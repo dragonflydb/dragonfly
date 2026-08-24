@@ -240,9 +240,7 @@ TEST_F(TransactionTest, AwakenedPollNotDroppedWhenBlockedTxPresent) {
   auto tx_bl = MakeTx(&cid_bl, {"x"});
   auto tx_z = MakeTx(&cid_z, {"a"});
 
-  auto ready_checker = [](EngineShard*, const DbContext&, std::string_view) {
-    return KeyReadyResult::kReady;
-  };
+  auto ready_checker = [](std::string_view, const CompactObj*) { return KeyReadyResult::kReady; };
 
   // Phase 1: BL schedules a first hop, then suspends watching key "x".
   bool bl_blocked = false, bl_paused = false;

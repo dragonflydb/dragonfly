@@ -3026,23 +3026,16 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   auto tp = (opts->timeout) ? chrono::steady_clock::now() + chrono::milliseconds(opts->timeout)
                             : Transaction::time_point::max();
 
-  const auto key_checker = [opts](EngineShard* owner, const DbContext& context,
-                                  std::string_view key) -> KeyReadyResult {
-    auto& db_slice = context.GetDbSlice(owner->shard_id());
-    auto res_it = db_slice.FindReadOnly(context, key, OBJ_STREAM);
-    if (!res_it.ok()) {
+  const auto key_checker = [opts](std::string_view key, const CompactObj* obj) -> KeyReadyResult {
+    if (!obj || obj->ObjType() != OBJ_STREAM) {
       // A blocked XREADGROUP must revalidate when its key is no longer a stream. The wake path
       // distinguishes a missing stream (NOGROUP) from a non-stream value (WRONGTYPE). A plain
       // XREAD keeps waiting for the stream to be recreated.
-      // TODO: Make kKeyNotFound a per-waiter result in BlockingController. It currently
-      // short-circuits the whole queue, allowing a blocked XREAD to hide a later XREADGROUP
-      // waiter. Return kNotReady until the controller handles heterogeneous queues.
       return opts->read_group ? KeyReadyResult::kReady : KeyReadyResult::kNotReady;
     }
 
     StreamIDsItem& sitem = opts->stream_ids.at(key);
-    const CompactObj& cobj = (*res_it)->second;
-    stream* s = GetReadOnlyStream(cobj);
+    stream* s = GetReadOnlyStream(*obj);
 
     // Update group pointer and check it's validity
     if (opts->read_group) {

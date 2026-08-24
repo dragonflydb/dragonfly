@@ -891,6 +891,38 @@ TEST_F(StreamFamilyTest, XReadGroupBlockLazyExpireDuringWakeDoesNotCrash) {
   EXPECT_THAT(resp0, ErrArg("consumer group this client was blocked on no longer exists"));
 }
 
+// A blocked XREADGROUP gets NOGROUP when its stream is deleted, even with a BLPOP blocked ahead of
+// it on the same key. Issue #8067.
+TEST_F(StreamFamilyTest, XReadGroupBlockNotHiddenByBlpopWaiter) {
+  RespExpr blpop_resp;
+  auto blpop_fb = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    blpop_resp = Run({"BLPOP", "k", "0"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"XGROUP", "CREATE", "k", "g", "0", "MKSTREAM"});
+
+  RespExpr xread_resp;
+  auto xread_fb = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+    xread_resp = Run({"XREADGROUP", "GROUP", "g", "c", "BLOCK", "0", "STREAMS", "k", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO2"); }, 500ms));
+
+  EXPECT_THAT(Run({"DEL", "k"}), IntArg(1));
+
+  EXPECT_TRUE(WaitUntilCondition([&] { return !IsConnBlocked("IO2"); }, 500ms))
+      << "XREADGROUP stayed blocked after its stream was deleted";
+  EXPECT_TRUE(IsConnBlocked("IO1")) << "BLPOP must stay blocked, its key never received a value";
+
+  // Release BLPOP so both fibers can be joined regardless of the outcome above.
+  Run({"LPUSH", "k", "v"});
+  blpop_fb.Join();
+  xread_fb.Join();
+
+  EXPECT_THAT(xread_resp, ErrArg("consumer group this client was blocked on no longer exists"));
+  EXPECT_THAT(blpop_resp, RespArray(ElementsAre("k", "v")));
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockHonorsCount) {
   Run({"xgroup", "create", "foo", "group", "0", "MKSTREAM"});
 
