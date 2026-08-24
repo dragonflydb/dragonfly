@@ -544,9 +544,14 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagge
         assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
         await asyncio.sleep(random.random() + 0.5)
 
-    # Wait for it to finish finally
-    async with async_timeout.timeout(75):
+    # Wait for it to finish finally. Widened to 150s (vs the 75s budget we actually care about)
+    # so a slow CI run completes and reports its real duration instead of dying with an opaque
+    # TimeoutError and no timing data. The 75s budget is still enforced below, after the fact.
+    wait_start = time.time()
+    async with async_timeout.timeout(150):
         await wait_for_replicas_state(c_replica)
+    wait_elapsed = time.time() - wait_start
+    print(f"wait_for_replicas_state took {wait_elapsed:.2f}s (budget: 75s)")
 
     done = True
     for t in tickers:
@@ -566,6 +571,11 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagge
     replica.stop()
     lines = replica.find_in_logs("Duplicate zset fields detected")
     assert len(lines) == 0
+
+    # Enforced last, after correctness checks above already ran and logged: we want the full
+    # diagnostic picture (data consistency, log contents) even from a run that ends up failing
+    # this budget, rather than losing all of that to an early opaque timeout.
+    assert wait_elapsed <= 75, f"wait_for_replicas_state took {wait_elapsed:.2f}s, budget is 75s"
 
 
 @pytest.mark.large

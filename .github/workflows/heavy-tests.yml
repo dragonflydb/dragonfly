@@ -41,6 +41,12 @@ jobs:
           ulimit -a
           env
           lsblk -l
+          uname -a
+          echo "--- kernel timer config (see server/snapshot.cc idle-sleep investigation) ---"
+          zcat /proc/config.gz 2>/dev/null | grep -i "HIGH_RES_TIMER\|CONFIG_HZ" || echo "no /proc/config.gz"
+          cat /hostroot/boot/config-$(uname -r) 2>/dev/null | grep -i "HIGH_RES_TIMER\|CONFIG_HZ" || echo "no /hostroot/boot/config-$(uname -r)"
+          echo "--- runtime tick device mode (1=periodic/low-res, 3=oneshot/high-res) ---"
+          cat /proc/timer_list 2>/dev/null | grep -A3 "Tick Device" || echo "no /proc/timer_list"
 
       - name: Build Dragonfly
         uses: ./.github/actions/builder
