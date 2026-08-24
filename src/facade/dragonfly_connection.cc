@@ -1432,10 +1432,8 @@ io::Result<bool> Connection::CheckForHttpProto() {
 
   size_t probe_limit = kMaxHttpProbeLen;
 
-  // Protocol detection reads into the private buffer, which may already contain real protocol
-  // input. If this connection later uses the shared RESP V2 buffer, those unread bytes are moved to
-  // overflow_buf_ and must fit in the shared buffer. Limit each Recv to the remaining space so the
-  // final read can fill, but cannot exceed, the bound. This is done by limiting the probe_limit.
+  // If shared V2 will be used, limit the the private probe so unread bytes fit in the shared
+  // buffer.
   const bool may_use_shared_read_buffer = (protocol_ == Protocol::REDIS) &&
                                           GetFlag(FLAGS_enable_resp_io_loop_v2) &&
                                           GetFlag(FLAGS_enable_shared_read_buffer);
