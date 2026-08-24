@@ -2732,8 +2732,8 @@ string ServerFamily::FormatInfoMetrics(
     if (success) {
       append("used_memory_rss", rss);
       append("used_memory_rss_human", HumanReadableNumBytes(rss));
+      append("used_memory_peak_rss", m.used_mem_rss_peak);
     }
-    append("used_memory_peak_rss", glob_memory_peaks.used.load(memory_order_relaxed));
 
     size_t limit = max_memory_limit.load(memory_order_relaxed);
     append("maxmemory", limit);
