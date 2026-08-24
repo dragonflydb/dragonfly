@@ -99,22 +99,26 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
       targets.push_back(delayed_entries_.extract(it++));
   }
 
-  // Serialize all targets
+  // Serialize all targets. Once the state stops running (error/cancellation), skip the blocking
+  // reads but still release the bucket latches.
   for (auto& target : targets) {
     auto& entry = target.mapped();
-    auto value = entry->value.Get();
-
-    if (!value.has_value()) {
-      deps_.Decrement(target.key());
-      cntx->ReportError(make_error_code(std::errc::io_error),
-                        absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
-      return;
+    if (cntx->IsRunning()) {
+      if (auto value = entry->value.Get(); value.has_value()) {
+        SerializeFetchedEntry(*entry, *value);
+      } else {
+        cntx->ReportError(make_error_code(std::errc::io_error),
+                          absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
+      }
     }
-
-    SerializeFetchedEntry(*entry, *value);
-
     deps_.Decrement(target.key());
-  };
+  }
+}
+
+void DelayedEntryHandler::DiscardDelayedEntries() {
+  for (const auto& [bucket, entry] : delayed_entries_)
+    deps_.Decrement(bucket);
+  delayed_entries_.clear();
 }
 
 SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
