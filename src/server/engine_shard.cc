@@ -1151,7 +1151,7 @@ void EngineShard::CacheStats() {
 
 size_t EngineShard::UsedMemory() const {
   return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal() +
-         search_indices()->GetUsedMemory();
+         search_indices()->GetUsedMemory() + (tiered_storage_ ? tiered_storage_->UsedMemory() : 0);
 }
 
 bool EngineShard::ShouldThrottleForTiering() const {

@@ -80,6 +80,8 @@ class ExternalAllocator {
     return allocated_bytes_;
   }
 
+  size_t UsedMemory() const;
+
  private:
   class SegmentDescr;
   using Page = detail::Page;
@@ -104,6 +106,7 @@ class ExternalAllocator {
 
   size_t capacity_ = 0;  // in bytes.
   size_t allocated_bytes_ = 0;
+  size_t segments_metadata_bytes_ = 0;
 };
 
 }  // namespace dfly::tiering

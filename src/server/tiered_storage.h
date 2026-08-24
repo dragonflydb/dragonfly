@@ -140,6 +140,8 @@ class TieredStorage : public TieredStorageBase {
     return stats_.cool_memory_used;
   }
 
+  size_t UsedMemory() const;
+
   bool IsClosed() const {
     return is_closed_;
   }
@@ -319,6 +321,10 @@ class TieredStorage : public TieredStorageBase {
   }
 
   size_t CoolMemoryUsage() const {
+    return 0;
+  }
+
+  size_t UsedMemory() const {
     return 0;
   }
 
