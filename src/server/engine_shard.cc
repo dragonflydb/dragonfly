@@ -1149,9 +1149,12 @@ void EngineShard::CacheStats() {
   last_mem_params_ = {used_mem};
 }
 
+size_t EngineShard::UsedMemoryWithoutSearch() const {
+  return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
+}
+
 size_t EngineShard::UsedMemory() const {
-  return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal() +
-         search_indices()->GetUsedMemory();
+  return UsedMemoryWithoutSearch() + search_indices()->GetUsedMemory();
 }
 
 bool EngineShard::ShouldThrottleForTiering() const {
@@ -1292,6 +1295,14 @@ EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbInd
   }
 
   return stats;
+}
+
+void EngineShard::AddTypeMemDelta(size_t type, int64_t delta) {
+  if (delta == 0)
+    return;
+
+  DCHECK_LT(type, type_mem_delta_.size());
+  type_mem_delta_[type] += delta;
 }
 
 }  // namespace dfly

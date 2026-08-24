@@ -386,4 +386,8 @@ class CommandRegistry {
   std::optional<uint32_t> acl_category_;  // category of family currently being built
 };
 
+// Returns the object type for tracked command family, or -1 for families which have no one specific
+// type. family must come from a CommandId registered by CommandRegistry.
+int TypeForFamily(size_t family);
+
 }  // namespace dfly

@@ -8,21 +8,23 @@
 
 #include <memory>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_stats.h"
 #include "facade/op_status.h"
-#include "redis/redis_aux.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 
 ABSL_FLAG(uint32_t, tx_queue_warning_len, 96,
           "Length threshold for warning about long transaction queue");
+ABSL_FLAG(bool, disable_scope_based_mem_track, false, "Turn off scope based memory metric");
 
 namespace dfly {
 
@@ -80,6 +82,35 @@ std::string FormatTp(Transaction::time_point tp) {
 
 uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
+}
+
+thread_local MemoryScope* tl_mem_scope = nullptr;
+
+void MemTrackerHook(fb2::FiberSwitchHookEvent event) noexcept {
+  DCHECK_NE(tl_mem_scope, nullptr);
+
+  using enum fb2::FiberSwitchHookEvent;
+  switch (event) {
+    case SUSPEND:
+      tl_mem_scope->Suspend();
+      break;
+    case RESUME:
+      tl_mem_scope->Resume();
+      break;
+  }
+}
+
+template <typename Func> auto WithHook(int obj_type, Func func) {
+  MemoryScope scope(obj_type);
+  const auto prev_hook = ThisFiber::SetSwitchHook({MemTrackerHook});
+  // there is probably no prev. hook but restore just in case
+  auto cleanup = absl::MakeCleanup([prev_hook] { ThisFiber::SetSwitchHook(prev_hook); });
+  return func();
+}
+
+int ObjectType(const CommandId* cid) {
+  static const bool kTrackScopeMem = !absl::GetFlag(FLAGS_disable_scope_based_mem_track);
+  return kTrackScopeMem && cid && cid->HasFamily() ? TypeForFamily(cid->GetFamily()) : -1;
 }
 
 }  // namespace
@@ -683,7 +714,10 @@ void Transaction::RunCallback(EngineShard* shard) {
 
   RunnableResult result;
   try {
-    result = (*cb_ptr_)(this, shard);
+    if (const int obj_typ = ObjectType(cid_); obj_typ >= 0)
+      result = WithHook(obj_typ, [&] { return (*cb_ptr_)(this, shard); });
+    else
+      result = (*cb_ptr_)(this, shard);
 
     if (unique_shard_cnt_ == 1) {
       cb_ptr_.reset();  // We can do it because only a single thread runs the callback.
@@ -1525,7 +1559,10 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   // An escaping exception would skip the cleanup below and leave the EXEC reply incomplete.
   RunnableResult result;
   try {
-    result = cb(this, shard);
+    if (const int obj_typ = ObjectType(cid_); obj_typ >= 0)
+      result = WithHook(obj_typ, [&] { return cb(this, shard); });
+    else
+      result = cb(this, shard);
   } catch (std::bad_alloc&) {
     LOG_EVERY_T(ERROR, 1) << " out of memory";
     result = OpStatus::OUT_OF_MEMORY;
@@ -1871,6 +1908,63 @@ std::vector<Transaction::PerShardCache>& Transaction::TLTmpSpace::GetShardIndex(
   for (auto& v : shard_cache)
     v.Clear();
   return shard_cache;
+}
+
+namespace {
+
+int64_t TrackedMemory() {
+  const EngineShard* shard = EngineShard::tlocal();
+  // Full search index memory accounting scans all indices. Keep command-scope sampling O(1).
+  const int64_t used_memory = shard->UsedMemoryWithoutSearch();
+
+  const DbSlice* db_slice = nullptr;
+  if (const Transaction* tx = shard->running_tx(); tx != nullptr)
+    db_slice = &tx->GetDbSlice(shard->shard_id());
+  // for unit tests which do not run in transactions
+  else if (namespaces != nullptr)
+    db_slice = &namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+
+  return used_memory - db_slice->table_memory();
+}
+
+}  // namespace
+
+MemoryScope::MemoryScope(int obj_type) : obj_type_(obj_type), mem_baseline_(TrackedMemory()) {
+  DCHECK_GE(obj_type_, 0);
+  DCHECK_EQ(tl_mem_scope, nullptr);
+  tl_mem_scope = this;
+}
+
+void MemoryScope::Suspend() {
+  DCHECK_EQ(tl_mem_scope, this);
+  DCHECK(!suspended_);
+
+  Checkpoint(TrackedMemory());
+  suspended_ = true;
+}
+
+void MemoryScope::Resume() {
+  DCHECK_EQ(tl_mem_scope, this);
+  DCHECK(suspended_);
+
+  mem_baseline_ = TrackedMemory();
+  suspended_ = false;
+}
+
+MemoryScope::~MemoryScope() {
+  DCHECK_EQ(tl_mem_scope, this);
+  DCHECK(!suspended_);
+
+  Checkpoint(TrackedMemory());
+  tl_mem_scope = nullptr;
+
+  EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta_);
+}
+
+void MemoryScope::Checkpoint(int64_t used_memory) {
+  DCHECK(!suspended_);
+  delta_ += used_memory - mem_baseline_;
+  mem_baseline_ = used_memory;
 }
 
 }  // namespace dfly
