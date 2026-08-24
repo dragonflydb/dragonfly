@@ -1155,9 +1155,8 @@ size_t EngineShard::UsedMemory() const {
 }
 
 bool EngineShard::ShouldThrottleForTiering() const {
-  // Throttle if the tiered storage is busy offloading (at least 30% of allowed capacity)
-  return tiered_storage_ && tiered_storage_->WriteDepthUsage() > 0.3 &&
-         tiered_storage_->ShouldOffload();
+  // Throttle if the tiered storage is busy offloading (at least 50% of allowed capacity)
+  return tiered_storage_ && tiered_storage_->TotalUsage() > 50 && tiered_storage_->ShouldOffload();
 }
 
 void EngineShard::FinalizeMulti(Transaction* tx) {
