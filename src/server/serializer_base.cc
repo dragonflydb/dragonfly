@@ -166,10 +166,11 @@ void SerializerBase::RegisterChangeListener(bool replication) {
 }
 
 void SerializerBase::UnregisterChangeListener() {
-  DCHECK(!IsAnyBucketBlocked());
   if (snapshot_version_ > 0)
     if (!db_slice_->UnregisterOnChange(this))
       LOG(DFATAL) << "UnregisterOnChange failed for snapshot_version_ " << snapshot_version_;
+  // No OnChange is in flight after unregistering, so leftover deps can only be leaks.
+  DCHECK(!IsAnyBucketBlocked());
 }
 
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
