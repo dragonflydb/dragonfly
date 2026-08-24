@@ -325,8 +325,6 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   AppendMetricWithoutLabels("shared_buf_overflow_copies_total", "Shared V2 overflow copies",
                             conn_stats.shared_buf_overflow_copies, MetricType::COUNTER,
                             &resp->body());
-  // fix A5
-  // Convert only after aggregation so individual sub-microsecond borrows contribute to the total.
   AppendMetricWithoutLabels("shared_buf_borrow_callback_usec_total",
                             "Shared V2 callback borrow duration",
                             base::CycleClock::ToUsec(conn_stats.shared_buf_borrow_cycles_callback),

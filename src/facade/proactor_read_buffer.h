@@ -34,9 +34,7 @@ class ProactorReadBuffer {
       Release();
     }
 
-    io::IoBuf& buf() {
-      return *proactor_read_buffer_->io_buf_;
-    }
+    io::IoBuf& buf();
 
    private:
     friend class ProactorReadBuffer;
@@ -51,6 +49,7 @@ class ProactorReadBuffer {
   };
 
   void Init(size_t capacity);
+  void Reset();
   bool IsInitialized() const {
     return io_buf_.has_value();
   }
@@ -82,8 +81,8 @@ class ProactorReadBuffer {
   static constexpr uint64_t kNoOwner = std::numeric_limits<uint64_t>::max();
   uint64_t owner_conn_id_ = kNoOwner;
 
-  // The configured size of io_buf_, in bytes. Init() sets this value. The code checks that this
-  // size does not change while a connection is using io_buf_.
+  // The actual size of io_buf_, in bytes. Init() stores the rounded capacity allocated by IoBuf.
+  // The code checks that this size does not change while a connection is using io_buf_.
   size_t capacity_ = 0;
 
   // Fiber-switch epoch captured when ownership begins. Release verifies it is unchanged, proving

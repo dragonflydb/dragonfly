@@ -189,6 +189,8 @@ constexpr size_t kMaxHttpProbeLen = 1024;
 constexpr size_t kMinSharedReadBufferLen = kMaxHttpProbeLen;
 constexpr size_t kHttpProbeAppendBytes = 128;
 
+// Access from connection execution paths via GetSharedReadBuffer() to reload TLS after a
+// possible proactor migration.
 thread_local ProactorReadBuffer tl_shared_read_buf;
 
 void SendProtocolError(RespSrvParser::Result pres, SinkReplyBuilder* builder) {
@@ -677,6 +679,14 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
   return tl_facade_stats->conn_stats;
 }
 
+// See GetLocalConnStats() above. Connection fibers can migrate between proactors, so reload this
+// thread-local buffer after every possible migration point.
+ProactorReadBuffer& __attribute__((noinline)) GetSharedReadBuffer() {
+  asm volatile("");
+
+  return tl_shared_read_buf;
+}
+
 thread_local uint32_t max_busy_read_cycles_cached = UINT32_MAX;
 thread_local const size_t max_client_iobuf_len_cached = GetFlag(FLAGS_max_client_iobuf_len);
 thread_local const uint32_t iobuf_min_shrink_interval_sec_cached =
@@ -895,33 +905,36 @@ void Connection::Init(unsigned io_threads) {
     }
   }
 
-  if (GetFlag(FLAGS_enable_shared_read_buffer)) {
+  if (GetFlag(FLAGS_enable_shared_read_buffer) && GetFlag(FLAGS_enable_resp_io_loop_v2)) {
     const size_t capacity = GetFlag(FLAGS_shared_read_buffer_len);
-    LOG(INFO) << "Shared RESP V2 read buffer enabled: " << capacity << " bytes per proactor, "
-              << capacity * io_threads << " bytes across " << io_threads << " proactors";
+    LOG(INFO) << "Shared RESP V2 read buffer enabled with a requested capacity of " << capacity
+              << " bytes per proactor, " << capacity * io_threads << " bytes across " << io_threads
+              << " proactors";
   } else {
     LOG(INFO) << "Shared RESP V2 read buffer disabled";
   }
 }
 
 void Connection::InitThreadLocal() {
-  if (!GetFlag(FLAGS_enable_shared_read_buffer)) {
-    return;
+  if (GetFlag(FLAGS_enable_shared_read_buffer) && GetFlag(FLAGS_enable_resp_io_loop_v2)) {
+    // Protocol detection first reads into the connection's private buffer. Those bytes are moved
+    // into the shared buffer before normal RESP V2 reads begin, so the shared buffer must be large
+    // enough to hold everything collected during detection.
+    const size_t shared_read_buffer_len = GetFlag(FLAGS_shared_read_buffer_len);
+    CHECK_GE(shared_read_buffer_len, kMinSharedReadBufferLen)
+        << "--shared_read_buffer_len is too small";
+    tl_shared_read_buf.Init(shared_read_buffer_len);
+    ReadBufTracker::Update(0, tl_shared_read_buf.Capacity(), 0,
+                           ReadBufTracker::kReasonProactorSharedReadBuffer);
   }
-
-  // FLAGS_enable_shared_read_buffer is true:
-  // Protocol detection first reads into the connection's private buffer. Those bytes are moved
-  // into the shared buffer before normal RESP V2 reads begin, so the shared buffer must be large
-  // Enough to hold everything collected during detection.
-  const size_t shared_read_buffer_len = GetFlag(FLAGS_shared_read_buffer_len);
-  CHECK_GE(shared_read_buffer_len, kMinSharedReadBufferLen)
-      << "--shared_read_buffer_len is too small";
-  tl_shared_read_buf.Init(shared_read_buffer_len);
-  ReadBufTracker::Update(0, tl_shared_read_buf.Capacity(), 0,
-                         ReadBufTracker::kReasonProactorSharedReadBuffer);
 }
 
 void Connection::ShutdownThreadLocal() {
+  if (tl_shared_read_buf.IsInitialized()) {
+    ReadBufTracker::Update(tl_shared_read_buf.Capacity(), 0, 0,
+                           ReadBufTracker::kReasonProactorSharedReadBuffer);
+    tl_shared_read_buf.Reset();
+  }
   pipeline_req_pool_.clear();
 }
 
@@ -1202,11 +1215,11 @@ void Connection::HandleRequests() {
                    (protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_resp_io_loop_v2));
       pipeline_squashing_v2_ =
           ioloop_v2_ && GetFlag(FLAGS_enable_pipeline_squashing_v2) && protocol_ == Protocol::REDIS;
-      // Initialization order invariant: tl_shared_read_buf must be initialized here if
-      // enable_shared_read_buffer is true.
+      // Initialization order invariant: the proactor shared buffer must exist when this
+      // connection uses it.
       shared_read_buf_enabled_ =
           ioloop_v2_ && protocol_ == Protocol::REDIS && GetFlag(FLAGS_enable_shared_read_buffer);
-      CHECK(!shared_read_buf_enabled_ || tl_shared_read_buf.IsInitialized())
+      CHECK(!shared_read_buf_enabled_ || GetSharedReadBuffer().IsInitialized())
           << "Shared read buffer was not initialized on this proactor";
 
       socket_->RegisterOnErrorCb([this](int32_t mask) { this->OnBreakCb(mask); });
@@ -1427,8 +1440,8 @@ io::Result<bool> Connection::CheckForHttpProto() {
                                           GetFlag(FLAGS_enable_resp_io_loop_v2) &&
                                           GetFlag(FLAGS_enable_shared_read_buffer);
   if (may_use_shared_read_buffer) {  // V2 Resp with shared read buffer enabled.
-    CHECK(tl_shared_read_buf.IsInitialized());
-    probe_limit = std::min(probe_limit, tl_shared_read_buf.Capacity());
+    CHECK(GetSharedReadBuffer().IsInitialized());
+    probe_limit = std::min(probe_limit, GetSharedReadBuffer().Capacity());
   }
 
   size_t last_len = 0;
@@ -3713,7 +3726,7 @@ void Connection::MoveInputToOverflow(io::IoBuf& input_buf) {
   if (input_buf.InputLen() == 0)
     return;
   CHECK(!overflow_buf_);
-  CHECK_LE(input_buf.InputLen(), tl_shared_read_buf.Capacity());
+  CHECK_LE(input_buf.InputLen(), GetSharedReadBuffer().Capacity());
 
   // TODO: Optimize overflow-buffer memory management, e.g. by retaining or pooling allocations.
 
@@ -3757,10 +3770,11 @@ void Connection::FinalizeSharedInput(io::IoBuf& input_buf, bool discard) {
 
 size_t Connection::GetUnreadInputLen() const {
   if (shared_read_buf_enabled_) {  // shared buffer
-    if (tl_shared_read_buf.OwnerConnId() == id_) {
+    auto& shared_read_buf = GetSharedReadBuffer();
+    if (shared_read_buf.OwnerConnId() == id_) {
       // shared buffer is borrowed by me
       DCHECK(!overflow_buf_);
-      return tl_shared_read_buf.InputLen();
+      return shared_read_buf.InputLen();
     }
     // shared buffer not borrowed, only overflow buffer counts
     return overflow_buf_ ? overflow_buf_->InputLen() : 0;
@@ -3776,12 +3790,13 @@ Connection::ParserStatus Connection::ReadAndParseShared(bool from_proactor_callb
   if (IsOverPipelineLimit())
     return NEED_MORE;
 
-  auto borrow = tl_shared_read_buf.TryBorrow(id_);
+  auto& shared_read_buf = GetSharedReadBuffer();
+  auto borrow = shared_read_buf.TryBorrow(id_);
   if (!borrow) {
     // This cannot occur when a borrow never suspends; terminate on the internal invariant failure.
     // Set it as an IO error and not as a client protocol error.
     LOG(DFATAL) << CONN_ID << "Shared read buffer is already borrowed by "
-                << tl_shared_read_buf.OwnerConnId();
+                << shared_read_buf.OwnerConnId();
     io_ec_ = make_error_code(errc::operation_canceled);
     pending_input_ = false;
     return NEED_MORE;

@@ -25,6 +25,11 @@ ProactorReadBuffer::ScopedBorrow& ProactorReadBuffer::ScopedBorrow::operator=(
   return *this;
 }
 
+io::IoBuf& ProactorReadBuffer::ScopedBorrow::buf() {
+  assert(proactor_read_buffer_);
+  return *proactor_read_buffer_->io_buf_;
+}
+
 void ProactorReadBuffer::ScopedBorrow::Release() {
   if (!proactor_read_buffer_)
     // This is possible by definition since the ScopedBorrow might be moved from.
@@ -45,9 +50,17 @@ void ProactorReadBuffer::ScopedBorrow::Release() {
 void ProactorReadBuffer::Init(size_t capacity) {
   CHECK(!io_buf_);  // can init only once.
   CHECK_GT(capacity, 0u);
-  // Construct the IoBuf in-place and keep the capacity_ for later verification.
+  // IoBuf may round capacity up. Keep its actual allocation for later verification.
   io_buf_.emplace(capacity);
-  capacity_ = capacity;
+  capacity_ = io_buf_->Capacity();
+}
+
+void ProactorReadBuffer::Reset() {
+  DCHECK(!in_use_);
+  io_buf_.reset();
+  capacity_ = 0;
+  owner_conn_id_ = kNoOwner;
+  switch_epoch_ = 0;
 }
 
 size_t ProactorReadBuffer::Capacity() const {
