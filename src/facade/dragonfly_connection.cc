@@ -153,7 +153,7 @@ ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
 ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
           "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
 
-ABSL_FLAG(bool, enable_shared_read_buffer, true,
+ABSL_FLAG(bool, enable_shared_read_buffer, false,
           "Use one read buffer per proactor for eligible RESP IoLoopV2 connections.");
 
 ABSL_FLAG(strings::MemoryBytesFlag, shared_read_buffer_len, 1u << 15,
