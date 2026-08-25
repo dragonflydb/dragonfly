@@ -116,7 +116,7 @@ class LockTag {
 };
 
 enum class KeyReadyResult {
-  kNotReady,  // key exists but per-tx conditions not met - skip this tx, try next
+  kNotReady,  // key missing or conditions not met keep this tx waiting, check next in queue
   kReady,     // wake this tx
 };
 
