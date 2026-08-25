@@ -56,9 +56,8 @@ EXCLUDED = {
     "_XGROUP_HELP": "hidden internal helper",
 }
 
-# Commands that predate this check and are still missing from the mutator.
-# Empty since the 2026-08 seed audit; do NOT add new entries — new commands must
-# go into resp_mutator.COMMANDS or EXCLUDED above.
+# Registered commands still missing from the mutator. Do NOT add entries — new
+# commands must go into resp_mutator.COMMANDS or EXCLUDED above.
 KNOWN_GAPS = set()
 
 # Matches `CI{"NAME", <mask expr, no top-level commas>, <arity>, ...}`. The mask
@@ -84,22 +83,18 @@ def mutator_commands():
 
 
 def seeded_commands():
-    """Returns ({command name seen in command position}, [seed parse errors]).
+    """Returns ({command name in command position}, [parse errors]).
 
-    Each seed is parsed with the same strict RESP parser the mutator uses
-    (resp_mutator._parse_resp_commands). A seed the mutator cannot parse is a
-    hard error: the server rejects it too (RESP framing requires CRLF and exact
-    bulk lengths), so its commands never execute and the fuzzer cannot mutate
-    it at command level. Counting only true command-position names (not option
-    keywords like GET inside SET ... GET) keeps the seed requirement honest.
-    """
+    Strict-parses each seed with the mutator's own parser (a seed the parser
+    rejects the server rejects too) and counts only command-position names, not
+    option keywords like GET inside SET ... GET."""
     sys.path.insert(0, str(FUZZ_DIR))
     import resp_mutator
 
     names = set()
     errors = []
     for path in sorted(SEEDS_RESP_DIR.glob("*.resp")):
-        cmds, ok = resp_mutator._parse_resp_commands(path.read_bytes())
+        cmds, ok = resp_mutator._parse_resp_commands(path.read_bytes(), strict=True)
         if not ok or not cmds:
             errors.append(
                 f"seed {path.name} is not valid strict RESP (CRLF framing, exact bulk\n"
@@ -122,7 +117,7 @@ def mc_seed_errors():
     names = set()
     errors = []
     for path in sorted(SEEDS_MC_DIR.glob("*.mc")):
-        cmds, ok = memcache_mutator._parse_mc_commands(path.read_bytes())
+        cmds, ok = memcache_mutator._parse_mc_commands(path.read_bytes(), strict=True)
         if not ok:
             errors.append(
                 f"memcache seed {path.name} does not parse as CRLF-framed memcache\n"

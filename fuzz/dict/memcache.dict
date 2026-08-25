@@ -80,7 +80,7 @@
 "  "
 ""
 
-# Meta-protocol flags recognized by MemcacheParser::ParseMeta (2026-08 audit)
+# Meta-protocol flags (MemcacheParser::ParseMeta)
 "T100"
 "T0"
 "F7"

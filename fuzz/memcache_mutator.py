@@ -30,9 +30,7 @@ COMMANDS = [
     ("replace", "store"),
     ("append",  "store"),
     ("prepend", "store"),
-    # cas dispatch is dead in Dragonfly (no MP::CAS case in McTypeToCmdName ->
-    # always CLIENT_ERROR), but it uniquely exercises MemcacheParser::ParseStore's
-    # CAS branch (opt_pos shift, cas_unique parsing), so keep generating it.
+    # cas dispatch is dead (CLIENT_ERROR) but exercises ParseStore's CAS branch.
     ("cas",     "cas"),
     # Retrieval
     ("get",     "get"),
@@ -43,13 +41,11 @@ COMMANDS = [
     ("delete",  "del"),
     ("incr",    "delta"),
     ("decr",    "delta"),
-    # Utility. flush_all is intentionally absent: it maps to FLUSHDB, which is on
-    # the fuzz --restricted_commands list, so it can only ever produce SERVER_ERROR.
+    # Utility. flush_all omitted: maps to restricted FLUSHDB (always SERVER_ERROR).
     ("stats",     "bare"),
     ("version",   "bare"),
     ("quit",      "bare"),
-    # Meta commands. mn/me are intentionally absent: the parser/dispatch rejects
-    # them unconditionally (no META_NOOP dispatch; 'meta debug' not implemented).
+    # Meta. mn/me omitted: unconditionally rejected by parser/dispatch.
     ("ms",      "meta_store"),
     ("mg",      "meta"),
     ("md",      "meta"),
@@ -62,12 +58,10 @@ VALUES = [b"abc", b"hello", b"x", b"", b"0", b"12345", b"\x00\xff", b"a" * 100]
 EXPIRY = [b"0", b"10", b"100", b"3600", b"9999999"]
 FLAGS = [b"0", b"1", b"255", b"65535", b"4294967295"]
 DELTAS = [b"1", b"5", b"10", b"100", b"0", b"99999999999"]
-# Flags recognized by MemcacheParser::ParseMeta: T<ttl>, b, F<flags>, M<mode>,
-# D<delta>, q, f, v, t, l, h, c. Anything else is PARSE_ERROR, so stick to these.
+# Only flags ParseMeta accepts; anything else is PARSE_ERROR.
 META_FLAGS = [b"T30", b"T0", b"F7", b"v", b"h", b"l", b"t", b"c", b"f", b"q"]
-# Mode flags are type-specific: ms accepts MS/ME/MA/MR/MP, ma accepts MI/MD.
-MS_MODES = [b"MS", b"ME", b"MA", b"MR", b"MP"]
-MA_FLAGS = [b"D5", b"D10", b"MI", b"MD", b"T30", b"q", b"v"]
+MS_MODES = [b"MS", b"ME", b"MA", b"MR", b"MP"]  # ms mode flags
+MA_FLAGS = [b"D5", b"D10", b"MI", b"MD", b"T30", b"q", b"v"]  # ma (meta-arithmetic)
 FUZZ_VALUES = [b"\x00", b"\xff" * 4, b"\r\n", b"A" * 256, b"-1", b"NaN"]
 
 
@@ -188,53 +182,59 @@ def _random_command():
         return cmd + b"\r\n"
 
 
-def _parse_mc_commands(buf):
-    """Best-effort parse of memcache text protocol into list of raw command lines.
-    Returns (commands, success) where commands is a list of bytes."""
+def _parse_mc_commands(buf, strict=False):
+    """Parse memcache text protocol into (commands, success), each command a
+    (line, data_block) pair.
+
+    strict=False is the fuzzing hot path (best-effort). strict=True is the CI
+    gate: a store/ms data block that is missing, truncated, or not CRLF-
+    terminated is a hard failure and the whole buffer must be consumed, matching
+    what the server accepts."""
     commands = []
     data = bytes(buf)
     pos = 0
 
+    STORE = (b"set", b"add", b"replace", b"append", b"prepend", b"cas")
+
     while pos < len(data):
         end = data.find(b"\r\n", pos)
         if end < 0:
+            if strict:
+                return ([], False)
             break
 
         line = data[pos:end]
         pos = end + 2
 
-        # Check if this is a store command that has a data block
         parts = line.split(b" ")
-        if len(parts) >= 5 and parts[0].lower() in (
-            b"set",
-            b"add",
-            b"replace",
-            b"append",
-            b"prepend",
-            b"cas",
-        ):
+        name = parts[0].lower() if parts else b""
+        # Byte-count field: index 4 for classic stores/cas, index 2 for meta-set.
+        nbytes_idx = None
+        if len(parts) >= 5 and name in STORE:
+            nbytes_idx = 4
+        elif len(parts) >= 3 and name == b"ms":
+            nbytes_idx = 2
+
+        if nbytes_idx is not None:
             try:
-                nbytes = int(parts[4])
-                if pos + nbytes + 2 <= len(data):
-                    value = data[pos : pos + nbytes]
-                    pos += nbytes + 2  # skip value + \r\n
-                    commands.append((line, value))
-                    continue
+                nbytes = int(parts[nbytes_idx])
             except (ValueError, IndexError):
-                pass
-        elif len(parts) >= 3 and parts[0].lower() == b"ms":
-            try:
-                nbytes = int(parts[2]) if len(parts) > 2 else int(parts[1])
-                if pos + nbytes + 2 <= len(data):
-                    value = data[pos : pos + nbytes]
-                    pos += nbytes + 2
-                    commands.append((line, value))
-                    continue
-            except (ValueError, IndexError):
-                pass
+                if strict:
+                    return ([], False)
+                commands.append((line, None))
+                continue
+            if pos + nbytes + 2 <= len(data) and data[pos + nbytes : pos + nbytes + 2] == b"\r\n":
+                value = data[pos : pos + nbytes]
+                pos += nbytes + 2
+                commands.append((line, value))
+                continue
+            if strict:
+                return ([], False)
 
         commands.append((line, None))
 
+    if strict:
+        return (commands, len(commands) > 0 and pos == len(data))
     return (commands, len(commands) > 0)
 
 

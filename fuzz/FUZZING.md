@@ -205,6 +205,15 @@ seed (for both `resp` and `memcache`); it rejects a seed the RESP/memcache
 parser cannot read, so a mis-framed seed fails CI instead of silently
 contributing nothing.
 
+The one sanctioned exception is a command whose sole fuzzing value is a parser
+branch that has **no** successful dispatch path: memcache `cas`. Dragonfly's
+`McTypeToCmdName` has no `MP::CAS` case, so every `cas` returns `CLIENT_ERROR`
+at dispatch — but it uniquely exercises `MemcacheParser::ParseStore`'s CAS
+branch (the `cas_unique` field), which is real parser-fuzzing surface. It is
+therefore kept in `memcache_mutator.COMMANDS` and seeded once (in
+`seeds/memcache/cas.mc`) purely to give the mutator a correctly-framed example;
+its `CLIENT_ERROR` reply is the accepted trade-off, not a seed defect.
+
 To add a new RESP seed (lines MUST be CRLF-terminated — `\r\n`, not `\n`):
 ```
 *3

@@ -1,22 +1,7 @@
-"""AFL++ custom mutator for RESP protocol.
-
-Instead of random byte-level mutations (which would break protocol framing and get
-rejected by the parser), this mutator operates at the command level: it parses
-the input into commands, then randomly replaces/inserts/removes/reorders commands and
-arguments while keeping RESP encoding valid. This ensures mutated inputs actually
-reach command execution code paths.
-
-Focus commands (optional, set via FUZZ_FOCUS_COMMANDS env var):
-    When running PR-targeted fuzzing, generate_targeted_seeds.py produces a list of
-    command names affected by the code change. This mutator reads that list and
-    picks those commands ~70% of the time, concentrating mutations on the changed code.
-    Commands not already in the COMMANDS table are auto-registered with default arity.
-
-Usage:
-    export PYTHONPATH=/path/to/dragonfly/fuzz
-    export AFL_PYTHON_MODULE=resp_mutator
-    export AFL_CUSTOM_MUTATOR_ONLY=1
-    afl-fuzz ...
+"""AFL++ custom mutator for RESP: mutates at the command level (parse, then
+replace/insert/remove/reorder commands and args) so mutated inputs stay valid
+RESP and reach command execution. FUZZ_FOCUS_COMMANDS biases command choice for
+PR-targeted runs. Load via AFL_PYTHON_MODULE=resp_mutator.
 """
 
 import json
@@ -24,10 +9,8 @@ import os
 import random
 
 # fmt: off
-# Every command registered in Dragonfly (via CI{...}), grouped by family: (name, min_args, max_args).
-# min/max are argument counts AFTER the command name. min_args satisfies the registered arity;
-# max_args covers the documented option grammar (variadic lists capped to a practical bound).
-# Admin/replication/cluster commands (REPLICAOF, CLUSTER, DEBUG, FLUSHALL, ...) are intentionally excluded.
+# (name, min_args, max_args): arg counts after the command name. min_args meets the
+# registered arity; max_args caps the option grammar. Admin/cluster cmds excluded.
 COMMANDS = [
     # String
     (b"GET", 1, 1), (b"SET", 2, 8), (b"SETEX", 3, 3), (b"PSETEX", 3, 3),
@@ -139,9 +122,7 @@ COMMANDS = [
 
 KEYS = [b"k", b"key", b"k1", b"k2", b"k3", b"src", b"dst", b"mylist", b"myset", b"myhash"]
 VALUES = [b"v", b"val", b"hello", b"0", b"1", b"-1", b"100", b"3.14", b"", b"a b"]
-# Option keyword tokens parsed across the command grammar — feeding these as
-# arguments steers mutations into option-parsing branches instead of dead-ending
-# on unknown tokens. Grouped roughly by area but mixed uniformly when chosen.
+# Option keywords, to steer mutations into option-parsing branches.
 SPECIAL = [
     b"*",
     b"?",
@@ -341,15 +322,17 @@ def _random_command():
     return _encode_resp(*args)
 
 
-def _parse_resp_commands(buf):
-    """Best-effort parse of RESP buffer into list of commands (each is list of bytes).
-    Returns (commands, success). On parse failure returns ([], False)."""
+def _parse_resp_commands(buf, strict=False):
+    """Parse a RESP buffer into (commands, success).
+
+    strict=False is the fuzzing hot path (best-effort). strict=True is the CI
+    gate: it verifies the CRLF terminator after each bulk body so a mis-framed
+    seed fails the check instead of passing what the server would reject."""
     commands = []
     pos = 0
     data = bytes(buf)
 
     while pos < len(data):
-        # Skip whitespace/newlines
         while pos < len(data) and data[pos : pos + 1] in (b"\r", b"\n", b" "):
             pos += 1
         if pos >= len(data):
@@ -358,7 +341,6 @@ def _parse_resp_commands(buf):
         if data[pos : pos + 1] != b"*":
             return ([], False)
 
-        # Parse *N\r\n
         end = data.find(b"\r\n", pos)
         if end < 0:
             return ([], False)
@@ -384,6 +366,8 @@ def _parse_resp_commands(buf):
                 args.append(b"")
                 continue
             if pos + slen + 2 > len(data):
+                return ([], False)
+            if strict and data[pos + slen : pos + slen + 2] != b"\r\n":
                 return ([], False)
             args.append(data[pos : pos + slen])
             pos += slen + 2

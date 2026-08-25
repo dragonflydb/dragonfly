@@ -513,8 +513,6 @@
 "$0\x0d\x0a\x0d\x0a"
 "$-1\x0d\x0a"
 
-# ---- Added by the 2026-08 seed corpus audit ----
-
 # Scripting (supported SCRIPT/FUNCTION grammar)
 "FUNCTION FLUSH"
 "SCRIPT LOAD"
