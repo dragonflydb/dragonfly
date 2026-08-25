@@ -4,6 +4,7 @@
 
 #include "server/snapshot.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
 #include <mutex>
@@ -163,6 +164,9 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 // Serializes all the entries with version less than snapshot_version_.
 void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
+
+  // Covers cancellation exits; on the normal path the entries were already drained.
+  absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
 
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     stats_.keys_total += db_slice_->DbSize(db_indx);
