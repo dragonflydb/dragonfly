@@ -1,0 +1,40 @@
+# V1 vs V2 remote matrix. Run on the server with private VPC IPs:
+#   SERVER_IP=<server-private-ip> CLIENT_IP=<client-private-ip> SSH_USER=<user> \
+#     BENCH_LOG_DIR=./bench_batch_v1_vs_v2_$(date +%Y%m%d_%H%M%S) \
+#     ./bench.sh --batch v1_vs_v2.bench
+#
+# Preflight: same AZ/placement group; SSH works; client has memtier, redis-cli,
+# and redis-benchmark; TCP 6379 is allowed client -> server; no competing load.
+# Record instance type, AMI, kernel, nproc, lscpu, free -h, NIC driver, and git SHA.
+# Each row runs both loops three times for 30 seconds. GET rows prefill 100k keys.
+# Counts below are baseline measurements; adaptive averaging can add retries for noisy cells.
+
+# === Writes
+# Baseline: 54 timed cases (3 DATA_SIZE x 3 PIPELINE x 2 loops x 3 repeats).
+PIPELINE=1,10,100 BENCH_DURATION=30 DATA_SIZE=256,1024,4096 RATIO=1:0 ./build-opt/dragonfly multi_conn 3 v1v2_set_multi both
+# Baseline: 54 timed cases (3 DATA_SIZE x 3 PIPELINE x 2 loops x 3 repeats).
+PIPELINE=1,10,100 BENCH_DURATION=30 DATA_SIZE=256,1024,4096 RATIO=1:0 ./build-opt/dragonfly single_conn 3 v1v2_set_single both
+
+# === Reads
+# Baseline: 54 timed cases (3 DATA_SIZE x 3 PIPELINE x 2 loops x 3 repeats),
+# plus setup prefills before the GET cases.
+PIPELINE=1,10,100 BENCH_DURATION=30 DATA_SIZE=256,1024,4096 RATIO=0:1 PREFILL_KEYS=100000 PREFILL_PIPELINE=100 ./build-opt/dragonfly multi_conn 3 v1v2_get_multi both
+# Baseline: 54 timed cases (3 DATA_SIZE x 3 PIPELINE x 2 loops x 3 repeats),
+# plus setup prefills before the GET cases.
+PIPELINE=1,10,100 BENCH_DURATION=30 DATA_SIZE=256,1024,4096 RATIO=0:1 PREFILL_KEYS=100000 PREFILL_PIPELINE=100 ./build-opt/dragonfly single_conn 3 v1v2_get_single both
+
+# === Mixed reads and writes
+# Baseline: 54 timed cases (3 DATA_SIZE x 3 PIPELINE x 2 loops x 3 repeats),
+# plus setup prefills before the mixed cases.
+PIPELINE=1,10,100 BENCH_DURATION=30 DATA_SIZE=256,1024,4096 RATIO=1:1 PREFILL_KEYS=100000 PREFILL_PIPELINE=100 ./build-opt/dragonfly multi_conn 3 v1v2_mix_1to1_multi both
+# Baseline: 54 timed cases (3 DATA_SIZE x 3 PIPELINE x 2 loops x 3 repeats),
+# plus setup prefills before the mixed cases.
+PIPELINE=1,10,100 BENCH_DURATION=30 DATA_SIZE=256,1024,4096 RATIO=1:10 PREFILL_KEYS=100000 PREFILL_PIPELINE=100 ./build-opt/dragonfly multi_conn 3 v1v2_mix_1to10_multi both
+
+# === Publish one message to multiple subscribers
+# Three payload rows use approximately the same total payload volume per subscriber:
+# 256B x 50,000 = 1024B x 12,500 = 4096B x 3,125.
+# Each row has 18 timed publisher cases (3 PIPELINE x 2 loops x 3 repeats).
+PIPELINE=1,10,100 DATA_SIZE=256 PUBSUB_MESSAGES=50000 ./build-opt/dragonfly pubsub 3 v1v2_pubsub_256b both
+PIPELINE=1,10,100 DATA_SIZE=1024 PUBSUB_MESSAGES=12500 ./build-opt/dragonfly pubsub 3 v1v2_pubsub_1kb both
+PIPELINE=1,10,100 DATA_SIZE=4096 PUBSUB_MESSAGES=3125 ./build-opt/dragonfly pubsub 3 v1v2_pubsub_4kb both
