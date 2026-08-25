@@ -21,16 +21,13 @@ using namespace std;
 
 namespace {
 
-// Fixed per-entry header: 2 dbid + 8 hash + 2 strlen.
-constexpr size_t kEntryHeaderSize = 12;
-
 // See FlushBin() for format details
 size_t StashedValueSize(string_view value) {
-  return kEntryHeaderSize + value.size();
+  return SmallBins::kEntryHeaderSize + value.size();
 }
 
 // The biggest a single entry (value + fixed header) can ever be.
-constexpr size_t kMaxEntrySize = (2_KB - 1) + kEntryHeaderSize;
+constexpr size_t kMaxEntrySize = (2_KB - 1) + SmallBins::kEntryHeaderSize;
 
 // We offload a bin at a minimum of ~49.7% utilization; use a cutoff below that to flag real
 // fragmentation.
@@ -118,6 +115,7 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   }
 
   stats_.stashed_entries_cnt += list.size();
+  stats_.stashed_entries_bytes += bytes;
   stashed_bins_.InsertNew(segment.offset, StashInfo{uint8_t(list.size()), bytes});
 
   return list;
@@ -160,6 +158,7 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 
     DCHECK_LE(segment.length + kEntryHeaderSize, bin.bytes);
     bin.bytes -= segment.length + kEntryHeaderSize;
+    stats_.stashed_entries_bytes -= segment.length + kEntryHeaderSize;
 
     if (--bin.entries == 0) {
       DCHECK_EQ(bin.bytes, 0u);
@@ -183,7 +182,7 @@ bool SmallBins::IsFragmented(size_t offset) {
 
 ::dfly::detail::DashCursor SmallBins::TraverseFragmented(::dfly::detail::DashCursor cursor,
                                                          absl::FunctionRef<void(size_t)> f) {
-  return stashed_bins_.Traverse(cursor, [f](Dash::iterator it) {
+  return stashed_bins_.TraverseBySegmentOrder(cursor, [f](Dash::iterator it) {
     if (it->second.bytes < kFragmentedCutoff)
       f(it->first);
   });
@@ -192,6 +191,7 @@ bool SmallBins::IsFragmented(size_t offset) {
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
                .stashed_entries_cnt = stats_.stashed_entries_cnt,
+               .stashed_entries_bytes = stats_.stashed_entries_bytes,
                .current_bin_bytes = current_bin_.bytes_,
                .current_entries_cnt = current_bin_.entries_.size()};
 }
@@ -205,6 +205,7 @@ SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_v
 
   auto bin = it->second;
   stats_.stashed_entries_cnt -= bin.entries;
+  stats_.stashed_entries_bytes -= bin.bytes;
   stashed_bins_.Erase(it);
 
   const char* data = value.data();
