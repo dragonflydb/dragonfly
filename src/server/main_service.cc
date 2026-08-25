@@ -1179,6 +1179,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
       [&](uint32_t index, ProactorBase* pb) { sharding::InitThreadLocals(shard_set->size()); });
 
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {
+    facade::Connection::InitThreadLocal();
     facade::Connection::UpdateFromFlags();
     UpdateFromFlagsOnThread();
     UpdateSchedulerFlagsOnThread();

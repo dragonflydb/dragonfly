@@ -674,7 +674,10 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   OkService service(pool);
 
   Connection::Init(pool->size());
-  pool->Await([](auto*) { tl_facade_stats = new FacadeStats; });
+  pool->Await([](auto*) {
+    tl_facade_stats = new FacadeStats;
+    Connection::InitThreadLocal();
+  });
 
   // Create a FiberQueue per shard and start a consumer fiber draining it on the owning
   // proactor thread. The queue and its consumer fiber both live on that thread, so cross-thread

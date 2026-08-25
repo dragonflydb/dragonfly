@@ -2720,6 +2720,7 @@ IOBUF_WAIT_TIMEOUT_SEC = 6
     {
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
+        "enable_shared_read_buffer": "false",
         "max_client_iobuf_len": 4096,
         "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
@@ -2763,6 +2764,7 @@ async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
+        "enable_shared_read_buffer": "false",
         "max_client_iobuf_len": 4096,
         "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
@@ -2800,6 +2802,7 @@ async def test_iobuf_regrows_after_receive_idle_shrink(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
+        "enable_shared_read_buffer": "false",
         "max_client_iobuf_len": 4096,
         "iobuf_min_shrink_interval_sec": 0,
     }
@@ -2828,6 +2831,7 @@ async def test_iobuf_does_not_shrink_when_disabled(df_server: DflyInstance):
 @dfly_args(
     {
         "proactor_threads": 1,
+        "enable_shared_read_buffer": "false",
         "max_client_iobuf_len": 4096,
         "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
@@ -2873,6 +2877,7 @@ async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
 @dfly_args(
     {
         "proactor_threads": 1,
+        "enable_shared_read_buffer": "false",
         "max_client_iobuf_len": 4096,
         "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
@@ -2904,6 +2909,7 @@ async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
 @dfly_args(
     {
         "proactor_threads": 1,
+        "enable_shared_read_buffer": "false",
         "max_client_iobuf_len": 4096,
         "iobuf_min_shrink_interval_sec": IOBUF_MIN_SHRINK_INTERVAL_SEC,
     }
@@ -2943,6 +2949,7 @@ async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
     {
         "proactor_threads": 1,
         "enable_resp_io_loop_v2": "true",
+        "enable_shared_read_buffer": "false",
         "max_client_iobuf_len": 4096,
         # Needs a longer configured shrink interval so it can prove that after the first shrink
         # a second shrink does not occur during the cooldown window.
