@@ -51,6 +51,7 @@ ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
 // ok_backend always binds on all interfaces (AcceptServer default) and has no persistence.
 ABSL_FLAG(std::string, bind, "", "Bind address (no-op in ok_backend)");
 ABSL_FLAG(std::string, dbfilename, "", "DB filename (no-op in ok_backend)");
+ABSL_FLAG(std::string, maxmemory, "", "Memory cap (no-op in ok_backend)");
 ABSL_FLAG(bool, coro_squash, false,
           "Squash pipelined SET/GET batches with the coroutine-based squasher (a shared blocker "
           "plus a per-command reply coroutine, no connection-fiber blocking) instead of the "
