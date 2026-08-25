@@ -4074,6 +4074,18 @@ TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
   EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
 }
 
+TEST_F(SearchFamilyTest, BlockSizeZeroRejected) {
+  Run({"HSET", "doc:a", "n", "7"});
+
+  EXPECT_THAT(Run({"FT.CREATE", "idx0", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "n",
+                   "NUMERIC", "BLOCKSIZE", "0"}),
+              ErrArg("BLOCKSIZE"));
+
+  EXPECT_THAT(Run({"FT.CREATE", "idx1", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "n",
+                   "NUMERIC", "BLOCKSIZE", "1"}),
+              "OK");
+}
+
 TEST_F(SearchFamilyTest, AggregateWithLoadFromJoinSimple) {
   Run({"ft.create", "idx1", "ON", "HASH", "SCHEMA", "num1", "NUMERIC", "num2", "NUMERIC"});
   Run({"ft.create", "idx2", "ON", "HASH", "SCHEMA", "num3", "NUMERIC", "num4", "NUMERIC"});
