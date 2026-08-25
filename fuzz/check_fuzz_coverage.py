@@ -25,6 +25,7 @@ FUZZ_DIR = Path(__file__).resolve().parent
 REPO_ROOT = FUZZ_DIR.parent
 SERVER_SRC = REPO_ROOT / "src" / "server"
 SEEDS_RESP_DIR = FUZZ_DIR / "seeds" / "resp"
+SEEDS_MC_DIR = FUZZ_DIR / "seeds" / "memcache"
 
 # Commands intentionally NOT fuzzed, with the reason. New entries require a
 # justification — prefer adding the command to resp_mutator.COMMANDS instead.
@@ -55,15 +56,9 @@ EXCLUDED = {
     "_XGROUP_HELP": "hidden internal helper",
 }
 
-# Commands that predate this check and are still missing from the mutator.
-# TODO: burn this list down (see resp_mutator.COMMANDS); do NOT add new entries —
-# new commands must go into resp_mutator.COMMANDS or EXCLUDED above.
-KNOWN_GAPS = {
-    "BF.INFO",
-    "RM",
-    "ROLE",
-    "LASTSAVE",
-}
+# Registered commands still missing from the mutator. Do NOT add entries — new
+# commands must go into resp_mutator.COMMANDS or EXCLUDED above.
+KNOWN_GAPS = set()
 
 # Matches `CI{"NAME", <mask expr, no top-level commas>, <arity>, ...}`. The mask
 # expression is a `CO::FOO | CO::BAR`-style OR chain, so it never contains a comma,
@@ -87,21 +82,59 @@ def mutator_commands():
     return {name.decode(): (lo, hi) for name, lo, hi in resp_mutator.COMMANDS}
 
 
-# A command name occupying its own line in a seed's RESP bulk-string encoding
-# (e.g. the "GET" line in "$3\r\nGET\r\n"). Seeds mix CRLF and bare-LF line
-# endings, so splitlines()+strip() is used to normalize both.
-SEED_COMMAND_RE = re.compile(r"^[A-Z0-9._]+$")
-
-
 def seeded_commands():
-    """Returns the set of command names that appear in some fuzz/seeds/resp/*.resp file."""
+    """Returns ({command name in command position}, [parse errors]).
+
+    Strict-parses each seed with the mutator's own parser (a seed the parser
+    rejects the server rejects too) and counts only command-position names, not
+    option keywords like GET inside SET ... GET."""
+    sys.path.insert(0, str(FUZZ_DIR))
+    import resp_mutator
+
     names = set()
+    errors = []
     for path in sorted(SEEDS_RESP_DIR.glob("*.resp")):
-        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            token = line.strip()
-            if SEED_COMMAND_RE.fullmatch(token):
-                names.add(token)
-    return names
+        cmds, ok = resp_mutator._parse_resp_commands(path.read_bytes(), strict=True)
+        if not ok or not cmds:
+            errors.append(
+                f"seed {path.name} is not valid strict RESP (CRLF framing, exact bulk\n"
+                f"  lengths). The server rejects it, so it contributes nothing. Rewrite it;\n"
+                f"  see fuzz/FUZZING.md 'Seed Corpus'."
+            )
+            continue
+        for args in cmds:
+            names.add(args[0].decode("latin1", "replace").upper())
+    return names, errors
+
+
+def mc_seed_errors():
+    """Mirrors the seed requirement for the memcache fuzzer: every command in
+    memcache_mutator.COMMANDS must appear in command position in a parseable
+    fuzz/seeds/memcache/*.mc seed."""
+    sys.path.insert(0, str(FUZZ_DIR))
+    import memcache_mutator
+
+    names = set()
+    errors = []
+    for path in sorted(SEEDS_MC_DIR.glob("*.mc")):
+        cmds, ok = memcache_mutator._parse_mc_commands(path.read_bytes(), strict=True)
+        if not ok:
+            errors.append(
+                f"memcache seed {path.name} does not parse as CRLF-framed memcache\n"
+                f"  protocol; the server rejects it. Rewrite it."
+            )
+            continue
+        for line, _value in cmds:
+            parts = line.split()
+            if parts:
+                names.add(parts[0].lower().decode("latin1", "replace"))
+    for name, _type in memcache_mutator.COMMANDS:
+        if name not in names:
+            errors.append(
+                f"{name} is in memcache_mutator.COMMANDS but no seed under\n"
+                f"  fuzz/seeds/memcache/ contains it. Add an example invocation."
+            )
+    return errors
 
 
 def main():
@@ -112,9 +145,8 @@ def main():
     reg_names = registered.keys()
     fuzzed = mutator_commands()
     fuzzed_names = fuzzed.keys()
-    seeded = seeded_commands()
-
-    errors = []
+    seeded, errors = seeded_commands()
+    errors.extend(mc_seed_errors())
 
     for name, reason in EXCLUDED.items():
         if not reason.strip():
