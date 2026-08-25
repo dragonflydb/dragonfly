@@ -1,0 +1,1009 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cycles:P'
+# Event count (approx.): 35613978295
+#
+# Overhead  Command    Shared Object               Symbol
+# ........  .........  ..........................  ................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+     3.97%  Proactor0  dragonfly                   [.] dfly::detail::ascii_pack_simd(char const*, unsigned long, unsigned char*) [clone .localalias]
+            |
+            ---dfly::detail::ascii_pack_simd(char const*, unsigned long, unsigned char*) [clone .localalias]
+               dfly::CompactObj::EncodeString(std::basic_string_view<char, std::char_traits<char> >)
+               |
+                --3.49%--dfly::(anonymous namespace)::SetCmd::SetExisting(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, dfly::DbSlice::ItAndUpdater*)
+                          dfly::(anonymous namespace)::SetCmd::Set(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)
+                          dfly::Transaction::RunnableResult absl::lts_20250512::functional_internal::InvokeObject<dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::{lambda(dfly::Transaction*, dfly::EngineShard*)#1}, dfly::Transaction::RunnableResult, dfly::Transaction*, dfly::EngineShard*>(absl::lts_20250512::functional_internal::VoidPtr, absl::lts_20250512::functional_internal::ForwardT<dfly::Transaction*>::type, absl::lts_20250512::functional_internal::ForwardT<dfly::EngineShard*>::type)
+                          dfly::Transaction::RunCallback(dfly::EngineShard*)
+                          dfly::Transaction::ScheduleInShard(dfly::EngineShard*, bool)
+                          dfly::Transaction::SingleHopAsync(absl::lts_20250512::FunctionRef<dfly::Transaction::RunnableResult (dfly::Transaction*, dfly::EngineShard*)>)
+                          dfly::cmd::SingleHopWaiter::await_ready()
+                          dfly::(anonymous namespace)::CmdSet(dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::_ZN4dfly12_GLOBAL__N_16CmdSetEN4absl12lts_202505124SpanIKSt17basic_string_viewIcSt11char_traitsIcEEEEPNS_14CommandContextE.Frame*) [clone .actor]
+                          dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::InvokeCmd(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::Connection::ExecuteBatch()
+                          facade::Connection::ParseLoop()
+                          facade::Connection::IoLoopV2()
+                          facade::Connection::ConnectionFlow()
+                          facade::Connection::HandleRequests()
+                          util::ListenerInterface::RunSingleConnection(util::Connection*)
+                          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          make_fcontext
+
+     2.12%  Proactor0  [nf_conntrack]              [k] __nf_conntrack_find_get
+            |
+            ---__nf_conntrack_find_get
+               |
+                --1.99%--resolve_normal_ct
+                          nf_conntrack_in
+                          |
+                          |--1.10%--ipv4_conntrack_local
+                          |          nf_hook_slow
+                          |          __ip_local_out
+                          |          __ip_queue_xmit
+                          |          ip_queue_xmit
+                          |          __tcp_transmit_skb
+                          |          tcp_write_xmit
+                          |          __tcp_push_pending_frames
+                          |          tcp_push
+                          |          tcp_sendmsg_locked
+                          |          tcp_sendmsg
+                          |          inet_sendmsg
+                          |          __sock_sendmsg
+                          |          sock_sendmsg
+                          |          io_send
+                          |          __io_issue_sqe
+                          |          io_issue_sqe
+                          |          io_submit_sqes
+                          |          __do_sys_io_uring_enter
+                          |          __arm64_sys_io_uring_enter
+                          |          invoke_syscall
+                          |          el0_svc_common.constprop.0
+                          |          do_el0_svc
+                          |          el0_svc
+                          |          el0t_64_sync_handler
+                          |          el0t_64_sync
+                          |          io_uring_submit_and_get_events
+                          |          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, boost::context::basic_fixedsize_stack<boost::context::stack_traits>, util::fb2::detail::(anonymous namespace)::DispatcherImpl::DispatcherImpl(boost::context::preallocated const&, boost::context::basic_fixedsize_stack<boost::context::stack_traits>&&, util::fb2::detail::Scheduler*)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          |          make_fcontext
+                          |
+                           --0.89%--ipv4_conntrack_in
+                                     nf_hook_slow
+                                     nf_hook_slow_list
+                                     ip_sublist_rcv
+                                     ip_list_rcv
+                                     __netif_receive_skb_list_core
+                                     netif_receive_skb_list_internal
+
+     2.05%  Proactor0  [kernel.kallsyms]           [k] __arch_copy_to_user
+            |
+            ---__arch_copy_to_user
+               simple_copy_to_iter
+               __skb_datagram_iter
+               skb_copy_datagram_iter
+               tcp_recvmsg_locked
+               tcp_recvmsg
+               inet_recvmsg
+               sock_recvmsg
+               __sys_recvfrom
+               __arm64_sys_recvfrom
+               invoke_syscall
+               el0_svc_common.constprop.0
+               do_el0_svc
+               el0_svc
+               el0t_64_sync_handler
+               el0t_64_sync
+               __libc_recv
+               util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+               facade::Connection::ReadPendingInput()
+               facade::Connection::IoLoopV2()
+               facade::Connection::ConnectionFlow()
+               facade::Connection::HandleRequests()
+               util::ListenerInterface::RunSingleConnection(util::Connection*)
+               void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+               make_fcontext
+
+     1.44%  Proactor0  dragonfly                   [.] dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+            |
+            ---dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+               facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+               facade::Connection::ExecuteBatch()
+               facade::Connection::ParseLoop()
+               facade::Connection::IoLoopV2()
+               facade::Connection::ConnectionFlow()
+               facade::Connection::HandleRequests()
+               util::ListenerInterface::RunSingleConnection(util::Connection*)
+               void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+               make_fcontext
+
+     1.30%  Proactor0  [kernel.kallsyms]           [k] tcp_recvmsg_locked
+            |
+            ---tcp_recvmsg_locked
+               tcp_recvmsg
+               inet_recvmsg
+               sock_recvmsg
+               __sys_recvfrom
+               __arm64_sys_recvfrom
+               invoke_syscall
+               el0_svc_common.constprop.0
+               do_el0_svc
+               el0_svc
+               el0t_64_sync_handler
+               el0t_64_sync
+               __libc_recv
+               util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+               facade::Connection::ReadPendingInput()
+               facade::Connection::IoLoopV2()
+               facade::Connection::ConnectionFlow()
+               facade::Connection::HandleRequests()
+               util::ListenerInterface::RunSingleConnection(util::Connection*)
+               void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+               make_fcontext
+
+     1.27%  Proactor0  dragonfly                   [.] dfly::DbSlice::IteratorT<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Iterator<false, false> >::LaunderIfNeeded() const
+            |
+            ---dfly::DbSlice::IteratorT<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Iterator<false, false> >::LaunderIfNeeded() const
+
+     1.23%  Proactor0  dragonfly                   [.] facade::Connection::IoLoopV2()
+            |
+            ---facade::Connection::IoLoopV2()
+               facade::Connection::ConnectionFlow()
+               facade::Connection::HandleRequests()
+               util::ListenerInterface::RunSingleConnection(util::Connection*)
+               void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+               make_fcontext
+
+     1.23%  Proactor0  libc.so.6                   [.] __memcpy_generic
+            |
+            ---__memcpy_generic
+               |
+                --0.62%--dfly::detail::LargeString::SetString(std::basic_string_view<char, std::char_traits<char> >, std::pmr::memory_resource*)
+                          dfly::(anonymous namespace)::SetCmd::SetExisting(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, dfly::DbSlice::ItAndUpdater*)
+                          dfly::(anonymous namespace)::SetCmd::Set(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)
+                          dfly::Transaction::RunnableResult absl::lts_20250512::functional_internal::InvokeObject<dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::{lambda(dfly::Transaction*, dfly::EngineShard*)#1}, dfly::Transaction::RunnableResult, dfly::Transaction*, dfly::EngineShard*>(absl::lts_20250512::functional_internal::VoidPtr, absl::lts_20250512::functional_internal::ForwardT<dfly::Transaction*>::type, absl::lts_20250512::functional_internal::ForwardT<dfly::EngineShard*>::type)
+                          dfly::Transaction::RunCallback(dfly::EngineShard*)
+                          dfly::Transaction::ScheduleInShard(dfly::EngineShard*, bool)
+                          dfly::Transaction::SingleHopAsync(absl::lts_20250512::FunctionRef<dfly::Transaction::RunnableResult (dfly::Transaction*, dfly::EngineShard*)>)
+                          dfly::cmd::SingleHopWaiter::await_ready()
+                          dfly::(anonymous namespace)::CmdSet(dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::_ZN4dfly12_GLOBAL__N_16CmdSetEN4absl12lts_202505124SpanIKSt17basic_string_viewIcSt11char_traitsIcEEEEPNS_14CommandContextE.Frame*) [clone .actor]
+                          dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::InvokeCmd(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::Connection::ExecuteBatch()
+                          facade::Connection::ParseLoop()
+                          facade::Connection::IoLoopV2()
+                          facade::Connection::ConnectionFlow()
+                          facade::Connection::HandleRequests()
+                          util::ListenerInterface::RunSingleConnection(util::Connection*)
+                          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          make_fcontext
+
+     1.16%  Proactor0  [kernel.kallsyms]           [k] __pi_clear_page
+            |
+            ---__pi_clear_page
+               get_page_from_freelist
+               __alloc_frozen_pages_noprof
+               |
+                --1.09%--__alloc_pages_noprof
+                          ena_refill_rx_bufs
+                          ena_clean_rx_irq
+                          ena_io_poll
+                          |
+                           --0.82%--__napi_busy_loop
+                                     napi_busy_loop
+                                     tcp_recvmsg
+                                     inet_recvmsg
+                                     sock_recvmsg
+                                     __sys_recvfrom
+                                     __arm64_sys_recvfrom
+                                     invoke_syscall
+                                     el0_svc_common.constprop.0
+                                     do_el0_svc
+                                     el0_svc
+                                     el0t_64_sync_handler
+                                     el0t_64_sync
+                                     __libc_recv
+                                     util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+                                     facade::Connection::ReadPendingInput()
+                                     facade::Connection::IoLoopV2()
+                                     facade::Connection::ConnectionFlow()
+                                     facade::Connection::HandleRequests()
+                                     util::ListenerInterface::RunSingleConnection(util::Connection*)
+                                     void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                                     make_fcontext
+
+     1.03%  Proactor0  [kernel.kallsyms]           [k] __build_skb_around
+            |
+            ---__build_skb_around
+               |
+                --0.68%--__napi_build_skb
+                          napi_build_skb
+                          ena_rx_skb
+                          ena_clean_rx_irq
+                          ena_io_poll
+                          |
+                           --0.55%--__napi_busy_loop
+                                     napi_busy_loop
+                                     tcp_recvmsg
+                                     inet_recvmsg
+                                     sock_recvmsg
+                                     __sys_recvfrom
+                                     __arm64_sys_recvfrom
+                                     invoke_syscall
+                                     el0_svc_common.constprop.0
+                                     do_el0_svc
+                                     el0_svc
+                                     el0t_64_sync_handler
+                                     el0t_64_sync
+                                     __libc_recv
+                                     util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+                                     facade::Connection::ReadPendingInput()
+                                     facade::Connection::IoLoopV2()
+                                     facade::Connection::ConnectionFlow()
+                                     facade::Connection::HandleRequests()
+                                     util::ListenerInterface::RunSingleConnection(util::Connection*)
+                                     void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                                     make_fcontext
+
+     1.03%  Proactor0  dragonfly                   [.] dfly::(anonymous namespace)::CmdSet(dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::_ZN4dfly12_GLOBAL__N_16CmdSetEN4absl12lts_202505124SpanIKSt17basic_string_viewIcSt11char_traitsIcEEEEPNS_14CommandContextE.Frame*) [clone .actor]
+            |
+            ---dfly::(anonymous namespace)::CmdSet(dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::_ZN4dfly12_GLOBAL__N_16CmdSetEN4absl12lts_202505124SpanIKSt17basic_string_viewIcSt11char_traitsIcEEEEPNS_14CommandContextE.Frame*) [clone .actor]
+               |
+                --0.55%--dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::InvokeCmd(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::Connection::ExecuteBatch()
+                          facade::Connection::ParseLoop()
+                          facade::Connection::IoLoopV2()
+                          facade::Connection::ConnectionFlow()
+                          facade::Connection::HandleRequests()
+                          util::ListenerInterface::RunSingleConnection(util::Connection*)
+                          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          make_fcontext
+
+     0.96%  Proactor0  [kernel.kallsyms]           [k] el0_svc
+            |
+            ---el0_svc
+               el0t_64_sync_handler
+               el0t_64_sync
+               __libc_recv
+               util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+               facade::Connection::ReadPendingInput()
+               facade::Connection::IoLoopV2()
+               facade::Connection::ConnectionFlow()
+               facade::Connection::HandleRequests()
+               util::ListenerInterface::RunSingleConnection(util::Connection*)
+               void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+               make_fcontext
+
+     0.90%  Proactor0  dragonfly                   [.] dfly::CompactObj::EncodeString(std::basic_string_view<char, std::char_traits<char> >)
+            |
+            ---dfly::CompactObj::EncodeString(std::basic_string_view<char, std::char_traits<char> >)
+               dfly::(anonymous namespace)::SetCmd::SetExisting(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, dfly::DbSlice::ItAndUpdater*)
+               |
+                --0.69%--dfly::(anonymous namespace)::SetCmd::Set(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)
+                          dfly::Transaction::RunnableResult absl::lts_20250512::functional_internal::InvokeObject<dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::{lambda(dfly::Transaction*, dfly::EngineShard*)#1}, dfly::Transaction::RunnableResult, dfly::Transaction*, dfly::EngineShard*>(absl::lts_20250512::functional_internal::VoidPtr, absl::lts_20250512::functional_internal::ForwardT<dfly::Transaction*>::type, absl::lts_20250512::functional_internal::ForwardT<dfly::EngineShard*>::type)
+                          dfly::Transaction::RunCallback(dfly::EngineShard*)
+                          dfly::Transaction::ScheduleInShard(dfly::EngineShard*, bool)
+                          dfly::Transaction::SingleHopAsync(absl::lts_20250512::FunctionRef<dfly::Transaction::RunnableResult (dfly::Transaction*, dfly::EngineShard*)>)
+                          dfly::cmd::SingleHopWaiter::await_ready()
+                          dfly::(anonymous namespace)::CmdSet(dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::_ZN4dfly12_GLOBAL__N_16CmdSetEN4absl12lts_202505124SpanIKSt17basic_string_viewIcSt11char_traitsIcEEEEPNS_14CommandContextE.Frame*) [clone .actor]
+                          dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::InvokeCmd(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::Connection::ExecuteBatch()
+                          facade::Connection::ParseLoop()
+                          facade::Connection::IoLoopV2()
+                          facade::Connection::ConnectionFlow()
+                          facade::Connection::HandleRequests()
+                          util::ListenerInterface::RunSingleConnection(util::Connection*)
+                          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          make_fcontext
+
+     0.89%  Proactor0  dragonfly                   [.] dfly::detail::validate_ascii_fast(char const*, unsigned long)
+            |
+            ---dfly::detail::validate_ascii_fast(char const*, unsigned long)
+               |
+                --0.82%--dfly::(anonymous namespace)::SetCmd::SetExisting(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, dfly::DbSlice::ItAndUpdater*)
+                          dfly::(anonymous namespace)::SetCmd::Set(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)
+                          dfly::Transaction::RunnableResult absl::lts_20250512::functional_internal::InvokeObject<dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::{lambda(dfly::Transaction*, dfly::EngineShard*)#1}, dfly::Transaction::RunnableResult, dfly::Transaction*, dfly::EngineShard*>(absl::lts_20250512::functional_internal::VoidPtr, absl::lts_20250512::functional_internal::ForwardT<dfly::Transaction*>::type, absl::lts_20250512::functional_internal::ForwardT<dfly::EngineShard*>::type)
+                          dfly::Transaction::RunCallback(dfly::EngineShard*)
+                          dfly::Transaction::ScheduleInShard(dfly::EngineShard*, bool)
+                          dfly::Transaction::SingleHopAsync(absl::lts_20250512::FunctionRef<dfly::Transaction::RunnableResult (dfly::Transaction*, dfly::EngineShard*)>)
+                          dfly::cmd::SingleHopWaiter::await_ready()
+                          dfly::(anonymous namespace)::CmdSet(dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::_ZN4dfly12_GLOBAL__N_16CmdSetEN4absl12lts_202505124SpanIKSt17basic_string_viewIcSt11char_traitsIcEEEEPNS_14CommandContextE.Frame*) [clone .actor]
+                          dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::InvokeCmd(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::Connection::ExecuteBatch()
+                          facade::Connection::ParseLoop()
+                          facade::Connection::IoLoopV2()
+                          facade::Connection::ConnectionFlow()
+                          facade::Connection::HandleRequests()
+                          util::ListenerInterface::RunSingleConnection(util::Connection*)
+                          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          make_fcontext
+
+     0.89%  Proactor0  dragonfly                   [.] unsigned char dfly::detail::Segment<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Bucket::FindByFp<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}&>(unsigned char, bool, dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}&) const
+            |
+            ---unsigned char dfly::detail::Segment<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Bucket::FindByFp<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}&>(unsigned char, bool, dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}&) const
+               dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Iterator<false, false> dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::FindFirst<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}>(unsigned long, dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}&&)
+               dfly::DbSlice::FindInternal(dfly::DbContext const&, std::basic_string_view<char, std::char_traits<char> >, std::optional<unsigned int>, dfly::DbSlice::UpdateStatsMode) const
+               dfly::DbSlice::AddOrFindInternal(dfly::DbContext const&, std::basic_string_view<char, std::char_traits<char> >, std::optional<unsigned int>)
+               dfly::DbSlice::AddOrFind(dfly::DbContext const&, std::basic_string_view<char, std::char_traits<char> >, std::optional<unsigned int>)
+               dfly::(anonymous namespace)::SetCmd::Set(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)
+               dfly::Transaction::RunnableResult absl::lts_20250512::functional_internal::InvokeObject<dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::{lambda(dfly::Transaction*, dfly::EngineShard*)#1}, dfly::Transaction::RunnableResult, dfly::Transaction*, dfly::EngineShard*>(absl::lts_20250512::functional_internal::VoidPtr, absl::lts_20250512::functional_internal::ForwardT<dfly::Transaction*>::type, absl::lts_20250512::functional_internal::ForwardT<dfly::EngineShard*>::type)
+               dfly::Transaction::RunCallback(dfly::EngineShard*)
+               dfly::Transaction::ScheduleInShard(dfly::EngineShard*, bool)
+               dfly::Transaction::SingleHopAsync(absl::lts_20250512::FunctionRef<dfly::Transaction::RunnableResult (dfly::Transaction*, dfly::EngineShard*)>)
+               dfly::cmd::SingleHopWaiter::await_ready()
+               dfly::(anonymous namespace)::CmdSet(dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::_ZN4dfly12_GLOBAL__N_16CmdSetEN4absl12lts_202505124SpanIKSt17basic_string_viewIcSt11char_traitsIcEEEEPNS_14CommandContextE.Frame*) [clone .actor]
+               dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+               dfly::Service::InvokeCmd(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+               dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+               facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+               facade::Connection::ExecuteBatch()
+               facade::Connection::ParseLoop()
+               facade::Connection::IoLoopV2()
+               facade::Connection::ConnectionFlow()
+               facade::Connection::HandleRequests()
+               util::ListenerInterface::RunSingleConnection(util::Connection*)
+               void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+               make_fcontext
+
+     0.89%  Proactor0  [kernel.kallsyms]           [k] sch_direct_xmit
+            |
+            ---sch_direct_xmit
+               __dev_xmit_skb
+               __dev_queue_xmit
+               neigh_hh_output
+               ip_finish_output2
+               __ip_finish_output
+               ip_finish_output
+               ip_output
+               __ip_queue_xmit
+               ip_queue_xmit
+               __tcp_transmit_skb
+               tcp_write_xmit
+               __tcp_push_pending_frames
+               tcp_push
+               tcp_sendmsg_locked
+               tcp_sendmsg
+               inet_sendmsg
+               __sock_sendmsg
+               sock_sendmsg
+               io_send
+               __io_issue_sqe
+               io_issue_sqe
+               io_submit_sqes
+               __do_sys_io_uring_enter
+               __arm64_sys_io_uring_enter
+               invoke_syscall
+               el0_svc_common.constprop.0
+               do_el0_svc
+               el0_svc
+               el0t_64_sync_handler
+               el0t_64_sync
+               io_uring_submit_and_get_events
+               void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, boost::context::basic_fixedsize_stack<boost::context::stack_traits>, util::fb2::detail::(anonymous namespace)::DispatcherImpl::DispatcherImpl(boost::context::preallocated const&, boost::context::basic_fixedsize_stack<boost::context::stack_traits>&&, util::fb2::detail::Scheduler*)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+               make_fcontext
+
+     0.89%  Proactor0  [kernel.kallsyms]           [k] tcp_recvmsg
+            |
+            ---tcp_recvmsg
+               |
+                --0.82%--inet_recvmsg
+                          sock_recvmsg
+                          __sys_recvfrom
+                          __arm64_sys_recvfrom
+                          invoke_syscall
+                          el0_svc_common.constprop.0
+                          do_el0_svc
+                          el0_svc
+                          el0t_64_sync_handler
+                          el0t_64_sync
+                          __libc_recv
+                          util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+                          facade::Connection::ReadPendingInput()
+                          facade::Connection::IoLoopV2()
+                          facade::Connection::ConnectionFlow()
+                          facade::Connection::HandleRequests()
+                          util::ListenerInterface::RunSingleConnection(util::Connection*)
+                          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          make_fcontext
+
+     0.89%  Proactor0  [kernel.kallsyms]           [k] handle_softirqs
+            |
+            ---handle_softirqs
+               __do_softirq
+               ____do_softirq
+               call_on_irq_stack
+               do_softirq_own_stack
+               __irq_exit_rcu
+               irq_exit_rcu
+
+     0.82%  Proactor0  [kernel.kallsyms]           [k] __wake_up_sync_key
+            |
+            ---__wake_up_sync_key
+               sock_def_readable
+               tcp_data_ready
+               tcp_rcv_established
+               tcp_v4_do_rcv
+               tcp_v4_rcv
+               ip_protocol_deliver_rcu
+               ip_local_deliver_finish
+               ip_local_deliver
+               ip_sublist_rcv_finish
+               ip_sublist_rcv
+               ip_list_rcv
+               __netif_receive_skb_list_core
+               netif_receive_skb_list_internal
+               |
+                --0.55%--__napi_busy_loop
+                          napi_busy_loop
+                          tcp_recvmsg
+                          inet_recvmsg
+                          sock_recvmsg
+                          __sys_recvfrom
+                          __arm64_sys_recvfrom
+                          invoke_syscall
+                          el0_svc_common.constprop.0
+                          do_el0_svc
+                          el0_svc
+                          el0t_64_sync_handler
+                          el0t_64_sync
+                          __libc_recv
+                          util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+                          facade::Connection::ReadPendingInput()
+                          facade::Connection::IoLoopV2()
+                          facade::Connection::ConnectionFlow()
+                          facade::Connection::HandleRequests()
+                          util::ListenerInterface::RunSingleConnection(util::Connection*)
+                          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          make_fcontext
+
+     0.82%  Proactor0  dragonfly                   [.] dfly::DbSlice::AddOrFindInternal(dfly::DbContext const&, std::basic_string_view<char, std::char_traits<char> >, std::optional<unsigned int>)
+            |
+            ---dfly::DbSlice::AddOrFindInternal(dfly::DbContext const&, std::basic_string_view<char, std::char_traits<char> >, std::optional<unsigned int>)
+               dfly::DbSlice::AddOrFind(dfly::DbContext const&, std::basic_string_view<char, std::char_traits<char> >, std::optional<unsigned int>)
+               |
+                --0.69%--dfly::(anonymous namespace)::SetCmd::Set(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)
+                          dfly::Transaction::RunnableResult absl::lts_20250512::functional_internal::InvokeObject<dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::{lambda(dfly::Transaction*, dfly::EngineShard*)#1}, dfly::Transaction::RunnableResult, dfly::Transaction*, dfly::EngineShard*>(absl::lts_20250512::functional_internal::VoidPtr, absl::lts_20250512::functional_internal::ForwardT<dfly::Transaction*>::type, absl::lts_20250512::functional_internal::ForwardT<dfly::EngineShard*>::type)
+                          dfly::Transaction::RunCallback(dfly::EngineShard*)
+                          dfly::Transaction::ScheduleInShard(dfly::EngineShard*, bool)
+                          dfly::Transaction::SingleHopAsync(absl::lts_20250512::FunctionRef<dfly::Transaction::RunnableResult (dfly::Transaction*, dfly::EngineShard*)>)
+                          dfly::cmd::SingleHopWaiter::await_ready()
+                          dfly::(anonymous namespace)::CmdSet(dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::_ZN4dfly12_GLOBAL__N_16CmdSetEN4absl12lts_202505124SpanIKSt17basic_string_viewIcSt11char_traitsIcEEEEPNS_14CommandContextE.Frame*) [clone .actor]
+                          dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::InvokeCmd(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+                          dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+                          facade::Connection::ExecuteBatch()
+                          facade::Connection::ParseLoop()
+                          facade::Connection::IoLoopV2()
+                          facade::Connection::ConnectionFlow()
+                          facade::Connection::HandleRequests()
+                          util::ListenerInterface::RunSingleConnection(util::Connection*)
+                          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          make_fcontext
+
+     0.82%  Proactor0  [kernel.kallsyms]           [k] ena_clean_rx_irq
+            |
+            ---ena_clean_rx_irq
+               ena_io_poll
+               |
+                --0.55%--__napi_busy_loop
+                          napi_busy_loop
+                          tcp_recvmsg
+                          inet_recvmsg
+                          sock_recvmsg
+                          __sys_recvfrom
+                          __arm64_sys_recvfrom
+                          invoke_syscall
+                          el0_svc_common.constprop.0
+                          do_el0_svc
+                          el0_svc
+                          el0t_64_sync_handler
+                          el0t_64_sync
+                          __libc_recv
+                          util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+                          facade::Connection::ReadPendingInput()
+                          facade::Connection::IoLoopV2()
+                          facade::Connection::ConnectionFlow()
+                          facade::Connection::HandleRequests()
+                          util::ListenerInterface::RunSingleConnection(util::Connection*)
+                          void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+                          make_fcontext
+
+     0.82%  Proactor0  dragonfly                   [.] dfly::CommandRegistry::FindExtended(facade::ParsedArgs) const
+            |
+            ---dfly::CommandRegistry::FindExtended(facade::ParsedArgs) const
+
+     0.75%  Proactor0  [nf_conntrack]              [k] nf_conntrack_tcp_packet
+            |
+            ---nf_conntrack_tcp_packet
+               nf_conntrack_in
+
+     0.75%  Proactor0  libc.so.6                   [.] __libc_recv
+            |
+            ---__libc_recv
+               util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+               facade::Connection::ReadPendingInput()
+               facade::Connection::IoLoopV2()
+               facade::Connection::ConnectionFlow()
+               facade::Connection::HandleRequests()
+               util::ListenerInterface::RunSingleConnection(util::Connection*)
+               void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+               make_fcontext
+
+     0.68%  Proactor0  [kernel.kallsyms]           [k] check_heap_object
+            |
+            ---check_heap_object
+               |
+                --0.55%--__check_object_size.part.0
+                          __check_object_size
+
+     0.68%  Proactor0  [kernel.kallsyms]           [k] __pi_memset_generic
+            |
+            ---__pi_memset_generic
+
+     0.62%  Proactor0  dragonfly                   [.] absl::lts_20250512::numbers_internal::safe_strto64_base(std::basic_string_view<char, std::char_traits<char> >, long*, int)
+            |
+            ---absl::lts_20250512::numbers_internal::safe_strto64_base(std::basic_string_view<char, std::char_traits<char> >, long*, int)
+               facade::RespSrvParser::ParseLen(absl::lts_20250512::Span<unsigned char const>, long*)
+
+     0.62%  Proactor0  dragonfly                   [.] dfly::DbSlice::AutoUpdater::Run()
+            |
+            ---dfly::DbSlice::AutoUpdater::Run()
+
+     0.55%  Proactor0  [kernel.kallsyms]           [k] arch_counter_get_cntvct
+            |
+            ---arch_counter_get_cntvct
+
+     0.55%  Proactor0  [kernel.kallsyms]           [k] fdget
+            |
+            ---fdget
+
+     0.55%  Proactor0  [kernel.kallsyms]           [k] __local_bh_enable_ip
+            |
+            ---__local_bh_enable_ip
+
+     0.55%  Proactor0  [kernel.kallsyms]           [k] ena_start_xmit
+            |
+            ---ena_start_xmit
+               dev_hard_start_xmit
+               sch_direct_xmit
+               __dev_xmit_skb
+               __dev_queue_xmit
+
+     0.55%  Proactor0  dragonfly                   [.] dfly::Service::VerifyCommandState(dfly::CommandId const&, absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::ConnectionContext const&)
+            |
+            ---dfly::Service::VerifyCommandState(dfly::CommandId const&, absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::ConnectionContext const&)
+
+     0.55%  Proactor0  dragonfly                   [.] facade::ParsedArgs::WrapperBacked::ToVec(std::vector<std::basic_string_view<char, std::char_traits<char> >, std::allocator<std::basic_string_view<char, std::char_traits<char> > > >*) const
+            |
+            ---facade::ParsedArgs::WrapperBacked::ToVec(std::vector<std::basic_string_view<char, std::char_traits<char> >, std::allocator<std::basic_string_view<char, std::char_traits<char> > > >*) const
+
+     0.55%  Proactor0  dragonfly                   [.] dfly::Transaction::StoreKeysInArgs(dfly::KeyIndex const&)
+            |
+            ---dfly::Transaction::StoreKeysInArgs(dfly::KeyIndex const&)
+               dfly::Transaction::InitByKeys(dfly::KeyIndex const&)
+               dfly::Transaction::InitByArgs(dfly::Namespace*, unsigned short, absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>)
+               dfly::Service::DispatchCommand(facade::ParsedArgs, facade::ParsedCommand*, facade::AsyncPreference)
+               facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+               facade::Connection::ExecuteBatch()
+               facade::Connection::ParseLoop()
+               facade::Connection::IoLoopV2()
+               facade::Connection::ConnectionFlow()
+               facade::Connection::HandleRequests()
+               util::ListenerInterface::RunSingleConnection(util::Connection*)
+               void boost::context::detail::fiber_entry<boost::context::detail::fiber_record<boost::context::fiber, util::fb2::FixedStackAllocator, util::fb2::detail::WorkerFiberImpl<util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}>::WorkerFiberImpl<util::fb2::FixedStackAllocator>(std::basic_string_view<char, std::char_traits<char> >, util::fb2::FiberPriority, boost::context::preallocated const&, util::fb2::FixedStackAllocator&&, util::ListenerInterface::RunAcceptLoop()::{lambda()#1}::operator()() const::{lambda()#1}&&)::{lambda(boost::context::fiber&&)#1}> >(boost::context::detail::transfer_t)
+               make_fcontext
+
+     0.48%  Proactor0  [kernel.kallsyms]           [k] ena_clean_tx_irq
+     0.48%  Proactor0  [kernel.kallsyms]           [k] ena_com_rx_pkt
+     0.48%  Proactor0  dragonfly                   [.] facade::RespSrvParser::ParseLen(absl::lts_20250512::Span<unsigned char const>, long*)
+     0.48%  Proactor0  dragonfly                   [.] dfly::Transaction::GetDbSlice(unsigned short) const
+     0.48%  Proactor0  [kernel.kallsyms]           [k] __mod_timer
+     0.47%  Proactor0  dragonfly                   [.] dfly::DbSlice::FindInternal(dfly::DbContext const&, std::basic_string_view<char, std::char_traits<char> >, std::optional<unsigned int>, dfly::DbSlice::UpdateStatsMode) const
+     0.41%  Proactor0  [kernel.kallsyms]           [k] __napi_busy_loop
+     0.41%  Proactor0  dragonfly                   [.] absl::lts_20250512::inlined_vector_internal::Storage<unsigned int, 5ul, std::allocator<unsigned int> >::Reserve(unsigned long)
+     0.41%  Proactor0  [kernel.kallsyms]           [k] ip_rcv_finish_core
+     0.41%  Proactor0  dragonfly                   [.] facade::RespSrvParser::ConsumeBulk(absl::lts_20250512::Span<unsigned char const>, cmn::BackedArguments*)
+     0.41%  Proactor0  dragonfly                   [.] dfly::Service::InvokeCmd(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+     0.41%  Proactor0  [kernel.kallsyms]           [k] __sk_mem_reduce_allocated
+     0.41%  Proactor0  dragonfly                   [.] dfly::Transaction::SingleHopAsync(absl::lts_20250512::FunctionRef<dfly::Transaction::RunnableResult (dfly::Transaction*, dfly::EngineShard*)>)
+     0.41%  Proactor0  dragonfly                   [.] dfly::acl::IsUserAllowedToInvokeCommandGeneric(dfly::ConnectionContext const&, dfly::CommandId const&, absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>)
+     0.41%  Proactor0  [kernel.kallsyms]           [k] tcp_clean_rtx_queue.constprop.0
+     0.41%  Proactor0  [kernel.kallsyms]           [k] nf_hook_slow
+     0.41%  Proactor0  [nf_conntrack]              [k] tcp_in_window
+     0.41%  Proactor0  [kernel.kallsyms]           [k] tcp_parse_aligned_timestamp.part.0
+     0.41%  Proactor0  [kernel.kallsyms]           [k] tcp_v4_rcv
+     0.41%  Proactor0  [kernel.kallsyms]           [k] get_random_u16
+     0.41%  Proactor0  dragonfly                   [.] dfly::ServerState::RecordCmd(bool)
+     0.41%  Proactor0  [kernel.kallsyms]           [k] io_poll_check_events
+     0.41%  Proactor0  dragonfly                   [.] mi_usable_size
+     0.41%  Proactor0  [kernel.kallsyms]           [k] lock_sock_nested
+     0.41%  Proactor0  [kernel.kallsyms]           [k] __siphash_unaligned
+     0.41%  Proactor0  dragonfly                   [.] dfly::CompactObj::HasAllocated() const
+     0.41%  Proactor0  [kernel.kallsyms]           [k] skb_attempt_defer_free
+     0.35%  Proactor0  [kernel.kallsyms]           [k] ena_com_prepare_tx
+     0.34%  Proactor0  dragonfly                   [.] std::_Function_handler<void (util::FiberSocketBase::RecvNotification const&), facade::Connection::IoLoopV2()::{lambda(util::FiberSocketBase::RecvNotification const&)#1}>::_M_invoke(std::_Any_data const&, util::FiberSocketBase::RecvNotification const&)
+     0.34%  Proactor0  [kernel.kallsyms]           [k] dev_gro_receive
+     0.34%  Proactor0  [kernel.kallsyms]           [k] fget
+     0.34%  Proactor0  dragonfly                   [.] dfly::Transaction::RunCallback(dfly::EngineShard*)
+     0.34%  Proactor0  dragonfly                   [.] dfly::CompactObj::SetString(std::basic_string_view<char, std::char_traits<char> >)
+     0.34%  Proactor0  dragonfly                   [.] dfly::CommandId::Validate(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>) const
+     0.34%  Proactor0  [kernel.kallsyms]           [k] __inet_lookup_established
+     0.34%  Proactor0  [kernel.kallsyms]           [k] mod_memcg_state
+     0.34%  Proactor0  [vdso]                      [.] 0x0000000000000584
+     0.34%  Proactor0  [kernel.kallsyms]           [k] __skb_datagram_iter
+     0.34%  Proactor0  libc.so.6                   [.] __memset_zva64
+     0.34%  Proactor0  [kernel.kallsyms]           [k] __slab_free
+     0.34%  Proactor0  dragonfly                   [.] facade::RespSrvParser::Parse(absl::lts_20250512::Span<unsigned char const>, unsigned int*, cmn::BackedArguments*)
+     0.34%  Proactor0  dragonfly                   [.] dfly::Shard(std::basic_string_view<char, std::char_traits<char> >, unsigned short)
+     0.34%  Proactor0  [kernel.kallsyms]           [k] tcp_sendmsg_locked
+     0.34%  Proactor0  [kernel.kallsyms]           [k] tcp_recv_timestamp
+     0.34%  Proactor0  dragonfly                   [.] dfly::Namespace::GetDbSlice(unsigned short)
+     0.34%  Proactor0  [nf_nat]                    [k] nf_nat_inet_fn
+     0.34%  Proactor0  dragonfly                   [.] facade::Connection::ReadPendingInput()
+     0.34%  Proactor0  dragonfly                   [.] util::fb2::UringProactor::GetSubmitEntry(fu2::abi_400::detail::function<fu2::abi_400::detail::config<true, false, fu2::capacity_fixed<16ul, 8ul> >, fu2::abi_400::detail::property<false, false, void (util::fb2::detail::FiberInterface*, int, unsigned int, unsigned int)> >, unsigned int)
+     0.34%  Proactor0  dragonfly                   [.] void facade::SinkReplyBuilder::WritePieces<char const (&) [2], std::basic_string_view<char, std::char_traits<char> >&, char const (&) [3]>(char const (&) [2], std::basic_string_view<char, std::char_traits<char> >&, char const (&) [3])
+     0.34%  Proactor0  dragonfly                   [.] util::fb2::UringSocket::WriteSome(iovec const*, unsigned int)
+     0.34%  Proactor0  [kernel.kallsyms]           [k] validate_xmit_skb
+     0.34%  Proactor0  [kernel.kallsyms]           [k] tcp_ack
+     0.34%  Proactor0  dragonfly                   [.] dfly::Transaction::InitByKeys(dfly::KeyIndex const&)
+     0.34%  Proactor0  [kernel.kallsyms]           [k] dma_direct_map_page
+     0.34%  Proactor0  [kernel.kallsyms]           [k] refill_stock
+     0.34%  Proactor0  dragonfly                   [.] _mi_malloc_generic
+     0.34%  Proactor0  [nf_conntrack]              [k] nf_confirm
+     0.28%  Proactor0  dragonfly                   [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::_M_dispose()
+     0.28%  Proactor0  dragonfly                   [.] dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Iterator<false, false> dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::FindFirst<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}>(unsigned long, dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}&&)
+     0.28%  Proactor0  [kernel.kallsyms]           [k] memblock_is_map_memory
+     0.28%  Proactor0  dragonfly                   [.] dfly::MiMemoryResource::do_deallocate(void*, unsigned long, unsigned long)
+     0.27%  Proactor0  dragonfly                   [.] dfly::Transaction::InitBase(dfly::Namespace*, unsigned short, absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>)
+     0.27%  Proactor0  [kernel.kallsyms]           [k] tcp_rcv_space_adjust
+     0.27%  Proactor0  [kernel.kallsyms]           [k] dev_hard_start_xmit
+     0.27%  Proactor0  dragonfly                   [.] dfly::DbSlice::CallChangeCallbacks(unsigned short, std::variant<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Iterator<false, true>, dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::BucketSet> const&) const
+     0.27%  Proactor0  libboost_context.so.1.83.0  [.] ontop_fcontext
+     0.27%  Proactor0  dragonfly                   [.] dfly::(anonymous namespace)::SetCmd::SetExisting(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, dfly::DbSlice::ItAndUpdater*)
+     0.27%  Proactor0  dragonfly                   [.] mi_thread_init
+     0.27%  Proactor0  [kernel.kallsyms]           [k] __tcp_cleanup_rbuf
+     0.27%  Proactor0  dragonfly                   [.] util::fb2::EmbeddedBlockingCounter::Dec()
+     0.27%  Proactor0  [nf_conntrack]              [k] hash_conntrack_raw
+     0.27%  Proactor0  dragonfly                   [.] dfly::DbSlice::AutoUpdater::operator=(dfly::DbSlice::AutoUpdater&&)
+     0.27%  Proactor0  dragonfly                   [.] dfly::LockTagOptions::instance()
+     0.27%  Proactor0  dragonfly                   [.] io::(anonymous namespace)::WriteSomeBytes(iovec const*, unsigned int, io::Sink*)
+     0.27%  Proactor0  dragonfly                   [.] dfly::Transaction::LogAutoJournalOnShard(dfly::EngineShard*, dfly::Transaction::RunnableResult)
+     0.27%  Proactor0  [kernel.kallsyms]           [k] rcu_all_qs
+     0.27%  Proactor0  [kernel.kallsyms]           [k] ena_com_cdesc_rx_pkt_get
+     0.27%  Proactor0  dragonfly                   [.] mi_find_page
+     0.27%  Proactor0  [kernel.kallsyms]           [k] __netif_receive_skb_core.constprop.0
+     0.27%  Proactor0  dragonfly                   [.] dfly::CompactObj::Free()
+     0.27%  Proactor0  dragonfly                   [.] util::posix_err_wrap(long, std::error_code*)
+     0.27%  Proactor0  dragonfly                   [.] dfly::DbSlice::AutoUpdater::Cancel()
+     0.27%  Proactor0  [kernel.kallsyms]           [k] eth_type_trans
+     0.27%  Proactor0  [kernel.kallsyms]           [k] release_sock
+     0.27%  Proactor0  dragonfly                   [.] _mi_stat_decrease
+     0.27%  Proactor0  dragonfly                   [.] std::__detail::__variant::_Copy_ctor_base<false, std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > >::_Copy_ctor_base(std::__detail::__variant::_Copy_ctor_base<false, std::basic_string_view<char, std::char_traits<char> >, std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> > > const&)
+     0.27%  Proactor0  [kernel.kallsyms]           [k] arch_counter_read
+     0.27%  Proactor0  dragonfly                   [.] void absl::lts_20250512::inlined_vector_internal::Storage<char, 88ul, std::allocator<char> >::Resize<absl::lts_20250512::inlined_vector_internal::DefaultValueAdapter<std::allocator<char> > >(absl::lts_20250512::inlined_vector_internal::DefaultValueAdapter<std::allocator<char> >, unsigned long) [clone .isra.0]
+     0.27%  Proactor0  dragonfly                   [.] dfly::DbSlice::Acquire(dfly::IntentLock::Mode, dfly::KeyLockArgs const&)
+     0.27%  Proactor0  dragonfly                   [.] util::fb2::detail::Scheduler::Preempt(bool)
+     0.27%  Proactor0  dragonfly                   [.] facade::Connection::GetFromPoolOrCreate()
+     0.27%  Proactor0  [nf_conntrack]              [k] tcp_sack
+     0.21%  Proactor0  [kernel.kallsyms]           [k] tcp_release_cb
+     0.21%  Proactor0  [kernel.kallsyms]           [k] inet_gro_receive
+     0.21%  Proactor0  [kernel.kallsyms]           [k] tcp_current_mss
+     0.21%  Proactor0  [kernel.kallsyms]           [k] ip_finish_output2
+     0.21%  Proactor0  [kernel.kallsyms]           [k] ktime_get
+     0.21%  Proactor0  dragonfly                   [.] __tls_init
+     0.21%  Proactor0  [kernel.kallsyms]           [k] validate_xmit_skb_list
+     0.21%  Proactor0  dragonfly                   [.] facade::ParsedCommand::SuspendedCommand::~SuspendedCommand()
+     0.21%  Proactor0  dragonfly                   [.] util::fb2::detail::FiberInterface::SwitchSetup()
+     0.21%  Proactor0  [kernel.kallsyms]           [k] tcp_check_space
+     0.21%  Proactor0  [vdso]                      [.] 0x0000000000000578
+     0.21%  Proactor0  dragonfly                   [.] mi_new
+     0.21%  Proactor0  [kernel.kallsyms]           [k] pfn_is_map_memory
+     0.21%  Proactor0  dragonfly                   [.] dfly::LockTable::Release(unsigned long, dfly::IntentLock::Mode)
+     0.21%  Proactor0  [kernel.kallsyms]           [k] tcp_rcv_established
+     0.21%  Proactor0  [kernel.kallsyms]           [k] invoke_syscall
+     0.21%  Proactor0  dragonfly                   [.] void fu2::abi_400::detail::type_erasure::tables::vtable<fu2::abi_400::detail::property<false, false, void (util::fb2::detail::FiberInterface*, int, unsigned int, unsigned int)> >::trait<fu2::abi_400::detail::type_erasure::box<false, util::fb2::FiberCall::FiberCall(util::fb2::UringProactor*, unsigned int)::{lambda(util::fb2::detail::FiberInterface*, int, unsigned int, unsigned int)#1}, std::allocator<util::fb2::FiberCall::FiberCall(util::fb2::UringProactor*, unsigned int)::{lambda(util::fb2::detail::FiberInterface*, int, unsigned int, unsigned int)#1}> > >::process_cmd<true>(fu2::abi_400::detail::type_erasure::tables::vtable<fu2::abi_400::detail::property<false, false, void (util::fb2::detail::FiberInterface*, int, unsigned int, unsigned int)> >*, fu2::abi_400::detail::type_erasure::tables::opcode, fu2::abi_400::detail::type_erasure::data_accessor*, unsigned long, fu2::abi_400::detail::type_erasure::data_accessor*, unsigned long)
+     0.21%  Proactor0  dragonfly                   [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::operator=(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&&) [clone .isra.0]
+     0.21%  Proactor0  dragonfly                   [.] dfly::KeyIndex::operator++()
+     0.21%  Proactor0  [kernel.kallsyms]           [k] __tcp_transmit_skb
+     0.21%  Proactor0  [kernel.kallsyms]           [k] io_submit_sqes
+     0.21%  Proactor0  dragonfly                   [.] util::fb2::EventCount::wait(unsigned int) [clone .isra.0]
+     0.21%  Proactor0  [kernel.kallsyms]           [k] ena_xmit_common
+     0.21%  Proactor0  [kernel.kallsyms]           [k] tcp_write_xmit
+     0.21%  Proactor0  dragonfly                   [.] void absl::lts_20250512::inlined_vector_internal::Storage<dfly::Transaction::PerShardData, 4ul, std::allocator<dfly::Transaction::PerShardData> >::Resize<absl::lts_20250512::inlined_vector_internal::DefaultValueAdapter<std::allocator<dfly::Transaction::PerShardData> > >(absl::lts_20250512::inlined_vector_internal::DefaultValueAdapter<std::allocator<dfly::Transaction::PerShardData> >, unsigned long) [clone .isra.0]
+     0.21%  Proactor0  dragonfly                   [.] util::fb2::EventCount::NotifyInternal(bool (util::fb2::detail::WaitQueue::*)(util::fb2::detail::FiberInterface*)) [clone .isra.0]
+     0.21%  Proactor0  dragonfly                   [.] dfly::DbTableStats::AddTypeMemoryUsage(unsigned int, long)
+     0.21%  Proactor0  dragonfly                   [.] dfly::Transaction::ScheduleInShard(dfly::EngineShard*, bool)
+     0.21%  Proactor0  [kernel.kallsyms]           [k] tcp_push
+     0.21%  Proactor0  dragonfly                   [.] util::fb2::detail::ActivateSameThread(util::fb2::detail::FiberInterface*, util::fb2::detail::FiberInterface*)
+     0.21%  Proactor0  dragonfly                   [.] std::_Function_handler<void (unsigned int), util::fb2::UringSocket::RegisterOnRecv(std::function<void (util::FiberSocketBase::RecvNotification const&)>)::{lambda(unsigned int)#1}>::_M_invoke(std::_Any_data const&, unsigned int&&)
+     0.21%  Proactor0  [kernel.kallsyms]           [k] tcp_select_window
+     0.21%  Proactor0  [kernel.kallsyms]           [k] tcp_inbound_hash
+     0.21%  Proactor0  dragonfly                   [.] dfly::acl::IsUserAllowedToInvokeCommand(dfly::ConnectionContext const&, dfly::CommandId const&, absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>)
+     0.21%  Proactor0  dragonfly                   [.] dfly::Transaction::~Transaction()
+     0.21%  Proactor0  dragonfly                   [.] mi_heap_malloc_aligned
+     0.21%  Proactor0  dragonfly                   [.] dfly::Service::InvokeCmd(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::{lambda()#1}::operator()() const
+     0.21%  Proactor0  dragonfly                   [.] dfly::CommandContext::RecordLatency(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>) const
+     0.21%  Proactor0  dragonfly                   [.] util::fb2::detail::FiberInterface::SwitchTo()
+     0.21%  Proactor0  dragonfly                   [.] mi_free_size
+     0.21%  Proactor0  [kernel.kallsyms]           [k] fib_table_lookup
+     0.21%  Proactor0  dragonfly                   [.] absl::lts_20250512::GetCurrentTimeNanos()
+     0.21%  Proactor0  libc.so.6                   [.] __aarch64_cas4_acq
+     0.21%  Proactor0  dragonfly                   [.] dfly::Transaction::RunnableResult absl::lts_20250512::functional_internal::InvokeObject<dfly::(anonymous namespace)::CmdSet(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)::{lambda(dfly::Transaction*, dfly::EngineShard*)#1}, dfly::Transaction::RunnableResult, dfly::Transaction*, dfly::EngineShard*>(absl::lts_20250512::functional_internal::VoidPtr, absl::lts_20250512::functional_internal::ForwardT<dfly::Transaction*>::type, absl::lts_20250512::functional_internal::ForwardT<dfly::EngineShard*>::type)
+     0.21%  Proactor0  dragonfly                   [.] util::fb2::detail::WaitQueue::NotifyOne(util::fb2::detail::FiberInterface*)
+     0.21%  Proactor0  dragonfly                   [.] dfly::DbSlice::Release(dfly::IntentLock::Mode, dfly::KeyLockArgs const&)
+     0.20%  Proactor0  [kernel.kallsyms]           [k] kmem_cache_free
+     0.20%  Proactor0  dragonfly                   [.] dfly::DbSlice::PostUpdate(unsigned short, std::basic_string_view<char, std::char_traits<char> >)
+     0.20%  Proactor0  [kernel.kallsyms]           [k] tcp_v4_early_demux
+     0.20%  Proactor0  libc.so.6                   [.] memcmp
+     0.14%  Proactor0  dragonfly                   [.] util::fb2::FiberCall::FiberCall(util::fb2::UringProactor*, unsigned int)
+     0.14%  Proactor0  dragonfly                   [.] dfly::AllocationTracker::ProcessNew(void*, unsigned long)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] dequeue_skb
+     0.14%  Proactor0  dragonfly                   [.] dfly::IsClusterShardedByTag()
+     0.14%  Proactor0  [kernel.kallsyms]           [k] ip_rcv_core
+     0.14%  Proactor0  [kernel.kallsyms]           [k] __tcp_select_window
+     0.14%  Proactor0  [nf_conntrack]              [k] nf_conntrack_in
+     0.14%  Proactor0  dragonfly                   [.] dfly::ShouldDenyOnOOM(dfly::CommandContext const&)
+     0.14%  Proactor0  dragonfly                   [.] facade::Connection::HandleMigrateRequest()
+     0.14%  Proactor0  [kernel.kallsyms]           [k] __sock_sendmsg
+     0.14%  Proactor0  dragonfly                   [.] facade::Connection::EnqueueParsedCommand(facade::ParsedCommand*)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] __sk_dst_check
+     0.14%  Proactor0  dragonfly                   [.] operator delete(void*, unsigned long)
+     0.14%  Proactor0  dragonfly                   [.] dfly::DbSlice::AutoUpdater::~AutoUpdater()
+     0.14%  Proactor0  dragonfly                   [.] mi_heap_get_default
+     0.14%  Proactor0  [kernel.kallsyms]           [k] ena_com_close_bounce_buffer
+     0.14%  Proactor0  dragonfly                   [.] io::Sink::Write(iovec const*, unsigned int)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_queue_rcv
+     0.14%  Proactor0  [vdso]                      [.] 0x0000000000000594
+     0.14%  Proactor0  dragonfly                   [.] dfly::journal::GetCallbackCount()
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_send_mss
+     0.14%  Proactor0  [kernel.kallsyms]           [k] ip_output
+     0.14%  Proactor0  dragonfly                   [.] facade::Connection::ParseRedis(base::IoBuf&, unsigned int, bool)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] skb_page_frag_refill
+     0.14%  Proactor0  dragonfly                   [.] util::fb2::detail::FbInitializer()
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_rate_check_app_limited
+     0.14%  Proactor0  [kernel.kallsyms]           [k] sock_def_readable
+     0.14%  Proactor0  [kernel.kallsyms]           [k] kmem_cache_alloc_node_noprof
+     0.14%  Proactor0  [kernel.kallsyms]           [k] import_ubuf
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_schedule_loss_probe
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_rearm_rto
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_schedule_loss_probe.part.0
+     0.14%  Proactor0  dragonfly                   [.] memcmp$plt
+     0.14%  Proactor0  [kernel.kallsyms]           [k] io_init_req
+     0.14%  Proactor0  dragonfly                   [.] facade::Connection::ExecuteBatch()
+     0.14%  Proactor0  [kernel.kallsyms]           [k] fput
+     0.14%  Proactor0  [nf_defrag_ipv4]            [k] ipv4_conntrack_defrag
+     0.14%  Proactor0  dragonfly                   [.] _mi_stat_increase
+     0.14%  Proactor0  [kernel.kallsyms]           [k] _copy_from_iter
+     0.14%  Proactor0  [kernel.kallsyms]           [k] __free_frozen_pages
+     0.14%  Proactor0  [kernel.kallsyms]           [k] uaccess_ttbr0_enable.isra.0
+     0.14%  Proactor0  [kernel.kallsyms]           [k] __update_cpu_freelist_fast
+     0.14%  Proactor0  [kernel.kallsyms]           [k] busy_poll_stop
+     0.14%  Proactor0  dragonfly                   [.] dfly::(anonymous namespace)::SetCmd::CachePrevIfNeeded(dfly::(anonymous namespace)::SetCmd::SetParams const&, dfly::DbSlice::IteratorT<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Iterator<false, false> >)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] ena_com_sq_update_tail
+     0.14%  Proactor0  dragonfly                   [.] dfly::Transaction::GetLockArgs(unsigned short) const
+     0.14%  Proactor0  dragonfly                   [.] memset$plt
+     0.14%  Proactor0  dragonfly                   [.] dfly::intrusive_ptr_release(dfly::Transaction*)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_cleanup_rbuf
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_event_data_recv
+     0.14%  Proactor0  dragonfly                   [.] std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >::basic_string(std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >&&)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] skb_release_head_state
+     0.14%  Proactor0  [nf_conntrack]              [k] ipv4_get_l4proto
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_rtt_estimator
+     0.14%  Proactor0  [nf_conntrack]              [k] nf_ct_get_tuple
+     0.14%  Proactor0  dragonfly                   [.] dfly::DetermineKeys(dfly::CommandId const*, absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] netdev_tx_sent_queue
+     0.14%  Proactor0  dragonfly                   [.] dfly::DbSlice::AutoUpdater::ReduceHeapUsage()
+     0.14%  Proactor0  [kernel.kallsyms]           [k] __alloc_frozen_pages_noprof
+     0.14%  Proactor0  [nf_conntrack]              [k] resolve_normal_ct
+     0.14%  Proactor0  [vdso]                      [.] 0x0000000000000574
+     0.14%  Proactor0  [kernel.kallsyms]           [k] cubictcp_cong_avoid
+     0.14%  Proactor0  [kernel.kallsyms]           [k] __dev_queue_xmit
+     0.14%  Proactor0  [nf_conntrack]              [k] ipv4_conntrack_local
+     0.14%  Proactor0  [kernel.kallsyms]           [k] rb_first
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_mstamp_refresh
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_rbtree_insert
+     0.14%  Proactor0  [kernel.kallsyms]           [k] skb_release_data
+     0.14%  Proactor0  [kernel.kallsyms]           [k] tcp_cwnd_validate
+     0.14%  Proactor0  dragonfly                   [.] dfly::DbSlice::AutoUpdater::AutoUpdater(unsigned short, std::basic_string_view<char, std::char_traits<char> >, dfly::DbSlice::IteratorT<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Iterator<false, false> > const&, dfly::DbSlice*)
+     0.14%  Proactor0  dragonfly                   [.] _mi_page_malloc
+     0.14%  Proactor0  [kernel.kallsyms]           [k] ipv4_dst_check
+     0.14%  Proactor0  dragonfly                   [.] operator new(unsigned long, std::align_val_t)
+     0.14%  Proactor0  dragonfly                   [.] dfly::DbSlice::PreUpdateBlocking(unsigned short, dfly::DbSlice::IteratorT<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Iterator<false, false> > const&)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] skb_network_protocol
+     0.14%  Proactor0  [kernel.kallsyms]           [k] ip_route_use_hint
+     0.14%  Proactor0  [kernel.kallsyms]           [k] inet_send_prepare
+     0.14%  Proactor0  [kernel.kallsyms]           [k] ip_list_rcv
+     0.14%  Proactor0  dragonfly                   [.] dfly::detail::LargeString::SetString(std::basic_string_view<char, std::char_traits<char> >, std::pmr::memory_resource*)
+     0.14%  Proactor0  [kernel.kallsyms]           [k] napi_complete_done
+     0.14%  Proactor0  dragonfly                   [.] facade::SinkReplyBuilder::Flush(unsigned long)
+     0.14%  Proactor0  dragonfly                   [.] XXH3_64bits_withSeed
+     0.14%  Proactor0  dragonfly                   [.] absl::lts_20250512::ascii_internal::AsciiStrToUpper(char*, char const*, unsigned long)
+     0.14%  Proactor0  [vdso]                      [.] 0x0000000000000790
+     0.14%  Proactor0  [vdso]                      [.] 0x0000000000000760
+     0.14%  Proactor0  dragonfly                   [.] dfly::OpArgs::GetDbSlice() const
+     0.09%  Proactor0  [kernel.kallsyms]           [k] rmqueue.isra.0
+     0.07%  Proactor0  [kernel.kallsyms]           [k] hystart_update
+     0.07%  Proactor0  [kernel.kallsyms]           [k] netdev_core_pick_tx
+     0.07%  Proactor0  [vdso]                      [.] 0x000000000000062c
+     0.07%  Proactor0  [kernel.kallsyms]           [k] ip_local_deliver
+     0.07%  Proactor0  dragonfly                   [.] util::fb2::ProactorBase::RunL2Tasks(util::fb2::detail::Scheduler*)
+     0.07%  Proactor0  dragonfly                   [.] dfly::AllocationTracker::Get()
+     0.07%  Proactor0  dragonfly                   [.] dfly::Transaction::Transaction(dfly::CommandId const*)
+     0.07%  Proactor0  dragonfly                   [.] facade::CmdArgParser::~CmdArgParser()
+     0.07%  Proactor0  [kernel.kallsyms]           [k] consume_skb
+     0.07%  Proactor0  [kernel.kallsyms]           [k] napi_skb_cache_get
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __alloc_skb
+     0.07%  Proactor0  [vdso]                      [.] __kernel_clock_gettime
+     0.07%  Proactor0  [kernel.kallsyms]           [k] page_frag_free
+     0.07%  Proactor0  [kernel.kallsyms]           [k] mem_cgroup_uncharge_skmem
+     0.07%  Proactor0  dragonfly                   [.] util::fb2::FiberCall::Get()
+     0.07%  Proactor0  [sch_fq_codel]              [k] fq_codel_dequeue
+     0.07%  Proactor0  dragonfly                   [.] fu2::abi_400::detail::type_erasure::tables::vtable<fu2::abi_400::detail::property<false, false, std::optional<facade::ErrorReply> (absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>) const> >::empty_cmd(fu2::abi_400::detail::type_erasure::tables::vtable<fu2::abi_400::detail::property<false, false, std::optional<facade::ErrorReply> (absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>) const> >*, fu2::abi_400::detail::type_erasure::tables::opcode, fu2::abi_400::detail::type_erasure::data_accessor*, unsigned long, fu2::abi_400::detail::type_erasure::data_accessor*, unsigned long)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] sock_sendmsg
+     0.07%  Proactor0  dragonfly                   [.] dfly::ServerState::ShouldLogSlowCmd(unsigned int) const
+     0.07%  Proactor0  dragonfly                   [.] dfly::CommandId::IsTransactional() const
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_gro_receive
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_update_pacing_rate
+     0.07%  Proactor0  [kernel.kallsyms]           [k] skb_clone
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp4_check_fraglist_gro
+     0.07%  Proactor0  [kernel.kallsyms]           [k] ip_finish_output
+     0.07%  Proactor0  [kernel.kallsyms]           [k] ip_send_check
+     0.07%  Proactor0  dragonfly                   [.] facade::Listener::IsPrivilegedInterface() const
+     0.07%  Proactor0  dragonfly                   [.] _mi_stat_counter_increase
+     0.07%  Proactor0  [nf_conntrack]              [k] __nf_ct_refresh_acct
+     0.07%  Proactor0  [vdso]                      [.] 0x0000000000000568
+     0.07%  Proactor0  [kernel.kallsyms]           [k] skb_push
+     0.07%  Proactor0  dragonfly                   [.] dfly::Transaction::LockMode() const
+     0.07%  Proactor0  dragonfly                   [.] _mi_page_unfull
+     0.07%  Proactor0  libc.so.6                   [.] __GI___pthread_disable_asynccancel
+     0.07%  Proactor0  [nf_nat]                    [k] nf_nat_ipv4_out
+     0.07%  Proactor0  dragonfly                   [.] facade::Connection::ParseRedisBatch(base::IoBuf&)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] sk_forced_mem_schedule
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_rate_skb_sent
+     0.07%  Proactor0  dragonfly                   [.] dfly::CompactObj::ObjType() const
+     0.07%  Proactor0  dragonfly                   [.] mi_free_generic_local.isra.0
+     0.07%  Proactor0  dragonfly                   [.] facade::ParsedCommand::ResetForReuse()
+     0.07%  Proactor0  dragonfly                   [.] util::fb2::detail::FiberInterface::ActivateOther(util::fb2::detail::FiberInterface*)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] put_cpu_partial
+     0.07%  Proactor0  dragonfly                   [.] operator new(unsigned long)
+     0.07%  Proactor0  dragonfly                   [.] std::pair<unsigned int, unsigned char> dfly::detail::BucketBase<14u>::IterateStash<dfly::detail::Segment<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::FindIt<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}&>(unsigned long, dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}&) const::{lambda(unsigned int, unsigned char)#1}&>(unsigned char, bool, dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::EqPred<std::basic_string_view<char, std::char_traits<char> > >(std::basic_string_view<char, std::char_traits<char> > const&) const::{lambda(auto:1 const&)#1}&) const
+     0.07%  Proactor0  [kernel.kallsyms]           [k] do_el0_svc
+     0.07%  Proactor0  dragonfly                   [.] dfly::CommandId::RecordLatency(unsigned int, unsigned long) const
+     0.07%  Proactor0  dragonfly                   [.] util::fb2::UringProactor::MainLoop(util::fb2::detail::Scheduler*)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] sk_free
+     0.07%  Proactor0  dragonfly                   [.] mi_malloc_aligned
+     0.07%  Proactor0  dragonfly                   [.] dfly::EngineShard::CalculateEvictionBytes()
+     0.07%  Proactor0  [vdso]                      [.] 0x0000000000000780
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __io_submit_flush_completions
+     0.07%  Proactor0  [kernel.kallsyms]           [k] nf_hook_slow_list
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __netif_receive_skb_list_core
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_established_options
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_mtu_probe
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_newly_delivered
+     0.07%  Proactor0  [kernel.kallsyms]           [k] inet_recvmsg
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_v4_send_check
+     0.07%  Proactor0  dragonfly                   [.] facade::Connection::CheckIoBufCapacity(bool, base::IoBuf*)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] mempolicy_slab_node
+     0.07%  Proactor0  [kernel.kallsyms]           [k] arch_local_irq_restore
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_rack_advance
+     0.07%  Proactor0  dragonfly                   [.] mi_page_queue_enqueue_from_ex.constprop.0
+     0.07%  Proactor0  [kernel.kallsyms]           [k] get_page_from_freelist
+     0.07%  Proactor0  dragonfly                   [.] util::fb2::FiberCall::~FiberCall()
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __fib_validate_source
+     0.07%  Proactor0  dragonfly                   [.] base::IoBuf::ConsumeInput(unsigned long)
+     0.07%  Proactor0  dragonfly                   [.] TLS init function for facade::Connection::pipeline_req_pool_
+     0.07%  Proactor0  [kernel.kallsyms]           [k] ena_com_write_bounce_buffer_to_dev
+     0.07%  Proactor0  [kernel.kallsyms]           [k] rb_insert_color
+     0.07%  Proactor0  dragonfly                   [.] util::fb2::EmbeddedBlockingCounter::IsCompleted() const
+     0.07%  Proactor0  dragonfly                   [.] facade::Connection::IsPrivileged() const [clone .localalias]
+     0.07%  Proactor0  [kernel.kallsyms]           [k] ip_protocol_deliver_rcu
+     0.07%  Proactor0  libc.so.6                   [.] __time
+     0.07%  Proactor0  [kernel.kallsyms]           [k] memset
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __arch_copy_from_user
+     0.07%  Proactor0  [kernel.kallsyms]           [k] io_netmsg_recycle
+     0.07%  Proactor0  [kernel.kallsyms]           [k] fib_validate_source
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __io_run_local_work
+     0.07%  Proactor0  [kernel.kallsyms]           [k] io_file_get_normal
+     0.07%  Proactor0  [kernel.kallsyms]           [k] kmalloc_reserve
+     0.07%  Proactor0  [kernel.kallsyms]           [k] skb_defer_rx_timestamp
+     0.07%  Proactor0  dragonfly                   [.] facade::SinkReplyBuilder::Send()
+     0.07%  Proactor0  [nf_conntrack]              [k] ipv4_conntrack_in
+     0.07%  Proactor0  [kernel.kallsyms]           [k] security_socket_recvmsg
+     0.07%  Proactor0  [vdso]                      [.] 0x0000000000000560
+     0.07%  Proactor0  dragonfly                   [.] util::LinuxSocketBase::TryRecv(absl::lts_20250512::Span<unsigned char>)
+     0.07%  Proactor0  dragonfly                   [.] dfly::DbSlice::RemoveExpire(unsigned short, dfly::DbSlice::IteratorT<dfly::DashTable<dfly::CompactKey, dfly::CompactValue, dfly::detail::PrimeTablePolicy>::Iterator<false, false> > const&)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] post_alloc_hook
+     0.07%  Proactor0  [kernel.kallsyms]           [k] dma_map_page_attrs
+     0.07%  Proactor0  dragonfly                   [.] dfly::DbSlice::AutoUpdater::AutoUpdater(dfly::DbSlice::AutoUpdater&&)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] netdev_pick_tx
+     0.07%  Proactor0  [kernel.kallsyms]           [k] sock_recvmsg
+     0.07%  Proactor0  [kernel.kallsyms]           [k] security_socket_sendmsg
+     0.07%  Proactor0  libc.so.6                   [.] __errno_location
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_rate_gen
+     0.07%  Proactor0  dragonfly                   [.] fu2::abi_400::detail::type_erasure::invocation_table::function_trait<void (absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*) const>::internal_invoker<fu2::abi_400::detail::type_erasure::box<true, dfly::CommandId::SetAsyncHandler<dfly::cmd::CmdR>(dfly::cmd::CmdR (*)(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)) &&::{lambda(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)#1}, std::allocator<dfly::CommandId::SetAsyncHandler<dfly::cmd::CmdR>(dfly::cmd::CmdR (*)(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)) &&::{lambda(absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)#1}> >, true>::invoke(fu2::abi_400::detail::type_erasure::data_accessor const*, unsigned long, absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>, dfly::CommandContext*)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] io_issue_sqe
+     0.07%  Proactor0  dragonfly                   [.] _ZNSt3_V216generic_categoryEv$plt
+     0.07%  Proactor0  dragonfly                   [.] facade::SinkReplyBuilder::ReplyScope::~ReplyScope()
+     0.07%  Proactor0  dragonfly                   [.] facade::Connection::ReleaseParsedCommand(facade::ParsedCommand*, bool)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] skb_put
+     0.07%  Proactor0  dragonfly                   [.] facade::SinkReplyBuilder::FinishScope()
+     0.07%  Proactor0  [kernel.kallsyms]           [k] sk_filter_trim_cap
+     0.07%  Proactor0  [kernel.kallsyms]           [k] page_counter_try_charge
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __iowrite64_copy_full
+     0.07%  Proactor0  [kernel.kallsyms]           [k] try_charge_memcg
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __napi_build_skb
+     0.07%  Proactor0  [kernel.kallsyms]           [k] napi_build_skb
+     0.07%  Proactor0  [kernel.kallsyms]           [k] sk_reset_timer
+     0.07%  Proactor0  [kernel.kallsyms]           [k] skb_free_head
+     0.07%  Proactor0  dragonfly                   [.] facade::RespSrvParser::ConsumeArrayLen(absl::lts_20250512::Span<unsigned char const>, cmn::BackedArguments*)
+     0.07%  Proactor0  dragonfly                   [.] dfly::DbSlice::SendQueuedInvalidationMessages()
+     0.07%  Proactor0  dragonfly                   [.] facade::RedisReplyBuilderBase::SendSimpleString(std::basic_string_view<char, std::char_traits<char> >) [clone .localalias]
+     0.07%  Proactor0  [kernel.kallsyms]           [k] net_rx_action
+     0.07%  Proactor0  [kernel.kallsyms]           [k] gro_list_prepare
+     0.07%  Proactor0  libc.so.6                   [.] __GI___pthread_enable_asynccancel
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __arm64_sys_recvfrom
+     0.07%  Proactor0  dragonfly                   [.] dfly::(anonymous namespace)::SetCmd::Set(dfly::(anonymous namespace)::SetCmd::SetParams const&, std::basic_string_view<char, std::char_traits<char> >, std::basic_string_view<char, std::char_traits<char> >)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_send_delayed_ack
+     0.07%  Proactor0  [kernel.kallsyms]           [k] raw_v4_input
+     0.07%  Proactor0  [kernel.kallsyms]           [k] ena_tx_map_skb
+     0.07%  Proactor0  dragonfly                   [.] facade::Connection::ReplyBatch()
+     0.07%  Proactor0  [kernel.kallsyms]           [k] ip_sublist_rcv
+     0.07%  Proactor0  dragonfly                   [.] dfly::Transaction::InitByArgs(dfly::Namespace*, unsigned short, absl::lts_20250512::Span<std::basic_string_view<char, std::char_traits<char> > const>)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __cond_resched
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __alloc_pages_noprof
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __pi_memcpy_generic
+     0.07%  Proactor0  dragonfly                   [.] facade::ServiceInterface::DispatchCommandSimple(facade::ParsedCommand*, facade::AsyncPreference)
+     0.07%  Proactor0  dragonfly                   [.] dfly::AllocationTracker::ProcessDelete(void*)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] sock_rfree
+     0.07%  Proactor0  [kernel.kallsyms]           [k] fib_lookup_good_nhc
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tmigr_handle_remote
+     0.07%  Proactor0  [nf_nat]                    [k] nf_nat_ipv4_local_in
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_v4_do_rcv
+     0.07%  Proactor0  dragonfly                   [.] mi_heap_malloc_zero_aligned_at_generic
+     0.07%  Proactor0  dragonfly                   [.] dfly::LockTag::LockTag(std::basic_string_view<char, std::char_traits<char> >)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __copy_skb_header
+     0.07%  Proactor0  [kernel.kallsyms]           [k] llist_reverse_order
+     0.07%  Proactor0  [kernel.kallsyms]           [k] free_frozen_pages
+     0.07%  Proactor0  [vdso]                      [.] 0x0000000000000544
+     0.07%  Proactor0  [kernel.kallsyms]           [k] io_msg_alloc_async
+     0.07%  Proactor0  [kernel.kallsyms]           [k] mod_timer
+     0.07%  Proactor0  dragonfly                   [.] fu2::abi_400::detail::type_erasure::invocation_table::function_trait<void (util::fb2::detail::FiberInterface*, int, unsigned int, unsigned int)>::internal_invoker<fu2::abi_400::detail::type_erasure::box<false, util::fb2::UringProactor::RearmEpoll(util::fb2::UringProactor::EpollEntry*)::{lambda(util::fb2::detail::FiberInterface*, int, unsigned int, unsigned int)#1}, std::allocator<util::fb2::UringProactor::RearmEpoll(util::fb2::UringProactor::EpollEntry*)::{lambda(util::fb2::detail::FiberInterface*, int, unsigned int, unsigned int)#1}> >, true>::invoke(fu2::abi_400::detail::type_erasure::data_accessor*, unsigned long, util::fb2::detail::FiberInterface*, int, unsigned int, unsigned int)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] csum_tcpudp_nofold
+     0.07%  Proactor0  [kernel.kallsyms]           [k] io_send_setup
+     0.07%  Proactor0  dragonfly                   [.] dfly::Transaction::InitTxTime()
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_stream_alloc_skb
+     0.07%  Proactor0  [kernel.kallsyms]           [k] css_rstat_updated
+     0.07%  Proactor0  [kernel.kallsyms]           [k] simple_copy_to_iter
+     0.07%  Proactor0  dragonfly                   [.] dfly::DbSlice::SetMCFlag(unsigned short, dfly::CompactKey const&, unsigned int)
+     0.07%  Proactor0  dragonfly                   [.] util::fb2::UringProactor::ProcessCqeBatch(unsigned int, io_uring_cqe**, util::fb2::detail::FiberInterface*)
+     0.07%  Proactor0  [kernel.kallsyms]           [k] io_send
+     0.07%  Proactor0  [kernel.kallsyms]           [k] cubictcp_acked
+     0.07%  Proactor0  [kernel.kallsyms]           [k] ena_io_poll
+     0.07%  Proactor0  dragonfly                   [.] mi_good_size
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __ip_queue_xmit
+     0.07%  Proactor0  dragonfly                   [.] facade::(anonymous namespace)::GetLocalConnStats()
+     0.07%  Proactor0  [kernel.kallsyms]           [k] tcp_rcv_sne_update
+     0.07%  Proactor0  [kernel.kallsyms]           [k] __get_pfnblock_flags_mask.isra.0
+     0.07%  Proactor0  [kernel.kallsyms]           [k] ena_com_create_and_store_tx_meta_desc
+     0.00%  Proactor0  [kernel.kallsyms]           [k] finish_task_switch.isra.0
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#
