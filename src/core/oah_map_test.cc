@@ -38,17 +38,18 @@ static string KeyOf(OAHPair p) {
   return string{key.view()};
 }
 
+[[maybe_unused]] const bool kThreadLocalAllocatorsInitialized = [] {
+  auto* tlh = mi_heap_get_backing();
+  init_zmalloc_threadlocal(tlh);
+  InitTLStatelessAllocMR(PMR_NS::get_default_resource());
+  return true;
+}();
+
 // Mirrors string_map_test.cc for the OAHMap (OAHTable<OAHPair>) container. The StringMap SdsPair
 // iterator (it->first/it->second) maps to the OAHPair accessor (KeyOf(*it)/it->Value()), and
 // AddOrExchange/Extract return an OwnedOAHPair (RAII, frees on destruction) instead of an SdsEntry.
 class OAHMapTest : public ::testing::Test {
  protected:
-  static void SetUpTestSuite() {
-    auto* tlh = mi_heap_get_backing();
-    init_zmalloc_threadlocal(tlh);
-    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
-  }
-
   void SetUp() override {
     m_ = new OAHMap;
     generator_.seed(0);
@@ -906,7 +907,7 @@ void BM_Shrink(benchmark::State& state) {
     m.Reserve(kGrowTo);
     for (auto& [k, v] : kv)
       m.AddOrUpdate(k, v);
-    CHECK_EQ(m.BucketCount(), kGrowTo);
+    CHECK_EQ(m.BucketCount(), kGrowTo / OAHMap::kOverloadFactor);
     state.ResumeTiming();
     m.Shrink(kShrinkTo);
   }
