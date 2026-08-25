@@ -516,9 +516,9 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
 @dfly_args(
     {
         "proactor_threads": 2,
-        "serialization_max_chunk_size": 5000,
+        # 4mb is around 500 chunks
+        "serialization_max_chunk_size": 4194304,
         "compression_mode": "0",
-        "proactor_busy_poll_usec": 500,
     }
 )
 async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagged_chunks):
