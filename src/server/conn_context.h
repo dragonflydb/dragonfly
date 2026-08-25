@@ -143,6 +143,13 @@ struct ConnectionState {
     std::vector<std::string> key_backing;    // storage for keys provided from lua
     bool read_only = false;
 
+    // ACL rules snapshotted from the connection when the script started. That way,
+    // concurrent ACL modifications of that user do not affect the script execution.
+    std::vector<uint64_t> acl_commands;
+    dfly::acl::AclKeys acl_keys;
+    dfly::acl::AclPubSub acl_pub_sub;
+    size_t acl_db_idx = std::numeric_limits<size_t>::max();
+
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
     size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds
     std::vector<StoredCmd> async_cmds;  // aggregated by acall
