@@ -1,11 +1,11 @@
-# Known-failing Valkey stream tests on Dragonfly, skipped so the suite is a green
+# Known-failing Valkey stream/pubsub tests on Dragonfly, skipped so the suite is a green
 # regression gate over the passing subset. One test name per line (a line starting
 # with '/' is treated as a regexp by the harness). Comments (#) and blank lines are
 # stripped before the list is passed to --skipfile.
 #
 # Each entry is a tracked gap, NOT a permanent exclusion — remove it once fixed.
 # Validated against Valkey unstable @ 79fc841577be18d5e789f741ca92a4157e8315fa.
-# Baseline PoC (truncated partial run before the wake fixes): 65 pass / 27 fail.
+# Baseline (main @ b6c22ce5e): streams 96 pass / 0 fail, pubsub 20 pass / 0 fail.
 
 # --- Missing runtime CONFIG `stream-node-max-entries` (test setup fails) ---
 XADD with MAXLEN option and the '~' argument
@@ -34,12 +34,6 @@ XSETID cannot set the offset to less than the length
 # --- Blocking XREAD not registered as a blocked client (wait_for_blocked_clients timeout) ---
 XREAD with same stream name multiple times should work
 XREAD + multiple XADD inside transaction
-Blocking XREAD for stream that ran dry (issue #5299)
-# Woken blocking XREAD replies an empty set ({x {}}) instead of the newly added entry.
-XREAD streamID edge (blocking)
-
-# --- Ran-dry XREADGROUP replies {stream {}} instead of nil (issue #5299 shape) ---
-Blocking XREADGROUP for stream that ran dry (issue #5299)
 
 # --- Blocked-client accounting: INFO lacks `total_blocking_keys`(+`_on_nokey`); multi-client ---
 # blocked-count scenarios don't converge. NOTE: these tests abort mid-way and LEAK blocked
@@ -59,15 +53,7 @@ XGROUP CREATE: with ENTRIESREAD parameter
 # --- XGROUP SETID rejects the `-` special id ---
 PEL NACK reassignment after XGROUP SETID event
 
-# --- HANGS: blocked XREADGROUP is not woken when the key is mutated (BLOCK 0). ---
-# A group-blocked client is not woken by DEL/SET(retype)/FLUSHALL/SWAPDB, so `$rd read`
-# blocks forever. These MUST stay skipped or the whole run wedges. Remove once
-# wake-on-key-invalidation for blocked XREADGROUP lands.
-# (XGROUP DESTROY and RENAME *do* wake correctly.)
-Blocking XREADGROUP: key deleted
-Blocking XREADGROUP: key type changed with SET
-Blocking XREADGROUP: key type changed with transaction
-Blocking XREADGROUP: flushed DB
+# --- SWAPDB is not implemented (`ERR unknown command`) ---
 Blocking XREADGROUP: swapped DB, key doesn't exist
 Blocking XREADGROUP: swapped DB, key is not a stream
 
@@ -88,3 +74,26 @@ XCLAIM can claim PEL items from another consumer
 XREAD and XREADGROUP against wrong parameter
 XAUTOCLAIM COUNT must be > 0
 XAUTOCLAIM with out of range count
+
+# ===================================== unit/pubsub =====================================
+
+# --- CLIENT REPLY OFF|SKIP unsupported ---
+PubSub messages with CLIENT REPLY OFF
+
+# --- notify-keyspace-events: only the Ex class is supported, CONFIG SET rejects the rest ---
+Keyspace notifications: we receive keyspace notifications
+Keyspace notifications: we receive keyevent notifications
+Keyspace notifications: we can receive both kind of events
+Keyspace notifications: we are able to mask events
+Keyspace notifications: general events test
+Keyspace notifications: list events test
+Keyspace notifications: set events test
+Keyspace notifications: zset events test
+Keyspace notifications: hash events test
+Keyspace notifications: stream events test
+Keyspace notifications: evicted events
+Keyspace notifications: test CONFIG GET/SET of event flags
+Keyspace notifications: new key test
+
+# --- UNSUBSCRIBE is rejected inside MULTI ---
+unsubscribe inside multi, and publish to self
