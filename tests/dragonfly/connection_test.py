@@ -2667,43 +2667,43 @@ async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
 # pipeline commands and then "back off" by gradually reducing the pipeline load such that
 # the cache becomes progressively underutilized. At that stage, the pipeline should slowly
 # shrink (because it's underutilized).
-@pytest.mark.skip("Flaky")
 @dfly_args({"proactor_threads": 1})
 async def test_pipeline_cache_size(df_server: DflyInstance):
     # Start 1 client.
-    good_client = df_server.client()
-    bad_actor_client = df_server.client()
+    good = df_server.client()
+    bad = df_server.client()
 
-    async def push_pipeline(bad_actor_client, size=1):
+    async def push_pipeline(size=1):
         # Fill cache.
-        p = bad_actor_client.pipeline(transaction=True)
+        p = bad.pipeline(transaction=True)
         for i in range(size):
             p.lpush(str(i), "V")
         await p.execute()
 
     # Establish a baseline for the cache size. We dispatch async here.
-    await push_pipeline(bad_actor_client, 32)
-    info = await good_client.info()
+    await push_pipeline(32)
+    info = await good.info()
 
     old_pipeline_cache_bytes = info["pipeline_cache_bytes"]
     assert old_pipeline_cache_bytes > 0
     assert info["dispatch_queue_bytes"] == 0
 
-    for i in range(30):
-        await push_pipeline(bad_actor_client)
-        await good_client.execute_command(f"set foo{i} bar")
+    @assert_eventually(timeout=2)
+    async def wait_for_pipeline_cache_shrink():
+        await push_pipeline()
+        await good.set("foo", "bar")
+        good_info = await good.info()
+        assert good_info["pipeline_cache_bytes"] < old_pipeline_cache_bytes
+        return good_info
 
-    info = await good_client.info()
-
-    # Gradually release pipeline.
-    assert old_pipeline_cache_bytes > info["pipeline_cache_bytes"]
+    info = await wait_for_pipeline_cache_shrink()
     assert info["dispatch_queue_bytes"] == 0
 
     # Now drain the full cache.
     async with async_timeout.timeout(5):
         while info["pipeline_cache_bytes"] != 0:
-            await good_client.execute_command(f"set foo{i} bar")
-            info = await good_client.info()
+            await good.execute_command("set foo bar")
+            info = await good.info()
 
     assert info["dispatch_queue_bytes"] == 0
 
