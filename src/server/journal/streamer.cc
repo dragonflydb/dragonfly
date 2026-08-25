@@ -4,6 +4,7 @@
 
 #include "server/journal/streamer.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <sys/socket.h>
 
 #include <chrono>
@@ -449,6 +450,9 @@ void RestoreStreamer::Run() {
   // mid-traversal cancellation is handled by the cntx_->IsRunning() check inside the loop.
   if (db_array_.empty())
     return;
+
+  // Covers cancellation exits; on the normal path the entries were already drained.
+  absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
 
   PrimeTable::Cursor cursor;
   uint64_t last_yield = 0;

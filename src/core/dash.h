@@ -367,7 +367,8 @@ class DashTable : public detail::DashTableBase {
   // segment by segment over physical backets.
   // traverse by segment order does not guarantees coverage if the table grows/shrinks, it is useful
   // when formal full coverage is not critically important.
-  template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb);
+  // count bounds how many physical buckets are visited in a single call.
+  template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb, unsigned count = 8);
 
   // Discards slots information.
   static const_bucket_iterator BucketIt(const_iterator it) {
@@ -1195,23 +1196,27 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id, EvictionPolicy& ev)
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& cb) -> Cursor {
+auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& cb, unsigned count)
+    -> Cursor {
   uint32_t sid = curs.segment_id(global_depth_);
   assert(sid < segment_.size());
-  SegmentType* s = segment_[sid];
-  assert(s);
   uint8_t bid = curs.bucket_id();
 
-  auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
-  s->TraverseBucket(bid, std::move(dt_cb));
+  for (unsigned i = 0; i < count; ++i) {
+    SegmentType* s = segment_[sid];
+    assert(s);
 
-  ++bid;
-  if (SegmentType::OutOfRange(bid)) {
-    sid = NextSeg(sid);
-    if (sid >= segment_.size()) {
-      return Cursor::end();
+    auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
+    s->TraverseBucket(bid, dt_cb);
+
+    ++bid;
+    if (SegmentType::OutOfRange(bid)) {
+      sid = NextSeg(sid);
+      if (sid >= segment_.size()) {
+        return Cursor::end();
+      }
+      bid = 0;
     }
-    bid = 0;
   }
 
   return Cursor{global_depth_, sid, bid};

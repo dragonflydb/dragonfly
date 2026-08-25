@@ -43,7 +43,7 @@ ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
           "The maximum number of dashtable segments to scan in each eviction "
           "when heartbeat based eviction is triggered under memory pressure.");
 
-ABSL_FLAG(double, table_growth_margin, 0.4,
+ABSL_FLAG(double, table_growth_margin, 0.15,
           "Prevents table from growing if number of free slots x average object size x this ratio "
           "is larger than memory budget.");
 
@@ -320,6 +320,10 @@ void AsyncDeleter::Shutdown() {
 int32_t AsyncDeleter::IdleCb() {
   if (head_ == nullptr)
     return -1;  // unregister itself.
+
+  if (EngineShard* shard = EngineShard::tlocal(); shard) {
+    shard->stats().async_delete_task_invocation_total++;
+  }
 
   auto* current = head_;
   DVLOG(2) << "IdleCb " << current->cursor;
@@ -1628,21 +1632,21 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     ++result.deleted;
   };
 
-  unsigned i = 0;
-
   auto quota_remains = [] {
     // Break out of traversal if we spent more than 1ms
     return base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) < 1000;
   };
 
-  for (; i < count / 3 && quota_remains(); ++i) {
-    db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
+  constexpr unsigned kStep = 8;
+
+  while (result.traversed < count / 3 && quota_remains()) {
+    db.expire_cursor = db.prime.TraverseBySegmentOrder(db.expire_cursor, cb, kStep);
   }
 
   // Continue traversing if we had a strong deletion rate among checked TTL keys.
   if (result.deleted * 4 > checked) {
-    for (; i < count && quota_remains(); ++i) {
-      db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
+    while (result.traversed < count && quota_remains()) {
+      db.expire_cursor = db.prime.TraverseBySegmentOrder(db.expire_cursor, cb, kStep);
     }
   }
 

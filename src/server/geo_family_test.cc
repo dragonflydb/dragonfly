@@ -35,7 +35,7 @@ TEST_F(GeoFamilyTest, GeoAddOptions) {
   auto resp = Run({"geopos", "Sicily", "Palermo", "Messina"});
   EXPECT_THAT(
       resp, RespArray(ElementsAre(RespArray(ElementsAre("15.361389219760895", "38.1155563954963")),
-                                  ArgType(RespExpr::NIL))));
+                                  ArgType(RespExpr::NIL_ARRAY))));
 
   // add 1 + update 1 + NX
   EXPECT_EQ(1, CheckedInt({"geoadd", "Sicily", "NX", "18.361389", "38.115556", "Palermo", "15.2875",
@@ -79,7 +79,7 @@ TEST_F(GeoFamilyTest, GeoPos) {
   auto resp = Run({"geopos", "Sicily", "Palermo", "NonExisting"});
   EXPECT_THAT(
       resp, RespArray(ElementsAre(RespArray(ElementsAre("13.361389338970184", "38.1155563954963")),
-                                  ArgType(RespExpr::NIL))));
+                                  ArgType(RespExpr::NIL_ARRAY))));
 }
 
 TEST_F(GeoFamilyTest, GeoPosWrongType) {

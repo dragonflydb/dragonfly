@@ -31,6 +31,8 @@ class EngineShard {
     uint64_t defrag_skipped_mem_under_threshold = 0;
     uint64_t defrag_skipped_within_check_interval = 0;
     uint64_t defrag_skipped_not_enough_fragmentation = 0;
+    // In case it spins similarly to defragmentation. See pr #8115
+    uint64_t async_delete_task_invocation_total = 0;
     uint64_t poll_execution_total = 0;
 
     // number of optimistic executions - that were run as part of the scheduling.
@@ -251,12 +253,19 @@ class EngineShard {
     time_t last_check_time = 0;
     float page_utilization_threshold = 0.8;
 
+    // Duty-cycle backoff: bounds how much of this shard's CPU % defrag can burst.
+    // Without this, defrag task will return kOnIdleMaxLevel and will spin CPU without a cap.
+    // For more info, check helio's proactor event loop and how background tasks are run.
+    uint64_t consecutive_burst_cycles = 0;
+    uint64_t cooldown_until_cycles = 0;  // CycleClock ticks; 0 means "not cooling down"
+
     enum class SkipReason : uint8_t {
       MemoryTooLow,
       MemoryBelowThreshold,
       CheckWithinInterval,
       NotEnoughFragmentation,
       CheckInProgress,
+      CoolingDown,
       NotSkipped,
     };
 

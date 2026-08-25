@@ -340,8 +340,8 @@ void OutgoingMigration::SyncFb() {
 
     long attempt = 0;
     while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
-      // Break loop and don't sleep in case of C_FATAL
-      if (GetState() == MigrationState::C_FATAL) {
+      // Break loop and don't sleep in case of C_FATAL, or a reported error (e.g. OOM on ACK).
+      if (GetState() == MigrationState::C_FATAL || !exec_st_.IsRunning()) {
         break;
       }
       // Process commands that were on pause and try again
@@ -429,10 +429,12 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       return false;
     }
 
-    // Check OOM from incoming slot migration on ACK request
+    // OOM might reach the target node from a flow or from the ack here. Both should report
+    // an error to the context such that the next iteration of the control loop deletes the slots
+    // on the target before it finishes.
     if (CheckRespSimpleError(kIncomingMigrationOOM)) {
-      Finish(GenericError{std::make_error_code(errc::not_enough_memory),
-                          std::string(kIncomingMigrationOOM)});
+      exec_st_.ReportError(GenericError(std::make_error_code(errc::not_enough_memory),
+                                        std::string(kIncomingMigrationOOM)));
       return false;
     }
 

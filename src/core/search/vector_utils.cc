@@ -126,7 +126,19 @@ uint16_t FloatToHalf(float f) {
 }
 
 uint16_t FloatToBf16(float f) {
+#ifdef __APPLE__
+  // Round-to-nearest-even truncation of the float32 bits, done manually instead of via
+  // static_cast<__bf16>(f): that cast crashes Apple clang's backend on arm64
+  // ("Cannot select: bf16 = fp_round") at -O3.
+  uint32_t bits = std::bit_cast<uint32_t>(f);
+  if (std::isnan(f)) {
+    return static_cast<uint16_t>((bits >> 16) | 0x0040);
+  }
+  bits += 0x7fff + ((bits >> 16) & 1);
+  return static_cast<uint16_t>(bits >> 16);
+#else
   return std::bit_cast<uint16_t>(static_cast<__bf16>(f));
+#endif
 }
 
 std::vector<std::byte> EncodeOnesVector(size_t dim, VectorDataType dt) {

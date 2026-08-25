@@ -1488,12 +1488,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
-                                        facade::AsyncPreference async_pref) {
+DispatchResult Service::DispatchCommand(
+    facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd, facade::AsyncPreference async_pref,
+    absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) {
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
   const CommandId* cid = nullptr;
   ParsedArgs args_no_cmd;
+  auto invoke_pre_dispatch = [&] {
+    if (pre_dispatch_cb)
+      (*pre_dispatch_cb)(parsed_cmd);
+  };
 
   if (parsed_cmd->mc_command()) {
     auto mc_res = HandleMemcacheCommand(parsed_cmd, async_pref);
@@ -1508,6 +1513,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   }
 
   if (cid == nullptr) {
+    invoke_pre_dispatch();
     if (async_pref != AsyncPreference::ONLY_SYNC) {
       parsed_cmd->SetDeferredReply();
     }
@@ -1532,6 +1538,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
         parsed_cmd->SetDeferredReply();
       break;
   };
+
+  invoke_pre_dispatch();
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
@@ -1754,8 +1762,9 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
   return res;
 }
 
-uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
-                                        facade::ConnectionContext* cntx) {
+uint32_t Service::DispatchSquashedBatch(
+    facade::ParsedCommand* first, unsigned count, facade::ConnectionContext* cntx,
+    absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) {
   auto* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
 
@@ -1845,6 +1854,8 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
         cid->IsSubscribeFamily())
       break;
 
+    if (pre_dispatch_cb)
+      (*pre_dispatch_cb)(cmd);
     if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
       CapturingReplyBuilder crb{ReplyMode::FULL, rb->GetRespVersion()};
       crb.SendError(std::move(*err));
@@ -2172,7 +2183,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       auto saved_tail = cmd_cntx->tail_args();
 
       auto* prev = cmd_cntx->SwapReplier(&replier);
-      DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
+      DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
       cmd_cntx->SwapReplier(prev);
 
       cmd_cntx->SetTailArgs(saved_tail);
@@ -2232,21 +2243,26 @@ void Service::CallSHA(const facade::ParsedArgs& args, string_view sha, Interpret
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
 }
 
-void LoadScript(string_view sha, ScriptMgr* script_mgr, Interpreter* interpreter) {
+// Returns false if the script body is unknown to the script manager and can not be run.
+[[nodiscard]] bool LoadScript(string_view sha, ScriptMgr* script_mgr, Interpreter* interpreter) {
   if (interpreter->Exists(sha))
-    return;
+    return true;
 
   auto script_data = script_mgr->Find(sha);
   if (!script_data) {
-    LOG(DFATAL) << "Script " << sha << " not found in script mgr";
-    return;
+    // Unreachable: params are cached only for scripts that have a body.
+    LOG_EVERY_T(WARNING, 1) << "Script " << sha << " has cached params but no body";
+    return false;
   }
 
   string err;
   Interpreter::AddResult add_res = interpreter->AddFunction(sha, script_data->body, &err);
   if (add_res != Interpreter::ADD_OK) {
     LOG(DFATAL) << "Error adding " << sha << " to database, err " << err;
+    return false;
   }
+
+  return true;
 }
 
 // Determine multi mode based on script params.
@@ -2319,7 +2335,9 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     return cmd_cntx->SendError(facade::kScriptNotFound);
   }
 
-  LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter);
+  if (!LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter)) {
+    return cmd_cntx->SendError(facade::kScriptNotFound);
+  }
 
   string error;
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
@@ -2571,7 +2589,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   }
 
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
-    return rb->SendNull();
+    return rb->SendNullArray();
   }
 
   auto keys = CollectAllKeys(&exec_info);
@@ -2609,7 +2627,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   if (!exec_info.watched_keys.empty() &&
       !CheckWatchedKeyExpiry(cntx, registry_.Find("EXISTS"), exec_cid_)) {
     cmd_cntx->tx()->UnlockMulti();
-    return rb->SendNull();
+    return rb->SendNullArray();
   }
 
   exec_info.state = ConnectionState::ExecInfo::EXEC_RUNNING;
@@ -2880,15 +2898,20 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendLong(cmd_cnt);
   }
 
-  // INFO [cmd]
+  // INFO [cmd ...]
   if (subcmd == "INFO" && parser.HasNext()) {
-    string cmd = absl::AsciiStrToUpper(parser.Next());
+    vector<string> names;
+    while (parser.HasNext())
+      names.push_back(absl::AsciiStrToUpper(parser.Next()));
 
-    if (const auto* cid = registry_.Find(cmd); cid) {
-      rb->StartArray(1);
-      serialize_command(cmd, *cid);
-    } else {
-      rb->SendNull();
+    // One entry per requested name; an unknown name gets a null entry.
+    rb->StartArray(names.size());
+    for (const string& name : names) {
+      if (const auto* cid = registry_.Find(name); cid) {
+        serialize_command(name, *cid);
+      } else {
+        rb->SendNull();
+      }
     }
 
     return;

@@ -386,8 +386,8 @@ TEST_F(ZSetFamilyTest, ZRank) {
   EXPECT_EQ(0, CheckedInt({"zrevrank", "x", "b"}));
   EXPECT_THAT(Run({"zrevrank", "x", "c"}), ArgType(RespExpr::NIL));
   EXPECT_THAT(Run({"zrank", "y", "c"}), ArgType(RespExpr::NIL));
-  EXPECT_THAT(Run({"zrevrank", "x", "c", "WITHSCORE"}), ArgType(RespExpr::NIL));
-  EXPECT_THAT(Run({"zrank", "y", "c", "WITHSCORE"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"zrevrank", "x", "c", "WITHSCORE"}), ArgType(RespExpr::NIL_ARRAY));
+  EXPECT_THAT(Run({"zrank", "y", "c", "WITHSCORE"}), ArgType(RespExpr::NIL_ARRAY));
 
   auto resp = Run({"zrank", "x", "a", "WITHSCORE"});
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
@@ -926,9 +926,59 @@ TEST_F(ZSetFamilyTest, ZMPopInvalidSyntax) {
   resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "boo"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 
+  // Count is zero.
+  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "0"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  // Count is negative.
+  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "-1"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "-9223372036854775808"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  // Count above UINT32_MAX.
+  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "4294967296"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "9223372036854775807"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  // Non-positive count errors even with trailing junk.
+  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "0", "foo"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
   // Too many arguments.
   resp = Run({"zmpop", "1", "c", "MAX", "COUNT", "2", "foo"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(ZSetFamilyTest, ZMPopCountZeroMulti) {
+  auto resp = Run({"multi"});
+  ASSERT_EQ(resp, "OK");
+
+  Run({"zmpop", "1", "a", "MIN", "COUNT", "0"});
+  resp = Run({"exec"});
+  EXPECT_THAT(resp, RespElementsAre(ErrArg("count should be greater than 0")));
+
+  // The connection stays usable after the error.
+  Run({"zadd", "a", "1", "a1"});
+  resp = Run({"zmpop", "1", "a", "MIN"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("a", {{"a1", "1"}}));
+}
+
+TEST_F(ZSetFamilyTest, ZMPopCountLargerThanSet) {
+  Run({"zadd", "a", "1", "a1", "2", "a2", "3", "a3"});
+
+  // Count above int32 range must pop the whole set, not truncate.
+  auto resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "2147483648"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("a", {{"a1", "1"}, {"a2", "2"}, {"a3", "3"}}));
+  EXPECT_THAT(Run({"exists", "a"}), IntArg(0));
+
+  Run({"zadd", "b", "1", "b1", "2", "b2"});
+  resp = Run({"zmpop", "1", "b", "MIN", "COUNT", "4294967295"});
+  EXPECT_THAT(resp, ContainsLabeledScoredArray("b", {{"b1", "1"}, {"b2", "2"}}));
+  EXPECT_THAT(Run({"exists", "b"}), IntArg(0));
 }
 
 TEST_F(ZSetFamilyTest, ZMPop) {
@@ -1020,6 +1070,13 @@ TEST_F(ZSetFamilyTest, BZMPopInvalidSyntax) {
   // Count number is not uint.
   resp = Run({"bzmpop", "1", "1", "a", "MIN", "COUNT", "boo"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+
+  // Non-positive count errors immediately, even with an infinite timeout.
+  resp = Run({"bzmpop", "0", "1", "a", "MIN", "COUNT", "0"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  resp = Run({"bzmpop", "0", "1", "a", "MIN", "COUNT", "-1"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
 
   // Too many arguments.
   resp = Run({"bzmpop", "1", "1", "c", "MAX", "COUNT", "2", "foo"});
@@ -1132,6 +1189,13 @@ TEST_F(ZSetFamilyTest, ZPopMin) {
 
   resp = Run({"zpopmin", "key", "1"});
   ASSERT_THAT(resp, ArrLen(0));
+
+  // Count >= 2^31 must delete the popped elements, not silently keep them.
+  Run({"zadd", "key2", "1", "a", "2", "b"});
+  resp = Run({"zpopmin", "key2", "2147483648"});
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "1", "b", "2"));
+  EXPECT_THAT(Run({"exists", "key2"}), IntArg(0));
 }
 
 TEST_F(ZSetFamilyTest, ZPopMax) {
@@ -1159,6 +1223,13 @@ TEST_F(ZSetFamilyTest, ZPopMax) {
 
   resp = Run({"zpopmax", "key", "1"});
   ASSERT_THAT(resp, ArrLen(0));
+
+  // Count >= 2^31 must delete the popped elements, not silently keep them.
+  Run({"zadd", "key2", "1", "a", "2", "b"});
+  resp = Run({"zpopmax", "key2", "2147483648"});
+  ASSERT_THAT(resp, ArrLen(4));
+  EXPECT_THAT(resp.GetVec(), ElementsAre("b", "2", "a", "1"));
+  EXPECT_THAT(Run({"exists", "key2"}), IntArg(0));
 }
 
 TEST_F(ZSetFamilyTest, ZAddPopCrash) {

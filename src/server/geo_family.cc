@@ -384,7 +384,7 @@ void CmdGeoPos(CmdArgParser parser, CommandContext* cmd_cntx) {
       rb->SendDouble(xy[0]);
       rb->SendDouble(xy[1]);
     } else {
-      rb->SendNull();
+      rb->SendNullArray();
     }
   }
 }

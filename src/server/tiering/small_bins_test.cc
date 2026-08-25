@@ -93,17 +93,10 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
     EXPECT_EQ(key, "k"s + data.substr(segment.offset, segment.length).substr(1));
   }
 
-  // Delete all stashed values, tracking live bytes to know when we've crossed the
-  // "more than half of this bin's live content was deleted" fragmentation threshold.
-  size_t orig_bytes = 0;
-  for (auto& [dbid, key, segment] : segments)
-    orig_bytes += segment.length;
-
-  size_t deleted_bytes = 0;
+  // Delete all stashed values
   while (!segments.empty()) {
     auto segment = std::get<2>(segments.back());
     segments.pop_back();
-    deleted_bytes += segment.length;
     auto bin = bins_.Delete(segment);
 
     EXPECT_EQ(bin.segment.offset, 0u);
@@ -111,10 +104,8 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
 
     if (segments.empty()) {
       EXPECT_TRUE(bin.empty);
-    } else if (deleted_bytes * 2 > orig_bytes) {
-      EXPECT_TRUE(bin.fragmented);  // more than half of the bin's live bytes were deleted
     } else {
-      EXPECT_FALSE(bin.fragmented);
+      EXPECT_TRUE(bin.fragmented);  // half of the values were deleted
     }
   }
 }

@@ -160,6 +160,10 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
             "maxmemory": "512mb",
             "enable_heartbeat_eviction": "false",
             "rss_oom_deny_ratio": 1.3,
+            # The test fills the master to ~87% of maxmemory and relies on the conservative
+            # table growth estimate to deny dashtable growth, which is what triggers policy
+            # based eviction. Pin the margin instead of depending on its default.
+            "table_growth_margin": 0.4,
         },
         replica_args={"proactor_threads": 2},
         connect=False,
@@ -505,11 +509,18 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
-@pytest.mark.skip("fails, investigating")
 @pytest.mark.large
+@pytest.mark.exclude_epoll
 @pytest.mark.opt_only
 @pytest.mark.parametrize("tagged_chunks", [True, False])
-@dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
+@dfly_args(
+    {
+        "proactor_threads": 2,
+        "serialization_max_chunk_size": 5000,
+        "compression_mode": "0",
+        "proactor_busy_poll_usec": 500,
+    }
+)
 async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagged_chunks):
     """
     Restart replicating instance with huge values. Tests that interrupting the streaming process doesn't hinder retrying replication

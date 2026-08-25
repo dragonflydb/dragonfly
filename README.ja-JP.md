@@ -7,7 +7,7 @@
 
 [![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
-その他の言語:  [English](README.md) [简体中文](README.zh-CN.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md)
+その他の言語:  [English](README.md) [简体中文](README.zh-CN.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md) [ภาษาไทย](README.th-TH.md)
 
 [Web サイト](https://www.dragonflydb.io/) • [ドキュメント](https://dragonflydb.io/docs) • [クイックスタート](https://www.dragonflydb.io/docs/getting-started) • [コミュニティ Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly Forum](https://dragonfly.discourse.group/) • [Join the Dragonfly Community](https://www.dragonflydb.io/community)
 

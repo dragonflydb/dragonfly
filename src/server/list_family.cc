@@ -942,8 +942,9 @@ void BRPopLPush(CmdArgParser parser, CommandContext* cmd_cntx) {
   switch (op_res.status()) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
-      return builder->SendNull();
-      break;
+      // On a miss deny-blocking (MULTI/script) replies a scalar null, a blocked timeout replies a
+      // null array.
+      return cmd_cntx->tx()->IsMulti() ? builder->SendNull() : builder->SendNullArray();
 
     default:
       return builder->SendError(op_res.status());
@@ -971,8 +972,9 @@ void BLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
   switch (op_res.status()) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
-      return builder->SendNull();
-      break;
+      // On a miss deny-blocking (MULTI/script) replies a scalar null, a blocked timeout replies a
+      // null array.
+      return cmd_cntx->tx()->IsMulti() ? builder->SendNull() : builder->SendNullArray();
 
     default:
       return builder->SendError(op_res.status());
@@ -1093,7 +1095,8 @@ void PopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   switch (result.status()) {
     case OpStatus::KEY_NOTFOUND:
-      return rb->SendNull();
+      // With COUNT the reply is an aggregate, so its null form is a null array.
+      return return_arr ? rb->SendNullArray() : rb->SendNull();
     case OpStatus::WRONG_TYPE:
       return cmd_cntx->SendError(kWrongTypeErr);
     default:;
@@ -1184,11 +1187,15 @@ void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.NextRange();  // numkeys + keys, handled by the command key spec
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
-  size_t pop_count = 1;
-  parser.Check("COUNT", &pop_count);
+  int64_t count_arg = 1;
+  parser.Check("COUNT", &count_arg);
+  if (!parser.HasError() && (count_arg < 1 || count_arg > UINT32_MAX))
+    return cmd_cntx->SendError(kCountNotGreaterThanZeroErr);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+  uint32_t pop_count = static_cast<uint32_t>(count_arg);
 
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
@@ -1268,11 +1275,15 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.NextRange();  // numkeys + keys, handled by the command key spec
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 
-  size_t pop_count = 1;
-  parser.Check("COUNT", &pop_count);
+  int64_t count_arg = 1;
+  parser.Check("COUNT", &count_arg);
+  if (!parser.HasError() && (count_arg < 1 || count_arg > UINT32_MAX))
+    return cmd_cntx->SendError(kCountNotGreaterThanZeroErr);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+  uint32_t pop_count = static_cast<uint32_t>(count_arg);
 
   OpResult<StringVec> result;
   auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {

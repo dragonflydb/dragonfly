@@ -141,6 +141,13 @@ TEST_F(ListFamilyTest, BLMPopInvalidSyntax) {
   resp = Run({"blmpop", "0.01", "1", kKey1, "LEFT", "COUNT", "boo"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 
+  // Non-positive count errors immediately, even with an infinite timeout
+  resp = Run({"blmpop", "0", "1", kKey1, "LEFT", "COUNT", "0"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  resp = Run({"blmpop", "0", "1", kKey1, "LEFT", "COUNT", "-1"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
   // Too many arguments
   resp = Run({"blmpop", "0.01", "1", "c", "LEFT", "COUNT", "2", "foo"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
@@ -582,6 +589,8 @@ TEST_F(ListFamilyTest, LPop) {
   auto resp = Run({"lpop", "foo", "0"});
   EXPECT_THAT(resp, RespArray(ElementsAre()));
   resp = Run({"lpop", "bar", "0"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
+  resp = Run({"lpop", "bar"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
@@ -809,7 +818,7 @@ TEST_F(ListFamilyTest, TwoQueueBug451) {
 }
 
 TEST_F(ListFamilyTest, BRPopLPushSingleShard) {
-  EXPECT_THAT(Run({"brpoplpush", "x", "y", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"brpoplpush", "x", "y", "0.05"}), ArgType(RespExpr::NIL_ARRAY));
   ASSERT_EQ(0, NumWatched());
 
   EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
@@ -846,7 +855,7 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBug2857) {
 
   // Timeout
   f = pp_->at(1)->LaunchFiber(Launch::dispatch, blpop);
-  EXPECT_THAT(Run({"brpoplpush", "src", "dest", "1"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"brpoplpush", "src", "dest", "1"}), ArgType(RespExpr::NIL_ARRAY));
   f.Join();
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
@@ -916,7 +925,7 @@ TEST_F(ListFamilyTest, BRPopContended) {
 
 TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   RespExpr resp;
-  EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.05"}), ArgType(RespExpr::NIL_ARRAY));
 
   ASSERT_EQ(0, NumWatched());
 
@@ -957,7 +966,7 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
 }
 
 TEST_F(ListFamilyTest, BLMove) {
-  EXPECT_THAT(Run({"blmove", "x", "y", "right", "right", "0.05"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"blmove", "x", "y", "right", "right", "0.05"}), ArgType(RespExpr::NIL_ARRAY));
   ASSERT_EQ(0, NumWatched());
 
   EXPECT_THAT(Run({"lpush", "x", "val1"}), IntArg(1));
@@ -1010,6 +1019,15 @@ TEST_F(ListFamilyTest, BlockingTimeoutValidation) {
   // A large-but-representable timeout is accepted (returns immediately since the key exists).
   Run({"rpush", "k", "v"});
   EXPECT_THAT(Run({"blpop", "k", "4000000"}).GetVec(), ElementsAre("k", "v"));
+}
+
+TEST_F(ListFamilyTest, BLMoveMultiNull) {
+  // Inside MULTI blocking is denied and the miss reply is a scalar null,
+  // unlike the null array replied on a blocking timeout.
+  Run({"multi"});
+  Run({"blmove", "nokey", "dst", "LEFT", "RIGHT", "0.01"});
+  auto resp = Run({"exec"});
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::NIL))));
 }
 
 // Wake two BLMOVEs on the same shard simultaneously
@@ -1320,9 +1338,40 @@ TEST_F(ListFamilyTest, LMPopInvalidSyntax) {
   resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "boo"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
 
+  // COUNT is zero
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "0"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  // COUNT is negative
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "-1"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "-9223372036854775808"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  // COUNT above UINT32_MAX
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "4294967296"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "9223372036854775807"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
+  // Non-positive count errors even with trailing junk
+  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "0", "foo"});
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
+
   // Too many arguments
   resp = Run({"lmpop", "1", "c", "LEFT", "COUNT", "2", "foo"});
   EXPECT_THAT(resp, ErrArg("syntax error"));
+}
+
+TEST_F(ListFamilyTest, LMPopCountLargerThanList) {
+  Run({"rpush", "a", "a1", "a2", "a3"});
+
+  // Count above the list size (up to UINT32_MAX) pops the whole list.
+  auto resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "4294967295"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("a", RespArray(ElementsAre("a1", "a2", "a3")))));
+  EXPECT_THAT(Run({"exists", "a"}), IntArg(0));
 }
 
 TEST_F(ListFamilyTest, LMPop) {
@@ -1440,11 +1489,11 @@ TEST_F(ListFamilyTest, LMPopEdgeCases) {
 
   // Test with COUNT = 0 - should return error
   resp = Run({"lmpop", "1", "list", "LEFT", "COUNT", "0"});
-  EXPECT_THAT(resp, RespArray(ElementsAre("list", RespArray(ElementsAre()))));
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
 
   // Test with negative COUNT - should return error
   resp = Run({"lmpop", "1", "list", "LEFT", "COUNT", "-1"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
 }
 
 TEST_F(ListFamilyTest, LMPopDocExample) {

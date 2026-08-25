@@ -39,7 +39,6 @@ using namespace std;
 
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
-ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
 ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
 
 namespace dfly {
@@ -490,8 +489,8 @@ bool DflyCmd::IsLSNInPartialSyncBuffer(LSN lsn) const {
     LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
               << " that the replication buffer doesn't contain this anymore (current_lsn="
               << journal::GetLsn() << "). Will perform a full sync of the data.";
-    LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
-                 "--shard_repl_backlog_len option";
+    LOG(INFO) << "If this happens often, increase --shard_repl_backlog_time_ms or "
+                 "--shard_repl_backlog_max_bytes.";
   }
   return exists;
 }

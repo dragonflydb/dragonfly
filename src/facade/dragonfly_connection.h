@@ -292,9 +292,11 @@ class Connection : public util::Connection {
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file containing requests from connections on
   // that thread whose listener type equals `listener_type`. Exactly one listener
-  // kind per recording — mixing protocols in a single file is not supported.
+  // kind per recording — mixing protocols in a single file is not supported. All
+  // threads in a recording session receive the same `start_logging_cycle`.
   static StartTrafficResult StartTrafficLogging(std::string_view base_path,
-                                                ListenerType listener_type);
+                                                ListenerType listener_type,
+                                                uint64_t start_logging_cycle);
 
   // Stops traffic logging in this thread. A noop if the thread is not logging.
   static void StopTrafficLogging();
@@ -549,8 +551,17 @@ class Connection : public util::Connection {
 
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
-  // Returns true on successful execution, false on reply builder error.
-  bool ExecuteBatch();
+  // Returns kDeferToControlPath only when V2 stops to let IoLoopV2 drain control messages that
+  // precede the next parsed command.
+  enum class ExecuteBatchResult : uint8_t { kSuccess, kFailure, kDeferToControlPath };
+  ExecuteBatchResult ExecuteBatch();
+
+  // V2: Returns true if the connection is currently logging traffic to a file.
+  bool ShouldLogTrafficV2() const;
+
+  // V2: Records a command only while logging is active at dispatch and it was parsed after the
+  // current logger started. STOP can therefore suppress a command parsed while logging was active.
+  void LogTrafficV2(ParsedCommand* cmd);
 
   // V2 vectorized squash phase: dispatch the run starting at parsed_to_execute_ through
   // DispatchSquashedBatch when squashing is enabled. Returns true if a squashed batch was

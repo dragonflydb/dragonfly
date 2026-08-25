@@ -9,7 +9,7 @@
 
 > Before moving on, please consider giving us a GitHub star ⭐️. Thank you!
 
-Other languages:  [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md)
+Other languages:  [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md) [ภาษาไทย](README.th-TH.md)
 
 [Website](https://www.dragonflydb.io/) • [Docs](https://dragonflydb.io/docs) • [Quick Start](https://www.dragonflydb.io/docs/getting-started) • [Community Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly User Conference](https://www.dragonflydb.io/events/dragonfly-ascent) • [Join the Dragonfly Community](https://www.dragonflydb.io/community)
 

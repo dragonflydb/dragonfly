@@ -719,6 +719,15 @@ TEST_F(ServerFamilyTest, CommandDocsOk) {
   EXPECT_THAT(Run({"command", "docs"}), ErrArg("COMMAND DOCS Not Implemented"));
 }
 
+TEST_F(ServerFamilyTest, CommandInfoUnknown) {
+  // The reply is an array with one entry per requested command name, null for unknown names.
+  auto resp = Run({"command", "info", "nosuchcmd"});
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::NIL))));
+
+  resp = Run({"command", "info", "nosuchcmd", "get"});
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::ARRAY))));
+}
+
 TEST_F(ServerFamilyTest, PubSubCommandErr) {
   // Check conditions only in non cluster mode
   if (auto cluster_mode = absl::GetFlag(FLAGS_cluster_mode); cluster_mode == "") {

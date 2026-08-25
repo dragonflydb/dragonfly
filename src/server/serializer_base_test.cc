@@ -4,6 +4,7 @@
 
 #include "server/serializer_base.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/random/distributions.h>
 #include <absl/random/random.h>
@@ -105,6 +106,8 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   struct Params {
     float delay_prob = 0.0;
     std::pair<unsigned, unsigned> delay_lat_us = {0, 100};
+    bool start_paused = false;
+    bool block_on_update = false;
   };
 
   TestDriver(Params params, DbSlice* slice, ExecutionState* cntx, CommandRegistry* reg)
@@ -145,6 +148,19 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
       std::lock_guard lk{stream_mu_};
       RecordSerialized(std::move(key));
     }
+  }
+
+  // Inject an offloaded entry on `bucket` whose tiered read resolves to an IO error.
+  void EnqueueErroringEntry(BucketIdentity bucket, std::string key) {
+    DelayedEntryHandler::deps_.Increment(bucket);
+    util::fb2::Future<io::Result<PrimeValue>> fut;
+    fut.Resolve(nonstd::make_unexpected(make_error_code(std::errc::io_error)));
+    DelayedEntryHandler::delayed_entries_.emplace(
+        bucket, std::make_unique<TieredDelayedEntry>(0, CompactKey{key}, std::move(fut), 0, 0));
+  }
+
+  bool AnyBlocked() {
+    return DelayedEntryHandler::deps_.HasAny();
   }
 
   void RecordSerialized(std::string key) {
@@ -198,6 +214,8 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   // subdriver for delayed entries
   TestDelayDriver delay_driver_;
 
+  util::fb2::Done on_update_entered_, on_update_release_, resume_traversal_;
+
   // Number of delayed entries currently enqueued.
   unsigned delayed_enqueued_ = 0;
 
@@ -206,6 +224,12 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
 };
 
 void TestDriver::Loop() {
+  if (params_.start_paused)
+    resume_traversal_.Wait();
+
+  // Covers cancellation exits; on the normal path the entries were already drained.
+  absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
+
   for (DbIndex snapshot_db_indx = 0; snapshot_db_indx < db_array_.size(); ++snapshot_db_indx) {
     if (!base_cntx_->IsRunning())
       return;
@@ -215,9 +239,8 @@ void TestDriver::Loop() {
 
     PrimeTable* pt = &db_array_[snapshot_db_indx]->prime;
     do {
-      if (!base_cntx_->IsRunning()) {
+      if (!base_cntx_->IsRunning())
         return;
-      }
 
       snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
         ProcessBucket(snapshot_db_indx, it, false);
@@ -263,6 +286,11 @@ void TestDriver::ConsumeJournalChange(const journal::JournalChangeItem& item) {
 
 unsigned TestDriver::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                            bool on_update) {
+  if (on_update && params_.block_on_update) {
+    on_update_entered_.Notify();
+    on_update_release_.Wait();
+  }
+
   unsigned serialized = 0;
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
@@ -300,9 +328,53 @@ class SerializerBaseTest : public BaseFamilyTest {
     pp_->at(0)->Await([this, cb] { cb(*driver_); });
   }
 
+  void CancelCntx() {
+    pp_->at(0)->Await([this] { cntx_.ReportCancelError(); });
+  }
+
+  // #1: two offloaded entries both fail to read; the error path must release both bucket latches.
+  bool DelayedErrorLeavesBlocked() {
+    return pp_->at(0)->Await([this] {
+      EmplaceDriverOnThread(false);
+      driver_->EnqueueErroringEntry(0x1000, "k1");
+      driver_->EnqueueErroringEntry(0x2000, "k2");
+      driver_->ProcessDelayedEntries(true, 0, &cntx_);
+      bool blocked = driver_->AnyBlocked();
+      driver_.reset();
+      return blocked;
+    });
+  }
+
+  // #2: a pending offloaded entry, then cancel; the traversal must discard it before returning.
+  bool CancelledTraversalLeaksDelayed() {
+    return pp_->at(0)->Await([this] {
+      EmplaceDriverOnThread(true);
+      driver_->EnqueueErroringEntry(0x1000, "k1");
+      cntx_.ReportCancelError();
+      driver_->Loop();
+      bool blocked = driver_->AnyBlocked();
+      driver_->UnregisterChangeListener();
+      driver_.reset();
+      return blocked;
+    });
+  }
+
   TestDriver::Params driver_params;
 
  private:
+  // Construct the driver (no snapshot fiber); optionally register it as a db_slice change listener.
+  void EmplaceDriverOnThread(bool register_cb) {
+    auto* reg = service_->mutable_registry();
+    boost::intrusive_ptr<Transaction> tx = new Transaction{reg->Find("SAVE")};
+    tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+    tx->ScheduleSingleHop([this, reg, register_cb](Transaction* t, EngineShard* es) {
+      driver_.emplace(driver_params, &t->GetDbSlice(es->shard_id()), &cntx_, reg);
+      if (register_cb)
+        driver_->RegisterChangeListener(false);
+      return OpStatus::OK;
+    });
+  }
+
   void StartOnThread() {
     auto* reg = service_->mutable_registry();
 
@@ -493,6 +565,42 @@ TEST_F(SerializerBaseTest, DelayedEvicted) {
 
   // Currently we write baselines before eviction
   EXPECT_EQ(baselines.size(), kKeys + 1);
+}
+
+// Cancelling mid-sync must not let UnregisterChangeListener observe a bucket latch still held
+// by an OnChange serialization suspended inside the Increment..Decrement window.
+TEST_F(SerializerBaseTest, UnregisterWaitsForInflightOnChange) {
+  driver_params = {.start_paused = true, .block_on_update = true};
+
+  Run({"DEBUG", "POPULATE", "100"});
+  Start();
+
+  auto writer = pp_->at(0)->LaunchFiber([&] { Run("W1", {"APPEND", "key:1", "D"}); });
+  Change([](TestDriver& d) { d.on_update_entered_.Wait(); });
+
+  CancelCntx();
+  Change([](TestDriver& d) { d.resume_traversal_.Notify(); });
+  Change([](TestDriver&) {
+    for (unsigned i = 0; i < 20; ++i)
+      util::ThisFiber::Yield();
+  });
+
+  Change([](TestDriver& d) { d.on_update_release_.Notify(); });
+
+  writer.Join();
+  Finish();
+}
+
+// A failed tiered read must not leak the other extracted entries' bucket latches.
+TEST_F(SerializerBaseTest, DelayedEntriesErrorReleasesLatches) {
+  Run({"DEBUG", "POPULATE", "1"});
+  EXPECT_FALSE(DelayedErrorLeavesBlocked());
+}
+
+// A cancelled traversal must discard pending offloaded entries, not leak their bucket latches.
+TEST_F(SerializerBaseTest, CancelledTraversalDiscardsDelayed) {
+  Run({"DEBUG", "POPULATE", "1"});
+  EXPECT_FALSE(CancelledTraversalLeaksDelayed());
 }
 
 }  // namespace dfly

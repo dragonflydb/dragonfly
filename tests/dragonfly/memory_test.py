@@ -170,8 +170,8 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
         with pytest.raises(redis.exceptions.ConnectionError):
             await client.ping()
 
-    # flush to free memory
-    await new_client.flushall()
+    # Wait for decommit
+    await new_client.execute_command("FLUSHALL", "SYNC")
 
     await rss_compare(False)
     await asyncio.sleep(0.5)  # Wait for another RSS heartbeat update in Dragonfly
