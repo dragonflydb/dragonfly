@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 #include "common/borrowed_string.h"
 #include "facade/facade_stats.h"
@@ -96,12 +97,16 @@ class SinkReplyBuilder {
   // `additional_bytes` hints how many bytes did not fit into the buffer to possibly grow it
   void Flush(size_t additional_bytes = 0);
 
-  // Starts an asynchronous write only when every iovec is backed by the builder's own buffer.
-  // The buffer and iovec array remain alive until the completion callback runs.
+  // Starts an asynchronous write when every iovec is retained by the builder.
+  // The payloads and iovec array remain alive until the completion callback runs.
   AsyncFlushResult TryAsyncFlush(io::AsyncResultCb cb);
 
   bool HasAsyncWrite() const {
     return async_write_ != nullptr;
+  }
+
+  void SetAsyncFlushEnabled(bool enabled) {
+    async_flush_enabled_ = enabled;
   }
 
   std::error_code GetError() const {
@@ -182,11 +187,18 @@ class SinkReplyBuilder {
 
     base::IoBuf buffer;
     absl::InlinedVector<iovec, 16> vecs;
+    std::string external_data;
+    std::vector<size_t> external_offsets;
     PendingPin pin;
     size_t total_size = 0;
   };
 
+  static constexpr size_t kNoExternalData = size_t(-1);
+
   bool AreAllVecsBuilderOwned() const;
+  bool AreAllVecsRetained() const;
+  bool IsBuilderOwnedVec(const iovec& vec) const;
+  void CopyExternalRefs();
 
   io::Sink* sink_;
   std::error_code ec_;
@@ -200,8 +212,11 @@ class SinkReplyBuilder {
   // external data (WriteRef). Validity is ensured by FinishScope that either flushes before ref
   // lifetime ends or copies refs to the buffer.
   absl::InlinedVector<iovec, 16> vecs_;
+  std::string external_data_;
+  std::vector<size_t> external_offsets_;
   size_t guaranteed_pieces_ = 0;   // length of prefix of vecs_ that are guaranteed to be pieces
   uint64_t send_time_cycles_ = 0;  // base::CycleClock::Now() at Send() entry, 0 when idle
+  bool async_flush_enabled_ = false;
   std::unique_ptr<AsyncWriteState> async_write_;
 };
 

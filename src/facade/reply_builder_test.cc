@@ -54,6 +54,44 @@ std::string_view GetErrorType(std::string_view err) {
   return err == kSyntaxErr ? kSyntaxErrType : err;
 }
 
+class DeferredAsyncSink : public io::Sink, public io::AsyncSink {
+ public:
+  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final {
+    size_t written = 0;
+    for (size_t i = 0; i < len; ++i) {
+      output_.append(static_cast<const char*>(v[i].iov_base), v[i].iov_len);
+      written += v[i].iov_len;
+    }
+    return written;
+  }
+
+  void AsyncWriteSome(const iovec* v, uint32_t len, io::AsyncProgressCb cb) final {
+    CHECK(!async_cb_);
+    vecs_.assign(v, v + len);
+    async_cb_ = std::move(cb);
+  }
+
+  void Complete() {
+    CHECK(async_cb_);
+    size_t written = 0;
+    for (const iovec& vec : vecs_) {
+      output_.append(static_cast<const char*>(vec.iov_base), vec.iov_len);
+      written += vec.iov_len;
+    }
+    vecs_.clear();
+    std::move(async_cb_)(written);
+  }
+
+  const std::string& output() const {
+    return output_;
+  }
+
+ private:
+  std::string output_;
+  std::vector<iovec> vecs_;
+  io::AsyncProgressCb async_cb_;
+};
+
 }  // namespace
 
 class RedisReplyBuilderTest : public testing::Test {
@@ -764,6 +802,30 @@ TEST_F(RedisReplyBuilderTest, BatchMode) {
                           absl::StrCat(kBulkStringStart, kInputArray[4].size()), kInputArray[4],
                           absl::StrCat(kBulkStringStart, kInputArray[5].size()), kInputArray[5],
                           absl::StrCat(kBulkStringStart, "0"), std::string_view{}));
+}
+
+TEST_F(RedisReplyBuilderTest, AsyncFlushRetainsLargeExternalPayload) {
+  DeferredAsyncSink sink;
+  RedisReplyBuilder builder(&sink);
+  builder.SetBatchMode(true);
+  builder.SetAsyncFlushEnabled(true);
+
+  std::string payload(2 * SinkReplyBuilder::kMaxBufferSize, 'a');
+  std::string expected = absl::StrCat("$", payload.size(), "\r\n", payload, "\r\n");
+  builder.SendBulkString(payload);
+
+  bool completed = false;
+  EXPECT_EQ(builder.TryAsyncFlush([&](std::error_code ec) {
+    EXPECT_FALSE(ec);
+    completed = true;
+  }),
+            SinkReplyBuilder::AsyncFlushResult::kStarted);
+
+  std::fill(payload.begin(), payload.end(), 'b');
+  sink.Complete();
+
+  EXPECT_TRUE(completed);
+  EXPECT_EQ(sink.output(), expected);
 }
 
 // Verify that in batch mode the buffer grows continuously to reduce flushes

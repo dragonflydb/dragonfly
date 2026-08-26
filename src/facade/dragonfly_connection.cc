@@ -1234,6 +1234,9 @@ void Connection::HandleRequests() {
         default:
           break;
       }
+      reply_builder_->SetAsyncFlushEnabled(
+          ioloop_v2_ && fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::IOURING &&
+          dynamic_cast<io::AsyncSink*>(socket_.get()) != nullptr);
       parsed_cmd_ = CreateParsedCommand();
       ConnectionFlow();
 

@@ -169,16 +169,54 @@ void SinkReplyBuilder::WriteRef(std::string_view str) {
 }
 
 bool SinkReplyBuilder::AreAllVecsBuilderOwned() const {
-  auto input = buffer_.InputBuffer();
-  uintptr_t begin = reinterpret_cast<uintptr_t>(input.data());
-  uintptr_t end = begin + input.size();
-
   for (const iovec& vec : vecs_) {
-    uintptr_t vec_begin = reinterpret_cast<uintptr_t>(vec.iov_base);
-    if (vec_begin < begin || vec_begin > end || vec.iov_len > end - vec_begin)
+    if (!IsBuilderOwnedVec(vec))
       return false;
   }
   return true;
+}
+
+bool SinkReplyBuilder::AreAllVecsRetained() const {
+  if (external_offsets_.size() != vecs_.size())
+    return AreAllVecsBuilderOwned();
+
+  for (size_t i = 0; i < vecs_.size(); ++i) {
+    if (!IsBuilderOwnedVec(vecs_[i]) && external_offsets_[i] == kNoExternalData)
+      return false;
+  }
+  return true;
+}
+
+bool SinkReplyBuilder::IsBuilderOwnedVec(const iovec& vec) const {
+  auto input = buffer_.InputBuffer();
+  uintptr_t begin = reinterpret_cast<uintptr_t>(input.data());
+  uintptr_t end = begin + input.size();
+  uintptr_t vec_begin = reinterpret_cast<uintptr_t>(vec.iov_base);
+  return vec_begin >= begin && vec_begin <= end && vec.iov_len <= end - vec_begin;
+}
+
+void SinkReplyBuilder::CopyExternalRefs() {
+  external_offsets_.resize(vecs_.size(), kNoExternalData);
+
+  size_t copy_size = 0;
+  for (size_t i = guaranteed_pieces_; i < vecs_.size(); ++i) {
+    if (!IsBuilderOwnedVec(vecs_[i]) && external_offsets_[i] == kNoExternalData)
+      copy_size += vecs_[i].iov_len;
+  }
+  if (copy_size == 0)
+    return;
+
+  external_data_.reserve(external_data_.size() + copy_size);
+  for (size_t i = guaranteed_pieces_; i < vecs_.size(); ++i) {
+    if (!IsBuilderOwnedVec(vecs_[i]) && external_offsets_[i] == kNoExternalData) {
+      external_offsets_[i] = external_data_.size();
+      external_data_.append(static_cast<const char*>(vecs_[i].iov_base), vecs_[i].iov_len);
+    }
+  }
+  for (size_t i = 0; i < vecs_.size(); ++i) {
+    if (external_offsets_[i] != kNoExternalData)
+      vecs_[i].iov_base = external_data_.data() + external_offsets_[i];
+  }
 }
 
 SinkReplyBuilder::AsyncFlushResult SinkReplyBuilder::TryAsyncFlush(io::AsyncResultCb cb) {
@@ -186,13 +224,23 @@ SinkReplyBuilder::AsyncFlushResult SinkReplyBuilder::TryAsyncFlush(io::AsyncResu
     return AsyncFlushResult::kNoData;
 
   auto* async_sink = dynamic_cast<io::AsyncSink*>(sink_);
-  if (async_sink == nullptr || async_write_ != nullptr || !AreAllVecsBuilderOwned())
+  if (async_sink == nullptr || async_write_ != nullptr || !AreAllVecsRetained())
     return AsyncFlushResult::kNotSupported;
 
   send_time_cycles_ = base::CycleClock::Now();
   async_write_ = std::make_unique<AsyncWriteState>(send_time_cycles_);
   async_write_->buffer = std::move(buffer_);
   async_write_->vecs = std::move(vecs_);
+  async_write_->external_data = std::move(external_data_);
+  async_write_->external_offsets = std::move(external_offsets_);
+  if (!async_write_->external_offsets.empty()) {
+    for (size_t i = 0; i < async_write_->vecs.size(); ++i) {
+      if (async_write_->external_offsets[i] != kNoExternalData) {
+        async_write_->vecs[i].iov_base =
+            async_write_->external_data.data() + async_write_->external_offsets[i];
+      }
+    }
+  }
   async_write_->total_size = total_size_;
   pending_list.push_back(async_write_->pin);
 
@@ -237,6 +285,8 @@ void SinkReplyBuilder::Flush(size_t additional_bytes) {
   total_size_ = 0;
   buffer_.Clear();
   vecs_.clear();
+  external_data_.clear();
+  external_offsets_.clear();
   guaranteed_pieces_ = 0;
 
   target_capacity = std::min(target_capacity, kMaxBufferSize);
@@ -287,7 +337,16 @@ void SinkReplyBuilder::FinishScope() {
   replies_recorded_++;
 
   size_t ref_bytes = total_size_ - buffer_.InputLen();
-  if (!batched_ || ref_bytes * 2 >= kMaxBufferSize /* copying isn't worth it */)
+  if (!batched_)
+    return Flush();
+
+  if (async_flush_enabled_ &&
+      (ref_bytes * 2 >= kMaxBufferSize || ref_bytes > buffer_.AppendLen())) {
+    CopyExternalRefs();
+    return;
+  }
+
+  if (ref_bytes * 2 >= kMaxBufferSize /* copying isn't worth it */)
     return Flush();
 
   // Check if we have enough space to copy all refs to buffer
