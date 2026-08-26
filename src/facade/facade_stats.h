@@ -135,6 +135,12 @@ struct ReplyStats {
 
   size_t io_write_cnt = 0;
   size_t io_write_bytes = 0;
+  uint64_t sync_write_attempts = 0;
+  uint64_t sync_partial_writes = 0;
+  uint64_t sync_would_block = 0;
+  uint64_t sync_write_wait_batches = 0;
+  uint64_t sync_bytes_before_first_wait = 0;
+  uint64_t sync_write_wait_cycles = 0;
   uint64_t borrowed_string_sent_cnt = 0;
 
   absl::flat_hash_map<std::string, uint64_t> err_count;

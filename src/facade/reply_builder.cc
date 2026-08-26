@@ -210,6 +210,14 @@ void SinkReplyBuilder::Send() {
   if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
     ec_ = ec;
 
+  io::WriteMetrics metrics = sink_->GetWriteMetrics();
+  reply_stats.sync_write_attempts += metrics.attempts;
+  reply_stats.sync_partial_writes += metrics.partial_writes;
+  reply_stats.sync_would_block += metrics.would_block;
+  reply_stats.sync_write_wait_batches += metrics.wait_batches;
+  reply_stats.sync_bytes_before_first_wait += metrics.bytes_before_first_wait;
+  reply_stats.sync_write_wait_cycles += metrics.wait_cycles;
+
   auto it = PendingList::s_iterator_to(pin);
   pending_list.erase(it);
 

@@ -647,6 +647,26 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
   APPEND_BODY("# TYPE dragonfly_net_output_send_total counter\n");
   APPEND_BODY("dragonfly_net_output_send_total ", reply.io_write_cnt, "\n");
 
+  APPEND_BODY("# TYPE dragonfly_sync_write_attempt_total counter\n");
+  APPEND_BODY("dragonfly_sync_write_attempt_total ", reply.sync_write_attempts, "\n");
+
+  APPEND_BODY("# TYPE dragonfly_sync_write_partial_total counter\n");
+  APPEND_BODY("dragonfly_sync_write_partial_total ", reply.sync_partial_writes, "\n");
+
+  APPEND_BODY("# TYPE dragonfly_sync_write_would_block_total counter\n");
+  APPEND_BODY("dragonfly_sync_write_would_block_total ", reply.sync_would_block, "\n");
+
+  APPEND_BODY("# TYPE dragonfly_sync_write_wait_batch_total counter\n");
+  APPEND_BODY("dragonfly_sync_write_wait_batch_total ", reply.sync_write_wait_batches, "\n");
+
+  APPEND_BODY("# TYPE dragonfly_sync_write_bytes_before_first_wait_total counter\n");
+  APPEND_BODY("dragonfly_sync_write_bytes_before_first_wait_total ",
+              reply.sync_bytes_before_first_wait, "\n");
+
+  APPEND_BODY("# TYPE dragonfly_sync_write_wait_seconds counter\n");
+  APPEND_BODY("dragonfly_sync_write_wait_seconds ",
+              base::CycleClock::ToUsec(reply.sync_write_wait_cycles) * 1e-6, "\n");
+
   APPEND_BODY("# TYPE dragonfly_net_read_yields_total counter\n");
   APPEND_BODY("dragonfly_net_read_yields_total ", conn.num_read_yields, "\n");
 

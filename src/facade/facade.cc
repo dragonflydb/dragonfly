@@ -74,9 +74,15 @@ ReplyStats::ReplyStats(ReplyStats&& other) noexcept {
 }
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 88u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 136u + kSanitizerOverhead);
   ADD(io_write_cnt);
   ADD(io_write_bytes);
+  ADD(sync_write_attempts);
+  ADD(sync_partial_writes);
+  ADD(sync_would_block);
+  ADD(sync_write_wait_batches);
+  ADD(sync_bytes_before_first_wait);
+  ADD(sync_write_wait_cycles);
 
   for (const auto& k_v : o.err_count) {
     err_count[k_v.first] += k_v.second;
@@ -94,7 +100,7 @@ ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
 #undef ADD
 
 ReplyStats& ReplyStats::operator=(const ReplyStats& o) {
-  static_assert(sizeof(ReplyStats) == 88u + kSanitizerOverhead);
+  static_assert(sizeof(ReplyStats) == 136u + kSanitizerOverhead);
 
   if (this == &o) {
     return *this;
@@ -103,6 +109,12 @@ ReplyStats& ReplyStats::operator=(const ReplyStats& o) {
   send_stats = o.send_stats;
   io_write_cnt = o.io_write_cnt;
   io_write_bytes = o.io_write_bytes;
+  sync_write_attempts = o.sync_write_attempts;
+  sync_partial_writes = o.sync_partial_writes;
+  sync_would_block = o.sync_would_block;
+  sync_write_wait_batches = o.sync_write_wait_batches;
+  sync_bytes_before_first_wait = o.sync_bytes_before_first_wait;
+  sync_write_wait_cycles = o.sync_write_wait_cycles;
   err_count = o.err_count;
   script_error_count = o.script_error_count;
   borrowed_string_sent_cnt = o.borrowed_string_sent_cnt;
