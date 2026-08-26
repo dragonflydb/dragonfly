@@ -1284,6 +1284,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
   // It's write because we add a NACK. Relevant to XReadGroup only
   const bool is_write_command = opts.group;
+  DCHECK(!is_write_command || opts.consumer);
   auto& db_slice = op_args.GetDbSlice();
   DbSlice::ItAndUpdater it;
   const CompactObj* cobj;
@@ -1493,6 +1494,11 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, con
 
     // We skip, group can be empty after waking up from a blocked read
     if (!sitem.group && opts.read_group) {
+      continue;
+    }
+
+    // We skip, consumers can be unresolved from FindOrAddGroupConsumers.
+    if (sitem.group && !sitem.consumer) {
       continue;
     }
 
@@ -1855,6 +1861,23 @@ streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_m
   }
 
   return consumer;
+}
+
+// Creates the group consumer for every requested key on this shard.
+void FindOrAddGroupConsumers(const OpArgs& op_args, const ShardArgs& keys, ReadOpts* opts) {
+  for (string_view key : keys) {
+    StreamIDsItem& sitem = opts->stream_ids.at(key);
+    if (!sitem.group || sitem.consumer)
+      continue;
+    auto res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STREAM);
+    if (!res)
+      continue;
+    StreamMemTracker tracker;
+    sitem.is_consumer_new = false;
+    sitem.consumer = FindOrAddConsumer(opts->consumer_name, sitem.group,
+                                       op_args.db_cntx.time_now_ms, &sitem.is_consumer_new);
+    tracker.UpdateStreamSize(res->it->second);
+  }
 }
 
 constexpr uint8_t kClaimForce = 1 << 0;
@@ -3260,7 +3283,9 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
     }
 
     if (is_single_shard) {
-      if (have_entries.load(memory_order_relaxed)) {
+      if (have_entries.load(memory_order_relaxed) && !err) {
+        if (read_group)
+          FindOrAddGroupConsumers(op_args, tx->GetShardArgs(es->shard_id()), &*opts);
         fastread_prefetched = OpRead(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()), *opts);
         if (read_group) {
           size_t index = 0;
@@ -3271,9 +3296,11 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
           }
         }
       } else {
-        // We didn't read any entries but we might added new consumers
-        for (auto key : tx->GetShardArgs(es->shard_id())) {
-          JournalConsumerCreationIfNeeded(op_args, *opts, key);
+        if (!err && read_group) {
+          FindOrAddGroupConsumers(op_args, tx->GetShardArgs(es->shard_id()), &*opts);
+          for (auto key : tx->GetShardArgs(es->shard_id())) {
+            JournalConsumerCreationIfNeeded(op_args, *opts, key);
+          }
         }
         return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
       }
@@ -3287,8 +3314,20 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(**err);
   }
 
-  if (!have_entries.load(memory_order_relaxed))
+  if (!have_entries.load(memory_order_relaxed)) {
+    // Cross-shard, create consumers before blocking.
+    if (read_group && !is_single_shard) {
+      auto register_cb = [&](Transaction* t, EngineShard* shard) {
+        auto op_args = t->GetOpArgs(shard);
+        FindOrAddGroupConsumers(op_args, t->GetShardArgs(shard->shard_id()), &*opts);
+        for (auto key : t->GetShardArgs(shard->shard_id()))
+          JournalConsumerCreationIfNeeded(op_args, *opts, key);
+        return OpStatus::OK;
+      };
+      tx->Execute(register_cb, false);
+    }
     return XReadBlock(&*opts, tx, cmd_cntx->rb(), cmd_cntx->server_conn_cntx());
+  }
 
   vector<vector<RecordVec>> xread_resp;
   if (is_single_shard && have_entries.load(memory_order_relaxed)) {
@@ -3298,6 +3337,9 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
     auto read_cb = [&](Transaction* t, EngineShard* shard) {
       ShardId sid = shard->shard_id();
       auto op_args = tx->GetOpArgs(shard);
+      if (read_group) {
+        FindOrAddGroupConsumers(op_args, t->GetShardArgs(sid), &*opts);
+      }
       xread_resp[sid] = OpRead(op_args, t->GetShardArgs(sid), *opts);
       if (read_group) {
         size_t index = 0;
@@ -3993,15 +4035,9 @@ void CmdXRevRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   XRangeGeneric(key, end, start, parser.UnparsedArgs(), true, cmd_cntx);
 }
 
-// If opts.read_group is true then this is a WRITE command. We don't however journal the consumer
-// creation, only the side effects later on from the scheduled callbacks.
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
                                               ReadOpts* opts) {
-  const bool is_write_command = opts->read_group;
   auto& db_slice = op_args.GetDbSlice();
-
-  DbSlice::ItAndUpdater it;
-  const CompactObj* cobj;
 
   auto error = [&](auto res_it) -> variant<bool, facade::ErrorReply> {
     if (res_it.status() == OpStatus::WRONG_TYPE)
@@ -4012,18 +4048,11 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     return false;
   };
 
-  if (is_write_command) {
-    auto res = db_slice.FindMutable(op_args.db_cntx, skey, OBJ_STREAM);
-    if (!res)
-      return error(std::move(res));
-    it = std::move(*res);
-    cobj = &it.it->second;
-  } else {
-    auto res = db_slice.FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
-    if (!res)
-      return error(res);
-    cobj = &(*res)->second;
-  }
+  auto res = db_slice.FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
+  if (!res)
+    return error(res);
+
+  const CompactObj* cobj = &(*res)->second;
 
   stream* s = GetReadOnlyStream(*cobj);
 
@@ -4037,23 +4066,17 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   // Check requested
   auto& requested_sitem = opts->stream_ids.at(skey);
 
-  // Look up group consumer if needed
-  streamCG* group = nullptr;
-  streamConsumer* consumer = nullptr;
-  if (is_write_command) {
-    group = StreamLookupCG(s, WrapSds(opts->group_name));
+  // Look up the group, but not the consumer: consumer creation is a mutation and must wait until
+  // the caller knows every requested stream is valid.
+  if (opts->read_group) {
+    streamCG* group = StreamLookupCG(s, WrapSds(opts->group_name));
     if (!group)
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
-    StreamMemTracker tracker;
-    requested_sitem.is_consumer_new = false;
-    consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms,
-                                 &requested_sitem.is_consumer_new);
-    tracker.UpdateStreamSize(it.it->second);
-
     requested_sitem.group = group;
-    requested_sitem.consumer = consumer;
+    // Consumer create needs to be done after all streams have been validated.
+    requested_sitem.consumer = nullptr;
 
     // If '>' is not provided, consumer PEL is used. So don't need to block.
     if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
