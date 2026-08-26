@@ -672,6 +672,9 @@ async def test_replica_reconnections_after_network_disconnect(
         await assert_replica_reconnections(replica, initial_reconnects_count)
 
 
+@pytest.mark.skip(
+    reason="Has been failing in CI for a long time. See https://github.com/dragonflydb/dragonfly/issues/5662."
+)
 @pytest.mark.debug_only
 @dfly_args({"proactor_threads": 2})
 async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
