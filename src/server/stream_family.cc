@@ -2331,7 +2331,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
 
 struct PendingOpts {
   string_view group_name;
-  string_view consumer_name;
+  std::optional<string_view> consumer_name;
   ParsedStreamId start;
   ParsedStreamId end;
   int64_t min_idle_time = 0;
@@ -2446,8 +2446,10 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   RETURN_ON_BAD_STATUS(cgroup_res);
 
   streamConsumer* consumer = nullptr;
-  if (!opts.consumer_name.empty()) {
-    consumer = StreamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name));
+  if (opts.consumer_name) {
+    consumer = StreamLookupConsumer(cgroup_res->cg, WrapSds(*opts.consumer_name));
+    if (!consumer)
+      return PendingResult{PendingExtendedResultList{}};  // an unknown consumer owns nothing
   }
 
   PendingResult result;
