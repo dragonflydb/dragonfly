@@ -52,6 +52,7 @@ extern "C" {
 #include "io/proc_reader.h"
 #include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/jwt_validator.h"
 #include "server/acl/user_registry.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -2040,7 +2041,23 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
                           std::string_view password) {
   const auto* registry = ServerState::tlocal()->user_registry;
   CHECK(registry);
-  const bool is_authorized = registry->AuthUser(username, password);
+
+  bool is_authorized = false;
+  std::string jwt_username;
+  auto auth_expires_at = std::chrono::steady_clock::time_point::max();
+  if (acl::JwtValidator::IsEnabled()) {
+    acl::JwtValidator jwt;
+    auto claims = jwt.Validate(password);
+    if (claims) {
+      jwt_username = std::move(claims->username);
+      username = jwt_username;
+      is_authorized = registry->IsUserActive(username);
+      auth_expires_at = claims->expires_at;
+    }
+  } else {
+    is_authorized = registry->AuthUser(username, password);
+  }
+
   if (is_authorized) {
     cntx->authed_username = username;
     auto cred = registry->GetCredentials(username);
@@ -2049,6 +2066,7 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
     cntx->pub_sub = std::move(cred.pub_sub);
     cntx->ns = &namespaces->GetOrInsert(cred.ns);
     cntx->authenticated = true;
+    cntx->auth_expires_at = auth_expires_at;
     cntx->acl_db_idx = cred.db;
     if (cred.db == std::numeric_limits<size_t>::max()) {
       cntx->conn_state.db_index = 0;

@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <cassert>
+#include <chrono>
 
 #include "facade/conn_context.h"
 #include "facade/parsed_command.h"
@@ -368,6 +369,10 @@ class ConnectionContext : public facade::ConnectionContext {
 
   // Username
   std::string authed_username{"default"};
+
+  // Point-in-time expiration of this connection's JWT auth; max() means never expires.
+  std::chrono::steady_clock::time_point auth_expires_at =
+      std::chrono::steady_clock::time_point::max();
 
   // Each entry in the list is a bitfield representing a specific command family,
   // where each bit corresponds to an individual command within that family.
