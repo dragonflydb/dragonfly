@@ -152,6 +152,39 @@ if(DF_MINIMAL_DEBUG_INFO AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_options(-g1)
 endif()
 
+# Optional Tracy profiler client. Compile-time gated so it is zero overhead by default (WITH_TRACY
+# OFF). When ON we (1) force-enable the Tracy client options, (2) globally define the macros our
+# instrumentation guards on, and (3) fetch + build the client. On-demand mode means an enabled
+# binary only starts capturing once a Tracy viewer/capture connects (the runtime on/off switch).
+option(WITH_TRACY "Enable the Tracy profiler client (on-demand)" OFF)
+if (WITH_TRACY)
+  message(STATUS "Tracy profiler enabled (on-demand). Connect the Tracy viewer to start capture.")
+  set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
+  set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
+  set(TRACY_FIBERS ON CACHE BOOL "" FORCE)
+
+  # Force the client macros on for EVERY translation unit (dragonfly + the helio submodule), so the
+  # guards activate regardless of how INTERFACE compile-defs propagate across helio's custom
+  # cxx_link / submodule target boundary:
+  #  - TRACY_ENABLE: activates the app zones in facade/tracy_support.h (and the client itself).
+  #  - TRACY_FIBERS: activates the per-fiber instrumentation in
+  #    helio/util/fibers/detail/fiber_interface.cc, whose guard is
+  #    `#if defined(TRACY_ENABLE) && defined(TRACY_FIBERS)`. Without this the fiber lanes stay off.
+  # NOTE: WITH_TRACY is a CMake option only - no source #ifdefs on it - so we do NOT define it as a
+  # preprocessor macro. Symbol resolution still comes from linking Tracy::TracyClient to dfly_facade
+  # and fibers2 (see the respective CMakeLists).
+  add_compile_definitions(TRACY_ENABLE TRACY_FIBERS)
+
+  FetchContent_Declare(
+    tracy
+    GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+    GIT_TAG v0.11.1
+    GIT_SHALLOW TRUE
+    GIT_PROGRESS TRUE
+  )
+  FetchContent_MakeAvailable(tracy)
+endif()
+
 include_directories(src)
 include_directories(helio)
 

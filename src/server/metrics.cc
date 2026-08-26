@@ -322,6 +322,13 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   AppendMetricWithoutLabels("proactor_parse_total",
                             "V2 OnRecv parses that enqueued at least one command",
                             conn_stats.proactor_parse, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_idle_parks_total",
+                            "V2 connection fiber idle-await parks (went to sleep)",
+                            conn_stats.pipeline_idle_parks, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels(
+      "pipeline_reply_wait_parks_total",
+      "V2 idle-await parks while a dispatched command reply was still pending (coroutine window)",
+      conn_stats.pipeline_reply_wait_parks, MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("shared_buf_overflow_copies_total", "Shared V2 overflow copies",
                             conn_stats.shared_buf_overflow_copies, MetricType::COUNTER,
                             &resp->body());
@@ -782,7 +789,7 @@ void Metrics::Merge(const Metrics& src) {
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
                              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+                             184,  // scalar fields (20 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
   // Per-db stats / events / small_string_bytes are merged element-wise.
@@ -852,7 +859,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
                              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
                              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
                              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+                             184,  // scalar fields (20 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
   ServerState* ss = ServerState::tlocal();
