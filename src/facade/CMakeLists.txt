@@ -15,6 +15,13 @@ endif()
 cxx_link(dfly_facade dfly_parser_lib http_server_lib fibers2
          ${TLS_LIB} TRDP::mimalloc2 TRDP::dconv redis_lib)
 
+if (WITH_TRACY)
+  # Plain signature to match cxx_link's target_link_libraries (CMake forbids mixing plain and
+  # keyword forms on one target). This propagates Tracy's TRACY_ENABLE define + include dirs to
+  # dfly_facade and its consumers, activating facade/tracy_support.h wherever it is included.
+  target_link_libraries(dfly_facade Tracy::TracyClient)
+endif()
+
 add_library(facade_test facade_test.cc resp_expr_test_utils.cc)
 cxx_link(facade_test dfly_facade gtest_main_ext)
 
