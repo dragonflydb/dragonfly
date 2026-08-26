@@ -1301,6 +1301,10 @@ TEST_F(StreamFamilyTest, XPending) {
                   RespArray(ElementsAre("1-1", "alice", ArgType(RespExpr::INT64), IntArg(1))),
                   RespArray(ElementsAre("1-2", "alice", ArgType(RespExpr::INT64), IntArg(1))))));
 
+  // An unknown consumer owns nothing: empty, not the whole group PEL.
+  EXPECT_THAT(Run({"xpending", "foo", "group", "-", "+", "10", "nobody"}), ArrLen(0));
+  EXPECT_THAT(Run({"xpending", "foo", "group", "-", "+", "10", ""}), ArrLen(0));
+
   // only return a single entry
   resp = Run({"xpending", "foo", "group", "-", "+", "1"});
   EXPECT_THAT(resp.GetVec()[0].GetVec(),

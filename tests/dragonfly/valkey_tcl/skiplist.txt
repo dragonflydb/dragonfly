@@ -65,11 +65,6 @@ XGROUP DESTROY should unblock XREADGROUP with -NOGROUP
 # --- XCLAIM with trimming: needs `config set stream-node-max-entries` (two tests share this name) ---
 XCLAIM with trimming
 
-# --- XPENDING ignores the <consumer> filter argument ---
-# `XPENDING key group - + 10 consumer2` returns other consumers' entries instead of an
-# empty array (live-verified), so the pre-claim asserts fail.
-XCLAIM can claim PEL items from another consumer
-
 # --- Error-message text differs from Valkey (assert_error exact-match) ---
 XREAD and XREADGROUP against wrong parameter
 XAUTOCLAIM COUNT must be > 0
