@@ -876,7 +876,10 @@ void QList::Replace(Iterator it, std::string_view elem) {
       zfree(node->entry);
       uint8_t* new_entry = (uint8_t*)zmalloc(sz);
       memcpy(new_entry, elem.data(), sz);
-      malloc_size_ += NodeSetEntry(node, new_entry);
+      // Plain nodes hold raw bytes; size is the value length, not lpBytes() of a listpack header.
+      malloc_size_ += ssize_t(sz) - ssize_t(node->sz);
+      node->entry = new_entry;
+      node->sz = sz;
       CoolOff(node, node_id);
     } else {
       Insert(it, elem, AFTER);

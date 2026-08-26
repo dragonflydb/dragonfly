@@ -582,6 +582,14 @@ TEST_F(ListFamilyTest, Lset) {
   ASSERT_EQ(Run({"rpop", kKey1}), "foo");
   Run({"rpush", kKey2, "a"});
   ASSERT_THAT(Run({"lset", kKey2, "1", "foo"}), ErrArg("index out of range"));
+
+  // LSET of a large (plain-node) element over another large element must not corrupt the node.
+  string big_a(9000, 'a'), big_b(9000, 'b');
+  Run({"rpush", kKey3, big_a});
+  ASSERT_EQ(Run({"lset", kKey3, "0", big_b}), "OK");
+  EXPECT_EQ(Run({"lindex", kKey3, "0"}), big_b);
+  Run({"debug", "reload"});
+  EXPECT_EQ(Run({"lindex", kKey3, "0"}), big_b);
 }
 
 TEST_F(ListFamilyTest, LPop) {
