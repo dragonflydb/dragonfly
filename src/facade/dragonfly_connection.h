@@ -191,6 +191,7 @@ class Connection : public util::Connection {
 
   // Flushes pending replies and returns the reply builder's error code (empty on success).
   std::error_code FlushReplies();
+  void OnAsyncReplyWrite(std::error_code ec);
 
   // Manually shutdown self.
   void ShutdownSelfBlocking();
@@ -700,6 +701,7 @@ class Connection : public util::Connection {
   std::error_code io_ec_;
   util::fb2::EventCount io_event_;
   std::optional<WaitEvent> current_wait_;
+  bool async_reply_write_completed_ = false;
 
   // - V2 only: used to store checkpoints (holding a BlockingCounter) whose bc->Dec() was deferred
   // because async commands were still in-flight when the checkpoint was processed.

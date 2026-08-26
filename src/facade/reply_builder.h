@@ -6,6 +6,7 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <boost/intrusive/list.hpp>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -38,6 +39,8 @@ class SinkReplyBuilder {
  public:
   constexpr static size_t kMaxInlineSize = 32;
   constexpr static size_t kMaxBufferSize = 8192;
+
+  enum class AsyncFlushResult : uint8_t { kNoData, kStarted, kNotSupported };
 
   struct PendingPin : public boost::intrusive::list_base_hook<
                           ::boost::intrusive::link_mode<::boost::intrusive::normal_link>> {
@@ -92,6 +95,14 @@ class SinkReplyBuilder {
   // Send all accumulated data and reset to clear state
   // `additional_bytes` hints how many bytes did not fit into the buffer to possibly grow it
   void Flush(size_t additional_bytes = 0);
+
+  // Starts an asynchronous write only when every iovec is backed by the builder's own buffer.
+  // The buffer and iovec array remain alive until the completion callback runs.
+  AsyncFlushResult TryAsyncFlush(io::AsyncResultCb cb);
+
+  bool HasAsyncWrite() const {
+    return async_write_ != nullptr;
+  }
 
   std::error_code GetError() const {
     return ec_;
@@ -165,6 +176,18 @@ class SinkReplyBuilder {
   std::string last_error_;
 
  private:
+  struct AsyncWriteState {
+    explicit AsyncWriteState(uint64_t start_cycles) : pin(start_cycles) {
+    }
+
+    base::IoBuf buffer;
+    absl::InlinedVector<iovec, 16> vecs;
+    PendingPin pin;
+    size_t total_size = 0;
+  };
+
+  bool AreAllVecsBuilderOwned() const;
+
   io::Sink* sink_;
   std::error_code ec_;
 
@@ -179,6 +202,7 @@ class SinkReplyBuilder {
   absl::InlinedVector<iovec, 16> vecs_;
   size_t guaranteed_pieces_ = 0;   // length of prefix of vecs_ that are guaranteed to be pieces
   uint64_t send_time_cycles_ = 0;  // base::CycleClock::Now() at Send() entry, 0 when idle
+  std::unique_ptr<AsyncWriteState> async_write_;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {

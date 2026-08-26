@@ -1259,8 +1259,26 @@ unsigned Connection::GetSendWaitTimeSec() const {
 
 std::error_code Connection::FlushReplies() {  // NOLINT must not be const due to flush side effect
   DCHECK(reply_builder_);
+
+  if (ioloop_v2_ && fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::IOURING) {
+    if (reply_builder_->HasAsyncWrite())
+      return {};
+
+    auto result =
+        reply_builder_->TryAsyncFlush([this](std::error_code ec) { OnAsyncReplyWrite(ec); });
+    if (result != SinkReplyBuilder::AsyncFlushResult::kNotSupported)
+      return {};
+  }
+
   reply_builder_->Flush();
   return reply_builder_->GetError();
+}
+
+void Connection::OnAsyncReplyWrite(std::error_code ec) {
+  if (ec)
+    io_ec_ = ec;
+  async_reply_write_completed_ = true;
+  io_event_.notify();
 }
 
 std::string FormatClientInfo(const ClientInfo& ci) {
@@ -4124,7 +4142,7 @@ bool Connection::HasControlEvent() const {
   // A callback parse error must wake the V2 fiber even if the callback did not read more input.
   // So we must include proactor_parse_error_.
   return (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
-         proactor_parse_error_ || IsReadyToMigrate();
+         async_reply_write_completed_ || proactor_parse_error_ || IsReadyToMigrate();
 }
 
 bool Connection::ShouldWakeIdle() const {
@@ -4265,6 +4283,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   do {
     HandleMigrateRequest();
+
+    if (async_reply_write_completed_) {
+      async_reply_write_completed_ = false;
+      if (io_ec_)
+        return io_ec_;
+      if (auto ec = FlushReplies(); ec)
+        return ec;
+    }
 
     // Register completion for current head if its pending and we don't wait on current_wait_.
     if (HasInFlightCommands() && !current_wait_.has_value()) {

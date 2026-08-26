@@ -168,6 +168,60 @@ void SinkReplyBuilder::WriteRef(std::string_view str) {
   total_size_ += str.size();
 }
 
+bool SinkReplyBuilder::AreAllVecsBuilderOwned() const {
+  auto input = buffer_.InputBuffer();
+  uintptr_t begin = reinterpret_cast<uintptr_t>(input.data());
+  uintptr_t end = begin + input.size();
+
+  for (const iovec& vec : vecs_) {
+    uintptr_t vec_begin = reinterpret_cast<uintptr_t>(vec.iov_base);
+    if (vec_begin < begin || vec_begin > end || vec.iov_len > end - vec_begin)
+      return false;
+  }
+  return true;
+}
+
+SinkReplyBuilder::AsyncFlushResult SinkReplyBuilder::TryAsyncFlush(io::AsyncResultCb cb) {
+  if (vecs_.empty())
+    return AsyncFlushResult::kNoData;
+
+  auto* async_sink = dynamic_cast<io::AsyncSink*>(sink_);
+  if (async_sink == nullptr || async_write_ != nullptr || !AreAllVecsBuilderOwned())
+    return AsyncFlushResult::kNotSupported;
+
+  send_time_cycles_ = base::CycleClock::Now();
+  async_write_ = std::make_unique<AsyncWriteState>(send_time_cycles_);
+  async_write_->buffer = std::move(buffer_);
+  async_write_->vecs = std::move(vecs_);
+  async_write_->total_size = total_size_;
+  pending_list.push_back(async_write_->pin);
+
+  auto& reply_stats = tl_facade_stats->reply_stats;
+  reply_stats.io_write_cnt++;
+  reply_stats.io_write_bytes += async_write_->total_size;
+
+  total_size_ = 0;
+  guaranteed_pieces_ = 0;
+  buffer_ = base::IoBuf{};
+
+  async_sink->AsyncWrite(async_write_->vecs.data(), async_write_->vecs.size(),
+                         [this, cb = std::move(cb)](std::error_code ec) mutable {
+                           auto state = std::move(async_write_);
+                           auto it = PendingList::s_iterator_to(state->pin);
+                           pending_list.erase(it);
+
+                           uint64_t after_cycles = base::CycleClock::Now();
+                           auto& reply_stats = tl_facade_stats->reply_stats;
+                           reply_stats.send_stats.count++;
+                           reply_stats.send_stats.total_duration +=
+                               (after_cycles - state->pin.timestamp_cycles);
+                           send_time_cycles_ = 0;
+                           cb(ec);
+                         });
+
+  return AsyncFlushResult::kStarted;
+}
+
 void SinkReplyBuilder::Flush(size_t additional_bytes) {
   // Fast path: nothing buffered and no buffer resize requested.
   if (vecs_.empty() && (additional_bytes == 0))
