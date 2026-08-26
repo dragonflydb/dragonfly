@@ -4,6 +4,49 @@ on:
   schedule:
     - cron: "0 0/3 * * *"
   workflow_dispatch:
+    inputs:
+      # Manual trigger inputs: select and repeat regression test runs.
+      test-suites:
+        description: "Optional pytest filenames; see .github/REGRESSION-TESTS.md. Example: connection_test,eval_test"
+        required: false
+        default: ""
+        type: string
+      test-cases:
+        description: "Optional regex for pytest node IDs; see .github/REGRESSION-TESTS.md. Example: test_golang_asynq_script|test_shared_read_buffer_overflow_copy_metric"
+        required: false
+        default: ""
+        type: string
+      iterations:
+        description: "Optional pytest run count; see .github/REGRESSION-TESTS.md. Default: 1. Example: 12"
+        required: false
+        default: "1"
+        type: string
+      max-run-time:
+        description: "Optional test budget in minutes; see .github/REGRESSION-TESTS.md. Default: 360 (6 hours)"
+        required: false
+        default: ""
+        type: string
+      gtest-suites:
+        description: "Optional GoogleTest targets; see .github/REGRESSION-TESTS.md. Example: dfly_core_test,redis_parser_test"
+        required: false
+        default: ""
+        type: string
+      gtest-cases:
+        description: "Optional GoogleTest --gtest_filter value; see .github/REGRESSION-TESTS.md. Example: StringMapTest.*:DashTest.*"
+        required: false
+        default: ""
+        type: string
+      gtest-iterations:
+        description: "Optional GoogleTest run count; see .github/REGRESSION-TESTS.md. Default: 1. Example: 12"
+        required: false
+        default: "1"
+        type: string
+      continue-on-test-failure:
+        description: "Optional failure handling; see .github/REGRESSION-TESTS.md. true continues after failures"
+        required: false
+        default: false
+        type: boolean
+      # End manual trigger inputs.
 
 jobs:
   build:
@@ -35,6 +78,19 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+
+      - name: Validate manual regression inputs
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: .github/scripts/run-regression-tests-helper.sh validate
+        env:
+          ITERATIONS_INPUT: ${{ inputs.iterations || '1' }}
+          TEST_SUITES_INPUT: ${{ inputs.test-suites || '' }}
+          TEST_CASES_INPUT: ${{ inputs.test-cases || '' }}
+          GTEST_SUITES_INPUT: ${{ inputs.gtest-suites || '' }}
+          GTEST_ITERATIONS_INPUT: ${{ inputs.gtest-iterations || '' }}
+          MAX_RUN_TIME_INPUT: ${{ inputs.max-run-time || '' }}
+          CONTINUE_ON_TEST_FAILURE_INPUT: ${{ inputs.continue-on-test-failure || 'false' }}
 
       - name: Print environment info
         run: |
@@ -69,6 +125,14 @@ jobs:
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           build-folder-name: build
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
+          test-suites: ${{ inputs.test-suites || '' }}
+          test-cases: ${{ inputs.test-cases || '' }}
+          iterations: ${{ inputs.iterations || '1' }}
+          max-run-time: ${{ github.event_name == 'workflow_dispatch' && (inputs.max-run-time || '360') || '80' }}
+          gtest-suites: ${{ inputs.gtest-suites || '' }}
+          gtest-cases: ${{ inputs.gtest-cases || '' }}
+          gtest-iterations: ${{ inputs.gtest-iterations || '' }}
+          continue-on-test-failure: ${{ inputs.continue-on-test-failure || 'false' }}
           df-runtime-flags: enable_resp_io_loop_v2=${{ matrix.enable_resp_io_loop_v2 }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}

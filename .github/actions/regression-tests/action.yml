@@ -59,6 +59,48 @@ inputs:
     required: false
     type: string
     description: "Runtime flags to pass to the dragonfly process via --df, e.g. 'enable_resp_io_loop_v2=true'"
+  # Manual trigger inputs: select and repeat regression test runs.
+  test-suites:
+    required: false
+    default: ""
+    type: string
+    description: "Optional pytest filenames relative to tests/dragonfly; empty runs all suites"
+  test-cases:
+    required: false
+    default: ""
+    type: string
+    description: "Optional extended regular expression matched against collected pytest node IDs; empty runs all cases"
+  iterations:
+    required: false
+    default: "1"
+    type: string
+    description: "Optional number of times to run selected pytest tests; defaults to 1"
+  max-run-time:
+    required: false
+    default: "360"
+    type: string
+    description: "Maximum total test execution time in minutes; defaults to 360 and is limited by the GitHub Actions job timeout"
+  gtest-suites:
+    required: false
+    default: ""
+    type: string
+    description: "Optional GoogleTest target names; empty runs all suites under src/core, src/facade, and src/server"
+  gtest-cases:
+    required: false
+    default: ""
+    type: string
+    description: "Optional value forwarded to --gtest_filter; empty runs all GoogleTest cases"
+  gtest-iterations:
+    required: false
+    default: "1"
+    type: string
+    description: "Optional number of times to run selected GoogleTest suites; defaults to 1 when GoogleTests run"
+  continue-on-test-failure:
+    required: false
+    default: "false"
+    type: string
+    description: "When true, continue selected iterations after test failures and fail after all runs complete"
+  # End manual trigger inputs.
 
 runs:
   using: "composite"
@@ -113,7 +155,7 @@ runs:
         } >> "${GITHUB_ENV}"
 
     - name: Run S3 snapshot tests with MinIO
-      if: inputs.s3-bucket != ''
+      if: inputs.s3-bucket != '' && inputs.test-suites == '' && inputs.test-cases == '' && inputs.iterations == '1'
       shell: bash
       run: |
         echo "=== Running S3 snapshot tests with local MinIO ==="
@@ -126,76 +168,19 @@ runs:
 
     - name: Run PyTests
       id: main
+      if: inputs.test-suites != '' || inputs.test-cases != '' || inputs.iterations != '1' || (inputs.gtest-suites == '' && inputs.gtest-cases == '' && inputs.gtest-iterations == '1')
       shell: bash
-      run: |
-        ls -l ${GITHUB_WORKSPACE}/
-        cd ${GITHUB_WORKSPACE}/tests
-        echo "Current commit is ${{github.sha}}"
-        # used by PyTests
-        export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
-        export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
-        export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 # to crash on errors
-        export FILTER="${{inputs.filter}}"
-        JUNIT_DIR="${REGRESSION_JUNIT_DIR}"
-
-        # Runtime flags forwarded to the dragonfly process via --df.
-        # Globbing is disabled while splitting so values like vmodule=*=1 are preserved,
-        # and the flags are collected into an array to avoid re-splitting/globbing
-        # when expanded on the pytest command line.
-        DF_RUNTIME_ARGS=()
-        if [[ -n "${DF_RUNTIME_FLAGS_INPUT}" ]]; then
-          set -f # disables filename expansion (globbing)
-          for flag in ${DF_RUNTIME_FLAGS_INPUT}; do
-            DF_RUNTIME_ARGS+=(--df "$flag")
-          done
-          set +f
-        fi
-
-        # Exclude large tests unless explicitly requested
-        if [[ "$FILTER" == "large" ]]; then
-          : # keep as-is, run only large tests
-        elif [[ -n "$FILTER" ]]; then
-          FILTER="(not large) and ($FILTER)"
-        else
-          FILTER="not large"
-        fi
-
-        if [[ "${REGRESSION_JUNIT_KIND}" == 'epoll' ]]; then
-          FILTER="$FILTER and not exclude_epoll"
-          # Run only replication tests with epoll
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes \
-            --json-report --json-report-file=report.json \
-            --junitxml="${JUNIT_DIR}/pytest-${REGRESSION_JUNIT_KIND}.xml" \
-            dragonfly --df force_epoll=true "${DF_RUNTIME_ARGS[@]}" --log-cli-level=INFO || code=$?
-        else
-          # Run only replication tests with iouring
-          timeout 80m pytest -m "$FILTER" --durations=10 --timeout=300 --color=yes \
-            --json-report --json-report-file=report.json \
-            --junitxml="${JUNIT_DIR}/pytest-${REGRESSION_JUNIT_KIND}.xml" \
-            dragonfly "${DF_RUNTIME_ARGS[@]}" --log-cli-level=INFO || code=$?
-        fi
-
-        # timeout returns 124 if we exceeded the timeout duration
-        if [[ $code -eq 124 ]]; then
-          # Add an extra new line here because when tests timeout the first line below continues from the test failure name
-          echo "\n"
-          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
-          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 TESTS TIMEDOUT 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
-          echo "🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑 🛑"
-          # Copy the last log file because we timedout and pytest did not copy it over
-          # the /tmp/failed/ folder
-          cat /tmp/last_test_log_dir.txt | xargs -I {} mv {}/ /tmp/failed/
-          exit 1
-        fi
-
-        # when a test fails in pytest it returns 1 but there are other return codes as well so we just check if the code is non zero
-        if [[ $code -ne 0 ]]; then
-          exit 1
-        fi
+      run: "${GITHUB_WORKSPACE}/.github/scripts/run-regression-tests-helper.sh pytest"
       env:
-        # Pass the raw runtime-flags input through the environment so the value is never
-        # embedded directly in the shell script (avoids shell injection).
+        BUILD_FOLDER_NAME: ${{ inputs.build-folder-name }}
+        DFLY_EXECUTABLE: ${{ inputs.dfly-executable }}
+        TEST_FILTER: ${{ inputs.filter }}
         DF_RUNTIME_FLAGS_INPUT: ${{ inputs.df-runtime-flags }}
+        TEST_SUITES_INPUT: ${{ inputs.test-suites }}
+        TEST_CASES_INPUT: ${{ inputs.test-cases }}
+        ITERATIONS_INPUT: ${{ inputs.iterations }}
+        MAX_RUN_TIME_MINUTES: ${{ inputs.max-run-time }}
+        CONTINUE_ON_TEST_FAILURE_INPUT: ${{ inputs.continue-on-test-failure }}
         # Add environment variables to enable the S3 snapshot test.
         # AWS credentials: if inputs provided, use them; otherwise rely on workflow OIDC auth
         DRAGONFLY_S3_BUCKET: ${{ inputs.s3-bucket }}
@@ -206,6 +191,18 @@ runs:
         # Azure credentials for snapshot tests (optional)
         DRAGONFLY_AZURE_CONTAINER: ${{ inputs.azure-container }}
         AZURE_STORAGE_CONNECTION_STRING: ${{ inputs.azure-storage-connection-string }}
+
+    - name: Build and run GoogleTests
+      if: inputs.gtest-suites != '' || inputs.gtest-cases != '' || inputs.gtest-iterations != '1' || (inputs.test-suites == '' && inputs.test-cases == '' && inputs.iterations == '1')
+      shell: bash
+      run: "${GITHUB_WORKSPACE}/.github/scripts/run-regression-tests-helper.sh gtest"
+      env:
+        BUILD_FOLDER_NAME: ${{ inputs.build-folder-name }}
+        GTEST_SUITES_INPUT: ${{ inputs.gtest-suites }}
+        GTEST_CASES_INPUT: ${{ inputs.gtest-cases }}
+        GTEST_ITERATIONS_INPUT: ${{ inputs.gtest-iterations }}
+        MAX_RUN_TIME_MINUTES: ${{ inputs.max-run-time }}
+        CONTINUE_ON_TEST_FAILURE_INPUT: ${{ inputs.continue-on-test-failure }}
 
     - name: Upload regression JUnit results
       if: always()
