@@ -168,12 +168,12 @@ runs:
 
     - name: Run PyTests
       id: main
-      if: inputs.test-suites != '' || inputs.test-cases != '' || inputs.iterations != '1' || (inputs.gtest-suites == '' && inputs.gtest-cases == '' && inputs.gtest-iterations == '1')
+      if: always() && (inputs.test-suites != '' || inputs.test-cases != '' || inputs.iterations != '1' || (inputs.gtest-suites == '' && inputs.gtest-cases == '' && inputs.gtest-iterations == '1'))
       shell: bash
       run: "${GITHUB_WORKSPACE}/.github/scripts/run-regression-tests-helper.sh pytest"
       env:
         BUILD_FOLDER_NAME: ${{ inputs.build-folder-name }}
-        DFLY_EXECUTABLE: ${{ inputs.dfly-executable }}
+        REGRESSION_DFLY_EXECUTABLE: ${{ inputs.dfly-executable }}
         TEST_FILTER: ${{ inputs.filter }}
         DF_RUNTIME_FLAGS_INPUT: ${{ inputs.df-runtime-flags }}
         TEST_SUITES_INPUT: ${{ inputs.test-suites }}
@@ -193,7 +193,7 @@ runs:
         AZURE_STORAGE_CONNECTION_STRING: ${{ inputs.azure-storage-connection-string }}
 
     - name: Build and run GoogleTests
-      if: inputs.gtest-suites != '' || inputs.gtest-cases != '' || inputs.gtest-iterations != '1' || (inputs.test-suites == '' && inputs.test-cases == '' && inputs.iterations == '1')
+      if: always() && (inputs.gtest-suites != '' || inputs.gtest-cases != '' || inputs.gtest-iterations != '1' || (inputs.test-suites == '' && inputs.test-cases == '' && inputs.iterations == '1'))
       shell: bash
       run: "${GITHUB_WORKSPACE}/.github/scripts/run-regression-tests-helper.sh gtest"
       env:

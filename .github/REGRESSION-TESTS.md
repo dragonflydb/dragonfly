@@ -93,7 +93,8 @@ case names from both suites. There is currently no per-suite filter syntax.
 Python and GoogleTest selection are independent. Set Python inputs to run Python,
 GoogleTest inputs to run GoogleTest, or both sets of inputs to run both. When every
 selection input is left at its default, both full suites run once. Both iteration
-fields visibly default to `1` in the workflow form.
+fields visibly default to `1` in the workflow form. The two test steps are also
+independent after starting: a failure in one does not prevent the other from running.
 
 Python is selected by a non-empty `test-suites` or `test-cases` value, or by setting
 `iterations` to a value other than its default of `1`. GoogleTest is selected by a
@@ -157,6 +158,10 @@ run when its job or runner timeout expires.
 Both workflows fan out over their configured build matrix. Targeted inputs reduce
 test execution time, but each matrix job still builds the configured Dragonfly
 variant before running tests.
+
+Before each Python or GoogleTest iteration, the regression action prints a green
+iteration banner followed by the exact shell-escaped command it is about to run.
+Expand the `Run regression tests action` step in the job log to see these lines.
 
 ## Runner Capacity And Iterations
 

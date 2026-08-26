@@ -5,6 +5,16 @@
 # 2. Pytest execution for Python regression tests.
 # 3. GoogleTest execution for opt-in C++ test runs.
 
+PrintCommand() {
+  printf 'Command: '
+  printf '%q ' "$@"
+  printf '\n'
+}
+
+PrintIteration() {
+  printf '\033[32m=== %s iteration %s/%s ===\033[0m\n' "$1" "$2" "$3"
+}
+
 ValidateInputs() {
   ITERATIONS_INPUT=${ITERATIONS_INPUT:-1}
 
@@ -65,7 +75,7 @@ RunPytests() {
   cd "${GITHUB_WORKSPACE}/tests" || exit 2
   echo "Current commit is ${GITHUB_SHA}"
 
-  export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${BUILD_FOLDER_NAME}/${DFLY_EXECUTABLE}"
+  export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${BUILD_FOLDER_NAME}/${REGRESSION_DFLY_EXECUTABLE}"
   export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
   export UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
   export FILTER="${TEST_FILTER}"
@@ -123,7 +133,7 @@ RunPytests() {
   max_run_time_minutes=${MAX_RUN_TIME_MINUTES}
   deadline_seconds=$((SECONDS + max_run_time_minutes * 60))
   for iteration in $(seq 1 "${ITERATIONS_INPUT}"); do
-    echo "=== Regression test iteration ${iteration}/${ITERATIONS_INPUT} ==="
+    PrintIteration "Regression test" "${iteration}" "${ITERATIONS_INPUT}"
     junit_file="${REGRESSION_JUNIT_DIR}/pytest-${REGRESSION_JUNIT_KIND}-${iteration}.xml"
     remaining_seconds=$((deadline_seconds - SECONDS))
     if [[ "${remaining_seconds}" -le 0 ]]; then
@@ -132,14 +142,18 @@ RunPytests() {
     fi
     code=0
     if [[ "${REGRESSION_JUNIT_KIND}" == "epoll" ]]; then
-      timeout --foreground "${remaining_seconds}s" pytest -m "${FILTER}" --durations=10 --timeout=300 --color=yes --json-report \
-        --json-report-file=report.json --junitxml="${junit_file}" "${selected_tests[@]}" \
-        --df force_epoll=true "${df_runtime_args[@]}" --log-cli-level=INFO || code=$?
+      pytest_command=(timeout --foreground "${remaining_seconds}s" pytest -m "${FILTER}" --durations=10
+        --timeout=300 --color=yes --json-report --json-report-file=report.json
+        --junitxml="${junit_file}" "${selected_tests[@]}" --df force_epoll=true
+        "${df_runtime_args[@]}" --log-cli-level=INFO)
     else
-      timeout --foreground "${remaining_seconds}s" pytest -m "${FILTER}" --durations=10 --timeout=300 --color=yes --json-report \
-        --json-report-file=report.json --junitxml="${junit_file}" "${selected_tests[@]}" \
-        "${df_runtime_args[@]}" --log-cli-level=INFO || code=$?
+      pytest_command=(timeout --foreground "${remaining_seconds}s" pytest -m "${FILTER}" --durations=10
+        --timeout=300 --color=yes --json-report --json-report-file=report.json
+        --junitxml="${junit_file}" "${selected_tests[@]}" "${df_runtime_args[@]}"
+        --log-cli-level=INFO)
     fi
+    PrintCommand "${pytest_command[@]}"
+    "${pytest_command[@]}" || code=$?
 
     if [[ "${code}" -eq 124 ]]; then
       echo "Regression test time budget of ${max_run_time_minutes} minutes exhausted"
@@ -213,7 +227,7 @@ RunGtests() {
   max_run_time_minutes=${MAX_RUN_TIME_MINUTES}
   deadline_seconds=$((SECONDS + max_run_time_minutes * 60))
   for iteration in $(seq 1 "${GTEST_ITERATIONS_INPUT}"); do
-    echo "=== GoogleTest iteration ${iteration}/${GTEST_ITERATIONS_INPUT} ==="
+    PrintIteration "GoogleTest" "${iteration}" "${GTEST_ITERATIONS_INPUT}"
     for suite in "${selected_gtest_suites[@]}"; do
       remaining_seconds=$((deadline_seconds - SECONDS))
       if [[ "${remaining_seconds}" -le 0 ]]; then
@@ -232,7 +246,9 @@ RunGtests() {
         gtest_args+=("--gtest_filter=${GTEST_CASES_INPUT}")
       fi
       code=0
-      timeout --foreground "${remaining_seconds}s" "${binary_path}" "${gtest_args[@]}" || code=$?
+      gtest_command=(timeout --foreground "${remaining_seconds}s" "${binary_path}" "${gtest_args[@]}")
+      PrintCommand "${gtest_command[@]}"
+      "${gtest_command[@]}" || code=$?
       if [[ "${code}" -eq 124 ]]; then
         echo "GoogleTest time budget of ${max_run_time_minutes} minutes exhausted"
         exit 1
