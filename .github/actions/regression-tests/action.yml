@@ -75,11 +75,6 @@ inputs:
     default: "1"
     type: string
     description: "Optional number of times to run selected pytest tests; defaults to 1"
-  max-run-time:
-    required: false
-    default: "360"
-    type: string
-    description: "Maximum total test execution time in minutes; defaults to 360 and is limited by the GitHub Actions job timeout"
   gtest-suites:
     required: false
     default: ""
@@ -95,11 +90,16 @@ inputs:
     default: "1"
     type: string
     description: "Optional number of times to run selected GoogleTest suites; defaults to 1 when GoogleTests run"
+  max-run-time:
+    required: false
+    default: "360"
+    type: string
+    description: "Shared job budget in minutes for the build, Pytest, and GoogleTest runs; defaults to 360"
   continue-on-test-failure:
     required: false
     default: "false"
     type: string
-    description: "When true, continue selected iterations after test failures and fail after all runs complete"
+    description: "When true, both test families continue selected iterations after failures and fail after all runs complete"
   # End manual trigger inputs.
 
 runs:

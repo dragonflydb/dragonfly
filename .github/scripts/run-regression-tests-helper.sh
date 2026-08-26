@@ -15,6 +15,20 @@ PrintIteration() {
   printf '\033[32m=== %s iteration %s/%s ===\033[0m\n' "$1" "$2" "$3"
 }
 
+GetDeadlineSeconds() {
+  local max_run_time_minutes=$1
+
+  if [[ -n "${REGRESSION_DEADLINE_EPOCH:-}" ]]; then
+    printf '%s\n' "${REGRESSION_DEADLINE_EPOCH}"
+  else
+    printf '%s\n' "$(( $(date +%s) + max_run_time_minutes * 60 ))"
+  fi
+}
+
+PrintBudgetExhausted() {
+  echo "Shared regression time budget of $1 minutes exhausted"
+}
+
 ValidateInputs() {
   ITERATIONS_INPUT=${ITERATIONS_INPUT:-1}
 
@@ -31,6 +45,11 @@ ValidateInputs() {
 
   if [[ -n "${MAX_RUN_TIME_INPUT}" ]] && ! [[ "${MAX_RUN_TIME_INPUT}" =~ ^[1-9][0-9]*$ ]]; then
     echo "max-run-time must be a positive integer, got: ${MAX_RUN_TIME_INPUT}"
+    exit 2
+  fi
+
+  if [[ -n "${MAX_RUN_TIME_INPUT}" ]] && ((10#${MAX_RUN_TIME_INPUT} > 360)); then
+    echo "max-run-time must be between 1 and 360 minutes, got: ${MAX_RUN_TIME_INPUT}"
     exit 2
   fi
 
@@ -70,6 +89,8 @@ ValidateInputs() {
 
 RunPytests() {
   MAX_RUN_TIME_INPUT="${MAX_RUN_TIME_MINUTES}" ValidateInputs
+  max_run_time_minutes=${MAX_RUN_TIME_MINUTES}
+  deadline_seconds=$(GetDeadlineSeconds "${max_run_time_minutes}")
 
   ls -l "${GITHUB_WORKSPACE}/"
   cd "${GITHUB_WORKSPACE}/tests" || exit 2
@@ -130,14 +151,12 @@ RunPytests() {
   fi
 
   pytest_failed=false
-  max_run_time_minutes=${MAX_RUN_TIME_MINUTES}
-  deadline_seconds=$((SECONDS + max_run_time_minutes * 60))
   for iteration in $(seq 1 "${ITERATIONS_INPUT}"); do
     PrintIteration "Regression test" "${iteration}" "${ITERATIONS_INPUT}"
     junit_file="${REGRESSION_JUNIT_DIR}/pytest-${REGRESSION_JUNIT_KIND}-${iteration}.xml"
-    remaining_seconds=$((deadline_seconds - SECONDS))
+    remaining_seconds=$((deadline_seconds - $(date +%s)))
     if [[ "${remaining_seconds}" -le 0 ]]; then
-      echo "Regression test time budget of ${max_run_time_minutes} minutes exhausted"
+      PrintBudgetExhausted "${max_run_time_minutes}"
       exit 124
     fi
     code=0
@@ -156,7 +175,7 @@ RunPytests() {
     "${pytest_command[@]}" || code=$?
 
     if [[ "${code}" -eq 124 ]]; then
-      echo "Regression test time budget of ${max_run_time_minutes} minutes exhausted"
+      PrintBudgetExhausted "${max_run_time_minutes}"
       if [[ -f /tmp/last_test_log_dir.txt ]]; then
         while IFS= read -r log_dir; do
           if [[ -d "${log_dir}" ]]; then
@@ -190,6 +209,8 @@ RunGtests() {
     GTEST_ITERATIONS_INPUT=1
   fi
   MAX_RUN_TIME_INPUT="${MAX_RUN_TIME_MINUTES}" ValidateInputs
+  max_run_time_minutes=${MAX_RUN_TIME_MINUTES}
+  deadline_seconds=$(GetDeadlineSeconds "${max_run_time_minutes}")
 
   cd "${GITHUB_WORKSPACE}" || exit 2
   mapfile -t available_gtest_suites < <(
@@ -221,17 +242,30 @@ RunGtests() {
 
   echo "Building GoogleTest suites: ${selected_gtest_suites[*]}"
   cd "${GITHUB_WORKSPACE}/${BUILD_FOLDER_NAME}" || exit 2
-  ninja "${selected_gtest_suites[@]}"
+  remaining_seconds=$((deadline_seconds - $(date +%s)))
+  if [[ "${remaining_seconds}" -le 0 ]]; then
+    PrintBudgetExhausted "${max_run_time_minutes}"
+    exit 124
+  fi
+  gtest_build_code=0
+  gtest_build_command=(timeout --foreground "${remaining_seconds}s" ninja "${selected_gtest_suites[@]}")
+  PrintCommand "${gtest_build_command[@]}"
+  "${gtest_build_command[@]}" || gtest_build_code=$?
+  if [[ "${gtest_build_code}" -eq 124 ]]; then
+    PrintBudgetExhausted "${max_run_time_minutes}"
+    exit 1
+  fi
+  if [[ "${gtest_build_code}" -ne 0 ]]; then
+    exit "${gtest_build_code}"
+  fi
 
   gtest_failed=false
-  max_run_time_minutes=${MAX_RUN_TIME_MINUTES}
-  deadline_seconds=$((SECONDS + max_run_time_minutes * 60))
   for iteration in $(seq 1 "${GTEST_ITERATIONS_INPUT}"); do
     PrintIteration "GoogleTest" "${iteration}" "${GTEST_ITERATIONS_INPUT}"
     for suite in "${selected_gtest_suites[@]}"; do
-      remaining_seconds=$((deadline_seconds - SECONDS))
+      remaining_seconds=$((deadline_seconds - $(date +%s)))
       if [[ "${remaining_seconds}" -le 0 ]]; then
-        echo "GoogleTest time budget of ${max_run_time_minutes} minutes exhausted"
+        PrintBudgetExhausted "${max_run_time_minutes}"
         exit 124
       fi
       binary_path=$(find "${GITHUB_WORKSPACE}/${BUILD_FOLDER_NAME}" -type f -name "${suite}" \
@@ -248,9 +282,17 @@ RunGtests() {
       code=0
       gtest_command=(timeout --foreground "${remaining_seconds}s" "${binary_path}" "${gtest_args[@]}")
       PrintCommand "${gtest_command[@]}"
-      "${gtest_command[@]}" || code=$?
+      gtest_output_file=$(mktemp)
+      "${gtest_command[@]}" >"${gtest_output_file}" 2>&1 || code=$?
+      cat "${gtest_output_file}"
+      if [[ "${code}" -eq 0 ]] && \
+        grep -Eq 'filter ".*" did not match any test; no tests were run' "${gtest_output_file}"; then
+        echo "GoogleTest filter matched no tests: ${GTEST_CASES_INPUT}"
+        code=1
+      fi
+      rm -f "${gtest_output_file}"
       if [[ "${code}" -eq 124 ]]; then
-        echo "GoogleTest time budget of ${max_run_time_minutes} minutes exhausted"
+        PrintBudgetExhausted "${max_run_time_minutes}"
         exit 1
       fi
       if [[ "${code}" -eq 0 ]]; then

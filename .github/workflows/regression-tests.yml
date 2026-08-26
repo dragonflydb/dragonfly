@@ -5,48 +5,51 @@ on:
     - cron: "0 0/3 * * *"
   workflow_dispatch:
     inputs:
-      # Manual trigger inputs: select and repeat regression test runs.
+      # Pytest inputs.
       test-suites:
-        description: "Optional pytest filenames; see .github/REGRESSION-TESTS.md. Example: connection_test,eval_test"
+        description: "Pytest: optional filenames; see .github/REGRESSION-TESTS.md. Example: connection_test,eval_test"
         required: false
         default: ""
         type: string
       test-cases:
-        description: "Optional regex for pytest node IDs; see .github/REGRESSION-TESTS.md. Example: test_golang_asynq_script|test_shared_read_buffer_overflow_copy_metric"
+        description: "Pytest: optional node ID regex; see .github/REGRESSION-TESTS.md. Example: test_golang_asynq_script|test_shared_read_buffer_overflow_copy_metric"
         required: false
         default: ""
         type: string
       iterations:
-        description: "Optional pytest run count; see .github/REGRESSION-TESTS.md. Default: 1. Example: 12"
+        description: "Pytest: optional run count; see .github/REGRESSION-TESTS.md. Default: 1. Example: 12"
         required: false
         default: "1"
         type: string
-      max-run-time:
-        description: "Optional test budget in minutes; see .github/REGRESSION-TESTS.md. Default: 360 (6 hours)"
-        required: false
-        default: ""
-        type: string
+
+      # GoogleTest inputs.
       gtest-suites:
-        description: "Optional GoogleTest targets; see .github/REGRESSION-TESTS.md. Example: dfly_core_test,redis_parser_test"
+        description: "GoogleTest: optional targets; see .github/REGRESSION-TESTS.md. Example: dfly_core_test,redis_parser_test"
         required: false
         default: ""
         type: string
       gtest-cases:
-        description: "Optional GoogleTest --gtest_filter value; see .github/REGRESSION-TESTS.md. Example: StringMapTest.*:DashTest.*"
+        description: "GoogleTest: optional --gtest_filter; see .github/REGRESSION-TESTS.md. Example: StringMapTest.*:DashTest.*"
         required: false
         default: ""
         type: string
       gtest-iterations:
-        description: "Optional GoogleTest run count; see .github/REGRESSION-TESTS.md. Default: 1. Example: 12"
+        description: "GoogleTest: optional run count; see .github/REGRESSION-TESTS.md. Default: 1. Example: 12"
         required: false
         default: "1"
         type: string
+
+      # Common inputs.
+      max-run-time:
+        description: "Common: optional total job budget in minutes for build, Pytest, and GoogleTest; see .github/REGRESSION-TESTS.md. Default: 360 (6 hours)"
+        required: false
+        default: "360"
+        type: string
       continue-on-test-failure:
-        description: "Optional failure handling; see .github/REGRESSION-TESTS.md. true continues after failures"
+        description: "Common: failure handling for Pytest and GoogleTest; see .github/REGRESSION-TESTS.md. true completes iterations after failures"
         required: false
         default: false
         type: boolean
-      # End manual trigger inputs.
 
 jobs:
   build:
@@ -61,6 +64,7 @@ jobs:
         enable_resp_io_loop_v2: [false, true]
 
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: "${{ fromJSON(github.event_name == 'workflow_dispatch' && (inputs.max-run-time || '360') || '80') }}"
 
     permissions:
       id-token: write
@@ -91,6 +95,14 @@ jobs:
           GTEST_ITERATIONS_INPUT: ${{ inputs.gtest-iterations || '' }}
           MAX_RUN_TIME_INPUT: ${{ inputs.max-run-time || '' }}
           CONTINUE_ON_TEST_FAILURE_INPUT: ${{ inputs.continue-on-test-failure || 'false' }}
+
+      - name: Start shared regression time budget
+        shell: bash
+        env:
+          MAX_RUN_TIME_MINUTES: ${{ github.event_name == 'workflow_dispatch' && (inputs.max-run-time || '360') || '80' }}
+        run: |
+          echo "Shared regression time budget: ${MAX_RUN_TIME_MINUTES} minutes (build, Pytest, and GoogleTest)"
+          echo "REGRESSION_DEADLINE_EPOCH=$(( $(date +%s) + MAX_RUN_TIME_MINUTES * 60 ))" >> "$GITHUB_ENV"
 
       - name: Print environment info
         run: |

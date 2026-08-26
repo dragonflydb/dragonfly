@@ -11,7 +11,7 @@ and fill in only the inputs needed for the scenario.
 
 The following names match the `workflow_dispatch` fields in the YAML exactly.
 
-### Python tests
+## Pytest Inputs
 
 - `test-suites`: Comma- or space-separated Python test filenames. A filename without
   a path is resolved under `tests/dragonfly/`. Leave empty to use the full
@@ -21,12 +21,6 @@ The following names match the `workflow_dispatch` fields in the YAML exactly.
   applies to every suite in `test-suites`; it is not a separate filter per file.
 - `iterations`: A positive integer controlling how many times the selected pytest
   tests run. It defaults to `1` when left empty.
-- `max-run-time`: An optional positive number of minutes for the complete selected
-  test run, including all requested iterations. It applies to Python or GoogleTest
-  runs and stops the run when the time budget or requested iterations finish first.
-  Manual runs default to `360` minutes (6 hours) and have no internal 80-minute cap.
-  Leave empty to use the six-hour default. GitHub Actions' job timeout also defaults
-  to and is capped at 6 hours; GitHub-hosted runners cannot run longer than 6 hours.
 
 Examples:
 
@@ -88,7 +82,7 @@ Pytest receives the resulting collected node IDs as explicit test arguments. A
 short regex such as `test_case_one|test_case_two` is global and can select matching
 case names from both suites. There is currently no per-suite filter syntax.
 
-## GoogleTest
+## GoogleTest Inputs
 
 Python and GoogleTest selection are independent. Set Python inputs to run Python,
 GoogleTest inputs to run GoogleTest, or both sets of inputs to run both. When every
@@ -106,7 +100,8 @@ Python tests three times and `dfly_core_test` once by default.
 - `gtest-suites`: Comma- or space-separated target names discovered under
   `src/core`, `src/facade`, and `src/server`. You may also provide a target path or
   `.cc` suffix; only the target name is used.
-- `gtest-cases`: A value passed directly to GoogleTest as `--gtest_filter`.
+- `gtest-cases`: A value passed directly to GoogleTest as `--gtest_filter`. Leave it
+  empty to run all cases in the selected targets.
 - `gtest-iterations`: A positive integer controlling how many times the selected
   GoogleTest targets run. It defaults to `1`.
 
@@ -130,18 +125,32 @@ StringMapTest.*:DashTest.*
 2
 ```
 
+## Common Inputs
+
+- `max-run-time`: An optional positive integer from `1` through `360`, specifying a
+  single time budget in minutes for every matrix job. It starts when the job begins
+  and includes checkout, input validation, Dragonfly build, test setup, Pytest, and
+  GoogleTest. The helpers also share a deadline started before the build, so time
+  used by the build or one test family reduces the time available to the other.
+  Manual runs default to `360` minutes (6 hours); scheduled runs retain an 80-minute
+  shared job budget. A runner cannot exceed GitHub Actions' six-hour job limit.
+- `continue-on-test-failure`: A boolean that defaults to `false`. When `false`, the
+  first failing iteration stops its own selected test family. Set it to `true` to
+  complete every selected iteration in both Pytest and GoogleTest, then report a
+  failure at the end. The two family steps are independent: a failure in one never
+  prevents the other from starting.
+
 `max-run-time`:
 
 ```text
 30
 ```
 
-### Failure handling
+`continue-on-test-failure`:
 
-- `continue-on-test-failure`: A boolean that defaults to `false`. When `false`, the
-  first failing test stops the selected run. Set it to `true` to complete all
-  selected iterations and report a failure at the end. This applies to both Python
-  and GoogleTest runs.
+```text
+true
+```
 
 ## Validation and scheduling
 
@@ -151,9 +160,10 @@ The boolean failure setting is also validated by GitHub because it is a typed
 workflow input.
 
 Scheduled runs do not provide manual inputs. They skip the manual-input validation
-step and retain the original 80-minute Python command timeout. Manual runs use the
-longer `max-run-time` budget described above. GitHub Actions can still terminate a
-run when its job or runner timeout expires.
+step and use the 80-minute shared job budget described above. Manual runs use the
+longer `max-run-time` budget. The job-level timeout is the hard deadline for the
+build and both test families, so GitHub may cancel a command immediately when the
+budget expires before post-test uploads can run.
 
 Both workflows fan out over their configured build matrix. Targeted inputs reduce
 test execution time, but each matrix job still builds the configured Dragonfly
