@@ -989,6 +989,23 @@ TEST_F(RdbTest, ReloadKeepsConsumerGroupEntriesRead) {
   EXPECT_THAT(Run({"xinfo", "groups", "x"}).GetVec()[0].GetVec(), expected);
 }
 
+// An RDB image with a zero-member set 'e' followed by string 'f'. The empty key must be skipped
+// without aborting the load.
+TEST_F(RdbTest, LoadSkipsEmptyKey) {
+  uint8_t rdb[] = {0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, 0xfe,
+                   0x00, 0x02, 0x01, 0x65, 0x00, 0x00, 0x01, 0x66, 0x01, 0x76,
+                   0xff, 0xc9, 0xbd, 0xe3, 0xb2, 0xec, 0x3b, 0x7a, 0xb5};
+  auto ec = pp_->at(0)->Await([&] {
+    io::BytesSource src(string_view(reinterpret_cast<const char*>(rdb), sizeof(rdb)));
+    RdbLoadContext load_context;
+    RdbLoader loader(service_.get(), &load_context);
+    return loader.Load(&src);
+  });
+  ASSERT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"get", "f"}), "v");
+  EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+}
+
 // Tests loading a huge stream, where the stream is loaded in multiple partial
 // reads.
 TEST_F(RdbTest, LoadHugeStream) {
