@@ -1711,6 +1711,8 @@ auto SetFamily::LoadLPSetBlob(std::string_view blob, bool deep, PrimeValue* pv) 
   }
 
   unsigned char* lp = (unsigned char*)blob.data();
+  if (lpLength(lp) == 0)
+    return LoadBlobResult::kEmpty;
   void* set_ptr = g_use_oah_set ? static_cast<void*>(BuildSetFromLP<OAHSet>(lp))
                                 : static_cast<void*>(BuildSetFromLP<StringSet>(lp));
   if (!set_ptr)
