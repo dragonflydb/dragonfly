@@ -1236,7 +1236,8 @@ void Connection::HandleRequests() {
       }
       reply_builder_->SetAsyncFlushEnabled(
           ioloop_v2_ && fb2::ProactorBase::me()->GetKind() == fb2::ProactorBase::IOURING &&
-          dynamic_cast<io::AsyncSink*>(socket_.get()) != nullptr);
+              dynamic_cast<io::AsyncSink*>(socket_.get()) != nullptr,
+          [this](std::error_code ec) { OnAsyncReplyWrite(ec); });
       parsed_cmd_ = CreateParsedCommand();
       ConnectionFlow();
 
@@ -1267,8 +1268,7 @@ std::error_code Connection::FlushReplies() {  // NOLINT must not be const due to
     if (reply_builder_->HasAsyncWrite())
       return {};
 
-    auto result =
-        reply_builder_->TryAsyncFlush([this](std::error_code ec) { OnAsyncReplyWrite(ec); });
+    auto result = reply_builder_->TryAsyncFlush({});
     if (result != SinkReplyBuilder::AsyncFlushResult::kNotSupported)
       return {};
   }
@@ -2143,7 +2143,7 @@ void Connection::SquashPipeline() {
   // subtracted from parsed_cmd_q_len_, so add them back for the comparison.
   if (parsed_cmd_q_len_ + squashed == pipeline_count || always_flush_pipeline_cached) {
     uint64_t flush_start_cycle = CycleClock::Now();
-    reply_builder_->Flush();
+    FlushReplies();
     conn_stats.pipeline_dispatch_flush_count++;
     reply_builder_->SetBatchMode(false);  // in case the next dispatch is sync
     conn_stats.pipeline_dispatch_flush_usec +=
@@ -2258,7 +2258,7 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
   // we MUST flush the buffer now. Otherwise, previous pipelined replies might wait
   // indefinitely or be lost if the fiber terminates.
   if (!HasPendingMessages() && !is_replying) {
-    reply_builder_->Flush();
+    FlushReplies();
   }
 
   // Fiber Termination Check
@@ -2289,7 +2289,7 @@ bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_
   // buffer (e.g. subscription filter), and the queues are empty.
   if (!HasPendingMessages() && is_replying &&
       (replies_recorded_before == reply_builder_->RepliesRecorded())) {
-    reply_builder_->Flush();
+    FlushReplies();
   }
   return false;
 }
@@ -2314,7 +2314,7 @@ void Connection::ProcessPipelineCommandV1() {
 
   // If we drained the pipeline and no admin messages are waiting, flush.
   if (!HasPendingMessages()) {
-    reply_builder_->Flush();
+    FlushReplies();
   }
 }
 
@@ -3475,7 +3475,7 @@ bool Connection::ReplyBatch() {
   // safely flushes the coalesced buffer right before the fiber yields (await) or when memory limits
   // are reached.
   if (!ioloop_v2_) {
-    reply_builder_->Flush();
+    FlushReplies();
   }
 
   return !reply_builder_->GetError();

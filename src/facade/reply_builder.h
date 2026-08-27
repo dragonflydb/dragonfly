@@ -6,6 +6,7 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <boost/intrusive/list.hpp>
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
@@ -105,8 +106,9 @@ class SinkReplyBuilder {
     return async_write_ != nullptr;
   }
 
-  void SetAsyncFlushEnabled(bool enabled) {
+  void SetAsyncFlushEnabled(bool enabled, io::AsyncResultCb cb = {}) {
     async_flush_enabled_ = enabled;
+    async_flush_cb_ = std::move(cb);
   }
 
   std::error_code GetError() const {
@@ -199,6 +201,9 @@ class SinkReplyBuilder {
   bool AreAllVecsRetained() const;
   bool IsBuilderOwnedVec(const iovec& vec) const;
   void CopyExternalRefs();
+  AsyncFlushResult QueueAsyncFlush();
+  void StartAsyncWrite();
+  void CompleteAsyncWrite(std::error_code ec);
 
   io::Sink* sink_;
   std::error_code ec_;
@@ -217,7 +222,9 @@ class SinkReplyBuilder {
   size_t guaranteed_pieces_ = 0;   // length of prefix of vecs_ that are guaranteed to be pieces
   uint64_t send_time_cycles_ = 0;  // base::CycleClock::Now() at Send() entry, 0 when idle
   bool async_flush_enabled_ = false;
+  io::AsyncResultCb async_flush_cb_;
   std::unique_ptr<AsyncWriteState> async_write_;
+  std::deque<std::unique_ptr<AsyncWriteState>> async_write_queue_;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {

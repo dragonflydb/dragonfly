@@ -57,6 +57,7 @@ std::string_view GetErrorType(std::string_view err) {
 class DeferredAsyncSink : public io::Sink, public io::AsyncSink {
  public:
   io::Result<size_t> WriteSome(const iovec* v, uint32_t len) final {
+    ++sync_write_calls_;
     size_t written = 0;
     for (size_t i = 0; i < len; ++i) {
       output_.append(static_cast<const char*>(v[i].iov_base), v[i].iov_len);
@@ -67,6 +68,7 @@ class DeferredAsyncSink : public io::Sink, public io::AsyncSink {
 
   void AsyncWriteSome(const iovec* v, uint32_t len, io::AsyncProgressCb cb) final {
     CHECK(!async_cb_);
+    ++async_write_calls_;
     vecs_.assign(v, v + len);
     async_cb_ = std::move(cb);
   }
@@ -86,10 +88,20 @@ class DeferredAsyncSink : public io::Sink, public io::AsyncSink {
     return output_;
   }
 
+  size_t sync_write_calls() const {
+    return sync_write_calls_;
+  }
+
+  size_t async_write_calls() const {
+    return async_write_calls_;
+  }
+
  private:
   std::string output_;
   std::vector<iovec> vecs_;
   io::AsyncProgressCb async_cb_;
+  size_t sync_write_calls_ = 0;
+  size_t async_write_calls_ = 0;
 };
 
 }  // namespace
@@ -825,6 +837,30 @@ TEST_F(RedisReplyBuilderTest, AsyncFlushRetainsLargeExternalPayload) {
   sink.Complete();
 
   EXPECT_TRUE(completed);
+  EXPECT_EQ(sink.output(), expected);
+}
+
+TEST_F(RedisReplyBuilderTest, AsyncFlushQueuesCapacityBatches) {
+  DeferredAsyncSink sink;
+  RedisReplyBuilder builder(&sink);
+  builder.SetBatchMode(true);
+  builder.SetAsyncFlushEnabled(true, [](std::error_code) {});
+
+  const std::string payload(256, 'a');
+  const std::string reply = absl::StrCat("$", payload.size(), "\r\n", payload, "\r\n");
+  std::string expected;
+  for (size_t i = 0; i < 200; ++i) {
+    builder.SendBulkString(payload);
+    expected.append(reply);
+  }
+
+  EXPECT_EQ(builder.TryAsyncFlush({}), SinkReplyBuilder::AsyncFlushResult::kStarted);
+  EXPECT_EQ(sink.async_write_calls(), 1u);
+  while (builder.HasAsyncWrite())
+    sink.Complete();
+
+  EXPECT_EQ(sink.sync_write_calls(), 0u);
+  EXPECT_GT(sink.async_write_calls(), 1u);
   EXPECT_EQ(sink.output(), expected);
 }
 

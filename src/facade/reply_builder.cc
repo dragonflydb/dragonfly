@@ -219,55 +219,88 @@ void SinkReplyBuilder::CopyExternalRefs() {
   }
 }
 
-SinkReplyBuilder::AsyncFlushResult SinkReplyBuilder::TryAsyncFlush(io::AsyncResultCb cb) {
+SinkReplyBuilder::AsyncFlushResult SinkReplyBuilder::QueueAsyncFlush() {
   if (vecs_.empty())
     return AsyncFlushResult::kNoData;
 
   auto* async_sink = dynamic_cast<io::AsyncSink*>(sink_);
-  if (async_sink == nullptr || async_write_ != nullptr || !AreAllVecsRetained())
+  if (async_sink == nullptr || !AreAllVecsRetained())
     return AsyncFlushResult::kNotSupported;
 
   send_time_cycles_ = base::CycleClock::Now();
-  async_write_ = std::make_unique<AsyncWriteState>(send_time_cycles_);
-  async_write_->buffer = std::move(buffer_);
-  async_write_->vecs = std::move(vecs_);
-  async_write_->external_data = std::move(external_data_);
-  async_write_->external_offsets = std::move(external_offsets_);
-  if (!async_write_->external_offsets.empty()) {
-    for (size_t i = 0; i < async_write_->vecs.size(); ++i) {
-      if (async_write_->external_offsets[i] != kNoExternalData) {
-        async_write_->vecs[i].iov_base =
-            async_write_->external_data.data() + async_write_->external_offsets[i];
+  auto state = std::make_unique<AsyncWriteState>(send_time_cycles_);
+  state->buffer = std::move(buffer_);
+  state->vecs = std::move(vecs_);
+  state->external_data = std::move(external_data_);
+  state->external_offsets = std::move(external_offsets_);
+  if (!state->external_offsets.empty()) {
+    for (size_t i = 0; i < state->vecs.size(); ++i) {
+      if (state->external_offsets[i] != kNoExternalData) {
+        state->vecs[i].iov_base = state->external_data.data() + state->external_offsets[i];
       }
     }
   }
-  async_write_->total_size = total_size_;
-  pending_list.push_back(async_write_->pin);
+  state->total_size = total_size_;
+  pending_list.push_back(state->pin);
 
   auto& reply_stats = tl_facade_stats->reply_stats;
   reply_stats.io_write_cnt++;
-  reply_stats.io_write_bytes += async_write_->total_size;
+  reply_stats.io_write_bytes += state->total_size;
 
   total_size_ = 0;
   guaranteed_pieces_ = 0;
   buffer_ = base::IoBuf{};
 
-  async_sink->AsyncWrite(async_write_->vecs.data(), async_write_->vecs.size(),
-                         [this, cb = std::move(cb)](std::error_code ec) mutable {
-                           auto state = std::move(async_write_);
-                           auto it = PendingList::s_iterator_to(state->pin);
-                           pending_list.erase(it);
-
-                           uint64_t after_cycles = base::CycleClock::Now();
-                           auto& reply_stats = tl_facade_stats->reply_stats;
-                           reply_stats.send_stats.count++;
-                           reply_stats.send_stats.total_duration +=
-                               (after_cycles - state->pin.timestamp_cycles);
-                           send_time_cycles_ = 0;
-                           cb(ec);
-                         });
+  if (async_write_ == nullptr) {
+    async_write_ = std::move(state);
+    StartAsyncWrite();
+  } else {
+    async_write_queue_.push_back(std::move(state));
+  }
 
   return AsyncFlushResult::kStarted;
+}
+
+SinkReplyBuilder::AsyncFlushResult SinkReplyBuilder::TryAsyncFlush(io::AsyncResultCb cb) {
+  if (async_flush_cb_ == nullptr)
+    async_flush_cb_ = std::move(cb);
+  return QueueAsyncFlush();
+}
+
+void SinkReplyBuilder::StartAsyncWrite() {
+  auto* async_sink = dynamic_cast<io::AsyncSink*>(sink_);
+  DCHECK(async_sink != nullptr);
+  DCHECK(async_write_ != nullptr);
+
+  async_sink->AsyncWrite(async_write_->vecs.data(), async_write_->vecs.size(),
+                         [this](std::error_code ec) { CompleteAsyncWrite(ec); });
+}
+
+void SinkReplyBuilder::CompleteAsyncWrite(std::error_code ec) {
+  auto state = std::move(async_write_);
+  auto it = PendingList::s_iterator_to(state->pin);
+  pending_list.erase(it);
+
+  uint64_t after_cycles = base::CycleClock::Now();
+  auto& reply_stats = tl_facade_stats->reply_stats;
+  reply_stats.send_stats.count++;
+  reply_stats.send_stats.total_duration += after_cycles - state->pin.timestamp_cycles;
+
+  if (!ec && !async_write_queue_.empty()) {
+    async_write_ = std::move(async_write_queue_.front());
+    async_write_queue_.pop_front();
+    StartAsyncWrite();
+  } else {
+    for (const auto& queued_state : async_write_queue_) {
+      auto queued_it = PendingList::s_iterator_to(queued_state->pin);
+      pending_list.erase(queued_it);
+    }
+    async_write_queue_.clear();
+    send_time_cycles_ = 0;
+  }
+
+  if (async_flush_cb_ != nullptr)
+    async_flush_cb_(ec);
 }
 
 void SinkReplyBuilder::Flush(size_t additional_bytes) {
@@ -275,8 +308,16 @@ void SinkReplyBuilder::Flush(size_t additional_bytes) {
   if (vecs_.empty() && (additional_bytes == 0))
     return;
 
-  if (!vecs_.empty())
-    Send();
+  if (!vecs_.empty()) {
+    if (async_flush_enabled_ && async_flush_cb_ != nullptr) {
+      CopyExternalRefs();
+      auto result = QueueAsyncFlush();
+      if (result == AsyncFlushResult::kNotSupported)
+        Send();
+    } else {
+      Send();
+    }
+  }
 
   size_t target_capacity = buffer_.Capacity();
   if (additional_bytes > 0)
