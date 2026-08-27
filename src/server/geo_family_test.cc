@@ -360,12 +360,41 @@ TEST_F(GeoFamilyTest, GeoRadius) {
   EXPECT_THAT(resp, ErrArg("ERR COUNT must be > 0"));
 
   resp = Run("GEORADIUS Sicily 15 37 200 km COUNT 1");
-  EXPECT_THAT(resp, RespElementsAre("Agrigento"));
+  EXPECT_THAT(resp, RespElementsAre("Catania"));  // the closest, not the first in geohash order
 
   auto err =
       "ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORDS options"sv;
   resp = Run("GEORADIUS Sicily 15 37 200 km WITHDIST STORE result");
   EXPECT_THAT(resp, ErrArg(err));
+}
+
+TEST_F(GeoFamilyTest, GeoCountWithoutAnyReturnsNearest) {
+  Run({"geoadd",      "nyc",         "-73.9454966",  "40.747533",
+       "lic market",  "-73.9733487", "40.7648057",   "central park n/q/r",
+       "-73.9903085", "40.7362513",  "union square", "-74.0131604",
+       "40.7126674",  "wtc one",     "-73.7858139",  "40.6428986",
+       "jfk",         "-73.9375699", "40.7498929",   "q4",
+       "-73.9564142", "40.7480973",  "4545"});
+  // COUNT without ANY means the N closest, in ascending distance order.
+  auto nearest3 = RespArray(ElementsAre("central park n/q/r", "4545", "union square"));
+  EXPECT_THAT(Run({"georadius", "nyc", "-73.9798091", "40.7598464", "10", "km", "count", "3"}),
+              nearest3);
+  EXPECT_THAT(Run({"geosearch", "nyc", "fromlonlat", "-73.9798091", "40.7598464", "byradius", "10",
+                   "km", "count", "3"}),
+              nearest3);
+  EXPECT_THAT(Run({"georadiusbymember", "nyc", "wtc one", "10", "km", "count", "1"}),
+              RespArray(ElementsAre("wtc one")));
+  EXPECT_THAT(
+      Run({"georadius", "nyc", "-73.9798091", "40.7598464", "10", "km", "count", "1", "desc"}),
+      RespArray(ElementsAre("wtc one")));
+  EXPECT_THAT(
+      Run({"georadius", "nyc", "-73.9798091", "40.7598464", "10", "km", "count", "3", "any"}),
+      ArrLen(3));
+  EXPECT_THAT(Run({"georadius", "nyc", "-73.9798091", "40.7598464", "10", "km", "count", "3",
+                   "store", "dst"}),
+              IntArg(3));
+  EXPECT_THAT(Run({"zrange", "dst", "0", "-1"}).GetVec(),
+              UnorderedElementsAre("central park n/q/r", "4545", "union square"));
 }
 
 TEST_F(GeoFamilyTest, GeoRadiusRO) {
