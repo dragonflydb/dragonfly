@@ -988,9 +988,11 @@ OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, string_view 
   if (!it->first.HasExpire())
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = it->first.GetExpireTime();
-  DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
-  return ttl_ms;
+  int64_t expire_ms = it->first.GetExpireTime();
+  // Expiry may be disabled (CLIENT PAUSE, replica): a key past its deadline is logically gone.
+  if (expire_ms <= int64_t(t->GetDbContext().time_now_ms))
+    return OpStatus::KEY_NOTFOUND;
+  return expire_ms;
 }
 
 // OpMove touches multiple databases (op_args.db_idx, target_db), so it assumes it runs

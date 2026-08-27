@@ -34,6 +34,18 @@ namespace dfly {
 
 class GenericFamilyTest : public BaseFamilyTest {};
 
+TEST_F(GenericFamilyTest, TtlOfExpiredKeyDuringPause) {
+  // CLIENT PAUSE disables expiry; a key past its deadline is logically gone, not a negative TTL.
+  Run({"set", "k", "v", "px", "10"});
+  Run({"client", "pause", "5000", "write"});
+  AdvanceTime(300);
+  EXPECT_THAT(Run({"pttl", "k"}), IntArg(-2));
+  EXPECT_THAT(Run({"ttl", "k"}), IntArg(-2));
+  EXPECT_THAT(Run({"expiretime", "k"}), IntArg(-2));
+  EXPECT_THAT(Run({"pexpiretime", "k"}), IntArg(-2));
+  Run({"client", "unpause"});
+}
+
 TEST_F(GenericFamilyTest, Expire) {
   Run({"set", "key", "val"});
 
