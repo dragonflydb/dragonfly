@@ -197,6 +197,8 @@ CommandId::~CommandId() {
 CommandId CommandId::Clone(const std::string_view name) const {
   CommandId cloned =
       CommandId{name.data(), opt_mask_, arity_, first_key_, last_key_, acl_categories_};
+  cloned.SetFamily(GetFamily());
+  cloned.SetBitIndex(GetBitIndex());
   cloned.handler_ = handler_;
   cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
   cloned.acl_categories_ = acl_categories_;
