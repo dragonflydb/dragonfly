@@ -593,8 +593,12 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
     }
   }
 
-  // sort and trim by count
-  SortIfNeeded(&ga, geo_ops.sorting, geo_ops.count);
+  // COUNT without ANY means the N closest, which needs an ascending sort.
+  Sorting sorting = geo_ops.sorting;
+  if (sorting == Sorting::kUnsorted && !geo_ops.any && geo_ops.count != 0) {
+    sorting = Sorting::kAsc;
+  }
+  SortIfNeeded(&ga, sorting, geo_ops.count);
 
   if (geo_ops.store == GeoStoreType::kNoStore) {
     // case 1: read mode
