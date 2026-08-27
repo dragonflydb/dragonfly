@@ -100,8 +100,9 @@ class CommandId {
   // Acl categories
   uint32_t acl_categories_;
   // Acl commands indices
-  size_t family_;
-  uint64_t bit_index_;
+  static constexpr size_t kNoFamily = std::numeric_limits<size_t>::max();
+  size_t family_ = kNoFamily;
+  uint64_t bit_index_ = 0;
 };
 
 }  // namespace facade
