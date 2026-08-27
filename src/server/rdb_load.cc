@@ -1944,7 +1944,7 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     }  // while (consumers_num)
   }    // while (cgroup_num)
 
-  return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
+  return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
 auto RdbLoaderBase::ReadRedisModule2() -> io::Result<OpaqueObj> {

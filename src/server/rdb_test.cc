@@ -973,6 +973,22 @@ TEST_F(RdbTest, LoadHugeList) {
   EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 20'000'000u);
 }
 
+TEST_F(RdbTest, ReloadKeepsConsumerGroupEntriesRead) {
+  Run({"xadd", "x", "1-0", "f", "v"});
+  Run({"xadd", "x", "2-0", "f", "v"});
+  Run({"xadd", "x", "3-0", "f", "v"});
+  Run({"xgroup", "create", "x", "g", "0"});
+  Run({"xreadgroup", "group", "g", "c", "count", "2", "streams", "x", ">"});
+  auto expected =
+      ElementsAre("name", "g", "consumers", IntArg(1), "pending", IntArg(2), "last-delivered-id",
+                  "2-0", "entries-read", IntArg(2), "lag", IntArg(1));
+  EXPECT_THAT(Run({"xinfo", "groups", "x"}).GetVec()[0].GetVec(), expected);
+
+  ASSERT_EQ(Run({"debug", "reload"}), "OK");
+  // A mid-stream group's entries-read cannot be estimated; it must survive the reload verbatim.
+  EXPECT_THAT(Run({"xinfo", "groups", "x"}).GetVec()[0].GetVec(), expected);
+}
+
 // Tests loading a huge stream, where the stream is loaded in multiple partial
 // reads.
 TEST_F(RdbTest, LoadHugeStream) {
