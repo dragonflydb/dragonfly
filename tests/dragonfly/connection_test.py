@@ -390,8 +390,12 @@ async def test_debug_traffic_v2_parse_in_proactor_does_not_preempt(df_server, tm
 )
 async def test_shared_read_buffer_interleaved_fragmented_resp(df_server):
     """
-    Verifies that if Client A sends an incomplete command (fragmented across multiple socket writes) and the server's thread
-    switches to handle Client B, Client A's partial state is not corrupted or lost in the shared memory buffer.
+    Client A sends only part of a SET command, stopping in the middle of the value length.
+    Client B then sends a complete command and uses the same shared read buffer.
+
+    When Client A sends the rest of its command, Dragonfly must still remember A's partial
+    command. Both clients then read their own values back, proving that B did not replace A's
+    unfinished input.
     """
     require_shared_resp_io_loop_v2(df_server)
     reader_a, writer_a = await asyncio.open_connection("127.0.0.1", df_server.port)
@@ -432,7 +436,13 @@ async def test_shared_read_buffer_interleaved_fragmented_resp(df_server):
     }
 )
 async def test_shared_read_buffer_interleaved_pipelines(df_server):
-    """Concurrent pipelines on one proactor retain each connection's command stream."""
+    """
+    Client A sends half of a large pipeline, then Client B sends a complete pipeline while
+    Client A is still unfinished. Both clients use the same proactor and shared read buffer.
+
+    Each client must receive all of its replies and later read back its own final value. This
+    checks that command bytes from two busy connections are not mixed together.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader_a, writer_a = await asyncio.open_connection("127.0.0.1", df_server.port)
     reader_b, writer_b = await asyncio.open_connection("127.0.0.1", df_server.port)
@@ -483,7 +493,13 @@ async def test_shared_read_buffer_interleaved_pipelines(df_server):
     }
 )
 async def test_shared_read_buffer_fragmented_large_bulk(df_server):
-    """A fragmented bulk payload survives repeated shared-buffer reuse by another connection."""
+    """
+    Client A sends a 64 KiB value in many small pieces. Between some pieces, Client B sends
+    PING commands, so the shared buffer is used again and again before A's command is complete.
+
+    Dragonfly must keep every piece of A's value in the right order. Reading the value back
+    byte-for-byte shows that no part was lost, changed, or taken from Client B.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader_a, writer_a = await asyncio.open_connection("127.0.0.1", df_server.port)
     reader_b, writer_b = await asyncio.open_connection("127.0.0.1", df_server.port)
@@ -530,7 +546,13 @@ async def test_shared_read_buffer_fragmented_large_bulk(df_server):
     }
 )
 async def test_shared_read_buffer_split_inline_and_length_lines(df_server):
-    """RESP parser state, rather than bytes in the shared buffer, carries split command lines."""
+    """
+    Client A splits PING in the middle of its command name, first as an inline command and then
+    as a RESP array command. Client B runs a complete PING between A's two writes.
+
+    The parser must remember that Client A had started a command even after Client B used the
+    shared buffer. Both forms of A's split PING must still return PONG.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader_a, writer_a = await asyncio.open_connection("127.0.0.1", df_server.port)
     reader_b, writer_b = await asyncio.open_connection("127.0.0.1", df_server.port)
@@ -569,8 +591,11 @@ async def test_shared_read_buffer_split_inline_and_length_lines(df_server):
 )
 async def test_shared_read_buffer_drains_silent_pipeline(df_server):
     """
-    Tests how the server handles a large wave of commands sent all at once, purposely exceeding the
-    1024-byte limit of the server's shared read buffer.
+    The client sends 1,024 PING commands in one write. The input is much larger than the 1 KiB
+    shared read buffer, and the client sends no more bytes afterward.
+
+    Dragonfly must keep draining the socket and reusing the buffer until it handles every command.
+    Receiving all 1,024 PONG replies proves it does not stop after the first buffer-sized chunk.
     """
     require_shared_resp_io_loop_v2(df_server)
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
@@ -595,10 +620,11 @@ async def test_shared_read_buffer_drains_silent_pipeline(df_server):
 )
 async def test_shared_read_buffer_setup_bytes_handoff(df_server):
     """
-    A basic sanity check for protocol setup. When a connection is established, initial
-    bytes may be consumed during protocol detection. This test ensures those setup bytes
-    are successfully handed off to the shared read buffer without being lost, allowing
-    the very first command to execute correctly.
+    A new connection may read some bytes while Dragonfly decides how to set up its protocol.
+    Those early bytes must be passed into the shared V2 read path instead of being dropped.
+
+    The first command on the connection is PING. Getting PONG proves the setup code handed its
+    bytes to the shared buffer correctly.
     """
     require_shared_resp_io_loop_v2(df_server)
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
@@ -623,10 +649,12 @@ async def test_shared_read_buffer_setup_bytes_handoff(df_server):
 )
 async def test_shared_read_buffer_overflow_copy_metric(df_server):
     """
-    Verifies that when a pipeline hits the strict queue limit (pipeline_queue_limit=1),
-    the server safely copies the unparsed, remaining bytes out of the shared read buffer
-    to prevent data loss. We confirm this fallback mechanism triggered by checking that
-    the 'dragonfly_shared_buf_overflow_copies' metric increments.
+    A blocking BLPOP is followed by many PING commands while the pipeline queue is limited to one
+    command. The remaining PING bytes cannot stay in the shared buffer because another connection
+    may need that buffer.
+
+    Dragonfly must copy those remaining bytes to connection-owned memory. The test checks that the
+    copy metric increases, then unblocks BLPOP and receives both its reply and every queued PONG.
     """
     require_shared_resp_io_loop_v2(df_server)
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
@@ -668,7 +696,13 @@ async def test_shared_read_buffer_overflow_copy_metric(df_server):
     }
 )
 async def test_shared_read_buffer_blocking_command_releases_borrow(df_server):
-    """A callback can parse after BLPOP blocks without pinning the shared buffer."""
+    """
+    One client sends BLPOP followed by SET. BLPOP waits for a list value, but SET arrives while
+    that wait is still active.
+
+    Dragonfly must not keep the shared read buffer locked by the waiting BLPOP. It must parse the
+    later SET, then run it after BLPOP is unblocked. The final GET confirms that SET was preserved.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
     client = df_server.client()
@@ -699,7 +733,13 @@ async def test_shared_read_buffer_blocking_command_releases_borrow(df_server):
     }
 )
 async def test_shared_read_buffer_multi_exec_split(df_server):
-    """A transaction split at a RESP boundary retains its connection-owned parser state."""
+    """
+    Client A starts a transaction and sends only `EX` from the final EXEC command. Client B sends
+    PING before Client A sends the remaining `EC` bytes.
+
+    The transaction and parser state must stay with Client A while Client B uses the shared buffer.
+    Client A must receive the normal MULTI, QUEUED, and EXEC replies and then read the saved value.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader_a, writer_a = await asyncio.open_connection("127.0.0.1", df_server.port)
     reader_b, writer_b = await asyncio.open_connection("127.0.0.1", df_server.port)
@@ -735,7 +775,13 @@ async def test_shared_read_buffer_multi_exec_split(df_server):
     }
 )
 async def test_shared_read_buffer_protocol_error_closes_connection(df_server):
-    """A parser failure discards shared-buffer residue, replies, and closes only that client."""
+    """
+    One client first proves it is healthy with PING, then sends an invalid RESP array header.
+    Dragonfly must return a protocol error, discard any input left for that connection, and close it.
+
+    A second client then sends PING on the same proactor. Its success proves bad input from the
+    first client did not damage the shared buffer or break other connections.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
     healthy_client = df_server.client()
@@ -769,7 +815,13 @@ async def test_shared_read_buffer_protocol_error_closes_connection(df_server):
     }
 )
 async def test_shared_read_buffer_backpressure_recovers_without_new_write(df_server):
-    """Overflow input drains after backpressure relief without another client write."""
+    """
+    The client sends more PING commands than the tiny pipeline limits allow. Dragonfly must save
+    the unread commands and wait for backpressure to be removed.
+
+    The test raises the limits without writing any new bytes to that client. All PONG replies must
+    still arrive, proving the saved input wakes up and continues on its own.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
     admin = df_server.client()
@@ -806,7 +858,13 @@ async def test_shared_read_buffer_backpressure_recovers_without_new_write(df_ser
     }
 )
 async def test_shared_read_buffer_backpressure_keeps_server_responsive(df_server):
-    """A throttled shared connection preserves overflow while another client still makes progress."""
+    """
+    One client is blocked in BLPOP and has many PING commands waiting behind it. The small pipeline
+    limits force Dragonfly to save the waiting input outside the shared buffer.
+
+    While that client is stuck, a second admin client must still answer PING quickly. After lifting
+    the limits and unblocking BLPOP, the first client must receive all of its saved replies.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
     admin = df_server.client()
@@ -844,7 +902,13 @@ async def test_shared_read_buffer_backpressure_keeps_server_responsive(df_server
     }
 )
 async def test_shared_read_buffer_reset_and_pause(df_server):
-    """RESET and CLIENT PAUSE do not retain the buffer across their control-path waits."""
+    """
+    This test runs commands that change connection state or make writes wait: RESET and CLIENT
+    PAUSE. Both paths must release the shared read buffer before they wait or change state.
+
+    The PING after RESET must work on the same connection. The SET sent during the write pause must
+    also complete and store its value once the pause finishes.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
     admin = df_server.client()
@@ -877,7 +941,13 @@ async def test_shared_read_buffer_reset_and_pause(df_server):
     }
 )
 async def test_shared_read_buffer_migrates_backpressured_overflow(df_server):
-    """A connection retains shared-buffer overflow safely while migrating between proactors."""
+    """
+    A named client blocks in BLPOP and has many PING commands saved because of the small pipeline
+    limits. The test then moves that client to the other proactor thread.
+
+    The saved input belongs to the connection, not to the old thread's shared buffer. After the
+    move, lifting the limits and unblocking BLPOP must produce the list reply and all PONG replies.
+    """
     require_shared_resp_io_loop_v2(df_server)
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
     admin = df_server.client()
@@ -915,7 +985,13 @@ async def test_shared_read_buffer_migrates_backpressured_overflow(df_server):
 
 
 async def test_shared_read_buffer_tls_fragmented(df_factory):
-    """Fragmented TLS plaintext is reassembled on the shared V2 path while another client runs."""
+    """
+    A TLS client sends an 8 KiB SET command in 137-byte pieces. TLS must first turn encrypted
+    network bytes into normal RESP bytes before the shared V2 parser can use them.
+
+    Another TLS client sends PING while the first request is incomplete. The final GET must return
+    the whole value, proving shared-buffer handling also works for fragmented TLS input.
+    """
     server = df_factory.create(
         enable_resp_io_loop_v2="true",
         enable_shared_read_buffer="true",
@@ -954,7 +1030,13 @@ async def test_shared_read_buffer_tls_fragmented(df_factory):
 
 
 async def test_shared_read_buffer_unix_and_admin_connections(df_factory, tmp_dir):
-    """Shared V2 selection works for Unix-domain and admin RESP listeners."""
+    """
+    The shared V2 path is available through more than the normal TCP port. This test starts both a
+    Unix-domain socket and the separate admin RESP port with shared buffering enabled.
+
+    A PING through each listener must return successfully. That proves both listener types choose
+    and work with the shared V2 read path.
+    """
     server = df_factory.create(
         enable_resp_io_loop_v2="true",
         enable_shared_read_buffer="true",
@@ -978,7 +1060,14 @@ async def test_shared_read_buffer_unix_and_admin_connections(df_factory, tmp_dir
 
 
 async def test_shared_read_buffer_accounting_1000_connections(df_factory):
-    """The aggregate read-buffer metric accounts for shared and direct client buffers."""
+    """
+    The server opens 1,000 client connections with shared buffering enabled, then asks for memory
+    use through both INFO and the Prometheus metrics endpoint.
+
+    The two reported totals should match except for the small direct buffer used by the metrics
+    request itself. This checks that shared buffers are counted once and client buffers are counted
+    correctly at larger connection counts.
+    """
     server = df_factory.create(
         enable_resp_io_loop_v2="true",
         enable_shared_read_buffer="true",
@@ -1017,7 +1106,14 @@ async def test_shared_read_buffer_accounting_1000_connections(df_factory):
 )
 @pytest.mark.exclude_epoll
 async def test_shared_read_buffer_excludes_uring_multishot(df_server):
-    """Shared V2 reads must not consume io_uring provided buffers when a ring is available."""
+    """
+    On systems with an io_uring buffer ring, normal reads can use buffers supplied by io_uring.
+    Shared V2 reads must use their own shared buffer instead, because the two buffer systems have
+    different ownership rules.
+
+    After a small PING pipeline, the test checks that no receive call used an io_uring provided
+    buffer. It skips cleanly when the host has no io_uring buffer ring.
+    """
     require_shared_resp_io_loop_v2(df_server)
     if not any(
         "Registered a bufring" in Path(log_file).read_text() for log_file in df_server.log_files
