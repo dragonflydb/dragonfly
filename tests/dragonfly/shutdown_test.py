@@ -27,6 +27,7 @@ class TestGracefulShutdown:
     async def test_shutdown_snapshot_contains_acknowledged_writes(self, df_factory):
         df_server = df_factory.create(dbfilename="dump", **BASIC_ARGS)
         df_server.start()
+        await wait_available_async(df_server.client())
 
         def make_client():
             # One pinned connection, no retries: a lost reply must surface as
