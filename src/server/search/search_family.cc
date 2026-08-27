@@ -204,7 +204,10 @@ constexpr auto kTextParamsGrammar =
 
 search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
   search::SchemaField::NumericParams params{};
-  parser->Check("BLOCKSIZE", &params.block_size);
+  // A zero block size divides by zero when the numeric range tree is built.
+  if (parser->Check("BLOCKSIZE"))
+    params.block_size =
+        parser->Next<facade::Positive<size_t>>("BLOCKSIZE must be a positive integer");
   return params;
 }
 

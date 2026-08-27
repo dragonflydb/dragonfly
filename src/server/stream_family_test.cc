@@ -317,6 +317,58 @@ TEST_F(StreamFamilyTest, XReadGroup) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
+// A multi-stream XREADGROUP where one stream is valid and another has no matching key/group
+// must return NOGROUP without mutating any state on the valid stream: no PEL insertion, no new
+// consumer, and no advance of last-delivered-id. Both single shard and cross shard are tested.
+TEST_F(StreamFamilyTest, XReadGroupMultiStreamErrorDoesNotMutateState) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  struct Case {
+    string_view name;
+    bool same_shard;
+  };
+
+  const vector<Case> cases = {
+      {"same-shard", true},
+      {"cross-shard", false},
+  };
+
+  for (const Case& tc : cases) {
+    SCOPED_TRACE(tc.name);
+
+    const string good = absl::StrCat(tc.name, "-good");
+    string missing;
+    for (unsigned i = 0; missing.empty(); ++i) {
+      string candidate = absl::StrCat(tc.name, "-missing-", i);
+      const bool collocated = Shard(candidate, shard_set->size()) == Shard(good, shard_set->size());
+      if (collocated == tc.same_shard)
+        missing = std::move(candidate);
+    }
+
+    Run({"XGROUP", "CREATE", good, "g", "0", "MKSTREAM"});
+    Run({"XADD", good, "1-0", "f", "v"});
+
+    // "missing" has no key at all, so this must fail with NOGROUP for it.
+    auto resp = Run({"XREADGROUP", "GROUP", "g", "c", "STREAMS", good, missing, ">", ">"});
+    EXPECT_THAT(resp, ErrArg(absl::StrCat("No such key '", missing,
+                                          "' or consumer group 'g' in XREADGROUP with GROUP "
+                                          "option")));
+
+    // Entry 1-0 must not have leaked into the group/consumer PEL.
+    auto pending = Run({"XPENDING", good, "g"});
+    EXPECT_THAT(pending.GetVec()[0], IntArg(0))
+        << "entry 1-0 leaked into the PEL despite the NOGROUP error";
+
+    // Consumer "c" must not have been created, and last-delivered-id must not have advanced.
+    auto group_info = Run({"XINFO", "GROUPS", good});
+    ASSERT_THAT(group_info, ArrLen(1));
+    EXPECT_THAT(
+        group_info.GetVec()[0].GetVec(),
+        ElementsAre("name", "g", "consumers", IntArg(0), "pending", IntArg(0), "last-delivered-id",
+                    "0-0", "entries-read", kMatchNil, "lag", IntArg(1)));
+  }
+}
+
 TEST_F(StreamFamilyTest, XReadGroupConsumerNamedStreams) {
   Run({"XADD", "COUNT", "1-0", "field", "value"});
   Run({"XGROUP", "CREATE", "COUNT", "grp1", "0"});
@@ -1248,6 +1300,10 @@ TEST_F(StreamFamilyTest, XPending) {
                   RespArray(ElementsAre("1-0", "alice", ArgType(RespExpr::INT64), IntArg(1))),
                   RespArray(ElementsAre("1-1", "alice", ArgType(RespExpr::INT64), IntArg(1))),
                   RespArray(ElementsAre("1-2", "alice", ArgType(RespExpr::INT64), IntArg(1))))));
+
+  // An unknown consumer owns nothing: empty, not the whole group PEL.
+  EXPECT_THAT(Run({"xpending", "foo", "group", "-", "+", "10", "nobody"}), ArrLen(0));
+  EXPECT_THAT(Run({"xpending", "foo", "group", "-", "+", "10", ""}), ArrLen(0));
 
   // only return a single entry
   resp = Run({"xpending", "foo", "group", "-", "+", "1"});

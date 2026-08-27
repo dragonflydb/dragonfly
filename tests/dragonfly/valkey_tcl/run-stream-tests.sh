@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run the Valkey stream TCL suites against a Dragonfly binary in external-server mode.
+# Run the Valkey stream and pubsub TCL suites against a Dragonfly binary in external-server mode.
 # Exits 0 only if every non-skipped test passes (harness returns 1 on any failure).
 #
 # Usage: ./run-stream-tests.sh <path-to-dragonfly-binary> [port]
@@ -118,6 +118,7 @@ timeout --kill-after=30 900 tclsh tests/test_helper.tcl \
   --host 127.0.0.1 --port "$PORT" \
   --single unit/type/stream \
   --single unit/type/stream-cgroups \
+  --single unit/pubsub \
   --tags "-needs:debug -needs:repl -external:skip -large-memory" \
   --skipfile "$CLEAN_SKIP" \
   --timeout 120 \
