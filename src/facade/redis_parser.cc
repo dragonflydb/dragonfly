@@ -6,12 +6,20 @@
 #include <absl/strings/escaping.h>
 #include <absl/strings/numbers.h>
 
+#include <algorithm>
+
 #include "base/logging.h"
 #include "common/heap_size.h"
 
 namespace facade {
 
 using namespace std;
+
+// Cap upfront array reservation so a wire count can't force one giant allocation.
+constexpr uint32_t kMaxArrReserve = 1024;
+
+// Cap client-mode aggregate nesting so many nested headers can't accumulate memory.
+constexpr uint32_t kMaxDepth = 64;
 
 auto RedisParser::Parse(Buffer str, uint32_t* consumed, RespExpr::Vec* res) -> Result {
   DCHECK(!str.empty());
@@ -311,8 +319,11 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
   }
 
   if (state_ == MAP_LEN_S) {
-    // Map starts with %N followed by an array of 2*N elements.
-    // Even elements are keys, odd elements are values.
+    // Guard len*2 against overflow.
+    if (len > max_arr_len_ / 2) {
+      LOG(WARNING) << "Multibulk len is too large " << len;
+      return {BAD_ARRAYLEN, res.second};
+    }
     len *= 2;
   }
 
@@ -343,13 +354,18 @@ auto RedisParser::ConsumeArrayLen(Buffer str) -> ResultConsumed {
     return {OK, res.second};
   }
 
+  if (parse_stack_.size() >= kMaxDepth) {
+    LOG(WARNING) << "Nesting is too deep";
+    return {BAD_ARRAYLEN, res.second};
+  }
+
   if (state_ == PARSE_ARG_S) {
     DCHECK(!server_mode_);
 
     cached_expr_->emplace_back(RespExpr::ARRAY);
     stash_.emplace_back(new RespExpr::Vec());
     RespExpr::Vec* arr = stash_.back().get();
-    arr->reserve(len);
+    arr->reserve(std::min<size_t>(len, kMaxArrReserve));
     cached_expr_->back().u = arr;
     cached_expr_ = arr;
   }
