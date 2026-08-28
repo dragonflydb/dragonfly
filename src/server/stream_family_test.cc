@@ -916,6 +916,54 @@ TEST_F(StreamFamilyTest, XReadGroupBlockMultiStreamRevalidatesStreams) {
   }
 }
 
+// For multi-shard XREADGROUP, the reported error must come from the first invalid key in
+// STREAMS argument order, regardless of shard assignment or validation order.
+TEST_F(StreamFamilyTest, XReadGroupErrorFollowsArgumentOrder) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  // Find a key that maps to a specific shard.
+  auto find_key_on_shard = [&](string_view prefix, ShardId target_shard) {
+    for (unsigned i = 0;; ++i) {
+      string candidate = absl::StrCat(prefix, "-", i);
+      if (Shard(candidate, shard_set->size()) == target_shard)
+        return candidate;
+    }
+  };
+
+  const string key_on_shard1 = find_key_on_shard("nb-shard1", 1);  // 1st: missing key
+  const string key_on_shard0 = find_key_on_shard("nb-shard0", 0);  // 2nd: wrong type
+
+  Run({"SET", key_on_shard0, "value"});
+
+  // The first key is missing and the second has the wrong type. The error must come from
+  // the first key, even though it is on the higher shard ID.
+  auto resp =
+      Run({"XREADGROUP", "GROUP", "group", "c", "STREAMS", key_on_shard1, key_on_shard0, ">", ">"});
+  EXPECT_THAT(resp, ErrArg("No such key"));
+
+  const string blocked_key_on_shard1 = find_key_on_shard("blk-shard1", 1);
+  const string blocked_key_on_shard0 = find_key_on_shard("blk-shard0", 0);
+  Run({"XGROUP", "CREATE", blocked_key_on_shard1, "group", "0", "MKSTREAM"});
+  Run({"XGROUP", "CREATE", blocked_key_on_shard0, "group", "0", "MKSTREAM"});
+
+  // The first key becomes WRONGTYPE and the second loses its group (NOGROUP). The first
+  // key's error must be reported, regardless of shard validation order.
+  RespExpr blocked_resp;
+  auto reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    blocked_resp = Run({"XREADGROUP", "GROUP", "group", "c", "BLOCK", "0", "STREAMS",
+                        blocked_key_on_shard1, blocked_key_on_shard0, ">", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"MULTI"});
+  Run({"XGROUP", "DESTROY", blocked_key_on_shard0, "group"});
+  Run({"SET", blocked_key_on_shard1, "value"});
+  Run({"EXEC"});
+
+  reader.Join();
+  EXPECT_THAT(blocked_resp, ErrArg("WRONGTYPE"));
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockLazyExpireDuringWakeDoesNotCrash) {
   Run({"XGROUP", "CREATE", "s", "g", "0", "MKSTREAM"});
 
