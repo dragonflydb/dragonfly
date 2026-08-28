@@ -1250,8 +1250,9 @@ ExpireArgs ParseExpireArgs(CmdArgParser* parser) {
   auto args = kGrammar.Apply(parser);
   parser->Finalize("Unsupported option: ");
 
+  // NX with GT/LT is allowed as a deliberate extension, see docs/differences.md.
   if ((args.flags & ExpireFlags::EXPIRE_NX) && (args.flags & ExpireFlags::EXPIRE_XX))
-    parser->ReportCustom("NX and XX options at the same time are not compatible");
+    parser->ReportCustom("NX and XX, GT or LT options at the same time are not compatible");
   if ((args.flags & ExpireFlags::EXPIRE_GT) && (args.flags & ExpireFlags::EXPIRE_LT))
     parser->ReportCustom("GT and LT options at the same time are not compatible");
   return args;

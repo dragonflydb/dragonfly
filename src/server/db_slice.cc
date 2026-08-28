@@ -1277,20 +1277,23 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 
   int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
-  bool satisfied = params.expire_options == ExpireFlags::EXPIRE_ALWAYS;
-
-  if (prime_it->first.HasExpire()) {
+  const bool has_expire = prime_it->first.HasExpire();
+  if (has_expire)
     current_cmp = prime_it->first.GetExpireTime();
-    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_XX);
-  } else {
-    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_NX);
+
+  // Every given flag must hold. Exception: NX with GT/LT (deliberate extension) sets the
+  // expiry when there is none, otherwise GT/LT alone decides.
+  int32_t opts = params.expire_options;
+  if ((opts & ExpireFlags::EXPIRE_NX) &&
+      (opts & (ExpireFlags::EXPIRE_GT | ExpireFlags::EXPIRE_LT))) {
+    opts = has_expire ? opts & ~ExpireFlags::EXPIRE_NX : int32_t{ExpireFlags::EXPIRE_ALWAYS};
   }
-
-  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_LT) && (abs_msec < current_cmp);
-  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_GT) && (abs_msec > current_cmp);
-
-  if (!satisfied)
+  if (((opts & ExpireFlags::EXPIRE_XX) && !has_expire) ||
+      ((opts & ExpireFlags::EXPIRE_NX) && has_expire) ||
+      ((opts & ExpireFlags::EXPIRE_LT) && !(abs_msec < current_cmp)) ||
+      ((opts & ExpireFlags::EXPIRE_GT) && !(abs_msec > current_cmp))) {
     return OpStatus::SKIPPED;
+  }
 
   // If we update and the new value is already expired, delete the key
   // Already-expired new value: delete; the caller emits the expired event after journaling.
