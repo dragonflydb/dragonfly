@@ -2829,6 +2829,13 @@ LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, bool deep, Pr
   }
 
   unsigned char* src_lp = (unsigned char*)blob.data();
+
+  // Reject an unpaired tail; gated on deep since counting may scan not-yet-validated entries.
+  if (deep && lpLength(src_lp) % 2 != 0) {
+    LOG(ERROR) << "Zset listpack has an odd number of entries.";
+    return LoadBlobResult::kCorrupted;
+  }
+
   unsigned long long bytes = lpBytes(src_lp);
   unsigned char* lp = (uint8_t*)zmalloc(bytes);
   std::memcpy(lp, src_lp, bytes);
