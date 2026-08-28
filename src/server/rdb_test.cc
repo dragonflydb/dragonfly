@@ -50,6 +50,7 @@ ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
 ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
+ABSL_DECLARE_FLAG(bool, df_snapshot_format);
 ABSL_DECLARE_FLAG(uint32_t, max_rdb_save_serialize_buffer_capacity);
 
 namespace {
@@ -1004,6 +1005,21 @@ TEST_F(RdbTest, LoadSkipsEmptyKey) {
   ASSERT_FALSE(ec) << ec.message();
   EXPECT_EQ(Run({"get", "f"}), "v");
   EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+}
+
+// With RDB-format snapshots the recorded last-save path must keep its .rdb extension, otherwise
+// DEBUG RELOAD flushes the dataset and then fails to load it back.
+TEST_F(RdbTest, DebugReloadRdbFormat) {
+  absl::FlagSaver fs;
+  ShutdownService();  // clears dbfilename; set it afterwards, as InitWithDbFilename does
+  absl::SetFlag(&FLAGS_df_snapshot_format, false);
+  absl::SetFlag(&FLAGS_dbfilename, absl::StrCat("rdbtestdump_", getpid(), ".rdb"));
+  ResetService();
+
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  EXPECT_THAT(service_->server_family().GetLastSaveInfo().file_name, EndsWith(".rdb"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
 }
 
 // Tests loading a huge stream, where the stream is loaded in multiple partial
