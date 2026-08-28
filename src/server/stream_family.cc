@@ -3109,28 +3109,38 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
   };
 
+  vector<OpStatus> key_status(opts->stream_ids.size(), OpStatus::OK);
+
   // Re-resolves the streams owned by a single shard. The cached streamCG* predates the wake: the
-  // waking transaction can drop the group or replace the key. Returns INVALID_VALUE for a missing
-  // stream or group, WRONG_TYPE if the key was replaced by another type.
+  // waking transaction can drop the group or replace the key. Records INVALID_VALUE for a missing
+  // stream or group, WRONG_TYPE if the key was replaced by another type, at that key's argument
+  // position.
   auto validate_shard_keys = [&](const OpArgs& op_args, const ShardArgs& keys) {
-    OpStatus status = OpStatus::OK;
-    for (string_view skey : keys) {
+    // Status of first error in shard's keys or OK if none.
+    OpStatus first_found_key_error = OpStatus::OK;
+    for (auto arg_it = keys.begin(); arg_it != keys.end(); ++arg_it) {
+      const string_view skey = *arg_it;
+      const size_t pos = arg_it.index() - opts->streams_arg;
       auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
       if (!res_it.ok()) {
-        if (status == OpStatus::OK) {
-          status = res_it.status() == OpStatus::WRONG_TYPE ? OpStatus::WRONG_TYPE
-                                                           : OpStatus::INVALID_VALUE;
-        }
+        OpStatus key_err = res_it.status() == OpStatus::WRONG_TYPE ? OpStatus::WRONG_TYPE
+                                                                   : OpStatus::INVALID_VALUE;
+        key_status[pos] = key_err;
+        if (first_found_key_error == OpStatus::OK)
+          first_found_key_error = key_err;
         continue;
       }
 
       StreamIDsItem& stream_item = opts->stream_ids.at(skey);
       stream_item.group =
           StreamLookupCG(GetReadOnlyStream((*res_it)->second), WrapSds(opts->group_name));
-      if (!stream_item.group && status == OpStatus::OK)
-        status = OpStatus::INVALID_VALUE;
+      if (!stream_item.group) {
+        key_status[pos] = OpStatus::INVALID_VALUE;
+        if (first_found_key_error == OpStatus::OK)
+          first_found_key_error = OpStatus::INVALID_VALUE;
+      }
     }
-    return status;
+    return first_found_key_error;
   };
 
   // While we were blocked any of the watched streams could have been deleted, retyped or lost its
@@ -3140,17 +3150,13 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   // It cannot be folded into the action hop: waiting for sibling shards from inside a transaction
   // callback stalls the shard and can deadlock two interleaved multi shard readers.
   if (opts->read_group && tx->GetUniqueShardCnt() > 1) {
-    // Indexed by shard id; each shard writes only its own slot.
-    vector<OpStatus> validation_status(shard_set->size(), OpStatus::OK);
-
     auto validate_cb = [&](Transaction* t, EngineShard* shard) {
-      const ShardId sid = shard->shard_id();
-      validation_status[sid] = validate_shard_keys(t->GetOpArgs(shard), t->GetShardArgs(sid));
+      validate_shard_keys(t->GetOpArgs(shard), t->GetShardArgs(shard->shard_id()));
       return OpStatus::OK;
     };
     tx->Execute(validate_cb, false);
 
-    for (OpStatus status : validation_status) {
+    for (OpStatus status : key_status) {
       if (status == OpStatus::OK)
         continue;
 
@@ -3266,8 +3272,8 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
   if (!opts)
     return;
 
-  // Determine if streams have entries or any error occured
-  AggregateValue<optional<facade::ErrorReply>> err;
+  // Key errors, indexed by their position in the command arguments.
+  vector<optional<facade::ErrorReply>> key_errors(opts->stream_ids.size());
   atomic_bool have_entries = false;
   auto* tx = cmd_cntx->tx();
   // With a single shard we can call OpRead in a single hop, falling back to
@@ -3277,15 +3283,21 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
 
   auto cb = [&](auto* tx, auto* es) -> Transaction::RunnableResult {
     auto op_args = tx->GetOpArgs(es);
-    for (string_view skey : tx->GetShardArgs(es->shard_id())) {
-      if (auto res = HasEntries2(op_args, skey, &*opts); holds_alternative<facade::ErrorReply>(res))
-        err = get<facade::ErrorReply>(res);
-      else if (holds_alternative<bool>(res) && get<bool>(res))
+    bool error = false;
+    ShardArgs shard_args = tx->GetShardArgs(es->shard_id());
+    for (auto arg_it = shard_args.begin(); arg_it != shard_args.end(); ++arg_it) {
+      string_view skey = *arg_it;
+      if (auto res = HasEntries2(op_args, skey, &*opts);
+          holds_alternative<facade::ErrorReply>(res)) {
+        key_errors[arg_it.index() - opts->streams_arg] = get<facade::ErrorReply>(res);
+        error = true;
+      } else if (holds_alternative<bool>(res) && get<bool>(res)) {
         have_entries.store(true, memory_order_relaxed);
+      }
     }
 
     if (is_single_shard) {
-      if (have_entries.load(memory_order_relaxed) && !err) {
+      if (have_entries.load(memory_order_relaxed) && !error) {
         if (read_group)
           FindOrAddGroupConsumers(op_args, tx->GetShardArgs(es->shard_id()), &*opts);
         fastread_prefetched = OpRead(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()), *opts);
@@ -3298,7 +3310,7 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
           }
         }
       } else {
-        if (!err && read_group) {
+        if (!error && read_group) {
           FindOrAddGroupConsumers(op_args, tx->GetShardArgs(es->shard_id()), &*opts);
           for (auto key : tx->GetShardArgs(es->shard_id())) {
             JournalConsumerCreationIfNeeded(op_args, *opts, key);
@@ -3311,9 +3323,18 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
   };
   tx->Execute(cb, is_single_shard);
 
+  // Iterate over key_errors to find the first error, if exists, and report it.
+  optional<facade::ErrorReply> err;
+  for (auto& key_err : key_errors) {
+    if (key_err) {
+      err = std::move(key_err);
+      break;
+    }
+  }
+
   if (err) {
     tx->Conclude();
-    return cmd_cntx->SendError(**err);
+    return cmd_cntx->SendError(*err);
   }
 
   if (!have_entries.load(memory_order_relaxed)) {
