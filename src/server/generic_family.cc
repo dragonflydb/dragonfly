@@ -2173,6 +2173,25 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
   vector<string> raw_elements;
   ShardId source_sid = Shard(key, shard_set->size());
 
+  // STORE with nothing to store still overwrites, i.e. deletes, the destination and replies 0.
+  auto store_nothing = [&]() {
+    string_view store_key_sv = params.store_key.value();
+    ShardId dest_sid = Shard(store_key_sv, shard_set->size());
+    OpResult<uint32_t> store_len;
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      if (shard->shard_id() == dest_sid) {
+        vector<SortEntryBase> none;
+        store_len = OpStore(t->GetOpArgs(shard), store_key_sv, none.begin(), none.end(), false);
+      }
+      return OpStatus::OK;
+    };
+    cmd_cntx->tx()->Execute(std::move(cb), true);
+    if (store_len)
+      cmd_cntx->SendLong(store_len.value());
+    else
+      cmd_cntx->SendError(store_len.status());
+  };
+
   // The high level steps are:
   // 1. Fetch container elements (strings only, no parsing) if no sorting needed.
   // 2. If sorting needed, prepare SortEntryList and fetch external keys if BY pattern is used.
@@ -2194,6 +2213,8 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
     // elem_result->first is empty both for missing/empty containers and for errors;
     // use elem_result's OpStatus to distinguish actual error cases (e.g. WRONG_TYPE).
     if (elem_result->first.empty()) {
+      if (elem_result != OpStatus::WRONG_TYPE && params.store_key)
+        return store_nothing();
       cmd_cntx->tx()->Conclude();
       if (elem_result == OpStatus::WRONG_TYPE)
         return cmd_cntx->SendError(elem_result.status());
@@ -2234,6 +2255,8 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
 
     if (sort_status != OpStatus::OK) {
       DVLOG(2) << "Sorting failed with status " << sort_status;
+      if (sort_status == OpStatus::KEY_NOTFOUND && params.store_key)
+        return store_nothing();
       cmd_cntx->tx()->Conclude();
       if (sort_status == OpStatus::WRONG_TYPE)
         return cmd_cntx->SendError(sort_status);

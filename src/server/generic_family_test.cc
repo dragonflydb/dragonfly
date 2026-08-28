@@ -1018,6 +1018,26 @@ TEST_F(GenericFamilyTest, SortStoreEmptyResult) {
   EXPECT_EQ(0, Run({"exists", "dest"}).GetInt()) << "empty SORT STORE must delete existing key";
 }
 
+TEST_F(GenericFamilyTest, SortStoreMissingSource) {
+  // A missing source still overwrites (i.e. deletes) the destination and replies with 0.
+  Run({"rpush", "dst", "1", "2", "3"});
+  EXPECT_THAT(Run({"sort", "nosuch", "store", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  Run({"rpush", "dst", "1"});
+  EXPECT_THAT(Run({"sort", "nosuch", "by", "nosort", "store", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  Run({"set", "dst", "s"});
+  EXPECT_THAT(Run({"sort", "nosuch", "alpha", "store", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  Run({"set", "str", "x"});
+  Run({"rpush", "dst", "1"});
+  EXPECT_THAT(Run({"sort", "str", "store", "dst"}), ErrArg("WRONGTYPE"));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(1));
+}
+
 TEST_F(GenericFamilyTest, SortStoreResetsExpiry) {
   // SORT set STORE dest, where dest has an expiry — dest expiry must be cleared.
   Run({"del", "src", "dest"});
