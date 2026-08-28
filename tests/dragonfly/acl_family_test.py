@@ -613,6 +613,9 @@ async def test_geosearchstore_acl(df_server):
     user = df_server.client()
     cmd = "GEOSEARCHSTORE out secret FROMMEMBER member BYRADIUS 100 km"
 
+    await admin.execute_command("DEL out secret")
+    await admin.execute_command("ACL DELUSER gssuser")
+
     await admin.execute_command("GEOADD secret 13.361389 38.115556 member")
     await admin.execute_command("ZADD out 1 placeholder")
 
@@ -633,8 +636,10 @@ async def test_geosearchstore_acl(df_server):
     assert "member" in await user.execute_command("ZRANGE out 0 -1")
 
     await admin.execute_command("ACL SETUSER gssuser -GEOSEARCHSTORE")
+    revoked = df_server.client()
+    await revoked.execute_command("AUTH gssuser pass")
     with pytest.raises(redis.exceptions.NoPermissionError):
-        await user.execute_command(cmd)
+        await revoked.execute_command(cmd)
 
 
 @pytest.mark.asyncio
