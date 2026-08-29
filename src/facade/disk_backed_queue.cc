@@ -14,7 +14,9 @@
 
 #include <cerrno>
 #include <cstring>
+#include <deque>
 #include <string>
+#include <utility>
 
 #include "base/flags.h"
 #include "facade/facade_types.h"
@@ -22,6 +24,7 @@
 #include "util/fibers/uring_proactor.h"
 
 using facade::operator""_MB;
+using facade::operator""_KB;
 
 ABSL_FLAG(std::string, disk_backpressure_folder, "/tmp/",
           "Folder to store disk-backed connection backpressure");
@@ -30,16 +33,32 @@ ABSL_FLAG(size_t, disk_backpressure_file_max_bytes, 50_MB,
           "Maximum size of the backing file. When max size is reached, connection will "
           "stop offloading backpressure to disk and block on client read.");
 
+ABSL_FLAG(size_t, disk_backpressure_drain_threshold, 16_KB,
+          "When remaining bytes in the disk-backed queue drop below this "
+          "threshold, queue is in draining phase (backpressure drains). "
+          "Defaults to 2x the max chunk size (16KB).");
+
 namespace facade {
 
 struct DiskBackedQueue::Impl {
   std::unique_ptr<util::fb2::LinuxFile> file;
   size_t write_offset = 0;
-  size_t total_backing_bytes = 0;
+  size_t total_backing_bytes = 0;  // bytes actually on disk, available to pop
+  size_t queued_bytes = 0;         // bytes in write_queue not yet written to disk
   size_t next_read_offset = 0;
   // Tracks how far into the file holes have been punched (always 4096-aligned).
   size_t punch_offset = 0;
   size_t in_flight_callbacks = 0;
+  bool push_in_flight = false;
+  bool pop_in_flight = false;
+  // Set by Cancel() or on I/O error — no further async operations are submitted.
+  bool cancelled = false;
+
+  struct PendingWrite {
+    Chunk chunk;
+    AsyncPushCallback cb;
+  };
+  std::deque<PendingWrite> write_queue;
 
   // Punch holes over the aligned region we have fully read past so the OS can reclaim pages.
   void MaybePunchHole() {
@@ -51,11 +70,52 @@ struct DiskBackedQueue::Impl {
       punch_offset = aligned_end;
     }
   }
+
+  void MaybeFlushQueue() {
+    if (cancelled || push_in_flight || write_queue.empty())
+      return;
+
+    push_in_flight = true;
+
+    PendingWrite pw = std::move(write_queue.front());
+    write_queue.pop_front();
+
+    const uint8_t* data_ptr = pw.chunk.data.data();
+    const size_t size = pw.chunk.data.size();
+    const size_t offset = write_offset;
+
+    file->WriteAsync({data_ptr, size}, offset, [this, pw = std::move(pw), size](int res) mutable {
+      --in_flight_callbacks;
+      push_in_flight = false;
+
+      std::error_code ec;
+      if (res < 0) {
+        ec = {-res, std::system_category()};
+        LOG(ERROR) << "Failed to offload chunk of size " << size
+                   << " to backing with error: " << ec;
+        cancelled = true;
+      } else if (!cancelled) {
+        write_offset += size;
+        total_backing_bytes += size;
+        queued_bytes -= size;
+      }
+
+      if (cancelled)
+        ec = std::make_error_code(std::errc::operation_canceled);
+
+      if (!ec && !write_queue.empty())
+        MaybeFlushQueue();
+
+      pw.cb(ec);
+    });
+    ++in_flight_callbacks;
+  }
 };
 
 DiskBackedQueue::DiskBackedQueue(uint32_t conn_id)
     : impl_(std::make_unique<Impl>()),
       max_backing_size_(absl::GetFlag(FLAGS_disk_backpressure_file_max_bytes)),
+      drain_threshold_(absl::GetFlag(FLAGS_disk_backpressure_drain_threshold)),
       id_(conn_id) {
 }
 
@@ -96,44 +156,69 @@ bool DiskBackedQueue::Empty() const {
   return impl_->total_backing_bytes == 0;
 }
 
-bool DiskBackedQueue::HasEnoughBackingSpaceFor(size_t bytes) const {
-  return (bytes + impl_->total_backing_bytes) < max_backing_size_;
+void DiskBackedQueue::Cancel() {
+  impl_->cancelled = true;
+  impl_->queued_bytes = 0;
+  impl_->total_backing_bytes = 0;
 }
 
-void DiskBackedQueue::PushAsync(io::Bytes bytes, AsyncPushCallback cb) {
-  const size_t offset = impl_->write_offset;
-  const size_t size = bytes.size();
-  ++impl_->in_flight_callbacks;
+bool DiskBackedQueue::IsActive() const {
+  return (!impl_->cancelled && impl_->total_backing_bytes > 0) || !impl_->write_queue.empty() ||
+         impl_->push_in_flight || impl_->pop_in_flight;
+}
 
-  impl_->file->WriteAsync(bytes, offset, [this, size, cb = std::move(cb)](int res) {
-    --impl_->in_flight_callbacks;
-    if (res < 0) {
-      std::error_code ec{-res, std::system_category()};
-      VLOG(2) << "Failed to offload blob of size " << size << " to backing with error: " << ec;
-      cb(ec);
-      return;
-    }
+bool DiskBackedQueue::IsDraining() const {
+  if (!IsActive())
+    return false;
+  return (impl_->total_backing_bytes + impl_->queued_bytes) < drain_threshold_;
+}
 
-    impl_->write_offset += size;
-    impl_->total_backing_bytes += size;
-    VLOG(2) << "Offload connection " << this << " backpressure of " << size;
-    cb({});
-  });
+bool DiskBackedQueue::IsPopInFlight() const {
+  return impl_->pop_in_flight;
+}
+
+bool DiskBackedQueue::IsPushInFlight() const {
+  return impl_->push_in_flight;
+}
+
+bool DiskBackedQueue::HasEnoughBackingSpaceFor(size_t bytes) const {
+  return (bytes + impl_->total_backing_bytes + impl_->queued_bytes) < max_backing_size_;
+}
+
+void DiskBackedQueue::PushAsync(Chunk chunk, AsyncPushCallback cb) {
+  DCHECK(!chunk.data.empty());
+
+  impl_->queued_bytes += chunk.data.size();
+  impl_->write_queue.push_back({std::move(chunk), std::move(cb)});
+  impl_->MaybeFlushQueue();
 }
 
 void DiskBackedQueue::PopAsync(io::MutableBytes out, AsyncPopCallback cb) {
+  DCHECK(!impl_->pop_in_flight);
+  DCHECK(!impl_->cancelled);
+  DCHECK_GT(impl_->total_backing_bytes, 0u);
+
   const size_t to_read = std::min(impl_->total_backing_bytes, out.size());
   const size_t offset = impl_->next_read_offset;
   ++impl_->in_flight_callbacks;
+  impl_->pop_in_flight = true;
 
   io::MutableBytes read_buf = out.subspan(0, to_read);
 
   impl_->file->ReadAsync(read_buf, offset, [this, to_read, offset, cb = std::move(cb)](int res) {
     --impl_->in_flight_callbacks;
+    impl_->pop_in_flight = false;
+
+    if (impl_->cancelled) {
+      cb(nonstd::make_unexpected(std::make_error_code(std::errc::operation_canceled)));
+      return;
+    }
+
     if (res < 0) {
       std::error_code ec{-res, std::system_category()};
       LOG(ERROR) << "Could not load item at offset " << offset << " of size " << to_read
                  << " from disk with error: " << ec.value() << " " << ec.message();
+      impl_->cancelled = true;
       cb(nonstd::make_unexpected(ec));
       return;
     }
@@ -160,7 +245,7 @@ namespace facade {
 struct DiskBackedQueue::Impl {};
 
 DiskBackedQueue::DiskBackedQueue(uint32_t conn_id)
-    : impl_(std::make_unique<Impl>()), max_backing_size_(0), id_(conn_id) {
+    : impl_(std::make_unique<Impl>()), max_backing_size_(0), drain_threshold_(0), id_(conn_id) {
 }
 
 DiskBackedQueue::~DiskBackedQueue() = default;
@@ -177,11 +262,30 @@ bool DiskBackedQueue::Empty() const {
   return true;
 }
 
+bool DiskBackedQueue::IsActive() const {
+  return false;
+}
+
+bool DiskBackedQueue::IsDraining() const {
+  return false;
+}
+
+bool DiskBackedQueue::IsPopInFlight() const {
+  return false;
+}
+
+bool DiskBackedQueue::IsPushInFlight() const {
+  return false;
+}
+
+void DiskBackedQueue::Cancel() {
+}
+
 std::error_code DiskBackedQueue::Close() {
   return {};
 }
 
-void DiskBackedQueue::PushAsync(io::Bytes, AsyncPushCallback cb) {
+void DiskBackedQueue::PushAsync(Chunk, AsyncPushCallback cb) {
   cb(std::make_error_code(std::errc::function_not_supported));
 }
 
