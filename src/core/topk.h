@@ -59,21 +59,21 @@ class TOPK {
   friend class TOPKTest;
 
  public:
-  // Initializes a Top-K tracking sketch with the specified dimensions.
-  //
-  // mr: Pointer to the memory resource used for allocations (MUST NOT be null).
-  // k: Maximum number of most frequent items to maintain in the min-heap.
-  // width: Number of counter buckets per row in the hash grid (default: 8).
-  // depth: Number of independent hash functions (rows) used (default: 7).
-  // decay: Probability multiplier for exponential decay (must be 0.0 to 1.0, default: 0.9).
-  TOPK(PMR_NS::memory_resource* mr, uint32_t k, uint32_t width = kDefaultWidth,
-       uint32_t depth = kDefaultDepth, double decay = kDefaultDecay);
+  // Constructs an empty, uninitialized TOPK bound to mr. This is the only constructor; it
+  // never allocates and never throws. Call Init() before use.
+  explicit TOPK(PMR_NS::memory_resource* mr);
 
   TOPK(const TOPK&) = delete;
   TOPK& operator=(const TOPK&) = delete;
   TOPK(TOPK&& other) noexcept;
   TOPK& operator=(TOPK&& other) noexcept;
   ~TOPK() = default;
+
+  // Initializes this sketch with the given dimensions. Must be called exactly once, right
+  // after construction, on an otherwise-empty TOPK. May throw std::bad_alloc; on failure this
+  // object is left unchanged.
+  void Init(uint32_t k, uint32_t width = kDefaultWidth, uint32_t depth = kDefaultDepth,
+            double decay = kDefaultDecay);
 
   static constexpr double kDefaultDecay = 0.9;
   static constexpr uint32_t kDefaultWidth = 8;
@@ -224,10 +224,10 @@ class TOPK {
   void HeapifyUp(size_t index);
   void HeapifyDown(size_t index);
 
-  uint32_t k_;      // Number of top items to track
-  uint32_t width_;  // Hash table width (buckets per row)
-  uint32_t depth_;  // Hash table depth (number of rows)
-  double decay_;    // Decay constant (0.0-1.0, typically 0.9)
+  uint32_t k_ = 0;      // Number of top items to track
+  uint32_t width_ = 0;  // Hash table width (buckets per row)
+  uint32_t depth_ = 0;  // Hash table depth (number of rows)
+  double decay_ = 0.0;  // Decay constant (0.0-1.0, typically 0.9)
 
   // Pointer to the active decay lookup table. For the default decay (0.9), this points to
   // a process-wide shared static table (32KB, allocated once). For custom (non-default) decay

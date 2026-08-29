@@ -34,32 +34,53 @@ const std::array<double, TOPK::kDecayLookupSize>& GetDefaultDecayTable() {
 
 }  // namespace
 
-TOPK::TOPK(PMR_NS::memory_resource* mr, uint32_t k, uint32_t width, uint32_t depth, double decay)
-    : k_(k),
-      width_(width),
-      depth_(depth),
-      decay_(decay),
-      counters_(static_cast<size_t>(width) * depth, 0, PMR_NS::polymorphic_allocator<uint32_t>(mr)),
+TOPK::TOPK(PMR_NS::memory_resource* mr)
+    : counters_(PMR_NS::polymorphic_allocator<uint32_t>(mr)),
       min_heap_(PMR_NS::polymorphic_allocator<HeapItem>(mr)) {
   DCHECK(mr != nullptr);
-  DCHECK_GT(k_, 0u);
-  DCHECK_GT(width_, 0u);
-  DCHECK_GT(depth_, 0u);
-  DCHECK_GE(decay_, 0.0);
-  DCHECK_LE(decay_, 1.0);
-  min_heap_.reserve(k_);
+}
 
-  if (std::abs(decay_ - TOPK::kDefaultDecay) < TOPK::kDecayEpsilon) {
+void TOPK::Init(uint32_t k, uint32_t width, uint32_t depth, double decay) {
+  // Called exactly once, right after construction: no previous state to preserve.
+  DCHECK(counters_.empty());
+  DCHECK(min_heap_.empty());
+  DCHECK_GT(k, 0u);
+  DCHECK_GT(width, 0u);
+  DCHECK_GT(depth, 0u);
+  DCHECK_GE(decay, 0.0);
+  DCHECK_LE(decay, 1.0);
+
+  // Build the new state in locals first; only commit once every allocation below has
+  // succeeded, so a failure here leaves *this completely unchanged.
+  std::vector<uint32_t, PMR_NS::polymorphic_allocator<uint32_t>> new_counters(
+      static_cast<size_t>(width) * depth, 0, counters_.get_allocator());
+  std::vector<HeapItem, PMR_NS::polymorphic_allocator<HeapItem>> new_heap(
+      min_heap_.get_allocator());
+  new_heap.reserve(k);
+
+  const std::array<double, kDecayLookupSize>* new_lookup;
+  std::unique_ptr<std::array<double, kDecayLookupSize>> new_custom_table;
+  if (std::abs(decay - TOPK::kDefaultDecay) < TOPK::kDecayEpsilon) {
     // default decay value: use shared static table to save memory and initialization time
-    decay_lookup_ = &GetDefaultDecayTable();
+    new_lookup = &GetDefaultDecayTable();
   } else {
     // custom decay value: build a dedicated table for this instance
-    custom_decay_table_ = std::make_unique<std::array<double, TOPK::kDecayLookupSize>>();
+    new_custom_table = std::make_unique<std::array<double, TOPK::kDecayLookupSize>>();
     for (size_t i = 0; i < TOPK::kDecayLookupSize; ++i) {
-      (*custom_decay_table_)[i] = std::pow(decay_, static_cast<double>(i));
+      (*new_custom_table)[i] = std::pow(decay, static_cast<double>(i));
     }
-    decay_lookup_ = custom_decay_table_.get();
+    new_lookup = new_custom_table.get();
   }
+
+  // Nothing below can throw.
+  k_ = k;
+  width_ = width;
+  depth_ = depth;
+  decay_ = decay;
+  counters_.swap(new_counters);
+  min_heap_.swap(new_heap);
+  custom_decay_table_ = std::move(new_custom_table);
+  decay_lookup_ = custom_decay_table_ ? custom_decay_table_.get() : new_lookup;
 }
 
 TOPK::TOPK(TOPK&& other) noexcept
