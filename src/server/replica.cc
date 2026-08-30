@@ -1120,6 +1120,8 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
 
   acks_fb_ = fb2::Fiber("shard_acks", &DflyShardReplica::StableSyncDflyAcksFb, this, cntx);
   TransactionData tx_data;
+  auto next_progress_log = std::chrono::steady_clock::now() + std::chrono::seconds{1};
+  uint64_t previous_offset = journal_rec_executed_.load(std::memory_order_relaxed);
   while (tx_reader.NextTxData(&reader, cntx, &tx_data)) {
     DVLOG(3) << "Lsn: " << tx_data.lsn;
 
@@ -1135,7 +1137,13 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
       }
     } else {
+      auto start = std::chrono::steady_clock::now();
       const bool is_successful = ExecuteTx(std::move(tx_data), cntx);
+      auto elapsed = std::chrono::steady_clock::now() - start;
+      if (elapsed > std::chrono::milliseconds{10}) {
+        VLOG(1) << "Flow " << flow_id_ << " ExecuteTx took "
+                << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << "ms";
+      }
       if (is_successful) {
         // We only increment upon successful execution of the transaction.
         // The reason for this is that during partial sync we sent this
@@ -1155,6 +1163,14 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
       }
     }
 
+    auto now = std::chrono::steady_clock::now();
+    if (now >= next_progress_log) {
+      uint64_t current_offset = journal_rec_executed_.load(std::memory_order_relaxed);
+      VLOG(1) << "Flow " << flow_id_ << " stable-sync progress: " << current_offset << " LSN, "
+              << current_offset - previous_offset << " records/sec";
+      previous_offset = current_offset;
+      next_progress_log = now + std::chrono::seconds{1};
+    }
     shard_replica_waker_.notifyAll();
   }
 }

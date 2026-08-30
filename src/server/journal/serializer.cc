@@ -4,6 +4,7 @@
 
 #include "server/journal/serializer.h"
 
+#include <chrono>
 #include <system_error>
 
 #include "base/logging.h"
@@ -102,8 +103,15 @@ std::error_code JournalReader::EnsureRead(size_t num) {
   buf_.EnsureCapacity(remainder);
 
   // Try reading at least how much we need, but possibly more
+  auto start = std::chrono::steady_clock::now();
   uint64_t read;
   SET_OR_RETURN(source_->ReadAtLeast(buf_.AppendBuffer(), remainder), read);
+  auto elapsed = std::chrono::steady_clock::now() - start;
+  if (elapsed > std::chrono::milliseconds{10}) {
+    VLOG(1) << "Journal socket read took "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << "ms for "
+            << remainder << " bytes";
+  }
 
   // Happens on end of stream (for example, a too-small string buffer or a closed socket)
   if (read < remainder) {

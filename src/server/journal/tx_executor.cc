@@ -6,6 +6,8 @@
 
 #include <absl/strings/match.h>
 
+#include <chrono>
+
 #include "base/logging.h"
 #include "server/execution_state.h"
 #include "server/journal/serializer.h"
@@ -99,9 +101,15 @@ bool TransactionReader::NextTxData(JournalReader* reader, ExecutionState* cntx,
     return false;
   }
   journal::ParsedEntry entry;
+  auto start = std::chrono::steady_clock::now();
   if (auto ec = reader->ReadEntry(&entry); ec) {
     cntx->ReportError(ec);
     return false;
+  }
+  auto elapsed = std::chrono::steady_clock::now() - start;
+  if (elapsed > std::chrono::milliseconds{10}) {
+    VLOG(1) << "Journal entry read and parse took "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << "ms";
   }
 
   // When LSN opcode is sent master does not increase journal lsn.
