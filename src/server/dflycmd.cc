@@ -754,7 +754,11 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
 
   LSN partial_lsn = flow->start_partial_sync_at.value_or(0);
   JournalStreamer::Config config{
-      .should_sent_lsn = true, .init_from_stable_sync = true, .start_partial_sync_at = partial_lsn};
+      .should_sent_lsn = true,
+      .init_from_stable_sync = true,
+      .start_partial_sync_at = partial_lsn,
+      .flow_id = shard->shard_id(),
+  };
   flow->streamer.reset(new JournalStreamer(exec_st, config));
   flow->streamer->Start(flow->conn->socket());
 

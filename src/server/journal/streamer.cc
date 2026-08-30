@@ -133,6 +133,11 @@ void JournalStreamer::ConsumeJournalChange(const JournalChangeItem& item) {
 
   DCHECK_GT(item.journal_item.lsn, last_lsn_writen_);
   Write(item.journal_item.data);
+  if (config_.flow_id.has_value()) {
+    VLOG(1) << "Journal stream flow " << *config_.flow_id << " queued LSN " << item.journal_item.lsn
+            << ": item_bytes=" << item.journal_item.data.size()
+            << ", pending_bytes=" << pending_buf_.Size() << ", inflight_bytes=" << in_flight_bytes_;
+  }
   time_t now = time(nullptr);
   last_lsn_writen_ = item.journal_item.lsn;
   // TODO: to chain it to the previous Write call.
@@ -268,6 +273,10 @@ void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms
       continue;
     }
 
+    if (config_.flow_id.has_value()) {
+      VLOG(1) << "Journal stream flow " << *config_.flow_id
+              << " periodic flush: pending_bytes=" << pending_buf_.Size();
+    }
     AsyncWrite(true);
   }
 }
@@ -276,6 +285,11 @@ void JournalStreamer::AsyncWrite(bool force_send) {
   // Stable sync or RestoreStreamer replication can't write data until
   // previous AsyncWriter finished.
   if (in_flight_bytes_ > 0) {
+    if (config_.flow_id.has_value()) {
+      VLOG(2) << "Journal stream flow " << *config_.flow_id
+              << " deferred write: pending_bytes=" << pending_buf_.Size()
+              << ", inflight_bytes=" << in_flight_bytes_;
+    }
     return;
   }
 
@@ -283,6 +297,11 @@ void JournalStreamer::AsyncWrite(bool force_send) {
   // threshold before writing data.
   if (config_.init_from_stable_sync && !force_send &&
       pending_buf_.FrontBufSize() < replication_dispatch_threshold) {
+    if (config_.flow_id.has_value()) {
+      VLOG(2) << "Journal stream flow " << *config_.flow_id
+              << " deferred below dispatch threshold: front_bytes=" << pending_buf_.FrontBufSize()
+              << ", threshold=" << replication_dispatch_threshold;
+    }
     return;
   }
 
@@ -291,6 +310,15 @@ void JournalStreamer::AsyncWrite(bool force_send) {
   in_flight_bytes_ = cur_buf.mem_size;
   total_sent_ += in_flight_bytes_;
   last_async_write_time_ = base::CycleClock::Now();
+  async_write_start_ = chrono::steady_clock::now();
+
+  if (config_.flow_id.has_value()) {
+    VLOG(1) << "Journal stream flow " << *config_.flow_id
+            << " async write start: bytes=" << in_flight_bytes_
+            << ", entries=" << cur_buf.buf.size()
+            << ", reason=" << (force_send ? "periodic flush" : "dispatch threshold")
+            << ", pending_bytes=" << pending_buf_.Size();
+  }
 
   ServerState::tlocal()->GetEgressThrottler().Record(in_flight_bytes_, false);
 
@@ -308,6 +336,14 @@ void JournalStreamer::AsyncWrite(bool force_send) {
 
 void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
   DCHECK_EQ(in_flight_bytes_, len);
+
+  auto elapsed = chrono::steady_clock::now() - async_write_start_;
+  if (config_.flow_id.has_value()) {
+    VLOG(1) << "Journal stream flow " << *config_.flow_id << " async write complete: bytes=" << len
+            << ", elapsed_ms=" << chrono::duration_cast<chrono::milliseconds>(elapsed).count()
+            << ", result=" << (ec ? ec.message() : "ok")
+            << ", pending_bytes_before_pop=" << pending_buf_.Size();
+  }
 
   DVLOG(3) << "Completing " << in_flight_bytes_;
   in_flight_bytes_ = 0;

@@ -24,6 +24,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
     bool should_sent_lsn = false;
     bool init_from_stable_sync = false;
     LSN start_partial_sync_at = 0;
+    std::optional<uint32_t> flow_id;
   };
 
   JournalStreamer(ExecutionState* cntx, Config config);
@@ -99,6 +100,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   // Last time we sent async data, as base::CycleClock::Now() cycles.
   uint64_t last_async_write_time_ = 0;
+  std::chrono::steady_clock::time_point async_write_start_;
   time_t last_lsn_time_ = 0;
   LSN last_lsn_writen_ = 0;
   util::fb2::EventCount waker_;

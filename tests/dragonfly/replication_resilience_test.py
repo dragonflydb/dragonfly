@@ -728,7 +728,9 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     In parallel, connect a replica, so that these SETEX commands write their custom journal log.
     This makes sure that no Fiber context switch while inside a shard callback.
     """
-    instance_args = dict(vmodule="replica=1,dflycmd=2,journal_slice=2,serializer=1,tx_executor=1")
+    instance_args = dict(
+        vmodule="replica=1,dflycmd=2,journal_slice=2,serializer=1,streamer=2,tx_executor=1"
+    )
     master = df_factory.create(**instance_args)
     replica = df_factory.create(**instance_args)
     df_factory.start_all([master, replica])
