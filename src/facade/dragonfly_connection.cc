@@ -1259,6 +1259,7 @@ unsigned Connection::GetSendWaitTimeSec() const {
 }
 
 std::error_code Connection::FlushReplies() {  // NOLINT must not be const due to flush side effect
+  DFLY_TRACY_ZONE("Conn.FlushReplies");
   DCHECK(reply_builder_);
   reply_builder_->Flush();
   return reply_builder_->GetError();
@@ -1677,7 +1678,8 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
       ++local_stats_.cmds;
       cc_->sync_dispatch = true;
       {
-        DFLY_TRACY_ZONE("V1.Dispatch");  // sync DispatchCommand - may preempt (cmd-dependent)
+        DFLY_TRACY_ZONE_FORENSIC("V1.Dispatch");
+        // Sync DispatchCommand - may preempt (cmd-dependent).
         invoke_cb();
       }
       cc_->sync_dispatch = false;
@@ -2064,10 +2066,12 @@ bool Connection::ShouldEndAsyncFiber(const MessageHandle& msg) {
 }
 
 void Connection::SquashPipeline() {
+  DFLY_TRACY_ZONE("V1.Squash.Pipeline");
   DCHECK_EQ(GetPendingMessageCount(), parsed_cmd_q_len_);
   DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
   ConnectionMemoryTracker memory_tracker(this);
   unsigned pipeline_count = std::min<uint32_t>(parsed_cmd_q_len_, pipeline_squash_limit_cached);
+  DFLY_TRACY_ZONE_VALUE(static_cast<uint64_t>(pipeline_count));
   auto& conn_stats = tl_facade_stats->conn_stats;
 
   uint64_t start = CycleClock::Now();
@@ -2077,8 +2081,13 @@ void Connection::SquashPipeline() {
   // It must be set before DispatchSquashedBatch, which can preempt on shard hops.
   cc_->async_dispatch = true;
 
-  uint32_t squashed =
-      service_->DispatchSquashedBatch(parsed_to_execute_, pipeline_count, cc_.get(), nullptr);
+  uint32_t squashed = 0;
+  {
+    DFLY_TRACY_ZONE("V1.Squash.Dispatch");
+    squashed =
+        service_->DispatchSquashedBatch(parsed_to_execute_, pipeline_count, cc_.get(), nullptr);
+    DFLY_TRACY_ZONE_VALUE(static_cast<uint64_t>(squashed));
+  }
 
   // Nothing was squashed (the head command can't join a batch, e.g. MULTI/EXEC, EVAL,
   // subscribe, blocking, or unknown). Hand it off to regular dispatch without flushing or
@@ -2093,6 +2102,7 @@ void Connection::SquashPipeline() {
   // Send all replies under a ReplyScope before releasing the commands.
   // This allows the reply builder to flush without copies
   {
+    DFLY_TRACY_ZONE("V1.Squash.Reply");
     SinkReplyBuilder::ReplyScope scope(reply_builder_.get());
     auto* cmd = parsed_head_;
     for (unsigned i = 0; i < squashed && cmd; i++, cmd = cmd->next) {
@@ -2101,27 +2111,41 @@ void Connection::SquashPipeline() {
       std::optional<SinkReplyBuilder::ScopePause> pause;
       if (cmd->IsSuspendedReply())
         pause.emplace(reply_builder_.get());
-      cmd->SendReply();
+      {
+        DFLY_TRACY_ZONE_FORENSIC("V1.Squash.Reply.Send");
+        cmd->SendReply();
+      }
       conn_stats.pipelined_wait_latency += CycleClock::ToUsec(start - cmd->parsed_cycle);
     }
   }
 
-  for (unsigned i = 0; i < squashed && parsed_head_; ++i) {
-    auto* current = parsed_head_;
-    auto* next = current->next;
-    ReleasePipelinedCommand(current);
-    AdvanceParsedHead(next);
+  {
+    DFLY_TRACY_ZONE("V1.Squash.Release");
+    for (unsigned i = 0; i < squashed && parsed_head_; ++i) {
+      auto* current = parsed_head_;
+      auto* next = current->next;
+      {
+        DFLY_TRACY_ZONE_FORENSIC("V1.Squash.Release.Command");
+        ReleasePipelinedCommand(current);
+      }
+      AdvanceParsedHead(next);
+    }
   }
-  DCHECK_GE(dispatch_waiting_count_, squashed);
-  dispatch_waiting_count_ -= squashed;  // the squashed run was waiting; it is now fully handled
-  parsed_to_execute_ = parsed_head_;
 
-  local_stats_.cmds += squashed;
-  last_interaction_ = time(nullptr);
+  {
+    DFLY_TRACY_ZONE("V1.Squash.AdvanceAndDispatchStats");
+    DCHECK_GE(dispatch_waiting_count_, squashed);
+    dispatch_waiting_count_ -= squashed;  // the squashed run was waiting; it is now fully handled
+    parsed_to_execute_ = parsed_head_;
+
+    local_stats_.cmds += squashed;
+    last_interaction_ = time(nullptr);
+  }
 
   // Flush if no new commands appeared while we dispatched. The released commands were already
   // subtracted from parsed_cmd_q_len_, so add them back for the comparison.
   if (parsed_cmd_q_len_ + squashed == pipeline_count || always_flush_pipeline_cached) {
+    DFLY_TRACY_ZONE("V1.Squash.Flush");
     uint64_t flush_start_cycle = CycleClock::Now();
     reply_builder_->Flush();
     conn_stats.pipeline_dispatch_flush_count++;
@@ -2447,7 +2471,8 @@ void Connection::AsyncFiber() {
             << ", async_dispatch_quota: " << async_dispatch_quota
             << ", dispatch_q_cmd_processed: " << dispatch_q_cmd_processed;
         {
-          DFLY_TRACY_ZONE("V1.Dispatch");  // DispatchCommand (ONLY_SYNC) - may preempt
+          DFLY_TRACY_ZONE_FORENSIC("V1.Dispatch");
+          // DispatchCommand (ONLY_SYNC) may preempt.
           ProcessPipelineCommandV1();
         }
         dispatch_q_cmd_processed = 0;
@@ -2928,29 +2953,37 @@ std::shared_ptr<const TlsCertInfo> Connection::GetTlsCertInfo() const {
 }
 
 void Connection::RefreshConnectionMemoryUsage() {
+  DFLY_TRACY_ZONE("Conn.Memory.Refresh");
   if (!conn_stats_registered_)
     return;
 
   DCHECK(socket());
   DCHECK_EQ(socket()->proactor(), ProactorBase::me());
 
-  size_t current = account_connection_memory_ ? GetMemoryUsage() : 0;
+  size_t current{};
+  {
+    DFLY_TRACY_ZONE("Conn.Memory.ComputeUsage");
+    current = account_connection_memory_ ? GetMemoryUsage() : 0;
+  }
   ConnectionStats& conn_stats = GetLocalConnStats();
 
-  if (current >= accounted_connection_memory_bytes_) {
-    conn_stats.connection_memory_bytes += current - accounted_connection_memory_bytes_;
-  } else {
-    const size_t delta = accounted_connection_memory_bytes_ - current;
-    if (ABSL_PREDICT_FALSE(delta > conn_stats.connection_memory_bytes)) {
-      LOG(DFATAL) << CONN_ID << "Connection memory accounting underflow: total="
-                  << conn_stats.connection_memory_bytes << " delta=" << delta;
-      conn_stats.connection_memory_bytes = 0;
+  {
+    DFLY_TRACY_ZONE("Conn.Memory.ApplyUsage");
+    if (current >= accounted_connection_memory_bytes_) {
+      conn_stats.connection_memory_bytes += current - accounted_connection_memory_bytes_;
     } else {
-      conn_stats.connection_memory_bytes -= delta;
+      const size_t delta = accounted_connection_memory_bytes_ - current;
+      if (ABSL_PREDICT_FALSE(delta > conn_stats.connection_memory_bytes)) {
+        LOG(DFATAL) << CONN_ID << "Connection memory accounting underflow: total="
+                    << conn_stats.connection_memory_bytes << " delta=" << delta;
+        conn_stats.connection_memory_bytes = 0;
+      } else {
+        conn_stats.connection_memory_bytes -= delta;
+      }
     }
-  }
 
-  accounted_connection_memory_bytes_ = current;
+    accounted_connection_memory_bytes_ = current;
+  }
 }
 
 void Connection::SetConnectionMemoryAccounting(bool enabled) {
@@ -3164,10 +3197,12 @@ void Connection::LogTrafficV2(ParsedCommand* cmd) {
 }
 
 bool Connection::SquashPipelineV2() {
+  DFLY_TRACY_ZONE("V2.Squash.Pipeline");
   // vectorized squash phase: pack multiple commands and dispatch at once.
   // dispatch_waiting_count_ is the exact length of the run starting at parsed_to_execute_, so the
   // squash works even when earlier commands are still in flight.
   auto& conn_stats = tl_facade_stats->conn_stats;
+  DFLY_TRACY_ZONE_VALUE(static_cast<uint64_t>(dispatch_waiting_count_));
 
   uint64_t dispatch_start = CycleClock::Now();
   fiber_park_spot_ = FiberParkSpot::kSquashHop;
@@ -3181,9 +3216,13 @@ bool Connection::SquashPipelineV2() {
   // FunctionRef is non-owning. Keep log_command and the log_command_ref alive through the
   // synchronous dispatch.
   absl::FunctionRef<void(ParsedCommand*)> log_command_ref = log_command;
-  unsigned squashed =
-      service_->DispatchSquashedBatch(parsed_to_execute_, dispatch_waiting_count_, cc_.get(),
-                                      log_traffic ? &log_command_ref : nullptr);
+  unsigned squashed = 0;
+  {
+    DFLY_TRACY_ZONE("V2.Squash.Dispatch");
+    squashed = service_->DispatchSquashedBatch(parsed_to_execute_, dispatch_waiting_count_,
+                                               cc_.get(), log_traffic ? &log_command_ref : nullptr);
+    DFLY_TRACY_ZONE_VALUE(static_cast<uint64_t>(squashed));
+  }
   cc_->sync_dispatch = false;
   fiber_park_spot_ = FiberParkSpot::kNone;
 
@@ -3192,16 +3231,19 @@ bool Connection::SquashPipelineV2() {
 
   // Like V1's SquashPipeline, sample once before the blocking squash and attribute it to every
   // squashed command's parse->dispatch wait.
-  for (unsigned i = 0; i < squashed; i++) {
-    auto usec = CycleClock::ToUsec(dispatch_start - parsed_to_execute_->parsed_cycle);
-    conn_stats.pipelined_wait_latency += usec;
-    AdvanceToExecute();
-  }
+  {
+    DFLY_TRACY_ZONE("V2.Squash.AdvanceAndDispatchStats");
+    for (unsigned i = 0; i < squashed; i++) {
+      auto usec = CycleClock::ToUsec(dispatch_start - parsed_to_execute_->parsed_cycle);
+      conn_stats.pipelined_wait_latency += usec;
+      AdvanceToExecute();
+    }
 
-  conn_stats.pipeline_dispatch_calls++;
-  conn_stats.pipeline_dispatch_commands += squashed;
-  local_stats_.cmds += squashed;
-  last_interaction_ = time(nullptr);
+    conn_stats.pipeline_dispatch_calls++;
+    conn_stats.pipeline_dispatch_commands += squashed;
+    local_stats_.cmds += squashed;
+    last_interaction_ = time(nullptr);
+  }
   return true;
 }
 
@@ -3264,11 +3306,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
       DVLOG(2) << CONN_ID << "Squashing pipeline " << dispatch_waiting_count_ << " commands "
                << pending_input_ << " " << GetUnreadInputLen();
 
-      bool squashed;
-      {
-        DFLY_TRACY_ZONE("V2.Squash");
-        squashed = SquashPipelineV2();
-      }
+      bool squashed = SquashPipelineV2();
       if (squashed) {
         // - This helps with throughput. Explanation:
         //   when we suspend the thread calls io-callbacks that fill up the input buffer.
@@ -3288,7 +3326,8 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
     if (cmd->IsDeferredReply() && cmd->CanReply()) {
       if (is_head) {
         {
-          DFLY_TRACY_ZONE("V2.SendReply");  // a suspended (coroutine) reply may preempt here
+          DFLY_TRACY_ZONE_FORENSIC("V2.SendReply");
+          // A suspended (coroutine) reply may preempt here.
           cmd->SendReply();
         }
         retire_head();
@@ -3345,10 +3384,10 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
     absl::FunctionRef<void(ParsedCommand*)> log_command_ref = log_command;
     DispatchResult dispatch_res = DispatchResult::OK;
     {
-      DFLY_TRACY_ZONE("V2.Dispatch");
+      DFLY_TRACY_ZONE_FORENSIC("V2.Dispatch");
       // Attach the command verb (GET/SET/...) so the trace shows per-command execution cost.
       if (cmd->size() > 0)
-        DFLY_TRACY_ZONE_TEXT_SV(cmd->Front());
+        DFLY_TRACY_ZONE_FORENSIC_TEXT_SV(cmd->Front());
       dispatch_res =
           service_->DispatchCommandSimple(cmd, mode, log_traffic ? &log_command_ref : nullptr);
     }
@@ -3405,6 +3444,7 @@ bool Connection::ReplyBatch() {
   ParsedCommand* release_head = parsed_head_;
   unsigned replied = 0;
   {
+    DFLY_TRACY_ZONE("V2.Reply.Send");
     SinkReplyBuilder::ReplyScope scope(reply_builder_.get());
     while (HasInFlightCommands() && parsed_head_->CanReply()) {
       current_wait_.reset();  // Clear the subscription before moving to the next command
@@ -3427,7 +3467,7 @@ bool Connection::ReplyBatch() {
       //   SendCheckpoint's HasInFlightCommands() check) and waits for the write to land.
       // - A non-suspended reply just copies an already-built payload and can't preempt.
       {
-        DFLY_TRACY_ZONE("V2.SendReply");
+        DFLY_TRACY_ZONE_FORENSIC("V2.Reply.SendOne");
         cmd->SendReply();
       }
       fiber_park_spot_ = FiberParkSpot::kNone;
@@ -3440,11 +3480,15 @@ bool Connection::ReplyBatch() {
   }
 
   // Release all the commands that replied
-  for (unsigned i = 0; i < replied; ++i) {
-    auto* next = release_head->next;
-    ReleasePipelinedCommand(release_head);
-    release_head = next;
+  {
+    DFLY_TRACY_ZONE("V2.Reply.Release");
+    for (unsigned i = 0; i < replied; ++i) {
+      auto* next = release_head->next;
+      ReleasePipelinedCommand(release_head);
+      release_head = next;
+    }
   }
+  DFLY_TRACY_ZONE_VALUE(static_cast<uint64_t>(replied));
 
   if (reply_builder_->GetError())
     return false;
@@ -3471,11 +3515,15 @@ ParsedCommand* Connection::CreateParsedCommand() {
 }
 
 void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
+  DFLY_TRACY_ZONE_FORENSIC("Conn.Pipeline.Enqueue");
   DCHECK(cmd);
   cmd->next = nullptr;
   auto& conn_stats = tl_facade_stats->conn_stats;
 
-  cmd->FinalizeParsing();
+  {
+    DFLY_TRACY_ZONE_FORENSIC("Conn.Pipeline.Enqueue.Finalize");
+    cmd->FinalizeParsing();
+  }
 
   if (parsed_head_ == nullptr) {
     parsed_head_ = cmd;
@@ -3505,6 +3553,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
+  DFLY_TRACY_ZONE_FORENSIC("Conn.Pipeline.ReleasePipelined");
   auto& conn_stats = tl_facade_stats->conn_stats;
   conn_stats.pipelined_cmd_cnt++;
   uint64_t latency_usec = CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
@@ -3522,6 +3571,7 @@ void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
 }
 
 void Connection::ReleaseParsedCommand(ParsedCommand* cmd) {
+  DFLY_TRACY_ZONE_FORENSIC("Conn.Pipeline.ReleaseParsed");
   size_t used_mem = cmd->UsedMemory();
   auto& conn_stats = tl_facade_stats->conn_stats;
 
@@ -4305,7 +4355,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       // Count idle-await parks and the subset that waits on an in-flight reply.
       auto& cstats = GetLocalConnStats();
       ++cstats.pipeline_idle_parks;
-      if (HasInFlightCommands())
+      const bool wait_for_reply = HasInFlightCommands();
+      if (wait_for_reply)
         ++cstats.pipeline_reply_wait_parks;
 
       fiber_park_spot_ = FiberParkSpot::kIdleAwait;
@@ -4317,6 +4368,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
         // with Tracy "wait stacks" (call-stack sampling) to answer "how long am I waiting vs
         // working" without guessing.
         DFLY_TRACY_WAIT("V2.IdleWait");
+        DFLY_TRACY_ZONE_TEXT_SV(wait_for_reply ? "reply" : "input");
         io_event_.await([this] { return ShouldWakeIdle(); });
       }
       fiber_park_spot_ = FiberParkSpot::kNone;
