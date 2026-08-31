@@ -264,12 +264,12 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     double avg_sleep_usec = stats_.debt_sleep_count > 0 ? double(stats_.debt_sleep_usec_total) /
                                                               double(stats_.debt_sleep_count)
                                                         : 0;
-    LOG(INFO) << "[SNAPSHOT_THROTTLE_STATS] keys_total=" << stats_.keys_total
-              << " total_iterate_usec=" << total_usec
-              << " debt_sleep_count=" << stats_.debt_sleep_count
-              << " debt_sleep_usec_total=" << stats_.debt_sleep_usec_total
-              << " debt_sleep_pct_of_total=" << sleep_pct << " avg_sleep_usec=" << avg_sleep_usec
-              << " debt_cycles_paid_total=" << stats_.debt_cycles_paid_total;
+    LOG(ERROR) << "[SNAPSHOT_THROTTLE_STATS] keys_total=" << stats_.keys_total
+               << " total_iterate_usec=" << total_usec
+               << " debt_sleep_count=" << stats_.debt_sleep_count
+               << " debt_sleep_usec_total=" << stats_.debt_sleep_usec_total
+               << " debt_sleep_pct_of_total=" << sleep_pct << " avg_sleep_usec=" << avg_sleep_usec
+               << " debt_cycles_paid_total=" << stats_.debt_cycles_paid_total;
   }
 }
 
