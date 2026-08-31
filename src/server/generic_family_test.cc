@@ -1018,6 +1018,20 @@ TEST_F(GenericFamilyTest, SortStoreEmptyResult) {
   EXPECT_EQ(0, Run({"exists", "dest"}).GetInt()) << "empty SORT STORE must delete existing key";
 }
 
+TEST_F(GenericFamilyTest, SortStoreNotLastOption) {
+  // STORE may appear anywhere among the options; the destination must still be a transaction
+  // key, otherwise a cross-shard destination is silently never written.
+  Run({"rpush", "src", "b", "a", "c"});
+  for (string_view dst : {"d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8"}) {  // spans all shards
+    Run({"set", dst, "old"});
+    EXPECT_THAT(Run({"sort", "src", "store", dst, "alpha"}), IntArg(3)) << dst;
+    EXPECT_THAT(Run({"lrange", dst, "0", "-1"}), RespArray(ElementsAre("a", "b", "c"))) << dst;
+    EXPECT_THAT(Run({"sort", "src", "alpha", "limit", "0", "2", "store", dst, "desc"}), IntArg(2))
+        << dst;
+    EXPECT_THAT(Run({"lrange", dst, "0", "-1"}), RespArray(ElementsAre("c", "b"))) << dst;
+  }
+}
+
 TEST_F(GenericFamilyTest, SortStoreResetsExpiry) {
   // SORT set STORE dest, where dest has an expiry — dest expiry must be cleared.
   Run({"del", "src", "dest"});

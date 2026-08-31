@@ -1849,11 +1849,19 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs&
       }
 
       if (name == "SORT") {
-        if (args.size() >= 3) {
-          // SORT key ... STORE destkey
-          string_view opt = args[args.size() - 2];
+        // Options are order-independent, so walk them by arity instead of assuming STORE is the
+        // penultimate argument.
+        for (size_t i = 1; i + 1 < args.size();) {
+          string_view opt = args[i];
           if (absl::EqualsIgnoreCase(opt, "STORE")) {
-            bonus = args.size() - 1;
+            bonus = i + 1;
+            i += 2;
+          } else if (absl::EqualsIgnoreCase(opt, "LIMIT")) {
+            i += 3;
+          } else if (absl::EqualsIgnoreCase(opt, "BY") || absl::EqualsIgnoreCase(opt, "GET")) {
+            i += 2;
+          } else {
+            i += 1;
           }
         }
       }
