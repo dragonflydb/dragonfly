@@ -10,6 +10,8 @@
 #include "base/logging.h"
 #include "cluster_family.h"
 #include "cluster_utility.h"
+#include "facade/dragonfly_connection.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/socket_utils.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -30,6 +32,32 @@ using namespace facade;
 using namespace util;
 
 namespace dfly::cluster {
+
+namespace {
+
+#ifndef NDEBUG
+// Debug-only: called when a client pause times out waiting for connections to finish
+// dispatching. Walks every connection on the given listeners and, for any that still owe a
+// DispatchTracker checkpoint, logs Connection::DebugCheckpointState()'s causal classification
+// (dropped / leaked / livelock / executing) so the log already has the answer without needing to
+// reproduce and attach a debugger. No-op (empty body) in non-debug builds.
+void DumpCheckpointDiagnostics(absl::Span<facade::Listener* const> listeners) {
+  for (auto* listener : listeners) {
+    listener->TraverseConnections([](unsigned, util::Connection* conn) {
+      auto* fconn = static_cast<facade::Connection*>(conn);
+      string state = fconn->DebugCheckpointState();
+      if (!state.empty()) {
+        LOG(WARNING) << "pause-timeout diagnostic: " << fconn->DebugInfo() << " " << state;
+      }
+    });
+  }
+}
+#else
+void DumpCheckpointDiagnostics(absl::Span<facade::Listener* const>) {
+}
+#endif
+
+}  // namespace
 
 class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  public:
@@ -384,6 +412,11 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
                   nullptr, ClientPause::ALL, is_pause_in_progress);
 
+  if (!pause_fb_opt) {
+    // Dump before the DCHECK below can abort - this is the one build (debug) where both are
+    // compiled in, and the DCHECK must not shadow the diagnostic that explains it.
+    DumpCheckpointDiagnostics(server_family_->GetNonPriviligedListeners());
+  }
   DCHECK(pause_fb_opt);
   if (!pause_fb_opt) {
     auto err = absl::StrCat("Migration finalization time out ", cf_->MyID(), " : ",

@@ -2205,6 +2205,42 @@ string Connection::DebugInfo() const {
   return info;
 }
 
+#ifndef NDEBUG
+string Connection::DebugCheckpointState() const {
+  const bool queued = any_of(dispatch_q_.begin(), dispatch_q_.end(),
+                             [](const MessageHandle& m) { return m.IsCheckPoint(); });
+  const bool deferred = !deferred_checkpoints_.empty();
+  const bool in_flight = HasInFlightCommands();
+
+  if (!queued && !deferred)
+    return {};  // nothing outstanding on this connection
+
+  string info = "{cause=";
+  if (queued && !in_flight) {
+    // Still sitting in dispatch_q_ despite nothing async pending - the control path itself isn't
+    // draining, not a checkpoint-release problem at all.
+    absl::StrAppend(&info, "dropped");
+  } else if (deferred && !in_flight) {
+    // The release condition already holds, yet ReleaseDeferredCheckpoints() wasn't called even
+    // though it sits right next to this check. Direct proof of a leak, no timing needed.
+    absl::StrAppend(&info, "leaked");
+  } else if (deferred && in_flight && parsed_head_ && parsed_head_->CanReply()) {
+    // The transaction's own completion flag is already set, but our dispatch bookkeeping never
+    // consumed it. Not slow - stuck.
+    absl::StrAppend(&info, "livelock");
+  } else {
+    // The in-flight command genuinely hasn't finished yet. Real contention/latency, not a bug in
+    // this mechanism.
+    absl::StrAppend(&info, "executing");
+  }
+  absl::StrAppend(&info, ", queued=", queued, ", deferred=", deferred_checkpoints_.size(),
+                  ", in_flight=", in_flight, ", rechecks=", inflight_recheck_misses_,
+                  ", can_reply=", parsed_head_ ? parsed_head_->CanReply() : false,
+                  ", park=", static_cast<unsigned>(fiber_park_spot_), "}");
+  return info;
+}
+#endif
+
 bool Connection::ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op) {
   // Guard: Automatically subtract stats when this scope exits (via return or exception).
   absl::Cleanup stats_guard = [this, msg] { UpdateDispatchStats(*msg, false /* subtract */); };
@@ -4272,6 +4308,10 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     // run has drained.
     if (!HasInFlightCommands()) {
       ReleaseDeferredCheckpoints();
+#ifndef NDEBUG
+    } else if (!deferred_checkpoints_.empty()) {
+      ++inflight_recheck_misses_;
+#endif
     }
 
     // A protocol error detected by parse-in-proactor (which runs in the recv callback and cannot

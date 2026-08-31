@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import socket
 from binascii import crc_hqx
 from dataclasses import dataclass
 
@@ -12,13 +13,26 @@ from .instance import DflyInstance
 from .utility import tick_timer
 
 BASE_PORT = 30001
+# Kept below the kernel's ephemeral port range (starts at 32768 by default on Linux, see
+# /proc/sys/net/ipv4/ip_local_port_range). Without a ceiling this counter marches straight past
+# that boundary in a long repeat run and starts racing the OS's own automatic port allocator for
+# outbound connections, causing spurious "Address already in use" bind failures.
+MAX_PORT = 32000
+
+
+def _is_port_available(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("localhost", port)) != 0
 
 
 def monotonically_increasing_port_number():
     port = BASE_PORT
     while True:
-        yield port
-        port = port + 1
+        if _is_port_available(port):
+            yield port
+        port += 1
+        if port > MAX_PORT:
+            port = BASE_PORT
 
 
 # Create a generator object
