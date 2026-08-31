@@ -5,6 +5,7 @@
 #include "server/journal/streamer.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 
 #include <chrono>
@@ -60,7 +61,7 @@ uint32_t migration_buckets_sleep_usec_cached = 100;
 uint32_t replication_dispatch_threshold = 1500;
 uint32_t stalled_writer_base_period_ms = 10;
 
-void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
+void LogTcpSocketDiagnostics(util::FiberSocketBase* dest, std::string_view prefix = {}) {
   if (!dest) {
     return;
   }
@@ -72,10 +73,15 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
     return;
   }
 
+  int send_queue_bytes = -1;
+  if (ioctl(sockfd, TIOCOUTQ, &send_queue_bytes) != 0) {
+    send_queue_bytes = -1;
+  }
+
   struct tcp_info info;
   socklen_t info_len = sizeof(info);
   if (getsockopt(sockfd, IPPROTO_TCP, TCP_INFO, &info, &info_len) == 0) {
-    LOG_EVERY_T(INFO, 1) << "TCP socket diagnostics - "
+    LOG_EVERY_T(INFO, 1) << prefix << "TCP socket diagnostics - "
                          << "state: " << static_cast<int>(info.tcpi_state)
                          << ", ca_state: " << static_cast<int>(info.tcpi_ca_state)
                          << ", retransmits: " << static_cast<int>(info.tcpi_retransmits)
@@ -101,7 +107,8 @@ void LogTcpSocketDiagnostics(util::FiberSocketBase* dest) {
                          << ", reordering: " << info.tcpi_reordering
                          << ", rcv_rtt: " << info.tcpi_rcv_rtt
                          << ", rcv_space: " << info.tcpi_rcv_space
-                         << ", total_retrans: " << info.tcpi_total_retrans;
+                         << ", total_retrans: " << info.tcpi_total_retrans
+                         << ", send_queue_bytes: " << send_queue_bytes;
   } else {
     LOG_EVERY_T(INFO, 1) << "Failed to get TCP socket info: " << strerror(errno);
   }
@@ -265,10 +272,21 @@ void JournalStreamer::StalledDataWriterFiber(std::chrono::milliseconds period_ms
       }
     }
 
+    const auto now = chrono::steady_clock::now();
+    if (in_flight_bytes_ > 0) {
+      if (config_.flow_id.has_value() && now - async_write_start_ > chrono::milliseconds{100} &&
+          now - last_async_write_diagnostics_ >= chrono::seconds{1}) {
+        last_async_write_diagnostics_ = now;
+        LogTcpSocketDiagnostics(
+            dest_, absl::StrCat("Journal stream flow ", *config_.flow_id, " in-flight write: "));
+      }
+      continue;
+    }
+
     // We don't want to force async write to replicate if last data
     // was written recent. Data needs to be stalled for period_ms duration.
     const uint64_t period_cycles = base::CycleClock::FromUsec(period_ms.count() * 1000);
-    if (!pending_buf_.Size() || in_flight_bytes_ > 0 ||
+    if (!pending_buf_.Size() ||
         ((last_async_write_time_ + period_cycles) > base::CycleClock::Now())) {
       continue;
     }
@@ -311,6 +329,7 @@ void JournalStreamer::AsyncWrite(bool force_send) {
   total_sent_ += in_flight_bytes_;
   last_async_write_time_ = base::CycleClock::Now();
   async_write_start_ = chrono::steady_clock::now();
+  last_async_write_diagnostics_ = async_write_start_;
 
   if (config_.flow_id.has_value()) {
     VLOG(1) << "Journal stream flow " << *config_.flow_id
@@ -343,6 +362,10 @@ void JournalStreamer::OnCompletion(std::error_code ec, size_t len) {
             << ", elapsed_ms=" << chrono::duration_cast<chrono::milliseconds>(elapsed).count()
             << ", result=" << (ec ? ec.message() : "ok")
             << ", pending_bytes_before_pop=" << pending_buf_.Size();
+    if (elapsed > chrono::milliseconds{10}) {
+      LogTcpSocketDiagnostics(
+          dest_, absl::StrCat("Journal stream flow ", *config_.flow_id, " slow write: "));
+    }
   }
 
   DVLOG(3) << "Completing " << in_flight_bytes_;

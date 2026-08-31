@@ -101,6 +101,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   // Last time we sent async data, as base::CycleClock::Now() cycles.
   uint64_t last_async_write_time_ = 0;
   std::chrono::steady_clock::time_point async_write_start_;
+  std::chrono::steady_clock::time_point last_async_write_diagnostics_;
   time_t last_lsn_time_ = 0;
   LSN last_lsn_writen_ = 0;
   util::fb2::EventCount waker_;

@@ -1113,6 +1113,8 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
   }
 
   io::PrefixSource ps{prefix, Sock()};
+  VLOG(1) << "Flow " << flow_id_ << " stable-sync reader started: prefix_bytes=" << prefix.size()
+          << ", kernel_unread_bytes=" << GetSocketUnreadBytes();
 
   JournalReader reader{&ps, 0};
   DCHECK_GE(journal_rec_executed_, 1u);
@@ -1131,13 +1133,19 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     const auto read_elapsed = std::chrono::steady_clock::now() - read_start;
     const int kernel_unread_after = GetSocketUnreadBytes();
     if (read_elapsed > std::chrono::milliseconds{10}) {
+      const auto& read_stats = reader.LastReadStats();
       VLOG(1) << "Flow " << flow_id_ << " journal entry read: elapsed_ms="
               << std::chrono::duration_cast<std::chrono::milliseconds>(read_elapsed).count()
               << ", result=" << has_tx_data << ", kernel_unread_before=" << kernel_unread_before
               << ", kernel_unread_after=" << kernel_unread_after
               << ", reader_buffered_before=" << reader_buffered_before
               << ", reader_buffered_after=" << reader.BufferedBytes()
-              << ", reader_buffer_capacity=" << reader_buffer_capacity;
+              << ", reader_buffer_capacity=" << reader_buffer_capacity
+              << ", source_read_calls=" << read_stats.source_read_calls
+              << ", source_read_bytes=" << read_stats.source_read_bytes
+              << ", source_read_elapsed_ms="
+              << std::chrono::duration_cast<std::chrono::milliseconds>(read_stats.source_read_time)
+                     .count();
     }
     if (!has_tx_data)
       break;

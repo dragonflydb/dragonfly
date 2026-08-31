@@ -109,6 +109,9 @@ std::error_code JournalReader::EnsureRead(size_t num) {
   uint64_t read;
   SET_OR_RETURN(source_->ReadAtLeast(buf_.AppendBuffer(), remainder), read);
   auto elapsed = std::chrono::steady_clock::now() - start;
+  ++last_read_stats_.source_read_calls;
+  last_read_stats_.source_read_bytes += read;
+  last_read_stats_.source_read_time += elapsed;
   if (elapsed > std::chrono::milliseconds{10}) {
     VLOG(1) << "Journal socket read: elapsed_ms="
             << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
@@ -174,8 +177,22 @@ std::error_code JournalReader::ReadString(io::MutableBytes buffer) {
         return ec;
       buf_.ReadAndConsume(remainder, remainder_buf_pos);
     } else {
+      const size_t buffered_before = buf_.InputLen();
+      const size_t capacity = buf_.Capacity();
+      auto start = std::chrono::steady_clock::now();
       uint64_t read;
       SET_OR_RETURN(source_->Read({remainder_buf_pos, remainder}), read);
+      auto elapsed = std::chrono::steady_clock::now() - start;
+      ++last_read_stats_.source_read_calls;
+      last_read_stats_.source_read_bytes += read;
+      last_read_stats_.source_read_time += elapsed;
+      if (elapsed > std::chrono::milliseconds{10}) {
+        VLOG(1) << "Journal direct payload read: elapsed_ms="
+                << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+                << ", required_bytes=" << remainder << ", received_bytes=" << read
+                << ", reader_buffered_before=" << buffered_before
+                << ", reader_buffer_capacity=" << capacity;
+      }
       if (read < remainder) {
         return make_error_code(errc::io_error);
       }
@@ -215,13 +232,19 @@ std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) 
 }
 
 std::error_code JournalReader::ReadEntry(journal::ParsedEntry* dest) {
+  last_read_stats_ = {};
   uint8_t int_op;
   SET_OR_RETURN(ReadUInt<uint8_t>(), int_op);
   journal::Op opcode = static_cast<journal::Op>(int_op);
 
   if (opcode == journal::Op::SELECT) {
     SET_OR_RETURN(ReadUInt<uint16_t>(), dbid_);
-    return ReadEntry(dest);
+    ReadStats select_read_stats = last_read_stats_;
+    std::error_code ec = ReadEntry(dest);
+    last_read_stats_.source_read_calls += select_read_stats.source_read_calls;
+    last_read_stats_.source_read_bytes += select_read_stats.source_read_bytes;
+    last_read_stats_.source_read_time += select_read_stats.source_read_time;
+    return ec;
   }
 
   dest->dbid = dbid_;

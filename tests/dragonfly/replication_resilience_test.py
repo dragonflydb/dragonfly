@@ -729,7 +729,10 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     This makes sure that no Fiber context switch while inside a shard callback.
     """
     instance_args = dict(
-        vmodule="replica=1,dflycmd=2,journal_slice=2,serializer=1,streamer=2,tx_executor=1"
+        vmodule=(
+            "replica=1,dflycmd=2,journal_slice=2,serializer=1,streamer=2,tx_executor=1,"
+            "uring_socket=2,epoll_socket=2"
+        )
     )
     master = df_factory.create(**instance_args)
     replica = df_factory.create(**instance_args)

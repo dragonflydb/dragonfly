@@ -36,6 +36,12 @@ class JournalWriter {
 // Like the writer, it automatically keeps track of the database index.
 struct JournalReader {
  public:
+  struct ReadStats {
+    size_t source_read_calls = 0;
+    size_t source_read_bytes = 0;
+    std::chrono::nanoseconds source_read_time{};
+  };
+
   // Initialize start database index.
   JournalReader(io::Source* source, DbIndex dbid);
 
@@ -51,6 +57,10 @@ struct JournalReader {
 
   size_t BufferCapacity() const {
     return buf_.Capacity();
+  }
+
+  const ReadStats& LastReadStats() const {
+    return last_read_stats_;
   }
 
  private:
@@ -70,6 +80,7 @@ struct JournalReader {
   io::Source* source_;
   base::IoBuf buf_;
   DbIndex dbid_;
+  ReadStats last_read_stats_;
 };
 
 }  // namespace dfly
