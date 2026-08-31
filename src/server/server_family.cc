@@ -650,7 +650,7 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
     } else {
       return cmd_cntx->SendError(kSyntaxErr);
     }
-  } else if (args.size() % 2 != 0) {
+  } else if (args.size() == 0 || args.size() % 2 != 0) {
     return cmd_cntx->SendError(kSyntaxErr);
   } else {
     for (size_t i = 0; i < args.size(); i += 2) {
