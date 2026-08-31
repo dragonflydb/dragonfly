@@ -848,8 +848,10 @@ uint64_t RmGeneric(uint64_t cursor, const ScanOpts& scan_opts, uint32_t* deleted
   return cursor;
 }
 
-OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireParams& params) {
+OpStatus OpExpire(OpArgs op_args, string_view key, const DbSlice::ExpireParams& params) {
   auto& db_slice = op_args.GetDbSlice();
+  op_args.db_cntx.is_omittable_operation = true;  // See DbSlice::DetermineOmitPossibility
+
   auto find_res = db_slice.FindMutable(op_args.db_cntx, key);
   if (!IsValid(find_res.it)) {
     return OpStatus::KEY_NOTFOUND;
@@ -861,7 +863,9 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   // If the value was deleted, replicate as DEL.
   // Else, replicate as PEXPIREAT with exact time.
   if (op_args.shard->journal() && res.ok()) {
-    if (res.value() == -1) {
+    if (find_res.omitted_journal) {
+      journal::ClearBuffer();
+    } else if (res.value() == -1) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     } else {
       auto time = absl::StrCat(res.value());

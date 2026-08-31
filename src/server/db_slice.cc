@@ -434,7 +434,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 144, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 152, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -454,6 +454,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(huff_encode_total);
   ADD(huff_encode_success);
   ADD(journal_omit);
+  ADD(serialize_skip);
   return *this;
 }
 
@@ -624,15 +625,15 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 
   auto it = Iterator(*res, StringOrView::FromView(key));
 
-  bool omitted = IsOmittableWrite(cntx, ChangeReq{it.GetInnerIt()});
-  if (!omitted)
+  auto omit = DetermineOmitPossibility(cntx, ChangeReq{it.GetInnerIt()});
+  if (!omit.skip_serialize)
     PreUpdateBlocking(cntx.db_index, it);
 
   // PreUpdate() might have caused a deletion of `it`
   if (res->IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, (*res)->second.MallocUsed());
 
-    return {{it, AutoUpdater{cntx.db_index, key, it, this}, false, omitted}};
+    return {{it, AutoUpdater{cntx.db_index, key, it, this}, false, omit.omit_journal}};
   } else {
     return OpStatus::KEY_NOTFOUND;
   }
@@ -751,8 +752,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   if (res.ok()) {
     Iterator it(*res, StringOrView::FromView(key));
 
-    bool omitted_journal = IsOmittableWrite(cntx, ChangeReq{it.GetInnerIt()});
-    if (!omitted_journal)
+    auto omit = DetermineOmitPossibility(cntx, ChangeReq{it.GetInnerIt()});
+    if (!omit.skip_serialize)
       PreUpdateBlocking(cntx.db_index, it);
 
     // PreUpdate() might have caused a deletion of `it`
@@ -760,7 +761,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
       return ItAndUpdater{.it = it,
                           .post_updater{cntx.db_index, key, it, this},
                           .is_new = false,
-                          .omitted_journal = omitted_journal};
+                          .omitted_journal = omit.omit_journal};
     } else {
       res = OpStatus::KEY_NOTFOUND;
     }
@@ -773,14 +774,18 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
 
   // Call change callbacks on the computed set of buckets that can be affected by the insert
+  bool skip_serialize = false;
   bool omit_journal = false;
   if (!change_cb_.empty()) {
     for (bool consistent = false; !consistent;) {
       auto bucket_set = db.prime.CVCUponInsert(key);
 
       // We skip calling callbacks, so the bucket set is consistent and we break
-      if (omit_journal = IsOmittableWrite(cntx, bucket_set); omit_journal)
+      if (auto omit = DetermineOmitPossibility(cntx, bucket_set); omit.skip_serialize) {
+        skip_serialize = true;
+        omit_journal = omit.omit_journal;
         break;
+      }
 
       CallChangeCallbacks(cntx.db_index, bucket_set);
 
@@ -878,7 +883,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
 
-  if (!omit_journal)
+  if (!skip_serialize)
     it.SetVersion(NextVersion());
 
   TouchTopKeysIfNeeded(key, db.sample_top_keys);
@@ -2148,26 +2153,27 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
     cb->OnChange(id, cr);
 }
 
-// We can omit the journal write if:
+// We can skip the forced snapshot serialization if:
 // 1. it supports mutation hints and uses only a single key
 // 2. there is a single eventually-consistent snapshot (i.e. replica full sync)
-// 3. there are no other journal consumers
-// 4. the snapshot did not reach the bucket yet
-bool DbSlice::IsOmittableWrite(const Context& cntx, const ChangeReq& req) {
+// 3. the snapshot did not reach the bucket yet
+// The journal write is additionally omitted only when the snapshot is the sole journal consumer.
+DbSlice::OmitDecision DbSlice::DetermineOmitPossibility(const Context& cntx, const ChangeReq& req) {
   if (!journal_omit_redundant_writes_)
-    return false;
+    return {};
 
-  bool omit_update = false;
+  OmitDecision res;
   if (cntx.is_omittable_operation && change_cb_.size() == 1) {
     auto gv = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
     uint64_t max_version = std::ranges::max(req.buckets(), {}, gv).GetVersion();
 
     auto* cb = change_cb_.front();
-    omit_update = cb->eventually_consistent_ && max_version < cb->snapshot_version_ &&
-                  journal::GetCallbackCount() == 1;
-    events_.journal_omit += unsigned(omit_update);
+    res.skip_serialize = cb->eventually_consistent_ && max_version < cb->snapshot_version_;
+    res.omit_journal = res.skip_serialize && journal::GetCallbackCount() == 1;
+    events_.serialize_skip += unsigned(res.skip_serialize);
+    events_.journal_omit += unsigned(res.omit_journal);
   }
-  return omit_update;
+  return res;
 }
 
 }  // namespace dfly

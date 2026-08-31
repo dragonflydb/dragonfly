@@ -87,6 +87,9 @@ struct SliceEvents {
   // how many journal omit optimizations were performed
   size_t journal_omit = 0;
 
+  // how many times the forced snapshot serialization was skipped (superset of journal_omit)
+  size_t serialize_skip = 0;
+
   uint64_t huff_encode_total = 0, huff_encode_success = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
@@ -600,8 +603,18 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
-  // Returns true if this write could be ignored during replication without losing consistency
-  bool IsOmittableWrite(const Context& cntx, const ChangeReq& req);
+  // Describes what events caused by a write during ongoing serialization can be safely skipped.
+  struct OmitDecision {
+    bool skip_serialize = false;  // Skip bucket serialization caused by on-change consumers
+    bool omit_journal = false;    // Skip emitting journal event
+  };
+
+  // Decides whether the forced snapshot serialization and/or the journal write can be skipped.
+  // In general, we serialize buckets just before a modification, even if the modified value is
+  // completely overwritten - this is wasteful. If the snapshot traversal loop has not yet reached
+  // the targets bucket, we can skip forced serialization, as it will be eventually serialized with
+  // the new value
+  OmitDecision DetermineOmitPossibility(const Context& cntx, const ChangeReq& req);
 
   enum class UpdateStatsMode : uint8_t {
     kReadStats,
