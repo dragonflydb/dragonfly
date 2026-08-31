@@ -164,6 +164,10 @@ async def test_client_kill_filters(df_factory):
         with pytest.raises(ResponseError):
             await admin_client.execute_command("CLIENT KILL TYPE badtype")
 
+        # Test zero-argument CLIENT KILL: must return syntax error, not kill everyone
+        with pytest.raises(ResponseError):
+            await admin_client.execute_command("CLIENT KILL")
+
         # Test MAXAGE 0: connections with age >= 0 (all connections) should be killed
         c4 = instance.client(retry=Retry(NoBackoff(), 0))
         await c4.ping()
