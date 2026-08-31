@@ -390,6 +390,10 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
 }
 
+TEST_F(SearchFamilyTest, InfoMissingIndexUsesRedisCompatibleError) {
+  EXPECT_THAT(Run({"FT.INFO", "missing-index"}), ErrArg("missing-index: no such index"));
+}
+
 // Regression for #7953: a zero-field index is a broken state (FT.INFO says "not found" while
 // FT._LIST lists it, and it doesn't survive serialization), so SCHEMA with at least one field
 // must be required unconditionally - not inferred from a heuristic over the skipped tokens.
@@ -401,7 +405,7 @@ TEST_F(SearchFamilyTest, CreateWithoutSchemaKeywordIsError) {
                    "TEXT", "timestamp", "NUMERIC", "SORTABLE"}),
               ErrArg(kMissingSchema));
   EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::IsEmpty());
-  EXPECT_THAT(Run({"ft.info", "idx_ts_test"}), ErrArg("Index with name 'idx_ts_test' not found"));
+  EXPECT_THAT(Run({"ft.info", "idx_ts_test"}), ErrArg("idx_ts_test: no such index"));
 
   // No SCHEMA clause at all, and no field-like tokens either - still rejected, since the
   // resulting index would be just as unusable regardless of how it ended up with zero fields.
@@ -441,7 +445,7 @@ TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
 
   // ft.dropindex must work from another database
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
-  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("Index with name 'idx-1' not found"));
+  EXPECT_THAT(Run({"ft.info", "idx-1"}), ErrArg("idx-1: no such index"));
 }
 
 TEST_F(SearchFamilyTest, AlterIndex) {
