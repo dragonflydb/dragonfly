@@ -467,6 +467,36 @@ TEST_F(AclFamilyTest, TestDryRun) {
   EXPECT_THAT(resp, ErrArg("ERR Command 'ACL BOGUSSUBCMD' not found"));
 }
 
+TEST_F(AclFamilyTest, GeoSearchStoreDryRun) {
+  TestInitAclFam();
+  const char* cmd = "GEOSEARCHSTORE out secret FROMMEMBER member BYRADIUS 100 km";
+
+  auto resp =
+      Run("ACL SETUSER gss-exfil ON >pass +GEOSEARCHSTORE +@geo resetkeys %W~secret %RW~out");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(absl::StrCat("ACL DRYRUN gss-exfil ", cmd));
+  EXPECT_THAT(resp, "This user has no permissions to run the 'GEOSEARCHSTORE' command");
+
+  resp = Run("ACL SETUSER gss-dest ON >pass +GEOSEARCHSTORE +@geo resetkeys %R~out %R~secret");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(absl::StrCat("ACL DRYRUN gss-dest ", cmd));
+  EXPECT_THAT(resp, "This user has no permissions to run the 'GEOSEARCHSTORE' command");
+
+  resp = Run("ACL SETUSER gss-ok ON >pass +GEOSEARCHSTORE +@geo resetkeys %RW~out %R~secret");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(absl::StrCat("ACL DRYRUN gss-ok ", cmd));
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL SETUSER gss-nocmd ON >pass +@geo -GEOSEARCHSTORE resetkeys %RW~out %R~secret");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(absl::StrCat("ACL DRYRUN gss-nocmd ", cmd));
+  EXPECT_THAT(resp, "This user has no permissions to run the 'GEOSEARCHSTORE' command");
+}
+
 TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {
   TestInitAclFam();
 

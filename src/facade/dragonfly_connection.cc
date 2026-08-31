@@ -714,7 +714,8 @@ class PipelineCacheSizeTracker {
     const auto now = absl::Now();
     const auto elapsed = now - last_check_;
     min_ = std::min(min_, pipeline_sz);
-    if (elapsed < absl::Milliseconds(10)) {
+    constexpr auto kPipelineCacheReclamationInterval = absl::Milliseconds(10);
+    if (elapsed < kPipelineCacheReclamationInterval) {
       return false;
     }
 
@@ -3173,6 +3174,8 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
   if (parsed_to_execute_ == nullptr) {
     return ExecuteBatchResult::kSuccess;  // no errors.
   }
+
+  ShrinkPipelinePool();
 
   ConnectionMemoryTracker memory_tracker(this);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };

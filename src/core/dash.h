@@ -723,6 +723,16 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
            });
   }
 
+  bool ContainsStashBucket() const {
+    if (limit_ > ids_.size())
+      return limit_ > DashTable::kBucketNum;
+
+    for (unsigned i = 0; i < limit_; ++i)
+      if (ids_[i] >= DashTable::kBucketNum)
+        return true;
+    return false;
+  }
+
   bool operator==(const BucketSet& other) const {
     return owner_ == other.owner_ && seg_id_ == other.seg_id_ && limit_ == other.limit_ &&
            ids_[0] == other.ids_[0] && ids_[1] == other.ids_[1];
@@ -745,7 +755,7 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
 
   DashTable* owner_;
   uint32_t seg_id_;
-  uint8_t limit_;
+  uint8_t limit_;  // number of entries: 1 or 2 values from ids_ or all possible buckets
   std::array<uint8_t, 2> ids_;
 };
 

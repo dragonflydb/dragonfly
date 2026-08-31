@@ -67,7 +67,7 @@ COMMANDS = [
     (b"PFADD", 2, 6), (b"PFCOUNT", 1, 4), (b"PFMERGE", 2, 5),
     # Geo
     (b"GEOADD", 4, 10), (b"GEOHASH", 2, 6), (b"GEOPOS", 2, 6), (b"GEODIST", 3, 4),
-    (b"GEOSEARCH", 6, 12), (b"GEORADIUS", 5, 12), (b"GEORADIUS_RO", 5, 10), (b"GEORADIUSBYMEMBER", 4, 11),
+    (b"GEOSEARCH", 6, 12), (b"GEOSEARCHSTORE", 7, 14), (b"GEORADIUS", 5, 12), (b"GEORADIUS_RO", 5, 10), (b"GEORADIUSBYMEMBER", 4, 11),
     (b"GEORADIUSBYMEMBER_RO", 4, 9),
     # Bitops
     (b"SETBIT", 3, 3), (b"GETBIT", 2, 2), (b"BITCOUNT", 1, 4), (b"BITOP", 3, 6),
