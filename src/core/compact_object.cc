@@ -1095,16 +1095,25 @@ void CompactObj::SetJsonSize(int64_t size) {
   }
 }
 
-void CompactObj::AddStreamSize(int64_t size) {
+void CompactObj::AddStreamSize(int64_t delta) {
   DCHECK_EQ(taglen_, STREAM_TAG);
-  if (size < 0) {
-    // We might have a negative size. For example, if we remove a consumer,
-    // the tracker will report a negative net (since we deallocated),
-    // so the object now consumes less memory than it did before. This DCHECK
-    // is for fanity and to catch any potential issues with our tracking approach.
-    DCHECK(static_cast<int64_t>(u_.r_obj.Size()) >= size);
+
+  const uint64_t current = u_.r_obj.Size();
+  if (delta >= 0) {
+    u_.r_obj.SetSize(current + delta);
+    return;
   }
-  u_.r_obj.SetSize((u_.r_obj.Size() + size));
+
+  const int64_t signed_current = static_cast<int64_t>(current);
+  if (delta > -signed_current) {
+    u_.r_obj.SetSize(signed_current + delta);
+    return;
+  }
+
+  const size_t slow_measure = MallocUsed(true);
+  LOG_EVERY_T(ERROR, 30) << "Invalid stream memory delta: cached=" << current << ", delta=" << delta
+                         << ", measured=" << slow_measure;
+  u_.r_obj.SetSize(slow_measure);
 }
 
 void CompactObj::SetJson(const uint8_t* buf, size_t len) {
@@ -1414,6 +1423,17 @@ void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
 CompactObj::ExternalRep CompactObj::GetExternalRep() const {
   DCHECK(IsExternal());
   return static_cast<CompactObj::ExternalRep>(u_.ext_ptr.representation);
+}
+
+CompactObj CompactObj::CloneExternal() const {
+  DCHECK(IsExternal() && !IsCool());
+
+  CompactObj res{is_key_};
+  res.taglen_ = taglen_;
+  res.mask_ = mask_;
+  res.encoding_ = encoding_;
+  res.u_.ext_ptr = u_.ext_ptr;
+  return res;
 }
 
 void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
@@ -1768,7 +1788,7 @@ size_t CompactObj::MallocUsed(bool slow) const {
   }
 
   if (taglen_ == SDS_TTL_TAG) {
-    return sdsAllocSize(u_.sds_ttl.sds_ptr);
+    return zmalloc_usable_size(sdsAllocPtr(u_.sds_ttl.sds_ptr));
   }
 
   if (taglen_ == TOPK_TAG) {

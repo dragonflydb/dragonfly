@@ -25,9 +25,6 @@ struct TieredStats {
   // Defragmentation operations (small bins read and consolidated back to memory).
   uint64_t total_defrags = 0;
 
-  // Number of segments waiting in the delayed defragmentation queue.
-  size_t delayed_defrag_queue_size = 0;
-
   // Values restored from disk to memory (e.g. after modification).
   uint64_t total_uploads = 0;
 
@@ -42,8 +39,11 @@ struct TieredStats {
   // (disjoint with total_stashes).
   uint64_t total_stash_overflows = 0;
 
-  // Iterations through the primary table during background offloading scans.
-  uint64_t total_offloading_steps = 0;
+  // Cumulative time in microseconds spent in background offloading scans.
+  uint64_t total_offloading_usec = 0;
+
+  // Cumulative time in microseconds spent in background defragmentation scans.
+  uint64_t total_defrag_usec = 0;
 
   // Values stashed during background offloading scans (subset of total_stashes).
   uint64_t total_offloading_stashes = 0;
@@ -66,6 +66,9 @@ struct TieredStats {
 
   // Total entries across all fully written bins on disk.
   uint64_t small_bins_entries_cnt = 0;
+
+  // Total value bytes across all fully written bins on disk.
+  uint64_t small_bins_entries_bytes = 0;
 
   // Bytes accumulated in the in-memory bin currently being filled.
   size_t small_bins_filling_bytes = 0;

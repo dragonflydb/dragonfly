@@ -1,13 +1,15 @@
-import logging
-import pytest
-import redis
 import asyncio
+import logging
+
+import pytest
+
+import redis
 from redis import asyncio as aioredis
 
-from . import dfly_multi_test_args, dfly_args
+from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyStartException
-from .utility import batch_fill_data, gen_test_data, EnvironCntx
 from .seeder import DebugPopulateSeeder
+from .utility import EnvironCntx, batch_fill_data, gen_test_data
 
 
 @dfly_multi_test_args({"keys_output_limit": 512}, {"keys_output_limit": 1024})
@@ -166,22 +168,20 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
 
 
 async def test_arg_from_environ_overwritten_by_cli(df_factory):
-    with EnvironCntx(DFLY_port="6378"):
-        with df_factory.create(port=6377):
-            client = aioredis.Redis(port=6377)
-            await client.ping()
+    with EnvironCntx(DFLY_port="6378"), df_factory.create(port=6377):
+        client = aioredis.Redis(port=6377)
+        await client.ping()
 
 
 async def test_arg_from_environ(df_factory):
-    with EnvironCntx(DFLY_requirepass="pass"):
-        with df_factory.create() as dfly:
-            # Expect password from environment variable
-            with pytest.raises(redis.exceptions.AuthenticationError):
-                client = aioredis.Redis(port=dfly.port)
-                await client.ping()
-
-            client = aioredis.Redis(password="pass", port=dfly.port)
+    with EnvironCntx(DFLY_requirepass="pass"), df_factory.create() as dfly:
+        # Expect password from environment variable
+        with pytest.raises(redis.exceptions.AuthenticationError):
+            client = aioredis.Redis(port=dfly.port)
             await client.ping()
+
+        client = aioredis.Redis(password="pass", port=dfly.port)
+        await client.ping()
 
 
 async def test_unknown_dfly_env(df_factory, export_dfly_password):
@@ -330,3 +330,37 @@ async def test_command_empty_key(df_factory):
     assert res == 1
     res = await client.execute_command("KEYS *")
     assert len(res) == 1
+
+
+@dfly_args({"proactor_threads": 1})
+async def test_expired_evicted_counters_zero_initialised(
+    async_client: aioredis.Redis, df_server: DflyInstance
+):
+    """
+    expired_keys_total and evicted_keys_total must be exported with a value of 0 on a
+    fresh instance, and must still expose a series after CONFIG RESETSTAT.
+
+    Before the fix, the HELP/TYPE header was emitted without any sample while the
+    counter was zero, so Prometheus ingested no series at all until the first expiry or
+    eviction -- which also made rate()/increase() under-count that very first burst,
+    since there was no earlier sample to diff against.
+    """
+
+    # prometheus_client strips the `_total` suffix from the family name.
+    families = ("dragonfly_expired_keys", "dragonfly_evicted_keys")
+
+    async def db0_values():
+        metrics = await df_server.metrics()
+        values = {}
+        for family in families:
+            assert family in metrics, f"{family} is missing from /metrics"
+            samples = {s.labels["db"]: s.value for s in metrics[family].samples}
+            assert "db0" in samples, f"{family} exposes no db0 sample, only {sorted(samples)}"
+            values[family] = samples["db0"]
+        return values
+
+    assert await db0_values() == {family: 0 for family in families}
+
+    await async_client.execute_command("CONFIG RESETSTAT")
+
+    assert await db0_values() == {family: 0 for family in families}

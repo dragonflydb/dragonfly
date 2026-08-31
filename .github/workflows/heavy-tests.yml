@@ -21,6 +21,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: write # To allow deleting cache
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -30,7 +31,7 @@ jobs:
         - /:/hostroot
         - /mnt:/mnt
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -44,6 +45,11 @@ jobs:
       - name: Build Dragonfly
         uses: ./.github/actions/builder
         with:
+          enable-ccache: 'true'
+          enable-deps-cache: 'true'
+          cache-key-suffix: 'df_common_bin'
+          c-compiler: gcc
+          cxx-compiler: g++
           build-type: ${{matrix.build-type}}
           targets: 'dragonfly'
 

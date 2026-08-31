@@ -64,11 +64,29 @@ cd build-opt && ninja dragonfly
 | WITH_COLLECTION_CMDS | Include commands for collections (SET, HSET, ZSET)                                                                                                                                                                                       |
 | WITH_EXTENSION_CMDS  | Include extension commands (Bloom, HLL, JSON, ...)                                                                                                                                                                                       |
 | USE_MOLD             | Uses the mold linker to reduce link time overhead while enabling Link Time Optimization (LTO) for improved runtime performance. Recommended for benchmarking and production. |
+| ENABLE_CCACHE | Use ccache as the compiler launcher when it is installed (ON by default). Disable with -DENABLE_CCACHE=OFF |
 
 Minimal debug build:
 
 ```bash
 ./helio/blaze.sh -DWITH_GPERF=OFF -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_TIERING=OFF -DWITH_SEARCH=OFF -DWITH_COLLECTION_CMDS=OFF -DWITH_EXTENSION_CMDS=OFF
+```
+
+### ccache
+
+For **local builds**, ccache is enabled automatically whenever the `ccache` binary is on your `PATH`, so incremental rebuilds recompile only the files you changed. (In CI it is enabled per-workflow, and the production `make release` build forces it off.) If you do **not** want ccache, disable it in any of these ways:
+
+- configure with `-DENABLE_CCACHE=OFF` (e.g. `./helio/blaze.sh -DENABLE_CCACHE=OFF`)
+- set the `CCACHE_DISABLE=1` environment variable
+- set `disable = true` in your ccache config (`ccache -o disable=true`)
+
+#### Cache size
+
+Dragonfly is large, so ccache's default size (5 GB, or ~5% of disk on ccache ≥ 4.10) fills up quickly - more so with several build configs or multiple worktrees — and hit rates drop once it's full. The right size depends on your free disk space and how many projects share the (per-user) cache, so it's left to you. If rebuilds feel slow, raise it (50 GB is a comfortable value):
+
+```bash
+ccache -M 50G              # per-user, global; applies to all projects
+ccache -p | grep max_size  # verify
 ```
 
 ## Step 4 - voilà

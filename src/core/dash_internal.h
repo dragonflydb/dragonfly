@@ -411,6 +411,8 @@ class Segment {
   Segment(const Segment&) = delete;
   Segment& operator=(const Segment&) = delete;
 
+  Segment(Segment&&) = default;
+
   // Returns (iterator, true) if insert succeeds,
   // (iterator, false) for duplicate and (invalid-iterator, false) if it's full
   template <typename K, typename V, typename Pred, typename OnMoveCb>
@@ -583,6 +585,19 @@ class Segment {
     segment_id_ = new_id;
   }
 
+  void BorrowPinnedIterator() {
+    ++live_iterators_;
+  }
+
+  void ReturnPinnedIterator() {
+    assert(live_iterators_ > 0);
+    --live_iterators_;
+  }
+
+  bool IsSafeToDefragment() const {
+    return live_iterators_ == 0;
+  }
+
  private:
   static_assert(sizeof(Iterator) == 2);
 
@@ -618,6 +633,10 @@ class Segment {
   uint8_t local_depth_;
   uint32_t segment_id_;  // segment id in the table.
   PMR_NS::memory_resource* mr_ = nullptr;
+
+  // Number of iterators active with this segment's pointer. Determines whether it is safe to
+  // reallocate for defragmentation.
+  uint32_t live_iterators_{0};
 
  public:
   static constexpr size_t kBucketSz = sizeof(Bucket);

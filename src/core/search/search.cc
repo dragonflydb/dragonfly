@@ -559,12 +559,12 @@ struct BasicSearch {
   void SearchKnnFlat(FlatVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {
     knn_distances_.reserve(sub_results.ApproximateSize());
     auto cb = [&](auto* set) {
-      auto [dim, sim] = vec_index->Info();
+      auto info = vec_index->Info();
       for (DocId matched_doc : *set) {
-        const float* vec = vec_index->Get(matched_doc);
+        const void* vec = vec_index->Get(matched_doc);
         if (!vec)
           continue;
-        float dist = VectorDistance(knn.vec.first.get(), vec, dim, sim);
+        float dist = VectorDistance(knn.blob.data(), vec, info.dim, info.sim, info.data_type);
         knn_distances_.emplace_back(dist, matched_doc);
       }
     };
@@ -579,12 +579,12 @@ struct BasicSearch {
   void SearchVectorRangeFlat(FlatVectorIndex* vec_index, const AstVectorRangeNode& node,
                              vector<DocId>* out) {
     const auto& all_docs = indices_->GetAllDocs();
-    auto [dim, sim] = vec_index->Info();
+    auto info = vec_index->Info();
     for (DocId doc : all_docs) {
-      const float* vec = vec_index->Get(doc);
+      const void* vec = vec_index->Get(doc);
       if (!vec)
         continue;
-      float dist = VectorDistance(node.vec.first.get(), vec, dim, sim);
+      float dist = VectorDistance(node.blob.data(), vec, info.dim, info.sim, info.data_type);
       if (dist <= static_cast<float>(node.radius)) {
         knn_scores_[doc] = dist;
         out->push_back(doc);
@@ -601,7 +601,12 @@ struct BasicSearch {
     if (!vec_index)
       return IndexResult{};
 
-    if (node.vec.second == 0)
+    auto info = vec_index->Info();
+    const size_t width = ElementSize(info.data_type);
+    if (node.blob.empty() || node.blob.size() % width != 0)
+      return IndexResult{};
+    const size_t qdim = node.blob.size() / width;
+    if (qdim == 0)
       return IndexResult{};
 
     if (!(node.radius >= 0) || !std::isfinite(node.radius)) {
@@ -613,9 +618,8 @@ struct BasicSearch {
       return IndexResult{};
     }
 
-    if (auto [dim, _] = vec_index->Info(); dim != node.vec.second) {
-      error_ = absl::StrCat("Wrong vector index dimensions, got: ", node.vec.second,
-                            ", expected: ", dim);
+    if (info.dim != qdim) {
+      error_ = absl::StrCat("Wrong vector index dimensions, got: ", qdim, ", expected: ", info.dim);
       return IndexResult{};
     }
 
@@ -639,14 +643,16 @@ struct BasicSearch {
     if (!vec_index)
       return IndexResult{};
 
-    // If vector dimension is 0, treat as placeholder/invalid - return empty results
-    // This allows tests to use dummy vector values like "<your_vector_blob>"
-    if (knn.vec.second == 0)
+    // A malformed/placeholder blob (empty or not a whole number of elements) yields no results
+    // instead of an error. This allows tests to use dummy values like "<your_vector_blob>".
+    auto info = vec_index->Info();
+    const size_t width = ElementSize(info.data_type);
+    if (knn.blob.empty() || knn.blob.size() % width != 0)
       return IndexResult{};
+    const size_t qdim = knn.blob.size() / width;
 
-    if (auto [dim, _] = vec_index->Info(); dim != knn.vec.second) {
-      error_ =
-          absl::StrCat("Wrong vector index dimensions, got: ", knn.vec.second, ", expected: ", dim);
+    if (info.dim != qdim) {
+      error_ = absl::StrCat("Wrong vector index dimensions, got: ", qdim, ", expected: ", info.dim);
       return IndexResult{};
     }
 

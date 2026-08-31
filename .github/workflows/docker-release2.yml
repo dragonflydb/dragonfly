@@ -1,5 +1,9 @@
 name: Docker Release-v2
 
+# Note: do not add a GitHub Actions cache (type=gha) here when running in the
+# dragonflydb/dragonfly repo: the shared 10 GB cache is limited and better used
+# by the far more frequent CI builds. This runs only on release / manual dispatch.
+
 on:
   workflow_dispatch:
     inputs:
@@ -44,7 +48,7 @@ jobs:
 
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           submodules: true
@@ -107,8 +111,6 @@ jobs:
             ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           file: tools/packaging/Dockerfile.${{ matrix.flavor }}-prod
-          cache-from: type=gha,scope=prod-${{ matrix.flavor }}
-          cache-to: type=gha,scope=prod-${{ matrix.flavor }},mode=max
           load: true  # Load the build images into the local docker.
 
       - name: Test Image
@@ -133,7 +135,7 @@ jobs:
         flavor: [ubuntu]
     steps:
       - name: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Login to Registries
         uses: ./.github/actions/multi-registry-docker-login
@@ -280,7 +282,7 @@ jobs:
       run: env
 
     - name: checkout
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         token: ${{ secrets.DRAGONFLY_TOKEN }}  # PAT to push to main
         fetch-depth: 0
@@ -291,7 +293,7 @@ jobs:
         version: "v3.21.0"
 
     - name: Setup Go
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@v7
       with:
         go-version-file: go.work
 

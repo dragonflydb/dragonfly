@@ -2,28 +2,34 @@ import asyncio
 import glob
 import logging
 import os
+import random
+import shutil
+import signal
+import socket
+import subprocess
 import time
+import uuid
 from pathlib import Path
 
-from async_timeout import timeout
 import boto3
 import pytest
-import redis
-import random
+from async_timeout import timeout
 from pymemcache.client.base import Client as MCClient
+
+import redis
 from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, RedisServer
-from .replication_test import compare_datasets
+from .replication_utils import compare_datasets
 from .seeder import DebugPopulateSeeder, Seeder
 from .utility import (
     assert_eventually,
-    wait_available_async,
+    check_all_replicas_finished,
     is_saving,
     tmp_file_name,
+    wait_available_async,
     wait_for_replicas_state,
-    check_all_replicas_finished,
 )
 
 BASIC_ARGS = {"dir": "{DRAGONFLY_TMP}/", "proactor_threads": 4}
@@ -31,6 +37,18 @@ FILE_FORMATS = ["RDB", "DF"]
 
 # Should be used where text auxiliary mechanisms like filenames
 LIGHTWEIGHT_SEEDER_ARGS = dict(key_target=100, data_size=100, variance=1, samples=1)
+
+AZURITE_ACCOUNT = "devstoreaccount1"
+AZURITE_KEY = (
+    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/" "K1SZFPTOtr/KBHBeksoGMGw=="
+)
+AZURITE_PORT = 10000
+AZURITE_CONN_STR = (
+    f"DefaultEndpointsProtocol=http;"
+    f"AccountName={AZURITE_ACCOUNT};"
+    f"AccountKey={AZURITE_KEY};"
+    f"BlobEndpoint=http://127.0.0.1:{AZURITE_PORT}/{AZURITE_ACCOUNT};"
+)
 
 
 def find_main_file(path: Path, pattern):
@@ -201,44 +219,49 @@ async def test_cron_snapshot(tmp_dir: Path, async_client: aioredis.Redis):
     assert file is not None, os.listdir(tmp_dir)
 
 
-@pytest.mark.skip("Fails and also causes all TLS tests to fail")
 @pytest.mark.large
-@dfly_args({**BASIC_ARGS, "dbfilename": "test-failed-saving", "snapshot_cron": "* * * * *"})
-async def test_cron_snapshot_failed_saving(df_server, tmp_dir: Path, async_client: aioredis.Redis):
-    await DebugPopulateSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
+@dfly_args({**BASIC_ARGS, "dbfilename": "test-failed-saving"})
+async def test_cron_snapshot_failed_saving(df_factory, tmp_dir: Path):
+    snapshot_dir = tmp_dir / f"failed-snapshots-{uuid.uuid4().hex}"
+    snapshot_dir.mkdir()
 
-    backups_total = await get_metric_value(df_server, "dragonfly_backups")
-    failed_backups_total = await get_metric_value(df_server, "dragonfly_failed_backups")
+    # Directories cannot be opened as snapshot files, even when Dragonfly runs as root.
+    for suffix in ("0000", "summary"):
+        (snapshot_dir / f"test-failed-saving-{suffix}.dfs.tmp").mkdir()
 
-    file = None
-    async with timeout(65):
-        while file is None:
-            await asyncio.sleep(1)
-            file = find_main_file(tmp_dir, "test-failed-saving-summary.dfs")
+    df_server = None
 
-    assert file is not None, os.listdir(tmp_dir)
+    try:
+        # A single shard makes the expected temporary snapshot paths deterministic.
+        df_server = df_factory.create(dir=str(snapshot_dir), num_shards=1)
+        df_server.start()
 
-    await assert_metric_value(df_server, "dragonfly_backups", backups_total + 1)
-    await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total)
+        async with df_server.client() as async_client:
+            await DebugPopulateSeeder(**LIGHTWEIGHT_SEEDER_ARGS).run(async_client)
 
-    # Remove all files from directory
-    for dir_file in tmp_dir.iterdir():
-        os.unlink(dir_file)
+            backups_total = await get_metric_value(df_server, "dragonfly_backups")
+            failed_backups_total = await get_metric_value(df_server, "dragonfly_failed_backups")
 
-    # Make directory read-only
-    os.chmod(tmp_dir, 0o555)
+            # Start the scheduler only after the sentinels and metric baseline are in place.
+            await async_client.config_set("snapshot_cron", "* * * * *")
 
-    # Wait for the next SAVE command
-    await asyncio.sleep(65)
-    file = find_main_file(tmp_dir, "test-failed-saving-summary.dfs")
+            @assert_eventually(timeout=65)
+            async def assert_failed_snapshot():
+                await assert_metric_value(df_server, "dragonfly_backups", backups_total + 1)
+                await assert_metric_value(
+                    df_server, "dragonfly_failed_backups", failed_backups_total + 1
+                )
 
-    # Make directory writable again
-    os.chmod(tmp_dir, 0o777)
-
-    assert file is None, os.listdir(tmp_dir)
-
-    await assert_metric_value(df_server, "dragonfly_backups", backups_total + 2)
-    await assert_metric_value(df_server, "dragonfly_failed_backups", failed_backups_total + 1)
+            await assert_failed_snapshot()
+            assert not list(snapshot_dir.iterdir())
+    finally:
+        if df_server is not None:
+            try:
+                async with df_server.client() as shutdown_client:
+                    await shutdown_client.shutdown(nosave=True)
+            except Exception:
+                pass
+            df_server.stop()
 
 
 @pytest.mark.large
@@ -371,9 +394,6 @@ async def test_exit_on_s3_snapshot_load_err(df_factory):
 
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
-# TODO: temporarily disabled, constantly fails. See
-# https://github.com/dragonflydb/dragonfly/issues/7840
-@pytest.mark.skip("Temporarily disabled, constantly fails. See issue #7840")
 @pytest.mark.skipif(
     _missing_s3_test_env(),
     reason="AWS S3 snapshots bucket or credentials are not configured",
@@ -487,6 +507,84 @@ def delete_azure_objects(container, prefix):
         container_client.delete_blob(blob.name)
 
 
+def get_azure_account_name():
+    from azure.storage.blob import BlobServiceClient
+
+    blob_service = BlobServiceClient.from_connection_string(
+        os.environ["AZURE_STORAGE_CONNECTION_STRING"]
+    )
+    return blob_service.account_name
+
+
+def _azurite_running():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1)
+        return sock.connect_ex(("127.0.0.1", AZURITE_PORT)) == 0
+
+
+@pytest.fixture
+def azurite():
+    if _azurite_running():
+        yield
+        return
+
+    azurite_bin = shutil.which("azurite-blob")
+    if not azurite_bin:
+        pytest.skip("azurite-blob is not installed")
+
+    proc = subprocess.Popen(
+        [azurite_bin, "--blobHost", "127.0.0.1", "--skipApiVersionCheck"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    for _ in range(30):
+        if _azurite_running():
+            break
+        time.sleep(0.5)
+    else:
+        proc.kill()
+        pytest.skip("Azurite did not become ready in time")
+
+    yield
+
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=5)
+
+
+@dfly_args({**BASIC_ARGS})
+async def test_azure_snapshot_azurite(df_factory, monkeypatch, azurite):
+    from azure.storage.blob import BlobServiceClient
+
+    monkeypatch.delenv("AZURE_STORAGE_CONNECTION_STRING", raising=False)
+    monkeypatch.setenv("AZURE_STORAGE_ACCOUNT", "otheraccount")
+    monkeypatch.setenv("AZURE_STORAGE_KEY", AZURITE_KEY)
+    monkeypatch.setenv(
+        "AZURE_STORAGE_BLOB_ENDPOINT",
+        f"http://127.0.0.1:{AZURITE_PORT}/{AZURITE_ACCOUNT}",
+    )
+    container = f"dfly{uuid.uuid4().hex[:20]}"
+    blob_service = BlobServiceClient.from_connection_string(AZURITE_CONN_STR)
+    blob_service.create_container(container)
+
+    instance = df_factory.create()
+    instance.start()
+    async_client = instance.client()
+    seeder = DebugPopulateSeeder(key_target=10_000)
+    await seeder.run(async_client)
+    start_capture = await DebugPopulateSeeder.capture(async_client)
+    prefix = f"snapshot-{uuid.uuid4().hex}"
+    az_path = f"https://{AZURITE_ACCOUNT}.blob.core.windows.net/{container}/{prefix}"
+
+    try:
+        await async_client.execute_command("SAVE", "DF", az_path, "snapshot")
+        assert await async_client.flushall()
+        await async_client.execute_command("DFLY", "LOAD", az_path + "/snapshot-summary.dfs")
+
+        assert await DebugPopulateSeeder.capture(async_client) == start_capture
+    finally:
+        blob_service.delete_container(container)
+
+
 @pytest.mark.skipif(
     _missing_azure_test_env(),
     reason="Azure storage container or credentials are not configured",
@@ -497,7 +595,13 @@ async def test_azure_snapshot(async_client, tmp_dir):
     await seeder.run(async_client)
 
     start_capture = await DebugPopulateSeeder.capture(async_client)
-    az_path = "az://" + os.environ["DRAGONFLY_AZURE_CONTAINER"] + str(tmp_dir)
+    az_path = (
+        "https://"
+        + get_azure_account_name()
+        + ".blob.core.windows.net/"
+        + os.environ["DRAGONFLY_AZURE_CONTAINER"]
+        + str(tmp_dir)
+    )
 
     try:
         # save to Azure + flush + load from Azure

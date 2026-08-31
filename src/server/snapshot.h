@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include "server/detail/egress_throttle.h"
 #include "server/journal/types.h"
 #include "server/rdb_save.h"
 #include "server/serializer_base.h"
@@ -144,6 +145,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // IterateBucketsFb ever pays this debt down (with a sleep, between TraverseBuckets()
   // batches), which is never inside a held latch and never on a write command's fiber.
   uint64_t accrued_run_cycles_ = 0;
+
+  // Limits this snapshot's socket egress to a configured bandwidth budget.
+  detail::EgressThrottler throttler_{0};
 
   struct Stats {
     size_t keys_total = 0;

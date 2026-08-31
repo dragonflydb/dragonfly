@@ -15,6 +15,7 @@
 #include <variant>
 
 #include "facade/connection_ref.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
 #include "facade/parsed_command.h"
 #include "io/io_buf.h"
@@ -91,6 +92,7 @@ std::string FormatClientInfo(const ClientInfo& ci);
 class Connection : public util::Connection {
  public:
   static void Init(unsigned io_threads);
+  static void InitThreadLocal();
   static void Shutdown();
   static void ShutdownThreadLocal();
 
@@ -265,6 +267,10 @@ class Connection : public util::Connection {
 
   ConnectionContext* cntx();
 
+  // Returns the TLS certificate metadata for this connection's listener, or nullptr if the listener
+  // has no TLS configured or the certificate could not be parsed.
+  std::shared_ptr<const TlsCertInfo> GetTlsCertInfo() const;
+
   // For non replication connections refresh memory usage field as well as update tl stats if conn.
   // is still live.
   void RefreshConnectionMemoryUsage();
@@ -287,9 +293,11 @@ class Connection : public util::Connection {
   // Starts traffic logging in the calling thread. Must be a proactor thread.
   // Each thread creates its own log file containing requests from connections on
   // that thread whose listener type equals `listener_type`. Exactly one listener
-  // kind per recording — mixing protocols in a single file is not supported.
+  // kind per recording — mixing protocols in a single file is not supported. All
+  // threads in a recording session receive the same `start_logging_cycle`.
   static StartTrafficResult StartTrafficLogging(std::string_view base_path,
-                                                ListenerType listener_type);
+                                                ListenerType listener_type,
+                                                uint64_t start_logging_cycle);
 
   // Stops traffic logging in this thread. A noop if the thread is not logging.
   static void StopTrafficLogging();
@@ -326,6 +334,11 @@ class Connection : public util::Connection {
   }
 
   bool IsSending() const;
+
+  // Reclaims capacity for receive-idle connections when the V2 fiber is safely parked.
+  // A receive-idle connection has not received data for the configured minimum duration.
+  // Returns true if the buffer capacity changed.
+  bool MaybeShrinkIoBufOnReceiveIdle();
 
   void Notify() {
     io_event_.notify();
@@ -377,10 +390,77 @@ class Connection : public util::Connection {
   // provided the buffer ring is configured and the connection is not using TLS.
   void MaybeEnableRecvMultishot();
 
-  // Drains currently available bytes from socket into io_buf_ using non-blocking reads.
+  // Drains currently available socket bytes into the private V2 input buffer without suspending.
   void ReadPendingInput();
 
-  void CheckIoBufCapacity(bool reached_capacity, base::IoBuf* buf);
+  // Borrows the shared buffer for this proactor, reads available RESP V2 data from the socket, and
+  // parses the data while the borrow is held. Set from_proactor_callback=true when calling from
+  // proactor. Before the borrow is released, any input that could not be parsed because of
+  // backpressure is copied to overflow_buf_.
+  ParserStatus ReadAndParseShared(bool from_proactor_callback);
+
+  // Copies the unread part of `input_buf` into the connection-owned overflow_buf_ and then clears
+  // `input_buf`. The source buffer is empty when the function returns. overflow_buf_ is allocated
+  // only if input remains.
+  void MoveInputToOverflow(io::IoBuf& input_buf);
+
+  // Copies all unread overflow input into `input_buf`. The caller must provide a buffer with:
+  // 1) Nothing to consume in (i.e., InputLen() == 0) and
+  // 2) Enough space to append the overflow buffer input (i.e., AppendLen() >=
+  // overflow_buf_->InputLen()).
+  // overflow_buf_ is released after the copy.
+  void RestoreOverflowToInput(io::IoBuf& input_buf);
+
+  // Finalizes `input_buf` before the shared-buffer borrow ends. When `discard` is true, unread
+  // input in the shared buffer and any existing overflow_buf_ are discarded. Otherwise, unread
+  // input is copied to overflow_buf_ for processing during a later borrow. The shared buffer is
+  // empty when the function returns.
+  void FinalizeSharedInput(io::IoBuf& input_buf, bool discard);
+
+  // Returns this connection's unread input. In shared-buffer mode, it reads the active shared
+  // buffer only when this connection owns the borrow; otherwise it returns overflow_buf_ input.
+  size_t GetUnreadInputLen() const;
+
+  // Handles the result of a non-blocking receive in `result`. On EAGAIN/EWOULDBLOCK, it clears
+  // pending_input_ to mark the connection as waiting indefinitely for the next receive notification
+  // instead of polling the socket. It records EOF or a non-retryable error in the connection state
+  // and returns true only when `result` contains a positive number of bytes that the caller may
+  // commit to its input buffer.
+  bool HandleTryRecvResult(const io::Result<size_t>& result);
+
+  // Adds `bytes` to the receive counters for this connection and its current proactor. It also
+  // updates the last-interaction time and the timestamp used by private-buffer resizing.
+  void RecordRecvBytes(size_t bytes);
+
+  // Grows the buffer when parsing needs more data, or evaluates low-usage shrinking otherwise.
+  // `parse_status` is the parser result; `reached_capacity` marks the preceding read filled it.
+  void MaybeAdjustIoBufCapacity(ParserStatus parse_status, bool reached_capacity);
+
+  // Halves the buffer when its peak unread input is below half capacity; otherwise starts a new
+  // observation window.
+  void MaybeShrinkIoBufOnLowUsage();
+
+  // Records the time of the latest received data and updates the peak unread input.
+  void UpdateIoBufReadState();
+
+  // Updates resize statistics and starts a new observation window when the capacity changed.
+  // `previous_capacity` is compared with the current capacity.
+  void UpdateIoBufCapacityChange(size_t previous_capacity);
+
+  // Starts a new observation window and initializes the peak with current unread input.
+  // `now` determines when the next resize is allowed.
+  void ResetIoBufUsageWindow(time_t now);
+
+  // Returns true when shrinking is enabled, the resize cooldown elapsed, and the buffer is larger
+  // than the minimum capacity. `now` is compared with the resize deadline.
+  bool CanShrinkIoBuf(time_t now) const;
+
+  // Returns true when the V2 fiber is idle and no pending input or receive result uses the buffer.
+  bool IsIoBufShrinkSafe() const;
+
+  // Shrinks the buffer and updates capacity accounting. `target_capacity` is the new capacity and
+  // `reason` identifies the resize in diagnostics. Returns true when the capacity changes.
+  bool ShrinkIoBufTo(size_t target_capacity, std::string_view reason);
 
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
@@ -401,6 +481,17 @@ class Connection : public util::Connection {
   // Processes a single Admin/Control message from dispatch_q_.
   // Returns true if the fiber should terminate (e.g. Migration).
   bool ProcessAdminMessage(MessageHandle* msg, AsyncOperations* async_op);
+
+  // Returns true if a control-path async operation is currently
+  // running inside ProcessAdminMessage and been stalled for longer than the configured threshold.
+  bool IsAsyncOpOverdue() const;
+
+  // Slow-subscriber protection (RESP V1): evict queued PubMessage items from dispatch_q_ (releasing
+  // their per-thread subscriber accounting immediately), account the discard metrics, log a
+  // rate-limited diagnostic, and MarkForClose() this connection. Non-blocking: it never waits,
+  // joins, or interrupts the in-flight send. The connection closes via the normal shutdown path
+  // once the pending send returns.
+  void RequestPubsubClose();
 
   // Processes the next Pipeline command from parsed_head_.
   void ProcessPipelineCommandV1();
@@ -443,8 +534,10 @@ class Connection : public util::Connection {
   // Squashes pipelined commands from the dispatch queue to spread load over all threads
   void SquashPipeline();
 
-  // Clear pipelined messages, dispatching only intrusive ones.
-  void ClearPipelinedMessages();
+  // Drain the control message queue (dispatch_q_) and the parsed command queue (parsed_head_) at
+  // close time, processing checkpoints and waiting on in-flight commands, then release deferred
+  // checkpoints.
+  void DrainConnectionQueues();
 
   // Dec()s every BlockingCounter held in deferred_checkpoints_, then clear the vector.
   // These belong to the checkpoint commands the V2 loop deferred in
@@ -458,6 +551,14 @@ class Connection : public util::Connection {
 
   void IncreaseConnStats();
   void DecreaseConnStats();
+
+  // Registers or unregisters the two connection-owned read buffers: io_buf_ and overflow_buf_.
+  // The shared per-proactor buffer capacity is registered separately and is not this connection's
+  // responsibility. GetReadBufCapacity is a helper.
+  void RegisterReadBufCapacity();
+  void UnregisterReadBufCapacity();
+  size_t GetReadBufCapacity() const;
+
   void BreakOnce(uint32_t ev_mask);
 
   // The read buffer with read data that needs to be parsed and processed.
@@ -496,8 +597,17 @@ class Connection : public util::Connection {
 
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
-  // Returns true on successful execution, false on reply builder error.
-  bool ExecuteBatch();
+  // Returns kDeferToControlPath only when V2 stops to let IoLoopV2 drain control messages that
+  // precede the next parsed command.
+  enum class ExecuteBatchResult : uint8_t { kSuccess, kFailure, kDeferToControlPath };
+  ExecuteBatchResult ExecuteBatch();
+
+  // V2: Returns true if the connection is currently logging traffic to a file.
+  bool ShouldLogTrafficV2() const;
+
+  // V2: Records a command only while logging is active at dispatch and it was parsed after the
+  // current logger started. STOP can therefore suppress a command parsed while logging was active.
+  void LogTrafficV2(ParsedCommand* cmd);
 
   // V2 vectorized squash phase: dispatch the run starting at parsed_to_execute_ through
   // DispatchSquashedBatch when squashing is enabled. Returns true if a squashed batch was
@@ -605,7 +715,13 @@ class Connection : public util::Connection {
   size_t request_consumed_bytes_ = 0;
 
   util::FiberSocketBase::ProvidedBuffer recv_buf_;
-  io::IoBuf io_buf_;  // used in io loop and parsers
+
+  // IO buffer for reading data from the socket, and parsing commands from it.
+  io::IoBuf io_buf_;
+  time_t io_buf_last_read_time_;
+  time_t iobuf_resize_allowed_time_;
+  size_t io_buf_high_watermark_ = 0;
+
   std::unique_ptr<RespSrvParser> redis_parser_;
   std::unique_ptr<MemcacheParser> memcache_parser_;
   ParsedCommand* parsed_cmd_ = nullptr;
@@ -668,15 +784,25 @@ class Connection : public util::Connection {
   Protocol protocol_;
   Phase phase_ = SETUP;
 
-  // Where the V2 fiber is currently parked (suspended). Used as a safety gate, for example:
-  // - parse-in-proactor only fires when parked at kSquashHop (ensuring the parser is idle).
-  // - kNone = fiber is running or was just created.
-  enum class FiberParkSpot : uint8_t { kNone, kIdleAwait, kSquashHop, kParseYield };
+  // Where the V2 fiber is currently parked (suspended). Used as the safety gate for
+  // parse-in-proactor (see OnRecvNotification). kNone = running or just created.
+  enum class FiberParkSpot : uint8_t {
+    kNone,
+    kIdleAwait,
+    kSquashHop,
+    kParseYield,
+    kSendReply,
+    kSimpleHop,
+  };
   FiberParkSpot fiber_park_spot_ = FiberParkSpot::kNone;
 
   // True after IncreaseConnStats registers this connection in the current thread's stats.
   // False before registration and after DecreaseConnStats unregisters it during close/migration.
   bool conn_stats_registered_ = false;
+
+  // Used for DEBUG assertions. true when this connection's io_buf_ capacity contributes to the
+  // current thread's total.
+  bool read_buf_capacity_registered_ = false;
 
   // True while this connection contributes to connection_memory_bytes. Set false for
   // replication-flow connections, whose direct memory is excluded from the client connection
@@ -744,12 +870,24 @@ class Connection : public util::Connection {
       // The recv callback cannot return a status, so IoLoopV2 observes this flag and surfaces
       // ParserStatus::ERROR to close the connection and send the protocol-error reply.
       bool proactor_parse_error_ : 1;
+
+      // Shared read buffer: only valid for RESP IoLoop V2 connections.
+      bool shared_read_buf_enabled_ : 1;
+
+      bool request_shutdown_ : 1;  // set when the connection is requested to shutdown
     };
   };
 
   ListenerType listener_type_ = ListenerType::MAIN_RESP;
 
-  bool request_shutdown_ = false;
+  // Monotonic start time (base::CycleClock::Now()) of the control-path async operation currently
+  // executing inside ProcessAdminMessage's std::visit, or 0 when none is in progress. Used by the
+  // slow-subscriber protection policy to detect a Pub/Sub send that has been blocked too long.
+  uint64_t async_op_start_cycle_ = 0;
+
+  // V2 with shared read buffer: Raw RESP suffix retained by parser when shared-buffer parsing stops
+  // at backpressure.
+  std::unique_ptr<io::IoBuf> overflow_buf_;
 };
 
 }  // namespace facade

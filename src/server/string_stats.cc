@@ -12,7 +12,7 @@ namespace {
 
 void MakeHLL(HllBufferPtr* p) {
   p->size = getDenseHllSize();
-  p->hll = new uint8_t[p->size];
+  p->hll = new uint8_t[p->size + 1];
   CHECK_EQ(0, createDenseHll(*p));
 }
 

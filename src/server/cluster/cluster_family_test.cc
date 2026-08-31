@@ -2,10 +2,12 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
 #include <gtest/gtest-matchers.h>
 
+#include <atomic>
 #include <string>
 #include <string_view>
 
@@ -13,11 +15,22 @@
 #include "absl/strings/substitute.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/compact_object.h"
 #include "core/detail/gen_utils.h"
+#include "core/page_usage/page_usage_stats.h"
 #include "facade/facade_test.h"
+#include "server/db_slice.h"
+#include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/test_utils.h"
+#include "server/tiered_storage.h"
+#include "util/fibers/fibers.h"
+
+ABSL_DECLARE_FLAG(bool, force_epoll);
 
 namespace dfly::cluster {
 namespace {
@@ -27,11 +40,18 @@ using namespace testing;
 
 class ClusterFamilyTest : public BaseFamilyTest {
  public:
-  ClusterFamilyTest() {
+  ClusterFamilyTest() = default;
+
+ protected:
+  virtual void ConfigureClusterFlags() {
     SetTestFlag("cluster_mode", "yes");
   }
 
- protected:
+  void SetUp() override {
+    ConfigureClusterFlags();
+    BaseFamilyTest::SetUp();
+  }
+
   static constexpr string_view kInvalidConfiguration = "Invalid cluster configuration";
 
   string GetMyId() {
@@ -628,6 +648,437 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
                                 "total_writes", Not(IntArg(0)), "memory_bytes", IntArg(0))))));
 }
 
+// SlotStats::memory_bytes tracks resident RAM.
+class ClusterMemoryTest : public ClusterFamilyTest {
+ protected:
+  ClusterMemoryTest() {
+    num_threads_ = 1;
+  }
+
+  struct SlotInfo {
+    int64_t key_count = 0;
+    int64_t total_reads = 0;
+    int64_t total_writes = 0;
+    int64_t memory_bytes = 0;
+    int64_t tiered_bytes = 0;  // reported only when non-zero
+  };
+
+  SlotInfo GetSlotInfo(SlotId slot) {
+    auto resp = RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(slot)});
+    const auto& row = resp.GetVec()[0].GetVec();
+    SlotInfo info{*row[2].GetInt(), *row[4].GetInt(), *row[6].GetInt(), *row[8].GetInt()};
+    if (row.size() >= 11) {
+      EXPECT_EQ(row[9], "tiered_bytes");
+      info.tiered_bytes = *row[10].GetInt();
+    }
+    return info;
+  }
+
+  // GETSLOTINFO adds a fixed per-key table-space term.
+  int64_t RawSlotMemory(SlotId slot) {
+    SlotInfo info = GetSlotInfo(slot);
+    return info.memory_bytes - info.key_count * int64_t(sizeof(CompactObj)) * 2;
+  }
+
+  void ExpectSlotEmpty(SlotId slot) {
+    SlotInfo info = GetSlotInfo(slot);
+    EXPECT_EQ(info.key_count, 0);
+    EXPECT_EQ(info.memory_bytes, 0);
+    EXPECT_EQ(info.tiered_bytes, 0);
+  }
+
+  // The slot ledgers must mirror the db-wide ones.
+  void ExpectSlotMirrorsDb(SlotId slot) {
+    auto db_stats = GetMetrics().db_stats[0];
+    EXPECT_EQ(RawSlotMemory(slot), int64_t(db_stats.obj_memory_usage));
+    EXPECT_EQ(GetSlotInfo(slot).tiered_bytes, int64_t(db_stats.tiered_used_bytes));
+  }
+};
+
+#ifdef WITH_TIERING
+
+class ClusterTieredTest : public ClusterMemoryTest {
+ protected:
+  void SetUp() override {
+    if (absl::GetFlag(FLAGS_force_epoll)) {
+      GTEST_SKIP() << "Tiered storage requires io_uring";
+    }
+    flag_saver_.emplace();
+    SetTestFlag("tiered_prefix", "/tmp/cluster_tiered_test");
+    SetTestFlag("tiered_offload_threshold", "1.0");
+    SetTestFlag("tiered_min_value_size", "64");
+    SetTestFlag("tiered_experimental_cooling", "false");
+    ClusterMemoryTest::SetUp();
+    ConfigSingleNodeCluster(GetMyId());
+  }
+
+  void TearDown() override {
+    if (service_)
+      ClusterMemoryTest::TearDown();
+    flag_saver_.reset();
+  }
+
+  void WaitForOffload(size_t entries) {
+    ExpectConditionWithinTimeout(
+        [this, entries] { return GetMetrics().db_stats[0].tiered_entries == entries; });
+  }
+
+  // The background offloader keeps moving bytes between the counters; park it and drain
+  // in-flight stashes so that multi-command assertions see a stable state.
+  void StopOffloading() {
+    SetTestFlag("tiered_offload_threshold", "0.0");
+    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+    ExpectConditionWithinTimeout(
+        [this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0u; });
+  }
+
+  void PadSlot(string_view tag, int count) {
+    const string value(48, 'p');
+    for (int i = 0; i < count; ++i)
+      Run({"SET", absl::StrCat("{", tag, "}p", i), value});
+    ASSERT_EQ(CheckedInt({"DBSIZE"}), count);
+  }
+
+  uint32_t StartJournalWithConsumer(journal::JournalConsumerInterface* consumer) {
+    uint32_t id = 0;
+    pp_->at(0)->AwaitBrief([&] {
+      journal::StartInThread();
+      id = journal::RegisterConsumer(consumer);
+    });
+    return id;
+  }
+
+  std::optional<absl::FlagSaver> flag_saver_;
+};
+
+// memory_bytes tracks resident RAM only: offloading removes the value's bytes from it, and it
+// must return to zero once the slot is empty.
+TEST_F(ClusterTieredTest, SlotCountersFollowOffloadAndDelete) {
+  const string kKey = "tiered-del";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  EXPECT_EQ(RawSlotMemory(slot), 0);
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(CheckedInt({"DEL", kKey}), 1);
+  ExpectSlotEmpty(slot);
+}
+
+// List-node tiering offloads individual QList nodes, not the whole value; slot counters must
+// still track those bytes and return to zero after DEL.
+TEST_F(ClusterTieredTest, SlotCountersFollowListNodeOffloadAndDelete) {
+  const string kKey = "tiered-list-del";
+  const SlotId slot = KeySlot(kKey);
+  const int kItems = 8;  // Total number of nodes in the list.
+
+  SetTestFlag("tiered_experimental_list_support", "true");
+  SetTestFlag("list_tiering_threshold", "1");
+  SetTestFlag("list_max_listpack_size", "1");
+
+  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+
+  for (int i = 0; i < kItems; i++) {
+    EXPECT_THAT(Run({"RPUSH", kKey, string(2048, char('A' + i))}), IntArg(i + 1));
+  }
+
+  WaitForOffload(6);
+
+  // Only the head and tail nodes stay resident - 2 nods; Due to additional structure
+  // overhead we can still expect that the memory_bytes is less than 3 * 2048.
+  EXPECT_LT(RawSlotMemory(slot), int64_t(3 * 2048));
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+  ExpectSlotMirrorsDb(slot);
+
+  EXPECT_EQ(CheckedInt({"DEL", kKey}), 1);
+  ExpectSlotEmpty(slot);
+}
+
+// The single key lives in one slot, so the slot counters must mirror the db-wide ones exactly.
+TEST_F(ClusterTieredTest, SlotCountersFollowExternalOverwrite) {
+  const string kKey = "tiered-set";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  // Overwriting an offloaded value releases its disk extent; the new value may get offloaded
+  // again right away, so compare against the db-wide counters instead of fixed values.
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'y')}), "OK");
+  StopOffloading();
+
+  ExpectSlotMirrorsDb(slot);
+  // The old extent was released: at most one value's worth of disk is held.
+  EXPECT_LE(GetMetrics().db_stats[0].tiered_used_bytes, 3584u);
+}
+
+TEST_F(ClusterTieredTest, SlotCountersReleasedOnFlushSlots) {
+  const string kKey = "tiered-flush";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+  ASSERT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", absl::StrCat(slot), absl::StrCat(slot)}),
+            "OK");
+  ExpectConditionWithinTimeout([&]() { return GetSlotInfo(slot).key_count == 0; });
+
+  ExpectSlotEmpty(slot);
+}
+
+TEST_F(ClusterTieredTest, SlotCountersReleasedOnExpiry) {
+  const string kKey = "tiered-ttl";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+  ASSERT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(CheckedInt({"PEXPIRE", kKey, "10"}), 1);
+  AdvanceTime(100);
+  EXPECT_THAT(Run({"GET", kKey}), ArgType(RespExpr::NIL));
+  ExpectSlotEmpty(slot);
+}
+
+// Uploads and re-offloads move bytes in and out of memory_bytes; it must mirror the db-wide
+// counter at every step and never wrap around zero.
+TEST_F(ClusterTieredTest, SlotCountersFollowUploadAndAppend) {
+  const string kKey = "tiered-append";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4000, 'x')}), "OK");
+  WaitForOffload(1);
+
+  for (int i = 0; i < 6; ++i)
+    Run({"APPEND", kKey, string(512, 'y')});
+  StopOffloading();
+
+  ExpectSlotMirrorsDb(slot);
+
+  EXPECT_EQ(CheckedInt({"DEL", kKey}), 1);
+  ExpectSlotEmpty(slot);
+}
+
+TEST_F(ClusterTieredTest, SlotCountersReleasedOnConfigSlotRemoval) {
+  Run({"debug", "populate", "20", "key", "3000", "SLOTS", "1", "1"});
+  WaitForOffload(20);
+  ASSERT_GT(GetSlotInfo(1).tiered_bytes, 0);
+
+  ConfigSingleNodeCluster("abc");
+  ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
+
+  ExpectSlotEmpty(1);
+}
+
+// Helper to block a command until the stash operation completes
+class WaitTillStash : public journal::JournalConsumerInterface {
+ public:
+  explicit WaitTillStash(string key) : key_(std::move(key)) {
+  }
+
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+    if (item.cmd != "SET" || done_.load(std::memory_order_relaxed) || item.slot != KeySlot(key_))
+      return;
+
+    const absl::Time deadline = absl::Now() + absl::Seconds(5);
+    while (absl::Now() < deadline) {
+      auto& db_slice =
+          namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+      if (auto it = db_slice.GetDBTable(0)->prime.Find(key_);
+          IsValid(it) && it->second.IsExternal()) {
+        done_.store(true, std::memory_order_relaxed);
+        return;
+      }
+      util::ThisFiber::SleepFor(chrono::microseconds(100));
+    }
+  }
+
+  void ThrottleIfNeeded() override {
+  }
+
+  bool done() const {
+    return done_.load(std::memory_order_relaxed);
+  }
+
+ private:
+  string key_;
+  std::atomic_bool done_{false};
+};
+
+TEST_F(ClusterTieredTest, SetCmdAccounting) {
+  // tests that if a value is set which is stashed, then the accounting is correct, ie in order:
+  // 1. size is added to memory accounting
+  // 2. size is removed by stash operation
+  // 3. sum total of operations remains 0
+  // Fixes a bug where step 2 happened before step 1, and then step 1 computed size as 0
+  constexpr string_view kTag = "t";
+  const string kKey = absl::StrCat("{", kTag, "}k");
+  const SlotId slot = KeySlot(kKey);
+
+  // fill slot memory, so that we do not hit the DCHECK (value < delta), instead we just get wrong
+  // numbers after update
+  PadSlot(kTag, 512);
+  const int64_t slot_baseline = RawSlotMemory(slot);
+  const size_t db_baseline = GetMetrics().db_stats[0].obj_memory_usage;
+  ASSERT_GT(slot_baseline, 4096);
+
+  WaitTillStash waiter{kKey};
+  // will not let SET command finish until stash is done
+  const uint32_t consumer_id = StartJournalWithConsumer(&waiter);
+  absl::Cleanup unregister = [&] {
+    pp_->at(0)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+
+  ASSERT_TRUE(waiter.done()) << "the stash did not complete inside SET";
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(RawSlotMemory(slot), slot_baseline);
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, db_baseline);
+}
+
+TEST_F(ClusterTieredTest, SetCmdAccountingOverWrite) {
+  constexpr string_view kTag = "t";
+  const string kKey = absl::StrCat("{", kTag, "}k");
+  const SlotId slot = KeySlot(kKey);
+
+  PadSlot(kTag, 512);
+  const int64_t slot_baseline = RawSlotMemory(slot);
+  const size_t db_baseline = GetMetrics().db_stats[0].obj_memory_usage;
+  ASSERT_GT(slot_baseline, 4096);
+
+  EXPECT_EQ(Run({"SET", kKey, string(48, 'a')}), "OK");
+
+  WaitTillStash waiter{kKey};
+  const uint32_t consumer_id = StartJournalWithConsumer(&waiter);
+  absl::Cleanup unregister = [&] {
+    pp_->at(0)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+
+  ASSERT_TRUE(waiter.done()) << "the stash did not complete inside SET";
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(RawSlotMemory(slot), slot_baseline);
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, db_baseline);
+}
+
+class ClusterTieredCoolingTest : public ClusterTieredTest {
+ protected:
+  void SetUp() override {
+    ClusterTieredTest::SetUp();
+    if (!service_)  // skipped
+      return;
+    SetTestFlag("tiered_experimental_cooling", "true");
+    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+  }
+};
+
+// A cool value is invisible to the RAM ledger but still holds its disk extent, so it counts
+// in tiered_bytes only.
+TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnFlushSlots) {
+  const string kKey = "cool-flush";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+
+  ExpectSlotMirrorsDb(slot);
+  EXPECT_EQ(RawSlotMemory(slot), 0);
+  EXPECT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+
+  EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", absl::StrCat(slot), absl::StrCat(slot)}),
+            "OK");
+  ExpectConditionWithinTimeout([&]() { return GetSlotInfo(slot).key_count == 0; });
+
+  ExpectSlotEmpty(slot);
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+// Warming a cool value up returns its bytes to the RAM ledger and releases the disk extent.
+TEST_F(ClusterTieredCoolingTest, CoolSlotCountersReleasedOnWarmup) {
+  const string kKey = "cool-warm";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(4096, 'x')}), "OK");
+  WaitForOffload(1);
+  ASSERT_GT(GetSlotInfo(slot).tiered_bytes, 0);
+  StopOffloading();
+
+  EXPECT_EQ(Run({"GET", kKey}), string(4096, 'x'));
+
+  ExpectSlotMirrorsDb(slot);
+  EXPECT_GT(RawSlotMemory(slot), 0);
+  EXPECT_EQ(GetSlotInfo(slot).tiered_bytes, 0);
+}
+
+#endif  // WITH_TIERING
+
+TEST_F(ClusterMemoryTest, SlotMemoryFollowsDefrag) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  const SlotId slot = KeySlot("{tag}0");
+  const int kKeys = 120;
+
+  // Arrays grown element by element keep spare capacity that defrag drops, so the post-defrag
+  // delta is non-zero only for a non-power-of-two element count.
+  for (int i = 0; i < kKeys; ++i) {
+    Run({"JSON.SET", absl::StrCat("{tag}", i), "$", "[]"});
+    for (int j = 0; j < 40; ++j)
+      Run({"JSON.ARRAPPEND", absl::StrCat("{tag}", i), "$", absl::StrCat(j)});
+  }
+
+  shard_set->pool()->AwaitFiberOnAll([](unsigned, util::ProactorBase*) {
+    auto* shard = EngineShard::tlocal();
+    if (!shard)
+      return;
+    for (int i = 0; i < 100; ++i) {
+      PageUsage page_usage{CollectPageStats::NO, 0, CycleQuota::Unlimited()};
+      page_usage.SetForceReallocate(true);
+      shard->DoDefrag(&page_usage);
+      if (shard->GetDefragCursor() == 0)
+        break;
+    }
+  });
+
+  ASSERT_GT(GetMetrics().shard_stats.defrag_realloc_total, 0u);
+
+  // Every key shares one hashtag.
+  ExpectSlotMirrorsDb(slot);
+
+  for (int i = 0; i < kKeys; ++i)
+    Run({"DEL", absl::StrCat("{tag}", i)});
+
+  ExpectSlotEmpty(slot);
+}
+
+TEST_F(ClusterMemoryTest, SlotTrafficCountersSurviveFlush) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  const string kKey = "traffic-key";
+  const SlotId slot = KeySlot(kKey);
+
+  EXPECT_EQ(Run({"SET", kKey, string(1000, '#')}), "OK");
+  Run({"GET", kKey});
+
+  SlotInfo before = GetSlotInfo(slot);
+  ASSERT_GT(before.total_reads, 0);
+  ASSERT_GT(before.total_writes, 0);
+
+  Run({"FLUSHALL"});
+
+  SlotInfo after = GetSlotInfo(slot);
+  EXPECT_EQ(after.key_count, 0);
+  EXPECT_EQ(after.memory_bytes, 0);
+  EXPECT_EQ(after.total_reads, before.total_reads);
+  EXPECT_EQ(after.total_writes, before.total_writes);
+}
+
 // Test issue #1302
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlotsNoCrashOnShutdown) {
   ConfigSingleNodeCluster(GetMyId());
@@ -822,6 +1273,25 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                                   _, "total_writes", _, "memory_bytes", _)))));
 }
 
+TEST_F(ClusterFamilyTest, FlushSlotsWakesBlockedXReadGroup) {
+  ConfigSingleNodeCluster(GetMyId());
+  EXPECT_EQ(Run({"XGROUP", "CREATE", "s", "group", "0", "MKSTREAM"}), "OK");
+
+  RespExpr blocked_resp;
+  auto reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    blocked_resp =
+        Run({"XREADGROUP", "GROUP", "group", "consumer", "BLOCK", "2000", "STREAMS", "s", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  const string slot = absl::StrCat(CheckedInt({"CLUSTER", "KEYSLOT", "s"}));
+  EXPECT_EQ(RunPrivileged({"DFLYCLUSTER", "FLUSHSLOTS", slot, slot}), "OK");
+
+  reader.Join();
+  EXPECT_THAT(blocked_resp, ErrArg("consumer group this client was blocked on no longer exists"));
+  EXPECT_THAT(Run({"EXISTS", "s"}), IntArg(0));
+}
+
 TEST_F(ClusterFamilyTest, FlushSlotsOutOfBounds) {
   EXPECT_THAT(RunPrivileged({"dflycluster", "flushslots", "0", "16384"}),
               ErrArg("value is not an integer or out of range"));
@@ -917,6 +1387,55 @@ TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
   });
 }
 
+TEST_F(ClusterFamilyTest, MoveNotAllowedInClusterMode) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  EXPECT_EQ(Run({"set", "key", "val"}), "OK");
+  EXPECT_THAT(Run({"move", "key", "1"}), ErrArg("MOVE is not allowed in cluster mode"));
+  EXPECT_EQ(Run({"get", "key"}), "val");
+}
+
+TEST_F(ClusterFamilyTest, AclSelectDbNotAllowedInClusterMode) {
+  EXPECT_THAT(Run({"acl", "setuser", "u1", "on", ">pw", "~*", "+@all", "$1"}),
+              ErrArg("not allowed in cluster mode"));
+  EXPECT_EQ(Run({"acl", "setuser", "u2", "on", ">pw", "~*", "+@all", "$0"}), "OK");
+  EXPECT_EQ(Run({"acl", "setuser", "u3", "on", ">pw", "~*", "+@all", "$ALL"}), "OK");
+}
+
+// The flush's on_change fires for every db index but must only touch db 0; the bug charged
+// db 0's table for a db 1 deletion (FATAL underflow in debug).
+TEST_F(ClusterFamilyTest, FlushSlotsOnChangeIgnoresNonDefaultDb) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    db_slice.ActivateDb(1);
+    DbContext cntx{&namespaces->GetDefaultNamespace(), 1, GetCurrentTimeMs()};
+
+    PrimeValue val;
+    val.SetString(string(128, 'x'));
+    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val), 0).ok());
+
+    cluster::SlotRanges ranges({{0, 16383}});
+    es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    db_slice.FlushSlots(ranges);
+    es->shard_lock()->Release(IntentLock::EXCLUSIVE);
+
+    // Overwrite without yielding: PreUpdateBlocking fires on_change with db_index=1.
+    PrimeValue val2;
+    val2.SetString(string(128, 'y'));
+    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val2), 0).ok());
+
+    util::ThisFiber::SleepFor(50ms);  // let the flush fiber finish
+
+    // db 1 is not covered by slot operations; the entry stays.
+    EXPECT_EQ(db_slice.DbSize(1), 1u);
+    EXPECT_EQ(db_slice.DbSize(0), 0u);
+  });
+}
+
 TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
   ConfigSingleNodeCluster(GetMyId());
 
@@ -935,12 +1454,26 @@ TEST_F(ClusterFamilyTest, ClusterCrossSlot) {
 }
 
 class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
- public:
-  ClusterFamilyEmulatedTest() {
+ protected:
+  void ConfigureClusterFlags() override {
     SetTestFlag("cluster_mode", "emulated");
     SetTestFlag("cluster_announce_ip", "fake-host");
+    SetTestFlag("announce_port", "6379");
   }
 };
+
+// slots_stats is null outside real cluster mode; GetSlotStats must not crash.
+TEST_F(ClusterFamilyEmulatedTest, GetSlotStatsWithoutClusterMode) {
+  EXPECT_EQ(Run({"set", "key", "value"}), "OK");
+
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
+    SlotStats stats = db_slice.GetSlotStats(0);
+    EXPECT_EQ(stats.key_count, 0u);
+  });
+}
 
 TEST_F(ClusterFamilyEmulatedTest, ClusterInfo) {
   string cluster_info = Run({"cluster", "info"}).GetString();
@@ -963,6 +1496,24 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterShardInfos) {
                                                     "endpoint", "fake-host",                   //
                                                     "ip", "fake-host",                         //
                                                     "port", IntArg(6379),                      //
+                                                    "role", "master",                          //
+                                                    "replication-offset", IntArg(0),           //
+                                                    "health", "online"))))))));
+
+  EXPECT_EQ(RunPrivileged({"config", "set", "cluster_announce_ip", "updated-host"}), "OK");
+  EXPECT_EQ(RunPrivileged({"config", "set", "announce_port", "6380"}), "OK");
+
+  EXPECT_THAT(
+      Run({"cluster", "shards"}),
+      RespElementsAre(RespArray(ElementsAre("slots",                                           //
+                                            RespArray(ElementsAre(IntArg(0), IntArg(16383))),  //
+                                            "nodes",                                           //
+                                            RespArray(ElementsAre(                             //
+                                                RespArray(ElementsAre(                         //
+                                                    "id", GetMyId(),                           //
+                                                    "endpoint", "updated-host",                //
+                                                    "ip", "updated-host",                      //
+                                                    "port", IntArg(6380),                      //
                                                     "role", "master",                          //
                                                     "replication-offset", IntArg(0),           //
                                                     "health", "online"))))))));

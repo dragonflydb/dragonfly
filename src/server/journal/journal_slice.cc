@@ -4,26 +4,52 @@
 
 #include "server/journal/journal_slice.h"
 
-#include <absl/container/inlined_vector.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <fcntl.h>
 
+#include <algorithm>
 #include <filesystem>
 
 #include "base/function2.hpp"
 #include "base/logging.h"
+#include "server/common.h"
+#include "server/engine_shard_set.h"
 #include "server/journal/serializer.h"
+#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 
-ABSL_FLAG(uint32_t, shard_repl_backlog_len, 8192,
-          "The length of the circular replication log per shard");
+ABSL_RETIRED_FLAG(uint32_t, shard_repl_backlog_len, 0,
+                  "Deprecated. Use --shard_repl_backlog_time_ms and "
+                  "--shard_repl_backlog_max_bytes instead.");
+ABSL_FLAG(uint32_t, shard_repl_backlog_time_ms, 5000,
+          "Target retention age in milliseconds of entries in the per-shard replication backlog. "
+          "Entries older than this are evicted on later journal writes. 0 disables time-based "
+          "eviction.");
+ABSL_FLAG(strings::MemoryBytesFlag, shard_repl_backlog_max_bytes, 0,
+          "Total bytes retained by replication backlog. 0 (the default) uses 0.5% of maxmemory.");
 
 namespace dfly {
 namespace journal {
 using namespace std;
 using namespace util;
+
+namespace {
+constexpr size_t kMaxTimeEvictionsPerCall = 100;
+
+size_t GetPerShardBacklogMaxBytes() {
+  size_t total_max_bytes = absl::GetFlag(FLAGS_shard_repl_backlog_max_bytes).value;
+  if (total_max_bytes == 0) {
+    constexpr size_t kBacklogMemoryFraction = 200;
+    total_max_bytes = max_memory_limit.load(memory_order_relaxed) / kBacklogMemoryFraction;
+  }
+
+  const size_t shard_count = shard_set ? max<size_t>(1, shard_set->size()) : 1;
+  return total_max_bytes / shard_count;
+}
+
+}  // namespace
 
 JournalSlice::JournalSlice() {
 }
@@ -36,8 +62,10 @@ void JournalSlice::Init() {
   if (ring_buffer_.capacity() > 0)
     return;
 
-  ring_buffer_.set_capacity(absl::GetFlag(FLAGS_shard_repl_backlog_len));
-  ring_buffer_bytes_ = ring_buffer_.capacity() * sizeof(JournalItem);
+  constexpr size_t kDefaultBacklogCapacity = 8192;
+  ring_buffer_.set_capacity(kDefaultBacklogCapacity);
+  max_age_ms_ = absl::GetFlag(FLAGS_shard_repl_backlog_time_ms);
+  max_bytes_ = GetPerShardBacklogMaxBytes();
 }
 
 bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
@@ -109,35 +137,91 @@ void JournalSlice::CallOnChange(JournalChangeItem* change_item) {
   // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
   // Hence this lock prevents the UnregisterOnChange to start running in the middle of CallOnChange.
   // CallOnChange is atomic if JournalSlice::SetFlushMode(false) is called before.
+  auto& item = change_item->journal_item;
+  const uint64_t now_ms = GetCurrentTimeMs();
+  item.time_ms = now_ms;
+
   std::shared_lock lk(cb_mu_);
   for (auto k_v : journal_consumers_arr_) {
     k_v.second->ConsumeJournalChange(*change_item);
   }
-  auto& item = change_item->journal_item;
 
-  // We preserve order here. After ConsumeJournalChange there can reordering
-  if (ring_buffer_.size() == ring_buffer_.capacity()) {
-    const size_t bytes_removed = ring_buffer_.front().data.capacity();
-    DCHECK_GE(ring_buffer_bytes_, bytes_removed);
-    ring_buffer_bytes_ -= bytes_removed;
-  }
+  // We preserve order here. After ConsumeJournalChange there can be reordering.
   if (!ring_buffer_.empty()) {
     DCHECK(item.lsn == ring_buffer_.back().lsn + 1);
   }
-  ring_buffer_.push_back(std::move(item));
-  auto& data = ring_buffer_.back().data;
+  auto& data = item.data;
 
   // Small strings assignment keep the existing capacity intact due to SSO.
   // Shrink strings in this case to prevent excessive memory usage.
   if (data.size() < 32 && data.capacity() > 64) {
     data.shrink_to_fit();
   }
-  ring_buffer_bytes_ += data.capacity();
+  const size_t item_bytes = ItemBytes(item);
+  CleanEntries(item_bytes, now_ms);
+  ring_buffer_.push_back(std::move(item));
+  ring_buffer_bytes_ += item_bytes;
 
   if (enable_journal_flush_) {
     for (auto k_v : journal_consumers_arr_) {
       k_v.second->ThrottleIfNeeded();
     }
+  }
+}
+
+size_t JournalSlice::ItemBytes(const JournalItem& item) {
+  return sizeof(item) + item.data.capacity();
+}
+
+void JournalSlice::CleanEntries(size_t next_item_bytes, uint64_t now_ms) {
+  size_t retained_bytes = ring_buffer_bytes_;
+  size_t time_evictions = 0;
+  size_t bytes_to_free = 0;
+
+  auto first_retained = ring_buffer_.begin();
+  while (first_retained != ring_buffer_.end()) {
+    const bool exceeds_byte_limit =
+        retained_bytes > max_bytes_ || next_item_bytes > max_bytes_ - retained_bytes;
+    const bool expired = max_age_ms_ != 0 && now_ms >= first_retained->time_ms &&
+                         now_ms - first_retained->time_ms >= max_age_ms_;
+    const bool evict_for_time = expired && time_evictions < kMaxTimeEvictionsPerCall;
+    bool evict_for_capacity = bytes_to_free != 0;
+
+    if (!exceeds_byte_limit && !evict_for_time && !evict_for_capacity &&
+        first_retained == ring_buffer_.begin() && ring_buffer_.full()) {
+      const size_t capacity = ring_buffer_.capacity();
+      const size_t avg_item_bytes = retained_bytes / capacity;
+      DCHECK_GT(avg_item_bytes, 0u);
+
+      const size_t available_bytes = max_bytes_ > retained_bytes ? max_bytes_ - retained_bytes : 0;
+      const size_t growth = available_bytes / avg_item_bytes;
+      if (growth != 0) {
+        ring_buffer_.set_capacity(capacity + growth);
+        return;
+      }
+      bytes_to_free = next_item_bytes;
+      evict_for_capacity = true;
+    }
+
+    if (!exceeds_byte_limit && !evict_for_time && !evict_for_capacity) {
+      break;
+    }
+
+    const size_t item_bytes = ItemBytes(*first_retained);
+    DCHECK_GE(retained_bytes, item_bytes);
+    retained_bytes -= item_bytes;
+    if (evict_for_capacity) {
+      bytes_to_free = item_bytes >= bytes_to_free ? 0 : bytes_to_free - item_bytes;
+    }
+    if (evict_for_time && !exceeds_byte_limit && !evict_for_capacity) {
+      ++time_evictions;
+    }
+    ++first_retained;
+  }
+
+  if (first_retained != ring_buffer_.begin()) {
+    ring_buffer_bytes_ = retained_bytes;
+    ring_buffer_.rerase(ring_buffer_.begin(), first_retained);
   }
 }
 

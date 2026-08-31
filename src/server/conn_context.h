@@ -143,6 +143,13 @@ struct ConnectionState {
     std::vector<std::string> key_backing;    // storage for keys provided from lua
     bool read_only = false;
 
+    // ACL rules snapshotted from the connection when the script started. That way,
+    // concurrent ACL modifications of that user do not affect the script execution.
+    std::vector<uint64_t> acl_commands;
+    dfly::acl::AclKeys acl_keys;
+    dfly::acl::AclPubSub acl_pub_sub;
+    size_t acl_db_idx = std::numeric_limits<size_t>::max();
+
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
     size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds
     std::vector<StoredCmd> async_cmds;  // aggregated by acall
@@ -306,6 +313,11 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
 
+  // Applies the ACL identity carried by `cred` (command set, key/channel globs, db constraint)
+  // to this context. Used both when a connection is created and by RESET to restore the default
+  // user's identity. Does not touch `authed_username`, `ns`, or `authenticated`.
+  void SetAclCredentials(dfly::acl::UserCredentials cred);
+
   // Per-client introspection about the most recent command executed on this
   // connection (akin to the info Redis exposes via CLIENT INFO). Captured live
   // during command execution because the underlying Transaction is per-command
@@ -449,7 +461,7 @@ class CommandContext : public facade::ParsedCommand {
     return tail_args_;
   }
 
-  uint64_t start_time_usec = 0;
+  uint64_t start_cycle = 0;
 
  protected:
   void ReuseInternal() final;

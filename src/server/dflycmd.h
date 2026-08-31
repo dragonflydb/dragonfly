@@ -275,11 +275,12 @@ class DflyCmd {
   // Return connection thread index or migrate to another thread.
   void Thread(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
-  // FLOW <masterid> <syncid> <flowid> [<seqid>]
-  // Register connection as flow for sync session.
-  // If seqid is given, it means the client wants to try partial sync.
-  // If it is possible, return Ok and prepare for a partial sync, else
-  // return error and ask the replica to execute FLOW again.
+  // FLOW <masterid> <syncid> <flowid> [<seqid> OR <last_master_id> <lsn-vec>]
+  // Register connection as flow for sync session and determine sync type (possibly partial).
+  // For <seqid> - this is the last LSN processed when replication broke with the same node
+  // For <last_master_id> <lsn-vec> - replicas last replication info, determine if partial sync
+  // is possible (node promotion (master-replica swap), cascaded replication omitting a node).
+  // Replies with sync type (partial/full) and eof token
   void Flow(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   // SYNC <syncid>
@@ -327,9 +328,6 @@ class DflyCmd {
 
   // Main entrypoint for stopping replication.
   void StopReplication(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
-
-  std::optional<LSN> ParseLsnVec(std::string_view lsn_vec, size_t last_journal_lsn_size,
-                                 size_t flow_id, CommandContext* cmd_cntx);
 
   // Checks if LSN exists in the partial sync buffer. If not, also LOG that we can't
   // partial sync.

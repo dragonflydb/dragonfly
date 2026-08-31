@@ -5,7 +5,9 @@
 
 extern "C" {
 #include "redis/crc64.h"
+#include "redis/listpack.h"
 #include "redis/redis_aux.h"
+#include "redis/stream.h"
 #include "redis/zmalloc.h"
 }
 
@@ -19,6 +21,7 @@ extern "C" {
 #include "core/cuckoo.h"
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
+#include "io/file_util.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
@@ -27,6 +30,7 @@ extern "C" {
 #include "server/rdb_save.h"
 #include "server/serializer_commons.h"
 #include "server/test_utils.h"
+#include "strings/human_readable.h"
 
 namespace rng = std::ranges;
 
@@ -45,6 +49,25 @@ ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
 ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
+ABSL_DECLARE_FLAG(std::string, dbfilename);
+ABSL_DECLARE_FLAG(bool, df_snapshot_format);
+ABSL_DECLARE_FLAG(uint32_t, max_rdb_save_serialize_buffer_capacity);
+
+namespace {
+
+uint64_t EncodeModuleId(std::string_view name, int ver) {
+  CHECK_LE(name.size(), 9u) << "Module names are encoded in at most 9 chars";
+  constexpr std::string_view kCharset =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  uint64_t bits = 0;
+  for (char c : name) {
+    size_t idx = kCharset.find(c);
+    bits = (bits << 6) | idx;
+  }
+  return (bits << 10) | static_cast<uint64_t>(ver);
+}
+
+}  // namespace
 
 namespace dfly {
 
@@ -949,6 +972,54 @@ TEST_F(RdbTest, LoadHugeList) {
   ASSERT_EQ(100000, CheckedInt({"llen", "test:1"}));
   auto metrics = GetMetrics();
   EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 20'000'000u);
+}
+
+TEST_F(RdbTest, ReloadKeepsConsumerGroupEntriesRead) {
+  Run({"xadd", "x", "1-0", "f", "v"});
+  Run({"xadd", "x", "2-0", "f", "v"});
+  Run({"xadd", "x", "3-0", "f", "v"});
+  Run({"xgroup", "create", "x", "g", "0"});
+  Run({"xreadgroup", "group", "g", "c", "count", "2", "streams", "x", ">"});
+  auto expected =
+      ElementsAre("name", "g", "consumers", IntArg(1), "pending", IntArg(2), "last-delivered-id",
+                  "2-0", "entries-read", IntArg(2), "lag", IntArg(1));
+  EXPECT_THAT(Run({"xinfo", "groups", "x"}).GetVec()[0].GetVec(), expected);
+
+  ASSERT_EQ(Run({"debug", "reload"}), "OK");
+  // A mid-stream group's entries-read cannot be estimated; it must survive the reload verbatim.
+  EXPECT_THAT(Run({"xinfo", "groups", "x"}).GetVec()[0].GetVec(), expected);
+}
+
+// An RDB image with a zero-member set 'e' followed by string 'f'. The empty key must be skipped
+// without aborting the load.
+TEST_F(RdbTest, LoadSkipsEmptyKey) {
+  uint8_t rdb[] = {0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, 0xfe,
+                   0x00, 0x02, 0x01, 0x65, 0x00, 0x00, 0x01, 0x66, 0x01, 0x76,
+                   0xff, 0xc9, 0xbd, 0xe3, 0xb2, 0xec, 0x3b, 0x7a, 0xb5};
+  auto ec = pp_->at(0)->Await([&] {
+    io::BytesSource src(string_view(reinterpret_cast<const char*>(rdb), sizeof(rdb)));
+    RdbLoadContext load_context;
+    RdbLoader loader(service_.get(), &load_context);
+    return loader.Load(&src);
+  });
+  ASSERT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"get", "f"}), "v");
+  EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+}
+
+// With RDB-format snapshots the recorded last-save path must keep its .rdb extension, otherwise
+// DEBUG RELOAD flushes the dataset and then fails to load it back.
+TEST_F(RdbTest, DebugReloadRdbFormat) {
+  absl::FlagSaver fs;
+  ShutdownService();  // clears dbfilename; set it afterwards, as InitWithDbFilename does
+  absl::SetFlag(&FLAGS_df_snapshot_format, false);
+  absl::SetFlag(&FLAGS_dbfilename, absl::StrCat("rdbtestdump_", getpid(), ".rdb"));
+  ResetService();
+
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  EXPECT_THAT(service_->server_family().GetLastSaveInfo().file_name, EndsWith(".rdb"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
 }
 
 // Tests loading a huge stream, where the stream is loaded in multiple partial
@@ -1997,6 +2068,335 @@ TEST_F(RdbTest, JournalDelWaitsForShardLoads) {
   ASSERT_FALSE(ec) << ec.message();
 
   EXPECT_THAT(Run({"GET", key}), ArgType(RespExpr::NIL));
+}
+
+// Test that an unsupported module type is skipped, and that the keys before and after it are
+// loaded correctly.
+TEST_F(RdbTest, ModuleUnsupportedTypeSkipped) {
+  std::string body;
+
+  body.push_back(RDB_TYPE_STRING);
+  AddKV(&body, "key_before", "val_before");
+
+  body.push_back(RDB_TYPE_MODULE_2);
+  AppendString(&body, "key_with_unsupported_module");
+  AppendLen(&body, EncodeModuleId("invalid", 1));
+  AppendLen(&body, RDB_MODULE_OPCODE_STRING);
+  AppendString(&body, "value");
+  AppendLen(&body, RDB_MODULE_OPCODE_EOF);
+
+  body.push_back(RDB_TYPE_STRING);
+  AddKV(&body, "key_after", "val_after");
+
+  auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_EQ(Run({"GET", "key_before"}), "val_before");
+  EXPECT_THAT(Run({"EXISTS", "key_with_unsupported_module"}), IntArg(0));
+  EXPECT_EQ(Run({"GET", "key_after"}), "val_after");
+}
+
+// Every global-PEL entry of a loaded consumer group must be owned by exactly one
+// consumer. A crafted stream that violates this must be rejected: two consumers
+// sharing one entry leave a NACK double-freed on consumer deletion, and an
+// unclaimed entry leaves nack->consumer == nullptr for XACK/XCLAIM to dereference.
+TEST_F(RdbTest, RestoreStreamConsumerGroupCorruption) {
+  auto u64le = [](std::string* out, uint64_t v) {
+    uint8_t b[8];
+    absl::little_endian::Store64(b, v);
+    out->append(reinterpret_cast<const char*>(b), sizeof(b));
+  };
+
+  struct Consumer {
+    std::string name;
+    std::vector<std::string> pel;
+  };
+
+  // Builds a DUMP payload for a stream with an empty body and a single consumer
+  // group whose global PEL and consumers are as specified.
+  auto build = [&](const std::vector<std::string>& global_pel,
+                   const std::vector<Consumer>& consumers) {
+    std::string p;
+    p.push_back(RDB_TYPE_STREAM_LISTPACKS);
+    AppendLen(&p, 0);  // listpack node count: empty stream body
+    AppendLen(&p, 0);  // stream_len
+    AppendLen(&p, 0);  // last_id.ms
+    AppendLen(&p, 0);  // last_id.seq
+
+    AppendLen(&p, 1);       // one consumer group
+    AppendString(&p, "g");  // group name
+    AppendLen(&p, 0);       // group last_id.ms
+    AppendLen(&p, 0);       // group last_id.seq
+
+    AppendLen(&p, global_pel.size());
+    for (const auto& id : global_pel) {
+      p.append(id);
+      u64le(&p, 0);      // delivery_time
+      AppendLen(&p, 0);  // delivery_count
+    }
+
+    AppendLen(&p, consumers.size());
+    for (const auto& c : consumers) {
+      AppendString(&p, c.name);
+      u64le(&p, 0);  // seen_time
+      AppendLen(&p, c.pel.size());
+      for (const auto& id : c.pel)
+        p.append(id);
+    }
+
+    // DUMP footer: 2-byte version, then CRC64 over everything preceding it.
+    uint8_t ver[2];
+    absl::little_endian::Store16(ver, RDB_SER_VERSION);
+    p.append(reinterpret_cast<const char*>(ver), sizeof(ver));
+    uint64_t cs = crc64(0, reinterpret_cast<const uint8_t*>(p.data()), p.size());
+    u64le(&p, cs);
+    return p;
+  };
+
+  const std::string x(16, 'A');
+  const std::string y(16, 'B');
+
+  // Two consumers claim the same global-PEL entry: accepted by a vulnerable
+  // loader, then a double-free when both consumers are deleted.
+  EXPECT_THAT(Run({"RESTORE", "shared", "0", build({x}, {{"c1", {x}}, {"c2", {x}}})}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "shared"}), IntArg(0));
+
+  // A global-PEL entry that no consumer claims: accepted by a vulnerable loader,
+  // leaving nack->consumer == nullptr.
+  EXPECT_THAT(Run({"RESTORE", "unclaimed", "0", build({x}, {{"c1", {}}})}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "unclaimed"}), IntArg(0));
+
+  // One consumer lists the same id twice (duplicate consumer-PEL insert).
+  EXPECT_THAT(Run({"RESTORE", "dup", "0", build({x}, {{"c1", {x, x}}})}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "dup"}), IntArg(0));
+
+  // Positive controls: well-formed groups must still load.
+  EXPECT_EQ(Run({"RESTORE", "ok1", "0", build({x}, {{"c1", {x}}})}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "ok1"}), IntArg(1));
+  EXPECT_EQ(Run({"RESTORE", "ok2", "0", build({x, y}, {{"c1", {x}}, {"c2", {y}}})}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "ok2"}), IntArg(1));
+}
+
+// A master entry declaring more fields than the listpack holds makes stream iteration walk
+// lpNext past the end and crash; RESTORE must reject the inconsistent stream.
+TEST_F(RdbTest, RestoreStreamListpackMasterFieldsOverflow) {
+  auto u64le = [](std::string* out, uint64_t v) {
+    uint8_t b[8];
+    absl::little_endian::Store64(b, v);
+    out->append(reinterpret_cast<const char*>(b), sizeof(b));
+  };
+
+  // A one-node stream DUMP whose master entry declares the given counts. An optional record with
+  // no fields can be added to test consistency between deleted_count and the record flags.
+  auto build = [&](int64_t count, int64_t deleted, int64_t num_master_fields,
+                   std::optional<int64_t> record_flags = std::nullopt) {
+    uint8_t* lp = lpNew(0);
+    lp = lpAppendInteger(lp, count);              // valid entry count
+    lp = lpAppendInteger(lp, deleted);            // deleted count
+    lp = lpAppendInteger(lp, num_master_fields);  // master fields (untrusted)
+    lp = lpAppendInteger(lp, 0);                  // terminator
+    if (record_flags) {
+      CHECK_EQ(num_master_fields, 0);
+      lp = lpAppendInteger(lp, *record_flags);
+      lp = lpAppendInteger(lp, 0);  // entry ID milliseconds delta
+      lp = lpAppendInteger(lp, 0);  // entry ID sequence delta
+      lp = lpAppendInteger(lp, 3);  // flags + two ID deltas
+    }
+    std::string lp_blob(reinterpret_cast<const char*>(lp), lpBytes(lp));
+    lpFree(lp);
+
+    std::string p;
+    p.push_back(RDB_TYPE_STREAM_LISTPACKS);
+    AppendLen(&p, 1);                           // one listpack node
+    AppendString(&p, std::string(16, '\x01'));  // 16-byte master ID (sizeof(streamID))
+    AppendString(&p, lp_blob);                  // the crafted master-entry listpack
+    AppendLen(&p, 0);                           // stream_len
+    AppendLen(&p, 0);                           // last_id.ms
+    AppendLen(&p, 0);                           // last_id.seq
+    AppendLen(&p, 0);                           // consumer-group count
+
+    uint8_t ver[2];
+    absl::little_endian::Store16(ver, RDB_SER_VERSION);
+    p.append(reinterpret_cast<const char*>(ver), sizeof(ver));
+    u64le(&p, crc64(0, reinterpret_cast<const uint8_t*>(p.data()), p.size()));
+    return p;
+  };
+
+  // Control: truthful counts must still load.
+  EXPECT_EQ(Run({"RESTORE", "safe", "0", build(0, 0, 0)}), "OK");
+  EXPECT_THAT(Run({"EXISTS", "safe"}), IntArg(1));
+
+  // Inflated master-fields count: crashes a vulnerable loader in streamGetEdgeID, rejected here.
+  EXPECT_THAT(Run({"RESTORE", "overflow", "0", build(0, 0, 1000)}), ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "overflow"}), IntArg(0));
+
+  // valid + deleted counts whose signed sum overflows; must not wrap negative and skip the walk.
+  EXPECT_THAT(Run({"RESTORE", "sumovf", "0", build(INT64_MAX, 1, 0)}), ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "sumovf"}), IntArg(0));
+
+  // The number of records carrying the DELETED flag must match deleted_count in the master entry.
+  EXPECT_THAT(Run({"RESTORE", "deleted-mismatch", "0",
+                   build(1, 0, 0, STREAM_ITEM_FLAG_SAMEFIELDS | STREAM_ITEM_FLAG_DELETED)}),
+              ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"EXISTS", "deleted-mismatch"}), IntArg(0));
+
+  // Real streams must still round-trip, exercising both SAMEFIELDS and full records.
+  Run({"XADD", "s", "1-1", "a", "1", "b", "2"});  // master fields {a, b}
+  Run({"XADD", "s", "2-1", "a", "3", "b", "4"});  // same fields -> SAMEFIELDS
+  Run({"XADD", "s", "3-1", "c", "5"});            // different fields -> full record
+  auto dump = Run({"DUMP", "s"});
+  Run({"DEL", "s"});
+  EXPECT_EQ(Run({"RESTORE", "s", "0", dump.GetString()}), "OK");
+  EXPECT_THAT(Run({"XLEN", "s"}), IntArg(3));
+}
+
+// An early EOF with trailing bytes passes the non-deep lpValidateIntegrity but must be
+// rejected by the walk; otherwise reverse iteration (lpLast/lpPrev) reads the trailing bytes
+// out of bounds. Exercised via the non-deep full-RDB load path.
+TEST_F(RdbTest, LoadStreamListpackEarlyEof) {
+  uint8_t* lp = lpNew(0);
+  lp = lpAppendInteger(lp, 0);  // count
+  lp = lpAppendInteger(lp, 0);  // deleted
+  lp = lpAppendInteger(lp, 0);  // num master fields
+  lp = lpAppendInteger(lp, 0);  // terminator
+  std::string blob(reinterpret_cast<const char*>(lp), lpBytes(lp));
+  lpFree(lp);
+
+  // The trailing LP_EOF becomes an early EOF once junk and a new final EOF follow it; patch
+  // the header total-bytes to the enlarged size so lpValidateIntegrity still accepts it.
+  blob.append(4, '\x7f');
+  blob.push_back('\xff');
+  absl::little_endian::Store32(reinterpret_cast<uint8_t*>(blob.data()), blob.size());
+
+  std::string body;
+  body.push_back(RDB_TYPE_STREAM_LISTPACKS);
+  AppendString(&body, "earlyeof");               // key
+  AppendLen(&body, 1);                           // one listpack node
+  AppendString(&body, std::string(16, '\x01'));  // 16-byte master ID
+  AppendString(&body, blob);                     // the early-EOF listpack
+  AppendLen(&body, 0);                           // stream_len
+  AppendLen(&body, 0);                           // last_id.ms
+  AppendLen(&body, 0);                           // last_id.seq
+  AppendLen(&body, 0);                           // consumer-group count
+
+  // Skipping the corrupt key is non-fatal; the point is that it is never stored.
+  std::ignore = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  EXPECT_THAT(Run({"EXISTS", "earlyeof"}), IntArg(0));
+}
+
+// Integration test for snapshot egress throttling (--snapshot_egress_limit_bytes).
+// Bandwidth limiting is inherently time-based, so this test runs a snapshot large enough
+// that the throttled run takes a few seconds. It asserts two robust properties:
+//   1. The effective egress rate does not exceed the configured limit (the core guarantee).
+//   2. The limit - not inherent serialization cost - is what slows the save down.
+TEST_F(RdbTest, SnapshotEgressThrottle) {
+  absl::FlagSaver fs;
+  // Disable compression so the on-disk size equals the tracked egress and serialization
+  // stays cheap, ensuring the throttle (not CPU) dominates the timing.
+  SetFlag(&FLAGS_compression_mode, CompressionMode::NONE);
+
+  // ~20MB spread across shards.
+  Run({"debug", "populate", "20000", "key", "1000"});
+
+  auto save_and_measure = [&]() -> std::pair<double, size_t> {
+    int64_t start = absl::GetCurrentTimeNanos();
+    RespExpr resp = Run({"save", "rdb"});
+    CHECK_EQ(resp, "OK");
+    double secs = double(absl::GetCurrentTimeNanos() - start) / 1e9;
+    auto files = io::StatFiles(absl::StrCat(absl::GetFlag(FLAGS_dbfilename), "*"));
+    CHECK(files) << files.error().message();
+    size_t total = 0;
+    for (const auto& f : *files)
+      total += f.size;
+    return {secs, total};
+  };
+
+  // Baseline save with no limit to measure the machine's serialization capacity.
+  Run({"config", "set", "snapshot_egress_limit_bytes", "0"});
+  auto [t_base, bytes] = save_and_measure();
+  ASSERT_GT(bytes, 1u << 20) << "populated dataset too small to test throttling";
+
+  // The limit is per-shard-thread, so throttle each shard to a small fraction of the machine's
+  // measured per-shard capacity. That way the limit - not CPU - is the bottleneck on any machine
+  // (including slow ASAN/CI). Aim for a run of at least a couple of seconds so several sliding
+  // windows elapse. Pacing makes each shard's average rate converge to the limit, so the
+  // aggregate rate converges to limit * num_shards and the expected duration is ~target_sec.
+  uint64_t shards = shard_set->size();
+  double target_sec = std::max(2.0, t_base * 8);
+  uint64_t limit = uint64_t(bytes / shards / target_sec);
+  Run({"config", "set", "snapshot_egress_limit_bytes", absl::StrCat(limit)});
+  auto [t_lim, bytes2] = save_and_measure();
+
+  double rate = double(bytes2) / t_lim;
+  double per_shard_rate = rate / shards;
+  LOG(INFO) << "egress throttle: bytes=" << bytes2 << " shards=" << shards << " limit=" << limit
+            << "B/s t_base=" << t_base << "s t_lim=" << t_lim << "s rate=" << uint64_t(rate)
+            << "B/s per_shard_rate=" << uint64_t(per_shard_rate) << "B/s";
+
+  // Core guarantee: each shard's achieved egress rate stays at/below the limit. The only slack is
+  // the one-window initial burst plus per-bucket overshoot, comfortably within 1.6x.
+  EXPECT_LE(per_shard_rate, limit * 1.6) << "egress exceeded the configured per-shard limit";
+
+  // Sanity: the slowdown is caused by the limit, not by inherent save cost.
+  EXPECT_GT(t_lim, t_base * 3);
+}
+
+TEST_F(RdbTest, EofWithRemoteShardChunksPending) {
+  // This test creates a key whose RDB chunk is dispatched to a remote shard (not the shard
+  // driving the load), and simulates the source stream ending (EOF) before all of that chunk's
+  // promised elements arrive. This exercises the case where a remote-shard chunk is left
+  // incomplete/pending when EOF is hit, verifying the loader neither errors out nor leaves a
+  // partially-built key behind.
+  ASSERT_GT(shard_set->size(), 1);  // need >1 shard so we can pick a key on a non-zero shard
+
+  std::string key;
+  ShardId sid = 0;
+
+  for (auto i = 0; i < 1000; ++i) {
+    key = absl::StrCat("uc-", i);
+    sid = Shard(key, shard_set->size());
+    if (sid > 0)
+      break;
+  }
+  ASSERT_GT(sid, 0);
+
+  std::string chunk;
+  chunk.push_back(RDB_TYPE_HASH);
+  AppendString(&chunk, key);
+  AppendLen(&chunk, 2);  // promise 2 fields, only 1 will follow
+  AddKV(&chunk, "field", "v1");
+
+  const std::string body = MakeTaggedChunk(1, chunk);
+
+  const auto ec = pp_->at(0)->Await([&] { return LoadRdbData(service_.get(), WrapInRdb(body)); });
+  ASSERT_FALSE(ec) << ec.message();  // EOF with pending remote chunk must not surface as an error
+
+  // Key was never fully loaded before EOF, so it must not exist.
+  EXPECT_EQ(Run({"EXISTS", key}), 0);
+}
+
+TEST(RdbSerializerTest, BufferShrinksIfOverCap) {
+  absl::FlagSaver fs;
+  constexpr uint32_t kMaxCap = 8 * 1024;
+  SetFlag(&FLAGS_max_rdb_save_serialize_buffer_capacity, kMaxCap);
+
+  RdbSerializer serializer{CompressionMode::NONE};
+
+  const string big(kMaxCap + 1, 'x');
+  ASSERT_FALSE(serializer.WriteRaw(io::Buffer(big)));
+  ASSERT_GT(serializer.GetBufferCapacity(), kMaxCap);
+
+  EXPECT_EQ(serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry), big);
+  EXPECT_EQ(serializer.SerializedLen(), 0);
+  EXPECT_EQ(serializer.GetBufferCapacity(), kMaxCap);
+
+  constexpr string_view tail = "tail entry";
+  ASSERT_FALSE(serializer.WriteRaw(io::Buffer(tail)));
+  ASSERT_EQ(serializer.GetBufferCapacity(), kMaxCap);
+  EXPECT_EQ(serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry), tail);
 }
 
 }  // namespace dfly

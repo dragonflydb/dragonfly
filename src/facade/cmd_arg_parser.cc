@@ -12,40 +12,40 @@
 namespace facade {
 
 void CmdArgParser::ExpectTag(std::string_view tag) {
-  if (cur_i_ >= args_.size()) {
+  if (cur_i_ >= size_) {
     Report(OUT_OF_BOUNDS, cur_i_);
     return;
   }
 
   auto idx = cur_i_++;
-  auto val = args_[idx];
+  auto val = SVAt(idx);
   if (!absl::EqualsIgnoreCase(val, tag)) {
     Report(INVALID_NEXT, idx);
   }
 }
 
 void CmdArgParser::ExpectTag(std::string_view tag, std::string error_msg) {
-  if (cur_i_ >= args_.size()) {
+  if (cur_i_ >= size_) {
     Report(CUSTOM_ERROR, cur_i_, std::move(error_msg));
     return;
   }
 
   auto idx = cur_i_++;
-  if (!absl::EqualsIgnoreCase(args_[idx], tag))
+  if (!absl::EqualsIgnoreCase(SVAt(idx), tag))
     Report(CUSTOM_ERROR, idx, std::move(error_msg));
 }
 
 std::string_view CmdArgParser::ExpectStartsWith(std::string_view prefix, std::string error_msg) {
-  if (cur_i_ >= args_.size()) {
+  if (cur_i_ >= size_) {
     Report(CUSTOM_ERROR, cur_i_, std::move(error_msg));
-    return {};
+    return std::string_view{""};
   }
 
   auto idx = cur_i_++;
-  auto val = args_[idx];
+  auto val = SVAt(idx);
   if (!absl::StartsWith(val, prefix)) {
     Report(CUSTOM_ERROR, idx, std::move(error_msg));
-    return {};
+    return std::string_view{""};
   }
   val.remove_prefix(prefix.size());
   return val;
@@ -68,11 +68,6 @@ ErrorReply CmdArgParser::ErrorInfo::MakeReply() const {
       return ErrorReply{kSyntaxErr};
   };
   return ErrorReply{kSyntaxErr};
-}
-
-CmdArgParser::~CmdArgParser() {
-  DCHECK(!error_) << "Parsing error occured but not checked";
-  // TODO DCHECK(!HasNext()) << "Not all args were processed";
 }
 
 }  // namespace facade

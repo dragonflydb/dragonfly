@@ -22,6 +22,7 @@
 #include "facade/reply_capture.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/blocking_controller.h"
 #include "server/cmd_support.h"
 #include "server/command_families.h"
 #include "server/command_registry.h"
@@ -31,8 +32,8 @@
 #include "server/error.h"
 #include "server/execution_state.h"
 #include "server/family_utils.h"
-#include "server/generic_family.h"
 #include "server/journal/journal.h"
+#include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
@@ -114,6 +115,7 @@ class SetCmd {
     uint64_t expire_after_ms = 0;  // Relative value based on now. 0 means no expiration.
     optional<StringResult>* prev_val = nullptr;  // if set, previous value will be stored if found
     BackPressureFuture* backpressure = nullptr;
+    bool expire_in_past = false;  // the parsed absolute expiration has already elapsed
 
     constexpr bool IsConditionalSet() const {
       return flags & SET_IF_NOTEXIST || flags & SET_IF_EXISTS;
@@ -126,16 +128,18 @@ class SetCmd {
   OpStatus SetExisting(const SetParams& params, std::string_view value,
                        DbSlice::ItAndUpdater* it_upd);
 
-  void AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
+  void AddNew(const SetParams& params, DbSlice::ItAndUpdater& it_upd, std::string_view key,
               std::string_view value);
 
   // Called at the end of AddNew of SetExisting
   void PostEdit(const SetParams& params, std::string_view key, std::string_view value, PrimeKey* pk,
-                PrimeValue* pv);
+                PrimeValue* pv, DbSlice::AutoUpdater& post_updater);
 
   void RecordJournal(const SetParams& params, std::string_view key, std::string_view value);
 
   OpStatus CachePrevIfNeeded(const SetParams& params, DbSlice::Iterator it);
+
+  OpStatus DeleteExpiredKey(std::string_view key, DbSlice::ItAndUpdater* it_upd);
 
   OpArgs op_args_;
   bool explicit_journal_;  // call RecordJournal (auto journaling disabled)
@@ -278,14 +282,14 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
     auto tier = ReadTieredString(op_args.db_cntx.db_index, key, res.it->second,
                                  op_args.shard->tiered_storage())
                     .Get();
+    res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     if (!tier)
       return OpStatus::IO_ERROR;
     string slice = std::move(tier).value();
     string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
-    // The read may have warmed the value back into memory; re-check before Delete.
+    res.post_updater.ReduceHeapUsage();
     if (res.it->second.IsExternal()) {
-      res.post_updater.ReduceHeapUsage();
-      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
     }
     res.it->second.SetString(new_val);
     return true;
@@ -321,6 +325,7 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
     auto res = ReadTieredString(op_args.db_cntx.db_index, key, add_res.it->second,
                                 op_args.shard->tiered_storage())
                    .Get();
+    add_res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     if (!res)
       return OpStatus::IO_ERROR;
     tmp = std::move(res).value();
@@ -342,11 +347,9 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
 
-  // The tiered read may have warmed the value back into memory; re-check so Delete
-  // only runs while it is still external.
+  add_res.post_updater.ReduceHeapUsage();
   if (add_res.it->second.IsExternal()) {
-    add_res.post_updater.ReduceHeapUsage();
-    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &add_res.it->second);
+    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &add_res.it->second);
   }
   add_res.it->second.SetString(str);
 
@@ -708,8 +711,12 @@ OpResult<TResultOrT<size_t>> OpExtend(const OpArgs& op_args, std::string_view ke
 
 // Helper for building replies for strings
 struct GetReplies {
-  GetReplies(SinkReplyBuilder* rb) : rb{static_cast<RedisReplyBuilder*>(rb)} {
-    DCHECK(dynamic_cast<RedisReplyBuilder*>(rb));
+  GetReplies(CommandContext* cmd_cntx) : cmd_cntx{cmd_cntx} {
+  }
+
+  // Fetch the reply builder lazily only after were allowed to reply (after await)
+  RedisReplyBuilder* rb() const {
+    return static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   }
 
   template <typename T> void Send(OpResult<T>&& res) const {
@@ -717,18 +724,18 @@ struct GetReplies {
       case OpStatus::OK:
         return Send(std::move(res.value()));
       case OpStatus::WRONG_TYPE:
-        return rb->SendError(kWrongTypeErr);
+        return rb()->SendError(kWrongTypeErr);
       case OpStatus::IO_ERROR:
-        return rb->SendError(kTieredIoError);
+        return rb()->SendError(kTieredIoError);
       default:
-        rb->SendNull();
+        rb()->SendNull();
     }
   }
 
   template <typename T> void Send(optional<T>&& res) const {
     if (res.has_value())
       return Send(std::move(*res));
-    return rb->SendNull();
+    return rb()->SendNull();
   }
 
   template <typename T> void Send(TResultOrT<T>&& res) const {
@@ -748,7 +755,7 @@ struct GetReplies {
     if (holds_alternative<cmn::BorrowedString>(res)) {
       // Move the BorrowedString into SendBulkStringBorrowed; the reply builder takes ownership
       // of the borrow (and associated pin) and parks the pin until all the writes complete.
-      rb->SendBulkStringBorrowed(std::move(get<cmn::BorrowedString>(res)));
+      rb()->SendBulkStringBorrowed(std::move(get<cmn::BorrowedString>(res)));
       return;
     }
     auto fut = get<TieredStorage::TResult<std::string>>(std::move(res));
@@ -760,20 +767,20 @@ struct GetReplies {
   }
 
   void Send(size_t val) const {
-    rb->SendLong(val);
+    rb()->SendLong(val);
   }
 
   // TODO: to remove.
   void Send(string_view str) const {
     LOG(FATAL) << "SHOULD NOT SEND STRINGVIEW DIRECTLY";
-    rb->SendBulkString(str);
+    rb()->SendBulkString(str);
   }
 
   void Send(const std::string& str) const {
-    rb->SendBulkString(str);
+    rb()->SendBulkString(str);
   }
 
-  RedisReplyBuilder* rb;
+  CommandContext* cmd_cntx;
 };
 
 cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -787,8 +794,7 @@ cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
       return OpExtend(t->GetOpArgs(shard), key, value, prepend);
     };
 
-    RedisReplyBuilder* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-    GetReplies{rb}.Send(co_await cmd::SingleHopT(cb));
+    GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   } else {
     // Memcached skips if key is missing
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -865,12 +871,16 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
     const OpArgs& op_args = params.t->GetOpArgs(params.shard);
     if (expired) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{(params.key)});
+    } else if (params.expire_params.persist) {
+      // GAT 0 removes the expiry; PEXPIREAT with the returned 0 would delete the replica's key.
+      RecordJournal(op_args, "PERSIST"sv, ArgSlice{(params.key)});
     } else {
       RecordJournal(op_args, "PEXPIREAT"sv, ArgSlice{(params.key), (absl::StrCat(value))});
     }
   }
 
   if (expired) {
+    db_slice.SendExpiredKeyEvent(ctx, params.key);
     return OpStatus::KEY_NOTFOUND;
   }
   return find_res->it;
@@ -911,6 +921,8 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
 
     if (params.flags & SET_IF_EXISTS) {
       if (IsValid(find_res.it)) {
+        if (params.expire_in_past)
+          return DeleteExpiredKey(key, &find_res);
         return SetExisting(params, value, &find_res);
       } else {
         return OpStatus::SKIPPED;
@@ -919,8 +931,20 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
       DCHECK(params.flags & SET_IF_NOTEXIST) << params.flags;
       if (IsValid(find_res.it)) {
         return OpStatus::SKIPPED;
-      }  // else AddNew() is called below
+      }
+      // The new value would already be expired: nothing to create.
+      if (params.expire_in_past)
+        return OpStatus::OK;
+      // else AddNew() is called below
     }
+  } else if (params.expire_in_past) {
+    // Unconditional set with an elapsed expiration: delete the existing key instead of storing.
+    auto find_res = db_slice.FindMutable(op_args_.db_cntx, key);
+    if (auto status = CachePrevIfNeeded(params, find_res.it); status != OpStatus::OK)
+      return status;
+    if (!IsValid(find_res.it))
+      return OpStatus::OK;
+    return DeleteExpiredKey(key, &find_res);
   }
 
   // Enable journal omits for this operation
@@ -936,10 +960,10 @@ OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value
       return status;
 
     return SetExisting(params, value, &(*op_res));
-  } else {
-    AddNew(params, op_res->it, key, value);
-    return OpStatus::OK;
   }
+
+  AddNew(params, *op_res, key, value);
+  return OpStatus::OK;
 }
 
 OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
@@ -967,6 +991,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   bool has_expire = key.HasExpire();
+  const bool was_stream = prime_value.ObjType() == OBJ_STREAM;
 
   it_upd->post_updater.ReduceHeapUsage();
 
@@ -980,21 +1005,28 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
 
   // If value is external, mark it as deleted
   if (prime_value.IsExternal()) {
-    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, &prime_value);
+    shard->tiered_storage()->Delete(op_args_.db_cntx.db_index, it_upd->it.key(), &prime_value);
   }
 
   // overwrite existing entry.
   prime_value.SetString(value);
 
+  if (was_stream) {
+    if (auto* bc = op_args_.db_cntx.ns->GetBlockingController(shard->shard_id()); bc) {
+      bc->Awaken(op_args_.db_cntx.db_index, it_upd->it.key());
+    }
+  }
+
   DCHECK_EQ(has_expire, key.HasExpire());
 
-  PostEdit(params, it_upd->it.key(), value, &key, &prime_value);
+  PostEdit(params, it_upd->it.key(), value, &key, &prime_value, it_upd->post_updater);
   return OpStatus::OK;
 }
 
-void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::string_view key,
+void SetCmd::AddNew(const SetParams& params, DbSlice::ItAndUpdater& it_upd, std::string_view key,
                     std::string_view value) {
   auto& db_slice = op_args_.GetDbSlice();
+  const auto& it = it_upd.it;
   it->second = PrimeValue{value};
 
   if (params.expire_after_ms) {
@@ -1011,11 +1043,15 @@ void SetCmd::AddNew(const SetParams& params, const DbSlice::Iterator& it, std::s
     it->first.SetSticky(true);
   }
 
-  PostEdit(params, key, value, &it->first, &it->second);
+  PostEdit(params, key, value, &it->first, &it->second, it_upd.post_updater);
 }
 
 void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string_view value,
-                      PrimeKey* pk, PrimeValue* pv) {
+                      PrimeKey* pk, PrimeValue* pv, DbSlice::AutoUpdater& post_updater) {
+  // Finish accounting (adding/subtracting size) before RecordJournal, which might suspend.
+  // If it suspends then StashPrimeValue might finish first and add -ve size resulting in
+  // miscalculation.
+  post_updater.Run();
   EngineShard* shard = op_args_.shard;
 
   // Currently we always try to offload, but Stash may ignore it, if disk I/O is overloaded.
@@ -1061,6 +1097,23 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
   dfly::RecordJournal(op_args_, "SET", ArgSlice{cmds});
 }
 
+OpStatus SetCmd::DeleteExpiredKey(string_view key, DbSlice::ItAndUpdater* it_upd) {
+  auto& db_slice = op_args_.GetDbSlice();
+  it_upd->post_updater.Run();  // finalize memory accounting before the delete
+
+  DbSlice::ExpireParams past{TimeUnit::MSEC, -1, op_args_.db_cntx.time_now_ms, /*cap=*/true};
+  auto res = db_slice.UpdateExpire(op_args_.db_cntx, it_upd->it, past);
+  RETURN_ON_BAD_STATUS(res);
+  DCHECK_EQ(*res, -1);
+
+  // SET is NO_AUTOJOURNAL: journal the delete explicitly or the replica keeps the key forever.
+  if (op_args_.shard->journal()) {
+    dfly::RecordJournal(op_args_, "DEL"sv, ArgSlice{key});
+  }
+  db_slice.SendExpiredKeyEvent(op_args_.db_cntx, key);
+  return OpStatus::OK;
+}
+
 OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Iterator it) {
   if (!params.prev_val || !IsValid(it))
     return OpStatus::OK;
@@ -1072,53 +1125,38 @@ OpStatus SetCmd::CachePrevIfNeeded(const SetCmd::SetParams& params, DbSlice::Ite
   return OpStatus::OK;
 }
 
-struct NegativeExpire {};  // Returned if relative expiry was in the past
-std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetParams(
-    CmdArgParser parser, const CommandContext* cmd_cntx) {
+struct SetOpts {
+  ExpiryOption expiry;
+  uint16_t flags = SetCmd::SET_ALWAYS;
+  uint32_t memcache_flags = 0;
+};
+
+std::variant<SetCmd::SetParams, facade::ErrorReply> ParseSetParams(CmdArgParser parser,
+                                                                   const CommandContext* cmd_cntx) {
+  static constexpr auto kGrammar = Compile(Options(
+      Into(&SetOpts::expiry, ExpiryOneOf()),
+      Flags(&SetOpts::flags, "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL",
+            SetCmd::SET_KEEP_EXPIRE, "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST),
+      Field("_MCFLAGS", &SetOpts::memcache_flags)));
+
+  SetOpts opts;
+  opts.memcache_flags = cmd_cntx->mc_command() ? cmd_cntx->mc_command()->flags : 0;
+  kGrammar.Apply(&parser, &opts);
+  if (!parser.Finalize())
+    return parser.TakeError().MakeReply();
+
   SetCmd::SetParams sparams;
+  sparams.flags = opts.flags;
+  sparams.memcache_flags = opts.memcache_flags;
 
-  sparams.memcache_flags = cmd_cntx->mc_command() ? cmd_cntx->mc_command()->flags : 0;
-
-  while (parser.HasNext()) {
-    if (auto exp_type = parser.TryMapNext("EX", ExpT::EX, "PX", ExpT::PX, "EXAT", ExpT::EXAT,
-                                          "PXAT", ExpT::PXAT);
-        exp_type) {
-      auto int_arg = parser.Next<int64_t>();
-      if (parser.HasError())
-        break;
-
-      // We can set expiry only once.
-      if (sparams.flags & SetCmd::SET_EXPIRE_AFTER_MS)
-        return facade::ErrorReply{kSyntaxErr};
-
-      sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-
-      // Since PXAT/EXAT can change this, we need to check this ahead
-      if (int_arg <= 0)
-        return facade::ErrorReply{InvalidExpireTime("set")};
-
-      const uint64_t now_ms = GetCurrentTimeMs();
-      DbSlice::ExpireParams expiry{*exp_type, int_arg, now_ms};
-
-      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
-      if (abs_ms < 0)
-        return facade::ErrorReply{InvalidExpireTime("set")};
-
-      // Remove existed key if the key is expired already
-      if (rel_ms < 0)
-        return NegativeExpire{};
-
-      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
-    } else if (!parser.Check("_MCFLAGS", &sparams.memcache_flags)) {
-      uint16_t flag = parser.MapNext(  //
-          "GET", SetCmd::SET_GET, "STICK", SetCmd::SET_STICK, "KEEPTTL", SetCmd::SET_KEEP_EXPIRE,
-          "XX", SetCmd::SET_IF_EXISTS, "NX", SetCmd::SET_IF_NOTEXIST);
-      sparams.flags |= flag;
-    }
+  optional<DbSlice::ExpireParams> expiry;
+  // The transaction time: the same clock that anchors expire_after_ms during execution.
+  const uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
+  if (opts.expiry.value) {
+    if (*opts.expiry.value <= 0)
+      return facade::ErrorReply{InvalidExpireTime("set")};
+    expiry.emplace(opts.expiry.type, *opts.expiry.value, now_ms);
   }
-
-  if (auto err = parser.TakeError(); err)
-    return err.MakeReply();
 
   if (auto* mc = cmd_cntx->mc_command()) {
     using MP = facade::MemcacheParser;
@@ -1127,17 +1165,20 @@ std::variant<SetCmd::SetParams, facade::ErrorReply, NegativeExpire> ParseSetPara
     else if (mc->type == MP::REPLACE)
       sparams.flags |= SetCmd::SET_IF_EXISTS;
 
-    if (mc->expire_ts > 0) {
-      sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
-      DbSlice::ExpireParams expiry{TimeUnit::SEC, mc->expire_ts};
-      int64_t now_ms = GetCurrentTimeMs();
-      auto [rel_ms, abs_ms] = expiry.Calculate(now_ms, false);
-      if (abs_ms < 0)
-        return facade::ErrorReply{InvalidExpireTime("set")};
-      if (rel_ms < 0)
-        return NegativeExpire{};
-      tie(sparams.expire_after_ms, ignore) = expiry.Calculate(now_ms, true);
-    }
+    if (mc->expire_ts > 0)
+      expiry.emplace(TimeUnit::SEC, mc->expire_ts);  // absolute unix seconds
+  }
+
+  if (expiry) {
+    sparams.flags |= SetCmd::SET_EXPIRE_AFTER_MS;
+    // The cap keeps negative rel_ms and the overflow marker intact, so one call suffices.
+    auto [rel_ms, abs_ms] = expiry->Calculate(now_ms, true);
+    if (abs_ms < 0)
+      return facade::ErrorReply{InvalidExpireTime("set")};
+    if (rel_ms <= 0)
+      sparams.expire_in_past = true;
+    else
+      sparams.expire_after_ms = rel_ms;
   }
 
   auto has_mask = [&](uint16_t m) { return (sparams.flags & m) == m; };
@@ -1155,23 +1196,6 @@ cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (holds_alternative<facade::ErrorReply>(params_result))
     co_return get<facade::ErrorReply>(params_result);
-
-  if (holds_alternative<NegativeExpire>(params_result)) {
-    auto del_cb = [](const Transaction* tx, EngineShard* es) {
-      ShardArgs args = tx->GetShardArgs(es->shard_id());
-      GenericFamily::OpDel(tx->GetOpArgs(es), args, false);
-      return OpStatus::OK;
-    };
-    co_await cmd::SingleHop(del_cb);
-
-    if (cmd_cntx->mc_command() != nullptr) {
-      cmd_cntx->rb()->SendSimpleString(
-          MCRender{cmd_cntx->mc_command()->cmd_flags}.RenderStored(true));
-    } else {
-      cmd_cntx->rb()->SendOk();
-    }
-    co_return std::nullopt;
-  }
 
   auto& sparams = get<SetCmd::SetParams>(params_result);
 
@@ -1206,7 +1230,7 @@ cmd::CmdR CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (sparams.flags & SetCmd::SET_GET) {
-    GetReplies{rb}.Send(std::move(prev));
+    GetReplies{cmd_cntx}.Send(std::move(prev));
     co_return std::nullopt;
   }
 
@@ -1293,7 +1317,7 @@ cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
     return BorrowStringOrRead(tx->GetDbIndex(), key, (*it_res)->second, es);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1309,7 +1333,7 @@ cmd::CmdR CmdGetDel(CmdArgParser parser, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1368,7 +1392,7 @@ cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (status != OpStatus::OK) {
     cmd_cntx->rb()->SendError(status);
   } else {
-    GetReplies{cmd_cntx->rb()}.Send(std::move(prev));
+    GetReplies{cmd_cntx}.Send(std::move(prev));
   }
   co_return std::nullopt;
 }
@@ -1376,36 +1400,24 @@ cmd::CmdR CmdGetSet(CmdArgParser parser, CommandContext* cmd_cntx) {
 cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
-  ExpT exp_type_value = ExpT::EX;
-  int64_t int_arg = 0;
-  bool persist = false;
-  bool defined = false;
+  static constexpr char kGetExExpiryErr[] = "invalid expire time in 'getex' command";
+  using ExpiryValue = Validated<int64_t, ClosedRange<int64_t{1}, INT64_MAX, kGetExExpiryErr>>;
+  static constexpr auto kGrammar = Compile(Options(ExpiryOrPersist<ExpiryValue>()));
+  auto opts = kGrammar.Apply(&parser);
 
-  auto expiry = [&](ExpT type) {
-    return [&, type](CmdArgParser* p) {
-      exp_type_value = type;
-      int_arg = p->Next<int64_t>();
-      defined = true;
-    };
-  };
-  parser.Apply(OneOf(Tag("EX", expiry(ExpT::EX)), Tag("PX", expiry(ExpT::PX)),
-                     Tag("EXAT", expiry(ExpT::EXAT)), Tag("PXAT", expiry(ExpT::PXAT)),
-                     Exist("PERSIST", &persist)));
   if (!parser.Finalize()) {
     co_return parser.TakeError().MakeReply();
-  }
-  if (defined && int_arg <= 0) {
-    co_return facade::ErrorReply{InvalidExpireTime("getex")};
   }
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringResult> {
     auto op_args = t->GetOpArgs(shard);
 
     DbSlice::ExpireParams exp_params;
-    if (defined) {
-      exp_params = DbSlice::ExpireParams{exp_type_value, int_arg, op_args.db_cntx.time_now_ms};
+    if (opts.expiry.value) {
+      exp_params =
+          DbSlice::ExpireParams{opts.expiry.type, *opts.expiry.value, op_args.db_cntx.time_now_ms};
     }
-    exp_params.persist = persist;
+    exp_params.persist = opts.persist;
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STRING);
     if (!it_res)
@@ -1413,16 +1425,20 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     StringResult value = ReadString(t->GetDbIndex(), key, it_res->it->second, shard);
 
+    bool key_expired = false;
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
-      RETURN_ON_BAD_STATUS(
-          op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params));
+      auto expire_res = op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params);
+      RETURN_ON_BAD_STATUS(expire_res);
+      key_expired = *expire_res == -1;
     }
 
-    // Replicate GETEX as PEXPIREAT or PERSIST
+    // Replicate GETEX as DEL (already-past expiration), PEXPIREAT or PERSIST.
     if (shard->journal() && exp_params.IsDefined()) {
       if (exp_params.persist) {
         RecordJournal(op_args, "PERSIST", {key});
+      } else if (key_expired) {
+        RecordJournal(op_args, "DEL", {key});
       } else {
         auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms, false);
         auto abs_time_str = absl::StrCat(abs_time);
@@ -1430,10 +1446,14 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
     }
 
+    if (key_expired) {
+      op_args.GetDbSlice().SendExpiredKeyEvent(op_args.db_cntx, key);
+    }
+
     return value;
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1664,7 +1684,7 @@ cmd::CmdR CmdStrLen(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [key = parser.Next()](Transaction* t, EngineShard* shard) {
     return OpStrLen(t->GetOpArgs(shard), key);
   };
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1678,7 +1698,7 @@ cmd::CmdR CmdGetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
     return OpGetRange(t->GetOpArgs(shard), key, start, end);
   };
 
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 
@@ -1697,7 +1717,7 @@ cmd::CmdR CmdSetRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [&, &key = key, &start = start, &value = value](Transaction* t, EngineShard* shard) {
     return OpSetRange(t->GetOpArgs(shard), key, start, value);
   };
-  GetReplies{cmd_cntx->rb()}.Send(co_await cmd::SingleHopT(cb));
+  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
   co_return std::nullopt;
 }
 

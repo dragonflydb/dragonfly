@@ -74,7 +74,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
     auto timeout = absl::GetFlag(FLAGS_cluster_coordinator_connect_timeout_ms) * 1ms;
     if (auto ec = ConnectAndAuth(timeout, &exec_st_); ec) {
       LOG(WARNING) << "Couldn't connect to " << server().Description() << ": " << ec.message()
-                   << ", socket state: " << GetSocketInfo(Sock()->native_handle());
+                   << ", socket state: " << SockInfo();
       exec_st_.ReportError(GenericError(ec, "Couldn't connect to source."));
       return false;
     }
@@ -115,7 +115,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
         if (auto ec = ProtocolClient::SendCommand(send_queue_.front()->GetCommand()); ec) {
           exec_st_.ReportError(GenericError(
               ec, absl::StrCat("Coordinator could not send command to : ", server().Description(),
-                               "socket state: ", GetSocketInfo(Sock()->native_handle()))));
+                               "socket state: ", SockInfo())));
           // TODO reinit connection.
           break;
         }
@@ -136,8 +136,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
         auto resp = TakeRespReply(timeout);
         if (!resp) {
           LOG(WARNING) << "Error reading response from " << server().Description() << ": "
-                       << resp.error()
-                       << ", socket state: " + GetSocketInfo(Sock()->native_handle());
+                       << resp.error() << ", socket state: " + SockInfo();
 
           // TODO make all requests fail in this case.
           // TODO reinit connection.

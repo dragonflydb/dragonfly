@@ -16,23 +16,23 @@ from copy import deepcopy
 from pathlib import Path
 from tempfile import gettempdir, mkdtemp
 from time import sleep
-from typing import Dict, List, Union
 
 import pymemcache
 import pytest
 import pytest_asyncio
+
 import redis
 from redis import asyncio as aioredis
 
 from . import PortPicker
-from .instance import DflyInstance, DflyParams, DflyInstanceFactory, RedisServer
+from .instance import DflyInstance, DflyInstanceFactory, DflyParams, RedisServer
 from .proxy import Proxy
 from .utility import (
     DflySeederFactory,
+    download_with_retries,
     gen_ca_cert,
     gen_certificate,
     skip_if_not_in_github,
-    download_with_retries,
 )
 
 logging.getLogger("asyncio").setLevel(logging.WARNING)
@@ -71,8 +71,9 @@ def _download_minio_binary(dest: Path):
 
 def _start_minio_server(endpoint):
     """Start MinIO subprocess and configure env vars for S3 tests."""
-    import boto3
     from urllib.parse import urlparse
+
+    import boto3
 
     cache_dir = Path.home() / ".cache" / "dragonfly-tests"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -259,7 +260,7 @@ async def proxy_factory():
         yield create_proxy
 
 
-def parse_args(args: List[str]) -> Dict[str, Union[str, None]]:
+def parse_args(args: list[str]) -> dict[str, str | None]:
     args_dict = {}
     for arg in args:
         if "=" in arg:
@@ -357,6 +358,60 @@ def df_server(df_factory: DflyInstanceFactory) -> typing.Generator[DflyInstance,
         print("Cluster clients left: ", len(clients_left))
 
 
+class RedisClusterNode:
+    def __init__(self, port):
+        self.port = port
+        self.proc = None
+
+    def start(self):
+        self.proc = subprocess.Popen(
+            [
+                "redis-server-6.2.11",
+                f"--port {self.port}",
+                "--save ''",
+                "--cluster-enabled yes",
+                f"--cluster-config-file nodes_{self.port}.conf",
+                "--cluster-node-timeout 5000",
+                "--appendonly no",
+                "--protected-mode no",
+                "--repl-diskless-sync yes",
+                "--repl-diskless-sync-delay 0",
+            ]
+        )
+        logging.debug(self.proc.args)
+
+    def stop(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except Exception:
+            pass
+
+
+@pytest.fixture(scope="function")
+def redis_cluster(port_picker):
+    # create redis client with 3 node with default slot configuration
+    # node1 slots 0-5460
+    # node2 slots 5461-10922
+    # node3 slots 10923-16383
+    ports = [port_picker.get_available_port() for i in range(3)]
+    nodes = [RedisClusterNode(port) for port in ports]
+    try:
+        for node in nodes:
+            node.start()
+            time.sleep(1)
+    except FileNotFoundError:
+        skip_if_not_in_github()
+        raise
+
+    create_command = f'echo "yes" |redis-cli --cluster create {" ".join([f"127.0.0.1:{port}" for port in ports])}'
+    subprocess.run(create_command, shell=True)
+    time.sleep(4)
+    yield nodes
+    for node in nodes:
+        node.stop()
+
+
 @pytest.fixture(scope="function")
 def cluster_client(df_server):
     """
@@ -393,6 +448,20 @@ async def async_client(async_pool):
     await client.flushall()
     await client.select(DATABASE_INDEX)
     yield client
+
+
+@pytest_asyncio.fixture
+async def replication(df_factory, request):
+    """Decomposable, marker-annotated replication fixture.
+
+    Configure the topology with ``@pytest.mark.replication(...)`` whose keyword
+    arguments are forwarded to :func:`replication_utils.setup_replication`.
+    """
+    from .replication_utils import setup_replication
+
+    marker = request.node.get_closest_marker("replication")
+    kwargs = dict(marker.kwargs) if marker else {}
+    return await setup_replication(df_factory, **kwargs)
 
 
 def pytest_addoption(parser):

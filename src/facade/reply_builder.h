@@ -7,7 +7,9 @@
 
 #include <boost/intrusive/list.hpp>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <type_traits>
 
 #include "common/borrowed_string.h"
 #include "facade/facade_stats.h"
@@ -115,6 +117,10 @@ class SinkReplyBuilder {
     return batched_;
   }
 
+  bool IsScoped() const {
+    return scoped_;
+  }
+
   void CloseConnection();
 
   static const ReplyStats& GetThreadLocalStats() {
@@ -217,11 +223,21 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
   void SendSimpleString(std::string_view str) override;
   virtual void SendBulkString(std::string_view str);  // RESP: Blob String
 
-  void SendBulkStringBorrowed(const cmn::BorrowedString& bs);
+  // Forward a temporary std::string to the string_view overload. Sending a temporary under a
+  // ReplyScope would enqueue it by reference and read it after destruction (use-after-free), so the
+  // implementation DCHECKs that the builder is not scoped (when unscoped the value is copied
+  // immediately). Constrained to std::string rvalues, so string literals / string_view / lvalue
+  // strings are unaffected (a plain `std::string&&` overload would make `SendBulkString("literal")`
+  // ambiguous). Defined in the .cc and explicitly instantiated to keep base/logging.h out of here.
+  template <typename T>
+  requires std::is_same_v<T, std::string>
+  void SendBulkString(T&& str);
 
-  // The interface exposes only the rvalue function to allow squashing to "steal" the value,
-  // the real builder implementation forwards it to the constref version
-  virtual void SendBulkStringBorrowed(cmn::BorrowedString&& bs);
+  // Send a borrowed bulk string. Abstract: every concrete builder decides how
+  // (RedisReplyBuilder streams via iovec, the interpreter decodes to a string,
+  // squashing steals the value). The rvalue-only interface lets squashing
+  // "steal" the borrow.
+  virtual void SendBulkStringBorrowed(cmn::BorrowedString&& bs) = 0;
 
   void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number
@@ -246,7 +262,7 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
     resp_ = resp_version;
   }
 
-  RespVersion GetRespVersion() {
+  RespVersion GetRespVersion() const {
     return resp_;
   }
 
@@ -270,6 +286,14 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
       rb->StartArray(len);
     }
   };
+
+  // Optimized borrowed-string send: chunk-decode directly into the sink scratch
+  // (encoded) or reference the raw bytes (unencoded), avoiding a materialized
+  // copy. The const-ref overload is non-consuming, so capture replay can call
+  // it while the borrow stays owned by the payload; the rvalue override just
+  // forwards to it.
+  void SendBulkStringBorrowed(const cmn::BorrowedString& bs);
+  void SendBulkStringBorrowed(cmn::BorrowedString&& bs) override;
 
   void SendSimpleStrArr(const facade::ArgRange& strs);
   void SendBulkStrArr(const facade::ArgRange& strs, CollectionType ct = CollectionType::ARRAY);

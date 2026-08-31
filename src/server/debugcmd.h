@@ -54,6 +54,8 @@ class DebugCmd {
   void TxAnalysis(CommandContext* cmd_cntx);
   void ObjHist(CommandContext* cmd_cntx);
   void Stacktrace(CommandContext* cmd_cntx);
+  // Investigation-only. Remove once closed.
+  void ReplDiag(CommandContext* cmd_cntx);
   void Shards(CommandContext* cmd_cntx);
   void LogTraffic(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void RecvSize(std::string_view param, CommandContext* cmd_cntx);

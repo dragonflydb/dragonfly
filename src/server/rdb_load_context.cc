@@ -230,7 +230,7 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
     cntx_cmd.PushArg(resp_vec[i].GetView());
   }
   service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
-                           facade::AsyncPreference::ONLY_SYNC);
+                           facade::AsyncPreference::ONLY_SYNC, nullptr);
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {

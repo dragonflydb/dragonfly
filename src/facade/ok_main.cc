@@ -348,9 +348,10 @@ class OkService : public ServiceInterface {
   explicit OkService(ProactorPool* pool) : pool_(pool) {
   }
 
-  DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference mode) final;
-  uint32_t DispatchSquashedBatch(ParsedCommand* first, unsigned count,
-                                 ConnectionContext* cntx) final;
+  DispatchResult DispatchCommand(ParsedArgs args, ParsedCommand* cmd, AsyncPreference mode,
+                                 absl::FunctionRef<void(ParsedCommand*)>* pre_dispatch_cb) final;
+  uint32_t DispatchSquashedBatch(ParsedCommand* first, unsigned count, ConnectionContext* cntx,
+                                 absl::FunctionRef<void(ParsedCommand*)>* pre_dispatch_cb) final;
   void ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) final;
 
   ConnectionContext* CreateContext(Connection* owner) final {
@@ -377,8 +378,12 @@ class OkService : public ServiceInterface {
   ProactorPool* pool_;
 };
 
-DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, ParsedCommand* cmd,
-                                          AsyncPreference mode) {
+DispatchResult OkService::DispatchCommand(
+    [[maybe_unused]] ParsedArgs args, ParsedCommand* cmd, AsyncPreference mode,
+    absl::FunctionRef<void(ParsedCommand*)>* pre_dispatch_cb) {
+  if (pre_dispatch_cb)
+    (*pre_dispatch_cb)(cmd);
+
   ++tl_facade_stats->conn_stats.command_cnt_main;
 
   if (cmd->empty()) {
@@ -432,8 +437,9 @@ DispatchResult OkService::DispatchCommand([[maybe_unused]] ParsedArgs args, Pars
 // the run into per-shard buckets; EmitBlockingBatch then dispatches one task per active shard, so
 // cross-thread cost drops from one Add + one Dec per command to one Add + one Dec per active shard.
 // Returns the run length consumed.
-uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
-                                          [[maybe_unused]] ConnectionContext* cntx) {
+uint32_t OkService::DispatchSquashedBatch(
+    ParsedCommand* first, unsigned count, [[maybe_unused]] ConnectionContext* cntx,
+    absl::FunctionRef<void(ParsedCommand*)>* pre_dispatch_cb) {
   const unsigned num_shards = pool_->size();
   VLOG(1) << "DispatchSquashedBatch: " << count << " commands";
 
@@ -443,6 +449,13 @@ uint32_t OkService::DispatchSquashedBatch(ParsedCommand* first, unsigned count,
   GroupResult group = GroupSquashableRun(first, count, num_shards, &per_shard);
   if (group.processed == 0)
     return 0;
+
+  if (pre_dispatch_cb) {
+    auto* cmd = first;
+    for (unsigned i = 0; i < group.processed; ++i, cmd = cmd->next) {
+      (*pre_dispatch_cb)(cmd);
+    }
+  }
 
   tl_facade_stats->conn_stats.command_cnt_main += group.processed;
 
@@ -661,7 +674,10 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   OkService service(pool);
 
   Connection::Init(pool->size());
-  pool->Await([](auto*) { tl_facade_stats = new FacadeStats; });
+  pool->Await([](auto*) {
+    tl_facade_stats = new FacadeStats;
+    Connection::InitThreadLocal();
+  });
 
   // Create a FiberQueue per shard and start a consumer fiber draining it on the owning
   // proactor thread. The queue and its consumer fiber both live on that thread, so cross-thread

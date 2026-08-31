@@ -105,6 +105,7 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     initSparseHll(StringToHllPtr(hll));
   } else {
     auto val = ReadHll(op_args, key, res.it->second);
+    res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     RETURN_ON_BAD_STATUS(val);
     hll = std::move(val).value();
   }
@@ -146,10 +147,9 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     hll = string{hll_sds, sdslen(hll_sds)};
     sdsfree(hll_sds);
   }
-  // ReadHll may have warmed the value back into memory; re-check before Delete.
+  res.post_updater.ReduceHeapUsage();
   if (res.it->second.IsExternal()) {
-    res.post_updater.ReduceHeapUsage();
-    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+    op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
   }
   res.it->second.SetString(hll);
   return std::min(updated, 1);
@@ -325,7 +325,7 @@ OpResult<int> PFMergeInternal(string_view key, Transaction* tx, SinkReplyBuilder
     auto& res = *op_res;
     if (!res.is_new && res.it->second.IsExternal()) {
       res.post_updater.ReduceHeapUsage();
-      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, &res.it->second);
+      op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
     }
     res.it->second.SetString(hll);
 

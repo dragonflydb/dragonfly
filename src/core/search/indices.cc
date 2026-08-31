@@ -867,76 +867,69 @@ void TagIndex::Tokenize(std::string_view value, uint32_t* /*pos_counter*/,
   NormalizeTags(value, case_sensitive_, separator_, out);
 }
 
-BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim) : dim_{dim}, sim_{sim} {
+BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim, VectorDataType data_type)
+    : dim_{dim}, sim_{sim}, data_type_{data_type} {
 }
 
-std::pair<size_t /*dim*/, VectorSimilarity> BaseVectorIndex::Info() const {
-  return {dim_, sim_};
+VectorIndexInfo BaseVectorIndex::Info() const {
+  return {dim_, sim_, data_type_};
 }
 
 bool BaseVectorIndex::Add(DocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector = doc.GetVector(field, dim_);
+  auto vector = doc.GetVector(field, dim_, data_type_);
 
   if (!vector)
     return false;
 
-  if (std::holds_alternative<OwnedFtVector>(*vector)) {
-    const auto& owned_vector = std::get<OwnedFtVector>(*vector);
-    AddVector(id, owned_vector.first.get());
-  } else {
-    const auto& borrowed_vector = std::get<BorrowedFtVector>(*vector);
-    AddVector(id, borrowed_vector);
-  }
+  if (std::holds_alternative<OwnedFtVector>(*vector))
+    AddVector(id, std::get<OwnedFtVector>(*vector).first.get());
+  else
+    AddVector(id, std::get<BorrowedFtVector>(*vector));
 
   return true;
 }
 
-// Each document occupies (dim_ + 1) floats in entries_: dim_ floats for the vector data,
-// followed by one float as a presence marker (1.0 = present, 0.0 = absent/removed).
-// This avoids the previous heuristic of treating all-zero vectors as null.
-static constexpr float kPresent = 1.0f;
-static constexpr float kAbsent = 0.0f;
-
 FlatVectorIndex::FlatVectorIndex(const SchemaField::VectorParams& params,
                                  PMR_NS::memory_resource* mr)
-    : BaseVectorIndex{params.dim, params.sim}, entries_{mr} {
+    : BaseVectorIndex{params.dim, params.sim, params.data_type},
+      stride_bytes_{params.dim * ElementSize(params.data_type)},
+      entries_{mr},
+      present_(mr) {
   DCHECK(!params.use_hnsw);
-  entries_.reserve(params.capacity * (params.dim + 1));
+  entries_.reserve(params.capacity * stride_bytes_);
+  present_.reserve(params.capacity);
 }
 
 void FlatVectorIndex::AddVector(DocId id, const void* vector) {
-  const size_t stride = dim_ + 1;
-  DCHECK_LE(id * stride, entries_.size());
-  if (id * stride == entries_.size())
-    entries_.resize((id + 1) * stride, 0.0f);
+  // Grow, never shrink: DocIds are recycled (see ShardDocIndex free_ids_), so `id` can be smaller
+  // than the current max — an unconditional resize would truncate and drop other docs' vectors.
+  const size_t need_bytes = (static_cast<size_t>(id) + 1) * stride_bytes_;
+  if (entries_.size() < need_bytes)
+    entries_.resize(need_bytes);
+  if (present_.size() <= id)
+    present_.resize(id + 1, false);
 
-  if (vector) {
-    memcpy(&entries_[id * stride], vector, dim_ * sizeof(float));
-    entries_[id * stride + dim_] = kPresent;
-  }
+  present_[id] = vector != nullptr;
+  if (vector)
+    memcpy(entries_.data() + static_cast<size_t>(id) * stride_bytes_, vector, stride_bytes_);
 }
 
 void FlatVectorIndex::Remove(DocId id, const DocumentAccessor& doc, string_view field) {
-  const size_t stride = dim_ + 1;
-  if (id * stride + dim_ < entries_.size())
-    entries_[id * stride + dim_] = kAbsent;
+  if (id < present_.size())
+    present_[id] = false;
 }
 
-const float* FlatVectorIndex::Get(DocId doc) const {
-  const size_t stride = dim_ + 1;
-  if (doc * stride + dim_ >= entries_.size() || entries_[doc * stride + dim_] != kPresent)
+const void* FlatVectorIndex::Get(DocId doc) const {
+  if (doc >= present_.size() || !present_[doc])
     return nullptr;
-  return &entries_[doc * stride];
+  return entries_.data() + static_cast<size_t>(doc) * stride_bytes_;
 }
 
 std::vector<DocId> FlatVectorIndex::GetAllDocsWithNonNullValues() const {
-  const size_t stride = dim_ + 1;
-  size_t num_slots = entries_.size() / stride;
   std::vector<DocId> result;
-  result.reserve(num_slots);
-  for (DocId id = 0; id < num_slots; ++id) {
-    if (entries_[id * stride + dim_] == kPresent)
-      result.push_back(id);
+  for (size_t id = 0; id < present_.size(); ++id) {
+    if (present_[id])
+      result.push_back(static_cast<DocId>(id));
   }
   return result;
 }

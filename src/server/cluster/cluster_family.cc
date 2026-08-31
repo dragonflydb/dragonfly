@@ -77,6 +77,9 @@ constexpr string_view kClusterDisabled =
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
   CHECK_NOTNULL(server_family_);
 
+  config_registry.RegisterMutable("cluster_announce_ip");
+  config_registry.RegisterMutable("announce_port");
+
   InitializeCluster();
 
   id_ = absl::GetFlag(FLAGS_cluster_node_id);
@@ -493,58 +496,43 @@ namespace {
 
 // FlushSlots calls RegisterOnChange which requires the shard lock to be held (see #7153).
 // Execute under a global transaction so the shard lock is acquired properly.
+//
+// The journal record must be emitted from inside that transaction, so that every shard uses the
+// transaction's txid. Replicas rendezvous all their flows on this record keyed by txid, so two
+// records sharing one txid make those flows wait for each other forever.
 void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
   if (slots_ranges.Empty()) {
     return;
   }
 
+  vector<string> args;
+  args.reserve(slots_ranges.Size() * 2 + 1);
+  args.push_back("FLUSHSLOTS");
+  for (SlotRange range : slots_ranges) {
+    args.push_back(absl::StrCat(range.start));
+    args.push_back(absl::StrCat(range.end));
+  }
+  vector<string_view> args_view(args.begin(), args.end());
+
   trans->Execute(
-      [&slots_ranges](Transaction* t, EngineShard* shard) {
+      [&slots_ranges, &args_view](Transaction* t, EngineShard* shard) {
         namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
+
+        // TODO: Break slot migration upon FLUSHSLOTS
+        if (shard->journal()) {
+          journal::RecordEntry(t->txid(), journal::Op::COMMAND, /* dbid= */ 0, nullopt,
+                               Payload("DFLYCLUSTER", args_view));
+        }
         return OpStatus::OK;
       },
       true);
 
+  OpStatus status = *trans->LocalResultPtr();
+  LOG_IF(ERROR, status != OpStatus::OK)
+      << "Failed to flush slots " << slots_ranges.ToString() << ": " << status;
+
   auto deleted = SlotSet(slots_ranges);
   channel_store->UnsubscribeAfterClusterSlotMigration(deleted);
-}
-
-void WriteFlushSlotsToJournal(const SlotRanges& slot_ranges) {
-  if (slot_ranges.Empty()) {
-    return;
-  }
-
-  // Build args
-  vector<string> args;
-  args.reserve(slot_ranges.Size() + 1);
-  args.push_back("FLUSHSLOTS");
-  for (SlotRange range : slot_ranges) {
-    args.push_back(absl::StrCat(range.start));
-    args.push_back(absl::StrCat(range.end));
-  }
-
-  // Build view
-  vector<string_view> args_view(args.size());
-  for (size_t i = 0; i < args.size(); ++i) {
-    args_view[i] = args[i];
-  }
-
-  auto cb = [&](auto*) {
-    EngineShard* shard = EngineShard::tlocal();
-    if (shard == nullptr) {
-      return;
-    }
-
-    if (!shard->journal()) {
-      return;
-    }
-
-    // Send journal entry
-    // TODO: Break slot migration upon FLUSHSLOTS
-    journal::RecordEntry(/* txid= */ 0, journal::Op::COMMAND, /* dbid= */ 0, nullopt,
-                         Payload("DFLYCLUSTER", args_view));
-  };
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
 }
 }  // namespace
 
@@ -631,7 +619,6 @@ void ClusterFamily::DflyClusterConfig(CmdArgParser parser, CommandContext* cmd_c
       DeleteSlots(cmd_cntx->tx(), deleted_slots);
       LOG_IF(INFO, !deleted_slots.Empty())
           << "Flushing newly unowned slots: " << deleted_slots.ToString();
-      WriteFlushSlotsToJournal(deleted_slots);
     }
 
     // Start new migrations only after stale data is flushed. This ensures DFLYMIGRATE FLOW
@@ -710,7 +697,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
   rb->StartArray(slots_stats.size());
 
   for (const auto& slot_data : slots_stats) {
-    rb->StartArray(9);
+    rb->StartArray(slot_data.second.tiered_bytes > 0 ? 11 : 9);
     rb->SendLong(slot_data.first);
     rb->SendBulkString("key_count");
     rb->SendLong(slot_data.second.key_count);
@@ -725,6 +712,12 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
     rb->SendBulkString("memory_bytes");
     rb->SendLong(slot_data.second.memory_bytes +
                  slot_data.second.key_count * sizeof(CompactObj) * 2);
+
+    // Disk bytes held by the slot's offloaded entries; reported only when non-zero.
+    if (slot_data.second.tiered_bytes > 0) {
+      rb->SendBulkString("tiered_bytes");
+      rb->SendLong(slot_data.second.tiered_bytes);
+    }
   }
 }
 
@@ -800,37 +793,40 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgParser parser, CommandContext*
     string_view state;
     size_t keys_number;
     string error;
+    string slot_ranges;
   };
   vector<Reply> reply;
   reply.reserve(incoming_migrations_jobs_.size() + outgoing_migration_jobs_.size());
 
   auto append_answer = [&reply](string_view direction, string node_id, string_view filter,
-                                MigrationState state, size_t keys_number, string error) {
+                                MigrationState state, size_t keys_number, string error,
+                                string slot_ranges) {
     if (filter.empty() || filter == node_id) {
       error = error.empty() ? "0" : error;
-      reply.emplace_back(
-          Reply{direction, std::move(node_id), StateToStr(state), keys_number, std::move(error)});
+      reply.emplace_back(Reply{direction, std::move(node_id), StateToStr(state), keys_number,
+                               std::move(error), std::move(slot_ranges)});
     }
   };
 
   for (const auto& m : incoming_migrations_jobs_) {
     append_answer("in", m->GetSourceID(), node_id, m->GetState(), m->GetKeyCount(),
-                  m->GetErrorStr());
+                  m->GetErrorStr(), m->GetSlots().ToString());
   }
   for (const auto& m : outgoing_migration_jobs_) {
     append_answer("out", m->GetMigrationInfo().node_info.id, node_id, m->GetState(),
-                  m->GetKeyCount(), m->GetErrorStr());
+                  m->GetKeyCount(), m->GetErrorStr(), m->GetSlots().ToString());
   }
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->StartArray(reply.size());
   for (const auto& r : reply) {
-    rb->StartArray(5);
+    rb->StartArray(6);
     rb->SendBulkString(r.direction);
     rb->SendBulkString(r.node_id);
     rb->SendBulkString(r.state);
     rb->SendLong(r.keys_number);
     rb->SendBulkString(r.error);
+    rb->SendBulkString(r.slot_ranges);
   }
 }
 
@@ -986,7 +982,6 @@ void ClusterFamily::InitMigration(CmdArgParser parser, CommandContext* cmd_cntx)
         new Transaction{server_family_->service().FindCmd("DFLYCLUSTER")});
     flush_tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
     DeleteSlots(flush_tx.get(), slots);
-    WriteFlushSlotsToJournal(slots);
   }
 
   if (migration->GetState() == MigrationState::C_FATAL) {

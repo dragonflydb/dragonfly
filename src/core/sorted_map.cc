@@ -154,8 +154,9 @@ unsigned char* ZzlInsertAt(unsigned char* zl, unsigned char* eptr, std::string_v
 
 double ZzlStrtod(unsigned char* vstr, unsigned int vlen) {
   char buf[128];
-  if (vlen > sizeof(buf))
-    vlen = sizeof(buf);
+  // Leave room for the terminating NUL: buf[vlen] must stay in bounds.
+  if (vlen >= sizeof(buf))
+    vlen = sizeof(buf) - 1;
   memcpy(buf, vstr, vlen);
   buf[vlen] = '\0';
   return strtod(buf, NULL);
@@ -704,6 +705,14 @@ int SortedMap::AddElem(double score, std::string_view ele, int in_flags, int* ou
       *out_flags = ZADD_OUT_NAN;
       return 0;
     }
+  }
+
+  // GT/LT? Only update if score is greater/less than current.
+  double curscore = GetObjScore(obj);
+  if (((in_flags & ZADD_IN_LT) && score >= curscore) ||
+      ((in_flags & ZADD_IN_GT) && score <= curscore)) {
+    *out_flags = ZADD_OUT_NOP;
+    return 1;
   }
 
   // Update the score.

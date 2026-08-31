@@ -110,6 +110,39 @@
 #define unlikely(x) (x)
 #endif
 
+#if defined(__has_attribute)
+#if __has_attribute(no_sanitize)
+#define VALKEY_NO_SANITIZE(sanitizer) __attribute__((no_sanitize(sanitizer)))
+#endif
+#endif
+#if !defined(VALKEY_NO_SANITIZE)
+#define VALKEY_NO_SANITIZE(sanitizer)
+#endif
+
+/* Check if we can compile x86 SIMD code */
+#if defined(__x86_64__) && ((defined(__GNUC__) && __GNUC__ >= 5) || (defined(__clang__) && __clang_major__ >= 4)) && defined(__has_attribute) && __has_attribute(target)
+#define HAVE_X86_SIMD 1
+#else
+#define HAVE_X86_SIMD 0
+#endif
+
+#if HAVE_X86_SIMD
+#define ATTRIBUTE_TARGET_SSE2 __attribute__((target("sse2")))
+#define ATTRIBUTE_TARGET_AVX2 __attribute__((target("avx2")))
+#define ATTRIBUTE_TARGET_AVX512 __attribute__((target("avx512f,avx512bw,avx512vl")))
+#else
+#define ATTRIBUTE_TARGET_SSE2
+#define ATTRIBUTE_TARGET_AVX2
+#define ATTRIBUTE_TARGET_AVX512
+#endif
+
+/* Check if we can compile ARM SIMD code */
+#if defined(__aarch64__) && (defined(__ARM_NEON) || defined(__ARM_NEON__))
+#define HAVE_ARM_NEON 1
+#else
+#define HAVE_ARM_NEON 0
+#endif
+
 /* Define rdb_fsync_range to sync_file_range() on Linux, otherwise we use
  * the plain fsync() call. */
 #if (defined(__linux__) && defined(SYNC_FILE_RANGE_WAIT_BEFORE))

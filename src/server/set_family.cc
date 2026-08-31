@@ -13,6 +13,7 @@ extern "C" {
 }
 
 #include "base/cycle_clock.h"
+#include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "core/detail/listpack_wrap.h"
@@ -29,9 +30,15 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
+ABSL_FLAG(bool, use_oah_set, true, "If true, store SET values in OAHSet instead of StringSet.");
+
 namespace rng = std::ranges;
 
 namespace dfly {
+
+void InitSetFamilyFlags() {
+  g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
+}
 
 using namespace facade;
 
@@ -148,12 +155,8 @@ struct StringSetWrapper {
     };
     do {
       curs = VisitSet(obj_, [&](auto* s) {
-        return s->Scan(static_cast<uint32_t>(curs), [&](auto key) {
-          if constexpr (std::is_same_v<decltype(key), sds>)
-            record(string_view{key, sdslen(key)});
-          else
-            record(key);
-        });
+        return s->Scan(static_cast<uint32_t>(curs),
+                       [&](const auto& key) { record(GetKeyView(key)); });
       });
     } while (curs && maxiterations-- && res->size() < count &&
              (base::CycleClock::Now() - start_cycles) < timeout_cycles);
@@ -162,8 +165,10 @@ struct StringSetWrapper {
 
   template <typename Cb> void ForEach(Cb&& cb) const {
     VisitSet(obj_, [&](auto* s) {
-      for (auto it = s->begin(); it != s->end(); ++it)
-        cb(Key(it));
+      for (auto it = s->begin(); it != s->end(); ++it) {
+        auto key = Key(it);
+        cb(GetKeyView(key));
+      }
     });
   }
 
@@ -314,9 +319,11 @@ void RandMemberUnique(const StringSetWrapper& strset, size_t count, cmn::BackedA
       auto it = s->GetRandomMember();
       if (it == s->end())
         break;
-      auto [_, inserted] = picks.insert(string{Key(it)});
+      auto key = Key(it);
+      const string_view key_view = GetKeyView(key);
+      auto [_, inserted] = picks.insert(string{key_view});
       if (inserted)
-        dest->PushArg(Key(it));
+        dest->PushArg(key_view);
     }
   });
 }
@@ -327,7 +334,8 @@ void RandMemberRepeat(const StringSetWrapper& strset, size_t count, cmn::BackedA
       auto it = s->GetRandomMember();
       if (it == s->end())
         break;
-      dest->PushArg(Key(it));
+      auto key = Key(it);
+      dest->PushArg(GetKeyView(key));
     }
   });
 }
@@ -520,9 +528,10 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   // to overwrite the key. However, if the set is empty it means we should delete the
   // key if it exists.
   if (overwrite && (vals_it.begin() == vals_it.end())) {
-    auto res_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_SET);
-    if (res_it) {
-      db_slice.DelMutable(op_args.db_cntx, std::move(*res_it));
+    // Lookup is untyped: an empty result deletes the destination regardless of its type.
+    auto res_it = db_slice.FindMutable(op_args.db_cntx, key);
+    if (IsValid(res_it.it)) {
+      db_slice.DelMutable(op_args.db_cntx, std::move(res_it));
       if (journal_update && op_args.shard->journal()) {
         RecordJournal(op_args, "DEL"sv, ArgSlice{key});
       }
@@ -559,7 +568,16 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
 
     // does not store the values, merely sets the encoding.
     // TODO: why not store the values as well?
-    InitSet(vals, &co);
+    if (co.IsExternal()) {
+      // Build the replacement first: freeing the disk extent is irreversible, while a bad_alloc
+      // inside InitSet is reported to the client as OOM and must leave the value readable.
+      PrimeValue replacement;
+      InitSet(vals, &replacement);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &co);
+      co = std::move(replacement);
+    } else {
+      InitSet(vals, &co);
+    }
   }
 
   uint32_t res = 0;
@@ -946,6 +964,8 @@ OpStatus OpRandMember(const OpArgs& op_args, std::string_view key, int count,
   const PrimeValue& pv = find_res.value()->second;
 
   const std::uint32_t size = pv.Size();
+  if (size == 0)  // only a RESTOREd payload can yield this; NonUniquePicksGenerator(0) CHECKs
+    return OpStatus::OK;
   const bool picks_are_unique = count >= 0;
   // Widen to int64_t before std::abs: for count == INT_MIN, std::abs(count) on an int is UB
   // (the magnitude isn't representable in int). The magnitude fits in int64_t and uint32_t.
@@ -1381,11 +1401,8 @@ void CmdSRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool is_count = parser.HasNext();
   int count = parser.NextOrDefault<int>(1);
 
-  if (parser.HasNext())
-    return cmd_cntx->SendError(WrongNumArgsError("SRANDMEMBER"));
-
-  if (auto err = parser.TakeError(); err)
-    return cmd_cntx->SendError(err.MakeReply());
+  if (!parser.Finalize())
+    return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
   cmn::BackedArguments vals;
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1590,8 +1607,9 @@ void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (result.status() != OpStatus::WRONG_TYPE) {
     auto replier = [cursor, result = std::move(result)](facade::SinkReplyBuilder* builder) {
       auto* rb = static_cast<RedisReplyBuilder*>(builder);
+      std::string cursor_str = absl::StrCat(cursor);
       RedisReplyBuilder::ArrayScope scope{rb, 2};
-      rb->SendBulkString(absl::StrCat(cursor));
+      rb->SendBulkString(cursor_str);
       rb->SendBulkStrArr(*result);
     };
     cmd_cntx->ReplyWith(std::move(replier));
@@ -1602,10 +1620,9 @@ void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 // Syntax: saddex key [KEEPTTL] ttl_sec member [member...]
 void CmdSAddEx(CmdArgParser parser, CommandContext* cmd_cntx) {
-  constexpr uint32_t kMaxTtl = (1UL << 26);
   const std::string_view key = parser.Next<std::string_view>();
   const bool keepttl = parser.Check("KEEPTTL");
-  const uint32_t ttl_sec = parser.Next<FInt<1u, kMaxTtl>>();
+  const uint32_t ttl_sec = parser.Next<FInt<uint32_t{1}, uint32_t{kMaxExpireDeadlineSec}>>();
   ParsedArgs vals = parser.RemainingRange(WrongNumArgsError("SADDEX"));
 
   if (auto err = parser.TakeError(); err) {
@@ -1694,6 +1711,8 @@ auto SetFamily::LoadLPSetBlob(std::string_view blob, bool deep, PrimeValue* pv) 
   }
 
   unsigned char* lp = (unsigned char*)blob.data();
+  if (lpLength(lp) == 0)
+    return LoadBlobResult::kEmpty;
   void* set_ptr = g_use_oah_set ? static_cast<void*>(BuildSetFromLP<OAHSet>(lp))
                                 : static_cast<void*>(BuildSetFromLP<StringSet>(lp));
   if (!set_ptr)

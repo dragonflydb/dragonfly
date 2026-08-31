@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/dash_internal.h"
 #include "core/tiering_types.h"
 #include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
 #include "server/stats.h"
@@ -42,6 +43,7 @@ struct TieredStorageBase {
   };
 
   struct StashContext {
+    DbIndex dbid = 0;
     uint64_t key_expire_ms = 0;  // 0 means no expiry
   };
 
@@ -69,13 +71,13 @@ class TieredStorage : public TieredStorageBase {
   // Enqueue read external value with generic decoder.
   template <typename D, typename F>
   void Read(tiering::ReadId id, const tiering::DiskSegment& segment, const D& decoder, F&& f,
-            bool read_only = true) {
+            tiering::ReadOptions options = {}) {
     // TODO(vlad): untangle endless callback wrapping!
     // Templates don't consider implicit conversions, so explicitly convert to std::function
     auto wrapped_cb = [f = std::forward<F>(f)](io::Result<tiering::Decoder*> res) mutable {
       f(res.transform([](auto* d) { return static_cast<D*>(d); }));
     };
-    ReadInternal(id, segment, decoder, wrapped_cb, read_only);
+    ReadInternal(id, segment, decoder, wrapped_cb, options);
   }
 
   // Returns StashDescriptor if a value should be stashed.
@@ -92,13 +94,23 @@ class TieredStorage : public TieredStorageBase {
                          BackPressureFuture* backpressure);
 
   // Delete value, must be offloaded (external type)
+  void Delete(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref);
+  // List node fragments carry no key; per-slot counters cannot follow them.
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref);
+
+  // Prepare key to be transferred between databases / renamed.
+  // Tiered storage must invalidate all back references to it: values in small bins serializing
+  // the key and pending reads referencing the key
+  bool PrepareKeyForTransfer(DbIndex dbid, std::string_view key, PrimeValue* pv);
 
   // Returns true if there is a pending modification for the given segment.
   bool HasModificationPending(tiering::DiskSegment segment) const;
 
   // Cancel pending stash for the value. Must have HasStashPending() true.
   void CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref);
+
+  // Cancel pending load for the value. Must have IsLoadPending() true.
+  void CancelLoad(tiering::DiskSegment segment);
 
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
@@ -107,7 +119,12 @@ class TieredStorage : public TieredStorageBase {
   size_t ReclaimMemory(size_t goal);
 
   // Returns the primary value, and deletes the cool item as well as its offloaded storage.
-  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item);
+  PrimeValue Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item);
+
+  // Brings an offloaded HASH back into memory so a search index can read its fields. The returned
+  // future resolves to false if a disk-resident value could not be read.
+  util::fb2::Future<bool> MaterializeForIndexing(DbIndex dbid, std::string_view key,
+                                                 PrimeValue* pv);
 
   TieredStats GetStats() const;
 
@@ -130,18 +147,24 @@ class TieredStorage : public TieredStorageBase {
  private:
   void ReadInternal(tiering::ReadId, const tiering::DiskSegment& segment,
                     const tiering::Decoder& decoder,
-                    std::function<void(io::Result<tiering::Decoder*>)> cb, bool read_only);
+                    std::function<void(io::Result<tiering::Decoder*>)> cb,
+                    tiering::ReadOptions options = {});
 
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
 
-  void ProcessDelayedDeframents();
+  // Scan small bins for fragmented ones and enqueue for defrag
+  void RunDefragScan();
 
   PrimeValue DeleteCool(tiering::TieredCoolRecord* record);
   tiering::TieredCoolRecord* PopCool();
 
-  PrimeTable::Cursor offloading_cursor_;  // where RunOffloading left off
+  detail::DashCursor offloading_cursor_;  // where RunOffloading left off
+  detail::DashCursor defrag_cursor_;      // where defrag left off
+
+  // Number of bins the previous defrag scan enqueued. Used to scale the next scan's cpu time-slice.
+  unsigned last_defrag_scan_hits_ = 0;
 
   // Stash operations waiting for completion to throttle
   tiering::EntryMap<::util::fb2::Future<bool>> stash_backpressure_;
@@ -163,12 +186,16 @@ class TieredStorage : public TieredStorageBase {
     bool experimental_hash_offload;
     bool experimental_list_offload;
     uint32_t min_ttl_to_offload_ms;
+    uint32_t offload_scan_budget_us;
+    uint32_t defrag_scan_budget_us;
+    uint32_t max_pending_defrags;
   } config_;
 
   mutable struct {
     uint64_t stash_overflow_cnt = 0;
     uint64_t total_deletes = 0;
-    uint64_t offloading_steps = 0;
+    uint64_t offloading_usec = 0;
+    uint64_t defrag_usec = 0;
     uint64_t offloading_stashes = 0;
     uint64_t total_clients_throttled = 0;
     size_t cool_memory_used = 0;
@@ -199,9 +226,18 @@ inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::s
       dbid, key, value, [](std::string_view val) { return std::string(val); }, ts);
 }
 
+// Read an offloaded top-level value into a detached copy while preserving its type. Usual fetch
+// side effects apply.
+TieredStorage::TResult<PrimeValue> ReadTieredValue(DbIndex dbid, std::string_view key,
+                                                   const PrimeValue& value, TieredStorage* ts);
+
 TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,
                                                 const tiering::DiskSegment& segment,
                                                 TieredStorage* ts);
+
+// Prefetches offloaded list node. This is async and does not block the caller.
+// The node's io_pending is set to true until the read completes, and cleared on completion.
+void PrefetchTieredListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts);
 
 // Reads offloaded value, and applies modifications on it and return generic result from callback.
 // Unlike with immutable Reads - the modified value will be uploaded back to memory.
@@ -246,7 +282,7 @@ class TieredStorage : public TieredStorageBase {
 
   template <typename D, typename F>
   void Read(tiering::ReadId id, const tiering::DiskSegment& segment, const D& decoder, F&& f,
-            bool read_only = true) {
+            tiering::ReadOptions options = {}) {
   }
 
   template <typename T>
@@ -264,7 +300,14 @@ class TieredStorage : public TieredStorageBase {
              BackPressureFuture* backpressure) {
   }
 
+  void Delete(DbIndex dbid, std::string_view key, tiering::FragmentRef fragment_ref) {
+  }
+
   void Delete(DbIndex dbid, tiering::FragmentRef fragment_ref) {
+  }
+
+  bool PrepareKeyForTransfer(DbIndex dbid, std::string_view key, PrimeValue* pv) {
+    return true;
   }
 
   bool HasModificationPending(tiering::DiskSegment segment) const {
@@ -284,6 +327,9 @@ class TieredStorage : public TieredStorageBase {
   }
 
   void CancelStash(tiering::PendingId id, tiering::FragmentRef fragment_ref) {
+  }
+
+  void CancelLoad(tiering::DiskSegment segment) {
   }
 
   TieredStats GetStats() const {
@@ -308,8 +354,15 @@ class TieredStorage : public TieredStorageBase {
     return 0;
   }
 
-  PrimeValue Warmup(DbIndex dbid, PrimeValue::CoolItem item) {
+  PrimeValue Warmup(DbIndex dbid, std::string_view key, PrimeValue::CoolItem item) {
     return PrimeValue{};
+  }
+
+  util::fb2::Future<bool> MaterializeForIndexing(DbIndex dbid, std::string_view key,
+                                                 PrimeValue* pv) {
+    util::fb2::Future<bool> fut;
+    fut.Resolve(true);
+    return fut;
   }
 
   bool IsClosed() const {
@@ -333,10 +386,19 @@ inline TieredStorage::TResult<std::string> ReadTieredString(DbIndex dbid, std::s
   return {};
 }
 
+inline TieredStorage::TResult<PrimeValue> ReadTieredValue(DbIndex dbid, std::string_view key,
+                                                          const PrimeValue& value,
+                                                          TieredStorage* ts) {
+  return {};
+}
+
 inline TieredStorage::TResult<bool> ReadTieredListNode(DbIndex dbid, QList* ql, QList::Node* node,
                                                        const tiering::DiskSegment& segment,
                                                        TieredStorage* ts) {
   return {};
+}
+
+inline void PrefetchTieredListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStorage* ts) {
 }
 
 template <typename T>

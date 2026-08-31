@@ -33,8 +33,10 @@ std::string ServiceInterface::ContextInfo::Format() const {
   return res;
 }
 
-DispatchResult ServiceInterface::DispatchCommandSimple(ParsedCommand* cmd, AsyncPreference mode) {
-  return DispatchCommand(ParsedArgs{*cmd}, cmd, mode);
+DispatchResult ServiceInterface::DispatchCommandSimple(
+    ParsedCommand* cmd, AsyncPreference mode,
+    absl::FunctionRef<void(ParsedCommand*)>* pre_dispatch_cb) {
+  return DispatchCommand(ParsedArgs{*cmd}, cmd, mode, pre_dispatch_cb);
 }
 
 }  // namespace facade

@@ -354,8 +354,8 @@ SaveInfo SaveStagesController::GetSaveInfo() {
   fs::path resulting_path = full_path_;
   if (use_dfs_format_)
     SetExtension("summary", ".dfs", &resulting_path);
-  else
-    resulting_path.replace_extension();  // remove .tmp
+  else if (!resulting_path.has_extension())
+    resulting_path += ".rdb";  // full_path_ never carries .tmp; mirror SaveRdb's on-disk name
 
   LOG(INFO) << "Saving " << resulting_path << " finished after "
             << strings::HumanReadableElapsedTime(info.duration_sec);

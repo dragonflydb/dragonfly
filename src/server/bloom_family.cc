@@ -130,6 +130,7 @@ OpStatus OpLoadChunk(const OpArgs& op_args, std::string_view blob, std::string_v
       // existing key might not necessarily be SBF, it could be HASH/JSON, and indexed
       RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, op_res->it->second, op_args.shard);
       db_slice.RemoveExpire(op_args.db_cntx.db_index, op_res->it);
+      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &op_res->it->second);
     }
 
     op_res->it->second.SetSBF(load_result.value());

@@ -91,6 +91,10 @@ ConnectionContext::ConnectionContext(facade::Connection* owner, acl::UserCredent
     has_main_or_memcache_listener = owner->IsMainOrMemcache();
   }
 
+  SetAclCredentials(std::move(cred));
+}
+
+void ConnectionContext::SetAclCredentials(acl::UserCredentials cred) {
   keys = std::move(cred.keys);
   pub_sub = std::move(cred.pub_sub);
   if (cred.acl_commands.empty()) {
@@ -194,7 +198,8 @@ size_t ConnectionState::ExecInfo::ClearStoredCmds() {
 }
 
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
-  return HeapSize(lock_tags) + async_cmds_heap_mem;
+  return HeapSize(lock_tags) + async_cmds_heap_mem + HeapSize(acl_commands) +
+         HeapSize(acl_keys.key_globs) + HeapSize(acl_pub_sub.globs);
 }
 
 size_t ConnectionState::SubscribeInfo::UsedMemory() const {
@@ -313,15 +318,21 @@ void CommandContext::ReuseInternal() {
   cid_ = nullptr;
   tx_ = nullptr;
   tail_args_ = {};
-  start_time_usec = 0;
+  start_cycle = 0;
 }
 
 void CommandContext::RecordLatency(const facade::ParsedArgs& tail_args) const {
-  DCHECK_GT(start_time_usec, 0u);
-  int64_t after = base::CycleClock::ToUsec(base::CycleClock::Now());
+  DCHECK_GT(start_cycle, 0u);
+  const uint64_t end_cycle = base::CycleClock::Now();
+  if (end_cycle < start_cycle) {
+    LOG(ERROR) << "Cycle clock moved backwards while recording " << cid_->name()
+               << " latency: start=" << start_cycle << ", end=" << end_cycle
+               << ", frequency=" << base::CycleClock::Frequency();
+    return;
+  }
 
   ServerState* ss = ServerState::SafeTLocal();  // Might have migrated thread, read after invocation
-  int64_t execution_time_usec = after - start_time_usec;
+  uint64_t execution_time_usec = base::CycleClock::ToUsec(end_cycle - start_cycle);
 
   cid_->RecordLatency(ss->thread_index(), execution_time_usec);
   DCHECK(conn_cntx_ != nullptr);

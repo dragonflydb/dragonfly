@@ -1026,8 +1026,8 @@ TEST_F(HSetFamilyTest, HGetExErrors) {
               ErrArg("invalid expire time"));
   EXPECT_THAT(Run({"HGETEX", "key", "EXAT", "9223372036854775807", "FIELDS", "1", "f1"}),
               ErrArg("invalid expire time"));
-  // A far-future absolute timestamp beyond the hash-field TTL cap (1<<26 s, as for HEXPIRE/HSETEX)
-  // is rejected even though it does not overflow.
+  // A far-future absolute timestamp beyond the hash-field TTL cap (kMaxExpireDeadlineSec, shared by
+  // HEXPIRE/HSETEX) is rejected even though it does not overflow.
   EXPECT_THAT(Run({"HGETEX", "key", "EXAT", "9999999999", "FIELDS", "1", "f1"}),
               ErrArg("invalid expire time"));
 

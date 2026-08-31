@@ -186,26 +186,28 @@ ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
   return lang;
 }
 
+using TP = search::SchemaField::TextParams;
+
 struct ValidTextWeight : facade::VNum<double> {
   static facade::RuleError validate(double v) {
-    return {!search::SchemaField::TextParams::IsValidWeight(v), {}};
+    return {!TP::IsValidWeight(v), {}};
   }
 };
 
-void ParseTextWeight(CmdArgParser* parser, search::SchemaField::TextParams* params) {
+void ParseTextWeight(CmdArgParser* parser, TP* params) {
   params->weight = parser->Next<ValidTextWeight>("Invalid WEIGHT value");
 }
 
-ParseResult<search::SchemaField::TextParams> ParseTextParams(CmdArgParser* parser) {
-  search::SchemaField::TextParams params{};
-  parser->Apply(Exist("WITHSUFFIXTRIE", &params.with_suffixtrie), Exist("NOSTEM", &params.no_stem),
-                Tag("WEIGHT", [&](CmdArgParser* p) { ParseTextWeight(p, &params); }));
-  return params;
-}
+constexpr auto kTextParamsGrammar =
+    Compile(Options(Exist("WITHSUFFIXTRIE", &TP::with_suffixtrie), Exist("NOSTEM", &TP::no_stem),
+                    Field<ValidTextWeight>("WEIGHT", &TP::weight, "Invalid WEIGHT value")));
 
 search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
   search::SchemaField::NumericParams params{};
-  parser->Check("BLOCKSIZE", &params.block_size);
+  // A zero block size divides by zero when the numeric range tree is built.
+  if (parser->Check("BLOCKSIZE"))
+    params.block_size =
+        parser->Next<facade::Positive<size_t>>("BLOCKSIZE must be a positive integer");
   return params;
 }
 
@@ -228,10 +230,7 @@ ParsedSchemaField ParseTag(CmdArgParser* parser) {
 }
 
 ParsedSchemaField ParseText(CmdArgParser* parser) {
-  auto text_params = ParseTextParams(parser);
-  if (!text_params)
-    return make_unexpected(text_params.error());
-  return std::make_pair(search::SchemaField::TEXT, std::move(text_params).value());
+  return std::make_pair(search::SchemaField::TEXT, kTextParamsGrammar.Apply(parser));
 }
 
 ParsedSchemaField ParseNumeric(CmdArgParser* parser) {
@@ -252,16 +251,18 @@ ParsedSchemaField ParseVector(CmdArgParser* parser) {
     return CreateSyntaxError("Knn vector dimension cannot be zero"sv);
   }
 
-  // Validate that the initial allocation (capacity * (dim+1) floats) cannot
-  // overflow size_t or request an unreasonable amount of memory.  Without this
-  // check FlatVectorIndex::FlatVectorIndex() would throw std::bad_alloc,
-  // leaving a half-initialised index registered in ShardDocIndices.
-  static constexpr size_t kMaxFlatBufEntries = size_t{1} << 30;  // ~4 GiB of floats
-  if (vector_params.dim >= kMaxFlatBufEntries) {
+  // Cap the initial allocation (capacity * dim * element_width bytes, plus a small presence bitmap)
+  // so it cannot overflow size_t or request an unreasonable amount of memory. Without this check
+  // FlatVectorIndex::FlatVectorIndex() would throw std::bad_alloc, leaving a half-initialised index
+  // registered in ShardDocIndices.
+  static constexpr size_t kMaxFlatBufBytes = size_t{1} << 32;  // 4 GiB
+  const size_t width =
+      search::ElementSize(vector_params.data_type);  // dim already checked non-zero
+  if (vector_params.dim > kMaxFlatBufBytes / width) {
     return CreateSyntaxError("Vector index initial allocation is too large"sv);
   }
-  size_t dim_plus1 = vector_params.dim + 1;
-  if (vector_params.capacity > kMaxFlatBufEntries / dim_plus1) {
+  const size_t stride_bytes = vector_params.dim * width;
+  if (vector_params.capacity > kMaxFlatBufBytes / stride_bytes) {
     return CreateSyntaxError("Vector index initial allocation is too large"sv);
   }
 
@@ -459,6 +460,10 @@ ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser
     }
   }
 
+  if (!parser->HasError() && index.schema.fields.empty()) {
+    return CreateSyntaxError("Missing required SCHEMA clause with at least one field"sv);
+  }
+
   return index;
 }
 
@@ -539,12 +544,12 @@ std::optional<search::ScorerSpec> ParseScorer(CmdArgParser* parser) {
 }
 
 constexpr string_view kBM25StdTanhFactorErr = "BM25STD_TANH_FACTOR must be a positive integer";
+using BM25StdTanhFactor = facade::Positive<uint64_t>;
 
 // Parses a BM25STD_TANH_FACTOR value: an integer >= 1 (no upper bound). On a missing or invalid
 // value the parser reports kBM25StdTanhFactorErr, surfaced by the caller's error handling.
 uint64_t ParseBM25StdTanhFactor(CmdArgParser* parser) {
-  using TanhFactorInt = facade::FInt<uint64_t{1}, std::numeric_limits<uint64_t>::max()>;
-  return parser->Next<TanhFactorInt>(kBM25StdTanhFactorErr);
+  return parser->Next<BM25StdTanhFactor>(kBM25StdTanhFactorErr);
 }
 
 ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
@@ -660,11 +665,8 @@ ParseResult<AggregateParams::JoinParams> ParseAggregatorJoinParams(
     CmdArgParser* parser, absl::flat_hash_set<std::string>* known_indexes) {
   AggregateParams::JoinParams join_params;
   join_params.index = parser->Next<std::string>();
-  if (parser->Check("AS")) {
-    join_params.index_alias = parser->Next<std::string>();
-  } else {
+  if (!parser->Check("AS", &join_params.index_alias))
     join_params.index_alias = join_params.index;
-  }
 
   if (known_indexes->contains(join_params.index_alias)) {
     return CreateSyntaxError(
@@ -1305,12 +1307,16 @@ void SearchReply(const SearchParams& params,
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
   const size_t items_per_field =
       (reply_with_ids_only ? 1 : 2) + params.with_sortkeys + params.with_scores;
-  RedisReplyBuilder::ArrayScope scope{rb, limit * items_per_field + 1};
+  // Batch the reply so temporary sortkeys are copied into the batching buffer instead of referenced
+  // past their lifetime — a >kMaxInlineSize bulk string enqueued by reference under a reply scope
+  // is copied only when the scope ends, after the "$" + s temporary is gone (use-after-free).
+  SinkReplyBuilder::ReplyAggregator agg{rb};
+  rb->StartArray(limit * items_per_field + 1);
 
   Overloaded sortable_value_sender{
       [rb](monostate) { rb->SendNull(); },
       [rb](double d) { rb->SendBulkString(absl::StrCat("#", d)); },
-      [rb](const string& s) { rb->SendBulkString("$" + s); },
+      [rb](const string& s) { rb->SendBulkString(absl::StrCat("$", s)); },
   };
 
   rb->SendLong(total_hits);
@@ -1476,23 +1482,42 @@ vector<SearchResult> LoadHnswSearchDocs(
   return results;
 }
 
+// Validates that a KNN query blob matches the index's dim * element width. Returns an error
+// message on mismatch (mirrors the FLAT and FT.AGGREGATE paths), else nullopt.
+std::optional<std::string> ValidateHnswKnnBlob(const search::AstKnnNode* knn,
+                                               const search::HnswVectorIndex& index) {
+  size_t width = search::ElementSize(index.GetDataType());
+  if (knn->blob.empty() || knn->blob.size() % width != 0)
+    return "Parse error of vector parameters";
+  if (knn->blob.size() != index.GetDim() * width)
+    return absl::StrCat("Wrong vector index dimensions, got: ", knn->blob.size() / width,
+                        ", expected: ", index.GetDim());
+  return std::nullopt;
+}
+
 std::vector<std::pair<float, search::GlobalDocId>> SearchHnswWithPrefilter(
     const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
     std::optional<std::vector<search::GlobalDocId>> prefilter_global_docs_ids) {
+  // Callers validate the blob width and surface an error (ValidateHnswKnnBlob). This guard is a
+  // release-safety net against OOB reads if a future call site forgets; DCHECK flags that misuse.
+  DCHECK_EQ(knn->blob.size(), index->GetDim() * search::ElementSize(index->GetDataType()));
+  if (knn->blob.size() != index->GetDim() * search::ElementSize(index->GetDataType()))
+    return {};
+
   if (!prefilter_global_docs_ids)
-    return index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+    return index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime);
 
   auto& ids = *prefilter_global_docs_ids;
   VLOG(1) << "Searching HNSW index with prefilter size: " << ids.size();
 
   if (ids.size() < absl::GetFlag(FLAGS_subset_knn_search_threshold))
-    return index->SubsetKnn(knn->vec.first.get(), knn->limit, ids);
+    return index->SubsetKnn(knn->blob.data(), knn->limit, ids);
 
   // HnswVectorIndex::Knn(... allowed) uses binary_search for membership.
   if (!is_sorted(ids.begin(), ids.end()))
     sort(ids.begin(), ids.end());
 
-  return index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, ids);
+  return index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, ids);
 }
 
 vector<SearchResult> SearchGlobalHnswIndex(
@@ -1571,7 +1596,7 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
   const ShardId shard_size = shard_set->size();
 
   auto range_results =
-      index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius), range->epsilon);
+      index->RangeQuery(range->blob.data(), static_cast<float>(range->radius), range->epsilon);
 
   std::vector<std::vector<SerializedSearchDoc>> shard_docs(shard_size);
   for (const auto& [score, global_doc_id] : range_results) {
@@ -1636,7 +1661,7 @@ vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
         [](const SerializedSearchDoc& a, const SerializedSearchDoc& b) { return a.id < b.id; });
 
   auto range_results =
-      index->RangeQuery(range->vec.first.get(), static_cast<float>(range->radius), range->epsilon);
+      index->RangeQuery(range->blob.data(), static_cast<float>(range->radius), range->epsilon);
 
   std::vector<SerializedSearchDoc> out;
   out.reserve(range_results.size());
@@ -1693,7 +1718,8 @@ std::shared_ptr<search::HnswVectorIndex> GetValidatedHnswRangeIndex(
     builder->SendError(string{index_name} + ": no such global hnsw index");
     return nullptr;
   }
-  if (hnsw_range->vec.second == 0) {
+  const size_t width = search::ElementSize(hnsw_index->GetDataType());
+  if (hnsw_range->blob.empty() || hnsw_range->blob.size() % width != 0) {
     builder->SendError("Parse error of vector parameters");
     return nullptr;
   }
@@ -1707,9 +1733,10 @@ std::shared_ptr<search::HnswVectorIndex> GetValidatedHnswRangeIndex(
     builder->SendError("VECTOR_RANGE EPSILON must be greater than zero");
     return nullptr;
   }
-  if (hnsw_index->GetDim() != hnsw_range->vec.second) {
-    builder->SendError(absl::StrCat("Wrong vector index dimensions, got: ", hnsw_range->vec.second,
-                                    ", expected: ", hnsw_index->GetDim()));
+  if (hnsw_index->GetDim() * width != hnsw_range->blob.size()) {
+    builder->SendError(
+        absl::StrCat("Wrong vector index dimensions, got: ", hnsw_range->blob.size() / width,
+                     ", expected: ", hnsw_index->GetDim()));
     return nullptr;
   }
   return hnsw_index;
@@ -1758,6 +1785,7 @@ struct HybridSearchParams {
   string text_query;
   string yield_text_score_as;
   std::optional<search::ScorerSpec> scorer;  // carries the BM25STD.TANH factor when applicable
+  uint64_t bm25std_tanh_factor = search::kDefaultBM25StdTanhFactor;
 
   string vsim_field;
   string vsim_param;
@@ -1776,6 +1804,7 @@ struct HybridSearchParams {
 
   size_t num_candidates = 0;
   std::optional<uint32_t> ef_runtime;
+  float shard_k_ratio = 1.0f;
 
   size_t limit_offset = 0;
   size_t limit_total = 10;
@@ -1812,25 +1841,45 @@ struct HnswRangeEpsilon : facade::VNum<double> {
   }
 };
 
+void ParseScorerInto(CmdArgParser* sub, HybridSearchParams* p) {
+  if (p->scorer) {
+    sub->Next();
+    return;
+  }
+  auto scorer_fn = ParseScorer(sub);
+  if (!scorer_fn)
+    sub->ReportCustom(absl::StrCat("No such scorer: ", sub->Peek()));
+  else
+    p->scorer = *scorer_fn;
+}
+
+void ParseHybridLoad(CmdArgParser* parser, HybridSearchParams* params) {
+  if (parser->Check("*")) {
+    params->load_all_fields = true;
+    return;
+  }
+
+  const size_t count = parser->Next<size_t>();
+  std::vector<FieldReference> fields;
+  fields.reserve(count);
+  for (size_t i = 0; i < count; ++i) {
+    string_view field = parser->Next();
+    if (absl::StartsWith(field, "@"))
+      field.remove_prefix(1);
+    string_view alias;
+    parser->Check("AS", &alias);
+    fields.emplace_back(field, alias);
+  }
+  params->return_fields = std::move(fields);
+}
+
+void ParseHybridQueryParams(CmdArgParser* parser, HybridSearchParams* params) {
+  params->query_params = ParseQueryParams(parser);
+}
+
 ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
-  using facade::Map;
-  using facade::Tag;
-
   HybridSearchParams p;
-  uint64_t tanh_factor = search::kDefaultBM25StdTanhFactor;
 
-  auto parse_scorer = [&](CmdArgParser* sub) {
-    if (p.scorer) {
-      sub->Next();
-      return;
-    }
-    auto scorer_fn = ParseScorer(sub);
-    if (!scorer_fn)
-      sub->ReportCustom(absl::StrCat("No such scorer: ", sub->Peek()));
-    else
-      p.scorer = *scorer_fn;
-  };
-  auto parse_tanh_factor = [&](CmdArgParser* sub) { tanh_factor = ParseBM25StdTanhFactor(sub); };
   auto read_range_epsilon = [&](CmdArgParser* sub) {
     double epsilon = sub->Next<HnswRangeEpsilon>("Invalid EPSILON value");
     if (!sub->HasError())
@@ -1879,28 +1928,36 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
 
   parser->ExpectTag("SEARCH", "expected SEARCH keyword");
   p.text_query = parser->Next<string>();
-  parser->Apply(Tag("SCORER", parse_scorer), Tag("BM25STD_TANH_FACTOR", parse_tanh_factor),
-                Tag("YIELD_SCORE_AS", &p.yield_text_score_as));
+  static constexpr auto kScorerGrammar = Compile(Options(
+      Action("SCORER", &ParseScorerInto),
+      Field<BM25StdTanhFactor>("BM25STD_TANH_FACTOR", &HybridSearchParams::bm25std_tanh_factor,
+                               kBM25StdTanhFactorErr),
+      Field("YIELD_SCORE_AS", &HybridSearchParams::yield_text_score_as)));
+  kScorerGrammar.Apply(parser, &p);
   if (p.scorer)
-    p.scorer->bm25std_tanh_factor = tanh_factor;
+    p.scorer->bm25std_tanh_factor = p.bm25std_tanh_factor;
 
   parser->ExpectTag("VSIM", "expected VSIM keyword");
   p.vsim_field = string{parser->ExpectStartsWith("@", "VSIM field must start with @")};
   p.vsim_param = string{parser->ExpectStartsWith("$", "VSIM parameter must start with $")};
 
-  float shard_k_ratio = 1.0f;
   if (parser->Check("KNN", &p.num_candidates)) {
-    parser->Apply(Tag("K", &p.num_candidates), Tag("EF_RUNTIME", &p.ef_runtime),
-                  Tag("SHARD_K_RATIO", &shard_k_ratio));
+    static constexpr auto kGrammar =
+        Compile(Options(Field("K", &HybridSearchParams::num_candidates),
+                        Field("EF_RUNTIME", &HybridSearchParams::ef_runtime),
+                        Field("SHARD_K_RATIO", &HybridSearchParams::shard_k_ratio)));
+    kGrammar.Apply(parser, &p);
     p.num_candidates =
-        static_cast<size_t>(std::ceil(static_cast<float>(p.num_candidates) * shard_k_ratio));
+        static_cast<size_t>(std::ceil(static_cast<float>(p.num_candidates) * p.shard_k_ratio));
   } else if (parser->Check("RANGE")) {
     parse_hybrid_range(parser);
   }
 
   if (parser->Check("FILTER", &p.vsim_filter) && p.use_range)
     parser->ReportCustom("VSIM RANGE cannot be combined with FILTER");
-  parser->Apply(Tag("YIELD_SCORE_AS", &p.yield_vsim_score_as));
+  static constexpr auto kYieldGrammar =
+      Compile(Options(Field("YIELD_SCORE_AS", &HybridSearchParams::yield_vsim_score_as)));
+  kYieldGrammar.Apply(parser, &p);
 
   if (parser->Check("COMBINE")) {
     using CM = HybridSearchParams::CombineMethod;
@@ -1908,40 +1965,27 @@ ParseResult<HybridSearchParams> ParseHybridParams(CmdArgParser* parser) {
       p.combine_method = *method;
       parser->Next<size_t>();  // nargs hint, not validated -- key/value pairs drive parsing.
       if (p.combine_method == CM::LINEAR) {
-        parser->Apply(Tag("ALPHA", &p.alpha), Tag("BETA", &p.beta),
-                      Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
+        static constexpr auto kGrammar = Compile(Options(
+            Field("ALPHA", &HybridSearchParams::alpha), Field("BETA", &HybridSearchParams::beta),
+            Field("YIELD_SCORE_AS", &HybridSearchParams::yield_combined_score_as)));
+        kGrammar.Apply(parser, &p);
       } else {
-        parser->Apply(Tag("CONSTANT", &p.rrf_constant), Tag("WINDOW", &p.rrf_window),
-                      Tag("YIELD_SCORE_AS", &p.yield_combined_score_as));
+        static constexpr auto kGrammar =
+            Compile(Options(Field("CONSTANT", &HybridSearchParams::rrf_constant),
+                            Field("WINDOW", &HybridSearchParams::rrf_window),
+                            Field("YIELD_SCORE_AS", &HybridSearchParams::yield_combined_score_as)));
+        kGrammar.Apply(parser, &p);
       }
     } else {
       parser->ReportCustom(absl::StrCat("unsupported COMBINE method: ", parser->Peek()));
     }
   }
 
-  auto parse_load = [&](CmdArgParser* sub) {
-    if (sub->Check("*")) {
-      p.load_all_fields = true;
-      return;
-    }
-    const size_t n = sub->Next<size_t>();
-    std::vector<FieldReference> fields;
-    fields.reserve(n);
-    for (size_t i = 0; i < n; i++) {
-      string_view f = sub->Next();
-      if (absl::StartsWith(f, "@"))
-        f.remove_prefix(1);
-      string_view alias;
-      sub->Check("AS", &alias);
-      fields.emplace_back(f, alias);
-    }
-    p.return_fields = std::move(fields);
-  };
-
-  auto parse_params = [&](CmdArgParser* sub) { p.query_params = ParseQueryParams(sub); };
-
-  parser->ApplyOrSkip(Tag("SCORER", parse_scorer), Tag("LOAD", parse_load),
-                      Tag("LIMIT", &p.limit_offset, &p.limit_total), Tag("PARAMS", parse_params));
+  static constexpr auto kTailGrammar = Compile(
+      Options(Action("SCORER", &ParseScorerInto), Action("LOAD", &ParseHybridLoad),
+              Field("LIMIT", &HybridSearchParams::limit_offset, &HybridSearchParams::limit_total),
+              Action("PARAMS", &ParseHybridQueryParams), Skip()));
+  kTailGrammar.Apply(parser, &p);
 
   if (parser->HasError())
     return make_unexpected(parser->TakeError().MakeReply());
@@ -2097,21 +2141,18 @@ bool CollectGlobalScoringStats(string_view index_name, search::SearchAlgorithm& 
 
 std::optional<string> ValidateAndExtractHnswVector(const search::HnswVectorIndex& hnsw_index,
                                                    const HybridSearchParams& params,
-                                                   search::OwnedFtVector* out_vec) {
+                                                   std::string_view* out_blob) {
   auto vec_bytes = params.query_params[params.vsim_param];
   if (vec_bytes.empty())
     return absl::StrCat("Vector parameter not found: $", params.vsim_param);
 
-  auto vec = search::BytesToFtVectorSafe(vec_bytes);
-  if (!vec)
-    return absl::StrCat("Invalid vector bytes for parameter: $", params.vsim_param);
+  const size_t width = search::ElementSize(hnsw_index.GetDataType());
+  if (vec_bytes.size() != hnsw_index.GetDim() * width)
+    return absl::StrCat("Query vector blob size (", vec_bytes.size(),
+                        ") does not match index's expected size (", hnsw_index.GetDim() * width,
+                        ")");
 
-  if (vec->second != hnsw_index.GetDim())
-    return absl::StrCat("Query vector blob size (", vec->second * sizeof(float),
-                        ") does not match index's expected size (",
-                        hnsw_index.GetDim() * sizeof(float), ")");
-
-  *out_vec = std::move(*vec);
+  *out_blob = vec_bytes;
   return std::nullopt;
 }
 
@@ -2122,8 +2163,8 @@ std::optional<string> RunHnswPreSearch(string_view index_name, const HybridSearc
   if (!hnsw_index)
     return absl::StrCat("No HNSW index for field: ", params.vsim_field);
 
-  search::OwnedFtVector vec;
-  if (auto err = ValidateAndExtractHnswVector(*hnsw_index, params, &vec))
+  std::string_view blob;
+  if (auto err = ValidateAndExtractHnswVector(*hnsw_index, params, &blob))
     return err;
 
   auto populate = [&](const vector<pair<float, search::GlobalDocId>>& results) {
@@ -2137,9 +2178,9 @@ std::optional<string> RunHnswPreSearch(string_view index_name, const HybridSearc
   };
 
   if (params.use_range)
-    populate(hnsw_index->RangeQuery(vec.first.get(), params.range_radius, params.range_epsilon));
+    populate(hnsw_index->RangeQuery(blob.data(), params.range_radius, params.range_epsilon));
   else
-    populate(hnsw_index->Knn(vec.first.get(), params.num_candidates, params.ef_runtime));
+    populate(hnsw_index->Knn(blob.data(), params.num_candidates, params.ef_runtime));
   return std::nullopt;
 }
 
@@ -2152,8 +2193,8 @@ std::optional<string> RunHnswFilteredSearch(string_view index_name,
   if (!hnsw_index)
     return absl::StrCat("No HNSW index for field: ", params.vsim_field);
 
-  search::OwnedFtVector vec;
-  if (auto err = ValidateAndExtractHnswVector(*hnsw_index, params, &vec))
+  std::string_view blob;
+  if (auto err = ValidateAndExtractHnswVector(*hnsw_index, params, &blob))
     return err;
 
   vector<search::GlobalDocId> prefilter_ids;
@@ -2168,9 +2209,8 @@ std::optional<string> RunHnswFilteredSearch(string_view index_name,
 
   auto knn_results =
       prefilter_ids.size() < absl::GetFlag(FLAGS_subset_knn_search_threshold)
-          ? hnsw_index->SubsetKnn(vec.first.get(), params.num_candidates, prefilter_ids)
-          : hnsw_index->Knn(vec.first.get(), params.num_candidates, params.ef_runtime,
-                            prefilter_ids);
+          ? hnsw_index->SubsetKnn(blob.data(), params.num_candidates, prefilter_ids)
+          : hnsw_index->Knn(blob.data(), params.num_candidates, params.ef_runtime, prefilter_ids);
 
   for (const auto& [dist, global_id] : knn_results) {
     auto it = prefilter_map.find(global_id);
@@ -2363,8 +2403,8 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
       rb->SendError(absl::StrCat("No HNSW index for field: ", params->vsim_field));
       return false;
     }
-    search::OwnedFtVector vec_ignored;
-    if (auto err = ValidateAndExtractHnswVector(*hnsw_index, *params, &vec_ignored)) {
+    std::string_view blob_ignored;
+    if (auto err = ValidateAndExtractHnswVector(*hnsw_index, *params, &blob_ignored)) {
       rb->SendError(*err);
       return false;
     }
@@ -2397,7 +2437,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   std::once_flag schema_validated;
   bool vsim_not_vector = false;
   bool vsim_dim_mismatch = false;
-  size_t vsim_query_dim = 0, vsim_index_dim = 0;
+  size_t vsim_query_dim = 0, vsim_index_dim = 0, vsim_width = sizeof(float);
   search::VectorSimilarity captured_metric = search::VectorSimilarity::L2;
 
   vector<SearchResult> text_docs(shard_count);
@@ -2426,10 +2466,11 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
       captured_metric = vp.sim;
       if (!use_hnsw) {
         auto vec_bytes = params->query_params[params->vsim_param];
-        if (!vec_bytes.empty() && vec_bytes.size() != vp.dim * sizeof(float)) {
+        vsim_width = search::ElementSize(vp.data_type);
+        if (!vec_bytes.empty() && vec_bytes.size() != vp.dim * vsim_width) {
           vsim_dim_mismatch = true;
           vsim_index_dim = vp.dim;
-          vsim_query_dim = vec_bytes.size() / sizeof(float);
+          vsim_query_dim = vec_bytes.size() / vsim_width;
         }
       }
     });
@@ -2480,9 +2521,9 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     return false;
   }
   if (vsim_dim_mismatch) {
-    rb->SendError(absl::StrCat("Query vector blob size (", vsim_query_dim * sizeof(float),
+    rb->SendError(absl::StrCat("Query vector blob size (", vsim_query_dim * vsim_width,
                                ") does not match index's expected size (",
-                               vsim_index_dim * sizeof(float), ")"));
+                               vsim_index_dim * vsim_width, ")"));
     return false;
   }
 
@@ -3186,6 +3227,11 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
         cmd_cntx->tx()->Conclude();
       return builder->SendError(string{index_name} + ": no such global hnsw index");
     }
+    if (auto err = ValidateHnswKnnBlob(knn, *hnsw_index)) {
+      if (knn_has_prefilter)
+        cmd_cntx->tx()->Conclude();
+      return builder->SendError(*err);
+    }
     if (knn_has_prefilter) {
       docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
                                    knn_prefilter_docs, *params, *cmd_cntx);
@@ -3395,6 +3441,8 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, profile_knn->field);
     if (!hnsw_index)
       return rb->SendError(std::string{index_name} + ": no such global hnsw index");
+    if (auto err = ValidateHnswKnnBlob(profile_knn, *hnsw_index))
+      return rb->SendError(*err);
 
     std::vector<SearchResult> search_results(shards_count);
     std::vector<SearchResult> profile_search_results(shards_count);
@@ -3744,6 +3792,18 @@ static bool AggregateHnswKnn(CommandContext* cmd_cntx, AggregateParams& params,
     return false;
   }
 
+  const size_t hnsw_width = search::ElementSize(hnsw_index->GetDataType());
+  if (knn->blob.empty() || knn->blob.size() % hnsw_width != 0) {
+    cmd_cntx->rb()->SendError("Parse error of vector parameters");
+    return false;
+  }
+  if (knn->blob.size() != hnsw_index->GetDim() * hnsw_width) {
+    cmd_cntx->rb()->SendError(
+        absl::StrCat("Wrong vector index dimensions, got: ", knn->blob.size() / hnsw_width,
+                     ", expected: ", hnsw_index->GetDim()));
+    return false;
+  }
+
   const bool has_prefilter = knn->HasPreFilter();
   std::vector<absl::flat_hash_map<search::DocId, float>> text_scores(shard_set->size());
   std::optional<std::vector<search::GlobalDocId>> prefilter_ids;
@@ -3751,9 +3811,8 @@ static bool AggregateHnswKnn(CommandContext* cmd_cntx, AggregateParams& params,
     prefilter_ids = RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores);
 
   auto knn_results =
-      prefilter_ids
-          ? hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime, *prefilter_ids)
-          : hnsw_index->Knn(knn->vec.first.get(), knn->limit, knn->ef_runtime);
+      prefilter_ids ? hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, *prefilter_ids)
+                    : hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime);
   auto shard_docs = GroupByShardId(knn_results, shard_set->size());
   RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, knn->score_alias, text_scores,
                        has_prefilter);
@@ -3795,7 +3854,7 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
   // Intersect the range hits with the filter matches: keep only range results whose global id is
   // in the sorted prefilter id set. Memory is O(filter matches) of ids plus O(range hits).
   auto range_results = hnsw_index->RangeQuery(
-      hnsw_range->vec.first.get(), static_cast<float>(hnsw_range->radius), hnsw_range->epsilon);
+      hnsw_range->blob.data(), static_cast<float>(hnsw_range->radius), hnsw_range->epsilon);
   if (prefilter_ids) {
     erase_if(range_results, [&](const auto& r) {
       return !std::binary_search(prefilter_ids->begin(), prefilter_ids->end(), r.second);

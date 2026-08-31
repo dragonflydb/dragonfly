@@ -65,12 +65,13 @@ DbTableStats& DbTableStats::operator+=(const DbTableStats& o) {
 }
 
 SlotStats& SlotStats::operator+=(const SlotStats& o) {
-  static_assert(sizeof(SlotStats) == 32);
+  static_assert(sizeof(SlotStats) == 40);
 
   ADD(key_count);
   ADD(total_reads);
   ADD(total_writes);
   ADD(memory_bytes);
+  ADD(tiered_bytes);
   return *this;
 }
 
@@ -123,10 +124,11 @@ DbTable::~DbTable() {
 }
 
 void DbTable::Clear() {
-  prime.size();
   prime.Clear();
   mcflag.Clear();
   stats = DbTableStats{};
+  expire_cursor = PrimeTable::Cursor::end();
+  segment_defrag_cursor = PrimeTable::Cursor::end();
 }
 
 PrimeIterator DbTable::Launder(PrimeIterator it, string_view key) {

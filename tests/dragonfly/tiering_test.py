@@ -1,21 +1,23 @@
-import async_timeout
 import asyncio
 import itertools
 import logging
-import pytest
 import random
+
+import async_timeout
+import pytest
 import redis.asyncio as aioredis
 
 from . import dfly_args
-from .seeder import DebugPopulateSeeder, Seeder as SeederV2
+from .instance import DflyInstance, DflyInstanceFactory
+from .seeder import DebugPopulateSeeder
+from .seeder import Seeder as SeederV2
 from .utility import (
+    LogMonitor,
+    check_all_replicas_finished,
+    compare_master_replica_keys,
     info_tick_timer,
     wait_for_replicas_state,
-    check_all_replicas_finished,
-    LogMonitor,
-    compare_master_replica_keys,
 )
-from .instance import DflyInstance, DflyInstanceFactory
 
 BASIC_ARGS = {
     "proactor_threads": 4,
@@ -244,6 +246,65 @@ async def test_tiered_replication_with_hashes(
 
     await check_all_replicas_finished([replica_client], async_client, timeout=500)
     monitor.assert_no_match()
+
+
+@pytest.mark.exclude_epoll
+async def test_tiered_replication_offloaded_listpack_hashes(
+    df_factory: DflyInstanceFactory,
+):
+    master = df_factory.create(
+        proactor_threads=2,
+        maxmemory="512MB",
+        tiered_prefix="{DRAGONFLY_TMP}/offloaded_hash_full_sync_master",
+        tiered_min_value_size="64",
+        tiered_offload_threshold="1.0",
+        tiered_upload_threshold="1.0",
+        tiered_experimental_cooling="false",
+        tiered_experimental_hash_support="false",
+    )
+    master.start()
+    master_client = master.client()
+
+    # Keep hash tiering disabled until the listpack encoding has been verified.
+    expected = {}
+    pipe = master_client.pipeline(transaction=False)
+    for i in range(100):
+        key = f"hash:{i}"
+        prefix = f"{i:03d}:"
+        fields = {"f1": prefix + "a" * 44, "f2": prefix + "b" * 44}
+        expected[key] = fields
+        pipe.hset(key, mapping=fields)
+
+    assert await pipe.execute() == [2] * len(expected)
+    debug_info = await master_client.execute_command("DEBUG", "OBJECT", "hash:0")
+    assert "encoding:listpack" in debug_info
+
+    assert await master_client.config_set("tiered_experimental_hash_support", "true")
+    # Only hashes exist, so any tiered entry proves an external hash is present before full sync.
+    async for info, breaker in info_tick_timer(master_client, section="TIERED", timeout=30):
+        with breaker:
+            assert info["tiered_entries"] > 0
+
+    replica = df_factory.create(proactor_threads=1, dbfilename="", tiered_prefix="")
+    replica.start()
+    replica_client = replica.client()
+
+    await replica_client.replicaof("localhost", master.port)
+    async with async_timeout.timeout(30):
+        await wait_for_replicas_state(replica_client)
+    await check_all_replicas_finished([replica_client], master_client, timeout=30)
+
+    assert await replica_client.dbsize() == len(expected)
+
+    pipe = replica_client.pipeline(transaction=False)
+    for key in expected:
+        pipe.type(key)
+    assert await pipe.execute() == ["hash"] * len(expected)
+
+    pipe = replica_client.pipeline(transaction=False)
+    for key in expected:
+        pipe.hgetall(key)
+    assert await pipe.execute() == list(expected.values())
 
 
 @pytest.mark.large

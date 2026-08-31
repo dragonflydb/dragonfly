@@ -23,6 +23,7 @@ class MemoryCmd {
   void ArenaStats(facade::CmdArgParser parser);
   void Usage(std::string_view key, bool account_key_memory_usage);
   void Track(facade::CmdArgParser parser);
+  void DefragmentSegments(facade::CmdArgParser parser);
 
   CommandContext* cmd_cntx_;
   ServerFamily* owner_;

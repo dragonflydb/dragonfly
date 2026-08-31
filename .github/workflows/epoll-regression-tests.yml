@@ -21,6 +21,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: write # To allow deleting cache
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
@@ -30,7 +31,7 @@ jobs:
         - /:/hostroot
         - /mnt:/mnt
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -43,7 +44,13 @@ jobs:
       - name: Build Dragonfly
         uses: ./.github/actions/builder
         with:
+          enable-ccache: 'true'
+          ccache-save: 'true'
+          enable-deps-cache: 'true'
           build-type: ${{matrix.build-type}}
+          cache-key-suffix: 'df_common_bin'
+          c-compiler: gcc
+          cxx-compiler: g++
           targets: 'dragonfly'
 
       - name: Authenticate to AWS
@@ -78,5 +85,5 @@ jobs:
     if: github.repository == 'dragonflydb/dragonfly'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/lint-test-chart

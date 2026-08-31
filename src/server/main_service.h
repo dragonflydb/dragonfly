@@ -38,12 +38,14 @@ class Service : public facade::ServiceInterface {
   void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
-  facade::DispatchResult DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
-                                         facade::AsyncPreference apref) final;
+  facade::DispatchResult DispatchCommand(
+      facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd, facade::AsyncPreference apref,
+      absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) final;
 
   // Execute multiple consecutive commands, possibly in parallel by squashing
-  uint32_t DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
-                                 facade::ConnectionContext* cntx) final;
+  uint32_t DispatchSquashedBatch(
+      facade::ParsedCommand* first, unsigned count, facade::ConnectionContext* cntx,
+      absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) final;
 
   // Check OOM and invoke command with args
   facade::DispatchResult InvokeCmd(const facade::ParsedArgs& tail_args, CommandContext* cmd_cntx);
@@ -127,6 +129,7 @@ class Service : public facade::ServiceInterface {
   using SinkReplyBuilder = facade::SinkReplyBuilder;
 
   static void Quit(facade::CmdArgParser parser, CommandContext* cmd_cntx);
+  static void Reset(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   static void Multi(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   static void Watch(facade::CmdArgParser parser, CommandContext* cmd_cntx);

@@ -9,6 +9,8 @@
 #include <hnswlib/space_ip.h>
 #include <hnswlib/space_l2.h>
 
+#include <cstddef>
+
 #include "base/logging.h"
 #include "core/search/hnsw_alg.h"
 #include "core/search/mrmw_mutex.h"
@@ -23,44 +25,33 @@ using namespace std;
 namespace {
 
 class HnswSpace : public hnswlib::SpaceInterface<float> {
-  unsigned dim_;
-  VectorSimilarity sim_;
+  struct DistParams {
+    size_t dim;  // must stay first: hnsw_alg.h reads *((size_t*)dist_func_param_) as dim
+    VectorSimilarity sim;
+    VectorDataType dt;
+  };
+  DistParams params_;
 
-  static float L2DistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
-    return L2Distance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
-                      *static_cast<const unsigned*>(param));
-  }
-
-  static float IPDistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
-    return IPDistance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
-                      *static_cast<const unsigned*>(param));
-  }
-
-  static float CosineDistanceStatic(const void* pVect1, const void* pVect2, const void* param) {
-    return CosineDistance(static_cast<const float*>(pVect1), static_cast<const float*>(pVect2),
-                          *static_cast<const unsigned*>(param));
+  // Distance between two native-width vector blobs; elements are widened to float internally.
+  static float DistStatic(const void* pVect1, const void* pVect2, const void* param) {
+    const auto* p = static_cast<const DistParams*>(param);
+    return VectorDistance(pVect1, pVect2, p->dim, p->sim, p->dt);
   }
 
  public:
-  explicit HnswSpace(size_t dim, VectorSimilarity sim) : dim_(dim), sim_(sim) {
+  HnswSpace(size_t dim, VectorSimilarity sim, VectorDataType dt) : params_{dim, sim, dt} {
   }
 
   size_t get_data_size() {
-    return dim_ * sizeof(float);
+    return params_.dim * ElementSize(params_.dt);
   }
 
   hnswlib::DISTFUNC<float> get_dist_func() {
-    if (sim_ == VectorSimilarity::L2) {
-      return L2DistanceStatic;
-    } else if (sim_ == VectorSimilarity::COSINE) {
-      return CosineDistanceStatic;
-    } else {
-      return IPDistanceStatic;
-    }
+    return DistStatic;
   }
 
   void* get_dist_func_param() {
-    return &dim_;
+    return &params_;
   }
 };
 }  // namespace
@@ -70,7 +61,7 @@ struct HnswlibAdapter {
   constexpr static size_t kSeed = 100;
 
   explicit HnswlibAdapter(const SchemaField::VectorParams& params, bool copy_vector)
-      : space_{params.dim, params.sim},
+      : space_{params.dim, params.sim, params.data_type},
         world_{&space_, params.capacity, params.hnsw_m, params.hnsw_ef_construction,
                kSeed,   copy_vector},
         copy_vector_{copy_vector},
@@ -79,8 +70,8 @@ struct HnswlibAdapter {
         ef_construction_{params.hnsw_ef_construction},
         ef_runtime_{params.hnsw_ef_runtime},
         epsilon_{params.hnsw_epsilon},
-        data_size_{params.dim * sizeof(float)},
-        stub_vector_(data_size_ / sizeof(float), 1.0f) {
+        data_size_{params.dim * ElementSize(params.data_type)},
+        stub_vector_(EncodeOnesVector(params.dim, params.data_type)) {
   }
 
   void Add(const void* data, GlobalDocId id) {
@@ -93,13 +84,13 @@ struct HnswlibAdapter {
     DoRemove(id);
   }
 
-  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<uint32_t> ef) {
+  vector<pair<float, GlobalDocId>> Knn(const void* target, size_t k, std::optional<uint32_t> ef) {
     uint32_t ef_runtime = ef.value_or(ef_runtime_);
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.searchKnnWithEf(target, k, nullptr, ef_runtime));
   }
 
-  vector<pair<float, GlobalDocId>> Knn(float* target, size_t k, std::optional<uint32_t> ef,
+  vector<pair<float, GlobalDocId>> Knn(const void* target, size_t k, std::optional<uint32_t> ef,
                                        const vector<GlobalDocId>& allowed) {
     struct BinsearchFilter : hnswlib::BaseFilterFunctor {
       virtual bool operator()(hnswlib::labeltype id) {
@@ -119,7 +110,7 @@ struct HnswlibAdapter {
 
   // Brute-force KNN search over a specific subset of documents.
   // Computes distances for all provided document IDs and returns the k nearest neighbors.
-  vector<pair<float, GlobalDocId>> SubsetKnn(float* target, size_t k,
+  vector<pair<float, GlobalDocId>> SubsetKnn(const void* target, size_t k,
                                              const vector<GlobalDocId>& docs) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return QueueToVec(world_.subsetKnnSearch(target, k, docs));
@@ -128,7 +119,7 @@ struct HnswlibAdapter {
   // Returns all documents within the given radius, with their distances.
   // Uses dynamic-range exploration (searchRange) to correctly handle cases where
   // the entry point is farther than radius.
-  vector<pair<float, GlobalDocId>> RangeSearch(float* target, float radius,
+  vector<pair<float, GlobalDocId>> RangeSearch(const void* target, float radius,
                                                std::optional<double> epsilon) {
     double effective_epsilon = epsilon.value_or(epsilon_);
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
@@ -228,8 +219,8 @@ struct HnswlibAdapter {
     // In borrowed mode the node stays in the graph after markDelete and
     // traversal still computes distances for it.  Replace the external
     // pointer with stub_vector_ so the caller can free the original data.
-    // Uses 1.0f (not zero) because CosineDistance(v, 0) = 0 would bias
-    // traversal toward deleted nodes.
+    // Uses a native-encoded 1.0 (not zero) because a zero-norm vector yields
+    // cosine distance 0 and would bias traversal toward deleted nodes.
     if (it != world_.label_lookup_.end()) {
       const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
       char* ptr_location = world_.getDataPtrByInternalId(it->second);
@@ -444,20 +435,21 @@ struct HnswlibAdapter {
   absl::Mutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
 
-  bool copy_vector_;                // Whether vectors are copied into hnswlib.
-  size_t capacity_;                 // Initial max_elements_ — used to reconstruct world_.
-  size_t M_;                        // hnsw_m — used to reconstruct world_.
-  size_t ef_construction_;          // hnsw_ef_construction — used to reconstruct world_.
-  uint32_t ef_runtime_;             // Default runtime search breadth.
-  double epsilon_;                  // Default range-search overscan.
-  size_t data_size_;                // Byte size of a single vector.
-  std::vector<float> stub_vector_;  // Non-zero data for deleted nodes in borrowed mode.
+  bool copy_vector_;                    // Whether vectors are copied into hnswlib.
+  size_t capacity_;                     // Initial max_elements_ — used to reconstruct world_.
+  size_t M_;                            // hnsw_m — used to reconstruct world_.
+  size_t ef_construction_;              // hnsw_ef_construction — used to reconstruct world_.
+  uint32_t ef_runtime_;                 // Default runtime search breadth.
+  double epsilon_;                      // Default range-search overscan.
+  size_t data_size_;                    // Byte size of a single vector.
+  std::vector<std::byte> stub_vector_;  // Native 1.0 data for deleted nodes in borrowed mode.
 };
 
 HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, bool copy_vector,
                                  PMR_NS::memory_resource*)
     : copy_vector_(copy_vector),
       dim_{params.dim},
+      data_type_{params.data_type},
       adapter_{make_unique<HnswlibAdapter>(params, copy_vector)} {
   DCHECK(params.use_hnsw);
   // TODO: Patch hnsw to use MR
@@ -467,7 +459,7 @@ HnswVectorIndex::~HnswVectorIndex() {
 }
 
 bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) {
-  auto vector_ptr = doc.GetVector(field, dim_);
+  auto vector_ptr = doc.GetVector(field, dim_, data_type_);
 
   if (!vector_ptr) {
     return false;
@@ -488,24 +480,24 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
   return true;
 }
 
-std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(float* target, size_t k,
+std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(const void* target, size_t k,
                                                                 std::optional<uint32_t> ef) const {
   return adapter_->Knn(target, k, ef);
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(
-    float* target, size_t k, std::optional<uint32_t> ef,
+    const void* target, size_t k, std::optional<uint32_t> ef,
     const std::vector<GlobalDocId>& allowed) const {
   return adapter_->Knn(target, k, ef, allowed);
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::SubsetKnn(
-    float* target, size_t k, const std::vector<GlobalDocId>& docs) const {
+    const void* target, size_t k, const std::vector<GlobalDocId>& docs) const {
   return adapter_->SubsetKnn(target, k, docs);
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::RangeQuery(
-    float* target, float radius, std::optional<double> epsilon) const {
+    const void* target, float radius, std::optional<double> epsilon) const {
   return adapter_->RangeSearch(target, radius, epsilon);
 }
 
@@ -536,7 +528,7 @@ bool HnswVectorIndex::RestoreFromNodes(const std::vector<HnswNodeData>& nodes,
 
 bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc,
                                        std::string_view field) {
-  auto vector_ptr = doc.GetVector(field, dim_);
+  auto vector_ptr = doc.GetVector(field, dim_, data_type_);
   if (!vector_ptr ||
       *vector_ptr == search::DocumentAccessor::VectorInfo(search::BorrowedFtVector(nullptr))) {
     // Document doesn't have the vector field - mark node as deleted to prevent

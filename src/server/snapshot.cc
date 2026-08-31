@@ -4,6 +4,7 @@
 
 #include "server/snapshot.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
 #include <mutex>
@@ -23,11 +24,13 @@
 #include "server/search/serialization_utils.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
+#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
 
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
+
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
 ABSL_FLAG(bool, serialization_tagged_chunks, true,
           "Allow serializer output to be split into tagged chunks and reassembled by receiver");
@@ -163,6 +166,9 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
 
+  // Covers cancellation exits; on the normal path the entries were already drained.
+  absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
+
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     stats_.keys_total += db_slice_->DbSize(db_indx);
   }
@@ -215,6 +221,10 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
           ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
         }
       }
+
+      // Suspend the traversal loop if we are exceeding the egress budget, letting
+      // high priority writes drain first. Guarantees the loop its reserved share.
+      ServerState::tlocal()->GetEgressThrottler().Throttle();
     } while (snapshot_cursor_);
 
     // Wait for all the outstanding delayed entries and serialize them as well.
@@ -296,6 +306,10 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   // Once last_pushed_id_ = 4, A will be unblocked, while B will wait until A finishes pushing and
   // update last_pushed_id_ to 5.
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
+
+  // Track egress just before the socket write. Attribute it to a high priority (out of order)
+  // write when we don't run on the snapshot fiber.
+  ServerState::tlocal()->GetEgressThrottler().Record(serialized, !snapshot_fb_.IsActive());
 
   // Blocking point.
   consumer_->ConsumeData(std::move(data), base_cntx_);

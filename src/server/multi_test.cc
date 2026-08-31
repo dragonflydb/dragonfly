@@ -12,6 +12,7 @@
 #include "base/logging.h"
 #include "core/interpreter.h"
 #include "facade/facade_test.h"
+#include "facade/reply_builder.h"
 #include "facade/resp_expr.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
@@ -689,7 +690,7 @@ TEST_F(MultiTest, Eval) {
 }
 
 TEST_F(MultiTest, Watch) {
-  auto kExecFail = ArgType(RespExpr::NIL);
+  auto kExecFail = ArgType(RespExpr::NIL_ARRAY);
   auto kExecSuccess = ArgType(RespExpr::ARRAY);
 
   // Check watch doesn't run in multi.
@@ -728,6 +729,14 @@ TEST_F(MultiTest, Watch) {
   Run({"watch", "a"});
   Run({"expire", "a", "1"});
   AdvanceTime(1000);
+  Run({"multi"});
+  Run({"get", "a"});
+  ASSERT_THAT(Run({"exec"}), kExecFail);
+
+  // A TTL set before WATCH that lapses untouched aborts EXEC via the expiry check.
+  Run({"set", "a", "1", "ex", "1"});
+  Run({"watch", "a"});
+  AdvanceTime(1100);
   Run({"multi"});
   Run({"get", "a"});
   ASSERT_THAT(Run({"exec"}), kExecFail);
@@ -1616,6 +1625,18 @@ TEST_F(MultiTest, EvalRo) {
   EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
 }
 
+TEST_F(MultiTest, EvalRoUndeclaredKeys) {
+  EXPECT_THAT(Run({"set", "foo", "bar"}), "OK");
+
+  // Undeclared keys make the script global, and read-only takes the shard lock in shared mode.
+  EXPECT_THAT(
+      Run({"eval_ro", "--!df flags=allow-undeclared-keys\nreturn redis.call('get', 'foo')", "0"}),
+      "bar");
+
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_TRUE(shard->shard_lock()->IsFree()); });
+}
+
 TEST_F(MultiTest, EvalShaRo) {
   RespExpr resp;
 
@@ -1710,6 +1731,106 @@ return redis.call('GET', KEYS[1])
 
   auto resp = Run({"eval", kScript, "1", "key"});
   ASSERT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
+// Tests for the RESET command (connection-layer reset, mirrors Redis RESET).
+// RESET clears MULTI state, WATCH keys, DB index, and auth, keeping the connection alive.
+TEST_F(MultiTest, ResetReturnsResetString) {
+  EXPECT_THAT(Run({"reset"}), "RESET");
+}
+
+TEST_F(MultiTest, ResetClearsMULTIBlock) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"get", "x"}), "QUEUED");
+
+  // RESET should abort the MULTI block and leave us in normal state.
+  EXPECT_THAT(Run({"reset"}), "RESET");
+
+  // After RESET a plain GET works (not QUEUED, not an error).
+  EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
+  // EXEC without MULTI confirms the block was cleared.
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+}
+
+TEST_F(MultiTest, ResetClearsWatchState) {
+  Run({"set", "a", "1"});
+  EXPECT_THAT(Run({"watch", "a"}), "OK");
+
+  // Modify watched key from another connection so EXEC would normally fail.
+  Run("other", {"set", "a", "2"});
+
+  // RESET should clear WATCH; after RESET, a new MULTI/EXEC should succeed.
+  EXPECT_THAT(Run({"reset"}), "RESET");
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"get", "a"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("2"));
+}
+
+TEST_F(MultiTest, ResetSelectsDB0) {
+  // Move to DB 1, set a key there.
+  EXPECT_THAT(Run({"select", "1"}), "OK");
+  EXPECT_THAT(Run({"set", "resetkey", "val"}), "OK");
+
+  // RESET should switch back to DB 0.
+  EXPECT_THAT(Run({"reset"}), "RESET");
+
+  // The key in DB 1 should not be visible in DB 0.
+  EXPECT_THAT(Run({"get", "resetkey"}), ArgType(RespExpr::NIL));
+
+  // Select 1 to confirm the key is still there.
+  EXPECT_THAT(Run({"select", "1"}), "OK");
+  EXPECT_THAT(Run({"get", "resetkey"}), "val");
+}
+
+TEST_F(MultiTest, EvalMPopEmptyIsFalse) {
+  // Empty-result ZMPOP/LMPOP inside a script replies with a null array, which must
+  // produce Lua false, never a table.
+  auto resp = Run(
+      {"eval", "local r = redis.call('zmpop', '1', KEYS[1], 'MIN') return type(r)", "1", "nozset"});
+  EXPECT_EQ(resp, "boolean");
+
+  resp = Run({"eval", "local r = redis.call('lmpop', '1', KEYS[1], 'LEFT') return type(r)", "1",
+              "nolist"});
+  EXPECT_EQ(resp, "boolean");
+}
+
+// A bad_alloc thrown by a shard callback inside a squashed MULTI must surface as an error reply.
+TEST_F(MultiTest, SquashedCallbackBadAlloc) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_squash, true);
+
+  static atomic_bool threw_in_stub;
+  threw_in_stub = false;
+
+  auto handler = [](CmdArgParser, CommandContext* cmd_cntx) {
+    auto cb = [](Transaction* t, EngineShard*) -> OpResult<long> {
+      threw_in_stub = t->IsSquashedStub();
+      throw std::bad_alloc{};
+    };
+    OpResult<long> res = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+    auto* rb = cmd_cntx->rb();
+    if (res)
+      rb->SendLong(*res);
+    else
+      rb->SendError(res.status());
+  };
+  std::move(*service_->mutable_registry()->Find("LPUSH")).SetHandler(handler);
+
+  Run({"multi"});
+  Run({"lpush", kKey1, "a"});
+  Run({"set", kKey2, "b"});
+  RespExpr resp = Run({"exec"});
+
+  // Otherwise the throw happened on the unsquashed path and the test is vacuous.
+  EXPECT_TRUE(threw_in_stub.load());
+
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], ErrArg("Out of memory"));
+  EXPECT_EQ(resp.GetVec()[1], "OK");
+
+  // The connection must stay in sync after the failed sub-command.
+  EXPECT_EQ(Run({"ping"}), "PONG");
+  EXPECT_EQ(Run({"get", kKey2}), "b");
 }
 
 }  // namespace dfly

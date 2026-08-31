@@ -31,6 +31,8 @@ class EngineShard {
     uint64_t defrag_skipped_mem_under_threshold = 0;
     uint64_t defrag_skipped_within_check_interval = 0;
     uint64_t defrag_skipped_not_enough_fragmentation = 0;
+    // In case it spins similarly to defragmentation. See pr #8115
+    uint64_t async_delete_task_invocation_total = 0;
     uint64_t poll_execution_total = 0;
 
     // number of optimistic executions - that were run as part of the scheduling.
@@ -221,8 +223,28 @@ class EngineShard {
     return defrag_state_.cursor;
   }
 
-  // Return total segments merged.
-  size_t CompactTable(double threshold, DbIndex db_idx);
+  struct CompactTableStats {
+    // Segments successfully merged.
+    size_t merged = 0;
+    // Buddy pairs that passed the size gate and were handed to Merge.
+    size_t attempted = 0;
+    // Attempted merges that moved items into the buddy and then had to roll back
+    // after a failed insertion.
+    size_t rolled_back = 0;
+    // True if we bailed out early due to a snapshot in progress.
+    bool exited_on_snapshot = false;
+
+    CompactTableStats& operator+=(const CompactTableStats& o) {
+      merged += o.merged;
+      attempted += o.attempted;
+      rolled_back += o.rolled_back;
+      exited_on_snapshot = exited_on_snapshot || o.exited_on_snapshot;
+      return *this;
+    }
+  };
+
+  // Merge underutilized buddy-segment pairs in the dash table.
+  CompactTableStats CompactTable(double threshold, DbIndex db_idx);
 
  private:
   struct DefragTaskState {
@@ -231,12 +253,19 @@ class EngineShard {
     time_t last_check_time = 0;
     float page_utilization_threshold = 0.8;
 
+    // Duty-cycle backoff: bounds how much of this shard's CPU % defrag can burst.
+    // Without this, defrag task will return kOnIdleMaxLevel and will spin CPU without a cap.
+    // For more info, check helio's proactor event loop and how background tasks are run.
+    uint64_t consecutive_burst_cycles = 0;
+    uint64_t cooldown_until_cycles = 0;  // CycleClock ticks; 0 means "not cooling down"
+
     enum class SkipReason : uint8_t {
       MemoryTooLow,
       MemoryBelowThreshold,
       CheckWithinInterval,
       NotEnoughFragmentation,
       CheckInProgress,
+      CoolingDown,
       NotSkipped,
     };
 

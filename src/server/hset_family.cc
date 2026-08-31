@@ -49,6 +49,26 @@ using IncrByParam = std::variant<double, int64_t>;
 using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 
+OpStatus MaterializeForHashIndex(const OpArgs& op_args, string_view key,
+                                 DbSlice::ItAndUpdater* entry) {
+  if (op_args.db_cntx.db_index != 0 || !entry->it->second.IsExternal() ||
+      !op_args.shard->search_indices()->HasHashIndexes()) {
+    return OpStatus::OK;
+  }
+
+  bool fetched =
+      op_args.shard->tiered_storage()->MaterializeForIndexing(0, key, &entry->it->second).Get();
+  if (!IsValid(entry->it)) {
+    entry->post_updater.Cancel();
+    return OpStatus::IO_ERROR;
+  }
+
+  entry->post_updater.ResyncBaseline();
+  return fetched && entry->it->second.ObjType() == OBJ_HASH && !entry->it->second.IsExternal()
+             ? OpStatus::OK
+             : OpStatus::IO_ERROR;
+}
+
 // FIELDS arg-count error for the hash field-TTL commands. HTTL/HPEXPIRETIME/HGETEX additionally
 // pass kInvalidNumFields for a non-positive numfields.
 constexpr char kNumFieldsMismatch[] =
@@ -269,6 +289,10 @@ auto ExecuteW(Transaction* tx, F&& f,
 
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_HASH);
     RETURN_ON_BAD_STATUS(it_res);
+    OpStatus materialized = MaterializeForHashIndex(op_args, key, &*it_res);
+    if (materialized != OpStatus::OK)
+      return materialized;
+
     auto& pv = it_res->it->second;
 
     // Enqueue read for future values
@@ -287,7 +311,8 @@ auto ExecuteW(Transaction* tx, F&& f,
       };
 
       es->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
-                                 pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+                                 pv.GetExternalSlice(), D{}, std::move(read_cb),
+                                 tiering::ReadOptions{.read_only = false});
       return CbVariant<T>{std::move(fut)};
     }
 
@@ -531,6 +556,10 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
+  OpStatus materialized = MaterializeForHashIndex(op_args, key, &add_res);
+  if (materialized != OpStatus::OK)
+    return materialized;
+
   uint8_t* lp = nullptr;
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
@@ -561,7 +590,8 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
     };
 
     op_args.shard->tiered_storage()->Read(std::make_pair(op_args.db_cntx.db_index, key),
-                                          pv.GetExternalSlice(), D{}, std::move(read_cb), false);
+                                          pv.GetExternalSlice(), D{}, std::move(read_cb),
+                                          tiering::ReadOptions{.read_only = false});
     return CbVariant<uint32_t>{std::move(fut)};
   }
 
@@ -670,14 +700,42 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   if (pv->IsExternal() && !pv->IsCool())
     return OpStatus::CANCELLED;  // can't mutate offloaded hashes synchronously
 
+  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
+  const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
+
   auto res = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
 
   // If it is a hash which became empty after expiring fields, we must delete the key safely.
   // We use DelMutable which consumes the iterator/updater to prevent the crash.
+  bool key_deleted = false;
   if (pv->Encoding() == kEncodingStrMap2) {
     auto* sm = static_cast<StringMap*>(pv->RObjPtr());
     if (sm->UpperBoundSize() == 0) {
       db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+      key_deleted = true;
+    }
+  }
+
+  // Journaling below may yield; disarm the updater so no dash iterator survives the yield
+  // (DelMutable already consumed it in the deleted case).
+  if (!key_deleted)
+    op_res->post_updater.Run();
+
+  if (op_args.shard->journal()) {
+    if (key_deleted) {
+      // The replayed command re-applies a relative TTL against the replica clock and
+      // cannot reproduce this deletion; journal it explicitly.
+      RecordJournal(op_args, "DEL"sv, {key});
+    } else if (had_member_expiry) {
+      // A field probed while lazily expired is still alive on a lagging replica and the
+      // replayed command would re-arm it there; delete it explicitly.
+      absl::InlinedVector<string_view, 4> missing{key};
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (res[i] == -2)
+          missing.push_back(values[i]);
+      }
+      if (missing.size() > 1)
+        RecordJournal(op_args, "HDEL"sv, missing);
     }
   }
 
@@ -702,24 +760,49 @@ OpResult<bool> CheckHSetExCondition(const OpArgs& op_args, string_view key,
   if (pv.IsExternal() && !pv.IsCool())
     return OpStatus::CANCELLED;  // can't inspect offloaded hashes synchronously
 
+  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
+  const bool had_member_expiry = pv.Encoding() == kEncodingStrMap2 && pv.HasMemberExpiration();
+
   HMapWrap hw{pv, op_args.db_cntx};
   bool holds = true;
+  absl::InlinedVector<string_view, 4> missing{key};
   for (size_t i = 0; i < fields.size(); i += 2) {
+    const bool found = bool(hw.Find(fields[i]));
+    if (had_member_expiry && !found)
+      missing.push_back(fields[i]);
     // FNX requires every field to be absent; FXX requires every field to be present.
-    if (fnx == bool(hw.Find(fields[i]))) {
+    if (fnx == found) {
       holds = false;
       break;
     }
   }
-  if (hw.Length() == 0)  // Find() may have lazily expired fields and emptied the hash.
+  if (hw.Length() == 0) {  // Find() may have lazily expired fields and emptied the hash.
     DeleteHw(hw, op_args, key);
+  } else if (missing.size() > 1 && op_args.shard->journal()) {
+    // A field probed while lazily expired is still alive on a lagging replica and the
+    // replayed condition would decide differently there; delete it explicitly first.
+    RecordJournal(op_args, "HDEL"sv, missing);
+  }
   return holds;
 }
 
 struct HSetExParams {
   OpSetParams op_sp;
+  ExpiryOption expiry;
   CmdArgParser::Range fields;  // field/value pairs; valid only when the parser has no error.
 };
+
+optional<DbSlice::ExpireParams> MakeFieldExpireParams(ExpT type, int64_t value, uint64_t now_ms,
+                                                      bool allow_expired) {
+  if (value < 0)
+    return nullopt;
+
+  DbSlice::ExpireParams params{type, value, now_ms};
+  auto [ttl_ms, expire_at_ms] = params.Calculate(now_ms, false);
+  if (expire_at_ms < 0 || ttl_ms > kMaxExpireDeadlineMs || (!allow_expired && ttl_ms <= 0))
+    return nullopt;
+  return params;
+}
 
 // Parses HSETEX arguments after the key, reporting any error into `parser` (surfaced by the caller
 // via RETURN_ON_PARSE_ERROR). `cmd_name` is only used to format error messages.
@@ -732,53 +815,42 @@ struct HSetExParams {
 // mandatory FIELDS keyword, the Dragonfly format a bare numeric ttl_sec. NX (per-field skip) and
 // the collective FNX/FXX condition are mutually exclusive; FNX/FXX behave identically in both
 // syntaxes (set all-or-nothing). Only the reported value differs (see OpSetParams::Format).
-HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
+HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name, uint64_t now_ms) {
   using Mode = OpSetParams::Mode;
   using Format = OpSetParams::Format;
-  constexpr int kMaxTtl = 1 << 26;
 
-  HSetExParams res;
+  static constexpr auto kGrammar = Compile(
+      Options(Into(&HSetExParams::op_sp, OneOf("", Map(&OpSetParams::mode, "NX", Mode::kNX, "FNX",
+                                                       Mode::kFNX, "FXX", Mode::kFXX))),
+              Into(&HSetExParams::op_sp, OneOf("", Exist("KEEPTTL", &OpSetParams::keepttl))),
+              Into(&HSetExParams::expiry, ExpiryOneOf())));
+  HSetExParams res = kGrammar.Apply(parser);
   OpSetParams& op_sp = res.op_sp;
+  ExpiryOption& expiry = res.expiry;
 
-  bool has_exp = false;
-
-  // EX/PX are relative (now = 0), EXAT/PXAT absolute (now = current time); ms = true for PX/PXAT.
-  // The value must land in (now, now + kMaxTtl] so the resulting ttl_sec stays in [1, kMaxTtl].
-  const int64_t now_ms = GetCurrentTimeMs();
-  const auto expiry = [&](int64_t now, bool ms) {
-    return [&, now, ms](CmdArgParser* p) {
-      has_exp = true;
-      int64_t span = ms ? int64_t(kMaxTtl) * 1000 : kMaxTtl;
-      int64_t v = p->Next<int64_t>();
-      if (v <= now || v > now + span)
-        p->ReportCustom(
-            InvalidExpireTime(cmd_name));  // no-op if Next already reported a non-integer
-      else
-        op_sp.ttl = ms ? (v - now + 999) / 1000 : v - now;
-    };
-  };
-
-  // A single Map makes the set modes (NX/FNX/FXX) mutually exclusive; OneOf also rejects a repeated
-  // flag. Parsing stops at the first non-flag token (ttl_sec or FIELDS).
-  parser->Apply(
-      OneOf(Map(&op_sp.mode, "NX", Mode::kNX, "FNX", Mode::kFNX, "FXX", Mode::kFXX)),
-      OneOf(Exist("KEEPTTL", &op_sp.keepttl)),
-      OneOf(Tag("EX", expiry(0, false)), Tag("PX", expiry(0, true)),
-            Tag("EXAT", expiry(now_ms / 1000, false)), Tag("PXAT", expiry(now_ms, true))));
+  if (expiry.value) {
+    auto expire_params = MakeFieldExpireParams(expiry.type, *expiry.value, now_ms, false);
+    if (!expire_params) {
+      parser->ReportCustom(InvalidExpireTime(cmd_name));
+    } else {
+      int64_t ttl_ms = expire_params->Calculate(now_ms, false).first;
+      op_sp.ttl = (ttl_ms + 999) / 1000;
+    }
+  }
 
   // FIELDS marks the Redis format, a bare ttl_sec the Dragonfly format. The parser short-circuits
   // once errored, so the steps below need no per-step checks.
   if (parser->Check("FIELDS")) {
     op_sp.format = Format::kRedis;
-    if (op_sp.mode == Mode::kNX || (op_sp.keepttl && has_exp))
+    if (op_sp.mode == Mode::kNX || (op_sp.keepttl && expiry.value))
       parser->Report(CmdArgParser::CUSTOM_ERROR);  // NX is Dragonfly-only; one expiry option max
     res.fields = parser->NextRange(2, kNumFieldsMismatch, /*consume_all=*/true);
-  } else if (has_exp) {
+  } else if (expiry.value) {
     // EX/PX/EXAT/PXAT belong to the Redis form; without FIELDS the command is malformed.
     parser->Report(CmdArgParser::CUSTOM_ERROR);
   } else {
     op_sp.format = Format::kDragonfly;
-    op_sp.ttl = parser->Next<FInt<1, kMaxTtl>>();
+    op_sp.ttl = parser->Next<FInt<int64_t{1}, kMaxExpireDeadlineSec>>();
 
     res.fields = parser->RemainingRange();
     if (res.fields.empty() || res.fields.size() % 2 != 0)
@@ -789,7 +861,8 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name) {
 
 void HSetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name());
+  uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
+  HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name(), now_ms);
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   // Evaluate the FNX/FXX condition (if any), then let OpSet set the fields and report the
@@ -849,7 +922,7 @@ void CmdHDel(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdHExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
-  using MinMaxTtl = FInt<0, (1 << 26)>;
+  using MinMaxTtl = FInt<int64_t{0}, kMaxExpireDeadlineSec>;
   auto [key, ttl_sec] = parser.Next<string_view, MinMaxTtl>();
 
   ExpireFlags flags = parser
@@ -990,6 +1063,9 @@ OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const 
   if (pv->IsExternal() && !pv->IsCool())
     return OpStatus::CANCELLED;  // offloaded hashes can't be read/mutated synchronously
 
+  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
+  const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
+
   // Capture the current field values before mutating TTLs: a past/zero expiry deletes the field,
   // but its value must still be returned (Redis semantics).
   vector<OptStr> values;
@@ -1009,44 +1085,64 @@ OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const 
   }
 
   // Lazy field expiry during the read, or a 0-ttl deletion above, may have emptied the hash.
+  bool key_deleted = false;
   if (pv->Encoding() == kEncodingStrMap2) {
     auto* sm = static_cast<StringMap*>(pv->RObjPtr());
-    if (sm->UpperBoundSize() == 0)
+    if (sm->UpperBoundSize() == 0) {
       db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
+      key_deleted = true;
+    }
+  }
+
+  // Journaling below may yield; disarm the updater so no dash iterator survives the yield
+  // (DelMutable already consumed it in the deleted case).
+  if (!key_deleted)
+    op_res->post_updater.Run();
+
+  if (op_args.shard->journal()) {
+    if (key_deleted) {
+      // The replayed command re-applies a relative TTL against the replica clock and
+      // cannot reproduce this deletion; journal it explicitly.
+      RecordJournal(op_args, "DEL"sv, {key});
+    } else if (had_member_expiry) {
+      // A field probed while lazily expired is still alive on a lagging replica and the
+      // replayed command would re-arm or persist it there; delete it explicitly.
+      absl::InlinedVector<string_view, 4> missing{key};
+      for (size_t i = 0; i < fields.size(); ++i) {
+        if (!values[i].has_value())
+          missing.push_back(fields[i]);
+      }
+      if (missing.size() > 1)
+        RecordJournal(op_args, "HDEL"sv, missing);
+    }
   }
 
   return values;
 }
 
+DbSlice::ExpireParams BuildHGetExpiry(CmdArgParser* p, const ExpiryOrPersistOptions& o,
+                                      uint64_t now_ms, string_view cmd_name) {
+  DbSlice::ExpireParams out;
+  out.persist = o.persist;  // PERSIST and an expiry are mutually exclusive (OneOf)
+  if (!o.expiry.value)
+    return out;
+
+  auto params = MakeFieldExpireParams(o.expiry.type, *o.expiry.value, now_ms, true);
+  if (!params)
+    p->ReportCustom(InvalidExpireTime(cmd_name));
+  return params.value_or(out);
+}
+
 void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  string_view cmd_name = cmd_cntx->cid()->name();
-  // The transaction clock the op applies the TTL against, so a relative EX/PX resolves against the
-  // same time the op uses rather than a separate wall-clock read.
-  const uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
 
-  // At most one of EX/PX/EXAT/PXAT/PERSIST is accepted before FIELDS; OneOf rejects a second option
-  // as a syntax error (Redis instead reports a misplaced-FIELDS error here).
-  DbSlice::ExpireParams exp_params;
-  auto read_expiry = [&](ExpT type) {
-    return [&, type](CmdArgParser* p) {
-      // HGETEX accepts 0 (expire now -> delete the field) but rejects negatives, unlike SET/GETEX.
-      // A non-integer leaves the parser's own error in place (ReportCustom won't overwrite it).
-      int64_t value = p->Next<int64_t>();
-      if (value < 0)
-        return p->ReportCustom("invalid expire time, must be >= 0");
+  uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
+  static constexpr auto kGrammar = Compile(Options(ExpiryOrPersist()));
+  auto opts = kGrammar.Apply(&parser);
 
-      // Reject overflow and values past the hash-field TTL cap (1<<26 s, as for HEXPIRE/HSETEX).
-      exp_params = DbSlice::ExpireParams{type, value, now_ms};
-      constexpr int64_t kMaxTtlMs = (int64_t{1} << 26) * 1000;
-      auto [rel_msec, abs_msec] = exp_params.Calculate(now_ms, false);
-      if (abs_msec < 0 || rel_msec > kMaxTtlMs)
-        return p->ReportCustom(InvalidExpireTime(cmd_name));
-    };
-  };
-  parser.Apply(OneOf(Tag("EX", read_expiry(ExpT::EX)), Tag("PX", read_expiry(ExpT::PX)),
-                     Tag("EXAT", read_expiry(ExpT::EXAT)), Tag("PXAT", read_expiry(ExpT::PXAT)),
-                     Exist("PERSIST", &exp_params.persist)));
+  DbSlice::ExpireParams exp_params =
+      BuildHGetExpiry(&parser, opts, now_ms, cmd_cntx->cid()->name());
+
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
   CmdArgParser::Range fields =
       parser.NextRange(1, kNumFieldsMismatch, /*consume_all=*/true, kInvalidNumFields);
@@ -1243,8 +1339,9 @@ void CmdHScan(CmdArgParser parser, CommandContext* cmd_cntx) {
       cursor = 0;
       [[fallthrough]];
     case OpStatus::OK: {
+      std::string cursor_str = absl::StrCat(cursor);
       RedisReplyBuilder::ArrayScope scope{rb, 2};
-      rb->SendBulkString(absl::StrCat(cursor));
+      rb->SendBulkString(cursor_str);
       rb->SendBulkStrArr(*result);
       break;
     }
@@ -1356,10 +1453,7 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
 
       if (string_map->Empty()) {  // Can happen if we use a TTL on hash members.
-        auto res_it = db_slice.FindMutable(db_context, key, OBJ_HASH);
-        if (res_it) {
-          db_slice.DelMutable(db_context, std::move(*res_it));
-        }
+        HSetFamily::DeleteIfEmpty(db_slice, db_context, key, pv);
         return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {
@@ -1489,6 +1583,12 @@ auto HSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* 
     -> LoadBlobResult {
   if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
     LOG(ERROR) << "Hash listpack integrity check failed.";
+    return LoadBlobResult::kCorrupted;
+  }
+
+  // Reject an unpaired tail; gated on deep since counting may scan not-yet-validated entries.
+  if (deep && lpLength((uint8_t*)blob.data()) % 2 != 0) {
+    LOG(ERROR) << "Hash listpack has an odd number of entries.";
     return LoadBlobResult::kCorrupted;
   }
 

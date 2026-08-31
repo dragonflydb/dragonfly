@@ -15,6 +15,7 @@
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
+#include "server/namespaces.h"
 #include "server/transaction.h"
 #include "server/tx_base.h"
 
@@ -169,6 +170,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
 
   // In pipeline mode the reply is captured and deferred into the parsed command, preserving
   // the reply order with squashed commands whose replies are sent later by the connection.
+  [[maybe_unused]] const RespVersion original_resp = rb->GetRespVersion();
   optional<CapturingReplyBuilder> crb;
   if (opts_.pipeline_mode) {
     DCHECK(cmd.cmd_cntx);
@@ -197,6 +199,10 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
   cmd_cntx.SetupTx(cmd.cid, tx);
   cmd_cntx.SetTailArgs(cmd.args);
   service_->InvokeCmd(cmd.args, &cmd_cntx);
+
+  DCHECK(!crb || crb->GetRespVersion() == original_resp)
+      << cmd.cid->name() << " changed its RESP version while captured";
+
   resolve();
 
   return true;
@@ -220,18 +226,24 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     sinfo.reply_size_total_ptr->fetch_add(sz, std::memory_order_relaxed);
   };
 
+  constexpr size_t kPrefetchBatch = 8;
   const size_t dispatched_sz = sinfo.dispatched.size();
-  for (size_t batch_start = 0; batch_start < dispatched_sz; batch_start += 8) {
-    size_t batch_end = batch_start + 8;
-    if (batch_end > dispatched_sz)
-      batch_end = dispatched_sz;
 
-    // We are in the context of a shard thread, so prefetching allows faster access
-    // to the command arguments.
-    for (size_t i = batch_start; i < batch_end; ++i) {
-      auto& dispatched = sinfo.dispatched[i];
-      if (dispatched.cmd_cntx) {
-        __builtin_prefetch(dispatched.cmd_cntx, 0, 3);
+  PrimeTable* prime = nullptr;
+  if (DbTable* t = namespaces->GetDefaultNamespace()
+                       .GetDbSlice(es->shard_id())
+                       .GetDBTable(cntx_->conn_state.db_index))
+    prime = &t->prime;
+
+  for (size_t batch_start = 0; batch_start < dispatched_sz; batch_start += kPrefetchBatch) {
+    const size_t batch_end = std::min(batch_start + kPrefetchBatch, dispatched_sz);
+
+    // Prefetch prime table buckets for all commands to avoid stalling on dashtable memory access
+    // See git-blame source PR for different prefetch comparisons
+    if (prime) {
+      for (size_t i = batch_start; i < batch_end; ++i) {
+        const auto& dispatched = sinfo.dispatched[i];
+        prime->Prefetch(dispatched.args[dispatched.key_index.start]);
       }
     }
 
@@ -247,6 +259,11 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       else
         crb.ProvideInlineBuffer({});  // reset buffer
 
+      // For async commands we need to exchange the reply builder as they still can access it
+      // mutably (for example for last_error_ updates). Sync commands use the local context with the
+      // local one
+      SinkReplyBuilder* saved_rb = nullptr;
+
       // With tiered storage enabled, it makes sense to dispatch async commands concurrently
       // to allow concurrent disk operations. Tiered futures are only blocked on during replies
       bool do_async = es->tiered_storage() && !IsAtomic() && opts_.pipeline_mode &&
@@ -254,6 +271,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       if (do_async) {
         ctx = dispatched.cmd_cntx;
         ctx->SetDeferredReply();
+        saved_rb = ctx->SwapReplyBuilder(&crb);
       }
 
       ctx->SetupTx(dispatched.cid, local_cntx.tx());
@@ -266,8 +284,12 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       } else {
         ctx->UpdateCid(dispatched.cid);
         ctx->SetTailArgs(dispatched.args);
+
         service_->InvokeCmd(dispatched.args, ctx);
       }
+
+      if (saved_rb)
+        ctx->SwapReplyBuilder(saved_rb);
 
       if (!do_async) {
         move_reply(&dispatched);  // Async commands resolve the context directly

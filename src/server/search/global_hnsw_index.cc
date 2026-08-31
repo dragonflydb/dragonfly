@@ -49,7 +49,8 @@ bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_vi
   //    as listpack or StringMap. Problem with listpack encoding is that vector memory, if
   //    referenced, can have wrong alignment for vector distance operations.
   const bool copy_vector =
-      (data_type == DocIndex::JSON) || (params.dim * 4 < server.max_listpack_map_bytes);
+      (data_type == DocIndex::JSON) ||
+      (params.dim * search::ElementSize(params.data_type) < server.max_listpack_map_bytes);
 
   indices_[key] = std::make_shared<search::HnswVectorIndex>(params, copy_vector);
 

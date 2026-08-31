@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <string_view>
 
@@ -22,6 +23,7 @@ inline constexpr char kKeyNotFoundErr[] = "no such key";
 inline constexpr char kInvalidIntErr[] = "value is not an integer or out of range";
 inline constexpr char kInvalidFloatErr[] = "value is not a valid float";
 inline constexpr char kUintErr[] = "value is out of range, must be positive";
+inline constexpr char kCountNotGreaterThanZeroErr[] = "count should be greater than 0";
 inline constexpr char kTimeoutNegativeErr[] = "timeout is negative";
 inline constexpr char kTimeoutNotFloatErr[] = "timeout is not a float or out of range";
 inline constexpr char kTimeoutOutOfRangeErr[] = "timeout is out of range";
@@ -58,5 +60,12 @@ inline constexpr char kNoAuthErrType[] = "no_auth";
 
 inline constexpr char kBloomFilterLoadInProgress[] = "bloom filter load in progress";
 inline constexpr char kCuckooFilterFull[] = "Filter is full";
+inline constexpr char kCuckooFilterMaxExpansions[] = "Maximum expansions reached";
+
+inline constexpr uint64_t kCuckooFilterMaxCapacity = 1ULL << 30;
+inline constexpr char kCuckooFilterInvalidCapacity[] =
+    "CF: capacity must be in the range [2 * bucket size, 1073741824]";
+static_assert(kCuckooFilterMaxCapacity == 1073741824,
+              "update the literal in kCuckooFilterInvalidCapacity above too");
 
 }  // namespace facade

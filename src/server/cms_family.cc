@@ -32,6 +32,8 @@ constexpr char kCmsWrongNumKeys[] = "CMS: wrong number of keys";
 constexpr char kCmsWrongNumKeysWeights[] = "CMS: wrong number of keys/weights";
 constexpr char kCmsCannotParseNumber[] = "CMS: Cannot parse number";
 constexpr char kCmsPositiveIncrement[] = "CMS: increment must be a positive integer";
+constexpr char kCmsErrRange[] = "CMS: error must be between 0 and 1 exclusive";
+constexpr char kCmsProbRange[] = "CMS: probability must be between 0 and 1 exclusive";
 
 constexpr uint32_t kMaxCmsWidth = 1'000'000;
 constexpr uint32_t kMaxCmsDepth = 100;
@@ -166,16 +168,10 @@ void CmdInitByProb(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   double error, probability;
 
-  tie(error, probability) = parser.Next<double, double>();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  tie(error, probability) = parser.Next<Validated<double, OpenRange<0, 1, kCmsErrRange>>,
+                                        Validated<double, OpenRange<0, 1, kCmsProbRange>>>();
   RETURN_ON_PARSE_ERROR(parser, rb);
-
-  if (!(error > 0 && error < 1)) {
-    return rb->SendError("CMS: error must be between 0 and 1 exclusive");
-  }
-  if (!(probability > 0 && probability < 1)) {
-    return rb->SendError("CMS: probability must be between 0 and 1 exclusive");
-  }
 
   uint32_t width = 0, depth = 0;
   if (!ComputeCmsDimensions(error, probability, rb, &width, &depth))

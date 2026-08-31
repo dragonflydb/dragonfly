@@ -1,0 +1,94 @@
+# Known-failing Valkey stream/pubsub tests on Dragonfly, skipped so the suite is a green
+# regression gate over the passing subset. One test name per line (a line starting
+# with '/' is treated as a regexp by the harness). Comments (#) and blank lines are
+# stripped before the list is passed to --skipfile.
+#
+# Each entry is a tracked gap, NOT a permanent exclusion — remove it once fixed.
+# Validated against Valkey unstable @ 79fc841577be18d5e789f741ca92a4157e8315fa.
+# Baseline (main @ b6c22ce5e): streams 96 pass / 0 fail, pubsub 20 pass / 0 fail.
+
+# --- Missing runtime CONFIG `stream-node-max-entries` (test setup fails) ---
+XADD with MAXLEN option and the '~' argument
+XADD with LIMIT consecutive calls
+XTRIM with ~ is limited
+XTRIM without ~ is not limited
+XTRIM without ~ and with LIMIT
+XTRIM with LIMIT delete entries no more than limit
+XTRIM MINID marking last entry in listpack as deleted
+
+# --- `XREAD ... STREAMS key +` (read last element, Valkey 7.4+) unsupported ---
+XREAD last element from non-empty stream
+XREAD last element from empty stream
+XREAD last element blocking from empty stream
+XREAD last element blocking from non-empty stream
+XREAD last element from multiple streams
+XREAD last element with count > 1
+
+# --- `XSETID ... ENTRIESADDED/MAXDELETEDID/offset` extended syntax unsupported ---
+XSETID cannot run with an offset but without a maximal tombstone
+XSETID cannot run with a maximal tombstone but without an offset
+XSETID errors on negative offset
+XSETID cannot set the maximal tombstone with larger ID
+XSETID cannot set the offset to less than the length
+
+# --- Blocking XREAD not registered as a blocked client (wait_for_blocked_clients timeout) ---
+XREAD with same stream name multiple times should work
+XREAD + multiple XADD inside transaction
+
+# --- Blocked-client accounting: INFO lacks `total_blocking_keys`(+`_on_nokey`); multi-client ---
+# blocked-count scenarios don't converge. NOTE: these tests abort mid-way and LEAK blocked
+# clients, which then poison the following RENAME/XCLAIM tests (cascade failures) — so they
+# must stay skipped together.
+Blocking XREADGROUP for stream key that has clients blocked on list
+Blocking XREADGROUP for stream key that has clients blocked on stream - avoid endless loop
+Blocking XREADGROUP for stream key that has clients blocked on stream - reprocessing command
+
+# --- XGROUP/XINFO HELP extra-arg handling differs (cosmetic) ---
+XGROUP HELP should not have unexpected options
+XINFO HELP should not have unexpected options
+
+# --- XGROUP CREATE does not validate a negative ENTRIESREAD ---
+XGROUP CREATE: with ENTRIESREAD parameter
+
+# --- XGROUP SETID rejects the `-` special id ---
+PEL NACK reassignment after XGROUP SETID event
+
+# --- SWAPDB is not implemented (`ERR unknown command`) ---
+Blocking XREADGROUP: swapped DB, key doesn't exist
+Blocking XREADGROUP: swapped DB, key is not a stream
+
+# --- Errorstats naming/format differs from Valkey (pre-existing, unrelated to wake) ---
+# The XREADGROUP wake to -NOGROUP works; this test also asserts `errorstat_NOGROUP:count=1`,
+# but Dragonfly emits its internal type tag (`no_group_error:N`) with a different format.
+XGROUP DESTROY should unblock XREADGROUP with -NOGROUP
+
+# --- XCLAIM with trimming: needs `config set stream-node-max-entries` (two tests share this name) ---
+XCLAIM with trimming
+
+# --- Error-message text differs from Valkey (assert_error exact-match) ---
+XREAD and XREADGROUP against wrong parameter
+XAUTOCLAIM COUNT must be > 0
+XAUTOCLAIM with out of range count
+
+# ===================================== unit/pubsub =====================================
+
+# --- CLIENT REPLY OFF|SKIP unsupported ---
+PubSub messages with CLIENT REPLY OFF
+
+# --- notify-keyspace-events: only the Ex class is supported, CONFIG SET rejects the rest ---
+Keyspace notifications: we receive keyspace notifications
+Keyspace notifications: we receive keyevent notifications
+Keyspace notifications: we can receive both kind of events
+Keyspace notifications: we are able to mask events
+Keyspace notifications: general events test
+Keyspace notifications: list events test
+Keyspace notifications: set events test
+Keyspace notifications: zset events test
+Keyspace notifications: hash events test
+Keyspace notifications: stream events test
+Keyspace notifications: evicted events
+Keyspace notifications: test CONFIG GET/SET of event flags
+Keyspace notifications: new key test
+
+# --- UNSUBSCRIBE is rejected inside MULTI ---
+unsubscribe inside multi, and publish to self

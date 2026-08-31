@@ -473,7 +473,8 @@ class MockDocument final : public search::DocumentAccessor {
   std::optional<StringList> GetStrings(std::string_view active_field) const override {
     return {{words[absl::GetCurrentTimeNanos() % words.size()]}};
   }
-  std::optional<VectorInfo> GetVector(std::string_view active_field, size_t dim) const override {
+  std::optional<VectorInfo> GetVector(std::string_view active_field, size_t dim,
+                                      search::VectorDataType dtype) const override {
     return std::nullopt;
   }
   std::optional<NumsList> GetNumbers(std::string_view active_field) const override {

@@ -7,6 +7,7 @@
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/oah_set.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
 
@@ -214,6 +215,17 @@ TEST_F(SetFamilyTest, SPop) {
   EXPECT_THAT(Run({"spop", "xlarge", "2", "3"}), ErrArg("syntax error"));
 }
 
+TEST_F(SetFamilyTest, SRandMemberRestoredEmptySet) {
+  // A zero-member set payload is rejected at RESTORE; SRANDMEMBER on the absent key stays sane.
+  uint8_t payload[] = {0x02, 0x00, 0x0b, 0x00, 0x53, 0x11, 0x84, 0x73, 0x66, 0x16, 0xd0, 0x61};
+  std::string_view dump(reinterpret_cast<const char*>(payload), sizeof(payload));
+  EXPECT_THAT(Run({"restore", "es", "0", dump}), ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"exists", "es"}), IntArg(0));
+  EXPECT_THAT(Run({"srandmember", "es", "-1"}), ArrLen(0));
+  EXPECT_THAT(Run({"srandmember", "es", "2"}), ArrLen(0));
+  EXPECT_THAT(Run({"srandmember", "es"}), ArgType(RespExpr::NIL));
+}
+
 TEST_F(SetFamilyTest, SRandMember) {
   // Test IntSet
   Run({"sadd", "x", "1", "2", "3"});
@@ -311,9 +323,9 @@ TEST_F(SetFamilyTest, SRandMember) {
   ASSERT_THAT(Run({"SRandMember", "unknown::set"}), ArgType(RespExpr::NIL));
   ASSERT_THAT(Run({"SRandMember", "unknown::set", "0"}), ArrLen(0));
 
-  // Test wrong arguments
+  // Test wrong arguments: Redis returns a syntax error for extra args (t_set.c srandmemberCommand).
   resp = Run({"SRandMember", "x", "5", "3"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(SetFamilyTest, SMIsMember) {
@@ -385,7 +397,9 @@ TEST_F(SetFamilyTest, SScan) {
   resp = Run({"sscan", "mystrset", "0", "match", "str-1*", "count", "3"});
   vec = StrArray(resp.GetVec()[1]);
   EXPECT_THAT(vec, IsSubsetOf({"str-1", "str-10", "str-11", "str-12", "str-13", "str-14"}));
-  EXPECT_EQ(vec.size(), 3);
+  // COUNT is a hint. OAHSet scans an entire bucket at a time, so a response can contain more
+  // than the requested number of matching members.
+  EXPECT_GE(vec.size(), 3);
 
   // nothing should match this
   resp = Run({"sscan", "mystrset", "0", "match", "1*"});
@@ -467,6 +481,15 @@ TEST_F(SetFamilyTest, SAddEx) {
 
   // At least one arg is expected
   EXPECT_THAT(Run({"saddex", "key", "KEEPTTL", "2"}), ErrArg("wrong number of arguments"));
+}
+
+TEST_F(SetFamilyTest, SAddExTtlBoundary) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
+
+  // The member-TTL ceiling is the shared kMaxExpireDeadlineSec (same as HEXPIRE/HSETEX/HGETEX).
+  EXPECT_THAT(Run({"saddex", "key", absl::StrCat(kMaxExpireDeadlineSec), "at_cap"}), IntArg(1));
+  EXPECT_THAT(Run({"saddex", "key", absl::StrCat(kMaxExpireDeadlineSec + 1), "above_cap"}),
+              ErrArg("value is not an integer or out of range"));
 }
 
 TEST_F(SetFamilyTest, CheckSetLinkExpiryTransfer) {
@@ -803,13 +826,16 @@ TEST_F(SetFamilyTest, FieldTtlDeletesEmptySet) {
 TEST_F(SetFamilyTest, ShrinkMemoryAccountingSet) {
   TEST_current_time_ms = kMemberExpiryBase * 1000;
 
-  // Phase 1: Grow bucket_count to 128 by adding 60 members.
-  for (int i = 0; i < 60; i++) {
+  // OAH's 200% overload factor needs more inserts to grow beyond the target it
+  // will choose for the 10 surviving members.
+  const int initial_members = g_use_oah_set ? 200 : 60;
+  const int members_to_remove = initial_members - 10;
+  for (int i = 0; i < initial_members; i++) {
     Run({"SADDEX", "s1", "1000", absl::StrCat("temp", i)});
   }
 
-  // Phase 2: Remove 50, keep 10, bucket_count stays 128.
-  for (int i = 0; i < 50; i++) {
+  // Phase 2: Remove most members while retaining a large bucket array.
+  for (int i = 0; i < members_to_remove; i++) {
     Run({"SREM", "s1", absl::StrCat("temp", i)});
   }
 
@@ -817,18 +843,27 @@ TEST_F(SetFamilyTest, ShrinkMemoryAccountingSet) {
   for (int i = 0; i < 10; i++) {
     Run({"SADDEX", "s1", "1", absl::StrCat("exp", i)});
   }
-  // 20 total (10 long + 10 short), bucket_count = 128.
+  // 20 total (10 long + 10 short).
 
   // Phase 4: Expire the short-TTL members.
   AdvanceTime(2000);
 
-  // UpperBoundSize = 20, optimal = 32 < 128 → Shrink.
+  // Reaping leaves 10 live members and must reduce the much larger bucket array.
   int64_t shrink_result = CheckedInt({"SHRINK", "s1"});
   EXPECT_GT(shrink_result, 0) << "SHRINK must actually shrink the set";
 
   // Must not crash in FindMutable → DCHECK.
-  Run({"SREM", "s1", "temp50"});
+  Run({"SREM", "s1", absl::StrCat("temp", members_to_remove)});
   EXPECT_THAT(Run({"SCARD", "s1"}), IntArg(9));
+}
+
+// An empty result deletes the destination regardless of its previous type.
+TEST_F(SetFamilyTest, EmptyStoreDeletesForeignTypeDest) {
+  for (std::string_view cmd : {"SINTERSTORE"sv, "SUNIONSTORE"sv, "SDIFFSTORE"sv}) {
+    Run({"SET", "dest", "hello"});
+    EXPECT_THAT(Run({cmd, "dest", "nx1", "nx2"}), IntArg(0)) << cmd;
+    EXPECT_THAT(Run({"EXISTS", "dest"}), IntArg(0)) << cmd;
+  }
 }
 
 }  // namespace dfly

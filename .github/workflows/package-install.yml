@@ -15,11 +15,22 @@ jobs:
     container:
       image: ghcr.io/romange/fedora:30
     steps:
+      - uses: actions/checkout@v7
+      - name: Wait for repo version
+        if: github.event_name == 'workflow_run'
+        run: python3 tools/packaging/osrepos/scripts/wait_for_repo_version.py
       - name: Install on fedora
         run: |
           curl -Lo /etc/yum.repos.d/dragonfly.repo https://packages.dragonflydb.io/dragonfly.repo
           dnf clean all
           dnf makecache
+
+          echo "=== repomd.xml ==="
+          curl -s https://packages.dragonflydb.io/rpm/repodata/repomd.xml
+          echo ""
+          echo "=== dnf info ==="
+          dnf info dragonfly
+
           dnf -y install dragonfly
           dragonfly --version
 
@@ -29,6 +40,12 @@ jobs:
     container:
       image: ghcr.io/romange/ubuntu:noble
     steps:
+      - uses: actions/checkout@v7
+      - name: Wait for repo version
+        if: github.event_name == 'workflow_run'
+        run: |
+          apt update && apt install -y python3
+          python3 tools/packaging/osrepos/scripts/wait_for_repo_version.py
       - name: Install on ubuntu
         run: |
           apt update
@@ -36,6 +53,13 @@ jobs:
           curl -Lo /usr/share/keyrings/dragonfly-keyring.public https://packages.dragonflydb.io/pgp-key.public
           curl -Lo /etc/apt/sources.list.d/dragonfly.sources https://packages.dragonflydb.io/dragonfly.sources
           apt update
+
+          echo "=== Packages index ==="
+          curl -s https://packages.dragonflydb.io/deb/dists/noble/main/binary-amd64/Packages
+          echo ""
+          echo "=== apt-cache policy ==="
+          apt-cache policy dragonfly
+
           apt install -y dragonfly
           dragonfly --version
 

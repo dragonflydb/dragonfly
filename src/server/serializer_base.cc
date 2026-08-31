@@ -64,10 +64,9 @@ void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_ind
                                            uint32_t mc_flags) {
   DCHECK(pv.IsExternal());
   DCHECK(!pv.IsCool());
-  DCHECK_EQ(pv.ObjType(), OBJ_STRING);
 
   auto key = pk.ToString();
-  auto future = ReadTieredString(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
+  auto future = ReadTieredValue(db_index, key, pv, EngineShard::tlocal()->tiered_storage());
   auto entry = std::make_unique<TieredDelayedEntry>(db_index, std::move(pk), std::move(future),
                                                     expire_time, mc_flags);
 
@@ -100,23 +99,26 @@ void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush
       targets.push_back(delayed_entries_.extract(it++));
   }
 
-  // Serialize all targets
+  // Serialize all targets. Once the state stops running (error/cancellation), skip the blocking
+  // reads but still release the bucket latches.
   for (auto& target : targets) {
     auto& entry = target.mapped();
-    auto value = entry->value.Get();
-
-    if (!value.has_value()) {
-      deps_.Decrement(target.key());
-      cntx->ReportError(make_error_code(std::errc::io_error),
-                        absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
-      return;
+    if (cntx->IsRunning()) {
+      if (auto value = entry->value.Get(); value.has_value()) {
+        SerializeFetchedEntry(*entry, *value);
+      } else {
+        cntx->ReportError(make_error_code(std::errc::io_error),
+                          absl::StrCat("Failed to read tiered key: ", entry->key.ToString()));
+      }
     }
-
-    PrimeValue pv{*value};
-    SerializeFetchedEntry(*entry, pv);
-
     deps_.Decrement(target.key());
-  };
+  }
+}
+
+void DelayedEntryHandler::DiscardDelayedEntries() {
+  for (const auto& [bucket, entry] : delayed_entries_)
+    deps_.Decrement(bucket);
+  delayed_entries_.clear();
 }
 
 SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
@@ -168,10 +170,11 @@ void SerializerBase::RegisterChangeListener(bool replication) {
 }
 
 void SerializerBase::UnregisterChangeListener() {
-  DCHECK(!IsAnyBucketBlocked());
   if (snapshot_version_ > 0)
     if (!db_slice_->UnregisterOnChange(this))
       LOG(DFATAL) << "UnregisterOnChange failed for snapshot_version_ " << snapshot_version_;
+  // No OnChange is in flight after unregistering, so leftover deps can only be leaks.
+  DCHECK(!IsAnyBucketBlocked());
 }
 
 bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it,

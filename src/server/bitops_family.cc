@@ -321,9 +321,12 @@ OpStatus ElementAccess::Find(bool allow_wrong_type) {
 }
 
 OpResult<string> ElementAccess::Value() const {
-  return IsNewEntry()
-             ? OpResult<string>{string{}}
-             : ReadStringValue(context_.db_index, key_, updater_.it->second, EngineShard::tlocal());
+  if (IsNewEntry())
+    return OpResult<string>{string{}};
+
+  auto res = ReadStringValue(context_.db_index, key_, updater_.it->second, EngineShard::tlocal());
+  updater_.post_updater.ResyncBaseline();  // the read may have uploaded the value
+  return res;
 }
 
 bool ElementAccess::GetByteAtIndex(size_t idx, uint8_t* res) const {
@@ -351,13 +354,13 @@ void ElementAccess::Commit(string_view new_value) const {
     context_.ns->GetCurrentDbSlice().Del(context_, updater_.it);
   } else {
     const bool is_external = IsExternal();
-    // Overwriting a non-string type or an offloaded value: drop the old heap
-    // accounting once, and release the disk segment before storing in memory.
-    if (!IsNewEntry() && (updater_.it->second.ObjType() != OBJ_STRING || is_external)) {
+    // The value is replaced wholesale below, so drop the old heap accounting once.
+    if (!IsNewEntry()) {
       updater_.post_updater.ReduceHeapUsage();
     }
     if (is_external) {
-      EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, &updater_.it->second);
+      EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, key_,
+                                                      &updater_.it->second);
     }
     updater_.it->second.SetString(new_value);
     updater_.post_updater.Run();
@@ -560,7 +563,7 @@ void BitPos(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
 
   auto key = parser.Next<string_view>();
-  int32_t value = parser.Next<Validated<int32_t, Bounded<int32_t{0}, int32_t{1}, kBitArgErr>>>();
+  int32_t value = parser.Next<Validated<int32_t, ClosedRange<0, 1, kBitArgErr>>>();
 
   int64_t start = parser.NextOrDefault<int64_t>();
   int64_t end = parser.NextOrDefault<int64_t>(std::numeric_limits<int64_t>::max());
@@ -584,20 +587,16 @@ void BitCount(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto key = parser.Next<string_view>();
 
-  std::pair<int64_t, int64_t> start_end;
-  if (parser.HasNext()) {
-    auto tuple_result = parser.Next<int64_t, int64_t>();
-    start_end = std::make_pair(std::get<0>(tuple_result), std::get<1>(tuple_result));
-  } else {
-    start_end = std::make_pair(0, std::numeric_limits<int64_t>::max());
-  }
+  int64_t start = 0, end = std::numeric_limits<int64_t>::max();
+  if (parser.HasNext())
+    std::tie(start, end) = parser.Next<int64_t, int64_t>();
 
   bool as_bit = parser.HasNext() ? parser.MapNext("BYTE", false, "BIT", true) : false;
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
-  auto cb = [&, start_end](Transaction* t, EngineShard* shard) {
-    return CountBitsForValue(t->GetOpArgs(shard), key, start_end.first, start_end.second, as_bit);
+  auto cb = [&, start, end](Transaction* t, EngineShard* shard) {
+    return CountBitsForValue(t->GetOpArgs(shard), key, start, end, as_bit);
   };
   OpResult<std::size_t> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   HandleOpValueResult(res, cmd_cntx->rb());

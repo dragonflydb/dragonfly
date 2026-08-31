@@ -163,34 +163,38 @@ bool ParseDouble(string_view src, double* value) {
 }
 
 OpResult<ScanOpts> ScanOpts::TryFrom(const facade::ParsedArgs& args, bool allow_novalues) {
+  using namespace facade;
   ScanOpts scan_opts;
-  facade::CmdArgParser parser{args};
+  scan_opts.allow_novalues = allow_novalues;
+  CmdArgParser parser{args};
 
-  parser.Apply(
-      facade::If(allow_novalues, facade::Exist("NOVALUES", &scan_opts.novalues)),
-      facade::Tag(
+  static constexpr auto kGrammar = Compile(Options(
+      If(&ScanOpts::allow_novalues, Exist("NOVALUES", &ScanOpts::novalues)),
+      Action(
           "COUNT",
-          [&](facade::CmdArgParser* p) { scan_opts.limit = max(size_t{1}, p->Next<size_t>()); }),
-      facade::Tag("MATCH",
-                  [&](facade::CmdArgParser* p) {
-                    std::string_view pattern = p->Next();
-                    if (pattern != "*")
-                      scan_opts.matcher.reset(new GlobMatcher{pattern, true});
-                  }),
-      facade::Tag("TYPE",
-                  [&](facade::CmdArgParser* p) {
-                    CompactObjType obj_type = ObjTypeFromString(p->Next());
-                    if (obj_type == kInvalidCompactObjType) {
-                      p->Report(facade::CmdArgParser::INVALID_CASES);
-                      return;
-                    }
-                    scan_opts.type_filter = obj_type;
-                  }),
-      facade::Tag("BUCKET", &scan_opts.bucket_id),
-      facade::Tag("ATTR", facade::Map(&scan_opts.mask, "v", ScanOpts::Mask::Volatile, "p",
-                                      ScanOpts::Mask::Permanent, "a", ScanOpts::Mask::Accessed, "u",
-                                      ScanOpts::Mask::Untouched)),
-      facade::Tag("MINMSZ", &scan_opts.min_malloc_size));
+          +[](CmdArgParser* p, ScanOpts* o) { o->limit = max(size_t{1}, p->Next<size_t>()); }),
+      Action(
+          "MATCH",
+          +[](CmdArgParser* p, ScanOpts* o) {
+            std::string_view pattern = p->Next();
+            if (pattern != "*")
+              o->matcher.reset(new GlobMatcher{pattern, true});
+          }),
+      Action(
+          "TYPE",
+          +[](CmdArgParser* p, ScanOpts* o) {
+            CompactObjType obj_type = ObjTypeFromString(p->Next());
+            if (obj_type == kInvalidCompactObjType) {
+              p->Report(CmdArgParser::INVALID_CASES);
+              return;
+            }
+            o->type_filter = obj_type;
+          }),
+      Field("BUCKET", &ScanOpts::bucket_id),
+      Choice("ATTR", &ScanOpts::mask, "v", ScanOpts::Mask::Volatile, "p", ScanOpts::Mask::Permanent,
+             "a", ScanOpts::Mask::Accessed, "u", ScanOpts::Mask::Untouched),
+      Field("MINMSZ", &ScanOpts::min_malloc_size)));
+  kGrammar.Apply(&parser, &scan_opts);
 
   if (!parser.Finalize()) {
     auto err = parser.TakeError();

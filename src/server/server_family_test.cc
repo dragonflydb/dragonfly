@@ -316,6 +316,17 @@ TEST_F(ServerFamilyTest, ClientListRejected) {
   }
 }
 
+TEST_F(ServerFamilyTest, ClientInfoSingleDbField) {
+  const string info = Run({"CLIENT", "INFO"}).GetString();
+  // Regression: "db=" used to be emitted twice (FormatClientInfo + a redundant append).
+  size_t count = 0;
+  for (size_t pos = info.find(" db="); pos != string::npos; pos = info.find(" db=", pos + 1))
+    ++count;
+  EXPECT_EQ(count, 1u) << info;
+  // CLIENT INFO returns a single line with no trailing newline (unlike CLIENT LIST).
+  EXPECT_FALSE(absl::EndsWith(info, "\r\n")) << info;
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
   // case 1. can't use the feature for resp2
   auto resp = Run({"CLIENT", "TRACKING", "ON"});
@@ -708,6 +719,15 @@ TEST_F(ServerFamilyTest, CommandDocsOk) {
   EXPECT_THAT(Run({"command", "docs"}), ErrArg("COMMAND DOCS Not Implemented"));
 }
 
+TEST_F(ServerFamilyTest, CommandInfoUnknown) {
+  // The reply is an array with one entry per requested command name, null for unknown names.
+  auto resp = Run({"command", "info", "nosuchcmd"});
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::NIL))));
+
+  resp = Run({"command", "info", "nosuchcmd", "get"});
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::NIL), ArgType(RespExpr::ARRAY))));
+}
+
 TEST_F(ServerFamilyTest, PubSubCommandErr) {
   // Check conditions only in non cluster mode
   if (auto cluster_mode = absl::GetFlag(FLAGS_cluster_mode); cluster_mode == "") {
@@ -775,7 +795,22 @@ TEST_F(ServerFamilyTest, MemoryArenaSummary) {
 }
 
 TEST_F(ServerFamilyTest, MemoryParserErrorHandling) {
-  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT", "not-a-float"}), ErrArg("not a valid float"));
+  constexpr auto no_float = "not a valid float";
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT", "not-a-float"}), ErrArg(no_float));
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "nofloat"}), ErrArg(no_float));
+
+  constexpr auto threshold_err = "Threshold must be between 0 and 1";
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT", "2"}), ErrArg(threshold_err));
+  EXPECT_THAT(Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "2"}), ErrArg(threshold_err));
+}
+
+TEST_F(ServerFamilyTest, MemoryDefragSegments) {
+  auto resp = Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "0.9"});
+  EXPECT_THAT(resp.GetString(), HasSubstr("Page usage threshold: 90"));
+  ;
+
+  resp = Run({"MEMORY", "DEFRAGMENT-SEGMENTS", "0.9", "xyz"});
+  EXPECT_THAT(resp, ErrArg("syntax error"));
 }
 
 TEST_F(ServerFamilyTest, InfoReplicationMemoryNoReplicas) {

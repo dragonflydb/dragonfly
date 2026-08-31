@@ -7,6 +7,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
@@ -16,11 +17,13 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "facade/dragonfly_listener.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "server/command_registry.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
+#include "util/accept_server.h"
 
 ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
@@ -140,6 +143,23 @@ TEST_F(DflyEngineTest, EvalResp) {
   ASSERT_THAT(resp, ArrLen(4));
   EXPECT_THAT(resp.GetVec(), AnyOf(ElementsAre("a", IntArg(1), "b", IntArg(2)),
                                    ElementsAre("b", IntArg(2), "a", IntArg(1))));
+}
+
+TEST_F(DflyEngineTest, EvalGetLargeBorrowedStrings) {
+  std::string raw(32 * 1024, '\x81');
+  std::string ascii(32 * 1024, 'a');
+
+  EXPECT_THAT(Run({"set", "ascii", ascii}), "OK");
+  EXPECT_THAT(Run({"set", "raw", raw}), "OK");
+  optional<int64_t> ascii_usage = Run({"memory", "usage", "ascii"}).GetInt();
+  optional<int64_t> raw_usage = Run({"memory", "usage", "raw"}).GetInt();
+  ASSERT_TRUE(ascii_usage);
+  ASSERT_TRUE(raw_usage);
+  EXPECT_GT(*raw_usage, *ascii_usage);
+
+  EXPECT_THAT(Run({"eval", "return {redis.call('get', KEYS[1]), redis.call('get', KEYS[2])}", "2",
+                   "ascii", "raw"}),
+              RespElementsAre(ascii, raw));
 }
 
 TEST_F(DflyEngineTest, EvalPublish) {
@@ -283,6 +303,22 @@ TEST_F(DflyEngineTest, ScriptFlush) {
   EXPECT_THAT(5, resp.GetInt());
   resp = Run({"script", "exists", sha});
   EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
+}
+
+// SCRIPT FLAGS on a sha that was never loaded used to publish script params without a body, so
+// EVALSHA passed its NOSCRIPT guard and aborted inside LoadScript. See #8103.
+TEST_F(DflyEngineTest, ScriptFlagsUnknownSha) {
+  const char kSha[] = "0000000000000000000000000000000000000000";
+
+  EXPECT_EQ(Run({"script", "flags", kSha, "no-writes"}), "OK");
+  EXPECT_THAT(Run({"evalsha", kSha, "0"}), ErrArg("NOSCRIPT No matching script. Please use EVAL."));
+  EXPECT_EQ(Run({"ping"}), "PONG");
+
+  // A body-less entry must not leak into SCRIPT LIST, which is also what gets written to snapshots.
+  auto resp = Run({"script", "load", "return 7"});
+  ASSERT_THAT(resp, ArgType(RespExpr::STRING));
+  string sha{ToSV(resp.GetBuf())};
+  EXPECT_THAT(Run({"script", "list"}), RespElementsAre(RespElementsAre(sha, "return 7")));
 }
 
 TEST_F(DflyEngineTestWithRegistry, Hello) {
@@ -727,6 +763,28 @@ TEST_F(DflyEngineTest, Bug496) {
   });
 }
 
+TEST_F(DflyEngineTest, ReduceHeapUsageIdempotent) {
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+
+    {
+      auto res = *db.AddOrFind({}, "key", std::nullopt);
+      res.it->second.SetString(string(1000, 'x'));
+    }
+
+    size_t before = db.GetStats().db_stats[0].obj_memory_usage;
+    EXPECT_GT(before, 0u);
+
+    auto res = db.FindMutable({}, "key");
+    res.post_updater.ReduceHeapUsage();
+    // A second call before the value is replaced must not subtract the same bytes again.
+    res.post_updater.ReduceHeapUsage();
+    res.post_updater.Run();
+
+    EXPECT_EQ(db.GetStats().db_stats[0].obj_memory_usage, before);
+  });
+}
+
 TEST_F(DflyEngineTest, Issue607) {
   // https://github.com/dragonflydb/dragonfly/issues/607
 
@@ -872,6 +930,58 @@ TEST_F(DefragDflyEngineTest, DefragEventuallyFinishes) {
     EXPECT_GT(shard->stats().defrag_realloc_total, 0);
     EXPECT_GE(shard->stats().defrag_attempt_total, shard->stats().defrag_realloc_total);
   });
+}
+
+TEST_F(DefragDflyEngineTest, SegmentsRelocated) {
+  // runs defrag on all segments, checks whether the state is consistent afterwards
+  constexpr size_t kKeys = 5000;
+  Run({"DEBUG", "POPULATE", std::to_string(kKeys), "key", "32"});
+
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned, ProactorBase*) {
+    auto* shard = EngineShard::tlocal();
+    auto& slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    auto* db = slice.GetDBTable(0);
+    auto& table = db->prime;
+
+    auto collect_addresses = [&] {
+      absl::flat_hash_map<size_t, uintptr_t> seg_ptrs;
+      PrimeTable::Cursor cursor;
+      do {
+        auto [next, segment] = table.VisitSegment(cursor);
+        cursor = next;
+        if (!segment) {
+          ADD_FAILURE() << "Valid cursor did not resolve to a segment";
+          return seg_ptrs;
+        }
+        seg_ptrs.emplace(segment->first, reinterpret_cast<uintptr_t>(segment->second));
+      } while (cursor);
+      return seg_ptrs;
+    };
+
+    const auto before = collect_addresses();
+    const size_t size_before = table.size();
+    ASSERT_GT(before.size(), 1u);
+
+    PageUsage page_usage{CollectPageStats::NO, 0, CycleQuota::Unlimited()};
+    page_usage.SetForceReallocate(true);
+
+    slice.DefragTableSegments(0, &page_usage);
+
+    const auto after = collect_addresses();
+
+    EXPECT_EQ(after.size(), before.size());
+    EXPECT_EQ(table.size(), size_before);
+
+    for (const auto& [sid, old_address] : before) {
+      ASSERT_TRUE(after.contains(sid));
+      EXPECT_NE(after.at(sid), old_address);
+    }
+  });
+
+  EXPECT_EQ(CheckedInt({"DBSIZE"}), kKeys);
+  // check some random keys
+  for (size_t i = 0; i < kKeys; i += 341)
+    EXPECT_EQ(CheckedInt({"STRLEN", absl::StrFormat("key:%d", i)}), 32);
 }
 
 TEST_F(DflyEngineTest, Issue752) {
@@ -1059,6 +1169,30 @@ TEST_F(DflyEngineTest, ExpireInlineKeyAccounting) {
   EXPECT_EQ(stats.inline_keys, 0u);
   EXPECT_EQ(stats.expire_count, 0u);
   EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
+}
+
+// AddListener picks the accept-loop proactor via the pool's shared round-robin, so listener
+// construction (see MakeListener in dfly_main.cc) must not call GetNextProactor() in between —
+// that would stack several accept loops on one proactor.
+TEST_F(DflyEngineTest, ListenerAcceptLoopDistribution) {
+  util::AcceptServer acceptor{pp_.get(), /*break_on_int=*/false};
+  const size_t kListeners = 3;
+  ASSERT_LE(kListeners, pp_->size());
+
+  std::vector<facade::Listener*> listeners;
+  for (size_t i = 0; i < kListeners; ++i) {
+    facade::Listener* listener = nullptr;
+    // Construct on a fixed proactor, mirroring MakeListener.
+    pp_->at(0)->Await(
+        [&] { listener = new facade::Listener(facade::Protocol::REDIS, service_.get()); });
+    ASSERT_FALSE(acceptor.AddListener("localhost", 0, listener));  // Takes ownership.
+    listeners.push_back(listener);
+  }
+
+  absl::flat_hash_set<util::ProactorBase*> accept_proactors;
+  for (facade::Listener* listener : listeners)
+    accept_proactors.insert(listener->socket()->proactor());
+  EXPECT_EQ(kListeners, accept_proactors.size());
 }
 
 class DflyCommandAliasTest : public DflyEngineTest {

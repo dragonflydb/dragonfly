@@ -48,6 +48,15 @@ ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "memory page under utilization threshold. Ratio between used and committed size, below "
           "this, memory in this page will defragmented");
 
+ABSL_FLAG(uint64_t, mem_defrag_max_burst_duration_us, 0,
+          "Maximum real (CycleClock-measured) time DefragTask() may spend running at the "
+          "proactor's highest on-idle priority before forcing a cooldown. 0 disables the "
+          "duty-cycle cap (unbounded, previous behavior)");
+
+ABSL_FLAG(uint32_t, mem_defrag_backoff_duration_us, 0,
+          "Duration in microseconds to drop to low on-idle priority once "
+          "mem_defrag_max_burst_duration_us is reached, before resuming at high priority");
+
 ABSL_FLAG(int32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
           "Warning: not advised to decrease in production.");
@@ -232,7 +241,7 @@ string EngineShard::TxQueueInfo::Format() const {
 }
 
 EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
-  static_assert(sizeof(Stats) == 136);
+  static_assert(sizeof(Stats) == 144);
 
 #define ADD(x) x += o.x
 
@@ -242,6 +251,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
   ADD(defrag_skipped_mem_under_threshold);
   ADD(defrag_skipped_within_check_interval);
   ADD(defrag_skipped_not_enough_fragmentation);
+  ADD(async_delete_task_invocation_total);
   ADD(poll_execution_total);
   ADD(tx_ooo_total);
   ADD(tx_optimistic_total);
@@ -278,6 +288,18 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // (control by mem_defrag_waste_threshold flag)
 EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequired() {
   using enum SkipReason;
+
+  // Duty-cycle backoff takes priority over everything else, including an in-progress cursor:
+  // once mem_defrag_max_burst_duration_us of real time was spent this burst, we force a rest
+  // period before resuming, regardless of how much of the pass is left.
+  if (cooldown_until_cycles != 0) {
+    if (base::CycleClock::Now() < cooldown_until_cycles) {
+      return CoolingDown;
+    }
+    cooldown_until_cycles = 0;
+    consecutive_burst_cycles = 0;
+  }
+
   if (cursor > kCursorDoneState) {
     VLOG(2) << "cursor: " << cursor;
     return NotSkipped;
@@ -366,6 +388,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
   uint64_t attempts = 0;
 
   DbTable* db_table = slice.GetDBTable(defrag_state_.dbid);
+  std::string scratch;
   do {
     cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
       // for each value check whether we should move it because it
@@ -376,7 +399,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
       if (did) {
         reallocations++;
         if (const ssize_t delta = it->second.MallocUsed() - original_size; delta != 0) {
-          db_table->stats.AddTypeMemoryUsage(it->second.ObjType(), delta);
+          AccountObjectMemory(it->first.GetSlice(&scratch), it->second.ObjType(), delta, db_table);
         }
       }
     });
@@ -433,10 +456,26 @@ uint32_t EngineShard::DefragTask() {
     // TODO (abhijat): implement move ctor for PageUsage so this object can be moved into the task.
     PageUsage page_usage{CollectPageStats::NO, threshold,
                          CycleQuota{CycleQuota::kDefaultDefragQuota}};
-    if (DoDefrag(&page_usage)) {
+    const uint64_t call_start_cycles = base::CycleClock::Now();
+    const bool scan_incomplete = bool(DoDefrag(&page_usage));
+    defrag_state_.consecutive_burst_cycles += base::CycleClock::Now() - call_start_cycles;
+    if (scan_incomplete) {
       // we didn't finish the scan
+      const uint64_t max_burst_cycles =
+          base::CycleClock::FromUsec(GetFlag(FLAGS_mem_defrag_max_burst_duration_us));
+      if (max_burst_cycles > 0 && defrag_state_.consecutive_burst_cycles >= max_burst_cycles) {
+        // Burst budget spent. Force a cooldown before we're allowed to spin again, capping
+        // the achievable duty cycle insteadof running flat-out until completion.
+        defrag_state_.consecutive_burst_cycles = 0;
+        defrag_state_.cooldown_until_cycles =
+            base::CycleClock::Now() +
+            base::CycleClock::FromUsec(GetFlag(FLAGS_mem_defrag_backoff_duration_us));
+        return 6;
+      }
       return ProactorBase::kOnIdleMaxLevel;
     }
+    // Pass finished naturally - start the next pass with a fresh burst budget.
+    defrag_state_.consecutive_burst_cycles = 0;
   } else {
     std::string_view reason;
     switch (check_result) {
@@ -458,6 +497,9 @@ uint32_t EngineShard::DefragTask() {
         break;
       case CheckInProgress:
         reason = "check is in progress";
+        break;
+      case CoolingDown:
+        reason = "cooling down after duty-cycle burst limit";
         break;
       default:
         DCHECK(false) << "unexpected result";
@@ -536,7 +578,7 @@ void EngineShard::StartPeriodicHeartbeatFiber(util::ProactorBase* pb) {
   fiber_heartbeat_periodic_ = fb2::Fiber(fb_opts, [this, period_ms, heartbeat]() mutable {
     RunFPeriodically(heartbeat, period_ms, "heartbeat", &fiber_heartbeat_periodic_done_);
   });
-  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); });
+  defrag_task_id_ = pb->AddOnIdleTask([this]() { return DefragTask(); }, "defrag");
 }
 
 void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
@@ -828,15 +870,16 @@ void EngineShard::Heartbeat() {
         check_huffman = false;  // trigger only once.
 
         // launch the task
-        huffman_check_task_id_ =
-            ProactorBase::me()->AddOnIdleTask([task = HuffmanCheckTask{}]() mutable {
+        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask(
+            [task = HuffmanCheckTask{}]() mutable {
               if (!shard_ || !namespaces) {
                 return -1;
               }
 
               DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
               return task.Run(&db_slice);
-            });
+            },
+            "huffman_check");
       }
     }
   }
@@ -952,6 +995,13 @@ void EngineShard::RetireExpiredAndEvict() {
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
     eviction_state_.deleted_bytes_at_prev_eviction = deleted_bytes;
+  }
+
+  // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
+  // section, because readiness checks read the db slice and may preempt.
+  if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
+      bc && GetContTx() == nullptr) {
+    bc->NotifyPending();
   }
 }
 
@@ -1191,17 +1241,18 @@ EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   return info;
 }
 
-size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
+EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbIndex db_idx) {
   DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   auto& prime = db_slice.GetDBTable(db_idx)->prime;
-  size_t total_seg_merged = 0;
+  CompactTableStats stats;
 
   while (true) {
     bool merged_any = false;
     // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
     for (size_t seg_id = 0; seg_id < prime.GetSegmentCount(); seg_id = prime.NextSeg(seg_id)) {
       if (SliceSnapshot::IsSnaphotInProgress()) {
-        return total_seg_merged;
+        stats.exited_on_snapshot = true;
+        return stats;
       }
       // Fetch segment pointer fresh each iteration
       auto* seg = prime.GetSegment(seg_id);
@@ -1215,15 +1266,21 @@ size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
 
       auto* buddy = prime.GetSegment(buddy_id);
 
+      // max_size is threshold * ONE segment's capacity, but combined is the SUM of both
+      // buddies, so each buddy must average under roughly threshold/2 full to qualify.
       const size_t combined = seg->SlowSize() + buddy->SlowSize();
       const size_t max_size = threshold * seg->capacity();
 
       if (combined > max_size)
         continue;
 
-      if (prime.Merge(seg_id, buddy_id)) {
-        ++total_seg_merged;
+      ++stats.attempted;
+      auto [seg_merged, declined_depth_guard] = prime.Merge(seg_id, buddy_id);
+      if (seg_merged) {
+        ++stats.merged;
         merged_any = true;
+      } else if (!declined_depth_guard) {
+        ++stats.rolled_back;
       }
 
       // Yield after merge (don't hold pointers across yield)
@@ -1234,7 +1291,7 @@ size_t EngineShard::CompactTable(double threshold, DbIndex db_idx) {
       break;
   }
 
-  return total_seg_merged;
+  return stats;
 }
 
 }  // namespace dfly

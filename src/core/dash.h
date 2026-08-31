@@ -4,7 +4,9 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <ranges>
+#include <utility>
 #include <vector>
 
 #include "absl/random/random.h"
@@ -52,6 +54,13 @@ class DashTable : public detail::DashTableBase {
   using bucket_iterator = Iterator<false, true>;
   using Cursor = detail::DashCursor;
 
+  struct SegmentVisitResult {
+    using SegmentRef = std::pair<uint32_t, SegmentType*>;
+    Cursor next;
+    // pointer must be consumed without yielding, or it can be invalidated.
+    std::optional<SegmentRef> id_and_pointer{std::nullopt};
+  };
+
   struct HotBuckets {
     static constexpr size_t kRegularBuckets = 4;
     static constexpr size_t kNumBuckets = kRegularBuckets + SegmentType::kStashBucketNum;
@@ -59,19 +68,14 @@ class DashTable : public detail::DashTableBase {
     struct ByType {
       bucket_iterator regular_buckets[kRegularBuckets];
       bucket_iterator stash_buckets[SegmentType::kStashBucketNum];
-    };
-
-    union Probes {
-      ByType by_type;
-      bucket_iterator arr[kNumBuckets];
-
-      Probes() : arr() {
-      }
     } probes;
 
     // id must be in the range [0, kNumBuckets).
     bucket_iterator at(unsigned id) const {
-      return probes.arr[id];
+      if (id < kRegularBuckets) {
+        return probes.regular_buckets[id];
+      }
+      return probes.stash_buckets[id - kRegularBuckets];
     }
 
     unsigned num_buckets;
@@ -211,15 +215,24 @@ class DashTable : public detail::DashTableBase {
     return buddy_idx;
   }
 
+  // Result of Merge(): `merged` is true iff the two segments were merged. When `merged` is
+  // false, `declined_depth_guard` tells apart the two ways it can fail: true means Merge
+  // refused to run because it would violate the initial_depth invariant (no items were
+  // touched); false means a real rollback happened (items were moved into `keep` then moved
+  // back after a failed insertion).
+  struct MergeResult {
+    bool merged = false;
+    bool declined_depth_guard = false;
+  };
+
   // - Moves all items from `buddy_id` to `keep_id` (merges the two segments).
   //   After merge completes, `buddy_id` segment is deleted.
-  // - Return true if the two segments merged successfully.
-  // - If an insertion fails we rollback and abort the merge (return false).
+  // - If an insertion fails we rollback and abort the merge.
   // - Merge can run only if there are no active snapshots.
   // - Prefer calling this function only when the combined size of both segments
   //   than x * segment_capacity. With x: 0 < x < 0.25 as statistically this won't
   //   trigger rollbacks.
-  bool Merge(unsigned keep_id, unsigned buddy_id) {
+  MergeResult Merge(unsigned keep_id, unsigned buddy_id) {
     auto* keep = GetSegment(keep_id);
     auto* buddy = GetSegment(buddy_id);
 
@@ -233,7 +246,7 @@ class DashTable : public detail::DashTableBase {
     // After merge, keep will have depth-1, which determines unique_segments
     uint8_t depth_after_merge = keep->local_depth() - 1;
     if (depth_after_merge < initial_depth_) {
-      return false;
+      return {.merged = false, .declined_depth_guard = true};
     }
 
     bool should_rollback = false;
@@ -267,7 +280,7 @@ class DashTable : public detail::DashTableBase {
       auto hash_fn = [this](const auto& k) { return policy_.HashFn(k); };
       keep->Split(hash_fn, buddy, [](auto&&...) {});
 
-      return false;
+      return {.merged = false, .declined_depth_guard = false};
     }
 
     // Same as Split()
@@ -287,7 +300,7 @@ class DashTable : public detail::DashTableBase {
     --unique_segments_;
     bucket_count_ -= keep->num_buckets();
 
-    return true;
+    return {.merged = true, .declined_depth_guard = false};
   }
 
   size_t GetSegmentCount() const {
@@ -354,7 +367,8 @@ class DashTable : public detail::DashTableBase {
   // segment by segment over physical backets.
   // traverse by segment order does not guarantees coverage if the table grows/shrinks, it is useful
   // when formal full coverage is not critically important.
-  template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb);
+  // count bounds how many physical buckets are visited in a single call.
+  template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb, unsigned count = 8);
 
   // Discards slots information.
   static const_bucket_iterator BucketIt(const_iterator it) {
@@ -412,6 +426,12 @@ class DashTable : public detail::DashTableBase {
     return stash_unloaded_;
   }
 
+  // Attempts to reallocate segment for defragmentation. Will not continue if segment has outgoing
+  // iterators holding pointers to it as these will become invalid on relocation.
+  bool TryRelocateSegment(size_t segment_id);
+
+  SegmentVisitResult VisitSegment(Cursor cursor);
+
  private:
   enum class InsertMode {
     kInsertIfNotFound,
@@ -454,6 +474,45 @@ class DashTable : public detail::DashTableBase {
 template <typename _Key, typename _Value, typename Policy>
 template <bool IsConst, bool IsSingleBucket>
 class DashTable<_Key, _Value, Policy>::Iterator {
+  // RAII class to increase, decrease segment iterator count on its lifetime
+  class SegmentPin {
+   public:
+    SegmentPin() = default;
+
+    explicit SegmentPin(SegmentType* p) noexcept : segment_(p) {
+      // copy ctor, increment borrow count of segment
+      if (segment_)
+        segment_->BorrowPinnedIterator();
+    }
+
+    SegmentPin(const SegmentPin& other) noexcept : SegmentPin(other.segment_) {
+      // defer to copy ctor, increment count
+    }
+
+    SegmentPin(SegmentPin&& other) noexcept : segment_(std::exchange(other.segment_, nullptr)) {
+      // move ctor, do not increment count, clear other segment ptr
+      // other segment will not reduce count on destruction
+    }
+
+    SegmentPin& operator=(SegmentPin other) noexcept {
+      // copy and swap to decrement count of original segment_ when other is destroyed
+      std::swap(segment_, other.segment_);
+      return *this;
+    }
+
+    ~SegmentPin() {
+      if (segment_)
+        segment_->ReturnPinnedIterator();
+    }
+
+    SegmentType* get() const {
+      return segment_;
+    }
+
+   private:
+    SegmentType* segment_ = nullptr;
+  };
+
   using Owner = std::conditional_t<IsConst, const DashTable, DashTable>;
 
   Owner* owner_;
@@ -462,14 +521,50 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   uint8_t slot_id_;
   bool done_;
 
+  // For single bucket iterators we pin the segment to its pointer. Because the iterators are held
+  // across suspension points during concurrent modifications, growing the dashtable will displace
+  // the seg_id_ pointing it to a different bucket.
+  using PinnedType = std::conditional_t<IsSingleBucket, SegmentPin, std::nullptr_t>;
+  PinnedType pinned_seg_ = {};
+
   friend class DashTable;
+
+  // Resolves the segment backing this iterator. Single-bucket iterators use the pinned pointer;
+  // multi-bucket iterators always read the live directory entry.
+  SegmentType* GetSegment() const {
+    if constexpr (IsSingleBucket) {
+      return pinned_seg_.get();
+    } else {
+      return owner_->segment_[seg_id_];
+    }
+  }
+
+  // Pins the segment pointer from the current directory index (single-bucket iterators only).
+  void PinSegment() {
+    if constexpr (IsSingleBucket) {
+      SegmentType* segment =
+          owner_ && seg_id_ < owner_->segment_.size() ? owner_->segment_[seg_id_] : nullptr;
+      pinned_seg_ = SegmentPin{segment};
+    }
+  }
+
+  // Pins the same segment as other if both are single bucket iterators
+  template <bool TIsConst, bool TIsSingle>
+  void PinSegment(const Iterator<TIsConst, TIsSingle>& other) {
+    if constexpr (IsSingleBucket && TIsSingle)
+      pinned_seg_ = SegmentPin{other.pinned_seg_.get()};
+    else
+      PinSegment();
+  }
 
   Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid, uint8_t sid)
       : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(sid), done_(false) {
+    PinSegment();
   }
 
   Iterator(Owner* me, uint32_t seg_id, detail::PhysicalBid bid)
       : owner_(me), seg_id_(seg_id), bucket_id_(bid), slot_id_(0), done_(false) {
+    PinSegment();
     Seek2Occupied();
   }
 
@@ -480,6 +575,8 @@ class DashTable<_Key, _Value, Policy>::Iterator {
       std::conditional_t<IsConst, detail::IteratorPair<const Key_t, const Value_t>,
                          detail::IteratorPair<Key_t, Value_t>>;
 
+  ~Iterator() = default;
+
   // Copy constructor from iterator to const_iterator.
   template <bool TIsConst = IsConst, bool TIsSingleB>
   requires TIsConst Iterator(const Iterator<!TIsConst, TIsSingleB>& other)
@@ -489,6 +586,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
         bucket_id_(other.bucket_id_),
         slot_id_(other.slot_id_),
         done_(other.done_) {
+    PinSegment(other);
   }
 
   // Copy constructor from iterator to bucket_iterator and vice versa.
@@ -499,6 +597,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
         bucket_id_(other.bucket_id_),
         slot_id_(IsSingleBucket ? 0 : other.slot_id_),
         done_(other.done_) {
+    PinSegment(other);
     // if this - is a bucket_iterator - we reset slot_id to the first occupied space.
     if constexpr (IsSingleBucket) {
       Seek2Occupied();
@@ -509,26 +608,25 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   }
 
   Iterator(const Iterator& other) = default;
-
-  Iterator(Iterator&& other) = default;
-
+  Iterator(Iterator&& other) noexcept = default;
   Iterator& operator=(const Iterator& other) = default;
-  Iterator& operator=(Iterator&& other) = default;
+  Iterator& operator=(Iterator&& other) noexcept = default;
 
-  // pre
-  Iterator& operator++() {
+  // Advancing is restricted to single-bucket iterators. A multi-bucket iterator may easily be
+  // invalidated across suspension points, so the cursors and the Traverse function should be used
+  Iterator& operator++() requires IsSingleBucket {
     ++slot_id_;
     Seek2Occupied();
     return *this;
   }
 
-  Iterator& operator+=(int delta) {
+  Iterator& operator+=(int delta) requires IsSingleBucket {
     slot_id_ += delta;
     Seek2Occupied();
     return *this;
   }
 
-  Iterator& AdvanceIfNotOccupied() {
+  Iterator& AdvanceIfNotOccupied() requires IsSingleBucket {
     if (!IsOccupied()) {
       this->operator++();
     }
@@ -536,7 +634,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   }
 
   IteratorPairType operator->() const {
-    auto* seg = owner_->segment_[seg_id_];
+    auto* seg = GetSegment();
     return {seg->Key(bucket_id_, slot_id_), seg->Value(bucket_id_, slot_id_)};
   }
 
@@ -546,8 +644,13 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   }
 
   bool IsOccupied() const {
-    return (seg_id_ < owner_->segment_.size()) &&
-           ((owner_->segment_[seg_id_]->IsBusy(bucket_id_, slot_id_)));
+    if constexpr (IsSingleBucket) {
+      SegmentType* segment = pinned_seg_.get();
+      return segment && segment->IsBusy(bucket_id_, slot_id_);
+    } else {
+      return (seg_id_ < owner_->segment_.size()) &&
+             ((owner_->segment_[seg_id_]->IsBusy(bucket_id_, slot_id_)));
+    }
   }
 
   Owner& owner() const {
@@ -558,12 +661,12 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   requires B uint64_t GetVersion()
   const {
     assert(owner_ && seg_id_ < owner_->segment_.size());
-    return owner_->segment_[seg_id_]->GetVersion(bucket_id_);
+    return GetSegment()->GetVersion(bucket_id_);
   }
 
   template <bool B = Policy::kUseVersion>
   requires B void SetVersion(uint64_t v) {
-    return owner_->segment_[seg_id_]->SetVersion(bucket_id_, v);
+    return GetSegment()->SetVersion(bucket_id_, v);
   }
 
   friend bool operator==(const Iterator& lhs, const Iterator& rhs) {
@@ -594,7 +697,7 @@ class DashTable<_Key, _Value, Policy>::Iterator {
   // segment splits are blocked while a snapshot version is registered).
   uintptr_t bucket_address() const {
     assert(owner_ && seg_id_ < owner_->segment_.size());
-    return reinterpret_cast<uintptr_t>(&owner_->segment_[seg_id_]->GetBucket(bucket_id_));
+    return reinterpret_cast<uintptr_t>(&GetSegment()->GetBucket(bucket_id_));
   }
 
   unsigned slot_id() const {
@@ -666,7 +769,7 @@ void DashTable<_Key, _Value, Policy>::Iterator<IsConst, IsSingleBucket>::Seek2Oc
   assert(seg_id_ < owner_->segment_.size());
 
   if constexpr (IsSingleBucket) {
-    const auto& b = owner_->segment_[seg_id_]->GetBucket(bucket_id_);
+    const auto& b = GetSegment()->GetBucket(bucket_id_);
     uint32_t mask = b.GetBusy() >> slot_id_;
     if (mask) {
       int slot = __builtin_ctz(mask);
@@ -973,11 +1076,11 @@ auto DashTable<_Key, _Value, Policy>::InsertInternal(U&& key, V&& value, Evictio
       hotspot.key_hash = key_hash;
 
       for (unsigned j = 0; j < HotBuckets::kRegularBuckets; ++j) {
-        hotspot.probes.by_type.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
+        hotspot.probes.regular_buckets[j] = bucket_iterator{this, target_seg_id, bid[j]};
       }
 
       for (unsigned i = 0; i < SegmentType::kStashBucketNum; ++i) {
-        hotspot.probes.by_type.stash_buckets[i] =
+        hotspot.probes.stash_buckets[i] =
             bucket_iterator{this, target_seg_id, uint8_t(Policy::kBucketNum + i), 0};
       }
       hotspot.num_buckets = HotBuckets::kNumBuckets;
@@ -1093,23 +1196,27 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id, EvictionPolicy& ev)
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& cb) -> Cursor {
+auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& cb, unsigned count)
+    -> Cursor {
   uint32_t sid = curs.segment_id(global_depth_);
   assert(sid < segment_.size());
-  SegmentType* s = segment_[sid];
-  assert(s);
   uint8_t bid = curs.bucket_id();
 
-  auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
-  s->TraverseBucket(bid, std::move(dt_cb));
+  for (unsigned i = 0; i < count; ++i) {
+    SegmentType* s = segment_[sid];
+    assert(s);
 
-  ++bid;
-  if (SegmentType::OutOfRange(bid)) {
-    sid = NextSeg(sid);
-    if (sid >= segment_.size()) {
-      return Cursor::end();
+    auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
+    s->TraverseBucket(bid, dt_cb);
+
+    ++bid;
+    if (SegmentType::OutOfRange(bid)) {
+      sid = NextSeg(sid);
+      if (sid >= segment_.size()) {
+        return Cursor::end();
+      }
+      bid = 0;
     }
-    bid = 0;
   }
 
   return Cursor{global_depth_, sid, bid};
@@ -1156,6 +1263,49 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
   } while (!fetched);
 
   return Cursor{global_depth_, sid, bid};
+}
+
+template <typename _Key, typename _Value, typename Policy>
+bool DashTable<_Key, _Value, Policy>::TryRelocateSegment(size_t segment_id) {
+  static_assert(std::is_nothrow_move_constructible_v<SegmentType>);
+
+  SegmentType* segment = segment_[segment_id];
+  if (!segment->IsSafeToDefragment())
+    return false;
+
+  const size_t chunk = size_t{1} << (global_depth_ - segment->local_depth());
+  const size_t start = segment->segment_id();
+
+  PMR_NS::polymorphic_allocator<SegmentType> allocator(segment_.get_allocator());
+  using A = std::allocator_traits<decltype(allocator)>;
+
+  SegmentType* new_segment = allocator.allocate(1);
+  // invokes move ctor. will move: segment -> bucket[] -> key[],value[] etc.
+  // if key,values data is heap allocated, moving the handle moves ownership
+  A::construct(allocator, new_segment, std::move(*segment));
+
+  std::fill_n(segment_.begin() + start, chunk, new_segment);
+
+  A::destroy(allocator, segment);
+  A::deallocate(allocator, segment, 1);
+
+  return true;
+}
+
+template <typename _Key, typename _Value, typename Policy>
+auto DashTable<_Key, _Value, Policy>::VisitSegment(Cursor cursor) -> SegmentVisitResult {
+  uint32_t sid = cursor.segment_id(global_depth_);
+  if (sid >= segment_.size())
+    return {Cursor::end(), std::nullopt};
+
+  auto* seg = segment_[sid];
+  sid = seg->segment_id();
+
+  Cursor next = Cursor::end();
+  if (const auto nid = NextSeg(sid); nid < segment_.size())
+    next = Cursor{global_depth_, static_cast<uint32_t>(nid), 0};
+
+  return {next, std::make_pair(sid, seg)};
 }
 
 template <typename _Key, typename _Value, typename Policy>

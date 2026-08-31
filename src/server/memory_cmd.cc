@@ -211,7 +211,7 @@ void MemoryCmd::Run(CmdArgParser parser) {
         "    USE WITH CAUTIOUS! This command is designed for Dragonfly developers.",
         "    ADD <lower-bound> <upper-bound> <sample-odds>",
         "        Sets up tracking memory allocations in the (inclusive) range [lower, upper]",
-        "        sample-odds indicates how many of the allocations will be logged, there 0 means "
+        "        sample-odds indicates how many of the allocations will be logged, there 0 means ",
         "none, 1 means all, and everything in between is linear",
         "        There could be at most 4 tracking placed in parallel",
         "    REMOVE <lower-bound> <upper-bound>",
@@ -224,8 +224,16 @@ void MemoryCmd::Run(CmdArgParser parser) {
         "    ADDRESS <address>",
         "        Returns whether <address> is known to be allocated internally by any of the "
         "backing heaps",
+        "DEFRAGMENT-SEGMENTS [threshold]",
+        "    Tries to free memory by moving DashTable segments from sparsely used memory pages.",
+        "    WARNING: This command runs on all shards and may temporarily monopolize their "
+        "threads,",
+        "    causing high CPU usage and latency spikes. Run only during low-traffic periods.",
         "DEFRAGMENT [threshold]",
         "    Tries to free memory by moving allocations around from sparsely used memory pages.",
+        "    WARNING: This command runs on all shards and may temporarily monopolize their "
+        "threads,",
+        "    causing high CPU usage and latency spikes. Run only during low-traffic periods.",
         "    If a threshold is supplied, it is used to determine if data will be moved from the "
         "page.",
         "    Pages used less than the threshold percentage (default 0.8) are targeted for moving "
@@ -279,14 +287,22 @@ void MemoryCmd::Run(CmdArgParser parser) {
     return Track(parser);
   }
 
+  if (parser.Check("DEFRAGMENT-SEGMENTS")) {
+    return DefragmentSegments(parser);
+  }
+
   if (parser.Check("DEFRAGMENT")) {
     static const float default_threshold =
         absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
     const float threshold = parser.NextOrDefault(default_threshold);
-    if (const auto err = parser.TakeError(); err)
-      return cmd_cntx_->SendError(err.MakeReply());
+    if (!parser.Finalize())
+      return cmd_cntx_->SendError(parser.TakeError().MakeReply());
+    if (!(threshold > 0.0 && threshold <= 1.0))
+      return cmd_cntx_->SendError("Threshold must be between 0 and 1");
 
     std::vector<CollectedPageStats> results(shard_set->size());
+    // This runs concurrently on every shard and may temporarily monopolize shard threads, causing
+    // high CPU usage and latency spikes. Use only during low-traffic periods.
     shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard) {
         PageUsage page_usage{CollectPageStats::YES, threshold,
@@ -304,6 +320,37 @@ void MemoryCmd::Run(CmdArgParser parser) {
 
   const string err = UnknownSubCmd(parser.Next(), "MEMORY");
   return cmd_cntx_->SendError(err, kSyntaxErrType);
+}
+
+void MemoryCmd::DefragmentSegments(CmdArgParser parser) {
+  static const float default_threshold = absl::GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
+  const float threshold = parser.NextOrDefault(default_threshold);
+  if (!parser.Finalize())
+    return cmd_cntx_->SendError(parser.TakeError().MakeReply());
+  if (!(threshold > 0.0 && threshold <= 1.0))
+    return cmd_cntx_->SendError("Threshold must be between 0 and 1");
+
+  const auto* conn_cntx = cmd_cntx_->server_conn_cntx();
+  // Only defragment currently selected db
+  Namespace* ns = conn_cntx->ns;
+  const DbIndex db_ind = conn_cntx->db_index();
+
+  std::vector<CollectedPageStats> results(shard_set->size());
+  // This runs concurrently on every shard and may temporarily monopolize shard threads, causing
+  // high CPU usage and latency spikes. Use only during low-traffic periods.
+  shard_set->pool()->AwaitFiberOnAll([threshold, ns, db_ind, &results](util::ProactorBase*) {
+    if (auto* shard = EngineShard::tlocal(); shard) {
+      PageUsage page_usage{CollectPageStats::YES, threshold,
+                           CycleQuota{CycleQuota::kDefaultDefragQuota}};
+      const ShardId sid = shard->shard_id();
+      ns->GetDbSlice(sid).DefragTableSegments(db_ind, &page_usage);
+      results[sid] = page_usage.CollectedStats();
+    }
+  });
+
+  const CollectedPageStats merged = CollectedPageStats::Merge(std::move(results), threshold);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx_->rb());
+  return rb->SendVerbatimString(merged.ToString());
 }
 
 namespace {

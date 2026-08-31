@@ -372,7 +372,7 @@ class CompactObj {
   // Adjusts the size used by json
   void SetJsonSize(int64_t size);
   // Adjusts the size used by a stream
-  void AddStreamSize(int64_t size);
+  void AddStreamSize(int64_t delta);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
@@ -425,6 +425,9 @@ class CompactObj {
 
   void SetExternal(size_t offset, uint32_t sz, ExternalRep rep);
   ExternalRep GetExternalRep() const;
+
+  // Clone a non-cool external stub: copies representation, disk segment, encoding and mask bits.
+  CompactObj CloneExternal() const;
 
   // Switches to empty, non-external string.
   // Preserves all the attributes.

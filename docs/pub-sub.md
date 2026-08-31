@@ -216,7 +216,8 @@ SendMessages(channel, messages, sharded)
   3. Backpressure gate (per destination thread):
      For each unique subscriber thread:
        Connection::EnsureMemoryBudget(sub_thread)
-       → blocks fiber if that thread's subscriber_bytes > publish_buffer_limit
+       → blocks fiber if that thread's subscriber_bytes > hard limit
+         (publish_buffer_limit * kPubSubHardMultiplier)
 
   4. Build message payload:
      BuildSender copies channel + message into a single shared_ptr<char[]>
@@ -353,61 +354,132 @@ operator()(const PubMessage& pub_msg)
 Messages are sent as RESP3 Push types (`CollectionType::PUSH`) via
 `RedisReplyBuilder::SendBulkStrArr`.
 
-## Backpressure
+## Backpressure (RESP V1)
 
-Fast publishers sending to slow subscribers can cause unbounded memory growth in the
-dispatch queues. Dragonfly prevents this with a **per-thread memory budget** for subscriber
-messages.
+This section describes the current publisher back-pressure behavior for
+Redis/RESP connections using Dragonfly's V1 connection loop (`IoLoop` plus
+`AsyncFiber`). It focuses on a fast `PUBLISH`/`SPUBLISH` producer and a
+subscriber that does not read from its socket. The V2 connection loop is
+intentionally out of scope.
 
-### Memory Accounting
+Dragonfly does not block a publisher on an individual subscriber socket.
+Instead, published messages are placed on each subscriber connection's
+control-path dispatch queue, and the queued Pub/Sub memory is accounted per I/O
+thread in `QueueBackpressure::subscriber_bytes`. Two thresholds derive from
+`publish_buffer_limit`:
 
-Memory is tracked at two levels:
+- **Soft limit** — `publish_buffer_limit`. Crossing it starts a back-pressure
+  *episode* and enables slow-subscriber protection (see below), but does **not**
+  park publishers.
+- **Hard limit** — `publish_buffer_limit * kPubSubHardMultiplier` (hardcoded to `4`).
+  Publishers targeting the thread park their fibers only once
+  `subscriber_bytes` reaches this red line, until queued subscriber messages are
+  processed or the connections are closed.
 
-| Scope | Variable | Location |
-|-------|----------|----------|
-| **Per-thread** (all connections) | `QueueBackpressure::subscriber_bytes` | `atomic_size_t`, thread-local struct |
-| **Per-connection** | `dispatch_q_subscriber_bytes_` | Connection member |
-| **Per-thread stats** | `conn_stats.dispatch_queue_subscriber_bytes` | `ConnectionStats` |
+The hard limit is a throttling point, not a strict cap. A publish
+checks the budget before dispatching and does not reserve space, so concurrent
+publishers can add messages after the check and temporarily push the total
+above the configured value.
 
-`UpdateDispatchStats(msg, add)` is called:
-- **On enqueue** (`add=true`): in `SendAsync()`, before pushing to `dispatch_q_`.
-  Atomically increments `subscriber_bytes`.
-- **On dequeue** (`add=false`): via `absl::Cleanup` in `ProcessAdminMessage()`, after the
-  message handler returns. Atomically decrements `subscriber_bytes`.
+### IoLoopV1 delivery path
 
-### Throttling Publishers
+For `PUBLISH` and the non-cluster `SPUBLISH` path, the delivery sequence is:
 
-Before dispatching messages, `ChannelStore::SendMessages` calls
-`Connection::EnsureMemoryBudget(sub_thread)` for each unique destination thread:
+1. `ChannelStore::SendMessages` finds exact and pattern subscribers and sorts
+   them by their owning I/O thread.
+2. Before dispatching, it calls
+   `Connection::EnsureMemoryBudget(thread_id)` once per destination thread.
+   `QueueBackpressure::EnsureBelowLimit` parks the publishing fiber only while
+   `subscriber_bytes` exceeds the **hard** limit (the equality case is allowed);
+   being above the soft limit alone does not park publishers.
+3. `BuildSender` creates one shared payload containing the channel and message
+   arguments. `DispatchBrief` runs on each I/O thread and calls
+   `Connection::SendPubMessageAsync` for local subscribers.
+4. `SendPubMessageAsync` wraps the `PubMessage` in a `MessageHandle` and calls
+   `SendAsync`. The message is appended to the connection's `dispatch_q_`,
+   the V1 `AsyncFiber` is started if necessary, and the fiber is notified.
+5. `AsyncFiber` consumes the control path. `ProcessAdminMessage` invokes the
+   Pub/Sub handler, which formats a RESP push (`message`, `smessage`, or
+   `pmessage`) into the subscriber's reply builder.
+6. After the handler returns, the message's queue accounting is removed. The
+   reply builder flushes according to the normal V1 connection-loop rules. A
+   slow or non-reading socket therefore leaves messages in `dispatch_q_`,
+   keeping the subscriber memory accounted and eventually throttling
+   publishers for that I/O thread.
 
-```cpp
-void Connection::EnsureMemoryBudget(unsigned tid) {
-  thread_queue_backpressure[tid].EnsureBelowLimit();
-}
+The budget is shared by all subscriber connections on one I/O thread. A
+single stuck subscriber can therefore throttle publishers sending to other
+subscribers assigned to the same thread, but it does not directly consume the
+budget of other I/O threads.
 
-void QueueBackpressure::EnsureBelowLimit() {
-  pubsub_ec.await([this] {
-    return subscriber_bytes.load(memory_order_relaxed) <= publish_buffer_limit;
-  });
-}
-```
+### Slow-subscriber protection
 
-This blocks the publishing fiber (not the thread) until the destination thread's subscriber
-memory drops below the `publish_buffer_limit` (default: 128MB, configurable via
-`--publish_buffer_limit`).
+To keep one stuck subscriber from throttling publishers up to the hard limit,
+Dragonfly can close it once it is clearly the culprit. `ProcessAdminMessage`
+records `async_op_start_cycle_` around the `std::visit` that runs the Pub/Sub
+send, so the connection knows how long its current send has been blocked.
 
-### Wake-up Path
+`SendPubMessageAsync` (which runs on the subscriber's thread while that send is
+parked) closes the subscriber when its active send has been blocked continuously
+for at least `--pubsub_slow_subscriber_timeout_ms` and **either** of these
+conditions holds:
 
-In the `AsyncFiber` loop, after processing a dispatch queue message:
+1. this connection's queued Pub/Sub data has reached one-sixteenth of
+   `publish_buffer_limit`, or
+2. the thread is in a soft-limit episode (`subscriber_bytes` above the soft
+   limit).
 
-```cpp
-if (subscriber_over_limit &&
-    conn_stats.dispatch_queue_subscriber_bytes < qbp.publish_buffer_limit)
-  qbp.pubsub_ec.notify();  // wake ONE blocked publisher
-```
+Thus, a slow connection cannot consume the entire per-thread budget before the
+policy can evict it, while a full thread can evict any subscriber with a
+timed-out send. A slow send below the per-connection threshold is left alone
+until the thread reaches its soft limit, and a full budget with a
+still-progressing send is also left alone. When the policy triggers,
+`RequestPubsubClose` discards the new message, evicts the connection's queued
+`PubMessage` items (immediately releasing their subscriber accounting and waking
+parked publishers), and calls the non-blocking `MarkForClose` — it never waits,
+joins, or interrupts the in-flight write. `ProcessAdminMessage` observes
+`request_shutdown_` once the parked send returns and lets the normal shutdown
+path close the connection; further pub messages are dropped in the meantime.
 
-The check snapshots the "over limit" state before processing and only notifies if the state
-transitioned from over-limit to under-limit. This avoids spurious wake-ups.
+`--pubsub_slow_subscriber_timeout_ms` is startup-only (like
+`publish_buffer_limit`) and defaults to `0`, which disables the protection.
+
+### Limits, cleanup, and observability
+
+Queued Pub/Sub messages are accounted both per connection and in the owning
+I/O thread's `QueueBackpressure::subscriber_bytes`. When a message is
+processed, or when a connection closes and its queue is drained, the bytes are
+released. Once the thread falls back below the hard limit, V1 wakes waiting
+publishers. Messages are normally retained until they are processed or the
+subscriber disconnects; stale messages are dropped after the client leaves
+Pub/Sub mode.
+
+The main configuration knobs are `publish_buffer_limit` (196 MB per I/O thread,
+startup-only) and `pubsub_slow_subscriber_timeout_ms` (startup-only, `0`
+disables). `proactor_threads` changes how subscribers and independent budgets
+are distributed. Other V1 pipeline and socket settings can affect processing or
+output latency, but do not change Pub/Sub admission directly.
+
+For diagnosis, use:
+
+- `dispatch_queue_subscriber_bytes`: queued Pub/Sub bytes;
+- `pubsub_backpressure_events_total{event=...}`: back-pressure and
+  slow-subscriber events by type — `soft_limit` (soft-limit crossings),
+  `hard_limit` (publisher throttle episodes), `forced_disconnect` (subscribers
+  closed by the policy), and `messages_discarded`;
+- `send_delay_ms` / `send_delay_seconds`: age of the oldest pending send;
+- `total_net_output_bytes` and `total_writes_processed`: output progress; and
+- `cmdstat_publish`: indirect evidence of publisher waiting.
+
+Aside from `pubsub_backpressure_events_total`, these signals are aggregated and
+do not identify the specific subscriber holding the budget; the policy also
+emits a rate-limited structured log naming the connection it closes.
+`pipeline_queue_bytes` and `pipeline_throttle_total` can indicate competing
+data-path pressure. Coverage is in
+`tests/dragonfly/connection_test.py`: `test_publish_stuck` (publishers resume
+after the stuck subscriber disconnects), `test_pubsub_slow_subscriber_closed`
+(the policy force-closes a stuck subscriber), and
+`test_pubsub_slow_subscriber_disabled` (a `0` timeout never closes).
 
 ## Cluster Mode Integration
 

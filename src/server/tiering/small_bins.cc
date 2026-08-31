@@ -4,6 +4,8 @@
 
 #include "server/tiering/small_bins.h"
 
+#include <xxhash.h>
+
 #include <algorithm>
 #include <optional>
 #include <utility>
@@ -21,10 +23,21 @@ namespace {
 
 // See FlushBin() for format details
 size_t StashedValueSize(string_view value) {
-  return 2 /* dbid */ + 8 /* hash */ + 2 /* strlen*/ + value.size();
+  return SmallBins::kEntryHeaderSize + value.size();
 }
 
+// The biggest a single entry (value + fixed header) can ever be.
+constexpr size_t kMaxEntrySize = (2_KB - 1) + SmallBins::kEntryHeaderSize;
+
+// We offload a bin at a minimum of ~49.7% utilization; use a cutoff below that to flag real
+// fragmentation.
+constexpr size_t kFragmentedCutoff = kPageSize - 2 - kMaxEntrySize;
+
 }  // namespace
+
+uint64_t SmallBins::BasicDashPolicy::HashFn(uint64_t v) {
+  return XXH3_64bits(&v, sizeof(v));
+}
 
 std::optional<SmallBins::FilledBin> SmallBins::Stash(DbIndex dbid, std::string_view key,
                                                      std::string_view value) {
@@ -85,9 +98,9 @@ size_t SmallBins::SerializeBin(FilledBin* bin, io::MutableBytes dest) {
 }
 
 SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment) {
-  DVLOG(1) << "ReportStashed " << id;
+  DCHECK(pending_bins_.contains(id));                    // valid pending operation id
+  DCHECK(stashed_bins_.Find(segment.offset).is_done());  // new unoccupied destination
 
-  DCHECK(pending_bins_.contains(id));
   auto seg_map_node = pending_bins_.extract(id);
   const auto& seg_map = seg_map_node.mapped();
   DCHECK_GT(seg_map.size(), 0u) << id;
@@ -95,14 +108,16 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   uint16_t bytes = 0;
   SmallBins::KeySegmentList list;
   for (auto& [key, sub_segment] : seg_map) {
-    bytes += sub_segment.length;
+    bytes += sub_segment.length + kEntryHeaderSize;
 
     DiskSegment real_segment{segment.offset + sub_segment.offset, sub_segment.length};
     list.emplace_back(key.first, key.second, real_segment);
   }
 
   stats_.stashed_entries_cnt += list.size();
-  stashed_bins_[segment.offset] = {uint8_t(list.size()), bytes};
+  stats_.stashed_entries_bytes += bytes;
+  stashed_bins_.InsertNew(segment.offset, StashInfo{uint8_t(list.size()), bytes});
+
   return list;
 }
 
@@ -137,20 +152,21 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
 
 SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
   auto full_segment = segment.ContainingPages();
-  if (auto it = stashed_bins_.find(full_segment.offset); it != stashed_bins_.end()) {
+  if (auto it = stashed_bins_.Find(full_segment.offset); it != stashed_bins_.end()) {
     stats_.stashed_entries_cnt--;
     auto& bin = it->second;
 
-    DCHECK_LE(segment.length, bin.bytes);
-    bin.bytes -= segment.length;
+    DCHECK_LE(segment.length + kEntryHeaderSize, bin.bytes);
+    bin.bytes -= segment.length + kEntryHeaderSize;
+    stats_.stashed_entries_bytes -= segment.length + kEntryHeaderSize;
 
     if (--bin.entries == 0) {
       DCHECK_EQ(bin.bytes, 0u);
-      stashed_bins_.erase(it);
+      stashed_bins_.Erase(it);
       return {full_segment, false /* fragmented */, true /* empty */};
     }
 
-    if (bin.bytes < kPageSize / 2) {
+    if (bin.bytes < kFragmentedCutoff) {
       return {full_segment, true /* fragmented */, false /* empty */};
     }
   }
@@ -159,26 +175,38 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 }
 
 bool SmallBins::IsFragmented(size_t offset) {
-  if (auto it = stashed_bins_.find(offset); it != stashed_bins_.end())
-    return it->second.bytes < kPageSize / 2;
+  if (auto it = stashed_bins_.Find(offset); it != stashed_bins_.end())
+    return it->second.bytes < kFragmentedCutoff;
   return false;
+}
+
+::dfly::detail::DashCursor SmallBins::TraverseFragmented(::dfly::detail::DashCursor cursor,
+                                                         absl::FunctionRef<void(size_t)> f) {
+  return stashed_bins_.TraverseBySegmentOrder(cursor, [f](Dash::iterator it) {
+    if (it->second.bytes < kFragmentedCutoff)
+      f(it->first);
+  });
 }
 
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
                .stashed_entries_cnt = stats_.stashed_entries_cnt,
+               .stashed_entries_bytes = stats_.stashed_entries_bytes,
                .current_bin_bytes = current_bin_.bytes_,
                .current_entries_cnt = current_bin_.entries_.size()};
 }
 
 SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {
   DCHECK_EQ(value.size(), kPageSize);
+  auto it = stashed_bins_.Find(segment.offset);
 
-  auto bin = stashed_bins_.extract(segment.offset);
-  if (bin.empty())
+  if (it == stashed_bins_.end())
     return {};
 
-  stats_.stashed_entries_cnt -= bin.mapped().entries;
+  auto bin = it->second;
+  stats_.stashed_entries_cnt -= bin.entries;
+  stats_.stashed_entries_bytes -= bin.bytes;
+  stashed_bins_.Erase(it);
 
   const char* data = value.data();
 

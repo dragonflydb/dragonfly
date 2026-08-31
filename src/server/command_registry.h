@@ -254,6 +254,10 @@ class CommandId : public facade::CommandId {
     return kind_mask_ & QUIT;
   }
 
+  bool IsReset() const {
+    return kind_mask_ & RESET;
+  }
+
   void RecordLatency(unsigned tid, uint64_t latency_usec) const;
 
   bool SupportsAsync() const {
@@ -265,7 +269,7 @@ class CommandId : public facade::CommandId {
   // command name and opt_mask, and stored in kind_mask_ so that hot-path queries are single bit
   // tests instead of string comparisons. This is an internal detail of CommandId, distinct from
   // CO::CommandOpt which holds author-declared capabilities set at registration time.
-  enum CmdKind : uint16_t {
+  enum CmdKind : uint32_t {
     // pub/sub family. The *PUBLISH bits additionally mark the publishing command within a family.
     PUBSUB_REGULAR = 1U << 0,  // PUBLISH / SUBSCRIBE / UNSUBSCRIBE
     PUBSUB_PATTERN = 1U << 1,  // PSUBSCRIBE / PUNSUBSCRIBE
@@ -296,12 +300,13 @@ class CommandId : public facade::CommandId {
     SUPPORT_ASYNC = 1U << 14,
     // Command has exactly one key at a fixed position (first_key == last_key > 0) with no
     // variadic/store-key or global/no-key semantics. Lets DetermineKeys skip its generic branching.
-    FIXED_SINGLE_KEY =
-        1U << 15,  // last free bit of the uint16_t; widen kind_mask_ before adding more
+    FIXED_SINGLE_KEY = 1U << 15,  // last bit of the low uint16_t half of kind_mask_.
+
+    RESET = 1U << 16,  // RESET only
   };
 
   // CmdKind bits. Trivially copied by the move ctor.
-  uint16_t kind_mask_ = 0;
+  uint32_t kind_mask_ = 0;
   int8_t interleave_step_{0};
 
   struct alignas(64) StatsCell {

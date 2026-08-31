@@ -5,11 +5,11 @@
   </a>
 </p>
 
-[![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
+[![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Total pulls](https://img.shields.io/endpoint?url=https%3A%2F%2Fstorage.googleapis.com%2Fstatic.dragonflydb.io%2Frepo-assets%2Fghcr-downloads%2Ftotal.json)](https://github.com/dragonflydb/dragonfly/pkgs/container/dragonfly) [![Monthly pulls](https://img.shields.io/endpoint?url=https%3A%2F%2Fstorage.googleapis.com%2Fstatic.dragonflydb.io%2Frepo-assets%2Fghcr-downloads%2Fmonthly.json)](https://github.com/dragonflydb/dragonfly/pkgs/container/dragonfly) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
 > Before moving on, please consider giving us a GitHub star ⭐️. Thank you!
 
-Other languages:  [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md)
+Other languages:  [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md) [ภาษาไทย](README.th-TH.md)
 
 [Website](https://www.dragonflydb.io/) • [Docs](https://dragonflydb.io/docs) • [Quick Start](https://www.dragonflydb.io/docs/getting-started) • [Community Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly User Conference](https://www.dragonflydb.io/events/dragonfly-ascent) • [Join the Dragonfly Community](https://www.dragonflydb.io/community)
 
@@ -26,10 +26,10 @@ Fully compatible with Redis and Memcached APIs, Dragonfly requires no code chang
 - [Benchmarks](#benchmarks)
 - [Quick start](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start)
 - [Configuration](#configuration)
-- [Roadmap and status](#roadmap-status)
 - [Design decisions](#design-decisions)
 - [Background](#background)
 - [Build from source](./docs/build-from-source.md)
+- [Contributors](#contributors)
 
 ## <a name="benchmarks"><a/>Benchmarks
 
@@ -183,15 +183,6 @@ Arguments can be also provided via:
 
 For more options like logs management or TLS support, run `dragonfly --help`.
 
-## <a name="roadmap-status"><a/>Roadmap and status
-
-Dragonfly currently supports ~185 Redis commands and all Memcached commands besides `cas`. Almost on par with the Redis 5 API, Dragonfly's next milestone will be to stabilize basic functionality and implement the replication API. If there is a command you need that is not implemented yet, please open an issue.
-
-For Dragonfly-native replication, we are designing a distributed log format that will support order-of-magnitude higher speeds.
-
-Following the replication feature, we will continue adding missing commands for Redis versions 3-6 APIs.
-
-Please see our [Command Reference](https://dragonflydb.io/docs/category/command-reference) for the current commands supported by Dragonfly.
 
 ## <a name="design-decisions"><a/> Design decisions
 
@@ -238,3 +229,11 @@ Once we had built the foundation for Dragonfly and [we were happy with its perfo
 
 And finally, <br>
 <em>Our mission is to build a well-designed, ultra-fast, cost-efficient in-memory datastore for cloud workloads that takes advantage of the latest hardware advancements. We intend to address the pain points of current solutions while preserving their product APIs and propositions.</em>
+
+## <a name="contributors"><a/>Contributors
+
+Thanks to all the contributors to Dragonfly project!
+
+<a href="https://github.com/dragonflydb/dragonfly/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=dragonflydb/dragonfly" />
+</a>

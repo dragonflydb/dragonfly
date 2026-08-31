@@ -366,21 +366,54 @@ template <typename... Matchers> auto IsUnordArrayWithSize(Matchers... matchers) 
 }
 
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
-  EXPECT_EQ(Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "prefix-1"}), "OK");
-  EXPECT_EQ(Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2"}), "OK");
-  EXPECT_EQ(Run({"ft.create", "idx-3", "ON", "JSON", "PREFIX", "1", "prefix-3"}), "OK");
+  EXPECT_EQ(
+      Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "prefix-1", "SCHEMA", "f", "TEXT"}),
+      "OK");
+  EXPECT_EQ(
+      Run({"ft.create", "idx-2", "ON", "JSON", "PREFIX", "1", "prefix-2", "SCHEMA", "f", "TEXT"}),
+      "OK");
+  EXPECT_EQ(
+      Run({"ft.create", "idx-3", "ON", "JSON", "PREFIX", "1", "prefix-3", "SCHEMA", "f", "TEXT"}),
+      "OK");
 
   EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::UnorderedElementsAre("idx-1", "idx-2", "idx-3"));
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-2"}), "OK");
   EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::UnorderedElementsAre("idx-1", "idx-3"));
 
-  EXPECT_THAT(Run({"ft.create", "idx-1"}), ErrArg("Index already exists"));
+  EXPECT_THAT(Run({"ft.create", "idx-1", "ON", "HASH", "SCHEMA", "f", "TEXT"}),
+              ErrArg("Index already exists"));
 
   EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("Index with name 'idx-100' not found"));
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
   EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
+}
+
+// Regression for #7953: a zero-field index is a broken state (FT.INFO says "not found" while
+// FT._LIST lists it, and it doesn't survive serialization), so SCHEMA with at least one field
+// must be required unconditionally - not inferred from a heuristic over the skipped tokens.
+TEST_F(SearchFamilyTest, CreateWithoutSchemaKeywordIsError) {
+  const auto kMissingSchema = "Missing required SCHEMA clause with at least one field";
+
+  // Forgotten SCHEMA keyword before field definitions.
+  EXPECT_THAT(Run({"ft.create", "idx_ts_test", "ON", "HASH", "PREFIX", "1", "ot:foo", "name",
+                   "TEXT", "timestamp", "NUMERIC", "SORTABLE"}),
+              ErrArg(kMissingSchema));
+  EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::IsEmpty());
+  EXPECT_THAT(Run({"ft.info", "idx_ts_test"}), ErrArg("Index with name 'idx_ts_test' not found"));
+
+  // No SCHEMA clause at all, and no field-like tokens either - still rejected, since the
+  // resulting index would be just as unusable regardless of how it ended up with zero fields.
+  EXPECT_THAT(Run({"ft.create", "idx_empty", "ON", "HASH"}), ErrArg(kMissingSchema));
+  EXPECT_THAT(Run({"ft.create", "idx_skip_scan", "ON", "HASH", "SKIPINITIALSCAN"}),
+              ErrArg(kMissingSchema));
+
+  // SCHEMA keyword present but with no fields after it.
+  EXPECT_THAT(Run({"ft.create", "idx_bare_schema", "ON", "HASH", "SCHEMA"}),
+              ErrArg("Fields arguments are missing"));
+
+  EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::IsEmpty());
 }
 
 TEST_F(SearchFamilyTest, CreateDropDifferentDatabases) {
@@ -415,7 +448,7 @@ TEST_F(SearchFamilyTest, AlterIndex) {
   Run({"hset", "d:1", "color", "blue", "cost", "150"});
   Run({"hset", "d:2", "color", "green", "cost", "200"});
 
-  Run({"ft.create", "idx-1", "ON", "HASH"});
+  Run({"ft.create", "idx-1", "ON", "HASH", "SCHEMA", "unused", "TAG"});
 
   EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "color", "tag"}), "OK");
   WaitForIndexReady("idx-1");
@@ -926,6 +959,73 @@ TEST_F(SearchFamilyTest, SymbolsInTag) {
   EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{\"fourth})"}), AreDocIds("doc:4"));
 }
 
+TEST_F(SearchFamilyTest, QuotedTagEscapes) {
+  Run({"FT.CREATE", "demo_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "tags", "TAG"});
+  Run({"HSET", "doc:1", "tags", R"(tnt\backslash)"});
+  Run({"HSET", "doc:2", "tags", "tnt\"quote"});
+  Run({"HSET", "doc:3", "tags", "plain-value"});
+  Run({"HSET", "doc:4", "tags", "foo bar"});
+  Run({"HSET", "doc:5", "tags", R"(a\b)"});
+  Run({"HSET", "doc:6", "tags", "c"});
+  Run({"HSET", "doc:7", "tags", R"(C:\)"});
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"tnt\\backslash"})", "DIALECT", "2"}),
+              AreDocIds("doc:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"tnt\"quote"})", "DIALECT", "2"}),
+              AreDocIds("doc:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"plain-value"})", "DIALECT", "2"}),
+              AreDocIds("doc:3"));
+
+  // A quoted value may contain spaces, which the bare {foo bar} form cannot express.
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"foo bar"})", "DIALECT", "2"}),
+              AreDocIds("doc:4"));
+
+  // OR-list of quoted members, each unescaped independently.
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"a\\b"|"c"})", "DIALECT", "2"}),
+              AreDocIds("doc:5", "doc:6"));
+
+  // Value ending in a backslash: the doubled query matches the stored `C:\`, and the lone-backslash
+  // query must not abort the server (it unescapes to `C:`, which matches nothing here).
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"C:\\"})", "DIALECT", "2"}),
+              AreDocIds("doc:7"));
+  EXPECT_THAT(Run({"FT.SEARCH", "demo_idx", R"(@tags:{"C:\"})", "DIALECT", "2"}), kNoResults);
+  EXPECT_EQ(Run({"PING"}), "PONG");
+}
+
+TEST_F(SearchFamilyTest, QuotedTagEscapesJson) {
+  Run({"FT.CREATE", "json_idx", "ON", "JSON", "PREFIX", "1", "jdoc:", "SCHEMA", "$.tag", "AS",
+       "tag", "TAG"});
+  // JSON unescapes "a\\b" to the stored tag value a\b.
+  Run({"JSON.SET", "jdoc:1", "$", R"({"tag":"a\\b"})"});
+  EXPECT_THAT(Run({"FT.SEARCH", "json_idx", R"(@tag:{"a\\b"})", "DIALECT", "2"}),
+              AreDocIds("jdoc:1"));
+}
+
+TEST_F(SearchFamilyTest, QuotedTagEscapesCaseSensitive) {
+  Run({"FT.CREATE", "cs_idx", "ON", "HASH", "PREFIX", "1", "cs:", "SCHEMA", "tags", "TAG",
+       "CASESENSITIVE"});
+  Run({"HSET", "cs:1", "tags", R"(ACME\Admin)"});
+  // Exact case matches; wrong case does not.
+  EXPECT_THAT(Run({"FT.SEARCH", "cs_idx", R"(@tags:{"ACME\\Admin"})", "DIALECT", "2"}),
+              AreDocIds("cs:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "cs_idx", R"(@tags:{"acme\\admin"})", "DIALECT", "2"}), kNoResults);
+}
+
+// The quoted (UnescapeTerm) and unquoted (make_Tag) tag paths share one unescape helper, so an
+// escaped value must be found identically by both query forms. Guards the make_Tag/UnescapeTerm
+// dedup: any divergence between the two paths would surface here. The colon steers the unquoted
+// form through make_Tag (TAG_VAL) rather than the TERM rule.
+TEST_F(SearchFamilyTest, QuotedUnquotedTagEscapeEquivalence) {
+  Run({"FT.CREATE", "eqv_idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "tags", "TAG"});
+  Run({"HSET", "doc:1", "tags", R"(a:b\c)"});  // stored value: a:b\c
+
+  EXPECT_THAT(Run({"FT.SEARCH", "eqv_idx", R"(@tags:{a:b\\c})", "DIALECT", "2"}),
+              AreDocIds("doc:1"));  // unquoted -> make_Tag
+  EXPECT_THAT(Run({"FT.SEARCH", "eqv_idx", R"(@tags:{"a:b\\c"})", "DIALECT", "2"}),
+              AreDocIds("doc:1"));  // quoted -> UnescapeTerm
+  EXPECT_THAT(Run({"FT.SEARCH", "eqv_idx", R"(@tags:{a:b\\c*})", "DIALECT", "2"}),
+              AreDocIds("doc:1"));  // prefix glob -> make_Tag marker-trim branch
+}
+
 TEST_F(SearchFamilyTest, TagNumbers) {
   Run({"hset", "d:1", "number", "1"});
   Run({"hset", "d:2", "number", "2"});
@@ -1315,6 +1415,278 @@ TEST_F(SearchFamilyTest, HashKnnReturnsImplicitVectorScore) {
 
   resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q]", "PARAMS", "2", "q", q, "DIALECT", "2"});
   EXPECT_THAT(resp, MatchEntry("d:a", "__v_score", "0", "v", va));
+}
+
+TEST_F(SearchFamilyTest, HashKnnInt8) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "INT8", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", Int8Vec({1, 2, 3})});
+  Run({"HSET", "d:b", "v", Int8Vec({40, 50, 60})});
+
+  const string q = Int8Vec({1, 2, 3});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HashKnnFloat64) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "FLOAT64", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F64 = [](std::initializer_list<double> vals) {
+    string s;
+    for (double v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F64({1.5, 2.5, 3.5})});
+  Run({"HSET", "d:b", "v", F64({-1.0, -2.0, -3.0})});
+
+  const string q = F64({1.5, 2.5, 3.5});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HashKnnFloat16) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "FLAT", "6",
+       "TYPE", "FLOAT16", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F16 = [](std::initializer_list<uint16_t> vals) {
+    string s;
+    for (uint16_t v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F16({0x3C00, 0x4000, 0x4200})});  // 1, 2, 3
+  Run({"HSET", "d:b", "v", F16({0x4400, 0x4500, 0x4600})});  // 4, 5, 6
+
+  const string q = F16({0x3C00, 0x4000, 0x4200});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnInt8) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "INT8", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", Int8Vec({1, 2, 3})});
+  Run({"HSET", "d:b", "v", Int8Vec({40, 50, 60})});
+
+  const string q = Int8Vec({1, 2, 3});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnFloat16) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT16", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F16 = [](std::initializer_list<uint16_t> vals) {
+    string s;
+    for (uint16_t v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F16({0x3C00, 0x4000, 0x4200})});
+  Run({"HSET", "d:b", "v", F16({0x4400, 0x4500, 0x4600})});
+
+  const string q = F16({0x3C00, 0x4000, 0x4200});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnInt8) {
+  Run({"FT.CREATE", "idx",  "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",  "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "INT8", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"v":[1,2,3]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"v":[40,50,60]})"});
+
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  const string q = Int8Vec({1, 2, 3});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnFloat16) {
+  Run({"FT.CREATE", "idx",     "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",     "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "FLOAT16", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:a", "$", R"({"v":[1,2,3]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"v":[4,5,6]})"});
+
+  auto F16 = [](std::initializer_list<uint16_t> vals) {
+    string s;
+    for (uint16_t v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  const string q = F16({0x3C00, 0x4000, 0x4200});  // 1, 2, 3
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnWrongDimReturnsError) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F32 = [](std::initializer_list<float> vals) {
+    string s;
+    for (float v : vals)
+      s.append(reinterpret_cast<const char*>(&v), sizeof(v));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F32({1, 2, 3})});
+
+  // Query blob carries 2 elements, index expects 3 -> explicit error, not a silent empty result.
+  const string q = F32({1, 2});
+  auto resp =
+      Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, ErrArg("Wrong vector index dimensions"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnNonMultipleBlobReturnsError) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT32", "DIM", "3", "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  // Blob size (5 bytes) is not a whole number of float32 elements -> parse error, and the reported
+  // dimension must not be a truncated size / width.
+  const string q = "abcde";
+  auto resp =
+      Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "PARAMS", "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, ErrArg("Parse error of vector parameters"));
+}
+
+TEST_F(SearchFamilyTest, JsonKnnInt8OutOfRange) {
+  Run({"FT.CREATE", "idx",  "ON",  "JSON", "PREFIX",          "1",    "d:",
+       "SCHEMA",    "$.v",  "AS",  "v",    "VECTOR",          "FLAT", "6",
+       "TYPE",      "INT8", "DIM", "3",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  Run({"JSON.SET", "d:ok", "$", R"({"v":[1,2,3]})"});
+  Run({"JSON.SET", "d:round", "$", R"({"v":[1,2,3.4]})"});  // 3.4 rounds to 3
+  Run({"JSON.SET", "d:hi", "$", R"({"v":[1,2,999]})"});     // out of int8 range -> doc skipped
+  Run({"JSON.SET", "d:lo", "$", R"({"v":[1,2,-200]})"});    // out of int8 range -> doc skipped
+
+  // Only the two in-range docs are indexed; the out-of-range ones are dropped (not wrapped).
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*"}), AreDocIds("d:ok", "d:round"));
+
+  // 3.4 rounded to 3, so d:round matches the [1,2,3] query exactly (distance 0).
+  Run({"JSON.DEL", "d:ok"});
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  const string q = Int8Vec({1, 2, 3});
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:round", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, HnswKnnFloat64LargeDim) {
+  // dim*8 = 2048 bytes exceeds the listpack threshold -> borrowed keyspace storage, whose sds
+  // data pointer is unaligned. Exercises the memcpy-based FLOAT64 reader (would trip
+  // -fsanitize=alignment before the byte-safe-load fix).
+  const int kDim = 256;
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
+       "TYPE", "FLOAT64", "DIM", absl::StrCat(kDim), "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("idx");
+
+  auto F64 = [](double fill, int dim) {
+    string s;
+    for (int i = 0; i < dim; i++)
+      s.append(reinterpret_cast<const char*>(&fill), sizeof(fill));
+    return s;
+  };
+  Run({"HSET", "d:a", "v", F64(1.0, kDim)});
+  Run({"HSET", "d:b", "v", F64(5.0, kDim)});
+
+  const string q = F64(1.0, kDim);
+  auto resp = Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q AS dist]", "RETURN", "1", "dist", "PARAMS",
+                   "2", "q", q, "DIALECT", "2"});
+  EXPECT_THAT(resp, MatchEntry("d:a", "dist", "0"));
+}
+
+TEST_F(SearchFamilyTest, VectorUnknownTypeRejected) {
+  // A non-standard TYPE is rejected on a normal FT.CREATE (the replay-only coerce does not apply).
+  for (string_view bogus : {"BOGUS", "FP32", "FLOAT8", ""}) {
+    EXPECT_THAT(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "v", "VECTOR", "FLAT", "6", "TYPE",
+                     bogus, "DIM", "3", "DISTANCE_METRIC", "L2"}),
+                ErrArg("Parse error of vector parameters"))
+        << "TYPE=" << bogus;
+  }
+}
+
+TEST_F(SearchFamilyTest, HnswVectorRangeInt8) {
+  // VECTOR_RANGE on a non-float dtype: exercises the width-aware range validation/decode seam.
+  auto Int8Bytes = [](int v) { return string(1, static_cast<char>(static_cast<int8_t>(v))); };
+  Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "pos", "VECTOR", "HNSW", "6", "TYPE", "INT8",
+       "DIM", "1", "DISTANCE_METRIC", "L2"});
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrFormat("k%d", i), "pos", Int8Bytes(i)});
+
+  const string q = Int8Bytes(5);
+  auto resp = Run({"FT.SEARCH", "idx", "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+                   "PARAMS", "2", "vec", q, "LIMIT", "0", "10"});
+  EXPECT_THAT(resp, AreDocIds("k4", "k5", "k6"));
+}
+
+TEST_F(SearchFamilyTest, FtHybridInt8) {
+  // FT.HYBRID has its own vector-width validation, separate from the plain KNN path.
+  auto Int8Vec = [](std::initializer_list<int> vals) {
+    string s;
+    for (int v : vals)
+      s.push_back(static_cast<char>(static_cast<int8_t>(v)));
+    return s;
+  };
+  EXPECT_EQ(Run({"FT.CREATE", "vidx", "ON", "HASH", "SCHEMA", "t", "TEXT", "v", "VECTOR", "FLAT",
+                 "6", "TYPE", "INT8", "DIM", "3", "DISTANCE_METRIC", "L2"}),
+            "OK");
+  Run({"HSET", "d:a", "t", "hello world", "v", Int8Vec({1, 2, 3})});
+  Run({"HSET", "d:b", "t", "hello there", "v", Int8Vec({40, 50, 60})});
+
+  auto resp = Run({"FT.HYBRID", "vidx", "SEARCH", "hello", "VSIM", "@v", "$b", "KNN", "5", "PARAMS",
+                   "2", "b", Int8Vec({1, 2, 3})});
+  ASSERT_HYBRID_RESP(resp);
+  EXPECT_EQ(HybridTotal(resp), 2);
+  EXPECT_THAT(HybridKeys(resp), UnorderedElementsAre("d:a", "d:b"));
 }
 
 TEST_F(SearchFamilyTest, HashHnswKnnReturnsImplicitVectorScore) {
@@ -1833,16 +2205,6 @@ TEST_F(SearchFamilyTest, AggregateLoad) {
   resp = Run({"ft.aggregate", "index", "*", "GROUPBY", "1", "@word", "REDUCE", "SUM", "1", "@foo",
               "AS", "foo_total", "LOAD", "1", "foo_total"});
   EXPECT_THAT(resp, ErrArg("LOAD cannot be applied after projectors or reducers"));
-}
-
-TEST_F(SearchFamilyTest, VectorUnknownTypeRejected) {
-  // A non-standard TYPE is rejected on a normal FT.CREATE (the replay-only coerce does not apply).
-  for (string_view bogus : {"BOGUS", "FP32", "FLOAT8", ""}) {
-    EXPECT_THAT(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "v", "VECTOR", "FLAT", "6", "TYPE",
-                     bogus, "DIM", "3", "DISTANCE_METRIC", "L2"}),
-                ErrArg("Parse error of vector parameters"))
-        << "TYPE=" << bogus;
-  }
 }
 
 TEST_F(SearchFamilyTest, Vector) {
@@ -3608,7 +3970,7 @@ TEST_F(SearchFamilyTest, SearchStatsInfoRace) {
     for (int i = 1; i <= 5; ++i) {
       std::string idx_name = absl::StrCat("idx", i);
       std::string prefix = absl::StrCat("prefix", i, ":");
-      Run({"FT.CREATE", idx_name, "ON", "HASH", "PREFIX", "1", prefix});
+      Run({"FT.CREATE", idx_name, "ON", "HASH", "PREFIX", "1", prefix, "SCHEMA", "f", "TEXT"});
       Run({"FT.DROPINDEX", idx_name});
     }
   });
@@ -3710,6 +4072,18 @@ TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
   // Search the index
   resp = Run({"FT.SEARCH", "index", "@number1:[1 3] @number2:[10 30]", "SORTBY", "number1", "ASC"});
   EXPECT_THAT(resp, AreDocIds("doc:1", "doc:2", "doc:3"));
+}
+
+TEST_F(SearchFamilyTest, BlockSizeZeroRejected) {
+  Run({"HSET", "doc:a", "n", "7"});
+
+  EXPECT_THAT(Run({"FT.CREATE", "idx0", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "n",
+                   "NUMERIC", "BLOCKSIZE", "0"}),
+              ErrArg("BLOCKSIZE"));
+
+  EXPECT_THAT(Run({"FT.CREATE", "idx1", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "n",
+                   "NUMERIC", "BLOCKSIZE", "1"}),
+              "OK");
 }
 
 TEST_F(SearchFamilyTest, AggregateWithLoadFromJoinSimple) {
@@ -5227,6 +5601,18 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
                    "user2", "$jones", IsMap("last_name", "jones", "first_name", "bob", "age", "36"),
                    "user1", "$jones",
                    IsMap("last_name", "jones", "first_name", "alice", "age", "35")));
+}
+
+TEST_F(SearchFamilyTest, WithSortKeysLongValue) {
+  // Regression: a WITHSORTKEYS string sortkey whose "$"-prefixed form exceeds kMaxInlineSize was
+  // garbled when read back — the "$" + s temporary was enqueued into the reply by reference past
+  // its lifetime (use-after-free). Derive the length from the constant so the test keeps exercising
+  // the non-inlined (WriteRef) path even if kMaxInlineSize changes.
+  EXPECT_EQ(Run({"ft.create", "idx", "SCHEMA", "txt", "TEXT", "SORTABLE"}), "OK");
+  const string long_val(RedisReplyBuilder::kMaxInlineSize + 8, 'a');
+  Run({"HSET", "doc1", "txt", long_val});
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "txt", "WITHSORTKEYS", "NOCONTENT"}),
+              IsArray(IntArg(1), "doc1", "$" + long_val));
 }
 
 // GEO index tests for FT.SEARCH with HASH and JSON documents
@@ -6827,6 +7213,63 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   EXPECT_THAT(cmd, HasSubstr("EPSILON 0.07"));
 }
 
+// Builds the FT.CREATE restore command for a single vector field of the given algorithm, dtype and
+// storage — the shared setup for the data_type round-trip tests below.
+static std::string BuildVectorRestoreCommand(bool use_hnsw, dfly::search::VectorDataType dt,
+                                             dfly::DocIndex::DataType storage) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+  using dfly::search::VectorSimilarity;
+
+  SchemaField field;
+  field.type = SchemaField::VECTOR;
+  field.flags = 0;
+  field.short_name = "embedding";
+
+  SchemaField::VectorParams vparams;
+  vparams.use_hnsw = use_hnsw;
+  vparams.dim = 4;
+  vparams.sim = VectorSimilarity::COSINE;
+  vparams.data_type = dt;
+  vparams.capacity = 500;
+  vparams.hnsw_m = 32;
+  vparams.hnsw_ef_construction = 400;
+  vparams.hnsw_ef_runtime = 75;
+  vparams.hnsw_epsilon = 0.07;
+  field.special_params = vparams;
+
+  DocIndex base;
+  base.type = storage;
+  base.prefixes = {"doc:"};
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["embedding"] = std::move(field);
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+  return info.BuildRestoreCommand();
+}
+
+// A FLAT index restores its non-float32 TYPE (and stays FLAT).
+TEST(BuildRestoreCommandTest, FlatVectorPreservesDataType) {
+  std::string cmd =
+      BuildVectorRestoreCommand(false, dfly::search::VectorDataType::INT8, dfly::DocIndex::HASH);
+  EXPECT_THAT(cmd, HasSubstr("FLAT"));
+  EXPECT_THAT(cmd, HasSubstr("TYPE INT8"));
+  EXPECT_THAT(cmd, HasSubstr("DIM 4"));
+  EXPECT_THAT(cmd, HasSubstr("DISTANCE_METRIC COSINE"));
+}
+
+// An HNSW index restores a non-float32 TYPE.
+TEST(BuildRestoreCommandTest, HnswVectorPreservesNonFloat32DataType) {
+  std::string cmd =
+      BuildVectorRestoreCommand(true, dfly::search::VectorDataType::FLOAT16, dfly::DocIndex::HASH);
+  EXPECT_THAT(cmd, HasSubstr("HNSW"));
+  EXPECT_THAT(cmd, HasSubstr("TYPE FLOAT16"));
+  EXPECT_THAT(cmd, HasSubstr("DIM 4"));
+}
+
 // FT.CREATE with a VECTOR FLAT field whose DIM is enormous (e.g. 99999999999)
 // used to cause std::bad_alloc inside FlatVectorIndex, leaving a broken
 // ShardDocIndex registered.  A subsequent FT.SEARCH would dereference the empty
@@ -6840,6 +7283,18 @@ TEST_F(SearchFamilyTest, SearchOnIndexWithHugeVectorDim) {
 
   // Index must not be registered — FT.SEARCH must report "no such index".
   resp = Run({"FT.SEARCH", "idx", "hello"});
+  EXPECT_THAT(resp, ErrArg("idx: no such index"));
+}
+
+// The allocation guard must account for the element width, not a fixed float32 layout.
+// dim=1000 / capacity=1e6 slips under the old "capacity * (dim+1) floats" bound, yet allocates
+// ~8 GiB as FLOAT64 — which used to throw std::bad_alloc and leave a broken ShardDocIndex.
+TEST_F(SearchFamilyTest, FlatWideDtypeAllocationGuard) {
+  auto resp = Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "v", "VECTOR", "FLAT", "8", "TYPE",
+                   "FLOAT64", "DIM", "1000", "INITIAL_CAP", "1000000", "DISTANCE_METRIC", "L2"});
+  EXPECT_THAT(resp, ErrArg("Vector index initial allocation is too large"));
+
+  resp = Run({"FT.SEARCH", "idx", "*"});
   EXPECT_THAT(resp, ErrArg("idx: no such index"));
 }
 
@@ -7444,6 +7899,35 @@ TEST_F(SearchFamilyTest, SearchWithScoresBasic) {
   EXPECT_GT(scores["d:2"], 0.0);
   // d:1 has higher TF -> should score higher
   EXPECT_GT(scores["d:1"], scores["d:2"]) << "Doc with higher TF should score higher";
+}
+
+// A per-term weight inside a field group must parse, stay scoped to the field, and boost the
+// score of docs matching the weighted term (the shape emitted when weighting individual words).
+TEST_F(SearchFamilyTest, SearchPerTermWeightInFieldGroup) {
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "body", "TEXT"}),
+            "OK");
+  Run({"hset", "d:1", "title", "machine", "body", "z"});
+  Run({"hset", "d:2", "title", "learning", "body", "z"});
+  Run({"hset", "d:3", "title", "unrelated", "body", "machine learning"});
+
+  auto collect = [&](std::string_view query) {
+    auto resp = Run({"ft.search", "i1", query, "NOCONTENT", "WITHSCORES", "DIALECT", "2"});
+    std::map<std::string, double> scores;
+    const auto& vals = resp.GetVec();
+    for (size_t i = 1; i + 1 < vals.size(); i += 2)
+      scores[vals[i].GetString()] = std::stod(vals[i + 1].GetString());
+    return scores;
+  };
+
+  auto scores = collect("@title:(machine=>{$weight:3.0} | learning)");
+  // d:1 and d:2 match via title; d:3 has the words only in body -> field scoping excludes it.
+  ASSERT_EQ(scores.size(), 2u);
+  EXPECT_FALSE(scores.contains("d:3"));
+  ASSERT_TRUE(scores.contains("d:1") && scores.contains("d:2"));
+  // Weighting "machine" 3x boosts the otherwise-symmetric d:1 above d:2. Use at() so a missing
+  // key fails loudly instead of operator[] inserting a default score.
+  EXPECT_GT(scores.at("d:1"), scores.at("d:2"));
 }
 
 // Verify ADDSCORES injects __score for simple (non-KNN) FT.AGGREGATE

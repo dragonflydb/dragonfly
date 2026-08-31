@@ -1,10 +1,14 @@
-// Copyright 2024, DragonflyDB authors.  All rights reserved.
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
 
 #pragma once
 
-#include "core/oah_entry.h"
+#include <cassert>
+#include <cstddef>
+#include <cstdint>
+
+#include "core/oah_base.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/ptr_vector.h"
 
@@ -18,11 +22,10 @@ namespace dfly {
 // owns the lifetime logic (promote-to-vector, grow, clear) via the Entry and PtrVector
 // Create()/Destroy() factories.
 template <typename Entry> class OAHPtr {
+  using TaggedPtr = oah::TaggedPtr;
   using Vector = PtrVector<TaggedPtr>;
 
  public:
-  static constexpr TaggedPtr kVectorBit = 1ULL << 0;
-
   explicit OAHPtr(TaggedPtr& slot) : slot_(&slot) {
   }
 
@@ -33,7 +36,7 @@ template <typename Entry> class OAHPtr {
     return !Empty();
   }
   bool IsVector() const {
-    return (*slot_ & kVectorBit) != 0;
+    return (*slot_ & oah::kVectorBit) != 0;
   }
 
   Vector AsVector() {
@@ -117,32 +120,10 @@ template <typename Entry> class OAHPtr {
   // Defragments fragmented buffers under this slot: the entry's string, or for a vector every inner
   // entry plus the array. Returns the cumulative usable-size delta; *realloced is set if anything
   // moved.
-  ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced) {
-    *realloced = false;
-    if (Empty())
-      return 0;
-    if (!IsVector())
-      return Entry(*slot_).ReallocIfNeeded(page_usage, realloced);
-
-    ssize_t obj_alloc_delta = 0;
-    Vector vec = AsVector();
-    for (TaggedPtr& cell : vec) {
-      Entry entry(cell);
-      if (entry) {
-        bool inner_moved = false;
-        obj_alloc_delta += entry.ReallocIfNeeded(page_usage, &inner_moved);
-        *realloced |= inner_moved;
-      }
-    }
-    if (page_usage->IsPageForObjectUnderUtilized(Raw())) {
-      vec.Realloc();
-      *realloced = true;
-    }
-    return obj_alloc_delta;
-  }
+  ssize_t ReallocIfNeeded(PageUsage* page_usage, bool* realloced);
 
   char* Raw() const {
-    return reinterpret_cast<char*>(*slot_ & ~Entry::kTagMask);
+    return reinterpret_cast<char*>(*slot_ & ~oah::kTagMask);
   }
 
   // Replaces the slot's contents with the single entry `tagged_ptr`, freeing the old contents.

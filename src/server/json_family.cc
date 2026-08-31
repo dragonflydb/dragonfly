@@ -530,6 +530,7 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
       VLOG(1) << "got invalid JSON string '" << json_str << "' cannot be saved";
       return OpStatus::INVALID_JSON;
     }
+    op_args.GetDbSlice().ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &it_res->it->second);
     it_res->it->second.Reset();
   }
 
@@ -2025,10 +2026,15 @@ void CmdClear(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void CmdStrAppend(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  string_view path = parser.Next();
+  string_view path;
+  if (parser.HasAtLeast(2))
+    path = parser.Next();
   string_view value = parser.Next();
 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  if (!parser.Finalize())
+    return builder->SendError(parser.TakeError().MakeReply());
+
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
   // We try parsing the value into json string object first.
@@ -2233,7 +2239,7 @@ void RegisterJsonFamily(CommandRegistry* registry) {
   *registry << CI{"JSON.FORGET", CO::JOURNALED, -2, 1, 1, acl::JSON}.HFUNC(
       Del);  // An alias of JSON.DEL.
   *registry << CI{"JSON.OBJKEYS", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ObjKeys);
-  *registry << CI{"JSON.STRAPPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}
+  *registry << CI{"JSON.STRAPPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::JSON}
                    .HFUNC(StrAppend);
   *registry << CI{"JSON.CLEAR", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Clear);
   *registry << CI{"JSON.ARRPOP", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrPop);

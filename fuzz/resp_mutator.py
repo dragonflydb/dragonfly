@@ -1,22 +1,7 @@
-"""AFL++ custom mutator for RESP protocol.
-
-Instead of random byte-level mutations (which would break protocol framing and get
-rejected by the parser), this mutator operates at the command level: it parses
-the input into commands, then randomly replaces/inserts/removes/reorders commands and
-arguments while keeping RESP encoding valid. This ensures mutated inputs actually
-reach command execution code paths.
-
-Focus commands (optional, set via FUZZ_FOCUS_COMMANDS env var):
-    When running PR-targeted fuzzing, generate_targeted_seeds.py produces a list of
-    command names affected by the code change. This mutator reads that list and
-    picks those commands ~70% of the time, concentrating mutations on the changed code.
-    Commands not already in the COMMANDS table are auto-registered with default arity.
-
-Usage:
-    export PYTHONPATH=/path/to/dragonfly/fuzz
-    export AFL_PYTHON_MODULE=resp_mutator
-    export AFL_CUSTOM_MUTATOR_ONLY=1
-    afl-fuzz ...
+"""AFL++ custom mutator for RESP: mutates at the command level (parse, then
+replace/insert/remove/reorder commands and args) so mutated inputs stay valid
+RESP and reach command execution. FUZZ_FOCUS_COMMANDS biases command choice for
+PR-targeted runs. Load via AFL_PYTHON_MODULE=resp_mutator.
 """
 
 import json
@@ -24,10 +9,8 @@ import os
 import random
 
 # fmt: off
-# Every command registered in Dragonfly (via CI{...}), grouped by family: (name, min_args, max_args).
-# min/max are argument counts AFTER the command name. min_args satisfies the registered arity;
-# max_args covers the documented option grammar (variadic lists capped to a practical bound).
-# Admin/replication/cluster commands (REPLICAOF, CLUSTER, DEBUG, FLUSHALL, ...) are intentionally excluded.
+# (name, min_args, max_args): arg counts after the command name. min_args meets the
+# registered arity; max_args caps the option grammar. Admin/cluster cmds excluded.
 COMMANDS = [
     # String
     (b"GET", 1, 1), (b"SET", 2, 8), (b"SETEX", 3, 3), (b"PSETEX", 3, 3),
@@ -44,7 +27,7 @@ COMMANDS = [
     (b"DUMP", 1, 1), (b"RESTORE", 3, 7), (b"TOUCH", 1, 6), (b"RANDOMKEY", 0, 0),
     (b"KEYS", 1, 1), (b"SCAN", 1, 8), (b"SORT", 1, 10), (b"SORT_RO", 1, 9),
     (b"MOVE", 2, 2), (b"STICK", 1, 6), (b"DELEX", 1, 3), (b"FIELDEXPIRE", 3, 8),
-    (b"FIELDTTL", 2, 2),
+    (b"FIELDTTL", 2, 2), (b"RM", 1, 7),
     # List
     (b"LPUSH", 2, 6), (b"RPUSH", 2, 6), (b"LPUSHX", 2, 6), (b"RPUSHX", 2, 6),
     (b"LPOP", 1, 2), (b"RPOP", 1, 2), (b"LLEN", 1, 1), (b"LINDEX", 2, 2),
@@ -78,8 +61,8 @@ COMMANDS = [
     # Stream
     (b"XADD", 4, 10), (b"XLEN", 1, 1), (b"XRANGE", 3, 5), (b"XREVRANGE", 3, 5),
     (b"XREAD", 3, 9), (b"XREADGROUP", 5, 11), (b"XTRIM", 3, 6), (b"XDEL", 2, 6),
-    (b"XINFO", 1, 3), (b"XACK", 3, 6), (b"XGROUP", 2, 6), (b"XAUTOCLAIM", 5, 7),
-    (b"XCLAIM", 5, 10), (b"XPENDING", 2, 6), (b"XSETID", 2, 4),
+    (b"XINFO", 1, 5), (b"XACK", 3, 6), (b"XGROUP", 2, 6), (b"XAUTOCLAIM", 5, 7),
+    (b"XCLAIM", 5, 10), (b"XPENDING", 2, 6), (b"XSETID", 2, 2),
     # HyperLogLog
     (b"PFADD", 2, 6), (b"PFCOUNT", 1, 4), (b"PFMERGE", 2, 5),
     # Geo
@@ -92,7 +75,7 @@ COMMANDS = [
     # Pub/Sub
     (b"SUBSCRIBE", 1, 4), (b"UNSUBSCRIBE", 0, 4), (b"PSUBSCRIBE", 1, 4), (b"PUNSUBSCRIBE", 0, 4),
     (b"SSUBSCRIBE", 1, 4), (b"SUNSUBSCRIBE", 0, 4), (b"PUBLISH", 2, 2), (b"SPUBLISH", 2, 2),
-    (b"PUBSUB", 0, 3),
+    (b"PUBSUB", 1, 3),
     # Transaction
     (b"MULTI", 0, 0), (b"EXEC", 0, 0), (b"DISCARD", 0, 0), (b"WATCH", 1, 4),
     (b"UNWATCH", 0, 0),
@@ -109,6 +92,7 @@ COMMANDS = [
     # Bloom filter
     (b"BF.ADD", 2, 2), (b"BF.EXISTS", 2, 2), (b"BF.MADD", 2, 6), (b"BF.MEXISTS", 2, 6),
     (b"BF.RESERVE", 3, 5), (b"BF.SCANDUMP", 2, 2), (b"BF.LOADCHUNK", 3, 3),
+    (b"BF.INFO", 1, 2),
     # Cuckoo filter
     (b"CF.RESERVE", 2, 8), (b"CF.ADD", 2, 2), (b"CF.ADDNX", 2, 2), (b"CF.EXISTS", 2, 2),
     (b"CF.MEXISTS", 2, 6), (b"CF.INFO", 1, 1), (b"CF.COUNT", 2, 2), (b"CF.DEL", 2, 2),
@@ -130,6 +114,7 @@ COMMANDS = [
     (b"MEMORY", 1, 3), (b"ACL", 1, 5), (b"MONITOR", 0, 0), (b"HELLO", 0, 5),
     (b"BGSAVE", 0, 4), (b"SAVE", 0, 3), (b"LATENCY", 1, 2), (b"SLOWLOG", 1, 2),
     (b"SHRINK", 1, 1), (b"QUIT", 0, 0), (b"TIME", 0, 0), (b"WAIT", 2, 2),
+    (b"RESET", 0, 0), (b"ROLE", 0, 0), (b"LASTSAVE", 0, 0),
     # Throttle
     (b"CL.THROTTLE", 4, 5),
 ]
@@ -137,9 +122,7 @@ COMMANDS = [
 
 KEYS = [b"k", b"key", b"k1", b"k2", b"k3", b"src", b"dst", b"mylist", b"myset", b"myhash"]
 VALUES = [b"v", b"val", b"hello", b"0", b"1", b"-1", b"100", b"3.14", b"", b"a b"]
-# Option keyword tokens parsed across the command grammar — feeding these as
-# arguments steers mutations into option-parsing branches instead of dead-ending
-# on unknown tokens. Grouped roughly by area but mixed uniformly when chosen.
+# Option keywords, to steer mutations into option-parsing branches.
 SPECIAL = [
     b"*",
     b"?",
@@ -195,12 +178,24 @@ SPECIAL = [
     b"FIELDS",
     b"JUSTID",
     b"IDLE",
+    b"NOMKSTREAM",
+    b"MKSTREAM",
+    b"FORCE",
+    b"RETRYCOUNT",
+    b"LASTID",
+    b"CREATECONSUMER",
+    b"DELCONSUMER",
+    b"SETID",
+    b"DESTROY",
+    b"FULL",
     b"FROMMEMBER",
     b"FROMLONLAT",
     b"BYRADIUS",
     b"BYBOX",
     b"WITHCOORD",
     b"WITHDIST",
+    b"WITHHASH",
+    b"STOREDIST",
     b"m",
     b"km",
     # bitfield / restore / misc
@@ -212,6 +207,16 @@ SPECIAL = [
     b"ABSTTL",
     b"u8",
     b"i64",
+    # delex conditions / scan-rm options / save variants
+    b"IFEQ",
+    b"IFNE",
+    b"IFDEQ",
+    b"IFDNE",
+    b"MINMSZ",
+    b"BUCKET",
+    b"ATTR",
+    b"SCHEDULE",
+    b"nosort",
     # cuckoo filter options
     b"NOCREATE",
     b"ITEMS",
@@ -317,15 +322,17 @@ def _random_command():
     return _encode_resp(*args)
 
 
-def _parse_resp_commands(buf):
-    """Best-effort parse of RESP buffer into list of commands (each is list of bytes).
-    Returns (commands, success). On parse failure returns ([], False)."""
+def _parse_resp_commands(buf, strict=False):
+    """Parse a RESP buffer into (commands, success).
+
+    strict=False is the fuzzing hot path (best-effort). strict=True is the CI
+    gate: it verifies the CRLF terminator after each bulk body so a mis-framed
+    seed fails the check instead of passing what the server would reject."""
     commands = []
     pos = 0
     data = bytes(buf)
 
     while pos < len(data):
-        # Skip whitespace/newlines
         while pos < len(data) and data[pos : pos + 1] in (b"\r", b"\n", b" "):
             pos += 1
         if pos >= len(data):
@@ -334,7 +341,6 @@ def _parse_resp_commands(buf):
         if data[pos : pos + 1] != b"*":
             return ([], False)
 
-        # Parse *N\r\n
         end = data.find(b"\r\n", pos)
         if end < 0:
             return ([], False)
@@ -360,6 +366,8 @@ def _parse_resp_commands(buf):
                 args.append(b"")
                 continue
             if pos + slen + 2 > len(data):
+                return ([], False)
+            if strict and data[pos + slen : pos + slen + 2] != b"\r\n":
                 return ([], False)
             args.append(data[pos : pos + slen])
             pos += slen + 2

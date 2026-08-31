@@ -39,7 +39,7 @@ using namespace std;
 
 ABSL_DECLARE_FLAG(bool, info_replication_valkey_compatible);
 ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
-ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
+ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
 
 namespace dfly {
 
@@ -81,6 +81,41 @@ bool ToSyncId(string_view str, uint32_t* num) {
   str.remove_prefix(4);
 
   return absl::SimpleAtoi(str, num);
+}
+
+// Parse LSN vector such as "5-3-8"
+std::vector<LSN> ParseLsnVec(std::string_view arg, RuleError& err) {
+  std::vector<LSN> lsns;
+  for (std::string_view token : absl::StrSplit(arg, '-')) {
+    LSN value;
+    if (!absl::SimpleAtoi(token, &value)) {
+      err = {true, {}};
+      return {};
+    }
+    lsns.push_back(value);
+  }
+  return lsns;
+}
+
+// Wires replication metadata onto the flow's connection and returns its FlowInfo, writing the
+// freshly generated EOF token into *eof_token. Must be called under the replica's lock.
+FlowInfo& SetupFlowConnection(CommandContext* cmd_cntx, DflyCmd::ReplicaInfo* replica_ptr,
+                              uint32_t sync_id, unsigned flow_id, string* eof_token) {
+  auto* conn_cntx = cmd_cntx->server_conn_cntx();
+  cmd_cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
+  conn_cntx->conn_state.replication_info.repl_session_id = sync_id;
+  conn_cntx->conn_state.replication_info.repl_flow_id = flow_id;
+  conn_cntx->replica_conn = true;
+
+  absl::InsecureBitGen gen;
+  *eof_token = GetRandomHex(gen, 40);
+
+  auto& flow = replica_ptr->GetFlow(flow_id);
+  conn_cntx->master_repl_flow = &flow;
+  conn_cntx->conn()->SetConnectionMemoryAccounting(false);
+  flow.conn = cmd_cntx->conn();
+  flow.eof_token = *eof_token;
+  return flow;
 }
 
 bool WaitReplicaFlowToCatchup(absl::Time end_time, const DflyCmd::ReplicaInfo* replica,
@@ -252,21 +287,21 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view sync_id_str = parser.Next<string_view>();
   string_view flow_id_str = parser.Next<string_view>();
 
-  std::optional<LSN> seqid;
-  std::optional<string> last_master_id;
-  std::optional<string> last_master_lsn;
+  std::optional<LSN> flow_lsn;
+  std::optional<Replica::LastMasterSyncData> replica_last_master;
+
   if (parser.HasAtLeast(2)) {
-    last_master_id = parser.Next<string>();
-    last_master_lsn = parser.Next<string>();
+    replica_last_master = {parser.Next<string>(), parser.Next(ParseLsnVec)};
   } else if (parser.HasNext()) {
-    seqid = parser.Next<LSN>();
-    if (parser.TakeError()) {
-      return cmd_cntx->SendError(facade::kInvalidIntErr);
-    }
+    flow_lsn = parser.Next<LSN>();
+  }
+
+  if (parser.TakeError()) {
+    return cmd_cntx->SendError(facade::kInvalidIntErr);
   }
 
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
-          << " flow: " << flow_id_str << " seq: " << seqid.value_or(-1);
+          << " flow: " << flow_id_str << " seq: " << flow_lsn.value_or(-1);
 
   if (master_id != sf_->master_replid()) {
     return cmd_cntx->SendError(kBadMasterId);
@@ -290,25 +325,12 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(kInvalidState);
     }
 
-    // Set meta info on connection.
-    auto* conn_cntx = cmd_cntx->server_conn_cntx();
-    cmd_cntx->conn()->SetName(absl::StrCat("repl_flow_", sync_id));
-    conn_cntx->conn_state.replication_info.repl_session_id = sync_id;
-    conn_cntx->conn_state.replication_info.repl_flow_id = flow_id;
-    conn_cntx->replica_conn = true;
+    // Set meta info on the connection and prepare the flow.
+    auto& flow = SetupFlowConnection(cmd_cntx, replica_ptr.get(), sync_id, flow_id, &eof_token);
 
-    absl::InsecureBitGen gen;
-    eof_token = GetRandomHex(gen, 40);
-
-    auto& flow = replica_ptr->GetFlow(flow_id);
-    conn_cntx->master_repl_flow = &flow;
-    conn_cntx->conn()->SetConnectionMemoryAccounting(false);
-    flow.conn = cmd_cntx->conn();
-    flow.eof_token = eof_token;
-
-    if (!conn_cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
+    if (!cmd_cntx->conn()->Migrate(shard_set->pool()->at(flow_id))) {
       // Listener::PreShutdown() triggered
-      if (conn_cntx->conn()->socket()->IsOpen()) {
+      if (cmd_cntx->conn()->socket()->IsOpen()) {
         return cmd_cntx->SendError(kInvalidState);
       }
       return;
@@ -316,27 +338,37 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     journal::StartInThread();
 
-    std::optional<Replica::LastMasterSyncData> data = sf_->GetLastMasterData();
-    std::optional<LSN> lsn_to_start_partial;
-    // In this flow the master and the registered replica where synced from the same master.
-    if (last_master_id && data && data->id == *last_master_id) {
+    std::optional<Replica::LastMasterSyncData> my_last_master = sf_->GetLastMasterData();
+
+    // Skip full sync if we stem from the same master and this node was promoted (my_last_master)
+    const bool failover_match =
+        my_last_master && replica_last_master && replica_last_master->id == my_last_master->id;
+
+    // Skip full sync if we have the same parent in a cascaded setup
+    const bool cascaded_match = replica_last_master &&
+                                replica_last_master->id == sf_->GetLineageId() &&
+                                absl::GetFlag(FLAGS_experimental_cascaded_partial_sync);
+
+    // Case for partial sync
+    if (failover_match || cascaded_match) {
       ++ServerState::tlocal()->stats.psync_requests_total;
-      auto flow_lsn =
-          ParseLsnVec(*last_master_lsn, data->last_journal_LSNs.size(), flow_id, cmd_cntx);
-      if (!flow_lsn) {
-        return;  // ParseLsnVec replies in case of error
-      }
+      const std::vector<LSN>& lsns = replica_last_master->last_journal_LSNs;
 
-      if (IsLSNInPartialSyncBuffer(*flow_lsn)) {
-        lsn_to_start_partial.emplace(*flow_lsn);
-      }
+      if (lsns.size() != shard_set->size())  // Replica sends LSNs only on equal shard size
+        return cmd_cntx->SendError(facade::kSyntaxErr);
 
-    } else if (seqid.has_value() && IsLSNInPartialSyncBuffer(*seqid)) {
-      lsn_to_start_partial.emplace(*seqid);
+      DCHECK_LT(flow_id, lsns.size());
+      if (flow_id >= lsns.size()) {
+        LOG(ERROR) << "Invalid flow_id: " << flow_id << " exceeds LSN vector size: " << lsns.size()
+                   << ". Disabling partial sync.";
+        return;  // Fall back to full sync without an error reply.
+      }
+      flow_lsn = lsns[flow_id];  // this is a valid lsn - we can follow up with the buffer check
     }
 
-    if (lsn_to_start_partial) {
-      flow.start_partial_sync_at = *lsn_to_start_partial;
+    // Switch sync type to partial
+    if (flow_lsn && IsLSNInPartialSyncBuffer(*flow_lsn)) {
+      flow.start_partial_sync_at = *flow_lsn;
       sync_type = "PARTIAL";
       VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
               << " and is available. (current_lsn=" << journal::GetLsn() << ")";
@@ -457,42 +489,10 @@ bool DflyCmd::IsLSNInPartialSyncBuffer(LSN lsn) const {
     LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
               << " that the replication buffer doesn't contain this anymore (current_lsn="
               << journal::GetLsn() << "). Will perform a full sync of the data.";
-    LOG(INFO) << "If this happens often you can control the replication buffer's size with the "
-                 "--shard_repl_backlog_len option";
+    LOG(INFO) << "If this happens often, increase --shard_repl_backlog_time_ms or "
+                 "--shard_repl_backlog_max_bytes.";
   }
   return exists;
-}
-
-std::optional<LSN> DflyCmd::ParseLsnVec(std::string_view last_master_lsn,
-                                        size_t last_journal_lsn_size, size_t flow_id,
-                                        CommandContext* cmd_cntx) {
-  std::vector<std::string_view> lsn_str_vec = absl::StrSplit(last_master_lsn, '-');
-  if (lsn_str_vec.size() != last_journal_lsn_size) {
-    cmd_cntx->SendError(facade::kSyntaxErr);  // Unexpected flow. LSN vector of same master
-                                              // should be the same size on all replicas.
-    return std::nullopt;
-  }
-
-  std::vector<LSN> lsn_vec;
-  lsn_vec.reserve(lsn_str_vec.size());
-
-  for (string_view lsn_str : lsn_str_vec) {
-    int64_t value;
-    if (!absl::SimpleAtoi(lsn_str, &value)) {
-      cmd_cntx->SendError(facade::kInvalidIntErr);
-      return std::nullopt;
-    }
-    lsn_vec.push_back(value);
-  }
-
-  DCHECK(flow_id < lsn_vec.size());
-  if (flow_id >= lsn_vec.size()) {
-    LOG(ERROR) << "Invalid flow_id: " << flow_id << " exceeds LSN vector size: " << lsn_vec.size()
-               << ". Disabling partial sync.";
-    return std::nullopt;
-  }
-
-  return {lsn_vec[flow_id]};
 }
 
 // DFLY TAKEOVER <timeout_sec> [SAVE] <sync_id>

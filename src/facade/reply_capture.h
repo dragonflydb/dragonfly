@@ -17,9 +17,9 @@ namespace facade {
 
 struct CaptureVisitor;
 
-// CapturingReplyBuilder allows capturing replies and retrieveing them with Take().
-// Those replies can be stored standalone and sent with
-// CapturingReplyBuilder::Apply() to another reply builder.
+// CapturingReplyBuilder allows capturing replies and retrieving them with Take().
+// Those replies can be stored standalone and sent with CapturingReplyBuilder::Apply() to another
+// reply builder.
 class CapturingReplyBuilder : public RedisReplyBuilder {
   friend struct CaptureVisitor;
 
@@ -31,6 +31,7 @@ class CapturingReplyBuilder : public RedisReplyBuilder {
   void SendDouble(double val) override;
   void SendSimpleString(std::string_view str) override;
   void SendBulkString(std::string_view str) override;
+  using RedisReplyBuilderBase::SendBulkString;  // keep the guarded rvalue overload visible
   void SendVerbatimString(std::string_view str, VerbatimFormat format = TXT) override;
 
   void SendBulkStringBorrowed(cmn::BorrowedString&& bs) override;

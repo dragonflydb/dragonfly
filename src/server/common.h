@@ -93,6 +93,7 @@ struct ScanOpts {
   std::optional<Mask> mask;
   size_t min_malloc_size = 0;
   bool novalues = false;
+  bool allow_novalues = false;
 };
 
 // I use relative time from Feb 1, 2023 in seconds.

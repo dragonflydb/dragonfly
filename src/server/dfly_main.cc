@@ -61,6 +61,7 @@ ABSL_DECLARE_FLAG(std::string, dir);
 #include "server/generic_family.h"
 #include "server/main_service.h"
 #include "server/server_family.h"
+#include "server/set_family.h"
 #include "server/version.h"
 #include "server/version_monitor.h"
 #include "strings/human_readable.h"
@@ -84,11 +85,6 @@ ABSL_DECLARE_FLAG(std::string, admin_bind);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, maxmemory);
 ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
-ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
-
-namespace dfly {
-extern bool g_use_oah_set;  // defined in core/oah_set.h
-}
 
 #ifdef USE_ABSL_LOG
 ABSL_FLAG(bool, alsologtostderr, false, "also log messages to stderr in addition to logfiles");
@@ -143,6 +139,9 @@ using absl::StrCat;
 using strings::HumanReadableNumBytes;
 
 namespace dfly {
+
+// Forward-declared here to avoid pulling the heavy protocol_client.h into this translation unit.
+bool ValidateClientTlsFlags();
 
 namespace {
 
@@ -224,9 +223,15 @@ string NormalizePaths(std::string_view path) {
   return string(path);
 }
 
-template <typename... Args> unique_ptr<Listener> MakeListener(Args&&... args) {
-  auto res = make_unique<Listener>(std::forward<Args>(args)...);
-  res->SetConnFiberStackSize(kFiberDefaultStackSize);
+template <typename... Args> unique_ptr<Listener> MakeListener(ProactorPool* pool, Args&&... args) {
+  unique_ptr<Listener> res;
+  // The constructor allocates TLS state; run it on a proactor thread so those bytes land on a
+  // thread included in the tls_bytes sum (the main thread is not). at(0), not GetNextProactor():
+  // the latter would shift the round-robin AddListener uses to spread accept loops.
+  pool->at(0)->Await([&] {
+    res = make_unique<Listener>(std::forward<Args>(args)...);
+    res->SetConnFiberStackSize(kFiberDefaultStackSize);
+  });
   return res;
 }
 
@@ -329,7 +334,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   // we depend on tcp listener to be at the front since we later
   // need to pass it to the AclFamily::Init
   if (!tcp_disabled) {
-    auto listener = MakeListener(Protocol::REDIS, &service, Listener::Role::MAIN);
+    auto listener = MakeListener(pool, Protocol::REDIS, &service, Listener::Role::MAIN);
     main_listener = listener.get();
     listeners.push_back(listener.release());
   }
@@ -394,7 +399,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     }
     unlink(unix_sock.c_str());
 
-    auto uds_listener = MakeListener(Protocol::REDIS, &service);
+    auto uds_listener = MakeListener(pool, Protocol::REDIS, &service);
     error_code ec =
         acceptor->AddUDSListener(unix_sock.c_str(), unix_socket_perm, uds_listener.get());
     if (ec) {
@@ -424,7 +429,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
     const char* interface_addr = admin_bind.empty() ? nullptr : admin_bind.c_str();
     const std::string printable_addr =
         absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
-    auto admin_listener = MakeListener(Protocol::REDIS, &service, Listener::Role::PRIVILEGED);
+    auto admin_listener = MakeListener(pool, Protocol::REDIS, &service, Listener::Role::PRIVILEGED);
 
     error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener.get());
 
@@ -450,7 +455,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   }
 
   if (mc_port > 0 && !tcp_disabled) {
-    auto listener = MakeListener(Protocol::MEMCACHE, &service);
+    auto listener = MakeListener(pool, Protocol::MEMCACHE, &service);
     error_code ec = acceptor->AddListener(bind_addr, mc_port, listener.get());
     if (ec) {
       LOG(ERROR) << "Could not open memcached port " << mc_port << ", error: " << ec.message();
@@ -533,14 +538,17 @@ bool ShouldUseEpollAPI(const base::sys::KernelVersion& kver) {
   iouring_res = -iouring_res;
 
   if (iouring_res == ENOSYS) {
-    LOG(WARNING) << "iouring API is not supported. switching to epoll.";
+    LOG(WARNING) << "iouring API is not supported. Switching to epoll.";
   } else if (iouring_res == ENOMEM) {
     LOG(WARNING) << "io_uring does not have enough memory. That can happen when your "
                     "max locked memory is too limited. If you run via docker, "
                     "try adding '--ulimit memlock=-1' to \"docker run\" command."
                     "Meanwhile, switching to epoll";
+  } else if (iouring_res == EPERM) {
+    LOG(WARNING) << "Check if io_uring is disabled via /proc/sys/kernel/io_uring_disabled. "
+                    "Switching to epoll.";
   } else {
-    LOG(WARNING) << "Weird error " << iouring_res << " switching to epoll";
+    LOG(WARNING) << "Weird error " << strerror(iouring_res) << " switching to epoll";
   }
 
   return true;
@@ -1120,6 +1128,15 @@ Usage: dragonfly [FLAGS]
     return 1;
   }
 
+  // Validate startup flags (TLS, snapshot filename, keyspace events) BEFORE creating the
+  // pidfile and before starting the proactor pool. They return false on a bad config; we exit
+  // cleanly (code 1) here, before the fiber runtime exists, which avoids a stale pidfile and
+  // aborting during fiber-runtime teardown.
+  if (!dfly::ValidateServerTlsFlags() || !dfly::ValidateClientTlsFlags() ||
+      !dfly::ValidateSnapshotFilenameFlags() || !dfly::ValidateNotifyKeyspaceEventsFlag()) {
+    return 1;
+  }
+
   string pidfile_path = GetFlag(FLAGS_pidfile);
   if (!pidfile_path.empty()) {
     if (!CreatePidFile(pidfile_path)) {
@@ -1146,7 +1163,7 @@ Usage: dragonfly [FLAGS]
     LOG(WARNING) << "SWAP is enabled. Consider disabling it when running Dragonfly.";
 
   dfly::max_memory_limit = absl::GetFlag(FLAGS_maxmemory);
-  dfly::g_use_oah_set = absl::GetFlag(FLAGS_use_oah_set);
+  dfly::InitSetFamilyFlags();
 
   if (dfly::max_memory_limit == 0) {
     LOG(INFO) << "maxmemory has not been specified. Deciding myself....";

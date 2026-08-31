@@ -29,7 +29,7 @@ class ConnectionContext;
 class JournalExecutor;
 struct JournalReader;
 
-void ValidateClientTlsFlags();
+bool ValidateClientTlsFlags();
 
 // A helper class for implementing a Redis client that talks to a redis server.
 // This class should be inherited from.
@@ -137,6 +137,15 @@ class ProtocolClient {
   util::FiberSocketBase* Sock() const {
     return sock_.get();
   }
+
+  // Socket diagnostics string for error logs. Evaluates the socket exactly once and tolerates a
+  // socket that was never created (e.g. ConnectAndAuth() refusing on a dead context).
+  std::string SockInfo() const;
+
+  // Bytes currently sitting unread in the socket's kernel receive buffer, or -1 if unavailable
+  // (no socket yet, or the ioctl failed). Locks sock_mu_ so it can't race with ConnectAndAuth()/
+  // ShutdownSocketImpl() replacing or destroying sock_ concurrently.
+  int GetSocketUnreadBytes();
 
  private:
   std::error_code Recv(util::FiberSocketBase* input, base::IoBuf* dest);

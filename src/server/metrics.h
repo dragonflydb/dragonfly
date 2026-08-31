@@ -90,7 +90,8 @@ struct Metrics {
   uint64_t hoffman_encode_total = 0, hoffman_encode_success = 0;
   uint64_t fiber_switch_cnt = 0;
   uint64_t fiber_switch_delay_usec = 0;
-  uint64_t tls_bytes = 0;
+  // Per-thread deltas may be negative (cross-thread frees); clamped after aggregation.
+  int64_t tls_bytes = 0;
   uint64_t refused_conn_max_clients_reached_count = 0;
   uint64_t serialization_bytes = 0;
 

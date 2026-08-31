@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#include <atomic>
+
 #include "server/cluster/cluster_defs.h"
 #include "server/execution_state.h"
 #include "server/protocol_client.h"
@@ -25,9 +27,10 @@ class OutgoingMigration : private ProtocolClient {
   // start migration process, sends INIT command to the target node
   void Start();
 
-  // if is_error = false mark migration as FINISHED and cancel migration if it's not finished yet
-  // can be called from any thread, but only after Start()
-  // if is_error = true and migration is in progress it will be restarted otherwise nothing happens
+  // Terminal transition: marks the migration FINISHED (or FATAL for an OOM error) and tears down
+  // the current flows. Used by the success path, incoming-OOM handling and external cancellation
+  // (config update). Can be called from any thread, but only after Start(). Error-driven teardown
+  // with retry is not done here - it is owned by OnAttemptError(), the exec_st_ error handler.
   void Finish(const GenericError& error = {}) ABSL_LOCKS_EXCLUDED(state_mu_);
 
   MigrationState GetState() const ABSL_LOCKS_EXCLUDED(state_mu_);
@@ -51,7 +54,10 @@ class OutgoingMigration : private ProtocolClient {
   void ResetError() {
     if (exec_st_.IsError()) {
       SetLastError(exec_st_.GetError());
-      exec_st_.Reset(nullptr);
+      // Attempt boundary barrier: Reset() joins the in-flight OnAttemptError() handler before
+      // returning, so no teardown from the previous attempt is still running when SyncFb builds
+      // the next one, and re-arms the handler for the new attempt.
+      exec_st_.Reset([this](const GenericError& ge) { OnAttemptError(ge); });
     }
   }
 
@@ -85,6 +91,12 @@ class OutgoingMigration : private ProtocolClient {
   void SyncFb();
   // return true if migration is finalized even with C_ERROR state
   bool FinalizeMigration(long attempt);
+
+  // Error handler of exec_st_: tears down the failed attempt's flows and moves the state to
+  // C_ERROR so SyncFb retries. Runs as the handler fiber - at most one is in flight, and
+  // ResetError() joins it at the attempt boundary, so it can never overlap the construction of
+  // the next attempt.
+  void OnAttemptError(const GenericError& error) ABSL_LOCKS_EXCLUDED(state_mu_);
 
   bool ChangeState(MigrationState new_state) ABSL_LOCKS_EXCLUDED(state_mu_);
 
