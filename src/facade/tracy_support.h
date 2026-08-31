@@ -28,7 +28,11 @@
 #ifdef TRACY_ENABLE
 
 #include <string_view>
+// liburing's BLOCK_SIZE macro collides with Tracy's ConcurrentQueue internals.
+#pragma push_macro("BLOCK_SIZE")
+#undef BLOCK_SIZE
 #include <tracy/Tracy.hpp>
+#pragma pop_macro("BLOCK_SIZE")
 
 // Scoped zone. `name` must be a string literal.
 #define DFLY_TRACY_ZONE(name) ZoneScopedN(name)
@@ -42,6 +46,8 @@
     ::std::string_view _dfly_tz_sv = (sv);            \
     ZoneText(_dfly_tz_sv.data(), _dfly_tz_sv.size()); \
   } while (0)
+#define DFLY_TRACY_ZONE_TEXT_F(...) ZoneTextF(__VA_ARGS__)
+#define DFLY_TRACY_ZONE_VALUE(value) ZoneValue(value)
 #define DFLY_TRACY_FRAME_MARK() FrameMark
 #define DFLY_TRACY_PLOT(name, val) TracyPlot(name, val)
 #define DFLY_TRACY_MESSAGE(txt, size) TracyMessage(txt, size)
@@ -54,6 +60,15 @@
 // (those stay normal-colored; their fiber-lane gaps already reveal the preemption).
 #define DFLY_TRACY_WAIT(name) ZoneScopedNC(name, 0xC0392B)
 
+#ifdef DFLY_TRACY_FORENSIC
+// High-volume per-command detail. Enable with -DWITH_TRACY_FORENSIC=ON.
+#define DFLY_TRACY_ZONE_FORENSIC(name) ZoneScopedN(name)
+#define DFLY_TRACY_ZONE_FORENSIC_TEXT_SV(sv) DFLY_TRACY_ZONE_TEXT_SV(sv)
+#else
+#define DFLY_TRACY_ZONE_FORENSIC(name) (void)sizeof(name)
+#define DFLY_TRACY_ZONE_FORENSIC_TEXT_SV(sv) (void)sizeof(sv)
+#endif
+
 #else  // !TRACY_ENABLE
 
 // No-op fallbacks. Use sizeof to keep arguments unevaluated while silencing unused warnings.
@@ -64,6 +79,8 @@
     (void)sizeof(size);                 \
   } while (0)
 #define DFLY_TRACY_ZONE_TEXT_SV(sv) (void)sizeof(sv)
+#define DFLY_TRACY_ZONE_TEXT_F(...) (void)sizeof(#__VA_ARGS__)
+#define DFLY_TRACY_ZONE_VALUE(value) (void)sizeof(value)
 #define DFLY_TRACY_FRAME_MARK() (void)0
 #define DFLY_TRACY_PLOT(name, val) \
   do {                             \
@@ -82,5 +99,7 @@
     (void)sizeof(color);               \
   } while (0)
 #define DFLY_TRACY_WAIT(name) (void)sizeof(name)
+#define DFLY_TRACY_ZONE_FORENSIC(name) (void)sizeof(name)
+#define DFLY_TRACY_ZONE_FORENSIC_TEXT_SV(sv) (void)sizeof(sv)
 
 #endif  // TRACY_ENABLE

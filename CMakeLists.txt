@@ -157,6 +157,7 @@ endif()
 # instrumentation guards on, and (3) fetch + build the client. On-demand mode means an enabled
 # binary only starts capturing once a Tracy viewer/capture connects (the runtime on/off switch).
 option(WITH_TRACY "Enable the Tracy profiler client (on-demand)" OFF)
+option(WITH_TRACY_FORENSIC "Enable high-volume per-command Tracy zones" OFF)
 if (WITH_TRACY)
   message(STATUS "Tracy profiler enabled (on-demand). Connect the Tracy viewer to start capture.")
   set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
@@ -174,6 +175,10 @@ if (WITH_TRACY)
   # preprocessor macro. Symbol resolution still comes from linking Tracy::TracyClient to dfly_facade
   # and fibers2 (see the respective CMakeLists).
   add_compile_definitions(TRACY_ENABLE TRACY_FIBERS)
+  if (WITH_TRACY_FORENSIC)
+    message(STATUS "Tracy forensic per-command zones enabled.")
+    add_compile_definitions(DFLY_TRACY_FORENSIC)
+  endif()
 
   FetchContent_Declare(
     tracy
