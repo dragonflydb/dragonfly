@@ -1,13 +1,13 @@
 const state = {
+  manifest: null,
   data: null,
   suite: 'all',
   view: 'often',
-  range: 'all',
-  date: 'all',
-  workflow: 'all',
-  variant: 'all',
+  range: '30',
   search: '',
   selectedId: null,
+  detailCache: new Map(),
+  detailErrors: new Map(),
 };
 
 const suiteOptions = [
@@ -25,7 +25,7 @@ const viewOptions = [
   ['all', 'All Tests'],
 ];
 
-const rangeOptions = [
+let rangeOptions = [
   ['all', 'All history'],
   ['7', 'Last 7 days'],
   ['14', 'Last 14 days'],
@@ -45,19 +45,60 @@ const recentFailureDays = 7;
 
 async function boot() {
   try {
-    const response = await fetch('data/summary.json');
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    state.data = await response.json();
-    state.selectedId = firstVisibleTest()?.id ?? null;
+    state.manifest = await fetchJson('data/manifest.json');
+    rangeOptions = rangesFromManifest(state.manifest);
+    state.range = state.manifest.default_range ?? rangeOptions[0]?.[0] ?? 'all';
+    await loadRange(state.range, false);
     render();
   } catch (error) {
     document.getElementById('dataStatus').textContent = 'No data';
     document.getElementById('subtitle').textContent =
-        'Run python3 build_dashboard.py tmp/junit-results site/data/summary.json';
+        'Run python3 build_dashboard.py tmp/junit-results site/data';
     document.getElementById('detailsPane').textContent = String(error);
   }
+}
+
+async function fetchJson(path) {
+  const response = await fetch(path);
+  if (!response.ok) {
+    throw new Error(`${path}: HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+function rangesFromManifest(manifest) {
+  const ranges = manifest.ranges ?? [];
+  if (ranges.length === 0) {
+    return rangeOptions;
+  }
+  return ranges.map((range) => [range.id, range.label]);
+}
+
+async function loadRange(rangeId, shouldRender = true) {
+  const range = rangeFile(rangeId);
+  document.getElementById('dataStatus').textContent = 'Loading';
+  state.data = await fetchJson(`data/${range.file}`);
+  state.range = range.id;
+  state.selectedId = currentSelectionInData() ? state.selectedId : firstVisibleTest()?.id ?? null;
+  if (shouldRender) {
+    render();
+  }
+}
+
+function rangeFile(rangeId) {
+  const ranges = state.manifest?.ranges ?? [];
+  return ranges.find((item) => item.id === rangeId) ?? ranges[0] ??
+      {id: 'all', file: 'ranges/all.json'};
+}
+
+function currentSelectionInData() {
+  return state.selectedId && state.data?.tests?.some((item) => item.id === state.selectedId);
+}
+
+function showDataError(error) {
+  document.getElementById('dataStatus').textContent = 'Error';
+  document.getElementById('detailsPane').className = 'empty-state';
+  document.getElementById('detailsPane').textContent = String(error);
 }
 
 function render() {
@@ -123,53 +164,14 @@ function renderFilters() {
   };
 
   renderSelect('rangeFilter', rangeOptions, state.range, (value) => {
-    state.range = value;
-    state.date = 'all';
-    state.selectedId = firstVisibleTest()?.id ?? null;
-    render();
+    loadRange(value).catch(showDataError);
   });
-
-  renderSelect('dateFilter', facetOptions('dates', 'All dates'), state.date, (value) => {
-    state.date = value;
-    if (value !== 'all') {
-      state.range = 'all';
-    }
-    state.selectedId = firstVisibleTest()?.id ?? null;
-    render();
-  });
-
-  renderSelect(
-      'workflowFilter',
-      facetOptions('workflows', 'All workflows'),
-      state.workflow,
-      (value) => {
-        state.workflow = value;
-        state.selectedId = firstVisibleTest()?.id ?? null;
-        render();
-      },
-  );
-
-  renderSelect(
-      'variantFilter',
-      facetOptions('variants', 'All variants'),
-      state.variant,
-      (value) => {
-        state.variant = value;
-        state.selectedId = firstVisibleTest()?.id ?? null;
-        render();
-      },
-  );
 
   document.getElementById('resetFilters').onclick = () => {
     state.suite = 'all';
     state.view = 'often';
-    state.range = 'all';
-    state.date = 'all';
-    state.workflow = 'all';
-    state.variant = 'all';
     state.search = '';
-    state.selectedId = firstVisibleTest()?.id ?? null;
-    render();
+    loadRange(state.manifest?.default_range ?? '30').catch(showDataError);
   };
 }
 
@@ -202,11 +204,6 @@ function renderSelect(elementId, options, value, onChange) {
           .join('');
   element.value = value;
   element.onchange = () => onChange(element.value);
-}
-
-function facetOptions(name, allLabel) {
-  const values = state.data.facets?.[name] ?? [];
-  return [['all', allLabel], ...values.map((value) => [value, value])];
 }
 
 function renderTable() {
@@ -250,7 +247,10 @@ function renderTable() {
 function renderDetails() {
   const pane = document.getElementById('detailsPane');
   const source = state.data.tests.find((item) => item.id === state.selectedId);
-  const test = source ? deriveRow(source) : null;
+  const detail = source ? state.detailCache.get(source.id) : null;
+  const detailError = source ? state.detailErrors.get(source.id) : null;
+  const needsDetail = Boolean(source?.detail_file && !detail && !detailError);
+  const test = source ? deriveRow(detailForSelectedRange(source, detail)) : null;
   if (!test) {
     pane.className = 'empty-state';
     pane.textContent = 'Select a test row.';
@@ -280,10 +280,85 @@ function renderDetails() {
     ${chips('Dates', test.active_dates)}
     ${chips('Workflows', test.active_workflows)}
     ${chips('Variants', test.active_variants)}
+    ${detailLoading(needsDetail)}
+    ${detailLoadError(detailError)}
     ${failureRuns(test.failure_runs)}
     ${history(test.recent)}
     ${failureExamples(test.failure_examples)}
   `;
+
+  if (needsDetail) {
+    loadTestDetail(source)
+        .then(() => {
+          if (state.selectedId === source.id) {
+            renderDetails();
+          }
+        })
+        .catch((error) => {
+          state.detailErrors.set(source.id, error);
+          if (state.selectedId === source.id) {
+            renderDetails();
+          }
+        });
+  }
+}
+
+function detailLoading(isLoading) {
+  if (!isLoading) {
+    return '';
+  }
+  return '<section class="empty-state">Loading details...</section>';
+}
+
+function detailLoadError(error) {
+  if (!error) {
+    return '';
+  }
+  return `<section class="empty-state">${escapeHtml(String(error))}</section>`;
+}
+
+async function loadTestDetail(test) {
+  if (!test.detail_file || state.detailCache.has(test.id)) {
+    return;
+  }
+  const detail = await fetchJson(`data/${test.detail_file}`);
+  state.detailCache.set(test.id, detail);
+}
+
+function detailForSelectedRange(source, detail) {
+  if (!detail) {
+    return source;
+  }
+
+  const activeDates = activeDateSet(source);
+  const segments = Array.isArray(detail.segments) ?
+      detail.segments.filter((segment) => inActiveDateSet(activeDates, segment.date)) :
+      [];
+  const failureExamples = Array.isArray(detail.failure_examples) ?
+      detail.failure_examples.filter(
+          (example) => inActiveDateSet(activeDates, datePart(example.time))) :
+      [];
+
+  return {
+    ...source,
+    ...detail,
+    segments,
+    failure_examples: failureExamples,
+  };
+}
+
+function activeDateSet(source) {
+  const dates = source.active_dates ?? state.data?.date_range?.days ?? [];
+  return new Set(dates.filter(Boolean));
+}
+
+function inActiveDateSet(activeDates, date) {
+  return activeDates.size === 0 || activeDates.has(date);
+}
+
+function datePart(value) {
+  const match = String(value ?? '').match(/^(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : '';
 }
 
 function chips(label, values) {
@@ -388,8 +463,8 @@ function visibleTests() {
           test.level,
           test.last_workflow,
           test.last_variant,
-          ...(test.filters?.workflows ?? []),
-          ...(test.filters?.variants ?? []),
+          ...(test.active_workflows ?? []),
+          ...(test.active_variants ?? []),
         ].join(' ')
             .toLowerCase()
             .includes(query);
@@ -398,13 +473,18 @@ function visibleTests() {
 }
 
 function baseFilteredRows() {
-  return state.data.tests.filter((test) => state.suite === 'all' || test.suite === state.suite)
+  return (state.data?.tests ?? [])
+      .filter((test) => state.suite === 'all' || test.suite === state.suite)
       .map(deriveRow)
       .filter(Boolean);
 }
 
 function deriveRow(test) {
-  const segments = (test.segments ?? []).filter(segmentMatches);
+  if (!test.segments) {
+    return normalizedSummaryRow(test);
+  }
+
+  const segments = test.segments;
   if (segments.length === 0) {
     return null;
   }
@@ -485,6 +565,15 @@ function deriveRow(test) {
   };
 }
 
+function normalizedSummaryRow(test) {
+  return {
+    ...test,
+    active_dates: test.active_dates ?? [],
+    active_workflows: test.active_workflows ?? [],
+    active_variants: test.active_variants ?? [],
+  };
+}
+
 function failureRunsFromSegments(segments) {
   return segments.filter((segment) => segment.last_failed)
       .map((segment) => ({
@@ -498,32 +587,6 @@ function failureRunsFromSegments(segments) {
            }))
       .sort((left, right) => compareNullableDates(right.time, left.time))
       .slice(0, 20);
-}
-
-function segmentMatches(segment) {
-  return (
-      rangeMatches(segment.date) && (state.date === 'all' || segment.date === state.date) &&
-      (state.workflow === 'all' || segment.workflow === state.workflow) &&
-      (state.variant === 'all' || segment.variant === state.variant));
-}
-
-function rangeMatches(dateValue) {
-  if (state.range === 'all' || state.date !== 'all') {
-    return true;
-  }
-  const days = Number.parseInt(state.range, 10);
-  if (!Number.isFinite(days)) {
-    return true;
-  }
-  const latestDay = state.data.date_range?.last;
-  if (!latestDay) {
-    return true;
-  }
-  const latest = new Date(`${latestDay}T00:00:00Z`);
-  const cutoff = new Date(latest);
-  cutoff.setUTCDate(cutoff.getUTCDate() - (days - 1));
-  const current = new Date(`${dateValue}T00:00:00Z`);
-  return current >= cutoff && current <= latest;
 }
 
 function summarizeRows(rows) {
