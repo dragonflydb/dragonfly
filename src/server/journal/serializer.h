@@ -45,6 +45,14 @@ struct JournalReader {
   // Try reading entry from source.
   std::error_code ReadEntry(journal::ParsedEntry* dest);
 
+  size_t BufferedBytes() const {
+    return buf_.InputLen();
+  }
+
+  size_t BufferCapacity() const {
+    return buf_.Capacity();
+  }
+
  private:
   // Read from source until buffer contains at least num bytes.
   std::error_code EnsureRead(size_t num);

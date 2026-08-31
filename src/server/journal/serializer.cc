@@ -103,14 +103,18 @@ std::error_code JournalReader::EnsureRead(size_t num) {
   buf_.EnsureCapacity(remainder);
 
   // Try reading at least how much we need, but possibly more
+  const size_t buffered_before = buf_.InputLen();
+  const size_t capacity = buf_.Capacity();
   auto start = std::chrono::steady_clock::now();
   uint64_t read;
   SET_OR_RETURN(source_->ReadAtLeast(buf_.AppendBuffer(), remainder), read);
   auto elapsed = std::chrono::steady_clock::now() - start;
   if (elapsed > std::chrono::milliseconds{10}) {
-    VLOG(1) << "Journal socket read took "
-            << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << "ms for "
-            << remainder << " bytes";
+    VLOG(1) << "Journal socket read: elapsed_ms="
+            << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count()
+            << ", required_bytes=" << remainder << ", received_bytes=" << read
+            << ", reader_buffered_before=" << buffered_before
+            << ", reader_buffer_capacity=" << capacity;
   }
 
   // Happens on end of stream (for example, a too-small string buffer or a closed socket)
