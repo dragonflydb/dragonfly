@@ -5,14 +5,13 @@
 #include "server/rdb_load_context.h"
 
 #include <absl/container/flat_hash_set.h>
-#include <absl/strings/match.h>
 
 #include <algorithm>
 #include <limits>
 
 #include "base/logging.h"
-#include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
+#include "facade/resp_srv_parser.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -183,8 +182,8 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
   cntx.ns = &namespaces->GetDefaultNamespace();
 
   uint32_t consumed = 0;
-  facade::RespVec resp_vec;
-  facade::RedisParser parser;
+  cmn::BackedArguments parsed_args;
+  facade::RespSrvParser parser;
 
   // Prepend a whitespace so names starting with ':' are treated as names, not RESP tokens.
   def.insert(def.begin(), ' ');
@@ -195,26 +194,12 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
 
   std::string_view printable_def{def.data(), def.size() - kRespTerminator.size()};
 
-  io::MutableBytes buffer{reinterpret_cast<uint8_t*>(def.data()), def.size()};
-  auto res = parser.Parse(buffer, &consumed, &resp_vec);
+  facade::RespSrvParser::Buffer buffer{reinterpret_cast<const uint8_t*>(def.data()), def.size()};
+  auto res = parser.Parse(buffer, &consumed, &parsed_args);
 
-  if (res != facade::RedisParser::Result::OK) {
+  if (res != facade::RespSrvParser::OK) {
     LOG(ERROR) << "Bad " << error_context << ": " << printable_def;
     return;
-  }
-
-  // Temporary migration fix for backwards compatibility with old snapshots where TAG fields were
-  // serialized as "TAG SORTABLE SEPARATOR x" but parser expects "TAG SEPARATOR x SORTABLE".
-  // Reorder arguments if needed.
-  // TODO: Remove this workaround after Apr 2026.
-  for (size_t i = 0; i + 2 < resp_vec.size(); ++i) {
-    std::string_view cur = resp_vec[i].GetView();
-    std::string_view next = resp_vec[i + 1].GetView();
-    if (absl::EqualsIgnoreCase(cur, "SORTABLE") && absl::EqualsIgnoreCase(next, "SEPARATOR")) {
-      // SORTABLE SEPARATOR x -> SEPARATOR x SORTABLE
-      std::swap(resp_vec[i], resp_vec[i + 1]);      // SEPARATOR SORTABLE x
-      std::swap(resp_vec[i + 1], resp_vec[i + 2]);  // SEPARATOR x SORTABLE
-    }
   }
 
   // Prepend command name (FT.CREATE or FT.SYNUPDATE)
@@ -222,12 +207,13 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
   cntx_cmd.Init(&crb, &cntx);
 
   cntx_cmd.PushArg(command_name);
-  cntx_cmd.PushArg(resp_vec[0].GetView());  // index name
+  cntx_cmd.PushArg(parsed_args[0]);  // index name
   if (add_NX) {
     cntx_cmd.PushArg("NX");
   }
-  for (unsigned i = 1; i < resp_vec.size(); i++) {
-    cntx_cmd.PushArg(resp_vec[i].GetView());
+
+  for (size_t i = 1; i < parsed_args.size(); ++i) {
+    cntx_cmd.PushArg(parsed_args[i]);
   }
   service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
                            facade::AsyncPreference::ONLY_SYNC, nullptr);
