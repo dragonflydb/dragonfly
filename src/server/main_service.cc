@@ -1114,6 +1114,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
+  config_registry.RegisterMutable("jwt_validate");
 #ifdef WITH_SEARCH
   config_registry.RegisterMutable("MAXSEARCHRESULTS");
   config_registry.RegisterMutable("search_query_string_bytes");
@@ -1430,6 +1431,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   if (dfly_cntx.req_auth && !dfly_cntx.authenticated) {
     if (cmd_name != "AUTH" && !cid.IsQuit() && !cid.IsReset() && cmd_name != "HELLO") {
       return ErrorReply{"-NOAUTH Authentication required.", facade::kNoAuthErrType};
+    }
+  }
+
+  // JWT-derived auth carries its own expiration contract (see acl::JwtValidator): once
+  // it lapses, we must force a reauth.
+  if (dfly_cntx.authenticated &&
+      dfly_cntx.auth_expires_at != std::chrono::steady_clock::time_point::max() &&
+      dfly_cntx.auth_expires_at <= std::chrono::steady_clock::now()) {
+    if (cmd_name != "AUTH" && !cid.IsQuit() && !cid.IsReset() && cmd_name != "HELLO") {
+      return ErrorReply{"-NOAUTH JWT token expired, please re-authenticate.",
+                        facade::kNoAuthErrType};
     }
   }
 
@@ -2006,6 +2018,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   cntx->authed_username = "default";
   cntx->ns = &namespaces->GetOrInsert("");
   cntx->authenticated = false;
+  cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
 
   rb->SendSimpleString("RESET");
 }
