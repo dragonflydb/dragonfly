@@ -32,6 +32,36 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   return (acl_commands[index] & command_mask) != 0;
 }
 
+struct KeyPermissions {
+  bool read = false;
+  bool write = false;
+};
+
+// Per-key ACL requirements for commands that read one key and write another.
+KeyPermissions RequiredKeyPermissions(const CommandId& id, unsigned key_offset) {
+  if (id.name() == "GEOSEARCHSTORE") {
+    // dest key (offset 0) is written; source key (offset 1) is read-only.
+    if (key_offset == 0)
+      return {false, true};
+    if (key_offset == 1)
+      return {true, false};
+  }
+
+  return {id.IsReadOnly(), id.IsJournaled()};
+}
+
+bool KeyGlobAllowed(const AclKeys& keys, std::string_view target, KeyPermissions perms) {
+  for (auto& [elem, op] : keys.key_globs) {
+    if (!Matches(elem, target))
+      continue;
+    if (perms.read && (op == KeyOp::READ || op == KeyOp::READ_WRITE))
+      return true;
+    if (perms.write && (op == KeyOp::WRITE || op == KeyOp::READ_WRITE))
+      return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 // Exported (not anonymous-namespace-local) so callers without a live connection, like ACL DRYRUN's
@@ -146,20 +176,6 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
   const bool is_read_command = id.IsReadOnly();
   const bool is_write_command = id.IsJournaled();
 
-  auto iterate_globs = [&](auto target) {
-    for (auto& [elem, op] : keys.key_globs) {
-      if (Matches(elem, target)) {
-        if (is_read_command && (op == KeyOp::READ || op == KeyOp::READ_WRITE)) {
-          return true;
-        }
-        if (is_write_command && (op == KeyOp::WRITE || op == KeyOp::READ_WRITE)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  };
-
   bool keys_allowed = true;
   if (!keys.all_keys && id.first_key_pos() != 0 && (is_read_command || is_write_command)) {
     auto keys_index = DetermineKeys(&id, tail_args);
@@ -169,8 +185,14 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
     if (!keys_index)
       return {false, AclLog::Reason::KEY};
 
-    for (std::string_view key : keys_index->Range(tail_args))
-      keys_allowed &= iterate_globs(key);
+    for (unsigned idx : keys_index->Range()) {
+      const unsigned key_offset = idx - keys_index->start;
+      keys_allowed &= KeyGlobAllowed(keys, tail_args[idx], RequiredKeyPermissions(id, key_offset));
+    }
+
+    if (keys_index->bonus.has_value()) {
+      keys_allowed &= KeyGlobAllowed(keys, tail_args[*keys_index->bonus], {false, true});
+    }
   }
 
   return {keys_allowed, AclLog::Reason::KEY};
