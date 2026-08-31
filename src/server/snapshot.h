@@ -153,6 +153,11 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
     size_t keys_total = 0;
     size_t jounal_changes = 0;
     size_t flushed_under_lock = 0;
+
+    // DEBUG: CPU-debt throttling stats, logged once at the end of IterateBucketsFb.
+    uint64_t debt_sleep_count = 0;
+    uint64_t debt_sleep_usec_total = 0;
+    uint64_t debt_cycles_paid_total = 0;
   } stats_;
 
   SnapshotDataConsumerInterface* consumer_;

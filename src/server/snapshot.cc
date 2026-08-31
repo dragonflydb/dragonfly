@@ -6,6 +6,7 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
+#include <absl/time/clock.h>
 
 #include <mutex>
 #include <utility>
@@ -165,6 +166,7 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
 // Serializes all the entries with version less than snapshot_version_.
 void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
+  const int64_t iterate_start_ns = absl::GetCurrentTimeNanos();          // DEBUG
 
   // Covers cancellation exits; on the normal path the entries were already drained.
   absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
@@ -218,7 +220,13 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
         if (accrued_run_cycles_ > 0) {
           uint64_t debt = std::exchange(accrued_run_cycles_, 0);
           uint64_t sleep_usec = (debt * 1000'000 / base::CycleClock::Frequency()) / 2;
-          ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
+          uint64_t actual_sleep_usec = std::min<uint64_t>(sleep_usec, 2000ul);
+          ThisFiber::SleepFor(chrono::microseconds(actual_sleep_usec));
+
+          // DEBUG: throttling stats.
+          ++stats_.debt_sleep_count;
+          stats_.debt_sleep_usec_total += actual_sleep_usec;
+          stats_.debt_cycles_paid_total += debt;
         }
       }
 
@@ -246,6 +254,22 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     VLOG(1) << "Exit SnapshotSerializer total_serialized: " << stats.keys_serialized
             << ", buckets side saved " << stats.buckets_on_change << ", total bucket saved "
             << stats.buckets_serialized << ", journal_saved " << stats_.jounal_changes;
+  }
+
+  // DEBUG: unconditional throttling summary, always logged regardless of verbosity.
+  {
+    int64_t total_usec = (absl::GetCurrentTimeNanos() - iterate_start_ns) / 1000;
+    double sleep_pct =
+        total_usec > 0 ? (100.0 * double(stats_.debt_sleep_usec_total) / double(total_usec)) : 0;
+    double avg_sleep_usec = stats_.debt_sleep_count > 0 ? double(stats_.debt_sleep_usec_total) /
+                                                              double(stats_.debt_sleep_count)
+                                                        : 0;
+    LOG(INFO) << "[SNAPSHOT_THROTTLE_STATS] keys_total=" << stats_.keys_total
+              << " total_iterate_usec=" << total_usec
+              << " debt_sleep_count=" << stats_.debt_sleep_count
+              << " debt_sleep_usec_total=" << stats_.debt_sleep_usec_total
+              << " debt_sleep_pct_of_total=" << sleep_pct << " avg_sleep_usec=" << avg_sleep_usec
+              << " debt_cycles_paid_total=" << stats_.debt_cycles_paid_total;
   }
 }
 
