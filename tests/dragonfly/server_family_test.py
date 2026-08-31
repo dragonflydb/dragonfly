@@ -116,6 +116,69 @@ async def test_client_kill(df_factory):
                 await client_conn.ping()
 
 
+async def test_client_kill_filters(df_factory):
+    with df_factory.create(port=1115, admin_port=1116) as instance:
+        instance: DflyInstance
+        from redis.asyncio.retry import Retry
+        from redis.backoff import NoBackoff
+
+        admin_client = instance.admin_client()
+        await admin_client.ping()
+
+        # Test TYPE normal: kill all normal connections
+        c1 = instance.client(retry=Retry(NoBackoff(), 0))
+        c2 = instance.client(retry=Retry(NoBackoff(), 0))
+        await c1.ping()
+        await c2.ping()
+
+        killed = await admin_client.execute_command("CLIENT KILL TYPE normal")
+        assert killed >= 2
+
+        @assert_eventually(timeout=10)
+        async def assert_normals_killed():
+            assert len(await admin_client.execute_command("CLIENT LIST")) == 1
+
+        await assert_normals_killed()
+        await c1.aclose()
+        await c2.aclose()
+
+        # Test USER filter: kill connections by username (all connect as "default")
+        c3 = instance.client(retry=Retry(NoBackoff(), 0))
+        await c3.ping()
+
+        killed = await admin_client.execute_command("CLIENT KILL USER default TYPE normal")
+        assert killed >= 1
+
+        @assert_eventually(timeout=10)
+        async def assert_user_killed():
+            assert len(await admin_client.execute_command("CLIENT LIST")) == 1
+
+        await assert_user_killed()
+        await c3.aclose()
+
+        # Test SKIPME yes (default): admin should not kill itself
+        killed = await admin_client.execute_command("CLIENT KILL SKIPME yes TYPE pubsub")
+        assert killed == 0  # no pubsub connections, and self is skipped
+
+        # Test invalid TYPE value
+        with pytest.raises(ResponseError):
+            await admin_client.execute_command("CLIENT KILL TYPE badtype")
+
+        # Test MAXAGE 0: connections with age >= 0 (all connections) should be killed
+        c4 = instance.client(retry=Retry(NoBackoff(), 0))
+        await c4.ping()
+
+        killed = await admin_client.execute_command("CLIENT KILL MAXAGE 0 TYPE normal")
+        assert killed >= 1
+
+        @assert_eventually(timeout=10)
+        async def assert_maxage_killed():
+            assert len(await admin_client.execute_command("CLIENT LIST")) == 1
+
+        await assert_maxage_killed()
+        await c4.aclose()
+
+
 async def test_scan(async_client: aioredis.Redis):
     """
     make sure that the scan command is working with python

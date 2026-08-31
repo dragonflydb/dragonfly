@@ -327,6 +327,10 @@ class Connection : public util::Connection {
     return time(nullptr) - last_interaction_;
   }
 
+  time_t GetCreationTime() const {
+    return creation_time_;
+  }
+
   unsigned GetSendWaitTimeSec() const;
 
   Phase phase() const {

@@ -635,49 +635,105 @@ void ClientId(facade::ParsedArgs args, CommandContext* cmd_cntx) {
 
 void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners,
                 ServerFamily* server_family, CommandContext* cmd_cntx) {
-  std::function<bool(facade::Connection * conn)> evaluator;
+  optional<string_view> addr_filter;
+  optional<string_view> laddr_filter;
+  optional<uint32_t> id_filter;
+  optional<ClientListType> type_filter;
+  optional<string_view> user_filter;
+  optional<int64_t> maxage_filter;
+  bool skipme = true;
 
   if (args.size() == 1) {
     string_view ip_port = args[0];
     if (ip_port.find(':') != ip_port.npos) {
-      evaluator = [ip_port](facade::Connection* conn) {
-        return conn->RemoteEndpointStr() == ip_port;
-      };
+      addr_filter = ip_port;
+    } else {
+      return cmd_cntx->SendError(kSyntaxErr);
     }
-  } else if (args.size() == 2) {
-    string filter_type = absl::AsciiStrToUpper(args[0]);
-    string_view filter_value = args[1];
-    if (filter_type == "ADDR") {
-      evaluator = [filter_value](facade::Connection* conn) {
-        return conn->RemoteEndpointStr() == filter_value;
-      };
-    } else if (filter_type == "LADDR") {
-      evaluator = [filter_value](facade::Connection* conn) {
-        return conn->LocalBindStr() == filter_value;
-      };
-    } else if (filter_type == "ID") {
-      uint32_t id;
-      if (absl::SimpleAtoi(filter_value, &id)) {
-        if (server_family->IsMasterLinkClientId(id)) {
-          return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
-        }
-        evaluator = [id](facade::Connection* conn) { return conn->GetClientId() == id; };
+  } else if (args.size() % 2 != 0) {
+    return cmd_cntx->SendError(kSyntaxErr);
+  } else {
+    for (size_t i = 0; i < args.size(); i += 2) {
+      string filter_key = absl::AsciiStrToUpper(args[i]);
+      string_view filter_value = args[i + 1];
+
+      if (filter_key == "ADDR") {
+        addr_filter = filter_value;
+      } else if (filter_key == "LADDR") {
+        laddr_filter = filter_value;
+      } else if (filter_key == "ID") {
+        uint32_t id;
+        if (!absl::SimpleAtoi(filter_value, &id))
+          return cmd_cntx->SendError(kSyntaxErr);
+        id_filter = id;
+      } else if (filter_key == "TYPE") {
+        if (absl::EqualsIgnoreCase(filter_value, "normal"))
+          type_filter = ClientListType::kNormal;
+        else if (absl::EqualsIgnoreCase(filter_value, "master"))
+          type_filter = ClientListType::kMaster;
+        else if (absl::EqualsIgnoreCase(filter_value, "replica") ||
+                 absl::EqualsIgnoreCase(filter_value, "slave"))
+          type_filter = ClientListType::kReplica;
+        else if (absl::EqualsIgnoreCase(filter_value, "pubsub"))
+          type_filter = ClientListType::kPubsub;
+        else
+          return cmd_cntx->SendError(StrCat("Unknown client type '", filter_value, "'"));
+      } else if (filter_key == "USER") {
+        user_filter = filter_value;
+      } else if (filter_key == "SKIPME") {
+        if (absl::EqualsIgnoreCase(filter_value, "yes"))
+          skipme = true;
+        else if (absl::EqualsIgnoreCase(filter_value, "no"))
+          skipme = false;
+        else
+          return cmd_cntx->SendError(kSyntaxErr);
+      } else if (filter_key == "MAXAGE") {
+        int64_t age;
+        if (!absl::SimpleAtoi(filter_value, &age) || age < 0)
+          return cmd_cntx->SendError(kSyntaxErr);
+        maxage_filter = age;
+      } else {
+        return cmd_cntx->SendError(kSyntaxErr);
       }
     }
-    // TODO: Add support for KILL USER/TYPE/SKIPME
   }
 
-  if (!evaluator) {
-    return cmd_cntx->SendError(kSyntaxErr);
+  if (id_filter && server_family->IsMasterLinkClientId(*id_filter)) {
+    return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
   }
 
+  const uint32_t self_id = cmd_cntx->conn()->GetClientId();
   const bool is_admin_request = cmd_cntx->conn()->IsPrivileged();
+  const time_t now = time(nullptr);
+
+  auto evaluator = [&](facade::Connection* conn) -> bool {
+    if (skipme && conn->GetClientId() == self_id)
+      return false;
+    if (addr_filter && conn->RemoteEndpointStr() != *addr_filter)
+      return false;
+    if (laddr_filter && conn->LocalBindStr() != *laddr_filter)
+      return false;
+    if (id_filter && conn->GetClientId() != *id_filter)
+      return false;
+    if (type_filter && ClassifyConnection(conn) != *type_filter)
+      return false;
+    if (user_filter) {
+      auto* base_cntx = conn->cntx();
+      if (!base_cntx)
+        return false;
+      auto* dfly_cntx = static_cast<ConnectionContext*>(base_cntx);
+      if (dfly_cntx->authed_username != *user_filter)
+        return false;
+    }
+    if (maxage_filter && (now - conn->GetCreationTime()) < *maxage_filter)
+      return false;
+    return true;
+  };
 
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
 
   auto cb = [&](unsigned idx, ProactorBase* p) mutable {
-    // Step 1 aggregate the per thread connections from all listeners
     std::vector<facade::Connection::WeakRef> connections;
     auto traverse_cb = [&](unsigned idx, util::Connection* conn) {
       facade::Connection* dconn = static_cast<facade::Connection*>(conn);
@@ -693,7 +749,6 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
       listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
     }
 
-    // Step 2 kill the clients
     for (auto& tcon : connections) {
       facade::Connection* conn = tcon.Get();
       if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
@@ -3104,7 +3159,7 @@ string ServerFamily::FormatInfoMetrics(
       if (show) {
         size_t total = stats.events.hits + stats.events.misses;
         double hit_ratio =
-            (total > 0) ? static_cast<double>(stats.events.hits) / (total)*100.0 : 0.0;
+            (total > 0) ? static_cast<double>(stats.events.hits) / (total) * 100.0 : 0.0;
         string val = StrCat("keys=", stats.key_count, ",expires=", stats.expire_count,
                             ",hits=", stats.events.hits, ",misses=", stats.events.misses,
                             ",hit_ratio=", absl::StrFormat("%.2f", hit_ratio),
