@@ -755,7 +755,7 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
 
   DashTable* owner_;
   uint32_t seg_id_;
-  uint8_t limit_;  // if larger than ids, then it is just the prefix 1..limit
+  uint8_t limit_;  // number of entries: 1 or 2 values from ids_ or all possible buckets
   std::array<uint8_t, 2> ids_;
 };
 
