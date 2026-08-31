@@ -673,6 +673,7 @@ async def test_replica_reconnections_after_network_disconnect(
 
 
 @pytest.mark.debug_only
+@pytest.mark.exclude_epoll  # epoll sockets/file reads behave differently, load finishes too fast
 @dfly_args({"proactor_threads": 2})
 async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     master = df_factory.create()
