@@ -270,6 +270,20 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
                << " debt_sleep_usec_total=" << stats_.debt_sleep_usec_total
                << " debt_sleep_pct_of_total=" << sleep_pct << " avg_sleep_usec=" << avg_sleep_usec
                << " debt_cycles_paid_total=" << stats_.debt_cycles_paid_total;
+
+    double seq_wait_pct =
+        total_usec > 0 ? (100.0 * double(stats_.seq_wait_usec_total) / double(total_usec)) : 0;
+    double avg_seq_wait_usec =
+        stats_.seq_wait_blocked_count > 0
+            ? double(stats_.seq_wait_usec_total) / double(stats_.seq_wait_blocked_count)
+            : 0;
+    LOG(ERROR) << "[SNAPSHOT_SEQ_WAIT_STATS] seq_wait_count=" << stats_.seq_wait_count
+               << " seq_wait_blocked_count=" << stats_.seq_wait_blocked_count
+               << " seq_wait_writer_blocked_count=" << stats_.seq_wait_writer_blocked_count
+               << " seq_wait_usec_total=" << stats_.seq_wait_usec_total
+               << " seq_wait_pct_of_total=" << seq_wait_pct
+               << " avg_seq_wait_usec=" << avg_seq_wait_usec
+               << " seq_wait_peak_waiters=" << stats_.seq_wait_peak_waiters;
   }
 }
 
@@ -329,7 +343,28 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   // If A.id = 5, and then B.id = 6, and both are blocked here, it means that last_pushed_id_ < 4.
   // Once last_pushed_id_ = 4, A will be unblocked, while B will wait until A finishes pushing and
   // update last_pushed_id_ to 5.
+
+  // DEBUG: seq_cond_ contention stats.
+  bool is_writer_caller = !snapshot_fb_.IsActive();
+  bool will_block = (id != this->last_pushed_id_ + 1);
+  ++stats_.seq_wait_count;
+  int64_t seq_wait_start_ns = 0;
+  if (will_block) {
+    ++stats_.seq_wait_blocked_count;
+    if (is_writer_caller)
+      ++stats_.seq_wait_writer_blocked_count;
+    ++stats_.seq_wait_current_waiters;
+    stats_.seq_wait_peak_waiters =
+        std::max(stats_.seq_wait_peak_waiters, stats_.seq_wait_current_waiters);
+    seq_wait_start_ns = absl::GetCurrentTimeNanos();
+  }
+
   seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
+
+  if (will_block) {
+    stats_.seq_wait_usec_total += (absl::GetCurrentTimeNanos() - seq_wait_start_ns) / 1000;
+    --stats_.seq_wait_current_waiters;
+  }
 
   // Track egress just before the socket write. Attribute it to a high priority (out of order)
   // write when we don't run on the snapshot fiber.

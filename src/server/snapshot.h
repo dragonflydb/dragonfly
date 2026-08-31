@@ -158,6 +158,14 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
     uint64_t debt_sleep_count = 0;
     uint64_t debt_sleep_usec_total = 0;
     uint64_t debt_cycles_paid_total = 0;
+
+    // DEBUG: seq_cond_ (push-order ticket queue) contention stats.
+    uint64_t seq_wait_count = 0;                 // times we reached the wait point at all
+    uint64_t seq_wait_blocked_count = 0;         // times it wasn't already our turn
+    uint64_t seq_wait_writer_blocked_count = 0;  // subset of the above: caller was NOT snapshot_fb_
+    uint64_t seq_wait_usec_total = 0;            // cumulative real wall-clock time actually blocked
+    uint32_t seq_wait_current_waiters = 0;  // live count of fibers blocked in seq_cond_.wait() now
+    uint32_t seq_wait_peak_waiters = 0;     // high-water mark of the above
   } stats_;
 
   SnapshotDataConsumerInterface* consumer_;
