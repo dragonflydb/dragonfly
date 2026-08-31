@@ -105,6 +105,9 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   struct Params {
     float delay_prob = 0.0;
     std::pair<unsigned, unsigned> delay_lat_us = {0, 100};
+    bool start_paused = false;
+    bool block_on_update = false;
+    bool eventually_consistent = false;
   };
 
   TestDriver(Params params, DbSlice* slice, ExecutionState* cntx, CommandRegistry* reg)
@@ -153,7 +156,7 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   }
 
   void Start() {
-    SerializerBase::RegisterChangeListener(false);
+    SerializerBase::RegisterChangeListener(params_.eventually_consistent);
     journal::StartInThread();
     journal_id_ = journal::RegisterConsumer(this);
 
@@ -307,30 +310,62 @@ class SerializerBaseTest : public BaseFamilyTest {
   std::optional<TestDriver> driver_;
 };
 
-// Check that basic serialization of debug populate is successful and fullfils all driver asserts
-TEST_F(SerializerBaseTest, StaticDebugPopulate) {
+class SerializerBaseParamTest : public SerializerBaseTest,
+                                public testing::WithParamInterface<bool> {};
+
+INSTANTIATE_TEST_SUITE_P(WithAppender, SerializerBaseParamTest, testing::Bool());
+
+// Snapshots a populated DB while a writer inserts new (omittable) keys.
+// With an appender it also runs non-omittable APPENDs
+TEST_P(SerializerBaseParamTest, StaticWithSetAndAppend) {
+  driver_params.eventually_consistent = true;
+
+  const bool with_appender = GetParam();
   const size_t kKeys = 10000;
+  const size_t kNew = 30000;
+
   Run({"DEBUG", "POPULATE", std::to_string(kKeys)});
   Start();
 
-  // Issue appends at the same time
   std::atomic_bool running = true;
-  auto worker = pp_->at(0)->LaunchFiber([&] {
-    for (unsigned i = 0; running.load(std::memory_order_relaxed) && i < kKeys; i++) {
-      Run("W1", {"APPEND", absl::StrCat("key:", i), "D"});
+  util::fb2::Fiber appender;
+  if (with_appender) {
+    appender = pp_->at(0)->LaunchFiber([&] {
+      for (unsigned i = 0; running.load(std::memory_order_relaxed) && i < kKeys; i++) {
+        Run("W2", {"APPEND", absl::StrCat("key:", i), "D"});
+        util::ThisFiber::Yield();
+      }
+    });
+  }
+  auto setter = pp_->at(0)->LaunchFiber([&] {
+    for (unsigned i = 0; running.load(std::memory_order_relaxed) && i < kNew; i++) {
+      Run("W1", {"SET", absl::StrCat("newkey:", i), "v"});
       util::ThisFiber::Yield();
     }
   });
 
-  // Finish and join worker
-  auto [stats, baselines, _] = Finish();
+  // Wait for the traversal loop to finish while the writers are still running, then finalize.
+  Change([](TestDriver& d) { d.Wait(); });
   running = false;
-  worker.Join();
+  if (with_appender)
+    appender.Join();
+  setter.Join();
+  auto [stats, baselines, journal_writes] = Finish();
 
-  // Expect serialized keys
-  EXPECT_EQ(stats.keys_serialized, kKeys);
+  // Pre-existing keys always exist and must be strictly covered by a baseline (emitted before any
+  // journal write by the ordering invariant).
   for (unsigned i = 0; i < kKeys; i++)
     EXPECT_TRUE(baselines.contains(absl::StrCat("key:", i)));
+
+  // New keys are inserted mid-sweep, so a surviving one must be covered by a baseline or a journal
+  // write; a key omitted past the cursor by a split would be missing from both.
+  for (unsigned i = 0; i < kNew; i++) {
+    auto key = absl::StrCat("newkey:", i);
+    if (Run({"EXISTS", key}).GetInt() == 1) {
+      EXPECT_TRUE(baselines.contains(key) || journal_writes.contains(key))
+          << "silently lost " << key;
+    }
+  }
 }
 
 // Check serialization of lists is successful with parallel additions to list.
