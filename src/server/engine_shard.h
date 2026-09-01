@@ -46,9 +46,6 @@ class EngineShard {
     // cluster stats
     uint64_t total_migrated_keys = 0;
 
-    // how many huffman tables were built successfully in the background
-    uint32_t huffman_tables_built = 0;
-
     // Stream access pattern metrics (per-command, not per-entry).
     uint64_t stream_sequential_accesses = 0;  // head/tail: XADD, XREAD recent, XTRIM, etc.
     uint64_t stream_random_accesses = 0;      // arbitrary-ID lookups: XRANGE partial, XDEL, XCLAIM
@@ -352,7 +349,7 @@ class EngineShard {
 
   IntentLock shard_lock_;
 
-  uint32_t defrag_task_id_ = UINT32_MAX, huffman_check_task_id_ = UINT32_MAX;
+  uint32_t defrag_task_id_ = UINT32_MAX;
   EvictionTaskState eviction_state_;  // Used on eviction fiber
   util::fb2::Fiber fiber_heartbeat_periodic_;
   util::fb2::Done fiber_heartbeat_periodic_done_;
