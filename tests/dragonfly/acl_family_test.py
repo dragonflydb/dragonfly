@@ -632,7 +632,15 @@ async def test_geosearchstore_acl(df_server):
         await user.execute_command(cmd)
 
     await admin.execute_command("ACL SETUSER gssuser resetkeys %RW~out %R~secret")
-    assert await user.execute_command(cmd) == 1
+    # retry for a few seconds while the ACL SETUSER propagates to the other connection
+    start = time.time()
+    stored = None
+    while stored is None and time.time() - start < 10:
+        try:
+            stored = await user.execute_command(cmd)
+        except redis.exceptions.NoPermissionError:
+            await asyncio.sleep(0.1)
+    assert stored == 1, "GEOSEARCHSTORE stayed denied after the grant was acknowledged"
     assert "member" in await user.execute_command("ZRANGE out 0 -1")
 
     await admin.execute_command("ACL SETUSER gssuser -GEOSEARCHSTORE")
