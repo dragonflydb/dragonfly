@@ -154,8 +154,9 @@ unsigned char* ZzlInsertAt(unsigned char* zl, unsigned char* eptr, std::string_v
 
 double ZzlStrtod(unsigned char* vstr, unsigned int vlen) {
   char buf[128];
-  if (vlen > sizeof(buf))
-    vlen = sizeof(buf);
+  // Leave room for the terminating NUL: buf[vlen] must stay in bounds.
+  if (vlen >= sizeof(buf))
+    vlen = sizeof(buf) - 1;
   memcpy(buf, vstr, vlen);
   buf[vlen] = '\0';
   return strtod(buf, NULL);

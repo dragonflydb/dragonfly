@@ -1544,6 +1544,8 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
     len = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(NULL), len);
+    if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
+      return Unexpected(errc::empty_key);
     if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
       len *= 2;
     }
@@ -1623,6 +1625,8 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
     len = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(NULL), len);
+    if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
+      return Unexpected(errc::empty_key);
 
     if (rdbtype == RDB_TYPE_HASH) {
       len *= 2;
@@ -1944,7 +1948,7 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     }  // while (consumers_num)
   }    // while (cgroup_num)
 
-  return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
+  return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
 auto RdbLoaderBase::ReadRedisModule2() -> io::Result<OpaqueObj> {
@@ -2679,7 +2683,12 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     ++keys_loaded;
-    RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+    if (auto ec = LoadKeyValPair(type, &settings); ec) {
+      if (ec != RdbError(errc::empty_key))
+        return ec;
+      // Nothing is left of the value to consume; skip the key and keep loading.
+      LOG(WARNING) << "Skipping empty key: " << absl::CHexEscape(last_key_loaded_);
+    }
 
     VLOG(2) << "LoadKeyValPair key=" << last_key_loaded_ << " rdb_type=" << type
             << " db= " << cur_db_index_;

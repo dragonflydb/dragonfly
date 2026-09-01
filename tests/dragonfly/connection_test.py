@@ -2669,9 +2669,6 @@ async def test_pipeline_cache_only_async_squashed_dispatches(df_factory):
 # shrink (because it's underutilized).
 @dfly_args({"proactor_threads": 1})
 async def test_pipeline_cache_size(df_server: DflyInstance):
-    # tracking issue: https://github.com/dragonflydb/dragonfly/issues/8163
-    if is_resp_io_loop_v2(df_server):
-        pytest.skip("V2 does not have reclamation yet")
     # Start 1 client.
     good = df_server.client()
     bad = df_server.client()

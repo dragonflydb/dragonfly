@@ -2847,7 +2847,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (num_notfound > 0u)
-    return rb->SendError(IndexNotFoundMsg(idx_name));
+    return rb->SendError(absl::StrCat(idx_name, ": no such index"));
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());

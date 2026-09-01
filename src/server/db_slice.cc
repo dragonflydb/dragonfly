@@ -2157,6 +2157,11 @@ bool DbSlice::IsOmittableWrite(const Context& cntx, const ChangeReq& req) {
   if (!journal_omit_redundant_writes_)
     return false;
 
+  // Stash entries can be moved backwards relative to the cursor by TryMoveFromStash,
+  // breaking our reachability assumption. We must serialize now
+  if (req.ContainsStashBucket())
+    return false;
+
   bool omit_update = false;
   if (cntx.is_omittable_operation && change_cb_.size() == 1) {
     auto gv = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };

@@ -2047,7 +2047,7 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
       // absl::StrCat truncates to ~6 significant digits; scores must round-trip exactly
       // (e.g. geohash-derived scores from GEORADIUS/GEORADIUSBYMEMBER STORE) since this is
       // the only replay path for callers using NO_AUTOJOURNAL.
-      scores.push_back(RedisReplyBuilder::FormatDouble(score, buf, sizeof(buf)));
+      scores.emplace_back(RedisReplyBuilder::FormatDouble(score, buf, sizeof(buf)));
       mapped.push_back(scores.back());
       mapped.push_back(member);
     }
@@ -2829,6 +2829,13 @@ LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, bool deep, Pr
   }
 
   unsigned char* src_lp = (unsigned char*)blob.data();
+
+  // Reject an unpaired tail; gated on deep since counting may scan not-yet-validated entries.
+  if (deep && lpLength(src_lp) % 2 != 0) {
+    LOG(ERROR) << "Zset listpack has an odd number of entries.";
+    return LoadBlobResult::kCorrupted;
+  }
+
   unsigned long long bytes = lpBytes(src_lp);
   unsigned char* lp = (uint8_t*)zmalloc(bytes);
   std::memcpy(lp, src_lp, bytes);

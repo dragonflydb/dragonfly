@@ -964,6 +964,8 @@ OpStatus OpRandMember(const OpArgs& op_args, std::string_view key, int count,
   const PrimeValue& pv = find_res.value()->second;
 
   const std::uint32_t size = pv.Size();
+  if (size == 0)  // only a RESTOREd payload can yield this; NonUniquePicksGenerator(0) CHECKs
+    return OpStatus::OK;
   const bool picks_are_unique = count >= 0;
   // Widen to int64_t before std::abs: for count == INT_MIN, std::abs(count) on an int is UB
   // (the magnitude isn't representable in int). The magnitude fits in int64_t and uint32_t.
@@ -1709,6 +1711,8 @@ auto SetFamily::LoadLPSetBlob(std::string_view blob, bool deep, PrimeValue* pv) 
   }
 
   unsigned char* lp = (unsigned char*)blob.data();
+  if (lpLength(lp) == 0)
+    return LoadBlobResult::kEmpty;
   void* set_ptr = g_use_oah_set ? static_cast<void*>(BuildSetFromLP<OAHSet>(lp))
                                 : static_cast<void*>(BuildSetFromLP<StringSet>(lp));
   if (!set_ptr)

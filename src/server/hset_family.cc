@@ -1586,6 +1586,12 @@ auto HSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* 
     return LoadBlobResult::kCorrupted;
   }
 
+  // Reject an unpaired tail; gated on deep since counting may scan not-yet-validated entries.
+  if (deep && lpLength((uint8_t*)blob.data()) % 2 != 0) {
+    LOG(ERROR) << "Hash listpack has an odd number of entries.";
+    return LoadBlobResult::kCorrupted;
+  }
+
   unsigned char* lp = lpNew(blob.size());
   std::memcpy(lp, blob.data(), blob.size());
 

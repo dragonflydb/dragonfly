@@ -608,6 +608,66 @@ async def test_acl_keys(async_client):
 
 
 @pytest.mark.asyncio
+async def test_geosearchstore_acl(df_server):
+    admin = df_server.client()
+    user = df_server.client()
+    cmd = "GEOSEARCHSTORE out secret FROMMEMBER member BYRADIUS 100 km"
+
+    await admin.execute_command("DEL out secret")
+    await admin.execute_command("ACL DELUSER gssuser")
+
+    await admin.execute_command("GEOADD secret 13.361389 38.115556 member")
+    await admin.execute_command("ZADD out 1 placeholder")
+
+    await admin.execute_command("ACL SETUSER gssuser ON >pass +GEOSEARCHSTORE +@geo +ZRANGE")
+
+    await admin.execute_command("ACL SETUSER gssuser resetkeys %W~secret %RW~out")
+    await user.execute_command("AUTH gssuser pass")
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await user.execute_command(cmd)
+    assert await user.execute_command("ZRANGE out 0 -1") == ["placeholder"]
+
+    await admin.execute_command("ACL SETUSER gssuser resetkeys %R~out %R~secret")
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await user.execute_command(cmd)
+
+    await admin.execute_command("ACL SETUSER gssuser resetkeys %RW~out %R~secret")
+    # retry for a few seconds while the ACL SETUSER propagates to the other connection
+    start = time.time()
+    stored = None
+    while stored is None and time.time() - start < 10:
+        try:
+            stored = await user.execute_command(cmd)
+        except redis.exceptions.NoPermissionError:
+            await asyncio.sleep(0.1)
+    assert stored == 1, "GEOSEARCHSTORE stayed denied after the grant was acknowledged"
+    assert "member" in await user.execute_command("ZRANGE out 0 -1")
+
+    await admin.execute_command("ACL SETUSER gssuser -GEOSEARCHSTORE")
+    revoked = df_server.client()
+    await revoked.execute_command("AUTH gssuser pass")
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await revoked.execute_command(cmd)
+
+
+@pytest.mark.asyncio
+async def test_geosearchstore_acl_dryrun(async_client):
+    cmd = "GEOSEARCHSTORE out secret FROMMEMBER member BYRADIUS 100 km"
+
+    await async_client.execute_command("ACL SETUSER gssuser ON >pass +GEOSEARCHSTORE +@geo")
+    await async_client.execute_command("ACL SETUSER gssuser resetkeys %W~secret %RW~out")
+    resp = await async_client.execute_command(f"ACL DRYRUN gssuser {cmd}")
+    assert "no permissions" in resp.lower()
+
+    await async_client.execute_command("ACL SETUSER gssuser resetkeys %RW~out %R~secret")
+    assert await async_client.execute_command(f"ACL DRYRUN gssuser {cmd}") == "OK"
+
+    await async_client.execute_command("ACL SETUSER gssuser -GEOSEARCHSTORE")
+    resp = await async_client.execute_command(f"ACL DRYRUN gssuser {cmd}")
+    assert "no permissions" in resp.lower()
+
+
+@pytest.mark.asyncio
 async def test_namespaces(df_server):
     admin = df_server.client()
     assert await admin.execute_command("SET foo admin") == "OK"

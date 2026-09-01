@@ -34,6 +34,18 @@ namespace dfly {
 
 class GenericFamilyTest : public BaseFamilyTest {};
 
+TEST_F(GenericFamilyTest, TtlOfExpiredKeyDuringPause) {
+  // CLIENT PAUSE disables expiry; a key past its deadline is logically gone, not a negative TTL.
+  Run({"set", "k", "v", "px", "10"});
+  Run({"client", "pause", "5000", "write"});
+  AdvanceTime(300);
+  EXPECT_THAT(Run({"pttl", "k"}), IntArg(-2));
+  EXPECT_THAT(Run({"ttl", "k"}), IntArg(-2));
+  EXPECT_THAT(Run({"expiretime", "k"}), IntArg(-2));
+  EXPECT_THAT(Run({"pexpiretime", "k"}), IntArg(-2));
+  Run({"client", "unpause"});
+}
+
 TEST_F(GenericFamilyTest, Expire) {
   Run({"set", "key", "val"});
 
@@ -1006,6 +1018,40 @@ TEST_F(GenericFamilyTest, SortStoreEmptyResult) {
   EXPECT_EQ(0, Run({"exists", "dest"}).GetInt()) << "empty SORT STORE must delete existing key";
 }
 
+TEST_F(GenericFamilyTest, SortStoreNotLastOption) {
+  // STORE may appear anywhere among the options; the destination must still be a transaction
+  // key, otherwise a cross-shard destination is silently never written.
+  Run({"rpush", "src", "b", "a", "c"});
+  for (string_view dst : {"d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8"}) {  // spans all shards
+    Run({"set", dst, "old"});
+    EXPECT_THAT(Run({"sort", "src", "store", dst, "alpha"}), IntArg(3)) << dst;
+    EXPECT_THAT(Run({"lrange", dst, "0", "-1"}), RespArray(ElementsAre("a", "b", "c"))) << dst;
+    EXPECT_THAT(Run({"sort", "src", "alpha", "limit", "0", "2", "store", dst, "desc"}), IntArg(2))
+        << dst;
+    EXPECT_THAT(Run({"lrange", dst, "0", "-1"}), RespArray(ElementsAre("c", "b"))) << dst;
+  }
+}
+
+TEST_F(GenericFamilyTest, SortStoreMissingSource) {
+  // A missing source still overwrites (i.e. deletes) the destination and replies with 0.
+  Run({"rpush", "dst", "1", "2", "3"});
+  EXPECT_THAT(Run({"sort", "nosuch", "store", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  Run({"rpush", "dst", "1"});
+  EXPECT_THAT(Run({"sort", "nosuch", "by", "nosort", "store", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  Run({"set", "dst", "s"});
+  EXPECT_THAT(Run({"sort", "nosuch", "alpha", "store", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  Run({"set", "str", "x"});
+  Run({"rpush", "dst", "1"});
+  EXPECT_THAT(Run({"sort", "str", "store", "dst"}), ErrArg("WRONGTYPE"));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(1));
+}
+
 TEST_F(GenericFamilyTest, SortStoreResetsExpiry) {
   // SORT set STORE dest, where dest has an expiry — dest expiry must be cleared.
   Run({"del", "src", "dest"});
@@ -1350,11 +1396,49 @@ TEST_F(GenericFamilyTest, RestoreOobHashListpack) {
   Run({"hgetall", "pwn"});
 }
 
+// A zero-member collection is never serialized, so RESTORE must reject it rather than create a
+// present-but-empty key. One payload per encoding, each with a valid version+CRC footer.
+TEST_F(GenericFamilyTest, RestoreRejectsEmptyCollections) {
+  uint8_t set_len0[] = {0x02, 0x00, 0x0b, 0x00, 0x53, 0x11, 0x84, 0x73, 0x66, 0x16, 0xd0, 0x61};
+  uint8_t hash_len0[] = {0x04, 0x00, 0x0b, 0x00, 0xfa, 0xee, 0x2b, 0xb3, 0xda, 0x0d, 0x7c, 0x36};
+  uint8_t intset0[] = {0x0b, 0x08, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                       0x0b, 0x00, 0x33, 0x9c, 0x86, 0x6e, 0x68, 0x44, 0x64, 0xb0};
+  uint8_t set_lp0[] = {0x14, 0x07, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0b,
+                       0x00, 0x2b, 0x78, 0x47, 0x5d, 0x0d, 0x6c, 0x14, 0x34};
+  uint8_t hash_lp0[] = {0x10, 0x07, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0b,
+                        0x00, 0xb3, 0xcd, 0x2b, 0xfb, 0x89, 0x06, 0xb3, 0xb1};
+  for (auto payload :
+       {ToSV(set_len0), ToSV(hash_len0), ToSV(intset0), ToSV(set_lp0), ToSV(hash_lp0)}) {
+    Run({"del", "e"});
+    EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+    EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+  }
+}
+
 TEST_F(GenericFamilyTest, RestoreOobZsetListpack) {
   uint8_t payload[] = {0x11, 0x0c, 0x0c, 0x00, 0x00, 0x00, 0x02, 0x00, 0xf0, 0xff, 0xff, 0xff,
                        0x7f, 0xff, 0x0b, 0x00, 0xc1, 0xf6, 0xd5, 0x74, 0xd3, 0x02, 0x6a, 0x79};
   EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
   Run({"zrange", "pwn", "0", "-1"});
+}
+
+// An odd-entry HASH/ZSET listpack must be rejected: a later pairwise walk NULL-derefs the tail.
+TEST_F(GenericFamilyTest, RestoreRejectsOddHashListpack) {
+  uint8_t payload[] = {0x10, 0x13, 0x13, 0x00, 0x00, 0x00, 0x03, 0x00, 0x82, 0x66, 0x31,
+                       0x03, 0x82, 0x76, 0x31, 0x03, 0x82, 0x66, 0x32, 0x03, 0xff, 0x0c,
+                       0x00, 0x6d, 0x3d, 0x7d, 0xb5, 0xd6, 0x7a, 0xa3, 0x1f};
+  EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
+  EXPECT_THAT(Run({"exists", "pwn"}), IntArg(0));
+  Run({"hgetall", "pwn"});
+}
+
+TEST_F(GenericFamilyTest, RestoreRejectsOddZsetListpack) {
+  uint8_t payload[] = {0x11, 0x12, 0x12, 0x00, 0x00, 0x00, 0x03, 0x00, 0x82, 0x6d,
+                       0x31, 0x03, 0x81, 0x31, 0x02, 0x82, 0x6d, 0x32, 0x03, 0xff,
+                       0x0c, 0x00, 0x6e, 0x40, 0x41, 0x0c, 0x8b, 0x6d, 0xe0, 0xe8};
+  EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
+  EXPECT_THAT(Run({"exists", "pwn"}), IntArg(0));
+  Run({"zrank", "pwn", "zzz"});
 }
 
 TEST_F(GenericFamilyTest, RestoreOobListQuicklist) {

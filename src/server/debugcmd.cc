@@ -5,17 +5,12 @@
 
 #include "core/detail/gen_utils.h"
 
-#define HUF_STATIC_LINKING_ONLY
-
 extern "C" {
-#include "huff/hist.h"
-#include "huff/huf.h"
 #include "redis/redis_aux.h"
 }
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
-#include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <lz4.h>
@@ -28,7 +23,6 @@ extern "C" {
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/huff_coder.h"
 #include "core/qlist.h"
 #include "core/sorted_map.h"
 #include "core/string_map.h"
@@ -265,115 +259,6 @@ void DoSegmentHist(EngineShard* shard, ConnectionContext* cntx, SegmentInfo* inf
       ThisFiber::Yield();
     }
   }
-}
-
-struct HufHist {
-  static constexpr unsigned kMaxSymbol = 255;
-  array<unsigned, kMaxSymbol + 1> hist;  // histogram of symbols.
-  unsigned max_symbol = 0;               // what is the max symbol of the histogram.
-
-  HufHist() {
-    hist.fill(0);
-  }
-
-  void Merge(const HufHist& other) {
-    max_symbol = std::max(max_symbol, other.max_symbol);
-    for (unsigned i = 0; i <= max_symbol; ++i) {
-      hist[i] += other.hist[i];
-    }
-  }
-
-  unsigned MaxFreqCount() const;
-};
-
-unsigned HufHist::MaxFreqCount() const {
-  unsigned max_freq = 0;
-  for (unsigned i = 0; i < kMaxSymbol; ++i) {
-    if (hist[i] > max_freq) {
-      max_freq = hist[i];
-    }
-  }
-  return max_freq;
-}
-
-constexpr unsigned kMaxFreqPerShard = 1U << 20;
-constexpr unsigned kMaxFreqTotal = static_cast<unsigned>((1U << 31) * 0.9);
-
-void DoComputeHist(CompactObjType type, EngineShard* shard, ConnectionContext* cntx,
-                   HufHist* dest) {
-  auto& db_slice = cntx->ns->GetDbSlice(shard->shard_id());
-  DbTable* dbt = db_slice.GetDBTable(cntx->db_index());
-  CHECK(dbt);
-
-  PrimeTable::Cursor cursor;
-  unsigned steps = 0;
-  string scratch;
-  // Sample up to kMaxHuffLen bytes per string so the trained huffman table matches the byte
-  // distribution of the data that EncodeString will actually compress.
-  constexpr size_t kMaxLen = CompactObj::kMaxHuffLen;
-  PrimeTable& table = dbt->prime;
-
-  do {
-    cursor = table.Traverse(cursor, [&](PrimeIterator it) {
-      scratch.clear();
-      ++steps;
-      if (type == kInvalidCompactObjType) {  // KEYSPACE
-        if (it->first.MallocUsed() > 0) {
-          it->first.GetString(&scratch);
-        }
-      } else if (type == OBJ_STRING && it->second.ObjType() == OBJ_STRING) {
-        if (it->second.MallocUsed() > 0) {
-          it->second.GetString(&scratch);
-        }
-      } else if (type == OBJ_ZSET && it->second.ObjType() == OBJ_ZSET) {
-        container_utils::IterateSortedSet(
-            it->second, [&](container_utils::ContainerEntry entry, double) {
-              ++steps;
-              if (entry.IsString()) {
-                HIST_add(dest->hist.data(), entry.data(), entry.size());
-              }
-              return true;
-            });
-      } else if (type == OBJ_LIST && it->second.ObjType() == OBJ_LIST) {
-        container_utils::IterateList(it->second, [&](container_utils::ContainerEntry entry) {
-          ++steps;
-          if (entry.IsString()) {
-            HIST_add(dest->hist.data(), entry.data(), entry.size());
-          }
-          return true;
-        });
-      } else if (type == OBJ_HASH && it->second.ObjType() == OBJ_HASH) {
-        container_utils::IterateMap(it->second, [&](container_utils::ContainerEntry key,
-                                                    container_utils::ContainerEntry value) {
-          ++steps;
-          if (key.IsString()) {
-            HIST_add(dest->hist.data(), key.data(), key.size());
-          }
-          if (value.IsString()) {
-            HIST_add(dest->hist.data(), value.data(), value.size());
-          }
-          return true;
-        });
-      }
-
-      if (!scratch.empty()) {
-        size_t len = std::min(scratch.size(), kMaxLen);
-        HIST_add(dest->hist.data(), scratch.data(), len);
-      }
-    });
-
-    if (steps >= 40000) {
-      if (dest->MaxFreqCount() > kMaxFreqPerShard) {
-        break;
-      }
-
-      steps = 0;
-      ThisFiber::Yield();
-    }
-  } while (cursor);
-  dest->max_symbol = HufHist::kMaxSymbol;
-  while (dest->max_symbol && dest->hist[dest->max_symbol] == 0)
-    --dest->max_symbol;
 }
 
 ObjInfo InspectOp(ConnectionContext* cntx, string_view key) {
@@ -724,11 +609,6 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    Stop traffic logging started by a previous TRAFFIC START.",
         "RECVSIZE [<tid> | ENABLE | DISABLE]",
         "    Prints the histogram of the received request sizes on the given thread",
-        "COMPRESSION [IMPORT <bintable> | EXPORT | SET <bintable>] [type]",
-        "    Estimate the compressibility of values of the given type. if no type is given, ",
-        "    checks compressibility of keys. If IN is specified, then the provided ",
-        "    bintable is used to check compressibility. If OUT is specified, then ",
-        "    the serialized table is printed as well",
         "IOSTATS [PS]",
         "    Prints IO stats per thread. If PS is specified, prints thread-level stats ",
         "    per second.",
@@ -820,10 +700,6 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   if (subcmd == "VALUES" && parser.HasNext()) {
     return Values(parser, cmd_cntx);
   }
-  if (subcmd == "COMPRESSION") {
-    return Compression(parser, cmd_cntx);
-  }
-
   if (subcmd == "IOSTATS") {
     return IOStats(parser, cmd_cntx);
   }
@@ -1604,145 +1480,6 @@ void DebugCmd::Values(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   return cmd_cntx->SendError(kSyntaxErr);
-}
-
-static size_t PostProcessHist(HufHist* dest) {
-  size_t total_freq = 0;
-  auto& hist = dest->hist;
-  unsigned max_freq = 0;
-
-  for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
-    // raw_size may count less characters than the actual size because
-    // we may cut the counting early.
-    total_freq += hist[i];
-    if (hist[i] == 0) {
-      hist[i] = 1;  // Avoid zero frequency symbols.
-    }
-  }
-
-  if (total_freq > kMaxFreqTotal) {
-    // huffman encoder has a bug with frequencies too high, so we scale down everything
-    // to avoid overflow.
-    double scale = static_cast<double>(max_freq) / kMaxFreqTotal;
-    for (unsigned i = 0; i <= HufHist::kMaxSymbol; i++) {
-      hist[i] = unsigned(hist[i] / scale);
-      if (hist[i] == 0) {
-        hist[i] = 1;  // Avoid zero frequency symbols.
-      }
-    }
-  }
-  return total_freq;
-}
-
-void DebugCmd::Compression(CmdArgParser parser, CommandContext* cmd_cntx) {
-  CompactObjType type = kInvalidCompactObjType;
-  string bintable;
-  bool print_bintable = false;
-
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (parser.Check("SET", &bintable)) {
-    RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
-
-    // SET <bintable> [type]
-    string raw;
-    atomic_bool succeed = absl::Base64Unescape(bintable, &raw);
-    if (succeed) {
-      CompactObj::HuffmanDomain domain = CompactObj::HUFF_KEYS;
-      if (parser.HasNext()) {
-        string_view type_str = parser.Next();
-        type = ObjTypeFromString(type_str);
-        if (type != OBJ_STRING) {  // Currently only string type is supported.
-          return cmd_cntx->SendError(kSyntaxErr);
-        }
-        domain = CompactObj::HUFF_STRING_VALUES;
-      }
-      shard_set->RunBriefInParallel([&](EngineShard* shard) {
-        if (!CompactObj::InitHuffmanThreadLocal(domain, raw)) {
-          succeed = false;
-        }
-      });
-    }
-    return succeed ? rb->SendOk() : cmd_cntx->SendError("Failed to set bintable");
-  }
-
-  if (parser.Check("EXPORT")) {
-    print_bintable = true;
-  } else if (parser.Check("IMPORT", &bintable)) {
-    RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
-
-    string raw;
-    bool succeed = absl::Base64Unescape(bintable, &raw);
-    if (succeed) {
-      bintable = raw;
-    }
-  }
-
-  if (parser.HasNext()) {
-    string_view type_str = parser.Next();
-    type = ObjTypeFromString(type_str);
-    if (type == kInvalidCompactObjType) {
-      return cmd_cntx->SendError(kSyntaxErr);
-    }
-  }
-
-  RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
-
-  fb2::Mutex mu;
-  HufHist hist;
-  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
-    HufHist local;
-    DoComputeHist(type, shard, cntx_, &local);
-    std::unique_lock lk(mu);
-    hist.Merge(local);
-  });
-
-  size_t num_bits = 0, compressed_size = 0, raw_size = 0;
-  if (hist.max_symbol) {
-    HuffmanEncoder huff_enc;
-    string err_msg;
-
-    raw_size = PostProcessHist(&hist);
-
-    if (bintable.empty()) {
-      if (!huff_enc.Build(hist.hist.data(), HufHist::kMaxSymbol, &err_msg)) {
-        return cmd_cntx->SendError(StrCat("Internal error: ", err_msg));
-      }
-    } else {
-      // Try to read the bintable and create a ctable from it.
-      if (!huff_enc.Load(bintable, &err_msg)) {
-        return cmd_cntx->SendError(StrCat("Internal error: ", err_msg));
-      }
-    }
-    num_bits = huff_enc.num_bits();
-    compressed_size = huff_enc.EstimateCompressedSize(hist.hist.data(), HufHist::kMaxSymbol);
-
-    if (print_bintable) {
-      auto exported = huff_enc.Export();
-      bintable = exported.value_or(string{});
-    } else {
-      bintable.clear();
-    }
-  }
-
-  unsigned map_len = print_bintable ? 6 : 5;
-
-  rb->StartCollection(map_len, CollectionType::MAP);
-  rb->SendSimpleString("max_symbol");
-  rb->SendLong(hist.max_symbol);
-
-  rb->SendSimpleString("max_bits");
-  rb->SendLong(num_bits);
-  rb->SendSimpleString("raw_size");
-  rb->SendLong(raw_size);
-  rb->SendSimpleString("compressed_size");
-  rb->SendLong(compressed_size);
-  rb->SendSimpleString("ratio");
-  double ratio = raw_size > 0 ? static_cast<double>(compressed_size) / raw_size : 0;
-  rb->SendDouble(ratio);
-  if (print_bintable) {
-    rb->SendSimpleString("bintable");
-    rb->SendBulkString(absl::Base64Escape(bintable));
-  }
 }
 
 void DebugCmd::IOStats(facade::CmdArgParser parser, CommandContext* cmd_cntx) {

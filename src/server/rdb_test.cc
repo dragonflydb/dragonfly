@@ -50,6 +50,7 @@ ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
 ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
+ABSL_DECLARE_FLAG(bool, df_snapshot_format);
 ABSL_DECLARE_FLAG(uint32_t, max_rdb_save_serialize_buffer_capacity);
 
 namespace {
@@ -971,6 +972,54 @@ TEST_F(RdbTest, LoadHugeList) {
   ASSERT_EQ(100000, CheckedInt({"llen", "test:1"}));
   auto metrics = GetMetrics();
   EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 20'000'000u);
+}
+
+TEST_F(RdbTest, ReloadKeepsConsumerGroupEntriesRead) {
+  Run({"xadd", "x", "1-0", "f", "v"});
+  Run({"xadd", "x", "2-0", "f", "v"});
+  Run({"xadd", "x", "3-0", "f", "v"});
+  Run({"xgroup", "create", "x", "g", "0"});
+  Run({"xreadgroup", "group", "g", "c", "count", "2", "streams", "x", ">"});
+  auto expected =
+      ElementsAre("name", "g", "consumers", IntArg(1), "pending", IntArg(2), "last-delivered-id",
+                  "2-0", "entries-read", IntArg(2), "lag", IntArg(1));
+  EXPECT_THAT(Run({"xinfo", "groups", "x"}).GetVec()[0].GetVec(), expected);
+
+  ASSERT_EQ(Run({"debug", "reload"}), "OK");
+  // A mid-stream group's entries-read cannot be estimated; it must survive the reload verbatim.
+  EXPECT_THAT(Run({"xinfo", "groups", "x"}).GetVec()[0].GetVec(), expected);
+}
+
+// An RDB image with a zero-member set 'e' followed by string 'f'. The empty key must be skipped
+// without aborting the load.
+TEST_F(RdbTest, LoadSkipsEmptyKey) {
+  uint8_t rdb[] = {0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, 0xfe,
+                   0x00, 0x02, 0x01, 0x65, 0x00, 0x00, 0x01, 0x66, 0x01, 0x76,
+                   0xff, 0xc9, 0xbd, 0xe3, 0xb2, 0xec, 0x3b, 0x7a, 0xb5};
+  auto ec = pp_->at(0)->Await([&] {
+    io::BytesSource src(string_view(reinterpret_cast<const char*>(rdb), sizeof(rdb)));
+    RdbLoadContext load_context;
+    RdbLoader loader(service_.get(), &load_context);
+    return loader.Load(&src);
+  });
+  ASSERT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"get", "f"}), "v");
+  EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+}
+
+// With RDB-format snapshots the recorded last-save path must keep its .rdb extension, otherwise
+// DEBUG RELOAD flushes the dataset and then fails to load it back.
+TEST_F(RdbTest, DebugReloadRdbFormat) {
+  absl::FlagSaver fs;
+  ShutdownService();  // clears dbfilename; set it afterwards, as InitWithDbFilename does
+  absl::SetFlag(&FLAGS_df_snapshot_format, false);
+  absl::SetFlag(&FLAGS_dbfilename, absl::StrCat("rdbtestdump_", getpid(), ".rdb"));
+  ResetService();
+
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  EXPECT_THAT(service_->server_family().GetLastSaveInfo().file_name, EndsWith(".rdb"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
 }
 
 // Tests loading a huge stream, where the stream is loaded in multiple partial

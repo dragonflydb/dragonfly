@@ -988,9 +988,11 @@ OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, string_view 
   if (!it->first.HasExpire())
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = it->first.GetExpireTime();
-  DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
-  return ttl_ms;
+  int64_t expire_ms = it->first.GetExpireTime();
+  // Expiry may be disabled (CLIENT PAUSE, replica): a key past its deadline is logically gone.
+  if (expire_ms <= int64_t(t->GetDbContext().time_now_ms))
+    return OpStatus::KEY_NOTFOUND;
+  return expire_ms;
 }
 
 // OpMove touches multiple databases (op_args.db_idx, target_db), so it assumes it runs
@@ -2116,6 +2118,25 @@ OpStatus PopulateSortEntriesFromByPattern(const SortParams& params,
   return OpStatus::OK;
 }
 
+// STORE with nothing to store still overwrites, i.e. deletes, the destination and replies 0.
+void SortStoreNothing(string_view store_key, CommandContext* cmd_cntx) {
+  ShardId dest_sid = Shard(store_key, shard_set->size());
+  OpResult<uint32_t> store_len;
+  cmd_cntx->tx()->Execute(
+      [&](Transaction* t, EngineShard* shard) {
+        if (shard->shard_id() == dest_sid) {
+          vector<SortEntryBase> none;
+          store_len = OpStore(t->GetOpArgs(shard), store_key, none.begin(), none.end(), false);
+        }
+        return OpStatus::OK;
+      },
+      true);
+  if (store_len)
+    cmd_cntx->SendLong(store_len.value());
+  else
+    cmd_cntx->SendError(store_len.status());
+}
+
 void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_only) {
   std::string_view key = parser.Next();
   SortParams params;
@@ -2192,6 +2213,8 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
     // elem_result->first is empty both for missing/empty containers and for errors;
     // use elem_result's OpStatus to distinguish actual error cases (e.g. WRONG_TYPE).
     if (elem_result->first.empty()) {
+      if (elem_result != OpStatus::WRONG_TYPE && params.store_key)
+        return SortStoreNothing(params.store_key.value(), cmd_cntx);
       cmd_cntx->tx()->Conclude();
       if (elem_result == OpStatus::WRONG_TYPE)
         return cmd_cntx->SendError(elem_result.status());
@@ -2232,6 +2255,8 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
 
     if (sort_status != OpStatus::OK) {
       DVLOG(2) << "Sorting failed with status " << sort_status;
+      if (sort_status == OpStatus::KEY_NOTFOUND && params.store_key)
+        return SortStoreNothing(params.store_key.value(), cmd_cntx);
       cmd_cntx->tx()->Conclude();
       if (sort_status == OpStatus::WRONG_TYPE)
         return cmd_cntx->SendError(sort_status);
