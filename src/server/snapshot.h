@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <deque>
+#include <string>
+
 #include "server/detail/egress_throttle.h"
 #include "server/journal/types.h"
 #include "server/rdb_save.h"
@@ -112,6 +115,10 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized();
 
+  // DEBUG: drains pending_writes_ via the real consumer_->ConsumeData(), FIFO. Only called from
+  // snapshot_fb_, during the initial full sync.
+  void DrainPendingWrites();
+
   PrimeTable::Cursor snapshot_cursor_;
 
   std::unique_ptr<RdbSerializer> serializer_;
@@ -127,9 +134,17 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   RdbTypeFreqMap type_freq_map_;
 
   bool use_background_mode_ = false;
+  uint64_t write_buffer_cap_bytes_ = 0;  // DEBUG: cached FLAGS_snapshot_write_buffer_bytes
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
+
+  // DEBUG: bounded backpressure buffer, active only during the initial full sync (see
+  // draining_active_) and only when --snapshot_write_buffer_bytes > 0. Producers append here
+  // instead of calling ConsumeData() directly; only snapshot_fb_ drains it for real.
+  bool draining_active_ = false;
+  std::deque<std::string> pending_writes_;
+  size_t pending_bytes_ = 0;
 
   // Outstanding serialization CPU-time debt (cycles), accrued by every HandleFlushData()
   // call regardless of which fiber runs it - snapshot_fb_'s own traversal, or a write
@@ -154,18 +169,24 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
     size_t jounal_changes = 0;
     size_t flushed_under_lock = 0;
 
-    // DEBUG: CPU-debt throttling stats, logged once at the end of IterateBucketsFb.
+    // DEBUG: throttling/contention stats, logged once at the end of IterateBucketsFb.
     uint64_t debt_sleep_count = 0;
     uint64_t debt_sleep_usec_total = 0;
     uint64_t debt_cycles_paid_total = 0;
 
-    // DEBUG: seq_cond_ (push-order ticket queue) contention stats.
-    uint64_t seq_wait_count = 0;                 // times we reached the wait point at all
-    uint64_t seq_wait_blocked_count = 0;         // times it wasn't already our turn
-    uint64_t seq_wait_writer_blocked_count = 0;  // subset of the above: caller was NOT snapshot_fb_
-    uint64_t seq_wait_usec_total = 0;            // cumulative real wall-clock time actually blocked
-    uint32_t seq_wait_current_waiters = 0;  // live count of fibers blocked in seq_cond_.wait() now
-    uint32_t seq_wait_peak_waiters = 0;     // high-water mark of the above
+    uint64_t seq_wait_count = 0;
+    uint64_t seq_wait_blocked_count = 0;
+    uint64_t seq_wait_writer_blocked_count = 0;
+    uint64_t seq_wait_usec_total = 0;
+    uint32_t seq_wait_current_waiters = 0;
+    uint32_t seq_wait_peak_waiters = 0;
+
+    uint64_t consume_data_count = 0;
+    uint64_t consume_data_usec_total = 0;
+
+    uint64_t buffer_full_wait_count = 0;
+    uint64_t buffer_full_wait_usec_total = 0;
+    uint64_t pending_bytes_peak = 0;
   } stats_;
 
   SnapshotDataConsumerInterface* consumer_;
