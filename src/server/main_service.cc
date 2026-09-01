@@ -116,11 +116,10 @@ ABSL_FLAG(strings::MemoryBytesFlag, maxmemory, strings::MemoryBytesFlag{},
 ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
           "If non-zero, overrides the busy polling parameter for shard threads.");
 
-ABSL_FLAG(string, huffman_table, "",
-          "a comma separated map: domain1:code1,domain2:code2,... where "
-          "domain can currently be only KEYS or STRINGS, code is a base64-encoded huffman table"
-          " exported via "
-          "DEBUG COMPRESSION EXPORT. if the flag is empty no huffman compression is applied.");
+// TODO: remove this retired flag after Jan 1, 2027.
+ABSL_RETIRED_FLAG(string, huffman_table, "",
+                  "Deprecated: huffman compression of keys and string values is no longer "
+                  "configurable and the flag is ignored.");
 
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
@@ -717,46 +716,6 @@ void UpdateSchedulerFlagsOnThread() {
                       GetFlag(FLAGS_scheduler_background_warrant));
 }
 
-void SetHuffmanTable(const std::string& huffman_table) {
-  if (huffman_table.empty())
-    return;
-  vector<string_view> parts = absl::StrSplit(huffman_table, ',');
-  for (const auto& part : parts) {
-    vector<string_view> kv = absl::StrSplit(part, ':');
-    if (kv.size() != 2 || kv[0].empty() || kv[1].empty()) {
-      LOG(ERROR) << "Invalid huffman table entry" << part;
-      continue;
-    }
-    string domain_str = absl::AsciiStrToUpper(kv[0]);
-    CompactObj::HuffmanDomain domain;
-
-    if (domain_str == "KEYS") {
-      domain = CompactObj::HUFF_KEYS;
-    } else if (domain_str == "STRINGS") {
-      domain = CompactObj::HUFF_STRING_VALUES;
-    } else {
-      LOG(ERROR) << "Unknown huffman domain: " << kv[0];
-      continue;
-    }
-
-    string unescaped;
-    if (!absl::Base64Unescape(kv[1], &unescaped)) {
-      LOG(ERROR) << "Failed to decode base64 huffman table for domain " << kv[0] << " with value "
-                 << kv[1];
-      continue;
-    }
-
-    atomic_bool success = true;
-    shard_set->RunBriefInParallel([&](auto* shard) {
-      if (!CompactObj::InitHuffmanThreadLocal(domain, unescaped)) {
-        success = false;
-      }
-    });
-    LOG_IF(ERROR, !success) << "Failed to set huffman table for domain " << kv[0] << " with value "
-                            << kv[1];
-  }
-}
-
 string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
   using namespace CO;
   if (!enabled) {
@@ -1185,8 +1144,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
     UpdateFromFlagsOnThread();
     UpdateSchedulerFlagsOnThread();
   });
-  SetHuffmanTable(GetFlag(FLAGS_huffman_table));
-
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
   server_family_.Init(acceptor, std::move(listeners));

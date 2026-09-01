@@ -307,20 +307,3 @@ async def test_metrics_sanity_check(df_server: DflyInstance):
         logging.error(f"found error: {error}")
 
     assert actual_errors == []
-
-
-@pytest.mark.opt_only
-@dfly_args({"proactor_threads": "2"})
-async def test_huffman_tables_built(df_server: DflyInstance):
-    async_client = df_server.client()
-    # Insert enough data to trigger background huffman table building
-    key_name = "keyfooobarrsoooooooooooooooooooooooooooooooooooooooooooooooo"
-    await async_client.execute_command("DEBUG", "POPULATE", "1000000", key_name, "14")
-
-    @assert_eventually(times=500)
-    async def check_metrics():
-        metrics = await df_server.metrics()
-        m = metrics["dragonfly_huffman_tables_built"]
-        assert m.samples[0].value > 0
-
-    await check_metrics()
