@@ -90,6 +90,7 @@ class JournalSlice {
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
   bool enable_journal_flush_ = true;
+  bool use_legacy_entry_limit_ = false;
 
   uint32_t max_age_ms_ = 0;
   size_t max_bytes_ = 0;

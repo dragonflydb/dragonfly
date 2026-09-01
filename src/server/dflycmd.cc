@@ -489,8 +489,8 @@ bool DflyCmd::IsLSNInPartialSyncBuffer(LSN lsn) const {
     LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
               << " that the replication buffer doesn't contain this anymore (current_lsn="
               << journal::GetLsn() << "). Will perform a full sync of the data.";
-    LOG(INFO) << "If this happens often, increase --shard_repl_backlog_time_ms or "
-                 "--shard_repl_backlog_max_bytes.";
+    LOG(INFO) << "If this happens often, increase --shard_repl_backlog_len in legacy mode, or "
+                 "--shard_repl_backlog_time_ms/--shard_repl_backlog_max_bytes otherwise.";
   }
   return exists;
 }

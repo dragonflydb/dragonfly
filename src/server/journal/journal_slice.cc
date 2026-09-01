@@ -5,11 +5,14 @@
 #include "server/journal/journal_slice.h"
 
 #include <absl/flags/flag.h>
+#include <absl/flags/parse.h>
+#include <absl/flags/reflection.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <fcntl.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 
 #include "base/function2.hpp"
@@ -20,15 +23,17 @@
 #include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 
-ABSL_RETIRED_FLAG(uint32_t, shard_repl_backlog_len, 0,
-                  "Deprecated. Use --shard_repl_backlog_time_ms and "
-                  "--shard_repl_backlog_max_bytes instead.");
+ABSL_FLAG(uint32_t, shard_repl_backlog_len, 0,
+          "Legacy maximum number of entries retained by each shard's replication backlog. "
+          "A nonzero value disables time- and byte-based eviction unless either new backlog "
+          "limit flag is explicitly configured.");
 ABSL_FLAG(uint32_t, shard_repl_backlog_time_ms, 5000,
           "Target retention age in milliseconds of entries in the per-shard replication backlog. "
           "Entries older than this are evicted on later journal writes. 0 disables time-based "
           "eviction.");
 ABSL_FLAG(strings::MemoryBytesFlag, shard_repl_backlog_max_bytes, 0,
-          "Total bytes retained by replication backlog. 0 (the default) uses 0.5% of maxmemory.");
+          "Maximum bytes retained by each shard's replication backlog. 0 (the default) uses "
+          "maxmemory / shard count / 200.");
 
 namespace dfly {
 namespace journal {
@@ -38,15 +43,29 @@ using namespace util;
 namespace {
 constexpr size_t kMaxTimeEvictionsPerCall = 100;
 
+bool IsFlagConfigured(const absl::CommandLineFlag& handle) {
+  // DFLY_ environment flags are parsed programmatically (see ParseFlagsFromEnv) and do not set
+  // Abseil's command-line marker. Check their presence separately so an explicitly configured
+  // flag selects the new mode even when its value equals the default one.
+  return absl::flags_internal::WasPresentOnCommandLine(handle.Name()) ||
+         handle.CurrentValue() != handle.DefaultValue() ||
+         std::getenv(absl::StrCat("DFLY_", handle.Name()).c_str()) != nullptr;
+}
+
+bool AreNewBacklogLimitsConfigured() {
+  return IsFlagConfigured(absl::GetFlagReflectionHandle(FLAGS_shard_repl_backlog_time_ms)) ||
+         IsFlagConfigured(absl::GetFlagReflectionHandle(FLAGS_shard_repl_backlog_max_bytes));
+}
+
 size_t GetPerShardBacklogMaxBytes() {
-  size_t total_max_bytes = absl::GetFlag(FLAGS_shard_repl_backlog_max_bytes).value;
-  if (total_max_bytes == 0) {
-    constexpr size_t kBacklogMemoryFraction = 200;
-    total_max_bytes = max_memory_limit.load(memory_order_relaxed) / kBacklogMemoryFraction;
+  const size_t per_shard_max_bytes = absl::GetFlag(FLAGS_shard_repl_backlog_max_bytes).value;
+  if (per_shard_max_bytes != 0) {
+    return per_shard_max_bytes;
   }
 
+  constexpr size_t kBacklogMemoryFraction = 200;
   const size_t shard_count = shard_set ? max<size_t>(1, shard_set->size()) : 1;
-  return total_max_bytes / shard_count;
+  return max_memory_limit.load(memory_order_relaxed) / shard_count / kBacklogMemoryFraction;
 }
 
 }  // namespace
@@ -62,8 +81,17 @@ void JournalSlice::Init() {
   if (ring_buffer_.capacity() > 0)
     return;
 
-  constexpr size_t kDefaultBacklogCapacity = 8192;
-  ring_buffer_.set_capacity(kDefaultBacklogCapacity);
+  const uint32_t legacy_entry_limit = absl::GetFlag(FLAGS_shard_repl_backlog_len);
+  if (legacy_entry_limit != 0 && !AreNewBacklogLimitsConfigured()) {
+    LOG_FIRST_N(WARNING, 1) << "Using deprecated --shard_repl_backlog_len=" << legacy_entry_limit
+                            << ". Time- and byte-based backlog eviction is disabled. Prefer "
+                               "--shard_repl_backlog_time_ms/--shard_repl_backlog_max_bytes.";
+    use_legacy_entry_limit_ = true;
+    ring_buffer_.set_capacity(legacy_entry_limit);
+    return;
+  }
+
+  ring_buffer_.set_capacity(8192);
   max_age_ms_ = absl::GetFlag(FLAGS_shard_repl_backlog_time_ms);
   max_bytes_ = GetPerShardBacklogMaxBytes();
 }
@@ -174,6 +202,15 @@ size_t JournalSlice::ItemBytes(const JournalItem& item) {
 }
 
 void JournalSlice::CleanEntries(size_t next_item_bytes, uint64_t now_ms) {
+  if (use_legacy_entry_limit_) {
+    if (ring_buffer_.full()) {
+      const size_t evicted_item_bytes = ItemBytes(ring_buffer_.front());
+      DCHECK_GE(ring_buffer_bytes_, evicted_item_bytes);
+      ring_buffer_bytes_ -= evicted_item_bytes;
+    }
+    return;
+  }
+
   size_t retained_bytes = ring_buffer_bytes_;
   size_t time_evictions = 0;
   size_t bytes_to_free = 0;
