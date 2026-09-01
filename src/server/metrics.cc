@@ -622,9 +622,6 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_not_enough_fragmentation,
                     {"reason"}, {"not_enough_fragmentation"}, &resp->body());
 
-  AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
-                            m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
-
   AppendMetricHeader("list_reads", "List Reads Patterns", MetricType::COUNTER, &resp->body());
   AppendMetricValue("list_reads", m.qlist_stats.total_node_reads, {"type"}, {"total"},
                     &resp->body());
