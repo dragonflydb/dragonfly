@@ -148,8 +148,10 @@ _minio_data_dir = None
 def pytest_configure(config):
     global _minio_proc, _minio_data_dir
 
-    # clean everything
-    if os.path.exists(FAILED_PATH):
+    # Clean everything - unless  explicitly requested not to
+    if os.environ.get("DELETE_FAILED_LOGS", "true").lower() == "true" and os.path.exists(
+        FAILED_PATH
+    ):
         shutil.rmtree(FAILED_PATH)
     if os.path.exists(BASE_LOG_DIR):
         shutil.rmtree(BASE_LOG_DIR)
