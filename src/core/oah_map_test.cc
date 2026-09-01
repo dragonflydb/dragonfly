@@ -135,6 +135,17 @@ TEST_F(OAHMapTest, Basic) {
   EXPECT_FALSE(m_->GetValue("missing").has_value());
 }
 
+TEST_F(OAHMapTest, AddOrSkipDuplicateDoesNotEnableExpiration) {
+  EXPECT_TRUE(m_->AddOrUpdate("field", "old-value"));
+  ASSERT_FALSE(m_->ExpirationUsed());
+  const size_t obj_alloc = m_->ObjMallocUsed();
+
+  EXPECT_FALSE(m_->AddOrSkip("field", string(4096, 'x'), 10));
+  EXPECT_EQ(m_->GetValue("field"), std::optional{"old-value"sv});
+  EXPECT_EQ(m_->ObjMallocUsed(), obj_alloc);
+  EXPECT_FALSE(m_->ExpirationUsed());
+}
+
 TEST_F(OAHMapTest, ShrinkToMinimumBuckets) {
   m_->Reserve(1);
   EXPECT_EQ(m_->BucketCount(), OAHMap::kMinBucketCount);
@@ -640,6 +651,32 @@ TEST_F(OAHMapTest, AddOrExchange) {
   EXPECT_EQ(it.ExpiryTime(), 200u);
 }
 
+TEST_F(OAHMapTest, AddOrExchangeKeepTtl) {
+  m_->set_time(10);
+  EXPECT_TRUE(m_->AddOrUpdate("field", "old-value", 30));
+
+  auto previous = m_->AddOrExchange("field", "new-value", 5, true);
+  ASSERT_TRUE(previous);
+  EXPECT_EQ(previous.pair().Value(), "old-value"sv);
+  EXPECT_EQ(previous.pair().GetExpiry(), 40u);
+
+  auto current = m_->Find("field");
+  ASSERT_NE(current, m_->end());
+  EXPECT_EQ(current->Value(), "new-value"sv);
+  EXPECT_TRUE(current.HasExpiry());
+  EXPECT_EQ(current.ExpiryTime(), 40u);
+
+  // An expired pair is treated as absent and its TTL is not retained.
+  m_->set_time(40);
+  auto expired = m_->AddOrExchange("field", "replacement", UINT32_MAX, true);
+  EXPECT_FALSE(expired);
+  current = m_->Find("field");
+  ASSERT_NE(current, m_->end());
+  EXPECT_EQ(current->Value(), "replacement"sv);
+  EXPECT_FALSE(current.HasExpiry());
+  EXPECT_EQ(m_->UpperBoundSize(), 1u);
+}
+
 TEST_F(OAHMapTest, Extract) {
   // Non-existing key: empty owner, map unchanged.
   m_->AddOrUpdate("f1", "v1");
@@ -807,6 +844,70 @@ void BM_AddOrUpdate(benchmark::State& state) {
 BENCHMARK(BM_AddOrUpdate)
     ->ArgNames({"elements", "KeySize"})
     ->ArgsProduct({{1000, 10000, 100000}, {10, 100, 1000}});
+
+void BM_UpdateExisting(benchmark::State& state) {
+  vector<pair<string, string>> kv;
+  mt19937 generator(0);
+  OAHMap map;
+  const unsigned elems = state.range(0);
+  const unsigned key_size = state.range(1);
+  for (size_t i = 0; i < elems; ++i) {
+    kv.emplace_back(random_string(generator, key_size), random_string(generator, key_size));
+    map.AddOrUpdate(kv.back().first, "initial");
+  }
+
+  while (state.KeepRunning()) {
+    for (const auto& [key, value] : kv)
+      benchmark::DoNotOptimize(map.AddOrUpdate(key, value));
+  }
+  state.SetItemsProcessed(state.iterations() * elems);
+}
+BENCHMARK(BM_UpdateExisting)
+    ->ArgNames({"elements", "KeySize"})
+    ->ArgsProduct({{1000, 10000}, {10, 100}});
+
+void BM_UpdateExistingKeepTtl(benchmark::State& state) {
+  vector<pair<string, string>> kv;
+  mt19937 generator(0);
+  OAHMap map;
+  const unsigned elems = state.range(0);
+  const unsigned key_size = state.range(1);
+  map.set_time(100);
+  for (size_t i = 0; i < elems; ++i) {
+    kv.emplace_back(random_string(generator, key_size), random_string(generator, key_size));
+    map.AddOrUpdate(kv.back().first, "initial", 1000);
+  }
+
+  while (state.KeepRunning()) {
+    for (const auto& [key, value] : kv)
+      benchmark::DoNotOptimize(map.AddOrUpdate(key, value, UINT32_MAX, true));
+  }
+  state.SetItemsProcessed(state.iterations() * elems);
+}
+BENCHMARK(BM_UpdateExistingKeepTtl)
+    ->ArgNames({"elements", "KeySize"})
+    ->ArgsProduct({{1000, 10000}, {10, 100}});
+
+void BM_AddOrSkipExisting(benchmark::State& state) {
+  vector<pair<string, string>> kv;
+  mt19937 generator(0);
+  OAHMap map;
+  const unsigned elems = state.range(0);
+  const unsigned key_size = state.range(1);
+  for (size_t i = 0; i < elems; ++i) {
+    kv.emplace_back(random_string(generator, key_size), random_string(generator, key_size));
+    map.AddOrUpdate(kv.back().first, "initial");
+  }
+
+  while (state.KeepRunning()) {
+    for (const auto& [key, value] : kv)
+      benchmark::DoNotOptimize(map.AddOrSkip(key, value));
+  }
+  state.SetItemsProcessed(state.iterations() * elems);
+}
+BENCHMARK(BM_AddOrSkipExisting)
+    ->ArgNames({"elements", "KeySize"})
+    ->ArgsProduct({{1000, 10000}, {10, 100}});
 
 void BM_Erase(benchmark::State& state) {
   vector<pair<string, string>> kv;
