@@ -2586,7 +2586,9 @@ async def test_send_timeout(df_server, async_client: aioredis.Redis):
     clients = await async_client.client_list()
     assert len(clients) == 2
     size = 1024 * 1024
-    writer.write(f"SET a {'v'*size}\n".encode())
+    # RESP: an inline line this large would exceed the 64KB inline cap.
+    value = "v" * size
+    writer.write(f"*3\r\n$3\r\nSET\r\n$1\r\na\r\n${size}\r\n{value}\r\n".encode())
     await writer.drain()
 
     async def get_task():

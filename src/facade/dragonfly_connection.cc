@@ -194,13 +194,15 @@ constexpr size_t kHttpProbeAppendBytes = 128;
 thread_local ProactorReadBuffer tl_shared_read_buf;
 
 void SendProtocolError(RespSrvParser::Result pres, SinkReplyBuilder* builder) {
-  constexpr string_view res = "-ERR Protocol error: "sv;
+  // The builder already prepends the protocol-error preamble.
   if (pres == RespSrvParser::BAD_BULKLEN) {
-    builder->SendProtocolError(absl::StrCat(res, "invalid bulk length"));
+    builder->SendProtocolError("invalid bulk length");
   } else if (pres == RespSrvParser::BAD_ARRAYLEN) {
-    builder->SendProtocolError(absl::StrCat(res, "invalid multibulk length"));
+    builder->SendProtocolError("invalid multibulk length");
+  } else if (pres == RespSrvParser::BAD_INLINE) {
+    builder->SendProtocolError("too big inline request");
   } else {
-    builder->SendProtocolError(absl::StrCat(res, "parse error"));
+    builder->SendProtocolError("parse error");
   }
 }
 
