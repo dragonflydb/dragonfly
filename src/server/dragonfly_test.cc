@@ -7,6 +7,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
@@ -716,6 +717,26 @@ TEST_F(DflyEngineTest, Bug468) {
   ASSERT_THAT(resp, ErrArg("not an integer"));
 
   ASSERT_FALSE(IsLocked(0, "foo"));
+}
+
+TEST_F(DflyEngineTest, PingAll) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  // Wedge shard 1's task queue behind a task that never completes on its own.
+  fb2::Done gate;
+  absl::Cleanup release_gate = [&] { gate.Notify(); };  // survives a failed ASSERT below
+  shard_set->Add(1, [&] { gate.Wait(); });
+
+  // A wedged shard queue doesn't stop a plain PING from a different connection.
+  ASSERT_EQ(Run({"ping"}), "PONG");
+
+  RespExpr resp = Run({"debug", "pingall", "200"});
+  EXPECT_THAT(resp, ErrArg("shard_queue=[1]"));
+
+  gate.Notify();
+
+  resp = Run({"debug", "pingall", "200"});
+  ASSERT_EQ(resp, "OK");
 }
 
 struct CountingConsumer : public DbSlice::ChangeConsumerInterface {

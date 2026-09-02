@@ -54,6 +54,7 @@ class DebugCmd {
   void TxAnalysis(CommandContext* cmd_cntx);
   void ObjHist(CommandContext* cmd_cntx);
   void Stacktrace(CommandContext* cmd_cntx);
+  void PingAll(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   // Investigation-only. Remove once closed.
   void ReplDiag(CommandContext* cmd_cntx);
   void Shards(CommandContext* cmd_cntx);

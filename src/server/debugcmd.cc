@@ -13,12 +13,15 @@ extern "C" {
 #include <absl/random/random.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
 #include <lz4.h>
 #include <zdict.h>
 #include <zstd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
+#include <memory>
 #include <numeric>
 
 #include "base/flags.h"
@@ -580,6 +583,10 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    Prints histogram of object sizes.",
         "STACKTRACE",
         "    Prints the stacktraces of all current fibers to the logs.",
+        "PINGALL [timeout_ms]",
+        "    Liveness probe that checks every proactor thread and shard queue, not just the",
+        "    one handling this connection. Replies OK if all respond within <timeout_ms>",
+        "    (default 1000), or an error naming the ones that didn't.",
         "REPLDIAG",
         "    Investigation-only: like STACKTRACE, plus (if this instance is a redis-"
         "    stream replica) the unread byte count in the master socket's kernel recv buffer.",
@@ -667,6 +674,10 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (subcmd == "STACKTRACE") {
     return Stacktrace(cmd_cntx);
+  }
+
+  if (subcmd == "PINGALL") {
+    return PingAll(parser, cmd_cntx);
   }
 
   if (subcmd == "REPLDIAG") {
@@ -1252,6 +1263,70 @@ void DebugCmd::Stacktrace(CommandContext* cmd_cntx) {
   });
   base::FlushLogs();
   rb->SendOk();
+}
+
+namespace {
+struct PingAllState {
+  PingAllState(unsigned num_fibers, unsigned num_shards)
+      : fiber_done(num_fibers), shard_done(num_shards) {
+  }
+
+  std::vector<std::atomic_bool> fiber_done;
+  std::vector<std::atomic_bool> shard_done;
+};
+}  // namespace
+
+// Unlike PING, checks that every proactor and shard queue is still making progress.
+void DebugCmd::PingAll(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  uint32_t timeout_ms = parser.NextOrDefault<uint32_t>(1000);
+  if (auto err = parser.TakeError(); err)
+    return rb->SendError("Invalid timeout value");
+
+  unsigned num_fibers = shard_set->pool()->size();
+  unsigned num_shards = shard_set->size();
+
+  fb2::BlockingCounter bc(num_fibers + num_shards);
+  // Heap-owned: a wedged callback may still run long after this function returns.
+  auto state = std::make_shared<PingAllState>(num_fibers, num_shards);
+
+  for (unsigned i = 0; i < num_fibers; ++i) {
+    ProactorBase* proactor = shard_set->pool()->at(i);
+    // Skip a full queue rather than risk DispatchBrief blocking on a stalled proactor.
+    if (!proactor->IsTaskQueueFull()) {
+      proactor->DispatchBrief([bc, state, i]() mutable {
+        state->fiber_done[i].store(true, std::memory_order_relaxed);
+        bc->Dec();
+      });
+    }
+    // Not decremented on failure, so WaitFor() below reports it as unresponsive.
+  }
+
+  for (unsigned i = 0; i < num_shards; ++i) {
+    shard_set->TryAdd(i, [bc, state, i]() mutable {
+      state->shard_done[i].store(true, std::memory_order_relaxed);
+      bc->Dec();
+    });
+  }
+
+  if (bc->WaitFor(std::chrono::milliseconds(timeout_ms))) {
+    return rb->SendOk();
+  }
+
+  std::vector<unsigned> late_fibers, late_shards;
+  for (unsigned i = 0; i < num_fibers; ++i) {
+    if (!state->fiber_done[i].load(std::memory_order_relaxed))
+      late_fibers.push_back(i);
+  }
+  for (unsigned i = 0; i < num_shards; ++i) {
+    if (!state->shard_done[i].load(std::memory_order_relaxed))
+      late_shards.push_back(i);
+  }
+
+  return rb->SendError(absl::StrCat("pingall timed out after ", timeout_ms, "ms: fiber=[",
+                                    absl::StrJoin(late_fibers, ","), "] shard_queue=[",
+                                    absl::StrJoin(late_shards, ","), "]"));
 }
 
 // Investigation-only: dumps everything Stacktrace() does, plus (on a redis-stream

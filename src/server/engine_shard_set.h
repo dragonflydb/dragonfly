@@ -57,6 +57,12 @@ class EngineShardSet {
     return shards_[sid]->GetFiberQueue()->Add(std::forward<F>(f));
   }
 
+  // Non-blocking: returns false immediately if the shard's queue is full instead of waiting.
+  template <typename F> bool TryAdd(ShardId sid, F&& f) {
+    assert(sid < size_);
+    return shards_[sid]->GetFiberQueue()->TryAdd(std::forward<F>(f));
+  }
+
   template <typename F> auto AddL2(ShardId sid, F&& f) {
     return shards_[sid]->GetSecondaryQueue()->Add(std::forward<F>(f));
   }
