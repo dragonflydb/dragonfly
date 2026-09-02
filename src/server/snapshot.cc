@@ -255,13 +255,18 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     PushSerialized(true);
   }  // for (dbindex)
 
+  stats_.bucket_traverse_usec = (absl::GetCurrentTimeNanos() - iterate_start_ns) / 1000;
+
   CHECK(!serialize_bucket_running_);
   if (send_full_sync_cut) {
     CHECK(!serializer_->SendFullSyncCut());
     PushSerialized(true);
   }
 
+  draining_active_ = false;
+  const int64_t final_drain_start_ns = absl::GetCurrentTimeNanos();
   DrainPendingWrites();  // must be empty before consumer_->Finalize() runs
+  stats_.final_drain_usec = (absl::GetCurrentTimeNanos() - final_drain_start_ns) / 1000;
 
   if (VLOG_IS_ON(1)) {
     auto stats = SerializerBase::GetStats();
@@ -281,6 +286,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
                                                         : 0;
     LOG(ERROR) << "[SNAPSHOT_THROTTLE_STATS] keys_total=" << stats_.keys_total
                << " total_iterate_usec=" << total_usec
+               << " bucket_traverse_usec=" << stats_.bucket_traverse_usec
+               << " final_drain_usec=" << stats_.final_drain_usec
                << " debt_sleep_count=" << stats_.debt_sleep_count
                << " debt_sleep_usec_total=" << stats_.debt_sleep_usec_total
                << " debt_sleep_pct_of_total=" << sleep_pct << " avg_sleep_usec=" << avg_sleep_usec
@@ -412,7 +419,13 @@ void SliceSnapshot::HandleFlushData(std::string data) {
     }
   };
 
-  wait_or_drain([&] { return id == this->last_pushed_id_ + 1; });
+  if (buffering_active) {
+    wait_or_drain([&] { return id == this->last_pushed_id_ + 1; });
+  } else {
+    // Once buffering is off, wait for physical drain progress, not just admission - otherwise
+    // this call could race ahead of older entries still sitting undrained in pending_writes_.
+    seq_cond_.wait(lk, [&] { return id == this->last_drained_id_ + 1; });
+  }
 
   if (will_block) {
     stats_.seq_wait_usec_total += (absl::GetCurrentTimeNanos() - seq_wait_start_ns) / 1000;
@@ -442,6 +455,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
     consumer_->ConsumeData(std::move(data), base_cntx_);
     stats_.consume_data_usec_total += (absl::GetCurrentTimeNanos() - consume_start_ns) / 1000;
     ++stats_.consume_data_count;
+    last_drained_id_ = id;
   }
 
   DCHECK_EQ(last_pushed_id_ + 1, id);
@@ -479,7 +493,8 @@ void SliceSnapshot::DrainPendingWrites() {
     ++stats_.consume_data_count;
 
     pending_bytes_ -= sz;
-    seq_cond_.notify_all();  // wake any producer waiting for buffer room
+    ++last_drained_id_;
+    seq_cond_.notify_all();  // wake any producer waiting for buffer room or drain progress
   }
 }
 

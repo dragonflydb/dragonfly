@@ -138,6 +138,7 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
+  uint64_t last_drained_id_ = 0;
 
   // DEBUG: bounded backpressure buffer, active only during the initial full sync (see
   // draining_active_) and only when --snapshot_write_buffer_bytes > 0. Producers append here
@@ -187,6 +188,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
     uint64_t buffer_full_wait_count = 0;
     uint64_t buffer_full_wait_usec_total = 0;
     uint64_t pending_bytes_peak = 0;
+
+    uint64_t bucket_traverse_usec = 0;
+    uint64_t final_drain_usec = 0;
   } stats_;
 
   SnapshotDataConsumerInterface* consumer_;
