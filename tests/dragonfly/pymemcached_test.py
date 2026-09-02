@@ -366,13 +366,14 @@ async def test_read_huge_redis_key_over_memcached(
                 break
             resp += chunk
     except socket.timeout:
-        pass
+        pytest.fail(f"Timed out waiting for memcached reply, got: {resp!r}")
     sock.close()
 
     # The oversized key must be rejected, never echoed back in a VALUE line.
+    assert resp.endswith(b"\r\n")
+    assert resp.startswith((b"CLIENT_ERROR", b"ERROR", b"SERVER_ERROR"))
     assert big_key.encode() not in resp
     assert b"VALUE" not in resp
-
     # The server must still be alive and serving memcached traffic.
     assert memcached_client.set("alive", "1")
     assert memcached_client.get("alive") == b"1"
