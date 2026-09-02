@@ -1,0 +1,89 @@
+name: CI Test Dashboard
+
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+    inputs:
+      lookback_days:
+        description: "Number of recent UTC days to include"
+        required: false
+        type: number
+        default: 30
+      publish_bucket:
+        description: "Optional S3 bucket to publish the static dashboard to"
+        required: false
+        type: string
+      publish_prefix:
+        description: "Optional prefix within the publish bucket"
+        required: false
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: github.repository == 'dragonflydb/dragonfly'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      DASHBOARD_ROOT: tools/ci_test_dashboard
+      LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '30' }}
+      SOURCE_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
+      PUBLISH_BUCKET: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_bucket || secrets.S3_CI_TEST_DASHBOARD_BUCKET }}
+      PUBLISH_PREFIX: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_prefix || vars.CI_TEST_DASHBOARD_PREFIX }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Authenticate to AWS
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Ensure AWS CLI is available
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v aws >/dev/null 2>&1; then
+            python3 -m pip install --user awscli
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          aws --version
+
+      - name: Download recent test results
+        shell: bash
+        run: ${GITHUB_WORKSPACE}/.github/scripts/download-ci-dashboard-results.sh
+
+      - name: Build dashboard data
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "${DASHBOARD_ROOT}/build_dashboard.py" \
+            "${INPUT_DIR}" \
+            "${DASHBOARD_ROOT}/site/data"
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ci-test-dashboard
+          path: ${{ env.DASHBOARD_ROOT }}/site
+          if-no-files-found: error
+
+      - name: Publish dashboard site to S3
+        if: env.PUBLISH_BUCKET != ''
+        shell: bash
+        run: ${GITHUB_WORKSPACE}/.github/scripts/publish-ci-dashboard-site-to-s3.sh
+
+      - name: Skip S3 publish
+        if: env.PUBLISH_BUCKET == ''
+        run: echo "No publish bucket configured; dashboard is available as a workflow artifact."
