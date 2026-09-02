@@ -314,4 +314,23 @@ TEST_F(MCParserNoreplyTest, LargeGetRequest) {
   }));
 }
 
+// Keys longer than 250 bytes must be rejected on the get/gets/gat/gats path, matching the
+// store and meta paths. Otherwise the oversized echoed key overflows the reply buffer.
+TEST_F(MCParserTest, OversizedKeyRejected) {
+  std::string long_key(251, 'k');
+
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, Parse(absl::StrCat("get ", long_key, "\r\n")));
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, Parse(absl::StrCat("gets ", long_key, "\r\n")));
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, Parse(absl::StrCat("gat 10 ", long_key, "\r\n")));
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, Parse(absl::StrCat("delete ", long_key, "\r\n")));
+
+  // A second oversized key in a multi-key get is rejected too.
+  EXPECT_EQ(MemcacheParser::PARSE_ERROR, Parse(absl::StrCat("get ok ", long_key, "\r\n")));
+
+  // A 250-byte key is still accepted.
+  std::string max_key(250, 'k');
+  EXPECT_EQ(MemcacheParser::OK, Parse(absl::StrCat("get ", max_key, "\r\n")));
+  EXPECT_EQ(max_key, cmd_.key());
+}
+
 }  // namespace facade
