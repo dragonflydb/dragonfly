@@ -36,6 +36,11 @@ $TRACY/profiler/build/tracy-profiler /tmp/df.tracy
 $TRACY/csvexport/build/tracy-csvexport -e /tmp/df.tracy > /tmp/zones.csv
 ```
 
+For a dispatch-focused diagnostic capture, add `-DWITH_TRACY_DISPATCH_ONLY=ON` to the Dragonfly
+configuration. It compiles out every ordinary and non-dispatch forensic zone, retaining only
+the outer `Dispatch.Command`, `InvokeCmd.Handler`, `Squash.Dispatch.Command`, and existing batch,
+squasher-work, and callback zones. It is an attribution build rather than a throughput baseline.
+
 ---
 
 ## 1. Why so few `DFLY_TRACY_ZONE`s? (read this first)

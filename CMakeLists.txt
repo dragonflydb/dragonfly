@@ -158,6 +158,7 @@ endif()
 # binary only starts capturing once a Tracy viewer/capture connects (the runtime on/off switch).
 option(WITH_TRACY "Enable the Tracy profiler client (on-demand)" OFF)
 option(WITH_TRACY_FORENSIC "Enable high-volume per-command Tracy zones" OFF)
+option(WITH_TRACY_DISPATCH_ONLY "Enable only Tracy command-dispatch and squasher zones" OFF)
 if (WITH_TRACY)
   message(STATUS "Tracy profiler enabled (on-demand). Connect the Tracy viewer to start capture.")
   set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
@@ -175,9 +176,13 @@ if (WITH_TRACY)
   # preprocessor macro. Symbol resolution still comes from linking Tracy::TracyClient to dfly_facade
   # and fibers2 (see the respective CMakeLists).
   add_compile_definitions(TRACY_ENABLE TRACY_FIBERS)
-  if (WITH_TRACY_FORENSIC)
+  if (WITH_TRACY_FORENSIC AND NOT WITH_TRACY_DISPATCH_ONLY)
     message(STATUS "Tracy forensic per-command zones enabled.")
     add_compile_definitions(DFLY_TRACY_FORENSIC)
+  endif()
+  if (WITH_TRACY_DISPATCH_ONLY)
+    message(STATUS "Tracy dispatch-only zones enabled.")
+    add_compile_definitions(DFLY_TRACY_DISPATCH_ONLY)
   endif()
 
   FetchContent_Declare(
