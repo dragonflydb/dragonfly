@@ -54,6 +54,7 @@ ABSL_DECLARE_FLAG(std::string, dir);
 #include "base/init.h"
 #include "base/proc_util.h"  // for GetKernelVersion
 #include "facade/dragonfly_listener.h"
+#include "facade/tracy_support.h"
 #include "io/file.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
@@ -1090,6 +1091,7 @@ Usage: dragonfly [FLAGS]
   MainInitGuard guard(&argc, &argv);
 
   ParseFlagsFromEnv();
+  facade::InitTracyScopes();
 
 #ifdef USE_ABSL_LOG
   // alsologtostderr: route all logs to stderr in addition to files.
