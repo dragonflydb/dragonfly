@@ -20,6 +20,7 @@
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
 #include "facade/reply_capture.h"
+#include "facade/tracy_support.h"
 #include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
@@ -750,6 +751,7 @@ struct GetReplies {
   }
 
   void Send(StringResult&& res) const {
+    DFLY_TRACY_ZONE_FORENSIC("String.Get.Reply");
     if (holds_alternative<std::string>(res))
       return Send(get<std::string>(res));
     if (holds_alternative<cmn::BorrowedString>(res)) {
@@ -1310,11 +1312,15 @@ cmd::CmdR CmdSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [key = parser.Next()](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
+    DFLY_TRACY_ZONE_FORENSIC("String.Get.Lookup");
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
-    return BorrowStringOrRead(tx->GetDbIndex(), key, (*it_res)->second, es);
+    {
+      DFLY_TRACY_ZONE_FORENSIC("String.Get.Value");
+      return BorrowStringOrRead(tx->GetDbIndex(), key, (*it_res)->second, es);
+    }
   };
 
   GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
