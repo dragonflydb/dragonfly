@@ -2273,6 +2273,28 @@ TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
   EXPECT_EQ(Run({"dbsize"}), 5);
 }
 
+// RM is a no-key transaction, so it must run correctly as one command inside MULTI/EXEC: it
+// concludes its own hops without ending the surrounding EXEC, and commands after it still run.
+TEST_F(GenericFamilyTest, RmInsideMulti) {
+  Run({"set", "x", "1"});
+  Run({"sadd", "y", "a", "b"});
+
+  Run({"multi"});
+  Run({"set", "x", "2"});
+  Run({"rm", "0", "match", "y", "count", "10"});
+  Run({"get", "x"});
+  auto exec = Run({"exec"});
+
+  ASSERT_THAT(exec, ArrLen(3));
+  EXPECT_EQ(exec.GetVec()[0], "OK");
+  EXPECT_THAT(exec.GetVec()[1], ArrLen(2));              // RM reply: [cursor, deleted]
+  EXPECT_THAT(exec.GetVec()[1].GetVec()[1], IntArg(1));  // y deleted
+  EXPECT_EQ(exec.GetVec()[2], "2");                      // GET x ran after RM
+
+  EXPECT_EQ(Run({"exists", "y"}), 0);
+  EXPECT_EQ(Run({"get", "x"}), "2");
+}
+
 // Verifies that long-running container iteration is yielding.
 // This test uses a sorted set iteration path, but the same yielding
 // behavior is expected for other containers (SET, HASH, LIST) with non
@@ -2399,12 +2421,12 @@ TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
   }
 }
 
-// RM deletes without a key lock. While a fiber is parked inside container_utils::Iterate* its
-// transaction is the shard's running_tx(); RM must defer rather than free the value under it, and
-// must not lose the key behind the cursor either - the returned cursor keeps pointing at it until a
-// later pass, once the walk is gone, deletes it.
-TEST_F(GenericFamilyTest, RmDefersWhileContainerYields) {
-  // Put the list on shard 0 so the deferred cursor also exercises the shard-0/resume-token path.
+// RM runs as a no-key transaction, so a scan+delete hop executes as the shard's running_tx: it
+// cannot run while another transaction is parked mid-container-walk on that shard. It waits its
+// turn instead of freeing the value under the walk. This is the regression test for the fuzzer
+// use-after-free (SORT_RO walking a list while RM deletes it).
+TEST_F(GenericFamilyTest, RmWaitsForContainerYield) {
+  // Put the list on shard 0 so RM's first hop targets exactly the shard holding the parked walk.
   const unsigned shard_count = shard_set->size();
   string key;
   for (int i = 0; key.empty(); ++i) {
@@ -2438,7 +2460,7 @@ TEST_F(GenericFamilyTest, RmDefersWhileContainerYields) {
       size_t visited = 0;
       container_utils::IterateList(res.value()->second, [&](container_utils::ContainerEntry) {
         walk_started.store(true);
-        while (!release_walk.load())  // hold the walk parked so running_tx() stays set
+        while (!release_walk.load())  // hold the walk parked while RM tries to run
           ThisFiber::SleepFor(std::chrono::milliseconds(1));
         ++visited;
         return true;
@@ -2451,35 +2473,41 @@ TEST_F(GenericFamilyTest, RmDefersWhileContainerYields) {
 
   RespExpr rm_resp;
   auto remover = pp_->at(1)->LaunchFiber([&] {
-    Run("remover", {"ping"});  // pay the connection setup before the window opens
     for (int spin = 0; spin < 100'000 && !walk_started.load(); ++spin)
       ThisFiber::Yield();
+    // Blocks behind the parked walk on shard 0 until it is released, then deletes.
     rm_resp = Run("remover", {"rm", "0", "match", key, "count", "10"});
   });
+
+  // Release the walk only once RM has actually queued its transaction behind the running walk on
+  // shard 0. The parked read ran optimistically and is not itself in the queue, so a non-empty
+  // queue means RM is waiting. A fixed sleep could let the walk finish before RM even schedules
+  // and never exercise the overlap.
+  bool rm_queued = false;
+  for (int spin = 0; spin < 5'000 && !rm_queued; ++spin) {
+    shard_set->Await(0, [&] { rm_queued = !EngineShard::tlocal()->txq()->Empty(); });
+    if (!rm_queued)
+      ThisFiber::SleepFor(std::chrono::milliseconds(1));
+  }
+  release_walk.store(true);
+
+  reader.Join();
   remover.Join();
 
-  // Deferred: nothing freed under the walk, and the pass did not report itself finished. A
-  // transactional EXISTS here would deadlock behind the parked read tx, so the key's survival is
-  // confirmed below instead, once the walk is gone.
+  EXPECT_TRUE(rm_queued) << "RM did not queue behind the parked walk; overlap not exercised";
+
+  // RM waited the walk out rather than crashing or deferring, and deleted the key. Drain to the
+  // final cursor instead of assuming one pass: RM's time budget may split the pass across calls.
   ASSERT_THAT(rm_resp, ArrLen(2));
-  EXPECT_THAT(rm_resp.GetVec()[1], IntArg(0));
+  uint32_t total = rm_resp.GetVec()[1].GetInt().value_or(0);
   string cursor = rm_resp.GetVec()[0].GetString();
-  EXPECT_NE(cursor, "0");
-
-  release_walk.store(true);
-  reader.Join();
-
-  // The walk is gone; resuming from the deferred cursor deletes the key and drains to completion.
-  // total == 1 proves the key survived the deferred pass.
-  uint32_t total = 0;
-  for (int call = 0; call < 100; ++call) {
+  for (int call = 0; cursor != "0" && call < 100; ++call) {
     RespExpr resp = Run({"rm", cursor, "match", key, "count", "10"});
     ASSERT_THAT(resp, ArrLen(2)) << call;
     total += resp.GetVec()[1].GetInt().value_or(0);
     cursor = resp.GetVec()[0].GetString();
-    if (cursor == "0")
-      break;
   }
+  EXPECT_EQ(cursor, "0");
   EXPECT_EQ(total, 1u);
   EXPECT_THAT(Run({"exists", key}), IntArg(0));
 }
