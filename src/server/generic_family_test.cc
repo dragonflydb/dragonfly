@@ -2399,6 +2399,91 @@ TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
   }
 }
 
+// RM deletes without a key lock. While a fiber is parked inside container_utils::Iterate* its
+// transaction is the shard's running_tx(); RM must defer rather than free the value under it, and
+// must not lose the key behind the cursor either - the returned cursor keeps pointing at it until a
+// later pass, once the walk is gone, deletes it.
+TEST_F(GenericFamilyTest, RmDefersWhileContainerYields) {
+  // Put the list on shard 0 so the deferred cursor also exercises the shard-0/resume-token path.
+  const unsigned shard_count = shard_set->size();
+  string key;
+  for (int i = 0; key.empty(); ++i) {
+    string candidate = absl::StrCat("list", i);
+    if (Shard(candidate, shard_count) == 0)
+      key = candidate;
+  }
+
+  constexpr int kListSize = 20'000;
+  constexpr int kBatch = 1'000;
+  vector<string> batch_args = {"rpush", key};
+  batch_args.insert(batch_args.end(), kBatch, "v");
+  for (int pushed = 0; pushed < kListSize; pushed += kBatch) {
+    Run(absl::Span<const string>(batch_args));
+  }
+
+  atomic_bool walk_started{false};
+  atomic_bool release_walk{false};
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    static CommandId cid{"RM_ITERATION", CO::READONLY, 1, 1, 1};
+    boost::intrusive_ptr<Transaction> tx(new Transaction{&cid});
+    CmdArgVec args{key};
+    ASSERT_EQ(tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, CmdArgList{args}),
+              OpStatus::OK);
+
+    auto cb = [&](Transaction* tx, EngineShard* shard) -> OpResult<void> {
+      auto op_args = tx->GetOpArgs(shard);
+      auto res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+      CHECK(res);
+
+      size_t visited = 0;
+      container_utils::IterateList(res.value()->second, [&](container_utils::ContainerEntry) {
+        walk_started.store(true);
+        while (!release_walk.load())  // hold the walk parked so running_tx() stays set
+          ThisFiber::SleepFor(std::chrono::milliseconds(1));
+        ++visited;
+        return true;
+      });
+      EXPECT_EQ(visited, kListSize);  // the value stayed live for the whole walk
+      return OpStatus::OK;
+    };
+    EXPECT_EQ(tx->ScheduleSingleHopT(std::move(cb)).status(), OpStatus::OK);
+  });
+
+  RespExpr rm_resp;
+  auto remover = pp_->at(1)->LaunchFiber([&] {
+    Run("remover", {"ping"});  // pay the connection setup before the window opens
+    for (int spin = 0; spin < 100'000 && !walk_started.load(); ++spin)
+      ThisFiber::Yield();
+    rm_resp = Run("remover", {"rm", "0", "match", key, "count", "10"});
+  });
+  remover.Join();
+
+  // Deferred: nothing freed under the walk, and the pass did not report itself finished. A
+  // transactional EXISTS here would deadlock behind the parked read tx, so the key's survival is
+  // confirmed below instead, once the walk is gone.
+  ASSERT_THAT(rm_resp, ArrLen(2));
+  EXPECT_THAT(rm_resp.GetVec()[1], IntArg(0));
+  string cursor = rm_resp.GetVec()[0].GetString();
+  EXPECT_NE(cursor, "0");
+
+  release_walk.store(true);
+  reader.Join();
+
+  // The walk is gone; resuming from the deferred cursor deletes the key and drains to completion.
+  // total == 1 proves the key survived the deferred pass.
+  uint32_t total = 0;
+  for (int call = 0; call < 100; ++call) {
+    RespExpr resp = Run({"rm", cursor, "match", key, "count", "10"});
+    ASSERT_THAT(resp, ArrLen(2)) << call;
+    total += resp.GetVec()[1].GetInt().value_or(0);
+    cursor = resp.GetVec()[0].GetString();
+    if (cursor == "0")
+      break;
+  }
+  EXPECT_EQ(total, 1u);
+  EXPECT_THAT(Run({"exists", key}), IntArg(0));
+}
+
 // Regression test for SORT BY nosort STORE inside MULTI/EXEC does a
 // non-concluding Execute() hop to fetch elements, then falls through to the
 // unsorted reply path without a concluding hop or Conclude().
