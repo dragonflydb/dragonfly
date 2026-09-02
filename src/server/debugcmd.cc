@@ -744,6 +744,12 @@ void DebugCmd::Reload(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   string last_save_file = sf_.GetLastSaveInfo().file_name;
 
+  // Validate before FlushAll so an unloadable snapshot does not destroy the dataset.
+  if (GenericError load_check = sf_.CheckSnapshotLoadable(last_save_file); load_check) {
+    LOG(WARNING) << "Cannot reload snapshot '" << last_save_file << "': " << load_check.Format();
+    return cmd_cntx->SendError(load_check.Format());
+  }
+
   sf_.FlushAll(cntx_->ns);
 
   if (auto fut_ec = sf_.Load(last_save_file, ServerFamily::LoadExistingKeys::kFail); fut_ec) {

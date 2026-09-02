@@ -14,6 +14,8 @@ extern "C" {
 #include <absl/flags/reflection.h>
 #include <mimalloc.h>
 
+#include <filesystem>
+
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -29,6 +31,7 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/serializer_commons.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 #include "strings/human_readable.h"
 
@@ -1020,6 +1023,50 @@ TEST_F(RdbTest, DebugReloadRdbFormat) {
   EXPECT_EQ(Run({"debug", "reload"}), "OK");
   EXPECT_THAT(service_->server_family().GetLastSaveInfo().file_name, EndsWith(".rdb"));
   EXPECT_EQ(Run({"get", "k1"}), "v1");
+}
+
+TEST_F(RdbTest, DebugReloadNoSnapshotKeepsData) {
+  // Nothing was ever saved; RELOAD NOSAVE must fail without flushing the dataset.
+  Run({"set", "k1", "v1"});
+  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ErrArg("no snapshot"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
+}
+
+TEST_F(RdbTest, DebugReloadMissingSnapshotKeepsData) {
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  CleanupSnapshots();  // the snapshot disappears out from under the server
+  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ErrArg("not found"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
+}
+
+TEST_F(RdbTest, DebugReloadOnReplicaKeepsData) {
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = false; });
+  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ErrArg("replica"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = true; });
+}
+
+TEST_F(RdbTest, DebugReloadSnapshotDirectoryKeepsData) {
+  // Single-file .rdb: a directory shadowing the path passes fs::canonical, so it must be
+  // rejected as a non-regular file before the flush.
+  absl::FlagSaver fs;
+  ShutdownService();  // clears dbfilename; set it afterwards, as InitWithDbFilename does
+  absl::SetFlag(&FLAGS_df_snapshot_format, false);
+  absl::SetFlag(&FLAGS_dbfilename, absl::StrCat("rdbtestdump_", getpid(), ".rdb"));
+  ResetService();
+
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  std::string path = service_->server_family().GetLastSaveInfo().file_name;
+  ASSERT_THAT(path, EndsWith(".rdb"));
+  CleanupSnapshots();
+  std::filesystem::create_directory(path);  // a directory now shadows the snapshot path
+  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ErrArg("directory"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
+  std::filesystem::remove(path);
 }
 
 // Tests loading a huge stream, where the stream is loaded in multiple partial
