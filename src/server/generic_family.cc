@@ -1894,8 +1894,9 @@ template <typename C> auto GetSortRange(const C& entries, const optional<SortBou
   auto start_it = entries.begin();
   auto end_it = entries.end();
   if (bounds) {
-    start_it += std::min<uint32_t>(bounds->offset, entries.size());
-    end_it = entries.begin() + std::min<uint32_t>(bounds->offset + bounds->count, entries.size());
+    start_it += std::min<size_t>(bounds->offset, entries.size());
+    end_it =
+        entries.begin() + std::min<size_t>(size_t{bounds->offset} + bounds->count, entries.size());
   }
 
   return std::make_pair(start_it, end_it);
@@ -2003,7 +2004,7 @@ struct SortVisitor {
     if (params.bounds) {
       auto sort_it =
           entries.begin() +
-          std::min<uint32_t>(params.bounds->offset + params.bounds->count, entries.size());
+          std::min<size_t>(size_t{params.bounds->offset} + params.bounds->count, entries.size());
       std::partial_sort(entries.begin(), sort_it, entries.end(), cmp);
     } else {
       rng::sort(entries, cmp);

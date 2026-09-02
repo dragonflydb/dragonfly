@@ -1988,6 +1988,18 @@ TEST_F(GenericFamilyTest, SortNegativeLimit) {
   ASSERT_THAT(resp, ErrArg("value is not an integer"));
 }
 
+TEST_F(GenericFamilyTest, SortLimitOverflow) {
+  Run({"rpush", "l", "1", "2", "3", "4", "5"});
+
+  EXPECT_THAT(Run({"sort", "l", "LIMIT", "4294967295", "2"}), ArrLen(0));
+  EXPECT_THAT(Run({"sort", "l", "LIMIT", "2", "4294967295"}).GetVec(), ElementsAre("3", "4", "5"));
+
+  EXPECT_THAT(Run({"sort", "l", "LIMIT", "4294967295", "2", "STORE", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  EXPECT_EQ(Run({"ping"}), "PONG");
+}
+
 TEST_F(GenericFamilyTest, SortBy) {
   Run({"del", "list-1"});
   Run({"lpush", "list-1", "1", "2", "3"});
