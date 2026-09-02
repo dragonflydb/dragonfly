@@ -1493,7 +1493,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
 DispatchResult Service::DispatchCommand(
     facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd, facade::AsyncPreference async_pref,
     absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) {
-  DFLY_TRACY_DISPATCH_ONLY_ZONE("Dispatch.Command");
+  DFLY_TRACY_DISPATCH_ZONE("Dispatch.Command");
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
   const CommandId* cid = nullptr;
@@ -1505,7 +1505,7 @@ DispatchResult Service::DispatchCommand(
 
   if (parsed_cmd->mc_command()) {
     {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.Resolve");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.Resolve");
       auto mc_res = HandleMemcacheCommand(parsed_cmd, async_pref);
       if (std::holds_alternative<facade::DispatchResult>(mc_res)) {
         return std::get<facade::DispatchResult>(mc_res);
@@ -1515,14 +1515,14 @@ DispatchResult Service::DispatchCommand(
     args_no_cmd = args;  // MC args have no command name prefix
   } else {
     {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.Resolve");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.Resolve");
       DCHECK(!args.empty());
       std::tie(cid, args_no_cmd) = registry_.FindExtended(args);
     }
   }
 
   if (cid == nullptr) {
-    DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.UnknownCommand");
+    DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.UnknownCommand");
     invoke_pre_dispatch();
     if (async_pref != AsyncPreference::ONLY_SYNC) {
       parsed_cmd->SetDeferredReply();
@@ -1555,7 +1555,7 @@ DispatchResult Service::DispatchCommand(
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
 
   if (dfly_cntx->async_dispatch && cid->IsBlocking()) {
-    DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.BlockingFlush");
+    DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.BlockingFlush");
     ++ServerState::tlocal()->stats.blocking_commands_in_pipelines;
     cmd_cntx->conn()->FlushReplies();
   }
@@ -1564,7 +1564,7 @@ DispatchResult Service::DispatchCommand(
 
   // Block on CLIENT PAUSE if needed
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
-    DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.PauseCheck");
+    DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.PauseCheck");
     if (VLOG_IS_ON(2)) {
       bool under_script = bool(dfly_cntx->conn_state.script_info);
       LOG(INFO) << "Got (" << conn->GetClientId() << "): " << (under_script ? "LUA " : "")
@@ -1579,9 +1579,9 @@ DispatchResult Service::DispatchCommand(
 
   // Verify command state
   {
-    DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.Verify");
+    DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.Verify");
     if (auto err = VerifyCommandState(*cid, args_no_cmd, *dfly_cntx); err) {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.VerifyFailure");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.VerifyFailure");
       LOG_IF(WARNING,
              dfly_cntx->replica_conn || !dfly_cntx->conn() /* no owner in replica context */)
           << "VerifyCommandState error: " << err->ToSv();
@@ -1615,7 +1615,7 @@ DispatchResult Service::DispatchCommand(
   // RESET must execute immediately even inside MULTI (it aborts the transaction).
   bool is_trans_cmd = cid->IsExecGroup() || cid->IsReset();
   if (dfly_cntx->conn_state.exec_info.IsCollecting() && !is_trans_cmd) {
-    DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.MultiQueue");
+    DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.MultiQueue");
     uint8_t tail_index = args.size() - args_no_cmd.size();
     StoreInMultiBlock(dfly_cntx, cid, parsed_cmd, tail_index);
     cmd_cntx->SendSimpleString("QUEUED");
@@ -1623,7 +1623,7 @@ DispatchResult Service::DispatchCommand(
   }
 
   {
-    DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.TransactionAndInvoke");
+    DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.TransactionAndInvoke");
     auto [dispatched_tx, status] = PrepareTransaction(cid, args_no_cmd, cmd_cntx);
     if (status != OpStatus::OK) {
       DCHECK(!dispatched_tx);
@@ -1633,11 +1633,11 @@ DispatchResult Service::DispatchCommand(
 
     DispatchResult res = DispatchResult::OK;
     {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.Invoke");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.Invoke");
       res = InvokeCmd(cmd_cntx->tail_args(), cmd_cntx);
     }
     if (dispatched_tx) {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.TransactionComplete");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.TransactionComplete");
       DCHECK(dfly_cntx->transaction == dispatched_tx.get());
       // A new top-level transaction is created here only for top-level commands. Nested commands
       // (EXEC body, script CALLs, squashed sub-commands) reuse an existing transaction or run on a
@@ -1648,7 +1648,7 @@ DispatchResult Service::DispatchCommand(
     }
 
     if ((res != DispatchResult::OK) && (res != DispatchResult::OOM)) {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Dispatch.ErrorClose");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Dispatch.ErrorClose");
       cmd_cntx->SendError("Internal Error");
       dfly_cntx->conn()->MarkForClose();
     }
@@ -1747,7 +1747,7 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
   builder->ConsumeLastError();  // throw away last error
   DispatchResult res = DispatchResult::OK;
   try {
-    DFLY_TRACY_DISPATCH_ONLY_ZONE("InvokeCmd.Handler");
+    DFLY_TRACY_DISPATCH_ZONE("InvokeCmd.Handler");
     cid->Invoke(tail_args, cmd_cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();
@@ -1864,14 +1864,14 @@ uint32_t Service::DispatchSquashedBatch(
 
   auto* cmd = first;
   for (unsigned i = 0; i < count && cmd; i++) {
-    DFLY_TRACY_DISPATCH_ONLY_ZONE("Squash.Dispatch.Command");
+    DFLY_TRACY_DISPATCH_ZONE("Squash.Dispatch.Command");
     auto* cmd_cntx = static_cast<CommandContext*>(cmd);
 
     ParsedArgs args{*cmd_cntx};
     const CommandId* cid = nullptr;
     ParsedArgs tail_args;
     {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squash.Dispatch.Resolve");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Squash.Dispatch.Resolve");
       std::tie(cid, tail_args) = cmd_cache.Resolve(args);
     }
 
@@ -1902,11 +1902,11 @@ uint32_t Service::DispatchSquashedBatch(
     }
 
     if (pre_dispatch_cb) {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squash.Dispatch.PreDispatch");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Squash.Dispatch.PreDispatch");
       (*pre_dispatch_cb)(cmd);
     }
     {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squash.Dispatch.Verify");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("Squash.Dispatch.Verify");
       if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
         CapturingReplyBuilder crb{ReplyMode::FULL, rb->GetRespVersion()};
         crb.SendError(std::move(*err));

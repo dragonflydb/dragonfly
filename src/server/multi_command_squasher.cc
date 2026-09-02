@@ -88,7 +88,7 @@ MultiCommandSquasher::MultiCommandSquasher(CmdGenerator cmd_gen, ConnectionConte
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
-  DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.PrepareShard");
+  DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.PrepareShard");
   if (sharded_.empty()) {
     sharded_.resize(shard_set->size());
     for (size_t i = 0; i < sharded_.size(); i++) {
@@ -115,7 +115,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
 }
 
 MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
-  DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.Classify");
+  DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.Classify");
   DCHECK(cmd.cid);
 
   const CommandId& cid = *cmd.cid;
@@ -169,7 +169,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
 }
 
 bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) {
-  DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.Standalone");
+  DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.Standalone");
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
   // In pipeline mode the reply is captured and deferred into the parsed command, preserving
@@ -190,7 +190,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
 
   auto* tx = cntx_->transaction;
   {
-    DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.Standalone.Transaction");
+    DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.Standalone.Transaction");
     if (cmd.cid->IsTransactional()) {
       tx->MultiSwitchCmd(cmd.cid);
       auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, cmd.args);
@@ -206,7 +206,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
   cmd_cntx.SetupTx(cmd.cid, tx);
   cmd_cntx.SetTailArgs(cmd.args);
   {
-    DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.Standalone.Invoke");
+    DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.Standalone.Invoke");
     service_->InvokeCmd(cmd.args, &cmd_cntx);
   }
 
@@ -214,7 +214,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
       << cmd.cid->name() << " changed its RESP version while captured";
 
   {
-    DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.Standalone.ResolveReply");
+    DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.Standalone.ResolveReply");
     resolve();
   }
 
@@ -222,7 +222,7 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
 }
 
 OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v) {
-  DFLY_TRACY_DISPATCH_ZONE("Squasher.Hop.Work");
+  DFLY_TRACY_SQUASHER_ZONE("Squasher.Hop.Work");
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.dispatched.empty());
 
@@ -262,7 +262,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     }
 
     for (size_t i = batch_start; i < batch_end; ++i) {
-      DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.Hop.Command");
+      DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.Hop.Command");
       auto& dispatched = sinfo.dispatched[i];
       auto* ctx = &local_cntx;
       crb.SetReplyMode(dispatched.reply_mode);
@@ -293,7 +293,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       ctx->tx()->MultiSwitchCmd(dispatched.cid);
 
       {
-        DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.Hop.Command.Transaction");
+        DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.Hop.Command.Transaction");
         auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args,
                                             dispatched.key_index);
         if (status != OpStatus::OK) {
@@ -303,7 +303,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
           ctx->SetTailArgs(dispatched.args);
 
           {
-            DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.Hop.Command.Invoke");
+            DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.Hop.Command.Invoke");
             service_->InvokeCmd(dispatched.args, ctx);
           }
         }
@@ -313,10 +313,10 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
         ctx->SwapReplyBuilder(saved_rb);
 
       if (!do_async) {
-        DFLY_TRACY_DISPATCH_ZONE_FORENSIC("Squasher.Hop.Command.CaptureReply");
+        DFLY_TRACY_SQUASHER_FORENSIC_ZONE("Squasher.Hop.Command.CaptureReply");
         move_reply(&dispatched);  // Async commands resolve the context directly
       } else if (!ctx->CanReply()) {
-        DFLY_TRACY_WAIT("Squasher.Hop.Command.AsyncReplyWait");
+        DFLY_TRACY_SQUASHER_WAIT("Squasher.Hop.Command.AsyncReplyWait");
         ctx->Blocker()
             ->Wait();  // Transaction didn't finish inline (likely locked key), wait for it
       }
@@ -327,7 +327,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 }
 
 bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
-  DFLY_TRACY_DISPATCH_ZONE("Squasher.Execute");
+  DFLY_TRACY_SQUASHER_ZONE("Squasher.Execute");
   DCHECK(!cntx_->conn_state.exec_info.IsCollecting());
 
   if (order_.empty())
@@ -338,8 +338,8 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     if (!sd.dispatched.empty())
       ++num_shards;
   }
-  DFLY_TRACY_ZONE_VALUE(static_cast<uint64_t>(order_.size()));
-  DFLY_TRACY_ZONE_TEXT_F("fanout=%u", num_shards);
+  DFLY_TRACY_SQUASHER_VALUE(static_cast<uint64_t>(order_.size()));
+  DFLY_TRACY_SQUASHER_TEXT_F("fanout=%u", num_shards);
 
   Transaction* tx = cntx_->transaction;
   ServerState::tlocal()->stats.squash_width_freq_arr[num_shards - 1]++;
@@ -359,7 +359,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.
   if (IsAtomic()) {
-    DFLY_TRACY_DISPATCH_ZONE("Squasher.Execute.AtomicHops");
+    DFLY_TRACY_SQUASHER_ZONE("Squasher.Execute.AtomicHops");
     auto cb = [this](ShardId sid) { return !sharded_[sid].dispatched.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
     tx->ScheduleSingleHop(
@@ -371,10 +371,12 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     // Saves work in case logging is disable (i.e. log_squash_threshold_cached is high).
     cb_cntx.min_threshold_cycles = CycleClock::FromUsec(log_squash_threshold_cached / 5);
     auto cb = [bc, &cb_cntx, this]() mutable {
-      DFLY_TRACY_DISPATCH_ZONE("Squasher.Hop.Callback");
+      DFLY_TRACY_SQUASHER_ZONE("Squasher.Hop.Callback");
       uint64_t sched_time = CycleClock::Now() - cb_cntx.start;
-      DFLY_TRACY_ZONE_TEXT_SV("schedule_delay_cycles");
-      DFLY_TRACY_ZONE_VALUE(sched_time);
+      uint64_t sched_time_ns =
+          (sched_time / CycleClock::Frequency()) * 1'000'000'000ULL +
+          ((sched_time % CycleClock::Frequency()) * 1'000'000'000ULL) / CycleClock::Frequency();
+      DFLY_TRACY_SQUASHER_VALUE(sched_time_ns);
 
       // Update max_sched_cycles in lock-free fashion, to avoid contention
       uint64_t current = cb_cntx.max_sched_cycles.load(memory_order_relaxed);
@@ -398,7 +400,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
       }
 
       if (ThisFiber::GetRunningTimeCycles() > max_busy_squash_cycles_cached) {
-        DFLY_TRACY_WAIT("Squasher.Hop.BusyYield");
+        DFLY_TRACY_SQUASHER_WAIT("Squasher.Hop.BusyYield");
         ThisFiber::Yield();
         stats_.yields++;
       }
@@ -416,14 +418,14 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 
     static_assert(sizeof(cb) <= 32);
     {
-      DFLY_TRACY_DISPATCH_ZONE("Squasher.Execute.ScheduleHops");
+      DFLY_TRACY_SQUASHER_ZONE("Squasher.Execute.ScheduleHops");
       for (unsigned i = 0; i < sharded_.size(); ++i) {
         if (!sharded_[i].dispatched.empty())
           shard_set->AddL2(i, cb);
       }
     }
     {
-      DFLY_TRACY_WAIT("Squasher.Execute.WaitForHops");
+      DFLY_TRACY_SQUASHER_WAIT("Squasher.Execute.WaitForHops");
       bc.Wait();
     }
   }
@@ -432,7 +434,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   bool aborted = false;
 
   if (!opts_.pipeline_mode) {
-    DFLY_TRACY_DISPATCH_ZONE("Squasher.Execute.MergeReplies");
+    DFLY_TRACY_SQUASHER_ZONE("Squasher.Execute.MergeReplies");
     size_t total_reply_size = 0;
     for (auto& sinfo : sharded_) {
       total_reply_size += sinfo.reply_size_delta;
@@ -478,7 +480,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   }
 
   {
-    DFLY_TRACY_DISPATCH_ZONE("Squasher.Execute.Cleanup");
+    DFLY_TRACY_SQUASHER_ZONE("Squasher.Execute.Cleanup");
     for (auto& sinfo : sharded_) {
       sinfo.dispatched.clear();
       sinfo.reply_id = 0;
@@ -493,7 +495,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
 }
 
 void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
-  DFLY_TRACY_DISPATCH_ZONE("Squasher.Run");
+  DFLY_TRACY_SQUASHER_ZONE("Squasher.Run");
   DVLOG(1) << "Trying to squash commands for transaction " << cntx_->transaction->DebugId();
 
   for (CmdRef cmd = cmd_gen_(); cmd.IsValid(); cmd = cmd_gen_()) {
