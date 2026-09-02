@@ -1716,6 +1716,7 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
   builder->ConsumeLastError();  // throw away last error
   DispatchResult res = DispatchResult::OK;
   try {
+    DFLY_TRACY_ZONE_FORENSIC("InvokeCmd.Handler");
     cid->Invoke(tail_args, cmd_cntx);
   } catch (std::exception& e) {
     LOG(ERROR) << "Internal error, system probably unstable " << e.what();

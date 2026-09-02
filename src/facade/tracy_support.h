@@ -64,9 +64,11 @@
 // High-volume per-command detail. Enable with -DWITH_TRACY_FORENSIC=ON.
 #define DFLY_TRACY_ZONE_FORENSIC(name) ZoneScopedN(name)
 #define DFLY_TRACY_ZONE_FORENSIC_TEXT_SV(sv) DFLY_TRACY_ZONE_TEXT_SV(sv)
+#define DFLY_TRACY_ZONE_FORENSIC_VALUE(value) DFLY_TRACY_ZONE_VALUE(value)
 #else
 #define DFLY_TRACY_ZONE_FORENSIC(name) (void)sizeof(name)
 #define DFLY_TRACY_ZONE_FORENSIC_TEXT_SV(sv) (void)sizeof(sv)
+#define DFLY_TRACY_ZONE_FORENSIC_VALUE(value) (void)sizeof(value)
 #endif
 
 #else  // !TRACY_ENABLE
@@ -101,5 +103,6 @@
 #define DFLY_TRACY_WAIT(name) (void)sizeof(name)
 #define DFLY_TRACY_ZONE_FORENSIC(name) (void)sizeof(name)
 #define DFLY_TRACY_ZONE_FORENSIC_TEXT_SV(sv) (void)sizeof(sv)
+#define DFLY_TRACY_ZONE_FORENSIC_VALUE(value) (void)sizeof(value)
 
 #endif  // TRACY_ENABLE
