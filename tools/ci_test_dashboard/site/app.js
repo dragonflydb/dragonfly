@@ -52,8 +52,6 @@ async function boot() {
     render();
   } catch (error) {
     document.getElementById('dataStatus').textContent = 'No data';
-    document.getElementById('subtitle').textContent =
-        'Run python3 build_dashboard.py tmp/junit-results site/data';
     document.getElementById('detailsPane').textContent = String(error);
   }
 }
