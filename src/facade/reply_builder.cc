@@ -102,7 +102,10 @@ void SinkReplyBuilder::CloseConnection() {
 }
 
 template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
-  if (size_t required = (piece_size(pieces) + ...); buffer_.AppendLen() <= required)
+  size_t required = (piece_size(pieces) + ...);
+  CHECK_LE(required, kMaxBufferSize);
+
+  if (buffer_.AppendLen() <= required)
     Flush(required);
 
   auto iovec_end = [](const iovec& v) { return reinterpret_cast<char*>(v.iov_base) + v.iov_len; };
@@ -275,6 +278,7 @@ void MCReplyBuilder::SendValue(MemcacheCmdFlags cmd_flags, std::string_view key,
       WritePieces("HD ", flags, kCRLF);
     }
   } else {
+    DCHECK_LE(key.size(), kMaxBufferSize);  // Memcached key bounds to 250 by hard protocol
     WritePieces("VALUE ", key, " ", mc_flag, " ", value.size());
     if (cmd_flags.return_cas)
       WritePieces(" ", mc_token);
