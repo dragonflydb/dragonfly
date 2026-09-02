@@ -11,6 +11,12 @@ Indices (say in GETRANGE and SETRANGE commands) should be signed 32 bit integers
 SORT does not take any locale into account.
 
 ## Expiry ranges.
+
+### EXPIRE flags
+EXPIRE, PEXPIRE, EXPIREAT and PEXPIREAT accept NX together with GT or LT: the expiry is set when
+the key has none, otherwise GT or LT alone decides. Redis rejects these combinations as
+incompatible.
+
 Expirations are limited to 8 years. For commands with millisecond precision like PEXPIRE or PSETEX,
 expirations greater than 2^28ms are quietly rounded to the nearest second losing precision of less than 0.001%.
 
