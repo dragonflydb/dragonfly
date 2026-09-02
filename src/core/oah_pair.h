@@ -15,6 +15,7 @@
 #include "core/oah_base.h"
 
 extern "C" {
+#include "redis/redis_aux.h"
 #include "redis/zmalloc.h"
 }
 
@@ -24,10 +25,11 @@ class PageUsage;
 
 // oah_pair.h - a map member (key + value, plus expiry and cached hash), the map counterpart of
 // OAHEntry, sharing its pointer-tag layout so OAHTable SIMD probes stay entry-agnostic. Blob
-// layout:
-//   [expiry?, key_size, value_size, value_ptr:8B, key]      (sizes use variable-width oah::size)
-// The value always lives in its own zmalloc buffer, so its bytes stay >=8-byte aligned for typed
-// reinterpretation (e.g. vector search). An empty value stores a null value_ptr and no buffer.
+// layout (sizes use variable-width oah::size):
+//   [expiry?, key_size, value_size, key, value | value_ptr:8B]
+// Values of at least server.max_listpack_map_bytes live in their own zmalloc buffer, so their bytes
+// stay >=8-byte aligned for typed reinterpretation (vector search borrows them, see
+// GlobalHnswIndexRegistry::Create). Smaller values, which search copies, are stored inline.
 class OAHPair {
  public:
   using TaggedPtr = oah::TaggedPtr;
@@ -67,7 +69,7 @@ class OAHPair {
 
   std::string_view Value() const {
     const Header header = ParseHeader();
-    return {ReadValuePtr(header), header.value_size};
+    return {ValueData(header), header.value_size};
   }
 
   // Stored key content (ascii-packed or raw) used for hashing. Not the logical key.
@@ -118,8 +120,8 @@ class OAHPair {
 
  protected:
   struct Header {
-    char* value_ptr_field;
-    char* key_content;  // packed/raw key content bytes (stored after value_ptr)
+    char* value_field;  // inline value or value_ptr, stored after the key content
+    char* key_content;  // packed/raw key content bytes
     uint32_t value_size;
     oah::key::Header key;  // encoded flag, logical length, header/content sizes
   };
@@ -130,24 +132,34 @@ class OAHPair {
     p += key.field_size;
     const oah::size::Decoded value = oah::size::Read(p);
     p += value.field_size;
-    return {p, p + sizeof(char*), value.size, key};
+    return {p + key.content_size, p, value.size, key};
   }
 
-  static char* ReadValuePtr(const Header& header) {
+  // The size alone selects the layout, as max_listpack_map_bytes is fixed at startup.
+  static bool ValueUsesPointer(size_t value_size) {
+    return value_size != 0 && value_size >= server.max_listpack_map_bytes;
+  }
+
+  static char* ValueData(const Header& header) {
+    if (!ValueUsesPointer(header.value_size))
+      return header.value_field;
+
     char* value = nullptr;
-    std::memcpy(&value, header.value_ptr_field, sizeof(value));
+    std::memcpy(&value, header.value_field, sizeof(value));
     return value;
   }
 
+  // The separate value buffer, or null when the value is stored inline.
   char* ValuePtr() const {
-    return ReadValuePtr(ParseHeader());
+    const Header header = ParseHeader();
+    return ValueUsesPointer(header.value_size) ? ValueData(header) : nullptr;
   }
 
-  // Builds a blob that takes ownership of `value_ptr` (null for an empty value), storing the
-  // already-encoded `key` content verbatim. The header records `real_size`; whether the key is
-  // encoded is derived from key.size() != real_size. Create allocates a fresh value buffer; Rebuild
-  // passes the existing key/value through unchanged.
-  static TaggedPtr BuildBlob(std::string_view key, uint32_t real_size, char* value_ptr,
+  // Builds a blob that takes ownership of `value_ptr` if ValueUsesPointer(value_size), otherwise
+  // copies the value inline, storing the already-encoded `key` content verbatim. The header records
+  // `real_size`; whether the key is encoded is derived from key.size() != real_size. Create
+  // allocates a fresh value buffer; Rebuild passes the existing key/value through unchanged.
+  static TaggedPtr BuildBlob(std::string_view key, uint32_t real_size, const char* value_ptr,
                              size_t value_size, uint32_t expiry);
 
   // Reallocates the blob with `expiry`, preserving key, value and the cached ext-hash.
