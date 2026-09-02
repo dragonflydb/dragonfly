@@ -5,7 +5,7 @@ Fiber‑aware [Tracy](https://github.com/wolfpld/tracy) profiling for the V2 I/O
 capturing traces, reading them, and extending the instrumentation.
 
 - **Full Tracy manual (PDF):** <https://github.com/wolfpld/tracy/releases/latest/download/tracy.pdf>
-- **Tracy repo:** <https://github.com/wolfpld/tracy> (we pin **v0.11.1**, protocol 69)
+- **Tracy repo:** <https://github.com/wolfpld/tracy> (we pin **v0.14.1**)
 
 > **Zero overhead when off.** All instrumentation is compiled out unless you build with
 > `-DWITH_TRACY=ON`. The default build has no Tracy code at all.
@@ -36,10 +36,89 @@ $TRACY/profiler/build/tracy-profiler /tmp/df.tracy
 $TRACY/csvexport/build/tracy-csvexport -e /tmp/df.tracy > /tmp/zones.csv
 ```
 
-For a dispatch-focused diagnostic capture, add `-DWITH_TRACY_DISPATCH_ONLY=ON` to the Dragonfly
-configuration. It compiles out every ordinary and non-dispatch forensic zone, retaining only
-the outer `Dispatch.Command`, `InvokeCmd.Handler`, `Squash.Dispatch.Command`, and existing batch,
-squasher-work, and callback zones. It is an attribution build rather than a throughput baseline.
+## Choosing Tracy Data and Overhead
+
+Tracy has two separate controls, plus an optional detail level. Use them together: build a binary
+with the groups that might be useful, then choose a smaller subset at startup for each capture.
+
+| Control | When chosen | Effect |
+|---|---|---|
+| `-DWITH_TRACY=ON` | build time | Includes the Tracy client. With `OFF` (the default), there is no Tracy client or manual instrumentation code. |
+| `-DDFLY_TRACY_SCOPES=...` | build time | Decides which manual zone groups are compiled into the binary. Excluded groups have no Tracy work at runtime. |
+| `--tracy_scopes=...` | server startup | Selects which compiled groups emit in this server run. No rebuild is needed to add or remove an already compiled group. |
+| `-DWITH_TRACY_FORENSIC=ON` | build time | Adds high-volume nested per-command detail within the selected compiled groups. Leave it `OFF` for ordinary captures. |
+
+The available groups are `connection`, `dispatch`, `squasher`, `reply`, and `memory`. `all` means
+every available group at build time, or every group compiled into this binary at runtime.
+
+### What Each Scope Contains
+
+| Scope | Main zones and data | Source owner |
+|---|---|---|
+| `connection` | input, parse loops, idle/backpressure waits, control handling, migration, and the parsed-queue plot | `src/facade/dragonfly_connection.cc` |
+| `dispatch` | command dispatch and execution, including `Dispatch.*`, `Squash.Dispatch.*`, `InvokeCmd.Handler`, and `V2.ExecuteBatch` | `src/server/main_service.cc`, `src/facade/dragonfly_connection.cc` |
+| `squasher` | pipeline squash structure, shard hops, scheduling, merge, and squasher wait zones | `src/server/multi_command_squasher.cc`, `src/facade/dragonfly_connection.cc` |
+| `reply` | reply batching, send/release/flush, plus `ReplyBuilder.*` when forensic detail is compiled | `src/facade/dragonfly_connection.cc`, `src/facade/reply_builder.cc` |
+| `memory` | connection memory-usage refresh, computation, and application | `src/facade/dragonfly_connection.cc` |
+
+`ReplyBuilder.*` zones specifically require both `reply` in `DFLY_TRACY_SCOPES` and
+`-DWITH_TRACY_FORENSIC=ON` at build time. They can then be enabled or disabled with the runtime
+`reply` scope like any other compiled group.
+
+### Build a focused binary
+
+This binary contains only dispatch and pipeline-squasher instrumentation. It is the preferred
+starting point when comparing V1 and V2 command execution:
+
+```bash
+./helio/blaze.sh -release -DUSE_MOLD=ON -DWITH_AWS=OFF -DWITH_TRACY=ON \
+  -DDFLY_TRACY_SCOPES=dispatch,squasher
+```
+
+To have every current group available for later runtime selection, use
+`-DDFLY_TRACY_SCOPES=all`. To collect nested, high-volume detail as well, add
+`-DWITH_TRACY_FORENSIC=ON` to the build command. `DFLY_TRACY_SCOPES` is a CMake cache value, so
+pass it explicitly on later reconfigures when changing the selected set.
+
+### Select groups at server startup
+
+The default `--tracy_scopes=all` emits every group compiled into the binary. Select a subset for
+one run without rebuilding:
+
+```bash
+# From a binary built with dispatch,squasher available.
+./build-opt/dragonfly --tracy_scopes=dispatch
+
+# Emit both compiled groups.
+./build-opt/dragonfly --tracy_scopes=dispatch,squasher
+
+# Emit no grouped manual zones. Useful for measuring the enabled Tracy client itself.
+./build-opt/dragonfly --tracy_scopes=
+```
+
+Requesting a group that was excluded by `DFLY_TRACY_SCOPES` is rejected at startup. Rebuild with
+that group included when it is needed. For an unbiased performance baseline, use a separate binary
+built with `-DWITH_TRACY=OFF`; an enabled Tracy build remains an attribution tool, even when its
+manual groups are disabled.
+
+### Five Common Configurations
+
+Assume the Tracy-enabled binary was built with
+`-DDFLY_TRACY_SCOPES=dispatch,squasher`. The runtime flag can remove or restore either compiled
+group, but it cannot add `connection`, `reply`, or `memory` until a rebuild includes them.
+
+| # | Build and server configuration | Manual zone result | Expected relative cost |
+|---|---|---|---|
+| 1 | `-DWITH_TRACY=OFF` | No Tracy client, fibers, manual zones, or scope checks | lowest |
+| 2 | `-DWITH_TRACY=ON`, then default runtime setting | `dispatch` and `squasher` emit because the default is `--tracy_scopes=all` | higher than 1 |
+| 3 | Same binary, `--tracy_scopes=` | No grouped manual zones emit | lower than 2; still above 1 |
+| 4 | Same binary, `--tracy_scopes=dispatch` | Only `dispatch` emits; removes `squasher` | normally between 2 and 3 |
+| 5 | Same binary, `--tracy_scopes=all` | Same result as 2: every compiled group emits | same as 2 |
+
+The largest profiling cost is an `all` build with `--tracy_scopes=all`,
+`-DWITH_TRACY_FORENSIC=ON`, and a Tracy viewer or capture client connected. With no collector
+attached, on-demand Tracy does not record a capture, but the Tracy-enabled binary still is not a
+clean replacement for configuration 1.
 
 ---
 
@@ -57,37 +136,57 @@ So the philosophy is: a *handful* of well‑placed structural zones on the hot l
 sampling do the rest. Adding a zone to every function would bloat the trace and slow the client for
 little benefit. (Tracy manual §"Sampling profiler" / §"Call stack sampling".)
 
-The V2 loop currently has these zones (all in `src/facade/dragonfly_connection.cc`):
+### Zone vs. scope
+
+A **zone** is one named individual Tracy event, such as `V2.Squash.Pipeline` or
+`Squasher.Hop.Callback`. It measures one lexical region of code, beginning at its macro and ending
+when its C++ scope exits. A **scope** is a named group of related zones, selected at build time by
+`DFLY_TRACY_SCOPES` and at startup by `--tracy_scopes`. For example, enabling the `squasher` scope
+enables every `V1.Squash.*`, `V2.Squash.*`, and `Squasher.*` zone that was compiled into the binary.
+
+The full current inventory is below. It applies to an `-DDFLY_TRACY_SCOPES=all` build; a focused
+build contains only the rows belonging to its compiled scopes.
 
 **Color convention:** zones that are **pure wait** (fiber parked, no CPU — `await`/`yield`/cond-wait/
 blocking-recv/join) are colored **red** via `DFLY_TRACY_WAIT(...)`. Everything else is normal-colored
 "work that may internally preempt" — its fiber-lane gaps still reveal any preemption.
 
-| Zone | Loop | Meaning | Kind |
-|---|---|---|---|
-| `V2.RunParsePath` / `V2.ParseLoop` | V2 | one parse→execute→reply pass / cycle | work |
-| `V2.Parse` | V2 | RESP protocol parsing | work |
-| `ParseYield` | V1+V2 | yield mid-parse (busy-read cap) | **wait** |
-| `V2.ExecuteBatch` | V2 | per-command execution loop | work |
-| `V2.Dispatch` (+verb) | V2 | one `DispatchCommandSimple` | work/preempt |
-| `V2.Squash` | V2 | vectorized cross-shard squash (blocks) | work/block |
-| `V2.ReplyBatch` / `V2.SendReply` | V2 | reply assembly / one (coroutine) reply | work/preempt |
-| `V2.ReadInput` | V2 | copy bytes from socket (non-blocking `TryRecv`) | work |
-| `V2.Flush` | V2 | `sendmsg` / socket write | work/block |
-| `V2.IdleWait` | V2 | parked: nothing to do | **wait** |
-| `V2.Backpressure` | V2 | parked: pipeline over memory limit | **wait** |
-| `V2.Control` | V2 | drain admin/pubsub (`ProcessControlMessages`) | work/preempt |
-| `V2.ProactorParse` | V2 | parse-in-proactor (runs on the proactor lane) | work |
-| `Migrate` | V1+V2 | cross-thread hop (cold) | **wait** |
-| `V1.Recv` | V1 | blocking socket read | **wait** |
-| `V1.Parse` | V1 | parse + inline sync dispatch | work/preempt |
-| `V1.CondWait` | V1 | `AsyncFiber` parked on the condvar | **wait** |
-| `V1.BatchYield` / `V1.QuotaYield` | V1 | `AsyncFiber` yields to the producer | **wait** |
-| `V1.Backpressure` | V1 | `DispatchSingle` parked over limit | **wait** |
-| `V1.Squash` | V1 | `SquashPipeline` (blocks on shards) | work/block |
-| `V1.Dispatch` | V1 | sync `DispatchCommand` | work/preempt |
-| `V1.Admin` | V1 | admin/pubsub dispatch | work/preempt |
-| `v2.parsed_q_len` (plot) | V2 | pipeline depth over time | plot |
+| Scope | Zone | Applies to | Meaning | Kind |
+|---|---|---|---|---|
+| `connection` | `V2.RunParsePath`, `V2.ParseLoop`, `V2.Parse` | V2 | parse-path pass, parse-loop cycle, and RESP parsing | work |
+| `connection` | `V2.ReadInput`, `V2.ProactorParse`, `V2.Control` | V2 | input copy, proactor parse-hop, and control-message handling | work |
+| `connection` | `V1.Parse` | V1 | parse and inline synchronous dispatch path | work/preempt |
+| `connection` | `V1.Recv` | V1 | blocking socket read | **wait** |
+| `connection` | `V1.Backpressure`, `V2.Backpressure` | V1/V2 | parked above the pipeline memory limit | **wait** |
+| `connection` | `V1.CondWait`, `V1.BatchYield`, `V1.QuotaYield`, `ParseYield` | V1/V2 | async-dispatch coordination and parser yields | **wait** |
+| `connection` | `V2.IdleWait`, `Migrate` | V1/V2 | idle park and connection migration | **wait** |
+| `connection` | `v2.parsed_q_len` | V2 | parsed command queue-depth plot | plot |
+| `connection` | `Conn.Pipeline.Enqueue`, `Conn.Pipeline.Enqueue.Finalize`, `Conn.Pipeline.ReleasePipelined`, `Conn.Pipeline.ReleaseParsed` | shared | pipeline-queue insertion and release detail; forensic only | work |
+| `dispatch` | `Dispatch.Command`, `InvokeCmd.Handler` | shared | command dispatch and command-handler body | work/preempt |
+| `dispatch` | `V1.Admin` | V1 | administrative or pub/sub command dispatch | work/preempt |
+| `dispatch` | `V2.ExecuteBatch` | V2 | per-command execution loop | work |
+| `dispatch` | `Squash.DispatchBatch`, `Squash.Dispatch.Command` | squashed | squashed-batch dispatch and one command in it | work/preempt |
+| `dispatch` | `Squash.Dispatch.TransactionSetup`, `Squash.Dispatch.Execute`, `Squash.Dispatch.TransactionTeardown` | transactions | transaction setup, execution, and teardown | work |
+| `dispatch` | `Squash.Dispatch.ThrottleSleep`, `Squash.Dispatch.Unlock` | squashed | throttle and unlock work in the batch path | work/preempt |
+| `dispatch` | `V1.Dispatch`, `V2.Dispatch` | V1/V2 | per-command V1/V2 dispatch detail; forensic only | work/preempt |
+| `dispatch` | `Dispatch.Resolve`, `Dispatch.UnknownCommand`, `Dispatch.BlockingFlush`, `Dispatch.PauseCheck`, `Dispatch.Verify`, `Dispatch.VerifyFailure`, `Dispatch.MultiQueue`, `Dispatch.TransactionAndInvoke`, `Dispatch.Invoke`, `Dispatch.TransactionComplete`, `Dispatch.ErrorClose` | shared | command-resolution, validation, transaction, and error-path detail; forensic only | work |
+| `dispatch` | `Squash.Dispatch.Resolve`, `Squash.Dispatch.PreDispatch`, `Squash.Dispatch.Verify` | squashed | squashed-command resolution and validation detail; forensic only | work |
+| `dispatch` | `String.Get.Lookup`, `String.Get.Value` | GET | GET lookup and value retrieval detail; forensic only | work |
+| `squasher` | `V1.Squash`, `V1.Squash.Pipeline`, `V1.Squash.Dispatch` | V1 | pipeline squash, preparation, and dispatch | work/block |
+| `squasher` | `V1.Squash.Release`, `V1.Squash.AdvanceAndDispatchStats` | V1 | reply release and post-dispatch accounting | work |
+| `squasher` | `V1.Squash.Release.Command` | V1 | one V1 squashed reply release; forensic only | work |
+| `squasher` | `V2.Squash.Pipeline`, `V2.Squash.Dispatch`, `V2.Squash.AdvanceAndDispatchStats` | V2 | equivalent V2 squash preparation, dispatch, and accounting | work/block |
+| `squasher` | `Squasher.Run`, `Squasher.Execute`, `Squasher.Execute.AtomicHops` | shared | squasher loop, batch execution, and atomic-hop phase | work |
+| `squasher` | `Squasher.Execute.ScheduleHops`, `Squasher.Execute.MergeReplies`, `Squasher.Execute.Cleanup` | shared | shard-hop scheduling, reply merge, and cleanup | work |
+| `squasher` | `Squasher.Hop.Work`, `Squasher.Hop.Callback` | shared | shard-hop work and callback execution; callback records scheduling delay in ns | work |
+| `squasher` | `Squasher.Hop.Command.AsyncReplyWait`, `Squasher.Hop.BusyYield`, `Squasher.Execute.WaitForHops` | shared | waits for command replies, scheduler yield, and shard-hop completion | **wait** |
+| `squasher` | `Squasher.PrepareShard`, `Squasher.Classify`, `Squasher.Standalone`, `Squasher.Standalone.Transaction`, `Squasher.Standalone.Invoke`, `Squasher.Standalone.ResolveReply` | shared | shard preparation, command classification, and standalone-command detail; forensic only | work |
+| `squasher` | `Squasher.Hop.Command`, `Squasher.Hop.Command.Transaction`, `Squasher.Hop.Command.Invoke`, `Squasher.Hop.Command.CaptureReply` | shared | per-command shard-hop detail; forensic only | work |
+| `reply` | `Conn.FlushReplies`, `V1.Squash.Reply`, `V1.Squash.Flush` | V1/shared | connection flush helper and V1 reply/flush work | work/block |
+| `reply` | `V2.ReplyBatch`, `V2.Reply.Send`, `V2.Reply.Release`, `V2.Flush` | V2 | V2 reply batch, coroutine send/release, and socket flush | work/block |
+| `reply` | `V1.Squash.Reply.Send`, `V2.SendReply`, `V2.Reply.SendOne`, `String.Get.Reply` | V1/V2/GET | per-reply and GET reply detail; forensic only | work |
+| `reply` | `ReplyBuilder.Flush.Aggregator`, `ReplyBuilder.Flush.BufferSpace`, `ReplyBuilder.Flush.IovLimit`, `ReplyBuilder.Flush.DecodeReserve`, `ReplyBuilder.Flush.DecodeBufferSpace`, `ReplyBuilder.Flush`, `ReplyBuilder.Send`, `ReplyBuilder.FinishScope`, `ReplyBuilder.Flush.ScopeUnbatched`, `ReplyBuilder.Flush.ScopeLargeRefs`, `ReplyBuilder.Flush.ScopeCopyNoSpace`, `ReplyBuilder.FinishScope.CopyRefs` | shared | reply-builder detail; forensic only | work |
+| `memory` | `Conn.Memory.Refresh`, `Conn.Memory.ComputeUsage`, `Conn.Memory.ApplyUsage` | shared | connection memory refresh, calculation, and limit application | work |
 
 **Deliberately NOT zoned** (cold / not on the loop): connection-close cleanup waits
 (`ClearPipelinedMessages`/`DestroyParsedQueue` `Blocker()->Wait()`), and the publisher-side
@@ -101,11 +200,11 @@ connection loop). Add them only if you're chasing a shutdown/pubsub-publisher st
 The **client** (inside `dragonfly`) is built automatically by `-DWITH_TRACY=ON`. The three
 **server-side tools** are separate binaries you build once from a Tracy checkout.
 
-Get the source (match our pinned **v0.11.1**) and remember its root:
+Get the source (match our pinned **v0.14.1**) and remember its root:
 
 ```bash
 git clone https://github.com/wolfpld/tracy
-cd tracy && git checkout v0.11.1
+cd tracy && git checkout v0.14.1
 export TRACY=$PWD          # repo root — every tool path in this doc is written as $TRACY/…
 ```
 
@@ -400,7 +499,7 @@ flow: export v1 and v2, hand both CSVs to the agent, ask for the diff.
   elapsed time can still include a parked fiber, including inside `V2.Squash` or `V2.Flush`. Use
   **Sampling** to attribute on-CPU work; use zones to explain phase latency and wait structure.
 - **csvexport covers instrumentation zones only.** The **Sampling** flat profile (per‑function CPU,
-  ghost zones, wait stacks) has **no** clean headless export in v0.11.1 — that part still needs the
+  ghost zones, wait stacks) has **no** clean headless export in v0.14.1 — that part still needs the
   GUI (or paste the Sampling table).
 
 ---
@@ -408,19 +507,29 @@ flow: export v1 and v2, hand both CSVs to the agent, ask for the diff.
 ## 7. Adding your **own** app‑level zones (no helio changes)
 
 You never need to touch `helio/` to profile application code. The fiber lanes already exist; you
-just drop zones into whatever Dragonfly `.cc` you want to measure.
+can add a zone to the relevant Dragonfly `.cc` file. Add it to a scope so build-time and runtime
+selection continue to work:
 
 ```cpp
 #include "facade/tracy_support.h"      // the zero-cost wrapper
 
 void MyFunc() {
-  DFLY_TRACY_ZONE("MyFunc");           // scoped span, name must be a string literal
-  DFLY_TRACY_ZONE_TEXT_SV(some_view);  // attach dynamic text (e.g. a key/command)
+  DFLY_TRACY_DISPATCH_ZONE("MyFunc");  // scoped span, name must be a string literal
   // ...
 }
 ```
 
-Available macros (all no‑ops unless `-DWITH_TRACY=ON`):
+Choose the group by ownership: `connection`, `dispatch`, `squasher`, `reply`, or `memory` (see
+**What Each Scope Contains** above). Use the corresponding `DFLY_TRACY_<GROUP>_ZONE` or
+`DFLY_TRACY_<GROUP>_WAIT` macro. Groups that have dynamic metadata also provide matching
+`_VALUE`, `_TEXT`, `_TEXT_F`, or `_PLOT` forms; keep metadata in the same lexical scope as a zone
+from that group.
+
+`DFLY_TRACY_ZONE`, `DFLY_TRACY_WAIT`, `DFLY_TRACY_PLOT`, and the other ungrouped macros bypass
+`DFLY_TRACY_SCOPES` and `--tracy_scopes`. They are reserved for deliberate, temporary always-on
+debugging in a Tracy-enabled build, not for normal Dragonfly instrumentation.
+
+The generic macros below are no‑ops unless `-DWITH_TRACY=ON`:
 
 | Macro | Use |
 |---|---|
@@ -433,8 +542,8 @@ Available macros (all no‑ops unless `-DWITH_TRACY=ON`):
 | `DFLY_TRACY_THREAD_NAME("name")` | name the current OS thread |
 
 Rules that matter:
-- **One zone per `{}` scope.** `DFLY_TRACY_ZONE` uses a fixed variable name, so two in the *same*
-  scope collide — wrap extra zones in their own `{ … }` block.
+- **One grouped zone per `{}` scope.** Grouped zone macros use a fixed variable name, so two in the
+  *same* scope collide — wrap extra zones in their own `{ … }` block.
 - **Names must be string literals** (they're pooled by pointer). Dynamic text goes through
   `..._TEXT` / `..._TEXT_SV`.
 - Zones you add in **other libraries** (e.g. `dragonfly_lib`) work because `-DWITH_TRACY=ON`
@@ -449,6 +558,9 @@ Rules that matter:
 | Where | Flag | Effect |
 |---|---|---|
 | CMake | `-DWITH_TRACY=ON` | fetch + link Tracy client, define `TRACY_ENABLE`+`TRACY_FIBERS` globally, on‑demand mode |
+| CMake | `-DDFLY_TRACY_SCOPES=all` | compile all manual zone groups; use a comma-separated subset for a narrower binary |
+| CMake | `-DWITH_TRACY_FORENSIC=ON` | compile high-volume nested per-command detail for the selected groups |
+| server | `--tracy_scopes=all` | emit all groups compiled into this binary; pass a comma-separated subset or an empty value to emit none |
 | tools | `-DLEGACY=ON` | profiler uses X11/GLFW backend (needed on X11 sessions) |
 | tools | `-DNO_ISA_EXTENSIONS=ON` | don't pass `-march=native` (portable tool binaries) |
 | env | `TRACY_SAMPLING_HZ=N` | sampling frequency |
@@ -473,11 +585,11 @@ Turn Tracy off again for clean perf numbers: `cd build-opt && cmake -DWITH_TRACY
   and make sure the trace isn't empty.
 - **Tools vanished after a rebuild** → you built them inside `_deps`; rebuild in a standalone
   `$TRACY` checkout (§2).
-- Version skew: client and tools **must** be the same Tracy version (we use v0.11.1 / protocol 69).
+- Version skew: client and tools **must** be the same Tracy version (we use v0.14.1).
 
 ---
 
-## 10. Implementation overview (handoff for another agent)
+## 10. Implementation overview (handoff for another agent) - This is a draft section which should be removed when this becomes official
 
 Everything below is **uncommitted, local** by request (including the `helio` submodule edits).
 
@@ -488,7 +600,7 @@ Everything below is **uncommitted, local** by request (including the `helio` sub
 - `add_compile_definitions(TRACY_ENABLE TRACY_FIBERS)` — **global** defines so the guards fire in
   every TU (dragonfly + helio) regardless of how INTERFACE defs propagate across helio's custom
   `cxx_link` boundary. (We do **not** define `WITH_TRACY` as a C macro — nothing `#ifdef`s it.)
-- `FetchContent` Tracy `v0.11.1`.
+- `FetchContent` Tracy `v0.14.1`.
 
 **`src/facade/tracy_support.h`** (new) — thin wrapper. Real Tracy macros when `TRACY_ENABLE` is
 defined (propagated by linking `Tracy::TracyClient`), otherwise zero‑cost no‑ops that leave args

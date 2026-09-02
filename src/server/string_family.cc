@@ -751,7 +751,7 @@ struct GetReplies {
   }
 
   void Send(StringResult&& res) const {
-    DFLY_TRACY_ZONE_FORENSIC("String.Get.Reply");
+    DFLY_TRACY_REPLY_FORENSIC_ZONE("String.Get.Reply");
     if (holds_alternative<std::string>(res))
       return Send(get<std::string>(res));
     if (holds_alternative<cmn::BorrowedString>(res)) {
@@ -1312,13 +1312,13 @@ cmd::CmdR CmdSetNx(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 cmd::CmdR CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto cb = [key = parser.Next()](Transaction* tx, EngineShard* es) -> OpResult<StringResult> {
-    DFLY_TRACY_ZONE_FORENSIC("String.Get.Lookup");
+    DFLY_TRACY_DISPATCH_FORENSIC_ZONE("String.Get.Lookup");
     auto it_res = tx->GetDbSlice(es->shard_id()).FindReadOnly(tx->GetDbContext(), key, OBJ_STRING);
     if (!it_res.ok())
       return it_res.status();
 
     {
-      DFLY_TRACY_ZONE_FORENSIC("String.Get.Value");
+      DFLY_TRACY_DISPATCH_FORENSIC_ZONE("String.Get.Value");
       return BorrowStringOrRead(tx->GetDbIndex(), key, (*it_res)->second, es);
     }
   };
