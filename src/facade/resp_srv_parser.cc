@@ -12,6 +12,12 @@
 
 namespace facade {
 
+namespace {
+constexpr uint32_t kMaxInlineSize = 64 * 1024;
+// Above this declared bulk length the buffer grows as data arrives instead of upfront.
+constexpr size_t kBulkEagerLimit = 1u << 20;
+}  // namespace
+
 using namespace std;
 
 auto RespSrvParser::Parse(Buffer str, uint32_t* consumed, cmn::BackedArguments* args) -> Result {
@@ -23,6 +29,7 @@ auto RespSrvParser::Parse(Buffer str, uint32_t* consumed, cmn::BackedArguments* 
   if (state_ == CMD_COMPLETE_S) {
     args->clear();
     buf_stash_.clear();
+    inline_total_ = 0;
 
     if (str[0] == '*') {
       // We recognized a non-INLINE state, starting with '*'
@@ -113,6 +120,9 @@ auto RespSrvParser::ParseInline(Buffer str, cmn::BackedArguments* args) -> Resul
 
     buf_stash_.append(reinterpret_cast<const char*>(token_start), len);
     if (ptr == end) {
+      inline_total_ += len;
+      if (inline_total_ > kMaxInlineSize)
+        return {BAD_INLINE, uint32_t(len)};
       return {INPUT_PENDING, ptr - token_start};
     }
 
@@ -155,10 +165,16 @@ auto RespSrvParser::ParseInline(Buffer str, cmn::BackedArguments* args) -> Resul
     } else if (args->empty()) {
       state_ = CMD_COMPLETE_S;  // have not found anything besides whitespace.
     }
+    inline_total_ += last_consumed;
+    if (inline_total_ > kMaxInlineSize)
+      return {BAD_INLINE, last_consumed};
     return {INPUT_PENDING, last_consumed};
   }
 
   DCHECK_EQ('\n', *ptr);
+
+  if (inline_total_ + last_consumed > kMaxInlineSize)
+    return {BAD_INLINE, last_consumed};
 
   ++last_consumed;  // consume \n as well.
   state_ = CMD_COMPLETE_S;
@@ -259,7 +275,8 @@ auto RespSrvParser::ParseArg(Buffer str, cmn::BackedArguments* args) -> ResultCo
 
   bulk_len_ = len;
   state_ = BULK_STR_S;
-  args->PushArg(size_t(len));
+  bulk_append_ = size_t(len) > kBulkEagerLimit;
+  args->PushArg(bulk_append_ ? size_t(0) : size_t(len));
 
   return {OK, res.second};
 }
@@ -271,11 +288,16 @@ auto RespSrvParser::ConsumeBulk(Buffer str, cmn::BackedArguments* args) -> Resul
   if (str.size() >= bulk_len_) {
     consumed = bulk_len_;
     if (bulk_len_) {
-      char* last_arg = args->data(args->size() - 1);  // Get pointer to last argument.
-      DCHECK_GE(args->elem_len(args->size() - 1), bulk_len_);
-      char* start = last_arg + (args->elem_len(args->size() - 1) - bulk_len_);
-      memcpy(start, str.data(), bulk_len_);
-      str.remove_prefix(exchange(bulk_len_, 0));
+      if (bulk_append_) {
+        args->ExtendLastArg(str.data(), bulk_len_);
+        str.remove_prefix(exchange(bulk_len_, 0));
+      } else {
+        char* last_arg = args->data(args->size() - 1);  // Get pointer to last argument.
+        DCHECK_GE(args->elem_len(args->size() - 1), bulk_len_);
+        char* start = last_arg + (args->elem_len(args->size() - 1) - bulk_len_);
+        memcpy(start, str.data(), bulk_len_);
+        str.remove_prefix(exchange(bulk_len_, 0));
+      }
     }
 
     if (str.size() >= 2) {
@@ -297,11 +319,15 @@ auto RespSrvParser::ConsumeBulk(Buffer str, cmn::BackedArguments* args) -> Resul
   }
 
   DCHECK(bulk_len_);
-  DCHECK_GE(args->elem_len(args->size() - 1), bulk_len_);
   size_t len = std::min<size_t>(str.size(), bulk_len_);
-  char* last_arg = args->data(args->size() - 1);  // Get pointer to last argument.
-  char* start = last_arg + (args->elem_len(args->size() - 1) - bulk_len_);
-  memcpy(start, str.data(), len);
+  if (bulk_append_) {
+    args->ExtendLastArg(str.data(), len);
+  } else {
+    DCHECK_GE(args->elem_len(args->size() - 1), bulk_len_);
+    char* last_arg = args->data(args->size() - 1);  // Get pointer to last argument.
+    char* start = last_arg + (args->elem_len(args->size() - 1) - bulk_len_);
+    memcpy(start, str.data(), len);
+  }
   consumed = len;
   bulk_len_ -= len;
 

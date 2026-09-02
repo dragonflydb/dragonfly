@@ -180,6 +180,65 @@ TEST_F(RespSrvParserTest, LargeBulk) {
   EXPECT_EQ(27000000u, args_[0].size());
 }
 
+TEST_F(RespSrvParserTest, InlineTooLong) {
+  // A single unterminated token.
+  string big(40000, 'A');
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(big));
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(big));  // 80000 > 64KB, still no EOL
+}
+
+TEST_F(RespSrvParserTest, InlineManyTokensTooLong) {
+  string chunk;
+  for (unsigned i = 0; i < 5000; ++i)
+    chunk += "aaaaaaa ";  // 40000 bytes of complete tokens
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(chunk));
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(chunk));
+}
+
+TEST_F(RespSrvParserTest, InlineCapFinalFragmentWithEol) {
+  // The cap must hold even when the crossing fragment carries the newline.
+  string big(63 * 1024, 'A');
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(big));
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(string(4096, 'A') + "\r\n"));
+}
+
+TEST_F(RespSrvParserTest, InlineCapSingleBufferWithEol) {
+  // An oversized line completed within one buffer must be rejected as well.
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(string(70 * 1024, 'A') + "\r\n"));
+}
+
+TEST_F(RespSrvParserTest, InlineBelowCapOk) {
+  string ok_line(63 * 1024, 'B');
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(ok_line));
+  ASSERT_EQ(RespSrvParser::OK, Parse("\r\n"));
+  EXPECT_THAT(Vec(), ElementsAre(ok_line));
+}
+
+TEST_F(RespSrvParserTest, HugeBulkNoEagerAlloc) {
+  // Declaring a huge bulk length must not allocate the full buffer upfront.
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse("*1\r\n$200000000\r\n"));
+  EXPECT_LT(args_.HeapMemory() + parser_.UsedMemory(), 64u * 1024);
+}
+
+TEST_F(RespSrvParserTest, BulkOverEagerLimitAssembled) {
+  const size_t kLen = 2'000'000;
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(absl::StrCat("*1\r\n$", kLen, "\r\n")));
+  EXPECT_LT(args_.HeapMemory() + parser_.UsedMemory(), 64u * 1024);
+
+  string chunk(100'000, 'x');
+  chunk.front() = 'F';
+  for (unsigned i = 0; i < kLen / chunk.size(); ++i) {
+    ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(chunk));
+    ASSERT_EQ(chunk.size(), consumed_);
+  }
+  ASSERT_EQ(RespSrvParser::OK, Parse("\r\n"));
+  ASSERT_EQ(1u, args_.size());
+  ASSERT_EQ(kLen, args_[0].size());
+  EXPECT_EQ('F', args_[0][0]);
+  EXPECT_EQ('F', args_[0][kLen - chunk.size()]);
+  EXPECT_EQ('x', args_[0][kLen - 1]);
+}
+
 TEST_F(RespSrvParserTest, Eol) {
   ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse("*1\r"));
   EXPECT_EQ(3, consumed_);
