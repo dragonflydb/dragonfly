@@ -3316,6 +3316,9 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
             JournalConsumerCreationIfNeeded(op_args, *opts, key);
           }
         }
+        // A squashed stub can't block, and AVOID_CONCLUDING would abort the squash.
+        if (tx->IsSquashedStub())
+          return OpStatus::OK;
         return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
       }
     }

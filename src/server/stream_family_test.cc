@@ -317,6 +317,21 @@ TEST_F(StreamFamilyTest, XReadGroup) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
+TEST_F(StreamFamilyTest, XReadInsideScriptNoEntries) {
+  // Nothing to serve inside a script must reply nil, not abort on AVOID_CONCLUDING.
+  Run({"xadd", "s", "1-0", "k", "v"});
+  Run({"xgroup", "create", "s", "g", "$"});
+
+  auto resp =
+      Run({"eval", "return redis.call('xreadgroup','group','g','c','STREAMS','s','>')", "1", "s"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"ping"}), "PONG");
+
+  resp = Run({"eval", "return redis.call('xread','STREAMS','s','$')", "1", "s"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"ping"}), "PONG");
+}
+
 // A multi-stream XREADGROUP where one stream is valid and another has no matching key/group
 // must return NOGROUP without mutating any state on the valid stream: no PEL insertion, no new
 // consumer, and no advance of last-delivered-id. Both single shard and cross shard are tested.
