@@ -1440,6 +1440,17 @@ void ServerFamily::FlushAll(Namespace* ns) {
   Drakarys(flush_trans.get(), DbSlice::kDbAll, false);
 }
 
+GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
+  if (!IsMaster())
+    return {std::make_error_code(std::errc::operation_not_permitted), "replica cannot load data"};
+  if (path.empty())
+    return {std::make_error_code(std::errc::invalid_argument), "no snapshot found to load"};
+  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
+  if (auto res = storage->ExpandSnapshot(path); !res)
+    return res.error();
+  return {};
+}
+
 // Load starts as many fibers as there are files to load each one separately.
 // It starts one more fiber that waits for all load fibers to finish and returns the first
 // error (if any occurred) with a future.

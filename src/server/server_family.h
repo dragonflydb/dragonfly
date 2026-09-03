@@ -195,6 +195,9 @@ class ServerFamily {
 
   void FlushAll(Namespace* ns);
 
+  // Returns an error if the snapshot at `path` cannot be loaded (empty/bad name, missing files).
+  GenericError CheckSnapshotLoadable(const std::string& path);
+
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
   enum class LoadExistingKeys : uint8_t { kFail, kOverride };

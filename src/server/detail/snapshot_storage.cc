@@ -373,7 +373,15 @@ io::Result<vector<string>, GenericError> FileSnapshotStorage::ExpandFromPath(con
 
 error_code FileSnapshotStorage::CheckPath(const string& path) {
   error_code ec;
-  std::ignore = fs::canonical(path, ec);
+  fs::path canonical = fs::canonical(path, ec);
+  if (ec)
+    return ec;
+  // A directory (or other non-regular file) shadowing a .rdb path passes canonical() but fails
+  // to load; reject it before the caller flushes the dataset.
+  error_code type_ec;
+  if (!fs::is_regular_file(canonical, ec) && !ec)
+    ec = fs::is_directory(canonical, type_ec) ? make_error_code(errc::is_a_directory)
+                                              : make_error_code(errc::invalid_argument);
   return ec;
 }
 
