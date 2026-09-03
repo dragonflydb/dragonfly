@@ -3342,6 +3342,26 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
 }
 
 bool Connection::ReplyBatch() {
+  // flush_and_check_error: called both by the empty fast path and on the normal exit.
+  // V1 handles pipeline batching inside AsyncFiber, so it flushes unconditionally here.
+  //
+  // V2 operates as a single-fiber event loop where reading, parsing, and executing happen
+  // sequentially. Because ParseLoop processes pipelines in chunks, flushing here would trigger a
+  // sendmsg syscall for every single chunk. Instead, V2 delegates flushing to IoLoopV2, which
+  // safely flushes the coalesced buffer right before the fiber yields (await) or when memory limits
+  // are reached.
+  auto flush_and_check_error = [this] {
+    if (!ioloop_v2_) {
+      reply_builder_->Flush();
+    }
+    return !reply_builder_->GetError();
+  };
+
+  // Avoid an empty ReplyScope and batch-mode setup when no replies are in flight.
+  if (!HasInFlightCommands()) {
+    return flush_and_check_error();
+  }
+
   ConnectionMemoryTracker memory_tracker(this);
   reply_builder_->SetBatchMode(true);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
@@ -3392,18 +3412,7 @@ bool Connection::ReplyBatch() {
   if (reply_builder_->GetError())
     return false;
 
-  // V1: handles its pipeline batching inside AsyncFiber, so it flushes unconditionally here.
-  //
-  // V2: operates as a single-fiber event loop where reading, parsing, and executing happen
-  // sequentially. Because ParseLoop processes pipelines in chunks, flushing here would trigger a
-  // sendmsg syscall for every single chunk. Instead, V2 delegates flushing to IoLoopV2, which
-  // safely flushes the coalesced buffer right before the fiber yields (await) or when memory limits
-  // are reached.
-  if (!ioloop_v2_) {
-    reply_builder_->Flush();
-  }
-
-  return !reply_builder_->GetError();
+  return flush_and_check_error();
 }
 
 ParsedCommand* Connection::CreateParsedCommand() {
