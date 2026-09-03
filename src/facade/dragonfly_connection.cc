@@ -1689,6 +1689,8 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
                                                 bool enqueue_only) {
   DCHECK_EQ(enqueue_only, ioloop_v2_)
       << "enqueue_only==true should only be used for ioloop_v2_ and vice versa";
+  // Account memory once after parsing completes, including every terminal parser status.
+  absl::Cleanup refresh_memory_usage = [this] { RefreshConnectionMemoryUsage(); };
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
 
@@ -1754,7 +1756,6 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
           << CONN_ID << "Redis parser error: " << static_cast<unsigned int>(result)
           << " during parse: " << io::View(read_buffer);
     }
-    RefreshConnectionMemoryUsage();
     if (stop_parsing)
       break;
 
