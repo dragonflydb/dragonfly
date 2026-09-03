@@ -664,19 +664,29 @@ void QueueBackpressure::SubSubscriberBytes(size_t mem) {
 // Global array for each io thread to keep track of the total memory usage of the dispatch queues.
 QueueBackpressure* thread_queue_backpressure = nullptr;
 
-QueueBackpressure& GetQueueBackpressure() {
+// Fiber-Migration-Safe Thread-Local Accessor Pattern (applied in multiple functions)
+//
+// Standard C++ assumes thread identity never changes, so compilers aggressively
+// cache thread-local (TLS) addresses in CPU registers. If a fiber migrates to a
+// new OS thread, this cached address becomes stale, causing data corruption.
+//
+// To force a fresh TLS lookup on every call, we combine two directives:
+// 1. __attribute__((noinline)): Creates a hard function boundary, preventing
+//    the caller from caching the TLS address across the migration point.
+// 2. asm volatile("" ::: "memory"): A strict compiler barrier. It forces the
+//    compiler to flush cached registers and physically recalculate the TLS
+//    address from the current physical OS thread.
+QueueBackpressure& __attribute__((noinline)) GetQueueBackpressure() {
   DCHECK(thread_queue_backpressure != nullptr);
+  // Force the thread-local proactor lookup to be reloaded after a possible migration.
+  asm volatile("" ::: "memory");
 
   return thread_queue_backpressure[ProactorBase::me()->GetPoolIndex()];
 }
 
-// A special accessor for accessing thread local ConnectionStats that is robust to fiber-thread
-// migrations. Compiler optimizations can cache a stale thread local pointer, and not refresh it
-// after HandleMigrateRequest() is called. This function should be used to force loading
-// the variable from memory every time, preventing such bugs.
 ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
   // https://stackoverflow.com/a/75622732
-  asm volatile("");
+  asm volatile("" ::: "memory");
 
   return tl_facade_stats->conn_stats;
 }
@@ -684,7 +694,7 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
 // See GetLocalConnStats() above. Connection fibers can migrate between proactors, so reload this
 // thread-local buffer after every possible migration point.
 ProactorReadBuffer& __attribute__((noinline)) GetSharedReadBuffer() {
-  asm volatile("");
+  asm volatile("" ::: "memory");
 
   return tl_shared_read_buf;
 }
