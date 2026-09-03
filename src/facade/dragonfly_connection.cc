@@ -3442,7 +3442,7 @@ void Connection::EnqueueParsedCommand(ParsedCommand* cmd) {
 
   // AsyncFiber for Memcache only wakes up on dispatch_q_, notify only redis as this is the parse
   // commands queue.
-  if ((!cc_->sync_dispatch) && (protocol_ == Protocol::REDIS)) {
+  if (!ioloop_v2_ && (!cc_->sync_dispatch) && (protocol_ == Protocol::REDIS)) {
     cnd_.notify_one();
   }
 }
