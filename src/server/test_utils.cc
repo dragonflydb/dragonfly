@@ -754,6 +754,13 @@ Transaction* BaseFamilyTest::GetTransaction(string_view conn_id) {
   return it->second->cmd_cntx()->transaction;
 }
 
+void BaseFamilyTest::SetAuthExpiresAt(string_view conn_id, chrono::steady_clock::time_point at) {
+  unique_lock lk(mu_);
+  auto it = connections_.find(conn_id);
+  CHECK(it != connections_.end()) << conn_id;
+  it->second->cmd_cntx()->auth_expires_at = at;
+}
+
 vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {
   CHECK(expr.type == RespExpr::ARRAY || expr.type == RespExpr::NIL_ARRAY);
   if (expr.type == RespExpr::NIL_ARRAY)
