@@ -1389,10 +1389,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_ZSET_ZIPLIST:
     case RDB_TYPE_STRING:
     case RDB_TYPE_JSON:
-    // Dragonfly used id 20 for JSON before rdb version 10, which collides with Redis'
-    // RDB_TYPE_SET_LISTPACK. We no longer support loading these legacy payloads, so id 20
-    // is always a set listpack. Do not reintroduce a rdb_version_ based branch here:
-    // tools such as RedisShake stamp RESTORE payloads with an unrelated footer version.
     case RDB_TYPE_SET_LISTPACK:
       iores = ReadGeneric(rdbtype);
       break;
