@@ -44,12 +44,45 @@ with the groups that might be useful, then choose a smaller subset at startup fo
 | Control | When chosen | Effect |
 |---|---|---|
 | `-DWITH_TRACY=ON` | build time | Includes the Tracy client. With `OFF` (the default), there is no Tracy client or manual instrumentation code. |
-| `-DDFLY_TRACY_SCOPES=...` | build time | Decides which manual zone groups are compiled into the binary. Excluded groups have no Tracy work at runtime. |
+| `-DDFLY_TRACY_SCOPES=...` | build time | Decides which broad manual zone groups are compiled into the binary. Excluded groups have no Tracy work at runtime. |
+| `-DDFLY_TRACY_MANUAL_ZONES=...` | build time | Compiles only the listed exact manual zones, selected by stable numeric ID or explicit Tracy name. It does not broaden any scope group. |
 | `--tracy_scopes=...` | server startup | Selects which compiled groups emit in this server run. No rebuild is needed to add or remove an already compiled group. |
+| `--tracy_manual_zones=...` | server startup | Selects exact manual zone IDs or names when `manual` is present in `--tracy_scopes`. |
 | `-DWITH_TRACY_FORENSIC=ON` | build time | Adds high-volume nested per-command detail within the selected compiled groups. Leave it `OFF` for ordinary captures. |
 
-The available groups are `connection`, `dispatch`, `squasher`, `reply`, and `memory`. `all` means
-every available group at build time, or every group compiled into this binary at runtime.
+The broad groups are `connection`, `dispatch`, `squasher`, `reply`, and `memory`. `manual` is the
+exact-zone scope. `all` means every broad group at build time, or every broad group compiled into
+this binary at runtime; it does not implicitly enable the `manual` scope.
+
+### Exact Manual Zones
+
+`manual` is a permanent special scope for an exact subset of the existing manual instrumentation.
+The authoritative registry is [src/facade/tracy_manual_zones.h](src/facade/tracy_manual_zones.h):
+it assigns every current label a stable ID from `1` through `106`. Do not renumber or reuse an ID;
+append new zones instead. Grouped source macros use its symbolic token, and Tracy display names come
+only from the registry, so exact selection never needs a runtime zone-name lookup.
+
+Both selection inputs accept comma-separated IDs, exact names (case-insensitive), or `all`:
+
+```bash
+# Build a binary where only these exact zones are available to the manual scope.
+./helio/blaze.sh -release -DWITH_TRACY=ON -DDFLY_TRACY_SCOPES=manual \
+  -DDFLY_TRACY_MANUAL_ZONES=72,Squasher.Hop.Callback
+
+# Emit exactly those compiled zones. Broad scopes are not enabled in this run.
+./build-opt/dragonfly --tracy_scopes=manual \
+  --tracy_manual_zones=InvokeCmd.Handler,97
+```
+
+The build and runtime lists are intersected. For example, a binary built with `72,97` cannot emit
+another zone through `manual`, even if that other zone is named at startup. A broad scope and
+`manual` may be combined; their result is a union, so `--tracy_scopes=dispatch,manual` enables all
+compiled dispatch zones plus the selected exact manual zones from other groups. Requesting `manual`
+when no exact manual zones were compiled fails at startup.
+
+The IDs most useful for the V1/V2 squashing investigation are `72` (`InvokeCmd.Handler`), `73`
+(`Squash.DispatchBatch`), `77` (`Squash.Dispatch.Command`), `89` (`Squasher.Hop.Work`), and `97`
+(`Squasher.Hop.Callback`). They are ordinary registry entries, not a separate comparison scope.
 
 ### What Each Scope Contains
 
@@ -60,15 +93,13 @@ every available group at build time, or every group compiled into this binary at
 | `squasher` | pipeline squash structure, shard hops, scheduling, merge, and squasher wait zones | `src/server/multi_command_squasher.cc`, `src/facade/dragonfly_connection.cc` |
 | `reply` | reply batching, send/release/flush, plus `ReplyBuilder.*` when forensic detail is compiled | `src/facade/dragonfly_connection.cc`, `src/facade/reply_builder.cc` |
 | `memory` | connection memory-usage refresh, computation, and application | `src/facade/dragonfly_connection.cc` |
-
 `ReplyBuilder.*` zones specifically require both `reply` in `DFLY_TRACY_SCOPES` and
 `-DWITH_TRACY_FORENSIC=ON` at build time. They can then be enabled or disabled with the runtime
 `reply` scope like any other compiled group.
 
 ### Build a focused binary
 
-This binary contains only dispatch and pipeline-squasher instrumentation. It is the preferred
-starting point when comparing V1 and V2 command execution:
+This binary contains dispatch and pipeline-squasher instrumentation for exploratory captures:
 
 ```bash
 ./helio/blaze.sh -release -DUSE_MOLD=ON -DWITH_AWS=OFF -DWITH_TRACY=ON \

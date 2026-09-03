@@ -76,7 +76,7 @@ thread_local SinkReplyBuilder::PendingList SinkReplyBuilder::pending_list;
 SinkReplyBuilder::ReplyAggregator::~ReplyAggregator() {
   rb->batched_ = prev;
   if (!prev) {
-    DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush.Aggregator");
+    DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlushAggregator);
     rb->Flush();
   }
 }
@@ -106,8 +106,8 @@ void SinkReplyBuilder::CloseConnection() {
 
 template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
   if (size_t required = (piece_size(pieces) + ...); buffer_.AppendLen() <= required) {
-    DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush.BufferSpace");
-    DFLY_TRACY_REPLY_FORENSIC_VALUE(static_cast<uint64_t>(required));
+    DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlushBufferSpace);
+    DFLY_TRACY_REPLY_FORENSIC_VALUE(kReplyBuilderFlushBufferSpace, static_cast<uint64_t>(required));
     Flush(required);
   }
 
@@ -119,8 +119,9 @@ template <typename... Ts> void SinkReplyBuilder::WritePieces(Ts&&... pieces) {
     vecs_.push_back(iovec{dest, 0});
   } else if (iovec_end(vecs_.back()) != dest) {
     if (vecs_.size() >= IOV_MAX - 2) {
-      DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush.IovLimit");
-      DFLY_TRACY_REPLY_FORENSIC_VALUE(static_cast<uint64_t>(vecs_.size()));
+      DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlushIovLimit);
+      DFLY_TRACY_REPLY_FORENSIC_VALUE(kReplyBuilderFlushIovLimit,
+                                      static_cast<uint64_t>(vecs_.size()));
       Flush();
     }
     dest = reinterpret_cast<char*>(buffer_.AppendBuffer().data());
@@ -147,14 +148,14 @@ void SinkReplyBuilder::WriteDecodedAscii(const cmn::BorrowedString& bs) {
   // a reallocate-grow would dangling-pointer the prefix iovec written by the
   // caller into our own scratch.
   if (buffer_.Capacity() < kMaxBufferSize) {
-    DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush.DecodeReserve");
+    DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlushDecodeReserve);
     Flush(kMaxBufferSize);
   }
 
   while (src_offset < src_total) {
     // Ensure buffer_ has some room.
     if (buffer_.AppendLen() < 64) {
-      DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush.DecodeBufferSpace");
+      DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlushDecodeBufferSpace);
       Flush();
     }
     if (ec_)
@@ -176,8 +177,9 @@ void SinkReplyBuilder::WriteDecodedAscii(const cmn::BorrowedString& bs) {
 
 void SinkReplyBuilder::WriteRef(std::string_view str) {
   if (vecs_.size() >= IOV_MAX - 2) {
-    DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush.IovLimit");
-    DFLY_TRACY_REPLY_FORENSIC_VALUE(static_cast<uint64_t>(vecs_.size()));
+    DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlushIovLimit);
+    DFLY_TRACY_REPLY_FORENSIC_VALUE(kReplyBuilderFlushIovLimit,
+                                    static_cast<uint64_t>(vecs_.size()));
     Flush();
   }
   vecs_.push_back(iovec{const_cast<char*>(str.data()), str.size()});
@@ -185,8 +187,8 @@ void SinkReplyBuilder::WriteRef(std::string_view str) {
 }
 
 void SinkReplyBuilder::Flush(size_t additional_bytes) {
-  DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush");
-  DFLY_TRACY_REPLY_FORENSIC_VALUE(static_cast<uint64_t>(total_size_));
+  DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlush);
+  DFLY_TRACY_REPLY_FORENSIC_VALUE(kReplyBuilderFlush, static_cast<uint64_t>(total_size_));
   // Fast path: nothing buffered and no buffer resize requested.
   if (vecs_.empty() && (additional_bytes == 0))
     return;
@@ -213,8 +215,8 @@ uint64_t SinkReplyBuilder::GetLastSendTimeCycles() const {
 }
 
 void SinkReplyBuilder::Send() {
-  DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Send");
-  DFLY_TRACY_REPLY_FORENSIC_VALUE(static_cast<uint64_t>(total_size_));
+  DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderSend);
+  DFLY_TRACY_REPLY_FORENSIC_VALUE(kReplyBuilderSend, static_cast<uint64_t>(total_size_));
   DCHECK(sink_ != nullptr);
   DCHECK(!vecs_.empty());
   auto& reply_stats = tl_facade_stats->reply_stats;
@@ -242,33 +244,37 @@ void SinkReplyBuilder::Send() {
 }
 
 void SinkReplyBuilder::FinishScope() {
-  DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.FinishScope");
+  DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFinishScope);
   replies_recorded_++;
 
   size_t ref_bytes = total_size_ - buffer_.InputLen();
   if (!batched_) {
-    DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush.ScopeUnbatched");
-    DFLY_TRACY_REPLY_FORENSIC_VALUE(static_cast<uint64_t>(ref_bytes));
+    DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlushScopeUnbatched);
+    DFLY_TRACY_REPLY_FORENSIC_VALUE(kReplyBuilderFlushScopeUnbatched,
+                                    static_cast<uint64_t>(ref_bytes));
     return Flush();
   }
 
   if (ref_bytes * 2 >= kMaxBufferSize) {  // Copying isn't worth it.
-    DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush.ScopeLargeRefs");
-    DFLY_TRACY_REPLY_FORENSIC_VALUE(static_cast<uint64_t>(ref_bytes));
+    DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlushScopeLargeRefs);
+    DFLY_TRACY_REPLY_FORENSIC_VALUE(kReplyBuilderFlushScopeLargeRefs,
+                                    static_cast<uint64_t>(ref_bytes));
     return Flush();
   }
 
   // Check if we have enough space to copy all refs to buffer
   if (ref_bytes > buffer_.AppendLen()) {
-    DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.Flush.ScopeCopyNoSpace");
-    DFLY_TRACY_REPLY_FORENSIC_VALUE(static_cast<uint64_t>(ref_bytes));
+    DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFlushScopeCopyNoSpace);
+    DFLY_TRACY_REPLY_FORENSIC_VALUE(kReplyBuilderFlushScopeCopyNoSpace,
+                                    static_cast<uint64_t>(ref_bytes));
     return Flush(ref_bytes);
   }
 
   // Copy all external references to buffer to safely keep batching
   {
-    DFLY_TRACY_REPLY_FORENSIC_ZONE("ReplyBuilder.FinishScope.CopyRefs");
-    DFLY_TRACY_REPLY_FORENSIC_VALUE(static_cast<uint64_t>(ref_bytes));
+    DFLY_TRACY_REPLY_FORENSIC_ZONE(kReplyBuilderFinishScopeCopyRefs);
+    DFLY_TRACY_REPLY_FORENSIC_VALUE(kReplyBuilderFinishScopeCopyRefs,
+                                    static_cast<uint64_t>(ref_bytes));
     for (size_t i = guaranteed_pieces_; i < vecs_.size(); i++) {
       auto ib = buffer_.InputBuffer();
       if (vecs_[i].iov_base >= ib.data() && vecs_[i].iov_base <= ib.data() + ib.size())
