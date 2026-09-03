@@ -7,9 +7,10 @@ or GoogleTest inputs. You can also choose your own branch.
 ## Execution Model
 
 - Scheduled runs execute Pytest once and do not build or run GoogleTests.
-- Manual runs execute the Pytest step first and then attempt the GoogleTest step,
-  even if Pytest fails. Set Pytest `iterations` to `0` to skip Pytest and run
-  GoogleTests only.
+- Manual runs execute the Pytest step first when `iterations` is positive.
+  GoogleTests are disabled when `gtest-iterations` is `0` and run when it is
+  positive. When both test families are enabled, they run one after another:
+  GoogleTests are attempted after Pytest even if Pytest fails.
 - Each workflow fans out across its configured matrix. Inputs apply to every
   matrix job; they cannot select an architecture, runner, or build type.
 
@@ -36,17 +37,19 @@ test-cases:  (^|/)connection_test\.py::(test_case_one|test_case_two)$|(^|/)eval_
 
 ## GoogleTest Inputs
 
-GoogleTests run only for manual dispatches of these two regression workflows. With default GoogleTest inputs, every
-target found by recursively scanning `CMakeLists.txt` files for `helio_cxx_test(...)`
-under `src/core`, `src/facade`, and `src/server` runs once. This includes tests in
-nested directories such as `src/core/json` and `src/server/cluster`; the available
-targets can still vary with the selected build configuration.
+GoogleTests run only for manual dispatches of these two regression workflows.
+`gtest-iterations=0` disables them, including when GoogleTest selectors are supplied.
+Set `gtest-iterations` to a positive value to enable them. With no selectors, every
+discovered target runs. Targets are found by recursively scanning `CMakeLists.txt`
+files for `helio_cxx_test(...)` under `src/core`, `src/facade`, and `src/server`. This
+includes tests in nested directories such as `src/core/json` and `src/server/cluster`;
+the available targets can still vary with the selected build configuration.
 
 | Input | Default | Description |
 | --- | --- | --- |
 | `gtest-suites` | empty | Comma- or space-separated GoogleTest target names. A target path and `.cc` suffix are accepted, but only the target name is used. Empty runs all discovered targets. Example: `set_family_test,generic_family_test`. |
 | `gtest-cases` | empty | Value passed directly as `--gtest_filter`. Empty runs all cases in each selected target. Example: `SetFamilyTest.*:HSetFamilyTest.*`. |
-| `gtest-iterations` | `1` | Positive GoogleTest run count. |
+| `gtest-iterations` | `0` | GoogleTest run count. `0` skips GoogleTests; a positive value enables and repeats them. |
 
 Specify `gtest-suites` when using `gtest-cases` for only a few binaries. Otherwise
 the workflow builds every target and evaluates the filter against each one. A

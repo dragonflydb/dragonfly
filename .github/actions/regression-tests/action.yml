@@ -88,9 +88,9 @@ inputs:
     description: "Optional value forwarded to --gtest_filter"
   gtest-iterations:
     required: false
-    default: "1"
+    default: "0"
     type: string
-    description: "Optional number of times to run selected GoogleTest suites; defaults to 1"
+    description: "Number of times to run selected GoogleTest suites; default: 0 (skips GoogleTests)"
   run-gtests:
     required: false
     default: "false"
