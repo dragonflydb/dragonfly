@@ -173,13 +173,21 @@ Environment variables (for cross-machine benchmarking):
                 rejects writes and stays alive instead of swapping/freezing. Set to
                 'off' or 0 to disable; skipped if EXTRA_SERVER_FLAGS already sets
                 --maxmemory. Example: SERVER_MAXMEMORY=20gb
-  SERVER_PIN:   Remote mode only. 'on' (default) pins the local server with taskset;
-                'off' disables it. With a spare core the server is pinned to cores
-                1..threads, leaving core 0 free for the OS and NIC (ENA) IRQs - pass
-                threads < nproc (e.g. 3 on a 4-core box) to create that spare core, and
-                pin the NIC IRQs to core 0 (see README). Local mode always pins.
-  SERVER_CPUS:  Remote mode only. Explicit core list for the server taskset
-                (e.g. SERVER_CPUS=1-3 or 0,2). Overrides the automatic selection.
+    SERVER_PIN:   Remote mode only. 'on' (default) pins the local server with taskset;
+                                'off' disables it. With a spare core the server is pinned to cores
+                                1..threads, leaving core 0 free for the OS and NIC (ENA) IRQs - pass
+                                threads < nproc (e.g. 3 on a 4-core box) to create that spare core, and
+                                pin the NIC IRQs to core 0 (see README). Local mode always pins.
+    SERVER_CPUS:  Explicit core list for the local server taskset (e.g. SERVER_CPUS=1-3
+                                or 0,2). In local mode this requires CLIENT_CPUS as well. In remote
+                                mode it overrides the automatic selection.
+    CLIENT_CPUS:  Local mode only. Explicit core list for the client taskset. Required
+                                with SERVER_CPUS in local mode (e.g. SERVER_CPUS=4 CLIENT_CPUS=5,6).
+  TRACY_CAPTURE: Set to 1 to capture Tracy during each measured server run. Not supported
+                in batch mode. Requires TRACY_CAPTURE_FILE.
+  TRACY_CAPTURE_FILE: Base path for Tracy captures when TRACY_CAPTURE=1. The script appends
+                _<V1|V2>_<mode>_run<N>.tracy so repeated runs never overwrite one another.
+                 Example: TRACY_CAPTURE=1 TRACY_CAPTURE_FILE=traces/get_p100.tracy
   NUM_RUNS:     Number of times to repeat the full benchmark (default: 3).
                 Overrides the [runs] positional argument when set. Useful when driving
                 bench_v2.sh from a wrapper script (e.g. run_stage1.sh) so all rows
@@ -366,7 +374,7 @@ run_batch_mode() {
                         PREFILL_PIPELINE EXTRA_SERVER_FLAGS
                         MEMTIER_ARGS REDIS_CLI_ARGS NUM_RUNS BENCH_DURATION
                         CLIENT_TIMEOUT CLIENT_DELAY_US SERVER_METRICS_PORT SERVER_LOG_DIR
-                        METRICS_DIR)
+                        METRICS_DIR TRACY_CAPTURE TRACY_CAPTURE_FILE)
     local v
     for v in "${forbidden[@]}"; do
         if [[ -n "${!v:-}" ]]; then
@@ -660,6 +668,23 @@ BENCH_DURATION=${BENCH_DURATION:-15}
 RATIO=${RATIO:-"1:0"}
 PREFILL_KEYS=${PREFILL_KEYS:-10000}
 PREFILL_PIPELINE=${PREFILL_PIPELINE:-100}
+TRACY_CAPTURE=${TRACY_CAPTURE:-0}
+TRACY_CAPTURE_FILE=${TRACY_CAPTURE_FILE:-""}
+
+if [[ "$TRACY_CAPTURE" != "0" && "$TRACY_CAPTURE" != "1" ]]; then
+    echo "[!] Error: TRACY_CAPTURE must be 0 or 1. Got: '$TRACY_CAPTURE'"
+    exit 1
+fi
+if [[ "$TRACY_CAPTURE" == "1" ]]; then
+    if [[ -z "$TRACY_CAPTURE_FILE" ]]; then
+        echo "[!] Error: TRACY_CAPTURE=1 requires TRACY_CAPTURE_FILE."
+        exit 1
+    fi
+    if ! command -v tracy-capture > /dev/null 2>&1; then
+        echo "[!] Error: TRACY_CAPTURE=1 requires 'tracy-capture' in PATH."
+        exit 1
+    fi
+fi
 
 # Value size in bytes. For single_conn/multi_conn this is memtier's -d (the SET
 # value size); for pubsub it is the published message length. Lets a batch line
@@ -911,6 +936,8 @@ filter_pipelines() {
 
 # Global PID tracking for cleanup.
 SERVER_PID=""
+TRACY_CAPTURE_PID=""
+TRACY_CAPTURE_PATH=""
 SUB_PIDS=()          # Local-mode Pub/Sub subscriber PIDs (direct children of this script).
 REMOTE_SUB_PGIDS=()  # Remote-mode Pub/Sub subscriber process-group IDs on CLIENT_IP. Each
                      # subscriber is launched via setsid as its own session leader, so its
@@ -937,6 +964,50 @@ _kill_remote_pgids() {
         "${term_cmd}sleep 0.3; ${kill_cmd}true" 2>/dev/null || true
 }
 
+start_tracy_capture() {
+    local label=$1 mode_name=$2
+    [[ "$TRACY_CAPTURE" == "1" ]] || return 0
+
+    local capture_dir capture_name capture_stem
+    capture_dir=$(dirname -- "$TRACY_CAPTURE_FILE")
+    capture_name=$(basename -- "$TRACY_CAPTURE_FILE")
+    capture_stem=${capture_name%.tracy}
+    [[ -n "$capture_stem" ]] || capture_stem="capture"
+    TRACY_CAPTURE_PATH="${capture_dir}/${capture_stem}_${label}_${mode_name}_run${r:-1}.tracy"
+
+    mkdir -p "$capture_dir" || {
+        echo "[!] Error: cannot create Tracy capture directory '$capture_dir'."
+        return 1
+    }
+    echo "  [tracy] Capturing to ${TRACY_CAPTURE_PATH}"
+    tracy-capture -f -o "$TRACY_CAPTURE_PATH" > "${TRACY_CAPTURE_PATH}.log" 2>&1 &
+    TRACY_CAPTURE_PID=$!
+    sleep 0.5
+    if ! kill -0 "$TRACY_CAPTURE_PID" 2>/dev/null; then
+        echo "[!] Error: tracy-capture exited before the benchmark began."
+        cat "${TRACY_CAPTURE_PATH}.log" 2>/dev/null || true
+        TRACY_CAPTURE_PID=""
+        return 1
+    fi
+}
+
+stop_tracy_capture() {
+    [[ -n "$TRACY_CAPTURE_PID" ]] || return 0
+    if kill -0 "$TRACY_CAPTURE_PID" 2>/dev/null; then
+        echo "  [tracy] Stopping capture: ${TRACY_CAPTURE_PATH}"
+        kill -INT "$TRACY_CAPTURE_PID" 2>/dev/null || true
+        local attempts=0
+        while kill -0 "$TRACY_CAPTURE_PID" 2>/dev/null && (( attempts < 40 )); do
+            sleep 0.15
+            attempts=$((attempts + 1))
+        done
+        kill -0 "$TRACY_CAPTURE_PID" 2>/dev/null && kill -TERM "$TRACY_CAPTURE_PID" 2>/dev/null || true
+    fi
+    wait "$TRACY_CAPTURE_PID" 2>/dev/null || true
+    TRACY_CAPTURE_PID=""
+    TRACY_CAPTURE_PATH=""
+}
+
 cleanup() {
     local exit_code=$?
     local server_was_alive=0
@@ -944,6 +1015,7 @@ cleanup() {
     echo "[*] Cleaning up (exit_code=$exit_code)..."
 
     teardown_netem
+    stop_tracy_capture
 
     for pid in "${SUB_PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
@@ -1015,14 +1087,29 @@ if [[ -z "$REMOTE_MODE" ]]; then
         exit 1
     fi
 
-    SERVER_CPUS=$(seq -s ',' 0 $((_server_thread_count - 1)))
-    CLIENT_CORES_START=$_server_thread_count
-    CLIENT_CORES_END=$((_server_thread_count + 1))
-    [[ $CLIENT_CORES_END -ge $NUM_CPUS ]] && CLIENT_CORES_END=$((NUM_CPUS - 1))
-    CLIENT_CPUS=$(seq -s ',' ${CLIENT_CORES_START} ${CLIENT_CORES_END})
+    if [[ -n "${SERVER_CPUS:-}" || -n "${CLIENT_CPUS:-}" ]]; then
+        if [[ -z "${SERVER_CPUS:-}" || -z "${CLIENT_CPUS:-}" ]]; then
+            echo "[!] Error: local SERVER_CPUS and CLIENT_CPUS must be specified together."
+            exit 1
+        fi
+    else
+        # Reserve CPU 0 for OS housekeeping when at least one server CPU and one client CPU
+        # remain after doing so. Include it only as the capacity-preserving fallback.
+        if [[ $_server_thread_count -le $((NUM_CPUS - 2)) ]]; then
+            SERVER_CPUS=$(seq -s ',' 1 "$_server_thread_count")
+            CLIENT_CORES_START=$((_server_thread_count + 1))
+        else
+            SERVER_CPUS=$(seq -s ',' 0 $((_server_thread_count - 1)))
+            CLIENT_CORES_START=$_server_thread_count
+        fi
+        CLIENT_CORES_END=$((CLIENT_CORES_START + 1))
+        [[ $CLIENT_CORES_END -ge $NUM_CPUS ]] && CLIENT_CORES_END=$((NUM_CPUS - 1))
+        CLIENT_CPUS=$(seq -s ',' "$CLIENT_CORES_START" "$CLIENT_CORES_END")
+    fi
 
     SERVER_TASKSET="taskset -c ${SERVER_CPUS}"
     CLIENT_TASKSET="taskset -c ${CLIENT_CPUS}"
+    echo "[*] Local CPUs: $NUM_CPUS (server pinned to: $SERVER_CPUS, client pinned to: $CLIENT_CPUS)"
 else
     # Remote mode: the client runs on the remote machine, so all local cores are free
     # for the server. Pin the server anyway (steadier, less jitter) and, when a spare
@@ -1248,6 +1335,7 @@ reset_server_stats() {
 # When omitted (e.g. from the cleanup trap) the filename falls back to generic fields.
 stop_server() {
     local _sv_label=${1:-} _sv_mode=${2:-}
+    stop_tracy_capture
     if [[ -n "$SERVER_PID" ]]; then
         kill "$SERVER_PID" 2>/dev/null || true
         local i=0
@@ -1462,6 +1550,7 @@ run_bench() {
     target=$(client_target)
 
     prefill_read_keyspace "$target" "$data_size"
+    start_tracy_capture "$label" "$mode_name"
 
     RESULTS_TMP=$(mktemp)
     echo -e "PIPELINE\tRPS\tAVG_LAT(ms)\tP50(ms)\tP99(ms)\tP99.9(ms)\tSEND_SYSCALLS\tBATCH_DENSITY" > "$RESULTS_TMP"
@@ -1576,6 +1665,8 @@ run_bench_custom() {
     local target
     target=$(client_target)
 
+    start_tracy_capture "$label" "$mode_name"
+
     RESULTS_TMP=$(mktemp)
     echo -e "PIPELINE\tRPS\tAVG_LAT(ms)\tP50(ms)\tP99(ms)\tP99.9(ms)\tSEND_SYSCALLS\tBATCH_DENSITY" > "$RESULTS_TMP"
 
@@ -1672,6 +1763,8 @@ run_pubsub_bench() {
 
     local target
     target=$(client_target)
+
+    start_tracy_capture "$label" "$mode_name"
 
     RESULTS_TMP=$(mktemp)
     echo -e "PIPELINE\tPUB_RPS\tP50(ms)\tSEND_SYSCALLS\tSUBSCRIBERS" > "$RESULTS_TMP"
