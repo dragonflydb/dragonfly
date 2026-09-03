@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 
 extern "C" {
+#include "redis/crc64.h"
 #include "redis/rdb.h"
 }
 
@@ -1443,6 +1444,52 @@ TEST_F(GenericFamilyTest, RestoreRejectsEmptyCollections) {
     EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
     EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
   }
+}
+
+// A collection element declaring a 64-bit length must be rejected, not resized (remote OOM).
+TEST_F(GenericFamilyTest, RestoreRejectsHugeElementLength) {
+  uint8_t set_huge[] = {0x02, 0x01, 0x81, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                        0x0b, 0x00, 0x10, 0xd6, 0x89, 0xeb, 0x19, 0x8f, 0x53, 0xc7};
+  uint8_t hash_huge[] = {0x04, 0x01, 0x81, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                         0x0b, 0x00, 0x03, 0x21, 0x50, 0xfd, 0xd3, 0x79, 0x3d, 0xcc};
+  uint8_t zset_huge[] = {0x05, 0x01, 0x81, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                         0x0b, 0x00, 0xce, 0x41, 0xc0, 0x57, 0xd9, 0xc3, 0xfc, 0x5a};
+  for (auto payload : {ToSV(set_huge), ToSV(hash_huge), ToSV(zset_huge)}) {
+    Run({"del", "e"});
+    EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+    EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+  }
+  EXPECT_EQ(Run({"ping"}), "PONG");  // server survived
+}
+
+// An LZF-encoded element declaring a 64-bit compressed length must be rejected before its buffer
+// is resized.
+TEST_F(GenericFamilyTest, RestoreRejectsHugeCompressedLength) {
+  uint8_t set_lzf[] = {0x02, 0x01, 0xc3, 0x81, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                       0x0a, 0x0b, 0x00, 0x18, 0x36, 0x24, 0x06, 0xd8, 0x88, 0x36, 0xdb};
+  EXPECT_THAT(Run({"restore", "e", "0", ToSV(set_lzf)}), ErrArg("ERR Bad data format"));
+  EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+  EXPECT_EQ(Run({"ping"}), "PONG");  // server survived
+}
+
+// A SET declaring a 64-bit member count but supplying a full first chunk of real members reaches
+// set->Reserve with the claimed count and crashes; the count must be rejected up front.
+TEST_F(GenericFamilyTest, RestoreRejectsHugeMemberCount) {
+  string payload;
+  payload.push_back(0x02);      // RDB_TYPE_SET
+  payload.push_back('\x81');    // RDB_64BITLEN
+  for (int i = 7; i >= 0; --i)  // count 0x7fffffffffffffff, big-endian
+    payload.push_back(static_cast<char>((0x7fffffffffffffffULL >> (i * 8)) & 0xff));
+  payload.append(4092, '\x00');  // a full chunk of empty-string members
+  payload.push_back(0x0b);       // rdb version, little-endian
+  payload.push_back(0x00);
+  uint64_t crc = crc64(0, reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+  for (int i = 0; i < 8; ++i)
+    payload.push_back(static_cast<char>((crc >> (i * 8)) & 0xff));
+
+  EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+  EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+  EXPECT_EQ(Run({"ping"}), "PONG");  // server survived
 }
 
 TEST_F(GenericFamilyTest, RestoreOobZsetListpack) {

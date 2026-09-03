@@ -213,6 +213,8 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
                                                      const DbContext& cntx, const RestoreArgs& args,
                                                      DbSlice* db_slice) {
   InMemSource data_src(data);
+  // Bound declared lengths to the payload so a crafted element length can't force a huge resize.
+  source_limit_ = data.size();
   PrimeValue pv;
   bool first_parse = true;
   do {
