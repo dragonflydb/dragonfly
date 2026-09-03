@@ -1481,6 +1481,12 @@ error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest, bool big_string_split)
     }
   }
 
+  // Reject a length beyond the remaining input before allocating or reserving it.
+  if (len > RemainingBytes()) {
+    LOG(ERROR) << "Bad string length " << len;
+    return RdbError(errc::rdb_file_corrupted);
+  }
+
   if (big_string_split && len > kMaxStringSize) {
     pending_read_.remaining = len - kMaxStringSize;
     pending_read_.reserve = len;
@@ -1528,6 +1534,12 @@ auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
+  // Reject a compressed length beyond the remaining input before allocating it.
+  if (clen > RemainingBytes()) {
+    LOG(ERROR) << "Bad compressed length " << clen;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
   res.compressed_blob.resize(clen);
   /* Load the compressed representation and uncompress it to target. */
   error_code ec = FetchBuf(clen, res.compressed_blob.data());
@@ -1546,6 +1558,9 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
     SET_OR_UNEXPECT(LoadLen(NULL), len);
     if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
       return Unexpected(errc::empty_key);
+    // Reject a member count beyond the remaining input before it is reserved.
+    if (len > RemainingBytes())
+      return Unexpected(errc::rdb_file_corrupted);
     if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
       len *= 2;
     }
@@ -1627,6 +1642,9 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
     SET_OR_UNEXPECT(LoadLen(NULL), len);
     if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
       return Unexpected(errc::empty_key);
+    // Reject a field count beyond the remaining input before it is reserved.
+    if (len > RemainingBytes())
+      return Unexpected(errc::rdb_file_corrupted);
 
     if (rdbtype == RDB_TYPE_HASH) {
       len *= 2;
@@ -1667,6 +1685,9 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
     zsetlen = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
+    // Reject a member count beyond the remaining input before it is reserved.
+    if (zsetlen > RemainingBytes())
+      return Unexpected(errc::rdb_file_corrupted);
     pending_read_.reserve = zsetlen;
   }
 

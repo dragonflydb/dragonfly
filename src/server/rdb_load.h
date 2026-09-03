@@ -246,6 +246,15 @@ class RdbLoaderBase {
 
   std::error_code EnsureReadInternal(size_t min_to_read);
 
+  // Upper bound on bytes a bounded source can still supply; SIZE_MAX when unbounded (file load).
+  // Used to reject a declared length/count before allocating for it (a crafted RESTORE OOM).
+  size_t RemainingBytes() const {
+    if (source_limit_ == SIZE_MAX)
+      return SIZE_MAX;
+    size_t from_source = bytes_read_ < source_limit_ ? source_limit_ - bytes_read_ : 0;
+    return (mem_buf_ ? mem_buf_->InputLen() : 0) + from_source;
+  }
+
   // Wrapper to consume n bytes from mem buf, and also decrement remaining_payload_bytes if a chunk
   // read is in progress
   std::error_code ConsumeInput(size_t n);
