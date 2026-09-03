@@ -1710,6 +1710,10 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   // test fail.
   // TODO(kostas): follow up on this
   size_t total_consumed = 0;
+  // V2 only: cache these for the current parser whole loop. An exception: a connection can migrate
+  // after a yield, so reload both pointers before parsing resumes.
+  QueueBackpressure* qbp = enqueue_only ? &GetQueueBackpressure() : nullptr;
+  ConnectionStats* conn_stats = enqueue_only ? &GetLocalConnStats() : nullptr;
   do {
     bool stop_parsing = false;
     DCHECK(parsed_cmd_);
@@ -1739,8 +1743,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
 
         // Stop parsing the current buffer if we crossed the limit.
         // Unparsed bytes remain in io_buf_ for the next ParseLoop iteration.
-        if (GetQueueBackpressure().IsPipelineBufferOverLimit(
-                GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
+        if (qbp->IsPipelineBufferOverLimit(conn_stats->pipeline_queue_bytes, parsed_cmd_q_len_)) {
           DVLOG(2) << CONN_ID << "Pipeline buffer over limit, breaking from parsing loop.";
           stop_parsing = true;
         }
@@ -1766,12 +1769,20 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
     //
     // If max_busy_cycles == 0, never yield. We rely on io_buf_ to bound the work.
     if ((max_busy_cycles > 0) && ThisFiber::GetRunningTimeCycles() > max_busy_cycles) {
-      GetLocalConnStats().num_read_yields++;
+      if (enqueue_only) {
+        ++conn_stats->num_read_yields;
+      } else {
+        ++GetLocalConnStats().num_read_yields;
+      }
 
       fiber_park_spot_ = FiberParkSpot::kParseYield;
       const uint64_t io_buf_generation = io_buf.generation();
       ThisFiber::Yield();
       fiber_park_spot_ = FiberParkSpot::kNone;
+      if (enqueue_only) {
+        qbp = &GetQueueBackpressure();
+        conn_stats = &GetLocalConnStats();
+      }
       // io_buf_ backing storage should not be replaced while read_buffer is retained.
       DCHECK_EQ(io_buf.generation(), io_buf_generation);
 
