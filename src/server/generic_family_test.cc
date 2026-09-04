@@ -1409,6 +1409,22 @@ TEST_F(GenericFamilyTest, Restore) {
   EXPECT_THAT(resp, ErrArg("ERR Bad data format"));
 }
 
+// Redis 7.2+ encodes small sets as listpacks under rdb type 20, the id Dragonfly used for JSON
+// before rdb version 10. Migration tools rebuild RESTORE payloads with their own footer version
+// (RedisShake hard codes 6), so type 20 must be read as a set listpack regardless of the version.
+TEST_F(GenericFamilyTest, RestoreSetListpackOldRdbVersion) {
+  // sadd set:strs alpha beta gamma, dumped by Redis 7.4 and re-footered by RedisShake with
+  // rdb version 6. Taken verbatim from a failing migration.
+  uint8_t SET_LISTPACK_DUMP_V6[] = {0x14, 0x1b, 0x1b, 0x00, 0x00, 0x00, 0x03, 0x00, 0x85, 0x61,
+                                    0x6c, 0x70, 0x68, 0x61, 0x06, 0x84, 0x62, 0x65, 0x74, 0x61,
+                                    0x05, 0x85, 0x67, 0x61, 0x6d, 0x6d, 0x61, 0x06, 0xff, 0x06,
+                                    0x00, 0xc7, 0xe8, 0x19, 0x08, 0x6c, 0x7e, 0x1a, 0x33};
+  EXPECT_THAT(Run({"restore", "set:strs", "0", ToSV(SET_LISTPACK_DUMP_V6)}), "OK");
+  EXPECT_THAT(Run({"type", "set:strs"}), "set");
+  EXPECT_THAT(Run({"smembers", "set:strs"}),
+              RespArray(UnorderedElementsAre("alpha", "beta", "gamma")));
+}
+
 // A crafted RESTORE payload with a valid listpack header but an interior 32-bit string entry
 // of declared length 0x7fffffff must be rejected. The trailing read triggers the deferred
 // crash for types that store the listpack as-is.
