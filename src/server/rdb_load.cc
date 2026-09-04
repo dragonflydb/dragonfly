@@ -1389,6 +1389,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_ZSET_ZIPLIST:
     case RDB_TYPE_STRING:
     case RDB_TYPE_JSON:
+    case RDB_TYPE_SET_LISTPACK:
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
@@ -1407,17 +1408,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_STREAM_LISTPACKS_2:
     case RDB_TYPE_STREAM_LISTPACKS_3:
       iores = ReadStreams(rdbtype);
-      break;
-    case RDB_TYPE_SET_LISTPACK:
-      // We need to deal with protocol versions 9 and older because in these
-      // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
-      // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
-      if (rdb_version_ < 10) {
-        // consider it RDB_TYPE_JSON_OLD (20)
-        iores = ReadGeneric(RDB_TYPE_JSON);
-      } else {
-        iores = ReadGeneric(rdbtype);
-      }
       break;
     case RDB_TYPE_MODULE_2:
       iores = ReadRedisModule2();
