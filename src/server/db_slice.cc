@@ -491,6 +491,10 @@ DbSlice::~DbSlice() {
     db.reset();
   }
 
+  ShutdownThreadLocal();
+}
+
+void DbSlice::ShutdownThreadLocal() {
   AsyncDeleter::Shutdown();
 }
 

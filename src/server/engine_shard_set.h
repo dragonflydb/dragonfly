@@ -44,7 +44,7 @@ class EngineShardSet {
   // - Namespaces.Clear()
   // - EngineShardSet.Shutdown()
   void PreShutdown();
-  void Shutdown();
+  void Shutdown(bool fast_clear = false);
 
   // Uses a shard queue to dispatch. Callback runs in a dedicated fiber.
   template <typename F> auto Await(ShardId sid, F&& f) {

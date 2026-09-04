@@ -54,7 +54,8 @@ class Namespaces {
   Namespaces();
   ~Namespaces();
 
-  void Clear() ABSL_LOCKS_EXCLUDED(mu_);  // Thread unsafe, use in tear-down or tests
+  void Clear(bool fast_clear = false)
+      ABSL_LOCKS_EXCLUDED(mu_);  // Thread unsafe, use in tear-down or tests
 
   Namespace& GetDefaultNamespace() const;  // No locks
   Namespace& GetOrInsert(std::string_view ns) ABSL_LOCKS_EXCLUDED(mu_);

@@ -260,6 +260,9 @@ class DbSlice {
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner, Namespace* ns);
   ~DbSlice();
 
+  // Discards pending shard-local asynchronous deletions without destroying queued objects.
+  static void ShutdownThreadLocal();
+
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
 
