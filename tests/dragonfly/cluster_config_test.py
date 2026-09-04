@@ -81,7 +81,7 @@ class ReplicaInfo:
     port: int
 
 
-def verify_slots_result(port: int, answer: list, replicas) -> bool:
+def verify_slots_result(port: int, answer: list, replicas, master_id: str | None = None) -> bool:
     def is_local_host(ip: str) -> bool:
         return ip == "127.0.0.1" or ip == "localhost"
 
@@ -93,10 +93,12 @@ def verify_slots_result(port: int, answer: list, replicas) -> bool:
     ip_addr = info[0]
     assert is_local_host(ip_addr)
     assert info[1] == port
+    if master_id is not None:
+        assert info[2] == master_id
 
     # Replicas
     assert len(answer) == 3 + len(replicas)
-    for i in range(3, len(replicas)):
+    for i in range(3, len(answer)):
         replica = replicas[i - 3]
         rep_info = answer[i]
         assert len(rep_info) == 3
@@ -132,18 +134,48 @@ async def test_emulated_cluster_with_replicas(df_factory):
     res = await c_master.execute_command("CLUSTER SLOTS")
     assert verify_slots_result(port=master.port, answer=res[0], replicas=[])
 
-    # Connect replicas to master
-    for replica, c_replica in zip(replicas, c_replicas):
-        rc = await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    # One replica uses the admin port, as the operator does; both must advertise the client port.
+    for c_replica, master_port in zip(c_replicas, [master.admin_port, master.port]):
+        rc = await c_replica.execute_command(f"REPLICAOF localhost {master_port}")
         assert rc == "OK"
 
-    await asyncio.sleep(0.5)
+    await wait_available_async(c_replicas)
 
-    for replica, c_replica in zip(replicas, c_replicas):
+    for replica, replica_id, c_replica in zip(replicas, replica_ids, c_replicas):
         res = await c_replica.execute_command("CLUSTER SLOTS")
         assert verify_slots_result(
-            port=master.port, answer=res[0], replicas=[ReplicaInfo(replica.port, id)]
+            port=master.port,
+            answer=res[0],
+            replicas=[ReplicaInfo(replica_id, replica.port)],
+            master_id=master_id,
         )
+
+        assert await c_replica.execute_command("CLUSTER NODES") == {
+            f"127.0.0.1:{master.port}": {
+                "connected": True,
+                "epoch": "0",
+                "flags": "master",
+                "hostname": "",
+                "last_ping_sent": "0",
+                "last_pong_rcvd": "0",
+                "master_id": "-",
+                "migrations": [],
+                "node_id": master_id,
+                "slots": [["0", "16383"]],
+            },
+            f"127.0.0.1:{replica.port}": {
+                "connected": True,
+                "epoch": "0",
+                "flags": "myself,slave",
+                "hostname": "",
+                "last_ping_sent": "0",
+                "last_pong_rcvd": "0",
+                "master_id": master_id,
+                "migrations": [],
+                "node_id": replica_id,
+                "slots": [],
+            },
+        }
 
     res = await c_master.execute_command("CLUSTER SLOTS")
     assert verify_slots_result(
@@ -212,6 +244,82 @@ async def test_emulated_cluster_with_replicas(df_factory):
             "slots": [],
         },
     }
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "emulated"})
+async def test_emulated_cluster_replica_advertises_announced_addresses(df_factory):
+    # The replica advertises the master's announced address, not the one it replicates from.
+    master = df_factory.create(
+        port=next(next_port),
+        admin_port=next(next_port),
+        cluster_announce_ip="127.0.0.2",
+        announce_port=1337,
+    )
+    replica = df_factory.create(
+        port=next(next_port), replica_announce_ip="127.0.0.3", announce_port=1338
+    )
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+    master_id = await c_master.execute_command("CLUSTER MYID")
+    replica_id = await c_replica.execute_command("CLUSTER MYID")
+
+    # The handshake reply may only grow at the end; elements 6-7 carry the announced address.
+    probe = master.client(socket_timeout=5)
+    res = await probe.execute_command("REPLCONF", "capa", "dragonfly")
+    assert len(res) >= 7 and res[5:7] == ["127.0.0.2", 1337]
+    await probe.aclose()
+
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}") == "OK"
+    await wait_available_async(c_replica)
+
+    expected = [[0, 16383, ["127.0.0.2", 1337, master_id], ["127.0.0.3", 1338, replica_id]]]
+    assert await c_replica.execute_command("CLUSTER SLOTS") == expected
+
+    # Announced addresses are captured at handshake time; the own row reflects changes at once.
+    assert await c_master.execute_command("CONFIG SET cluster_announce_ip 127.0.0.4") == "OK"
+    assert await c_master.execute_command("CONFIG SET announce_port 1339") == "OK"
+    assert await c_replica.execute_command("CONFIG SET announce_port 1340") == "OK"
+    expected[0][3][1] = 1340
+    assert await c_replica.execute_command("CLUSTER SLOTS") == expected
+
+    assert await c_replica.execute_command("REPLICAOF NO ONE") == "OK"
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}") == "OK"
+    await wait_available_async(c_replica)
+    expected[0][2][:2] = ["127.0.0.4", 1339]
+    assert await c_replica.execute_command("CLUSTER SLOTS") == expected
+
+    # An automatic reconnect re-reads the announced address (the restart drops the CONFIG SETs).
+    master.stop()
+    master.start()
+    expected[0][2] = ["127.0.0.2", 1337, await c_master.execute_command("CLUSTER MYID")]
+
+    @assert_eventually(times=200)
+    async def replica_follows_restarted_master():
+        assert await c_replica.execute_command("CLUSTER SLOTS") == expected
+
+    await replica_follows_restarted_master()
+
+
+@dfly_args({"proactor_threads": 2, "cluster_mode": "emulated"})
+async def test_emulated_cluster_replica_advertises_master_bind_address(df_factory):
+    # Without announce flags the master announces its bind address, not the interface it was
+    # reached on (here the admin listener on 127.0.0.1).
+    master = df_factory.create(
+        port=next(next_port), admin_port=next(next_port), bind="127.0.0.2", admin_bind="127.0.0.1"
+    )
+    replica = df_factory.create(port=next(next_port))
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+    master_id = await c_master.execute_command("CLUSTER MYID")
+
+    assert await c_replica.execute_command(f"REPLICAOF 127.0.0.1 {master.admin_port}") == "OK"
+    await wait_available_async(c_replica)
+    res = await c_replica.execute_command("CLUSTER SLOTS")
+    assert res[0][2] == ["127.0.0.2", master.port, master_id]
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
