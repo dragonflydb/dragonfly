@@ -4,9 +4,11 @@
 
 #pragma once
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/types/span.h>
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
 
@@ -75,8 +77,9 @@ class Interpreter {
   Interpreter(const Interpreter&) = delete;
   void operator=(const Interpreter&) = delete;
 
-  Interpreter(Interpreter&&) = default;
-  Interpreter& operator=(Interpreter&&) = default;
+  // lua keeps pointers back to us, so a moved-from object stays reachable and gets closed twice.
+  Interpreter(Interpreter&&) = delete;
+  Interpreter& operator=(Interpreter&&) = delete;
 
   // Note: We leak the state for now.
   // Production code should not access this method.
@@ -196,17 +199,17 @@ class InterpreterManager {
   };
 
  public:
-  InterpreterManager(unsigned num) : waker_{}, available_{}, storage_{} {
-    // We pre-allocate the backing storage during initialization and
-    // start storing pointers to slots in the available vector.
+  explicit InterpreterManager(unsigned num) : num_(num) {
     storage_.reserve(num);
   }
+
+  ~InterpreterManager();
 
   // Borrow interpreter. Always return it after usage.
   Interpreter* Get();
   void Return(Interpreter*);
 
-  // Clear all interpreters, keeps capacity. Waits until all are returned.
+  // Drops all interpreters. Never blocks: borrowed ones are destroyed once returned.
   void Reset();
 
   // Run on all unused interpreters. Those are marked as used at once, so the callback can preempt
@@ -215,13 +218,18 @@ class InterpreterManager {
   static Stats& tl_stats();
 
  private:
-  util::fb2::EventCount waker_, reset_ec_;
+  bool IsLive(const Interpreter* ir) const;
+
+  util::fb2::EventCount waker_;
+  const unsigned num_;  // Pool capacity. Reset() empties storage_, so it can't be derived from it.
+
   std::vector<Interpreter*> available_;
-  std::vector<Interpreter> storage_;
+  std::vector<std::unique_ptr<Interpreter>> storage_;
+
+  // Borrowed when Reset() ran. Destroyed by Return().
+  absl::flat_hash_map<Interpreter*, std::unique_ptr<Interpreter>> retired_;
 
   util::fb2::Mutex reset_mu_;  // Acts as a singleton.
-
-  unsigned return_untracked_ = 0;  // Number of returned interpreters during reset.
 };
 
 }  // namespace dfly

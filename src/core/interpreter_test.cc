@@ -902,4 +902,28 @@ TEST_F(InterpreterTest, RandstrValidation) {
   EXPECT_THAT(error_, testing::HasSubstr("randstr: count must be between 1 and"));
 }
 
+TEST_F(InterpreterTest, ResetRetiresOnlyBorrowed) {
+  const uint64_t before = InterpreterManager::tl_stats().interpreter_cnt;
+  InterpreterManager im(2);
+
+  Interpreter* borrowed = im.Get();
+  Interpreter* idle = im.Get();
+  im.Return(idle);
+
+  im.Reset();
+  // The idle one is gone already, the borrowed one lives until it comes back.
+  EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt - before, 1u);
+
+  im.Return(borrowed);
+  EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt, before);
+
+  // Repeated resets must not stack up generations.
+  for (int i = 0; i < 5; ++i) {
+    Interpreter* ir = im.Get();
+    im.Reset();
+    im.Return(ir);
+  }
+  EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt, before);
+}
+
 }  // namespace dfly

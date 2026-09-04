@@ -526,3 +526,31 @@ async def test_lua_schedule_during_bgsave(df_factory: DflyInstanceFactory):
         "DbSlice change callback fired from DflyConn_* fiber during BGSAVE+EVAL "
         "(SerializerBase::OnChangeBlocking invariant violated).\n" + "\n".join(bad_lines)
     )
+
+
+@pytest.mark.asyncio
+async def test_script_flush_does_not_deadlock(df_factory: DflyInstanceFactory):
+    """EXEC pre-borrows an interpreter for the whole block, and SCRIPT FLUSH used to wait inside
+    InterpreterManager::Reset for every borrowed one - so the EXEC fiber waited for itself, holding
+    a global lock while doing it."""
+    server = df_factory.create(proactor_threads=4)
+    server.start()
+    client = server.client()
+
+    async def exec_block():
+        pipe = client.pipeline(transaction=True)
+        pipe.eval("return 42", 0)
+        pipe.execute_command("SCRIPT", "FLUSH")
+        # This interpreter survived the flush with its functions still compiled.
+        pipe.eval("return 42", 0)
+        return await pipe.execute(raise_on_error=False)
+
+    try:
+        res = await asyncio.wait_for(exec_block(), timeout=10)
+        await asyncio.wait_for(client.set("k", "v"), timeout=10)
+    except asyncio.TimeoutError:
+        # A wedged Dragonfly ignores SIGTERM, and teardown would burn 125s before reporting.
+        server.stop(kill=True)
+        pytest.fail("SCRIPT FLUSH deadlocked: EXEC never completed")
+
+    assert res == [42, "OK", 42], f"unexpected EXEC result: {res}"

@@ -2221,7 +2221,7 @@ void Service::CallSHA(const facade::ParsedArgs& args, string_view sha, Interpret
 
   auto script_data = script_mgr->Find(sha);
   if (!script_data) {
-    // Unreachable: params are cached only for scripts that have a body.
+    // Rare: a concurrent SCRIPT FLUSH can clear db_ between the params check and this lookup.
     LOG_EVERY_T(WARNING, 1) << "Script " << sha << " has cached params but no body";
     return false;
   }
