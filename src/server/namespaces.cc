@@ -4,6 +4,8 @@
 
 #include "server/namespaces.h"
 
+#include <ranges>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
@@ -63,7 +65,7 @@ Namespaces::~Namespaces() {
   Clear();
 }
 
-void Namespaces::Clear() {
+void Namespaces::Clear(bool fast_clear) {
   util::fb2::LockGuard guard(mu_);
 
   default_namespace_ = nullptr;
@@ -74,8 +76,16 @@ void Namespaces::Clear() {
 
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
-    for (auto& ns : ABSL_TS_UNCHECKED_READ(namespaces_)) {
-      ns.second.shard_db_slices_[es->shard_id()].reset();
+    // We will not destroy the db slice, so clear the pending delete list
+    if (fast_clear)
+      DbSlice::ShutdownThreadLocal();
+
+    for (auto& val : ABSL_TS_UNCHECKED_READ(namespaces_) | views::values) {
+      auto& db_slice = val.shard_db_slices_[es->shard_id()];
+      if (fast_clear)
+        db_slice.release();
+      else
+        db_slice.reset();
     }
   });
 

@@ -144,10 +144,10 @@ void EngineShardSet::PreShutdown() {
   });
 }
 
-void EngineShardSet::Shutdown() {
+void EngineShardSet::Shutdown(bool fast_clear) {
   // Calling Namespaces::Clear before destroying engine shards, because it accesses them
   // internally.
-  namespaces->Clear();
+  namespaces->Clear(fast_clear);
   RunBlockingInParallel([](EngineShard*) { EngineShard::DestroyThreadLocal(); });
 
   delete namespaces;

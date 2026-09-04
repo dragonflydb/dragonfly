@@ -1149,7 +1149,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   server_family_.Init(acceptor, std::move(listeners));
 }
 
-void Service::Shutdown() {
+void Service::Shutdown(bool fast_clear) {
   VLOG(1) << "Service::Shutdown";
 
   // We mark that we are shutting down. After this incoming requests will be
@@ -1174,7 +1174,7 @@ void Service::Shutdown() {
   engine_varz.reset();
 
   shard_set->PreShutdown();
-  shard_set->Shutdown();
+  shard_set->Shutdown(fast_clear);
 
   delete channel_store;
   channel_store = nullptr;
