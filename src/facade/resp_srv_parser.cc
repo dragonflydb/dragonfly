@@ -26,25 +26,25 @@ auto RespSrvParser::Parse(Buffer str, uint32_t* consumed, cmn::BackedArguments* 
   DVLOG(2) << "Parsing: "
            << absl::CHexEscape(string_view{reinterpret_cast<const char*>(str.data()), str.size()});
 
-  if (state_ == CMD_COMPLETE_S) {
-    args->clear();
-    buf_stash_.clear();
-    inline_total_ = 0;
-
-    if (str[0] == '*') {
-      // We recognized a non-INLINE state, starting with '*'
-      str.remove_prefix(1);
-      *consumed += 1;
-      state_ = ARRAY_LEN_S;
-      if (str.empty())
-        return INPUT_PENDING;
-    } else {  // INLINE mode, aka PING\n
-      state_ = INLINE_S;
-    }
-  }
-
   ResultConsumed resultc{OK, 0};
   do {
+    if (state_ == CMD_COMPLETE_S) {
+      args->clear();
+      buf_stash_.clear();
+      inline_total_ = 0;
+
+      if (str[0] == '*') {
+        // We recognized a non-INLINE state, starting with '*'
+        str.remove_prefix(1);
+        *consumed += 1;
+        state_ = ARRAY_LEN_S;
+        if (str.empty())
+          return INPUT_PENDING;
+      } else {  // INLINE mode, aka PING\n
+        state_ = INLINE_S;
+      }
+    }
+
     switch (state_) {
       case ARRAY_LEN_S:
         resultc = ConsumeArrayLen(str, args);
@@ -78,7 +78,9 @@ auto RespSrvParser::Parse(Buffer str, uint32_t* consumed, cmn::BackedArguments* 
 
     *consumed += resultc.second;
     str.remove_prefix(exchange(resultc.second, 0));
-  } while (state_ != CMD_COMPLETE_S && resultc.first == OK && !str.empty());
+    // Empty inline lines end a command too. Detect the next command's protocol again,
+    // even when it is already in this buffer (e.g. the redis-cli --pipe ECHO sentinel).
+  } while ((state_ != CMD_COMPLETE_S || args->empty()) && resultc.first == OK && !str.empty());
 
   if (state_ != CMD_COMPLETE_S) {
     if (resultc.first == OK) {
@@ -98,7 +100,7 @@ auto RespSrvParser::Parse(Buffer str, uint32_t* consumed, cmn::BackedArguments* 
   }
 
   args->MaybeShrink();
-  return resultc.first;
+  return resultc.first == OK && args->empty() ? INPUT_PENDING : resultc.first;
 }
 
 auto RespSrvParser::ParseInline(Buffer str, cmn::BackedArguments* args) -> ResultConsumed {
@@ -133,10 +135,6 @@ auto RespSrvParser::ParseInline(Buffer str, cmn::BackedArguments* args) -> Resul
   while (ptr != end) {
     // For inline input we only require \n.
     if (*ptr == '\n') {
-      if (args->empty()) {
-        ++ptr;
-        continue;  // skip empty line
-      }
       break;
     }
 
