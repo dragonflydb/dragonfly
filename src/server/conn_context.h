@@ -350,6 +350,7 @@ class ConnectionContext : public facade::ConnectionContext {
   void ChangeMonitor(bool start);  // either start or stop monitor on a given connection
 
   size_t UsedMemory() const override;
+  size_t UsedMemoryO1() const override;
 
   void Unsubscribe(std::string_view channel) override;
   void OnSocketError(uint32_t epoll_mask) override;

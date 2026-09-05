@@ -264,6 +264,7 @@ class Connection : public util::Connection {
 
   // Returns memory usage of this connection's auxiliary members in bytes.
   size_t GetMemoryUsage() const;
+  size_t GetMemoryUsageO1() const;
 
   ConnectionContext* cntx();
 

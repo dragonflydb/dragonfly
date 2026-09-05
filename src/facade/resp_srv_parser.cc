@@ -341,7 +341,7 @@ void RespSrvParser::HandleFinishArg() {
 }
 
 size_t RespSrvParser::UsedMemory() const {
-  return cmn::HeapSize(buf_stash_);
+  return cmn::ShallowHeapSize(buf_stash_);
 }
 
 }  // namespace facade

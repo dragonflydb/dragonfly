@@ -42,6 +42,10 @@ class ConnectionContext {
     return 0;
   }
 
+  virtual size_t UsedMemoryO1() const {
+    return 0;
+  }
+
   // Noop.
   virtual void Unsubscribe(std::string_view channel) {
   }

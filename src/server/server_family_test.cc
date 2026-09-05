@@ -4,7 +4,10 @@
 
 #include "server/server_family.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/match.h>
+
+#include <chrono>
 
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
@@ -764,6 +767,64 @@ TEST_F(ServerFamilyTest, DebugPopulateZeroValSize) {
   // val_size=0 with the default element count (1) must not crash the server.
   auto resp = Run({"DEBUG", "POPULATE", "1", "key", "0"});
   EXPECT_THAT(resp, ErrArg("val_size must be positive"));
+}
+
+TEST_F(ServerFamilyTest, ConnMemUseConstTime) {
+  if (!absl::GetFlag(FLAGS_cluster_mode).empty()) {
+    GTEST_SKIP() << "SUBSCRIBE requires non-cluster mode";
+  }
+
+  pp_->at(0)->Await([&] {
+    constexpr unsigned kSmallSubscriptions = 100;
+    constexpr unsigned kLargeSubscriptions = 30'000;
+    constexpr unsigned kIterations = 256;
+
+    single_response_ = false;
+    absl::Cleanup cleanup = [&] {
+      Run({"UNSUBSCRIBE"});
+      single_response_ = true;
+    };
+    auto subscribe = [&](unsigned first, unsigned end) {
+      vector<string> args{"SUBSCRIBE"};
+      args.reserve(1 + end - first);
+      const string prefix(64, 'x');
+      for (unsigned i = first; i < end; ++i) {
+        args.push_back(absl::StrCat(prefix, ":", i));
+      }
+      EXPECT_THAT(Run(absl::Span<const string>{args}),
+                  RespElementsAre("subscribe", args[1], first + 1));
+    };
+
+    auto thread_cpu_time = [] {
+      timespec ts{};
+      CHECK_EQ(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts), 0);
+      return chrono::seconds(ts.tv_sec) + chrono::nanoseconds(ts.tv_nsec);
+    };
+
+    subscribe(0, kSmallSubscriptions);
+    auto* conn = GetConnection(GetId());
+    ASSERT_NE(conn, nullptr);
+
+    auto measure = [&] {
+      const auto start = thread_cpu_time();
+      for (unsigned i = 0; i < kIterations; ++i) {
+        benchmark::DoNotOptimize(conn->GetMemoryUsageO1());
+      }
+      return thread_cpu_time() - start;
+    };
+
+    const size_t small_bytes = conn->GetMemoryUsageO1();
+    ASSERT_GT(small_bytes, 0u);
+    const auto small_time = measure();
+
+    subscribe(kSmallSubscriptions, kLargeSubscriptions);
+    const size_t large_bytes = conn->GetMemoryUsageO1();
+    EXPECT_GT(large_bytes, small_bytes);
+    const auto large_time = measure();
+
+    const auto budget = 10 * small_time + chrono::milliseconds(1);
+    EXPECT_LE(large_time.count(), budget.count());
+  });
 }
 
 TEST_F(ServerFamilyTest, MemoryArenaSummary) {

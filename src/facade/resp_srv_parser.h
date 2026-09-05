@@ -46,6 +46,7 @@ class RespSrvParser {
     return bulk_len_;
   }
 
+  // Must remain O(1) for connection memory accounting.
   size_t UsedMemory() const;
 
  private:

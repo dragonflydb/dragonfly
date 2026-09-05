@@ -39,6 +39,7 @@ class BackedArguments {
     storage_.reserve(total_size);
   }
 
+  // Must remain O(1) for connection memory accounting.
   size_t HeapMemory() const {
     size_t s1 = offsets_.capacity() <= kLenCap ? 0 : offsets_.capacity() * sizeof(uint32_t);
     size_t s2 = storage_.capacity() <= kStorageCap ? 0 : storage_.capacity();

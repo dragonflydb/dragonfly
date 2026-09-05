@@ -23,6 +23,7 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 using cmn::HeapSize;
+using cmn::ShallowHeapSize;
 
 namespace {
 void SendSubscriptionChangedResponse(string_view action, std::optional<string_view> topic,
@@ -214,6 +215,32 @@ size_t ConnectionContext::UsedMemory() const {
   return facade::ConnectionContext::UsedMemory() + HeapSize(conn_state) +
          HeapSize(authed_username) + HeapSize(acl_commands) + HeapSize(keys.key_globs) +
          HeapSize(pub_sub.globs);
+}
+
+namespace {
+
+template <typename T> size_t CapBytes(const T& coll) {
+  return coll.capacity() * sizeof(typename T::value_type);
+}
+
+}  // namespace
+
+size_t ConnectionContext::UsedMemoryO1() const {
+  const auto& state = conn_state;
+  size_t mem = facade::ConnectionContext::UsedMemoryO1() + state.exec_info.GetStoredCmdBytes() +
+               CapBytes(state.exec_info.watched_keys) + CapBytes(authed_username) +
+               CapBytes(acl_commands) + CapBytes(keys.key_globs) + CapBytes(pub_sub.globs);
+
+  if (const auto* script = state.script_info.get())
+    mem += sizeof(*script) + CapBytes(script->lock_tags) + script->async_cmds_heap_mem +
+           CapBytes(script->acl_commands) + CapBytes(script->acl_keys.key_globs) +
+           CapBytes(script->acl_pub_sub.globs);
+
+  if (const auto* subscriptions = state.subscribe_info.get())
+    mem += sizeof(*subscriptions) + CapBytes(subscriptions->channels) +
+           CapBytes(subscriptions->patterns);
+
+  return mem;
 }
 
 void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
