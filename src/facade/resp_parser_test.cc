@@ -74,6 +74,51 @@ TEST_F(RESPParserTest, BaseRespTypesTest) {
   EXPECT_EQ(search_results["s9"]["title"], "test 9");
 }
 
+TEST_F(RESPParserTest, StreamingState) {
+  RESPParser reader;
+  size_t consumed = 0;
+
+  auto reply = reader.Feed("*1\r\n", 4, &consumed);
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_TRUE(reply->Empty());
+  EXPECT_EQ(consumed, 4u);
+  EXPECT_FALSE(reader.HasBufferedInput());
+
+  constexpr std::string_view kReplies = "$4\r\nPING\r\n+OK\r\n";
+  reply = reader.Feed(kReplies.data(), kReplies.size(), &consumed);
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_FALSE(reply->Empty());
+  EXPECT_EQ(consumed, 10u);
+  EXPECT_TRUE(reader.HasBufferedInput());
+
+  reply = reader.Feed(nullptr, 0, &consumed);
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_FALSE(reply->Empty());
+  EXPECT_EQ(consumed, 5u);
+  EXPECT_FALSE(reader.HasBufferedInput());
+
+  reader.Reset();
+  std::string payload(2048, 'x');
+  std::string large_reply = "$" + std::to_string(payload.size()) + "\r\n" + payload + "\r\n";
+  std::string combined = large_reply + "+QUEUED\r\n";
+
+  reply = reader.Feed(combined.data(), combined.size(), &consumed);
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_FALSE(reply->Empty());
+  EXPECT_EQ(consumed, large_reply.size());
+  EXPECT_TRUE(reader.HasBufferedInput());
+
+  reply = reader.Feed(nullptr, 0, &consumed);
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_FALSE(reply->Empty());
+  EXPECT_EQ(consumed, 9u);
+  EXPECT_FALSE(reader.HasBufferedInput());
+}
+
+TEST_F(RESPParserTest, ArrayLimit) {
+  EXPECT_FALSE(RESPParser({.max_array_len = 2}).Feed("*3\r\n", 4).has_value());
+}
+
 TEST_F(RESPParserTest, RESPIteratorTest) {
   using Fields = std::map<std::string, std::string>;
   using Docs = std::map<std::string, Fields>;
