@@ -17,7 +17,7 @@ on:
         default: ""
         type: string
       iterations:
-        description: "Pytest: optional number of iterations. Default: 1. Example: 12"
+        description: "Pytest: optional number of iterations. Default: 1."
         required: false
         default: "1"
         type: string
@@ -34,9 +34,9 @@ on:
         default: ""
         type: string
       gtest-iterations:
-        description: "GoogleTest: optional number of iterations. Default: 1. Example: 12"
+        description: "GoogleTest: number of iterations; default: 0 (skips GoogleTests)."
         required: false
-        default: "1"
+        default: "0"
         type: string
 
       # Common inputs.

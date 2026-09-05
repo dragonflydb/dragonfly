@@ -90,9 +90,8 @@ ValidateInputs() {
   fi
   ITERATIONS_INPUT=$((10#${ITERATIONS_INPUT}))
 
-  if [[ -n "${GTEST_ITERATIONS_INPUT}" ]] && \
-     ! [[ "${GTEST_ITERATIONS_INPUT}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "gtest-iterations must be a positive integer, got: ${GTEST_ITERATIONS_INPUT}"
+  if [[ -n "${GTEST_ITERATIONS_INPUT}" ]] && ! [[ "${GTEST_ITERATIONS_INPUT}" =~ ^[0-9]+$ ]]; then
+    echo "gtest-iterations must be a non-negative integer, got: ${GTEST_ITERATIONS_INPUT}"
     exit 2
   fi
   if [[ -n "${GTEST_ITERATIONS_INPUT}" ]]; then
@@ -328,10 +327,14 @@ RunPytests() {
 
 RunGtests() {
   if [[ -z "${GTEST_ITERATIONS_INPUT}" ]]; then
-    GTEST_ITERATIONS_INPUT=1
+    GTEST_ITERATIONS_INPUT=0
   fi
   MAX_TESTS_RUN_TIME_INPUT="${MAX_TESTS_RUN_TIME_MINUTES}"
   ValidateInputs
+  if [[ "${GTEST_ITERATIONS_INPUT}" -eq 0 ]]; then
+    echo "Skipping GoogleTests: gtest-iterations is 0"
+    return
+  fi
   max_tests_run_time_minutes=${MAX_TESTS_RUN_TIME_INPUT}
   deadline_seconds=$(GetDeadlineSeconds "${max_tests_run_time_minutes}")
 
