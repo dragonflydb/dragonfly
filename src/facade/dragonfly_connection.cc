@@ -664,19 +664,29 @@ void QueueBackpressure::SubSubscriberBytes(size_t mem) {
 // Global array for each io thread to keep track of the total memory usage of the dispatch queues.
 QueueBackpressure* thread_queue_backpressure = nullptr;
 
-QueueBackpressure& GetQueueBackpressure() {
+// Fiber-Migration-Safe Thread-Local Accessor Pattern (applied in multiple functions)
+//
+// Standard C++ assumes thread identity never changes, so compilers aggressively
+// cache thread-local (TLS) addresses in CPU registers. If a fiber migrates to a
+// new OS thread, this cached address becomes stale, causing data corruption.
+//
+// To force a fresh TLS lookup on every call, we combine two directives:
+// 1. __attribute__((noinline)): Creates a hard function boundary, preventing
+//    the caller from caching the TLS address across the migration point.
+// 2. asm volatile("" ::: "memory"): A strict compiler barrier. It forces the
+//    compiler to flush cached registers and physically recalculate the TLS
+//    address from the current physical OS thread.
+QueueBackpressure& __attribute__((noinline)) GetQueueBackpressure() {
   DCHECK(thread_queue_backpressure != nullptr);
+  // Force the thread-local proactor lookup to be reloaded after a possible migration.
+  asm volatile("" ::: "memory");
 
   return thread_queue_backpressure[ProactorBase::me()->GetPoolIndex()];
 }
 
-// A special accessor for accessing thread local ConnectionStats that is robust to fiber-thread
-// migrations. Compiler optimizations can cache a stale thread local pointer, and not refresh it
-// after HandleMigrateRequest() is called. This function should be used to force loading
-// the variable from memory every time, preventing such bugs.
 ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
   // https://stackoverflow.com/a/75622732
-  asm volatile("");
+  asm volatile("" ::: "memory");
 
   return tl_facade_stats->conn_stats;
 }
@@ -684,7 +694,7 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
 // See GetLocalConnStats() above. Connection fibers can migrate between proactors, so reload this
 // thread-local buffer after every possible migration point.
 ProactorReadBuffer& __attribute__((noinline)) GetSharedReadBuffer() {
-  asm volatile("");
+  asm volatile("" ::: "memory");
 
   return tl_shared_read_buf;
 }
@@ -1712,6 +1722,10 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   // test fail.
   // TODO(kostas): follow up on this
   size_t total_consumed = 0;
+  // V2 only: cache these for the current parser whole loop. An exception: a connection can migrate
+  // after a yield, so reload both pointers before parsing resumes.
+  QueueBackpressure* qbp = enqueue_only ? &GetQueueBackpressure() : nullptr;
+  ConnectionStats* conn_stats = enqueue_only ? &GetLocalConnStats() : nullptr;
   do {
     bool stop_parsing = false;
     DCHECK(parsed_cmd_);
@@ -1741,8 +1755,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
 
         // Stop parsing the current buffer if we crossed the limit.
         // Unparsed bytes remain in io_buf_ for the next ParseLoop iteration.
-        if (GetQueueBackpressure().IsPipelineBufferOverLimit(
-                GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_)) {
+        if (qbp->IsPipelineBufferOverLimit(conn_stats->pipeline_queue_bytes, parsed_cmd_q_len_)) {
           DVLOG(2) << CONN_ID << "Pipeline buffer over limit, breaking from parsing loop.";
           stop_parsing = true;
         }
@@ -1767,12 +1780,20 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
     //
     // If max_busy_cycles == 0, never yield. We rely on io_buf_ to bound the work.
     if ((max_busy_cycles > 0) && ThisFiber::GetRunningTimeCycles() > max_busy_cycles) {
-      GetLocalConnStats().num_read_yields++;
+      if (enqueue_only) {
+        ++conn_stats->num_read_yields;
+      } else {
+        ++GetLocalConnStats().num_read_yields;
+      }
 
       fiber_park_spot_ = FiberParkSpot::kParseYield;
       const uint64_t io_buf_generation = io_buf.generation();
       ThisFiber::Yield();
       fiber_park_spot_ = FiberParkSpot::kNone;
+      if (enqueue_only) {
+        qbp = &GetQueueBackpressure();
+        conn_stats = &GetLocalConnStats();
+      }
       // io_buf_ backing storage should not be replaced while read_buffer is retained.
       DCHECK_EQ(io_buf.generation(), io_buf_generation);
 
