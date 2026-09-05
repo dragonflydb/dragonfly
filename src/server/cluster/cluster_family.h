@@ -4,7 +4,10 @@
 
 #pragma once
 
+#include <absl/types/span.h>
+
 #include <string>
+#include <string_view>
 
 #include "facade/cmd_arg_parser.h"
 #include "facade/conn_context.h"
@@ -15,6 +18,7 @@
 
 namespace facade {
 class SinkReplyBuilder;
+class Listener;
 }  // namespace facade
 
 namespace dfly {
@@ -41,6 +45,14 @@ class ClusterFamily {
   const std::string& MyID() const {
     return id_;
   }
+
+  // Address this node advertises to cluster clients and to downstream replicas: the announce flag
+  // for its role, else the client listener's bind address (or the address `conn` was accepted on
+  // when it is not bound to one interface), and --announce_port, else --port.
+  static ClusterNodeInfo AnnouncedNodeInfo(const facade::Connection* conn,
+                                           absl::Span<facade::Listener* const> listeners,
+                                           std::string_view id = {});
+  static uint16_t AnnouncedPort();
 
   // Only for debug purpose. Pause/Resume all incoming migrations
   void PauseAllIncomingMigrations(bool pause) ABSL_LOCKS_EXCLUDED(migration_mu_);

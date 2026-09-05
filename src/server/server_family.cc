@@ -3620,17 +3620,21 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
 
         cntx->replica_conn = true;
 
-        // The response for 'capa dragonfly' is:
-        //   <masterid> <syncid> <numthreads> <version> <lineage_id>
+        // The response for 'capa dragonfly' is <master_repl_id> <syncid> <num_shards> <version>
+        // <lineage_id> <announced_ip> <announced_port>. It may only grow at the end, and the ip
+        // is a bulk string because it is operator-supplied.
         std::string lineage_id = GetLineageId();
+        auto announced = cluster::ClusterFamily::AnnouncedNodeInfo(cntx->conn(), GetListeners());
 
         auto* rb = static_cast<RedisReplyBuilder*>(builder);
-        rb->StartArray(5);
+        rb->StartArray(7);
         rb->SendSimpleString(master_replid_);
         rb->SendSimpleString(sync_id);
         rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
         rb->SendSimpleString(lineage_id);
+        rb->SendBulkString(announced.ip);
+        rb->SendLong(announced.port);
         return;
       }
     } else if (cmd == "LISTENING-PORT") {
