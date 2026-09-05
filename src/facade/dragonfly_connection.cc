@@ -2882,6 +2882,24 @@ size_t Connection::GetMemoryUsage() const {
   return mem;
 }
 
+size_t Connection::GetMemoryUsageO1() const {
+  size_t mem = sizeof(*this) + cmn::ShallowHeapSize(name_);
+
+  if (memcache_parser_)
+    mem += sizeof(*memcache_parser_) + memcache_parser_->UsedMemory();
+  if (redis_parser_)
+    mem += sizeof(*redis_parser_) + redis_parser_->UsedMemory();
+  if (cc_)
+    mem += sizeof(*cc_) + cc_->UsedMemoryO1();
+  if (reply_builder_)
+    mem += sizeof(*reply_builder_) + reply_builder_->UsedMemory();
+
+  if (parsed_cmd_)
+    mem += parsed_cmd_->GetSize() + parsed_cmd_->HeapMemory();
+  mem += 9'000;
+  return mem;
+}
+
 std::shared_ptr<const TlsCertInfo> Connection::GetTlsCertInfo() const {
 #ifdef DFLY_USE_SSL
   auto* facade_listener = static_cast<facade::Listener*>(listener());
@@ -2898,7 +2916,7 @@ void Connection::RefreshConnectionMemoryUsage() {
   DCHECK(socket());
   DCHECK_EQ(socket()->proactor(), ProactorBase::me());
 
-  size_t current = account_connection_memory_ ? GetMemoryUsage() : 0;
+  size_t current = account_connection_memory_ ? GetMemoryUsageO1() : 0;
   ConnectionStats& conn_stats = GetLocalConnStats();
 
   if (current >= accounted_connection_memory_bytes_) {
@@ -2947,7 +2965,7 @@ void Connection::IncreaseConnStats() {
   }
 
   conn_stats_registered_ = true;
-  accounted_connection_memory_bytes_ = account_connection_memory_ ? GetMemoryUsage() : 0;
+  accounted_connection_memory_bytes_ = account_connection_memory_ ? GetMemoryUsageO1() : 0;
   conn_stats.connection_memory_bytes += accounted_connection_memory_bytes_;
 }
 

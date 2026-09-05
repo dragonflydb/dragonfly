@@ -33,9 +33,13 @@ template <typename Container>
 size_t AccumulateContainer(const Container& c);  // defined below to use HeapSize()
 }  // namespace detail
 
-inline size_t HeapSize(const std::string& s) {
+inline size_t ShallowHeapSize(const std::string& s) {
   constexpr size_t kSmallStringOptSize = 15;
   return s.capacity() > kSmallStringOptSize ? s.capacity() : 0UL;
+}
+
+inline size_t HeapSize(const std::string& s) {
+  return ShallowHeapSize(s);
 }
 
 // Overload for types that have defined UsedMemory

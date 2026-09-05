@@ -125,6 +125,7 @@ class MemcacheParser {
   // so that the memcache command name does not need to be duplicated in callers.
   static std::string_view CmdName(CmdType type);
 
+  // Must remain O(1) for connection memory accounting.
   size_t UsedMemory() const {
     return tmp_buf_.capacity();
   }

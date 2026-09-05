@@ -97,6 +97,7 @@ class SinkReplyBuilder {
     return ec_;
   }
 
+  // Must remain O(1) for connection memory accounting.
   size_t UsedMemory() const {
     return buffer_.Capacity();
   }
