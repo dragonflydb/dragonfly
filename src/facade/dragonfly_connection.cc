@@ -1859,7 +1859,7 @@ auto Connection::ParseLoop() -> ParserStatus {
     // - This helps accumulating commands into the same queue for one larger squash batch instead of
     // many small ones.
     if (ioloop_v2_ && pipeline_prioritize_large_batches_cached && (parse_status != ERROR) &&
-        pending_input_ && (parsed_cmd_q_len_ > 1) && !IsOverPipelineLimit())
+        pending_input_ && (dispatch_waiting_count_ > 1) && !IsOverPipelineLimit())
       return parse_status;
 
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
