@@ -2046,7 +2046,6 @@ bool Connection::ShouldEndAsyncFiber(const MessageHandle& msg) {
 void Connection::SquashPipeline() {
   DCHECK_EQ(GetPendingMessageCount(), parsed_cmd_q_len_);
   DCHECK_EQ(reply_builder_->GetProtocol(), Protocol::REDIS);  // Only Redis is supported.
-  ConnectionMemoryTracker memory_tracker(this);
   unsigned pipeline_count = std::min<uint32_t>(parsed_cmd_q_len_, pipeline_squash_limit_cached);
   auto& conn_stats = tl_facade_stats->conn_stats;
 
@@ -2069,6 +2068,8 @@ void Connection::SquashPipeline() {
     skip_next_squashing_ = true;
     return;
   }
+
+  ConnectionMemoryTracker memory_tracker(this);
 
   // Send all replies under a ReplyScope before releasing the commands.
   // This allows the reply builder to flush without copies
@@ -2895,16 +2896,20 @@ void Connection::RefreshConnectionMemoryUsage() {
   if (!conn_stats_registered_)
     return;
 
+  SetMemoryContribution(account_connection_memory_ ? GetMemoryUsage() : 0);
+}
+
+void Connection::SetMemoryContribution(size_t bytes) {
+  DCHECK(conn_stats_registered_);
   DCHECK(socket());
   DCHECK_EQ(socket()->proactor(), ProactorBase::me());
 
-  size_t current = account_connection_memory_ ? GetMemoryUsage() : 0;
   ConnectionStats& conn_stats = GetLocalConnStats();
 
-  if (current >= accounted_connection_memory_bytes_) {
-    conn_stats.connection_memory_bytes += current - accounted_connection_memory_bytes_;
+  if (bytes >= accounted_connection_memory_bytes_) {
+    conn_stats.connection_memory_bytes += bytes - accounted_connection_memory_bytes_;
   } else {
-    const size_t delta = accounted_connection_memory_bytes_ - current;
+    const size_t delta = accounted_connection_memory_bytes_ - bytes;
     if (ABSL_PREDICT_FALSE(delta > conn_stats.connection_memory_bytes)) {
       LOG(DFATAL) << CONN_ID << "Connection memory accounting underflow: total="
                   << conn_stats.connection_memory_bytes << " delta=" << delta;
@@ -2914,7 +2919,7 @@ void Connection::RefreshConnectionMemoryUsage() {
     }
   }
 
-  accounted_connection_memory_bytes_ = current;
+  accounted_connection_memory_bytes_ = bytes;
 }
 
 void Connection::SetConnectionMemoryAccounting(bool enabled) {
@@ -2922,13 +2927,13 @@ void Connection::SetConnectionMemoryAccounting(bool enabled) {
     return;
 
   account_connection_memory_ = enabled;
-  // reduce memory to 0 and tl stat contribution to 0 on enabled=false
   RefreshConnectionMemoryUsage();
 }
 
 void Connection::IncreaseConnStats() {
   DCHECK(tl_facade_stats);
   DCHECK(!conn_stats_registered_);
+  DCHECK_EQ(accounted_connection_memory_bytes_, 0u);
   DCHECK(socket());
   DCHECK_EQ(socket()->proactor(), ProactorBase::me());
   auto& conn_stats = tl_facade_stats->conn_stats;
@@ -2947,24 +2952,15 @@ void Connection::IncreaseConnStats() {
   }
 
   conn_stats_registered_ = true;
-  accounted_connection_memory_bytes_ = account_connection_memory_ ? GetMemoryUsage() : 0;
-  conn_stats.connection_memory_bytes += accounted_connection_memory_bytes_;
+  RefreshConnectionMemoryUsage();
 }
 
 void Connection::DecreaseConnStats() {
   DCHECK(tl_facade_stats);
   DCHECK(conn_stats_registered_);
   auto& conn_stats = tl_facade_stats->conn_stats;
-  RefreshConnectionMemoryUsage();
-  if (ABSL_PREDICT_FALSE(accounted_connection_memory_bytes_ > conn_stats.connection_memory_bytes)) {
-    LOG(DFATAL) << CONN_ID << "Connection memory accounting underflow on unregister: total="
-                << conn_stats.connection_memory_bytes
-                << " delta=" << accounted_connection_memory_bytes_;
-    conn_stats.connection_memory_bytes = 0;
-  } else {
-    conn_stats.connection_memory_bytes -= accounted_connection_memory_bytes_;
-  }
-  accounted_connection_memory_bytes_ = 0;
+  // Remove the last reported contribution, not a fresh estimate of memory being discarded.
+  SetMemoryContribution(0);
   conn_stats_registered_ = false;
 
   if (IsMainOrMemcache()) {
@@ -3053,6 +3049,7 @@ Connection::ParserStatus Connection::ParseRedisBatch(base::IoBuf& buf) {
 
 Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
   CHECK(io_buf.InputLen() > 0);
+  ConnectionMemoryTracker memory_tracker(this);
 
   do {
     if (parsed_cmd_ == nullptr) {
@@ -3069,7 +3066,6 @@ Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
     DVLOG(2) << CONN_ID << "mc_result " << unsigned(result) << " consumed: " << consumed << " type "
              << unsigned(parsed_cmd_->mc_command()->type);
     if (result == MemcacheParser::INPUT_PENDING) {
-      RefreshConnectionMemoryUsage();
       return NEED_MORE;
     }
 
@@ -3108,7 +3104,6 @@ Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
           break;
       }
     }
-    RefreshConnectionMemoryUsage();
   } while (parsed_cmd_q_len_ < 128 && io_buf.InputLen() > 0);
   // Memcache parse errors are turned into deferred replies above, so we never return ERROR here.
   return OK;

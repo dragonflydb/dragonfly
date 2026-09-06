@@ -552,6 +552,9 @@ class Connection : public util::Connection {
   void IncreaseConnStats();
   void DecreaseConnStats();
 
+  // Replaces this connection's last reported contribution to the owning thread's total.
+  void SetMemoryContribution(size_t bytes);
+
   // Registers or unregisters the two connection-owned read buffers: io_buf_ and overflow_buf_.
   // The shared per-proactor buffer capacity is registered separately and is not this connection's
   // responsibility. GetReadBufCapacity is a helper.
