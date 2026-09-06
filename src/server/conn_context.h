@@ -136,6 +136,9 @@ struct ConnectionState {
     // The total size of all stored commands kept in "body". Does not include memory allocated by
     // the "body" vector.
     size_t stored_cmd_bytes = 0;
+
+   private:
+    size_t watched_keys_heap_bytes_ = 0;
   };
 
   // Lua-script related data.
@@ -167,6 +170,13 @@ struct ConnectionState {
       uint8_t tx_mode = 0;     // value of Transaction::MultiMode
       unsigned tx_shards = 0;  // Number of shards on the transaction
     } stats;
+
+   private:
+    // Separate from ConnectionContext's counter: this snapshot survives live ACL updates,
+    // and its copied vectors/strings can have different capacities.
+    // TODO: Share immutable ACL rules and their cached size via shared_ptr<const AclState>
+    // to avoid copies, accounting for each shared allocation only once.
+    size_t acl_globs_heap_bytes_ = 0;
   };
 
   // PUB-SUB messaging related data.
@@ -196,6 +206,7 @@ struct ConnectionState {
     // TODO: to provide unique_strings across service. This will allow us to use string_view here.
     absl::flat_hash_set<std::string> channels_;
     absl::flat_hash_set<std::string> patterns_;
+    size_t strings_heap_bytes_ = 0;
   };
 
   struct ReplicationInfo {
@@ -330,7 +341,7 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
 
-  // Applies the ACL identity carried by `cred` to this context.
+  // Applies the ACL identity carried by `cred` and refreshes its cached memory estimate.
   // Does not touch `authed_username`, `ns`, or `authenticated`.
   void SetAclCredentials(dfly::acl::UserCredentials cred);
 
@@ -429,6 +440,8 @@ class ConnectionContext : public facade::ConnectionContext {
 
   std::vector<unsigned> ChangeSubscriptions(facade::ParsedArgs channels, bool pattern, bool to_add,
                                             bool to_reply);
+
+  size_t acl_globs_heap_bytes_ = 0;
 };
 
 class CommandContext : public facade::ParsedCommand {

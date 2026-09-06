@@ -4,12 +4,16 @@
 
 #include "server/server_family.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/match.h>
+
+#include <chrono>
 
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "common/heap_size.h"
 #include "facade/facade_test.h"
 #include "facade/socket_utils.h"
 #include "server/test_utils.h"
@@ -764,6 +768,247 @@ TEST_F(ServerFamilyTest, DebugPopulateZeroValSize) {
   // val_size=0 with the default element count (1) must not crash the server.
   auto resp = Run({"DEBUG", "POPULATE", "1", "key", "0"});
   EXPECT_THAT(resp, ErrArg("val_size must be positive"));
+}
+
+TEST_F(ServerFamilyTest, SubscriptionMemoryAccounting) {
+  ConnectionState::SubscribeInfo info;
+  auto check_memory = [&] {
+    EXPECT_EQ(info.UsedMemory(),
+              cmn::SlowHeapSize(info.Channels()) + cmn::SlowHeapSize(info.Patterns()));
+  };
+  check_memory();
+
+  const string long_name(96, 'x');
+  vector<string> names{"short", long_name};
+  for (unsigned i = 0; i < 64; ++i)
+    names.push_back(absl::StrCat(i % 2 ? long_name : "s", i));
+
+  for (bool pattern : {false, true}) {
+    for (size_t i = 0; i < 2; ++i) {
+      EXPECT_TRUE(info.Add(names[i], pattern));
+      check_memory();
+      EXPECT_FALSE(info.Add(names[i], pattern));
+      check_memory();
+    }
+    EXPECT_FALSE(info.Remove("missing", pattern));
+    EXPECT_FALSE(info.Remove(string(128, 'z'), pattern));
+    check_memory();
+
+    const auto& subscriptions = pattern ? info.Patterns() : info.Channels();
+    const size_t initial_capacity = subscriptions.capacity();
+    for (size_t i = 2; i < names.size(); ++i) {
+      EXPECT_TRUE(info.Add(names[i], pattern));
+      check_memory();
+    }
+    EXPECT_GT(subscriptions.capacity(), initial_capacity);
+  }
+  EXPECT_EQ(info.SubscriptionCount(), 2 * names.size());
+
+  for (bool pattern : {false, true}) {
+    for (const auto& name : names) {
+      EXPECT_TRUE(info.Remove(name, pattern));
+      check_memory();
+      EXPECT_FALSE(info.Remove(name, pattern));
+      check_memory();
+    }
+  }
+  EXPECT_TRUE(info.IsEmpty());
+}
+
+TEST_F(ServerFamilyTest, UnsubscribeMemoryAccounting) {
+  ConnectionContext cntx{nullptr, {}};
+  const size_t baseline = cntx.UsedMemory();
+  cntx.conn_state.subscribe_info = make_unique<ConnectionState::SubscribeInfo>();
+  cntx.subscriptions = 1;
+  auto& info = *cntx.conn_state.subscribe_info;
+  const string long_name(96, 'x');
+  ASSERT_TRUE(info.Add("short", false));
+  ASSERT_TRUE(info.Add(long_name, false));
+  EXPECT_EQ(cntx.UsedMemory(), baseline + sizeof(info) + cmn::SlowHeapSize(info.Channels()) +
+                                   cmn::SlowHeapSize(info.Patterns()));
+
+  cntx.Unsubscribe(long_name);
+  ASSERT_NE(cntx.conn_state.subscribe_info, nullptr);
+  EXPECT_EQ(cntx.UsedMemory(), baseline + sizeof(info) + cmn::SlowHeapSize(info.Channels()) +
+                                   cmn::SlowHeapSize(info.Patterns()));
+  EXPECT_EQ(cntx.subscriptions, 1);
+
+  cntx.Unsubscribe("short");
+  EXPECT_EQ(cntx.conn_state.subscribe_info, nullptr);
+  EXPECT_EQ(cntx.subscriptions, 0);
+  EXPECT_EQ(cntx.UsedMemory(), baseline);
+}
+
+TEST_F(ServerFamilyTest, ExecMemoryAccounting) {
+  pp_->at(0)->Await([&] {
+    EXPECT_THAT(Run({"PING"}), "PONG");
+    auto* conn = GetConnection(GetId());
+    ASSERT_NE(conn, nullptr);
+    auto& info = static_cast<ConnectionContext*>(conn->cntx())->conn_state.exec_info;
+    auto check_memory = [&] {
+      EXPECT_EQ(info.UsedMemory(),
+                cmn::SlowHeapSize(info.body) + cmn::SlowHeapSize(info.watched_keys));
+    };
+    check_memory();
+
+    const string short_key = "{m}:s";
+    const string long_key = absl::StrCat("{m}:", string(96, 'k'));
+    EXPECT_THAT(Run({"WATCH", short_key, long_key, long_key}), "OK");
+    EXPECT_EQ(info.watched_keys.size(), 3);
+    check_memory();
+    const size_t initial_capacity = info.watched_keys.capacity();
+    vector<string> watch_args{"WATCH"};
+    for (unsigned i = 0; i < 32; ++i)
+      watch_args.push_back(absl::StrCat(i % 2 ? long_key : short_key, i));
+    EXPECT_THAT(Run(absl::Span<const string>{watch_args}), "OK");
+    EXPECT_GT(info.watched_keys.capacity(), initial_capacity);
+    check_memory();
+
+    const size_t retained_capacity = info.watched_keys.capacity();
+    EXPECT_THAT(Run({"UNWATCH"}), "OK");
+    EXPECT_TRUE(info.watched_keys.empty());
+    EXPECT_EQ(info.watched_keys.capacity(), retained_capacity);
+    check_memory();
+
+    const string value(128, 'v');
+    for (std::string_view finish : {"DISCARD", "EXEC", "RESET"}) {
+      SCOPED_TRACE(finish);
+      EXPECT_THAT(Run({"WATCH", short_key, long_key}), "OK");
+      check_memory();
+      EXPECT_THAT(Run({"MULTI"}), "OK");
+      EXPECT_THAT(Run({"SET", short_key, value}), "QUEUED");
+      check_memory();
+      EXPECT_THAT(Run({"GET", short_key}), "QUEUED");
+      EXPECT_EQ(info.body.size(), 2);
+      check_memory();
+
+      auto resp = Run({finish});
+      if (finish == "EXEC")
+        EXPECT_THAT(resp, RespElementsAre("OK", value));
+      else
+        EXPECT_THAT(resp, finish == "RESET" ? "RESET" : "OK");
+      EXPECT_TRUE(info.body.empty());
+      EXPECT_TRUE(info.watched_keys.empty());
+      EXPECT_EQ(info.watched_keys.capacity(), retained_capacity);
+      check_memory();
+    }
+  });
+}
+
+TEST_F(ServerFamilyTest, AclSnapshotMemoryAccounting) {
+  acl::UserCredentials credentials;
+  credentials.acl_commands = {acl::ALL_COMMANDS, acl::NONE_COMMANDS};
+  credentials.acl_commands.reserve(32);
+  credentials.keys.key_globs = {{"k*", acl::KeyOp::READ},
+                                {string(96, 'k'), acl::KeyOp::READ_WRITE}};
+  credentials.keys.key_globs.reserve(64);
+  credentials.keys.key_globs.back().first.reserve(512);
+  credentials.pub_sub.globs = {{"c*", true}, {string(96, 'c'), false}};
+  credentials.pub_sub.globs.reserve(32);
+  credentials.pub_sub.globs.back().first.reserve(512);
+  credentials.db = 7;
+  ConnectionContext cntx{nullptr, std::move(credentials)};
+  cntx.authed_username = string(96, 'u');
+  auto check_context = [&] {
+    EXPECT_EQ(cntx.UsedMemory(),
+              cntx.facade::ConnectionContext::UsedMemory() + cmn::HeapSize(cntx.conn_state) +
+                  cmn::HeapSize(cntx.authed_username) + cmn::SlowHeapSize(cntx.acl_commands) +
+                  cmn::SlowHeapSize(cntx.keys.key_globs) + cmn::SlowHeapSize(cntx.pub_sub.globs));
+  };
+  check_context();
+
+  ConnectionState::ScriptInfo snapshot{cntx};
+  snapshot.lock_tags.reserve(16);
+  auto check_snapshot = [&] {
+    EXPECT_EQ(snapshot.UsedMemory(), snapshot.lock_tags.capacity() * sizeof(LockTag) +
+                                         snapshot.async_cmds_heap_mem +
+                                         cmn::SlowHeapSize(snapshot.acl_commands) +
+                                         cmn::SlowHeapSize(snapshot.acl_keys.key_globs) +
+                                         cmn::SlowHeapSize(snapshot.acl_pub_sub.globs));
+  };
+  EXPECT_EQ(snapshot.acl_commands, cntx.acl_commands);
+  EXPECT_EQ(snapshot.acl_keys.key_globs, cntx.keys.key_globs);
+  EXPECT_EQ(snapshot.acl_pub_sub.globs, cntx.pub_sub.globs);
+  EXPECT_EQ(snapshot.acl_db_idx, 7);
+  EXPECT_LT(snapshot.acl_commands.capacity(), cntx.acl_commands.capacity());
+  EXPECT_LT(snapshot.acl_keys.key_globs.capacity(), cntx.keys.key_globs.capacity());
+  EXPECT_LT(snapshot.acl_pub_sub.globs.capacity(), cntx.pub_sub.globs.capacity());
+  check_snapshot();
+  const size_t snapshot_memory = snapshot.UsedMemory();
+
+  acl::UserCredentials small;
+  small.acl_commands = {acl::NONE_COMMANDS};
+  small.keys.key_globs = {{"s*", acl::KeyOp::READ}};
+  small.pub_sub.globs = {{"p*", true}};
+  cntx.SetAclCredentials(std::move(small));
+  check_context();
+  check_snapshot();
+  EXPECT_EQ(snapshot.UsedMemory(), snapshot_memory);
+
+  cntx.SetAclCredentials({});
+  EXPECT_TRUE(cntx.keys.key_globs.empty());
+  EXPECT_TRUE(cntx.pub_sub.globs.empty());
+  check_context();
+  check_snapshot();
+  EXPECT_EQ(snapshot.UsedMemory(), snapshot_memory);
+}
+
+TEST_F(ServerFamilyTest, ConnMemUseConstTime) {
+  if (!absl::GetFlag(FLAGS_cluster_mode).empty()) {
+    GTEST_SKIP() << "SUBSCRIBE requires non-cluster mode";
+  }
+
+  pp_->at(0)->Await([&] {
+    constexpr unsigned kSmallSubscriptions = 100;
+    constexpr unsigned kLargeSubscriptions = 30'000;
+    constexpr unsigned kIterations = 256;
+
+    single_response_ = false;
+    absl::Cleanup cleanup = [&] {
+      Run({"UNSUBSCRIBE"});
+      single_response_ = true;
+    };
+    auto subscribe = [&](unsigned first, unsigned end) {
+      vector<string> args{"SUBSCRIBE"};
+      args.reserve(1 + end - first);
+      const string prefix(64, 'x');
+      for (unsigned i = first; i < end; ++i) {
+        args.push_back(absl::StrCat(prefix, ":", i));
+      }
+      EXPECT_THAT(Run(absl::Span<const string>{args}),
+                  RespElementsAre("subscribe", args[1], first + 1));
+    };
+
+    auto thread_cpu_time = [] {
+      timespec ts{};
+      CHECK_EQ(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts), 0);
+      return chrono::seconds(ts.tv_sec) + chrono::nanoseconds(ts.tv_nsec);
+    };
+
+    subscribe(0, kSmallSubscriptions);
+    auto* conn = GetConnection(GetId());
+    ASSERT_NE(conn, nullptr);
+
+    auto measure = [&] {
+      const auto start = thread_cpu_time();
+      for (unsigned i = 0; i < kIterations; ++i) {
+        benchmark::DoNotOptimize(conn->GetMemoryUsage());
+      }
+      return thread_cpu_time() - start;
+    };
+
+    const size_t small_bytes = conn->GetMemoryUsage();
+    ASSERT_GT(small_bytes, 0u);
+    const auto small_time = measure();
+
+    subscribe(kSmallSubscriptions, kLargeSubscriptions);
+    const size_t large_bytes = conn->GetMemoryUsage();
+    EXPECT_GT(large_bytes, small_bytes);
+    const auto large_time = measure();
+
+    const auto budget = 10 * small_time + chrono::milliseconds(1);
+    EXPECT_LE(large_time.count(), budget.count());
+  });
 }
 
 TEST_F(ServerFamilyTest, MemoryArenaSummary) {
