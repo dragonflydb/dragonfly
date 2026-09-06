@@ -166,28 +166,32 @@ void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply,
 }
 
 void ConnectionContext::UnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb) {
-  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->channels.empty())) {
+  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->Channels().empty())) {
     return SendSubscriptionChangedResponse("unsubscribe", std::nullopt, 0, rb);
   }
-  StringVec channels(conn_state.subscribe_info->channels.begin(),
-                     conn_state.subscribe_info->channels.end());
+  const auto& subscriptions = conn_state.subscribe_info->Channels();
+  StringVec channels(subscriptions.begin(), subscriptions.end());
   CmdArgVec arg_vec(channels.begin(), channels.end());
   ChangeSubscription(false, to_reply, false, CmdArgList{arg_vec}, rb);
 }
 
 void ConnectionContext::PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb) {
-  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->patterns.empty())) {
+  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->Patterns().empty())) {
     return SendSubscriptionChangedResponse("punsubscribe", std::nullopt, 0, rb);
   }
 
-  StringVec patterns(conn_state.subscribe_info->patterns.begin(),
-                     conn_state.subscribe_info->patterns.end());
+  const auto& subscriptions = conn_state.subscribe_info->Patterns();
+  StringVec patterns(subscriptions.begin(), subscriptions.end());
   CmdArgVec arg_vec(patterns.begin(), patterns.end());
   ChangePSubscription(false, to_reply, CmdArgList{arg_vec}, rb);
 }
 
 size_t ConnectionState::ExecInfo::UsedMemory() const {
   return HeapSize(body) + HeapSize(watched_keys);
+}
+
+void ConnectionState::ExecInfo::AddWatchedKey(DbIndex db_index, string_view key) {
+  watched_keys.emplace_back(db_index, key);
 }
 
 size_t ConnectionState::ExecInfo::ClearStoredCmds() {
@@ -197,13 +201,30 @@ size_t ConnectionState::ExecInfo::ClearStoredCmds() {
   return used;
 }
 
+ConnectionState::ScriptInfo::ScriptInfo(const ConnectionContext& cntx)
+    : acl_commands(cntx.acl_commands),
+      acl_keys(cntx.keys),
+      acl_pub_sub(cntx.pub_sub),
+      acl_db_idx(cntx.acl_db_idx) {
+}
+
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
   return HeapSize(lock_tags) + async_cmds_heap_mem + HeapSize(acl_commands) +
          HeapSize(acl_keys.key_globs) + HeapSize(acl_pub_sub.globs);
 }
 
+bool ConnectionState::SubscribeInfo::Add(string_view channel, bool pattern) {
+  auto& store = pattern ? patterns_ : channels_;
+  return store.emplace(channel).second;
+}
+
+bool ConnectionState::SubscribeInfo::Remove(string_view channel, bool pattern) {
+  auto& store = pattern ? patterns_ : channels_;
+  return store.erase(channel) > 0;
+}
+
 size_t ConnectionState::SubscribeInfo::UsedMemory() const {
-  return HeapSize(channels) + HeapSize(patterns);
+  return HeapSize(channels_) + HeapSize(patterns_);
 }
 
 size_t ConnectionState::UsedMemory() const {
@@ -224,7 +245,7 @@ void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
 void ConnectionContext::Unsubscribe(std::string_view channel) {
   auto* sinfo = conn_state.subscribe_info.get();
   DCHECK(sinfo);
-  auto erased = sinfo->channels.erase(channel);
+  bool erased = sinfo->Remove(channel, false);
   DCHECK(erased);
   if (sinfo->IsEmpty()) {
     conn_state.subscribe_info.reset();
@@ -248,7 +269,6 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(facade::ParsedArgs chann
   }
 
   auto& sinfo = *conn_state.subscribe_info.get();
-  auto& local_store = pattern ? sinfo.patterns : sinfo.channels;
 
   int32_t tid = util::ProactorBase::me()->GetPoolIndex();
   DCHECK_GE(tid, 0);
@@ -258,9 +278,8 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(facade::ParsedArgs chann
   // Gather all the channels we need to subscribe to / remove.
   size_t i = 0;
   for (string_view channel : channels) {
-    if (to_add && local_store.emplace(channel).second)
-      csu.Record(channel);
-    else if (!to_add && local_store.erase(channel) > 0)
+    bool changed = to_add ? sinfo.Add(channel, pattern) : sinfo.Remove(channel, pattern);
+    if (changed)
       csu.Record(channel);
 
     if (to_reply)

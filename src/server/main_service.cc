@@ -1949,7 +1949,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   MultiCleanup(cntx);
 
   if (conn_state.subscribe_info) {
-    if (!conn_state.subscribe_info->channels.empty())
+    if (!conn_state.subscribe_info->Channels().empty())
       cntx->UnsubscribeAll(false, nullptr);
     if (conn_state.subscribe_info)
       cntx->PUnsubscribeAll(false, nullptr);
@@ -2016,7 +2016,7 @@ void Service::Watch(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
   for (string_view key : parser.UnparsedArgs()) {
-    exec_info.watched_keys.emplace_back(cntx->db_index(), key);
+    exec_info.AddWatchedKey(cntx->db_index(), key);
   }
 
   return cmd_cntx->rb()->SendOk();
@@ -2318,14 +2318,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
   auto& sinfo = conn_cntx->conn_state.script_info;
-  sinfo = make_unique<ConnectionState::ScriptInfo>();
+  sinfo = make_unique<ConnectionState::ScriptInfo>(*conn_cntx);
   sinfo->lock_tags.reserve(eval_args.num_keys);
   sinfo->read_only = read_only;
   memcpy(sinfo->stats.sha, eval_args.sha.data(), eval_args.sha.size());
-  sinfo->acl_commands = conn_cntx->acl_commands;
-  sinfo->acl_keys = conn_cntx->keys;
-  sinfo->acl_pub_sub = conn_cntx->pub_sub;
-  sinfo->acl_db_idx = conn_cntx->acl_db_idx;
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
@@ -3021,12 +3017,12 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
       << ", repl_session_id: " << conn_state.replication_info.repl_session_id;
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
-    if (!conn_state.subscribe_info->channels.empty()) {
+    if (!conn_state.subscribe_info->Channels().empty()) {
       server_cntx->UnsubscribeAll(false, nullptr);
     }
 
     if (conn_state.subscribe_info) {
-      DCHECK(!conn_state.subscribe_info->patterns.empty());
+      DCHECK(!conn_state.subscribe_info->Patterns().empty());
       server_cntx->PUnsubscribeAll(false, nullptr);
     }
 

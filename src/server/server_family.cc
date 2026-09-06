@@ -2072,23 +2072,21 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
   if (is_authorized) {
     cntx->authed_username = username;
     auto cred = registry->GetCredentials(username);
-    cntx->acl_commands = cred.acl_commands;
-    cntx->keys = std::move(cred.keys);
-    cntx->pub_sub = std::move(cred.pub_sub);
+    const size_t db_index = cred.db;
     cntx->ns = &namespaces->GetOrInsert(cred.ns);
+    cntx->SetAclCredentials(std::move(cred));
     cntx->authenticated = true;
     cntx->auth_expires_at = auth_expires_at;
-    cntx->acl_db_idx = cred.db;
-    if (cred.db == std::numeric_limits<size_t>::max()) {
+    if (db_index == std::numeric_limits<size_t>::max()) {
       cntx->conn_state.db_index = 0;
     } else {
-      auto cb = [ns = cntx->ns, index = cred.db](EngineShard* shard) {
+      auto cb = [ns = cntx->ns, index = db_index](EngineShard* shard) {
         auto& db_slice = ns->GetDbSlice(shard->shard_id());
         db_slice.ActivateDb(index);
         return OpStatus::OK;
       };
       shard_set->RunBriefInParallel(std::move(cb));
-      cntx->conn_state.db_index = cred.db;
+      cntx->conn_state.db_index = db_index;
     }
   }
   return is_authorized;

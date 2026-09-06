@@ -5,22 +5,20 @@
 // This file provides utilities to *estimate* heap memory usage of classes.
 // The main function exposed here is HeapSize() (with various overloads).
 // It supports simple structs (returns 0), std::string (returns capacity if it's larger than SSO)
-// and common containers, such as std::vector, std::deque, absl::flat_hash_map and unique_ptr.
+// and std::vector, absl::flat_hash_set and std::unique_ptr.
 //
 // Example usage:
-// absl::flat_hash_map<std::string, std::vector<std::unique_ptr<int>>> m;
+// std::vector<std::unique_ptr<int>> v;
 // ...
-// size_t size = HeapSize(m);
+// size_t size = HeapSize(v);
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
-#include <absl/container/inlined_vector.h>
 #include <absl/types/span.h>
 
 #include <concepts>
-#include <deque>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -65,10 +63,7 @@ template <typename T> size_t HeapSize(const T& t) {
 // Declare first, so that we can use these "recursively"
 template <typename T> size_t HeapSize(const std::unique_ptr<T>& t);
 template <typename T> size_t HeapSize(const std::vector<T>& v);
-template <typename T> size_t HeapSize(const std::deque<T>& d);
 template <typename T1, typename T2> size_t HeapSize(const std::pair<T1, T2>& p);
-template <typename T, size_t N> size_t HeapSize(const absl::InlinedVector<T, N>& v);
-template <typename K, typename V> size_t HeapSize(const absl::flat_hash_map<K, V>& m);
 template <typename K> size_t HeapSize(const absl::flat_hash_set<K>& s);
 
 template <typename T> size_t HeapSize(const std::unique_ptr<T>& t) {
@@ -83,26 +78,8 @@ template <typename T> size_t HeapSize(const std::vector<T>& v) {
   return (v.capacity() * sizeof(T)) + detail::AccumulateContainer(v);
 }
 
-template <typename T> size_t HeapSize(const std::deque<T>& d) {
-  return (d.size() * sizeof(T)) + detail::AccumulateContainer(d);
-}
-
 template <typename T1, typename T2> size_t HeapSize(const std::pair<T1, T2>& p) {
   return HeapSize(p.first) + HeapSize(p.second);
-}
-
-template <typename T, size_t N> size_t HeapSize(const absl::InlinedVector<T, N>& v) {
-  size_t size = 0;
-  if (v.capacity() > N) {
-    size += v.capacity() * sizeof(T);
-  }
-  size += detail::AccumulateContainer(v);
-  return size;
-}
-
-template <typename K, typename V> size_t HeapSize(const absl::flat_hash_map<K, V>& m) {
-  size_t size = m.capacity() * sizeof(typename absl::flat_hash_map<K, V>::value_type);
-  return size + detail::AccumulateContainer(m);
 }
 
 template <typename K> size_t HeapSize(const absl::flat_hash_set<K>& s) {
