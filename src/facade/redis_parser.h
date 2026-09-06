@@ -65,8 +65,6 @@ class RedisParser {
     return stash_;
   }
 
-  size_t UsedMemory() const;
-
  private:
   using ResultConsumed = std::pair<Result, uint32_t>;
 

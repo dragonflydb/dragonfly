@@ -23,8 +23,13 @@ namespace dfly {
 using namespace std;
 using namespace facade;
 using cmn::HeapSize;
+using cmn::SlowHeapSize;
 
 namespace {
+template <typename T> size_t CapBytes(const T& coll) {
+  return coll.capacity() * sizeof(typename T::value_type);
+}
+
 void SendSubscriptionChangedResponse(string_view action, std::optional<string_view> topic,
                                      unsigned count, RedisReplyBuilder* rb) {
   rb->StartCollection(3, CollectionType::PUSH);
@@ -103,6 +108,7 @@ void ConnectionContext::SetAclCredentials(acl::UserCredentials cred) {
     acl_commands = std::move(cred.acl_commands);
   }
   acl_db_idx = cred.db;
+  acl_globs_heap_bytes_ = SlowHeapSize(keys.key_globs) + SlowHeapSize(pub_sub.globs);
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {
@@ -166,28 +172,33 @@ void ConnectionContext::ChangePSubscription(bool to_add, bool to_reply,
 }
 
 void ConnectionContext::UnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb) {
-  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->channels.empty())) {
+  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->Channels().empty())) {
     return SendSubscriptionChangedResponse("unsubscribe", std::nullopt, 0, rb);
   }
-  StringVec channels(conn_state.subscribe_info->channels.begin(),
-                     conn_state.subscribe_info->channels.end());
+  const auto& subscriptions = conn_state.subscribe_info->Channels();
+  StringVec channels(subscriptions.begin(), subscriptions.end());
   CmdArgVec arg_vec(channels.begin(), channels.end());
   ChangeSubscription(false, to_reply, false, CmdArgList{arg_vec}, rb);
 }
 
 void ConnectionContext::PUnsubscribeAll(bool to_reply, facade::RedisReplyBuilder* rb) {
-  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->patterns.empty())) {
+  if (to_reply && (!conn_state.subscribe_info || conn_state.subscribe_info->Patterns().empty())) {
     return SendSubscriptionChangedResponse("punsubscribe", std::nullopt, 0, rb);
   }
 
-  StringVec patterns(conn_state.subscribe_info->patterns.begin(),
-                     conn_state.subscribe_info->patterns.end());
+  const auto& subscriptions = conn_state.subscribe_info->Patterns();
+  StringVec patterns(subscriptions.begin(), subscriptions.end());
   CmdArgVec arg_vec(patterns.begin(), patterns.end());
   ChangePSubscription(false, to_reply, CmdArgList{arg_vec}, rb);
 }
 
 size_t ConnectionState::ExecInfo::UsedMemory() const {
-  return HeapSize(body) + HeapSize(watched_keys);
+  return GetStoredCmdBytes() + CapBytes(watched_keys) + watched_keys_heap_bytes_;
+}
+
+void ConnectionState::ExecInfo::AddWatchedKey(DbIndex db_index, string_view key) {
+  watched_keys.emplace_back(db_index, key);
+  watched_keys_heap_bytes_ += HeapSize(watched_keys.back().second);
 }
 
 size_t ConnectionState::ExecInfo::ClearStoredCmds() {
@@ -198,11 +209,30 @@ size_t ConnectionState::ExecInfo::ClearStoredCmds() {
 }
 
 size_t ConnectionState::ScriptInfo::UsedMemory() const {
-  return HeapSize(lock_tags) + async_cmds_heap_mem;
+  return CapBytes(lock_tags) + async_cmds_heap_mem;
+}
+
+bool ConnectionState::SubscribeInfo::Add(string_view channel, bool pattern) {
+  auto& store = pattern ? patterns_ : channels_;
+  auto [it, inserted] = store.emplace(channel);
+  if (inserted)
+    strings_heap_bytes_ += HeapSize(*it);
+  return inserted;
+}
+
+bool ConnectionState::SubscribeInfo::Remove(string_view channel, bool pattern) {
+  auto& store = pattern ? patterns_ : channels_;
+  auto it = store.find(channel);
+  if (it == store.end())
+    return false;
+
+  strings_heap_bytes_ -= HeapSize(*it);
+  store.erase(it);
+  return true;
 }
 
 size_t ConnectionState::SubscribeInfo::UsedMemory() const {
-  return HeapSize(channels) + HeapSize(patterns);
+  return CapBytes(channels_) + CapBytes(patterns_) + strings_heap_bytes_;
 }
 
 size_t ConnectionState::UsedMemory() const {
@@ -211,8 +241,7 @@ size_t ConnectionState::UsedMemory() const {
 
 size_t ConnectionContext::UsedMemory() const {
   return facade::ConnectionContext::UsedMemory() + HeapSize(conn_state) +
-         HeapSize(authed_username) + HeapSize(acl_commands) + HeapSize(keys.key_globs) +
-         HeapSize(pub_sub.globs);
+         HeapSize(authed_username) + CapBytes(acl_commands) + acl_globs_heap_bytes_;
 }
 
 void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
@@ -223,7 +252,7 @@ void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
 void ConnectionContext::Unsubscribe(std::string_view channel) {
   auto* sinfo = conn_state.subscribe_info.get();
   DCHECK(sinfo);
-  auto erased = sinfo->channels.erase(channel);
+  bool erased = sinfo->Remove(channel, false);
   DCHECK(erased);
   if (sinfo->IsEmpty()) {
     conn_state.subscribe_info.reset();
@@ -247,7 +276,6 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(facade::ParsedArgs chann
   }
 
   auto& sinfo = *conn_state.subscribe_info.get();
-  auto& local_store = pattern ? sinfo.patterns : sinfo.channels;
 
   int32_t tid = util::ProactorBase::me()->GetPoolIndex();
   DCHECK_GE(tid, 0);
@@ -257,9 +285,8 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(facade::ParsedArgs chann
   // Gather all the channels we need to subscribe to / remove.
   size_t i = 0;
   for (string_view channel : channels) {
-    if (to_add && local_store.emplace(channel).second)
-      csu.Record(channel);
-    else if (!to_add && local_store.erase(channel) > 0)
+    bool changed = to_add ? sinfo.Add(channel, pattern) : sinfo.Remove(channel, pattern);
+    if (changed)
       csu.Record(channel);
 
     if (to_reply)
@@ -290,6 +317,7 @@ void ConnectionState::ExecInfo::Clear() {
 
 void ConnectionState::ExecInfo::ClearWatched() {
   watched_keys.clear();
+  watched_keys_heap_bytes_ = 0;
   watched_dirty.store(false, memory_order_relaxed);
   watched_existed = 0;
 }

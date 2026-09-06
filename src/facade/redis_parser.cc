@@ -7,7 +7,6 @@
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
-#include "common/heap_size.h"
 
 namespace facade {
 
@@ -598,10 +597,6 @@ void RedisParser::ExtendBulkString(Buffer str) {
   memcpy(nb.data() + bulk_str.size(), str.data(), str.size());
   bulk_str = RespExpr::Buffer{nb.data(), bulk_str.size() + str.size()};
   buf_stash_.back() = std::move(nb);
-}
-
-size_t RedisParser::UsedMemory() const {
-  return cmn::HeapSize(parse_stack_) + cmn::HeapSize(stash_) + cmn::HeapSize(buf_stash_);
 }
 
 }  // namespace facade

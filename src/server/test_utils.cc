@@ -746,6 +746,17 @@ auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestCon
   return it->second.get();
 }
 
+TestConnection* BaseFamilyTest::GetConnection(string_view conn_id) {
+  DCHECK(ProactorBase::IsProactorThread());
+  unique_lock lk(mu_);
+  auto it = connections_.find(conn_id);
+  if (it == connections_.end())
+    return nullptr;
+  auto* conn = it->second->conn();
+  DCHECK_EQ(conn->socket()->proactor(), ProactorBase::me());
+  return conn;
+}
+
 Transaction* BaseFamilyTest::GetTransaction(string_view conn_id) {
   unique_lock lk(mu_);
   auto it = connections_.find(conn_id);

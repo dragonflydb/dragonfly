@@ -105,6 +105,8 @@ struct ConnectionState {
     // Resets local watched keys info. Does not unregister the keys from DbSlices.
     void ClearWatched();
 
+    void AddWatchedKey(DbIndex db_index, std::string_view key);
+
     size_t UsedMemory() const;
 
     // Empties the body vector and resets stored_cmd_bytes to 0. Returns the size before data was
@@ -133,6 +135,9 @@ struct ConnectionState {
     // The total size of all stored commands kept in "body". Does not include memory allocated by
     // the "body" vector.
     size_t stored_cmd_bytes = 0;
+
+   private:
+    size_t watched_keys_heap_bytes_ = 0;
   };
 
   // Lua-script related data.
@@ -160,18 +165,31 @@ struct ConnectionState {
   // PUB-SUB messaging related data.
   struct SubscribeInfo {
     bool IsEmpty() const {
-      return channels.empty() && patterns.empty();
+      return channels_.empty() && patterns_.empty();
     }
 
     unsigned SubscriptionCount() const {
-      return channels.size() + patterns.size();
+      return channels_.size() + patterns_.size();
     }
+
+    const auto& Channels() const {
+      return channels_;
+    }
+
+    const auto& Patterns() const {
+      return patterns_;
+    }
+
+    bool Add(std::string_view channel, bool pattern);
+    bool Remove(std::string_view channel, bool pattern);
 
     size_t UsedMemory() const;
 
+   private:
     // TODO: to provide unique_strings across service. This will allow us to use string_view here.
-    absl::flat_hash_set<std::string> channels;
-    absl::flat_hash_set<std::string> patterns;
+    absl::flat_hash_set<std::string> channels_;
+    absl::flat_hash_set<std::string> patterns_;
+    size_t strings_heap_bytes_ = 0;
   };
 
   struct ReplicationInfo {
@@ -306,9 +324,8 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
 
-  // Applies the ACL identity carried by `cred` (command set, key/channel globs, db constraint)
-  // to this context. Used both when a connection is created and by RESET to restore the default
-  // user's identity. Does not touch `authed_username`, `ns`, or `authenticated`.
+  // Applies the ACL identity carried by `cred` and refreshes its cached memory estimate.
+  // Does not touch `authed_username`, `ns`, or `authenticated`.
   void SetAclCredentials(dfly::acl::UserCredentials cred);
 
   // Per-client introspection about the most recent command executed on this
@@ -402,6 +419,8 @@ class ConnectionContext : public facade::ConnectionContext {
 
   std::vector<unsigned> ChangeSubscriptions(facade::ParsedArgs channels, bool pattern, bool to_add,
                                             bool to_reply);
+
+  size_t acl_globs_heap_bytes_ = 0;
 };
 
 class CommandContext : public facade::ParsedCommand {
