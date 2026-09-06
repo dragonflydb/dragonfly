@@ -3231,7 +3231,9 @@ bool Connection::SquashPipelineV2() {
   // dispatch_waiting_count_ is the exact length of the run starting at parsed_to_execute_, so the
   // squash works even when earlier commands are still in flight.
   auto& conn_stats = tl_facade_stats->conn_stats;
-  DFLY_TRACY_SQUASHER_VALUE(kV2SquashPipeline, static_cast<uint64_t>(dispatch_waiting_count_));
+  unsigned pipeline_count =
+      std::min<uint32_t>(dispatch_waiting_count_, pipeline_squash_limit_cached);
+  DFLY_TRACY_SQUASHER_VALUE(kV2SquashPipeline, static_cast<uint64_t>(pipeline_count));
 
   uint64_t dispatch_start = CycleClock::Now();
   fiber_park_spot_ = FiberParkSpot::kSquashHop;
@@ -3248,8 +3250,8 @@ bool Connection::SquashPipelineV2() {
   unsigned squashed = 0;
   {
     DFLY_TRACY_SQUASHER_ZONE(kV2SquashDispatch);
-    squashed = service_->DispatchSquashedBatch(parsed_to_execute_, dispatch_waiting_count_,
-                                               cc_.get(), log_traffic ? &log_command_ref : nullptr);
+    squashed = service_->DispatchSquashedBatch(parsed_to_execute_, pipeline_count, cc_.get(),
+                                               log_traffic ? &log_command_ref : nullptr);
     DFLY_TRACY_SQUASHER_VALUE(kV2SquashDispatch, static_cast<uint64_t>(squashed));
   }
   cc_->sync_dispatch = false;
