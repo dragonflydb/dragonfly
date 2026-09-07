@@ -375,6 +375,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
       break;
     case RDB_TYPE_HASH:
     case RDB_TYPE_HASH_WITH_EXPIRY:
+    case RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS:
       CreateHMap(ptr.get());
       break;
     case RDB_TYPE_LIST_QUICKLIST:
@@ -590,14 +591,14 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
-  size_t increment = 2;
-  if (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY)
-    increment = 3;
+  const bool is_expiry =
+      (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY || rdb_type_ == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS);
+  const size_t increment = is_expiry ? 3 : 2;
 
   size_t len = ltrace->arr.size() / increment;
 
   /* Too many entries? Use a hash table right from the start. */
-  bool keep_lp = !config_.chunked && (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
+  bool keep_lp = !config_.chunked && (len <= 64) && increment == 2;
 
   size_t lp_size = 0;
   if (keep_lp) {
@@ -1394,6 +1395,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       break;
     case RDB_TYPE_HASH:
     case RDB_TYPE_HASH_WITH_EXPIRY:
+    case RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS:
       iores = ReadHMap(rdbtype);
       break;
     case RDB_TYPE_ZSET:
@@ -1607,6 +1609,24 @@ auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(str_obj), rdbtype};
 }
 
+error_code RdbLoaderBase::ReadValkeyHashExpiry(RdbVariant* dest) {
+  io::Result<int64_t> expiry_res = FetchInt<int64_t>();
+  if (!expiry_res)
+    return expiry_res.error();
+
+  int64_t expiry_ms = *expiry_res;
+  if (expiry_ms < -1)
+    return RdbError(errc::rdb_file_corrupted);
+  if (expiry_ms >= 0) {
+    uint64_t expiry_sec = (static_cast<uint64_t>(expiry_ms) + 999) / 1000;
+    expiry_sec = std::min(expiry_sec, kMemberExpiryBase + UINT32_MAX);
+    expiry_ms = expiry_sec <= kMemberExpiryBase ? 0 : expiry_sec - kMemberExpiryBase;
+  }
+
+  dest->emplace<long long>(expiry_ms);
+  return error_code{};
+}
+
 auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
   if (pending_read_.remaining > 0) {
@@ -1617,7 +1637,8 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
     if (rdbtype == RDB_TYPE_HASH) {
       len *= 2;
     } else {
-      DCHECK_EQ(rdbtype, RDB_TYPE_HASH_WITH_EXPIRY);
+      DCHECK(rdbtype == RDB_TYPE_HASH_WITH_EXPIRY ||
+             rdbtype == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS);
       len *= 3;
     }
 
@@ -1629,10 +1650,20 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t n = std::min<size_t>(len, kMaxBlobLen);
   load_trace->arr.resize(n);
   size_t i = 0;
-  for (; i < n && !ChunkBudgetExhausted(); ++i) {
-    error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
-    if (ec)
-      return make_unexpected(ec);
+  // Valkey encodes the expiry as a raw little-endian int64, whereas Dragonfly encodes it as an
+  // RDB string. Both formats encode the preceding field and value as RDB strings.
+  if (rdbtype == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS) {
+    for (; i < n; ++i) {
+      auto* dest = &load_trace->arr[i].rdb_var;
+      error_code ec = i % 3 == 2 ? ReadValkeyHashExpiry(dest) : ReadStringObj(dest);
+      if (ec)
+        return make_unexpected(ec);
+    }
+  } else {
+    for (; i < n && !ChunkBudgetExhausted(); ++i) {
+      if (error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var); ec)
+        return make_unexpected(ec);
+    }
   }
   load_trace->arr.resize(i);
 
@@ -2405,16 +2436,20 @@ error_code RdbLoader::Load(io::Source* src) {
   {
     auto cb = mem_buf_->InputBuffer();
 
-    if (memcmp(cb.data(), "REDIS", 5) != 0) {
+    const bool is_valkey = memcmp(cb.data(), "VALKEY", 6) == 0;
+    const size_t magic_size = is_valkey ? 6 : 5;
+    if (!is_valkey && memcmp(cb.data(), "REDIS", 5) != 0) {
       VLOG(1) << "Bad header: " << absl::CHexEscape(facade::ToSV(cb));
       return RdbError(errc::wrong_signature);
     }
 
     char buf[64] = {0};
-    ::memcpy(buf, cb.data() + 5, 4);
+    ::memcpy(buf, cb.data() + magic_size, 9 - magic_size);
 
     rdb_version_ = atoi(buf);
-    if (rdb_version_ < 5 || rdb_version_ > RDB_VERSION) {  // We accept starting from 5.
+    const bool unsupported_version = is_valkey ? rdb_version_ != RDB_VERSION_VALKEY
+                                               : (rdb_version_ < 5 || rdb_version_ > RDB_VERSION);
+    if (unsupported_version) {  // We accept Redis RDBs starting from 5.
       LOG(ERROR) << "RDB Version " << rdb_version_ << " is not supported";
       return RdbError(errc::bad_version);
     }
@@ -2649,7 +2684,9 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
-    if (!rdbIsObjectTypeDF(type)) {
+    const bool is_valkey_type =
+        rdb_version_ == RDB_VERSION_VALKEY && type == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS;
+    if (!rdbIsObjectTypeDF(type) && !is_valkey_type) {
       LOG(ERROR) << "Unrecognized rdb object type: " << type;
       LOG(ERROR) << "Last iteration: ";
       LOG(ERROR) << "key loaded: " << absl::CHexEscape(last_key_loaded_);
@@ -3124,7 +3161,8 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       // Sets and hashes are deleted when all their entries are expired.
       // If it's the case, set reset append flag and start from scratch.
       bool key_is_not_expired = item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms;
-      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
+      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS ||
+                                item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
                                 item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
       if (!is_set_expiry_type && key_is_not_expired) {
         LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;
