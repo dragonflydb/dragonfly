@@ -10,7 +10,7 @@ extern "C" {
 
 // Valkey 9 RDB extensions.
 constexpr int RDB_VERSION_VALKEY = 80;
-constexpr uint8_t RDB_TYPE_HASH_WITH_EXPIRY_MS = 22;
+constexpr uint8_t RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS = 22;
 
 //  Custom types: Range 30-36 is used by DF RDB types.
 constexpr uint8_t RDB_TYPE_JSON = 30;

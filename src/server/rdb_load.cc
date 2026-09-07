@@ -375,7 +375,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
       break;
     case RDB_TYPE_HASH:
     case RDB_TYPE_HASH_WITH_EXPIRY:
-    case RDB_TYPE_HASH_WITH_EXPIRY_MS:
+    case RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS:
       CreateHMap(ptr.get());
       break;
     case RDB_TYPE_LIST_QUICKLIST:
@@ -592,7 +592,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
 
 void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
   const bool is_expiry =
-      (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY || rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY_MS);
+      (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY || rdb_type_ == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS);
   const size_t increment = is_expiry ? 3 : 2;
 
   size_t len = ltrace->arr.size() / increment;
@@ -1395,7 +1395,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       break;
     case RDB_TYPE_HASH:
     case RDB_TYPE_HASH_WITH_EXPIRY:
-    case RDB_TYPE_HASH_WITH_EXPIRY_MS:
+    case RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS:
       iores = ReadHMap(rdbtype);
       break;
     case RDB_TYPE_ZSET:
@@ -1626,7 +1626,7 @@ auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(str_obj), rdbtype};
 }
 
-error_code RdbLoaderBase::ReadHashExpiry(RdbVariant* dest) {
+error_code RdbLoaderBase::ReadValkeyHashExpiry(RdbVariant* dest) {
   io::Result<int64_t> expiry_res = FetchInt<int64_t>();
   if (!expiry_res)
     return expiry_res.error();
@@ -1659,7 +1659,8 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
     if (rdbtype == RDB_TYPE_HASH) {
       len *= 2;
     } else {
-      DCHECK(rdbtype == RDB_TYPE_HASH_WITH_EXPIRY || rdbtype == RDB_TYPE_HASH_WITH_EXPIRY_MS);
+      DCHECK(rdbtype == RDB_TYPE_HASH_WITH_EXPIRY ||
+             rdbtype == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS);
       len *= 3;
     }
 
@@ -1671,10 +1672,12 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t n = std::min<size_t>(len, kMaxBlobLen);
   load_trace->arr.resize(n);
   size_t i = 0;
-  if (rdbtype == RDB_TYPE_HASH_WITH_EXPIRY_MS) {
-    for (; i < n && !ChunkBudgetExhausted(); ++i) {
+  // Valkey encodes the expiry as a raw little-endian int64, whereas Dragonfly encodes it as an
+  // RDB string. Both formats encode the preceding field and value as RDB strings.
+  if (rdbtype == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS) {
+    for (; i < n; ++i) {
       auto* dest = &load_trace->arr[i].rdb_var;
-      error_code ec = i % 3 == 2 ? ReadHashExpiry(dest) : ReadStringObj(dest);
+      error_code ec = i % 3 == 2 ? ReadValkeyHashExpiry(dest) : ReadStringObj(dest);
       if (ec)
         return make_unexpected(ec);
     }
@@ -2469,7 +2472,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
     const bool is_valkey = memcmp(cb.data(), "VALKEY", 6) == 0;
     const size_t magic_size = is_valkey ? 6 : 5;
-    if (!is_valkey && memcmp(cb.data(), "REDIS", magic_size) != 0) {
+    if (!is_valkey && memcmp(cb.data(), "REDIS", 5) != 0) {
       VLOG(1) << "Bad header: " << absl::CHexEscape(facade::ToSV(cb));
       return RdbError(errc::wrong_signature);
     }
@@ -2716,7 +2719,7 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     const bool is_valkey_type =
-        rdb_version_ == RDB_VERSION_VALKEY && type == RDB_TYPE_HASH_WITH_EXPIRY_MS;
+        rdb_version_ == RDB_VERSION_VALKEY && type == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS;
     if (!rdbIsObjectTypeDF(type) && !is_valkey_type) {
       LOG(ERROR) << "Unrecognized rdb object type: " << type;
       LOG(ERROR) << "Last iteration: ";
@@ -3233,7 +3236,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       // Sets and hashes are deleted when all their entries are expired.
       // If it's the case, set reset append flag and start from scratch.
       bool key_is_not_expired = item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms;
-      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY_MS ||
+      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS ||
                                 item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
                                 item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
       if (!is_set_expiry_type && key_is_not_expired) {
