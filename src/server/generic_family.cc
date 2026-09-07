@@ -777,125 +777,72 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
   return cursor;
 }
 
-// A container walk (e.g. SORT_RO yielding inside container_utils::Iterate*) parks with raw pointers
-// into the value while its transaction stays as the shard's running_tx(). RM holds no key lock, so
-// freeing a value under that walk is a use-after-free. kDeferred leaves the key for a later pass.
-enum class DeleteScannedResult { kDeleted, kMissing, kDeferred };
-
-DeleteScannedResult DeleteScannedKey(const OpArgs& op_args, string_view key) {
-  auto& db_slice = op_args.GetDbSlice();
-  auto res = db_slice.FindMutable(op_args.db_cntx, key);
-  if (!IsValid(res.it))
-    return DeleteScannedResult::kMissing;
-
-  // FindMutable preempts (change callbacks), so a walk may have started on this shard meanwhile.
-  if (op_args.shard->running_tx() != nullptr) {
-    res.post_updater.Cancel();
-    return DeleteScannedResult::kDeferred;
-  }
-
-  db_slice.DelMutable(op_args.db_cntx, std::move(res));
-  if (op_args.shard->journal()) {
-    RecordDelete(op_args.db_cntx.db_index, key);
-  }
-  return DeleteScannedResult::kDeleted;
-}
-
-// Returns false if a key was deferred. *cursor is then left where this pass started, so the next
-// RM call revisits the key instead of losing it behind a cursor OpScan already advanced. Rescanning
-// is idempotent - whatever we did delete no longer matches.
-bool OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor,
+void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor,
                      uint32_t* deleted) {
-  // A walk parked on this shard leaves its transaction as running_tx(). Defer the whole batch
-  // rather than scan and free under it; the cursor stays put and the client's next call retries.
-  if (op_args.shard->running_tx() != nullptr)
-    return false;
-
-  const uint64_t scan_start = *cursor;
   StringVec keys;
   OpScan(op_args, scan_opts, cursor, &keys);
 
+  auto& db_slice = op_args.GetDbSlice();
   uint32_t count = 0;
-  bool complete = true;
   for (const auto& key : keys) {
-    switch (DeleteScannedKey(op_args, key)) {
-      case DeleteScannedResult::kDeleted:
-        ++count;
-        break;
-      case DeleteScannedResult::kMissing:
-        break;
-      case DeleteScannedResult::kDeferred:
-        complete = false;
-        break;
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater runs immediately
+    if (!IsValid(it))
+      continue;
+    db_slice.Del(op_args.db_cntx, it);
+    if (op_args.shard->journal()) {
+      RecordDelete(op_args.db_cntx.db_index, key);
     }
+    ++count;
   }
   *deleted += count;
-
-  if (!complete)
-    *cursor = scan_start;
-  return complete;
 }
 
-uint64_t RmGeneric(uint64_t cursor, const ScanOpts& scan_opts, uint32_t* deleted,
-                   ConnectionContext* cntx) {
-  // A returned cursor of 0 means the pass is over, so it cannot also mean "resume at shard 0,
-  // bucket 0" - which is what we must say when a key is deferred in shard 0's first batch. A dash
-  // token stays below 2^40 and we shift it by 10, so the high bits are ours to use as a flag.
-  constexpr uint64_t kResumeBit = 1ULL << 62;
-  cursor &= ~kResumeBit;
-
+uint64_t RmGeneric(uint64_t cursor, const ScanOpts& scan_opts, uint32_t* deleted, Transaction* tx) {
   ShardId sid = cursor % 1024;
 
-  EngineShardSet* ess = shard_set;
-  unsigned shard_count = ess->size();
+  unsigned shard_count = shard_set->size();
   constexpr uint64_t kMaxRmTimeMs = 100;
 
   CHECK_LT(shard_count, 1024u);
 
+  *deleted = 0;
+
   if (sid >= shard_count) {
+    tx->Conclude();
     return 0;
   }
 
   cursor >>= 10;
-  DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
+  const uint64_t deadline_ms = GetCurrentTimeMs() + kMaxRmTimeMs;
 
-  *deleted = 0;
-  bool complete = true;
+  // RM runs as a no-key transaction spanning all shards, so each scan+delete hop executes as the
+  // shard's running_tx: no other transaction can walk or mutate the value while the callback runs,
+  // which is what makes deleting the key safe without a key lock. Between hops the shard is free.
+  while (sid < shard_count) {
+    uint64_t shard_cursor = cursor;
+    tx->Execute(
+        [sid, &scan_opts, &shard_cursor, deleted](Transaction* t, EngineShard* shard) {
+          if (shard->shard_id() == sid)
+            OpScanAndDelete(t->GetOpArgs(shard), scan_opts, &shard_cursor, deleted);
+          return OpStatus::OK;
+        },
+        /*conclude=*/false);
+    cursor = shard_cursor;
 
-  do {
-    auto cb = [&] {
-      OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
-      complete = OpScanAndDelete(op_args, scan_opts, &cursor, deleted);
-    };
-
-    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid) {
-      cb();
-      util::ThisFiber::Yield();
-    } else {
-      ess->Await(sid, cb);
-    }
-
-    if (!complete)  // cursor stayed put; hand it back so the deferred key is revisited
-      break;
-
-    if (cursor == 0) {
+    if (cursor == 0)  // this shard is exhausted, move to the next one
       ++sid;
-      if (unsigned(sid) == shard_count)
-        break;
-    }
 
-    uint64_t time_now_ms = GetCurrentTimeMs();
-    if (time_now_ms > db_cntx.time_now_ms + kMaxRmTimeMs) {
+    if (*deleted >= scan_opts.limit || GetCurrentTimeMs() >= deadline_ms)
       break;
-    }
-  } while (*deleted < scan_opts.limit);
+  }
+
+  tx->Conclude();
 
   if (sid < shard_count) {
     cursor = (cursor << 10) | sid;
-    if (cursor == 0)  // deferred in shard 0's first batch; a bare 0 would read as "done"
-      cursor = kResumeBit;
   } else {
     DCHECK_EQ(0u, cursor);
+    cursor = 0;
   }
 
   return cursor;
@@ -2816,7 +2763,7 @@ void GenericFamily::Rm(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   uint32_t deleted = 0;
-  cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->server_conn_cntx());
+  cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->tx());
 
   auto replier = [cursor, deleted](RedisReplyBuilder* rb) {
     std::string cursor_str = absl::StrCat(cursor);
@@ -2965,7 +2912,13 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
       << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
-      << CI{"RM", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 0, 0, acl::kRm}.HFUNC(Rm)
+      << CI{"RM",
+            CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::JOURNALED | CO::NO_AUTOJOURNAL,
+            -2,
+            0,
+            0,
+            acl::kRm}
+             .HFUNC(Rm)
       << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kTTL}.HFUNC(Ttl)
       << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPTTL}.HFUNC(Pttl)
       << CI{"FIELDTTL", CO::READONLY | CO::FAST, 3, 1, 1, acl::kFieldTtl}.HFUNC(FieldTtl)
