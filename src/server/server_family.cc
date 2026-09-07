@@ -1037,7 +1037,7 @@ bool ValidateSnapshotFilenameFlags() {
 
 void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::ProactorPool* pp,
                 CommandContext* cmd_cntx) {
-  size_t requested_slow_log_length = UINT32_MAX;
+  size_t requested_slow_log_length = 10;
   size_t argc = args.size();
   if (argc >= 3) {
     return cmd_cntx->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
@@ -1048,9 +1048,7 @@ void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::Proacto
       return cmd_cntx->SendError("count should be greater than or equal to -1",
                                  facade::kSyntaxErrType);
     }
-    if (num >= 0) {
-      requested_slow_log_length = num;
-    }
+    requested_slow_log_length = num == -1 ? UINT32_MAX : static_cast<size_t>(num);
   }
 
   // gather all the individual slowlogs from all the fibers and sort them by their timestamp

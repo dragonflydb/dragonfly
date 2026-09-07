@@ -165,15 +165,27 @@ TEST_F(ServerFamilyTest, SlowLogMaxLengthZero) {
 }
 
 TEST_F(ServerFamilyTest, SlowLogGetLen) {
-  auto resp = Run({"config", "set", "slowlog_max_len", "3"});
+  auto resp = Run({"config", "set", "slowlog_max_len", "20"});
   EXPECT_THAT(resp.GetString(), "OK");
   resp = Run({"config", "set", "slowlog_log_slower_than", "0"});
   EXPECT_THAT(resp.GetString(), "OK");
+  Run({"slowlog", "reset"});
 
-  for (int i = 1; i <= 3; ++i) {
+  for (int i = 1; i <= 15; ++i) {
     resp = Run({"lpush", "mykey", std::to_string(i)});
     EXPECT_THAT(resp.GetInt(), i);
   }
+  Run({"config", "set", "slowlog_log_slower_than", "-1"});
+  const auto slowlog_length = Run({"slowlog", "len"}).GetInt();
+  EXPECT_GT(slowlog_length, 10);
+
+  // Test GET without a count - returns 10 entries by default
+  resp = Run({"slowlog", "get"});
+  EXPECT_THAT(resp.GetVec().size(), 10);
+
+  // Test GET with a positive count - returns the requested number of entries
+  resp = Run({"slowlog", "get", "3"});
+  EXPECT_THAT(resp.GetVec().size(), 3);
 
   // Test GET 0 - returns empty
   resp = Run({"slowlog", "get", "0"});
@@ -181,7 +193,7 @@ TEST_F(ServerFamilyTest, SlowLogGetLen) {
 
   // Test GET -1 - returns all entries
   resp = Run({"slowlog", "get", "-1"});
-  EXPECT_THAT(resp.GetVec().size(), 3);
+  EXPECT_THAT(resp.GetVec().size(), slowlog_length);
 
   // Test GET < -1 - returns error
   resp = Run({"slowlog", "get", "-2"});
