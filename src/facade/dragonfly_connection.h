@@ -374,15 +374,15 @@ class Connection : public util::Connection {
 
   // Ingests a single proactor recv notification, updating connection I/O state:
   // - io_ec_ on error/abort, pending_input_ for multishot completions
-  // - io_buf_ for provided buffers.
+  // - receive accounting for provided buffers, which OnRecvNotification parses directly.
   // May return early on error.
   // The caller (OnRecvNotification) wakes the fiber regardless so the loop can observe io_ec_ and
   // close.
   void ProcessRecvNotification(const util::FiberSocketBase::RecvNotification& n);
 
   // Callback: registered as the proactor OnRecv hook for V2 connections.
-  // Processes the notification, eagerly drains the socket into io_buf_, and wakes the connection
-  // fiber. Only called from the proactor event loop while the connection fiber is suspended.
+  // Processes the notification, parses provided buffers directly or drains the socket into io_buf_,
+  // and wakes the connection fiber. Only called while the connection fiber is suspended.
   void OnRecvNotification(const util::FiberSocketBase::RecvNotification& n);
 
   // Enables io_uring multishot receives for the connection if the current thread supports it.
@@ -511,6 +511,10 @@ class Connection : public util::Connection {
   // When enqueue_only=true (V2): all parsed commands are enqueued without inline
   // dispatch.
   ParserStatus ParseRedis(base::IoBuf& buf, uint32_t max_busy_cycles, bool enqueue_only);
+
+  // Parses a non-owning V2 input span without yielding. The parser may retain partial command
+  // state, but must not retain a reference into input after this function returns.
+  ParserStatus ParseRedisSpan(io::Bytes input);
 
   void OnBreakCb(int32_t mask);
 
@@ -876,6 +880,12 @@ class Connection : public util::Connection {
 
       // Shared read buffer: only valid for RESP IoLoop V2 connections.
       bool shared_read_buf_enabled_ : 1;
+
+      // Benchmark POC: direct parsing from a provided buffer cannot overlap a V2 parser yield.
+      bool direct_provided_buffer_parse_enabled_ : 1;
+
+      // True while RespSrvParser may retain parse state across a fiber suspension.
+      bool redis_parser_active_ : 1;
 
       bool request_shutdown_ : 1;  // set when the connection is requested to shutdown
     };

@@ -1689,6 +1689,9 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
                                                 bool enqueue_only) {
   DCHECK_EQ(enqueue_only, ioloop_v2_)
       << "enqueue_only==true should only be used for ioloop_v2_ and vice versa";
+  CHECK(!redis_parser_active_);
+  redis_parser_active_ = true;
+  absl::Cleanup clear_parser_active = [this] { redis_parser_active_ = false; };
   // Account memory once after parsing completes, including every terminal parser status.
   absl::Cleanup refresh_memory_usage = [this] { RefreshConnectionMemoryUsage(); };
   uint32_t consumed = 0;
@@ -1799,6 +1802,61 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
 
   VLOG(1) << CONN_ID << "Parser error " << result;
 
+  return ERROR;
+}
+
+Connection::ParserStatus Connection::ParseRedisSpan(io::Bytes input) {
+  DCHECK(ioloop_v2_);
+  DCHECK(parsed_cmd_);
+  CHECK(!redis_parser_active_);
+  redis_parser_active_ = true;
+  absl::Cleanup clear_parser_active = [this] { redis_parser_active_ = false; };
+
+  absl::Cleanup refresh_memory_usage = [this] { RefreshConnectionMemoryUsage(); };
+  QueueBackpressure& qbp = GetQueueBackpressure();
+  ConnectionStats& conn_stats = GetLocalConnStats();
+  RespSrvParser::Result result = RespSrvParser::OK;
+
+  while ((result == RespSrvParser::OK) && !input.empty() && !reply_builder_->GetError()) {
+    uint32_t consumed{};
+    result = redis_parser_->Parse(input, &consumed, parsed_cmd_);
+    request_consumed_bytes_ += consumed;
+
+    if (result == RespSrvParser::OK) {
+      DCHECK(!parsed_cmd_->empty());
+      if (io_req_size_hist) {
+        io_req_size_hist->Add(request_consumed_bytes_);
+      }
+      request_consumed_bytes_ = 0;
+      parsed_cmd_->has_unparsed_input = consumed < input.size();
+
+      PipelineMessagePtr ptr = GetFromPoolOrCreate();
+      auto* cmd = std::exchange(parsed_cmd_, ptr.release());
+      EnqueueParsedCommand(cmd);
+
+      // This benchmark POC has no push-mode backpressure or staging path.
+      CHECK(!qbp.IsPipelineBufferOverLimit(conn_stats.pipeline_queue_bytes, parsed_cmd_q_len_));
+    }
+
+    if ((result != RespSrvParser::OK) && (result != RespSrvParser::INPUT_PENDING)) {
+      LOG_IF(WARNING, cntx()->replica_conn)
+          << CONN_ID << "Redis parser error: " << static_cast<unsigned int>(result)
+          << " during parse: " << io::View(input);
+    }
+
+    input.remove_prefix(consumed);
+  }
+
+  parser_error_ = result;
+  if (result == RespSrvParser::OK) {
+    return OK;
+  }
+  if (result == RespSrvParser::INPUT_PENDING) {
+    DCHECK(input.empty());
+    return NEED_MORE;
+  }
+
+  VLOG(1) << CONN_ID << "Parser error " << result;
   return ERROR;
 }
 
@@ -3044,7 +3102,9 @@ Connection::ParserStatus Connection::ParseRedisBatch(base::IoBuf& buf) {
   }
   // Forward ParseRedis's status verbatim (OK / NEED_MORE / ERROR) so a protocol error
   // propagates to ParseLoop instead of being flattened into "no commands parsed".
-  return ParseRedis(buf, max_busy_read_cycles_cached, /*enqueue_only=*/true);
+  const uint32_t max_busy_cycles =
+      direct_provided_buffer_parse_enabled_ ? 0 : max_busy_read_cycles_cached;
+  return ParseRedis(buf, max_busy_cycles, /*enqueue_only=*/true);
 }
 
 Connection::ParserStatus Connection::ParseMCBatch(base::IoBuf& io_buf) {
@@ -3612,6 +3672,7 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
            << " pending_input=" << pending_input_;
   const uint64_t start_epoch = fb2::FiberSwitchEpoch();
   const uint64_t initial_read_count = GetLocalConnStats().io_read_cnt;
+  const bool is_provided_buffer = std::holds_alternative<io::MutableBytes>(n.read_result);
   ProcessRecvNotification(n);
 
   auto parse_in_proactor = [this](auto&& parse_cb) {
@@ -3632,7 +3693,14 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
                                                  fiber_park_spot_ == FiberParkSpot::kSimpleHop);
   };
 
-  if (shared_read_buf_enabled_ && can_parse_in_proactor()) {
+  if (is_provided_buffer) {
+    CHECK(redis_parser_);
+    CHECK(!shared_read_buf_enabled_);
+    parse_in_proactor([this, &n] {
+      const auto& buf = std::get<io::MutableBytes>(n.read_result);
+      return ParseRedisSpan(buf);
+    });
+  } else if (shared_read_buf_enabled_ && can_parse_in_proactor()) {
     // TODO: Bound callback read/parse work to prevent a busy connection from starving the proactor.
     parse_in_proactor([this] { return ReadAndParseShared(/*from_proactor_callback=*/true); });
   } else if (!shared_read_buf_enabled_ && !IsOverPipelineLimit()) {
@@ -3675,19 +3743,8 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
   } else if (std::holds_alternative<io::MutableBytes>(n.read_result)) {  // provided buffer.
     CHECK(!shared_read_buf_enabled_);
     io::MutableBytes buf = std::get<io::MutableBytes>(n.read_result);
-    {
-      ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonPrivateProvidedBufferReceive);
-      io_buf_.WriteAndCommit(buf.data(), buf.size());
-    }
-    last_interaction_ = time(nullptr);
-    UpdateIoBufReadState();
-
-    DCHECK(tl_facade_stats);
-    auto& conn_stats = tl_facade_stats->conn_stats;
-    conn_stats.io_read_bytes += buf.size();
-    local_stats_.net_bytes_in += buf.size();
-    ++conn_stats.io_read_cnt;
-    ++local_stats_.read_cnt;
+    RecordRecvBytes(buf.size());
+    auto& conn_stats = GetLocalConnStats();
     ++conn_stats.num_recv_provided_calls;
   } else {
     LOG(FATAL) << CONN_ID << "Should not reach here";
@@ -4039,6 +4096,7 @@ void Connection::MaybeEnableRecvMultishot() {
     // Only enable if the buffer ring is configured and we aren't using TLS
     if (up->BufRingEntrySize(kRecvSockGid) > 0 && !is_tls_ && !shared_read_buf_enabled_) {
       static_cast<fb2::UringSocket*>(socket_.get())->EnableRecvMultishot();
+      direct_provided_buffer_parse_enabled_ = true;
       pending_input_ = false;
     }
   }
