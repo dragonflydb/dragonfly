@@ -202,6 +202,34 @@ TEST_F(AclFamilyTest, AclAuth) {
   EXPECT_THAT(resp, "OK");
 }
 
+TEST_F(AclFamilyTest, AuthRejectedAfterJwtExpiry) {
+  TestInitAclFam();
+  auto resp = Run("ACL SETUSER shahar ON >mypass +@fast");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("AUTH shahar mypass");
+  EXPECT_THAT(resp, "OK");
+
+  // A command works right after a normal (non-JWT) AUTH, since auth_expires_at defaults
+  // to "never expires".
+  resp = Run("GET foo");
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Simulate a JWT-derived auth whose token has already expired (as if the connection had
+  // authenticated with a JWT carrying an "exp" claim in the past).
+  SetAuthExpiresAt("IO0", std::chrono::steady_clock::now() - std::chrono::seconds(1));
+
+  resp = Run("GET foo");
+  EXPECT_THAT(resp, ErrArg("NOAUTH JWT token expired, please re-authenticate."));
+
+  // Re-authenticating resets auth_expires_at back to "never expires" and unblocks commands.
+  resp = Run("AUTH shahar mypass");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("GET foo");
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
 TEST_F(AclFamilyTest, AclWhoAmI) {
   TestInitAclFam();
   auto resp = Run("ACL WHOAMI WHO");
