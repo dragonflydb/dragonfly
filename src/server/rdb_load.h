@@ -213,6 +213,7 @@ class RdbLoaderBase {
 
   std::error_code ReadObj(int rdbtype, OpaqueObj* dest);
   std::error_code ReadStringObj(RdbVariant* rdb_variant, bool big_string_split = false);
+  std::error_code ReadHashExpiry(RdbVariant* dest);
   std::error_code ReadRemainingString(RdbVariant* dest);
   ::io::Result<long long> ReadIntObj(int encoding);
   ::io::Result<LzfString> ReadLzf();
