@@ -557,6 +557,7 @@ void EngineShard::DestroyThreadLocal() {
   shard_ = nullptr;
   CompactObj::InitThreadLocal(nullptr);
   SmallString::ShutdownThreadLocal();
+  reset_zmalloc_threadlocal();
 
   // Everything still living in `tlh` at this point (DB values orphaned by
   // Namespaces::Clear(), shard_'s own now-destructed storage) has no more live
