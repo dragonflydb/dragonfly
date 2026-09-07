@@ -119,6 +119,9 @@ ABSL_FLAG(string, user, "",
 ABSL_FLAG(uint16_t, uring_recv_buffer_cnt, 0,
           "How many buffer ring entries to allocate per thread for io_uring receive operations. "
           "Relevant only for modern kernels with io_uring enabled");
+ABSL_FLAG(uint32_t, uring_recv_buffer_size, facade::kRecvBufSize,
+          "Size in bytes of each io_uring receive buffer ring entry. "
+          "Relevant only when uring_recv_buffer_cnt is non-zero.");
 
 ABSL_FLAG(bool, omit_basic_usage, false, "Omit printing basic usage info.");
 
@@ -785,6 +788,7 @@ void SetupAllocationTracker(ProactorPool* pool) {
 void RegisterBufRings(ProactorPool* pool) {
 #ifdef __linux__
   auto bufcnt = absl::GetFlag(FLAGS_uring_recv_buffer_cnt);
+  auto bufsize = absl::GetFlag(FLAGS_uring_recv_buffer_size);
   if (bufcnt == 0) {
     return;
   }
@@ -796,19 +800,20 @@ void RegisterBufRings(ProactorPool* pool) {
   }
 
   CHECK_LE(bufcnt, 16384u);
+  CHECK_GT(bufsize, 0u);
 
   // We need a power of 2 length.
   bufcnt = absl::bit_ceil(bufcnt);
   pool->AwaitBrief([&](unsigned, ProactorBase* pb) {
     auto up = static_cast<fb2::UringProactor*>(pb);
-    int res = up->RegisterBufferRing(facade::kRecvSockGid, bufcnt, facade::kRecvBufSize);
+    int res = up->RegisterBufferRing(facade::kRecvSockGid, bufcnt, bufsize);
     if (res != 0) {
       LOG(ERROR) << "Failed to register buf ring for proactor "
                  << util::detail::SafeErrorMessage(res);
       exit(1);
     }
   });
-  LOG(INFO) << "Registered a bufring with " << bufcnt << " buffers of size " << facade::kRecvBufSize
+  LOG(INFO) << "Registered a bufring with " << bufcnt << " buffers of size " << bufsize
             << " per thread ";
 #endif
 }
