@@ -339,9 +339,16 @@ void OutgoingMigration::SyncFb() {
     }
 
     long attempt = 0;
+    constexpr long kMaxFinalizeAttempts = 30;  // bound retries so finalize can't loop forever
     while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
       // Break loop and don't sleep in case of C_FATAL, or a reported error (e.g. OOM on ACK).
       if (GetState() == MigrationState::C_FATAL || !exec_st_.IsRunning()) {
+        break;
+      }
+      if (attempt >= kMaxFinalizeAttempts) {
+        exec_st_.ReportError(absl::StrCat("Migration finalization failed after ", attempt,
+                                          " attempts for ", cf_->MyID(), " : ",
+                                          migration_info_.node_info.id));
         break;
       }
       // Process commands that were on pause and try again

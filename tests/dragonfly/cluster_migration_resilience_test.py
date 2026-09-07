@@ -95,7 +95,7 @@ async def test_network_disconnect_during_migration(df_factory, proxy_factory):
         ),
     ],
 )
-@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "pause_wait_timeout": 10})
 async def test_cluster_fuzzymigration(
     df_factory: DflyInstanceFactory,
     df_seeder_factory,
