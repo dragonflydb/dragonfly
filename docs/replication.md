@@ -103,7 +103,6 @@ DFLY FLOW <master_repl_id> <dfly_session_id> <flow_id> [<lsn>] [<last_master_id>
   and the master's version supports it.
 
 ```mermaid
-%%{init: {'theme':'base'}}%%
 sequenceDiagram
     participant R as Replica
     participant M as Master
@@ -155,16 +154,20 @@ The master replies to `DFLY FLOW` with `(sync_type, eof_token)` where `sync_type
 `"PARTIAL"`, and `eof_token` is a fresh random 40-hex string used later only in the full-sync path
 to mark the end of the RDB stream out-of-band from the RDB format itself.
 
-**Important asymmetry**: partial/full sync is decided *per flow*, independently, at `DFLY FLOW`
-time - before the replica has even sent `DFLY SYNC`. `DFLY SYNC` (below) fans out to shards and,
-for any flow that was negotiated as `PARTIAL`, skips starting a full-sync saver for that flow
-entirely.
+**Important asymmetry**: partial vs. full sync is decided *per flow*, independently, at
+`DFLY FLOW` time — before the replica has even sent `DFLY SYNC` on the control connection. Each
+flow's answer is final by the time `DFLY SYNC` runs: `DFLY SYNC` (below) fans out to shards and,
+for any flow already negotiated as `PARTIAL`, skips starting a full-sync saver for that flow
+entirely — it never revisits what `DFLY FLOW` decided. This per-flow decision isn't necessarily
+the session's final outcome, though: if flows disagree (some full, some partial), the mismatch is
+only caught afterwards and forces the *whole session* back to full resync (see "Mixed full/partial"
+below).
 
 ## 3. Full sync (`DFLY SYNC`)
 
 Once *all* flows have replied to `DFLY FLOW`, the replica sends `DFLY SYNC <sync_id>` on the
-*first* (control) connection. The master requires session state `PREPARATION`, and - under a
-guard so no write transaction is mid-flight - starts a full-sync snapshot on every shard whose
+*first* (control) connection. The master requires session state `PREPARATION`, and — under a
+guard so no write transaction is mid-flight — starts a full-sync snapshot on every shard whose
 flow was **not** already resolved to `PARTIAL` (a flow already resolved to partial makes the
 full-sync start a no-op / error path). It then transitions the session to `FULL_SYNC` and replies
 `+OK` - **without waiting for the snapshot itself to finish**; the RDB bytes stream asynchronously
@@ -214,7 +217,6 @@ without a global lock. The mechanism (shared by full sync, `SAVE`/`BGSAVE`, and 
 migration) is a per-bucket copy-on-write scheme:
 
 ```mermaid
-%%{init: {'theme':'base'}}%%
 sequenceDiagram
     participant T as Traversal fiber
     participant B as Bucket (version v)
@@ -402,7 +404,6 @@ numbering starts at 1) - not at 0. This happens in two promotion paths:
 requesting session and requiring it already be in `STABLE_SYNC`:
 
 ```mermaid
-%%{init: {'theme':'base'}}%%
 sequenceDiagram
     participant R as Replica (requesting takeover)
     participant M as Master
@@ -427,8 +428,8 @@ sequenceDiagram
    send a fresh ACK immediately instead of waiting for its normal interval) and busy-waits until
    the last-acked LSN on every shard equals the master's current LSN, i.e. the replica has now
    applied everything.
-4. If that succeeds, replies `+OK` to the takeover request, then - best-effort, without forcing a
-   PING (which would itself advance the LSN and defeat partial sync for those nodes) - waits for
+4. If that succeeds, replies `+OK` to the takeover request, then — best-effort, without forcing a
+   PING (which would itself advance the LSN and defeat partial sync for those nodes) — waits for
    *every other* connected replica to catch up too, so they don't miss data or need a full resync
    against the replica that is about to become the new master.
 5. Optionally does a synchronous `SAVE` (test-only knob), then shuts the process down
