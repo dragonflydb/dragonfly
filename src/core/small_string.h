@@ -18,6 +18,10 @@ class SmallString {
 
  public:
   static void InitThreadLocal(void* heap);
+  // Drops the thread-local segment allocator without freeing its segments individually.
+  // Call only when the underlying heap is about to be bulk-freed (e.g. mi_heap_destroy),
+  // and nothing will call into SmallString on this thread again.
+  static void ShutdownThreadLocal();
   static size_t UsedThreadLocal();
   static bool CanAllocate(size_t size);
 

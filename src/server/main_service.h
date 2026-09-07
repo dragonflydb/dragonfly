@@ -35,7 +35,7 @@ class Service : public facade::ServiceInterface {
 
   void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners);
 
-  void Shutdown(bool fast_clear = false);
+  void Shutdown();
 
   // Prepare command execution, verify and execute, reply to context
   facade::DispatchResult DispatchCommand(

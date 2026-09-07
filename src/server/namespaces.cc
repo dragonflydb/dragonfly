@@ -65,7 +65,7 @@ Namespaces::~Namespaces() {
   Clear();
 }
 
-void Namespaces::Clear(bool fast_clear) {
+void Namespaces::Clear() {
   util::fb2::LockGuard guard(mu_);
 
   default_namespace_ = nullptr;
@@ -76,16 +76,14 @@ void Namespaces::Clear(bool fast_clear) {
 
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
-    // We will not destroy the db slice, so clear the pending delete list
-    if (fast_clear)
-      DbSlice::ShutdownThreadLocal();
+    // We will not destroy the db slice, so clear the pending delete list. The orphaned
+    // DbSlice/DashTable pages get reclaimed in bulk when the shard's heap is destroyed
+    // in EngineShard::DestroyThreadLocal(), right after this runs.
+    DbSlice::ShutdownThreadLocal();
 
     for (auto& val : ABSL_TS_UNCHECKED_READ(namespaces_) | views::values) {
       auto& db_slice = val.shard_db_slices_[es->shard_id()];
-      if (fast_clear)
-        db_slice.release();
-      else
-        db_slice.reset();
+      db_slice.release();
     }
   });
 

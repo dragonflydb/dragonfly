@@ -490,8 +490,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   version_monitor.Shutdown();
 
-  constexpr bool fast_clear = true;
-  service.Shutdown(fast_clear);
+  service.Shutdown();
 }
 
 bool CreatePidFile(const string& path) {

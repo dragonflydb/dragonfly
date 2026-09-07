@@ -505,3 +505,88 @@ async def test_bitops_denyoom(df_factory: DflyInstanceFactory):
         with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
             await client.execute_command(*cmd)
     assert await client.ping()
+
+
+# Populates a single hash field-by-field with sequential field names (guaranteed
+# unique, unlike random field names which collide badly at 1-byte length) and
+# independently-sized random values. Avoids building the whole batch as a Lua
+# table + unpack(), which would blow the interpreter's argument-stack limit at
+# millions of fields.
+_POPULATE_HASH_CHUNK_SCRIPT = """
+local key = KEYS[1]
+local start = tonumber(ARGV[1])
+local count = tonumber(ARGV[2])
+local val_size = tonumber(ARGV[3])
+for i = 1, count do
+    redis.call('HSET', key, tostring(start + i), dragonfly.randstr(val_size))
+end
+return start + count
+"""
+
+# Docker container running this test has 12gb total; stay well clear of that.
+LARGE_HASH_TARGET_BYTES = 6 * 1024**3
+LARGE_HASH_HARD_LIMIT_BYTES = 8 * 1024**3  # abort if we ever blow past this
+LARGE_HASH_CHUNK_FIELDS = 1_000_000
+
+
+@pytest.mark.large
+@pytest.mark.opt_only
+async def test_shutdown_large_single_hash(df_factory: DflyInstanceFactory):
+    """
+    Seeds a single HASH key with millions of sequential fields, each holding a
+    1-byte value, until reaching ~6gb of RSS. Used to reproduce/benchmark the
+    synchronous per-object destructor walk for a single large nested container
+    during shutdown/FLUSHALL (see PR #8239 and the mi_heap_destroy discussion).
+    """
+    instance = df_factory.create(
+        proactor_threads=1,
+        maxmemory="6gb",
+        num_shards=1,
+    )
+    instance.start()
+    client = instance.client()
+
+    sha = await client.script_load(_POPULATE_HASH_CHUNK_SCRIPT)
+
+    key = "bighash"
+    field_count = 0
+    while True:
+        field_count = int(
+            await client.evalsha(sha, 1, key, field_count, LARGE_HASH_CHUNK_FIELDS, 1)
+        )
+
+        rss = instance.rss
+        logging.info(f"fields={field_count} rss={rss}")
+        assert rss < LARGE_HASH_HARD_LIMIT_BYTES, f"RSS overshoot: {rss} bytes, aborting"
+
+        if rss >= LARGE_HASH_TARGET_BYTES:
+            break
+
+    await asyncio.sleep(1)  # let Dragonfly's own RSS heartbeat catch up for the final check
+    info = await client.info("memory")
+    logging.info(
+        f'Populated {field_count} fields, used_memory={info["used_memory"]}, '
+        f'used_memory_rss={info["used_memory_rss"]}, psutil_rss={instance.rss}'
+    )
+    assert await client.hlen(key) == field_count
+
+    await client.connection_pool.disconnect()
+
+    # Explicitly time shutdown here rather than leaving it to fixture teardown, so we can
+    # report how long it took (or whether SIGTERM was ignored and SIGKILL was required).
+    logging.info("Sending SIGTERM, timing shutdown...")
+    start = time.time()
+    killed = False
+    try:
+        instance.stop()
+    except Exception as e:
+        killed = True
+        logging.error(f"Shutdown did not complete gracefully: {e}")
+    finally:
+        elapsed = time.time() - start
+        if killed:
+            logging.info(f"Dragonfly had to be SIGKILLed after {elapsed:.2f}s")
+        else:
+            logging.info(f"Dragonfly shut down gracefully in {elapsed:.2f}s")
+
+    assert not killed, "Dragonfly needed to be force-killed on shutdown"
