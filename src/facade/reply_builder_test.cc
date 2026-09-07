@@ -393,19 +393,39 @@ TEST_F(RedisReplyBuilderTest, StringMessage) {
   }
 }
 
-TEST_F(RedisReplyBuilderTest, EmptyArray) {
+TEST_F(RedisReplyBuilderTest, EmptyOrNullArray) {
   // This test would build an array and try sending it over the "wire"
   // The array starts with the '*', then the number of elements in the array
   // then "\r\n", then each element inside is encoded accordingly
   // an empty array has this "*0\r\n" form
   const std::string_view empty_array = "*0\r\n";
-  const std::string_view null_array = "*-1\r\n";
+
+  // A null array is "*-1\r\n" on RESP2, but "_\r\n" on RESP3
+  const std::string_view null_array_resp2 = "*-1\r\n";
+  const std::string_view null_array_resp3 = "_\r\n";
+
   builder_->StartArray(0);
   ASSERT_EQ(str(), empty_array);
 
   sink_.Clear();
   builder_->SendNullArray();
-  ASSERT_EQ(null_array, str());
+  ASSERT_EQ(null_array_resp2, str());
+
+  sink_.Clear();
+  builder_->SendEmptyArray();
+  ASSERT_EQ(str(), empty_array);
+
+  // RESP3
+
+  builder_->SetRespVersion(RespVersion::kResp3);
+
+  sink_.Clear();
+  builder_->StartArray(0);
+  ASSERT_EQ(str(), empty_array);
+
+  sink_.Clear();
+  builder_->SendNullArray();
+  ASSERT_EQ(null_array_resp3, str());
 
   sink_.Clear();
   builder_->SendEmptyArray();

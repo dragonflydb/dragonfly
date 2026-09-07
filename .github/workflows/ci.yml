@@ -22,14 +22,14 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
           cache: 'pip'
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -90,7 +90,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: true
 
@@ -259,10 +259,10 @@ jobs:
           name: regression_logs
           path: /tmp/failed/*
 
-      - name: Run Valkey TCL stream tests
-        # Same gating as the regression tests above: runs the upstream Valkey stream TCL suites
-        # (unit/type/stream[-cgroups]) in external-server mode against the just-built binary,
-        # on both Debug and Release. continue-on-error keeps it a canary for now — flip to a
+      - name: Run Valkey TCL tests
+        # Same gating as the regression tests above: runs the upstream Valkey TCL suites
+        # (unit/type/stream[-cgroups], unit/pubsub) in external-server mode against the just-built
+        # binary, on both Debug and Release. continue-on-error keeps it a canary for now — flip to a
         # blocking step once proven stable in CI. See tests/dragonfly/valkey_tcl/README.md.
         if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push'
         continue-on-error: true
@@ -345,7 +345,7 @@ jobs:
     needs: [build]
     if: github.event_name != 'push'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: actions/download-artifact@v8
         with:
@@ -419,7 +419,7 @@ jobs:
     needs: [build]
     if: github.event_name != 'push'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/lint-test-chart
 
   list-caches:
@@ -454,7 +454,7 @@ jobs:
         - /mnt:/mnt
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: true
 

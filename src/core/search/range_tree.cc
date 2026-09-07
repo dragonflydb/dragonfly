@@ -76,7 +76,10 @@ template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
 }  // namespace
 
 RangeTree::RangeTree(PMR_NS::memory_resource* mr, size_t max_range_block_size)
-    : max_range_block_size_(max_range_block_size), entries_(mr) {
+    // A zero block size is used as a divisor in Builder::Populate; fall back to the default.
+    : max_range_block_size_(max_range_block_size ? max_range_block_size
+                                                 : kDefaultMaxRangeBlockSize),
+      entries_(mr) {
   // The tree has at least always a block with a negative infinity bound, so that any new insertion
   // goes at least somewhere
   CreateEmptyBlock(-std::numeric_limits<double>::infinity());

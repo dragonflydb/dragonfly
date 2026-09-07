@@ -60,4 +60,14 @@ using PendingId = std::variant<uintptr_t, KeyRef, ListNodeId>;
 // Separate kesypaces that are used to fetch tiered values.
 using ReadId = std::variant<KeyRef, ListNodeId>;
 
+struct ReadOptions {
+  bool read_only = true;      // the value won't be modified through the decoder
+  bool force_upload = false;  // restore the value to memory and drop its disk copy once read
+
+  void Merge(const ReadOptions& other) {
+    read_only &= other.read_only;
+    force_upload |= other.force_upload;
+  }
+};
+
 };  // namespace dfly::tiering

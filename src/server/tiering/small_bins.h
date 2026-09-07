@@ -24,9 +24,13 @@ using DbIndex = uint16_t;
 // SIMPLEST VERSION for now.
 class SmallBins {
  public:
+  // Fixed per-entry header written on disk: 2 dbid + 8 hash + 2 strlen.
+  static constexpr size_t kEntryHeaderSize = 12;
+
   struct Stats {
     size_t stashed_bins_cnt = 0;
     size_t stashed_entries_cnt = 0;
+    size_t stashed_entries_bytes = 0;
     size_t current_bin_bytes = 0;
     size_t current_entries_cnt = 0;
   };
@@ -98,13 +102,9 @@ class SmallBins {
  private:
   struct StashInfo {
     uint8_t entries = 0;
-    // Live bytes still occupied by non-deleted entries.
     uint16_t bytes = 0;
-    // Bytes at stash time; used to detect real fragmentation from deletes rather than
-    // flagging bins that were simply packed small.
-    uint16_t orig_bytes = 0;
   };
-  static_assert(sizeof(StashInfo) == 6);
+  static_assert(sizeof(StashInfo) == sizeof(unsigned));
 
   BinId last_bin_id_ = 0;
   FilledBin current_bin_{last_bin_id_};
@@ -137,6 +137,7 @@ class SmallBins {
 
   struct {
     size_t stashed_entries_cnt = 0;
+    size_t stashed_entries_bytes = 0;
   } stats_;
 };
 

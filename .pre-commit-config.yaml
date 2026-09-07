@@ -4,7 +4,8 @@ exclude: |
       src/redis/.* |
       src/huff/.* |
       contrib/charts/dragonfly/ci/.* |
-      patches/.*
+      patches/.* |
+      fuzz/seeds/.*
     )
 repos:
   - repo: local

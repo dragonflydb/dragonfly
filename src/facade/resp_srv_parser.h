@@ -24,6 +24,7 @@ class RespSrvParser {
     BAD_ARRAYLEN,
     BAD_BULKLEN,
     BAD_STRING,
+    BAD_INLINE,
   };
   using Buffer = absl::Span<const uint8_t>;
   explicit RespSrvParser(uint32_t max_arr_len = UINT32_MAX, uint32_t max_bulk_len = UINT32_MAX)
@@ -73,6 +74,8 @@ class RespSrvParser {
   uint8_t small_len_ = 0;
 
   uint32_t bulk_len_ = 0, arg_len_ = 0;
+  uint32_t inline_total_ = 0;  // accumulated length of the current inline line
+  bool bulk_append_ = false;   // current bulk grows incrementally instead of eager reserve
   uint32_t max_arr_len_;
   uint32_t max_bulk_len_;
 

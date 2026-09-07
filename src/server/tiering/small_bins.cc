@@ -23,8 +23,15 @@ namespace {
 
 // See FlushBin() for format details
 size_t StashedValueSize(string_view value) {
-  return 2 /* dbid */ + 8 /* hash */ + 2 /* strlen*/ + value.size();
+  return SmallBins::kEntryHeaderSize + value.size();
 }
+
+// The biggest a single entry (value + fixed header) can ever be.
+constexpr size_t kMaxEntrySize = (2_KB - 1) + SmallBins::kEntryHeaderSize;
+
+// We offload a bin at a minimum of ~49.7% utilization; use a cutoff below that to flag real
+// fragmentation.
+constexpr size_t kFragmentedCutoff = kPageSize - 2 - kMaxEntrySize;
 
 }  // namespace
 
@@ -101,14 +108,15 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
   uint16_t bytes = 0;
   SmallBins::KeySegmentList list;
   for (auto& [key, sub_segment] : seg_map) {
-    bytes += sub_segment.length;
+    bytes += sub_segment.length + kEntryHeaderSize;
 
     DiskSegment real_segment{segment.offset + sub_segment.offset, sub_segment.length};
     list.emplace_back(key.first, key.second, real_segment);
   }
 
   stats_.stashed_entries_cnt += list.size();
-  stashed_bins_.InsertNew(segment.offset, StashInfo{uint8_t(list.size()), bytes, bytes});
+  stats_.stashed_entries_bytes += bytes;
+  stashed_bins_.InsertNew(segment.offset, StashInfo{uint8_t(list.size()), bytes});
 
   return list;
 }
@@ -148,8 +156,9 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
     stats_.stashed_entries_cnt--;
     auto& bin = it->second;
 
-    DCHECK_LE(segment.length, bin.bytes);
-    bin.bytes -= segment.length;
+    DCHECK_LE(segment.length + kEntryHeaderSize, bin.bytes);
+    bin.bytes -= segment.length + kEntryHeaderSize;
+    stats_.stashed_entries_bytes -= segment.length + kEntryHeaderSize;
 
     if (--bin.entries == 0) {
       DCHECK_EQ(bin.bytes, 0u);
@@ -157,8 +166,9 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
       return {full_segment, false /* fragmented */, true /* empty */};
     }
 
-    bool fragmented = bin.bytes * 2 < bin.orig_bytes;
-    return {full_segment, fragmented, false /* empty */};
+    if (bin.bytes < kFragmentedCutoff) {
+      return {full_segment, true /* fragmented */, false /* empty */};
+    }
   }
 
   return {segment};
@@ -166,14 +176,14 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
 
 bool SmallBins::IsFragmented(size_t offset) {
   if (auto it = stashed_bins_.Find(offset); it != stashed_bins_.end())
-    return it->second.bytes * 2 < it->second.orig_bytes;
+    return it->second.bytes < kFragmentedCutoff;
   return false;
 }
 
 ::dfly::detail::DashCursor SmallBins::TraverseFragmented(::dfly::detail::DashCursor cursor,
                                                          absl::FunctionRef<void(size_t)> f) {
-  return stashed_bins_.Traverse(cursor, [f](Dash::iterator it) {
-    if (it->second.bytes * 2 < it->second.orig_bytes)
+  return stashed_bins_.TraverseBySegmentOrder(cursor, [f](Dash::iterator it) {
+    if (it->second.bytes < kFragmentedCutoff)
       f(it->first);
   });
 }
@@ -181,6 +191,7 @@ bool SmallBins::IsFragmented(size_t offset) {
 SmallBins::Stats SmallBins::GetStats() const {
   return Stats{.stashed_bins_cnt = stashed_bins_.size(),
                .stashed_entries_cnt = stats_.stashed_entries_cnt,
+               .stashed_entries_bytes = stats_.stashed_entries_bytes,
                .current_bin_bytes = current_bin_.bytes_,
                .current_entries_cnt = current_bin_.entries_.size()};
 }
@@ -194,6 +205,7 @@ SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_v
 
   auto bin = it->second;
   stats_.stashed_entries_cnt -= bin.entries;
+  stats_.stashed_entries_bytes -= bin.bytes;
   stashed_bins_.Erase(it);
 
   const char* data = value.data();

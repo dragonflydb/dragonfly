@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_set.h>
 
 #include <cassert>
+#include <chrono>
 
 #include "facade/conn_context.h"
 #include "facade/parsed_command.h"
@@ -105,6 +106,8 @@ struct ConnectionState {
     // Resets local watched keys info. Does not unregister the keys from DbSlices.
     void ClearWatched();
 
+    void AddWatchedKey(DbIndex db_index, std::string_view key);
+
     size_t UsedMemory() const;
 
     // Empties the body vector and resets stored_cmd_bytes to 0. Returns the size before data was
@@ -133,15 +136,27 @@ struct ConnectionState {
     // The total size of all stored commands kept in "body". Does not include memory allocated by
     // the "body" vector.
     size_t stored_cmd_bytes = 0;
+
+   private:
+    size_t watched_keys_heap_bytes_ = 0;
   };
 
   // Lua-script related data.
   struct ScriptInfo {
+    explicit ScriptInfo(const ConnectionContext& cntx);
+
     size_t UsedMemory() const;
 
     absl::flat_hash_set<LockTag> lock_tags;  // declared tags
     std::vector<std::string> key_backing;    // storage for keys provided from lua
     bool read_only = false;
+
+    // ACL rules snapshotted from the connection when the script started. That way,
+    // concurrent ACL modifications of that user do not affect the script execution.
+    std::vector<uint64_t> acl_commands;
+    dfly::acl::AclKeys acl_keys;
+    dfly::acl::AclPubSub acl_pub_sub;
+    size_t acl_db_idx = std::numeric_limits<size_t>::max();
 
     size_t async_cmds_heap_mem = 0;     // bytes used by async_cmds
     size_t async_cmds_heap_limit = 0;   // max bytes allowed for async_cmds
@@ -155,23 +170,43 @@ struct ConnectionState {
       uint8_t tx_mode = 0;     // value of Transaction::MultiMode
       unsigned tx_shards = 0;  // Number of shards on the transaction
     } stats;
+
+   private:
+    // Separate from ConnectionContext's counter: this snapshot survives live ACL updates,
+    // and its copied vectors/strings can have different capacities.
+    // TODO: Share immutable ACL rules and their cached size via shared_ptr<const AclState>
+    // to avoid copies, accounting for each shared allocation only once.
+    size_t acl_globs_heap_bytes_ = 0;
   };
 
   // PUB-SUB messaging related data.
   struct SubscribeInfo {
     bool IsEmpty() const {
-      return channels.empty() && patterns.empty();
+      return channels_.empty() && patterns_.empty();
     }
 
     unsigned SubscriptionCount() const {
-      return channels.size() + patterns.size();
+      return channels_.size() + patterns_.size();
     }
+
+    const auto& Channels() const {
+      return channels_;
+    }
+
+    const auto& Patterns() const {
+      return patterns_;
+    }
+
+    bool Add(std::string_view channel, bool pattern);
+    bool Remove(std::string_view channel, bool pattern);
 
     size_t UsedMemory() const;
 
+   private:
     // TODO: to provide unique_strings across service. This will allow us to use string_view here.
-    absl::flat_hash_set<std::string> channels;
-    absl::flat_hash_set<std::string> patterns;
+    absl::flat_hash_set<std::string> channels_;
+    absl::flat_hash_set<std::string> patterns_;
+    size_t strings_heap_bytes_ = 0;
   };
 
   struct ReplicationInfo {
@@ -306,9 +341,8 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
 
-  // Applies the ACL identity carried by `cred` (command set, key/channel globs, db constraint)
-  // to this context. Used both when a connection is created and by RESET to restore the default
-  // user's identity. Does not touch `authed_username`, `ns`, or `authenticated`.
+  // Applies the ACL identity carried by `cred` and refreshes its cached memory estimate.
+  // Does not touch `authed_username`, `ns`, or `authenticated`.
   void SetAclCredentials(dfly::acl::UserCredentials cred);
 
   // Per-client introspection about the most recent command executed on this
@@ -369,6 +403,10 @@ class ConnectionContext : public facade::ConnectionContext {
   // Username
   std::string authed_username{"default"};
 
+  // Point-in-time expiration of this connection's JWT auth; max() means never expires.
+  std::chrono::steady_clock::time_point auth_expires_at =
+      std::chrono::steady_clock::time_point::max();
+
   // Each entry in the list is a bitfield representing a specific command family,
   // where each bit corresponds to an individual command within that family.
   // Together, these entries encode the user's full ACL to commands.
@@ -402,6 +440,8 @@ class ConnectionContext : public facade::ConnectionContext {
 
   std::vector<unsigned> ChangeSubscriptions(facade::ParsedArgs channels, bool pattern, bool to_add,
                                             bool to_reply);
+
+  size_t acl_globs_heap_bytes_ = 0;
 };
 
 class CommandContext : public facade::ParsedCommand {

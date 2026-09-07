@@ -59,10 +59,15 @@ class Namespaces {
   Namespace& GetDefaultNamespace() const;  // No locks
   Namespace& GetOrInsert(std::string_view ns) ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Applies to all namespaces and becomes the default for namespaces created later.
+  void SetExpiredEventsRecording(bool enable) ABSL_LOCKS_EXCLUDED(mu_);
+
  private:
   util::fb2::SharedMutex mu_{};
   absl::node_hash_map<std::string, Namespace> namespaces_ ABSL_GUARDED_BY(mu_);
   Namespace* default_namespace_ = nullptr;
+  // Kept apart from the raw flag, which briefly holds unvalidated input during CONFIG SET.
+  bool expired_events_recording_default_ ABSL_GUARDED_BY(mu_) = false;
 };
 
 }  // namespace dfly

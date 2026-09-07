@@ -116,11 +116,10 @@ ABSL_FLAG(strings::MemoryBytesFlag, maxmemory, strings::MemoryBytesFlag{},
 ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
           "If non-zero, overrides the busy polling parameter for shard threads.");
 
-ABSL_FLAG(string, huffman_table, "",
-          "a comma separated map: domain1:code1,domain2:code2,... where "
-          "domain can currently be only KEYS or STRINGS, code is a base64-encoded huffman table"
-          " exported via "
-          "DEBUG COMPRESSION EXPORT. if the flag is empty no huffman compression is applied.");
+// TODO: remove this retired flag after Jan 1, 2027.
+ABSL_RETIRED_FLAG(string, huffman_table, "",
+                  "Deprecated: huffman compression of keys and string values is no longer "
+                  "configurable and the flag is ignored.");
 
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
@@ -487,7 +486,8 @@ void InterpreterReplier::SendSimpleString(string_view str) {
 }
 
 void InterpreterReplier::SendNullArray() {
-  SendSimpleStrArr(ArgSlice{});
+  // A null array converts to false, same as a null string.
+  explr_->OnNil();
   PostItem();
 }
 
@@ -716,46 +716,6 @@ void UpdateSchedulerFlagsOnThread() {
                       GetFlag(FLAGS_scheduler_background_warrant));
 }
 
-void SetHuffmanTable(const std::string& huffman_table) {
-  if (huffman_table.empty())
-    return;
-  vector<string_view> parts = absl::StrSplit(huffman_table, ',');
-  for (const auto& part : parts) {
-    vector<string_view> kv = absl::StrSplit(part, ':');
-    if (kv.size() != 2 || kv[0].empty() || kv[1].empty()) {
-      LOG(ERROR) << "Invalid huffman table entry" << part;
-      continue;
-    }
-    string domain_str = absl::AsciiStrToUpper(kv[0]);
-    CompactObj::HuffmanDomain domain;
-
-    if (domain_str == "KEYS") {
-      domain = CompactObj::HUFF_KEYS;
-    } else if (domain_str == "STRINGS") {
-      domain = CompactObj::HUFF_STRING_VALUES;
-    } else {
-      LOG(ERROR) << "Unknown huffman domain: " << kv[0];
-      continue;
-    }
-
-    string unescaped;
-    if (!absl::Base64Unescape(kv[1], &unescaped)) {
-      LOG(ERROR) << "Failed to decode base64 huffman table for domain " << kv[0] << " with value "
-                 << kv[1];
-      continue;
-    }
-
-    atomic_bool success = true;
-    shard_set->RunBriefInParallel([&](auto* shard) {
-      if (!CompactObj::InitHuffmanThreadLocal(domain, unescaped)) {
-        success = false;
-      }
-    });
-    LOG_IF(ERROR, !success) << "Failed to set huffman table for domain " << kv[0] << " with value "
-                            << kv[1];
-  }
-}
-
 string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
   using namespace CO;
   if (!enabled) {
@@ -957,6 +917,34 @@ string_view McTypeToCmdName(MemcacheParser::CmdType type) {
   }
 }
 
+// Memoizes last command lookup to avoid hashmap access + ascii upper casting
+class CommandCache {
+ public:
+  explicit CommandCache(const CommandRegistry& registry) : registry_(registry) {
+  }
+
+  std::pair<const CommandId*, facade::ParsedArgs> Resolve(const facade::ParsedArgs& args) {
+    std::string_view verb = args.Front();
+    if (last_cid_ && verb == last_verb_)
+      return {last_cid_, args.Tail()};
+
+    auto [cid, tail] = registry_.FindExtended(args);
+
+    // Cache if it was a single verb command
+    last_cid_ = nullptr;
+    if (cid && tail.size() + 1 == args.size()) {
+      last_verb_.assign(verb);
+      last_cid_ = cid;
+    }
+    return {cid, tail};
+  }
+
+ private:
+  const CommandRegistry& registry_;
+  std::string last_verb_;
+  const CommandId* last_cid_ = nullptr;
+};
+
 }  // namespace
 
 Service::Service(ProactorPool* pp)
@@ -1085,29 +1073,27 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
+  config_registry.RegisterMutable("jwt_validate");
 #ifdef WITH_SEARCH
   config_registry.RegisterMutable("MAXSEARCHRESULTS");
   config_registry.RegisterMutable("search_query_string_bytes");
 #endif
 
-  config_registry.RegisterMutable(
-      "notify_keyspace_events", [pool = &pp_](const absl::CommandLineFlag& flag) {
-        auto res = flag.TryGet<std::string>();
-        if (!res.has_value() || (!res->empty() && !absl::EqualsIgnoreCase(*res, "EX"))) {
-          return false;
-        }
+  // dfly_main validates before the pidfile/listeners exist; backstop for other embeddings.
+  if (!ValidateNotifyKeyspaceEventsFlag()) {
+    exit(1);
+  }
 
-        pool->AwaitBrief([&res](unsigned, auto*) {
-          auto* shard = EngineShard::tlocal();
-          if (shard) {
-            auto shard_id = shard->shard_id();
-            auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id);
-            db_slice.SetNotifyKeyspaceEvents(*res);
-          }
-        });
+  config_registry.RegisterMutable("notify_keyspace_events", [](const absl::CommandLineFlag& flag) {
+    // The candidate value is already parsed into the flag at this point.
+    auto res = flag.TryGet<std::string>();
+    if (!res.has_value() || !ValidateNotifyKeyspaceEventsFlag()) {
+      return false;
+    }
 
-        return true;
-      });
+    namespaces->SetExpiredEventsRecording(!res->empty());
+    return true;
+  });
 
   config_registry.RegisterMutable("aclfile");
   config_registry.RegisterSetter<uint32_t>("acllog_max_len", [](uint32_t val) {
@@ -1153,12 +1139,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
       [&](uint32_t index, ProactorBase* pb) { sharding::InitThreadLocals(shard_set->size()); });
 
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {
+    facade::Connection::InitThreadLocal();
     facade::Connection::UpdateFromFlags();
     UpdateFromFlagsOnThread();
     UpdateSchedulerFlagsOnThread();
   });
-  SetHuffmanTable(GetFlag(FLAGS_huffman_table));
-
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
   server_family_.Init(acceptor, std::move(listeners));
@@ -1406,6 +1391,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
     }
   }
 
+  // JWT-derived auth carries its own expiration contract (see acl::JwtValidator): once
+  // it lapses, we must force a reauth.
+  if (dfly_cntx.authenticated &&
+      dfly_cntx.auth_expires_at != std::chrono::steady_clock::time_point::max() &&
+      dfly_cntx.auth_expires_at <= std::chrono::steady_clock::now()) {
+    if (cmd_name != "AUTH" && !cid.IsQuit() && !cid.IsReset() && cmd_name != "HELLO") {
+      return ErrorReply{"-NOAUTH JWT token expired, please re-authenticate.",
+                        facade::kNoAuthErrType};
+    }
+  }
+
   // only reset and quit are allow if this connection is used for monitoring.
   // In Valkey monitor connections are marked as replica connections, so they get this unrelated
   // error message.
@@ -1462,12 +1458,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
-                                        facade::AsyncPreference async_pref) {
+DispatchResult Service::DispatchCommand(
+    facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd, facade::AsyncPreference async_pref,
+    absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) {
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
   const CommandId* cid = nullptr;
   ParsedArgs args_no_cmd;
+  auto invoke_pre_dispatch = [&] {
+    if (pre_dispatch_cb)
+      (*pre_dispatch_cb)(parsed_cmd);
+  };
 
   if (parsed_cmd->mc_command()) {
     auto mc_res = HandleMemcacheCommand(parsed_cmd, async_pref);
@@ -1482,6 +1483,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   }
 
   if (cid == nullptr) {
+    invoke_pre_dispatch();
     if (async_pref != AsyncPreference::ONLY_SYNC) {
       parsed_cmd->SetDeferredReply();
     }
@@ -1506,6 +1508,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
         parsed_cmd->SetDeferredReply();
       break;
   };
+
+  invoke_pre_dispatch();
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
@@ -1728,8 +1732,9 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
   return res;
 }
 
-uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
-                                        facade::ConnectionContext* cntx) {
+uint32_t Service::DispatchSquashedBatch(
+    facade::ParsedCommand* first, unsigned count, facade::ConnectionContext* cntx,
+    absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) {
   auto* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
 
@@ -1785,12 +1790,15 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
     }
   };
 
+  // Skip FindExtended for repeated verbs (the common case in pipelines).
+  CommandCache cmd_cache{registry_};
+
   auto* cmd = first;
   for (unsigned i = 0; i < count && cmd; i++) {
     auto* cmd_cntx = static_cast<CommandContext*>(cmd);
 
     ParsedArgs args{*cmd_cntx};
-    const auto [cid, tail_args] = registry_.FindExtended(args);
+    const auto [cid, tail_args] = cmd_cache.Resolve(args);
 
     // Stop the batch at the first command that can't join it; the connection's regular dispatch
     // path then handles exceptions (and the rest of the pipeline) with the real reply builder,
@@ -1816,6 +1824,8 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
         cid->IsSubscribeFamily())
       break;
 
+    if (pre_dispatch_cb)
+      (*pre_dispatch_cb)(cmd);
     if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
       CapturingReplyBuilder crb{ReplyMode::FULL, rb->GetRespVersion()};
       crb.SendError(std::move(*err));
@@ -1939,7 +1949,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   MultiCleanup(cntx);
 
   if (conn_state.subscribe_info) {
-    if (!conn_state.subscribe_info->channels.empty())
+    if (!conn_state.subscribe_info->Channels().empty())
       cntx->UnsubscribeAll(false, nullptr);
     if (conn_state.subscribe_info)
       cntx->PUnsubscribeAll(false, nullptr);
@@ -1965,6 +1975,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   cntx->authed_username = "default";
   cntx->ns = &namespaces->GetOrInsert("");
   cntx->authenticated = false;
+  cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
 
   rb->SendSimpleString("RESET");
 }
@@ -2005,7 +2016,7 @@ void Service::Watch(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
   for (string_view key : parser.UnparsedArgs()) {
-    exec_info.watched_keys.emplace_back(cntx->db_index(), key);
+    exec_info.AddWatchedKey(cntx->db_index(), key);
   }
 
   return cmd_cntx->rb()->SendOk();
@@ -2143,7 +2154,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       auto saved_tail = cmd_cntx->tail_args();
 
       auto* prev = cmd_cntx->SwapReplier(&replier);
-      DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
+      DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
       cmd_cntx->SwapReplier(prev);
 
       cmd_cntx->SetTailArgs(saved_tail);
@@ -2203,21 +2214,26 @@ void Service::CallSHA(const facade::ParsedArgs& args, string_view sha, Interpret
   ServerState::tlocal()->RecordCallLatency(sha, (end - start) / 1000);
 }
 
-void LoadScript(string_view sha, ScriptMgr* script_mgr, Interpreter* interpreter) {
+// Returns false if the script body is unknown to the script manager and can not be run.
+[[nodiscard]] bool LoadScript(string_view sha, ScriptMgr* script_mgr, Interpreter* interpreter) {
   if (interpreter->Exists(sha))
-    return;
+    return true;
 
   auto script_data = script_mgr->Find(sha);
   if (!script_data) {
-    LOG(DFATAL) << "Script " << sha << " not found in script mgr";
-    return;
+    // Unreachable: params are cached only for scripts that have a body.
+    LOG_EVERY_T(WARNING, 1) << "Script " << sha << " has cached params but no body";
+    return false;
   }
 
   string err;
   Interpreter::AddResult add_res = interpreter->AddFunction(sha, script_data->body, &err);
   if (add_res != Interpreter::ADD_OK) {
     LOG(DFATAL) << "Error adding " << sha << " to database, err " << err;
+    return false;
   }
+
+  return true;
 }
 
 // Determine multi mode based on script params.
@@ -2290,7 +2306,9 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     return cmd_cntx->SendError(facade::kScriptNotFound);
   }
 
-  LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter);
+  if (!LoadScript(eval_args.sha, server_family_.script_mgr(), interpreter)) {
+    return cmd_cntx->SendError(facade::kScriptNotFound);
+  }
 
   string error;
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
@@ -2300,7 +2318,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
   auto& sinfo = conn_cntx->conn_state.script_info;
-  sinfo = make_unique<ConnectionState::ScriptInfo>();
+  sinfo = make_unique<ConnectionState::ScriptInfo>(*conn_cntx);
   sinfo->lock_tags.reserve(eval_args.num_keys);
   sinfo->read_only = read_only;
   memcpy(sinfo->stats.sha, eval_args.sha.data(), eval_args.sha.size());
@@ -2542,7 +2560,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   }
 
   if (exec_info.watched_dirty.load(memory_order_relaxed)) {
-    return rb->SendNull();
+    return rb->SendNullArray();
   }
 
   auto keys = CollectAllKeys(&exec_info);
@@ -2580,7 +2598,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   if (!exec_info.watched_keys.empty() &&
       !CheckWatchedKeyExpiry(cntx, registry_.Find("EXISTS"), exec_cid_)) {
     cmd_cntx->tx()->UnlockMulti();
-    return rb->SendNull();
+    return rb->SendNullArray();
   }
 
   exec_info.state = ConnectionState::ExecInfo::EXEC_RUNNING;
@@ -2851,15 +2869,20 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendLong(cmd_cnt);
   }
 
-  // INFO [cmd]
+  // INFO [cmd ...]
   if (subcmd == "INFO" && parser.HasNext()) {
-    string cmd = absl::AsciiStrToUpper(parser.Next());
+    vector<string> names;
+    while (parser.HasNext())
+      names.push_back(absl::AsciiStrToUpper(parser.Next()));
 
-    if (const auto* cid = registry_.Find(cmd); cid) {
-      rb->StartArray(1);
-      serialize_command(cmd, *cid);
-    } else {
-      rb->SendNull();
+    // One entry per requested name; an unknown name gets a null entry.
+    rb->StartArray(names.size());
+    for (const string& name : names) {
+      if (const auto* cid = registry_.Find(name); cid) {
+        serialize_command(name, *cid);
+      } else {
+        rb->SendNull();
+      }
     }
 
     return;
@@ -2994,12 +3017,12 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
       << ", repl_session_id: " << conn_state.replication_info.repl_session_id;
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
-    if (!conn_state.subscribe_info->channels.empty()) {
+    if (!conn_state.subscribe_info->Channels().empty()) {
       server_cntx->UnsubscribeAll(false, nullptr);
     }
 
     if (conn_state.subscribe_info) {
-      DCHECK(!conn_state.subscribe_info->patterns.empty());
+      DCHECK(!conn_state.subscribe_info->Patterns().empty());
       server_cntx->PUnsubscribeAll(false, nullptr);
     }
 

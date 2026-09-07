@@ -204,7 +204,10 @@ constexpr auto kTextParamsGrammar =
 
 search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
   search::SchemaField::NumericParams params{};
-  parser->Check("BLOCKSIZE", &params.block_size);
+  // A zero block size divides by zero when the numeric range tree is built.
+  if (parser->Check("BLOCKSIZE"))
+    params.block_size =
+        parser->Next<facade::Positive<size_t>>("BLOCKSIZE must be a positive integer");
   return params;
 }
 
@@ -455,6 +458,10 @@ ParseResult<DocIndex> CreateDocIndex(std::string_view name, CmdArgParser* parser
     if (!parse_result.value()) {
       break;
     }
+  }
+
+  if (!parser->HasError() && index.schema.fields.empty()) {
+    return CreateSyntaxError("Missing required SCHEMA clause with at least one field"sv);
   }
 
   return index;
@@ -2840,7 +2847,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (num_notfound > 0u)
-    return rb->SendError(IndexNotFoundMsg(idx_name));
+    return rb->SendError(absl::StrCat(idx_name, ": no such index"));
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());

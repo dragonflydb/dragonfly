@@ -202,7 +202,7 @@ class Decoded {
       : content_(stored.content), len_(stored.header.len), encoded_(stored.header.encoded) {
     assert(!encoded_ || (len_ >= ASCIIStr::kMinLen && len_ <= ASCIIStr::kMaxLen));
     if (encoded_) {
-      detail::ascii_unpack(reinterpret_cast<const uint8_t*>(content_), len_, decoded_);
+      detail::ascii_unpack_fast(reinterpret_cast<const uint8_t*>(content_), len_, decoded_);
       content_ = nullptr;
     }
   }

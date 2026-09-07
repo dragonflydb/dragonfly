@@ -55,6 +55,10 @@ bool ValidateServerTlsFlags();
 // separators, extension vs snapshot format). Returns false on an invalid configuration.
 bool ValidateSnapshotFilenameFlags();
 
+// Validates --notify_keyspace_events (only the Ex class is supported). Returns false and logs
+// on an invalid value.
+bool ValidateNotifyKeyspaceEventsFlag();
+
 class CommandContext;
 class CommandRegistry;
 class DflyCmd;
@@ -190,6 +194,9 @@ class ServerFamily {
   SaveInfoData GetLastSaveInfo() const;
 
   void FlushAll(Namespace* ns);
+
+  // Returns an error if the snapshot at `path` cannot be loaded (empty/bad name, missing files).
+  GenericError CheckSnapshotLoadable(const std::string& path);
 
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.

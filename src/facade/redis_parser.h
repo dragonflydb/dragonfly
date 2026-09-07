@@ -34,7 +34,10 @@ class RedisParser {
 
   explicit RedisParser(Mode mode = Mode::SERVER, uint32_t max_arr_len = UINT32_MAX,
                        uint64_t max_bulk_len = UINT64_MAX)
-      : server_mode_(mode == Mode::SERVER), max_arr_len_(max_arr_len), max_bulk_len_(max_bulk_len) {
+      : server_mode_(mode == Mode::SERVER),
+        max_arr_len_(max_arr_len),
+        // bulk_len_ is uint32_t; clamp so an accepted length can't truncate.
+        max_bulk_len_(max_bulk_len > UINT32_MAX ? UINT32_MAX : max_bulk_len) {
   }
 
   /**
@@ -64,8 +67,6 @@ class RedisParser {
   const std::vector<std::unique_ptr<RespVec>>& stash() const {
     return stash_;
   }
-
-  size_t UsedMemory() const;
 
  private:
   using ResultConsumed = std::pair<Result, uint32_t>;

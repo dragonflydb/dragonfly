@@ -474,7 +474,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   CommandContext cmd_cntx;
   cmd_cntx.Init(conn_wrapper->builder(), context);
   cmd_cntx.Assign(args.begin(), args.end(), args.size());
-  service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC);
+  service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
 
   DCHECK(context->transaction == nullptr);
 
@@ -504,7 +504,7 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
     if (i + 1 < cmds.size())
       cmd_cntxs[i].next = &cmd_cntxs[i + 1];
   }
-  service_->DispatchSquashedBatch(cmd_cntxs.data(), cmds.size(), context);
+  service_->DispatchSquashedBatch(cmd_cntxs.data(), cmds.size(), context, nullptr);
 
   // DispatchSquashedBatch defers replies into the parsed commands; flush them in order.
   for (auto& cmd_cntx : cmd_cntxs) {
@@ -541,7 +541,7 @@ auto BaseFamilyTest::RunMC(MP::CmdType cmd_type, string_view key, MCArgs args) -
 
   DCHECK(context->transaction == nullptr);
 
-  service_->DispatchCommandSimple(&cmd_cntx, AsyncPreference::ONLY_SYNC);
+  service_->DispatchCommandSimple(&cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
 
   DCHECK(context->transaction == nullptr);
 
@@ -577,7 +577,7 @@ auto BaseFamilyTest::GetMC(MP::CmdType cmd_type, std::initializer_list<std::stri
   }
 
   cmd_cntx.Assign(src, list.end(), list.end() - src);
-  service_->DispatchCommandSimple(&cmd_cntx, AsyncPreference::ONLY_SYNC);
+  service_->DispatchCommandSimple(&cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
 
   return conn->SplitLines();
 }
@@ -744,6 +744,17 @@ auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestCon
     it->second->ClearSink();
   }
   return it->second.get();
+}
+
+TestConnection* BaseFamilyTest::GetConnection(string_view conn_id) {
+  DCHECK(ProactorBase::IsProactorThread());
+  unique_lock lk(mu_);
+  auto it = connections_.find(conn_id);
+  if (it == connections_.end())
+    return nullptr;
+  auto* conn = it->second->conn();
+  DCHECK_EQ(conn->socket()->proactor(), ProactorBase::me());
+  return conn;
 }
 
 Transaction* BaseFamilyTest::GetTransaction(string_view conn_id) {

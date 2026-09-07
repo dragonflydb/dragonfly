@@ -39,12 +39,10 @@ bool AllocationTracker::Add(const TrackingInfo& info) {
 bool AllocationTracker::Remove(size_t lower_bound, size_t upper_bound) {
   size_t before_size = tracking_.size();
 
-  tracking_.erase(std::remove_if(tracking_.begin(), tracking_.end(),
-                                 [&](const TrackingInfo& info) {
-                                   return info.lower_bound == lower_bound &&
-                                          info.upper_bound == upper_bound;
-                                 }),
-                  tracking_.end());
+  const auto removed = std::ranges::remove_if(tracking_, [&](const TrackingInfo& info) {
+    return info.lower_bound == lower_bound && info.upper_bound == upper_bound;
+  });
+  tracking_.erase(removed.begin(), removed.end());
 
   UpdateAbsSizes();
 
@@ -53,6 +51,7 @@ bool AllocationTracker::Remove(size_t lower_bound, size_t upper_bound) {
 
 void AllocationTracker::Clear() {
   tracking_.clear();
+  UpdateAbsSizes();
 }
 
 absl::Span<const AllocationTracker::TrackingInfo> AllocationTracker::GetRanges() const {
@@ -60,7 +59,7 @@ absl::Span<const AllocationTracker::TrackingInfo> AllocationTracker::GetRanges()
 }
 
 void AllocationTracker::ProcessNew(void* ptr, size_t size) {
-  if (size < abs_min_size_ || size > abs_max_size_) {
+  if (tracking_.empty() || size < abs_min_size_ || size > abs_max_size_) {
     return;
   }
 
@@ -113,8 +112,15 @@ void AllocationTracker::ProcessDelete(void* ptr) {
 }
 
 void AllocationTracker::UpdateAbsSizes() {
-  abs_min_size_ = 0;
-  abs_max_size_ = 0;
+  if (tracking_.empty()) {
+    abs_min_size_ = 0;
+    abs_max_size_ = 0;
+    return;
+  }
+
+  abs_min_size_ = tracking_.front().lower_bound;
+  abs_max_size_ = tracking_.front().upper_bound;
+
   for (const auto& tracker : tracking_) {
     abs_min_size_ = std::min(abs_min_size_, tracker.lower_bound);
     abs_max_size_ = std::max(abs_max_size_, tracker.upper_bound);

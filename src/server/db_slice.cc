@@ -43,7 +43,7 @@ ABSL_FLAG(uint32_t, max_segment_to_consider, 4,
           "The maximum number of dashtable segments to scan in each eviction "
           "when heartbeat based eviction is triggered under memory pressure.");
 
-ABSL_FLAG(double, table_growth_margin, 0.4,
+ABSL_FLAG(double, table_growth_margin, 0.15,
           "Prevents table from growing if number of free slots x average object size x this ratio "
           "is larger than memory budget.");
 
@@ -321,6 +321,10 @@ int32_t AsyncDeleter::IdleCb() {
   if (head_ == nullptr)
     return -1;  // unregister itself.
 
+  if (EngineShard* shard = EngineShard::tlocal(); shard) {
+    shard->stats().async_delete_task_invocation_total++;
+  }
+
   auto* current = head_;
   DVLOG(2) << "IdleCb " << current->cursor;
   if (current->step(current)) {
@@ -375,18 +379,25 @@ template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerIn
 namespace {
 
 void UpdateSlotStat(string_view key, int64_t delta, DbTable* db, uint64_t SlotStats::*stat,
-                    string_view name) {
+                    string_view name, std::optional<unsigned> obj_type = std::nullopt) {
   if (delta == 0 || !db->slots_stats)
     return;
 
   const SlotId sid = KeySlot(key);
   uint64_t& value = db->slots_stats[sid].*stat;
-  if (delta < 0 && value < uint64_t(-delta)) {
+  if (delta < 0 && value < static_cast<uint64_t>(-delta)) {
     // Legacy glog used in release builds does not support LOG_EVERY_T(DFATAL, ...).
-    LOG_EVERY_T(ERROR, 1) << "Encountered underflow of per-slot " << name << ": " << value << " + "
-                          << delta << ", slot: " << sid;
+    if (obj_type) {
+      LOG_EVERY_T(ERROR, 1) << "Encountered underflow of per-slot " << name << ": " << value
+                            << " + " << delta << ", slot: " << sid
+                            << ", object type: " << ObjTypeToString(*obj_type) << " (" << *obj_type
+                            << ")";
+    } else {
+      LOG_EVERY_T(ERROR, 1) << "Encountered underflow of per-slot " << name << ": " << value
+                            << " + " << delta << ", slot: " << sid;
+    }
     DCHECK(false);
-    delta = -int64_t(value);
+    delta = -static_cast<int64_t>(value);
   }
   value += delta;
 }
@@ -399,7 +410,7 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable*
     return;
 
   db->stats.AddTypeMemoryUsage(type, delta);
-  UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage");
+  UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage", type);
 }
 
 void AccountSlotTieredBytes(string_view key, int64_t delta, DbTable* db) {
@@ -467,12 +478,6 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner, Namespace*
   CHECK(ns_ != nullptr);
   db_arr_.emplace_back();
   CreateDb(0);
-  std::string keyspace_events = GetFlag(FLAGS_notify_keyspace_events);
-  if (!keyspace_events.empty() && keyspace_events != "Ex") {
-    LOG(ERROR) << "Only Ex is currently supported";
-    exit(0);
-  }
-  expired_keys_events_recording_ = !keyspace_events.empty();
   journal_omit_redundant_writes_ = absl::GetFlag(FLAGS_journal_omit_redundant_writes);
 }
 
@@ -973,6 +978,14 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
     cursor = next;
     ThisFiber::Yield();
+
+    // Del above only marks the watchers of a deleted stream as awakened; normally the deleting
+    // transaction dispatches them when it concludes. This fiber has no such transaction, so
+    // dispatch here - between bucket traversals, where preempting in a readiness check is safe.
+    if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
+        bc && owner_->GetContTx() == nullptr) {
+      bc->NotifyPending();
+    }
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
@@ -1264,29 +1277,42 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 
   int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
-  bool satisfied = params.expire_options == ExpireFlags::EXPIRE_ALWAYS;
-
-  if (prime_it->first.HasExpire()) {
+  const bool has_expire = prime_it->first.HasExpire();
+  if (has_expire)
     current_cmp = prime_it->first.GetExpireTime();
-    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_XX);
-  } else {
-    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_NX);
+
+  // Every given flag must hold. Exception: NX with GT/LT (deliberate extension) sets the
+  // expiry when there is none, otherwise GT/LT alone decides.
+  int32_t opts = params.expire_options;
+  if ((opts & ExpireFlags::EXPIRE_NX) &&
+      (opts & (ExpireFlags::EXPIRE_GT | ExpireFlags::EXPIRE_LT))) {
+    opts = has_expire ? opts & ~ExpireFlags::EXPIRE_NX : int32_t{ExpireFlags::EXPIRE_ALWAYS};
+  }
+  if (((opts & ExpireFlags::EXPIRE_XX) && !has_expire) ||
+      ((opts & ExpireFlags::EXPIRE_NX) && has_expire) ||
+      ((opts & ExpireFlags::EXPIRE_LT) && !(abs_msec < current_cmp)) ||
+      ((opts & ExpireFlags::EXPIRE_GT) && !(abs_msec > current_cmp))) {
+    return OpStatus::SKIPPED;
   }
 
-  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_LT) && (abs_msec < current_cmp);
-  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_GT) && (abs_msec > current_cmp);
-
-  if (!satisfied)
-    return OpStatus::SKIPPED;
-
   // If we update and the new value is already expired, delete the key
+  // Already-expired new value: delete; the caller emits the expired event after journaling.
   if (rel_msec <= 0) {
     Del(cntx, prime_it);
+    ++events_.expired_keys;
+    db_arr_[cntx.db_index]->stats.events.expired_keys++;
     return -1;
   }
 
   AddExpire(cntx.db_index, prime_it, abs_msec);
   return abs_msec;
+}
+
+void DbSlice::SendExpiredKeyEvent(const Context& cntx, std::string_view key) const {
+  if (!expired_keys_events_recording_)
+    return;
+  channel_store->SendMessages(absl::StrCat("__keyevent@", cntx.db_index, "__:expired"),
+                              absl::Span<const std::string_view>{&key, 1}, false);
 }
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx,
@@ -1405,6 +1431,13 @@ void DbSlice::PreUpdateBlocking(DbIndex db_ind, const Iterator& it) {
 }
 
 void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
+  // A blocked reader may watch this key expecting a different type, e.g. XREADGROUP when the
+  // stream is overwritten by BITOP/RENAME/SUNIONSTORE. Let the readiness check re-evaluate it.
+  if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
+      bc && bc->HasBlockedTransactions()) {
+    bc->Awaken(db_ind, key);
+  }
+
   auto& db = *db_arr_[db_ind];
   auto& watched_keys = db.watched_keys;
   if (!watched_keys.empty()) {
@@ -1467,13 +1500,8 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
     }
   }
 
-  auto obj_type = it->second.ObjType();
-  if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
-    doc_del_cb_(key, cntx, it->second);
-  }
-
-  const_cast<DbSlice*>(this)->PerformDeletionAtomic(Iterator(it, StringOrView::FromView(key)),
-                                                    db.get());
+  // Route through Del so that expiry runs the same per-type hooks as an explicit DEL.
+  const_cast<DbSlice*>(this)->Del(cntx, Iterator(it, StringOrView::FromView(key)), db.get());
 
   ++events_.expired_keys;
   db->stats.events.expired_keys++;
@@ -1589,32 +1617,39 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     checked++;
 
     string_view key = it->first.GetSlice(&stash);
-    if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key))
-      return;
 
     int64_t ttl = it->first.GetExpireTime() - cntx.time_now_ms;
-    if (ttl <= 0) {
-      result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
-      ExpireIfNeeded(cntx, it, &result.key_events);
-      ++result.deleted;
-    }
-  };
+    if (ttl > 0)
+      return;
 
-  unsigned i = 0;
+    if (!CheckLock(IntentLock::EXCLUSIVE, cntx.db_index, key)) {
+      // A client blocked on this key holds the lock itself, so we can never expire it here.
+      // Wake it instead: its readiness check lazily expires the key.
+      if (auto* bc = ns_->GetBlockingController(owner_->shard_id()); bc)
+        bc->Awaken(cntx.db_index, key);
+      return;
+    }
+
+    result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
+    ExpireIfNeeded(cntx, it, &result.key_events);
+    ++result.deleted;
+  };
 
   auto quota_remains = [] {
     // Break out of traversal if we spent more than 1ms
     return base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) < 1000;
   };
 
-  for (; i < count / 3 && quota_remains(); ++i) {
-    db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
+  constexpr unsigned kStep = 8;
+
+  while (result.traversed < count / 3 && quota_remains()) {
+    db.expire_cursor = db.prime.TraverseBySegmentOrder(db.expire_cursor, cb, kStep);
   }
 
   // Continue traversing if we had a strong deletion rate among checked TTL keys.
   if (result.deleted * 4 > checked) {
-    for (; i < count && quota_remains(); ++i) {
-      db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
+    while (result.traversed < count && quota_remains()) {
+      db.expire_cursor = db.prime.TraverseBySegmentOrder(db.expire_cursor, cb, kStep);
     }
   }
 
@@ -1819,10 +1854,6 @@ void DbSlice::ResetEvents() {
   }
 }
 
-void DbSlice::SetNotifyKeyspaceEvents(std::string_view notify_keyspace_events) {
-  expired_keys_events_recording_ = !notify_keyspace_events.empty();
-}
-
 void DbSlice::QueueInvalidationTrackingMessageAtomic(std::string_view key) {
   FiberAtomicGuard guard;
   auto it = client_tracking_map_.find(key);
@@ -1978,6 +2009,26 @@ unique_ptr<base::Histogram> DbSlice::StopSampleValues(DbIndex db_ind) {
   return unique_ptr<base::Histogram>{exchange(db.sample_values_hist, nullptr)};
 }
 
+void DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
+  if (!IsDbValid(db_ind))
+    return;
+
+  DbTable* db_table = GetDBTable(db_ind);
+  PrimeTable& pt = db_table->prime;
+
+  detail::DashCursor cursor = db_table->segment_defrag_cursor;
+  do {
+    // only relocate one segment at a time, must not yield, if it yields, then new bucket iterators
+    // might be created, and then we might relocate the segment and break their held pointers
+    FiberAtomicGuard g;
+    const auto [next, segment] = pt.VisitSegment(cursor);
+    cursor = next;
+    if (segment && page_usage->IsPageForObjectUnderUtilized(segment->second))
+      pt.TryRelocateSegment(segment->first);
+  } while (cursor && !page_usage->QuotaDepleted());
+  db_table->segment_defrag_cursor = cursor;
+}
+
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async) {
   FiberAtomicGuard guard;
   size_t table_before = table->table_memory();
@@ -2107,6 +2158,11 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
 // 4. the snapshot did not reach the bucket yet
 bool DbSlice::IsOmittableWrite(const Context& cntx, const ChangeReq& req) {
   if (!journal_omit_redundant_writes_)
+    return false;
+
+  // Stash entries can be moved backwards relative to the cursor by TryMoveFromStash,
+  // breaking our reachability assumption. We must serialize now
+  if (req.ContainsStashBucket())
     return false;
 
   bool omit_update = false;

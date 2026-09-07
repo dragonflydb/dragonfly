@@ -185,7 +185,11 @@ void ScriptMgr::ConfigCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder
       return builder->SendError("Invalid config format: " + err.Format());
   }
 
-  UpdateScriptCaches(key, data);
+  // The per-thread params cache doubles as the EVALSHA existence check, so publish only scripts
+  // that are actually loaded. Flags of a not yet loaded script stay in db_ until Insert() runs.
+  if (data.body) {
+    UpdateScriptCaches(key, data);
+  }
 
   // Schedule empty callback inorder to journal command via transaction framework.
   tx->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
@@ -368,7 +372,7 @@ void ScriptMgr::OnScriptError(std::string_view sha, std::string_view error) {
     size_t pos = error.rfind(kUndeclaredKeyErr);
     lock_guard lk{mu_};
     auto it = db_.find(sha);
-    if (it == db_.end()) {
+    if (it == db_.end() || !it->second.body) {
       return;
     }
 
@@ -396,8 +400,10 @@ vector<pair<string, ScriptMgr::ScriptData>> ScriptMgr::GetAll() const {
   lock_guard lk{mu_};
   res.reserve(db_.size());
   for (const auto& [sha, data] : db_) {
-    string body = data.body ? string{data.body.get()} : string{};
-    res.emplace_back(string{sha.data(), sha.size()}, ScriptData{data, std::move(body)});
+    // Body-less entries only carry flags for a script that was never loaded.
+    if (!data.body)
+      continue;
+    res.emplace_back(string{sha.data(), sha.size()}, ScriptData{data, string{data.body.get()}});
   }
 
   return res;

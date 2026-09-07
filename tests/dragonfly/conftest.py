@@ -148,8 +148,10 @@ _minio_data_dir = None
 def pytest_configure(config):
     global _minio_proc, _minio_data_dir
 
-    # clean everything
-    if os.path.exists(FAILED_PATH):
+    # Clean everything - unless  explicitly requested not to
+    if os.environ.get("DELETE_FAILED_LOGS", "true").lower() == "true" and os.path.exists(
+        FAILED_PATH
+    ):
         shutil.rmtree(FAILED_PATH)
     if os.path.exists(BASE_LOG_DIR):
         shutil.rmtree(BASE_LOG_DIR)
@@ -356,6 +358,60 @@ def df_server(df_factory: DflyInstanceFactory) -> typing.Generator[DflyInstance,
 
     if instance["cluster_mode"]:
         print("Cluster clients left: ", len(clients_left))
+
+
+class RedisClusterNode:
+    def __init__(self, port):
+        self.port = port
+        self.proc = None
+
+    def start(self):
+        self.proc = subprocess.Popen(
+            [
+                "redis-server-6.2.11",
+                f"--port {self.port}",
+                "--save ''",
+                "--cluster-enabled yes",
+                f"--cluster-config-file nodes_{self.port}.conf",
+                "--cluster-node-timeout 5000",
+                "--appendonly no",
+                "--protected-mode no",
+                "--repl-diskless-sync yes",
+                "--repl-diskless-sync-delay 0",
+            ]
+        )
+        logging.debug(self.proc.args)
+
+    def stop(self):
+        self.proc.terminate()
+        try:
+            self.proc.wait(timeout=10)
+        except Exception:
+            pass
+
+
+@pytest.fixture(scope="function")
+def redis_cluster(port_picker):
+    # create redis client with 3 node with default slot configuration
+    # node1 slots 0-5460
+    # node2 slots 5461-10922
+    # node3 slots 10923-16383
+    ports = [port_picker.get_available_port() for i in range(3)]
+    nodes = [RedisClusterNode(port) for port in ports]
+    try:
+        for node in nodes:
+            node.start()
+            time.sleep(1)
+    except FileNotFoundError:
+        skip_if_not_in_github()
+        raise
+
+    create_command = f'echo "yes" |redis-cli --cluster create {" ".join([f"127.0.0.1:{port}" for port in ports])}'
+    subprocess.run(create_command, shell=True)
+    time.sleep(4)
+    yield nodes
+    for node in nodes:
+        node.stop()
 
 
 @pytest.fixture(scope="function")

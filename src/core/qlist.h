@@ -179,6 +179,7 @@ class QList {
     void (*offload)(QList* ql, Node* node) = nullptr;
     void (*load)(QList* ql, Node* node) = nullptr;
     void (*cleanup)(QList* ql, Node* node) = nullptr;
+    std::string key;
   };
 
   /**
@@ -340,6 +341,19 @@ class QList {
 
   // Updates the db index associated with this list.
   void SetDbIndex(DbIndex db_id);
+
+  void SetKey(std::string_view key) {
+    if (tiering_enabled_) {
+      tiering_params_->key = key;
+    }
+  }
+
+  std::string_view GetKey() const {
+    if (tiering_enabled_) {
+      return std::string_view(tiering_params_->key);
+    }
+    return {};
+  }
 
   struct Stats {
     uint64_t compression_attempts = 0;

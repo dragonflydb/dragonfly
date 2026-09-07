@@ -124,6 +124,17 @@ class BackedArguments {
     dest[arg.size()] = '\0';
   }
 
+  // Extends the last argument with a chunk, keeping the trailing '\0'.
+  void ExtendLastArg(const void* data, size_t len) {
+    assert(!offsets_.empty() && !storage_.empty());
+    size_t old_size = storage_.size();
+    if (old_size + len > storage_.capacity())
+      storage_.reserve(std::max(old_size + len, storage_.capacity() * 2));
+    storage_.resize(old_size + len);
+    memcpy(storage_.data() + old_size - 1, data, len);
+    storage_[old_size + len - 1] = '\0';
+  }
+
   void PopArg() {
     uint32_t last_offs = offsets_.back();
     offsets_.pop_back();

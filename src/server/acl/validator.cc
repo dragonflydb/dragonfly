@@ -32,6 +32,36 @@ bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId&
   return (acl_commands[index] & command_mask) != 0;
 }
 
+struct KeyPermissions {
+  bool read = false;
+  bool write = false;
+};
+
+// Per-key ACL requirements for commands that read one key and write another.
+KeyPermissions RequiredKeyPermissions(const CommandId& id, unsigned key_offset) {
+  if (id.name() == "GEOSEARCHSTORE") {
+    // dest key (offset 0) is written; source key (offset 1) is read-only.
+    if (key_offset == 0)
+      return {false, true};
+    if (key_offset == 1)
+      return {true, false};
+  }
+
+  return {id.IsReadOnly(), id.IsJournaled()};
+}
+
+bool KeyGlobAllowed(const AclKeys& keys, std::string_view target, KeyPermissions perms) {
+  for (auto& [elem, op] : keys.key_globs) {
+    if (!Matches(elem, target))
+      continue;
+    if (perms.read && (op == KeyOp::READ || op == KeyOp::READ_WRITE))
+      return true;
+    if (perms.write && (op == KeyOp::WRITE || op == KeyOp::READ_WRITE))
+      return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 // Exported (not anonymous-namespace-local) so callers without a live connection, like ACL DRYRUN's
@@ -92,12 +122,17 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
     return false;
   }
 
+  // While a script is running, redis.call() must be checked against the
+  // ACL rules that were in effect when the script started.
+  const auto* sinfo = cntx.conn_state.script_info.get();
+  const std::vector<uint64_t>& acl_commands = sinfo ? sinfo->acl_commands : cntx.acl_commands;
+  const AclPubSub& pub_sub = sinfo ? sinfo->acl_pub_sub : cntx.pub_sub;
+
   std::pair<bool, AclLog::Reason> auth_res;
 
   if (id.IsPubSub()) {
     bool is_pattern = id.IsPatternPubSub();
-    auth_res =
-        IsPubSubCommandAuthorized(is_pattern, cntx.acl_commands, cntx.pub_sub, tail_args, id);
+    auth_res = IsPubSubCommandAuthorized(is_pattern, acl_commands, pub_sub, tail_args, id);
   } else {
     auth_res = IsUserAllowedToInvokeCommandGeneric(cntx, id, tail_args);
   }
@@ -114,42 +149,32 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
 
 [[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
     const ConnectionContext& cntx, const CommandId& id, const facade::ParsedArgs& tail_args) {
+  // See the comment in IsUserAllowedToInvokeCommand: while a script is running, checks are done
+  // against the ACL snapshot taken when the script started, not the connection's live rules.
+  const auto* sinfo = cntx.conn_state.script_info.get();
+  const std::vector<uint64_t>& acl_commands = sinfo ? sinfo->acl_commands : cntx.acl_commands;
+  const AclKeys& keys = sinfo ? sinfo->acl_keys : cntx.keys;
+  const size_t acl_db_idx = sinfo ? sinfo->acl_db_idx : cntx.acl_db_idx;
+
   const size_t max = std::numeric_limits<size_t>::max();
   // Once we support ranges this must change
-  const bool reject_move_command = cntx.acl_db_idx != max && id.name() == "MOVE";
+  const bool reject_move_command = acl_db_idx != max && id.name() == "MOVE";
   const bool reject_trans_command =
-      cntx.acl_db_idx != max && cntx.acl_db_idx != cntx.db_index() && id.IsTransactional();
+      acl_db_idx != max && acl_db_idx != cntx.db_index() && id.IsTransactional();
   if (reject_move_command || reject_trans_command) {
     return {false, AclLog::Reason::AUTH};
   }
   size_t res = 0;
   if (tail_args.size() == 1 && id.name() == "SELECT" && absl::SimpleAtoi(tail_args[0], &res) &&
-      cntx.acl_db_idx != max && cntx.acl_db_idx != res) {
+      acl_db_idx != max && acl_db_idx != res) {
     return {false, AclLog::Reason::AUTH};
   }
-
-  const auto& acl_commands = cntx.acl_commands;
-  const auto& keys = cntx.keys;
   if (!ValidateCommand(acl_commands, id)) {
     return {false, AclLog::Reason::COMMAND};
   }
 
   const bool is_read_command = id.IsReadOnly();
   const bool is_write_command = id.IsJournaled();
-
-  auto iterate_globs = [&](auto target) {
-    for (auto& [elem, op] : keys.key_globs) {
-      if (Matches(elem, target)) {
-        if (is_read_command && (op == KeyOp::READ || op == KeyOp::READ_WRITE)) {
-          return true;
-        }
-        if (is_write_command && (op == KeyOp::WRITE || op == KeyOp::READ_WRITE)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  };
 
   bool keys_allowed = true;
   if (!keys.all_keys && id.first_key_pos() != 0 && (is_read_command || is_write_command)) {
@@ -160,8 +185,14 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
     if (!keys_index)
       return {false, AclLog::Reason::KEY};
 
-    for (std::string_view key : keys_index->Range(tail_args))
-      keys_allowed &= iterate_globs(key);
+    for (unsigned idx : keys_index->Range()) {
+      const unsigned key_offset = idx - keys_index->start;
+      keys_allowed &= KeyGlobAllowed(keys, tail_args[idx], RequiredKeyPermissions(id, key_offset));
+    }
+
+    if (keys_index->bonus.has_value()) {
+      keys_allowed &= KeyGlobAllowed(keys, tail_args[*keys_index->bonus], {false, true});
+    }
   }
 
   return {keys_allowed, AclLog::Reason::KEY};

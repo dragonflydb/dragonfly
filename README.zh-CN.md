@@ -7,11 +7,11 @@
 
 
 
-[![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
+[![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Total pulls](https://img.shields.io/endpoint?url=https%3A%2F%2Fstorage.googleapis.com%2Fstatic.dragonflydb.io%2Frepo-assets%2Fghcr-downloads%2Ftotal.json)](https://github.com/dragonflydb/dragonfly/pkgs/container/dragonfly) [![Monthly pulls](https://img.shields.io/endpoint?url=https%3A%2F%2Fstorage.googleapis.com%2Fstatic.dragonflydb.io%2Frepo-assets%2Fghcr-downloads%2Fmonthly.json)](https://github.com/dragonflydb/dragonfly/pkgs/container/dragonfly) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
 > 在您继续之前，请考虑给我们一个 GitHub 星标 ⭐️。谢谢！
 
-其他语言:  [English](README.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md)
+其他语言:  [English](README.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md) [ภาษาไทย](README.th-TH.md)
 
 [主页](https://dragonflydb.io/) • [快速入门](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start) • [社区 Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly 论坛](https://dragonfly.discourse.group/) • [加入 Dragonfly 社区](https://www.dragonflydb.io/community)
 

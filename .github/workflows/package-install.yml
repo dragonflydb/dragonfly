@@ -15,7 +15,7 @@ jobs:
     container:
       image: ghcr.io/romange/fedora:30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Wait for repo version
         if: github.event_name == 'workflow_run'
         run: python3 tools/packaging/osrepos/scripts/wait_for_repo_version.py
@@ -40,7 +40,7 @@ jobs:
     container:
       image: ghcr.io/romange/ubuntu:noble
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Wait for repo version
         if: github.event_name == 'workflow_run'
         run: |

@@ -628,6 +628,24 @@ TEST_F(RangeTreeTest, DiscreteIntialization) {
   EXPECT_EQ(result.size(), 4u);
 }
 
+TEST_F(BuilderTest, ZeroBlockSizeDoesNotDivideByZero) {
+  RangeTree tree{PMR_NS::get_default_resource(), 0};
+  RangeTree::Builder builder;
+
+  std::vector<RangeTree::Entry> entries;
+  entries.reserve(20);
+  for (size_t i = 0; i < 20; i++)
+    entries.emplace_back(i, double(i));
+  for (auto [id, v] : entries)
+    builder.Add(id, v);
+
+  builder.Populate(&tree, RenewableQuota::Unlimited());
+
+  rng::sort(entries, {}, &RangeTree::Entry::first);
+  auto all_values = tree.Range(-1000, +1000);
+  EXPECT_TRUE(rng::equal(all_values.Take(), entries | std::views::keys));
+}
+
 // Benchmark tree insertion performance with set of discrete values
 static void BM_DiscreteInsertion(benchmark::State& state) {
   RangeTree tree{PMR_NS::get_default_resource()};

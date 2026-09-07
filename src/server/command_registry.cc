@@ -197,6 +197,8 @@ CommandId::~CommandId() {
 CommandId CommandId::Clone(const std::string_view name) const {
   CommandId cloned =
       CommandId{name.data(), opt_mask_, arity_, first_key_, last_key_, acl_categories_};
+  cloned.SetFamily(GetFamily());
+  cloned.SetBitIndex(GetBitIndex());
   cloned.handler_ = handler_;
   cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
   cloned.acl_categories_ = acl_categories_;
@@ -345,9 +347,11 @@ std::pair<const CommandId*, ParsedArgs> CommandRegistry::FindExtended(ParsedArgs
     return {nullptr, {}};
 
   // A workaround for XGROUP HELP that does not fit our static taxonomy of commands.
+  // Consume the HELP token so the tail is empty: _XGROUP_HELP takes no arguments, and keeping
+  // HELP in the tail would let CommandCache memoize _XGROUP_HELP under the "XGROUP" verb.
   if (tail_args.size() == 1 && res->name() == "XGROUP") {
     if (absl::EqualsIgnoreCase(tail_args.Front(), "HELP")) {
-      res = Find("_XGROUP_HELP");
+      return {Find("_XGROUP_HELP"), tail_args.Tail()};
     }
   }
   return {res, tail_args};

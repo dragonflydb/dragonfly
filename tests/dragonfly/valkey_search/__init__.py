@@ -25,11 +25,22 @@ else:
         sys.path.insert(0, current_dir)
 
     # Import the Dragonfly-specific test case classes
-    with open(os.path.join(current_dir, "valkey_search_test_case_dragonfly.py")) as f:
-        exec(f.read())
+    from .valkey_search_test_case_dragonfly import (
+        Node,
+        ReplicationGroup,
+        ReplicationTestCase,
+        ValkeySearchClusterTestCase,
+        ValkeySearchClusterTestCaseDebugMode,
+        ValkeySearchTestCaseBase,
+        ValkeySearchTestCaseCommon,
+        ValkeySearchTestCaseDebugMode,
+        ValkeyServerHandle,
+        ValkeyTestCase,
+    )
 
     # Create a mock module for valkey_search_test_case
     mock_module = types.ModuleType("valkey_search_test_case")
+    mock_module.ValkeySearchTestCaseCommon = ValkeySearchTestCaseCommon
     mock_module.ValkeySearchTestCaseBase = ValkeySearchTestCaseBase
     mock_module.ValkeySearchTestCaseDebugMode = ValkeySearchTestCaseDebugMode
     mock_module.ValkeySearchClusterTestCase = ValkeySearchClusterTestCase

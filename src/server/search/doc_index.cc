@@ -402,8 +402,11 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
   return false;
 }
 
-ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index)
-    : base_{std::move(index)}, key_index_{} {
+ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index, unsigned* hash_index_count)
+    : base_{std::move(index)},
+      hash_index_lifetime_{base_->type == DocIndex::HASH ? hash_index_count : nullptr},
+      key_index_{} {
+  DCHECK(base_->type != DocIndex::HASH || hash_index_count);
 }
 
 ShardDocIndex::~ShardDocIndex() {
@@ -1287,7 +1290,7 @@ ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
 
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
                                 shared_ptr<const DocIndex> index_ptr, bool is_journal) {
-  auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr));
+  auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr), &hash_index_count_);
   auto [it, _] = indices_.emplace(name, std::move(shard_index));
 
   it->second->InitHnswShardIndices();

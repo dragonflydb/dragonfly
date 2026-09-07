@@ -12,3 +12,12 @@ $5
 USAGE
 $5
 mykey
+*4
+$6
+MEMORY
+$5
+USAGE
+$5
+mykey
+$10
+WITHOUTKEY

@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <variant>
@@ -81,6 +82,7 @@ struct ParsedEntry : public EntryBase {
 
 struct JournalItem {
   LSN lsn;
+  uint64_t time_ms = 0;
   std::string data;
 };
 

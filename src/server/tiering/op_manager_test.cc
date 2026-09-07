@@ -72,7 +72,8 @@ struct OpManagerTest : PoolTestBase, OpManager {
     ASSERT_TRUE(inserted);
   }
 
-  bool NotifyFetched(const OwnedEntryId& id, DiskSegment segment, Decoder* decoder) override {
+  bool NotifyFetched(const OwnedEntryId& id, DiskSegment segment, Decoder* decoder,
+                     const ReadOptions& options) override {
     auto* tdecoder = static_cast<TestDecoder*>(decoder);
     fetched_[id] = std::move(tdecoder->value);
     return false;

@@ -30,6 +30,7 @@ COMMANDS = [
     ("replace", "store"),
     ("append",  "store"),
     ("prepend", "store"),
+    # cas dispatch is dead (CLIENT_ERROR) but exercises ParseStore's CAS branch.
     ("cas",     "cas"),
     # Retrieval
     ("get",     "get"),
@@ -40,18 +41,15 @@ COMMANDS = [
     ("delete",  "del"),
     ("incr",    "delta"),
     ("decr",    "delta"),
-    # Utility
-    ("flush_all", "bare"),
+    # Utility. flush_all omitted: maps to restricted FLUSHDB (always SERVER_ERROR).
     ("stats",     "bare"),
     ("version",   "bare"),
     ("quit",      "bare"),
-    # Meta commands
+    # Meta. mn/me omitted: unconditionally rejected by parser/dispatch.
     ("ms",      "meta_store"),
     ("mg",      "meta"),
     ("md",      "meta"),
-    ("ma",      "meta"),
-    ("mn",      "bare"),
-    ("me",      "meta"),
+    ("ma",      "meta_arithm"),
 ]
 # fmt: on
 
@@ -60,7 +58,10 @@ VALUES = [b"abc", b"hello", b"x", b"", b"0", b"12345", b"\x00\xff", b"a" * 100]
 EXPIRY = [b"0", b"10", b"100", b"3600", b"9999999"]
 FLAGS = [b"0", b"1", b"255", b"65535", b"4294967295"]
 DELTAS = [b"1", b"5", b"10", b"100", b"0", b"99999999999"]
-META_FLAGS = [b"T30", b"N10", b"R", b"v", b"h", b"l", b"t", b"c", b"f1", b"q", b"k"]
+# Only flags ParseMeta accepts; anything else is PARSE_ERROR.
+META_FLAGS = [b"T30", b"T0", b"F7", b"v", b"h", b"l", b"t", b"c", b"f", b"q"]
+MS_MODES = [b"MS", b"ME", b"MA", b"MR", b"MP"]  # ms mode flags
+MA_FLAGS = [b"D5", b"D10", b"MI", b"MD", b"T30", b"q", b"v"]  # ma (meta-arithmetic)
 FUZZ_VALUES = [b"\x00", b"\xff" * 4, b"\r\n", b"A" * 256, b"-1", b"NaN"]
 
 
@@ -157,11 +158,19 @@ def _random_command():
     elif cmd_type == "meta_store":
         key = _random_key()
         value = _random_value()
-        meta_flags = b" ".join(random.sample(META_FLAGS, random.randint(0, 3)))
-        extra = (b" " + meta_flags) if meta_flags else b""
+        flags = random.sample(META_FLAGS, random.randint(0, 3))
+        if random.random() < 0.4:
+            flags.append(random.choice(MS_MODES))
+        extra = (b" " + b" ".join(flags)) if flags else b""
         return (
             cmd + b" " + key + b" " + str(len(value)).encode() + extra + b"\r\n" + value + b"\r\n"
         )
+
+    elif cmd_type == "meta_arithm":
+        key = _random_key()
+        flags = random.sample(MA_FLAGS, random.randint(0, 2))
+        extra = (b" " + b" ".join(flags)) if flags else b""
+        return cmd + b" " + key + extra + b"\r\n"
 
     elif cmd_type == "meta":
         key = _random_key()
@@ -173,53 +182,59 @@ def _random_command():
         return cmd + b"\r\n"
 
 
-def _parse_mc_commands(buf):
-    """Best-effort parse of memcache text protocol into list of raw command lines.
-    Returns (commands, success) where commands is a list of bytes."""
+def _parse_mc_commands(buf, strict=False):
+    """Parse memcache text protocol into (commands, success), each command a
+    (line, data_block) pair.
+
+    strict=False is the fuzzing hot path (best-effort). strict=True is the CI
+    gate: a store/ms data block that is missing, truncated, or not CRLF-
+    terminated is a hard failure and the whole buffer must be consumed, matching
+    what the server accepts."""
     commands = []
     data = bytes(buf)
     pos = 0
 
+    STORE = (b"set", b"add", b"replace", b"append", b"prepend", b"cas")
+
     while pos < len(data):
         end = data.find(b"\r\n", pos)
         if end < 0:
+            if strict:
+                return ([], False)
             break
 
         line = data[pos:end]
         pos = end + 2
 
-        # Check if this is a store command that has a data block
         parts = line.split(b" ")
-        if len(parts) >= 5 and parts[0].lower() in (
-            b"set",
-            b"add",
-            b"replace",
-            b"append",
-            b"prepend",
-            b"cas",
-        ):
+        name = parts[0].lower() if parts else b""
+        # Byte-count field: index 4 for classic stores/cas, index 2 for meta-set.
+        nbytes_idx = None
+        if len(parts) >= 5 and name in STORE:
+            nbytes_idx = 4
+        elif len(parts) >= 3 and name == b"ms":
+            nbytes_idx = 2
+
+        if nbytes_idx is not None:
             try:
-                nbytes = int(parts[4])
-                if pos + nbytes + 2 <= len(data):
-                    value = data[pos : pos + nbytes]
-                    pos += nbytes + 2  # skip value + \r\n
-                    commands.append((line, value))
-                    continue
+                nbytes = int(parts[nbytes_idx])
             except (ValueError, IndexError):
-                pass
-        elif len(parts) >= 3 and parts[0].lower() == b"ms":
-            try:
-                nbytes = int(parts[2]) if len(parts) > 2 else int(parts[1])
-                if pos + nbytes + 2 <= len(data):
-                    value = data[pos : pos + nbytes]
-                    pos += nbytes + 2
-                    commands.append((line, value))
-                    continue
-            except (ValueError, IndexError):
-                pass
+                if strict:
+                    return ([], False)
+                commands.append((line, None))
+                continue
+            if pos + nbytes + 2 <= len(data) and data[pos + nbytes : pos + nbytes + 2] == b"\r\n":
+                value = data[pos : pos + nbytes]
+                pos += nbytes + 2
+                commands.append((line, value))
+                continue
+            if strict:
+                return ([], False)
 
         commands.append((line, None))
 
+    if strict:
+        return (commands, len(commands) > 0 and pos == len(data))
     return (commands, len(commands) > 0)
 
 

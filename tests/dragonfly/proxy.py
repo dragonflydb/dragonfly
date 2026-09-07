@@ -12,6 +12,9 @@ class Proxy:
         self.server = None
         self._handler_tasks = set()
         self._serve_task = None
+        self._forwarding = asyncio.Event()
+        self._forwarding.set()
+        self._conn_gates = []
 
     async def handle(self, reader, writer):
         task = asyncio.current_task()
@@ -30,8 +33,14 @@ class Proxy:
             writer.close()
             return
 
+        gate = asyncio.Event()
+        gate.set()
+        self._conn_gates.append(gate)
+
         async def forward(reader, writer):
             while True:
+                await self._forwarding.wait()
+                await gate.wait()
                 data = await reader.read(1024)
                 if not data:
                     break
@@ -47,6 +56,8 @@ class Proxy:
             task2.cancel()
             writer.close()
             remote_writer.close()
+            if gate in self._conn_gates:
+                self._conn_gates.remove(gate)
 
         self.stop_connections.append(cleanup)
 
@@ -84,6 +95,36 @@ class Proxy:
     async def __aexit__(self, exc_type, exc, tb):
         await self.close()
 
+    def pause(self):
+        """
+        Stop forwarding bytes without closing anything. Sockets stay ESTABLISHED on both
+        sides while data stops moving, which is what either a lost network path or a peer
+        that stopped reading looks like to the sender (as opposed to drop_connection, which
+        is an immediate reset).
+        """
+        self._forwarding.clear()
+
+    def pause_one(self, index=0):
+        """
+        Stall a single connection and leave the rest forwarding. With one replication
+        flow per shard, this freezes exactly one flow.
+        """
+        gates = list(self._conn_gates)
+        if not gates:
+            return False
+        gates[index % len(gates)].clear()
+        return True
+
+    def connection_count(self):
+        """Number of currently proxied connections."""
+        return len(self._conn_gates)
+
+    def resume(self):
+        """Undo pause()/pause_one(): resume forwarding on all connections."""
+        self._forwarding.set()
+        for gate in list(self._conn_gates):
+            gate.set()
+
     def drop_connection(self):
         """
         Randomly drop one connection
@@ -94,6 +135,10 @@ class Proxy:
             cb()
 
     async def close(self, task=None):
+        # A Proxy is reused across close()/start_serving() cycles (see test_partial_sync), so
+        # leave it forwarding: a paused proxy would silently stall every future connection.
+        self.resume()
+
         if task is None:
             task = self._serve_task
         if task is self._serve_task:

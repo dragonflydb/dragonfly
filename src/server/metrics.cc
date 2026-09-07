@@ -322,6 +322,16 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   AppendMetricWithoutLabels("proactor_parse_total",
                             "V2 OnRecv parses that enqueued at least one command",
                             conn_stats.proactor_parse, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("shared_buf_overflow_copies_total", "Shared V2 overflow copies",
+                            conn_stats.shared_buf_overflow_copies, MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("shared_buf_borrow_callback_usec_total",
+                            "Shared V2 callback borrow duration",
+                            base::CycleClock::ToUsec(conn_stats.shared_buf_borrow_cycles_callback),
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("shared_buf_borrow_fiber_usec_total", "Shared V2 fiber borrow duration",
+                            base::CycleClock::ToUsec(conn_stats.shared_buf_borrow_cycles_fiber),
+                            MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("net_input_bytes_total", "", conn_stats.io_read_bytes,
                             MetricType::COUNTER, &resp->body());
 
@@ -351,12 +361,10 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     string exp_str, evict_str;
     for (size_t i = 0; i < m.db_stats.size(); ++i) {
       const auto& s = m.db_stats[i];
-      if (s.events.expired_keys > 0)
-        AppendMetricValue("expired_keys_total", s.events.expired_keys, {"db"}, {StrCat("db", i)},
-                          &exp_str);
-      if (s.events.evicted_keys > 0)
-        AppendMetricValue("evicted_keys_total", s.events.evicted_keys, {"db"}, {StrCat("db", i)},
-                          &evict_str);
+      AppendMetricValue("expired_keys_total", s.events.expired_keys, {"db"}, {StrCat("db", i)},
+                        &exp_str);
+      AppendMetricValue("evicted_keys_total", s.events.evicted_keys, {"db"}, {StrCat("db", i)},
+                        &evict_str);
     }
     AppendMetricHeader("expired_keys_total", "", MetricType::COUNTER, &resp->body());
     absl::StrAppend(&resp->body(), exp_str);
@@ -614,9 +622,6 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   AppendMetricValue("defrag_skipped_total", m.shard_stats.defrag_skipped_not_enough_fragmentation,
                     {"reason"}, {"not_enough_fragmentation"}, &resp->body());
 
-  AppendMetricWithoutLabels("huffman_tables_built", "Huffman tables built",
-                            m.shard_stats.huffman_tables_built, MetricType::COUNTER, &resp->body());
-
   AppendMetricHeader("list_reads", "List Reads Patterns", MetricType::COUNTER, &resp->body());
   AppendMetricValue("list_reads", m.qlist_stats.total_node_reads, {"type"}, {"total"},
                     &resp->body());
@@ -664,6 +669,43 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                       &resp->body());
     AppendMetricValue("tiered_events", m.tiered_stats.total_deletes, {"type"}, {"delete"},
                       &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_defrags, {"type"}, {"defrag"},
+                      &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_offloading_stashes, {"type"},
+                      {"offload_stash"}, &resp->body());
+
+    // Buffer allocations for disk I/O
+    AppendMetricHeader("tiered_buf_allocations", "Tiered buffer allocations", MetricType::COUNTER,
+                       &resp->body());
+    AppendMetricValue("tiered_buf_allocations", m.tiered_stats.total_heap_buf_allocs, {"type"},
+                      {"heap"}, &resp->body());
+    AppendMetricValue("tiered_buf_allocations", m.tiered_stats.total_registered_buf_allocs,
+                      {"type"}, {"registered"}, &resp->body());
+
+    // In-flight operations
+    AppendMetricHeader("tiered_pending_ops", "Tiered in-flight operations", MetricType::GAUGE,
+                       &resp->body());
+    AppendMetricValue("tiered_pending_ops", m.tiered_stats.pending_read_cnt, {"type"}, {"read"},
+                      &resp->body());
+    AppendMetricValue("tiered_pending_ops", m.tiered_stats.pending_stash_cnt, {"type"}, {"stash"},
+                      &resp->body());
+
+    // Small bins
+    AppendMetricHeader("tiered_small_bins", "Tiered small bins", MetricType::GAUGE, &resp->body());
+    AppendMetricValue("tiered_small_bins", m.tiered_stats.small_bins_cnt, {"type"}, {"bins"},
+                      &resp->body());
+    AppendMetricValue("tiered_small_bins", m.tiered_stats.small_bins_entries_cnt, {"type"},
+                      {"entries"}, &resp->body());
+    AppendMetricValue("tiered_small_bins", m.tiered_stats.small_bins_entries_bytes, {"type"},
+                      {"entries_bytes"}, &resp->body());
+
+    // Cumulative time spent in background scans
+    AppendMetricHeader("tiered_scan_usec", "Time in microseconds spent in background scans",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("tiered_scan_usec", m.tiered_stats.total_offloading_usec, {"type"},
+                      {"offload"}, &resp->body());
+    AppendMetricValue("tiered_scan_usec", m.tiered_stats.total_defrag_usec, {"type"}, {"defrag"},
+                      &resp->body());
 
     // Hits: ram, cool, missed
     AppendMetricHeader("tiered_hits", "Tiered hits", MetricType::COUNTER, &resp->body());
@@ -678,6 +720,9 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                       {"client throttling"}, &resp->body());
     AppendMetricValue("tiered_overload", m.tiered_stats.total_stash_overflows, {"type"},
                       {"stash overflows"}, &resp->body());
+
+    AppendMetricWithoutLabels("tiered_clients_throttled", "Currently throttled clients",
+                              m.tiered_stats.clients_throttled, MetricType::GAUGE, &resp->body());
 
     AppendMetricHeader("tiered_list_events", "Tiered List Events", MetricType::COUNTER,
                        &resp->body());

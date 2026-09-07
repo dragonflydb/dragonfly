@@ -93,17 +93,10 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
     EXPECT_EQ(key, "k"s + data.substr(segment.offset, segment.length).substr(1));
   }
 
-  // Delete all stashed values, tracking live bytes to know when we've crossed the
-  // "more than half of this bin's live content was deleted" fragmentation threshold.
-  size_t orig_bytes = 0;
-  for (auto& [dbid, key, segment] : segments)
-    orig_bytes += segment.length;
-
-  size_t deleted_bytes = 0;
+  // Delete all stashed values
   while (!segments.empty()) {
     auto segment = std::get<2>(segments.back());
     segments.pop_back();
-    deleted_bytes += segment.length;
     auto bin = bins_.Delete(segment);
 
     EXPECT_EQ(bin.segment.offset, 0u);
@@ -111,10 +104,8 @@ TEST_F(SmallBinsTest, PartialStashDelete) {
 
     if (segments.empty()) {
       EXPECT_TRUE(bin.empty);
-    } else if (deleted_bytes * 2 > orig_bytes) {
-      EXPECT_TRUE(bin.fragmented);  // more than half of the bin's live bytes were deleted
     } else {
-      EXPECT_FALSE(bin.fragmented);
+      EXPECT_TRUE(bin.fragmented);  // half of the values were deleted
     }
   }
 }
@@ -132,6 +123,40 @@ TEST_F(SmallBinsTest, UpdateStatsAfterDelete) {
     ASSERT_FALSE(res);
   }
   EXPECT_EQ(0u, bins_.GetStats().current_bin_bytes);
+}
+
+TEST_F(SmallBinsTest, StashedEntriesBytes) {
+  // Fill single bin.
+  std::optional<SmallBins::FilledBin> bin;
+  unsigned i = 0;
+  for (; !bin; i++)
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+  auto [id, data] = Serialize(*bin);
+
+  // Delete all even values from the pending bin (mirrors PartialStashDelete which drains cleanly).
+  for (unsigned j = 0; j <= i; j += 2)
+    bins_.Delete(0, absl::StrCat("k", j));
+
+  EXPECT_EQ(bins_.GetStats().stashed_entries_bytes, 0u);
+
+  auto segments = bins_.ReportStashed(id, DiskSegment{0, 4_KB});
+  ASSERT_GT(segments.size(), 0u);
+
+  // After stash, bytes counter equals the on-disk size of the entries (value + header each).
+  size_t total_bytes = 0;
+  for (auto& [dbid, key, segment] : segments)
+    total_bytes += segment.length + SmallBins::kEntryHeaderSize;
+  EXPECT_EQ(bins_.GetStats().stashed_entries_bytes, total_bytes);
+  EXPECT_EQ(bins_.GetStats().stashed_entries_cnt, segments.size());
+
+  // Deleting entries one by one drains the byte counter back to zero.
+  while (!segments.empty()) {
+    auto segment = std::get<2>(segments.back());
+    segments.pop_back();
+    bins_.Delete(segment);
+  }
+  EXPECT_EQ(bins_.GetStats().stashed_entries_bytes, 0u);
+  EXPECT_EQ(bins_.GetStats().stashed_entries_cnt, 0u);
 }
 
 }  // namespace dfly::tiering

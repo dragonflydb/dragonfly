@@ -24,6 +24,10 @@ enum class SBFLoadResult : uint8_t {
 
 const char* ToString(SBFLoadResult res);
 
+// Max false-positive probability a persisted filter may carry. BF.LOADCHUNK and the rdb loader
+// must agree on it, else a filter can be built that its own snapshot refuses to load back.
+inline constexpr double kMaxSBFFpProb = 0.5;
+
 /// Bloom filter based on the design of https://github.com/jvirkki/libbloom
 class Bloom {
  public:

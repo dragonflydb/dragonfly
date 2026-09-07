@@ -215,6 +215,17 @@ TEST_F(SetFamilyTest, SPop) {
   EXPECT_THAT(Run({"spop", "xlarge", "2", "3"}), ErrArg("syntax error"));
 }
 
+TEST_F(SetFamilyTest, SRandMemberRestoredEmptySet) {
+  // A zero-member set payload is rejected at RESTORE; SRANDMEMBER on the absent key stays sane.
+  uint8_t payload[] = {0x02, 0x00, 0x0b, 0x00, 0x53, 0x11, 0x84, 0x73, 0x66, 0x16, 0xd0, 0x61};
+  std::string_view dump(reinterpret_cast<const char*>(payload), sizeof(payload));
+  EXPECT_THAT(Run({"restore", "es", "0", dump}), ErrArg("Bad data format"));
+  EXPECT_THAT(Run({"exists", "es"}), IntArg(0));
+  EXPECT_THAT(Run({"srandmember", "es", "-1"}), ArrLen(0));
+  EXPECT_THAT(Run({"srandmember", "es", "2"}), ArrLen(0));
+  EXPECT_THAT(Run({"srandmember", "es"}), ArgType(RespExpr::NIL));
+}
+
 TEST_F(SetFamilyTest, SRandMember) {
   // Test IntSet
   Run({"sadd", "x", "1", "2", "3"});

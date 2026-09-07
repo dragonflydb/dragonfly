@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <optional>
 #include <ranges>
 #include <utility>
 #include <vector>
@@ -52,6 +53,13 @@ class DashTable : public detail::DashTableBase {
   using const_bucket_iterator = Iterator<true, true>;
   using bucket_iterator = Iterator<false, true>;
   using Cursor = detail::DashCursor;
+
+  struct SegmentVisitResult {
+    using SegmentRef = std::pair<uint32_t, SegmentType*>;
+    Cursor next;
+    // pointer must be consumed without yielding, or it can be invalidated.
+    std::optional<SegmentRef> id_and_pointer{std::nullopt};
+  };
 
   struct HotBuckets {
     static constexpr size_t kRegularBuckets = 4;
@@ -359,7 +367,8 @@ class DashTable : public detail::DashTableBase {
   // segment by segment over physical backets.
   // traverse by segment order does not guarantees coverage if the table grows/shrinks, it is useful
   // when formal full coverage is not critically important.
-  template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb);
+  // count bounds how many physical buckets are visited in a single call.
+  template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb, unsigned count = 8);
 
   // Discards slots information.
   static const_bucket_iterator BucketIt(const_iterator it) {
@@ -420,6 +429,8 @@ class DashTable : public detail::DashTableBase {
   // Attempts to reallocate segment for defragmentation. Will not continue if segment has outgoing
   // iterators holding pointers to it as these will become invalid on relocation.
   bool TryRelocateSegment(size_t segment_id);
+
+  SegmentVisitResult VisitSegment(Cursor cursor);
 
  private:
   enum class InsertMode {
@@ -712,6 +723,16 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
            });
   }
 
+  bool ContainsStashBucket() const {
+    if (limit_ > ids_.size())
+      return limit_ > DashTable::kBucketNum;
+
+    for (unsigned i = 0; i < limit_; ++i)
+      if (ids_[i] >= DashTable::kBucketNum)
+        return true;
+    return false;
+  }
+
   bool operator==(const BucketSet& other) const {
     return owner_ == other.owner_ && seg_id_ == other.seg_id_ && limit_ == other.limit_ &&
            ids_[0] == other.ids_[0] && ids_[1] == other.ids_[1];
@@ -734,7 +755,7 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
 
   DashTable* owner_;
   uint32_t seg_id_;
-  uint8_t limit_;
+  uint8_t limit_;  // number of entries: 1 or 2 values from ids_ or all possible buckets
   std::array<uint8_t, 2> ids_;
 };
 
@@ -1185,23 +1206,27 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id, EvictionPolicy& ev)
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& cb) -> Cursor {
+auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& cb, unsigned count)
+    -> Cursor {
   uint32_t sid = curs.segment_id(global_depth_);
   assert(sid < segment_.size());
-  SegmentType* s = segment_[sid];
-  assert(s);
   uint8_t bid = curs.bucket_id();
 
-  auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
-  s->TraverseBucket(bid, std::move(dt_cb));
+  for (unsigned i = 0; i < count; ++i) {
+    SegmentType* s = segment_[sid];
+    assert(s);
 
-  ++bid;
-  if (SegmentType::OutOfRange(bid)) {
-    sid = NextSeg(sid);
-    if (sid >= segment_.size()) {
-      return Cursor::end();
+    auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
+    s->TraverseBucket(bid, dt_cb);
+
+    ++bid;
+    if (SegmentType::OutOfRange(bid)) {
+      sid = NextSeg(sid);
+      if (sid >= segment_.size()) {
+        return Cursor::end();
+      }
+      bid = 0;
     }
-    bid = 0;
   }
 
   return Cursor{global_depth_, sid, bid};
@@ -1275,6 +1300,22 @@ bool DashTable<_Key, _Value, Policy>::TryRelocateSegment(size_t segment_id) {
   A::deallocate(allocator, segment, 1);
 
   return true;
+}
+
+template <typename _Key, typename _Value, typename Policy>
+auto DashTable<_Key, _Value, Policy>::VisitSegment(Cursor cursor) -> SegmentVisitResult {
+  uint32_t sid = cursor.segment_id(global_depth_);
+  if (sid >= segment_.size())
+    return {Cursor::end(), std::nullopt};
+
+  auto* seg = segment_[sid];
+  sid = seg->segment_id();
+
+  Cursor next = Cursor::end();
+  if (const auto nid = NextSeg(sid); nid < segment_.size())
+    next = Cursor{global_depth_, static_cast<uint32_t>(nid), 0};
+
+  return {next, std::make_pair(sid, seg)};
 }
 
 template <typename _Key, typename _Value, typename Policy>

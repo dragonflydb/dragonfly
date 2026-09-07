@@ -52,6 +52,7 @@ extern "C" {
 #include "io/proc_reader.h"
 #include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/jwt_validator.h"
 #include "server/acl/user_registry.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -166,6 +167,7 @@ ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
           "when set, preserves journal offsets after REPLICAOF NO ONE");
 
 ABSL_DECLARE_FLAG(int32_t, port);
+ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
 ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
@@ -991,6 +993,15 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
 
 }  // namespace
 
+bool ValidateNotifyKeyspaceEventsFlag() {
+  const string value = absl::GetFlag(FLAGS_notify_keyspace_events);
+  if (!value.empty() && !absl::EqualsIgnoreCase(value, "EX")) {
+    LOG(ERROR) << "Invalid notify_keyspace_events value, only Ex is currently supported";
+    return false;
+  }
+  return true;
+}
+
 bool ValidateServerTlsFlags() {
   if (!absl::GetFlag(FLAGS_tls)) {
     return true;
@@ -1229,12 +1240,25 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     if (!ValidateServerTlsFlags()) {
       return false;
     }
-    for (facade::Listener* l : listeners_) {
-      // Must reconfigure in the listener proactor to avoid a race.
-      if (!l->socket()->proactor()->Await([l] { return l->ReconfigureTLS(); })) {
+#ifdef DFLY_USE_SSL
+    // Build the new context before touching any listener: a bad cert/key must fail here, not
+    // midway through the listeners (a failed callback only rolls back the flag value, so a
+    // partial switch would leave listeners split between old and new TLS state).
+    SSL_CTX* ctx = nullptr;
+    if (absl::GetFlag(FLAGS_tls)) {
+      ctx = facade::CreateSslCntx(facade::TlsContextRole::SERVER);
+      if (!ctx) {
         return false;
       }
     }
+    for (facade::Listener* l : listeners_) {
+      // Must reconfigure in the listener proactor to avoid a race.
+      l->socket()->proactor()->Await([l, ctx] { l->ApplyTlsCtx(ctx); });
+    }
+    if (ctx) {
+      SSL_CTX_free(ctx);
+    }
+#endif
     return true;
   });
   config_registry.RegisterMutable("tls_cert_file");
@@ -1414,6 +1438,17 @@ void ServerFamily::FlushAll(Namespace* ns) {
   flush_trans->InitByArgs(ns, 0, {});
   VLOG(1) << "Performing flush";
   Drakarys(flush_trans.get(), DbSlice::kDbAll, false);
+}
+
+GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
+  if (!IsMaster())
+    return {std::make_error_code(std::errc::operation_not_permitted), "replica cannot load data"};
+  if (path.empty())
+    return {std::make_error_code(std::errc::invalid_argument), "no snapshot found to load"};
+  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
+  if (auto res = storage->ExpandSnapshot(path); !res)
+    return res.error();
+  return {};
 }
 
 // Load starts as many fibers as there are files to load each one separately.
@@ -2017,26 +2052,41 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
                           std::string_view password) {
   const auto* registry = ServerState::tlocal()->user_registry;
   CHECK(registry);
-  const bool is_authorized = registry->AuthUser(username, password);
+
+  bool is_authorized = false;
+  std::string jwt_username;
+  auto auth_expires_at = std::chrono::steady_clock::time_point::max();
+  if (acl::JwtValidator::IsEnabled()) {
+    acl::JwtValidator jwt;
+    auto claims = jwt.Validate(password);
+    if (claims) {
+      jwt_username = std::move(claims->username);
+      username = jwt_username;
+      is_authorized = registry->IsUserActive(username);
+      auth_expires_at = claims->expires_at;
+    }
+  } else {
+    is_authorized = registry->AuthUser(username, password);
+  }
+
   if (is_authorized) {
     cntx->authed_username = username;
     auto cred = registry->GetCredentials(username);
-    cntx->acl_commands = cred.acl_commands;
-    cntx->keys = std::move(cred.keys);
-    cntx->pub_sub = std::move(cred.pub_sub);
+    const size_t db_index = cred.db;
     cntx->ns = &namespaces->GetOrInsert(cred.ns);
+    cntx->SetAclCredentials(std::move(cred));
     cntx->authenticated = true;
-    cntx->acl_db_idx = cred.db;
-    if (cred.db == std::numeric_limits<size_t>::max()) {
+    cntx->auth_expires_at = auth_expires_at;
+    if (db_index == std::numeric_limits<size_t>::max()) {
       cntx->conn_state.db_index = 0;
     } else {
-      auto cb = [ns = cntx->ns, index = cred.db](EngineShard* shard) {
+      auto cb = [ns = cntx->ns, index = db_index](EngineShard* shard) {
         auto& db_slice = ns->GetDbSlice(shard->shard_id());
         db_slice.ActivateDb(index);
         return OpStatus::OK;
       };
       shard_set->RunBriefInParallel(std::move(cb));
-      cntx->conn_state.db_index = cred.db;
+      cntx->conn_state.db_index = db_index;
     }
   }
   return is_authorized;
@@ -2533,6 +2583,14 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
   for (const Metrics& partial : partials)
     result.Merge(partial);
 
+  // The per-thread deltas are read at slightly different moments, so the sum can transiently
+  // dip below zero; a large negative value however means an accounting leak.
+  constexpr int64_t kTlsAccountingDipThreshold = -1024 * 1024;
+  if (result.tls_bytes < kTlsAccountingDipThreshold) {
+    LOG_EVERY_T(WARNING, 60) << "tls_bytes accounting went negative: " << result.tls_bytes;
+  }
+  result.tls_bytes = std::max<int64_t>(0, result.tls_bytes);
+
 #ifdef WITH_SEARCH
   // HNSW indices live in a single global registry shared across shards, so their
   // footprint must be added once — not per-shard. Track it in both the search_used
@@ -2701,8 +2759,8 @@ string ServerFamily::FormatInfoMetrics(
     if (success) {
       append("used_memory_rss", rss);
       append("used_memory_rss_human", HumanReadableNumBytes(rss));
+      append("used_memory_peak_rss", m.used_mem_rss_peak);
     }
-    append("used_memory_peak_rss", glob_memory_peaks.used.load(memory_order_relaxed));
 
     size_t limit = max_memory_limit.load(memory_order_relaxed);
     append("maxmemory", limit);
@@ -2813,6 +2871,7 @@ string ServerFamily::FormatInfoMetrics(
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
+    append("async_delete_task_invocation_total", m.shard_stats.async_delete_task_invocation_total);
     append("borrowed_strings_sent_total", reply_stats.borrowed_string_sent_cnt);
 
     // Number of connections that are currently blocked on grabbing interpreter.
@@ -2854,9 +2913,11 @@ string ServerFamily::FormatInfoMetrics(
 
     append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
+    append("tiered_small_bins_entries_bytes", m.tiered_stats.small_bins_entries_bytes);
     append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
     append("tiered_cold_storage_bytes", m.tiered_stats.cold_storage_bytes);
-    append("tiered_offloading_steps", m.tiered_stats.total_offloading_steps);
+    append("tiered_offloading_usec", m.tiered_stats.total_offloading_usec);
+    append("tiered_defrag_usec", m.tiered_stats.total_defrag_usec);
     append("tiered_offloading_stashes", m.tiered_stats.total_offloading_stashes);
     append("tiered_ram_hits", m.events.ram_hits);
     append("tiered_ram_cool_hits", m.events.ram_cool_hits);

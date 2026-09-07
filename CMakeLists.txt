@@ -10,6 +10,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
 
 # AFL++ fuzzing support - must be set BEFORE project() command
 option(USE_AFL "Enable AFL++ fuzzing" OFF)
+option(DF_MINIMAL_DEBUG_INFO "Use minimal debug information for CI builds" OFF)
 if(USE_AFL)
   # Automatically set AFL++ compilers if not already set
   if(NOT CMAKE_C_COMPILER MATCHES "afl-" AND NOT CMAKE_CXX_COMPILER MATCHES "afl-")
@@ -146,6 +147,10 @@ set(WITH_AWS OFF CACHE BOOL "Build with helio native AWS support")
 
 include(third_party)
 include(internal)
+
+if(DF_MINIMAL_DEBUG_INFO AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+  add_compile_options(-g1)
+endif()
 
 include_directories(src)
 include_directories(helio)

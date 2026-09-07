@@ -45,6 +45,8 @@ ABSL_DECLARE_FLAG(std::string, tls_cert_file);
 ABSL_DECLARE_FLAG(std::string, tls_key_file);
 ABSL_DECLARE_FLAG(std::string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(std::string, tls_ca_cert_dir);
+ABSL_DECLARE_FLAG(uint32_t, max_multi_bulk_len);
+ABSL_DECLARE_FLAG(uint64_t, max_bulk_len);
 
 namespace dfly {
 
@@ -468,8 +470,12 @@ error_code ProtocolClient::SendCommandAndReadResponse(string_view command) {
 }
 
 void ProtocolClient::ResetParser(RedisParser::Mode mode) {
-  // We accept any length for the parser because it has been approved by the master.
-  parser_.reset(new RedisParser(mode));
+  // Bound the parser so a peer cannot force a huge allocation. SERVER mode mirrors an
+  // upstream master's commands, whose arg count can exceed our client cap.
+  uint32_t max_arr_len = GetFlag(FLAGS_max_multi_bulk_len);
+  if (mode == RedisParser::Mode::SERVER && max_arr_len < (1u << 20))
+    max_arr_len = 1u << 20;
+  parser_.reset(new RedisParser(mode, max_arr_len, GetFlag(FLAGS_max_bulk_len)));
 }
 
 uint64_t ProtocolClient::LastIoTime() const {

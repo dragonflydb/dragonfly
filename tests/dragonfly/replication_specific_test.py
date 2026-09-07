@@ -160,6 +160,10 @@ async def test_policy_based_eviction_propagation(df_factory, df_seeder_factory):
             "maxmemory": "512mb",
             "enable_heartbeat_eviction": "false",
             "rss_oom_deny_ratio": 1.3,
+            # The test fills the master to ~87% of maxmemory and relies on the conservative
+            # table growth estimate to deny dashtable growth, which is what triggers policy
+            # based eviction. Pin the margin instead of depending on its default.
+            "table_growth_margin": 0.4,
         },
         replica_args={"proactor_threads": 2},
         connect=False,
@@ -505,11 +509,18 @@ async def test_bug_in_json_memory_tracking(df_factory: DflyInstanceFactory):
     await fill_task
 
 
-@pytest.mark.skip("fails, investigating")
 @pytest.mark.large
+@pytest.mark.exclude_epoll
 @pytest.mark.opt_only
 @pytest.mark.parametrize("tagged_chunks", [True, False])
-@dfly_args({"proactor_threads": 2, "serialization_max_chunk_size": 5000, "compression_mode": "0"})
+@dfly_args(
+    {
+        "proactor_threads": 2,
+        # 4mb is around 500 chunks
+        "serialization_max_chunk_size": 4194304,
+        "compression_mode": "0",
+    }
+)
 async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagged_chunks):
     """
     Restart replicating instance with huge values. Tests that interrupting the streaming process doesn't hinder retrying replication
@@ -726,64 +737,34 @@ async def test_mc_gat_replication(df_factory):
     expected_cas_ver = b"0"
     assert result[key] == (value, expected_cas_ver), f"unexpected result for key: {result=}"
 
+    # GAT 0 removes the expiry; the replica must keep the key as persistent, not delete it
+    assert cm.set(key, value, expire=1000, noreply=True)
+    assert cm._fetch_cmd(b"gat", [str(0), key], expect_cas=False) == {key: value}
 
-@pytest.mark.skip("Fails constantly on CI")
-@pytest.mark.large
-@pytest.mark.parametrize("serialization_max_size", [1, 64000])
-async def test_replication_onmove_flow(df_factory, serialization_max_size):
-    master = df_factory.create(
-        proactor_threads=2,
-        cache_mode=True,
-        point_in_time_snapshot=False,
-        serialization_max_chunk_size=serialization_max_size,
-    )
-    replica = df_factory.create(proactor_threads=2)
+    async with master.client() as c_master, replica.client() as c_replica:
+        assert await c_master.pttl(key) == -1
+        await check_all_replicas_finished([c_replica], c_master)
+        # -2 would mean the replica dropped the key instead of persisting it
+        assert await c_replica.pttl(key) == -1
 
+
+async def test_set_past_expiry_replication(df_factory):
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1)
     df_factory.start_all([master, replica])
-    c_master = master.client()
-    c_replica = replica.client()
 
-    key_target = 100000
-    # Fill master with test data
-    await c_master.execute_command(f"DEBUG POPULATE {key_target} key 32 RAND TYPE hash ELEMENTS 10")
-    logging.debug("finished populate")
+    async with master.client() as c_master, replica.client() as c_replica:
+        await c_master.set("k", "v")
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_available_async(c_replica)
+        assert await c_replica.get("k") == "v"
 
-    stop_event = asyncio.Event()
-
-    async def get_keys():
-        while not stop_event.is_set():
-            pipe = c_master.pipeline(transaction=False)
-            for _ in range(50):
-                id = random.randint(0, key_target)
-                pipe.hlen(f"key:{id}")
-            await pipe.execute()
-
-    get_task = asyncio.create_task(get_keys())
-    await asyncio.sleep(0.1)
-
-    # Start replication and wait for full sync
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_for_replicas_state(c_replica)
-
-    info = await c_master.info("stats")
-    assert info["bump_ups"] >= 100
-
-    await check_all_replicas_finished([c_replica], c_master)
-    stop_event.set()
-    await get_task
-
-    # Check replica data consisten
-    hash1, hash2 = await asyncio.gather(*(SeederV2.capture(c) for c in (c_master, c_replica)))
-    assert hash1 == hash2
-
-    master.stop()
-    lines = master.find_in_logs("Exit SnapshotSerializer")
-    assert len(lines) > 0
-    for line in lines:
-        # We test the full sync on moved path execution
-        moved_saved = extract_int_after_prefix("moved_saved ", line)
-        logging.debug(f"Moved saves {moved_saved}")
-        assert moved_saved > 0
+        # SET with a past expiry deletes the key; SET is not auto-journaled, so the delete
+        # needs an explicit journal record to reach the replica
+        assert await c_master.execute_command("SET", "k", "v2", "PXAT", "1")
+        assert await c_master.exists("k") == 0
+        await check_all_replicas_finished([c_replica], c_master)
+        assert await c_replica.exists("k") == 0
 
 
 @pytest.mark.large

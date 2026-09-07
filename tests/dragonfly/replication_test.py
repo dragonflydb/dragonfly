@@ -340,6 +340,31 @@ async def test_rewrites(replication):
         assert abs(ttl1 - ttl2) <= 1
 
     async with m_replica:
+        # Pick GEORADIUS/GEORADIUSBYMEMBER STORE dest keys that are deliberately on a different
+        # shard than the source (gh #7996 — the crash this guards against only reproduces when
+        # source and destination land on different shards). Each probe SET/DEL is journaled, so
+        # it must be skip_cmd()'d like any other setup write in this monitor block.
+        async def get_shard(key):
+            await c_master.execute_command(f"SET {key} v")
+            await skip_cmd()
+            debug_key_info = await c_master.execute_command(f"DEBUG OBJECT {key}")
+            shard_id = int(dict(map(lambda s: s.split(":"), debug_key_info.split()))["shard"])
+            await c_master.execute_command(f"DEL {key}")
+            await skip_cmd()
+            return shard_id
+
+        async def cross_shard_key(prefix, other_shard):
+            i = 0
+            while True:
+                candidate = f"{prefix}{i}"
+                if await get_shard(candidate) != other_shard:
+                    return candidate
+                i += 1
+
+        src_shard = await get_shard("geo-src")
+        geo_dst = await cross_shard_key("geo-dst", src_shard)
+        geo_dst2 = await cross_shard_key("geo-dst2", src_shard)
+
         # CHECK EXPIRE, PEXPIRE, PEXPIRE turn into EXPIREAT
         await c_master.set("k-exp", "v")
         await skip_cmd()
@@ -415,6 +440,24 @@ async def test_rewrites(replication):
 
         # Check ZUNIONSTORE turns into DEL and ZADD
         await check_list_ooo("ZUNIONSTORE k 2 zet1 zet2", [r"DEL k", r"ZADD k (.*?)"])
+
+        # Check GEORADIUS/GEORADIUSBYMEMBER with STORE turn into DEL and ZADD (gh #7996 — a
+        # raw-command replay is invalid when the source and destination keys land on different
+        # shards; geo_dst/geo_dst2 were pre-selected above to be cross-shard from geo-src).
+        await c_master.execute_command(
+            "GEOADD geo-src 13.361389 38.115556 Palermo 15.087269 37.502669 Catania"
+        )
+        await skip_cmd()
+        await check_list_ooo(
+            f"GEORADIUS geo-src 15 37 200 km STORE {geo_dst}",
+            [rf"DEL {geo_dst}", rf"ZADD {geo_dst} (.*?)"],
+        )
+
+        # Check GEORADIUSBYMEMBER with STORE turns into DEL and ZADD
+        await check_list_ooo(
+            f"GEORADIUSBYMEMBER geo-src Palermo 200 km STORE {geo_dst2}",
+            [rf"DEL {geo_dst2}", rf"ZADD {geo_dst2} (.*?)"],
+        )
 
         await c_master.set("k1", "1000")
         await c_master.set("k2", "1100")
@@ -535,6 +578,53 @@ async def test_rewrites(replication):
         )
         # With NOACK, only XGROUP SETID should be journaled (no XCLAIM)
         assert await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 2")
+
+
+@pytest.mark.replication(master_args={"proactor_threads": 4}, replica_args={"proactor_threads": 2})
+async def test_georadius_store_cross_shard_precision(replication):
+    """
+    Regression test for gh #7996 follow-up: GEORADIUS/GEORADIUSBYMEMBER STORE journal their
+    destination via ZSetFamily::OpAdd's explicit DEL+ZADD path (CO::NO_AUTOJOURNAL), which used
+    to serialize scores with absl::StrCat (~6 significant digits). Geohash-derived scores are
+    huge 52-bit-precision doubles, so that silently corrupted the replica's data. Verify master
+    and replica end up with identical ZRANGE ... WITHSCORES results after a cross-shard STORE.
+    """
+    _, _, c_master, [c_replica] = replication
+
+    async def get_shard(key):
+        await c_master.execute_command(f"SET {key} v")
+        debug_key_info = await c_master.execute_command(f"DEBUG OBJECT {key}")
+        shard_id = int(dict(map(lambda s: s.split(":"), debug_key_info.split()))["shard"])
+        await c_master.execute_command(f"DEL {key}")
+        return shard_id
+
+    async def cross_shard_key(prefix, other_shard):
+        i = 0
+        while True:
+            candidate = f"{prefix}{i}"
+            if await get_shard(candidate) != other_shard:
+                return candidate
+            i += 1
+
+    src_shard = await get_shard("geo-src-precision")
+    geo_dst = await cross_shard_key("geo-dst-precision", src_shard)
+    geo_dst2 = await cross_shard_key("geo-dst2-precision", src_shard)
+
+    await c_master.execute_command(
+        "GEOADD geo-src-precision 13.361389 38.115556 Palermo 15.087269 37.502669 Catania"
+    )
+    await c_master.execute_command(f"GEORADIUS geo-src-precision 15 37 200 km STORE {geo_dst}")
+    await c_master.execute_command(
+        f"GEORADIUSBYMEMBER geo-src-precision Palermo 200 km STORE {geo_dst2}"
+    )
+
+    await check_all_replicas_finished([c_replica], c_master)
+
+    for key in (geo_dst, geo_dst2):
+        master_scores = await c_master.zrange(key, 0, -1, withscores=True)
+        replica_scores = await c_replica.zrange(key, 0, -1, withscores=True)
+        assert len(master_scores) == 2
+        assert master_scores == replica_scores
 
 
 """
@@ -822,30 +912,44 @@ def parse_lag(replication_info: str):
     return int(lags[0])
 
 
-async def assert_lag_condition(inst, client, condition):
+async def assert_lag_condition(inst, client, condition, timeout=5.0):
     """
-    Since lag is a bit random, and we want stable tests, we check
-    10 times in quick succession and validate that the condition
-    is satisfied at least once.
+    Since lag is a bit random, and we want stable tests, we poll until `condition`
+    is satisfied, bounded by `timeout` seconds.
     We check both `INFO REPLICATION` redis protocol and the `/metrics`
     prometheus endpoint.
     """
-    for _ in range(10):
+
+    @assert_eventually(timeout=timeout)
+    async def check_prometheus_lag():
         lag = await get_metric_value(inst, "dragonfly_connected_replica_lag_records")
-        if condition(lag):
-            break
-        print("current prometheus lag =", lag)
-        await asyncio.sleep(0.05)
-    else:
-        assert False, "Lag from prometheus metrics has never satisfied condition!"
-    for _ in range(10):
+        print(f"prometheus lag={lag}")
+        assert condition(
+            lag
+        ), f"Lag from prometheus metrics never satisfied condition (last lag={lag})"
+
+    @assert_eventually(timeout=timeout)
+    async def check_info_replication_lag():
         lag = parse_lag(await client.execute_command("info replication"))
-        if condition(lag):
-            break
-        print("current lag =", lag)
-        await asyncio.sleep(0.05)
-    else:
-        assert False, "Lag has never satisfied condition!"
+        print(f"info lag={lag}")
+        assert condition(
+            lag
+        ), f"Lag from info replication never satisfied condition (last lag={lag})"
+
+    await check_prometheus_lag()
+    await check_info_replication_lag()
+
+
+async def _poll_lsn_continuous(client, stop_event):
+    """Continuously sample INFO replication's lag until stopped from outside,
+    and return the highest lag seen."""
+    max_lag = 0
+    while not stop_event.is_set():
+        lag = parse_lag(await client.execute_command("info replication"))
+        print(f"continous lag={lag}")
+        max_lag = max(max_lag, lag)
+        await asyncio.sleep(0.01)
+    return max_lag
 
 
 @dfly_args({"proactor_threads": 2})
@@ -853,14 +957,28 @@ async def assert_lag_condition(inst, client, condition):
 async def test_replication_info(replication, df_seeder_factory, n_keys=2000):
     master, [replica], c_master, [c_replica] = replication
 
+    # No lag at start
     await assert_lag_condition(master, c_master, lambda lag: lag == 0)
 
     seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
-    fill_task = asyncio.create_task(seeder.run(target_ops=3000))
-    await assert_lag_condition(master, c_master, lambda lag: lag > 30)
-    seeder.stop()
+    fill_task = asyncio.create_task(seeder.run(target_ops=30000))
 
-    await fill_task
+    # Start continous lsn sampling in the background
+    stop_poll = asyncio.Event()
+    poll_task = asyncio.create_task(_poll_lsn_continuous(c_master, stop_poll))
+
+    # Wait for seeder to finish, then stop polling.
+    try:
+        await fill_task
+        await asyncio.sleep(0.5)  # give some time for the replica to catch up
+    finally:
+        stop_poll.set()
+
+    max_lag = await poll_task
+
+    assert max_lag > 30, f"Lag never exceeded 30 while filling (max observed: {max_lag})"
+
+    # Wait for replica to catch all up.
     await wait_available_async(c_replica)
     await assert_lag_condition(master, c_master, lambda lag: lag == 0)
 

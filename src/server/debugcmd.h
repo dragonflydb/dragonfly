@@ -62,7 +62,6 @@ class DebugCmd {
   void Topk(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Values(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Compression(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void IOStats(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Segments(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void CompactTable(facade::CmdArgParser parser, CommandContext* cmd_cntx);

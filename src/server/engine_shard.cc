@@ -4,14 +4,12 @@
 
 #include "server/engine_shard.h"
 
-#include <absl/strings/escaping.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
 #include <memory>
 
 #include "base/flags.h"
-#include "core/huff_coder.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
 #include "io/proc_reader.h"
@@ -47,6 +45,15 @@ ABSL_FLAG(float, mem_defrag_waste_threshold, 0.2,
 ABSL_FLAG(float, mem_defrag_page_utilization_threshold, 0.8,
           "memory page under utilization threshold. Ratio between used and committed size, below "
           "this, memory in this page will defragmented");
+
+ABSL_FLAG(uint64_t, mem_defrag_max_burst_duration_us, 0,
+          "Maximum real (CycleClock-measured) time DefragTask() may spend running at the "
+          "proactor's highest on-idle priority before forcing a cooldown. 0 disables the "
+          "duty-cycle cap (unbounded, previous behavior)");
+
+ABSL_FLAG(uint32_t, mem_defrag_backoff_duration_us, 0,
+          "Duration in microseconds to drop to low on-idle priority once "
+          "mem_defrag_max_burst_duration_us is reached, before resuming at high priority");
 
 ABSL_FLAG(int32_t, hz, 100,
           "Base frequency at which the server performs other background tasks. "
@@ -123,90 +130,6 @@ size_t CalculateHowManyBytesToEvictOnShard(size_t global_memory_limit, size_t gl
   return shard_budget < shard_memory_threshold ? (shard_memory_threshold - shard_budget) : 0;
 }
 
-class HuffmanCheckTask {
- public:
-  HuffmanCheckTask() {
-    hist_.fill(0);
-  }
-
-  int32_t Run(DbSlice* db_slice);
-
- private:
-  PrimeTable::Cursor cursor_;
-
-  static constexpr unsigned kMaxSymbol = 255;
-  array<unsigned, kMaxSymbol + 1> hist_;  // histogram of symbols.
-  string scratch_;
-};
-
-int32_t HuffmanCheckTask::Run(DbSlice* db_slice) {
-  DbTable* db_table = db_slice->GetDBTable(0);  // we currently support only default db.
-  if (!db_table)
-    return -1;
-
-  // incrementally aggregate frequency histogram.
-  auto& prime = db_table->prime;
-
-  constexpr uint32_t kMaxTraverses = 512;
-  uint32_t traverses_count = 0;
-  do {
-    cursor_ = prime.Traverse(cursor_, [&](PrimeIterator it) {
-      if (!it->first.IsInline()) {
-        string_view val = it->first.GetSlice(&scratch_);
-        for (unsigned char c : val) {
-          hist_[c]++;
-        }
-
-        if (val.size() > 1024) {
-          traverses_count = kMaxTraverses;  // return early.
-          string{}.swap(scratch_);          // free memory.
-        }
-      }
-    });
-    traverses_count++;
-  } while (traverses_count < kMaxTraverses && cursor_);
-
-  if (cursor_)
-    return 4;  // priority to continue later.
-
-  // Finished scanning the table, now normalize the table.
-  constexpr unsigned kMaxFreqTotal = static_cast<unsigned>((1U << 31) * 0.9);
-  size_t total_freq = std::accumulate(hist_.begin(), hist_.end(), 0UL);
-  if (total_freq == 0)
-    return -1;
-
-  // to avoid overflow.
-  double scale = total_freq > kMaxFreqTotal ? static_cast<double>(total_freq) / kMaxFreqTotal : 1.0;
-  for (unsigned i = 0; i <= kMaxSymbol; i++) {
-    hist_[i] = static_cast<unsigned>(hist_[i] / scale);
-    if (hist_[i] == 0) {
-      hist_[i] = 1;  // Avoid zero frequency symbols.
-    }
-  }
-
-  // Build the huffman table. We currently output the table to logs and just increase
-  // the metric counter to signal that we built a table.
-
-  HuffmanEncoder huff_enc;
-  string error_msg;
-  if (huff_enc.Build(hist_.data(), kMaxSymbol, &error_msg)) {
-    size_t compressed_size = huff_enc.EstimateCompressedSize(hist_.data(), kMaxSymbol);
-    double ratio = double(compressed_size) / total_freq;
-    LOG(INFO) << "Huffman table built, reducing character count from " << total_freq << " to "
-              << compressed_size << ", compression ratio " << ratio;
-    if (ratio < 1.0) {
-      if (auto bintable = huff_enc.Export()) {
-        LOG(INFO) << "Huffman binary table: " << absl::Base64Escape(*bintable);
-        db_slice->shard_owner()->stats().huffman_tables_built++;
-      }
-    }
-  } else {
-    LOG(WARNING) << "Huffman build failed: " << error_msg;
-  }
-
-  return -1;  // task completed.
-}
-
 }  // namespace
 
 __thread EngineShard* EngineShard::shard_ = nullptr;
@@ -242,6 +165,7 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
   ADD(defrag_skipped_mem_under_threshold);
   ADD(defrag_skipped_within_check_interval);
   ADD(defrag_skipped_not_enough_fragmentation);
+  ADD(async_delete_task_invocation_total);
   ADD(poll_execution_total);
   ADD(tx_ooo_total);
   ADD(tx_optimistic_total);
@@ -249,7 +173,6 @@ EngineShard::Stats& EngineShard::Stats::operator+=(const Stats& o) {
   ADD(total_heartbeat_expired_bytes);
   ADD(total_heartbeat_expired_calls);
   ADD(total_migrated_keys);
-  ADD(huffman_tables_built);
   ADD(stream_sequential_accesses);
   ADD(stream_random_accesses);
   ADD(stream_fetch_all_accesses);
@@ -278,6 +201,18 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // (control by mem_defrag_waste_threshold flag)
 EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequired() {
   using enum SkipReason;
+
+  // Duty-cycle backoff takes priority over everything else, including an in-progress cursor:
+  // once mem_defrag_max_burst_duration_us of real time was spent this burst, we force a rest
+  // period before resuming, regardless of how much of the pass is left.
+  if (cooldown_until_cycles != 0) {
+    if (base::CycleClock::Now() < cooldown_until_cycles) {
+      return CoolingDown;
+    }
+    cooldown_until_cycles = 0;
+    consecutive_burst_cycles = 0;
+  }
+
   if (cursor > kCursorDoneState) {
     VLOG(2) << "cursor: " << cursor;
     return NotSkipped;
@@ -434,10 +369,26 @@ uint32_t EngineShard::DefragTask() {
     // TODO (abhijat): implement move ctor for PageUsage so this object can be moved into the task.
     PageUsage page_usage{CollectPageStats::NO, threshold,
                          CycleQuota{CycleQuota::kDefaultDefragQuota}};
-    if (DoDefrag(&page_usage)) {
+    const uint64_t call_start_cycles = base::CycleClock::Now();
+    const bool scan_incomplete = bool(DoDefrag(&page_usage));
+    defrag_state_.consecutive_burst_cycles += base::CycleClock::Now() - call_start_cycles;
+    if (scan_incomplete) {
       // we didn't finish the scan
+      const uint64_t max_burst_cycles =
+          base::CycleClock::FromUsec(GetFlag(FLAGS_mem_defrag_max_burst_duration_us));
+      if (max_burst_cycles > 0 && defrag_state_.consecutive_burst_cycles >= max_burst_cycles) {
+        // Burst budget spent. Force a cooldown before we're allowed to spin again, capping
+        // the achievable duty cycle insteadof running flat-out until completion.
+        defrag_state_.consecutive_burst_cycles = 0;
+        defrag_state_.cooldown_until_cycles =
+            base::CycleClock::Now() +
+            base::CycleClock::FromUsec(GetFlag(FLAGS_mem_defrag_backoff_duration_us));
+        return 6;
+      }
       return ProactorBase::kOnIdleMaxLevel;
     }
+    // Pass finished naturally - start the next pass with a fresh burst budget.
+    defrag_state_.consecutive_burst_cycles = 0;
   } else {
     std::string_view reason;
     switch (check_result) {
@@ -459,6 +410,9 @@ uint32_t EngineShard::DefragTask() {
         break;
       case CheckInProgress:
         reason = "check is in progress";
+        break;
+      case CoolingDown:
+        reason = "cooling down after duty-cycle burst limit";
         break;
       default:
         DCHECK(false) << "unexpected result";
@@ -489,7 +443,6 @@ void EngineShard::Shutdown() {
 
 void EngineShard::StopPeriodicFiber() {
   ProactorBase::me()->RemoveOnIdleTask(defrag_task_id_);
-  ProactorBase::me()->RemoveOnIdleTask(huffman_check_task_id_);
 
   fiber_heartbeat_periodic_done_.Notify();
   if (fiber_heartbeat_periodic_.IsJoinable()) {
@@ -809,40 +762,6 @@ void EngineShard::Heartbeat() {
   }
   stalled_start_ns_ = 0;
 
-  thread_local bool check_huffman = (shard_id_ == 0);  // run it only on shard 0.
-  if (check_huffman) {
-    auto* ptr = db_slice.GetDBTable(0);
-    if (ptr) {
-      size_t key_usage = ptr->stats.memory_usage_by_type[OBJ_KEY];
-      size_t obj_usage = ptr->stats.obj_memory_usage;
-
-#ifdef NDEBUG
-#define MB_THRESHOLD (50 * 1024 * 1024)
-#else
-#define MB_THRESHOLD (5 * 1024 * 1024)
-#endif
-
-      if (key_usage > MB_THRESHOLD && key_usage > obj_usage / 8) {
-        VLOG(1) << "Scheduling huffman check task, key usage: " << key_usage
-                << ", obj usage: " << obj_usage;
-
-        check_huffman = false;  // trigger only once.
-
-        // launch the task
-        huffman_check_task_id_ = ProactorBase::me()->AddOnIdleTask(
-            [task = HuffmanCheckTask{}]() mutable {
-              if (!shard_ || !namespaces) {
-                return -1;
-              }
-
-              DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_->shard_id());
-              return task.Run(&db_slice);
-            },
-            "huffman_check");
-      }
-    }
-  }
-
   if (!IsReplica()) {  // Never run expiry/evictions on replica.
     RetireExpiredAndEvict();
   }
@@ -954,6 +873,13 @@ void EngineShard::RetireExpiredAndEvict() {
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
     eviction_state_.deleted_bytes_at_prev_eviction = deleted_bytes;
+  }
+
+  // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
+  // section, because readiness checks read the db slice and may preempt.
+  if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
+      bc && GetContTx() == nullptr) {
+    bc->NotifyPending();
   }
 }
 

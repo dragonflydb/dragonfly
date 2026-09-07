@@ -340,8 +340,8 @@ void OutgoingMigration::SyncFb() {
 
     long attempt = 0;
     while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
-      // Break loop and don't sleep in case of C_FATAL
-      if (GetState() == MigrationState::C_FATAL) {
+      // Break loop and don't sleep in case of C_FATAL, or a reported error (e.g. OOM on ACK).
+      if (GetState() == MigrationState::C_FATAL || !exec_st_.IsRunning()) {
         break;
       }
       // Process commands that were on pause and try again
@@ -384,13 +384,13 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
                   nullptr, ClientPause::ALL, is_pause_in_progress);
 
-  DCHECK(pause_fb_opt);
   if (!pause_fb_opt) {
     auto err = absl::StrCat("Migration finalization time out ", cf_->MyID(), " : ",
                             migration_info_.node_info.id, " attempt ", attempt);
 
     LOG(WARNING) << err;
     SetLastError(std::move(err));
+    return false;
   }
 
   absl::Cleanup cleanup([&is_block_active, &pause_fb_opt]() {
@@ -429,10 +429,12 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       return false;
     }
 
-    // Check OOM from incoming slot migration on ACK request
+    // OOM might reach the target node from a flow or from the ack here. Both should report
+    // an error to the context such that the next iteration of the control loop deletes the slots
+    // on the target before it finishes.
     if (CheckRespSimpleError(kIncomingMigrationOOM)) {
-      Finish(GenericError{std::make_error_code(errc::not_enough_memory),
-                          std::string(kIncomingMigrationOOM)});
+      exec_st_.ReportError(GenericError(std::make_error_code(errc::not_enough_memory),
+                                        std::string(kIncomingMigrationOOM)));
       return false;
     }
 

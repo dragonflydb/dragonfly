@@ -4,6 +4,7 @@
 
 #include "server/serializer_base.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/random/distributions.h>
 #include <absl/random/random.h>
@@ -41,7 +42,7 @@ namespace dfly {
 // Driver for "artificially" resolving delayed entries with some delay
 // driven by a fiber in the background
 struct TestDelayDriver {
-  using Fut = util::fb2::Future<io::Result<std::string>>;
+  using Fut = util::fb2::Future<io::Result<PrimeValue>>;
   using OrdEntry = std::pair<std::chrono::steady_clock::time_point, Fut>;
 
   struct Comp {
@@ -68,7 +69,7 @@ struct TestDelayDriver {
         q_.pop();
 
         util::ThisFiber::SleepUntil(entry.first);
-        entry.second.Resolve(std::string{});
+        entry.second.Resolve(PrimeValue{});
       }
     }
   }
@@ -105,6 +106,9 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   struct Params {
     float delay_prob = 0.0;
     std::pair<unsigned, unsigned> delay_lat_us = {0, 100};
+    bool start_paused = false;
+    bool block_on_update = false;
+    bool eventually_consistent = false;
   };
 
   TestDriver(Params params, DbSlice* slice, ExecutionState* cntx, CommandRegistry* reg)
@@ -117,6 +121,12 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             time_t expire, uint32_t mc_flags) override {
     RecordSerialized(pk.ToString());
+  }
+
+  void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) override {
+    CHECK_GT(delayed_enqueued_, 0u);
+    --delayed_enqueued_;
+    SerializerBase::SerializeFetchedEntry(tde, pv);
   }
 
   void ConsumeJournalChange(const journal::JournalChangeItem& item) override;
@@ -134,10 +144,24 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
       auto de = std::make_unique<TieredDelayedEntry>(0, CompactKey{key},
                                                      delay_driver_.Enqeue(delay), 0, 0);
       DelayedEntryHandler::delayed_entries_.emplace(bucket, std::move(de));
+      ++delayed_enqueued_;
     } else {
       std::lock_guard lk{stream_mu_};
       RecordSerialized(std::move(key));
     }
+  }
+
+  // Inject an offloaded entry on `bucket` whose tiered read resolves to an IO error.
+  void EnqueueErroringEntry(BucketIdentity bucket, std::string key) {
+    DelayedEntryHandler::deps_.Increment(bucket);
+    util::fb2::Future<io::Result<PrimeValue>> fut;
+    fut.Resolve(nonstd::make_unexpected(make_error_code(std::errc::io_error)));
+    DelayedEntryHandler::delayed_entries_.emplace(
+        bucket, std::make_unique<TieredDelayedEntry>(0, CompactKey{key}, std::move(fut), 0, 0));
+  }
+
+  bool AnyBlocked() {
+    return DelayedEntryHandler::deps_.HasAny();
   }
 
   void RecordSerialized(std::string key) {
@@ -153,16 +177,19 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   }
 
   void Start() {
-    SerializerBase::RegisterChangeListener(false);
+    SerializerBase::RegisterChangeListener(params_.eventually_consistent);
     journal::StartInThread();
     journal_id_ = journal::RegisterConsumer(this);
+
+    // Start paused so that no delayed entry can be enqueued and resolved by
+    // resolver_fb_/snapshot_fb_ before an explicit Resume() call.
+    delay_driver_.Start();
+    delay_driver_.Pause();
 
     snapshot_fb_ = util::fb2::Fiber{[this] {
       Loop();
       UnregisterChangeListener();
     }};
-
-    delay_driver_.Start();
   }
 
   void Wait() {
@@ -188,11 +215,22 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   // subdriver for delayed entries
   TestDelayDriver delay_driver_;
 
+  util::fb2::Done on_update_entered_, on_update_release_, resume_traversal_;
+
+  // Number of delayed entries currently enqueued.
+  unsigned delayed_enqueued_ = 0;
+
   absl::flat_hash_set<std::string> emitted_baselines_;
   absl::flat_hash_map<std::string, unsigned> journal_writes_;
 };
 
 void TestDriver::Loop() {
+  if (params_.start_paused)
+    resume_traversal_.Wait();
+
+  // Covers cancellation exits; on the normal path the entries were already drained.
+  absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
+
   for (DbIndex snapshot_db_indx = 0; snapshot_db_indx < db_array_.size(); ++snapshot_db_indx) {
     if (!base_cntx_->IsRunning())
       return;
@@ -202,9 +240,8 @@ void TestDriver::Loop() {
 
     PrimeTable* pt = &db_array_[snapshot_db_indx]->prime;
     do {
-      if (!base_cntx_->IsRunning()) {
+      if (!base_cntx_->IsRunning())
         return;
-      }
 
       snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
         ProcessBucket(snapshot_db_indx, it, false);
@@ -250,6 +287,11 @@ void TestDriver::ConsumeJournalChange(const journal::JournalChangeItem& item) {
 
 unsigned TestDriver::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                            bool on_update) {
+  if (on_update && params_.block_on_update) {
+    on_update_entered_.Notify();
+    on_update_release_.Wait();
+  }
+
   unsigned serialized = 0;
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
     DCHECK_EQ(it.GetVersion(), snapshot_version_);
@@ -287,9 +329,53 @@ class SerializerBaseTest : public BaseFamilyTest {
     pp_->at(0)->Await([this, cb] { cb(*driver_); });
   }
 
+  void CancelCntx() {
+    pp_->at(0)->Await([this] { cntx_.ReportCancelError(); });
+  }
+
+  // #1: two offloaded entries both fail to read; the error path must release both bucket latches.
+  bool DelayedErrorLeavesBlocked() {
+    return pp_->at(0)->Await([this] {
+      EmplaceDriverOnThread(false);
+      driver_->EnqueueErroringEntry(0x1000, "k1");
+      driver_->EnqueueErroringEntry(0x2000, "k2");
+      driver_->ProcessDelayedEntries(true, 0, &cntx_);
+      bool blocked = driver_->AnyBlocked();
+      driver_.reset();
+      return blocked;
+    });
+  }
+
+  // #2: a pending offloaded entry, then cancel; the traversal must discard it before returning.
+  bool CancelledTraversalLeaksDelayed() {
+    return pp_->at(0)->Await([this] {
+      EmplaceDriverOnThread(true);
+      driver_->EnqueueErroringEntry(0x1000, "k1");
+      cntx_.ReportCancelError();
+      driver_->Loop();
+      bool blocked = driver_->AnyBlocked();
+      driver_->UnregisterChangeListener();
+      driver_.reset();
+      return blocked;
+    });
+  }
+
   TestDriver::Params driver_params;
 
  private:
+  // Construct the driver (no snapshot fiber); optionally register it as a db_slice change listener.
+  void EmplaceDriverOnThread(bool register_cb) {
+    auto* reg = service_->mutable_registry();
+    boost::intrusive_ptr<Transaction> tx = new Transaction{reg->Find("SAVE")};
+    tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+    tx->ScheduleSingleHop([this, reg, register_cb](Transaction* t, EngineShard* es) {
+      driver_.emplace(driver_params, &t->GetDbSlice(es->shard_id()), &cntx_, reg);
+      if (register_cb)
+        driver_->RegisterChangeListener(false);
+      return OpStatus::OK;
+    });
+  }
+
   void StartOnThread() {
     auto* reg = service_->mutable_registry();
 
@@ -307,30 +393,62 @@ class SerializerBaseTest : public BaseFamilyTest {
   std::optional<TestDriver> driver_;
 };
 
-// Check that basic serialization of debug populate is successful and fullfils all driver asserts
-TEST_F(SerializerBaseTest, StaticDebugPopulate) {
+class SerializerBaseParamTest : public SerializerBaseTest,
+                                public testing::WithParamInterface<bool> {};
+
+INSTANTIATE_TEST_SUITE_P(WithAppender, SerializerBaseParamTest, testing::Bool());
+
+// Snapshots a populated DB while a writer inserts new (omittable) keys.
+// With an appender it also runs non-omittable APPENDs
+TEST_P(SerializerBaseParamTest, StaticWithSetAndAppend) {
+  driver_params.eventually_consistent = true;
+
+  const bool with_appender = GetParam();
   const size_t kKeys = 10000;
+  const size_t kNew = 30000;
+
   Run({"DEBUG", "POPULATE", std::to_string(kKeys)});
   Start();
 
-  // Issue appends at the same time
   std::atomic_bool running = true;
-  auto worker = pp_->at(0)->LaunchFiber([&] {
-    for (unsigned i = 0; running.load(std::memory_order_relaxed) && i < kKeys; i++) {
-      Run("W1", {"APPEND", absl::StrCat("key:", i), "D"});
+  util::fb2::Fiber appender;
+  if (with_appender) {
+    appender = pp_->at(0)->LaunchFiber([&] {
+      for (unsigned i = 0; running.load(std::memory_order_relaxed) && i < kKeys; i++) {
+        Run("W2", {"APPEND", absl::StrCat("key:", i), "D"});
+        util::ThisFiber::Yield();
+      }
+    });
+  }
+  auto setter = pp_->at(0)->LaunchFiber([&] {
+    for (unsigned i = 0; running.load(std::memory_order_relaxed) && i < kNew; i++) {
+      Run("W1", {"SET", absl::StrCat("newkey:", i), "v"});
       util::ThisFiber::Yield();
     }
   });
 
-  // Finish and join worker
-  auto [stats, baselines, _] = Finish();
+  // Wait for the traversal loop to finish while the writers are still running, then finalize.
+  Change([](TestDriver& d) { d.Wait(); });
   running = false;
-  worker.Join();
+  if (with_appender)
+    appender.Join();
+  setter.Join();
+  auto [stats, baselines, journal_writes] = Finish();
 
-  // Expect serialized keys
-  EXPECT_EQ(stats.keys_serialized, kKeys);
+  // Pre-existing keys always exist and must be strictly covered by a baseline (emitted before any
+  // journal write by the ordering invariant).
   for (unsigned i = 0; i < kKeys; i++)
     EXPECT_TRUE(baselines.contains(absl::StrCat("key:", i)));
+
+  // New keys are inserted mid-sweep, so a surviving one must be covered by a baseline or a journal
+  // write; a key omitted past the cursor by a split would be missing from both.
+  for (unsigned i = 0; i < kNew; i++) {
+    auto key = absl::StrCat("newkey:", i);
+    if (Run({"EXISTS", key}).GetInt() == 1) {
+      EXPECT_TRUE(baselines.contains(key) || journal_writes.contains(key))
+          << "silently lost " << key;
+    }
+  }
 }
 
 // Check serialization of lists is successful with parallel additions to list.
@@ -408,9 +526,7 @@ TEST_F(SerializerBaseTest, DelayedAllDeleted) {
   for (unsigned i = 0; i < kKeys; i++)
     Run({"PEXPIRE", absl::StrCat("key:", i), "10"});
 
-  // Start and pause reolution of delayed entries
   Start();
-  Change([](TestDriver& d) { d.delay_driver_.Pause(); });
 
   // Let all values to be expire deleted
   TEST_current_time_ms = TEST_current_time_ms + 100;
@@ -443,9 +559,13 @@ TEST_F(SerializerBaseTest, DelayedEvicted) {
   // Its bucket should not coincide with any of the string keys
   Run({"SADD", "gigantic-set", "first-entry"});
 
-  // Start and pause reolution of delayed entries
   Start();
-  Change([](TestDriver& d) { d.delay_driver_.Pause(); });
+
+  // Wait until at least one delayed entry exists.
+  Change([](TestDriver& d) {
+    while (d.delayed_enqueued_ == 0)
+      util::ThisFiber::Yield();
+  });
 
   // Enable cache mode and grow set
   shard_set->TEST_EnableCacheMode();
@@ -478,6 +598,42 @@ TEST_F(SerializerBaseTest, DelayedEvicted) {
 
   // Currently we write baselines before eviction
   EXPECT_EQ(baselines.size(), kKeys + 1);
+}
+
+// Cancelling mid-sync must not let UnregisterChangeListener observe a bucket latch still held
+// by an OnChange serialization suspended inside the Increment..Decrement window.
+TEST_F(SerializerBaseTest, UnregisterWaitsForInflightOnChange) {
+  driver_params = {.start_paused = true, .block_on_update = true};
+
+  Run({"DEBUG", "POPULATE", "100"});
+  Start();
+
+  auto writer = pp_->at(0)->LaunchFiber([&] { Run("W1", {"APPEND", "key:1", "D"}); });
+  Change([](TestDriver& d) { d.on_update_entered_.Wait(); });
+
+  CancelCntx();
+  Change([](TestDriver& d) { d.resume_traversal_.Notify(); });
+  Change([](TestDriver&) {
+    for (unsigned i = 0; i < 20; ++i)
+      util::ThisFiber::Yield();
+  });
+
+  Change([](TestDriver& d) { d.on_update_release_.Notify(); });
+
+  writer.Join();
+  Finish();
+}
+
+// A failed tiered read must not leak the other extracted entries' bucket latches.
+TEST_F(SerializerBaseTest, DelayedEntriesErrorReleasesLatches) {
+  Run({"DEBUG", "POPULATE", "1"});
+  EXPECT_FALSE(DelayedErrorLeavesBlocked());
+}
+
+// A cancelled traversal must discard pending offloaded entries, not leak their bucket latches.
+TEST_F(SerializerBaseTest, CancelledTraversalDiscardsDelayed) {
+  Run({"DEBUG", "POPULATE", "1"});
+  EXPECT_FALSE(CancelledTraversalLeaksDelayed());
 }
 
 }  // namespace dfly

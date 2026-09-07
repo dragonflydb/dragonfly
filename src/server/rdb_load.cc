@@ -1389,6 +1389,7 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_ZSET_ZIPLIST:
     case RDB_TYPE_STRING:
     case RDB_TYPE_JSON:
+    case RDB_TYPE_SET_LISTPACK:
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
@@ -1407,17 +1408,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_STREAM_LISTPACKS_2:
     case RDB_TYPE_STREAM_LISTPACKS_3:
       iores = ReadStreams(rdbtype);
-      break;
-    case RDB_TYPE_SET_LISTPACK:
-      // We need to deal with protocol versions 9 and older because in these
-      // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
-      // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
-      if (rdb_version_ < 10) {
-        // consider it RDB_TYPE_JSON_OLD (20)
-        iores = ReadGeneric(RDB_TYPE_JSON);
-      } else {
-        iores = ReadGeneric(rdbtype);
-      }
       break;
     case RDB_TYPE_MODULE_2:
       iores = ReadRedisModule2();
@@ -1481,6 +1471,12 @@ error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest, bool big_string_split)
     }
   }
 
+  // Reject a length beyond the remaining input before allocating or reserving it.
+  if (len > RemainingBytes()) {
+    LOG(ERROR) << "Bad string length " << len;
+    return RdbError(errc::rdb_file_corrupted);
+  }
+
   if (big_string_split && len > kMaxStringSize) {
     pending_read_.remaining = len - kMaxStringSize;
     pending_read_.reserve = len;
@@ -1528,6 +1524,12 @@ auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
+  // Reject a compressed length beyond the remaining input before allocating it.
+  if (clen > RemainingBytes()) {
+    LOG(ERROR) << "Bad compressed length " << clen;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
   res.compressed_blob.resize(clen);
   /* Load the compressed representation and uncompress it to target. */
   error_code ec = FetchBuf(clen, res.compressed_blob.data());
@@ -1544,6 +1546,11 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
     len = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(NULL), len);
+    if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
+      return Unexpected(errc::empty_key);
+    // Reject a member count beyond the remaining input before it is reserved.
+    if (len > RemainingBytes())
+      return Unexpected(errc::rdb_file_corrupted);
     if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
       len *= 2;
     }
@@ -1623,6 +1630,11 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
     len = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(NULL), len);
+    if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
+      return Unexpected(errc::empty_key);
+    // Reject a field count beyond the remaining input before it is reserved.
+    if (len > RemainingBytes())
+      return Unexpected(errc::rdb_file_corrupted);
 
     if (rdbtype == RDB_TYPE_HASH) {
       len *= 2;
@@ -1663,6 +1675,9 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
     zsetlen = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
+    // Reject a member count beyond the remaining input before it is reserved.
+    if (zsetlen > RemainingBytes())
+      return Unexpected(errc::rdb_file_corrupted);
     pending_read_.reserve = zsetlen;
   }
 
@@ -1944,7 +1959,7 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     }  // while (consumers_num)
   }    // while (cgroup_num)
 
-  return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
+  return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
 auto RdbLoaderBase::ReadRedisModule2() -> io::Result<OpaqueObj> {
@@ -2003,15 +2018,24 @@ auto RdbLoaderBase::ReadSBFImpl(bool filter_is_chunked) -> io::Result<OpaqueObj>
     if (options != 0)
       return Unexpected(errc::rdb_file_corrupted);
     SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
-    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
-    if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
+    // A later expansion multiplies by grow_factor, so guard it as LoadSBFHeader does - RESTORE
+    // and replicas reach this without going through that check.
+    if (!std::isfinite(res.grow_factor) || res.grow_factor < 1.0)
       return Unexpected(errc::rdb_file_corrupted);
-    }
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
     SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
     SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
     SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
 
     SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+
+    // A filterless SBF is a BF.LOADCHUNK restore that stopped after the header: no probability
+    // and no sizes yet. A populated one must satisfy the loader's fp_prob range.
+    const bool state_ok = num_filters == 0 ? res.fp_prob == 0 && res.prev_size == 0 &&
+                                                 res.current_size == 0 && res.max_capacity == 0
+                                           : res.fp_prob > 0 && res.fp_prob <= kMaxSBFFpProb;
+    if (!state_ok)
+      return Unexpected(errc::rdb_file_corrupted);
   } else {
     num_filters = pending_read_.remaining;
     pending_read_.remaining = 0;
@@ -2670,7 +2694,12 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     ++keys_loaded;
-    RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+    if (auto ec = LoadKeyValPair(type, &settings); ec) {
+      if (ec != RdbError(errc::empty_key))
+        return ec;
+      // Nothing is left of the value to consume; skip the key and keep loading.
+      LOG(WARNING) << "Skipping empty key: " << absl::CHexEscape(last_key_loaded_);
+    }
 
     VLOG(2) << "LoadKeyValPair key=" << last_key_loaded_ << " rdb_type=" << type
             << " db= " << cur_db_index_;
@@ -2690,6 +2719,33 @@ error_code RdbLoader::Load(io::Source* src) {
   return kOk;
 }
 
+void RdbLoader::DiscardChunkedValuesOnFinish() {
+  using Values = std::vector<std::unique_ptr<PrimeValue>>;
+  std::vector<Values> by_shard(shard_set->size());
+  {
+    std::unique_lock l{now_chunked_mu_};
+    for (auto& [key, pv] : now_chunked_)
+      by_shard[Shard(key.second, shard_set->size())].push_back(std::move(pv));
+    now_chunked_.clear();
+  }
+
+  BlockingCounter bc{0};
+  for (ShardId sid = 0; sid < by_shard.size(); ++sid) {
+    auto& values = by_shard[sid];
+    if (values.empty())
+      continue;
+
+    LOG(ERROR) << "unexpected " << values.size() << " values found in chunk map on RDB load finish";
+    bc->Add(1);
+    shard_set->Add(sid, [values = std::move(values), bc]() mutable {
+      values.clear();
+      bc->Dec();
+    });
+  }
+
+  bc->Wait();
+}
+
 void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   BlockingCounter bc(shard_set->size());
   for (unsigned i = 0; i < shard_set->size(); ++i) {
@@ -2705,7 +2761,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     GetCurrentDbSlice().DecrLoadInProgress();
   }
 
-  now_chunked_.clear();
+  DiscardChunkedValuesOnFinish();
 
   absl::Duration dur = absl::Now() - start_time;
   load_time_ = double(absl::ToInt64Milliseconds(dur)) / 1000;
@@ -3119,13 +3175,22 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   PrimeValue* pv_ptr = &pv;
   DbIndex db_ind = db_cntx.db_index;
 
+  LoadConfig config_copy = item->load_config;
+  ChunkedKey chunked_key{db_ind, item->key};
+
+  bool failed_should_cleanup = false;
+  absl::Cleanup maybe_remove_chunk_entry = [&] {
+    if (!failed_should_cleanup)
+      return;
+    std::unique_lock l{now_chunked_mu_};
+    now_chunked_.erase(chunked_key);
+  };
+
   auto error_msg = [](const auto* item, auto db_ind) {
     return absl::StrCat("Found empty key: ", item->key, " in DB ", db_ind, " rdb_type ",
                         item->val.rdb_type);
   };
 
-  LoadConfig config_copy = item->load_config;
-  ChunkedKey chunked_key{db_ind, item->key};
   if (item->load_config.chunked && item->load_config.append) {
     std::unique_lock lk{now_chunked_mu_};
     if (auto it = now_chunked_.find(chunked_key); it != now_chunked_.end()) {
@@ -3145,6 +3210,7 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
   }
 
   if (auto ec = FromOpaque(item->val, config_copy, pv_ptr); ec) {
+    failed_should_cleanup = item->load_config.chunked;
     if (ec.value() == errc::value_expired) {
       // hmap and sset values can expire and we ok with it,
       // so we don't set ec_ in this case

@@ -330,3 +330,37 @@ async def test_command_empty_key(df_factory):
     assert res == 1
     res = await client.execute_command("KEYS *")
     assert len(res) == 1
+
+
+@dfly_args({"proactor_threads": 1})
+async def test_expired_evicted_counters_zero_initialised(
+    async_client: aioredis.Redis, df_server: DflyInstance
+):
+    """
+    expired_keys_total and evicted_keys_total must be exported with a value of 0 on a
+    fresh instance, and must still expose a series after CONFIG RESETSTAT.
+
+    Before the fix, the HELP/TYPE header was emitted without any sample while the
+    counter was zero, so Prometheus ingested no series at all until the first expiry or
+    eviction -- which also made rate()/increase() under-count that very first burst,
+    since there was no earlier sample to diff against.
+    """
+
+    # prometheus_client strips the `_total` suffix from the family name.
+    families = ("dragonfly_expired_keys", "dragonfly_evicted_keys")
+
+    async def db0_values():
+        metrics = await df_server.metrics()
+        values = {}
+        for family in families:
+            assert family in metrics, f"{family} is missing from /metrics"
+            samples = {s.labels["db"]: s.value for s in metrics[family].samples}
+            assert "db0" in samples, f"{family} exposes no db0 sample, only {sorted(samples)}"
+            values[family] = samples["db0"]
+        return values
+
+    assert await db0_values() == {family: 0 for family in families}
+
+    await async_client.execute_command("CONFIG RESETSTAT")
+
+    assert await db0_values() == {family: 0 for family in families}

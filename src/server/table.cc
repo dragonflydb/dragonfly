@@ -124,10 +124,11 @@ DbTable::~DbTable() {
 }
 
 void DbTable::Clear() {
-  prime.size();
   prime.Clear();
   mcflag.Clear();
   stats = DbTableStats{};
+  expire_cursor = PrimeTable::Cursor::end();
+  segment_defrag_cursor = PrimeTable::Cursor::end();
 }
 
 PrimeIterator DbTable::Launder(PrimeIterator it, string_view key) {

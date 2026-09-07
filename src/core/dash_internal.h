@@ -1353,6 +1353,14 @@ void Segment<Key, Value, Policy>::Split(HFunc&& hfn, Segment* dest_right, MoveCb
     stash.ForEachSlot(std::move(cb));
     stash.ClearSlots(invalid_mask);
   }
+
+  // Propagate parent version - the version is never expected to magically decrease (drop to 0)
+  if constexpr (kUseVersion) {
+    for (unsigned i = 0; i < kBucketNum; ++i) {
+      if (dest_right->bucket_[i].IsEmpty())
+        dest_right->bucket_[i].SetVersion(bucket_[i].GetVersion());
+    }
+  }
 }
 
 template <typename Key, typename Value, typename Policy>

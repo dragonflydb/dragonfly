@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "base/logging.h"
 #include "base/pmr/memory_resource.h"
 #include "core/mi_memory_resource.h"
 #include "core/search/base.h"
@@ -388,7 +389,7 @@ class ShardDocIndex {
     DocId last_id_ = 0;
   };
   // Index must be rebuilt at least once after intialization
-  explicit ShardDocIndex(std::shared_ptr<const DocIndex> index);
+  explicit ShardDocIndex(std::shared_ptr<const DocIndex> index, unsigned* hash_index_count);
 
   // Possibly blocking to stop indexing job
   ~ShardDocIndex();
@@ -537,6 +538,26 @@ class ShardDocIndex {
   size_t GetNonPmrMemoryUsage() const;
 
  private:
+  struct HashIndexLifetime {
+    explicit HashIndexLifetime(unsigned* count) : count_{count} {
+      if (count_)
+        ++*count_;
+    }
+
+    ~HashIndexLifetime() {
+      if (count_) {
+        DCHECK_GT(*count_, 0u);
+        --*count_;
+      }
+    }
+
+    HashIndexLifetime(const HashIndexLifetime&) = delete;
+    HashIndexLifetime& operator=(const HashIndexLifetime&) = delete;
+
+   private:
+    unsigned* count_;
+  };
+
   // Common doc-loading loop used by SearchForAggregator and LoadHnswRangeDocsForAggregator.
   // Loads, serializes, and (optionally) injects the YIELD_DISTANCE_AS alias for each doc.
   std::vector<SearchDocData> LoadDocEntriesWithScores(
@@ -566,6 +587,10 @@ class ShardDocIndex {
 
  private:
   std::shared_ptr<const DocIndex> base_;
+
+  // Declared before index resources so its destructor releases the resident gate last.
+  HashIndexLifetime hash_index_lifetime_;
+
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
   Synonyms synonyms_;
@@ -614,6 +639,11 @@ class ShardDocIndices {
 
   std::vector<std::string> GetIndexNames() const;
 
+  // HASH values in database 0 stay resident while any HASH index exists on this shard.
+  bool HasHashIndexes() const {
+    return hash_index_count_ != 0;
+  }
+
   /* Use AddDoc and RemoveDoc only if pv object type is json or hset */
   void AddDoc(std::string_view key, const DbContext& db_cnt, PrimeValue* pv);
 
@@ -635,6 +665,7 @@ class ShardDocIndices {
 
  private:
   MiMemoryResource local_mr_;
+  unsigned hash_index_count_ = 0;
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
 
   std::string next_defrag_index_;

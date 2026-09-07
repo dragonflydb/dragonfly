@@ -1,5 +1,5 @@
 #!/bin/bash
-# Sync the Valkey TCL test harness + stream test files into ./upstream (gitignored),
+# Sync the Valkey TCL test harness + stream/pubsub test files into ./upstream (gitignored),
 # pinned to a specific revision. Mirrors tests/dragonfly/valkey_search/sync-valkey-search-tests.sh.
 #
 # Usage: ./sync-valkey-tcl-tests.sh [<git-sha-or-tag>]
@@ -29,6 +29,7 @@ cp -r "$TMP/tests/helpers"                        "$DEST/tests/"
 cp -r "$TMP/tests/assets"                         "$DEST/tests/"
 cp    "$TMP/tests/unit/type/stream.tcl"           "$DEST/tests/unit/type/"
 cp    "$TMP/tests/unit/type/stream-cgroups.tcl"   "$DEST/tests/unit/type/"
+cp    "$TMP/tests/unit/pubsub.tcl"                "$DEST/tests/unit/"
 echo "$REV" > "$DEST/TESTED_REVISION.txt"
 
-echo "Done. Synced harness + $(ls "$DEST"/tests/unit/type | wc -l) stream test file(s) to $DEST"
+echo "Done. Synced harness + $(find "$DEST/tests/unit" -name "*.tcl" | wc -l) test file(s) to $DEST"

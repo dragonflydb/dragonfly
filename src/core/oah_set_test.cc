@@ -38,14 +38,15 @@ static string KeyOf(OAHEntry e) {
   return string{key.view()};
 }
 
+[[maybe_unused]] const bool kThreadLocalAllocatorsInitialized = [] {
+  auto* tlh = mi_heap_get_backing();
+  init_zmalloc_threadlocal(tlh);
+  InitTLStatelessAllocMR(PMR_NS::get_default_resource());
+  return true;
+}();
+
 class OAHSetTest : public ::testing::Test {
  protected:
-  static void SetUpTestSuite() {
-    auto* tlh = mi_heap_get_backing();
-    init_zmalloc_threadlocal(tlh);
-    InitTLStatelessAllocMR(PMR_NS::get_default_resource());
-  }
-
   void SetUp() override {
     ss_ = new OAHSet;
     generator_.seed(0);
@@ -1427,12 +1428,12 @@ void BM_Grow(benchmark::State& state) {
     state.ResumeTiming();
     for (const auto& str : strs) {
       tmp.Add(str);
-      if (tmp.BucketCount() > elems) {
+      if (tmp.BucketCount() >= elems) {
         break;  // we grew
       }
     }
 
-    CHECK_GT(tmp.BucketCount(), elems);
+    CHECK_EQ(tmp.BucketCount(), elems);
   }
 }
 BENCHMARK(BM_Grow);
