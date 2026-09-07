@@ -531,6 +531,7 @@ LARGE_HASH_CHUNK_FIELDS = 1_000_000
 
 @pytest.mark.large
 @pytest.mark.opt_only
+@pytest.mark.skip(reason="manual benchmark, run explicitly to compare shutdown timing")
 async def test_shutdown_large_single_hash(df_factory: DflyInstanceFactory):
     """
     Seeds a single HASH key with millions of sequential fields, each holding a
