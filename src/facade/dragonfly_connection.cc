@@ -13,7 +13,9 @@
 #include <absl/time/time.h>
 
 #include <algorithm>
+#include <memory>
 #include <numeric>
+#include <unordered_map>
 #include <variant>
 
 #include "base/cycle_clock.h"
@@ -4255,13 +4257,18 @@ void Connection::EmitV2QueueTelemetry() const {
   constexpr size_t kReplyBufferedBytes = 10;
   constexpr size_t kReplyBufferedIovecs = 11;
 
-  if (tracy_queue_plot_names_[kPendingInput].empty()) {
+  static thread_local std::unordered_map<uint32_t, std::unique_ptr<std::array<std::string, 12> > >
+      plot_names_by_connection;
+  auto [names_it, inserted] = plot_names_by_connection.try_emplace(id_);
+  if (inserted) {
+    names_it->second = std::make_unique<std::array<std::string, 12> >();
     for (size_t index{}; index < kQueuePlotZones.size(); ++index) {
       const std::string_view metric_name{TracyManualZoneName(kQueuePlotZones[index])};
-      tracy_queue_plot_names_[index] =
+      (*names_it->second)[index] =
           absl::StrCat("v2.conn_", id_, ".", metric_name.substr(std::string_view{"v2."}.size()));
     }
   }
+  const auto& plot_names = *names_it->second;
 
   if (!tracy_queue_plots_configured_) {
     constexpr std::array<tracy::PlotFormatType, 12> kQueuePlotFormats{
@@ -4270,9 +4277,8 @@ void Connection::EmitV2QueueTelemetry() const {
         tracy::PlotFormatType::Number, tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory,
         tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory, tracy::PlotFormatType::Number,
     };
-    for (size_t index{}; index < tracy_queue_plot_names_.size(); ++index) {
-      TracyPlotConfig(tracy_queue_plot_names_[index].c_str(), kQueuePlotFormats[index], true, false,
-                      0);
+    for (size_t index{}; index < plot_names.size(); ++index) {
+      TracyPlotConfig(plot_names[index].c_str(), kQueuePlotFormats[index], true, false, 0);
     }
     tracy_queue_plots_configured_ = true;
   }
@@ -4300,62 +4306,55 @@ void Connection::EmitV2QueueTelemetry() const {
   };
 
   if (should_emit(kPendingInput, values[kPendingInput])) {
-    DFLY_TRACY_CONNECTION_PLOT_NAMED(
-        kV2PendingInput, tracy_queue_plot_names_[kPendingInput].c_str(), values[kPendingInput]);
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PendingInput, plot_names[kPendingInput].c_str(),
+                                     values[kPendingInput]);
   }
   if (should_emit(kIoBufUnreadBytes, values[kIoBufUnreadBytes])) {
-    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2IoBufUnreadBytes,
-                                     tracy_queue_plot_names_[kIoBufUnreadBytes].c_str(),
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2IoBufUnreadBytes, plot_names[kIoBufUnreadBytes].c_str(),
                                      values[kIoBufUnreadBytes]);
   }
   if (should_emit(kAdminQueueLength, values[kAdminQueueLength])) {
-    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2AdminQueueLength,
-                                     tracy_queue_plot_names_[kAdminQueueLength].c_str(),
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2AdminQueueLength, plot_names[kAdminQueueLength].c_str(),
                                      values[kAdminQueueLength]);
   }
   if (should_emit(kAdminQueueBytes, values[kAdminQueueBytes])) {
-    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2AdminQueueBytes,
-                                     tracy_queue_plot_names_[kAdminQueueBytes].c_str(),
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2AdminQueueBytes, plot_names[kAdminQueueBytes].c_str(),
                                      values[kAdminQueueBytes]);
   }
   if (should_emit(kPipelineQueueLength, values[kPipelineQueueLength])) {
     DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineQueueLength,
-                                     tracy_queue_plot_names_[kPipelineQueueLength].c_str(),
+                                     plot_names[kPipelineQueueLength].c_str(),
                                      values[kPipelineQueueLength]);
   }
   if (should_emit(kPipelineQueueBytes, values[kPipelineQueueBytes])) {
-    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineQueueBytes,
-                                     tracy_queue_plot_names_[kPipelineQueueBytes].c_str(),
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineQueueBytes, plot_names[kPipelineQueueBytes].c_str(),
                                      values[kPipelineQueueBytes]);
   }
   if (should_emit(kPipelineWaitingDispatch, values[kPipelineWaitingDispatch])) {
     DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineWaitingDispatch,
-                                     tracy_queue_plot_names_[kPipelineWaitingDispatch].c_str(),
+                                     plot_names[kPipelineWaitingDispatch].c_str(),
                                      values[kPipelineWaitingDispatch]);
   }
   if (should_emit(kPipelineInFlight, values[kPipelineInFlight])) {
-    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineInFlight,
-                                     tracy_queue_plot_names_[kPipelineInFlight].c_str(),
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineInFlight, plot_names[kPipelineInFlight].c_str(),
                                      values[kPipelineInFlight]);
   }
   if (should_emit(kSharedOverflowBytes, values[kSharedOverflowBytes])) {
     DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2SharedOverflowBytes,
-                                     tracy_queue_plot_names_[kSharedOverflowBytes].c_str(),
+                                     plot_names[kSharedOverflowBytes].c_str(),
                                      values[kSharedOverflowBytes]);
   }
   if (should_emit(kPipelineReplyReady, values[kPipelineReplyReady])) {
-    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineReplyReady,
-                                     tracy_queue_plot_names_[kPipelineReplyReady].c_str(),
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineReplyReady, plot_names[kPipelineReplyReady].c_str(),
                                      values[kPipelineReplyReady]);
   }
   if (should_emit(kReplyBufferedBytes, values[kReplyBufferedBytes])) {
-    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2ReplyBufferedBytes,
-                                     tracy_queue_plot_names_[kReplyBufferedBytes].c_str(),
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2ReplyBufferedBytes, plot_names[kReplyBufferedBytes].c_str(),
                                      values[kReplyBufferedBytes]);
   }
   if (should_emit(kReplyBufferedIovecs, values[kReplyBufferedIovecs])) {
     DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2ReplyBufferedIovecs,
-                                     tracy_queue_plot_names_[kReplyBufferedIovecs].c_str(),
+                                     plot_names[kReplyBufferedIovecs].c_str(),
                                      values[kReplyBufferedIovecs]);
   }
   tracy_queue_plot_values_valid_ = true;

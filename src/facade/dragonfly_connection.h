@@ -794,7 +794,6 @@ class Connection : public util::Connection {
 
   uint32_t id_;
 #ifdef TRACY_ENABLE
-  mutable std::array<std::string, 12> tracy_queue_plot_names_;
   mutable uint64_t tracy_queue_plot_connection_id_ = 0;
   mutable bool tracy_queue_plots_configured_ = false;
   mutable bool tracy_queue_plot_values_valid_ = false;
