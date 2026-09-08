@@ -627,13 +627,18 @@ unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score) {
   return nullptr;
 }
 
-SortedMap::SortedMap()
-    : score_map(new ScoreMap), score_tree(new ScoreTree(StatelessAllocator<char>::resource())) {
+SortedMap::SortedMap() {
+  PMR_NS::memory_resource* mr = StatelessAllocator<char>::resource();
+  score_map = new (mr->allocate(sizeof(ScoreMap), alignof(ScoreMap))) ScoreMap();
+  score_tree = new (mr->allocate(sizeof(ScoreTree), alignof(ScoreTree))) ScoreTree(mr);
 }
 
 SortedMap::~SortedMap() {
-  delete score_tree;
-  delete score_map;
+  PMR_NS::memory_resource* mr = StatelessAllocator<char>::resource();
+  score_tree->~ScoreTree();
+  mr->deallocate(score_tree, sizeof(ScoreTree), alignof(ScoreTree));
+  score_map->~ScoreMap();
+  mr->deallocate(score_map, sizeof(ScoreMap), alignof(ScoreMap));
 }
 
 // Three way comparison of q and key.
