@@ -1361,6 +1361,65 @@ async def test_partial_sync(df_factory, proactors, proxy_factory):
     assert len(lines) == 1
 
 
+async def test_unused_journal_stops_and_restarts(df_factory, proxy_factory):
+    master = df_factory.create(
+        proactor_threads=2,
+        shard_repl_backlog_time_ms=0,
+        shard_repl_backlog_max_bytes="1b",
+    )
+    replica = df_factory.create(proactor_threads=2)
+    df_factory.start_all([master, replica])
+    cm, cr = master.client(), replica.client()
+    proxy = await proxy_factory(master.port)
+
+    await cr.execute_command(f"REPLICAOF localhost {proxy.port}")
+    await wait_for_replicas_state(cr)
+    # key acts like a log collecting all phases
+    await cm.append("key", "base")
+    await check_all_replicas_finished([cr], cm)
+    assert await cr.execute_command("DFLY REPLICAOFFSET") == [0]
+
+    await proxy.close()
+
+    @assert_eventually
+    async def replica_disconnected():
+        assert (await cm.info("replication"))["connected_slaves"] == 0
+
+    await replica_disconnected()
+    last_offset = (await cm.execute_command("DFLY REPLICAOFFSET"))[0]
+    # backlog retains just one item. second write evicts resume boundary.
+    await cm.append("key", "_first")
+    await cm.append("key", "_second")
+
+    @assert_eventually
+    async def journal_stopped():
+        assert await cm.execute_command("DFLY REPLICAOFFSET") == [0]
+        info = await cm.info("memory")
+        assert info["psync_buffer_size"] == info["psync_buffer_bytes"] == 0
+
+    await journal_stopped()
+    await cm.append("key", "_unjournaled")
+    await journal_stopped()
+
+    await proxy.start_serving()
+    await check_all_replicas_finished([cr], cm)
+    assert await cr.get("key") == "base_first_second_unjournaled"
+    assert (await cm.execute_command("DFLY REPLICAOFFSET"))[0] > last_offset
+    await cm.append("key", "_streamed")
+    await check_all_replicas_finished([cr], cm)
+    assert await cr.get("key") == "base_first_second_unjournaled_streamed"
+
+    await cm.aclose()
+    await cr.aclose()
+    master.stop()
+    replica.stop()
+    lines = master.find_in_logs(
+        f"Stopped unused journal on shard 0: resume boundary {last_offset} evicted"
+    )
+    assert len(lines) == 1
+    assert len(master.find_in_logs("Partial sync requested from stale LSN")) == 1
+
+
 async def test_partial_sync_keeps_oversized_backlog_record(df_factory, proxy_factory):
     master = df_factory.create(
         proactor_threads=2,

@@ -176,6 +176,10 @@ void DflyCmd::ReplicaInfo::Cancel() {
     }
     VLOG(2) << "After flow cleanup " << shard->shard_id();
     flow->conn = nullptr;
+    if (flow->journal_held) {
+      journal::ReleaseUser();
+      flow->journal_held = false;
+    }
   });
   // Wait for error handler to quit.
   exec_st_.JoinErrorHandler();
@@ -336,7 +340,10 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
       return;
     }
 
-    journal::StartInThread();
+    if (!flow.journal_held) {
+      journal::AcquireUser();
+      flow.journal_held = true;
+    }
 
     std::optional<Replica::LastMasterSyncData> my_last_master = sf_->GetLastMasterData();
 
@@ -1048,6 +1055,7 @@ void FlowInfo::TryShutdownSocket() {
 }
 
 FlowInfo::~FlowInfo() {
+  DCHECK(!journal_held);
 }
 
 FlowInfo::FlowInfo() {

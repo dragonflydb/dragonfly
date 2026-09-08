@@ -14,6 +14,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/journal/streamer.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
@@ -36,6 +37,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
                      OutgoingMigration* om)
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), &exec_st_) {
+    journal::AcquireUser();
     // Flows only report errors; teardown is owned by the migration-level handler
     // (OutgoingMigration::OnAttemptError), which ResetError() joins at every attempt boundary.
     // A forwarder that fires late (after the boundary) injects an error into the new attempt
@@ -44,6 +46,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   ~SliceSlotMigration() {
+    DCHECK(cancel_done_->IsCompleted());
     CloseSocket();
     // it should already be unregistered, this cancel was added to avoid race condition that we
     // possibly have.
@@ -94,9 +97,18 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   void Cancel() {
+    auto done = cancel_done_;
+    if (cancel_started_) {
+      done->Wait();
+      return;
+    }
+
+    cancel_started_ = true;
     // Shutdown socket and allow IO loops to return.
     ShutdownSocket();
     streamer_.Cancel();
+    journal::ReleaseUser();
+    done->Dec();
   }
 
   void Finalize(long attempt) {
@@ -112,6 +124,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  private:
   ExecutionState exec_st_;
   RestoreStreamer streamer_;
+  bool cancel_started_ = false;
+  fb2::BlockingCounter cancel_done_{1};
 };
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
@@ -132,6 +146,7 @@ OutgoingMigration::~OutgoingMigration() {
   // owner of the db tables
   OnAllShards([](auto& migration) {
     if (migration) {
+      migration->Cancel();
       migration.reset();
     }
   });
@@ -307,7 +322,6 @@ void OutgoingMigration::SyncFb() {
         migration->Cancel();
       }
       DbSlice& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
-      journal::StartInThread();
       migration = std::make_unique<SliceSlotMigration>(&db_slice, server(),
                                                        migration_info_.slot_ranges, this);
     });

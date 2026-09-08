@@ -24,6 +24,11 @@ std::error_code Close();
 
 //******* The following functions must be called in the context of the owning shard *********//
 
+void AcquireUser(bool start_journal = true);
+void ReleaseUser();
+
+void MaybeStop();
+
 unsigned GetCallbackCount();
 inline bool HasRegisteredCallbacks() {
   return GetCallbackCount() > 0;
