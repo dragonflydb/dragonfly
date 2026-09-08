@@ -150,6 +150,9 @@ class TieredStorage : public TieredStorageBase {
                     std::function<void(io::Result<tiering::Decoder*>)> cb,
                     tiering::ReadOptions options = {});
 
+  // Whether newly offloaded values should be cooled (added to cool queue) now
+  bool ShouldCool() const;
+
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
