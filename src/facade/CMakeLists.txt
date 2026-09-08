@@ -25,6 +25,7 @@ helio_cxx_test(reply_builder_test facade_test LABELS DFLY)
 helio_cxx_test(resp_parser_test facade_test LABELS DFLY)
 helio_cxx_test(cmd_arg_parser_test facade_test LABELS DFLY)
 helio_cxx_test(disk_backed_queue_test facade_test LABELS DFLY)
+helio_cxx_test(proactor_read_buffer_test dfly_facade LABELS DFLY)
 
 add_executable(ok_backend ok_main.cc)
 cxx_link(ok_backend dfly_facade)
