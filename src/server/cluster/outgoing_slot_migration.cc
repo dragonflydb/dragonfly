@@ -339,10 +339,20 @@ void OutgoingMigration::SyncFb() {
     }
 
     long attempt = 0;
+    // Attempts are spaced 500ms apart, so this is ~15s of failed finalize attempts.
+    constexpr long kStalledFinalizeAttempts = 30;
     while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
       // Break loop and don't sleep in case of C_FATAL, or a reported error (e.g. OOM on ACK).
       if (GetState() == MigrationState::C_FATAL || !exec_st_.IsRunning()) {
         break;
+      }
+      if (attempt >= kStalledFinalizeAttempts) {
+        auto err = absl::StrCat("Migration finalization stuck after ", attempt, " attempts for ",
+                                cf_->MyID(), " : ", migration_info_.node_info.id);
+        LOG_EVERY_T(ERROR, 1) << err;
+        if (attempt == kStalledFinalizeAttempts) {
+          SetLastError(std::move(err));
+        }
       }
       // Process commands that were on pause and try again
       VLOG(1) << "Waiting for migration to finalize...";
