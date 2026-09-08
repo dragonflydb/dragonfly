@@ -6,6 +6,7 @@
 
 #include <absl/base/internal/endian.h>
 
+#include <memory>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -508,16 +509,16 @@ class CompactObj {
   static MemoryResource* memory_resource();  // thread-local.
 
   template <typename T, typename... Args> static T* AllocateMR(Args&&... args) {
-    void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
+    T* ptr = static_cast<T*>(memory_resource()->allocate(sizeof(T), alignof(T)));
     if constexpr (std::is_constructible_v<T, decltype(memory_resource())> && sizeof...(args) == 0)
-      return new (ptr) T{memory_resource()};
+      return std::construct_at(ptr, memory_resource());
     else
-      return new (ptr) T{std::forward<Args>(args)...};
+      return std::construct_at(ptr, std::forward<Args>(args)...);
   }
 
   template <typename T> static void DeleteMR(void* ptr) {
     T* t = (T*)ptr;
-    t->~T();
+    std::destroy_at(t);
     memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 

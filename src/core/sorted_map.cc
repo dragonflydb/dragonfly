@@ -7,6 +7,7 @@
 #include <absl/strings/str_cat.h>
 
 #include <cmath>
+#include <memory>
 
 extern "C" {
 #include "redis/listpack.h"
@@ -629,15 +630,17 @@ unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score) {
 
 SortedMap::SortedMap() {
   PMR_NS::memory_resource* mr = StatelessAllocator<char>::resource();
-  score_map = new (mr->allocate(sizeof(ScoreMap), alignof(ScoreMap))) ScoreMap();
-  score_tree = new (mr->allocate(sizeof(ScoreTree), alignof(ScoreTree))) ScoreTree(mr);
+  score_map =
+      std::construct_at(static_cast<ScoreMap*>(mr->allocate(sizeof(ScoreMap), alignof(ScoreMap))));
+  score_tree = std::construct_at(
+      static_cast<ScoreTree*>(mr->allocate(sizeof(ScoreTree), alignof(ScoreTree))), mr);
 }
 
 SortedMap::~SortedMap() {
   PMR_NS::memory_resource* mr = StatelessAllocator<char>::resource();
-  score_tree->~ScoreTree();
+  std::destroy_at(score_tree);
   mr->deallocate(score_tree, sizeof(ScoreTree), alignof(ScoreTree));
-  score_map->~ScoreMap();
+  std::destroy_at(score_map);
   mr->deallocate(score_map, sizeof(ScoreMap), alignof(ScoreMap));
 }
 
@@ -1164,8 +1167,8 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   unsigned int vlen;
   long long vlong;
 
-  void* ptr = res->allocate(sizeof(SortedMap), alignof(SortedMap));
-  SortedMap* zs = new (ptr) SortedMap;
+  SortedMap* zs = std::construct_at(
+      static_cast<SortedMap*>(res->allocate(sizeof(SortedMap), alignof(SortedMap))));
 
   eptr = lpSeek(zl, 0);
   if (eptr != NULL) {
