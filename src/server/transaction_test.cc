@@ -15,6 +15,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
 #include "server/engine_shard_set.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 #include "util/fibers/pool.h"
@@ -421,6 +422,82 @@ TEST_F(TransactionTest, LazyLockDisjointKeyMarkedOutOfOrder) {
 
   ASSERT_TRUE(v_done.WaitFor(5s)) << "V was never run after Z concluded";
   fb_v.Join();
+}
+
+namespace {
+
+TypeMemDeltas DeltaDiff(const TypeMemDeltas& before, const TypeMemDeltas& after) {
+  TypeMemDeltas diffs = after;
+  for (size_t i = 0; i < before.size(); ++i)
+    diffs[i] -= before[i];
+  return diffs;
+}
+
+void AllButOneDeltaIs(const TypeMemDeltas& deltas, size_t pos, int64_t expected) {
+  ASSERT_GT(deltas.size(), pos);
+  for (size_t i = 0; i < deltas.size(); ++i)
+    if (i == pos)
+      ASSERT_EQ(deltas[i], expected);
+    else
+      ASSERT_EQ(deltas[i], 0);
+}
+
+template <typename F> auto WithMemTrack(int obj_type, F f) {
+  MemoryScope scope(obj_type);
+  return f();
+}
+
+}  // namespace
+
+TEST_F(TransactionTest, DeltaChanges) {
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+    void* p = nullptr;
+    const auto before = shard->type_mem_delta();
+    WithMemTrack(OBJ_STRING, [&] { p = mr->allocate(1024); });
+    AllButOneDeltaIs(DeltaDiff(before, shard->type_mem_delta()), OBJ_STRING, 1024);
+    mr->deallocate(p, 1024);
+  });
+}
+
+TEST_F(TransactionTest, DeltaAllocAndFree) {
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+    void* p = mr->allocate(1024);
+    const auto before = shard->type_mem_delta();
+    WithMemTrack(OBJ_LIST, [&] { mr->deallocate(p, 1024); });
+    AllButOneDeltaIs(DeltaDiff(before, shard->type_mem_delta()), OBJ_LIST, -1024);
+  });
+}
+
+TEST_F(TransactionTest, DeltaSuspendResume) {
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+
+    const auto before = shard->type_mem_delta();
+    void* p = nullptr;
+    void* q = nullptr;
+
+    {
+      MemoryScope scope_for_string{OBJ_STRING};
+      p = mr->allocate(1024);
+
+      scope_for_string.Suspend();
+
+      q = mr->allocate(128);
+
+      scope_for_string.Resume();
+    }
+
+    const auto diff = DeltaDiff(before, shard->type_mem_delta());
+    AllButOneDeltaIs(diff, OBJ_STRING, 1024);
+
+    mr->deallocate(p, 1024);
+    mr->deallocate(q, 128);
+  });
 }
 
 }  // namespace dfly

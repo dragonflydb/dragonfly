@@ -86,6 +86,10 @@ class CommandId {
     opt_mask_ |= flag;
   }
 
+  bool HasFamily() const {
+    return family_ != kNoFamily;
+  }
+
  protected:
   std::string name_;
 
