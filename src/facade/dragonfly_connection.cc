@@ -1832,6 +1832,10 @@ auto Connection::ParseLoop() -> ParserStatus {
       parse_status = (this->*parse_func)(io_buf_);
     }
 
+    if (ioloop_v2_) {
+      EmitV2QueueTelemetry();
+    }
+
     // V2 large-batch prioritization (pipeline_prioritize_large_batches):
     // - When a real pipeline is forming (>1 queued) and more socket data is expected
     // (pending_input_), return without executing so IoLoopV2's read path fill the buffer and
@@ -1848,8 +1852,16 @@ auto Connection::ParseLoop() -> ParserStatus {
     if (execute_result == ExecuteBatchResult::kFailure)
       return ERROR;
 
+    if (ioloop_v2_) {
+      EmitV2QueueTelemetry();
+    }
+
     if (!ReplyBatch())
       return ERROR;
+
+    if (ioloop_v2_) {
+      EmitV2QueueTelemetry();
+    }
 
     // Surface a protocol error to the caller (HandleRequests/IoLoopV2) so it can send the
     // protocol error reply (using parser_error_) and close the connection.
@@ -3504,6 +3516,10 @@ bool Connection::ReplyBatch() {
     }
   }
 
+  if (ioloop_v2_) {
+    EmitV2QueueTelemetry();
+  }
+
   // Release all the commands that replied
   {
     DFLY_TRACY_REPLY_ZONE(kV2ReplyRelease);
@@ -3729,6 +3745,9 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
   const uint64_t start_epoch = fb2::FiberSwitchEpoch();
   const uint64_t initial_read_count = GetLocalConnStats().io_read_cnt;
   ProcessRecvNotification(n);
+  if (ioloop_v2_) {
+    EmitV2QueueTelemetry();
+  }
 
   auto parse_in_proactor = [this](auto&& parse_cb) {
     size_t cmds_before = parsed_cmd_q_len_;
@@ -3768,6 +3787,10 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
         return ParseRedis(io_buf_, 0, /*enqueue_only=*/true);
       });
     }
+  }
+
+  if (ioloop_v2_) {
+    EmitV2QueueTelemetry();
   }
 
   if (GetLocalConnStats().io_read_cnt > initial_read_count)
@@ -4172,6 +4195,173 @@ bool Connection::IsOverPipelineLimit() const {
                                       GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
 }
 
+size_t Connection::CountReplyReadyCommands() const {
+  size_t ready_count{};
+  for (ParsedCommand* command = parsed_head_; command != parsed_to_execute_;
+       command = command->next) {
+    if (!command->CanReply()) {
+      break;
+    }
+    ++ready_count;
+  }
+  return ready_count;
+}
+
+void Connection::EmitV2QueueTelemetry() const {
+#ifndef TRACY_ENABLE
+  return;
+#else
+  if (!IsTracyScopeEnabled(TracyScope::kConnection) && !IsTracyScopeEnabled(TracyScope::kManual)) {
+    return;
+  }
+
+  if (!TracyIsConnected) {
+    tracy_queue_plots_configured_ = false;
+    tracy_queue_plot_values_valid_ = false;
+    return;
+  }
+
+  const uint64_t tracy_connection_id = tracy::GetProfiler().ConnectionId();
+  if (tracy_queue_plot_connection_id_ != tracy_connection_id) {
+    tracy_queue_plot_connection_id_ = tracy_connection_id;
+    tracy_queue_plots_configured_ = false;
+    tracy_queue_plot_values_valid_ = false;
+  }
+
+  constexpr std::array<TracyManualZone, 12> kQueuePlotZones{
+      TracyManualZone::kV2PendingInput,
+      TracyManualZone::kV2IoBufUnreadBytes,
+      TracyManualZone::kV2AdminQueueLength,
+      TracyManualZone::kV2AdminQueueBytes,
+      TracyManualZone::kV2PipelineQueueLength,
+      TracyManualZone::kV2PipelineQueueBytes,
+      TracyManualZone::kV2PipelineWaitingDispatch,
+      TracyManualZone::kV2PipelineInFlight,
+      TracyManualZone::kV2SharedOverflowBytes,
+      TracyManualZone::kV2PipelineReplyReady,
+      TracyManualZone::kV2ReplyBufferedBytes,
+      TracyManualZone::kV2ReplyBufferedIovecs,
+  };
+  constexpr size_t kPendingInput = 0;
+  constexpr size_t kIoBufUnreadBytes = 1;
+  constexpr size_t kAdminQueueLength = 2;
+  constexpr size_t kAdminQueueBytes = 3;
+  constexpr size_t kPipelineQueueLength = 4;
+  constexpr size_t kPipelineQueueBytes = 5;
+  constexpr size_t kPipelineWaitingDispatch = 6;
+  constexpr size_t kPipelineInFlight = 7;
+  constexpr size_t kSharedOverflowBytes = 8;
+  constexpr size_t kPipelineReplyReady = 9;
+  constexpr size_t kReplyBufferedBytes = 10;
+  constexpr size_t kReplyBufferedIovecs = 11;
+
+  if (tracy_queue_plot_names_[kPendingInput].empty()) {
+    for (size_t index{}; index < kQueuePlotZones.size(); ++index) {
+      const std::string_view metric_name{TracyManualZoneName(kQueuePlotZones[index])};
+      tracy_queue_plot_names_[index] =
+          absl::StrCat("v2.conn_", id_, ".", metric_name.substr(std::string_view{"v2."}.size()));
+    }
+  }
+
+  if (!tracy_queue_plots_configured_) {
+    constexpr std::array<tracy::PlotFormatType, 12> kQueuePlotFormats{
+        tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory, tracy::PlotFormatType::Number,
+        tracy::PlotFormatType::Memory, tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory,
+        tracy::PlotFormatType::Number, tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory,
+        tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory, tracy::PlotFormatType::Number,
+    };
+    for (size_t index{}; index < tracy_queue_plot_names_.size(); ++index) {
+      TracyPlotConfig(tracy_queue_plot_names_[index].c_str(), kQueuePlotFormats[index], true, false,
+                      0);
+    }
+    tracy_queue_plots_configured_ = true;
+  }
+
+  const std::array<int64_t, 12> values{
+      static_cast<int64_t>(pending_input_),
+      static_cast<int64_t>(GetUnreadInputLen()),
+      static_cast<int64_t>(dispatch_q_.size()),
+      static_cast<int64_t>(dispatch_q_bytes_),
+      static_cast<int64_t>(parsed_cmd_q_len_),
+      static_cast<int64_t>(parsed_cmd_q_bytes_),
+      static_cast<int64_t>(dispatch_waiting_count_),
+      static_cast<int64_t>(parsed_cmd_q_len_ - dispatch_waiting_count_),
+      static_cast<int64_t>(overflow_buf_ ? overflow_buf_->InputLen() : 0),
+      static_cast<int64_t>(CountReplyReadyCommands()),
+      static_cast<int64_t>(reply_builder_ ? reply_builder_->BufferedBytes() : 0),
+      static_cast<int64_t>(reply_builder_ ? reply_builder_->BufferedIovecs() : 0),
+  };
+  const auto should_emit = [this](size_t index, int64_t value) {
+    if (tracy_queue_plot_values_valid_ && (tracy_queue_plot_values_[index] == value)) {
+      return false;
+    }
+    tracy_queue_plot_values_[index] = value;
+    return true;
+  };
+
+  if (should_emit(kPendingInput, values[kPendingInput])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(
+        kV2PendingInput, tracy_queue_plot_names_[kPendingInput].c_str(), values[kPendingInput]);
+  }
+  if (should_emit(kIoBufUnreadBytes, values[kIoBufUnreadBytes])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2IoBufUnreadBytes,
+                                     tracy_queue_plot_names_[kIoBufUnreadBytes].c_str(),
+                                     values[kIoBufUnreadBytes]);
+  }
+  if (should_emit(kAdminQueueLength, values[kAdminQueueLength])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2AdminQueueLength,
+                                     tracy_queue_plot_names_[kAdminQueueLength].c_str(),
+                                     values[kAdminQueueLength]);
+  }
+  if (should_emit(kAdminQueueBytes, values[kAdminQueueBytes])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2AdminQueueBytes,
+                                     tracy_queue_plot_names_[kAdminQueueBytes].c_str(),
+                                     values[kAdminQueueBytes]);
+  }
+  if (should_emit(kPipelineQueueLength, values[kPipelineQueueLength])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineQueueLength,
+                                     tracy_queue_plot_names_[kPipelineQueueLength].c_str(),
+                                     values[kPipelineQueueLength]);
+  }
+  if (should_emit(kPipelineQueueBytes, values[kPipelineQueueBytes])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineQueueBytes,
+                                     tracy_queue_plot_names_[kPipelineQueueBytes].c_str(),
+                                     values[kPipelineQueueBytes]);
+  }
+  if (should_emit(kPipelineWaitingDispatch, values[kPipelineWaitingDispatch])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineWaitingDispatch,
+                                     tracy_queue_plot_names_[kPipelineWaitingDispatch].c_str(),
+                                     values[kPipelineWaitingDispatch]);
+  }
+  if (should_emit(kPipelineInFlight, values[kPipelineInFlight])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineInFlight,
+                                     tracy_queue_plot_names_[kPipelineInFlight].c_str(),
+                                     values[kPipelineInFlight]);
+  }
+  if (should_emit(kSharedOverflowBytes, values[kSharedOverflowBytes])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2SharedOverflowBytes,
+                                     tracy_queue_plot_names_[kSharedOverflowBytes].c_str(),
+                                     values[kSharedOverflowBytes]);
+  }
+  if (should_emit(kPipelineReplyReady, values[kPipelineReplyReady])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2PipelineReplyReady,
+                                     tracy_queue_plot_names_[kPipelineReplyReady].c_str(),
+                                     values[kPipelineReplyReady]);
+  }
+  if (should_emit(kReplyBufferedBytes, values[kReplyBufferedBytes])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2ReplyBufferedBytes,
+                                     tracy_queue_plot_names_[kReplyBufferedBytes].c_str(),
+                                     values[kReplyBufferedBytes]);
+  }
+  if (should_emit(kReplyBufferedIovecs, values[kReplyBufferedIovecs])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2ReplyBufferedIovecs,
+                                     tracy_queue_plot_names_[kReplyBufferedIovecs].c_str(),
+                                     values[kReplyBufferedIovecs]);
+  }
+  tracy_queue_plot_values_valid_ = true;
+#endif
+}
+
 void Connection::NotifyIfMemReleased(size_t bytes_before) {
   // Executing and replying to commands frees up memory. Because those internal functions only
   // wake up this specific connection, we manually notify other connections on this thread that
@@ -4224,9 +4414,6 @@ bool Connection::DrainControlPath(uint32_t quota) {
 
 Connection::ParserStatus Connection::RunParsePath() {
   DFLY_TRACY_CONNECTION_ZONE(kV2RunParsePath);
-  // Pipeline depth over time - shows whether batches are forming as expected. Tracy plots are keyed
-  // by name, so this aggregates across all connections sharing this proactor thread.
-  DFLY_TRACY_CONNECTION_PLOT(kV2ParsedQueueLength, int64_t(parsed_cmd_q_len_));
   // We have input data AND memory budget - parse new commands, execute, reply.
   size_t mem_before = GetLocalConnStats().pipeline_queue_bytes;
   ParserStatus parse_status = ParseLoop();

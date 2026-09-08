@@ -164,6 +164,8 @@ set(DFLY_TRACY_MANUAL_ZONES "" CACHE STRING
   "Comma-separated manual Tracy zone IDs or names, or all (see TRACY.md)")
 if (WITH_TRACY)
   message(STATUS "Tracy profiler enabled (on-demand). Connect the Tracy viewer to start capture.")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/facade/tracy_manual_zones.h")
   file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/facade/tracy_manual_zones.h"
     _dfly_tracy_registry_contents)
   string(REGEX MATCHALL "X\\(([0-9]+),[ \\t]*([A-Za-z0-9_]+),[ \\t]*\\\"([^\\\"]+)\\\"\\)"

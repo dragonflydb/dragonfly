@@ -114,9 +114,21 @@
   X(103, kSquasherRun, "Squasher.Run")                                               \
   X(104, kStringGetReply, "String.Get.Reply")                                        \
   X(105, kStringGetLookup, "String.Get.Lookup")                                      \
-  X(106, kStringGetValue, "String.Get.Value")
+  X(106, kStringGetValue, "String.Get.Value")                                        \
+  X(107, kV2PendingInput, "v2.input.pending")                                        \
+  X(108, kV2IoBufUnreadBytes, "v2.input.unread_bytes")                               \
+  X(109, kV2AdminQueueLength, "v2.admin.queue_length")                               \
+  X(110, kV2AdminQueueBytes, "v2.admin.queue_bytes")                                 \
+  X(111, kV2PipelineQueueLength, "v2.pipeline.queue_length")                         \
+  X(112, kV2PipelineQueueBytes, "v2.pipeline.queue_bytes")                           \
+  X(113, kV2PipelineWaitingDispatch, "v2.pipeline.waiting_dispatch")                 \
+  X(114, kV2PipelineInFlight, "v2.pipeline.dispatched")                              \
+  X(115, kV2SharedOverflowBytes, "v2.shared.overflow_bytes")                         \
+  X(116, kV2PipelineReplyReady, "v2.pipeline.reply_ready")                           \
+  X(117, kV2ReplyBufferedBytes, "v2.reply.buffered_bytes")                           \
+  X(118, kV2ReplyBufferedIovecs, "v2.reply.buffered_iovecs")
 
-#define DFLY_TRACY_MANUAL_ZONE_COUNT 106
+#define DFLY_TRACY_MANUAL_ZONE_COUNT 118
 
 namespace facade {
 

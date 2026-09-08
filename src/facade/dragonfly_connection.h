@@ -7,9 +7,11 @@
 #include <absl/container/fixed_array.h>
 #include <sys/socket.h>
 
+#include <array>
 #include <deque>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -768,6 +770,13 @@ class Connection : public util::Connection {
     return parsed_head_ != parsed_to_execute_;
   }
 
+  // Counts the reply-ready prefix of dispatched commands. Replies after the first incomplete
+  // command cannot be sent yet because RESP replies preserve request order.
+  size_t CountReplyReadyCommands() const;
+
+  // Emits a snapshot of V2 queue and reply state for the current proactor thread.
+  void EmitV2QueueTelemetry() const;
+
   // Returns true if the head command is ready to execute (nothing in-flight ahead of it).
   bool HasCommandToExecute() const {
     return parsed_head_ && !HasInFlightCommands();
@@ -784,6 +793,13 @@ class Connection : public util::Connection {
   }
 
   uint32_t id_;
+#ifdef TRACY_ENABLE
+  mutable std::array<std::string, 12> tracy_queue_plot_names_;
+  mutable uint64_t tracy_queue_plot_connection_id_ = 0;
+  mutable bool tracy_queue_plots_configured_ = false;
+  mutable bool tracy_queue_plot_values_valid_ = false;
+  mutable std::array<int64_t, 12> tracy_queue_plot_values_;
+#endif
   Protocol protocol_;
   Phase phase_ = SETUP;
 

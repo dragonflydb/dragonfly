@@ -58,7 +58,7 @@ this binary at runtime; it does not implicitly enable the `manual` scope.
 
 `manual` is a permanent special scope for an exact subset of the existing manual instrumentation.
 The authoritative registry is [src/facade/tracy_manual_zones.h](src/facade/tracy_manual_zones.h):
-it assigns every current label a stable ID from `1` through `106`. Do not renumber or reuse an ID;
+it assigns every current label a stable ID from `1` through `118`. Do not renumber or reuse an ID;
 append new zones instead. Grouped source macros use its symbolic token, and Tracy display names come
 only from the registry, so exact selection never needs a runtime zone-name lookup.
 
@@ -88,7 +88,7 @@ The IDs most useful for the V1/V2 squashing investigation are `72` (`InvokeCmd.H
 
 | Scope | Main zones and data | Source owner |
 |---|---|---|
-| `connection` | input, parse loops, idle/backpressure waits, control handling, migration, and the parsed-queue plot | `src/facade/dragonfly_connection.cc` |
+| `connection` | input, parse loops, idle/backpressure waits, control handling, migration, and V2 queue-state plots | `src/facade/dragonfly_connection.cc` |
 | `dispatch` | command dispatch and execution, including `Dispatch.*`, `Squash.Dispatch.*`, `InvokeCmd.Handler`, and `V2.ExecuteBatch` | `src/server/main_service.cc`, `src/facade/dragonfly_connection.cc` |
 | `squasher` | pipeline squash structure, shard hops, scheduling, merge, and squasher wait zones | `src/server/multi_command_squasher.cc`, `src/facade/dragonfly_connection.cc` |
 | `reply` | reply batching, send/release/flush, plus `ReplyBuilder.*` when forensic detail is compiled | `src/facade/dragonfly_connection.cc`, `src/facade/reply_builder.cc` |
@@ -182,6 +182,9 @@ build contains only the rows belonging to its compiled scopes.
 blocking-recv/join) are colored **red** via `DFLY_TRACY_WAIT(...)`. Everything else is normal-colored
 "work that may internally preempt" — its fiber-lane gaps still reveal any preemption.
 
+V2 queue plots include Dragonfly's client ID as `v2.conn_<id>.*`, so samples from different
+connections are never merged. A capture with $N$ active connections therefore has up to $12N$ queue plots.
+
 | Scope | Zone | Applies to | Meaning | Kind |
 |---|---|---|---|---|
 | `connection` | `V2.RunParsePath`, `V2.ParseLoop`, `V2.Parse` | V2 | parse-path pass, parse-loop cycle, and RESP parsing | work |
@@ -191,7 +194,11 @@ blocking-recv/join) are colored **red** via `DFLY_TRACY_WAIT(...)`. Everything e
 | `connection` | `V1.Backpressure`, `V2.Backpressure` | V1/V2 | parked above the pipeline memory limit | **wait** |
 | `connection` | `V1.CondWait`, `V1.BatchYield`, `V1.QuotaYield`, `ParseYield` | V1/V2 | async-dispatch coordination and parser yields | **wait** |
 | `connection` | `V2.IdleWait`, `Migrate` | V1/V2 | idle park and connection migration | **wait** |
-| `connection` | `v2.parsed_q_len` | V2 | parsed command queue-depth plot | plot |
+| `connection` | `v2.conn_<id>.input.pending`, `v2.conn_<id>.input.unread_bytes` | V2 | raw receive-ready state and unread userspace request bytes | plot |
+| `connection` | `v2.conn_<id>.shared.overflow_bytes` | V2 shared-buffer mode | unread bytes retained privately while the shared input buffer is borrowed elsewhere | plot |
+| `connection` | `v2.conn_<id>.admin.queue_length`, `v2.conn_<id>.admin.queue_bytes` | V2 | control/admin queue depth and owned bytes | plot |
+| `connection` | `v2.conn_<id>.pipeline.queue_length`, `v2.conn_<id>.pipeline.queue_bytes`, `v2.conn_<id>.pipeline.waiting_dispatch`, `v2.conn_<id>.pipeline.dispatched`, `v2.conn_<id>.pipeline.reply_ready` | V2 | parsed-command queue depth/bytes, undispatched commands, dispatched-but-not-released commands, and the contiguous reply-ready prefix | plot |
+| `connection` | `v2.conn_<id>.reply.buffered_bytes`, `v2.conn_<id>.reply.buffered_iovecs` | V2 | bytes and writev segments accumulated in `SinkReplyBuilder` and ready for the next flush | plot |
 | `connection` | `Conn.Pipeline.Enqueue`, `Conn.Pipeline.Enqueue.Finalize`, `Conn.Pipeline.ReleasePipelined`, `Conn.Pipeline.ReleaseParsed` | shared | pipeline-queue insertion and release detail; forensic only | work |
 | `dispatch` | `Dispatch.Command`, `InvokeCmd.Handler` | shared | command dispatch and command-handler body | work/preempt |
 | `dispatch` | `V1.Admin` | V1 | administrative or pub/sub command dispatch | work/preempt |
@@ -642,7 +649,7 @@ unevaluated via `sizeof`. Exposes `DFLY_TRACY_ZONE[_TEXT[_SV]]`, `_PLOT`, `_MESS
 signature — `cxx_link` uses plain; mixing plain+keyword is a CMake error).
 
 **`src/facade/dragonfly_connection.cc`** — the V2 zones from §1 (parse/execute/squash/reply/flush/
-read/idle‑wait) plus the `v2.parsed_q_len` plot and `V2.Dispatch` command‑verb text.
+read/idle‑wait), per-connection queue plots, and `V2.Dispatch` command‑verb text.
 
 **helio (submodule) — fiber awareness:**
 - `helio/util/fibers/CMakeLists.txt` — link `Tracy::TracyClient` to `fibers2` when `WITH_TRACY`.

@@ -162,6 +162,26 @@ inline bool IsTracyScopeEnabled(TracyScope scope) {
         if (::facade::IsTracyZoneEnabled(tracy_scope, ::facade::TracyManualZone::symbol))     \
           TracyPlot(::facade::TracyManualZoneName(::facade::TracyManualZone::symbol), value); \
       } while (0))
+#define DFLY_TRACY_PLOT_NAMED_IMPL(scope, tracy_scope, symbol, name, value)               \
+  DFLY_TRACY_IF(                                                                          \
+      DFLY_TRACY_SITE_ENABLED(scope, symbol), do {                                        \
+        if (::facade::IsTracyZoneEnabled(tracy_scope, ::facade::TracyManualZone::symbol)) \
+          TracyPlot(name, value);                                                         \
+      } while (0))
+#define DFLY_TRACY_PLOT_CONFIG_IMPL(scope, tracy_scope, symbol, format, step, fill, color)  \
+  DFLY_TRACY_IF(                                                                            \
+      DFLY_TRACY_SITE_ENABLED(scope, symbol), do {                                          \
+        if (::facade::IsTracyZoneEnabled(tracy_scope, ::facade::TracyManualZone::symbol))   \
+          TracyPlotConfig(::facade::TracyManualZoneName(::facade::TracyManualZone::symbol), \
+                          format, step, fill, color);                                       \
+      } while (0))
+#define DFLY_TRACY_PLOT_CONFIG_NAMED_IMPL(scope, tracy_scope, symbol, name, format, step, fill, \
+                                          color)                                                \
+  DFLY_TRACY_IF(                                                                                \
+      DFLY_TRACY_SITE_ENABLED(scope, symbol), do {                                              \
+        if (::facade::IsTracyZoneEnabled(tracy_scope, ::facade::TracyManualZone::symbol))       \
+          TracyPlotConfig(name, format, step, fill, color);                                     \
+      } while (0))
 
 #define DFLY_TRACY_CONNECTION_ZONE(symbol) \
   DFLY_TRACY_ZONE_IMPL(CONNECTION, ::facade::TracyScope::kConnection, symbol)
@@ -174,6 +194,14 @@ inline bool IsTracyScopeEnabled(TracyScope scope) {
 #endif
 #define DFLY_TRACY_CONNECTION_PLOT(symbol, value) \
   DFLY_TRACY_PLOT_IMPL(CONNECTION, ::facade::TracyScope::kConnection, symbol, value)
+#define DFLY_TRACY_CONNECTION_PLOT_NAMED(symbol, name, value) \
+  DFLY_TRACY_PLOT_NAMED_IMPL(CONNECTION, ::facade::TracyScope::kConnection, symbol, name, value)
+#define DFLY_TRACY_CONNECTION_PLOT_CONFIG(symbol, format, step, fill, color)                       \
+  DFLY_TRACY_PLOT_CONFIG_IMPL(CONNECTION, ::facade::TracyScope::kConnection, symbol, format, step, \
+                              fill, color)
+#define DFLY_TRACY_CONNECTION_PLOT_CONFIG_NAMED(symbol, name, format, step, fill, color)         \
+  DFLY_TRACY_PLOT_CONFIG_NAMED_IMPL(CONNECTION, ::facade::TracyScope::kConnection, symbol, name, \
+                                    format, step, fill, color)
 #define DFLY_TRACY_CONNECTION_TEXT_SV(symbol, value) \
   DFLY_TRACY_TEXT_SV_IMPL(CONNECTION, ::facade::TracyScope::kConnection, symbol, value)
 
@@ -258,6 +286,9 @@ inline bool IsTracyScopeEnabled(TracyScope scope) {
 #define DFLY_TRACY_CONNECTION_ZONE(name) (void)0
 #define DFLY_TRACY_CONNECTION_WAIT(name) (void)0
 #define DFLY_TRACY_CONNECTION_FORENSIC_ZONE(name) (void)0
+#define DFLY_TRACY_CONNECTION_PLOT_NAMED(symbol, name, value) (void)sizeof(value)
+#define DFLY_TRACY_CONNECTION_PLOT_CONFIG(symbol, format, step, fill, color) (void)0
+#define DFLY_TRACY_CONNECTION_PLOT_CONFIG_NAMED(symbol, name, format, step, fill, color) (void)0
 #define DFLY_TRACY_CONNECTION_PLOT(symbol, value) \
   do {                                            \
     (void)sizeof(value);                          \
