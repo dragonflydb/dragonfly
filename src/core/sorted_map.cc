@@ -630,10 +630,10 @@ unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score) {
 
 SortedMap::SortedMap() {
   PMR_NS::memory_resource* mr = StatelessAllocator<char>::resource();
-  score_map =
-      std::construct_at(static_cast<ScoreMap*>(mr->allocate(sizeof(ScoreMap), alignof(ScoreMap))));
-  score_tree = std::construct_at(
-      static_cast<ScoreTree*>(mr->allocate(sizeof(ScoreTree), alignof(ScoreTree))), mr);
+  auto* map_mem = static_cast<ScoreMap*>(mr->allocate(sizeof(ScoreMap), alignof(ScoreMap)));
+  score_map = std::construct_at(map_mem);
+  auto* tree_mem = static_cast<ScoreTree*>(mr->allocate(sizeof(ScoreTree), alignof(ScoreTree)));
+  score_tree = std::construct_at(tree_mem, mr);
 }
 
 SortedMap::~SortedMap() {
@@ -1167,8 +1167,8 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   unsigned int vlen;
   long long vlong;
 
-  SortedMap* zs = std::construct_at(
-      static_cast<SortedMap*>(res->allocate(sizeof(SortedMap), alignof(SortedMap))));
+  auto* zs_mem = static_cast<SortedMap*>(res->allocate(sizeof(SortedMap), alignof(SortedMap)));
+  SortedMap* zs = std::construct_at(zs_mem);
 
   eptr = lpSeek(zl, 0);
   if (eptr != NULL) {
