@@ -4,7 +4,9 @@
 
 #include "server/hset_family.h"
 
+#include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
+#include <absl/strings/str_cat.h>
 
 extern "C" {
 #include "redis/listpack.h"
@@ -1590,6 +1592,21 @@ auto HSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* 
   if (deep && lpLength((uint8_t*)blob.data()) % 2 != 0) {
     LOG(ERROR) << "Hash listpack has an odd number of entries.";
     return LoadBlobResult::kCorrupted;
+  }
+
+  if (deep) {  // untrusted input only; a duplicate field is corruption
+    absl::flat_hash_set<std::string> seen;
+    uint8_t* src = (uint8_t*)blob.data();
+    for (uint8_t* p = lpFirst(src); p; p = lpNext(src, lpNext(src, p))) {
+      unsigned slen = 0;
+      long long lval = 0;
+      uint8_t* vstr = lpGetValue(p, &slen, &lval);
+      std::string field = vstr ? std::string((char*)vstr, slen) : absl::StrCat(lval);
+      if (!seen.insert(std::move(field)).second) {
+        LOG(ERROR) << "Hash listpack has a duplicate field.";
+        return LoadBlobResult::kCorrupted;
+      }
+    }
   }
 
   unsigned char* lp = lpNew(blob.size());

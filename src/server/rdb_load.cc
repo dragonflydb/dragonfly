@@ -20,6 +20,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 #include <absl/cleanup/cleanup.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/numeric/bits.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -618,9 +619,15 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     uint8_t* lp = lpNew(lp_size);
 
     CHECK(ltrace->arr.size() % 2 == 0);
+    absl::flat_hash_set<string> seen;  // untrusted input only; a duplicate field is corruption
     for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
       /* Add pair to listpack */
       string_view sv = ToSV(ltrace->arr[i].rdb_var, &buf1_);
+      if (config_.deep_integrity && !seen.emplace(sv).second) {
+        LOG(ERROR) << "Duplicate hash field detected";
+        ec_ = RdbError(errc::duplicate_key);
+        break;
+      }
       lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
 
       sv = ToSV(ltrace->arr[i + 1].rdb_var, &buf1_);
@@ -686,7 +693,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       }
 
       if (!string_map->AddOrSkip(key, val, ttl_sec)) {
-        LOG(ERROR) << "Duplicate hash fields detected for field " << key;
+        LOG(ERROR) << "Duplicate hash field detected";
         ec_ = RdbError(errc::rdb_file_corrupted);
         return;
       }
