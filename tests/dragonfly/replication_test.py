@@ -1351,3 +1351,45 @@ async def test_wait_semantics(replication):
     await c_master.connection_pool.disconnect()
     await c_replica.connection_pool.disconnect()
     await c_wait.connection_pool.disconnect()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_blocked_client_unblocked_on_role_change(df_factory: DflyInstanceFactory):
+    master = df_factory.create()
+    replica = df_factory.create()
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+    c_blocked = [replica.client() for _ in range(5)]
+
+    blocked = [
+        asyncio.create_task(c_blocked[0].blpop("foo", 0)),
+        asyncio.create_task(c_blocked[1].execute_command("BLMPOP", 0, 1, "lfoo", "LEFT")),
+        asyncio.create_task(c_blocked[2].bzpopmin("zfoo", 0)),
+        asyncio.create_task(c_blocked[3].execute_command("BZMPOP", 0, 1, "zmfoo", "MIN")),
+        asyncio.create_task(c_blocked[4].xread({"sfoo": "$"}, block=0)),
+    ]
+
+    @assert_eventually
+    async def blocked_registered():
+        assert (await c_replica.info("clients"))["blocked_clients"] == len(blocked)
+
+    await blocked_registered()
+
+    await start_replication(c_replica, master.port)
+    await wait_for_replicas_state(c_replica)
+
+    # The blocked client must not consume elements applied from the replication stream.
+    await c_master.rpush("foo", "a", "b", "c")
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.lrange("foo", 0, -1) == ["a", "b", "c"]
+
+    for task in blocked:
+        with pytest.raises(redis.exceptions.ResponseError, match="UNBLOCKED"):
+            await asyncio.wait_for(task, 5)
+
+    await c_master.connection_pool.disconnect()
+    await c_replica.connection_pool.disconnect()
+    for c in c_blocked:
+        await c.connection_pool.disconnect()
