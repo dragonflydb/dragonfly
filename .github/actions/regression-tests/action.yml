@@ -135,6 +135,8 @@ runs:
     - name: Prepare regression JUnit environment
       if: always()
       shell: bash
+      env:
+        DF_RUNTIME_FLAGS_INPUT: ${{ inputs.df-runtime-flags }}
       run: |
         JUNIT_DIR="${GITHUB_WORKSPACE}/test-results/junit/regression"
         mkdir -p "${JUNIT_DIR}"
@@ -150,26 +152,42 @@ runs:
         fi
 
         SAFE_FILTER=$("${GITHUB_WORKSPACE}/.github/scripts/sanitize-token.sh" "${FILTER}" all)
+        SAFE_RUNTIME_FLAGS=$("${GITHUB_WORKSPACE}/.github/scripts/sanitize-token.sh" "${DF_RUNTIME_FLAGS_INPUT}" default)
 
         UNIQUE_SUFFIX="$(date +%s%N)-${RANDOM}"
         {
           echo "REGRESSION_JUNIT_DIR=${JUNIT_DIR}"
           echo "REGRESSION_JUNIT_KIND=${KIND}"
-          echo "REGRESSION_JUNIT_S3_SUFFIX=${RUNNER_OS}-${RUNNER_ARCH}-${KIND}-${FILTER}"
-          echo "REGRESSION_JUNIT_ARTIFACT=junit-regression-${GITHUB_JOB}-${RUNNER_OS}-${RUNNER_ARCH}-${KIND}-${SAFE_FILTER}-${UNIQUE_SUFFIX}"
+          echo "REGRESSION_JUNIT_S3_SUFFIX=${RUNNER_OS}-${RUNNER_ARCH}-${KIND}-${SAFE_FILTER}-${SAFE_RUNTIME_FLAGS}"
+          echo "REGRESSION_JUNIT_ARTIFACT=junit-regression-${GITHUB_JOB}-${RUNNER_OS}-${RUNNER_ARCH}-${KIND}-${SAFE_FILTER}-${SAFE_RUNTIME_FLAGS}-${UNIQUE_SUFFIX}"
         } >> "${GITHUB_ENV}"
 
     - name: Run S3 snapshot tests with MinIO
       if: inputs.s3-bucket != '' && inputs.test-suites == '' && inputs.test-cases == '' && inputs.iterations == '1'
       shell: bash
+      env:
+        DF_RUNTIME_FLAGS_INPUT: ${{ inputs.df-runtime-flags }}
       run: |
         echo "=== Running S3 snapshot tests with local MinIO ==="
         cd ${GITHUB_WORKSPACE}/tests
 
         export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${{inputs.build-folder-name}}/${{inputs.dfly-executable}}"
 
+        # Match the Dragonfly I/O loop configuration selected by the surrounding workflow matrix.
+        df_runtime_args=()
+        if [[ -n "${DF_RUNTIME_FLAGS_INPUT}" ]]; then
+          set -f
+          for flag in ${DF_RUNTIME_FLAGS_INPUT}; do
+            df_runtime_args+=(--df "$flag")
+          done
+          set +f
+        fi
+        if [[ "${{ inputs.epoll }}" == 'epoll' ]]; then
+          df_runtime_args+=(--df force_epoll=true)
+        fi
+
         # MinIO binary is downloaded and started by conftest.py when MINIO_S3_ENDPOINT is set
-        MINIO_S3_ENDPOINT=http://localhost:9000 timeout 10m pytest -k "s3" --timeout=300 --color=yes dragonfly/snapshot_test.py --log-cli-level=INFO -v
+        MINIO_S3_ENDPOINT=http://localhost:9000 timeout 10m pytest -k "s3" --timeout=300 --color=yes dragonfly/snapshot_test.py "${df_runtime_args[@]}" --log-cli-level=INFO -v
 
     - name: Run PyTests
       id: main
