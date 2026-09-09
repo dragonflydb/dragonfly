@@ -1347,15 +1347,28 @@ async def test_large_cmd(async_client: aioredis.Redis):
     assert len(res) == MAX_ARR_SIZE
 
 
-@dfly_args({"proactor_threads": 1})
-async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
-    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port, limit=10)
-    writer.write(b"*1000\r\n")
-    writer.write(b"$4\r\nmget\r\n")
-    val = (b"a" * 100) + b"\r\n"
-    for i in range(900):
-        writer.write(b"$100\r\n" + val)
-    await writer.drain()  # writer is pending because the request is not finished.
+@dfly_multi_test_args(
+    {
+        "proactor_threads": 1,
+        "memcached_port": 11212,
+        "enable_resp_io_loop_v2": "false",
+        "enable_memcache_io_loop_v2": "false",
+    },
+    {
+        "proactor_threads": 1,
+        "memcached_port": 11212,
+        "enable_resp_io_loop_v2": "true",
+        "enable_memcache_io_loop_v2": "true",
+    },
+)
+@pytest.mark.parametrize("protocol", ["redis", "memcache"])
+async def test_parser_memory_stats(df_server, async_client: aioredis.Redis, protocol):
+    await async_client.ping()
+    metrics = await df_server.metrics()
+    baseline = metrics["dragonfly_connection_memory_bytes"].samples[0].value
+
+    port = df_server.port if protocol == "redis" else df_server.mc_port
+    reader, writer = await asyncio.open_connection("127.0.0.1", port, limit=10)
 
     @assert_eventually
     async def check_stats():
@@ -1364,13 +1377,34 @@ async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
 
         metrics = await df_server.metrics()
         connection_memory_bytes = metrics["dragonfly_connection_memory_bytes"].samples[0].value
-        assert connection_memory_bytes > 130000
+        assert connection_memory_bytes > baseline + 130000
         assert any(
             sample.labels["class"] == "connection" and sample.value == connection_memory_bytes
             for sample in metrics["dragonfly_memory_by_class_bytes"].samples
         )
 
-    await check_stats()
+    try:
+        if protocol == "redis":
+            writer.write(b"*1000\r\n")
+            writer.write(b"$4\r\nmget\r\n")
+            val = (b"a" * 100) + b"\r\n"
+            for i in range(900):
+                writer.write(b"$100\r\n" + val)
+        else:
+            writer.write(b"set key 0 0 200000\r\n" + b"a" * 150000)
+        await writer.drain()  # Leave the request incomplete and the connection idle.
+        await check_stats()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+    @assert_eventually
+    async def check_cleanup():
+        metrics = await df_server.metrics()
+        current = metrics["dragonfly_connection_memory_bytes"].samples[0].value
+        assert baseline <= current < baseline + 4096
+
+    await check_cleanup()
 
 
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factory):
@@ -3266,7 +3300,7 @@ async def test_client_migrate(df_server: DflyInstance):
     Test that we can migrate a client with "CLIENT MIGRATE" command.
     """
     client1 = df_server.client()
-    await client1.client_setname("test_migrate")
+    await client1.client_setname("test_migrate" + "x" * 65536)
     resp = await client1.execute_command("DFLY THREAD")
     client_id = await client1.client_id()
     assert resp[1] == 4
@@ -3277,8 +3311,19 @@ async def test_client_migrate(df_server: DflyInstance):
     dest_tid = (current_tid + 1) % 4
     resp = await client2.execute_command("CLIENT", "MIGRATE", client_id + 999, dest_tid)
     assert resp == 0  # Not migrated as the client does not exist
+    metrics = await df_server.metrics()
+    memory_before = metrics["dragonfly_connection_memory_bytes"].samples[0].value
     resp = await client2.execute_command("CLIENT", "MIGRATE", client_id, dest_tid)
     assert resp == 1  # migrated successfully
+
+    @assert_eventually
+    async def check_migrated():
+        assert (await client1.execute_command("DFLY THREAD"))[0] == dest_tid
+        metrics = await df_server.metrics()
+        memory_after = metrics["dragonfly_connection_memory_bytes"].samples[0].value
+        assert abs(memory_after - memory_before) < 4096
+
+    await check_migrated()
 
 
 @dfly_multi_test_args(
