@@ -6,6 +6,8 @@ extern "C" {
 #include "redis/hyperloglog.h"
 }
 
+#include <absl/cleanup/cleanup.h>
+
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/error.h"
@@ -115,10 +117,8 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
 
   int updated = 0;
   bool is_sparse = isValidHLL(StringToHllPtr(hll)) == HLL_VALID_SPARSE;
-  sds hll_sds;
-  if (is_sparse) {
-    hll_sds = sdsnewlen(hll.data(), hll.size());
-  }
+  sds hll_sds = is_sparse ? sdsnewlen(hll.data(), hll.size()) : nullptr;
+  absl::Cleanup sds_free = [&hll_sds] { sdsfree(hll_sds); };
 
   for (const auto& value : values) {
     int added;
@@ -131,7 +131,6 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
       if (promoted == 1) {
         is_sparse = false;
         hll = string{hll_sds, sdslen(hll_sds)};
-        sdsfree(hll_sds);
         DCHECK_EQ(isValidHLL(StringToHllPtr(hll)), HLL_VALID_DENSE);
       }
     } else {
@@ -145,7 +144,6 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
 
   if (is_sparse) {
     hll = string{hll_sds, sdslen(hll_sds)};
-    sdsfree(hll_sds);
   }
   res.post_updater.ReduceHeapUsage();
   if (res.it->second.IsExternal()) {
