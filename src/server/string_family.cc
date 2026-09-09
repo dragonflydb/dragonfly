@@ -1782,24 +1782,14 @@ void CmdClThrottle(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (result) {
     RedisReplyBuilder* redis_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-    redis_builder->StartArray(result->size());
     auto& array = result.value();
 
-    int64_t retry_after_s = array[3] / 1000;
-    if (array[3] > 0) {
-      retry_after_s += 1;
-    }
-    array[3] = retry_after_s;
+    // Round up to whole seconds, preserving the retry sentinel.
+    array[3] = array[3] > 0 ? (array[3] + 999) / 1000 : array[3] / 1000;
+    array[4] = array[4] > 0 ? (array[4] + 999) / 1000 : array[4] / 1000;
 
-    int64_t reset_after_s = array[4] / 1000;
-    if (array[4] > 0) {
-      reset_after_s += 1;
-    }
-    array[4] = reset_after_s;
-
-    for (const auto& v : array) {
-      redis_builder->SendLong(v);
-    }
+    // Keep the entire reply in one scope to avoid per-element flushes.
+    redis_builder->SendLongArr(absl::MakeConstSpan(array));
   } else {
     switch (result.status()) {
       case OpStatus::WRONG_TYPE:
