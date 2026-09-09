@@ -2360,8 +2360,11 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     }
   }
 
-  // Reset cid to EVAL[] as the context is reused during command dispatch
-  absl::Cleanup clean = [interpreter, cmd_cntx, cid = cmd_cntx->cid()]() {
+  // Reset cid to EVAL[] as the context is reused during command dispatch. A SELECT inside the
+  // script must not outlive it, so the caller's db is restored as well.
+  absl::Cleanup clean = [interpreter, cmd_cntx, conn_cntx, caller_db = conn_cntx->db_index(),
+                         cid = cmd_cntx->cid()]() {
+    conn_cntx->conn_state.db_index = caller_db;
     interpreter->ResetStack();
     cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };

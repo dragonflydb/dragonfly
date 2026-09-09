@@ -283,6 +283,18 @@ TEST_F(DflyEngineTest, EvalShaNegativeZeroNumKeys) {
   EXPECT_THAT(Run({"eval", "return 1", "-0"}), ErrArg(facade::kInvalidIntErr));
 }
 
+TEST_F(DflyEngineTest, EvalSelectDoesNotLeak) {
+  Run({"select", "2"});
+  Run({"set", "k2", "v"});
+  Run({"select", "1"});
+  Run({"set", "canary", "hi"});
+  Run({"set", "k1b", "v"});
+  // SELECT applies to the rest of the script (db 2 holds one key) ...
+  EXPECT_THAT(Run({"eval", "redis.call('select', 2) return redis.call('dbsize')", "0"}), IntArg(1));
+  // ... but must not move the connection off db 1.
+  EXPECT_EQ(Run({"get", "canary"}), "hi");
+}
+
 TEST_F(DflyEngineTest, ScriptFlush) {
   auto resp = Run({"script", "load", "return 5"});
   EXPECT_THAT(resp, ArgType(RespExpr::STRING));
