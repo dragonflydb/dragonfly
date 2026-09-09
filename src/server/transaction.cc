@@ -24,7 +24,7 @@
 
 ABSL_FLAG(uint32_t, tx_queue_warning_len, 96,
           "Length threshold for warning about long transaction queue");
-ABSL_FLAG(bool, disable_scope_based_mem_track, false, "Turn off scope based memory metric");
+ABSL_FLAG(bool, disable_scope_based_mem_track, true, "Turn off scope based memory metric");
 
 namespace dfly {
 
