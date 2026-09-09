@@ -169,7 +169,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     client = aioredis.Redis(port=df.port, decode_responses=True)
 
     # NOPERM while executing multi
-    await client.execute_command("ACL SETUSER kk -@string")
+    await client.execute_command("ACL SETUSER kk -@string +@list")
     assert res == "OK"
     await client.execute_command("AUTH kk kk")
     assert res == "OK"
@@ -178,6 +178,11 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
 
     with pytest.raises(redis.exceptions.NoPermissionError):
         await client.execute_command("SET x bar")
+    # The transaction keeps collecting after the queue-time error and EXEC aborts all of it.
+    assert await client.execute_command("RPUSH l a") == "QUEUED"
+    with pytest.raises(redis.exceptions.ExecAbortError):
+        await client.execute_command("EXEC")
+    assert await client.execute_command("LLEN l") == 0
     await client.aclose()
 
     # NOPERM between multi and exec

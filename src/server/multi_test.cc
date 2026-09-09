@@ -103,6 +103,45 @@ TEST_F(MultiTest, MultiWithError) {
   EXPECT_THAT(Run({"get", "z"}), "y");
 }
 
+TEST_F(MultiTest, MultiWithUnknownCommand) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"nosuchcmd"}), ErrArg("unknown command"));
+  EXPECT_THAT(Run({"set", "x", "y"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT Transaction discarded because of previous errors"));
+  EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
+}
+
+// Commands after a queue-time error are still queued, never executed outside the transaction.
+TEST_F(MultiTest, MultiQueueErrorStillQueues) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "x", "y"}), "QUEUED");
+  EXPECT_THAT(Run({"set", "x"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"set", "w", "v"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT Transaction discarded because of previous errors"));
+  EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"get", "w"}), ArgType(RespExpr::NIL));
+}
+
+TEST_F(MultiTest, MultiQueueErrorDiscard) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"nosuchcmd"}), ErrArg("unknown command"));
+  EXPECT_THAT(Run({"multi"}), ErrArg("MULTI calls can not be nested"));
+  EXPECT_THAT(Run({"discard"}), "OK");
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+  EXPECT_THAT(Run({"set", "after", "1"}), "OK");
+}
+
+TEST_F(MultiTest, RejectedExecDiscards) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "x", "1"}), "QUEUED");
+  EXPECT_THAT(Run({"exec", "blahblah"}), ErrArg("EXECABORT"));
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "x", "2"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK")));
+  EXPECT_EQ(Run({"get", "x"}), "2");
+}
+
 TEST_F(MultiTest, Multi) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
