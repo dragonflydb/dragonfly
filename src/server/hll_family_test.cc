@@ -332,6 +332,36 @@ TEST_F(HllFamilyTest, CorruptedSparseTruncatedRun) {
   EXPECT_THAT(Run({"pfcount", "truncated"}), ErrArg(kCorruptedHllError));
 }
 
+// Corrupt sparse HLL: passes isValidHLL(), rejected by hllSparseSet().
+// Each PFADD used to leak the sds copy of the value on that error path.
+TEST_F(HllFamilyTest, PfAddCorruptSparseDoesNotLeak) {
+  string hll("HYLL", 4);
+  hll.push_back(1);
+  hll.append(3, '\0');
+  hll.append(8, '\0');
+  for (int i = 0; i < 2048; ++i) {
+    hll.push_back('\x7f');
+    hll.push_back('\xff');
+  }
+  ASSERT_EQ(Run({"set", "leak", hll}), "OK");
+
+  auto used_memory = [this] {
+    const string info = Run({"info", "memory"}).GetString();
+    const auto pos = info.find("used_memory:") + strlen("used_memory:");
+    return strtoll(info.c_str() + pos, nullptr, 10);
+  };
+
+  EXPECT_THAT(Run({"pfadd", "leak", "x"}), ErrArg(kInvalidHllError));
+  const int64_t before = used_memory();
+
+  for (int i = 0; i < 50; ++i) {
+    EXPECT_THAT(Run({"pfadd", "leak", "x"}), ErrArg(kInvalidHllError));
+  }
+
+  const int64_t after = used_memory();
+  EXPECT_LE(after - before, int64_t(20 * hll.size()));
+}
+
 // PFCOUNT over several keys merges into a raw register array; it used to write
 // that array HLL_HDR_SIZE bytes too low, so the estimate silently dropped the
 // first 16 registers and counted 16 zeroed ones instead. The union estimate has
