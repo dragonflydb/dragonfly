@@ -1606,6 +1606,53 @@ void AddKV(std::string* out, std::string_view key, std::string_view val) {
   AppendString(out, val);
 }
 
+TEST_F(RdbTest, LoadRejectsHugeDeclaredLength) {
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
+  AppendLen(&body, 0);
+  body.push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  body.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendLen(&body, 1ULL << 60);  // key length
+  AppendString(&body, "v");
+
+  const string rdb_file = absl::StrCat("rdb_sourcelimit_", getpid(), ".rdb");
+  io::WriteStringToFileOrDie(WrapInRdb(body), rdb_file);
+
+  auto fut = service_->server_family().Load(rdb_file, ServerFamily::LoadExistingKeys::kFail);
+  ASSERT_TRUE(fut.has_value());
+  auto err = static_cast<std::error_code>(fut->Get());
+  unlink(rdb_file.c_str());
+
+  EXPECT_EQ(err, RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeLzfKey) {
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
+  AppendLen(&body, 0);
+  body.push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  body.push_back(static_cast<char>(RDB_TYPE_STRING));
+  // LZF-encoded key: clen=1, declared uncompressed length 2^60.
+  body.push_back(static_cast<char>((RDB_ENCVAL << 6) | RDB_ENC_LZF));
+  AppendLen(&body, 1);
+  AppendLen(&body, 1ULL << 60);
+  body.push_back('\x00');
+
+  const string rdb_file = absl::StrCat("rdb_sourcelimit_", getpid(), ".rdb");
+  io::WriteStringToFileOrDie(WrapInRdb(body), rdb_file);
+
+  auto fut = service_->server_family().Load(rdb_file, ServerFamily::LoadExistingKeys::kFail);
+  ASSERT_TRUE(fut.has_value());
+  auto err = static_cast<std::error_code>(fut->Get());
+  unlink(rdb_file.c_str());
+
+  EXPECT_EQ(err, RdbError(rdb::errc::rdb_file_corrupted));
+}
+
 std::string MakeTaggedChunk(uint32_t id, std::string_view payload) {
   std::string out;
   out.push_back(static_cast<char>(RDB_OPCODE_TAGGED_CHUNK));
