@@ -226,11 +226,17 @@ void ServerState::SetPauseState(ClientPause state, bool start) {
   }
 }
 
-void ServerState::AwaitPauseState(bool is_write) {
-  client_pause_ec_.await([is_write, this]() {
+void ServerState::AwaitPauseState(bool is_write, const facade::ConnectionContext* cntx) {
+  auto resumed = [is_write, this]() {
     return client_pauses_[int(ClientPause::ALL)] == 0 &&
            (!is_write || client_pauses_[int(ClientPause::WRITE)] == 0);
-  });
+  };
+  // A closing connection does not notify the pause event, so poll for it.
+  while (!cntx->conn_closing) {
+    if (client_pause_ec_.await_until(resumed, chrono::steady_clock::now() + 100ms) ==
+        cv_status::no_timeout)
+      return;
+  }
 }
 
 void ServerState::DecommitMemory(uint8_t flags) {

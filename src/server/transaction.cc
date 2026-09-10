@@ -1486,7 +1486,7 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
   --stats->num_blocked_clients;
 
   cntx->paused = true;
-  ServerState::tlocal()->AwaitPauseState(true);  // blocking are always write commands
+  ServerState::tlocal()->AwaitPauseState(true, cntx);  // blocking are always write commands
   cntx->paused = false;
 
   OpStatus result = OpStatus::OK;
@@ -1495,6 +1495,9 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
   } else if (coordinator_state_ & COORD_CANCELLED) {
     DCHECK_GT(block_cancel_result_, OpStatus::OK);
     result = block_cancel_result_;
+  } else if (cntx->conn_closing) {
+    // Woken after the client left: expiring hands the wake to the next waiter.
+    result = OpStatus::CANCELLED;
   }
 
   // If we don't follow up with an "action" hop, we must clean up manually on all shards.
