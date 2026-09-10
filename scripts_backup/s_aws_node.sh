@@ -30,11 +30,13 @@ Examples:
   s_aws_node
   s_aws_node list
   s_aws_node start bm-server
+  s_aws_node stop all
   s_aws_node stop --hard bm-server bm-client
   s_aws_node stop myaws-bm-client
   s_aws_node status vm-server
 
 The script operates only on the four nodes listed above in us-east-1.
+Use `s_aws_node stop all` to stop all four nodes in one AWS request.
 --hard (or --skip-os-shutdown) bypasses the guest OS shutdown. It can lose
 unflushed results and require filesystem recovery at the next boot.
 EOF
@@ -124,6 +126,13 @@ main() {
       shift
       for node in "$@"; do
         case "$node" in
+          all)
+            [[ $action == stop ]] || {
+              printf 'all is only valid with stop\n' >&2
+              exit 2
+            }
+            instance_ids+=("$VM_SERVER_ID" "$VM_CLIENT_ID" "$BM_SERVER_ID" "$BM_CLIENT_ID")
+            ;;
           --hard|--skip-os-shutdown)
             [[ $action == stop ]] || {
               printf '%s is only valid with stop\n' "$node" >&2

@@ -91,13 +91,14 @@ Batch mode (--batch <file> | -b <file>):
   --batch is EXCLUSIVE: it cannot be combined
   with positional arguments, and the following per-run env vars must NOT be set in the
   environment (the script exits with an error if they are):
-    SERVER_TYPE, VALKEY_IO_THREADS, PIPELINE, CMD, EXTRA_SERVER_FLAGS, MEMTIER_ARGS,
-    REDIS_CLI_ARGS, NUM_RUNS, BENCH_DURATION, CLIENT_TIMEOUT, CLIENT_DELAY_US,
+    SERVER_TYPE, VALKEY_IO_THREADS, CMD, EXTRA_SERVER_FLAGS, MEMTIER_ARGS,
+    REDIS_CLI_ARGS, NUM_RUNS, CLIENT_TIMEOUT, CLIENT_DELAY_US,
     SERVER_METRICS_PORT, SERVER_LOG_DIR.
   Put those per-run knobs on the relevant line instead.
 
   Still honored from the environment with --batch (they are global, not per-run):
     SERVER_IP, CLIENT_IP, SSH_USER  - cross-machine topology, applied to every run.
+        PIPELINE, DATA_SIZE, BENCH_DURATION - common matrix dimensions, inherited by every run.
     BENCH_LOG_DIR                       - directory that collects all logs (see below).
     METRICS_DIR                         - directory for /metrics snapshots (defaults to
                                           BENCH_LOG_DIR/metrics; set METRICS_DIR=off to disable).
@@ -165,7 +166,7 @@ Environment variables (for cross-machine benchmarking):
                 binary name 'memtier_benchmark'. The script always prepends:
                   memtier_benchmark -s <host> -p <port> --pipeline=<depth>
                 Must NOT include: -s/--server, -p/--port, --pipeline  (script exits if found).
-                Batch density is computed only if -n <N> is present in the args.
+                Flush batch density is computed only if -n <N> is present in the args.
                 Example: MEMTIER_ARGS="-t 1 -c 1 -n 2000000 --ratio=1:0 -d 2 --hide-histogram"
   REDIS_CLI_ARGS: Extra arguments for redis-benchmark in pubsub mode (publisher only).
                 Replaces the default '-c 5 -q' options. The script always injects:
@@ -226,7 +227,7 @@ Environment variables (for cross-machine benchmarking):
                   valkey     - launch [binary] as valkey-server.
                                Dragonfly-specific flags are not passed.
                                /metrics scraping is disabled; SEND_SYSCALLS and
-                               BATCH_DENSITY will show 0.
+                               FLUSH_BATCH_DENSITY will show 0.
                                ver argument is accepted but ignored (only one run per mode).
                                Pubsub mode is supported (standard Redis pub/sub protocol).
                 Additional env vars for SERVER_TYPE=valkey:
@@ -377,6 +378,17 @@ _mark_variance_files() {
     done < <(grep -oP 'Metrics snapshot saved to \K.*' "$run_out" 2>/dev/null)
 }
 
+# Keep an executable copy with the benchmark artifacts, rather than recording only
+# its path and Git revision. This preserves the exact binary used for the run.
+_snapshot_server_binary() {
+    local output_dir="$1" binary="$2"
+    local binary_dir="${output_dir%/}/binaries"
+
+    mkdir -p "$binary_dir" || return 1
+    cp -p -- "$binary" "$binary_dir/" || return 1
+    sha256sum "$binary" > "$binary_dir/$(basename -- "$binary").sha256" || return 1
+}
+
 run_batch_mode() {
     local desc_file="$1"; shift
     local -a leftover=("$@")
@@ -394,11 +406,11 @@ run_batch_mode() {
     fi
     # Per-run knobs must live on each line, not in the global environment, so one
     # run's settings never silently leak into every other run.
-    local -a forbidden=(SERVER_TYPE VALKEY_IO_THREADS PIPELINE CMD RATIO PREFILL_KEYS
+    local -a forbidden=(SERVER_TYPE VALKEY_IO_THREADS CMD RATIO PREFILL_KEYS
                         PREFILL_PIPELINE EXTRA_SERVER_FLAGS
-                        MEMTIER_ARGS REDIS_CLI_ARGS NUM_RUNS BENCH_DURATION
+                        MEMTIER_ARGS REDIS_CLI_ARGS NUM_RUNS
                         CLIENT_TIMEOUT CLIENT_DELAY_US SERVER_METRICS_PORT SERVER_LOG_DIR
-                        METRICS_DIR TRACY_CAPTURE TRACY_CAPTURE_FILE TRACY_CAPTURE_SECONDS)
+                        TRACY_CAPTURE TRACY_CAPTURE_FILE TRACY_CAPTURE_SECONDS)
     local v
     for v in "${forbidden[@]}"; do
         if [[ -n "${!v:-}" ]]; then
@@ -489,6 +501,7 @@ run_batch_mode() {
     # --- Preflight: parse every line and verify its binary exists ------------
     local -a parsed_envs=() parsed_args=()
     local idx=0 ok=1
+    local -A batch_binaries=()
     echo "========================================"
     echo " Batch preflight: ${desc_file} (${#run_lines[@]} run(s))"
     echo "========================================"
@@ -500,8 +513,9 @@ run_batch_mode() {
         if [[ ${#parsed_args[@]} -eq 0 ]]; then
             echo "  [!!] run ${idx}: no binary/arguments: ${line}"; ok=0; continue
         fi
-        if _resolve_binary "${parsed_args[0]}" >/dev/null 2>&1; then
+        if _resolved=$(_resolve_binary "${parsed_args[0]}"); then
             echo "  [ok] run ${idx}: ${parsed_args[0]}"
+            batch_binaries["$_resolved"]=1
         else
             echo "  [!!] run ${idx}: binary not found: ${parsed_args[0]}"; ok=0
         fi
@@ -512,6 +526,12 @@ run_batch_mode() {
         exit 1
     fi
     echo "  All ${#run_lines[@]} run(s) look valid."
+
+    local binary
+    for binary in "${!batch_binaries[@]}"; do
+        _snapshot_server_binary "$outdir" "$binary" \
+            || echo "[!] Warning: could not snapshot server binary '${binary}'."
+    done
 
     # --- Execute every run ----------------------------------------------------
     # BENCH_LOG_DIR is injected first so each child writes its .log and server
@@ -911,6 +931,12 @@ if [[ -n "${BENCH_LOG_DIR:-}" ]]; then
     if [[ -z "${METRICS_DIR:-}" ]]; then
         METRICS_DIR="${BENCH_LOG_DIR%/}/metrics"
     fi
+
+    # Batch mode snapshots binaries once in its parent before spawning children.
+    if [[ -z "${BATCH_RUN_INDEX:-}" ]]; then
+        _snapshot_server_binary "$BENCH_LOG_DIR" "$SERVER_BIN" \
+            || echo "[!] Warning: could not snapshot server binary '${SERVER_BIN}'."
+    fi
 fi
 
 ACCUM_FILE=$(mktemp)
@@ -921,6 +947,23 @@ if [[ -n "$SERVER_LOG_DIR" && ! -d "$SERVER_LOG_DIR" ]]; then
     echo "[!] Error: server_log_dir '${SERVER_LOG_DIR}' does not exist. Create it first."
     exit 1
 fi
+
+# Detect EC2 from DMI data without querying the instance metadata service. This keeps
+# the topology warning available even when IMDS is disabled or restricted.
+_is_aws_ec2() {
+    local dmi_value=""
+    for dmi_file in /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name; do
+        if [[ -r "$dmi_file" ]]; then
+            IFS= read -r dmi_value < "$dmi_file"
+            [[ "$dmi_value" == *"Amazon EC2"* ]] && return 0
+        fi
+    done
+    if [[ -r /sys/class/dmi/id/product_uuid ]]; then
+        IFS= read -r dmi_value < /sys/class/dmi/id/product_uuid
+        [[ "${dmi_value^^}" == EC2* ]] && return 0
+    fi
+    return 1
+}
 
 # Cross-machine mode detection.
 REMOTE_MODE=""
@@ -939,6 +982,9 @@ if [[ -n "$CLIENT_IP" ]]; then
     fi
     echo "[*] Cross-machine mode: server=$(hostname), client=${SSH_USER}@${CLIENT_IP}"
     echo "    Client will target ${SERVER_IP}:${PORT}"
+elif [[ "$SERVER_IP" == "127.0.0.1" ]] && _is_aws_ec2; then
+    printf '\033[31m[!] WARNING: Running loopback on an AWS EC2 instance. Is this what you intended to do?\033[0m\n'
+    echo "    Set CLIENT_IP and SERVER_IP to run memtier from a separate client machine."
 fi
 
 ulimit -n 4096 2>/dev/null || true
@@ -1290,7 +1336,7 @@ get_send_count() {
 }
 
 get_cmd_count() {
-    # Returns total commands processed. Used to compute batch density accurately
+    # Returns total commands processed. Used to compute flush batch density accurately
     # without relying on -n counts. Works for both dragonfly and ok_backend
     # (ok_backend exposes commands_processed_total on its main port).
     if [[ "$SERVER_TYPE" != "dragonfly" ]]; then echo 0; return; fi
@@ -1313,8 +1359,8 @@ get_replies_per_flush_raw() {
     echo "${sum:-0} ${count:-0}"
 }
 
-compute_batch_density() {
-    # Given total replies and syscall delta, compute real batch density.
+compute_flush_batch_density() {
+    # Given total replies and syscall delta, compute the real flush batch density.
     local total_replies=$1 send_delta=$2
     if [[ "$send_delta" -gt 0 ]]; then
         awk "BEGIN {printf \"%.1f\", $total_replies / $send_delta}"
@@ -1387,7 +1433,7 @@ save_metrics_snapshot() {
 # per-pipeline metrics snapshot reflects only that pipeline depth, never a blend of all
 # depths run against the same long-lived server process. Clears (among others)
 # squash_batch_size_hist, proactor_reads, and the reply/command counters used for
-# batch-density. (The pipeline_latency_seconds residence histogram is NOT cleared by
+# flush batch density. (The pipeline_latency_seconds residence histogram is NOT cleared by
 # RESETSTAT — it decays instead; client latency is taken from memtier, not from it.)
 # No-op for non-dragonfly servers.
 # ---------------------------------------------------------------------------
@@ -1619,7 +1665,7 @@ run_bench() {
     start_tracy_capture "$label" "$mode_name"
 
     RESULTS_TMP=$(mktemp)
-    echo -e "PIPELINE\tRPS\tAVG_LAT(ms)\tP50(ms)\tP99(ms)\tP99.9(ms)\tSEND_SYSCALLS\tBATCH_DENSITY" > "$RESULTS_TMP"
+    echo -e "PIPELINE\tRPS\tAVG_LAT(ms)\tP50(ms)\tP99(ms)\tP99.9(ms)\tSEND_SYSCALLS\tFLUSH_BATCH_DENSITY" > "$RESULTS_TMP"
 
     for PIPELINE in "${pipelines[@]}"; do
         echo "  [+] pipeline=$PIPELINE ..."
@@ -1664,7 +1710,7 @@ run_bench() {
         CMDS_AFTER=$(get_cmd_count)
         SEND_DELTA=$(( SENDS_AFTER - SENDS_BEFORE ))
         CMD_DELTA=$(( CMDS_AFTER - CMDS_BEFORE ))
-        BATCH_DENSITY=$(compute_batch_density "$CMD_DELTA" "$SEND_DELTA")
+        FLUSH_BATCH_DENSITY=$(compute_flush_batch_density "$CMD_DELTA" "$SEND_DELTA")
 
         RPS=$(echo "$OUTPUT" | grep "^Totals" | awk '{print $2}' || true)
         LATENCY=$(echo "$OUTPUT" | grep "^Totals" | awk '{print $5}' || true)
@@ -1680,8 +1726,8 @@ run_bench() {
         P99=${P99:-"N/A"}
         P999=${P999:-"N/A"}
 
-        echo -e "$PIPELINE\t$RPS\t$LATENCY\t$P50\t$P99\t$P999\t$SEND_DELTA\t$BATCH_DENSITY" >> "$RESULTS_TMP"
-        echo "${label}|${mode_name}|${PIPELINE}|${RPS}|${LATENCY}|${SEND_DELTA}|${BATCH_DENSITY}|${P50}|${P99}|${P999}" >> "$ACCUM_FILE"
+        echo -e "$PIPELINE\t$RPS\t$LATENCY\t$P50\t$P99\t$P999\t$SEND_DELTA\t$FLUSH_BATCH_DENSITY" >> "$RESULTS_TMP"
+        echo "${label}|${mode_name}|${PIPELINE}|${RPS}|${LATENCY}|${SEND_DELTA}|${FLUSH_BATCH_DENSITY}|${P50}|${P99}|${P999}" >> "$ACCUM_FILE"
 
         # Per-pipeline metrics: snapshot THIS depth, then reset counters so the next
         # depth's snapshot is clean (one .prom == one config/mode/pipeline/run).
@@ -1734,7 +1780,7 @@ run_bench_custom() {
     start_tracy_capture "$label" "$mode_name"
 
     RESULTS_TMP=$(mktemp)
-    echo -e "PIPELINE\tRPS\tAVG_LAT(ms)\tP50(ms)\tP99(ms)\tP99.9(ms)\tSEND_SYSCALLS\tBATCH_DENSITY" > "$RESULTS_TMP"
+    echo -e "PIPELINE\tRPS\tAVG_LAT(ms)\tP50(ms)\tP99(ms)\tP99.9(ms)\tSEND_SYSCALLS\tFLUSH_BATCH_DENSITY" > "$RESULTS_TMP"
 
     for PIPELINE in "${pipelines[@]}"; do
         echo "  [+] pipeline=$PIPELINE ..."
@@ -1777,7 +1823,7 @@ run_bench_custom() {
         CMDS_AFTER=$(get_cmd_count)
         SEND_DELTA=$(( SENDS_AFTER - SENDS_BEFORE ))
         CMD_DELTA=$(( CMDS_AFTER - CMDS_BEFORE ))
-        BATCH_DENSITY=$(compute_batch_density "$CMD_DELTA" "$SEND_DELTA")
+        FLUSH_BATCH_DENSITY=$(compute_flush_batch_density "$CMD_DELTA" "$SEND_DELTA")
 
         RPS=$(echo "$OUTPUT" | grep "^Totals" | awk '{print $2}' || true)
         LATENCY=$(echo "$OUTPUT" | grep "^Totals" | awk '{print $5}' || true)
@@ -1791,8 +1837,8 @@ run_bench_custom() {
         P99=${P99:-"N/A"}
         P999=${P999:-"N/A"}
 
-        echo -e "$PIPELINE\t$RPS\t$LATENCY\t$P50\t$P99\t$P999\t$SEND_DELTA\t$BATCH_DENSITY" >> "$RESULTS_TMP"
-        echo "${label}|${mode_name}|${PIPELINE}|${RPS}|${LATENCY}|${SEND_DELTA}|${BATCH_DENSITY}|${P50}|${P99}|${P999}" >> "$ACCUM_FILE"
+        echo -e "$PIPELINE\t$RPS\t$LATENCY\t$P50\t$P99\t$P999\t$SEND_DELTA\t$FLUSH_BATCH_DENSITY" >> "$RESULTS_TMP"
+        echo "${label}|${mode_name}|${PIPELINE}|${RPS}|${LATENCY}|${SEND_DELTA}|${FLUSH_BATCH_DENSITY}|${P50}|${P99}|${P999}" >> "$ACCUM_FILE"
 
         # Per-pipeline metrics: snapshot THIS depth, then reset counters so the next
         # depth's snapshot is clean (one .prom == one config/mode/pipeline/run).
@@ -2175,7 +2221,7 @@ print_final_report() {
                 print ""
                 printf "  %-4s  %s\n", lbl[k], mod[k]
                 print "====================================================="
-                print "PIPELINE\tRPS\tAVG_LAT(ms)\tP50(ms)\tP99(ms)\tP99.9(ms)\tSEND_SYSCALLS\tBATCH_DENSITY\tRUNS_USED"
+                print "PIPELINE\tRPS\tAVG_LAT(ms)\tP50(ms)\tP99(ms)\tP99.9(ms)\tSEND_SYSCALLS\tFLUSH_BATCH_DENSITY\tRUNS_USED"
                 prev_group = g
             }
             rps_avg = (rps_c > 0) ? rps_s / rps_c : 0
