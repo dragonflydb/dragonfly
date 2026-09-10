@@ -357,8 +357,7 @@ async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInst
         await task
 
     df.stop()
-    found = df.find_in_logs("Commands squashing current reply size is overlimit")
-    assert len(found) > 0
+    assert df.is_in_logs("Commands squashing current reply size is overlimit")
 
 
 @pytest.mark.asyncio

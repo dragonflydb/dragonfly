@@ -571,8 +571,7 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagge
 
     # No in-between errors occured
     replica.stop()
-    lines = replica.find_in_logs("Duplicate zset fields detected")
-    assert len(lines) == 0
+    assert replica.is_not_in_logs("Duplicate zset fields detected")
 
 
 @pytest.mark.large

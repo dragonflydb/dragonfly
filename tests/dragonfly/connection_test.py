@@ -3287,8 +3287,7 @@ async def test_tls_client_kill_preemption(
     await task
 
     server.stop()
-    lines = server.find_in_logs("Preempting inside of atomic section, fiber")
-    assert len(lines) == 0
+    assert server.is_not_in_logs("Preempting inside of atomic section, fiber")
 
 
 @dfly_multi_test_args(

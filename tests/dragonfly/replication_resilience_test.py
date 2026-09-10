@@ -628,8 +628,7 @@ async def test_network_disconnect(
 
     if check_stale_log:
         master.stop()
-        lines = master.find_in_logs("Partial sync requested from stale LSN")
-        assert len(lines) > 0
+        assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
 async def test_replica_reconnections_after_network_disconnect(
@@ -1070,14 +1069,12 @@ async def test_partial_replication_on_same_source_master(
         lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
         assert len(lines) == 1
         # Check no full sync logs
-        lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
-        assert len(lines) == 0
+        assert replica2.is_not_in_logs(f"Started full sync with localhost:{replica1.port}")
     else:
         lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
         assert len(lines) == 1
         # No partial sync after NO ONE
-        lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
-        assert len(lines) == 0
+        assert replica2.is_not_in_logs(f"Started partial sync with localhost:{replica1.port}")
 
 
 async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df_factory):
@@ -1183,8 +1180,7 @@ async def test_cascaded_partial_sync(df_factory, reconnect_to):
     instances[-1].stop()
     lines = instances[-1].find_in_logs(f"Started partial sync with localhost:{target.port}")
     assert len(lines) == 1
-    lines = instances[-1].find_in_logs(f"Started full sync with localhost:{target.port}")
-    assert len(lines) == 0
+    assert instances[-1].is_not_in_logs(f"Started full sync with localhost:{target.port}")
 
 
 async def test_cascaded_full_sync_on_master_switch(df_factory):
@@ -1427,10 +1423,9 @@ async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
     # Check master logs
     master.stop(kill=False)
 
-    timeout_logs = master.find_in_logs(
+    assert master.is_not_in_logs(
         f"Couldn't synchronize with replica for takeover in time: 127.0.0.1:{replicas[0].port}"
     )
-    assert not timeout_logs
 
 
 @pytest.mark.large
@@ -1519,10 +1514,8 @@ async def test_partial_sync_with_different_shard_sizes(df_factory):
     for replica in (replica1, replica2, replica3):
         replica.stop()
 
-    lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
-    assert len(lines) == 0
-    lines = replica3.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
-    assert len(lines) == 0
+    assert replica2.is_not_in_logs(f"Started partial sync with localhost:{replica1.port}")
+    assert replica3.is_not_in_logs(f"Started partial sync with localhost:{replica1.port}")
 
 
 @pytest.mark.large
