@@ -294,8 +294,7 @@ async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_mast
             fill_seeder.stop()
             fill_task.cancel()
 
-        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        await wait_available_async(c_replica)
+        await start_replication(c_replica, master.port)
 
         capture = await seeder.capture()
         assert await seeder.compare(capture, port=replica.port)
@@ -644,10 +643,7 @@ async def test_replica_reconnections_after_network_disconnect(
         await seeder.run(target_deviation=0.1)
 
         proxy = await proxy_factory(master.port)
-        await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
-
-        # Wait replica to be up and synchronized with master
-        await wait_available_async(c_replica)
+        await start_replication(c_replica, proxy.port)
 
         initial_reconnects_count = await get_replica_reconnects_count(replica)
 
@@ -1568,8 +1564,7 @@ async def test_replica_no_deadlock_on_disconnect(df_factory: DflyInstanceFactory
     c_replica = replica.client()
 
     await c_master.execute_command("DEBUG", "POPULATE", "1000")
-    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
-    await wait_available_async(c_replica)
+    await start_replication(c_replica, master.port)
     await check_all_replicas_finished([c_replica], c_master)
 
     # Stream Lua-based multi-shard traffic that generates global commands,

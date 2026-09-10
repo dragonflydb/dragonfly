@@ -350,9 +350,7 @@ async def test_user_acl_replication(df_factory):
     c_replica = replica.client()
     await c_replica.execute_command("CONFIG SET masteruser tmp")
     await c_replica.execute_command("CONFIG SET masterauth tmp")
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-
-    await wait_available_async(c_replica)
+    await start_replication(c_replica, master.port)
     assert 1 == await c_replica.execute_command("DBSIZE")
 
     # revoke acl's from tmp

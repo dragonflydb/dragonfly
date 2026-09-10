@@ -59,8 +59,7 @@ async def test_search(df_factory):
     assert (await c_master.ft("idx-m").search("@f2:[6 10]")).total == 3
 
     # Replicate
-    await c_replica.execute_command("REPLICAOF", "localhost", master.port)
-    await wait_available_async(c_replica)
+    await start_replication(c_replica, master.port)
 
     # Check master index was picked up and original index was deleted
     assert (await c_replica.execute_command("FT._LIST")) == ["idx-m"]
@@ -217,8 +216,7 @@ async def test_save_with_replication(df_factory, action_during_save):
 
     if action_during_save == "disconnect":
         await c_master.execute_command("DEBUG POPULATE 100000 key 4048 RAND")
-        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        await wait_available_async(c_replica)
+        await start_replication(c_replica, master.port)
     else:
         await c_replica.execute_command("DEBUG POPULATE 100000 key 4096 RAND")
 
@@ -636,8 +634,7 @@ async def test_replicate_hset_with_expiry(df_factory: DflyInstanceFactory):
     await cm.execute_command("HSETEX key 86400 name 1234")
 
     cr = replica.client()
-    await cr.execute_command(f"REPLICAOF localhost {master.port}")
-    await wait_available_async(cr)
+    await start_replication(cr, master.port)
 
     result = await cr.hgetall("key")
 
@@ -682,8 +679,7 @@ async def test_mc_gat_replication(df_factory):
     assert cm.set(key, value, noreply=True)
 
     async with replica.client() as cl:
-        await cl.execute_command(f"REPLICAOF localhost {master.port}")
-        await wait_available_async(cl)
+        await start_replication(cl, master.port)
 
     async def state_transitioned_stable(
         init: bytes,
@@ -754,8 +750,7 @@ async def test_set_past_expiry_replication(df_factory):
 
     async with master.client() as c_master, replica.client() as c_replica:
         await c_master.set("k", "v")
-        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        await wait_available_async(c_replica)
+        await start_replication(c_replica, master.port)
         assert await c_replica.get("k") == "v"
 
         # SET with a past expiry deletes the key; SET is not auto-journaled, so the delete
@@ -1573,8 +1568,7 @@ async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
     await c_master.execute_command("SAVE", "DF", dbfilename)
     await c_master.execute_command("FLUSHALL")
 
-    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
-    await wait_available_async(c_replica)
+    await start_replication(c_replica, master.port)
 
     # Stream writes during DFLY LOAD to exercise the race between journal
     # writes and the load that bypasses the journal. LOADING state rejects

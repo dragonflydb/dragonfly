@@ -1203,8 +1203,7 @@ async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
 
     assert parse_client_list(await c_replica.execute_command("CLIENT LIST TYPE master")) == []
 
-    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
-    await wait_available_async(c_replica)
+    await start_replication(c_replica, master.port)
 
     replicas_on_master = parse_client_list(
         await c_master.execute_command("CLIENT LIST TYPE replica")

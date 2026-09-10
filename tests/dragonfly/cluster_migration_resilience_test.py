@@ -27,12 +27,12 @@ from .cluster_test_utils import (
     wait_for_status,
 )
 from .instance import DflyInstanceFactory
+from .replication_utils import start_replication
 from .seeder import DebugPopulateSeeder
 from .utility import (
     assert_eventually,
     extract_int_after_prefix,
     tick_timer,
-    wait_available_async,
 )
 
 
@@ -716,8 +716,7 @@ async def test_slot_migration_oom_replica_rollback(df_factory):
 
     # Start replication: target_replica follows target_master before migration begins
     c_replica_admin = target_replica.admin_client()
-    await c_replica_admin.execute_command(f"replicaof localhost {target_master.port}")
-    await wait_available_async(c_replica_admin)
+    await start_replication(c_replica_admin, target_master.port)
 
     # Kick off migration from source -> target (expects OOM on target)
     source_node.migrations.append(
