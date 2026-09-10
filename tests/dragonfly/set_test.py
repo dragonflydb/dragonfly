@@ -1,9 +1,6 @@
-import pytest
-
 from .instance import DflyInstanceFactory
 
 
-@pytest.mark.asyncio
 async def test_sscan_regression(df_factory: DflyInstanceFactory):
     df = df_factory.create(
         proactor_threads=2,
@@ -22,7 +19,6 @@ async def test_sscan_regression(df_factory: DflyInstanceFactory):
     assert res == []
 
 
-@pytest.mark.asyncio
 async def test_spop_with_null_byte_members(df_factory: DflyInstanceFactory):
     df = df_factory.create(proactor_threads=1)
 

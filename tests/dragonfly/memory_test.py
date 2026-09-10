@@ -98,7 +98,6 @@ async def test_rss_used_mem_gap(df_factory: DflyInstanceFactory, type, keys, val
     assert info["used_memory_rss"] < min_rss / 10  # RSS must have been freed
 
 
-@pytest.mark.asyncio
 async def test_rss_ratio_canary(df_factory: DflyInstanceFactory):
     """
     tests that RSS is within a fixed ratio of used_mem, less than 1.5x.
@@ -122,7 +121,6 @@ async def test_rss_ratio_canary(df_factory: DflyInstanceFactory):
     assert ratio < 1.5, f"RSS ratio {ratio:.3f} over canary threshold (used={used}, rss={rss})"
 
 
-@pytest.mark.asyncio
 @dfly_args(
     {
         "maxmemory": "512mb",
@@ -182,7 +180,6 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
 
 
 @pytest.mark.large
-@pytest.mark.asyncio
 @dfly_args(
     {
         "maxmemory": "512mb",
@@ -325,7 +322,6 @@ async def test_no_rss_eviction_overflow_on_expired_keys(df_factory: DflyInstance
 
 
 @pytest.mark.skip(reason="Disabling test until improvements in squashing.")
-@pytest.mark.asyncio
 async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInstanceFactory):
     df = df_factory.create(
         proactor_threads=2,
@@ -357,11 +353,9 @@ async def test_throttle_on_commands_squashing_replies_bytes(df_factory: DflyInst
         await task
 
     df.stop()
-    found = df.find_in_logs("Commands squashing current reply size is overlimit")
-    assert len(found) > 0
+    assert df.is_in_logs("Commands squashing current reply size is overlimit")
 
 
-@pytest.mark.asyncio
 async def test_remove_docs_on_eviction(df_factory):
     max_memory = 256 * 1024**2  # 256MB
     df_server = df_factory.create(
@@ -403,7 +397,6 @@ async def test_remove_docs_on_eviction(df_factory):
     assert index_info_num_docs == keyspace_keys
 
 
-@pytest.mark.asyncio
 async def test_memory_shrink_basic(df_factory: DflyInstanceFactory):
     df_server = df_factory.create(proactor_threads=2)
     df_server.start()
@@ -430,7 +423,6 @@ async def test_memory_shrink_basic(df_factory: DflyInstanceFactory):
     assert result is None
 
 
-@pytest.mark.asyncio
 async def test_memory_shrink_with_scan(df_factory: DflyInstanceFactory):
     df_server = df_factory.create(proactor_threads=1)
     df_server.start()
@@ -455,7 +447,6 @@ async def test_memory_shrink_with_scan(df_factory: DflyInstanceFactory):
     assert len(all_keys) == 1000
 
 
-@pytest.mark.asyncio
 async def test_expiry_heartbeat_responsiveness(df_factory: DflyInstanceFactory):
     df_server = df_factory.create(proactor_threads=1)
     df_server.start()

@@ -19,6 +19,7 @@ from .replication_utils import (
     get_metric_value,
     master_role_reply,
     replica_role_reply,
+    setup_replication,
     start_replication,
     wait_for_replica_status,
 )
@@ -38,9 +39,6 @@ from .utility import (
 DISCONNECT_CRASH_FULL_SYNC = 0
 DISCONNECT_CRASH_STABLE_SYNC = 1
 DISCONNECT_NORMAL_STABLE_SYNC = 2
-
-M_OPT = [pytest.mark.opt_only]
-M_SLOW = [pytest.mark.large]
 
 
 """
@@ -294,8 +292,7 @@ async def test_rotating_masters(df_factory, df_seeder_factory, t_replica, t_mast
             fill_seeder.stop()
             fill_task.cancel()
 
-        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-        await wait_available_async(c_replica)
+        await start_replication(c_replica, master.port)
 
         capture = await seeder.capture()
         assert await seeder.compare(capture, port=replica.port)
@@ -628,8 +625,7 @@ async def test_network_disconnect(
 
     if check_stale_log:
         master.stop()
-        lines = master.find_in_logs("Partial sync requested from stale LSN")
-        assert len(lines) > 0
+        assert master.is_in_logs("Partial sync requested from stale LSN")
 
 
 async def test_replica_reconnections_after_network_disconnect(
@@ -645,10 +641,7 @@ async def test_replica_reconnections_after_network_disconnect(
         await seeder.run(target_deviation=0.1)
 
         proxy = await proxy_factory(master.port)
-        await c_replica.execute_command(f"REPLICAOF localhost {proxy.port}")
-
-        # Wait replica to be up and synchronized with master
-        await wait_available_async(c_replica)
+        await start_replication(c_replica, proxy.port)
 
         initial_reconnects_count = await get_replica_reconnects_count(replica)
 
@@ -729,12 +722,7 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     In parallel, connect a replica, so that these SETEX commands write their custom journal log.
     This makes sure that no Fiber context switch while inside a shard callback.
     """
-    master = df_factory.create()
-    replica = df_factory.create()
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     async def send_setex():
         script = """
@@ -907,13 +895,9 @@ async def test_replication_timeout_on_full_sync(
 @dfly_args({"proactor_threads": 1})
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     # disconnect after 1 second of being blocked
-    master = df_factory.create(replication_timeout=1000)
-    replica = df_factory.create()
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"replication_timeout": 1000}, connect=False
+    )
 
     await c_master.execute_command("debug", "populate", "200000", "foo", "500", "RAND")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
@@ -1070,14 +1054,12 @@ async def test_partial_replication_on_same_source_master(
         lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
         assert len(lines) == 1
         # Check no full sync logs
-        lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
-        assert len(lines) == 0
+        assert replica2.is_not_in_logs(f"Started full sync with localhost:{replica1.port}")
     else:
         lines = replica2.find_in_logs(f"Started full sync with localhost:{replica1.port}")
         assert len(lines) == 1
         # No partial sync after NO ONE
-        lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
-        assert len(lines) == 0
+        assert replica2.is_not_in_logs(f"Started partial sync with localhost:{replica1.port}")
 
 
 async def test_partial_replication_on_same_source_master_with_replica_lsn_inc(df_factory):
@@ -1183,8 +1165,7 @@ async def test_cascaded_partial_sync(df_factory, reconnect_to):
     instances[-1].stop()
     lines = instances[-1].find_in_logs(f"Started partial sync with localhost:{target.port}")
     assert len(lines) == 1
-    lines = instances[-1].find_in_logs(f"Started full sync with localhost:{target.port}")
-    assert len(lines) == 0
+    assert instances[-1].is_not_in_logs(f"Started full sync with localhost:{target.port}")
 
 
 async def test_cascaded_full_sync_on_master_switch(df_factory):
@@ -1427,23 +1408,17 @@ async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
     # Check master logs
     master.stop(kill=False)
 
-    timeout_logs = master.find_in_logs(
+    assert master.is_not_in_logs(
         f"Couldn't synchronize with replica for takeover in time: 127.0.0.1:{replicas[0].port}"
     )
-    assert not timeout_logs
 
 
 @pytest.mark.large
 async def test_takeover_timeout_on_unresponsive_master(df_factory):
-    master = df_factory.create(proactor_threads=4)
-    replica = df_factory.create(proactor_threads=2)
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
     # Setup replication
-    await start_replication(c_replica, master.port)
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 4}, replica_args={"proactor_threads": 2}
+    )
 
     # Write some data
     for i in range(10):
@@ -1519,10 +1494,8 @@ async def test_partial_sync_with_different_shard_sizes(df_factory):
     for replica in (replica1, replica2, replica3):
         replica.stop()
 
-    lines = replica2.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
-    assert len(lines) == 0
-    lines = replica3.find_in_logs(f"Started partial sync with localhost:{replica1.port}")
-    assert len(lines) == 0
+    assert replica2.is_not_in_logs(f"Started partial sync with localhost:{replica1.port}")
+    assert replica3.is_not_in_logs(f"Started partial sync with localhost:{replica1.port}")
 
 
 @pytest.mark.large
@@ -1575,8 +1548,7 @@ async def test_replica_no_deadlock_on_disconnect(df_factory: DflyInstanceFactory
     c_replica = replica.client()
 
     await c_master.execute_command("DEBUG", "POPULATE", "1000")
-    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
-    await wait_available_async(c_replica)
+    await start_replication(c_replica, master.port)
     await check_all_replicas_finished([c_replica], c_master)
 
     # Stream Lua-based multi-shard traffic that generates global commands,

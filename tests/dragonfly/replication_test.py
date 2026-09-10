@@ -33,10 +33,6 @@ from .utility import (
     wait_for_replicas_state,
 )
 
-DISCONNECT_CRASH_FULL_SYNC = 0
-DISCONNECT_CRASH_STABLE_SYNC = 1
-DISCONNECT_NORMAL_STABLE_SYNC = 2
-
 M_OPT = [pytest.mark.opt_only]
 M_SLOW = [pytest.mark.large]
 
@@ -197,16 +193,12 @@ serialization_max_chunk_size=500 forces frequent yields within that burst.
 
 async def test_replication_list_double_apply(df_factory: DflyInstanceFactory):
     """Regression test for double-apply of LIST mutations during full sync."""
-    master = df_factory.create(
-        proactor_threads=2,
-        num_shards=1,
-        serialization_max_chunk_size=500,
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"proactor_threads": 2, "num_shards": 1, "serialization_max_chunk_size": 500},
+        replica_args={"proactor_threads": 1},
+        connect=False,
     )
-    replica = df_factory.create(proactor_threads=1)
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
 
     # Pre-fill master with LIST keys so the snapshot has real data to traverse.
     seeder = SeederV2(
@@ -846,13 +838,7 @@ SCRIPT_TEMPLATE = "return {}"
 
 @dfly_args({"proactor_threads": 2})
 async def test_script_transfer(df_factory):
-    master = df_factory.create()
-    replica = df_factory.create()
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     # Load some scripts into master ahead
     scripts = []
@@ -878,13 +864,7 @@ async def test_script_transfer(df_factory):
 
 @dfly_args({"proactor_threads": 4})
 async def test_role_command(df_factory, n_keys=20):
-    master = df_factory.create()
-    replica = df_factory.create()
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     assert await c_master.execute_command("role") == master_role_reply([])
     await start_replication(c_replica, master.port)
@@ -1203,8 +1183,7 @@ async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
 
     assert parse_client_list(await c_replica.execute_command("CLIENT LIST TYPE master")) == []
 
-    await c_replica.execute_command("REPLICAOF", "localhost", str(master.port))
-    await wait_available_async(c_replica)
+    await start_replication(c_replica, master.port)
 
     replicas_on_master = parse_client_list(
         await c_master.execute_command("CLIENT LIST TYPE replica")
@@ -1243,9 +1222,8 @@ async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
     assert again[0]["id"] == entry["id"]
 
     # CLIENT KILL ID against the master-link id must be rejected explicitly.
-    with pytest.raises(aioredis.ResponseError) as exc:
+    with pytest.raises(aioredis.ResponseError, match="REPLICAOF NO ONE"):
         await c_replica.execute_command("CLIENT", "KILL", "ID", entry["id"])
-    assert "REPLICAOF NO ONE" in str(exc.value)
 
     await c_replica.execute_command("REPLICAOF", "NO", "ONE")
 
@@ -1258,12 +1236,7 @@ async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
 
 @dfly_args({"proactor_threads": 2})
 async def test_wait_with_replica(df_factory: DflyInstanceFactory):
-    master = df_factory.create()
-    replica = df_factory.create()
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     await c_master.set("k", "v")
     # No replicas yet: should return 0 without blocking for the full timeout.
@@ -1355,12 +1328,7 @@ async def test_wait_semantics(replication):
 
 @dfly_args({"proactor_threads": 2})
 async def test_blocked_client_unblocked_on_role_change(df_factory: DflyInstanceFactory):
-    master = df_factory.create()
-    replica = df_factory.create()
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
     c_blocked = [replica.client() for _ in range(5)]
 
     blocked = [

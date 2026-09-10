@@ -154,11 +154,8 @@ async def test_cluster_data_migration(df_factory: DflyInstanceFactory, interrupt
     status[0].pop()  # error
     assert status[0] == ["in", nodes[0].id, "FINISHED", 7]
 
-    nodes[0].migrations = []
-    nodes[0].slots = [(0, 2999)]
-    nodes[1].slots = [(3000, 16383)]
     logging.debug("remove finished migrations")
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [(0, 2999)], [(3000, 16383)])
 
     for i in range(22):
         key = "KEY" + str(i)
@@ -232,11 +229,8 @@ async def test_migration_with_key_ttl(df_factory):
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16383)]
     logging.debug("finalize migration")
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
 
     assert await nodes[1].client.execute_command("get k_with_ttl") == "v1"
     assert await nodes[1].client.execute_command("get k_without_ttl") == "v2"
@@ -501,12 +495,7 @@ async def test_snapshoting_during_migration(
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
     logging.debug("finish migration")
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].migrations = []
-    nodes[1].slots = [(0, 16383)]
-
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
 
     seeder.stop()
     await seed
@@ -528,7 +517,6 @@ async def test_snapshoting_during_migration(
 )
 @pytest.mark.large
 @pytest.mark.parametrize("chunk_size", [1_000_000, 30])
-@pytest.mark.asyncio
 @pytest.mark.exclude_epoll
 async def test_cluster_migration_while_seeding(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, chunk_size
@@ -585,7 +573,6 @@ async def test_cluster_migration_while_seeding(
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
-@pytest.mark.asyncio
 async def test_cluster_migrations_sequence(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
 ):
@@ -629,10 +616,7 @@ async def test_cluster_migrations_sequence(
     await apply_config(nodes)
 
     logging.debug("Finalizing migration")
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16383)]
-    nodes[0].migrations = []
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
 
     logging.debug("stop seeding")
     seeder.stop()
@@ -642,7 +626,6 @@ async def test_cluster_migrations_sequence(
     assert await seeder.compare(capture, instances[1].port)
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_seeder_factory):
     # 1. Create cluster of 3 nodes with all slots allocated to first node.
@@ -673,11 +656,7 @@ async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_s
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=50)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", timeout=50)
 
-    nodes[0].migrations = []
-    nodes[0].slots = [(16301, 16383)]
-    nodes[1].slots = [(0, 16300)]
-    nodes[2].slots = []
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [(16301, 16383)], [(0, 16300)])
 
     # 4. Start migrating remaind slots from first node to third node
     logging.debug("Start second migration")
@@ -690,11 +669,7 @@ async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_s
     await wait_for_status(nodes[0].admin_client, nodes[2].id, "FINISHED", timeout=10)
     await wait_for_status(nodes[2].admin_client, nodes[0].id, "FINISHED", timeout=10)
 
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16300)]
-    nodes[2].slots = [(16301, 16383)]
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 2, [], [(16301, 16383)])
 
     # 6. Check all data was migrated
     # Using dbsize to check all the data was migrated to the other nodes.
@@ -715,7 +690,6 @@ For each migration we start migration, wait for it to finish and once it is fini
 
 @pytest.mark.large
 @pytest.mark.exclude_epoll
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "pause_wait_timeout": 10})
 async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seeder_factory):
     # 1. Create cluster of 3 nodes with all slots allocated to first node.
@@ -851,11 +825,8 @@ async def test_remove_docs_on_cluster_migration(df_factory):
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16383)]
     logging.debug("finalize migration")
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
 
     await asyncio.sleep(1)
 
@@ -936,11 +907,8 @@ async def _run_tiering_migration(
         migration_done = True
         await delete_task
 
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16383)]
     logging.debug("finalize migration")
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
 
     async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED", timeout=60):
         with breaker:

@@ -4,7 +4,6 @@ from redis.exceptions import ResponseError
 from redis import asyncio as aioredis
 
 
-@pytest.mark.asyncio
 async def test_config_cmd(async_client: aioredis.Redis):
     with pytest.raises(ResponseError):
         await async_client.config_set("foo", "bar")

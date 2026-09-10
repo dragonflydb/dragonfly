@@ -147,7 +147,6 @@ def sentinel(tmp_dir, port_picker) -> Sentinel:
     s.stop()
 
 
-@pytest.mark.asyncio
 @pytest.mark.large
 async def test_failover(df_factory: DflyInstanceFactory, sentinel, port_picker):
     master = df_factory.create(port=sentinel.initial_master_port)
@@ -217,7 +216,6 @@ async def test_failover(df_factory: DflyInstanceFactory, sentinel, port_picker):
         raise
 
 
-@pytest.mark.asyncio
 @pytest.mark.large
 async def test_master_failure(df_factory, sentinel, port_picker):
     master = df_factory.create(port=sentinel.initial_master_port)
@@ -257,7 +255,6 @@ async def test_master_failure(df_factory, sentinel, port_picker):
 
 
 @dfly_args({"info_replication_valkey_compatible": True})
-@pytest.mark.asyncio
 async def test_priority_on_failover(df_factory, sentinel, port_picker):
     master = df_factory.create(port=sentinel.initial_master_port)
     # lower priority is the best candidate for sentinel

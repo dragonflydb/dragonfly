@@ -35,13 +35,11 @@ from .utility import (
 @dfly_args({})
 class TestNotEmulated:
     async def test_cluster_commands_fails_when_not_emulate(self, async_client: aioredis.Redis):
-        with pytest.raises(aioredis.ResponseError) as respErr:
+        with pytest.raises(aioredis.ResponseError, match="cluster_mode"):
             await async_client.execute_command("CLUSTER HELP")
-        assert "cluster_mode" in str(respErr.value)
 
-        with pytest.raises(aioredis.ResponseError) as respErr:
+        with pytest.raises(aioredis.ResponseError, match="emulated"):
             await async_client.execute_command("CLUSTER SLOTS")
-        assert "emulated" in str(respErr.value)
 
 
 @dfly_args({"cluster_mode": "emulated"})
@@ -376,7 +374,6 @@ async def test_cluster_info(async_client):
 
 
 @dfly_args({"cluster_mode": "emulated", "cluster_announce_ip": "127.0.0.2"})
-@pytest.mark.asyncio
 async def test_cluster_nodes(df_server, async_client):
     res = await async_client.execute_command("CLUSTER NODES")
     assert len(res) == 1
@@ -687,12 +684,8 @@ async def test_config_consistency(df_factory: DflyInstanceFactory):
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
-    nodes[0].migrations = []
-    nodes[0].slots = [(0, 5199)]
-    nodes[1].slots = [(5200, 16383)]
-
     logging.debug("remove finished migrations")
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [(0, 5199)], [(5200, 16383)])
 
     await check_for_no_state_status([node.admin_client for node in nodes])
 

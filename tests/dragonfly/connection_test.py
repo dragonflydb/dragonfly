@@ -2752,6 +2752,11 @@ IOBUF_WAIT_SEC = 2
 IOBUF_WAIT_TIMEOUT_SEC = 6
 
 
+async def get_client_read_buffer_bytes(client: aioredis.Redis) -> int:
+    """Return total client read buffer memory from INFO clients."""
+    return int((await client.info("clients"))["client_read_buffer_bytes"])
+
+
 @dfly_args(
     {
         "proactor_threads": 1,
@@ -2778,17 +2783,16 @@ async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
             if sample.labels["class"] == "client_read_buffer"
         )
 
-    baseline = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    baseline = await get_client_read_buffer_bytes(observer)
     await client.set("iobuf-shrink", "x" * 2048)
 
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
     metric_peak = await client_read_buffer_bytes()
     assert peak > baseline
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_reclamation():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
         assert await client_read_buffer_bytes() < metric_peak
 
     await wait_for_reclamation()
@@ -2815,20 +2819,19 @@ async def test_iobuf_regrows_after_receive_idle_shrink(df_server: DflyInstance):
     await observer.ping()
 
     await client.set("iobuf-regrow-before", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_shrink():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
 
     await wait_for_shrink()
-    shrunk = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    shrunk = await get_client_read_buffer_bytes(observer)
 
     value = "y" * 3072
     assert await client.set("iobuf-regrow-after", value) is True
     assert await client.get("iobuf-regrow-after") == value
-    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) > shrunk
+    assert await get_client_read_buffer_bytes(observer) > shrunk
 
     await client.aclose()
     await observer.aclose()
@@ -2853,12 +2856,11 @@ async def test_iobuf_does_not_shrink_when_disabled(df_server: DflyInstance):
     await observer.ping()
 
     await client.set("iobuf-shrink-disabled", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     await asyncio.sleep(IOBUF_WAIT_SEC)
 
-    current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-    assert current == peak
+    assert await get_client_read_buffer_bytes(observer) == peak
 
     await client.aclose()
     await observer.aclose()
@@ -2883,7 +2885,7 @@ async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
     await writer.drain()
     assert await reader.readuntil(b"\r\n") == b"+OK\r\n"
 
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
     await asyncio.sleep(IOBUF_WAIT_SEC)
 
     partial_value = b"y" * 100
@@ -2896,8 +2898,7 @@ async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_reclamation():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
 
     await wait_for_reclamation()
 
@@ -2925,7 +2926,7 @@ async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
     await observer.ping()
 
     await client.set("iobuf-shrink-complete", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     await asyncio.sleep(IOBUF_WAIT_SEC)
     await client.ping()
@@ -2934,8 +2935,7 @@ async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_reclamation():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
 
     await wait_for_reclamation()
     await client.aclose()
@@ -2957,9 +2957,9 @@ async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
     client = df_server.client()
     await observer.ping()
 
-    observer_size = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    observer_size = await get_client_read_buffer_bytes(observer)
     await client.set("iobuf-shrink-high-usage", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     await asyncio.sleep(IOBUF_WAIT_SEC)
     await client.ping()
@@ -2968,14 +2968,14 @@ async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
         # Keep client receive-idle while the observer polls aggregate client-buffer memory.
         @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
         async def wait_for_receive_idle_shrink():
-            current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+            current = await get_client_read_buffer_bytes(observer)
             assert current <= observer_size + (peak - observer_size) // 2
 
         await wait_for_receive_idle_shrink()
     else:
         # V1 only shrinks in its active path, so it cannot self-shrink while receive-idle.
         await asyncio.sleep(IOBUF_WAIT_SEC)
-        assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == peak
+        assert await get_client_read_buffer_bytes(observer) == peak
 
     await client.aclose()
     await observer.aclose()
@@ -3002,17 +3002,16 @@ async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
     await observer.ping()
 
     await client.set("iobuf-shrink-cooldown", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_first_shrink():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
 
     await wait_for_first_shrink()
-    after_first_shrink = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    after_first_shrink = await get_client_read_buffer_bytes(observer)
     await asyncio.sleep(IOBUF_WAIT_SEC)
-    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == after_first_shrink
+    assert await get_client_read_buffer_bytes(observer) == after_first_shrink
 
     await client.aclose()
     await observer.aclose()
@@ -3287,8 +3286,7 @@ async def test_tls_client_kill_preemption(
     await task
 
     server.stop()
-    lines = server.find_in_logs("Preempting inside of atomic section, fiber")
-    assert len(lines) == 0
+    assert server.is_not_in_logs("Preempting inside of atomic section, fiber")
 
 
 @dfly_multi_test_args(
@@ -4170,7 +4168,6 @@ async def test_client_list_filters(df_server: DflyInstance):
         "write_connection_throttling_sleep_usec": 10000,  # 10ms per throttled batch; >0 enables throttling
     }
 )
-@pytest.mark.asyncio
 async def test_rw_throttle_stats(df_server: DflyInstance):
     """Verify write connections are throttled and rw_throttle_* stats are reported"""
 

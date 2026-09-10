@@ -14,7 +14,6 @@ from . import dfly_args
 from .utility import assert_eventually
 
 
-@pytest.mark.asyncio
 async def test_acl_setuser(async_client):
     await async_client.execute_command("ACL SETUSER kostas")
     result = await async_client.execute_command("ACL LIST")
@@ -80,7 +79,6 @@ async def test_acl_setuser(async_client):
     )
 
 
-@pytest.mark.asyncio
 async def test_acl_categories(async_client):
     await async_client.execute_command(
         "ACL SETUSER vlad ON >mypass -@all +@string +@list +@connection ~*"
@@ -131,7 +129,6 @@ async def test_acl_categories(async_client):
     assert result == "OK"
 
 
-@pytest.mark.asyncio
 async def test_acl_commands(async_client):
     await async_client.execute_command("ACL SETUSER random ON >mypass -@all +set +get ~*")
 
@@ -145,7 +142,6 @@ async def test_acl_commands(async_client):
         await async_client.execute_command("ZADD myset 1 two")
 
 
-@pytest.mark.asyncio
 async def test_acl_cat_commands_multi_exec_squash(df_factory):
     df = df_factory.create(multi_exec_squash=True, port=1111)
 
@@ -243,7 +239,6 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     assert denied, "all SET commands succeeded unexpectedly defying ACL"
 
 
-@pytest.mark.asyncio
 async def test_acl_deluser(df_server):
     client = df_server.client()
 
@@ -273,7 +268,6 @@ end
 """
 
 
-@pytest.mark.asyncio
 @pytest.mark.debug_only
 @dfly_args(
     {
@@ -317,7 +311,6 @@ async def test_acl_del_user_while_running_lua_script(df_server):
     await check_keys_written()
 
 
-@pytest.mark.asyncio
 @pytest.mark.debug_only
 @dfly_args(
     {"proactor_threads": 2, "num_shards": 1, "conn_io_threads": 1, "conn_io_thread_start": 1}
@@ -352,7 +345,6 @@ def create_temp_file(content, tmp_dir):
     return acl
 
 
-@pytest.mark.asyncio
 @dfly_args({"port": 1111})
 async def test_bad_acl_file(df_factory, tmp_dir):
     acl = create_temp_file("ACL SETUSER kostas ON >mypass +@WRONG", tmp_dir)
@@ -367,7 +359,6 @@ async def test_bad_acl_file(df_factory, tmp_dir):
         await client.execute_command("ACL LOAD")
 
 
-@pytest.mark.asyncio
 @dfly_args({"port": 1111})
 async def test_good_acl_file(df_factory, tmp_dir):
     # The hash below is password temp
@@ -422,7 +413,6 @@ async def test_good_acl_file(df_factory, tmp_dir):
     assert "user default on nopass ~* &* +@all $all" in result
 
 
-@pytest.mark.asyncio
 async def test_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert [] == res
@@ -473,7 +463,6 @@ async def test_acl_log(async_client):
     assert res[0]["username"] == "elon"
 
 
-@pytest.mark.asyncio
 @dfly_args({"port": 1111, "admin_port": 1112, "requirepass": "mypass"})
 async def test_require_pass(df_factory):
     df = df_factory.create()
@@ -502,7 +491,6 @@ async def test_require_pass(df_factory):
     assert res == "44"
 
 
-@pytest.mark.asyncio
 @dfly_args({"port": 1111, "requirepass": "temp"})
 async def test_require_pass_with_acl_file_order(df_factory, tmp_dir):
     acl = create_temp_file(
@@ -518,7 +506,6 @@ async def test_require_pass_with_acl_file_order(df_factory, tmp_dir):
     assert await client.set("foo", "bar")
 
 
-@pytest.mark.asyncio
 async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
     # Note the extra space below, it's intented to also check that we properly parse extra spaces
     acl_file_content = "USER    roy ON #ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@string +@fast +hset\nUSER john on nopass +@string"
@@ -539,7 +526,6 @@ async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
     assert result == "OK"
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 1})
 async def test_set_len_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
@@ -569,7 +555,6 @@ async def test_set_len_acl_log(async_client):
     assert 10 == len(res)
 
 
-@pytest.mark.asyncio
 async def test_acl_keys(async_client):
     await async_client.execute_command("ACL SETUSER mrkeys ON >mrkeys allkeys +@admin")
     await async_client.execute_command("AUTH mrkeys mrkeys")
@@ -612,7 +597,6 @@ async def test_acl_keys(async_client):
         await async_client.execute_command("ZUNIONSTORE destkey 2 barz1 barz2")
 
 
-@pytest.mark.asyncio
 async def test_geosearchstore_acl(df_server):
     admin = df_server.client()
     user = df_server.client()
@@ -655,7 +639,6 @@ async def test_geosearchstore_acl(df_server):
         await revoked.execute_command(cmd)
 
 
-@pytest.mark.asyncio
 async def test_geosearchstore_acl_dryrun(async_client):
     cmd = "GEOSEARCHSTORE out secret FROMMEMBER member BYRADIUS 100 km"
 
@@ -672,7 +655,6 @@ async def test_geosearchstore_acl_dryrun(async_client):
     assert "no permissions" in resp.lower()
 
 
-@pytest.mark.asyncio
 async def test_namespaces(df_server):
     admin = df_server.client()
     assert await admin.execute_command("SET foo admin") == "OK"
@@ -704,7 +686,6 @@ async def test_namespaces(df_server):
     assert await roman.execute_command("GET foo") == None
 
 
-@pytest.mark.asyncio
 async def test_default_user_bug(df_server):
     client = df_server.client()
 
@@ -717,7 +698,6 @@ async def test_default_user_bug(df_server):
         await client.execute_command("SET foo bar")
 
 
-@pytest.mark.asyncio
 async def test_auth_resp3_bug(df_factory):
     df = df_factory.create()
     df.start()
@@ -734,7 +714,6 @@ async def test_auth_resp3_bug(df_factory):
     assert res["id"] == 1
 
 
-@pytest.mark.asyncio
 async def test_acl_pub_sub_auth(df_factory):
     df = df_factory.create()
     df.start()
@@ -763,7 +742,6 @@ async def test_acl_pub_sub_auth(df_factory):
     assert res == ["psubscribe", "bar", 3]
 
 
-@pytest.mark.asyncio
 async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
     df = df_factory.create()
     df.start()
@@ -828,7 +806,6 @@ async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
         await subscribe_task
 
 
-@pytest.mark.asyncio
 async def test_acl_select(async_client):
     await async_client.execute_command("ACL SETUSER kostas on >tmp +@all $1 ~*")
     assert await async_client.execute_command("AUTH kostas tmp") == "OK"

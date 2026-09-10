@@ -23,7 +23,6 @@ class TestGracefulShutdown:
     exceed the last acknowledged one by at most 1.
     """
 
-    @pytest.mark.asyncio
     async def test_shutdown_snapshot_contains_acknowledged_writes(self, df_factory):
         df_server = df_factory.create(dbfilename="dump", **BASIC_ARGS)
         df_server.start()
@@ -85,7 +84,6 @@ class TestGracefulShutdown:
 
 @dfly_args({"proactor_threads": "2"})
 class TestShutdownOptions:
-    @pytest.mark.asyncio
     async def test_shutdown_abort_and_invalid_option(self, df_factory):
         df_args = {"dbfilename": "dump", **BASIC_ARGS, "port": 1121}
         df_server = df_factory.create(**df_args)
@@ -107,7 +105,6 @@ class TestShutdownOptions:
         await client.connection_pool.disconnect()
         df_server.stop()
 
-    @pytest.mark.asyncio
     @pytest.mark.parametrize("flavour", ["SAVE", "SAFE"])  # valkey uses SAFE instead of SAVE
     async def test_shutdown_save_persists_snapshot(
         self, df_factory: DflyInstanceFactory, tmp_path, flavour

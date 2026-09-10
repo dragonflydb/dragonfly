@@ -27,12 +27,12 @@ from .cluster_test_utils import (
     wait_for_status,
 )
 from .instance import DflyInstanceFactory
+from .replication_utils import start_replication
 from .seeder import DebugPopulateSeeder
 from .utility import (
     assert_eventually,
     extract_int_after_prefix,
     tick_timer,
-    wait_available_async,
 )
 
 
@@ -71,11 +71,8 @@ async def test_network_disconnect_during_migration(df_factory, proxy_factory):
     await proxy.start_serving()
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16383)]
     logging.debug("remove finished migrations")
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
 
     assert (await DebugPopulateSeeder.capture(nodes[1].client)) == start_capture
 
@@ -236,7 +233,6 @@ async def test_cluster_fuzzymigration(
 
 @pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-@pytest.mark.asyncio
 async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
     """Check data migration from one node to another."""
     instances, nodes = await create_cluster(df_factory, 2)
@@ -290,7 +286,6 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
-@pytest.mark.asyncio
 @pytest.mark.opt_only
 @pytest.mark.exclude_epoll
 async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory):
@@ -393,7 +388,6 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
 
 @pytest.mark.large
 @pytest.mark.exclude_epoll
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_cpu_budget": 1})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # Timeout set to 3 seconds because we must first saturate the socket before we get the timeout
@@ -716,8 +710,7 @@ async def test_slot_migration_oom_replica_rollback(df_factory):
 
     # Start replication: target_replica follows target_master before migration begins
     c_replica_admin = target_replica.admin_client()
-    await c_replica_admin.execute_command(f"replicaof localhost {target_master.port}")
-    await wait_available_async(c_replica_admin)
+    await start_replication(c_replica_admin, target_master.port)
 
     # Kick off migration from source -> target (expects OOM on target)
     source_node.migrations.append(

@@ -394,7 +394,7 @@ class DflyInstance:
             for metric_family in text_string_to_metric_families(data)
         }
 
-    def find_in_logs(self, pattern):
+    def find_in_logs(self, pattern) -> list[str]:
         if self.proc is not None:
             raise RuntimeError("Must close server first")
 
@@ -405,6 +405,12 @@ class DflyInstance:
                 if matcher.search(line):
                     results.append(line)
         return results
+
+    def is_in_logs(self, pattern) -> bool:
+        return bool(self.find_in_logs(pattern))
+
+    def is_not_in_logs(self, pattern) -> bool:
+        return not self.find_in_logs(pattern)
 
     @property
     def rss(self):
