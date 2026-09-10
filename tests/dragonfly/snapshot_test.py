@@ -21,7 +21,7 @@ from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, RedisServer
-from .replication_utils import compare_datasets
+from .replication_utils import compare_datasets, get_metric_value
 from .seeder import DebugPopulateSeeder, Seeder
 from .utility import (
     assert_eventually,
@@ -53,10 +53,6 @@ AZURITE_CONN_STR = (
 
 def find_main_file(path: Path, pattern):
     return next(iter(glob.glob(str(path) + "/" + pattern)), None)
-
-
-async def get_metric_value(inst, metric_name, sample_index=0):
-    return (await inst.metrics())[metric_name].samples[sample_index].value
 
 
 async def assert_metric_value(inst, metric_name, expected_value):
