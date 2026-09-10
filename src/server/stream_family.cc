@@ -3097,7 +3097,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   if (auto status =
           tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, &cntx->blocked, &cntx->paused);
       status != OpStatus::OK)
-    return rb->SendNullArray();
+    return status == OpStatus::UNBLOCKED ? rb->SendError(status) : rb->SendNullArray();
 
   // Resolve the entry in the woken key. Note this must not use OpRead since
   // only the shard that contains the woken key blocks for the awoken

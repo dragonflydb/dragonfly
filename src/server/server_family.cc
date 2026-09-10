@@ -3510,6 +3510,10 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   // TODO Update thread locals. That way INFO never blocks
   replica_ = new_replica;
   SetMasterFlagOnAllThreads(false);
+  // Blocked writers would otherwise consume elements applied from the replication stream.
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase*) {
+    CancelBlockingOnThread([](ArgSlice) { return OpStatus::UNBLOCKED; });
+  });
 
   if (on_error == ActionOnConnectionFail::kReturnOnError) {
     replica_->StartMainReplicationFiber(last_master_data);

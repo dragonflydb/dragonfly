@@ -1129,6 +1129,8 @@ void BZPopMinMax(facade::ParsedArgs args, bool is_max, CommandContext* cmd_cntx)
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
+    case OpStatus::UNBLOCKED:
+      return cmd_cntx->SendError(popped_key.status());
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
@@ -2520,7 +2522,8 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
                                      &cntx->paused);
 
     if (status != OpStatus::OK) {
-      response_builder->SendNullArray();
+      status == OpStatus::UNBLOCKED ? response_builder->SendError(status)
+                                    : response_builder->SendNullArray();
       return;
     }
 

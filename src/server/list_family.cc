@@ -1142,6 +1142,8 @@ void BPopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
+    case OpStatus::UNBLOCKED:
+      return cmd_cntx->SendError(popped_key.status());
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*tx->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
@@ -1309,6 +1311,8 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return response_builder->SendNullArray();
+    case OpStatus::UNBLOCKED:
+      return cmd_cntx->SendError(popped_key.status());
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
