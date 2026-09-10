@@ -6,7 +6,6 @@
 
 #include <array>
 #include <cstdint>
-#include <memory>
 #include <optional>
 #include <queue>
 #include <string>
@@ -49,12 +48,6 @@ class TOPKTest;
 // design safely overestimates counts (which is acceptable for Top-K bounds)
 // while simplifying PMR memory layout and RDB serialization.
 //
-// TODO: Full PMR Integration for String Ownership
-// Currently, min_heap_ and counters_ use the provided memory_resource, ensuring the
-// dominant allocations are tracked. However, the std::string keys inside HeapItem
-// use the default heap.
-// Future optimization: Upgrade HeapItem to use PMR_NS::string with proper
-// uses_allocator construction.
 class TOPK {
   friend class TOPKTest;
 
@@ -179,7 +172,11 @@ class TOPK {
 
  private:
   struct HeapItem {
-    std::string key;
+    HeapItem(PMR_NS::memory_resource* mr, std::string_view key, uint32_t count)
+        : key(key, PMR_NS::polymorphic_allocator<char>(mr)), count(count) {
+    }
+
+    PMR_NS::string key;
     uint32_t count;
 
     // Min heap comparator
@@ -236,10 +233,10 @@ class TOPK {
   // Assumption: >99% of TOPK instances will use the default decay, so
   // this optimization can significantly reduce memory usage and improve startup performance by
   // avoiding the need to build a custom table for each instance.
-  const std::array<double, kDecayLookupSize>* decay_lookup_ = nullptr;
+  const double* decay_lookup_ = nullptr;
 
-  // Heap-allocated table for non-default decay values. Null for the common case (decay=0.9).
-  std::unique_ptr<std::array<double, kDecayLookupSize>> custom_decay_table_;
+  // PMR-allocated table for non-default decay values. Empty for the common case (decay=0.9).
+  std::vector<double, PMR_NS::polymorphic_allocator<double>> custom_decay_table_;
 
   // HeavyKeeper data structures
   // Hash table: width × depth matrix of counters

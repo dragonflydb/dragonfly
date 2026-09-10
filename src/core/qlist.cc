@@ -493,11 +493,30 @@ QList::QList(QList&& other) noexcept {
 
 QList::~QList() {
   Clear();
+  DeleteTieringParams();
+}
+
+void QList::EnableTiering(const TieringParams& params, PMR_NS::memory_resource* mr) {
+  DCHECK(mr);
+  DCHECK(!tiering_params_);
+  void* storage = mr->allocate(sizeof(StoredTieringParams), alignof(StoredTieringParams));
+  tiering_params_ = std::construct_at(static_cast<StoredTieringParams*>(storage), params, mr);
+  tiering_enabled_ = 1;
+}
+
+void QList::DeleteTieringParams() {
+  if (!tiering_params_)
+    return;
+  auto* mr = tiering_params_->key.get_allocator().resource();
+  std::destroy_at(tiering_params_);
+  mr->deallocate(tiering_params_, sizeof(StoredTieringParams), alignof(StoredTieringParams));
+  tiering_params_ = nullptr;
 }
 
 QList& QList::operator=(QList&& other) noexcept {
   if (this != &other) {
     Clear();
+    DeleteTieringParams();
     MoveFrom(std::move(other));
   }
   return *this;
@@ -517,7 +536,7 @@ void QList::MoveFrom(QList&& other) {
   bookmark_count_ = other.bookmark_count_;
   db_id_ = other.db_id_;
   zstd_threshold_ = other.zstd_threshold_;
-  tiering_params_ = std::move(other.tiering_params_);
+  tiering_params_ = std::exchange(other.tiering_params_, nullptr);
 
   other.head_ = nullptr;
   other.malloc_size_ = 0;
