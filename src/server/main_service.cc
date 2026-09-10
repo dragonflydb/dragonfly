@@ -1169,12 +1169,12 @@ void Service::Shutdown() {
   cluster_family_.Shutdown();
   server_family_.Shutdown();
 
-  shutdown_watchdog.emplace(pp_);
-
   engine_varz.reset();
 
   shard_set->PreShutdown();
   shard_set->Shutdown();
+
+  shutdown_watchdog.emplace(pp_);
 
   delete channel_store;
   channel_store = nullptr;
