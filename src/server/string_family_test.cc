@@ -728,80 +728,80 @@ TEST_F(StringFamilyTest, ClThrottle) {
   resp = Run({"cl.throttle", key, max_burst, count, period});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(10)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(3), IntArg(-1), IntArg(21)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(3), IntArg(-1), IntArg(20)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(31)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(30)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(41)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(40)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(0), IntArg(-1), IntArg(51)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(0), IntArg(-1), IntArg(50)));
 
   resp = Run({"cl.throttle", key, max_burst, count, period});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(1), IntArg(limit), IntArg(0), IntArg(11), IntArg(51)));
+              ElementsAre(IntArg(1), IntArg(limit), IntArg(0), IntArg(10), IntArg(50)));
 
   AdvanceTime(30000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(31)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(30)));
 
   AdvanceTime(1000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(40)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(39)));
 
   AdvanceTime(9000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(41)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(1), IntArg(-1), IntArg(40)));
 
   AdvanceTime(40000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(10)));
 
   AdvanceTime(15000);
   resp = Run({"cl.throttle", key, max_burst, count, period, "1"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(10)));
 
   // Zero-volume request just peeks at the state.
   resp = Run({"cl.throttle", key, max_burst, count, period, "0"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(11)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(4), IntArg(-1), IntArg(10)));
 
   // High-volume request uses up more of the limit.
   resp = Run({"cl.throttle", key, max_burst, count, period, "2"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(31)));
+              ElementsAre(IntArg(0), IntArg(limit), IntArg(2), IntArg(-1), IntArg(30)));
 
   // Large requests cannot exceed limits
   resp = Run({"cl.throttle", key, max_burst, count, period, "5"});
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
-              ElementsAre(IntArg(1), IntArg(limit), IntArg(2), IntArg(31), IntArg(31)));
+              ElementsAre(IntArg(1), IntArg(limit), IntArg(2), IntArg(30), IntArg(30)));
 
   // Zero rates aren't supported
   resp = Run({"cl.throttle", "bar", "10", "1", "0"});
@@ -818,6 +818,42 @@ TEST_F(StringFamilyTest, ClThrottle) {
   ASSERT_EQ(RespExpr::ARRAY, resp.type);
   ASSERT_THAT(resp.GetVec(),
               ElementsAre(IntArg(0), IntArg(limit), IntArg(limit - 2), IntArg(-1), IntArg(1)));
+}
+
+TEST_F(StringFamilyTest, ClThrottleWholeSecondRounding) {
+  // Exact two-second interval.
+  auto resp = Run({"cl.throttle", "exact2", "0", "1", "2"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(1), IntArg(0), IntArg(-1), IntArg(2)));
+
+  // Rejected requests use the same rounding for retry_after.
+  resp = Run({"cl.throttle", "exact2", "0", "1", "2"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(1), IntArg(0), IntArg(2), IntArg(2)));
+
+  // Exact one-second interval.
+  resp = Run({"cl.throttle", "exact1", "0", "1", "1"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(1), IntArg(0), IntArg(-1), IntArg(1)));
+
+  // Fractional intervals round up.
+  resp = Run({"cl.throttle", "frac15", "0", "2", "3"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(1), IntArg(0), IntArg(-1), IntArg(2)));
+
+  resp = Run({"cl.throttle", "frac25", "0", "2", "5"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(1), IntArg(0), IntArg(-1), IntArg(3)));
+
+  // Zero quantity preserves the retry sentinel.
+  resp = Run({"cl.throttle", "peek", "5", "1", "2", "0"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(0), IntArg(6), IntArg(6), IntArg(-1), IntArg(0)));
+
+  // Unsatisfiable quantities preserve the retry sentinel.
+  resp = Run({"cl.throttle", "toobig", "2", "1", "2", "99"});
+  ASSERT_EQ(RespExpr::ARRAY, resp.type);
+  ASSERT_THAT(resp.GetVec(), ElementsAre(IntArg(1), IntArg(3), IntArg(3), IntArg(-1), IntArg(0)));
 }
 
 TEST_F(StringFamilyTest, SetMGetWithNilResp3) {
