@@ -1539,29 +1539,40 @@ TEST_F(ClusterFamilyEmulatedTest, ForbidenCommands) {
   EXPECT_THAT(res, ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
 }
 
-class ClusterFamilyDisabledTest : public ClusterFamilyTest {
+// Migrations can not exist in modes without a cluster config: off and emulated reject at the
+// gate, while real mode without an applied config keeps the migration protocol replies.
+class DflyMigrateNoConfigTest : public ClusterFamilyTest,
+                                public testing::WithParamInterface<string_view> {
  protected:
-  void ConfigureClusterFlags() override {
-    SetTestFlag("cluster_mode", "");
+  void SetUp() override {
+    flag_saver_.emplace();
+    ClusterFamilyTest::SetUp();
   }
+
+  void ConfigureClusterFlags() override {
+    SetTestFlag("cluster_mode", GetParam());
+  }
+
+  std::optional<absl::FlagSaver> flag_saver_;
 };
 
-TEST_F(ClusterFamilyDisabledTest, DflyMigrateWithoutClusterMode) {
-  EXPECT_THAT(Run({"DFLYMIGRATE", "ACK", "src", "1"}),
-              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
-  EXPECT_THAT(Run({"DFLYMIGRATE", "INIT", "src", "1", "0-1"}),
-              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
-  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1", "0", "0"}),
-              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
+TEST_P(DflyMigrateNoConfigTest, RejectsSubcommands) {
+  const auto expected = ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable.");
+  EXPECT_THAT(Run({"DFLYMIGRATE", "ACK", "src", "1"}), expected);
+  EXPECT_THAT(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "1"}), expected);
+  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), expected);
 }
 
-TEST_F(ClusterFamilyEmulatedTest, DflyMigrateEmulatedMode) {
-  EXPECT_THAT(Run({"DFLYMIGRATE", "ACK", "src", "1"}),
-              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
-  EXPECT_THAT(Run({"DFLYMIGRATE", "INIT", "src", "1", "0-1"}),
-              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
-  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1", "0", "0"}),
-              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
+INSTANTIATE_TEST_SUITE_P(ModesWithoutConfig, DflyMigrateNoConfigTest,
+                         testing::Values(""sv, "emulated"sv));
+
+// The config can reach a real-mode migration target after the source starts polling. The
+// handlers must not dereference the absent ClusterConfig and must keep the replies the
+// source's 30-second UNKNOWN_MIGRATION grace period depends on.
+TEST_F(ClusterFamilyTest, DflyMigrateRealModeWithoutConfig) {
+  EXPECT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "1"}), "UNKNOWN_MIGRATION");
+  EXPECT_EQ(Run({"DFLYMIGRATE", "ACK", "src", "1"}), "UNKNOWN_MIGRATION");
+  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), ErrArg("syncid not found"));
 }
 
 }  // namespace
