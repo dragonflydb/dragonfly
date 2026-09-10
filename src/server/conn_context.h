@@ -86,7 +86,7 @@ class StoredCmd {
 struct ConnectionState {
   // MULTI-EXEC transaction related data.
   struct ExecInfo {
-    enum ExecState : uint8_t { EXEC_INACTIVE, EXEC_COLLECT, EXEC_RUNNING, EXEC_ERROR };
+    enum ExecState : uint8_t { EXEC_INACTIVE, EXEC_COLLECT, EXEC_RUNNING };
 
     ExecInfo() = default;
     // ExecInfo is immovable due to being referenced from DbSlice.
@@ -122,6 +122,7 @@ struct ConnectionState {
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
     bool is_write = false;
+    bool error = false;  // a queue-time error: keep collecting, but EXEC must abort
 
     std::vector<std::pair<DbIndex, std::string>> watched_keys;  // List of keys registered by WATCH
     std::atomic_bool watched_dirty = false;  // Set if a watched key was changed before EXEC

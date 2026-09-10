@@ -317,6 +317,7 @@ vector<unsigned> ConnectionContext::ChangeSubscriptions(facade::ParsedArgs chann
 void ConnectionState::ExecInfo::Clear() {
   DCHECK(!preborrowed_interpreter);  // Must have been released properly
   state = EXEC_INACTIVE;
+  error = false;
   const size_t cleared_size = ClearStoredCmds();
   ServerState::tlocal()->stats.stored_cmd_bytes -= cleared_size;
   is_write = false;

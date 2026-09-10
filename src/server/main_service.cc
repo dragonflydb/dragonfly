@@ -1492,6 +1492,11 @@ DispatchResult Service::DispatchCommand(
     } else {
       parsed_cmd->SendError(ReportUnknownCmd(absl::AsciiStrToUpper(args.Front())));
     }
+    // A collecting MULTI must abort at EXEC, as with any other queue-time error.
+    auto& exec_info =
+        static_cast<CommandContext*>(parsed_cmd)->server_conn_cntx()->conn_state.exec_info;
+    if (exec_info.IsCollecting())
+      exec_info.error = true;
     return DispatchResult::ERROR;
   }
 
@@ -1539,8 +1544,11 @@ DispatchResult Service::DispatchCommand(
   if (auto err = VerifyCommandState(*cid, args_no_cmd, *dfly_cntx); err) {
     LOG_IF(WARNING, dfly_cntx->replica_conn || !dfly_cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
-    if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
-      exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
+    // A rejected EXEC discards the transaction, a rejected queued command only marks it.
+    if (cid->IsExec())
+      MultiCleanup(dfly_cntx);
+    else if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
+      exec_info.error = true;
 
     // We need to skip this because ACK's should not be replied to
     // Bonus points because this allows to continue replication with ACL users who got
@@ -2549,7 +2557,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
 
-  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
+  if (exec_info.error) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
