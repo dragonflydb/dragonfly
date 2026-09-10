@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cassert>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <tuple>
@@ -83,19 +84,36 @@ class RESPArray {
 
 class RESPParser {
  public:
+  struct Limits {
+    uint32_t max_array_len = UINT32_MAX;
+  };
+
   RESPParser();
+  explicit RESPParser(Limits limits);
+  RESPParser(const RESPParser&) = delete;
+  RESPParser& operator=(const RESPParser&) = delete;
+
   ~RESPParser() {
     redisReaderFree(reader_);
   }
 
-  std::optional<RESPObj> Feed(const char* data, size_t len);
+  // If consumed is provided, it receives the number of buffered wire bytes processed by this
+  // call. Summing it across calls gives the exact size of a fragmented reply.
+  std::optional<RESPObj> Feed(const char* data, size_t len, size_t* consumed = nullptr);
+
+  void Reset();
+  void Reset(Limits limits);
+
+  bool HasBufferedInput() const {
+    return reader_->pos < reader_->len;
+  }
 
   size_t BufferPos() const {
     return reader_->pos;
   }
 
  private:
-  redisReader* reader_;
+  redisReader* reader_ = nullptr;
 };
 
 std::ostream& operator<<(std::ostream& os, const RESPObj& obj);

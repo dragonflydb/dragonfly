@@ -79,7 +79,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
       return false;
     }
 
-    ResetParser(RedisParser::Mode::CLIENT);
+    ResetParser();
     send_fb_ = util::fb2::Fiber("CSS_SendFb", &CrossShardClient::SendFb, this);
     resp_fb_ = util::fb2::Fiber("CSS_RespFb", &CrossShardClient::RespFb, this);
     return true;

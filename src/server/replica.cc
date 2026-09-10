@@ -328,7 +328,7 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
 }
 
 error_code Replica::Greet() {
-  ResetParser(RedisParser::Mode::CLIENT);
+  ResetParser();
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommandAndReadResponse("PING"));  // optional.
@@ -732,7 +732,7 @@ error_code Replica::ConsumeRedisStream() {
 
   // we never reply back on the commands.
   facade::CapturingReplyBuilder null_builder{facade::ReplyMode::NONE};
-  ResetParser(RedisParser::Mode::SERVER);
+  ResetCommandParser();
 
   // Master waits for this command in order to start sending replication stream.
   RETURN_ON_ERR(SendCommand("REPLCONF ACK 0"));
@@ -780,7 +780,11 @@ error_code Replica::ConsumeRedisStream() {
       ThisFiber::Yield();
     }
 
-    auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
+    CommandContext* ctx = &ctx_pool[batch.size()];
+    ctx->ResetForReuse();
+    ctx->Init(&null_builder, &conn_context);
+
+    auto response = ReadRespCommand(&io_buf, ctx);
 
     if (!response.has_value()) {
       LOG_REPL_ERROR("Error in Redis Stream at phase "
@@ -791,11 +795,11 @@ error_code Replica::ConsumeRedisStream() {
       return response.error();
     }
 
-    const auto& last_args = LastResponseArgs();
+    const auto& last_args = *ctx;
     bool queued = false;
 
     if (!last_args.empty()) {
-      auto cmd = last_args[0].GetView();
+      auto cmd = last_args.Front();
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
       // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we
@@ -804,22 +808,10 @@ error_code Replica::ConsumeRedisStream() {
         VLOG(2) << "Got command " << absl::CHexEscape(cmd)
                 << "\n consumed: " << response->total_read;
 
-        if (LastResponseArgs()[0].GetBuf()[0] == '\r') {
-          for (const auto& arg : LastResponseArgs()) {
-            LOG(INFO) << absl::CHexEscape(ToSV(arg.GetBuf()));
-          }
-        }
-
-        CommandContext* ctx = &ctx_pool[batch.size()];
-        ctx->ResetForReuse();
-        ctx->Init(&null_builder, &conn_context);
-        FillBackedArgs(last_args, ctx);
         batch.push_back(BatchEntry{ctx, response->total_read});
         queued = true;
       }
     }
-
-    io_buf.ConsumeInput(response->left_in_buffer);
 
     if (!queued) {
       // Skipped commands can be ACKed immediately only if there are no earlier queued commands
@@ -835,7 +827,7 @@ error_code Replica::ConsumeRedisStream() {
 
     // Dispatch when the read buffer is drained or the batch is full, and drain the whole
     // batch before reading from the socket again.
-    if ((io_buf.InputLen() == 0 || batch.size() >= max_batch) && !batch.empty()) {
+    if ((!response->has_more_data || batch.size() >= max_batch) && !batch.empty()) {
       // Chain the commands together so that the squasher can process them in one go.
       for (size_t i = 0; i + 1 < batch.size(); ++i) {
         batch[i].cmd->next = batch[i + 1].cmd;
@@ -993,7 +985,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
     VLOG(1) << "Sending last master sync flow " << last_master_data.value().id << " " << lsn_str;
   }
 
-  ResetParser(RedisParser::Mode::CLIENT);
+  ResetParser();
   leftover_buf_.emplace(128);
   RETURN_ON_ERR_T(make_unexpected, SendCommand(cmd));
   auto read_resp = ReadRespReply(&*leftover_buf_);
