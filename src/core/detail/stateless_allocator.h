@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cassert>
+#include <memory>
 
 #include "base/pmr/memory_resource.h"
 
@@ -20,8 +21,9 @@ template <typename T, typename Impl> class StatelessAllocatorBase {
   using difference_type = std::ptrdiff_t;
   using is_always_equal = std::true_type;
 
+  // TODO: redundant with the std::allocator_traits fallback to std::construct_at; remove.
   template <typename U, typename... _Args> void construct(U* __p, _Args&&... __args) {
-    ::new (static_cast<void*>(__p)) U(std::forward<_Args>(__args)...);
+    std::construct_at(__p, std::forward<_Args>(__args)...);
   }
 
   static value_type* allocate(size_type n) {
