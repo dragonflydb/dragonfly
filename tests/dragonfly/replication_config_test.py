@@ -416,21 +416,16 @@ async def test_replicate_old_master(
 
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
-    master = df_factory.create(
-        version=1.19,
-        path=released_dfly_path,
-        cluster_mode=cluster_mode,
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"version": 1.19, "path": released_dfly_path, "cluster_mode": cluster_mode},
+        replica_args={
+            "cluster_mode": cluster_mode,
+            "cluster_announce_ip": announce_ip,
+            "announce_port": announce_port,
+        },
+        connect=False,
     )
-    replica = df_factory.create(
-        cluster_mode=cluster_mode,
-        cluster_announce_ip=announce_ip,
-        announce_port=announce_port,
-    )
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
 
     assert (
         f"df-{dfly_version}"
@@ -556,18 +551,13 @@ async def test_replicate_search_index_to_old_replica(df_factory: DflyInstanceFac
     released_dfly_path = download_dragonfly_release(dfly_version)
 
     # New master (current version) with search index
-    master = df_factory.create(proactor_threads=2)
-    # Old replica (v1.35)
-    replica = df_factory.create(
-        version=1.35,
-        path=released_dfly_path,
-        proactor_threads=2,
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"proactor_threads": 2},
+        # Old replica (v1.35)
+        replica_args={"version": 1.35, "path": released_dfly_path, "proactor_threads": 2},
+        connect=False,
     )
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
 
     # Create a search index with HNSW vector field on the new master
     await c_master.execute_command(

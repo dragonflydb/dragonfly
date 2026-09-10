@@ -19,6 +19,7 @@ from .replication_utils import (
     get_metric_value,
     master_role_reply,
     replica_role_reply,
+    setup_replication,
     start_replication,
     wait_for_replica_status,
 )
@@ -721,12 +722,7 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     In parallel, connect a replica, so that these SETEX commands write their custom journal log.
     This makes sure that no Fiber context switch while inside a shard callback.
     """
-    master = df_factory.create()
-    replica = df_factory.create()
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     async def send_setex():
         script = """
@@ -899,13 +895,9 @@ async def test_replication_timeout_on_full_sync(
 @dfly_args({"proactor_threads": 1})
 async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     # disconnect after 1 second of being blocked
-    master = df_factory.create(replication_timeout=1000)
-    replica = df_factory.create()
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"replication_timeout": 1000}, connect=False
+    )
 
     await c_master.execute_command("debug", "populate", "200000", "foo", "500", "RAND")
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
@@ -1423,15 +1415,10 @@ async def test_takeover_bug_wrong_replica_checked_in_logs(df_factory):
 
 @pytest.mark.large
 async def test_takeover_timeout_on_unresponsive_master(df_factory):
-    master = df_factory.create(proactor_threads=4)
-    replica = df_factory.create(proactor_threads=2)
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
     # Setup replication
-    await start_replication(c_replica, master.port)
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 4}, replica_args={"proactor_threads": 2}
+    )
 
     # Write some data
     for i in range(10):

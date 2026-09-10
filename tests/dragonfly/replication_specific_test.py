@@ -278,12 +278,7 @@ async def test_memory_on_big_string_loading(df_factory):
     2. replicate master
     3. check rss peak memory on replica node
     """
-    master = df_factory.create()
-    replica = df_factory.create()
-
-    df_factory.start_all([master, replica])
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     logging.debug("Populate with one big string")
     await c_master.execute_command("DEBUG POPULATE 1 key 200000000 RAND")
@@ -317,12 +312,7 @@ async def test_memory_on_big_string_loading(df_factory):
 )
 @dfly_args({"proactor_threads": 1})
 async def test_big_containers(df_factory, element_size, elements_number):
-    master = df_factory.create()
-    replica = df_factory.create()
-
-    df_factory.start_all([master, replica])
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     logging.debug("Fill master with test data")
     seeder = DebugPopulateSeeder(
@@ -382,12 +372,7 @@ async def test_master_too_big(df_factory):
 
 @dfly_args({"proactor_threads": 4})
 async def test_stream_approximate_trimming(df_factory):
-    master = df_factory.create()
-    replica = df_factory.create()
-
-    df_factory.start_all([master, replica])
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
     await wait_for_replicas_state(c_replica)
@@ -933,19 +918,12 @@ async def test_xread_block_replication_crash_6975(df_factory):
 # contains the expected items.
 @pytest.mark.large
 async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
-    master = df_factory.create(
-        proactor_threads=1,
-        maxmemory="6G",
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"proactor_threads": 1, "maxmemory": "6G"},
+        replica_args={"proactor_threads": 1, "maxmemory": "6G"},
+        connect=False,
     )
-    replica = df_factory.create(
-        proactor_threads=1,
-        maxmemory="6G",
-    )
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
 
     await c_master.execute_command("BF.RESERVE", "bf", "0.00001", "1000000000")
     await c_master.execute_command("BF.ADD", "bf", "hello")
@@ -963,19 +941,12 @@ async def test_sbf_chunked_replication(df_factory: DflyInstanceFactory):
 # the max chunk size and correctly replicates all added items.
 @pytest.mark.large
 async def test_sbf_chunked_replication_chunk_size(df_factory: DflyInstanceFactory):
-    master = df_factory.create(
-        proactor_threads=1,
-        maxmemory="4G",
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"proactor_threads": 1, "maxmemory": "4G"},
+        replica_args={"proactor_threads": 1, "maxmemory": "4G"},
+        connect=False,
     )
-    replica = df_factory.create(
-        proactor_threads=1,
-        maxmemory="4G",
-    )
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
 
     await c_master.execute_command("BF.RESERVE", "bf", "0.011", "400000000")
 
@@ -1274,16 +1245,10 @@ async def test_set_member_expiry_replication(
     so a single member is used to guarantee the set becomes empty.
     SINTER needs a second set to exist for the intersection code path to iterate.
     """
-    master = df_factory.create(proactor_threads=2)
-    replica = df_factory.create(proactor_threads=2)
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
     # Set up replication before writing data to avoid race with TTL
-    await start_replication(c_replica, master.port)
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
+    )
 
     await c_master.execute_command("SADDEX", "myset", "1", *members)
     for cmd in extra_setup:
@@ -1345,16 +1310,10 @@ async def test_hash_field_expiry_replication(df_factory: DflyInstanceFactory, tr
     single field is used to guarantee the hash becomes empty. HGETALL iterates the
     whole map, so it gets a multi-field seed.
     """
-    master = df_factory.create(proactor_threads=2)
-    replica = df_factory.create(proactor_threads=2)
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
     # Set up replication before writing data to avoid race with TTL
-    await start_replication(c_replica, master.port)
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
+    )
 
     hset_args = [x for f in fields for x in (f, "v")]
     await c_master.execute_command("HSET", "myhash", *hset_args)
@@ -1548,12 +1507,7 @@ async def test_hnsw_multi_replica_with_concurrent_index_ops(
 async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
     dbfilename = f"dump_{tmp_file_name()}"
 
-    master = df_factory.create()
-    replica = df_factory.create()
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
+    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     # Populate initial data and save a snapshot.
     seeder = DebugPopulateSeeder(key_target=1000, data_size=100)
@@ -1758,16 +1712,10 @@ async def test_hash_field_expiry_replication_lag(df_factory: DflyInstanceFactory
         # wrapper pauses nothing, SIGSTOP on the child cannot be resumed with SIGCONT.
         pytest.skip("SIGSTOP-based lag simulation cannot pause a gdb-traced server")
 
-    master = df_factory.create(proactor_threads=2)
-    replica = df_factory.create(proactor_threads=2)
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
     # Set up replication before writing data so any later mismatch is real divergence
-    await start_replication(c_replica, master.port)
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
+    )
 
     await c_master.execute_command("HSET", "myhash", "f1", "v1")
     await check_all_replicas_finished([c_replica], c_master)
@@ -1819,16 +1767,10 @@ async def test_shrink_emptied_key_replication_lag(df_factory: DflyInstanceFactor
         # wrapper pauses nothing, SIGSTOP on the child cannot be resumed with SIGCONT.
         pytest.skip("SIGSTOP-based lag simulation cannot pause a gdb-traced server")
 
-    master = df_factory.create(proactor_threads=2)
-    replica = df_factory.create(proactor_threads=2)
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
     # Set up replication before writing data so any later mismatch is real divergence
-    await start_replication(c_replica, master.port)
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
+    )
 
     # Seed one entry at a time: a single bulk insert presizes the bucket array
     # compactly and SHRINK early-returns 0 without expiring anything.
@@ -1922,16 +1864,10 @@ async def test_hash_partial_field_expiry_replication_lag(
         # wrapper pauses nothing, SIGSTOP on the child cannot be resumed with SIGCONT.
         pytest.skip("SIGSTOP-based lag simulation cannot pause a gdb-traced server")
 
-    master = df_factory.create(proactor_threads=2)
-    replica = df_factory.create(proactor_threads=2)
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
     # Set up replication before writing data so any later mismatch is real divergence
-    await start_replication(c_replica, master.port)
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
+    )
 
     await c_master.execute_command("HSET", "myhash", "f1", "10", "keep", "x")
     await check_all_replicas_finished([c_replica], c_master)
@@ -1985,16 +1921,10 @@ async def test_set_member_partial_expiry_replication_lag(df_factory: DflyInstanc
         # wrapper pauses nothing, SIGSTOP on the child cannot be resumed with SIGCONT.
         pytest.skip("SIGSTOP-based lag simulation cannot pause a gdb-traced server")
 
-    master = df_factory.create(proactor_threads=2)
-    replica = df_factory.create(proactor_threads=2)
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
-
     # Set up replication before writing data so any later mismatch is real divergence
-    await start_replication(c_replica, master.port)
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
+    )
 
     await c_master.sadd("myset", "m1", "keep")
     await check_all_replicas_finished([c_replica], c_master)
