@@ -684,12 +684,8 @@ async def test_config_consistency(df_factory: DflyInstanceFactory):
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
-    nodes[0].migrations = []
-    nodes[0].slots = [(0, 5199)]
-    nodes[1].slots = [(5200, 16383)]
-
     logging.debug("remove finished migrations")
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [(0, 5199)], [(5200, 16383)])
 
     await check_for_no_state_status([node.admin_client for node in nodes])
 

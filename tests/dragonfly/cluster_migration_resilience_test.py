@@ -71,11 +71,8 @@ async def test_network_disconnect_during_migration(df_factory, proxy_factory):
     await proxy.start_serving()
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16383)]
     logging.debug("remove finished migrations")
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
 
     assert (await DebugPopulateSeeder.capture(nodes[1].client)) == start_capture
 
