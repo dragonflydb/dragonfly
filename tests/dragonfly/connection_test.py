@@ -4168,7 +4168,6 @@ async def test_client_list_filters(df_server: DflyInstance):
         "write_connection_throttling_sleep_usec": 10000,  # 10ms per throttled batch; >0 enables throttling
     }
 )
-@pytest.mark.asyncio
 async def test_rw_throttle_stats(df_server: DflyInstance):
     """Verify write connections are throttled and rw_throttle_* stats are reported"""
 

@@ -236,7 +236,6 @@ async def test_cluster_fuzzymigration(
 
 @pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-@pytest.mark.asyncio
 async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
     """Check data migration from one node to another."""
     instances, nodes = await create_cluster(df_factory, 2)
@@ -290,7 +289,6 @@ async def test_cluster_migration_cancel(df_factory: DflyInstanceFactory):
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
-@pytest.mark.asyncio
 @pytest.mark.opt_only
 @pytest.mark.exclude_epoll
 async def test_cluster_migration_huge_container(df_factory: DflyInstanceFactory):
@@ -393,7 +391,6 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
 
 @pytest.mark.large
 @pytest.mark.exclude_epoll
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_cpu_budget": 1})
 async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
     # Timeout set to 3 seconds because we must first saturate the socket before we get the timeout

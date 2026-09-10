@@ -1592,7 +1592,6 @@ async def test_snapshot_load_replication(df_factory: DflyInstanceFactory):
     await c_replica.execute_command("REPLICAOF", "NO", "ONE")
 
 
-@pytest.mark.asyncio
 async def test_bgsave_during_stable_sync(df_factory: DflyInstanceFactory):
     """
     shard_stable_sync_read when a BGSAVE is running on the replica concurrently

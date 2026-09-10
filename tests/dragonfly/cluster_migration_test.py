@@ -528,7 +528,6 @@ async def test_snapshoting_during_migration(
 )
 @pytest.mark.large
 @pytest.mark.parametrize("chunk_size", [1_000_000, 30])
-@pytest.mark.asyncio
 @pytest.mark.exclude_epoll
 async def test_cluster_migration_while_seeding(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, chunk_size
@@ -585,7 +584,6 @@ async def test_cluster_migration_while_seeding(
 
 
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes"})
-@pytest.mark.asyncio
 async def test_cluster_migrations_sequence(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
 ):
@@ -642,7 +640,6 @@ async def test_cluster_migrations_sequence(
     assert await seeder.compare(capture, instances[1].port)
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_seeder_factory):
     # 1. Create cluster of 3 nodes with all slots allocated to first node.
@@ -715,7 +712,6 @@ For each migration we start migration, wait for it to finish and once it is fini
 
 @pytest.mark.large
 @pytest.mark.exclude_epoll
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "pause_wait_timeout": 10})
 async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seeder_factory):
     # 1. Create cluster of 3 nodes with all slots allocated to first node.

@@ -729,7 +729,6 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE")
 
 
-@pytest.mark.asyncio
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-objhist-crash"})
 async def test_debug_objhist_during_bgsave(df_factory: DflyInstanceFactory):
     df = df_factory.create(proactor_threads=2)
@@ -763,7 +762,6 @@ async def test_debug_objhist_during_bgsave(df_factory: DflyInstanceFactory):
     assert await client.ping()
 
 
-@pytest.mark.asyncio
 @dfly_args({**BASIC_ARGS})
 async def test_randomkey_during_bgsave(df_factory: DflyInstanceFactory):
     """

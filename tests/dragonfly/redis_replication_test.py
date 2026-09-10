@@ -426,7 +426,6 @@ async def test_disconnect_master(
             await asyncio.gather(stream_task, return_exceptions=True)
 
 
-@pytest.mark.asyncio
 async def test_redis_replication_info_offset(df_factory, redis_server, port_picker):
     """
     Dragonfly replica of a Redis master must report a non-zero slave_repl_offset

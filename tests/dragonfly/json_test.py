@@ -96,7 +96,6 @@ async def test_update_value(async_client: aioredis.Redis):
         ("boolean false", "false", "boolean"),
     ),
 )
-@pytest.mark.asyncio
 async def test_arrappend(async_client: aioredis.Redis, description, expected_value, expected_type):
     key_name = "test-json-key"
 
