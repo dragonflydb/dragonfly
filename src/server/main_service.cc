@@ -1422,6 +1422,20 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
       return ErrorReply{absl::StrCat("'", cmd_name, "' not allowed inside a transaction")};
   }
 
+  // Refused before queueing so that EXEC is all-or-nothing under maxmemory.
+  if (const auto& exec_info = dfly_cntx.conn_state.exec_info; exec_info.IsCollecting()) {
+    bool denyoom = cid.opt_mask() & CO::DENYOOM;
+    if (cid.IsExec())
+      denyoom = any_of(exec_info.body.begin(), exec_info.body.end(),
+                       [](const StoredCmd& cmd) { return cmd.Cid()->opt_mask() & CO::DENYOOM; });
+    if (denyoom && etl.ShouldDenyOnOOM(base::CycleClock::ToUsec(base::CycleClock::Now()))) {
+      if (cid.IsExec())
+        return ErrorReply{
+            absl::StrCat("-EXECABORT Transaction discarded because of: ", kOutOfMemory)};
+      return ErrorReply{kOutOfMemory};
+    }
+  }
+
   if (IsClusterEnabled()) {
     if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
       return err;

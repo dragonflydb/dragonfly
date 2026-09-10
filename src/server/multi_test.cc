@@ -142,6 +142,32 @@ TEST_F(MultiTest, RejectedExecDiscards) {
   EXPECT_EQ(Run({"get", "x"}), "2");
 }
 
+TEST_F(MultiTest, ExecDeniedOnOom) {
+  const uint64_t old_limit = max_memory_limit;
+  used_mem_current = 1000000;
+  max_memory_limit = 100000;
+
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "x", "1"}), ErrArg("Out of memory"));
+  EXPECT_THAT(Run({"get", "x"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT"));
+
+  // Memory runs out only after the write was queued: EXEC itself is refused.
+  max_memory_limit = old_limit;
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "y", "1"}), "QUEUED");
+  max_memory_limit = 100000;
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT Transaction discarded because of: Out of memory"));
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+  EXPECT_THAT(Run({"get", "y"}), ArgType(RespExpr::NIL));
+
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"get", "x"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre(ArgType(RespExpr::NIL))));
+
+  max_memory_limit = old_limit;
+}
+
 TEST_F(MultiTest, Multi) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
