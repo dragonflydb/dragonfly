@@ -32,13 +32,6 @@ from .utility import (
     wait_for_replicas_state,
 )
 
-DISCONNECT_CRASH_FULL_SYNC = 0
-DISCONNECT_CRASH_STABLE_SYNC = 1
-DISCONNECT_NORMAL_STABLE_SYNC = 2
-
-M_OPT = [pytest.mark.opt_only]
-M_SLOW = [pytest.mark.large]
-
 
 @dfly_args({"proactor_threads": 4})
 async def test_auth_master(df_factory, n_keys=20):

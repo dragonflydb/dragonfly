@@ -30,13 +30,6 @@ from .utility import (
     wait_for_replicas_state,
 )
 
-DISCONNECT_CRASH_FULL_SYNC = 0
-DISCONNECT_CRASH_STABLE_SYNC = 1
-DISCONNECT_NORMAL_STABLE_SYNC = 2
-
-M_OPT = [pytest.mark.opt_only]
-M_SLOW = [pytest.mark.large]
-
 
 async def test_search(df_factory):
     master, [replica], c_master, [c_replica] = await setup_replication(

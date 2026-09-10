@@ -39,9 +39,6 @@ DISCONNECT_CRASH_FULL_SYNC = 0
 DISCONNECT_CRASH_STABLE_SYNC = 1
 DISCONNECT_NORMAL_STABLE_SYNC = 2
 
-M_OPT = [pytest.mark.opt_only]
-M_SLOW = [pytest.mark.large]
-
 
 """
 Test disconnecting replicas during different phases while constantly streaming changes to master.

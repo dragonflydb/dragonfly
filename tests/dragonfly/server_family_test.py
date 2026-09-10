@@ -47,17 +47,6 @@ class TestServer:
         assert val == [True, "bar"]
 
 
-"""
-see https://github.com/dragonflydb/dragonfly/issues/457
-For now we would not allow for eval command inside multi
-As this would create to level transactions (in effect recursive call
-to Schedule function).
-When this issue is fully fixed, this test would failed, and then it should
-change to match the fact that we supporting this operation.
-For now we are expecting to get an error
-"""
-
-
 async def test_multi_eval(async_client: aioredis.Redis):
     pipeline = async_client.pipeline()
     pipeline.set("foo", "bar")
