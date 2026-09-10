@@ -46,6 +46,9 @@ test = [
 [tool.uv]
 default-groups = ["test"]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 [tool.black]
 line-length = 100
 include = '\.py$'
