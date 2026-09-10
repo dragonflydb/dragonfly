@@ -380,6 +380,12 @@ class ConnectionContext : public facade::ConnectionContext {
   void Unsubscribe(std::string_view channel) override;
   void OnSocketError(uint32_t epoll_mask) override;
 
+  // A borrowed interpreter (EXEC preborrow or a running script) is pinned to this thread's pool.
+  bool IsMigrationBlocked() const override {
+    return conn_state.exec_info.preborrowed_interpreter != nullptr ||
+           conn_state.script_info != nullptr;
+  }
+
   // Whether this connection is a connection from a replica to its master.
   // This flag is true only on replica side, where we need to setup a special ConnectionContext
   // instance that helps applying commands coming from master.

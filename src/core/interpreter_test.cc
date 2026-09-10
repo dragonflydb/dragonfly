@@ -902,4 +902,55 @@ TEST_F(InterpreterTest, RandstrValidation) {
   EXPECT_THAT(error_, testing::HasSubstr("randstr: count must be between 1 and"));
 }
 
+TEST_F(InterpreterTest, ResetRetiresOnlyBorrowed) {
+  const uint64_t before = InterpreterManager::tl_stats().interpreter_cnt;
+  InterpreterManager im(2);
+
+  Interpreter* borrowed = im.Get();
+  Interpreter* idle = im.Get();
+  im.Return(idle);
+
+  im.Reset();
+  // The idle one is gone already, the borrowed one lives until it comes back.
+  EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt - before, 1u);
+
+  im.Return(borrowed);
+  EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt, before);
+
+  // Repeated resets must not stack up generations.
+  for (int i = 0; i < 5; ++i) {
+    Interpreter* ir = im.Get();
+    im.Reset();
+    im.Return(ir);
+  }
+  EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt, before);
+}
+
+TEST_F(InterpreterTest, UsedBytesDropsWithInterpreter) {
+  const uint64_t before = InterpreterManager::tl_stats().used_bytes;
+  InterpreterManager im(2);
+
+  char sha_buf[41];
+  std::string err;
+  Interpreter::FuncSha1("return 1", sha_buf);
+
+  Interpreter* ir = im.Get();
+  ASSERT_EQ(Interpreter::ADD_OK, ir->AddFunction({sha_buf, 40}, "return 1", &err));
+  im.Return(ir);
+  EXPECT_GT(InterpreterManager::tl_stats().used_bytes, before);
+
+  im.Reset();  // destroying the interpreter must take its memory out of the stat
+  EXPECT_EQ(InterpreterManager::tl_stats().used_bytes, before);
+}
+
+TEST_F(InterpreterTest, ForeignReturnIsRefused) {
+  InterpreterManager im_a(2), im_b(2);
+
+  Interpreter* ir = im_a.Get();
+  // Returning to the wrong pool must be refused, not absorbed (else its next Reset underflows).
+  EXPECT_DEBUG_DEATH(im_b.Return(ir), "foreign manager");
+
+  im_a.Return(ir);
+}
+
 }  // namespace dfly
