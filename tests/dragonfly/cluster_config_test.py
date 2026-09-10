@@ -35,13 +35,11 @@ from .utility import (
 @dfly_args({})
 class TestNotEmulated:
     async def test_cluster_commands_fails_when_not_emulate(self, async_client: aioredis.Redis):
-        with pytest.raises(aioredis.ResponseError) as respErr:
+        with pytest.raises(aioredis.ResponseError, match="cluster_mode"):
             await async_client.execute_command("CLUSTER HELP")
-        assert "cluster_mode" in str(respErr.value)
 
-        with pytest.raises(aioredis.ResponseError) as respErr:
+        with pytest.raises(aioredis.ResponseError, match="emulated"):
             await async_client.execute_command("CLUSTER SLOTS")
-        assert "emulated" in str(respErr.value)
 
 
 @dfly_args({"cluster_mode": "emulated"})

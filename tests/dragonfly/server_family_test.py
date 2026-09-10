@@ -130,8 +130,7 @@ async def test_scan(async_client: aioredis.Redis):
         assert res is not None
         cur, keys = await async_client.scan(cursor=0, match=key, count=2)
         assert cur == 0
-        assert len(keys) == 1
-        assert keys[0] == key
+        assert keys == [key]
 
 
 def configure_slowlog_parsing(async_client: aioredis.Redis):

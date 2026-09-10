@@ -1242,9 +1242,8 @@ async def test_client_list_replication_types(df_factory: DflyInstanceFactory):
     assert again[0]["id"] == entry["id"]
 
     # CLIENT KILL ID against the master-link id must be rejected explicitly.
-    with pytest.raises(aioredis.ResponseError) as exc:
+    with pytest.raises(aioredis.ResponseError, match="REPLICAOF NO ONE"):
         await c_replica.execute_command("CLIENT", "KILL", "ID", entry["id"])
-    assert "REPLICAOF NO ONE" in str(exc.value)
 
     await c_replica.execute_command("REPLICAOF", "NO", "ONE")
 
