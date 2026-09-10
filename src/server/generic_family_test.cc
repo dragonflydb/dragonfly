@@ -6,6 +6,8 @@
 
 #include <absl/cleanup/cleanup.h>
 
+#include <array>
+
 extern "C" {
 #include "redis/crc64.h"
 #include "redis/rdb.h"
@@ -15,7 +17,9 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "facade/reply_builder.h"
 #include "server/channel_store.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -2736,5 +2740,107 @@ TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
   EXPECT_EQ("foo", msg.message);
   EXPECT_GE(GetMetrics().events.expired_keys, 1u);
 }
+
+// Each iteration traverses the whole database, including command dispatch and RESP serialization
+// to a reusable in-memory sink. Run with --bench --gtest_filter='-*'
+// --benchmark_filter=BM_ScanCommand --benchmark_min_time=1s.
+class ScanBenchmark : public BaseFamilyTest {
+ public:
+  ScanBenchmark() {
+    SetUpTestSuite();
+    SetUp();
+    // Profiling runs may intentionally take longer than the unit-test watchdog's timeout.
+    watchdog_done_.Notify();
+  }
+
+  ~ScanBenchmark() {
+    TearDown();
+  }
+
+  void RunBenchmark(benchmark::State& state) {
+    const uint64_t key_count = state.range(0);
+    const string count = absl::StrCat(state.range(1));
+    const bool expiring = state.range(2);
+
+    vector<string> populate_args = {"debug",         "populate", absl::StrCat(key_count),
+                                    string(48, 'k'), "16",       "rand"};
+    if (expiring) {
+      populate_args.insert(populate_args.end(), {"expire", "86400", "86401"});
+    }
+    auto populate_resp = Run(absl::Span<const string>{populate_args});
+    DCHECK_EQ(populate_resp.GetView(), "OK");
+    DCHECK_EQ(Run({"dbsize"}).GetInt().value(), key_count);
+
+    // A real connection runs many commands in one fiber. Run() would create a fiber per command
+    // and retain all parsed replies until teardown, so use the normal dispatcher directly here.
+    pp_->at(0)->Await([&] {
+      TestConnection conn{service_.get(), Protocol::REDIS};
+      auto* cntx = static_cast<ConnectionContext*>(conn.cntx());
+      cntx->ns = &namespaces->GetDefaultNamespace();
+      io::StringSink sink;
+      RedisReplyBuilder builder{&sink};
+      CommandContext cmd_cntx{&builder, cntx};
+      // Both patterns return every generated key; only "k*" exercises glob matching.
+      array<string_view, 6> args = {"SCAN", "0",     "COUNT",
+                                    count,  "MATCH", state.range(3) ? "k*" : "*"};
+
+      auto read_line = [](string_view* reply) {
+        size_t end = reply->find("\r\n");
+        DCHECK_NE(end, string_view::npos);
+        string_view line = reply->substr(0, end);
+        reply->remove_prefix(end + 2);
+        return line;
+      };
+
+      uint64_t scan_calls = 0;
+      for (auto _ : state) {
+        args[1] = "0";
+        [[maybe_unused]] uint64_t walk_keys = 0;
+        do {
+          cmd_cntx.ResetForReuse();
+          // Copy the previous cursor before clearing the buffer it points into.
+          cmd_cntx.Assign(args.begin(), args.end(), args.size());
+          sink.Clear();
+          service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC,
+                                    nullptr);
+
+          // Only the cursor is needed to continue the traversal.
+          string_view reply = sink.str();
+          DCHECK(reply.starts_with("*2\r\n$"));
+          reply.remove_prefix(5);
+          read_line(&reply);  // Skip the cursor's bulk-string length.
+          args[1] = read_line(&reply);
+#ifndef NDEBUG
+          string_view array_header = read_line(&reply);
+          DCHECK(array_header.starts_with('*'));
+          uint64_t returned_keys = 0;
+          DCHECK(absl::SimpleAtoi(array_header.substr(1), &returned_keys));
+          walk_keys += returned_keys;
+#endif
+          ++scan_calls;
+        } while (args[1] != "0");
+        DCHECK_EQ(walk_keys, key_count);
+      }
+
+      state.SetItemsProcessed(state.iterations() * key_count);
+      state.counters["scan_calls"] = benchmark::Counter(scan_calls, benchmark::Counter::kIsRate);
+    });
+  }
+
+  void TestBody() override {
+  }
+};
+
+static void BM_ScanCommand(benchmark::State& state) {
+  ScanBenchmark server;
+  server.RunBenchmark(state);
+}
+BENCHMARK(BM_ScanCommand)
+    ->ArgNames({"keys", "count", "expiring", "match"})
+    ->ArgsProduct({{1'000'000}, {10, 100, 1000}, {0, 1}, {0}})
+    ->Args({1'000'000, 1000, 1, 1})
+    ->MeasureProcessCPUTime()
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
 
 }  // namespace dfly

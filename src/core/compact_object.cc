@@ -2194,7 +2194,7 @@ size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const 
       break;
     case ASCII1_ENC:
     case ASCII2_ENC:
-      detail::ascii_unpack(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, dest);
+      detail::ascii_unpack_fast(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, dest);
       break;
     case HUFFMAN_ENC: {
       auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;
