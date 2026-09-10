@@ -234,7 +234,7 @@ void BaseFamilyTest::TearDown() {
   ShutdownService();
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
-  LOG(INFO) << "Finishing " << test_info->name();
+  LOG(INFO) << "Finishing " << (test_info ? test_info->name() : "benchmark");
 }
 
 void BaseFamilyTest::ResetService() {
@@ -270,7 +270,7 @@ void BaseFamilyTest::ResetService() {
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
-  LOG(INFO) << "Starting " << test_info->name();
+  LOG(INFO) << "Starting " << (test_info ? test_info->name() : "benchmark");
 
   watchdog_fiber_ = pp_->GetNextProactor()->LaunchFiber([this] {
     ThisFiber::SetName("Watchdog");

@@ -29,6 +29,7 @@ extern "C" {
 #include "server/blocking_controller.h"
 #include "server/cmd_support.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
@@ -646,48 +647,65 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
   return add_res.status();
 }
 
-bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
-  auto& db_slice = op_args.GetDbSlice();
-
-  DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
-  if (prime_it->first.HasExpire()) {
-    it = db_slice.ExpireIfNeeded(op_args.db_cntx, it);
-    if (!IsValid(it))
+bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) {
+  if (opts.matcher) {
+    string str;
+    key.GetString(&str);
+    if (!opts.matcher->Matches(str))
       return false;
+    res->emplace_back(std::move(str));
+    return true;
   }
 
-  bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
+  res->emplace_back();
+  key.GetString(&res->back());
+  return true;
+}
+
+bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, ScanResult* res) {
+  key.GetString(res->AppendBuffer(key.Size()));
+  if (opts.matcher && !opts.matcher->Matches(res->back())) {
+    res->PopBack();
+    return false;
+  }
+  return true;
+}
+
+template <typename Result>
+bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, Result* res) {
+  auto& db_slice = op_args.GetDbSlice();
+
+  if (db_slice.TryExpire(op_args.db_cntx, prime_it)) [[unlikely]]
+    return false;
+
+  bool matches = !opts.type_filter || prime_it->second.ObjType() == opts.type_filter;
   if (opts.mask.has_value()) {
     if (opts.mask == ScanOpts::Mask::Volatile) {
-      matches &= it->first.HasExpire();
+      matches &= prime_it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Permanent) {
-      matches &= !it->first.HasExpire();
+      matches &= !prime_it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Accessed) {
-      matches &= it->first.WasTouched();
+      matches &= prime_it->first.WasTouched();
     } else if (opts.mask == ScanOpts::Mask::Untouched) {
-      matches &= !it->first.WasTouched();
+      matches &= !prime_it->first.WasTouched();
     }
   }
   if (!matches)
     return false;
 
-  if (opts.min_malloc_size > 0 && it->second.MallocUsed() < opts.min_malloc_size) {
+  if (opts.min_malloc_size > 0 && prime_it->second.MallocUsed() < opts.min_malloc_size) {
     return false;
   }
 
-  if (opts.bucket_id != UINT_MAX && opts.bucket_id != it.GetInnerIt().bucket_id()) {
+  if (opts.bucket_id != UINT_MAX && opts.bucket_id != prime_it.bucket_id()) {
     return false;
   }
 
-  if (!opts.Matches(it.key())) {
-    return false;
-  }
-  res->emplace_back(it.key());
-
-  return true;
+  return AppendScanKey(prime_it->first, opts, res);
 }
 
-void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, StringVec* vec) {
+template <typename Result>
+void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, Result* vec) {
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
@@ -722,7 +740,8 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   *cursor = cur.token();
 }
 
-uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys,
+template <typename Result>
+uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, Result* keys,
                      ConnectionContext* cntx) {
   ShardId sid = cursor % 1024;
 
@@ -2725,14 +2744,14 @@ void GenericFamily::Scan(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
   const ScanOpts& scan_op = ops.value();
 
-  StringVec keys;
+  ScanResult keys{scan_op.limit};
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx->server_conn_cntx());
 
   auto replier = [cursor, keys = std::move(keys)](RedisReplyBuilder* builder) {
     std::string cursor_str = absl::StrCat(cursor);
     RedisReplyBuilder::ArrayScope scope{builder, 2};
     builder->SendBulkString(cursor_str);
-    builder->SendBulkStrArr(keys);
+    keys.Send(builder);
   };
 
   cmd_cntx->ReplyWith(std::move(replier));

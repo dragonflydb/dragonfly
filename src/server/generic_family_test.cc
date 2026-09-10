@@ -6,6 +6,10 @@
 
 #include <absl/cleanup/cleanup.h>
 
+#include <array>
+#include <cstring>
+#include <limits>
+
 extern "C" {
 #include "redis/crc64.h"
 #include "redis/rdb.h"
@@ -15,7 +19,9 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "facade/reply_builder.h"
 #include "server/channel_store.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -839,6 +845,85 @@ TEST_F(GenericFamilyTest, ScanWithAttr) {
   resp = Run({"scan", "0", "attr", "u"});
   vec = StrArray(resp.GetVec()[1]);
   ASSERT_EQ(0, vec.size());
+}
+
+TEST(ScanResultTest, AppendBufferAndOwnership) {
+  ScanResult result{numeric_limits<size_t>::max()};
+  string member = "member";
+  result.Append(member);
+  member = "changed";
+  EXPECT_EQ(result.back(), "member");
+
+  const string binary("x\0\xff", 3);
+  memcpy(result.AppendBuffer(binary.size()), binary.data(), binary.size());
+  EXPECT_EQ(result.back(), binary);
+  result.Append(string_view{});
+  EXPECT_EQ(result.size(), 3u);
+  EXPECT_TRUE(result.back().empty());
+
+  result.PopBack();
+  EXPECT_EQ(result.back(), binary);
+  result.PopBack();
+  EXPECT_EQ(result.back(), "member");
+  result.PopBack();
+  EXPECT_EQ(result.size(), 0u);
+}
+
+TEST(ScanResultTest, GrowthMoveAndPop) {
+  ScanResult result{1};
+  const array<string, 8> entries = {
+      "first", "", string("x\0y", 3), string(128, 'a'), string(64 << 10, 'b'), string(1 << 20, 'c'),
+      "tail",  ""};
+  for (const auto& entry : entries)
+    result.Append(entry);
+
+  auto moved = std::move(result);
+  for (size_t i = entries.size(); i > 0; --i) {
+    ASSERT_EQ(moved.size(), i);
+    EXPECT_EQ(moved.back(), entries[i - 1]);
+    moved.PopBack();
+  }
+  EXPECT_EQ(moved.size(), 0u);
+  moved.Append("reused");
+  EXPECT_EQ(moved.back(), "reused");
+}
+
+TEST_F(GenericFamilyTest, ScanResultBuffer) {
+  // Exercise buffer growth, empty/integer/binary keys, and the oversized-reply fallback.
+  StringVec keys = {"", "42", string("binary\0\xff", 8), "keep:" + string(1 << 20, 'x')};
+  for (unsigned i = 0; i < 128; ++i) {
+    keys.push_back(
+        StrCat(i % 2 ? "keep:" : "drop:", i, ":", string(8192 + i, i % 3 ? 'a' : '\xff')));
+  }
+  for (const auto& key : keys)
+    ASSERT_EQ(Run({"set", key, "value"}), "OK");
+
+  ASSERT_THAT(Run({"expire", keys.back(), "1000"}), IntArg(1));
+  ASSERT_EQ(Run({"set", string(64, 'a'), "value", "px", "1"}), "OK");
+  AdvanceTime(1);
+
+  for (string_view pattern : {"*", "keep:*", "missing:*"}) {
+    SCOPED_TRACE(pattern);
+    StringVec expected;
+    for (const auto& key : keys) {
+      if (pattern == "*" || (pattern == "keep:*" && key.starts_with("keep:")))
+        expected.push_back(key);
+    }
+
+    string cursor = "0";
+    StringVec actual;
+    do {
+      // A huge COUNT must not cause an equally huge eager allocation.
+      auto resp = Run({"scan", cursor, "count", "5000000000", "match", pattern});
+      ASSERT_THAT(resp, ArrLen(2));
+      cursor = resp.GetVec()[0].GetString();
+      auto batch = StrArray(resp.GetVec()[1]);
+      actual.insert(actual.end(), make_move_iterator(batch.begin()),
+                    make_move_iterator(batch.end()));
+    } while (cursor != "0");
+    EXPECT_THAT(actual, UnorderedElementsAreArray(expected));
+  }
+  EXPECT_THAT(Run({"dbsize"}), IntArg(keys.size()));
 }
 
 TEST_F(GenericFamilyTest, ScanMallocSize) {
@@ -2736,5 +2821,108 @@ TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
   EXPECT_EQ("foo", msg.message);
   EXPECT_GE(GetMetrics().events.expired_keys, 1u);
 }
+
+// Measures command dispatch, SCAN, and RESP serialization to a reusable in-memory sink. Run with
+// --bench --gtest_filter='-*' --benchmark_filter=BM_ScanCommand --benchmark_min_time=1s.
+class ScanBenchmark : public BaseFamilyTest {
+ public:
+  ScanBenchmark() {
+    SetUpTestSuite();
+    SetUp();
+    // Profiling runs may intentionally take longer than the unit-test watchdog's timeout.
+    watchdog_done_.Notify();
+  }
+
+  ~ScanBenchmark() {
+    TearDown();
+  }
+
+  void RunBenchmark(benchmark::State& state) {
+    const uint64_t key_count = state.range(0);
+    const string count = absl::StrCat(state.range(1));
+    const bool expiring = state.range(2);
+
+    vector<string> populate_args = {"debug",         "populate", absl::StrCat(key_count),
+                                    string(48, 'k'), "16",       "rand"};
+    if (expiring) {
+      populate_args.insert(populate_args.end(), {"expire", "86400", "86401"});
+    }
+    auto populate_resp = Run(absl::Span<const string>{populate_args});
+    DCHECK_EQ(populate_resp.GetView(), "OK");
+    DCHECK_EQ(Run({"dbsize"}).GetInt().value(), key_count);
+
+    // A real connection runs many commands in one fiber. Run() would create a fiber per command
+    // and retain all parsed replies until teardown, so use the normal dispatcher directly here.
+    pp_->at(0)->Await([&] {
+      TestConnection conn{service_.get(), Protocol::REDIS};
+      auto* cntx = static_cast<ConnectionContext*>(conn.cntx());
+      cntx->ns = &namespaces->GetDefaultNamespace();
+      io::StringSink sink;
+      RedisReplyBuilder builder{&sink};
+      CommandContext cmd_cntx{&builder, cntx};
+      array<string_view, 4> args = {"SCAN", "0", "COUNT", count};
+
+      auto read_line = [](string_view* reply) {
+        size_t end = reply->find("\r\n");
+        DCHECK_NE(end, string_view::npos);
+        string_view line = reply->substr(0, end);
+        reply->remove_prefix(end + 2);
+        return line;
+      };
+
+      [[maybe_unused]] uint64_t walk_keys = 0;
+      uint64_t total_keys = 0;
+      for (auto _ : state) {
+        cmd_cntx.ResetForReuse();
+        // Copy the previous cursor before clearing the buffer it points into.
+        cmd_cntx.Assign(args.begin(), args.end(), args.size());
+        sink.Clear();
+        service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC,
+                                  nullptr);
+
+        // Read only the cursor and array length; parsing every returned key is client-side work.
+        string_view reply = sink.str();
+        [[maybe_unused]] string_view reply_header = read_line(&reply);
+        DCHECK_EQ(reply_header, "*2");
+        [[maybe_unused]] string_view bulk_header = read_line(&reply);
+        DCHECK(bulk_header.starts_with('$'));
+        [[maybe_unused]] size_t cursor_len = 0;
+        DCHECK(absl::SimpleAtoi(bulk_header.substr(1), &cursor_len));
+        args[1] = read_line(&reply);
+        DCHECK_EQ(args[1].size(), cursor_len);
+        string_view array_header = read_line(&reply);
+        DCHECK(array_header.starts_with('*'));
+        uint64_t returned_keys = 0;
+        [[maybe_unused]] bool parsed = absl::SimpleAtoi(array_header.substr(1), &returned_keys);
+        DCHECK(parsed);
+        total_keys += returned_keys;
+#ifndef NDEBUG
+        walk_keys += returned_keys;
+        if (args[1] == "0") {
+          DCHECK_EQ(walk_keys, key_count);
+          walk_keys = 0;
+        }
+#endif
+      }
+
+      state.SetItemsProcessed(total_keys);
+      state.counters["scan_calls"] =
+          benchmark::Counter(state.iterations(), benchmark::Counter::kIsRate);
+    });
+  }
+
+  void TestBody() override {
+  }
+};
+
+static void BM_ScanCommand(benchmark::State& state) {
+  ScanBenchmark server;
+  server.RunBenchmark(state);
+}
+BENCHMARK(BM_ScanCommand)
+    ->ArgNames({"keys", "count", "expiring"})
+    ->ArgsProduct({{1'000'000}, {10, 100, 1000}, {0, 1}})
+    ->MeasureProcessCPUTime()
+    ->UseRealTime();
 
 }  // namespace dfly

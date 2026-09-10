@@ -9,6 +9,7 @@
 #include <absl/strings/str_cat.h>
 #include <fast_float/fast_float.h>
 
+#include <algorithm>
 #include <system_error>
 
 extern "C" {
@@ -21,6 +22,7 @@ extern "C" {
 #include "core/glob_matcher.h"
 #include "core/interpreter.h"
 #include "facade/cmd_arg_parser.h"
+#include "facade/reply_builder.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -216,6 +218,20 @@ std::ostream& operator<<(std::ostream& os, const GlobalState& state) {
 }
 
 ScanOpts::~ScanOpts() {
+}
+
+ScanResult::ScanResult(size_t count) {
+  // COUNT is an untrusted hint, not a bound on the number or size of returned entries.
+  count = min<size_t>(count, 1024);
+  entries_.Reserve(count, count * 64);
+}
+
+void ScanResult::Send(facade::RedisReplyBuilder* builder) const {
+  facade::RedisReplyBuilder::ArrayScope scope{builder, size()};
+  for (string_view entry : entries_.view())
+    builder->SendBulkString(entry);
+  for (const auto& entry : overflow_)
+    builder->SendBulkString(entry);
 }
 
 BorrowedInterpreter::BorrowedInterpreter(Transaction* tx, ConnectionState* state) {

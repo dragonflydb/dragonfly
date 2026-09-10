@@ -680,6 +680,10 @@ struct CompactKey : public CompactObj {
     return taglen_ == SDS_TTL_TAG;
   }
 
+  bool IsExpired(uint64_t now_ms) const {
+    return taglen_ == SDS_TTL_TAG && int64_t(now_ms) >= int64_t(u_.sds_ttl.exp_ms);
+  }
+
   // Embed expire time directly in the key by converting to SDS_TTL_TAG.
   void SetExpireTime(uint64_t abs_ms);
 
