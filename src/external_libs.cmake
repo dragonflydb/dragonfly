@@ -66,6 +66,12 @@ set(MIMALLOC_ROOT_DIR ${THIRD_PARTY_LIB_DIR}/mimalloc2)
 set(MIMALLOC_INCLUDE_DIR ${MIMALLOC_ROOT_DIR}/include)
 set(MIMALLOC_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.2.4)
 set(MIMALLOC_C_FLAGS "-O3 -g -DMI_STAT=0 -DNDEBUG")
+set(MIMALLOC_TRACK_ASAN ${WITH_ASAN})
+if (MIMALLOC_TRACK_ASAN)
+  set(MIMALLOC_LIB_NAME libmimalloc-asan.a)
+else()
+  set(MIMALLOC_LIB_NAME libmimalloc.a)
+endif()
 set(MIMALLOC_URL https://github.com/microsoft/mimalloc/archive/refs/tags/v2.2.4.tar.gz)
 set(MIMALLOC_SHA256 754a98de5e2912fddbeaf24830f982b4540992f1bab4a0a8796ee118e0752bda)
 file(MAKE_DIRECTORY ${MIMALLOC_INCLUDE_DIR})
@@ -112,7 +118,7 @@ ExternalProject_Add(mimalloc2_project
   # Add -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS=-O0 to debug, and set BUILD_BYPRODUCTS to
   # libmimalloc-debug.a
 
-  BUILD_BYPRODUCTS ${MIMALLOC_ROOT_DIR}/lib/libmimalloc.a
+  BUILD_BYPRODUCTS ${MIMALLOC_ROOT_DIR}/lib/${MIMALLOC_LIB_NAME}
 
   CMAKE_ARGS -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY:PATH=${MIMALLOC_ROOT_DIR}/lib
         -DCMAKE_LIBRARY_OUTPUT_DIRECTORY:PATH=${MIMALLOC_ROOT_DIR}/lib
@@ -120,6 +126,7 @@ ExternalProject_Add(mimalloc2_project
         -DCMAKE_CXX_COMPILER:STRING=${CMAKE_CXX_COMPILER}
         -DMI_INSTALL_TOPLEVEL=ON
         -DMI_OVERRIDE=OFF
+        -DMI_TRACK_ASAN=${MIMALLOC_TRACK_ASAN}
         -DMI_NO_PADDING=ON
         -DMI_BUILD_TESTS=OFF
         -DMI_BUILD_SHARED=OFF
@@ -130,7 +137,7 @@ ExternalProject_Add(mimalloc2_project
 
 add_library(TRDP::mimalloc2 STATIC IMPORTED)
 add_dependencies(TRDP::mimalloc2 mimalloc2_project)
-set_target_properties(TRDP::mimalloc2 PROPERTIES IMPORTED_LOCATION ${MIMALLOC_ROOT_DIR}/lib/libmimalloc.a
+set_target_properties(TRDP::mimalloc2 PROPERTIES IMPORTED_LOCATION ${MIMALLOC_ROOT_DIR}/lib/${MIMALLOC_LIB_NAME}
                       INTERFACE_INCLUDE_DIRECTORIES ${MIMALLOC_ROOT_DIR}/include)
 
 add_third_party(
