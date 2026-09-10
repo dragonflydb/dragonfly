@@ -1539,5 +1539,30 @@ TEST_F(ClusterFamilyEmulatedTest, ForbidenCommands) {
   EXPECT_THAT(res, ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
 }
 
+class ClusterFamilyDisabledTest : public ClusterFamilyTest {
+ protected:
+  void ConfigureClusterFlags() override {
+    SetTestFlag("cluster_mode", "");
+  }
+};
+
+TEST_F(ClusterFamilyDisabledTest, DflyMigrateWithoutClusterMode) {
+  EXPECT_THAT(Run({"DFLYMIGRATE", "ACK", "src", "1"}),
+              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
+  EXPECT_THAT(Run({"DFLYMIGRATE", "INIT", "src", "1", "0-1"}),
+              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
+  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1", "0", "0"}),
+              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
+}
+
+TEST_F(ClusterFamilyEmulatedTest, DflyMigrateEmulatedMode) {
+  EXPECT_THAT(Run({"DFLYMIGRATE", "ACK", "src", "1"}),
+              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
+  EXPECT_THAT(Run({"DFLYMIGRATE", "INIT", "src", "1", "0-1"}),
+              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
+  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1", "0", "0"}),
+              ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
+}
+
 }  // namespace
 }  // namespace dfly::cluster

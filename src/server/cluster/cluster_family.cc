@@ -831,6 +831,11 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgParser parser, CommandContext*
 }
 
 void ClusterFamily::DflyMigrate(CmdArgParser parser, CommandContext* cmd_cntx) {
+  auto* cntx = cmd_cntx->server_conn_cntx();
+  if (!(IsClusterEnabled() || (IsClusterEmulated() && cntx->journal_emulated))) {
+    return cmd_cntx->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
+  }
+
   string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
   if (sub_cmd == "INIT") {
