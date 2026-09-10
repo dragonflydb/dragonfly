@@ -255,6 +255,9 @@ size_t ConnectionContext::UsedMemory() const {
 void ConnectionContext::OnSocketError(uint32_t /* epoll_mask */) {
   if (transaction)
     transaction->CancelBlocking(nullptr);
+  // A command parked behind CLIENT PAUSE must not keep a closed connection alive.
+  if (paused)
+    pause_ec.notifyAll();
 }
 
 void ConnectionContext::Unsubscribe(std::string_view channel) {

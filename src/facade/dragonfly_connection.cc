@@ -1558,8 +1558,8 @@ void Connection::ConnectionFlow() {
     }
   }
 
-  // After the client disconnected.
-  cc_->conn_closing = true;  // Signal dispatch to close.
+  // After the client disconnected. Also releases a blocked or paused dispatch.
+  BreakOnce(POLLHUP);
   cnd_.notify_one();
   phase_ = SHUTTING_DOWN;
   VLOG(2) << CONN_ID << "Before dispatch_fb.join()";
@@ -2447,6 +2447,8 @@ void Connection::AsyncFiber() {
   DCHECK(cc_->conn_closing || reply_builder_->GetError());
 
   cc_->conn_closing = true;
+  // A final reply (protocol error) must not stay buffered behind a batch that will never drain.
+  reply_builder_->SetBatchMode(false);
   qbp.NotifyPipelineWaiters();
 
   // If shutdown was requested, we need to break the receive call in case the i/o fiber
@@ -2701,7 +2703,10 @@ void Connection::SendAsync(MessageHandle msg) {
     if (GetQueueBackpressure().IsPipelineBufferOverLimit(
             conn_stats.dispatch_queue_bytes + conn_stats.pipeline_queue_bytes,
             GetPendingMessageCount())) {
-      cc_->conn_closing = true;
+      // Same signals as OnShutdown: the v2 loop only leaves on io_ec_.
+      BreakOnce(POLLHUP);
+      io_ec_ = make_error_code(errc::connection_aborted);
+      io_event_.notify();
       request_shutdown_ = true;
       // We don't shutdown here. The reason is that TLS socket is preemptive
       // and SendAsync is atomic.
@@ -3014,6 +3019,7 @@ void Connection::UnregisterReadBufCapacity() {
 
 void Connection::BreakOnce(uint32_t ev_mask) {
   if (cc_) {
+    cc_->conn_closing = true;
     cc_->OnSocketError(ev_mask);
   }
 }

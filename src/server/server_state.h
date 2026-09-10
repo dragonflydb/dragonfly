@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/container/flat_hash_set.h>
+
 #include <optional>
 #include <valarray>
 #include <vector>
@@ -22,6 +24,7 @@ typedef struct mi_heap_s mi_heap_t;
 
 namespace facade {
 class Connection;
+class ConnectionContext;
 struct ConnectionStats;
 }  // namespace facade
 
@@ -274,9 +277,9 @@ class ServerState {  // public struct - to allow initialization.
   // whether this is starting or ending the pause.
   void SetPauseState(ClientPause state, bool start);
 
-  // Awaits until the pause is over and the command can execute.
+  // Awaits until the pause is over and the command can execute, or until the connection closes.
   // @is_write controls whether the command is a write command or not.
-  void AwaitPauseState(bool is_write);
+  void AwaitPauseState(bool is_write, facade::ConnectionContext* cntx);
 
   bool IsPaused() const {
     return (client_pauses_[0] + client_pauses_[1]) > 0;
@@ -321,10 +324,9 @@ class ServerState {  // public struct - to allow initialization.
 
   // To support concurrent `CLIENT PAUSE commands` correctly, we store the amount
   // of current CLIENT PAUSE commands that are in effect. Blocked execution fibers
-  // should subscribe to `client_pause_ec_` through `AwaitPauseState` to be
-  // notified when the break is over.
+  // park through `AwaitPauseState` and are notified when the pause is over.
   int client_pauses_[2] = {};
-  util::fb2::EventCount client_pause_ec_;
+  absl::flat_hash_set<facade::ConnectionContext*> paused_conns_;
 
   // Monitors connections. Currently responsible for closing timed out connections.
   util::fb2::Fiber watcher_fiber_;

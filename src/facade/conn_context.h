@@ -8,6 +8,8 @@
 
 #include <string_view>
 
+#include "util/fibers/event_count.h"
+
 namespace facade {
 
 class Connection;
@@ -82,7 +84,8 @@ class ConnectionContext {
   bool async_dispatch : 1;
   bool sync_dispatch : 1;
 
-  bool paused = false;  // whether this connection is paused due to CLIENT PAUSE
+  bool paused = false;             // whether this connection is paused due to CLIENT PAUSE
+  util::fb2::EventCount pause_ec;  // wakes the command parked by CLIENT PAUSE
   // whether it's blocked on blocking commands like BLPOP, needs to be addressable
   bool blocked = false;
 

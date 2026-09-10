@@ -11,6 +11,7 @@
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/conn_context.h"
 #include "facade/facade_stats.h"
 #include "facade/op_status.h"
 #include "server/blocking_controller.h"
@@ -1447,7 +1448,7 @@ ShardArgs Transaction::GetShardArgs(ShardId sid) const {
 }
 
 OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReadyChecker krc,
-                                  bool* block_flag, bool* pause_flag) {
+                                  facade::ConnectionContext* cntx) {
   if (blocking_barrier_.IsClaimed()) {  // Might have been cancelled ahead by a dropping connection
     Conclude();
     return OpStatus::CANCELLED;
@@ -1477,16 +1478,16 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
 
   // Wait for the blocking barrier to be closed.
   // Note: It might return immediately if another thread already notified us.
-  *block_flag = true;
+  cntx->blocked = true;
   cv_status status = blocking_barrier_.Wait(tp);
-  *block_flag = false;
+  cntx->blocked = false;
 
   DVLOG(1) << "WaitOnWatch done " << int(status) << " " << DebugId();
   --stats->num_blocked_clients;
 
-  *pause_flag = true;
-  ServerState::tlocal()->AwaitPauseState(true);  // blocking are always write commands
-  *pause_flag = false;
+  cntx->paused = true;
+  ServerState::tlocal()->AwaitPauseState(true, cntx);  // blocking are always write commands
+  cntx->paused = false;
 
   OpStatus result = OpStatus::OK;
   if (status == cv_status::timeout) {

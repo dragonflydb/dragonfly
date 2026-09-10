@@ -15,6 +15,10 @@ extern "C" {
 
 #include <functional>
 
+namespace facade {
+class ConnectionContext;
+}  // namespace facade
+
 namespace dfly {
 
 class StringMap;
@@ -65,7 +69,7 @@ using BlockingResultCb =
 // immediately with the first key listed in the tx arguments.
 facade::OpResult<std::string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                                            BlockingResultCb cb, unsigned limit_ms,
-                                                           bool* block_flag, bool* pause_flag);
+                                                           facade::ConnectionContext* cntx);
 
 };  // namespace container_utils
 
