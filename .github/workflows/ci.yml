@@ -289,6 +289,14 @@ jobs:
               .github/scripts/run-regression-tests-helper.sh pytest
             '
 
+      - name: Fix core dump / log permissions for upload
+        # Core files land here owned by whatever UID wrote them inside the container
+        # (often root), but actions/upload-artifact runs on the bare host as the
+        # unprivileged runner user now that this job doesn't use job-level container: --
+        # without this it fails with EACCES trying to zip a root-owned core file.
+        if: always()
+        run: sudo chmod -R a+rX /tmp/failed /tmp/core_dumps 2>/dev/null || true
+
       - name: Upload regression logs on failure
         if: failure() && github.event_name != 'push'
         uses: actions/upload-artifact@v7

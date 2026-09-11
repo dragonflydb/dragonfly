@@ -391,14 +391,22 @@ class DflyInstance:
         return rv
 
     def print_info_logs_to_debug_log(self):
+        # subprocess.call(sed_cmd, stdin=file) used to inherit this process's stdout directly,
+        # writing straight to the shared CI terminal uncaptured -- same multiplexing bug as
+        # read_sedout had. Capture it and log it atomically per-file instead, like
+        # symbolize_stack_trace does, so concurrent instances can't interleave here either.
         logs = self.log_files
         sed_format = f"s/[^ ]*/{self.port}{Colors.next()}➜{Colors.CLEAR}/"
         sed_cmd = ["sed", "-e", sed_format]
         for log in logs:
             if "INFO" in log:
-                with open(log) as file:
-                    print(f"🪵🪵🪵🪵🪵🪵 LOG name {log} 🪵🪵🪵🪵🪵🪵")
-                    subprocess.call(sed_cmd, stdin=file)
+                with open(log, "rb") as file:
+                    result = subprocess.run(sed_cmd, stdin=file, stdout=subprocess.PIPE)
+                    logging.debug(
+                        "🪵🪵🪵🪵🪵🪵 LOG name %s 🪵🪵🪵🪵🪵🪵\n%s",
+                        log,
+                        result.stdout.decode(errors="replace"),
+                    )
 
     @staticmethod
     def format_args(args):
