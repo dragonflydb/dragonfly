@@ -525,6 +525,55 @@ TEST_F(AclFamilyTest, GeoSearchStoreDryRun) {
   EXPECT_THAT(resp, "This user has no permissions to run the 'GEOSEARCHSTORE' command");
 }
 
+TEST_F(AclFamilyTest, StoreLikeCommandsRequirePerKeyPermissions) {
+  TestInitAclFam();
+
+  struct Case {
+    std::string_view name;
+    std::string_view command;
+  };
+
+  const Case cases[] = {
+      {"COPY", "COPY src dest"},
+      {"BITOP", "BITOP AND dest src"},
+      {"SINTERSTORE", "SINTERSTORE dest src"},
+      {"SUNIONSTORE", "SUNIONSTORE dest src"},
+      {"SDIFFSTORE", "SDIFFSTORE dest src"},
+      {"ZRANGESTORE", "ZRANGESTORE dest src 0 -1"},
+      {"ZUNIONSTORE", "ZUNIONSTORE dest 1 src"},
+      {"ZINTERSTORE", "ZINTERSTORE dest 1 src"},
+      {"ZDIFFSTORE", "ZDIFFSTORE dest 1 src"},
+      {"GEORADIUS", "GEORADIUS src 15 37 200 km STORE dest"},
+      {"GEORADIUSBYMEMBER", "GEORADIUSBYMEMBER src member 200 km STORE dest"},
+      {"SORT", "SORT src STORE dest"},
+      {"CMS.MERGE", "CMS.MERGE dest 1 src"},
+  };
+
+  for (const auto& [name, command] : cases) {
+    const std::string user = absl::StrCat("u-", absl::AsciiStrToLower(name));
+    auto denied = absl::StrCat("This user has no permissions to run the '", name, "' command");
+
+    // Read on source, write on dest: this is the bug scenario, must succeed.
+    auto resp = Run({"ACL", "SETUSER", user, "ON", ">p", absl::StrCat("+", name), "resetkeys",
+                     "%RW~dest", "%R~src"});
+    EXPECT_THAT(resp, "OK") << name;
+    resp = Run(absl::StrCat("ACL DRYRUN ", user, " ", command));
+    EXPECT_THAT(resp, "OK") << name;
+
+    // Read-only on dest (no write): must still be denied, dest always needs write.
+    resp = Run({"ACL", "SETUSER", user, "resetkeys", "%R~dest", "%R~src"});
+    EXPECT_THAT(resp, "OK") << name;
+    resp = Run(absl::StrCat("ACL DRYRUN ", user, " ", command));
+    EXPECT_THAT(resp, denied) << name;
+
+    // Write-only on source (no read): must be denied, source never needs write, only read.
+    resp = Run({"ACL", "SETUSER", user, "resetkeys", "%RW~dest", "%W~src"});
+    EXPECT_THAT(resp, "OK") << name;
+    resp = Run(absl::StrCat("ACL DRYRUN ", user, " ", command));
+    EXPECT_THAT(resp, denied) << name;
+  }
+}
+
 TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {
   TestInitAclFam();
 

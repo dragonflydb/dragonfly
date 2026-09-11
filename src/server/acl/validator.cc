@@ -37,15 +37,12 @@ struct KeyPermissions {
   bool write = false;
 };
 
-// Per-key ACL requirements for commands that read one key and write another.
+// Per-key ACL requirements for commands that read one key and write another (e.g. COPY).
 KeyPermissions RequiredKeyPermissions(const CommandId& id, unsigned key_offset) {
-  if (id.name() == "GEOSEARCHSTORE") {
-    // dest key (offset 0) is written; source key (offset 1) is read-only.
-    if (key_offset == 0)
-      return {false, true};
-    if (key_offset == 1)
-      return {true, false};
-  }
+  if (id.opt_mask() & CO::WRITE_KEY_OFFSET_0)
+    return {key_offset != 0, key_offset == 0};
+  if (id.opt_mask() & CO::WRITE_KEY_OFFSET_1)
+    return {key_offset != 1, key_offset == 1};
 
   return {id.IsReadOnly(), id.IsJournaled()};
 }
@@ -185,12 +182,16 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
     if (!keys_index)
       return {false, AclLog::Reason::KEY};
 
-    for (unsigned idx : keys_index->Range()) {
+    // The bonus key (dest of Z*STORE/CMS.MERGE/GEORADIUS.../SORT STORE) is the sole write target.
+    const bool has_bonus_dest = keys_index->bonus.has_value();
+    for (unsigned idx = keys_index->start; idx < keys_index->end; idx += keys_index->step) {
       const unsigned key_offset = idx - keys_index->start;
-      keys_allowed &= KeyGlobAllowed(keys, tail_args[idx], RequiredKeyPermissions(id, key_offset));
+      KeyPermissions perms =
+          has_bonus_dest ? KeyPermissions{true, false} : RequiredKeyPermissions(id, key_offset);
+      keys_allowed &= KeyGlobAllowed(keys, tail_args[idx], perms);
     }
 
-    if (keys_index->bonus.has_value()) {
+    if (has_bonus_dest) {
       keys_allowed &= KeyGlobAllowed(keys, tail_args[*keys_index->bonus], {false, true});
     }
   }
