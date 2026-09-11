@@ -78,77 +78,107 @@ jobs:
             ccache-max-size: "2G"
 
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/romange/${{ matrix.container }}
-      # Seems that docker by default prohibits running iouring syscalls
-      # --cap-add SYS_ADMIN: lets the regression-test step override kernel.core_pattern so
-      # crashing dragonfly processes leave a gdb-analyzable core file instead of losing the
-      # dump to the host's unreachable systemd-coredump pipe.
-      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0" --cap-add SYS_ADMIN
-      volumes:
-        - /:/hostroot
-        - /mnt:/mnt
-      credentials:
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
+    # TEMPORARY EXPERIMENT (fast-shutdown SIGFPE investigation): no job-level container:.
+    # kernel.core_pattern is host-kernel-wide; Docker containers can't write it themselves
+    # even with extra capabilities (verified: --cap-add SYS_ADMIN alone did not work). So
+    # this sets it on the bare runner VM, then docker run's the build/test container
+    # manually so the setting is already in effect before anything inside it can crash.
+    # Drops ccache/deps-cache (those composite-action steps only work under job-level
+    # container:) -- intentional, to be reverted after this experiment.
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: true
 
+      - name: Configure host core_pattern
+        run: |
+          sudo mkdir -p /tmp/core_dumps
+          sudo chmod 1777 /tmp/core_dumps
+          sudo sysctl -w kernel.core_pattern='/tmp/core_dumps/core.%e.%p.%t'
+          cat /proc/sys/kernel/core_pattern
+
+      - name: Docker login
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.repository_owner }}" --password-stdin
+
+      - name: Start build container
+        run: |
+          docker run -d --name build_container \
+            --ulimit core=-1 \
+            --security-opt seccomp=unconfined \
+            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
+            -v /:/hostroot \
+            -v /mnt:/mnt \
+            -v /tmp:/tmp \
+            -w "${GITHUB_WORKSPACE}" \
+            -e GITHUB_WORKSPACE="${GITHUB_WORKSPACE}" \
+            -e CPP_JUNIT_DIR="${CPP_JUNIT_DIR}" \
+            -e CPP_DASHBOARD_DIR="${CPP_DASHBOARD_DIR}" \
+            ghcr.io/romange/${{ matrix.container }} \
+            sleep infinity
+
       - name: Prepare Environment
         run: |
-          uname -a
-          cmake --version
-          mkdir -p ${GITHUB_WORKSPACE}/build
-          mount
+          docker exec build_container bash -c '
+            uname -a
+            cmake --version
+            mkdir -p ${GITHUB_WORKSPACE}/build
+            mount
 
-          echo "===================Before freeing up space ============================================"
-          df -h
-          rm -rf /hostroot/usr/share/dotnet
-          rm -rf /hostroot/usr/local/share/boost
-          rm -rf /hostroot/usr/local/lib/android
-          rm -rf /hostroot/opt/ghc
-          echo "===================After freeing up space ============================================"
-          df -h
-          touch /mnt/foo
-          ls -la /mnt/foo
+            echo "===================Before freeing up space ============================================"
+            df -h
+            rm -rf /hostroot/usr/share/dotnet
+            rm -rf /hostroot/usr/local/share/boost
+            rm -rf /hostroot/usr/local/lib/android
+            rm -rf /hostroot/opt/ghc
+            echo "===================After freeing up space ============================================"
+            df -h
+            touch /mnt/foo
+            ls -la /mnt/foo
+          '
 
       - name: System diagnostics
         run: |
-          echo "ulimit is"
-          ulimit -s
-          echo "-----------------------------"
-          echo "disk space is:"
-          df -h
-          echo "-----------------------------"
+          docker exec build_container bash -c '
+            echo "ulimit is"
+            ulimit -s
+            echo "-----------------------------"
+            echo "disk space is:"
+            df -h
+            echo "-----------------------------"
+          '
 
       - name: Test dependency-cache manifest
         if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Debug' && matrix.compiler.cxx == 'g++' && matrix.sanitizers == 'NoSanitizers'
         # run only once for both pull requests and pushes.
-        run: bash .github/actions/builder/scripts/test_deps_cache_manifest.sh
+        run: docker exec build_container bash -c 'bash .github/actions/builder/scripts/test_deps_cache_manifest.sh'
 
       - name: Build Dragonfly
-        uses: ./.github/actions/builder
-        with:
-          enable-ccache: 'true'
-          ccache-save: 'true'
-          enable-deps-cache: 'true'
-          build-type: ${{matrix.build-type}}
-          cache-key-suffix: ${{ matrix.container }}
-          ccache-max-size: ${{ matrix.ccache-max-size || '1G' }}
-          c-compiler: ${{matrix.compiler.c}}
-          cxx-compiler: ${{matrix.compiler.cxx}}
-          cxx-flags: ${{matrix.cxx_flags}}
-          sanitizers: ${{matrix.sanitizers}}
-          with-aws: 'OFF'
+        # ccache/deps-cache dropped for this experiment (those steps only work under
+        # job-level container:) -- inlined equivalent of .github/actions/builder without them.
+        run: |
+          docker exec build_container bash -c '
+            set -euo pipefail
+            ASAN="OFF"; USAN="OFF"
+            if [ "${{ matrix.sanitizers }}" = "Sanitizers" ]; then ASAN="ON"; USAN="ON"; fi
+            CMAKE_CMD=(cmake -B "${GITHUB_WORKSPACE}/build" -DCMAKE_BUILD_TYPE="${{ matrix.build-type }}" -GNinja -DENABLE_CCACHE=OFF)
+            CMAKE_CMD+=(-DCMAKE_C_COMPILER="${{ matrix.compiler.c }}" -DCMAKE_CXX_COMPILER="${{ matrix.compiler.cxx }}")
+            CMAKE_CMD+=(-DCMAKE_CXX_FLAGS="${{ matrix.cxx_flags }}")
+            if [ "${{ matrix.build-type }}" = "Debug" ]; then CMAKE_CMD+=(-DDF_MINIMAL_DEBUG_INFO=ON); fi
+            CMAKE_CMD+=(-DPRINT_STACKTRACES_ON_SIGNAL=ON -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_UNWIND=OFF -DWITH_GPERF=OFF -DWITH_ASAN="$ASAN" -DWITH_USAN="$USAN" -DLEGACY_GLOG=OFF)
+            echo "Running: ${CMAKE_CMD[@]}"
+            "${CMAKE_CMD[@]}"
+            cd "${GITHUB_WORKSPACE}/build"
+            ninja src/all
+          '
 
       - name: PostFail
         if: failure()
         run: |
-          echo "disk space is:"
-          df -h
+          docker exec build_container bash -c '
+            echo "disk space is:"
+            df -h
+          '
 
       - name: C++ Unit Tests - IoUring
         if: github.event_name != 'push' && false # debugging fast-shutdown crash: skip unit tests
@@ -242,21 +272,21 @@ jobs:
 
       - name: Run regression tests
         if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push'
-        uses: ./.github/actions/regression-tests
-        with:
-          dfly-executable: dragonfly
-          run-only-on-ubuntu-latest: true
-          build-folder-name: build
-          # Non-release build will not run tests marked as opt_only
-          # "not empty" string is needed for release build because pytest command can not get empty string for filter
-          filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
-          # debugging fast-shutdown crash: only the tests that actually crashed in CI, so
-          # this step doesn't wait on the full ~700-test suite while iterating on a fix.
-          test-cases: "test_cascaded_partial_sync|test_partial_sync|test_partial_replication_on_same_source_master_with_replica_lsn_inc|test_bgsave_during_stable_sync|test_tls_replication"
-          junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
-          aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
-          azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
-          azure-storage-connection-string: ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+        # Inlined equivalent of .github/actions/regression-tests's core pytest step (S3/JUnit-S3/
+        # notification sub-steps dropped for this experiment -- not needed to test core dumps).
+        run: |
+          docker exec \
+            -e BUILD_FOLDER_NAME=build \
+            -e REGRESSION_DFLY_EXECUTABLE=dragonfly \
+            -e TEST_FILTER="${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}" \
+            -e TEST_CASES_INPUT="test_cascaded_partial_sync|test_partial_sync|test_partial_replication_on_same_source_master_with_replica_lsn_inc|test_bgsave_during_stable_sync|test_tls_replication" \
+            -e DELETE_FAILED_LOGS=true \
+            build_container bash -c '
+              set -euo pipefail
+              ulimit -c unlimited
+              .github/scripts/install-pytest-requirements.sh
+              .github/scripts/run-regression-tests-helper.sh pytest
+            '
 
       - name: Upload regression logs on failure
         if: failure() && github.event_name != 'push'
@@ -274,11 +304,13 @@ jobs:
         continue-on-error: true
         timeout-minutes: 20
         run: |
-          # tcl runs the harness; redis-tools + iproute2 (ss) for the fail-closed readiness probe.
-          apt-get update && apt-get install -y --no-install-recommends tcl redis-tools iproute2
-          cd ${GITHUB_WORKSPACE}/tests/dragonfly/valkey_tcl
-          ./sync-valkey-tcl-tests.sh
-          ./run-stream-tests.sh ${GITHUB_WORKSPACE}/build/dragonfly 6399
+          docker exec build_container bash -c '
+            # tcl runs the harness; redis-tools + iproute2 (ss) for the fail-closed readiness probe.
+            apt-get update && apt-get install -y --no-install-recommends tcl redis-tools iproute2
+            cd ${GITHUB_WORKSPACE}/tests/dragonfly/valkey_tcl
+            ./sync-valkey-tcl-tests.sh
+            ./run-stream-tests.sh ${GITHUB_WORKSPACE}/build/dragonfly 6399
+          '
 
       - name: Prepare JUnit artifact name
         if: always() && github.event_name != 'push'
@@ -345,6 +377,22 @@ jobs:
           name: dragonfly-binary
           path: ${{ github.workspace }}/build/dragonfly
           retention-days: 1
+
+      - name: List core dumps
+        if: always()
+        run: ls -lh /tmp/core_dumps || true
+
+      - name: Upload core dumps
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: core-dumps-${{ matrix.container }}-${{ matrix.build-type }}-${{ matrix.compiler.cxx }}
+          path: /tmp/core_dumps
+          if-no-files-found: ignore
+
+      - name: Stop build container
+        if: always()
+        run: docker rm -f build_container || true
 
   cgroup-thread-detection:
     runs-on: ubuntu-latest
