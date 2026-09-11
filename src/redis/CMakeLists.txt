@@ -8,8 +8,8 @@ else()
   set(ZMALLOC_DEPS "")
 endif()
 
-add_library(redis_lib crc16.c crc64.c crcspeed.c debug.c  intset.c geo.c 
-            geohash.c geohash_helper.c hiredis.c read.c
+add_library(redis_lib crc16.c crc64.c crcspeed.c debug.c  intset.c geo.c
+            geohash.c geohash_helper.c hiredis.c read.c read_alloc.c
             listpack.c lzf_c.c lzf_d.c sds.c
             rax.c redis_aux.c t_stream.c 
             util.c ziplist.c hyperloglog.c ${ZMALLOC_SRC})
