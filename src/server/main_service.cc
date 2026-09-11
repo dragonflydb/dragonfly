@@ -44,6 +44,7 @@ extern "C" {
 #include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
+#include "server/acl/jwt_validator.h"
 #include "server/acl/user_registry.h"
 #include "server/acl/validator.h"
 #include "server/channel_store.h"
@@ -1900,7 +1901,8 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
       res->req_auth = false;
       res->authenticated = true;  // Automatically authenticated for Memcached protocol
     } else {
-      res->req_auth = !user_registry_.AuthUser("default", "");
+      // JWT validation must gate every connection even if the local "default" user is nopass.
+      res->req_auth = acl::JwtValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
     }
   }
 
