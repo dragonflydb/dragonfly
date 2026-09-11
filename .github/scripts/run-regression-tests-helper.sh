@@ -81,6 +81,162 @@ ArchiveAndCleanPytestLogs() {
   echo "Removed Pytest logs from iteration ${iteration}"
 }
 
+# --- Core dump capture --------------------------------------------------------
+#
+# Each dragonfly test instance runs with cwd set to a pytest-owned mkdtemp() dir
+# (tests/dragonfly/conftest.py's tmp_dir fixture) that gets shutil.rmtree'd at
+# fixture teardown — often within moments of a crash, i.e. before a single
+# end-of-run sweep would ever see a plain "core" file dropped there by the
+# kernel's default core_pattern. Overriding core_pattern to an absolute path
+# avoids that races entirely, but the override itself is not guaranteed to
+# stick everywhere (e.g. verified locally: an unprivileged/sandboxed container
+# can get "Permission denied" writing /proc/sys/kernel/core_pattern and silently
+# fall back to the default pattern). So this does not rely on the override
+# succeeding: COREDUMP_WATCH_PID runs a tight poll loop for the whole test run
+# that relocates any core file the instant it appears, from every location a
+# core could land in (our override target, or the kernel default's cwd-relative
+# "core"/"core.<pid>" wherever that cwd happens to be), before its owning tmp
+# dir can be cleaned up.
+COREDUMP_STAGING_DIR=/tmp/df_ci_collected_cores
+COREDUMP_WATCH_PID=""
+
+# Enables core dumps so a crash (SIGSEGV/SIGABRT/SIGFPE/...) in a dragonfly process
+# under test leaves a core file we can pull from CI and debug offline with gdb,
+# instead of only a bare signal number. Called once per RunPytests invocation, in the
+# same shell that (via fork/exec) launches every dragonfly process pytest starts, so
+# the resulting ulimit is inherited by all of them.
+SetupCoreDumps() {
+  # ulimit -c only ever raises the *soft* limit up to the current *hard* limit; if the
+  # hard limit was inherited as something low (e.g. 0), "ulimit -c unlimited" alone
+  # would silently stay at 0. Try to raise the hard limit first (root can always do
+  # this; a non-root, non-root-owned hard cap would make this a no-op, which
+  # VerifyCoreDumpCapture below will catch and report).
+  ulimit -Hc unlimited 2>/dev/null || true
+  if ! ulimit -Sc unlimited; then
+    echo "Warning: 'ulimit -c unlimited' failed (hard limit: $(ulimit -Hc)); core dumps may be truncated or disabled"
+  fi
+  echo "Core dump ulimit: soft=$(ulimit -Sc) hard=$(ulimit -Hc)"
+
+  mkdir -p /tmp/core_dumps "${COREDUMP_STAGING_DIR}"
+  # An absolute path (not a "|pipe-to-handler" pattern) makes the kernel write the
+  # core file directly, bypassing any apport/systemd-coredump helper that might
+  # otherwise swallow it somewhere we can't retrieve it from. This is a bonus, not
+  # a dependency: StartCoreDumpWatcher below also catches the default cwd-relative
+  # pattern in case this write is refused.
+  if echo '/tmp/core_dumps/core.%e.%p.%t' > /proc/sys/kernel/core_pattern 2>/dev/null; then
+    echo "core_pattern set to: $(cat /proc/sys/kernel/core_pattern 2>/dev/null)"
+  else
+    echo "Warning: could not write /proc/sys/kernel/core_pattern; current value: $(cat /proc/sys/kernel/core_pattern 2>/dev/null || echo unreadable)"
+    echo "Relying on the core dump watcher to still catch dumps at the default location"
+  fi
+}
+
+# Moves any file matching the kernel's core-dump naming (exactly "core", or
+# "core.*"/"core-*" as produced by common core_pattern templates, including ours)
+# out of harm's way and into COREDUMP_STAGING_DIR, tagged with a discovery
+# timestamp to avoid collisions. Searches everywhere a dump could land: our own
+# override target, every pytest tmp_dir under /tmp (mkdtemp()'s default root),
+# and the pytest working directory itself.
+_RelocateCoreDumps() {
+  local f base
+  while IFS= read -r -d '' f; do
+    base="$(basename "$f")"
+    mv "$f" "${COREDUMP_STAGING_DIR}/$(date +%s%N)-${base}" 2>/dev/null || true
+  done < <(find /tmp/core_dumps /tmp/tmp* "${GITHUB_WORKSPACE}/tests" \
+    -maxdepth 1 -type f \( -name 'core' -o -name 'core.*' -o -name 'core-*' \) \
+    -print0 2>/dev/null)
+}
+
+# Background loop: catches a core file within ~0.2s of it being written, well
+# before the owning pytest tmp_dir fixture can rmtree it at teardown.
+StartCoreDumpWatcher() {
+  ( while true; do _RelocateCoreDumps; sleep 0.2; done ) &
+  COREDUMP_WATCH_PID=$!
+  disown "${COREDUMP_WATCH_PID}" 2>/dev/null || true
+}
+
+StopCoreDumpWatcher() {
+  if [[ -n "${COREDUMP_WATCH_PID}" ]]; then
+    kill "${COREDUMP_WATCH_PID}" 2>/dev/null || true
+    wait "${COREDUMP_WATCH_PID}" 2>/dev/null || true
+    COREDUMP_WATCH_PID=""
+  fi
+  _RelocateCoreDumps # final sweep in case the watcher's last poll missed one
+
+  # Safety net: anything still sitting in staging wasn't claimed by a
+  # CollectCoreDumps call for a specific iteration (e.g. a crash right before an
+  # early "exit" on the timeout path). Archive it anyway rather than lose it.
+  shopt -s nullglob
+  local leftover=("${COREDUMP_STAGING_DIR}"/*)
+  shopt -u nullglob
+  if [[ ${#leftover[@]} -gt 0 ]]; then
+    echo "Found ${#leftover[@]} unclaimed core dump(s); archiving to /tmp/failed/leftover_cores"
+    mkdir -p /tmp/failed/leftover_cores
+    mv "${COREDUMP_STAGING_DIR}"/* /tmp/failed/leftover_cores/ 2>/dev/null || true
+    [[ -n "${DRAGONFLY_PATH:-}" ]] && cp "${DRAGONFLY_PATH}" /tmp/failed/leftover_cores/ 2>/dev/null
+  fi
+}
+
+# Deliberately crashes a disposable child process in a throwaway mkdtemp() dir —
+# mirroring exactly how a real dragonfly test instance is launched — with the
+# exact ulimit and core_pattern this function's caller just set up, then checks
+# the watcher actually relocated the resulting core file. This is the only way
+# to know FOR SURE that a real crash later in this job will leave a usable dump:
+# the constraints that can silently break it (hard ulimit caps, a read-only
+# /proc/sys, disk quota, a runner security profile) live outside dragonfly's code
+# and can't be verified by reading source alone. Loud, but non-fatal: broken
+# core-dump plumbing shouldn't block the regression run itself, only the ability
+# to debug a crash after the fact.
+VerifyCoreDumpCapture() {
+  echo "=== Verifying core dump capture works in this environment ==="
+  local canary_cwd
+  canary_cwd="$(mktemp -d)"
+  ( cd "${canary_cwd}" && exec sh -c 'kill -SEGV $$' ) || true
+
+  local canary=""
+  for _ in $(seq 1 30); do
+    canary=$(find "${COREDUMP_STAGING_DIR}" -maxdepth 1 -name '*-core*' 2>/dev/null | head -1 || true)
+    [[ -n "${canary}" ]] && break
+    sleep 0.1
+  done
+  rm -rf "${canary_cwd}"
+
+  if [[ -n "${canary}" ]]; then
+    echo "Core dump capture verified OK (canary: ${canary})"
+    rm -f "${canary}"
+  else
+    echo "############################################################################"
+    echo "# WARNING: core dump capture canary FAILED."
+    echo "# A real crash in this job will NOT leave a usable core file to debug."
+    echo "# soft=$(ulimit -Sc) hard=$(ulimit -Hc) core_pattern=$(cat /proc/sys/kernel/core_pattern 2>/dev/null || echo unreadable)"
+    echo "############################################################################"
+  fi
+}
+
+# Picks up whatever the watcher relocated to COREDUMP_STAGING_DIR for this
+# iteration and copies it, together with a matching copy of the binary (needed
+# to symbolize it), into /tmp/failed so it rides along with the existing
+# "regression_logs" artifact upload on failure. Best effort; a missing core is
+# not itself an error since not every test failure is a crash.
+CollectCoreDumps() {
+  local iteration=$1
+  local core_dir="/tmp/failed/iteration_${iteration}_cores"
+  local found=false
+
+  shopt -s nullglob
+  for f in "${COREDUMP_STAGING_DIR}"/*; do
+    mkdir -p "${core_dir}"
+    mv "$f" "${core_dir}/"
+    found=true
+  done
+  shopt -u nullglob
+
+  if [[ "${found}" == true ]]; then
+    echo "Found core dump(s) for iteration ${iteration} in ${core_dir}, copying the binary alongside"
+    cp "${DRAGONFLY_PATH}" "${core_dir}/" || echo "Failed to copy binary alongside core dump"
+  fi
+}
+
 ValidateInputs() {
   ITERATIONS_INPUT=${ITERATIONS_INPUT:-1}
 
@@ -172,6 +328,12 @@ RunPytests() {
   ls -l ${GITHUB_WORKSPACE}/
   cd ${GITHUB_WORKSPACE}/tests || exit 2
   echo "Current commit is ${GITHUB_SHA}"
+
+  SetupCoreDumps
+  StartCoreDumpWatcher
+  trap StopCoreDumpWatcher EXIT
+  VerifyCoreDumpCapture
+
   # used by PyTests
   export DRAGONFLY_PATH="${GITHUB_WORKSPACE}/${BUILD_FOLDER_NAME}/${REGRESSION_DFLY_EXECUTABLE}"
   export ROOT_DIR="${GITHUB_WORKSPACE}/tests/dragonfly/valkey_search"
@@ -283,6 +445,10 @@ RunPytests() {
     fi
     PrintCommand "${pytest_command[@]}"
     "${pytest_command[@]}" || code=$?
+
+    if [[ "${code}" -ne 0 ]]; then
+      CollectCoreDumps "${iteration}"
+    fi
 
     # timeout returns 124 if we exceeded the timeout duration
     if [[ "${code}" -eq 124 ]]; then

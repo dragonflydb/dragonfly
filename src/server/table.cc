@@ -131,14 +131,17 @@ DbTable::~DbTable() {
 }
 
 void DbTable::PrepareForSingleShotHeapDestroy() {
+  LOG(ERROR) << "DbTable::PrepareForSingleShotHeapDestroy: trans_locks db_index=" << index;
   trans_locks.PrepareForSingleShotHeapDestroy();
   CHECK(watched_keys.empty());
   watched_keys.rehash(0);
 
+  LOG(ERROR) << "DbTable::PrepareForSingleShotHeapDestroy: sample structures db_index=" << index;
   delete std::exchange(sample_top_keys, nullptr);
   delete std::exchange(sample_unique_keys, nullptr);
   delete std::exchange(sample_values_hist, nullptr);
   slots_stats.reset();
+  LOG(ERROR) << "DbTable::PrepareForSingleShotHeapDestroy: done db_index=" << index;
 }
 
 void intrusive_ptr_add_ref(DbTable* table) noexcept {

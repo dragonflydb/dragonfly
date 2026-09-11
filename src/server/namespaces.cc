@@ -87,6 +87,7 @@ void Namespaces::Clear() {
 
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
+    LOG(ERROR) << "Namespaces::Clear: DbSlice::ShutdownThreadLocal shard=" << es->shard_id();
     // We will not destroy the db slice, so clear the pending delete list. The orphaned
     // DbSlice/DashTable pages get reclaimed in bulk when the shard's heap is destroyed
     // in EngineShard::DestroyThreadLocal(), right after this runs.
@@ -94,11 +95,14 @@ void Namespaces::Clear() {
 
     for (auto& val : ABSL_TS_UNCHECKED_READ(namespaces_) | views::values) {
       auto& db_slice = val.shard_db_slices_[es->shard_id()];
+      LOG(ERROR) << "Namespaces::Clear: PrepareForSingleShotHeapDestroy shard=" << es->shard_id();
       db_slice->PrepareForSingleShotHeapDestroy();
       db_slice.release();
     }
+    LOG(ERROR) << "Namespaces::Clear: shard done, shard=" << es->shard_id();
   });
 
+  LOG(ERROR) << "Namespaces::Clear: all shards done, clearing namespaces_ map";
   namespaces_.clear();
 }
 

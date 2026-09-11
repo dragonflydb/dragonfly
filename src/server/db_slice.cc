@@ -496,10 +496,17 @@ DbSlice::~DbSlice() {
 }
 
 void DbSlice::ShutdownThreadLocal() {
+  EngineShard* shard = EngineShard::tlocal();
+  LOG(ERROR) << "DbSlice::ShutdownThreadLocal: AsyncDeleter::Shutdown, shard="
+             << (shard ? shard->shard_id() : kInvalidSid);
   AsyncDeleter::Shutdown();
+  LOG(ERROR) << "DbSlice::ShutdownThreadLocal: done, shard="
+             << (shard ? shard->shard_id() : kInvalidSid);
 }
 
 void DbSlice::PrepareForSingleShotHeapDestroy() {
+  LOG(ERROR) << "DbSlice::PrepareForSingleShotHeapDestroy: begin, index=" << shard_id_
+             << " db_count=" << db_arr_.size();
   client_tracking_map_.clear();
   pending_send_map_.clear();
   doc_del_cb_ = {};
@@ -513,11 +520,14 @@ void DbSlice::PrepareForSingleShotHeapDestroy() {
   for (auto& db : db_arr_) {
     if (!db)
       continue;
+    LOG(ERROR) << "DbSlice::PrepareForSingleShotHeapDestroy: db_index=" << db->index
+               << " index=" << shard_id_;
     CHECK_EQ(db->use_count(), 1u);
     db->PrepareForSingleShotHeapDestroy();
     db.detach();
   }
   DbTableArray{}.swap(db_arr_);
+  LOG(ERROR) << "DbSlice::PrepareForSingleShotHeapDestroy: done, index=" << shard_id_;
 }
 
 auto DbSlice::GetStats() const -> Stats {

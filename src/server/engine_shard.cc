@@ -545,25 +545,37 @@ void EngineShard::DestroyThreadLocal() {
   uint32_t shard_id = shard_->shard_id();
   mi_heap_t* tlh = shard_->mi_resource_.heap();
 
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: shard_->Shutdown() shard=" << shard_id;
   shard_->Shutdown();
 
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: QList::ShutdownThread shard=" << shard_id;
   QList::ShutdownThread();
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: InternedString::ResetPool shard=" << shard_id;
   detail::InternedString::ResetPool();
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: ~EngineShard shard=" << shard_id;
   shard_->~EngineShard();
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: CleanupStatelessAllocMR shard=" << shard_id;
   CleanupStatelessAllocMR();
 
   // shard_'s own storage lives in `tlh` too; no need to free it individually below,
   // mi_heap_destroy reclaims it along with the rest of the heap's pages in one shot.
   shard_ = nullptr;
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: CompactObj::InitThreadLocal(nullptr) shard="
+             << shard_id;
   CompactObj::InitThreadLocal(nullptr);
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: SmallString::ShutdownThreadLocal shard="
+             << shard_id;
   SmallString::ShutdownThreadLocal();
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: reset_zmalloc_threadlocal shard=" << shard_id;
   reset_zmalloc_threadlocal();
 
   // Everything still living in `tlh` at this point (DB values orphaned by
   // Namespaces::Clear(), shard_'s own now-destructed storage) has no more live
   // references anywhere on this thread, so we can reclaim the heap's pages directly
   // instead of walking and destructing each object individually.
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: mi_heap_destroy starting shard=" << shard_id;
   mi_heap_destroy(tlh);
+  LOG(ERROR) << "EngineShard::DestroyThreadLocal: mi_heap_destroy done shard=" << shard_id;
   VLOG(1) << "Shard reset " << shard_id;
 }
 
