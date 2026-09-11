@@ -51,14 +51,20 @@ class DflyStartException(Exception):
 
 
 def symbolize_stack_trace(binary_path, lines):
-    addr2line_proc = subprocess.Popen(
-        ["/usr/bin/addr2line", "-fCa", "-e", binary_path], stdin=subprocess.PIPE
-    )
-    for line in lines:
-        addr2line_proc.stdin.write(line.encode())
+    if not lines:
+        return
 
-    addr2line_proc.stdin.close()
-    addr2line_proc.wait()
+    addr2line_proc = subprocess.run(
+        ["/usr/bin/addr2line", "-fCa", "-e", binary_path],
+        input="".join(lines).encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    logging.error(
+        "Symbolized crash stack trace for %s:\n%s",
+        binary_path,
+        addr2line_proc.stdout.decode(errors="replace"),
+    )
 
 
 def read_sedout(pipe, stacktrace):

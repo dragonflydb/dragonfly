@@ -81,7 +81,10 @@ jobs:
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       # Seems that docker by default prohibits running iouring syscalls
-      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      # --cap-add SYS_ADMIN: lets the regression-test step override kernel.core_pattern so
+      # crashing dragonfly processes leave a gdb-analyzable core file instead of losing the
+      # dump to the host's unreachable systemd-coredump pipe.
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0" --cap-add SYS_ADMIN
       volumes:
         - /:/hostroot
         - /mnt:/mnt
