@@ -151,7 +151,7 @@ jobs:
           df -h
 
       - name: C++ Unit Tests - IoUring
-        if: github.event_name != 'push' && false # debugging fast-shutdown crash: skip unit tests
+        if: github.event_name != 'push'
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
@@ -182,7 +182,7 @@ jobs:
 
 
       - name: C++ Unit Tests - Epoll
-        if: github.event_name != 'push' && false # debugging fast-shutdown crash: skip unit tests
+        if: github.event_name != 'push'
         run: |
           cd ${GITHUB_WORKSPACE}/build
           JUNIT_DIR="${CPP_JUNIT_DIR}"
@@ -210,7 +210,7 @@ jobs:
             FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
 
       - name: C++ Unit Tests - IoUring with cluster mode
-        if: github.event_name != 'push' && false # debugging fast-shutdown crash: skip unit tests
+        if: github.event_name != 'push'
         run: |
           cd ${GITHUB_WORKSPACE}/build
           JUNIT_DIR="${CPP_JUNIT_DIR}"
@@ -222,7 +222,7 @@ jobs:
             --output-junit "${CTEST_JUNIT_DIR}/cluster.xml"
 
       - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
-        if: github.event_name != 'push' && false # debugging fast-shutdown crash: skip unit tests
+        if: github.event_name != 'push'
         run: |
           cd ${GITHUB_WORKSPACE}/build
           JUNIT_DIR="${CPP_JUNIT_DIR}"
@@ -250,9 +250,6 @@ jobs:
           # Non-release build will not run tests marked as opt_only
           # "not empty" string is needed for release build because pytest command can not get empty string for filter
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
-          # debugging fast-shutdown crash: only the tests that actually crashed in CI, so
-          # this step doesn't wait on the full ~700-test suite while iterating on a fix.
-          test-cases: "test_cascaded_partial_sync|test_partial_sync|test_partial_replication_on_same_source_master_with_replica_lsn_inc|test_bgsave_during_stable_sync|test_tls_replication"
           junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
