@@ -47,7 +47,6 @@ extern "C" {
 #include "server/transaction.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/future.h"
-#include "util/varz.h"
 
 namespace rng = std::ranges;
 
@@ -1836,15 +1835,22 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
 
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
   QList::Where where = QList::TAIL;
+  std::vector rpush_args{key};
+
+  auto add_item = [&](const auto& value) {
+    ql_v2->Push(value, where);
+    if (op_args.shard->journal())
+      rpush_args.push_back(value);
+  };
+
   for (auto it = start_it; it != end_it; ++it) {
     if (has_get_patterns) {
       // Store all GET pattern values for this entry
-      for (const auto& value : it->get_values) {
-        ql_v2->Push(value, where);
-      }
+      for (const auto& value : it->get_values)
+        add_item(value);
     } else {
       // No GET patterns - store the element itself
-      ql_v2->Push(it->ResultKey(), where);
+      add_item(it->ResultKey());
     }
   }
   len = ql_v2->Size();
@@ -1854,6 +1860,8 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key);
     if (IsValid(it_res.it)) {
       op_args.GetDbSlice().DelMutable(op_args.db_cntx, std::move(it_res));
+      if (op_args.shard->journal())
+        RecordJournal(op_args, "DEL", {key});
     }
     return 0;
   }
@@ -1864,6 +1872,13 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   // This would overwrite existing value if any with new list.
   auto op_res = op_args.GetDbSlice().AddOrUpdate(op_args.db_cntx, key, std::move(pv), 0);
   RETURN_ON_BAD_STATUS(op_res);
+
+  if (op_args.shard->journal()) {
+    RecordJournal(op_args, "DEL", {key});
+    RecordJournal(op_args, "RPUSH", rpush_args);
+    if (op_res->it->first.IsSticky())
+      RecordJournal(op_args, "STICK", {key});
+  }
 
   return len;
 }
