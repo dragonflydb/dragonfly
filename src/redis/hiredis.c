@@ -63,7 +63,7 @@ static redisReplyObjectFunctions defaultFunctions = {
 
 /* Create a reply object */
 static redisReply *createReplyObject(int type) {
-    redisReply *r = s_calloc(sizeof(*r));
+    redisReply *r = calloc(1, sizeof(*r));
 
     if (r == NULL)
         return NULL;
@@ -93,7 +93,7 @@ void freeReplyObject(void *reply) {
         if (r->element != NULL) {
             for (j = 0; j < r->elements; j++)
                 freeReplyObject(r->element[j]);
-            s_free(r->element);
+            free(r->element);
         }
         break;
     case REDIS_REPLY_ERROR:
@@ -102,10 +102,10 @@ void freeReplyObject(void *reply) {
     case REDIS_REPLY_DOUBLE:
     case REDIS_REPLY_VERB:
     case REDIS_REPLY_BIGNUM:
-        s_free(r->str);
+        free(r->str);
         break;
     }
-    s_free(r);
+    free(r);
 }
 
 static void *createStringObject(const redisReadTask *task, char *str, size_t len) {
@@ -124,7 +124,7 @@ static void *createStringObject(const redisReadTask *task, char *str, size_t len
 
     /* Copy string value */
     if (task->type == REDIS_REPLY_VERB) {
-        buf = s_malloc(len-4+1); /* Skip 4 bytes of verbatim type header. */
+        buf = malloc(len-4+1); /* Skip 4 bytes of verbatim type header. */
         if (buf == NULL) goto oom;
 
         memcpy(r->vtype,str,3);
@@ -133,7 +133,7 @@ static void *createStringObject(const redisReadTask *task, char *str, size_t len
         buf[len-4] = '\0';
         r->len = len - 4;
     } else {
-        buf = s_malloc(len+1);
+        buf = malloc(len+1);
         if (buf == NULL) goto oom;
 
         memcpy(buf,str,len);
@@ -166,7 +166,7 @@ static void *createArrayObject(const redisReadTask *task, size_t elements) {
         return NULL;
 
     if (elements > 0) {
-        r->element = s_calloc(elements * sizeof(redisReply*));
+        r->element = calloc(1, elements * sizeof(redisReply*));
         if (r->element == NULL) {
             freeReplyObject(r);
             return NULL;
@@ -211,7 +211,7 @@ static void *createIntegerObject(const redisReadTask *task, long long value) {
 static void *createDoubleObject(const redisReadTask *task, double value, char *str, size_t len) {
     redisReply *r, *parent;
 
-    if (len == SIZE_MAX) // Prevents s_malloc(0) if len equals to SIZE_MAX
+    if (len == SIZE_MAX) // Prevents malloc(0) if len equals to SIZE_MAX
         return NULL;
 
     r = createReplyObject(REDIS_REPLY_DOUBLE);
@@ -219,7 +219,7 @@ static void *createDoubleObject(const redisReadTask *task, double value, char *s
         return NULL;
 
     r->dval = value;
-    r->str = s_malloc(len+1);
+    r->str = malloc(len+1);
     if (r->str == NULL) {
         freeReplyObject(r);
         return NULL;
@@ -345,7 +345,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
         if (*c != '%' || c[1] == '\0') {
             if (*c == ' ') {
                 if (touched) {
-                    newargv = s_realloc(curargv,sizeof(char*)*(argc+1));
+                    newargv = realloc(curargv,sizeof(char*)*(argc+1));
                     if (newargv == NULL) goto memory_err;
                     curargv = newargv;
                     curargv[argc++] = curarg;
@@ -501,7 +501,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
 
     /* Add the last argument if needed */
     if (touched) {
-        newargv = s_realloc(curargv,sizeof(char*)*(argc+1));
+        newargv = realloc(curargv,sizeof(char*)*(argc+1));
         if (newargv == NULL) goto memory_err;
         curargv = newargv;
         curargv[argc++] = curarg;
@@ -517,7 +517,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     totlen += 1+countDigits(argc)+2;
 
     /* Build the command at protocol level */
-    cmd = s_malloc(totlen+1);
+    cmd = malloc(totlen+1);
     if (cmd == NULL) goto memory_err;
 
     pos = sprintf(cmd,"*%d\r\n",argc);
@@ -532,7 +532,7 @@ int redisvFormatCommand(char **target, const char *format, va_list ap) {
     assert(pos == totlen);
     cmd[pos] = '\0';
 
-    s_free(curargv);
+    free(curargv);
     *target = cmd;
     return totlen;
 
@@ -548,11 +548,11 @@ cleanup:
     if (curargv) {
         while(argc--)
             sdsfree(curargv[argc]);
-        s_free(curargv);
+        free(curargv);
     }
 
     sdsfree(curarg);
-    s_free(cmd);
+    free(cmd);
 
     return error_type;
 }
@@ -664,7 +664,7 @@ long long redisFormatCommandArgv(char **target, int argc, const char **argv, con
     }
 
     /* Build the command at protocol level */
-    cmd = s_malloc(totlen+1);
+    cmd = malloc(totlen+1);
     if (cmd == NULL)
         return -1;
 
@@ -685,7 +685,7 @@ long long redisFormatCommandArgv(char **target, int argc, const char **argv, con
 }
 
 void redisFreeCommand(char *cmd) {
-    s_free(cmd);
+    free(cmd);
 }
 
 redisReader *redisReaderCreate(void) {
