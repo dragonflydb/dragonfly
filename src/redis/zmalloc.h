@@ -147,6 +147,10 @@ void zmalloc_page_is_underutilized(void* ptr, float ratio, int collect_stats, st
 char* zstrdup(const char* s);
 
 void init_zmalloc_threadlocal(void* heap);
+// Drops the thread-local heap pointer. Call before the underlying heap is destroyed
+// and before this thread's zmalloc/zfree could be called again (a following
+// init_zmalloc_threadlocal() re-arms it for reuse, e.g. across test cycles).
+void reset_zmalloc_threadlocal(void);
 extern __thread ssize_t zmalloc_used_memory_tl;
 
 #undef __zm_str

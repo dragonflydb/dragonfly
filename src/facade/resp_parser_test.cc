@@ -9,6 +9,10 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 
+extern "C" {
+#include "redis/zmalloc.h"
+}
+
 using namespace testing;
 using namespace std;
 namespace facade {

@@ -474,7 +474,8 @@ DbSlice::DbSlice(uint32_t index, bool cache_mode, EngineShard* owner, Namespace*
       cache_mode_(cache_mode),
       owner_(owner),
       ns_(ns),
-      client_tracking_map_(owner->memory_resource()) {
+      client_tracking_map_(owner->memory_resource()),
+      pending_send_map_(owner->memory_resource()) {
   CHECK(ns_ != nullptr);
   db_arr_.emplace_back();
   CreateDb(0);
@@ -491,7 +492,42 @@ DbSlice::~DbSlice() {
     db.reset();
   }
 
+  ShutdownThreadLocal();
+}
+
+void DbSlice::ShutdownThreadLocal() {
+  EngineShard* shard = EngineShard::tlocal();
+  LOG(ERROR) << "DbSlice::ShutdownThreadLocal: AsyncDeleter::Shutdown, shard="
+             << (shard ? shard->shard_id() : kInvalidSid);
   AsyncDeleter::Shutdown();
+  LOG(ERROR) << "DbSlice::ShutdownThreadLocal: done, shard="
+             << (shard ? shard->shard_id() : kInvalidSid);
+}
+
+void DbSlice::PrepareForSingleShotHeapDestroy() {
+  LOG(ERROR) << "DbSlice::PrepareForSingleShotHeapDestroy: begin, index=" << shard_id_
+             << " db_count=" << db_arr_.size();
+  client_tracking_map_.clear();
+  pending_send_map_.clear();
+  doc_del_cb_ = {};
+
+  CHECK(uniq_fps_.empty());
+  uniq_fps_.rehash(0);
+  CHECK(fetched_items_.empty());
+  fetched_items_.rehash(0);
+  CHECK(change_cb_.empty());
+
+  for (auto& db : db_arr_) {
+    if (!db)
+      continue;
+    LOG(ERROR) << "DbSlice::PrepareForSingleShotHeapDestroy: db_index=" << db->index
+               << " index=" << shard_id_;
+    CHECK_EQ(db->use_count(), 1u);
+    db->PrepareForSingleShotHeapDestroy();
+    db.detach();
+  }
+  DbTableArray{}.swap(db_arr_);
+  LOG(ERROR) << "DbSlice::PrepareForSingleShotHeapDestroy: done, index=" << shard_id_;
 }
 
 auto DbSlice::GetStats() const -> Stats {
@@ -1760,7 +1796,9 @@ finish:
 void DbSlice::CreateDb(DbIndex db_ind) {
   auto& db = db_arr_[db_ind];
   if (!db) {
-    db.reset(new DbTable{owner_->memory_resource(), db_ind});
+    auto* mr = owner_->memory_resource();
+    void* storage = mr->allocate(sizeof(DbTable), alignof(DbTable));
+    db.reset(std::construct_at(static_cast<DbTable*>(storage), mr, db_ind));
     table_memory_ += db->table_memory();
   }
 }
@@ -1895,8 +1933,8 @@ void DbSlice::SendQueuedInvalidationMessages() {
   while (!pending_send_map_.empty()) {
     // Notify all the clients. this function is not efficient,
     // because it broadcasts to all threads unrelated to the subscribers for the key.
-    auto local_map = std::move(pending_send_map_);
-    pending_send_map_ = {};
+    TrackingMap local_map(owner_->memory_resource());
+    local_map.swap(pending_send_map_);
     auto cb = [&](unsigned thread_id, util::ProactorBase*) {
       SendQueuedInvalidationMessagesCb(local_map, thread_id);
     };
@@ -1911,8 +1949,9 @@ void DbSlice::SendQueuedInvalidationMessagesAsync() {
   if (pending_send_map_.empty()) {
     return;
   }
-  // DispatchBrief will copy local_map
-  auto cb = [lm = std::move(pending_send_map_), this](unsigned idx, util::ProactorBase*) {
+  TrackingMap local_map(owner_->memory_resource());
+  local_map.swap(pending_send_map_);
+  auto cb = [lm = std::move(local_map), this](unsigned idx, util::ProactorBase*) {
     SendQueuedInvalidationMessagesCb(lm, idx);
   };
 

@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 
+#include "base/pmr/memory_resource.h"
 #include "core/collection_entry.h"
 #include "server/common_types.h"
 
@@ -179,7 +180,7 @@ class QList {
     void (*offload)(QList* ql, Node* node) = nullptr;
     void (*load)(QList* ql, Node* node) = nullptr;
     void (*cleanup)(QList* ql, Node* node) = nullptr;
-    std::string key;
+    std::string_view key;
   };
 
   /**
@@ -334,10 +335,7 @@ class QList {
   void CompressAfterLoad();
 
   // Enable tiered storage.
-  void EnableTiering(const TieringParams& params) {
-    tiering_enabled_ = 1;
-    tiering_params_ = std::make_unique<TieringParams>(params);
-  }
+  void EnableTiering(const TieringParams& params, PMR_NS::memory_resource* mr);
 
   // Updates the db index associated with this list.
   void SetDbIndex(DbIndex db_id);
@@ -465,7 +463,27 @@ class QList {
   unsigned reserved2_ : 12;
   uint16_t db_id_ = kInvalidDbId;
   uint32_t zstd_threshold_ = 0;  // 0 = disabled
-  std::unique_ptr<TieringParams> tiering_params_;
+  struct StoredTieringParams {
+    StoredTieringParams(const TieringParams& params, PMR_NS::memory_resource* mr)
+        : num_offloaded_nodes(params.num_offloaded_nodes),
+          node_depth_threshold(params.node_depth_threshold),
+          offload(params.offload),
+          load(params.load),
+          cleanup(params.cleanup),
+          key(params.key, PMR_NS::polymorphic_allocator<char>(mr)) {
+    }
+
+    uint32_t num_offloaded_nodes = 0;
+    uint32_t node_depth_threshold = 0;
+    void (*offload)(QList* ql, Node* node) = nullptr;
+    void (*load)(QList* ql, Node* node) = nullptr;
+    void (*cleanup)(QList* ql, Node* node) = nullptr;
+    PMR_NS::string key;
+  };
+
+  void DeleteTieringParams();
+
+  StoredTieringParams* tiering_params_ = nullptr;
 };
 
 }  // namespace dfly
