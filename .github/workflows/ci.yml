@@ -281,6 +281,7 @@ jobs:
             -e TEST_FILTER="${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}" \
             -e TEST_CASES_INPUT="test_cascaded_partial_sync|test_partial_sync|test_partial_replication_on_same_source_master_with_replica_lsn_inc|test_bgsave_during_stable_sync|test_tls_replication" \
             -e DELETE_FAILED_LOGS=true \
+            -e CONTINUE_ON_TEST_FAILURE_INPUT=false \
             build_container bash -c '
               set -euo pipefail
               ulimit -c unlimited
