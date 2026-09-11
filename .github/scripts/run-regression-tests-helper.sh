@@ -118,6 +118,14 @@ SetupCoreDumps() {
   echo "Core dump ulimit: soft=$(ulimit -Sc) hard=$(ulimit -Hc)"
 
   mkdir -p /tmp/core_dumps "${COREDUMP_STAGING_DIR}"
+  # Docker bind-mounts /proc/sys read-only by default even when the container has
+  # CAP_SYS_ADMIN (this is deliberate: a writable core_pattern piping to an
+  # arbitrary program is a known container-escape vector). CAP_SYS_ADMIN only grants
+  # the *ability* to remount it read-write; it doesn't do so automatically the way
+  # --privileged would. So remount it ourselves before attempting the write below.
+  # Best-effort: if the container lacks CAP_SYS_ADMIN this just fails and falls
+  # through to the same "could not write" fallback path as before.
+  mount -o remount,rw /proc/sys 2>/dev/null || true
   # An absolute path (not a "|pipe-to-handler" pattern) makes the kernel write the
   # core file directly, bypassing any apport/systemd-coredump helper that might
   # otherwise swallow it somewhere we can't retrieve it from. This is a bonus, not
