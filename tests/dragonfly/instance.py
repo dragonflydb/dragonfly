@@ -68,11 +68,11 @@ def symbolize_stack_trace(binary_path, lines):
 
 
 def read_sedout(pipe, stacktrace, raw_log_path=None):
-    # Multiple DflyInstances' output all funnels through print() onto the one shared
-    # process-wide stdout, so concurrent instances' lines can interleave/corrupt each
-    # other in the captured CI console. raw_log_path gives each instance its own file
-    # (a plain write(), never shared with another instance) as the reliable source of
-    # truth; print() is kept only for live local-terminal convenience.
+    # Multiple DflyInstances used to all print() their output onto the one shared
+    # process-wide stdout, so concurrent instances' lines could interleave/corrupt each
+    # other in the captured CI console. Instead, each instance writes only to its own
+    # raw_log_path file (never shared with another instance); on failure, conftest.py's
+    # copy_failed_logs() dumps each one to the CI log in full, one at a time.
     raw_log = open(raw_log_path, "a") if raw_log_path else None
     try:
         seen = set()
@@ -84,7 +84,6 @@ def read_sedout(pipe, stacktrace, raw_log_path=None):
             # to tty redirections.
             if line not in seen:
                 seen.add(line)
-                print(line)
                 if raw_log:
                     raw_log.write(line)
                     raw_log.flush()
@@ -237,6 +236,9 @@ class DflyInstance:
                 if self.params.log_dir
                 else None
             )
+            if raw_log_path:
+                with open(raw_log_path, "w") as raw_log:
+                    raw_log.write(f"=== instance pid={self.proc.pid} port={self.port} ===\n")
             self.sed_thread = threading.Thread(
                 target=read_sedout,
                 args=(self.sed_proc.stdout, self.stacktrace, raw_log_path),
