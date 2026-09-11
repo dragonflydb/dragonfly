@@ -982,13 +982,11 @@ void BLMove(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 }
 
-KeyReadyResult ListKeyChecker(EngineShard* owner, const DbContext& context, std::string_view key) {
-  auto res = context.GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_LIST);
-  if (res.ok())
-    return KeyReadyResult::kReady;
-  if (res.status() == OpStatus::WRONG_TYPE)
+KeyReadyResult ListKeyChecker(std::string_view /*unused*/, const CompactObj* obj) {
+  if (!obj || obj->ObjType() != OBJ_LIST) {
     return KeyReadyResult::kNotReady;
-  return KeyReadyResult::kKeyNotFound;
+  }
+  return KeyReadyResult::kReady;
 }
 
 BPopPusher::BPopPusher(string_view pop_key, string_view push_key, ListDir popdir, ListDir pushdir)

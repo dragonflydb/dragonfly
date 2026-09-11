@@ -22,16 +22,23 @@ struct WatchItem {
   Transaction* trans;
   KeyReadyChecker key_ready_checker;
 
+  // True if this waiter should be woken by the missing key.
+  bool wake_on_missing_key;
+
   Transaction* get() const {
     return trans;
   }
 
-  WatchItem(Transaction* t, KeyReadyChecker krc) : trans(t), key_ready_checker(std::move(krc)) {
+  WatchItem(Transaction* t, KeyReadyChecker krc, bool wake_on_missing_key)
+      : trans(t), key_ready_checker(std::move(krc)), wake_on_missing_key(wake_on_missing_key) {
   }
 };
 
 struct BlockingController::WatchQueue {
   deque<WatchItem> items;
+
+  // Items with wake_on_missing_key set.
+  size_t wake_on_missing_key_count = 0;
 
   // Updated  by both coordinator and shard threads but at different times.
   enum State { SUSPENDED, ACTIVE } state = SUSPENDED;
@@ -71,6 +78,7 @@ bool BlockingController::DbWatchTable::UnwatchTx(string_view key, Transaction* t
 
   bool res = false;
   if (wq->state == WatchQueue::ACTIVE && wq->items.front().get() == tx) {
+    wq->wake_on_missing_key_count -= wq->items.front().wake_on_missing_key;
     wq->items.pop_front();
 
     // We suspend the queue and add keys to re-verification.
@@ -87,6 +95,7 @@ bool BlockingController::DbWatchTable::UnwatchTx(string_view key, Transaction* t
     // This shard has not been awakened and in case this transaction in the queue
     // we must clean it up.
     if (auto it = wq->Find(tx); it != wq->items.end()) {
+      wq->wake_on_missing_key_count -= it->wake_on_missing_key;
       wq->items.erase(it);
     }
   }
@@ -203,7 +212,11 @@ void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transa
         continue;
     }
     DVLOG(2) << "Emplace " << trans->DebugId() << " to watch " << key;
-    res->second->items.emplace_back(trans, krc);
+
+    // Ask the checker itself whether a missing key wakes this waiter
+    const bool wake_on_missing = krc(key, nullptr) == KeyReadyResult::kReady;
+    res->second->items.emplace_back(trans, krc, wake_on_missing);
+    res->second->wake_on_missing_key_count += wake_on_missing;
   }
 }
 
@@ -254,16 +267,23 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
   auto& queue = wq->items;
   ShardId sid = owner_->shard_id();
 
+  // Resolve the key once for the whole queue. Waiters check the type themselves, so a missing or
+  // wrong-type key costs no per-waiter db access.
+  auto it = context.GetDbSlice(sid).FindReadOnly(context, key);
+  const CompactObj* obj = IsValid(it) ? &it->second : nullptr;
+
+  // Skipping the sweep if the key is missing and no waiter in queue doesn't need to woke up.
+  if (obj == nullptr && wq->wake_on_missing_key_count == 0) {
+    return;
+  }
+
   // In the most cases we shouldn't have skipped elements at all
   absl::InlinedVector<dfly::WatchItem, 4> skipped;
   while (!queue.empty()) {
     auto& wi = queue.front();
     Transaction* head = wi.get();
-    KeyReadyResult result = wi.key_ready_checker(owner_, context, key);
-    if (result == KeyReadyResult::kKeyNotFound) {
-      // Key is gone - no tx in this queue can be woken, abort the scan entirely.
-      break;
-    } else if (result == KeyReadyResult::kReady) {
+    KeyReadyResult result = wi.key_ready_checker(key, obj);
+    if (result == KeyReadyResult::kReady) {
       DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
                << owner_->committed_txid();
       if (head->NotifySuspended(sid, key)) {
@@ -273,7 +293,8 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
         awakened_transactions_.insert(head);
         break;
       }
-    } else {  // kNotReady - key exists but per-tx conditions not met, try next
+      wq->wake_on_missing_key_count -= wi.wake_on_missing_key;
+    } else {
       skipped.push_back(std::move(wi));
     }
 
