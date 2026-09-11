@@ -72,6 +72,11 @@ constexpr char kIdNotFound[] = "syncid not found";
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 
+// Sent to clients that use cluster management commands with cluster mode off or emulated:
+// modes that never have a cluster config, where migrations and slot management do not exist.
+constexpr string_view kClusterDisabledNoConfig =
+    "Cluster is disabled. Use --cluster_mode=yes to enable.";
+
 }  // namespace
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
@@ -471,7 +476,7 @@ void ClusterFamily::DflyCluster(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
   auto* cntx = cmd_cntx->server_conn_cntx();
   if (!(IsClusterEnabled() || (IsClusterEmulated() && cntx->journal_emulated))) {
-    return builder->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
+    return builder->SendError(kClusterDisabledNoConfig);
   }
 
   string sub_cmd = absl::AsciiStrToUpper(parser.Next());  // remove subcommand name
@@ -831,6 +836,13 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgParser parser, CommandContext*
 }
 
 void ClusterFamily::DflyMigrate(CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Migrations can not exist without an applied cluster config, which off and emulated modes
+  // never have. Real mode without a config keeps the migration protocol replies below: the
+  // source relies on UNKNOWN_MIGRATION for its config-propagation grace period.
+  if (!IsClusterEnabled()) {
+    return cmd_cntx->SendError(kClusterDisabledNoConfig);
+  }
+
   string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
   if (sub_cmd == "INIT") {
@@ -1085,7 +1097,13 @@ void ClusterFamily::DflyMigrateAck(CmdArgParser parser, CommandContext* cmd_cntx
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   VLOG(1) << "DFLYMIGRATE ACK" << ack_args;
-  auto in_migrations = ClusterConfig::Current()->GetIncomingMigrations();
+  auto config = ClusterConfig::Current();
+  if (!config) {
+    // Reply like the unknown-migration path below: the source polls ACK while the config
+    // propagates and grants a quiet grace period on UNKNOWN_MIGRATION.
+    return cmd_cntx->SendSimpleString(kUnknownMigration);
+  }
+  auto in_migrations = config->GetIncomingMigrations();
   auto m_it = rng::find_if(in_migrations, [source_id = source_id](const auto& m) {
     return m.node_info.id == source_id;
   });
