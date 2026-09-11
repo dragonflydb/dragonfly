@@ -16,10 +16,12 @@
 #include "facade/resp_expr.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
+ABSL_DECLARE_FLAG(uint32_t, interpreter_per_thread);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
@@ -58,6 +60,15 @@ class MultiTest : public BaseFamilyTest {
   MultiTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
   }
+};
+
+class ScriptLoadTest : public MultiTest {
+ protected:
+  ScriptLoadTest() {
+    absl::SetFlag(&FLAGS_interpreter_per_thread, 1);
+  }
+
+  absl::FlagSaver saver_;
 };
 
 class SingleShardMultiTest : public BaseFamilyTest {
@@ -989,6 +1000,67 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   Run({"move", "a", "1"});
   Run({"exec"});
   EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_global_cnt);
+}
+
+TEST_F(ScriptLoadTest, CachedScriptDoesNotWaitForInterpreter) {
+  constexpr string_view kScript = "return 5";
+  string sha = Run({"script", "load", kScript}).GetString();
+
+  // Load on a different thread whose only interpreter is unavailable and has no compiled copy.
+  pp_->at(1)->Await([&] {
+    auto* ss = ServerState::tlocal();
+    auto* interpreter = ss->BorrowInterpreter();
+    EXPECT_FALSE(interpreter->Exists(sha));
+
+    bool loaded = false;
+    Fiber load_fb([&] {
+      EXPECT_EQ(Run({"script", "load", kScript}), sha);
+      loaded = true;
+    });
+
+    ExpectConditionWithinTimeout([&] { return loaded || ss->stats.blocked_on_interpreter != 0; });
+    EXPECT_TRUE(loaded) << "Cached SCRIPT LOAD waited for an interpreter";
+
+    // Release the interpreter even on failure so the load can finish and the test can clean up.
+    ss->ReturnInterpreter(interpreter);
+    load_fb.Join();
+    EXPECT_THAT(Run({"evalsha", sha, "0"}), IntArg(5));
+  });
+}
+
+TEST_F(ScriptLoadTest, ReleasesInterpreterBeforeJournaling) {
+  pp_->at(1)->Await([&] {
+    // Prevent journaling from finishing while we test interpreter reuse.
+    TransactionSuspension suspension;
+    suspension.Start();
+
+    auto is_scheduled = [&](string_view id) {
+      auto* tx = GetTransaction(id);
+      return tx != nullptr && tx->IsScheduled();
+    };
+
+    Fiber first_load([&] {
+      EXPECT_THAT(Run("first_load", {"script", "load", "return 1"}), ArgType(RespExpr::STRING));
+    });
+    ExpectConditionWithinTimeout([&] { return is_scheduled("first_load"); });
+
+    // This thread has one interpreter. Use a different script so the second load must borrow it
+    // and compile. Reaching journaling while the first is still waiting proves the interpreter
+    // was returned. If the first retains it, the second blocks in Get() and the assertion fails.
+    Fiber second_load([&] {
+      EXPECT_THAT(Run("second_load", {"script", "load", "return 2"}), ArgType(RespExpr::STRING));
+    });
+    ExpectConditionWithinTimeout([&] {
+      return is_scheduled("second_load") ||
+             ServerState::tlocal()->stats.blocked_on_interpreter != 0;
+    });
+    EXPECT_TRUE(is_scheduled("second_load"))
+        << "First load retained the interpreter while journaling";
+
+    suspension.Terminate();
+    first_load.Join();
+    second_load.Join();
+  });
 }
 
 TEST_F(MultiTest, ScriptFlagsCommand) {

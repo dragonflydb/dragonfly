@@ -76,6 +76,11 @@ class ScriptMgr {
   void OnScriptError(std::string_view sha, std::string_view error);
 
  private:
+  // Insert using the precomputed SHA of the original script body.
+  nonstd::expected<std::string, GenericError> InsertWithSha(std::string_view sha,
+                                                            std::string_view body,
+                                                            Interpreter* interpreter);
+
   void ExistsCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder) const;
   void FlushCmd(Transaction* tx, SinkReplyBuilder* builder);
   void LoadCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder,
