@@ -67,7 +67,13 @@ def symbolize_stack_trace(binary_path, lines):
     )
 
 
-def read_sedout(pipe, stacktrace):
+def read_sedout(pipe, stacktrace, raw_log_path=None):
+    # Multiple DflyInstances' output all funnels through print() onto the one shared
+    # process-wide stdout, so concurrent instances' lines can interleave/corrupt each
+    # other in the captured CI console. raw_log_path gives each instance its own file
+    # (a plain write(), never shared with another instance) as the reliable source of
+    # truth; print() is kept only for live local-terminal convenience.
+    raw_log = open(raw_log_path, "a") if raw_log_path else None
     try:
         seen = set()
         pattern = r"@\s*(0x[0-9a-fA-F]+)"
@@ -79,6 +85,9 @@ def read_sedout(pipe, stacktrace):
             if line not in seen:
                 seen.add(line)
                 print(line)
+                if raw_log:
+                    raw_log.write(line)
+                    raw_log.flush()
                 res = matcher.search(line)
                 if res:
                     stacktrace.append(res.group(1) + "\n")
@@ -86,6 +95,8 @@ def read_sedout(pipe, stacktrace):
         pass
     finally:
         pipe.close()
+        if raw_log:
+            raw_log.close()
 
 
 class DflyInstance:
@@ -221,8 +232,15 @@ class DflyInstance:
                 universal_newlines=True,
             )
             self.stacktrace = []
+            raw_log_path = (
+                os.path.join(self.params.log_dir, f"console.{self.proc.pid}.log")
+                if self.params.log_dir
+                else None
+            )
             self.sed_thread = threading.Thread(
-                target=read_sedout, args=(self.sed_proc.stdout, self.stacktrace), daemon=True
+                target=read_sedout,
+                args=(self.sed_proc.stdout, self.stacktrace, raw_log_path),
+                daemon=True,
             )
             self.sed_thread.start()
 
