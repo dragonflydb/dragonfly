@@ -6,7 +6,6 @@ import time
 
 import async_timeout
 import pytest
-
 import redis
 from redis import asyncio as aioredis
 
@@ -617,6 +616,34 @@ async def test_georadius_store_cross_shard_precision(replication):
         replica_scores = await c_replica.zrange(key, 0, -1, withscores=True)
         assert len(master_scores) == 2
         assert master_scores == replica_scores
+
+
+@pytest.mark.replication(
+    master_args={"proactor_threads": 4, "num_shards": 3}, replica_args={"proactor_threads": 3}
+)
+async def test_sort_store_x_shard(replication):
+    _, _, cm, [cr] = replication
+    await cm.rpush("x", 3, 1, 2)
+    assert (await cm.sort("x", alpha=True, store="z")) == 3
+
+    async def shard_for(k: str):
+        info = await cm.execute_command(f"DEBUG OBJECT {k}")
+        return int(info.split("shard:", 1)[1].split()[0])
+
+    assert (await shard_for("x")) != (await shard_for("z"))
+
+    await check_all_replicas_finished([cr], cm)
+    assert (await cr.lrange("x", 0, -1)) == ["3", "1", "2"]
+
+    assert (await cm.lrange("z", 0, -1)) == ["1", "2", "3"]
+    assert (await cr.lrange("z", 0, -1)) == ["1", "2", "3"]
+
+    await cm.delete("x")
+    assert (await cm.sort("x", alpha=True, store="z")) == 0
+    await check_all_replicas_finished([cr], cm)
+
+    assert not (await cm.exists("z"))
+    assert not (await cr.exists("z"))
 
 
 """

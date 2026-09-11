@@ -27,6 +27,7 @@ from redis import asyncio as aioredis
 from . import PortPicker
 from .instance import DflyInstance, DflyInstanceFactory, DflyParams, RedisServer
 from .proxy import Proxy
+from .replication_utils import ReplicationSetup
 from .utility import (
     DflySeederFactory,
     download_with_retries,
@@ -453,7 +454,7 @@ async def async_client(async_pool):
 
 
 @pytest_asyncio.fixture
-async def replication(df_factory, request):
+async def replication(df_factory, request) -> ReplicationSetup:
     """Decomposable, marker-annotated replication fixture.
 
     Configure the topology with ``@pytest.mark.replication(...)`` whose keyword
