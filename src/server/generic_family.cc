@@ -2943,7 +2943,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kUnlink}.SetAsyncHandler(
              CmdDel)
       << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
-      << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
+      << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -2, 1, 1, acl::kSort}
+             .HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
       << CI{"MOVE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}
              .HFUNC(Move)

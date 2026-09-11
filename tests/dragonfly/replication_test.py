@@ -19,6 +19,7 @@ from .replication_utils import (
     replica_role_reply,
     setup_replication,
     start_replication,
+    ReplicationSetup,
 )
 from .seeder import DebugPopulateSeeder
 from .seeder import Seeder as SeederV2
@@ -621,8 +622,8 @@ async def test_georadius_store_cross_shard_precision(replication):
 @pytest.mark.replication(
     master_args={"proactor_threads": 4, "num_shards": 3}, replica_args={"proactor_threads": 3}
 )
-async def test_sort_store_x_shard(replication):
-    _, _, cm, [cr] = replication
+async def test_sort_store_x_shard(replication: ReplicationSetup):
+    cm, cr = replication.c_master, replication.c_replica
     await cm.rpush("x", 3, 1, 2)
     assert (await cm.sort("x", alpha=True, store="z")) == 3
 
@@ -638,12 +639,56 @@ async def test_sort_store_x_shard(replication):
     assert (await cm.lrange("z", 0, -1)) == ["1", "2", "3"]
     assert (await cr.lrange("z", 0, -1)) == ["1", "2", "3"]
 
+    # test empty collection is deleted
     await cm.delete("x")
     assert (await cm.sort("x", alpha=True, store="z")) == 0
     await check_all_replicas_finished([cr], cm)
 
     assert not (await cm.exists("z"))
     assert not (await cr.exists("z"))
+
+    # test no auto journal
+    await cm.rpush("x", 3, 1, 2)
+    assert (await cm.sort("x", start=1, num=2, store="x")) == 2
+    await check_all_replicas_finished([cr], cm)
+
+    assert (await cm.lrange("x", start=0, end=-1)) == ["2", "3"]
+    assert (await cr.lrange("x", start=0, end=-1)) == ["2", "3"]
+
+    await cm.rpush("z", "stale", "values")
+    assert await cm.execute_command("STICK", "z") == 1
+    await check_all_replicas_finished([cr], cm)
+    assert await cr.lrange("z", 0, -1) == ["stale", "values"]
+
+    assert await cm.sort("x", store="z") == 2
+    await check_all_replicas_finished([cr], cm)
+    assert await cm.lrange("z", 0, -1) == ["2", "3"]
+    assert await cr.lrange("z", 0, -1) == ["2", "3"]
+
+    # BY nosort maintains order on replication
+    await cm.delete("x")
+    await cm.sadd("x", "charlie", "alpha", "bravo")
+    assert await cm.sort("x", by="nosort", store="z") == 3
+    stored = await cm.lrange("z", 0, -1)
+    assert len(stored) == 3
+    assert set(stored) == {"alpha", "bravo", "charlie"}
+
+    await check_all_replicas_finished([cr], cm)
+    assert await cr.lrange("z", 0, -1) == stored
+
+    await cm.mset(
+        {"sort-value:alpha": "first", "sort-value:bravo": "second", "sort-value:charlie": "third"}
+    )
+    assert await cm.sort("x", alpha=True, get=["#", "sort-value:*"], store="z") == 6
+    await check_all_replicas_finished([cr], cm)
+    expected = ["alpha", "first", "bravo", "second", "charlie", "third"]
+    assert await cm.lrange("z", 0, -1) == expected
+    assert await cr.lrange("z", 0, -1) == expected
+
+    # Promote so we can run the STICK command
+    await cr.execute_command("REPLICAOF", "NO", "ONE")
+    assert await cr.execute_command("STICK", "z") == 0
+    assert await cm.execute_command("STICK", "z") == 0
 
 
 """
