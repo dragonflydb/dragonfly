@@ -4,6 +4,9 @@
 
 #pragma once
 
+#include <deque>
+#include <string>
+
 #include "server/detail/egress_throttle.h"
 #include "server/journal/types.h"
 #include "server/rdb_save.h"
@@ -112,6 +115,10 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized();
 
+  // DEBUG: drains pending_writes_ via the real consumer_->ConsumeData(), FIFO. Only called from
+  // snapshot_fb_, during the initial full sync.
+  void DrainPendingWrites();
+
   PrimeTable::Cursor snapshot_cursor_;
 
   std::unique_ptr<RdbSerializer> serializer_;
@@ -127,9 +134,33 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   RdbTypeFreqMap type_freq_map_;
 
   bool use_background_mode_ = false;
+  uint64_t write_buffer_cap_bytes_ = 0;  // DEBUG: cached FLAGS_snapshot_write_buffer_bytes
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
 
   uint64_t rec_id_ = 1, last_pushed_id_ = 0;
+  uint64_t last_drained_id_ = 0;
+
+  // DEBUG: bounded backpressure buffer, active only during the initial full sync (see
+  // draining_active_) and only when --snapshot_write_buffer_bytes > 0. Producers append here
+  // instead of calling ConsumeData() directly; only snapshot_fb_ drains it for real.
+  bool draining_active_ = false;
+  std::deque<std::string> pending_writes_;
+  size_t pending_bytes_ = 0;
+
+  // Outstanding serialization CPU-time debt (cycles), accrued by every HandleFlushData()
+  // call regardless of which fiber runs it - snapshot_fb_'s own traversal, or a write
+  // command's inline catch-up serialization of a stale bucket (SerializeBucketLocked
+  // called from OnChange). It's a shared budget: serialization cost is serialization
+  // cost no matter who paid it, and a write doing that work means the traversal has less
+  // left to do, so it's correct for the traversal to back off proportionally more.
+  //
+  // Deliberately NOT slept on inside HandleFlushData/ConsumeBigValueChunk: those can run
+  // while a bucket's BucketDependencies latch is held (mid big-value chunking), so
+  // sleeping there would extend that latch by the sleep duration for every chunk, and -
+  // for the write-command case - would directly delay that command's own write. Only
+  // IterateBucketsFb ever pays this debt down (with a sleep, between TraverseBuckets()
+  // batches), which is never inside a held latch and never on a write command's fiber.
+  uint64_t accrued_run_cycles_ = 0;
 
   // Limits this snapshot's socket egress to a configured bandwidth budget.
   detail::EgressThrottler throttler_{0};
@@ -138,6 +169,28 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
     size_t keys_total = 0;
     size_t jounal_changes = 0;
     size_t flushed_under_lock = 0;
+
+    // DEBUG: throttling/contention stats, logged once at the end of IterateBucketsFb.
+    uint64_t debt_sleep_count = 0;
+    uint64_t debt_sleep_usec_total = 0;
+    uint64_t debt_cycles_paid_total = 0;
+
+    uint64_t seq_wait_count = 0;
+    uint64_t seq_wait_blocked_count = 0;
+    uint64_t seq_wait_writer_blocked_count = 0;
+    uint64_t seq_wait_usec_total = 0;
+    uint32_t seq_wait_current_waiters = 0;
+    uint32_t seq_wait_peak_waiters = 0;
+
+    uint64_t consume_data_count = 0;
+    uint64_t consume_data_usec_total = 0;
+
+    uint64_t buffer_full_wait_count = 0;
+    uint64_t buffer_full_wait_usec_total = 0;
+    uint64_t pending_bytes_peak = 0;
+
+    uint64_t bucket_traverse_usec = 0;
+    uint64_t final_drain_usec = 0;
   } stats_;
 
   SnapshotDataConsumerInterface* consumer_;
