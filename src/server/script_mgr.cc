@@ -152,22 +152,27 @@ void ScriptMgr::LoadCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* 
                         ConnectionContext* cntx) {
   string_view body = parser.Next<string_view>();
   auto rb = static_cast<RedisReplyBuilder*>(builder);
+
+  char sha_buf[41];
+  Interpreter::FuncSha1(body, sha_buf);
+  string_view sha{sha_buf, 40};
   if (body.empty()) {
-    char sha[41];
-    Interpreter::FuncSha1(body, sha);
     return rb->SendBulkString(sha);
   }
 
-  BorrowedInterpreter interpreter{tx, &cntx->conn_state};
+  // The per-thread params cache only contains loaded scripts. EVALSHA lazily loads them into
+  // its interpreter, so cached loads do not need to borrow one here.
+  if (!ServerState::tlocal()->GetScriptParams(sha)) {
+    BorrowedInterpreter interpreter{tx, &cntx->conn_state};
+    auto res = InsertWithSha(sha, body, interpreter);
+    if (!res)
+      return builder->SendError(res.error().Format());
+  }
 
-  auto res = Insert(body, interpreter);
-  if (!res)
-    return builder->SendError(res.error().Format());
-
-  // Schedule empty callback inorder to journal command via transaction framework.
+  // Journal cached loads too, but return any owned interpreter before waiting on the transaction.
   tx->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
 
-  return rb->SendBulkString(res.value());
+  return rb->SendBulkString(sha);
 }
 
 void ScriptMgr::ConfigCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* builder) {
@@ -276,6 +281,11 @@ nonstd::expected<string, GenericError> ScriptMgr::Insert(string_view body,
   Interpreter::FuncSha1(body, sha_buf);
   string_view sha{sha_buf, std::strlen(sha_buf)};
 
+  return InsertWithSha(sha, body, interpreter);
+}
+
+nonstd::expected<string, GenericError> ScriptMgr::InsertWithSha(string_view sha, string_view body,
+                                                                Interpreter* interpreter) {
   if (interpreter->Exists(sha)) {
     return string{sha};
   }
