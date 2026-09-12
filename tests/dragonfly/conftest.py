@@ -3,12 +3,14 @@ Pytest fixtures to be provided for all tests without import
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import typing
 from contextlib import AsyncExitStack
@@ -45,39 +47,73 @@ FAILED_PATH = "/tmp/failed/"
 LAST_LOGS = "/tmp/last_test_log_dir.txt"
 
 
-def _download_minio_binary(dest: Path):
-    """Download MinIO binary to dest if not already cached.
+# MinIO archived its OSS server and dl.min.io returns HTTP 410 for every build, so the
+# binary comes from silo, a maintained fork that is CLI- and API-compatible with it.
+MINIO_RELEASE = "RELEASE.2026-09-03T13-18-01Z"
+MINIO_VERSION = "20260903131801.0.0"
+MINIO_SHA256 = {
+    "linux-amd64": "cbe5c01eac0a97ccb22fa252eafa432e8608bfde7e3ea27a324cb5ed625a1e96",
+    "linux-arm64": "311846ca9387de36f8e34daa8bf1a130684cc7b8c61aa39581264249eb8df0cf",
+    "darwin-amd64": "35b4121f6ca2ba79514c3536e5f7f79ae8f7fe6fb88288efbdfa2ae8d5283131",
+    "darwin-arm64": "bcfd90d51ab6dffc34193aac260464097bb1d2decdd2598538e618bc02ada668",
+}
 
-    Downloads to a temporary file first, then renames atomically to avoid
-    leaving a corrupt binary on interrupted downloads.
-    """
+
+def _minio_platform_key() -> str:
     import platform
 
     system = platform.system().lower()
     arch = platform.machine()
     arch_map = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
-    arch = arch_map.get(arch, arch)
-    url = f"https://dl.min.io/server/minio/release/{system}-{arch}/minio"
+    return f"{system}-{arch_map.get(arch, arch)}"
+
+
+def _download_minio_binary(dest: Path):
+    """Download the MinIO-compatible server to dest if not already cached.
+
+    The checksum is verified against the published one before the binary is
+    extracted, and the result is renamed atomically so an interrupted download
+    never leaves a usable but corrupt binary behind.
+    """
+    platform_key = _minio_platform_key()
+    expected_sha256 = MINIO_SHA256.get(platform_key)
+    if expected_sha256 is None:
+        raise RuntimeError(f"No pinned MinIO build for {platform_key}")
+
+    url = (
+        f"https://github.com/pgsty/silo/releases/download/{MINIO_RELEASE}"
+        f"/silo_{MINIO_VERSION}_{platform_key.replace('-', '_')}.tar.gz"
+    )
     logging.info(f"Downloading MinIO binary from {url}")
-    tmp_dest = dest.with_suffix(".tmp")
+    tmp_archive = dest.with_name(dest.name + ".tar.gz")
+    tmp_dest = dest.with_name(dest.name + ".tmp")
     try:
-        download_with_retries(url, tmp_dest)
+        download_with_retries(url, tmp_archive)
+        actual_sha256 = hashlib.sha256(tmp_archive.read_bytes()).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"MinIO checksum mismatch for {url}: got {actual_sha256}, "
+                f"expected {expected_sha256}"
+            )
+        with tarfile.open(tmp_archive) as tar:
+            with tar.extractfile("silo") as src, open(tmp_dest, "wb") as dst:
+                shutil.copyfileobj(src, dst)
         tmp_dest.chmod(0o755)
         tmp_dest.rename(dest)
-    except Exception:
+    finally:
+        tmp_archive.unlink(missing_ok=True)
         tmp_dest.unlink(missing_ok=True)
-        raise
 
 
 def _start_minio_server(endpoint):
-    """Start MinIO subprocess and configure env vars for S3 tests."""
+    """Start the MinIO-compatible server and configure env vars for S3 tests."""
     from urllib.parse import urlparse
 
     import boto3
 
     cache_dir = Path.home() / ".cache" / "dragonfly-tests"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    minio_bin = cache_dir / "minio"
+    minio_bin = cache_dir / f"minio-{MINIO_RELEASE}-{_minio_platform_key()}"
 
     if not minio_bin.exists():
         _download_minio_binary(minio_bin)
