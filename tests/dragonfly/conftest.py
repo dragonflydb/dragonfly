@@ -3,6 +3,7 @@ Pytest fixtures to be provided for all tests without import
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import random
@@ -45,6 +46,17 @@ FAILED_PATH = "/tmp/failed/"
 LAST_LOGS = "/tmp/last_test_log_dir.txt"
 
 
+# dl.min.io returns HTTP 410 for every OSS build since MinIO archived the project, so the
+# pinned release assets on GitHub are the download source now.
+MINIO_RELEASE = "RELEASE.2025-09-07T16-13-09Z"
+MINIO_SHA256 = {
+    "linux-amd64": "7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f",
+    "linux-arm64": "5c83cd2cf151717ba0243f73e1c7802ff36e272b67144bdd7f1f7d684fd6f03d",
+    "darwin-amd64": "4759080aeef7385aaceaac1131c30aaeb99605921553967dc6d3ef4e16ac64f9",
+    "darwin-arm64": "7c3b3039b76e55a1b80935848ed83998d5e8d317374f87851f46a019ff5c0aa4",
+}
+
+
 def _download_minio_binary(dest: Path):
     """Download MinIO binary to dest if not already cached.
 
@@ -57,11 +69,25 @@ def _download_minio_binary(dest: Path):
     arch = platform.machine()
     arch_map = {"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
     arch = arch_map.get(arch, arch)
-    url = f"https://dl.min.io/server/minio/release/{system}-{arch}/minio"
+    platform_key = f"{system}-{arch}"
+    expected_sha256 = MINIO_SHA256.get(platform_key)
+    if expected_sha256 is None:
+        raise RuntimeError(f"No pinned MinIO build for {platform_key}")
+
+    url = (
+        f"https://github.com/minio/minio/releases/download/{MINIO_RELEASE}"
+        f"/minio.{platform_key}.{MINIO_RELEASE}"
+    )
     logging.info(f"Downloading MinIO binary from {url}")
-    tmp_dest = dest.with_suffix(".tmp")
+    tmp_dest = dest.with_name(dest.name + ".tmp")
     try:
         download_with_retries(url, tmp_dest)
+        actual_sha256 = hashlib.sha256(tmp_dest.read_bytes()).hexdigest()
+        if actual_sha256 != expected_sha256:
+            raise RuntimeError(
+                f"MinIO checksum mismatch for {url}: got {actual_sha256}, "
+                f"expected {expected_sha256}"
+            )
         tmp_dest.chmod(0o755)
         tmp_dest.rename(dest)
     except Exception:
@@ -77,7 +103,7 @@ def _start_minio_server(endpoint):
 
     cache_dir = Path.home() / ".cache" / "dragonfly-tests"
     cache_dir.mkdir(parents=True, exist_ok=True)
-    minio_bin = cache_dir / "minio"
+    minio_bin = cache_dir / f"minio-{MINIO_RELEASE}"
 
     if not minio_bin.exists():
         _download_minio_binary(minio_bin)
