@@ -5,6 +5,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
 #include "facade/cmd_arg_parser.h"
 #include "facade/conn_context.h"
@@ -41,6 +42,12 @@ class ClusterFamily {
   const std::string& MyID() const {
     return id_;
   }
+
+  // Address this node advertises to cluster clients: cluster_announce_ip, else the address `conn`
+  // was accepted on, and announce_port, else --port.
+  static ClusterNodeInfo AnnouncedNodeInfo(const facade::Connection* conn,
+                                           std::string_view id = {});
+  static uint16_t AnnouncedPort();
 
   // Only for debug purpose. Pause/Resume all incoming migrations
   void PauseAllIncomingMigrations(bool pause) ABSL_LOCKS_EXCLUDED(migration_mu_);

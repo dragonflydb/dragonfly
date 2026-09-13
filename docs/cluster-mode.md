@@ -593,14 +593,15 @@ mechanism, the state transition each side undergoes, and the recovery action.
 | Value | Behavior |
 |-------|----------|
 | unset / `""` | No cluster commands; `DFLYCLUSTER` rejected. |
-| `emulated` | Single-node owner of slots `0..16383`. `CLUSTER *` answers from a synthetic topology built from the local replication summary. `DFLYCLUSTER` is not exposed. |
+| `emulated` | Single-node owner of slots `0..16383`. `CLUSTER *` answers from a synthetic topology built from the local replication summary. A replica advertises its master at the address the master announces to clients (learned during the replication handshake, so both sides must run a version that has it), not at the address it replicates from. `DFLYCLUSTER` is not exposed. |
 | `yes` | Full cluster mode. Topology must be installed via `DFLYCLUSTER CONFIG` before the node serves any data-plane traffic. |
 
 | Flag | Default | Effect |
 |------|---------|--------|
 | `--admin_port` | `0` (off) | Required in real-cluster mode. `DFLYCLUSTER` and `DFLYMIGRATE` only accept connections on this listener; client-facing listeners reject them. |
 | `--cluster_node_id` | `""` (uses the master replication id) | Node identity in the config; must match what the cluster manager embeds in `master.id`, `replicas[].id`, and `migrations[].node_id`. Disallowed in `emulated` mode. |
-| `--cluster_announce_ip` | `""` (uses the local bind) | IP returned to clients in `CLUSTER SLOTS/SHARDS/NODES` and embedded in MOVED replies. |
+| `--cluster_announce_ip` | `""` (uses the local bind) | IP returned to clients in `CLUSTER SLOTS/SHARDS/NODES` and embedded in MOVED replies. Also sent to replicas during the replication handshake, so a runtime change reaches them on their next connection. |
+| `--announce_port` | `0` (uses `--port`) | Port announced to cluster clients and to the replication master; propagated to replicas like `--cluster_announce_ip`. |
 | `--experimental_cluster_shard_by_slot` | `false` | When `true`, thread-shard selection uses the slot id modulo shard count instead of a tag-hash modulo shard count. |
 | `--slot_migration_throttle_us` | `0` (off) | Target-side throttle: sleep this many microseconds after every 100 µs of migration processing. A starting value of `20` is reasonable if migrations starve user traffic. |
 | `--slot_migration_connection_timeout_ms` | `2000` | Source-side TCP connect timeout for the migration's INIT, FLOW, and ACK reconnects. |

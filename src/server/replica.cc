@@ -64,8 +64,6 @@ ABSL_FLAG(bool, break_replication_on_master_restart, false,
 ABSL_FLAG(std::string, replica_announce_ip, "",
           "IP address that Dragonfly announces to replication master");
 ABSL_FLAG(bool, experimental_cascaded_partial_sync, false, "Experimental cascaded psync");
-ABSL_DECLARE_FLAG(int32_t, port);
-ABSL_DECLARE_FLAG(uint16_t, announce_port);
 ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
@@ -335,10 +333,7 @@ error_code Replica::Greet() {
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
-  uint16_t port = absl::GetFlag(FLAGS_announce_port);
-  if (port == 0) {
-    port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port));
-  }
+  uint16_t port = cluster::ClusterFamily::AnnouncedPort();
   RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port)));
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
@@ -358,6 +353,9 @@ error_code Replica::Greet() {
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa dragonfly"));
   PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
 
+  // The address belongs to the master we are greeting now, which may be a different server.
+  master_context_.announced.reset();
+
   if (LastResponseArgs().size() == 1) {  // Redis
     PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   } else if (LastResponseArgs().size() >= 3) {  // it's dragonfly master.
@@ -373,7 +371,8 @@ error_code Replica::Greet() {
 }
 
 std::error_code Replica::HandleCapaDflyResp() {
-  // Response is: <master_repl_id, syncid, num_shards [, version]>
+  // Response is: <master_repl_id> <syncid> <num_shards> [<version> [<lineage_id>
+  //   [<announced_ip> <announced_port>]]]
   if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING, RespExpr::INT64}) ||
       LastResponseArgs()[0].GetBuf().size() != CONFIG_RUN_ID_SIZE)
     return make_error_code(errc::bad_message);
@@ -425,11 +424,23 @@ std::error_code Replica::HandleCapaDflyResp() {
     master_context_.lineage_id = master_context_.master_repl_id;
   }
 
+  if (LastResponseArgs().size() >= 7) {
+    PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[5].type == RespExpr::STRING &&
+                              LastResponseArgs()[6].type == RespExpr::INT64);
+    int64_t announced_port = get<int64_t>(LastResponseArgs()[6].u);
+    PC_RETURN_ON_BAD_RESPONSE(announced_port >= 0 && announced_port <= UINT16_MAX);
+    master_context_.announced = {string(ToSV(LastResponseArgs()[5].GetBuf())),
+                                 static_cast<uint16_t>(announced_port)};
+  }
+
   VLOG(1) << "Master id: " << master_context_.master_repl_id
           << ", sync id: " << master_context_.dfly_session_id
           << ", num journals: " << param_num_flows
           << ", version: " << unsigned(master_context_.version)
-          << ", lineage: " << master_context_.lineage_id;
+          << ", lineage: " << master_context_.lineage_id << ", announced address: "
+          << (master_context_.announced
+                  ? StrCat(master_context_.announced->ip, ":", master_context_.announced->port)
+                  : "none");
 
   return error_code{};
 }
@@ -1391,6 +1402,7 @@ auto Replica::GetSummary() const -> Summary {
     Summary res;
     res.host = server().host;
     res.port = server().port;
+    res.announced = master_context_.announced;
     res.master_link_established = (state_mask_ & R_TCP_CONNECTED);
     res.full_sync_in_progress = (state_mask_ & R_SYNCING);
     res.full_sync_done = (state_mask_ & R_SYNC_OK);
