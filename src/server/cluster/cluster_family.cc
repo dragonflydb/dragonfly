@@ -128,6 +128,19 @@ std::optional<ClusterShardInfos> ClusterFamily::GetShardInfos(ConnectionContext*
   return nullopt;
 }
 
+ClusterNodeInfo ClusterFamily::AnnouncedNodeInfo(const facade::Connection* conn, string_view id) {
+  std::string ip = absl::GetFlag(FLAGS_cluster_announce_ip);
+  if (ip.empty()) {
+    ip = conn->LocalBindAddress();
+  }
+  return {.id = string(id), .ip = std::move(ip), .port = AnnouncedPort()};
+}
+
+uint16_t ClusterFamily::AnnouncedPort() {
+  uint16_t port = absl::GetFlag(FLAGS_announce_port);
+  return port == 0 ? static_cast<uint16_t>(absl::GetFlag(FLAGS_port)) : port;
+}
+
 ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
   ClusterShardInfo info{.slot_ranges = SlotRanges({{.start = 0, .end = kMaxSlotNum}}),
                         .master = {},
@@ -138,16 +151,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
   ServerState& etl = *ServerState::tlocal();
   if (!repl_info) {
     DCHECK(etl.is_master);
-    std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
-    std::string preferred_endpoint =
-        cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
-    uint16_t cluster_announce_port = absl::GetFlag(FLAGS_announce_port);
-    uint16_t preferred_port = cluster_announce_port == 0
-                                  ? static_cast<uint16_t>(absl::GetFlag(FLAGS_port))
-                                  : cluster_announce_port;
-
-    info.master = {{.id = id_, .ip = preferred_endpoint, .port = preferred_port},
-                   NodeHealth::ONLINE};
+    info.master = {AnnouncedNodeInfo(cntx->conn(), id_), NodeHealth::ONLINE};
 
     if (cntx->conn()->IsPrivileged() || !absl::GetFlag(FLAGS_managed_service_info)) {
       for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
@@ -158,9 +162,14 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
       }
     }
   } else {
-    // TODO: We currently don't save the master's ID in the replica
-    info.master = {{.id = "", .ip = repl_info->summary.host, .port = repl_info->summary.port},
-                   NodeHealth::ONLINE};
+    // The master's announced address, not the one we replicate from (e.g. its admin port).
+    const ReplicaSummary& master = repl_info->summary;
+    ClusterNodeInfo master_node{.id = master.master_id, .ip = master.host, .port = master.port};
+    if (master.announced) {
+      master_node.ip = master.announced->ip;
+      master_node.port = master.announced->port;
+    }
+    info.master = {std::move(master_node), NodeHealth::ONLINE};
     info.replicas.push_back({{.id = id_,
                               .ip = cntx->conn()->LocalBindAddress(),
                               .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))},
