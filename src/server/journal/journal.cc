@@ -56,6 +56,28 @@ error_code Close() {
   return {};
 }
 
+void AcquireUser(bool start_journal) {
+  if (start_journal) {
+    StartInThread();
+  }
+  journal_slice.AcquireUser();
+}
+
+void ReleaseUser() {
+  journal_slice.ReleaseUser();
+}
+
+void MaybeStop() {
+  EngineShard* shard = EngineShard::tlocal();
+  if (shard->journal() && journal_slice.CanStop()) {
+    const LSN resume_bound = journal_slice.resume_bound();
+    ClearBuffer();
+    shard->set_journal(false);
+    LOG_EVERY_T(INFO, 1) << "Stopped unused journal on shard " << shard->shard_id()
+                         << ": resume boundary " << resume_bound << " evicted";
+  }
+}
+
 unsigned GetCallbackCount() {
   return journal_slice.OnChangeCbCount();
 }

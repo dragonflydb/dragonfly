@@ -54,6 +54,8 @@ struct FlowInfo {
   // Written by REPLCONF ACK on the owner-shard proactor; all readers also run there.
   uint64_t last_acked_lsn = 0;
 
+  bool journal_held = false;
+
   std::function<void()> cleanup;  // Optional cleanup for cancellation.
 };
 

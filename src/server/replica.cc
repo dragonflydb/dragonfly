@@ -950,7 +950,13 @@ void Replica::JoinDflyFlows() {
 }
 
 void Replica::SetShardStates(bool replica) {
-  shard_set->RunBriefInParallel([replica](EngineShard* shard) { shard->SetReplica(replica); });
+  shard_set->RunBriefInParallel([replica](EngineShard* shard) {
+    if (replica)
+      journal::AcquireUser(/*start_journal=*/false);
+    else
+      journal::ReleaseUser();
+    shard->SetReplica(replica);
+  });
 }
 
 error_code Replica::SendNextPhaseRequest(string_view kind) {

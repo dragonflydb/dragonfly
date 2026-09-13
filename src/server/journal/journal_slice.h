@@ -35,6 +35,19 @@ class JournalSlice {
 
   void AddLogRecord(const Entry& entry);
 
+  void AcquireUser();
+  void ReleaseUser();
+
+  void RefreshResumeBound() {
+    resume_bound_ = cur_lsn();
+  }
+
+  LSN resume_bound() const {
+    return resume_bound_;
+  }
+
+  bool CanStop() const;
+
   // Register a callback that will be called every time a new entry is
   // added to the journal.
   // The callback receives the entry and a boolean that indicates whether
@@ -49,6 +62,8 @@ class JournalSlice {
   /// Returns whether the journal entry with this LSN is available
   /// from the buffer.
   bool IsLSNInBuffer(LSN lsn) const;
+  bool IsLSNBeforeBuffer(LSN lsn) const;
+
   std::string_view GetEntry(LSN lsn) const;
   // SetFlushMode with allow_flush=false is used to disable preemptions during
   // subsequent calls to AddLogRecord.
@@ -73,6 +88,7 @@ class JournalSlice {
 
   void SetStartingLSN(LSN lsn) {
     lsn_ = lsn;
+    RefreshResumeBound();
   }
 
  private:
@@ -86,6 +102,9 @@ class JournalSlice {
   std::list<std::pair<uint32_t, JournalConsumerInterface*>> journal_consumers_arr_;
 
   LSN lsn_ = 1;
+
+  LSN resume_bound_ = 1;
+  uint32_t user_count_ = 0;
 
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
