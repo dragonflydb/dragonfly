@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <functional>
 #include <system_error>
 
 extern "C" {
@@ -248,7 +249,9 @@ class RdbLoaderBase {
 
   std::error_code EnsureReadInternal(size_t min_to_read);
 
-  // Upper bound on bytes a bounded source can still supply; SIZE_MAX when unbounded (file load).
+  bool ExceedsRemainingInput(uint64_t n, std::string_view what, size_t min_entry_bytes = 1);
+
+  // Upper bound on bytes a bounded source can still supply; SIZE_MAX when no limit is set.
   // Used to reject a declared length/count before allocating for it (a crafted RESTORE OOM).
   size_t RemainingBytes() const {
     if (source_limit_ == SIZE_MAX)
@@ -281,6 +284,7 @@ class RdbLoaderBase {
 
   size_t bytes_read_ = 0;
   size_t source_limit_ = SIZE_MAX;
+  std::function<size_t()> size_provider_;
   base::PODArray<uint8_t> compr_buf_;
   std::unique_ptr<detail::DecompressImpl> decompress_impl_;
   std::optional<uint64_t> journal_offset_ = std::nullopt;
@@ -328,6 +332,10 @@ class RdbLoader : protected RdbLoaderBase {
 
   void set_source_limit(size_t n) {
     source_limit_ = n;
+  }
+
+  void set_source_size_provider(std::function<size_t()> provider) {
+    size_provider_ = std::move(provider);
   }
 
   ::io::Bytes Leftover() const {

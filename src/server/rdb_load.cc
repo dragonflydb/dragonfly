@@ -1246,6 +1246,19 @@ size_t RdbLoaderBase::StrLen(const RdbVariant& tset) {
   return 0;
 }
 
+bool RdbLoaderBase::ExceedsRemainingInput(uint64_t n, std::string_view what,
+                                          size_t min_entry_bytes) {
+  DCHECK_GT(min_entry_bytes, 0u);
+  size_t remaining = RemainingBytes();
+  if (remaining == SIZE_MAX)
+    return false;
+  if (n > remaining / min_entry_bytes) {
+    LOG(ERROR) << "Bad " << what << " " << n << ", exceeds remaining input " << remaining;
+    return true;
+  }
+  return false;
+}
+
 auto RdbLoaderBase::FetchGenericString() -> io::Result<string> {
   bool isencoded;
   size_t len;
@@ -1264,6 +1277,10 @@ auto RdbLoaderBase::FetchGenericString() -> io::Result<string> {
         LOG(ERROR) << "Unknown RDB string encoding len " << len;
         return Unexpected(errc::rdb_file_corrupted);
     }
+  }
+
+  if (ExceedsRemainingInput(len, "string length")) {
+    return Unexpected(errc::rdb_file_corrupted);
   }
 
   string res;
@@ -1288,10 +1305,17 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
   SET_OR_UNEXPECT(LoadLen(NULL), clen);
   SET_OR_UNEXPECT(LoadLen(NULL), len);
 
-  // TODO serialization and deserialization for data > 512 MB should be done via chunks
   if (len <= clen || clen == 0) {
     LOG(ERROR) << "Bad compressed string";
     return Unexpected(rdb::rdb_file_corrupted);
+  }
+  constexpr uint64_t kMaxLzfExpansion = 128;
+  if (len / kMaxLzfExpansion > clen) {
+    LOG(ERROR) << "Bad uncompressed length " << len << " for compressed length " << clen;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+  if (ExceedsRemainingInput(clen, "compressed length")) {
+    return Unexpected(errc::rdb_file_corrupted);
   }
 
   if (mem_buf_->InputLen() >= clen) {
@@ -1897,8 +1921,16 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
   }
 
   /* Consumer groups loading */
+  constexpr size_t kMinCgroupWireBytes = 5;
+  constexpr size_t kMinPelWireBytes = 25;
+  constexpr size_t kMinConsumerWireBytes = 10;
+  constexpr size_t kMinNackWireBytes = 16;
+
   uint64_t cgroups_count;
   SET_OR_UNEXPECT(LoadLen(nullptr), cgroups_count);
+  if (ExceedsRemainingInput(cgroups_count, "stream cgroups count", kMinCgroupWireBytes)) {
+    return Unexpected(errc::rdb_file_corrupted);
+  }
   load_trace->stream_trace->cgroup.resize(cgroups_count);
 
   for (size_t i = 0; i < cgroups_count; ++i) {
@@ -1930,6 +1962,9 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     uint64_t pel_size;
     SET_OR_UNEXPECT(LoadLen(nullptr), pel_size);
 
+    if (ExceedsRemainingInput(pel_size, "stream pel count", kMinPelWireBytes)) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
     cgroup.pel_arr.resize(pel_size);
 
     for (size_t j = 0; j < pel_size; ++j) {
@@ -1948,6 +1983,9 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
      * consumers and their local PELs. */
     uint64_t consumers_num;
     SET_OR_UNEXPECT(LoadLen(nullptr), consumers_num);
+    if (ExceedsRemainingInput(consumers_num, "stream consumers count", kMinConsumerWireBytes)) {
+      return Unexpected(errc::rdb_file_corrupted);
+    }
     cgroup.cons_arr.resize(consumers_num);
 
     for (size_t j = 0; j < consumers_num; ++j) {
@@ -1968,6 +2006,9 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
       /* Load the PEL about entries owned by this specific
        * consumer. */
       SET_OR_UNEXPECT(LoadLen(nullptr), pel_size);
+      if (ExceedsRemainingInput(pel_size, "stream consumer pel count", kMinNackWireBytes)) {
+        return Unexpected(errc::rdb_file_corrupted);
+      }
       consumer.nack_arr.resize(pel_size);
       for (size_t k = 0; k < pel_size; ++k) {
         auto& nack = consumer.nack_arr[k];
@@ -2498,6 +2539,14 @@ error_code RdbLoader::Load(io::Source* src) {
     mem_buf_->ConsumeInput(9);
   }
 
+  if (source_limit_ == SIZE_MAX && size_provider_) {
+    if (size_t file_size = size_provider_(); file_size > 0) {
+      source_limit_ = file_size;
+    } else {
+      LOG(WARNING) << "Source size unresolved after first read; loading without a source limit";
+    }
+  }
+
   int type;
 
   /* Key-specific attributes, set by opcodes before the key type. */
@@ -2846,8 +2895,14 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_to_read) {
 
   // If limit was applied we do not want to read more than needed
   // important when reading from sockets.
-  if (bytes_read_ + out_buf.size() > source_limit_) {
-    out_buf = out_buf.subspan(0, source_limit_ - bytes_read_);
+  size_t avail = bytes_read_ <= source_limit_ ? source_limit_ - bytes_read_ : 0;
+  if (out_buf.size() > avail) {
+    out_buf = out_buf.subspan(0, avail);
+    if (out_buf.size() < min_sz) {
+      LOG(ERROR) << "Truncated source: need " << min_sz << " bytes, " << out_buf.size()
+                 << " available";
+      return RdbError(errc::rdb_file_corrupted);
+    }
   }
 
   io::Result<size_t> res = src_->ReadAtLeast(out_buf, min_sz);
