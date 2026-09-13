@@ -1621,6 +1621,14 @@ std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingK
 
     RdbLoader loader{&service_, load_context, filt_snapshot_id};
     loader.SetShardCount(load_opts->shard_count);
+    // Cloud backends resolve the object size on the first Read, so probe once.
+    uint8_t probe;
+    iovec probe_iov{&probe, 1};
+    auto probe_res = (*res)->Read(0, &probe_iov, 1);
+    (void)probe_res;
+    if (size_t file_size = (*res)->Size(); file_size > 0) {
+      loader.set_source_limit(file_size);
+    }
     if (existing_keys == LoadExistingKeys::kOverride) {
       loader.SetOverrideExistingKeys(true);
     }

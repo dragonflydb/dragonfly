@@ -1266,6 +1266,11 @@ auto RdbLoaderBase::FetchGenericString() -> io::Result<string> {
     }
   }
 
+  if (len > RemainingBytes()) {
+    LOG(ERROR) << "Bad string length " << len;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
   string res;
 
   if (len > 0) {
@@ -1288,10 +1293,17 @@ auto RdbLoaderBase::FetchLzfStringObject() -> io::Result<string> {
   SET_OR_UNEXPECT(LoadLen(NULL), clen);
   SET_OR_UNEXPECT(LoadLen(NULL), len);
 
-  // TODO serialization and deserialization for data > 512 MB should be done via chunks
   if (len <= clen || clen == 0) {
     LOG(ERROR) << "Bad compressed string";
     return Unexpected(rdb::rdb_file_corrupted);
+  }
+  if (len > 1ULL << 29) {
+    LOG(ERROR) << "Uncompressed length is too big " << len;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+  if (clen > RemainingBytes()) {
+    LOG(ERROR) << "Bad compressed length " << clen;
+    return Unexpected(errc::rdb_file_corrupted);
   }
 
   if (mem_buf_->InputLen() >= clen) {
