@@ -190,8 +190,8 @@ class ReplicationSetup:
 
     master: DflyInstance
     replicas: list[DflyInstance]
-    c_master: "object"
-    c_replicas: list["object"]
+    c_master: "aioredis.Redis"
+    c_replicas: list["aioredis.Redis"]
 
     def __iter__(self):
         return iter((self.master, self.replicas, self.c_master, self.c_replicas))
