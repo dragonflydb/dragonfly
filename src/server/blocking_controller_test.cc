@@ -7,6 +7,7 @@
 #include <gmock/gmock.h>
 
 #include "base/logging.h"
+#include "facade/conn_context.h"
 #include "facade/facade_stats.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
@@ -140,12 +141,10 @@ TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
 
 TEST_F(BlockingControllerTest, Timeout) {
   time_point tp = steady_clock::now() + chrono::milliseconds(10);
-  bool blocked;
-  bool paused;
+  facade::ConnectionContext cntx{nullptr};
 
   facade::OpStatus status = trans_->WaitOnWatch(
-      tp, Transaction::kShardArgs, [](auto...) { return KeyReadyResult::kReady; }, &blocked,
-      &paused);
+      tp, Transaction::kShardArgs, [](auto...) { return KeyReadyResult::kReady; }, &cntx);
 
   EXPECT_EQ(status, facade::OpStatus::TIMED_OUT);
   unsigned num_watched = shard_set->Await(

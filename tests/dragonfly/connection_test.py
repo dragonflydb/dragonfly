@@ -41,10 +41,14 @@ def is_resp_io_loop_v2(server: DflyInstance) -> bool:
     stores its value as None instead of "true". This function checks both has_arg() and
     != "false" to correctly detect V2 while safely defaulting to V1 otherwise.
     """
-    return (
-        server.has_arg("enable_resp_io_loop_v2")
-        and server.args.get("enable_resp_io_loop_v2") != "false"
-    )
+    if not server.has_arg("enable_resp_io_loop_v2"):
+        return False
+    value = server.args.get("enable_resp_io_loop_v2")
+    if value is None:  # bare flag
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() not in ("false", "f", "0", "no", "n")
 
 
 @dataclass(frozen=True)
@@ -4206,3 +4210,135 @@ async def test_rw_throttle_stats(df_server: DflyInstance):
 
     await read_client.aclose()
     await write_client.aclose()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_shutdown_with_paused_clients(df_factory):
+    server = df_factory.create(dbfilename="dump_paused")
+    server.start()
+    admin = server.client()
+    blocked = server.client()
+    parked = server.client()
+
+    assert await admin.set("acked", "v")
+    blpop = asyncio.create_task(blocked.blpop("l", 0))
+    for _ in range(50):
+        if (await admin.info("clients"))["blocked_clients"] == 1:
+            break
+        await asyncio.sleep(0.1)
+    assert (await admin.info("clients"))["blocked_clients"] == 1
+    assert await admin.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
+    write = asyncio.create_task(parked.set("k", "v"))
+    await asyncio.sleep(0.5)
+    assert not write.done()
+
+    # Neither the parked write nor the blocked pop may keep the process alive, and the shutdown
+    # snapshot must still be written.
+    server.proc.terminate()
+    server.proc.wait(timeout=15)
+    assert server.proc.returncode == 0
+    for task in (blpop, write):
+        task.cancel()
+    await admin.aclose()
+
+    server.start()
+    admin = server.client()
+    assert await admin.get("acked") == "v"
+    assert await admin.get("k") is None
+    await admin.aclose()
+
+
+def _resp(*args):
+    return ("*%d\r\n" % len(args) + "".join("$%d\r\n%s\r\n" % (len(a), a) for a in args)).encode()
+
+
+async def _wait_client(admin, name, pred, what):
+    """Polls CLIENT LIST until the client called name satisfies pred."""
+    for _ in range(100):
+        entries = [c for c in await admin.client_list() if c.get("name") == name and pred(c)]
+        if entries:
+            return entries[0]
+        await asyncio.sleep(0.05)
+    assert False, f"client {name} did not reach: {what}"
+
+
+def _named_raw_client(port, name):
+    client = socket.create_connection(("localhost", port))
+    client.settimeout(5)
+    client.sendall(_resp("CLIENT", "SETNAME", name))
+    reply = b""
+    while not reply.endswith(b"\r\n"):
+        reply += client.recv(64)
+    assert reply == b"+OK\r\n"
+    return client
+
+
+def _skip_unless_v1(server):
+    if is_resp_io_loop_v2(server):
+        pytest.skip("v1 io loop only")
+
+
+@pytest.mark.parametrize("v2", [False, True])
+async def test_paused_client_disconnect_cleanup(df_factory, v2):
+    server = df_factory.create(proactor_threads=2, enable_resp_io_loop_v2=v2)
+    server.start()
+    admin = server.client()
+
+    async def queues():
+        info = await admin.info("all")  # includes this INFO itself, hence compared to a baseline
+        return [
+            info[k]
+            for k in ("pipeline_queue_length", "pipeline_queue_bytes", "dispatch_queue_bytes")
+        ]
+
+    baseline = await queues()
+    assert await admin.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
+
+    parked = _named_raw_client(server.port, "parked")
+    await _wait_client(admin, "parked", lambda c: c.get("phase") == "readsock", "named")
+    parked.sendall(_resp("SET", "k", "v"))
+    # A single command runs in the io fiber, which stays in the process phase while parked.
+    await _wait_client(admin, "parked", lambda c: c.get("phase") == "process", "parked in pause")
+
+    # The parked write is dropped, its reply is resolved and the queues are accounted.
+    parked.close()
+    for _ in range(50):
+        if len(await admin.client_list()) == 1:
+            break
+        await asyncio.sleep(0.1)
+    assert len(await admin.client_list()) == 1
+    assert await queues() == baseline
+
+    assert await admin.execute_command("CLIENT UNPAUSE") == "OK"
+    assert await admin.get("k") is None
+    await admin.aclose()
+
+
+async def test_paused_client_released_on_protocol_error(df_factory):
+    # v1 io loop only: pipelined writes park the dispatch fiber while the io fiber keeps reading.
+    # A malformed request then ends the read loop, which must release the parked dispatch before
+    # the protocol error reply is sent. (The v2 loop runs commands in the read fiber, so the tail
+    # would not be parsed until the pause ends.)
+    server = df_factory.create(proactor_threads=2, enable_resp_io_loop_v2=False)
+    _skip_unless_v1(server)
+    server.start()
+    admin = server.client()
+    assert await admin.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
+
+    client = _named_raw_client(server.port, "piped")
+    # Two complete writes go to the dispatch fiber, the incomplete third keeps the io fiber reading.
+    client.sendall(_resp("SET", "k", "v") + _resp("SET", "k2", "v") + b"*3\r\n$3\r\nSET\r\n")
+    # Flag 'a' means the dispatch fiber is inside a command, which under the pause is parked.
+    await _wait_client(admin, "piped", lambda c: "a" in c.get("flags", ""), "parked in pause")
+    client.sendall(b"$abc\r\n")  # malformed continuation
+
+    buf = b""
+    while b"-ERR Protocol error" not in buf:
+        chunk = client.recv(200)
+        assert chunk, buf
+        buf += chunk
+    client.close()
+
+    assert await admin.execute_command("CLIENT UNPAUSE") == "OK"
+    assert await admin.get("k") is None and await admin.get("k2") is None
+    await admin.aclose()

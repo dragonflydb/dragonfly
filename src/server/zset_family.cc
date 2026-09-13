@@ -1106,8 +1106,7 @@ void BZPopMinMax(facade::ParsedArgs args, bool is_max, CommandContext* cmd_cntx)
 
   auto* cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
-      &cntx->paused);
+      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), cntx);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (popped_key) {
@@ -2518,8 +2517,7 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
 
     DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
                                    // `WaitOnWatch`
-    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, &cntx->blocked,
-                                     &cntx->paused);
+    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, cntx);
 
     if (status != OpStatus::OK) {
       status == OpStatus::UNBLOCKED ? response_builder->SendError(status)

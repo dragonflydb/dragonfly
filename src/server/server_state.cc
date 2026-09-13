@@ -222,15 +222,18 @@ bool ServerState::AllowInlineScheduling() const {
 void ServerState::SetPauseState(ClientPause state, bool start) {
   client_pauses_[int(state)] += (start ? 1 : -1);
   if (!client_pauses_[int(state)]) {
-    client_pause_ec_.notifyAll();
+    for (auto* cntx : paused_conns_)
+      cntx->pause_ec.notifyAll();
   }
 }
 
-void ServerState::AwaitPauseState(bool is_write) {
-  client_pause_ec_.await([is_write, this]() {
-    return client_pauses_[int(ClientPause::ALL)] == 0 &&
-           (!is_write || client_pauses_[int(ClientPause::WRITE)] == 0);
+void ServerState::AwaitPauseState(bool is_write, facade::ConnectionContext* cntx) {
+  paused_conns_.insert(cntx);
+  cntx->pause_ec.await([is_write, cntx, this]() {
+    return cntx->conn_closing || (client_pauses_[int(ClientPause::ALL)] == 0 &&
+                                  (!is_write || client_pauses_[int(ClientPause::WRITE)] == 0));
   });
+  paused_conns_.erase(cntx);
 }
 
 void ServerState::DecommitMemory(uint8_t flags) {
