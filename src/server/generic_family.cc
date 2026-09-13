@@ -646,45 +646,52 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
   return add_res.status();
 }
 
+bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) {
+  if (opts.matcher) {
+    string str;
+    key.GetString(&str);
+    if (!opts.matcher->Matches(str))
+      return false;
+    res->emplace_back(std::move(str));
+    return true;
+  }
+
+  res->emplace_back();
+  key.GetString(&res->back());
+  return true;
+}
+
 bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
   auto& db_slice = op_args.GetDbSlice();
 
-  DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
-  if (prime_it->first.HasExpire()) {
-    it = db_slice.ExpireIfNeeded(op_args.db_cntx, it);
-    if (!IsValid(it))
-      return false;
-  }
+  // OpScan holds a DisableFlushGuard while traversing, so a raw iterator is sufficient.
+  if (db_slice.TryExpire(op_args.db_cntx, prime_it)) [[unlikely]]
+    return false;
 
-  bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
+  bool matches = !opts.type_filter || prime_it->second.ObjType() == opts.type_filter;
   if (opts.mask.has_value()) {
     if (opts.mask == ScanOpts::Mask::Volatile) {
-      matches &= it->first.HasExpire();
+      matches &= prime_it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Permanent) {
-      matches &= !it->first.HasExpire();
+      matches &= !prime_it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Accessed) {
-      matches &= it->first.WasTouched();
+      matches &= prime_it->first.WasTouched();
     } else if (opts.mask == ScanOpts::Mask::Untouched) {
-      matches &= !it->first.WasTouched();
+      matches &= !prime_it->first.WasTouched();
     }
   }
   if (!matches)
     return false;
 
-  if (opts.min_malloc_size > 0 && it->second.MallocUsed() < opts.min_malloc_size) {
+  if (opts.min_malloc_size > 0 && prime_it->second.MallocUsed() < opts.min_malloc_size) {
     return false;
   }
 
-  if (opts.bucket_id != UINT_MAX && opts.bucket_id != it.GetInnerIt().bucket_id()) {
+  if (opts.bucket_id != UINT_MAX && opts.bucket_id != prime_it.bucket_id()) {
     return false;
   }
 
-  if (!opts.Matches(it.key())) {
-    return false;
-  }
-  res->emplace_back(it.key());
-
-  return true;
+  return AppendScanKey(prime_it->first, opts, res);
 }
 
 void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, StringVec* vec) {

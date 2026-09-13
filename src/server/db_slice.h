@@ -421,6 +421,14 @@ class DbSlice {
   // and returns Iterator{}.
   Iterator ExpireIfNeeded(const Context& cntx, Iterator it) const;
 
+  // Attempts to expire a valid entry and returns true only when it was erased.
+  // The caller must prevent preemption while using the raw iterator.
+  bool TryExpire(const Context& cntx, PrimeIterator it) const {
+    if (!it->first.IsExpired(cntx.time_now_ms))
+      return false;
+    return Expire(cntx, it, nullptr);
+  }
+
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
 
@@ -612,6 +620,7 @@ class DbSlice {
   // will send notifications later). If null, the notification is sent immediately (read path).
   PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it,
                                std::vector<std::string>* events = nullptr) const;
+  bool Expire(const Context& cntx, PrimeIterator it, std::vector<std::string>* events) const;
 
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
                                            std::optional<unsigned> req_obj_type);
