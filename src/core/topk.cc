@@ -39,6 +39,7 @@ TOPK::TOPK(PMR_NS::memory_resource* mr, uint32_t k, uint32_t width, uint32_t dep
       width_(width),
       depth_(depth),
       decay_(decay),
+      custom_decay_table_(PMR_NS::polymorphic_allocator<double>(mr)),
       counters_(static_cast<size_t>(width) * depth, 0, PMR_NS::polymorphic_allocator<uint32_t>(mr)),
       min_heap_(PMR_NS::polymorphic_allocator<HeapItem>(mr)) {
   DCHECK(mr != nullptr);
@@ -51,14 +52,14 @@ TOPK::TOPK(PMR_NS::memory_resource* mr, uint32_t k, uint32_t width, uint32_t dep
 
   if (std::abs(decay_ - TOPK::kDefaultDecay) < TOPK::kDecayEpsilon) {
     // default decay value: use shared static table to save memory and initialization time
-    decay_lookup_ = &GetDefaultDecayTable();
+    decay_lookup_ = GetDefaultDecayTable().data();
   } else {
     // custom decay value: build a dedicated table for this instance
-    custom_decay_table_ = std::make_unique<std::array<double, TOPK::kDecayLookupSize>>();
+    custom_decay_table_.resize(kDecayLookupSize);
     for (size_t i = 0; i < TOPK::kDecayLookupSize; ++i) {
-      (*custom_decay_table_)[i] = std::pow(decay_, static_cast<double>(i));
+      custom_decay_table_[i] = std::pow(decay_, static_cast<double>(i));
     }
-    decay_lookup_ = custom_decay_table_.get();
+    decay_lookup_ = custom_decay_table_.data();
   }
 }
 
@@ -67,10 +68,12 @@ TOPK::TOPK(TOPK&& other) noexcept
       width_(std::exchange(other.width_, 0)),
       depth_(std::exchange(other.depth_, 0)),
       decay_(std::exchange(other.decay_, 0.0)),
-      decay_lookup_(std::exchange(other.decay_lookup_, nullptr)),
       custom_decay_table_(std::move(other.custom_decay_table_)),
       counters_(std::move(other.counters_)),
       min_heap_(std::move(other.min_heap_)) {
+  decay_lookup_ =
+      custom_decay_table_.empty() ? GetDefaultDecayTable().data() : custom_decay_table_.data();
+  other.decay_lookup_ = nullptr;
 }
 
 TOPK& TOPK::operator=(TOPK&& other) noexcept {
@@ -79,10 +82,12 @@ TOPK& TOPK::operator=(TOPK&& other) noexcept {
     width_ = std::exchange(other.width_, 0);
     depth_ = std::exchange(other.depth_, 0);
     decay_ = std::exchange(other.decay_, 0.0);
-    decay_lookup_ = std::exchange(other.decay_lookup_, nullptr);
     custom_decay_table_ = std::move(other.custom_decay_table_);
     counters_ = std::move(other.counters_);
     min_heap_ = std::move(other.min_heap_);
+    decay_lookup_ =
+        custom_decay_table_.empty() ? GetDefaultDecayTable().data() : custom_decay_table_.data();
+    other.decay_lookup_ = nullptr;
   }
   return *this;
 }
@@ -104,7 +109,7 @@ uint64_t TOPK::Hash(std::string_view item, uint32_t row) const {
 double TOPK::ComputeDecayProbability(uint32_t count) const {
   DCHECK(decay_lookup_);
   DCHECK_GT(count, 0u);
-  const auto& table = *decay_lookup_;
+  const auto* table = decay_lookup_;
   if (count < kDecayLookupSize) {
     return table[count];
   }
@@ -255,7 +260,7 @@ std::vector<TOPK::TopKItem> TOPK::List() const {
   result.reserve(min_heap_.size());
 
   for (const auto& heap_item : min_heap_) {
-    result.push_back({heap_item.count, heap_item.key});
+    result.push_back({heap_item.count, std::string(heap_item.key)});
   }
 
   // Sort descending by count.
@@ -298,20 +303,20 @@ std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_
   DCHECK_LE(min_heap_.size(), k_);
 
   // Slow path: item will enter the heap. Now allocate.
-  std::string item_str(item);
+  auto* mr = min_heap_.get_allocator().resource();
 
   if (min_heap_.size() < k_) {
     // Heap not full, add the item, no eviction needed
     size_t new_idx = min_heap_.size();
-    min_heap_.push_back({std::move(item_str), new_count});
+    min_heap_.emplace_back(mr, item, new_count);
     HeapifyUp(new_idx);
     return std::nullopt;
   }
 
   // Heap is full, evict minimum and add new item
   DCHECK_EQ(min_heap_.size(), k_);
-  std::string old_key = std::move(min_heap_[0].key);
-  min_heap_[0] = {std::move(item_str), new_count};
+  std::string old_key(min_heap_[0].key);
+  min_heap_[0] = HeapItem(mr, item, new_count);
   HeapifyDown(0);
   return old_key;
 }
@@ -320,9 +325,7 @@ size_t TOPK::MallocUsed() const {
   size_t size = 0;
 
   // Custom decay table (only for non-default decay values)
-  if (custom_decay_table_) {
-    size += sizeof(std::array<double, kDecayLookupSize>);
-  }
+  size += custom_decay_table_.capacity() * sizeof(double);
 
   // Counter array
   size += counters_.capacity() * sizeof(uint32_t);
@@ -353,7 +356,7 @@ void TOPK::Deserialize(const SerializedData& data) {
   // Restore heap
   min_heap_.reserve(data.heap_items.size());
   for (const auto& item : data.heap_items) {
-    min_heap_.push_back({item.item, item.count});
+    min_heap_.emplace_back(min_heap_.get_allocator().resource(), item.item, item.count);
   }
 
   // Rebuild heap property
