@@ -362,7 +362,8 @@ void RegisterHllFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::HYPERLOGLOG);
   *registry << CI{"PFADD", CO::FAST | CO::JOURNALED, -3, 1, 1}.SetHandler(PFAdd)
             << CI{"PFCOUNT", CO::READONLY, -2, 1, -1}.SetHandler(PFCount)
-            << CI{"PFMERGE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1}.SetHandler(PFMerge);
+            << CI{"PFMERGE", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -2, 1, -1}
+                   .SetHandler(PFMerge);
 }
 
 }  // namespace dfly

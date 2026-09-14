@@ -44,6 +44,9 @@ KeyPermissions RequiredKeyPermissions(const CommandId& id, unsigned key_offset) 
   if (id.opt_mask() & CO::WRITE_KEY_OFFSET_1)
     return {key_offset != 1, key_offset == 1};
 
+  if (id.opt_mask() & CO::STORE_LAST_KEY)
+    return {true, false};
+
   return {id.IsReadOnly(), id.IsJournaled()};
 }
 
