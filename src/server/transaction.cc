@@ -1841,10 +1841,23 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs&
 
       if ((name == "GEORADIUSBYMEMBER" && args.size() >= 5) ||
           (name == "GEORADIUS" && args.size() >= 6)) {
-        // key member radius .. STORE destkey
-        string_view opt = args[args.size() - 2];
-        if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
-          bonus = args.size() - 1;
+        // Options (WITHCOORD/WITHDIST/WITHHASH/COUNT/ASC/DESC/STORE/STOREDIST) are
+        // order-independent (see ParseGeoResultOptions), so walk them by arity instead of
+        // assuming STORE/STOREDIST is the penultimate argument.
+        size_t i = name == "GEORADIUSBYMEMBER" ? 4 : 5;
+        while (i < args.size()) {
+          string_view opt = args[i];
+          if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
+            if (i + 1 < args.size())
+              bonus = i + 1;
+            i += 2;
+          } else if (absl::EqualsIgnoreCase(opt, "COUNT")) {
+            i += 2;
+            if (i < args.size() && absl::EqualsIgnoreCase(args[i], "ANY"))
+              i += 1;
+          } else {
+            i += 1;
+          }
         }
       }
 
