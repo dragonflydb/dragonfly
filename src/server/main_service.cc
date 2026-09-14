@@ -1073,7 +1073,14 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
-  config_registry.RegisterMutable("jwt_validate");
+  config_registry.RegisterMutable("jwt_validate", [this](const absl::CommandLineFlag&) {
+    server_family_.ForceReauthOnLiveConnections();
+    return true;
+  });
+  config_registry.RegisterMutable("jwt_validate_url", [this](const absl::CommandLineFlag&) {
+    server_family_.ForceReauthOnLiveConnections();
+    return true;
+  });
 #ifdef WITH_SEARCH
   config_registry.RegisterMutable("MAXSEARCHRESULTS");
   config_registry.RegisterMutable("search_query_string_bytes");
@@ -1126,7 +1133,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
   if (!tcp_disabled && main_listener) {
-    acl_family_.Init(main_listener, &user_registry_);
+    acl_family_.Init(main_listener, &user_registry_,
+                     [this] { server_family_.ForceReauthOnLiveConnections(); });
   }
 
   // Initialize shard_set with a callback running once in a while in the shard threads.

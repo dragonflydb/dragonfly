@@ -230,6 +230,9 @@ class ServerFamily {
   // with a cancellation error (DfylCmd::CancelReplicas) and resetting the journal
   void ForceReplicasToFullSync();
 
+  // Clears `authenticated` on live RESP connections; call after an auth-mode config change.
+  void ForceReauthOnLiveConnections();
+
   std::optional<LastMasterSyncData> GetLastMasterData() const {
     return last_master_data_;
   }

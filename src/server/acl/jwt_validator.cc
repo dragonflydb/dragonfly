@@ -27,9 +27,10 @@ ABSL_FLAG(std::string, jwt_validate_url, "",
 ABSL_FLAG(bool, jwt_validate, false,
           "Master on/off switch for JWT-mode auth. When true, every AUTH credential is "
           "sent to --jwt_validate_url for validation instead of being checked against "
-          "the local ACL password store; --jwt_validate_url must already be set (at "
-          "startup) for this to take effect. Runtime-mutable via CONFIG SET, so JWT auth "
-          "can be toggled on/off without a restart once the endpoint is configured.");
+          "the local ACL password store; --jwt_validate_url must be non-empty for this "
+          "to take effect. Both flags are runtime-mutable via CONFIG SET, so JWT auth "
+          "can be configured and toggled on/off without a restart. Changing either flag "
+          "forces already-authenticated connections to re-authenticate.");
 
 ABSL_FLAG(uint32_t, jwt_validate_timeout_ms, 300,
           "Deadline (ms) for the whole JWT validation HTTP call (connect + request), "
@@ -88,7 +89,8 @@ bool JwtValidator::IsEnabled() {
     // Misconfigured: fall back to password auth rather than reject every AUTH.
     LOG_FIRST_N(ERROR, 1)
         << "jwt_validate is enabled but jwt_validate_url is empty; falling back to "
-           "password auth until jwt_validate_url is configured (requires a restart)";
+           "password auth until jwt_validate_url is configured (CONFIG SET jwt_validate_url "
+           "..., no restart required)";
     return false;
   }
   return true;
