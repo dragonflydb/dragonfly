@@ -119,6 +119,29 @@ TEST_F(RESPParserTest, ArrayLimit) {
   EXPECT_FALSE(RESPParser({.max_array_len = 2}).Feed("*3\r\n", 4).has_value());
 }
 
+TEST_F(RESPParserTest, SurvivesDataHeapDestruction) {
+  mi_heap_t* data_heap = mi_heap_new();
+  zmalloc_set_threadlocal_heap(data_heap);
+
+  auto reader = std::make_unique<RESPParser>();
+  std::string_view msg = "$4\r\nPING\r\n";
+  auto reply = reader->Feed(msg.data(), msg.size());
+  ASSERT_TRUE(reply.has_value());
+
+  const void* buf = reader->BufferPtrForTest();
+  EXPECT_TRUE(mi_heap_contains_block(mi_heap_get_backing(), buf));
+  EXPECT_FALSE(mi_heap_contains_block(data_heap, buf));
+
+  // Destroying data_heap must not affect the parser: none of its memory lives there.
+  zmalloc_set_threadlocal_heap(mi_heap_get_backing());
+  mi_heap_destroy(data_heap);
+
+  reply = reader->Feed("+OK\r\n", 5);
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_FALSE(reply->Empty());
+  reader.reset();
+}
+
 TEST_F(RESPParserTest, RESPIteratorTest) {
   using Fields = std::map<std::string, std::string>;
   using Docs = std::map<std::string, Fields>;

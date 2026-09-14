@@ -147,6 +147,12 @@ void zmalloc_page_is_underutilized(void* ptr, float ratio, int collect_stats, st
 char* zstrdup(const char* s);
 
 void init_zmalloc_threadlocal(void* heap);
+
+// Get/set the thread-local heap zmalloc allocates from. Unlike init_zmalloc_threadlocal(),
+// the setter is unconditional, so callers can scope it to a different heap temporarily.
+void* zmalloc_get_threadlocal_heap(void);
+void zmalloc_set_threadlocal_heap(void* heap);
+
 extern __thread ssize_t zmalloc_used_memory_tl;
 
 #undef __zm_str

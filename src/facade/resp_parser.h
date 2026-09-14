@@ -112,6 +112,11 @@ class RESPParser {
     return reader_->pos;
   }
 
+  // Exposes the read buffer's pointer, e.g. to check which heap it was allocated on.
+  const void* BufferPtrForTest() const {
+    return reader_->buf;
+  }
+
  private:
   redisReader* reader_ = nullptr;
 };

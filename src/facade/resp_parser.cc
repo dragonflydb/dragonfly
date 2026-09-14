@@ -4,15 +4,42 @@
 
 #include "facade/resp_parser.h"
 
+#include <mimalloc.h>
+
 #include <cstring>
 
 #include "base/logging.h"
+#include "util/fibers/fibers.h"
 
 extern "C" {
 #include "redis/hiredis.h"
 }
 
 namespace facade {
+
+namespace {
+
+// Scopes zmalloc onto the backing heap so redisReader outliving its shard doesn't UAF the
+// shard's data heap. Asserts no fiber preemption, since that could expose the swap to others.
+class BackingHeapScope {
+ public:
+  BackingHeapScope() : prev_heap_(zmalloc_get_threadlocal_heap()) {
+    zmalloc_set_threadlocal_heap(mi_heap_get_backing());
+  }
+
+  ~BackingHeapScope() {
+    zmalloc_set_threadlocal_heap(prev_heap_);
+  }
+
+  BackingHeapScope(const BackingHeapScope&) = delete;
+  BackingHeapScope& operator=(const BackingHeapScope&) = delete;
+
+ private:
+  util::FiberAtomicGuard fiber_guard_;
+  void* prev_heap_;
+};
+
+}  // namespace
 
 RESPParser::RESPParser() : RESPParser(Limits{}) {
 }
@@ -27,7 +54,10 @@ void RESPParser::Reset() {
 
 void RESPParser::Reset(Limits limits) {
   redisReaderFree(reader_);
-  reader_ = redisReaderCreate();
+  {
+    BackingHeapScope backing_heap;
+    reader_ = redisReaderCreate();
+  }
   CHECK(reader_);
 
   reader_->maxelements = limits.max_array_len;
@@ -77,15 +107,23 @@ std::optional<RESPObj> RESPParser::Feed(const char* data, size_t len, size_t* co
 
   const size_t buffered_before = reader_->len - reader_->pos;
   int status = REDIS_OK;
-  if (len != 0) {  // if no new data we check is previoud data produced a reply
-    status = redisReaderFeed(reader_, data, len);
-    if (status != REDIS_OK) {
-      log_error(status);
-      return std::nullopt;
+  bool feed_failed = false;
+  void* reply_obj = nullptr;
+  {
+    BackingHeapScope backing_heap;
+    if (len != 0) {  // if no new data we check is previoud data produced a reply
+      status = redisReaderFeed(reader_, data, len);
+      feed_failed = status != REDIS_OK;
+    }
+    if (!feed_failed) {
+      status = redisReaderGetReply(reader_, &reply_obj);
     }
   }
-  void* reply_obj = nullptr;
-  status = redisReaderGetReply(reader_, &reply_obj);
+
+  if (feed_failed) {
+    log_error(status);
+    return std::nullopt;
+  }
   if (consumed) {
     const size_t buffered_after = reader_->len - reader_->pos;
     DCHECK_LE(buffered_after, buffered_before + len);
