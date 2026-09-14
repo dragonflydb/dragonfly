@@ -4,6 +4,8 @@
 
 #include "server/namespaces.h"
 
+#include <ranges>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
@@ -17,13 +19,24 @@ namespace dfly {
 
 using namespace std;
 
+void DbSliceDeleter::operator()(DbSlice* ptr) const {
+  if (!ptr)
+    return;
+  auto* mr = ptr->shard_owner()->memory_resource();
+  std::destroy_at(ptr);
+  mr->deallocate(ptr, sizeof(DbSlice), alignof(DbSlice));
+}
+
 Namespace::Namespace() {
   shard_db_slices_.resize(shard_set->size());
   shard_blocking_controller_.resize(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
     ShardId sid = es->shard_id();
-    shard_db_slices_[sid] = make_unique<DbSlice>(sid, absl::GetFlag(FLAGS_cache_mode), es, this);
+    auto* mr = es->memory_resource();
+    void* storage = mr->allocate(sizeof(DbSlice), alignof(DbSlice));
+    shard_db_slices_[sid].reset(std::construct_at(static_cast<DbSlice*>(storage), sid,
+                                                  absl::GetFlag(FLAGS_cache_mode), es, this));
   });
 }
 
@@ -74,11 +87,22 @@ void Namespaces::Clear() {
 
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
-    for (auto& ns : ABSL_TS_UNCHECKED_READ(namespaces_)) {
-      ns.second.shard_db_slices_[es->shard_id()].reset();
+    LOG(ERROR) << "Namespaces::Clear: DbSlice::ShutdownThreadLocal shard=" << es->shard_id();
+    // We will not destroy the db slice, so clear the pending delete list. The orphaned
+    // DbSlice/DashTable pages get reclaimed in bulk when the shard's heap is destroyed
+    // in EngineShard::DestroyThreadLocal(), right after this runs.
+    DbSlice::ShutdownThreadLocal();
+
+    for (auto& val : ABSL_TS_UNCHECKED_READ(namespaces_) | views::values) {
+      auto& db_slice = val.shard_db_slices_[es->shard_id()];
+      LOG(ERROR) << "Namespaces::Clear: PrepareForSingleShotHeapDestroy shard=" << es->shard_id();
+      db_slice->PrepareForSingleShotHeapDestroy();
+      db_slice.release();
     }
+    LOG(ERROR) << "Namespaces::Clear: shard done, shard=" << es->shard_id();
   });
 
+  LOG(ERROR) << "Namespaces::Clear: all shards done, clearing namespaces_ map";
   namespaces_.clear();
 }
 

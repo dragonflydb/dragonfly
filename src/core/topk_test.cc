@@ -31,6 +31,7 @@ class TOPKTest : public ::testing::Test {
   double ComputeDecayProbability(TOPK* topk, uint32_t count) const {
     return topk->ComputeDecayProbability(count);
   }
+
   TOPK topk_;
 };
 

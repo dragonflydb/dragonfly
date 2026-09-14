@@ -1173,8 +1173,11 @@ void Service::Shutdown() {
 
   engine_varz.reset();
 
+  LOG(ERROR) << "Service::Shutdown: shard_set->PreShutdown starting";
   shard_set->PreShutdown();
+  LOG(ERROR) << "Service::Shutdown: shard_set->PreShutdown done, shard_set->Shutdown starting";
   shard_set->Shutdown();
+  LOG(ERROR) << "Service::Shutdown: shard_set->Shutdown done";
 
   delete channel_store;
   channel_store = nullptr;

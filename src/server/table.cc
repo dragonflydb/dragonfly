@@ -97,6 +97,11 @@ void LockTable::Release(uint64_t fp, IntentLock::Mode mode) {
     locks_.erase(it);
 }
 
+void LockTable::PrepareForSingleShotHeapDestroy() {
+  CHECK(locks_.empty());
+  locks_.rehash(0);
+}
+
 [[maybe_unused]] constexpr size_t kSzTable = sizeof(DbTable);
 
 DbTable::SampleTopKeys::~SampleTopKeys() {
@@ -110,7 +115,8 @@ DbTable::SampleUniqueKeys::~SampleUniqueKeys() {
 DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       mcflag(0, detail::ExpireTablePolicy{}, mr),
-      index(db_index) {
+      index(db_index),
+      memory_resource_(mr) {
   if (IsClusterEnabled()) {
     slots_stats.reset(new SlotStats[kMaxSlotNum + 1]);
   }
@@ -121,6 +127,34 @@ DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
   delete sample_top_keys;
   delete sample_unique_keys;
+  delete sample_values_hist;
+}
+
+void DbTable::PrepareForSingleShotHeapDestroy() {
+  LOG(ERROR) << "DbTable::PrepareForSingleShotHeapDestroy: trans_locks db_index=" << index;
+  trans_locks.PrepareForSingleShotHeapDestroy();
+  CHECK(watched_keys.empty());
+  watched_keys.rehash(0);
+
+  LOG(ERROR) << "DbTable::PrepareForSingleShotHeapDestroy: sample structures db_index=" << index;
+  delete std::exchange(sample_top_keys, nullptr);
+  delete std::exchange(sample_unique_keys, nullptr);
+  delete std::exchange(sample_values_hist, nullptr);
+  slots_stats.reset();
+  LOG(ERROR) << "DbTable::PrepareForSingleShotHeapDestroy: done db_index=" << index;
+}
+
+void intrusive_ptr_add_ref(DbTable* table) noexcept {
+  ++table->use_count_;
+}
+
+void intrusive_ptr_release(DbTable* table) noexcept {
+  DCHECK_GT(table->use_count_, 0u);
+  if (--table->use_count_ == 0) {
+    auto* mr = table->memory_resource_;
+    std::destroy_at(table);
+    mr->deallocate(table, sizeof(DbTable), alignof(DbTable));
+  }
 }
 
 void DbTable::Clear() {

@@ -19,6 +19,10 @@
 #include "facade/reply_capture.h"
 #include "facade/resp_expr_test_utils.h"
 
+extern "C" {
+#include "redis/zmalloc.h"
+}
+
 using namespace testing;
 using namespace std;
 

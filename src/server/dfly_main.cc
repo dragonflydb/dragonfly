@@ -489,6 +489,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   acceptor->Wait();
 
   version_monitor.Shutdown();
+
   service.Shutdown();
 }
 
