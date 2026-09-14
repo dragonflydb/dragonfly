@@ -651,10 +651,29 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 
   trans->Execute(std::move(cb), false);
 
+  // RunPair watches "src" on both shards, so the dest shard ends up with a watch keyed by
+  // "src" that the generic conclusion cleanup (keyed by dest) never removes. Drop it manually
+  // on every concluding path, otherwise the queue keeps a dangling Transaction*.
+  auto cleanup_src_watch = [&](Transaction* t, EngineShard* shard) {
+    if (t->GetShardArgs(shard->shard_id()).Front() != dest)
+      return;
+    if (auto* bc = t->GetNamespace().GetBlockingController(shard->shard_id()); bc) {
+      IndexSlice slice(0, 1);
+      ShardArgs sa{cmn::ArgSlice{&src, 1}, absl::MakeSpan(&slice, 1)};
+      bc->RemovedWatched(sa, t);
+    }
+  };
+
   if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
     result = find_res[0] ? find_res[1] : find_res[0];
-    if (conclude_on_error)
-      trans->Conclude();
+    if (conclude_on_error) {
+      trans->Execute(
+          [&](Transaction* t, EngineShard* shard) {
+            cleanup_src_watch(t, shard);
+            return OpStatus::OK;
+          },
+          true);
+    }
   } else {
     // Everything is ok, lets proceed with the mutations.
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -668,18 +687,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
         DVLOG(1) << "Pushing value: " << val << " to list: " << dest;
 
         OpPush(op_args, key, dest_dir, false, ArgSlice{val}, true);
-
-        // blocking_controller does not have to be set with non-blocking transactions.
-        auto blocking_controller = t->GetNamespace().GetBlockingController(shard->shard_id());
-        if (blocking_controller) {
-          IndexSlice slice(0, 1);
-          ShardArgs sa{cmn::ArgSlice{&src, 1}, absl::MakeSpan(&slice, 1)};
-
-          // hack, again. since we hacked which queue we are waiting on (see RunPair)
-          // we must clean-up src key here manually. See RunPair why we do this.
-          // in short- we suspended on "src" on both shards.
-          blocking_controller->RemovedWatched(sa, t);
-        }
+        cleanup_src_watch(t, shard);
       } else {
         DVLOG(1) << "Popping value from list: " << key;
         OpPop(op_args, key, src_dir, 1, false, true);
