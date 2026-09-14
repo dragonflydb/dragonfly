@@ -44,6 +44,7 @@ extern "C" {
 #include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
+#include "server/acl/jwt_validator.h"
 #include "server/acl/user_registry.h"
 #include "server/acl/validator.h"
 #include "server/channel_store.h"
@@ -1073,6 +1074,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
+  // TODO: CONFIG SET currently lets any authenticated client flip jwt_validate off at
+  // runtime, bypassing JWT enforcement without a restart. This breaks the security
+  // guarantee that req_auth depends on in Service::CreateContext.
   config_registry.RegisterMutable("jwt_validate");
 #ifdef WITH_SEARCH
   config_registry.RegisterMutable("MAXSEARCHRESULTS");
@@ -1895,12 +1899,14 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
-    // Memcached protocol doesn't support authentication, so we don't require it
+    // Memcached protocol doesn't support authentication, so we don't require it.
+    // This also means JWT validation is not supported/enforced for Memcached connections.
     if (owner->GetProtocol() == Protocol::MEMCACHE) {
       res->req_auth = false;
       res->authenticated = true;  // Automatically authenticated for Memcached protocol
     } else {
-      res->req_auth = !user_registry_.AuthUser("default", "");
+      // JWT validation must gate every connection even if the local "default" user is nopass.
+      res->req_auth = acl::JwtValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
     }
   }
 
