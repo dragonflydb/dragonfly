@@ -4093,6 +4093,7 @@ constexpr uint32_t kHello = FAST | CONNECTION;
 constexpr uint32_t kLastSave = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kLatency = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kMemory = READ | SLOW;
+constexpr uint32_t kShrink = WRITE | FAST;
 constexpr uint32_t kSave = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kShutDown = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kSlaveOf = ADMIN | SLOW | DANGEROUS;
@@ -4100,7 +4101,7 @@ constexpr uint32_t kReplicaOf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kReplTakeOver = DANGEROUS;
 constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
-constexpr uint32_t kWait = SLOW | CONNECTION;
+constexpr uint32_t kWait = SLOW | CONNECTION | BLOCKING;
 constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
 constexpr uint32_t kModule = ADMIN | SLOW | DANGEROUS;
@@ -4110,7 +4111,7 @@ constexpr uint32_t kDfly = ADMIN;
 
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
-  constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST;
+  constexpr auto kMemOpts = CO::LOADING | CO::READONLY;
   registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
@@ -4124,12 +4125,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"FLUSHALL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
              .HFUNC(FlushDb)
       << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
-      << CI{"HELLO", CO::LOADING, -1, 0, 0, acl::kHello}.HFUNC(Hello)
+      << CI{"HELLO", CO::LOADING | CO::FAST, -1, 0, 0, acl::kHello}.HFUNC(Hello)
       << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)
-      << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, acl::kLatency}.HFUNC(
-             Latency)
+      << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kLatency}.HFUNC(Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
-      << CI{"SHRINK", CO::JOURNALED | CO::FAST, 2, 1, 1, acl::kMemory}.HFUNC(Shrink)
+      << CI{"SHRINK", CO::JOURNALED | CO::FAST, 2, 1, 1, acl::kShrink}.HFUNC(Shrink)
       << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kSave}.HFUNC(Save)
       << CI{"SHUTDOWN",    CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::DANGEROUS, -1, 0, 0,
             acl::kShutDown}
@@ -4142,7 +4142,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"WAIT", CO::NOSCRIPT | CO::BLOCKING, 3, 0, 0, acl::kWait}.HFUNC(Wait)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)
-      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
+      << CI{"SLOWLOG", CO::ADMIN, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly)
       << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);

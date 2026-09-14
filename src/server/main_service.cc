@@ -3096,8 +3096,8 @@ void Service::Register(CommandRegistry* registry) {
       << CI{"QUIT", CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"RESET", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kReset}.HFUNC(Reset)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kMulti}.HFUNC(Multi)
-      << CI{"WATCH", CO::LOADING, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
-      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
+      << CI{"WATCH", CO::LOADING | CO::FAST, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
+      << CI{"UNWATCH", CO::LOADING | CO::FAST, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
       << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDiscard}.MFUNC(Discard)
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEval}
              .MFUNC(Eval)
@@ -3126,7 +3126,7 @@ void Service::Register(CommandRegistry* registry) {
              PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, acl::kFunction}.MFUNC(Function)
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, acl::kMonitor}.MFUNC(Monitor)
-      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
+      << CI{"PUBSUB", CO::LOADING, -1, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
       << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, acl::kCommand}.MFUNC(Command);
 }
 
