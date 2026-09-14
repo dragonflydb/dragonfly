@@ -69,7 +69,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
-    ResetParser(RedisParser::Mode::CLIENT);
+    ResetParser();
 
     std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", node_id, " ", shard_id);
     VLOG(1) << "cmd: " << cmd;
@@ -276,7 +276,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     VLOG(1) << "Migration initiating";
-    ResetParser(RedisParser::Mode::CLIENT);
+    ResetParser();
     auto cmd = absl::StrCat("DFLYMIGRATE INIT ", cf_->MyID(), " ", slot_migrations_.size());
     for (const auto& s : migration_info_.slot_ranges) {
       absl::StrAppend(&cmd, " ", s.start, " ", s.end);

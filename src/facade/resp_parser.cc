@@ -14,8 +14,23 @@ extern "C" {
 
 namespace facade {
 
-RESPParser::RESPParser() {
+RESPParser::RESPParser() : RESPParser(Limits{}) {
+}
+
+RESPParser::RESPParser(Limits limits) {
+  Reset(limits);
+}
+
+void RESPParser::Reset() {
+  Reset(Limits{});
+}
+
+void RESPParser::Reset(Limits limits) {
+  redisReaderFree(reader_);
   reader_ = redisReaderCreate();
+  CHECK(reader_);
+
+  reader_->maxelements = limits.max_array_len;
 }
 
 RESPObj::RESPObj(RESPObj&& other) noexcept
@@ -47,21 +62,37 @@ size_t RESPObj::Size() const {
   return (type == Type::ARRAY || type == Type::MAP || type == Type::SET) ? reply_->elements : 1;
 }
 
-std::optional<RESPObj> RESPParser::Feed(const char* data, size_t len) {
+std::optional<RESPObj> RESPParser::Feed(const char* data, size_t len, size_t* consumed) {
+  if (consumed) {
+    *consumed = 0;
+  }
+
+  // The peer controls this data, so only log a bounded prefix of it.
+  auto log_error = [this, data, len](int status) {
+    constexpr size_t kMaxLoggedData = 256;
+    std::string_view sv = data ? std::string_view{data, len} : std::string_view{};
+    LOG(ERROR) << "RESP parser error: " << status << " description: " << reader_->errstr
+               << " data: " << sv.substr(0, kMaxLoggedData);
+  };
+
+  const size_t buffered_before = reader_->len - reader_->pos;
   int status = REDIS_OK;
   if (len != 0) {  // if no new data we check is previoud data produced a reply
     status = redisReaderFeed(reader_, data, len);
     if (status != REDIS_OK) {
-      LOG(ERROR) << "RESP parser error: " << status << " description: " << reader_->errstr
-                 << " data: " << std::string_view{data, len};
+      log_error(status);
       return std::nullopt;
     }
   }
   void* reply_obj = nullptr;
   status = redisReaderGetReply(reader_, &reply_obj);
+  if (consumed) {
+    const size_t buffered_after = reader_->len - reader_->pos;
+    DCHECK_LE(buffered_after, buffered_before + len);
+    *consumed = buffered_before + len - buffered_after;
+  }
   if (status != REDIS_OK) {
-    LOG(ERROR) << "RESP parser error: " << status << " description: " << reader_->errstr
-               << " data: " << data;
+    log_error(status);
     return std::nullopt;
   }
 

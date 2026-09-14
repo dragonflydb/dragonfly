@@ -17,6 +17,7 @@ extern "C" {
 #include <sys/ioctl.h>
 
 #include <boost/asio/ip/tcp.hpp>
+#include <limits>
 #include <string>
 
 #include "base/flags.h"
@@ -56,6 +57,43 @@ using namespace boost::asio;
 using namespace facade;
 using absl::GetFlag;
 using absl::StrCat;
+
+namespace {
+
+// Leaves dest empty if the reply is not a flat array of strings.
+bool CopyCommandArgs(const RESPObj& reply, cmn::BackedArguments* dest) {
+  dest->clear();
+
+  if (reply.GetType() != RESPObj::Type::ARRAY)
+    return false;
+
+  auto array = reply.As<RESPArray>();
+  if (!array || array->Empty())
+    return false;
+
+  size_t total_size = 0;
+  for (size_t i = 0; i < array->Size(); ++i) {
+    RESPObj arg = (*array)[i];
+    if (arg.GetType() != RESPObj::Type::STRING)
+      return false;
+
+    auto value = arg.As<string_view>();
+    DCHECK(value);
+    total_size += value->size() + 1;
+  }
+
+  // BackedArguments indexes its storage with uint32 offsets.
+  if (total_size > numeric_limits<uint32_t>::max())
+    return false;
+
+  dest->Reserve(array->Size(), total_size);
+  for (size_t i = 0; i < array->Size(); ++i) {
+    dest->PushArg(*(*array)[i].As<string_view>());
+  }
+  return true;
+}
+
+}  // namespace
 
 error_code ProtocolClient::Recv(FiberSocketBase* input, base::IoBuf* dest) {
   auto buf = dest->AppendBuffer();
@@ -225,7 +263,7 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
 
   auto masterauth = GetFlag(FLAGS_masterauth);
   auto masteruser = GetFlag(FLAGS_masteruser);
-  ResetParser(RedisParser::Mode::CLIENT);
+  ResetParser();
   if (!masterauth.empty()) {
     auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
                                   : StrCat("AUTH ", masteruser, " ", masterauth);
@@ -338,6 +376,48 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(uint32_t t
   auto res = ReadRespReply();
   sock_->set_timeout(prev_timeout);
   return res;
+}
+
+io::Result<ProtocolClient::ReadCommandRes> ProtocolClient::ReadRespCommand(
+    base::IoBuf* buffer, cmn::BackedArguments* dest) {
+  DCHECK(!parser_);
+  DCHECK(buffer);
+  DCHECK(dest);
+
+  size_t total_read = 0, consumed = 0;
+
+  // The parser may already hold a complete command left over from an earlier read.
+  auto response = resp_parser_.Feed(nullptr, 0, &consumed);
+  total_read += consumed;
+
+  while (response && response->Empty()) {
+    if (buffer->InputLen() == 0) {
+      DCHECK_GT(buffer->AppendLen(), 0u);
+      if (auto ec = Recv(sock_.get(), buffer); ec) {
+        return nonstd::make_unexpected(ec);
+      }
+    }
+
+    auto input = buffer->InputBuffer();
+    response =
+        resp_parser_.Feed(reinterpret_cast<const char*>(input.data()), input.size(), &consumed);
+    // Feed copies everything it is given, so the buffer can be released right away.
+    buffer->ConsumeInput(input.size());
+    total_read += consumed;
+  }
+
+  // Keep the wire-size representation in ReadCommandRes bounded.
+  if (!response || total_read > numeric_limits<uint32_t>::max()) {
+    return nonstd::make_unexpected(make_error_code(errc::bad_message));
+  }
+
+  if (!CopyCommandArgs(*response, dest)) {
+    LOG(ERROR) << "Invalid Redis replication command, reply type: "
+               << static_cast<int>(response->GetType()) << ", elements: " << response->Size();
+    return nonstd::make_unexpected(make_error_code(errc::bad_message));
+  }
+
+  return ReadCommandRes{static_cast<uint32_t>(total_read), resp_parser_.HasBufferedInput()};
 }
 
 io::Result<dfly::RESPObj> ProtocolClient::TakeRespReply(uint32_t timeout, base::IoBuf* buffer,
@@ -469,13 +549,19 @@ error_code ProtocolClient::SendCommandAndReadResponse(string_view command) {
   return response_res.has_value() ? error_code{} : response_res.error();
 }
 
-void ProtocolClient::ResetParser(RedisParser::Mode mode) {
-  // Bound the parser so a peer cannot force a huge allocation. SERVER mode mirrors an
-  // upstream master's commands, whose arg count can exceed our client cap.
-  uint32_t max_arr_len = GetFlag(FLAGS_max_multi_bulk_len);
-  if (mode == RedisParser::Mode::SERVER && max_arr_len < (1u << 20))
-    max_arr_len = 1u << 20;
-  parser_.reset(new RedisParser(mode, max_arr_len, GetFlag(FLAGS_max_bulk_len)));
+void ProtocolClient::ResetParser() {
+  parser_ = make_unique<RedisParser>(RedisParser::Mode::CLIENT, GetFlag(FLAGS_max_multi_bulk_len),
+                                     GetFlag(FLAGS_max_bulk_len));
+  resp_parser_.Reset();
+}
+
+void ProtocolClient::ResetCommandParser() {
+  parser_.reset();
+
+  // An upstream master's commands may contain more arguments than regular client requests.
+  uint32_t max_array_len = max(GetFlag(FLAGS_max_multi_bulk_len), 1u << 20);
+  // TODO: Add bulk-length, line-length, and nesting-depth limits to RESPParser.
+  resp_parser_.Reset({.max_array_len = max_array_len});
 }
 
 uint64_t ProtocolClient::LastIoTime() const {
