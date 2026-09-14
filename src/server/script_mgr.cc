@@ -153,8 +153,8 @@ void ScriptMgr::LoadCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* 
   string_view body = parser.Next<string_view>();
   auto rb = static_cast<RedisReplyBuilder*>(builder);
   if (body.empty()) {
-    char sha[41];
-    Interpreter::FuncSha1(body, sha);
+    auto sha_buf = Interpreter::FuncSha1(body);
+    string_view sha{sha_buf.data(), sha_buf.size()};
     return rb->SendBulkString(sha);
   }
 
@@ -272,9 +272,8 @@ unique_ptr<char[]> CharBufFromSV(string_view sv) {
 
 nonstd::expected<string, GenericError> ScriptMgr::Insert(string_view body,
                                                          Interpreter* interpreter) {
-  char sha_buf[64];
-  Interpreter::FuncSha1(body, sha_buf);
-  string_view sha{sha_buf, std::strlen(sha_buf)};
+  auto sha_buf = Interpreter::FuncSha1(body);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   if (interpreter->Exists(sha)) {
     return string{sha};

@@ -123,9 +123,8 @@ void InterpreterTest::SetGlobalArray(const char* name, const vector<string_view>
 }
 
 bool InterpreterTest::Execute(string_view script) {
-  char sha_buf[64];
-  Interpreter::FuncSha1(script, sha_buf);
-  string_view sha{sha_buf, std::strlen(sha_buf)};
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   string result;
   Interpreter::AddResult add_res = intptr_.AddFunction(sha, script, &result);
@@ -233,11 +232,10 @@ TEST_F(InterpreterTest, Add) {
   const char* s1 = "return 0";
   const char* s2 = "foobar";
 
-  char sha_buf1[64], sha_buf2[64];
-  Interpreter::FuncSha1(s1, sha_buf1);
-  Interpreter::FuncSha1(s2, sha_buf2);
-  string_view sha1{sha_buf1, std::strlen(sha_buf1)};
-  string_view sha2{sha_buf2, std::strlen(sha_buf2)};
+  auto sha_buf1 = Interpreter::FuncSha1(s1);
+  auto sha_buf2 = Interpreter::FuncSha1(s2);
+  string_view sha1{sha_buf1.data(), sha_buf1.size()};
+  string_view sha2{sha_buf2.data(), sha_buf2.size()};
 
   string err;
 
@@ -782,9 +780,8 @@ TEST_F(InterpreterTest, LuaGcStatistic) {
         end
        )";
 
-  char sha_buf[64];
-  Interpreter::FuncSha1(script, sha_buf);
-  string_view sha{sha_buf, std::strlen(sha_buf)};
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   string result;
   Interpreter::AddResult add_res = interpreter->AddFunction(sha, script, &result);
@@ -835,13 +832,12 @@ TEST_F(InterpreterTest, GcAccountingAfterReturn) {
 
   // Generate ~100KB of garbage.
   string script = "local s = string.rep('x', 1024 * 100) return #s";
-  char sha_buf[64];
-  Interpreter::FuncSha1(script, sha_buf);
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   string result;
-  ASSERT_EQ(Interpreter::ADD_OK,
-            interpreter->AddFunction({sha_buf, strlen(sha_buf)}, script, &result));
-  ASSERT_EQ(Interpreter::RUN_OK, interpreter->RunFunction({sha_buf, strlen(sha_buf)}, &error_));
+  ASSERT_EQ(Interpreter::ADD_OK, interpreter->AddFunction(sha, script, &result));
+  ASSERT_EQ(Interpreter::RUN_OK, interpreter->RunFunction(sha, &error_));
 
   auto& stats = InterpreterManager::tl_stats();
   uint64_t gc_before = stats.force_gc_calls;
