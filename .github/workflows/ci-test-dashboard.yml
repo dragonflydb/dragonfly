@@ -41,7 +41,7 @@ jobs:
       PUBLISH_PREFIX: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_prefix || vars.CI_TEST_DASHBOARD_PREFIX }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Authenticate to AWS
         uses: aws-actions/configure-aws-credentials@v6
