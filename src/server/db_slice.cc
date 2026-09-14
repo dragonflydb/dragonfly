@@ -1472,13 +1472,20 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
     return it;
   }
 
-  int64_t expire_time = it->first.GetExpireTime();
+  if (!it->first.IsExpired(cntx.time_now_ms) || !Expire(cntx, it, events)) {
+    return it;
+  }
+
+  return PrimeIterator{};
+}
+
+bool DbSlice::Expire(const Context& cntx, PrimeIterator it, vector<string>* events) const {
+  DCHECK(it->first.IsExpired(cntx.time_now_ms));
 
   // Never do expiration if expiration is disabled, or on replicas unless replica_delete_expired
   // is enabled (which allows replicas to proactively delete expired keys on the read path).
-  if (int64_t(cntx.time_now_ms) < expire_time || !expire_allowed_ ||
-      (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
-    return it;
+  if (!expire_allowed_ || (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
+    return false;
   }
 
   string scratch;
@@ -1506,7 +1513,7 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
   ++events_.expired_keys;
   db->stats.events.expired_keys++;
 
-  return PrimeIterator{};
+  return true;
 }
 
 void DbSlice::ExpireAllIfNeeded() {
