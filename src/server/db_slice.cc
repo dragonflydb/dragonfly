@@ -1240,6 +1240,16 @@ DbSlice::ExpireParams::ExpireParams(TimeUnit unit, int64_t svalue, uint64_t now_
   ms_timestamp = ms_value + now_ms;
 }
 
+bool DbSlice::ExpireParams::IsValid(uint64_t now_ms, int64_t max_ttl_ms) const {
+  auto [ttl_ms, expire_at_ms] = Calculate(now_ms, false);
+  return expire_at_ms >= 0 && ttl_ms <= max_ttl_ms;
+}
+
+bool DbSlice::ExpireParams::IsExpired(uint64_t now_ms) const {
+  return !persist && ms_timestamp >= 0 && ms_timestamp < kOverflow &&
+         static_cast<uint64_t>(ms_timestamp) <= now_ms;
+}
+
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool cap) const {
   if (persist)
     return {0, 0};
@@ -1253,6 +1263,19 @@ pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool ca
   }
 
   return {rel_ms, ms_timestamp};
+}
+
+uint64_t DbSlice::ExpireParams::DeadlineSec() const {
+  DCHECK(!persist);
+  DCHECK_GE(ms_timestamp, 0);
+  DCHECK_LT(ms_timestamp, kOverflow);
+  return ms_timestamp / 1000 + (ms_timestamp % 1000 != 0);
+}
+
+uint64_t DbSlice::ExpireParams::TtlSec(uint64_t now_ms) const {
+  if (IsExpired(now_ms))
+    return 0;
+  return DeadlineSec() - now_ms / 1000;
 }
 
 void DbSlice::ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv) {
@@ -1271,11 +1294,11 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return kPersistValue;
   }
 
-  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms, false);
-  if (abs_msec < 0 || rel_msec > kMaxExpireDeadlineMs) {
+  if (!params.IsValid(cntx.time_now_ms)) {
     return OpStatus::OUT_OF_RANGE;
   }
 
+  const int64_t abs_msec = params.ms_timestamp;
   int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
   const bool has_expire = prime_it->first.HasExpire();
   if (has_expire)
@@ -1295,9 +1318,8 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return OpStatus::SKIPPED;
   }
 
-  // If we update and the new value is already expired, delete the key
-  // Already-expired new value: delete; the caller emits the expired event after journaling.
-  if (rel_msec <= 0) {
+  // Delete an already expired key; the caller emits the event after journaling.
+  if (params.IsExpired(cntx.time_now_ms)) {
     Del(cntx, prime_it);
     ++events_.expired_keys;
     db_arr_[cntx.db_index]->stats.events.expired_keys++;

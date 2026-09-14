@@ -20,6 +20,10 @@ incompatible.
 Expirations are limited to 8 years. For commands with millisecond precision like PEXPIRE or PSETEX,
 expirations greater than 2^28ms are quietly rounded to the nearest second losing precision of less than 0.001%.
 
+Hash field expirations use one-second precision. Deadlines are rounded up to the next whole
+second, so fields never expire before the requested deadline and may remain live for less than
+one additional second.
+
 ## Lua
 We use lua 5.4.4 that has been released in 2022.
 That means we also support [lua integers](https://github.com/redis/redis/issues/5261).

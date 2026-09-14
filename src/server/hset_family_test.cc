@@ -196,6 +196,7 @@ TEST_F(HSetFamilyTest, HIncrRespected) {
 }
 
 TEST_F(HSetFamilyTest, HIncrCmdsPreserveTtl) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
   Run({"hsetex", "key", "5", "a", "1"});
   EXPECT_EQ(5, CheckedInt({"fieldttl", "key", "a"}));
   EXPECT_EQ(2, CheckedInt({"hincrby", "key", "a", "1"}));
@@ -502,7 +503,7 @@ TEST_F(HSetFamilyTest, HSetEx) {
   resp = Run({"HSETEX", "k", "NX", short_time, "field4", "value"});
   EXPECT_THAT(resp, IntArg(0));
 
-  AdvanceTime(1100);
+  AdvanceTime(1000);
   resp = Run({"HGET", "k", "field4"});
   EXPECT_THAT(resp,
               "value");  // HSETEX with NX option; old expiration time was NOT replaced by a new one
@@ -518,7 +519,8 @@ TEST_F(HSetFamilyTest, HSetEx) {
   EXPECT_EQ(CheckedInt({"FIELDTTL", "k", "kttlfield"}), 100);
   EXPECT_EQ(Run({"FIELDTTL", "k", "afield"}).GetInt(), 1);
   EXPECT_EQ(Run({"HGET", "k", "afield"}), "aval");
-  // make afield expire
+
+  // Expiring afield leaves kttlfield's longer TTL intact.
   AdvanceTime(1000);
   EXPECT_THAT(Run({"HGET", "k", "afield"}), ArgType(RespExpr::NIL));
 
@@ -636,12 +638,16 @@ TEST_F(HSetFamilyTest, HSetExRedisFormat) {
   EXPECT_THAT(Run({"HSETEX", "k", "FIELDS", "1", "exf", "v2"}), IntArg(1));
   EXPECT_EQ(Run({"FIELDTTL", "k", "exf"}).GetInt(), -1);
 
-  // KEEPTTL retains the existing TTL while updating the value.
+  // KEEPTTL preserves individual deadlines; new fields stay persistent.
   EXPECT_THAT(Run({"HSETEX", "k", "EX", "50", "FIELDS", "1", "kf", "v1"}), IntArg(1));
   EXPECT_EQ(Run({"FIELDTTL", "k", "kf"}).GetInt(), 50);
-  EXPECT_THAT(Run({"HSETEX", "k", "KEEPTTL", "FIELDS", "1", "kf", "v2"}), IntArg(1));
-  EXPECT_EQ(Run({"HGET", "k", "kf"}), "v2");
-  EXPECT_EQ(Run({"FIELDTTL", "k", "kf"}).GetInt(), 50);
+  EXPECT_THAT(
+      Run({"HSETEX", "k", "KEEPTTL", "FIELDS", "3", "kf", "v2", "pxatf", "v2", "persistent", "v3"}),
+      IntArg(1));
+  EXPECT_THAT(Run({"HMGET", "k", "kf", "pxatf", "persistent"}), RespElementsAre("v2", "v2", "v3"));
+  EXPECT_THAT(Run({"HPEXPIRETIME", "k", "FIELDS", "3", "kf", "pxatf", "persistent"}),
+              RespElementsAre(IntArg((kMemberExpiryBase + 50) * 1000),
+                              IntArg((kMemberExpiryBase + 100) * 1000), IntArg(-1)));
 
   // FNX: only set when none of the fields exist.
   EXPECT_THAT(Run({"HSETEX", "k", "FNX", "FIELDS", "1", "fnxf", "v1"}), IntArg(1));
@@ -683,14 +689,25 @@ TEST_F(HSetFamilyTest, HSetExRedisFormat) {
               ErrArg("invalid expire time"));
   EXPECT_THAT(Run({"HSETEX", "k", "EXAT", "9223372036854775", "FIELDS", "1", "f", "v"}),
               ErrArg("invalid expire time"));
-  EXPECT_THAT(Run({"HSETEX", "k", "EX", "0", "FIELDS", "1", "f", "v"}),
-              ErrArg("invalid expire time"));
+  EXPECT_THAT(
+      Run({"HSETEX", "k", "PX", absl::StrCat(kMaxExpireDeadlineMs + 1), "FIELDS", "1", "f", "v"}),
+      ErrArg("invalid expire time"));
+  // Non-positive inputs normalize to an expired deadline, which HSETEX rejects for every unit.
+  for (string_view type : {"EX", "PX", "EXAT", "PXAT"}) {
+    for (string_view value : {"0", "-1"}) {
+      EXPECT_THAT(Run({"HSETEX", "k", type, value, "FIELDS", "1", "f", "v"}),
+                  ErrArg("invalid expire time"));
+    }
+  }
   // A non-integer expiry value still reports the integer error (matching Redis).
   EXPECT_THAT(Run({"HSETEX", "k", "EX", "abc", "FIELDS", "1", "f", "v"}),
               ErrArg("value is not an integer or out of range"));
   // A past EXAT is in the past -> rejected.
   EXPECT_THAT(Run({"HSETEX", "k", "EXAT", "1", "FIELDS", "1", "f", "v"}),
               ErrArg("invalid expire time"));
+  EXPECT_THAT(
+      Run({"HSETEX", "k", "PXAT", absl::StrCat(TEST_current_time_ms), "FIELDS", "1", "f", "v"}),
+      ErrArg("invalid expire time"));
 
   // Error: numfields must match the number of field/value pairs.
   EXPECT_THAT(Run({"HSETEX", "k", "FIELDS", "2", "f", "v"}), ErrArg("must match"));
@@ -753,6 +770,7 @@ TEST_F(HSetFamilyTest, Issue1140) {
 }
 
 TEST_F(HSetFamilyTest, Issue2102) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
   // Set key with element that will expire after 1s
   EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", "k1", "v1"}), 1);
   AdvanceTime(10'000);
@@ -760,6 +778,7 @@ TEST_F(HSetFamilyTest, Issue2102) {
 }
 
 TEST_F(HSetFamilyTest, HExpire) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
   EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0", "k1", "v1", "k2", "v2"}), 3);
   EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "3", "k0", "k1", "k2"}),
               RespArray(ElementsAre(IntArg(1), IntArg(1), IntArg(1))));
@@ -838,11 +857,31 @@ TEST_F(HSetFamilyTest, HExpireNumFieldsErrors) {
 }
 
 TEST_F(HSetFamilyTest, HExpireNoExpireEarly) {
-  EXPECT_EQ(CheckedInt({"HSET", "key", "k0", "v0", "k1", "v1"}), 2);
-  EXPECT_THAT(Run({"HEXPIRE", "key", "10", "FIELDS", "2", "k0", "k1"}),
-              RespArray(ElementsAre(IntArg(1), IntArg(1))));
-  AdvanceTime(9'000);
-  EXPECT_THAT(Run({"HGETALL", "key"}), RespArray(UnorderedElementsAre("k0", "v0", "k1", "v1")));
+  const int64_t base_ms = kMemberExpiryBase * 1000;
+  const vector<vector<string>> commands = {
+      {"HEXPIRE", "hash", "1", "FIELDS", "1", "field"},
+      {"FIELDEXPIRE", "hash", "1", "field"},
+      {"HSETEX", "hash", "1", "field", "value"},
+      {"HSETEX", "hash", "PX", "200", "FIELDS", "1", "field", "value"},
+      {"HSETEX", "hash", "PXAT", absl::StrCat(base_ms + 1200), "FIELDS", "1", "field", "value"},
+      {"HGETEX", "hash", "PX", "200", "FIELDS", "1", "field"},
+      {"HGETEX", "hash", "PXAT", absl::StrCat(base_ms + 1200), "FIELDS", "1", "field"},
+  };
+  for (const auto& command : commands) {
+    SCOPED_TRACE(PrintToString(command));
+    Run({"DEL", "hash"});
+    TEST_current_time_ms = base_ms + 850;
+    Run({"HSET", "hash", "field", "value"});
+    ASSERT_NE(Run(command).type, RespExpr::ERROR);
+
+    // Every requested deadline lies after the next second boundary and rounds to base_ms + 2000.
+    EXPECT_THAT(Run({"HPEXPIRETIME", "hash", "FIELDS", "1", "field"}),
+                RespElementsAre(IntArg(base_ms + 2000)));
+    AdvanceTime(150);
+    EXPECT_EQ(Run({"HGET", "hash", "field"}), "value");
+    TEST_current_time_ms = base_ms + 2000;
+    EXPECT_THAT(Run({"HGET", "hash", "field"}), ArgType(RespExpr::NIL));
+  }
 }
 
 TEST_F(HSetFamilyTest, HExpireNoSuchField) {
@@ -871,6 +910,7 @@ TEST_F(HSetFamilyTest, HExpireWithNullChar) {
 }
 
 TEST_F(HSetFamilyTest, HTtl) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
   // Non-existent key returns -2 for all fields
   EXPECT_THAT(Run({"HTTL", "nokey", "FIELDS", "2", "f1", "f2"}),
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
@@ -987,8 +1027,10 @@ TEST_F(HSetFamilyTest, HGetEx) {
   EXPECT_THAT(Run({"HGETEX", "key", "EX", "0", "FIELDS", "1", "f3"}), RespElementsAre("v3"));
   EXPECT_THAT(Run({"HEXISTS", "key", "f3"}), IntArg(0));
 
-  // Deleting the last field removes the key entirely.
-  EXPECT_THAT(Run({"HGETEX", "key", "EX", "0", "FIELDS", "1", "f1"}), RespElementsAre("v1"));
+  // A deadline exactly at now also expires the field; deleting the last field removes the key.
+  EXPECT_THAT(
+      Run({"HGETEX", "key", "PXAT", absl::StrCat(TEST_current_time_ms), "FIELDS", "1", "f1"}),
+      RespElementsAre("v1"));
   EXPECT_THAT(Run({"EXISTS", "key"}), IntArg(0));
 
   // PERSIST on a listpack-encoded hash (no TTLs) just returns values.
@@ -1012,9 +1054,12 @@ TEST_F(HSetFamilyTest, HGetExErrors) {
   EXPECT_THAT(Run({"HGETEX", "key", "KEEPTTL", "FIELDS", "1", "f1"}),
               ErrArg("Mandatory argument FIELDS"));
 
-  // Negative relative expiry and non-integer values are rejected.
-  EXPECT_THAT(Run({"HGETEX", "key", "EX", "-1", "FIELDS", "1", "f1"}),
-              ErrArg("invalid expire time"));
+  // Negative input is invalid even though zero and past deadlines are allowed.
+  for (string_view type : {"EX", "PX", "EXAT", "PXAT"}) {
+    EXPECT_THAT(Run({"HGETEX", "key", type, "-1", "FIELDS", "1", "f1"}),
+                ErrArg("invalid expire time"));
+    EXPECT_EQ(Run({"HGET", "key", "f1"}), "v1");
+  }
   EXPECT_THAT(Run({"HGETEX", "key", "EX", "abc", "FIELDS", "1", "f1"}), ErrArg("not an integer"));
 
   // Out-of-range / overflow-inducing expiries are rejected (not UB) for every unit.
@@ -1030,6 +1075,10 @@ TEST_F(HSetFamilyTest, HGetExErrors) {
   // HEXPIRE/HSETEX) is rejected even though it does not overflow.
   EXPECT_THAT(Run({"HGETEX", "key", "EXAT", "9999999999", "FIELDS", "1", "f1"}),
               ErrArg("invalid expire time"));
+  // Rounding absolute deadlines must not extend the relative TTL cap.
+  EXPECT_THAT(
+      Run({"HGETEX", "key", "PX", absl::StrCat(kMaxExpireDeadlineMs + 1), "FIELDS", "1", "f1"}),
+      ErrArg("invalid expire time"));
 
   // Missing FIELDS keyword / numfields mismatch / numfields must be positive.
   EXPECT_THAT(Run({"HGETEX", "key", "notfields", "1", "f1"}), ErrArg("Mandatory argument FIELDS"));
@@ -1053,6 +1102,7 @@ TEST_F(HSetFamilyTest, HGetExErrors) {
 }
 
 TEST_F(HSetFamilyTest, RandomFieldAllExpired) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
   for (int i = 0; i < 10; ++i) {
     EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), 1);
   }
@@ -1061,6 +1111,7 @@ TEST_F(HSetFamilyTest, RandomFieldAllExpired) {
 }
 
 TEST_F(HSetFamilyTest, RandomField1NotExpired) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
   for (int i = 0; i < 10; ++i) {
     EXPECT_EQ(CheckedInt({"HSETEX", "key", "10", absl::StrCat("k", i), "v"}), 1);
   }
@@ -1118,6 +1169,7 @@ TEST_F(HSetFamilyTest, ScanAfterExpireSet) {
 }
 
 TEST_F(HSetFamilyTest, KeyRemovedWhenEmpty) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
   auto test_cmd = [&](const std::function<void()>& f, const std::string_view tag) {
     EXPECT_THAT(Run({"HSET", "a", "afield", "avalue"}), IntArg(1));
     EXPECT_THAT(Run({"HEXPIRE", "a", "1", "FIELDS", "1", "afield"}), RespElementsAre(IntArg(1)));
