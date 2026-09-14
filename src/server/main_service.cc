@@ -1171,8 +1171,11 @@ void Service::Shutdown() {
 
   engine_varz.reset();
 
+  uint64_t shard_shutdown_start = absl::GetCurrentTimeNanos();
   shard_set->PreShutdown();
   shard_set->Shutdown();
+  LOG(INFO) << "Shard set shutdown took "
+            << (absl::GetCurrentTimeNanos() - shard_shutdown_start) / 1000 << "us";
 
   shutdown_watchdog.emplace(pp_);
 
