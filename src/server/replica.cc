@@ -589,8 +589,12 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
     }
     DestroyFlowOnOwnerThread(shard_flows_[i]);
-    shard_flows_[i] = std::make_unique<DflyShardReplica>(server(), master_context_, i, &service_,
-                                                         multi_shard_exe_, load_context.get());
+    // Keeps zmalloc's per-thread accounting balanced.
+    unsigned tid = i % shard_set->pool()->size();
+    shard_set->pool()->at(tid)->Await([&] {
+      shard_flows_[i] = std::make_unique<DflyShardReplica>(server(), master_context_, i, &service_,
+                                                           multi_shard_exe_, load_context.get());
+    });
     if (partial_sync_lsn > 0) {
       shard_flows_[i]->SetRecordsExecuted(partial_sync_lsn);
     }
