@@ -190,9 +190,9 @@ class ListWrapper {
           .offload = OffloadListNode,
           .load = LoadListNode,
           .cleanup = CleanupListNode,
-          .key = std::string(key_),
+          .key = key_,
       };
-      ql->EnableTiering(params);
+      ql->EnableTiering(params, EngineShard::tlocal()->memory_resource());
     }
 
     if (uint32_t zstd_thresh = GetFlag(FLAGS_list_compress_dict_threshold); zstd_thresh > 0) {
