@@ -421,8 +421,11 @@ class DbSlice {
   // and returns Iterator{}.
   Iterator ExpireIfNeeded(const Context& cntx, Iterator it) const;
 
-  // Attempts to expire a valid entry and returns true only when it was erased.
-  // The caller must prevent preemption while using the raw iterator.
+  // Erases 'it' if its embedded expire time has already passed, returning true and invalidating
+  // 'it' in that case. Entries without a TTL are accepted and simply return false, unlike in
+  // ExpireIfNeeded. It is also cheaper: no key materialization and no iterator laundering.
+  // The caller must disable journal flushing before calling, using journal::DisableFlushGuard
+  // or journal::SetFlushMode(false).
   bool TryExpire(const Context& cntx, PrimeIterator it) const {
     if (!it->first.IsExpired(cntx.time_now_ms))
       return false;
@@ -620,6 +623,11 @@ class DbSlice {
   // will send notifications later). If null, the notification is sent immediately (read path).
   PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it,
                                std::vector<std::string>* events = nullptr) const;
+
+  // Erases an entry whose expire time has already passed - the caller must have verified that
+  // with it->first.IsExpired(cntx.time_now_ms). Returns false without erasing when expiration is
+  // disabled or when we are a replica that does not delete expired keys on its own.
+  // 'events' has the same meaning as in ExpireIfNeeded above.
   bool Expire(const Context& cntx, PrimeIterator it, std::vector<std::string>* events) const;
 
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,

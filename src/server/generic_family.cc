@@ -646,6 +646,7 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
   return add_res.status();
 }
 
+// Appends 'key' to 'res' unless it is filtered out by MATCH. Materializes the key exactly once.
 bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) {
   if (opts.matcher) {
     string str;
@@ -664,7 +665,7 @@ bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) 
 bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
   auto& db_slice = op_args.GetDbSlice();
 
-  // OpScan holds a DisableFlushGuard while traversing, so a raw iterator is sufficient.
+  // Passing the raw iterator is safe: OpScan prevents preemption for the whole traversal.
   if (db_slice.TryExpire(op_args.db_cntx, prime_it)) [[unlikely]]
     return false;
 
@@ -703,7 +704,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // the bucket might change as we Traverse and yield.
   db_slice.WaitForUnblockedJournalWrites();
 
-  // Disable flush journal changes to prevent preemtion in traverse.
+  // Disable flush journal changes to prevent preemption in traverse.
   journal::DisableFlushGuard journal_flush_guard(op_args.shard->journal());
   unsigned cnt = 0;
 
