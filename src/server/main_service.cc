@@ -751,6 +751,8 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case NO_KEY_TRANSACTIONAL:
     case NO_KEY_TX_SPAN_ALL:
     case IDEMPOTENT:
+    case WRITE_KEY_OFFSET_0:
+    case WRITE_KEY_OFFSET_1:
       return "";
   }
   return "";

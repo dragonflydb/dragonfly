@@ -1752,11 +1752,15 @@ void SetFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::SET);
   *registry << CI{"SADD", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(SAdd)
             << CI{"SDIFF", CO::READONLY, -2, 1, -1}.HFUNC(SDiff)
-            << CI{"SDIFFSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
-                   SDiffStore)
+            << CI{"SDIFFSTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
+                  -1}
+                   .HFUNC(SDiffStore)
             << CI{"SINTER", CO::READONLY, -2, 1, -1}.HFUNC(SInter)
-            << CI{"SINTERSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
-                   SInterStore)
+            << CI{"SINTERSTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
+                  -1}
+                   .HFUNC(SInterStore)
             << CI{"SINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(SInterCard)
             << CI{"SMEMBERS", CO::READONLY, 2, 1, 1}.HFUNC(SMembers)
             << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(SIsMember)
@@ -1767,8 +1771,10 @@ void SetFamily::Register(CommandRegistry* registry) {
             << CI{"SPOP", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(SPop)
             << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(SRandMember)
             << CI{"SUNION", CO::READONLY, -2, 1, -1}.HFUNC(SUnion)
-            << CI{"SUNIONSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
-                   SUnionStore)
+            << CI{"SUNIONSTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
+                  -1}
+                   .HFUNC(SUnionStore)
             << CI{"SSCAN", CO::READONLY, -3, 1, 1}.HFUNC(SScan)
             << CI{"SADDEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(SAddEx);
 }

@@ -2883,8 +2883,10 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRank)
             << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByLex)
             << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByScore)
-            << CI{"ZRANGESTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -5, 1, 2}.HFUNC(
-                   ZRangeStore);
+            << CI{"ZRANGESTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -5, 1,
+                  2}
+                   .HFUNC(ZRangeStore);
 
   *registry << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(ZScore)
             << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZMScore)

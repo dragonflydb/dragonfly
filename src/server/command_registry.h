@@ -51,6 +51,10 @@ enum CommandOpt : uint32_t {
   // The same callback can be run multiple times without corrupting the result. Used for
   // opportunistic optimizations where inconsistencies can only be detected afterwards.
   IDEMPOTENT = 1U << 18,
+
+  // ACL: only the key at this offset among the command's keys needs write; others need read.
+  WRITE_KEY_OFFSET_0 = 1U << 19,
+  WRITE_KEY_OFFSET_1 = 1U << 20,
 };
 
 };  // namespace CO
