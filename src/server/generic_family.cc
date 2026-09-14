@@ -2908,7 +2908,9 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"FIELDEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kFieldExpire}
              .HFUNC(FieldExpire)
       << CI{"RENAME", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
-      << CI{"COPY", CO::JOURNALED | CO::NO_AUTOJOURNAL, -3, 1, 2, acl::kCopy}.HFUNC(Copy)
+      << CI{"COPY",    CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_1, -3, 1, 2,
+            acl::kCopy}
+             .HFUNC(Copy)
       << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
       << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)

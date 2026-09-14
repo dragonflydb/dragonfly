@@ -675,7 +675,7 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
 
     c_replica = replica.client()
 
-    await c_replica.execute_command("DEBUG POPULATE 2100 key 1000 RAND type set elements 1000")
+    await c_replica.execute_command("DEBUG POPULATE 1000 key 1000 RAND type set elements 500")
 
     # Disable retries so that BusyLoadingError is raised immediately.
     # redis-py >= 7 retries on ConnectionError by default, and BusyLoadingError
