@@ -4206,3 +4206,106 @@ async def test_rw_throttle_stats(df_server: DflyInstance):
 
     await read_client.aclose()
     await write_client.aclose()
+
+
+def _resp(*args):
+    return ("*%d\r\n" % len(args) + "".join("$%d\r\n%s\r\n" % (len(a), a) for a in args)).encode()
+
+
+def _named_raw_client(port, name):
+    """A raw socket client with a CLIENT LIST name, so tests can wait for its exact state."""
+    client = socket.create_connection(("localhost", port))
+    client.settimeout(10)
+    client.sendall(_resp("CLIENT", "SETNAME", name))
+    reply = b""
+    while not reply.endswith(b"\r\n"):
+        reply += client.recv(64)
+    assert reply == b"+OK\r\n"
+    return client
+
+
+async def _wait_client(admin, name, pred, what):
+    """Polls CLIENT LIST until the client called name satisfies pred."""
+    for _ in range(200):
+        entries = [c for c in await admin.client_list() if c.get("name") == name and pred(c)]
+        if entries:
+            return entries[0]
+        await asyncio.sleep(0.05)
+    assert False, f"client {name} did not reach: {what}"
+
+
+async def test_v1_protocol_error_flushed_on_close(df_factory):
+    """The v1 dispatch loop arms reply batching while more messages are queued behind the command
+    it runs, and used to leave it armed when it exits on a closing connection. ConnectionFlow
+    writes the protocol error only after joining that loop, so the reply landed in a batch nobody
+    would ever flush and the client saw a bare FIN instead of an error.
+
+    v1 only: the v2 loop runs commands in the read fiber, so the malformed tail below is never
+    parsed while an earlier command is still in flight.
+    """
+    server = df_factory.create(proactor_threads=2, enable_resp_io_loop_v2=False)
+    server.start()
+    admin = server.client()
+
+    client = _named_raw_client(server.port, "piped")
+    # DEBUG POPULATE is slow and preempts, but is not a blocking command - a blocking one would
+    # not do, since the dispatch loop flushes pending replies before parking on one. The second
+    # command keeps the queue non-empty (which is what arms batching) and the incomplete third
+    # keeps the io fiber in recv.
+    client.sendall(
+        _resp("DEBUG", "POPULATE", "50000") + _resp("SET", "k2", "v") + b"*3\r\n$3\r\nSET\r\n"
+    )
+    # Flag 'a' is async_dispatch: the dispatch fiber is inside DEBUG POPULATE.
+    await _wait_client(admin, "piped", lambda c: "a" in c.get("flags", ""), "in dispatch")
+
+    client.sendall(b"$abc\r\n")  # malformed continuation, ends the read loop
+
+    buf = b""
+    while b"-ERR Protocol error" not in buf:
+        chunk = client.recv(4096)
+        assert chunk, f"connection closed without the protocol error, got {buf!r}"
+        buf += chunk
+    client.close()
+    await admin.aclose()
+
+
+@pytest.mark.parametrize("v2", [False, True])
+async def test_monitor_overflow_closes_connection(df_factory, v2):
+    """A MONITOR client that stops reading must be dropped once the queued traffic passes the
+    pipeline buffer limit. The overflow path used to only raise conn_closing, which the v1 loop
+    picks up on its condvar but the v2 loop never sees - it leaves on io_ec_ alone - so the
+    connection stayed alive and kept accumulating.
+    """
+    server = df_factory.create(
+        proactor_threads=1,
+        pipeline_queue_limit=10,
+        pipeline_buffer_limit="1024",
+        enable_resp_io_loop_v2=v2,
+    )
+    server.start()
+
+    monitor = socket.create_connection(("localhost", server.port))
+    monitor.settimeout(20)
+    monitor.sendall(_resp("MONITOR"))
+    reply = b""
+    while not reply.endswith(b"\r\n"):
+        reply += monitor.recv(64)
+    assert reply == b"+OK\r\n"
+    # From here on the monitor never reads, so its dispatch queue grows once the socket backs up.
+
+    writer = socket.create_connection(("localhost", server.port))
+    writer.settimeout(20)
+    reader = writer.makefile("rb")
+    value = "x" * 800
+    for i in range(10000):
+        writer.sendall(_resp("SET", f"k{i}", value))
+        assert reader.readline() == b"+OK\r\n"  # lockstep, so only the monitor queue grows
+    reader.close()
+    writer.close()
+
+    try:
+        while monitor.recv(65536):
+            pass
+    except socket.timeout:
+        assert False, "the overflowing monitor connection was not closed"
+    monitor.close()
