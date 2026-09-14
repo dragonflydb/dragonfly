@@ -214,6 +214,54 @@ void AddSetRecord(JournalSlice* slice, string_view value) {
       Entry{0, Op::COMMAND, 0, nullopt, Entry::Payload{"SET", ArgSlice{args.data(), args.size()}}});
 }
 
+TEST(Journal, LastUserFreezesResumeBoundary) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_len, 1u);
+  JournalSlice slice;
+  slice.Init();
+
+  struct Consumer : JournalConsumerInterface {
+    void ConsumeJournalChange(const JournalChangeItem&) override {
+    }
+    void ThrottleIfNeeded() override {
+    }
+  } consumer;
+  auto id = slice.RegisterOnChange(&consumer);
+  AddSetRecord(&slice, "first");
+  AddSetRecord(&slice, "second");
+  // user count != 0 due to register
+  EXPECT_FALSE(slice.CanStop());
+
+  slice.AcquireUser();
+  slice.UnregisterOnChange(id);
+  AddSetRecord(&slice, "third");
+  EXPECT_FALSE(slice.CanStop());
+
+  // last user gone sets resume-lsn=4
+  slice.ReleaseUser();
+  AddSetRecord(&slice, "fourth");
+  EXPECT_FALSE(slice.CanStop());
+  AddSetRecord(&slice, "fifth");
+  EXPECT_TRUE(slice.CanStop());
+
+  slice.AcquireUser();
+  EXPECT_FALSE(slice.CanStop());
+  // resume-lsn updated to 6
+  slice.ReleaseUser();
+  AddSetRecord(&slice, "sixth");
+  EXPECT_FALSE(slice.CanStop());
+  AddSetRecord(&slice, "seventh");
+  EXPECT_TRUE(slice.CanStop());
+
+  slice.RefreshResumeBound();
+  EXPECT_TRUE(slice.IsLSNInBuffer(7));
+  EXPECT_FALSE(slice.CanStop());
+  AddSetRecord(&slice, "eighth");
+  EXPECT_FALSE(slice.CanStop());
+  AddSetRecord(&slice, "ninth");
+  EXPECT_TRUE(slice.CanStop());
+}
+
 TEST(Journal, BacklogSupportsLegacyEntryLimit) {
   absl::FlagSaver flag_saver;
   absl::SetFlag(&FLAGS_shard_repl_backlog_len, 2u);

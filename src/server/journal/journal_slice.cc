@@ -110,6 +110,26 @@ bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
   return ring_buffer_.front().lsn <= lsn && lsn <= ring_buffer_.back().lsn;
 }
 
+void JournalSlice::AcquireUser() {
+  ++user_count_;
+}
+
+void JournalSlice::ReleaseUser() {
+  CHECK_GT(user_count_, 0u);
+  if (--user_count_ == 0)
+    RefreshResumeBound();
+}
+
+bool JournalSlice::CanStop() const {
+  DCHECK(ring_buffer_.capacity() > 0);
+  if (user_count_ > 0)
+    return false;
+
+  // even if buffer is empty, if resume bound == cur lsn do not stop, a replica at exactly cur lsn
+  // should be allowed to do partial sync.
+  return resume_bound_ < (ring_buffer_.empty() ? cur_lsn() : ring_buffer_.front().lsn);
+}
+
 std::string_view JournalSlice::GetEntry(LSN lsn) const {
   DCHECK(ring_buffer_.capacity() > 0 && IsLSNInBuffer(lsn));
 
@@ -266,6 +286,7 @@ uint32_t JournalSlice::RegisterOnChange(JournalConsumerInterface* consumer) {
   // mutex lock isn't needed due to iterators are not invalidated
   uint32_t id = next_cb_id_++;
   journal_consumers_arr_.emplace_back(id, consumer);
+  AcquireUser();
   return id;
 }
 
@@ -276,6 +297,7 @@ void JournalSlice::UnregisterOnChange(uint32_t id) {
                     [id](const auto& e) { return e.first == id; });
   CHECK(it != journal_consumers_arr_.end());
   journal_consumers_arr_.erase(it);
+  ReleaseUser();
 }
 
 }  // namespace journal
