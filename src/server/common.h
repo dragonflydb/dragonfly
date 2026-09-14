@@ -7,11 +7,17 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <vector>
 
+#include "common/backed_args.h"
 #include "facade/facade_types.h"
 #include "server/common_types.h"
+
+namespace facade {
+class RedisReplyBuilder;
+}
 
 namespace dfly {
 
@@ -94,6 +100,39 @@ struct ScanOpts {
   size_t min_malloc_size = 0;
   bool novalues = false;
   bool allow_novalues = false;
+};
+
+// Own scan results across shard hops and reply writes without allocating a string per entry.
+// Traversal, decoding, and matching are left to the caller.
+class ScanResult {
+ public:
+  explicit ScanResult(size_t count);
+
+  // Append writable storage for an entry; the caller must fill all len bytes.
+  // Returned pointers and views are invalidated by subsequent mutations or moving the result.
+  char* AppendBuffer(size_t len);
+
+  // Copy an entry; it must not reference this result's storage.
+  void Append(std::string_view entry);
+
+  // Discard the last entry, for example when MATCH rejects a decoded key.
+  void PopBack();
+
+  std::string_view back() const {
+    return overflow_.empty() ? entries_.back() : std::string_view{overflow_.back()};
+  }
+
+  size_t size() const {
+    return entries_.size() + overflow_.size();
+  }
+
+  void Send(facade::RedisReplyBuilder* builder) const;
+
+ private:
+  // Reuse packed argument storage for result entries to avoid per-entry string allocations.
+  cmn::BackedArguments entries_;
+  StringVec overflow_;
+  size_t packed_bytes_ = 0;
 };
 
 // I use relative time from Feb 1, 2023 in seconds.
