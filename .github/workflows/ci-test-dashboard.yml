@@ -68,9 +68,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 "${DASHBOARD_ROOT}/build_dashboard.py" \
+          echo "Disk before dashboard build:"
+          df -h
+          echo "Downloaded input size:"
+          du -sh "${INPUT_DIR}" || true
+          echo "Downloaded input file count:"
+          find "${INPUT_DIR}" -type f | wc -l
+          /usr/bin/time -v python3 -u "${DASHBOARD_ROOT}/build_dashboard.py" \
             "${INPUT_DIR}" \
             "${DASHBOARD_ROOT}/site/data"
+          echo "Generated dashboard data size:"
+          du -sh "${DASHBOARD_ROOT}/site/data" || true
+          echo "Disk after dashboard build:"
+          df -h
 
       - name: Upload dashboard artifact
         uses: actions/upload-artifact@v7

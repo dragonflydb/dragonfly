@@ -28,6 +28,8 @@ for offset in $(seq 0 "$((LOOKBACK_DAYS - 1))"); do
   cpp_junit_target="${JUNIT_DIR}/cpp/year=${year}/month=${month}/day=${day}/"
   echo "Downloading C++ CTest XML from ${cpp_junit_source}"
   aws s3 sync "${cpp_junit_source}" "${cpp_junit_target}" \
+    --only-show-errors \
+    --no-progress \
     --exclude "*" \
     --include "*/ctest/*.xml"
 
@@ -35,6 +37,8 @@ for offset in $(seq 0 "$((LOOKBACK_DAYS - 1))"); do
   regression_target="${JUNIT_DIR}/regression/year=${year}/month=${month}/day=${day}/"
   echo "Downloading regression JUnit XML from ${regression_source}"
   aws s3 sync "${regression_source}" "${regression_target}" \
+    --only-show-errors \
+    --no-progress \
     --exclude "*" \
     --include "*.xml"
 
@@ -42,6 +46,8 @@ for offset in $(seq 0 "$((LOOKBACK_DAYS - 1))"); do
   dashboard_target="${DASHBOARD_JSON_DIR}/cpp/year=${year}/month=${month}/day=${day}/"
   echo "Downloading C++ GTest dashboard JSON from ${dashboard_source}"
   aws s3 sync "${dashboard_source}" "${dashboard_target}" \
+    --only-show-errors \
+    --no-progress \
     --exclude "*" \
     --include "*/gtest-summary.json"
 done
