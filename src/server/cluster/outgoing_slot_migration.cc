@@ -125,7 +125,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   ExecutionState exec_st_;
   RestoreStreamer streamer_;
   bool cancel_started_ = false;
-  fb2::BlockingCounter cancel_done_{1};
+  BlockingCounter cancel_done_{1};
 };
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)

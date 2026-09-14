@@ -762,8 +762,6 @@ void EngineShard::Heartbeat() {
   }
   stalled_start_ns_ = 0;
 
-  journal::MaybeStop();
-
   if (!IsReplica()) {  // Never run expiry/evictions on replica.
     RetireExpiredAndEvict();
   }

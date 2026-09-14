@@ -6,8 +6,6 @@
 
 #include <boost/circular_buffer.hpp>
 #include <boost/circular_buffer/space_optimized.hpp>
-#include <cstdint>
-#include <shared_mutex>
 #include <string_view>
 
 #include "server/journal/types.h"
@@ -62,7 +60,6 @@ class JournalSlice {
   /// Returns whether the journal entry with this LSN is available
   /// from the buffer.
   bool IsLSNInBuffer(LSN lsn) const;
-  bool IsLSNBeforeBuffer(LSN lsn) const;
 
   std::string_view GetEntry(LSN lsn) const;
   // SetFlushMode with allow_flush=false is used to disable preemptions during
@@ -103,6 +100,9 @@ class JournalSlice {
 
   LSN lsn_ = 1;
 
+  // Boundary set when the last user of journal goes away. When all entries in the journal are
+  // ahead of this mark AND there are no current users, it is safe to stop the journal, because no
+  // replica will be able to use the journal.
   LSN resume_bound_ = 1;
   uint32_t user_count_ = 0;
 

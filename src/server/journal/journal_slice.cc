@@ -110,11 +110,6 @@ bool JournalSlice::IsLSNInBuffer(LSN lsn) const {
   return ring_buffer_.front().lsn <= lsn && lsn <= ring_buffer_.back().lsn;
 }
 
-bool JournalSlice::IsLSNBeforeBuffer(LSN lsn) const {
-  DCHECK(ring_buffer_.capacity() > 0);
-  return lsn < (ring_buffer_.empty() ? cur_lsn() : ring_buffer_.front().lsn);
-}
-
 void JournalSlice::AcquireUser() {
   ++user_count_;
 }
@@ -126,7 +121,13 @@ void JournalSlice::ReleaseUser() {
 }
 
 bool JournalSlice::CanStop() const {
-  return user_count_ == 0 && IsLSNBeforeBuffer(resume_bound_);
+  DCHECK(ring_buffer_.capacity() > 0);
+  if (user_count_ > 0)
+    return false;
+
+  // even if buffer is empty, if resume bound == cur lsn do not stop, a replica at exactly cur lsn
+  // should be allowed to do partial sync.
+  return resume_bound_ < (ring_buffer_.empty() ? cur_lsn() : ring_buffer_.front().lsn);
 }
 
 std::string_view JournalSlice::GetEntry(LSN lsn) const {

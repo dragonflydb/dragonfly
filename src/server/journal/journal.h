@@ -24,10 +24,17 @@ std::error_code Close();
 
 //******* The following functions must be called in the context of the owning shard *********//
 
+// Create a hold on the journal, both during registered callbacks, and explicitly set around code
+// to protect the following areas:
+// 1. replication setup
+// 2. slot migration setup
+// 3. partial sync replay
+// Also starts the journal unless start_journal is false
 void AcquireUser(bool start_journal = true);
-void ReleaseUser();
 
-void MaybeStop();
+// Release one user count. If user count reaches 0 then the journal is serving no one, mark the LSN
+// which will later be used to stop the journal.
+void ReleaseUser();
 
 unsigned GetCallbackCount();
 inline bool HasRegisteredCallbacks() {
