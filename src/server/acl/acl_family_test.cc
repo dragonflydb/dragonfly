@@ -391,6 +391,14 @@ TEST_F(AclFamilyTest, ClusterReadonlyIsNotReadCategory) {
   EXPECT_THAT(resp, "OK");
   resp = Run("ACL DRYRUN cluster-conn READWRITE");
   EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL DRYRUN cluster-read CLUSTER INFO");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'CLUSTER' command");
+
+  resp = Run("ACL SETUSER cluster-slow ON >p +@slow");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN cluster-slow CLUSTER INFO");
+  EXPECT_THAT(resp, "OK");
 }
 
 TEST_F(AclFamilyTest, TestGetUser) {
