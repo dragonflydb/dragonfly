@@ -1116,6 +1116,17 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   // we keep the value we want to move.
   PrimeValue from_obj = std::move(from_res.it->second);
 
+  // When tiering is enabled, update tiered-storage metadata to the new key. Must run before
+  // any post_updater.Run() so the size delta from the (possibly longer) new key's storage is
+  // captured by that updater's memory accounting, instead of being silently dropped.
+  auto retier_key = [&](const DbSlice::Iterator& it) {
+    if (EngineShard::tlocal()->tiered_storage() && it->second.ObjType() == OBJ_LIST &&
+        it->second.Encoding() == kEncodingQL2) {
+      auto* ql = static_cast<QList*>(it->second.RObjPtr());
+      ql->SetKey(to_key);
+    }
+  };
+
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
     db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, to_key, &to_res.it->second);
@@ -1128,6 +1139,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     }
 
     to_res.it->first.SetSticky(sticky);
+    retier_key(to_res.it);
     to_res.post_updater.Run();
 
     db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
@@ -1140,17 +1152,10 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     RETURN_ON_BAD_STATUS(op_result);
     to_res = std::move(*op_result);
     to_res.it->first.SetSticky(sticky);
+    retier_key(to_res.it);
   }
 
   AddKeyToIndexesIfNeeded(to_key, op_args.db_cntx, to_res.it->second, op_args.shard);
-
-  // When tiering is enabled, update tiered-storage metadata to the new key.
-  if (EngineShard::tlocal()->tiered_storage()) {
-    if (to_res.it->second.ObjType() == OBJ_LIST && to_res.it->second.Encoding() == kEncodingQL2) {
-      auto* ql = static_cast<QList*>(to_res.it->second.RObjPtr());
-      ql->SetKey(to_key);
-    }
-  }
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {

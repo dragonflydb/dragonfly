@@ -176,7 +176,7 @@ class QList {
   }
   struct TieringParams {
     TieringParams(uint32_t node_depth_threshold, void (*offload)(QList*, Node*),
-                  void (*load)(QList*, Node*), void (*cleanup)(QList*, Node*), PMR_NS::string key)
+                  void (*load)(QList*, Node*), void (*cleanup)(QList*, Node*), PMR_NS::string&& key)
         : node_depth_threshold(node_depth_threshold),
           offload(offload),
           load(load),
