@@ -798,19 +798,21 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
   }
 }
 
-// Check CLIENT PAUSE state and block if needed
-void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, const CommandId* cid) {
+// Blocks the command while CLIENT PAUSE holds it. Returns true if a pause was active.
+bool PauseConnection(const CommandId* cid, bool is_privileged, ConnectionContext* dfly_cntx) {
   auto& etl = *ServerState::tlocal();
-  if (etl.IsPaused() && !conn->IsPrivileged()) {
+  if (etl.IsPaused() && !is_privileged) {
     bool is_write = cid->IsJournaled();
     // PUBLISH and writable EVAL/EVALSHA (not the *_RO variants) count as writes here.
     is_write |= cid->IsPublish() || (cid->IsEvalGroup() && !cid->IsReadOnly());
     is_write |= cid->IsExec() && dfly_cntx->conn_state.exec_info.is_write;
 
     dfly_cntx->paused = true;
-    etl.AwaitPauseState(is_write);
+    etl.AwaitPauseState(is_write, dfly_cntx);
     dfly_cntx->paused = false;
+    return true;
   }
+  return false;
 }
 
 // Prepare transaction for DispatchCommand.
@@ -1541,8 +1543,11 @@ DispatchResult Service::DispatchCommand(
     }
 
     // Check pause state only if it is a top level transaction.
-    if (dfly_cntx->transaction == nullptr)
-      CheckPauseState(conn, dfly_cntx, cid);
+    if (dfly_cntx->transaction == nullptr &&
+        PauseConnection(cid, conn->IsPrivileged(), dfly_cntx) && dfly_cntx->conn_closing) {
+      cmd_cntx->SendError("connection is closing");  // resolves a deferred reply as well
+      return DispatchResult::ERROR;
+    }
   }
 
   // Verify command state
