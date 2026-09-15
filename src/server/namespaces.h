@@ -58,6 +58,8 @@ class Namespaces {
 
   Namespace& GetDefaultNamespace() const;  // No locks
   Namespace& GetOrInsert(std::string_view ns) ABSL_LOCKS_EXCLUDED(mu_);
+  // Namespaces are never removed, so the pointers stay valid.
+  std::vector<Namespace*> GetAll() ABSL_LOCKS_EXCLUDED(mu_);
 
   // Applies to all namespaces and becomes the default for namespaces created later.
   void SetExpiredEventsRecording(bool enable) ABSL_LOCKS_EXCLUDED(mu_);

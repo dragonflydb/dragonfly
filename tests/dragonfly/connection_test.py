@@ -4309,3 +4309,77 @@ async def test_monitor_overflow_closes_connection(df_factory, v2):
     except socket.timeout:
         assert False, "the overflowing monitor connection was not closed"
     monitor.close()
+
+
+async def test_blocked_client_not_woken_under_pause(df_factory):
+    # hz=0 disables the heartbeat, so only the end of the pause can wake the blocked client.
+    server = df_factory.create(proactor_threads=2, admin_port=BASE_PORT, hz=0)
+    server.start()
+    client = server.client()
+    admin = server.admin_client()
+
+    blocked = _named_raw_client(server.port, "blocked")
+    blocked.sendall(_resp("BLPOP", "l", "0"))
+    await _wait_client(admin, "blocked", lambda c: "b" in c.get("flags", ""), "blocked")
+    assert await client.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
+
+    # The admin port is not paused. Waking the pop now would park it holding the key until the
+    # pause ends, so the element must stay readable instead.
+    assert await admin.rpush("l", "a") == 1
+    assert await asyncio.wait_for(admin.llen("l"), 5) == 1
+
+    assert await client.execute_command("CLIENT UNPAUSE") == "OK"
+    expected = b"*2\r\n$1\r\nl\r\n$1\r\na\r\n"
+    reply = b""
+    while len(reply) < len(expected):
+        chunk = blocked.recv(64)
+        assert chunk, reply
+        reply += chunk
+    assert reply == expected
+    blocked.close()
+    await client.aclose()
+    await admin.aclose()
+
+
+async def test_blocked_tenant_woken_after_pause(df_factory):
+    # hz=0 disables the heartbeat, so only the end of the pause can wake the blocked clients.
+    server = df_factory.create(proactor_threads=2, num_shards=2, hz=0, pause_wait_timeout=30)
+    server.start()
+    client = server.client()
+    await client.execute_command("ACL SETUSER tenant NAMESPACE:ns1 ON >pass +@all ~*")
+
+    # "a" and "b" live on different shards.
+    blocked = {}
+    for key in ("a", "b"):
+        blocked[key] = _named_raw_client(server.port, f"blocked-{key}")
+        blocked[key].sendall(_resp("AUTH", "tenant", "pass"))
+        assert blocked[key].recv(64) == b"+OK\r\n"
+        blocked[key].sendall(_resp("BLPOP", key, "0"))
+        await _wait_client(client, f"blocked-{key}", lambda c: "b" in c.get("flags", ""), "blocked")
+
+    # A tenant script still running when the pause starts pushes both keys under the pause.
+    script = (
+        "local i = 0 while i < 1000000000 do i = i + 1 end "
+        "redis.call('RPUSH', KEYS[1], 'x') return redis.call('RPUSH', KEYS[2], 'x')"
+    )
+    pusher = _named_raw_client(server.port, "pusher")
+    pusher.sendall(_resp("AUTH", "tenant", "pass"))
+    assert pusher.recv(64) == b"+OK\r\n"
+    pusher.sendall(_resp("EVAL", script, "2", "a", "b"))
+    await asyncio.sleep(0.3)  # the script loops for longer, a busy thread cannot answer CLIENT LIST
+    assert await client.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
+    pusher.settimeout(30)
+    assert pusher.recv(64) == b":1\r\n"
+    assert await client.execute_command("CLIENT UNPAUSE") == "OK"
+
+    for key, sock in blocked.items():
+        expected = _resp(key, "x")
+        reply = b""
+        while len(reply) < len(expected):
+            chunk = sock.recv(64)
+            assert chunk, reply
+            reply += chunk
+        assert reply == expected, key
+        sock.close()
+    pusher.close()
+    await client.aclose()

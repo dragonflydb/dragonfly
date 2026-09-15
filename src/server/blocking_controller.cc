@@ -12,6 +12,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
+#include "server/server_state.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -150,6 +151,11 @@ void BlockingController::RemovedWatched(Keys keys, Transaction* tx) {
 void BlockingController::NotifyPending() {
   const Transaction* tx = owner_->GetContTx();
   CHECK(tx == nullptr) << tx->DebugId();
+
+  // A command woken under CLIENT PAUSE would park holding its keys and stall the shard queue, so
+  // the ready keys stay pending until the pause ends.
+  if (auto* ss = ServerState::tlocal(); ss && ss->IsPaused())
+    return;
 
   DbContext context;
   context.ns = ns_;

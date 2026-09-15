@@ -1109,6 +1109,20 @@ void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::Proacto
   }
 }
 
+// Wakes the blocked commands whose keys became ready while the pause deferred them.
+void NotifyBlockedAfterPause() {
+  std::vector<Namespace*> all = namespaces->GetAll();
+  shard_set->RunBlockingInParallel([&all](EngineShard* shard) {
+    for (Namespace* ns : all) {
+      if (auto* bc = ns->GetBlockingController(shard->shard_id()); bc) {
+        while (shard->GetContTx())  // NotifyPending requires the shard to be free
+          ThisFiber::SleepFor(1ms);
+        bc->NotifyPending();
+      }
+    }
+  });
+}
+
 std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                 facade::Connection* conn, ClientPause pause_state,
                                 std::function<bool()> is_pause_in_progress,
@@ -1135,6 +1149,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
     shard_set->pool()->AwaitBrief([pause_state](unsigned, util::ProactorBase*) {
       ServerState::tlocal()->SetPauseState(pause_state, false);
     });
+    NotifyBlockedAfterPause();
     return std::nullopt;
   }
 
@@ -1159,6 +1174,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
                         shard_set->RunBriefInParallel([ns](EngineShard* shard) {
                           ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
                         });
+                        NotifyBlockedAfterPause();
                       }
                       if (maybe_cleanup) {
                         maybe_cleanup();

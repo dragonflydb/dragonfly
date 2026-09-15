@@ -101,6 +101,15 @@ void Namespaces::SetExpiredEventsRecording(bool enable) {
   });
 }
 
+std::vector<Namespace*> Namespaces::GetAll() {
+  dfly::SharedLock guard(mu_);
+  std::vector<Namespace*> res;
+  res.reserve(namespaces_.size());
+  for (auto& [name, ns] : namespaces_)
+    res.push_back(&ns);
+  return res;
+}
+
 Namespace& Namespaces::GetOrInsert(std::string_view ns) {
   {
     // Try to look up under a shared lock
