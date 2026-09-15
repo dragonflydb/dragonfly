@@ -390,15 +390,12 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     limit_tp = steady_clock::now() + milliseconds(limit_ms);
   }
 
-  auto* ns = &trans->GetNamespace();
-  const auto key_checker = [req_obj_type, ns](EngineShard* owner, const DbContext& context,
-                                              std::string_view key) -> KeyReadyResult {
-    auto res = ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, req_obj_type);
-    if (res.ok())
-      return KeyReadyResult::kReady;
-    if (res.status() == OpStatus::WRONG_TYPE)
+  const auto key_checker = [req_obj_type](std::string_view /*unused*/,
+                                          const CompactObj* obj) -> KeyReadyResult {
+    if (!obj || obj->ObjType() != CompactObjType(req_obj_type)) {
       return KeyReadyResult::kNotReady;
-    return KeyReadyResult::kKeyNotFound;
+    }
+    return KeyReadyResult::kReady;
   };
 
   auto status =

@@ -98,8 +98,8 @@ TEST_F(BlockingControllerTest, Basic) {
 
 // Regression for https://github.com/dragonflydb/dragonfly/pull/7225:
 // NotifyWatchQueue used to walk every queued waiter (O(N) per notify) when
-// the key was absent. The fast path now short-circuits via FindReadOnly. We
-// assert the per-waiter checker is never invoked.
+// the key was absent. The queue is now skipped outright when no waiter can be
+// woken by a missing key. We assert the per-waiter checker is never invoked.
 TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
   constexpr size_t kWaiters = 64;
   const std::string_view key = str_vec_[0];  // "x", hashes to shard 0 (verified in SetUp)
@@ -119,9 +119,9 @@ TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
     EngineShard* shard = EngineShard::tlocal();
     BlockingController bc(shard, &namespaces->GetDefaultNamespace());
 
-    auto checker = [&checker_calls](EngineShard*, const DbContext&, std::string_view) {
+    auto checker = [&checker_calls](std::string_view, const CompactObj*) {
       ++checker_calls;
-      return KeyReadyResult::kKeyNotFound;
+      return KeyReadyResult::kNotReady;
     };
 
     for (auto& t : txs) {
@@ -129,13 +129,12 @@ TEST_F(BlockingControllerTest, NotifyWatchQueueFastPathOnAbsentKey) {
     }
     ASSERT_EQ(1u, bc.NumWatched(0));  // 1 watched key, kWaiters items in its queue
 
+    checker_calls = 0;
     bc.Awaken(0, key);
     bc.NotifyPending();
   });
 
-  // With the enum-based fast path, the first item's checker is called once and returns
-  // kKeyNotFound, aborting the scan without visiting the remaining kWaiters-1 items.
-  EXPECT_EQ(1u, checker_calls) << "fast path did not short-circuit";
+  EXPECT_EQ(0u, checker_calls) << "fast path did not short-circuit";
 }
 
 TEST_F(BlockingControllerTest, Timeout) {
