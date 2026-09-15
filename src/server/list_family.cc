@@ -185,14 +185,11 @@ class ListWrapper {
 
     const uint32_t tiering_node_depth_threshold = absl::GetFlag(FLAGS_list_tiering_threshold);
     if (tiering_node_depth_threshold > 0 && EngineShard::tlocal()->tiered_storage()) {
-      QList::TieringParams params{
-          .node_depth_threshold = tiering_node_depth_threshold,
-          .offload = OffloadListNode,
-          .load = LoadListNode,
-          .cleanup = CleanupListNode,
-          .key = key_,
-      };
-      ql->EnableTiering(params, EngineShard::tlocal()->memory_resource());
+      PMR_NS::memory_resource* mr = EngineShard::tlocal()->memory_resource();
+      QList::TieringParams params(tiering_node_depth_threshold, OffloadListNode, LoadListNode,
+                                  CleanupListNode,
+                                  PMR_NS::string(key_, PMR_NS::polymorphic_allocator<char>(mr)));
+      ql->EnableTiering(std::move(params), mr);
     }
 
     if (uint32_t zstd_thresh = GetFlag(FLAGS_list_compress_dict_threshold); zstd_thresh > 0) {

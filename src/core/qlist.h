@@ -175,12 +175,28 @@ class QList {
     return db_id_;
   }
   struct TieringParams {
+    TieringParams(uint32_t node_depth_threshold, void (*offload)(QList*, Node*),
+                  void (*load)(QList*, Node*), void (*cleanup)(QList*, Node*), PMR_NS::string key)
+        : node_depth_threshold(node_depth_threshold),
+          offload(offload),
+          load(load),
+          cleanup(cleanup),
+          key(std::move(key)) {
+    }
+
+    // Copying would silently rebind `key` to the default memory resource via
+    // polymorphic_allocator's select_on_container_copy_construction; only moving is safe.
+    TieringParams(const TieringParams&) = delete;
+    TieringParams& operator=(const TieringParams&) = delete;
+    TieringParams(TieringParams&&) = default;
+    TieringParams& operator=(TieringParams&&) = default;
+
     uint32_t num_offloaded_nodes = 0;
-    uint32_t node_depth_threshold = 0;
-    void (*offload)(QList* ql, Node* node) = nullptr;
-    void (*load)(QList* ql, Node* node) = nullptr;
-    void (*cleanup)(QList* ql, Node* node) = nullptr;
-    std::string_view key;
+    uint32_t node_depth_threshold;
+    void (*offload)(QList* ql, Node* node);
+    void (*load)(QList* ql, Node* node);
+    void (*cleanup)(QList* ql, Node* node);
+    PMR_NS::string key;
   };
 
   /**
@@ -334,8 +350,8 @@ class QList {
   // disabled.
   void CompressAfterLoad();
 
-  // Enable tiered storage.
-  void EnableTiering(const TieringParams& params, PMR_NS::memory_resource* mr);
+  // Enable tiered storage. `params.key` must already be allocated with `mr`.
+  void EnableTiering(TieringParams params, PMR_NS::memory_resource* mr);
 
   // Updates the db index associated with this list.
   void SetDbIndex(DbIndex db_id);
@@ -464,31 +480,13 @@ class QList {
   uint16_t db_id_ = kInvalidDbId;
   uint32_t zstd_threshold_ = 0;  // 0 = disabled
 
-  struct StoredTieringParams {
-    StoredTieringParams(const TieringParams& params, PMR_NS::memory_resource* mr)
-        : num_offloaded_nodes(params.num_offloaded_nodes),
-          node_depth_threshold(params.node_depth_threshold),
-          offload(params.offload),
-          load(params.load),
-          cleanup(params.cleanup),
-          key(params.key, PMR_NS::polymorphic_allocator<char>(mr)) {
-    }
-
-    uint32_t num_offloaded_nodes = 0;
-    uint32_t node_depth_threshold = 0;
-    void (*offload)(QList* ql, Node* node) = nullptr;
-    void (*load)(QList* ql, Node* node) = nullptr;
-    void (*cleanup)(QList* ql, Node* node) = nullptr;
-    PMR_NS::string key;
-  };
-
   // Stateless deleter: recovers the memory_resource from the object's own
   // PMR-allocated key, so this stays the size of a raw pointer (no deleter state).
-  struct StoredTieringParamsDeleter {
-    void operator()(StoredTieringParams* p) const noexcept;
+  struct TieringParamsDeleter {
+    void operator()(TieringParams* p) const noexcept;
   };
 
-  std::unique_ptr<StoredTieringParams, StoredTieringParamsDeleter> tiering_params_;
+  std::unique_ptr<TieringParams, TieringParamsDeleter> tiering_params_;
 
   static_assert(sizeof(tiering_params_) == sizeof(void*),
                 "tiering_params_ deleter must stay stateless/empty");
