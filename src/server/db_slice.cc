@@ -1767,7 +1767,8 @@ finish:
 void DbSlice::CreateDb(DbIndex db_ind) {
   auto& db = db_arr_[db_ind];
   if (!db) {
-    db.reset(new DbTable{owner_->memory_resource(), db_ind});
+    auto* mr = owner_->memory_resource();
+    db.reset(PMR_NS::polymorphic_allocator<DbTable>(mr).new_object<DbTable>(mr, db_ind));
     table_memory_ += db->table_memory();
   }
 }

@@ -17,13 +17,22 @@ namespace dfly {
 
 using namespace std;
 
+void DbSliceDeleter::operator()(DbSlice* ptr) const {
+  if (!ptr)
+    return;
+  auto* mr = ptr->shard_owner()->memory_resource();
+  PMR_NS::polymorphic_allocator<DbSlice>(mr).delete_object(ptr);
+}
+
 Namespace::Namespace() {
   shard_db_slices_.resize(shard_set->size());
   shard_blocking_controller_.resize(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
     ShardId sid = es->shard_id();
-    shard_db_slices_[sid] = make_unique<DbSlice>(sid, absl::GetFlag(FLAGS_cache_mode), es, this);
+    auto* mr = es->memory_resource();
+    shard_db_slices_[sid].reset(PMR_NS::polymorphic_allocator<DbSlice>(mr).new_object<DbSlice>(
+        sid, absl::GetFlag(FLAGS_cache_mode), es, this));
   });
 }
 

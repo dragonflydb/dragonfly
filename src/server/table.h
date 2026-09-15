@@ -7,7 +7,6 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ref_counter.hpp>
 
 #include "core/intent_lock.h"
 #include "server/detail/table.h"
@@ -33,6 +32,11 @@ using PrimeIterator = PrimeTable::iterator;
 using PrimeConstIterator = PrimeTable::const_iterator;
 
 class TopKeys;
+class DbTable;
+
+// Free functions so intrusive_ptr deallocates via DbTable's own memory_resource, not new/delete.
+void intrusive_ptr_add_ref(DbTable* table) noexcept;
+void intrusive_ptr_release(DbTable* table) noexcept;
 
 inline bool IsValid(PrimeIterator it) {
   return !it.is_done();
@@ -123,7 +127,7 @@ class LockTable {
 };
 
 // A single Db table that represents a table that can be chosen with "SELECT" command.
-struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_counter> {
+struct DbTable {
   PrimeTable prime;
   DashTable<PrimeKey, uint32_t, detail::ExpireTablePolicy> mcflag;
 
@@ -174,6 +178,18 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   size_t table_memory() const {
     return prime.mem_usage();
   }
+
+  uint32_t use_count() const {
+    return use_count_;
+  }
+
+ private:
+  friend void intrusive_ptr_add_ref(DbTable* table) noexcept;
+  friend void intrusive_ptr_release(DbTable* table) noexcept;
+
+  // memory_resource DbTable itself was allocated from.
+  PMR_NS::memory_resource* memory_resource_;
+  uint32_t use_count_ = 0;
 };
 
 // We use reference counting semantics of DbTable when doing snapshotting.
