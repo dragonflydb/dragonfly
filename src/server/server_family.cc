@@ -1013,6 +1013,10 @@ bool ValidateServerTlsFlags() {
     has_auth = true;
   }
 
+  if (acl::JwtValidator::IsEnabled()) {
+    has_auth = true;
+  }
+
   if (!(absl::GetFlag(FLAGS_tls_ca_cert_file).empty() &&
         absl::GetFlag(FLAGS_tls_ca_cert_dir).empty())) {
     has_auth = true;
