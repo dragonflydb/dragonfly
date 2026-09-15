@@ -1536,7 +1536,7 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(HLen)
             << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HExists)
             << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HGet)
-            << CI{"HGETALL", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(HGetAll)
+            << CI{"HGETALL", CO::READONLY, 2, 1, 1}.HFUNC(HGetAll)
             << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(HMGet)
             << CI{"HMSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
             << CI{"HINCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)

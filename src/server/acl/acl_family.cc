@@ -1261,7 +1261,7 @@ CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &AclFamily::x))
 
-constexpr uint32_t kAcl = acl::CONNECTION;
+constexpr uint32_t kAcl = acl::SLOW;
 constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kDelUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
