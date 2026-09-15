@@ -688,6 +688,10 @@ bool QList::Replace(long index, std::string_view elem) {
 
 size_t QList::MallocUsed(bool slow) const {
   size_t node_size = len_ * sizeof(Node) + znallocx(sizeof(QList));
+  if (tiering_params_) {
+    node_size += sizeof(StoredTieringParams) + tiering_params_->key.capacity();
+  }
+
   if (slow) {
     for (Node* node = head_; node; node = node->next) {
       // Skip offloaded nodes from malloc size calculation.
