@@ -112,9 +112,6 @@ class ScanResult {
   // Returned pointers and views are invalidated by subsequent mutations or moving the result.
   char* AppendBuffer(size_t len);
 
-  // Copy an entry; it must not reference this result's storage.
-  void Append(std::string_view entry);
-
   // Discard the last entry, for example when MATCH rejects a decoded key.
   void PopBack();
 

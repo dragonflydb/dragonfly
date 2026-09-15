@@ -850,14 +850,14 @@ TEST_F(GenericFamilyTest, ScanWithAttr) {
 TEST(ScanResultTest, AppendBufferAndOwnership) {
   ScanResult result{numeric_limits<size_t>::max()};
   string member = "member";
-  result.Append(member);
+  memcpy(result.AppendBuffer(member.size()), member.data(), member.size());
   member = "changed";
   EXPECT_EQ(result.back(), "member");
 
   const string binary("x\0\xff", 3);
   memcpy(result.AppendBuffer(binary.size()), binary.data(), binary.size());
   EXPECT_EQ(result.back(), binary);
-  result.Append(string_view{});
+  result.AppendBuffer(0);
   EXPECT_EQ(result.size(), 3u);
   EXPECT_TRUE(result.back().empty());
 
@@ -875,7 +875,7 @@ TEST(ScanResultTest, GrowthMoveAndPop) {
       "first", "", string("x\0y", 3), string(128, 'a'), string(64 << 10, 'b'), string(1 << 20, 'c'),
       "tail",  ""};
   for (const auto& entry : entries)
-    result.Append(entry);
+    memcpy(result.AppendBuffer(entry.size()), entry.data(), entry.size());
 
   auto moved = std::move(result);
   for (size_t i = entries.size(); i > 0; --i) {
@@ -884,8 +884,9 @@ TEST(ScanResultTest, GrowthMoveAndPop) {
     moved.PopBack();
   }
   EXPECT_EQ(moved.size(), 0u);
-  moved.Append("reused");
-  EXPECT_EQ(moved.back(), "reused");
+  const string_view reused = "reused";
+  memcpy(moved.AppendBuffer(reused.size()), reused.data(), reused.size());
+  EXPECT_EQ(moved.back(), reused);
 }
 
 TEST_F(GenericFamilyTest, ScanResultBuffer) {

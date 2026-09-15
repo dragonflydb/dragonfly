@@ -647,7 +647,7 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
 }
 
 // Appends 'key' to 'res' unless it is filtered out by MATCH. Materializes the key exactly once.
-bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) {
+bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) {
   if (opts.matcher) {
     string str;
     key.GetString(&str);
@@ -662,7 +662,7 @@ bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) 
   return true;
 }
 
-bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, ScanResult* res) {
+bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, ScanResult* res) {
   key.GetString(res->AppendBuffer(key.Size()));
   if (opts.matcher && !opts.matcher->Matches(res->back())) {
     res->PopBack();
@@ -704,7 +704,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
     return false;
   }
 
-  return AppendScanKey(prime_it->first, opts, res);
+  return MatchAndAppendKey(prime_it->first, opts, res);
 }
 
 // TODO drop template after all SCAN operations have been converted to use ScanResult instead of

@@ -10,7 +10,6 @@
 #include <fast_float/fast_float.h>
 
 #include <algorithm>
-#include <cstring>
 #include <system_error>
 
 extern "C" {
@@ -228,22 +227,16 @@ ScanResult::ScanResult(size_t count) {
 }
 
 char* ScanResult::AppendBuffer(size_t len) {
-  // Bound buffer growth/copying and stay within BackedArguments' 32-bit offsets.
-  // Preserve oversized replies with the original storage, without dropping entries.
+  // Cap packed bytes at 1 MiB to limit buffer reallocations/copying for large replies.
+  // Store all later entries as separate strings in overflow_ so Send() preserves their order.
   constexpr size_t kMaxPackedBytes = 1 << 20;
-  if (!overflow_.empty() || len >= kMaxPackedBytes - packed_bytes_) {
+  if (!overflow_.empty() || len + packed_bytes_ >= kMaxPackedBytes) {
     return overflow_.emplace_back(len, '\0').data();
   }
 
   entries_.PushArg(len);
   packed_bytes_ += len + 1;
   return entries_.data(entries_.size() - 1);
-}
-
-void ScanResult::Append(string_view entry) {
-  char* dest = AppendBuffer(entry.size());
-  if (!entry.empty())
-    std::memcpy(dest, entry.data(), entry.size());
 }
 
 void ScanResult::PopBack() {
