@@ -14,6 +14,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/journal/journal.h"
 #include "server/journal/streamer.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
@@ -36,6 +37,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   SliceSlotMigration(DbSlice* slice, ServerContext server_context, SlotSet slots,
                      OutgoingMigration* om)
       : ProtocolClient(server_context), streamer_(slice, std::move(slots), &exec_st_) {
+    journal::AcquireUser();
     // Flows only report errors; teardown is owned by the migration-level handler
     // (OutgoingMigration::OnAttemptError), which ResetError() joins at every attempt boundary.
     // A forwarder that fires late (after the boundary) injects an error into the new attempt
@@ -44,6 +46,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   ~SliceSlotMigration() {
+    DCHECK(cancel_done_->IsCompleted());
     CloseSocket();
     // it should already be unregistered, this cancel was added to avoid race condition that we
     // possibly have.
@@ -66,7 +69,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
-    ResetParser(RedisParser::Mode::CLIENT);
+    ResetParser();
 
     std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", node_id, " ", shard_id);
     VLOG(1) << "cmd: " << cmd;
@@ -94,9 +97,18 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
   }
 
   void Cancel() {
+    auto done = cancel_done_;
+    if (cancel_started_) {
+      done->Wait();
+      return;
+    }
+
+    cancel_started_ = true;
     // Shutdown socket and allow IO loops to return.
     ShutdownSocket();
     streamer_.Cancel();
+    journal::ReleaseUser();
+    done->Dec();
   }
 
   void Finalize(long attempt) {
@@ -112,6 +124,8 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  private:
   ExecutionState exec_st_;
   RestoreStreamer streamer_;
+  bool cancel_started_ = false;
+  BlockingCounter cancel_done_{1};
 };
 
 OutgoingMigration::OutgoingMigration(MigrationInfo info, ClusterFamily* cf, ServerFamily* sf)
@@ -132,6 +146,7 @@ OutgoingMigration::~OutgoingMigration() {
   // owner of the db tables
   OnAllShards([](auto& migration) {
     if (migration) {
+      migration->Cancel();
       migration.reset();
     }
   });
@@ -261,7 +276,7 @@ void OutgoingMigration::SyncFb() {
     }
 
     VLOG(1) << "Migration initiating";
-    ResetParser(RedisParser::Mode::CLIENT);
+    ResetParser();
     auto cmd = absl::StrCat("DFLYMIGRATE INIT ", cf_->MyID(), " ", slot_migrations_.size());
     for (const auto& s : migration_info_.slot_ranges) {
       absl::StrAppend(&cmd, " ", s.start, " ", s.end);
@@ -307,7 +322,6 @@ void OutgoingMigration::SyncFb() {
         migration->Cancel();
       }
       DbSlice& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
-      journal::StartInThread();
       migration = std::make_unique<SliceSlotMigration>(&db_slice, server(),
                                                        migration_info_.slot_ranges, this);
     });
@@ -339,10 +353,20 @@ void OutgoingMigration::SyncFb() {
     }
 
     long attempt = 0;
+    // Attempts are spaced 500ms apart, so this is ~15s of failed finalize attempts.
+    constexpr long kStalledFinalizeAttempts = 30;
     while (GetState() != MigrationState::C_FINISHED && !FinalizeMigration(++attempt)) {
-      // Break loop and don't sleep in case of C_FATAL
-      if (GetState() == MigrationState::C_FATAL) {
+      // Break loop and don't sleep in case of C_FATAL, or a reported error (e.g. OOM on ACK).
+      if (GetState() == MigrationState::C_FATAL || !exec_st_.IsRunning()) {
         break;
+      }
+      if (attempt >= kStalledFinalizeAttempts) {
+        auto err = absl::StrCat("Migration finalization stuck after ", attempt, " attempts for ",
+                                cf_->MyID(), " : ", migration_info_.node_info.id);
+        LOG_EVERY_T(ERROR, 1) << err;
+        if (attempt == kStalledFinalizeAttempts) {
+          SetLastError(std::move(err));
+        }
       }
       // Process commands that were on pause and try again
       VLOG(1) << "Waiting for migration to finalize...";
@@ -384,13 +408,13 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
                   nullptr, ClientPause::ALL, is_pause_in_progress);
 
-  DCHECK(pause_fb_opt);
   if (!pause_fb_opt) {
     auto err = absl::StrCat("Migration finalization time out ", cf_->MyID(), " : ",
                             migration_info_.node_info.id, " attempt ", attempt);
 
     LOG(WARNING) << err;
     SetLastError(std::move(err));
+    return false;
   }
 
   absl::Cleanup cleanup([&is_block_active, &pause_fb_opt]() {
@@ -429,10 +453,12 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       return false;
     }
 
-    // Check OOM from incoming slot migration on ACK request
+    // OOM might reach the target node from a flow or from the ack here. Both should report
+    // an error to the context such that the next iteration of the control loop deletes the slots
+    // on the target before it finishes.
     if (CheckRespSimpleError(kIncomingMigrationOOM)) {
-      Finish(GenericError{std::make_error_code(errc::not_enough_memory),
-                          std::string(kIncomingMigrationOOM)});
+      exec_st_.ReportError(GenericError(std::make_error_code(errc::not_enough_memory),
+                                        std::string(kIncomingMigrationOOM)));
       return false;
     }
 

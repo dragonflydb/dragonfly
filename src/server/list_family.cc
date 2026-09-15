@@ -185,14 +185,11 @@ class ListWrapper {
 
     const uint32_t tiering_node_depth_threshold = absl::GetFlag(FLAGS_list_tiering_threshold);
     if (tiering_node_depth_threshold > 0 && EngineShard::tlocal()->tiered_storage()) {
-      QList::TieringParams params{
-          .node_depth_threshold = tiering_node_depth_threshold,
-          .offload = OffloadListNode,
-          .load = LoadListNode,
-          .cleanup = CleanupListNode,
-          .key = std::string(key_),
-      };
-      ql->EnableTiering(params);
+      PMR_NS::memory_resource* mr = EngineShard::tlocal()->memory_resource();
+      QList::TieringParams params(tiering_node_depth_threshold, OffloadListNode, LoadListNode,
+                                  CleanupListNode,
+                                  PMR_NS::string(key_, PMR_NS::polymorphic_allocator<char>(mr)));
+      ql->EnableTiering(std::move(params), mr);
     }
 
     if (uint32_t zstd_thresh = GetFlag(FLAGS_list_compress_dict_threshold); zstd_thresh > 0) {
@@ -1033,7 +1030,7 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
   }
 
   // Block
-  auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, &(cntx->blocked), &(cntx->paused));
+  auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, cntx);
   if (status != OpStatus::OK)
     return status;
 
@@ -1057,8 +1054,7 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
   // Therefore we follow the regular flow of watching the key but for the destination shard it
   // will never be triggerred.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
-  if (auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, &cntx->blocked, &cntx->paused);
-      status != OpStatus::OK)
+  if (auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, cntx); status != OpStatus::OK)
     return status;
 
   return MoveTwoShards(tx, pop_key_, push_key_, popdir_, pushdir_, true);
@@ -1125,7 +1121,7 @@ void BPopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   Transaction* tx = cmd_cntx->tx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
+      tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), cntx);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (popped_key) {
@@ -1142,6 +1138,8 @@ void BPopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
+    case OpStatus::UNBLOCKED:
+      return cmd_cntx->SendError(popped_key.status());
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*tx->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
@@ -1187,11 +1185,15 @@ void CmdLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.NextRange();  // numkeys + keys, handled by the command key spec
 
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
-  size_t pop_count = 1;
-  parser.Check("COUNT", &pop_count);
+  int64_t count_arg = 1;
+  parser.Check("COUNT", &count_arg);
+  if (!parser.HasError() && (count_arg < 1 || count_arg > UINT32_MAX))
+    return cmd_cntx->SendError(kCountNotGreaterThanZeroErr);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+  uint32_t pop_count = static_cast<uint32_t>(count_arg);
 
   // Create a vector to store first found key for each shard
   vector<optional<pair<string_view, bool>>> found_keys_per_shard(shard_set->size());
@@ -1271,11 +1273,15 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.NextRange();  // numkeys + keys, handled by the command key spec
   ListDir dir = parser.MapNext("LEFT", ListDir::LEFT, "RIGHT", ListDir::RIGHT);
 
-  size_t pop_count = 1;
-  parser.Check("COUNT", &pop_count);
+  int64_t count_arg = 1;
+  parser.Check("COUNT", &count_arg);
+  if (!parser.HasError() && (count_arg < 1 || count_arg > UINT32_MAX))
+    return cmd_cntx->SendError(kCountNotGreaterThanZeroErr);
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+  uint32_t pop_count = static_cast<uint32_t>(count_arg);
 
   OpResult<StringVec> result;
   auto cb = [&](Transaction* t, EngineShard* shard, string_view key) {
@@ -1285,8 +1291,7 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   ConnectionContext* conn_cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx(), OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
-      &conn_cntx->paused);
+      cmd_cntx->tx(), OBJ_LIST, std::move(cb), unsigned(timeout * 1000), conn_cntx);
 
   if (popped_key.ok()) {
     response_builder->StartArray(2);
@@ -1301,6 +1306,8 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return response_builder->SendNullArray();
+    case OpStatus::UNBLOCKED:
+      return cmd_cntx->SendError(popped_key.status());
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);

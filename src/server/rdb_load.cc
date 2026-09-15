@@ -20,6 +20,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 #include <absl/cleanup/cleanup.h>
+#include <absl/container/flat_hash_set.h>
 #include <absl/numeric/bits.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -375,6 +376,7 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
       break;
     case RDB_TYPE_HASH:
     case RDB_TYPE_HASH_WITH_EXPIRY:
+    case RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS:
       CreateHMap(ptr.get());
       break;
     case RDB_TYPE_LIST_QUICKLIST:
@@ -590,14 +592,14 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
-  size_t increment = 2;
-  if (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY)
-    increment = 3;
+  const bool is_expiry =
+      (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY || rdb_type_ == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS);
+  const size_t increment = is_expiry ? 3 : 2;
 
   size_t len = ltrace->arr.size() / increment;
 
   /* Too many entries? Use a hash table right from the start. */
-  bool keep_lp = !config_.chunked && (len <= 64) && (rdb_type_ != RDB_TYPE_HASH_WITH_EXPIRY);
+  bool keep_lp = !config_.chunked && (len <= 64) && increment == 2;
 
   size_t lp_size = 0;
   if (keep_lp) {
@@ -617,9 +619,15 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
     uint8_t* lp = lpNew(lp_size);
 
     CHECK(ltrace->arr.size() % 2 == 0);
+    absl::flat_hash_set<string> seen;  // untrusted input only; a duplicate field is corruption
     for (size_t i = 0; i < ltrace->arr.size(); i += 2) {
       /* Add pair to listpack */
       string_view sv = ToSV(ltrace->arr[i].rdb_var, &buf1_);
+      if (config_.deep_integrity && !seen.emplace(sv).second) {
+        LOG(ERROR) << "Duplicate hash field detected";
+        ec_ = RdbError(errc::duplicate_key);
+        break;
+      }
       lp = lpAppend(lp, reinterpret_cast<const uint8_t*>(sv.data()), sv.size());
 
       sv = ToSV(ltrace->arr[i + 1].rdb_var, &buf1_);
@@ -685,7 +693,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       }
 
       if (!string_map->AddOrSkip(key, val, ttl_sec)) {
-        LOG(ERROR) << "Duplicate hash fields detected for field " << key;
+        LOG(ERROR) << "Duplicate hash field detected";
         ec_ = RdbError(errc::rdb_file_corrupted);
         return;
       }
@@ -1389,10 +1397,12 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_ZSET_ZIPLIST:
     case RDB_TYPE_STRING:
     case RDB_TYPE_JSON:
+    case RDB_TYPE_SET_LISTPACK:
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
     case RDB_TYPE_HASH_WITH_EXPIRY:
+    case RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS:
       iores = ReadHMap(rdbtype);
       break;
     case RDB_TYPE_ZSET:
@@ -1407,17 +1417,6 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
     case RDB_TYPE_STREAM_LISTPACKS_2:
     case RDB_TYPE_STREAM_LISTPACKS_3:
       iores = ReadStreams(rdbtype);
-      break;
-    case RDB_TYPE_SET_LISTPACK:
-      // We need to deal with protocol versions 9 and older because in these
-      // RDB_TYPE_JSON == 20. On newer versions > 9 we bumped up RDB_TYPE_JSON to 30
-      // because it overlapped with the new type RDB_TYPE_SET_LISTPACK
-      if (rdb_version_ < 10) {
-        // consider it RDB_TYPE_JSON_OLD (20)
-        iores = ReadGeneric(RDB_TYPE_JSON);
-      } else {
-        iores = ReadGeneric(rdbtype);
-      }
       break;
     case RDB_TYPE_MODULE_2:
       iores = ReadRedisModule2();
@@ -1481,6 +1480,12 @@ error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest, bool big_string_split)
     }
   }
 
+  // Reject a length beyond the remaining input before allocating or reserving it.
+  if (len > RemainingBytes()) {
+    LOG(ERROR) << "Bad string length " << len;
+    return RdbError(errc::rdb_file_corrupted);
+  }
+
   if (big_string_split && len > kMaxStringSize) {
     pending_read_.remaining = len - kMaxStringSize;
     pending_read_.reserve = len;
@@ -1528,6 +1533,12 @@ auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
     return Unexpected(errc::rdb_file_corrupted);
   }
 
+  // Reject a compressed length beyond the remaining input before allocating it.
+  if (clen > RemainingBytes()) {
+    LOG(ERROR) << "Bad compressed length " << clen;
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
   res.compressed_blob.resize(clen);
   /* Load the compressed representation and uncompress it to target. */
   error_code ec = FetchBuf(clen, res.compressed_blob.data());
@@ -1544,6 +1555,11 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
     len = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(NULL), len);
+    if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
+      return Unexpected(errc::empty_key);
+    // Reject a member count beyond the remaining input before it is reserved.
+    if (len > RemainingBytes())
+      return Unexpected(errc::rdb_file_corrupted);
     if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
       len *= 2;
     }
@@ -1617,17 +1633,41 @@ auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(str_obj), rdbtype};
 }
 
+error_code RdbLoaderBase::ReadValkeyHashExpiry(RdbVariant* dest) {
+  io::Result<int64_t> expiry_res = FetchInt<int64_t>();
+  if (!expiry_res)
+    return expiry_res.error();
+
+  int64_t expiry_ms = *expiry_res;
+  if (expiry_ms < -1)
+    return RdbError(errc::rdb_file_corrupted);
+  if (expiry_ms >= 0) {
+    uint64_t expiry_sec = (static_cast<uint64_t>(expiry_ms) + 999) / 1000;
+    expiry_sec = std::min(expiry_sec, kMemberExpiryBase + UINT32_MAX);
+    expiry_ms = expiry_sec <= kMemberExpiryBase ? 0 : expiry_sec - kMemberExpiryBase;
+  }
+
+  dest->emplace<long long>(expiry_ms);
+  return error_code{};
+}
+
 auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t len;
   if (pending_read_.remaining > 0) {
     len = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(NULL), len);
+    if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
+      return Unexpected(errc::empty_key);
+    // Reject a field count beyond the remaining input before it is reserved.
+    if (len > RemainingBytes())
+      return Unexpected(errc::rdb_file_corrupted);
 
     if (rdbtype == RDB_TYPE_HASH) {
       len *= 2;
     } else {
-      DCHECK_EQ(rdbtype, RDB_TYPE_HASH_WITH_EXPIRY);
+      DCHECK(rdbtype == RDB_TYPE_HASH_WITH_EXPIRY ||
+             rdbtype == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS);
       len *= 3;
     }
 
@@ -1639,10 +1679,20 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t n = std::min<size_t>(len, kMaxBlobLen);
   load_trace->arr.resize(n);
   size_t i = 0;
-  for (; i < n && !ChunkBudgetExhausted(); ++i) {
-    error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
-    if (ec)
-      return make_unexpected(ec);
+  // Valkey encodes the expiry as a raw little-endian int64, whereas Dragonfly encodes it as an
+  // RDB string. Both formats encode the preceding field and value as RDB strings.
+  if (rdbtype == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS) {
+    for (; i < n; ++i) {
+      auto* dest = &load_trace->arr[i].rdb_var;
+      error_code ec = i % 3 == 2 ? ReadValkeyHashExpiry(dest) : ReadStringObj(dest);
+      if (ec)
+        return make_unexpected(ec);
+    }
+  } else {
+    for (; i < n && !ChunkBudgetExhausted(); ++i) {
+      if (error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var); ec)
+        return make_unexpected(ec);
+    }
   }
   load_trace->arr.resize(i);
 
@@ -1663,6 +1713,9 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
     zsetlen = pending_read_.remaining;
   } else {
     SET_OR_UNEXPECT(LoadLen(nullptr), zsetlen);
+    // Reject a member count beyond the remaining input before it is reserved.
+    if (zsetlen > RemainingBytes())
+      return Unexpected(errc::rdb_file_corrupted);
     pending_read_.reserve = zsetlen;
   }
 
@@ -1944,7 +1997,7 @@ auto RdbLoaderBase::ReadStreams(int rdbtype) -> io::Result<OpaqueObj> {
     }  // while (consumers_num)
   }    // while (cgroup_num)
 
-  return OpaqueObj{std::move(load_trace), RDB_TYPE_STREAM_LISTPACKS};
+  return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
 auto RdbLoaderBase::ReadRedisModule2() -> io::Result<OpaqueObj> {
@@ -2003,15 +2056,24 @@ auto RdbLoaderBase::ReadSBFImpl(bool filter_is_chunked) -> io::Result<OpaqueObj>
     if (options != 0)
       return Unexpected(errc::rdb_file_corrupted);
     SET_OR_UNEXPECT(FetchBinaryDouble(), res.grow_factor);
-    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
-    if (res.fp_prob <= 0 || res.fp_prob > 0.5) {
+    // A later expansion multiplies by grow_factor, so guard it as LoadSBFHeader does - RESTORE
+    // and replicas reach this without going through that check.
+    if (!std::isfinite(res.grow_factor) || res.grow_factor < 1.0)
       return Unexpected(errc::rdb_file_corrupted);
-    }
+    SET_OR_UNEXPECT(FetchBinaryDouble(), res.fp_prob);
     SET_OR_UNEXPECT(LoadLen(nullptr), res.prev_size);
     SET_OR_UNEXPECT(LoadLen(nullptr), res.current_size);
     SET_OR_UNEXPECT(LoadLen(nullptr), res.max_capacity);
 
     SET_OR_UNEXPECT(LoadLen(nullptr), num_filters);
+
+    // A filterless SBF is a BF.LOADCHUNK restore that stopped after the header: no probability
+    // and no sizes yet. A populated one must satisfy the loader's fp_prob range.
+    const bool state_ok = num_filters == 0 ? res.fp_prob == 0 && res.prev_size == 0 &&
+                                                 res.current_size == 0 && res.max_capacity == 0
+                                           : res.fp_prob > 0 && res.fp_prob <= kMaxSBFFpProb;
+    if (!state_ok)
+      return Unexpected(errc::rdb_file_corrupted);
   } else {
     num_filters = pending_read_.remaining;
     pending_read_.remaining = 0;
@@ -2415,16 +2477,20 @@ error_code RdbLoader::Load(io::Source* src) {
   {
     auto cb = mem_buf_->InputBuffer();
 
-    if (memcmp(cb.data(), "REDIS", 5) != 0) {
+    const bool is_valkey = memcmp(cb.data(), "VALKEY", 6) == 0;
+    const size_t magic_size = is_valkey ? 6 : 5;
+    if (!is_valkey && memcmp(cb.data(), "REDIS", 5) != 0) {
       VLOG(1) << "Bad header: " << absl::CHexEscape(facade::ToSV(cb));
       return RdbError(errc::wrong_signature);
     }
 
     char buf[64] = {0};
-    ::memcpy(buf, cb.data() + 5, 4);
+    ::memcpy(buf, cb.data() + magic_size, 9 - magic_size);
 
     rdb_version_ = atoi(buf);
-    if (rdb_version_ < 5 || rdb_version_ > RDB_VERSION) {  // We accept starting from 5.
+    const bool unsupported_version = is_valkey ? rdb_version_ != RDB_VERSION_VALKEY
+                                               : (rdb_version_ < 5 || rdb_version_ > RDB_VERSION);
+    if (unsupported_version) {  // We accept Redis RDBs starting from 5.
       LOG(ERROR) << "RDB Version " << rdb_version_ << " is not supported";
       return RdbError(errc::bad_version);
     }
@@ -2659,7 +2725,9 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
-    if (!rdbIsObjectTypeDF(type)) {
+    const bool is_valkey_type =
+        rdb_version_ == RDB_VERSION_VALKEY && type == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS;
+    if (!rdbIsObjectTypeDF(type) && !is_valkey_type) {
       LOG(ERROR) << "Unrecognized rdb object type: " << type;
       LOG(ERROR) << "Last iteration: ";
       LOG(ERROR) << "key loaded: " << absl::CHexEscape(last_key_loaded_);
@@ -2670,7 +2738,12 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     ++keys_loaded;
-    RETURN_ON_ERR(LoadKeyValPair(type, &settings));
+    if (auto ec = LoadKeyValPair(type, &settings); ec) {
+      if (ec != RdbError(errc::empty_key))
+        return ec;
+      // Nothing is left of the value to consume; skip the key and keep loading.
+      LOG(WARNING) << "Skipping empty key: " << absl::CHexEscape(last_key_loaded_);
+    }
 
     VLOG(2) << "LoadKeyValPair key=" << last_key_loaded_ << " rdb_type=" << type
             << " db= " << cur_db_index_;
@@ -3170,7 +3243,8 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       // Sets and hashes are deleted when all their entries are expired.
       // If it's the case, set reset append flag and start from scratch.
       bool key_is_not_expired = item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms;
-      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
+      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS ||
+                                item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
                                 item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
       if (!is_set_expiry_type && key_is_not_expired) {
         LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;

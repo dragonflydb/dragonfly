@@ -9,15 +9,16 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
-#include <absl/time/clock.h>
 #include <hdr/hdr_histogram.h>
 
-#include "base/bits.h"
+#include <array>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/error.h"
+#include "redis/redis_aux.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/conn_context.h"
 
@@ -127,12 +128,43 @@ constexpr int64_t kLatencyHistogramMinValue = 1;        // Minimum value in usec
 constexpr int64_t kLatencyHistogramMaxValue = 1000000;  // Maximum value in usec (1s)
 constexpr int32_t kLatencyHistogramPrecision = 2;
 
+constexpr int kNoCommandMemoryType = -1;
+
+constexpr auto kFamilyToType = std::to_array<int>({
+    kNoCommandMemoryType,  // core
+    kNoCommandMemoryType,  // server
+    kNoCommandMemoryType,  // generic
+    OBJ_LIST,              // list
+    OBJ_STRING,            // string
+#ifdef WITH_COLLECTION_CMDS
+    OBJ_SET,     // set
+    OBJ_HASH,    // hash
+    OBJ_ZSET,    // sorted_set
+    OBJ_STREAM,  // stream
+#endif
+#ifdef WITH_EXTENSION_CMDS
+    OBJ_ZSET,          // geo
+    OBJ_STRING,        // bitmap
+    OBJ_STRING,        // hyperloglog
+    OBJ_SBF,           // bloom
+    OBJ_CMS,           // cms
+    OBJ_TOPK,          // topk
+    OBJ_CUCKOOFILTER,  // cuckoo_filter
+    OBJ_JSON,          // json
+#endif
+#ifdef WITH_SEARCH
+    kNoCommandMemoryType,  // search
+#endif
+    kNoCommandMemoryType,  // cluster
+    kNoCommandMemoryType,  // acl
+});
+
 }  // namespace
 
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, std::optional<uint32_t> acl_categories)
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
-                        acl_categories.value_or(ImplicitAclCategories(mask))) {
+                        ImplicitAclCategories(mask) | acl_categories.value_or(0)) {
   if (!acl_categories.has_value())
     kind_mask_ |= IMPLICIT_ACL;
   bool is_latency_tracked = GetFlag(FLAGS_latency_tracking);
@@ -197,6 +229,8 @@ CommandId::~CommandId() {
 CommandId CommandId::Clone(const std::string_view name) const {
   CommandId cloned =
       CommandId{name.data(), opt_mask_, arity_, first_key_, last_key_, acl_categories_};
+  cloned.SetFamily(GetFamily());
+  cloned.SetBitIndex(GetBitIndex());
   cloned.handler_ = handler_;
   cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
   cloned.acl_categories_ = acl_categories_;
@@ -362,6 +396,11 @@ absl::flat_hash_map<std::string, hdr_histogram*> CommandRegistry::LatencyMap() c
     cmd_latencies.insert({absl::AsciiStrToLower(cmd_name), cmd.GetLatencyHist()});
   }
   return cmd_latencies;
+}
+
+int TypeForFamily(size_t family) {
+  DCHECK_LT(family, kFamilyToType.size());
+  return kFamilyToType[family];
 }
 
 absl::flat_hash_map<std::string, CmdCallStats> CommandRegistry::NamedCallStats(

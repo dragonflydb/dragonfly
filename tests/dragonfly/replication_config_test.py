@@ -32,13 +32,6 @@ from .utility import (
     wait_for_replicas_state,
 )
 
-DISCONNECT_CRASH_FULL_SYNC = 0
-DISCONNECT_CRASH_STABLE_SYNC = 1
-DISCONNECT_NORMAL_STABLE_SYNC = 2
-
-M_OPT = [pytest.mark.opt_only]
-M_SLOW = [pytest.mark.large]
-
 
 @dfly_args({"proactor_threads": 4})
 async def test_auth_master(df_factory, n_keys=20):
@@ -89,6 +82,7 @@ async def test_no_tls_on_admin_port(
         **with_tls_server_args,
         requirepass="XXX",
         proactor_threads=t_master,
+        cluster_mode="emulated",
     )
     master.start()
     c_master = master.admin_client(password="XXX")
@@ -104,6 +98,7 @@ async def test_no_tls_on_admin_port(
         proactor_threads=t_replica,
         requirepass="XXX",
         masterauth="XXX",
+        cluster_mode="emulated",
     )
     replica.start()
     c_replica = replica.admin_client(password="XXX")
@@ -112,6 +107,10 @@ async def test_no_tls_on_admin_port(
 
     # 3. Verify that replica dbsize == debug populate key size -- replication works
     await assert_debug_populate_synced(c_master, c_replica, 100, populate=False)
+
+    # 4. The replica advertises the master's client port, not the admin port it replicates over
+    res = await c_replica.execute_command("CLUSTER SLOTS")
+    assert res[0][2][1] == master.port
 
 
 # 1. Number of master threads
@@ -350,9 +349,7 @@ async def test_user_acl_replication(df_factory):
     c_replica = replica.client()
     await c_replica.execute_command("CONFIG SET masteruser tmp")
     await c_replica.execute_command("CONFIG SET masterauth tmp")
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-
-    await wait_available_async(c_replica)
+    await start_replication(c_replica, master.port)
     assert 1 == await c_replica.execute_command("DBSIZE")
 
     # revoke acl's from tmp
@@ -419,27 +416,22 @@ def download_dragonfly_release(version):
 async def test_replicate_old_master(
     df_factory: DflyInstanceFactory, cluster_mode, announce_ip, announce_port
 ):
-    cpu = platform.processor()
-    if cpu != "x86_64":
-        pytest.skip(f"Supported only on x64, running on {cpu}")
+    cpu = platform.machine()
+    if cpu not in ("x86_64", "aarch64"):
+        pytest.skip(f"No release binaries for {cpu}")
 
     dfly_version = "v1.19.2"
     released_dfly_path = download_dragonfly_release(dfly_version)
-    master = df_factory.create(
-        version=1.19,
-        path=released_dfly_path,
-        cluster_mode=cluster_mode,
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"version": 1.19, "path": released_dfly_path, "cluster_mode": cluster_mode},
+        replica_args={
+            "cluster_mode": cluster_mode,
+            "cluster_announce_ip": announce_ip,
+            "announce_port": announce_port,
+        },
+        connect=False,
     )
-    replica = df_factory.create(
-        cluster_mode=cluster_mode,
-        cluster_announce_ip=announce_ip,
-        announce_port=announce_port,
-    )
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
 
     assert (
         f"df-{dfly_version}"
@@ -453,6 +445,49 @@ async def test_replicate_old_master(
     await wait_available_async(c_replica)
 
     assert await c_replica.execute_command("get", "k1") == "v1"
+
+    if cluster_mode == "emulated":
+        # An old master sends no announced address: fall back to the one we replicate from.
+        res = await c_replica.execute_command("CLUSTER SLOTS")
+        master_replid = (await c_replica.execute_command("INFO", "REPLICATION"))["master_replid"]
+        assert res[0][2] == ["localhost", master.port, master_replid]
+        assert res[0][3][1] == replica.port
+
+
+async def test_replicate_to_old_replica(df_factory: DflyInstanceFactory):
+    cpu = platform.machine()
+    if cpu not in ("x86_64", "aarch64"):
+        pytest.skip(f"No release binaries for {cpu}")
+
+    dfly_version = "v1.19.2"
+    released_dfly_path = download_dragonfly_release(dfly_version)
+    master = df_factory.create(cluster_mode="emulated", admin_port=ADMIN_PORT)
+    replica = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode="emulated")
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+    assert (
+        f"df-{dfly_version}"
+        == (await c_replica.execute_command("info", "server"))["dragonfly_version"]
+    )
+    await c_master.execute_command("set", "k1", "v1")
+
+    # An old replica must tolerate the longer handshake reply of a new master.
+    assert await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}") == "OK"
+
+    @assert_eventually(times=200)
+    async def old_replica_synced():
+        # The old version has no slave_repl_offset, which wait_available_async relies on.
+        info = await c_replica.execute_command("INFO", "REPLICATION")
+        assert info["master_link_status"] == "up" and info["master_sync_in_progress"] == 0
+        assert await c_replica.execute_command("get", "k1") == "v1"
+
+    await old_replica_synced()
+
+    # It keeps advertising the address it replicates from until it is upgraded.
+    res = await c_replica.execute_command("CLUSTER SLOTS")
+    assert res[0][2][:2] == ["localhost", master.admin_port]
 
 
 # This Test was intorduced in response to a bug when replicating empty hashmaps (encoded as
@@ -565,18 +600,13 @@ async def test_replicate_search_index_to_old_replica(df_factory: DflyInstanceFac
     released_dfly_path = download_dragonfly_release(dfly_version)
 
     # New master (current version) with search index
-    master = df_factory.create(proactor_threads=2)
-    # Old replica (v1.35)
-    replica = df_factory.create(
-        version=1.35,
-        path=released_dfly_path,
-        proactor_threads=2,
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"proactor_threads": 2},
+        # Old replica (v1.35)
+        replica_args={"version": 1.35, "path": released_dfly_path, "proactor_threads": 2},
+        connect=False,
     )
-
-    df_factory.start_all([master, replica])
-
-    c_master = master.client()
-    c_replica = replica.client()
 
     # Create a search index with HNSW vector field on the new master
     await c_master.execute_command(

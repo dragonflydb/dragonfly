@@ -79,3 +79,17 @@
 " "
 "  "
 ""
+
+# Meta-protocol flags (MemcacheParser::ParseMeta)
+"T100"
+"T0"
+"F7"
+"D5"
+"MS"
+"ME"
+"MA"
+"MR"
+"MP"
+"MI"
+"MD"
+"aw=="

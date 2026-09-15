@@ -1284,6 +1284,7 @@ OpResult<streamID> OpAdd(const OpArgs& op_args, string_view key, const AddOpts& 
 OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeOpts& opts) {
   // It's write because we add a NACK. Relevant to XReadGroup only
   const bool is_write_command = opts.group;
+  DCHECK(!is_write_command || opts.consumer);
   auto& db_slice = op_args.GetDbSlice();
   DbSlice::ItAndUpdater it;
   const CompactObj* cobj;
@@ -1493,6 +1494,11 @@ vector<RecordVec> OpRead(const OpArgs& op_args, const ShardArgs& shard_args, con
 
     // We skip, group can be empty after waking up from a blocked read
     if (!sitem.group && opts.read_group) {
+      continue;
+    }
+
+    // We skip, consumers can be unresolved from FindOrAddGroupConsumers.
+    if (sitem.group && !sitem.consumer) {
       continue;
     }
 
@@ -1855,6 +1861,23 @@ streamConsumer* FindOrAddConsumer(string_view name, streamCG* cg, uint64_t now_m
   }
 
   return consumer;
+}
+
+// Creates the group consumer for every requested key on this shard.
+void FindOrAddGroupConsumers(const OpArgs& op_args, const ShardArgs& keys, ReadOpts* opts) {
+  for (string_view key : keys) {
+    StreamIDsItem& sitem = opts->stream_ids.at(key);
+    if (!sitem.group || sitem.consumer)
+      continue;
+    auto res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STREAM);
+    if (!res)
+      continue;
+    StreamMemTracker tracker;
+    sitem.is_consumer_new = false;
+    sitem.consumer = FindOrAddConsumer(opts->consumer_name, sitem.group,
+                                       op_args.db_cntx.time_now_ms, &sitem.is_consumer_new);
+    tracker.UpdateStreamSize(res->it->second);
+  }
 }
 
 constexpr uint8_t kClaimForce = 1 << 0;
@@ -2308,7 +2331,7 @@ OpResult<ClaimInfo> OpAutoClaim(const OpArgs& op_args, string_view key, const Cl
 
 struct PendingOpts {
   string_view group_name;
-  string_view consumer_name;
+  std::optional<string_view> consumer_name;
   ParsedStreamId start;
   ParsedStreamId end;
   int64_t min_idle_time = 0;
@@ -2423,8 +2446,10 @@ OpResult<PendingResult> OpPending(const OpArgs& op_args, string_view key, const 
   RETURN_ON_BAD_STATUS(cgroup_res);
 
   streamConsumer* consumer = nullptr;
-  if (!opts.consumer_name.empty()) {
-    consumer = StreamLookupConsumer(cgroup_res->cg, WrapSds(opts.consumer_name));
+  if (opts.consumer_name) {
+    consumer = StreamLookupConsumer(cgroup_res->cg, WrapSds(*opts.consumer_name));
+    if (!consumer)
+      return PendingResult{PendingExtendedResultList{}};  // an unknown consumer owns nothing
   }
 
   PendingResult result;
@@ -3069,10 +3094,9 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
                                                          : KeyReadyResult::kNotReady;
   };
 
-  if (auto status =
-          tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, &cntx->blocked, &cntx->paused);
+  if (auto status = tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, cntx);
       status != OpStatus::OK)
-    return rb->SendNullArray();
+    return status == OpStatus::UNBLOCKED ? rb->SendError(status) : rb->SendNullArray();
 
   // Resolve the entry in the woken key. Note this must not use OpRead since
   // only the shard that contains the woken key blocks for the awoken
@@ -3084,28 +3108,38 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     return rb->SendError("-NOGROUP the consumer group this client was blocked on no longer exists");
   };
 
+  vector<OpStatus> key_status(opts->stream_ids.size(), OpStatus::OK);
+
   // Re-resolves the streams owned by a single shard. The cached streamCG* predates the wake: the
-  // waking transaction can drop the group or replace the key. Returns INVALID_VALUE for a missing
-  // stream or group, WRONG_TYPE if the key was replaced by another type.
+  // waking transaction can drop the group or replace the key. Records INVALID_VALUE for a missing
+  // stream or group, WRONG_TYPE if the key was replaced by another type, at that key's argument
+  // position.
   auto validate_shard_keys = [&](const OpArgs& op_args, const ShardArgs& keys) {
-    OpStatus status = OpStatus::OK;
-    for (string_view skey : keys) {
+    // Status of first error in shard's keys or OK if none.
+    OpStatus first_found_key_error = OpStatus::OK;
+    for (auto arg_it = keys.begin(); arg_it != keys.end(); ++arg_it) {
+      const string_view skey = *arg_it;
+      const size_t pos = arg_it.index() - opts->streams_arg;
       auto res_it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
       if (!res_it.ok()) {
-        if (status == OpStatus::OK) {
-          status = res_it.status() == OpStatus::WRONG_TYPE ? OpStatus::WRONG_TYPE
-                                                           : OpStatus::INVALID_VALUE;
-        }
+        OpStatus key_err = res_it.status() == OpStatus::WRONG_TYPE ? OpStatus::WRONG_TYPE
+                                                                   : OpStatus::INVALID_VALUE;
+        key_status[pos] = key_err;
+        if (first_found_key_error == OpStatus::OK)
+          first_found_key_error = key_err;
         continue;
       }
 
       StreamIDsItem& stream_item = opts->stream_ids.at(skey);
       stream_item.group =
           StreamLookupCG(GetReadOnlyStream((*res_it)->second), WrapSds(opts->group_name));
-      if (!stream_item.group && status == OpStatus::OK)
-        status = OpStatus::INVALID_VALUE;
+      if (!stream_item.group) {
+        key_status[pos] = OpStatus::INVALID_VALUE;
+        if (first_found_key_error == OpStatus::OK)
+          first_found_key_error = OpStatus::INVALID_VALUE;
+      }
     }
-    return status;
+    return first_found_key_error;
   };
 
   // While we were blocked any of the watched streams could have been deleted, retyped or lost its
@@ -3115,17 +3149,13 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   // It cannot be folded into the action hop: waiting for sibling shards from inside a transaction
   // callback stalls the shard and can deadlock two interleaved multi shard readers.
   if (opts->read_group && tx->GetUniqueShardCnt() > 1) {
-    // Indexed by shard id; each shard writes only its own slot.
-    vector<OpStatus> validation_status(shard_set->size(), OpStatus::OK);
-
     auto validate_cb = [&](Transaction* t, EngineShard* shard) {
-      const ShardId sid = shard->shard_id();
-      validation_status[sid] = validate_shard_keys(t->GetOpArgs(shard), t->GetShardArgs(sid));
+      validate_shard_keys(t->GetOpArgs(shard), t->GetShardArgs(shard->shard_id()));
       return OpStatus::OK;
     };
     tx->Execute(validate_cb, false);
 
-    for (OpStatus status : validation_status) {
+    for (OpStatus status : key_status) {
       if (status == OpStatus::OK)
         continue;
 
@@ -3241,8 +3271,8 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
   if (!opts)
     return;
 
-  // Determine if streams have entries or any error occured
-  AggregateValue<optional<facade::ErrorReply>> err;
+  // Key errors, indexed by their position in the command arguments.
+  vector<optional<facade::ErrorReply>> key_errors(opts->stream_ids.size());
   atomic_bool have_entries = false;
   auto* tx = cmd_cntx->tx();
   // With a single shard we can call OpRead in a single hop, falling back to
@@ -3252,15 +3282,23 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
 
   auto cb = [&](auto* tx, auto* es) -> Transaction::RunnableResult {
     auto op_args = tx->GetOpArgs(es);
-    for (string_view skey : tx->GetShardArgs(es->shard_id())) {
-      if (auto res = HasEntries2(op_args, skey, &*opts); holds_alternative<facade::ErrorReply>(res))
-        err = get<facade::ErrorReply>(res);
-      else if (holds_alternative<bool>(res) && get<bool>(res))
+    bool error = false;
+    ShardArgs shard_args = tx->GetShardArgs(es->shard_id());
+    for (auto arg_it = shard_args.begin(); arg_it != shard_args.end(); ++arg_it) {
+      string_view skey = *arg_it;
+      if (auto res = HasEntries2(op_args, skey, &*opts);
+          holds_alternative<facade::ErrorReply>(res)) {
+        key_errors[arg_it.index() - opts->streams_arg] = get<facade::ErrorReply>(res);
+        error = true;
+      } else if (holds_alternative<bool>(res) && get<bool>(res)) {
         have_entries.store(true, memory_order_relaxed);
+      }
     }
 
     if (is_single_shard) {
-      if (have_entries.load(memory_order_relaxed)) {
+      if (have_entries.load(memory_order_relaxed) && !error) {
+        if (read_group)
+          FindOrAddGroupConsumers(op_args, tx->GetShardArgs(es->shard_id()), &*opts);
         fastread_prefetched = OpRead(tx->GetOpArgs(es), tx->GetShardArgs(es->shard_id()), *opts);
         if (read_group) {
           size_t index = 0;
@@ -3271,10 +3309,15 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
           }
         }
       } else {
-        // We didn't read any entries but we might added new consumers
-        for (auto key : tx->GetShardArgs(es->shard_id())) {
-          JournalConsumerCreationIfNeeded(op_args, *opts, key);
+        if (!error && read_group) {
+          FindOrAddGroupConsumers(op_args, tx->GetShardArgs(es->shard_id()), &*opts);
+          for (auto key : tx->GetShardArgs(es->shard_id())) {
+            JournalConsumerCreationIfNeeded(op_args, *opts, key);
+          }
         }
+        // A squashed stub can't block, and AVOID_CONCLUDING would abort the squash.
+        if (tx->IsSquashedStub())
+          return OpStatus::OK;
         return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
       }
     }
@@ -3282,13 +3325,34 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
   };
   tx->Execute(cb, is_single_shard);
 
-  if (err) {
-    tx->Conclude();
-    return cmd_cntx->SendError(**err);
+  // Iterate over key_errors to find the first error, if exists, and report it.
+  optional<facade::ErrorReply> err;
+  for (auto& key_err : key_errors) {
+    if (key_err) {
+      err = std::move(key_err);
+      break;
+    }
   }
 
-  if (!have_entries.load(memory_order_relaxed))
+  if (err) {
+    tx->Conclude();
+    return cmd_cntx->SendError(*err);
+  }
+
+  if (!have_entries.load(memory_order_relaxed)) {
+    // Cross-shard, create consumers before blocking.
+    if (read_group && !is_single_shard) {
+      auto register_cb = [&](Transaction* t, EngineShard* shard) {
+        auto op_args = t->GetOpArgs(shard);
+        FindOrAddGroupConsumers(op_args, t->GetShardArgs(shard->shard_id()), &*opts);
+        for (auto key : t->GetShardArgs(shard->shard_id()))
+          JournalConsumerCreationIfNeeded(op_args, *opts, key);
+        return OpStatus::OK;
+      };
+      tx->Execute(register_cb, false);
+    }
     return XReadBlock(&*opts, tx, cmd_cntx->rb(), cmd_cntx->server_conn_cntx());
+  }
 
   vector<vector<RecordVec>> xread_resp;
   if (is_single_shard && have_entries.load(memory_order_relaxed)) {
@@ -3298,6 +3362,9 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
     auto read_cb = [&](Transaction* t, EngineShard* shard) {
       ShardId sid = shard->shard_id();
       auto op_args = tx->GetOpArgs(shard);
+      if (read_group) {
+        FindOrAddGroupConsumers(op_args, t->GetShardArgs(sid), &*opts);
+      }
       xread_resp[sid] = OpRead(op_args, t->GetShardArgs(sid), *opts);
       if (read_group) {
         size_t index = 0;
@@ -3993,15 +4060,9 @@ void CmdXRevRange(CmdArgParser parser, CommandContext* cmd_cntx) {
   XRangeGeneric(key, end, start, parser.UnparsedArgs(), true, cmd_cntx);
 }
 
-// If opts.read_group is true then this is a WRITE command. We don't however journal the consumer
-// creation, only the side effects later on from the scheduled callbacks.
 variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view skey,
                                               ReadOpts* opts) {
-  const bool is_write_command = opts->read_group;
   auto& db_slice = op_args.GetDbSlice();
-
-  DbSlice::ItAndUpdater it;
-  const CompactObj* cobj;
 
   auto error = [&](auto res_it) -> variant<bool, facade::ErrorReply> {
     if (res_it.status() == OpStatus::WRONG_TYPE)
@@ -4012,18 +4073,11 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
     return false;
   };
 
-  if (is_write_command) {
-    auto res = db_slice.FindMutable(op_args.db_cntx, skey, OBJ_STREAM);
-    if (!res)
-      return error(std::move(res));
-    it = std::move(*res);
-    cobj = &it.it->second;
-  } else {
-    auto res = db_slice.FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
-    if (!res)
-      return error(res);
-    cobj = &(*res)->second;
-  }
+  auto res = db_slice.FindReadOnly(op_args.db_cntx, skey, OBJ_STREAM);
+  if (!res)
+    return error(res);
+
+  const CompactObj* cobj = &(*res)->second;
 
   stream* s = GetReadOnlyStream(*cobj);
 
@@ -4037,23 +4091,17 @@ variant<bool, facade::ErrorReply> HasEntries2(const OpArgs& op_args, string_view
   // Check requested
   auto& requested_sitem = opts->stream_ids.at(skey);
 
-  // Look up group consumer if needed
-  streamCG* group = nullptr;
-  streamConsumer* consumer = nullptr;
-  if (is_write_command) {
-    group = StreamLookupCG(s, WrapSds(opts->group_name));
+  // Look up the group, but not the consumer: consumer creation is a mutation and must wait until
+  // the caller knows every requested stream is valid.
+  if (opts->read_group) {
+    streamCG* group = StreamLookupCG(s, WrapSds(opts->group_name));
     if (!group)
       return facade::ErrorReply{
           NoGroupOrKey(skey, opts->group_name, " in XREADGROUP with GROUP option")};
 
-    StreamMemTracker tracker;
-    requested_sitem.is_consumer_new = false;
-    consumer = FindOrAddConsumer(opts->consumer_name, group, op_args.db_cntx.time_now_ms,
-                                 &requested_sitem.is_consumer_new);
-    tracker.UpdateStreamSize(it.it->second);
-
     requested_sitem.group = group;
-    requested_sitem.consumer = consumer;
+    // Consumer create needs to be done after all streams have been validated.
+    requested_sitem.consumer = nullptr;
 
     // If '>' is not provided, consumer PEL is used. So don't need to block.
     if (requested_sitem.id.val.ms != UINT64_MAX || requested_sitem.id.val.seq != UINT64_MAX) {
@@ -4251,17 +4299,17 @@ void CmdXAutoClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 namespace acl {
 constexpr uint32_t kXAdd = WRITE | STREAM | FAST;
-constexpr uint32_t kXClaim = WRITE | FAST;
+constexpr uint32_t kXClaim = WRITE | STREAM | FAST;
 constexpr uint32_t kXDel = WRITE | STREAM | FAST;
 constexpr uint32_t kXGroup = SLOW;
 constexpr uint32_t kXInfo = SLOW;
 constexpr uint32_t kXLen = READ | STREAM | FAST;
-constexpr uint32_t kXPending = READ | STREAM;
+constexpr uint32_t kXPending = READ | STREAM | SLOW;
 constexpr uint32_t kXRange = READ | STREAM | SLOW;
 constexpr uint32_t kXRevRange = READ | STREAM | SLOW;
 constexpr uint32_t kXRead = READ | STREAM | SLOW | BLOCKING;
 constexpr uint32_t kXReadGroup = WRITE | STREAM | SLOW | BLOCKING;
-constexpr uint32_t kXSetId = WRITE | STREAM | SLOW;
+constexpr uint32_t kXSetId = WRITE | STREAM | FAST;
 constexpr uint32_t kXTrim = WRITE | STREAM | SLOW;
 constexpr uint32_t kXGroupHelp = READ | STREAM | SLOW;
 constexpr uint32_t kXAck = WRITE | STREAM | FAST;
@@ -4272,33 +4320,32 @@ void StreamFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
   registry->StartFamily();
   constexpr auto kReadFlags = CO::READONLY | CO::BLOCKING | CO::VARIADIC_KEYS;
-  *registry
-      << CI{"XADD",    CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -5, 1, 1,
-            acl::kXAdd}
-             .HFUNC(XAdd)
-      << CI{"XCLAIM", CO::JOURNALED | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XClaim)
-      << CI{"XDEL", CO::JOURNALED | CO::FAST, -3, 1, 1, acl::kXDel}.HFUNC(XDel)
-      << CI{"XGROUP", CO::JOURNALED | CO::DENYOOM, -3, 2, 2, acl::kXGroup}.HFUNC(XGroup)
-      << CI{"XINFO", CO::READONLY, -2, 0, 0, acl::kXInfo}.HFUNC(XInfo)
-      << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kXLen}.HFUNC(XLen)
-      << CI{"XPENDING", CO::READONLY, -3, 1, 1, acl::kXPending}.HFUNC(XPending)
-      << CI{"XRANGE", CO::READONLY, -4, 1, 1, acl::kXRange}.HFUNC(XRange)
-      << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, acl::kXRevRange}.HFUNC(XRevRange)
-      << CI{"XREAD", kReadFlags, -3, 3, 3, acl::kXRead}.HFUNC(XRead)
-      << CI{"XREADGROUP",
-            CO::VARIADIC_KEYS | CO::BLOCKING | CO::JOURNALED | CO::NO_AUTOJOURNAL,
-            -6,
-            6,
-            6,
-            acl::kXReadGroup}
-             .HFUNC(XReadGroup)
-      << CI{"XSETID", CO::JOURNALED, 3, 1, 1, acl::kXSetId}.HFUNC(XSetId)
-      << CI{"XTRIM", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -4, 1, 1, acl::kXTrim}.HFUNC(
-             XTrim)
-      << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 1, 0, 0, acl::kXGroupHelp}.SetHandler(
-             XGroupHelp)
-      << CI{"XACK", CO::JOURNALED | CO::FAST, -4, 1, 1, acl::kXAck}.HFUNC(XAck)
-      << CI{"XAUTOCLAIM", CO::JOURNALED | CO::FAST, -6, 1, 1, acl::kXAutoClaim}.HFUNC(XAutoClaim);
+  *registry << CI{"XADD",    CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -5, 1, 1,
+                  acl::kXAdd}
+                   .HFUNC(XAdd)
+            << CI{"XCLAIM", CO::JOURNALED | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XClaim)
+            << CI{"XDEL", CO::JOURNALED | CO::FAST, -3, 1, 1, acl::kXDel}.HFUNC(XDel)
+            << CI{"XGROUP", CO::JOURNALED | CO::DENYOOM, -3, 2, 2, acl::kXGroup}.HFUNC(XGroup)
+            << CI{"XINFO", CO::READONLY, -2, 0, 0, acl::kXInfo}.HFUNC(XInfo)
+            << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kXLen}.HFUNC(XLen)
+            << CI{"XPENDING", CO::READONLY, -3, 1, 1, acl::kXPending}.HFUNC(XPending)
+            << CI{"XRANGE", CO::READONLY, -4, 1, 1, acl::kXRange}.HFUNC(XRange)
+            << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, acl::kXRevRange}.HFUNC(XRevRange)
+            << CI{"XREAD", kReadFlags, -3, 3, 3, acl::kXRead}.HFUNC(XRead)
+            << CI{"XREADGROUP",
+                  CO::VARIADIC_KEYS | CO::BLOCKING | CO::JOURNALED | CO::NO_AUTOJOURNAL,
+                  -6,
+                  6,
+                  6,
+                  acl::kXReadGroup}
+                   .HFUNC(XReadGroup)
+            << CI{"XSETID", CO::JOURNALED | CO::FAST, 3, 1, 1, acl::kXSetId}.HFUNC(XSetId)
+            << CI{"XTRIM", CO::JOURNALED | CO::NO_AUTOJOURNAL, -4, 1, 1, acl::kXTrim}.HFUNC(XTrim)
+            << CI{"_XGROUP_HELP", CO::NOSCRIPT | CO::HIDDEN, 1, 0, 0, acl::kXGroupHelp}.SetHandler(
+                   XGroupHelp)
+            << CI{"XACK", CO::JOURNALED | CO::FAST, -4, 1, 1, acl::kXAck}.HFUNC(XAck)
+            << CI{"XAUTOCLAIM", CO::JOURNALED | CO::FAST, -6, 1, 1, acl::kXAutoClaim}.HFUNC(
+                   XAutoClaim);
 }
 
 }  // namespace dfly

@@ -1,8 +1,16 @@
 // Copyright 2024, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <limits>
+
+#include "absl/base/casts.h"
+#include "absl/base/internal/endian.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
+
+extern "C" {
+#include "redis/crc64.h"
+}
 
 namespace dfly {
 
@@ -10,6 +18,15 @@ using testing::ElementsAre;
 
 class BloomFamilyTest : public BaseFamilyTest {
  protected:
+  struct Chunks {
+    std::string header, filter, filter_cursor;
+  };
+  // Header chunk and first filter chunk of key "src".
+  Chunks DumpChunks() {
+    auto h = Run({"bf.scandump", "src", "0"}).GetVec();
+    auto f = Run({"bf.scandump", "src", std::to_string(*h[0].GetInt())}).GetVec();
+    return {h[1].GetString(), f[1].GetString(), std::to_string(*f[0].GetInt())};
+  }
 };
 
 TEST_F(BloomFamilyTest, Basic) {
@@ -183,6 +200,64 @@ TEST_F(BloomFamilyTest, CopyChunkedRoundTrip) {
 
   for (int i = 0; i < 100; ++i)
     EXPECT_THAT(Run({"bf.exists", "b2", absl::StrCat("item", i)}), IntArg(1));
+}
+
+// A BF.LOADCHUNK stopped after the header leaves a filterless SBF. COPY (DUMP->RESTORE) used
+// to abort on it, and a snapshot holding one used to fail to load, taking every other key with it.
+TEST_F(BloomFamilyTest, LoadChunkHeaderOnly) {
+  InitWithDbFilename();
+  Run({"bf.reserve", "src", "0.01", "100"});
+  Run({"bf.add", "src", "x"});
+  auto [header, filter, cursor] = DumpChunks();
+
+  EXPECT_EQ(Run({"bf.loadchunk", "dst", "1", header}), "OK");
+  Run({"set", "keep", "v"});
+
+  EXPECT_THAT(Run({"copy", "dst", "dst2"}), IntArg(1));
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  EXPECT_EQ(Run({"get", "keep"}), "v");
+  EXPECT_EQ(Run({"bf.loadchunk", "dst", cursor, filter}), "OK");  // still resumable
+  EXPECT_THAT(Run({"bf.exists", "dst", "x"}), IntArg(1));
+}
+
+// LOADCHUNK must refuse an fp_prob the loader would later reject: the cap 0.50 is fine, 0.51 is
+// not.
+TEST_F(BloomFamilyTest, LoadChunkFpProbRange) {
+  Run({"bf.reserve", "src", "0.01", "100"});
+  Run({"bf.add", "src", "x"});
+  auto [header, filter, cursor] = DumpChunks();
+
+  auto with_fp = [&](double fp) {
+    std::string f = filter;
+    absl::little_endian::Store64(f.data() + 12, absl::bit_cast<uint64_t>(fp));  // fp_prob offset
+    return f;
+  };
+  EXPECT_EQ(Run({"bf.loadchunk", "dst", "1", header}), "OK");
+  EXPECT_EQ(Run({"bf.loadchunk", "dst", cursor, with_fp(0.50)}), "OK");
+  Run({"del", "bad"});
+  EXPECT_EQ(Run({"bf.loadchunk", "bad", "1", header}), "OK");
+  EXPECT_THAT(Run({"bf.loadchunk", "bad", cursor, with_fp(0.51)}), ErrArg("out of range"));
+}
+
+// A crafted RESTORE reaches the loader without BF.LOADCHUNK's header check, so the loader itself
+// must reject a grow_factor an expansion would later multiply by.
+TEST_F(BloomFamilyTest, RestoreRejectsBadGrowFactor) {
+  Run({"bf.reserve", "src", "0.01", "100"});
+  Run({"bf.add", "src", "x"});
+  Run({"bf.loadchunk", "hdr", "1", DumpChunks().header});  // header-only SBF, grow_factor 2.0
+
+  std::string dump = Run({"dump", "hdr"}).GetString();
+  const size_t gf_off = 2;  // type(1) + reserved options len(1)
+  ASSERT_EQ(absl::little_endian::Load64(dump.data() + gf_off), absl::bit_cast<uint64_t>(2.0));
+  absl::little_endian::Store64(dump.data() + gf_off,
+                               absl::bit_cast<uint64_t>(std::numeric_limits<double>::infinity()));
+  // Re-sign so RESTORE's checksum passes and the SBF loader is what rejects it.
+  crc64_init();
+  const uint64_t crc =
+      crc64(0, reinterpret_cast<const uint8_t*>(dump.data()), dump.size() - sizeof(uint64_t));
+  absl::little_endian::Store64(dump.data() + dump.size() - sizeof(uint64_t), crc);
+
+  EXPECT_THAT(Run({"restore", "bad", "0", dump}), ErrArg("Bad data format"));
 }
 
 }  // namespace dfly

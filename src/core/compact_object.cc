@@ -1095,16 +1095,25 @@ void CompactObj::SetJsonSize(int64_t size) {
   }
 }
 
-void CompactObj::AddStreamSize(int64_t size) {
+void CompactObj::AddStreamSize(int64_t delta) {
   DCHECK_EQ(taglen_, STREAM_TAG);
-  if (size < 0) {
-    // We might have a negative size. For example, if we remove a consumer,
-    // the tracker will report a negative net (since we deallocated),
-    // so the object now consumes less memory than it did before. This DCHECK
-    // is for fanity and to catch any potential issues with our tracking approach.
-    DCHECK(static_cast<int64_t>(u_.r_obj.Size()) >= size);
+
+  const uint64_t current = u_.r_obj.Size();
+  if (delta >= 0) {
+    u_.r_obj.SetSize(current + delta);
+    return;
   }
-  u_.r_obj.SetSize((u_.r_obj.Size() + size));
+
+  const int64_t signed_current = static_cast<int64_t>(current);
+  if (delta > -signed_current) {
+    u_.r_obj.SetSize(signed_current + delta);
+    return;
+  }
+
+  const size_t slow_measure = MallocUsed(true);
+  LOG_EVERY_T(ERROR, 30) << "Invalid stream memory delta: cached=" << current << ", delta=" << delta
+                         << ", measured=" << slow_measure;
+  u_.r_obj.SetSize(slow_measure);
 }
 
 void CompactObj::SetJson(const uint8_t* buf, size_t len) {
@@ -2185,7 +2194,7 @@ size_t CompactObj::StrEncoding::Decode(std::string_view blob, char* dest) const 
       break;
     case ASCII1_ENC:
     case ASCII2_ENC:
-      detail::ascii_unpack(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, dest);
+      detail::ascii_unpack_fast(reinterpret_cast<const uint8_t*>(blob.data()), decoded_len, dest);
       break;
     case HUFFMAN_ENC: {
       auto domain = is_key_ ? HUFF_KEYS : HUFF_STRING_VALUES;

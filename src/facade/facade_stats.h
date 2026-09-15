@@ -98,6 +98,11 @@ struct ConnectionStats {
   // callback.
   uint64_t proactor_parse = 0;
 
+  // Local validation metrics for the V2 shared read-buffer path.
+  uint64_t shared_buf_overflow_copies = 0;
+  uint64_t shared_buf_borrow_cycles_callback = 0;
+  uint64_t shared_buf_borrow_cycles_fiber = 0;
+
   // Pub/Sub back-pressure / slow-subscriber protection counters.
   PubsubBackpressureStats pubsub_backpressure;
 

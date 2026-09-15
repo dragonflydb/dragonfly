@@ -12,6 +12,7 @@
 #include "base/logging.h"
 #include "core/interpreter.h"
 #include "facade/facade_test.h"
+#include "facade/reply_builder.h"
 #include "facade/resp_expr.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
@@ -19,6 +20,7 @@
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
+ABSL_DECLARE_FLAG(uint32_t, interpreter_per_thread);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
@@ -57,6 +59,15 @@ class MultiTest : public BaseFamilyTest {
   MultiTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
   }
+};
+
+class ScriptJournalTest : public MultiTest, public testing::WithParamInterface<string_view> {
+ protected:
+  ScriptJournalTest() {
+    absl::SetFlag(&FLAGS_interpreter_per_thread, 1);
+  }
+
+  absl::FlagSaver saver_;
 };
 
 class SingleShardMultiTest : public BaseFamilyTest {
@@ -100,6 +111,45 @@ TEST_F(MultiTest, MultiWithError) {
 
   EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
   EXPECT_THAT(Run({"get", "z"}), "y");
+}
+
+TEST_F(MultiTest, MultiWithUnknownCommand) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"nosuchcmd"}), ErrArg("unknown command"));
+  EXPECT_THAT(Run({"set", "x", "y"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT Transaction discarded because of previous errors"));
+  EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
+}
+
+// Commands after a queue-time error are still queued, never executed outside the transaction.
+TEST_F(MultiTest, MultiQueueErrorStillQueues) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "x", "y"}), "QUEUED");
+  EXPECT_THAT(Run({"set", "x"}), ErrArg("wrong number of arguments"));
+  EXPECT_THAT(Run({"set", "w", "v"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT Transaction discarded because of previous errors"));
+  EXPECT_THAT(Run({"get", "x"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"get", "w"}), ArgType(RespExpr::NIL));
+}
+
+TEST_F(MultiTest, MultiQueueErrorDiscard) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"nosuchcmd"}), ErrArg("unknown command"));
+  EXPECT_THAT(Run({"multi"}), ErrArg("MULTI calls can not be nested"));
+  EXPECT_THAT(Run({"discard"}), "OK");
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+  EXPECT_THAT(Run({"set", "after", "1"}), "OK");
+}
+
+TEST_F(MultiTest, RejectedExecDiscards) {
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "x", "1"}), "QUEUED");
+  EXPECT_THAT(Run({"exec", "blahblah"}), ErrArg("EXECABORT"));
+  EXPECT_THAT(Run({"exec"}), ErrArg("EXEC without MULTI"));
+  EXPECT_THAT(Run({"multi"}), "OK");
+  EXPECT_THAT(Run({"set", "x", "2"}), "QUEUED");
+  EXPECT_THAT(Run({"exec"}), RespArray(ElementsAre("OK")));
+  EXPECT_EQ(Run({"get", "x"}), "2");
 }
 
 TEST_F(MultiTest, Multi) {
@@ -990,6 +1040,37 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_global_cnt);
 }
 
+TEST_P(ScriptJournalTest, ReleasesResourcesBeforeJournaling) {
+  pp_->at(0)->Await([&] {
+    string sha = Run({"script", "load", "return 1"}).GetString();
+
+    // Release the shard locks on success or timeout so a regression still permits cleanup.
+    bool evaluated = false;
+    auto suspension = ExpectConditionWithSuspension([&] { return evaluated; });
+    Fiber command_fb([&] {
+      if (GetParam() == "LOAD") {
+        // Keep LOAD uncached so it must borrow an interpreter and compile.
+        EXPECT_THAT(Run("pending", {"script", "load", "return 3"}), ArgType(RespExpr::STRING));
+      } else {
+        EXPECT_EQ(Run("pending", {"script", "flags", sha, "legacy-float"}), "OK");
+      }
+    });
+    ExpectConditionWithinTimeout([&] {
+      auto* tx = GetTransaction("pending");
+      return tx != nullptr && tx->IsScheduled();
+    });
+
+    // A new script needs an interpreter and the registry, but this EVAL needs no shard locks.
+    EXPECT_THAT(Run({"eval", "--!df flags=disable-atomicity\nreturn 2", "0"}), IntArg(2));
+    evaluated = true;
+    command_fb.Join();
+    suspension.Join();
+  });
+}
+
+INSTANTIATE_TEST_SUITE_P(ScriptCommands, ScriptJournalTest, testing::Values("LOAD"sv, "FLAGS"sv),
+                         [](const auto& info) { return string{info.param}; });
+
 TEST_F(MultiTest, ScriptFlagsCommand) {
   if (auto flags = absl::GetFlag(FLAGS_default_lua_flags); flags != "") {
     GTEST_SKIP() << "Skipped ScriptFlagsCommand test because default_lua_flags is set";
@@ -1016,9 +1097,8 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
 
   // Check SCRIPT FLAGS can be applied by sha before loading.
   {
-    char sha_buf[41];
-    Interpreter::FuncSha1(kUndeclared2, sha_buf);
-    string_view sha{sha_buf, 40};
+    auto sha_buf = Interpreter::FuncSha1(kUndeclared2);
+    string_view sha{sha_buf.data(), sha_buf.size()};
 
     EXPECT_THAT(Run({"script", "flags", sha, "allow-undeclared-keys"}), "OK");
 
@@ -1090,9 +1170,8 @@ TEST_F(MultiTest, LegacyFloatFlag) {
   EXPECT_THAT(Run({"eval", "return 42.9", "0"}), DoubleArg(42.9));
 
   const char* script = "return 42.9";
-  char sha_buf[41];
-  Interpreter::FuncSha1(script, sha_buf);
-  string_view sha{sha_buf, 40};
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   EXPECT_EQ(Run({"script", "flags", string(sha), "legacy-float"}), "OK");
 
@@ -1624,6 +1703,18 @@ TEST_F(MultiTest, EvalRo) {
   EXPECT_THAT(resp, ErrArg("Write commands are not allowed from read-only scripts"));
 }
 
+TEST_F(MultiTest, EvalRoUndeclaredKeys) {
+  EXPECT_THAT(Run({"set", "foo", "bar"}), "OK");
+
+  // Undeclared keys make the script global, and read-only takes the shard lock in shared mode.
+  EXPECT_THAT(
+      Run({"eval_ro", "--!df flags=allow-undeclared-keys\nreturn redis.call('get', 'foo')", "0"}),
+      "bar");
+
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_TRUE(shard->shard_lock()->IsFree()); });
+}
+
 TEST_F(MultiTest, EvalShaRo) {
   RespExpr resp;
 
@@ -1779,6 +1870,45 @@ TEST_F(MultiTest, EvalMPopEmptyIsFalse) {
   resp = Run({"eval", "local r = redis.call('lmpop', '1', KEYS[1], 'LEFT') return type(r)", "1",
               "nolist"});
   EXPECT_EQ(resp, "boolean");
+}
+
+// A bad_alloc thrown by a shard callback inside a squashed MULTI must surface as an error reply.
+TEST_F(MultiTest, SquashedCallbackBadAlloc) {
+  absl::FlagSaver fs;
+  absl::SetFlag(&FLAGS_multi_exec_squash, true);
+
+  static atomic_bool threw_in_stub;
+  threw_in_stub = false;
+
+  auto handler = [](CmdArgParser, CommandContext* cmd_cntx) {
+    auto cb = [](Transaction* t, EngineShard*) -> OpResult<long> {
+      threw_in_stub = t->IsSquashedStub();
+      throw std::bad_alloc{};
+    };
+    OpResult<long> res = cmd_cntx->tx()->ScheduleSingleHopT(cb);
+    auto* rb = cmd_cntx->rb();
+    if (res)
+      rb->SendLong(*res);
+    else
+      rb->SendError(res.status());
+  };
+  std::move(*service_->mutable_registry()->Find("LPUSH")).SetHandler(handler);
+
+  Run({"multi"});
+  Run({"lpush", kKey1, "a"});
+  Run({"set", kKey2, "b"});
+  RespExpr resp = Run({"exec"});
+
+  // Otherwise the throw happened on the unsquashed path and the test is vacuous.
+  EXPECT_TRUE(threw_in_stub.load());
+
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[0], ErrArg("Out of memory"));
+  EXPECT_EQ(resp.GetVec()[1], "OK");
+
+  // The connection must stay in sync after the failed sub-command.
+  EXPECT_EQ(Run({"ping"}), "PONG");
+  EXPECT_EQ(Run({"get", kKey2}), "b");
 }
 
 }  // namespace dfly

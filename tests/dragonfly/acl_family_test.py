@@ -11,9 +11,9 @@ import redis
 from redis import asyncio as aioredis
 
 from . import dfly_args
+from .utility import assert_eventually
 
 
-@pytest.mark.asyncio
 async def test_acl_setuser(async_client):
     await async_client.execute_command("ACL SETUSER kostas")
     result = await async_client.execute_command("ACL LIST")
@@ -79,7 +79,6 @@ async def test_acl_setuser(async_client):
     )
 
 
-@pytest.mark.asyncio
 async def test_acl_categories(async_client):
     await async_client.execute_command(
         "ACL SETUSER vlad ON >mypass -@all +@string +@list +@connection ~*"
@@ -130,7 +129,6 @@ async def test_acl_categories(async_client):
     assert result == "OK"
 
 
-@pytest.mark.asyncio
 async def test_acl_commands(async_client):
     await async_client.execute_command("ACL SETUSER random ON >mypass -@all +set +get ~*")
 
@@ -144,7 +142,6 @@ async def test_acl_commands(async_client):
         await async_client.execute_command("ZADD myset 1 two")
 
 
-@pytest.mark.asyncio
 async def test_acl_cat_commands_multi_exec_squash(df_factory):
     df = df_factory.create(multi_exec_squash=True, port=1111)
 
@@ -168,7 +165,7 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     client = aioredis.Redis(port=df.port, decode_responses=True)
 
     # NOPERM while executing multi
-    await client.execute_command("ACL SETUSER kk -@string")
+    await client.execute_command("ACL SETUSER kk -@string +@list")
     assert res == "OK"
     await client.execute_command("AUTH kk kk")
     assert res == "OK"
@@ -177,6 +174,11 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
 
     with pytest.raises(redis.exceptions.NoPermissionError):
         await client.execute_command("SET x bar")
+    # The transaction keeps collecting after the queue-time error and EXEC aborts all of it.
+    assert await client.execute_command("RPUSH l a") == "QUEUED"
+    with pytest.raises(redis.exceptions.ExecAbortError):
+        await client.execute_command("EXEC")
+    assert await client.execute_command("LLEN l") == 0
     await client.aclose()
 
     # NOPERM between multi and exec
@@ -237,7 +239,6 @@ async def test_acl_cat_commands_multi_exec_squash(df_factory):
     assert denied, "all SET commands succeeded unexpectedly defying ACL"
 
 
-@pytest.mark.asyncio
 async def test_acl_deluser(df_server):
     client = df_server.client()
 
@@ -258,7 +259,7 @@ async def test_acl_deluser(df_server):
 
 
 script = """
-for i = 1, 10000 do
+for i = 1, 280000 do
   redis.call('SET', 'key', i)
   redis.call('SET', 'key1', i)
   redis.call('SET', 'key2', i)
@@ -267,10 +268,24 @@ end
 """
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip("Flaky on CI, needs investigation")
+@pytest.mark.debug_only
+@dfly_args(
+    {
+        "proactor_threads": 8,
+        "num_shards": 7,
+        "conn_io_threads": 1,
+        "conn_io_thread_start": 7,
+        "shard_round_robin_prefix": "key",
+    }
+)
 async def test_acl_del_user_while_running_lua_script(df_server):
-    client = aioredis.Redis(port=df_server.port)
+    # Disable client-side retries: newer redis-py versions retry a ConnectionError by
+    # default, which would silently resend EVAL on a fresh (unauthenticated) connection
+    # instead of letting it propagate here.
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry
+
+    client = aioredis.Redis(port=df_server.port, retry=Retry(NoBackoff(), 0))
     await client.execute_command("ACL SETUSER kostas ON >kk +@string +@scripting ~*")
     await client.execute_command("AUTH kostas kk")
     admin_client = aioredis.Redis(port=df_server.port, decode_responses=True)
@@ -287,14 +302,19 @@ async def test_acl_del_user_while_running_lua_script(df_server):
     with pytest.raises(redis.exceptions.ConnectionError):
         await eval_task
 
-    # The script should have run to completion on the server side.
-    for i in range(1, 4):
-        res = await admin_client.get(f"key{i}")
-        assert res == "10000"
+    @assert_eventually(timeout=20)
+    async def check_keys_written():
+        for i in range(1, 4):
+            res = await admin_client.get(f"key{i}")
+            assert res == "280000"
+
+    await check_keys_written()
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip("Check TODO in the body below")
+@pytest.mark.debug_only
+@dfly_args(
+    {"proactor_threads": 2, "num_shards": 1, "conn_io_threads": 1, "conn_io_thread_start": 1}
+)
 async def test_acl_with_long_running_script(df_server):
     client = aioredis.Redis(port=df_server.port)
     await client.execute_command("ACL SETUSER roman ON >yoman +@string +@scripting ~*")
@@ -310,14 +330,11 @@ async def test_acl_with_long_running_script(df_server):
     await admin_client.execute_command("ACL SETUSER roman -@string -@scripting")
 
     # The script should continue and finish successfully
-    # TODO(fix): acl context should be immutable while the script is running. This requires
-    # a "dummy" context so we can allow acl commands to run in parallel but we don't use stubs
-    # anymore. Figure out a good solution for this.
     await eval_task
 
     for i in range(1, 4):
         res = await admin_client.get(f"key{i}")
-        assert res == "10000"
+        assert res == "280000"
 
 
 def create_temp_file(content, tmp_dir):
@@ -328,7 +345,6 @@ def create_temp_file(content, tmp_dir):
     return acl
 
 
-@pytest.mark.asyncio
 @dfly_args({"port": 1111})
 async def test_bad_acl_file(df_factory, tmp_dir):
     acl = create_temp_file("ACL SETUSER kostas ON >mypass +@WRONG", tmp_dir)
@@ -343,7 +359,6 @@ async def test_bad_acl_file(df_factory, tmp_dir):
         await client.execute_command("ACL LOAD")
 
 
-@pytest.mark.asyncio
 @dfly_args({"port": 1111})
 async def test_good_acl_file(df_factory, tmp_dir):
     # The hash below is password temp
@@ -398,7 +413,6 @@ async def test_good_acl_file(df_factory, tmp_dir):
     assert "user default on nopass ~* &* +@all $all" in result
 
 
-@pytest.mark.asyncio
 async def test_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert [] == res
@@ -449,7 +463,6 @@ async def test_acl_log(async_client):
     assert res[0]["username"] == "elon"
 
 
-@pytest.mark.asyncio
 @dfly_args({"port": 1111, "admin_port": 1112, "requirepass": "mypass"})
 async def test_require_pass(df_factory):
     df = df_factory.create()
@@ -478,7 +491,6 @@ async def test_require_pass(df_factory):
     assert res == "44"
 
 
-@pytest.mark.asyncio
 @dfly_args({"port": 1111, "requirepass": "temp"})
 async def test_require_pass_with_acl_file_order(df_factory, tmp_dir):
     acl = create_temp_file(
@@ -494,7 +506,6 @@ async def test_require_pass_with_acl_file_order(df_factory, tmp_dir):
     assert await client.set("foo", "bar")
 
 
-@pytest.mark.asyncio
 async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
     # Note the extra space below, it's intented to also check that we properly parse extra spaces
     acl_file_content = "USER    roy ON #ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@string +@fast +hset\nUSER john on nopass +@string"
@@ -515,7 +526,6 @@ async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
     assert result == "OK"
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 1})
 async def test_set_len_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
@@ -545,7 +555,6 @@ async def test_set_len_acl_log(async_client):
     assert 10 == len(res)
 
 
-@pytest.mark.asyncio
 async def test_acl_keys(async_client):
     await async_client.execute_command("ACL SETUSER mrkeys ON >mrkeys allkeys +@admin")
     await async_client.execute_command("AUTH mrkeys mrkeys")
@@ -588,7 +597,64 @@ async def test_acl_keys(async_client):
         await async_client.execute_command("ZUNIONSTORE destkey 2 barz1 barz2")
 
 
-@pytest.mark.asyncio
+async def test_geosearchstore_acl(df_server):
+    admin = df_server.client()
+    user = df_server.client()
+    cmd = "GEOSEARCHSTORE out secret FROMMEMBER member BYRADIUS 100 km"
+
+    await admin.execute_command("DEL out secret")
+    await admin.execute_command("ACL DELUSER gssuser")
+
+    await admin.execute_command("GEOADD secret 13.361389 38.115556 member")
+    await admin.execute_command("ZADD out 1 placeholder")
+
+    await admin.execute_command("ACL SETUSER gssuser ON >pass +GEOSEARCHSTORE +@geo +ZRANGE")
+
+    await admin.execute_command("ACL SETUSER gssuser resetkeys %W~secret %RW~out")
+    await user.execute_command("AUTH gssuser pass")
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await user.execute_command(cmd)
+    assert await user.execute_command("ZRANGE out 0 -1") == ["placeholder"]
+
+    await admin.execute_command("ACL SETUSER gssuser resetkeys %R~out %R~secret")
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await user.execute_command(cmd)
+
+    await admin.execute_command("ACL SETUSER gssuser resetkeys %RW~out %R~secret")
+    # retry for a few seconds while the ACL SETUSER propagates to the other connection
+    start = time.time()
+    stored = None
+    while stored is None and time.time() - start < 10:
+        try:
+            stored = await user.execute_command(cmd)
+        except redis.exceptions.NoPermissionError:
+            await asyncio.sleep(0.1)
+    assert stored == 1, "GEOSEARCHSTORE stayed denied after the grant was acknowledged"
+    assert "member" in await user.execute_command("ZRANGE out 0 -1")
+
+    await admin.execute_command("ACL SETUSER gssuser -GEOSEARCHSTORE")
+    revoked = df_server.client()
+    await revoked.execute_command("AUTH gssuser pass")
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await revoked.execute_command(cmd)
+
+
+async def test_geosearchstore_acl_dryrun(async_client):
+    cmd = "GEOSEARCHSTORE out secret FROMMEMBER member BYRADIUS 100 km"
+
+    await async_client.execute_command("ACL SETUSER gssuser ON >pass +GEOSEARCHSTORE +@geo")
+    await async_client.execute_command("ACL SETUSER gssuser resetkeys %W~secret %RW~out")
+    resp = await async_client.execute_command(f"ACL DRYRUN gssuser {cmd}")
+    assert "no permissions" in resp.lower()
+
+    await async_client.execute_command("ACL SETUSER gssuser resetkeys %RW~out %R~secret")
+    assert await async_client.execute_command(f"ACL DRYRUN gssuser {cmd}") == "OK"
+
+    await async_client.execute_command("ACL SETUSER gssuser -GEOSEARCHSTORE")
+    resp = await async_client.execute_command(f"ACL DRYRUN gssuser {cmd}")
+    assert "no permissions" in resp.lower()
+
+
 async def test_namespaces(df_server):
     admin = df_server.client()
     assert await admin.execute_command("SET foo admin") == "OK"
@@ -620,7 +686,6 @@ async def test_namespaces(df_server):
     assert await roman.execute_command("GET foo") == None
 
 
-@pytest.mark.asyncio
 async def test_default_user_bug(df_server):
     client = df_server.client()
 
@@ -633,7 +698,6 @@ async def test_default_user_bug(df_server):
         await client.execute_command("SET foo bar")
 
 
-@pytest.mark.asyncio
 async def test_auth_resp3_bug(df_factory):
     df = df_factory.create()
     df.start()
@@ -650,7 +714,6 @@ async def test_auth_resp3_bug(df_factory):
     assert res["id"] == 1
 
 
-@pytest.mark.asyncio
 async def test_acl_pub_sub_auth(df_factory):
     df = df_factory.create()
     df.start()
@@ -679,7 +742,6 @@ async def test_acl_pub_sub_auth(df_factory):
     assert res == ["psubscribe", "bar", 3]
 
 
-@pytest.mark.asyncio
 async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
     df = df_factory.create()
     df.start()
@@ -744,7 +806,6 @@ async def test_acl_revoke_pub_sub_while_subscribed(df_factory):
         await subscribe_task
 
 
-@pytest.mark.asyncio
 async def test_acl_select(async_client):
     await async_client.execute_command("ACL SETUSER kostas on >tmp +@all $1 ~*")
     assert await async_client.execute_command("AUTH kostas tmp") == "OK"

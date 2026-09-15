@@ -6,7 +6,10 @@
 
 #include <absl/cleanup/cleanup.h>
 
+#include <array>
+
 extern "C" {
+#include "redis/crc64.h"
 #include "redis/rdb.h"
 }
 
@@ -14,7 +17,9 @@ extern "C" {
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "facade/reply_builder.h"
 #include "server/channel_store.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
@@ -33,6 +38,59 @@ using absl::StrCat;
 namespace dfly {
 
 class GenericFamilyTest : public BaseFamilyTest {};
+
+TEST_F(GenericFamilyTest, TtlOfExpiredKeyDuringPause) {
+  // CLIENT PAUSE disables expiry; a key past its deadline is logically gone, not a negative TTL.
+  Run({"set", "k", "v", "px", "10"});
+  Run({"client", "pause", "5000", "write"});
+  AdvanceTime(300);
+  EXPECT_THAT(Run({"pttl", "k"}), IntArg(-2));
+  EXPECT_THAT(Run({"ttl", "k"}), IntArg(-2));
+  EXPECT_THAT(Run({"expiretime", "k"}), IntArg(-2));
+  EXPECT_THAT(Run({"pexpiretime", "k"}), IntArg(-2));
+  Run({"client", "unpause"});
+}
+
+TEST_F(GenericFamilyTest, ExpireFlagsAreAnded) {
+  // Every given flag must hold; one passing flag must not override another that fails.
+  Run({"set", "foo", "bar", "ex", "50"});
+  EXPECT_THAT(Run({"expire", "foo", "100", "XX", "LT"}), IntArg(0));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(50));
+
+  Run({"set", "foo", "bar", "ex", "200"});
+  EXPECT_THAT(Run({"expire", "foo", "100", "XX", "GT"}), IntArg(0));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(200));
+
+  Run({"set", "foo", "bar"});
+  EXPECT_THAT(Run({"expire", "foo", "200", "LT", "XX"}), IntArg(0));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(-1));
+
+  Run({"set", "foo", "bar", "ex", "50"});
+  EXPECT_THAT(Run({"expire", "foo", "100", "XX", "GT"}), IntArg(1));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(100));
+
+  EXPECT_THAT(Run({"expire", "foo", "10", "NX", "XX"}),
+              ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
+}
+
+TEST_F(GenericFamilyTest, ExpireNxWithComparison) {
+  // Deliberate extension: NX with GT/LT sets the expiry when there is none, else GT/LT decides.
+  Run({"set", "foo", "bar"});
+  EXPECT_THAT(Run({"expire", "foo", "5", "NX", "GT"}), IntArg(1));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(5));
+  EXPECT_THAT(Run({"expire", "foo", "3", "NX", "GT"}), IntArg(0));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(5));
+  EXPECT_THAT(Run({"expire", "foo", "7", "NX", "GT"}), IntArg(1));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(7));
+
+  Run({"persist", "foo"});
+  EXPECT_THAT(Run({"expire", "foo", "10", "NX", "LT"}), IntArg(1));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(10));
+  EXPECT_THAT(Run({"expire", "foo", "20", "NX", "LT"}), IntArg(0));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(10));
+  EXPECT_THAT(Run({"expire", "foo", "4", "NX", "LT"}), IntArg(1));
+  EXPECT_THAT(Run({"ttl", "foo"}), IntArg(4));
+}
 
 TEST_F(GenericFamilyTest, Expire) {
   Run({"set", "key", "val"});
@@ -148,7 +206,7 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   // NX and XX are mutually exclusive
   Run({"set", "key", "val"});
   auto resp = Run({"expire", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"expire", "key", "3600", "GT", "LT"});
@@ -227,17 +285,6 @@ TEST_F(GenericFamilyTest, ExpireOptions) {
   EXPECT_THAT(resp, IntArg(0));
   resp = Run({"ttl", "key"});
   EXPECT_THAT(resp.GetInt(), 101);
-
-  // NX with GT, first sets expiry, updates only to larger values
-  Run({"persist", "key"});
-  Run({"expire", "key", "5", "NX", "GT"});
-  EXPECT_THAT(Run({"ttl", "key"}), IntArg(5));
-
-  Run({"expire", "key", "3", "NX", "GT"});
-  EXPECT_THAT(Run({"ttl", "key"}), IntArg(5));
-
-  Run({"expire", "key", "7", "NX", "GT"});
-  EXPECT_THAT(Run({"ttl", "key"}), IntArg(7));
 }
 
 TEST_F(GenericFamilyTest, ExpireAtOptions) {
@@ -248,7 +295,7 @@ TEST_F(GenericFamilyTest, ExpireAtOptions) {
   Run({"set", "key", "val"});
   // NX and XX are mutually exclusive
   auto resp = Run({"expireat", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"expireat", "key", "3600", "GT", "LT"});
@@ -313,7 +360,7 @@ TEST_F(GenericFamilyTest, PExpireOptions) {
   // NX and XX are mutually exclusive
   Run({"set", "key", "val"});
   auto resp = Run({"pexpire", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"pexpire", "key", "3600", "GT", "LT"});
@@ -377,7 +424,7 @@ TEST_F(GenericFamilyTest, PExpireAtOptions) {
   Run({"set", "key", "val"});
   // NX and XX are mutually exclusive
   auto resp = Run({"pexpireat", "key", "3600", "NX", "XX"});
-  ASSERT_THAT(resp, ErrArg("NX and XX options at the same time are not compatible"));
+  ASSERT_THAT(resp, ErrArg("NX and XX, GT or LT options at the same time are not compatible"));
 
   // GT and LT are mutually exclusive
   resp = Run({"pexpireat", "key", "3600", "GT", "LT"});
@@ -1006,6 +1053,40 @@ TEST_F(GenericFamilyTest, SortStoreEmptyResult) {
   EXPECT_EQ(0, Run({"exists", "dest"}).GetInt()) << "empty SORT STORE must delete existing key";
 }
 
+TEST_F(GenericFamilyTest, SortStoreNotLastOption) {
+  // STORE may appear anywhere among the options; the destination must still be a transaction
+  // key, otherwise a cross-shard destination is silently never written.
+  Run({"rpush", "src", "b", "a", "c"});
+  for (string_view dst : {"d1", "d2", "d3", "d4", "d5", "d6", "d7", "d8"}) {  // spans all shards
+    Run({"set", dst, "old"});
+    EXPECT_THAT(Run({"sort", "src", "store", dst, "alpha"}), IntArg(3)) << dst;
+    EXPECT_THAT(Run({"lrange", dst, "0", "-1"}), RespArray(ElementsAre("a", "b", "c"))) << dst;
+    EXPECT_THAT(Run({"sort", "src", "alpha", "limit", "0", "2", "store", dst, "desc"}), IntArg(2))
+        << dst;
+    EXPECT_THAT(Run({"lrange", dst, "0", "-1"}), RespArray(ElementsAre("c", "b"))) << dst;
+  }
+}
+
+TEST_F(GenericFamilyTest, SortStoreMissingSource) {
+  // A missing source still overwrites (i.e. deletes) the destination and replies with 0.
+  Run({"rpush", "dst", "1", "2", "3"});
+  EXPECT_THAT(Run({"sort", "nosuch", "store", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  Run({"rpush", "dst", "1"});
+  EXPECT_THAT(Run({"sort", "nosuch", "by", "nosort", "store", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  Run({"set", "dst", "s"});
+  EXPECT_THAT(Run({"sort", "nosuch", "alpha", "store", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  Run({"set", "str", "x"});
+  Run({"rpush", "dst", "1"});
+  EXPECT_THAT(Run({"sort", "str", "store", "dst"}), ErrArg("WRONGTYPE"));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(1));
+}
+
 TEST_F(GenericFamilyTest, SortStoreResetsExpiry) {
   // SORT set STORE dest, where dest has an expiry — dest expiry must be cleared.
   Run({"del", "src", "dest"});
@@ -1332,6 +1413,22 @@ TEST_F(GenericFamilyTest, Restore) {
   EXPECT_THAT(resp, ErrArg("ERR Bad data format"));
 }
 
+// Redis 7.2+ encodes small sets as listpacks under rdb type 20, the id Dragonfly used for JSON
+// before rdb version 10. Migration tools rebuild RESTORE payloads with their own footer version
+// (RedisShake hard codes 6), so type 20 must be read as a set listpack regardless of the version.
+TEST_F(GenericFamilyTest, RestoreSetListpackOldRdbVersion) {
+  // sadd set:strs alpha beta gamma, dumped by Redis 7.4 and re-footered by RedisShake with
+  // rdb version 6. Taken verbatim from a failing migration.
+  uint8_t SET_LISTPACK_DUMP_V6[] = {0x14, 0x1b, 0x1b, 0x00, 0x00, 0x00, 0x03, 0x00, 0x85, 0x61,
+                                    0x6c, 0x70, 0x68, 0x61, 0x06, 0x84, 0x62, 0x65, 0x74, 0x61,
+                                    0x05, 0x85, 0x67, 0x61, 0x6d, 0x6d, 0x61, 0x06, 0xff, 0x06,
+                                    0x00, 0xc7, 0xe8, 0x19, 0x08, 0x6c, 0x7e, 0x1a, 0x33};
+  EXPECT_THAT(Run({"restore", "set:strs", "0", ToSV(SET_LISTPACK_DUMP_V6)}), "OK");
+  EXPECT_THAT(Run({"type", "set:strs"}), "set");
+  EXPECT_THAT(Run({"smembers", "set:strs"}),
+              RespArray(UnorderedElementsAre("alpha", "beta", "gamma")));
+}
+
 // A crafted RESTORE payload with a valid listpack header but an interior 32-bit string entry
 // of declared length 0x7fffffff must be rejected. The trailing read triggers the deferred
 // crash for types that store the listpack as-is.
@@ -1350,11 +1447,121 @@ TEST_F(GenericFamilyTest, RestoreOobHashListpack) {
   Run({"hgetall", "pwn"});
 }
 
+// A zero-member collection is never serialized, so RESTORE must reject it rather than create a
+// present-but-empty key. One payload per encoding, each with a valid version+CRC footer.
+TEST_F(GenericFamilyTest, RestoreRejectsEmptyCollections) {
+  uint8_t set_len0[] = {0x02, 0x00, 0x0b, 0x00, 0x53, 0x11, 0x84, 0x73, 0x66, 0x16, 0xd0, 0x61};
+  uint8_t hash_len0[] = {0x04, 0x00, 0x0b, 0x00, 0xfa, 0xee, 0x2b, 0xb3, 0xda, 0x0d, 0x7c, 0x36};
+  uint8_t intset0[] = {0x0b, 0x08, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                       0x0b, 0x00, 0x33, 0x9c, 0x86, 0x6e, 0x68, 0x44, 0x64, 0xb0};
+  uint8_t set_lp0[] = {0x14, 0x07, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0b,
+                       0x00, 0x2b, 0x78, 0x47, 0x5d, 0x0d, 0x6c, 0x14, 0x34};
+  uint8_t hash_lp0[] = {0x10, 0x07, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x0b,
+                        0x00, 0xb3, 0xcd, 0x2b, 0xfb, 0x89, 0x06, 0xb3, 0xb1};
+  for (auto payload :
+       {ToSV(set_len0), ToSV(hash_len0), ToSV(intset0), ToSV(set_lp0), ToSV(hash_lp0)}) {
+    Run({"del", "e"});
+    EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+    EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+  }
+}
+
+// A collection element declaring a 64-bit length must be rejected, not resized (remote OOM).
+TEST_F(GenericFamilyTest, RestoreRejectsHugeElementLength) {
+  uint8_t set_huge[] = {0x02, 0x01, 0x81, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                        0x0b, 0x00, 0x10, 0xd6, 0x89, 0xeb, 0x19, 0x8f, 0x53, 0xc7};
+  uint8_t hash_huge[] = {0x04, 0x01, 0x81, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                         0x0b, 0x00, 0x03, 0x21, 0x50, 0xfd, 0xd3, 0x79, 0x3d, 0xcc};
+  uint8_t zset_huge[] = {0x05, 0x01, 0x81, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                         0x0b, 0x00, 0xce, 0x41, 0xc0, 0x57, 0xd9, 0xc3, 0xfc, 0x5a};
+  for (auto payload : {ToSV(set_huge), ToSV(hash_huge), ToSV(zset_huge)}) {
+    Run({"del", "e"});
+    EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+    EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+  }
+  EXPECT_EQ(Run({"ping"}), "PONG");  // server survived
+}
+
+// An LZF-encoded element declaring a 64-bit compressed length must be rejected before its buffer
+// is resized.
+TEST_F(GenericFamilyTest, RestoreRejectsHugeCompressedLength) {
+  uint8_t set_lzf[] = {0x02, 0x01, 0xc3, 0x81, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                       0x0a, 0x0b, 0x00, 0x18, 0x36, 0x24, 0x06, 0xd8, 0x88, 0x36, 0xdb};
+  EXPECT_THAT(Run({"restore", "e", "0", ToSV(set_lzf)}), ErrArg("ERR Bad data format"));
+  EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+  EXPECT_EQ(Run({"ping"}), "PONG");  // server survived
+}
+
+// A SET declaring a 64-bit member count but supplying a full first chunk of real members reaches
+// set->Reserve with the claimed count and crashes; the count must be rejected up front.
+TEST_F(GenericFamilyTest, RestoreRejectsHugeMemberCount) {
+  string payload;
+  payload.push_back(0x02);      // RDB_TYPE_SET
+  payload.push_back('\x81');    // RDB_64BITLEN
+  for (int i = 7; i >= 0; --i)  // count 0x7fffffffffffffff, big-endian
+    payload.push_back(static_cast<char>((0x7fffffffffffffffULL >> (i * 8)) & 0xff));
+  payload.append(4092, '\x00');  // a full chunk of empty-string members
+  payload.push_back(0x0b);       // rdb version, little-endian
+  payload.push_back(0x00);
+  uint64_t crc = crc64(0, reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
+  for (int i = 0; i < 8; ++i)
+    payload.push_back(static_cast<char>((crc >> (i * 8)) & 0xff));
+
+  EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+  EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+  EXPECT_EQ(Run({"ping"}), "PONG");  // server survived
+}
+
+// A hash with a duplicate field is never serialized; RESTORE must reject it for both encodings.
+TEST_F(GenericFamilyTest, RestoreRejectsDuplicateHashField) {
+  uint8_t hash_dup[] = {0x04, 0x02, 0x01, 0x61, 0x01, 0x62, 0x01, 0x61, 0x01, 0x64,
+                        0x0b, 0x00, 0x7f, 0xb1, 0x47, 0x03, 0xa1, 0x72, 0x86, 0x3e};
+  uint8_t hash_lp_dup[] = {0x10, 0x13, 0x13, 0x00, 0x00, 0x00, 0x04, 0x00, 0x81, 0x61, 0x02,
+                           0x81, 0x62, 0x02, 0x81, 0x61, 0x02, 0x81, 0x64, 0x02, 0xff, 0x0b,
+                           0x00, 0xbd, 0x46, 0xcd, 0x72, 0xc3, 0xf1, 0xd6, 0x32};
+  for (auto payload : {ToSV(hash_dup), ToSV(hash_lp_dup)}) {
+    Run({"del", "e"});
+    EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+    EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+  }
+
+  // The same shapes without a duplicate still load.
+  uint8_t hash_ok[] = {0x04, 0x02, 0x01, 0x61, 0x01, 0x62, 0x01, 0x63, 0x01, 0x64,
+                       0x0b, 0x00, 0x43, 0x0b, 0x0a, 0x34, 0xb6, 0xb9, 0x8f, 0x54};
+  uint8_t hash_lp_ok[] = {0x10, 0x13, 0x13, 0x00, 0x00, 0x00, 0x04, 0x00, 0x81, 0x61, 0x02,
+                          0x81, 0x62, 0x02, 0x81, 0x63, 0x02, 0x81, 0x64, 0x02, 0xff, 0x0b,
+                          0x00, 0x35, 0xce, 0x13, 0xe0, 0xe8, 0xf1, 0xec, 0x42};
+  for (auto payload : {ToSV(hash_ok), ToSV(hash_lp_ok)}) {
+    Run({"del", "e"});
+    EXPECT_EQ(Run({"restore", "e", "0", payload}), "OK");
+    EXPECT_THAT(Run({"hlen", "e"}), IntArg(2));
+  }
+}
+
 TEST_F(GenericFamilyTest, RestoreOobZsetListpack) {
   uint8_t payload[] = {0x11, 0x0c, 0x0c, 0x00, 0x00, 0x00, 0x02, 0x00, 0xf0, 0xff, 0xff, 0xff,
                        0x7f, 0xff, 0x0b, 0x00, 0xc1, 0xf6, 0xd5, 0x74, 0xd3, 0x02, 0x6a, 0x79};
   EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
   Run({"zrange", "pwn", "0", "-1"});
+}
+
+// An odd-entry HASH/ZSET listpack must be rejected: a later pairwise walk NULL-derefs the tail.
+TEST_F(GenericFamilyTest, RestoreRejectsOddHashListpack) {
+  uint8_t payload[] = {0x10, 0x13, 0x13, 0x00, 0x00, 0x00, 0x03, 0x00, 0x82, 0x66, 0x31,
+                       0x03, 0x82, 0x76, 0x31, 0x03, 0x82, 0x66, 0x32, 0x03, 0xff, 0x0c,
+                       0x00, 0x6d, 0x3d, 0x7d, 0xb5, 0xd6, 0x7a, 0xa3, 0x1f};
+  EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
+  EXPECT_THAT(Run({"exists", "pwn"}), IntArg(0));
+  Run({"hgetall", "pwn"});
+}
+
+TEST_F(GenericFamilyTest, RestoreRejectsOddZsetListpack) {
+  uint8_t payload[] = {0x11, 0x12, 0x12, 0x00, 0x00, 0x00, 0x03, 0x00, 0x82, 0x6d,
+                       0x31, 0x03, 0x81, 0x31, 0x02, 0x82, 0x6d, 0x32, 0x03, 0xff,
+                       0x0c, 0x00, 0x6e, 0x40, 0x41, 0x0c, 0x8b, 0x6d, 0xe0, 0xe8};
+  EXPECT_THAT(Run({"restore", "pwn", "0", ToSV(payload)}), ErrArg("ERR Bad data format"));
+  EXPECT_THAT(Run({"exists", "pwn"}), IntArg(0));
+  Run({"zrank", "pwn", "zzz"});
 }
 
 TEST_F(GenericFamilyTest, RestoreOobListQuicklist) {
@@ -1904,6 +2111,18 @@ TEST_F(GenericFamilyTest, SortNegativeLimit) {
   ASSERT_THAT(resp, ErrArg("value is not an integer"));
 }
 
+TEST_F(GenericFamilyTest, SortLimitOverflow) {
+  Run({"rpush", "l", "1", "2", "3", "4", "5"});
+
+  EXPECT_THAT(Run({"sort", "l", "LIMIT", "4294967295", "2"}), ArrLen(0));
+  EXPECT_THAT(Run({"sort", "l", "LIMIT", "2", "4294967295"}).GetVec(), ElementsAre("3", "4", "5"));
+
+  EXPECT_THAT(Run({"sort", "l", "LIMIT", "4294967295", "2", "STORE", "dst"}), IntArg(0));
+  EXPECT_THAT(Run({"exists", "dst"}), IntArg(0));
+
+  EXPECT_EQ(Run({"ping"}), "PONG");
+}
+
 TEST_F(GenericFamilyTest, SortBy) {
   Run({"del", "list-1"});
   Run({"lpush", "list-1", "1", "2", "3"});
@@ -2147,6 +2366,28 @@ TEST_F(GenericFamilyTest, RmDeletesMatchingKeys) {
   EXPECT_EQ(Run({"dbsize"}), 5);
 }
 
+// RM is a no-key transaction, so it must run correctly as one command inside MULTI/EXEC: it
+// concludes its own hops without ending the surrounding EXEC, and commands after it still run.
+TEST_F(GenericFamilyTest, RmInsideMulti) {
+  Run({"set", "x", "1"});
+  Run({"sadd", "y", "a", "b"});
+
+  Run({"multi"});
+  Run({"set", "x", "2"});
+  Run({"rm", "0", "match", "y", "count", "10"});
+  Run({"get", "x"});
+  auto exec = Run({"exec"});
+
+  ASSERT_THAT(exec, ArrLen(3));
+  EXPECT_EQ(exec.GetVec()[0], "OK");
+  EXPECT_THAT(exec.GetVec()[1], ArrLen(2));              // RM reply: [cursor, deleted]
+  EXPECT_THAT(exec.GetVec()[1].GetVec()[1], IntArg(1));  // y deleted
+  EXPECT_EQ(exec.GetVec()[2], "2");                      // GET x ran after RM
+
+  EXPECT_EQ(Run({"exists", "y"}), 0);
+  EXPECT_EQ(Run({"get", "x"}), "2");
+}
+
 // Verifies that long-running container iteration is yielding.
 // This test uses a sorted set iteration path, but the same yielding
 // behavior is expected for other containers (SET, HASH, LIST) with non
@@ -2271,6 +2512,97 @@ TEST_F(GenericFamilyTest, ConcurrentWritesDuringContainerYield) {
   for (Fiber& writer : writer_fibers) {
     writer.Join();
   }
+}
+
+// RM runs as a no-key transaction, so a scan+delete hop executes as the shard's running_tx: it
+// cannot run while another transaction is parked mid-container-walk on that shard. It waits its
+// turn instead of freeing the value under the walk. This is the regression test for the fuzzer
+// use-after-free (SORT_RO walking a list while RM deletes it).
+TEST_F(GenericFamilyTest, RmWaitsForContainerYield) {
+  // Put the list on shard 0 so RM's first hop targets exactly the shard holding the parked walk.
+  const unsigned shard_count = shard_set->size();
+  string key;
+  for (int i = 0; key.empty(); ++i) {
+    string candidate = absl::StrCat("list", i);
+    if (Shard(candidate, shard_count) == 0)
+      key = candidate;
+  }
+
+  constexpr int kListSize = 20'000;
+  constexpr int kBatch = 1'000;
+  vector<string> batch_args = {"rpush", key};
+  batch_args.insert(batch_args.end(), kBatch, "v");
+  for (int pushed = 0; pushed < kListSize; pushed += kBatch) {
+    Run(absl::Span<const string>(batch_args));
+  }
+
+  atomic_bool walk_started{false};
+  atomic_bool release_walk{false};
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    static CommandId cid{"RM_ITERATION", CO::READONLY, 1, 1, 1};
+    boost::intrusive_ptr<Transaction> tx(new Transaction{&cid});
+    CmdArgVec args{key};
+    ASSERT_EQ(tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, CmdArgList{args}),
+              OpStatus::OK);
+
+    auto cb = [&](Transaction* tx, EngineShard* shard) -> OpResult<void> {
+      auto op_args = tx->GetOpArgs(shard);
+      auto res = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_LIST);
+      CHECK(res);
+
+      size_t visited = 0;
+      container_utils::IterateList(res.value()->second, [&](container_utils::ContainerEntry) {
+        walk_started.store(true);
+        while (!release_walk.load())  // hold the walk parked while RM tries to run
+          ThisFiber::SleepFor(std::chrono::milliseconds(1));
+        ++visited;
+        return true;
+      });
+      EXPECT_EQ(visited, kListSize);  // the value stayed live for the whole walk
+      return OpStatus::OK;
+    };
+    EXPECT_EQ(tx->ScheduleSingleHopT(std::move(cb)).status(), OpStatus::OK);
+  });
+
+  RespExpr rm_resp;
+  auto remover = pp_->at(1)->LaunchFiber([&] {
+    for (int spin = 0; spin < 100'000 && !walk_started.load(); ++spin)
+      ThisFiber::Yield();
+    // Blocks behind the parked walk on shard 0 until it is released, then deletes.
+    rm_resp = Run("remover", {"rm", "0", "match", key, "count", "10"});
+  });
+
+  // Release the walk only once RM has actually queued its transaction behind the running walk on
+  // shard 0. The parked read ran optimistically and is not itself in the queue, so a non-empty
+  // queue means RM is waiting. A fixed sleep could let the walk finish before RM even schedules
+  // and never exercise the overlap.
+  bool rm_queued = false;
+  for (int spin = 0; spin < 5'000 && !rm_queued; ++spin) {
+    shard_set->Await(0, [&] { rm_queued = !EngineShard::tlocal()->txq()->Empty(); });
+    if (!rm_queued)
+      ThisFiber::SleepFor(std::chrono::milliseconds(1));
+  }
+  release_walk.store(true);
+
+  reader.Join();
+  remover.Join();
+
+  EXPECT_TRUE(rm_queued) << "RM did not queue behind the parked walk; overlap not exercised";
+
+  // RM waited the walk out rather than crashing or deferring, and deleted the key. Drain to the
+  // final cursor instead of assuming one pass: RM's time budget may split the pass across calls.
+  ASSERT_THAT(rm_resp, ArrLen(2));
+  uint32_t total = rm_resp.GetVec()[1].GetInt().value_or(0);
+  string cursor = rm_resp.GetVec()[0].GetString();
+  for (int call = 0; cursor != "0" && call < 100; ++call) {
+    RespExpr resp = Run({"rm", cursor, "match", key, "count", "10"});
+    ASSERT_THAT(resp, ArrLen(2)) << call;
+    total += resp.GetVec()[1].GetInt().value_or(0);
+    cursor = resp.GetVec()[0].GetString();
+  }
+  EXPECT_EQ(cursor, "0");
+  EXPECT_EQ(total, 1u);
+  EXPECT_THAT(Run({"exists", key}), IntArg(0));
 }
 
 // Regression test for SORT BY nosort STORE inside MULTI/EXEC does a
@@ -2408,5 +2740,107 @@ TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
   EXPECT_EQ("foo", msg.message);
   EXPECT_GE(GetMetrics().events.expired_keys, 1u);
 }
+
+// Each iteration traverses the whole database, including command dispatch and RESP serialization
+// to a reusable in-memory sink. Run with --bench --gtest_filter='-*'
+// --benchmark_filter=BM_ScanCommand --benchmark_min_time=1s.
+class ScanBenchmark : public BaseFamilyTest {
+ public:
+  ScanBenchmark() {
+    SetUpTestSuite();
+    SetUp();
+    // Profiling runs may intentionally take longer than the unit-test watchdog's timeout.
+    watchdog_done_.Notify();
+  }
+
+  ~ScanBenchmark() {
+    TearDown();
+  }
+
+  void RunBenchmark(benchmark::State& state) {
+    const uint64_t key_count = state.range(0);
+    const string count = absl::StrCat(state.range(1));
+    const bool expiring = state.range(2);
+
+    vector<string> populate_args = {"debug",         "populate", absl::StrCat(key_count),
+                                    string(48, 'k'), "16",       "rand"};
+    if (expiring) {
+      populate_args.insert(populate_args.end(), {"expire", "86400", "86401"});
+    }
+    auto populate_resp = Run(absl::Span<const string>{populate_args});
+    DCHECK_EQ(populate_resp.GetView(), "OK");
+    DCHECK_EQ(Run({"dbsize"}).GetInt().value(), key_count);
+
+    // A real connection runs many commands in one fiber. Run() would create a fiber per command
+    // and retain all parsed replies until teardown, so use the normal dispatcher directly here.
+    pp_->at(0)->Await([&] {
+      TestConnection conn{service_.get(), Protocol::REDIS};
+      auto* cntx = static_cast<ConnectionContext*>(conn.cntx());
+      cntx->ns = &namespaces->GetDefaultNamespace();
+      io::StringSink sink;
+      RedisReplyBuilder builder{&sink};
+      CommandContext cmd_cntx{&builder, cntx};
+      // Both patterns return every generated key; only "k*" exercises glob matching.
+      array<string_view, 6> args = {"SCAN", "0",     "COUNT",
+                                    count,  "MATCH", state.range(3) ? "k*" : "*"};
+
+      auto read_line = [](string_view* reply) {
+        size_t end = reply->find("\r\n");
+        DCHECK_NE(end, string_view::npos);
+        string_view line = reply->substr(0, end);
+        reply->remove_prefix(end + 2);
+        return line;
+      };
+
+      uint64_t scan_calls = 0;
+      for (auto _ : state) {
+        args[1] = "0";
+        [[maybe_unused]] uint64_t walk_keys = 0;
+        do {
+          cmd_cntx.ResetForReuse();
+          // Copy the previous cursor before clearing the buffer it points into.
+          cmd_cntx.Assign(args.begin(), args.end(), args.size());
+          sink.Clear();
+          service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC,
+                                    nullptr);
+
+          // Only the cursor is needed to continue the traversal.
+          string_view reply = sink.str();
+          DCHECK(reply.starts_with("*2\r\n$"));
+          reply.remove_prefix(5);
+          read_line(&reply);  // Skip the cursor's bulk-string length.
+          args[1] = read_line(&reply);
+#ifndef NDEBUG
+          string_view array_header = read_line(&reply);
+          DCHECK(array_header.starts_with('*'));
+          uint64_t returned_keys = 0;
+          DCHECK(absl::SimpleAtoi(array_header.substr(1), &returned_keys));
+          walk_keys += returned_keys;
+#endif
+          ++scan_calls;
+        } while (args[1] != "0");
+        DCHECK_EQ(walk_keys, key_count);
+      }
+
+      state.SetItemsProcessed(state.iterations() * key_count);
+      state.counters["scan_calls"] = benchmark::Counter(scan_calls, benchmark::Counter::kIsRate);
+    });
+  }
+
+  void TestBody() override {
+  }
+};
+
+static void BM_ScanCommand(benchmark::State& state) {
+  ScanBenchmark server;
+  server.RunBenchmark(state);
+}
+BENCHMARK(BM_ScanCommand)
+    ->ArgNames({"keys", "count", "expiring", "match"})
+    ->ArgsProduct({{1'000'000}, {10, 100, 1000}, {0, 1}, {0}})
+    ->Args({1'000'000, 1000, 1, 1})
+    ->MeasureProcessCPUTime()
+    ->UseRealTime()
+    ->Unit(benchmark::kMillisecond);
 
 }  // namespace dfly

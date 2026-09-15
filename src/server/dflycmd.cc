@@ -176,6 +176,10 @@ void DflyCmd::ReplicaInfo::Cancel() {
     }
     VLOG(2) << "After flow cleanup " << shard->shard_id();
     flow->conn = nullptr;
+    if (flow->journal_held) {
+      journal::ReleaseUser();
+      flow->journal_held = false;
+    }
   });
   // Wait for error handler to quit.
   exec_st_.JoinErrorHandler();
@@ -346,7 +350,10 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
       return;
     }
 
-    journal::StartInThread();
+    if (!flow.journal_held) {
+      journal::AcquireUser();
+      flow.journal_held = true;
+    }
 
     std::optional<Replica::LastMasterSyncData> my_last_master = sf_->GetLastMasterData();
 
@@ -499,8 +506,8 @@ bool DflyCmd::IsLSNInPartialSyncBuffer(LSN lsn) const {
     LOG(INFO) << "Partial sync requested from stale LSN=" << lsn
               << " that the replication buffer doesn't contain this anymore (current_lsn="
               << journal::GetLsn() << "). Will perform a full sync of the data.";
-    LOG(INFO) << "If this happens often, increase --shard_repl_backlog_time_ms or "
-                 "--shard_repl_backlog_max_bytes.";
+    LOG(INFO) << "If this happens often, increase --shard_repl_backlog_len in legacy mode, or "
+                 "--shard_repl_backlog_time_ms/--shard_repl_backlog_max_bytes otherwise.";
   }
   return exists;
 }
@@ -1058,6 +1065,7 @@ void FlowInfo::TryShutdownSocket() {
 }
 
 FlowInfo::~FlowInfo() {
+  DCHECK(!journal_held);
 }
 
 FlowInfo::FlowInfo() {

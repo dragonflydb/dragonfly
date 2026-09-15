@@ -259,10 +259,10 @@ jobs:
           name: regression_logs
           path: /tmp/failed/*
 
-      - name: Run Valkey TCL stream tests
-        # Same gating as the regression tests above: runs the upstream Valkey stream TCL suites
-        # (unit/type/stream[-cgroups]) in external-server mode against the just-built binary,
-        # on both Debug and Release. continue-on-error keeps it a canary for now — flip to a
+      - name: Run Valkey TCL tests
+        # Same gating as the regression tests above: runs the upstream Valkey TCL suites
+        # (unit/type/stream[-cgroups], unit/pubsub) in external-server mode against the just-built
+        # binary, on both Debug and Release. continue-on-error keeps it a canary for now — flip to a
         # blocking step once proven stable in CI. See tests/dragonfly/valkey_tcl/README.md.
         if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push'
         continue-on-error: true

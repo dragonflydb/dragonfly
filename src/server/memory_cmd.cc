@@ -211,7 +211,7 @@ void MemoryCmd::Run(CmdArgParser parser) {
         "    USE WITH CAUTIOUS! This command is designed for Dragonfly developers.",
         "    ADD <lower-bound> <upper-bound> <sample-odds>",
         "        Sets up tracking memory allocations in the (inclusive) range [lower, upper]",
-        "        sample-odds indicates how many of the allocations will be logged, there 0 means "
+        "        sample-odds indicates how many of the allocations will be logged, there 0 means ",
         "none, 1 means all, and everything in between is linear",
         "        There could be at most 4 tracking placed in parallel",
         "    REMOVE <lower-bound> <upper-bound>",
@@ -226,8 +226,14 @@ void MemoryCmd::Run(CmdArgParser parser) {
         "backing heaps",
         "DEFRAGMENT-SEGMENTS [threshold]",
         "    Tries to free memory by moving DashTable segments from sparsely used memory pages.",
+        "    WARNING: This command runs on all shards and may temporarily monopolize their "
+        "threads,",
+        "    causing high CPU usage and latency spikes. Run only during low-traffic periods.",
         "DEFRAGMENT [threshold]",
         "    Tries to free memory by moving allocations around from sparsely used memory pages.",
+        "    WARNING: This command runs on all shards and may temporarily monopolize their "
+        "threads,",
+        "    causing high CPU usage and latency spikes. Run only during low-traffic periods.",
         "    If a threshold is supplied, it is used to determine if data will be moved from the "
         "page.",
         "    Pages used less than the threshold percentage (default 0.8) are targeted for moving "
@@ -295,6 +301,8 @@ void MemoryCmd::Run(CmdArgParser parser) {
       return cmd_cntx_->SendError("Threshold must be between 0 and 1");
 
     std::vector<CollectedPageStats> results(shard_set->size());
+    // This runs concurrently on every shard and may temporarily monopolize shard threads, causing
+    // high CPU usage and latency spikes. Use only during low-traffic periods.
     shard_set->pool()->AwaitFiberOnAll([threshold, &results](util::ProactorBase*) {
       if (auto* shard = EngineShard::tlocal(); shard) {
         PageUsage page_usage{CollectPageStats::YES, threshold,
@@ -328,6 +336,8 @@ void MemoryCmd::DefragmentSegments(CmdArgParser parser) {
   const DbIndex db_ind = conn_cntx->db_index();
 
   std::vector<CollectedPageStats> results(shard_set->size());
+  // This runs concurrently on every shard and may temporarily monopolize shard threads, causing
+  // high CPU usage and latency spikes. Use only during low-traffic periods.
   shard_set->pool()->AwaitFiberOnAll([threshold, ns, db_ind, &results](util::ProactorBase*) {
     if (auto* shard = EngineShard::tlocal(); shard) {
       PageUsage page_usage{CollectPageStats::YES, threshold,

@@ -64,8 +64,6 @@ ABSL_FLAG(bool, break_replication_on_master_restart, false,
 ABSL_FLAG(std::string, replica_announce_ip, "",
           "IP address that Dragonfly announces to replication master");
 ABSL_FLAG(bool, experimental_cascaded_partial_sync, false, "Experimental cascaded psync");
-ABSL_DECLARE_FLAG(int32_t, port);
-ABSL_DECLARE_FLAG(uint16_t, announce_port);
 ABSL_FLAG(
     int, replica_priority, 100,
     "Published by info command for sentinel to pick replica based on score during a failover");
@@ -328,17 +326,14 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
 }
 
 error_code Replica::Greet() {
-  ResetParser(RedisParser::Mode::CLIENT);
+  ResetParser();
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
   RETURN_ON_ERR(SendCommandAndReadResponse("PING"));  // optional.
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
-  uint16_t port = absl::GetFlag(FLAGS_announce_port);
-  if (port == 0) {
-    port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port));
-  }
+  uint16_t port = cluster::ClusterFamily::AnnouncedPort();
   RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port)));
   PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
 
@@ -358,6 +353,9 @@ error_code Replica::Greet() {
   RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa dragonfly"));
   PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
 
+  // The address belongs to the master we are greeting now, which may be a different server.
+  master_context_.announced.reset();
+
   if (LastResponseArgs().size() == 1) {  // Redis
     PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
   } else if (LastResponseArgs().size() >= 3) {  // it's dragonfly master.
@@ -373,7 +371,8 @@ error_code Replica::Greet() {
 }
 
 std::error_code Replica::HandleCapaDflyResp() {
-  // Response is: <master_repl_id, syncid, num_shards [, version]>
+  // Response is: <master_repl_id> <syncid> <num_shards> [<version> [<lineage_id>
+  //   [<announced_ip> <announced_port>]]]
   if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING, RespExpr::INT64}) ||
       LastResponseArgs()[0].GetBuf().size() != CONFIG_RUN_ID_SIZE)
     return make_error_code(errc::bad_message);
@@ -425,11 +424,23 @@ std::error_code Replica::HandleCapaDflyResp() {
     master_context_.lineage_id = master_context_.master_repl_id;
   }
 
+  if (LastResponseArgs().size() >= 7) {
+    PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[5].type == RespExpr::STRING &&
+                              LastResponseArgs()[6].type == RespExpr::INT64);
+    int64_t announced_port = get<int64_t>(LastResponseArgs()[6].u);
+    PC_RETURN_ON_BAD_RESPONSE(announced_port >= 0 && announced_port <= UINT16_MAX);
+    master_context_.announced = {string(ToSV(LastResponseArgs()[5].GetBuf())),
+                                 static_cast<uint16_t>(announced_port)};
+  }
+
   VLOG(1) << "Master id: " << master_context_.master_repl_id
           << ", sync id: " << master_context_.dfly_session_id
           << ", num journals: " << param_num_flows
           << ", version: " << unsigned(master_context_.version)
-          << ", lineage: " << master_context_.lineage_id;
+          << ", lineage: " << master_context_.lineage_id << ", announced address: "
+          << (master_context_.announced
+                  ? StrCat(master_context_.announced->ip, ":", master_context_.announced->port)
+                  : "none");
 
   return error_code{};
 }
@@ -732,7 +743,7 @@ error_code Replica::ConsumeRedisStream() {
 
   // we never reply back on the commands.
   facade::CapturingReplyBuilder null_builder{facade::ReplyMode::NONE};
-  ResetParser(RedisParser::Mode::SERVER);
+  ResetCommandParser();
 
   // Master waits for this command in order to start sending replication stream.
   RETURN_ON_ERR(SendCommand("REPLCONF ACK 0"));
@@ -780,7 +791,11 @@ error_code Replica::ConsumeRedisStream() {
       ThisFiber::Yield();
     }
 
-    auto response = ReadRespReply(&io_buf, /*copy_msg=*/false);
+    CommandContext* ctx = &ctx_pool[batch.size()];
+    ctx->ResetForReuse();
+    ctx->Init(&null_builder, &conn_context);
+
+    auto response = ReadRespCommand(&io_buf, ctx);
 
     if (!response.has_value()) {
       LOG_REPL_ERROR("Error in Redis Stream at phase "
@@ -791,11 +806,11 @@ error_code Replica::ConsumeRedisStream() {
       return response.error();
     }
 
-    const auto& last_args = LastResponseArgs();
+    const auto& last_args = *ctx;
     bool queued = false;
 
     if (!last_args.empty()) {
-      auto cmd = last_args[0].GetView();
+      auto cmd = last_args.Front();
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
       // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we
@@ -804,22 +819,10 @@ error_code Replica::ConsumeRedisStream() {
         VLOG(2) << "Got command " << absl::CHexEscape(cmd)
                 << "\n consumed: " << response->total_read;
 
-        if (LastResponseArgs()[0].GetBuf()[0] == '\r') {
-          for (const auto& arg : LastResponseArgs()) {
-            LOG(INFO) << absl::CHexEscape(ToSV(arg.GetBuf()));
-          }
-        }
-
-        CommandContext* ctx = &ctx_pool[batch.size()];
-        ctx->ResetForReuse();
-        ctx->Init(&null_builder, &conn_context);
-        FillBackedArgs(last_args, ctx);
         batch.push_back(BatchEntry{ctx, response->total_read});
         queued = true;
       }
     }
-
-    io_buf.ConsumeInput(response->left_in_buffer);
 
     if (!queued) {
       // Skipped commands can be ACKed immediately only if there are no earlier queued commands
@@ -835,7 +838,7 @@ error_code Replica::ConsumeRedisStream() {
 
     // Dispatch when the read buffer is drained or the batch is full, and drain the whole
     // batch before reading from the socket again.
-    if ((io_buf.InputLen() == 0 || batch.size() >= max_batch) && !batch.empty()) {
+    if ((!response->has_more_data || batch.size() >= max_batch) && !batch.empty()) {
       // Chain the commands together so that the squasher can process them in one go.
       for (size_t i = 0; i + 1 < batch.size(); ++i) {
         batch[i].cmd->next = batch[i + 1].cmd;
@@ -846,14 +849,14 @@ error_code Replica::ConsumeRedisStream() {
         // Try dispatching the batch of commands - if the batch didn't process any commands than
         // fall back to dispatching the first command in the batch synchronously.
         auto dispatch_batch = [&](size_t idx) {
-          size_t processed =
-              service_.DispatchSquashedBatch(batch[idx].cmd, batch.size() - idx, &conn_context);
+          size_t processed = service_.DispatchSquashedBatch(batch[idx].cmd, batch.size() - idx,
+                                                            &conn_context, nullptr);
           if (processed > 0) {
             return processed;
           }
           auto* cmd = batch[idx].cmd;
           service_.DispatchCommand(facade::ParsedArgs{*cmd}, cmd,
-                                   facade::AsyncPreference::ONLY_SYNC);
+                                   facade::AsyncPreference::ONLY_SYNC, nullptr);
           return size_t{1};
         };
 
@@ -950,7 +953,13 @@ void Replica::JoinDflyFlows() {
 }
 
 void Replica::SetShardStates(bool replica) {
-  shard_set->RunBriefInParallel([replica](EngineShard* shard) { shard->SetReplica(replica); });
+  shard_set->RunBriefInParallel([replica](EngineShard* shard) {
+    if (replica)
+      journal::AcquireUser(/*start_journal=*/false);
+    else
+      journal::ReleaseUser();
+    shard->SetReplica(replica);
+  });
 }
 
 error_code Replica::SendNextPhaseRequest(string_view kind) {
@@ -993,7 +1002,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
     VLOG(1) << "Sending last master sync flow " << last_master_data.value().id << " " << lsn_str;
   }
 
-  ResetParser(RedisParser::Mode::CLIENT);
+  ResetParser();
   leftover_buf_.emplace(128);
   RETURN_ON_ERR_T(make_unexpected, SendCommand(cmd));
   auto read_resp = ReadRespReply(&*leftover_buf_);
@@ -1391,6 +1400,7 @@ auto Replica::GetSummary() const -> Summary {
     Summary res;
     res.host = server().host;
     res.port = server().port;
+    res.announced = master_context_.announced;
     res.master_link_established = (state_mask_ & R_TCP_CONNECTED);
     res.full_sync_in_progress = (state_mask_ & R_SYNCING);
     res.full_sync_done = (state_mask_ & R_SYNC_OK);

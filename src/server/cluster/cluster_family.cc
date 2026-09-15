@@ -72,6 +72,11 @@ constexpr char kIdNotFound[] = "syncid not found";
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
 
+// Sent to clients that use cluster management commands with cluster mode off or emulated:
+// modes that never have a cluster config, where migrations and slot management do not exist.
+constexpr string_view kClusterDisabledNoConfig =
+    "Cluster is disabled. Use --cluster_mode=yes to enable.";
+
 }  // namespace
 
 ClusterFamily::ClusterFamily(ServerFamily* server_family) : server_family_(server_family) {
@@ -123,6 +128,19 @@ std::optional<ClusterShardInfos> ClusterFamily::GetShardInfos(ConnectionContext*
   return nullopt;
 }
 
+ClusterNodeInfo ClusterFamily::AnnouncedNodeInfo(const facade::Connection* conn, string_view id) {
+  std::string ip = absl::GetFlag(FLAGS_cluster_announce_ip);
+  if (ip.empty()) {
+    ip = conn->LocalBindAddress();
+  }
+  return {.id = string(id), .ip = std::move(ip), .port = AnnouncedPort()};
+}
+
+uint16_t ClusterFamily::AnnouncedPort() {
+  uint16_t port = absl::GetFlag(FLAGS_announce_port);
+  return port == 0 ? static_cast<uint16_t>(absl::GetFlag(FLAGS_port)) : port;
+}
+
 ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) const {
   ClusterShardInfo info{.slot_ranges = SlotRanges({{.start = 0, .end = kMaxSlotNum}}),
                         .master = {},
@@ -133,16 +151,7 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
   ServerState& etl = *ServerState::tlocal();
   if (!repl_info) {
     DCHECK(etl.is_master);
-    std::string cluster_announce_ip = absl::GetFlag(FLAGS_cluster_announce_ip);
-    std::string preferred_endpoint =
-        cluster_announce_ip.empty() ? cntx->conn()->LocalBindAddress() : cluster_announce_ip;
-    uint16_t cluster_announce_port = absl::GetFlag(FLAGS_announce_port);
-    uint16_t preferred_port = cluster_announce_port == 0
-                                  ? static_cast<uint16_t>(absl::GetFlag(FLAGS_port))
-                                  : cluster_announce_port;
-
-    info.master = {{.id = id_, .ip = preferred_endpoint, .port = preferred_port},
-                   NodeHealth::ONLINE};
+    info.master = {AnnouncedNodeInfo(cntx->conn(), id_), NodeHealth::ONLINE};
 
     if (cntx->conn()->IsPrivileged() || !absl::GetFlag(FLAGS_managed_service_info)) {
       for (const auto& replica : server_family_->GetDflyCmd()->GetReplicasRoleInfo()) {
@@ -153,9 +162,14 @@ ClusterShardInfo ClusterFamily::GetEmulatedShardInfo(ConnectionContext* cntx) co
       }
     }
   } else {
-    // TODO: We currently don't save the master's ID in the replica
-    info.master = {{.id = "", .ip = repl_info->summary.host, .port = repl_info->summary.port},
-                   NodeHealth::ONLINE};
+    // The master's announced address, not the one we replicate from (e.g. its admin port).
+    const ReplicaSummary& master = repl_info->summary;
+    ClusterNodeInfo master_node{.id = master.master_id, .ip = master.host, .port = master.port};
+    if (master.announced) {
+      master_node.ip = master.announced->ip;
+      master_node.port = master.announced->port;
+    }
+    info.master = {std::move(master_node), NodeHealth::ONLINE};
     info.replicas.push_back({{.id = id_,
                               .ip = cntx->conn()->LocalBindAddress(),
                               .port = static_cast<uint16_t>(absl::GetFlag(FLAGS_port))},
@@ -471,7 +485,7 @@ void ClusterFamily::DflyCluster(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = cmd_cntx->rb();
   auto* cntx = cmd_cntx->server_conn_cntx();
   if (!(IsClusterEnabled() || (IsClusterEmulated() && cntx->journal_emulated))) {
-    return builder->SendError("Cluster is disabled. Use --cluster_mode=yes to enable.");
+    return builder->SendError(kClusterDisabledNoConfig);
   }
 
   string sub_cmd = absl::AsciiStrToUpper(parser.Next());  // remove subcommand name
@@ -831,6 +845,13 @@ void ClusterFamily::DflySlotMigrationStatus(CmdArgParser parser, CommandContext*
 }
 
 void ClusterFamily::DflyMigrate(CmdArgParser parser, CommandContext* cmd_cntx) {
+  // Migrations can not exist without an applied cluster config, which off and emulated modes
+  // never have. Real mode without a config keeps the migration protocol replies below: the
+  // source relies on UNKNOWN_MIGRATION for its config-propagation grace period.
+  if (!IsClusterEnabled()) {
+    return cmd_cntx->SendError(kClusterDisabledNoConfig);
+  }
+
   string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
   if (sub_cmd == "INIT") {
@@ -1090,7 +1111,13 @@ void ClusterFamily::DflyMigrateAck(CmdArgParser parser, CommandContext* cmd_cntx
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
   VLOG(1) << "DFLYMIGRATE ACK" << ack_args;
-  auto in_migrations = ClusterConfig::Current()->GetIncomingMigrations();
+  auto config = ClusterConfig::Current();
+  if (!config) {
+    // Reply like the unknown-migration path below: the source polls ACK while the config
+    // propagates and grants a quiet grace period on UNKNOWN_MIGRATION.
+    return cmd_cntx->SendSimpleString(kUnknownMigration);
+  }
+  auto in_migrations = config->GetIncomingMigrations();
   auto m_it = rng::find_if(in_migrations, [source_id = source_id](const auto& m) {
     return m.node_info.id == source_id;
   });
@@ -1227,12 +1254,12 @@ inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 void ClusterFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
-  *registry << CI{"CLUSTER", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
+  *registry << CI{"CLUSTER", CO::LOADING, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0,
                   acl::kDflyCluster}
                    .HFUNC(DflyCluster)
-            << CI{"READONLY", CO::READONLY, 1, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
-            << CI{"READWRITE", CO::READONLY, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite)
+            << CI{"READONLY", CO::FAST, 1, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
+            << CI{"READWRITE", CO::FAST, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite)
             << CI{"DFLYMIGRATE", CO::ADMIN | CO::HIDDEN, -1, 0, 0, acl::kDflyMigrate}.HFUNC(
                    DflyMigrate);
 }

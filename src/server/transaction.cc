@@ -8,21 +8,24 @@
 
 #include <memory>
 
+#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/conn_context.h"
 #include "facade/facade_stats.h"
 #include "facade/op_status.h"
-#include "redis/redis_aux.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 
 ABSL_FLAG(uint32_t, tx_queue_warning_len, 96,
           "Length threshold for warning about long transaction queue");
+ABSL_FLAG(bool, disable_scope_based_mem_track, true, "Turn off scope based memory metric");
 
 namespace dfly {
 
@@ -80,6 +83,35 @@ std::string FormatTp(Transaction::time_point tp) {
 
 uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
+}
+
+thread_local MemoryScope* tl_mem_scope = nullptr;
+
+void MemTrackerHook(fb2::FiberSwitchHookEvent event) noexcept {
+  DCHECK_NE(tl_mem_scope, nullptr);
+
+  using enum fb2::FiberSwitchHookEvent;
+  switch (event) {
+    case SUSPEND:
+      tl_mem_scope->Suspend();
+      break;
+    case RESUME:
+      tl_mem_scope->Resume();
+      break;
+  }
+}
+
+template <typename Func> auto WithHook(int obj_type, Func func) {
+  MemoryScope scope(obj_type);
+  const auto prev_hook = ThisFiber::SetSwitchHook({MemTrackerHook});
+  // there is probably no prev. hook but restore just in case
+  auto cleanup = absl::MakeCleanup([prev_hook] { ThisFiber::SetSwitchHook(prev_hook); });
+  return func();
+}
+
+int ObjectType(const CommandId* cid) {
+  static const bool kTrackScopeMem = !absl::GetFlag(FLAGS_disable_scope_based_mem_track);
+  return kTrackScopeMem && cid && cid->HasFamily() ? TypeForFamily(cid->GetFamily()) : -1;
 }
 
 }  // namespace
@@ -450,7 +482,9 @@ void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
   multi_->mode = GLOBAL;
   InitBase(ns, dbid, {});
   InitGlobal();
-  multi_->lock_mode = IntentLock::EXCLUSIVE;
+  // ScheduleInternal below acquires the shard lock in this mode, so it must not be hardcoded:
+  // a read-only command (EVAL_RO) takes it shared.
+  multi_->lock_mode = LockMode();
 
   ScheduleInternal();
 }
@@ -681,7 +715,10 @@ void Transaction::RunCallback(EngineShard* shard) {
 
   RunnableResult result;
   try {
-    result = (*cb_ptr_)(this, shard);
+    if (const int obj_typ = ObjectType(cid_); obj_typ >= 0)
+      result = WithHook(obj_typ, [&] { return (*cb_ptr_)(this, shard); });
+    else
+      result = (*cb_ptr_)(this, shard);
 
     if (unique_shard_cnt_ == 1) {
       cb_ptr_.reset();  // We can do it because only a single thread runs the callback.
@@ -1411,7 +1448,7 @@ ShardArgs Transaction::GetShardArgs(ShardId sid) const {
 }
 
 OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReadyChecker krc,
-                                  bool* block_flag, bool* pause_flag) {
+                                  facade::ConnectionContext* cntx) {
   if (blocking_barrier_.IsClaimed()) {  // Might have been cancelled ahead by a dropping connection
     Conclude();
     return OpStatus::CANCELLED;
@@ -1441,16 +1478,16 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
 
   // Wait for the blocking barrier to be closed.
   // Note: It might return immediately if another thread already notified us.
-  *block_flag = true;
+  cntx->blocked = true;
   cv_status status = blocking_barrier_.Wait(tp);
-  *block_flag = false;
+  cntx->blocked = false;
 
   DVLOG(1) << "WaitOnWatch done " << int(status) << " " << DebugId();
   --stats->num_blocked_clients;
 
-  *pause_flag = true;
+  cntx->paused = true;
   ServerState::tlocal()->AwaitPauseState(true);  // blocking are always write commands
-  *pause_flag = false;
+  cntx->paused = false;
 
   OpStatus result = OpStatus::OK;
   if (status == cv_status::timeout) {
@@ -1520,7 +1557,17 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
     shard->set_running_tx(this);
   }
 
-  auto result = cb(this, shard);
+  // An escaping exception would skip the cleanup below and leave the EXEC reply incomplete.
+  RunnableResult result;
+  try {
+    if (const int obj_typ = ObjectType(cid_); obj_typ >= 0)
+      result = WithHook(obj_typ, [&] { return cb(this, shard); });
+    else
+      result = cb(this, shard);
+  } catch (std::bad_alloc&) {
+    LOG_EVERY_T(ERROR, 1) << " out of memory";
+    result = OpStatus::OUT_OF_MEMORY;
+  }
   db_slice.OnCbFinishBlocking();
 
   LogAutoJournalOnShard(shard, result);
@@ -1537,7 +1584,7 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
   DCHECK(multi_ && multi_->lock_mode);
 
   if (multi_->mode == GLOBAL) {
-    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+    shard->shard_lock()->Release(*multi_->lock_mode);
   } else {
     GetDbSlice(shard->shard_id()).Release(*multi_->lock_mode, KeyLockArgs{db_index_, fps});
   }
@@ -1832,19 +1879,40 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs&
 
       if ((name == "GEORADIUSBYMEMBER" && args.size() >= 5) ||
           (name == "GEORADIUS" && args.size() >= 6)) {
-        // key member radius .. STORE destkey
-        string_view opt = args[args.size() - 2];
-        if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
-          bonus = args.size() - 1;
+        // Options (WITHCOORD/WITHDIST/WITHHASH/COUNT/ASC/DESC/STORE/STOREDIST) are
+        // order-independent (see ParseGeoResultOptions), so walk them by arity instead of
+        // assuming STORE/STOREDIST is the penultimate argument.
+        size_t i = name == "GEORADIUSBYMEMBER" ? 4 : 5;
+        while (i < args.size()) {
+          string_view opt = args[i];
+          if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
+            if (i + 1 < args.size())
+              bonus = i + 1;
+            i += 2;
+          } else if (absl::EqualsIgnoreCase(opt, "COUNT")) {
+            i += 2;
+            if (i < args.size() && absl::EqualsIgnoreCase(args[i], "ANY"))
+              i += 1;
+          } else {
+            i += 1;
+          }
         }
       }
 
       if (name == "SORT") {
-        if (args.size() >= 3) {
-          // SORT key ... STORE destkey
-          string_view opt = args[args.size() - 2];
+        // Options are order-independent, so walk them by arity instead of assuming STORE is the
+        // penultimate argument.
+        for (size_t i = 1; i + 1 < args.size();) {
+          string_view opt = args[i];
           if (absl::EqualsIgnoreCase(opt, "STORE")) {
-            bonus = args.size() - 1;
+            bonus = i + 1;
+            i += 2;
+          } else if (absl::EqualsIgnoreCase(opt, "LIMIT")) {
+            i += 3;
+          } else if (absl::EqualsIgnoreCase(opt, "BY") || absl::EqualsIgnoreCase(opt, "GET")) {
+            i += 2;
+          } else {
+            i += 1;
           }
         }
       }
@@ -1862,6 +1930,63 @@ std::vector<Transaction::PerShardCache>& Transaction::TLTmpSpace::GetShardIndex(
   for (auto& v : shard_cache)
     v.Clear();
   return shard_cache;
+}
+
+namespace {
+
+int64_t TrackedMemory() {
+  const EngineShard* shard = EngineShard::tlocal();
+  // Full search index memory accounting scans all indices. Keep command-scope sampling O(1).
+  const int64_t used_memory = shard->UsedMemoryWithoutSearch();
+
+  const DbSlice* db_slice = nullptr;
+  if (const Transaction* tx = shard->running_tx(); tx != nullptr)
+    db_slice = &tx->GetDbSlice(shard->shard_id());
+  // for unit tests which do not run in transactions
+  else if (namespaces != nullptr)
+    db_slice = &namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+
+  return used_memory - db_slice->table_memory();
+}
+
+}  // namespace
+
+MemoryScope::MemoryScope(int obj_type) : obj_type_(obj_type), mem_baseline_(TrackedMemory()) {
+  DCHECK_GE(obj_type_, 0);
+  DCHECK_EQ(tl_mem_scope, nullptr);
+  tl_mem_scope = this;
+}
+
+void MemoryScope::Suspend() {
+  DCHECK_EQ(tl_mem_scope, this);
+  DCHECK(!suspended_);
+
+  Checkpoint(TrackedMemory());
+  suspended_ = true;
+}
+
+void MemoryScope::Resume() {
+  DCHECK_EQ(tl_mem_scope, this);
+  DCHECK(suspended_);
+
+  mem_baseline_ = TrackedMemory();
+  suspended_ = false;
+}
+
+MemoryScope::~MemoryScope() {
+  DCHECK_EQ(tl_mem_scope, this);
+  DCHECK(!suspended_);
+
+  Checkpoint(TrackedMemory());
+  tl_mem_scope = nullptr;
+
+  EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta_);
+}
+
+void MemoryScope::Checkpoint(int64_t used_memory) {
+  DCHECK(!suspended_);
+  delta_ += used_memory - mem_baseline_;
+  mem_baseline_ = used_memory;
 }
 
 }  // namespace dfly

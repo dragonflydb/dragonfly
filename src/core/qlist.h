@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 
+#include "base/pmr/memory_resource.h"
 #include "core/collection_entry.h"
 #include "server/common_types.h"
 
@@ -174,12 +175,28 @@ class QList {
     return db_id_;
   }
   struct TieringParams {
+    TieringParams(uint32_t node_depth_threshold, void (*offload)(QList*, Node*),
+                  void (*load)(QList*, Node*), void (*cleanup)(QList*, Node*), PMR_NS::string&& key)
+        : node_depth_threshold(node_depth_threshold),
+          offload(offload),
+          load(load),
+          cleanup(cleanup),
+          key(std::move(key)) {
+    }
+
+    // Copying would silently rebind `key` to the default memory resource via
+    // polymorphic_allocator's select_on_container_copy_construction; only moving is safe.
+    TieringParams(const TieringParams&) = delete;
+    TieringParams& operator=(const TieringParams&) = delete;
+    TieringParams(TieringParams&&) = default;
+    TieringParams& operator=(TieringParams&&) = default;
+
     uint32_t num_offloaded_nodes = 0;
-    uint32_t node_depth_threshold = 0;
-    void (*offload)(QList* ql, Node* node) = nullptr;
-    void (*load)(QList* ql, Node* node) = nullptr;
-    void (*cleanup)(QList* ql, Node* node) = nullptr;
-    std::string key;
+    uint32_t node_depth_threshold;
+    void (*offload)(QList* ql, Node* node);
+    void (*load)(QList* ql, Node* node);
+    void (*cleanup)(QList* ql, Node* node);
+    PMR_NS::string key;
   };
 
   /**
@@ -333,11 +350,8 @@ class QList {
   // disabled.
   void CompressAfterLoad();
 
-  // Enable tiered storage.
-  void EnableTiering(const TieringParams& params) {
-    tiering_enabled_ = 1;
-    tiering_params_ = std::make_unique<TieringParams>(params);
-  }
+  // Enable tiered storage. `params.key` must already be allocated with `mr`.
+  void EnableTiering(TieringParams params, PMR_NS::memory_resource* mr);
 
   // Updates the db index associated with this list.
   void SetDbIndex(DbIndex db_id);
@@ -465,7 +479,17 @@ class QList {
   unsigned reserved2_ : 12;
   uint16_t db_id_ = kInvalidDbId;
   uint32_t zstd_threshold_ = 0;  // 0 = disabled
-  std::unique_ptr<TieringParams> tiering_params_;
+
+  // Stateless deleter: recovers the memory_resource from the object's own
+  // PMR-allocated key, so this stays the size of a raw pointer (no deleter state).
+  struct TieringParamsDeleter {
+    void operator()(TieringParams* p) const noexcept;
+  };
+
+  std::unique_ptr<TieringParams, TieringParamsDeleter> tiering_params_;
+
+  static_assert(sizeof(tiering_params_) == sizeof(void*),
+                "tiering_params_ deleter must stay stateless/empty");
 };
 
 }  // namespace dfly

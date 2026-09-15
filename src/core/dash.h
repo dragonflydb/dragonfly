@@ -367,7 +367,8 @@ class DashTable : public detail::DashTableBase {
   // segment by segment over physical backets.
   // traverse by segment order does not guarantees coverage if the table grows/shrinks, it is useful
   // when formal full coverage is not critically important.
-  template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb);
+  // count bounds how many physical buckets are visited in a single call.
+  template <typename Cb> Cursor TraverseBySegmentOrder(Cursor curs, Cb&& cb, unsigned count = 8);
 
   // Discards slots information.
   static const_bucket_iterator BucketIt(const_iterator it) {
@@ -722,6 +723,16 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
            });
   }
 
+  bool ContainsStashBucket() const {
+    if (limit_ > ids_.size())
+      return limit_ > DashTable::kBucketNum;
+
+    for (unsigned i = 0; i < limit_; ++i)
+      if (ids_[i] >= DashTable::kBucketNum)
+        return true;
+    return false;
+  }
+
   bool operator==(const BucketSet& other) const {
     return owner_ == other.owner_ && seg_id_ == other.seg_id_ && limit_ == other.limit_ &&
            ids_[0] == other.ids_[0] && ids_[1] == other.ids_[1];
@@ -744,7 +755,7 @@ struct DashTable<_Key, _Value, Policy>::BucketSet {
 
   DashTable* owner_;
   uint32_t seg_id_;
-  uint8_t limit_;
+  uint8_t limit_;  // number of entries: 1 or 2 values from ids_ or all possible buckets
   std::array<uint8_t, 2> ids_;
 };
 
@@ -1195,23 +1206,27 @@ void DashTable<_Key, _Value, Policy>::Split(uint32_t seg_id, EvictionPolicy& ev)
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& cb) -> Cursor {
+auto DashTable<_Key, _Value, Policy>::TraverseBySegmentOrder(Cursor curs, Cb&& cb, unsigned count)
+    -> Cursor {
   uint32_t sid = curs.segment_id(global_depth_);
   assert(sid < segment_.size());
-  SegmentType* s = segment_[sid];
-  assert(s);
   uint8_t bid = curs.bucket_id();
 
-  auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
-  s->TraverseBucket(bid, std::move(dt_cb));
+  for (unsigned i = 0; i < count; ++i) {
+    SegmentType* s = segment_[sid];
+    assert(s);
 
-  ++bid;
-  if (SegmentType::OutOfRange(bid)) {
-    sid = NextSeg(sid);
-    if (sid >= segment_.size()) {
-      return Cursor::end();
+    auto dt_cb = [&](const SegmentIterator& it) { cb(iterator{this, sid, it.index, it.slot}); };
+    s->TraverseBucket(bid, dt_cb);
+
+    ++bid;
+    if (SegmentType::OutOfRange(bid)) {
+      sid = NextSeg(sid);
+      if (sid >= segment_.size()) {
+        return Cursor::end();
+      }
+      bid = 0;
     }
-    bid = 0;
   }
 
   return Cursor{global_depth_, sid, bid};

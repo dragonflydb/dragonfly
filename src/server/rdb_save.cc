@@ -56,6 +56,9 @@ ABSL_FLAG(dfly::CompressionMode, compression_mode, dfly::CompressionMode::MULTI_
 
 ABSL_FLAG(bool, rdb_sbf_chunked, true, "Enable new save format for saving SBFs in chunks.");
 
+ABSL_FLAG(uint32_t, max_rdb_save_serialize_buffer_capacity, 4194304,  // 4 MiB
+          "Maximum buffer capacity that rdb serializer retains after a flush");
+
 namespace dfly {
 
 using namespace std;
@@ -219,7 +222,8 @@ RdbSerializer::RdbSerializer(CompressionMode compression_mode, ConsumeFun consum
     : compression_mode_(compression_mode),
       tmp_buf_(nullptr),
       consume_fun_(std::move(consume_fun)),
-      flush_threshold_(flush_threshold) {
+      flush_threshold_(flush_threshold),
+      max_buffer_capacity_(absl::GetFlag(FLAGS_max_rdb_save_serialize_buffer_capacity)) {
 }
 
 RdbSerializer::~RdbSerializer() {
@@ -1022,6 +1026,8 @@ string RdbSerializer::Flush(FlushState flush_state) {
   }
 
   string result = mem_buf_controller_.BuildBlob();
+  mem_buf_controller_.MaybeShrinkTo(max_buffer_capacity_);
+
   if (result.empty())
     return {};
 
@@ -1984,6 +1990,12 @@ void MemBufController::MaybeTagEntryTail() {
 
   buffer_.Clear();
   buffer_.WriteAndCommit(dest.data(), dest.size());
+}
+
+bool MemBufController::MaybeShrinkTo(uint32_t max_capacity) {
+  DCHECK_EQ(buffer_.InputLen(), 0) << "attempt to reset non-empty buffer";
+  DCHECK_EQ(prefix_len_, 0) << "attempt to reset buffer with pending prefix data";
+  return buffer_.ShrinkTo(max_capacity);
 }
 
 void MemBufController::ConsumePrefix(std::string* out) {

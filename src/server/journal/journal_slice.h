@@ -6,8 +6,6 @@
 
 #include <boost/circular_buffer.hpp>
 #include <boost/circular_buffer/space_optimized.hpp>
-#include <cstdint>
-#include <shared_mutex>
 #include <string_view>
 
 #include "server/journal/types.h"
@@ -35,6 +33,19 @@ class JournalSlice {
 
   void AddLogRecord(const Entry& entry);
 
+  void AcquireUser();
+  void ReleaseUser();
+
+  void RefreshResumeBound() {
+    resume_bound_ = cur_lsn();
+  }
+
+  LSN resume_bound() const {
+    return resume_bound_;
+  }
+
+  bool CanStop() const;
+
   // Register a callback that will be called every time a new entry is
   // added to the journal.
   // The callback receives the entry and a boolean that indicates whether
@@ -49,6 +60,7 @@ class JournalSlice {
   /// Returns whether the journal entry with this LSN is available
   /// from the buffer.
   bool IsLSNInBuffer(LSN lsn) const;
+
   std::string_view GetEntry(LSN lsn) const;
   // SetFlushMode with allow_flush=false is used to disable preemptions during
   // subsequent calls to AddLogRecord.
@@ -73,6 +85,7 @@ class JournalSlice {
 
   void SetStartingLSN(LSN lsn) {
     lsn_ = lsn;
+    RefreshResumeBound();
   }
 
  private:
@@ -87,9 +100,16 @@ class JournalSlice {
 
   LSN lsn_ = 1;
 
+  // Boundary set when the last user of journal goes away. When all entries in the journal are
+  // ahead of this mark AND there are no current users, it is safe to stop the journal, because no
+  // replica will be able to use the journal.
+  LSN resume_bound_ = 1;
+  uint32_t user_count_ = 0;
+
   uint32_t next_cb_id_ = 1;
   std::error_code status_ec_;
   bool enable_journal_flush_ = true;
+  bool use_legacy_entry_limit_ = false;
 
   uint32_t max_age_ms_ = 0;
   size_t max_bytes_ = 0;

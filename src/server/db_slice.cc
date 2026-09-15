@@ -321,6 +321,10 @@ int32_t AsyncDeleter::IdleCb() {
   if (head_ == nullptr)
     return -1;  // unregister itself.
 
+  if (EngineShard* shard = EngineShard::tlocal(); shard) {
+    shard->stats().async_delete_task_invocation_total++;
+  }
+
   auto* current = head_;
   DVLOG(2) << "IdleCb " << current->cursor;
   if (current->step(current)) {
@@ -1273,20 +1277,23 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 
   int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
-  bool satisfied = params.expire_options == ExpireFlags::EXPIRE_ALWAYS;
-
-  if (prime_it->first.HasExpire()) {
+  const bool has_expire = prime_it->first.HasExpire();
+  if (has_expire)
     current_cmp = prime_it->first.GetExpireTime();
-    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_XX);
-  } else {
-    satisfied |= (params.expire_options & ExpireFlags::EXPIRE_NX);
+
+  // Every given flag must hold. Exception: NX with GT/LT (deliberate extension) sets the
+  // expiry when there is none, otherwise GT/LT alone decides.
+  int32_t opts = params.expire_options;
+  if ((opts & ExpireFlags::EXPIRE_NX) &&
+      (opts & (ExpireFlags::EXPIRE_GT | ExpireFlags::EXPIRE_LT))) {
+    opts = has_expire ? opts & ~ExpireFlags::EXPIRE_NX : int32_t{ExpireFlags::EXPIRE_ALWAYS};
   }
-
-  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_LT) && (abs_msec < current_cmp);
-  satisfied |= (params.expire_options & ExpireFlags::EXPIRE_GT) && (abs_msec > current_cmp);
-
-  if (!satisfied)
+  if (((opts & ExpireFlags::EXPIRE_XX) && !has_expire) ||
+      ((opts & ExpireFlags::EXPIRE_NX) && has_expire) ||
+      ((opts & ExpireFlags::EXPIRE_LT) && !(abs_msec < current_cmp)) ||
+      ((opts & ExpireFlags::EXPIRE_GT) && !(abs_msec > current_cmp))) {
     return OpStatus::SKIPPED;
+  }
 
   // If we update and the new value is already expired, delete the key
   // Already-expired new value: delete; the caller emits the expired event after journaling.
@@ -1465,13 +1472,20 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
     return it;
   }
 
-  int64_t expire_time = it->first.GetExpireTime();
+  if (!it->first.IsExpired(cntx.time_now_ms) || !Expire(cntx, it, events)) {
+    return it;
+  }
+
+  return PrimeIterator{};
+}
+
+bool DbSlice::Expire(const Context& cntx, PrimeIterator it, vector<string>* events) const {
+  DCHECK(it->first.IsExpired(cntx.time_now_ms));
 
   // Never do expiration if expiration is disabled, or on replicas unless replica_delete_expired
   // is enabled (which allows replicas to proactively delete expired keys on the read path).
-  if (int64_t(cntx.time_now_ms) < expire_time || !expire_allowed_ ||
-      (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
-    return it;
+  if (!expire_allowed_ || (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
+    return false;
   }
 
   string scratch;
@@ -1499,7 +1513,7 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
   ++events_.expired_keys;
   db->stats.events.expired_keys++;
 
-  return PrimeIterator{};
+  return true;
 }
 
 void DbSlice::ExpireAllIfNeeded() {
@@ -1628,21 +1642,21 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     ++result.deleted;
   };
 
-  unsigned i = 0;
-
   auto quota_remains = [] {
     // Break out of traversal if we spent more than 1ms
     return base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) < 1000;
   };
 
-  for (; i < count / 3 && quota_remains(); ++i) {
-    db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
+  constexpr unsigned kStep = 8;
+
+  while (result.traversed < count / 3 && quota_remains()) {
+    db.expire_cursor = db.prime.TraverseBySegmentOrder(db.expire_cursor, cb, kStep);
   }
 
   // Continue traversing if we had a strong deletion rate among checked TTL keys.
   if (result.deleted * 4 > checked) {
-    for (; i < count && quota_remains(); ++i) {
-      db.expire_cursor = db.prime.Traverse(db.expire_cursor, cb);
+    while (result.traversed < count && quota_remains()) {
+      db.expire_cursor = db.prime.TraverseBySegmentOrder(db.expire_cursor, cb, kStep);
     }
   }
 
@@ -2151,6 +2165,11 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
 // 4. the snapshot did not reach the bucket yet
 bool DbSlice::IsOmittableWrite(const Context& cntx, const ChangeReq& req) {
   if (!journal_omit_redundant_writes_)
+    return false;
+
+  // Stash entries can be moved backwards relative to the cursor by TryMoveFromStash,
+  // breaking our reachability assumption. We must serialize now
+  if (req.ContainsStashBucket())
     return false;
 
   bool omit_update = false;

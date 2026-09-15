@@ -101,6 +101,10 @@ struct DelayedEntryHandler {
   // If flush_bucket is provided, flushes all entries belonging to this bucket.
   void ProcessDelayedEntries(bool force, BucketIdentity flush_bucket, ExecutionState* cntx);
 
+  // Release all pending delayed entries without serializing them, decrementing their bucket
+  // dependencies. Used when serialization is abandoned (cancellation) to avoid leaking latches.
+  void DiscardDelayedEntries();
+
   // Serialize delayed entry that was fetched with serializer specific implementation
   virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
 

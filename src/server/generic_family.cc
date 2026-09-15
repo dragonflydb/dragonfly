@@ -47,7 +47,6 @@ extern "C" {
 #include "server/transaction.h"
 #include "util/fibers/fibers.h"
 #include "util/fibers/future.h"
-#include "util/varz.h"
 
 namespace rng = std::ranges;
 
@@ -213,6 +212,8 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
                                                      const DbContext& cntx, const RestoreArgs& args,
                                                      DbSlice* db_slice) {
   InMemSource data_src(data);
+  // Bound declared lengths to the payload so a crafted element length can't force a huge resize.
+  source_limit_ = data.size();
   PrimeValue pv;
   bool first_parse = true;
   do {
@@ -644,45 +645,53 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
   return add_res.status();
 }
 
+// Appends 'key' to 'res' unless it is filtered out by MATCH. Materializes the key exactly once.
+bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) {
+  if (opts.matcher) {
+    string str;
+    key.GetString(&str);
+    if (!opts.matcher->Matches(str))
+      return false;
+    res->emplace_back(std::move(str));
+    return true;
+  }
+
+  res->emplace_back();
+  key.GetString(&res->back());
+  return true;
+}
+
 bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
   auto& db_slice = op_args.GetDbSlice();
 
-  DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
-  if (prime_it->first.HasExpire()) {
-    it = db_slice.ExpireIfNeeded(op_args.db_cntx, it);
-    if (!IsValid(it))
-      return false;
-  }
+  // Passing the raw iterator is safe: OpScan prevents preemption for the whole traversal.
+  if (db_slice.TryExpire(op_args.db_cntx, prime_it)) [[unlikely]]
+    return false;
 
-  bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
+  bool matches = !opts.type_filter || prime_it->second.ObjType() == opts.type_filter;
   if (opts.mask.has_value()) {
     if (opts.mask == ScanOpts::Mask::Volatile) {
-      matches &= it->first.HasExpire();
+      matches &= prime_it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Permanent) {
-      matches &= !it->first.HasExpire();
+      matches &= !prime_it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Accessed) {
-      matches &= it->first.WasTouched();
+      matches &= prime_it->first.WasTouched();
     } else if (opts.mask == ScanOpts::Mask::Untouched) {
-      matches &= !it->first.WasTouched();
+      matches &= !prime_it->first.WasTouched();
     }
   }
   if (!matches)
     return false;
 
-  if (opts.min_malloc_size > 0 && it->second.MallocUsed() < opts.min_malloc_size) {
+  if (opts.min_malloc_size > 0 && prime_it->second.MallocUsed() < opts.min_malloc_size) {
     return false;
   }
 
-  if (opts.bucket_id != UINT_MAX && opts.bucket_id != it.GetInnerIt().bucket_id()) {
+  if (opts.bucket_id != UINT_MAX && opts.bucket_id != prime_it.bucket_id()) {
     return false;
   }
 
-  if (!opts.Matches(it.key())) {
-    return false;
-  }
-  res->emplace_back(it.key());
-
-  return true;
+  return AppendScanKey(prime_it->first, opts, res);
 }
 
 void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, StringVec* vec) {
@@ -694,7 +703,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // the bucket might change as we Traverse and yield.
   db_slice.WaitForUnblockedJournalWrites();
 
-  // Disable flush journal changes to prevent preemtion in traverse.
+  // Disable flush journal changes to prevent preemption in traverse.
   journal::DisableFlushGuard journal_flush_guard(op_args.shard->journal());
   unsigned cnt = 0;
 
@@ -783,7 +792,7 @@ void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t*
   auto& db_slice = op_args.GetDbSlice();
   uint32_t count = 0;
   for (const auto& key : keys) {
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
+    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater runs immediately
     if (!IsValid(it))
       continue;
     db_slice.Del(op_args.db_cntx, it);
@@ -795,54 +804,52 @@ void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t*
   *deleted += count;
 }
 
-uint64_t RmGeneric(uint64_t cursor, const ScanOpts& scan_opts, uint32_t* deleted,
-                   ConnectionContext* cntx) {
+uint64_t RmGeneric(uint64_t cursor, const ScanOpts& scan_opts, uint32_t* deleted, Transaction* tx) {
   ShardId sid = cursor % 1024;
 
-  EngineShardSet* ess = shard_set;
-  unsigned shard_count = ess->size();
+  unsigned shard_count = shard_set->size();
   constexpr uint64_t kMaxRmTimeMs = 100;
 
   CHECK_LT(shard_count, 1024u);
 
+  *deleted = 0;
+
   if (sid >= shard_count) {
+    tx->Conclude();
     return 0;
   }
 
   cursor >>= 10;
-  DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
+  const uint64_t deadline_ms = GetCurrentTimeMs() + kMaxRmTimeMs;
 
-  *deleted = 0;
+  // RM runs as a no-key transaction spanning all shards, so each scan+delete hop executes as the
+  // shard's running_tx: no other transaction can walk or mutate the value while the callback runs,
+  // which is what makes deleting the key safe without a key lock. Between hops the shard is free.
+  while (sid < shard_count) {
+    uint64_t shard_cursor = cursor;
+    tx->Execute(
+        [sid, &scan_opts, &shard_cursor, deleted](Transaction* t, EngineShard* shard) {
+          if (shard->shard_id() == sid)
+            OpScanAndDelete(t->GetOpArgs(shard), scan_opts, &shard_cursor, deleted);
+          return OpStatus::OK;
+        },
+        /*conclude=*/false);
+    cursor = shard_cursor;
 
-  do {
-    auto cb = [&] {
-      OpArgs op_args{EngineShard::tlocal(), nullptr, db_cntx};
-      OpScanAndDelete(op_args, scan_opts, &cursor, deleted);
-    };
-
-    if (EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid) {
-      cb();
-      util::ThisFiber::Yield();
-    } else {
-      ess->Await(sid, cb);
-    }
-
-    if (cursor == 0) {
+    if (cursor == 0)  // this shard is exhausted, move to the next one
       ++sid;
-      if (unsigned(sid) == shard_count)
-        break;
-    }
 
-    uint64_t time_now_ms = GetCurrentTimeMs();
-    if (time_now_ms > db_cntx.time_now_ms + kMaxRmTimeMs) {
+    if (*deleted >= scan_opts.limit || GetCurrentTimeMs() >= deadline_ms)
       break;
-    }
-  } while (*deleted < scan_opts.limit);
+  }
+
+  tx->Conclude();
 
   if (sid < shard_count) {
     cursor = (cursor << 10) | sid;
   } else {
     DCHECK_EQ(0u, cursor);
+    cursor = 0;
   }
 
   return cursor;
@@ -988,9 +995,11 @@ OpResult<uint64_t> OpExpireTime(Transaction* t, EngineShard* shard, string_view 
   if (!it->first.HasExpire())
     return OpStatus::SKIPPED;
 
-  int64_t ttl_ms = it->first.GetExpireTime();
-  DCHECK_GT(ttl_ms, 0);  // Otherwise FindReadOnly would return null.
-  return ttl_ms;
+  int64_t expire_ms = it->first.GetExpireTime();
+  // Expiry may be disabled (CLIENT PAUSE, replica): a key past its deadline is logically gone.
+  if (expire_ms <= int64_t(t->GetDbContext().time_now_ms))
+    return OpStatus::KEY_NOTFOUND;
+  return expire_ms;
 }
 
 // OpMove touches multiple databases (op_args.db_idx, target_db), so it assumes it runs
@@ -1115,6 +1124,17 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   // we keep the value we want to move.
   PrimeValue from_obj = std::move(from_res.it->second);
 
+  // When tiering is enabled, update tiered-storage metadata to the new key. Must run before
+  // any post_updater.Run() so the size delta from the (possibly longer) new key's storage is
+  // captured by that updater's memory accounting, instead of being silently dropped.
+  auto retier_key = [&](const DbSlice::Iterator& it) {
+    if (EngineShard::tlocal()->tiered_storage() && it->second.ObjType() == OBJ_LIST &&
+        it->second.Encoding() == kEncodingQL2) {
+      auto* ql = static_cast<QList*>(it->second.RObjPtr());
+      ql->SetKey(to_key);
+    }
+  };
+
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
     db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, to_key, &to_res.it->second);
@@ -1127,6 +1147,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     }
 
     to_res.it->first.SetSticky(sticky);
+    retier_key(to_res.it);
     to_res.post_updater.Run();
 
     db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
@@ -1139,17 +1160,10 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     RETURN_ON_BAD_STATUS(op_result);
     to_res = std::move(*op_result);
     to_res.it->first.SetSticky(sticky);
+    retier_key(to_res.it);
   }
 
   AddKeyToIndexesIfNeeded(to_key, op_args.db_cntx, to_res.it->second, op_args.shard);
-
-  // When tiering is enabled, update tiered-storage metadata to the new key.
-  if (EngineShard::tlocal()->tiered_storage()) {
-    if (to_res.it->second.ObjType() == OBJ_LIST && to_res.it->second.Encoding() == kEncodingQL2) {
-      auto* ql = static_cast<QList*>(to_res.it->second.RObjPtr());
-      ql->SetKey(to_key);
-    }
-  }
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {
@@ -1248,8 +1262,9 @@ ExpireArgs ParseExpireArgs(CmdArgParser* parser) {
   auto args = kGrammar.Apply(parser);
   parser->Finalize("Unsupported option: ");
 
+  // NX with GT/LT is allowed as a deliberate extension, see docs/differences.md.
   if ((args.flags & ExpireFlags::EXPIRE_NX) && (args.flags & ExpireFlags::EXPIRE_XX))
-    parser->ReportCustom("NX and XX options at the same time are not compatible");
+    parser->ReportCustom("NX and XX, GT or LT options at the same time are not compatible");
   if ((args.flags & ExpireFlags::EXPIRE_GT) && (args.flags & ExpireFlags::EXPIRE_LT))
     parser->ReportCustom("GT and LT options at the same time are not compatible");
   return args;
@@ -1833,15 +1848,22 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
 
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
   QList::Where where = QList::TAIL;
+  std::vector rpush_args{key};
+
+  auto add_item = [&](const auto& value) {
+    ql_v2->Push(value, where);
+    if (op_args.shard->journal())
+      rpush_args.push_back(value);
+  };
+
   for (auto it = start_it; it != end_it; ++it) {
     if (has_get_patterns) {
       // Store all GET pattern values for this entry
-      for (const auto& value : it->get_values) {
-        ql_v2->Push(value, where);
-      }
+      for (const auto& value : it->get_values)
+        add_item(value);
     } else {
       // No GET patterns - store the element itself
-      ql_v2->Push(it->ResultKey(), where);
+      add_item(it->ResultKey());
     }
   }
   len = ql_v2->Size();
@@ -1851,6 +1873,8 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
     auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key);
     if (IsValid(it_res.it)) {
       op_args.GetDbSlice().DelMutable(op_args.db_cntx, std::move(it_res));
+      if (op_args.shard->journal())
+        RecordJournal(op_args, "DEL", {key});
     }
     return 0;
   }
@@ -1861,6 +1885,13 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
   // This would overwrite existing value if any with new list.
   auto op_res = op_args.GetDbSlice().AddOrUpdate(op_args.db_cntx, key, std::move(pv), 0);
   RETURN_ON_BAD_STATUS(op_res);
+
+  if (op_args.shard->journal()) {
+    RecordJournal(op_args, "DEL", {key});
+    RecordJournal(op_args, "RPUSH", rpush_args);
+    if (op_res->it->first.IsSticky())
+      RecordJournal(op_args, "STICK", {key});
+  }
 
   return len;
 }
@@ -1892,8 +1923,9 @@ template <typename C> auto GetSortRange(const C& entries, const optional<SortBou
   auto start_it = entries.begin();
   auto end_it = entries.end();
   if (bounds) {
-    start_it += std::min<uint32_t>(bounds->offset, entries.size());
-    end_it = entries.begin() + std::min<uint32_t>(bounds->offset + bounds->count, entries.size());
+    start_it += std::min<size_t>(bounds->offset, entries.size());
+    end_it =
+        entries.begin() + std::min<size_t>(size_t{bounds->offset} + bounds->count, entries.size());
   }
 
   return std::make_pair(start_it, end_it);
@@ -2001,7 +2033,7 @@ struct SortVisitor {
     if (params.bounds) {
       auto sort_it =
           entries.begin() +
-          std::min<uint32_t>(params.bounds->offset + params.bounds->count, entries.size());
+          std::min<size_t>(size_t{params.bounds->offset} + params.bounds->count, entries.size());
       std::partial_sort(entries.begin(), sort_it, entries.end(), cmp);
     } else {
       rng::sort(entries, cmp);
@@ -2116,6 +2148,25 @@ OpStatus PopulateSortEntriesFromByPattern(const SortParams& params,
   return OpStatus::OK;
 }
 
+// STORE with nothing to store still overwrites, i.e. deletes, the destination and replies 0.
+void SortStoreNothing(string_view store_key, CommandContext* cmd_cntx) {
+  ShardId dest_sid = Shard(store_key, shard_set->size());
+  OpResult<uint32_t> store_len;
+  cmd_cntx->tx()->Execute(
+      [&](Transaction* t, EngineShard* shard) {
+        if (shard->shard_id() == dest_sid) {
+          vector<SortEntryBase> none;
+          store_len = OpStore(t->GetOpArgs(shard), store_key, none.begin(), none.end(), false);
+        }
+        return OpStatus::OK;
+      },
+      true);
+  if (store_len)
+    cmd_cntx->SendLong(store_len.value());
+  else
+    cmd_cntx->SendError(store_len.status());
+}
+
 void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_only) {
   std::string_view key = parser.Next();
   SortParams params;
@@ -2192,6 +2243,8 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
     // elem_result->first is empty both for missing/empty containers and for errors;
     // use elem_result's OpStatus to distinguish actual error cases (e.g. WRONG_TYPE).
     if (elem_result->first.empty()) {
+      if (elem_result != OpStatus::WRONG_TYPE && params.store_key)
+        return SortStoreNothing(params.store_key.value(), cmd_cntx);
       cmd_cntx->tx()->Conclude();
       if (elem_result == OpStatus::WRONG_TYPE)
         return cmd_cntx->SendError(elem_result.status());
@@ -2232,6 +2285,8 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
 
     if (sort_status != OpStatus::OK) {
       DVLOG(2) << "Sorting failed with status " << sort_status;
+      if (sort_status == OpStatus::KEY_NOTFOUND && params.store_key)
+        return SortStoreNothing(params.store_key.value(), cmd_cntx);
       cmd_cntx->tx()->Conclude();
       if (sort_status == OpStatus::WRONG_TYPE)
         return cmd_cntx->SendError(sort_status);
@@ -2736,7 +2791,7 @@ void GenericFamily::Rm(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   uint32_t deleted = 0;
-  cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->server_conn_cntx());
+  cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->tx());
 
   auto replier = [cursor, deleted](RedisReplyBuilder* rb) {
     std::string cursor_str = absl::StrCat(cursor);
@@ -2821,6 +2876,7 @@ using CI = CommandId;
 namespace acl {
 
 constexpr uint32_t kDel = KEYSPACE | WRITE | SLOW;
+constexpr uint32_t kDelEx = STRING | WRITE | FAST;
 constexpr uint32_t kPing = FAST | CONNECTION;
 constexpr uint32_t kEcho = FAST | CONNECTION;
 constexpr uint32_t kExists = KEYSPACE | READ | FAST;
@@ -2852,6 +2908,7 @@ constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kPExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
+constexpr uint32_t kRandomKey = KEYSPACE | READ | SLOW;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
@@ -2859,7 +2916,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"DEL", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kDel}.SetAsyncHandler(CmdDel)
-      << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDel}.HFUNC(Delex)
+      << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDelEx}.HFUNC(Delex)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
        * failure detection, and a loading server is considered to be
@@ -2881,26 +2938,37 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"FIELDEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kFieldExpire}
              .HFUNC(FieldExpire)
       << CI{"RENAME", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
-      << CI{"COPY", CO::JOURNALED | CO::NO_AUTOJOURNAL, -3, 1, 2, acl::kCopy}.HFUNC(Copy)
-      << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
+      << CI{"COPY",    CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_1, -3, 1, 2,
+            acl::kCopy}
+             .HFUNC(Copy)
+      << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 2, acl::kRenamNX}
+             .HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
-      << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
-      << CI{"RM", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 0, 0, acl::kRm}.HFUNC(Rm)
+      << CI{"SCAN", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
+      << CI{"RM",
+            CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::JOURNALED | CO::NO_AUTOJOURNAL,
+            -2,
+            0,
+            0,
+            acl::kRm}
+             .HFUNC(Rm)
       << CI{"TTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kTTL}.HFUNC(Ttl)
       << CI{"PTTL", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPTTL}.HFUNC(Pttl)
       << CI{"FIELDTTL", CO::READONLY | CO::FAST, 3, 1, 1, acl::kFieldTtl}.HFUNC(FieldTtl)
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kUnlink}.SetAsyncHandler(
-             CmdDel)
-      << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
-      << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY, -2, 1, 1, acl::kSort}.HFUNC(Sort)
+      << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, -2, 1, -1, acl::kUnlink}
+             .SetAsyncHandler(CmdDel)
+      << CI{"STICK", CO::JOURNALED | CO::FAST, -2, 1, -1, acl::kStick}.HFUNC(Stick)
+      << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -2, 1, 1, acl::kSort}
+             .HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
-      << CI{"MOVE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}
+      << CI{"MOVE",    CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 1,
+            acl::kMove}
              .HFUNC(Move)
       << CI{"RESTORE", CO::JOURNALED, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
-      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, 0}.HFUNC(RandomKey)
+      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, acl::kRandomKey}.HFUNC(RandomKey)
       << CI{"EXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kExpireTime}.HFUNC(ExpireTime)
       << CI{"PEXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPExpireTime}.HFUNC(PExpireTime);
 }

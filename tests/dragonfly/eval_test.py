@@ -225,7 +225,6 @@ ERROR_CALL_SCRIPT_TEMPLATE = [
 
 
 @dfly_args({"proactor_threads": 1})
-@pytest.mark.asyncio
 async def test_eval_error_propagation(async_client):
     CMDS = ["call", "pcall", "acall", "apcall"]
 
@@ -405,7 +404,6 @@ async def test_gc_force_flag(async_client: aioredis.Redis):
 
 
 @dfly_args({"proactor_threads": 1})
-@pytest.mark.asyncio
 async def test_StackOverflowByHincrbyfloat(df_server: DflyInstance):
     client = df_server.client()
 
@@ -464,7 +462,6 @@ async def test_eval_commandstats_nested_call(async_client: aioredis.Redis):
     assert calls(stats, "exists") == 3
 
 
-@pytest.mark.asyncio
 async def test_lua_schedule_during_bgsave(df_factory: DflyInstanceFactory):
     server = df_factory.create(
         proactor_threads=8,

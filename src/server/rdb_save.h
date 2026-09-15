@@ -146,6 +146,10 @@ class MemBufController {
     return buffer_.Capacity();
   }
 
+  // Optionally shrink to max_capacity, only if buffer_ is over that limit. Otherwise this is a
+  // no-op.
+  bool MaybeShrinkTo(uint32_t max_capacity);
+
  private:
   // Consumes upto the prefix_len_ from the buffer, and appends into the string. Clears prefix_len_.
   void ConsumePrefix(std::string* out);
@@ -392,6 +396,7 @@ class RdbSerializer {
   size_t flush_threshold_ = 0;
 
   MemBufController mem_buf_controller_;
+  uint32_t max_buffer_capacity_;
 };
 
 }  // namespace dfly

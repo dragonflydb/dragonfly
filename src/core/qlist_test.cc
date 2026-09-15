@@ -321,6 +321,17 @@ TEST_F(QListTest, PushPlain) {
   EXPECT_THAT(items, ElementsAre(val));
 }
 
+TEST_F(QListTest, ReplacePlainWithPlain) {
+  // Replacing a large (plain-node) element with another large element must set node->sz from the
+  // value length, not by parsing a listpack header out of the raw plain bytes.
+  string a(9000, 'a'), b(9000, 'b');
+  ql_.Push(a, QList::HEAD);
+  ASSERT_TRUE(ql_.Replace(0, b));
+  auto it = ql_.GetIterator(0);
+  ASSERT_TRUE(it.Valid());
+  EXPECT_EQ(b, it.Get().view());
+}
+
 TEST_F(QListTest, GetNum) {
   ql_.Push("1251977", QList::HEAD);
   QList::Iterator it = ql_.GetIterator(QList::HEAD);

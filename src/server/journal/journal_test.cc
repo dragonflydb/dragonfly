@@ -22,6 +22,7 @@
 
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_time_ms);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, shard_repl_backlog_max_bytes);
+ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_len);
 
 using namespace testing;
 using namespace std;
@@ -211,6 +212,116 @@ void AddSetRecord(JournalSlice* slice, string_view value) {
   array<string_view, 2> args{"key", value};
   slice->AddLogRecord(
       Entry{0, Op::COMMAND, 0, nullopt, Entry::Payload{"SET", ArgSlice{args.data(), args.size()}}});
+}
+
+TEST(Journal, LastUserFreezesResumeBoundary) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_len, 1u);
+  JournalSlice slice;
+  slice.Init();
+
+  struct Consumer : JournalConsumerInterface {
+    void ConsumeJournalChange(const JournalChangeItem&) override {
+    }
+    void ThrottleIfNeeded() override {
+    }
+  } consumer;
+  auto id = slice.RegisterOnChange(&consumer);
+  AddSetRecord(&slice, "first");
+  AddSetRecord(&slice, "second");
+  // user count != 0 due to register
+  EXPECT_FALSE(slice.CanStop());
+
+  slice.AcquireUser();
+  slice.UnregisterOnChange(id);
+  AddSetRecord(&slice, "third");
+  EXPECT_FALSE(slice.CanStop());
+
+  // last user gone sets resume-lsn=4
+  slice.ReleaseUser();
+  AddSetRecord(&slice, "fourth");
+  EXPECT_FALSE(slice.CanStop());
+  AddSetRecord(&slice, "fifth");
+  EXPECT_TRUE(slice.CanStop());
+
+  slice.AcquireUser();
+  EXPECT_FALSE(slice.CanStop());
+  // resume-lsn updated to 6
+  slice.ReleaseUser();
+  AddSetRecord(&slice, "sixth");
+  EXPECT_FALSE(slice.CanStop());
+  AddSetRecord(&slice, "seventh");
+  EXPECT_TRUE(slice.CanStop());
+
+  slice.RefreshResumeBound();
+  EXPECT_TRUE(slice.IsLSNInBuffer(7));
+  EXPECT_FALSE(slice.CanStop());
+  AddSetRecord(&slice, "eighth");
+  EXPECT_FALSE(slice.CanStop());
+  AddSetRecord(&slice, "ninth");
+  EXPECT_TRUE(slice.CanStop());
+}
+
+TEST(Journal, BacklogSupportsLegacyEntryLimit) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_len, 2u);
+
+  JournalSlice slice;
+  slice.Init();
+
+  AddSetRecord(&slice, "value");
+  AddSetRecord(&slice, "value");
+
+  EXPECT_EQ(slice.GetRingBufferSize(), 2u);
+  EXPECT_TRUE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(2));
+  EXPECT_GT(slice.GetRingBufferBytes(), 1u);
+  const size_t retained_bytes = slice.GetRingBufferBytes();
+
+  AddSetRecord(&slice, "value");
+
+  EXPECT_EQ(slice.GetRingBufferSize(), 2u);
+  EXPECT_EQ(slice.GetRingBufferBytes(), retained_bytes);
+  EXPECT_FALSE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(2));
+  EXPECT_TRUE(slice.IsLSNInBuffer(3));
+}
+
+TEST(Journal, BacklogByteLimitOverridesLegacyEntryLimit) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_len, 2u);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_max_bytes, strings::MemoryBytesFlag{1});
+
+  JournalSlice slice;
+  slice.Init();
+
+  AddSetRecord(&slice, "value");
+  AddSetRecord(&slice, "value");
+
+  EXPECT_EQ(slice.GetRingBufferSize(), 1u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(2));
+}
+
+TEST(Journal, BacklogTimeLimitOverridesLegacyEntryLimit) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_shard_repl_backlog_len, 2u);
+  absl::SetFlag(&FLAGS_shard_repl_backlog_time_ms, 1u);
+
+  const uint64_t original_time = TEST_current_time_ms;
+  auto restore_time = absl::MakeCleanup([original_time] { TEST_current_time_ms = original_time; });
+
+  JournalSlice slice;
+  slice.Init();
+
+  TEST_current_time_ms = 1000;
+  AddSetRecord(&slice, "value");
+  TEST_current_time_ms = 1001;
+  AddSetRecord(&slice, "value");
+
+  EXPECT_EQ(slice.GetRingBufferSize(), 1u);
+  EXPECT_FALSE(slice.IsLSNInBuffer(1));
+  EXPECT_TRUE(slice.IsLSNInBuffer(2));
 }
 
 TEST(Journal, BacklogHonorsByteLimitAndReplacesOversizedRecord) {

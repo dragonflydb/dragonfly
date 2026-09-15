@@ -42,6 +42,9 @@ std::string_view StatusToMsg(OpStatus status) {
       return "-BUSYGROUP Consumer Group name already exists";
     case OpStatus::INVALID_NUMERIC_RESULT:
       return kInvalidNumericResult;
+    case OpStatus::UNBLOCKED:
+      return "-UNBLOCKED force unblock from blocking operation, instance state changed (master -> "
+             "replica?)";
     case OpStatus::AT_LEAST_ONE_KEY:
       return "at least 1 input key is needed for this command";
     case OpStatus::MEMBER_NOTFOUND:

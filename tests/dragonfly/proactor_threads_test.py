@@ -7,12 +7,9 @@ ignores FLAGS_proactor_threads entirely. The fix resets pool_size to 0 when
 --proactor_threads (or DFLY_proactor_threads) is explicitly set, so the flag wins.
 """
 
-import pytest
-
 from .instance import DflyInstanceFactory
 
 
-@pytest.mark.asyncio
 async def test_proactor_threads_flag_is_respected(df_factory: DflyInstanceFactory):
     """Starting with --proactor_threads=N must result in exactly N threads."""
     server = df_factory.create(proactor_threads=3)
@@ -26,7 +23,6 @@ async def test_proactor_threads_flag_is_respected(df_factory: DflyInstanceFactor
         server.stop()
 
 
-@pytest.mark.asyncio
 async def test_proactor_threads_env_var_is_respected(df_factory: DflyInstanceFactory, monkeypatch):
     """DFLY_proactor_threads env var must behave identically to the CLI flag.
 
@@ -46,7 +42,6 @@ async def test_proactor_threads_env_var_is_respected(df_factory: DflyInstanceFac
         server.stop()
 
 
-@pytest.mark.asyncio
 async def test_proactor_threads_flag_overrides_env_var(
     df_factory: DflyInstanceFactory, monkeypatch
 ):

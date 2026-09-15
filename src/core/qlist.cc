@@ -495,6 +495,20 @@ QList::~QList() {
   Clear();
 }
 
+void QList::TieringParamsDeleter::operator()(TieringParams* p) const noexcept {
+  PMR_NS::polymorphic_allocator<std::byte> alloc(p->key.get_allocator().resource());
+  alloc.delete_object(p);
+}
+
+void QList::EnableTiering(TieringParams params, PMR_NS::memory_resource* mr) {
+  DCHECK(mr);
+  DCHECK(!tiering_params_);
+  DCHECK(params.key.get_allocator().resource() == mr);
+  PMR_NS::polymorphic_allocator<std::byte> alloc(mr);
+  tiering_params_.reset(alloc.new_object<TieringParams>(std::move(params)));
+  tiering_enabled_ = 1;
+}
+
 QList& QList::operator=(QList&& other) noexcept {
   if (this != &other) {
     Clear();
@@ -674,6 +688,10 @@ bool QList::Replace(long index, std::string_view elem) {
 
 size_t QList::MallocUsed(bool slow) const {
   size_t node_size = len_ * sizeof(Node) + znallocx(sizeof(QList));
+  if (tiering_params_) {
+    node_size += sizeof(TieringParams) + tiering_params_->key.capacity();
+  }
+
   if (slow) {
     for (Node* node = head_; node; node = node->next) {
       // Skip offloaded nodes from malloc size calculation.
@@ -876,7 +894,10 @@ void QList::Replace(Iterator it, std::string_view elem) {
       zfree(node->entry);
       uint8_t* new_entry = (uint8_t*)zmalloc(sz);
       memcpy(new_entry, elem.data(), sz);
-      malloc_size_ += NodeSetEntry(node, new_entry);
+      // Plain nodes hold raw bytes; size is the value length, not lpBytes() of a listpack header.
+      malloc_size_ += ssize_t(sz) - ssize_t(node->sz);
+      node->entry = new_entry;
+      node->sz = sz;
       CoolOff(node, node_id);
     } else {
       Insert(it, elem, AFTER);

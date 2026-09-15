@@ -6,6 +6,7 @@
 
 #include <absl/types/span.h>
 
+#include <array>
 #include <functional>
 #include <optional>
 #include <string_view>
@@ -153,9 +154,8 @@ class Interpreter {
 
   void UpdateGCParameters();
 
-  // fp must point to buffer with at least 41 chars.
-  // fp[40] will be set to '\0'.
-  static void FuncSha1(std::string_view body, char* fp);
+  // Returns the SHA1 as 40 lowercase hex characters, without a null terminator.
+  static std::array<char, 40> FuncSha1(std::string_view body);
 
   static std::optional<std::string> DetectPossibleAsyncCalls(std::string_view body);
 

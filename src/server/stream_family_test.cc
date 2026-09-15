@@ -317,6 +317,73 @@ TEST_F(StreamFamilyTest, XReadGroup) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
+TEST_F(StreamFamilyTest, XReadInsideScriptNoEntries) {
+  // Nothing to serve inside a script must reply nil, not abort on AVOID_CONCLUDING.
+  Run({"xadd", "s", "1-0", "k", "v"});
+  Run({"xgroup", "create", "s", "g", "$"});
+
+  auto resp =
+      Run({"eval", "return redis.call('xreadgroup','group','g','c','STREAMS','s','>')", "1", "s"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"ping"}), "PONG");
+
+  resp = Run({"eval", "return redis.call('xread','STREAMS','s','$')", "1", "s"});
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"ping"}), "PONG");
+}
+
+// A multi-stream XREADGROUP where one stream is valid and another has no matching key/group
+// must return NOGROUP without mutating any state on the valid stream: no PEL insertion, no new
+// consumer, and no advance of last-delivered-id. Both single shard and cross shard are tested.
+TEST_F(StreamFamilyTest, XReadGroupMultiStreamErrorDoesNotMutateState) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  struct Case {
+    string_view name;
+    bool same_shard;
+  };
+
+  const vector<Case> cases = {
+      {"same-shard", true},
+      {"cross-shard", false},
+  };
+
+  for (const Case& tc : cases) {
+    SCOPED_TRACE(tc.name);
+
+    const string good = absl::StrCat(tc.name, "-good");
+    string missing;
+    for (unsigned i = 0; missing.empty(); ++i) {
+      string candidate = absl::StrCat(tc.name, "-missing-", i);
+      const bool collocated = Shard(candidate, shard_set->size()) == Shard(good, shard_set->size());
+      if (collocated == tc.same_shard)
+        missing = std::move(candidate);
+    }
+
+    Run({"XGROUP", "CREATE", good, "g", "0", "MKSTREAM"});
+    Run({"XADD", good, "1-0", "f", "v"});
+
+    // "missing" has no key at all, so this must fail with NOGROUP for it.
+    auto resp = Run({"XREADGROUP", "GROUP", "g", "c", "STREAMS", good, missing, ">", ">"});
+    EXPECT_THAT(resp, ErrArg(absl::StrCat("No such key '", missing,
+                                          "' or consumer group 'g' in XREADGROUP with GROUP "
+                                          "option")));
+
+    // Entry 1-0 must not have leaked into the group/consumer PEL.
+    auto pending = Run({"XPENDING", good, "g"});
+    EXPECT_THAT(pending.GetVec()[0], IntArg(0))
+        << "entry 1-0 leaked into the PEL despite the NOGROUP error";
+
+    // Consumer "c" must not have been created, and last-delivered-id must not have advanced.
+    auto group_info = Run({"XINFO", "GROUPS", good});
+    ASSERT_THAT(group_info, ArrLen(1));
+    EXPECT_THAT(
+        group_info.GetVec()[0].GetVec(),
+        ElementsAre("name", "g", "consumers", IntArg(0), "pending", IntArg(0), "last-delivered-id",
+                    "0-0", "entries-read", kMatchNil, "lag", IntArg(1)));
+  }
+}
+
 TEST_F(StreamFamilyTest, XReadGroupConsumerNamedStreams) {
   Run({"XADD", "COUNT", "1-0", "field", "value"});
   Run({"XGROUP", "CREATE", "COUNT", "grp1", "0"});
@@ -864,6 +931,54 @@ TEST_F(StreamFamilyTest, XReadGroupBlockMultiStreamRevalidatesStreams) {
   }
 }
 
+// For multi-shard XREADGROUP, the reported error must come from the first invalid key in
+// STREAMS argument order, regardless of shard assignment or validation order.
+TEST_F(StreamFamilyTest, XReadGroupErrorFollowsArgumentOrder) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  // Find a key that maps to a specific shard.
+  auto find_key_on_shard = [&](string_view prefix, ShardId target_shard) {
+    for (unsigned i = 0;; ++i) {
+      string candidate = absl::StrCat(prefix, "-", i);
+      if (Shard(candidate, shard_set->size()) == target_shard)
+        return candidate;
+    }
+  };
+
+  const string key_on_shard1 = find_key_on_shard("nb-shard1", 1);  // 1st: missing key
+  const string key_on_shard0 = find_key_on_shard("nb-shard0", 0);  // 2nd: wrong type
+
+  Run({"SET", key_on_shard0, "value"});
+
+  // The first key is missing and the second has the wrong type. The error must come from
+  // the first key, even though it is on the higher shard ID.
+  auto resp =
+      Run({"XREADGROUP", "GROUP", "group", "c", "STREAMS", key_on_shard1, key_on_shard0, ">", ">"});
+  EXPECT_THAT(resp, ErrArg("No such key"));
+
+  const string blocked_key_on_shard1 = find_key_on_shard("blk-shard1", 1);
+  const string blocked_key_on_shard0 = find_key_on_shard("blk-shard0", 0);
+  Run({"XGROUP", "CREATE", blocked_key_on_shard1, "group", "0", "MKSTREAM"});
+  Run({"XGROUP", "CREATE", blocked_key_on_shard0, "group", "0", "MKSTREAM"});
+
+  // The first key becomes WRONGTYPE and the second loses its group (NOGROUP). The first
+  // key's error must be reported, regardless of shard validation order.
+  RespExpr blocked_resp;
+  auto reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    blocked_resp = Run({"XREADGROUP", "GROUP", "group", "c", "BLOCK", "0", "STREAMS",
+                        blocked_key_on_shard1, blocked_key_on_shard0, ">", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"MULTI"});
+  Run({"XGROUP", "DESTROY", blocked_key_on_shard0, "group"});
+  Run({"SET", blocked_key_on_shard1, "value"});
+  Run({"EXEC"});
+
+  reader.Join();
+  EXPECT_THAT(blocked_resp, ErrArg("WRONGTYPE"));
+}
+
 TEST_F(StreamFamilyTest, XReadGroupBlockLazyExpireDuringWakeDoesNotCrash) {
   Run({"XGROUP", "CREATE", "s", "g", "0", "MKSTREAM"});
 
@@ -1248,6 +1363,10 @@ TEST_F(StreamFamilyTest, XPending) {
                   RespArray(ElementsAre("1-0", "alice", ArgType(RespExpr::INT64), IntArg(1))),
                   RespArray(ElementsAre("1-1", "alice", ArgType(RespExpr::INT64), IntArg(1))),
                   RespArray(ElementsAre("1-2", "alice", ArgType(RespExpr::INT64), IntArg(1))))));
+
+  // An unknown consumer owns nothing: empty, not the whole group PEL.
+  EXPECT_THAT(Run({"xpending", "foo", "group", "-", "+", "10", "nobody"}), ArrLen(0));
+  EXPECT_THAT(Run({"xpending", "foo", "group", "-", "+", "10", ""}), ArrLen(0));
 
   // only return a single entry
   resp = Run({"xpending", "foo", "group", "-", "+", "1"});

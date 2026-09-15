@@ -52,6 +52,7 @@ extern "C" {
 #include "io/proc_reader.h"
 #include "search/doc_index.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/jwt_validator.h"
 #include "server/acl/user_registry.h"
 #include "server/blocking_controller.h"
 #include "server/command_registry.h"
@@ -1036,7 +1037,7 @@ bool ValidateSnapshotFilenameFlags() {
 
 void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::ProactorPool* pp,
                 CommandContext* cmd_cntx) {
-  size_t requested_slow_log_length = UINT32_MAX;
+  size_t requested_slow_log_length = 10;
   size_t argc = args.size();
   if (argc >= 3) {
     return cmd_cntx->SendError(facade::UnknownSubCmd(sub_cmd, "SLOWLOG"), facade::kSyntaxErrType);
@@ -1047,9 +1048,7 @@ void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::Proacto
       return cmd_cntx->SendError("count should be greater than or equal to -1",
                                  facade::kSyntaxErrType);
     }
-    if (num >= 0) {
-      requested_slow_log_length = num;
-    }
+    requested_slow_log_length = num == -1 ? UINT32_MAX : static_cast<size_t>(num);
   }
 
   // gather all the individual slowlogs from all the fibers and sort them by their timestamp
@@ -1437,6 +1436,17 @@ void ServerFamily::FlushAll(Namespace* ns) {
   flush_trans->InitByArgs(ns, 0, {});
   VLOG(1) << "Performing flush";
   Drakarys(flush_trans.get(), DbSlice::kDbAll, false);
+}
+
+GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
+  if (!IsMaster())
+    return {std::make_error_code(std::errc::operation_not_permitted), "replica cannot load data"};
+  if (path.empty())
+    return {std::make_error_code(std::errc::invalid_argument), "no snapshot found to load"};
+  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
+  if (auto res = storage->ExpandSnapshot(path); !res)
+    return res.error();
+  return {};
 }
 
 // Load starts as many fibers as there are files to load each one separately.
@@ -2040,26 +2050,41 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
                           std::string_view password) {
   const auto* registry = ServerState::tlocal()->user_registry;
   CHECK(registry);
-  const bool is_authorized = registry->AuthUser(username, password);
+
+  bool is_authorized = false;
+  std::string jwt_username;
+  auto auth_expires_at = std::chrono::steady_clock::time_point::max();
+  if (acl::JwtValidator::IsEnabled()) {
+    acl::JwtValidator jwt;
+    auto claims = jwt.Validate(password);
+    if (claims) {
+      jwt_username = std::move(claims->username);
+      username = jwt_username;
+      is_authorized = registry->IsUserActive(username);
+      auth_expires_at = claims->expires_at;
+    }
+  } else {
+    is_authorized = registry->AuthUser(username, password);
+  }
+
   if (is_authorized) {
     cntx->authed_username = username;
     auto cred = registry->GetCredentials(username);
-    cntx->acl_commands = cred.acl_commands;
-    cntx->keys = std::move(cred.keys);
-    cntx->pub_sub = std::move(cred.pub_sub);
+    const size_t db_index = cred.db;
     cntx->ns = &namespaces->GetOrInsert(cred.ns);
+    cntx->SetAclCredentials(std::move(cred));
     cntx->authenticated = true;
-    cntx->acl_db_idx = cred.db;
-    if (cred.db == std::numeric_limits<size_t>::max()) {
+    cntx->auth_expires_at = auth_expires_at;
+    if (db_index == std::numeric_limits<size_t>::max()) {
       cntx->conn_state.db_index = 0;
     } else {
-      auto cb = [ns = cntx->ns, index = cred.db](EngineShard* shard) {
+      auto cb = [ns = cntx->ns, index = db_index](EngineShard* shard) {
         auto& db_slice = ns->GetDbSlice(shard->shard_id());
         db_slice.ActivateDb(index);
         return OpStatus::OK;
       };
       shard_set->RunBriefInParallel(std::move(cb));
-      cntx->conn_state.db_index = cred.db;
+      cntx->conn_state.db_index = db_index;
     }
   }
   return is_authorized;
@@ -2732,8 +2757,8 @@ string ServerFamily::FormatInfoMetrics(
     if (success) {
       append("used_memory_rss", rss);
       append("used_memory_rss_human", HumanReadableNumBytes(rss));
+      append("used_memory_peak_rss", m.used_mem_rss_peak);
     }
-    append("used_memory_peak_rss", glob_memory_peaks.used.load(memory_order_relaxed));
 
     size_t limit = max_memory_limit.load(memory_order_relaxed);
     append("maxmemory", limit);
@@ -2844,6 +2869,7 @@ string ServerFamily::FormatInfoMetrics(
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
+    append("async_delete_task_invocation_total", m.shard_stats.async_delete_task_invocation_total);
     append("borrowed_strings_sent_total", reply_stats.borrowed_string_sent_cnt);
 
     // Number of connections that are currently blocked on grabbing interpreter.
@@ -2885,9 +2911,11 @@ string ServerFamily::FormatInfoMetrics(
 
     append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
+    append("tiered_small_bins_entries_bytes", m.tiered_stats.small_bins_entries_bytes);
     append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
     append("tiered_cold_storage_bytes", m.tiered_stats.cold_storage_bytes);
-    append("tiered_offloading_steps", m.tiered_stats.total_offloading_steps);
+    append("tiered_offloading_usec", m.tiered_stats.total_offloading_usec);
+    append("tiered_defrag_usec", m.tiered_stats.total_defrag_usec);
     append("tiered_offloading_stashes", m.tiered_stats.total_offloading_stashes);
     append("tiered_ram_hits", m.events.ram_hits);
     append("tiered_ram_cool_hits", m.events.ram_cool_hits);
@@ -3482,6 +3510,10 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   // TODO Update thread locals. That way INFO never blocks
   replica_ = new_replica;
   SetMasterFlagOnAllThreads(false);
+  // Blocked writers would otherwise consume elements applied from the replication stream.
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase*) {
+    CancelBlockingOnThread([](ArgSlice) { return OpStatus::UNBLOCKED; });
+  });
 
   if (on_error == ActionOnConnectionFail::kReturnOnError) {
     replica_->StartMainReplicationFiber(last_master_data);
@@ -3588,17 +3620,21 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
 
         cntx->replica_conn = true;
 
-        // The response for 'capa dragonfly' is:
-        //   <masterid> <syncid> <numthreads> <version> <lineage_id>
+        // The response for 'capa dragonfly' is <master_repl_id> <syncid> <num_shards> <version>
+        // <lineage_id> <announced_ip> <announced_port>. It may only grow at the end, and the ip
+        // is a bulk string because it is operator-supplied.
         std::string lineage_id = GetLineageId();
+        auto announced = cluster::ClusterFamily::AnnouncedNodeInfo(cntx->conn());
 
         auto* rb = static_cast<RedisReplyBuilder*>(builder);
-        rb->StartArray(5);
+        rb->StartArray(7);
         rb->SendSimpleString(master_replid_);
         rb->SendSimpleString(sync_id);
         rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
         rb->SendSimpleString(lineage_id);
+        rb->SendBulkString(announced.ip);
+        rb->SendLong(announced.port);
         return;
       }
     } else if (cmd == "LISTENING-PORT") {
@@ -4057,6 +4093,7 @@ constexpr uint32_t kHello = FAST | CONNECTION;
 constexpr uint32_t kLastSave = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kLatency = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kMemory = READ | SLOW;
+constexpr uint32_t kShrink = WRITE | FAST;
 constexpr uint32_t kSave = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kShutDown = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kSlaveOf = ADMIN | SLOW | DANGEROUS;
@@ -4064,7 +4101,7 @@ constexpr uint32_t kReplicaOf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kReplTakeOver = DANGEROUS;
 constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
-constexpr uint32_t kWait = SLOW | CONNECTION;
+constexpr uint32_t kWait = SLOW | CONNECTION | BLOCKING;
 constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
 constexpr uint32_t kModule = ADMIN | SLOW | DANGEROUS;
@@ -4074,7 +4111,7 @@ constexpr uint32_t kDfly = ADMIN;
 
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
-  constexpr auto kMemOpts = CO::LOADING | CO::READONLY | CO::FAST;
+  constexpr auto kMemOpts = CO::LOADING | CO::READONLY;
   registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
@@ -4088,12 +4125,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"FLUSHALL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
              .HFUNC(FlushDb)
       << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
-      << CI{"HELLO", CO::LOADING, -1, 0, 0, acl::kHello}.HFUNC(Hello)
+      << CI{"HELLO", CO::LOADING | CO::FAST, -1, 0, 0, acl::kHello}.HFUNC(Hello)
       << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)
-      << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING | CO::FAST, -2, 0, 0, acl::kLatency}.HFUNC(
-             Latency)
+      << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kLatency}.HFUNC(Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
-      << CI{"SHRINK", CO::JOURNALED | CO::FAST, 2, 1, 1, acl::kMemory}.HFUNC(Shrink)
+      << CI{"SHRINK", CO::JOURNALED | CO::FAST, 2, 1, 1, acl::kShrink}.HFUNC(Shrink)
       << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kSave}.HFUNC(Save)
       << CI{"SHUTDOWN",    CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::DANGEROUS, -1, 0, 0,
             acl::kShutDown}
@@ -4106,7 +4142,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"WAIT", CO::NOSCRIPT | CO::BLOCKING, 3, 0, 0, acl::kWait}.HFUNC(Wait)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)
-      << CI{"SLOWLOG", CO::ADMIN | CO::FAST, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
+      << CI{"SLOWLOG", CO::ADMIN, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly)
       << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);

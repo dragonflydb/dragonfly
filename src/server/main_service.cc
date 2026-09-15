@@ -116,11 +116,10 @@ ABSL_FLAG(strings::MemoryBytesFlag, maxmemory, strings::MemoryBytesFlag{},
 ABSL_FLAG(uint32_t, shard_thread_busy_polling_usec, 0,
           "If non-zero, overrides the busy polling parameter for shard threads.");
 
-ABSL_FLAG(string, huffman_table, "",
-          "a comma separated map: domain1:code1,domain2:code2,... where "
-          "domain can currently be only KEYS or STRINGS, code is a base64-encoded huffman table"
-          " exported via "
-          "DEBUG COMPRESSION EXPORT. if the flag is empty no huffman compression is applied.");
+// TODO: remove this retired flag after Jan 1, 2027.
+ABSL_RETIRED_FLAG(string, huffman_table, "",
+                  "Deprecated: huffman compression of keys and string values is no longer "
+                  "configurable and the flag is ignored.");
 
 ABSL_FLAG(bool, jsonpathv2, true,
           "If true uses Dragonfly jsonpath implementation, "
@@ -717,46 +716,6 @@ void UpdateSchedulerFlagsOnThread() {
                       GetFlag(FLAGS_scheduler_background_warrant));
 }
 
-void SetHuffmanTable(const std::string& huffman_table) {
-  if (huffman_table.empty())
-    return;
-  vector<string_view> parts = absl::StrSplit(huffman_table, ',');
-  for (const auto& part : parts) {
-    vector<string_view> kv = absl::StrSplit(part, ':');
-    if (kv.size() != 2 || kv[0].empty() || kv[1].empty()) {
-      LOG(ERROR) << "Invalid huffman table entry" << part;
-      continue;
-    }
-    string domain_str = absl::AsciiStrToUpper(kv[0]);
-    CompactObj::HuffmanDomain domain;
-
-    if (domain_str == "KEYS") {
-      domain = CompactObj::HUFF_KEYS;
-    } else if (domain_str == "STRINGS") {
-      domain = CompactObj::HUFF_STRING_VALUES;
-    } else {
-      LOG(ERROR) << "Unknown huffman domain: " << kv[0];
-      continue;
-    }
-
-    string unescaped;
-    if (!absl::Base64Unescape(kv[1], &unescaped)) {
-      LOG(ERROR) << "Failed to decode base64 huffman table for domain " << kv[0] << " with value "
-                 << kv[1];
-      continue;
-    }
-
-    atomic_bool success = true;
-    shard_set->RunBriefInParallel([&](auto* shard) {
-      if (!CompactObj::InitHuffmanThreadLocal(domain, unescaped)) {
-        success = false;
-      }
-    });
-    LOG_IF(ERROR, !success) << "Failed to set huffman table for domain " << kv[0] << " with value "
-                            << kv[1];
-  }
-}
-
 string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
   using namespace CO;
   if (!enabled) {
@@ -792,6 +751,8 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case NO_KEY_TRANSACTIONAL:
     case NO_KEY_TX_SPAN_ALL:
     case IDEMPOTENT:
+    case WRITE_KEY_OFFSET_0:
+    case WRITE_KEY_OFFSET_1:
       return "";
   }
   return "";
@@ -1114,6 +1075,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
+  config_registry.RegisterMutable("jwt_validate");
 #ifdef WITH_SEARCH
   config_registry.RegisterMutable("MAXSEARCHRESULTS");
   config_registry.RegisterMutable("search_query_string_bytes");
@@ -1179,12 +1141,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
       [&](uint32_t index, ProactorBase* pb) { sharding::InitThreadLocals(shard_set->size()); });
 
   shard_set->pool()->AwaitBrief([](unsigned, auto*) {
+    facade::Connection::InitThreadLocal();
     facade::Connection::UpdateFromFlags();
     UpdateFromFlagsOnThread();
     UpdateSchedulerFlagsOnThread();
   });
-  SetHuffmanTable(GetFlag(FLAGS_huffman_table));
-
   // Requires that shard_set will be initialized before because server_family_.Init might
   // load the snapshot.
   server_family_.Init(acceptor, std::move(listeners));
@@ -1210,12 +1171,15 @@ void Service::Shutdown() {
   cluster_family_.Shutdown();
   server_family_.Shutdown();
 
-  shutdown_watchdog.emplace(pp_);
-
   engine_varz.reset();
 
+  uint64_t shard_shutdown_start = absl::GetCurrentTimeNanos();
   shard_set->PreShutdown();
   shard_set->Shutdown();
+  LOG(INFO) << "Shard set shutdown took "
+            << (absl::GetCurrentTimeNanos() - shard_shutdown_start) / 1000 << "us";
+
+  shutdown_watchdog.emplace(pp_);
 
   delete channel_store;
   channel_store = nullptr;
@@ -1432,6 +1396,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
     }
   }
 
+  // JWT-derived auth carries its own expiration contract (see acl::JwtValidator): once
+  // it lapses, we must force a reauth.
+  if (dfly_cntx.authenticated &&
+      dfly_cntx.auth_expires_at != std::chrono::steady_clock::time_point::max() &&
+      dfly_cntx.auth_expires_at <= std::chrono::steady_clock::now()) {
+    if (cmd_name != "AUTH" && !cid.IsQuit() && !cid.IsReset() && cmd_name != "HELLO") {
+      return ErrorReply{"-NOAUTH JWT token expired, please re-authenticate.",
+                        facade::kNoAuthErrType};
+    }
+  }
+
   // only reset and quit are allow if this connection is used for monitoring.
   // In Valkey monitor connections are marked as replica connections, so they get this unrelated
   // error message.
@@ -1488,12 +1463,17 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
 }
 
-DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd,
-                                        facade::AsyncPreference async_pref) {
+DispatchResult Service::DispatchCommand(
+    facade::ParsedArgs args, facade::ParsedCommand* parsed_cmd, facade::AsyncPreference async_pref,
+    absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) {
   DCHECK_NE(0u, shard_set->size()) << "Init was not called";
 
   const CommandId* cid = nullptr;
   ParsedArgs args_no_cmd;
+  auto invoke_pre_dispatch = [&] {
+    if (pre_dispatch_cb)
+      (*pre_dispatch_cb)(parsed_cmd);
+  };
 
   if (parsed_cmd->mc_command()) {
     auto mc_res = HandleMemcacheCommand(parsed_cmd, async_pref);
@@ -1508,6 +1488,7 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   }
 
   if (cid == nullptr) {
+    invoke_pre_dispatch();
     if (async_pref != AsyncPreference::ONLY_SYNC) {
       parsed_cmd->SetDeferredReply();
     }
@@ -1516,6 +1497,11 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
     } else {
       parsed_cmd->SendError(ReportUnknownCmd(absl::AsciiStrToUpper(args.Front())));
     }
+    // A collecting MULTI must abort at EXEC, as with any other queue-time error.
+    auto& exec_info =
+        static_cast<CommandContext*>(parsed_cmd)->server_conn_cntx()->conn_state.exec_info;
+    if (exec_info.IsCollecting())
+      exec_info.error = true;
     return DispatchResult::ERROR;
   }
 
@@ -1532,6 +1518,8 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
         parsed_cmd->SetDeferredReply();
       break;
   };
+
+  invoke_pre_dispatch();
 
   CommandContext* cmd_cntx = static_cast<CommandContext*>(parsed_cmd);
   ConnectionContext* dfly_cntx = cmd_cntx->server_conn_cntx();
@@ -1561,8 +1549,11 @@ DispatchResult Service::DispatchCommand(facade::ParsedArgs args, facade::ParsedC
   if (auto err = VerifyCommandState(*cid, args_no_cmd, *dfly_cntx); err) {
     LOG_IF(WARNING, dfly_cntx->replica_conn || !dfly_cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
-    if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
-      exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
+    // A rejected EXEC discards the transaction, a rejected queued command only marks it.
+    if (cid->IsExec())
+      MultiCleanup(dfly_cntx);
+    else if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
+      exec_info.error = true;
 
     // We need to skip this because ACK's should not be replied to
     // Bonus points because this allows to continue replication with ACL users who got
@@ -1754,8 +1745,9 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
   return res;
 }
 
-uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned count,
-                                        facade::ConnectionContext* cntx) {
+uint32_t Service::DispatchSquashedBatch(
+    facade::ParsedCommand* first, unsigned count, facade::ConnectionContext* cntx,
+    absl::FunctionRef<void(facade::ParsedCommand*)>* pre_dispatch_cb) {
   auto* dfly_cntx = static_cast<ConnectionContext*>(cntx);
   DCHECK(!dfly_cntx->conn_state.exec_info.IsRunning());
 
@@ -1845,6 +1837,8 @@ uint32_t Service::DispatchSquashedBatch(facade::ParsedCommand* first, unsigned c
         cid->IsSubscribeFamily())
       break;
 
+    if (pre_dispatch_cb)
+      (*pre_dispatch_cb)(cmd);
     if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
       CapturingReplyBuilder crb{ReplyMode::FULL, rb->GetRespVersion()};
       crb.SendError(std::move(*err));
@@ -1968,7 +1962,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   MultiCleanup(cntx);
 
   if (conn_state.subscribe_info) {
-    if (!conn_state.subscribe_info->channels.empty())
+    if (!conn_state.subscribe_info->Channels().empty())
       cntx->UnsubscribeAll(false, nullptr);
     if (conn_state.subscribe_info)
       cntx->PUnsubscribeAll(false, nullptr);
@@ -1994,6 +1988,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   cntx->authed_username = "default";
   cntx->ns = &namespaces->GetOrInsert("");
   cntx->authenticated = false;
+  cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
 
   rb->SendSimpleString("RESET");
 }
@@ -2034,7 +2029,7 @@ void Service::Watch(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
   for (string_view key : parser.UnparsedArgs()) {
-    exec_info.watched_keys.emplace_back(cntx->db_index(), key);
+    exec_info.AddWatchedKey(cntx->db_index(), key);
   }
 
   return cmd_cntx->rb()->SendOk();
@@ -2172,7 +2167,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       auto saved_tail = cmd_cntx->tail_args();
 
       auto* prev = cmd_cntx->SwapReplier(&replier);
-      DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC);
+      DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
       cmd_cntx->SwapReplier(prev);
 
       cmd_cntx->SetTailArgs(saved_tail);
@@ -2336,7 +2331,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
   auto& sinfo = conn_cntx->conn_state.script_info;
-  sinfo = make_unique<ConnectionState::ScriptInfo>();
+  sinfo = make_unique<ConnectionState::ScriptInfo>(*conn_cntx);
   sinfo->lock_tags.reserve(eval_args.num_keys);
   sinfo->read_only = read_only;
   memcpy(sinfo->stats.sha, eval_args.sha.data(), eval_args.sha.size());
@@ -2378,8 +2373,11 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     }
   }
 
-  // Reset cid to EVAL[] as the context is reused during command dispatch
-  absl::Cleanup clean = [interpreter, cmd_cntx, cid = cmd_cntx->cid()]() {
+  // Reset cid to EVAL[] as the context is reused during command dispatch. A SELECT inside the
+  // script must not outlive it, so the caller's db is restored as well.
+  absl::Cleanup clean = [interpreter, cmd_cntx, conn_cntx, caller_db = conn_cntx->db_index(),
+                         cid = cmd_cntx->cid()]() {
+    conn_cntx->conn_state.db_index = caller_db;
     interpreter->ResetStack();
     cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
@@ -2564,7 +2562,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
 
-  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
+  if (exec_info.error) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
@@ -3035,12 +3033,12 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
       << ", repl_session_id: " << conn_state.replication_info.repl_session_id;
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
-    if (!conn_state.subscribe_info->channels.empty()) {
+    if (!conn_state.subscribe_info->Channels().empty()) {
       server_cntx->UnsubscribeAll(false, nullptr);
     }
 
     if (conn_state.subscribe_info) {
-      DCHECK(!conn_state.subscribe_info->patterns.empty());
+      DCHECK(!conn_state.subscribe_info->Patterns().empty());
       server_cntx->PUnsubscribeAll(false, nullptr);
     }
 
@@ -3103,8 +3101,8 @@ void Service::Register(CommandRegistry* registry) {
       << CI{"QUIT", CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"RESET", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kReset}.HFUNC(Reset)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kMulti}.HFUNC(Multi)
-      << CI{"WATCH", CO::LOADING, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
-      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
+      << CI{"WATCH", CO::LOADING | CO::FAST, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
+      << CI{"UNWATCH", CO::LOADING | CO::FAST, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
       << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDiscard}.MFUNC(Discard)
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEval}
              .MFUNC(Eval)
@@ -3133,7 +3131,7 @@ void Service::Register(CommandRegistry* registry) {
              PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, acl::kFunction}.MFUNC(Function)
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, acl::kMonitor}.MFUNC(Monitor)
-      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
+      << CI{"PUBSUB", CO::LOADING, -1, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
       << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, acl::kCommand}.MFUNC(Command);
 }
 

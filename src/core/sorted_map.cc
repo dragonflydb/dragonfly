@@ -7,6 +7,7 @@
 #include <absl/strings/str_cat.h>
 
 #include <cmath>
+#include <memory>
 
 extern "C" {
 #include "redis/listpack.h"
@@ -154,8 +155,9 @@ unsigned char* ZzlInsertAt(unsigned char* zl, unsigned char* eptr, std::string_v
 
 double ZzlStrtod(unsigned char* vstr, unsigned int vlen) {
   char buf[128];
-  if (vlen > sizeof(buf))
-    vlen = sizeof(buf);
+  // Leave room for the terminating NUL: buf[vlen] must stay in bounds.
+  if (vlen >= sizeof(buf))
+    vlen = sizeof(buf) - 1;
   memcpy(buf, vstr, vlen);
   buf[vlen] = '\0';
   return strtod(buf, NULL);
@@ -626,13 +628,20 @@ unsigned char* ZzlFind(unsigned char* lp, std::string_view ele, double* score) {
   return nullptr;
 }
 
-SortedMap::SortedMap()
-    : score_map(new ScoreMap), score_tree(new ScoreTree(StatelessAllocator<char>::resource())) {
+SortedMap::SortedMap() {
+  PMR_NS::memory_resource* mr = StatelessAllocator<char>::resource();
+  auto* map_mem = static_cast<ScoreMap*>(mr->allocate(sizeof(ScoreMap), alignof(ScoreMap)));
+  score_map = std::construct_at(map_mem);
+  auto* tree_mem = static_cast<ScoreTree*>(mr->allocate(sizeof(ScoreTree), alignof(ScoreTree)));
+  score_tree = std::construct_at(tree_mem, mr);
 }
 
 SortedMap::~SortedMap() {
-  delete score_tree;
-  delete score_map;
+  PMR_NS::memory_resource* mr = StatelessAllocator<char>::resource();
+  std::destroy_at(score_tree);
+  mr->deallocate(score_tree, sizeof(ScoreTree), alignof(ScoreTree));
+  std::destroy_at(score_map);
+  mr->deallocate(score_map, sizeof(ScoreMap), alignof(ScoreMap));
 }
 
 // Three way comparison of q and key.
@@ -1158,8 +1167,8 @@ SortedMap* SortedMap::FromListPack(PMR_NS::memory_resource* res, const uint8_t* 
   unsigned int vlen;
   long long vlong;
 
-  void* ptr = res->allocate(sizeof(SortedMap), alignof(SortedMap));
-  SortedMap* zs = new (ptr) SortedMap;
+  auto* zs_mem = static_cast<SortedMap*>(res->allocate(sizeof(SortedMap), alignof(SortedMap)));
+  SortedMap* zs = std::construct_at(zs_mem);
 
   eptr = lpSeek(zl, 0);
   if (eptr != NULL) {

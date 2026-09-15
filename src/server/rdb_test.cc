@@ -14,6 +14,8 @@ extern "C" {
 #include <absl/flags/reflection.h>
 #include <mimalloc.h>
 
+#include <filesystem>
+
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
@@ -29,6 +31,7 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "server/rdb_save.h"
 #include "server/serializer_commons.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 #include "strings/human_readable.h"
 
@@ -50,6 +53,8 @@ ABSL_DECLARE_FLAG(bool, rdb_sbf_chunked);
 ABSL_DECLARE_FLAG(bool, serialize_hnsw_index);
 ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
+ABSL_DECLARE_FLAG(bool, df_snapshot_format);
+ABSL_DECLARE_FLAG(uint32_t, max_rdb_save_serialize_buffer_capacity);
 
 namespace {
 
@@ -162,6 +167,16 @@ TEST_F(RdbTest, Crc) {
 TEST_F(RdbTest, LoadEmpty) {
   auto ec = LoadRdb("empty.rdb");
   ASSERT_FALSE(ec) << ec;
+}
+
+TEST_F(RdbTest, LoadValkeyHashWithExpiry) {
+  auto ec = LoadRdb("valkey9_hash_expiry.rdb");
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_THAT(Run({"HGETALL", "hash"}).GetVec(),
+              UnorderedElementsAre("expiring", "one", "persistent", "two", "overflow", "three"));
+  EXPECT_THAT(Run({"HPEXPIRETIME", "hash", "FIELDS", "2", "expiring", "persistent"}),
+              RespElementsAre(2524608000000, -1));
 }
 
 TEST_F(RdbTest, LoadSmall6) {
@@ -970,6 +985,98 @@ TEST_F(RdbTest, LoadHugeList) {
   ASSERT_EQ(100000, CheckedInt({"llen", "test:1"}));
   auto metrics = GetMetrics();
   EXPECT_GT(metrics.db_stats[0].obj_memory_usage, 20'000'000u);
+}
+
+TEST_F(RdbTest, ReloadKeepsConsumerGroupEntriesRead) {
+  Run({"xadd", "x", "1-0", "f", "v"});
+  Run({"xadd", "x", "2-0", "f", "v"});
+  Run({"xadd", "x", "3-0", "f", "v"});
+  Run({"xgroup", "create", "x", "g", "0"});
+  Run({"xreadgroup", "group", "g", "c", "count", "2", "streams", "x", ">"});
+  auto expected =
+      ElementsAre("name", "g", "consumers", IntArg(1), "pending", IntArg(2), "last-delivered-id",
+                  "2-0", "entries-read", IntArg(2), "lag", IntArg(1));
+  EXPECT_THAT(Run({"xinfo", "groups", "x"}).GetVec()[0].GetVec(), expected);
+
+  ASSERT_EQ(Run({"debug", "reload"}), "OK");
+  // A mid-stream group's entries-read cannot be estimated; it must survive the reload verbatim.
+  EXPECT_THAT(Run({"xinfo", "groups", "x"}).GetVec()[0].GetVec(), expected);
+}
+
+// An RDB image with a zero-member set 'e' followed by string 'f'. The empty key must be skipped
+// without aborting the load.
+TEST_F(RdbTest, LoadSkipsEmptyKey) {
+  uint8_t rdb[] = {0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, 0xfe,
+                   0x00, 0x02, 0x01, 0x65, 0x00, 0x00, 0x01, 0x66, 0x01, 0x76,
+                   0xff, 0xc9, 0xbd, 0xe3, 0xb2, 0xec, 0x3b, 0x7a, 0xb5};
+  auto ec = pp_->at(0)->Await([&] {
+    io::BytesSource src(string_view(reinterpret_cast<const char*>(rdb), sizeof(rdb)));
+    RdbLoadContext load_context;
+    RdbLoader loader(service_.get(), &load_context);
+    return loader.Load(&src);
+  });
+  ASSERT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"get", "f"}), "v");
+  EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
+}
+
+// With RDB-format snapshots the recorded last-save path must keep its .rdb extension, otherwise
+// DEBUG RELOAD flushes the dataset and then fails to load it back.
+TEST_F(RdbTest, DebugReloadRdbFormat) {
+  absl::FlagSaver fs;
+  ShutdownService();  // clears dbfilename; set it afterwards, as InitWithDbFilename does
+  absl::SetFlag(&FLAGS_df_snapshot_format, false);
+  absl::SetFlag(&FLAGS_dbfilename, absl::StrCat("rdbtestdump_", getpid(), ".rdb"));
+  ResetService();
+
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  EXPECT_THAT(service_->server_family().GetLastSaveInfo().file_name, EndsWith(".rdb"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
+}
+
+TEST_F(RdbTest, DebugReloadNoSnapshotKeepsData) {
+  // Nothing was ever saved; RELOAD NOSAVE must fail without flushing the dataset.
+  Run({"set", "k1", "v1"});
+  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ErrArg("no snapshot"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
+}
+
+TEST_F(RdbTest, DebugReloadMissingSnapshotKeepsData) {
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  CleanupSnapshots();  // the snapshot disappears out from under the server
+  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ErrArg("not found"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
+}
+
+TEST_F(RdbTest, DebugReloadOnReplicaKeepsData) {
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = false; });
+  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ErrArg("replica"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = true; });
+}
+
+TEST_F(RdbTest, DebugReloadSnapshotDirectoryKeepsData) {
+  // Single-file .rdb: a directory shadowing the path passes fs::canonical, so it must be
+  // rejected as a non-regular file before the flush.
+  absl::FlagSaver fs;
+  ShutdownService();  // clears dbfilename; set it afterwards, as InitWithDbFilename does
+  absl::SetFlag(&FLAGS_df_snapshot_format, false);
+  absl::SetFlag(&FLAGS_dbfilename, absl::StrCat("rdbtestdump_", getpid(), ".rdb"));
+  ResetService();
+
+  Run({"set", "k1", "v1"});
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  std::string path = service_->server_family().GetLastSaveInfo().file_name;
+  ASSERT_THAT(path, EndsWith(".rdb"));
+  CleanupSnapshots();
+  std::filesystem::create_directory(path);  // a directory now shadows the snapshot path
+  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ErrArg("directory"));
+  EXPECT_EQ(Run({"get", "k1"}), "v1");
+  std::filesystem::remove(path);
 }
 
 // Tests loading a huge stream, where the stream is loaded in multiple partial
@@ -2326,6 +2433,27 @@ TEST_F(RdbTest, EofWithRemoteShardChunksPending) {
 
   // Key was never fully loaded before EOF, so it must not exist.
   EXPECT_EQ(Run({"EXISTS", key}), 0);
+}
+
+TEST(RdbSerializerTest, BufferShrinksIfOverCap) {
+  absl::FlagSaver fs;
+  constexpr uint32_t kMaxCap = 8 * 1024;
+  SetFlag(&FLAGS_max_rdb_save_serialize_buffer_capacity, kMaxCap);
+
+  RdbSerializer serializer{CompressionMode::NONE};
+
+  const string big(kMaxCap + 1, 'x');
+  ASSERT_FALSE(serializer.WriteRaw(io::Buffer(big)));
+  ASSERT_GT(serializer.GetBufferCapacity(), kMaxCap);
+
+  EXPECT_EQ(serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry), big);
+  EXPECT_EQ(serializer.SerializedLen(), 0);
+  EXPECT_EQ(serializer.GetBufferCapacity(), kMaxCap);
+
+  constexpr string_view tail = "tail entry";
+  ASSERT_FALSE(serializer.WriteRaw(io::Buffer(tail)));
+  ASSERT_EQ(serializer.GetBufferCapacity(), kMaxCap);
+  EXPECT_EQ(serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry), tail);
 }
 
 }  // namespace dfly

@@ -51,6 +51,7 @@ string MCRender::RenderDeleted() const {
 void ParsedCommand::ResetForReuse() {
   is_deferred_reply_ = false;
   reply_ = std::monostate{};
+  has_unparsed_input = false;
 
   offsets_.resize(0);
   offsets_.shrink_to_fit();

@@ -180,6 +180,65 @@ TEST_F(RespSrvParserTest, LargeBulk) {
   EXPECT_EQ(27000000u, args_[0].size());
 }
 
+TEST_F(RespSrvParserTest, InlineTooLong) {
+  // A single unterminated token.
+  string big(40000, 'A');
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(big));
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(big));  // 80000 > 64KB, still no EOL
+}
+
+TEST_F(RespSrvParserTest, InlineManyTokensTooLong) {
+  string chunk;
+  for (unsigned i = 0; i < 5000; ++i)
+    chunk += "aaaaaaa ";  // 40000 bytes of complete tokens
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(chunk));
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(chunk));
+}
+
+TEST_F(RespSrvParserTest, InlineCapFinalFragmentWithEol) {
+  // The cap must hold even when the crossing fragment carries the newline.
+  string big(63 * 1024, 'A');
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(big));
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(string(4096, 'A') + "\r\n"));
+}
+
+TEST_F(RespSrvParserTest, InlineCapSingleBufferWithEol) {
+  // An oversized line completed within one buffer must be rejected as well.
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(string(70 * 1024, 'A') + "\r\n"));
+}
+
+TEST_F(RespSrvParserTest, InlineBelowCapOk) {
+  string ok_line(63 * 1024, 'B');
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(ok_line));
+  ASSERT_EQ(RespSrvParser::OK, Parse("\r\n"));
+  EXPECT_THAT(Vec(), ElementsAre(ok_line));
+}
+
+TEST_F(RespSrvParserTest, HugeBulkNoEagerAlloc) {
+  // Declaring a huge bulk length must not allocate the full buffer upfront.
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse("*1\r\n$200000000\r\n"));
+  EXPECT_LT(args_.HeapMemory() + parser_.UsedMemory(), 64u * 1024);
+}
+
+TEST_F(RespSrvParserTest, BulkOverEagerLimitAssembled) {
+  const size_t kLen = 2'000'000;
+  ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(absl::StrCat("*1\r\n$", kLen, "\r\n")));
+  EXPECT_LT(args_.HeapMemory() + parser_.UsedMemory(), 64u * 1024);
+
+  string chunk(100'000, 'x');
+  chunk.front() = 'F';
+  for (unsigned i = 0; i < kLen / chunk.size(); ++i) {
+    ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(chunk));
+    ASSERT_EQ(chunk.size(), consumed_);
+  }
+  ASSERT_EQ(RespSrvParser::OK, Parse("\r\n"));
+  ASSERT_EQ(1u, args_.size());
+  ASSERT_EQ(kLen, args_[0].size());
+  EXPECT_EQ('F', args_[0][0]);
+  EXPECT_EQ('F', args_[0][kLen - chunk.size()]);
+  EXPECT_EQ('x', args_[0][kLen - 1]);
+}
+
 TEST_F(RespSrvParserTest, Eol) {
   ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse("*1\r"));
   EXPECT_EQ(3, consumed_);
@@ -209,6 +268,50 @@ TEST_F(RespSrvParserTest, InlineReset) {
   EXPECT_EQ(4, consumed_);
   ASSERT_EQ(RespSrvParser::OK, Parse("*1\r\n$3\r\nfoo\r\n"));
   EXPECT_EQ(13, consumed_);
+}
+
+TEST_F(RespSrvParserTest, EmptyLinesBeforeMultibulk) {
+  // redis-cli --pipe prefixes its final ECHO with CRLF. The sentinel is binary data.
+  const string sentinel("0123\r\n\0*2\r\nabcdefghi", 20);
+  const string echo = absl::StrCat("*2\r\n$4\r\nECHO\r\n$20\r\n", sentinel, "\r\n");
+  for (string_view prefix : {"\r\n", "\n", "\r\n\r\n", "\t \r\n\n"}) {
+    const string input = absl::StrCat(prefix, echo);
+    // Include every two-buffer split, including CRLF and the multibulk marker.
+    for (size_t split = 1; split <= input.size(); ++split) {
+      SCOPED_TRACE(absl::StrCat("prefix size: ", prefix.size(), ", split: ", split));
+      ASSERT_EQ(split == input.size() ? RespSrvParser::OK : RespSrvParser::INPUT_PENDING,
+                Parse(string_view(input).substr(0, split)));
+      ASSERT_EQ(split, consumed_);
+      if (split < input.size()) {
+        ASSERT_EQ(RespSrvParser::OK, Parse(string_view(input).substr(split)));
+        ASSERT_EQ(input.size() - split, consumed_);
+      }
+      EXPECT_THAT(Vec(), ElementsAre("ECHO", sentinel));
+    }
+  }
+}
+
+TEST_F(RespSrvParserTest, EmptyLineTooLong) {
+  // An empty argument list must not hide a size-limit error.
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(string(70 * 1024, ' ')));
+}
+
+TEST_F(RespSrvParserTest, EmptyLinesBetweenPipelinedCommands) {
+  const string input = "*1\r\n$4\r\nPING\r\n\r\n*2\r\n$4\r\nECHO\r\n$3\r\nfoo\r\n\nPING\r\n";
+  string_view remaining(input);
+  ASSERT_EQ(RespSrvParser::OK, Parse(remaining));
+  EXPECT_THAT(Vec(), ElementsAre("PING"));
+  ASSERT_EQ(14, consumed_);
+  remaining.remove_prefix(consumed_);
+
+  ASSERT_EQ(RespSrvParser::OK, Parse(remaining));
+  EXPECT_THAT(Vec(), ElementsAre("ECHO", "foo"));
+  ASSERT_EQ(25, consumed_);
+  remaining.remove_prefix(consumed_);
+
+  ASSERT_EQ(RespSrvParser::OK, Parse(remaining));
+  EXPECT_THAT(Vec(), ElementsAre("PING"));
+  EXPECT_EQ(remaining.size(), consumed_);
 }
 
 static string SetCmd(size_t val_size) {

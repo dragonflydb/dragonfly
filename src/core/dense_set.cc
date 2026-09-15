@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <stack>
 #include <type_traits>
 #include <vector>
@@ -914,8 +915,7 @@ auto DenseSet::NewLink(void* data, DensePtr next) -> DenseLinkKey* {
   using LinkAllocator = StatelessAllocator<DenseLinkKey>;
 
   LinkAllocator la;
-  DenseLinkKey* lk = la.allocate(1);
-  la.construct(lk);
+  DenseLinkKey* lk = std::construct_at(la.allocate(1));
 
   lk->next = next;
   lk->SetObject(data);

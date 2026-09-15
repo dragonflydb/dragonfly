@@ -186,12 +186,16 @@ class TieredStorage : public TieredStorageBase {
     bool experimental_hash_offload;
     bool experimental_list_offload;
     uint32_t min_ttl_to_offload_ms;
+    uint32_t offload_scan_budget_us;
+    uint32_t defrag_scan_budget_us;
+    uint32_t max_pending_defrags;
   } config_;
 
   mutable struct {
     uint64_t stash_overflow_cnt = 0;
     uint64_t total_deletes = 0;
-    uint64_t offloading_steps = 0;
+    uint64_t offloading_usec = 0;
+    uint64_t defrag_usec = 0;
     uint64_t offloading_stashes = 0;
     uint64_t total_clients_throttled = 0;
     size_t cool_memory_used = 0;

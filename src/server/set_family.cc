@@ -30,7 +30,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
-ABSL_FLAG(bool, use_oah_set, true, "If true, store SET values in OAHSet instead of StringSet.");
+ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
 
 namespace rng = std::ranges;
 
@@ -964,6 +964,8 @@ OpStatus OpRandMember(const OpArgs& op_args, std::string_view key, int count,
   const PrimeValue& pv = find_res.value()->second;
 
   const std::uint32_t size = pv.Size();
+  if (size == 0)  // only a RESTOREd payload can yield this; NonUniquePicksGenerator(0) CHECKs
+    return OpStatus::OK;
   const bool picks_are_unique = count >= 0;
   // Widen to int64_t before std::abs: for count == INT_MIN, std::abs(count) on an int is UB
   // (the magnitude isn't representable in int). The magnitude fits in int64_t and uint32_t.
@@ -1709,6 +1711,8 @@ auto SetFamily::LoadLPSetBlob(std::string_view blob, bool deep, PrimeValue* pv) 
   }
 
   unsigned char* lp = (unsigned char*)blob.data();
+  if (lpLength(lp) == 0)
+    return LoadBlobResult::kEmpty;
   void* set_ptr = g_use_oah_set ? static_cast<void*>(BuildSetFromLP<OAHSet>(lp))
                                 : static_cast<void*>(BuildSetFromLP<StringSet>(lp));
   if (!set_ptr)
@@ -1748,11 +1752,15 @@ void SetFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::SET);
   *registry << CI{"SADD", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(SAdd)
             << CI{"SDIFF", CO::READONLY, -2, 1, -1}.HFUNC(SDiff)
-            << CI{"SDIFFSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
-                   SDiffStore)
+            << CI{"SDIFFSTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
+                  -1}
+                   .HFUNC(SDiffStore)
             << CI{"SINTER", CO::READONLY, -2, 1, -1}.HFUNC(SInter)
-            << CI{"SINTERSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
-                   SInterStore)
+            << CI{"SINTERSTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
+                  -1}
+                   .HFUNC(SInterStore)
             << CI{"SINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(SInterCard)
             << CI{"SMEMBERS", CO::READONLY, 2, 1, 1}.HFUNC(SMembers)
             << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(SIsMember)
@@ -1763,8 +1771,10 @@ void SetFamily::Register(CommandRegistry* registry) {
             << CI{"SPOP", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(SPop)
             << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(SRandMember)
             << CI{"SUNION", CO::READONLY, -2, 1, -1}.HFUNC(SUnion)
-            << CI{"SUNIONSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
-                   SUnionStore)
+            << CI{"SUNIONSTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
+                  -1}
+                   .HFUNC(SUnionStore)
             << CI{"SSCAN", CO::READONLY, -3, 1, 1}.HFUNC(SScan)
             << CI{"SADDEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(SAddEx);
 }

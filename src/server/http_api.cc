@@ -220,7 +220,7 @@ void HttpAPI(const http::QueryArgs& args, HttpRequest&& req, Service* service,
     cmd_cntx.PushArg(vec[i].AsString().c_str());
   }
   service->DispatchCommand(facade::ParsedArgs{cmd_cntx}, &cmd_cntx,
-                           facade::AsyncPreference::ONLY_SYNC);
+                           facade::AsyncPreference::ONLY_SYNC, nullptr);
   facade::CapturingReplyBuilder::Payload payload = reply_builder.Take();
 
   auto response = http::MakeStringResponse();

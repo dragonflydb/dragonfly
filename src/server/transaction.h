@@ -24,6 +24,10 @@
 #include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 
+namespace facade {
+class ConnectionContext;
+}  // namespace facade
+
 namespace dfly {
 
 class BlockingController;
@@ -224,7 +228,7 @@ class Transaction {
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
   facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeys keys, KeyReadyChecker krc,
-                               bool* block_flag, bool* pause_flag);
+                               facade::ConnectionContext* cntx);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue.
@@ -694,10 +698,14 @@ class Transaction {
 template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(this, nullptr)) {
   decltype(f(this, nullptr)) res;
 
-  ScheduleSingleHop([&res, f = std::forward<F>(f)](Transaction* t, EngineShard* shard) {
-    res = f(t, shard);
-    return res.status();
-  });
+  OpStatus status =
+      ScheduleSingleHop([&res, f = std::forward<F>(f)](Transaction* t, EngineShard* shard) {
+        res = f(t, shard);
+        return res.status();
+      });
+  // A throwing callback leaves res unassigned; surface the hop status instead of a default value.
+  if (status != OpStatus::OK)
+    return status;
   return res;
 }
 

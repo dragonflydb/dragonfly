@@ -6,6 +6,7 @@
 
 #include <absl/base/internal/endian.h>
 
+#include <memory>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -372,7 +373,7 @@ class CompactObj {
   // Adjusts the size used by json
   void SetJsonSize(int64_t size);
   // Adjusts the size used by a stream
-  void AddStreamSize(int64_t size);
+  void AddStreamSize(int64_t delta);
 
   // pre condition - the type here is OBJ_JSON and was set with SetJson
   JsonType* GetJson() const;
@@ -508,16 +509,16 @@ class CompactObj {
   static MemoryResource* memory_resource();  // thread-local.
 
   template <typename T, typename... Args> static T* AllocateMR(Args&&... args) {
-    void* ptr = memory_resource()->allocate(sizeof(T), alignof(T));
+    T* ptr = static_cast<T*>(memory_resource()->allocate(sizeof(T), alignof(T)));
     if constexpr (std::is_constructible_v<T, decltype(memory_resource())> && sizeof...(args) == 0)
-      return new (ptr) T{memory_resource()};
+      return std::construct_at(ptr, memory_resource());
     else
-      return new (ptr) T{std::forward<Args>(args)...};
+      return std::construct_at(ptr, std::forward<Args>(args)...);
   }
 
   template <typename T> static void DeleteMR(void* ptr) {
     T* t = (T*)ptr;
-    t->~T();
+    std::destroy_at(t);
     memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
   }
 
@@ -678,6 +679,10 @@ struct CompactKey : public CompactObj {
 
   bool HasExpire() const {
     return taglen_ == SDS_TTL_TAG;
+  }
+
+  bool IsExpired(uint64_t now_ms) const {
+    return taglen_ == SDS_TTL_TAG && int64_t(now_ms) >= int64_t(u_.sds_ttl.exp_ms);
   }
 
   // Embed expire time directly in the key by converting to SDS_TTL_TAG.

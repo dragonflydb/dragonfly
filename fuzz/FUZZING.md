@@ -192,8 +192,27 @@ python3 replay_crash.py crashes 000000 127.0.0.1 11211
 
 | Target | Directory | Seeds | Coverage |
 |--------|-----------|-------|----------|
-| `resp` | `seeds/resp/` | 112 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops, CMS, Top-K, field expiry, hash expiry, SADDEX, GEORADIUS, hybrid vector search (FT.HYBRID), sharded pub/sub, bloom SCANDUMP |
-| `memcache` | `seeds/memcache/` | 15 | set/get, add/replace, append/prepend, cas, incr/decr, delete, multiget, gat, noreply, meta commands, flush, stats |
+| `resp` | `seeds/resp/` | 122 | string, list, hash, set, zset, stream, JSON, search, bloom, geo, HLL, bitops, scripting, ACL, pub/sub, transactions, server ops, CMS, Top-K, field expiry, hash expiry, SADDEX, GEORADIUS, hybrid vector search (FT.HYBRID), sharded pub/sub, bloom SCANDUMP/LOADCHUNK, RESP3 reply serialization (`HELLO 3`), RM, BF.INFO, option-grammar depth seeds (`*_gap.resp`) |
+| `memcache` | `seeds/memcache/` | 15 | set/get, add/replace, append/prepend, cas, incr/decr, delete, multiget, gat, noreply, meta commands (ms/mg/md/ma with valid flags), stats/version |
+
+Every seed must consist of commands that **execute successfully** on a fresh
+fuzz server (no unknown-command, arity, syntax, wrong-type, or missing-state
+errors): the custom mutator starts from these examples, so a seed that
+dead-ends in an error reply gives it nothing valid to mutate. Build the state a
+command needs earlier in the same file. `fuzz/check_fuzz_coverage.py` enforces
+that every mutator command appears in command position in a strictly-parseable
+seed (for both `resp` and `memcache`); it rejects a seed the RESP/memcache
+parser cannot read, so a mis-framed seed fails CI instead of silently
+contributing nothing.
+
+The one sanctioned exception is a command whose sole fuzzing value is a parser
+branch that has **no** successful dispatch path: memcache `cas`. Dragonfly's
+`McTypeToCmdName` has no `MP::CAS` case, so every `cas` returns `CLIENT_ERROR`
+at dispatch — but it uniquely exercises `MemcacheParser::ParseStore`'s CAS
+branch (the `cas_unique` field), which is real parser-fuzzing surface. It is
+therefore kept in `memcache_mutator.COMMANDS` and seeded once (in
+`seeds/memcache/cas.mc`) purely to give the mutator a correctly-framed example;
+its `CLIENT_ERROR` reply is the accepted trade-off, not a seed defect.
 
 To add a new RESP seed (lines MUST be CRLF-terminated — `\r\n`, not `\n`):
 ```

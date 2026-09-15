@@ -5,11 +5,11 @@
   </a>
 </p>
 
-[![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
+[![ci-tests](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml/badge.svg)](https://github.com/dragonflydb/dragonfly/actions/workflows/ci.yml) [![Total pulls](https://img.shields.io/endpoint?url=https%3A%2F%2Fstorage.googleapis.com%2Fstatic.dragonflydb.io%2Frepo-assets%2Fghcr-downloads%2Ftotal.json)](https://github.com/dragonflydb/dragonfly/pkgs/container/dragonfly) [![Monthly pulls](https://img.shields.io/endpoint?url=https%3A%2F%2Fstorage.googleapis.com%2Fstatic.dragonflydb.io%2Frepo-assets%2Fghcr-downloads%2Fmonthly.json)](https://github.com/dragonflydb/dragonfly/pkgs/container/dragonfly) [![Twitter URL](https://img.shields.io/twitter/follow/dragonflydbio?style=social)](https://twitter.com/dragonflydbio)
 
 > Before moving on, please consider giving us a GitHub star ⭐️. Thank you!
 
-Other languages:  [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md)
+Other languages:  [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [한국어](README.ko-KR.md) [Português](README.pt-BR.md) [ภาษาไทย](README.th-TH.md)
 
 [Website](https://www.dragonflydb.io/) • [Docs](https://dragonflydb.io/docs) • [Quick Start](https://www.dragonflydb.io/docs/getting-started) • [Community Discord](https://discord.gg/HsPjXGVH85) • [Dragonfly User Conference](https://www.dragonflydb.io/events/dragonfly-ascent) • [Join the Dragonfly Community](https://www.dragonflydb.io/community)
 

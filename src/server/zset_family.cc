@@ -654,15 +654,10 @@ void IntervalVisitor::PopListPack(ZSetFamily::TopNScored sc) {
     Next(zl, &eptr, &sptr);
   }
 
-  int start = 0;
-  if (params_.reverse) {
-    /* If the number of elements to delete is greater than the listpack length,
-     * we set the start to 0 because lpseek fails to search beyond length in reverse */
-    start = (2 * sc > lpLength(zl)) ? 0 : -2 * sc;
-  }
-
-  /* We can finally delete the elements */
-  pv_->SetRObjPtr(lpDeleteRange(zl, start, 2 * sc));
+  /* Cap at the listpack length: 2 * sc overflows uint32 for sc >= 2^31. */
+  unsigned long del_count = std::min<uint64_t>(2 * uint64_t{sc}, lpLength(zl));
+  long start = params_.reverse ? -static_cast<long>(del_count) : 0;
+  pv_->SetRObjPtr(lpDeleteRange(zl, start, del_count));
 }
 
 void IntervalVisitor::PopSkipList(ZSetFamily::TopNScored sc) {
@@ -1111,8 +1106,7 @@ void BZPopMinMax(facade::ParsedArgs args, bool is_max, CommandContext* cmd_cntx)
 
   auto* cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
-      &cntx->paused);
+      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), cntx);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (popped_key) {
@@ -1134,6 +1128,8 @@ void BZPopMinMax(facade::ParsedArgs args, bool is_max, CommandContext* cmd_cntx)
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
+    case OpStatus::UNBLOCKED:
+      return cmd_cntx->SendError(popped_key.status());
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
@@ -2052,7 +2048,7 @@ OpResult<ZSetFamily::AddResult> ZSetFamily::OpAdd(const OpArgs& op_args,
       // absl::StrCat truncates to ~6 significant digits; scores must round-trip exactly
       // (e.g. geohash-derived scores from GEORADIUS/GEORADIUSBYMEMBER STORE) since this is
       // the only replay path for callers using NO_AUTOJOURNAL.
-      scores.push_back(RedisReplyBuilder::FormatDouble(score, buf, sizeof(buf)));
+      scores.emplace_back(RedisReplyBuilder::FormatDouble(score, buf, sizeof(buf)));
       mapped.push_back(scores.back());
       mapped.push_back(member);
     }
@@ -2442,8 +2438,12 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   CmdArgParser::Range keys = parser.NextRange();  // numkeys + keys, handled by the key spec.
   bool is_max = parser.MapNext("MAX", true, "MIN", false);
 
-  int pop_count = 1;
-  parser.Check("COUNT", &pop_count);
+  int64_t count_arg = 1;
+  parser.Check("COUNT", &count_arg);
+  if (!parser.HasError() && (count_arg < 1 || count_arg > UINT32_MAX)) {
+    cmd_cntx->SendError(kCountNotGreaterThanZeroErr);
+    return;
+  }
 
   if (!parser.Finalize()) {
     cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2517,11 +2517,11 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
 
     DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
                                    // `WaitOnWatch`
-    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, &cntx->blocked,
-                                     &cntx->paused);
+    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, cntx);
 
     if (status != OpStatus::OK) {
-      response_builder->SendNullArray();
+      status == OpStatus::UNBLOCKED ? response_builder->SendError(status)
+                                    : response_builder->SendNullArray();
       return;
     }
 
@@ -2537,6 +2537,7 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   DCHECK(key_to_pop.has_value());
 
   // Pop elements from relevant set.
+  uint32_t pop_count = static_cast<uint32_t>(count_arg);
   OpResult<ScoredArray> pop_result =
       ZPopMinMaxInternal(*key_to_pop, FilterShards::YES, pop_count, is_max, cmd_cntx->tx());
 
@@ -2829,6 +2830,13 @@ LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, bool deep, Pr
   }
 
   unsigned char* src_lp = (unsigned char*)blob.data();
+
+  // Reject an unpaired tail; gated on deep since counting may scan not-yet-validated entries.
+  if (deep && lpLength(src_lp) % 2 != 0) {
+    LOG(ERROR) << "Zset listpack has an odd number of entries.";
+    return LoadBlobResult::kCorrupted;
+  }
+
   unsigned long long bytes = lpBytes(src_lp);
   unsigned char* lp = (uint8_t*)zmalloc(bytes);
   std::memcpy(lp, src_lp, bytes);
@@ -2843,10 +2851,12 @@ void ZSetFamily::Register(CommandRegistry* registry) {
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   // We break up chain into multiple calls to reduce stack usage in this function.
   *registry << CI{"ZADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
-            << CI{"BZPOPMIN", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+            << CI{"BZPOPMIN",
+                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
                   1, -2}
                    .HFUNC(BZPopMin)
-            << CI{"BZPOPMAX", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+            << CI{"BZPOPMAX",
+                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
                   1, -2}
                    .HFUNC(BZPopMax)
             << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
@@ -2858,7 +2868,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
             << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
             << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
-            << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1}.HFUNC(ZLexCount)
+            << CI{"ZLEXCOUNT", CO::READONLY | CO::FAST, 4, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(
                    ZMPop)
             << CI{"BZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
@@ -2873,8 +2883,10 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRank)
             << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByLex)
             << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByScore)
-            << CI{"ZRANGESTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -5, 1, 2}.HFUNC(
-                   ZRangeStore);
+            << CI{"ZRANGESTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -5, 1,
+                  2}
+                   .HFUNC(ZRangeStore);
 
   *registry << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(ZScore)
             << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZMScore)

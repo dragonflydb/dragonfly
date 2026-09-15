@@ -95,7 +95,7 @@ add_library(dragonfly_lib
             ${DF_TIERING_SRCS}
             ${DF_CLUSTER_SRCS}
             acl/user.cc acl/user_registry.cc acl/acl_family.cc
-            acl/validator.cc
+            acl/validator.cc acl/jwt_validator.cc
             sharding.cc cmd_support.cc)
 
 if (DF_ENABLE_MEMORY_TRACKING)
@@ -149,7 +149,8 @@ helio_cxx_test(bitops_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(rdb_test dfly_test_lib DATA testdata/empty.rdb testdata/redis6_small.rdb
          testdata/redis6_stream.rdb testdata/hll.rdb testdata/redis7_small.rdb
          testdata/redis_json.rdb testdata/RDB_TYPE_STREAM_LISTPACKS_2.rdb
-         testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb testdata/ignore_expiry.rdb LABELS DFLY)
+         testdata/RDB_TYPE_STREAM_LISTPACKS_3.rdb testdata/ignore_expiry.rdb
+         testdata/valkey9_hash_expiry.rdb LABELS DFLY)
 helio_cxx_test(zset_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(geo_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(blocking_controller_test dfly_test_lib LABELS DFLY)
@@ -166,6 +167,7 @@ helio_cxx_test(cuckoo_filter_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_config_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(acl/jwt_validator_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(serializer_base_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(detail/egress_throttle_test dfly_test_lib LABELS DFLY)
@@ -175,7 +177,7 @@ add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  redis_parser_test stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test geo_family_test
                  hll_family_test cluster_config_test cluster_family_test acl_family_test
-                 json_family_memory_test)
+                 json_family_memory_test jwt_validator_test)
 
 if (WITH_SEARCH)
   helio_cxx_test(search/search_family_test dfly_test_lib LABELS DFLY)

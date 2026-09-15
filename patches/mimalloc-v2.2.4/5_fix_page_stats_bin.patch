@@ -1,0 +1,72 @@
+diff --git a/include/mimalloc/internal.h b/include/mimalloc/internal.h
+index 194b01ab..26e03656 100644
+--- a/include/mimalloc/internal.h
++++ b/include/mimalloc/internal.h
+@@ -256,9 +256,9 @@ void        _mi_deferred_free(mi_heap_t* heap, bool force);
+ void        _mi_page_free_collect(mi_page_t* page,bool force);
+ void        _mi_page_reclaim(mi_heap_t* heap, mi_page_t* page);   // callback from segments
+ 
+-size_t      _mi_page_bin(const mi_page_t* page); // for stats
+-size_t      _mi_bin_size(size_t bin);            // for stats
+-size_t      _mi_bin(size_t size);                // for stats
++size_t      _mi_page_stats_bin(const mi_page_t* page); // for stats
++size_t      _mi_bin_size(size_t bin);                  // for stats
++size_t      _mi_bin(size_t size);                      // for stats
+ 
+ // "heap.c"
+ void        _mi_heap_init(mi_heap_t* heap, mi_tld_t* tld, mi_arena_id_t arena_id, bool noreclaim, uint8_t tag);
+diff --git a/src/page-queue.c b/src/page-queue.c
+index 38b9aff4..ab8174a5 100644
+--- a/src/page-queue.c
++++ b/src/page-queue.c
+@@ -136,15 +136,22 @@ static bool mi_heap_contains_queue(const mi_heap_t* heap, const mi_page_queue_t*
+ }
+ #endif
+ 
+-size_t _mi_page_bin(const mi_page_t* page) {
++static size_t mi_page_bin(const mi_page_t* page) {
+   const size_t bin = (mi_page_is_in_full(page) ? MI_BIN_FULL : (mi_page_is_huge(page) ? MI_BIN_HUGE : mi_bin(mi_page_block_size(page))));
+   mi_assert_internal(bin <= MI_BIN_FULL);
+   return bin;
+ }
+ 
++// returns the page bin without using MI_BIN_FULL for statistics
++size_t _mi_page_stats_bin(const mi_page_t* page) {
++  const size_t bin = (mi_page_is_huge(page) ? MI_BIN_HUGE : mi_bin(mi_page_block_size(page)));
++  mi_assert_internal(bin <= MI_BIN_HUGE);
++  return bin;
++}
++
+ static mi_page_queue_t* mi_heap_page_queue_of(mi_heap_t* heap, const mi_page_t* page) {
+   mi_assert_internal(heap!=NULL);
+-  const size_t bin = _mi_page_bin(page);
++  const size_t bin = mi_page_bin(page);
+   mi_page_queue_t* pq = &heap->pages[bin];
+   mi_assert_internal((mi_page_block_size(page) == pq->block_size) ||
+                        (mi_page_is_large_or_huge(page) && mi_page_queue_is_huge(pq)) ||
+diff --git a/src/page.c b/src/page.c
+index 8d3588e9..5b61ceb3 100644
+--- a/src/page.c
++++ b/src/page.c
+@@ -290,7 +290,7 @@ static mi_page_t* mi_page_fresh_alloc(mi_heap_t* heap, mi_page_queue_t* pq, size
+   mi_assert_internal(full_block_size >= block_size);
+   mi_page_init(heap, page, full_block_size, heap->tld);
+   mi_heap_stat_increase(heap, pages, 1);
+-  mi_heap_stat_increase(heap, page_bins[_mi_page_bin(page)], 1);
++  mi_heap_stat_increase(heap, page_bins[_mi_page_stats_bin(page)], 1);
+   if (pq != NULL) { mi_page_queue_push(heap, pq, page); }
+   mi_assert_expensive(_mi_page_is_valid(page));
+   return page;
+diff --git a/src/segment.c b/src/segment.c
+index 1813a1fc..94b80198 100644
+--- a/src/segment.c
++++ b/src/segment.c
+@@ -1023,7 +1023,7 @@ static mi_slice_t* mi_segment_page_clear(mi_page_t* page, mi_segments_tld_t* tld
+   size_t inuse = page->capacity * mi_page_block_size(page);
+   _mi_stat_decrease(&tld->stats->page_committed, inuse);
+   _mi_stat_decrease(&tld->stats->pages, 1);
+-  _mi_stat_decrease(&tld->stats->page_bins[_mi_page_bin(page)], 1);
++  _mi_stat_decrease(&tld->stats->page_bins[_mi_page_stats_bin(page)], 1);
+ 
+   // reset the page memory to reduce memory pressure?
+   if (segment->allow_decommit && mi_option_is_enabled(mi_option_deprecated_page_reset)) {

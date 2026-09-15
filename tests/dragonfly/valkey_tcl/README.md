@@ -1,16 +1,15 @@
-# Valkey TCL stream tests on Dragonfly
+# Valkey TCL stream and pubsub tests on Dragonfly
 
 Runs the upstream [Valkey](https://github.com/valkey-io/valkey) TCL test suite (the
 classic Redis-era tests) against Dragonfly in **external-server mode** — the harness
 connects to an already-running Dragonfly over `--host/--port` instead of spawning a
-server. Currently scoped to the two stream suites:
-`unit/type/stream` and `unit/type/stream-cgroups`.
+server. Currently scoped to `unit/type/stream`, `unit/type/stream-cgroups` and `unit/pubsub`.
 
 ## Layout
 
 ```
 tests/dragonfly/valkey_tcl/
-├── sync-valkey-tcl-tests.sh   # clone Valkey @ pinned SHA → copy harness + stream files (committed)
+├── sync-valkey-tcl-tests.sh   # clone Valkey @ pinned SHA → copy harness + test files (committed)
 ├── run-stream-tests.sh        # start Dragonfly + run the harness with the skiplist (committed)
 ├── skiplist.txt               # documented, tracked list of known-failing tests (committed)
 ├── README.md                  # this file (committed)
@@ -24,7 +23,7 @@ mirroring `tests/dragonfly/valkey_search/`.
 
 ```bash
 cd tests/dragonfly/valkey_tcl
-./sync-valkey-tcl-tests.sh                       # sync harness + stream tests (pinned SHA)
+./sync-valkey-tcl-tests.sh                       # sync harness + tests (pinned SHA)
 ./run-stream-tests.sh ../../../build-dbg/dragonfly   # start DF + run suites
 ```
 
@@ -53,7 +52,7 @@ the bucket comments of `skiplist.txt` itself.
 
 ## CI
 
-Runs as the `Run Valkey TCL stream tests` step of the `build` job in
+Runs as the `Run Valkey TCL tests` step of the `build` job in
 `.github/workflows/ci.yml`, right after the Python regression tests and under the same
 gating (`ubuntu-dev:24` + `NoSanitizers`, both Debug and Release), against the just-built
 binary. The step installs `tcl`/`redis-tools`, syncs the harness, and runs the suites.

@@ -51,6 +51,10 @@ enum CommandOpt : uint32_t {
   // The same callback can be run multiple times without corrupting the result. Used for
   // opportunistic optimizations where inconsistencies can only be detected afterwards.
   IDEMPOTENT = 1U << 18,
+
+  // ACL: only the key at this offset among the command's keys needs write; others need read.
+  WRITE_KEY_OFFSET_0 = 1U << 19,
+  WRITE_KEY_OFFSET_1 = 1U << 20,
 };
 
 };  // namespace CO
@@ -385,5 +389,9 @@ class CommandRegistry {
   size_t bit_index_;
   std::optional<uint32_t> acl_category_;  // category of family currently being built
 };
+
+// Returns the object type for tracked command family, or -1 for families which have no one specific
+// type. family must come from a CommandId registered by CommandRegistry.
+int TypeForFamily(size_t family);
 
 }  // namespace dfly

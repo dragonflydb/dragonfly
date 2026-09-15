@@ -140,8 +140,12 @@ class BaseFamilyTest : public ::testing::Test {
   }
 
   TestConnWrapper* AddFindConn(Protocol proto, std::string_view id);
+  // Returns an existing connection, or nullptr. Call only on its owning proactor thread.
+  TestConnection* GetConnection(std::string_view conn_id);
   Transaction* GetTransaction(std::string_view conn_id);
   static std::vector<std::string> StrArray(const RespExpr& expr);
+
+  void SetAuthExpiresAt(std::string_view conn_id, std::chrono::steady_clock::time_point at);
 
   Metrics GetMetrics() const {
     return service_->server_family().GetMetrics(&namespaces->GetDefaultNamespace(),

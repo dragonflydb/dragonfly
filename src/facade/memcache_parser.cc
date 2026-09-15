@@ -21,6 +21,9 @@ using MP = MemcacheParser;
 
 namespace {
 
+// Max allowed key length by memcached protocol
+constexpr size_t kMaxKeyLen = 250;
+
 int64_t ToAbsolute(uint32_t ts, uint64_t now) {
   // if expire_ts is greater than month it's a unix timestamp
   // https://github.com/memcached/memcached/blob/master/doc/protocol.txt#L139
@@ -149,6 +152,8 @@ MP::Result ParseValueless(ArgSlice tokens, int64_t now, MP::Command* res) {
   res->cmd_flags.return_value = true;
   res->cmd_flags.return_flags = true;
 
+  if (tokens[key_pos].size() > kMaxKeyLen)
+    return MP::PARSE_ERROR;
   res->backed_args->PushArg(tokens[key_pos++]);
 
   if (key_pos < num_tokens && res->type == MP::STATS)
@@ -164,6 +169,8 @@ MP::Result ParseValueless(ArgSlice tokens, int64_t now, MP::Command* res) {
   }
 
   while (key_pos < num_tokens) {
+    if (tokens[key_pos].size() > kMaxKeyLen)
+      return MP::PARSE_ERROR;
     res->backed_args->PushArg(tokens[key_pos++]);
   }
 
@@ -226,7 +233,7 @@ MP::Result ParseMeta(ArgSlice tokens, int64_t now, MP::Command* res, uint32_t ma
     return MP::PARSE_ERROR;
   }
 
-  if (tokens[0].size() > 250)
+  if (tokens[0].size() > kMaxKeyLen)
     return MP::PARSE_ERROR;
 
   res->cmd_flags.meta = true;
@@ -400,8 +407,8 @@ auto MP::ParseInternal(ArgSlice tokens_view, Command* cmd) -> Result {
   tokens_view.remove_prefix(1);
   cmd->backed_args->clear();
 
-  if (cmd->type <= CAS) {                                         // Store command
-    if (tokens_view.size() < 4 || tokens_view[0].size() > 250) {  // key length limit
+  if (cmd->type <= CAS) {                                                // Store command
+    if (tokens_view.size() < 4 || tokens_view[0].size() > kMaxKeyLen) {  // key length limit
       return MP::PARSE_ERROR;
     }
 

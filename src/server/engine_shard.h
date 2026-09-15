@@ -4,11 +4,14 @@
 
 #pragma once
 
+#include <array>
+
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/task_queue.h"
 #include "core/tx_queue.h"
+#include "redis/redis_aux.h"
 #include "server/common_types.h"
 #include "util/sliding_counter.h"
 
@@ -19,6 +22,8 @@ namespace dfly {
 class EngineShardSet;
 class TieredStorage;
 class ShardDocIndices;
+
+using TypeMemDeltas = std::array<int64_t, OBJ_TYPE_MAX>;
 
 class EngineShard {
   friend class EngineShardSet;
@@ -31,6 +36,8 @@ class EngineShard {
     uint64_t defrag_skipped_mem_under_threshold = 0;
     uint64_t defrag_skipped_within_check_interval = 0;
     uint64_t defrag_skipped_not_enough_fragmentation = 0;
+    // In case it spins similarly to defragmentation. See pr #8115
+    uint64_t async_delete_task_invocation_total = 0;
     uint64_t poll_execution_total = 0;
 
     // number of optimistic executions - that were run as part of the scheduling.
@@ -43,9 +50,6 @@ class EngineShard {
 
     // cluster stats
     uint64_t total_migrated_keys = 0;
-
-    // how many huffman tables were built successfully in the background
-    uint32_t huffman_tables_built = 0;
 
     // Stream access pattern metrics (per-command, not per-entry).
     uint64_t stream_sequential_accesses = 0;  // head/tail: XADD, XREAD recent, XTRIM, etc.
@@ -125,8 +129,11 @@ class EngineShard {
     return stats_;
   }
 
-  // Calculate memory used by shard by summing multiple sources
+  // Calculate memory used by shard by summing multiple sources.
   size_t UsedMemory() const;
+
+  // Calculate memory used by local shard allocators, excluding search index memory.
+  size_t UsedMemoryWithoutSearch() const;
 
   TieredStorage* tiered_storage() {
     return tiered_storage_.get();
@@ -244,6 +251,12 @@ class EngineShard {
   // Merge underutilized buddy-segment pairs in the dash table.
   CompactTableStats CompactTable(double threshold, DbIndex db_idx);
 
+  void AddTypeMemDelta(size_t type, int64_t delta);
+
+  const TypeMemDeltas& type_mem_delta() const {
+    return type_mem_delta_;
+  }
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
@@ -251,12 +264,19 @@ class EngineShard {
     time_t last_check_time = 0;
     float page_utilization_threshold = 0.8;
 
+    // Duty-cycle backoff: bounds how much of this shard's CPU % defrag can burst.
+    // Without this, defrag task will return kOnIdleMaxLevel and will spin CPU without a cap.
+    // For more info, check helio's proactor event loop and how background tasks are run.
+    uint64_t consecutive_burst_cycles = 0;
+    uint64_t cooldown_until_cycles = 0;  // CycleClock ticks; 0 means "not cooling down"
+
     enum class SkipReason : uint8_t {
       MemoryTooLow,
       MemoryBelowThreshold,
       CheckWithinInterval,
       NotEnoughFragmentation,
       CheckInProgress,
+      CoolingDown,
       NotSkipped,
     };
 
@@ -343,7 +363,7 @@ class EngineShard {
 
   IntentLock shard_lock_;
 
-  uint32_t defrag_task_id_ = UINT32_MAX, huffman_check_task_id_ = UINT32_MAX;
+  uint32_t defrag_task_id_ = UINT32_MAX;
   EvictionTaskState eviction_state_;  // Used on eviction fiber
   util::fb2::Fiber fiber_heartbeat_periodic_;
   util::fb2::Done fiber_heartbeat_periodic_done_;
@@ -359,6 +379,8 @@ class EngineShard {
   using Counter = util::SlidingCounter<7>;
 
   Counter counter_[COUNTER_TOTAL];
+
+  TypeMemDeltas type_mem_delta_ = {};
 
   static __thread EngineShard* shard_;
 };

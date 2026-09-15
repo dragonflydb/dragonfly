@@ -88,16 +88,26 @@ class ProtocolClient {
     uint32_t left_in_buffer;
   };
 
-  // This function uses parser_ and cmd_args_ in order to consume a single response
+  struct ReadCommandRes {
+    uint32_t total_read = 0;     // wire bytes this command occupied
+    bool has_more_data = false;  // parser still holds buffered input
+  };
+
+  // TODO: Remove ReadRespReply, parser_, resp_args_, and their RespExpr-based helpers once all
+  // ProtocolClient response paths have migrated to RESPParser.
+  // This function uses parser_ and resp_args_ in order to consume a single response
   // from the sock_. The output will reside in resp_args_.
   // For error reporting purposes, the parsed command would be in last_resp_ if copy_msg is true.
   // If io_buf is not given, a internal temporary buffer will be used.
   // It is the responsibility of the caller to call buffer->ConsumeInput(rv.left_in_buffer) when it
   // is done with the result of the call; Calling ConsumeInput may invalidate the data in the result
   // if the buffer relocates.
-  // TODO these functions contains bugs related to partial reads and parser state management.
   io::Result<ReadRespRes> ReadRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
   io::Result<ReadRespRes> ReadRespReply(uint32_t timeout);
+
+  // Reads one flat RESP array into dest. buffer is only a staging area - the parser copies
+  // everything it is fed, so this drains buffer completely and the caller must not consume it.
+  io::Result<ReadCommandRes> ReadRespCommand(base::IoBuf* buffer, cmn::BackedArguments* dest);
 
   io::Result<facade::RESPObj> TakeRespReply(uint32_t timeout, base::IoBuf* buffer = nullptr,
                                             bool copy_msg = true);
@@ -122,7 +132,8 @@ class ProtocolClient {
     return server_context_;
   }
 
-  void ResetParser(facade::RedisParser::Mode mode);
+  void ResetParser();
+  void ResetCommandParser();
 
   // TODO can return invalid results if response answer was bigger than provided buffer into
   // ReadRespReply

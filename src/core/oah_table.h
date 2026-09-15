@@ -319,15 +319,26 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
       return end();
 
     static thread_local absl::InsecureBitGen rng;
-    const uint32_t n = entries_.size();
-    const uint32_t start = absl::Uniform<uint32_t>(rng, 0u, n);
+    const uint64_t random = rng();
 
-    // Random-start wrap-around. The first range covers `n - start` buckets out of `n`,
-    // so for a non-trivially populated set finding a live entry there is the common
-    // case; the wrap-around call to [0, start) is the rare cold path.
-    if (auto it = ScanRange(start, n); it != end())
+    // Consume one random word from high to low: bucket, main/extension selector, then position.
+    const uint32_t n = entries_.size();
+    const uint32_t start = BucketId(random, capacity_log_);
+    const uint64_t selector_mask = uint64_t{1} << (63 - capacity_log_);
+    const bool pick_main = (random & selector_mask) != 0;
+    const uint32_t position = static_cast<uint32_t>(random & (selector_mask - 1));
+
+    if (!pick_main) {
+      const uint32_t extension = GetExtensionPoint(start);
+      if (auto it = PickFromBucket(extension, position); it != end())
+        return it;
+    }
+
+    // Return the sampled main entry, or the first live physical bucket after it. An absent
+    // extension also falls back here so a non-empty table still produces a member.
+    if (auto it = ScanRange(start, n, position); it != end())
       return it;
-    return ScanRange(0, start);
+    return ScanRange(0, start, position);
   }
 
   // Returns the number of elements in the map. Note that it might be that some of these elements
@@ -505,20 +516,28 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     return ext;
   }
 
-  // Returns an iterator to a live entry in bucket `b` (skipping just-expired ones for
-  // single entries and walking vector entries in order), or end() if none remain.
-  iterator PickFromBucket(uint32_t b) {
+  // Returns a live entry from physical bucket `b`. Vector buckets start at the position encoded in
+  // the random word and wrap past holes or expired entries.
+  iterator PickFromBucket(uint32_t b, uint32_t position) {
     OAHPtr<Entry> bucket = At(b);
     if (!bucket.IsVector()) {
-      Entry e = bucket[0];
-      ExpireIfNeeded(e);
-      return e.Empty() ? end() : iterator{this, b, 0};
+      Entry entry = bucket[0];
+      ExpireIfNeeded(entry);
+      return entry.Empty() ? end() : iterator{this, b, 0};
     }
+
     auto vec = bucket.AsVector();
-    for (uint32_t pos = 0, vec_size = vec.Size(); pos < vec_size; ++pos) {
+    const uint32_t vec_size = static_cast<uint32_t>(vec.Size());
+    assert(vec.Size() == vec_size);
+    const uint32_t start = position % vec_size;
+    for (uint32_t offset = 0; offset < vec_size; ++offset) {
+      uint32_t pos = start + offset;
+      if (pos >= vec_size)
+        pos -= vec_size;
       Entry entry(vec[pos]);
       if (!entry)
         continue;
+
       ExpireIfNeeded(entry);
       if (entry)
         return iterator{this, b, pos};
@@ -527,24 +546,22 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   }
 
   // Linear [lo, hi) scan returning the first live entry or end(). SIMD strides over
-  // EntryWide::kLanes plus a scalar tail for the < kLanes trailing buckets. Kept
-  // out-of-line so GetRandomMember can call it twice (hot range + rare wrap) without
-  // duplicating the body in the cold path.
-  iterator ScanRange(uint32_t lo, uint32_t hi) {
+  // EntryWide::kLanes plus a scalar tail for the < kLanes trailing buckets.
+  iterator ScanRange(uint32_t lo, uint32_t hi, uint32_t position) {
     for (; lo + EntryWide::kLanes <= hi; lo += EntryWide::kLanes) {
       const EntryWide data = EntryWide::Load(&entries_[lo]);
       uint32_t used = (~(data == uint64_t(0))).GetMSBs();
       while (used) {
         const uint32_t b = lo + std::countr_zero(used);
         used &= used - 1;
-        if (auto it = PickFromBucket(b); it != end())
+        if (auto it = PickFromBucket(b, position); it != end())
           return it;
       }
     }
     for (; lo < hi; ++lo) {
       if (entries_[lo] == 0)
         continue;
-      if (auto it = PickFromBucket(lo); it != end())
+      if (auto it = PickFromBucket(lo, position); it != end())
         return it;
     }
     return end();

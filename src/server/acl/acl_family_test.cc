@@ -202,6 +202,34 @@ TEST_F(AclFamilyTest, AclAuth) {
   EXPECT_THAT(resp, "OK");
 }
 
+TEST_F(AclFamilyTest, AuthRejectedAfterJwtExpiry) {
+  TestInitAclFam();
+  auto resp = Run("ACL SETUSER shahar ON >mypass +@fast");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("AUTH shahar mypass");
+  EXPECT_THAT(resp, "OK");
+
+  // A command works right after a normal (non-JWT) AUTH, since auth_expires_at defaults
+  // to "never expires".
+  resp = Run("GET foo");
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // Simulate a JWT-derived auth whose token has already expired (as if the connection had
+  // authenticated with a JWT carrying an "exp" claim in the past).
+  SetAuthExpiresAt("IO0", std::chrono::steady_clock::now() - std::chrono::seconds(1));
+
+  resp = Run("GET foo");
+  EXPECT_THAT(resp, ErrArg("NOAUTH JWT token expired, please re-authenticate."));
+
+  // Re-authenticating resets auth_expires_at back to "never expires" and unblocks commands.
+  resp = Run("AUTH shahar mypass");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("GET foo");
+  EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+}
+
 TEST_F(AclFamilyTest, AclWhoAmI) {
   TestInitAclFam();
   auto resp = Run("ACL WHOAMI WHO");
@@ -323,6 +351,54 @@ TEST_F(AclFamilyTest, TestCat) {
                             "SETEX",  "MSET",     "SET",         "PSETEX",  "SUBSTR", "DECR",
                             "STRLEN", "INCR",     "INCRBY",      "MGET",    "GET",    "SETNX",
                             "GETEX",  "APPEND",   "MSETNX",      "SETRANGE"}));
+
+  resp = Run("ACL CAT KEYSPACE");
+  EXPECT_THAT(resp.GetVec(), Contains("RANDOMKEY"));
+
+  resp = Run("ACL SETUSER randomkey-user ON >p +@keyspace");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN randomkey-user RANDOMKEY");
+  EXPECT_THAT(resp, "OK");
+}
+
+TEST_F(AclFamilyTest, WhoAmiIsNotAdminCategory) {
+  TestInitAclFam();
+
+  auto resp = Run("ACL SETUSER whoami-admin ON >p +@admin");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN whoami-admin ACL WHOAMI");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'ACL WHOAMI' command");
+
+  resp = Run("ACL SETUSER whoami-slow ON >p +@slow");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN whoami-slow ACL WHOAMI");
+  EXPECT_THAT(resp, "OK");
+}
+
+TEST_F(AclFamilyTest, ClusterReadonlyIsNotReadCategory) {
+  TestInitAclFam();
+
+  auto resp = Run("ACL SETUSER cluster-read ON >p +@read");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN cluster-read READONLY");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'READONLY' command");
+  resp = Run("ACL DRYRUN cluster-read READWRITE");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'READWRITE' command");
+
+  resp = Run("ACL SETUSER cluster-conn ON >p +@connection");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN cluster-conn READONLY");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN cluster-conn READWRITE");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL DRYRUN cluster-read CLUSTER INFO");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'CLUSTER' command");
+
+  resp = Run("ACL SETUSER cluster-slow ON >p +@slow");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN cluster-slow CLUSTER INFO");
+  EXPECT_THAT(resp, "OK");
 }
 
 TEST_F(AclFamilyTest, TestGetUser) {
@@ -465,6 +541,138 @@ TEST_F(AclFamilyTest, TestDryRun) {
   // Unknown ACL sub-commands must be reported by their full simulated name, not just "ACL".
   resp = Run("ACL DRYRUN default ACL BOGUSSUBCMD");
   EXPECT_THAT(resp, ErrArg("ERR Command 'ACL BOGUSSUBCMD' not found"));
+}
+
+TEST_F(AclFamilyTest, GeoSearchStoreDryRun) {
+  TestInitAclFam();
+  const char* cmd = "GEOSEARCHSTORE out secret FROMMEMBER member BYRADIUS 100 km";
+
+  auto resp =
+      Run("ACL SETUSER gss-exfil ON >pass +GEOSEARCHSTORE +@geo resetkeys %W~secret %RW~out");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(absl::StrCat("ACL DRYRUN gss-exfil ", cmd));
+  EXPECT_THAT(resp, "This user has no permissions to run the 'GEOSEARCHSTORE' command");
+
+  resp = Run("ACL SETUSER gss-dest ON >pass +GEOSEARCHSTORE +@geo resetkeys %R~out %R~secret");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(absl::StrCat("ACL DRYRUN gss-dest ", cmd));
+  EXPECT_THAT(resp, "This user has no permissions to run the 'GEOSEARCHSTORE' command");
+
+  resp = Run("ACL SETUSER gss-ok ON >pass +GEOSEARCHSTORE +@geo resetkeys %RW~out %R~secret");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(absl::StrCat("ACL DRYRUN gss-ok ", cmd));
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL SETUSER gss-nocmd ON >pass +@geo -GEOSEARCHSTORE resetkeys %RW~out %R~secret");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run(absl::StrCat("ACL DRYRUN gss-nocmd ", cmd));
+  EXPECT_THAT(resp, "This user has no permissions to run the 'GEOSEARCHSTORE' command");
+}
+
+TEST_F(AclFamilyTest, StoreLikeCommandsRequirePerKeyPermissions) {
+  TestInitAclFam();
+
+  struct Case {
+    std::string_view name;
+    std::string_view command;
+  };
+
+  const Case cases[] = {
+      {"COPY", "COPY src dest"},
+      {"BITOP", "BITOP AND dest src"},
+      {"SINTERSTORE", "SINTERSTORE dest src"},
+      {"SUNIONSTORE", "SUNIONSTORE dest src"},
+      {"SDIFFSTORE", "SDIFFSTORE dest src"},
+      {"ZRANGESTORE", "ZRANGESTORE dest src 0 -1"},
+      {"ZUNIONSTORE", "ZUNIONSTORE dest 1 src"},
+      {"ZINTERSTORE", "ZINTERSTORE dest 1 src"},
+      {"ZDIFFSTORE", "ZDIFFSTORE dest 1 src"},
+      {"GEORADIUS", "GEORADIUS src 15 37 200 km STORE dest"},
+      {"GEORADIUSBYMEMBER", "GEORADIUSBYMEMBER src member 200 km STORE dest"},
+      {"SORT", "SORT src STORE dest"},
+      {"CMS.MERGE", "CMS.MERGE dest 1 src"},
+  };
+
+  for (const auto& [name, command] : cases) {
+    const std::string user = absl::StrCat("u-", absl::AsciiStrToLower(name));
+    auto denied = absl::StrCat("This user has no permissions to run the '", name, "' command");
+
+    // Read on source, write on dest: this is the bug scenario, must succeed.
+    auto resp = Run({"ACL", "SETUSER", user, "ON", ">p", absl::StrCat("+", name), "resetkeys",
+                     "%RW~dest", "%R~src"});
+    EXPECT_THAT(resp, "OK") << name;
+    resp = Run(absl::StrCat("ACL DRYRUN ", user, " ", command));
+    EXPECT_THAT(resp, "OK") << name;
+
+    // Read-only on dest (no write): must still be denied, dest always needs write.
+    resp = Run({"ACL", "SETUSER", user, "resetkeys", "%R~dest", "%R~src"});
+    EXPECT_THAT(resp, "OK") << name;
+    resp = Run(absl::StrCat("ACL DRYRUN ", user, " ", command));
+    EXPECT_THAT(resp, denied) << name;
+
+    // Write-only on source (no read): must be denied, source never needs write, only read.
+    resp = Run({"ACL", "SETUSER", user, "resetkeys", "%RW~dest", "%W~src"});
+    EXPECT_THAT(resp, "OK") << name;
+    resp = Run(absl::StrCat("ACL DRYRUN ", user, " ", command));
+    EXPECT_THAT(resp, denied) << name;
+  }
+}
+
+TEST_F(AclFamilyTest, StoreLastKeyCommandsWithoutStoreAreReadOnly) {
+  TestInitAclFam();
+
+  struct Case {
+    std::string_view name;
+    std::string_view command;
+  };
+
+  // Without a STORE/STOREDIST destination these commands only read their source key, so
+  // read-only access must be sufficient and write-only access must be rejected.
+  const Case cases[] = {
+      {"GEORADIUS", "GEORADIUS src 15 37 200 km"},
+      {"GEORADIUSBYMEMBER", "GEORADIUSBYMEMBER src member 200 km"},
+      {"SORT", "SORT src"},
+  };
+
+  for (const auto& [name, command] : cases) {
+    const std::string user = absl::StrCat("u-nostore-", absl::AsciiStrToLower(name));
+    auto denied = absl::StrCat("This user has no permissions to run the '", name, "' command");
+
+    auto resp =
+        Run({"ACL", "SETUSER", user, "ON", ">p", absl::StrCat("+", name), "resetkeys", "%R~src"});
+    EXPECT_THAT(resp, "OK") << name;
+    resp = Run(absl::StrCat("ACL DRYRUN ", user, " ", command));
+    EXPECT_THAT(resp, "OK") << name;
+
+    resp = Run({"ACL", "SETUSER", user, "resetkeys", "%W~src"});
+    EXPECT_THAT(resp, "OK") << name;
+    resp = Run(absl::StrCat("ACL DRYRUN ", user, " ", command));
+    EXPECT_THAT(resp, denied) << name;
+  }
+}
+
+TEST_F(AclFamilyTest, PfmergeRequiresPerKeyPermissions) {
+  TestInitAclFam();
+
+  // PFMERGE writes only its first key (dest) and reads the rest (sources).
+  auto resp = Run("ACL SETUSER pfm-user ON >p +PFMERGE resetkeys %RW~dest %R~src");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN pfm-user PFMERGE dest src");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL SETUSER pfm-user resetkeys %R~dest %R~src");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN pfm-user PFMERGE dest src");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'PFMERGE' command");
+
+  resp = Run("ACL SETUSER pfm-user resetkeys %RW~dest %W~src");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN pfm-user PFMERGE dest src");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'PFMERGE' command");
 }
 
 TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {

@@ -334,3 +334,46 @@ def test_memcached_half_close(df_server: DflyInstance):
     sock.close()
 
     assert response == b"STORED\r\nVALUE hc 0 3\r\nfoo\r\nEND\r\n"
+
+
+@dfly_args(DEFAULT_ARGS)
+async def test_read_huge_redis_key_over_memcached(
+    df_server: DflyInstance, memcached_client: MCClient
+):
+    """
+    Memcached keys have a hard 250 limit. Ensure we never exceed it even with an open Redis port on the side.
+    """
+    big_key = "k" * 20000  # > 8192 reply-buffer limit, < 32768 default client iobuf limit
+
+    # Create key with Redis
+    redis_client = df_server.client()
+    assert await redis_client.set(big_key, "some-value")
+
+    # Compliant python client rejects it
+    with pytest.raises(Exception):
+        memcached_client.get(big_key)
+
+    # Try with a raw socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+    sock.connect(("127.0.0.1", df_server.mc_port))
+    sock.sendall(b"get " + big_key.encode() + b"\r\n")
+    resp = b""
+    try:
+        while not resp.endswith(b"\r\n"):
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+    except socket.timeout:
+        pytest.fail(f"Timed out waiting for memcached reply, got: {resp!r}")
+    sock.close()
+
+    # The oversized key must be rejected, never echoed back in a VALUE line.
+    assert resp.endswith(b"\r\n")
+    assert resp.startswith((b"CLIENT_ERROR", b"ERROR", b"SERVER_ERROR"))
+    assert big_key.encode() not in resp
+    assert b"VALUE" not in resp
+    # The server must still be alive and serving memcached traffic.
+    assert memcached_client.set("alive", "1")
+    assert memcached_client.get("alive") == b"1"
