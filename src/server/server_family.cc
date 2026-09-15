@@ -3420,6 +3420,29 @@ void ServerFamily::ForceReplicasToFullSync() {
   });
 }
 
+void ServerFamily::ForceReauthOnLiveConnections() {
+  auto cb = [](unsigned, util::Connection* conn) {
+    facade::Connection* dconn = static_cast<facade::Connection*>(conn);
+    if (dconn->GetProtocol() == facade::Protocol::MEMCACHE)
+      return;
+
+    facade::ConnectionContext* base_cntx = dconn->cntx();
+    if (base_cntx == nullptr || base_cntx->replica_conn)
+      return;
+
+    auto* dfly_cntx = static_cast<ConnectionContext*>(base_cntx);
+    if (dfly_cntx->skip_acl_validation)
+      return;
+
+    dfly_cntx->authenticated = false;
+    dfly_cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
+  };
+
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections(cb);
+  }
+}
+
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   util::fb2::LockGuard lk(replicaof_mu_);
 

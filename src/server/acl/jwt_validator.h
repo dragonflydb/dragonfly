@@ -13,9 +13,10 @@ namespace dfly::acl {
 
 // Delegates JWT validation to an external HTTP API instead of checking a password
 // against the local ACL user registry. Configured via --jwt_validate_url (endpoint)
-// and --jwt_validate (on/off, runtime-mutable). When enabled, every AUTH credential is
-// treated as a JWT and sent to the endpoint; the returned username must map to a
-// pre-provisioned ACL user. No local caching -- every AUTH hits the endpoint directly.
+// and --jwt_validate (on/off), both runtime-mutable via CONFIG SET. When enabled, every
+// AUTH credential is treated as a JWT and sent to the endpoint; the returned username
+// must map to a pre-provisioned ACL user. No local caching -- every AUTH hits the
+// endpoint directly.
 class JwtValidator {
  public:
   struct ValidationResult {
