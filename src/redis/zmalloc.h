@@ -31,6 +31,7 @@
 #ifndef __ZMALLOC_H
 #define __ZMALLOC_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Double expansion needed for stringification of macro values. */
@@ -154,6 +155,10 @@ void* zmalloc_get_threadlocal_heap(void);
 void zmalloc_set_threadlocal_heap(void* heap);
 
 extern __thread ssize_t zmalloc_used_memory_tl;
+
+// When true, zmalloc/zfree skip zmalloc_used_memory_tl: it reports data-heap usage, so
+// allocations on any other heap (e.g. the backing heap) must not count toward it.
+extern __thread bool zmalloc_skip_accounting_tl;
 
 #undef __zm_str
 #undef __xstr

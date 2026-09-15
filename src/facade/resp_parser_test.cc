@@ -142,6 +142,21 @@ TEST_F(RESPParserTest, SurvivesDataHeapDestruction) {
   reader.reset();
 }
 
+// zmalloc_used_memory_tl reports data-heap usage, so backing-heap allocations must not move it.
+TEST_F(RESPParserTest, BackingHeapAllocationsDontAffectAccounting) {
+  ssize_t before = zmalloc_used_memory_tl;
+
+  auto reader = std::make_unique<RESPParser>();
+  std::string_view msg = "$4\r\nPING\r\n";
+  auto reply = reader->Feed(msg.data(), msg.size());
+  ASSERT_TRUE(reply.has_value());
+  EXPECT_EQ(zmalloc_used_memory_tl, before);
+
+  reply.reset();
+  reader.reset();
+  EXPECT_EQ(zmalloc_used_memory_tl, before);
+}
+
 TEST_F(RESPParserTest, RESPIteratorTest) {
   using Fields = std::map<std::string, std::string>;
   using Docs = std::map<std::string, Fields>;

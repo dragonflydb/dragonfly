@@ -251,10 +251,6 @@ class DflyShardReplica : public ProtocolClient {
 
   uint32_t FlowId() const;
 
-  int ProactorIndex() const {
-    return proactor_index_;
-  }
-
   uint64_t JournalExecutedCount() const {
     return journal_rec_executed_.load(std::memory_order_relaxed);
   }

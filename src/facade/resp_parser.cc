@@ -23,12 +23,15 @@ namespace {
 // shard's data heap. Asserts no fiber preemption, since that could expose the swap to others.
 class BackingHeapScope {
  public:
-  BackingHeapScope() : prev_heap_(zmalloc_get_threadlocal_heap()) {
+  BackingHeapScope()
+      : prev_heap_(zmalloc_get_threadlocal_heap()), prev_skip_(zmalloc_skip_accounting_tl) {
     zmalloc_set_threadlocal_heap(mi_heap_get_backing());
+    zmalloc_skip_accounting_tl = true;
   }
 
   ~BackingHeapScope() {
     zmalloc_set_threadlocal_heap(prev_heap_);
+    zmalloc_skip_accounting_tl = prev_skip_;
   }
 
   BackingHeapScope(const BackingHeapScope&) = delete;
@@ -37,6 +40,7 @@ class BackingHeapScope {
  private:
   util::FiberAtomicGuard fiber_guard_;
   void* prev_heap_;
+  bool prev_skip_;
 };
 
 }  // namespace
@@ -53,14 +57,19 @@ void RESPParser::Reset() {
 }
 
 void RESPParser::Reset(Limits limits) {
-  redisReaderFree(reader_);
   {
     BackingHeapScope backing_heap;
+    redisReaderFree(reader_);
     reader_ = redisReaderCreate();
   }
   CHECK(reader_);
 
   reader_->maxelements = limits.max_array_len;
+}
+
+RESPParser::~RESPParser() {
+  BackingHeapScope backing_heap;
+  redisReaderFree(reader_);
 }
 
 RESPObj::RESPObj(RESPObj&& other) noexcept
@@ -76,8 +85,10 @@ RESPObj& RESPObj::operator=(RESPObj&& other) noexcept {
 }
 
 RESPObj::~RESPObj() {
-  if (needs_to_free_)
+  if (needs_to_free_) {
+    BackingHeapScope backing_heap;
     freeReplyObject(reply_);
+  }
 }
 
 RESPObj::Type RESPObj::GetType() const {

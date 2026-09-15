@@ -91,19 +91,6 @@ vector<vector<unsigned>> Partition(unsigned num_flows) {
   return partition;
 }
 
-// Destroys the flow on the thread that allocated its memory, so zmalloc's per-thread
-// accounting stays balanced.
-void DestroyFlowOnOwnerThread(std::unique_ptr<DflyShardReplica>& flow) {
-  if (!flow)
-    return;
-  int idx = flow->ProactorIndex();
-  if (idx < 0) {
-    flow.reset();
-    return;
-  }
-  shard_set->pool()->at(idx)->Await([&flow] { flow.reset(); });
-}
-
 }  // namespace
 
 Replica::Replica(string host, uint16_t port, Service* se, std::string_view id,
@@ -196,7 +183,7 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   DVLOG(1) << "MainReplicationFb stopped " << this;
   acks_fb_.JoinIfNeeded();
   for (auto& flow : shard_flows_) {
-    DestroyFlowOnOwnerThread(flow);
+    flow.reset();
   }
 
   if (last_journal_LSNs_.has_value()) {
@@ -588,13 +575,8 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     if (shard_flows_[i]) {
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
     }
-    DestroyFlowOnOwnerThread(shard_flows_[i]);
-    // Keeps zmalloc's per-thread accounting balanced.
-    unsigned tid = i % shard_set->pool()->size();
-    shard_set->pool()->at(tid)->Await([&] {
-      shard_flows_[i] = std::make_unique<DflyShardReplica>(server(), master_context_, i, &service_,
-                                                           multi_shard_exe_, load_context.get());
-    });
+    shard_flows_[i].reset(new DflyShardReplica(server(), master_context_, i, &service_,
+                                               multi_shard_exe_, load_context.get()));
     if (partial_sync_lsn > 0) {
       shard_flows_[i]->SetRecordsExecuted(partial_sync_lsn);
     }
