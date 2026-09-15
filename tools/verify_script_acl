@@ -251,25 +251,32 @@ def collect_dragonfly_commands(repo_root):
         text = open(path).read()
 
         local_masks = {}
-        for m in re.finditer(r"constexpr\s+(?:auto|uint32_t|size_t)\s+(k\w+)\s*=\s*([^;]+);", text):
+        for m in re.finditer(
+            r"(?:constexpr|const)\s+(?:auto|uint32_t|size_t)\s+(k\w+)\s*=\s*([^;]+);", text
+        ):
             name, expr = m.group(1), m.group(2)
             if "CO::" in expr:
                 val = resolve_mask_expr(expr, local_masks)
                 if val is not None:
                     local_masks[name] = val
 
+        # acl:: category aliases come in two styles across the codebase: bare names inside a
+        # `namespace acl { ... }` block (e.g. generic_family.cc's `kDel = KEYSPACE | WRITE`),
+        # or acl::-qualified at top level (e.g. acl_family.cc's `kAcl = acl::CONNECTION`).
+        # Collect both, in file order, so later constants can reference earlier ones.
         local_acls = {}
-        m_acl_ns = re.search(r"namespace acl \{(.*?)\}\s*//\s*namespace acl", text, re.S)
-        acl_ns_text = m_acl_ns.group(1) if m_acl_ns else ""
-        for m in re.finditer(r"constexpr\s+uint32_t\s+(k\w+)\s*=\s*([^;]+);", acl_ns_text):
+        for m in re.finditer(r"constexpr\s+uint32_t\s+(k\w+)\s*=\s*([^;]+);", text):
             name, expr = m.group(1), m.group(2)
+            if "CO::" in expr:
+                continue  # a mask alias, not an acl category alias
             val, ok = 0, True
             for tok in re.split(r"\|", expr):
                 tok = tok.strip()
-                if tok in ACL:
-                    val |= ACL[tok]
-                elif tok in local_acls:
-                    val |= local_acls[tok]
+                bare = tok[5:] if tok.startswith("acl::") else tok
+                if bare in ACL:
+                    val |= ACL[bare]
+                elif bare in local_acls:
+                    val |= local_acls[bare]
                 else:
                     ok = False
             if ok:
@@ -292,6 +299,7 @@ def collect_dragonfly_commands(repo_root):
 
             mask_val = resolve_mask_expr(mask_expr, local_masks)
             if mask_val is None:
+                unresolved.append((f, name, "mask expr: " + mask_expr))
                 continue
             implicit = implicit_acl(mask_val)
             explicit = 0
