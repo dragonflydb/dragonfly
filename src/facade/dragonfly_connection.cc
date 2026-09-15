@@ -2447,6 +2447,10 @@ void Connection::AsyncFiber() {
   DCHECK(cc_->conn_closing || reply_builder_->GetError());
 
   cc_->conn_closing = true;
+  // The loop can exit mid-drain with batching still on (it is armed per iteration while more
+  // messages are queued, and never disarmed on exit). ConnectionFlow writes the protocol error
+  // after joining us, so leaving it armed buries that reply in a batch nobody will flush.
+  reply_builder_->SetBatchMode(false);
   qbp.NotifyPipelineWaiters();
 
   // If shutdown was requested, we need to break the receive call in case the i/o fiber
@@ -2705,6 +2709,9 @@ void Connection::SendAsync(MessageHandle msg) {
       request_shutdown_ = true;
       // We don't shutdown here. The reason is that TLS socket is preemptive
       // and SendAsync is atomic.
+      // Same signals as OnShutdown: the v1 loop leaves on cnd_, the v2 loop only on io_ec_.
+      io_ec_ = make_error_code(errc::connection_aborted);
+      io_event_.notify();
       cnd_.notify_one();
       return;
     }
