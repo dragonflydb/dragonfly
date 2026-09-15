@@ -3094,8 +3094,7 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
                                                          : KeyReadyResult::kNotReady;
   };
 
-  if (auto status =
-          tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, &cntx->blocked, &cntx->paused);
+  if (auto status = tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, cntx);
       status != OpStatus::OK)
     return status == OpStatus::UNBLOCKED ? rb->SendError(status) : rb->SendNullArray();
 
