@@ -1558,8 +1558,8 @@ void Connection::ConnectionFlow() {
     }
   }
 
-  // After the client disconnected.
-  cc_->conn_closing = true;  // Signal dispatch to close.
+  // After the client disconnected. Signals dispatch to close and lets the context react.
+  BreakOnce(POLLHUP);
   cnd_.notify_one();
   phase_ = SHUTTING_DOWN;
   VLOG(2) << CONN_ID << "Before dispatch_fb.join()";
@@ -1858,7 +1858,6 @@ void Connection::OnBreakCb(int32_t mask) {
   VLOG(1) << CONN_ID << "Got event " << mask << " " << unsigned(phase_) << " "
           << reply_builder_->IsSendActive() << " " << reply_builder_->GetError();
 
-  cc_->conn_closing = true;
   BreakOnce(mask);
   cnd_.notify_one();  // Notify dispatch fiber.
 }
@@ -3019,8 +3018,12 @@ void Connection::UnregisterReadBufCapacity() {
   read_buf_capacity_registered_ = false;
 }
 
+// Every path that tears a connection down funnels through here: it marks the context as closing
+// and lets the context react (cancel a blocking transaction, and so on). Callers must not rely on
+// conn_closing being unset afterwards.
 void Connection::BreakOnce(uint32_t ev_mask) {
   if (cc_) {
+    cc_->conn_closing = true;
     cc_->OnSocketError(ev_mask);
   }
 }

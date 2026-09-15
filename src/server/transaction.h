@@ -24,6 +24,10 @@
 #include "server/tx_base.h"
 #include "util/fibers/synchronization.h"
 
+namespace facade {
+class ConnectionContext;
+}  // namespace facade
+
 namespace dfly {
 
 class BlockingController;
@@ -224,7 +228,7 @@ class Transaction {
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
   facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeys keys, KeyReadyChecker krc,
-                               bool* block_flag, bool* pause_flag);
+                               facade::ConnectionContext* cntx);
 
   // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
   // blocking queue.
