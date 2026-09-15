@@ -2851,10 +2851,12 @@ void ZSetFamily::Register(CommandRegistry* registry) {
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   // We break up chain into multiple calls to reduce stack usage in this function.
   *registry << CI{"ZADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
-            << CI{"BZPOPMIN", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+            << CI{"BZPOPMIN",
+                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
                   1, -2}
                    .HFUNC(BZPopMin)
-            << CI{"BZPOPMAX", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+            << CI{"BZPOPMAX",
+                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
                   1, -2}
                    .HFUNC(BZPopMax)
             << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
@@ -2866,7 +2868,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
             << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
             << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
-            << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1}.HFUNC(ZLexCount)
+            << CI{"ZLEXCOUNT", CO::READONLY | CO::FAST, 4, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(
                    ZMPop)
             << CI{"BZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,

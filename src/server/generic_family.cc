@@ -2876,6 +2876,7 @@ using CI = CommandId;
 namespace acl {
 
 constexpr uint32_t kDel = KEYSPACE | WRITE | SLOW;
+constexpr uint32_t kDelEx = STRING | WRITE | FAST;
 constexpr uint32_t kPing = FAST | CONNECTION;
 constexpr uint32_t kEcho = FAST | CONNECTION;
 constexpr uint32_t kExists = KEYSPACE | READ | FAST;
@@ -2907,6 +2908,7 @@ constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kPExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
+constexpr uint32_t kRandomKey = KEYSPACE | READ | SLOW;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
@@ -2914,7 +2916,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"DEL", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kDel}.SetAsyncHandler(CmdDel)
-      << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDel}.HFUNC(Delex)
+      << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDelEx}.HFUNC(Delex)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
        * failure detection, and a loading server is considered to be
@@ -2939,9 +2941,10 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"COPY",    CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_1, -3, 1, 2,
             acl::kCopy}
              .HFUNC(Copy)
-      << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
+      << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 2, acl::kRenamNX}
+             .HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
-      << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
+      << CI{"SCAN", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
       << CI{"RM",
             CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::JOURNALED | CO::NO_AUTOJOURNAL,
             -2,
@@ -2955,16 +2958,17 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kUnlink}.SetAsyncHandler(
-             CmdDel)
-      << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
+      << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, -2, 1, -1, acl::kUnlink}
+             .SetAsyncHandler(CmdDel)
+      << CI{"STICK", CO::JOURNALED | CO::FAST, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -2, 1, 1, acl::kSort}
              .HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
-      << CI{"MOVE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}
+      << CI{"MOVE",    CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 1,
+            acl::kMove}
              .HFUNC(Move)
       << CI{"RESTORE", CO::JOURNALED, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
-      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, 0}.HFUNC(RandomKey)
+      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, acl::kRandomKey}.HFUNC(RandomKey)
       << CI{"EXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kExpireTime}.HFUNC(ExpireTime)
       << CI{"PEXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPExpireTime}.HFUNC(PExpireTime);
 }

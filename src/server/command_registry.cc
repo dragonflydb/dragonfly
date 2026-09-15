@@ -164,7 +164,7 @@ constexpr auto kFamilyToType = std::to_array<int>({
 CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first_key,
                      int8_t last_key, std::optional<uint32_t> acl_categories)
     : facade::CommandId(name, ImplicitCategories(mask), arity, first_key, last_key,
-                        acl_categories.value_or(ImplicitAclCategories(mask))) {
+                        ImplicitAclCategories(mask) | acl_categories.value_or(0)) {
   if (!acl_categories.has_value())
     kind_mask_ |= IMPLICIT_ACL;
   bool is_latency_tracked = GetFlag(FLAGS_latency_tracking);

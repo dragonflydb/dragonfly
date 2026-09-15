@@ -351,6 +351,54 @@ TEST_F(AclFamilyTest, TestCat) {
                             "SETEX",  "MSET",     "SET",         "PSETEX",  "SUBSTR", "DECR",
                             "STRLEN", "INCR",     "INCRBY",      "MGET",    "GET",    "SETNX",
                             "GETEX",  "APPEND",   "MSETNX",      "SETRANGE"}));
+
+  resp = Run("ACL CAT KEYSPACE");
+  EXPECT_THAT(resp.GetVec(), Contains("RANDOMKEY"));
+
+  resp = Run("ACL SETUSER randomkey-user ON >p +@keyspace");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN randomkey-user RANDOMKEY");
+  EXPECT_THAT(resp, "OK");
+}
+
+TEST_F(AclFamilyTest, WhoAmiIsNotAdminCategory) {
+  TestInitAclFam();
+
+  auto resp = Run("ACL SETUSER whoami-admin ON >p +@admin");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN whoami-admin ACL WHOAMI");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'ACL WHOAMI' command");
+
+  resp = Run("ACL SETUSER whoami-slow ON >p +@slow");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN whoami-slow ACL WHOAMI");
+  EXPECT_THAT(resp, "OK");
+}
+
+TEST_F(AclFamilyTest, ClusterReadonlyIsNotReadCategory) {
+  TestInitAclFam();
+
+  auto resp = Run("ACL SETUSER cluster-read ON >p +@read");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN cluster-read READONLY");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'READONLY' command");
+  resp = Run("ACL DRYRUN cluster-read READWRITE");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'READWRITE' command");
+
+  resp = Run("ACL SETUSER cluster-conn ON >p +@connection");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN cluster-conn READONLY");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN cluster-conn READWRITE");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL DRYRUN cluster-read CLUSTER INFO");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'CLUSTER' command");
+
+  resp = Run("ACL SETUSER cluster-slow ON >p +@slow");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN cluster-slow CLUSTER INFO");
+  EXPECT_THAT(resp, "OK");
 }
 
 TEST_F(AclFamilyTest, TestGetUser) {

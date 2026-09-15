@@ -1249,12 +1249,12 @@ inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 void ClusterFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
-  *registry << CI{"CLUSTER", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
+  *registry << CI{"CLUSTER", CO::LOADING, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0,
                   acl::kDflyCluster}
                    .HFUNC(DflyCluster)
-            << CI{"READONLY", CO::READONLY, 1, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
-            << CI{"READWRITE", CO::READONLY, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite)
+            << CI{"READONLY", CO::FAST, 1, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
+            << CI{"READWRITE", CO::FAST, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite)
             << CI{"DFLYMIGRATE", CO::ADMIN | CO::HIDDEN, -1, 0, 0, acl::kDflyMigrate}.HFUNC(
                    DflyMigrate);
 }
