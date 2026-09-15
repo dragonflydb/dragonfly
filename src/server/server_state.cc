@@ -233,7 +233,7 @@ void ServerState::AwaitPauseState(bool is_write, const facade::ConnectionContext
   };
   // A closing connection does not notify the pause event, so poll for it.
   while (!cntx->conn_closing) {
-    if (client_pause_ec_.await_until(resumed, chrono::steady_clock::now() + 100ms) ==
+    if (client_pause_ec_.await_until(resumed, chrono::steady_clock::now() + 50ms) ==
         cv_status::no_timeout)
       return;
   }
