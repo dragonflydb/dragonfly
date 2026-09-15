@@ -1056,9 +1056,8 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
 
   // Check SCRIPT FLAGS can be applied by sha before loading.
   {
-    char sha_buf[41];
-    Interpreter::FuncSha1(kUndeclared2, sha_buf);
-    string_view sha{sha_buf, 40};
+    auto sha_buf = Interpreter::FuncSha1(kUndeclared2);
+    string_view sha{sha_buf.data(), sha_buf.size()};
 
     EXPECT_THAT(Run({"script", "flags", sha, "allow-undeclared-keys"}), "OK");
 
@@ -1130,9 +1129,8 @@ TEST_F(MultiTest, LegacyFloatFlag) {
   EXPECT_THAT(Run({"eval", "return 42.9", "0"}), DoubleArg(42.9));
 
   const char* script = "return 42.9";
-  char sha_buf[41];
-  Interpreter::FuncSha1(script, sha_buf);
-  string_view sha{sha_buf, 40};
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   EXPECT_EQ(Run({"script", "flags", string(sha), "legacy-float"}), "OK");
 
