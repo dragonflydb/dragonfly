@@ -2895,6 +2895,7 @@ constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kPExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
+constexpr uint32_t kRandomKey = KEYSPACE | READ | SLOW;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
@@ -2952,7 +2953,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
             acl::kMove}
              .HFUNC(Move)
       << CI{"RESTORE", CO::JOURNALED, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
-      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0}.HFUNC(RandomKey)
+      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, acl::kRandomKey}.HFUNC(RandomKey)
       << CI{"EXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kExpireTime}.HFUNC(ExpireTime)
       << CI{"PEXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPExpireTime}.HFUNC(PExpireTime);
 }
