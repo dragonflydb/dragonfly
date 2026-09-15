@@ -4212,6 +4212,41 @@ async def test_rw_throttle_stats(df_server: DflyInstance):
     await write_client.aclose()
 
 
+async def test_client_pause_write_expired_keys(async_client):
+    c = async_client
+    expired_earlier = (await c.info("stats"))["expired_keys"]
+    try:
+        # pipeline so expires key doesnt expire due to some delay in sending
+        async with c.pipeline(transaction=True) as pipe:
+            pipe.set("expires", "value", px=100)
+            pipe.set("persistent", "value")
+            pipe.execute_command("CLIENT", "PAUSE", 60_000, "WRITE")
+            await pipe.execute()
+
+        @assert_eventually(timeout=2)
+        async def check_hidden():
+            assert await c.get("expires") is None
+
+        async with async_timeout.timeout(5):
+            await check_hidden()
+            assert await c.exists("expires") == 0
+            assert await c.get("persistent") == "value"
+
+            assert await c.dbsize() == 2
+            assert (await c.info("stats"))["expired_keys"] == expired_earlier
+
+    finally:
+        await c.execute_command("CLIENT", "UNPAUSE")
+
+    @assert_eventually(timeout=2)
+    async def check_deleted():
+        assert await c.get("expires") is None
+        assert await c.dbsize() == 1
+        assert (await c.info("stats"))["expired_keys"] == expired_earlier + 1
+
+    await check_deleted()
+
+
 @dfly_args({"proactor_threads": 2})
 async def test_shutdown_with_paused_clients(df_factory):
     server = df_factory.create(dbfilename="dump_paused")
