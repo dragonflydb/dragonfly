@@ -2,14 +2,18 @@
 """Verifies Dragonfly's per-command ACL categories.
 
 Two independent checks:
-  --check self    (default): internal self-consistency -- flags any command whose
-                   effective ACL categories end up with both FAST and SLOW set at
-                   once, which means its CO:: mask disagrees with its hand-written
-                   acl:: category constant.
-  --check valkey            : diffs Dragonfly's effective ACL categories against
-                   real Valkey's (ground truth), for commands Dragonfly shares
-                   with Valkey. Requires a Valkey checkout (--valkey-dir), or
-                   clones the latest valkey/valkey unstable branch itself.
+  --check self  : internal self-consistency -- flags any command whose effective
+                  ACL categories end up with both FAST and SLOW set at once, which
+                  means its CO:: mask disagrees with its hand-written acl:: category
+                  constant. No network access required.
+  --check valkey: diffs Dragonfly's effective ACL categories against real Valkey's
+                  (ground truth), for commands Dragonfly shares with Valkey. Requires
+                  a Valkey checkout (--valkey-dir), or clones the latest valkey/valkey
+                  default branch itself if omitted -- this needs network access.
+
+Default is --check all (both checks), matching the CI job -- so a plain, no-argument
+invocation clones Valkey and needs network access. Pass --check self explicitly, or
+--valkey-dir pointing at an existing local checkout, to run fully offline.
 
 Exits non-zero if either check finds unresolved issues (for CI use).
 """
@@ -317,7 +321,7 @@ def collect_dragonfly_commands(repo_root):
     return commands, unresolved
 
 
-def check_self(commands, unresolved):
+def check_self(commands):
     issues = []
     for name, (final, mask_val, f) in commands.items():
         if (final & ACL["FAST"]) and (final & ACL["SLOW"]):
@@ -325,8 +329,6 @@ def check_self(commands, unresolved):
                 f"{f}: {name}: FAST+SLOW both set "
                 f"(mask={bits_str(mask_val, CO_REV)} final={bits_str(final, ACL_REV)})"
             )
-    for f, name, why in unresolved:
-        issues.append(f"{f}: {name}: UNRESOLVED {why}")
     return issues
 
 
@@ -388,7 +390,12 @@ def check_valkey(commands, valkey_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--check", choices=["self", "valkey", "all"], default="all")
+    ap.add_argument(
+        "--check",
+        choices=["self", "valkey", "all"],
+        default="all",
+        help="'all' (default) clones/needs Valkey and network access; 'self' is offline-only",
+    )
     ap.add_argument(
         "--valkey-dir", help="path to an existing valkey checkout; default clones latest"
     )
@@ -397,9 +404,12 @@ def main():
 
     commands, unresolved = collect_dragonfly_commands(args.repo_root)
 
-    all_issues = []
+    # Unresolved commands are hidden from every check below (they never made it into
+    # `commands`), so report them exactly once here regardless of --check mode -- otherwise
+    # `--check valkey` alone can silently omit them and report a false "0 issues".
+    all_issues = [f"{f}: {name}: UNRESOLVED {why}" for f, name, why in unresolved]
     if args.check in ("self", "all"):
-        all_issues += check_self(commands, unresolved)
+        all_issues += check_self(commands)
     if args.check in ("valkey", "all"):
         valkey_dir = ensure_valkey_checkout(args.valkey_dir)
         all_issues += check_valkey(commands, valkey_dir)
