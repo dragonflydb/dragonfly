@@ -751,6 +751,8 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case NO_KEY_TRANSACTIONAL:
     case NO_KEY_TX_SPAN_ALL:
     case IDEMPOTENT:
+    case WRITE_KEY_OFFSET_0:
+    case WRITE_KEY_OFFSET_1:
       return "";
   }
   return "";
@@ -1169,12 +1171,15 @@ void Service::Shutdown() {
   cluster_family_.Shutdown();
   server_family_.Shutdown();
 
-  shutdown_watchdog.emplace(pp_);
-
   engine_varz.reset();
 
+  uint64_t shard_shutdown_start = absl::GetCurrentTimeNanos();
   shard_set->PreShutdown();
   shard_set->Shutdown();
+  LOG(INFO) << "Shard set shutdown took "
+            << (absl::GetCurrentTimeNanos() - shard_shutdown_start) / 1000 << "us";
+
+  shutdown_watchdog.emplace(pp_);
 
   delete channel_store;
   channel_store = nullptr;

@@ -518,14 +518,14 @@ end
   register_polyfills(lua);
 }
 
-// dest must have at least 41 chars.
-void ToHex(const uint8_t* src, char* dest) {
+array<char, 40> ToHex(const uint8_t* src) {
+  array<char, 40> dest;
   const char cset[] = "0123456789abcdef";
-  for (size_t j = 0; j < 20; j++) {
+  for (size_t j = 0; j < dest.size() / 2; j++) {
     dest[j * 2] = cset[((src[j] & 0xF0) >> 4)];
     dest[j * 2 + 1] = cset[(src[j] & 0xF)];
   }
-  dest[40] = '\0';
+  return dest;
 }
 
 int DragonflyHashCommand(lua_State* lua) {
@@ -640,13 +640,8 @@ int RedisSha1Command(lua_State* lua) {
   size_t len;
   const char* s = lua_tolstring(lua, 1, &len);
 
-  uint8_t digest[EVP_MAX_MD_SIZE];
-  EVPDigest(s, len, digest, NULL);
-
-  char hex[41];
-  ToHex(digest, hex);
-
-  lua_pushstring(lua, hex);
+  auto hex = Interpreter::FuncSha1({s, len});
+  lua_pushlstring(lua, hex.data(), hex.size());
   return 1;
 }
 
@@ -844,11 +839,11 @@ Interpreter::~Interpreter() {
   lua_close(lua_);
 }
 
-void Interpreter::FuncSha1(string_view body, char* fp) {
+array<char, 40> Interpreter::FuncSha1(string_view body) {
   uint8_t digest[EVP_MAX_MD_SIZE];
   EVPDigest(body.data(), body.size(), digest, NULL);
 
-  ToHex(digest, fp);
+  return ToHex(digest);
 }
 
 auto Interpreter::AddFunction(string_view sha, string_view body, string* result) -> AddResult {
