@@ -23,9 +23,7 @@ struct DbSliceDeleter {
   void operator()(DbSlice* ptr) const;
 };
 
-// DbSlice is allocated via its owning shard's memory_resource (the shard's data heap), not the
-// default/backing heap, so it needs a deleter that deallocates through that memory_resource
-// instead of a plain `delete`.
+// Deallocates via DbSlice's owning shard's memory_resource instead of plain `delete`.
 using DbSlicePtr = std::unique_ptr<DbSlice, DbSliceDeleter>;
 
 // A Namespace is a way to separate and isolate different databases in a single instance.

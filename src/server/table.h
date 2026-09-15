@@ -34,9 +34,7 @@ using PrimeConstIterator = PrimeTable::const_iterator;
 class TopKeys;
 class DbTable;
 
-// DbTable is allocated via its own memory_resource (the shard's data heap), not the
-// default/backing heap, so intrusive_ptr uses these free functions instead of
-// boost::intrusive_ref_counter, which always allocates/deallocates via plain new/delete.
+// Free functions so intrusive_ptr deallocates via DbTable's own memory_resource, not new/delete.
 void intrusive_ptr_add_ref(DbTable* table) noexcept;
 void intrusive_ptr_release(DbTable* table) noexcept;
 
@@ -189,8 +187,7 @@ struct DbTable {
   friend void intrusive_ptr_add_ref(DbTable* table) noexcept;
   friend void intrusive_ptr_release(DbTable* table) noexcept;
 
-  // The memory_resource DbTable itself was allocated from (the shard's data heap), so
-  // intrusive_ptr_release can deallocate it without depending on shard-local thread state.
+  // memory_resource DbTable itself was allocated from.
   PMR_NS::memory_resource* memory_resource_;
   uint32_t use_count_ = 0;
 };
