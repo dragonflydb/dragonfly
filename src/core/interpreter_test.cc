@@ -926,12 +926,12 @@ TEST_F(InterpreterTest, UsedBytesDropsWithInterpreter) {
   const uint64_t before = InterpreterManager::tl_stats().used_bytes;
   InterpreterManager im(2);
 
-  char sha_buf[41];
   std::string err;
-  Interpreter::FuncSha1("return 1", sha_buf);
+  auto sha_buf = Interpreter::FuncSha1("return 1");
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   Interpreter* ir = im.Get();
-  ASSERT_EQ(Interpreter::ADD_OK, ir->AddFunction({sha_buf, 40}, "return 1", &err));
+  ASSERT_EQ(Interpreter::ADD_OK, ir->AddFunction(sha, "return 1", &err));
   im.Return(ir);
   EXPECT_GT(InterpreterManager::tl_stats().used_bytes, before);
 
