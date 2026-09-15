@@ -1767,7 +1767,9 @@ finish:
 void DbSlice::CreateDb(DbIndex db_ind) {
   auto& db = db_arr_[db_ind];
   if (!db) {
-    db.reset(new DbTable{owner_->memory_resource(), db_ind});
+    auto* mr = owner_->memory_resource();
+    void* storage = mr->allocate(sizeof(DbTable), alignof(DbTable));
+    db.reset(std::construct_at(static_cast<DbTable*>(storage), mr, db_ind));
     table_memory_ += db->table_memory();
   }
 }

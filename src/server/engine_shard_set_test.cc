@@ -16,7 +16,10 @@
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/mi_memory_resource.h"
+#include "server/db_slice.h"
 #include "server/main_service.h"
+#include "server/namespaces.h"
 #include "server/test_utils.h"
 
 ABSL_DECLARE_FLAG(std::string, shard_round_robin_prefix);
@@ -59,6 +62,27 @@ TEST_F(RoundRobinSharderTest, RoundRobinShard) {
     EXPECT_THAT(GetShardKeyCount(), Contains(Pair(1, 1)));
     EXPECT_THAT(GetShardKeyCount(), Contains(Pair(2, 1)));
   }
+}
+
+TEST_F(BaseFamilyTest, DbTableAndDbSliceLiveOnDataHeap) {
+  shard_set->Await(0, [] {
+    EngineShard* shard = EngineShard::tlocal();
+    auto* mr = static_cast<MiMemoryResource*>(shard->memory_resource());
+
+    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(0);
+    EXPECT_TRUE(mi_heap_contains_block(mr->heap(), &db_slice));
+
+    DbTable* table = db_slice.GetDBTable(0);
+    ASSERT_NE(table, nullptr);
+    EXPECT_TRUE(mi_heap_contains_block(mr->heap(), table));
+
+    EXPECT_EQ(table->use_count(), 1u);
+    {
+      boost::intrusive_ptr<DbTable> copy = db_slice.CopyDBTablePtr(0);
+      EXPECT_EQ(table->use_count(), 2u);
+    }
+    EXPECT_EQ(table->use_count(), 1u);
+  });
 }
 
 }  // namespace

@@ -19,6 +19,15 @@ class BlockingController;
 class DbSlice;
 class EngineShard;
 
+struct DbSliceDeleter {
+  void operator()(DbSlice* ptr) const;
+};
+
+// DbSlice is allocated via its owning shard's memory_resource (the shard's data heap), not the
+// default/backing heap, so it needs a deleter that deallocates through that memory_resource
+// instead of a plain `delete`.
+using DbSlicePtr = std::unique_ptr<DbSlice, DbSliceDeleter>;
+
 // A Namespace is a way to separate and isolate different databases in a single instance.
 // It can be used to allow multiple tenants to use the same server without hacks of using a common
 // prefix, or SELECT-ing a different database.
@@ -34,7 +43,7 @@ class Namespace {
   BlockingController* GetBlockingController(ShardId sid);
 
  private:
-  std::vector<std::unique_ptr<DbSlice>> shard_db_slices_;
+  std::vector<DbSlicePtr> shard_db_slices_;
   std::vector<std::unique_ptr<BlockingController>> shard_blocking_controller_;
 
   friend class Namespaces;
