@@ -131,9 +131,7 @@ void intrusive_ptr_add_ref(DbTable* table) noexcept {
 void intrusive_ptr_release(DbTable* table) noexcept {
   DCHECK_GT(table->use_count_, 0u);
   if (--table->use_count_ == 0) {
-    auto* mr = table->memory_resource_;
-    std::destroy_at(table);
-    mr->deallocate(table, sizeof(DbTable), alignof(DbTable));
+    PMR_NS::polymorphic_allocator<DbTable>(table->memory_resource_).delete_object(table);
   }
 }
 

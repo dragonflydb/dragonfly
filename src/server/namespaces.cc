@@ -21,8 +21,7 @@ void DbSliceDeleter::operator()(DbSlice* ptr) const {
   if (!ptr)
     return;
   auto* mr = ptr->shard_owner()->memory_resource();
-  std::destroy_at(ptr);
-  mr->deallocate(ptr, sizeof(DbSlice), alignof(DbSlice));
+  PMR_NS::polymorphic_allocator<DbSlice>(mr).delete_object(ptr);
 }
 
 Namespace::Namespace() {
@@ -32,9 +31,8 @@ Namespace::Namespace() {
     CHECK(es != nullptr);
     ShardId sid = es->shard_id();
     auto* mr = es->memory_resource();
-    void* storage = mr->allocate(sizeof(DbSlice), alignof(DbSlice));
-    shard_db_slices_[sid].reset(std::construct_at(static_cast<DbSlice*>(storage), sid,
-                                                  absl::GetFlag(FLAGS_cache_mode), es, this));
+    shard_db_slices_[sid].reset(PMR_NS::polymorphic_allocator<DbSlice>(mr).new_object<DbSlice>(
+        sid, absl::GetFlag(FLAGS_cache_mode), es, this));
   });
 }
 

@@ -1768,8 +1768,7 @@ void DbSlice::CreateDb(DbIndex db_ind) {
   auto& db = db_arr_[db_ind];
   if (!db) {
     auto* mr = owner_->memory_resource();
-    void* storage = mr->allocate(sizeof(DbTable), alignof(DbTable));
-    db.reset(std::construct_at(static_cast<DbTable*>(storage), mr, db_ind));
+    db.reset(PMR_NS::polymorphic_allocator<DbTable>(mr).new_object<DbTable>(mr, db_ind));
     table_memory_ += db->table_memory();
   }
 }
