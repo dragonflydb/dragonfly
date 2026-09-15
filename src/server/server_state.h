@@ -275,7 +275,7 @@ class ServerState {  // public struct - to allow initialization.
   // whether this is starting or ending the pause.
   void SetPauseState(ClientPause state, bool start);
 
-  // Awaits until the pause is over and the command can execute, or until the connection closes.
+  // Awaits until the pause is over and the command can execute, or until the connection starts closing.
   // @is_write controls whether the command is a write command or not.
   void AwaitPauseState(bool is_write, const facade::ConnectionContext* cntx);
 
