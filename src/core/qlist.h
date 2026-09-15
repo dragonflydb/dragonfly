@@ -482,9 +482,16 @@ class QList {
     PMR_NS::string key;
   };
 
-  void DeleteTieringParams();
+  // Stateless deleter: recovers the memory_resource from the object's own
+  // PMR-allocated key, so this stays the size of a raw pointer (no deleter state).
+  struct StoredTieringParamsDeleter {
+    void operator()(StoredTieringParams* p) const noexcept;
+  };
 
-  StoredTieringParams* tiering_params_ = nullptr;
+  std::unique_ptr<StoredTieringParams, StoredTieringParamsDeleter> tiering_params_;
+
+  static_assert(sizeof(tiering_params_) == sizeof(void*),
+                "tiering_params_ deleter must stay stateless/empty");
 };
 
 }  // namespace dfly
