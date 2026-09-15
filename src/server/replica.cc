@@ -28,6 +28,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
+#include "facade/resp_parser.h"
 #include "facade/socket_utils.h"
 #include "server/error.h"
 #include "server/journal/executor.h"

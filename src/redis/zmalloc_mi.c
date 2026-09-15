@@ -14,6 +14,7 @@
 
 __thread ssize_t zmalloc_used_memory_tl = 0;
 __thread mi_heap_t* zmalloc_heap = NULL;
+__thread bool zmalloc_skip_accounting_tl = false;
 
 mi_page_usage_stats_t mi_heap_page_is_underutilized(mi_heap_t* heap, void* p, float ratio,
                                                     bool collect_stats);
@@ -27,7 +28,8 @@ void* zmalloc(size_t size) {
   // assertion does not hold. Basically mi_good_size is not a good function for
   // doing accounting.
   // assert(usable == mi_good_size(size));
-  zmalloc_used_memory_tl += usable;
+  if (!zmalloc_skip_accounting_tl)
+    zmalloc_used_memory_tl += usable;
 
   return res;
 }
@@ -44,7 +46,8 @@ void zfree(void* ptr) {
   size_t usable = mi_usable_size(ptr);
 
   // assert(zmalloc_used_memory_tl >= (ssize_t)usable);
-  zmalloc_used_memory_tl -= usable;
+  if (!zmalloc_skip_accounting_tl)
+    zmalloc_used_memory_tl -= usable;
 
   mi_free_size(ptr, usable);
 }
@@ -59,7 +62,8 @@ void* zcalloc(size_t size) {
 
   void* res = mi_heap_calloc(zmalloc_heap, 1, size);
   size_t usable = mi_usable_size(res);
-  zmalloc_used_memory_tl += usable;
+  if (!zmalloc_skip_accounting_tl)
+    zmalloc_used_memory_tl += usable;
 
   return res;
 }
@@ -70,7 +74,8 @@ void* zmalloc_usable(size_t size, size_t* usable) {
   size_t uss = mi_usable_size(res);
   *usable = uss;
 
-  zmalloc_used_memory_tl += uss;
+  if (!zmalloc_skip_accounting_tl)
+    zmalloc_used_memory_tl += uss;
 
   return res;
 }
@@ -81,7 +86,8 @@ void* zrealloc_usable(void* ptr, size_t size, size_t* usable) {
   void* res = mi_heap_realloc(zmalloc_heap, ptr, size);
   ssize_t uss = mi_usable_size(res);
   *usable = uss;
-  zmalloc_used_memory_tl += (uss - prev);
+  if (!zmalloc_skip_accounting_tl)
+    zmalloc_used_memory_tl += (uss - prev);
 
   return res;
 }
@@ -92,7 +98,8 @@ size_t znallocx(size_t size) {
 
 void zfree_size(void* ptr, size_t size) {
   ssize_t uss = mi_usable_size(ptr);
-  zmalloc_used_memory_tl -= uss;
+  if (!zmalloc_skip_accounting_tl)
+    zmalloc_used_memory_tl -= uss;
   mi_free_size(ptr, uss);
 }
 
@@ -103,7 +110,8 @@ void* ztrymalloc(size_t size) {
 
 void* ztrycalloc(size_t size) {
   size_t g = mi_good_size(size);
-  zmalloc_used_memory_tl += g;
+  if (!zmalloc_skip_accounting_tl)
+    zmalloc_used_memory_tl += g;
   void* ptr = mi_heap_calloc(zmalloc_heap, 1, size);
   assert(mi_usable_size(ptr) == g);
   return ptr;
@@ -225,6 +233,14 @@ int zmalloc_get_allocator_fragmentation_step(float ratio, struct fragmentation_i
 void init_zmalloc_threadlocal(void* heap) {
   if (zmalloc_heap)
     return;
+  zmalloc_heap = heap;
+}
+
+void* zmalloc_get_threadlocal_heap(void) {
+  return zmalloc_heap;
+}
+
+void zmalloc_set_threadlocal_heap(void* heap) {
   zmalloc_heap = heap;
 }
 
