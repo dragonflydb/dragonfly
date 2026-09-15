@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <shared_mutex>
 
 #include "base/function2.hpp"
 #include "base/logging.h"
