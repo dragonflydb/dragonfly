@@ -171,7 +171,7 @@ TEST_F(ListFamilyTest, BLMPopBlocking) {
   auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     resp = Run({"blmpop", "0.1", "1", kKey1, "LEFT"});
   });
-  ThisFiber::SleepFor(1ms);
+  WaitUntilLocked(0, kKey1);
   ASSERT_TRUE(IsLocked(0, kKey1));
 
   fb0.Join();
