@@ -43,6 +43,17 @@ class QList {
  public:
   enum Where : uint8_t { TAIL, HEAD };
 
+  // Controls ZSTD dictionary compression of list nodes. Orthogonal to the legacy LZF
+  // depth-compression and ignored while the latter is enabled (see the `compress` ctor argument).
+  // Parsed from --list_compress_policy, see AbslParseFlag in qlist.cc.
+  struct ComprPolicy {
+    // The list's malloc usage must reach this many bytes before compression kicks in.
+    // 0 means no size gate: compress as soon as the list has more than a single node.
+    uint32_t min_size = 0;
+
+    bool enabled = false;
+  };
+
   /* Node is a 40 byte struct describing a listpack for a quicklist.
    * We use bit fields keep the Node at 40 bytes.
    * count: 16 bits, max 65536 (max lp bytes is 65k, so max count actually < 32k).
@@ -336,18 +347,21 @@ class QList {
   // Returns count of nodes reallocated to help in testing.
   size_t DefragIfNeeded(PageUsage* page_usage);
 
-  // Sets the malloc_size_ threshold at which ZSTD dictionary training is triggered.
-  // 0 disables ZSTD dictionary compression.
-  void set_compr_threshold(uint32_t threshold) {
-    zstd_threshold_ = threshold;
+  // Sets the ZSTD dictionary compression policy of this list. A disabled policy (the default)
+  // turns ZSTD dictionary compression off.
+  void set_compr_policy(const ComprPolicy& policy) {
+    zstd_enabled_ = policy.enabled;
+    zstd_min_size_ = policy.min_size;
   }
+
+  // Returns the compression policy derived from the command line flags.
+  static ComprPolicy PolicyFromFlags();
 
   // Trains a thread-local ZSTD dictionary (if not yet trained) and bulk-compresses
   // the list's interior nodes. Intended to be called once after a list has been
   // bulk-populated via AppendListpack/AppendPlain (e.g. during RDB/replication load),
   // where the per-push CoolOff() compression hook does not run. No-op unless
-  // set_compr_threshold() was given a non-zero value and LZF depth-compression is
-  // disabled.
+  // set_compr_policy() enabled compression and LZF depth-compression is disabled.
   void CompressAfterLoad();
 
   // Enable tiered storage. `params.key` must already be allocated with `mr`.
@@ -406,7 +420,7 @@ class QList {
   // compression site about offloaded nodes, tiered lists simply opt out of dictionary
   // compression. CoolOff() already prefers tiering; this keeps the rest of the code consistent.
   bool IsZstdDictMode() const {
-    return zstd_threshold_ > 0 && !AllowLZFCompression() && !tiering_enabled_;
+    return zstd_enabled_ && !AllowLZFCompression() && !tiering_enabled_;
   }
 
   bool IsInterior(const Node* node) const {
@@ -478,12 +492,13 @@ class QList {
   uint16_t dict_bulk_failed_ : 1;     /* compression with thread-local dict failed for this list */
   uint16_t dict_bulk_finished_ : 1;   /* bulk compression done, per-node compression active */
   uint16_t tiering_enabled_ : 1;      /* tiering storage enabled */
-  uint16_t reserved1_ : 12;
+  uint16_t zstd_enabled_ : 1;         /* ZSTD dictionary compression enabled for this list */
+  uint16_t reserved1_ : 11;
   unsigned compress_ : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;
   uint16_t db_id_ = kInvalidDbId;
-  uint32_t zstd_threshold_ = 0;  // 0 = disabled
+  uint32_t zstd_min_size_ = 0; /* malloc_size_ required before compressing; 0 = no size gate */
 
   // Stateless deleter: recovers the memory_resource from the object's own
   // PMR-allocated key, so this stays the size of a raw pointer (no deleter state).
@@ -496,5 +511,9 @@ class QList {
   static_assert(sizeof(tiering_params_) == sizeof(void*),
                 "tiering_params_ deleter must stay stateless/empty");
 };
+
+// Parses the --list_compress_policy flag, see its help string for the accepted syntax.
+bool AbslParseFlag(std::string_view in, QList::ComprPolicy* policy, std::string* err);
+std::string AbslUnparseFlag(const QList::ComprPolicy& policy);
 
 }  // namespace dfly
