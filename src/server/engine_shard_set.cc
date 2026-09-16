@@ -135,23 +135,31 @@ void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
 
 void EngineShardSet::PreShutdown() {
   RunBlockingInParallel([](EngineShard* shard) {
+    LOG(ERROR) << "EngineShardSet::PreShutdown: StopPeriodicFiber shard=" << shard->shard_id();
     shard->StopPeriodicFiber();
 
     // We must close tiered_storage before we destroy namespaces that own db slices.
     if (shard->tiered_storage()) {
+      LOG(ERROR) << "EngineShardSet::PreShutdown: closing tiered_storage shard="
+                 << shard->shard_id();
       shard->tiered_storage()->Close();
     }
+    LOG(ERROR) << "EngineShardSet::PreShutdown: done shard=" << shard->shard_id();
   });
 }
 
 void EngineShardSet::Shutdown() {
   // Calling Namespaces::Clear before destroying engine shards, because it accesses them
   // internally.
+  LOG(ERROR) << "EngineShardSet::Shutdown: namespaces->Clear starting";
   namespaces->Clear();
+  LOG(ERROR) << "EngineShardSet::Shutdown: namespaces->Clear done, DestroyThreadLocal starting";
   RunBlockingInParallel([](EngineShard*) { EngineShard::DestroyThreadLocal(); });
+  LOG(ERROR) << "EngineShardSet::Shutdown: DestroyThreadLocal done";
 
   delete namespaces;
   namespaces = nullptr;
+  LOG(ERROR) << "EngineShardSet::Shutdown: done";
 }
 
 void EngineShardSet::InitThreadLocal(ProactorBase* pb) {

@@ -1175,9 +1175,12 @@ void Service::Shutdown() {
 
   engine_varz.reset();
 
+  LOG(ERROR) << "Service::Shutdown: shard_set->PreShutdown starting";
   uint64_t shard_shutdown_start = absl::GetCurrentTimeNanos();
   shard_set->PreShutdown();
+  LOG(ERROR) << "Service::Shutdown: shard_set->PreShutdown done, shard_set->Shutdown starting";
   shard_set->Shutdown();
+  LOG(ERROR) << "Service::Shutdown: shard_set->Shutdown done";
   LOG(INFO) << "Shard set shutdown took "
             << (absl::GetCurrentTimeNanos() - shard_shutdown_start) / 1000 << "us";
 

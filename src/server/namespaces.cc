@@ -4,6 +4,8 @@
 
 #include "server/namespaces.h"
 
+#include <ranges>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
@@ -74,11 +76,27 @@ void Namespaces::Clear() {
 
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
-    for (auto& ns : ABSL_TS_UNCHECKED_READ(namespaces_)) {
-      ns.second.shard_db_slices_[es->shard_id()].reset();
+    LOG(ERROR) << "Namespaces::Clear: DbSlice::ShutdownThreadLocal shard=" << es->shard_id();
+    DbSlice::ShutdownThreadLocal();
+
+    // Marks each DbTable's prime/mcflag arena-destruct (no-op destructor), so the per-key
+    // data they hold is left for the shard's mi_heap_destroy() to reclaim in bulk instead of
+    // being walked/destructed one entry at a time. DbSlice/DbTable themselves are NOT
+    // detached -- they're destructed for real right here (cheaply, now that prime/mcflag are
+    // no-ops), explicitly, on this shard's own thread. That matters: DbTable::~DbTable()
+    // asserts thread_index == ServerState::tlocal()->thread_index(), so it must run here,
+    // inside this per-shard callback -- not later, implicitly, when namespaces_.clear() runs
+    // on whatever thread called Namespaces::Clear().
+    for (auto& val : ABSL_TS_UNCHECKED_READ(namespaces_) | views::values) {
+      auto& db_slice = val.shard_db_slices_[es->shard_id()];
+      LOG(ERROR) << "Namespaces::Clear: PrepareForSingleShotHeapDestroy shard=" << es->shard_id();
+      db_slice->PrepareForSingleShotHeapDestroy();
+      db_slice.reset();
     }
+    LOG(ERROR) << "Namespaces::Clear: shard done, shard=" << es->shard_id();
   });
 
+  LOG(ERROR) << "Namespaces::Clear: all shards done, clearing namespaces_ map";
   namespaces_.clear();
 }
 

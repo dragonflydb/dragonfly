@@ -531,7 +531,7 @@ void QList::MoveFrom(QList&& other) {
   bookmark_count_ = other.bookmark_count_;
   db_id_ = other.db_id_;
   zstd_threshold_ = other.zstd_threshold_;
-  tiering_params_ = std::move(other.tiering_params_);
+  tiering_params_ = std::exchange(other.tiering_params_, nullptr);
 
   other.head_ = nullptr;
   other.malloc_size_ = 0;

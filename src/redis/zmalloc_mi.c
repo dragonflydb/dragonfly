@@ -228,6 +228,10 @@ void init_zmalloc_threadlocal(void* heap) {
   zmalloc_heap = heap;
 }
 
+void reset_zmalloc_threadlocal(void) {
+  zmalloc_heap = NULL;
+}
+
 void zmalloc_page_is_underutilized(void* ptr, float ratio, int collect_stats,
                                    mi_page_usage_stats_t* result) {
   *result = mi_heap_page_is_underutilized(zmalloc_heap, ptr, ratio, collect_stats);
