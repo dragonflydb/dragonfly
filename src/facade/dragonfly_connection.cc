@@ -84,7 +84,7 @@ ABSL_FLAG(uint32_t, pipeline_queue_limit, 10000,
           "See https://github.com/dragonflydb/dragonfly/discussions/3997 for details");
 
 ABSL_FLAG(strings::MemoryBytesFlag, publish_buffer_limit, 196_MB,
-          "Amount of memory to use for storing pub commands in bytes - per IO thread. This is the "
+          "Amount of memory to use for stosring pub commands in bytes - per IO thread. This is the "
           "soft Pub/Sub back-pressure limit; publishers are only parked once the per-thread "
           "subscriber memory reaches this value times the internal hard-limit multiplier.");
 
