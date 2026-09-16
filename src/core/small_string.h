@@ -18,6 +18,8 @@ class SmallString {
 
  public:
   static void InitThreadLocal(void* heap);
+  // Drops the thread-local allocator; call only right before the heap is bulk-freed.
+  static void ShutdownThreadLocal();
   static size_t UsedThreadLocal();
   static bool CanAllocate(size_t size);
 

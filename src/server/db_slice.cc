@@ -491,7 +491,30 @@ DbSlice::~DbSlice() {
     db.reset();
   }
 
+  ShutdownThreadLocal();
+}
+
+void DbSlice::ShutdownThreadLocal() {
   AsyncDeleter::Shutdown();
+}
+
+void DbSlice::PrepareForSingleShotHeapDestroy() {
+  client_tracking_map_.clear();
+  pending_send_map_.clear();
+  doc_del_cb_ = {};
+
+  CHECK(uniq_fps_.empty());
+  uniq_fps_.rehash(0);
+  CHECK(fetched_items_.empty());
+  fetched_items_.rehash(0);
+  CHECK(change_cb_.empty());
+
+  for (auto& db : db_arr_) {
+    if (!db)
+      continue;
+    CHECK_EQ(db->use_count(), 1u);
+    db->PrepareForSingleShotHeapDestroy();
+  }
 }
 
 auto DbSlice::GetStats() const -> Stats {

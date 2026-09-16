@@ -260,6 +260,12 @@ class DbSlice {
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner, Namespace* ns);
   ~DbSlice();
 
+  // Drops pending shard-local async deletions without freeing the queued objects.
+  static void ShutdownThreadLocal();
+
+  // Marks db_arr_'s DbTables arena-destruct before the shard's mi_heap_destroy() runs.
+  void PrepareForSingleShotHeapDestroy();
+
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
 

@@ -12,6 +12,7 @@
 #include "base/flags.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
+#include "core/small_string.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -552,11 +553,14 @@ void EngineShard::DestroyThreadLocal() {
   shard_->~EngineShard();
   CleanupStatelessAllocMR();
 
-  mi_free(shard_);
+  // shard_ itself lives in `tlh`; mi_heap_destroy below reclaims it, no need to mi_free it.
   shard_ = nullptr;
   CompactObj::InitThreadLocal(nullptr);
+  SmallString::ShutdownThreadLocal();
+  zmalloc_set_threadlocal_heap(nullptr);
 
-  mi_heap_delete(tlh);
+  // Bulk-reclaim the heap instead of destructing each object individually.
+  mi_heap_destroy(tlh);
   VLOG(1) << "Shard reset " << shard_id;
 }
 

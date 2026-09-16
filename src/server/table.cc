@@ -97,6 +97,11 @@ void LockTable::Release(uint64_t fp, IntentLock::Mode mode) {
     locks_.erase(it);
 }
 
+void LockTable::PrepareForSingleShotHeapDestroy() {
+  CHECK(locks_.empty());
+  locks_.rehash(0);
+}
+
 [[maybe_unused]] constexpr size_t kSzTable = sizeof(DbTable);
 
 DbTable::SampleTopKeys::~SampleTopKeys() {
@@ -121,6 +126,17 @@ DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
   delete sample_top_keys;
   delete sample_unique_keys;
+}
+
+void DbTable::PrepareForSingleShotHeapDestroy() {
+  // prime/mcflag hold the bulk of per-key data; skip their destructors and let
+  // mi_heap_destroy reclaim it. DbTable itself is still destructed normally.
+  prime.SetArenaDestruct(true);
+  mcflag.SetArenaDestruct(true);
+
+  trans_locks.PrepareForSingleShotHeapDestroy();
+  CHECK(watched_keys.empty());
+  watched_keys.rehash(0);
 }
 
 void DbTable::Clear() {
