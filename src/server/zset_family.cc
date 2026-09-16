@@ -1106,8 +1106,7 @@ void BZPopMinMax(facade::ParsedArgs args, bool is_max, CommandContext* cmd_cntx)
 
   auto* cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
-      &cntx->paused);
+      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), cntx);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (popped_key) {
@@ -1129,6 +1128,8 @@ void BZPopMinMax(facade::ParsedArgs args, bool is_max, CommandContext* cmd_cntx)
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
+    case OpStatus::UNBLOCKED:
+      return cmd_cntx->SendError(popped_key.status());
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
@@ -2516,11 +2517,11 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
 
     DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
                                    // `WaitOnWatch`
-    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, &cntx->blocked,
-                                     &cntx->paused);
+    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, cntx);
 
     if (status != OpStatus::OK) {
-      response_builder->SendNullArray();
+      status == OpStatus::UNBLOCKED ? response_builder->SendError(status)
+                                    : response_builder->SendNullArray();
       return;
     }
 
@@ -2850,10 +2851,12 @@ void ZSetFamily::Register(CommandRegistry* registry) {
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   // We break up chain into multiple calls to reduce stack usage in this function.
   *registry << CI{"ZADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
-            << CI{"BZPOPMIN", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+            << CI{"BZPOPMIN",
+                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
                   1, -2}
                    .HFUNC(BZPopMin)
-            << CI{"BZPOPMAX", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+            << CI{"BZPOPMAX",
+                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
                   1, -2}
                    .HFUNC(BZPopMax)
             << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
@@ -2865,7 +2868,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
             << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
             << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
-            << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1}.HFUNC(ZLexCount)
+            << CI{"ZLEXCOUNT", CO::READONLY | CO::FAST, 4, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(
                    ZMPop)
             << CI{"BZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
@@ -2880,8 +2883,10 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRank)
             << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByLex)
             << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByScore)
-            << CI{"ZRANGESTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -5, 1, 2}.HFUNC(
-                   ZRangeStore);
+            << CI{"ZRANGESTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -5, 1,
+                  2}
+                   .HFUNC(ZRangeStore);
 
   *registry << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(ZScore)
             << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZMScore)

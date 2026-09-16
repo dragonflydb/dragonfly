@@ -973,6 +973,31 @@ TEST_F(ListFamilyTest, BRPopLPushTwoShards) {
   // the atomicity and causes the first bug as well.
 }
 
+// A cross-shard BRPOPLPUSH that wakes into a WRONGTYPE error must not leave the source key
+// watched on the destination shard. Otherwise the next block on that key touches a freed
+// transaction and aborts the server.
+TEST_F(ListFamilyTest, BRPopLPushWrongTypeTwoShards) {
+  Run({"set", "z", "nolist"});  // wrong type for the push destination
+
+  RespExpr resp;
+  auto fb = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    resp = Run({"brpoplpush", "x", "z", "0"});
+  });
+
+  WaitUntilLocked(0, "x");
+  pp_->at(1)->Await([&] { return Run("B1", {"lpush", "x", "val"}); });
+  fb.Join();
+  EXPECT_THAT(resp, ErrArg("WRONGTYPE"));
+
+  ASSERT_EQ(0, NumWatched());
+  ASSERT_FALSE(HasAwakened());
+
+  // Used to crash on a dangling watch left by the wake above.
+  Run({"del", "x"});
+  EXPECT_THAT(Run({"brpoplpush", "x", "z", "0.01"}), ArgType(RespExpr::NIL_ARRAY));
+  ASSERT_EQ(0, NumWatched());
+}
+
 TEST_F(ListFamilyTest, BLMove) {
   EXPECT_THAT(Run({"blmove", "x", "y", "right", "right", "0.05"}), ArgType(RespExpr::NIL_ARRAY));
   ASSERT_EQ(0, NumWatched());

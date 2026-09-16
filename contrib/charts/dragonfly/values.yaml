@@ -90,7 +90,7 @@ prometheusRule:
   # -- Deploy a PrometheusRule
   enabled: false
   # -- PrometheusRule.Spec
-  # https://awesome-prometheus-alerts.grep.to/rules
+  # https://samber.github.io/awesome-prometheus-alerts/rules
   spec: []
 
 storage:

@@ -47,17 +47,6 @@ class TestServer:
         assert val == [True, "bar"]
 
 
-"""
-see https://github.com/dragonflydb/dragonfly/issues/457
-For now we would not allow for eval command inside multi
-As this would create to level transactions (in effect recursive call
-to Schedule function).
-When this issue is fully fixed, this test would failed, and then it should
-change to match the fact that we supporting this operation.
-For now we are expecting to get an error
-"""
-
-
 async def test_multi_eval(async_client: aioredis.Redis):
     pipeline = async_client.pipeline()
     pipeline.set("foo", "bar")
@@ -130,8 +119,7 @@ async def test_scan(async_client: aioredis.Redis):
         assert res is not None
         cur, keys = await async_client.scan(cursor=0, match=key, count=2)
         assert cur == 0
-        assert len(keys) == 1
-        assert keys[0] == key
+        assert keys == [key]
 
 
 def configure_slowlog_parsing(async_client: aioredis.Redis):
@@ -159,7 +147,6 @@ def configure_slowlog_parsing(async_client: aioredis.Redis):
     return async_client
 
 
-@pytest.mark.asyncio
 @dfly_args({"slowlog_log_slower_than": 0, "slowlog_max_len": 3})
 async def test_slowlog_client_name_and_ip(df_factory, async_client: aioredis.Redis):
     df = df_factory.create()
@@ -177,7 +164,6 @@ async def test_slowlog_client_name_and_ip(df_factory, async_client: aioredis.Red
     assert slowlog[0]["client_address"] == addr
 
 
-@pytest.mark.asyncio
 @dfly_args({"slowlog_log_slower_than": 0, "slowlog_max_len": 3})
 async def test_blocking_commands_should_not_show_up_in_slow_log(
     df_factory, async_client: aioredis.Redis

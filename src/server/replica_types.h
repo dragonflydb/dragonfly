@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -11,9 +12,16 @@
 
 namespace dfly {
 
+// The client address a master announces during the replication handshake.
+struct AnnouncedAddress {
+  std::string ip;
+  uint16_t port;
+};
+
 struct ReplicaSummary {
   std::string host;
   uint16_t port;
+  std::optional<AnnouncedAddress> announced;  // absent when the master does not send it
   bool master_link_established;
   bool full_sync_in_progress;
   bool full_sync_done;

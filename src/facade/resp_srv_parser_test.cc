@@ -270,6 +270,50 @@ TEST_F(RespSrvParserTest, InlineReset) {
   EXPECT_EQ(13, consumed_);
 }
 
+TEST_F(RespSrvParserTest, EmptyLinesBeforeMultibulk) {
+  // redis-cli --pipe prefixes its final ECHO with CRLF. The sentinel is binary data.
+  const string sentinel("0123\r\n\0*2\r\nabcdefghi", 20);
+  const string echo = absl::StrCat("*2\r\n$4\r\nECHO\r\n$20\r\n", sentinel, "\r\n");
+  for (string_view prefix : {"\r\n", "\n", "\r\n\r\n", "\t \r\n\n"}) {
+    const string input = absl::StrCat(prefix, echo);
+    // Include every two-buffer split, including CRLF and the multibulk marker.
+    for (size_t split = 1; split <= input.size(); ++split) {
+      SCOPED_TRACE(absl::StrCat("prefix size: ", prefix.size(), ", split: ", split));
+      ASSERT_EQ(split == input.size() ? RespSrvParser::OK : RespSrvParser::INPUT_PENDING,
+                Parse(string_view(input).substr(0, split)));
+      ASSERT_EQ(split, consumed_);
+      if (split < input.size()) {
+        ASSERT_EQ(RespSrvParser::OK, Parse(string_view(input).substr(split)));
+        ASSERT_EQ(input.size() - split, consumed_);
+      }
+      EXPECT_THAT(Vec(), ElementsAre("ECHO", sentinel));
+    }
+  }
+}
+
+TEST_F(RespSrvParserTest, EmptyLineTooLong) {
+  // An empty argument list must not hide a size-limit error.
+  EXPECT_EQ(RespSrvParser::BAD_INLINE, Parse(string(70 * 1024, ' ')));
+}
+
+TEST_F(RespSrvParserTest, EmptyLinesBetweenPipelinedCommands) {
+  const string input = "*1\r\n$4\r\nPING\r\n\r\n*2\r\n$4\r\nECHO\r\n$3\r\nfoo\r\n\nPING\r\n";
+  string_view remaining(input);
+  ASSERT_EQ(RespSrvParser::OK, Parse(remaining));
+  EXPECT_THAT(Vec(), ElementsAre("PING"));
+  ASSERT_EQ(14, consumed_);
+  remaining.remove_prefix(consumed_);
+
+  ASSERT_EQ(RespSrvParser::OK, Parse(remaining));
+  EXPECT_THAT(Vec(), ElementsAre("ECHO", "foo"));
+  ASSERT_EQ(25, consumed_);
+  remaining.remove_prefix(consumed_);
+
+  ASSERT_EQ(RespSrvParser::OK, Parse(remaining));
+  EXPECT_THAT(Vec(), ElementsAre("PING"));
+  EXPECT_EQ(remaining.size(), consumed_);
+}
+
 static string SetCmd(size_t val_size) {
   const string val(val_size, 'x');
   return absl::StrCat("*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$", val_size, "\r\n", val, "\r\n");

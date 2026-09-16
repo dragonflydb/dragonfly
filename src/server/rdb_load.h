@@ -213,6 +213,8 @@ class RdbLoaderBase {
 
   std::error_code ReadObj(int rdbtype, OpaqueObj* dest);
   std::error_code ReadStringObj(RdbVariant* rdb_variant, bool big_string_split = false);
+  // Consumes the expiry following a Valkey hash field/value pair and normalizes it for StringMap.
+  std::error_code ReadValkeyHashExpiry(RdbVariant* dest);
   std::error_code ReadRemainingString(RdbVariant* dest);
   ::io::Result<long long> ReadIntObj(int encoding);
   ::io::Result<LzfString> ReadLzf();

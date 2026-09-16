@@ -86,7 +86,7 @@ class StoredCmd {
 struct ConnectionState {
   // MULTI-EXEC transaction related data.
   struct ExecInfo {
-    enum ExecState : uint8_t { EXEC_INACTIVE, EXEC_COLLECT, EXEC_RUNNING, EXEC_ERROR };
+    enum ExecState : uint8_t { EXEC_INACTIVE, EXEC_COLLECT, EXEC_RUNNING };
 
     ExecInfo() = default;
     // ExecInfo is immovable due to being referenced from DbSlice.
@@ -106,6 +106,8 @@ struct ConnectionState {
     // Resets local watched keys info. Does not unregister the keys from DbSlices.
     void ClearWatched();
 
+    void AddWatchedKey(DbIndex db_index, std::string_view key);
+
     size_t UsedMemory() const;
 
     // Empties the body vector and resets stored_cmd_bytes to 0. Returns the size before data was
@@ -120,6 +122,7 @@ struct ConnectionState {
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
     bool is_write = false;
+    bool error = false;  // a queue-time error: keep collecting, but EXEC must abort
 
     std::vector<std::pair<DbIndex, std::string>> watched_keys;  // List of keys registered by WATCH
     std::atomic_bool watched_dirty = false;  // Set if a watched key was changed before EXEC
@@ -134,10 +137,15 @@ struct ConnectionState {
     // The total size of all stored commands kept in "body". Does not include memory allocated by
     // the "body" vector.
     size_t stored_cmd_bytes = 0;
+
+   private:
+    size_t watched_keys_heap_bytes_ = 0;
   };
 
   // Lua-script related data.
   struct ScriptInfo {
+    explicit ScriptInfo(const ConnectionContext& cntx);
+
     size_t UsedMemory() const;
 
     absl::flat_hash_set<LockTag> lock_tags;  // declared tags
@@ -163,23 +171,43 @@ struct ConnectionState {
       uint8_t tx_mode = 0;     // value of Transaction::MultiMode
       unsigned tx_shards = 0;  // Number of shards on the transaction
     } stats;
+
+   private:
+    // Separate from ConnectionContext's counter: this snapshot survives live ACL updates,
+    // and its copied vectors/strings can have different capacities.
+    // TODO: Share immutable ACL rules and their cached size via shared_ptr<const AclState>
+    // to avoid copies, accounting for each shared allocation only once.
+    size_t acl_globs_heap_bytes_ = 0;
   };
 
   // PUB-SUB messaging related data.
   struct SubscribeInfo {
     bool IsEmpty() const {
-      return channels.empty() && patterns.empty();
+      return channels_.empty() && patterns_.empty();
     }
 
     unsigned SubscriptionCount() const {
-      return channels.size() + patterns.size();
+      return channels_.size() + patterns_.size();
     }
+
+    const auto& Channels() const {
+      return channels_;
+    }
+
+    const auto& Patterns() const {
+      return patterns_;
+    }
+
+    bool Add(std::string_view channel, bool pattern);
+    bool Remove(std::string_view channel, bool pattern);
 
     size_t UsedMemory() const;
 
+   private:
     // TODO: to provide unique_strings across service. This will allow us to use string_view here.
-    absl::flat_hash_set<std::string> channels;
-    absl::flat_hash_set<std::string> patterns;
+    absl::flat_hash_set<std::string> channels_;
+    absl::flat_hash_set<std::string> patterns_;
+    size_t strings_heap_bytes_ = 0;
   };
 
   struct ReplicationInfo {
@@ -314,9 +342,8 @@ class ConnectionContext : public facade::ConnectionContext {
  public:
   ConnectionContext(facade::Connection* owner, dfly::acl::UserCredentials cred);
 
-  // Applies the ACL identity carried by `cred` (command set, key/channel globs, db constraint)
-  // to this context. Used both when a connection is created and by RESET to restore the default
-  // user's identity. Does not touch `authed_username`, `ns`, or `authenticated`.
+  // Applies the ACL identity carried by `cred` and refreshes its cached memory estimate.
+  // Does not touch `authed_username`, `ns`, or `authenticated`.
   void SetAclCredentials(dfly::acl::UserCredentials cred);
 
   // Per-client introspection about the most recent command executed on this
@@ -414,6 +441,8 @@ class ConnectionContext : public facade::ConnectionContext {
 
   std::vector<unsigned> ChangeSubscriptions(facade::ParsedArgs channels, bool pattern, bool to_add,
                                             bool to_reply);
+
+  size_t acl_globs_heap_bytes_ = 0;
 };
 
 class CommandContext : public facade::ParsedCommand {

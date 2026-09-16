@@ -42,6 +42,12 @@ Then install all the required dependencies for the tests:
 pip3 install -r dragonfly/requirements.txt
 ```
 
+Alternatively, [uv](https://docs.astral.sh/uv/) manages a project-local environment without
+activation. Init once from `tests` folder `uv venv` and then:
+```
+uv run pytest -s dragonfly/connection_test.py
+```
+
 ### Running the tests
 to run pytest, run:
 `pytest -xv dragonfly`

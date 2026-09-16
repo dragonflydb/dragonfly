@@ -123,10 +123,11 @@ void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user,
     if (!connection->IsHttp() && connection->cntx()) {
       auto* cntx = static_cast<dfly::ConnectionContext*>(connection->cntx());
       if (user == cntx->authed_username) {
-        cntx->acl_commands = update_commands;
-        cntx->keys = update_keys;
-        cntx->pub_sub = update_pub_sub;
-        cntx->acl_db_idx = db;
+        cntx->SetAclCredentials({.acl_commands = update_commands,
+                                 .keys = update_keys,
+                                 .pub_sub = update_pub_sub,
+                                 .ns = {},
+                                 .db = db});
       }
     }
   };
@@ -608,19 +609,21 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   const auto& user = registry.find(username)->second;
-  // Stub, used to mimic connection context for a user.
-  ConnectionContext stub(nullptr, acl::UserCredentials{});
-  stub.authed_username = username;
-  stub.acl_commands = user.AclCommandsRef();
-  stub.pub_sub = user.PubSub();
-  stub.acl_db_idx = user.Db();
-  stub.conn_state.db_index =
-      stub.acl_db_idx == std::numeric_limits<size_t>::max() ? 0 : stub.acl_db_idx;
-  stub.keys = user.Keys();
+  acl::UserCredentials cred{.acl_commands = user.AclCommandsRef(),
+                            .keys = user.Keys(),
+                            .pub_sub = user.PubSub(),
+                            .ns = {},
+                            .db = user.Db()};
   // The regular command path validates arity before checking ACLs. DRYRUN historically accepts a
   // command without its arguments, so skip key-pattern validation for an incomplete simulation.
   if (cid->Validate(simulated_args))
-    stub.keys = {{}, true};
+    cred.keys = {{}, true};
+
+  // Stub, used to mimic connection context for a user.
+  ConnectionContext stub(nullptr, std::move(cred));
+  stub.authed_username = username;
+  stub.conn_state.db_index =
+      stub.acl_db_idx == std::numeric_limits<size_t>::max() ? 0 : stub.acl_db_idx;
   // Check pub/sub channel ACLs too, the same way a real PUBLISH/SUBSCRIBE/PSUBSCRIBE dispatch
   // would. We can't use the IsUserAllowedToInvokeCommand wrapper here: on denial it logs to
   // AclLog, which reads the real Connection* for client info - the stub above has none.
@@ -1258,7 +1261,7 @@ CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &AclFamily::x))
 
-constexpr uint32_t kAcl = acl::CONNECTION;
+constexpr uint32_t kAcl = acl::SLOW;
 constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 constexpr uint32_t kDelUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
@@ -1288,7 +1291,7 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
   *registry << CI{"ACL LIST", kAclMask, 1, 0, 0, acl::kList}.HFUNC(List);
   *registry << CI{"ACL SETUSER", kAclMask, -2, 0, 0, acl::kSetUser}.HFUNC(SetUser);
   *registry << CI{"ACL DELUSER", kAclMask, -2, 0, 0, acl::kDelUser}.HFUNC(DelUser);
-  *registry << CI{"ACL WHOAMI", kAclMask, 1, 0, 0, acl::kWhoAmI}.HFUNC(WhoAmI);
+  *registry << CI{"ACL WHOAMI", CO::NOSCRIPT | CO::LOADING, 1, 0, 0, acl::kWhoAmI}.HFUNC(WhoAmI);
   *registry << CI{"ACL SAVE", kAclMask, 1, 0, 0, acl::kSave}.HFUNC(Save);
   *registry << CI{"ACL LOAD", kAclMask, 1, 0, 0, acl::kLoad}.HFUNC(Load);
   *registry << CI{"ACL LOG", kAclMask, 0, 0, 0, acl::kLog}.HFUNC(Log);

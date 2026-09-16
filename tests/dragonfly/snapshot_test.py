@@ -21,7 +21,7 @@ from redis import asyncio as aioredis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, RedisServer
-from .replication_utils import compare_datasets
+from .replication_utils import compare_datasets, get_metric_value
 from .seeder import DebugPopulateSeeder, Seeder
 from .utility import (
     assert_eventually,
@@ -53,10 +53,6 @@ AZURITE_CONN_STR = (
 
 def find_main_file(path: Path, pattern):
     return next(iter(glob.glob(str(path) + "/" + pattern)), None)
-
-
-async def get_metric_value(inst, metric_name, sample_index=0):
-    return (await inst.metrics())[metric_name].samples[sample_index].value
 
 
 async def assert_metric_value(inst, metric_name, expected_value):
@@ -733,7 +729,6 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
     await async_client.execute_command("SAVE")
 
 
-@pytest.mark.asyncio
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-objhist-crash"})
 async def test_debug_objhist_during_bgsave(df_factory: DflyInstanceFactory):
     df = df_factory.create(proactor_threads=2)
@@ -767,7 +762,6 @@ async def test_debug_objhist_during_bgsave(df_factory: DflyInstanceFactory):
     assert await client.ping()
 
 
-@pytest.mark.asyncio
 @dfly_args({**BASIC_ARGS})
 async def test_randomkey_during_bgsave(df_factory: DflyInstanceFactory):
     """

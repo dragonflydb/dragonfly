@@ -11,6 +11,7 @@ from .cluster_test_utils import (
     MigrationInfo,
     apply_config,
     create_cluster,
+    finalize_migration,
     get_node_id,
     next_port,
     push_config,
@@ -85,11 +86,8 @@ async def test_blocking_commands_cancel(df_factory, df_seeder_factory):
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
 
-    nodes[0].migrations = []
-    nodes[0].slots = []
-    nodes[1].slots = [(0, 16383)]
     logging.debug("remove finished migrations")
-    await apply_config(nodes)
+    await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
 
     with pytest.raises(MovedError) as set_e_info:
         await set_task

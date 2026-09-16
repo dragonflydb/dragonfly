@@ -493,30 +493,25 @@ QList::QList(QList&& other) noexcept {
 
 QList::~QList() {
   Clear();
-  DeleteTieringParams();
 }
 
-void QList::EnableTiering(const TieringParams& params, PMR_NS::memory_resource* mr) {
+void QList::TieringParamsDeleter::operator()(TieringParams* p) const noexcept {
+  PMR_NS::polymorphic_allocator<std::byte> alloc(p->key.get_allocator().resource());
+  alloc.delete_object(p);
+}
+
+void QList::EnableTiering(TieringParams params, PMR_NS::memory_resource* mr) {
   DCHECK(mr);
   DCHECK(!tiering_params_);
-  void* storage = mr->allocate(sizeof(StoredTieringParams), alignof(StoredTieringParams));
-  tiering_params_ = std::construct_at(static_cast<StoredTieringParams*>(storage), params, mr);
+  DCHECK(params.key.get_allocator().resource() == mr);
+  PMR_NS::polymorphic_allocator<std::byte> alloc(mr);
+  tiering_params_.reset(alloc.new_object<TieringParams>(std::move(params)));
   tiering_enabled_ = 1;
-}
-
-void QList::DeleteTieringParams() {
-  if (!tiering_params_)
-    return;
-  auto* mr = tiering_params_->key.get_allocator().resource();
-  std::destroy_at(tiering_params_);
-  mr->deallocate(tiering_params_, sizeof(StoredTieringParams), alignof(StoredTieringParams));
-  tiering_params_ = nullptr;
 }
 
 QList& QList::operator=(QList&& other) noexcept {
   if (this != &other) {
     Clear();
-    DeleteTieringParams();
     MoveFrom(std::move(other));
   }
   return *this;
@@ -693,6 +688,10 @@ bool QList::Replace(long index, std::string_view elem) {
 
 size_t QList::MallocUsed(bool slow) const {
   size_t node_size = len_ * sizeof(Node) + znallocx(sizeof(QList));
+  if (tiering_params_) {
+    node_size += sizeof(TieringParams) + tiering_params_->key.capacity();
+  }
+
   if (slow) {
     for (Node* node = head_; node; node = node->next) {
       // Skip offloaded nodes from malloc size calculation.

@@ -22,6 +22,7 @@ typedef struct mi_heap_s mi_heap_t;
 
 namespace facade {
 class Connection;
+class ConnectionContext;
 struct ConnectionStats;
 }  // namespace facade
 
@@ -274,9 +275,10 @@ class ServerState {  // public struct - to allow initialization.
   // whether this is starting or ending the pause.
   void SetPauseState(ClientPause state, bool start);
 
-  // Awaits until the pause is over and the command can execute.
+  // Awaits until the pause is over and the command can execute, or until the connection starts
+  // closing.
   // @is_write controls whether the command is a write command or not.
-  void AwaitPauseState(bool is_write);
+  void AwaitPauseState(bool is_write, const facade::ConnectionContext* cntx);
 
   bool IsPaused() const {
     return (client_pauses_[0] + client_pauses_[1]) > 0;

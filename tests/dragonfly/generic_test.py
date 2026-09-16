@@ -208,7 +208,6 @@ async def test_restricted_commands(df_factory):
             await admin_client.set("foo", "bar")
 
 
-@pytest.mark.asyncio
 async def test_reply_guard_oom(df_factory, df_seeder_factory):
     master = df_factory.create(
         proactor_threads=1,
@@ -232,7 +231,6 @@ async def test_reply_guard_oom(df_factory, df_seeder_factory):
 
 @pytest.mark.parametrize("type", ["LIST", "HASH", "SET", "ZSET", "STRING", "STREAM"])
 @dfly_args({"proactor_threads": 4})
-@pytest.mark.asyncio
 async def test_rename_huge_values(df_factory, type):
     df_server = df_factory.create()
     df_server.start()
@@ -265,7 +263,6 @@ async def test_rename_huge_values(df_factory, type):
     assert source_data == target_data
 
 
-@pytest.mark.asyncio
 async def test_key_bump_ups(df_factory):
     master = df_factory.create(
         proactor_threads=2,
@@ -321,7 +318,6 @@ async def test_key_bump_ups(df_factory):
 
 
 @pytest.mark.debug_only
-@pytest.mark.asyncio
 async def test_command_empty_key(df_factory):
     df_server = df_factory.create()
     df_server.start()

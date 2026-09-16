@@ -185,14 +185,11 @@ class ListWrapper {
 
     const uint32_t tiering_node_depth_threshold = absl::GetFlag(FLAGS_list_tiering_threshold);
     if (tiering_node_depth_threshold > 0 && EngineShard::tlocal()->tiered_storage()) {
-      QList::TieringParams params{
-          .node_depth_threshold = tiering_node_depth_threshold,
-          .offload = OffloadListNode,
-          .load = LoadListNode,
-          .cleanup = CleanupListNode,
-          .key = key_,
-      };
-      ql->EnableTiering(params, EngineShard::tlocal()->memory_resource());
+      PMR_NS::memory_resource* mr = EngineShard::tlocal()->memory_resource();
+      QList::TieringParams params(tiering_node_depth_threshold, OffloadListNode, LoadListNode,
+                                  CleanupListNode,
+                                  PMR_NS::string(key_, PMR_NS::polymorphic_allocator<char>(mr)));
+      ql->EnableTiering(std::move(params), mr);
     }
 
     if (uint32_t zstd_thresh = GetFlag(FLAGS_list_compress_dict_threshold); zstd_thresh > 0) {
@@ -651,10 +648,29 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
 
   trans->Execute(std::move(cb), false);
 
+  // RunPair watches "src" on both shards, so the dest shard ends up with a watch keyed by
+  // "src" that the generic conclusion cleanup (keyed by dest) never removes. Drop it manually
+  // on every concluding path, otherwise the queue keeps a dangling Transaction*.
+  auto cleanup_src_watch = [&](Transaction* t, EngineShard* shard) {
+    if (t->GetShardArgs(shard->shard_id()).Front() != dest)
+      return;
+    if (auto* bc = t->GetNamespace().GetBlockingController(shard->shard_id()); bc) {
+      IndexSlice slice(0, 1);
+      ShardArgs sa{cmn::ArgSlice{&src, 1}, absl::MakeSpan(&slice, 1)};
+      bc->RemovedWatched(sa, t);
+    }
+  };
+
   if (!find_res[0] || find_res[1].status() == OpStatus::WRONG_TYPE) {
     result = find_res[0] ? find_res[1] : find_res[0];
-    if (conclude_on_error)
-      trans->Conclude();
+    if (conclude_on_error) {
+      trans->Execute(
+          [&](Transaction* t, EngineShard* shard) {
+            cleanup_src_watch(t, shard);
+            return OpStatus::OK;
+          },
+          true);
+    }
   } else {
     // Everything is ok, lets proceed with the mutations.
     auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -668,18 +684,7 @@ OpResult<string> MoveTwoShards(Transaction* trans, string_view src, string_view 
         DVLOG(1) << "Pushing value: " << val << " to list: " << dest;
 
         OpPush(op_args, key, dest_dir, false, ArgSlice{val}, true);
-
-        // blocking_controller does not have to be set with non-blocking transactions.
-        auto blocking_controller = t->GetNamespace().GetBlockingController(shard->shard_id());
-        if (blocking_controller) {
-          IndexSlice slice(0, 1);
-          ShardArgs sa{cmn::ArgSlice{&src, 1}, absl::MakeSpan(&slice, 1)};
-
-          // hack, again. since we hacked which queue we are waiting on (see RunPair)
-          // we must clean-up src key here manually. See RunPair why we do this.
-          // in short- we suspended on "src" on both shards.
-          blocking_controller->RemovedWatched(sa, t);
-        }
+        cleanup_src_watch(t, shard);
       } else {
         DVLOG(1) << "Popping value from list: " << key;
         OpPop(op_args, key, src_dir, 1, false, true);
@@ -1033,7 +1038,7 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
   }
 
   // Block
-  auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, &(cntx->blocked), &(cntx->paused));
+  auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, cntx);
   if (status != OpStatus::OK)
     return status;
 
@@ -1057,8 +1062,7 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
   // Therefore we follow the regular flow of watching the key but for the destination shard it
   // will never be triggerred.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
-  if (auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, &cntx->blocked, &cntx->paused);
-      status != OpStatus::OK)
+  if (auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, cntx); status != OpStatus::OK)
     return status;
 
   return MoveTwoShards(tx, pop_key_, push_key_, popdir_, pushdir_, true);
@@ -1125,7 +1129,7 @@ void BPopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   Transaction* tx = cmd_cntx->tx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &cntx->blocked, &cntx->paused);
+      tx, OBJ_LIST, std::move(cb), unsigned(timeout * 1000), cntx);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (popped_key) {
@@ -1142,6 +1146,8 @@ void BPopGeneric(ListDir dir, CmdArgParser parser, CommandContext* cmd_cntx) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return rb->SendNullArray();
+    case OpStatus::UNBLOCKED:
+      return cmd_cntx->SendError(popped_key.status());
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*tx->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);
@@ -1293,8 +1299,7 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   ConnectionContext* conn_cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx(), OBJ_LIST, std::move(cb), unsigned(timeout * 1000), &conn_cntx->blocked,
-      &conn_cntx->paused);
+      cmd_cntx->tx(), OBJ_LIST, std::move(cb), unsigned(timeout * 1000), conn_cntx);
 
   if (popped_key.ok()) {
     response_builder->StartArray(2);
@@ -1309,6 +1314,8 @@ void CmdBLMPop(CmdArgParser parser, CommandContext* cmd_cntx) {
     case OpStatus::CANCELLED:
     case OpStatus::TIMED_OUT:
       return response_builder->SendNullArray();
+    case OpStatus::UNBLOCKED:
+      return cmd_cntx->SendError(popped_key.status());
     case OpStatus::KEY_MOVED: {
       auto error = cluster::SlotOwnershipError(*cmd_cntx->tx()->GetUniqueSlotId());
       CHECK(!error.status.has_value() || error.status.value() != facade::OpStatus::OK);

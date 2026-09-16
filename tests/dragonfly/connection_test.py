@@ -41,10 +41,14 @@ def is_resp_io_loop_v2(server: DflyInstance) -> bool:
     stores its value as None instead of "true". This function checks both has_arg() and
     != "false" to correctly detect V2 while safely defaulting to V1 otherwise.
     """
-    return (
-        server.has_arg("enable_resp_io_loop_v2")
-        and server.args.get("enable_resp_io_loop_v2") != "false"
-    )
+    if not server.has_arg("enable_resp_io_loop_v2"):
+        return False
+    value = server.args.get("enable_resp_io_loop_v2")
+    if value is None:  # bare flag
+        return True
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() not in ("false", "f", "0", "no", "n")
 
 
 @dataclass(frozen=True)
@@ -1347,15 +1351,28 @@ async def test_large_cmd(async_client: aioredis.Redis):
     assert len(res) == MAX_ARR_SIZE
 
 
-@dfly_args({"proactor_threads": 1})
-async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
-    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port, limit=10)
-    writer.write(b"*1000\r\n")
-    writer.write(b"$4\r\nmget\r\n")
-    val = (b"a" * 100) + b"\r\n"
-    for i in range(900):
-        writer.write(b"$100\r\n" + val)
-    await writer.drain()  # writer is pending because the request is not finished.
+@dfly_multi_test_args(
+    {
+        "proactor_threads": 1,
+        "memcached_port": 11212,
+        "enable_resp_io_loop_v2": "false",
+        "enable_memcache_io_loop_v2": "false",
+    },
+    {
+        "proactor_threads": 1,
+        "memcached_port": 11212,
+        "enable_resp_io_loop_v2": "true",
+        "enable_memcache_io_loop_v2": "true",
+    },
+)
+@pytest.mark.parametrize("protocol", ["redis", "memcache"])
+async def test_parser_memory_stats(df_server, async_client: aioredis.Redis, protocol):
+    await async_client.ping()
+    metrics = await df_server.metrics()
+    baseline = metrics["dragonfly_connection_memory_bytes"].samples[0].value
+
+    port = df_server.port if protocol == "redis" else df_server.mc_port
+    reader, writer = await asyncio.open_connection("127.0.0.1", port, limit=10)
 
     @assert_eventually
     async def check_stats():
@@ -1364,13 +1381,34 @@ async def test_parser_memory_stats(df_server, async_client: aioredis.Redis):
 
         metrics = await df_server.metrics()
         connection_memory_bytes = metrics["dragonfly_connection_memory_bytes"].samples[0].value
-        assert connection_memory_bytes > 130000
+        assert connection_memory_bytes > baseline + 130000
         assert any(
             sample.labels["class"] == "connection" and sample.value == connection_memory_bytes
             for sample in metrics["dragonfly_memory_by_class_bytes"].samples
         )
 
-    await check_stats()
+    try:
+        if protocol == "redis":
+            writer.write(b"*1000\r\n")
+            writer.write(b"$4\r\nmget\r\n")
+            val = (b"a" * 100) + b"\r\n"
+            for i in range(900):
+                writer.write(b"$100\r\n" + val)
+        else:
+            writer.write(b"set key 0 0 200000\r\n" + b"a" * 150000)
+        await writer.drain()  # Leave the request incomplete and the connection idle.
+        await check_stats()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+    @assert_eventually
+    async def check_cleanup():
+        metrics = await df_server.metrics()
+        current = metrics["dragonfly_connection_memory_bytes"].samples[0].value
+        assert baseline <= current < baseline + 4096
+
+    await check_cleanup()
 
 
 async def test_reject_non_tls_connections_on_tls(with_tls_server_args, df_factory):
@@ -2718,6 +2756,11 @@ IOBUF_WAIT_SEC = 2
 IOBUF_WAIT_TIMEOUT_SEC = 6
 
 
+async def get_client_read_buffer_bytes(client: aioredis.Redis) -> int:
+    """Return total client read buffer memory from INFO clients."""
+    return int((await client.info("clients"))["client_read_buffer_bytes"])
+
+
 @dfly_args(
     {
         "proactor_threads": 1,
@@ -2744,17 +2787,16 @@ async def test_iobuf_shrinks_when_receive_idle(df_server: DflyInstance):
             if sample.labels["class"] == "client_read_buffer"
         )
 
-    baseline = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    baseline = await get_client_read_buffer_bytes(observer)
     await client.set("iobuf-shrink", "x" * 2048)
 
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
     metric_peak = await client_read_buffer_bytes()
     assert peak > baseline
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_reclamation():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
         assert await client_read_buffer_bytes() < metric_peak
 
     await wait_for_reclamation()
@@ -2781,20 +2823,19 @@ async def test_iobuf_regrows_after_receive_idle_shrink(df_server: DflyInstance):
     await observer.ping()
 
     await client.set("iobuf-regrow-before", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_shrink():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
 
     await wait_for_shrink()
-    shrunk = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    shrunk = await get_client_read_buffer_bytes(observer)
 
     value = "y" * 3072
     assert await client.set("iobuf-regrow-after", value) is True
     assert await client.get("iobuf-regrow-after") == value
-    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) > shrunk
+    assert await get_client_read_buffer_bytes(observer) > shrunk
 
     await client.aclose()
     await observer.aclose()
@@ -2819,12 +2860,11 @@ async def test_iobuf_does_not_shrink_when_disabled(df_server: DflyInstance):
     await observer.ping()
 
     await client.set("iobuf-shrink-disabled", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     await asyncio.sleep(IOBUF_WAIT_SEC)
 
-    current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-    assert current == peak
+    assert await get_client_read_buffer_bytes(observer) == peak
 
     await client.aclose()
     await observer.aclose()
@@ -2849,7 +2889,7 @@ async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
     await writer.drain()
     assert await reader.readuntil(b"\r\n") == b"+OK\r\n"
 
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
     await asyncio.sleep(IOBUF_WAIT_SEC)
 
     partial_value = b"y" * 100
@@ -2862,8 +2902,7 @@ async def test_iobuf_shrinks_from_active_path(df_server: DflyInstance):
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_reclamation():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
 
     await wait_for_reclamation()
 
@@ -2891,7 +2930,7 @@ async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
     await observer.ping()
 
     await client.set("iobuf-shrink-complete", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     await asyncio.sleep(IOBUF_WAIT_SEC)
     await client.ping()
@@ -2900,8 +2939,7 @@ async def test_iobuf_shrinks_from_complete_parse(df_server: DflyInstance):
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_reclamation():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
 
     await wait_for_reclamation()
     await client.aclose()
@@ -2923,9 +2961,9 @@ async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
     client = df_server.client()
     await observer.ping()
 
-    observer_size = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    observer_size = await get_client_read_buffer_bytes(observer)
     await client.set("iobuf-shrink-high-usage", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     await asyncio.sleep(IOBUF_WAIT_SEC)
     await client.ping()
@@ -2934,14 +2972,14 @@ async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
         # Keep client receive-idle while the observer polls aggregate client-buffer memory.
         @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
         async def wait_for_receive_idle_shrink():
-            current = int((await observer.info("clients"))["client_read_buffer_bytes"])
+            current = await get_client_read_buffer_bytes(observer)
             assert current <= observer_size + (peak - observer_size) // 2
 
         await wait_for_receive_idle_shrink()
     else:
         # V1 only shrinks in its active path, so it cannot self-shrink while receive-idle.
         await asyncio.sleep(IOBUF_WAIT_SEC)
-        assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == peak
+        assert await get_client_read_buffer_bytes(observer) == peak
 
     await client.aclose()
     await observer.aclose()
@@ -2968,17 +3006,16 @@ async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
     await observer.ping()
 
     await client.set("iobuf-shrink-cooldown", "x" * 2048)
-    peak = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    peak = await get_client_read_buffer_bytes(observer)
 
     @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
     async def wait_for_first_shrink():
-        current = int((await observer.info("clients"))["client_read_buffer_bytes"])
-        assert current < peak
+        assert await get_client_read_buffer_bytes(observer) < peak
 
     await wait_for_first_shrink()
-    after_first_shrink = int((await observer.info("clients"))["client_read_buffer_bytes"])
+    after_first_shrink = await get_client_read_buffer_bytes(observer)
     await asyncio.sleep(IOBUF_WAIT_SEC)
-    assert int((await observer.info("clients"))["client_read_buffer_bytes"]) == after_first_shrink
+    assert await get_client_read_buffer_bytes(observer) == after_first_shrink
 
     await client.aclose()
     await observer.aclose()
@@ -3253,8 +3290,7 @@ async def test_tls_client_kill_preemption(
     await task
 
     server.stop()
-    lines = server.find_in_logs("Preempting inside of atomic section, fiber")
-    assert len(lines) == 0
+    assert server.is_not_in_logs("Preempting inside of atomic section, fiber")
 
 
 @dfly_multi_test_args(
@@ -3266,7 +3302,7 @@ async def test_client_migrate(df_server: DflyInstance):
     Test that we can migrate a client with "CLIENT MIGRATE" command.
     """
     client1 = df_server.client()
-    await client1.client_setname("test_migrate")
+    await client1.client_setname("test_migrate" + "x" * 65536)
     resp = await client1.execute_command("DFLY THREAD")
     client_id = await client1.client_id()
     assert resp[1] == 4
@@ -3277,8 +3313,19 @@ async def test_client_migrate(df_server: DflyInstance):
     dest_tid = (current_tid + 1) % 4
     resp = await client2.execute_command("CLIENT", "MIGRATE", client_id + 999, dest_tid)
     assert resp == 0  # Not migrated as the client does not exist
+    metrics = await df_server.metrics()
+    memory_before = metrics["dragonfly_connection_memory_bytes"].samples[0].value
     resp = await client2.execute_command("CLIENT", "MIGRATE", client_id, dest_tid)
     assert resp == 1  # migrated successfully
+
+    @assert_eventually
+    async def check_migrated():
+        assert (await client1.execute_command("DFLY THREAD"))[0] == dest_tid
+        metrics = await df_server.metrics()
+        memory_after = metrics["dragonfly_connection_memory_bytes"].samples[0].value
+        assert abs(memory_after - memory_before) < 4096
+
+    await check_migrated()
 
 
 @dfly_multi_test_args(
@@ -4125,7 +4172,6 @@ async def test_client_list_filters(df_server: DflyInstance):
         "write_connection_throttling_sleep_usec": 10000,  # 10ms per throttled batch; >0 enables throttling
     }
 )
-@pytest.mark.asyncio
 async def test_rw_throttle_stats(df_server: DflyInstance):
     """Verify write connections are throttled and rw_throttle_* stats are reported"""
 
@@ -4164,3 +4210,245 @@ async def test_rw_throttle_stats(df_server: DflyInstance):
 
     await read_client.aclose()
     await write_client.aclose()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_shutdown_with_paused_clients(df_factory):
+    server = df_factory.create(dbfilename="dump_paused")
+    server.start()
+    admin = server.client()
+    blocked = server.client()
+    parked = server.client()
+
+    assert await admin.set("acked", "v")
+    blpop = asyncio.create_task(blocked.blpop("l", 0))
+    for _ in range(50):
+        if (await admin.info("clients"))["blocked_clients"] == 1:
+            break
+        await asyncio.sleep(0.1)
+    assert (await admin.info("clients"))["blocked_clients"] == 1
+    assert await admin.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
+    write = asyncio.create_task(parked.set("k", "v"))
+    await asyncio.sleep(0.5)
+    assert not write.done()
+
+    # Neither the parked write nor the blocked pop may keep the process alive, and the shutdown
+    # snapshot must still be written.
+    server.proc.terminate()
+    server.proc.wait(timeout=15)
+    assert server.proc.returncode == 0
+    for task in (blpop, write):
+        task.cancel()
+    await admin.aclose()
+
+    server.start()
+    admin = server.client()
+    assert await admin.get("acked") == "v"
+    assert await admin.get("k") is None
+    await admin.aclose()
+
+
+def _resp(*args):
+    return ("*%d\r\n" % len(args) + "".join("$%d\r\n%s\r\n" % (len(a), a) for a in args)).encode()
+
+
+def _named_raw_client(port, name):
+    """A raw socket client with a CLIENT LIST name, so tests can wait for its exact state."""
+    client = socket.create_connection(("localhost", port))
+    client.settimeout(10)
+    client.sendall(_resp("CLIENT", "SETNAME", name))
+    reply = b""
+    while not reply.endswith(b"\r\n"):
+        reply += client.recv(64)
+    assert reply == b"+OK\r\n"
+    return client
+
+
+async def _wait_client(admin, name, pred, what):
+    """Polls CLIENT LIST until the client called name satisfies pred."""
+    for _ in range(200):
+        entries = [c for c in await admin.client_list() if c.get("name") == name and pred(c)]
+        if entries:
+            return entries[0]
+        await asyncio.sleep(0.05)
+    assert False, f"client {name} did not reach: {what}"
+
+
+async def test_v1_protocol_error_flushed_on_close(df_factory):
+    """The v1 dispatch loop arms reply batching while more messages are queued behind the command
+    it runs, and used to leave it armed when it exits on a closing connection. ConnectionFlow
+    writes the protocol error only after joining that loop, so the reply landed in a batch nobody
+    would ever flush and the client saw a bare FIN instead of an error.
+
+    v1 only: the v2 loop runs commands in the read fiber, so the malformed tail below is never
+    parsed while an earlier command is still in flight.
+    """
+    server = df_factory.create(proactor_threads=2, enable_resp_io_loop_v2=False)
+    server.start()
+    admin = server.client()
+
+    client = _named_raw_client(server.port, "piped")
+    # DEBUG POPULATE is slow and preempts, but is not a blocking command - a blocking one would
+    # not do, since the dispatch loop flushes pending replies before parking on one. The second
+    # command keeps the queue non-empty (which is what arms batching) and the incomplete third
+    # keeps the io fiber in recv.
+    client.sendall(
+        _resp("DEBUG", "POPULATE", "50000") + _resp("SET", "k2", "v") + b"*3\r\n$3\r\nSET\r\n"
+    )
+    # Flag 'a' is async_dispatch: the dispatch fiber is inside DEBUG POPULATE.
+    await _wait_client(admin, "piped", lambda c: "a" in c.get("flags", ""), "in dispatch")
+
+    client.sendall(b"$abc\r\n")  # malformed continuation, ends the read loop
+
+    buf = b""
+    while b"-ERR Protocol error" not in buf:
+        chunk = client.recv(4096)
+        assert chunk, f"connection closed without the protocol error, got {buf!r}"
+        buf += chunk
+    client.close()
+    await admin.aclose()
+
+
+@pytest.mark.parametrize("v2", [False, True])
+async def test_monitor_overflow_closes_connection(df_factory, v2):
+    """A MONITOR client that stops reading must be dropped once the queued traffic passes the
+    pipeline buffer limit. The overflow path used to only raise conn_closing, which the v1 loop
+    picks up on its condvar but the v2 loop never sees - it leaves on io_ec_ alone - so the
+    connection stayed alive and kept accumulating.
+    """
+    server = df_factory.create(
+        proactor_threads=1,
+        pipeline_queue_limit=10,
+        pipeline_buffer_limit="1024",
+        enable_resp_io_loop_v2=v2,
+    )
+    server.start()
+
+    monitor = socket.create_connection(("localhost", server.port))
+    monitor.settimeout(20)
+    monitor.sendall(_resp("MONITOR"))
+    reply = b""
+    while not reply.endswith(b"\r\n"):
+        reply += monitor.recv(64)
+    assert reply == b"+OK\r\n"
+    # From here on the monitor never reads, so its dispatch queue grows once the socket backs up.
+
+    writer = socket.create_connection(("localhost", server.port))
+    writer.settimeout(20)
+    reader = writer.makefile("rb")
+    value = "x" * 800
+    for i in range(10000):
+        writer.sendall(_resp("SET", f"k{i}", value))
+        assert reader.readline() == b"+OK\r\n"  # lockstep, so only the monitor queue grows
+    reader.close()
+    writer.close()
+
+    try:
+        while monitor.recv(65536):
+            pass
+    except socket.timeout:
+        assert False, "the overflowing monitor connection was not closed"
+    monitor.close()
+
+
+def _skip_unless_v1(server):
+    if is_resp_io_loop_v2(server):
+        pytest.skip("v1 io loop only")
+
+
+@pytest.mark.parametrize("v2", [False, True])
+async def test_paused_client_disconnect_cleanup(df_factory, v2):
+    server = df_factory.create(proactor_threads=2, enable_resp_io_loop_v2=v2)
+    server.start()
+    admin = server.client()
+
+    async def queues():
+        info = await admin.info("all")  # includes this INFO itself, hence compared to a baseline
+        return [
+            info[k]
+            for k in ("pipeline_queue_length", "pipeline_queue_bytes", "dispatch_queue_bytes")
+        ]
+
+    baseline = await queues()
+    assert await admin.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
+
+    parked = _named_raw_client(server.port, "parked")
+    await _wait_client(admin, "parked", lambda c: c.get("phase") == "readsock", "named")
+    parked.sendall(_resp("SET", "k", "v"))
+    # A single command runs in the io fiber, which stays in the process phase while parked.
+    await _wait_client(admin, "parked", lambda c: c.get("phase") == "process", "parked in pause")
+
+    # The parked write is dropped, its reply is resolved and the queues are accounted.
+    parked.close()
+    for _ in range(50):
+        if len(await admin.client_list()) == 1:
+            break
+        await asyncio.sleep(0.1)
+    assert len(await admin.client_list()) == 1
+    assert await queues() == baseline
+
+    assert await admin.execute_command("CLIENT UNPAUSE") == "OK"
+    assert await admin.get("k") is None
+    await admin.aclose()
+
+
+async def test_paused_client_released_on_protocol_error(df_factory):
+    # v1 io loop only: pipelined writes park the dispatch fiber while the io fiber keeps reading.
+    # A malformed request then ends the read loop, which must release the parked dispatch before
+    # the protocol error reply is sent. (The v2 loop runs commands in the read fiber, so the tail
+    # would not be parsed until the pause ends.)
+    server = df_factory.create(proactor_threads=2, enable_resp_io_loop_v2=False)
+    _skip_unless_v1(server)
+    server.start()
+    admin = server.client()
+    assert await admin.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
+
+    client = _named_raw_client(server.port, "piped")
+    # Two complete writes go to the dispatch fiber, the incomplete third keeps the io fiber reading.
+    client.sendall(_resp("SET", "k", "v") + _resp("SET", "k2", "v") + b"*3\r\n$3\r\nSET\r\n")
+    # Flag 'a' means the dispatch fiber is inside a command, which under the pause is parked.
+    await _wait_client(admin, "piped", lambda c: "a" in c.get("flags", ""), "parked in pause")
+    client.sendall(b"$abc\r\n")  # malformed continuation
+
+    buf = b""
+    while b"-ERR Protocol error" not in buf:
+        chunk = client.recv(200)
+        assert chunk, buf
+        buf += chunk
+    client.close()
+
+    assert await admin.execute_command("CLIENT UNPAUSE") == "OK"
+    assert await admin.get("k") is None and await admin.get("k2") is None
+    await admin.aclose()
+
+
+async def test_awakened_blocked_client_closed_under_pause(df_factory):
+    server = df_factory.create(proactor_threads=2, admin_port=BASE_PORT)
+    server.start()
+    client = server.client()
+    admin = server.admin_client()
+
+    blocked = {}
+    for name in ("first", "second"):
+        blocked[name] = _named_raw_client(server.port, name)
+        blocked[name].sendall(_resp("BLPOP", "l", "0"))
+        await _wait_client(admin, name, lambda c: "b" in c.get("flags", ""), "blocked")
+    assert await client.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
+
+    # The admin port is not paused: the push wakes the first pop, which parks behind the pause.
+    assert await admin.rpush("l", "a") == 1
+    await _wait_client(admin, "first", lambda c: "b" not in c.get("flags", ""), "parked")
+
+    # Its client leaves before receiving the element, so the element goes to the second one.
+    blocked["first"].close()
+    await _wait_client(admin, "second", lambda c: "b" not in c.get("flags", ""), "woken")
+    assert await client.execute_command("CLIENT UNPAUSE") == "OK"
+
+    expected = b"*2\r\n$1\r\nl\r\n$1\r\na\r\n"
+    reply = b""
+    while len(reply) < len(expected):
+        reply += blocked["second"].recv(64)
+    assert reply == expected
+    blocked["second"].close()
+    await client.aclose()
+    await admin.aclose()

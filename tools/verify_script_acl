@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""Verifies Dragonfly's per-command ACL categories.
+
+Two independent checks:
+  --check self  : internal self-consistency -- flags any command whose effective
+                  ACL categories end up with both FAST and SLOW set at once, which
+                  means its CO:: mask disagrees with its hand-written acl:: category
+                  constant. No network access required.
+  --check valkey: diffs Dragonfly's effective ACL categories against real Valkey's
+                  (ground truth), for commands Dragonfly shares with Valkey. Requires
+                  a Valkey checkout (--valkey-dir), or clones the latest valkey/valkey
+                  default branch itself if omitted -- this needs network access.
+
+Default is --check all (both checks), matching the CI job -- so a plain, no-argument
+invocation clones Valkey and needs network access. Pass --check self explicitly, or
+--valkey-dir pointing at an existing local checkout, to run fully offline.
+
+Exits non-zero if either check finds unresolved issues (for CI use).
+"""
+import argparse
+import glob
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+FAMILY_FILES = [
+    "src/server/generic_family.cc",
+    "src/server/string_family.cc",
+    "src/server/list_family.cc",
+    "src/server/set_family.cc",
+    "src/server/zset_family.cc",
+    "src/server/hset_family.cc",
+    "src/server/bitops_family.cc",
+    "src/server/hll_family.cc",
+    "src/server/geo_family.cc",
+    "src/server/stream_family.cc",
+    "src/server/json_family.cc",
+    "src/server/bloom_family.cc",
+    "src/server/server_family.cc",
+    "src/server/main_service.cc",
+    "src/server/acl/acl_family.cc",
+    "src/server/cluster/cluster_family.cc",
+    "src/server/search/search_family.cc",
+    "src/server/cms_family.cc",
+    "src/server/cuckoo_filter_family.cc",
+    "src/server/topk_family.cc",
+]
+
+CO = {
+    "READONLY": 1 << 0,
+    "FAST": 1 << 1,
+    "JOURNALED": 1 << 2,
+    "LOADING": 1 << 3,
+    "DENYOOM": 1 << 4,
+    "DANGEROUS": 1 << 5,
+    "VARIADIC_KEYS": 1 << 6,
+    "ADMIN": 1 << 7,
+    "NOSCRIPT": 1 << 8,
+    "BLOCKING": 1 << 9,
+    "HIDDEN": 1 << 10,
+    "GLOBAL_TRANS": 1 << 12,
+    "STORE_LAST_KEY": 1 << 13,
+    "NO_AUTOJOURNAL": 1 << 15,
+    "NO_KEY_TRANSACTIONAL": 1 << 16,
+    "NO_KEY_TX_SPAN_ALL": 1 << 17,
+    "IDEMPOTENT": 1 << 18,
+}
+# The 21 standard categories -- named identically to Valkey/Redis's real ACL categories,
+# so a direct name-for-name comparison is valid for these. Everything from CUCKOO_FILTER
+# on is a Dragonfly/module extension category with no Valkey equivalent.
+ACL = {
+    "KEYSPACE": 1 << 0,
+    "READ": 1 << 1,
+    "WRITE": 1 << 2,
+    "SET": 1 << 3,
+    "SORTEDSET": 1 << 4,
+    "LIST": 1 << 5,
+    "HASH": 1 << 6,
+    "STRING": 1 << 7,
+    "BITMAP": 1 << 8,
+    "HYPERLOGLOG": 1 << 9,
+    "GEO": 1 << 10,
+    "STREAM": 1 << 11,
+    "PUBSUB": 1 << 12,
+    "ADMIN": 1 << 13,
+    "FAST": 1 << 14,
+    "SLOW": 1 << 15,
+    "BLOCKING": 1 << 16,
+    "DANGEROUS": 1 << 17,
+    "CONNECTION": 1 << 18,
+    "TRANSACTION": 1 << 19,
+    "SCRIPTING": 1 << 20,
+    "CUCKOO_FILTER": 1 << 25,
+    "TOPK": 1 << 26,
+    "CMS": 1 << 27,
+    "BLOOM": 1 << 28,
+    "FT_SEARCH": 1 << 29,
+    "THROTTLE": 1 << 30,
+    "JSON": 1 << 31,
+}
+STANDARD_ACL_NAMES = {
+    "KEYSPACE",
+    "READ",
+    "WRITE",
+    "SET",
+    "SORTEDSET",
+    "LIST",
+    "HASH",
+    "STRING",
+    "BITMAP",
+    "HYPERLOGLOG",
+    "GEO",
+    "STREAM",
+    "PUBSUB",
+    "ADMIN",
+    "FAST",
+    "SLOW",
+    "BLOCKING",
+    "DANGEROUS",
+    "CONNECTION",
+    "TRANSACTION",
+    "SCRIPTING",
+}
+ACL_REV = {v: k for k, v in ACL.items()}
+CO_REV = {v: k for k, v in CO.items()}
+
+# Container commands: Dragonfly registers these as a single flat command, while Valkey gives
+# each subcommand its own real categories and leaves the container itself with just @slow.
+# Not modeled here (no per-subcommand ACL categories in Dragonfly yet). Every other mismatch
+# is a real one and must be fixed, not added here.
+VALKEY_SKIP = {
+    "CLIENT": "container command, Valkey categorizes per-subcommand only",
+    "CONFIG": "container command, Valkey categorizes per-subcommand only",
+    "SCRIPT": "container command, Valkey categorizes per-subcommand only",
+    "MODULE": "container command, Valkey categorizes per-subcommand only",
+    "CLUSTER": "container command, Valkey categorizes per-subcommand only",
+    "XGROUP": "container command, Valkey categorizes per-subcommand only",
+    "XINFO": "container command, Valkey categorizes per-subcommand only",
+}
+
+
+def bits_str(val, table_rev):
+    names = [table_rev[b] for b in sorted(table_rev) if val & b]
+    return "|".join(names) if names else "0"
+
+
+def implicit_acl(mask):
+    m = mask
+    if m & CO["ADMIN"]:
+        m |= CO["NOSCRIPT"]
+    out = 0
+    if m & CO["JOURNALED"]:
+        out |= ACL["WRITE"]
+    if (m & CO["READONLY"]) and not (m & CO["NOSCRIPT"]):
+        out |= ACL["READ"]
+    if m & CO["ADMIN"]:
+        out |= ACL["ADMIN"] | ACL["DANGEROUS"]
+    if m & CO["FAST"]:
+        out |= ACL["FAST"]
+    if m & CO["BLOCKING"]:
+        out |= ACL["BLOCKING"]
+    if not (out & ACL["FAST"]):
+        out |= ACL["SLOW"]
+    return out
+
+
+def resolve_mask_expr(expr, local_masks):
+    expr = expr.strip()
+    if expr in local_masks:
+        return local_masks[expr]
+    val = 0
+    for tok in re.split(r"\|", expr):
+        tok = tok.strip()
+        if tok.startswith("CO::"):
+            # handles both CO::READONLY and the occasional CO::CommandOpt::READONLY spelling
+            val |= CO.get(tok.rsplit("::", 1)[-1], 0)
+        elif tok in local_masks:
+            val |= local_masks[tok]
+        else:
+            return None
+    return val
+
+
+def resolve_acl_expr(expr, local_acls):
+    expr = expr.strip()
+    val = 0
+    for tok in re.split(r"\|", expr):
+        tok = tok.strip()
+        if tok.startswith("acl::"):
+            name = tok[5:]
+            if name in ACL:
+                val |= ACL[name]
+            elif name in local_acls:
+                val |= local_acls[name]
+            else:
+                return None
+        else:
+            return None
+    return val
+
+
+def extract_balanced(text, start):
+    depth = 0
+    i = start
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+        i += 1
+    return None
+
+
+def split_top_commas(s):
+    depth = 0
+    parts, cur = [], ""
+    for ch in s:
+        if ch in "({[":
+            depth += 1
+        elif ch in ")}]":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    parts.append(cur)
+    return parts
+
+
+def resolve_family_bits(text, local_acls):
+    """registry->StartFamily(acl::XXX) adds XXX to every command in the family that has
+    no explicit acl_categories argument of its own (see CommandRegistry::operator<< /
+    CommandId::SetAclCategory, which is a no-op for commands with an explicit category)."""
+    m = re.search(r"StartFamily\(([^)]*)\)", text)
+    if not m or not m.group(1).strip():
+        return 0
+    r = resolve_acl_expr(m.group(1).strip(), local_acls)
+    return r or 0
+
+
+def collect_dragonfly_commands(repo_root):
+    """Returns {command_name: (final_acl_bits, mask_bits, source_file)}."""
+    commands = {}
+    unresolved = []
+    for f in FAMILY_FILES:
+        path = os.path.join(repo_root, f)
+        if not os.path.exists(path):
+            continue
+        text = open(path).read()
+
+        local_masks = {}
+        for m in re.finditer(
+            r"(?:constexpr|const)\s+(?:auto|uint32_t|size_t)\s+(k\w+)\s*=\s*([^;]+);", text
+        ):
+            name, expr = m.group(1), m.group(2)
+            if "CO::" in expr:
+                val = resolve_mask_expr(expr, local_masks)
+                if val is not None:
+                    local_masks[name] = val
+
+        # acl:: category aliases come in two styles across the codebase: bare names inside a
+        # `namespace acl { ... }` block (e.g. generic_family.cc's `kDel = KEYSPACE | WRITE`),
+        # or acl::-qualified at top level (e.g. acl_family.cc's `kAcl = acl::CONNECTION`).
+        # Collect both, in file order, so later constants can reference earlier ones.
+        local_acls = {}
+        for m in re.finditer(r"constexpr\s+uint32_t\s+(k\w+)\s*=\s*([^;]+);", text):
+            name, expr = m.group(1), m.group(2)
+            if "CO::" in expr:
+                continue  # a mask alias, not an acl category alias
+            val, ok = 0, True
+            for tok in re.split(r"\|", expr):
+                tok = tok.strip()
+                bare = tok[5:] if tok.startswith("acl::") else tok
+                if bare in ACL:
+                    val |= ACL[bare]
+                elif bare in local_acls:
+                    val |= local_acls[bare]
+                else:
+                    ok = False
+            if ok:
+                local_acls[name] = val
+
+        family_bits = resolve_family_bits(text, local_acls)
+
+        for m in re.finditer(r"CI\{", text):
+            blob = extract_balanced(text, m.start())
+            if blob is None:
+                continue
+            inner = blob[3:-1]
+            parts = split_top_commas(inner)
+            if len(parts) < 5:
+                continue
+            name = parts[0].strip().strip('"')
+            mask_expr = parts[1].strip()
+            rest = parts[2:]
+            acl_expr = rest[3].strip() if len(rest) > 3 and rest[3].strip() else None
+
+            mask_val = resolve_mask_expr(mask_expr, local_masks)
+            if mask_val is None:
+                unresolved.append((f, name, "mask expr: " + mask_expr))
+                continue
+            implicit = implicit_acl(mask_val)
+            explicit = 0
+            if acl_expr:
+                r = resolve_acl_expr(acl_expr, local_acls)
+                if r is None:
+                    unresolved.append((f, name, "acl expr: " + acl_expr))
+                    continue
+                explicit = r
+            else:
+                # No explicit acl_categories arg -> gets StartFamily's category (if any).
+                explicit = family_bits
+            final = implicit | explicit
+            commands[name] = (final, mask_val, f)
+    return commands, unresolved
+
+
+def check_self(commands):
+    issues = []
+    for name, (final, mask_val, f) in commands.items():
+        if (final & ACL["FAST"]) and (final & ACL["SLOW"]):
+            issues.append(
+                f"{f}: {name}: FAST+SLOW both set "
+                f"(mask={bits_str(mask_val, CO_REV)} final={bits_str(final, ACL_REV)})"
+            )
+    return issues
+
+
+def ensure_valkey_checkout(valkey_dir):
+    if valkey_dir:
+        if not os.path.isdir(os.path.join(valkey_dir, "src", "commands")):
+            sys.exit(f"--valkey-dir {valkey_dir} has no src/commands -- not a valkey checkout")
+        return valkey_dir
+    tmp = tempfile.mkdtemp(prefix="valkey-acl-check-")
+    print(f"Cloning latest valkey/valkey into {tmp} ...", file=sys.stderr)
+    subprocess.run(
+        ["git", "clone", "--depth", "1", "https://github.com/valkey-io/valkey.git", tmp],
+        check=True,
+    )
+    return tmp
+
+
+def valkey_command_categories(valkey_dir):
+    """Returns {command_name: set(acl_category_names)} for top-level commands only."""
+    result = {}
+    for path in glob.glob(os.path.join(valkey_dir, "src", "commands", "*.json")):
+        base = os.path.basename(path)[: -len(".json")]
+        if "-" in base:
+            continue  # subcommand (e.g. acl-cat.json) -- not modeled here yet
+        data = json.load(open(path))
+        for name, spec in data.items():
+            result[name.upper()] = set(spec.get("acl_categories") or [])
+    return result
+
+
+def check_valkey(commands, valkey_dir):
+    vk = valkey_command_categories(valkey_dir)
+    issues = []
+    checked = 0
+    for name, (final, _mask, f) in commands.items():
+        if " " in name:
+            continue  # subcommand, not modeled here yet
+        if name in VALKEY_SKIP:
+            continue
+        if name not in vk:
+            continue  # no valkey equivalent to compare against
+        dfly_names = {ACL_REV[b] for b in ACL_REV if final & b} & STANDARD_ACL_NAMES
+        vk_names = vk[name]
+        if dfly_names != vk_names:
+            missing = vk_names - dfly_names
+            extra = dfly_names - vk_names
+            detail = []
+            if missing:
+                detail.append("missing " + ",".join(sorted(missing)))
+            if extra:
+                detail.append("extra " + ",".join(sorted(extra)))
+            issues.append(
+                f"{f}: {name}: {'; '.join(detail)} (dfly={sorted(dfly_names)} valkey={sorted(vk_names)})"
+            )
+        checked += 1
+    print(f"(compared {checked} commands against valkey)", file=sys.stderr)
+    return issues
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument(
+        "--check",
+        choices=["self", "valkey", "all"],
+        default="all",
+        help="'all' (default) clones/needs Valkey and network access; 'self' is offline-only",
+    )
+    ap.add_argument(
+        "--valkey-dir", help="path to an existing valkey checkout; default clones latest"
+    )
+    ap.add_argument("--repo-root", default=".")
+    args = ap.parse_args()
+
+    commands, unresolved = collect_dragonfly_commands(args.repo_root)
+
+    # Unresolved commands are hidden from every check below (they never made it into
+    # `commands`), so report them exactly once here regardless of --check mode -- otherwise
+    # `--check valkey` alone can silently omit them and report a false "0 issues".
+    all_issues = [f"{f}: {name}: UNRESOLVED {why}" for f, name, why in unresolved]
+    if args.check in ("self", "all"):
+        all_issues += check_self(commands)
+    if args.check in ("valkey", "all"):
+        valkey_dir = ensure_valkey_checkout(args.valkey_dir)
+        all_issues += check_valkey(commands, valkey_dir)
+
+    for issue in all_issues:
+        print(issue)
+    print(f"total issues: {len(all_issues)}")
+    sys.exit(1 if all_issues else 0)
+
+
+if __name__ == "__main__":
+    main()

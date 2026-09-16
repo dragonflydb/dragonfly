@@ -36,7 +36,8 @@ struct MasterContext {
   std::string dfly_session_id;  // Sync session id for dfly sync.
   unsigned num_flows = 0;
   DflyVersion version = DflyVersion::VER1;
-  std::string lineage_id;  // lineage id of master
+  std::string lineage_id;                     // lineage id of master
+  std::optional<AnnouncedAddress> announced;  // from the capa reply, absent on older masters
 };
 
 // This class manages replication from both Dragonfly and Redis masters.

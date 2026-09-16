@@ -17,7 +17,7 @@ on:
         default: ""
         type: string
       iterations:
-        description: "Pytest: optional number of iterations. Default: 1. Example: 12"
+        description: "Pytest: optional number of iterations. Default: 1."
         required: false
         default: "1"
         type: string
@@ -34,9 +34,9 @@ on:
         default: ""
         type: string
       gtest-iterations:
-        description: "GoogleTest: optional number of iterations. Default: 1. Example: 12"
+        description: "GoogleTest: number of iterations; default: 0 (skips GoogleTests)."
         required: false
-        default: "1"
+        default: "0"
         type: string
 
       # Common inputs.
@@ -62,6 +62,7 @@ jobs:
         proactor: [Epoll]
         build-type: [Debug]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+        enable_resp_io_loop_v2: [false, true]
 
     runs-on: ${{ matrix.runner }}
 
@@ -137,6 +138,7 @@ jobs:
           gtest-iterations: ${{ inputs['gtest-iterations'] || '' }}
           run-gtests: 'true'
           continue-on-test-failure: ${{ inputs['continue-on-test-failure'] || 'false' }}
+          df-runtime-flags: enable_resp_io_loop_v2=${{ matrix.enable_resp_io_loop_v2 }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}

@@ -234,7 +234,7 @@ void BaseFamilyTest::TearDown() {
   ShutdownService();
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
-  LOG(INFO) << "Finishing " << test_info->name();
+  LOG(INFO) << "Finishing " << (test_info ? test_info->name() : "benchmark");
 }
 
 void BaseFamilyTest::ResetService() {
@@ -270,7 +270,7 @@ void BaseFamilyTest::ResetService() {
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
 
   const TestInfo* const test_info = UnitTest::GetInstance()->current_test_info();
-  LOG(INFO) << "Starting " << test_info->name();
+  LOG(INFO) << "Starting " << (test_info ? test_info->name() : "benchmark");
 
   watchdog_fiber_ = pp_->GetNextProactor()->LaunchFiber([this] {
     ThisFiber::SetName("Watchdog");
@@ -746,12 +746,30 @@ auto BaseFamilyTest::AddFindConn(Protocol proto, std::string_view id) -> TestCon
   return it->second.get();
 }
 
+TestConnection* BaseFamilyTest::GetConnection(string_view conn_id) {
+  DCHECK(ProactorBase::IsProactorThread());
+  unique_lock lk(mu_);
+  auto it = connections_.find(conn_id);
+  if (it == connections_.end())
+    return nullptr;
+  auto* conn = it->second->conn();
+  DCHECK_EQ(conn->socket()->proactor(), ProactorBase::me());
+  return conn;
+}
+
 Transaction* BaseFamilyTest::GetTransaction(string_view conn_id) {
   unique_lock lk(mu_);
   auto it = connections_.find(conn_id);
   if (it == connections_.end())
     return nullptr;
   return it->second->cmd_cntx()->transaction;
+}
+
+void BaseFamilyTest::SetAuthExpiresAt(string_view conn_id, chrono::steady_clock::time_point at) {
+  unique_lock lk(mu_);
+  auto it = connections_.find(conn_id);
+  CHECK(it != connections_.end()) << conn_id;
+  it->second->cmd_cntx()->auth_expires_at = at;
 }
 
 vector<string> BaseFamilyTest::StrArray(const RespExpr& expr) {

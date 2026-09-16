@@ -751,6 +751,8 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case NO_KEY_TRANSACTIONAL:
     case NO_KEY_TX_SPAN_ALL:
     case IDEMPOTENT:
+    case WRITE_KEY_OFFSET_0:
+    case WRITE_KEY_OFFSET_1:
       return "";
   }
   return "";
@@ -796,19 +798,21 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
   }
 }
 
-// Check CLIENT PAUSE state and block if needed
-void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, const CommandId* cid) {
+// Blocks the command while CLIENT PAUSE holds it. Returns true if a pause was active.
+bool PauseConnection(const CommandId* cid, bool is_privileged, ConnectionContext* dfly_cntx) {
   auto& etl = *ServerState::tlocal();
-  if (etl.IsPaused() && !conn->IsPrivileged()) {
+  if (etl.IsPaused() && !is_privileged) {
     bool is_write = cid->IsJournaled();
     // PUBLISH and writable EVAL/EVALSHA (not the *_RO variants) count as writes here.
     is_write |= cid->IsPublish() || (cid->IsEvalGroup() && !cid->IsReadOnly());
     is_write |= cid->IsExec() && dfly_cntx->conn_state.exec_info.is_write;
 
     dfly_cntx->paused = true;
-    etl.AwaitPauseState(is_write);
+    etl.AwaitPauseState(is_write, dfly_cntx);
     dfly_cntx->paused = false;
+    return true;
   }
+  return false;
 }
 
 // Prepare transaction for DispatchCommand.
@@ -1169,15 +1173,18 @@ void Service::Shutdown() {
   cluster_family_.Shutdown();
   server_family_.Shutdown();
 
-  shutdown_watchdog.emplace(pp_);
-
   engine_varz.reset();
 
   LOG(ERROR) << "Service::Shutdown: shard_set->PreShutdown starting";
+  uint64_t shard_shutdown_start = absl::GetCurrentTimeNanos();
   shard_set->PreShutdown();
   LOG(ERROR) << "Service::Shutdown: shard_set->PreShutdown done, shard_set->Shutdown starting";
   shard_set->Shutdown();
   LOG(ERROR) << "Service::Shutdown: shard_set->Shutdown done";
+  LOG(INFO) << "Shard set shutdown took "
+            << (absl::GetCurrentTimeNanos() - shard_shutdown_start) / 1000 << "us";
+
+  shutdown_watchdog.emplace(pp_);
 
   delete channel_store;
   channel_store = nullptr;
@@ -1495,6 +1502,11 @@ DispatchResult Service::DispatchCommand(
     } else {
       parsed_cmd->SendError(ReportUnknownCmd(absl::AsciiStrToUpper(args.Front())));
     }
+    // A collecting MULTI must abort at EXEC, as with any other queue-time error.
+    auto& exec_info =
+        static_cast<CommandContext*>(parsed_cmd)->server_conn_cntx()->conn_state.exec_info;
+    if (exec_info.IsCollecting())
+      exec_info.error = true;
     return DispatchResult::ERROR;
   }
 
@@ -1534,16 +1546,22 @@ DispatchResult Service::DispatchCommand(
     }
 
     // Check pause state only if it is a top level transaction.
-    if (dfly_cntx->transaction == nullptr)
-      CheckPauseState(conn, dfly_cntx, cid);
+    if (dfly_cntx->transaction == nullptr &&
+        PauseConnection(cid, conn->IsPrivileged(), dfly_cntx) && dfly_cntx->conn_closing) {
+      cmd_cntx->SendError("connection is closing");  // resolves a deferred reply as well
+      return DispatchResult::ERROR;
+    }
   }
 
   // Verify command state
   if (auto err = VerifyCommandState(*cid, args_no_cmd, *dfly_cntx); err) {
     LOG_IF(WARNING, dfly_cntx->replica_conn || !dfly_cntx->conn() /* no owner in replica context */)
         << "VerifyCommandState error: " << err->ToSv();
-    if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
-      exec_info.state = ConnectionState::ExecInfo::EXEC_ERROR;
+    // A rejected EXEC discards the transaction, a rejected queued command only marks it.
+    if (cid->IsExec())
+      MultiCleanup(dfly_cntx);
+    else if (auto& exec_info = dfly_cntx->conn_state.exec_info; exec_info.IsCollecting())
+      exec_info.error = true;
 
     // We need to skip this because ACK's should not be replied to
     // Bonus points because this allows to continue replication with ACL users who got
@@ -1952,7 +1970,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   MultiCleanup(cntx);
 
   if (conn_state.subscribe_info) {
-    if (!conn_state.subscribe_info->channels.empty())
+    if (!conn_state.subscribe_info->Channels().empty())
       cntx->UnsubscribeAll(false, nullptr);
     if (conn_state.subscribe_info)
       cntx->PUnsubscribeAll(false, nullptr);
@@ -2019,7 +2037,7 @@ void Service::Watch(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Duplicate keys are stored to keep correct count.
   exec_info.watched_existed += keys_existed.load(memory_order_relaxed);
   for (string_view key : parser.UnparsedArgs()) {
-    exec_info.watched_keys.emplace_back(cntx->db_index(), key);
+    exec_info.AddWatchedKey(cntx->db_index(), key);
   }
 
   return cmd_cntx->rb()->SendOk();
@@ -2321,14 +2339,10 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
   // and checking whether all invocations consist of RO commands.
   // we can do it once during script insertion into script mgr.
   auto& sinfo = conn_cntx->conn_state.script_info;
-  sinfo = make_unique<ConnectionState::ScriptInfo>();
+  sinfo = make_unique<ConnectionState::ScriptInfo>(*conn_cntx);
   sinfo->lock_tags.reserve(eval_args.num_keys);
   sinfo->read_only = read_only;
   memcpy(sinfo->stats.sha, eval_args.sha.data(), eval_args.sha.size());
-  sinfo->acl_commands = conn_cntx->acl_commands;
-  sinfo->acl_keys = conn_cntx->keys;
-  sinfo->acl_pub_sub = conn_cntx->pub_sub;
-  sinfo->acl_db_idx = conn_cntx->acl_db_idx;
 
   optional<ShardId> sid{nullopt};
   UniqueSlotChecker slot_checker;
@@ -2367,8 +2381,11 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     }
   }
 
-  // Reset cid to EVAL[] as the context is reused during command dispatch
-  absl::Cleanup clean = [interpreter, cmd_cntx, cid = cmd_cntx->cid()]() {
+  // Reset cid to EVAL[] as the context is reused during command dispatch. A SELECT inside the
+  // script must not outlive it, so the caller's db is restored as well.
+  absl::Cleanup clean = [interpreter, cmd_cntx, conn_cntx, caller_db = conn_cntx->db_index(),
+                         cid = cmd_cntx->cid()]() {
+    conn_cntx->conn_state.db_index = caller_db;
     interpreter->ResetStack();
     cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
@@ -2553,7 +2570,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
   auto* cntx = cmd_cntx->server_conn_cntx();
   auto& exec_info = cntx->conn_state.exec_info;
 
-  if (exec_info.state == ConnectionState::ExecInfo::EXEC_ERROR) {
+  if (exec_info.error) {
     return rb->SendError("-EXECABORT Transaction discarded because of previous errors");
   }
 
@@ -3024,12 +3041,12 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
       << ", repl_session_id: " << conn_state.replication_info.repl_session_id;
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
-    if (!conn_state.subscribe_info->channels.empty()) {
+    if (!conn_state.subscribe_info->Channels().empty()) {
       server_cntx->UnsubscribeAll(false, nullptr);
     }
 
     if (conn_state.subscribe_info) {
-      DCHECK(!conn_state.subscribe_info->patterns.empty());
+      DCHECK(!conn_state.subscribe_info->Patterns().empty());
       server_cntx->PUnsubscribeAll(false, nullptr);
     }
 
@@ -3092,8 +3109,8 @@ void Service::Register(CommandRegistry* registry) {
       << CI{"QUIT", CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"RESET", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kReset}.HFUNC(Reset)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kMulti}.HFUNC(Multi)
-      << CI{"WATCH", CO::LOADING, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
-      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
+      << CI{"WATCH", CO::LOADING | CO::FAST, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
+      << CI{"UNWATCH", CO::LOADING | CO::FAST, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
       << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDiscard}.MFUNC(Discard)
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEval}
              .MFUNC(Eval)
@@ -3122,7 +3139,7 @@ void Service::Register(CommandRegistry* registry) {
              PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, acl::kFunction}.MFUNC(Function)
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, acl::kMonitor}.MFUNC(Monitor)
-      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
+      << CI{"PUBSUB", CO::LOADING, -1, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
       << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, acl::kCommand}.MFUNC(Command);
 }
 

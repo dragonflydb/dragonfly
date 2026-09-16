@@ -20,6 +20,7 @@ extern "C" {
 #include "facade/dragonfly_listener.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
+#include "redis/redis_aux.h"
 #include "server/command_registry.h"
 #include "server/main_service.h"
 #include "server/test_utils.h"
@@ -280,6 +281,18 @@ TEST_F(DflyEngineTest, EvalSha) {
 TEST_F(DflyEngineTest, EvalShaNegativeZeroNumKeys) {
   EXPECT_THAT(Run({"evalsha", "k1", "-0"}), ErrArg(facade::kInvalidIntErr));
   EXPECT_THAT(Run({"eval", "return 1", "-0"}), ErrArg(facade::kInvalidIntErr));
+}
+
+TEST_F(DflyEngineTest, EvalSelectDoesNotLeak) {
+  Run({"select", "2"});
+  Run({"set", "k2", "v"});
+  Run({"select", "1"});
+  Run({"set", "canary", "hi"});
+  Run({"set", "k1b", "v"});
+  // SELECT applies to the rest of the script (db 2 holds one key) ...
+  EXPECT_THAT(Run({"eval", "redis.call('select', 2) return redis.call('dbsize')", "0"}), IntArg(1));
+  // ... but must not move the connection off db 1.
+  EXPECT_EQ(Run({"get", "canary"}), "hi");
 }
 
 TEST_F(DflyEngineTest, ScriptFlush) {
@@ -1177,6 +1190,49 @@ TEST_F(DflyEngineTest, ListenerAcceptLoopDistribution) {
   for (facade::Listener* listener : listeners)
     accept_proactors.insert(listener->socket()->proactor());
   EXPECT_EQ(kListeners, accept_proactors.size());
+}
+
+TEST_F(DflyEngineTest, TypeForFamilyMatchesRegisteredCommands) {
+  constexpr int kNoTrackedType = -1;
+  const auto* registry = service_->mutable_registry();
+
+  auto expect_type = [registry](string_view cmd, int type) {
+    const auto* cid = registry->Find(cmd);
+    ASSERT_NE(cid, nullptr);
+    ASSERT_TRUE(cid->HasFamily());
+    EXPECT_EQ(TypeForFamily(cid->GetFamily()), type);
+  };
+
+  expect_type("QUIT", kNoTrackedType);
+  expect_type("INFO", kNoTrackedType);
+  expect_type("DEL", kNoTrackedType);
+  expect_type("LPUSH", OBJ_LIST);
+  expect_type("SET", OBJ_STRING);
+
+#ifdef WITH_COLLECTION_CMDS
+  expect_type("SADD", OBJ_SET);
+  expect_type("HSET", OBJ_HASH);
+  expect_type("ZADD", OBJ_ZSET);
+  expect_type("XADD", OBJ_STREAM);
+#endif
+
+#ifdef WITH_EXTENSION_CMDS
+  expect_type("GEOADD", OBJ_ZSET);
+  expect_type("SETBIT", OBJ_STRING);
+  expect_type("PFADD", OBJ_STRING);
+  expect_type("BF.ADD", OBJ_SBF);
+  expect_type("CMS.INITBYDIM", OBJ_CMS);
+  expect_type("TOPK.RESERVE", OBJ_TOPK);
+  expect_type("CF.RESERVE", OBJ_CUCKOOFILTER);
+  expect_type("JSON.SET", OBJ_JSON);
+#endif
+
+#ifdef WITH_SEARCH
+  expect_type("FT.CREATE", kNoTrackedType);
+#endif
+
+  expect_type("CLUSTER", kNoTrackedType);
+  expect_type("ACL", kNoTrackedType);
 }
 
 class DflyCommandAliasTest : public DflyEngineTest {

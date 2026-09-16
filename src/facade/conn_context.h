@@ -38,6 +38,7 @@ class ConnectionContext {
     return owner_;
   }
 
+  // Estimates owned heap memory in O(1), independent of connection state cardinality.
   virtual size_t UsedMemory() const {
     return 0;
   }

@@ -17,6 +17,13 @@ using namespace testing;
 using namespace std;
 namespace facade {
 
+namespace {
+template <typename T>
+concept HasSlowHeapSize = requires(const T& t) {
+  { cmn::SlowHeapSize(t) } -> std::same_as<size_t>;
+};
+}  // namespace
+
 MATCHER_P(ArrArg, expected, absl::StrCat(negation ? "is not" : "is", " equal to:\n", expected)) {
   if (arg.type != RespExpr::ARRAY) {
     *result_listener << "\nWrong type: " << arg.type;
@@ -326,12 +333,41 @@ TEST_F(RedisParserTest, NestedArray) {
   ASSERT_THAT(args_[1].GetVec(), ElementsAre("car"));
 }
 
-TEST_F(RedisParserTest, UsedMemory) {
+TEST_F(RedisParserTest, HeapSize) {
+  struct CachedMemory {
+    size_t UsedMemory() const {
+      return 42;
+    }
+  };
+  static_assert(HasSlowHeapSize<unique_ptr<RespVec>>);
+  static_assert(HasSlowHeapSize<unique_ptr<const RespVec>>);
+  static_assert(HasSlowHeapSize<unique_ptr<absl::flat_hash_set<string>>>);
+  static_assert(!HasSlowHeapSize<unique_ptr<string>>);
+  static_assert(!HasSlowHeapSize<unique_ptr<int>>);
+  static_assert(!HasSlowHeapSize<unique_ptr<CachedMemory>>);
+  static_assert(!HasSlowHeapSize<pair<string, string>>);
+
+  auto cached = make_unique<CachedMemory>();
+  EXPECT_EQ(cmn::HeapSize(cached), sizeof(CachedMemory) + 42);
+  auto text = make_unique<string>(96, 'x');
+  EXPECT_EQ(cmn::HeapSize(text), sizeof(string) + text->capacity());
+  pair<string, string> strings{*text, *text};
+  EXPECT_EQ(cmn::HeapSize(strings), strings.first.capacity() + strings.second.capacity());
+
   vector<vector<uint8_t>> blobs;
   for (size_t i = 0; i < 100; ++i) {
     blobs.emplace_back(vector<uint8_t>(200));
   }
-  EXPECT_GT(cmn::HeapSize(blobs), 20000);
+  EXPECT_GT(cmn::SlowHeapSize(blobs), 20000);
+
+  EXPECT_EQ(cmn::SlowHeapSize(unique_ptr<RespVec>{}), 0);
+  auto values = make_unique<vector<string>>(2, *text);
+  EXPECT_EQ(cmn::SlowHeapSize(values), sizeof(*values) + values->capacity() * sizeof(string) +
+                                           values->front().capacity() + values->back().capacity());
+  auto names = make_unique<absl::flat_hash_set<string>>();
+  names->insert(*text);
+  EXPECT_EQ(cmn::SlowHeapSize(names),
+            sizeof(*names) + names->capacity() * sizeof(string) + names->begin()->capacity());
 
   std::vector<std::unique_ptr<RespVec>> stash;
   RespVec vec;
@@ -343,7 +379,7 @@ TEST_F(RedisParserTest, UsedMemory) {
   for (unsigned i = 0; i < 100; i++) {
     stash.emplace_back(new RespExpr::Vec(vec));
   }
-  EXPECT_GT(cmn::HeapSize(stash), 30000);
+  EXPECT_GT(cmn::SlowHeapSize(stash), 30000);
 }
 
 TEST_F(RedisParserTest, Eol) {

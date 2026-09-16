@@ -169,6 +169,16 @@ TEST_F(RdbTest, LoadEmpty) {
   ASSERT_FALSE(ec) << ec;
 }
 
+TEST_F(RdbTest, LoadValkeyHashWithExpiry) {
+  auto ec = LoadRdb("valkey9_hash_expiry.rdb");
+  ASSERT_FALSE(ec) << ec.message();
+
+  EXPECT_THAT(Run({"HGETALL", "hash"}).GetVec(),
+              UnorderedElementsAre("expiring", "one", "persistent", "two", "overflow", "three"));
+  EXPECT_THAT(Run({"HPEXPIRETIME", "hash", "FIELDS", "2", "expiring", "persistent"}),
+              RespElementsAre(2524608000000, -1));
+}
+
 TEST_F(RdbTest, LoadSmall6) {
   // The rdb file contians keys that already expired, we want to continue loading them in this test.
   absl::FlagSaver fs;

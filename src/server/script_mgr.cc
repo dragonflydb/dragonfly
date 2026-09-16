@@ -153,18 +153,24 @@ void ScriptMgr::LoadCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* 
   string_view body = parser.Next<string_view>();
   auto rb = static_cast<RedisReplyBuilder*>(builder);
   if (body.empty()) {
-    char sha[41];
-    Interpreter::FuncSha1(body, sha);
+    auto sha_buf = Interpreter::FuncSha1(body);
+    string_view sha{sha_buf.data(), sha_buf.size()};
     return rb->SendBulkString(sha);
   }
 
-  BorrowedInterpreter interpreter{tx, &cntx->conn_state};
-
-  auto res = Insert(body, interpreter);
+  // Release BorrowedInterpreter object right after the insertion. We want to avoid holding it
+  // during the hop below, which may block for a significant time - and potentially exhaust the
+  // interpreter pool.
+  auto res = [&] {
+    BorrowedInterpreter interpreter{tx, &cntx->conn_state};
+    return Insert(body, interpreter);
+  }();
   if (!res)
     return builder->SendError(res.error().Format());
 
-  // Schedule empty callback inorder to journal command via transaction framework.
+  // Schedule an empty callback to journal the command via the transaction framework.
+  // A concurrent SCRIPT FLUSH can remove the script while this hop is suspended. LOAD still
+  // returns its SHA, so EVALSHA may report NOSCRIPT and require the client to reload the script.
   tx->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
 
   return rb->SendBulkString(res.value());
@@ -176,22 +182,25 @@ void ScriptMgr::ConfigCmd(CmdArgParser parser, Transaction* tx, SinkReplyBuilder
     return builder->SendError(kSyntaxErr);
   }
 
-  lock_guard lk{mu_};
-  ScriptKey key{sha};
-  auto& data = db_[key];
+  {
+    // Release mu_ before waiting on shard locks. An already scheduled EXEC can need the registry
+    // to load a script; holding mu_ across this hop would make the two commands wait on each other.
+    lock_guard lk{mu_};
+    ScriptKey key{sha};
+    auto& data = db_[key];
 
-  while (parser.HasNext()) {
-    if (auto err = ScriptParams::ApplyFlags(parser.Next<string_view>(), &data); err)
-      return builder->SendError("Invalid config format: " + err.Format());
+    while (parser.HasNext()) {
+      if (auto err = ScriptParams::ApplyFlags(parser.Next<string_view>(), &data); err)
+        return builder->SendError("Invalid config format: " + err.Format());
+    }
+
+    // The per-thread params cache doubles as the EVALSHA existence check, so publish only scripts
+    // that are actually loaded. Flags of a not yet loaded script stay in db_ until Insert() runs.
+    if (data.body) {
+      UpdateScriptCaches(key, data);
+    }
   }
 
-  // The per-thread params cache doubles as the EVALSHA existence check, so publish only scripts
-  // that are actually loaded. Flags of a not yet loaded script stay in db_ until Insert() runs.
-  if (data.body) {
-    UpdateScriptCaches(key, data);
-  }
-
-  // Schedule empty callback inorder to journal command via transaction framework.
   tx->ScheduleSingleHop([](auto* t, auto* shard) { return OpStatus::OK; });
 
   return builder->SendOk();
@@ -272,9 +281,8 @@ unique_ptr<char[]> CharBufFromSV(string_view sv) {
 
 nonstd::expected<string, GenericError> ScriptMgr::Insert(string_view body,
                                                          Interpreter* interpreter) {
-  char sha_buf[64];
-  Interpreter::FuncSha1(body, sha_buf);
-  string_view sha{sha_buf, std::strlen(sha_buf)};
+  auto sha_buf = Interpreter::FuncSha1(body);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   if (interpreter->Exists(sha)) {
     return string{sha};

@@ -2,7 +2,6 @@ import asyncio
 import string
 
 import async_timeout
-import pytest
 
 from redis import asyncio as aioredis
 
@@ -122,7 +121,6 @@ async def test_seeder_capture(async_client: aioredis.Redis):
     assert capture != await Seeder.capture(async_client)
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 2})
 async def test_seeder_fake_redis(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
@@ -141,7 +139,6 @@ async def test_seeder_fake_redis(
     assert await seeder.compare(capture, instance.port)
 
 
-@pytest.mark.asyncio
 @dfly_args({"proactor_threads": 2})
 async def test_seeder_huge_value(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory
