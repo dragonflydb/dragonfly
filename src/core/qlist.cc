@@ -13,8 +13,12 @@ extern "C" {
 #include <absl/base/macros.h>
 #include <absl/base/optimization.h>
 #include <absl/flags/flag.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/escaping.h>
+#include <absl/strings/match.h>
+#include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
 #include <zstd.h>
 
 #include "base/logging.h"
@@ -25,6 +29,18 @@ using namespace std;
 
 ABSL_FLAG(int, list_compress_level, -1,
           "Compression level for QList ZSTD dictionaries. -1 uses ZSTD's default tuning.");
+
+ABSL_FLAG(dfly::QList::ComprPolicy, list_compress_policy, dfly::QList::ComprPolicy{},
+          "Policy for compressing list nodes with a ZSTD dictionary. Empty (the default) disables "
+          "compression. Otherwise a comma separated list of options: "
+          "min_size=<bytes> - the list must reach this malloc usage before nodes are compressed, "
+          "0 means no size requirement. For example, 'min_size=4096' compresses the interior "
+          "nodes of lists that occupy at least 4KB. A bare integer is also accepted as a "
+          "min_size, where 0 disables compression. Ignored unless --list_compress_depth is 0, "
+          "and ignored for lists backed by tiered storage.");
+
+ABSL_FLAG(uint32_t, list_compress_dict_threshold, 0,
+          "Deprecated -- use --list_compress_policy=min_size=<bytes> instead.");
 
 /* Maximum size in bytes of any multi-element listpack.
  * Larger values will live in their own isolated listpacks.
@@ -394,6 +410,72 @@ QList::Node* SplitNode(QList::Node* node, int offset, bool after, ssize_t* diff)
 
 }  // namespace
 
+bool AbslParseFlag(string_view in, QList::ComprPolicy* policy, string* err) {
+  *policy = QList::ComprPolicy{};
+  in = absl::StripAsciiWhitespace(in);
+  if (in.empty())  // compression disabled.
+    return true;
+
+  // A bare number is accepted for compatibility with the deprecated
+  // --list_compress_dict_threshold flag, which only controlled the size gate. That flag used 0
+  // to mean "disabled", so a bare 0 keeps meaning disabled here; the keyed "min_size=0" form is
+  // how an enabled policy asks for no size gate.
+  if (uint32_t min_size; absl::SimpleAtoi(in, &min_size)) {
+    if (min_size == 0)
+      return true;
+
+    policy->min_size = min_size;
+    policy->enabled = true;
+    return true;
+  }
+
+  for (string_view option : absl::StrSplit(in, ',', absl::SkipWhitespace())) {
+    if (!absl::StrContains(option, '=')) {
+      *err = absl::StrCat("expected key=value, got '", option, "'");
+      return false;
+    }
+    pair<string_view, string_view> kv = absl::StrSplit(option, absl::MaxSplits('=', 1));
+    string_view key = absl::StripAsciiWhitespace(kv.first);
+    string_view value = absl::StripAsciiWhitespace(kv.second);
+
+    uint32_t num;
+    if (!absl::SimpleAtoi(value, &num)) {
+      *err = absl::StrCat("invalid numeric value '", value, "' for '", key, "'");
+      return false;
+    }
+
+    if (key == "min_size") {
+      policy->min_size = num;
+    } else {
+      *err = absl::StrCat("unknown option '", key, "'");
+      return false;
+    }
+  }
+
+  policy->enabled = true;
+  return true;
+}
+
+string AbslUnparseFlag(const QList::ComprPolicy& policy) {
+  if (!policy.enabled)
+    return string{};
+
+  return absl::StrCat("min_size=", policy.min_size);
+}
+
+auto QList::PolicyFromFlags() -> ComprPolicy {
+  ComprPolicy policy = absl::GetFlag(FLAGS_list_compress_policy);
+  if (!policy.enabled) {
+    if (uint32_t threshold = absl::GetFlag(FLAGS_list_compress_dict_threshold); threshold > 0) {
+      LOG_FIRST_N(WARNING, 1) << "--list_compress_dict_threshold is deprecated, please use "
+                                 "--list_compress_policy=min_size=<bytes> instead";
+      policy.min_size = threshold;
+      policy.enabled = true;
+    }
+  }
+  return policy;
+}
+
 __thread QList::Stats QList::stats;
 
 QList::Stats& QList::Stats::operator+=(const Stats& other) {
@@ -483,6 +565,7 @@ QList::QList(int fill, int compress)
       dict_bulk_failed_(0),
       dict_bulk_finished_(0),
       tiering_enabled_(0),
+      zstd_enabled_(0),
       compress_(compress),
       bookmark_count_(0) {
 }
@@ -527,10 +610,11 @@ void QList::MoveFrom(QList&& other) {
   dict_bulk_failed_ = other.dict_bulk_failed_;
   dict_bulk_finished_ = other.dict_bulk_finished_;
   tiering_enabled_ = other.tiering_enabled_;
+  zstd_enabled_ = other.zstd_enabled_;
   compress_ = other.compress_;
   bookmark_count_ = other.bookmark_count_;
   db_id_ = other.db_id_;
-  zstd_threshold_ = other.zstd_threshold_;
+  zstd_min_size_ = other.zstd_min_size_;
   tiering_params_ = std::move(other.tiering_params_);
 
   other.head_ = nullptr;
@@ -1002,7 +1086,7 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
     } else if (tl_zstd_dict) {
       // Dict exists (trained by this or another instance), bulk-compress all interior nodes.
       BackfillCompressWithZstdDict();
-    } else if (!dict_learning_failed_ && malloc_size_ >= zstd_threshold_ && len_ >= 2) {
+    } else if (!dict_learning_failed_ && malloc_size_ >= zstd_min_size_ && len_ >= 2) {
       // No dict yet, try to train one.
       TrainZstdDict();
     }
@@ -1607,7 +1691,7 @@ auto QList::Iterator::Get() const -> Entry {
 }
 
 bool QList::TrainZstdDict() {
-  DCHECK_GE(malloc_size_, zstd_threshold_);
+  DCHECK_GE(malloc_size_, zstd_min_size_);
   DCHECK_GE(len_, 2u);
 
   // If the thread-local dictionary is already trained, reuse it.
@@ -1694,7 +1778,7 @@ void QList::CompressAfterLoad() {
   if (!tl_zstd_dict) {
     // No thread-local dictionary yet. Train one from this list's data, but only
     // if the list is large enough to be worth it.
-    if (dict_learning_failed_ || malloc_size_ < zstd_threshold_ || len_ < 2)
+    if (dict_learning_failed_ || malloc_size_ < zstd_min_size_ || len_ < 2)
       return;
     if (!TrainZstdDict())
       return;
