@@ -228,7 +228,7 @@ class InterpreterManager {
 
  private:
   util::fb2::EventCount waker_;
-  const unsigned num_;
+  const unsigned num_;  // pool capacity: max interpreters this manager keeps alive at once
 
   uint64_t generation_ = 0;   // bumped by Reset()
   unsigned total_alive_ = 0;  // live count incl. borrowed and stale; capped at num_

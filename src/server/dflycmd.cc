@@ -270,7 +270,8 @@ void DflyCmd::Thread(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (num_thread < pool->size()) {
     if (int(num_thread) != ProactorBase::me()->GetPoolIndex()) {
-      // Migrate refuses this too, but a plain error beats its "invalid state".
+      // Connection::Migrate() would refuse this as well, but its failure surfaces below only as a
+      // generic "invalid state"; reply with the specific reason instead.
       if (cmd_cntx->server_conn_cntx()->IsMigrationBlocked()) {
         return cmd_cntx->SendError(MigrationBlockedErr("DFLY THREAD"));
       }
