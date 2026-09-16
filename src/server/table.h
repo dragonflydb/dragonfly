@@ -190,7 +190,6 @@ struct DbTable {
   friend void intrusive_ptr_add_ref(DbTable* table) noexcept;
   friend void intrusive_ptr_release(DbTable* table) noexcept;
 
-  PMR_NS::memory_resource* memory_resource_;
   uint32_t use_count_ = 0;
 };
 

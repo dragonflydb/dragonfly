@@ -19,24 +19,13 @@ namespace dfly {
 
 using namespace std;
 
-void DbSliceDeleter::operator()(DbSlice* ptr) const {
-  if (!ptr)
-    return;
-  auto* mr = ptr->shard_owner()->memory_resource();
-  std::destroy_at(ptr);
-  mr->deallocate(ptr, sizeof(DbSlice), alignof(DbSlice));
-}
-
 Namespace::Namespace() {
   shard_db_slices_.resize(shard_set->size());
   shard_blocking_controller_.resize(shard_set->size());
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
     ShardId sid = es->shard_id();
-    auto* mr = es->memory_resource();
-    void* storage = mr->allocate(sizeof(DbSlice), alignof(DbSlice));
-    shard_db_slices_[sid].reset(std::construct_at(static_cast<DbSlice*>(storage), sid,
-                                                  absl::GetFlag(FLAGS_cache_mode), es, this));
+    shard_db_slices_[sid] = make_unique<DbSlice>(sid, absl::GetFlag(FLAGS_cache_mode), es, this);
   });
 }
 
@@ -88,16 +77,21 @@ void Namespaces::Clear() {
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
     LOG(ERROR) << "Namespaces::Clear: DbSlice::ShutdownThreadLocal shard=" << es->shard_id();
-    // We will not destroy the db slice, so clear the pending delete list. The orphaned
-    // DbSlice/DashTable pages get reclaimed in bulk when the shard's heap is destroyed
-    // in EngineShard::DestroyThreadLocal(), right after this runs.
     DbSlice::ShutdownThreadLocal();
 
+    // Marks each DbTable's prime/mcflag arena-destruct (no-op destructor), so the per-key
+    // data they hold is left for the shard's mi_heap_destroy() to reclaim in bulk instead of
+    // being walked/destructed one entry at a time. DbSlice/DbTable themselves are NOT
+    // detached -- they're destructed for real right here (cheaply, now that prime/mcflag are
+    // no-ops), explicitly, on this shard's own thread. That matters: DbTable::~DbTable()
+    // asserts thread_index == ServerState::tlocal()->thread_index(), so it must run here,
+    // inside this per-shard callback -- not later, implicitly, when namespaces_.clear() runs
+    // on whatever thread called Namespaces::Clear().
     for (auto& val : ABSL_TS_UNCHECKED_READ(namespaces_) | views::values) {
       auto& db_slice = val.shard_db_slices_[es->shard_id()];
       LOG(ERROR) << "Namespaces::Clear: PrepareForSingleShotHeapDestroy shard=" << es->shard_id();
       db_slice->PrepareForSingleShotHeapDestroy();
-      db_slice.release();
+      db_slice.reset();
     }
     LOG(ERROR) << "Namespaces::Clear: shard done, shard=" << es->shard_id();
   });

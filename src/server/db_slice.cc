@@ -517,6 +517,11 @@ void DbSlice::PrepareForSingleShotHeapDestroy() {
   fetched_items_.rehash(0);
   CHECK(change_cb_.empty());
 
+  // Mark each DbTable's prime/mcflag as arena-destruct (no-op destructor) so the actual
+  // teardown -- which happens normally, later, via ~DbSlice()'s existing db_arr_ loop below
+  // -- is cheap. DbTable/DbSlice themselves stay on the plain backing heap and are destructed
+  // for real; only the (potentially huge) per-key data inside prime/mcflag is left for the
+  // shard's mi_heap_destroy() to reclaim in bulk.
   for (auto& db : db_arr_) {
     if (!db)
       continue;
@@ -524,9 +529,7 @@ void DbSlice::PrepareForSingleShotHeapDestroy() {
                << " index=" << shard_id_;
     CHECK_EQ(db->use_count(), 1u);
     db->PrepareForSingleShotHeapDestroy();
-    db.detach();
   }
-  DbTableArray{}.swap(db_arr_);
   LOG(ERROR) << "DbSlice::PrepareForSingleShotHeapDestroy: done, index=" << shard_id_;
 }
 
@@ -1796,9 +1799,7 @@ finish:
 void DbSlice::CreateDb(DbIndex db_ind) {
   auto& db = db_arr_[db_ind];
   if (!db) {
-    auto* mr = owner_->memory_resource();
-    void* storage = mr->allocate(sizeof(DbTable), alignof(DbTable));
-    db.reset(std::construct_at(static_cast<DbTable*>(storage), mr, db_ind));
+    db.reset(new DbTable{owner_->memory_resource(), db_ind});
     table_memory_ += db->table_memory();
   }
 }

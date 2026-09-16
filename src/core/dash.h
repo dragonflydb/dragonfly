@@ -118,6 +118,13 @@ class DashTable : public detail::DashTableBase {
             PMR_NS::memory_resource* mr = PMR_NS::get_default_resource());
   ~DashTable();
 
+  // Marks this table so its destructor becomes a no-op (see arena_destruct_ below). Call only
+  // right before the table itself is about to be destructed, when its memory_resource's whole
+  // arena is about to be reclaimed in bulk regardless of what this destructor would do.
+  void SetArenaDestruct(bool enable) {
+    arena_destruct_ = enable;
+  }
+
   void Reserve(size_t size);
 
   // false for duplicate, true if inserted.
@@ -467,6 +474,13 @@ class DashTable : public detail::DashTableBase {
   Policy policy_;
   std::vector<SegmentType*, PMR_NS::polymorphic_allocator<SegmentType*>> segment_;
 
+  // When set, ~DashTable() becomes a no-op: neither the contained values nor the segment
+  // storage get destructed/deallocated. Only safe when the table's own memory lives in an
+  // arena/heap that will be reclaimed in bulk by other means (e.g. mi_heap_destroy) -- at
+  // which point per-entry teardown here is both wasted work and, if the arena is already
+  // gone by the time this destructor runs, a use-after-free.
+  bool arena_destruct_ = false;
+
   uint64_t garbage_collected_ = 0;
   uint64_t stash_unloaded_ = 0;
 };  // DashTable
@@ -815,6 +829,9 @@ DashTable<_Key, _Value, Policy>::DashTable(size_t capacity_log, const Policy& po
 
 template <typename _Key, typename _Value, typename Policy>
 DashTable<_Key, _Value, Policy>::~DashTable() {
+  if (arena_destruct_)
+    return;
+
   Clear();
   auto* resource = segment_.get_allocator().resource();
   PMR_NS::polymorphic_allocator<SegmentType> pa(resource);

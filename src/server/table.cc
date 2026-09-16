@@ -115,8 +115,7 @@ DbTable::SampleUniqueKeys::~SampleUniqueKeys() {
 DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
     : prime(kInitSegmentLog, detail::PrimeTablePolicy{}, mr),
       mcflag(0, detail::ExpireTablePolicy{}, mr),
-      index(db_index),
-      memory_resource_(mr) {
+      index(db_index) {
   if (IsClusterEnabled()) {
     slots_stats.reset(new SlotStats[kMaxSlotNum + 1]);
   }
@@ -131,16 +130,19 @@ DbTable::~DbTable() {
 }
 
 void DbTable::PrepareForSingleShotHeapDestroy() {
+  // prime/mcflag hold potentially millions of CompactObj entries, all allocated on this
+  // shard's arena; walking and destructing each one individually is exactly the per-object
+  // teardown "fast shutdown" exists to avoid. Mark them so their own destructors become
+  // no-ops -- the arena itself (mi_heap_destroy) reclaims their memory in bulk instead.
+  // DbTable itself stays on the plain backing heap and gets destructed normally (cheaply,
+  // now that prime/mcflag are no-ops) via the regular intrusive_ptr refcount path.
+  prime.SetArenaDestruct(true);
+  mcflag.SetArenaDestruct(true);
+
   LOG(ERROR) << "DbTable::PrepareForSingleShotHeapDestroy: trans_locks db_index=" << index;
   trans_locks.PrepareForSingleShotHeapDestroy();
   CHECK(watched_keys.empty());
   watched_keys.rehash(0);
-
-  LOG(ERROR) << "DbTable::PrepareForSingleShotHeapDestroy: sample structures db_index=" << index;
-  delete std::exchange(sample_top_keys, nullptr);
-  delete std::exchange(sample_unique_keys, nullptr);
-  delete std::exchange(sample_values_hist, nullptr);
-  slots_stats.reset();
   LOG(ERROR) << "DbTable::PrepareForSingleShotHeapDestroy: done db_index=" << index;
 }
 
@@ -151,9 +153,7 @@ void intrusive_ptr_add_ref(DbTable* table) noexcept {
 void intrusive_ptr_release(DbTable* table) noexcept {
   DCHECK_GT(table->use_count_, 0u);
   if (--table->use_count_ == 0) {
-    auto* mr = table->memory_resource_;
-    std::destroy_at(table);
-    mr->deallocate(table, sizeof(DbTable), alignof(DbTable));
+    delete table;
   }
 }
 
