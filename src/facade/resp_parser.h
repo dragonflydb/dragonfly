@@ -93,9 +93,7 @@ class RESPParser {
   RESPParser(const RESPParser&) = delete;
   RESPParser& operator=(const RESPParser&) = delete;
 
-  ~RESPParser() {
-    redisReaderFree(reader_);
-  }
+  ~RESPParser();
 
   // If consumed is provided, it receives the number of buffered wire bytes processed by this
   // call. Summing it across calls gives the exact size of a fragmented reply.
@@ -110,6 +108,11 @@ class RESPParser {
 
   size_t BufferPos() const {
     return reader_->pos;
+  }
+
+  // Exposes the read buffer's pointer, e.g. to check which heap it was allocated on.
+  const void* BufferPtrForTest() const {
+    return reader_->buf;
   }
 
  private:
