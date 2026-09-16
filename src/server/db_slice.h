@@ -87,8 +87,6 @@ struct SliceEvents {
   // how many journal omit optimizations were performed
   size_t journal_omit = 0;
 
-  uint64_t huff_encode_total = 0, huff_encode_success = 0;
-
   SliceEvents& operator+=(const SliceEvents& o);
 };
 

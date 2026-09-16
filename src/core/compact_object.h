@@ -155,12 +155,6 @@ class CompactObj {
   static constexpr unsigned kInlineLen = 16;
 
  public:
-  // Maximum input length, in bytes, that we attempt to compress with Huffman encoding.
-  // The on-wire blob carries a varint size-delta header (1 or 2 bytes), so 16 KB stays well
-  // inside the 15-bit delta budget. Also used by debug tooling that builds a representative
-  // symbol histogram from existing data to train the Huffman table.
-  static constexpr unsigned kMaxHuffLen = 16 * 1024;
-
  private:
   void operator=(const CompactObj&) = delete;
   CompactObj(const CompactObj&) = delete;
@@ -194,11 +188,10 @@ class CompactObj {
     NONE_ENC = 0,
     ASCII1_ENC = 1,
     ASCII2_ENC = 2,
-    HUFFMAN_ENC = 3,
   };
 
  public:
-  // Utility class for working with different string encodings (ascii, huffman, etc)
+  // Utility class for working with string encodings.
   struct StrEncoding {
     StrEncoding(uint8_t enc, bool is_key) : enc_(static_cast<EncodingEnum>(enc)), is_key_(is_key) {
     }
@@ -214,9 +207,7 @@ class CompactObj {
    private:
     friend class CompactObj;
 
-    // For HUFFMAN_ENC, huff_header is the little-endian 16-bit delta header
-    // (decoded_size - compressed_size - 2). For other encodings the header is ignored.
-    size_t DecodedSize(size_t compr_size, uint16_t huff_header) const;
+    size_t DecodedSize(size_t compr_size) const;
 
     EncodingEnum enc_;
     bool is_key_;
@@ -476,10 +467,6 @@ class CompactObj {
 
   uint8_t GetFirstByte() const;
 
-  // For HUFFMAN_ENC strings, returns the first 2 bytes of the encoded blob assembled as a
-  // little-endian uint16_t. Those 2 bytes carry the delta header that maps compressed length
-  // to decoded length. Only meaningful when encoding_ == HUFFMAN_ENC.
-  uint16_t GetHuffHeader() const;
   // Returns true if the byte was decoded successfully, false if idx is out of bounds.
   bool GetByteAtIndex(size_t idx, uint8_t* res) const;
   // Returns a pair of booleans: {success, in_place}. success is false if offset is out of bounds
@@ -488,7 +475,6 @@ class CompactObj {
 
   struct Stats {
     size_t small_string_bytes = 0;
-    uint64_t huff_encode_total = 0, huff_encode_success = 0;
   };
 
   static Stats GetStatsThreadLocal();
@@ -499,13 +485,6 @@ class CompactObj {
   // EngineShard::Heartbeat.
   static void DrainPendingReads();
 
-  enum HuffmanDomain : uint8_t {
-    HUFF_KEYS = 0,
-    HUFF_STRING_VALUES = 1,
-    // TODO: add more domains.
-  };
-
-  static bool InitHuffmanThreadLocal(HuffmanDomain domain, std::string_view hufftable);
   static MemoryResource* memory_resource();  // thread-local.
 
   template <typename T, typename... Args> static T* AllocateMR(Args&&... args) {
@@ -570,10 +549,7 @@ class CompactObj {
     uint16_t is_cool : 1;
     uint16_t representation : 2;  // See ExternalRep
     uint16_t is_reserved : 1;
-    // For HUFFMAN_ENC strings, holds the first 2 bytes of the encoded blob, which encode
-    // the huffman delta header (little-endian) used to recover decoded length. For other
-    // encodings, only header_bytes[0] is meaningful (cached first byte).
-    uint8_t header_bytes[2];
+    uint8_t reserved[2];
 
     // We do not have enough space in the common area to store page_index together with
     // cool_record pointer. Therefore, we moved this field into TieredCoolRecord itself.
