@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "base/gtest.h"
+#include "core/mi_memory_resource.h"
 
 namespace dfly {
 
@@ -63,6 +64,42 @@ TEST(TOPKBasic, DecayTableMemoryAllocation) {
   size_t expected_table_size = TOPK::kDecayLookupSize * sizeof(double);
   EXPECT_GE(custom_mem - default_mem, expected_table_size);
 }
+
+class TOPKAllocatorTest : public ::testing::TestWithParam<double> {};
+
+TEST_P(TOPKAllocatorTest, AllocatesFromSuppliedResource) {
+  const double decay = GetParam();
+  const bool is_custom_decay = std::abs(decay - TOPK::kDefaultDecay) >= TOPK::kDecayEpsilon;
+
+  MiMemoryResource tracking(mi_heap_get_backing());
+  TOPK topk(&tracking, /*k=*/1, /*width=*/8, /*depth=*/7, decay);
+
+  // Counters + heap capacity are always allocated from the supplied resource regardless of
+  // decay; isolate the decay table's contribution by comparing against a default-decay instance
+  // with identical dimensions (which allocates none of its own).
+  MiMemoryResource baseline_tracking(mi_heap_get_backing());
+  TOPK baseline_topk(&baseline_tracking, /*k=*/1, /*width=*/8, /*depth=*/7, TOPK::kDefaultDecay);
+
+  if (is_custom_decay) {
+    // Custom decay builds a dedicated ~32KB lookup table from the supplied resource.
+    EXPECT_GE(tracking.used() - baseline_tracking.used(), TOPK::kDecayLookupSize * sizeof(double));
+  } else {
+    EXPECT_EQ(tracking.used(), baseline_tracking.used());
+  }
+
+  size_t after_construction = tracking.used();
+
+  // Long enough to defeat SSO (libstdc++: 15 bytes, libc++: 22 bytes) so the key is guaranteed
+  // to allocate rather than being stored inline.
+  const string long_key(64, 'x');
+  topk.Add(long_key);
+
+  size_t after_add = tracking.used();
+  EXPECT_GE(after_add - after_construction, long_key.size());
+}
+
+INSTANTIATE_TEST_SUITE_P(DefaultAndCustomDecay, TOPKAllocatorTest,
+                         ::testing::Values(TOPK::kDefaultDecay, 0.75));
 
 // Move-construct a populated TOPK; source should be emptied and destination should hold the items.
 TEST_F(TOPKTest, MoveConstructorTransfersOwnership) {
