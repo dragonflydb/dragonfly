@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Allowlisted read-only wrapper for dfadmin."""
+
+import os
+import sys
+
+
+INFO_SECTIONS = {
+    "server",
+    "replication",
+    "keyspace",
+    "stats",
+    "memory",
+    "persistence",
+    "cpu",
+    "clients",
+    "commandstats",
+}
+
+
+def reject(message: str) -> None:
+    print(f"REJECTED: {message}", file=sys.stderr)
+    sys.exit(2)
+
+
+def split_global_options(arguments: list[str]) -> list[str]:
+    remaining = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--env":
+            if index + 1 == len(arguments):
+                reject("--env requires a value")
+            index += 2
+            continue
+        if argument.startswith("--env="):
+            index += 1
+            continue
+        remaining.append(argument)
+        index += 1
+    return remaining
+
+
+def is_show_options(arguments: list[str], allowed_flags: set[str]) -> bool:
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument not in allowed_flags:
+            return False
+        if argument == "--output":
+            if index + 1 == len(arguments) or arguments[index + 1] not in {"json", "yaml"}:
+                return False
+            index += 2
+            continue
+        index += 1
+    return True
+
+
+def is_allowed_node_response(arguments: list[str]) -> bool:
+    if len(arguments) < 5 or arguments[:2] != ["node", "resp"] or arguments[3] != "--":
+        return False
+    command = [argument.upper() for argument in arguments[4:]]
+    if command[0] == "INFO":
+        return len(command) <= 2 and (len(command) == 1 or command[1].lower() in INFO_SECTIONS)
+    if command[:2] == ["CONFIG", "GET"]:
+        return len(command) == 3
+    if command == ["MEMORY", "STATS"] or command == ["LATENCY", "LATEST"]:
+        return True
+    if command == ["DBSIZE"] or command == ["ROLE"] or command == ["PING"]:
+        return True
+    if len(command) == 3 and command[:2] == ["SLOWLOG", "GET"]:
+        try:
+            return 0 <= int(command[2]) <= 128
+        except ValueError:
+            return False
+    return False
+
+
+def is_allowed_audit_log(arguments: list[str]) -> bool:
+    if arguments[:2] != ["audit-log", "list"]:
+        return False
+
+    has_from = False
+    has_to = False
+    has_resource_id = False
+    has_search_metadata = False
+    index = 2
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--search-metadata":
+            has_search_metadata = True
+            index += 1
+            continue
+        if argument in {"--from", "--to", "--resource-id"}:
+            if index + 1 == len(arguments) or arguments[index + 1].startswith("-"):
+                return False
+            if argument == "--from":
+                has_from = True
+            elif argument == "--to":
+                has_to = True
+            else:
+                has_resource_id = True
+            index += 2
+            continue
+        if argument == "--limit":
+            if index + 1 == len(arguments):
+                return False
+            try:
+                if not 1 <= int(arguments[index + 1]) <= 100:
+                    return False
+            except ValueError:
+                return False
+            index += 2
+            continue
+        if argument == "--output":
+            if index + 1 == len(arguments) or arguments[index + 1] not in {"json", "yaml"}:
+                return False
+            index += 2
+            continue
+        return False
+
+    return has_from and has_to and has_resource_id and has_search_metadata
+
+
+def is_allowed(arguments: list[str]) -> bool:
+    if arguments == ["datastore", "list"]:
+        return True
+    if len(arguments) >= 3 and arguments[:2] == ["datastore", "show"]:
+        return is_show_options(arguments[3:], {"--shards", "--nodes", "--migrations", "--output"})
+    if len(arguments) == 3 and arguments[:2] in ({"cluster", "status"}, {"cluster", "slots"}):
+        return True
+    if len(arguments) >= 3 and arguments[:2] == ["shard", "show"]:
+        return is_show_options(arguments[3:], {"--nodes", "--migrations", "--output"})
+    if len(arguments) == 3 and arguments[:2] == ["node", "show"]:
+        return True
+    if arguments in (["node", "status"], ["node", "status", "cluster"]):
+        return True
+    if is_allowed_audit_log(arguments):
+        return True
+    return is_allowed_node_response(arguments)
+
+
+def print_help() -> None:
+    print("Usage: dfadmin-wrapper [--env ENV] <read-only dfadmin command>")
+    print("Allowed: datastore list/show, cluster status/slots, shard show, node show/status/resp,")
+    print(
+        "and bounded audit-log list queries with --from, --to, --resource-id, and --search-metadata"
+    )
+    print("Forwarded node resp commands: INFO, CONFIG GET, MEMORY STATS, LATENCY LATEST,")
+    print("DBSIZE, ROLE, PING, and SLOWLOG GET 0..128")
+    print("All commands not explicitly listed are rejected before dfadmin is run.")
+
+
+def main() -> None:
+    arguments = sys.argv[1:]
+    if not arguments or arguments in (["-h"], ["--help"]):
+        print_help()
+        return
+    command = split_global_options(arguments)
+    if not command:
+        reject("a read-only dfadmin command is required")
+    if not is_allowed(command):
+        reject("command is not on the read-only allowlist")
+    os.execvp("dfa", ["dfa", *arguments])
+
+
+if __name__ == "__main__":
+    main()

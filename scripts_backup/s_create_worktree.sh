@@ -3,39 +3,47 @@ set -euo pipefail
 
 show_help() {
     cat << EOF
-Usage: $(basename "$0") [OPTIONS] [<branch_name>] <target_dir>
+Usage:
+    $(basename "$0") [options] [<branch-name>] <target-dir>
 
-Automates Git worktree creation, submodule initialization, and optional build folder copying/scrubbing.
+Create a Dragonfly Git worktree. Optionally initialize Helio before use,
+copy a source build directory, or configure and build the new worktree.
 
-Omit <branch_name> to create a detached worktree at the current HEAD.
+Arguments:
+    <branch-name>  Existing branch to check out, or a new branch to create from HEAD.
+                                 Omit it for a detached worktree at the current HEAD.
+    <target-dir>   New worktree destination. It must not already exist.
 
 Options:
-    -s                   Initialize and update submodules recursively.
-    -b, --copy-build <path|default>
-                         Copy and scrub a build folder. Use 'default' for './build-dbg'
-                         (or './build-opt' with -r).
-    -B, --build          Configure and build Dragonfly after creating the worktree.
-    -r                   Build in Release mode. Default is Debug mode; implies --build.
-    -h, --help           Show this help message.
+    -s, --clone-helio        Initialize and update the Helio submodule recursively.
+    -b                       Copy and scrub the default build: ./build-dbg, or
+                                                     ./build-opt with --release.
+    --copy-build <build-dir> Copy and scrub the specified source build directory.
+    -B, --build              Configure and build Dragonfly after creating the worktree.
+    -r, --release            Use Release mode and imply --build. Debug is the default.
+    -h, --help               Show this help message.
+
+The copied build directory is scrubbed of generated CMake and Ninja state.
+Use either -b or --copy-build, not both. Build copying never enables --build.
 
 Examples:
-  # Basic worktree creation:
-  $(basename "$0") my-feature ../wt-feature
+    # Create a new branch and worktree only.
+    $(basename "$0") feature/cache ../feature-cache
 
-    # Create a detached worktree at the current HEAD:
-    $(basename "$0") ../wt-detached
+    # Create a detached worktree at the current HEAD.
+    $(basename "$0") ../detached-worktree
 
-    # Copy a specific build folder without building:
-  $(basename "$0") -s -b ./build-opt my-feature ../wt-feature
+    # Initialize Helio before using a new worktree.
+    $(basename "$0") --clone-helio feature/cache ../feature-cache
 
-    # Copy the default Debug build folder without building:
-    $(basename "$0") -s -b default my-feature ../wt-feature
+    # Copy the default Debug build directory (./build-dbg).
+    $(basename "$0") --clone-helio -b feature/cache ../feature-cache
 
-    # Build a new Debug worktree:
-    $(basename "$0") -s --build my-feature ../wt-feature
+    # Copy a specific build directory.
+    $(basename "$0") --clone-helio --copy-build ./build-asan feature/cache ../feature-cache
 
-    # Copy the default Release build folder and rebuild it in Release mode:
-    $(basename "$0") -s -b default -r my-feature ../wt-feature
+    # Copy the default Release build directory (./build-opt), then rebuild it.
+    $(basename "$0") --clone-helio -b --release feature/cache ../feature-cache
 EOF
 }
 
@@ -56,17 +64,31 @@ while [[ $# -gt 0 ]]; do
             show_help
             exit 0
             ;;
-        -s|--submodule|--submodules)
+        -s|--clone-helio)
             SUBMODULES=true
             shift
             ;;
-        -b|--copy-build)
-            COPY_BUILD=true
-            if [[ -z "${2:-}" || "$2" == -* ]]; then
-                echo "Error: '$1' requires a build directory path or 'default'." >&2
+        -b)
+            if [[ "$COPY_BUILD" == true ]]; then
+                echo "Error: Use either -b or --copy-build, not both." >&2
                 show_help
                 exit 1
             fi
+            COPY_BUILD=true
+            shift
+            ;;
+        --copy-build)
+            if [[ -z "${2:-}" || "$2" == -* ]]; then
+                echo "Error: '$1' requires a build directory path." >&2
+                show_help
+                exit 1
+            fi
+            if [[ "$COPY_BUILD" == true ]]; then
+                echo "Error: Use either -b or --copy-build, not both." >&2
+                show_help
+                exit 1
+            fi
+            COPY_BUILD=true
             EXPLICIT_BUILD_PATH="$2"
             shift 2
             ;;
@@ -136,7 +158,7 @@ ABS_BUILD_SRC=""
 TARGET_BUILD_DIR_NAME=""
 
 if [[ "$COPY_BUILD" == true ]]; then
-    if [[ "$EXPLICIT_BUILD_PATH" == "default" ]]; then
+    if [[ -z "$EXPLICIT_BUILD_PATH" ]]; then
         if [[ "$RELEASE_MODE" == true ]]; then
             EXPLICIT_BUILD_PATH="./build-opt"
         else
