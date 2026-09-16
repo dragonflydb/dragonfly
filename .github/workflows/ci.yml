@@ -41,6 +41,18 @@ jobs:
             --to-ref ${{ github.event.pull_request.head.sha }}
       - name: Check fuzz command coverage
         run: python3 fuzz/check_fuzz_coverage.py
+
+  acl-valkey-check:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Verify command ACL categories against Valkey
+        run: python3 tools/verify_script_acl --check all
+
   build:
     permissions:
       contents: read
