@@ -2824,17 +2824,33 @@ LoadBlobResult ZSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv
 }
 
 LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* pv) {
-  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
+  // Validate deeply on every load path, not only RESTORE: a sorted set is read pairwise (member,
+  // score), so an odd or count-mismatched listpack would later NULL-deref a missing score.
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), /*deep=*/1, nullptr, nullptr)) {
     LOG(ERROR) << "Zset listpack integrity check failed.";
     return LoadBlobResult::kCorrupted;
   }
 
   unsigned char* src_lp = (unsigned char*)blob.data();
 
-  // Reject an unpaired tail; gated on deep since counting may scan not-yet-validated entries.
-  if (deep && lpLength(src_lp) % 2 != 0) {
+  // Deep validation matched count to body, so lpLength is exact; reject an odd (unpaired) count.
+  if (lpLength(src_lp) % 2 != 0) {
     LOG(ERROR) << "Zset listpack has an odd number of entries.";
     return LoadBlobResult::kCorrupted;
+  }
+
+  if (deep) {  // untrusted input only; a duplicate member is corruption
+    absl::flat_hash_set<std::string> seen;
+    for (uint8_t* p = lpFirst(src_lp); p; p = lpNext(src_lp, lpNext(src_lp, p))) {
+      unsigned slen = 0;
+      long long lval = 0;
+      uint8_t* vstr = lpGetValue(p, &slen, &lval);
+      std::string member = vstr ? std::string((char*)vstr, slen) : absl::StrCat(lval);
+      if (!seen.insert(std::move(member)).second) {
+        LOG(ERROR) << "Zset listpack has a duplicate member.";
+        return LoadBlobResult::kCorrupted;
+      }
+    }
   }
 
   unsigned long long bytes = lpBytes(src_lp);

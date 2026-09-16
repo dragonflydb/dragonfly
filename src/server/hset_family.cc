@@ -1583,13 +1583,15 @@ auto HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) -> LoadB
 
 auto HSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* pv)
     -> LoadBlobResult {
-  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
+  // Validate deeply on every load path, not only RESTORE: a hash is read pairwise, so an odd or
+  // count-mismatched listpack would later NULL-deref a missing value.
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), /*deep=*/1, nullptr, nullptr)) {
     LOG(ERROR) << "Hash listpack integrity check failed.";
     return LoadBlobResult::kCorrupted;
   }
 
-  // Reject an unpaired tail; gated on deep since counting may scan not-yet-validated entries.
-  if (deep && lpLength((uint8_t*)blob.data()) % 2 != 0) {
+  // Deep validation matched count to body, so lpLength is exact; reject an odd (unpaired) count.
+  if (lpLength((uint8_t*)blob.data()) % 2 != 0) {
     LOG(ERROR) << "Hash listpack has an odd number of entries.";
     return LoadBlobResult::kCorrupted;
   }
