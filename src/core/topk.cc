@@ -316,7 +316,8 @@ std::optional<std::string> TOPK::UpdateHeap(std::string_view item, uint32_t new_
   // Heap is full, evict minimum and add new item
   DCHECK_EQ(min_heap_.size(), k_);
   std::string old_key(min_heap_[0].key);
-  min_heap_[0] = HeapItem(mr, item, new_count);
+  min_heap_[0].key.assign(item);
+  min_heap_[0].count = new_count;
   HeapifyDown(0);
   return old_key;
 }
