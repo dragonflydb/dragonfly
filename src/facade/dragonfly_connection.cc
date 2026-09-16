@@ -78,7 +78,7 @@ ABSL_FLAG(strings::MemoryBytesFlag, pipeline_buffer_limit, 128_MB,
 
 ABSL_FLAG(uint32_t, pipeline_queue_limit, 10000,
           "Pipeline queue max length, the server will stop reading from the client socket"
-          " once its pipeline queue crosses this limit, and will resume once it processes "
+          " once its pipeline queue crosses thsssis limit, and will resume once it processes "
           "excessive requests. This is to prevent OOM states. Users of huge pipelines sizes "
           "may require increasing this limit to prevent the risk of deadlocking."
           "See https://github.com/dragonflydb/dragonfly/discussions/3997 for details");
