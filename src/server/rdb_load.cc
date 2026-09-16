@@ -718,7 +718,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   } else {
     qlv2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                          GetFlag(FLAGS_list_compress_depth));
-    qlv2->set_compr_policy(QList::PolicyFromFlags());
+    qlv2->InitFromFlags();
   }
 
   auto cleanup = absl::Cleanup([&] {
