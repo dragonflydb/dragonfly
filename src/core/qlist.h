@@ -47,9 +47,19 @@ class QList {
   // depth-compression and ignored while the latter is enabled (see the `compress` ctor argument).
   // Parsed from --list_compress_policy, see AbslParseFlag in qlist.cc.
   struct ComprPolicy {
+    // Bounds the O(edge_depth) walk in IsCompressibleByPolicy(). Depths beyond a handful have
+    // no practical use: they only shrink the set of compressible nodes.
+    static constexpr uint32_t kMaxEdgeDepth = 16;
+    static constexpr uint32_t kMinEdgeDepth = 1;
+
     // The list's malloc usage must reach this many bytes before compression kicks in.
     // 0 means no size gate: compress as soon as the list has more than a single node.
     uint32_t min_size = 0;
+
+    // How many nodes at *each* end of the list are excluded from compression, mirroring the
+    // semantics of the `compress` depth argument. 1 (the default) keeps the head and the tail
+    // raw, so pushes and pops never need to decompress.
+    uint8_t edge_depth = 1;
 
     bool enabled = false;
   };
@@ -352,6 +362,7 @@ class QList {
   void set_compr_policy(const ComprPolicy& policy) {
     zstd_enabled_ = policy.enabled;
     zstd_min_size_ = policy.min_size;
+    edge_depth_ = policy.edge_depth;
   }
 
   // Returns the compression policy derived from the command line flags.
@@ -414,7 +425,7 @@ class QList {
     return compress_ != 0;
   }
 
-  // Tiering wins over ZSTD dictionary compression: an offloaded node reuses the `entry` pointer
+  // Tiering wins over the ZSTD dictionary policy: an offloaded node reuses the `entry` pointer
   // to hold `ext_offset` and keeps whatever `encoding` it had, so a node that was compressed and
   // then offloaded cannot be decompressed without first loading it back. Rather than teach every
   // compression site about offloaded nodes, tiered lists simply opt out of dictionary
@@ -423,12 +434,17 @@ class QList {
     return zstd_enabled_ && !AllowLZFCompression() && !tiering_enabled_;
   }
 
-  bool IsInterior(const Node* node) const {
-    return node && node != head_ && node->next != nullptr;
-  }
+  // True if `node` lies outside the uncompressed edge zone of the policy and is therefore
+  // eligible for compression. Costs O(edge_depth_) pointer hops, bounded by kMaxEdgeDepth.
+  bool IsCompressibleByPolicy(const Node* node) const;
+
+  // Compresses the first node past the uncompressed edge zone at each end. An insertion shifts
+  // every node one slot further from the head (or the tail), so at most one node per end newly
+  // becomes eligible, and CoolOff() only ever sees the nodes its caller touched.
+  void CompressEdgeBoundary();
 
   bool CanCompressWithZstdDict(const Node* node) const {
-    return !dict_bulk_failed_ && IsInterior(node);
+    return !dict_bulk_failed_ && IsCompressibleByPolicy(node);
   }
 
   Node* _Tail() const {
@@ -493,7 +509,8 @@ class QList {
   uint16_t dict_bulk_finished_ : 1;   /* bulk compression done, per-node compression active */
   uint16_t tiering_enabled_ : 1;      /* tiering storage enabled */
   uint16_t zstd_enabled_ : 1;         /* ZSTD dictionary compression enabled for this list */
-  uint16_t reserved1_ : 11;
+  uint16_t edge_depth_ : 8;           /* nodes at each end excluded from ZSTD compression */
+  uint16_t reserved1_ : 3;
   unsigned compress_ : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;
