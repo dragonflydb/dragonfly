@@ -4,11 +4,15 @@
 
 #include "server/generic_family.h"
 
+#include <absl/base/attributes.h>
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
+#include <array>
 #include <optional>
+#include <type_traits>
 
 #include "facade/cmd_arg_parser.h"
 #include "facade/reply_builder.h"
@@ -27,6 +31,7 @@ extern "C" {
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
+#include "server/channel_store.h"
 #include "server/cmd_support.h"
 #include "server/command_registry.h"
 #include "server/common.h"
@@ -673,12 +678,15 @@ bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, ScanResult* 
 
 // TODO drop template after all SCAN operations have been converted to use ScanResult instead of
 // StringVec.
+// Avoid a per-key function call from either traversal path.
 template <typename Result>
-bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, Result* res) {
+ABSL_ATTRIBUTE_ALWAYS_INLINE inline bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it,
+                                                const ScanOpts& opts, Result* res,
+                                                vector<string>& expired_events) {
   auto& db_slice = op_args.GetDbSlice();
 
-  // Passing the raw iterator is safe: OpScan prevents preemption for the whole traversal.
-  if (db_slice.TryExpire(op_args.db_cntx, prime_it)) [[unlikely]]
+  // OpScan disables journal flushing, as required by TryExpire.
+  if (db_slice.TryExpire(op_args.db_cntx, prime_it, expired_events)) [[unlikely]]
     return false;
 
   bool matches = !opts.type_filter || prime_it->second.ObjType() == opts.type_filter;
@@ -714,12 +722,21 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
-  // ScanCb can preempt due to journaling expired entries and we need to make sure that
-  // we enter the callback in a timing when journaling will not cause preemption. Otherwise,
-  // the bucket might change as we Traverse and yield.
+  // Wait for blocked bucket-serialization callbacks before obtaining iterators.
+  // Waiting here may suspend.
   db_slice.WaitForUnblockedJournalWrites();
 
-  // Disable flush journal changes to prevent preemption in traverse.
+  vector<string> expired_events;
+  // Declared before the flush guard so publishing happens after the atomic section ends.
+  absl::Cleanup publish_expired = [&] {
+    if (!expired_events.empty()) {
+      channel_store->SendMessages(
+          absl::StrCat("__keyevent@", op_args.db_cntx.db_index, "__:expired"), expired_events,
+          false);
+    }
+  };
+
+  // Prevent journal-flush suspension while traversal iterators are live.
   journal::DisableFlushGuard journal_flush_guard(op_args.shard->journal());
   unsigned cnt = 0;
 
@@ -735,9 +752,44 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // Approximately 30 microseconds.
   const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 15;
 
+  // Batch only ScanResult traversals without metadata filters that may reject keys before decoding.
+  const bool use_prefetch_batch = std::is_same_v<Result, ScanResult> && !scan_opts.type_filter &&
+                                  !scan_opts.mask && scan_opts.min_malloc_size == 0 &&
+                                  scan_opts.bucket_id == UINT_MAX;
+
+  // Queue of entries live at the fixed scan timestamp, drained once per traversed bucket. Their
+  // iterators remain valid when other entries are erased, provided the traversal does not suspend.
+  std::array<PrimeIterator, 32> pending;
+  unsigned pending_size = 0;
+  auto consume = [&] {
+    for (unsigned i = 0; i < pending_size; ++i)
+      cnt += MatchAndAppendKey(pending[i]->first, scan_opts, vec);
+    pending_size = 0;
+  };
+
   do {
-    cur = prime_table->Traverse(
-        cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
+    if (use_prefetch_batch) {
+      cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
+        if (it->first.IsExpired(op_args.db_cntx.time_now_ms)) [[unlikely]] {
+          cnt += ScanCb(op_args, it, scan_opts, vec, expired_events);
+          return;
+        }
+        it->first.PrefetchString();
+        pending[pending_size++] = it;
+        if (pending_size == pending.size())
+          consume();
+      });
+      if (cur) {
+        // Overlap fetching the next cursor's bucket with processing any remaining entries.
+        auto next_bucket = prime_table->CursorToBucketIt(cur);
+        __builtin_prefetch(reinterpret_cast<const void*>(next_bucket.bucket_address()), 0, 1);
+      }
+      consume();
+    } else {
+      cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
+        cnt += ScanCb(op_args, it, scan_opts, vec, expired_events);
+      });
+    }
   } while (cur && cnt < scan_opts.limit &&
            (base::CycleClock::Now() - start_cycles) < timeout_cycles);
 

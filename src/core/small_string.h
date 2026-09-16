@@ -35,6 +35,10 @@ class SmallString {
   void Get(char* out) const;
   void Get(std::string* dest) const;
 
+  // Hints the CPU to start loading the heap-resident part of the string. Stays out of line
+  // because the segment translation table lives in small_string.cc.
+  void Prefetch() const;
+
   bool DefragIfNeeded(PageUsage* page_usage);
 
   size_t size() const {

@@ -423,13 +423,14 @@ class DbSlice {
 
   // Erases 'it' if its embedded expire time has already passed, returning true and invalidating
   // 'it' in that case. Entries without a TTL are accepted and simply return false, unlike in
-  // ExpireIfNeeded. It is also cheaper: no key materialization and no iterator laundering.
+  // ExpireIfNeeded. Live entries need no key materialization or iterator laundering.
   // The caller must disable journal flushing before calling, using journal::DisableFlushGuard
-  // or journal::SetFlushMode(false).
-  bool TryExpire(const Context& cntx, PrimeIterator it) const {
+  // or journal::SetFlushMode(false). Expiry notifications are appended to 'events'; the caller
+  // must publish them after leaving the atomic section.
+  bool TryExpire(const Context& cntx, PrimeIterator it, std::vector<std::string>& events) const {
     if (!it->first.IsExpired(cntx.time_now_ms))
       return false;
-    return Expire(cntx, it, nullptr);
+    return Expire(cntx, it, &events);
   }
 
   // Iterate over all expire table entries and delete expired.

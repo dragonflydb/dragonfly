@@ -144,6 +144,11 @@ void SmallString::Get(std::string* dest) const {
   Get(dest->data());
 }
 
+void SmallString::Prefetch() const {
+  DCHECK(size_);
+  __builtin_prefetch(tl.seg_alloc->Translate(small_ptr_), 0, 3);
+}
+
 bool SmallString::DefragIfNeeded(PageUsage* page_usage) {
   uint8_t* cur_real_ptr = tl.seg_alloc->Translate(small_ptr_);
   if (!page_usage->IsPageForObjectUnderUtilized(tl.seg_alloc->heap(), cur_real_ptr))
