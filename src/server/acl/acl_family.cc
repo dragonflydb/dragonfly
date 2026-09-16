@@ -642,15 +642,20 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->SendBulkString(msg);
 }
 
-void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
+void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry,
+                     std::function<void()> on_requirepass_changed) {
   main_listener_ = main_listener;
   registry_ = registry;
-  config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {
-    User::UpdateRequest rqst;
-    rqst.passwords.push_back({flag.CurrentValue()});
-    registry_->MaybeAddAndUpdate("default", std::move(rqst));
-    return true;
-  });
+  config_registry.RegisterMutable(
+      "requirepass", [this, on_requirepass_changed = std::move(on_requirepass_changed)](
+                         const absl::CommandLineFlag& flag) {
+        User::UpdateRequest rqst;
+        rqst.passwords.push_back({flag.CurrentValue()});
+        registry_->MaybeAddAndUpdate("default", std::move(rqst));
+        if (on_requirepass_changed)
+          on_requirepass_changed();
+        return true;
+      });
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
   if (!acl_file.empty() && Load()) {
     return;
