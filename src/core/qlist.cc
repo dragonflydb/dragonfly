@@ -1748,11 +1748,23 @@ bool QList::CompressNodeWithDict(Node* node) {
 void QList::RecompressNode(Node* node) {
   if (!node->recompress || node->dont_compress)
     return;
-  if (IsZstdDictMode() && tl_zstd_dict && CanCompressWithZstdDict(node)) {
+
+  if (IsZstdDictMode()) {
+    // Do not fall back to LZF here. CompressRaw() asserts the node is RAW and is not the head or
+    // the tail, but a node can stop being interior between the read that set `recompress` and
+    // this call, so the fallback could fire on exactly the nodes it rejects.
     // CompressNodeWithDict updates malloc_size_ itself.
-    if (CompressNodeWithDict(node))
-      node->recompress = 0;
-  } else if (CompressRaw(node)) {
+    if (tl_zstd_dict && CanCompressWithZstdDict(node))
+      CompressNodeWithDict(node);
+
+    // Either the node is compressed again, or it is no longer eligible. Neither leaves anything
+    // pending, and a stale flag keeps the node out of sync with the memory accounting done by the
+    // callers of AccessForReads().
+    node->recompress = 0;
+    return;
+  }
+
+  if (CompressRaw(node)) {
     malloc_size_ += ssize_t(GetLzf(node)->sz) - ssize_t(node->sz);
   }
 }

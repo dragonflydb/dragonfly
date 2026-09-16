@@ -400,8 +400,13 @@ class QList {
     return compress_ != 0;
   }
 
+  // Tiering wins over ZSTD dictionary compression: an offloaded node reuses the `entry` pointer
+  // to hold `ext_offset` and keeps whatever `encoding` it had, so a node that was compressed and
+  // then offloaded cannot be decompressed without first loading it back. Rather than teach every
+  // compression site about offloaded nodes, tiered lists simply opt out of dictionary
+  // compression. CoolOff() already prefers tiering; this keeps the rest of the code consistent.
   bool IsZstdDictMode() const {
-    return zstd_threshold_ > 0 && !AllowLZFCompression();
+    return zstd_threshold_ > 0 && !AllowLZFCompression() && !tiering_enabled_;
   }
 
   bool IsInterior(const Node* node) const {
