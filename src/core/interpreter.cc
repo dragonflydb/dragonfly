@@ -1370,15 +1370,19 @@ bool Interpreter::PrepareArgs() {
         if (lua_isinteger(lua_, idx)) {
           char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), tmpbuf);
           backed_args_.PushArg(string_view{tmpbuf, size_t(next - tmpbuf)});
-        } else if (lua_isnumber(lua_, idx)) {
+        } else {
           int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
           CHECK_GT(fmt_len, 0);
           backed_args_.PushArg(string_view{tmpbuf, size_t(fmt_len)});
         }
         break;
-      case LUA_TSTRING:
-        backed_args_.PushArg(string_view{lua_tostring(lua_, idx), lua_rawlen(lua_, idx)});
+      case LUA_TSTRING: {
+        // Fetch the data and byte length together to avoid a second Lua stack lookup.
+        size_t len;
+        const char* str = lua_tolstring(lua_, idx, &len);
+        backed_args_.PushArg(string_view{str, len});
         break;
+      }
     }
   }
 
