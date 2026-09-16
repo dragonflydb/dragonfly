@@ -7,6 +7,8 @@
 #include <absl/cleanup/cleanup.h>
 
 #include <array>
+#include <cstring>
+#include <limits>
 
 extern "C" {
 #include "redis/crc64.h"
@@ -843,6 +845,86 @@ TEST_F(GenericFamilyTest, ScanWithAttr) {
   resp = Run({"scan", "0", "attr", "u"});
   vec = StrArray(resp.GetVec()[1]);
   ASSERT_EQ(0, vec.size());
+}
+
+TEST(ScanResultTest, AppendBufferAndOwnership) {
+  ScanResult result{numeric_limits<size_t>::max()};
+  string member = "member";
+  memcpy(result.AppendBuffer(member.size()), member.data(), member.size());
+  member = "changed";
+  EXPECT_EQ(result.back(), "member");
+
+  const string binary("x\0\xff", 3);
+  memcpy(result.AppendBuffer(binary.size()), binary.data(), binary.size());
+  EXPECT_EQ(result.back(), binary);
+  result.AppendBuffer(0);
+  EXPECT_EQ(result.size(), 3u);
+  EXPECT_TRUE(result.back().empty());
+
+  result.PopBack();
+  EXPECT_EQ(result.back(), binary);
+  result.PopBack();
+  EXPECT_EQ(result.back(), "member");
+  result.PopBack();
+  EXPECT_EQ(result.size(), 0u);
+}
+
+TEST(ScanResultTest, GrowthMoveAndPop) {
+  ScanResult result{1};
+  const array<string, 8> entries = {
+      "first", "", string("x\0y", 3), string(128, 'a'), string(64 << 10, 'b'), string(1 << 20, 'c'),
+      "tail",  ""};
+  for (const auto& entry : entries)
+    memcpy(result.AppendBuffer(entry.size()), entry.data(), entry.size());
+
+  auto moved = std::move(result);
+  for (size_t i = entries.size(); i > 0; --i) {
+    ASSERT_EQ(moved.size(), i);
+    EXPECT_EQ(moved.back(), entries[i - 1]);
+    moved.PopBack();
+  }
+  EXPECT_EQ(moved.size(), 0u);
+  const string_view reused = "reused";
+  memcpy(moved.AppendBuffer(reused.size()), reused.data(), reused.size());
+  EXPECT_EQ(moved.back(), reused);
+}
+
+TEST_F(GenericFamilyTest, ScanResultBuffer) {
+  // Exercise buffer growth, empty/integer/binary keys, and the oversized-reply fallback.
+  StringVec keys = {"", "42", string("binary\0\xff", 8), "keep:" + string(1 << 20, 'x')};
+  for (unsigned i = 0; i < 128; ++i) {
+    keys.push_back(
+        StrCat(i % 2 ? "keep:" : "drop:", i, ":", string(8192 + i, i % 3 ? 'a' : '\xff')));
+  }
+  for (const auto& key : keys)
+    ASSERT_EQ(Run({"set", key, "value"}), "OK");
+
+  ASSERT_THAT(Run({"expire", keys.back(), "1000"}), IntArg(1));
+  ASSERT_EQ(Run({"set", string(64, 'a'), "value", "px", "1"}), "OK");
+  AdvanceTime(1);
+
+  for (string_view pattern : {"*", "keep:*", "missing:*"}) {
+    SCOPED_TRACE(pattern);
+    StringVec expected;
+    for (const auto& key : keys) {
+      if (pattern == "*" || (pattern == "keep:*" && key.starts_with("keep:")))
+        expected.push_back(key);
+    }
+
+    string cursor = "0";
+    StringVec actual;
+    do {
+      // A huge COUNT must not cause an equally huge eager allocation.
+      auto resp = Run({"scan", cursor, "count", "5000000000", "match", pattern});
+      ASSERT_THAT(resp, ArrLen(2));
+      cursor = resp.GetVec()[0].GetString();
+      auto batch = StrArray(resp.GetVec()[1]);
+      actual.insert(actual.end(), make_move_iterator(batch.begin()),
+                    make_move_iterator(batch.end()));
+    } while (cursor != "0");
+    EXPECT_THAT(actual, UnorderedElementsAreArray(expected));
+  }
+  EXPECT_THAT(Run({"dbsize"}), IntArg(keys.size()));
 }
 
 TEST_F(GenericFamilyTest, ScanMallocSize) {

@@ -29,6 +29,7 @@ extern "C" {
 #include "server/blocking_controller.h"
 #include "server/cmd_support.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
@@ -646,7 +647,7 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
 }
 
 // Appends 'key' to 'res' unless it is filtered out by MATCH. Materializes the key exactly once.
-bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) {
+bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) {
   if (opts.matcher) {
     string str;
     key.GetString(&str);
@@ -661,7 +662,19 @@ bool AppendScanKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) 
   return true;
 }
 
-bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
+bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, ScanResult* res) {
+  key.GetString(res->AppendBuffer(key.Size()));
+  if (opts.matcher && !opts.matcher->Matches(res->back())) {
+    res->PopBack();
+    return false;
+  }
+  return true;
+}
+
+// TODO drop template after all SCAN operations have been converted to use ScanResult instead of
+// StringVec.
+template <typename Result>
+bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, Result* res) {
   auto& db_slice = op_args.GetDbSlice();
 
   // Passing the raw iterator is safe: OpScan prevents preemption for the whole traversal.
@@ -691,10 +704,13 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
     return false;
   }
 
-  return AppendScanKey(prime_it->first, opts, res);
+  return MatchAndAppendKey(prime_it->first, opts, res);
 }
 
-void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, StringVec* vec) {
+// TODO drop template after all SCAN operations have been converted to use ScanResult instead of
+// StringVec.
+template <typename Result>
+void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, Result* vec) {
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
@@ -729,7 +745,10 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   *cursor = cur.token();
 }
 
-uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys,
+// TODO drop template after all SCAN operations have been converted to use ScanResult instead of
+// StringVec.
+template <typename Result>
+uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, Result* keys,
                      ConnectionContext* cntx) {
   ShardId sid = cursor % 1024;
 
@@ -2753,14 +2772,14 @@ void GenericFamily::Scan(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
   const ScanOpts& scan_op = ops.value();
 
-  StringVec keys;
+  ScanResult keys{scan_op.limit};
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx->server_conn_cntx());
 
   auto replier = [cursor, keys = std::move(keys)](RedisReplyBuilder* builder) {
     std::string cursor_str = absl::StrCat(cursor);
     RedisReplyBuilder::ArrayScope scope{builder, 2};
     builder->SendBulkString(cursor_str);
-    builder->SendBulkStrArr(keys);
+    keys.Send(builder);
   };
 
   cmd_cntx->ReplyWith(std::move(replier));

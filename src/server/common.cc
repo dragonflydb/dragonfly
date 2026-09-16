@@ -9,6 +9,7 @@
 #include <absl/strings/str_cat.h>
 #include <fast_float/fast_float.h>
 
+#include <algorithm>
 #include <system_error>
 
 extern "C" {
@@ -21,6 +22,7 @@ extern "C" {
 #include "core/glob_matcher.h"
 #include "core/interpreter.h"
 #include "facade/cmd_arg_parser.h"
+#include "facade/reply_builder.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -216,6 +218,42 @@ std::ostream& operator<<(std::ostream& os, const GlobalState& state) {
 }
 
 ScanOpts::~ScanOpts() {
+}
+
+ScanResult::ScanResult(size_t count) {
+  // COUNT is an untrusted hint, not a bound on the number or size of returned entries.
+  count = min<size_t>(count, 1024);
+  entries_.Reserve(count, count * 64);
+}
+
+char* ScanResult::AppendBuffer(size_t len) {
+  // Cap packed bytes at 1 MiB to limit buffer reallocations/copying for large replies.
+  // Store all later entries as separate strings in overflow_ so Send() preserves their order.
+  constexpr size_t kMaxPackedBytes = 1 << 20;
+  if (!overflow_.empty() || len + packed_bytes_ >= kMaxPackedBytes) {
+    return overflow_.emplace_back(len, '\0').data();
+  }
+
+  entries_.PushArg(len);
+  packed_bytes_ += len + 1;
+  return entries_.data(entries_.size() - 1);
+}
+
+void ScanResult::PopBack() {
+  if (!overflow_.empty()) {
+    overflow_.pop_back();
+  } else {
+    packed_bytes_ -= entries_.back().size() + 1;
+    entries_.PopArg();
+  }
+}
+
+void ScanResult::Send(facade::RedisReplyBuilder* builder) const {
+  facade::RedisReplyBuilder::ArrayScope scope{builder, size()};
+  for (string_view entry : entries_.view())
+    builder->SendBulkString(entry);
+  for (const auto& entry : overflow_)
+    builder->SendBulkString(entry);
 }
 
 BorrowedInterpreter::BorrowedInterpreter(Transaction* tx, ConnectionState* state) {

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <ranges>
+#include <span>
 #include <string_view>
 
 namespace cmn {
