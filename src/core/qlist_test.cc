@@ -1224,6 +1224,9 @@ BENCHMARK(BM_QListUncompress)->ArgsProduct({{1, 4, 0}});
 
 class QListZstdTest : public ::testing::Test {
  protected:
+  QListZstdTest() : mr_(mi_heap_get_backing()) {
+  }
+
   static void SetUpTestSuite() {
     SetupMalloc();
   }
@@ -1277,6 +1280,8 @@ class QListZstdTest : public ::testing::Test {
     }
     return lp;
   }
+
+  MiMemoryResource mr_;
 };
 
 TEST_F(QListZstdTest, CompressAfterLoad) {
@@ -1560,6 +1565,47 @@ TEST_F(QListZstdTest, PartialReadIsFootprintNeutral) {
   EXPECT_EQ(tracked, ql.MallocUsed(false));
   EXPECT_LE(ql.MallocUsed(true), actual);
   EXPECT_TRUE(interior->IsCompressed());
+}
+
+TEST_F(QListZstdTest, TieredListSkipsLzfRecompression) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+  ASSERT_GT(ql.node_count(), 2u);
+
+  const QList::Node* interior = ql.Head()->next;
+  ASSERT_TRUE(interior->IsCompressed());
+
+  auto no_op = [](QList*, QList::Node*) {};
+  ql.EnableTiering(
+      QList::TieringParams{1000, no_op, no_op, no_op,
+                           PMR_NS::string("test", PMR_NS::polymorphic_allocator<char>(&mr_))},
+      &mr_);
+
+  {
+    auto cursor = ql.GetReadCursor(ql.Head()->count);
+    ASSERT_TRUE(cursor.Valid());
+    EXPECT_FALSE(interior->IsCompressed());
+  }
+
+  EXPECT_EQ(QUICKLIST_NODE_ENCODING_RAW, interior->encoding);
+  EXPECT_EQ(0, interior->recompress);
+}
+
+TEST_F(QListZstdTest, IteratorClearsIneligibleRecompression) {
+  QList ql(-1, 0);
+  ql.set_compr_threshold(1);
+  PopulateWithCeleryData(ql, 500);
+  ASSERT_GT(ql.node_count(), 2u);
+
+  QList::Node* head = const_cast<QList::Node*>(ql.Head());
+  head->recompress = 1;
+
+  auto iterator = ql.GetIterator(QList::HEAD);
+  while (iterator.Next()) {
+  }
+
+  EXPECT_EQ(0, head->recompress);
 }
 
 TEST_F(QListZstdTest, IncrementalCompression) {
