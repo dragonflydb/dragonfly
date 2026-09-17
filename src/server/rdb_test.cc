@@ -13,6 +13,7 @@ extern "C" {
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/flags/reflection.h>
+#include <lz4frame.h>
 #include <mimalloc.h>
 #include <zstd.h>
 
@@ -1945,7 +1946,7 @@ TEST_F(RdbTest, LoadAcceptsBoundedZstdBlob) {
 
   string frame(ZSTD_compressBound(inner.size()), '\0');
   size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
-  ASSERT_GT(frame_size, 0u);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
   frame.resize(frame_size);
 
   string body;
@@ -1955,6 +1956,77 @@ TEST_F(RdbTest, LoadAcceptsBoundedZstdBlob) {
   auto ec = LoadRdbBounded(WrapInRdb(body));
   EXPECT_FALSE(ec) << ec.message();
   EXPECT_EQ(Run({"get", "k"}), value);
+}
+
+TEST_F(RdbTest, LoadAcceptsExactPowerOfTwoBlob) {
+  string value(65536, 'v');
+  auto build = [&](const string& val) {
+    string in;
+    in.push_back(static_cast<char>(RDB_TYPE_STRING));
+    AppendString(&in, "k");
+    AppendString(&in, val);
+    return in;
+  };
+  string inner = build(value);
+  value.resize(value.size() - (inner.size() - 65536));
+  inner = build(value);
+  ASSERT_EQ(inner.size(), 65536u);
+
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  auto ec = LoadRdbBounded(WrapInRdb(body));
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(CheckedInt({"strlen", "k"}), 65528);
+}
+
+TEST_F(RdbTest, LoadRejectsTruncatedBlobContent) {
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendLen(&inner, 1000);
+  inner.append(5, 'x');
+
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+  body.append(4096, 'F');
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+  EXPECT_THAT(Run({"get", "k"}), kMatchNil);
+}
+
+TEST_F(RdbTest, LoadRejectsBlobEndingMidInteger) {
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendLen(&inner, 1000);
+  inner.append(1000, 'x');
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  inner.append(3, '\x80');
+
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+  body.append(4096, 'F');
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
 }
 
 TEST_F(RdbTest, LoadRejectsHugeLz4ContentSize) {
@@ -1981,7 +2053,7 @@ TEST_F(RdbTest, LoadRejectsNestedCompressedBlob) {
   string inner(1, static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
   string frame(ZSTD_compressBound(inner.size()), '\0');
   size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
-  ASSERT_GT(frame_size, 0u);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
   frame.resize(frame_size);
 
   string body;
@@ -2003,11 +2075,115 @@ TEST_F(RdbTest, LoadRejectsEofInsideCompressedBlob) {
   string inner(1, static_cast<char>(RDB_OPCODE_EOF));
   string frame(ZSTD_compressBound(inner.size()), '\0');
   size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
-  ASSERT_GT(frame_size, 0u);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
   frame.resize(frame_size);
 
   string body;
   body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+string MakeLz4Frame(string_view content) {
+  LZ4F_preferences_t prefs{};
+  prefs.frameInfo.contentSize = content.size();
+  string frame(LZ4F_compressFrameBound(content.size(), &prefs), '\0');
+  size_t frame_size =
+      LZ4F_compressFrame(frame.data(), frame.size(), content.data(), content.size(), &prefs);
+  CHECK_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size);
+  return frame;
+}
+
+TEST_F(RdbTest, LoadAcceptsBoundedLz4Blob) {
+  string value(2000, 'v');
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendString(&inner, value);
+  string frame = MakeLz4Frame(inner);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
+  AppendString(&body, frame);
+
+  auto ec = LoadRdbBounded(WrapInRdb(body));
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"get", "k"}), value);
+}
+
+TEST_F(RdbTest, LoadAcceptsLz4ExactPowerOfTwoBlob) {
+  string value(131072, 'v');
+  auto build = [&](const string& val) {
+    string in;
+    in.push_back(static_cast<char>(RDB_TYPE_STRING));
+    AppendString(&in, "k");
+    AppendString(&in, val);
+    return in;
+  };
+  string inner = build(value);
+  value.resize(value.size() - (inner.size() - 131072));
+  inner = build(value);
+  ASSERT_EQ(inner.size(), 131072u);
+  string frame = MakeLz4Frame(inner);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
+  AppendString(&body, frame);
+
+  auto ec = LoadRdbBounded(WrapInRdb(body));
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(CheckedInt({"strlen", "k"}), value.size());
+}
+
+TEST_F(RdbTest, LoadRejectsLyingLz4ContentSize) {
+  string inner(2000, '\0');
+  string frame = MakeLz4Frame(inner);
+  ASSERT_EQ(frame[4] & 0x08, 0x08);
+
+  uint8_t size_buf[8];
+  absl::little_endian::Store64(size_buf, 1000);
+  frame.replace(6, 8, reinterpret_cast<const char*>(size_buf), 8);
+  frame[14] =
+      static_cast<char>((base::XXHash32(std::string_view{frame}.substr(4, 10)) >> 8) & 0xFF);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsTruncatedZstdFrame) {
+  string value(50000, 'v');
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendString(&inner, value);
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(static_cast<ptrdiff_t>(frame_size), 0);
+  frame.resize(frame_size - 4);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsTruncatedLz4Frame) {
+  string value(20000, 'v');
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendString(&inner, value);
+  string frame = MakeLz4Frame(inner);
+  frame.resize(frame.size() - 4);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
   AppendString(&body, frame);
 
   EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
