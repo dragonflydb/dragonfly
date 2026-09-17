@@ -1174,9 +1174,11 @@ TEST_F(ServerFamilyTest, InfoClusterMigrationErrors) {
 TEST_F(ServerFamilyTest, TlsAcceptsConfiguredJwtValidation) {
   absl::FlagSaver flag_saver;
   const char* password_env = getenv("DFLY_PASSWORD");
-  absl::Cleanup restore_password = [password_env] {
-    if (password_env)
-      setenv("DFLY_PASSWORD", password_env, 1);
+  const bool had_password_env = password_env != nullptr;
+  const std::string saved_password_env = had_password_env ? password_env : "";
+  absl::Cleanup restore_password = [had_password_env, saved_password_env] {
+    if (had_password_env)
+      setenv("DFLY_PASSWORD", saved_password_env.c_str(), 1);
     else
       unsetenv("DFLY_PASSWORD");
   };
