@@ -15,6 +15,7 @@ from redis import asyncio as aioredis
 from . import dfly_args
 from .instance import DflyInstanceFactory
 from .replication_utils import (
+    assert_replica_data_matches,
     setup_replication,
     start_replication,
 )
@@ -1615,6 +1616,53 @@ async def test_bgsave_during_stable_sync(df_factory: DflyInstanceFactory):
     assert not bad_lines, (
         "DbSlice change callback fired from shard_stable_sync_read during BGSAVE "
         "(SerializerBase::OnChangeBlocking invariant violated).\n" + "\n".join(bad_lines)
+    )
+
+
+@pytest.mark.parametrize("tagged_chunks", [True, False])
+async def test_cf_replication_after_compaction(df_factory: DflyInstanceFactory, tagged_chunks):
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"proactor_threads": 2, "serialization_tagged_chunks": tagged_chunks},
+        replica_args={"proactor_threads": 2},
+        connect=False,
+    )
+    key = "cf"
+    # These distinct items map to buckets 1 and 11 with capacity 64 and bucket size 2.
+    # Five items cannot fit in their four slots, forcing a second subfilter.
+    items = ["item-271", "item-507", "item-619", "item-2075", "item-3925"]
+    await c_master.execute_command(f"CF.RESERVE {key} 64")
+    assert await c_master.execute_command(f"CF.INSERT {key} NOCREATE ITEMS {' '.join(items)}") == [
+        1
+    ] * len(items)
+    info = await c_master.execute_command(f"CF.INFO {key}")
+    assert dict(zip(info[::2], info[1::2]))["Number of filters"] == 2
+
+    # Auto-compaction removes the extra subfilter but retains the vector's capacity.
+    assert await c_master.execute_command(f"CF.DEL {key} {items[-1]}") == 1
+    info = await c_master.execute_command(f"CF.INFO {key}")
+    info = dict(zip(info[::2], info[1::2]))
+    assert info["Number of filters"] == 1
+    assert info["Number of items inserted"] == 4
+    assert info["Number of items deleted"] == 0
+
+    # Start full sync only after compaction, so loading reconstructs the filter vector.
+    await start_replication(c_replica, master.port)
+    await check_all_replicas_finished([c_replica], c_master)
+    async with (
+        aioredis.Redis(port=master.port) as raw_master,
+        aioredis.Redis(port=replica.port) as raw_replica,
+    ):
+        assert await raw_master.dump(key) == await raw_replica.dump(key)
+
+    # Equal contents must pass the same comparison used by test_replication_all.
+    await assert_replica_data_matches(c_master, [c_replica])
+
+    # Excluding allocated Size must not hide a difference in item counts.
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    await c_master.execute_command(f"CF.ADD {key} extra-item")
+    assert await SeederV2.capture(c_master, types=["CF"]) != await SeederV2.capture(
+        c_replica, types=["CF"]
     )
 
 
