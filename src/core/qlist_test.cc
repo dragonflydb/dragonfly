@@ -1570,7 +1570,7 @@ TEST_F(QListZstdTest, PartialReadIsFootprintNeutral) {
 
 TEST_F(QListZstdTest, TieredListSkipsLzfRecompression) {
   QList ql(-1, 0);
-  ql.set_compr_threshold(1);
+  ql.set_compr_policy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
   ASSERT_GT(ql.node_count(), 2u);
 
@@ -1595,7 +1595,7 @@ TEST_F(QListZstdTest, TieredListSkipsLzfRecompression) {
 
 TEST_F(QListZstdTest, IteratorClearsIneligibleRecompression) {
   QList ql(-1, 0);
-  ql.set_compr_threshold(1);
+  ql.set_compr_policy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
   ASSERT_GT(ql.node_count(), 2u);
 
@@ -1825,11 +1825,16 @@ TEST_F(QListZstdTest, PolicyFlagParsing) {
   EXPECT_EQ(policy.min_size, 8192u);
   EXPECT_EQ(AbslUnparseFlag(policy), "min_size=8192");
 
+  ASSERT_TRUE(AbslParseFlag(" min_size = 4096 ", &policy, &err)) << err;
+  EXPECT_TRUE(policy.enabled);
+  EXPECT_EQ(policy.min_size, 4096u);
+
   // The keyed form is how an enabled policy asks for no size gate.
   ASSERT_TRUE(AbslParseFlag("min_size=0", &policy, &err)) << err;
   EXPECT_TRUE(policy.enabled);
   EXPECT_EQ(policy.min_size, 0u);
 
+  EXPECT_FALSE(AbslParseFlag("min_size=1,", &policy, &err));
   EXPECT_FALSE(AbslParseFlag("min_size", &policy, &err));
   EXPECT_FALSE(AbslParseFlag("min_size=abc", &policy, &err));
   EXPECT_FALSE(AbslParseFlag("foo=1", &policy, &err));

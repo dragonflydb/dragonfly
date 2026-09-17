@@ -429,7 +429,12 @@ bool AbslParseFlag(string_view in, QList::ComprPolicy* policy, string* err) {
     return true;
   }
 
-  for (string_view option : absl::StrSplit(in, ',', absl::SkipWhitespace())) {
+  for (string_view option : absl::StrSplit(in, ',')) {
+    option = absl::StripAsciiWhitespace(option);
+    if (option.empty()) {
+      *err = "empty option";
+      return false;
+    }
     if (!absl::StrContains(option, '=')) {
       *err = absl::StrCat("expected key=value, got '", option, "'");
       return false;
