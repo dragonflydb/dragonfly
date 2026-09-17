@@ -163,6 +163,10 @@ class ClusterShardMigration {
     return last_attempt_.load();
   }
 
+  uint32_t GetSourceShardId() const {
+    return source_shard_id_;
+  }
+
  private:
   std::error_code ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
     if (!cntx->IsRunning()) {
@@ -299,13 +303,22 @@ void IncomingSlotMigration::Init(uint32_t shards_num) {
   bc_ = BlockingCounter(shards_num);
   shard_flows_.resize(shards_num);
   for (unsigned i = 0; i < shards_num; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this, bc_));
+    shard_flows_[i] = std::make_shared<ClusterShardMigration>(i, &service_, this, bc_);
   }
 }
 
-void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {
-  shard_flows_[shard]->Start(&cntx_, source);
-  VLOG(1) << "Incoming flow " << shard
+std::shared_ptr<ClusterShardMigration> IncomingSlotMigration::GetFlow(uint32_t shard) const {
+  util::fb2::LockGuard lk(state_mu_);
+  if (shard >= shard_flows_.size()) {
+    return nullptr;
+  }
+  return shard_flows_[shard];
+}
+
+void IncomingSlotMigration::StartFlow(std::shared_ptr<ClusterShardMigration> flow,
+                                      util::FiberSocketBase* source) {
+  flow->Start(&cntx_, source);
+  VLOG(1) << "Incoming flow " << flow->GetSourceShardId()
           << (GetState() == MigrationState::C_FINISHED ? " finished " : " cancelled ") << "for "
           << source_id_;
   if (GetState() == MigrationState::C_FATAL) {
