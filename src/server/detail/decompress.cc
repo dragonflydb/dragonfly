@@ -19,6 +19,8 @@ using io::IoBuf;
 using rdb::errc;
 using namespace std;
 
+constexpr size_t kInitialDecompressBuffer = 64 * 1024;
+
 inline auto Unexpected(errc ev) {
   return nonstd::make_unexpected(RdbError(ev));
 }
@@ -53,31 +55,48 @@ io::Result<io::IoBuf*> ZstdDecompress::Decompress(std::string_view str, size_t m
     LOG(ERROR) << "Zstd frame content size " << uncomp_size << " exceeds the allowed maximum";
     return Unexpected(errc::rdb_file_corrupted);
   }
-
-  uncompressed_mem_buf_.Reserve(uncomp_size + 1);
-
-  // Uncompress string to membuf
-  IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
-  if (dest.size() < uncomp_size) {
-    return Unexpected(errc::out_of_memory);
-  }
-  size_t const d_size =
-      ZSTD_decompressDCtx(dctx_, dest.data(), dest.size(), str.data(), str.size());
-  if (d_size == 0 || d_size != uncomp_size) {
+  if (uncomp_size == 0) {
     LOG(ERROR) << "Invalid ZSTD compressed string";
     return Unexpected(errc::rdb_file_corrupted);
   }
-  uncompressed_mem_buf_.CommitWrite(d_size);
 
-  // Add opcode of compressed blob end to membuf.
-  dest = uncompressed_mem_buf_.AppendBuffer();
-  if (dest.size() < 1) {
-    return Unexpected(errc::out_of_memory);
+  uncompressed_mem_buf_.Reserve(std::min<size_t>(uncomp_size + 1, kInitialDecompressBuffer));
+
+  ZSTD_inBuffer in{str.data(), str.size(), 0};
+  while (true) {
+    IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
+    if (dest.empty()) {
+      if (!GrowBuffer(uncomp_size)) {
+        LOG(ERROR) << "Zstd frame decoded past the declared content size";
+        return Unexpected(errc::rdb_file_corrupted);
+      }
+      continue;
+    }
+
+    ZSTD_outBuffer out{dest.data(), dest.size(), 0};
+    size_t prev_in = in.pos;
+    size_t ret = ZSTD_decompressStream(dctx_, &out, &in);
+    if (ZSTD_isError(ret)) {
+      LOG(ERROR) << "Invalid ZSTD compressed string: " << ZSTD_getErrorName(ret);
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    uncompressed_mem_buf_.CommitWrite(out.pos);
+
+    if (out.pos == 0 && in.pos == prev_in) {
+      LOG(ERROR) << "Zstd decompression stalled";
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+
+    if (ret == 0)
+      break;
   }
-  dest[0] = RDB_OPCODE_COMPRESSED_BLOB_END;
-  uncompressed_mem_buf_.CommitWrite(1);
 
-  return &uncompressed_mem_buf_;
+  if (in.pos != in.size || uncompressed_mem_buf_.InputLen() != uncomp_size) {
+    LOG(ERROR) << "Invalid ZSTD compressed string";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+
+  return AppendEndOpcode();
 }
 
 class Lz4Decompress : public DecompressImpl {
@@ -107,7 +126,6 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data, size_t
   if (LZ4F_isError(res)) {
     LOG(ERROR) << "LZ4F_getFrameInfo failed with error " << LZ4F_getErrorName(res);
     return Unexpected(errc::rdb_file_corrupted);
-    ;
   }
 
   if (frame_info.contentSize == 0) {
@@ -120,13 +138,8 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data, size_t
     return Unexpected(errc::rdb_file_corrupted);
   }
 
-  // reserve place for uncompressed data and end opcode
-  size_t reserve = frame_info.contentSize + 1;
-  uncompressed_mem_buf_.Reserve(reserve);
-  IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
-  if (dest.size() < reserve) {
-    return Unexpected(errc::out_of_memory);
-  }
+  uncompressed_mem_buf_.Reserve(
+      std::min<size_t>(frame_info.contentSize + 1, kInitialDecompressBuffer));
 
   // Uncompress data to membuf
   string_view src = data.substr(consumed);
@@ -135,8 +148,13 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data, size_t
   size_t ret = 1;
   while (ret != 0) {
     IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
-    if (dest.empty())
-      return Unexpected(errc::rdb_file_corrupted);
+    if (dest.empty()) {
+      if (!GrowBuffer(frame_info.contentSize)) {
+        LOG(ERROR) << "LZ4 frame decoded past the declared content size";
+        return Unexpected(errc::rdb_file_corrupted);
+      }
+      continue;
+    }
     size_t dest_capacity = dest.size();
 
     // It will read up to src_size bytes from src,
@@ -146,6 +164,10 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data, size_t
     ret = LZ4F_decompress(dctx_, dest.data(), &dest_capacity, src.data(), &src_size, nullptr);
     if (LZ4F_isError(ret)) {
       LOG(ERROR) << "LZ4F_decompress failed with error " << LZ4F_getErrorName(ret);
+      return Unexpected(errc::rdb_file_corrupted);
+    }
+    if (dest_capacity == 0 && src_size == 0) {
+      LOG(ERROR) << "LZ4 decompression stalled";
       return Unexpected(errc::rdb_file_corrupted);
     }
     consumed += src_size;
@@ -161,15 +183,7 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data, size_t
     return Unexpected(errc::rdb_file_corrupted);
   }
 
-  // Add opcode of compressed blob end to membuf.
-  dest = uncompressed_mem_buf_.AppendBuffer();
-  if (dest.size() < 1) {
-    return Unexpected(errc::out_of_memory);
-  }
-  dest[0] = RDB_OPCODE_COMPRESSED_BLOB_END;
-  uncompressed_mem_buf_.CommitWrite(1);
-
-  return &uncompressed_mem_buf_;
+  return AppendEndOpcode();
 }
 
 unique_ptr<DecompressImpl> DecompressImpl::CreateLZ4() {
