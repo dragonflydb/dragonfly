@@ -32,13 +32,13 @@ class ZstdDecompress : public DecompressImpl {
     ZSTD_freeDCtx(dctx_);
   }
 
-  io::Result<io::IoBuf*> Decompress(std::string_view str);
+  io::Result<io::IoBuf*> Decompress(std::string_view str, size_t max_uncomp_size);
 
  private:
   ZSTD_DCtx* dctx_;
 };
 
-io::Result<io::IoBuf*> ZstdDecompress::Decompress(std::string_view str) {
+io::Result<io::IoBuf*> ZstdDecompress::Decompress(std::string_view str, size_t max_uncomp_size) {
   // Prepare membuf memory to uncompressed string.
   auto uncomp_size = ZSTD_getFrameContentSize(str.data(), str.size());
   if (uncomp_size == ZSTD_CONTENTSIZE_UNKNOWN) {
@@ -48,6 +48,10 @@ io::Result<io::IoBuf*> ZstdDecompress::Decompress(std::string_view str) {
   if (uncomp_size == ZSTD_CONTENTSIZE_ERROR) {
     LOG(ERROR) << "Invalid ZSTD compressed string";
     return Unexpected(errc::invalid_encoding);
+  }
+  if (uncomp_size > max_uncomp_size) {
+    LOG(ERROR) << "Zstd frame content size " << uncomp_size << " exceeds the allowed maximum";
+    return Unexpected(errc::rdb_file_corrupted);
   }
 
   uncompressed_mem_buf_.Reserve(uncomp_size + 1);
@@ -87,13 +91,13 @@ class Lz4Decompress : public DecompressImpl {
     CHECK(!LZ4F_isError(result));
   }
 
-  io::Result<base::IoBuf*> Decompress(std::string_view str);
+  io::Result<base::IoBuf*> Decompress(std::string_view str, size_t max_uncomp_size);
 
  private:
   LZ4F_dctx* dctx_;
 };
 
-io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data) {
+io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data, size_t max_uncomp_size) {
   LZ4F_frameInfo_t frame_info;
   size_t frame_size = data.size();
 
@@ -108,6 +112,11 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data) {
 
   if (frame_info.contentSize == 0) {
     LOG(ERROR) << "Missing frame content size";
+    return Unexpected(errc::rdb_file_corrupted);
+  }
+  if (frame_info.contentSize > max_uncomp_size) {
+    LOG(ERROR) << "LZ4 frame content size " << frame_info.contentSize
+               << " exceeds the allowed maximum";
     return Unexpected(errc::rdb_file_corrupted);
   }
 
@@ -126,6 +135,8 @@ io::Result<base::IoBuf*> Lz4Decompress::Decompress(std::string_view data) {
   size_t ret = 1;
   while (ret != 0) {
     IoBuf::Bytes dest = uncompressed_mem_buf_.AppendBuffer();
+    if (dest.empty())
+      return Unexpected(errc::rdb_file_corrupted);
     size_t dest_capacity = dest.size();
 
     // It will read up to src_size bytes from src,

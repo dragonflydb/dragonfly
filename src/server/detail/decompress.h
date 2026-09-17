@@ -22,7 +22,7 @@ class DecompressImpl {
   virtual ~DecompressImpl() {
   }
 
-  virtual io::Result<io::IoBuf*> Decompress(std::string_view str) = 0;
+  virtual io::Result<io::IoBuf*> Decompress(std::string_view str, size_t max_uncomp_size) = 0;
 
  protected:
   io::IoBuf uncompressed_mem_buf_;
