@@ -272,10 +272,11 @@ jobs:
           path: /tmp/failed/*
 
       - name: Run Valkey TCL tests
-        # Same gating as the regression tests above: runs the upstream Valkey TCL suites
-        # (unit/type/stream[-cgroups], unit/pubsub) in external-server mode against the just-built
-        # binary, on both Debug and Release. continue-on-error keeps it a canary for now — flip to a
-        # blocking step once proven stable in CI. See tests/dragonfly/valkey_tcl/README.md.
+        # Same gating as the regression tests above: runs the enabled upstream Valkey TCL suites
+        # (stream[-cgroups], pubsub, incr, string, bitfield, bitops, scan, dump, geo) in
+        # external-server mode against the just-built binary, on both Debug and Release.
+        # continue-on-error keeps it a canary for now — flip to a blocking step once proven stable
+        # in CI. See tests/dragonfly/valkey_tcl/README.md.
         if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push'
         continue-on-error: true
         timeout-minutes: 20
@@ -284,7 +285,7 @@ jobs:
           apt-get update && apt-get install -y --no-install-recommends tcl redis-tools iproute2
           cd ${GITHUB_WORKSPACE}/tests/dragonfly/valkey_tcl
           ./sync-valkey-tcl-tests.sh
-          ./run-stream-tests.sh ${GITHUB_WORKSPACE}/build/dragonfly 6399
+          ./run-tcl-tests.sh ${GITHUB_WORKSPACE}/build/dragonfly 6399
 
       - name: Prepare JUnit artifact name
         if: always() && github.event_name != 'push'

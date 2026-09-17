@@ -1,8 +1,8 @@
 #!/bin/bash
-# Run the Valkey stream and pubsub TCL suites against a Dragonfly binary in external-server mode.
+# Run the enabled Valkey TCL suites against a Dragonfly binary in external-server mode.
 # Exits 0 only if every non-skipped test passes (harness returns 1 on any failure).
 #
-# Usage: ./run-stream-tests.sh <path-to-dragonfly-binary> [port]
+# Usage: ./run-tcl-tests.sh <path-to-dragonfly-binary> [port]
 # Fail fast on any setup error; -e is relaxed only around the harness to capture its status.
 set -euo pipefail
 
@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UPSTREAM="$SCRIPT_DIR/upstream"
 SKIPLIST="$SCRIPT_DIR/skiplist.txt"
 
-DRAGONFLY_BIN="${1:?usage: run-stream-tests.sh <dragonfly-binary> [port]}"
+DRAGONFLY_BIN="${1:?usage: run-tcl-tests.sh <dragonfly-binary> [port]}"
 PORT="${2:-6399}"
 
 if [ ! -d "$UPSTREAM/tests" ]; then
@@ -109,6 +109,12 @@ if [ ! -s "$CLEAN_SKIP" ]; then
 fi
 echo "Skipping $(wc -l < "$CLEAN_SKIP") known-failing test(s) (see skiplist.txt)"
 
+# The enabled suites: only ones that run to completion against an unmodified upstream harness
+# (no compat CONFIG SET aborts) and pass every non-skipped test. Suites that abort on an unknown
+# CONFIG SET override (set/zset/hash/list/sort/expire) or crash (keyspace) are intentionally left
+# out until the underlying gaps land - see README.md and skiplist.txt.
+# --ignore-encoding makes assert_encoding a no-op: Dragonfly's internal encoding names differ from
+# Valkey's, so we do not gate on them here.
 # --timeout bounds a single stuck test (the harness aborts the run on timeout); the outer
 # `timeout` is a hard backstop so a hung blocking test can never wedge CI indefinitely
 # (--kill-after escalates to SIGKILL if tclsh ignores the TERM).
@@ -119,7 +125,15 @@ timeout --kill-after=30 900 tclsh tests/test_helper.tcl \
   --single unit/type/stream \
   --single unit/type/stream-cgroups \
   --single unit/pubsub \
+  --single unit/type/incr \
+  --single unit/type/string \
+  --single unit/bitfield \
+  --single unit/bitops \
+  --single unit/scan \
+  --single unit/dump \
+  --single unit/geo \
   --tags "-needs:debug -needs:repl -external:skip -large-memory" \
+  --ignore-encoding \
   --skipfile "$CLEAN_SKIP" \
   --timeout 120 \
   --durable
