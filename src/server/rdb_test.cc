@@ -14,11 +14,13 @@ extern "C" {
 #include <absl/cleanup/cleanup.h>
 #include <absl/flags/reflection.h>
 #include <mimalloc.h>
+#include <zstd.h>
 
 #include <filesystem>
 
 #include "base/flags.h"
 #include "base/gtest.h"
+#include "base/hash.h"
 #include "base/logging.h"
 #include "core/bloom.h"
 #include "core/cuckoo.h"
@@ -1716,13 +1718,26 @@ void AddKV(std::string* out, std::string_view key, std::string_view val) {
   AppendString(out, val);
 }
 
+void AppendDbHeader(std::string* body) {
+  body->push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
+  AppendLen(body, 0);
+  body->push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
+  AppendLen(body, 0);
+  AppendLen(body, 0);
+}
+
+void AppendBinaryDouble(std::string* out, double val) {
+  uint64_t bits;
+  memcpy(&bits, &val, sizeof(bits));
+
+  uint8_t buf[8];
+  absl::little_endian::Store64(buf, bits);
+  out->append(reinterpret_cast<const char*>(buf), sizeof(buf));
+}
+
 TEST_F(RdbTest, LoadRejectsHugeDeclaredLength) {
   string body;
-  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
-  AppendLen(&body, 0);
-  body.push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
-  AppendLen(&body, 0);
-  AppendLen(&body, 0);
+  AppendDbHeader(&body);
   body.push_back(static_cast<char>(RDB_TYPE_STRING));
   AppendLen(&body, 1ULL << 60);
 
@@ -1749,11 +1764,7 @@ TEST_F(RdbTest, LoadRejectsTruncatedFile) {
 
 TEST_F(RdbTest, LoadRejectsHugeLzfKey) {
   string body;
-  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
-  AppendLen(&body, 0);
-  body.push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
-  AppendLen(&body, 0);
-  AppendLen(&body, 0);
+  AppendDbHeader(&body);
   body.push_back(static_cast<char>(RDB_TYPE_STRING));
   body.push_back(static_cast<char>((RDB_ENCVAL << 6) | RDB_ENC_LZF));
   AppendLen(&body, 1);
@@ -1765,11 +1776,7 @@ TEST_F(RdbTest, LoadRejectsHugeLzfKey) {
 
 TEST_F(RdbTest, LoadRejectsHugeLzfCompressedLength) {
   string body;
-  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
-  AppendLen(&body, 0);
-  body.push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
-  AppendLen(&body, 0);
-  AppendLen(&body, 0);
+  AppendDbHeader(&body);
   body.push_back(static_cast<char>(RDB_TYPE_STRING));
   body.push_back(static_cast<char>((RDB_ENCVAL << 6) | RDB_ENC_LZF));
   AppendLen(&body, 500);
@@ -1792,11 +1799,7 @@ void AppendEmptyStreamValue(std::string* body) {
 
 TEST_F(RdbTest, LoadRejectsHugeStreamCgroupsCount) {
   string body;
-  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
-  AppendLen(&body, 0);
-  body.push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
-  AppendLen(&body, 0);
-  AppendLen(&body, 0);
+  AppendDbHeader(&body);
   body.push_back(static_cast<char>(RDB_TYPE_STREAM_LISTPACKS_3));
   AppendString(&body, "k");
   AppendEmptyStreamValue(&body);
@@ -1807,11 +1810,7 @@ TEST_F(RdbTest, LoadRejectsHugeStreamCgroupsCount) {
 
 TEST_F(RdbTest, LoadRejectsHugeStreamPelCount) {
   string body;
-  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
-  AppendLen(&body, 0);
-  body.push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
-  AppendLen(&body, 0);
-  AppendLen(&body, 0);
+  AppendDbHeader(&body);
   body.push_back(static_cast<char>(RDB_TYPE_STREAM_LISTPACKS_3));
   AppendString(&body, "k");
   AppendEmptyStreamValue(&body);
@@ -1833,11 +1832,7 @@ void AppendInt64(std::string* out, int64_t val) {
 
 TEST_F(RdbTest, LoadAcceptsLegacyStream) {
   string body;
-  body.push_back(static_cast<char>(RDB_OPCODE_SELECTDB));
-  AppendLen(&body, 0);
-  body.push_back(static_cast<char>(RDB_OPCODE_RESIZEDB));
-  AppendLen(&body, 0);
-  AppendLen(&body, 0);
+  AppendDbHeader(&body);
   body.push_back(static_cast<char>(RDB_TYPE_STREAM_LISTPACKS));
   AppendString(&body, "k");
   AppendLen(&body, 0);
@@ -1863,6 +1858,161 @@ TEST_F(RdbTest, LoadAcceptsLegacyStream) {
   EXPECT_THAT(Run({"xinfo", "groups", "k"}), ArrLen(1));
 }
 
+TEST_F(RdbTest, LoadRejectsHugeCmsCounters) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_CMS));
+  AppendString(&body, "k");
+  AppendLen(&body, 1ULL << 30);
+  AppendLen(&body, 1);
+  AppendLen(&body, 0);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeTopkHeap) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_TOPK));
+  AppendString(&body, "k");
+  AppendLen(&body, 0);
+  AppendLen(&body, UINT32_MAX);
+  AppendLen(&body, 1);
+  AppendLen(&body, 1);
+  AppendBinaryDouble(&body, 0.5);
+  AppendLen(&body, UINT32_MAX);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeCuckooFilterCount) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_CUCKOO));
+  AppendString(&body, "k");
+  AppendLen(&body, 4);
+  AppendLen(&body, 1);
+  AppendLen(&body, 1);
+  AppendLen(&body, 1);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 1ULL << 60);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeSbfFilterSize) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_TYPE_SBF2));
+  AppendString(&body, "k");
+  AppendLen(&body, 0);
+  AppendBinaryDouble(&body, 1.0);
+  AppendBinaryDouble(&body, 0.5);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 0);
+  AppendLen(&body, 1);
+  AppendLen(&body, 0);
+  AppendLen(&body, 1ULL << 60);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsHugeZstdContentSize) {
+  string frame;
+  const uint8_t magic[] = {0x28, 0xB5, 0x2F, 0xFD};
+  frame.append(reinterpret_cast<const char*>(magic), sizeof(magic));
+  frame.push_back(static_cast<char>(0xE0));
+  uint8_t size_buf[8];
+  absl::little_endian::Store64(size_buf, 1ULL << 40);
+  frame.append(reinterpret_cast<const char*>(size_buf), sizeof(size_buf));
+
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadAcceptsBoundedZstdBlob) {
+  string value(50000, 'v');
+  string inner;
+  inner.push_back(static_cast<char>(RDB_TYPE_STRING));
+  AppendString(&inner, "k");
+  AppendString(&inner, value);
+
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(frame_size, 0u);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  auto ec = LoadRdbBounded(WrapInRdb(body));
+  EXPECT_FALSE(ec) << ec.message();
+  EXPECT_EQ(Run({"get", "k"}), value);
+}
+
+TEST_F(RdbTest, LoadRejectsHugeLz4ContentSize) {
+  string frame;
+  const uint8_t magic[] = {0x04, 0x22, 0x4D, 0x18};
+  frame.append(reinterpret_cast<const char*>(magic), sizeof(magic));
+  frame.push_back(static_cast<char>(0x68));
+  frame.push_back(static_cast<char>(0x40));
+  uint8_t size_buf[8];
+  absl::little_endian::Store64(size_buf, 1ULL << 40);
+  frame.append(reinterpret_cast<const char*>(size_buf), sizeof(size_buf));
+  uint8_t hc = (base::XXHash32(std::string_view{frame}.substr(4)) >> 8) & 0xFF;
+  frame.push_back(static_cast<char>(hc));
+
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_LZ4_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsNestedCompressedBlob) {
+  string inner(1, static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(frame_size, 0u);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsStrayCompressedBlobEnd) {
+  string body;
+  AppendDbHeader(&body);
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_BLOB_END));
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
+TEST_F(RdbTest, LoadRejectsEofInsideCompressedBlob) {
+  string inner(1, static_cast<char>(RDB_OPCODE_EOF));
+  string frame(ZSTD_compressBound(inner.size()), '\0');
+  size_t frame_size = ZSTD_compress(frame.data(), frame.size(), inner.data(), inner.size(), 1);
+  ASSERT_GT(frame_size, 0u);
+  frame.resize(frame_size);
+
+  string body;
+  body.push_back(static_cast<char>(RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START));
+  AppendString(&body, frame);
+
+  EXPECT_EQ(LoadRdbBounded(WrapInRdb(body)), RdbError(rdb::errc::rdb_file_corrupted));
+}
+
 std::string MakeTaggedChunk(uint32_t id, std::string_view payload) {
   std::string out;
   out.push_back(static_cast<char>(RDB_OPCODE_TAGGED_CHUNK));
@@ -1874,15 +2024,6 @@ std::string MakeTaggedChunk(uint32_t id, std::string_view payload) {
 
   out.append(payload);
   return out;
-}
-
-void AppendBinaryDouble(std::string* out, double val) {
-  uint64_t bits;
-  memcpy(&bits, &val, sizeof(bits));
-
-  uint8_t buf[8];
-  absl::little_endian::Store64(buf, bits);
-  out->append(reinterpret_cast<const char*>(buf), sizeof(buf));
 }
 
 // Drives interleaving SaveEntry calls from the serializer's consume callback to exercise

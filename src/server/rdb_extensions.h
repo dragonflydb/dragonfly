@@ -40,6 +40,8 @@ constexpr uint8_t RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START = 201;
 constexpr uint8_t RDB_OPCODE_COMPRESSED_LZ4_BLOB_START = 202;
 constexpr uint8_t RDB_OPCODE_COMPRESSED_BLOB_END = 203;
 
+constexpr size_t kMaxCompressedBlobSize = 2ULL << 30;
+
 constexpr uint8_t RDB_OPCODE_JOURNAL_BLOB = 210;
 
 // A full sync will continue to send information in journal blobs until the replica

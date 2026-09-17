@@ -2182,6 +2182,9 @@ auto RdbLoaderBase::ReadSBFImpl(bool filter_is_chunked) -> io::Result<OpaqueObj>
       SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
       if (total_size == 0)
         return Unexpected(errc::rdb_file_corrupted);
+      if (ExceedsRemainingInput(total_size, "sbf filter size")) {
+        return Unexpected(errc::rdb_file_corrupted);
+      }
 
       // This size is fixed and never changes. It acts as a limit of how much to read.
       filter_data.resize(total_size);
@@ -2257,6 +2260,8 @@ auto RdbLoaderBase::ReadTOPK() -> io::Result<OpaqueObj> {
   // Validate heap size doesn't exceed k (max items we track)
   if (heap_size > k)
     return Unexpected(errc::rdb_file_corrupted);
+  if (ExceedsRemainingInput(heap_size, "topk heap size", 2))
+    return Unexpected(errc::rdb_file_corrupted);
 
   res.heap_items.reserve(heap_size);
   for (uint64_t i{}; i < heap_size; ++i) {
@@ -2305,6 +2310,8 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCMS() {
   res.width = static_cast<uint32_t>(width);
   res.depth = static_cast<uint32_t>(depth);
   const size_t num_counters = static_cast<size_t>(width) * depth;
+  if (ExceedsRemainingInput(num_counters, "cms counter count", sizeof(int64_t)))
+    return Unexpected(errc::rdb_file_corrupted);
   res.counters.resize(num_counters);
   for (size_t i = 0; i < num_counters; ++i) {
     uint64_t raw;
@@ -2387,11 +2394,15 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCuckoo() {
   const uint8_t spb = pending_read_.cf_slots_per_bucket;
   if (spb == 0)
     return Unexpected(errc::rdb_file_corrupted);
+  if (ExceedsRemainingInput(num_filters, "cuckoo filter count", 2))
+    return Unexpected(errc::rdb_file_corrupted);
   res.filters.reserve(num_filters);
   for (; num_filters > 0 && !ChunkBudgetExhausted(); --num_filters) {
     uint64_t total_size;
     SET_OR_UNEXPECT(LoadLen(nullptr), total_size);
     if (total_size == 0 || total_size % spb != 0)
+      return Unexpected(errc::rdb_file_corrupted);
+    if (ExceedsRemainingInput(total_size, "cuckoo filter size"))
       return Unexpected(errc::rdb_file_corrupted);
 
     std::string blob(total_size, '\0');
@@ -2543,7 +2554,8 @@ error_code RdbLoader::Load(io::Source* src) {
     if (size_t file_size = size_provider_(); file_size > 0) {
       source_limit_ = file_size;
     } else {
-      LOG(WARNING) << "Source size unresolved after first read; loading without a source limit";
+      LOG(ERROR) << "Source size unresolved after the first read";
+      return std::make_error_code(std::errc::io_error);
     }
   }
 
@@ -2616,6 +2628,10 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_EOF) {
+      if (mem_buf_ != &origin_mem_buf_) {
+        LOG(ERROR) << "eof inside a compressed blob";
+        return RdbError(errc::rdb_file_corrupted);
+      }
       if (current_chunk_state_)
         LOG(WARNING) << "eof seen while a previous chunk is not yet finished, stream id "
                      << current_chunk_state_->stream_id << ", remaining bytes "
@@ -2713,11 +2729,19 @@ error_code RdbLoader::Load(io::Source* src) {
 
     if (type == RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START ||
         type == RDB_OPCODE_COMPRESSED_LZ4_BLOB_START) {
+      if (mem_buf_ != &origin_mem_buf_) {
+        LOG(ERROR) << "nested compressed blob";
+        return RdbError(errc::rdb_file_corrupted);
+      }
       RETURN_ON_ERR(HandleCompressedBlob(type));
       continue;
     }
 
     if (type == RDB_OPCODE_COMPRESSED_BLOB_END) {
+      if (mem_buf_ == &origin_mem_buf_) {
+        LOG(ERROR) << "compressed blob end without a blob";
+        return RdbError(errc::rdb_file_corrupted);
+      }
       RETURN_ON_ERR(HandleCompressedBlobFinish());
       continue;
     }
@@ -3053,7 +3077,7 @@ error_code RdbLoaderBase::HandleCompressedBlob(int op_type) {
   // Decompress blob and switch membuf pointer
   // Last type in the compressed blob is RDB_OPCODE_COMPRESSED_BLOB_END
   // in which we will switch back to the origin membuf (HandleCompressedBlobFinish)
-  SET_OR_RETURN(decompress_impl_->Decompress(res), mem_buf_);
+  SET_OR_RETURN(decompress_impl_->Decompress(res, kMaxCompressedBlobSize), mem_buf_);
 
   return kOk;
 }
@@ -3062,7 +3086,8 @@ error_code RdbLoaderBase::HandleCompressedBlobFinish() {
   DVLOG(2) << "HandleCompressedBlobFinish";
 
   CHECK_NE(&origin_mem_buf_, mem_buf_);
-  CHECK_EQ(mem_buf_->InputLen(), size_t(0));
+  if (mem_buf_->InputLen() != 0)
+    return RdbError(errc::rdb_file_corrupted);
   mem_buf_ = &origin_mem_buf_;
   return kOk;
 }
@@ -3683,6 +3708,8 @@ error_code RdbLoader::HandleShardDocIndex() {
 
   uint64_t mapping_count;
   SET_OR_RETURN(LoadLen(nullptr), mapping_count);
+  if (ExceedsRemainingInput(mapping_count, "doc index mapping count", 2))
+    return RdbError(errc::rdb_file_corrupted);
   pim.mappings.reserve(mapping_count);
 
   for (uint64_t i = 0; i < mapping_count; ++i) {
@@ -3715,6 +3742,8 @@ std::error_code RdbLoader::FinalizeCurrentChunkIfNeeded() {
 
 error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
                                            std::vector<search::HnswNodeData>* nodes) {
+  if (ExceedsRemainingInput(elements_number, "vector index node count", 16))
+    return RdbError(errc::rdb_file_corrupted);
   nodes->reserve(elements_number);
   for (uint64_t elem = 0; elem < elements_number; ++elem) {
     search::HnswNodeData node;
@@ -3722,12 +3751,16 @@ error_code RdbLoader::LoadVectorIndexNodes(uint64_t elements_number,
     SET_OR_RETURN(FetchInt<uint64_t>(), node.global_id);
     uint32_t raw_level;
     SET_OR_RETURN(FetchInt<uint32_t>(), raw_level);
+    if (ExceedsRemainingInput(raw_level + 1ULL, "vector index level count", sizeof(uint32_t)))
+      return RdbError(errc::rdb_file_corrupted);
     node.level = static_cast<int>(raw_level);
 
     node.levels_links.resize(node.level + 1);
     for (int lvl = 0; lvl <= node.level; ++lvl) {
       uint32_t links_num;
       SET_OR_RETURN(FetchInt<uint32_t>(), links_num);
+      if (ExceedsRemainingInput(links_num, "vector index link count", sizeof(uint32_t)))
+        return RdbError(errc::rdb_file_corrupted);
       node.levels_links[lvl].resize(links_num);
       for (uint32_t i = 0; i < links_num; ++i) {
         SET_OR_RETURN(FetchInt<uint32_t>(), node.levels_links[lvl][i]);
