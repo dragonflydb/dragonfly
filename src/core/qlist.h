@@ -400,8 +400,9 @@ class QList {
     return compress_ != 0;
   }
 
+  // Tiered lists cannot use dictionary compression because offloaded nodes replace `entry`.
   bool IsZstdDictMode() const {
-    return zstd_threshold_ > 0 && !AllowLZFCompression();
+    return zstd_threshold_ > 0 && !AllowLZFCompression() && !tiering_enabled_;
   }
 
   bool IsInterior(const Node* node) const {

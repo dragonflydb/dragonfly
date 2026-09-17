@@ -1022,14 +1022,15 @@ void QList::CompressByDepth(Node* node) {
   if (len_ == 0)
     return;
 
-  // In ZSTD dict mode (LZF disabled), depth-based LZF compression doesn't apply.
-  // Handle the recompress flag via dict and return.
-  if (IsZstdDictMode()) {
-    if (node && node->recompress && tl_zstd_dict && CanCompressWithZstdDict(node)) {
+  // Without LZF, recompress with ZSTD when available or clear the pending state.
+  if (!AllowLZFCompression()) {
+    if (IsZstdDictMode() && node && node->recompress && tl_zstd_dict &&
+        CanCompressWithZstdDict(node)) {
       // CompressNodeWithDict updates malloc_size_ itself.
-      if (CompressNodeWithDict(node))
-        node->recompress = 0;
+      CompressNodeWithDict(node);
     }
+    if (node)
+      node->recompress = 0;
     return;
   }
 
@@ -1748,11 +1749,19 @@ bool QList::CompressNodeWithDict(Node* node) {
 void QList::RecompressNode(Node* node) {
   if (!node->recompress || node->dont_compress)
     return;
-  if (IsZstdDictMode() && tl_zstd_dict && CanCompressWithZstdDict(node)) {
+
+  if (!AllowLZFCompression()) {
+    // Do not fall back to LZF when it is disabled.
     // CompressNodeWithDict updates malloc_size_ itself.
-    if (CompressNodeWithDict(node))
-      node->recompress = 0;
-  } else if (CompressRaw(node)) {
+    if (IsZstdDictMode() && tl_zstd_dict && CanCompressWithZstdDict(node))
+      CompressNodeWithDict(node);
+
+    // No recompression remains pending.
+    node->recompress = 0;
+    return;
+  }
+
+  if (CompressRaw(node)) {
     malloc_size_ += ssize_t(GetLzf(node)->sz) - ssize_t(node->sz);
   }
 }
