@@ -434,7 +434,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 144, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 128, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -451,8 +451,6 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(ram_hits);
   ADD(ram_cool_hits);
   ADD(ram_misses);
-  ADD(huff_encode_total);
-  ADD(huff_encode_success);
   ADD(journal_omit);
   return *this;
 }
@@ -511,8 +509,6 @@ auto DbSlice::GetStats() const -> Stats {
   }
   auto co_stats = CompactObj::GetStatsThreadLocal();
   s.small_string_bytes = co_stats.small_string_bytes;
-  s.events.huff_encode_total = co_stats.huff_encode_total;
-  s.events.huff_encode_success = co_stats.huff_encode_success;
 
   return s;
 }

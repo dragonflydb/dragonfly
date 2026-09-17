@@ -14,8 +14,7 @@ the last reader is done with it.
 ## What's covered
 
 - `LARGE_STR_TAG` (or `detail::LargeString`) values (heap-allocated, >> 1024 bytes).
-- Raw and ASCII-packed encodings. Huffman-encoded strings can be added later
-  if we prove their value.
+- Raw and ASCII-packed encodings.
 - `EXTERNAL_TAG` (tiered) values require an asynchronous disk fetch and are out of scope.
 
 Currently, `GET` is the only command that uses this path. Mutating reads
@@ -107,9 +106,9 @@ beyond letting it go out of scope (or calling `Unpin()` explicitly).
 
 ### Pin registry
 
-Lives in `compact_object.cc`'s thread-local scope alongside `local_mr`
-and the huffman tables. Not exposed beyond a handful of `CompactObj`
-static methods; `EngineShard` only invokes the periodic drain.
+Lives in `compact_object.cc`'s thread-local scope alongside `local_mr`.
+Not exposed beyond a handful of `CompactObj` static methods; `EngineShard`
+only invokes the periodic drain.
 
 ```cpp
 // compact_object.cc (internal)
@@ -268,9 +267,6 @@ the entire squashing / `MULTI`-`EXEC` pipeline.
 - **MGET.** `CollectKeys` today allocates a per-shard storage buffer
   and packs values into it. Zero-copy MGET would carry borrowed views
   per result instead.
-- **Huffman-encoded large strings.** `TryBorrow` returns `nullopt` for
-  `HUFFMAN_ENC`. Huffman codes are variable-length so decoding without
-  materialisation would require a stateful streaming decoder.
 - **`EXTERNAL_TAG` (tiered) values.** Asynchronous disk fetch and
   materialization; outside the in-memory zero-copy story.
 - **`SMALL_TAG` and inline values.** Already cheap to copy.
