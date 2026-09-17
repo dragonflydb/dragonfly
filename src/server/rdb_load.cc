@@ -1250,6 +1250,9 @@ auto RdbLoaderBase::FetchBuf(size_t size, void* dest) -> Error {
 
   next += to_copy;
 
+  if (mem_buf_ != &origin_mem_buf_)
+    return RdbError(errc::rdb_file_corrupted);
+
   if (size + bytes_read_ > source_limit_) {
     return Fail(errc::rdb_file_corrupted)
            << "out of bound read " << size + bytes_read_ << " > " << source_limit_;
@@ -2954,8 +2957,11 @@ auto RdbLoaderBase::EnsureRead(size_t min_sz) -> Error {
   // key/value. If the key/value is very small (less than 9 bytes) the remainded data in
   // uncompressed buffer might contain less than 9 bytes. We need to make sure that we dont read
   // from sink to the uncompressed buffer and therefor in this flow we return here.
-  if (mem_buf_ != &origin_mem_buf_)
+  if (mem_buf_ != &origin_mem_buf_) {
+    if (mem_buf_->InputLen() < min_sz)
+      return RdbError(errc::rdb_file_corrupted);
     return std::error_code{};
+  }
   if (mem_buf_->InputLen() >= min_sz)
     return std::error_code{};
   return EnsureReadInternal(min_sz);
@@ -3017,13 +3023,13 @@ auto RdbLoaderBase::LoadLen(bool* is_encoded) -> Result<uint64_t> {
   if (is_encoded)
     *is_encoded = false;
 
-  // Every RDB file with rdbver >= 5 has 8-bytes checksum at the end,
-  // so we can ensure we have 9 bytes to read up until that point.
-  RDB_TRY(EnsureRead(9));
+  RDB_TRY(EnsureRead(1));
 
-  // Read integer meta info.
+  PackedUIntMeta meta{mem_buf_->InputBuffer()[0]};
+
+  RDB_TRY(EnsureRead(1 + meta.ByteSize()));
+
   auto bytes = mem_buf_->InputBuffer();
-  PackedUIntMeta meta{bytes[0]};
   bytes.remove_prefix(1);
 
   // Read integer.

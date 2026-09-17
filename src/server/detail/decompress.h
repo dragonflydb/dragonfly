@@ -3,10 +3,12 @@
 //
 #pragma once
 
+#include <algorithm>
 #include <memory>
 
 #include "io/io.h"
 #include "io/io_buf.h"
+#include "server/rdb_extensions.h"
 
 namespace dfly {
 
@@ -26,6 +28,19 @@ class DecompressImpl {
 
  protected:
   io::IoBuf uncompressed_mem_buf_;
+
+  bool GrowBuffer(size_t declared_size) {
+    if (uncompressed_mem_buf_.InputLen() >= declared_size)
+      return false;
+    uncompressed_mem_buf_.Reserve(uncompressed_mem_buf_.InputLen() + 1);
+    return !uncompressed_mem_buf_.AppendBuffer().empty();
+  }
+
+  io::IoBuf* AppendEndOpcode() {
+    uint8_t op = RDB_OPCODE_COMPRESSED_BLOB_END;
+    uncompressed_mem_buf_.WriteAndCommit(&op, 1);
+    return &uncompressed_mem_buf_;
+  }
 };
 
 }  // namespace detail
