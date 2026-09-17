@@ -42,7 +42,9 @@ ADMIN_PORT = 1211
 
 async def compare_datasets(c_master, c_replica):
     r_port = c_replica.connection_pool.connection_kwargs.get("port", "unknown")
-    hash_script = """
+    hash_script = (
+        SeederV2._load_script("hashlib")
+        + """
     local type = ARGV[1]
     local res = {}
     for i, key in ipairs(KEYS) do
@@ -68,12 +70,13 @@ async def compare_datasets(c_master, c_replica):
         elseif type == 'TOPK' then
             hash = dragonfly.ihash(0, true, 'TOPK.LIST', key)
         elseif type == 'CF' then
-            hash = dragonfly.ihash(0, false, 'CF.INFO', key)
+            hash = LH_funcs.cf(key, 0)
         end
         table.insert(res, hash)
     end
     return res
     """
+    )
     sha = await c_master.script_load(hash_script)
     await c_replica.script_load(hash_script)
 
