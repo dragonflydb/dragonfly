@@ -92,3 +92,102 @@ Keyspace notifications: new key test
 
 # --- UNSUBSCRIBE is rejected inside MULTI ---
 unsubscribe inside multi, and publish to self
+
+# ===================================== unit/bitops =====================================
+
+# --- BITCOUNT key start (end optional, Valkey 8+) not supported ---
+BITCOUNT with just start
+
+# --- BITPOS trailing-garbage error text differs (syntax vs not-integer) ---
+BITPOS will illegal arguments
+
+# --- dirty counter (introspection) not exposed the same way ---
+SETBIT/BITFIELD only increase dirty when the value changed
+
+# ===================================== unit/scan =======================================
+
+# --- ZSCAN NOSCORES (Valkey 7.4+) and its reply shape unsupported ---
+{standalone} ZSCAN with encoding listpack
+{standalone} ZSCAN with encoding skiplist
+{standalone} ZSCAN with NOSCORES
+
+# ===================================== unit/dump =======================================
+
+# --- OBJECT IDLETIME/FREQ not tracked, so RESTORE IDLETIME/FREQ round-trip differs ---
+RESTORE can set LRU
+RESTORE can set LFU
+
+# --- RESTORE validates the DUMP checksum before the target-exists / option checks, so the
+# --- error text differs (BUSYKEY / syntax / version) ---
+RESTORE returns an error of the key already exists
+RESTORE can detect a syntax error for unrecognized options
+RESTORE key with future RDB version, relaxed version check
+
+# --- MIGRATE connection caching not implemented ---
+MIGRATE cached connections are released after some time
+
+# ===================================== unit/geo ========================================
+
+# --- Option-conflict / missing-option error texts differ (all inputs still rejected) ---
+GEOADD update with XX NX option will return syntax error
+GEOSEARCH FROMLONLAT and FROMMEMBER cannot exist at the same time
+GEOSEARCH FROMLONLAT and FROMMEMBER one must exist
+GEOSEARCH BYRADIUS and BYBOX cannot exist at the same time
+GEOSEARCH BYRADIUS and BYBOX one must exist
+GEORADIUS with ANY but no COUNT
+GEORADIUSBYMEMBER member does not exist
+GEOSEARCH FROMMEMBER member does not exist
+
+# --- Distances returned with full double precision instead of 4 decimals ---
+GEODIST simple & unit
+GEORADIUS withdist (sorted)
+GEOSEARCH withdist (sorted)
+GEORADIUS with multiple WITH* tokens
+GEORADIUSBYMEMBER withdist (sorted)
+GEOSEARCH with small distance
+GEOSEARCH with exact zero distances
+
+# --- GEOSEARCH BYPOLYGON (Valkey 9) not supported ---
+GEOSEARCH BYPOLYGON with invalid COUNT
+GEOSEARCH BYPOLYGON standard operations
+GEOSEARCH BYPOLYGON across hemispheres
+GEOSEARCH BYPOLYGON overlapping edges
+
+# ===================================== unit/type/string ================================
+
+# --- MSETEX (Valkey 9) not supported ---
+MSETEX with illegal arguments
+MSETEX with EX option - set the specified expire time, in seconds
+MSETEX with PX option - set the specified expire time, in milliseconds
+MSETEX with EXAT option- Set the specified Unix time at which the keys will expire, in seconds
+MSETEX with PXAT option - set the specified Unix time at which the keys will expire, in milliseconds
+MSETEX with KEEPTTL option - retain the time to live associated with the keys
+MSETEX with NX option - only set the keys if all keys do not already exist
+MSETEX with XX option - only set the keys if all keys already exist
+MSETEX with NX and EX options combined
+MSETEX with XX and PX options combined
+MSETEX with same key twice - last value wins
+MSETEX overwrites existing keys without options
+MSETEX removes TTL when setting without expiration options
+MSETEX keyspace notifications
+
+# --- SET IFEQ / DELIFEQ conditional (Valkey 9) not supported ---
+SET with IFEQ conditional
+SET with IFEQ conditional - non-string current value
+SET with IFEQ conditional - with get
+SET with IFEQ conditional - non string current value with get
+DELIFEQ non-existing key
+DELIFEQ existing key, matching value
+DELIFEQ existing key, non-matching value
+DELIFEQ existing key, non-string value
+
+# --- LCS not supported ---
+LCS basic
+LCS len
+LCS indexes
+LCS indexes with match len
+LCS indexes with match len and minimum match len
+
+# --- MEMORY USAGE accounting and GETRANGE out-of-range handling differ ---
+memoryusage of string
+GETRANGE with huge ranges, Github issue #1844

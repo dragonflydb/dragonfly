@@ -1,16 +1,26 @@
-# Valkey TCL stream and pubsub tests on Dragonfly
+# Valkey TCL tests on Dragonfly
 
 Runs the upstream [Valkey](https://github.com/valkey-io/valkey) TCL test suite (the
 classic Redis-era tests) against Dragonfly in **external-server mode** — the harness
 connects to an already-running Dragonfly over `--host/--port` instead of spawning a
-server. Currently scoped to `unit/type/stream`, `unit/type/stream-cgroups` and `unit/pubsub`.
+server.
+
+Enabled suites: `unit/type/stream`, `unit/type/stream-cgroups`, `unit/pubsub`,
+`unit/type/incr`, `unit/type/string`, `unit/bitfield`, `unit/bitops`, `unit/scan`,
+`unit/dump`, `unit/geo`.
+
+Only suites that run to completion against an unmodified upstream harness are enabled. A
+suite is left out when its `start_server` prologue issues a compat `CONFIG SET` that
+Dragonfly rejects (which aborts the whole file: `set`, `zset`, `hash`, `list`, `sort`,
+`expire`, ...) or when a test crashes the server (`keyspace`). Those wait for the
+underlying gaps to land.
 
 ## Layout
 
 ```
 tests/dragonfly/valkey_tcl/
 ├── sync-valkey-tcl-tests.sh   # clone Valkey @ pinned SHA → copy harness + test files (committed)
-├── run-stream-tests.sh        # start Dragonfly + run the harness with the skiplist (committed)
+├── run-tcl-tests.sh           # start Dragonfly + run the harness with the skiplist (committed)
 ├── skiplist.txt               # documented, tracked list of known-failing tests (committed)
 ├── README.md                  # this file (committed)
 └── upstream/                  # synced harness + tests — GITIGNORED, not committed
@@ -24,7 +34,7 @@ mirroring `tests/dragonfly/valkey_search/`.
 ```bash
 cd tests/dragonfly/valkey_tcl
 ./sync-valkey-tcl-tests.sh                       # sync harness + tests (pinned SHA)
-./run-stream-tests.sh ../../../build-dbg/dragonfly   # start DF + run suites
+./run-tcl-tests.sh ../../../build-dbg/dragonfly  # start DF + run suites
 ```
 
 Requirements: `tclsh` 8.6, and (optionally) `redis-cli` for the readiness probe.
@@ -32,7 +42,7 @@ The run script exits non-zero if any non-skipped test fails.
 
 ## How it works
 
-- **External mode**: `run-stream-tests.sh` starts Dragonfly (`--dbfilename= --dbnum=16`),
+- **External mode**: `run-tcl-tests.sh` starts Dragonfly (`--dbfilename= --dbnum=16`),
   waits for `PING`, then runs `tclsh test_helper.tcl --host … --port …`. In external mode
   the harness runs `FLUSHALL`/`FUNCTION FLUSH` before each block and applies overrides via
   `CONFIG SET`; it never spawns or kills the server.
@@ -43,6 +53,8 @@ The run script exits non-zero if any non-skipped test fails.
 - **Tag skiplist**: `--tags "-needs:debug -needs:repl -external:skip -large-memory"` drops
   the AOF/`debug loadaof` blocks (Dragonfly has no AOF), replication blocks, and
   process-control blocks.
+- **Ignore encoding**: `--ignore-encoding` makes `assert_encoding` a no-op — Dragonfly's
+  internal encoding names differ from Valkey's, so the suites do not gate on them.
 - **Test skiplist**: `skiplist.txt` lists individual known-failing tests (each a tracked
   Dragonfly gap) so the suite stays green over the passing subset. Remove an entry once the
   underlying gap is fixed.
