@@ -5,6 +5,7 @@
 #include "core/interpreter.h"
 
 #include <absl/base/casts.h>
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
@@ -207,7 +208,8 @@ class RedisTranslator : public ObjectExplorer {
 
   lua_State* lua_;
   bool has_error_{false};
-  vector<unsigned> array_index_{};
+  // Keep nesting indices inline to avoid a heap allocation for each shallow redis.call array reply.
+  absl::InlinedVector<unsigned, 4> array_index_;
 };
 
 void RedisTranslator::OnBool(bool b) {
