@@ -5,9 +5,11 @@
 #include "server/server_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/flags/flag.h>
 #include <absl/strings/match.h>
 
 #include <chrono>
+#include <cstdlib>
 
 #include "absl/strings/str_cat.h"
 #include "base/flags.h"
@@ -24,6 +26,12 @@ using namespace util;
 using namespace boost;
 
 ABSL_DECLARE_FLAG(string, cluster_mode);
+ABSL_DECLARE_FLAG(string, requirepass);
+ABSL_DECLARE_FLAG(bool, tls);
+ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
+ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
+ABSL_DECLARE_FLAG(bool, jwt_validate);
+ABSL_DECLARE_FLAG(string, jwt_validate_url);
 
 namespace dfly {
 
@@ -1161,6 +1169,30 @@ TEST_F(ServerFamilyTest, InfoCommandStatsAggregation) {
 
 TEST_F(ServerFamilyTest, InfoClusterMigrationErrors) {
   EXPECT_THAT(Run({"INFO", "CLUSTER"}).GetString(), HasSubstr("migration_errors_total:0"));
+}
+
+TEST_F(ServerFamilyTest, TlsAcceptsConfiguredJwtValidation) {
+  absl::FlagSaver flag_saver;
+  const char* password_env = getenv("DFLY_PASSWORD");
+  absl::Cleanup restore_password = [password_env] {
+    if (password_env)
+      setenv("DFLY_PASSWORD", password_env, 1);
+    else
+      unsetenv("DFLY_PASSWORD");
+  };
+
+  absl::SetFlag(&FLAGS_tls, true);
+  absl::SetFlag(&FLAGS_requirepass, "");
+  absl::SetFlag(&FLAGS_tls_ca_cert_file, "");
+  absl::SetFlag(&FLAGS_tls_ca_cert_dir, "");
+  unsetenv("DFLY_PASSWORD");
+  absl::SetFlag(&FLAGS_jwt_validate, false);
+  absl::SetFlag(&FLAGS_jwt_validate_url, "");
+  EXPECT_FALSE(ValidateServerTlsFlags());
+
+  absl::SetFlag(&FLAGS_jwt_validate, true);
+  absl::SetFlag(&FLAGS_jwt_validate_url, "http://localhost:8080/validate");
+  EXPECT_TRUE(ValidateServerTlsFlags());
 }
 
 }  // namespace dfly
