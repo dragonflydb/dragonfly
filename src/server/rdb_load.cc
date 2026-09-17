@@ -2753,8 +2753,13 @@ error_code RdbLoader::Load(io::Source* src) {
 
   DVLOG(1) << "RdbLoad loop finished";
 
+  // Drain and wait so a corruption that sets stop_early_ surfaces here, not in the deferred flush.
+  FlushAndWaitShards();
+
   if (stop_early_) {
-    return *ec_;
+    std::error_code ec = *ec_;
+    // stop()/Cancel() raises stop_early_ without an error; don't report an aborted load as success.
+    return ec ? ec : std::make_error_code(std::errc::operation_canceled);
   }
 
   /* Verify the checksum if RDB version is >= 5 */
@@ -2790,7 +2795,7 @@ void RdbLoader::DiscardChunkedValuesOnFinish() {
   bc->Wait();
 }
 
-void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
+void RdbLoader::FlushAndWaitShards() {
   BlockingCounter bc(shard_set->size());
   for (unsigned i = 0; i < shard_set->size(); ++i) {
     // Flush the remaining items.
@@ -2800,6 +2805,12 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     shard_set->Add(i, [bc]() mutable { bc->Dec(); });
   }
   bc->Wait();  // wait for sentinels to report.
+  shards_drained_ = true;
+}
+
+void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
+  if (!shards_drained_)  // early-return paths skip the in-Load drain
+    FlushAndWaitShards();
   // Decrement local one if it exists
   if (EngineShard* es = EngineShard::tlocal(); es) {
     GetCurrentDbSlice().DecrLoadInProgress();
