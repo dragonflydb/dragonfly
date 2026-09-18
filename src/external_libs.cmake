@@ -64,10 +64,10 @@ add_third_party(
 # tarball, so it reuses the shared retry policy (see third_party.cmake) via DOWNLOAD_COMMAND (see below).
 set(MIMALLOC_ROOT_DIR ${THIRD_PARTY_LIB_DIR}/mimalloc2)
 set(MIMALLOC_INCLUDE_DIR ${MIMALLOC_ROOT_DIR}/include)
-set(MIMALLOC_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.2.4)
+set(MIMALLOC_PATCH_DIR ${CMAKE_CURRENT_LIST_DIR}/../patches/mimalloc-v2.5.2)
 set(MIMALLOC_C_FLAGS "-O3 -g -DMI_STAT=0 -DNDEBUG")
-set(MIMALLOC_URL https://github.com/microsoft/mimalloc/archive/refs/tags/v2.2.4.tar.gz)
-set(MIMALLOC_SHA256 754a98de5e2912fddbeaf24830f982b4540992f1bab4a0a8796ee118e0752bda)
+set(MIMALLOC_URL https://github.com/microsoft/mimalloc/archive/refs/tags/v2.5.2.tar.gz)
+set(MIMALLOC_SHA256 5cf9d2a10fae5551b764e888a623da411c6c6beb0221b847f83492ab1932bdab)
 file(MAKE_DIRECTORY ${MIMALLOC_INCLUDE_DIR})
 
 ExternalProject_Add(mimalloc2_project
@@ -91,9 +91,6 @@ ExternalProject_Add(mimalloc2_project
       patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/0_base.patch
       COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/1_add_stat_type.patch
       COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/2_return_stat.patch
-      COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/3_track_full_size.patch
-      COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/4_fix_heap_collect.patch
-      COMMAND patch -p1 -d ${THIRD_PARTY_DIR}/mimalloc2/ -i ${MIMALLOC_PATCH_DIR}/5_fix_page_stats_bin.patch
   BUILD_COMMAND make mimalloc-static
 
   INSTALL_COMMAND make install
