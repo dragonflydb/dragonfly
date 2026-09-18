@@ -97,11 +97,6 @@ void LockTable::Release(uint64_t fp, IntentLock::Mode mode) {
     locks_.erase(it);
 }
 
-void LockTable::PrepareForSingleShotHeapDestroy() {
-  CHECK(locks_.empty());
-  locks_.rehash(0);
-}
-
 [[maybe_unused]] constexpr size_t kSzTable = sizeof(DbTable);
 
 DbTable::SampleTopKeys::~SampleTopKeys() {
@@ -134,9 +129,9 @@ void DbTable::PrepareForSingleShotHeapDestroy() {
   prime.SetArenaDestruct(true);
   mcflag.SetArenaDestruct(true);
 
-  trans_locks.PrepareForSingleShotHeapDestroy();
-  CHECK(watched_keys.empty());
-  watched_keys.rehash(0);
+  // These use the default allocator, not the arena, and DbTable is destructed normally.
+  DCHECK_EQ(trans_locks.Size(), 0u);
+  DCHECK(watched_keys.empty());
 }
 
 void DbTable::Clear() {

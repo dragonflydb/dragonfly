@@ -104,8 +104,6 @@ class LockTable {
 
   void Release(LockFp fp, IntentLock::Mode mode);
 
-  void PrepareForSingleShotHeapDestroy();
-
   auto begin() const {
     return locks_.cbegin();
   }

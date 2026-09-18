@@ -12,6 +12,7 @@
 #include "base/flags.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
+#include "core/search/stateless_allocator.h"
 #include "core/small_string.h"
 #include "io/proc_reader.h"
 
@@ -557,7 +558,11 @@ void EngineShard::DestroyThreadLocal() {
   shard_ = nullptr;
   CompactObj::InitThreadLocal(nullptr);
   SmallString::ShutdownThreadLocal();
+  InitTLSearchMR(nullptr);
   zmalloc_set_threadlocal_heap(nullptr);
+
+  // Bulk-reclaim bypasses individual zfree calls so reset the counter here
+  zmalloc_used_memory_tl = 0;
 
   // Bulk-reclaim the heap instead of destructing each object individually.
   mi_heap_destroy(tlh);

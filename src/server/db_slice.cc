@@ -503,16 +503,15 @@ void DbSlice::PrepareForSingleShotHeapDestroy() {
   pending_send_map_.clear();
   doc_del_cb_ = {};
 
-  CHECK(uniq_fps_.empty());
-  uniq_fps_.rehash(0);
-  CHECK(fetched_items_.empty());
-  fetched_items_.rehash(0);
-  CHECK(change_cb_.empty());
+  // These use the default allocator, not the arena, and therefore destructed normally.
+  DCHECK(uniq_fps_.empty());
+  DCHECK(fetched_items_.empty());
+  DCHECK(change_cb_.empty());
 
   for (auto& db : db_arr_) {
     if (!db)
       continue;
-    CHECK_EQ(db->use_count(), 1u);
+    DCHECK_EQ(db->use_count(), 1u);
     db->PrepareForSingleShotHeapDestroy();
   }
 }

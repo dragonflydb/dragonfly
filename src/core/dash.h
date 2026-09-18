@@ -472,7 +472,6 @@ class DashTable : public detail::DashTableBase {
   Policy policy_;
   std::vector<SegmentType*, PMR_NS::polymorphic_allocator<SegmentType*>> segment_;
 
-  // See SetArenaDestruct().
   bool arena_destruct_ = false;
 
   uint64_t garbage_collected_ = 0;
