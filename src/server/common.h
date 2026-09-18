@@ -102,21 +102,26 @@ struct ScanOpts {
   bool allow_novalues = false;
 };
 
-// Own scan results across shard hops and reply writes without allocating a string per entry.
+// Own unordered scan results across shard hops and reply writes, packing small entries together.
 // Traversal, decoding, and matching are left to the caller.
 class ScanResult {
  public:
-  explicit ScanResult(size_t count);
+  explicit ScanResult(size_t count = 0);
 
   // Append writable storage for an entry; the caller must fill all len bytes.
   // Returned pointers and views are invalidated by subsequent mutations or moving the result.
   char* AppendBuffer(size_t len);
 
-  // Discard the last entry, for example when MATCH rejects a decoded key.
-  void PopBack();
+  // Undo the most recent AppendBuffer using its returned pointer, e.g. when MATCH rejects a key.
+  // No other mutation or move may intervene, and each append can be undone only once.
+  void UndoAppend(char* buffer);
 
-  std::string_view back() const {
-    return overflow_.empty() ? entries_.back() : std::string_view{overflow_.back()};
+  // Access an entry without copying. The view is invalidated by mutation or moving the result.
+  // Packed entries precede overflow entries; insertion order is not preserved.
+  std::string_view operator[](size_t index) const;
+
+  bool empty() const {
+    return size() == 0;
   }
 
   size_t size() const {
@@ -126,6 +131,8 @@ class ScanResult {
   void Send(facade::RedisReplyBuilder* builder) const;
 
  private:
+  static constexpr size_t kEstimatedEntrySize = 64;
+
   // Reuse packed argument storage for result entries to avoid per-entry string allocations.
   cmn::BackedArguments entries_;
   StringVec overflow_;
