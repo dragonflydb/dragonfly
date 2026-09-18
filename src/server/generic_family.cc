@@ -909,44 +909,46 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
   auto& db_slice = op_args.GetDbSlice();
   auto [it, auto_updater, is_new, _] = db_slice.FindMutable(op_args.db_cntx, key);
 
-  if (!IsValid(it) || (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)) {
+  if (!IsValid(it)) {
     std::vector<long> res(values.size(), -2);
     return res;
   }
+  if (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)
+    return OpStatus::WRONG_TYPE;
 
   PrimeValue* pv = &it->second;
+  if (pv->ObjType() == OBJ_HASH) {
+    auto_updater.Run();
+    return HSetFamily::ExpireFields(op_args, key, ttl_sec, values);
+  }
   if (pv->IsExternal() && !pv->IsCool())
     return OpStatus::CANCELLED;  // can't mutate offloaded values synchronously
 
-  const bool is_set = pv->ObjType() == OBJ_SET;
-  // Only a TTL-carrying StringMap/StringSet can hold lazily expired members needing compensation.
+  // Only a TTL-carrying StringSet can hold lazily expired members needing compensation.
   const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
-
-  vector<long> result;
-  bool key_deleted;
-  if (is_set) {
-    result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
-    // Finalize memory accounting before potential deletion.
-    auto_updater.Run();
-    key_deleted = SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, *pv);
-  } else {
-    result = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key,
-                                             values, pv);
-    auto_updater.Run();
-    key_deleted = HSetFamily::DeleteIfEmpty(db_slice, op_args.db_cntx, key, *pv);
-  }
+  auto result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
+  // Finalize memory accounting before potential deletion.
+  auto_updater.Run();
+  bool key_deleted = SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, *pv);
 
   // A member probed while lazily expired is still alive on a lagging replica and the replayed
-  // command would re-arm it there; delete it explicitly. Delete*IfEmpty journaled a DEL itself
+  // command would re-arm it there; delete it explicitly. DeleteSetIfEmpty journaled a DEL itself
   // and may have yielded, so only locals are touched from here on.
-  if (!key_deleted && had_member_expiry && op_args.shard->journal()) {
-    absl::InlinedVector<std::string_view, 4> missing{key};
-    for (size_t i = 0; i < values.size(); ++i) {
-      if (result[i] == -2)
-        missing.push_back(values[i]);
+  if (!key_deleted && op_args.shard->journal()) {
+    if (had_member_expiry) {
+      absl::InlinedVector<std::string_view, 4> missing{key};
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (result[i] == -2)
+          missing.push_back(values[i]);
+      }
+      if (missing.size() > 1)
+        RecordJournal(op_args, "SREM"sv, missing);
     }
-    if (missing.size() > 1)
-      RecordJournal(op_args, is_set ? "SREM"sv : "HDEL"sv, missing);
+    // FIELDEXPIRE is NO_AUTOJOURNAL because the hash branch above journals its own effect.
+    string ttl = absl::StrCat(ttl_sec);
+    absl::InlinedVector<std::string_view, 6> args{key, ttl};
+    args.insert(args.end(), values.begin(), values.end());
+    RecordJournal(op_args, "FIELDEXPIRE"sv, args);
   }
   return result;
 }
@@ -2954,7 +2956,8 @@ void GenericFamily::Register(CommandRegistry* registry) {
              .HFUNC(PexpireAt)
       << CI{"PEXPIRE", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kPExpire}
              .HFUNC(Pexpire)
-      << CI{"FIELDEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kFieldExpire}
+      << CI{"FIELDEXPIRE",    CO::JOURNALED | CO::FAST | CO::DENYOOM | CO::NO_AUTOJOURNAL, -4, 1, 1,
+            acl::kFieldExpire}
              .HFUNC(FieldExpire)
       << CI{"RENAME", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
       << CI{"COPY",    CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_1, -3, 1, 2,

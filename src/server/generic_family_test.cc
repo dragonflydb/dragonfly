@@ -1781,7 +1781,9 @@ TEST_F(GenericFamilyTest, FieldTtl) {
   EXPECT_EQ(2, CheckedInt({"HSETEX", "k2", "1", "f1", "v1", "f2", "v2"}));
   EXPECT_EQ(1, CheckedInt({"HSET", "k2", "f3", "v3"}));
 
-  EXPECT_EQ(1, CheckedInt({"fieldttl", "k2", "f1"}));
+  // The clock is 1.1s past a whole second, so the 2.1s deadline rounds up to 3s and FIELDTTL,
+  // which subtracts the current whole second, reports 2 (1.9s of actual lifetime left).
+  EXPECT_EQ(2, CheckedInt({"fieldttl", "k2", "f1"}));
   EXPECT_EQ(-1, CheckedInt({"fieldttl", "k2", "f3"}));
   EXPECT_EQ(-3, CheckedInt({"fieldttl", "k2", "f4"}));
 }
@@ -1820,6 +1822,7 @@ TEST_F(GenericFamilyTest, FieldExpireSet) {
 }
 
 TEST_F(GenericFamilyTest, FieldExpireHset) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
   for (int i = 0; i < 3; ++i) {
     EXPECT_EQ(CheckedInt({"HSET", "key", absl::StrCat("k", i), "v"}), 1);
   }
@@ -1840,9 +1843,13 @@ TEST_F(GenericFamilyTest, FieldExpireNoSuchField) {
               RespArray(ElementsAre(IntArg(1), IntArg(-2))));
 }
 
-TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
+TEST_F(GenericFamilyTest, FieldExpireInvalidKey) {
   EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b"}),
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+
+  EXPECT_EQ(Run({"SET", "key", "value"}), "OK");
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b"}), ErrArg("WRONGTYPE"));
+  EXPECT_EQ(Run({"GET", "key"}), "value");
 }
 
 TEST_F(GenericFamilyTest, IterateMapSetStaleTimeZombie) {

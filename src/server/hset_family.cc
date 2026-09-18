@@ -4,7 +4,10 @@
 
 #include "server/hset_family.h"
 
+#include <absl/cleanup/cleanup.h>
+#include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
@@ -521,6 +524,214 @@ OpResult<vector<OptStr>> OpHMGet(const HMapWrap& hw, const ParsedArgs& fields) {
   return result;
 }
 
+// HGETEX accepts absolute deadlines in the past as well, deleting the field during delayed
+// replay.
+void JournalHGetEx(const OpArgs& op_args, string_view key, uint64_t expire_at_ms, ArgSlice fields) {
+  if (fields.empty())
+    return;
+
+  string deadline = absl::StrCat(expire_at_ms);
+  string num_fields = absl::StrCat(fields.size());
+  absl::InlinedVector<string_view, 8> args{key, "PXAT", deadline, "FIELDS", num_fields};
+  args.insert(args.end(), fields.begin(), fields.end());
+  RecordJournal(op_args, "HGETEX", args);
+}
+
+// Keeps field-TTL updates, replay data, and mutable-entry cleanup together. Construct before
+// reading fields so lazy expiry does not hide the need to compensate a lagging replica.
+class FieldExpiry {
+ public:
+  FieldExpiry(const OpArgs& op_args, string_view key, const ParsedArgs& fields,
+              const DbSlice::ExpireParams& exp_params, DbSlice::ItAndUpdater& entry)
+      : op_args_(op_args),
+        key_(key),
+        fields_(fields),
+        exp_params_(exp_params),
+        entry_(entry),
+        pv_(entry.it->second),
+        had_member_expiry_(pv_.Encoding() == kEncodingStrMap2 && pv_.HasMemberExpiration()),
+        journal_(op_args.shard->journal()),
+        restored_{key} {
+  }
+
+  // Apply once, completing the database update before journaling can yield. HGETEX supplies
+  // its saved reply values for PERSIST and for deletions caused by lazy expiry during the read.
+  vector<long> Apply(ExpireFlags flags, absl::Span<const OptStr> values = {});
+
+ private:
+  using Args = absl::InlinedVector<string_view, 4>;
+
+  vector<long> UpdateTTL(StringMap* owner, ExpireFlags flags);
+  vector<long> PersistFields(StringMap* sm, absl::Span<const OptStr> values);
+  void Journal(absl::Span<const long> results, absl::Span<const OptStr> values);
+
+  const OpArgs& op_args_;
+  string_view key_;
+  const ParsedArgs& fields_;
+  const DbSlice::ExpireParams& exp_params_;
+  DbSlice::ItAndUpdater& entry_;
+  PrimeValue& pv_;
+  const bool had_member_expiry_;
+  const bool journal_;
+  Args restored_;
+};
+
+vector<long> FieldExpiry::Apply(ExpireFlags flags, absl::Span<const OptStr> values) {
+  DCHECK_EQ(OBJ_HASH, pv_.ObjType());
+
+  vector<long> results;
+  // Listpacks do not store per-field TTLs, so PERSIST has nothing to remove from them.
+  if (exp_params_.persist ? pv_.Encoding() == kEncodingStrMap2 : exp_params_.IsDefined()) {
+    // Collect the affected fields for HNSW field data preservation.
+    Args field_names(fields_.begin(), fields_.end());
+    auto* indices = op_args_.shard->search_indices();
+    indices->RemoveDoc(key_, op_args_.db_cntx, pv_, field_names);
+
+    if (pv_.Encoding() == kEncodingListPack) {  // a listpack can not hold the new deadlines
+      pv_.InitRobj(OBJ_HASH, kEncodingStrMap2,
+                   HSetFamily::ConvertToStrMap(static_cast<uint8_t*>(pv_.RObjPtr())));
+    }
+
+    // Fetch the map after the conversion, which may have replaced the value.
+    StringMap* sm = GetStringMap(pv_, op_args_.db_cntx);
+    results = exp_params_.persist ? PersistFields(sm, values) : UpdateTTL(sm, flags);
+    indices->AddDoc(key_, op_args_.db_cntx, &pv_);
+  }
+
+  // Lazy expiry or a zero TTL may have emptied the hash. DelMutable consumes the updater,
+  // ensuring it cannot touch a deleted entry or survive a journal yield.
+  if (pv_.Encoding() == kEncodingStrMap2 &&
+      static_cast<StringMap*>(pv_.RObjPtr())->UpperBoundSize() == 0) {
+    op_args_.GetDbSlice().DelMutable(op_args_.db_cntx, std::move(entry_));
+    if (journal_)
+      RecordJournal(op_args_, "DEL", {key_});
+    return results;
+  }
+
+  entry_.post_updater.Run();
+  if (journal_)
+    Journal(results, values);
+  return results;
+}
+
+// Records the applied effects using values captured during the update, without looking them
+// up again. Only an extended or cleared deadline can need restoring on a lagging replica.
+void FieldExpiry::Journal(absl::Span<const long> results, absl::Span<const OptStr> values) {
+  DCHECK(!results.empty() || values.size() == fields_.size());
+
+  Args updated, deleted{key_};
+  for (size_t i = 0; i < fields_.size(); ++i) {
+    // A read without an expiry option has no result codes; there a missing value means the field
+    // was lazily expired while HGETEX read it.
+    const long code = results.empty() ? (values[i] ? 0 : -2) : results[i];
+    if (code == 1 && !exp_params_.persist)
+      updated.push_back(fields_[i]);
+    else if (code == 2 || (had_member_expiry_ && code == -2))
+      deleted.push_back(fields_[i]);
+  }
+
+  // RecordJournal serializes before yielding. Write the borrowed values first; subsequent
+  // records only reference command arguments, so they remain valid across yields.
+  if (restored_.size() > 1)
+    RecordJournal(op_args_, "HSET", restored_);
+  if (deleted.size() > 1)
+    RecordJournal(op_args_, "HDEL", deleted);
+  if (!updated.empty())
+    JournalHGetEx(op_args_, key_, exp_params_.DeadlineSec() * 1000, updated);
+}
+
+// Returns -2 for a missing field, 0 for an unmet NX/XX/GT/LT condition, 1 for an updated TTL,
+// and 2 for a field deleted by a zero or past expiry.
+vector<long> FieldExpiry::UpdateTTL(StringMap* owner, ExpireFlags flags) {
+  uint32_t ttl_sec = exp_params_.TtlSec(op_args_.db_cntx.time_now_ms);
+  vector<long> res;
+  res.reserve(fields_.size());
+
+  auto can_update = [&](const auto& it) {
+    switch (flags) {
+      case ExpireFlags::EXPIRE_NX:
+        return !it.HasExpiry();
+      case ExpireFlags::EXPIRE_XX:
+        return it.HasExpiry();
+      case ExpireFlags::EXPIRE_GT:
+        return it.ExpiryTime() - owner->time_now() < ttl_sec;
+      case ExpireFlags::EXPIRE_LT:
+        return it.ExpiryTime() - owner->time_now() > ttl_sec;
+      case ExpireFlags::EXPIRE_ALWAYS:
+        break;
+    }
+    return true;
+  };
+
+  for (string_view field : fields_) {
+    auto it = owner->Find(field);
+    if (it != owner->end()) {
+      if (!can_update(it)) {
+        res.emplace_back(0);
+        continue;
+      }
+      if (ttl_sec == 0) {
+        owner->Erase(field);
+        res.emplace_back(2);
+      } else {
+        // Only extending an existing deadline can lose a live value during delayed replay.
+        // These entries already have TTL storage, so SetExpiryTime won't reallocate the value.
+        if (journal_ && it.HasExpiry() && ttl_sec > it.ExpiryTime() - owner->time_now()) {
+          restored_.insert(restored_.end(), {field, string_view{it->second, sdslen(it->second)}});
+        }
+        it.SetExpiryTime(ttl_sec);
+        res.emplace_back(1);
+      }
+    } else {
+      res.emplace_back(-2);
+    }
+  }
+
+  return res;
+}
+
+// Removes field TTLs by re-inserting the values without an expiry.
+vector<long> FieldExpiry::PersistFields(StringMap* sm, absl::Span<const OptStr> values) {
+  DCHECK_EQ(fields_.size(), values.size());
+
+  vector<long> res;
+  res.reserve(fields_.size());
+  for (size_t i = 0; i < fields_.size(); ++i) {
+    string_view field = fields_[i];
+    auto it = sm->Find(field);
+    if (it == sm->end()) {
+      res.push_back(-2);
+      continue;
+    }
+    if (it.HasExpiry()) {
+      // Removing the TTL replaces the SDS entry. Borrow the saved HGETEX reply value instead.
+      if (journal_)
+        restored_.insert(restored_.end(), {field, *values[i]});
+      sm->AddOrUpdate(field, string_view{it->second, sdslen(it->second)}, UINT32_MAX, false);
+    }
+    res.push_back(1);
+  }
+  return res;
+}
+
+// Replay the applied values with their stored deadlines, resolving NX/FNX/FXX and KEEPTTL
+// on the master. Collect expiries before RecordJournal can yield and invalidate the hash.
+void JournalHSetEx(const OpArgs& op_args, ArgSlice args, const PrimeValue& pv) {
+  DCHECK_GE(args.size(), 3u);  // key plus at least one field/value pair
+  absl::flat_hash_map<uint32_t, vector<string_view>> expiries;
+  if (pv.Encoding() == kEncodingStrMap2 && pv.HasMemberExpiration()) {
+    auto* sm = GetStringMap(pv, op_args.db_cntx);
+    for (size_t i = 1; i < args.size(); i += 2) {
+      auto it = sm->Find(args[i]);
+      if (it != sm->end() && it.HasExpiry())
+        expiries[it.ExpiryTime()].push_back(args[i]);
+    }
+  }
+  RecordJournal(op_args, "HSET", args);
+  for (const auto& [expiry, fields] : expiries)
+    JournalHGetEx(op_args, args.front(), (uint64_t{expiry} + kMemberExpiryBase) * 1000, fields);
+}
+
 struct OpSetParams {
   enum class Mode : uint8_t {
     kNormal,  // overwrite every field
@@ -537,6 +748,7 @@ struct OpSetParams {
   bool keepttl = false;
   Mode mode = Mode::kNormal;
   Format format = Format::kDragonfly;
+  bool manual_journal = false;
 
   optional<util::fb2::Future<bool>>* backpressure = nullptr;
 };
@@ -565,16 +777,32 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
   uint8_t* lp = nullptr;
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
+  const bool is_external = pv.IsExternal() && !pv.IsCool();
+  if (is_external && op_sp.ttl != UINT32_MAX)
+    return OpStatus::CANCELLED;  // member TTLs can't be stored in an offloaded hash
 
   // Only Dragonfly NX skips existing fields; FNX/FXX were already resolved by the caller, so every
   // other mode overwrites.
   const bool skip_existing = op_sp.mode == OpSetParams::Mode::kNX;
+  // HSETEX journals its effect by hand so that deadlines replicate as absolute values.
+  vector<string_view> journal_args;
+  if (op_sp.manual_journal && op_args.shard->journal()) {
+    journal_args.push_back(key);
+    if (!skip_existing) {  // NX appends only the fields it actually creates, below
+      for (auto arg : values)
+        journal_args.push_back(arg);
+    }
+  }
+  // Finish accounting before journaling can yield, on either mutation path.
+  absl::Cleanup journal_on_exit = [&] {
+    if (journal_args.size() > 1) {
+      add_res.post_updater.Run();
+      JournalHSetEx(op_args, journal_args, pv);
+    }
+  };
 
   // If the value is external, enqueue read and modify it there
-  if (pv.IsExternal() && !pv.IsCool()) {
-    if (op_sp.ttl != UINT32_MAX)
-      return OpStatus::CANCELLED;  // member TTLs can't be stored in an offloaded hash
-
+  if (is_external) {
     using D = tiering::ListpackMapDecoder;
     util::fb2::Future<OpResult<uint32_t>> fut;
     auto read_cb = [fut, values, op_sp, skip_existing](io::Result<D*> res) mutable {
@@ -651,6 +879,8 @@ OpResult<CbVariant<uint32_t>> OpSet(const OpArgs& op_args, string_view key,
         added = sm->AddOrUpdate(field, value, op_sp.ttl, op_sp.keepttl);
 
       created += unsigned(added);
+      if (skip_existing && added && !journal_args.empty())
+        journal_args.insert(journal_args.end(), {field, value});
     }
   }
 
@@ -702,46 +932,10 @@ OpResult<vector<long>> OpHExpire(const OpArgs& op_args, string_view key, uint32_
   if (pv->IsExternal() && !pv->IsCool())
     return OpStatus::CANCELLED;  // can't mutate offloaded hashes synchronously
 
-  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
-  const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
-
-  auto res = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, flags, key, values, pv);
-
-  // If it is a hash which became empty after expiring fields, we must delete the key safely.
-  // We use DelMutable which consumes the iterator/updater to prevent the crash.
-  bool key_deleted = false;
-  if (pv->Encoding() == kEncodingStrMap2) {
-    auto* sm = static_cast<StringMap*>(pv->RObjPtr());
-    if (sm->UpperBoundSize() == 0) {
-      db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
-      key_deleted = true;
-    }
-  }
-
-  // Journaling below may yield; disarm the updater so no dash iterator survives the yield
-  // (DelMutable already consumed it in the deleted case).
-  if (!key_deleted)
-    op_res->post_updater.Run();
-
-  if (op_args.shard->journal()) {
-    if (key_deleted) {
-      // The replayed command re-applies a relative TTL against the replica clock and
-      // cannot reproduce this deletion; journal it explicitly.
-      RecordJournal(op_args, "DEL"sv, {key});
-    } else if (had_member_expiry) {
-      // A field probed while lazily expired is still alive on a lagging replica and the
-      // replayed command would re-arm it there; delete it explicitly.
-      absl::InlinedVector<string_view, 4> missing{key};
-      for (size_t i = 0; i < values.size(); ++i) {
-        if (res[i] == -2)
-          missing.push_back(values[i]);
-      }
-      if (missing.size() > 1)
-        RecordJournal(op_args, "HDEL"sv, missing);
-    }
-  }
-
-  return res;
+  uint64_t now_ms = op_args.db_cntx.time_now_ms;
+  DbSlice::ExpireParams exp_params{TimeUnit::SEC, ttl_sec, now_ms};
+  FieldExpiry expiry{op_args, key, values, exp_params, *op_res};
+  return expiry.Apply(flags);
 }
 
 // Evaluates the FNX/FXX collective condition of HSETEX.
@@ -794,16 +988,11 @@ struct HSetExParams {
   CmdArgParser::Range fields;  // field/value pairs; valid only when the parser has no error.
 };
 
-optional<DbSlice::ExpireParams> MakeFieldExpireParams(ExpT type, int64_t value, uint64_t now_ms,
-                                                      bool allow_expired) {
-  if (value < 0)
-    return nullopt;
-
-  DbSlice::ExpireParams params{type, value, now_ms};
-  auto [ttl_ms, expire_at_ms] = params.Calculate(now_ms, false);
-  if (expire_at_ms < 0 || ttl_ms > kMaxExpireDeadlineMs || (!allow_expired && ttl_ms <= 0))
-    return nullopt;
-  return params;
+// Field deadlines are stored with second resolution and rounded up, so a maximal relative TTL
+// journaled as an absolute deadline may exceed the cap by less than a second on replay.
+bool IsValidFieldExpiry(const DbSlice::ExpireParams& params, ExpT type, uint64_t now_ms) {
+  const bool absolute = type == ExpT::EXAT || type == ExpT::PXAT;
+  return params.IsValid(now_ms, kMaxExpireDeadlineMs + (absolute ? 999 : 0));
 }
 
 // Parses HSETEX arguments after the key, reporting any error into `parser` (surfaced by the caller
@@ -831,12 +1020,12 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name, uint64_t no
   ExpiryOption& expiry = res.expiry;
 
   if (expiry.value) {
-    auto expire_params = MakeFieldExpireParams(expiry.type, *expiry.value, now_ms, false);
-    if (!expire_params) {
+    DbSlice::ExpireParams expire_params{expiry.type, *expiry.value, now_ms};
+    if (!IsValidFieldExpiry(expire_params, expiry.type, now_ms) ||
+        expire_params.IsExpired(now_ms)) {
       parser->ReportCustom(InvalidExpireTime(cmd_name));
     } else {
-      int64_t ttl_ms = expire_params->Calculate(now_ms, false).first;
-      op_sp.ttl = (ttl_ms + 999) / 1000;
+      op_sp.ttl = expire_params.TtlSec(now_ms);
     }
   }
 
@@ -852,7 +1041,8 @@ HSetExParams ParseHSetEx(CmdArgParser* parser, string_view cmd_name, uint64_t no
     parser->Report(CmdArgParser::CUSTOM_ERROR);
   } else {
     op_sp.format = Format::kDragonfly;
-    op_sp.ttl = parser->Next<FInt<int64_t{1}, kMaxExpireDeadlineSec>>();
+    int64_t ttl_sec = parser->Next<FInt<int64_t{1}, kMaxExpireDeadlineSec>>();
+    op_sp.ttl = DbSlice::ExpireParams{TimeUnit::SEC, ttl_sec, now_ms}.TtlSec(now_ms);
 
     res.fields = parser->RemainingRange();
     if (res.fields.empty() || res.fields.size() % 2 != 0)
@@ -866,6 +1056,7 @@ void HSetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
   HSetExParams parsed = ParseHSetEx(&parser, cmd_cntx->cid()->name(), now_ms);
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  parsed.op_sp.manual_journal = true;
 
   // Evaluate the FNX/FXX condition (if any), then let OpSet set the fields and report the
   // format-appropriate value (created count for Dragonfly, 1 for Redis).
@@ -1035,26 +1226,6 @@ void CmdHPExpireTime(CmdArgParser parser, CommandContext* cmd_cntx) {
   HExpireTimeGeneric<FieldExpireOutput::kPExpireTimeMs>(std::move(parser), cmd_cntx);
 }
 
-// Removes the TTL from the listed existing fields by re-inserting them without an expiry.
-// No-op for listpack-encoded hashes (which never store per-field TTLs).
-void PersistFields(const OpArgs& op_args, string_view key, const ParsedArgs& fields,
-                   PrimeValue* pv) {
-  if (pv->Encoding() != kEncodingStrMap2)
-    return;
-
-  absl::InlinedVector<string_view, 4> field_names(fields.begin(), fields.end());
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv, field_names);
-
-  StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
-  for (string_view field : field_names) {
-    auto it = sm->Find(field);
-    if (it != sm->end() && it.HasExpiry())
-      sm->AddOrUpdate(field, string_view{it->second, sdslen(it->second)}, UINT32_MAX, false);
-  }
-
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
-}
-
 OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const ParsedArgs& fields,
                                   const DbSlice::ExpireParams& exp_params) {
   auto& db_slice = op_args.GetDbSlice();
@@ -1065,9 +1236,7 @@ OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const 
   if (pv->IsExternal() && !pv->IsCool())
     return OpStatus::CANCELLED;  // offloaded hashes can't be read/mutated synchronously
 
-  // Only a TTL-carrying StringMap can hold lazily expired fields needing compensation.
-  const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
-
+  FieldExpiry expiry{op_args, key, fields, exp_params, *op_res};
   // Capture the current field values before mutating TTLs: a past/zero expiry deletes the field,
   // but its value must still be returned (Redis semantics).
   vector<OptStr> values;
@@ -1076,63 +1245,8 @@ OpResult<vector<OptStr>> OpHGetEx(const OpArgs& op_args, string_view key, const 
     values = std::move(*OpHMGet(hw, fields));
   }
 
-  if (exp_params.persist) {
-    PersistFields(op_args, key, fields, pv);
-  } else if (exp_params.IsDefined()) {
-    // A non-positive relative TTL means the expiry is already due: ttl_sec 0 deletes the field
-    // (its value was captured above).
-    int64_t rel_msec = exp_params.Calculate(op_args.db_cntx.time_now_ms, false).first;
-    uint32_t ttl_sec = rel_msec <= 0 ? 0 : static_cast<uint32_t>((rel_msec + 999) / 1000);
-    HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key, fields, pv);
-  }
-
-  // Lazy field expiry during the read, or a 0-ttl deletion above, may have emptied the hash.
-  bool key_deleted = false;
-  if (pv->Encoding() == kEncodingStrMap2) {
-    auto* sm = static_cast<StringMap*>(pv->RObjPtr());
-    if (sm->UpperBoundSize() == 0) {
-      db_slice.DelMutable(op_args.db_cntx, std::move(*op_res));
-      key_deleted = true;
-    }
-  }
-
-  // Journaling below may yield; disarm the updater so no dash iterator survives the yield
-  // (DelMutable already consumed it in the deleted case).
-  if (!key_deleted)
-    op_res->post_updater.Run();
-
-  if (op_args.shard->journal()) {
-    if (key_deleted) {
-      // The replayed command re-applies a relative TTL against the replica clock and
-      // cannot reproduce this deletion; journal it explicitly.
-      RecordJournal(op_args, "DEL"sv, {key});
-    } else if (had_member_expiry) {
-      // A field probed while lazily expired is still alive on a lagging replica and the
-      // replayed command would re-arm or persist it there; delete it explicitly.
-      absl::InlinedVector<string_view, 4> missing{key};
-      for (size_t i = 0; i < fields.size(); ++i) {
-        if (!values[i].has_value())
-          missing.push_back(fields[i]);
-      }
-      if (missing.size() > 1)
-        RecordJournal(op_args, "HDEL"sv, missing);
-    }
-  }
-
+  expiry.Apply(ExpireFlags::EXPIRE_ALWAYS, values);
   return values;
-}
-
-DbSlice::ExpireParams BuildHGetExpiry(CmdArgParser* p, const ExpiryOrPersistOptions& o,
-                                      uint64_t now_ms, string_view cmd_name) {
-  DbSlice::ExpireParams out;
-  out.persist = o.persist;  // PERSIST and an expiry are mutually exclusive (OneOf)
-  if (!o.expiry.value)
-    return out;
-
-  auto params = MakeFieldExpireParams(o.expiry.type, *o.expiry.value, now_ms, true);
-  if (!params)
-    p->ReportCustom(InvalidExpireTime(cmd_name));
-  return params.value_or(out);
 }
 
 void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -1142,8 +1256,14 @@ void CmdHGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
   static constexpr auto kGrammar = Compile(Options(ExpiryOrPersist()));
   auto opts = kGrammar.Apply(&parser);
 
-  DbSlice::ExpireParams exp_params =
-      BuildHGetExpiry(&parser, opts, now_ms, cmd_cntx->cid()->name());
+  DbSlice::ExpireParams exp_params;
+  exp_params.persist = opts.persist;
+  if (opts.expiry.value) {
+    exp_params = DbSlice::ExpireParams{opts.expiry.type, *opts.expiry.value, now_ms};
+    // Zero and past deadlines are allowed, but negative input must not become "expire now".
+    if (*opts.expiry.value < 0 || !IsValidFieldExpiry(exp_params, opts.expiry.type, now_ms))
+      parser.ReportCustom(InvalidExpireTime(cmd_cntx->cid()->name()));
+  }
 
   parser.ExpectTag("FIELDS", "Mandatory argument FIELDS is missing or not at the right position");
   CmdArgParser::Range fields =
@@ -1531,6 +1651,8 @@ using CI = CommandId;
 #define HFUNC(x) SetHandler(&Cmd##x)
 
 void HSetFamily::Register(CommandRegistry* registry) {
+  constexpr auto kExpiryOpts = CO::JOURNALED | CO::FAST | CO::DENYOOM | CO::NO_AUTOJOURNAL;
+
   registry->StartFamily(acl::HASH);
   *registry << CI{"HDEL", CO::FAST | CO::JOURNALED, -3, 1, 1}.HFUNC(HDel)
             << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(HLen)
@@ -1543,14 +1665,14 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HINCRBYFLOAT", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(
                    HIncrByFloat)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
-            << CI{"HEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -5, 1, 1}.HFUNC(HExpire)
+            << CI{"HEXPIRE", kExpiryOpts, -5, 1, 1}.HFUNC(HExpire)
             << CI{"HPEXPIRETIME", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HPExpireTime)
-            << CI{"HGETEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HGetEx)
+            << CI{"HGETEX", kExpiryOpts, -4, 1, 1}.HFUNC(HGetEx)
             << CI{"HTTL", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HTtl)
             << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1}.HFUNC(HRandField)
             << CI{"HSCAN", CO::READONLY, -3, 1, 1}.HFUNC(HScan)
             << CI{"HSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
-            << CI{"HSETEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -5, 1, 1}.SetHandler(HSetEx)
+            << CI{"HSETEX", kExpiryOpts, -5, 1, 1}.SetHandler(HSetEx)
             << CI{"HSETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HSetNx)
             << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(HStrLen)
             << CI{"HVALS", CO::READONLY, 2, 1, 1}.HFUNC(HVals);
@@ -1677,83 +1799,9 @@ bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std:
   return false;
 }
 
-// returns vector of results for each field in values:
-// -2 if the provided key does not exist.
-// 0 if the specified NX | XX | GT | LT condition has not been met.
-// 1 if the expiration time was set/updated.
-// 2 when HEXPIRE/HPEXPIRE is called with 0 seconds and the field is deleted.
-static std::vector<long> UpdateTTL(ParsedArgs values, uint32_t ttl_sec, ExpireFlags flags,
-                                   StringMap* owner) {
-  std::vector<long> res;
-  res.reserve(values.size());
-
-  for (size_t i = 0; i < values.size(); i++) {
-    std::string_view field = facade::ToSV(values[i]);
-    auto it = owner->Find(field);
-    if (it != owner->end()) {
-      switch (flags) {
-        case ExpireFlags::EXPIRE_NX:
-          if (it.HasExpiry()) {
-            res.emplace_back(0);
-            continue;
-          }
-          break;
-        case ExpireFlags::EXPIRE_XX:
-          if (!it.HasExpiry()) {
-            res.emplace_back(0);
-            continue;
-          }
-          break;
-        case ExpireFlags::EXPIRE_GT:
-          if (it.ExpiryTime() - owner->time_now() >= ttl_sec) {
-            res.emplace_back(0);
-            continue;
-          }
-          break;
-        case ExpireFlags::EXPIRE_LT:
-          if (it.ExpiryTime() - owner->time_now() <= ttl_sec) {
-            res.emplace_back(0);
-            continue;
-          }
-          break;
-        case ExpireFlags::EXPIRE_ALWAYS:
-          break;
-      }
-      if (ttl_sec == 0) {
-        owner->Erase(field);
-        res.emplace_back(2);
-      } else {
-        it.SetExpiryTime(ttl_sec);
-        res.emplace_back(1);
-      }
-    } else {
-      res.emplace_back(-2);
-    }
-  }
-
-  return res;
-}
-
-vector<long> HSetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                             ExpireFlags flags, string_view key,
-                                             const ParsedArgs& fields, PrimeValue* pv) {
-  DCHECK_EQ(OBJ_HASH, pv->ObjType());
-  // values contains field names — collect them for HNSW field data preservation.
-  absl::InlinedVector<std::string_view, 4> field_names(fields.begin(), fields.end());
-  op_args.shard->search_indices()->RemoveDoc(key, op_args.db_cntx, *pv, field_names);
-
-  if (pv->Encoding() == kEncodingListPack) {
-    // a valid result can never be a listpack, since it doesnt keep ttl
-    uint8_t* lp = (uint8_t*)pv->RObjPtr();
-    StringMap* sm = HSetFamily::ConvertToStrMap(lp);
-    pv->InitRobj(OBJ_HASH, kEncodingStrMap2, sm);
-  }
-
-  // This needs to be explicitly fetched again since the pv might have changed.
-  StringMap* sm = container_utils::GetStringMap(*pv, op_args.db_cntx);
-  vector<long> res = UpdateTTL(fields, ttl_sec, flags, sm);
-  op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, pv);
-  return res;
+OpResult<vector<long>> HSetFamily::ExpireFields(const OpArgs& op_args, string_view key,
+                                                uint32_t ttl_sec, const ParsedArgs& fields) {
+  return OpHExpire(op_args, key, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, fields);
 }
 
 }  // namespace dfly

@@ -34,9 +34,10 @@ class HSetFamily {
   static bool DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
                             const PrimeValue& pv);
 
-  static std::vector<long> SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,
-                                               ExpireFlags flags, std::string_view key,
-                                               const facade::ParsedArgs& fields, PrimeValue* pv);
+  // Apply FIELDEXPIRE to a hash, including empty-key cleanup and absolute-deadline journaling.
+  static OpResult<std::vector<long>> ExpireFields(const OpArgs& op_args, std::string_view key,
+                                                  uint32_t ttl_sec,
+                                                  const facade::ParsedArgs& fields);
 };
 
 }  // namespace dfly

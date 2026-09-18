@@ -820,9 +820,10 @@ async def test_save_hash_with_expired_fields(async_client: aioredis.Redis):
     """
 
     await async_client.execute_command("HSETEX", "mykey", "1", "f1", "v1")
+    [deadline_ms] = await async_client.execute_command("HPEXPIRETIME", "mykey", "FIELDS", "1", "f1")
     await async_client.execute_command("SAVE")
 
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(max(0, deadline_ms / 1000 - time.time()) + 0.1)
 
     # Trigger lazy expiry of the field — the key remains but has 0 fields.
     assert await async_client.execute_command("FIELDTTL", "mykey", "f1") == -3
