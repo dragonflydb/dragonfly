@@ -556,6 +556,7 @@ void EngineShard::DestroyThreadLocal() {
 
   // shard_ itself lives in `tlh`; mi_heap_destroy below reclaims it, no need to mi_free it.
   shard_ = nullptr;
+  CompactObj::ClearThreadLocalStats();
   CompactObj::InitThreadLocal(nullptr);
   SmallString::ShutdownThreadLocal();
   InitTLSearchMR(nullptr);
