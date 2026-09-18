@@ -270,6 +270,12 @@ void DflyCmd::Thread(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (num_thread < pool->size()) {
     if (int(num_thread) != ProactorBase::me()->GetPoolIndex()) {
+      // Connection::Migrate() would refuse this as well, but its failure surfaces below only as a
+      // generic "invalid state"; reply with the specific reason instead.
+      if (cmd_cntx->server_conn_cntx()->IsMigrationBlocked()) {
+        return cmd_cntx->SendError(MigrationBlockedErr("DFLY THREAD"));
+      }
+
       auto* conn = cmd_cntx->conn();
       if (!conn->Migrate(pool->at(num_thread))) {
         // Listener::PreShutdown() triggered
@@ -302,6 +308,11 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (parser.TakeError()) {
     return cmd_cntx->SendError(facade::kInvalidIntErr);
+  }
+
+  // Refuse before SetupFlowConnection mutates the connection and Migrate then declines.
+  if (cmd_cntx->server_conn_cntx()->IsMigrationBlocked()) {
+    return cmd_cntx->SendError(MigrationBlockedErr("DFLY FLOW"));
   }
 
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
