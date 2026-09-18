@@ -33,7 +33,6 @@ extern "C" {
 #include "server/tiered_storage.h"
 #include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
-#include "util/fibers/stacktrace.h"
 
 ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
           "The maximum number of key-value pairs that will be deleted in each eviction "
@@ -675,8 +674,15 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     return OpStatus::WRONG_TYPE;
   }
 
-  if (it->first.HasExpire()) {  // check expiry state
-    it = ExpireIfNeeded(cntx, it);
+  if (it->first.HasExpire()) {
+    // If expire is not allowed hide expired keys from read lookups during pause, but retain them
+    // for mutable lookups.
+    if (stats_mode == UpdateStatsMode::kReadStats && !expire_allowed_ &&
+        it->first.IsExpired(cntx.time_now_ms)) {
+      it = PrimeIterator{};
+    } else {
+      it = ExpireIfNeeded(cntx, it);
+    }
     if (!IsValid(it)) {
       events_.misses += miss_weight;
       db.stats.events.misses += miss_weight;
