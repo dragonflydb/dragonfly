@@ -617,6 +617,10 @@ void CompactObj::InitThreadLocal(MemoryResource* mr) {
   cmn::BorrowedStringOps::Set(&g_borrow_ops);
 }
 
+void CompactObj::ClearThreadLocalStats() {
+  tl.small_str_bytes = 0;
+}
+
 void CompactObj::DrainPendingReads() {
   tl.pin_map.Drain(tl.local_mr);
 }

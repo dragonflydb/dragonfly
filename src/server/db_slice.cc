@@ -488,7 +488,29 @@ DbSlice::~DbSlice() {
     db.reset();
   }
 
+  ShutdownThreadLocal();
+}
+
+void DbSlice::ShutdownThreadLocal() {
   AsyncDeleter::Shutdown();
+}
+
+void DbSlice::PrepareForSingleShotHeapDestroy() {
+  client_tracking_map_.clear();
+  pending_send_map_.clear();
+  doc_del_cb_ = {};
+
+  // These use the default allocator, not the arena, and therefore destructed normally.
+  DCHECK(uniq_fps_.empty());
+  DCHECK(fetched_items_.empty());
+  DCHECK(change_cb_.empty());
+
+  for (auto& db : db_arr_) {
+    if (!db)
+      continue;
+    DCHECK_EQ(db->use_count(), 1u);
+    db->PrepareForSingleShotHeapDestroy();
+  }
 }
 
 auto DbSlice::GetStats() const -> Stats {

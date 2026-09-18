@@ -46,6 +46,11 @@ void SmallString::InitThreadLocal(void* heap) {
   XXH3_64bits_reset_withSeed(tl.xxh_state.get(), kHashSeed);
 }
 
+void SmallString::ShutdownThreadLocal() {
+  tl.seg_alloc.reset();
+  tl.xxh_state.reset();
+}
+
 bool SmallString::CanAllocate(size_t size) {
   return size <= kMaxSize && tl.seg_alloc->CanAllocate();
 }
