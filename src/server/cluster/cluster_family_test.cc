@@ -1575,5 +1575,40 @@ TEST_F(ClusterFamilyTest, DflyMigrateRealModeWithoutConfig) {
   EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), ErrArg("syncid not found"));
 }
 
+TEST_F(ClusterFamilyTest, DflyMigrateFlowInvalidShardId) {
+  string my_id = GetMyId();
+  string config_template = R"json(
+    [
+      {
+        "slot_ranges": [ { "start": 0, "end": 8000 } ],
+        "master": { "id": "id0", "ip": "10.0.0.1", "port": 7000 },
+        "replicas": [],
+        "migrations": [{ "slot_ranges": [ { "start": 7000, "end": 8000 } ],
+                         "ip": "10.0.0.2", "port" : 7001, "node_id": "$0" }]
+      },
+      {
+        "slot_ranges": [ { "start": 8001, "end": 16383 } ],
+        "master": { "id": "$0", "ip": "10.0.0.2", "port": 7001 },
+        "replicas": []
+      }
+    ])json";
+
+  string config = absl::Substitute(config_template, my_id);
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+
+  // Before DFLYMIGRATE INIT, ShardNum() is 0. Any flow should be rejected.
+  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "id0", "0"}), ErrArg("invalid shard id"));
+
+  // Initialize migration with 2 flows (flow IDs 0 and 1 are valid, >= 2 are invalid)
+  EXPECT_EQ(Run({"DFLYMIGRATE", "INIT", "id0", "2", "7000", "8000"}), "OK");
+
+  // Flow ID >= 2 should be rejected
+  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "id0", "2"}), ErrArg("invalid shard id"));
+  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "id0", "9999"}), ErrArg("invalid shard id"));
+
+  // Flow with unknown syncid should still return syncid not found
+  EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "unknown_id", "0"}), ErrArg("syncid not found"));
+}
+
 }  // namespace
 }  // namespace dfly::cluster

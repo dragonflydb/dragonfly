@@ -24,7 +24,10 @@ class IncomingSlotMigration {
 
   // process data from FDLYMIGRATE FLOW cmd
   // executes until Stop called or connection closed
-  void StartFlow(uint32_t shard, util::FiberSocketBase* source);
+  void StartFlow(std::shared_ptr<ClusterShardMigration> flow, util::FiberSocketBase* source);
+
+  // Get flow for a specific shard, or nullptr if out of bounds.
+  std::shared_ptr<ClusterShardMigration> GetFlow(uint32_t shard) const;
 
   // Waits until all flows got FIN opcode.
   // returns true if we joined false if timeout is readed
@@ -86,7 +89,7 @@ class IncomingSlotMigration {
  private:
   std::string source_id_;
   Service& service_;
-  std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
+  std::vector<std::shared_ptr<ClusterShardMigration>> shard_flows_;
   SlotRanges slots_;
   ExecutionState cntx_;
 
