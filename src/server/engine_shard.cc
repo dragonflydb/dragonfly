@@ -561,11 +561,10 @@ void EngineShard::DestroyThreadLocal() {
   InitTLSearchMR(nullptr);
   zmalloc_set_threadlocal_heap(nullptr);
 
-  // Bulk-reclaim bypasses individual zfree calls so reset the counter here
+  // Bulk-reclaim bypasses destructors
   zmalloc_used_memory_tl = 0;
-
-  // Bulk-reclaim the heap instead of destructing each object individually.
   mi_heap_destroy(tlh);
+
   VLOG(1) << "Shard reset " << shard_id;
 }
 

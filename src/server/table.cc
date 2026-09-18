@@ -124,12 +124,9 @@ DbTable::~DbTable() {
 }
 
 void DbTable::PrepareForSingleShotHeapDestroy() {
-  // prime/mcflag hold the bulk of per-key data; skip their destructors and let
-  // mi_heap_destroy reclaim it. DbTable itself is still destructed normally.
   prime.SetArenaDestruct(true);
   mcflag.SetArenaDestruct(true);
 
-  // These use the default allocator, not the arena, and DbTable is destructed normally.
   DCHECK_EQ(trans_locks.Size(), 0u);
   DCHECK(watched_keys.empty());
 }
