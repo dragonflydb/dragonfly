@@ -321,7 +321,7 @@ TEST_F(InterpreterTest, Call) {
   EXPECT_EQ("[str(table) status(mystatus)]", ser_.res);
 }
 
-TEST_F(InterpreterTest, CallTableFirstArg) {
+TEST_F(InterpreterTest, CallArguments) {
   auto cb = [](auto ca) { ca.translator->OnStatus("OK"); };
 
   intptr_.SetRedisFunc(cb);
@@ -339,14 +339,22 @@ TEST_F(InterpreterTest, CallTableFirstArg) {
 
   // A numeric command name is converted deterministically (not via the
   // evaluation-order-dependent lua_tostring/lua_rawlen path).
-  string captured;
+  vector<string> captured;
   auto capture_cb = [&captured](auto ca) {
-    captured = string{ca.args->at(0)};
+    captured.clear();
+    for (string_view arg : ca.args->view())
+      captured.emplace_back(arg);
     ca.translator->OnStatus("OK");
   };
   intptr_.SetRedisFunc(capture_cb);
   EXPECT_TRUE(Execute("return redis.call(123)")) << error_;
-  EXPECT_EQ("123", captured);
+  EXPECT_THAT(captured, testing::ElementsAre("123"));
+
+  EXPECT_TRUE(
+      Execute(R"(return redis.call('set', 'key\0suffix', '', 42, 1.5, string.rep('x', 256)))"))
+      << error_;
+  EXPECT_THAT(captured,
+              testing::ElementsAre("set", "key\0suffix"s, "", "42", "1.5", string(256, 'x')));
 }
 
 TEST_F(InterpreterTest, CallArray) {
