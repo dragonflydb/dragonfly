@@ -51,35 +51,52 @@ class DflyStartException(Exception):
 
 
 def symbolize_stack_trace(binary_path, lines):
-    addr2line_proc = subprocess.Popen(
-        ["/usr/bin/addr2line", "-fCa", "-e", binary_path], stdin=subprocess.PIPE
+    if not lines:
+        return
+
+    addr2line_proc = subprocess.run(
+        ["/usr/bin/addr2line", "-fCa", "-e", binary_path],
+        input="".join(lines).encode(),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
-    for line in lines:
-        addr2line_proc.stdin.write(line.encode())
+    logging.error(
+        "Symbolized crash stack trace for %s:\n%s",
+        binary_path,
+        addr2line_proc.stdout.decode(errors="replace"),
+    )
 
-    addr2line_proc.stdin.close()
-    addr2line_proc.wait()
 
-
-def read_sedout(pipe, stacktrace):
+def read_sedout(pipe, stacktrace, raw_log_path=None):
+    # Multiple DflyInstances used to all print() their output onto the one shared
+    # process-wide stdout, so concurrent instances' lines could interleave/corrupt each
+    # other in the captured CI console. Instead, each instance writes only to its own
+    # raw_log_path file (never shared with another instance); on failure, conftest.py's
+    # copy_failed_logs() dumps each one to the CI log in full, one at a time.
+    raw_log = open(raw_log_path, "a") if raw_log_path else None
     try:
-        seen = set()
         pattern = r"@\s*(0x[0-9a-fA-F]+)"
         matcher = re.compile(pattern)
 
         for line in iter(pipe.readline, b""):
-            # Deduplicate output - we somewhere duplicate the output, probably due
-            # to tty redirections.
-            if line not in seen:
-                seen.add(line)
-                print(line)
-                res = matcher.search(line)
-                if res:
-                    stacktrace.append(res.group(1) + "\n")
+            # No deduplication here (there used to be one, dropping any line that
+            # repeated anywhere in the instance's lifetime): now that this is the
+            # persisted crash record rather than just live console noise, silently
+            # dropping repeated lines is a bug, not a feature -- e.g. identical
+            # recursive stack frames in a crash trace, or a warning repeated right
+            # before a crash, must all show up.
+            if raw_log:
+                raw_log.write(line)
+                raw_log.flush()
+            res = matcher.search(line)
+            if res:
+                stacktrace.append(res.group(1) + "\n")
     except ValueError:
         pass
     finally:
         pipe.close()
+        if raw_log:
+            raw_log.close()
 
 
 class DflyInstance:
@@ -215,8 +232,18 @@ class DflyInstance:
                 universal_newlines=True,
             )
             self.stacktrace = []
+            raw_log_path = (
+                os.path.join(self.params.log_dir, f"console.{self.proc.pid}.log")
+                if self.params.log_dir
+                else None
+            )
+            if raw_log_path:
+                with open(raw_log_path, "w") as raw_log:
+                    raw_log.write(f"=== instance pid={self.proc.pid} port={self.port} ===\n")
             self.sed_thread = threading.Thread(
-                target=read_sedout, args=(self.sed_proc.stdout, self.stacktrace), daemon=True
+                target=read_sedout,
+                args=(self.sed_proc.stdout, self.stacktrace, raw_log_path),
+                daemon=True,
             )
             self.sed_thread.start()
 
@@ -365,14 +392,26 @@ class DflyInstance:
         return rv
 
     def print_info_logs_to_debug_log(self):
+        # subprocess.call(sed_cmd, stdin=file) used to inherit this process's stdout directly,
+        # writing straight to the shared CI terminal uncaptured -- same multiplexing bug as
+        # read_sedout had. Capture it and log it atomically per-file instead, like
+        # symbolize_stack_trace does, so concurrent instances can't interleave here either.
+        # Must be logging.error (not .debug): nothing in the CI pytest config raises the
+        # log level above the default (WARNING), so a .debug call here is silently dropped
+        # in every configuration that actually runs -- this call site exists specifically
+        # for the "DF didn't shut down in time" failure path, so it must always surface.
         logs = self.log_files
         sed_format = f"s/[^ ]*/{self.port}{Colors.next()}➜{Colors.CLEAR}/"
         sed_cmd = ["sed", "-e", sed_format]
         for log in logs:
             if "INFO" in log:
-                with open(log) as file:
-                    print(f"🪵🪵🪵🪵🪵🪵 LOG name {log} 🪵🪵🪵🪵🪵🪵")
-                    subprocess.call(sed_cmd, stdin=file)
+                with open(log, "rb") as file:
+                    result = subprocess.run(sed_cmd, stdin=file, stdout=subprocess.PIPE)
+                    logging.error(
+                        "🪵🪵🪵🪵🪵🪵 LOG name %s 🪵🪵🪵🪵🪵🪵\n%s",
+                        log,
+                        result.stdout.decode(errors="replace"),
+                    )
 
     @staticmethod
     def format_args(args):
