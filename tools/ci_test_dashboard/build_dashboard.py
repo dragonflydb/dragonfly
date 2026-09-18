@@ -4,15 +4,20 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
+import io
 import json
 import math
 import resource
 import shutil
 import sys
+import tempfile
 import time
 import xml.etree.ElementTree as ET
+import zlib
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from itertools import groupby
@@ -24,6 +29,14 @@ RECENT_LIMIT = 12
 FAILURE_RUN_LIMIT = 20
 EXAMPLE_LIMIT = 4
 SCHEMA_VERSION = 3
+CACHE_VERSION = 1
+INPUT_COUNT_KEYS = (
+    "xml_files",
+    "dashboard_json_files",
+    "reports_passed",
+    "reports_failed",
+    "parse_errors",
+)
 RANGE_OPTIONS = [
     ("all", "All history", None),
     ("7", "Last 7 days", 7),
@@ -169,6 +182,20 @@ class DayTestAggregate:
             row["total_time"] = round(row["total_time"], 4)
         return rows
 
+    def compact(self) -> dict[str, Any]:
+        segments = self.segments_json()
+        day = summary_row_for_segments(self.identity(), segments)
+        day["date"] = segments[0]["date"]
+        day["total_time"] = sum_float(segments, "total_time")
+        return {
+            "summary": day,
+            "samples": {
+                "recent": recent_from_segments(segments),
+                "failure_runs": failure_runs_from_segments(segments),
+                "failure_examples": self.failure_examples,
+            },
+        }
+
 
 @dataclass
 class TestAggregate:
@@ -176,19 +203,12 @@ class TestAggregate:
     groups: set[str] = field(default_factory=set)
     details: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
 
-    def add_day(self, aggregate: DayTestAggregate, range_ids: list[str]) -> None:
-        segments = aggregate.segments_json()
-        day = summary_row_for_segments(aggregate.identity(), segments)
-        day["date"] = segments[0]["date"]
-        day["total_time"] = sum_float(segments, "total_time")
+    def add_day(self, compact: dict[str, Any], range_ids: list[str]) -> None:
+        day = compact["summary"]
         self.days.append(day)
-        self.groups.update(aggregate.groups)
+        self.groups.update(day["groups"])
 
-        samples = {
-            "recent": recent_from_segments(segments),
-            "failure_runs": failure_runs_from_segments(segments),
-            "failure_examples": aggregate.failure_examples,
-        }
+        samples = compact["samples"]
         for range_id in range_ids:
             detail = self.details.setdefault(
                 range_id, {"recent": [], "failure_runs": [], "failure_examples": []}
@@ -253,6 +273,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("output_json", type=Path, help="Where to write dashboard JSON files")
     parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        help="Optional directory for reusable daily summaries (outside the site output)",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -265,9 +290,15 @@ def main() -> int:
     args = parse_args()
     input_dir = args.input_dir.resolve()
     output_json = args.output_json.resolve()
+    cache_dir = args.cache_dir.resolve() if args.cache_dir else None
 
     if not input_dir.exists():
         print(f"Input directory does not exist: {input_dir}", file=sys.stderr)
+        return 2
+
+    output_dir = output_json.parent if output_json.suffix else output_json
+    if cache_dir and cache_dir.is_relative_to(output_dir):
+        print("Cache directory must be outside the dashboard output directory", file=sys.stderr)
         return 2
 
     xml_root = input_dir / "junit" if (input_dir / "junit").is_dir() else input_dir
@@ -280,71 +311,100 @@ def main() -> int:
     if args.limit:
         xml_files = xml_files[: args.limit]
 
-    tests: dict[str, TestAggregate] = {}
-    reports_by_status: Counter[str] = Counter()
-    tests_by_status: Counter[str] = Counter()
-    parse_errors: list[dict[str, str]] = []
-    run_keys: set[str] = set()
-    dates: set[str] = set()
-
     inputs = [(path, metadata_for(xml_root, path)) for path in xml_files]
     inputs.extend(
         (path, metadata_for_dashboard_json(dashboard_root, path)) for path in dashboard_json_files
     )
     inputs.sort(key=lambda item: item[1].date)
-    dates.update(meta.date for _, meta in inputs)
-    latest_day = max(dates) if dates else None
-    total_input_files = len(inputs)
     started = time.monotonic()
+    build_from_summaries(
+        local_day_summaries(inputs, cache_dir, started),
+        {meta.date for _, meta in inputs},
+        str(input_dir),
+        output_json,
+        started,
+    )
+    return 0
+
+
+def local_day_summaries(
+    inputs: list[tuple[Path, Metadata]], cache_dir: Path | None, started: float
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    total_input_files = len(inputs)
+    dates = {meta.date for _, meta in inputs}
     index = 0
+    reused_days = reused_files = rebuilt_days = 0
+    builder_digest = builder_fingerprint() if cache_dir else None
 
     for day, day_inputs in groupby(inputs, key=lambda item: item[1].date):
-        daily_tests: dict[str, DayTestAggregate] = {}
-        log_progress(f"Starting {day}", started)
-        for path, meta in day_inputs:
-            index += 1
-            if index == 1 or index % (25 if path.suffix == ".json" else 500) == 0:
-                log_progress(f"Parsing {index}/{total_input_files}: {meta.relative_path}", started)
-            run_keys.add(
-                "/".join([meta.workflow, meta.run_id, meta.attempt, meta.job, meta.variant])
-            )
-
-            try:
-                if path.suffix == ".json":
-                    records, embedded_parse_errors = read_dashboard_testcases(path, meta)
+        day_inputs = list(day_inputs)
+        log_progress(
+            f"Checking day {reused_days + rebuilt_days + 1}/{len(dates)}: {day} "
+            f"({len(day_inputs)} reports)",
+            started,
+        )
+        fingerprint = input_fingerprint(day_inputs) if cache_dir else None
+        cache_file = cache_dir / f"{day}.json.gz" if cache_dir else None
+        cache_key = {
+            "cache_version": CACHE_VERSION,
+            "builder_fingerprint": builder_digest,
+            "source_fingerprint": fingerprint,
+            "date": day,
+        }
+        summary = read_day_cache(cache_file, cache_key) if fingerprint is not None else None
+        if summary is not None:
+            reused_days += 1
+            reused_files += len(day_inputs)
+            log_progress(f"Reused {day}: {len(day_inputs)} reports", started)
+        else:
+            summary, cacheable = parse_day(day_inputs, started, index, total_input_files)
+            rebuilt_days += 1
+            if fingerprint is not None and cacheable:
+                # Never label a summary with a fingerprint taken before its inputs changed.
+                if input_fingerprint(day_inputs) == fingerprint:
+                    write_day_cache(cache_file, {**cache_key, "summary": summary})
                 else:
-                    records = [(meta, record) for record in read_testcases(path, meta)]
-                    embedded_parse_errors = []
-            except (ET.ParseError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
-                parse_errors.append({"file": meta.relative_path, "error": str(exc)})
-                reports_by_status["parse_error"] += 1
-                continue
+                    log_progress(f"Inputs changed while parsing {day}; cache not written", started)
+        index += len(day_inputs)
+        yield day, summary
+        del summary
 
-            for error in embedded_parse_errors:
-                parse_errors.append(
-                    {
-                        "file": f"{meta.relative_path}:{error.get('file', 'unknown')}",
-                        "error": str(error.get("error", "unknown error")),
-                    }
-                )
-            reports_by_status["parse_error"] += len(embedded_parse_errors)
+    if cache_dir:
+        log_progress(
+            f"Daily cache: {reused_days} reused, {rebuilt_days} rebuilt; "
+            f"reports: {reused_files} reused, {total_input_files - reused_files} parsed",
+            started,
+        )
 
-            report_has_failure = False
-            for record_meta, record in records:
-                if add_test_record(daily_tests, tests_by_status, record_meta, record):
-                    report_has_failure = True
-            reports_by_status["failed" if report_has_failure else "passed"] += 1
-            del records
 
+def build_from_summaries(
+    summaries: Iterable[tuple[str, dict[str, Any]]],
+    dates: set[str],
+    input_dir: str,
+    output_json: Path,
+    started: float,
+) -> None:
+    """Merge days in ascending order, retaining only bounded samples across days."""
+    tests: dict[str, TestAggregate] = {}
+    input_counts: Counter[str] = Counter(dict.fromkeys(INPUT_COUNT_KEYS, 0))
+    test_occurrences = 0
+    parse_errors: list[dict[str, str]] = []
+    run_keys: set[str] = set()
+    latest_day = max(dates) if dates else None
+
+    for day, summary in summaries:
+        input_counts.update(summary["input_counts"])
+        test_occurrences += summary["test_occurrences"]
+        run_keys.update(summary["run_keys"])
+        parse_errors.extend(summary["parse_errors"][: 100 - len(parse_errors)])
         range_ids = [
             range_id
             for range_id, _, days in RANGE_OPTIONS
             if segments_for_range([{"date": day}], latest_day, days)
         ]
-        for test_id in list(daily_tests):
-            aggregate = daily_tests.pop(test_id)
-            tests.setdefault(test_id, TestAggregate()).add_day(aggregate, range_ids)
-            del aggregate
+        for test_id, compact in summary["tests"].items():
+            tests.setdefault(test_id, TestAggregate()).add_day(compact, range_ids)
+        del summary
         log_progress(f"Compacted {day}: {len(tests)} tests retained", started)
 
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -361,14 +421,6 @@ def main() -> int:
                 "ranges": aggregate.details,
             },
         )
-
-    input_counts = {
-        "xml_files": len(xml_files),
-        "dashboard_json_files": len(dashboard_json_files),
-        "reports_passed": reports_by_status["passed"],
-        "reports_failed": reports_by_status["failed"],
-        "parse_errors": len(parse_errors),
-    }
 
     ranges = []
     for range_id, label, days in RANGE_OPTIONS:
@@ -410,7 +462,7 @@ def main() -> int:
             **input_counts,
             "runs": len(run_keys),
             "unique_tests": len(tests),
-            "test_occurrences": sum(tests_by_status.values()),
+            "test_occurrences": test_occurrences,
         },
         "parse_errors": parse_errors[:100],
     }
@@ -418,13 +470,193 @@ def main() -> int:
 
     log_progress(f"Wrote dashboard data under {output_dir}", started)
     print(
-        "Parsed "
-        f"{len(xml_files)} XML files and {len(dashboard_json_files)} dashboard JSON files, "
-        f"{sum(tests_by_status.values())} occurrences, "
+        f"Included {input_counts['xml_files']} XML files and "
+        f"{input_counts['dashboard_json_files']} dashboard JSON files, "
+        f"{test_occurrences} occurrences, "
         f"{len(tests)} unique tests.",
         flush=True,
     )
-    return 0
+
+
+def parse_day(
+    inputs: list[tuple[Path, Metadata]], started: float, offset: int, total: int
+) -> tuple[dict[str, Any], bool]:
+    daily_tests: dict[str, DayTestAggregate] = {}
+    reports_by_status: Counter[str] = Counter()
+    tests_by_status: Counter[str] = Counter()
+    parse_errors = []
+    run_keys = set()
+    cacheable = True
+    for index, (path, meta) in enumerate(inputs, offset + 1):
+        if index == 1 or index % (25 if path.suffix == ".json" else 500) == 0:
+            log_progress(f"Parsing {index}/{total}: {meta.relative_path}", started)
+        run_keys.add("/".join([meta.workflow, meta.run_id, meta.attempt, meta.job, meta.variant]))
+        try:
+            if path.suffix == ".json":
+                records, embedded_parse_errors = read_dashboard_testcases(path, meta)
+            else:
+                records = [(meta, record) for record in read_testcases(path, meta)]
+                embedded_parse_errors = []
+        except (ET.ParseError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            parse_errors.append({"file": meta.relative_path, "error": str(exc)})
+            # A transient read failure must not become a reusable missing report.
+            cacheable = cacheable and not isinstance(exc, OSError)
+            continue
+        for error in embedded_parse_errors:
+            parse_errors.append(
+                {
+                    "file": f"{meta.relative_path}:{error.get('file', 'unknown')}",
+                    "error": str(error.get("error", "unknown error")),
+                }
+            )
+        report_has_failure = False
+        for record_meta, record in records:
+            if add_test_record(daily_tests, tests_by_status, record_meta, record):
+                report_has_failure = True
+        reports_by_status["failed" if report_has_failure else "passed"] += 1
+        del records
+
+    compact_tests = {}
+    for test_id in list(daily_tests):
+        aggregate = daily_tests.pop(test_id)
+        compact_tests[test_id] = aggregate.compact()
+        del aggregate
+    return {
+        "tests": compact_tests,
+        "input_counts": {
+            "xml_files": sum(path.suffix == ".xml" for path, _ in inputs),
+            "dashboard_json_files": sum(path.suffix == ".json" for path, _ in inputs),
+            "reports_passed": reports_by_status["passed"],
+            "reports_failed": reports_by_status["failed"],
+            "parse_errors": len(parse_errors),
+        },
+        "test_occurrences": sum(tests_by_status.values()),
+        "run_keys": sorted(run_keys),
+        "parse_errors": parse_errors[:100],
+    }, cacheable
+
+
+def builder_fingerprint() -> str:
+    # Conservative invalidation also covers changes to sample limits and parser behavior.
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def input_fingerprint(inputs: list[tuple[Path, Metadata]]) -> str | None:
+    digest = hashlib.sha256()
+    try:
+        for path, meta in inputs:
+            content = hashlib.sha256()
+            with path.open("rb") as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    content.update(chunk)
+            identity = [path.suffix, meta.relative_path, content.hexdigest()]
+            digest.update(json.dumps(identity, separators=(",", ":")).encode("utf-8"))
+            digest.update(b"\n")
+    except OSError as exc:
+        print(f"Cannot fingerprint inputs; parsing without cache: {exc}", flush=True)
+        return None
+    return digest.hexdigest()
+
+
+def read_day_cache(path: Path, expected: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as source:
+            payload = json.load(source)
+        if not isinstance(payload, dict):
+            raise ValueError("expected a cache object")
+        if any(payload.get(key) != value for key, value in expected.items()):
+            return None
+        summary = payload["summary"]
+        if (
+            not isinstance(summary["tests"], dict)
+            or not isinstance(summary["run_keys"], list)
+            or not all(isinstance(key, str) for key in summary["run_keys"])
+            or not isinstance(summary["parse_errors"], list)
+            or not isinstance(summary["test_occurrences"], int)
+            or summary["test_occurrences"] < 0
+            or not all(
+                isinstance(summary["input_counts"][key], int) and summary["input_counts"][key] >= 0
+                for key in INPUT_COUNT_KEYS
+            )
+        ):
+            raise ValueError("invalid daily summary")
+        for error in summary["parse_errors"]:
+            if not isinstance(error["file"], str) or not isinstance(error["error"], str):
+                raise ValueError("invalid cached parse error")
+        for test_id, compact in summary["tests"].items():
+            validate_cached_test(compact, test_id, expected["date"])
+        if summary["test_occurrences"] != sum(
+            compact["summary"]["total"] for compact in summary["tests"].values()
+        ):
+            raise ValueError("inconsistent cached occurrence count")
+        return summary
+    except FileNotFoundError:
+        return None
+    except (OSError, EOFError, ValueError, TypeError, KeyError, zlib.error) as exc:
+        print(f"Ignoring invalid daily cache {path}: {exc}", flush=True)
+        return None
+
+
+def validate_cached_test(compact: dict[str, Any], test_id: str, day: str) -> None:
+    row = compact["summary"]
+    if row["id"] != test_id or row["date"] != day:
+        raise ValueError("incorrect cached test identity or date")
+    for key in ("total", "passed", "failed", "errored", "skipped"):
+        if not isinstance(row[key], int) or row[key] < 0:
+            raise ValueError(f"invalid cached count: {key}")
+    if not row["total"] or not isinstance(row["total_time"], (int, float)):
+        raise ValueError("invalid cached total or duration")
+    for key in ("first_seen", "last_seen", "last_failed"):
+        if row[key] is not None and not isinstance(row[key], str):
+            raise ValueError(f"invalid cached timestamp: {key}")
+    for key in ("last_failed_run_id", "last_failed_run_attempt", "last_failed_report"):
+        if not isinstance(row[key], str):
+            raise ValueError(f"invalid cached failure metadata: {key}")
+    for key in ("groups", "active_dates", "active_workflows", "active_variants"):
+        if not isinstance(row[key], list) or not all(isinstance(value, str) for value in row[key]):
+            raise ValueError(f"invalid cached list: {key}")
+    for key, limit, fields in (
+        ("recent", RECENT_LIMIT, ("time", "status", "label")),
+        (
+            "failure_runs",
+            FAILURE_RUN_LIMIT,
+            ("time", "workflow", "run_id", "run_attempt", "variant", "report"),
+        ),
+        (
+            "failure_examples",
+            EXAMPLE_LIMIT,
+            ("time", "status", "workflow", "run_id", "run_attempt", "variant", "report", "message"),
+        ),
+    ):
+        values = compact["samples"][key]
+        if not isinstance(values, list) or len(values) > limit:
+            raise ValueError(f"invalid cached samples: {key}")
+        for value in values:
+            if not all(isinstance(value[field], str) for field in fields):
+                raise ValueError(f"invalid cached sample fields: {key}")
+            if key == "failure_runs" and not isinstance(value["failures"], int):
+                raise ValueError("invalid cached failure count")
+
+
+def write_day_cache(path: Path, payload: dict[str, Any]) -> bool:
+    temporary = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as raw:
+            temporary = Path(raw.name)
+            with gzip.GzipFile(filename="", fileobj=raw, mode="wb", mtime=0) as compressed:
+                with io.TextIOWrapper(compressed, encoding="utf-8") as output:
+                    json.dump(payload, output, separators=(",", ":"))
+        temporary.replace(path)
+        return True
+    except OSError as exc:
+        print(f"Could not write daily cache {path}: {exc}", flush=True)
+        return False
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def log_progress(message: str, started: float) -> None:
