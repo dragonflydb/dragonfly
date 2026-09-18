@@ -37,6 +37,7 @@ jobs:
       DASHBOARD_ROOT: tools/ci_test_dashboard
       LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '30' }}
       SOURCE_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
+      CACHE_PREFIX: ${{ vars.CI_TEST_DASHBOARD_CACHE_PREFIX || 'test-results/ci-dashboard-cache' }}
       PUBLISH_BUCKET: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_bucket || secrets.S3_CI_TEST_DASHBOARD_BUCKET }}
       PUBLISH_PREFIX: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_prefix || vars.CI_TEST_DASHBOARD_PREFIX }}
 
@@ -60,16 +61,15 @@ jobs:
           fi
           aws --version
 
-      - name: Download recent test results
-        shell: bash
-        run: ${GITHUB_WORKSPACE}/.github/scripts/download-ci-dashboard-results.sh
-
-      - name: Build dashboard data
+      - name: Refresh daily summaries and build dashboard data
         shell: bash
         run: |
           set -euo pipefail
-          python3 "${DASHBOARD_ROOT}/build_dashboard.py" \
-            "${INPUT_DIR}" \
+          python3 "${DASHBOARD_ROOT}/sync_dashboard.py" \
+            --source-bucket "${SOURCE_BUCKET}" \
+            --lookback-days "${LOOKBACK_DAYS}" \
+            --cache-prefix "${CACHE_PREFIX}" \
+            --work-dir "${RUNNER_TEMP}/ci-test-dashboard" \
             "${DASHBOARD_ROOT}/site/data"
 
       - name: Upload dashboard artifact
