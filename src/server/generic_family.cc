@@ -647,34 +647,18 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
 }
 
 // Appends 'key' to 'res' unless it is filtered out by MATCH. Materializes the key exactly once.
-bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, StringVec* res) {
-  if (opts.matcher) {
-    string str;
-    key.GetString(&str);
-    if (!opts.matcher->Matches(str))
-      return false;
-    res->emplace_back(std::move(str));
-    return true;
-  }
-
-  res->emplace_back();
-  key.GetString(&res->back());
-  return true;
-}
-
 bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, ScanResult* res) {
-  key.GetString(res->AppendBuffer(key.Size()));
-  if (opts.matcher && !opts.matcher->Matches(res->back())) {
-    res->PopBack();
+  size_t len = key.Size();
+  char* buffer = res->AppendBuffer(len);
+  key.GetString(buffer);
+  if (opts.matcher && !opts.matcher->Matches(string_view{buffer, len})) {
+    res->UndoAppend(buffer);
     return false;
   }
   return true;
 }
 
-// TODO drop template after all SCAN operations have been converted to use ScanResult instead of
-// StringVec.
-template <typename Result>
-bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, Result* res) {
+bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, ScanResult* res) {
   auto& db_slice = op_args.GetDbSlice();
 
   // Passing the raw iterator is safe: OpScan prevents preemption for the whole traversal.
@@ -707,10 +691,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
   return MatchAndAppendKey(prime_it->first, opts, res);
 }
 
-// TODO drop template after all SCAN operations have been converted to use ScanResult instead of
-// StringVec.
-template <typename Result>
-void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, Result* vec) {
+void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, ScanResult* vec) {
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
@@ -745,10 +726,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   *cursor = cur.token();
 }
 
-// TODO drop template after all SCAN operations have been converted to use ScanResult instead of
-// StringVec.
-template <typename Result>
-uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, Result* keys,
+uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, ScanResult* keys,
                      ConnectionContext* cntx) {
   ShardId sid = cursor % 1024;
 
@@ -805,12 +783,13 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, Result* keys,
 
 void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor,
                      uint32_t* deleted) {
-  StringVec keys;
+  ScanResult keys{scan_opts.limit};
   OpScan(op_args, scan_opts, cursor, &keys);
 
   auto& db_slice = op_args.GetDbSlice();
   uint32_t count = 0;
-  for (const auto& key : keys) {
+  for (size_t i = 0; i < keys.size(); ++i) {
+    string_view key = keys[i];
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater runs immediately
     if (!IsValid(it))
       continue;
@@ -1583,8 +1562,6 @@ void GenericFamily::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   string_view pattern = parser.Next();
   uint64_t cursor = 0;
 
-  StringVec keys;
-
   ScanOpts scan_opts;
   if (pattern != "*") {
     scan_opts.matcher.reset(new GlobMatcher{pattern, true});
@@ -1592,12 +1569,13 @@ void GenericFamily::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
   scan_opts.limit = 512;
   auto output_limit = absl::GetFlag(FLAGS_keys_output_limit);
+  ScanResult keys{scan_opts.limit};
 
   do {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cmd_cntx->server_conn_cntx());
   } while (cursor != 0 && keys.size() < output_limit);
 
-  auto replier = [keys = std::move(keys)](RedisReplyBuilder* rb) { rb->SendBulkStrArr(keys); };
+  auto replier = [keys = std::move(keys)](RedisReplyBuilder* rb) { keys.Send(rb); };
   return cmd_cntx->ReplyWith(std::move(replier));
 }
 
@@ -2844,7 +2822,7 @@ void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_c
   DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
   ScanOpts scan_opts;
   scan_opts.limit = 3;  // number of entries per shard
-  std::vector<StringVec> candidates_collection(shard_set->size());
+  std::vector<ScanResult> candidates_collection(shard_set->size());
 
   // OpScan can preempt (WaitForUnblockedJournalWrites suspends on CondVar during BGSAVE),
   // so we must run on a regular fiber rather than the dispatcher (RunBriefInParallel).
@@ -2854,7 +2832,7 @@ void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_c
       return;
     }
 
-    StringVec* candidates = &candidates_collection[shard->shard_id()];
+    ScanResult* candidates = &candidates_collection[shard->shard_id()];
 
     // Per-shard RNG; absl::BitGen is not thread-safe.
     absl::BitGen local_gen;
@@ -2879,8 +2857,8 @@ void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_c
     if (random_idx >= candidate.size()) {
       random_idx -= candidate.size();
     } else {
-      auto replier = [key = std::move(candidate[random_idx])](RedisReplyBuilder* builder) {
-        builder->SendBulkString(key);
+      auto replier = [keys = std::move(candidate), random_idx](RedisReplyBuilder* builder) {
+        builder->SendBulkString(keys[random_idx]);
       };
       return cmd_cntx->ReplyWith(std::move(replier));
     }

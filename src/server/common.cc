@@ -223,14 +223,14 @@ ScanOpts::~ScanOpts() {
 ScanResult::ScanResult(size_t count) {
   // COUNT is an untrusted hint, not a bound on the number or size of returned entries.
   count = min<size_t>(count, 1024);
-  entries_.Reserve(count, count * 64);
+  entries_.Reserve(count, count * kEstimatedEntrySize);
 }
 
 char* ScanResult::AppendBuffer(size_t len) {
+  // Keep large entries separate so growing the packed buffer does not copy them.
   // Cap packed bytes at 1 MiB to limit buffer reallocations/copying for large replies.
-  // Store all later entries as separate strings in overflow_ so Send() preserves their order.
   constexpr size_t kMaxPackedBytes = 1 << 20;
-  if (!overflow_.empty() || len + packed_bytes_ >= kMaxPackedBytes) {
+  if (len >= 8 * kEstimatedEntrySize || len + packed_bytes_ >= kMaxPackedBytes) {
     return overflow_.emplace_back(len, '\0').data();
   }
 
@@ -239,13 +239,22 @@ char* ScanResult::AppendBuffer(size_t len) {
   return entries_.data(entries_.size() - 1);
 }
 
-void ScanResult::PopBack() {
-  if (!overflow_.empty()) {
+void ScanResult::UndoAppend(char* buffer) {
+  if (!overflow_.empty() && overflow_.back().data() == buffer) {
     overflow_.pop_back();
   } else {
+    DCHECK(!entries_.empty());
+    DCHECK(entries_.back().data() == buffer);
     packed_bytes_ -= entries_.back().size() + 1;
     entries_.PopArg();
   }
+}
+
+string_view ScanResult::operator[](size_t index) const {
+  DCHECK_LT(index, size());
+  if (index < entries_.size())
+    return entries_[index];
+  return overflow_[index - entries_.size()];
 }
 
 void ScanResult::Send(facade::RedisReplyBuilder* builder) const {

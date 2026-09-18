@@ -852,45 +852,44 @@ TEST(ScanResultTest, AppendBufferAndOwnership) {
   string member = "member";
   memcpy(result.AppendBuffer(member.size()), member.data(), member.size());
   member = "changed";
-  EXPECT_EQ(result.back(), "member");
+  EXPECT_EQ(result[0], "member");
 
   const string binary("x\0\xff", 3);
   memcpy(result.AppendBuffer(binary.size()), binary.data(), binary.size());
-  EXPECT_EQ(result.back(), binary);
-  result.AppendBuffer(0);
+  EXPECT_EQ(result[1], binary);
+  char* empty = result.AppendBuffer(0);
   EXPECT_EQ(result.size(), 3u);
-  EXPECT_TRUE(result.back().empty());
+  EXPECT_TRUE(result[2].empty());
 
-  result.PopBack();
-  EXPECT_EQ(result.back(), binary);
-  result.PopBack();
-  EXPECT_EQ(result.back(), "member");
-  result.PopBack();
-  EXPECT_EQ(result.size(), 0u);
+  result.UndoAppend(empty);
+  EXPECT_EQ(result.size(), 2u);
+  EXPECT_EQ(result[0], "member");
+  EXPECT_EQ(result[1], binary);
 }
 
 TEST(ScanResultTest, GrowthMoveAndPop) {
   ScanResult result{1};
   const array<string, 8> entries = {
-      "first", "", string("x\0y", 3), string(128, 'a'), string(64 << 10, 'b'), string(1 << 20, 'c'),
+      "first", "", string("x\0y", 3), string(511, 'a'), string(512, 'b'), string(1 << 20, 'c'),
       "tail",  ""};
-  for (const auto& entry : entries)
+  for (const auto& entry : entries) {
+    // Undo each entry once before retaining it, including small entries after overflow.
+    char* buffer = result.AppendBuffer(entry.size());
+    memcpy(buffer, entry.data(), entry.size());
+    result.UndoAppend(buffer);
     memcpy(result.AppendBuffer(entry.size()), entry.data(), entry.size());
+  }
 
   auto moved = std::move(result);
-  for (size_t i = entries.size(); i > 0; --i) {
-    ASSERT_EQ(moved.size(), i);
-    EXPECT_EQ(moved.back(), entries[i - 1]);
-    moved.PopBack();
-  }
-  EXPECT_EQ(moved.size(), 0u);
-  const string_view reused = "reused";
-  memcpy(moved.AppendBuffer(reused.size()), reused.data(), reused.size());
-  EXPECT_EQ(moved.back(), reused);
+  ASSERT_EQ(moved.size(), entries.size());
+  // Small entries stay packed after large ones; indexing follows packed then overflow storage.
+  const array<size_t, 8> order = {0, 1, 2, 3, 6, 7, 4, 5};
+  for (size_t i = 0; i < order.size(); ++i)
+    EXPECT_EQ(moved[i], entries[order[i]]);
 }
 
 TEST_F(GenericFamilyTest, ScanResultBuffer) {
-  // Exercise buffer growth, empty/integer/binary keys, and the oversized-reply fallback.
+  // Exercise SCAN and KEYS buffer growth, empty/integer/binary keys, and oversized replies.
   StringVec keys = {"", "42", string("binary\0\xff", 8), "keep:" + string(1 << 20, 'x')};
   for (unsigned i = 0; i < 128; ++i) {
     keys.push_back(
@@ -910,6 +909,10 @@ TEST_F(GenericFamilyTest, ScanResultBuffer) {
       if (pattern == "*" || (pattern == "keep:*" && key.starts_with("keep:")))
         expected.push_back(key);
     }
+
+    auto keys_resp = Run({"keys", pattern});
+    ASSERT_THAT(keys_resp, ArrLen(expected.size()));
+    EXPECT_THAT(StrArray(keys_resp), UnorderedElementsAreArray(expected));
 
     string cursor = "0";
     StringVec actual;
