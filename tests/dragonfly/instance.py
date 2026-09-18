@@ -50,36 +50,40 @@ class DflyStartException(Exception):
     pass
 
 
-def symbolize_stack_trace(binary_path, lines):
-    addr2line_proc = subprocess.Popen(
-        ["/usr/bin/addr2line", "-fCa", "-e", binary_path], stdin=subprocess.PIPE
-    )
-    for line in lines:
-        addr2line_proc.stdin.write(line.encode())
-
-    addr2line_proc.stdin.close()
-    addr2line_proc.wait()
-
-
-def read_sedout(pipe, stacktrace):
+def read_sedout(pipe, raw_log_path=None):
+    # Multiple DflyInstances used to all print() their output onto the one shared
+    # process-wide stdout, so concurrent instances' lines could interleave/corrupt each
+    # other in the captured CI console. Instead, each instance writes only to its own
+    # raw_log_path file (never shared with another instance); on failure, conftest.py's
+    # copy_failed_logs() dumps each one to the CI log in full, one at a time.
+    #
+    # This is also the only symbolization CI relies on: a crash's stack trace is already
+    # live-symbolized here by the crashing process itself (absl's failure signal handler,
+    # via absl::Symbolize, which is ASLR-safe unlike a post-hoc addr2line pass). A
+    # separate addr2line re-symbolization pass used to run afterwards on the same
+    # addresses harvested out of this output, but it added nothing this output doesn't
+    # already have (same function names, same addresses) except, in principle, file:line
+    # -- which never actually worked here: the Debug build's -gsplit-dwarf moves line
+    # tables into per-TU .dwo files that GNU addr2line doesn't read, even when they're
+    # sitting right next to the object file (confirmed directly, not assumed).
+    raw_log = open(raw_log_path, "a") if raw_log_path else None
     try:
-        seen = set()
-        pattern = r"@\s*(0x[0-9a-fA-F]+)"
-        matcher = re.compile(pattern)
-
         for line in iter(pipe.readline, b""):
-            # Deduplicate output - we somewhere duplicate the output, probably due
-            # to tty redirections.
-            if line not in seen:
-                seen.add(line)
-                print(line)
-                res = matcher.search(line)
-                if res:
-                    stacktrace.append(res.group(1) + "\n")
+            # No deduplication here (there used to be one, dropping any line that
+            # repeated anywhere in the instance's lifetime): now that this is the
+            # persisted crash record rather than just live console noise, silently
+            # dropping repeated lines is a bug, not a feature -- e.g. identical
+            # recursive stack frames in a crash trace, or a warning repeated right
+            # before a crash, must all show up.
+            if raw_log:
+                raw_log.write(line)
+                raw_log.flush()
     except ValueError:
         pass
     finally:
         pipe.close()
+        if raw_log:
+            raw_log.close()
 
 
 class DflyInstance:
@@ -214,9 +218,23 @@ class DflyInstance:
                 bufsize=1,
                 universal_newlines=True,
             )
-            self.stacktrace = []
+            raw_log_path = (
+                os.path.join(self.params.log_dir, f"console.{self.proc.pid}.log")
+                if self.params.log_dir
+                else None
+            )
+            if raw_log_path:
+                with open(raw_log_path, "w") as raw_log:
+                    header = (
+                        f"=== instance pid={self.proc.pid} port={self.port} "
+                        f"binary={os.path.realpath(self.params.path)} ==="
+                    )
+                    raw_log.write(header + "\n")
+                    raw_log.write("=" * len(header) + "\n")
             self.sed_thread = threading.Thread(
-                target=read_sedout, args=(self.sed_proc.stdout, self.stacktrace), daemon=True
+                target=read_sedout,
+                args=(self.sed_proc.stdout, raw_log_path),
+                daemon=True,
             )
             self.sed_thread.start()
 
@@ -263,7 +281,6 @@ class DflyInstance:
             if self.sed_proc:
                 self.sed_proc.communicate()
                 self.sed_thread.join()
-                symbolize_stack_trace(proc.args[0], self.stacktrace)
 
     def wait(self):
         if self.proc is not None:
@@ -365,14 +382,26 @@ class DflyInstance:
         return rv
 
     def print_info_logs_to_debug_log(self):
+        # subprocess.call(sed_cmd, stdin=file) used to inherit this process's stdout directly,
+        # writing straight to the shared CI terminal uncaptured -- same multiplexing bug as
+        # read_sedout had. Capture it and log it atomically per-file instead, so concurrent
+        # instances can't interleave here either.
+        # Must be logging.error (not .debug): nothing in the CI pytest config raises the
+        # log level above the default (WARNING), so a .debug call here is silently dropped
+        # in every configuration that actually runs -- this call site exists specifically
+        # for the "DF didn't shut down in time" failure path, so it must always surface.
         logs = self.log_files
         sed_format = f"s/[^ ]*/{self.port}{Colors.next()}➜{Colors.CLEAR}/"
         sed_cmd = ["sed", "-e", sed_format]
         for log in logs:
             if "INFO" in log:
-                with open(log) as file:
-                    print(f"🪵🪵🪵🪵🪵🪵 LOG name {log} 🪵🪵🪵🪵🪵🪵")
-                    subprocess.call(sed_cmd, stdin=file)
+                with open(log, "rb") as file:
+                    result = subprocess.run(sed_cmd, stdin=file, stdout=subprocess.PIPE)
+                    logging.error(
+                        "🪵🪵🪵🪵🪵🪵 LOG name %s 🪵🪵🪵🪵🪵🪵\n%s",
+                        log,
+                        result.stdout.decode(errors="replace"),
+                    )
 
     @staticmethod
     def format_args(args):
