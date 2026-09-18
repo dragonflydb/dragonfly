@@ -723,8 +723,6 @@ void CompactObj::InitThreadLocal(MemoryResource* mr) {
 
 void CompactObj::ClearThreadLocalStats() {
   tl.small_str_bytes = 0;
-  tl.huff_encode_total = 0;
-  tl.huff_encode_success = 0;
 }
 
 void CompactObj::DrainPendingReads() {
