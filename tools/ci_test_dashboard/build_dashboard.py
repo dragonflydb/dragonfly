@@ -9,6 +9,7 @@ import json
 import math
 import shutil
 import sys
+import time
 import xml.etree.ElementTree as ET
 from collections import Counter
 from dataclasses import dataclass, field, replace
@@ -19,6 +20,8 @@ from typing import Any
 FAIL_STATUSES = {"failed", "error"}
 RECENT_LIMIT = 12
 EXAMPLE_LIMIT = 4
+XML_PROGRESS_INTERVAL = 500
+DASHBOARD_JSON_PROGRESS_INTERVAL = 25
 RANGE_OPTIONS = [
     ("all", "All history", None),
     ("7", "Last 7 days", 7),
@@ -192,6 +195,40 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def log_progress(index: int, total: int, path: Path, root: Path, started_at: float) -> None:
+    try:
+        size_mib = path.stat().st_size / 1024 / 1024
+    except OSError:
+        size_mib = 0
+
+    print(
+        f"Parsing {index}/{total} after {time.monotonic() - started_at:.1f}s "
+        f"({size_mib:.1f} MiB, {memory_summary()}): {path.relative_to(root)}",
+        flush=True,
+    )
+
+
+def memory_summary() -> str:
+    try:
+        status_lines = Path("/proc/self/status").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return "rss=unknown"
+
+    fields = {}
+    for line in status_lines:
+        if line.startswith(("VmRSS:", "VmHWM:")):
+            key, value = line.split(":", 1)
+            fields[key] = " ".join(value.split())
+
+    rss = fields.get("VmRSS")
+    hwm = fields.get("VmHWM")
+    if rss and hwm:
+        return f"rss={rss} hwm={hwm}"
+    if rss:
+        return f"rss={rss}"
+    return "rss=unknown"
+
+
 def main() -> int:
     args = parse_args()
     input_dir = args.input_dir.resolve()
@@ -219,10 +256,11 @@ def main() -> int:
     dates: set[str] = set()
 
     total_input_files = len(xml_files) + len(dashboard_json_files)
+    started_at = time.monotonic()
 
     for index, xml_file in enumerate(xml_files, 1):
-        if index == 1 or index % 500 == 0:
-            print(f"Parsing {index}/{total_input_files}: {xml_file.relative_to(xml_root)}")
+        if index == 1 or index % XML_PROGRESS_INTERVAL == 0:
+            log_progress(index, total_input_files, xml_file, xml_root, started_at)
 
         meta = metadata_for(xml_root, xml_file)
         run_keys.add("/".join([meta.workflow, meta.run_id, meta.attempt, meta.job, meta.variant]))
@@ -242,9 +280,10 @@ def main() -> int:
 
         reports_by_status["failed" if report_has_failure else "passed"] += 1
 
-    for index, json_file in enumerate(dashboard_json_files, len(xml_files) + 1):
-        if index == len(xml_files) + 1 or index % 500 == 0:
-            print(f"Parsing {index}/{total_input_files}: {json_file.relative_to(dashboard_root)}")
+    for json_index, json_file in enumerate(dashboard_json_files, 1):
+        index = len(xml_files) + json_index
+        if json_index == 1 or json_index % DASHBOARD_JSON_PROGRESS_INTERVAL == 0:
+            log_progress(index, total_input_files, json_file, dashboard_root, started_at)
 
         meta = metadata_for_dashboard_json(dashboard_root, json_file)
         run_keys.add("/".join([meta.workflow, meta.run_id, meta.attempt, meta.job, meta.variant]))
@@ -282,6 +321,7 @@ def main() -> int:
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
     output_dir = prepare_output_dir(output_json)
 
+    print(f"Writing {len(test_rows)} test detail files...", flush=True)
     for row in test_rows:
         write_json(
             output_dir / row["detail_file"],
@@ -303,6 +343,7 @@ def main() -> int:
     }
 
     ranges = []
+    print("Writing range summaries...", flush=True)
     for range_id, label, days in RANGE_OPTIONS:
         range_summary = build_range_summary(
             test_rows=test_rows,
@@ -347,12 +388,13 @@ def main() -> int:
     }
     write_json(output_dir / "manifest.json", manifest)
 
-    print(f"Wrote dashboard data under {output_dir}")
+    print(f"Wrote dashboard data under {output_dir}", flush=True)
     print(
         "Parsed "
         f"{len(xml_files)} XML files and {len(dashboard_json_files)} dashboard JSON files, "
         f"{sum(tests_by_status.values())} occurrences, "
-        f"{len(test_rows)} unique tests."
+        f"{len(test_rows)} unique tests.",
+        flush=True,
     )
     return 0
 
