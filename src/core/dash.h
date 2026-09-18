@@ -119,8 +119,8 @@ class DashTable : public detail::DashTableBase {
   ~DashTable();
 
   // Makes ~DashTable() a no-op; use when the arena backing it is about to be bulk-freed.
-  void SetArenaDestruct(bool enable) {
-    arena_destruct_ = enable;
+  void SetArenaDestruct() {
+    arena_destruct_ = true;
   }
 
   void Reserve(size_t size);

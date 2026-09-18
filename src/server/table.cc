@@ -124,8 +124,8 @@ DbTable::~DbTable() {
 }
 
 void DbTable::PrepareForSingleShotHeapDestroy() {
-  prime.SetArenaDestruct(true);
-  mcflag.SetArenaDestruct(true);
+  prime.SetArenaDestruct();
+  mcflag.SetArenaDestruct();
 
   DCHECK_EQ(trans_locks.Size(), 0u);
   DCHECK(watched_keys.empty());
