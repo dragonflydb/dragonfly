@@ -62,7 +62,7 @@ def extract_latency_timeseries(data, operation, ignore_last_seconds=3):
     Returns:
         Dictionary with time series data
     """
-    time_series = data["ALL STATS"][operation]["Time-Series"]
+    time_series = data["ALL STATS"][operation]["Time-Serie"]
 
     times = []
     avg_latencies = []
@@ -108,10 +108,10 @@ def get_latency_operations(all_stats):
     """Return operations with latency time-series samples."""
     operations = []
     for key, op_stats in all_stats.items():
-        if key == "Runtime" or not isinstance(op_stats, dict) or "Time-Series" not in op_stats:
+        if key == "Runtime" or not isinstance(op_stats, dict) or "Time-Serie" not in op_stats:
             continue
 
-        time_series = op_stats["Time-Series"]
+        time_series = op_stats["Time-Serie"]
         if any("Average Latency" in interval for interval in time_series.values()):
             operations.append(key)
 

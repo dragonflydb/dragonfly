@@ -1277,7 +1277,7 @@ base::Histogram AggregateTimeSeriesSample(const ClientStats& summary, uint64_t s
 void WriteTimeSeriesJson(std::ostream& os, const ClientStats& summary, size_t op_index,
                          uint64_t bucket_count, unsigned indent) {
   WriteIndent(os, indent);
-  os << "\"Time-Series\": {\n";
+  os << "\"Time-Serie\": {\n";
 
   for (uint64_t sec = 0; sec < bucket_count; ++sec) {
     base::Histogram sample;
@@ -1304,7 +1304,7 @@ void WriteTimeSeriesJson(std::ostream& os, const ClientStats& summary, size_t op
 void WriteTotalsTimeSeriesJson(std::ostream& os, const ClientStats& summary, uint64_t bucket_count,
                                unsigned indent) {
   WriteIndent(os, indent);
-  os << "\"Time-Series\": {\n";
+  os << "\"Time-Serie\": {\n";
 
   for (uint64_t sec = 0; sec < bucket_count; ++sec) {
     base::Histogram sample = AggregateTimeSeriesSample(summary, sec);
