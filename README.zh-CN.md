@@ -26,11 +26,12 @@ Dragonfly是一种针对现代应用程序负荷需求而构建的内存数据�
 - [基准测试](#基准测试)
 - [快速入门](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start)
 - [配置方法](#配置方法)
-- [开发路线和开发现状](#开发路线和开发现状)
 - [设计决策](#设计决策)
 - [开发背景](#开发背景)
+- [从源码构建](./docs/build-from-source.md)
+- [贡献者](#贡献者)
 
-## <a name="基准测试"><a/> 基准测试
+## <a name="基准测试"></a>基准测试
 
 <img src="http://static.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
 
@@ -88,7 +89,7 @@ Dragonfly 完成快照也很快，仅在启动后几秒钟内就完成了。
 
 
 
-## <a name="开发路线和开发现状"><a/>配置方法
+## <a name="配置方法"></a>配置方法
 
 Dragonfly 支持 Redis 的常见参数。
 例如，您可以运行：`dragonfly --requirepass=foo --bind localhost`。
@@ -135,9 +136,11 @@ Dragonfly 支持 Redis 的常见参数。
 
 * `admin_nopass`: 如果设置，允许在不提供任何认证令牌的情况下，通过指定的端口访问管理控制台。同时支持 HTTP 和 RESP 协议。 默认为 `false`。
 
-* `cluster_mode`：支持集群模式。目前仅支持 `emulated`。默认为空 `""`。
+* `cluster_mode`：启用集群模式。支持 `emulated` 和 `yes`。默认为空 `""`。
 
 * `cluster_announce_ip`：集群模式下向客户端公开的 IP。
+
+* `announce_port`：集群命令向客户端和复制主节点公开的端口。
 
 ### 启动脚本示例，包含常用选项：
 
@@ -148,19 +151,7 @@ Dragonfly 支持 Redis 的常见参数。
 
 要获取更多选项，如日志管理或TLS支持，请运行 `dragonfly --help`。
 
-## <a name="开发路线和开发现状"><a/>开发路线和开发现状
-
-目前，Dragonfly支持约185个Redis命令以及除 `cas` 之外的所有 Memcached 命令。
-我们几乎达到了Redis 5 API的水平。我们的下一个里程碑更新将会稳定基本功能并实现复刻API。
-如果您发现您需要的命令尚未实现，请提出一个Issue。
-
-对于dragonfly-native复制技术，我们正在设计一种分布式日志格式，该格式将支持更高的速度。
-
-在实现复制功能之后，我们将继续实现API 3-6中其他缺失的Redis命令。
-
-请参见[命令参考](https://dragonflydb.io/docs/category/command-reference)以了解Dragonfly当前支持的命令。
-
-## <a name="设计决策"><a/> 设计决策
+## <a name="设计决策"></a>设计决策
 
 ### 全新的缓存设计
 
@@ -181,10 +172,10 @@ Dragonfly采用单一的自适应缓存算法，该算法非常简单且具备�
 
 Prometheus导出的标准与Grafana仪表盘兼容，[请参见此处](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json)。
 
-重要！HTTP控制台仅应在安全网络内访问。如果您将Dragonfly的TCP端口暴露在外部，则建议使用`--http_admin_console=false`或`--nohttp_admin_console`禁用控制台。
+重要！HTTP控制台仅应在安全网络内访问。如果您将Dragonfly的TCP端口暴露在外部，则建议使用`--primary_port_http_enabled=false`或`--noprimary_port_http_enabled`禁用控制台。
 
 
-## <a name="开发背景"><a/>开发背景
+## <a name="开发背景"></a>开发背景
 
 Dragonfly始于一项实验，旨在探索如果在2022年重新设计内存数据库，它会是什么样子。基于我们作为内存存储的用户以及作为云服务公司的工程师的经验教训，我们得知需要保留Dragonfly的两个关键属性：a) 为其所有操作提供原子性保证，b) 保证在非常高的吞吐量下实现低于毫秒的延迟。
 
@@ -205,3 +196,11 @@ Dragonfly始于一项实验，旨在探索如果在2022年重新设计内存数�
 
 最后，<br>
 <em>我们的使命是构建一个设计良好、超高速、成本效益高的云工作负载内存数据存储系统，利用最新的硬件技术。我们旨在解决当前解决方案的痛点，同时保留其产品API和优势。 </em>
+
+## <a name="贡献者"></a>贡献者
+
+感谢所有 Dragonfly 项目的贡献者！
+
+<a href="https://github.com/dragonflydb/dragonfly/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=dragonflydb/dragonfly" />
+</a>

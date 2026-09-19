@@ -31,7 +31,7 @@ Dragonfly รองรับ API ของ Redis และ Memcached อย่�
 - [Build from source](./docs/build-from-source.md)
 - [Contributors](#contributors)
 
-## <a name="benchmarks"><a/>Benchmarks
+## <a name="benchmarks"></a>Benchmarks
 
 เราเริ่มด้วยการเปรียบเทียบ Dragonfly กับ Redis บนอินสแตนซ์ `m5.large` ซึ่งนิยมใช้รัน Redis เนื่องจาก Redis มีสถาปัตยกรรมแบบ single-threaded โปรแกรม benchmark รันจากอินสแตนซ์สำหรับทำ load test อีกเครื่องหนึ่ง (c5n) ใน AZ เดียวกัน โดยใช้คำสั่ง `memtier_benchmark  -c 20 --test-time 100 -t 4 -d 256 --distinct-client-seed`
 
@@ -71,7 +71,7 @@ Dragonfly ให้ประสิทธิภาพใกล้เคียง�
 
 <img src="http://static.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
 
-เมื่อเปรียบเทียบ Dragonfly กับ Redis บนอินสแตนซ์ c6gn.16xlarge ซึ่งรองรับ network bandwidth ได้สูงที่สุด Dragonfly ให้ throughput สูงกว่า Redis ที่รันแบบ single process ถึง 25 เท่า และทำได้มากกว่า 3.8M QPS
+เมื่อเปรียบเทียบ Dragonfly กับ Redis บนอินสแตนซ์ c6gn.16xlarge ซึ่งรองรับ network bandwidth ได้สูงที่สุด Dragonfly ให้ throughput สูงกว่า Redis process เดียวถึง 25 เท่า และทำได้มากกว่า 3.8M QPS
 
 ค่า latency ที่ percentile 99 ของ Dragonfly ขณะทำ throughput ได้สูงสุด:
 
@@ -129,7 +129,7 @@ Dragonfly สร้าง snapshot เสร็จเร็วกว่า โ�
 
 
 
-## <a name="configuration"><a/>Configuration
+## <a name="configuration"></a>Configuration
 
 Dragonfly รองรับ argument ที่ใช้กันทั่วไปของ Redis ในส่วนที่นำมาใช้กับ Dragonfly ได้ ตัวอย่างเช่น คุณสามารถรันคำสั่ง `dragonfly --requirepass=foo --bind localhost` ได้
 
@@ -162,7 +162,7 @@ Dragonfly รองรับ argument ที่ใช้กันทั่วไ
  * `admin_port`: เปิดให้เข้าถึง admin console ผ่านพอร์ตที่กำหนด (`ค่าเริ่มต้น: disabled`) รองรับทั้ง HTTP และ RESP
  * `admin_bind`: bind การเชื่อมต่อ TCP ของ admin console กับ address ที่กำหนด (`ค่าเริ่มต้น: any`) รองรับทั้ง HTTP และ RESP
  * `admin_nopass`: เปิดให้เข้าถึง admin console ผ่านพอร์ตที่กำหนดโดยไม่ต้องใช้ auth token (`ค่าเริ่มต้น: false`) รองรับทั้ง HTTP และ RESP
- * `cluster_mode`: โหมด cluster ที่รองรับ (`ค่าเริ่มต้น: ""`) ปัจจุบันรองรับเฉพาะ `emulated`
+ * `cluster_mode`: เปิดใช้โหมด cluster (`ค่าเริ่มต้น: ""`) รองรับ `emulated` และ `yes`
  * `cluster_announce_ip`: IP ที่คำสั่งของ cluster จะประกาศให้ client รู้
  * `announce_port`: พอร์ตที่คำสั่งของ cluster จะประกาศให้ client และ replication master รู้
 
@@ -179,7 +179,7 @@ Dragonfly รองรับ argument ที่ใช้กันทั่วไ
 ดู option เพิ่มเติม เช่น การจัดการ log หรือการรองรับ TLS ได้ด้วยคำสั่ง `dragonfly --help`
 
 
-## <a name="design-decisions"><a/> Design decisions
+## <a name="design-decisions"></a>Design decisions
 
 ### Novel cache design
 
@@ -204,10 +204,10 @@ Expiration deadline ที่มีความละเอียดระดั
 metric ที่ Dragonfly export ในรูปแบบที่ Prometheus รองรับสามารถใช้กับ Grafana dashboard ได้ [ดูตัวอย่างที่นี่](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json)
 
 
-สำคัญ! HTTP console มีไว้สำหรับเข้าถึงจาก network ที่ปลอดภัย หากคุณเปิดพอร์ต TCP ของ Dragonfly ให้เข้าถึงจากภายนอก เราแนะนำให้ปิด console ด้วย `--http_admin_console=false` หรือ `--nohttp_admin_console`
+สำคัญ! HTTP console มีไว้สำหรับเข้าถึงจาก network ที่ปลอดภัย หากคุณเปิดพอร์ต TCP ของ Dragonfly ให้เข้าถึงจากภายนอก เราแนะนำให้ปิด console ด้วย `--primary_port_http_enabled=false` หรือ `--noprimary_port_http_enabled`
 
 
-## <a name="background"><a/>Background
+## <a name="background"></a>Background
 
 Dragonfly เริ่มต้นจากการทดลองว่า in-memory datastore จะมีหน้าตาอย่างไรหากออกแบบขึ้นใหม่ในปี 2022 จากบทเรียนที่เราได้รับในฐานะผู้ใช้ memory store และวิศวกรที่เคยทำงานให้บริษัท cloud เรารู้ว่า Dragonfly ต้องรักษาคุณสมบัติหลักสองอย่าง ได้แก่ การรับประกัน atomicity สำหรับทุก operation และ latency ที่ต่ำกว่า millisecond ขณะรองรับ throughput ที่สูงมาก
 
@@ -225,7 +225,7 @@ Dragonfly เริ่มต้นจากการทดลองว่า in-
 และสุดท้าย <br>
 <em>ภารกิจของเราคือการสร้าง in-memory datastore ที่ออกแบบมาอย่างดี มีความเร็วสูงมาก และคุ้มค่าสำหรับ cloud workload โดยใช้ประโยชน์จากความก้าวหน้าของ hardware รุ่นล่าสุด เราตั้งใจแก้ pain point ของ solution ที่มีอยู่ พร้อมรักษา API และคุณค่าของผลิตภัณฑ์เหล่านั้นไว้</em>
 
-## <a name="contributors"><a/>Contributors
+## <a name="contributors"></a>Contributors
 
 ขอบคุณผู้ร่วมพัฒนาโปรเจกต์ Dragonfly ทุกคนเลย!
 

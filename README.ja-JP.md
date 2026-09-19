@@ -24,11 +24,12 @@ Redis や Memcached の API と完全に互換性があるため、Dragonfly を
 - [ベンチマーク](#ベンチマーク)
 - [クイックスタート](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start)
 - [コンフィグ](#コンフィグ)
-- [ロードマップとステータス](#ロードマップとステータス)
 - [デザイン決定](#デザイン決定)
 - [バックグラウンド](#バックグラウンド)
+- [ソースからビルド](./docs/build-from-source.md)
+- [コントリビューター](#コントリビューター)
 
-## <a name="ベンチマーク"><a/>ベンチマーク
+## <a name="ベンチマーク"></a>ベンチマーク
 
 <img src="http://static.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
 
@@ -90,7 +91,7 @@ Dragonfly のメモリ効率の詳細については、[Dashtable ドキュメ�
 
 
 
-## <a name="コンフィグ"><a/>コンフィグ
+## <a name="コンフィグ"></a>コンフィグ
 
 Dragonfly は一般的な Redis の引数をサポートしています。例えば `dragonfly --requirepass=foo --bind localhost`。
 
@@ -108,12 +109,25 @@ Dragonfly 特有の議論もある:
  * `dbnum`: `select` でサポートされるデータベースの最大数。
  * `cache_mode`: 以下の[斬新なキャッシュデザイン](#斬新なキャッシュデザイン)のセクションを参照してください。
  * `hz`: キーの有効期限評価頻度 (`default: 100`)。この頻度が低いと、アイドル時の CPU 使用量が少なくなるが、その分古くなったキーをクリアする速度が遅くなる。
+ * `snapshot_cron`: 標準の cron 構文を使い、分単位の粒度で自動バックアップスナップショットをスケジュールする式 (`default: ""`)。
+
+   cron スケジュール式の例です。この引数の詳細については、[ドキュメント](https://www.dragonflydb.io/docs/managing-dragonfly/backups#the-snapshot_cron-flag)をご覧ください。
+
+   | Cron スケジュール式 | 説明                         |
+   |----------------------|------------------------------|
+   | `* * * * *`          | 毎分                         |
+   | `*/5 * * * *`        | 5 分ごと                     |
+   | `5 */2 * * *`        | 2 時間ごとの 5 分            |
+   | `0 0 * * *`          | 毎日 00:00（深夜）           |
+   | `0 6 * * 1-5`        | 月曜日から金曜日の 06:00     |
+
  * `primary_port_http_enabled`: もし `true` (`default: true`) なら、メイン TCP ポートで HTTP コンソールにアクセスできるようにする。
  * `admin_port`: 割り当てられたポートのコンソールへの管理者アクセスを有効にする(`default: disabled`)。HTTP と RESP プロトコルの両方をサポートする。
  * `admin_bind`: 管理コンソールの TCP 接続を指定されたアドレスにバインドする(`default: any`)。HTTP と RESP の両方のプロトコルをサポートする。
  * `admin_nopass`: 割り当てられたポートで、認証トークンなしでコンソールへのオープン管理アクセスを有効にする (`default: false`)。HTTP と RESP の両方のプロトコルをサポートする。
- * `cluster_mode`: サポートするクラスターモード (`default: ""`)。現在は `emulated` のみをサポートしている。
+ * `cluster_mode`: クラスターモードを有効にする (`default: ""`)。`emulated` と `yes` をサポートする。
  * `cluster_announce_ip`: クラスタコマンドがクライアントにアナウンスする IP。
+ * `announce_port`: クラスタコマンドがクライアントとレプリケーションマスターにアナウンスするポート。
 
 ### 一般的なオプションを使用した開始スクリプトの例:
 
@@ -125,23 +139,13 @@ Dragonfly 特有の議論もある:
 
 ログの管理や TLS のサポートなど、その他のオプションについては `dragonfly --help` を実行してください。
 
-## <a name="ロードマップとステータス"><a/>ロードマップとステータス
-
-Dragonfly は現在、~185 個の Redis コマンドと、`cas` 以外のすべての Memcached コマンドをサポートしている。ほぼ Redis 5 API と同等ですが、Dragonfly の次のマイルストーンは基本的な機能を安定させ、レプリケーション API を実装することです。まだ実装されていないコマンドで必要なものがあれば、issue を開いてください。
-
-Dragonfly ネイティブのレプリケーションについては、桁違いに高速な分散ログフォーマットを設計中です。
-
-レプリケーション機能に続いて、Redis バージョン 3-6 の API に不足しているコマンドを追加していく予定です。
-
-現在 Dragonfly がサポートしているコマンドについては、[コマンドリファレンス](https://dragonflydb.io/docs/category/command-reference)をご覧ください。
-
-## <a name="デザイン決定"><a/> デザイン決定
+## <a name="デザイン決定"></a>デザイン決定
 
 ### 斬新なキャッシュデザイン
 
 Dragonfly には、シンプルでメモリ効率の良い、単一の統一された適応型キャッシュアルゴリズムがあります。
 
-`cache_mode=true` フラグを渡すことでキャッシュモードを有効にすることができます。このモードをオンにすると、Dragonfly は将来つまずく可能性が最も低いアイテムを退避させますが、`maxmemory` の限界に近づいたときのみ退避させます。
+`cache_mode=true` フラグを渡すことでキャッシュモードを有効にすることができます。このモードをオンにすると、Dragonfly は将来アクセスされる可能性が最も低いアイテムを退避させますが、`maxmemory` の限界に近づいたときのみ退避させます。
 
 ### 比較的正確な有効期限
 
@@ -160,10 +164,10 @@ Prometheus 互換のメトリクスを見るには、URL `:6379/metrics` にア�
 Prometheus からエクスポートされたメトリクスは Grafana ダッシュボードと互換性があります[こちらを参照](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json)。
 
 
-重要です！HTTP コンソールは安全なネットワーク内でアクセスすることを想定しています。Dragonfly の TCP ポートを外部に公開する場合は、`--http_admin_console=false` または `--nohttp_admin_console` でコンソールを無効にすることをお勧めします。
+重要です！HTTP コンソールは安全なネットワーク内でアクセスすることを想定しています。Dragonfly の TCP ポートを外部に公開する場合は、`--primary_port_http_enabled=false` または `--noprimary_port_http_enabled` でコンソールを無効にすることをお勧めします。
 
 
-## <a name="バックグラウンド"><a/>バックグラウンド
+## <a name="バックグラウンド"></a>バックグラウンド
 
 Dragonfly は、インメモリデータストアを 2022 年に設計したらどのようになるかという実験から始まりました。メモリストアのユーザーとして、またクラウド企業で働いたエンジニアとしての経験から学んだ教訓をもとに、Dragonfly では 2 つの重要な特性を維持する必要があると考えました: それは、すべてのオペレーションにおける原子性の保証と、非常に高いスループットにおけるミリ秒以下の低レイテンシーです。
 
@@ -180,3 +184,11 @@ Dragonfly の基盤を構築し、[そのパフォーマンスに満足したら
 
 そして最後に、<br>
 <em>私たちの使命は、最新のハードウェアの進歩を活用した、クラウドワークロード向けの、優れた設計、超高速、コスト効率の良いインメモリデータストアを構築することです。現在のソリューションの API と提案を維持しながら、その問題点を解決するつもりです。</em>
+
+## <a name="コントリビューター"></a>コントリビューター
+
+Dragonfly プロジェクトへのすべてのコントリビューターに感謝します！
+
+<a href="https://github.com/dragonflydb/dragonfly/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=dragonflydb/dragonfly" />
+</a>

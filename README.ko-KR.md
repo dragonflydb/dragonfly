@@ -24,11 +24,12 @@ Dragonfly는 Redis와 Memcached API와 완벽하게 호환되며, 이를 적용�
 - [벤치마크](#benchmarks)
 - [빠른 시작](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start)
 - [설정](#configuration)
-- [로드맵과 상태](#roadmap-status)
 - [설계 의사결정](#design-decisions)
 - [개발 배경](#background)
+- [소스에서 빌드](./docs/build-from-source.md)
+- [기여자](#contributors)
 
-## <a name="benchmarks"><a/>벤치마크
+## <a name="benchmarks"></a>벤치마크
 
 <img src="http://static.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
 
@@ -88,7 +89,7 @@ Dragonfly는 스냅샷 단계를 몇 초안에 더 빨리 마쳤습니다.
 Dragonfly의 메모리 효율에 대한 정보가 더 필요하시다면, 저희의 [Dashtable 문서](/docs/dashtable.md)를 참고하시기 바랍니다.
 
 
-## <a name="configuration"><a/>설정
+## <a name="configuration"></a>설정
 
 Dragonfly는 적용 가능한 Redis 인수를 지원합니다. 예를 들면, `dragonfly --requirepass=foo --bind localhost`와 같은 명령어를 사용할 수 있습니다.
 
@@ -106,12 +107,25 @@ Dragonfly는 현재 아래와 같은 Redis 인수들을 지원합니다 :
   * `dbnum`: `select` 명령에 대해 지원되는 최대 데이터베이스 수.
   * `cache_mode`: 아래의 섹션 [새로운 캐시 설계](#novel-cache-design)을 참고해주시기 바랍니다.
   * `hz`: 키가 만료되었는지를 판단하는 빈도(`기본값: 100`). 낮은 빈도는 키 방출이 느려지는 대신, 유휴 상태일 때 CPU 사용량을 줄입니다.
+  * `snapshot_cron`: 표준 cron 문법을 사용하여 분 단위로 자동 백업 스냅샷을 예약하는 표현식입니다. (`기본값: ""`).
+
+    cron 스케줄 표현식 예시입니다. 이 인수에 대한 자세한 내용은 [문서](https://www.dragonflydb.io/docs/managing-dragonfly/backups#the-snapshot_cron-flag)를 참고해주세요.
+
+    | Cron 스케줄 표현식 | 설명                  |
+    |--------------------|-----------------------|
+    | `* * * * *`        | 매분                  |
+    | `*/5 * * * *`      | 5분마다               |
+    | `5 */2 * * *`      | 2시간마다 5분에       |
+    | `0 0 * * *`        | 매일 00:00 자정       |
+    | `0 6 * * 1-5`      | 월요일부터 금요일 06:00 |
+
   * `primary_port_http_enabled`: `true` 인 경우 HTTP 콘솔로 메인 TCP 포트 접근을 허용합니다. (`기본값: true`).
   * `admin_port`: 할당된 포트에서 관리자 콘솔 접근을 활성화합니다. (`기본값: disabled`). HTTP와 RESP 프로토콜 모두를 지원합니다.
   * `admin_bind`: 주어진 주소에 관리자 콘솔 TCP 연결을 바인딩합니다. (`기본값: any`). HTTP와 RESP 프로토콜 모두를 지원합니다.
   * `admin_nopass`: 할당된 포트에 대해서 인증 토큰 없이 관리자 콘솔 접근을 활성화합니다. (`default: false`). HTTP와 RESP 프로토콜 모두를 지원합니다.
-  * `cluster_mode`: 클러스터 모드가 지원됩니다. (`기본값: ""`). 현재는`emulated` 만 지원합니다.
+  * `cluster_mode`: 클러스터 모드를 활성화합니다. (`기본값: ""`). `emulated`와 `yes`를 지원합니다.
   * `cluster_announce_ip`: 클러스터 명령을 클라이언트에게 알리는 IP 주소.
+  * `announce_port`: 클러스터 명령이 클라이언트와 복제 마스터에 알리는 포트입니다.
 
 
 ### 주요 옵션을 활용한 실행 스크립트 예시:
@@ -124,17 +138,7 @@ Dragonfly는 현재 아래와 같은 Redis 인수들을 지원합니다 :
 
 로그 관리나 TLS 지원과 같은 추가 옵션을 확인하고 싶다면, `dragonfly --help` 를 실행해보시길 바랍니다.
 
-## <a name="roadmap-status"><a/>로드맵과 상태
-
-Dragonfly는 현재 ~185개의 Redis 명령어들과 `cas` 뿐만 아니라 모든 Memcached 명령어를 지원합니다. 이는 거의 Redis 5 API와 동등하며, Dragonfly의 다음 마일스톤은 기본 기능 을 안정화하고 복제 API를 구현하는 것입니다. 아직 구현되지 않은 필요한 명령어가 있다면, 이슈를 오픈해주세요.
-
-Dragonfly 고유 복제기능을 위해, 저희는 몇 배 높은 속도를 지원할 수 있는 분산 로그 형식을 설계하고 있습니다.
-
-복제 기능을 추가한 뒤에 저희는 Redis 3-6 API에 해당되는 누락 명령어들을 계속 추가할 예정입니다.
-
-Dragonfly에 의해 현재 지원되는 명령어를 확인하기 위해서 [명령어 레퍼런스](https://dragonflydb.io/docs/category/command-reference)를 참고해주시기 바랍니다.
-
-## <a name="design-decisions"><a/>설계 의사결정
+## <a name="design-decisions"></a>설계 의사결정
 
 ### 새로운 캐시 설계
 
@@ -158,10 +162,10 @@ Dragonfly와 Redis의 만료 기한에 대한 구현의 차이는 [여기서 확
 
 Prometheus에서 내보내는 매트릭들은 Grafana 대시보드와 호환됩니다. 자세한 내용은 [여기](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json)를 참조해주세요.
 
-중요! HTTP 콘솔은 안전한 네트워크 내에서 접근하도록 설계되었습니다. Dragonfly의 TCP 포트를 외부로 노출한다면, `--http_admin_console=false` 혹은 `--nohttp_admin_console`과 같은 인수를 활용하여 콘솔을 비활성화하는 것을 조언해드립니다.
+중요! HTTP 콘솔은 안전한 네트워크 내에서 접근하도록 설계되었습니다. Dragonfly의 TCP 포트를 외부로 노출한다면, `--primary_port_http_enabled=false` 혹은 `--noprimary_port_http_enabled`와 같은 인수를 활용하여 콘솔을 비활성화하는 것을 조언해드립니다.
 
 
-## <a name="background"><a/>개발 배경
+## <a name="background"></a>개발 배경
 
 Dragonfly는 2022년에 인-메모리 데이터스토어를 설계한다면 어땠을까에 대한 실험으로 시작되었습니다. 클라우드 회사에서 근무한 엔지니어 및 메모리 스토어 사용자의 경험을 바탕으로, 저희는 Dragonfly에 핵심적인 두 가지 핵심 특성을 보존해야함을 알았습니다: 모든 작업에 대한 원자성 보장과 매우 높은 처리량에 대한 밀리초 이하의 낮은 지연 시간을 보장하는 것이었습니다.
 
@@ -179,3 +183,11 @@ Dragonfly는 2022년에 인-메모리 데이터스토어를 설계한다면 어�
 
 마지막으로, <br>
 <em>저희의 임무는 최신 하드웨어 발전을 활용하는 클라우드 작업을 위한 멋진 설계와 초고속 처리량 그리고 비용효율적인 인-메모리 데이터스토어를 만드는 것입니다. 저희는 현재 솔루션의 제품 API들이나 제안을 유지하면서 당면 과제를 해결하고자 합니다.</em>
+
+## <a name="contributors"></a>기여자
+
+Dragonfly 프로젝트에 기여해주신 모든 분들께 감사드립니다!
+
+<a href="https://github.com/dragonflydb/dragonfly/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=dragonflydb/dragonfly" />
+</a>

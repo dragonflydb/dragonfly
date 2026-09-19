@@ -26,12 +26,12 @@ Totalmente compatível com as APIs do Redis e Memcached, o Dragonfly não requer
 - [Benchmarks](#benchmarks)
 - [Guia rápido](https://github.com/dragonflydb/dragonfly/tree/main/docs/quick-start)
 - [Configuração](#configuration)
-- [Roteiro e status](#roadmap-status)
 - [Decisões de design](#design-decisions)
 - [Contexto](#background)
 - [Compilação a partir do código-fonte](./docs/build-from-source.md)
+- [Contribuidores](#contributors)
 
-## <a name="benchmarks"><a/>Benchmarks
+## <a name="benchmarks"></a>Benchmarks
 
 Primeiro comparamos o Dragonfly com o Redis em uma instância `m5.large`, frequentemente usada para rodar Redis devido à sua arquitetura single-threaded. O benchmark roda de outra instância de carga (c5n) na mesma AZ usando `memtier_benchmark  -c 20 --test-time 100 -t 4 -d 256 --distinct-client-seed`.
 
@@ -125,7 +125,7 @@ O Dragonfly concluiu o snapshot mais rápido, em poucos segundos.
 
 Para mais informações sobre eficiência de memória no Dragonfly, veja nosso [documento sobre Dashtable](/docs/dashtable.md).
 
-## <a name="configuration"><a/>Configuração
+## <a name="configuration"></a>Configuração
 
 O Dragonfly suporta argumentos comuns do Redis quando aplicável. Por exemplo, você pode executar: `dragonfly --requirepass=foo --bind localhost`.
 
@@ -170,7 +170,7 @@ Também há argumentos específicos do Dragonfly:
 
 - `admin_nopass`: Habilita acesso admin sem autenticação (`padrão: false`). Suporta HTTP e RESP.
 
-- `cluster_mode`: Modo cluster suportado (`padrão: ""`). Atualmente só `emulated`.
+- `cluster_mode`: Habilita o modo cluster (`padrão: ""`). Suporta `emulated` e `yes`.
 
 - `cluster_announce_ip`: IP que os comandos de cluster anunciam ao cliente.
 
@@ -189,17 +189,7 @@ Argumentos também podem ser passados via:
 
 Para mais opções como logs ou suporte a TLS, execute `dragonfly --help`.
 
-## <a name="roadmap-status"><a/>Roadmap e status
-
-Atualmente o Dragonfly suporta \~185 comandos Redis e todos os comandos Memcached exceto `cas`. Já quase no nível da API do Redis 5, o próximo marco é estabilizar as funcionalidades básicas e implementar a API de replicação. Caso precise de um comando ainda não implementado, abra uma issue.
-
-Para replicação nativa do Dragonfly, estamos projetando um formato de log distribuído que suportará velocidades ordens de magnitude maiores.
-
-Após a replicação, continuaremos adicionando comandos faltantes das versões 3 a 6 do Redis.
-
-Consulte nossa [Referência de Comandos](https://dragonflydb.io/docs/category/command-reference) para a lista atual.
-
-## <a name="design-decisions"><a/>Decisões de design
+## <a name="design-decisions"></a>Decisões de design
 
 ### Design de cache inovador
 
@@ -223,9 +213,9 @@ Acesse `:6379/metrics` para ver métricas Prometheus-compatíveis.
 
 As métricas são compatíveis com o dashboard do Grafana, [veja aqui](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json).
 
-Importante: o console HTTP deve ser acessado em rede segura. Se expor a porta TCP do Dragonfly externamente, desabilite o console com `--http_admin_console=false` ou `--nohttp_admin_console`.
+Importante: o console HTTP deve ser acessado em rede segura. Se expor a porta TCP do Dragonfly externamente, desabilite o console com `--primary_port_http_enabled=false` ou `--noprimary_port_http_enabled`.
 
-## <a name="background"><a/>Contexto
+## <a name="background"></a>Contexto
 
 O Dragonfly começou como um experimento para repensar um datastore in-memory em 2022. Baseado em lições como usuários e engenheiros de cloud, sabíamos que dois princípios deveriam ser preservados: garantias de atomicidade e latência sub-millisecond sob alto throughput.
 
@@ -247,3 +237,11 @@ Além disso, o Dash é mais eficiente em uso de CPU/memória. Com esse design, i
 Com essa base pronta e [performance satisfatória](#benchmarks), implementamos as APIs Redis e Memcached (\~185 comandos Redis, equivalente ao Redis 5.0, e 13 do Memcached).
 
 Por fim, <br> <em>Nossa missão é construir um datastore in-memory rápido, eficiente e bem projetado para cargas em nuvem, aproveitando o hardware moderno. Queremos resolver as dores das soluções atuais mantendo APIs e propostas de valor.</em>
+
+## <a name="contributors"></a>Contribuidores
+
+Obrigado a todos que contribuíram para o projeto Dragonfly!
+
+<a href="https://github.com/dragonflydb/dragonfly/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=dragonflydb/dragonfly" />
+</a>
