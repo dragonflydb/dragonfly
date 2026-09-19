@@ -850,7 +850,7 @@ void Transaction::ScheduleInternal() {
 
     // We must follow up with PollExecution because in rare cases with multi-trans
     // that follows this one, we may find the next transaction in the queue that is never
-    // trigerred. Which leads to deadlock. I could solve this by adding PollExecution to
+    // triggered. Which leads to deadlock. I could solve this by adding PollExecution to
     // CancelShardCb above but then we would need to use the shard_set queue since PollExecution
     // is blocking. I wanted to avoid the additional latency for the general case of running
     // CancelShardCb because of the very rate case below. Therefore, I decided to just fetch the
@@ -947,7 +947,7 @@ void Transaction::SingleHopAsync(RunnableType cb) {
         // do we really need to submit a shard callback?
         // an armed transaction will be driven by the next previous txq entry
 
-        // possible deadlock beacuse of api
+        // possible deadlock because of api
         // but really we just need to re-schedule the callback
         // shard_set->Add(unique_shard_id_, [this] {
         //  EngineShard::tlocal()->PollExecution("exec_cb", this);
@@ -1094,7 +1094,7 @@ bool Transaction::CancelScheduledTx() {
     });
   };
 
-  // For mutable transctions we can cancel only if all shards can be stopped.
+  // For mutable transactions we can cancel only if all shards can be stopped.
   // Reads do not cause any inconsistencies if stopped mid-read, so any condition is ok
   unsigned disarmed_cnt = disarmed_shards.count();
   if (disarmed_cnt == unique_shard_cnt_ || is_safe) {
@@ -1247,7 +1247,7 @@ bool Transaction::IsActive(ShardId sid) const {
   if (unique_shard_cnt_ == 0)  // Not initialized
     return false;
 
-  // If we have only one shard, we often don't store infromation about all shards, so determine it
+  // If we have only one shard, we often don't store information about all shards, so determine it
   // solely by id
   if (unique_shard_cnt_ == 1) {
     // However the active flag is still supposed to be set for our unique shard
@@ -1282,7 +1282,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
   IntentLock::Mode mode = LockMode();
   bool lock_granted = false;
 
-  // If a more recent transaction already commited, we abort
+  // If a more recent transaction already committed, we abort
   if (txid_ > 0 && shard->committed_txid() >= txid_)
     return false;
 
@@ -1367,7 +1367,7 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
     }
   }
 
-  // Single shard operations might have delayed acquiring txid unless neccessary.
+  // Single shard operations might have delayed acquiring txid unless necessary.
   if (txid_ == 0) {
     DCHECK_EQ(unique_shard_cnt_, 1u);
     txid_ = op_seq.fetch_add(1, memory_order_relaxed);
@@ -1616,7 +1616,7 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
 
 bool Transaction::IsGlobal() const {
   // Please note that a transaction can be non-global even if multi_->mode == GLOBAL.
-  // It happens when a transaction is squashed and switches to execute differrent commands.
+  // It happens when a transaction is squashed and switches to execute different commands.
   return global_;
 }
 
@@ -1735,7 +1735,7 @@ void Transaction::CancelBlocking(const std::function<OpStatus(ArgSlice)>& status
     return;
 
   coordinator_state_ |= COORD_CANCELLED;
-  // don't use local_result_ because it can be overwirtten if we cancel ahead
+  // don't use local_result_ because it can be overwritten if we cancel ahead
   block_cancel_result_ = status;
   blocking_barrier_.Close();
 }

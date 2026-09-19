@@ -132,7 +132,7 @@ template <size_t N> size_t FindFirst(const std::bitset<N>& bs) {
 namespace detail {
 
 // Page can be exactly in either these 3 states:
-// 1. unitialized - with no blocks being allocated - segment_inuse will be 0 in that case, 1
+// 1. uninitialized - with no blocks being allocated - segment_inuse will be 0 in that case, 1
 // otherwise.
 // 2. Partly utilized by 1 or more blocks, with available > 0 in that case. It must be present in
 // free_pages_ list then.

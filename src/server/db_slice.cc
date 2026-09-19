@@ -256,7 +256,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
 
 class AsyncDeleter {
  public:
-  template <typename Set> static void EnqueDeletion(uint32_t next, Set* ds);
+  template <typename Set> static void EnqueueDeletion(uint32_t next, Set* ds);
   static void Shutdown();
 
  private:
@@ -286,7 +286,7 @@ template <typename Set> uint32_t ClearStepEnd(Set* s) {
     return s->BucketCount();
 }
 
-template <typename Set> void AsyncDeleter::EnqueDeletion(uint32_t next, Set* ds) {
+template <typename Set> void AsyncDeleter::EnqueueDeletion(uint32_t next, Set* ds) {
   auto step = +[](ClearNode* n) {
     auto* s = static_cast<Set*>(n->ds);
     n->cursor = s->ClearStep(n->cursor, kClearStepSize);
@@ -2099,7 +2099,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
       using Ds = std::remove_pointer_t<decltype(ds)>;
       uint32_t next = ds->ClearStep(0, 512);
       if (next < ClearStepEnd(ds))
-        AsyncDeleter::EnqueDeletion(next, ds);
+        AsyncDeleter::EnqueueDeletion(next, ds);
       else
         CompactObj::DeleteMR<Ds>(ds);
     };

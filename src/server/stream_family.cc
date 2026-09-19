@@ -2227,7 +2227,7 @@ OpResult<uint32_t> OpAck(const OpArgs& op_args, string_view key, string_view gna
     unsigned char buf[sizeof(streamID)];
     StreamEncodeID(buf, id);
 
-    // From Redis' xackCommand's implemenation
+    // From Redis' xackCommand's implementation
     // Lookup the ID in the group PEL: it will have a reference to the
     // NACK structure that will have a reference to the consumer, so that
     // we are able to remove the entry from both PELs.

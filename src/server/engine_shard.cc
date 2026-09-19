@@ -62,7 +62,7 @@ ABSL_FLAG(int32_t, hz, 100,
 ABSL_FLAG(string, tiered_prefix, "",
           "Enables tiered storage if set. "
           "The string denotes the path and prefix of the files "
-          " associated with tiered storage. Stronly advised to use "
+          " associated with tiered storage. Strongly advised to use "
           "high performance NVME ssd disks for this. Also, seems that pipeline_squash does "
           "not work well with tiered storage, so it's advised to set it to 0.");
 
@@ -197,7 +197,7 @@ void EngineShard::DefragTaskState::ResetScanState() {
 // 1. Don't try memory fragmentation if we don't use "enough" memory (control by
 // mem_defrag_threshold flag)
 // 2. We have memory blocks that can be better utilized (there is a "wasted memory" in them).
-// 3. in case the above is OK, make sure that we have a "gap" between usage and commited memory
+// 3. in case the above is OK, make sure that we have a "gap" between usage and committed memory
 // (control by mem_defrag_waste_threshold flag)
 EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequired() {
   using enum SkipReason;
@@ -349,7 +349,7 @@ std::optional<CollectedPageStats> EngineShard::DoDefrag(PageUsage* page_usage) {
 
 // the memory defragmentation task is as follow:
 //  1. Check if memory usage is high enough
-//  2. Check if diff between commited and used memory is high enough
+//  2. Check if diff between committed and used memory is high enough
 //  3. if all the above pass -> scan this shard and try to find whether we can move pointer to
 //  underutilized pages values
 //     if the cursor returned from scan is not in done state, schedule the task to run at high
@@ -576,7 +576,7 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
   PollExecutionInternal(context, trans);
 
   // Executing `trans` out of order above would not follow up with queue processing, so
-  // we need to issue another poll if we interruped another poll request.
+  // we need to issue another poll if we interrupted another poll request.
   // Because it runs with trans=nullptr, it progresses only on the loop and does not need follow ups
   PollExecutionIfDeferred();
 }
@@ -618,7 +618,7 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
     if (!trans->RunInShard(this, true)) {
       // execution is blocked while HasAwakedTransaction() returns true, so no need to set
       // continuation_trans_. Moreover, setting it for wakened multi-hop transactions may lead to
-      // inconcistency, see BLMoveSimultaneously test.
+      // inconsistency, see BLMoveSimultaneously test.
       // continuation_trans_ = trans;
       return;
     }
@@ -677,7 +677,7 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
 
     TxId txid = head->txid();
 
-    // Update commited_txid before running, because RunInShard might block on i/o.
+    // Update committed_txid before running, because RunInShard might block on i/o.
     // This way scheduling transactions won't see an understated value.
     DCHECK_LT(committed_txid_, txid);  //  strictly increasing when processed via txq
     committed_txid_ = txid;
@@ -726,7 +726,7 @@ void EngineShard::RemoveContTx(Transaction* tx) {
 }
 
 void EngineShard::Heartbeat() {
-  DVLOG(3) << " Hearbeat";
+  DVLOG(3) << " Heartbeat";
   DCHECK(namespaces);
 
   // Reap zero-copy GET pins whose refcnt has dropped to 0. Cheap and idempotent.
@@ -1131,7 +1131,7 @@ EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbInd
     bool merged_any = false;
     // Prompt GetSegmentCount() each iteration to handle directory resizes across preemptions
     for (size_t seg_id = 0; seg_id < prime.GetSegmentCount(); seg_id = prime.NextSeg(seg_id)) {
-      if (SliceSnapshot::IsSnaphotInProgress()) {
+      if (SliceSnapshot::IsSnapshotInProgress()) {
         stats.exited_on_snapshot = true;
         return stats;
       }

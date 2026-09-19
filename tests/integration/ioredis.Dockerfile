@@ -17,7 +17,7 @@ WORKDIR /app/ioredis
 
 RUN npm install
 
-# Script to run the tests that curretly pass successfully.
+# Script to run the tests that currently pass successfully.
 # Note that in DF we still don't have support for cluster and we
 # want to skip tests such as elasticache, also we have some issues that
 # need to be resolved such as

@@ -274,7 +274,7 @@ MATCHER_P(IsMapMatcher, expected, "") {
   }
 
   constexpr size_t expected_size = std::tuple_size<decltype(expected)>::value;
-  constexpr size_t exprected_pairs_number = expected_size / 2;
+  constexpr size_t expected_pairs_number = expected_size / 2;
 
   auto result = arg.GetVec();
   if (result.size() != expected_size) {
@@ -288,7 +288,7 @@ MATCHER_P(IsMapMatcher, expected, "") {
   }
 
   std::vector<Matcher<std::pair<std::string, RespExpr>>> kv_matchers;
-  BuildKvMatchers(kv_matchers, expected, std::make_index_sequence<exprected_pairs_number>{});
+  BuildKvMatchers(kv_matchers, expected, std::make_index_sequence<expected_pairs_number>{});
 
   return ExplainMatchResult(UnorderedElementsAreArray(kv_matchers), received_pairs,
                             result_listener);
@@ -304,7 +304,7 @@ MATCHER_P(IsMapWithSizeMatcher, expected, "") {
     return false;
   }
   constexpr size_t expected_size = std::tuple_size<decltype(expected)>::value;
-  constexpr size_t exprected_pairs_number = expected_size / 2;
+  constexpr size_t expected_pairs_number = expected_size / 2;
 
   auto result = arg.GetVec();
   if (result.size() != expected_size + 1 || result.size() % 2 != 1) {
@@ -312,7 +312,7 @@ MATCHER_P(IsMapWithSizeMatcher, expected, "") {
     return false;
   }
 
-  if (result[0].GetInt() != exprected_pairs_number) {
+  if (result[0].GetInt() != expected_pairs_number) {
     *result_listener << "Wrong pairs count: " << result[0].GetInt().value_or(-1);
     return false;
   }
@@ -323,7 +323,7 @@ MATCHER_P(IsMapWithSizeMatcher, expected, "") {
   }
 
   std::vector<Matcher<std::pair<std::string, RespExpr>>> kv_matchers;
-  BuildKvMatchers(kv_matchers, expected, std::make_index_sequence<exprected_pairs_number>{});
+  BuildKvMatchers(kv_matchers, expected, std::make_index_sequence<expected_pairs_number>{});
 
   return ExplainMatchResult(UnorderedElementsAreArray(kv_matchers), received_pairs,
                             result_listener);
@@ -1191,7 +1191,7 @@ TEST_F(SearchFamilyTest, ReturnOption) {
   resp = Run({"ft.search", "i1", "@justA:0", "return", "1", "nothere"});
   EXPECT_THAT(resp, MatchEntry("k0"));
 
-  // Checl implcit __vector_score is provided
+  // Check implicit __vector_score is provided
   float score = 20;
   resp = Run({"ft.search", "i1", "@justA:0 => [KNN 20 @vector $vector]", "SORTBY", "__vector_score",
               "DESC", "RETURN", "1", "longA", "PARAMS", "2", "vector", FloatSV(&score)});

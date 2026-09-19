@@ -169,7 +169,7 @@ async def test_tiered_replication_strings_with_append(df_factory: DflyInstanceFa
     await check_all_replicas_finished([replica_client], master_client, timeout=500)
 
     # Check that everything is in sync.
-    # Disable heartbeat during string keys hash calculation to avoid evicition of keys during
+    # Disable heartbeat during string keys hash calculation to avoid eviction of keys during
     # which can cause inconsistency.
     await master_client.execute_command("CONFIG SET enable_heartbeat_eviction false")
     hashes = await asyncio.gather(

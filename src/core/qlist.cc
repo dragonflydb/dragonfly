@@ -953,7 +953,7 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
     uint32_t num_offloaded_nodes = tiering_params_->num_offloaded_nodes;
 
     // Dry run for offloading decision.
-    // a. Node id is withing the offloadable depth - offload it if not already offloaded.
+    // a. Node id is within the offloadable depth - offload it if not already offloaded.
     // b. Node id is outside the offloadable depth - but we have too many nodes that are not
     //    offloaded - take the O(n) route to traverse and offload them. The reason for having such
     //    nodes is because (a) handles node that we touch during operations.
@@ -1374,7 +1374,7 @@ auto QList::GetIterator(long idx) const -> Iterator {
   if (!n)
     return {};
 
-  /* Fix accum so it looks like we seeked in the other direction. */
+  /* Fix accum so it looks like we sought in the other direction. */
   if (seek_forward != forward)
     accum = count_ - n->count - accum;
 

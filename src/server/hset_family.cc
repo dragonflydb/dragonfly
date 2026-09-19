@@ -451,7 +451,7 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
    * COUNT, so if the hash table is in a pathological state (very
    * sparsely populated) we avoid to block too much time at the cost
    * of returning no or very few elements. (taken from redis code at db.c line 904 */
-  constexpr size_t INTERATION_FACTOR = 10;
+  constexpr size_t ITERATION_FACTOR = 10;
 
   StringVec res;
   // If NOVALUES, we expect 1 element per match (key). Otherwise, 2 elements (key + value).
@@ -471,7 +471,7 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
   } else {
     StringMap* sm = *hw.Get<StringMap*>();
 
-    long max_iterations = count * INTERATION_FACTOR;
+    long max_iterations = count * ITERATION_FACTOR;
 
     // note about this lambda - don't capture here! it should be convertible to C function!
     auto scanCb = [&](const void* obj) {

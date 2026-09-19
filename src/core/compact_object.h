@@ -149,7 +149,7 @@ using CompactObjType = unsigned;
 
 constexpr CompactObjType kInvalidCompactObjType = std::numeric_limits<CompactObjType>::max();
 
-uint32_t JsonEnconding();
+uint32_t JsonEncoding();
 
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
@@ -439,10 +439,10 @@ class CompactObj {
   };
 
   // Prerequisite: IsCool() is true.
-  // Returns the external data of the object incuding its ColdRecord.
+  // Returns the external data of the object including its ColdRecord.
   CoolItem GetCool() const;
 
-  // Prequisite: IsCool() is true.
+  // Prerequisite: IsCool() is true.
   // Keeps cool record only as external value and discard in-memory part.
   void Freeze(size_t offset, size_t sz);
 
@@ -630,9 +630,9 @@ class CompactObj {
       uint8_t io_pending : 1;
       uint8_t sticky : 1;
 
-      // TOUCHED used to determin which items are hot/cold.
+      // TOUCHED used to determine which items are hot/cold.
       // by checking if the item was touched from the last time we
-      // reached this item while travering the database to set items as cold.
+      // reached this item while traversing the database to set items as cold.
       // https://junchengyang.com/publication/nsdi24-SIEVE.pdf
       uint8_t touched : 1;  // used to mark keys that were accessed.
 

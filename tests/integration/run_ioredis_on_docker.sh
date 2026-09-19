@@ -14,6 +14,6 @@ if [ $? -ne 0 ];then
 	echo "some tests failed - please look at the output from this run"
 	exit 1
 else
-	echo "finish runing tests successfully"
+    echo "finish running tests successfully"
 	exit 0
 fi

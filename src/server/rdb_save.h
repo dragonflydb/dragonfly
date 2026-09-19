@@ -195,7 +195,7 @@ class RdbSaver {
   ~RdbSaver();
 
   // Initiates the serialization in the shard's thread.
-  // cll allows breaking in the middle.
+  // call allows breaking in the middle.
   void StartSnapshotInShard(bool stream_journal, ExecutionState* cntx, EngineShard* shard);
 
   // Stops full-sync serialization for replication in the shard's thread.
@@ -370,7 +370,7 @@ class RdbSerializer {
   static constexpr size_t kFilterChunkSize = 1ULL << 26;
   static constexpr size_t kMinStrSizeToCompress = 256;
   static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;
-  static constexpr double kMinCompressionReductionPrecentage = 0.95;
+  static constexpr double kMinCompressionReductionPercentage = 0.95;
   struct CompressionStats {
     uint32_t compression_no_effective = 0;
     uint32_t size_skip_count = 0;

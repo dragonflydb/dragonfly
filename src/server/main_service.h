@@ -99,7 +99,7 @@ class Service : public facade::ServiceInterface {
     return pp_;
   }
 
-  absl::flat_hash_map<std::string, unsigned> UknownCmdMap() const;
+  absl::flat_hash_map<std::string, unsigned> UnknownCmdMap() const;
 
   ScriptMgr* script_mgr() {
     return server_family_.script_mgr();
@@ -177,7 +177,7 @@ class Service : public facade::ServiceInterface {
   void CallSHA(const facade::ParsedArgs& args, std::string_view sha, Interpreter* interpreter,
                bool read_only, CommandContext* cmd_cntx);
 
-  // Return optional payload - first received error that occured when executing commands.
+  // Return optional payload - first received error that occurred when executing commands.
   std::optional<facade::payload::Payload> FlushEvalAsyncCmds(ConnectionContext* cntx,
                                                              bool force = false);
 

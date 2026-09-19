@@ -300,7 +300,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
       return make_unexpected(ec);
   }
 
-  /* Save the key poperties */
+  /* Save the key properties */
   uint32_t df_mask_flags = pk.IsSticky() ? DF_MASK_FLAG_STICKY : 0;
   df_mask_flags |= pv.HasFlag() ? DF_MASK_FLAG_MC_FLAGS : 0;
   if (df_mask_flags != 0) {
@@ -1285,7 +1285,7 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
   void Finalize() override;
 
   // used only for legacy rdb save flows.
-  error_code ConsumeChannel(const ExecutionState* cll);
+  error_code ConsumeChannel(const ExecutionState* call);
 
   void FillFreqMap(RdbTypeFreqMap* dest) const;
 
@@ -1332,7 +1332,7 @@ class RdbSaver::Impl final : public SliceSnapshot::SnapshotDataConsumerInterface
 
   // Single entry compression is compatible with redis rdb snapshot
   // Multi entry compression is available only on df snapshot, this will
-  // make snapshot size smaller and opreation faster.
+  // make snapshot size smaller and operation faster.
   CompressionMode compression_mode_;
   SaveMode save_mode_;
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
@@ -1879,7 +1879,7 @@ std::optional<std::string> RdbSerializer::CompressBlob(std::string_view input) {
   }
 
   Bytes compressed_blob = *res;
-  if (compressed_blob.length() > blob_size * kMinCompressionReductionPrecentage) {
+  if (compressed_blob.length() > blob_size * kMinCompressionReductionPercentage) {
     ++compression_stats_->compression_no_effective;
     return std::nullopt;
   }

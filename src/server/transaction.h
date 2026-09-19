@@ -50,7 +50,7 @@ using facade::OpStatus;
 //
 // Multi transactions are handled by a single transaction, which exposes the same interface for
 // commands as regular transactions, but internally avoids rescheduling. There are multiple modes in
-// which a mutli-transaction can run, those are documented in the MultiMode enum.
+// which a multi-transaction can run, those are documented in the MultiMode enum.
 //
 // The flow of EXEC and EVAL is as follows:
 //
@@ -130,7 +130,7 @@ class Transaction {
 
   using time_point = ::std::chrono::steady_clock::time_point;
   // Runnable that is run on shards during hop executions (often named callback).
-  // Callacks should return `OpStatus` which is implicitly converitble to `RunnableResult`!
+  // Callbacks should return `OpStatus` which is implicitly convertible to `RunnableResult`!
   using RunnableType = absl::FunctionRef<RunnableResult(Transaction* t, EngineShard*)>;
 
   static constexpr std::nullopt_t kShardArgs{std::nullopt};
@@ -539,7 +539,7 @@ class Transaction {
   // Finish hop, decrement run barrier
   void FinishHop();
 
-  // Run actual callback on shard, store result if single shard or OOM was catched
+  // Run actual callback on shard, store result if single shard or OOM was caught
   void RunCallback(EngineShard* shard);
 
   // Adds itself to watched queue in the shard. Must run in that shard thread.

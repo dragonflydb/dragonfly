@@ -22,7 +22,7 @@ namespace dfly {
 class StringMap;
 
 // Document accessors allow different types (json/hset) to be hidden
-// behind a document interface for quering fields and serializing.
+// behind a document interface for querying fields and serializing.
 // Field string_view's are only valid until the next is requested.
 struct BaseAccessor : public search::DocumentAccessor {
   // Serialize all fields

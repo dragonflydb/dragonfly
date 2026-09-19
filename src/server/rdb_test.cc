@@ -190,7 +190,7 @@ TEST_F(RdbTest, LoadValkeyHashWithExpiry) {
 }
 
 TEST_F(RdbTest, LoadSmall6) {
-  // The rdb file contians keys that already expired, we want to continue loading them in this test.
+  // The rdb file contains keys that already expired, we want to continue loading them in this test.
   absl::FlagSaver fs;
   SetTestFlag("rdb_ignore_expiry", "true");
 
@@ -254,7 +254,7 @@ TEST_F(RdbTest, Stream) {
   Run({"save"});
 }
 
-TEST_F(RdbTest, ComressionModeSaveDragonflyAndReload) {
+TEST_F(RdbTest, CompressionModeSaveDragonflyAndReload) {
   Run({"debug", "populate", "50000"});
   ASSERT_EQ(50000, CheckedInt({"dbsize"}));
   // Check keys inserted are lower than 50,000.
@@ -1288,7 +1288,7 @@ TEST_F(RdbTest, HugeKeyIssue4554) {
 }
 
 // ignore_expiry.rdb contains 2 keys which are expired keys
-// this test case verifies wheather rdb_ignore_expiry flag is working as expected.
+// this test case verifies whether rdb_ignore_expiry flag is working as expected.
 TEST_F(RdbTest, RDBIgnoreExpiryFlag) {
   absl::FlagSaver fs;
 

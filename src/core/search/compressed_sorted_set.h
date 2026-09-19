@@ -25,7 +25,7 @@ class CompressedSortedSet {
   struct ConstIterator {
     friend class CompressedSortedSet;
 
-    // To make it work with std container contructors
+    // To make it work with std container constructors
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
     using value_type = IntType;

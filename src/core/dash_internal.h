@@ -208,7 +208,7 @@ template <unsigned NUM_SLOTS> class BucketBase {
   uint32_t CompareFP(uint8_t fp) const;
   bool ShiftRight();
 
-  // Returns true if stash_pos was stored, false overwise
+  // Returns true if stash_pos was stored, false otherwise
   bool SetStash(uint8_t fp, unsigned stash_pos, bool probe);
   bool ClearStash(uint8_t fp, unsigned stash_pos, bool probe);
 

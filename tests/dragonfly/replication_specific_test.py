@@ -546,7 +546,7 @@ async def test_big_huge_streaming_restart(df_factory: DflyInstanceFactory, tagge
     hashes = await asyncio.gather(*(SeederV2.capture(c) for c in [c_master, c_replica]))
     assert len(set(hashes)) == 1
 
-    # No in-between errors occured
+    # No in-between errors occurred
     replica.stop()
     assert replica.is_not_in_logs("Duplicate zset fields detected")
 

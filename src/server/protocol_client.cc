@@ -460,7 +460,7 @@ io::Result<dfly::RESPObj> ProtocolClient::TakeRespReply(uint32_t timeout, base::
 
     buffer->ConsumeInput(input_buf.size());
     if (resp && !resp->Empty()) {
-      VLOG(2) << "successfully parsed readed reply";
+      VLOG(2) << "successfully parsed read reply";
       return std::move(resp).value();  // success path
     }
 

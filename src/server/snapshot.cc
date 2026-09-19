@@ -74,7 +74,7 @@ size_t SliceSnapshot::GetThreadLocalMemoryUsage() {
   return mem;
 }
 
-bool SliceSnapshot::IsSnaphotInProgress() {
+bool SliceSnapshot::IsSnapshotInProgress() {
   return !tl_slice_snapshots.empty();
 }
 
@@ -228,7 +228,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     // serialized + side_saved must be equal to the total saved.
     VLOG(1) << "Exit SnapshotSerializer total_serialized: " << stats.keys_serialized
             << ", buckets side saved " << stats.buckets_on_change << ", total bucket saved "
-            << stats.buckets_serialized << ", journal_saved " << stats_.jounal_changes;
+            << stats.buckets_serialized << ", journal_saved " << stats_.journal_changes;
   }
 }
 
@@ -273,7 +273,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
 
   if (use_background_mode_) {
     // Yield after possibly long cpu slice due to compression and serialization
-    // before possbile suspension of ConsumeData resets the cpu time of the last slice
+    // before possible suspension of ConsumeData resets the cpu time of the last slice
     if (ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND)
       ThisFiber::Yield();
     // else: This function is invoked from the journal with regular priority as well.
@@ -355,7 +355,7 @@ bool SliceSnapshot::PushSerialized(bool force) {
 void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item) {
   std::lock_guard lk{stream_mu_};
   std::ignore = serializer_->WriteJournalEntry(item.journal_item.data);
-  ++stats_.jounal_changes;
+  ++stats_.journal_changes;
 }
 
 void SliceSnapshot::ThrottleIfNeeded() {

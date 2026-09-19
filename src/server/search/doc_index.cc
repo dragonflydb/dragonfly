@@ -94,22 +94,22 @@ bool IsSortableField(std::string_view field_identifier, const search::Schema& sc
   return it != schema.fields.end() && (it->second.flags & search::SchemaField::SORTABLE);
 }
 
-using SortIndiciesFieldsList =
+using SortIndicesFieldsList =
     std::vector<std::pair<string_view /*identifier*/, string_view /*alias*/>>;
 
-std::pair<std::vector<FieldReference>, SortIndiciesFieldsList> PreprocessAggregateFields(
+std::pair<std::vector<FieldReference>, SortIndicesFieldsList> PreprocessAggregateFields(
     const search::Schema& schema, const AggregateParams& params,
     const std::optional<std::vector<FieldReference>>& load_fields) {
   absl::flat_hash_map<std::string_view, FieldReference> fields_by_identifier;
-  absl::flat_hash_map<std::string_view, std::string_view> sort_indicies_aliases;
+  absl::flat_hash_map<std::string_view, std::string_view> sort_indices_aliases;
   fields_by_identifier.reserve(schema.field_names.size());
-  sort_indicies_aliases.reserve(schema.field_names.size());
+  sort_indices_aliases.reserve(schema.field_names.size());
 
   for (const auto& [fname, fident] : schema.field_names) {
     if (!IsSortableField(fident, schema)) {
       fields_by_identifier.emplace(fident, FieldReference{fident, fname});
     } else {
-      sort_indicies_aliases[fident] = fname;
+      sort_indices_aliases[fident] = fname;
     }
   }
 
@@ -118,7 +118,7 @@ std::pair<std::vector<FieldReference>, SortIndiciesFieldsList> PreprocessAggrega
     if (!IsSortableField(fident, schema)) {
       fields_by_identifier.insert_or_assign(fident, field);
     } else {
-      sort_indicies_aliases[fident] = field.OutputName();
+      sort_indices_aliases[fident] = field.OutputName();
     }
   }
 
@@ -128,7 +128,7 @@ std::pair<std::vector<FieldReference>, SortIndiciesFieldsList> PreprocessAggrega
     fields.emplace_back(field);
   }
 
-  return {std::move(fields), {sort_indicies_aliases.begin(), sort_indicies_aliases.end()}};
+  return {std::move(fields), {sort_indices_aliases.begin(), sort_indices_aliases.end()}};
 }
 
 /* Separate fields into basic and sortable. The second vector contains flags indicating
@@ -1124,7 +1124,7 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
     const OpArgs& op_args, const AggregateParams& params, absl::Span<const search::DocId> ids,
     std::string_view score_alias, const absl::flat_hash_map<search::DocId, float>& score_map,
     const absl::flat_hash_map<search::DocId, float>& text_score_map) const {
-  auto [fields_to_load, sort_indicies] =
+  auto [fields_to_load, sort_indices] =
       PreprocessAggregateFields(base_->schema, params, params.load_fields);
 
   vector<SearchDocData> out;
@@ -1135,14 +1135,14 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
       continue;
     auto& [key, accessor] = *entry;
 
-    SearchDocData extracted_sort_indicies;
-    extracted_sort_indicies.reserve(sort_indicies.size());
-    for (const auto& [fident, fname] : sort_indicies)
-      extracted_sort_indicies[fname] = indices_->GetSortIndexValue(doc, fident);
+    SearchDocData extracted_sort_indices;
+    extracted_sort_indices.reserve(sort_indices.size());
+    for (const auto& [fident, fname] : sort_indices)
+      extracted_sort_indices[fname] = indices_->GetSortIndexValue(doc, fident);
 
     SearchDocData loaded = accessor->Serialize(base_->schema, fields_to_load);
-    out.emplace_back(make_move_iterator(extracted_sort_indicies.begin()),
-                     make_move_iterator(extracted_sort_indicies.end()));
+    out.emplace_back(make_move_iterator(extracted_sort_indices.begin()),
+                     make_move_iterator(extracted_sort_indices.end()));
     out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
 
     if (!score_alias.empty()) {

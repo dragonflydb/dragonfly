@@ -490,7 +490,7 @@ async def test_replicate_to_old_replica(df_factory: DflyInstanceFactory):
     assert res[0][2][:2] == ["localhost", master.admin_port]
 
 
-# This Test was intorduced in response to a bug when replicating empty hashmaps (encoded as
+# This Test was introduced in response to a bug when replicating empty hashmaps (encoded as
 # ziplists) created with HSET, HSETEX, HDEL and then replicated 2 times.
 # For more information plz refer to the issue on gh:
 # https://github.com/dragonflydb/dragonfly/issues/3504
@@ -548,7 +548,7 @@ async def test_empty_hash_map_replicate_old_master(df_factory):
         await client_b.aclose()
 
 
-# This Test was intorduced in response to a bug when replicating empty hash maps with
+# This Test was introduced in response to a bug when replicating empty hash maps with
 # HSET, HSETEX, HDEL and then loaded via replication.
 # For more information plz refer to the issue on gh:
 # https://github.com/dragonflydb/dragonfly/issues/3504
@@ -744,7 +744,7 @@ async def test_replicaof_inside_multi(df_factory):
     for result in asyncio.as_completed(replication_commands, timeout=80):
         num_successes += await result
 
-    logging.info(f"succeses: {num_successes}")
+    logging.info(f"success: {num_successes}")
     assert MULTI_COMMANDS_TO_ISSUE == num_successes
 
 

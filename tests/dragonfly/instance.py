@@ -251,7 +251,7 @@ class DflyInstance:
             # We can't really synchronize here because SIGTERM and SIGKILL do not block even if
             # sigaction explicitly blocks other incoming signals until it handles SIGUSR1.
             # Even worse, on SIGTERM and SIGKILL none of the handlers registered via sigaction
-            # are guranteed to run
+            # are guaranteed to run
             time.sleep(5)
             logging.debug(f"Unable to kill the process on port {self._port}")
             logging.debug("INFO LOGS of DF are:")

@@ -148,7 +148,7 @@ struct BaseSortIndex : BaseIndex {
 };
 
 /* Used in iterators of inverse indices.
-   It is used to mark iterators that can be seeked to doc id that is greater than or equal to
+   It is used to mark iterators that can be sought to doc id that is greater than or equal to
    the specified value (method name is SeekGE(DocId min_doc_id)).
    This is used to optimize merging of results from different indices.
    See index_result.h for more details. */

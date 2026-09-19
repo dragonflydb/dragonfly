@@ -131,7 +131,7 @@ GenericError Replica::Start() {
     return ec;
   };
 
-  // 0. Set basic error handler that is reponsible for cleaning up on errors.
+  // 0. Set basic error handler that is responsible for cleaning up on errors.
   // Can return an error only if replication was cancelled immediately.
   auto err = exec_st_.SwitchErrorHandler([this](const auto& ge) { this->DefaultErrorHandler(ge); });
   RETURN_ON_GENERIC_ERR(check_connection_error(err, "replication cancelled"));
@@ -173,7 +173,7 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
 
   proactor_->Await([this] {
     state_mask_ = 0;               // Specifically ~R_ENABLED.
-    exec_st_.ReportCancelError();  // Context is fully resposible for cleanup.
+    exec_st_.ReportCancelError();  // Context is fully responsible for cleanup.
   });
 
   // Make sure the replica fully stopped and did all cleanup,
@@ -550,7 +550,7 @@ error_code Replica::InitiatePSync() {
   state_mask_ |= R_SYNC_OK;
 
   // There is a data race condition in Redis-master code, where "ACK 0" handler may be
-  // triggered before Redis is ready to transition to the streaming state and it silenty ignores
+  // triggered before Redis is ready to transition to the streaming state and it silently ignores
   // "ACK 0". We reduce the chance it happens with this delay.
   ThisFiber::SleepFor(50ms);
 
@@ -1284,7 +1284,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
   // Check if we woke up due to cancellation.
   if (!cntx->IsRunning())
     return false;
-  // Global command will be executed only from one flow fiber. This ensure corectness of data in
+  // Global command will be executed only from one flow fiber. This ensure correctness of data in
   // replica.
   bool execution_res = true;
   if (inserted_by_me) {
@@ -1293,7 +1293,7 @@ bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx
     facade::Connection::LogReplicaCommand(tx_data.command, tx_data.dbid);
     execution_res = executor_->Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
   }
-  // Wait until exection is done, to make sure we done execute next commands while the global is
+  // Wait until execution is done, to make sure we done execute next commands while the global is
   // executed.
   multi_shard_data.barrier.Wait();
   // Check if we woke up due to cancellation.

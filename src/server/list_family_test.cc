@@ -624,7 +624,7 @@ TEST_F(ListFamilyTest, LPos) {
 }
 
 TEST_F(ListFamilyTest, RPopLPush) {
-  // src and dest are diffrent keys
+  // src and dest are different keys
   auto resp = Run({"rpush", kKey1, "1", "a", "b", "1", "2", "3", "4"});
   ASSERT_THAT(resp, IntArg(7));
 
@@ -1147,7 +1147,7 @@ TEST_F(ListFamilyTest, BLMoveWaves) {
   EXPECT_THAT(res.GetVec(), UnorderedElementsAreArray(values));
 }
 
-// Move value back and forth between two lists, verfiy that atomic lookup of states catches it only
+// Move value back and forth between two lists, verify that atomic lookup of states catches it only
 // in one of two possible states
 TEST_F(ListFamilyTest, BLMovePendulum) {
   GTEST_SKIP() << "Blocking commands don't respect transactional ordering after waking up";

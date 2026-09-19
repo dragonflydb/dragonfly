@@ -14,12 +14,12 @@ HOST="localhost"
 PORT=$HEALTHCHECK_PORT
 
 if [ -z "$HEALTHCHECK_PORT" ]; then
-  # try unpriveleged version first. This should cover cases when the container is running
+  # try unprivileged version first. This should cover cases when the container is running
   # without root, for example:
   # docker run  --group-add 999  --cap-drop=ALL --user 999 docker.dragonflydb.io/dragonflydb/dragonfly
   DF_NET=$(netstat -tlnp | grep "/dragonfly")
   if [ -z "$DF_NET" ]; then
-    # if we failed, then lets try the priveleged version. is triggerred by the regular command:
+    # if we failed, then lets try the privileged version. is triggered by the regular command:
     # docker run docker.dragonflydb.io/dragonflydb/dragonfly
     DF_NET=$(su dfly -c "netstat -tlnp" | grep "/dragonfly")
   fi

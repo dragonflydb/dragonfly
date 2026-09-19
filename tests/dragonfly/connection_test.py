@@ -553,7 +553,7 @@ async def test_pubsub_subcommand_for_numsub(async_client: aioredis.Redis):
             await s.subscribe(chan)
         else:
             await s.unsubscribe(chan)
-        # Wait for PUSH message to be parsed to make sure upadte was performed
+        # Wait for PUSH message to be parsed to make sure update was performed
         await s.get_message(timeout=0.1)
 
     # Subscribe 5 times to chan1
@@ -1329,7 +1329,7 @@ async def test_pipeline_batching_while_migrating(
         while not reply.strip().endswith("51"):
             reply = (await reader.read(520)).decode()
 
-    # Make sure we recived all replies
+    # Make sure we received all replies
     await asyncio.wait_for(read(), timeout=2.0)
 
     writer.close()
@@ -2142,7 +2142,7 @@ async def test_tls_info(with_ca_tls_server_args, with_ca_tls_client_args, df_fac
 async def test_squashed_pipeline_eval(async_client: aioredis.Redis):
     p = async_client.pipeline(transaction=False)
     for _ in range(5):
-        # Deliberately lowcase EVAL to test that it is not squashed
+        # Deliberately lowercase EVAL to test that it is not squashed
         p.execute_command("eval", "return redis.call('set', KEYS[1], 'value')", 1, "key")
     res = await p.execute()
     assert res == ["OK"] * 5

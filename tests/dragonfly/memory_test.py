@@ -174,7 +174,7 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
     await rss_compare(False)
     await asyncio.sleep(0.5)  # Wait for another RSS heartbeat update in Dragonfly
 
-    # new client create shoud not fail after memory usage decrease
+    # new client create should not fail after memory usage decrease
     client = df_server.client()
     await client.execute_command("set x y")
 
@@ -189,7 +189,7 @@ async def test_rss_oom_ratio(df_factory: DflyInstanceFactory, admin_port):
 async def test_eval_with_oom(df_factory: DflyInstanceFactory):
     """
     Test running eval commands when dragonfly returns OOM on write commands and check rss memory
-    This test was writen after detecting memory leak in script runs on OOM state
+    This test was written after detecting memory leak in script runs on OOM state
     """
     df_server = df_factory.create()
     df_server.start()
@@ -226,7 +226,7 @@ async def test_eval_with_oom(df_factory: DflyInstanceFactory):
 
 
 @pytest.mark.parametrize("heartbeat_rss_eviction", [True, False])
-async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbeat_rss_eviction):
+async def test_eviction_on_rss_threshold(df_factory: DflyInstanceFactory, heartbeat_rss_eviction):
     max_memory = 1024 * 1024**2  # 1024 mb
 
     df_server = df_factory.create(
@@ -261,7 +261,7 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
 
     memory_info_before = await client.info("memory")
 
-    # This will increase only RSS memory above treshold
+    # This will increase only RSS memory above threshold
     p = client.pipeline()
     for _ in range(150):
         p.execute_command("LRANGE list_1 0 -1")
@@ -278,7 +278,7 @@ async def test_eviction_on_rss_treshold(df_factory: DflyInstanceFactory, heartbe
         assert memory_info_after["used_memory"] < memory_info_before["used_memory"]
         assert stats_info_after["evicted_keys"]
     else:
-        # If heartbeat rss eviction is disabled there should be no chage
+        # If heartbeat rss eviction is disabled there should be no change
         assert memory_info_after["used_memory"] == memory_info_before["used_memory"]
         assert stats_info_after["evicted_keys"] == 0
 

@@ -400,12 +400,12 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
   }
 
   // Migration finalization has to be done via client pause because commands need to
-  // be blocked on coordinator level to avoid intializing transactions with stale cluster slot info
+  // be blocked on coordinator level to avoid initializing transactions with stale cluster slot info
   // TODO implement blocking on migrated slots only
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
   auto pause_fb_opt =
-      dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
+      dfly::Pause(server_family_->GetNonPrivilegedListeners(), &namespaces->GetDefaultNamespace(),
                   nullptr, ClientPause::ALL, is_pause_in_progress);
 
   if (!pause_fb_opt) {
@@ -442,7 +442,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     const absl::Time now = absl::Now();
     const int64_t passed_ms = absl::ToInt64Milliseconds(now - start);
     if (passed_ms >= ack_timeout_ms) {
-      LOG(WARNING) << "Timeout fot ACK " << cf_->MyID() << " : " << migration_info_.node_info.id
+      LOG(WARNING) << "Timeout for ACK " << cf_->MyID() << " : " << migration_info_.node_info.id
                    << " attempt " << attempt;
       return false;
     }

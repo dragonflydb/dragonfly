@@ -27,7 +27,7 @@ class IncomingSlotMigration {
   void StartFlow(uint32_t shard, util::FiberSocketBase* source);
 
   // Waits until all flows got FIN opcode.
-  // returns true if we joined false if timeout is readed
+  // returns true if we joined false if timeout is reached
   // After Join we still can get data due to error situation
   [[nodiscard]] bool Join(long attempt);
 

@@ -599,9 +599,9 @@ TEST_F(PureDiskTSTest, BackgroundOffloading) {
   EXPECT_EQ(metrics.tiered_stats.allocated_bytes, kNum * 4096);
 }
 
-// Verify correctness of our offloading startegy, offloading values only after second access.
+// Verify correctness of our offloading strategy, offloading values only after second access.
 TEST_F(PureDiskTSTest, OffloadingStrategy) {
-  // Create value and wait to be offlaoded
+  // Create value and wait to be offloaded
   string value = BuildString(3000);
   Run({"set", "key", value});
   ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
@@ -620,7 +620,7 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
     EXPECT_EQ(metrics.tiered_stats.total_fetches, 2 * i - 1);
     EXPECT_EQ(metrics.tiered_stats.total_uploads, i - 1);
 
-    // But on second read upload should happend at the end of chain due to two touches
+    // But on second read upload should happen at the end of chain due to two touches
     Run({"get", "key"});
     ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_uploads == i; });
     metrics = GetMetrics();
@@ -805,7 +805,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 1);
   UpdateFromFlags();
 
-  // issue client pause to accumualte SETs
+  // issue client pause to accumulate SETs
   Run({"CLIENT", "PAUSE", "1000"});
 
   string value(4096, 'a');

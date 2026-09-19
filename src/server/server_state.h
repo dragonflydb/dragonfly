@@ -204,7 +204,7 @@ class ServerState {  // public struct - to allow initialization.
   bool AllowInlineScheduling() const;
 
   // Borrow interpreter from interpreter pool, return it with ReturnInterpreter.
-  // Will block if no interpreters are aviable. Use with caution!
+  // Will block if no interpreters are available. Use with caution!
   Interpreter* BorrowInterpreter();
 
   // Return interpreter to internal manager to be re-used.
@@ -300,7 +300,7 @@ class ServerState {  // public struct - to allow initialization.
   };
   void DecommitMemory(uint8_t flags);
 
-  void UpdateFromFlags();                                 // Update configration from flags
+  void UpdateFromFlags();                                 // Update configuration from flags
   static std::vector<std::string> GetMutableFlagNames();  // Dependencies of UpdateFromFlags
 
   // Exec descriptor frequency count for this thread.

@@ -70,7 +70,7 @@ class SmallBins {
   // Enqueue key/value pair for stash. Returns page to be stashed if it filled up.
   std::optional<FilledBin> Stash(DbIndex dbid, std::string_view key, std::string_view value);
 
-  // Report that a stash succeeeded. Returns list of stored keys with calculated value locations.
+  // Report that a stash succeeded. Returns list of stored keys with calculated value locations.
   KeySegmentList ReportStashed(BinId id, DiskSegment segment);
 
   // Report that a stash was aborted. Returns list of keys that the entry contained.

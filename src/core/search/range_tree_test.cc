@@ -615,7 +615,7 @@ TEST_F(BuilderTest, BuilderUpdates) {
 }
 
 // Test tree doesn't create unnecessary nodes after initialization
-TEST_F(RangeTreeTest, DiscreteIntialization) {
+TEST_F(RangeTreeTest, DiscreteInitialization) {
   RangeTree tree{PMR_NS::get_default_resource(), 4};
   RangeTree::Builder builder;
 

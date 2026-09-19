@@ -403,11 +403,11 @@ func NewClient(w *FileWorker, pace bool, listenerType uint8) *ClientWorker {
 		// MAIN_RESP and ADMIN_RESP both speak RESP — they share -host. Replaying
 		// admin-listener traffic against a non-admin port may lose privileged
 		// commands; the caller is expected to point -host at the appropriate port.
-		client.redis = redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIndentity: true})
+		client.redis = redis.NewClient(&redis.Options{Addr: *fHost, PoolSize: 1, DisableIdentity: true})
 		client.pipe = client.redis.Pipeline()
 		// -compare-host only makes sense for the main-listener path.
 		if listenerType == ListenerMainRESP && *fCompareHost != "" {
-			client.compare = redis.NewClient(&redis.Options{Addr: *fCompareHost, PoolSize: 1, DisableIndentity: true})
+			client.compare = redis.NewClient(&redis.Options{Addr: *fCompareHost, PoolSize: 1, DisableIdentity: true})
 			client.comparePipe = client.compare.Pipeline()
 		}
 	}

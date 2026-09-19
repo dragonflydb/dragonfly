@@ -444,7 +444,7 @@ RespExpr BaseFamilyTest::RunPrivileged(std::initializer_list<const std::string_v
   conn_wrapper->conn()->SetPrivileged(true);
   auto res = Run(id, ArgSlice{list.begin(), list.size()});
   // After running the command set the connection as non admin connection
-  // because the connction is returned to the poll. This way the next call to Run from the same
+  // because the connection is returned to the poll. This way the next call to Run from the same
   // thread will not have the connection set as admin.
   conn_wrapper->conn()->SetPrivileged(false);
   return res;

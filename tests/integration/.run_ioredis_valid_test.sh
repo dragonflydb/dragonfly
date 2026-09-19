@@ -20,7 +20,7 @@
 # and https://github.com/dragonflydb/dragonfly/issues/458
 
 
-# The follwing tests would pass once we support script flush command:
+# The following tests would pass once we support script flush command:
 # does not fallback to EVAL in manual transaction
 # does not fallback to EVAL in regular
 # should reload scripts on redis restart (reconnect)"

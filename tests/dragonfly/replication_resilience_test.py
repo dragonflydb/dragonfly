@@ -44,7 +44,7 @@ DISCONNECT_NORMAL_STABLE_SYNC = 2
 """
 Test disconnecting replicas during different phases while constantly streaming changes to master.
 
-This test is targeted at the master cancellation mechanism that should qickly stop operations for a
+This test is targeted at the master cancellation mechanism that should quickly stop operations for a
 disconnected replica.
 
 Three types are tested:
@@ -71,14 +71,14 @@ disconnect_cases = [
 ]
 
 
-@pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disonnect, n_keys", disconnect_cases)
+@pytest.mark.parametrize("t_master, t_crash_fs, t_crash_ss, t_disconnect, n_keys", disconnect_cases)
 async def test_disconnect_replica(
     df_factory: DflyInstanceFactory,
     df_seeder_factory,
     t_master,
     t_crash_fs,
     t_crash_ss,
-    t_disonnect,
+    t_disconnect,
     n_keys,
 ):
     master = df_factory.create(
@@ -93,7 +93,7 @@ async def test_disconnect_replica(
             chain(
                 zip(t_crash_fs, repeat(DISCONNECT_CRASH_FULL_SYNC)),
                 zip(t_crash_ss, repeat(DISCONNECT_CRASH_STABLE_SYNC)),
-                zip(t_disonnect, repeat(DISCONNECT_NORMAL_STABLE_SYNC)),
+                zip(t_disconnect, repeat(DISCONNECT_NORMAL_STABLE_SYNC)),
             )
         )
     ]
@@ -195,7 +195,7 @@ Three types are tested:
 # 1. Number of master threads
 # 2. Number of threads for each replica
 # 3. Number of times a random crash happens
-# 4. Number of keys transferred (the more, the higher the propability to not miss full sync)
+# 4. Number of keys transferred (the more, the higher the probability to not miss full sync)
 master_crash_cases = [
     (6, [6], 3, 2_000),
     (4, [4, 4, 4], 3, 2_000),
@@ -338,7 +338,7 @@ async def test_cancel_replication_immediately(df_factory, df_seeder_factory: Dfl
     for result in asyncio.as_completed(replication_commands, timeout=80):
         num_successes += await result
 
-    logging.info(f"succeses: {num_successes}")
+    logging.info(f"success: {num_successes}")
     assert COMMANDS_TO_ISSUE == num_successes
 
     await wait_available_async(c_replica)
@@ -518,11 +518,11 @@ async def test_take_over_read_commands(df_factory, master_threads, replica_threa
             res = await client.execute_command("GET foo")
             assert res == "bar"
 
-    promt_task = asyncio.create_task(prompt())
+    prompt_task = asyncio.create_task(prompt())
     await c_replica.execute_command("REPLTAKEOVER 5")
 
     assert await c_replica.execute_command("role") == master_role_reply([])
-    await promt_task
+    await prompt_task
 
 
 async def test_take_over_timeout(df_factory, df_seeder_factory):
@@ -698,7 +698,7 @@ async def test_replicaof_reject_on_load(df_factory, df_seeder_factory):
     # If this fails adjust load of DEBUG POPULATE above.
     await check_replica_isloading()
 
-    # Check replica of not alowed while loading snapshot
+    # Check replica of not allowed while loading snapshot
     # Keep in mind that if the exception has not been raised, it doesn't mean
     # that there is a bug because it could be the case that while executing
     # INFO PERSISTENCE df is in loading state but when we call REPLICAOF df

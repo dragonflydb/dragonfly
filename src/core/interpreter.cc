@@ -54,7 +54,7 @@ struct LuaGcInc {
 using LuaGcFlag = std::variant<std::monostate, LuaGcGen, LuaGcInc>;
 
 ABSL_FLAG(LuaGcFlag, luagc, {},
-          "Specifies Lua garabage collector preferences. By default used default lua GC parameters."
+          "Specifies Lua garbage collector preferences. By default used default lua GC parameters."
           "Format should be 'inc/200/100/13' or 'gen/20/100' where 'inc' and 'gen' are types of "
           "GC, numbers are parameters."
           "For more information check https://www.lua.org/manual/5.4/manual.html#2.5");
@@ -1018,7 +1018,7 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   // We want to detect `redis.call` expressions with unused return values, i.e. they are a
   // standalone statement, not part of a expression, condition, function call or assignment.
   //
-  // We search for all `redis.(p)call` statements, that are preceeded on the same line by
+  // We search for all `redis.(p)call` statements, that are preceded on the same line by
   // - `do` or `then` -> first statement in a new block, certainly unused value
   // - no tokens      -> we need to check the previous line, if its part of a multi-line expression.
   //
@@ -1148,7 +1148,7 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   for (auto pos : targets)
     body.insert(pos, "a");
 
-  VLOG(1) << "Detected " << targets.size() << " aync calls in script";
+  VLOG(1) << "Detected " << targets.size() << " async calls in script";
 
   return body;
 }
@@ -1535,7 +1535,7 @@ void InterpreterManager::Return(Interpreter* ir) {
 void InterpreterManager::Reset() {
   lock_guard guard{reset_mu_};
 
-  // we perform double buffer swapping with storage and wait for the old interepreters to be
+  // we perform double buffer swapping with storage and wait for the old interpreters to be
   // returned.
   return_untracked_ = storage_.size() - available_.size();
 

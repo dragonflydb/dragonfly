@@ -712,14 +712,14 @@ async def test_expiry(replication, n_keys=1000):
     res = await c_replica.mget(k for k, _ in gen_test_data(n_keys))
     assert all(v is not None for v in res)
 
-    # Set key different expries times in ms
+    # Set key different expires times in ms
     pipe = c_master.pipeline(transaction=True)
     for k, _ in gen_test_data(n_keys):
         ms = random.randint(20, 500)
         pipe.pexpire(k, ms)
     await pipe.execute()
 
-    # send more traffic for differnt dbs while keys are expired
+    # send more traffic for different dbs while keys are expired
     for i in range(8):
         is_multi = i % 2
         async with aioredis.Redis(port=master.port, db=i) as c_master_db:
@@ -998,7 +998,7 @@ async def _poll_lsn_continuous(client, stop_event):
     max_lag = 0
     while not stop_event.is_set():
         lag = parse_lag(await client.execute_command("info replication"))
-        print(f"continous lag={lag}")
+        print(f"continuous lag={lag}")
         max_lag = max(max_lag, lag)
         await asyncio.sleep(0.01)
     return max_lag
@@ -1015,7 +1015,7 @@ async def test_replication_info(replication, df_seeder_factory, n_keys=2000):
     seeder = df_seeder_factory.create(port=master.port, keys=n_keys, dbcount=2)
     fill_task = asyncio.create_task(seeder.run(target_ops=30000))
 
-    # Start continous lsn sampling in the background
+    # Start continuous lsn sampling in the background
     stop_poll = asyncio.Event()
     poll_task = asyncio.create_task(_poll_lsn_continuous(c_master, stop_poll))
 
@@ -1092,7 +1092,7 @@ async def test_flushall_in_full_sync(df_factory):
 
     await check_all_replicas_finished([c_replica], c_master)
 
-    # Check replica data consisten
+    # Check replica data consistent
     hash1, hash2 = await asyncio.gather(*(SeederV2.capture(c) for c in (c_master, c_replica)))
     assert hash1 == hash2
 
@@ -1112,7 +1112,7 @@ return redis.call('GET', 'WORKS')
 """
 
 WRITE_SCRIPT = """
-redis.call('SET', 'A', 'ErrroR')
+redis.call('SET', 'A', 'ErrorR')
 """
 
 
@@ -1161,11 +1161,11 @@ async def test_client_pause_with_replica(replication, df_seeder_factory):
     seeder.stop()
     await fill_task
     stats_after_pause_finish = await c_master.info("CommandStats")
-    more_exeuted = False
+    more_executed = False
     for cmd, cmd_stats in stats_after_pause_finish.items():
         if "cmdstat_info" != cmd and "cmdstat_replconf" != cmd_stats and stats[cmd] != cmd_stats:
-            more_exeuted = True
-    assert more_exeuted
+            more_executed = True
+    assert more_executed
 
     capture = await seeder.capture(port=master.port)
     assert await seeder.compare(capture, port=replica.port)

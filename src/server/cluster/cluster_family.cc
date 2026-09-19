@@ -246,7 +246,7 @@ void ClusterShardsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builde
 void ClusterFamily::ClusterShards(SinkReplyBuilder* builder, ConnectionContext* cntx) {
   auto config = GetShardInfos(cntx);
   if (config) {
-    // we need to remove hiden replicas
+    // we need to remove hidden replicas
     auto shards_info = config->Unwrap();
     for (auto& shard : shards_info) {
       std::erase_if(shard.replicas, [](const auto& r) { return r.health == NodeHealth::HIDDEN; });
@@ -271,7 +271,7 @@ void ClusterSlotsImpl(ClusterShardInfos config, SinkReplyBuilder* builder) {
 
   unsigned int slot_ranges = 0;
 
-  // we need to remove hiden and fail replicas
+  // we need to remove hidden and fail replicas
   auto shards_info = config.Unwrap();
   for (auto& shard : shards_info) {
     slot_ranges += shard.slot_ranges.Size();
@@ -603,7 +603,7 @@ void ClusterFamily::DflyClusterConfig(CmdArgParser parser, CommandContext* cmd_c
 
     auto* conn = cmd_cntx->conn();
     // Ignore blocked commands because we filter them with CancelBlockingOnThread
-    DispatchTracker tracker{server_family_->GetNonPriviligedListeners(), conn,
+    DispatchTracker tracker{server_family_->GetNonPrivilegedListeners(), conn,
                             true /* ignore paused */, true /* ignore blocked */};
 
     auto blocking_filter = [&new_config](ArgSlice keys) {
@@ -1088,7 +1088,7 @@ void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
     return moved ? OpStatus::KEY_MOVED : OpStatus::OK;
   };
   // we don't need to use DispatchTracker here because for IncomingMingration we don't have
-  // connectionas that should be tracked and for Outgoing migration we do it under Pause
+  // connections that should be tracked and for Outgoing migration we do it under Pause
   server_family_->service().proactor_pool().AwaitFiberOnAll(
       [this, &new_config, &blocking_filter](util::ProactorBase*) {
         server_family_->CancelBlockingOnThread(blocking_filter);

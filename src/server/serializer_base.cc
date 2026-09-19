@@ -205,7 +205,7 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
     db_slice_->FlushChangeToEarlierCallbacks(db_index, DbSlice::Iterator::FromPrime(it),
                                              snapshot_version_);
 
-  // The block above with updating earlier callbacks is not exlusive - check version again
+  // The block above with updating earlier callbacks is not exclusive - check version again
   if (it.GetVersion() >= snapshot_version_)
     return ProcessBucket(db_index, it, on_update);  // for the false path
 

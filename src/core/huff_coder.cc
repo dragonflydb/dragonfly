@@ -47,10 +47,10 @@ bool HuffmanEncoder::Build(const unsigned hist[], unsigned max_symbol, std::stri
   CHECK(!huf_ctable_);
   huf_ctable_.reset(new HUF_CElt[HUF_CTABLE_SIZE_ST(max_symbol)]);
 
-  unique_ptr<uint32_t[]> wrkspace(new uint32_t[HUF_CTABLE_WORKSPACE_SIZE_U32]);
+  unique_ptr<uint32_t[]> workspace(new uint32_t[HUF_CTABLE_WORKSPACE_SIZE_U32]);
 
   size_t num_bits =
-      HUF_buildCTable_wksp(huf_ctable_.get(), hist, max_symbol, 0, wrkspace.get(), kWspSize);
+      HUF_buildCTable_wksp(huf_ctable_.get(), hist, max_symbol, 0, workspace.get(), kWspSize);
   if (HUF_isError(num_bits)) {
     *error_msg = HUF_getErrorName(num_bits);
     huf_ctable_.reset();
@@ -100,11 +100,11 @@ optional<string> HuffmanEncoder::Export() const {
   string res;
   res.resize(kMaxTableSize);
 
-  unique_ptr<uint32_t[]> wrkspace(new uint32_t[HUF_CTABLE_WORKSPACE_SIZE_U32]);
+  unique_ptr<uint32_t[]> workspace(new uint32_t[HUF_CTABLE_WORKSPACE_SIZE_U32]);
 
   // Seems we can reuse the same workspace, its capacity is enough.
   size_t size = HUF_writeCTable_wksp(res.data(), res.size(), huf_ctable_.get(), table_max_symbol_,
-                                     num_bits_, wrkspace.get(), kWspSize);
+                                     num_bits_, workspace.get(), kWspSize);
   if (HUF_isError(size)) {
     LOG(WARNING) << "Failed to export Huffman table: " << HUF_getErrorName(size);
     return nullopt;

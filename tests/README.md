@@ -9,14 +9,14 @@ You can override the location of the binary using `DRAGONFLY_PATH` environment v
 ### Important fixtures
 
 - `df_server` is the default instance that is available for testing. Use the `dfly_args` decorator to change its default arguments.
-- `client` and `async_client` are clients to the default instance. The default instance is re-used accross tests with the same arguments, but each new client flushes the instance.
+- `client` and `async_client` are clients to the default instance. The default instance is re-used across tests with the same arguments, but each new client flushes the instance.
 - `pool` and `async_pool` are client pools that are connected to the default instance
 
 ### Custom arguments
 
 - use `--gdb` to start all instances inside gdb.
 - use `--df arg=val` to pass custom arguments to all dragonfly instances. Can be used multiple times.
-- use `--log-seeder file` to store all single-db commands from the lastest tests seeder inside file.
+- use `--log-seeder file` to store all single-db commands from the latest tests seeder inside file.
 - use `--existing-port` to use an existing instance for tests instead of starting one
 - use `--rand-seed` to set the global random seed. Makes the seeder predictable.
 - use `--repeat <N>` to run a test multiple times.
@@ -70,7 +70,7 @@ To pass custom flags to the Dragonfly executable two class decorators have been 
 
 In the case of `@dfly_multi_test_args` each parameter configuration will create one Dragonfly instance which each test will receive a client to as described in the [above section](#interacting-with-dragonfly)
 
-Parameters can use environmental variables with a formatted string where `"{<VAR>}"` will be replaced with the value of the `<VAR>` environment variable. Due to [current pytest limtations](https://github.com/pytest-dev/pytest/issues/349) fixtures cannot be passed to either of these decorators, this is currently the provided way to pass the temporary directory path in a CLI parameter.
+Parameters can use environmental variables with a formatted string where `"{<VAR>}"` will be replaced with the value of the `<VAR>` environment variable. Due to [current pytest limitations](https://github.com/pytest-dev/pytest/issues/349) fixtures cannot be passed to either of these decorators, this is currently the provided way to pass the temporary directory path in a CLI parameter.
 
 ### Test Examples
 - **[snapshot_test](./dragonfly/snapshot_test.py)**: Example test using `@dfly_args`, environment variables and pre-test setup

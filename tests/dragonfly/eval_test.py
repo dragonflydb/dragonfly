@@ -118,7 +118,7 @@ async def test_django_cacheops_script(async_client, num_keys=500):
         fields = set.union(*(set(part.keys()) for part in fields))
         assert schema == fields
 
-    # Check revese mapping is correct
+    # Check reverse mapping is correct
     for k, vs in data:
         assert await async_client.exists(k)
         for table, fields in DJANGO_CACHEOPS_SCHEMA(vs).items():

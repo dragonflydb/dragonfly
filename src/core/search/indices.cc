@@ -1013,7 +1013,7 @@ std::vector<DocId> GeoIndex::RadiusSearch(double lon, double lat, double radius,
   boost::geometry::buffer(p, buffer_polygon, distance_strategy, side_strategy, join_strategy,
                           end_strategy, point_strategy);
 
-  // Create bouding box around polygon to include all possible points
+  // Create bounding box around polygon to include all possible points
   boost::geometry::model::box<point> box;
   boost::geometry::envelope(buffer_polygon, box);
 

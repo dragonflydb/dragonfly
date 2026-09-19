@@ -388,7 +388,7 @@ class ShardDocIndex {
     search::StatelessVector<DocId> free_ids_;
     DocId last_id_ = 0;
   };
-  // Index must be rebuilt at least once after intialization
+  // Index must be rebuilt at least once after initialization
   explicit ShardDocIndex(std::shared_ptr<const DocIndex> index, unsigned* hash_index_count);
 
   // Possibly blocking to stop indexing job

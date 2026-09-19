@@ -341,7 +341,7 @@ struct CmdArgParser {
 
   // Asserts that any error was consumed.
   ~CmdArgParser() {
-    assert(!error_ && "Parsing error occured but not checked");
+    assert(!error_ && "Parsing error occurred but not checked");
   }
 
   // Returns the arg `ahead` positions past the cursor without consuming it (empty if out of range).

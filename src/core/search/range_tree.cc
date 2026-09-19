@@ -65,7 +65,7 @@ template <typename MapT> auto FindRangeBlockImpl(MapT& entries, double value) {
   auto it = entries.lower_bound(value);
   if (it != entries.begin() && (it == entries.end() || it->first > value)) {
     // TODO: remove this, we do log N here
-    // we can use negative left bouding to find the block
+    // we can use negative left bounding to find the block
     --it;  // Move to the block that contains the value
   }
 

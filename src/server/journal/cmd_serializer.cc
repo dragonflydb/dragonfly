@@ -23,7 +23,7 @@ class CommandAggregator {
   using WriteCmdCallback = std::function<void(absl::Span<const string_view>)>;
 
   CommandAggregator(string_view key, WriteCmdCallback cb, size_t max_agg_bytes)
-      : key_(key), cb_(std::move(cb)), max_aggragation_bytes_(max_agg_bytes) {
+      : key_(key), cb_(std::move(cb)), max_aggregation_bytes_(max_agg_bytes) {
   }
 
   ~CommandAggregator() {
@@ -37,7 +37,7 @@ class CommandAggregator {
     agg_bytes_ += arg.size();
     members_.push_back(std::move(arg));
 
-    if (commit_mode != CommitMode::kNoCommit && agg_bytes_ >= max_aggragation_bytes_) {
+    if (commit_mode != CommitMode::kNoCommit && agg_bytes_ >= max_aggregation_bytes_) {
       CommitPending();
       return true;
     }
@@ -66,7 +66,7 @@ class CommandAggregator {
   vector<string> members_;
   absl::InlinedVector<string_view, 5> args_;
   size_t agg_bytes_ = 0;
-  size_t max_aggragation_bytes_;
+  size_t max_aggregation_bytes_;
 };
 
 }  // namespace

@@ -87,7 +87,7 @@ class AsyncWorker:
 
 class AsyncWorkerPool:
     """
-    Mangaes worker pool to send commands in parallel
+    Manages worker pool to send commands in parallel
     Maintains synchronous order for commands with the same sync_id
     """
     def __init__(self, redis_client, num_workers) -> None:
@@ -187,7 +187,7 @@ def main():
     parser = argparse.ArgumentParser(description='Cache Logs Player')
     parser.add_argument('-u', '--uri', type=str, default='localhost:6379', help='Redis server URI')
     parser.add_argument('-f', '--csv_file', type=str, default='/home/ari/Downloads/cluster017.csv', help='Redis server URI')
-    parser.add_argument('--num_workers', type=int, default=100, help='Maximum number of workers sending commands in parllel')
+    parser.add_argument('--num_workers', type=int, default=100, help='Maximum number of workers sending commands in parallel')
 
     args = parser.parse_args()
 

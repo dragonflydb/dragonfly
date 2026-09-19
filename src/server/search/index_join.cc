@@ -97,7 +97,7 @@ Vector<Vector<Key>> JoinAllIndexes(
   const auto& first_index_entries = indexes_entries[0];
 
   /* Store current result of joins
-     Each entry is vector of indexes, that referce to one key in the index
+     Each entry is vector of indexes, that reference to one key in the index
      For example, {1, 0, 4} means that key with index 1 in the first index,
      key with index 0 in the second index and key with index 4 in the third index were joined to
      single entry. */

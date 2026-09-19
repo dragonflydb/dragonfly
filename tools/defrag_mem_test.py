@@ -15,7 +15,7 @@ defrag_mem_test.py -k 8000000 -v 645
 This program would try to re-create the issue with memory defragmentation.
 See issue number 448 for more details.
 To run this:
-    You can just execute this from the command line without any arguemnts.
+    You can just execute this from the command line without any arguments.
     Or you can run with --help to see the options.
     The defaults are:
     number of keys: 800,000
@@ -67,9 +67,9 @@ async def handle_defrag_stats(connection, prev):
 async def memory_stats(connection):
     print("--------------------------------------------------------------")
     info = await run_cmd(connection, "info", "memory")
-    # print(f"memory commited: {info['comitted_memory']:,}")
+    # print(f"memory committed: {info['committed_memory']:,}")
     print(f"memory used: {info['used_memory']:,}")
-    # print(f"memory usage ratio: {info['comitted_memory']/info['used_memory']:.2f}")
+    # print(f"memory usage ratio: {info['committed_memory']/info['used_memory']:.2f}")
     print("--------------------------------------------------------------")
 
 

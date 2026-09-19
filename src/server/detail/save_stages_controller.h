@@ -82,7 +82,7 @@ class RdbSnapshot {
 struct SaveStagesController : public SaveStagesInputs {
   explicit SaveStagesController(SaveStagesInputs&& input);
   // Objects of this class are used concurrently. Call this function
-  // in a mutually exlusive context to avoid data races.
+  // in a mutually exclusive context to avoid data races.
   // Also call this function before any call to `WaitAllSnapshots`
   // Returns empty optional on success and SaveInfo on failure
   std::optional<SaveInfo> Init();
@@ -111,7 +111,7 @@ struct SaveStagesController : public SaveStagesInputs {
 
   // Start saving a dfs file on shard
   void SaveDfsSingle(EngineShard* shard, const std::string& snapshot_id);
-  void SaveSnashot(EngineShard* shard);
+  void SaveSnapshot(EngineShard* shard);
   void WaitSnapshotInShard(EngineShard* shard);
 
   // Save a single rdb file

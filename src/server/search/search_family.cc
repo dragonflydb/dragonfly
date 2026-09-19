@@ -88,7 +88,7 @@ string IndexNotFoundMsg(string_view index_name) {
 }
 
 // Send error from parser or result
-// Returns false if no errors occured
+// Returns false if no errors occurred
 template <typename T>
 bool SendErrorIfOccurred(const ParseResult<T>& result, CmdArgParser* parser,
                          CommandContext* cmd_cntx) {
@@ -982,7 +982,7 @@ io::Result<PreprocessedJoinData, ErrorReply> PreprocessDataForJoin(std::string_v
   }
 
   // Collect fields needed for sorting
-  // Max option will be temprorary ignored
+  // Max option will be temporary ignored
   if (params.join_agg_params.sort) {
     for (const auto& sort_field : params.join_agg_params.sort.value().fields) {
       auto [index_alias, field_name] = Split(sort_field.first, '.');

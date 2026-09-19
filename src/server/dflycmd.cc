@@ -60,7 +60,7 @@ std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
     case DflyCmd::SyncState::CANCELLED:
       return "cancelled";
   }
-  DCHECK(false) << "Unspported state " << int(sync_state);
+  DCHECK(false) << "Unsupported state " << int(sync_state);
   return "unsupported";
 }
 
@@ -545,7 +545,7 @@ void DflyCmd::TakeOver(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // We need to await for all dispatches to finish: Otherwise a transaction might be scheduled
   // after this function exits but before the actual shutdown.
-  facade::DispatchTracker tracker{sf_->GetNonPriviligedListeners(), cmd_cntx->conn(), false, false};
+  facade::DispatchTracker tracker{sf_->GetNonPrivilegedListeners(), cmd_cntx->conn(), false, false};
   shard_set->pool()->AwaitFiberOnAll([&](unsigned index, auto* pb) {
     sf_->CancelBlockingOnThread();
     tracker.TrackOnThread();

@@ -44,7 +44,7 @@ async def test_cluster_sharded_pub_sub(df_factory: DflyInstanceFactory):
     consumer.ssubscribe("kostas")
 
     await c_nodes[0].execute_command("SPUBLISH kostas hello")
-    # We need to sleep cause we use DispatchBrief internally. Otherwise we can't really gurantee
+    # We need to sleep cause we use DispatchBrief internally. Otherwise we can't really guarantee
     # that the client received the message
     await asyncio.sleep(2)
 

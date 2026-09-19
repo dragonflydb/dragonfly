@@ -364,7 +364,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   // bind any 'random' available port. The way to do that is to call
   // bind with the argument port 0. However we can't expose this functionality
   // as is to our users: Since giving --port=0 to redis DISABLES the network
-  // interface that would break users' existing configurations in potentionally
+  // interface that would break users' existing configurations in potentially
   // unsafe ways. For that reason the user's --port=-1 means to us 'bind port 0'.
   if (port == -1) {
     port = 0;
@@ -1190,7 +1190,7 @@ Usage: dragonfly [FLAGS]
 
   // Initialize mi_malloc options
   // export MIMALLOC_VERBOSE=1 to see the options before the override.
-  // _default functions override the default options vaues but if the options were set
+  // _default functions override the default options values but if the options were set
   // via the environment variables, they will not be overridden.
   mi_option_set_enabled_default(mi_option_show_errors, true);
   mi_option_set_default(mi_option_purge_delay, 0);

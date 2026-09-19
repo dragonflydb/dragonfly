@@ -121,7 +121,7 @@ class ExecutionState {
   GenericError GetError() const;
 
   // Report an error by submitting arguments for GenericError.
-  // If this is the first error that occured, then the error handler is run
+  // If this is the first error that occurred, then the error handler is run
   // and the context state set to ERROR.
   // If the state is CANCELLED does nothing
   template <typename... T> GenericError ReportError(T&&... ts) {

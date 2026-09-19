@@ -60,7 +60,7 @@ if (WITH_TIERING)
   helio_cxx_test(tiered_storage_test dfly_test_lib LABELS DFLY)
 endif()
 
-# Include cluster sources definitons (not separate target for now)
+# Include cluster sources definitions (not separate target for now)
 add_subdirectory(cluster)
 if (NOT DEFINED DF_CLUSTER_SRCS)
   message(FATAL_ERROR "Cluster source files not exported via DF_CLUSTER_SRCS")

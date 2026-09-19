@@ -321,7 +321,7 @@ bool CompressedSortedSet::Remove(IntType value) {
 void CompressedSortedSet::Merge(CompressedSortedSet&& other) {
   DCHECK_EQ(store_freq_, other.store_freq_);
   DCHECK_EQ(store_positions_, other.store_positions_);
-  // Quadratic compexity in theory, but in practice used only to merge with larger values.
+  // Quadratic complexity in theory, but in practice used only to merge with larger values.
   // Tail insert optimization makes it linear
   for (auto it = other.begin(); it != other.end(); ++it)
     Insert(*it, it.Freq(), it.Positions());

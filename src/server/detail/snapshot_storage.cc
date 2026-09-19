@@ -360,7 +360,7 @@ io::Result<vector<string>, GenericError> FileSnapshotStorage::ExpandFromPath(con
 
   if (!files || files->size() == 0) {
     return nonstd::make_unexpected(GenericError(make_error_code(errc::no_such_file_or_directory),
-                                                "Cound not find DFS shard files"));
+                     "Could not find DFS shard files"));
   }
 
   vector<string> paths;
@@ -523,7 +523,7 @@ io::Result<vector<string>, GenericError> GcsSnapshotStorage::ExpandFromPath(
   if (!paths || paths->empty()) {
     return nonstd::make_unexpected(
         GenericError{std::make_error_code(std::errc::no_such_file_or_directory),
-                     "Cound not find DFS snapshot shard files"});
+                     "Could not find DFS snapshot shard files"});
   }
 
   return *paths;
@@ -690,7 +690,7 @@ io::Result<vector<string>, GenericError> AzureSnapshotStorage::ExpandFromPath(
   if (!paths || paths->empty()) {
     return nonstd::make_unexpected(
         GenericError{std::make_error_code(std::errc::no_such_file_or_directory),
-                     "Cound not find DFS snapshot shard files"});
+                     "Could not find DFS snapshot shard files"});
   }
 
   return *paths;
@@ -790,7 +790,7 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
   auto [bucket, key] = GetBucketPath(path);
   fb2::ProactorBase* proactor = ProactorBase::me();
 
-  // We run S3 operations via a temporary fiber to avoid agressive stack consumption.
+  // We run S3 operations via a temporary fiber to avoid aggressive stack consumption.
   io::Result<std::pair<io::Sink*, uint8_t>, GenericError> result;
   auto fb = proactor->LaunchFiber(
       fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "open_s3_write", [&] {
@@ -890,7 +890,7 @@ io::Result<vector<string>, GenericError> AwsS3SnapshotStorage::ExpandFromPath(
   if (paths.empty()) {
     return nonstd::make_unexpected(
         GenericError{std::make_error_code(std::errc::no_such_file_or_directory),
-                     "Cound not find DFS snapshot shard files"});
+                     "Could not find DFS snapshot shard files"});
   }
 
   return paths;

@@ -167,7 +167,7 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
         StreamUpdatesToAllProactorConnections(string(username), user.AclCommands(), user.Keys(),
                                               user.PubSub(), user.Db());
       }
-      // We evict connections that had their channels reseted
+      // We evict connections that had their channels reset
       else {
         EvictOpenConnectionsOnAllProactors({username});
       }

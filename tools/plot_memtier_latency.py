@@ -62,7 +62,7 @@ def extract_latency_timeseries(data, operation, ignore_last_seconds=3):
     Returns:
         Dictionary with time series data
     """
-    time_serie = data["ALL STATS"][operation]["Time-Serie"]
+    time_series = data["ALL STATS"][operation]["Time-Series"]
 
     times = []
     avg_latencies = []
@@ -74,13 +74,13 @@ def extract_latency_timeseries(data, operation, ignore_last_seconds=3):
     ops_per_sec = []
 
     # Sort time points and determine cutoff
-    sorted_times = sorted(time_serie.keys(), key=lambda x: int(x))
+    sorted_times = sorted(time_series.keys(), key=lambda x: int(x))
     if ignore_last_seconds > 0 and len(sorted_times) > ignore_last_seconds:
         # Remove last N seconds
         sorted_times = sorted_times[:-ignore_last_seconds]
 
     for time_point in sorted_times:
-        interval_data = time_serie[time_point]
+        interval_data = time_series[time_point]
         times.append(int(time_point))
         avg_latencies.append(interval_data.get("Average Latency"))
         p50_latencies.append(interval_data.get("p50.00"))
@@ -108,11 +108,11 @@ def get_latency_operations(all_stats):
     """Return operations with latency time-series samples."""
     operations = []
     for key, op_stats in all_stats.items():
-        if key == "Runtime" or not isinstance(op_stats, dict) or "Time-Serie" not in op_stats:
+        if key == "Runtime" or not isinstance(op_stats, dict) or "Time-Series" not in op_stats:
             continue
 
-        time_serie = op_stats["Time-Serie"]
-        if any("Average Latency" in interval for interval in time_serie.values()):
+        time_series = op_stats["Time-Series"]
+        if any("Average Latency" in interval for interval in time_series.values()):
             operations.append(key)
 
     return operations

@@ -56,7 +56,7 @@ template <typename V> struct RaxTreeMap {
 
     SeekIterator(rax* tree, const char* op, std::string_view key) {
       raxStart(&it_, tree);
-      if (raxSeek(&it_, op, to_key_ptr(key), key.size())) {  // Successfuly seeked
+      if (raxSeek(&it_, op, to_key_ptr(key), key.size())) {  // Successfully sought
         operator++();
       } else {
         InvalidateIterator();

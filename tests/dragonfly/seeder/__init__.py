@@ -110,7 +110,7 @@ class DebugPopulateSeeder(SeederBase):
             (dtype, f"k-s{self.uid}u{i}-") for i, dtype in enumerate(self.types * self.samples)
         ]
 
-        # Handle samples in chuncks of 24 to not overload client pool and instance
+        # Handle samples in chunks of 24 to not overload client pool and instance
         chunk_size = 24
         for i in range(0, len(samples), chunk_size):
             await asyncio.gather(

@@ -50,7 +50,7 @@ SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& block_list
    3) both parts have approximately the same number of elements
 
    To achieve this, we first split entries into three parts: < median_value (left blocklist), ==
-   median_value (median_entries), > median_value (righ blocklist). Then we add == median_value part
+   median_value (median_entries), > median_value (right blocklist). Then we add == median_value part
    to the smaller of the two parts (< or >). This guarantees that both parts have approximately the
    same number of elements */
   BlockList<SortedVector<Entry>> left(block_list.blocks_.get_allocator().resource(),
@@ -315,7 +315,7 @@ template <typename T> bool SortedVector<T>::Remove(T t) {
 }
 
 template <typename T> void SortedVector<T>::Merge(SortedVector&& other) {
-  // NLog compexity in theory, but in practice used only to merge with larger values.
+  // NLog complexity in theory, but in practice used only to merge with larger values.
   // Tail insert optimization makes it linear
   entries_.reserve(entries_.size() + other.entries_.size());
   for (T& t : other.entries_)

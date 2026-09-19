@@ -40,10 +40,10 @@ ABSL_DECLARE_FLAG(std::string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(std::string, tls_ca_cert_dir);
 
 ABSL_FLAG(uint32_t, tcp_keepalive, 300,
-          "the period in seconds of inactivity after which keep-alives are triggerred,"
+          "the period in seconds of inactivity after which keep-alives are triggered,"
           "the duration until an inactive connection is terminated is twice the specified time");
 ABSL_FLAG(uint32_t, tcp_user_timeout, 0,
-          "the maximum period in milliseconds that transimitted data may stay unacknowledged "
+          "the maximum period in milliseconds that transmitted data may stay unacknowledged "
           "before TCP aborts the connection. 0 means OS default timeout");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);

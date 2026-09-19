@@ -300,7 +300,7 @@ std::optional<BaseAccessor::StringList> JsonAccessor::GetStrings(std::string_vie
   vector<size_t> sizes;
   sizes.reserve(path_res.size());
 
-  // Returns true if json element is convertiable to string
+  // Returns true if json element is convertible to string
   auto add_json_element_to_buf = [&](const JsonType& json) -> bool {
     if (!is_convertible_to_string(json))
       return false;
@@ -400,7 +400,7 @@ std::optional<BaseAccessor::NumsList> JsonAccessor::GetNumbers(string_view activ
   NumsList nums_list;
   nums_list.reserve(path_res.size());
 
-  // Returns true if json element is convertiable to number
+  // Returns true if json element is convertible to number
   auto add_json_element = [&](const JsonType& json) -> bool {
     if (!json.is_number())
       return false;

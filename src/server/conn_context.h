@@ -253,7 +253,7 @@ struct ConnectionState {
   //    >>   SET foo bar
   //    >>   GET brother_foo
   //    >> EXEC
-  //    From this point onwards `foo` and `get` keys are tracked. Same aplies if CACHING YES
+  //    From this point onwards `foo` and `get` keys are tracked. Same applies if CACHING YES
   //    is used within the MULTI/EXEC block.
   //
   // The state machine implements the above rules. We need to track:

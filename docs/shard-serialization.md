@@ -318,7 +318,7 @@ ConsumeJournalChange(item):                  // snapshot.cc
   lock_guard(stream_mu_)
   LOG_IF(DFATAL, serialize_bucket_running_)  // interleaving not yet supported
   serializer_->WriteJournalEntry(item.journal_item.data)
-  ++stats_.jounal_changes
+  ++stats_.journal_changes
 ```
 
 Active only when streaming the journal (replication / migration). It acquires `stream_mu_` so the

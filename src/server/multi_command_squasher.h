@@ -77,7 +77,7 @@ class MultiCommandSquasher {
   // Lazy initialize shard info.
   ShardExecInfo& PrepareShardInfo(ShardId sid);
 
-  // Retrun squash flags
+  // Return squash flags
   SquashResult TrySquash(CmdRef cmd);
 
   // Execute separate non-squashed cmd. Return false if aborting on error.

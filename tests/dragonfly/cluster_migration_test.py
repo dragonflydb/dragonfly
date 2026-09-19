@@ -430,7 +430,7 @@ async def test_keys_expiration_during_migration(df_factory: DflyInstanceFactory)
 
 @pytest.mark.parametrize("migration_first", [False, True])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
-async def test_snapshoting_during_migration(
+async def test_snapshotting_during_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory, migration_first: bool
 ):
     """
@@ -652,20 +652,20 @@ async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_s
     )
     await apply_config(nodes)
 
-    # 3. Wait for migratin finish
+    # 3. Wait for migrating finish
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", timeout=50)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED", timeout=50)
 
     await finalize_migration(nodes, 0, 1, [(16301, 16383)], [(0, 16300)])
 
-    # 4. Start migrating remaind slots from first node to third node
+    # 4. Start migrating remaining slots from first node to third node
     logging.debug("Start second migration")
     nodes[0].migrations.append(
         MigrationInfo("127.0.0.1", nodes[2].instance.admin_port, [(16301, 16383)], nodes[2].id)
     )
     await apply_config(nodes)
 
-    # 5. Wait for migratin finish
+    # 5. Wait for migrating finish
     await wait_for_status(nodes[0].admin_client, nodes[2].id, "FINISHED", timeout=10)
     await wait_for_status(nodes[2].admin_client, nodes[0].id, "FINISHED", timeout=10)
 
@@ -674,7 +674,7 @@ async def test_migration_one_after_another(df_factory: DflyInstanceFactory, df_s
     # 6. Check all data was migrated
     # Using dbsize to check all the data was migrated to the other nodes.
     # Note: we can not use the seeder capture as we migrate the data to 2 different nodes.
-    # TODO: improve the migration conrrectness by running the seeder capture on slot range (requiers changes in capture script).
+    # TODO: improve the migration conrrectness by running the seeder capture on slot range (requires changes in capture script).
     dbsize_node1 = await nodes[1].client.dbsize()
     dbsize_node2 = await nodes[2].client.dbsize()
     assert dbsize_node1 + dbsize_node2 == dbsize_node0
@@ -776,7 +776,7 @@ async def test_migration_rebalance_node(df_factory: DflyInstanceFactory, df_seed
     logging.debug("stop seeding")
     seeder.stop()
     await seed
-    await asyncio.sleep(0.5)  # wait untill all keys with ttl are expired
+    await asyncio.sleep(0.5)  # wait until all keys with ttl are expired
     capture = await seeder.capture_fake_redis()
     assert await seeder.compare(capture, nodes[1].instance.port)
 
@@ -885,17 +885,17 @@ async def _run_tiering_migration(
 
     await apply_config(nodes)
 
-    delete_succeded = 0
+    delete_succeeded = 0
     if delete_keys_count:
         migration_done = False
 
         async def delete_job():
-            nonlocal delete_succeded
+            nonlocal delete_succeeded
             for i in range(delete_keys_count):
                 if migration_done:
                     break
                 try:
-                    delete_succeded += await nodes[0].client.delete(f"key:{i}")
+                    delete_succeeded += await nodes[0].client.delete(f"key:{i}")
                 except Exception:
                     pass
 
@@ -915,7 +915,7 @@ async def _run_tiering_migration(
             assert info["tiered_entries"] == 0
 
     info = await nodes[1].client.info("keyspace")
-    assert info["db0"]["keys"] == keys - delete_succeded
+    assert info["db0"]["keys"] == keys - delete_succeeded
 
 
 @pytest.mark.large

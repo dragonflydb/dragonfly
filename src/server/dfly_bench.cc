@@ -85,7 +85,7 @@ ABSL_FLAG(bool, greet, true,
           "to make sure the connection succeeded");
 ABSL_FLAG(bool, cluster_skip_tags, true,
           "If true, skips tags (compatible with memtier benchmark) in cluster mode, "
-          "othewise adds hash tags to keys");
+          "otherwise adds hash tags to keys");
 ABSL_FLAG(bool, ascii, true, "If true, use ascii characters for values");
 ABSL_FLAG(bool, connect_only, false,
           "If true, will only connect to the server, without sending "
@@ -1277,7 +1277,7 @@ base::Histogram AggregateTimeSeriesSample(const ClientStats& summary, uint64_t s
 void WriteTimeSeriesJson(std::ostream& os, const ClientStats& summary, size_t op_index,
                          uint64_t bucket_count, unsigned indent) {
   WriteIndent(os, indent);
-  os << "\"Time-Serie\": {\n";
+  os << "\"Time-Series\": {\n";
 
   for (uint64_t sec = 0; sec < bucket_count; ++sec) {
     base::Histogram sample;
@@ -1304,7 +1304,7 @@ void WriteTimeSeriesJson(std::ostream& os, const ClientStats& summary, size_t op
 void WriteTotalsTimeSeriesJson(std::ostream& os, const ClientStats& summary, uint64_t bucket_count,
                                unsigned indent) {
   WriteIndent(os, indent);
-  os << "\"Time-Serie\": {\n";
+  os << "\"Time-Series\": {\n";
 
   for (uint64_t sec = 0; sec < bucket_count; ++sec) {
     base::Histogram sample = AggregateTimeSeriesSample(summary, sec);

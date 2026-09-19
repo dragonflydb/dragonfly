@@ -18,7 +18,7 @@ template <typename Container> class BlockList;
 template <typename T> class SortedVector;
 
 /* Split into two blocks, left and right, so that both blocks have approximately the same number
-   of elements. Returns median value of the split. Garantees that median present in the right
+   of elements. Returns median value of the split. Guarantees that median present in the right
    block and not present in the left block. Does not work for empty BlockList. */
 // TODO: Move to RangeTree logic
 SplitResult Split(BlockList<SortedVector<std::pair<DocId, double>>>&& result);
@@ -94,7 +94,7 @@ template <typename Container /* underlying container */> class BlockList {
   }
 
   struct BlockListIterator : public SeekableTag {
-    // To make it work with std container contructors
+    // To make it work with std container constructors
     using iterator_category = std::forward_iterator_tag;
     using difference_type = std::ptrdiff_t;
     using value_type = ElementType;

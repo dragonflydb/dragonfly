@@ -2842,7 +2842,7 @@ void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_c
       if (!candidates->empty()) {
         break;
       }
-      uint64_t cursor = 0;  // scans from the start of the shard after reaching kMaxAttemps
+      uint64_t cursor = 0;  // scans from the start of the shard after reaching kMaxAttempts
       if (i < kMaxAttempts) {
         cursor = prime_table->GetRandomCursor(&local_gen).token();
       }

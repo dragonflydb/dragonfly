@@ -143,7 +143,7 @@ ABSL_FLAG(uint32_t, pause_wait_timeout, 1,
 ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
 ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
 // Disable EC2 metadata by default, or if a users credentials are invalid the
-// AWS client will spent 30s trying to connect to inaccessable EC2 endpoints
+// AWS client will spent 30s trying to connect to inaccessible EC2 endpoints
 // to load the credentials.
 ABSL_FLAG(bool, s3_ec2_metadata, false,
           "whether to load credentials and configuration from EC2 metadata");
@@ -1118,9 +1118,9 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
                                 std::function<bool()> is_pause_in_progress,
                                 std::function<void()> maybe_cleanup) {
   // Track connections and set pause state to be able to wait until all running transactions read
-  // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
+  // the new pause state. Exclude already paused commands from the busy count. Exclude tracking
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
-  // state after waking from blocking so if the trasaction was waken by another running
+  // state after waking from blocking so if the transaction was waken by another running
   //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
@@ -1698,7 +1698,7 @@ std::optional<int> ServerFamily::GetReplicaMasterSocketUnreadBytes() {
   return nullopt;
 }
 
-vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
+vector<facade::Listener*> ServerFamily::GetNonPrivilegedListeners() const {
   std::vector<facade::Listener*> listeners;
   listeners.reserve(listeners.size());
   for (facade::Listener* listener : listeners_) {
@@ -1942,7 +1942,7 @@ GenericError ServerFamily::DoSave(const SaveCmdOptions& save_cmd_opts, Transacti
 bool ServerFamily::TEST_IsSaving() const {
   std::atomic_bool is_saving{false};
   shard_set->pool()->AwaitFiberOnAll([&](auto*) {
-    if (SliceSnapshot::IsSnaphotInProgress())
+    if (SliceSnapshot::IsSnapshotInProgress())
       is_saving.store(true, std::memory_order_relaxed);
   });
   return is_saving.load(std::memory_order_relaxed);
@@ -2145,7 +2145,7 @@ void ServerFamily::ClientUnPauseCmd(facade::ParsedArgs args, CommandContext* cmd
 void ServerFamily::ChangeConnectionAccept(bool accept) {
   DCHECK_NE(accept, accepting_connections_);
   auto h = accept ? &ListenerInterface::resume_accepting : &ListenerInterface::pause_accepting;
-  for (auto* listener : GetNonPriviligedListeners())
+  for (auto* listener : GetNonPrivilegedListeners())
     listener->socket()->proactor()->Await([listener, h]() { (listener->*h)(); });
   accepting_connections_ = accept;
 }
@@ -2652,7 +2652,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
 }
 
 string ServerFamily::FormatInfoMetrics(
-    const Metrics& m, std::string_view section, bool priveleged,
+    const Metrics& m, std::string_view section, bool privileged,
     const std::shared_ptr<const facade::TlsCertInfo>& cert_info) const {
   string info;
   DbStats total;
@@ -2683,7 +2683,7 @@ string ServerFamily::FormatInfoMetrics(
   if (section_enabled("MEMORY", false) || section_enabled("PERSISTENCE", true))
     save_controller = GetSaveController();
 
-  bool show_managed_info = priveleged || !absl::GetFlag(FLAGS_managed_service_info);
+  bool show_managed_info = privileged || !absl::GetFlag(FLAGS_managed_service_info);
 
   // For some reason on some distributions (like Fedora and OpenSuse) each call to append
   // increase the stack usage of this function. So we use the lambda trick to avoid this.
@@ -2932,10 +2932,10 @@ string ServerFamily::FormatInfoMetrics(
     size_t total_snap_keys = 0;
     double perc = 0;
     bool is_saving = false;
-    uint32_t curent_durration_sec = 0;
+    uint32_t current_durration_sec = 0;
     if (save_controller) {
       is_saving = true;
-      curent_durration_sec = save_controller->GetCurrentSaveDuration();
+      current_durration_sec = save_controller->GetCurrentSaveDuration();
       auto res = save_controller->GetCurrentSnapshotProgress();
       if (res.total_keys != 0) {
         current_snap_keys = res.current_keys;
@@ -2960,7 +2960,7 @@ string ServerFamily::FormatInfoMetrics(
     unsigned is_loading = ss && (ss->gstate() == GlobalState::LOADING);
     append("loading", is_loading);
     append("saving", is_saving);
-    append("current_save_duration_sec", curent_durration_sec);
+    append("current_save_duration_sec", current_durration_sec);
 
     for (const auto& k_v : save_info.freq_map) {
       append(StrCat("rdb_", k_v.first), k_v.second);
@@ -3058,7 +3058,7 @@ string ServerFamily::FormatInfoMetrics(
                                ",")});
     }
 
-    auto unknown_cmd = service_.UknownCmdMap();
+    auto unknown_cmd = service_.UnknownCmdMap();
 
     append_sorted("cmdstat_", std::move(commands));
     append_sorted("unknown_",
@@ -3235,19 +3235,19 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   std::string info;
-  bool is_priveleged = cmd_cntx->conn()->IsPrivileged();
+  bool is_privileged = cmd_cntx->conn()->IsPrivileged();
   // For multiple requested sections, invalid section names are ignored (not included in the
   // output). The command does not abort or return an error if some sections are invalid. This
   // matches Valkey behavior.
   if (sections.empty()) {  // No sections: default to all sections.
-    info = FormatInfoMetrics(metrics, "", is_priveleged, cmd_cntx->conn()->GetTlsCertInfo());
+    info = FormatInfoMetrics(metrics, "", is_privileged, cmd_cntx->conn()->GetTlsCertInfo());
   } else if (sections.size() == 1) {  // Single section
     info =
-        FormatInfoMetrics(metrics, sections[0], is_priveleged, cmd_cntx->conn()->GetTlsCertInfo());
+        FormatInfoMetrics(metrics, sections[0], is_privileged, cmd_cntx->conn()->GetTlsCertInfo());
   } else {  // Multiple sections: concatenate results for each requested section.
     for (const auto& section : sections) {
       const std::string section_str =
-          FormatInfoMetrics(metrics, section, is_priveleged, cmd_cntx->conn()->GetTlsCertInfo());
+          FormatInfoMetrics(metrics, section, is_privileged, cmd_cntx->conn()->GetTlsCertInfo());
       if (!section_str.empty()) {
         if (!info.empty()) {
           absl::StrAppend(&info, "\r\n", section_str);
@@ -4020,7 +4020,7 @@ void ServerFamily::Module(facade::CmdArgParser parser, CommandContext* cmd_cntx)
 }
 
 void ServerFamily::ClientPauseCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto listeners = GetNonPriviligedListeners();
+  auto listeners = GetNonPrivilegedListeners();
 
   auto timeout = parser.Next<uint64_t>();
   ClientPause pause_state = ClientPause::ALL;

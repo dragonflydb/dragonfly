@@ -1268,7 +1268,7 @@ TEST_F(JsonFamilyTest, Del) {
 
   resp = Run({"JSON.DEL", "json", "$..*"});
 
-  // TODO: legacy jsoncons implementation returns, 8 but in practive it should return 5.
+  // TODO: legacy jsoncons implementation returns, 8 but in practice it should return 5.
   // redis-stack returns 5 as well.
   // Once we drop jsoncons path, we can enforce here equality.
   EXPECT_GE(resp.GetInt(), 5);

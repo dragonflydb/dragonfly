@@ -51,7 +51,7 @@ struct TestDelayDriver {
     }
   };
 
-  Fut Enqeue(unsigned delay_us) {
+  Fut Enqueue(unsigned delay_us) {
     auto tp = std::chrono::steady_clock::now() + std::chrono::microseconds(delay_us);
     Fut future{};
     q_.emplace(tp, future);
@@ -142,7 +142,7 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
       DelayedEntryHandler::deps_.Increment(bucket);
       unsigned delay = absl::Uniform(bg_, params_.delay_lat_us.first, params_.delay_lat_us.second);
       auto de = std::make_unique<TieredDelayedEntry>(0, CompactKey{key},
-                                                     delay_driver_.Enqeue(delay), 0, 0);
+                                                     delay_driver_.Enqueue(delay), 0, 0);
       DelayedEntryHandler::delayed_entries_.emplace(bucket, std::move(de));
       ++delayed_enqueued_;
     } else {
@@ -247,7 +247,7 @@ void TestDriver::Loop() {
         ProcessBucket(snapshot_db_indx, it, false);
       });
 
-      // Simualte yield due to socket flushes
+      // Simulate yield due to socket flushes
       for (unsigned i = 0; i < 2; ++i)
         util::ThisFiber::Yield();
     } while (snapshot_cursor_);

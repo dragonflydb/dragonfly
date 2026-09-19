@@ -192,7 +192,7 @@ class SerializerBase : public BucketDependencies,
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
   // Serialize a single bucket. Returns the number of entries serialized.
-  // To be implemented by classses extending this base class.
+  // To be implemented by classes extending this base class.
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) = 0;
 

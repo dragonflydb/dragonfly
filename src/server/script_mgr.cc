@@ -36,7 +36,7 @@ ABSL_FLAG(
 
 ABSL_FLAG(bool, lua_allow_undeclared_auto_correct, false,
           "If enabled, when a script that is not allowed to run with undeclared keys is trying to "
-          "access undeclared keys, automaticaly set the script flag to be able to run with "
+          "access undeclared keys, automatically set the script flag to be able to run with "
           "undeclared key.");
 
 ABSL_FLAG(
@@ -84,7 +84,7 @@ void ScriptMgr::Run(CmdArgParser parser, Transaction* tx, SinkReplyBuilder* buil
         "LOAD <script>",
         "   Load a script into the scripts cache without executing it.",
         "FLAGS <sha> [flags ...]",
-        "   Set specific flags for script. Can be called before the sript is loaded.",
+        "   Set specific flags for script. Can be called before the script is loaded.",
         "   The following flags are possible: ",
         "      - Use 'allow-undeclared-keys' to allow accessing undeclared keys",
         "      - Use 'disable-atomicity' to allow running scripts non-atomically",
@@ -374,7 +374,7 @@ void ScriptMgr::OnScriptError(std::string_view sha, std::string_view error) {
   // Log script errors at most 5 times a second.
   LOG_EVERY_T(WARNING, 0.2) << "Error running script (call to " << sha << "): " << error;
 
-  // If script has undeclared_keys and was not flaged to run in this mode we will change the
+  // If script has undeclared_keys and was not flagged to run in this mode we will change the
   // script flag - this will make script next run to not fail but run as global.
   if (absl::GetFlag(FLAGS_lua_allow_undeclared_auto_correct)) {
     size_t pos = error.rfind(kUndeclaredKeyErr);

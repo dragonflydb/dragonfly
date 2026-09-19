@@ -225,7 +225,7 @@ TEST_F(DflyEngineTest, EvalBug713) {
   fb0.Join();
 }
 
-// Tests deadlock that happenned due to a fact that trans->Schedule was called
+// Tests deadlock that happened due to a fact that trans->Schedule was called
 // before interpreter->Lock().
 //
 // The problematic scenario:

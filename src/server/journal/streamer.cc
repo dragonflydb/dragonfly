@@ -131,16 +131,16 @@ void JournalStreamer::ConsumeJournalChange(const JournalChangeItem& item) {
     return;
   }
 
-  DCHECK_GT(item.journal_item.lsn, last_lsn_writen_);
+  DCHECK_GT(item.journal_item.lsn, last_lsn_written_);
   Write(item.journal_item.data);
   time_t now = time(nullptr);
-  last_lsn_writen_ = item.journal_item.lsn;
+  last_lsn_written_ = item.journal_item.lsn;
   // TODO: to chain it to the previous Write call.
   if (config_.should_sent_lsn && now - last_lsn_time_ > 3) {
     last_lsn_time_ = now;
     io::StringSink sink;
     JournalWriter writer(&sink);
-    writer.Write(Entry{journal::Op::LSN, last_lsn_writen_});
+    writer.Write(Entry{journal::Op::LSN, last_lsn_written_});
     Write(std::move(sink).str());
   }
 }
@@ -182,7 +182,7 @@ std::string JournalStreamer::FormatInternalState() const {
       " total_sent:", total_sent_, " throttle_count:", throttle_count_,
       " total_throttle_wait_usec:", total_throttle_wait_usec_,
       " throttle_waiters:", throttle_waiters_, " last_async_time_ms_ago:", last_async_ms_ago,
-      " last_lsn_time_s:", last_lsn_time_, " last_lsn_writen_:", last_lsn_writen_);
+      " last_lsn_time_s:", last_lsn_time_, " last_lsn_written_:", last_lsn_written_);
 }
 
 void JournalStreamer::Write(std::string str) {
@@ -472,7 +472,7 @@ void RestoreStreamer::Run() {
     // Note that we account for CPU time from OnChangeBlocking and here as well
     // (inside WriteBucket).
     // But we only throttle here, so if we migrated lots of slots during mutations, we
-    // won't progress here but if we have not, then this fiber will progress withing the
+    // won't progress here but if we have not, then this fiber will progress within the
     // CPU budget we defined for it.
     bool should_stall =
         throttle_waiters_ > 0 ||
@@ -503,7 +503,7 @@ void RestoreStreamer::Run() {
     });
 
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
-    // setting that controls how agressive we are with migration pace.
+    // setting that controls how aggressive we are with migration pace.
     // Once we gain confidence with FLAGS_migration_buckets_cpu_budget we should retire
     // migration_buckets_serialization_threshold and migration_buckets_sleep_usec.
     if (++last_yield >= migration_buckets_serialization_threshold_cached) {

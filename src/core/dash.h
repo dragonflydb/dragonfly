@@ -151,7 +151,7 @@ class DashTable : public detail::DashTableBase {
   // Prefetches the memory where the key would resize into the cache.
   template <typename U> void Prefetch(U&& key) const;
 
-  // Find first entry with given key hash that evaulates to true on pred.
+  // Find first entry with given key hash that evaluates to true on pred.
   // Pred accepts either (const key&) or (const key&, const value&)
   template <typename Pred> iterator FindFirst(uint64_t key_hash, Pred&& pred);
 
@@ -364,7 +364,7 @@ class DashTable : public detail::DashTableBase {
   template <typename Cb> Cursor TraverseBuckets(Cursor curs, Cb&& cb, bool visit_empty = false);
 
   // Traverses over a single bucket in table and calls cb(iterator). The traverse order will be
-  // segment by segment over physical backets.
+  // segment by segment over physical buckets.
   // traverse by segment order does not guarantees coverage if the table grows/shrinks, it is useful
   // when formal full coverage is not critically important.
   // count bounds how many physical buckets are visited in a single call.

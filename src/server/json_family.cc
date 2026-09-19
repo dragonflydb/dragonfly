@@ -554,7 +554,7 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
 
     op_args.GetDbSlice().RemoveExpire(op_args.db_cntx.db_index, updater.GetIterator());
 
-    if (JsonEnconding() == kEncodingJsonFlat) {
+    if (JsonEncoding() == kEncodingJsonFlat) {
       flexbuffers::Builder fbb;
       json::FromJsonType(*parsed_json, &fbb);
       fbb.Finish();

@@ -667,7 +667,7 @@ TEST_F(BitOpsFamilyTest, BitPos) {
   EXPECT_EQ(-1, CheckedInt({"bitpos", "d", "1"}));
   EXPECT_EQ(0, CheckedInt({"bitpos", "d", "0"}));
 
-  // Make sure we accept only 0 and 1 for the bit mode arguement.
+  // Make sure we accept only 0 and 1 for the bit mode argument.
   const auto argument_must_be_0_or_1_error = ErrArg("ERR The bit argument must be 1 or 0");
   ASSERT_THAT(Run({"bitpos", "d", "2"}), argument_must_be_0_or_1_error);
   ASSERT_THAT(Run({"bitpos", "d", "42"}), argument_must_be_0_or_1_error);
@@ -804,7 +804,7 @@ TEST_F(BitOpsFamilyTest, BitFieldOverflowUnderflow) {
 }
 
 TEST_F(BitOpsFamilyTest, BitFieldOperations) {
-  // alligned offset reads/writes unsigned
+  // aligned offset reads/writes unsigned
   Run({"bitfield", "foo", "set", "u32", "0", "0"});
   // Set the bit battern 01111000 00000001 00000001 00001010
   ASSERT_THAT(Run({"bitfield", "foo", "set", "u8", "0", "120"}), RespElementsAre(IntArg(0)));
@@ -828,7 +828,7 @@ TEST_F(BitOpsFamilyTest, BitFieldOperations) {
               RespElementsAre(IntArg(61561)));
   ASSERT_THAT(Run({"bitfield", "foo", "get", "u16", "0"}), RespElementsAre(IntArg(61561)));
 
-  // alligned offset reads/writes signed
+  // aligned offset reads/writes signed
   Run({"bitfield", "foo", "set", "u32", "0", "0"});
   // Set the bit battern 10001000 11111111 11111111 11110110
   ASSERT_THAT(Run({"bitfield", "foo", "set", "i8", "0", "-120"}), RespElementsAre(IntArg(0)));

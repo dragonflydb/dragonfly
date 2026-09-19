@@ -71,7 +71,7 @@ ABSL_DECLARE_FLAG(uint32_t, list_compress_dict_threshold);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_FLAG(bool, deserialize_hnsw_index, false, "Deserialize HNSW vector index graph structure");
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
-ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loding from RDB snapshot");
+ABSL_FLAG(bool, rdb_ignore_expiry, false, "Ignore Key Expiry when loading from RDB snapshot");
 
 namespace dfly {
 
@@ -3032,7 +3032,7 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
   io::BytesSource bs{io::Buffer(journal_blob)};
   journal_reader_->SetSource(&bs);
 
-  // Parse and exectue in loop.
+  // Parse and execute in loop.
   size_t done = 0;
   while (done < num_entries) {
     journal::ParsedEntry entry;

@@ -8,7 +8,7 @@ def main():
 
     client = redis.Redis(decode_responses=True)
     info = client.info("server")
-    # Check version upgrade finsihed from last released version to last weekly docker build
+    # Check version upgrade finished from last released version to last weekly docker build
     assert info["dragonfly_version"] == "df-HEAD-HASH-NOTFOUND"
 
     info = client.info("memory")

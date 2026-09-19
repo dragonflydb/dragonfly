@@ -60,7 +60,7 @@ OpResult<std::pair<DbSlice::ConstIterator, unsigned>> FindFirstReadOnly(const Db
 }
 
 // Find first non-empty key of a single shard transaction, pass it to `func` and return the key.
-// If no such key exists or a wrong type is found, the apropriate status is returned.
+// If no such key exists or a wrong type is found, the appropriate status is returned.
 // Optimized version of `FindFirstNonEmpty` below.
 OpResult<string> FindFirstNonEmptySingleShard(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func) {

@@ -56,7 +56,7 @@ class User final {
 
     // Categories and commands
     using CategoryValueType = std::pair<Sign, uint32_t>;
-    // If index s numberic_limits::max() then it's a +all flag
+    // If index s numeric_limits::max() then it's a +all flag
     using CommandsValueType = std::tuple<Sign, size_t /*index*/, uint64_t /*bit*/>;
     using UpdateType = std::vector<std::variant<CategoryValueType, CommandsValueType>>;
     UpdateType updates;
@@ -191,7 +191,7 @@ class User final {
   bool nopass_ = false;
 
   uint32_t acl_categories_{NONE};
-  // Each element index in the vector corresponds to a familly of commands
+  // Each element index in the vector corresponds to a family of commands
   // Each bit in the uin64_t field at index id, corresponds to a specific
   // command of that family. Look on TableCommandBuilder and on Service::Register
   // on how this mapping is built during the startup/registration of commands

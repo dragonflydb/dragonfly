@@ -34,7 +34,7 @@ local addfunc = LG_funcs['add_' .. string.lower(type)]
 local modfunc = LG_funcs['mod_' .. string.lower(type)]
 local huge_entries = LG_funcs["get_huge_entries"]
 local is_huge_entry = LG_funcs["is_huge_entry"]
--- Keep track of total number of keys including huge value keys. Intialize
+-- Keep track of total number of keys including huge value keys. Initialize
 -- to number of keys that currently exists.
 local total_keys = #keys
 

@@ -2,7 +2,7 @@
 
 """
 Usage:
-1. First run Dragonfly with tracking allocator enabled. Must be a single allocator range with 100% samping rate to catch both allocations and deallocations.
+1. First run Dragonfly with tracking allocator enabled. Must be a single allocator range with 100% sampling rate to catch both allocations and deallocations.
 2. Finish tracking.
 3. cat /tmp/dragonfly.INFO |  ./parse_allocator_tracking_logs.py
 """

@@ -643,7 +643,7 @@ TEST_F(MultiTest, FlushDb) {
   ASSERT_FALSE(service_->IsShardSetLocked());
 }
 
-// Triggers a false possitive and therefore we turn it off
+// Triggers a false positive and therefore we turn it off
 // There seem not to be a good solution to handle these false positives
 // since sanitizers work well with u_context which is *very* slow
 TEST_F(MultiTest, Eval) {
@@ -1370,7 +1370,7 @@ TEST_F(MultiTest, ContendedList) {
   EXPECT_THAT(Run({"llen", "chan-2"}), IntArg(0));
 }
 
-// Test that squashing makes single-key ops atomic withing a non-atomic tx
+// Test that squashing makes single-key ops atomic within a non-atomic tx
 // because it runs them within one hop.
 TEST_F(MultiTest, TestSquashing) {
   absl::FlagSaver fs;
@@ -1621,7 +1621,7 @@ TEST_F(MultiEvalTest, MultiSomeEval) {
   EXPECT_THAT(brpop_resp, ArgType(RespExpr::NIL_ARRAY));
 }
 
-TEST_F(MultiEvalTest, ScriptSquashingUknownCmd) {
+TEST_F(MultiEvalTest, ScriptSquashingUnknownCmd) {
   absl::FlagSaver fs;
   absl::SetFlag(&FLAGS_lua_auto_async, true);
 

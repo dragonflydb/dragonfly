@@ -561,7 +561,7 @@ enum class ExecScriptUse : uint8_t {
   SCRIPT_RUN = 2,
 };
 
-ExecScriptUse DetermineScriptPresense(const std::vector<StoredCmd>& body) {
+ExecScriptUse DetermineScriptPresence(const std::vector<StoredCmd>& body) {
   bool script_load = false;
   for (const auto& scmd : body) {
     if (scmd.Cid()->IsEvalGroup()) {
@@ -786,7 +786,7 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
 
   if (auto* tx = cmd_cntx->tx(); tx) {
     // Reset it, because in multi/exec the transaction pointer is the same and
-    // we will end up triggerring the callback on the following commands. To avoid this
+    // we will end up triggering the callback on the following commands. To avoid this
     // we reset it.
     tx->SetTrackingCallback({});
     if (cmd_cntx->cid()->IsReadOnly() && info.ShouldTrackKeys()) {
@@ -1884,11 +1884,11 @@ uint32_t Service::DispatchSquashedBatch(
 }
 
 ErrorReply Service::ReportUnknownCmd(string_view cmd_name) {
-  constexpr uint8_t kMaxUknownCommands = 64;
-  constexpr uint8_t kMaxUknownCommandLength = 20;
+  constexpr uint8_t kMaxUnknownCommands = 64;
+  constexpr uint8_t kMaxUnknownCommandLength = 20;
 
   lock_guard lk(mu_);
-  if (unknown_cmds_.size() <= kMaxUknownCommands && cmd_name.size() <= kMaxUknownCommandLength)
+  if (unknown_cmds_.size() <= kMaxUnknownCommands && cmd_name.size() <= kMaxUnknownCommandLength)
     unknown_cmds_[cmd_name]++;
 
   return ErrorReply{StrCat("unknown command `", cmd_name, "`"), "unknown_cmd"};
@@ -1950,7 +1950,7 @@ bool Service::IsShardSetLocked() const {
   return res.load() != 0;
 }
 
-absl::flat_hash_map<std::string, unsigned> Service::UknownCmdMap() const {
+absl::flat_hash_map<std::string, unsigned> Service::UnknownCmdMap() const {
   lock_guard lk(mu_);
   return unknown_cmds_;
 }
@@ -2601,7 +2601,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
 
   // The transaction can contain script load script execution, determine their presence ahead to
   // customize logic below.
-  ExecScriptUse state = DetermineScriptPresense(exec_info.body);
+  ExecScriptUse state = DetermineScriptPresence(exec_info.body);
 
   // We borrow a single interpreter for all the EVALs/Script load inside. Returned by MultiCleanup
   if (state != ExecScriptUse::NONE) {
@@ -3094,7 +3094,7 @@ constexpr uint32_t kPublish = PUBSUB | FAST;
 constexpr uint32_t kSubscribe = PUBSUB | SLOW;
 constexpr uint32_t kUnsubscribe = PUBSUB | SLOW;
 constexpr uint32_t kPSubscribe = PUBSUB | SLOW;
-constexpr uint32_t kPUnsubsribe = PUBSUB | SLOW;
+constexpr uint32_t kPUnsubscribe = PUBSUB | SLOW;
 constexpr uint32_t kFunction = SLOW;
 constexpr uint32_t kMonitor = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kPubSub = SLOW;
@@ -3135,7 +3135,7 @@ void Service::Register(CommandRegistry* registry) {
       << CI{"SUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kUnsubscribe}.MFUNC(
              Unsubscribe)
       << CI{"PSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kPSubscribe}.MFUNC(PSubscribe)
-      << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kPUnsubsribe}.MFUNC(
+      << CI{"PUNSUBSCRIBE", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kPUnsubscribe}.MFUNC(
              PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, acl::kFunction}.MFUNC(Function)
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, acl::kMonitor}.MFUNC(Monitor)
@@ -3175,7 +3175,7 @@ void Service::RegisterCommands() {
   cluster_family_.Register(&registry_);
 
   // AclFamily should always be registered last
-  // If we add a new familly, register that first above and *not* below
+  // If we add a new family, register that first above and *not* below
   acl_family_.Register(&registry_);
 
   // Only after all the commands are registered

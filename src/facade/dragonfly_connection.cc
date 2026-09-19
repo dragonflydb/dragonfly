@@ -64,7 +64,7 @@ ABSL_FLAG(uint16_t, admin_port, 0,
           "This supports both HTTP and RESP protocols");
 
 ABSL_FLAG(string, admin_bind, "",
-          "If set, the admin consol TCP connection would be bind the given address. "
+          "If set, the admin console TCP connection would be bind the given address. "
           "This supports both HTTP and RESP protocols");
 
 ABSL_FLAG(strings::MemoryBytesFlag, request_cache_limit, 64_MB,
@@ -302,7 +302,7 @@ size_t UsedMemoryInternal(const ParsedCommand& msg) {
 }
 
 struct TrafficLogger {
-  // protects agains closing the file while writing or data races when opening the file.
+  // protects against closing the file while writing or data races when opening the file.
   // Also, makes sure that LogTraffic are executed atomically.
   fb2::Mutex mutex;
   unique_ptr<io::WriteFile> log_file;
@@ -4198,7 +4198,7 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
 
   ParserStatus parse_status = OK;
 
-  // Callback that wakes the currrent V2 fiber by bumping the io_event_ epoch.
+  // Callback that wakes the current V2 fiber by bumping the io_event_ epoch.
   // Multiple waiters (e.g command completion, backpressure relief) can use the same callback since
   // they all wake the same fiber.
   auto ioevent_cb = [this]() { io_event_.notify(); };

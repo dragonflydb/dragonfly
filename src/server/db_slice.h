@@ -530,7 +530,7 @@ class DbSlice {
   // Register key to be watched - when touched, set dirty_ptr to true
   void RegisterWatchedKey(DbIndex db_indx, std::string_view key, std::atomic_bool* dirty_ptr);
 
-  // Unregisted all watched key for given dirty_ptr
+  // Unregistered all watched key for given dirty_ptr
   void UnregisterConnectionWatches(absl::Span<const std::pair<DbIndex, std::string>> keys,
                                    const std::atomic_bool* dirty_ptr);
 

@@ -682,8 +682,8 @@ def copy_failed_logs(log_dir, report):
 
 
 # tests results we get on the "call" state
-# but we can not copy logs until "teardown" state because the server isn't stoped
-# so we save result of the "call" state and process it on the "teardown" when the server is stoped
+# but we can not copy logs until "teardown" state because the server isn't stopped
+# so we save result of the "call" state and process it on the "teardown" when the server is stopped
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield

@@ -4,7 +4,7 @@ Please use the testing frameworks factories to obtain proper seeder instances!
 
 ### 1. Static seeder
 
-The DebugPopulateSeeder is a thin wrapper around `DEBUG POPULATE` with a little bit of fuzziness for collection sizes. It should be preffered for generating "static" data for snapshotting, memory consumption tests, etc.
+The DebugPopulateSeeder is a thin wrapper around `DEBUG POPULATE` with a little bit of fuzziness for collection sizes. It should be preferred for generating "static" data for snapshotting, memory consumption tests, etc.
 
 ```python
 s = DebugPopulateSeeder(key_target=10_000)

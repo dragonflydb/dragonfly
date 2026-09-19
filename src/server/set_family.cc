@@ -540,7 +540,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   }
 
   // We can use std::nullopt here because we check the type later.
-  // If the overwrite is true, we will call InitSet that calles SetMeta
+  // If the overwrite is true, we will call InitSet that calls SetMeta
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, std::nullopt);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;

@@ -313,7 +313,7 @@ class CommandGenerator:
             )
             return ("v0", 0, "v1", 0) + tuple(itertools.chain(*elements))
         elif t == ValueType.ZSET:
-            # Random sequnce of k-letter members and int score for ZADD
+            # Random sequence of k-letter members and int score for ZADD
             # The length of the sequence will vary between val_size/4 and 130.
             # This ensures that we test both the ZSET implementation with listpack and the our custom BPtree.
             value_sizes = [self.val_size // 4, 130]

@@ -1534,7 +1534,7 @@ TEST_F(ClusterFamilyEmulatedTest, ClusterNodes) {
   EXPECT_THAT(res, GetMyId() + " fake-host:6379@6379 myself,master - 0 0 0 connected 0-16383\n");
 }
 
-TEST_F(ClusterFamilyEmulatedTest, ForbidenCommands) {
+TEST_F(ClusterFamilyEmulatedTest, ForbiddenCommands) {
   auto res = Run({"DFLYCLUSTER", "GETSLOTINFO", "SLOTS", "1"});
   EXPECT_THAT(res, ErrArg("Cluster is disabled. Use --cluster_mode=yes to enable."));
 }

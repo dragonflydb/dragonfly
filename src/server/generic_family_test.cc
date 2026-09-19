@@ -678,17 +678,17 @@ TEST_F(GenericFamilyTest, Stick) {
   ASSERT_THAT(Run({"stick", "b", "d"}), IntArg(1));
   ASSERT_THAT(Run({"stick", "c", "d"}), IntArg(0));
 
-  // check stickyness persists during writes
+  // check stickiness persists during writes
   Run({"set", "a", "new"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
   Run({"append", "a", "-value"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
 
-  // check rename persists stickyness
+  // check rename persists stickiness
   Run({"rename", "a", "k"});
   ASSERT_THAT(Run({"stick", "k"}), IntArg(0));
 
-  // check rename persists stickyness on multiple shards
+  // check rename persists stickiness on multiple shards
   Run({"del", "b"});
   string b_val(32, 'b');
   string x_val(32, 'x');
@@ -707,7 +707,7 @@ TEST_F(GenericFamilyTest, Move) {
   ASSERT_THAT(Run({"move", "a", "-1"}), ArgType(RespExpr::ERROR));
   ASSERT_THAT(Run({"move", "a", "100500"}), ArgType(RespExpr::ERROR));
 
-  // Check MOVE moves value & expiry & stickyness
+  // Check MOVE moves value & expiry & stickiness
   Run({"set", "a", "test"});
   Run({"expire", "a", "1000"});
   Run({"stick", "a"});
@@ -953,7 +953,7 @@ TEST_F(GenericFamilyTest, Sort) {
   // desc numeric
   ASSERT_THAT(Run({"sort", "list-1", "DESC"}).GetVec(),
               ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
-  // desc strig
+  // desc string
   ASSERT_THAT(Run({"sort", "list-1", "DESC", "ALPHA"}).GetVec(),
               ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
   // ASC/DESC are not mutually exclusive — last one wins (matches Redis behavior).
@@ -1211,7 +1211,7 @@ TEST_F(GenericFamilyTest, Sort_RO) {
   // desc numeric
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC"}).GetVec(),
               ElementsAre("200", "10.1", "3.5", "2.20", "1.2"));
-  // desc strig
+  // desc string
   ASSERT_THAT(Run({"sort_ro", "list-1", "DESC", "ALPHA"}).GetVec(),
               ElementsAre("3.5", "200", "2.20", "10.1", "1.2"));
   // limits
@@ -1807,7 +1807,7 @@ TEST_F(GenericFamilyTest, JsonType) {
   EXPECT_EQ(resp, "ReJSON-RL") << "For the Redis GUI the register of the JSON type is important. "
                                   "See https://github.com/dragonflydb/dragonfly/issues/3386";
 
-  // Test json type lowercase works for the SCAN commmand
+  // Test json type lowercase works for the SCAN command
   resp = Run({"scan", "0", "type", "rejson-rl"});
   EXPECT_THAT(resp, ArrLen(2));
   auto vec = StrArray(resp.GetVec()[1]);

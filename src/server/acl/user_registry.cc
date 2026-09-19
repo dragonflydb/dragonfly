@@ -134,7 +134,7 @@ UserRegistry::UserWithWriteLock::UserWithWriteLock(std::unique_lock<fb2::SharedM
 }
 
 User::UpdateRequest UserRegistry::DefaultUserUpdateRequest() const {
-  // Assign field by field to supress an annoying compiler warning
+  // Assign field by field to suppress an annoying compiler warning
   User::UpdateRequest req;
   req.passwords = std::vector<User::UpdatePass>{{"", false, true}};
   req.is_active = true;

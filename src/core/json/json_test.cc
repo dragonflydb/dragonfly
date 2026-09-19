@@ -169,7 +169,7 @@ TEST_F(JsonTest, Delete) {
   EXPECT_EQ(R"({"c":{"a":1, "b":2}, "d":{"b":2, "c":3}, "e": [1,2]})"_json, j1);
 }
 
-TEST_F(JsonTest, JsonWithPolymorhicAllocator) {
+TEST_F(JsonTest, JsonWithPolymorphicAllocator) {
   char buffer[1024] = {};
   std::pmr::monotonic_buffer_resource pool{std::data(buffer), std::size(buffer)};
   std::pmr::polymorphic_allocator<char> alloc(&pool);

@@ -199,7 +199,7 @@ class EngineShard {
     // contended_locks - number of locks that are contended by more than one transaction.
     unsigned contended_locks = 0;
 
-    // The score of the lock with maximum contention (see IntentLock::ContetionScore for details).
+    // The score of the lock with maximum contention (see IntentLock::ContentionScore for details).
     unsigned max_contention_score = 0;
 
     // the lock fingerprint with maximum contention score.
@@ -213,7 +213,7 @@ class EngineShard {
 
   TxQueueInfo AnalyzeTxQueue() const;
 
-  // Returns true if revelant write operations should throttle to wait for tiering to catch up.
+  // Returns true if relevant write operations should throttle to wait for tiering to catch up.
   // The estimate is based on memory usage crossing tiering redline and the write depth being at
   // least 50% of allowed max, providing at least some guarantee of progress.
   bool ShouldThrottleForTiering() const;
@@ -340,7 +340,7 @@ class EngineShard {
   ShardId shard_id_;
   Stats stats_;
 
-  // Become passive if replica: don't automatially evict expired items.
+  // Become passive if replica: don't automatically evict expired items.
   bool is_replica_ = false;
   bool journal_ = false;
 

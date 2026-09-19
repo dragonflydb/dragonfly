@@ -436,7 +436,7 @@ TEST_F(InterpreterTest, Compatibility) {
   EXPECT_TRUE(Execute("return table.getn{1, 2, 3};"));
   EXPECT_EQ("i(3)", ser_.res);
 
-  // table.setn was removed, resizing is no longer needed, it thows an error
+  // table.setn was removed, resizing is no longer needed, it throws an error
   EXPECT_FALSE(Execute("local t = {}; local a = 1; table.setn(t, 100); return a+123;"));
 }
 
@@ -813,7 +813,7 @@ TEST_F(InterpreterTest, LuaGcStatistic) {
 
   used_bytes = InterpreterManager::tl_stats().used_bytes;
 
-  // we get the same interpeter again to call GC in separate thread
+  // we get the same interpreter again to call GC in separate thread
   auto* new_interpreter = im.Get();
   EXPECT_EQ(interpreter, new_interpreter);
 

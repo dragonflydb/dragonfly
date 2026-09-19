@@ -117,7 +117,7 @@ async def test_blocking_multiple_dbs(async_client: aioredis.Redis, df_server: Df
         await asyncio.gather(*tasks)
 
     # produce is constantly waking up consumers. It is used to trigger the
-    # flow that creates wake ups on a differrent database in the
+    # flow that creates wake ups on a different database in the
     # middle of continuation transaction.
     async def tasks_produce(num, iters):
         LPUSH_SCRIPT = """

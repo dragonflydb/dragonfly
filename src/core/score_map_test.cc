@@ -128,7 +128,7 @@ TEST_F(ScoreMapTest, ReallocIfNeeded) {
   mi_heap_visit_blocks(mi_heap_get_backing(), false, count_waste, nullptr);
   size_t wasted_after = total_wasted_memory;
 
-  // Check we waste significanlty less now
+  // Check we waste significantly less now
   EXPECT_GT(wasted_before, wasted_after * 2);
 
   ASSERT_EQ(sm_->UpperBoundSize(), 1000);

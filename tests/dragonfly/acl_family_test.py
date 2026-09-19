@@ -317,8 +317,8 @@ async def test_acl_del_user_while_running_lua_script(df_server):
 )
 async def test_acl_with_long_running_script(df_server):
     client = aioredis.Redis(port=df_server.port)
-    await client.execute_command("ACL SETUSER roman ON >yoman +@string +@scripting ~*")
-    await client.execute_command("AUTH roman yoman")
+    await client.execute_command("ACL SETUSER roman ON >yeoman +@string +@scripting ~*")
+    await client.execute_command("AUTH roman yeoman")
     admin_client = aioredis.Redis(port=df_server.port, decode_responses=True)
 
     eval_task = asyncio.create_task(client.eval(script, 4, "key", "key1", "key2", "key3"))
@@ -507,7 +507,7 @@ async def test_require_pass_with_acl_file_order(df_factory, tmp_dir):
 
 
 async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
-    # Note the extra space below, it's intented to also check that we properly parse extra spaces
+    # Note the extra space below, it's intended to also check that we properly parse extra spaces
     acl_file_content = "USER    roy ON #ea71c25a7a602246b4c39824b855678894a96f43bb9b71319c39700a1e045222 +@string +@fast +hset\nUSER john on nopass +@string"
 
     acl = create_temp_file(acl_file_content, tmp_dir)

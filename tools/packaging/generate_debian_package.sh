@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
-# Generate a debian package from a pre-build dragonfly bianry and set of files as well as generating change log from git history.
+# Generate a debian package from a pre-build dragonfly binary and set of files as well as generating change log from git history.
 # The result is debian install package file (.deb file).
 # This script accept 2 parameters:
-#	1. Optioanl path to the location at which the binary file is located.
+#	1. Optional path to the location at which the binary file is located.
 # this depends on
 # * git
 # * moreutils

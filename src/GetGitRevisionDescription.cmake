@@ -59,7 +59,7 @@ get_filename_component(_gitdescmoddir ${CMAKE_CURRENT_LIST_FILE} PATH)
 # function returns an empty string via _git_dir_var.
 #
 # Example: Given a path C:/bla/foo/bar and assuming C:/bla/.git exists and
-# neither foo nor bar contain a file/directory .git. This wil return
+# neither foo nor bar contain a file/directory .git. This will return
 # C:/bla/.git
 #
 function(_git_find_closest_git_dir _start_dir _git_dir_var)

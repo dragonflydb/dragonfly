@@ -383,10 +383,10 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
   // We must upload the value if it was modified or the caller forces it
   bool should_upload = metrics.modified || options.force_upload;
 
-  // Snapshotting casuses reads that are not from clients, so ignore request to upload
+  // Snapshotting causes reads that are not from clients, so ignore request to upload
   // List tiering uploads on it own rules from the ends
   const bool upload_disabled =
-      SliceSnapshot::IsSnaphotInProgress() && !std::holds_alternative<tiering::ListNodeId>(id);
+      SliceSnapshot::IsSnapshotInProgress() && !std::holds_alternative<tiering::ListNodeId>(id);
 
   // Give way for upload by reducing cooled queue if needed
   constexpr size_t kUploadReclaimMargin = 1_MB;
@@ -469,7 +469,7 @@ void TieredStorage::ShardOpManager::RetireColdEntries(size_t additional_memory) 
   VLOG(1) << "Upload budget: " << budget << ", gained " << gained;
 
   // Update memory_budget directly since we know that gained bytes were released.
-  // We will overwrite the budget correctly in the next Hearbeat.
+  // We will overwrite the budget correctly in the next Heartbeat.
   db_slice_.UpdateMemoryParams(gained + db_slice_.memory_budget(), db_slice_.bytes_per_object());
 }
 
@@ -708,7 +708,7 @@ int64_t TieredStorage::UploadBudget() const {
 
 void TieredStorage::RunOffloading(DbIndex dbid) {
   using namespace tiering::literals;
-  if (SliceSnapshot::IsSnaphotInProgress())
+  if (SliceSnapshot::IsSnapshotInProgress())
     return;
 
   // Takes up a small bounded amount of time and is best done before offloading (to be picked up)

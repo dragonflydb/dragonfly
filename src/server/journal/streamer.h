@@ -52,7 +52,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   // TODO: we copy the string on each write because JournalItem may be passed to multiple
   // streamers so we can not move it. However, if we would either wrap JournalItem in shared_ptr
   // or wrap JournalItem::data in shared_ptr, we can avoid the cost of copying strings.
-  // Also, for small strings it's more peformant to copy to the intermediate buffer than
+  // Also, for small strings it's more performant to copy to the intermediate buffer than
   // to issue an io operation.
   void Write(std::string str);
 
@@ -100,7 +100,7 @@ class JournalStreamer : public journal::JournalConsumerInterface {
   // Last time we sent async data, as base::CycleClock::Now() cycles.
   uint64_t last_async_write_time_ = 0;
   time_t last_lsn_time_ = 0;
-  LSN last_lsn_writen_ = 0;
+  LSN last_lsn_written_ = 0;
   util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
 };

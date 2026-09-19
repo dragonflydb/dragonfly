@@ -1196,7 +1196,7 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
     op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
   }
 
-  // Checking if command conatins flag with no autojournal
+  // Checking if command contains flag with no autojournal
   // and we are assuming auto journaling is not re-enabled.
   if ((op_args.tx->GetCId()->opt_mask() & CO::NO_AUTOJOURNAL) && op_args.shard->journal()) {
     auto reverse = range_spec.params.reverse;
@@ -1622,7 +1622,7 @@ void ZBooleanOperation(CmdArgParser parser, string_view cmd, bool is_union, bool
     rng::sort(smvec);
 
     // We can't use SendScoredArray because it expects strings, not string_views
-    // TOOD: Not longer relevant with new io, use scoping
+    // TODO: Not longer relevant with new io, use scoping
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
     rb->StartArray(smvec.size() * (op_args->with_scores ? 2 : 1));
     for (const auto& elem : smvec) {
@@ -2335,7 +2335,7 @@ void CmdZDiffStore(CmdArgParser parser, CommandContext* cmd_cntx) {
   // We need to have result stored and not be destructed before function ends because
   // we are passing string_view of result members to other functions
   ScoredMap result;
-  // Calculate diff between sets. We stil need to write  destination key even it is empty set
+  // Calculate diff between sets. We still need to write  destination key even it is empty set
   vector<ScoredMemberView> smvec = ZDiffOp(sid, std::move(maps), &result);
 
   auto store_cb = [&](Transaction* t, EngineShard* shard) {

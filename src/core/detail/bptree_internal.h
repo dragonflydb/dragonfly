@@ -166,7 +166,7 @@ template <typename T> class BPTreeNode {
     return IsLeaf() ? Layout::kMinLeafKeys : Layout::kMinInnerKeys;
   }
 
-  // Returns the overall number of iterms for a subtree rooted at this node.
+  // Returns the overall number of items for a subtree rooted at this node.
   // Equals to NumItems() for leaf nodes and GetInnerTreeCount() for inner nodes.
   uint32_t TreeCount() const {
     return IsLeaf() ? NumItems() : GetInnerTreeCount();

@@ -195,7 +195,7 @@ class Connection : public util::Connection {
   // Manually shutdown self.
   void ShutdownSelfBlocking();
 
-  // Migrate this connecton to a different thread.
+  // Migrate this connection to a different thread.
   // Return true if Migrate succeeded
   // Return false if dispatch_fb_ is active
   bool Migrate(util::fb2::ProactorBase* dest);

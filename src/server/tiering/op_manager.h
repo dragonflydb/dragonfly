@@ -138,7 +138,7 @@ class OpManager {
   };
 
   // Prepare read operation for aligned segment or return pending if it exists.
-  // Refernce is valid until any other read operations occur.
+  // Reference is valid until any other read operations occur.
   ReadOp& PrepareRead(DiskSegment aligned_segment);
 
   // Called once read finished

@@ -419,7 +419,7 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
     stored++;
   }
 
-  // Above loop could have parial success (e.g. OOM), replicate only what changed
+  // Above loop could have partial success (e.g. OOM), replicate only what changed
   if (auto journal = op_args.shard->journal(); journal) {
     if (stored * 2 == args.Size()) {
       RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
@@ -1544,7 +1544,7 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
     ShardId sid = shard->shard_id();
     MGetResponse resp = OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_ptr);
 
-    // Reorder shard resuls based on key indices in commands
+    // Reorder shard results based on key indices in commands
     ShardArgs shard_args = t->GetShardArgs(sid);
     unsigned src_indx = 0;
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {

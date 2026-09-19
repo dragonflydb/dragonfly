@@ -50,7 +50,7 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   ~SliceSnapshot();
 
   static size_t GetThreadLocalMemoryUsage();
-  static bool IsSnaphotInProgress();
+  static bool IsSnapshotInProgress();
 
   // Initialize snapshot, start bucket iteration fiber, register listeners.
   // In journal streaming mode it needs to be stopped by either Stop or Cancel.
@@ -136,7 +136,7 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   struct Stats {
     size_t keys_total = 0;
-    size_t jounal_changes = 0;
+    size_t journal_changes = 0;
     size_t flushed_under_lock = 0;
   } stats_;
 

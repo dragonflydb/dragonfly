@@ -166,7 +166,7 @@ class ServerFamily {
   // Collects server metrics. See MetricsCollectOpts; a default-constructed value collects all.
   Metrics GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) const;
 
-  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section, bool priveleged,
+  std::string FormatInfoMetrics(const Metrics& metrics, std::string_view section, bool privileged,
                                 const std::shared_ptr<const facade::TlsCertInfo>& cert_info) const;
 
   ScriptMgr* script_mgr() {
@@ -238,7 +238,7 @@ class ServerFamily {
     return listeners_;
   }
 
-  std::vector<facade::Listener*> GetNonPriviligedListeners() const;
+  std::vector<facade::Listener*> GetNonPrivilegedListeners() const;
 
   // Replica-side method. Returns replication summary if this server is a replica,
   // nullopt otherwise.
@@ -265,7 +265,7 @@ class ServerFamily {
   void UpdateMemoryGlobalStats();
 
   // Return true if no replicas are registered or if all replicas reached stable sync
-  // Used in debug populate to DCHECK insocsistent flows that violate transaction gurantees
+  // Used in debug populate to DCHECK insocsistent flows that violate transaction guarantees
   bool AreAllReplicasInStableSync() const;
 
  private:
@@ -361,7 +361,7 @@ class ServerFamily {
   void ClientPauseCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void ClientUnPauseCmd(facade::ParsedArgs args, CommandContext* cmd_cntx);
 
-  // Set accepting_connections_ and update listners according to it
+  // Set accepting_connections_ and update listeners according to it
   void ChangeConnectionAccept(bool accept);
 
   util::fb2::Fiber snapshot_schedule_fb_;
@@ -400,7 +400,7 @@ class ServerFamily {
 
   std::atomic<bool> is_c_pause_in_progress_ = false;
   // We need this because if dragonfly shuts down during pause, ServerState will destruct
-  // before the dettached fiber Pause() causing a seg fault.
+  // before the detached fiber Pause() causing a seg fault.
   std::atomic<size_t> active_pauses_ = 0;
   util::fb2::EventCount client_pause_ec_;
 

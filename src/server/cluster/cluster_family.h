@@ -100,7 +100,7 @@ class ClusterFamily {
 
   // DFLYMIGRATE FLOW initiate second step in slots migration procedure
   // this request should be done for every shard on the target node
-  // this method assocciate connection and shard that will be the data
+  // this method associate connection and shard that will be the data
   // source for migration
   void DflyMigrateFlow(CmdArgParser parser, CommandContext* cmd_cntx);
 

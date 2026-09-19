@@ -1060,7 +1060,7 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
 
   // a hack: we watch in both shards for pop_key but only in the source shard it's relevant.
   // Therefore we follow the regular flow of watching the key but for the destination shard it
-  // will never be triggerred.
+  // will never be triggered.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
   if (auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, cntx); status != OpStatus::OK)
     return status;

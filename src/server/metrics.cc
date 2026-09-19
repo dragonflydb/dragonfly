@@ -63,7 +63,7 @@ void AppendMetricHeader(string_view metric_name, string_view metric_help, Metric
   absl::StrAppend(dest, "# TYPE ", full_metric_name, " ", MetricTypeName(type), "\n");
 }
 
-void AppendLabelTupple(absl::Span<const string_view> label_names,
+void AppendLabelTuple(absl::Span<const string_view> label_names,
                        absl::Span<const string_view> label_values, string* dest) {
   if (label_names.empty())
     return;
@@ -83,7 +83,7 @@ void AppendMetricValue(string_view metric_name, const absl::AlphaNum& value,
                        absl::Span<const string_view> label_names,
                        absl::Span<const string_view> label_values, string* dest) {
   absl::StrAppend(dest, GetMetricFullName(metric_name));
-  AppendLabelTupple(label_names, label_values, dest);
+  AppendLabelTuple(label_names, label_values, dest);
   absl::StrAppend(dest, " ", value, "\n");
 }
 

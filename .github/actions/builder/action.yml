@@ -15,12 +15,12 @@ inputs:
   c-compiler:
     description: "C compiler to use. Leave unset only if the container default is intended"
     required: false
-    default: 'unknwn_c_cmpl'
+    default: 'unknown_c_cmpl'
     type: string
   cxx-compiler:
     description: "C++ compiler to use. Leave unset only if the container default is intended"
     required: false
-    default: 'unkn_cpp_cmpl'
+    default: 'unknown_cpp_cmpl'
     type: string
   cxx-flags:
     description: "C++ compiler flags"
@@ -198,12 +198,12 @@ runs:
           CMAKE_CMD+=(-DENABLE_CCACHE=OFF)
         fi
 
-        # Add optional compiler overrides. 'unknwn_c_cmpl' / 'unkn_cpp_cmpl' are the key-only sentinel
+        # Add optional compiler overrides. 'unknown_c_cmpl' / 'unknown_cpp_cmpl' are the key-only sentinel
         # defaults (see the inputs above): treat them like "unset".
-        if [ -n "${{ inputs.c-compiler }}" ] && [ "${{ inputs.c-compiler }}" != "unknwn_c_cmpl" ]; then
+        if [ -n "${{ inputs.c-compiler }}" ] && [ "${{ inputs.c-compiler }}" != "unknown_c_cmpl" ]; then
           CMAKE_CMD+=(-DCMAKE_C_COMPILER="${{ inputs.c-compiler }}")
         fi
-        if [ -n "${{ inputs.cxx-compiler }}" ] && [ "${{ inputs.cxx-compiler }}" != "unkn_cpp_cmpl" ]; then
+        if [ -n "${{ inputs.cxx-compiler }}" ] && [ "${{ inputs.cxx-compiler }}" != "unknown_cpp_cmpl" ]; then
           CMAKE_CMD+=(-DCMAKE_CXX_COMPILER="${{ inputs.cxx-compiler }}")
         fi
         if [ -n "${{ inputs.cxx-flags }}" ]; then

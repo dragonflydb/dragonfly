@@ -925,7 +925,7 @@ class CommandApplyVisitor {
   // Most recent overflow object encountered. We cache it to make the overflow
   // policy changes stick among different subcommands
   Overflow overflow_;
-  // This will be commited if it was updated
+  // This will be committed if it was updated
   string bitfield_;
   // If either of the subcommands SET|INCRBY is used we should persist the changes.
   // Otherwise, we only used a read only subcommand (GET)
@@ -1065,7 +1065,7 @@ nonstd::expected<CommonAttributes, string> ParseCommonAttr(CmdArgParser* parser,
 }
 
 // Parses a list of arguments (without key) to a CommandList.
-// Returns the CommandList if the parsing completed succefully or string
+// Returns the CommandList if the parsing completed successfully or string
 // to indicate an error
 nonstd::expected<CommandList, string> ParseToCommandList(CmdArgParser parser, bool read_only) {
   enum class Cmds { OVERFLOW_OPT, GET_OPT, SET_OPT, INCRBY_OPT };

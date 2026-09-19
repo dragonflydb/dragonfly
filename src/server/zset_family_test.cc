@@ -216,7 +216,7 @@ TEST_F(ZSetFamilyTest, AddGtLtSkiplistManyMembers) {
   EXPECT_EQ(Run({"zscore", "z", "m1"}), "10");
 }
 
-TEST_F(ZSetFamilyTest, AddNonUniqeMembers) {
+TEST_F(ZSetFamilyTest, AddNonUniqueMembers) {
   auto resp = Run({"zadd", "x", "2", "a", "1", "a"});
   EXPECT_THAT(resp, IntArg(1));
 
