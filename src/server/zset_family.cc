@@ -30,7 +30,6 @@ extern "C" {
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
-#include "server/set_family.h"
 #include "server/transaction.h"
 
 namespace rng = std::ranges;
@@ -833,7 +832,7 @@ ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, A
   // Safe to delete now — the loop above no longer references iterators.
   for (const auto& key : emptied_set_keys) {
     if (auto res = db_slice.FindReadOnly(db_cntx, key, OBJ_SET); res) {
-      SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, (*res)->second);
+      DeleteCollectionIfEmpty(db_slice, db_cntx, key, (*res)->second);
     }
   }
 
@@ -956,7 +955,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   for (const auto& key : emptied_set_keys) {
     if (auto res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_SET); res) {
-      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), key, (*res)->second);
+      DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), key, (*res)->second);
     }
   }
 

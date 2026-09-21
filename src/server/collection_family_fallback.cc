@@ -44,18 +44,6 @@ uint32_t SetFamily::MaxIntsetEntries() {
   return 0;
 }
 
-bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
-                                 const PrimeValue& pv) {
-  Fail();
-  return false;
-}
-
-bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
-                               const PrimeValue& pv) {
-  Fail();
-  return false;
-}
-
 LoadBlobResult SetFamily::LoadLPSetBlob(std::string_view blob, bool deep, PrimeValue* pv) {
   Fail();
   return LoadBlobResult::kCorrupted;
