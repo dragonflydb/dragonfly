@@ -19,7 +19,7 @@ Other languages:  [简体中文](README.zh-CN.md) [日本語](README.ja-JP.md) [
 
 Dragonfly is an in-memory data store built for modern application workloads.
 
-Fully compatible with Redis and Memcached APIs, Dragonfly requires no code changes to adopt. Compared to legacy in-memory datastores, Dragonfly delivers 25X more throughput, higher cache hit rates with lower tail latency, and can run on up to 80% less resources for the same sized workload.
+Fully compatible with Redis and Memcached APIs, Dragonfly requires no code changes to adopt. Compared to legacy in-memory datastores, Dragonfly delivers 25X more throughput, higher cache hit rates with lower tail latency, and can run on up to 80% fewer resources for the same-sized workload.
 
 ## Contents
 
@@ -31,13 +31,13 @@ Fully compatible with Redis and Memcached APIs, Dragonfly requires no code chang
 - [Build from source](./docs/build-from-source.md)
 - [Contributors](#contributors)
 
-## <a name="benchmarks"><a/>Benchmarks
+## <a name="benchmarks"></a>Benchmarks
 
-We first compare Dragonfly with Redis on `m5.large` instance which is commonly used to run Redis
+We first compare Dragonfly with Redis on an `m5.large` instance, which is commonly used to run Redis
 due to its single-threaded architecture. The benchmark program runs from another
 load-test instance (c5n) in the same AZ using `memtier_benchmark  -c 20 --test-time 100 -t 4 -d 256 --distinct-client-seed`
 
-Dragonfly shows a comparable performance:
+Dragonfly shows comparable performance:
 
 1. SETs (`--ratio 1:0`):
 
@@ -55,7 +55,7 @@ Dragonfly shows a comparable performance:
 The benchmark above shows that the algorithmic layer inside DF that allows it to scale vertically
 does not take a large toll when running single-threaded.
 
-However, if we take a bit stronger instance (m5.xlarge), the gap between DF and Redis starts growing.
+However, if we use a slightly larger instance (m5.xlarge), the gap between DF and Redis starts growing.
 (`memtier_benchmark  -c 20 --test-time 100 -t 6 -d 256 --distinct-client-seed`):
 1. SETs (`--ratio 1:0`):
 
@@ -76,7 +76,7 @@ while single-threaded Redis is bottlenecked on CPU and reaches local maxima in t
 <img src="http://static.dragonflydb.io/repo-assets/aws-throughput.svg" width="80%" border="0"/>
 
 If we compare Dragonfly and Redis on the most network-capable instance c6gn.16xlarge,
-Dragonfly showed a 25X increase in throughput compared to Redis single process, crossing 3.8M QPS.
+Dragonfly showed a 25X increase in throughput compared to a single Redis process, crossing 3.8M QPS.
 
 Dragonfly's 99th percentile latency metrics at its peak throughput:
 
@@ -134,7 +134,7 @@ For more info about memory efficiency in Dragonfly, see our [Dashtable doc](/doc
 
 
 
-## <a name="configuration"><a/>Configuration
+## <a name="configuration"></a>Configuration
 
 Dragonfly supports common Redis arguments where applicable. For example, you can run: `dragonfly --requirepass=foo --bind localhost`.
 
@@ -167,30 +167,30 @@ There are also some Dragonfly-specific arguments:
  * `admin_port`: To enable admin access to the console on the assigned port (`default: disabled`). Supports both HTTP and RESP protocols.
  * `admin_bind`: To bind the admin console TCP connection to a given address (`default: any`). Supports both HTTP and RESP protocols.
  * `admin_nopass`: To enable open admin access to console on the assigned port, without auth token needed (`default: false`). Supports both HTTP and RESP protocols.
- * `cluster_mode`: Cluster mode supported (`default: ""`). Currently supports only `emulated`.
+ * `cluster_mode`: Enables cluster mode (`default: ""`). Supports `emulated` and `yes`.
  * `cluster_announce_ip`: The IP that cluster commands announce to the client.
  * `announce_port`: The port that cluster commands announce to the client, and to replication master.
 
 ### Example start script with popular options:
 
 ```bash
-./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379 --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump.rdb
+./dragonfly-x86_64 --logtostderr --requirepass=youshallnotpass --cache_mode=true -dbnum 1 --bind localhost --port 6379 --maxmemory=12gb --keys_output_limit=12288 --dbfilename dump
 ```
 
-Arguments can be also provided via:
+Arguments can also be provided via:
  * `--flagfile <filename>`: The file should list one flag per line, with equal signs instead of spaces for key-value flags. No quotes are needed for flag values.
  * Setting environment variables. Set `DFLY_x`, where `x` is the exact name of the flag, case sensitive.
 
 For more options like logs management or TLS support, run `dragonfly --help`.
 
 
-## <a name="design-decisions"><a/> Design decisions
+## <a name="design-decisions"></a>Design decisions
 
 ### Novel cache design
 
 Dragonfly has a single, unified, adaptive caching algorithm that is simple and memory efficient.
 
-You can enable caching mode by passing the `--cache_mode=true` flag. Once this mode is on, Dragonfly will evict items least likely to be stumbled upon in the future but only when it is near the `maxmemory` limit.
+You can enable caching mode by passing the `--cache_mode=true` flag. Once this mode is on, Dragonfly will evict items least likely to be accessed in the future, but only when it is near the `maxmemory` limit.
 
 ### Expiration deadlines with relative accuracy
 
@@ -206,13 +206,13 @@ By default, Dragonfly allows HTTP access via its main TCP port (6379). That's ri
 
 Go to the URL `:6379/metrics` to view Prometheus-compatible metrics.
 
-The Prometheus exported metrics are compatible with the Grafana dashboard, [see here](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json).
+The exported Prometheus metrics are compatible with the Grafana dashboard, [see here](tools/local/monitoring/grafana/provisioning/dashboards/dragonfly.json).
 
 
-Important! The HTTP console is meant to be accessed within a safe network. If you expose Dragonfly's TCP port externally, we advise you to disable the console with `--http_admin_console=false` or `--nohttp_admin_console`.
+Important! The HTTP console is meant to be accessed within a safe network. If you expose Dragonfly's TCP port externally, we advise you to disable the console with `--primary_port_http_enabled=false` or `--noprimary_port_http_enabled`.
 
 
-## <a name="background"><a/>Background
+## <a name="background"></a>Background
 
 Dragonfly started as an experiment to see how an in-memory datastore could look if it was designed in 2022. Based on lessons learned from our experience as users of memory stores and engineers who worked for cloud companies, we knew that we need to preserve two key properties for Dragonfly: Atomicity guarantees for all operations and low, sub-millisecond latency over very high throughput.
 
@@ -220,7 +220,7 @@ Our first challenge was how to fully utilize CPU, memory, and I/O resources usin
 
 To provide atomicity guarantees for multi-key operations, we use the advancements from recent academic research. We chose the paper ["VLL: a lock manager redesign for main memory database systems”](https://www.cs.umd.edu/~abadi/papers/vldbj-vll.pdf) to develop the transactional framework for Dragonfly. The choice of shared-nothing architecture and VLL allowed us to compose atomic multi-key operations without using mutexes or spinlocks. This was a major milestone for our PoC and its performance stood out from other commercial and open-source solutions.
 
-Our second challenge was to engineer more efficient data structures for the new store. To achieve this goal, we based our core hashtable structure on the paper ["Dash: Scalable Hashing on Persistent Memory"](https://arxiv.org/pdf/2003.07302.pdf). The paper itself is centered around the persistent memory domain and is not directly related to main-memory stores, but it's still most applicable to our problem. The hashtable design suggested in the paper allowed us to maintain two special properties that are present in the Redis dictionary: The incremental hashing ability during datastore growth the ability to traverse the dictionary under changes using a stateless scan operation. In addition to these two properties, Dash is more efficient in CPU and memory use. By leveraging Dash's design, we were able to innovate further with the following features:
+Our second challenge was to engineer more efficient data structures for the new store. To achieve this goal, we based our core hashtable structure on the paper ["Dash: Scalable Hashing on Persistent Memory"](https://arxiv.org/pdf/2003.07302.pdf). The paper itself is centered around the persistent memory domain and is not directly related to main-memory stores, but it's still most applicable to our problem. The hashtable design suggested in the paper allowed us to maintain two special properties that are present in the Redis dictionary: The incremental hashing ability during datastore growth and the ability to traverse the dictionary under changes using a stateless scan operation. In addition to these two properties, Dash is more efficient in CPU and memory use. By leveraging Dash's design, we were able to innovate further with the following features:
  * Efficient record expiry for TTL records.
  * A novel cache eviction algorithm that achieves higher hit rates than other caching strategies like LRU and LFU with **zero memory overhead**.
  * A novel **fork-less** snapshotting algorithm.
@@ -230,9 +230,9 @@ Once we had built the foundation for Dragonfly and [we were happy with its perfo
 And finally, <br>
 <em>Our mission is to build a well-designed, ultra-fast, cost-efficient in-memory datastore for cloud workloads that takes advantage of the latest hardware advancements. We intend to address the pain points of current solutions while preserving their product APIs and propositions.</em>
 
-## <a name="contributors"><a/>Contributors
+## <a name="contributors"></a>Contributors
 
-Thanks to all the contributors to Dragonfly project!
+Thanks to all the contributors to the Dragonfly project!
 
 <a href="https://github.com/dragonflydb/dragonfly/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=dragonflydb/dragonfly" />
