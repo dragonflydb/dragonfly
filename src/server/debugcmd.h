@@ -57,9 +57,6 @@ class DebugCmd {
   // Investigation-only. Remove once closed.
   void ReplDiag(CommandContext* cmd_cntx);
   void Shards(CommandContext* cmd_cntx);
-  // Test-only crash injection for CI log-demultiplexing verification. Remove once that
-  // work (branch dedup-ci-logs) lands and is no longer needed.
-  void ShardCrash(CommandContext* cmd_cntx);
   void LogTraffic(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void RecvSize(std::string_view param, CommandContext* cmd_cntx);
   void Topk(facade::CmdArgParser parser, CommandContext* cmd_cntx);

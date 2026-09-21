@@ -672,10 +672,8 @@ def copy_failed_logs(log_dir, report):
         if os.path.isfile(file):
             file = file.rstrip("\n")
             logging.error(f"🪵🪵🪵🪵🪵🪵 {file} 🪵🪵🪵🪵🪵🪵")
-            # console.<pid>.log is one instance's raw stdout/stderr in isolation (see
-            # read_sedout in instance.py); dump it here, one file at a time and never
-            # concurrently with another instance, so it reads the same as it would live
-            # but without the interleaving multiple instances would otherwise cause.
+            # console.<pid>.log is one instance's raw stdout/stderr (see read_sedout);
+            # dump it one file at a time so instances never interleave.
             if os.path.basename(file).startswith("console."):
                 with open(file) as console_log:
                     logging.error(console_log.read())

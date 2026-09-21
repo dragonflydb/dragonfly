@@ -585,9 +585,6 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    stream replica) the unread byte count in the master socket's kernel recv buffer.",
         "SHARDS",
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
-        "SHARD-CRASH",
-        "    Test-only: logs a few LOG(ERROR) lines then DCHECK-fails on every shard",
-        "    concurrently, crashing the process. Debug builds only.",
         "TOPK ON [min_freq] | OFF [max_keys]",
         "    Turns on or off sampling of topk keys. Provides top keys with at least <min_freq> ",
         "    during the sampling period. The results are returned in descending order of frequency",
@@ -678,10 +675,6 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (subcmd == "SHARDS") {
     return Shards(cmd_cntx);
-  }
-
-  if (subcmd == "SHARD-CRASH") {
-    return ShardCrash(cmd_cntx);
   }
 
   if (subcmd == "EXEC") {
@@ -1360,27 +1353,6 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
 #undef MAXMIN_STAT
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->SendVerbatimString(out);
-}
-
-// Test-only: fires a DCHECK on every shard concurrently, so several shard/proactor
-// threads in this one process crash at nearly the same wall-clock moment -- reproducing
-// the "single process, multiple threads crash at once" scenario that the CI
-// log-demultiplexing fix (branch dedup-ci-logs) targets. The LOG(ERROR) lines before the
-// DCHECK exercise the other half of that fix: glog mirrors ERROR+ to stderr by default
-// (no --alsologtostderr needed), so this also produces real, attributable, per-shard
-// console output to verify against interleaving. DCHECK (not CHECK) is deliberate: it
-// only fires in Debug builds, matching how these crashes actually surface in CI.
-void DebugCmd::ShardCrash(CommandContext* cmd_cntx) {
-  shard_set->RunBriefInParallel([](EngineShard* shard) {
-    for (int i = 0; i < 3; ++i) {
-      LOG(ERROR) << "DEBUG SHARD-CRASH: shard " << shard->shard_id() << " about to crash";
-    }
-    DCHECK(false) << "DEBUG SHARD-CRASH: intentional DCHECK failure on shard " << shard->shard_id();
-  });
-
-  // Only reached in a build where DCHECK is a no-op (e.g. Release/NDEBUG).
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->SendOk();
 }
 
 void DebugCmd::RecvSize(string_view param, CommandContext* cmd_cntx) {
