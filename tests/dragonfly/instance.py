@@ -55,7 +55,7 @@ def read_sedout(pipe, raw_log_path=None):
     # don't interleave. Already symbolized live by the crashing process; no addr2line needed.
     raw_log = open(raw_log_path, "a") if raw_log_path else None
     try:
-        for line in iter(pipe.readline, b""):
+        for line in iter(pipe.readline, ""):
             # No dedup: a repeated line (e.g. recursive frames) is real content, not noise.
             if raw_log:
                 raw_log.write(line)
@@ -234,7 +234,8 @@ class DflyInstance:
                 proc.kill()
             else:
                 proc.terminate()
-                proc.communicate(timeout=120)
+                # wait(), not communicate(): communicate() would race sed for stdout bytes.
+                proc.wait(timeout=120)
                 # if the return code is 0 it means normal termination
                 # if the return code is negative it means termination by signal
                 # if the return code is positive it means abnormal exit
@@ -257,12 +258,13 @@ class DflyInstance:
             logging.debug("INFO LOGS of DF are:")
             self.print_info_logs_to_debug_log()
             proc.kill()
-            proc.communicate()
+            proc.wait()
             raise Exception("Unable to terminate DragonflyDB gracefully, it was killed")
         finally:
             if self.sed_proc:
-                self.sed_proc.communicate()
+                # join() first, not communicate(): read_sedout already drains sed_proc.stdout.
                 self.sed_thread.join()
+                self.sed_proc.wait()
 
     def wait(self):
         if self.proc is not None:
