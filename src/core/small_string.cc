@@ -81,7 +81,7 @@ size_t SmallString::Assign(std::string_view s) {
   size_ = s.size();
   memcpy(prefix_, s.data(), kPrefLen);
   memcpy(realptr, s.data() + kPrefLen, heap_len);
-  return mi_malloc_usable_size(realptr);
+  return mi_usable_size(realptr);
 }
 
 void SmallString::Free() {
@@ -92,7 +92,7 @@ void SmallString::Free() {
 
 uint16_t SmallString::MallocUsed() const {
   if (size_)
-    return mi_malloc_usable_size(tl.seg_alloc->Translate(small_ptr_));
+    return mi_usable_size(tl.seg_alloc->Translate(small_ptr_));
   return 0;
 }
 
