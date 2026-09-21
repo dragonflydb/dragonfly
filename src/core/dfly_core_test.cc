@@ -53,9 +53,6 @@ static string GetRandomHex(size_t len) {
   return res;
 }
 
-extern int stringmatchlen(const char* pattern, int patternLen, const char* string, int stringLen,
-                          int nocase);
-
 class TxQueueTest : public ::testing::Test {
  protected:
   TxQueueTest() {
@@ -115,7 +112,7 @@ TEST_F(IntentLockTest, Basic) {
 
 class StringMatchTest : public ::testing::Test {
  protected:
-  // wrapper around stringmatchlen with stringview arguments
+  // wrapper around GlobMatcher with stringview arguments
   bool MatchLen(string_view pattern, string_view str, bool nocase) {
     GlobMatcher matcher(pattern, !nocase);
     return matcher.Matches(str);
@@ -289,6 +286,65 @@ TEST_F(StringMatchTest, Special) {
 
   /* Unclosed character classes are not an error (undocumented): */
   TEST_STRINGMATCH("[A-", "B", 0, 0);
+}
+
+TEST_F(StringMatchTest, DeepStars) {
+  // Exercise MatchGlob directly (the server path uses neither reflex nor pcre2). A pattern
+  // with far more stars than any bounded recursion depth must still be evaluated correctly and
+  // without overflowing the stack. "*?" repeated N times matches exactly the strings of length
+  // >= N.
+  auto sm = [](const string& p, const string& s) { return GlobMatcher::MatchGlob(p, s, true); };
+  const int kN = 2000;
+  string deep;
+  for (int i = 0; i < kN; ++i)
+    deep += "*?";
+
+  EXPECT_TRUE(sm(deep, string(kN, 'a')));       // length == N -> matches
+  EXPECT_TRUE(sm(deep, string(kN + 7, 'a')));   // longer -> matches
+  EXPECT_FALSE(sm(deep, string(kN - 1, 'a')));  // too short -> no match
+
+  // Deep run of literal stars around a middle anchor still resolves.
+  string mid = string(kN, '*') + "b" + string(kN, '*');
+  EXPECT_TRUE(sm(mid, string(500, 'a') + "b" + string(500, 'a')));
+  EXPECT_FALSE(sm(mid, string(1000, 'a')));  // no 'b' -> no match
+}
+
+TEST_F(StringMatchTest, StarBacktracking) {
+  /* The literal search after '*' is case sensitive only: */
+  TEST_STRINGMATCH("*b", "aB", 0, 1);
+  TEST_STRINGMATCH("a*b", "aXB", 0, 1);
+  TEST_STRINGMATCH("*B*c", "abbC", 0, 1);
+
+  /* An escaped literal right after '*': */
+  TEST_STRINGMATCH("*\\ab", "xab", 1, 1);
+  TEST_STRINGMATCH("*\\ab*", "xabx", 1, 1);
+  TEST_STRINGMATCH("*\\?x", "a?x", 1, 1);
+
+  /* A literal prefix that consumes the whole string: */
+  TEST_STRINGMATCH("a*", "a", 1, 1);
+  TEST_STRINGMATCH("ab**", "ab", 1, 1);
+  TEST_STRINGMATCH("ab*c", "ab", 0, 0);
+
+  /* Range bounds are swapped before lowercasing: */
+  TEST_STRINGMATCH("[a-Z]", "m", 0, 0);
+  TEST_STRINGMATCH("[a-Z]", "_", 1, 0);
+
+  /* The last '*' retries from the right place: */
+  TEST_STRINGMATCH("*ab*", "xab", 1, 1);
+  TEST_STRINGMATCH("*ab", "abab", 1, 1);
+  TEST_STRINGMATCH("*a?", "aab", 1, 1);
+  TEST_STRINGMATCH("*ab*ab", "aab", 0, 0);
+
+  /* Not special outside character classes, also right after '*': */
+  TEST_STRINGMATCH("*]", "a]", 1, 1);
+  TEST_STRINGMATCH("*^x", "a^x", 1, 1);
+  TEST_STRINGMATCH("*-", "a-", 1, 1);
+
+  /* The pattern ends inside a token right after '*': */
+  TEST_STRINGMATCH("*[", "a[", 0, 0);
+  TEST_STRINGMATCH("*[^", "ab", 1, 1);
+  TEST_STRINGMATCH("*\\", "a\\", 1, 1);
+  TEST_STRINGMATCH("*[a-", "xa", 1, 1);
 }
 
 class HuffCoderTest : public ::testing::Test {
@@ -558,20 +614,18 @@ BENCHMARK(BM_MatchStd)->Arg(1000)->Arg(10000);
 
 static void BM_MatchRedisGlob(benchmark::State& state) {
   string random_val = GetRandomHex(state.range(0));
-  const char* pattern = "*foobar*";
+  string_view pattern = "*foobar*";
   while (state.KeepRunning()) {
-    DoNotOptimize(
-        stringmatchlen(pattern, strlen(pattern), random_val.c_str(), random_val.size(), 0));
+    DoNotOptimize(GlobMatcher::MatchGlob(pattern, random_val, true));
   }
 }
 BENCHMARK(BM_MatchRedisGlob)->Arg(1000)->Arg(10000);
 
 static void BM_MatchRedisGlob2(benchmark::State& state) {
   string random_val = GetRandomHex(state.range(0));
-  const char* pattern = "bull:*:meta";
+  string_view pattern = "bull:*:meta";
   while (state.KeepRunning()) {
-    DoNotOptimize(
-        stringmatchlen(pattern, strlen(pattern), random_val.c_str(), random_val.size(), 0));
+    DoNotOptimize(GlobMatcher::MatchGlob(pattern, random_val, true));
   }
 }
 BENCHMARK(BM_MatchRedisGlob2)->Arg(32)->Arg(1000)->Arg(10000);
@@ -593,7 +647,7 @@ static void BM_MatchData(benchmark::State& state) {
   } else {
     while (state.KeepRunning()) {
       for (const auto& key : keys) {
-        DoNotOptimize(stringmatchlen(pattern.data(), pattern.size(), key.c_str(), key.size(), 0));
+        DoNotOptimize(GlobMatcher::MatchGlob(pattern, key, true));
       }
     }
   }

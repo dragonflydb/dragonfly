@@ -360,3 +360,20 @@ async def test_expired_evicted_counters_zero_initialised(
     await async_client.execute_command("CONFIG RESETSTAT")
 
     assert await db0_values() == {family: 0 for family in families}
+
+
+async def test_keys_deep_glob_pattern_does_not_crash(async_client: aioredis.Redis):
+    # A pathological glob with tens of thousands of stars must not overflow the matcher and crash
+    # the server (regression for the recursive stringmatchlen on the small connection fiber stack).
+    # "*?" repeated N times matches any string of length >= N, so the key is returned.
+    key = "a" * 50000
+    pattern = "*?" * 50000
+    await async_client.set(key, "1")
+
+    assert len(await async_client.keys(pattern)) == 1
+    # SCAN MATCH goes through the same matcher. Iterate to cursor 0: a single SCAN page may come
+    # back empty with a non-zero cursor.
+    scan_keys = [k async for k in async_client.scan_iter(match=pattern)]
+    assert set(scan_keys) == {key}  # SCAN may repeat keys; check the key itself, not the count
+    # The server is still responsive.
+    assert await async_client.ping()
