@@ -584,6 +584,8 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    stream replica) the unread byte count in the master socket's kernel recv buffer.",
         "SHARDS",
         "    Prints memory usage and key stats per shard, as well as min/max indicators.",
+        "VECTOR-OOB",
+        "    Test-only: OOB vector write on one shard, crashes the process.",
         "TOPK ON [min_freq] | OFF [max_keys]",
         "    Turns on or off sampling of topk keys. Provides top keys with at least <min_freq> ",
         "    during the sampling period. The results are returned in descending order of frequency",
@@ -674,6 +676,10 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (subcmd == "SHARDS") {
     return Shards(cmd_cntx);
+  }
+
+  if (subcmd == "VECTOR-OOB") {
+    return VectorOob(cmd_cntx);
   }
 
   if (subcmd == "EXEC") {
@@ -1350,6 +1356,18 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
 #undef MAXMIN_STAT
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->SendVerbatimString(out);
+}
+
+// Test-only: real UB crash (not DCHECK) on a single shard, to exercise core dump capture.
+void DebugCmd::VectorOob(CommandContext* cmd_cntx) {
+  shard_set->RunBriefInParallel(
+      [](EngineShard*) {
+        vector<int> v(1);
+        for (size_t i = 0; i < 1'000'000'000; ++i)
+          v[i] = static_cast<int>(i);
+      },
+      [](auto i) { return i == 0; });
+  static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendOk();
 }
 
 void DebugCmd::RecvSize(string_view param, CommandContext* cmd_cntx) {

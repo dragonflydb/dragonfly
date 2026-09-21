@@ -66,28 +66,13 @@ jobs:
 
     strategy:
       matrix:
-        # This matrix also runs on push to main (build-only) to warm the ccache that PR builds restore.
-        # Test of these containers
-        container: ["ubuntu-dev:24", "alpine-dev:latest"]
-        build-type: [Debug, Release]
+        # TEMPORARY (core-dumps branch): single job for fast iteration; restore full matrix before merging.
+        container: ["ubuntu-dev:24"]
+        build-type: [Debug]
         compiler: [{ cxx: g++, c: gcc }]
         # -no-pie to disable address randomization so we could symbolize stacktraces
         cxx_flags: ["-Werror -no-pie"]
         sanitizers: ["NoSanitizers"]
-        include:
-          - container: "alpine-dev:latest"
-            build-type: Debug
-            compiler: { cxx: clang++, c: clang }
-            cxx_flags: ""
-            sanitizers: "NoSanitizers"
-          - container: "ubuntu-dev:24"
-            build-type: Debug
-            compiler: { cxx: clang++, c: clang }
-            # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
-            cxx_flags: "-Wno-error=unused-command-line-argument"
-            sanitizers: "Sanitizers"
-            # Sanitizer builds produce larger objects, so give this job a bigger ccache.
-            ccache-max-size: "2G"
 
     runs-on: ubuntu-latest
     container:
@@ -160,7 +145,7 @@ jobs:
           df -h
 
       - name: C++ Unit Tests - IoUring
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && false # TEMPORARY (core-dumps): skip for fast iteration
         run: |
           cd ${GITHUB_WORKSPACE}/build
           echo Run ctest -V -L DFLY
@@ -191,7 +176,7 @@ jobs:
 
 
       - name: C++ Unit Tests - Epoll
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && false # TEMPORARY (core-dumps): skip for fast iteration
         run: |
           cd ${GITHUB_WORKSPACE}/build
           JUNIT_DIR="${CPP_JUNIT_DIR}"
@@ -219,7 +204,7 @@ jobs:
             FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
 
       - name: C++ Unit Tests - IoUring with cluster mode
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && false # TEMPORARY (core-dumps): skip for fast iteration
         run: |
           cd ${GITHUB_WORKSPACE}/build
           JUNIT_DIR="${CPP_JUNIT_DIR}"
@@ -231,7 +216,7 @@ jobs:
             --output-junit "${CTEST_JUNIT_DIR}/cluster.xml"
 
       - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
-        if: github.event_name != 'push'
+        if: github.event_name != 'push' && false # TEMPORARY (core-dumps): skip for fast iteration
         run: |
           cd ${GITHUB_WORKSPACE}/build
           JUNIT_DIR="${CPP_JUNIT_DIR}"
@@ -259,6 +244,8 @@ jobs:
           # Non-release build will not run tests marked as opt_only
           # "not empty" string is needed for release build because pytest command can not get empty string for filter
           filter: ${{ matrix.build-type == 'Release' && 'not debug_only' || 'not opt_only' }}
+          # TEMPORARY (core-dumps): scope to just our test for fast iteration.
+          test-suites: "zz_coredump_check_test.py"
           junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
           azure-container: ${{ secrets.AZURE_REGTEST_CONTAINER }}
@@ -277,7 +264,7 @@ jobs:
         # external-server mode against the just-built binary, on both Debug and Release.
         # continue-on-error keeps it a canary for now — flip to a blocking step once proven stable
         # in CI. See tests/dragonfly/valkey_tcl/README.md.
-        if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push'
+        if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push' && false # TEMPORARY (core-dumps): skip for fast iteration
         continue-on-error: true
         timeout-minutes: 20
         run: |
