@@ -121,6 +121,15 @@ DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
   delete sample_top_keys;
   delete sample_unique_keys;
+  delete sample_values_hist;
+}
+
+void DbTable::PrepareForSingleShotHeapDestroy() {
+  prime.SetArenaDestruct();
+  mcflag.SetArenaDestruct();
+
+  DCHECK_EQ(trans_locks.Size(), 0u);
+  DCHECK(watched_keys.empty());
 }
 
 void DbTable::Clear() {

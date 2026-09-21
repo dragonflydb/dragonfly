@@ -4,6 +4,8 @@
 
 #include "server/namespaces.h"
 
+#include <ranges>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
@@ -74,8 +76,12 @@ void Namespaces::Clear() {
 
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
-    for (auto& ns : ABSL_TS_UNCHECKED_READ(namespaces_)) {
-      ns.second.shard_db_slices_[es->shard_id()].reset();
+    DbSlice::ShutdownThreadLocal();
+
+    for (auto& val : ABSL_TS_UNCHECKED_READ(namespaces_) | std::views::values) {
+      auto& db_slice = val.shard_db_slices_[es->shard_id()];
+      db_slice->PrepareForSingleShotHeapDestroy();
+      db_slice.reset();
     }
   });
 

@@ -479,6 +479,7 @@ class CompactObj {
 
   static Stats GetStatsThreadLocal();
   static void InitThreadLocal(MemoryResource* mr);
+  static void ClearThreadLocalStats();
 
   // Iterate the thread-local pin map and reap entries with refcnt==0:
   // free orphaned buffers, erase the map slot. Typically called from

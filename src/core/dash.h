@@ -118,6 +118,11 @@ class DashTable : public detail::DashTableBase {
             PMR_NS::memory_resource* mr = PMR_NS::get_default_resource());
   ~DashTable();
 
+  // Makes ~DashTable() a no-op; use when the arena backing it is about to be bulk-freed.
+  void SetArenaDestruct() {
+    arena_destruct_ = true;
+  }
+
   void Reserve(size_t size);
 
   // false for duplicate, true if inserted.
@@ -467,6 +472,8 @@ class DashTable : public detail::DashTableBase {
   Policy policy_;
   std::vector<SegmentType*, PMR_NS::polymorphic_allocator<SegmentType*>> segment_;
 
+  bool arena_destruct_ = false;
+
   uint64_t garbage_collected_ = 0;
   uint64_t stash_unloaded_ = 0;
 };  // DashTable
@@ -815,6 +822,9 @@ DashTable<_Key, _Value, Policy>::DashTable(size_t capacity_log, const Policy& po
 
 template <typename _Key, typename _Value, typename Policy>
 DashTable<_Key, _Value, Policy>::~DashTable() {
+  if (arena_destruct_)
+    return;
+
   Clear();
   auto* resource = segment_.get_allocator().resource();
   PMR_NS::polymorphic_allocator<SegmentType> pa(resource);
