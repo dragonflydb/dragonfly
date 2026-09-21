@@ -908,11 +908,10 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
   auto result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
   // Finalize memory accounting before potential deletion.
   auto_updater.Run();
-  bool key_deleted = SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, *pv);
+  bool key_deleted = DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, key, *pv);
 
-  // A member probed while lazily expired is still alive on a lagging replica and the replayed
-  // command would re-arm it there; delete it explicitly. DeleteSetIfEmpty journaled a DEL itself
-  // and may have yielded, so only locals are touched from here on.
+  // Delete lazily expired members on lagging replicas so replay cannot revive them.
+  // The cleanup above may journal DEL and yield; use only locals from here on.
   if (!key_deleted && op_args.shard->journal()) {
     if (had_member_expiry) {
       absl::InlinedVector<std::string_view, 4> missing{key};
@@ -947,15 +946,8 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   if (it->second.IsExternal() && !it->second.IsCool())
     return OpStatus::CANCELLED;  // can't inspect offloaded values synchronously
 
-  int32_t res = -1;
-  if (it->second.ObjType() == OBJ_SET) {
-    res = SetFamily::FieldExpireTime(db_cntx, it->second, field);
-    SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
-  } else {
-    DCHECK_EQ(OBJ_HASH, it->second.ObjType());
-    res = HSetFamily::FieldExpireTime(db_cntx, it->second, field);
-    HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
-  }
+  int32_t res = FieldExpireTime(db_cntx, it->second, field);
+  DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
   return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
 }
 #else
@@ -1777,7 +1769,7 @@ OpResult<CompactObjType> OpFetchSortEntries(const OpArgs& op_args, std::string_v
   // IterateSet may trigger lazy member expiry on sets with member-level TTL.
   // If all members expired, delete the now-empty key.
   if (obj_type == OBJ_SET && it->second.Size() == 0) {
-    SetFamily::DeleteSetIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
+    DeleteCollectionIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
   }
 
   return obj_type;
@@ -1813,7 +1805,7 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
 
   // IterateSet may trigger lazy member expiry.  Clean up empty set.
   if (obj_type == OBJ_SET && it->second.Size() == 0) {
-    SetFamily::DeleteSetIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
+    DeleteCollectionIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
   }
 
   return std::make_pair(std::move(elements), obj_type);

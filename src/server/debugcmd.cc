@@ -33,13 +33,12 @@ extern "C" {
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
-#include "server/hset_family.h"
+#include "server/family_utils.h"
 #include "server/main_service.h"
 #include "server/multi_command_squasher.h"
 #include "server/namespaces.h"
 #include "server/rdb_load.h"
 #include "server/server_state.h"
-#include "server/set_family.h"
 #include "server/string_stats.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -1207,10 +1206,8 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
       DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
       string key;
       it->first.GetString(&key);
-      if (obj_type == OBJ_SET)
-        SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
-      else if (obj_type == OBJ_HASH)
-        HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
+      if (obj_type == OBJ_SET || obj_type == OBJ_HASH)
+        DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
     }
   };
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
@@ -1603,10 +1600,8 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
       DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
       string key;
       it->first.GetString(&key);
-      if (obj_type == OBJ_SET)
-        SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
-      else if (obj_type == OBJ_HASH)
-        HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
+      if (obj_type == OBJ_SET || obj_type == OBJ_HASH)
+        DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
     }
   };
 

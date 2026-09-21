@@ -5,11 +5,17 @@
 #include <xxhash.h>
 
 #include "base/logging.h"
+#include "core/detail/listpack_wrap.h"
+#include "core/oah_set.h"
+#include "core/string_map.h"
+#include "server/db_slice.h"
+#include "server/tx_base.h"
 
 extern "C" {
 #include "redis/listpack.h"
 #include "redis/sds.h"
 #include "redis/stream.h"
+#include "redis/util.h"
 #include "redis/ziplist.h"
 #include "redis/zmalloc.h"
 }
@@ -64,6 +70,50 @@ int ZiplistPairsEntryConvertAndValidate(unsigned char* p, unsigned int head_coun
 string XXH3_Digest(std::string_view s) {
   uint64_t hash = XXH3_64bits(s.data(), s.size());
   return absl::StrCat(absl::Hex(hash, absl::kZeroPad16));
+}
+
+int32_t FieldExpireTime(const DbContext& db_cntx, const PrimeValue& pv, string_view field) {
+  DCHECK(pv.ObjType() == OBJ_SET || pv.ObjType() == OBJ_HASH);
+  if (pv.Encoding() == kEncodingIntSet) {
+    long long llval;
+    return string2ll(field.data(), field.size(), &llval) ? -1 : -3;
+  }
+  if (pv.Encoding() == kEncodingListPack) {
+    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
+    return lw.Find(field) == lw.end() ? -3 : -1;
+  }
+
+  pv.SetMemberTime(MemberTimeSeconds(db_cntx.time_now_ms));
+  auto get_expiry = [field](auto* owner) -> int32_t {
+    auto it = owner->Find(field);
+    if (it == owner->end())
+      return -3;
+    return it.HasExpiry() ? it.ExpiryTime() : -1;
+  };
+  return pv.ObjType() == OBJ_SET ? VisitSet(pv.RObjPtr(), get_expiry)
+                                 : get_expiry(static_cast<StringMap*>(pv.RObjPtr()));
+}
+
+bool DeleteCollectionIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, string_view key,
+                             const PrimeValue& pv) {
+  const auto obj_type = pv.ObjType();
+  DCHECK(obj_type == OBJ_SET || obj_type == OBJ_HASH);
+  if (pv.Encoding() != kEncodingStrMap2)
+    return false;
+
+  bool empty = obj_type == OBJ_SET ? VisitSet(pv.RObjPtr(), [](auto* s) { return s->Empty(); })
+                                   : static_cast<StringMap*>(pv.RObjPtr())->Empty();
+  if (!empty)
+    return false;
+
+  if (auto res = db_slice.FindMutable(db_cntx, key, obj_type); res) {
+    db_slice.DelMutable(db_cntx, std::move(*res));
+    if (db_slice.shard_owner()->journal()) {
+      RecordDelete(db_cntx.db_index, key);
+    }
+    return true;
+  }
+  return false;
 }
 
 sds WrapSds(std::string_view s) {

@@ -640,54 +640,16 @@ void FieldExpiry::Journal(absl::Span<const long> results, absl::Span<const OptSt
     JournalHGetEx(op_args_, key_, exp_params_.DeadlineSec() * 1000, updated);
 }
 
-// Returns -2 for a missing field, 0 for an unmet NX/XX/GT/LT condition, 1 for an updated TTL,
-// and 2 for a field deleted by a zero or past expiry.
 vector<long> FieldExpiry::UpdateTTL(StringMap* owner, ExpireFlags flags) {
   uint32_t ttl_sec = exp_params_.TtlSec(op_args_.db_cntx.time_now_ms);
-  vector<long> res;
-  res.reserve(fields_.size());
-
-  auto can_update = [&](const auto& it) {
-    switch (flags) {
-      case ExpireFlags::EXPIRE_NX:
-        return !it.HasExpiry();
-      case ExpireFlags::EXPIRE_XX:
-        return it.HasExpiry();
-      case ExpireFlags::EXPIRE_GT:
-        return it.ExpiryTime() - owner->time_now() < ttl_sec;
-      case ExpireFlags::EXPIRE_LT:
-        return it.ExpiryTime() - owner->time_now() > ttl_sec;
-      case ExpireFlags::EXPIRE_ALWAYS:
-        break;
+  auto before_update = [&](string_view field, const auto& it) {
+    // Only extending an existing deadline can lose a live value during delayed replay.
+    // These entries already have TTL storage, so SetExpiryTime won't reallocate the value.
+    if (journal_ && it.HasExpiry() && ttl_sec > it.ExpiryTime() - owner->time_now()) {
+      restored_.insert(restored_.end(), {field, string_view{it->second, sdslen(it->second)}});
     }
-    return true;
   };
-
-  for (string_view field : fields_) {
-    auto it = owner->Find(field);
-    if (it != owner->end()) {
-      if (!can_update(it)) {
-        res.emplace_back(0);
-        continue;
-      }
-      if (ttl_sec == 0) {
-        owner->Erase(field);
-        res.emplace_back(2);
-      } else {
-        // Only extending an existing deadline can lose a live value during delayed replay.
-        // These entries already have TTL storage, so SetExpiryTime won't reallocate the value.
-        if (journal_ && it.HasExpiry() && ttl_sec > it.ExpiryTime() - owner->time_now()) {
-          restored_.insert(restored_.end(), {field, string_view{it->second, sdslen(it->second)}});
-        }
-        it.SetExpiryTime(ttl_sec);
-        res.emplace_back(1);
-      }
-    } else {
-      res.emplace_back(-2);
-    }
-  }
-
-  return res;
+  return ExpireElements(owner, fields_, ttl_sec, flags, before_update);
 }
 
 // Removes field TTLs by re-inserting the values without an expiry.
@@ -1172,7 +1134,7 @@ OpResult<vector<int64_t>> OpHExpireTime(Transaction* t, EngineShard* shard, stri
   res.reserve(fields.size());
 
   for (auto field : fields) {
-    int32_t exp_time = HSetFamily::FieldExpireTime(db_cntx, pv, field);
+    int32_t exp_time = FieldExpireTime(db_cntx, pv, field);
     if (exp_time <= 0) {
       // -3 from FieldExpireTime means field not found -> -2; -1 means no expiry -> stays -1.
       res.push_back(exp_time == -3 ? -2 : exp_time);
@@ -1186,7 +1148,7 @@ OpResult<vector<int64_t>> OpHExpireTime(Transaction* t, EngineShard* shard, stri
   }
 
   // FieldExpireTime triggers lazy field expiry; drop the key if all fields are now gone.
-  HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, pv);
+  DeleteCollectionIfEmpty(db_slice, db_cntx, key, pv);
 
   return res;
 }
@@ -1575,7 +1537,7 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
 
       if (string_map->Empty()) {  // Can happen if we use a TTL on hash members.
-        HSetFamily::DeleteIfEmpty(db_slice, db_context, key, pv);
+        DeleteCollectionIfEmpty(db_slice, db_context, key, pv);
         return facade::OpStatus::KEY_NOTFOUND;
       }
     } else if (pv.Encoding() == kEncodingListPack) {
@@ -1761,42 +1723,6 @@ StringMap* HSetFamily::ConvertToStrMap(uint8_t* lp) {
   for (const auto [key, value] : lw)
     LOG_IF(ERROR, !sm->AddOrUpdate(key, value)) << "Internal error: duplicate key " << key;
   return sm;
-}
-
-// returns -1 if no expiry is associated with the field, -3 if no field is found.
-int32_t HSetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
-                                    std::string_view field) {
-  DCHECK_EQ(OBJ_HASH, pv.ObjType());
-
-  if (pv.Encoding() == kEncodingListPack) {
-    detail::ListpackWrap lw{static_cast<uint8_t*>(pv.RObjPtr())};
-    return lw.Find(field) == lw.end() ? -3 : -1;
-  } else {
-    pv.SetMemberTime(MemberTimeSeconds(db_context.time_now_ms));
-    StringMap* string_map = (StringMap*)pv.RObjPtr();
-    auto it = string_map->Find(field);
-    if (it == string_map->end())
-      return -3;
-    return it.HasExpiry() ? it.ExpiryTime() : -1;
-  }
-}
-
-bool HSetFamily::DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
-                               const PrimeValue& pv) {
-  if (pv.Encoding() != kEncodingStrMap2)
-    return false;
-
-  if (auto* sm = static_cast<StringMap*>(pv.RObjPtr()); !sm->Empty())
-    return false;
-
-  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_HASH); res) {
-    db_slice.DelMutable(db_cntx, std::move(*res));
-    if (db_slice.shard_owner()->journal()) {
-      RecordDelete(db_cntx.db_index, key);
-    }
-    return true;
-  }
-  return false;
 }
 
 OpResult<vector<long>> HSetFamily::ExpireFields(const OpArgs& op_args, string_view key,

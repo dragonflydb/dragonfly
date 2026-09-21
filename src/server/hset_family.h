@@ -26,14 +26,6 @@ class HSetFamily {
   // Does not free lp.
   static StringMap* ConvertToStrMap(uint8_t* lp);
 
-  static int32_t FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
-                                 std::string_view field);
-
-  // Delete the hash key if it became empty after lazy field expiry.
-  // Returns true if the key was deleted.
-  static bool DeleteIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, std::string_view key,
-                            const PrimeValue& pv);
-
   // Apply FIELDEXPIRE to a hash, including empty-key cleanup and absolute-deadline journaling.
   static OpResult<std::vector<long>> ExpireFields(const OpArgs& op_args, std::string_view key,
                                                   uint32_t ttl_sec,
