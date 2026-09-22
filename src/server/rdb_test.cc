@@ -1779,6 +1779,40 @@ struct InterleaveHarness {
 
 }  // namespace
 
+TEST_F(RdbTest, HashExpiryEncoding) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");
+  ResetService();
+
+  for (auto version : {DflyVersion::VER6, DflyVersion::VER7}) {
+    SCOPED_TRACE(static_cast<int>(version));
+    TEST_current_time_ms = 1675209700000;  // 100 seconds after the member expiry epoch.
+    EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+    EXPECT_THAT(Run({"HSETEX", "key", "100", "expiring", "one"}), IntArg(1));
+    EXPECT_THAT(Run({"HSET", "key", "persistent", "two"}), IntArg(1));
+
+    std::string dump;
+    pp_->at(0)->Await([&] {
+      DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+      auto it = ctx.GetDbSlice(0).FindReadOnly(ctx, "key", OBJ_HASH);
+      ASSERT_TRUE(it.ok());
+      dump = RdbSerializer::DumpValue(it.value()->second, version);
+    });
+    ASSERT_FALSE(dump.empty());
+    EXPECT_EQ(dump.front(), version == DflyVersion::VER6
+                                ? RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED
+                                : RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS);
+
+    EXPECT_EQ(Run({"RESTORE", "dumped", "0", dump}), "OK");
+    EXPECT_THAT(Run({"HGETALL", "dumped"}).GetVec(),
+                UnorderedElementsAre("expiring", "one", "persistent", "two"));
+    EXPECT_THAT(Run({"HPEXPIRETIME", "dumped", "FIELDS", "2", "expiring", "persistent"}),
+                RespElementsAre(1675209800000LL, -1));
+    AdvanceTime(100000);
+    EXPECT_THAT(Run({"HGETALL", "dumped"}).GetVec(), ElementsAre("persistent", "two"));
+  }
+}
+
 // The following are tests that directly feed byte data to loader to exercise chunk loading.
 // Some of these will become redundant once the saver starts sending chunked data, so instead of
 // hand-crafting data we will be able to load from the db directly.
@@ -2054,6 +2088,7 @@ TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
   SetTestFlag("num_shards", "1");
   SetTestFlag("serialization_tagged_chunks", "true");
   ResetService();
+  TEST_current_time_ms = (TEST_current_time_ms / 1000) * 1000;
 
   // create hset named key, then fill it with count fields each with 128 char long string
   auto fill_hash = [&](std::string_view key, int count, char ch) {
@@ -2077,6 +2112,8 @@ TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
     std::string s{ch};
     fill_hash(s, num_fields_in_hash_set(s), ch);
   }
+  // Mix Valkey hash expiry chunks with ordinary hashes and journal entries.
+  EXPECT_THAT(Run({"HEXPIRE", "A", "1000", "FIELDS", "1", "field:0"}), RespElementsAre(1));
 
   std::string body;
   std::optional<uint64_t> last_journal_offset;
@@ -2132,6 +2169,7 @@ TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
     std::string s{ch};
     verify_hash(s, num_fields_in_hash_set(s), ch);
   }
+  EXPECT_THAT(Run({"HTTL", "A", "FIELDS", "2", "field:0", "field:1"}), RespElementsAre(1000, -1));
 }
 
 std::string MakeJournalDel(std::string_view key) {
