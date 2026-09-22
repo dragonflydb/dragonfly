@@ -847,6 +847,27 @@ TEST_F(GenericFamilyTest, ScanWithAttr) {
   ASSERT_EQ(0, vec.size());
 }
 
+TEST_F(GenericFamilyTest, ScanExpiredButPaused) {
+  absl::Cleanup unpause = [this] { Run({"client", "unpause"}); };
+  Run({"set", "hello", "world"});
+
+  Run({"expire", "hello", "1"});
+  Run({"CLIENT", "PAUSE", "5000", "WRITE"});
+  {
+    const auto resp = Run({"scan", "0", "attr", "v"});
+    const auto vec = StrArray(resp.GetVec()[1]);
+    EXPECT_THAT(vec, ElementsAre("hello"));
+    EXPECT_THAT(Run({"keys", "*"}), RespElementsAre("hello"));
+  }
+
+  AdvanceTime(2000);
+  {
+    const auto resp = Run({"scan", "0", "attr", "v"});
+    ASSERT_TRUE(StrArray(resp.GetVec()[1]).empty());
+    EXPECT_THAT(Run({"keys", "*"}), RespElementsAre());
+  }
+}
+
 TEST(ScanResultTest, AppendBufferAndOwnership) {
   ScanResult result{numeric_limits<size_t>::max()};
   string member = "member";
@@ -2494,6 +2515,22 @@ TEST_F(GenericFamilyTest, RmInsideMulti) {
 
   EXPECT_EQ(Run({"exists", "y"}), 0);
   EXPECT_EQ(Run({"get", "x"}), "2");
+}
+
+TEST_F(GenericFamilyTest, RmDuringClientPauseDeletes) {
+  absl::Cleanup unpause = [this] { Run({"client", "unpause"}); };
+
+  Run({"set", "hello", "world", "px", "1000"});
+  Run({"client", "pause", "60000", "write"});
+
+  AdvanceTime(2000);
+
+  EXPECT_THAT(Run({"keys", "*"}), RespElementsAre());
+  ASSERT_THAT(Run({"dbsize"}), IntArg(1));
+
+  const auto resp = RunPrivileged({"rm", "0", "match", "hello"});
+  EXPECT_EQ(resp.GetVec()[1].GetInt().value(), 1);
+  EXPECT_THAT(Run({"dbsize"}), IntArg(0));
 }
 
 // Verifies that long-running container iteration is yielding.

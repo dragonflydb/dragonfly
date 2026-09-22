@@ -440,15 +440,28 @@ class DbSlice {
   // and returns Iterator{}.
   Iterator ExpireIfNeeded(const Context& cntx, Iterator it) const;
 
-  // Erases 'it' if its embedded expire time has already passed, returning true and invalidating
-  // 'it' in that case. Entries without a TTL are accepted and simply return false, unlike in
+  enum class ExpireResult : uint8_t {
+    Valid,
+    ExpiredHidden,
+    Deleted,
+  };
+
+  // Erases 'it' if its embedded expire time has already passed, returning Deleted and invalidating
+  // 'it' in that case. Entries without a TTL are accepted and simply return Valid, unlike in
   // ExpireIfNeeded. It is also cheaper: no key materialization and no iterator laundering.
   // The caller must disable journal flushing before calling, using journal::DisableFlushGuard
-  // or journal::SetFlushMode(false).
-  bool TryExpire(const Context& cntx, PrimeIterator it) const {
+  // or journal::SetFlushMode(false). If allow_hiding_expired is set, then even if a key is expired,
+  // do not expire it or invalidate it, but instead hide the value.
+  ExpireResult TryExpire(const Context& cntx, PrimeIterator it,
+                         bool allow_hiding_expired = false) const {
     if (!it->first.IsExpired(cntx.time_now_ms))
-      return false;
-    return Expire(cntx, it, nullptr);
+      return ExpireResult::Valid;
+
+    if (allow_hiding_expired && !expire_allowed_)
+      return ExpireResult::ExpiredHidden;
+
+    const auto expired = Expire(cntx, it, nullptr);
+    return expired ? ExpireResult::Deleted : ExpireResult::Valid;
   }
 
   // Iterate over all expire table entries and delete expired.

@@ -100,6 +100,7 @@ struct ScanOpts {
   size_t min_malloc_size = 0;
   bool novalues = false;
   bool allow_novalues = false;
+  bool for_mutation = false;
 };
 
 // Own unordered scan results across shard hops and reply writes, packing small entries together.

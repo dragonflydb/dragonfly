@@ -661,9 +661,19 @@ bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, ScanResult* 
 bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, ScanResult* res) {
   auto& db_slice = op_args.GetDbSlice();
 
+  // Hide expired keys when expiry is blocked, except for mutation commands
+  const bool allow_hiding_expired = !opts.for_mutation;
+
   // Passing the raw iterator is safe: OpScan prevents preemption for the whole traversal.
-  if (db_slice.TryExpire(op_args.db_cntx, prime_it)) [[unlikely]]
-    return false;
+  // clang-format off
+  switch (db_slice.TryExpire(op_args.db_cntx, prime_it, allow_hiding_expired)) {
+    case DbSlice::ExpireResult::Valid:
+      break;
+    [[unlikely]] case DbSlice::ExpireResult::ExpiredHidden:
+    [[unlikely]] case DbSlice::ExpireResult::Deleted:
+      return false;
+  }
+  // clang-format on
 
   bool matches = !opts.type_filter || prime_it->second.ObjType() == opts.type_filter;
   if (opts.mask.has_value()) {
@@ -2781,6 +2791,7 @@ void GenericFamily::Rm(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(ops.status());
   }
 
+  ops->for_mutation = true;
   uint32_t deleted = 0;
   cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->tx());
 
