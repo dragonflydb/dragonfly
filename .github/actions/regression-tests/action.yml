@@ -112,6 +112,19 @@ runs:
   # bring back timeouts once composite actions start supporting them
   # timeout-minutes: 20
   steps:
+    - name: Setup core dump capture
+      if: always()
+      shell: bash
+      # On a reused (e.g. self-hosted) runner, /hostroot/var/lib/systemd/coredump can
+      # already hold cores from a prior, unrelated job; this marker's mtime bounds later
+      # sweeps to only what crashed during this job. Must run first, before anything
+      # else in this action that could crash (e.g. the MinIO snapshot test).
+      run: |
+        mkdir -p /tmp/core_dumps /tmp/df_ci_collected_cores
+        touch /tmp/df_ci_core_search_start
+        echo '/tmp/core_dumps/core.%e.%p.%t' >/proc/sys/kernel/core_pattern 2>/dev/null \
+          || echo "Warning: could not write core_pattern; relying on systemd-coredump instead"
+
     - name: Sync valkey-search tests
       uses: ./.github/actions/sync-valkey-tests
 
@@ -189,17 +202,6 @@ runs:
         # MinIO binary is downloaded and started by conftest.py when MINIO_S3_ENDPOINT is set
         MINIO_S3_ENDPOINT=http://localhost:9000 timeout 10m pytest -k "s3" --timeout=300 --color=yes dragonfly/snapshot_test.py "${df_runtime_args[@]}" --log-cli-level=INFO -v
 
-    - name: Setup core dump capture
-      if: success()
-      shell: bash
-      # core_pattern is a global kernel setting, so writing it once here persists for
-      # every later step. ulimit is NOT global -- it's per-process, so it must be raised
-      # again at the start of each step that can spawn a crashing process (see below).
-      run: |
-        mkdir -p /tmp/core_dumps /tmp/df_ci_collected_cores
-        echo '/tmp/core_dumps/core.%e.%p.%t' >/proc/sys/kernel/core_pattern 2>/dev/null \
-          || echo "Warning: could not write core_pattern; relying on systemd-coredump instead"
-
     - name: Verify core dump capture
       if: success()
       shell: bash
@@ -213,7 +215,7 @@ runs:
           local f
           while IFS= read -r -d '' f; do
             mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
-          done < <(find /tmp/core_dumps /tmp/tmp* -maxdepth 1 -type f \
+          done < <(find /tmp/core_dumps /tmp/tmp* -maxdepth 1 -type f -newer /tmp/df_ci_core_search_start \
             \( -name 'core' -o -name 'core.*' -o -name 'core-*' \) -print0 2>/dev/null)
           while IFS= read -r -d '' f; do
               if [[ "$f" == *.zst ]] && command -v zstd >/dev/null 2>&1; then
@@ -222,7 +224,7 @@ runs:
               else
                 mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
               fi
-          done < <(find /hostroot/var/lib/systemd/coredump -maxdepth 1 -type f -name 'core.*' -print0 2>/dev/null)
+          done < <(find /hostroot/var/lib/systemd/coredump -maxdepth 1 -type f -newer /tmp/df_ci_core_search_start -name 'core.*' -print0 2>/dev/null)
           return 0
         }
         echo "=== Verifying core dump capture works in this environment ==="
@@ -295,7 +297,7 @@ runs:
         dest=/tmp/failed/cores
         while IFS= read -r -d '' f; do
           mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
-        done < <(find /tmp/core_dumps /tmp/tmp* -maxdepth 1 -type f \
+        done < <(find /tmp/core_dumps /tmp/tmp* -maxdepth 1 -type f -newer /tmp/df_ci_core_search_start \
           \( -name 'core' -o -name 'core.*' -o -name 'core-*' \) -print0 2>/dev/null)
         while IFS= read -r -d '' f; do
           if [[ "$f" == *.zst ]] && command -v zstd >/dev/null 2>&1; then
@@ -304,7 +306,7 @@ runs:
           else
             mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
           fi
-        done < <(find /hostroot/var/lib/systemd/coredump -maxdepth 1 -type f -name 'core.*' -print0 2>/dev/null)
+        done < <(find /hostroot/var/lib/systemd/coredump -maxdepth 1 -type f -newer /tmp/df_ci_core_search_start -name 'core.*' -print0 2>/dev/null)
         shopt -s nullglob
         found=false
         for f in "${staging}"/*; do
