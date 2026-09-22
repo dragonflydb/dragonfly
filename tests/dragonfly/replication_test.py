@@ -1138,7 +1138,7 @@ async def test_readonly_script(df_factory):
 # @pytest.mark.large
 @pytest.mark.replication(master_args={"proactor_threads": 4}, replica_args={"proactor_threads": 4})
 async def test_client_pause_with_replica(replication, df_seeder_factory):
-    master, [replica], c_master, [c_replica] = replication
+    master, [replica], c_master, _ = replication
 
     seeder = df_seeder_factory.create(port=master.port)
 
