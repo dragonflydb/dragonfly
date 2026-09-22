@@ -192,9 +192,10 @@ runs:
     - name: Setup core dump capture
       if: success()
       shell: bash
+      # core_pattern is a global kernel setting, so writing it once here persists for
+      # every later step. ulimit is NOT global -- it's per-process, so it must be raised
+      # again at the start of each step that can spawn a crashing process (see below).
       run: |
-        ulimit -Hc unlimited 2>/dev/null || true
-        ulimit -Sc unlimited || echo "Warning: 'ulimit -c unlimited' failed (hard: $(ulimit -Hc))"
         mkdir -p /tmp/core_dumps /tmp/df_ci_collected_cores
         echo '/tmp/core_dumps/core.%e.%p.%t' >/proc/sys/kernel/core_pattern 2>/dev/null \
           || echo "Warning: could not write core_pattern; relying on systemd-coredump instead"
@@ -205,6 +206,8 @@ runs:
       # Crashes a canary process so a broken pipeline is caught here, not on a real crash later.
       run: |
         set -eo pipefail
+        ulimit -Hc unlimited 2>/dev/null || true
+        ulimit -Sc unlimited || echo "Warning: 'ulimit -c unlimited' failed (hard: $(ulimit -Hc))"
         staging=/tmp/df_ci_collected_cores
         relocate() {
           local f
@@ -224,17 +227,22 @@ runs:
         }
         echo "=== Verifying core dump capture works in this environment ==="
         canary_cwd="$(mktemp -d)"
-        (cd "${canary_cwd}" && exec sh -c 'kill -SEGV $$') || true
+        # Match by PID, not just "*-core*": an earlier step's crash (e.g. a flaky unit
+        # test) can leave an unrelated core sitting in the same search locations, which
+        # a name-only match would mistake for this canary and report a false pass.
+        (cd "${canary_cwd}" && exec sh -c 'kill -SEGV $$') &
+        canary_pid=$!
+        wait "${canary_pid}" 2>/dev/null || true
         canary=""
         for _ in $(seq 1 30); do
           relocate
-          canary=$(find "${staging}" -maxdepth 1 -name '*-core*' 2>/dev/null | head -1 || true)
+          canary=$(find "${staging}" -maxdepth 1 -name "*.${canary_pid}.*" 2>/dev/null | head -1 || true)
           [[ -n "${canary}" ]] && break
           sleep 0.2
         done
         rm -rf "${canary_cwd}"
         if [[ -n "${canary}" ]]; then
-          echo "Core dump capture verified OK (canary: ${canary})"
+          echo "Core dump capture verified OK (canary pid=${canary_pid}: ${canary})"
           rm -f "${canary}"
         else
           echo "WARNING: core dump capture canary FAILED; a real crash won't leave a usable core"
@@ -246,6 +254,8 @@ runs:
       shell: bash
       # Start the manual test budget with Pytest; GoogleTest uses the same deadline.
       run: |
+        ulimit -Hc unlimited 2>/dev/null || true
+        ulimit -Sc unlimited || echo "Warning: 'ulimit -c unlimited' failed (hard: $(ulimit -Hc))"
         if [[ -n "${MAX_TESTS_RUN_TIME_MINUTES}" ]]; then
           echo "Shared regression test time budget: ${MAX_TESTS_RUN_TIME_MINUTES} minutes (Pytest and GoogleTest)"
           export REGRESSION_DEADLINE_EPOCH=$(( $(date +%s) + 10#${MAX_TESTS_RUN_TIME_MINUTES} * 60 ))
@@ -313,7 +323,10 @@ runs:
     - name: Build and run GoogleTests
       if: always() && github.event_name == 'workflow_dispatch' && inputs.run-gtests == 'true'
       shell: bash
-      run: "${GITHUB_WORKSPACE}/.github/scripts/run-regression-tests-helper.sh gtest"
+      run: |
+        ulimit -Hc unlimited 2>/dev/null || true
+        ulimit -Sc unlimited || echo "Warning: 'ulimit -c unlimited' failed (hard: $(ulimit -Hc))"
+        "${GITHUB_WORKSPACE}/.github/scripts/run-regression-tests-helper.sh" gtest
       env:
         BUILD_FOLDER_NAME: ${{ inputs.build-folder-name }}
         GTEST_SUITES_INPUT: ${{ inputs.gtest-suites }}
