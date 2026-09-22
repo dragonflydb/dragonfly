@@ -57,8 +57,6 @@ class DebugCmd {
   // Investigation-only. Remove once closed.
   void ReplDiag(CommandContext* cmd_cntx);
   void Shards(CommandContext* cmd_cntx);
-  // Test-only: OOB vector write -> UB crash, to test core dump capture.
-  void VectorOob(CommandContext* cmd_cntx);
   void LogTraffic(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void RecvSize(std::string_view param, CommandContext* cmd_cntx);
   void Topk(facade::CmdArgParser parser, CommandContext* cmd_cntx);
