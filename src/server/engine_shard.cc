@@ -227,8 +227,7 @@ EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequ
     return MemoryTooLow;
   }
 
-  thread_local fragmentation_info finfo{
-      .committed = 0, .committed_golden = 0, .wasted = 0, .bin = 0};
+  thread_local fragmentation_info finfo{.committed = 0, .wasted = 0, .bin = 0};
 
   const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
@@ -246,7 +245,7 @@ EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequ
     }
 
     // start checking.
-    finfo.committed = finfo.committed_golden = 0;
+    finfo.committed = 0;
     finfo.wasted = 0;
     page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   }
@@ -259,11 +258,6 @@ EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequ
   if (res == 0) {
     // finished checking.
     last_check_time = time(nullptr);
-
-    if (finfo.committed != finfo.committed_golden) {
-      LOG_FIRST_N(ERROR, 100) << "committed memory computed incorrectly: " << finfo.committed
-                              << " vs " << finfo.committed_golden;
-    }
 
     const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
     if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
