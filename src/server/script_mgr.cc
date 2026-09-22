@@ -284,7 +284,9 @@ nonstd::expected<string, GenericError> ScriptMgr::Insert(string_view body,
   auto sha_buf = Interpreter::FuncSha1(body);
   string_view sha{sha_buf.data(), sha_buf.size()};
 
-  if (interpreter->Exists(sha)) {
+  // An interpreter borrowed across SCRIPT FLUSH keeps its functions, so Exists() alone is not
+  // proof that the script is still registered.
+  if (interpreter->Exists(sha) && ServerState::tlocal()->GetScriptParams(ScriptKey{sha})) {
     return string{sha};
   }
 
