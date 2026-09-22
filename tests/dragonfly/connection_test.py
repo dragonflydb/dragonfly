@@ -2615,6 +2615,14 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
     assert int(info["timeout_disconnects"]) >= 1
 
 
+@assert_eventually(times=100)
+async def wait_for_conn_count(async_client, expected):
+    # The listener links a freshly accepted socket asynchronously, so a CLIENT LIST issued right
+    # after connect() may not include it yet.
+    clients = await async_client.client_list()
+    assert len(clients) == expected
+
+
 @dfly_args({"timeout": 1})
 async def test_timeout_silent_connection(df_server: DflyInstance, async_client: aioredis.Redis):
     """A connection that never sends a byte stays in the SETUP phase. It must be reaped by
@@ -2623,8 +2631,7 @@ async def test_timeout_silent_connection(df_server: DflyInstance, async_client: 
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
 
     # The silent socket is accepted and listed, but has never sent anything.
-    clients = await async_client.client_list()
-    assert len(clients) == 2
+    await wait_for_conn_count(async_client, 2)
 
     await asyncio.sleep(2)
     await wait_for_conn_drop(async_client)
@@ -2635,6 +2642,23 @@ async def test_timeout_silent_connection(df_server: DflyInstance, async_client: 
 
     info = await async_client.info("clients")
     assert int(info["timeout_disconnects"]) >= 1
+
+
+@dfly_args({"timeout": 2})
+async def test_timeout_slow_first_command(df_server: DflyInstance, async_client: aioredis.Redis):
+    """Bytes received during protocol detection count as client activity. A client that trickles
+    its first command over longer than `timeout` is not idle and must not be reaped."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    await wait_for_conn_count(async_client, 2)
+
+    # Six bytes, one every 0.6s: the connection stays in SETUP for ~3.6s, longer than the timeout.
+    for byte in b"PING\r\n":
+        writer.write(bytes([byte]))
+        await writer.drain()
+        await asyncio.sleep(0.6)
+
+    assert await asyncio.wait_for(reader.readline(), timeout=5) == b"+PONG\r\n"
+    writer.close()
 
 
 @dfly_args({"send_timeout": 3})
