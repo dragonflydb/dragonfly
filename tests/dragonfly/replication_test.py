@@ -1135,10 +1135,9 @@ async def test_readonly_script(df_factory):
         await c_replica.eval(WRITE_SCRIPT, 1, "A")
 
 
-# @pytest.mark.large
 @pytest.mark.replication(master_args={"proactor_threads": 4}, replica_args={"proactor_threads": 4})
 async def test_client_pause_with_replica(replication, df_seeder_factory):
-    master, [replica], c_master, [c_replica] = replication
+    master, [replica], c_master, c_replicas = replication
 
     seeder = df_seeder_factory.create(port=master.port)
 
@@ -1153,9 +1152,8 @@ async def test_client_pause_with_replica(replication, df_seeder_factory):
     stats_after_sleep = await c_master.info("CommandStats")
     # Check no commands are executed except info and replconf called from replica
     for cmd, cmd_stats in stats_after_sleep.items():
-        if cmd in ["cmdstat_info", "cmdstat_replconf", "cmdstat_multi"]:
-            continue
-        assert stats[cmd] == cmd_stats, cmd
+        if cmd not in {"cmdstat_info", "cmdstat_replconf", "cmdstat_multi"}:
+            assert stats[cmd] == cmd_stats, cmd
 
     await asyncio.sleep(6)
     seeder.stop()
@@ -1168,6 +1166,7 @@ async def test_client_pause_with_replica(replication, df_seeder_factory):
     assert more_exeuted
 
     capture = await seeder.capture(port=master.port)
+    await check_all_replicas_finished(c_replicas, c_master)
     assert await seeder.compare(capture, port=replica.port)
 
 
