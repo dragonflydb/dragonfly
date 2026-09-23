@@ -399,13 +399,7 @@ const char* EncodingName(unsigned obj_type, unsigned encoding) {
       }
       break;
     case OBJ_JSON:
-      switch (encoding) {
-        case kEncodingJsonCons:
-          return "jsoncons";
-        case kEncodingJsonFlat:
-          return "jsonflat";
-      }
-      break;
+      return "jsoncons";
     case OBJ_STREAM:
       return "stream";
   }

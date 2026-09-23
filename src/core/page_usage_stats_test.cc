@@ -4,12 +4,10 @@
 
 #include "core/page_usage/page_usage_stats.h"
 
-#include <absl/flags/reflection.h>
 #include <gmock/gmock-matchers.h>
 
 #include <random>
 
-#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/compact_object.h"
@@ -27,8 +25,6 @@
 extern "C" {
 #include "redis/zmalloc.h"
 }
-
-ABSL_DECLARE_FLAG(bool, experimental_flat_json);
 
 using namespace dfly;
 using namespace std::chrono_literals;
@@ -271,12 +267,6 @@ TEST_F(PageUsageStatsTest, StatCollection) {
 }
 
 TEST_F(PageUsageStatsTest, JSONCons) {
-  // Because of the static encoding it is not possible to easily test the flat encoding. Once the
-  // encoding flag is set, it is not re-read. If friend class is used to access the compact object
-  // inner fields and call `DefragIfNeeded` directly on the flat variant of the union, the test will
-  // still fail. This is because freeing the compact object code path takes the wrong branch based
-  // on encoding. The flat encoding was tested manually adjusting this same test with changed
-  // encoding.
   std::string data = GenerateTestJSON(1000);
 
   auto* mr = static_cast<MiMemoryResource*>(CompactObj::memory_resource());

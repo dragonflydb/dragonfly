@@ -30,8 +30,6 @@ constexpr unsigned kEncodingIntSet = 0;
 constexpr unsigned kEncodingStrMap2 = 2;  // for set/map encodings of strings using DenseSet
 constexpr unsigned kEncodingQL2 = 1;
 constexpr unsigned kEncodingListPack = 3;
-constexpr unsigned kEncodingJsonCons = 0;
-constexpr unsigned kEncodingJsonFlat = 1;
 
 class SBF;
 class TOPK;
@@ -148,8 +146,6 @@ static_assert(sizeof(LargeString) == 16);
 using CompactObjType = unsigned;
 
 constexpr CompactObjType kInvalidCompactObjType = std::numeric_limits<CompactObjType>::max();
-
-uint32_t JsonEnconding();
 
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
@@ -360,7 +356,6 @@ class CompactObj {
   // you need to move an object that created with the function JsonFromString
   // into here, no copying is allowed!
   void SetJson(JsonType&& j);
-  void SetJson(const uint8_t* buf, size_t len);
   // Adjusts the size used by json
   void SetJsonSize(int64_t size);
   // Adjusts the size used by a stream
@@ -580,22 +575,6 @@ class CompactObj {
     bool DefragIfNeeded(PageUsage* page_usage);
   };
 
-  struct FlatJsonT {
-    uint32_t json_len;
-    uint8_t* flat_ptr;
-
-    bool DefragIfNeeded(PageUsage* page_usage);
-  };
-
-  struct JsonWrapper {
-    union {
-      JsonConsT cons;
-      FlatJsonT flat;
-    };
-
-    bool DefragIfNeeded(PageUsage* page_usage);
-  };
-
   // Union of different representations
   union U {
     char inline_str[kInlineLen];
@@ -605,7 +584,7 @@ class CompactObj {
     detail::LargeString large_str;
 
     // using 'packed' to reduce alignment of U to 1.
-    JsonWrapper json_obj __attribute__((packed));
+    JsonConsT json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
     TOPK* topk __attribute__((packed));
     CMS* cms __attribute__((packed));

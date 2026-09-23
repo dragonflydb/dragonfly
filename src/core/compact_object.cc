@@ -40,8 +40,8 @@ extern "C" {
 #include "core/tiering_types.h"
 #include "core/topk.h"
 
-ABSL_FLAG(bool, experimental_flat_json, false, "If true uses flat json implementation.");
-ABSL_FLAG(bool, disable_json_defragmentation, false, "If true disable json object defragmentation");
+ABSL_RETIRED_FLAG(bool, experimental_flat_json, false, "retired.");
+ABSL_RETIRED_FLAG(bool, disable_json_defragmentation, false, "retired.");
 
 namespace dfly {
 using namespace std;
@@ -597,12 +597,6 @@ void LargeString::ReallocateString(MemoryResource* mr) {
 
 }  // namespace detail
 
-uint32_t JsonEnconding() {
-  thread_local uint32_t json_enc =
-      absl::GetFlag(FLAGS_experimental_flat_json) ? kEncodingJsonFlat : kEncodingJsonCons;
-  return json_enc;
-}
-
 using namespace std;
 
 auto CompactObj::GetStatsThreadLocal() -> Stats {
@@ -720,10 +714,7 @@ size_t CompactObj::Size() const {
     case SDS_TTL_TAG:
       return decoded_str_size(sdslen(u_.sds_ttl.sds_ptr));
     case JSON_TAG:
-      if (JsonEnconding() == kEncodingJsonFlat)
-        return u_.json_obj.flat.json_len;
-      else
-        return u_.json_obj.cons.json_ptr->size();
+      return u_.json_obj.json_ptr->size();
     case SBF_TAG:
       return u_.sbf->current_size();
     case CMS_TAG:
@@ -912,18 +903,17 @@ std::optional<int64_t> CompactObj::TryGetInt() const {
 
 auto CompactObj::GetJson() const -> JsonType* {
   if (ObjType() == OBJ_JSON) {
-    DCHECK_EQ(JsonEnconding(), kEncodingJsonCons);
-    return u_.json_obj.cons.json_ptr;
+    return u_.json_obj.json_ptr;
   }
   return nullptr;
 }
 
 void CompactObj::SetJson(JsonType&& j) {
-  if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
-    DCHECK(u_.json_obj.cons.json_ptr != nullptr);  // must be allocated
-    u_.json_obj.cons.json_ptr->swap(j);
-    DCHECK(jsoncons::is_trivial_storage(u_.json_obj.cons.json_ptr->storage_kind()) ||
-           u_.json_obj.cons.json_ptr->get_allocator().resource() == tl.local_mr);
+  if (taglen_ == JSON_TAG) {
+    DCHECK(u_.json_obj.json_ptr != nullptr);  // must be allocated
+    u_.json_obj.json_ptr->swap(j);
+    DCHECK(jsoncons::is_trivial_storage(u_.json_obj.json_ptr->storage_kind()) ||
+           u_.json_obj.json_ptr->get_allocator().resource() == tl.local_mr);
 
     // We do not set bytes_used as this is needed. Consider the two following cases:
     // 1. old json contains 50 bytes. The delta for new one is 50, so the total bytes
@@ -935,24 +925,24 @@ void CompactObj::SetJson(JsonType&& j) {
   }
 
   SetMeta(JSON_TAG);
-  u_.json_obj.cons.json_ptr = AllocateMR<JsonType>(std::move(j));
+  u_.json_obj.json_ptr = AllocateMR<JsonType>(std::move(j));
 
   // With trivial storage json_ptr->get_allocator() throws an exception.
-  DCHECK(jsoncons::is_trivial_storage(u_.json_obj.cons.json_ptr->storage_kind()) ||
-         u_.json_obj.cons.json_ptr->get_allocator().resource() == tl.local_mr);
-  u_.json_obj.cons.bytes_used = 0;
+  DCHECK(jsoncons::is_trivial_storage(u_.json_obj.json_ptr->storage_kind()) ||
+         u_.json_obj.json_ptr->get_allocator().resource() == tl.local_mr);
+  u_.json_obj.bytes_used = 0;
 }
 
 void CompactObj::SetJsonSize(int64_t size) {
-  if (taglen_ == JSON_TAG && JsonEnconding() == kEncodingJsonCons) {
+  if (taglen_ == JSON_TAG) {
     // JSON.SET or if mem hasn't changed from a JSON op then we just update.
-    int64_t result = static_cast<int64_t>(u_.json_obj.cons.bytes_used) + size;
+    int64_t result = static_cast<int64_t>(u_.json_obj.bytes_used) + size;
     if (result < 1) {
-      LOG_EVERY_T(ERROR, 20) << "JSON size underflow: " << u_.json_obj.cons.bytes_used << " + "
-                             << size << " = " << result;
-      u_.json_obj.cons.bytes_used = 1;
+      LOG_EVERY_T(ERROR, 20) << "JSON size underflow: " << u_.json_obj.bytes_used << " + " << size
+                             << " = " << result;
+      u_.json_obj.bytes_used = 1;
     } else {
-      u_.json_obj.cons.bytes_used = static_cast<size_t>(result);
+      u_.json_obj.bytes_used = static_cast<size_t>(result);
     }
   }
 }
@@ -976,13 +966,6 @@ void CompactObj::AddStreamSize(int64_t delta) {
   LOG_EVERY_T(ERROR, 30) << "Invalid stream memory delta: cached=" << current << ", delta=" << delta
                          << ", measured=" << slow_measure;
   u_.r_obj.SetSize(slow_measure);
-}
-
-void CompactObj::SetJson(const uint8_t* buf, size_t len) {
-  SetMeta(JSON_TAG);
-  u_.json_obj.flat.flat_ptr = (uint8_t*)tl.local_mr->allocate(len, kAlignSize);
-  memcpy(u_.json_obj.flat.flat_ptr, buf, len);
-  u_.json_obj.flat.json_len = len;
 }
 
 void CompactObj::SetSBF(uint64_t initial_capacity, double fp_prob, double grow_factor) {
@@ -1136,9 +1119,6 @@ string_view CompactObj::GetSlice(string* scratch) const {
 }
 
 bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
-  static const bool disable_json_defragmentation =
-      absl::GetFlag(FLAGS_disable_json_defragmentation);
-
   if (OmitDefrag()) {
     page_usage->RecordNotRequired();
     return false;
@@ -1173,9 +1153,6 @@ bool CompactObj::DefragIfNeeded(PageUsage* page_usage) {
     case SMALL_TAG:
       return u_.small_str.DefragIfNeeded(page_usage);
     case JSON_TAG:
-      if (disable_json_defragmentation) {
-        return false;
-      }
       return u_.json_obj.DefragIfNeeded(page_usage);
     case SDS_TTL_TAG:
       if (page_usage->IsPageForObjectUnderUtilized(u_.sds_ttl.sds_ptr)) {
@@ -1530,11 +1507,7 @@ void CompactObj::Free() {
     u_.small_str.Free();
   } else if (taglen_ == JSON_TAG) {
     DVLOG(1) << "Freeing JSON object";
-    if (JsonEnconding() == kEncodingJsonCons) {
-      DeleteMR<JsonType>(u_.json_obj.cons.json_ptr);
-    } else {
-      tl.local_mr->deallocate(u_.json_obj.flat.flat_ptr, u_.json_obj.flat.json_len, kAlignSize);
-    }
+    DeleteMR<JsonType>(u_.json_obj.json_ptr);
   } else if (taglen_ == SBF_TAG) {
     DeleteMR<SBF>(u_.sbf);
   } else if (taglen_ == TOPK_TAG) {
@@ -1580,13 +1553,7 @@ size_t CompactObj::MallocUsed(bool slow) const {
   }
 
   if (taglen_ == JSON_TAG) {
-    // TODO fix this once we fully support flat json
-    // This is here because accessing a union field that is not active
-    // is UB.
-    if (JsonEnconding() == kEncodingJsonFlat) {
-      return 0;
-    }
-    return u_.json_obj.cons.bytes_used;
+    return u_.json_obj.bytes_used;
   }
 
   if (taglen_ == SMALL_TAG) {
@@ -1805,26 +1772,6 @@ bool CompactObj::JsonConsT::DefragIfNeeded(PageUsage* page_usage) {
   }
 
   return did_defragment;
-}
-
-bool CompactObj::FlatJsonT::DefragIfNeeded(PageUsage* page_usage) {
-  if (uint8_t* old = flat_ptr; page_usage->IsPageForObjectUnderUtilized(old)) {
-    const uint32_t size = json_len;
-    flat_ptr = static_cast<uint8_t*>(tl.local_mr->allocate(size, kAlignSize));
-    memcpy(flat_ptr, old, size);
-    tl.local_mr->deallocate(old, size, kAlignSize);
-    return true;
-  }
-
-  return false;
-}
-
-bool CompactObj::JsonWrapper::DefragIfNeeded(PageUsage* page_usage) {
-  if (JsonEnconding() == kEncodingJsonCons) {
-    return cons.DefragIfNeeded(page_usage);
-  }
-
-  return flat.DefragIfNeeded(page_usage);
 }
 
 constexpr std::pair<CompactObjType, std::string_view> kObjTypeToString[] = {
