@@ -82,7 +82,7 @@ jobs:
       - name: Publish dashboard site to S3
         if: env.PUBLISH_BUCKET != ''
         shell: bash
-        run: ${GITHUB_WORKSPACE}/.github/scripts/publish-ci-dashboard-site-to-s3.sh
+        run: python3 "${GITHUB_WORKSPACE}/.github/scripts/publish-ci-dashboard-site-to-s3.py"
 
       - name: Skip S3 publish
         if: env.PUBLISH_BUCKET == ''
