@@ -62,6 +62,7 @@ jobs:
         proactor: [Epoll]
         build-type: [Debug]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
+        enable_resp_io_loop_v2: [false, true]
 
     runs-on: ${{ matrix.runner }}
 
@@ -137,6 +138,7 @@ jobs:
           gtest-iterations: ${{ inputs['gtest-iterations'] || '' }}
           run-gtests: 'true'
           continue-on-test-failure: ${{ inputs['continue-on-test-failure'] || 'false' }}
+          df-runtime-flags: enable_resp_io_loop_v2=${{ matrix.enable_resp_io_loop_v2 }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
