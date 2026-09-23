@@ -335,9 +335,6 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       facade::Connection* dfly_conn = static_cast<facade::Connection*>(conn);
       using Phase = facade::Connection::Phase;
       auto phase = dfly_conn->phase();
-      // A connection without a context has not run any command yet, so it cannot be a
-      // replication link. Defaulting to "replica" exempted such connections from the idle
-      // timeout forever.
       bool is_replica = false;
       if (dfly_conn->cntx()) {
         is_replica = dfly_conn->cntx()->replica_conn;
