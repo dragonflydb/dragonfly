@@ -360,8 +360,9 @@ on the journal streamer's own backpressure timeout instead.
 
 The partial-sync "recent history" is a per-shard ring buffer bounded by age and size. Entries
 older than `--shard_repl_backlog_time_ms` (default 5000) are evicted on later journal writes, and
-the buffer never holds more than `--shard_repl_backlog_max_bytes` (default 0, meaning maxmemory /
-shard count / 200). It starts at 8192 entries and grows while it stays under the byte limit. The
+the buffer is capped at `--shard_repl_backlog_max_bytes` (default 0, meaning maxmemory / shard
+count / 200); a single record larger than the cap is still kept until the next write replaces
+it. It starts at 8192 entries and grows while it stays under the byte limit. The
 deprecated `--shard_repl_backlog_len` still works: a nonzero value switches to a fixed entry
 count with no time or byte eviction, unless either of the two newer flags is also set. It is
 populated by every journal write
