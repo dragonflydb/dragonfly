@@ -251,7 +251,7 @@ make package           # Create release packages with debug symbols
 
 The [Makefile](Makefile) builds production releases with:
 - Static linking: libstdc++, libgcc, Boost, OpenSSL
-- Architecture optimizations (x86_64: `-march=core2 -msse4.1 -mtune=skylake`)
+- Architecture optimizations (ARM64: `-mcpu=neoverse-n1`; x86-64: `-march=x86-64-v3 -mtune=generic`)
 - Debug symbols (compressed)
 - Output: `build-release/dragonfly-{arch}.tar.gz`
 

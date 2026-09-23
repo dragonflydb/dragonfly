@@ -72,6 +72,21 @@ Minimal debug build:
 ./helio/blaze.sh -DWITH_GPERF=OFF -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_TIERING=OFF -DWITH_SEARCH=OFF -DWITH_COLLECTION_CMDS=OFF -DWITH_EXTENSION_CMDS=OFF
 ```
 
+### Release CPU targets
+
+Production builds using `make release` select these default compiler flags:
+
+| Architecture | `HELIO_MARCH_OPT` |
+| ------------ | ----------------- |
+| ARM64 (`aarch64`, `arm64`) | `-mcpu=neoverse-n1` |
+| x86-64 (`x86_64`, `amd64`) | `-march=x86-64-v3 -mtune=generic` |
+
+Override these defaults by exporting `HELIO_MARCH_OPT` or passing it to `make`, for example:
+
+```bash
+make release HELIO_MARCH_OPT="-march=native"
+```
+
 ### ccache
 
 For **local builds**, ccache is enabled automatically whenever the `ccache` binary is on your `PATH`, so incremental rebuilds recompile only the files you changed. (In CI it is enabled per-workflow, and the production `make release` build forces it off.) If you do **not** want ccache, disable it in any of these ways:

@@ -17,10 +17,11 @@ LEGACY_GLOG ?= ON
 # so we add -lz for them.
 LINKER_FLAGS=-lz
 
-# equivalent to: if $(uname_m) == x86_64 || $(uname_m) == amd64
-# Override HELIO_MARCH_OPT via environment: make HELIO_MARCH_OPT="-march=native"
+# Override HELIO_MARCH_OPT via the environment or make HELIO_MARCH_OPT="-march=native".
 ifneq (, $(filter $(BUILD_ARCH),x86_64 amd64))
-HELIO_MARCH_OPT ?= -march=core2 -msse4.1 -mpopcnt -mtune=skylake
+HELIO_MARCH_OPT ?= -march=x86-64-v3 -mtune=generic
+else ifneq (, $(filter $(BUILD_ARCH),aarch64 arm64))
+HELIO_MARCH_OPT ?= -mcpu=neoverse-n1
 endif
 
 # For release builds we link statically libstdc++ and libgcc. Currently,
