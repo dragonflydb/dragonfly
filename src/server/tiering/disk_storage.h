@@ -30,6 +30,9 @@ class DiskStorage {
     size_t max_file_size = 0;
     size_t pending_ops = 0;
     size_t pending_stash_bytes = 0;
+    size_t segment_bytes = 0;
+    size_t large_allocated_bytes = 0;
+    size_t free_extent_bytes = 0;
   };
 
   using ReadCb = std::function<void(io::Result<std::string_view>)>;

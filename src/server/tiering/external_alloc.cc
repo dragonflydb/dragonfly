@@ -372,6 +372,7 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
     size_t align_sz = alignup(sz, 4_KB);
     extent_tree_.Add(offset, align_sz);
     allocated_bytes_ -= align_sz;
+    large_allocated_bytes_ -= align_sz;
     return;
   }
 
@@ -416,6 +417,13 @@ void ExternalAllocator::AddStorage(size_t start, size_t size) {
 
   extent_tree_.Add(start, size);
   capacity_ += size;
+}
+
+ExternalAllocator::Stats ExternalAllocator::GetStats() const {
+  DCHECK_EQ(capacity_, segment_bytes_ + large_allocated_bytes_ + extent_tree_.len());
+  return Stats{.segment_bytes = segment_bytes_,
+               .large_allocated_bytes = large_allocated_bytes_,
+               .free_extent_bytes = extent_tree_.len()};
 }
 
 size_t ExternalAllocator::GoodSize(size_t sz) {
@@ -472,6 +480,7 @@ auto ExternalAllocator::FindPage(PageClass pc) -> Page* {
         mi_malloc_aligned(sizeof(SegmentDescr) + num_pages * sizeof(Page), kSegDescrAlignment);
     SegmentDescr* seg = new (ptr) SegmentDescr(pc, op_range->first, num_pages);
     segments_[seg_idx] = seg;
+    segment_bytes_ += kSegmentSize;
 
     DCHECK(sq_[pc] == NULL);
     DCHECK(seg->next == seg->prev && seg == seg->next);
@@ -492,6 +501,7 @@ int64_t ExternalAllocator::LargeMalloc(size_t size) {
   }
 
   allocated_bytes_ += align_sz;
+  large_allocated_bytes_ += align_sz;
   return op_range->first;
 }
 
