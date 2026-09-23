@@ -108,6 +108,19 @@ runs:
   # bring back timeouts once composite actions start supporting them
   # timeout-minutes: 20
   steps:
+    - name: Setup core dump capture
+      if: always()
+      shell: bash
+      # On a reused (e.g. self-hosted) runner, /hostroot/var/lib/systemd/coredump can
+      # already hold cores from a prior, unrelated job; this marker's mtime bounds later
+      # sweeps to only what crashed during this job. Must run first, before anything
+      # else in this action that could crash (e.g. the MinIO snapshot test).
+      run: |
+        mkdir -p /tmp/core_dumps /tmp/df_ci_collected_cores
+        touch /tmp/df_ci_core_search_start
+        echo '/tmp/core_dumps/core.%e.%p.%t' >/proc/sys/kernel/core_pattern 2>/dev/null \
+          || echo "Warning: could not write core_pattern; relying on systemd-coredump instead"
+
     - name: Sync valkey-search tests
       uses: ./.github/actions/sync-valkey-tests
 
@@ -173,12 +186,62 @@ runs:
         # MinIO binary is downloaded and started by conftest.py when MINIO_S3_ENDPOINT is set
         MINIO_S3_ENDPOINT=http://localhost:9000 timeout 10m pytest -k "s3" --timeout=300 --color=yes dragonfly/snapshot_test.py "${df_runtime_args[@]}" --log-cli-level=INFO -v
 
+    - name: Verify core dump capture
+      if: success()
+      shell: bash
+      # Crashes a canary process so a broken pipeline is caught here, not on a real crash later.
+      run: |
+        set -eo pipefail
+        ulimit -Hc unlimited 2>/dev/null || true
+        ulimit -Sc unlimited || echo "Warning: 'ulimit -c unlimited' failed (hard: $(ulimit -Hc))"
+        staging=/tmp/df_ci_collected_cores
+        relocate() {
+          local f
+          while IFS= read -r -d '' f; do
+            mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
+          done < <(find /tmp/core_dumps /tmp/tmp* -maxdepth 1 -type f -newer /tmp/df_ci_core_search_start \
+            \( -name 'core' -o -name 'core.*' -o -name 'core-*' \) -print0 2>/dev/null)
+          while IFS= read -r -d '' f; do
+              if [[ "$f" == *.zst ]] && command -v zstd >/dev/null 2>&1; then
+                zstd -dq "$f" -o "${staging}/$(date +%s%N)-$(basename "${f%.zst}")" 2>/dev/null && rm -f "$f" \
+                  || mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
+              else
+                mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
+              fi
+          done < <(find /hostroot/var/lib/systemd/coredump -maxdepth 1 -type f -newer /tmp/df_ci_core_search_start -name 'core.*' -print0 2>/dev/null)
+          return 0
+        }
+        echo "=== Verifying core dump capture works in this environment ==="
+        canary_cwd="$(mktemp -d)"
+        # Match by PID, not just "*-core*": an earlier step's crash (e.g. a flaky unit
+        # test) can leave an unrelated core sitting in the same search locations, which
+        # a name-only match would mistake for this canary and report a false pass.
+        (cd "${canary_cwd}" && exec sh -c 'kill -SEGV $$') &
+        canary_pid=$!
+        wait "${canary_pid}" 2>/dev/null || true
+        canary=""
+        for _ in $(seq 1 30); do
+          relocate
+          canary=$(find "${staging}" -maxdepth 1 -name "*.${canary_pid}.*" 2>/dev/null | head -1 || true)
+          [[ -n "${canary}" ]] && break
+          sleep 0.2
+        done
+        rm -rf "${canary_cwd}"
+        if [[ -n "${canary}" ]]; then
+          echo "Core dump capture verified OK (canary pid=${canary_pid}: ${canary})"
+          rm -f "${canary}"
+        else
+          echo "WARNING: core dump capture canary FAILED; a real crash won't leave a usable core"
+        fi
+
     - name: Run PyTests
       id: main
       if: success()
       shell: bash
       # Start the manual test budget with Pytest; GoogleTest uses the same deadline.
       run: |
+        ulimit -Hc unlimited 2>/dev/null || true
+        ulimit -Sc unlimited || echo "Warning: 'ulimit -c unlimited' failed (hard: $(ulimit -Hc))"
         if [[ -n "${MAX_TESTS_RUN_TIME_MINUTES}" ]]; then
           echo "Shared regression test time budget: ${MAX_TESTS_RUN_TIME_MINUTES} minutes (Pytest and GoogleTest)"
           export REGRESSION_DEADLINE_EPOCH=$(( $(date +%s) + 10#${MAX_TESTS_RUN_TIME_MINUTES} * 60 ))
@@ -206,10 +269,47 @@ runs:
         DRAGONFLY_AZURE_CONTAINER: ${{ inputs.azure-container }}
         AZURE_STORAGE_CONNECTION_STRING: ${{ inputs.azure-storage-connection-string }}
 
+    - name: Collect core dumps on failure
+      if: failure()
+      shell: bash
+      run: |
+        set -eo pipefail
+        staging=/tmp/df_ci_collected_cores
+        dest=/tmp/failed/cores
+        while IFS= read -r -d '' f; do
+          mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
+        done < <(find /tmp/core_dumps /tmp/tmp* -maxdepth 1 -type f -newer /tmp/df_ci_core_search_start \
+          \( -name 'core' -o -name 'core.*' -o -name 'core-*' \) -print0 2>/dev/null)
+        while IFS= read -r -d '' f; do
+          if [[ "$f" == *.zst ]] && command -v zstd >/dev/null 2>&1; then
+            zstd -dq "$f" -o "${staging}/$(date +%s%N)-$(basename "${f%.zst}")" 2>/dev/null && rm -f "$f" \
+              || mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
+          else
+            mv "$f" "${staging}/$(date +%s%N)-$(basename "$f")" 2>/dev/null || true
+          fi
+        done < <(find /hostroot/var/lib/systemd/coredump -maxdepth 1 -type f -newer /tmp/df_ci_core_search_start -name 'core.*' -print0 2>/dev/null)
+        shopt -s nullglob
+        found=false
+        for f in "${staging}"/*; do
+          mkdir -p "${dest}"
+          mv "$f" "${dest}/"
+          found=true
+        done
+        shopt -u nullglob
+        if [[ "${found}" == true ]]; then
+          echo "Collected core dump(s) into ${dest}"
+          cp "${GITHUB_WORKSPACE}/${{ inputs.build-folder-name }}/${{ inputs.dfly-executable }}" "${dest}/" 2>/dev/null || true
+        else
+          echo "No core dumps found to collect"
+        fi
+
     - name: Build and run GoogleTests
       if: always() && github.event_name == 'workflow_dispatch' && inputs.run-gtests == 'true'
       shell: bash
-      run: "${GITHUB_WORKSPACE}/.github/scripts/run-regression-tests-helper.sh gtest"
+      run: |
+        ulimit -Hc unlimited 2>/dev/null || true
+        ulimit -Sc unlimited || echo "Warning: 'ulimit -c unlimited' failed (hard: $(ulimit -Hc))"
+        "${GITHUB_WORKSPACE}/.github/scripts/run-regression-tests-helper.sh" gtest
       env:
         BUILD_FOLDER_NAME: ${{ inputs.build-folder-name }}
         GTEST_SUITES_INPUT: ${{ inputs.gtest-suites }}
