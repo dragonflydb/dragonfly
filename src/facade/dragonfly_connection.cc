@@ -1476,7 +1476,7 @@ io::Result<bool> Connection::CheckForHttpProto() {
     UpdateIoBufReadState();
     // Bytes received while still detecting the protocol are client activity for the idle
     // timeout (see ServerState::ConnectionsWatcherFb), same as reads in the command loop.
-    last_interaction_ = io_buf_last_read_time_;
+    last_interaction_ = time(nullptr);
     string_view ib = io::View(io_buf_.InputBuffer());
     if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
       // We matched the TLS handshake raw data, which means "peer" is a TCP socket.
