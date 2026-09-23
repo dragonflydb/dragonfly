@@ -23,6 +23,7 @@ extern "C" {
 #include <queue>
 #include <shared_mutex>
 #include <tuple>
+#include <variant>
 
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -30,7 +31,7 @@ extern "C" {
 #include "base/init.h"
 #include "base/random.h"
 #include "base/zipf_gen.h"
-#include "facade/redis_parser.h"
+#include "facade/resp_parser.h"
 #include "io/io.h"
 #include "io/io_buf.h"
 #include "util/fibers/dns_resolve.h"
@@ -97,9 +98,6 @@ using namespace std;
 using namespace util;
 using absl::GetFlag;
 using absl::StrFormat;
-using facade::RedisParser;
-using facade::RespExpr;
-using facade::RespVec;
 using tcp = ::boost::asio::ip::tcp;
 using absl::StrCat;
 
@@ -650,7 +648,7 @@ class Driver {
   queue<Req> reqs_;
   fb2::CondVarAny cnd_;
 
-  facade::RedisParser parser_{RedisParser::Mode::CLIENT, 1 << 16};
+  facade::RESPParser parser_{{.max_array_len = 1 << 16}};
   io::IoBuf io_buf_{512};
   unsigned blob_len_ = 0;
 };
@@ -1002,30 +1000,41 @@ void Driver::ReceiveFb() {
 }
 
 void Driver::ParseRESP() {
-  uint32_t consumed = 0;
-  RedisParser::Result result = RedisParser::OK;
-  RespVec parse_args;
+  auto input = io_buf_.InputBuffer();
+  auto reply = parser_.Feed(reinterpret_cast<const char*>(input.data()), input.size());
+  io_buf_.ConsumeInput(input.size());
 
-  do {
-    result = parser_.Parse(io_buf_.InputBuffer(), &consumed, &parse_args);
-    if (result == RedisParser::OK && !parse_args.empty()) {
-      if (parse_args[0].type == RespExpr::ERROR) {
-        string_view error = parse_args[0].GetView();
-        VLOG(2) << "Error " << error;
-        if (absl::StartsWith(error, kMovedErrorKey)) {
-          if (const auto moved = ParseMovedError(error, proactor_); moved) {
-            shard_slots_.MoveSlot(ep_, moved->second, moved->first);
-          }
-        }
-        ++stats_.num_errors;
-      } else if (reqs_.front().might_hit && parse_args[0].type != RespExpr::NIL) {
-        ++stats_.hit_count;
-      }
-      parse_args.clear();
-      PopRequest();
+  while (true) {
+    CHECK(reply.has_value()) << "Invalid RESP response";
+    if (reply->Empty()) {
+      break;
     }
-    io_buf_.ConsumeInput(consumed);
-  } while (result == RedisParser::OK && io_buf_.InputLen() > 0);
+
+    // Preserve hit and error accounting based on the first element of array replies (e.g. MGET).
+    facade::RESPObj first = *reply;
+    if (auto array = reply->As<facade::RESPArray>(); array && !array->Empty()) {
+      first = (*array)[0];
+    }
+
+    if (first.GetType() == facade::RESPObj::Type::ERROR) {
+      string_view error = *first.As<string_view>();
+      VLOG(2) << "Error " << error;
+      if (absl::StartsWith(error, kMovedErrorKey)) {
+        if (const auto moved = ParseMovedError(error, proactor_); moved) {
+          shard_slots_.MoveSlot(ep_, moved->second, moved->first);
+        }
+      }
+      ++stats_.num_errors;
+    } else if (reqs_.front().might_hit && first.GetType() != facade::RESPObj::Type::NIL) {
+      ++stats_.hit_count;
+    }
+    PopRequest();
+
+    if (!parser_.HasBufferedInput()) {
+      break;
+    }
+    reply = parser_.Feed(nullptr, 0);
+  }
 }
 
 void Driver::ParseMC() {
@@ -1488,27 +1497,24 @@ ClusterShards FetchClusterInfo(const tcp::endpoint& ep, ProactorBase* proactor) 
 
   ec = socket->Write(io::Buffer("cluster nodes\r\n"));
   CHECK(!ec);
-  facade::RedisParser parser{RedisParser::CLIENT, 1024};
+  facade::RESPParser parser({.max_array_len = 1024});
   uint8_t buf[1024];
-  RespVec resp_vec;
-  while (true) {
+  optional<facade::RESPObj> reply;
+  do {
     io::Result<size_t> res = socket->Recv(buf);
     CHECK(res) << res.error().message();
-    RespExpr::Buffer bytes(buf, *res);
-    uint32_t consumed = 0;
-    facade::RedisParser::Result result = parser.Parse(bytes, &consumed, &resp_vec);
-    if (result == facade::RedisParser::OK) {
-      break;
-    }
-    CHECK_EQ(result, facade::RedisParser::INPUT_PENDING);
-  }
-  CHECK_EQ(1u, resp_vec.size());
+    CHECK_GT(*res, 0u) << "Connection closed while reading CLUSTER NODES response";
+    reply = parser.Feed(reinterpret_cast<const char*>(buf), *res);
+    CHECK(reply.has_value()) << "Invalid CLUSTER NODES response";
+  } while (reply->Empty());
   std::ignore = socket->Close();
-  if (resp_vec.front().type == RespExpr::ERROR) {
-    LOG(INFO) << "Cluster command failed " << resp_vec.front().GetString();
+  if (reply->GetType() == facade::RESPObj::Type::ERROR) {
+    LOG(INFO) << "Cluster command failed " << *reply->As<string_view>();
     return {};
   }
-  string cluster_spec = resp_vec.front().GetString();
+  CHECK(reply->GetType() == facade::RESPObj::Type::STRING ||
+        reply->GetType() == facade::RESPObj::Type::REPLY_STATUS);
+  string_view cluster_spec = *reply->As<string_view>();
   LOG(INFO) << "Cluster spec: " << cluster_spec;
   vector<string_view> lines = absl::StrSplit(cluster_spec, '\n', absl::SkipEmpty());
   ClusterShards res;
