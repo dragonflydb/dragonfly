@@ -103,7 +103,6 @@ class ProtocolClient {
   // is done with the result of the call; Calling ConsumeInput may invalidate the data in the result
   // if the buffer relocates.
   io::Result<ReadRespRes> ReadRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
-  io::Result<ReadRespRes> ReadRespReply(uint32_t timeout);
 
   // Reads one flat RESP array into dest. buffer is only a staging area - the parser copies
   // everything it is fed, so this drains buffer completely and the caller must not consume it.
@@ -127,12 +126,16 @@ class ProtocolClient {
   std::error_code SendCommand(std::string_view command);
   // Send command, read response into resp_args_.
   std::error_code SendCommandAndReadResponse(std::string_view command);
+  // Send command and return an owning reply parsed with RESPParser.
+  io::Result<facade::RESPObj> SendCommandAndTakeReply(std::string_view command);
 
   const ServerContext& server() const {
     return server_context_;
   }
 
   void ResetParser();
+  // Start reading replies with RESPParser, discarding any previous parser state and input.
+  void ResetReplyParser();
   void ResetCommandParser();
 
   // TODO can return invalid results if response answer was bigger than provided buffer into

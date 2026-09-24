@@ -370,14 +370,6 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
   return nonstd::make_unexpected(ec);
 }
 
-io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(uint32_t timeout) {
-  auto prev_timeout = sock_->timeout();
-  sock_->set_timeout(timeout);
-  auto res = ReadRespReply();
-  sock_->set_timeout(prev_timeout);
-  return res;
-}
-
 io::Result<ProtocolClient::ReadCommandRes> ProtocolClient::ReadRespCommand(
     base::IoBuf* buffer, cmn::BackedArguments* dest) {
   DCHECK(!parser_);
@@ -549,10 +541,27 @@ error_code ProtocolClient::SendCommandAndReadResponse(string_view command) {
   return response_res.has_value() ? error_code{} : response_res.error();
 }
 
+io::Result<RESPObj> ProtocolClient::SendCommandAndTakeReply(string_view command) {
+  last_cmd_ = command;
+  if (auto ec = SendCommand(command); ec)
+    return nonstd::make_unexpected(ec);
+  return TakeRespReply(sock_->timeout());
+}
+
 void ProtocolClient::ResetParser() {
   parser_ = make_unique<RedisParser>(RedisParser::Mode::CLIENT, GetFlag(FLAGS_max_multi_bulk_len),
                                      GetFlag(FLAGS_max_bulk_len));
   resp_parser_.Reset();
+}
+
+void ProtocolClient::ResetReplyParser() {
+  // TODO: Remove this transition cleanup once RedisParser is fully removed.
+  // The legacy authentication reader leaves its reply in resp_buf_.
+  parser_.reset();
+  resp_args_.clear();
+  resp_buf_.Clear();
+
+  resp_parser_.Reset({.max_array_len = GetFlag(FLAGS_max_multi_bulk_len)});
 }
 
 void ProtocolClient::ResetCommandParser() {

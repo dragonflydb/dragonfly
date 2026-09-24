@@ -15,7 +15,6 @@
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
-#include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
 #include "facade/resp_expr_test_utils.h"
 
@@ -59,7 +58,7 @@ std::string_view GetErrorType(std::string_view err) {
 class RedisReplyBuilderTest : public testing::Test {
  public:
   struct ParsingResults {
-    RedisParser::Result result = RedisParser::OK;
+    bool parsed = false;
     RespExpr::Vec args;
     std::uint32_t consumed = 0;
 
@@ -70,13 +69,13 @@ class RedisReplyBuilderTest : public testing::Test {
 
       holder_.emplace(std::move(*obj));
 
-      result = RedisParser::OK;
+      parsed = true;
       consumed = buf_pos;
 
       if (holder_->GetType() == RESPObj::Type::ARRAY) {
         auto arr = holder_->As<RESPArray>();
         if (!arr.has_value()) {
-          result = RedisParser::BAD_ARRAYLEN;
+          parsed = false;
           return;
         }
 
@@ -91,11 +90,11 @@ class RedisReplyBuilderTest : public testing::Test {
     }
 
     bool Verify(std::uint32_t expected) const {
-      return consumed == expected && result == RedisParser::OK;
+      return parsed && consumed == expected;
     }
 
     bool IsError() const {
-      return result != RedisParser::OK || (args.size() == 1 && args[0].type == RespExpr::ERROR);
+      return !parsed || (args.size() == 1 && args[0].type == RespExpr::ERROR);
     }
 
     bool IsOk() const {
@@ -103,11 +102,11 @@ class RedisReplyBuilderTest : public testing::Test {
     }
 
     bool IsNull() const {
-      return result == RedisParser::OK && args.size() == 1 && args.at(0).type == RespExpr::NIL;
+      return parsed && args.size() == 1 && args.at(0).type == RespExpr::NIL;
     }
 
     bool IsString() const {
-      return args.size() == 1 && result == RedisParser::OK && args[0].type == RespExpr::STRING;
+      return parsed && args.size() == 1 && args[0].type == RespExpr::STRING;
     }
 
    private:
@@ -166,7 +165,7 @@ class RedisReplyBuilderTest : public testing::Test {
   // on the delimiter "\r\n". It is up to the test to verify these tokens
   std::vector<std::string_view> TokenizeMessage() const;
 
-  // Call the redis parser with the data in the sink
+  // Parse the data in the sink with RESPParser.
   ParsingResults Parse();
 
   io::StringSink sink_;
@@ -209,7 +208,7 @@ std::vector<std::string_view> RedisReplyBuilderTest::TokenizeMessage() const {
 }
 
 std::ostream& operator<<(std::ostream& os, const RedisReplyBuilderTest::ParsingResults& res) {
-  os << "result{consumed bytes:" << res.consumed << ", status: " << res.result << " result count "
+  os << "result{consumed bytes:" << res.consumed << ", parsed: " << res.parsed << " result count "
      << res.args.size() << ", first entry result: ";
   if (!res.args.empty()) {
     if (res.args.size() > 1) {
@@ -435,6 +434,7 @@ TEST_F(RedisReplyBuilderTest, EmptyOrNullArray) {
 TEST_F(RedisReplyBuilderTest, StrArray) {
   std::vector<std::string_view> string_vector{"hello", "world", "111", "@3#$^&*~"};
   builder_->StartArray(string_vector.size());
+  EXPECT_TRUE(Parse().IsError());  // The array header alone is not a complete reply.
   std::size_t expected_size = kCRLF.size() + 2;
   for (auto s : string_vector) {
     builder_->SendSimpleString(s);
@@ -1045,7 +1045,7 @@ TEST_F(RedisReplyBuilderTest, Issue4424) {
     builder_->SendBulkStrArr(records);
     ASSERT_TRUE(NoErrors());
     ParsingResults parse_result = Parse();
-    ASSERT_FALSE(parse_result.IsError()) << int(parse_result.result);
+    ASSERT_FALSE(parse_result.IsError()) << parse_result;
     ASSERT_TRUE(parse_result.Verify(SinkSize()));
     EXPECT_EQ(800, parse_result.args.size());
     sink_.Clear();
