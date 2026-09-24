@@ -44,21 +44,29 @@ UniqueStrings& UniqueStrings::operator=(UniqueStrings&& other) noexcept {
   return *this;
 }
 
+// No yield: DEBUG calls these inside Traverse, which holds a segment pointer a yield could free.
 void UniqueStrings::AddHMap(const PrimeValue& pv) {
   // Only adds the keys of a map
-  IterateMap(pv, [&](const ContainerEntry& k, const auto&) { return AddString(k); });
+  IterateMap(
+      pv, [&](const ContainerEntry& k, const auto&) { return AddString(k); },
+      /*allow_yield=*/false);
 }
 
 void UniqueStrings::AddSet(const PrimeValue& pv) {
-  IterateSet(pv, [&](const ContainerEntry& e) { return AddString(e); });
+  IterateSet(
+      pv, [&](const ContainerEntry& e) { return AddString(e); }, /*allow_yield=*/false);
 }
 
 void UniqueStrings::AddList(const PrimeValue& pv) {
-  IterateList(pv, [&](const ContainerEntry& e) { return AddString(e); });
+  IterateList(
+      pv, [&](const ContainerEntry& e) { return AddString(e); }, 0, SIZE_MAX,
+      /*allow_yield=*/false);
 }
 
 void UniqueStrings::AddZSet(const PrimeValue& pv) {
-  IterateSortedSet(pv, [&](const ContainerEntry& e, auto) { return AddString(e); });
+  IterateSortedSet(
+      pv, [&](const ContainerEntry& e, auto) { return AddString(e); }, 0, SIZE_MAX,
+      /*reverse=*/false, /*use_score=*/false, /*allow_yield=*/false);
 }
 
 void UniqueStrings::Add(const UniqueStrings& other) {
