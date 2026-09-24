@@ -122,20 +122,35 @@ def is_allowed_audit_log(arguments: list[str]) -> bool:
     return has_from and has_to and has_resource_id and has_search_metadata
 
 
+def is_allowed_flag_policy(arguments: list[str]) -> bool:
+    if arguments == ["flag-policy", "list"]:
+        return True
+    return (
+        len(arguments) == 3
+        and arguments[:2] == ["flag-policy", "show"]
+        and bool(arguments[2])
+        and not arguments[2].startswith("-")
+    )
+
+
 def is_allowed(arguments: list[str]) -> bool:
     if arguments == ["datastore", "list"]:
         return True
     if len(arguments) >= 3 and arguments[:2] == ["datastore", "show"]:
-        return is_show_options(arguments[3:], {"--shards", "--nodes", "--migrations", "--output"})
+        return is_show_options(
+            arguments[3:], {"--shards", "--nodes", "--migrations", "--history", "--output"}
+        )
     if len(arguments) == 3 and arguments[:2] in ({"cluster", "status"}, {"cluster", "slots"}):
         return True
     if len(arguments) >= 3 and arguments[:2] == ["shard", "show"]:
         return is_show_options(arguments[3:], {"--nodes", "--migrations", "--output"})
-    if len(arguments) == 3 and arguments[:2] == ["node", "show"]:
-        return True
+    if len(arguments) >= 3 and arguments[:2] == ["node", "show"]:
+        return is_show_options(arguments[3:], {"--output"})
     if arguments in (["node", "status"], ["node", "status", "cluster"]):
         return True
     if is_allowed_audit_log(arguments):
+        return True
+    if is_allowed_flag_policy(arguments):
         return True
     return is_allowed_node_response(arguments)
 
@@ -143,6 +158,7 @@ def is_allowed(arguments: list[str]) -> bool:
 def print_help() -> None:
     print("Usage: dfadmin-wrapper [--env ENV] <read-only dfadmin command>")
     print("Allowed: datastore list/show, cluster status/slots, shard show, node show/status/resp,")
+    print("flag-policy list/show, ")
     print(
         "and bounded audit-log list queries with --from, --to, --resource-id, and --search-metadata"
     )
@@ -161,7 +177,7 @@ def main() -> None:
         reject("a read-only dfadmin command is required")
     if not is_allowed(command):
         reject("command is not on the read-only allowlist")
-    os.execvp("dfa", ["dfa", *arguments])
+    os.execvp("dfadmin", ["dfadmin", *arguments])
 
 
 if __name__ == "__main__":

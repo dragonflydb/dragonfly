@@ -49,8 +49,8 @@ require_aws_auth() {
 
   cat >&2 <<'EOF'
 AWS authentication is unavailable or has expired.
-Authenticate with your normal AWS SSO profile, for example:
-  aws sso login
+Log in to the df-dev AWS account through the AWS access portal, then run:
+  aws login
 
 Then retry this command.
 EOF
