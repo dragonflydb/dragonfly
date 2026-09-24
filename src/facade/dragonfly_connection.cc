@@ -3283,10 +3283,14 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
                << pending_input_ << " " << GetUnreadInputLen();
 
       if (SquashPipelineV2()) {
-        // Let ParseLoop call ReplyBatch before dispatching another squash. A client with a bounded
-        // pipeline needs completed replies to replenish its requests. Delaying them reduces
-        // throughput even when more commands are ready to execute.
-        break;
+        // - This helps with throughput. Explanation:
+        //   when we suspend the thread calls io-callbacks that fill up the input buffer.
+        //   By breaking now we give the io-loop a chance to add more commands to the pipeline.
+        // - Skip the break when parse-in-proactor is on: the proactor already parsed those bytes
+        //   into the queue during the squash wait, so keep squashing in place instead.
+        if (!pipeline_parse_in_proactor_cached && (pending_input_ || GetUnreadInputLen() > 0))
+          break;
+        continue;
       }
     }
 
