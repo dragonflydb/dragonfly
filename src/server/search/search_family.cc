@@ -344,6 +344,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
   while (parser->HasNext()) {
     string_view field_token = parser->Next();
+    if (field_token.empty()) {
+      return CreateSyntaxError("Empty field name in schema"sv);
+    }
     string field_path_storage;
     string_view field_path = field_token;
     string_view field_alias = field_token;
@@ -361,6 +364,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
     // AS [alias]
     parser->Check("AS", &field_alias);
+    if (field_alias.empty()) {
+      return CreateSyntaxError("Empty field alias in schema"sv);
+    }
 
     if (schema.field_names.contains(field_alias)) {
       return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_alias));
@@ -487,8 +493,11 @@ std::optional<std::string_view> ParseFieldWithAtSign(CmdArgParser* parser) {
   return field;
 }
 
-void ParseNumericFilter(CmdArgParser* parser, SearchParams* params) {
+// Returns false when the field name is empty ("" or a lone "@").
+bool ParseNumericFilter(CmdArgParser* parser, SearchParams* params) {
   auto field = ParseField(parser);
+  if (field.empty())
+    return false;
   size_t lo = parser->Next<size_t>();
   size_t hi = parser->Next<size_t>();
   if (auto it = params->optional_filters.find(field); it != params->optional_filters.end()) {
@@ -499,6 +508,7 @@ void ParseNumericFilter(CmdArgParser* parser, SearchParams* params) {
     params->optional_filters.emplace(field,
                                      std::make_unique<search::OptionalNumericFilter>(lo, hi));
   }
+  return true;
 }
 
 std::vector<FieldReference> ParseLoadOrReturnFields(CmdArgParser* parser, bool is_load) {
@@ -585,7 +595,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
       params.sort_option =
           SearchParams::SortOption{field, parser->Check("DESC") ? SortOrder::DESC : SortOrder::ASC};
     } else if (parser->Check("FILTER")) {
-      ParseNumericFilter(parser, &params);
+      if (!ParseNumericFilter(parser, &params))
+        return CreateSyntaxError("bad arguments for FILTER: empty field name"sv);
     } else if (parser->Check("WITHSORTKEYS")) {
       params.with_sortkeys = true;
     } else if (parser->Check("WITHSCORES")) {

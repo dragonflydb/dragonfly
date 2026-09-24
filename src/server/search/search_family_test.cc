@@ -397,6 +397,23 @@ TEST_F(SearchFamilyTest, InfoMissingIndexUsesRedisCompatibleError) {
 // Regression for #7953: a zero-field index is a broken state (FT.INFO says "not found" while
 // FT._LIST lists it, and it doesn't survive serialization), so SCHEMA with at least one field
 // must be required unconditionally - not inferred from a heuristic over the skipped tokens.
+TEST_F(SearchFamilyTest, SchemaRejectsEmptyFieldName) {
+  const auto kEmptyName = "Empty field name in schema";
+  const auto kEmptyAlias = "Empty field alias in schema";
+
+  EXPECT_THAT(Run({"ft.create", "i1", "ON", "HASH", "SCHEMA", "", "NUMERIC"}), ErrArg(kEmptyName));
+  EXPECT_THAT(Run({"ft.create", "i1", "ON", "HASH", "SCHEMA", "age", "AS", "", "NUMERIC"}),
+              ErrArg(kEmptyAlias));
+  EXPECT_THAT(Run({"ft.create", "i1", "ON", "JSON", "SCHEMA", "", "NUMERIC"}), ErrArg(kEmptyName));
+  EXPECT_THAT(Run({"ft._list"}).GetVec(), testing::IsEmpty());
+
+  EXPECT_EQ(Run({"ft.create", "i1", "ON", "HASH", "SCHEMA", "age", "NUMERIC"}), "OK");
+  EXPECT_THAT(Run({"ft.alter", "i1", "SCHEMA", "ADD", "", "NUMERIC"}), ErrArg(kEmptyName));
+  EXPECT_THAT(Run({"ft.alter", "i1", "SCHEMA", "ADD", "h", "AS", "", "NUMERIC"}),
+              ErrArg(kEmptyAlias));
+  EXPECT_THAT(Run({"ft._list"}), RespElementsAre("i1"));
+}
+
 TEST_F(SearchFamilyTest, CreateWithoutSchemaKeywordIsError) {
   const auto kMissingSchema = "Missing required SCHEMA clause with at least one field";
 
@@ -4593,6 +4610,21 @@ TEST_F(SearchFamilyTest, NumericFilter) {
   EXPECT_THAT(res, AreDocIds("id:1"));
 
   Run({"FLUSHALL"});
+}
+
+TEST_F(SearchFamilyTest, NumericFilterRejectsEmptyField) {
+  const auto kEmptyField = "bad arguments for FILTER: empty field name";
+  Run({"FT.CREATE", "i1", "ON", "HASH", "SCHEMA", "age", "NUMERIC"});
+  Run({"HSET", "d1", "age", "1"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i1", "*", "FILTER", "", "0", "10"}), ErrArg(kEmptyField));
+  EXPECT_THAT(Run({"FT.SEARCH", "i1", "*", "FILTER", "@", "0", "10"}), ErrArg(kEmptyField));
+  EXPECT_THAT(Run({"FT.SEARCH", "i1", "*", "FILTER", "age", "0", "10", "FILTER", "", "0", "1"}),
+              ErrArg(kEmptyField));
+  EXPECT_THAT(Run({"FT.PROFILE", "i1", "SEARCH", "QUERY", "*", "FILTER", "", "0", "10"}),
+              ErrArg(kEmptyField));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "i1", "*", "FILTER", "age", "0", "10"}), AreDocIds("d1"));
 }
 
 TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
