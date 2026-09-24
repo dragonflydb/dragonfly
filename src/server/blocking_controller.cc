@@ -105,6 +105,14 @@ BlockingController::BlockingController(EngineShard* owner, Namespace* ns) : owne
 BlockingController::~BlockingController() {
 }
 
+bool BlockingController::HasAwakedTransaction() const {
+  for (const auto* tx : awakened_transactions_) {
+    if (!tx->IsCoordinatorPaused())
+      return true;
+  }
+  return false;
+}
+
 bool BlockingController::DbWatchTable::AddAwakeEvent(string_view key) {
   auto it = queue_map.find(key);
 

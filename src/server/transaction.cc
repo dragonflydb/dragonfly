@@ -12,6 +12,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
+#include "facade/dragonfly_connection.h"
 #include "facade/facade_stats.h"
 #include "facade/op_status.h"
 #include "server/blocking_controller.h"
@@ -1487,9 +1488,17 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
   DVLOG(1) << "WaitOnWatch done " << int(status) << " " << DebugId();
   --stats->num_blocked_clients;
 
-  cntx->paused = true;
-  ServerState::tlocal()->AwaitPauseState(true, cntx);  // blocking are always write commands
-  cntx->paused = false;
+  bool is_write = cid_ && !cid_->IsReadOnly();
+  auto* etl = ServerState::tlocal();
+  bool is_paused = etl->IsPaused(is_write) && (!cntx->conn() || !cntx->conn()->IsPrivileged());
+  if (is_paused && status != cv_status::timeout && !(coordinator_state_ & COORD_CANCELLED) &&
+      !cntx->conn_closing) {
+    SetCoordinatorPaused(true);
+    absl::Cleanup reset_paused = [this] { SetCoordinatorPaused(false); };
+    cntx->paused = true;
+    etl->AwaitPauseState(is_write, cntx);
+    cntx->paused = false;
+  }
 
   OpStatus result = OpStatus::OK;
   if (status == cv_status::timeout) {
