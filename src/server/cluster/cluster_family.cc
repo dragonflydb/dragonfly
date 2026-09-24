@@ -186,6 +186,7 @@ void ClusterFamily::ClusterHelp(SinkReplyBuilder* builder) {
 namespace {
 void ClusterShardsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builder) {
   // For more details https://redis.io/commands/cluster-shards/
+  SinkReplyBuilder::ReplyAggregator agg(builder);
   constexpr unsigned int kEntrySize = 4;
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
@@ -245,6 +246,7 @@ void ClusterFamily::ClusterShards(SinkReplyBuilder* builder, ConnectionContext* 
 namespace {
 void ClusterSlotsImpl(ClusterShardInfos config, SinkReplyBuilder* builder) {
   // For more details https://redis.io/commands/cluster-slots/
+  SinkReplyBuilder::ReplyAggregator agg(builder);
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
   auto WriteNode = [&](const ClusterNodeInfo& node) {

@@ -578,6 +578,47 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfoRanges) {
               ErrArg("Invalid slot range format"));
 }
 
+// Large CLUSTER SLOTS/SHARDS replies must be batched, not flushed to the socket per element.
+TEST_F(ClusterFamilyTest, FragmentedSlotsReplyIsBatched) {
+#ifndef NDEBUG
+  GTEST_SKIP() << "Requires release build";
+#endif
+  constexpr unsigned kRanges = 1024;
+  constexpr unsigned kWidth = 16384 / kRanges;
+  string ranges[2];
+  for (unsigned i = 0; i < kRanges; ++i) {
+    string& r = ranges[i % 2];
+    absl::StrAppend(&r, r.empty() ? "" : ",", R"({"start":)", i * kWidth, R"(,"end":)",
+                    (i + 1) * kWidth - 1, "}");
+  }
+  string config = absl::Substitute(R"json([
+      {"slot_ranges": [$0], "master": {"id": "$2", "ip": "10.0.0.1", "port": 7000},
+       "replicas": []},
+      {"slot_ranges": [$1], "master": {"id": "other", "ip": "10.0.0.2", "port": 7000},
+       "replicas": []}
+    ])json",
+                                   ranges[0], ranges[1], GetMyId());
+  ASSERT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
+
+  auto writes = [this] { return GetMetrics().facade_stats.reply_stats.io_write_cnt; };
+
+  uint64_t before = writes();
+  auto resp = Run({"cluster", "slots"});
+  // Unbatched, this would take 1 + kRanges * 7 writes.
+  EXPECT_LT(writes() - before, 100u);
+  ASSERT_THAT(resp, ArrLen(kRanges));
+  // Ranges are grouped by shard: shard 0 owns even ranges, shard 1 owns odd ones.
+  EXPECT_THAT(resp.GetVec()[0], RespElementsAre(IntArg(0), IntArg(kWidth - 1), _));
+  EXPECT_THAT(resp.GetVec()[kRanges / 2],
+              RespElementsAre(IntArg(kWidth), IntArg(2 * kWidth - 1), _));
+
+  before = writes();
+  resp = Run({"cluster", "shards"});
+  // Unbatched, this would take roughly kRanges * 2 writes.
+  EXPECT_LT(writes() - before, 100u);
+  ASSERT_THAT(resp, ArrLen(2));
+}
+
 TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
   ConfigSingleNodeCluster(GetMyId());
 
