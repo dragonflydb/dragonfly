@@ -1969,10 +1969,16 @@ TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
   Run({"ft.create", "i1", "on", "json", "schema", "$.id", "as", "id", "tag"});
   WaitForIndexReady("i1");
 
+  // Shard-side errors must surface exactly as FT.SEARCH reports them, not as an empty result.
   auto resp = Run({"ft.profile", "i1", "search", "query", "@id:[1 1]"});
-  ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
+  EXPECT_THAT(resp, ErrArg("Wrong access type for field: id"));
+  EXPECT_THAT(Run({"ft.search", "i1", "@id:[1 1]"}), ErrArg("Wrong access type for field: id"));
 
-  EXPECT_THAT(resp.GetVec()[0], IsMapWithSize());
+  resp = Run({"ft.profile", "i1", "search", "limited", "query", "@id:[1 1]"});
+  EXPECT_THAT(resp, ErrArg("Wrong access type for field: id"));
+
+  resp = Run({"ft.profile", "i1", "search", "query", "*", "FILTER", "nosuch", "1", "2"});
+  EXPECT_THAT(resp, ErrArg("Invalid field: nosuch"));
 
   resp = Run({"ft.profile", "i1", "search", "query", "@{invalid13289}"});
   EXPECT_THAT(resp, ErrArg("query syntax error"));

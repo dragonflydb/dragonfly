@@ -3352,29 +3352,24 @@ void SendFtProfileSearchResponse(const SearchParams& params,
                                  absl::Span<SearchResult> profile_results,
                                  absl::Span<const absl::Duration> shard_durations,
                                  absl::Duration took, RedisReplyBuilder* rb, bool limited) {
-  bool result_is_empty = false;
+  // A shard error is reported the same way FT.SEARCH reports it, not as an empty result.
+  for (const auto& result : search_results) {
+    if (result.error) {
+      return rb->SendError(*result.error);
+    }
+  }
+
   size_t total_docs = 0;
   size_t total_serialized = 0;
   for (const auto& result : search_results) {
-    if (!result.error) {
-      total_docs += result.total_hits;
-      total_serialized += result.docs.size();
-    } else {
-      result_is_empty = true;
-    }
+    total_docs += result.total_hits;
+    total_serialized += result.docs.size();
   }
 
   // First element -> Result of the search command
   // Second element -> Profile information
   rb->StartArray(2);
-
-  // Result of the search command
-  if (!result_is_empty) {
-    SearchReply(params, knn_sort_option, inject_score_alias, search_results, rb, false);
-  } else {
-    rb->StartArray(1);
-    rb->SendLong(0);
-  }
+  SearchReply(params, knn_sort_option, inject_score_alias, search_results, rb, false);
 
   // Profile information
   rb->StartArray(profile_results.size() + 1);
