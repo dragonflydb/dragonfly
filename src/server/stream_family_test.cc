@@ -2221,6 +2221,27 @@ TEST_F(StreamFamilyTest, XGroupSetIdEntriesRead) {
                   "last-delivered-id", "2000-0", "entries-read", kMatchNil, "lag", IntArg(0)));
 }
 
+TEST_F(StreamFamilyTest, XGroupSetIdRejectsBadEntriesRead) {
+  Run("XGROUP CREATE mystream mygroup $ MKSTREAM");
+  Run("XADD mystream 2000-0 key val");
+
+  EXPECT_THAT(Run({"XGROUP", "SETID", "mystream", "mygroup", "0", "ENTRIESREAD", "abc"}),
+              ErrArg("syntax error"));
+  EXPECT_THAT(Run({"XGROUP", "SETID", "mystream", "mygroup", "0", "ENTRIESREAD", "[1,2,3]"}),
+              ErrArg("syntax error"));
+  EXPECT_THAT(Run({"XGROUP", "SETID", "mystream", "mygroup", "0", "ENTRIESREAD", "-5"}),
+              ErrArg("syntax error"));
+  EXPECT_THAT(Run({"XGROUP", "SETID", "mystream", "mygroup", "0", "ENTRIESREAD"}),
+              ErrArg("syntax error"));
+
+  EXPECT_EQ(Run({"XGROUP", "SETID", "mystream", "mygroup", "2000-0", "ENTRIESREAD", "3"}), "OK");
+  auto resp = Run("XINFO GROUPS mystream");
+  EXPECT_THAT(
+      resp.GetVec()[0].GetVec(),
+      ElementsAre("name", "mygroup", "consumers", IntArg(0), "pending", IntArg(0),
+                  "last-delivered-id", "2000-0", "entries-read", IntArg(3), "lag", IntArg(-2)));
+}
+
 TEST_F(StreamFamilyTest, XInfoConsumersArityCrash) {
   Run("XGROUP CREATE mystream mygroup $ MKSTREAM");
   auto resp = Run("XINFO CONSUMERS mystream");

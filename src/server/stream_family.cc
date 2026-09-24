@@ -2573,7 +2573,7 @@ void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   while (parser->HasNext()) {
     if (parser->Check("ENTRIESREAD") && parser->HasAtLeast(1)) {
       entries_read = parser->Next<int64>();
-      if (parser->HasError() || *entries_read < SCG_INVALID_ENTRIES_READ) {
+      if (auto err = parser->TakeError(); err || *entries_read < SCG_INVALID_ENTRIES_READ) {
         return cmd_cntx->SendError(kSyntaxErr);
       }
     } else {
