@@ -10,10 +10,6 @@
 
 #include <optional>
 
-#include "facade/cmd_arg_parser.h"
-#include "facade/reply_builder.h"
-#include "server/tx_base.h"
-
 extern "C" {
 #include "redis/crc64.h"
 }
@@ -23,7 +19,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/glob_matcher.h"
 #include "core/qlist.h"
-#include "core/string_set.h"
+#include "facade/reply_builder.h"
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
