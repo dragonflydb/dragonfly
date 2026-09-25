@@ -15,15 +15,16 @@ serialization point. Periodic DFS checkpoints keep the logs bounded.
 5. [Write Path](#write-path)
 6. [I/O Mode](#io-mode)
 7. [Fsync Policy](#fsync-policy)
-8. [Checkpoints: Bounding File Growth](#checkpoints-bounding-file-growth)
-9. [Replay at Startup](#replay-at-startup)
-10. [Re-base: Paths That Bypass the Journal](#re-base-paths-that-bypass-the-journal)
-11. [Atomicity Semantics](#atomicity-semantics)
-12. [Configuration and Observability](#configuration-and-observability)
-13. [Implementation Map](#implementation-map)
-14. [Phasing](#phasing)
-15. [Testing](#testing)
-16. [Open Questions](#open-questions)
+8. [Discussion: Pure Async Disk I/O vs. Writer Fiber](#discussion-pure-async-disk-io-vs-writer-fiber)
+9. [Checkpoints: Bounding File Growth](#checkpoints-bounding-file-growth)
+10. [Replay at Startup](#replay-at-startup)
+11. [Re-base: Paths That Bypass the Journal](#re-base-paths-that-bypass-the-journal)
+12. [Atomicity Semantics](#atomicity-semantics)
+13. [Configuration and Observability](#configuration-and-observability)
+14. [Implementation Map](#implementation-map)
+15. [Phasing](#phasing)
+16. [Testing](#testing)
+17. [Open Questions](#open-questions)
 
 ---
 
@@ -96,13 +97,14 @@ Non-goals:
     the journal never auto-stops (`MaybeStop()`) while AOF is on.
   - The replication ring buffer and its retention policy don't change, and AOF does not depend
     on them.
-- **`AofSegmentWriter`** runs one writer fiber per shard, on the shard's own proactor. It uses
-  `fb2::LinuxFile` over io_uring and owns segment files, spare segments, rotation, and fsync.
-  - It follows the buffering and in-flight model of `BufferedSocketWriter`, with a file as the
-    destination instead of a socket. It is a separate class, because file writes need offsets,
+- **`AofSegmentWriter`** owns the segment files: writes, fsync, rotation, and spare segments. It
+  runs on the shard's own proactor and uses `fb2::LinuxFile` over io_uring.
+  - Like `BufferedSocketWriter`, it keeps at most one write in flight. Whatever is sealed in the
+    meantime goes into the next write. It is a separate class, because file writes need offsets,
     fsync, block framing, and rotation, none of which applies to a socket.
-  - It reuses `PendingBuf` ([pending_buf.h](../src/server/journal/pending_buf.h)) for iovec
-    batching.
+  - There are two ways to drive the I/O: purely from io_uring completion callbacks, or from a
+    dedicated writer fiber. See
+    [Discussion: Pure Async Disk I/O vs. Writer Fiber](#discussion-pure-async-disk-io-vs-writer-fiber).
 - **AOF LSN = journal LSN.** There is no second sequence number. Checkpoints, replay, and any
   future partial sync from disk all use the same coordinates.
 - **Shared apply logic.** The body of `DflyShardReplica::ExecuteTx` (the global-command barrier
@@ -187,13 +189,14 @@ called inside an atomic section. It appends `item.journal_item.data` to the open
 `last_appended_lsn`.
 
 `ThrottleIfNeeded()`:
-- Seals the open block and hands it to the writer by notifying an `EventCount`.
+- Seals the open block and hands it to the writer. If no write is in flight, a new one starts.
 - Applies disk backpressure: if `pending_bytes > --aof_max_pending_bytes`, it blocks until the
-  writer catches up. This stalls the shard, the same way replication throttling in
-  `BufferedSocketWriter` does today.
+  writer catches up. It waits on an `EventCount` that write completions notify. This stalls the
+  shard, the same way replication throttling in `BufferedSocketWriter` does today.
 
-The writer fiber loops:
-1. Take every sealed block and write them all with one `pwritev` at the segment offset.
+Each write cycle:
+1. Write every sealed block in one operation at the segment offset. Resubmit the remainder after
+   a short write.
 2. Publish `written_lsn`.
 3. Sync according to the [fsync policy](#fsync-policy), then publish `durable_lsn` (an atomic
    readable from any thread) and wake waiters. `durable_lsn` never passes an open
@@ -201,6 +204,9 @@ The writer fiber loops:
 4. When `offset >= --aof_segment_max_bytes`, rotate at a block boundary:
    - `fdatasync` and close the old segment.
    - Switch to the spare segment, and write its header as part of its first batch.
+
+Blocks sealed while a write or sync is in flight go into the next cycle. That is the group
+commit: under load, one write and one sync cover many transactions.
 
 **Spare segments.** A new segment's directory entry must be durable before any record in it is
 reported durable. Otherwise, after a power loss, the file could vanish together with
@@ -230,8 +236,9 @@ O_DIRECT also does not make anything durable. We would still need `fdatasync` or
 flush the device cache.
 
 **Durability.** Durability comes only from the fsync policy. In `always` mode, each write is
-submitted as an io_uring `WRITEV` with `rw_flags = RWF_DSYNC`, so the write and the datasync are
-a single operation per group commit.
+submitted with `RWF_DSYNC`, so the write and the datasync are a single operation per group
+commit. For how io_uring executes buffered writes and syncs (inline or in kernel worker
+threads), see [Buffered writes in io_uring](#buffered-writes-in-io_uring).
 
 **Keeping fdatasync cheap.**
 - The problem: `fallocate` alone leaves *unwritten* extents on ext4 and xfs. The first write into
@@ -291,6 +298,138 @@ Errors are handled the same way as in Valkey:
 - While in that state, write commands are rejected with `-MISCONF` until a later write succeeds.
   This applies in `always` mode, and in `everysec` mode after a failed fsync.
 - The state is exposed in `INFO persistence` as `aof_last_write_status` and `aof_delayed_fsync`.
+
+---
+
+## Discussion: Pure Async Disk I/O vs. Writer Fiber
+
+`AofSegmentWriter` can drive its I/O in two ways. Both keep the same on-disk format, the same
+fsync semantics, and the same rule of at most one write in flight, so completions arrive in
+order and `durable_lsn` advances over a contiguous prefix. They differ only in who issues the
+next I/O operation.
+
+### Option A: pure async disk I/O
+
+The writer is a chain of io_uring completion callbacks. This is the model tiering already uses:
+`DiskStorage::Stash` issues `WriteAsync`/`WriteFixedAsync`, and grows its file with
+`FallocateAsync` ([disk_storage.cc](../src/server/tiering/disk_storage.cc)).
+
+- `ThrottleIfNeeded()` seals a block. If no write is in flight, it issues an async write.
+- The completion callback does four things:
+  - publishes `written_lsn`, and `durable_lsn` where the policy allows;
+  - notifies the `EventCount` that `Throttle` and `always`-mode replies wait on;
+  - handles a short write;
+  - issues the next write from whatever was sealed in the meantime.
+- **`always`:** the write carries `RWF_DSYNC`, so each group commit is one submission. The
+  alternative is a write and an fdatasync linked with `IOSQE_IO_LINK`.
+- **`everysec`:** a `ProactorBase::AddPeriodic` task issues an async fdatasync once a second
+  when the segment is dirty. The `IORING_OP_SYNC_FILE_RANGE` and `IORING_OP_FADVISE` calls for
+  page-cache hygiene are chained from the fdatasync completion.
+- **Buffers:** each block can be built in a registered buffer (`RequestRegisteredSlice`) and
+  written with `WriteFixedAsync`, as `DiskStorage` does.
+- **Constraint:** completion callbacks run in the proactor context, outside any fiber. They must
+  never call a fiber-blocking function, such as `FSync()` or `Throttle()`.
+
+Additional work this option needs:
+- **helio `LinuxFile` API** ([uring_file.h](../helio/util/fibers/uring_file.h)):
+  - An async fsync (`FSyncAsync(flags, cb)`). Today `FSync` is fiber-blocking only; it is built
+    on `FiberCall`.
+  - An `rw_flags` argument on `WriteAsync` and `WriteFixedAsync`, to pass `RWF_DSYNC`.
+  - Optionally a vectored async write, to avoid copying sealed blocks into one buffer.
+  - Async `sync_file_range` and `fadvise`.
+
+  Each is a few lines on top of `GetSubmitEntry`. They are upstream helio changes, unless the
+  AOF code issues the SQEs itself.
+- **Spare-segment preparation:** preparing a spare takes several steps (open or rename,
+  zero-fill writes, fdatasync, then a directory fsync). It becomes either a callback state
+  machine, which also needs an async open, or a short-lived background fiber started after each
+  rotation.
+- **Error and shutdown handling:**
+  - Errors are recorded from the callbacks. `-MISCONF` gating reads that status.
+  - Closing a segment must first drain in-flight operations, using a pending-ops counter like
+    the one in `DiskStorage`.
+  - A new write can be issued both from `ThrottleIfNeeded()` and from a completion callback, so
+    the "write in flight" state must stay consistent between them.
+
+Pros:
+- No permanent fiber per shard.
+- No fiber context switch between the shard fiber and a writer on every batch.
+- The next write is issued directly from the completion that ends the previous one.
+- The model matches existing tiering code.
+
+Cons:
+- The helio additions above.
+- Control flow is split across callbacks (rotation, spare switch, errors). That is harder to
+  read and test than straight-line code.
+
+### Option B: dedicated writer fiber
+
+One fiber per shard runs a loop:
+1. wait on an `EventCount`;
+2. write the batch with the fiber-blocking `LinuxFile::Write(iov, n, offset, flags)`;
+3. `FSync()` according to the policy;
+4. publish the LSNs, and rotate if needed.
+
+`everysec` becomes a `WaitFor` timeout in the loop. Spare preparation can run inline between
+batches, or in a second fiber.
+
+Additional work this option needs:
+- None in helio. Vectored writes with `RWF_DSYNC` flags and a fiber-blocking fsync already
+  exist.
+
+Pros:
+- Straight-line code. Rotation, spare switching and error handling live in one place.
+- Same style as the snapshot save path.
+
+Cons:
+- A permanent fiber and its stack on every shard.
+- One extra fiber switch per batch.
+- A blocking fsync still runs in an io-wq kernel thread (see below), so the fiber only adds a
+  user-space hop on top of it.
+
+### Buffered writes in io_uring
+
+Historically, io_uring could complete writes to regular files without blocking only with
+`O_DIRECT`. Every buffered write was punted to io-wq kernel worker threads.
+- Async buffered *reads* came in Linux 5.9.
+- Async buffered *writes*, using the non-blocking `IOCB_NOWAIT` path, landed for XFS in 6.0 and
+  for btrfs in 6.1 ([LWN](https://lwn.net/Articles/896909/)).
+
+In current mainline:
+- **Which filesystems are covered:** a filesystem opts in with `FOP_BUFFER_WASYNC`. XFS and
+  btrfs set it; ext4 does not (`fs/ext4/file.c`).
+- **What happens without it:** for a regular file with neither `IOCB_DIRECT` nor that flag,
+  `io_uring/rw.c` returns `-EAGAIN` from the non-blocking attempt and punts the write to io-wq.
+- **Syncs:** `fsync`/`fdatasync`, `sync_file_range` and `fallocate` are always executed in
+  io-wq. `io_uring/sync.c` forces them async.
+
+What this means for the AOF:
+- **Buffered writes work on every filesystem.** They complete inline or through io-wq, but in
+  both cases the submitting thread never blocks. So neither option depends on the filesystem.
+  io-wq also serializes buffered writes to one file (hashed by inode), which preserves our
+  ordering.
+- **`RWF_DSYNC` writes most likely always go through io-wq.** They include a sync, which cannot
+  be done without blocking. This should be measured on ext4 and XFS.
+- **Worker threads under a slow disk.** Every sync occupies an io-wq worker. Consider capping
+  workers with `IORING_REGISTER_IOWQ_MAX_WORKERS`, so a stalled disk does not spawn many kernel
+  threads. helio does not set a cap today.
+- **The kernel I/O is the same either way.** The choice between A and B only affects scheduling
+  in user space.
+
+### Recommendation
+
+Option A, pure async I/O, for the write and sync path.
+- The hot path is a simple ordered chain with one operation in flight, which callbacks express
+  well.
+- It avoids a permanent fiber per shard and a context switch per batch.
+- It reuses the pattern `DiskStorage` already follows.
+
+The rare, multi-step spare-segment preparation should still run in a short-lived fiber rather
+than a callback state machine.
+
+The helio additions are the main cost. If they should not block phase 1, option B is an
+acceptable interim step. The format and semantics are identical, so moving from B to A later
+changes only `AofSegmentWriter`.
 
 ---
 
