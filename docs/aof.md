@@ -866,7 +866,7 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
    they ship as one stage:
    - `AofStreamer` and `AofSegmentWriter`: parallel async writes, periodic sync, spare segments,
      rotation at the cut, `-MISCONF`.
-   - Segment format and manifest.
+   - Segment format with sync markers, and the manifest.
    - Checkpoints: the cut, garbage collection, recycling, the automatic trigger,
      `DEBUG AOF CHECKPOINT`, and checkpoint-health reporting.
    - Replay, including the global-command barrier, the torn-tail rules, and restart with a
@@ -875,8 +875,8 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
    and `no`.
 3. **Atomic groups:** single-shard transaction and script atomicity.
 4. **Re-base:** `CONFIG SET appendonly`, AOF on replicas, `DFLY LOAD` and `DEBUG RELOAD`.
-5. **Optional:** multi-shard tail atomicity, size-based rotation, direct I/O, sync markers,
-   partial sync from AOF, repair tool.
+5. **Optional:** multi-shard tail atomicity, size-based rotation, direct I/O, partial sync from
+   AOF, repair tool.
 
 ---
 
