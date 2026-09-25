@@ -264,10 +264,15 @@ the contiguous `written_lsn`, not `last_appended_lsn`.
 A sync is also forced early when the unsynced amount reaches `max_unsynced_bytes`. This bound is
 what makes a torn tail recognizable at replay.
 
-**Rotation.** When the next block would cross `--aof_segment_max_bytes`, it goes into the spare
-segment instead, right after the header. The old segment then gets its final `fdatasync` and is
-closed once its in-flight writes complete. `durable_lsn` advances past a segment's records only
-after that segment's final sync.
+**Rotation.** A shard starts a new segment only at two points: at a checkpoint cut (see
+[Checkpoints](#checkpoints-bounding-file-growth)), and when the log resumes after a restart. There
+is no size-based rotation in the MVP. Between checkpoints, each shard appends to a single active
+segment, whose size the checkpoint trigger bounds.
+
+When rotating:
+- The next block goes into the spare segment, right after the header.
+- The old segment gets its final `fdatasync`, and is closed once its in-flight writes complete.
+- `durable_lsn` advances past a segment's records only after that segment's final sync.
 
 **Spare segments.** A new segment's directory entry must be durable before any record in it is
 reported durable. Otherwise, after a power loss, the file could vanish together with
@@ -465,9 +470,15 @@ identical, so moving from B to A later changes only `AofSegmentWriter`.
 
 ## Checkpoints: Bounding File Growth
 
-Rotating segments only splits the log into files; on its own, it does not bound disk usage. That
-comes from **checkpoints**. A checkpoint writes a new DFS base and records a cut LSN for each
-shard. Once it commits, every older segment can be deleted.
+Splitting the log into files does not bound disk usage by itself: a record can only be deleted
+once a base covers it. That comes from **checkpoints**. A checkpoint writes a new DFS base and
+records a cut LSN for each shard. Once it commits, every older segment can be deleted.
+
+This is also why segments rotate only at the cut. The rotation puts everything before the cut in
+older files, so garbage collection deletes whole files, and never has to trim the front of a live
+file (with a hole punch or a rewrite). Rotating by size between cuts would free nothing earlier,
+because nothing can be deleted before the next checkpoint anyway. With one segment per checkpoint
+interval, the previous interval's file becomes the recycle candidate for the next spare.
 
 This is what Valkey's `BGREWRITEAOF` does as well. It never reads the old AOF. A forked child
 dumps the in-memory dataset as the new BASE while the parent starts a new INCR file at the fork
@@ -516,6 +527,16 @@ point. Here, the snapshot's point-in-time cut takes the place of `fork()`.
   stays intact.
 
 Disk usage stays at roughly `base + rewrite threshold + one in-progress base`.
+
+### Checkpoint health
+
+The bound holds only while checkpoints succeed. If they keep failing (a full disk, or a save
+that is always already running), the active segments grow without bound. Size-based rotation
+would not help; this is a checkpoint-health problem, and it must be visible:
+- `INFO persistence` reports `aof_last_bgrewrite_status`, `aof_checkpoint_failures`
+  (consecutive failures), and the log size next to the trigger size (`aof_current_size`,
+  `aof_rewrite_trigger_size`).
+- Each failed checkpoint is logged with its cause, and a retry is scheduled with backoff.
 
 ---
 
@@ -699,6 +720,9 @@ Possible fix:
   tail page in memory and pad only at sync points. With O_DIRECT, parallel writes also map
   directly to device queue depth. This is worth doing only if benchmarks show that double
   buffering in the page cache hurts.
+- **Size-based rotation** (`--aof_segment_max_bytes`), if a later feature needs fixed-size
+  segments. For example, partial sync of replicas from AOF segments may want them. It does not
+  affect disk usage (see [Checkpoints](#checkpoints-bounding-file-growth)).
 - **Sync markers.** Recording completed sync points in the log would let replay tell corruption
   in the last `max_unsynced_bytes` from a torn tail.
 - **Partial sync for replicas from AOF segments.** This is cheap because AOF LSN equals journal
@@ -718,7 +742,6 @@ Possible fix:
 | `--aof` | `false` | MVP | Alias: `appendonly` |
 | `--aof_dir` | `--dir` | MVP | |
 | `--aof_name` | `appendonly` | MVP | File name prefix |
-| `--aof_segment_max_bytes` | 256MB | MVP | Segment rotation size |
 | `--aof_rewrite_percentage` | 100 | MVP | Auto-checkpoint growth factor |
 | `--aof_rewrite_min_size` | 64MB | MVP | Auto-checkpoint minimum size |
 | `--aof_write_batch_bytes` | TBD | MVP | Maximum size of one submitted batch of sealed blocks |
@@ -734,8 +757,9 @@ Commands:
 
 `INFO persistence` gains these fields:
 - **MVP, global:**
-  - `aof_enabled`, `aof_rewrite_in_progress`, `aof_last_bgrewrite_status`
-  - `aof_current_size`, `aof_base_size`
+  - `aof_enabled`, `aof_rewrite_in_progress`, `aof_last_bgrewrite_status`,
+    `aof_checkpoint_failures`
+  - `aof_current_size`, `aof_base_size`, `aof_rewrite_trigger_size`
   - `aof_last_write_status`
 - **MVP, per shard:** `aof_inflight_bytes`, `aof_unsynced_bytes`, `aof_throttle_usec`,
   `aof_fsync_latency`
@@ -765,22 +789,21 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
 
 ## Phasing
 
-1. **Log and replay** (MVP, part 1):
+1. **MVP: log, checkpoints and replay.** The log is only useful together with checkpoints, so
+   they ship as one stage:
    - `AofStreamer` and `AofSegmentWriter`: parallel async writes, periodic sync, spare segments,
-     rotation, `-MISCONF`.
-   - Segment format.
-   - Replay without a base, including the global-command barrier and the torn-tail rules.
-   - Files are not bounded yet, so this phase is for development only.
-2. **Checkpoints** (MVP, part 2):
-   - Manifest, garbage collection, the automatic trigger, and `DEBUG AOF CHECKPOINT`.
-   - Restart with a changed shard count.
-   - File growth becomes bounded, and the MVP is complete.
-3. **Fsync policy:** `always` with group commit and reply gating coalesced across a pipeline,
+     rotation at the cut, `-MISCONF`.
+   - Segment format and manifest.
+   - Checkpoints: the cut, garbage collection, recycling, the automatic trigger,
+     `DEBUG AOF CHECKPOINT`, and checkpoint-health reporting.
+   - Replay, including the global-command barrier, the torn-tail rules, and restart with a
+     changed shard count.
+2. **Fsync policy:** `always` with group commit and reply gating coalesced across a pipeline,
    and `no`.
-4. **Atomic groups:** single-shard transaction and script atomicity.
-5. **Re-base:** `CONFIG SET appendonly`, AOF on replicas, `DFLY LOAD` and `DEBUG RELOAD`.
-6. **Optional:** multi-shard tail atomicity, direct I/O, sync markers, partial sync from AOF,
-   repair tool.
+3. **Atomic groups:** single-shard transaction and script atomicity.
+4. **Re-base:** `CONFIG SET appendonly`, AOF on replicas, `DFLY LOAD` and `DEBUG RELOAD`.
+5. **Optional:** multi-shard tail atomicity, size-based rotation, direct I/O, sync markers,
+   partial sync from AOF, repair tool.
 
 ---
 
@@ -795,7 +818,9 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
   - corruption before the last `max_unsynced_bytes` of a chain is fatal
   - stale blocks in a recycled segment are read as end of log, including stale blocks whose LSN is
     higher than the expected one
-  - rotation keeps LSNs continuous
+  - rotation at a checkpoint cut and at restart keeps LSNs continuous
+  - a failed checkpoint leaves a valid chain from the old cut, across the extra segment it
+    started
   - atomic manifest replacement
   - garbage collection of unreferenced files
 - **MVP integration tests** in `tests/dragonfly/aof_test.py`, using the seeder and `capture()`:
@@ -803,6 +828,8 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
     window.
   - Checkpoint under load, with a crash injected at each checkpoint step: after restart, the
     data matches.
+  - Checkpoints forced to fail repeatedly: the log keeps growing, `aof_checkpoint_failures`
+    counts up, and the next successful checkpoint reclaims the space.
   - A FLUSHALL in the middle of the log replays correctly through the barrier.
   - A FLUSHALL present in only some chains (the others truncated before it) replays without
     deadlock.
