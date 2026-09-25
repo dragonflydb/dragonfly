@@ -10,10 +10,6 @@
 
 #include <optional>
 
-#include "facade/cmd_arg_parser.h"
-#include "facade/reply_builder.h"
-#include "server/tx_base.h"
-
 extern "C" {
 #include "redis/crc64.h"
 }
@@ -23,7 +19,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/glob_matcher.h"
 #include "core/qlist.h"
-#include "core/string_set.h"
+#include "facade/reply_builder.h"
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
@@ -206,7 +202,7 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(io::Source* sourc
     return std::nullopt;
   }
 
-  return std::optional<OpaqueObj>(std::move(obj));
+  return std::optional(std::move(obj));
 }
 
 OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_view data,
@@ -332,7 +328,7 @@ class Renamer {
 
  private:
   void FetchData(bool materialize_destination);
-  facade::OpStatus FinalizeRename();
+  OpStatus FinalizeRename();
 
   bool KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const;
   OpStatus PrepareDest(Transaction* t, EngineShard* shard);
@@ -1252,27 +1248,26 @@ void TtlGeneric(string_view key, TimeUnit unit, CommandContext* cmd_cntx) {
 struct ExpireArgs {
   string_view key;
   int64_t value = 0;
-  int32_t flags = ExpireFlags::EXPIRE_ALWAYS;
+  int32_t flags = EXPIRE_ALWAYS;
 };
 
 ExpireArgs ParseExpireArgs(CmdArgParser* parser) {
   static constexpr auto kGrammar =
       Compile(Args(&ExpireArgs::key, &ExpireArgs::value),
-              Options(Flags(&ExpireArgs::flags, "NX", int32_t{ExpireFlags::EXPIRE_NX}, "XX",
-                            int32_t{ExpireFlags::EXPIRE_XX}, "GT", int32_t{ExpireFlags::EXPIRE_GT},
-                            "LT", int32_t{ExpireFlags::EXPIRE_LT})));
+              Options(Flags(&ExpireArgs::flags, "NX", int32_t{EXPIRE_NX}, "XX", int32_t{EXPIRE_XX},
+                            "GT", int32_t{EXPIRE_GT}, "LT", int32_t{EXPIRE_LT})));
   auto args = kGrammar.Apply(parser);
   parser->Finalize("Unsupported option: ");
 
   // NX with GT/LT is allowed as a deliberate extension, see docs/differences.md.
-  if ((args.flags & ExpireFlags::EXPIRE_NX) && (args.flags & ExpireFlags::EXPIRE_XX))
+  if ((args.flags & EXPIRE_NX) && (args.flags & EXPIRE_XX))
     parser->ReportCustom("NX and XX, GT or LT options at the same time are not compatible");
-  if ((args.flags & ExpireFlags::EXPIRE_GT) && (args.flags & ExpireFlags::EXPIRE_LT))
+  if ((args.flags & EXPIRE_GT) && (args.flags & EXPIRE_LT))
     parser->ReportCustom("GT and LT options at the same time are not compatible");
   return args;
 }
 
-// New version of OpDel with possible journal omits - autojournaling must be disabled
+// Deletion with possible journal omits - autojournaling must be disabled
 OpResult<uint32_t> OpDelV2(const OpArgs& op_args, const ShardArgs& keys, bool async) {
   bool journal_enabled = op_args.shard->journal();
   auto& db_slice = op_args.GetDbSlice();
@@ -1307,24 +1302,6 @@ OpResult<uint32_t> OpDelV2(const OpArgs& op_args, const ShardArgs& keys, bool as
 
 }  // namespace
 
-OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async) {
-  DVLOG(1) << "Del: " << keys.Front() << " async: " << async;
-  auto& db_slice = op_args.GetDbSlice();
-
-  uint32_t res = 0;
-
-  for (string_view key : keys) {
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    if (!IsValid(it))
-      continue;
-
-    db_slice.Del(op_args.db_cntx, it, nullptr, async);
-    ++res;
-  }
-
-  return res;
-}
-
 static cmd::CmdR CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool async_unlink =
       cmd_cntx->cid()->name() == "UNLINK" && absl::GetFlag(FLAGS_unlink_experimental_async);
@@ -1354,7 +1331,7 @@ static cmd::CmdR CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Delex(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1373,11 +1350,11 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
     if (!parser.HasNext()) {
       // DELEX key <something> - invalid, needs both condition and value
       // TODO: include error type in error reply
-      return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+      return cmd_cntx->SendError(WrongNumArgsError("DELEX"), kSyntaxErrType);
     }
     compare_value = parser.Next();
     if (parser.HasNext()) {
-      return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+      return cmd_cntx->SendError(WrongNumArgsError("DELEX"), kSyntaxErrType);
     }
 
     if (absl::EqualsIgnoreCase(opt, "IFEQ")) {
@@ -1389,19 +1366,19 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
     } else if (absl::EqualsIgnoreCase(opt, "IFDNE")) {
       cond = Condition::IFDNE;
     } else {
-      return cmd_cntx->SendError(facade::UnknownSubCmd(opt, "DELEX"), kSyntaxErrType);
+      return cmd_cntx->SendError(UnknownSubCmd(opt, "DELEX"), kSyntaxErrType);
     }
   }
 
   if (auto err = parser.TakeError(); err) {
     // DELEX key <something> - invalid, needs both condition and value
     // TODO: include error type in error reply
-    return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+    return cmd_cntx->SendError(WrongNumArgsError("DELEX"), kSyntaxErrType);
   }
 
   // If no condition, delegate to standard DEL
   if (cond == Condition::NONE) {
-    CmdDel(facade::CmdArgParser{cmd_cntx->tail_args()}, cmd_cntx);
+    CmdDel(CmdArgParser{cmd_cntx->tail_args()}, cmd_cntx);
     return;
   }
 
@@ -1467,11 +1444,11 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
   }
 }
 
-void GenericFamily::Ping(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Ping(CmdArgParser parser, CommandContext* cmd_cntx) {
   const bool has_msg = parser.HasNext();
   string_view msg = parser.NextOrDefault();
   if (parser.HasNext()) {
-    return cmd_cntx->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
+    return cmd_cntx->SendError(WrongNumArgsError("ping"), kSyntaxErrType);
   }
 
   // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
@@ -1494,7 +1471,7 @@ void GenericFamily::Ping(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   return cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Exists(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Exists(CmdArgParser parser, CommandContext* cmd_cntx) {
   VLOG(1) << "Exists " << parser.Peek();
 
   atomic_uint32_t result{0};
@@ -1513,7 +1490,7 @@ void GenericFamily::Exists(facade::CmdArgParser parser, CommandContext* cmd_cntx
   return cmd_cntx->SendLong(result.load(memory_order_acquire));
 }
 
-void GenericFamily::Persist(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Persist(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
@@ -1522,7 +1499,7 @@ void GenericFamily::Persist(facade::CmdArgParser parser, CommandContext* cmd_cnt
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Expire(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.Next(ParseExpireArgs);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1540,7 +1517,7 @@ void GenericFamily::Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::ExpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::ExpireAt(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.Next(ParseExpireArgs);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1562,7 +1539,7 @@ void GenericFamily::ExpireAt(facade::CmdArgParser parser, CommandContext* cmd_cn
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Keys(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view pattern = parser.Next();
   uint64_t cursor = 0;
 
@@ -1583,7 +1560,7 @@ void GenericFamily::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   return cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::PexpireAt(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.Next(ParseExpireArgs);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1605,7 +1582,7 @@ void GenericFamily::PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_c
   }
 }
 
-void GenericFamily::Pexpire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Pexpire(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.Next(ParseExpireArgs);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1626,7 +1603,7 @@ void GenericFamily::Pexpire(facade::CmdArgParser parser, CommandContext* cmd_cnt
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Stick(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Stick(CmdArgParser parser, CommandContext* cmd_cntx) {
   Transaction* transaction = cmd_cntx->tx();
   VLOG(1) << "Stick " << parser.Peek();
 
@@ -1648,6 +1625,8 @@ void GenericFamily::Stick(facade::CmdArgParser parser, CommandContext* cmd_cntx)
   uint32_t match_cnt = result.load(memory_order_relaxed);
   cmd_cntx->SendLong(match_cnt);
 }
+
+namespace {
 
 struct SortEntryBase {
   string key;
@@ -2023,7 +2002,7 @@ struct SortVisitor {
   vector<string> raw_elements;
 
   template <typename T> void operator()(T& entries) {
-    using value_t = typename std::decay_t<decltype(entries)>::value_type;
+    using value_t = std::decay_t<decltype(entries)>::value_type;
     auto cmp = params.reversed ? &value_t::greater : &value_t::less;
 
     DCHECK(params.to_sort);
@@ -2186,7 +2165,7 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
 
   // Validate BY pattern has exactly one '*'
   if (params.by_pattern) {
-    size_t star_count = std::count(params.by_pattern->begin(), params.by_pattern->end(), '*');
+    size_t star_count = rng::count(*params.by_pattern, '*');
     if (star_count == 0) {
       // "nosort" pattern - no '*' means skip sorting, preserve insertion order
       params.to_sort = false;
@@ -2201,7 +2180,7 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
     if (pattern == "#") {
       continue;  // Special pattern, always valid
     }
-    size_t star_count = std::count(pattern.begin(), pattern.end(), '*');
+    size_t star_count = rng::count(pattern, '*');
     if (star_count > 1) {
       return cmd_cntx->SendError(kSyntaxErr);
     }
@@ -2384,15 +2363,17 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Sort(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+}  // namespace
+
+void GenericFamily::Sort(CmdArgParser parser, CommandContext* cmd_cntx) {
   SortGeneric(std::move(parser), cmd_cntx, false);
 }
 
-void GenericFamily::Sort_RO(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Sort_RO(CmdArgParser parser, CommandContext* cmd_cntx) {
   SortGeneric(std::move(parser), cmd_cntx, true);
 }
 
-void GenericFamily::Restore(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Restore(CmdArgParser parser, CommandContext* cmd_cntx) {
   static constexpr auto kGrammar = Compile(
       Args(&RestoreArgs::key, &RestoreArgs::expiration, &RestoreArgs::serialized_value),
       Options(Exist("REPLACE", &RestoreArgs::replace), Exist("ABSTTL", &RestoreArgs::abs_time),
@@ -2436,13 +2417,13 @@ void GenericFamily::Restore(facade::CmdArgParser parser, CommandContext* cmd_cnt
   }
 }
 
-void GenericFamily::FieldExpire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::FieldExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   uint32_t ttl_sec = parser.Next<FInt<uint32_t{1}, uint32_t{kMaxExpireDeadlineSec}>>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
-  facade::CmdArgVec fields;
+  CmdArgVec fields;
   auto field_args = parser.RemainingRange();
   fields.assign(field_args.begin(), field_args.end());
 
@@ -2464,7 +2445,7 @@ void GenericFamily::FieldExpire(facade::CmdArgParser parser, CommandContext* cmd
 
 // Returns -2 if key not found, WRONG_TYPE if key is not a set or hash
 // -1 if the field does not have associated TTL on it, and -3 if field is not found.
-void GenericFamily::FieldTtl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::FieldTtl(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, field] = parser.Next<string_view, string_view>();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2482,7 +2463,7 @@ void GenericFamily::FieldTtl(facade::CmdArgParser parser, CommandContext* cmd_cn
   cmd_cntx->SendError(result.status());
 }
 
-void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Move(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, target_db] = parser.Next<string_view, int32_t>();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2527,7 +2508,7 @@ void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   cmd_cntx->SendLong(res == OpStatus::OK);
 }
 
-void GenericFamily::Rename(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Rename(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src_key, dest_key] = parser.Next<string_view, string_view>();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2536,7 +2517,7 @@ void GenericFamily::Rename(facade::CmdArgParser parser, CommandContext* cmd_cntx
   cmd_cntx->SendError(reply);
 }
 
-void GenericFamily::RenameNx(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::RenameNx(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src_key, dest_key] = parser.Next<string_view, string_view>();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2556,7 +2537,7 @@ void GenericFamily::RenameNx(facade::CmdArgParser parser, CommandContext* cmd_cn
   }
 }
 
-void GenericFamily::Copy(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Copy(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [k1, k2] = parser.Next<std::string_view, std::string_view>();
   bool replace = parser.Check("REPLACE");
   if (!parser.Finalize()) {
@@ -2586,7 +2567,7 @@ void GenericFamily::Copy(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   }
 }
 
-void GenericFamily::ExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::ExpireTime(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2594,7 +2575,7 @@ void GenericFamily::ExpireTime(facade::CmdArgParser parser, CommandContext* cmd_
   ExpireTimeGeneric(key, TimeUnit::SEC, cmd_cntx);
 }
 
-void GenericFamily::PExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::PExpireTime(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2602,7 +2583,7 @@ void GenericFamily::PExpireTime(facade::CmdArgParser parser, CommandContext* cmd
   ExpireTimeGeneric(key, TimeUnit::MSEC, cmd_cntx);
 }
 
-void GenericFamily::Ttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Ttl(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2610,7 +2591,7 @@ void GenericFamily::Ttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   TtlGeneric(key, TimeUnit::SEC, cmd_cntx);
 }
 
-void GenericFamily::Pttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Pttl(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2618,7 +2599,7 @@ void GenericFamily::Pttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   TtlGeneric(key, TimeUnit::MSEC, cmd_cntx);
 }
 
-void GenericFamily::Select(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Select(CmdArgParser parser, CommandContext* cmd_cntx) {
   int64_t index = parser.Next<int64_t>();
   if (parser.TakeError()) {
     return cmd_cntx->SendError(kInvalidDbIndErr);
@@ -2657,7 +2638,7 @@ void GenericFamily::Select(facade::CmdArgParser parser, CommandContext* cmd_cntx
   return cmd_cntx->SendOk();
 }
 
-void GenericFamily::Dump(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Dump(CmdArgParser parser, CommandContext* cmd_cntx) {
   std::string_view key = parser.Next();
   DVLOG(1) << "Dumping before ::ScheduleSingleHopT " << key;
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpDump(t->GetOpArgs(shard), key); };
@@ -2673,7 +2654,7 @@ void GenericFamily::Dump(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   }
 }
 
-void GenericFamily::Type(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Type(CmdArgParser parser, CommandContext* cmd_cntx) {
   std::string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CompactObjType> {
@@ -2693,7 +2674,7 @@ void GenericFamily::Type(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   }
 }
 
-void GenericFamily::Time(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Time(CmdArgParser parser, CommandContext* cmd_cntx) {
   (void)parser;
 
   uint64_t now_usec;
@@ -2712,7 +2693,7 @@ void GenericFamily::Time(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Echo(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Echo(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   auto replier = [key = string(key)](RedisReplyBuilder* rb) { rb->SendBulkString(key); };
   cmd_cntx->ReplyWith(std::move(replier));
@@ -2720,7 +2701,7 @@ void GenericFamily::Echo(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
 // SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
 // [ATTR <mask>] [MLCGE <len>]
-void GenericFamily::Scan(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Scan(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view token = parser.Next();
   uint64_t cursor = 0;
   if (!absl::SimpleAtoi(token, &cursor)) {
@@ -2767,7 +2748,7 @@ void GenericFamily::Scan(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Rm(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Rm(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view token = parser.Next();
   uint64_t cursor = 0;
   if (!absl::SimpleAtoi(token, &cursor)) {
@@ -2816,7 +2797,7 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArg
   return res;
 }
 
-void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::RandomKey(CmdArgParser parser, CommandContext* cmd_cntx) {
   (void)parser;
 
   const static size_t kMaxAttempts = 3;
