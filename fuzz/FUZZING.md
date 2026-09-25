@@ -33,6 +33,17 @@ cmake -B build-dbg -DUSE_AFL=ON -DCMAKE_BUILD_TYPE=Debug -GNinja
 ninja -C build-dbg dragonfly
 ```
 
+This binary is the fuzz target only: outside `afl-fuzz` it runs the stdin fuzz loop and exits
+at once, so `triage_crashes.sh` and `replay_crash.py` need a plain Debug build (no `USE_AFL`),
+for example:
+
+```bash
+cmake -B build-dbg-plain -DCMAKE_BUILD_TYPE=Debug -GNinja
+ninja -C build-dbg-plain dragonfly
+```
+
+`triage_crashes.sh` refuses an AFL-instrumented binary.
+
 ## Run Fuzzer
 
 ```bash
@@ -116,18 +127,52 @@ crashes/RECORD:000000,cnt:000001      # second input
 crashes/RECORD:000000,cnt:NNNNNN      # input before the crash
 ```
 
+The saved `id:*` input is the one that was **in flight** when the process died, which is often
+not the one that ran the fatal command: after an assertion the process keeps its listener up for
+tens of milliseconds while the stack trace is printed, and the fuzzer has already moved on to
+the next input. The in-process harness also reads only one reply and closes, and the server
+drops the unexecuted tail of a pipeline when the peer closes, so the same input can survive
+thousands of times and die once. Both effects are handled by the tools below.
+
 ### Triage crashes from CI
 
 Download the crashes zip from CI artifacts and run:
 
 ```bash
-./fuzz/triage_crashes.sh ./build-dbg/dragonfly resp crashes.zip
-./fuzz/triage_crashes.sh ./build-dbg/dragonfly memcache crashes.zip
+./fuzz/triage_crashes.sh ./build-dbg-plain/dragonfly resp crashes.zip
+./fuzz/triage_crashes.sh ./build-dbg-plain/dragonfly memcache crashes.zip
 ```
+
+Each crash gets up to two passes on a fresh server: **drain** (a barrier command is appended to
+every input on the same connection and its reply is awaited, so every recorded command before
+it has executed; reproduces deterministic crashes and prints `Server died after input
+cnt:NNNNNN`, the input that ran the fatal command) and, only if the server survived,
+**harness** (the exact fuzzer behaviour byte for byte, for timing-dependent bugs). A confirmed
+crash is printed with the fatal message and stack trace from the server's stderr. With
+`AFL_DEBUG_CHILD=1` (set by `run_fuzzer.sh`) the same message is also visible in the CI job log.
+The server runs under the memory limit recorded in the archive; if it cannot start under it on
+your machine, set `TRIAGE_MEM_LIMIT_KB` (a number, or `unlimited`). Any such deviation from the
+fuzz run's configuration (an overridden memory limit, buffered IO forced because the filesystem
+has no O_DIRECT for tiering) turns a surviving server into INCONCLUSIVE rather than a false
+positive, since an OOM- or O_DIRECT-dependent crash would not reproduce; a signal death under
+such a deviation is reported as a crash under a different configuration and counted apart
+from confirmed crashes (exit code 2, not 1). An archive recorded for the other protocol is
+skipped and counted as failed. Tiering archives are, by policy, always replayed under a
+deviation: the fuzz run keeps its backing files on the runner's own disk and tiering crashes
+are IO- and timing-dependent, so locally they can only be INCONCLUSIVE or "crash under a
+different configuration", never a plain CONFIRMED or FALSE POSITIVE.
+
+Exit codes of `triage_crashes.sh`: 0 = every crash a false positive; 1 = at least one crash
+confirmed under the recorded configuration; 2 = some crash failed, was inconclusive, or
+crashed only under a changed configuration; 3 = bad arguments or the triage could not start.
 
 ### Replay a single crash
 
-Each crash has a `repro.env` with the exact Dragonfly flags used during fuzzing.
+Each crash has a `repro.env` with the Dragonfly flags of the fuzz run (an archive packaged
+without the run's file carries guessed defaults instead, marked `GUESSED=1`, and a surviving
+server is then inconclusive). For tiering runs it holds the placeholder
+`--tiered_prefix=tiered_backing`, a path relative to the working directory: start the server
+from an empty, writable directory, or replace it with an absolute path on a real disk.
 Use it to start the server with the same configuration:
 
 > Note: tiering-run archives may record `--backing_file_direct=true` (the fuzz
@@ -137,24 +182,60 @@ Use it to start the server with the same configuration:
 > wins). `triage_crashes.sh` handles this automatically.
 
 ```bash
-# Load flags from repro.env:
+# Load flags from repro.env and start the server on an empty --dir, as the fuzzer does:
 MEM_KB=$(grep '^MEM_LIMIT_KB=' fuzz/artifacts/resp/repro.env | cut -d= -f2)
-readarray -t DF_FLAGS < <(grep -v '^#' fuzz/artifacts/resp/repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')
-(ulimit -v "$MEM_KB"; exec ./build-dbg/dragonfly "${DF_FLAGS[@]}") &
+readarray -t DF_FLAGS < <(grep '^--' fuzz/artifacts/resp/repro.env)
+DF=$(realpath ./build-dbg-plain/dragonfly)   # absolute: the server starts from another directory
+WORK=$(mktemp -d)   # empty --dir; also the cwd, where a relative --tiered_prefix lands
+(cd "$WORK" && ulimit -v "$MEM_KB" && exec "$DF" "${DF_FLAGS[@]}" --dir="$WORK" --bind=127.0.0.1) &
+DF_PID=$!   # loopback only: the replay server has no authentication
 
-# RESP replay:
-python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000
+# RESP replay (drain mode: every command executes; reports the input after which the server died).
+# The replay waits up to --wait seconds (default 10) for the listener:
+python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000 --pid "$DF_PID"
+
+# Exact fuzzer behaviour (send, one read, close), byte for byte. The drain above already changed
+# the server's state, so start a fresh server on a new empty --dir first, as triage does:
+kill "$DF_PID"; wait "$DF_PID" 2>/dev/null; rm -rf "$WORK"   # tiering backing files can be large
+DF=$(realpath ./build-dbg-plain/dragonfly)   # absolute: the server starts from another directory
+WORK=$(mktemp -d)   # empty --dir; also the cwd, where a relative --tiered_prefix lands
+(cd "$WORK" && ulimit -v "$MEM_KB" && exec "$DF" "${DF_FLAGS[@]}" --dir="$WORK" --bind=127.0.0.1) &
+DF_PID=$!   # loopback only: the replay server has no authentication
+python3 fuzz/replay_crash.py fuzz/artifacts/resp/default/crashes 000000 --pid "$DF_PID" --mode harness
+kill "$DF_PID"; wait "$DF_PID" 2>/dev/null; rm -rf "$WORK"   # always stop the replay server
+# Useful options: --tail N (last N RECORD inputs only), --no-crash-input, --verbose (per-input
+# verification status), --timeout SEC (drain cap per input).
 ```
+
+Exit codes: 3 = the server died and the killing input is printed (if the fatal message in the
+server log predates that input, the previous one ran the fatal command, see above; when
+earlier inputs were unverified a note says so, since the state may then differ from the fuzz
+run); 4 = the server survived but some inputs could not be verified (they are listed with the
+reason: the input ends in the middle of a command and was sent without a barrier, a blocking
+command or open MULTI never answered, or the server closed the connection); 0 = survived (in
+drain mode every input was verified; harness mode verifies nothing). Liveness is checked
+through `--pid` or a bare TCP connect, never with an extra command, and with `--pid` the
+replay refuses to send anything unless `/proc` proves that the listener on the port is that
+process's own socket (use the pid of the server you started, as the same user, on a local
+address). Inputs longer than 64 KiB are cut to 64 KiB, the size of the harness's read buffer,
+because the fuzzer never sent more than that in one iteration. `repro.env` records the
+archive's protocol; `triage_crashes.sh` refuses to replay it under the other mode. An archive
+packaged without the run's `repro.env` carries guessed default flags (`GUESSED=1`): the triage
+reports a surviving server as INCONCLUSIVE rather than as a false positive.
 
 For memcache, use the memcache repro.env and pass the memcache port:
 
 ```bash
 MEM_KB=$(grep '^MEM_LIMIT_KB=' fuzz/artifacts/memcache/repro.env | cut -d= -f2)
-readarray -t DF_FLAGS < <(grep -v '^#' fuzz/artifacts/memcache/repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')
-(ulimit -v "$MEM_KB"; exec ./build-dbg/dragonfly "${DF_FLAGS[@]}") &
+readarray -t DF_FLAGS < <(grep '^--' fuzz/artifacts/memcache/repro.env)
+DF=$(realpath ./build-dbg-plain/dragonfly)   # absolute: the server starts from another directory
+WORK=$(mktemp -d)   # empty --dir; also the cwd, where a relative --tiered_prefix lands
+(cd "$WORK" && ulimit -v "$MEM_KB" && exec "$DF" "${DF_FLAGS[@]}" --dir="$WORK" --bind=127.0.0.1) &
+DF_PID=$!   # loopback only: the replay server has no authentication
 
 # Memcache replay:
-python3 fuzz/replay_crash.py fuzz/artifacts/memcache/default/crashes 000000 127.0.0.1 11211
+python3 fuzz/replay_crash.py fuzz/artifacts/memcache/default/crashes 000000 127.0.0.1 11211 --protocol memcache --pid "$DF_PID"
+kill "$DF_PID"; wait "$DF_PID" 2>/dev/null; rm -rf "$WORK"
 ```
 
 ### Package crash for sharing
@@ -177,15 +258,18 @@ The recipient extracts and runs:
 ```bash
 tar xzf crash-000000.tar.gz && cd crash-000000
 
-# Start Dragonfly with the fuzz run flags:
+# Start a plain (non-AFL) Dragonfly with the fuzz run flags on an empty --dir:
 MEM_KB=$(grep '^MEM_LIMIT_KB=' repro.env | cut -d= -f2)
-readarray -t DF_FLAGS < <(grep -v '^#' repro.env | grep -v '^MEM_LIMIT_KB=' | grep -v '^$')
-(ulimit -v "$MEM_KB"; exec ./build-dbg/dragonfly "${DF_FLAGS[@]}") &
+readarray -t DF_FLAGS < <(grep '^--' repro.env)
+WORK=$(mktemp -d)   # empty --dir; also the cwd, where a relative --tiered_prefix lands
+(cd "$WORK" && ulimit -v "$MEM_KB" && exec <absolute-path-to-dragonfly> "${DF_FLAGS[@]}" --dir="$WORK" --bind=127.0.0.1) &
+DF_PID=$!   # loopback only: the replay server has no authentication
 
 # RESP:
-python3 replay_crash.py crashes 000000
+python3 replay_crash.py crashes 000000 --pid "$DF_PID"
 # Memcache:
-python3 replay_crash.py crashes 000000 127.0.0.1 11211
+python3 replay_crash.py crashes 000000 127.0.0.1 11211 --protocol memcache --pid "$DF_PID"
+kill "$DF_PID"; wait "$DF_PID" 2>/dev/null; rm -rf "$WORK"
 ```
 
 ## Seed Corpus
