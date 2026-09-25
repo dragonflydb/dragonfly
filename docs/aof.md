@@ -308,9 +308,9 @@ segment, whose size the checkpoint trigger bounds.
 
 When rotating:
 - The next block goes into the spare segment, right after its header.
-- Once every in-flight write to the old segment has completed, the old segment gets its final
-  `fdatasync` and a final sync marker, and is then closed. The sync is issued only after the
-  writes drain, because an `fdatasync` does not cover writes that are still in flight.
+- Once every in-flight write to the old segment has completed, issue its final `fdatasync`,
+  append a final sync marker, and issue a second `fdatasync` to make that marker durable before
+  closing the segment.
 - `durable_lsn` advances past a segment's records only after that segment's final sync.
 
 **Spare segments.** A new segment's directory entry must be durable before any record in it is
