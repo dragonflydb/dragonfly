@@ -54,8 +54,8 @@ global log. Adopting that design would reintroduce a global serialization point 
 Dragonfly's shared-nothing architecture avoids ([df-share-nothing.md](df-share-nothing.md)).
 
 Goals:
-- Configurable durability. The MVP loses at most about one second of writes. A later stage
-  (`always`) makes every acknowledged write survive a crash.
+- Configurable durability. On a healthy disk, the MVP loses about one second of writes plus any
+  data still in flight. A later stage (`always`) makes every acknowledged write survive a crash.
 - Nothing added to the write hot path that is shared across shards.
 - Disk usage stays bounded without operator intervention.
 - Recovery is parallel across shards.
@@ -97,9 +97,16 @@ Non-goals:
 What the MVP provides:
 - **Logging:** one append-only log per shard, fed by the journal.
 - **Durability:** a fixed policy. Blocks are written as soon as they are sealed, and each shard
-  runs `fdatasync` about once per second. Replies are never delayed. A crash loses at most about
-  one second of writes. The configurable policies (`always`, `no`) come in a later stage
-  ([Fsync Policy](#fsync-policy)).
+  runs `fdatasync` about once per second. Replies are never delayed. The configurable policies
+  (`always`, `no`) come in a later stage ([Fsync Policy](#fsync-policy)).
+  - **What a crash loses:** about one second of writes, plus data still queued or in flight.
+  - **Why it is not a hard bound:** replies do not wait for the disk. A slow device can delay
+    queued writes and the in-flight sync arbitrarily, and everything acknowledged in the
+    meantime is at risk.
+  - **What limits it:** `--aof_max_inflight_bytes` backpressure caps how much can be queued. It
+    does not cap how long a stalled sync takes.
+  - `aof_fsync_latency` and `aof_inflight_bytes` in `INFO persistence` show when the window
+    grows.
 - **Bounded disk usage:** automatic checkpoints.
 - **Recovery:** parallel replay at startup, including a changed shard count.
 - **Errors:** after a failed write or sync, write commands are rejected with `-MISCONF`, as in
@@ -328,9 +335,9 @@ unused spare and ignores it.
 
 Rotation, and the switch at a checkpoint cut, only ever move to a spare that is already durable, so
 no directory fsync sits on the write path. Preparation is only an open or a rename, one header write
-and sync, a second rename, and a directory fsync. It starts right after a rotation, so it normally completes long
-before the next one. If rotation ever does find the spare not ready, sealed blocks accumulate and
-normal backpressure applies.
+and sync, a second rename, and a directory fsync. It starts right after a rotation, so it normally
+completes long before the next one. If rotation ever does find the spare not ready, sealed blocks
+accumulate and normal backpressure applies.
 
 **Errors.** Write failures and sync failures are handled differently.
 
