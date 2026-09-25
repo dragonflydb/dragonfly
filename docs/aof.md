@@ -177,6 +177,8 @@ All files live in `--aof_dir`, which defaults to `--dir`:
   - shard_id, shard_count
   - checkpoint id, segment seq
   - start_lsn
+  - `segment_uid`: a random 64-bit id, generated each time the file starts a new segment
+    (including when a recycled file is reused).
   - `max_unsynced_bytes`: the writer's bound on data not yet covered by a completed sync. Replay
     uses it to tell a torn tail from corruption; see [Replay](#replay-at-startup).
   - header CRC
@@ -188,11 +190,14 @@ All files live in `--aof_dir`, which defaults to `--dir`:
 
   - `payload` is the concatenated `JournalWriter` bytes, i.e. exactly what is already in
     `JournalItem::data`. Nothing is serialized a second time.
+  - `crc32c` covers the block and is seeded with the header's `segment_uid`. Stale blocks left in
+    a recycled file were written under a different uid, so they never validate, whatever their
+    LSN.
   - `flags` is reserved in the MVP (always 0). [Atomic groups](#atomic-groups) use one bit of it
     later.
-  - The end of data is either a block with `len == 0` or a block whose `first_lsn` is not the
-    expected next LSN. That rule is what allows segments to be pre-zeroed or recycled (see
-    [I/O Mode](#io-mode)).
+  - The end of data is a block with `len == 0` (a hole or unwritten space reads as zeros), a
+    block whose CRC does not validate, or a block whose `first_lsn` is not the expected next
+    LSN. That rule is what allows segments to be recycled (see [I/O Mode](#io-mode)).
 
 ### Manifest
 
@@ -266,27 +271,18 @@ after that segment's final sync.
 
 **Spare segments.** A new segment's directory entry must be durable before any record in it is
 reported durable. Otherwise, after a power loss, the file could vanish together with
-acknowledged records. So each shard always keeps one spare segment fully prepared in the
-background:
-- create it (or rename a recycled one into place), and zero-fill it;
-- `fdatasync` the file, then `fsync` the directory.
+acknowledged records. So each shard always keeps one spare segment ready in the background:
+- create an empty file, or rename a recycled one into place;
+- `fsync` the directory.
+
+No data is written while preparing a spare. There is no zero-filling and no `fallocate` (see
+[I/O Mode](#io-mode)). The header is written as part of the segment's first batch.
 
 Rotation, and the switch at a checkpoint cut, only ever move to a spare that is already durable,
-so no directory fsync sits on the write path.
-
-**Spare preparation must keep up.** Preparing the next spare starts right after a rotation, so
-it normally has the whole time it takes to fill a segment.
-- If a segment fills faster than the next spare can be prepared, the writer has nowhere to put
-  new blocks. Sealed blocks accumulate, backpressure applies, and the shard stalls until the
-  spare is ready. This is a throughput concern, not a correctness one.
-- Zero-filling writes every segment twice, once as zeros and once as data. Under sustained
-  writes close to disk bandwidth, that roughly halves the effective bandwidth and makes this
-  stall more likely.
-- Recycled segments avoid the extra write. They exist only after the first checkpoint has
-  garbage-collected old segments, so recycling is the steady state, and zero-filling mostly
-  applies to a fresh AOF.
-- `--aof_segment_max_bytes` should be sized so that segment fill time comfortably exceeds
-  spare preparation time.
+so no directory fsync sits on the write path. Preparation is only an open or a rename plus a
+directory fsync. It starts right after a rotation, so it normally completes long before the next
+one. If rotation ever does find the spare not ready, sealed blocks accumulate and normal
+backpressure applies.
 
 **Errors.** A failed write or sync puts the shard's AOF into an error state. While in that
 state, write commands are rejected with `-MISCONF` until a later write succeeds. The state is
@@ -307,17 +303,29 @@ block is often only a few hundred bytes. Every write would then have to do one o
 O_DIRECT also does not make anything durable. We would still need `fdatasync` to flush the
 device cache.
 
-**Keeping fdatasync cheap.**
-- The problem: `fallocate` alone leaves *unwritten* extents on ext4 and xfs. The first write into
-  one converts it, which is a metadata change and forces a filesystem journal commit on every
-  `fdatasync`.
-- The fix: the spare segment is prepared in the background in one of two ways:
-  - write zeros into it, or
-  - **recycle** a garbage-collected segment: rename it and overwrite it in place, similar to how
-    PostgreSQL recycles WAL segments.
-- Why recycling is safe: every block header carries `first_lsn`. Replay stops at the first block
-  whose `first_lsn` is not the expected next LSN, so stale data left in a recycled file is read
-  as end of log.
+**No preallocation.** Segments are neither zero-filled nor `fallocate`d.
+- Zero-filling writes every segment twice, once as zeros and once as data. Under sustained
+  writes close to disk bandwidth, that roughly halves the effective bandwidth.
+- `fallocate` latency can be significant. It also leaves *unwritten* extents on ext4 and XFS,
+  and converting them on the first write is a metadata change anyway.
+
+**What an append costs at sync time.** Appending to a fresh segment grows the file, so each
+`fdatasync` also persists the new file size: one filesystem journal commit per sync. With the
+MVP's once-per-second sync per shard, that cost is negligible.
+
+**Recycling removes it in steady state.**
+- After a checkpoint, garbage-collected segments are renamed and overwritten in place, similar to
+  how PostgreSQL recycles WAL segments. Only a shard's own segments are recycled.
+- Writes into a recycled file stay within its existing size and allocated blocks, so
+  `fdatasync` flushes data only.
+- Once checkpoints run, recycling is the steady state. A fresh AOF appends until the first
+  checkpoint.
+- This matters most for `always` ([Fsync Policy](#fsync-policy)), which syncs many times per
+  second. Until the first checkpoint, `always` pays the size-metadata commit on every group
+  commit; this should be measured.
+- **Why recycling is safe:** block CRCs are seeded with the new segment's `segment_uid`. Stale
+  blocks left in the file do not validate, so replay reads them as end of log, even if their
+  LSNs are higher than the expected one.
 
 **Page cache.** AOF data is written once and almost never read, so it should not push other data
 out of the page cache.
@@ -366,10 +374,9 @@ Additional work this option needs:
 
   Each is a few lines on top of `GetSubmitEntry`. They are upstream helio changes, unless the
   AOF code issues the SQEs itself.
-- **Spare-segment preparation:** preparing a spare takes several steps (open or rename,
-  zero-fill writes, fdatasync, then a directory fsync). It becomes either a callback state
-  machine, which also needs an async open, or a short-lived background fiber started after each
-  rotation.
+- **Spare-segment preparation:** preparing a spare takes two steps (an open or a rename, then a
+  directory fsync). It becomes either a small callback chain, which also needs an async open and
+  rename, or a short-lived background fiber started after each rotation.
 - **Error and shutdown handling:**
   - Errors are recorded from the callbacks. `-MISCONF` gating reads that status.
   - Closing a segment must first drain its in-flight operations, using a pending-ops counter like
@@ -564,8 +571,8 @@ does in Valkey.
      the chain: no CRC-valid block with `first_lsn` above the expected LSN appears more than W
      bytes after B.
      - Distance is measured in chain bytes, so the window can straddle a rotation.
-     - Zeroed regions (`len == 0`) and stale recycled blocks (lower LSNs) do not count as valid
-       blocks.
+     - Holes (`len == 0`) and stale recycled blocks (their CRC is seeded with another
+       `segment_uid`) do not count as valid blocks.
    - **What happens then.** With `--aof_load_truncated=true` (the default), log a warning and
      truncate the file at B. Otherwise, fail. Truncation is required before resuming, so that
      stale valid blocks after B can never be read again.
@@ -786,7 +793,8 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
   - a torn tail within the unsynced window gets truncated, including valid blocks after a hole
   - a bad block followed by valid data beyond the window is fatal
   - corruption before the last `max_unsynced_bytes` of a chain is fatal
-  - stale blocks in a recycled segment are read as end of log
+  - stale blocks in a recycled segment are read as end of log, including stale blocks whose LSN is
+    higher than the expected one
   - rotation keeps LSNs continuous
   - atomic manifest replacement
   - garbage collection of unreferenced files
