@@ -1307,24 +1307,6 @@ OpResult<uint32_t> OpDelV2(const OpArgs& op_args, const ShardArgs& keys, bool as
 
 }  // namespace
 
-OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async) {
-  DVLOG(1) << "Del: " << keys.Front() << " async: " << async;
-  auto& db_slice = op_args.GetDbSlice();
-
-  uint32_t res = 0;
-
-  for (string_view key : keys) {
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    if (!IsValid(it))
-      continue;
-
-    db_slice.Del(op_args.db_cntx, it, nullptr, async);
-    ++res;
-  }
-
-  return res;
-}
-
 static cmd::CmdR CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool async_unlink =
       cmd_cntx->cid()->name() == "UNLINK" && absl::GetFlag(FLAGS_unlink_experimental_async);
