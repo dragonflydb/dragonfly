@@ -9,6 +9,7 @@ import contextlib
 from datetime import datetime, timedelta, timezone
 from difflib import get_close_matches
 import functools
+import html
 import ipaddress
 import hashlib
 import io
@@ -23,7 +24,7 @@ import sys
 import tarfile
 import threading
 import time
-from typing import Any, Callable, Mapping, Sequence, TypeVar
+from typing import Any, Callable, Mapping, NoReturn, Sequence, TextIO, TypeVar
 
 DEFAULT_ENV = "prod"
 DEFAULT_CONFIG_PARAMETER = "maxmemory"
@@ -43,8 +44,17 @@ DEFAULT_AGENT_VALIDATOR_TIMEOUT_SECONDS = 30
 MAX_AGENT_CONTEXT_BYTES = 131072
 MAX_COPILOT_CONTEXT_BYTES = 12288
 COPILOT_VALIDATION_CREDITS = 30
+DEFAULT_COPILOT_EXPLAIN_MODEL = "gpt-5.6-luna"
 AGENT_POLICY_VERSION = "v2"
 AGENT_CACHE_DIR = Path("/tmp/dfly-inspect")
+HISTORY_DIR = Path.home() / ".local/state/dfly-inspect/history"
+HISTORY_INDEX_PATH = HISTORY_DIR / "index.json"
+AI_CACHE_DIR = HISTORY_DIR / "ai-cache"
+DEPLOYMENT_SSH_CONNECTION_PATH = HISTORY_DIR / "deployment-ssh-connection.json"
+MAX_HISTORY_ENTRIES = 20
+MAX_HISTORY_ARTIFACT_BYTES = 131072
+MAX_SESSION_ARTIFACTS = 8
+EXPLAIN_DEPTHS = ("concise", "standard", "deep")
 DEFAULT_DFADMIN_CHEATSHEET = Path.home() / "workspaces/controlplane/docs/operations/cheatsheet.md"
 DEFAULT_SLOT_OWNERSHIP_WORKERS = 5
 DEFAULT_MULTI_WORKERS = 20
@@ -56,6 +66,7 @@ DEFAULT_MAX_NORMALIZED_LOAD = 0.70
 DEFAULT_MIN_FREE_KIB = 524288
 DEFAULT_CONTROL_PLANE_TIMEOUT_SECONDS = 120
 GCX_CONTEXTS = {"prod": "dragonfly-prod", "staging": "dragonfly-staging"}
+TARGETS_HELP = "Customer (cus_...), datastore (dst_...), shard (shard_...), or node (node_...)"
 EXIT_DIVERGED = 2
 EXIT_INCONCLUSIVE = 3
 TOOL_VERSION = "0.1.0"
@@ -67,6 +78,7 @@ ANSI_RED = "\033[31m"
 ANSI_YELLOW = "\033[33m"
 
 NodeResult = TypeVar("NodeResult")
+_deployment_ssh_connection_command: str | None = None
 
 
 class AgentUnavailable(RuntimeError):
@@ -85,6 +97,131 @@ def warning_message(message: str) -> str:
 
 def error_message(message: str) -> str:
     return f"{color_message(ANSI_RED, 'ERROR:', sys.stderr)} {message}"
+
+
+def load_deployment_ssh_connection() -> str | None:
+    try:
+        value = json.loads(DEPLOYMENT_SSH_CONNECTION_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    command = value.get("command") if isinstance(value, dict) else None
+    return command if isinstance(command, str) and command.strip() else None
+
+
+def save_deployment_ssh_connection(command: str) -> None:
+    HISTORY_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    write_json(DEPLOYMENT_SSH_CONNECTION_PATH, {"command": command})
+    DEPLOYMENT_SSH_CONNECTION_PATH.chmod(0o600)
+
+
+def clear_deployment_ssh_connection() -> None:
+    with contextlib.suppress(OSError):
+        DEPLOYMENT_SSH_CONNECTION_PATH.unlink()
+
+
+def set_deployment_ssh_connection(command: str | None) -> bool:
+    global _deployment_ssh_connection_command
+    _deployment_ssh_connection_command = command or load_deployment_ssh_connection()
+    return command is None and _deployment_ssh_connection_command is not None
+
+
+def deployment_ssh_command(_bastion: str | None, remote_command: list[str]) -> list[str]:
+    if _deployment_ssh_connection_command:
+        command = shlex.split(_deployment_ssh_connection_command)
+        if command[:3] != ["gcloud", "compute", "ssh"]:
+            raise ValueError("--deployment-ssh-conn-command must start with 'gcloud compute ssh'")
+        return [*command, f"--command={shlex.join(remote_command)}"]
+    raise ValueError(
+        "deployment SSH is not configured; provide --deployment-ssh-conn-command once "
+        "to verify and cache the deployment connection"
+    )
+
+
+def preflight_dfadmin(environment: str) -> None:
+    try:
+        result = subprocess.run(
+            ["dfadmin-wrapper", "--env", environment, "datastore", "list"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=DEFAULT_CONTROL_PLANE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise RuntimeError(
+            f"dfadmin is not ready for --env {environment}: {error}\n"
+            f"Authenticate before retrying: dfadmin auth login --env {environment}"
+        ) from error
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise RuntimeError(
+            f"dfadmin is not ready for --env {environment}: {detail}\n"
+            f"Authenticate before retrying: dfadmin auth login --env {environment}"
+        )
+
+
+def preflight_deployment_ssh(supplied_command: str | None) -> None:
+    command = deployment_ssh_command(None, ["true"])
+    try:
+        result = subprocess.run(command, text=True, capture_output=True, check=False, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        if supplied_command or _deployment_ssh_connection_command:
+            clear_deployment_ssh_connection()
+        raise RuntimeError(f"deployment SSH readiness check failed: {error}") from error
+    if result.returncode:
+        if supplied_command or _deployment_ssh_connection_command:
+            clear_deployment_ssh_connection()
+        detail = result.stderr.strip() or result.stdout.strip() or "no output"
+        connection_hint = supplied_command or _deployment_ssh_connection_command
+        raise RuntimeError(
+            f"deployment SSH is not ready: {detail}\n"
+            "Authenticate or restore access, then retry with the deployment SSH connection "
+            f"command: {connection_hint!r}"
+        )
+    if supplied_command:
+        if supplied_command != load_deployment_ssh_connection():
+            save_deployment_ssh_connection(supplied_command)
+            print(
+                f"Deployment SSH connection cached: {DEPLOYMENT_SSH_CONNECTION_PATH}\n"
+                "Future commands will use it automatically; do not repeat --deployment-ssh-conn-command."
+            )
+
+
+class InspectArgumentParser(argparse.ArgumentParser):
+    """Show operator-oriented parser errors before the usage summary."""
+
+    description_first: bool = False
+
+    def format_help(self) -> str:
+        rendered = super().format_help()
+        if not getattr(self, "description_first", False) or not self.description:
+            return rendered
+        description = f"{self.description}\n\n"
+        return description + rendered.replace(description, "", 1)
+
+    def error(self, message: str) -> NoReturn:
+        options = {
+            option
+            for action in self._actions
+            for option in action.option_strings
+            if option.startswith("--")
+        }
+        mistyped = next(
+            (
+                argument
+                for argument in sys.argv[1:]
+                if argument.startswith("-")
+                and not argument.startswith("--")
+                and len(argument) > 2
+                and f"--{argument[1:]}" in options
+            ),
+            None,
+        )
+        if mistyped:
+            message = f"invalid option {mistyped!r}; use '--{mistyped[1:]}'"
+        print(error_message(message), file=sys.stderr)
+        print(f"Hint: run '{self.prog} --help' for command options and examples.", file=sys.stderr)
+        self.print_usage(sys.stderr)
+        self.exit(2)
 
 
 class CommandHelpFormatter(argparse.RawDescriptionHelpFormatter):
@@ -357,6 +494,90 @@ def normalize_environment_arguments(argv: list[str]) -> list[str]:
     return ["--environment", environment, *normalized]
 
 
+def normalize_explain_arguments(argv: list[str]) -> list[str]:
+    """Move explain controls placed before a subcommand into that subcommand's option list."""
+    commands = {
+        "addresses",
+        "ad",
+        "audit",
+        "au",
+        "bundle",
+        "bu",
+        "collect",
+        "co",
+        "dashboard-panels",
+        "dp",
+        "diff-config",
+        "dc",
+        "df",
+        "diff-flags",
+        "discover",
+        "ds",
+        "explain",
+        "ex",
+        "health",
+        "hl",
+        "log-archiver",
+        "la",
+        "logs",
+        "lg",
+        "migrations",
+        "mg",
+        "multi",
+        "mu",
+        "replication-gap",
+        "rg",
+        "run-inspection-script",
+        "rs",
+        "run-script",
+        "session",
+        "scan-compare",
+        "sc",
+        "slot-ownership",
+        "so",
+        "slowlog",
+        "sl",
+    }
+    command_index = next((index for index, value in enumerate(argv) if value in commands), None)
+    if command_index is None:
+        if "--ai-explain" in argv or "--explain" in argv:
+            arguments = list(argv)
+            arguments.remove("--ai-explain" if "--ai-explain" in arguments else "--explain")
+            return ["explain", *arguments]
+        return argv
+    prefix, command, suffix = argv[:command_index], argv[command_index], argv[command_index + 1 :]
+    controls = {"--ai-explain", "--explain", "--ai-deep", "--deep", "--ai-cache"}
+    controls_with_value = {
+        "--ai-agent",
+        "--agent",
+        "--ai-depth",
+        "--depth",
+        "--ai-model",
+        "--model",
+        "--session",
+        "--ai-question",
+    }
+    retained, moved = [], []
+    index = 0
+    while index < len(prefix):
+        value = prefix[index]
+        if value in controls:
+            moved.append(value)
+            index += 1
+        elif value in controls_with_value:
+            if index + 1 == len(prefix):
+                raise ValueError(f"{value} requires a value")
+            moved.extend([value, prefix[index + 1]])
+            index += 2
+        elif any(value.startswith(f"{option}=") for option in controls_with_value):
+            moved.append(value)
+            index += 1
+        else:
+            retained.append(value)
+            index += 1
+    return [*retained, command, *moved, *suffix]
+
+
 def build_log_query(source: str, node_id: str, datastore_id: str, shard_id: str) -> str:
     if source == "dfly":
         if not shard_id:
@@ -387,6 +608,7 @@ def build_log_command(
     end: str,
     context: str,
     limit: int | None,
+    datasource: str | None = None,
 ) -> list[str]:
     command = [
         "gcx",
@@ -401,6 +623,8 @@ def build_log_command(
     ]
     if limit is not None:
         command.extend(["--limit", str(limit)])
+    if datasource:
+        command.extend(["--datasource", datasource])
     return command + ["-o", "raw", build_log_query(source, node_id, datastore_id, shard_id)]
 
 
@@ -472,6 +696,27 @@ def gcx_command(context: str | None, *arguments: str) -> list[str]:
     return ["gcx", *(["--context", context] if context else []), *arguments]
 
 
+def resolve_loki_datasource(context: str, datasource: str | None) -> str:
+    if datasource:
+        return datasource
+    payload = run_gcx_json(gcx_command(context, "datasources", "list", "-o", "json"))
+    records = payload.get("datasources", [])
+    candidates = [
+        (str(record.get("name", "")), str(record.get("uid", "")))
+        for record in records
+        if isinstance(record, dict)
+        and str(record.get("name", "")).lower().endswith("-logs")
+        and str(record.get("uid", ""))
+    ]
+    if len(candidates) == 1:
+        return candidates[0][1]
+    names = ", ".join(repr(name) for name, _ in candidates) or "none"
+    raise RuntimeError(
+        "could not select a unique Grafana logs datasource; candidates: "
+        f"{names}. Use --loki-datasource only to override this selection."
+    )
+
+
 def write_json(path: Path, value: object) -> None:
     temporary_path = path.with_name(f".{path.name}.tmp")
     temporary_path.write_text(json.dumps(value, indent=2) + "\n")
@@ -498,6 +743,7 @@ def export_resolved_dashboard_panel(
     datasource: str,
     pacer: RequestPacer,
     resume: bool,
+    verbose: bool = True,
 ) -> str:
     queries = panel.get("spec", {}).get("data", {}).get("spec", {}).get("queries", [])
     exports = []
@@ -517,8 +763,9 @@ def export_resolved_dashboard_panel(
                 ),
             }
         )
-    print(f"Output directory: {output_dir}")
-    print(f"Dashboard: {dashboard_title} ({dashboard_id})")
+    if verbose:
+        print(f"Output directory: {output_dir}")
+        print(f"Dashboard: {dashboard_title} ({dashboard_id})")
     output_dir.mkdir(parents=True, exist_ok=True)
     dashboard_path = output_dir / "dashboard.json"
     if not resume or not dashboard_path.exists():
@@ -538,11 +785,13 @@ def export_resolved_dashboard_panel(
             "skip_reason": "no visible Prometheus queries",
         }
         write_json(output_dir / "manifest.json", manifest)
-        print(f"Panel: {requested_panel_title}; skipped: no visible Prometheus queries")
+        if verbose:
+            print(f"Panel: {requested_panel_title}; skipped: no visible Prometheus queries")
         return "skipped"
 
-    print(f"Panel: {requested_panel_title}; queries: {len(exports)}")
-    print(f"Window: {start} to {end}; remote request starts are paced at one per second.")
+    if verbose:
+        print(f"Panel: {requested_panel_title}; queries: {len(exports)}")
+        print(f"Window: {start} to {end}; remote request starts are paced at one per second.")
     manifest = {
         "source_folder": source_folder,
         "source_folder_id": source_folder_id,
@@ -600,7 +849,8 @@ def export_resolved_dashboard_panel(
         )
         if output.name in completed_outputs:
             export["output"] = output.name
-            print(f"Resumed {export['ref_id']}: {output}")
+            if verbose:
+                print(f"Resumed {export['ref_id']}: {output}")
             write_json(manifest_path, manifest)
             continue
         query_datasource = export["datasource"] or datasource
@@ -624,12 +874,13 @@ def export_resolved_dashboard_panel(
         pacer.wait()
         result = subprocess.run(command, text=True, capture_output=True, check=False)
         output.write_text(result.stdout)
-        if result.stderr:
+        if result.stderr and verbose:
             print(result.stderr, end="", file=sys.stderr)
         if result.returncode:
             raise RuntimeError(f"query {export['ref_id']} failed; response saved to {output}")
         export["output"] = output.name
-        print(f"Saved {export['ref_id']}: {output}")
+        if verbose:
+            print(f"Saved {export['ref_id']}: {output}")
         write_json(manifest_path, manifest)
     manifest["status"] = "completed"
     write_json(manifest_path, manifest)
@@ -714,8 +965,11 @@ def run_archived_log_query(
     context: str,
     limit: int | None,
     output: Path,
+    datasource: str | None = None,
 ) -> int:
-    command = build_log_command(source, node_id, datastore_id, shard_id, start, end, context, limit)
+    command = build_log_command(
+        source, node_id, datastore_id, shard_id, start, end, context, limit, datasource
+    )
     with output.open("wb") as stream:
         result = subprocess.run(command, stdout=stream, stderr=subprocess.PIPE, check=False)
     if result.stderr:
@@ -863,7 +1117,6 @@ def audit_log(
         "resource_id": resource_id,
         "from": request_since,
         "to": request_until,
-        "limit": limit,
         "events": events,
     }
     if json_output:
@@ -925,6 +1178,38 @@ def get_shard_node_ids(environment: str, shard_id: str) -> list[str]:
 
 def get_datastore_node_ids(environment: str, datastore_id: str) -> list[str]:
     return list(get_datastore_nodes(environment, datastore_id))
+
+
+@functools.lru_cache(maxsize=None)
+def get_customer_datastores(environment: str, customer_id: str) -> tuple[tuple[str, str], ...]:
+    if not re.fullmatch(r"cus_[A-Za-z0-9]+", customer_id):
+        raise ValueError(f"invalid customer target {customer_id!r}")
+    payload = run_dfadmin_json(environment, "datastore", "list", "--customer-id", customer_id)
+    records = payload.get("datastores") if isinstance(payload, dict) else None
+    datastores = {
+        (str(record.get("datastore_id")), str(record.get("name") or ""))
+        for record in records or []
+        if isinstance(record, dict) and str(record.get("datastore_id", "")).startswith("dst_")
+    }
+    if not datastores:
+        raise ValueError(f"customer target {customer_id!r} has no active datastores")
+    return tuple(sorted(datastores))
+
+
+def get_customer_datastore_ids(environment: str, customer_id: str) -> tuple[str, ...]:
+    return tuple(
+        datastore_id for datastore_id, _ in get_customer_datastores(environment, customer_id)
+    )
+
+
+def expand_customer_targets(environment: str, targets: Sequence[str]) -> list[str]:
+    expanded = []
+    for target in targets:
+        if target.startswith("cus_"):
+            expanded.extend(get_customer_datastore_ids(environment, target))
+        else:
+            expanded.append(target)
+    return sorted(set(expanded))
 
 
 def get_datastore_nodes(
@@ -1060,7 +1345,7 @@ def resolve_multi_resource_ids(
     environment: str, resource_type: str, targets: list[str]
 ) -> list[str]:
     resource_ids = set()
-    for target in targets:
+    for target in expand_customer_targets(environment, targets):
         if target.startswith("node_"):
             if resource_type == "node":
                 resource_ids.add(target)
@@ -1088,7 +1373,7 @@ def resolve_multi_resource_ids(
                 resource_ids.add(target)
         else:
             raise ValueError(
-                f"{target!r} must be a node ID (node_...), shard ID (shard_...), or datastore ID (dst_...)"
+                f"{target!r} must be a target ID (cus_..., dst_..., shard_..., or node_...)"
             )
     if not all(resource_ids):
         raise RuntimeError(f"could not resolve {resource_type} IDs for all targets")
@@ -1358,6 +1643,25 @@ def multi_show(
     return 0 if not any(row["error"] for row in rows) else 1
 
 
+def health_reports(
+    environment: str,
+    targets: Sequence[str],
+    bastion: str,
+    workers: int,
+    output_format: str,
+    max_elements: int | None = None,
+) -> int:
+    datastore_targets = expand_customer_targets(environment, targets)
+    statuses = []
+    for index, target in enumerate(datastore_targets):
+        if index and output_format != "json":
+            print()
+        statuses.append(
+            health_report(environment, target, bastion, workers, output_format, max_elements)
+        )
+    return 1 if any(statuses) else 0
+
+
 def archive_logs(
     environment: str,
     targets: list[str],
@@ -1371,6 +1675,7 @@ def archive_logs(
     compress: bool,
     dry_run: bool,
     max_elements: int | None = None,
+    datasource: str | None = None,
 ) -> int:
     if limit is not None and limit <= 0:
         raise ValueError("limit must be positive")
@@ -1385,6 +1690,7 @@ def archive_logs(
 
     effective_workers = max_workers or DEFAULT_LOG_ARCHIVER_WORKERS
     worker_source = "explicit" if max_workers is not None else "default"
+    datasource = resolve_loki_datasource(context, datasource)
 
     pacer = RequestPacer()
     resolved_nodes: dict[str, tuple[str, str, str, str, str]] = {}
@@ -1432,7 +1738,9 @@ def archive_logs(
                     node_id,
                     shard_id,
                     datastore_id,
-                    output_dir / log_filename(datastore_id, node_id, log_source, start, end),
+                    output_dir
+                    / node_id
+                    / log_filename(datastore_id, node_id, log_source, start, end),
                 )
             )
 
@@ -1458,11 +1766,21 @@ def archive_logs(
     def fetch(job: tuple[str, str, str, str, Path]) -> tuple[str, str, int, Path]:
         log_source, node_id, shard_id, datastore_id, output = job
         pacer.wait()
+        output.parent.mkdir(parents=True, exist_ok=True)
         return (
             log_source,
             node_id,
             run_archived_log_query(
-                log_source, node_id, shard_id, datastore_id, start, end, context, limit, output
+                log_source,
+                node_id,
+                shard_id,
+                datastore_id,
+                start,
+                end,
+                context,
+                limit,
+                output,
+                datasource,
             ),
             output,
         )
@@ -1568,6 +1886,167 @@ def show_addresses(
     return 0
 
 
+def redact_slowlog_value(value: object) -> object:
+    if isinstance(value, list):
+        return [redact_slowlog_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_persisted_output(value)
+    return value
+
+
+def parse_slowlog_response(node_id: str, response: str) -> list[dict[str, object]]:
+    """Normalize JSON-shaped SLOWLOG GET output while retaining unknown responses safely."""
+    try:
+        parsed = json.loads(response)
+    except json.JSONDecodeError:
+        return [{"node_id": node_id, "raw": redact_persisted_output(response)}]
+    entries = (
+        parsed
+        if isinstance(parsed, list)
+        else parsed.get("entries", []) if isinstance(parsed, dict) else []
+    )
+    if not isinstance(entries, list):
+        return [{"node_id": node_id, "raw": redact_persisted_output(response)}]
+    rows = []
+    for entry in entries:
+        if not isinstance(entry, list) or len(entry) < 4:
+            rows.append({"node_id": node_id, "raw": redact_slowlog_value(entry)})
+            continue
+        command = entry[3]
+        if isinstance(command, list):
+            command = " ".join(str(part) for part in command)
+        row = {
+            "node_id": node_id,
+            "id": entry[0],
+            "timestamp": entry[1],
+            "duration_us": entry[2],
+            "command": redact_slowlog_value(command),
+        }
+        if len(entry) > 4:
+            row["client"] = redact_slowlog_value(entry[4])
+        if len(entry) > 5:
+            row["client_name"] = redact_slowlog_value(entry[5])
+        rows.append(row)
+    return rows
+
+
+def slowlog_markdown(report: dict[str, Any], nodes: list[dict[str, Any]]) -> str:
+    lines = [
+        "# Dragonfly Slowlog Report",
+        "",
+        f"- Environment: `{report['environment']}`",
+        f"- Requested limit per node: `{report['limit']}`",
+        f"- Nodes queried: `{len(nodes)}`",
+        "",
+    ]
+    for node in nodes:
+        node_id = node["node_id"]
+        lines.extend([f"## {node_id}", ""])
+        if node.get("error"):
+            lines.extend([f"Error: `{node['error']}`", ""])
+            continue
+        rows = node["entries"]
+        if not rows:
+            lines.extend(["No slowlog entries returned.", ""])
+            continue
+        lines.extend(
+            [
+                "| ID | Timestamp | Duration (us) | Command | Client |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for row in rows:
+            command = (
+                str(row.get("command", row.get("raw", ""))).replace("|", "\\|").replace("\n", " ")
+            )
+            lines.append(
+                f"| {row.get('id', '')} | {row.get('timestamp', '')} | {row.get('duration_us', '')} | {command} | {row.get('client', '')} |"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def slowlog_report(
+    environment: str,
+    targets: list[str],
+    limit: int,
+    output_format: str,
+    output: Path | None,
+    workers: int,
+    max_elements: int | None,
+    dry_run: bool,
+) -> int:
+    if not 0 <= limit <= 128:
+        raise ValueError("--limit must be between 0 and 128")
+    if workers < 1 or workers > DEFAULT_MULTI_WORKERS:
+        raise ValueError(f"--workers must be between 1 and {DEFAULT_MULTI_WORKERS}")
+    if max_elements is not None and max_elements <= 0:
+        raise ValueError("--max-elements must be positive")
+    if output is not None and output_format == "table":
+        raise ValueError("--output requires --format json or --format markdown")
+    if dry_run:
+        print("Dry run: no control-plane or Redis requests will be sent.")
+        print(f"Planned topology resolution: resolve {', '.join(targets)} to unique node IDs")
+        print(
+            f"Planned command per resolved node: dfadmin-wrapper --env {environment} node resp NODE_ID -- SLOWLOG GET {limit}"
+        )
+        print(f"Planned output: {output or 'stdout'} ({output_format})")
+        return 0
+    node_ids = resolve_multi_resource_ids(environment, "node", targets)
+    total_nodes = len(node_ids)
+    node_ids = node_ids[:max_elements]
+
+    def fetch(node_id: str) -> dict[str, object]:
+        try:
+            return {
+                "node_id": node_id,
+                "entries": parse_slowlog_response(
+                    node_id,
+                    run_dfadmin(
+                        environment, "node", "resp", node_id, "--", "SLOWLOG", "GET", str(limit)
+                    ),
+                ),
+            }
+        except RuntimeError as error:
+            return {"node_id": node_id, "entries": [], "error": str(error)}
+
+    with ThreadPoolExecutor(max_workers=min(workers, len(node_ids))) as executor:
+        nodes: list[dict[str, Any]] = list(executor.map(fetch, node_ids))
+    report: dict[str, Any] = {
+        "command": "slowlog",
+        "environment": environment,
+        "targets": targets,
+        "limit": limit,
+        "total_nodes": total_nodes,
+        "selected_nodes": len(nodes),
+        "truncated": len(nodes) < total_nodes,
+        "nodes": nodes,
+    }
+    if output_format == "json":
+        rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
+    elif output_format == "markdown":
+        rendered = slowlog_markdown(report, nodes)
+    else:
+        rows = [entry for node in nodes for entry in node["entries"]]
+        if rows:
+            print_multi_table(
+                ["node_id", "id", "timestamp", "duration_us", "command", "client"], rows, 80
+            )
+        else:
+            print("No slowlog entries returned.")
+        for node in nodes:
+            if node.get("error"):
+                print(f"ERROR: {node['node_id']}: {node['error']}", file=sys.stderr)
+        rendered = ""
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(rendered)
+        print(f"Report: {output}")
+    elif output_format in {"json", "markdown"}:
+        print(rendered, end="")
+    return 1 if all(node.get("error") for node in nodes) else 0
+
+
 def resolve_collection_nodes(
     environment: str, targets: list[str]
 ) -> tuple[dict[str, tuple[str, str, str, str]], list[dict]]:
@@ -1595,47 +2074,36 @@ def resolve_collection_nodes(
 
 
 def remote_ssh_command(bastion: str, public_ip: str) -> list[str]:
-    if not re.fullmatch(r"[A-Za-z0-9._-]+", bastion):
-        raise ValueError("bastion must contain only letters, digits, '.', '_' or '-'")
     try:
         ipaddress.ip_address(public_ip)
     except ValueError as error:
         raise ValueError(f"invalid public IP address: {public_ip!r}") from error
-    return [
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=15",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=4",
-        "-o",
-        "Compression=no",
+    return deployment_ssh_command(
         bastion,
-        "sudo",
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ConnectTimeout=15",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=4",
-        "-o",
-        "Compression=no",
-        public_ip,
-        "sudo",
-        "nice",
-        "-n",
-        "19",
-        "ionice",
-        "-c3",
-        "bash",
-        "-s",
-    ]
+        [
+            "sudo",
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=4",
+            "-o",
+            "Compression=no",
+            public_ip,
+            "sudo",
+            "nice",
+            "-n",
+            "19",
+            "ionice",
+            "-c3",
+            "bash",
+            "-s",
+        ],
+    )
 
 
 def ssh_access_recovery_hint(detail: str, bastion: str) -> str:
@@ -1697,6 +2165,23 @@ normalized_load=$(awk -v load_value="$load_one" -v cpus="$cpu_count" 'BEGIN {{ p
 printf 'load1=%s cpu_count=%s normalized_load=%s\n' "$load_one" "$cpu_count" "$normalized_load"
 awk -v load_value="$normalized_load" -v max="{max_normalized_load}" 'BEGIN {{ exit !(load_value <= max) }}'
 """
+
+
+def admission_failure_reason(
+    detail: str, max_normalized_load: float, min_free_kib: int | None = None
+) -> str:
+    match = re.search(r"normalized_load=([0-9.]+)", detail)
+    if match and float(match.group(1)) > max_normalized_load:
+        return (
+            f"node is busy (load {match.group(1)} exceeds the safe limit {max_normalized_load:.3f}); "
+            "no collection scripts were run on it"
+        )
+    if min_free_kib is not None:
+        return (
+            f"node has less than {min_free_kib} KiB free on a checked filesystem; "
+            "no collection scripts were run on it"
+        )
+    return "node did not meet the safe collection limits; no collection scripts were run on it"
 
 
 def estimate_script(includes: set[str], since: str, until: str | None) -> str:
@@ -1940,7 +2425,7 @@ def collect_node(
             detail = admission.stdout + admission.stderr
             return report | {
                 "status": "SKIPPED",
-                "reason": "admission check failed",
+                "reason": admission_failure_reason(detail, max_normalized_load, min_free_kib),
                 "detail": detail + ssh_access_recovery_hint(detail, bastion),
             }
         raw_admission = subprocess.run(
@@ -1954,7 +2439,7 @@ def collect_node(
             detail = raw_admission.stdout + raw_admission.stderr
             return report | {
                 "status": "SKIPPED",
-                "reason": "load admission check failed",
+                "reason": admission_failure_reason(detail, max_normalized_load),
                 "detail": detail + ssh_access_recovery_hint(detail, bastion),
             }
         archive_compression = False
@@ -2008,7 +2493,7 @@ def estimate_node(
         detail = admission.stdout + admission.stderr
         return report | {
             "status": "SKIPPED",
-            "reason": "load admission check failed",
+            "reason": admission_failure_reason(detail, max_normalized_load),
             "detail": detail + ssh_access_recovery_hint(detail, bastion),
         }
     result = subprocess.run(
@@ -2037,7 +2522,7 @@ def collection_workflow_guide(collected: list[dict]) -> str:
     has_compressed = any(name.endswith(".tar.zst") for name in archive_names)
     has_raw = any(name.endswith(".tar") for name in archive_names)
     lines = [
-        "Dragonfly evidence artifact analysis guide",
+        "Collected node artifacts",
         "",
         "Run the archive commands from this output directory.",
         "",
@@ -2187,7 +2672,7 @@ def collect_evidence(
     }
     (output_dir / "collection-report.json").write_text(json.dumps(summary, indent=2) + "\n")
     collected = [entry for entry in report if entry.get("status") == "COLLECTED"]
-    analysis_guide = output_dir / "ARTIFACT_ANALYSIS_GUIDE.txt"
+    analysis_guide = output_dir / "README.txt"
     analysis_guide.write_text(collection_workflow_guide(collected))
     print("-" * 80)
     print("Collection Report:")
@@ -2201,9 +2686,9 @@ def collect_evidence(
             f"{status}: {target} - {entry.get('reason', ', '.join(entry.get('collected', [])))}"
         )
         if status == "SKIPPED":
-            print(color_message(ANSI_YELLOW, message))
+            print(message)
             if detail := entry.get("detail", "").strip():
-                print(warning_message(f"{target} admission output:\n{detail}"), file=sys.stderr)
+                print(f"{target} capacity check:\n{detail}", file=sys.stderr)
         elif status in {"FAILED", "PARTIAL"}:
             print(color_message(ANSI_RED, message))
             if detail := entry.get("detail", "").strip():
@@ -2218,11 +2703,439 @@ def collect_evidence(
             bundle.add(output_dir, arcname=output_dir.name)
         print(f"Local bundle: {archive}")
     elif not collected:
-        print(
-            warning_message("no node evidence was collected; no local bundle created."),
-            file=sys.stderr,
-        )
+        print("No node-local evidence was collected; no local archive was created.")
     return 0 if report and all(entry["status"] == "COLLECTED" for entry in report) else 1
+
+
+def parse_bundle_window(value: str) -> timedelta:
+    match = re.fullmatch(r"(\d+)([smhd])", value.strip().lower())
+    if not match or int(match.group(1)) <= 0:
+        raise ValueError("--window must be a positive duration such as 30m, 1h, or 2d")
+    amount, unit = match.groups()
+    return timedelta(
+        **{{"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}[unit]: int(amount)}
+    )
+
+
+def format_elapsed(seconds: float) -> str:
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m {seconds}s"
+    if minutes:
+        return f"{minutes}m {seconds}s"
+    return f"{seconds}s"
+
+
+def bundle_readme(
+    bundle_id: str, node_datastores: Sequence[tuple[str, str]], start: str, end: str
+) -> str:
+    scope = "\n".join(
+        f"    - node {node_id}: datastore {datastore_id}"
+        for node_id, datastore_id in node_datastores
+    )
+    return f"""Dragonfly evidence bundle {bundle_id}
+
+Scope:
+{scope}
+Evidence window: {start} to {end}
+
+Start here:
+    1. Check manifest.json for bundle status and completed stages.
+    2. For a failed or slow stage, read _dfly_inspect_logs/<stage>.log.
+    3. Inspect node-local evidence in artifacts/ and archived Dragonfly and dfcloud-agent logs in logs/<node-id>/.
+    4. Open index.html to view the captured dashboard data offline.
+
+artifacts/
+    One compressed evidence archive per collected node, named with its node ID. Each archive contains
+    bounded node-local diagnostics such as redacted Dragonfly configuration and metadata, service and
+    listener state, Redis INFO/MEMORY/DBSIZE/SLOWLOG output, and available metrics. Optional collection
+    sources can add Dragonfly logs, journals, agent logs, info dumps, client lists, or perf captures.
+    For exact archive search and extraction commands, see artifacts/README.txt.
+
+logs/<node-id>/
+    Archived Grafana Loki logs for that node. Files whose name contains _dfly_ are Dragonfly server
+    logs; files whose name contains _agent_ are dfcloud-agent logs. Log filenames include the datastore, node,
+    source, and requested time window.
+
+dashboards/
+    Grafana panel-query results grouped by source folder, dashboard, and panel. index.html is a
+    self-contained offline viewer built from the captured query data; it makes no Grafana requests.
+    These are datastore dashboard results, shared across all selected nodes, not node-local files.
+
+_dfly_inspect_logs/
+    Internal execution logs for bundle stages. Use these to diagnose a failed or slow stage.
+"""
+
+
+class BundleStageLog:
+    def __init__(
+        self, stream: TextIO, stream_lock: threading.Lock, stage_log: TextIO, stage_name: str
+    ):
+        self.stream = stream
+        self.stream_lock = stream_lock
+        self.stage_log = stage_log
+        self.stage_name = stage_name
+        self.lock = threading.Lock()
+
+    def write(self, text: str) -> int:
+        with self.lock:
+            written = self.stage_log.write(text)
+            self.stage_log.flush()
+            return written
+
+    def flush(self) -> None:
+        self.stage_log.flush()
+
+
+class BundleOutputRouter:
+    def __init__(self, fallback: TextIO):
+        self.fallback = fallback
+        self.outputs: dict[int, BundleStageLog] = {}
+        self.lock = threading.Lock()
+
+    def register(self, output: BundleStageLog) -> None:
+        with self.lock:
+            self.outputs[threading.get_ident()] = output
+
+    def unregister(self) -> None:
+        with self.lock:
+            self.outputs.pop(threading.get_ident(), None)
+
+    def write(self, text: str) -> int:
+        with self.lock:
+            output = self.outputs.get(threading.get_ident())
+        if output is not None:
+            return output.write(text)
+        return self.fallback.write(text)
+
+    def flush(self) -> None:
+        self.fallback.flush()
+
+
+def incident_bundle(
+    environment: str,
+    incident_id: str,
+    around: str,
+    window: str,
+    targets: list[str],
+    source_folder: str,
+    dashboard: str,
+    panels: str,
+    output_dir: Path,
+    collect_includes: set[str],
+    log_limit: int | None,
+    loki_datasource: str | None,
+    dashboard_sections: str,
+    dashboard_global_only: bool,
+    bastion: str,
+    resume: bool,
+    overwrite: bool,
+    dry_run: bool,
+) -> int:
+    bundle_started = time.monotonic()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", incident_id):
+        raise ValueError(
+            "incident-id must be 1-64 letters, digits, '.', '_', or '-', starting with a letter or digit"
+        )
+    captured_now = datetime.now(timezone.utc)
+    around_utc = resolve_utc_timestamp(around, captured_now)
+    center = datetime.strptime(around_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    duration = parse_bundle_window(window)
+    start = (center - duration).strftime("%Y-%m-%dT%H:%M:%SZ")
+    end = (center + duration).strftime("%Y-%m-%dT%H:%M:%SZ")
+    paths = {
+        "root": output_dir,
+        "viewer": output_dir / "index.html",
+        "artifacts": output_dir / "artifacts",
+        "logs": output_dir / "logs",
+        "dashboards": output_dir / "dashboards",
+        "stage_logs": output_dir / "_dfly_inspect_logs",
+        "manifest": output_dir / "manifest.json",
+        "readme": output_dir / "README.txt",
+    }
+    if dry_run:
+        print("Dry run: no control-plane, Redis, SSH, or Grafana requests will be sent.")
+        print(f"Bundle: {incident_id}; environment: {environment}")
+        print(f"Normalized window: {start} to {end} (around {around_utc}, +/- {window})")
+        print(f"Planned output root: {paths['root']}")
+        print(
+            f"Planned evidence artifacts: {paths['artifacts']} targets={', '.join(targets)} includes={','.join(sorted(collect_includes)) or 'baseline'}"
+        )
+        print(
+            f"Planned log archive: {paths['logs']} sources=dfly,agent "
+            f"limit={log_limit or 'unlimited'} datasource={loki_datasource or 'context default'}"
+        )
+        print(
+            f"Planned dashboard export: {paths['dashboards']} folder={source_folder!r} dashboard={dashboard!r} panels={panels!r}"
+        )
+        print(
+            f"Planned manifest: {paths['manifest']}; resume={'enabled' if resume else 'disabled'}"
+        )
+        return 0
+    if resume and overwrite:
+        raise ValueError("--resume and --overwrite cannot be used together")
+    context = GCX_CONTEXTS[environment]
+    print(
+        f"Bundle preflight: validating Grafana dashboard {dashboard!r} and logs datasource.",
+        flush=True,
+    )
+    resolve_dashboard(context, source_folder, dashboard)
+    loki_datasource = resolve_loki_datasource(context, loki_datasource)
+    if output_dir.exists() and overwrite:
+        if output_dir.is_dir():
+            shutil.rmtree(output_dir)
+        else:
+            output_dir.unlink()
+        print(f"Bundle output removed: {output_dir}")
+    if output_dir.exists() and not resume:
+        raise ValueError(
+            f"bundle output already exists: {output_dir}; use --resume to continue it, "
+            "--overwrite to delete it and start over, or remove it manually"
+        )
+    if resume and output_dir.exists() and not paths["manifest"].is_file():
+        raise ValueError(f"--resume requires an existing bundle manifest: {paths['manifest']}")
+    print("Bundle preflight: resolving datastore target.", flush=True)
+    datastore_ids = resolve_multi_resource_ids(environment, "datastore", targets)
+    if len(datastore_ids) != 1:
+        raise ValueError(
+            "bundle targets must resolve to exactly one datastore for dashboard export"
+        )
+    datastore_id = datastore_ids[0]
+    resolved_nodes, _ = resolve_collection_nodes(environment, targets)
+    if not resolved_nodes:
+        raise RuntimeError("no nodes could be resolved from the supplied targets")
+    node_datastores = [(node_id, datastore_id) for node_id in sorted(resolved_nodes)]
+    node_id_pattern = "^(?:" + "|".join(re.escape(node_id) for node_id, _ in node_datastores) + ")$"
+    print(f"Bundle preflight: ready for datastore {datastore_id}.")
+    previous_stages: dict[str, Any] = {}
+    if resume and paths["manifest"].is_file():
+        try:
+            previous = json.loads(paths["manifest"].read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"could not read bundle manifest for --resume: {error}") from error
+        compatible = {
+            "incident_id": incident_id,
+            "environment": environment,
+            "datastore_id": datastore_id,
+            "from": start,
+            "to": end,
+        }
+        if not isinstance(previous, dict) or any(
+            previous.get(key) != value for key, value in compatible.items()
+        ):
+            raise ValueError(
+                "--resume manifest does not match this incident, environment, datastore, or time window"
+            )
+        if isinstance(previous.get("stages"), dict):
+            previous_stages = previous["stages"]
+    output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    paths["stage_logs"].mkdir(mode=0o700, exist_ok=True)
+    paths["readme"].write_text(bundle_readme(incident_id, node_datastores, start, end))
+    manifest: dict[str, Any] = {
+        "command": "bundle",
+        "incident_id": incident_id,
+        "environment": environment,
+        "targets": targets,
+        "datastore_id": datastore_id,
+        "nodes": [
+            {"node_id": node_id, "datastore_id": node_datastore_id}
+            for node_id, node_datastore_id in node_datastores
+        ],
+        "around": around_utc,
+        "window": window,
+        "from": start,
+        "to": end,
+        "output_root": str(output_dir),
+        "status": "in_progress",
+        "resume": resume,
+        "stages": {},
+    }
+    write_json(paths["manifest"], manifest)
+    stages: list[tuple[str, Callable[[], int], Path]] = [
+        (
+            "dashboard_panels",
+            lambda: export_dashboard_panels(
+                source_folder,
+                dashboard,
+                panels,
+                start,
+                end,
+                paths["dashboards"],
+                datastore_id,
+                ".*",
+                node_id_pattern,
+                "1m",
+                context,
+                "victoria-prom",
+                dashboard_sections,
+                dashboard_global_only,
+                resume,
+                False,
+                False,
+            ),
+            paths["dashboards"],
+        ),
+        (
+            "collect",
+            lambda: collect_evidence(
+                environment,
+                targets,
+                paths["artifacts"],
+                collect_includes,
+                DEFAULT_COLLECTION_WORKERS,
+                bastion,
+                DEFAULT_MAX_NORMALIZED_LOAD,
+                DEFAULT_MIN_FREE_KIB,
+                start,
+                end,
+                False,
+                False,
+                False,
+                False,
+            ),
+            paths["artifacts"],
+        ),
+        (
+            "log_archiver",
+            lambda: archive_logs(
+                environment,
+                targets,
+                start,
+                end,
+                GCX_CONTEXTS[environment],
+                log_limit,
+                paths["logs"],
+                None,
+                "all",
+                False,
+                False,
+                None,
+                loki_datasource,
+            ),
+            paths["logs"],
+        ),
+    ]
+    terminal_stdout = sys.stdout
+    terminal_output_lock = threading.Lock()
+    failures = 0
+
+    def terminal_print(message: str) -> None:
+        with terminal_output_lock:
+            print(message, file=terminal_stdout, flush=True)
+
+    def finish_stage(name: str, status: int, stage: dict[str, object]) -> None:
+        nonlocal failures
+        manifest["stages"][name] = stage
+        failures += status != 0
+        write_json(paths["manifest"], manifest)
+        stage_log_path = Path(str(stage["details"]))
+        if status == 0:
+            result = "completed"
+        else:
+            detail = stage.get("error")
+            result = (
+                f"failed: {detail}; details: {stage_log_path}"
+                if isinstance(detail, str) and detail
+                else f"failed; details: {stage_log_path}"
+            )
+        elapsed_seconds = stage.get("elapsed_seconds")
+        elapsed = float(elapsed_seconds) if isinstance(elapsed_seconds, (int, float)) else 0.0
+        terminal_print(f"Bundle: {name} {result} in {format_elapsed(elapsed)}.")
+
+    def run_stage(
+        name: str,
+        stage_action: Callable[[], int],
+        path: Path,
+        output_router: BundleOutputRouter | None = None,
+    ) -> tuple[int, dict[str, object]]:
+        stage_started = time.monotonic()
+        stage_log_path = paths["stage_logs"] / f"{name}.log"
+        terminal_print(f"Bundle: {name} started; details: {stage_log_path}")
+        try:
+            with stage_log_path.open("w") as stage_log:
+                stage_output = BundleStageLog(
+                    terminal_stdout, terminal_output_lock, stage_log, name
+                )
+                if output_router is None:
+                    with (
+                        contextlib.redirect_stdout(stage_output),
+                        contextlib.redirect_stderr(stage_output),
+                    ):
+                        status = stage_action()
+                else:
+                    output_router.register(stage_output)
+                    try:
+                        status = stage_action()
+                    finally:
+                        output_router.unregister()
+            stage = {
+                "status": "completed" if status == 0 else "failed",
+                "exit_code": status,
+                "output": str(path),
+                "details": str(stage_log_path),
+                "elapsed_seconds": round(time.monotonic() - stage_started, 3),
+            }
+        except (OSError, RuntimeError, ValueError) as error:
+            status = 1
+            stage = {
+                "status": "failed",
+                "exit_code": status,
+                "output": str(path),
+                "details": str(stage_log_path),
+                "error": str(error),
+                "elapsed_seconds": round(time.monotonic() - stage_started, 3),
+            }
+        return status, stage
+
+    pending_stages = []
+    for name, stage_action, path in stages:
+        previous_stage = previous_stages.get(name)
+        if (
+            isinstance(previous_stage, dict)
+            and previous_stage.get("status") == "completed"
+            and path.exists()
+        ):
+            manifest["stages"][name] = {**previous_stage, "resume": "skipped_completed_stage"}
+            write_json(paths["manifest"], manifest)
+            print(f"Bundle resume: skipped completed {name} stage.")
+            continue
+        pending_stages.append((name, stage_action, path))
+
+    if pending_stages:
+        output_router = BundleOutputRouter(terminal_stdout)
+        with contextlib.redirect_stdout(output_router), contextlib.redirect_stderr(output_router):
+            with ThreadPoolExecutor(max_workers=len(pending_stages)) as executor:
+                future_names = {
+                    executor.submit(run_stage, name, stage_action, path, output_router): name
+                    for name, stage_action, path in pending_stages
+                }
+                for future in as_completed(future_names):
+                    name = future_names[future]
+                    status, stage = future.result()
+                    finish_stage(name, status, stage)
+    dashboard_dir = paths["dashboards"] / dashboard_output_component(source_folder, "source folder")
+    dashboard_dir /= dashboard_output_component(dashboard, "dashboard")
+    dashboard_stage = manifest["stages"].get("dashboard_panels")
+    if isinstance(dashboard_stage, dict) and dashboard_stage.get("status") == "completed":
+        try:
+            viewer_path = write_dashboard_viewer(dashboard_dir, paths["viewer"])
+        except (OSError, ValueError) as error:
+            failures += 1
+            manifest["offline_dashboard_viewer"] = {"status": "failed", "error": str(error)}
+            terminal_print(f"Bundle: offline dashboard viewer failed: {error}")
+        else:
+            manifest["offline_dashboard_viewer"] = {"status": "completed", "path": str(viewer_path)}
+            terminal_print(f"Bundle: offline dashboard viewer ready: {viewer_path}")
+    manifest["status"] = "completed" if not failures else "failed"
+    manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
+    write_json(paths["manifest"], manifest)
+    print(
+        f"Bundle status: {manifest['status']}; elapsed: {format_elapsed(time.monotonic() - bundle_started)}; "
+        f"manifest: {paths['manifest']}"
+    )
+    return 0 if not failures else 1
 
 
 def static_mutation_findings(script: str) -> list[str]:
@@ -2302,10 +3215,10 @@ def write_agent_validation_cache(agent_name: str, script_sha256: str, reason: st
     )
 
 
-def agent_command(agent_name: str, prompt: str) -> list[str]:
+def agent_command(agent_name: str, prompt: str, model: str | None = None) -> list[str]:
     """Return a bounded prompt-only invocation for a supported local agent CLI."""
     if agent_name == "copilot":
-        return [
+        command = [
             "copilot",
             "--prompt",
             prompt,
@@ -2322,6 +3235,11 @@ def agent_command(agent_name: str, prompt: str) -> list[str]:
             "--no-remote-export",
             "--no-ask-user",
         ]
+        if model:
+            command.extend(["--model", model])
+        return command
+    if model:
+        raise ValueError("--model is currently supported only with --agent copilot")
     if agent_name == "gemini":
         return ["gemini", "--prompt", prompt, "--output-format", "json", "--approval-mode", "plan"]
     if agent_name == "codex":
@@ -2367,21 +3285,40 @@ def parse_agent_response(agent_name: str, output: str) -> dict[str, Any]:
     return response
 
 
+def explain_depth_instruction(depth: str) -> str:
+    instructions = {
+        "concise": "Give only the key conclusion and the most important next read-only check.",
+        "standard": "Explain the key findings, uncertainty, and practical read-only next checks.",
+        "deep": "Analyze the evidence in detail, relate values across the supplied output, identify uncertainty and risks, and give prioritized read-only next checks.",
+    }
+    try:
+        return instructions[depth]
+    except KeyError as error:
+        raise ValueError(f"--depth must be one of: {', '.join(EXPLAIN_DEPTHS)}") from error
+
+
 def ask_agent(
-    agent_name: str, question: str, payload: Mapping[str, Any], context: str = ""
+    agent_name: str,
+    question: str,
+    payload: Mapping[str, Any],
+    context: str = "",
+    depth: str = "standard",
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Run a constrained local agent query; reusable by inspection and explain commands."""
-    executable = agent_command(agent_name, "")[0]
+    depth_instruction = explain_depth_instruction(depth)
+    executable = agent_command(agent_name, "", model)[0]
     if not shutil.which(executable):
         raise AgentUnavailable(f"{agent_name} CLI is not on PATH")
     prompt = (
         f"TASK: {question}\n"
+        f"RESPONSE DEPTH: {depth}. {depth_instruction}\n"
         "Return JSON only. Do not use tools, run commands, edit files, or make network requests.\n"
         f"PAYLOAD:\n{json.dumps(payload, sort_keys=True)}{context}"
     )
     try:
         result = subprocess.run(
-            agent_command(agent_name, prompt),
+            agent_command(agent_name, prompt, model),
             text=True,
             capture_output=True,
             timeout=DEFAULT_AGENT_VALIDATOR_TIMEOUT_SECONDS,
@@ -2428,18 +3365,462 @@ def run_agent_mutation_validation(
     return False, reason
 
 
-def explain_with_agent(agent_name: str, question: str) -> dict[str, Any]:
+def explain_with_agent(
+    agent_name: str, question: str, depth: str = "standard", model: str | None = None
+) -> dict[str, Any]:
+    model = effective_explain_model(agent_name, model)
+    print_explain_settings(agent_name, model, depth, question, "operator question", False, 0)
     response = ask_agent(
         agent_name,
         "Answer the operator question using the supplied reference context when relevant. "
         'Return exactly {"answer":"concise answer"}.',
         {"question": question},
         default_agent_context(),
+        depth,
+        model,
     )
     answer = response.get("answer")
     if not isinstance(answer, str) or not answer.strip():
         raise RuntimeError(f'{agent_name} must return {{"answer":"..."}}')
-    return {"agent": agent_name, "answer": answer.strip()}
+    return {"agent": agent_name, "model": model, "answer": answer.strip()}
+
+
+def effective_explain_model(agent_name: str, model: str | None) -> str | None:
+    if model is not None:
+        return model
+    return DEFAULT_COPILOT_EXPLAIN_MODEL if agent_name == "copilot" else None
+
+
+def print_explain_settings(
+    agent_name: str,
+    model: str | None,
+    depth: str,
+    question: str,
+    source: str,
+    use_cache: bool,
+    input_bytes: int,
+) -> None:
+    print(
+        "AI explanation settings: "
+        + json.dumps(
+            {
+                "agent": agent_name,
+                "model": model or "provider-default",
+                "depth": depth,
+                "question": question,
+                "source": source,
+                "cache": "enabled" if use_cache else "disabled",
+                "input_bytes": input_bytes,
+                "input_limit_bytes": MAX_AGENT_CONTEXT_BYTES,
+                "timeout_seconds": DEFAULT_AGENT_VALIDATOR_TIMEOUT_SECONDS,
+                "tools": "disabled",
+            },
+            sort_keys=True,
+        ),
+        file=sys.stderr,
+    )
+
+
+def load_history() -> list[dict[str, object]]:
+    try:
+        history = json.loads(HISTORY_INDEX_PATH.read_text())
+    except FileNotFoundError:
+        return []
+    except (OSError, json.JSONDecodeError):
+        return []
+    return (
+        [entry for entry in history if isinstance(entry, dict)] if isinstance(history, list) else []
+    )
+
+
+def save_history(entries: list[dict[str, object]]) -> None:
+    HISTORY_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    write_json(HISTORY_INDEX_PATH, entries[:MAX_HISTORY_ENTRIES])
+    HISTORY_INDEX_PATH.chmod(0o600)
+
+
+def history_command(arguments: list[str]) -> str:
+    redacted_arguments = list(arguments)
+    for index, argument in enumerate(redacted_arguments[:-1]):
+        if argument == "--command":
+            redacted_arguments[index + 1] = "<redacted>"
+    for index, argument in enumerate(redacted_arguments):
+        if argument.startswith("--command="):
+            redacted_arguments[index] = "--command=<redacted>"
+    return shlex.join(redacted_arguments)
+
+
+def redact_persisted_output(output: str) -> str:
+    """Redact common credential assignments before retaining any local artifact."""
+    sensitive = r"(?:auth(?:orization)?|pass(?:word)?|secret|token|credential|api[_-]?key|access[_-]?key|private[_-]?key|masterauth|requirepass)"
+    output = re.sub(
+        rf'(?im)("{sensitive}"\s*:\s*)"[^"]*"',
+        r'\1"<redacted>"',
+        output,
+    )
+    return re.sub(
+        r"(?im)(\b(?:auth(?:orization)?|pass(?:word)?|secret|token|credential|"
+        r"api[_-]?key|access[_-]?key|private[_-]?key|masterauth|requirepass)\b"
+        r"\s*(?:=|:|\s)\s*)([^\s,;]+)",
+        r"\1<redacted>",
+        output,
+    )
+
+
+def validate_session_name(session: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", session):
+        raise ValueError(
+            "--session must be 1-64 letters, digits, '.', '_', or '-', starting with a letter or digit"
+        )
+    return session
+
+
+def record_history(
+    arguments: list[str], output: str, session: str | None = None, artifact_type: str = "text"
+) -> dict[str, object] | None:
+    if not output.strip():
+        return None
+    output = redact_persisted_output(output)
+    encoded_output = output.encode()
+    if len(encoded_output) > MAX_HISTORY_ARTIFACT_BYTES:
+        encoded_output = encoded_output[:MAX_HISTORY_ARTIFACT_BYTES]
+    timestamp = datetime.now(timezone.utc)
+    artifact_name = f"{timestamp.strftime('%Y%m%dT%H%M%SZ')}-{hashlib.sha256(encoded_output).hexdigest()[:12]}.txt"
+    HISTORY_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    artifact_path = HISTORY_DIR / artifact_name
+    artifact_path.write_bytes(encoded_output)
+    artifact_path.chmod(0o600)
+    entry: dict[str, object] = {
+        "timestamp": timestamp.isoformat(),
+        "command": history_command(arguments),
+        "artifact": artifact_name,
+        "sha256": hashlib.sha256(encoded_output).hexdigest(),
+        "bytes": len(encoded_output),
+        "truncated": len(encoded_output) < len(output.encode()),
+        "artifact_type": artifact_type,
+    }
+    if session is not None:
+        entry["session"] = validate_session_name(session)
+    save_history([entry, *load_history()])
+    return entry
+
+
+def show_history() -> int:
+    entries = load_history()
+    if not entries:
+        print("No recorded command output.")
+        return 0
+    print("Recorded command output:")
+    for index, entry in enumerate(entries, 1):
+        session = entry.get("session")
+        suffix = f"  session={session}" if isinstance(session, str) else ""
+        print(
+            f"{index:>2}  {entry.get('timestamp', '<unknown>')}  {entry.get('command', '<unknown>')}{suffix}"
+        )
+    return 0
+
+
+def history_artifact(index: int) -> tuple[dict[str, object], str] | None:
+    entries = load_history()
+    if index < 1 or index > len(entries):
+        return None
+    entry = entries[index - 1]
+    artifact = entry.get("artifact")
+    if not isinstance(artifact, str) or Path(artifact).name != artifact:
+        return None
+    try:
+        return entry, (HISTORY_DIR / artifact).read_text()
+    except OSError:
+        return None
+
+
+def session_artifact(session: str) -> tuple[list[dict[str, object]], str] | None:
+    session = validate_session_name(session)
+    entries = [entry for entry in load_history() if entry.get("session") == session]
+    structured_entries = [entry for entry in entries if entry.get("artifact_type") == "json"]
+    entries = structured_entries or entries
+    chunks = []
+    selected_entries = []
+    remaining = MAX_AGENT_CONTEXT_BYTES
+    for entry in reversed(entries[-MAX_SESSION_ARTIFACTS:]):
+        artifact = entry.get("artifact")
+        if not isinstance(artifact, str) or Path(artifact).name != artifact:
+            continue
+        try:
+            output = (HISTORY_DIR / artifact).read_text()
+        except OSError:
+            continue
+        label = f"COMMAND: {entry.get('command', '<unknown>')}\nTIMESTAMP: {entry.get('timestamp', '<unknown>')}\n"
+        chunk = f"{label}{output}\n\n"
+        encoded_chunk = chunk.encode()
+        if len(encoded_chunk) > remaining:
+            chunk = encoded_chunk[:remaining].decode(errors="replace")
+        chunks.append(chunk)
+        selected_entries.append(entry)
+        remaining -= len(chunk.encode())
+        if remaining <= 0:
+            break
+    if not chunks:
+        return None
+    return selected_entries, "".join(chunks)
+
+
+def show_sessions() -> int:
+    sessions: dict[str, list[dict[str, object]]] = {}
+    for entry in load_history():
+        session = entry.get("session")
+        if isinstance(session, str):
+            sessions.setdefault(session, []).append(entry)
+    if not sessions:
+        print("No recorded investigation sessions.")
+        return 0
+    print("Recorded investigation sessions:")
+    for session, entries in sorted(sessions.items()):
+        print(
+            f"{session}  artifacts={len(entries)}  latest={entries[0].get('timestamp', '<unknown>')}"
+        )
+    return 0
+
+
+def show_session(session: str) -> int:
+    session = validate_session_name(session)
+    entries = [entry for entry in load_history() if entry.get("session") == session]
+    if not entries:
+        print(f"No recorded command output for session {session!r}.")
+        return 0
+    print(f"Session {session}:")
+    for index, entry in enumerate(reversed(entries), 1):
+        print(
+            f"{index:>2}  {entry.get('timestamp', '<unknown>')}  {entry.get('command', '<unknown>')}"
+        )
+    return 0
+
+
+def clear_session(session: str) -> int:
+    session = validate_session_name(session)
+    retained, removed = [], []
+    for entry in load_history():
+        if entry.get("session") == session:
+            removed.append(entry)
+        else:
+            retained.append(entry)
+    for entry in removed:
+        artifact = entry.get("artifact")
+        if isinstance(artifact, str) and Path(artifact).name == artifact:
+            with contextlib.suppress(OSError):
+                (HISTORY_DIR / artifact).unlink()
+    save_history(retained)
+    print(f"Cleared {len(removed)} recorded artifact(s) from session {session!r}.")
+    return 0
+
+
+def ai_cache_path(
+    agent: str, question: str, source: str, output: str, depth: str, model: str | None
+) -> Path:
+    digest = hashlib.sha256(
+        json.dumps(
+            {
+                "agent": agent,
+                "question": question,
+                "source": source,
+                "output": output,
+                "depth": depth,
+                "model": model,
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    return AI_CACHE_DIR / f"{digest}.json"
+
+
+def read_ai_cache(
+    agent: str, question: str, source: str, output: str, depth: str, model: str | None
+) -> dict[str, Any] | None:
+    try:
+        response = json.loads(
+            ai_cache_path(agent, question, source, output, depth, model).read_text()
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+    return (
+        response if isinstance(response, dict) and isinstance(response.get("answer"), str) else None
+    )
+
+
+def write_ai_cache(
+    response: dict[str, Any],
+    agent: str,
+    question: str,
+    source: str,
+    output: str,
+    depth: str,
+    model: str | None,
+) -> None:
+    AI_CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = ai_cache_path(agent, question, source, output, depth, model)
+    write_json(path, response)
+    path.chmod(0o600)
+
+
+def explain_dry_run(arguments: argparse.Namespace) -> int:
+    """Preview an explain request without invoking an agent or writing a cache entry."""
+    question = arguments.question or "Explain this command output."
+    source = "operator question"
+    output = ""
+    if arguments.last is not None:
+        selected = history_artifact(arguments.last)
+        if selected is None:
+            raise ValueError(f"no recorded command output at --last {arguments.last}")
+        entry, output = selected
+        source = str(entry.get("command", "recorded command"))
+    elif arguments.session is not None:
+        selected = session_artifact(arguments.session)
+        if selected is None:
+            raise ValueError(f"no recorded command output for session {arguments.session!r}")
+        entries, output = selected
+        source = f"session {arguments.session} ({len(entries)} artifacts)"
+        question = arguments.question or "Explain this session output."
+    elif arguments.file is not None:
+        try:
+            output = arguments.file.read_text()
+        except OSError as error:
+            raise RuntimeError(f"could not read --file {arguments.file}: {error}") from error
+        source = str(arguments.file)
+    elif not sys.stdin.isatty():
+        output = sys.stdin.read(MAX_AGENT_CONTEXT_BYTES + 1)
+        source = "stdin"
+    model = effective_explain_model(arguments.agent, arguments.model)
+    output = redact_persisted_output(output)
+    input_bytes = len(output.encode())
+    truncated = input_bytes > MAX_AGENT_CONTEXT_BYTES
+    cache_key = ai_cache_path(
+        arguments.agent, question, source, output, arguments.depth, model
+    ).stem
+    print_explain_settings(
+        arguments.agent, model, arguments.depth, question, source, arguments.ai_cache, input_bytes
+    )
+    print(
+        json.dumps(
+            {
+                "dry_run": True,
+                "source": source,
+                "input_bytes": input_bytes,
+                "input_limit_bytes": MAX_AGENT_CONTEXT_BYTES,
+                "would_truncate_input": truncated,
+                "cache": "would_lookup" if arguments.ai_cache else "disabled",
+                "cache_key": cache_key if arguments.ai_cache else None,
+                "provider_call": "not started",
+                "cache_write": "not performed",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def explain_artifact(
+    agent_name: str,
+    question: str,
+    source: str,
+    output: str,
+    depth: str = "standard",
+    model: str | None = None,
+    use_cache: bool = False,
+) -> dict[str, Any]:
+    model = effective_explain_model(agent_name, model)
+    output = redact_persisted_output(output)
+    print_explain_settings(
+        agent_name, model, depth, question, source, use_cache, len(output.encode())
+    )
+    if use_cache:
+        cached = read_ai_cache(agent_name, question, source, output, depth, model)
+        if cached is not None:
+            return {
+                "agent": agent_name,
+                "model": model,
+                "source": source,
+                "answer": cached["answer"],
+                "cache": "hit",
+            }
+    response = ask_agent(
+        agent_name,
+        "Explain the supplied successful dfly-inspect output for an operator. Distinguish facts from uncertainty and recommend only read-only next checks. "
+        'Return exactly {"answer":"concise answer"}.',
+        {"question": question, "source": source, "output": output[:MAX_AGENT_CONTEXT_BYTES]},
+        default_agent_context(),
+        depth,
+        model,
+    )
+    answer = response.get("answer")
+    if not isinstance(answer, str) or not answer.strip():
+        raise RuntimeError(f'{agent_name} must return {{"answer":"..."}}')
+    result = {"agent": agent_name, "model": model, "source": source, "answer": answer.strip()}
+    if use_cache:
+        write_ai_cache(result, agent_name, question, source, output, depth, model)
+        result["cache"] = "stored"
+    return result
+
+
+def explain_history_artifact(
+    arguments: argparse.Namespace, entry: dict[str, object], output: str
+) -> dict[str, Any]:
+    return explain_artifact(
+        arguments.agent,
+        getattr(arguments, "ai_question", None)
+        or getattr(arguments, "question", None)
+        or "Explain this command output.",
+        str(entry.get("command", "recorded command")),
+        output,
+        arguments.depth,
+        arguments.model,
+        getattr(arguments, "ai_cache", False),
+    )
+
+
+def explain_defaults() -> int:
+    print(
+        json.dumps(
+            {
+                "explain": {
+                    "default_agent": "copilot",
+                    "default_depth": "standard",
+                    "depths": list(EXPLAIN_DEPTHS),
+                    "model": f"{DEFAULT_COPILOT_EXPLAIN_MODEL} for Copilot unless --ai-model overrides it",
+                    "model_override": "--ai-model is supported only with --ai-agent copilot",
+                    "agent_timeout_seconds": DEFAULT_AGENT_VALIDATOR_TIMEOUT_SECONDS,
+                    "input_limit_bytes": MAX_AGENT_CONTEXT_BYTES,
+                    "output": "JSON object with an answer string; cache is disabled unless --ai-cache is supplied",
+                    "history": {
+                        "entries": MAX_HISTORY_ENTRIES,
+                        "artifact_limit_bytes": MAX_HISTORY_ARTIFACT_BYTES,
+                        "permissions": "owner-only local files",
+                    },
+                    "fine_tuning": "not supported; --depth is stateless prompt guidance",
+                },
+                "adapters": {
+                    "copilot": {
+                        "model": f"{DEFAULT_COPILOT_EXPLAIN_MODEL} unless --ai-model is supplied",
+                        "context": "default tier",
+                        "tools": "disabled",
+                        "custom_instructions": "disabled",
+                        "remote_export": "disabled",
+                        "credit_cap": COPILOT_VALIDATION_CREDITS,
+                    },
+                    "gemini": {"model": "provider CLI default", "approval_mode": "plan"},
+                    "codex": {
+                        "model": "provider CLI default",
+                        "sandbox": "read-only",
+                        "session": "ephemeral",
+                    },
+                    "claude": {"model": "provider CLI default", "output_format": "json"},
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
 
 
 def static_inspection_script_validation(script_text: str) -> str:
@@ -3440,31 +4821,7 @@ def layout_sections(layout: object) -> dict[str, set[str]]:
     return {title: names for title, names in sections.items() if names}
 
 
-def export_dashboard_panels(
-    source_folder: str,
-    dashboard_title: str,
-    panel_selector: str,
-    start: str,
-    end: str,
-    output_root: Path,
-    datastore_id: str,
-    shard_id: str,
-    node_id: str,
-    rate_interval: str,
-    context: str,
-    datasource: str,
-    sections: str,
-    global_only: bool,
-    resume: bool,
-    dry_run: bool,
-) -> int:
-    """Resolve and export selected panels while preserving the dashboard hierarchy."""
-    if not datastore_id.startswith("dst_"):
-        raise ValueError("datastore_id must begin with 'dst_'")
-    if datetime.strptime(end, "%Y-%m-%dT%H:%M:%SZ") <= datetime.strptime(
-        start, "%Y-%m-%dT%H:%M:%SZ"
-    ):
-        raise ValueError("end time must be after start time")
+def resolve_dashboard(context: str, source_folder: str, dashboard_title: str) -> tuple[str, str]:
     pacer = RequestPacer()
     pacer.wait()
     folders = run_gcx_json(gcx_command(context, "api", "/api/folders", "-X", "GET", "-o", "json"))
@@ -3501,6 +4858,37 @@ def export_dashboard_panels(
     dashboard_id = dashboards[0].get("metadata", {}).get("name")
     if not dashboard_id:
         raise RuntimeError(f"dashboard {dashboard_title!r} has no metadata.name")
+    return str(folder_id), str(dashboard_id)
+
+
+def export_dashboard_panels(
+    source_folder: str,
+    dashboard_title: str,
+    panel_selector: str,
+    start: str,
+    end: str,
+    output_root: Path,
+    datastore_id: str,
+    shard_id: str,
+    node_id: str,
+    rate_interval: str,
+    context: str,
+    datasource: str,
+    sections: str,
+    global_only: bool,
+    resume: bool,
+    dry_run: bool,
+    verbose: bool = True,
+) -> int:
+    """Resolve and export selected panels while preserving the dashboard hierarchy."""
+    if not datastore_id.startswith("dst_"):
+        raise ValueError("datastore_id must begin with 'dst_'")
+    if datetime.strptime(end, "%Y-%m-%dT%H:%M:%SZ") <= datetime.strptime(
+        start, "%Y-%m-%dT%H:%M:%SZ"
+    ):
+        raise ValueError("end time must be after start time")
+    folder_id, dashboard_id = resolve_dashboard(context, source_folder, dashboard_title)
+    pacer = RequestPacer()
     pacer.wait()
     dashboard = run_gcx_json(gcx_command(context, "dashboards", "get", dashboard_id, "-o", "json"))
     panel_records = [
@@ -3564,7 +4952,8 @@ def export_dashboard_panels(
             for name, title, panel in panel_records
             if title == requested_title
         ]
-    print(f"Dashboard: {dashboard_title} ({dashboard_id}); selected panels: {len(selected)}")
+    if verbose:
+        print(f"Dashboard: {dashboard_title} ({dashboard_id}); selected panels: {len(selected)}")
     if dry_run:
         for _, title, _, section in selected:
             location = f"Sections/{section}" if section else "Panels"
@@ -3628,6 +5017,7 @@ def export_dashboard_panels(
             datasource,
             pacer,
             resume,
+            verbose,
         )
         with progress_lock:
             next(entry for entry in progress["panels"] if entry["path"] == str(output_dir))[
@@ -3651,7 +5041,237 @@ def export_dashboard_panels(
         raise RuntimeError(f"dashboard export incomplete; see {resume_path}: {failures[0]}")
     progress["status"] = "completed"
     write_json(resume_path, progress)
+    write_dashboard_viewer(dashboard_output_dir)
     return 0
+
+
+def dashboard_viewer_payload(dashboard_dir: Path) -> dict[str, object]:
+    resume_path = dashboard_dir / "resume.json"
+    try:
+        resume = json.loads(resume_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"could not read dashboard export index {resume_path}: {error}") from error
+    if not isinstance(resume, dict) or resume.get("status") != "completed":
+        raise ValueError(f"dashboard export is not complete: {resume_path}")
+
+    focus_nodes: list[str] = []
+    datastore_id = ""
+    for parent in dashboard_dir.parents:
+        collection_report = parent / "artifacts" / "collection-report.json"
+        if not collection_report.is_file():
+            continue
+        try:
+            report = json.loads(collection_report.read_text())
+        except (OSError, json.JSONDecodeError):
+            break
+        focus_nodes = sorted(
+            str(entry["node_id"])
+            for entry in report.get("nodes", [])
+            if entry.get("status") == "COLLECTED" and entry.get("node_id")
+        )
+        break
+
+    for parent in dashboard_dir.parents:
+        bundle_manifest = parent / "manifest.json"
+        if not bundle_manifest.is_file():
+            continue
+        try:
+            manifest = json.loads(bundle_manifest.read_text())
+        except (OSError, json.JSONDecodeError):
+            break
+        datastore_id = str(manifest.get("datastore_id", ""))
+        break
+
+    panels = []
+    for entry in resume.get("panels", []):
+        panel_path = Path(str(entry.get("path", "")))
+        manifest_path = panel_path / "manifest.json"
+        if entry.get("status") != "completed" or not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"could not read panel manifest {manifest_path}: {error}") from error
+        queries = []
+        for query in manifest.get("queries", []):
+            output_name = query.get("output")
+            if not isinstance(output_name, str):
+                continue
+            output_path = panel_path / output_name
+            try:
+                response = json.loads(output_path.read_text())
+            except (OSError, json.JSONDecodeError) as error:
+                raise ValueError(f"could not read captured query {output_path}: {error}") from error
+            queries.append(
+                {
+                    "ref_id": query.get("ref_id", "?"),
+                    "expression": query.get("expression", ""),
+                    "response": response,
+                }
+            )
+        panels.append(
+            {
+                "title": manifest.get("panel", panel_path.name),
+                "section": manifest.get("section") or "Overview",
+                "queries": queries,
+            }
+        )
+    return {
+        "dashboard": resume.get("dashboard", dashboard_dir.name),
+        "from": resume.get("from", ""),
+        "to": resume.get("to", ""),
+        "datastore_id": datastore_id,
+        "focus_nodes": focus_nodes,
+        "panels": panels,
+    }
+
+
+def dashboard_viewer_html(payload: dict[str, object]) -> str:
+    encoded_payload = json.dumps(payload, separators=(",", ":")).replace("</", "<\\/")
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(str(payload['dashboard']))} - offline dashboard</title>
+<style>
+:root {{ color-scheme: dark; --ink:#d8dee9; --muted:#9ba8b4; --line:#303944; --page:#11161c; --card:#1b222b; --chart:#161d25; --grid:#2a3540; --accent:#ff9830; --nav:#0b0f14; --notice-bg:#302518; --notice-line:#795928; --notice-ink:#f2c280; }}
+:root[data-theme="light"] {{ color-scheme: light; --ink:#18212b; --muted:#657482; --line:#d9e1e7; --page:#f5f7f9; --card:#fff; --chart:#fff; --grid:#e6ebef; --accent:#f05a28; --nav:#1f2933; --notice-bg:#fff4e8; --notice-line:#ffd6b1; --notice-ink:#633616; }}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; color:var(--ink); background:var(--page); font:14px "IBM Plex Sans", "Segoe UI", sans-serif; }}
+header {{ background:var(--nav); color:#fff; padding:18px 28px; border-bottom:3px solid var(--accent); }}
+header h1 {{ margin:0; font-size:21px; font-weight:650; letter-spacing:0; }}
+header p {{ margin:6px 0 0; color:#c6d1da; }}
+main {{ max-width:1800px; margin:0 auto; padding:20px 28px 48px; }}
+.toolbar {{ display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:12px; }}
+.toolbar small {{ color:var(--muted); }}
+button {{ border:1px solid var(--line); border-radius:3px; padding:6px 9px; color:var(--ink); background:var(--card); cursor:pointer; }}
+button:hover {{ border-color:var(--accent); }}
+.notice {{ background:var(--notice-bg); border:1px solid var(--notice-line); color:var(--notice-ink); padding:10px 12px; margin-bottom:18px; }}
+.sections {{ display:grid; gap:18px; }}
+section {{ scroll-margin-top:16px; }}
+section > h2 {{ font-size:17px; margin:0 0 9px; font-weight:650; }}
+.grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(390px,1fr)); gap:12px; }}
+.panel {{ background:var(--card); border:1px solid var(--line); border-radius:4px; min-width:0; }}
+.panel h3 {{ margin:0; padding:12px 14px; border-bottom:1px solid var(--line); font-size:15px; font-weight:650; }}
+.query {{ padding:12px 14px; border-top:1px solid var(--line); }}
+.query:first-of-type {{ border-top:0; }}
+.query-head {{ display:flex; align-items:center; justify-content:space-between; gap:12px; color:var(--muted); font-size:12px; margin-bottom:8px; }}
+.badge {{ color:#fff; background:#566574; padding:2px 6px; border-radius:3px; font-weight:650; }}
+canvas {{ width:100%; height:250px; display:block; border:1px solid var(--line); background:var(--chart); cursor:crosshair; }}
+.legend {{ color:var(--muted); font-size:12px; margin-top:6px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+.chart {{ position:relative; }}
+.tooltip {{ display:none; position:absolute; z-index:2; min-width:180px; max-width:360px; padding:8px; border:1px solid #526170; background:var(--card); color:var(--ink); box-shadow:0 2px 8px #0008; font:12px ui-monospace, monospace; pointer-events:none; }}
+.stats {{ display:flex; flex-wrap:wrap; gap:10px; color:var(--muted); font:12px ui-monospace, monospace; margin-bottom:8px; }}
+.tooltip strong {{ display:block; margin-bottom:5px; font-family:"IBM Plex Sans", "Segoe UI", sans-serif; }}
+table {{ width:100%; border-collapse:collapse; font-size:12px; }}
+td,th {{ text-align:left; vertical-align:top; border-bottom:1px solid #edf1f4; padding:5px; overflow-wrap:anywhere; }}
+th {{ color:var(--muted); font-weight:650; }}
+.empty {{ color:var(--muted); padding:28px 0; text-align:center; }}
+@media (max-width:600px) {{ header,main {{ padding-left:14px; padding-right:14px; }} .grid {{ grid-template-columns:1fr; }} }}
+</style>
+</head>
+<body>
+<header><h1 id="title">Offline dashboard</h1><p id="scope"></p><p id="window"></p></header>
+<main>
+<div class="toolbar"><small>Hover for exact values. Scroll to zoom a chart; double-click to reset.</small><button id="theme-toggle" type="button">Light theme</button></div>
+<div class="notice">Captured historical evidence. Charts use the saved query responses and make no network requests.</div>
+<div id="sections" class="sections"></div>
+</main>
+<script id="dashboard-data" type="application/json">{encoded_payload}</script>
+<script>
+const report = JSON.parse(document.getElementById('dashboard-data').textContent);
+const colors = ['#5794f2','#e02f44','#73bf69','#ff9830','#b877d9','#56a64b','#3274d9','#ff7383','#f2cc0c','#8f3bb8'];
+const chartRanges = new WeakMap();
+const root = document.documentElement;
+const escapeHtml = value => String(value).replace(/[&<>"']/g, char => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[char]));
+const seriesName = series => series.metric.node_id || series.metric.instance || Object.entries(series.metric).filter(([key]) => key !== '__name__').slice(0,2).map(([key,value]) => `${{key}}=${{value}}`).join(', ') || 'series';
+document.getElementById('title').textContent = report.dashboard + ' - offline evidence';
+document.getElementById('scope').textContent = `Datastore: ${{report.datastore_id || 'unavailable'}} | Nodes: ${{(report.focus_nodes || []).join(', ') || 'unavailable'}}`;
+document.getElementById('window').textContent = `${{report.from}} to ${{report.to}} UTC`;
+document.getElementById('theme-toggle').addEventListener('click', event => {{
+    const light = root.dataset.theme !== 'light'; root.dataset.theme = light ? 'light' : '';
+    event.currentTarget.textContent = light ? 'Dark theme' : 'Light theme';
+    document.querySelectorAll('canvas[data-response]').forEach(canvas => draw(canvas, JSON.parse(canvas.dataset.response)));
+}});
+
+function sampled(values, limit=500) {{
+  if (values.length <= limit) return values;
+  const step = Math.ceil(values.length / limit), result = [];
+  for (let index = 0; index < values.length; index += step) result.push(values[index]);
+  if (result[result.length - 1] !== values[values.length - 1]) result.push(values[values.length - 1]);
+  return result;
+}}
+function draw(canvas, response) {{
+  const series = ((response.data || {{}}).result || []).filter(item => Array.isArray(item.values) && item.values.length);
+  const rect = canvas.getBoundingClientRect(), ratio = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, Math.floor(rect.width * ratio)); canvas.height = Math.floor(rect.height * ratio);
+  const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio); ctx.clearRect(0,0,rect.width,rect.height);
+    const allSamples = series.flatMap(item => sampled(item.values).map(([time,value]) => [Number(time), Number(value)]).filter(([,value]) => Number.isFinite(value)));
+    if (!allSamples.length) {{ ctx.fillStyle=getComputedStyle(root).getPropertyValue('--muted'); ctx.textAlign='center'; ctx.fillText('No captured samples', rect.width/2, rect.height/2); return; }}
+    const allTimes=allSamples.map(([time])=>time), fullMinX=Math.min(...allTimes), fullMaxX=Math.max(...allTimes), savedRange=chartRanges.get(canvas) || [fullMinX,fullMaxX], minX=savedRange[0], maxX=savedRange[1];
+    const samples=allSamples.filter(([time])=>time>=minX && time<=maxX), values=samples.map(([,value])=>value), left=58, right=12, top=14, bottom=30;
+    const rawMin=Math.min(...values), rawMax=Math.max(...values), pad=(rawMax-rawMin || Math.abs(rawMax) || 1)*0.08, minY=rawMin-pad, maxY=rawMax+pad;
+  const x=time=>left+(time-minX)/(maxX-minX || 1)*(rect.width-left-right), y=value=>top+(maxY-value)/(maxY-minY || 1)*(rect.height-top-bottom);
+    const style=getComputedStyle(root), grid=style.getPropertyValue('--grid'), muted=style.getPropertyValue('--muted');ctx.strokeStyle=grid; ctx.lineWidth=1;
+    for(let line=0;line<6;line++) {{ const yy=top+line*(rect.height-top-bottom)/5; ctx.beginPath();ctx.moveTo(left,yy);ctx.lineTo(rect.width-right,yy);ctx.stroke(); ctx.fillStyle=muted;ctx.font='10px "Segoe UI",sans-serif';ctx.textAlign='right';ctx.fillText((maxY-(maxY-minY)*line/5).toPrecision(4),left-6,yy+3); }}
+    for(let tick=0;tick<5;tick++) {{ const time=minX+(maxX-minX)*tick/4, xx=x(time);ctx.strokeStyle=grid;ctx.beginPath();ctx.moveTo(xx,top);ctx.lineTo(xx,rect.height-bottom);ctx.stroke();ctx.fillStyle=muted;ctx.textAlign=tick===0?'left':tick===4?'right':'center';ctx.fillText(new Date(time*1000).toISOString().slice(11,19),xx,rect.height-9); }}
+    series.forEach((item,index)=>{{ const points=sampled(item.values).map(([time,value])=>[Number(time),Number(value)]).filter(([time,value])=>Number.isFinite(value)&&time>=minX&&time<=maxX); if(!points.length)return; ctx.strokeStyle=colors[index%colors.length];ctx.lineWidth=1.25;ctx.beginPath();points.forEach(([time,value],pointIndex)=>pointIndex?ctx.lineTo(x(time),y(value)):ctx.moveTo(x(time),y(value)));ctx.stroke(); }});
+    return {{series,minX,maxX,fullMinX,fullMaxX,x,y,top,bottom,left,right}};
+}}
+function attachTooltip(canvas, tooltip, response) {{
+    canvas.addEventListener('pointermove', event => {{
+        const state=draw(canvas,response); if(!state)return;
+        const rect=canvas.getBoundingClientRect(), pointerX=event.clientX-rect.left;
+        const time=state.minX+(pointerX-state.left)/(rect.width-state.left-state.right)*(state.maxX-state.minX);
+        const rows=state.series.map(item=>{{const values=item.values || [];let nearest=values[0];for(const point of values){{if(Math.abs(Number(point[0])-time)<Math.abs(Number(nearest[0])-time))nearest=point;}}return {{name:seriesName(item),time:Number(nearest[0]),value:Number(nearest[1])}};}}).filter(row=>Number.isFinite(row.value)).sort((left,right)=>left.name.localeCompare(right.name));
+        const exactTime=rows[0]?.time; if(!exactTime)return;
+        const ctx=canvas.getContext('2d'), xx=state.x(exactTime);ctx.save();ctx.strokeStyle='#334452';ctx.setLineDash([3,3]);ctx.beginPath();ctx.moveTo(xx,state.top);ctx.lineTo(xx,canvas.clientHeight-state.bottom);ctx.stroke();ctx.restore();
+        tooltip.innerHTML=`<strong>${{new Date(exactTime*1000).toISOString().replace('.000Z','Z')}}</strong>${{rows.slice(0,10).map(row=>`${{escapeHtml(row.name)}}: ${{row.value.toPrecision(8)}}`).join('<br>')}}${{rows.length>10?`<br>+${{rows.length-10}} more series`:''}}`;
+        tooltip.style.display='block';tooltip.style.left=`${{Math.min(pointerX+12,rect.width-220)}}px`;tooltip.style.top=`${{Math.max(4,event.clientY-rect.top+10)}}px`;
+    }});
+    canvas.addEventListener('pointerleave', () => {{ tooltip.style.display='none'; draw(canvas,response); }});
+        canvas.addEventListener('wheel', event => {{
+            event.preventDefault(); const state=draw(canvas,response); if(!state)return;
+            const rect=canvas.getBoundingClientRect(), fraction=Math.max(0,Math.min(1,(event.clientX-rect.left-state.left)/(rect.width-state.left-state.right))), span=state.maxX-state.minX, factor=event.deltaY<0?0.72:1.38, nextSpan=Math.max(15,Math.min(state.fullMaxX-state.fullMinX,span*factor)), center=state.minX+span*fraction;
+            let nextMin=Math.max(state.fullMinX,center-nextSpan*fraction), nextMax=Math.min(state.fullMaxX,nextMin+nextSpan); nextMin=Math.max(state.fullMinX,nextMax-nextSpan); chartRanges.set(canvas,[nextMin,nextMax]); draw(canvas,response);
+        }},{{passive:false}});
+        canvas.addEventListener('dblclick', () => {{ chartRanges.delete(canvas); draw(canvas,response); }});
+}}
+function formatValue(value) {{ return Number.isFinite(value) ? value.toPrecision(6) : 'n/a'; }}
+function matrixStats(result) {{
+    const values=result.flatMap(series => (series.values || []).map(([,value]) => Number(value)).filter(Number.isFinite));
+    const last=result.map(series => series.values?.at(-1)).filter(Boolean).map(([,value]) => Number(value)).filter(Number.isFinite);
+    if(!values.length)return null;
+    return {{last:last.length?last.reduce((total,value)=>total+value,0)/last.length:NaN,min:Math.min(...values),max:Math.max(...values),avg:values.reduce((total,value)=>total+value,0)/values.length}};
+}}
+function queryElement(query) {{
+    const response=query.response || {{}}, data=response.data || {{}}, result=data.result || [], type=data.resultType || 'unknown';
+  const container=document.createElement('div'); container.className='query';
+  const head=document.createElement('div'); head.className='query-head'; head.innerHTML=`<span><span class="badge">${{escapeHtml(query.ref_id)}}</span> ${{result.length}} series, ${{escapeHtml(type)}}</span>`; container.append(head);
+    if(type==='matrix') {{ const stats=matrixStats(result);if(stats){{const summary=document.createElement('div');summary.className='stats';summary.innerHTML=`<span>Last ${{formatValue(stats.last)}}</span><span>Min ${{formatValue(stats.min)}}</span><span>Max ${{formatValue(stats.max)}}</span><span>Avg ${{formatValue(stats.avg)}}</span>`;container.append(summary);}}const chart=document.createElement('div');chart.className='chart';const canvas=document.createElement('canvas');canvas.dataset.response=JSON.stringify(response);const tooltip=document.createElement('div');tooltip.className='tooltip';chart.append(canvas,tooltip);container.append(chart);const legend=document.createElement('div');legend.className='legend';legend.textContent=result.slice(0,8).map(seriesName).join(' | ') + (result.length>8?` | +${{result.length-8}} more`: '');container.append(legend);attachTooltip(canvas,tooltip,response); }}
+  else if(result.length) {{ const table=document.createElement('table'); table.innerHTML='<thead><tr><th>Series</th><th>Value</th></tr></thead>'; const body=document.createElement('tbody'); result.slice(0,100).forEach(item=>{{const row=document.createElement('tr');const value=item.value || item.values?.at(-1) || '';row.innerHTML=`<td>${{escapeHtml(seriesName(item))}}</td><td>${{escapeHtml(Array.isArray(value)?value[1]:value)}}</td>`;body.append(row);}});table.append(body);container.append(table); }}
+  else {{ const empty=document.createElement('div');empty.className='empty';empty.textContent='No captured data';container.append(empty); }}
+    return container;
+}}
+function renderReport() {{
+    const bySection=new Map(); report.panels.forEach(panel=>{{if(!bySection.has(panel.section))bySection.set(panel.section,[]);bySection.get(panel.section).push(panel);}});
+    const target=document.getElementById('sections'); target.replaceChildren();
+    bySection.forEach((panels,section)=>{{const sectionElement=document.createElement('section');sectionElement.innerHTML=`<h2>${{escapeHtml(section)}}</h2>`;const grid=document.createElement('div');grid.className='grid';panels.forEach(panel=>{{const card=document.createElement('article');card.className='panel';card.innerHTML=`<h3>${{escapeHtml(panel.title)}}</h3>`;panel.queries.forEach(query=>card.append(queryElement(query)));grid.append(card);}});sectionElement.append(grid);target.append(sectionElement);}});
+    const observer=new IntersectionObserver(entries=>entries.forEach(entry=>{{if(!entry.isIntersecting)return;const canvas=entry.target;draw(canvas,JSON.parse(canvas.dataset.response));observer.unobserve(canvas);}}),{{rootMargin:'300px'}});document.querySelectorAll('canvas[data-response]').forEach(canvas=>observer.observe(canvas));
+}}
+renderReport();
+</script>
+</body>
+</html>
+"""
+
+
+def write_dashboard_viewer(dashboard_dir: Path, output: Path | None = None) -> Path:
+    viewer_path = output or dashboard_dir / "index.html"
+    viewer_path.parent.mkdir(parents=True, exist_ok=True)
+    viewer_path.write_text(dashboard_viewer_html(dashboard_viewer_payload(dashboard_dir)))
+    return viewer_path
 
 
 def first_value(value: object, names: set[str]) -> str:
@@ -3706,6 +5326,81 @@ def find_customer_name(value: object) -> str:
     )
 
 
+def discovery_topology_summary(report: Mapping[str, object], fallback_shards: int) -> str:
+    totals = report.get("totals", {})
+    if not isinstance(totals, dict):
+        totals = {}
+    selected = report.get("selected_elements", fallback_shards)
+    selected_nodes = report.get("selected_nodes", 0)
+    is_partial = selected != totals.get("shards", fallback_shards) or selected_nodes != totals.get(
+        "nodes", selected_nodes
+    )
+    prefix = "Partial topology" if is_partial else "Topology"
+    return (
+        f"{prefix}: {selected} of {totals.get('shards', fallback_shards)} shards; "
+        f"{selected_nodes} of {totals.get('nodes', selected_nodes)} unique nodes"
+    )
+
+
+def discovery_table_rows(
+    report: Mapping[str, object], shards_only: bool
+) -> list[tuple[str, str, str]]:
+    shards = report["shards"]
+    if not isinstance(shards, list):
+        raise RuntimeError("discovery report has invalid shard data")
+    public_ips = report.get("node_public_ips", {})
+    if not isinstance(public_ips, dict):
+        public_ips = {}
+    rows = []
+    for shard in shards:
+        if not isinstance(shard, dict):
+            continue
+        shard_id = str(shard.get("shard_id") or "<unavailable>")
+        primary = str(shard.get("primary") or "<unavailable>")
+        if shards_only:
+            rows.append((shard_id, str(shard.get("node_count", 0)), primary))
+            continue
+        primary_display = f"{primary} ({public_ips.get(primary) or '<unavailable>'})"
+        replicas = shard.get("replicas", [])
+        other_nodes = shard.get("other_nodes", [])
+        members = (
+            [*replicas, *other_nodes]
+            if isinstance(replicas, list) and isinstance(other_nodes, list)
+            else []
+        )
+        replica_display = (
+            ", ".join(
+                f"{node_id} ({public_ips.get(str(node_id)) or '<unavailable>'})"
+                for node_id in members
+            )
+            or "<none>"
+        )
+        rows.append((shard_id, primary_display, replica_display))
+    return rows
+
+
+def render_discovery_report(
+    report: Mapping[str, object], shards_only: bool, show_context: bool
+) -> None:
+    datastore_id = str(report["datastore_id"])
+    headers = (
+        ("Shard", "Nodes", "Primary")
+        if shards_only
+        else ("Shard", "Primary (public IP)", "Replicas (public IP)")
+    )
+    rows = discovery_table_rows(report, shards_only)
+    widths = [
+        max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)
+    ]
+    topology_summary = discovery_topology_summary(report, len(rows))
+    if show_context:
+        print(f"Datastore: {datastore_id} | {topology_summary}")
+    print(f"{headers[0]:<{widths[0]}}  {headers[1]:<{widths[1]}}  {headers[2]}")
+    print(f"{'-' * widths[0]}  {'-' * widths[1]}  {'-' * widths[2]}")
+    for shard_id, primary, replicas in rows:
+        print(f"{shard_id:<{widths[0]}}  {primary:<{widths[1]}}  {replicas}")
+
+
 def discover_datastore(
     environment: str,
     target: str,
@@ -3713,12 +5408,16 @@ def discover_datastore(
     max_elements: int | None = None,
     include_deleted: bool = False,
     shards_only: bool = False,
+    show_context: bool = True,
+    report_out: list[dict[str, object]] | None = None,
 ) -> int:
     if max_elements is not None and max_elements <= 0:
         raise ValueError("--max-elements must be positive")
     target_shard_id = ""
     if target.startswith("node_"):
-        _, datastore_id = get_node_details(environment, target)
+        target_shard_id, datastore_id = get_node_details(environment, target)
+        if not target_shard_id:
+            raise RuntimeError(f"could not identify the shard for {target}")
         if not datastore_id:
             raise RuntimeError(f"could not identify the datastore for {target}")
     elif target.startswith("shard_"):
@@ -3741,6 +5440,15 @@ def discover_datastore(
     customer_name = find_customer_name(datastore)
 
     all_records = find_node_records(datastore, include_deleted=True)
+    active_records = [record for record in all_records if not node_record_is_deleted(record)]
+    datastore_node_ids = {
+        first_value(record, {"node_id"})
+        for record in active_records
+        if first_value(record, {"node_id"})
+    }
+    datastore_shard_ids = {
+        first_value(record, {"shard_id"}) or "<unavailable>" for record in active_records
+    }
     scoped_records = [
         record
         for record in all_records
@@ -3775,11 +5483,11 @@ def discover_datastore(
 
     result_shards = []
     rows = []
-    total_shards = len(shards)
-    if max_elements is not None and total_shards == 1:
+    selected_total_shards = len(shards)
+    if max_elements is not None and selected_total_shards == 1:
         raise ValueError("--max-elements cannot be used when only one shard is selected")
     selected_shards = sorted(shards.items())[:max_elements]
-    truncated = len(selected_shards) < total_shards
+    truncated = len(selected_shards) < selected_total_shards
     for shard_id, members in selected_shards:
         replicas = sorted(members["replicas"])
         other_nodes = sorted(members["other"])
@@ -3831,83 +5539,47 @@ def discover_datastore(
         for record in historical_records
     ]
 
-    if json_output:
-        json_shards = (
-            [
-                {
-                    "shard_id": shard["shard_id"],
-                    "primary": shard["primary"],
-                    "node_count": shard["node_count"],
-                }
-                for shard in result_shards
-            ]
-            if shards_only
-            else result_shards
-        )
-        print(
-            json.dumps(
-                {
-                    "schema_version": TOPOLOGY_SCHEMA_VERSION,
-                    "command": "discover",
-                    "environment": environment,
-                    "datastore_id": datastore_id,
-                    "customer": customer_name or None,
-                    "shards": json_shards,
-                    "node_public_ips": public_ips,
-                    "totals": {"shards": total_shards, "nodes": len(unique_records)},
-                    "historical_nodes": historical_nodes,
-                    "view": "shards-only" if shards_only else "topology",
-                    "selected_elements": len(result_shards),
-                    "truncated": truncated,
-                },
-                indent=2,
-            )
-        )
-        return 0
-
-    headers = (
-        ("Shard", "Nodes", "Primary")
-        if shards_only
-        else ("Shard", "Primary (public IP)", "Replicas (public IP)")
-    )
-    if not shards_only:
-
-        def with_public_ip(node_id: str) -> str:
-            return f"{node_id} ({public_ips.get(node_id) or '<unavailable>'})"
-
-        rows = [
-            (
-                shard_id,
-                with_public_ip(primary),
-                (
-                    ", ".join(with_public_ip(node_id) for node_id in replicas.split(", "))
-                    if replicas != "<none>"
-                    else replicas
-                ),
-            )
-            for shard_id, primary, replicas in rows
+    json_shards = (
+        [
+            {
+                "shard_id": shard["shard_id"],
+                "primary": shard["primary"],
+                "node_count": shard["node_count"],
+            }
+            for shard in result_shards
         ]
-    widths = [
-        max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)
-    ]
-
-    print("Dragonfly Cluster Discovery Report")
-    print(f"Environment: {environment}")
-    print(f"Datastore: {datastore_id}")
-    print(f"Customer: {customer_name or '<unavailable>'}")
+        if shards_only
+        else result_shards
+    )
+    report = {
+        "schema_version": TOPOLOGY_SCHEMA_VERSION,
+        "command": "discover",
+        "environment": environment,
+        "datastore_id": datastore_id,
+        "customer": customer_name or None,
+        "shards": json_shards,
+        "node_public_ips": public_ips,
+        "totals": {"shards": len(datastore_shard_ids), "nodes": len(datastore_node_ids)},
+        "historical_nodes": historical_nodes,
+        "view": "shards-only" if shards_only else "topology",
+        "selected_elements": len(result_shards),
+        "selected_nodes": len(unique_records),
+        "truncated": truncated,
+    }
+    if report_out is not None:
+        report_out.append(report)
+        return 0
+    if json_output:
+        print(json.dumps(report, indent=2))
+        return 0
     if truncated:
         print(
-            warning_message(f"showing {len(rows)} of {total_shards} shards; results are partial."),
+            warning_message(
+                f"showing {len(rows)} of {selected_total_shards} selected shards; results are partial."
+            ),
             file=sys.stderr,
         )
-    print()
-    print(f"{headers[0]:<{widths[0]}}  {headers[1]:<{widths[1]}}  {headers[2]}")
-    print(f"{'-' * widths[0]}  {'-' * widths[1]}  {'-' * widths[2]}")
-    for shard_id, primary, replicas in rows:
-        print(f"{shard_id:<{widths[0]}}  {primary:<{widths[1]}}  {replicas}")
-    print()
-    print(f"Shown shard pairs: {len(rows)} of {total_shards}")
-    print(f"Total unique nodes: {len(unique_records)}")
+    render_discovery_report(report, shards_only, show_context)
     if historical_nodes:
         print("\nDeleted nodes:")
         for node in historical_nodes:
@@ -3927,36 +5599,178 @@ def discover_datastores(
     max_elements: int | None = None,
     include_deleted: bool = False,
     shards_only: bool = False,
+    customer_target: str | None = None,
+    short: bool = False,
 ) -> int:
-    if len(targets) == 1:
+    if len(targets) == 1 and customer_target is None and not short:
         return discover_datastore(
             environment, targets[0], json_output, max_elements, include_deleted, shards_only
         )
+    collected_reports: list[tuple[str, dict[str, object]]] = []
+    for target in targets:
+        target_reports: list[dict[str, object]] = []
+        discover_datastore(
+            environment,
+            target,
+            False,
+            max_elements,
+            include_deleted,
+            shards_only,
+            report_out=target_reports,
+        )
+        collected_reports.append((target, target_reports[0]))
+    full_datastores = {
+        str(report["datastore_id"])
+        for target, report in collected_reports
+        if target.startswith("dst_")
+    }
+    reports: list[dict[str, object]] = []
+    seen_scopes: set[tuple[str, tuple[str, ...]]] = set()
+    for target, report in collected_reports:
+        datastore_id = str(report["datastore_id"])
+        if not target.startswith("dst_") and datastore_id in full_datastores:
+            continue
+        shards = report.get("shards", [])
+        if not isinstance(shards, list):
+            raise RuntimeError("discovery report has invalid shard data")
+        shard_ids = tuple(
+            sorted(
+                str(shard.get("shard_id") or "<unavailable>")
+                for shard in shards
+                if isinstance(shard, dict)
+            )
+        )
+        scope = (datastore_id, shard_ids)
+        if scope not in seen_scopes:
+            seen_scopes.add(scope)
+            reports.append(report)
     if json_output:
-        reports = []
-        for target in targets:
-            output = io.StringIO()
-            with contextlib.redirect_stdout(output):
-                discover_datastore(
-                    environment, target, True, max_elements, include_deleted, shards_only
-                )
-            reports.append(json.loads(output.getvalue()))
         print(
             json.dumps(
                 {
                     "schema_version": TOPOLOGY_SCHEMA_VERSION,
                     "command": "discover",
                     "environment": environment,
+                    "customer": customer_target,
                     "datastores": reports,
                 },
                 indent=2,
             )
         )
         return 0
-    for index, target in enumerate(targets):
-        if index:
-            print()
-        discover_datastore(environment, target, False, max_elements, include_deleted, shards_only)
+    inventory_rows = []
+    total_shards = 0
+    total_nodes = 0
+    for report in reports:
+        totals = report["totals"]
+        shards = report["shards"]
+        if not isinstance(totals, dict) or not isinstance(shards, list):
+            raise RuntimeError("discovery report has invalid inventory data")
+        datastore_id = str(report["datastore_id"])
+        total_shard_count = int(totals.get("shards", 0))
+        total_node_count = int(totals.get("nodes", 0))
+        shard_count = len(shards)
+        selected_nodes = report.get("selected_nodes", 0)
+        if not isinstance(selected_nodes, int):
+            raise RuntimeError("discovery report has invalid selected-node count")
+        node_count = selected_nodes
+        primary_count = sum(
+            bool(shard.get("primary")) for shard in shards if isinstance(shard, dict)
+        )
+        replica_count = sum(
+            len(shard.get("replicas", [])) for shard in shards if isinstance(shard, dict)
+        )
+        total_shards += total_shard_count
+        total_nodes += total_node_count
+        is_partial = shard_count != total_shard_count or node_count != total_node_count
+        inventory_rows.append(
+            {
+                "datastore": datastore_id,
+                "scope": "partial" if is_partial else "full",
+                "shards": f"{shard_count} of {total_shard_count}",
+                "nodes": f"{node_count} of {total_node_count}",
+                "primaries": str(primary_count),
+                "replicas": str(replica_count),
+            }
+        )
+    if customer_target:
+        print(f"Customer: {customer_target}")
+    print(f"Datastores: {len(reports)} | Shards: {total_shards} | Nodes: {total_nodes}")
+    print("\nSummary:")
+    print("--------")
+    print_multi_table(
+        ["datastore", "scope", "shards", "nodes", "primaries", "replicas"],
+        inventory_rows,
+        None,
+    )
+    if short:
+        return 0
+    topology_rows = []
+    for report in reports:
+        datastore_id = str(report["datastore_id"])
+        shards = report["shards"]
+        public_ips = report.get("node_public_ips", {})
+        if not isinstance(shards, list) or not isinstance(public_ips, dict):
+            raise RuntimeError("discovery report has invalid topology data")
+        first_datastore_row = True
+        for shard in shards:
+            if not isinstance(shard, dict):
+                continue
+            shard_id = str(shard.get("shard_id") or "<unavailable>")
+            primary = str(shard.get("primary") or "<unavailable>")
+            if shards_only:
+                topology_rows.append(
+                    {
+                        "datastore": datastore_id if first_datastore_row else "",
+                        "shard": shard_id,
+                        "nodes": str(shard.get("node_count", 0)),
+                        "primary": primary,
+                    }
+                )
+            else:
+                replica_ids = [
+                    *shard.get("replicas", []),
+                    *shard.get("other_nodes", []),
+                ]
+                if not all(isinstance(node_id, str) for node_id in replica_ids):
+                    raise RuntimeError("discovery report has invalid replica data")
+                topology_rows.append(
+                    {
+                        "datastore": datastore_id if first_datastore_row else "",
+                        "shard": shard_id,
+                        "primary (public IP)": (
+                            f"{primary} ({public_ips.get(primary) or '<unavailable>'})"
+                        ),
+                        "replica (public IP)": (
+                            f"{replica_ids[0]} ({public_ips.get(replica_ids[0]) or '<unavailable>'})"
+                            if replica_ids
+                            else ""
+                        ),
+                    }
+                )
+                for node_id in replica_ids[1:]:
+                    topology_rows.append(
+                        {
+                            "datastore": "",
+                            "shard": "",
+                            "primary (public IP)": "",
+                            "replica (public IP)": (
+                                f"{node_id} ({public_ips.get(node_id) or '<unavailable>'})"
+                            ),
+                        }
+                    )
+            first_datastore_row = False
+    print("\nTopology:")
+    print("---------")
+    print_multi_table(
+        (
+            ["datastore", "shard", "nodes", "primary"]
+            if shards_only
+            else ["datastore", "shard", "primary (public IP)", "replica (public IP)"]
+        ),
+        topology_rows,
+        None,
+    )
     return 0
 
 
@@ -4820,8 +6634,11 @@ def scan_compare(
 
 
 def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="dfly-inspect: read-only Dragonfly Cloud inspection, evidence collection, and Grafana retrieval.",
+    parser = InspectArgumentParser(
+        description=(
+            "dfly-inspect: Dragonfly Cloud operator toolkit for safe, read-only inspection, "
+            "incident evidence, bulk diagnostics, and Grafana retrieval."
+        ),
         formatter_class=MainHelpFormatter,
         epilog="""Run %(prog)s <command> --help for that command's arguments, options, and examples.
 
@@ -4839,14 +6656,18 @@ Commands:
     diff-config            dc             Compare explicit CONFIG GET parameters across nodes.
     multi                  mu             Inspect compact schemas before comparing read-only resource fields.
     logs                   lg             Retrieve one archived Dragonfly or agent log stream.
-    log-archiver           la             Retrieve archived logs for nodes, shards, or a datastore.
+    log-archiver           la             Retrieve archived logs for selected targets.
+    bundle                 bu             Collect incident evidence, archived logs, and dashboard panels into one manifest.
+    slowlog                sl             Retrieve bounded Redis slowlog entries for selected targets.
     collect                co             Collect node evidence through the bastion and report results.
     run-inspection-script  rs             Run a validated custom script on selected nodes.
     explain                ex             Ask a named agent an operator question using compact dfadmin context.
     dashboard-panels       dp             Export selected panels, all panels, or a named dashboard section.
 
+Unless stated otherwise, a target is a customer (cus_...), datastore (dst_...), shard (shard_...), or node (node_...).
 All commands use production by default.""",
     )
+    parser.description_first = True
     global_options = parser.add_argument_group("global options")
     global_options.add_argument(
         "--staging",
@@ -4860,7 +6681,11 @@ All commands use production by default.""",
         "--version", action="version", version=f"%(prog)s {TOOL_VERSION} sha256={SCRIPT_SHA256}"
     )
     commands = parser.add_subparsers(
-        dest="command", required=True, title="commands", metavar="COMMAND"
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="COMMAND",
+        parser_class=InspectArgumentParser,
     )
 
     gap_parser = commands.add_parser(
@@ -4907,7 +6732,6 @@ All commands use production by default.""",
     scan_parser.add_argument(
         "second_node_id", help="The other member of the primary and replica pair"
     )
-    scan_parser.add_argument("--bastion", default="bastion-vm", help="SSH host for the bastion")
     scan_parser.add_argument(
         "--count",
         type=int,
@@ -4968,9 +6792,6 @@ All commands use production by default.""",
         "scope",
         nargs="+",
         help="One datastore ID (dst_...) or one-or-more node IDs (node_...) from that datastore",
-    )
-    ownership_parser.add_argument(
-        "--bastion", default="bastion-vm", help="SSH host for the bastion"
     )
     ownership_parser.add_argument(
         "-w",
@@ -5055,17 +6876,12 @@ All commands use production by default.""",
     health_parser = commands.add_parser(
         "health",
         aliases=["hl"],
-        help="summarize bounded node and replication health for a datastore, shard, or node",
-        description="Resolve a datastore parent and collect bounded control-plane, Dragonfly, replication, memory, key-count, and API-connectivity health signals.",
+        help="summarize bounded node and replication health for selected targets",
+        description="Resolve targets and collect bounded control-plane, Dragonfly, replication, memory, key-count, and API-connectivity health signals.",
         formatter_class=CommandHelpFormatter,
         epilog="example: %(prog)s dst_example --format vertical",
     )
-    health_parser.add_argument(
-        "target", help="Datastore (dst_...), shard (shard_...), or node (node_...) ID"
-    )
-    health_parser.add_argument(
-        "--bastion", default="bastion-vm", help="SSH host for bounded API checks"
-    )
+    health_parser.add_argument("targets", nargs="+", help=TARGETS_HELP)
     health_parser.add_argument(
         "-w",
         "--workers",
@@ -5087,15 +6903,53 @@ All commands use production by default.""",
         help="Output format: table (default), vertical, or json",
     )
 
+    slowlog_parser = commands.add_parser(
+        "slowlog",
+        aliases=["sl"],
+        help="retrieve bounded Redis slowlog entries for selected targets",
+        description="Resolve targets to nodes and issue only bounded SLOWLOG GET requests through the read-only dfadmin wrapper.",
+        formatter_class=CommandHelpFormatter,
+        epilog="example: %(prog)s dst_example --limit 20 --format markdown --output slowlog.md",
+    )
+    slowlog_parser.add_argument("targets", nargs="+", help=TARGETS_HELP)
+    slowlog_parser.add_argument(
+        "-l", "--limit", type=int, default=20, help="Entries per node, from 0 to 128 (default: 20)"
+    )
+    slowlog_parser.add_argument(
+        "-f",
+        "--format",
+        choices=("table", "json", "markdown"),
+        default="table",
+        help="Output format (default: table)",
+    )
+    slowlog_parser.add_argument(
+        "-o", "--output", type=Path, help="Write JSON or Markdown report to this file"
+    )
+    slowlog_parser.add_argument(
+        "-w",
+        "--workers",
+        type=int,
+        default=DEFAULT_MULTI_WORKERS,
+        help=f"Maximum parallel node queries (default: {DEFAULT_MULTI_WORKERS})",
+    )
+    slowlog_parser.add_argument(
+        "-n", "--max-elements", type=int, help="Query at most this many lexically sorted nodes"
+    )
+    slowlog_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the bounded SLOWLOG GET plan without contacting any service",
+    )
+
     config_parser = commands.add_parser(
         "diff-config",
         aliases=["dc", "df", "diff-flags"],
-        help="compare CONFIG GET parameters across mixed node, shard, and datastore targets",
+        help="compare CONFIG GET parameters across targets",
         description="Resolve mixed topology targets to at least two unique nodes, then compare named CONFIG GET parameters or all parameters with --parameter '*'. Sensitive values are redacted.",
         formatter_class=CommandHelpFormatter,
         epilog="example: %(prog)s dst_example --parameter maxmemory",
     )
-    config_parser.add_argument("targets", nargs="+", help="Node, shard, or datastore IDs")
+    config_parser.add_argument("targets", nargs="+", help=TARGETS_HELP)
     config_parser.add_argument(
         "-p",
         "--parameter",
@@ -5146,7 +7000,7 @@ All commands use production by default.""",
         "multi",
         aliases=["mu"],
         help="discover schemas or compare fields across topology resources",
-        description="Inspect a compact schema or compare selected read-only fields across node, shard, or datastore records.",
+        description="Inspect a compact schema or compare selected read-only fields across targets.",
         formatter_class=CommandHelpFormatter,
         epilog="""Schema output is a compact outline of a JSON record, not raw JSON:
     {a, b}       object fields whose values are scalars (string, number, boolean, or null)
@@ -5179,7 +7033,7 @@ Tables warn when they exceed the current terminal width or select more than 10 f
     multi_parser.add_argument(
         "targets",
         nargs="+",
-        help="One or more node IDs (node_...), shard IDs (shard_...), or datastore IDs (dst_...); duplicates are removed",
+        help=f"{TARGETS_HELP}; duplicates are removed",
     )
     multi_parser.add_argument(
         "--schema",
@@ -5233,14 +7087,14 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         "discover",
         aliases=["ds"],
         help="show primary-to-replica topology for a datastore",
-        description="Show active topology for a node, shard, or datastore. --include-deleted adds historical node records.",
+        description="Show active topology for selected targets. --include-deleted adds historical node records.",
         formatter_class=CommandHelpFormatter,
         epilog="example: %(prog)s dst_ckf66xo5q",
     )
     discover_parser.add_argument(
         "targets",
         nargs="+",
-        help="Node IDs (node_...), shard IDs (shard_...), or datastore IDs (dst_...)",
+        help=TARGETS_HELP,
     )
     discover_parser.add_argument(
         "-j",
@@ -5265,19 +7119,24 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         action="store_true",
         help="Show only each shard's active-node count and primary ID",
     )
+    discover_parser.add_argument(
+        "--short",
+        action="store_true",
+        help="Show only the compact datastore inventory",
+    )
 
     addresses_parser = commands.add_parser(
         "addresses",
         aliases=["ad"],
         help="show public and private IPs for nodes, shards, or an entire datastore",
-        description="Resolve node roles and public/private addresses for selected nodes, shards, or datastores.",
+        description="Resolve node roles and public/private addresses for selected targets.",
         formatter_class=CommandHelpFormatter,
         epilog="example: %(prog)s dst_ckf66xo5q",
     )
     addresses_parser.add_argument(
         "targets",
         nargs="+",
-        help="Node IDs (node_...), shard IDs (shard_...), or datastore IDs (dst_...)",
+        help=TARGETS_HELP,
     )
     addresses_parser.add_argument(
         "-j",
@@ -5351,7 +7210,7 @@ Tables warn when they exceed the current terminal width or select more than 10 f
     archiver_parser = commands.add_parser(
         "log-archiver",
         aliases=["la"],
-        help="retrieve logs for de-duplicated nodes resolved from node, shard, and datastore IDs",
+        help="retrieve logs for nodes resolved from targets",
         description="Resolve selected topology targets to nodes, download their archived log streams for a time window, and optionally create a local archive.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="Canonical form: %(prog)s TARGET... --output-dir DIRECTORY --since TIME [--until TIME]",
@@ -5368,7 +7227,7 @@ Tables warn when they exceed the current terminal width or select more than 10 f
     archiver_parser.add_argument(
         "targets",
         nargs="+",
-        help="Node IDs (node_...), shard IDs (shard_...), or datastore IDs (dst_...)",
+        help=TARGETS_HELP,
     )
     archiver_parser.add_argument(
         "--context",
@@ -5379,6 +7238,10 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         choices=("all", "dfly", "agent"),
         default="all",
         help="Log sources to retrieve (default: all)",
+    )
+    archiver_parser.add_argument(
+        "--loki-datasource",
+        help="Loki datasource UID for gcx log queries; required if the gcx context has multiple Loki datasources",
     )
     archiver_parser.add_argument(
         "-l", "--limit", type=int, help="Maximum log lines per node to retrieve"
@@ -5421,18 +7284,18 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         "collect",
         aliases=["co"],
         help="collect node evidence through bastion with a final report",
-        description="Collect bounded diagnostic evidence from selected nodes through the bastion and write a per-node local report.",
+        description="Collect bounded diagnostic evidence from selected nodes through the bastion and write a per-node local report. Baseline command evidence includes SLOWLOG GET 128 in commands/slowlog.txt.",
         formatter_class=CommandTextHelpFormatter,
     )
     collect_parser.add_argument(
         "output_dir", type=Path, help="Local directory for node tar streams"
     )
-    collect_parser.add_argument("targets", nargs="+", help="Node, shard, or datastore IDs")
+    collect_parser.add_argument("targets", nargs="+", help=TARGETS_HELP)
     collect_parser.add_argument(
         "--include",
         default="",
         help=(
-            "Add sources to the default evidence:\n"
+            "Baseline command evidence includes INFO, MEMORY STATS, DBSIZE, and bounded SLOWLOG GET 128. Add sources:\n"
             "  dfly-logs: Dragonfly INFO/WARNING files\n"
             "  info-dump: high-CPU diagnostic snapshot\n"
             "  journal: Dragonfly/kernel journal\n"
@@ -5454,7 +7317,6 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         type=int,
         help="Collect from at most this many lexically sorted nodes",
     )
-    collect_parser.add_argument("--bastion", default="bastion-vm", help="SSH host for the bastion")
     collect_parser.add_argument(
         "--max-normalized-load",
         type=float,
@@ -5495,6 +7357,72 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         "--dry-run", action="store_true", help="Resolve targets without SSH"
     )
 
+    bundle_parser = commands.add_parser(
+        "bundle",
+        aliases=["bu"],
+        help="collect node evidence, archived logs, and dashboard panels into one manifest",
+        description="Run the bounded collection, log-archiver, and dashboard-panels workflows into one manifest.",
+        formatter_class=CommandHelpFormatter,
+        epilog="example: %(prog)s 2246 --around now --window 1h dst_example --source-folder Operations --dashboard Dragonfly",
+    )
+    bundle_parser.add_argument("incident_id", help="Bundle label and default output directory name")
+    bundle_parser.add_argument(
+        "targets", nargs="+", help=f"{TARGETS_HELP}; must resolve to exactly one datastore"
+    )
+    bundle_parser.add_argument(
+        "--around",
+        required=True,
+        help="UTC time, now, or '<N> hours ago' at the center of the bundle window",
+    )
+    bundle_parser.add_argument(
+        "--window", required=True, help="Half-window duration such as 30m, 1h, or 2d"
+    )
+    bundle_parser.add_argument(
+        "--source-folder", required=True, help="Exact Grafana source-folder title"
+    )
+    bundle_parser.add_argument("--dashboard", required=True, help="Exact Grafana dashboard title")
+    bundle_parser.add_argument(
+        "--panels", default="*", help="Panel selector for dashboard export (default: *)"
+    )
+    bundle_parser.add_argument(
+        "--dashboard-sections",
+        default="",
+        help="Comma-separated exact dashboard sections; requires --panels '*'",
+    )
+    bundle_parser.add_argument(
+        "--dashboard-global-only",
+        action="store_true",
+        help="Export only global dashboard panels; requires --panels '*'",
+    )
+    bundle_parser.add_argument(
+        "--collect-include", default="", help="Comma-separated optional collect sources"
+    )
+    bundle_parser.add_argument(
+        "--log-limit", type=int, help="Maximum archived log records per node/source"
+    )
+    bundle_parser.add_argument(
+        "--loki-datasource",
+        help="Override the automatically selected Grafana logs datasource UID",
+    )
+    bundle_parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue an existing incident directory and resume dashboard exports",
+    )
+    bundle_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Delete an existing bundle output directory and start a new bundle",
+    )
+    bundle_parser.add_argument(
+        "--output-dir", type=Path, help="Bundle output root (default: ./<bundle-label>)"
+    )
+    bundle_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the normalized workflow plan without contacting any service",
+    )
+
     script_parser = commands.add_parser(
         "run-inspection-script",
         aliases=["rs", "run-script"],
@@ -5505,13 +7433,15 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         ),
         formatter_class=CommandHelpFormatter,
     )
-    script_parser.add_argument("targets", nargs="+", help="Node, shard, or datastore IDs")
+    script_parser.add_argument("targets", nargs="+", help=TARGETS_HELP)
     script_source_group = script_parser.add_mutually_exclusive_group(required=True)
     script_source_group.add_argument(
         "--script", type=Path, help="Local inspection script to run on every node"
     )
     script_source_group.add_argument(
-        "--command", help="Inline inspection shell command to run on every node"
+        "--command",
+        dest="inline_command",
+        help="Inline inspection shell command to run on every node",
     )
     script_parser.add_argument(
         "--agent-validation",
@@ -5524,7 +7454,6 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         type=Path,
         help="New or empty local output directory (default: run-inspection-script-<UTC timestamp>)",
     )
-    script_parser.add_argument("--bastion", default="bastion-vm", help="SSH host for the bastion")
     script_parser.add_argument(
         "-w",
         "--workers",
@@ -5565,17 +7494,88 @@ Tables warn when they exceed the current terminal width or select more than 10 f
     explain_parser = commands.add_parser(
         "explain",
         aliases=["ex"],
-        help="ask a named agent an operator question",
-        description="Ask a constrained named agent an operator question with compact dfadmin context.",
+        help="explain recorded command output or a supplied artifact with a named agent",
+        description="Explain recorded successful command output, a local artifact, or a direct operator question.",
         formatter_class=CommandHelpFormatter,
     )
-    explain_parser.add_argument("question", help="Question to ask the agent")
-    explain_parser.add_argument(
-        "--agent",
-        required=True,
-        choices=("copilot", "gemini", "codex", "claude"),
-        help="Named internal agent backend",
+    explain_parser.add_argument("question", nargs="?", help="Optional operator question")
+    explain_source_group = explain_parser.add_mutually_exclusive_group()
+    explain_source_group.add_argument(
+        "--history",
+        action="store_true",
+        help="List recorded successful commands with captured output",
     )
+    explain_source_group.add_argument(
+        "--defaults",
+        action="store_true",
+        help="Show dfly-inspect explain defaults and adapter policies",
+    )
+    explain_source_group.add_argument(
+        "--last",
+        nargs="?",
+        const=1,
+        type=int,
+        metavar="N",
+        help="Explain the Nth most recent recorded output (default: 1)",
+    )
+    explain_source_group.add_argument(
+        "--session", help="Explain successful recorded output tagged with this session"
+    )
+    explain_source_group.add_argument(
+        "--file", type=Path, help="Explain a local output or report file"
+    )
+    explain_parser.add_argument(
+        "--ai-agent",
+        "--agent",
+        dest="agent",
+        choices=("copilot", "gemini", "codex", "claude"),
+        default="copilot",
+        help="Named local agent backend (default: copilot)",
+    )
+    explain_parser.add_argument(
+        "--ai-depth",
+        "--depth",
+        dest="depth",
+        choices=EXPLAIN_DEPTHS,
+        default="standard",
+        help="Stateless response depth: concise, standard (default), or deep",
+    )
+    explain_parser.add_argument(
+        "--ai-deep",
+        "--deep",
+        action="store_const",
+        dest="depth",
+        const="deep",
+        help="Alias for --ai-depth deep",
+    )
+    explain_parser.add_argument(
+        "--ai-model",
+        "--model",
+        dest="model",
+        help="Copilot model override; use explain --defaults for adapter support",
+    )
+    explain_parser.add_argument(
+        "--ai-cache", action="store_true", help="Reuse an exact local AI response cache entry"
+    )
+    explain_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print resolved AI settings, source size, truncation, and cache key without invoking an agent",
+    )
+
+    session_parser = commands.add_parser(
+        "session", help="list, show, or clear recorded investigation sessions"
+    )
+    session_actions = session_parser.add_subparsers(dest="session_action", required=True)
+    session_actions.add_parser("list", help="List recorded sessions")
+    session_show_parser = session_actions.add_parser(
+        "show", help="Show recorded artifacts in a session"
+    )
+    session_show_parser.add_argument("name")
+    session_clear_parser = session_actions.add_parser(
+        "clear", help="Remove recorded artifacts for a session"
+    )
+    session_clear_parser.add_argument("name")
 
     dashboards_parser = commands.add_parser(
         "dashboard-panels",
@@ -5625,6 +7625,20 @@ Tables warn when they exceed the current terminal width or select more than 10 f
     dashboards_parser.add_argument(
         "-u", "--until", help="Window end; defaults to the captured current UTC time"
     )
+
+    viewer_parser = commands.add_parser(
+        "dashboard-viewer",
+        help="render saved dashboard query responses as a self-contained offline HTML report",
+        description="Create an offline HTML report from a completed dashboard-panels export. No network requests are made.",
+    )
+    viewer_parser.add_argument(
+        "dashboard_dir",
+        type=Path,
+        help="Completed dashboard export directory containing resume.json",
+    )
+    viewer_parser.add_argument(
+        "--output", type=Path, help="HTML output path (default: <dashboard-dir>/index.html)"
+    )
     for command_parser in dict.fromkeys(commands.choices.values()):
         global_options = command_parser.add_argument_group("global options")
         global_options.add_argument(
@@ -5633,19 +7647,76 @@ Tables warn when they exceed the current terminal width or select more than 10 f
             dest="_canonical_environment",
             help="Environment selector; accepted before or after the command (default: prod)",
         )
+        if command_parser not in {explain_parser, session_parser}:
+            global_options.add_argument(
+                "--deployment-ssh-conn-command",
+                help="Deployment 'gcloud compute ssh' command; verified once and cached automatically.",
+            )
+        if command_parser not in {explain_parser, session_parser}:
+            global_options.add_argument(
+                "--session",
+                help="Tag this successful recorded output with an investigation session",
+            )
+            global_options.add_argument(
+                "--ai-explain",
+                "--explain",
+                dest="explain",
+                action="store_true",
+                help="Explain this successful output and record it for explain --last",
+            )
+            global_options.add_argument(
+                "--ai-agent",
+                "--agent",
+                dest="agent",
+                choices=("copilot", "gemini", "codex", "claude"),
+                default="copilot",
+                help="Named local agent backend for --explain (default: copilot)",
+            )
+            global_options.add_argument(
+                "--ai-depth",
+                "--depth",
+                dest="depth",
+                choices=EXPLAIN_DEPTHS,
+                default="standard",
+                help="Stateless response depth for --explain (default: standard)",
+            )
+            global_options.add_argument(
+                "--ai-deep",
+                "--deep",
+                action="store_const",
+                dest="depth",
+                const="deep",
+                help="Alias for --ai-depth deep",
+            )
+            global_options.add_argument(
+                "--ai-model",
+                "--model",
+                dest="model",
+                help="Copilot model override for --explain",
+            )
+            global_options.add_argument(
+                "--ai-question", help="Question to answer with --ai-explain"
+            )
+            global_options.add_argument(
+                "--ai-cache",
+                action="store_true",
+                help="Reuse an exact local AI response cache entry",
+            )
     try:
         arguments = normalize_environment_arguments(sys.argv[1:])
+        arguments = normalize_explain_arguments(arguments)
         arguments = normalize_canonical_arguments(arguments)
         return parser.parse_args(normalize_time_window_arguments(arguments))
     except ValueError as error:
         parser.error(str(error))
 
 
-def main() -> int:
-    arguments = parse_arguments()
+def run_command(arguments: argparse.Namespace | None = None) -> int:
+    arguments = arguments or parse_arguments()
     command_aliases = {
         "ad": "addresses",
         "au": "audit",
+        "bu": "bundle",
         "co": "collect",
         "dp": "dashboard-panels",
         "ds": "discover",
@@ -5662,35 +7733,173 @@ def main() -> int:
         "run-script": "run-inspection-script",
         "mu": "multi",
         "sc": "scan-compare",
+        "sl": "slowlog",
         "so": "slot-ownership",
     }
     arguments.command = command_aliases.get(arguments.command, arguments.command)
     environment = arguments.environment
+    requires_dfadmin = arguments.command not in {"dashboard-panels", "explain", "session"}
+    requires_deployment_ssh = arguments.command in {
+        "bundle",
+        "collect",
+        "health",
+        "run-inspection-script",
+        "scan-compare",
+        "slot-ownership",
+    }
+    supplied_ssh_connection = getattr(arguments, "deployment_ssh_conn_command", None)
+    cached_ssh_connection = load_deployment_ssh_connection()
+    if (
+        not getattr(arguments, "dry_run", False)
+        and requires_deployment_ssh
+        and not (supplied_ssh_connection or cached_ssh_connection)
+    ):
+        raise ValueError(
+            "deployment SSH is not configured; provide --deployment-ssh-conn-command once "
+            "to verify and cache the deployment connection"
+        )
     executables = []
     if not getattr(arguments, "dry_run", False):
         executables = (
             []
-            if arguments.command == "explain"
+            if arguments.command in {"explain", "session"}
             else (
                 ["gcx", "dfadmin-wrapper"]
-                if arguments.command in {"logs", "log-archiver", "dashboard-panels"}
+                if arguments.command in {"bundle", "logs", "log-archiver", "dashboard-panels"}
                 else ["dfadmin-wrapper"]
             )
         )
-        if arguments.command in {
-            "collect",
-            "run-inspection-script",
-            "scan-compare",
-            "slot-ownership",
-        }:
-            executables.append("ssh")
+        if requires_deployment_ssh:
+            executables.append("gcloud")
     missing = next((executable for executable in executables if not shutil.which(executable)), None)
     if missing:
         print(error_message(f"{missing} is not on PATH"), file=sys.stderr)
         return 1
     try:
+        if not getattr(arguments, "dry_run", False):
+            set_deployment_ssh_connection(supplied_ssh_connection)
+            if requires_dfadmin:
+                preflight_dfadmin(environment)
+            if requires_deployment_ssh:
+                preflight_deployment_ssh(supplied_ssh_connection)
+        if arguments.command == "session":
+            if arguments.session_action == "list":
+                return show_sessions()
+            if arguments.session_action == "show":
+                return show_session(arguments.name)
+            return clear_session(arguments.name)
         if arguments.command == "explain":
-            print(json.dumps(explain_with_agent(arguments.agent, arguments.question), indent=2))
+            if arguments.dry_run:
+                if arguments.history or arguments.defaults:
+                    raise ValueError("--dry-run cannot be combined with --history or --defaults")
+                if arguments.last is not None and arguments.last <= 0:
+                    raise ValueError("--last must be positive")
+                return explain_dry_run(arguments)
+            if arguments.history:
+                if arguments.question:
+                    raise ValueError("--history does not accept a question")
+                return show_history()
+            if arguments.defaults:
+                if arguments.question:
+                    raise ValueError("--defaults does not accept a question")
+                return explain_defaults()
+            if arguments.last is not None:
+                if arguments.last <= 0:
+                    raise ValueError("--last must be positive")
+                selected = history_artifact(arguments.last)
+                if selected is None:
+                    print("No recorded command output.")
+                    return 0
+                entry, output = selected
+                print(json.dumps(explain_history_artifact(arguments, entry, output), indent=2))
+                return 0
+            if arguments.session is not None:
+                selected = session_artifact(arguments.session)
+                if selected is None:
+                    print(f"No recorded command output for session {arguments.session!r}.")
+                    return 0
+                entries, output = selected
+                source = f"session {arguments.session} ({len(entries)} artifacts)"
+                print(
+                    json.dumps(
+                        explain_artifact(
+                            arguments.agent,
+                            arguments.question or "Explain this session output.",
+                            source,
+                            output,
+                            arguments.depth,
+                            arguments.model,
+                            arguments.ai_cache,
+                        ),
+                        indent=2,
+                    )
+                )
+                return 0
+            if arguments.file is not None:
+                try:
+                    output = arguments.file.read_text()
+                except OSError as error:
+                    raise RuntimeError(
+                        f"could not read --file {arguments.file}: {error}"
+                    ) from error
+                if not output.strip():
+                    print("No output to explain.")
+                    return 0
+                print(
+                    json.dumps(
+                        explain_artifact(
+                            arguments.agent,
+                            arguments.question or "Explain this command output.",
+                            str(arguments.file),
+                            output,
+                            arguments.depth,
+                            arguments.model,
+                            arguments.ai_cache,
+                        ),
+                        indent=2,
+                    )
+                )
+                return 0
+            piped_output = ""
+            if not sys.stdin.isatty():
+                piped_output = sys.stdin.read(MAX_AGENT_CONTEXT_BYTES + 1)
+            if piped_output:
+                if len(piped_output.encode()) > MAX_AGENT_CONTEXT_BYTES:
+                    print(
+                        warning_message(
+                            f"stdin exceeds {MAX_AGENT_CONTEXT_BYTES} bytes; explaining the leading bytes only."
+                        ),
+                        file=sys.stderr,
+                    )
+                    piped_output = piped_output.encode()[:MAX_AGENT_CONTEXT_BYTES].decode(
+                        errors="replace"
+                    )
+                print(
+                    json.dumps(
+                        explain_artifact(
+                            arguments.agent,
+                            arguments.question or "Explain this command output.",
+                            "stdin",
+                            piped_output,
+                            arguments.depth,
+                            arguments.model,
+                            arguments.ai_cache,
+                        ),
+                        indent=2,
+                    )
+                )
+                return 0
+            if not arguments.question:
+                print("No recorded command output.")
+                return 0
+            print(
+                json.dumps(
+                    explain_with_agent(
+                        arguments.agent, arguments.question, arguments.depth, arguments.model
+                    ),
+                    indent=2,
+                )
+            )
             return 0
         if arguments.command in {"logs", "log-archiver", "dashboard-panels"}:
             expected_context = GCX_CONTEXTS[environment]
@@ -5700,13 +7909,20 @@ def main() -> int:
                     f"expected {expected_context!r}"
                 )
             arguments.context = expected_context
+        if hasattr(arguments, "targets"):
+            arguments.customer_targets = [
+                target for target in arguments.targets if target.startswith("cus_")
+            ]
+            if arguments.command == "discover" and len(arguments.customer_targets) > 1:
+                raise ValueError("discover accepts at most one customer target")
+            arguments.targets = expand_customer_targets(environment, arguments.targets)
         if arguments.command == "scan-compare":
             slots = parse_slots(arguments.slots) if arguments.slots else None
             return scan_compare(
                 environment,
                 arguments.first_node_id,
                 arguments.second_node_id,
-                arguments.bastion,
+                "",
                 arguments.count,
                 arguments.max_iterations,
                 arguments.stop_after_diffs,
@@ -5724,7 +7940,7 @@ def main() -> int:
             return slot_ownership(
                 environment,
                 arguments.scope,
-                arguments.bastion,
+                "",
                 slots,
                 arguments.output,
                 arguments.workers,
@@ -5759,13 +7975,24 @@ def main() -> int:
                 arguments.json_output,
             )
         if arguments.command == "health":
-            return health_report(
+            return health_reports(
                 environment,
-                arguments.target,
-                arguments.bastion,
+                arguments.targets,
+                "",
                 arguments.workers,
                 arguments.format,
                 arguments.max_elements,
+            )
+        if arguments.command == "slowlog":
+            return slowlog_report(
+                environment,
+                arguments.targets,
+                arguments.limit,
+                arguments.format,
+                arguments.output,
+                arguments.workers,
+                arguments.max_elements,
+                arguments.dry_run,
             )
         if arguments.command == "diff-config":
             if arguments.list_parameters:
@@ -5838,7 +8065,7 @@ def main() -> int:
                 arguments.output_dir,
                 includes,
                 arguments.workers,
-                arguments.bastion,
+                "",
                 arguments.max_normalized_load,
                 arguments.min_free_kib,
                 since,
@@ -5849,15 +8076,50 @@ def main() -> int:
                 arguments.dry_run,
                 arguments.max_elements,
             )
+        if arguments.command == "bundle":
+            includes = {item for item in arguments.collect_include.split(",") if item}
+            invalid_includes = includes - {
+                "dfly-logs",
+                "info-dump",
+                "journal",
+                "agent",
+                "clients",
+                "perf",
+            }
+            if invalid_includes:
+                raise ValueError(
+                    f"unknown --collect-include source: {', '.join(sorted(invalid_includes))}"
+                )
+            output_dir = arguments.output_dir or Path.cwd() / arguments.incident_id
+            return incident_bundle(
+                environment,
+                arguments.incident_id,
+                arguments.around,
+                arguments.window,
+                arguments.targets,
+                arguments.source_folder,
+                arguments.dashboard,
+                arguments.panels,
+                output_dir,
+                includes,
+                arguments.log_limit,
+                arguments.loki_datasource,
+                arguments.dashboard_sections,
+                arguments.dashboard_global_only,
+                "",
+                arguments.resume,
+                arguments.overwrite,
+                arguments.dry_run,
+            )
         if arguments.command == "run-inspection-script":
             return run_script_on_nodes(
                 environment,
                 arguments.targets,
                 arguments.script,
-                arguments.command,
+                arguments.inline_command,
                 arguments.output_dir,
                 arguments.workers,
-                arguments.bastion,
+                "",
                 arguments.timeout_seconds,
                 arguments.acknowledge_multi_node,
                 arguments.tee,
@@ -5894,6 +8156,7 @@ def main() -> int:
                 arguments.compress,
                 arguments.dry_run,
                 arguments.max_elements,
+                arguments.loki_datasource,
             )
         if arguments.command == "dashboard-panels":
             return export_dashboard_panels(
@@ -5914,6 +8177,10 @@ def main() -> int:
                 arguments.resume,
                 arguments.dry_run,
             )
+        if arguments.command == "dashboard-viewer":
+            viewer_path = write_dashboard_viewer(arguments.dashboard_dir, arguments.output)
+            print(f"Offline dashboard viewer: {viewer_path}")
+            return 0
         if arguments.command == "discover":
             return discover_datastores(
                 environment,
@@ -5922,6 +8189,8 @@ def main() -> int:
                 arguments.max_elements,
                 arguments.include_deleted,
                 arguments.shards_only,
+                arguments.customer_targets[0] if len(arguments.customer_targets) == 1 else None,
+                arguments.short,
             )
         if arguments.command == "addresses":
             return show_addresses(
@@ -5940,6 +8209,80 @@ def main() -> int:
     except (OSError, RuntimeError, ValueError) as error:
         print(error_message(str(error)), file=sys.stderr)
         return 1
+
+
+class OutputCapture(io.StringIO):
+    def __init__(self, target: Any) -> None:
+        super().__init__()
+        self.target = target
+
+    def write(self, value: str) -> int:
+        self.target.write(value)
+        self.target.flush()
+        return super().write(value)
+
+
+def main() -> int:
+    arguments = parse_arguments()
+    is_local_command = arguments.command in {"explain", "ex", "session"}
+    requested_explanation = getattr(arguments, "explain", False)
+    if getattr(arguments, "ai_question", None) and not requested_explanation:
+        print(error_message("--ai-question requires --ai-explain"), file=sys.stderr)
+        return 1
+    if is_local_command:
+        return run_command(arguments)
+
+    captured_stdout = OutputCapture(sys.stdout)
+    with contextlib.redirect_stdout(captured_stdout):
+        result = run_command(arguments)
+    if result != 0:
+        return result
+    output = captured_stdout.getvalue()
+    output_path = getattr(arguments, "output", None)
+    artifact_type = "text"
+    if (
+        isinstance(output_path, Path)
+        and output_path.is_file()
+        and output_path.suffix.lower() == ".json"
+    ):
+        try:
+            output = output_path.read_text()
+            artifact_type = "json"
+        except OSError:
+            pass
+    elif not output.strip() and isinstance(output_path, Path) and output_path.is_file():
+        try:
+            output = output_path.read_text()
+        except OSError:
+            pass
+    if artifact_type == "text":
+        try:
+            json.loads(output)
+            artifact_type = "json"
+        except json.JSONDecodeError:
+            pass
+    log_heavy_commands = {"collect", "logs", "log-archiver", "run-inspection-script", "slowlog"}
+    if arguments.command in log_heavy_commands and artifact_type == "text":
+        if requested_explanation:
+            print(
+                warning_message(
+                    "raw log-oriented output is not retained or sent to AI automatically; select a bounded local report with explain --file instead."
+                ),
+                file=sys.stderr,
+            )
+        return 0
+    entry = record_history(sys.argv[1:], output, getattr(arguments, "session", None), artifact_type)
+    if entry is None:
+        return 0
+    if not requested_explanation:
+        return 0
+    try:
+        response = explain_history_artifact(arguments, entry, output)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(error_message(str(error)), file=sys.stderr)
+        return 1
+    print(json.dumps(response, indent=2))
+    return 0
 
 
 if __name__ == "__main__":

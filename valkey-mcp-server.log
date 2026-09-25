@@ -1,0 +1,9 @@
+2026-09-26 04:01:05.753 | INFO     | awslabs.valkey_mcp_server.main:main:143 | Amazon ElastiCache/MemoryDB Valkey MCP Server Started...
+2026-09-26 04:01:05.794 | DEBUG    | asyncio.selector_events:__init__:64 | Using selector: EpollSelector
+2026-09-26 04:01:05.801 | DEBUG    | asyncio.selector_events:__init__:64 | Using selector: EpollSelector
+2026-09-26 04:01:24.170 | INFO     | awslabs.valkey_mcp_server.main:main:143 | Amazon ElastiCache/MemoryDB Valkey MCP Server Started...
+2026-09-26 04:01:24.184 | DEBUG    | asyncio.selector_events:__init__:64 | Using selector: EpollSelector
+2026-09-26 04:02:04.346 | DEBUG    | mcp.server.runner:_inner:273 | no handler for notification notifications/cancelled
+2026-09-26 04:02:18.597 | INFO     | awslabs.valkey_mcp_server.main:main:143 | Amazon ElastiCache/MemoryDB Valkey MCP Server Started...
+2026-09-26 04:02:18.604 | DEBUG    | asyncio.selector_events:__init__:64 | Using selector: EpollSelector
+2026-09-26 04:03:27.033 | DEBUG    | mcp.server.runner:_inner:273 | no handler for notification notifications/cancelled

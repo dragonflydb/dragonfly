@@ -133,8 +133,34 @@ def is_allowed_flag_policy(arguments: list[str]) -> bool:
     )
 
 
+def is_allowed_datastore_list(arguments: list[str]) -> bool:
+    if arguments[:2] != ["datastore", "list"]:
+        return False
+    index = 2
+    customer_id = False
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == "--customer-id":
+            if (
+                customer_id
+                or index + 1 == len(arguments)
+                or not arguments[index + 1].startswith("cus_")
+            ):
+                return False
+            customer_id = True
+            index += 2
+            continue
+        if argument == "--output":
+            if index + 1 == len(arguments) or arguments[index + 1] not in {"json", "yaml"}:
+                return False
+            index += 2
+            continue
+        return False
+    return True
+
+
 def is_allowed(arguments: list[str]) -> bool:
-    if arguments == ["datastore", "list"]:
+    if is_allowed_datastore_list(arguments):
         return True
     if len(arguments) >= 3 and arguments[:2] == ["datastore", "show"]:
         return is_show_options(
@@ -157,7 +183,9 @@ def is_allowed(arguments: list[str]) -> bool:
 
 def print_help() -> None:
     print("Usage: dfadmin-wrapper [--env ENV] <read-only dfadmin command>")
-    print("Allowed: datastore list/show, cluster status/slots, shard show, node show/status/resp,")
+    print(
+        "Allowed: datastore list (optionally scoped to one customer)/show, cluster status/slots, shard show, node show/status/resp,"
+    )
     print("flag-policy list/show, ")
     print(
         "and bounded audit-log list queries with --from, --to, --resource-id, and --search-metadata"
