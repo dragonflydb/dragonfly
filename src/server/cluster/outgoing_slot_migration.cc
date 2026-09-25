@@ -10,6 +10,7 @@
 #include "base/logging.h"
 #include "cluster_family.h"
 #include "cluster_utility.h"
+#include "facade/resp_parser.h"
 #include "facade/socket_utils.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -31,6 +32,20 @@ using namespace facade;
 using namespace util;
 
 namespace dfly::cluster {
+
+namespace {
+
+bool IsSimpleReply(const RESPObj& reply, string_view expected) {
+  return (reply.GetType() == RESPObj::Type::REPLY_STATUS ||
+          reply.GetType() == RESPObj::Type::STRING) &&
+         reply.As<string_view>() == expected;
+}
+
+bool IsSimpleError(const RESPObj& reply, string_view expected) {
+  return reply.GetType() == RESPObj::Type::ERROR && reply.As<string_view>() == expected;
+}
+
+}  // namespace
 
 class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
  public:
@@ -69,19 +84,21 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
       return;
     }
 
-    ResetParser();
+    ResetReplyParser();
 
     std::string cmd = absl::StrCat("DFLYMIGRATE FLOW ", node_id, " ", shard_id);
     VLOG(1) << "cmd: " << cmd;
 
-    if (auto ec = SendCommandAndReadResponse(cmd); ec) {
-      exec_st_.ReportError(GenericError(ec, cmd));
+    auto reply = SendCommandAndTakeReply(cmd);
+    if (!reply) {
+      exec_st_.ReportError(GenericError(reply.error(), cmd));
       return;
     }
 
-    if (!CheckRespIsSimpleReply("OK")) {
-      exec_st_.ReportError(absl::StrCat("Incorrect response for FLOW cmd: ",
-                                        ToSV(LastResponseArgs().front().GetBuf())));
+    if (!IsSimpleReply(*reply, "OK")) {
+      exec_st_.ReportError(
+          absl::StrCat("Incorrect response for FLOW cmd: ",
+                       reply->As<string_view>().value_or("Unexpected reply type")));
       return;
     }
   }
@@ -276,39 +293,41 @@ void OutgoingMigration::SyncFb() {
     }
 
     VLOG(1) << "Migration initiating";
-    ResetParser();
+    ResetReplyParser();
     auto cmd = absl::StrCat("DFLYMIGRATE INIT ", cf_->MyID(), " ", slot_migrations_.size());
     for (const auto& s : migration_info_.slot_ranges) {
       absl::StrAppend(&cmd, " ", s.start, " ", s.end);
     }
 
-    if (auto ec = SendCommandAndReadResponse(cmd); ec) {
+    auto reply = SendCommandAndTakeReply(cmd);
+    if (!reply) {
       LOG(WARNING) << "Could not send INIT command to " << server().Description()
-                   << " for migration: " << ec.message() << ", socket state: " + SockInfo();
-      exec_st_.ReportError(GenericError(ec, "Could not send INIT command."));
+                   << " for migration: " << reply.error().message()
+                   << ", socket state: " + SockInfo();
+      exec_st_.ReportError(GenericError(reply.error(), "Could not send INIT command."));
       continue;
     }
 
-    if (!CheckRespIsSimpleReply("OK")) {
+    if (!IsSimpleReply(*reply, "OK")) {
       // Break outgoing migration if INIT from incoming node responded with OOM. Usually this will
       // happen on second iteration after first failed with OOM. Sending second INIT is required to
       // cleanup slots on incoming slot migration node.
-      if (CheckRespSimpleError(kIncomingMigrationOOM)) {
+      if (IsSimpleError(*reply, kIncomingMigrationOOM)) {
         Finish(GenericError{std::make_error_code(errc::not_enough_memory),
                             std::string(kIncomingMigrationOOM)});
         break;
       }
-      if (CheckRespIsSimpleReply(kUnknownMigration)) {
+      if (IsSimpleReply(*reply, kUnknownMigration)) {
         const absl::Duration passed = absl::Now() - start_time;
         // we provide 30 seconds to distribute the config to all nodes to avoid extra errors
         // reporting
         if (passed >= absl::Milliseconds(30000)) {
-          exec_st_.ReportError(GenericError(LastResponseArgs().front().GetString()));
+          exec_st_.ReportError(GenericError(string(kUnknownMigration)));
         } else {
           ThisFiber::SleepFor(500ms);  // to prevent too many attempts
         }
       } else {
-        exec_st_.ReportError(GenericError(LastResponseArgs().front().GetString()));
+        exec_st_.ReportError(GenericError(reply->As<string>().value_or("Unexpected reply type")));
       }
       continue;
     }
@@ -397,6 +416,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
                    << ", socket state: " + SockInfo();
       return false;
     }
+    ResetReplyParser();
   }
 
   // Migration finalization has to be done via client pause because commands need to
@@ -447,33 +467,36 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
       return false;
     }
 
-    if (auto resp = ReadRespReply(ack_timeout_ms - passed_ms); !resp) {
+    auto reply = TakeRespReply(ack_timeout_ms - passed_ms);
+    if (!reply) {
       LOG(WARNING) << "Error reading response to ACK command from " << server().Description()
-                   << ": " << resp.error() << ", socket state: " + SockInfo();
+                   << ": " << reply.error() << ", socket state: " + SockInfo();
       return false;
     }
 
     // OOM might reach the target node from a flow or from the ack here. Both should report
     // an error to the context such that the next iteration of the control loop deletes the slots
     // on the target before it finishes.
-    if (CheckRespSimpleError(kIncomingMigrationOOM)) {
+    if (IsSimpleError(*reply, kIncomingMigrationOOM)) {
       exec_st_.ReportError(GenericError(std::make_error_code(errc::not_enough_memory),
                                         std::string(kIncomingMigrationOOM)));
       return false;
     }
 
-    if (!CheckRespFirstTypes({RespExpr::INT64})) {
+    auto ack_attempt = reply->As<int64_t>();
+    if (!ack_attempt) {
       LOG(WARNING) << "Incorrect response type for " << cf_->MyID() << " : "
                    << migration_info_.node_info.id << " attempt " << attempt
-                   << " msg: " << facade::ToSV(LastResponseArgs().front().GetBuf());
+                   << " type: " << static_cast<int>(reply->GetType());
       return false;
     }
 
-    if (const auto res = get<int64_t>(LastResponseArgs().front().u); res == attempt) {
+    if (*ack_attempt == attempt) {
       break;
     } else {
       LOG(WARNING) << "Incorrect attempt payload " << cf_->MyID() << " : "
-                   << migration_info_.node_info.id << ", sent " << attempt << " received " << res;
+                   << migration_info_.node_info.id << ", sent " << attempt << " received "
+                   << *ack_attempt;
     }
   }
 
