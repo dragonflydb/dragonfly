@@ -264,14 +264,31 @@ and writes do not need to be serialized.
   prefix of completed writes, and their buffers are released.
 - A short write is resubmitted for the remainder at `offset + written`.
 
-**Sync.** Once per second, if `written_lsn` moved since the last sync:
-1. Record `sync_target = written_lsn`.
+**Sync.** Once per second, if any completed write is not yet synced (records or a marker):
+1. Record `sync_target = written_lsn`, and the contiguous written offset.
 2. Issue an async `fdatasync`. At most one sync is in flight per shard.
-3. When it completes, publish `durable_lsn = sync_target` (an atomic readable from any thread),
-   wake waiters, and append a [sync marker](#segment-format) with `synced_lsn = sync_target`.
+3. When it completes, publish `durable_lsn = sync_target` (an atomic readable from any thread)
+   and wake waiters.
+4. If the sync covered new records (`sync_target` moved past the previous marker's
+   `synced_lsn`), append a [sync marker](#segment-format) with `synced_lsn = sync_target`.
 
 An `fdatasync` only covers writes that completed before it was issued. That is why the target is
 the contiguous `written_lsn`, not `last_appended_lsn`.
+
+**Markers become durable even when writes stop.** The sync condition is based on unsynced bytes,
+not on `written_lsn`. A marker adds no records, so it never moves `written_lsn`. Under an
+LSN-based condition, the marker written after the last sync would never be synced once writes
+stop. The log would then lack a durable marker covering its last records, and
+`--aof_load_truncated=false` would reject a fully synced idle log.
+- With the byte-based condition, the next tick issues a sync that covers only the marker.
+- That marker-only sync does not append another marker, because `synced_lsn` did not move. An
+  idle shard therefore settles after one extra sync, instead of writing a marker every second.
+- The window in which the newest durable marker trails the newest sync is one tick, idle or
+  not.
+
+**Why the marker is written after the sync, not before.** A marker written before the sync, to
+be covered by it, could reach the disk through writeback while some records it claims are still
+missing. Replay would then report a legitimate torn tail as fatal corruption.
 
 **Clean shutdown.** On shutdown, the writer waits for in-flight writes, syncs, appends a final
 sync marker, and syncs again. The log then ends right after a durable marker that covers every
@@ -891,6 +908,8 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
   - a bad block at or before a durable marker's `synced_lsn` is fatal
   - a log ending right after a durable marker is a clean end, even with
     `--aof_load_truncated=false`
+  - after writes stop, the final marker is made durable by one marker-only sync, and no further
+    markers are written while idle
   - an unused spare (valid header, no valid first block) at the end of a chain is ignored
   - a failed write is retried at its offset; `-MISCONF` clears only after the range is written
     and synced
