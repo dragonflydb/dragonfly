@@ -1527,7 +1527,8 @@ OpResult<ScoredArray> OpRandMember(int count, const ZSetFamily::RangeParams& par
     for (std::size_t i = 0; i < picks_count; i++) {
       const std::size_t picked_index = generator->Generate();
 
-      IntervalVisitor iv{Action::RANGE, params, &pv};
+      // The previous pick may have yielded and moved the entry; re-fetch via the laundering it.
+      IntervalVisitor iv{Action::RANGE, params, &const_cast<PrimeValue&>(it.value()->second)};
       iv(ZSetFamily::IndexInterval{picked_index, picked_index});
 
       result[i] = iv.PopResult().front();

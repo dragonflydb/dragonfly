@@ -158,7 +158,7 @@ struct ObjHist {
   base::Histogram listpack;   // for listpack encodings - the malloc used of the listpack.
 };
 
-// Returns number of O(1) steps executed.
+// No yield: runs inside Traverse, which holds a raw segment pointer a yield could free.
 void AddObjHist(PrimeIterator it, ObjHist* hist) {
   using namespace container_utils;
   const PrimeValue& pv = it->second;
@@ -177,7 +177,7 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
   hist->key_len.Add(it->first.MallocUsed());
 
   if (pv.ObjType() == OBJ_LIST) {
-    IterateList(pv, per_entry_cb);
+    IterateList(pv, per_entry_cb, 0, SIZE_MAX, /*allow_yield=*/false);
     if (pv.Encoding() == kEncodingQL2) {
       const QList* ql = static_cast<QList*>(pv.RObjPtr());
       val_len = ql->MallocUsed(true);
@@ -186,22 +186,27 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
       hist->listpack.Add(val_len);
     }
   } else if (pv.ObjType() == OBJ_ZSET) {
-    IterateSortedSet(pv, [&](ContainerEntry entry, double) { return per_entry_cb(entry); });
+    IterateSortedSet(
+        pv, [&](ContainerEntry entry, double) { return per_entry_cb(entry); }, 0, SIZE_MAX,
+        /*reverse=*/false, /*use_score=*/false, /*allow_yield=*/false);
     val_len = 0;  // reset - will be calculated below.
     if (pv.Encoding() == OBJ_ENCODING_LISTPACK) {
       hist->listpack.Add(pv.MallocUsed());
     }
   } else if (pv.ObjType() == OBJ_SET) {
-    IterateSet(pv, per_entry_cb);
+    IterateSet(pv, per_entry_cb, /*allow_yield=*/false);
     val_len = 0;  // reset - will be calculated below.
     if (pv.Encoding() == kEncodingIntSet) {
       hist->listpack.Add(pv.MallocUsed());
     }
   } else if (pv.ObjType() == OBJ_HASH) {
-    IterateMap(pv, [&](ContainerEntry key, ContainerEntry value) {
-      hist->entry_len.Add(key.size() + value.size());
-      return true;
-    });
+    IterateMap(
+        pv,
+        [&](ContainerEntry key, ContainerEntry value) {
+          hist->entry_len.Add(key.size() + value.size());
+          return true;
+        },
+        /*allow_yield=*/false);
     if (pv.Encoding() == kEncodingListPack) {
       hist->listpack.Add(pv.MallocUsed());
     }

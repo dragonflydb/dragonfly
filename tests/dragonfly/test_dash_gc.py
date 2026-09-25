@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+import pytest
 from redis import asyncio as aioredis
 
 from . import dfly_args
@@ -11,6 +12,20 @@ def _compact_table_stats(flat_reply):
     """DEBUG COMPACT-TABLE replies with a RESP map, which arrives as a flat
     [k1, v1, k2, v2, ...] list over RESP2."""
     return dict(zip(flat_reply[::2], flat_reply[1::2]))
+
+
+async def _make_sparse_table(client):
+    """Grow the dash table via DEBUG POPULATE, then delete those keys to leave sparse segments."""
+    populate_prefix = "gc-init-"
+    await client.execute_command("DEBUG", "POPULATE", 100_000, populate_prefix, 50)
+
+    cursor = 0
+    while True:
+        cursor, keys = await client.scan(cursor, match=f"{populate_prefix}*", count=1000)
+        if keys:
+            await client.delete(*keys)
+        if cursor == 0:
+            break
 
 
 @dfly_args({"proactor_threads": 2, "maxmemory": "1G"})
@@ -61,8 +76,10 @@ async def test_gc_merges_segments_and_shrinks_capacity(async_client: aioredis.Re
         assert res == value
 
 
-@dfly_args({"proactor_threads": 1, "maxmemory": "2G"})
-async def test_gc_concurrent_with_seeding(async_client: aioredis.Redis):
+# 500 is the default; 1 yields on every container element, so commands get preempted
+# mid-iteration while COMPACT-TABLE relocates entries.
+@pytest.mark.parametrize("yield_interval_usec", [500, 1])
+async def test_gc_concurrent_with_seeding(df_factory, yield_interval_usec):
     """
     Verify COMPACT-TABLE running concurrently with data insertion doesn't corrupt seeded data.
 
@@ -71,19 +88,16 @@ async def test_gc_concurrent_with_seeding(async_client: aioredis.Redis):
     c) Run DEBUG COMPACT-TABLE concurrently with Seeder
     d) Assert all data seeded by Seeder exists in the dash table
     """
-    # a) Grow the dash table by seeding a large number of keys with a prefix
-    populate_prefix = "gc-init-"
-    await async_client.execute_command("DEBUG", "POPULATE", 100_000, populate_prefix, 50)
+    instance = df_factory.create(
+        proactor_threads=1,
+        maxmemory="2G",
+        container_iteration_yield_interval_usec=yield_interval_usec,
+    )
+    instance.start()
+    async_client = instance.client()
 
-    # b) Delete all keys with the populate prefix to leave the segments sparse
-    cursor = 0
-    while True:
-        cursor, keys = await async_client.scan(cursor, match=f"{populate_prefix}*", count=1000)
-        if keys:
-            await async_client.delete(*keys)
-        if cursor == 0:
-            break
-
+    # a) + b) Grow the dash table, then delete everything to leave the segments sparse
+    await _make_sparse_table(async_client)
     assert await async_client.dbsize() == 0
 
     # c) Run COMPACT-TABLE concurrently with Seeder so GC reclaims sparse segments
@@ -114,3 +128,58 @@ async def test_gc_concurrent_with_seeding(async_client: aioredis.Redis):
     assert (
         capture_before == capture_after
     ), "Data should be identical after GC: seeder dataset must survive concurrent GC runs"
+
+
+# Each command iterates a container (may yield) and then reuses the entry while COMPACT-TABLE
+# relocates it. ZRANDMEMBER with count * log2(size) < size takes the per-pick path.
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        lambda p, k: p.zrandmember(f"z{k}", 5),
+        lambda p, k: p.sunion(f"s{k}", f"s{k + 1}"),
+        lambda p, k: p.sinter(f"s{k}"),
+        lambda p, k: p.sdiff(f"s{k}", "missing"),
+    ],
+    ids=["zrandmember", "sunion", "sinter", "sdiff"],
+)
+async def test_gc_concurrent_with_reads(df_factory, cmd):
+    instance = df_factory.create(
+        proactor_threads=1, maxmemory="2G", container_iteration_yield_interval_usec=1
+    )
+    instance.start()
+    client = instance.client()
+
+    await _make_sparse_table(client)
+
+    # More than 128 members, so zsets are skiplists and sets are dense.
+    num_keys = 200
+    members = [f"m{i}" for i in range(300)]
+    pipe = client.pipeline(transaction=False)
+    for k in range(num_keys + 1):
+        pipe.zadd(f"z{k}", {m: i for i, m in enumerate(members)})
+        pipe.sadd(f"s{k}", *members)
+    await pipe.execute()
+
+    gc_done = asyncio.Event()
+
+    async def run_gc():
+        # Re-sparsify each round, or later rounds have nothing to merge. Not DEBUG POPULATE: its
+        # stub transactions skip scheduling and collide with the suspended reads.
+        churn = [f"churn-{i}" for i in range(30_000)]
+        for _ in range(5):
+            for i in range(0, len(churn), 1000):
+                await client.mset({k: "x" for k in churn[i : i + 1000]})
+            for i in range(0, len(churn), 1000):
+                await client.delete(*churn[i : i + 1000])
+            await client.execute_command("DEBUG", "COMPACT-TABLE", "0.5")
+        gc_done.set()
+
+    async def run_reads():
+        while not gc_done.is_set():
+            pipe = client.pipeline(transaction=False)
+            for k in range(num_keys):
+                cmd(pipe, k)
+            for res in await pipe.execute():
+                assert res and set(res) <= set(members)
+
+    await asyncio.gather(run_gc(), run_reads())

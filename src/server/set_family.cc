@@ -772,7 +772,8 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
         uniques.emplace(ce.ToString());
         return true;
       });
-      DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, *start, pv);
+      // IterateSet may yield and pv may have moved; re-fetch via the laundering iterator.
+      DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, *start, find_res.value()->second);
       continue;
     }
 
@@ -807,7 +808,8 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
 
   // Lazy per-member TTL expiry during iteration may have emptied the set.
   // Delete the stale key and return KEY_NOTFOUND per Redis empty-key semantics.
-  if (DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, *start, pv)) {
+  // IterateSet may yield and pv may have moved; re-fetch via the laundering iterator.
+  if (DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, *start, find_res.value()->second)) {
     return OpStatus::KEY_NOTFOUND;
   }
 
@@ -866,7 +868,8 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
                                   result.push_back(ce.ToString());
                                   return true;
                                 });
-    DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), *it, pv);
+    // IterateSet may yield and pv may have moved; re-fetch via the laundering iterator.
+    DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), *it, find_res.value()->second);
     return result;
   }
 
