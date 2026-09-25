@@ -54,6 +54,11 @@ struct TieredStats {
   // Total capacity of the disk backing file.
   size_t capacity_bytes = 0;
 
+  // ExternalAllocator breakdown of capacity_bytes.
+  size_t alloc_segment_bytes = 0;
+  size_t alloc_large_bytes = 0;
+  size_t alloc_free_extent_bytes = 0;
+
   // In-flight read operations.
   uint32_t pending_read_cnt = 0;
 

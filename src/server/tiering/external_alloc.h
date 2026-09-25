@@ -80,6 +80,14 @@ class ExternalAllocator {
     return allocated_bytes_;
   }
 
+  struct Stats {
+    size_t segment_bytes = 0;
+    size_t large_allocated_bytes = 0;
+    size_t free_extent_bytes = 0;
+  };
+
+  Stats GetStats() const;
+
  private:
   class SegmentDescr;
   using Page = detail::Page;
@@ -104,6 +112,8 @@ class ExternalAllocator {
 
   size_t capacity_ = 0;  // in bytes.
   size_t allocated_bytes_ = 0;
+  size_t segment_bytes_ = 0;
+  size_t large_allocated_bytes_ = 0;
 };
 
 }  // namespace dfly::tiering
