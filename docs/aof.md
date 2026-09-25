@@ -102,8 +102,9 @@ What the MVP provides:
   ([Fsync Policy](#fsync-policy)).
 - **Bounded disk usage:** automatic checkpoints.
 - **Recovery:** parallel replay at startup, including a changed shard count.
-- **Errors:** after a failed write or fsync, write commands are rejected with `-MISCONF` until a
-  later write succeeds, as in Valkey.
+- **Errors:** after a failed write or sync, write commands are rejected with `-MISCONF`, as in
+  Valkey. A failed write clears once it is rewritten and synced. A failed sync clears only after a
+  checkpoint (see [Errors](#write-path)).
 
 What the MVP guarantees after a crash:
 - Each shard's log recovers to a prefix of what that shard wrote.
@@ -309,16 +310,28 @@ and sync, and a directory fsync. It starts right after a rotation, so it normall
 before the next one. If rotation ever does find the spare not ready, sealed blocks accumulate and
 normal backpressure applies.
 
-**Errors.** With parallel writes, a later write succeeding does not repair an earlier failed
-one. The failed range stays a hole, and `written_lsn` cannot advance past it.
+**Errors.** Write failures and sync failures are handled differently.
+
+*Write failures.* With parallel writes, a later write succeeding does not repair an earlier
+failed one. The failed range stays a hole, and `written_lsn` cannot advance past it.
 - A failed write keeps its batch buffer, and is retried at the same offset with backoff.
-- While any retry is pending, or a sync has failed, the shard's AOF is in an error state, and
-  write commands are rejected with `-MISCONF`.
-- The error clears only after the failed ranges are written, `written_lsn` is contiguous past
-  them, and a sync covering them completes.
-- If retries keep failing, the state persists. The chain can only be restored by a successful
-  checkpoint, which starts a new chain at its cut.
-- The state is exposed in `INFO persistence` as `aof_last_write_status`.
+- While a retry is pending, write commands are rejected with `-MISCONF`.
+- The error clears once the failed ranges are written, `written_lsn` is contiguous past them,
+  and a sync covering them completes.
+
+*Sync failures cannot be retried.* After a failed `fsync` or `fdatasync`, Linux may already have
+marked the affected dirty pages clean, or dropped them. A later sync can then succeed without
+that data ever reaching the disk. PostgreSQL ran into this in 2018 ("fsyncgate"). By then the
+batch buffers are already released, so the data cannot be rewritten from them either. A sync
+failure therefore breaks the shard's chain:
+- The shard's AOF enters a failed state. `durable_lsn` stops advancing, and write commands are
+  rejected with `-MISCONF`.
+- The only way out is a successful checkpoint. Its base is taken from memory, so it covers the
+  lost data, and its cut starts a new chain. The checkpoint is scheduled right away.
+- If the checkpoint also fails, the state persists, and is reported through
+  [checkpoint health](#checkpoint-health).
+
+The state is exposed in `INFO persistence` as `aof_last_write_status`.
 
 ---
 
@@ -681,8 +694,22 @@ would pay for its own sync. A single pipelined `fdatasync` amortizes one sync ov
   the socket**, not after each command. A pipeline of N writes, or a squashed MULTI/EXEC, then
   pays for a single wait.
 - Read-only and non-journaled commands never wait.
-- `-MISCONF` also applies in `always` mode after a failed sync. `INFO persistence` adds
-  `aof_delayed_fsync`.
+
+**Sync failure under `always`.** When a sync fails, `durable_lsn` never reaches the targets of
+replies that are already held. Without special handling, those connections would wait forever,
+while new commands get `-MISCONF`.
+- The failure transition wakes every durability waiter on that shard.
+- A woken connection whose target was not reached discards its buffered success replies. It
+  replies with an error instead, so the client does not take the write as durable.
+  - The error says the write was applied in memory but not persisted.
+  - For a pipeline, every reply from the first unconfirmed write onward is replaced.
+  - Closing the connection is the fallback, when the replies cannot be rewritten.
+- Later writes get `-MISCONF` until a checkpoint restores the chain (see [Errors](#write-path)).
+- For comparison, Valkey handles an fsync failure under `appendfsync always` by exiting the
+  process. We can offer that too, as a `--aof_exit_on_sync_error` flag, but the default keeps
+  serving reads.
+
+`INFO persistence` adds `aof_delayed_fsync`.
 
 ---
 
@@ -794,6 +821,7 @@ Possible fix:
 | `--aof_max_inflight_bytes` | TBD | MVP | Backpressure threshold for in-flight writes per shard |
 | `--aof_load_truncated` | `true` | MVP | Truncate a torn tail (records after the last durable sync marker) instead of failing |
 | `--aof_fsync` | `everysec` | Fsync Policy | `always` / `everysec` / `no`; alias `appendfsync` |
+| `--aof_exit_on_sync_error` | `false` | Fsync Policy | Exit on a sync failure under `always`, as Valkey does |
 
 Commands:
 - `DEBUG AOF CHECKPOINT` (MVP)
@@ -866,6 +894,8 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
   - an unused spare (valid header, no valid first block) at the end of a chain is ignored
   - a failed write is retried at its offset; `-MISCONF` clears only after the range is written
     and synced
+  - a failed sync is never retried as proof of durability; the shard stays failed until a
+    checkpoint starts a new chain
   - stale blocks in a recycled segment are read as end of log, including stale blocks whose LSN is
     higher than the expected one
   - rotation at a checkpoint cut and at restart keeps LSNs continuous
@@ -892,6 +922,8 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
   - Disk full (simulated with a small tmpfs) produces `-MISCONF`.
 - **Later stages:**
   - `always`: after `kill -9`, every acknowledged write survives.
+  - `always` with an injected sync failure: held replies are woken and answered with an error,
+    and no connection hangs.
   - Atomic groups: `kill -9` in the middle of a large EVAL or MULTI/EXEC leaves the transaction
     applied either entirely or not at all. A group cut off by the tail is dropped whole. A group
     that is the last write before an idle period still closes, and an `always` reply to it
