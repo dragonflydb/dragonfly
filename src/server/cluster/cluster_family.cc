@@ -68,6 +68,7 @@ using Payload = journal::Entry::Payload;
 using CI = CommandId;
 
 constexpr char kIdNotFound[] = "syncid not found";
+constexpr char kInvalidShardId[] = "invalid shard id";
 
 constexpr string_view kClusterDisabled =
     "Cluster is disabled. Enabled via passing --cluster_mode=emulated|yes";
@@ -1036,16 +1037,25 @@ void ClusterFamily::DflyMigrateFlow(CmdArgParser parser, CommandContext* cmd_cnt
     return cmd_cntx->SendError(kIdNotFound);
   }
 
+  if (migration->GetState() == MigrationState::C_FATAL) {
+    return cmd_cntx->SendError(kInvalidShardId);
+  }
+
+  size_t source_shards_num = migration->ShardNum();
+  if (shard_id >= source_shards_num) {
+    migration->ReportFatalError(GenericError(string(kInvalidShardId)));
+    migration->Stop();
+    return cmd_cntx->SendError(kInvalidShardId);
+  }
+
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
   DCHECK(conn_cntx->sync_dispatch);
   // we do this to be ignored by the dispatch tracker
   // TODO provide a more clear approach
   conn_cntx->sync_dispatch = false;
 
-  cmd_cntx->SendOk();
-
   // Try migrating the connection if we have the same shard configuration
-  if (migration->ShardNum() == shard_set->size() &&
+  if (source_shards_num == shard_set->size() &&
       int32_t(shard_id) != fb2::ProactorBase::me()->GetPoolIndex()) {
     DCHECK_LT(shard_id, shard_set->size());
     if (bool success = conn_cntx->conn()->Migrate(shard_set->pool()->at(shard_id)); !success) {
@@ -1054,7 +1064,16 @@ void ClusterFamily::DflyMigrateFlow(CmdArgParser parser, CommandContext* cmd_cnt
     }
   }
 
-  migration->StartFlow(shard_id, conn_cntx->conn()->socket());
+  auto flow = migration->GetFlow(shard_id);
+  if (!flow) {
+    migration->ReportFatalError(GenericError(string(kInvalidShardId)));
+    migration->Stop();
+    return cmd_cntx->SendError(kInvalidShardId);
+  }
+
+  cmd_cntx->SendOk();
+
+  migration->StartFlow(std::move(flow), conn_cntx->conn()->socket());
 }
 
 void ClusterFamily::ApplyMigrationSlotRangeToConfig(std::string_view node_id,
