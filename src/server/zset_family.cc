@@ -2496,22 +2496,18 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
   if (is_blocking && !key_to_pop.has_value()) {
     auto trans = cmd_cntx->tx();
     auto* cntx = cmd_cntx->server_conn_cntx();
-    auto* ns = &trans->GetNamespace();
-
     auto limit_tp = Transaction::time_point::max();
     auto limit_ms = (unsigned)(timeout * 1000);
     if (limit_ms > 0) {
       using namespace std::chrono;
       limit_tp = steady_clock::now() + milliseconds(limit_ms);
     }
-    const auto key_checker = [ns](EngineShard* owner, const DbContext& context,
-                                  std::string_view key) -> KeyReadyResult {
-      auto res = ns->GetDbSlice(owner->shard_id()).FindReadOnly(context, key, OBJ_ZSET);
-      if (res.ok())
-        return KeyReadyResult::kReady;
-      if (res.status() == OpStatus::WRONG_TYPE)
+    const auto key_checker = [](std::string_view /*unused*/,
+                                const CompactObj* obj) -> KeyReadyResult {
+      if (!obj || obj->ObjType() != OBJ_ZSET) {
         return KeyReadyResult::kNotReady;
-      return KeyReadyResult::kKeyNotFound;
+      }
+      return KeyReadyResult::kReady;
     };
 
     DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
