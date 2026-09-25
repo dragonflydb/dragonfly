@@ -328,10 +328,15 @@ and startup deletes the file, or reuses it as the next spare.
 Apart from the header, no data is written while preparing a spare. There is no zero-filling and
 no `fallocate` (see [I/O Mode](#io-mode)).
 
-A spare is visible to replay after a crash, so it must be recognizable. It has a valid header but
-no valid first block: the file ends after the header, or, in a recycled file, the first block
-fails its CRC under the new `segment_uid`. Replay treats such a file at the end of a chain as an
-unused spare and ignores it.
+A file with a valid header but no valid first block is an **empty segment**. The file ends
+after the header, or, in a recycled file, the first block fails its CRC under the new
+`segment_uid`. A crash can leave more than one:
+- an unused spare;
+- an active segment that had not received a block yet;
+- several of them in a row, when a checkpoint cut rotates to the spare and the next spare is
+  prepared before the first write.
+
+Replay skips empty segments (see [Replay](#replay-at-startup)).
 
 Rotation, and the switch at a checkpoint cut, only ever move to a spare that is already durable, so
 no directory fsync sits on the write path. Preparation is only an open or a rename, one header write
@@ -631,10 +636,15 @@ loads its snapshot from `--dbfilename` as usual, if one exists. That load goes t
 3. **Validate the segment chains.** For each shard i:
    - Glob its segments and read their headers.
    - Starting at `cut_seq_i`, require that segment seqs are contiguous.
-   - Require that each segment's first `first_lsn` equals the previous segment's last LSN + 1.
+   - Skip empty segments (a valid header but no valid first block; see
+     [Write Path](#write-path)) wherever they appear.
+   - **LSN continuity.** The first non-empty segment must start at the manifest's `cut_lsn_i`.
+     Each later non-empty segment must start at the previous non-empty segment's last LSN + 1.
+     The check spans empty segments, so skipping them cannot hide lost records: a segment whose
+     records were lost shows up as an LSN gap in the next one.
    - A gap is a hard error.
-   - A last file with a valid header but no valid first block is an unused spare (see
-     [Write Path](#write-path)). It is ignored, and kept as the next spare.
+   - At startup, empty segments at the end of the chain are reused as the next spare, or
+     deleted.
 4. **Replay each chain in its own fiber.** There is one fiber per source-shard chain, all
    running in parallel. They are distributed over the current proactor pool (chain i on proactor
    `i % pool size`), as replica flows are in `replica.cc`. A source shard id can exceed the
@@ -923,7 +933,9 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
     `--aof_load_truncated=false`
   - after writes stop, the final marker is made durable by one marker-only sync, and no further
     markers are written while idle
-  - an unused spare (valid header, no valid first block) at the end of a chain is ignored
+  - empty segments (valid header, no valid first block) are skipped anywhere in a chain,
+    including an empty active segment followed by an unused spare right after a checkpoint cut
+  - LSN continuity is checked across empty segments, starting from the manifest's `cut_lsn`
   - a crash during spare preparation leaves only a `.spare.tmp` file, which replay ignores and
     startup cleans up
   - a failed write is retried at its offset; `-MISCONF` clears only after the range is written
