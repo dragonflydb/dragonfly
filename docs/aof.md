@@ -309,9 +309,14 @@ When rotating:
 **Spare segments.** A new segment's directory entry must be durable before any record in it is
 reported durable. Otherwise, after a power loss, the file could vanish together with
 acknowledged records. So each shard always keeps one spare segment ready in the background:
-- create an empty file, or rename a recycled one into place;
-- write the header (a new `segment_uid` and seq) and `fdatasync` the file;
-- `fsync` the directory.
+1. Create an empty file under a temporary name (`<name>-<shard>.spare.tmp`), or rename a
+   recycled segment to that temporary name.
+2. Write the header (a new `segment_uid` and seq), and `fdatasync` the file.
+3. Rename it to its final segment name, and `fsync` the directory.
+
+The final name only ever points at a file whose header is already durable. If the node crashes
+earlier, the file is left under its temporary name. The segment glob does not match that name,
+and startup deletes the file, or reuses it as the next spare.
 
 Apart from the header, no data is written while preparing a spare. There is no zero-filling and
 no `fallocate` (see [I/O Mode](#io-mode)).
@@ -323,7 +328,7 @@ unused spare and ignores it.
 
 Rotation, and the switch at a checkpoint cut, only ever move to a spare that is already durable, so
 no directory fsync sits on the write path. Preparation is only an open or a rename, one header write
-and sync, and a directory fsync. It starts right after a rotation, so it normally completes long
+and sync, a second rename, and a directory fsync. It starts right after a rotation, so it normally completes long
 before the next one. If rotation ever does find the spare not ready, sealed blocks accumulate and
 normal backpressure applies.
 
@@ -436,8 +441,9 @@ Additional work this option needs:
 
   Each is a few lines on top of `GetSubmitEntry`. They are upstream helio changes, unless the
   AOF code issues the SQEs itself.
-- **Spare-segment preparation:** preparing a spare takes a few steps (an open or a rename, a
-  header write and `fdatasync`, then a directory fsync). It becomes either a small callback
+- **Spare-segment preparation:** preparing a spare takes a few steps (an open or a rename to a
+  temporary name, a header write and `fdatasync`, a rename to the final name, then a directory
+  fsync). It becomes either a small callback
   chain, which also needs an async open and rename, or a short-lived background fiber started
   after each rotation.
 - **Error and shutdown handling:**
@@ -911,6 +917,8 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
   - after writes stop, the final marker is made durable by one marker-only sync, and no further
     markers are written while idle
   - an unused spare (valid header, no valid first block) at the end of a chain is ignored
+  - a crash during spare preparation leaves only a `.spare.tmp` file, which replay ignores and
+    startup cleans up
   - a failed write is retried at its offset; `-MISCONF` clears only after the range is written
     and synced
   - a failed sync is never retried as proof of durability; the shard stays failed until a
