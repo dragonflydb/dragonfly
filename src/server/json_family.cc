@@ -12,7 +12,6 @@
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/flatbuffers.h"
 #include "core/json/json_object.h"
 #include "core/json/path.h"
 #include "core/mi_memory_resource.h"
@@ -554,15 +553,7 @@ OpStatus SetFullJson(const OpArgs& op_args, string_view key, string_view json_st
 
     op_args.GetDbSlice().RemoveExpire(op_args.db_cntx.db_index, updater.GetIterator());
 
-    if (JsonEnconding() == kEncodingJsonFlat) {
-      flexbuffers::Builder fbb;
-      json::FromJsonType(*parsed_json, &fbb);
-      fbb.Finish();
-      const auto& buf = fbb.GetBuffer();
-      updater.GetPrimeValue().SetJson(buf.data(), buf.size());
-    } else {
-      updater.GetPrimeValue().SetJson(std::move(*parsed_json));
-    }
+    updater.GetPrimeValue().SetJson(std::move(*parsed_json));
 
     // We should reset parsed_json before setting the size of the json, because
     // std::optional still holds the value and it will be deallocated
