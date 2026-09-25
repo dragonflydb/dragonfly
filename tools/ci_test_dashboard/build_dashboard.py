@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
 import json
 import math
@@ -12,7 +13,9 @@ import shutil
 import sys
 import time
 import xml.etree.ElementTree as ET
+import zlib
 from collections import Counter
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from itertools import groupby
@@ -24,6 +27,13 @@ RECENT_LIMIT = 12
 FAILURE_RUN_LIMIT = 20
 EXAMPLE_LIMIT = 4
 SCHEMA_VERSION = 3
+INPUT_COUNT_KEYS = (
+    "xml_files",
+    "dashboard_json_files",
+    "reports_passed",
+    "reports_failed",
+    "parse_errors",
+)
 RANGE_OPTIONS = [
     ("all", "All history", None),
     ("7", "Last 7 days", 7),
@@ -169,6 +179,20 @@ class DayTestAggregate:
             row["total_time"] = round(row["total_time"], 4)
         return rows
 
+    def compact(self) -> dict[str, Any]:
+        segments = self.segments_json()
+        day = summary_row_for_segments(self.identity(), segments)
+        day["date"] = segments[0]["date"]
+        day["total_time"] = sum_float(segments, "total_time")
+        return {
+            "summary": day,
+            "samples": {
+                "recent": recent_from_segments(segments),
+                "failure_runs": failure_runs_from_segments(segments),
+                "failure_examples": self.failure_examples,
+            },
+        }
+
 
 @dataclass
 class TestAggregate:
@@ -176,19 +200,12 @@ class TestAggregate:
     groups: set[str] = field(default_factory=set)
     details: dict[str, dict[str, list[dict[str, Any]]]] = field(default_factory=dict)
 
-    def add_day(self, aggregate: DayTestAggregate, range_ids: list[str]) -> None:
-        segments = aggregate.segments_json()
-        day = summary_row_for_segments(aggregate.identity(), segments)
-        day["date"] = segments[0]["date"]
-        day["total_time"] = sum_float(segments, "total_time")
+    def add_day(self, compact: dict[str, Any], range_ids: list[str]) -> None:
+        day = compact["summary"]
         self.days.append(day)
-        self.groups.update(aggregate.groups)
+        self.groups.update(day["groups"])
 
-        samples = {
-            "recent": recent_from_segments(segments),
-            "failure_runs": failure_runs_from_segments(segments),
-            "failure_examples": aggregate.failure_examples,
-        }
+        samples = compact["samples"]
         for range_id in range_ids:
             detail = self.details.setdefault(
                 range_id, {"recent": [], "failure_runs": [], "failure_examples": []}
@@ -280,71 +297,70 @@ def main() -> int:
     if args.limit:
         xml_files = xml_files[: args.limit]
 
-    tests: dict[str, TestAggregate] = {}
-    reports_by_status: Counter[str] = Counter()
-    tests_by_status: Counter[str] = Counter()
-    parse_errors: list[dict[str, str]] = []
-    run_keys: set[str] = set()
-    dates: set[str] = set()
-
     inputs = [(path, metadata_for(xml_root, path)) for path in xml_files]
     inputs.extend(
         (path, metadata_for_dashboard_json(dashboard_root, path)) for path in dashboard_json_files
     )
     inputs.sort(key=lambda item: item[1].date)
-    dates.update(meta.date for _, meta in inputs)
-    latest_day = max(dates) if dates else None
-    total_input_files = len(inputs)
     started = time.monotonic()
+    build_from_summaries(
+        local_day_summaries(inputs, started),
+        {meta.date for _, meta in inputs},
+        str(input_dir),
+        output_json,
+        started,
+    )
+    return 0
+
+
+def local_day_summaries(
+    inputs: list[tuple[Path, Metadata]], started: float
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    total_input_files = len(inputs)
+    dates = {meta.date for _, meta in inputs}
     index = 0
+    for day_index, (day, day_inputs) in enumerate(
+        groupby(inputs, key=lambda item: item[1].date), 1
+    ):
+        day_inputs = list(day_inputs)
+        log_progress(
+            f"Parsing day {day_index}/{len(dates)}: {day} ({len(day_inputs)} reports)",
+            started,
+        )
+        summary, _ = parse_day(day_inputs, started, index, total_input_files)
+        index += len(day_inputs)
+        yield day, summary
+        del summary
 
-    for day, day_inputs in groupby(inputs, key=lambda item: item[1].date):
-        daily_tests: dict[str, DayTestAggregate] = {}
-        log_progress(f"Starting {day}", started)
-        for path, meta in day_inputs:
-            index += 1
-            if index == 1 or index % (25 if path.suffix == ".json" else 500) == 0:
-                log_progress(f"Parsing {index}/{total_input_files}: {meta.relative_path}", started)
-            run_keys.add(
-                "/".join([meta.workflow, meta.run_id, meta.attempt, meta.job, meta.variant])
-            )
 
-            try:
-                if path.suffix == ".json":
-                    records, embedded_parse_errors = read_dashboard_testcases(path, meta)
-                else:
-                    records = [(meta, record) for record in read_testcases(path, meta)]
-                    embedded_parse_errors = []
-            except (ET.ParseError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
-                parse_errors.append({"file": meta.relative_path, "error": str(exc)})
-                reports_by_status["parse_error"] += 1
-                continue
+def build_from_summaries(
+    summaries: Iterable[tuple[str, dict[str, Any]]],
+    dates: set[str],
+    input_dir: str,
+    output_json: Path,
+    started: float,
+) -> None:
+    """Merge days in ascending order, retaining only bounded samples across days."""
+    tests: dict[str, TestAggregate] = {}
+    input_counts: Counter[str] = Counter(dict.fromkeys(INPUT_COUNT_KEYS, 0))
+    test_occurrences = 0
+    parse_errors: list[dict[str, str]] = []
+    run_keys: set[str] = set()
+    latest_day = max(dates) if dates else None
 
-            for error in embedded_parse_errors:
-                parse_errors.append(
-                    {
-                        "file": f"{meta.relative_path}:{error.get('file', 'unknown')}",
-                        "error": str(error.get("error", "unknown error")),
-                    }
-                )
-            reports_by_status["parse_error"] += len(embedded_parse_errors)
-
-            report_has_failure = False
-            for record_meta, record in records:
-                if add_test_record(daily_tests, tests_by_status, record_meta, record):
-                    report_has_failure = True
-            reports_by_status["failed" if report_has_failure else "passed"] += 1
-            del records
-
+    for day, summary in summaries:
+        input_counts.update(summary["input_counts"])
+        test_occurrences += summary["test_occurrences"]
+        run_keys.update(summary["run_keys"])
+        parse_errors.extend(summary["parse_errors"][: 100 - len(parse_errors)])
         range_ids = [
             range_id
             for range_id, _, days in RANGE_OPTIONS
             if segments_for_range([{"date": day}], latest_day, days)
         ]
-        for test_id in list(daily_tests):
-            aggregate = daily_tests.pop(test_id)
-            tests.setdefault(test_id, TestAggregate()).add_day(aggregate, range_ids)
-            del aggregate
+        for test_id, compact in summary["tests"].items():
+            tests.setdefault(test_id, TestAggregate()).add_day(compact, range_ids)
+        del summary
         log_progress(f"Compacted {day}: {len(tests)} tests retained", started)
 
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -361,14 +377,6 @@ def main() -> int:
                 "ranges": aggregate.details,
             },
         )
-
-    input_counts = {
-        "xml_files": len(xml_files),
-        "dashboard_json_files": len(dashboard_json_files),
-        "reports_passed": reports_by_status["passed"],
-        "reports_failed": reports_by_status["failed"],
-        "parse_errors": len(parse_errors),
-    }
 
     ranges = []
     for range_id, label, days in RANGE_OPTIONS:
@@ -410,7 +418,7 @@ def main() -> int:
             **input_counts,
             "runs": len(run_keys),
             "unique_tests": len(tests),
-            "test_occurrences": sum(tests_by_status.values()),
+            "test_occurrences": test_occurrences,
         },
         "parse_errors": parse_errors[:100],
     }
@@ -418,13 +426,99 @@ def main() -> int:
 
     log_progress(f"Wrote dashboard data under {output_dir}", started)
     print(
-        "Parsed "
-        f"{len(xml_files)} XML files and {len(dashboard_json_files)} dashboard JSON files, "
-        f"{sum(tests_by_status.values())} occurrences, "
+        f"Included {input_counts['xml_files']} XML files and "
+        f"{input_counts['dashboard_json_files']} dashboard JSON files, "
+        f"{test_occurrences} occurrences, "
         f"{len(tests)} unique tests.",
         flush=True,
     )
-    return 0
+
+
+def parse_day(
+    inputs: list[tuple[Path, Metadata]], started: float, offset: int, total: int
+) -> tuple[dict[str, Any], bool]:
+    daily_tests: dict[str, DayTestAggregate] = {}
+    reports_by_status: Counter[str] = Counter()
+    tests_by_status: Counter[str] = Counter()
+    parse_errors = []
+    run_keys = set()
+    cacheable = True
+    for index, (path, meta) in enumerate(inputs, offset + 1):
+        if index == 1 or index % (25 if path.suffix == ".json" else 500) == 0:
+            log_progress(f"Parsing {index}/{total}: {meta.relative_path}", started)
+        run_keys.add("/".join([meta.workflow, meta.run_id, meta.attempt, meta.job, meta.variant]))
+        try:
+            if path.suffix == ".json":
+                records, embedded_parse_errors = read_dashboard_testcases(path, meta)
+            else:
+                records = [(meta, record) for record in read_testcases(path, meta)]
+                embedded_parse_errors = []
+        except (ET.ParseError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            parse_errors.append({"file": meta.relative_path, "error": str(exc)})
+            # A transient read failure must not become a reusable missing report.
+            cacheable = cacheable and not isinstance(exc, OSError)
+            continue
+        for error in embedded_parse_errors:
+            parse_errors.append(
+                {
+                    "file": f"{meta.relative_path}:{error.get('file', 'unknown')}",
+                    "error": str(error.get("error", "unknown error")),
+                }
+            )
+        report_has_failure = False
+        for record_meta, record in records:
+            if add_test_record(daily_tests, tests_by_status, record_meta, record):
+                report_has_failure = True
+        reports_by_status["failed" if report_has_failure else "passed"] += 1
+        del records
+
+    compact_tests = {}
+    for test_id in list(daily_tests):
+        aggregate = daily_tests.pop(test_id)
+        compact_tests[test_id] = aggregate.compact()
+        del aggregate
+    return {
+        "tests": compact_tests,
+        "input_counts": {
+            "xml_files": sum(path.suffix == ".xml" for path, _ in inputs),
+            "dashboard_json_files": sum(path.suffix == ".json" for path, _ in inputs),
+            "reports_passed": reports_by_status["passed"],
+            "reports_failed": reports_by_status["failed"],
+            "parse_errors": len(parse_errors),
+        },
+        "test_occurrences": sum(tests_by_status.values()),
+        "run_keys": sorted(run_keys),
+        "parse_errors": parse_errors[:100],
+    }, cacheable
+
+
+def builder_fingerprint() -> str:
+    # Conservative invalidation also covers changes to sample limits and parser behavior.
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def read_day_cache(path: Path, expected: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as source:
+            payload = json.load(source)
+        if not isinstance(payload, dict):
+            raise ValueError("expected a cache object")
+        if any(payload.get(key) != value for key, value in expected.items()):
+            return None
+        summary = payload["summary"]
+        if not isinstance(summary, dict):
+            raise ValueError("expected a summary object")
+        return summary
+    except FileNotFoundError:
+        return None
+    except (OSError, EOFError, ValueError, TypeError, KeyError, zlib.error) as exc:
+        print(f"Ignoring invalid daily cache {path}: {exc}", flush=True)
+        return None
+
+
+def write_day_cache(path: Path, payload: dict[str, Any]) -> None:
+    with gzip.open(path, "wt", encoding="utf-8") as output:
+        json.dump(payload, output, separators=(",", ":"))
 
 
 def log_progress(message: str, started: float) -> None:

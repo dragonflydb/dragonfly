@@ -60,16 +60,14 @@ jobs:
           fi
           aws --version
 
-      - name: Download recent test results
-        shell: bash
-        run: ${GITHUB_WORKSPACE}/.github/scripts/download-ci-dashboard-results.sh
-
-      - name: Build dashboard data
+      - name: Refresh daily summaries and build dashboard data
         shell: bash
         run: |
           set -euo pipefail
-          python3 "${DASHBOARD_ROOT}/build_dashboard.py" \
-            "${INPUT_DIR}" \
+          python3 "${DASHBOARD_ROOT}/sync_dashboard.py" \
+            --source-bucket "${SOURCE_BUCKET}" \
+            --lookback-days "${LOOKBACK_DAYS}" \
+            --work-dir "${RUNNER_TEMP}/ci-test-dashboard" \
             "${DASHBOARD_ROOT}/site/data"
 
       - name: Upload dashboard artifact
