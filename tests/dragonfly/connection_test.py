@@ -2644,19 +2644,43 @@ async def test_timeout_silent_connection(df_server: DflyInstance, async_client: 
     assert int(info["timeout_disconnects"]) >= 1
 
 
-@dfly_args({"timeout": 2})
+@dfly_args({"timeout": 30})
 async def test_timeout_slow_first_command(df_server: DflyInstance, async_client: aioredis.Redis):
-    """Bytes received during protocol detection count as client activity. A client that trickles
-    its first command over longer than `timeout` is not idle and must not be reaped."""
+    """Bytes received during protocol detection count as client activity: they reset the idle
+    counter the --timeout reaper reads, so a client that trickles its first command is not
+    reaped. CLIENT LIST reports that same counter as `idle`, so the check is made there instead
+    of racing the reaper: `timeout` is far above every sleep in this test, and `idle < age`
+    keeps holding however long the test is descheduled afterwards."""
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    addr = "127.0.0.1:%d" % writer.get_extra_info("sockname")[1]
     await wait_for_conn_count(async_client, 2)
 
-    # Six bytes, one every 0.6s: the connection stays in SETUP for ~3.6s, longer than the timeout.
-    for byte in b"PING\r\n":
-        writer.write(bytes([byte]))
-        await writer.drain()
-        await asyncio.sleep(0.6)
+    async def silent_conn():
+        conns = [c for c in await async_client.client_list() if c["addr"] == addr]
+        assert len(conns) == 1
+        return conns[0]
 
+    # Nothing sent yet: idle and age have grown together since accept.
+    await asyncio.sleep(2)
+    conn = await silent_conn()
+    assert conn["phase"] == "setup"
+    assert int(conn["idle"]) == int(conn["age"]) >= 2
+
+    # A partial first command is a probe read. It must reset idle while the connection is still
+    # being classified (a lone "P" could still turn into an HTTP verb).
+    writer.write(b"P")
+    await writer.drain()
+
+    @assert_eventually(times=100)
+    async def idle_was_reset():
+        conn = await silent_conn()
+        assert conn["phase"] == "setup"
+        assert int(conn["idle"]) < int(conn["age"])
+
+    await idle_was_reset()
+
+    writer.write(b"ING\r\n")
+    await writer.drain()
     assert await asyncio.wait_for(reader.readline(), timeout=5) == b"+PONG\r\n"
     writer.close()
 
