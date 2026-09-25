@@ -25,22 +25,23 @@ The document is ordered by stage:
 8. [Pure Async Disk I/O vs. Writer Fiber](#pure-async-disk-io-vs-writer-fiber)
 9. [Checkpoints: Bounding File Growth](#checkpoints-bounding-file-growth)
 10. [Replay at Startup](#replay-at-startup)
+11. [Corruption Scenarios Not Covered](#corruption-scenarios-not-covered)
 
 **Part 2: Later Stages**
 
-11. [Fsync Policy](#fsync-policy)
-12. [Atomic Groups](#atomic-groups)
-13. [Re-base: Paths That Bypass the Journal](#re-base-paths-that-bypass-the-journal)
-14. [Multi-Shard Tail Atomicity](#multi-shard-tail-atomicity)
-15. [Other Extensions](#other-extensions)
+12. [Fsync Policy](#fsync-policy)
+13. [Atomic Groups](#atomic-groups)
+14. [Re-base: Paths That Bypass the Journal](#re-base-paths-that-bypass-the-journal)
+15. [Multi-Shard Tail Atomicity](#multi-shard-tail-atomicity)
+16. [Other Extensions](#other-extensions)
 
 **Part 3: Reference**
 
-16. [Configuration and Observability](#configuration-and-observability)
-17. [Implementation Map](#implementation-map)
-18. [Phasing](#phasing)
-19. [Testing](#testing)
-20. [Open Questions](#open-questions)
+17. [Configuration and Observability](#configuration-and-observability)
+18. [Implementation Map](#implementation-map)
+19. [Phasing](#phasing)
+20. [Testing](#testing)
+21. [Open Questions](#open-questions)
 
 ---
 
@@ -63,6 +64,10 @@ Goals:
 Non-goals:
 - The epoll backend. AOF requires io_uring and refuses to start with `--proactor_type=epoll`.
 - Loading or producing Valkey-format AOF files.
+- Detecting media corruption of data that was already synced. Hardware corruption and crashes
+  are both rare, so the design does not try to tell a corrupted block from a torn one. After a
+  crash, replay keeps the longest valid prefix of each shard's log. The cases this leaves
+  uncovered are listed in [Corruption Scenarios Not Covered](#corruption-scenarios-not-covered).
 
 ---
 
@@ -206,17 +211,11 @@ All files live in `--aof_dir`, which defaults to `--dir`:
   - `crc32c` covers the block and is seeded with the header's `segment_uid`. Stale blocks left in
     a recycled file were written under a different uid, so they never validate, whatever their
     LSN.
-  - `flags`: the MVP uses one bit, `SYNC_MARK` (below). [Atomic groups](#atomic-groups) add
-    `GROUP_CONT` later.
+  - `flags` is reserved in the MVP (always 0). [Atomic groups](#atomic-groups) use one bit of it
+    later.
   - The end of data is end of file, a block with `len == 0` (a hole or unwritten space reads as
     zeros), a block whose CRC does not validate, or a block whose `first_lsn` is not the expected
     next LSN. That rule is what allows segments to be recycled (see [I/O Mode](#io-mode)).
-- **Sync markers.** A sync marker is a block with the `SYNC_MARK` flag and no records. Its
-  payload is `synced_lsn`: every record up to that LSN was covered by a completed `fdatasync`.
-  After each sync completes, the writer appends a marker as an ordinary block at the next offset.
-  The marker becomes durable with the next sync, so the newest durable marker trails the newest
-  sync by one interval. Replay uses markers to tell a torn tail from corruption (see
-  [Replay](#replay-at-startup)).
 
 ### Manifest
 
@@ -271,35 +270,17 @@ and writes do not need to be serialized.
   prefix of completed writes, and their buffers are released.
 - A short write is resubmitted for the remainder at `offset + written`.
 
-**Sync.** Once per second, if any completed write is not yet synced (records or a marker):
-1. Record `sync_target = written_lsn`, and the contiguous written offset.
+**Sync.** Once per second, if `written_lsn` moved since the last sync:
+1. Record `sync_target = written_lsn`.
 2. Issue an async `fdatasync`. At most one sync is in flight per shard.
 3. When it completes, publish `durable_lsn = sync_target` (an atomic readable from any thread)
    and wake waiters.
-4. If the sync covered new records (`sync_target` moved past the previous marker's
-   `synced_lsn`), append a [sync marker](#segment-format) with `synced_lsn = sync_target`.
 
 An `fdatasync` only covers writes that completed before it was issued. That is why the target is
 the contiguous `written_lsn`, not `last_appended_lsn`.
 
-**Markers become durable even when writes stop.** The sync condition is based on unsynced bytes,
-not on `written_lsn`. A marker adds no records, so it never moves `written_lsn`. Under an
-LSN-based condition, the marker written after the last sync would never be synced once writes
-stop. The log would then lack a durable marker covering its last records, and
-`--aof_load_truncated=false` would reject a fully synced idle log.
-- With the byte-based condition, the next tick issues a sync that covers only the marker.
-- That marker-only sync does not append another marker, because `synced_lsn` did not move. An
-  idle shard therefore settles after one extra sync, instead of writing a marker every second.
-- The window in which the newest durable marker trails the newest sync is one tick, idle or
-  not.
-
-**Why the marker is written after the sync, not before.** A marker written before the sync, to
-be covered by it, could reach the disk through writeback while some records it claims are still
-missing. Replay would then report a legitimate torn tail as fatal corruption.
-
-**Clean shutdown.** On shutdown, the writer waits for in-flight writes, syncs, appends a final
-sync marker, and syncs again. The log then ends right after a durable marker that covers every
-record, which replay treats as a clean end.
+**Clean shutdown.** On shutdown, the writer waits for its in-flight writes to complete and syncs
+once. The log then ends at a block boundary, and replay has nothing to discard.
 
 **Rotation.** A shard starts a new segment only at two points: at a checkpoint cut (see
 [Checkpoints](#checkpoints-bounding-file-growth)), and when the log resumes after a restart. There
@@ -308,9 +289,9 @@ segment, whose size the checkpoint trigger bounds.
 
 When rotating:
 - The next block goes into the spare segment, right after its header.
-- Once every in-flight write to the old segment has completed, issue its final `fdatasync`,
-  append a final sync marker, and issue a second `fdatasync` to make that marker durable before
-  closing the segment.
+- Once every in-flight write to the old segment has completed, issue its final `fdatasync`, then
+  close the segment. The sync is issued only after the writes drain, because an `fdatasync` does
+  not cover writes that are still in flight.
 - `durable_lsn` advances past a segment's records only after that segment's final sync.
 
 **Spare segments.** A new segment's directory entry must be durable before any record in it is
@@ -639,10 +620,13 @@ loads its snapshot from `--dbfilename` as usual, if one exists. That load goes t
    - Skip empty segments (a valid header but no valid first block; see
      [Write Path](#write-path)) wherever they appear.
    - **LSN continuity.** The first non-empty segment must start at the manifest's `cut_lsn_i`.
-     Each later non-empty segment must start at the previous non-empty segment's last LSN + 1.
-     The check spans empty segments, so skipping them cannot hide lost records: a segment whose
-     records were lost shows up as an LSN gap in the next one.
-   - A gap is a hard error.
+     Each later non-empty segment must start where the previous non-empty segment's valid
+     records end. The check spans empty segments, so skipping them cannot hide lost records.
+   - A missing segment file (a gap in seqs) is a hard error. It points to an operator or
+     filesystem problem, not to a crash.
+   - An LSN discontinuity means an earlier segment ended early, for example because a crash
+     during rotation tore its tail while the next segment already had blocks on disk. The chain
+     then ends at that point (step 5).
    - At startup, empty segments at the end of the chain are reused as the next spare, or
      deleted.
 4. **Replay each chain in its own fiber.** There is one fiber per source-shard chain, all
@@ -670,32 +654,27 @@ loads its snapshot from `--dbfilename` as usual, if one exists. That load goes t
        B is exhausted matches what happened.
      - The global cut at checkpoints still guarantees that no chain starts past a global command
        that another chain has before its cut.
-5. **Find the end of the log.** Replay reads each chain until the first invalid position B:
-   end of file, `len == 0`, a CRC mismatch, or a `first_lsn` that is not the expected LSN.
-   What B means depends on where it falls relative to M, the newest durable
-   [sync marker](#segment-format) the chain contains. M's `synced_lsn` is the LSN up to which
-   records are known to be durable.
+5. **Find the end of the log: keep the longest valid prefix.** Within a segment, replay reads
+   blocks until the first invalid position B: end of file, `len == 0`, a CRC mismatch, or a
+   `first_lsn` that is not the expected LSN. At a segment's end, it continues with the next
+   non-empty segment, if that segment starts at the expected LSN. Otherwise, the chain ends.
    - **Why the tail can have holes.** Data written after the last completed sync can reach the
      disk in any order. Writes are submitted in parallel, and page-cache writeback does not follow
      file order either. After a crash, the end of a chain can therefore contain zeroed or stale
      regions and torn blocks, followed by blocks that did make it to disk.
-   - **B at or before `synced_lsn`: corruption, and fatal.** Those records were synced, so they
-     cannot be torn. Loading past corruption needs an explicit repair step, such as a future
-     `dfly-aof-check --fix`.
-   - **B right after the last record covered by M, with no records after M: a clean end.** This
-     is the normal case after a clean shutdown, or after a crash that happened right after a
-     sync. It is accepted regardless of `--aof_load_truncated`. Stale blocks in a recycled file
-     fail their CRC under the new `segment_uid`, so they also end the log cleanly.
-   - **B after unsynced records: a torn tail.** Records after `synced_lsn` were never covered
-     by a durable marker. Replay applies the valid records before B and discards everything from
-     B on, including valid blocks after a hole.
-     - With `--aof_load_truncated=true` (the default), log a warning and truncate the file at B.
-     - Otherwise, fail.
-     - Truncation is required before resuming, so that stale valid blocks after B can never be
-       read again.
-   - **Remaining limitation.** The newest durable marker trails the newest sync by one interval.
-     Corruption in records synced by that last sync is therefore still treated as a torn tail.
-     The window is at most one sync interval of data, instead of an arbitrary tail.
+   - **What is kept.** Replay applies every valid record before the chain's end.
+   - **What is discarded.** Everything after the end: valid blocks after a hole, and any later
+     segments of the chain.
+   - **Stale data.** Stale blocks in a recycled file fail their CRC under the new
+     `segment_uid`, so they end the log like any other invalid block.
+   - **Before resuming:**
+     - The file that holds the end is truncated there. Later segments of the chain are renamed
+       with a `.discarded` suffix, and kept until the next successful checkpoint.
+     - This keeps stale valid blocks from ever being read again.
+     - The warning log and `INFO persistence` (`aof_load_discarded_bytes`) report how much each
+       shard discarded.
+   - **No classification.** Replay does not try to tell a torn tail from corruption of synced
+     data; see [Corruption Scenarios Not Covered](#corruption-scenarios-not-covered).
 6. **Resume the log.**
    - **Same shard count:** on each shard, call `journal::StartInThreadAtLsn(last_lsn_i + 1)`,
      open a new segment at that LSN, and only then register `AofStreamer`. Registering it this
@@ -704,6 +683,57 @@ loads its snapshot from `--dbfilename` as usual, if one exists. That load goes t
      old chains cannot be continued. Run a checkpoint while still in LOADING. Its cut registers
      the new `AofStreamer`s, and the server switches to ACTIVE only after that.
 7. **Finish.** Run `PerformPostLoad` and `ForceReplicasToFullSync()`, then switch to ACTIVE.
+
+---
+
+## Corruption Scenarios Not Covered
+
+The design protects against crashes: torn blocks, holes left by parallel or reordered writeback,
+and stale data in recycled files. It does not protect against corruption of data that was
+already synced, and it does not detect it separately. Every damaged block is handled the same
+way: the shard's log ends there, and the rest of that shard's chain is discarded. The following
+scenarios are therefore not covered:
+
+- **Media corruption of synced data** (bit rot, a bad sector, a firmware bug).
+  - Replay truncates at the damaged block.
+  - Every later record of that shard is lost. Under `always`, that includes writes that were
+    acknowledged as durable.
+  - The loss is reported only through the load warning and `aof_load_discarded_bytes`.
+- **Damage in the middle of the log, not just at the tail.** A damaged block early in an old
+  segment discards all later segments of that chain, not just the damaged block. There is no
+  skipping ahead to the next readable block.
+- **Cross-shard inconsistency after a truncation.** Other shards replay their full logs, so the
+  dataset combines a shorter prefix for one shard with full state for the others. A multi-key
+  operation that spanned the damaged shard is then partially applied. This goes beyond the
+  crash case in [Multi-Shard Tail Atomicity](#multi-shard-tail-atomicity), because the lost
+  records may be arbitrarily old.
+- **Corruption that keeps a valid CRC.** A damaged block that still matches its CRC32C is
+  undetected, about 1 in 2^32 per damaged block. Replay applies it as data: wrong values, or
+  commands that fail. A damaged `len` that still passes can make replay skip over or misread
+  the following blocks.
+- **Devices that do not honor flushes.** Examples are volatile write caches without power-loss
+  protection, and some virtualized or network storage. `fdatasync` can then return before the
+  data is durable, and a power loss removes synced data. Replay finds a shorter valid prefix,
+  and acknowledged writes are lost without any error.
+- **Lost or misdirected writes.** A write that the device reports as done but never lands, or
+  lands at another offset, leaves a hole in synced data. Replay ends the shard's log at the hole.
+- **Corruption outside the segments.**
+  - Base DFS files and the manifest are not covered by this design. Damage there is caught, if
+    at all, by the existing snapshot loader's checks, or by the manifest failing to parse, and
+    makes the load fail.
+  - Filesystem metadata damage that removes a segment file shows up as a seq gap, which is a
+    hard error (step 3).
+- **Operator errors.** Partially copied directories and files mixed in from another node are
+  caught only in part: by `shard_id`, `shard_count`, `segment_uid`, seq and LSN checks. For
+  example, a whole chain copied from an older backup of the same node passes all of these checks.
+
+What can be added later, if any of these turn out to matter:
+- A durable-offset record in each segment header (two alternating slots holding the last synced
+  offset), so replay can report damage before that offset as corruption instead of truncating.
+- Fixed framing, as in the LevelDB/RocksDB WAL, so replay can skip a damaged frame and continue.
+- A strict load mode, and `dfly-aof-check`, that fail or report instead of truncating.
+- At the infrastructure level: filesystems with data checksums (ZFS, btrfs), storage with
+  power-loss protection, and replicas.
 
 ---
 
@@ -718,7 +748,7 @@ This stage replaces the MVP's fixed once-per-second sync with `--aof_fsync`. The
 |---|---|---|---|
 | `always` | Group commit: one `fdatasync` covers every write completed before it was issued. While it is in flight, new writes keep being submitted, and the next sync covers them. | The reply is held until `durable_lsn[s] >= L_s` on every shard the transaction touched. | No acknowledged writes |
 | `everysec` (default) | The MVP behavior. | Replies are never delayed. | About 1s plus in-flight data |
-| `no` | No periodic sync. The kernel decides when to flush, optionally smoothed with `sync_file_range`. Syncs, and their markers, still happen at checkpoint cuts, rotation, and shutdown. | Replies are never delayed. | Up to OS writeback |
+| `no` | No periodic sync. The kernel decides when to flush, optionally smoothed with `sync_file_range`. Syncs still happen at checkpoint cuts, rotation, and shutdown. | Replies are never delayed. | Up to OS writeback |
 
 `always` deliberately does not use `RWF_DSYNC` on every write. With parallel writes, each write
 would pay for its own sync. A single pipelined `fdatasync` amortizes one sync over many writes.
@@ -841,6 +871,8 @@ Possible fix:
 - **Partial sync for replicas from AOF segments.** This is cheap because AOF LSN equals journal
   LSN.
 - **`dfly-aof-check --fix`**, a repair tool for corrupted segments.
+- **Corruption detection** for data that was already synced; see
+  [Corruption Scenarios Not Covered](#corruption-scenarios-not-covered).
 - **`BGREWRITEAOF`** as a thin alias for a checkpoint, if Valkey tooling compatibility calls for
   it.
 
@@ -859,7 +891,6 @@ Possible fix:
 | `--aof_rewrite_min_size` | 64MB | MVP | Auto-checkpoint minimum size |
 | `--aof_write_batch_bytes` | TBD | MVP | Maximum size of one submitted batch of sealed blocks |
 | `--aof_max_inflight_bytes` | TBD | MVP | Backpressure threshold for in-flight writes per shard |
-| `--aof_load_truncated` | `true` | MVP | Truncate a torn tail (records after the last durable sync marker) instead of failing |
 | `--aof_fsync` | `everysec` | Fsync Policy | `always` / `everysec` / `no`; alias `appendfsync` |
 | `--aof_exit_on_sync_error` | `false` | Fsync Policy | Exit on a sync failure under `always`, as Valkey does |
 
@@ -875,7 +906,7 @@ Commands:
   - `aof_current_size`, `aof_base_size`, `aof_rewrite_trigger_size`
   - `aof_last_write_status`
 - **MVP, per shard:** `aof_inflight_bytes`, `aof_unsynced_bytes`, `aof_throttle_usec`,
-  `aof_fsync_latency`
+  `aof_fsync_latency`, `aof_load_discarded_bytes` (bytes discarded at the last load)
 - **Fsync Policy stage:** `aof_delayed_fsync`
 
 Base files carry a per-shard `aof-cut-lsn` aux field. It replaces the `aof-preamble` aux field,
@@ -906,7 +937,7 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
    they ship as one stage:
    - `AofStreamer` and `AofSegmentWriter`: parallel async writes, periodic sync, spare segments,
      rotation at the cut, `-MISCONF`.
-   - Segment format with sync markers, and the manifest.
+   - Segment format and manifest.
    - Checkpoints: the cut, garbage collection, recycling, the automatic trigger,
      `DEBUG AOF CHECKPOINT`, and checkpoint-health reporting.
    - Replay, including the global-command barrier, the torn-tail rules, and restart with a
@@ -926,13 +957,11 @@ which is currently hardcoded to 0. It is informational only; the manifest is aut
   - block framing and CRC checks
   - out-of-order write completions advance `written_lsn` only over the contiguous prefix
   - blocks sealed in one proactor loop iteration are submitted as one write
-  - a torn tail after the last durable sync marker gets truncated, including valid blocks after
-    a hole
-  - a bad block at or before a durable marker's `synced_lsn` is fatal
-  - a log ending right after a durable marker is a clean end, even with
-    `--aof_load_truncated=false`
-  - after writes stop, the final marker is made durable by one marker-only sync, and no further
-    markers are written while idle
+  - a torn tail gets truncated at the first invalid block, including valid blocks after a hole
+  - a crash during rotation that tears the old segment's tail, while the new segment already has
+    blocks, ends the chain at the tear; the later segment is renamed `.discarded`
+  - a clean shutdown leaves nothing to truncate
+  - `aof_load_discarded_bytes` reports what each shard discarded
   - empty segments (valid header, no valid first block) are skipped anywhere in a chain,
     including an empty active segment followed by an unused spare right after a checkpoint cut
   - LSN continuity is checked across empty segments, starting from the manifest's `cut_lsn`
