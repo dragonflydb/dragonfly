@@ -90,7 +90,8 @@ Non-goals:
   [replica.cc](../src/server/replica.cc)).
 - **Journal records are deterministic.** TTLs are journaled as absolute times (PEXPIREAT, PXAT).
   Expiry and eviction are journaled as `DEL`. Replaying the log hours later therefore produces
-  the same state.
+  the same state, provided replay does not expire keys on its own (see
+  [Replay](#replay-at-startup), step 4).
 - **Snapshots are point-in-time per shard.** The cut happens at
   `SerializerBase::RegisterChangeListener`. Replication full sync registers the journal consumer
   at that same point ([snapshot.cc](../src/server/snapshot.cc)). This is exactly the
@@ -110,9 +111,9 @@ What the MVP provides:
   - **Why it is not a hard bound:** replies do not wait for the disk. A slow device can delay
     queued writes and the in-flight sync arbitrarily, and everything acknowledged in the
     meantime is at risk.
-  - **What limits it:** `--aof_max_inflight_bytes` backpressure caps how much can be queued. It
+  - **What limits it:** `--aof_max_buffered_bytes` backpressure caps how much can be queued. It
     does not cap how long a stalled sync takes.
-  - `aof_fsync_latency` and `aof_inflight_bytes` in `INFO persistence` show when the window
+  - `aof_fsync_latency` and `aof_buffered_bytes` in `INFO persistence` show when the window
     grows.
 - **Bounded disk usage:** automatic checkpoints. Every local save (SAVE, BGSAVE, scheduled
   saves) doubles as a checkpoint, so there is no second snapshot next to regular backups.
@@ -202,6 +203,9 @@ All files live in `--aof_dir`, which defaults to `--dir`:
   - segment seq
   - `segment_uid`: a random 64-bit id, generated each time the file is prepared as a spare
     (including when a recycled file is reused).
+  - `run_id`: a random 64-bit id of the process run that prepared the segment. Transaction ids
+    restart in every process (`op_seq` starts at 1), so replay pairs records across shards by
+    `(run_id, txid)`, not by txid alone.
   - header CRC
 
   The header omits the start LSN and checkpoint id because neither is known when the writer
@@ -214,9 +218,11 @@ All files live in `--aof_dir`, which defaults to `--dir`:
   ```
 
   - The block header is 21 bytes. All integers are fixed-width and little-endian. `len` is the
-    payload size in bytes.
-  - **Bounds.** A block is valid only if its header and `len` payload bytes fit in what remains
-    of the file. Replay checks this before it reads or allocates anything. A torn `len` is thus
+    size of the whole block, header included, so a valid block has `len >= 21`. `len == 0`
+    therefore always means a hole or unwritten space, never a real block, even one with no
+    records.
+  - **Bounds.** A block is valid only if `len >= 21` and the `len` bytes fit in what remains of
+    the file. Replay checks this before it reads or allocates anything. A torn `len` is thus
     just an invalid block, and a reader never allocates more than the file size.
 
   - `payload` is the concatenated `JournalWriter` bytes, i.e. exactly what is already in
@@ -268,10 +274,11 @@ called inside an atomic section. It appends `item.journal_item.data` to the open
 
    Batching never waits for earlier writes to complete; it only groups blocks sealed close
    together in time. The batch buffer stays alive until its write completes.
-3. Apply backpressure: if in-flight writes exceed `--aof_max_inflight_bytes`, wait on an
-   `EventCount` until the byte count falls below the limit. Completion callbacks notify the
-   `EventCount`. This applies backpressure in the same way as replication throttling in
-   `BufferedSocketWriter`.
+3. Apply backpressure. The limit covers every AOF buffer that is not yet written: batches that are
+   queued (for example while waiting for a spare segment), writes being retried, and writes in
+   flight. If their total exceeds `--aof_max_buffered_bytes`, wait on an `EventCount` until it falls
+   below the limit. Completion callbacks notify the `EventCount`. This applies backpressure in the
+   same way as replication throttling in `BufferedSocketWriter`.
 
 **Why parallel writes.** On a socket, the next write must wait for the previous one, so data has
 to be buffered until then. A file write specifies its offset, so order is encoded in the offset
@@ -289,14 +296,22 @@ and writes do not need to be serialized.
   contiguous prefix of completed writes and releases their buffers.
 - After a short write, the writer resubmits the remaining bytes at `offset + written`.
 
-**Sync.** Every `kFSyncMs` milliseconds, if `written_lsn` moved since the last sync:
-1. Record `sync_target = written_lsn`.
-2. Issue an async `fdatasync`. At most one sync is in flight per shard.
-3. When it completes, publish `durable_lsn = sync_target` (an atomic readable from any thread)
-   and wake waiters.
+**Sync.** Every `kFSyncMs` milliseconds, if the active segment has completed writes that are
+not synced yet:
+1. Record `sync_target` as the end of the contiguous completed prefix *within the active
+   segment*.
+2. Issue an async `fdatasync` on the active segment. At most one sync is in flight per shard.
+3. When it completes, advance `durable_lsn` (an atomic readable from any thread), and wake
+   waiters.
 
-An `fdatasync` only covers writes that completed before it was issued. That is why the target is
-the contiguous `written_lsn`, not `last_appended_lsn`.
+An `fdatasync` covers only one file, and only writes that completed before it was issued.
+That is why the target is per segment and based on completed writes, not on
+`last_appended_lsn`.
+- During a rotation, writes can be outstanding on both the old and the new segment. A sync of
+  the new segment says nothing about the old one.
+- `durable_lsn` therefore advances only over records whose own segment has been synced past
+  them, and only across segments in order. It moves into the new segment only after the old
+  segment's final sync (see Rotation).
 
 **Clean shutdown.** On shutdown, the writer waits for its in-flight writes to complete and syncs
 once. The log then ends at a block boundary, and replay has nothing to discard.
@@ -693,8 +708,14 @@ failures and delays:
 When AOF is enabled and a manifest exists, the AOF takes precedence over `--dbfilename`, as it
 does in Valkey.
 
-**Bootstrap: AOF enabled but no manifest yet.** This is the first start with `--aof`. The server
-loads its snapshot from `--dbfilename` as usual, if one exists. That load goes through
+**Bootstrap: AOF enabled but no manifest yet.** A missing manifest does not prove this is the
+first start with `--aof`, because a manifest can also be deleted or lost. Bootstrap therefore
+runs only when `--aof_dir` has no AOF files at all: no segments, base files, `.spare.tmp` or
+`.discarded` files. If any exist without a manifest, startup fails loudly. Loading `--dbfilename`
+then could silently replace a newer AOF.
+
+On a real first start, the server loads its snapshot from `--dbfilename` as usual, if one
+exists. That load goes through
 `RdbLoader` and bypasses the journal, so the loaded data must become the AOF's first base:
 - While still in LOADING, the server runs an initial checkpoint. It writes the first manifest,
   and its cut registers the `AofStreamer`s.
@@ -718,8 +739,8 @@ loads its snapshot from `--dbfilename` as usual, if one exists. That load goes t
    - An LSN discontinuity means an earlier segment ended early, for example because a crash
      during rotation tore its tail while the next segment already had blocks on disk. The chain
      then ends at that point (step 5).
-   - At startup, empty segments at the end of the chain are reused as the next spare, or
-     deleted.
+   - At startup, empty segments at the end of the chain are re-prepared as the next spare, with a
+     new header and the current `run_id`, or deleted.
 4. **Replay each chain in its own fiber.** There is one fiber per source-shard chain, all
    running in parallel. They are distributed over the current proactor pool (chain i on proactor
    `i % pool size`), as replica flows are in `replica.cc`. A source shard id can exceed the
@@ -730,11 +751,22 @@ loads its snapshot from `--dbfilename` as usual, if one exists. That load goes t
    - Apply records through `JournalApplier` (`JournalExecutor` → `Service::DispatchCommand`).
      Keys are routed to their owning shard, so the current shard count may differ from the one
      that wrote the files.
+   - **Expiry is suspended during replay.** Keys are neither lazily nor actively expired, and a
+     command with an absolute expiry that is already in the past sets that expiry instead of
+     deleting the key. Valkey does the same while loading its AOF.
+     - Without this, replay after the deadline diverges. `SET k 0 PXAT T; INCR k` ran before
+       `T`. Replayed after `T`, the SET would delete `k`, and INCR would recreate it without a
+       TTL.
+     - Expirations that really happened are already in the log as `DEL` records, so replay
+       loses nothing by not expiring.
+     - Normal expiry resumes after replay, and removes keys whose deadline has passed.
    - **Why this is correct:** all of a key's records live in a single source shard's log, in
      order. Per-key ordering is therefore preserved. This is the same argument that makes
      replication between masters and replicas with different shard counts correct.
    - **Global commands** (FLUSHALL, FLUSHDB, FLUSHSLOTS) meet at the `MultiShardExecution`
-     barrier, keyed by txid. The barrier's participant count is not fixed at `shard_count`. It
+     barrier, keyed by `(run_id, txid)`. The `run_id` comes from each record's segment header,
+     because txids restart in every process. The barrier's participant count is not fixed at
+     `shard_count`. It
      is the number of chains that have not reached end of log.
      - A chain that reaches end of log counts as having arrived at every pending and future
        barrier. Reaching end of log also wakes fibers already waiting at a barrier.
@@ -765,6 +797,11 @@ loads its snapshot from `--dbfilename` as usual, if one exists. That load goes t
      - Truncate the segment containing the end of the valid log at that position. Rename later
        segments with a `.discarded` suffix and retain them until the next successful checkpoint.
      - This keeps stale valid blocks from ever being read again.
+     - These changes must themselves survive a crash. So `fsync` the truncated file and the
+       directory before any new write is accepted. Otherwise a second crash could bring the
+       discarded files back.
+     - The resumed segment reuses the seq of the first discarded segment. That keeps seqs
+       contiguous, so the next startup does not see a seq gap (step 3).
      - The warning log and `INFO persistence` (`aof_load_discarded_bytes`) report how much each
        shard discarded.
    - **No classification.** Replay treats torn tails and corruption of synced data alike.
@@ -913,7 +950,8 @@ transaction boundaries explicitly:
     guard is still open. So the transaction's last record is sealed with `GROUP_CONT` as well.
   - To end the group, closing the guard seals the open block with the bit cleared. If that block
     is empty, because the last record was already sealed, it writes a group-end block instead:
-    no records, `GROUP_CONT` cleared.
+    no records, `GROUP_CONT` cleared. Its `len` is 21, the header alone, so replay does not
+    mistake it for a hole.
   - Without this explicit end, a group whose last block is followed by no further record would
     never close. `durable_lsn` could then not advance past it, and an `always` reply could wait
     forever.
@@ -984,7 +1022,8 @@ across a crash: shard A's part can be durable while shard B's is not.
 Possible fix:
 - Reuse the deprecated per-entry field (currently always written as `1u`) to carry the number
   of shards that participate in the transaction.
-- During replay, hold back multi-shard txids at the tail until every other chain has shown its
+- During replay, hold back multi-shard transactions, identified by `(run_id, txid)`, at the tail
+  until every other chain has shown its
   part or reached end of log.
 - Drop the incomplete ones. Only the tail of the log can contain them.
 - Dropping a transaction's part leaves that part on disk in the middle of a chain. As with a
@@ -1040,7 +1079,7 @@ Possible fix:
 | `--aof_rewrite_percentage` | 100 | MVP | Auto-checkpoint growth factor |
 | `--aof_rewrite_min_size` | 64MB | MVP | Auto-checkpoint minimum size |
 | `--aof_write_batch_bytes` | TBD | MVP | Maximum size of one submitted batch of sealed blocks |
-| `--aof_max_inflight_bytes` | TBD | MVP | Backpressure threshold for in-flight writes per shard |
+| `--aof_max_buffered_bytes` | TBD | MVP | Backpressure threshold per shard: queued, retrying and in-flight write buffers |
 | `--aof_fsync` | `everysec` | Fsync Policy | `always` / `everysec` / `no`; alias `appendfsync` |
 | `--aof_exit_on_sync_error` | `false` | Fsync Policy | Exit on a sync failure under `always`, as Valkey does |
 
@@ -1055,7 +1094,7 @@ Commands:
     `aof_checkpoint_failures`
   - `aof_current_size`, `aof_base_size`, `aof_rewrite_trigger_size`
   - `aof_last_write_status`
-- **MVP, per shard:** `aof_inflight_bytes`, `aof_unsynced_bytes`, `aof_throttle_usec`,
+- **MVP, per shard:** `aof_buffered_bytes`, `aof_unsynced_bytes`, `aof_throttle_usec`,
   `aof_fsync_latency`, `aof_load_discarded_bytes` (bytes discarded at the last load)
 - **Fsync Policy stage:** `aof_delayed_fsync`
 
@@ -1106,8 +1145,15 @@ authoritative source; the aux field provides diagnostic information only.
 
 - **MVP unit tests** in `aof_test.cc`, alongside `journal_test.cc`:
   - block framing and CRC checks, including the exact CRC byte range
-  - a `len` that does not fit in the remaining file makes the block invalid, with no large
-    allocation
+  - a `len` below 21, or one that does not fit in the remaining file, makes the block invalid,
+    with no large allocation
+  - during a rotation with writes outstanding on both segments, `durable_lsn` does not advance
+    into the new segment before the old segment's final sync
+  - buffers queued while waiting for a spare count against `--aof_max_buffered_bytes`
+  - a crash right after the replay truncation and renames does not bring discarded segments back,
+    and the resumed segment keeps seqs contiguous
+  - global commands from different runs with the same txid are not paired, because the barrier is
+    keyed by `(run_id, txid)`
   - out-of-order write completions advance `written_lsn` only over the contiguous prefix
   - blocks sealed in one proactor loop iteration are submitted as one write
   - a torn tail gets truncated at the first invalid block, including valid blocks after a hole
@@ -1152,6 +1198,10 @@ authoritative source; the aux field provides diagnostic information only.
     between: after the second restart, the writes made after the first restart survive.
   - Restart with a different `--proactor_threads`, both larger and smaller: the data matches and
     a checkpoint happened.
+  - A missing manifest with AOF files still present in `--aof_dir` makes startup fail, instead
+    of loading `--dbfilename`.
+  - A key set with `PXAT` and then modified, replayed after its deadline: the key comes back
+    with its TTL and then expires, instead of being recreated without a TTL.
   - First start with `--aof` and an existing `--dbfilename` snapshot: the initial checkpoint
     makes the snapshot data the first base, and a later restart from the AOF alone matches.
   - `--aof` on a standalone node with no replicas: records reach the AOF, i.e. the journal is
@@ -1181,7 +1231,7 @@ authoritative source; the aux field provides diagnostic information only.
 ## Open Questions
 
 - **Defaults.** What should the defaults for `--aof_write_batch_bytes` and
-  `--aof_max_inflight_bytes` be?
+  `--aof_max_buffered_bytes` be?
 - **Blocking vs. dropping under backpressure.** Should `ThrottleIfNeeded` ever give up on AOF
   instead of stalling the shard, for example after a timeout? Or should it always block?
 - **Group latency coupling** (atomic groups stage). Under `always`, an open atomic group holds
