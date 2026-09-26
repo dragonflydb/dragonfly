@@ -490,10 +490,15 @@ class CompactObj {
 
   template <typename T, typename... Args> static T* AllocateMR(Args&&... args) {
     T* ptr = static_cast<T*>(memory_resource()->allocate(sizeof(T), alignof(T)));
-    if constexpr (std::is_constructible_v<T, decltype(memory_resource())> && sizeof...(args) == 0)
-      return std::construct_at(ptr, memory_resource());
-    else
-      return std::construct_at(ptr, std::forward<Args>(args)...);
+    try {
+      if constexpr (std::is_constructible_v<T, decltype(memory_resource())> && sizeof...(args) == 0)
+        return std::construct_at(ptr, memory_resource());
+      else
+        return std::construct_at(ptr, std::forward<Args>(args)...);
+    } catch (...) {
+      memory_resource()->deallocate(ptr, sizeof(T), alignof(T));
+      throw;
+    }
   }
 
   template <typename T> static void DeleteMR(void* ptr) {
