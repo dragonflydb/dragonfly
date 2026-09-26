@@ -527,7 +527,7 @@ async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
 
 
 async def test_set_acl_file_minimal_user_rule(async_client: aioredis.Redis, tmp_dir):
-    acl_file_content = "USER default off\nUSER worker on nopass +@all"
+    acl_file_content = "USER default off\nUSER worker on nopass ~* &* +@all"
     acl = create_temp_file(acl_file_content, tmp_dir)
 
     await async_client.execute_command(f"CONFIG SET aclfile {acl}")
