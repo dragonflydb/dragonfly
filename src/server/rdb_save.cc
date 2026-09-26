@@ -166,7 +166,7 @@ dfly::CompressionMode GetDefaultCompressionMode() {
   return absl::GetFlag(FLAGS_compression_mode);
 }
 
-uint8_t RdbObjectType(const CompactObj& pv) {
+uint8_t RdbObjectType(const CompactObj& pv, DflyVersion version) {
   unsigned type = pv.ObjType();
   unsigned compact_enc = pv.Encoding();
   switch (type) {
@@ -193,7 +193,8 @@ uint8_t RdbObjectType(const CompactObj& pv) {
         return RDB_TYPE_HASH_LISTPACK;
       else if (compact_enc == kEncodingStrMap2) {
         if (pv.HasMemberExpiration())
-          return RDB_TYPE_HASH_WITH_EXPIRY;  // Incompatible with Redis
+          return version >= DflyVersion::VER7 ? RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS
+                                              : RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED;
         else
           return RDB_TYPE_HASH;
       }
@@ -218,8 +219,9 @@ uint8_t RdbObjectType(const CompactObj& pv) {
 }
 
 RdbSerializer::RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun,
-                             size_t flush_threshold)
+                             size_t flush_threshold, DflyVersion version)
     : compression_mode_(compression_mode),
+      version_(version),
       tmp_buf_(nullptr),
       consume_fun_(std::move(consume_fun)),
       flush_threshold_(flush_threshold),
@@ -315,7 +317,7 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
       return make_unexpected(ec);
   }
 
-  uint8_t rdb_type = RdbObjectType(pv);
+  uint8_t rdb_type = RdbObjectType(pv, version_);
 
   string_view key = pk.GetSlice(&tmp_str_);
   DVLOG(3) << ((void*)this) << ": Saving key/val start " << key << " in dbid=" << dbid;
@@ -508,7 +510,7 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
         int64_t expiry = -1;
         if (it.HasExpiry())
           expiry = it.ExpiryTime();
-        RETURN_ON_ERR(SaveLongLongAsString(expiry));
+        RETURN_ON_ERR(SaveHSetExpiry(expiry));
       }
       ++it;
       FlushState flush_state = FlushState::kFlushMidEntry;
@@ -526,6 +528,18 @@ error_code RdbSerializer::SaveHSetObject(const PrimeValue& pv) {
   }
 
   return error_code{};
+}
+
+error_code RdbSerializer::SaveHSetExpiry(int64_t expiry) {
+  if (version_ >= DflyVersion::VER7) {
+    // Valkey stores absolute Unix milliseconds as a little-endian int64 (-1 for no expiry).
+    if (expiry != -1)
+      expiry = (expiry + kMemberExpiryBase) * 1000;
+    uint8_t buf[sizeof(int64_t)];
+    absl::little_endian::Store64(buf, expiry);
+    return WriteRaw(Bytes{buf, sizeof(buf)});
+  }
+  return SaveLongLongAsString(expiry);
 }
 
 error_code RdbSerializer::SaveZSetObject(const PrimeValue& pv) {
@@ -1095,7 +1109,7 @@ string RdbSerializer::DumpValue(RdbSerializer* serializer, const PrimeValue& obj
   // According to Redis code we need to
   // 1. Save the value itself - without the key
   // 2. Save footer: this include the RDB version and the CRC value for the message
-  auto type = RdbObjectType(obj);
+  auto type = RdbObjectType(obj, serializer->version_);
   DVLOG(2) << "We are going to dump object type: " << int(type);
 
   std::error_code ec = serializer->WriteOpcode(type);
@@ -1111,8 +1125,8 @@ string RdbSerializer::DumpValue(RdbSerializer* serializer, const PrimeValue& obj
   return res;
 }
 
-string RdbSerializer::DumpValue(const PrimeValue& obj, bool ignore_crc) {
-  RdbSerializer serializer(GetDefaultCompressionMode());
+string RdbSerializer::DumpValue(const PrimeValue& obj, DflyVersion version, bool ignore_crc) {
+  RdbSerializer serializer(GetDefaultCompressionMode(), {}, 0, version);
   return DumpValue(&serializer, obj, ignore_crc);
 }
 

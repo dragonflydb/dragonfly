@@ -280,8 +280,9 @@ string ModuleTypeName(uint64_t module_id) {
 bool RdbTypeAllowedEmpty(int type) {
   return type == RDB_TYPE_STRING || type == RDB_TYPE_JSON || type == RDB_TYPE_SBF ||
          type == RDB_TYPE_STREAM_LISTPACKS || type == RDB_TYPE_SET_WITH_EXPIRY ||
-         type == RDB_TYPE_HASH_WITH_EXPIRY || type == RDB_TYPE_SBF2 || type == RDB_TYPE_CMS ||
-         type == RDB_TYPE_TOPK || type == RDB_TYPE_CUCKOO;
+         type == RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED ||
+         type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS || type == RDB_TYPE_SBF2 ||
+         type == RDB_TYPE_CMS || type == RDB_TYPE_TOPK || type == RDB_TYPE_CUCKOO;
 }
 
 DbSlice& GetCurrentDbSlice() {
@@ -374,8 +375,8 @@ void RdbLoaderBase::OpaqueObjLoader::operator()(const unique_ptr<LoadTrace>& ptr
       CreateSet(ptr.get());
       break;
     case RDB_TYPE_HASH:
-    case RDB_TYPE_HASH_WITH_EXPIRY:
-    case RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS:
+    case RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED:
+    case RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS:
       CreateHMap(ptr.get());
       break;
     case RDB_TYPE_LIST_QUICKLIST:
@@ -591,8 +592,8 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
 }
 
 void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
-  const bool is_expiry =
-      (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY || rdb_type_ == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS);
+  const bool is_expiry = (rdb_type_ == RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED ||
+                          rdb_type_ == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS);
   const size_t increment = is_expiry ? 3 : 2;
 
   size_t len = ltrace->arr.size() / increment;
@@ -1398,8 +1399,8 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadGeneric(rdbtype);
       break;
     case RDB_TYPE_HASH:
-    case RDB_TYPE_HASH_WITH_EXPIRY:
-    case RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS:
+    case RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED:
+    case RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS:
       iores = ReadHMap(rdbtype);
       break;
     case RDB_TYPE_ZSET:
@@ -1663,8 +1664,8 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
     if (rdbtype == RDB_TYPE_HASH) {
       len *= 2;
     } else {
-      DCHECK(rdbtype == RDB_TYPE_HASH_WITH_EXPIRY ||
-             rdbtype == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS);
+      DCHECK(rdbtype == RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED ||
+             rdbtype == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS);
       len *= 3;
     }
 
@@ -1676,10 +1677,10 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   size_t n = std::min<size_t>(len, kMaxBlobLen);
   load_trace->arr.resize(n);
   size_t i = 0;
-  // Valkey encodes the expiry as a raw little-endian int64, whereas Dragonfly encodes it as an
-  // RDB string. Both formats encode the preceding field and value as RDB strings.
-  if (rdbtype == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS) {
-    for (; i < n; ++i) {
+  // Valkey and current Dragonfly versions encode expiry as a raw little-endian int64.
+  // The deprecated Dragonfly type uses an RDB string. Fields and values use RDB strings in both.
+  if (rdbtype == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS) {
+    for (; i < n && !ChunkBudgetExhausted(); ++i) {
       auto* dest = &load_trace->arr[i].rdb_var;
       error_code ec = i % 3 == 2 ? ReadValkeyHashExpiry(dest) : ReadStringObj(dest);
       if (ec)
@@ -2722,9 +2723,7 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
-    const bool is_valkey_type =
-        rdb_version_ == RDB_VERSION_VALKEY && type == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS;
-    if (!rdbIsObjectTypeDF(type) && !is_valkey_type) {
+    if (!rdbIsObjectTypeDF(type)) {
       LOG(ERROR) << "Unrecognized rdb object type: " << type;
       LOG(ERROR) << "Last iteration: ";
       LOG(ERROR) << "key loaded: " << absl::CHexEscape(last_key_loaded_);
@@ -3251,8 +3250,8 @@ void RdbLoader::CreateObjectOnShard(const DbContext& db_cntx, const Item* item, 
       // Sets and hashes are deleted when all their entries are expired.
       // If it's the case, set reset append flag and start from scratch.
       bool key_is_not_expired = item->expire_ms == 0 || db_cntx.time_now_ms < item->expire_ms;
-      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_VALKEY_HASH_WITH_EXPIRY_MS ||
-                                item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY ||
+      bool is_set_expiry_type = item->val.rdb_type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS ||
+                                item->val.rdb_type == RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED ||
                                 item->val.rdb_type == RDB_TYPE_SET_WITH_EXPIRY;
       if (!is_set_expiry_type && key_is_not_expired) {
         LOG(ERROR) << "Count not to find append key '" << item->key << "' in DB " << db_ind;

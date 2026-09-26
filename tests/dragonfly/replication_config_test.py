@@ -405,6 +405,13 @@ def download_dragonfly_release(version):
     return binary
 
 
+async def assert_hash_expiry(c_master, c_replica, key="hash"):
+    assert await c_replica.hgetall(key) == await c_master.hgetall(key)
+    for client in (c_master, c_replica):
+        assert await client.execute_command("FIELDTTL", key, "persistent") == -1
+        assert await client.execute_command("FIELDTTL", key, "expiring") > 0
+
+
 @pytest.mark.parametrize(
     "cluster_mode, announce_ip, announce_port",
     [
@@ -440,11 +447,14 @@ async def test_replicate_old_master(
     assert dfly_version != (await c_replica.execute_command("info", "server"))["dragonfly_version"]
 
     await c_master.execute_command("set", "k1", "v1")
+    await c_master.execute_command("HSETEX", "hash", 3600, "expiring", "one")
+    await c_master.hset("hash", "persistent", "two")
 
     assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
     await wait_available_async(c_replica)
 
     assert await c_replica.execute_command("get", "k1") == "v1"
+    await assert_hash_expiry(c_master, c_replica)
 
     if cluster_mode == "emulated":
         # An old master sends no announced address: fall back to the one we replicate from.
@@ -472,22 +482,57 @@ async def test_replicate_to_old_replica(df_factory: DflyInstanceFactory):
         == (await c_replica.execute_command("info", "server"))["dragonfly_version"]
     )
     await c_master.execute_command("set", "k1", "v1")
+    await c_master.execute_command("HSETEX", "hash", 3600, "expiring", "one")
+    await c_master.hset("hash", "persistent", "two")
+    # Save the new encoding before the old replica connects.
+    dump = await c_master.execute_command("DUMP", "hash", NEVER_DECODE=True)
+    assert dump[0] == 22
 
     # An old replica must tolerate the longer handshake reply of a new master.
     assert await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}") == "OK"
 
     @assert_eventually(times=200)
-    async def old_replica_synced():
+    async def old_replica_synced(key="hash"):
         # The old version has no slave_repl_offset, which wait_available_async relies on.
         info = await c_replica.execute_command("INFO", "REPLICATION")
         assert info["master_link_status"] == "up" and info["master_sync_in_progress"] == 0
         assert await c_replica.execute_command("get", "k1") == "v1"
+        await assert_hash_expiry(c_master, c_replica, key)
 
     await old_replica_synced()
 
     # It keeps advertising the address it replicates from until it is upgraded.
     res = await c_replica.execute_command("CLUSTER SLOTS")
     assert res[0][2][:2] == ["localhost", master.admin_port]
+
+    await c_master.restore("restored", 0, dump)
+    await old_replica_synced("restored")
+
+
+@pytest.mark.parametrize("older_replica", [False, True])
+@dfly_args({"proactor_threads": 3})
+async def test_hash_expiry_replica_version(df_factory: DflyInstanceFactory, older_replica):
+    master, _, c_master, _ = await setup_replication(df_factory)
+    lsn = (await c_master.execute_command("DFLY REPLICAOFFSET"))[0]
+    await c_master.execute_command("HSETEX", "hash", 3600, "field", "value")
+
+    @assert_eventually
+    async def check_encoding(expected):
+        assert (await c_master.execute_command("DUMP", "hash", NEVER_DECODE=True))[0] == expected
+
+    await check_encoding(22)
+    async with master.client(single_connection_client=True) as control:
+        handshake = await control.execute_command("REPLCONF", "CAPA", "dragonfly")
+        version = 5 if older_replica else handshake[3]  # VER6 is zero-based.
+        await control.execute_command("REPLCONF", "CLIENT-VERSION", version)
+        await check_encoding(31 if older_replica else 22)
+        # Disable pipelined client metadata so the flow connection can migrate to a shard.
+        async with master.client(
+            single_connection_client=True, lib_name=None, lib_version=None
+        ) as flow:
+            response = await flow.execute_command("DFLY", "FLOW", *handshake[:2], 0, lsn)
+            assert response[0] == ("FULL" if older_replica else "PARTIAL")
+    await check_encoding(22)
 
 
 # This Test was intorduced in response to a bug when replicating empty hashmaps (encoded as

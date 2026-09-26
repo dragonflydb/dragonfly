@@ -29,6 +29,7 @@ extern "C" {
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
+#include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
@@ -302,12 +303,33 @@ OpResult<string> DumpToString(string_view key, const PrimeValue& pv, const OpArg
     if (!res.has_value())
       return OpStatus::IO_ERROR;
 
-    str_res = RdbSerializer::DumpValue(*res);
+    str_res = RdbSerializer::DumpValue(*res, DflyCmd::GetMinReplicaVersion());
   } else {
-    str_res = RdbSerializer::DumpValue(pv);
+    str_res = RdbSerializer::DumpValue(pv, DflyCmd::GetMinReplicaVersion());
   }
 
   return {std::move(str_res)};
+}
+
+void JournalRestore(const OpArgs& op_args, string_view key, const PrimeValue& pv,
+                    string_view payload, const RestoreArgs& restore_args) {
+  if (!op_args.shard->journal())
+    return;
+
+  // A stored DUMP may predate an older replica joining. Convert it for the current receivers.
+  string storage;
+  auto version = DflyCmd::GetMinReplicaVersion();
+  if (static_cast<uint8_t>(payload.front()) == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS &&
+      version < DflyVersion::VER7) {
+    storage = RdbSerializer::DumpValue(pv, version);
+    payload = storage;
+  }
+
+  auto expire_str = absl::StrCat(restore_args.ExpirationTime());
+  absl::InlinedVector<string_view, 6> args({key, expire_str, payload, "REPLACE"sv, "ABSTTL"sv});
+  if (restore_args.Sticky())
+    args.push_back("STICK"sv);
+  RecordJournal(op_args, "RESTORE"sv, args);
 }
 
 OpStatus OpPersist(const OpArgs& op_args, string_view key);
@@ -564,17 +586,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     bc->Awaken(t->GetDbIndex(), dest_key_);
   }
 
-  if (shard->journal()) {
-    auto expire_str = absl::StrCat(serialized_value_->expire_ts);
-
-    absl::InlinedVector<std::string_view, 6> args(
-        {dest_key_, expire_str, serialized_value_->value, "REPLACE"sv, "ABSTTL"sv});
-    if (serialized_value_->sticky) {
-      args.push_back("STICK"sv);
-    }
-
-    RecordJournal(op_args, "RESTORE"sv, args, 2);
-  }
+  JournalRestore(op_args, dest_key_, add_res->it->second, serialized_value_->value, restore_args);
 
   return OpStatus::OK;
 }
@@ -629,15 +641,27 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
 
   if (restore_args.Expired()) {
     VLOG(1) << "the new key '" << key << "' already expired, will not save the value";
+    if (found_prev && op_args.shard->journal())
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     return OpStatus::OK;
   }
 
   RdbRestoreValue loader(rdb_version);
   auto add_res = loader.Add(key, payload, op_args.db_cntx, restore_args, &db_slice);
+  if (add_res.status() == OpStatus::SKIPPED) {
+    // All fields expired, but replacing an existing key still needs to be journaled.
+    if (found_prev && op_args.shard->journal())
+      RecordJournal(op_args, "DEL"sv, ArgSlice{key});
+    return OpStatus::OK;
+  }
+
   LOG_IF(DFATAL, add_res && !add_res->is_new)
       << "Unexpected override for key " << key << ", found previous " << found_prev
       << " override: " << restore_args.Replace()
       << ", type: " << ObjTypeToString(add_res->it->second.ObjType());
+
+  if (add_res)
+    JournalRestore(op_args, key, add_res->it->second, payload, restore_args);
 
   return add_res.status();
 }
@@ -2951,7 +2975,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"MOVE",    CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 1,
             acl::kMove}
              .HFUNC(Move)
-      << CI{"RESTORE", CO::JOURNALED, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
+      << CI{"RESTORE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
       << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, acl::kRandomKey}.HFUNC(RandomKey)
       << CI{"EXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kExpireTime}.HFUNC(ExpireTime)
       << CI{"PEXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPExpireTime}.HFUNC(PExpireTime);

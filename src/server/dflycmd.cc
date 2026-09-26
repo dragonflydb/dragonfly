@@ -49,6 +49,8 @@ using namespace util;
 using std::string;
 using util::ProactorBase;
 
+std::atomic<DflyVersion> DflyCmd::min_replica_version_{DflyVersion::CURRENT_VER};
+
 std::string_view SyncStateName(DflyCmd::SyncState sync_state) {
   switch (sync_state) {
     case DflyCmd::SyncState::PREPARATION:
@@ -384,8 +386,9 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
       flow_lsn = lsns[flow_id];  // this is a valid lsn - we can follow up with the buffer check
     }
 
-    // Switch sync type to partial
-    if (flow_lsn && IsLSNInPartialSyncBuffer(*flow_lsn)) {
+    // Journal payloads may differ across protocol versions, so only resume matching versions.
+    if (flow_lsn && replica_ptr->GetVersion() == DflyVersion::CURRENT_VER &&
+        IsLSNInPartialSyncBuffer(*flow_lsn)) {
       flow.start_partial_sync_at = *flow_lsn;
       sync_type = "PARTIAL";
       VLOG(1) << "Partial sync requested from LSN=" << flow.start_partial_sync_at.value()
@@ -1008,7 +1011,16 @@ std::map<uint32_t, LSN> DflyCmd::ReplicationLags(const ReplicaInfoMap& replicas_
   return rv;
 }
 
+void DflyCmd::UpdateMinReplicaVersionLocked() {
+  DflyVersion min_version = DflyVersion::CURRENT_VER;
+  for (const auto& [id, info] : replica_infos_) {
+    min_version = std::min(min_version, info->GetVersion());
+  }
+  min_replica_version_.store(min_version, std::memory_order_relaxed);
+}
+
 void DflyCmd::UpdateReplicaInfoCacheLocked() {
+  UpdateMinReplicaVersionLocked();
   auto replica_infos = std::make_shared<const ReplicaInfoMap>(replica_infos_);
   // Dispatching under mu_ keeps
   // the per-proactor caches consistent — concurrent callers enqueue their updates in a
@@ -1019,11 +1031,16 @@ void DflyCmd::UpdateReplicaInfoCacheLocked() {
 }
 
 void DflyCmd::SetDflyClientVersion(ConnectionState* state, DflyVersion version) {
-  auto replica_ptr = GetReplicaInfo(state->replication_info.repl_session_id);
+  util::fb2::LockGuard lk(mu_);
+  auto it = replica_infos_.find(state->replication_info.repl_session_id);
+  if (it == replica_infos_.end())
+    return;
+
   VLOG(1) << "Client version for session_id=" << state->replication_info.repl_session_id << " is "
           << int(version);
 
-  replica_ptr->SetVersion(version);
+  it->second->SetVersion(version);
+  UpdateMinReplicaVersionLocked();
 }
 
 // Must run under locked replica_info.mu.
