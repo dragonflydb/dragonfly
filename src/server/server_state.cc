@@ -335,13 +335,17 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       facade::Connection* dfly_conn = static_cast<facade::Connection*>(conn);
       using Phase = facade::Connection::Phase;
       auto phase = dfly_conn->phase();
-      bool is_replica = true;
+      bool is_replica = false;
       if (dfly_conn->cntx()) {
         is_replica = dfly_conn->cntx()->replica_conn;
       }
 
-      bool idle_read = timeout != 0 && !is_replica && phase == Phase::READ_SOCKET &&
-                       dfly_conn->idle_time() > timeout;
+      // SETUP covers connections that were accepted but never sent a byte, e.g. pre-dialled
+      // client pool connections. They occupy a maxclients slot like any other client and
+      // Redis applies `timeout` to them too, so reap them together with idle READ_SOCKET ones.
+      bool idle_phase = phase == Phase::READ_SOCKET || phase == Phase::SETUP;
+      bool idle_read =
+          timeout != 0 && !is_replica && idle_phase && dfly_conn->idle_time() > timeout;
       bool stuck_sending = send_timeout != 0 && !is_replica && dfly_conn->IsSending() &&
                            dfly_conn->GetSendWaitTimeSec() > send_timeout;
 
