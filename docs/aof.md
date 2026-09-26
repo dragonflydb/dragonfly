@@ -702,7 +702,21 @@ loads its snapshot from `--dbfilename` as usual, if one exists. That load goes t
    - **No classification.** Replay treats torn tails and corruption of synced data alike.
      [Corruption Scenarios Not Covered](#corruption-scenarios-not-covered) explains the resulting
      data-loss risks.
-6. **Resume the log.**
+6. **Resume the log.** The files must describe exactly the state replay produced. Otherwise a
+   second crash replays them differently.
+   - **A strict prefix needs only truncation.** When every chain replayed a prefix of its own
+     log, truncating at each chain's end (step 5) is enough.
+   - **A global command completed by an exhausted chain needs a checkpoint.** Say replay applied
+     a FLUSH from shard A after shard B's log had already ended.
+     - If B's log simply resumed, the FLUSH would exist only in A's log. After new writes on B
+       and another crash, B would replay those writes first, reach its end of log, and A's old
+       FLUSH would erase them.
+     - So replay runs a checkpoint while still in LOADING. That writes a new base, and new chains
+       that start after the FLUSH.
+     - The case needs a crash that tore a flush on some shards but not others. It is rare enough
+       that the cost of a full checkpoint at startup is acceptable.
+     - A cheaper alternative, not chosen for the MVP: append the missing global command, with its
+       original txid, to each shorter chain before resuming it.
    - **Same shard count:** on each shard, call `journal::StartInThreadAtLsn(last_lsn_i + 1)`,
      open a new segment at that LSN, and only then register `AofStreamer`. Registering it this
      late keeps replayed records from being appended to the log again.
@@ -838,6 +852,10 @@ transaction boundaries explicitly:
 - **Replay.** Replay buffers records from `GROUP_CONT` blocks until it reads the closing block,
   then applies the complete group. If a torn tail removes the closing block, replay discards
   the entire group.
+  - The chain's end then moves back to the group's first block, and the file is truncated there
+    (see [Replay](#replay-at-startup), step 6).
+  - Otherwise the group's blocks would stay on disk, new records would follow them after the
+    restart, and the next replay would find a group that never closes.
 - **Interleaved records.** Records of unrelated transactions on the same shard can land inside an
   open group, for example between the hops of a lock-ahead MULTI. They share the group's
   durability: they are applied with it, or dropped with it. Per-key order is unchanged.
@@ -859,6 +877,10 @@ not its *execution*.
 - Groups matter only when loading the AOF after a crash that takes down the whole replication
   group. A live replica already has the same prefix the master executed. Replay does not apply
   a group whose end did not reach the disk.
+- Partial transactions are a general Dragonfly issue, not an AOF-specific one. A replica can end
+  up with a partial transaction when the master crashes mid-way. The group boundaries this stage
+  adds to the journal could later let replicas hold back an incomplete transaction too. That
+  would be a separate change to replication.
 
 ---
 
@@ -897,6 +919,10 @@ Possible fix:
 - During replay, hold back multi-shard txids at the tail until every other chain has shown its
   part or reached end of log.
 - Drop the incomplete ones. Only the tail of the log can contain them.
+- Dropping a transaction's part leaves that part on disk in the middle of a chain. As with a
+  global command completed by an exhausted chain, the files no longer match the replayed state.
+  So this case also forces a checkpoint before ACTIVE (see [Replay](#replay-at-startup),
+  step 6).
 
 ---
 
@@ -1031,7 +1057,9 @@ authoritative source; the aux field provides diagnostic information only.
     counts up, and the next successful checkpoint reclaims the space.
   - A FLUSHALL in the middle of the log replays correctly through the barrier.
   - A FLUSHALL present in only some chains (the others truncated before it) replays without
-    deadlock.
+    deadlock, and forces a checkpoint before ACTIVE.
+  - Crash twice in a row, with a FLUSHALL torn on some shards the first time and new writes in
+    between: after the second restart, the writes made after the first restart survive.
   - Restart with a different `--proactor_threads`, both larger and smaller: the data matches and
     a checkpoint happened.
   - First start with `--aof` and an existing `--dbfilename` snapshot: the initial checkpoint
@@ -1044,8 +1072,9 @@ authoritative source; the aux field provides diagnostic information only.
   - `always` with an injected sync failure: held replies are woken and answered with an error,
     and no connection hangs.
   - Atomic groups: `kill -9` in the middle of a large EVAL or MULTI/EXEC leaves the transaction
-    applied either entirely or not at all. A group cut off by the tail is dropped whole. A group
-    that is the last write before an idle period still closes, and an `always` reply to it
+    applied either entirely or not at all. A dropped group is truncated away, so a second crash
+    after new writes does not find an unclosed group. A group cut off by the tail is dropped whole.
+    A group that is the last write before an idle period still closes, and an `always` reply to it
     returns.
   - Re-base: a replica with AOF enabled goes through full sync, re-base, then stable sync, and is
     killed. After restart it matches the master.
