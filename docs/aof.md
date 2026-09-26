@@ -158,8 +158,8 @@ Terms used throughout this document. They are per shard unless stated otherwise.
 - **Cut LSN (`L_i`, `cut_lsn`):** the LSN of shard i's first record after the cut. Shard i's
   chain starts there.
 - **Checkpoint:** a committed base together with its per-shard cut LSNs. Once it commits,
-  segments before the cuts can be deleted. While AOF is on, every save takes the cut, and a
-  qualifying save becomes the checkpoint.
+  segments before the cuts can be deleted. While AOF is on, every qualifying save takes the cut
+  and becomes the checkpoint.
 - **Qualifying save:** a save whose output can serve as the base. In the MVP, that is a save
   into `--aof_dir`, or to a local path on the same filesystem, whose files are hard-linked into
   `--aof_dir`.
@@ -538,8 +538,8 @@ cgroup memory limit.
 
 **Checkpoint base files** keep using the existing O_DIRECT snapshot path. Those are large
 sequential writes that are already aligned. The only change is a final `FSync()` before the
-rename, since snapshot files are not fsynced today. While AOF is on, this applies to every save,
-because any save may become the base (see [Checkpoints](#checkpoints-bounding-file-growth)).
+rename, since snapshot files are not fsynced today. While AOF is on, this applies to every
+qualifying save, because it becomes the base (see [Checkpoints](#checkpoints-bounding-file-growth)).
 
 ---
 
@@ -695,10 +695,10 @@ point. Here, the snapshot's point-in-time cut takes the place of `fork()`.
 
 ### Saves and checkpoints are one operation
 
-While AOF is on, there is no separate checkpoint mechanism. Every save takes the AOF cut, and
-a checkpoint is simply a save whose output can serve as the base. This covers SAVE, BGSAVE,
-`--snapshot_cron`, and the automatic trigger. Whether a save commits as a checkpoint depends only
-on where its output lives:
+While AOF is on, there is no separate checkpoint mechanism. A checkpoint is simply a save whose
+output can serve as the base. The goal is for every save to be one, and the MVP gets there for
+local saves. This covers SAVE, BGSAVE, `--snapshot_cron`, and the automatic trigger. Whether a
+save commits as a checkpoint depends only on where its output lives:
 
 | Save | Output | Becomes the checkpoint? |
 |---|---|---|
@@ -710,12 +710,13 @@ on where its output lives:
   breaking recovery, and garbage collection deletes only the AOF's links, never the user's
   files. A save qualifies when its destination directory and `--aof_dir` are on the same
   filesystem (same `st_dev`).
-- **Plain saves take the cut too.** A save that does not qualify still captures the cut and
-  rotates the log, so there is one code path. It just does not commit a manifest, and it does
-  not reset the automatic trigger. The extra segment boundary is harmless, because the chain
-  stays continuous.
-- **Fsync.** While AOF is on, every save fsyncs its files, because a base must be durable.
-  That adds some latency to SAVE. Saves without AOF are unchanged.
+- **Plain saves leave the AOF alone.** A save that does not qualify neither takes the AOF cut
+  nor rotates the log: it runs exactly as it does without AOF. It does not commit a manifest,
+  and it does not reset the automatic trigger. So such saves never add segments, and the chain
+  stays a single segment in steady state. Once S3 saves become checkpoints (see
+  [Other Extensions](#other-extensions)), they take the cut like local saves.
+- **Fsync.** A qualifying save fsyncs its files, because a base must be durable. That adds some
+  latency to those saves. Plain saves, and saves without AOF, are unchanged.
 - **Formats.** Both DFS and RDB output work as a base. Both come from per-shard
   `SliceSnapshot`s, each with its own cut. The manifest records which format the base uses.
 - **One save at a time.** This is the existing `SaveStagesController` rule, not an extra one.
@@ -1287,8 +1288,8 @@ authoritative source; the aux field provides diagnostic information only.
     data matches.
   - A BGSAVE to a local path on the same filesystem becomes the checkpoint. Deleting the user's
     dump file afterwards does not break replay.
-  - A save to S3 (in the MVP), or to another filesystem, stays a plain save: no manifest commit, and
-    the automatic trigger is not reset.
+  - A save to S3 (in the MVP), or to another filesystem, stays a plain save: no cut, no rotation,
+    no manifest commit, and the automatic trigger is not reset. The shard keeps a single segment.
   - An automatic checkpoint that comes due during a qualifying BGSAVE is dropped, and that
     BGSAVE commits as the checkpoint.
   - With `--snapshot_cron`, the AOF stays bounded with no extra snapshots.
