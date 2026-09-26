@@ -404,10 +404,27 @@ MVP's periodic sync per shard, that cost is negligible.
   LSNs are higher than the expected one.
 
 **Page cache.** AOF data is written once and almost never read, so it should not push other data
-out of the page cache.
-- Once a region of a segment is durable, the writer issues `IORING_OP_SYNC_FILE_RANGE` (WRITE)
-  followed by `IORING_OP_FADVISE` (DONTNEED) on that region.
-- This also caps the dirty pages that count against a container's cgroup memory limit.
+out of the page cache. Keeping it out also caps the dirty pages that count against a container's
+cgroup memory limit.
+- **Primary: `RWF_DONTCACHE`.** Segment writes carry the `RWF_DONTCACHE` flag in
+  `sqe->rw_flags`. This is "uncached buffered I/O", merged in Linux 6.14
+  ([Phoronix](https://www.phoronix.com/news/Uncached-Buffered-IO-Linux-6.14),
+  [LWN](https://lwn.net/ml/all/20241203153232.92224-2-axboe@kernel.dk/)).
+  - The write still goes through the page cache. Before the call returns, the kernel starts
+    writeback of the written range (`filemap_dontcache_kick_writeback()`), and it drops the
+    pages once that writeback completes.
+  - It is not a durability flag. The periodic `fdatasync` is still needed to flush the device
+    cache and the file size.
+  - Because writeback has already started, much of the data may be on its way to disk by the
+    time the sync runs, which could make the sync cheaper. The cost is that writeback starts
+    per write, instead of being batched by the kernel's flusher. Both effects should be
+    benchmarked.
+  - A filesystem opts in with `FOP_DONTCACHE`. In current mainline, ext4 and XFS set it, and
+    btrfs does not. On an unsupported filesystem, a DAX mapping, or a kernel older than 6.14,
+    the write fails with `-EOPNOTSUPP`.
+- **Fallback.** The writer detects `-EOPNOTSUPP` on its first write and then drops the flag for
+  that file. After each completed sync, it issues `IORING_OP_SYNC_FILE_RANGE` (WRITE) followed by
+  `IORING_OP_FADVISE` (DONTNEED) on the synced region.
 
 **Checkpoint base files** keep using the existing O_DIRECT snapshot path. Those are large
 sequential writes that are already aligned. The only change is a final `FSync()` before the
@@ -435,8 +452,8 @@ This is the model tiering already uses: `DiskStorage::Stash` issues `WriteAsync`
   - resubmits a short write;
   - notifies the `EventCount` that backpressure waits on.
 - **Sync:** a `ProactorBase::AddPeriodic` task issues an async `fdatasync` when there is unsynced
-  data. Its completion publishes `durable_lsn`, and chains `sync_file_range` and `fadvise` for
-  page-cache hygiene.
+  data. Its completion publishes `durable_lsn`. Only on the fallback path (no `RWF_DONTCACHE`),
+  it also chains `sync_file_range` and `fadvise` for page-cache hygiene.
 - **Rotation:** handled from the completion of the old segment's last write.
 - **Buffers:** each block can be built in a registered buffer (`RequestRegisteredSlice`) and
   written with `WriteFixedAsync`, as `DiskStorage` does.
@@ -447,7 +464,9 @@ Additional work this option needs:
 - **helio `LinuxFile` API** ([uring_file.h](../helio/util/fibers/uring_file.h)):
   - An async fsync (`FSyncAsync(flags, cb)`). Today `FSync` is fiber-blocking only; it is built
     on `FiberCall`.
-  - Async `sync_file_range` and `fadvise`.
+  - An `rw_flags` argument on `WriteAsync` and `WriteFixedAsync`, to pass `RWF_DONTCACHE`.
+  - Async `sync_file_range` and `fadvise`, for the fallback when `RWF_DONTCACHE` is not
+    supported.
 
   Each is a few lines on top of `GetSubmitEntry`. They are upstream helio changes, unless the
   AOF code issues the SQEs itself.
@@ -508,6 +527,9 @@ In current mainline:
   `io_uring/rw.c` returns `-EAGAIN` from the non-blocking attempt and punts the write to io-wq.
 - **Syncs:** `fsync`/`fdatasync`, `sync_file_range` and `fallocate` are always executed in
   io-wq. `io_uring/sync.c` forces them async.
+- **Uncached writes:** `RWF_DONTCACHE` (Linux 6.14) goes in `sqe->rw_flags` of a buffered write.
+  It combines with the paths above: the write completes inline or in io-wq as usual, and in
+  both cases writeback starts before it completes. See [I/O Mode](#io-mode).
 
 What this means for the AOF:
 - **Buffered writes work on every filesystem.** They complete inline or through io-wq, but in
@@ -536,7 +558,8 @@ Option A, pure async I/O.
 The rare, multi-step spare-segment preparation should still run in a short-lived fiber rather
 than a callback state machine.
 
-The helio additions (async fsync, `sync_file_range`, `fadvise`) are the main cost. If those
+The helio additions (async fsync, `rw_flags` on async writes, and the fallback's
+`sync_file_range` and `fadvise`) are the main cost. If those
 changes would delay the MVP, option B is an acceptable interim step. The format and semantics
 are identical, so moving from B to A later changes only `AofSegmentWriter`.
 
@@ -987,7 +1010,7 @@ authoritative source; the aux field provides diagnostic information only.
 | Area | Files | Stage |
 |---|---|---|
 | `AofStreamer`, `AofSegmentWriter`, segment reader, manifest | `src/server/journal/aof.{h,cc}` (new) | MVP |
-| Async fsync, `sync_file_range`, `fadvise` (option A) | `helio/util/fibers/uring_file.{h,cc}` | MVP |
+| Async fsync, `rw_flags` on async writes, fallback `sync_file_range` and `fadvise` (option A) | `helio/util/fibers/uring_file.{h,cc}` | MVP |
 | Shared apply logic for replica and AOF replay | `src/server/journal/journal_applier.{h,cc}` (new, extracted from `replica.cc`) | MVP |
 | End-of-log-aware global-command barrier | [tx_executor.cc](../src/server/journal/tx_executor.cc) (`MultiShardExecution`) | MVP |
 | Always-on journal user; seal and rotate at the cut | [journal_slice.cc](../src/server/journal/journal_slice.cc), [journal.cc](../src/server/journal/journal.cc) | MVP |
@@ -1082,6 +1105,8 @@ authoritative source; the aux field provides diagnostic information only.
   - memtier SET throughput and p99 latency, MVP sync against AOF off. Target: less than 10%
     regression.
   - Parallel vs. serialized write submission, on ext4 and on XFS.
+  - `RWF_DONTCACHE` vs. the `sync_file_range` + `fadvise` fallback: throughput, `fdatasync`
+    latency, and page-cache footprint.
   - `always` with pipelining, to show that group commit amortizes the sync cost.
 
 ---
