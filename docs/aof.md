@@ -138,8 +138,10 @@ What the MVP provides:
 - **Durability:** a fixed policy. Blocks are written as soon as they are sealed, and each shard
   runs `fdatasync` every `kFSyncMs` milliseconds (a hard-coded interval). Replies are never delayed.
   [Fsync Policy](#fsync-policy) adds the configurable `always` and `no` policies in a later stage.
-  - **What a crash loses:** writes from approximately the last `kFSyncMs` milliseconds, plus
-    data still queued or in flight.
+  - **What a crash loses:** a process crash loses about one heartbeat period of writes (10ms by
+    default). An OS crash or power loss loses writes from approximately the last `kFSyncMs`
+    milliseconds, plus data still queued or in flight. See
+    [Process crash vs. power loss](#write-path).
   - **Why it is not a hard bound:** replies do not wait for the disk. A slow device can delay
     queued writes and the in-flight sync arbitrarily, and everything acknowledged in the
     meantime is at risk.
@@ -301,13 +303,35 @@ called inside an atomic section. It appends `item.journal_item.data` to the open
 after *every* record, so sealing each time would make one block per record. Every record would
 then pay a 25-byte header, its own CRC, and its own submission.
 
-**Small blocks.** A block below the threshold keeps accumulating records. At the end of each
-proactor loop iteration, just before the proactor waits for events again, an idle hook
-(`ProactorBase::AddOnIdleTask`) seals and submits whatever is open. A small block therefore
-waits at most one loop iteration.
-- The idle hook runs between fiber runs, never inside one. Like `ThrottleIfNeeded()`, it seals
-  only at a point where the journal allows a flush.
+**Small blocks.** A block below the threshold keeps accumulating records. The shard's existing
+heartbeat (`EngineShard::Heartbeat()`) seals and submits whatever is open, so a small block waits
+at most one heartbeat period.
+- **Period.** The heartbeat runs every `1000 / --hz` ms, 10ms by default. That caps small writes
+  at about 100 per second per shard, while blocks still fill to `kAofBlockBytes` under load.
+  Raising `--hz` shortens the wait.
+- **The seal comes first.** The heartbeat skips its work while a global transaction runs, while
+  a callback on the shard is suspended, or while a journal write would block. So sealing goes at
+  its very top, before that check. Sealing needs no locks.
+- **A safe point.** The heartbeat fiber runs between other fibers, never inside an atomic
+  section. Like `ThrottleIfNeeded()`, it seals only at a point where the journal allows a flush.
+- **Why not seal more often.** Sealing on every proactor loop iteration would issue very small
+  writes under moderate load. Each small write costs a submission, a page-cache copy, and, with
+  `RWF_DONTCACHE`, a writeback of a partly filled page. A tiny write every loop iteration would
+  write the same 4K page to the device again and again.
 - Sealing is thus the one batching step: a block is a batch, and one block is one write.
+
+**Process crash vs. power loss.** Written blocks sit in the page cache, which survives a crash
+of the Dragonfly process (a segfault, an OOM kill, `kill -9`). Only an OS crash or a power loss
+drops them, which is what the periodic sync protects against. Records still in the open block
+live only in process memory. So:
+- A **process crash** loses at most the open block: about one heartbeat period (10ms by default)
+  of writes.
+- An **OS crash or power loss** loses writes from about the last `kFSyncMs` milliseconds, plus
+  data still queued or in flight.
+- Process crashes are far more common than machine crashes, which is why the open block is
+  sealed on the heartbeat, not only at sync time. Valkey makes the same split: under `everysec`,
+  it writes its AOF buffer to the file on every event-loop iteration, and runs `fsync` once per
+  second.
 
 **Backpressure.** The limit covers every AOF buffer that is not yet written: sealed blocks that are
 queued (for example while waiting for a spare segment), writes being retried, and writes in flight.
@@ -998,8 +1022,8 @@ transaction boundaries explicitly:
   be written.
   - Blocks sealed inside a group carry the `GROUP_CONT` bit in `flags`: the block ends inside a
     group that continues in the next block.
-  - A block can be sealed while the guard is still open: by the size threshold, or by the idle
-    hook between the hops of a multi-hop transaction. The transaction's last record can
+  - A block can be sealed while the guard is still open: by the size threshold, or by the
+    heartbeat between the hops of a multi-hop transaction. The transaction's last record can
     therefore end up in a block sealed with `GROUP_CONT` as well.
   - To end the group, closing the guard seals the open block with the bit cleared. If that block
     is empty, because the last record was already sealed, it writes a group-end block instead:
@@ -1173,6 +1197,7 @@ authoritative source; the aux field provides diagnostic information only.
 | Async fsync, `rw_flags` on async writes, fallback `sync_file_range` and `fadvise` (option A) | `helio/util/fibers/uring_file.{h,cc}` | MVP |
 | Shared apply logic for replica and AOF replay | `src/server/journal/journal_applier.{h,cc}` (new, extracted from `replica.cc`) | MVP |
 | End-of-log-aware global-command barrier | [tx_executor.cc](../src/server/journal/tx_executor.cc) (`MultiShardExecution`) | MVP |
+| Seal the open block at the top of `Heartbeat()`, before its skip check | [engine_shard.cc](../src/server/engine_shard.cc) | MVP |
 | Always-on journal user; seal and rotate at the cut | [journal_slice.cc](../src/server/journal/journal_slice.cc), [journal.cc](../src/server/journal/journal.cc) | MVP |
 | Atomic cut capture on every save, fsync, hard links for qualifying saves, manifest commit | [snapshot.cc](../src/server/snapshot.cc), [save_stages_controller.cc](../src/server/detail/save_stages_controller.cc) | MVP |
 | Startup precedence, INFO, `-MISCONF` gating | [server_family.cc](../src/server/server_family.cc), [main_service.cc](../src/server/main_service.cc) | MVP |
@@ -1216,8 +1241,10 @@ authoritative source; the aux field provides diagnostic information only.
   - global commands from different runs that reuse a txid are paired correctly, because chains
     pass global commands in lockstep
   - out-of-order write completions advance `written_lsn` only over the contiguous prefix
-  - small records accumulate in one block until `kAofBlockBytes` or the end of the proactor
-    loop iteration, so there is no header per record
+  - small records accumulate in one block until `kAofBlockBytes` or the next heartbeat, so there
+    is no header per record
+  - the heartbeat seals the open block even when it skips its other work (global transaction
+    running, suspended callback)
   - a torn tail gets truncated at the first invalid block, including valid blocks after a hole
   - a crash during rotation that tears the old segment's tail, while the new segment already has
     blocks, ends the chain at the tear; the later segment is renamed `.discarded`
