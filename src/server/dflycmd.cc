@@ -771,9 +771,7 @@ void DflyCmd::StartStableSyncInThread(FlowInfo* flow, ExecutionState* exec_st, E
   DCHECK(flow->conn);
 
   LSN partial_lsn = flow->start_partial_sync_at.value_or(0);
-  JournalStreamer::Config config{
-      .should_sent_lsn = true, .init_from_stable_sync = true, .start_partial_sync_at = partial_lsn};
-  flow->streamer.reset(new JournalStreamer(exec_st, config));
+  flow->streamer.reset(new ReplicaStreamer(exec_st, partial_lsn));
   flow->streamer->Start(flow->conn->socket());
 
   // Register cleanup.

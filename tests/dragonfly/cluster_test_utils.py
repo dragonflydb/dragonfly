@@ -196,7 +196,7 @@ async def get_node_id(connection):
 
 def stop_and_get_restore_log(instance):
     instance.stop()
-    lines = instance.find_in_logs("RestoreStreamer LSN")
+    lines = instance.find_in_logs("SlotMigrationStreamer LSN")
     assert len(lines) == 1
     line = lines[0]
     logging.debug(f"Streamer log line: {line}")

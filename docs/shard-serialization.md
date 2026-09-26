@@ -10,7 +10,7 @@ Shard serialization is used for three purposes:
 
 1. **Backups (RDB / DFS save)** — produces a consistent point-in-time snapshot.
 2. **Replication (full sync)** — serializes baseline data and then streams journal changes.
-3. **Slot migration** — `RestoreStreamer` serializes a subset of slots and streams changes.
+3. **Slot migration** — `SlotMigrationStreamer` serializes a subset of slots and streams changes.
 
 All three share the same base class, **`SerializerBase`**, which owns the bucket traversal
 coordination, point-in-time isolation via DashTable bucket versioning, the change-listener
@@ -20,7 +20,7 @@ subclasses implement only how a single bucket/entry is turned into bytes:
 | Subclass | Location | Output format | Use case |
 |----------|----------|---------------|----------|
 | `SliceSnapshot` | `src/server/snapshot.{h,cc}` | RDB (`RdbSerializer`) | Backups + replication full sync |
-| `RestoreStreamer` | `src/server/journal/streamer.h` | `RESTORE` commands (`CmdSerializer`) | Cluster slot migration |
+| `SlotMigrationStreamer` | `src/server/journal/streamer.h` | `RESTORE` commands (`CmdSerializer`) | Cluster slot migration |
 
 > **Historical note.** Earlier revisions of this document described a `--point_in_time_snapshot`
 > flag that toggled between a "PIT" mode and a "non-PIT" (eventual consistency) mode, the latter
@@ -38,7 +38,7 @@ subclasses implement only how a single bucket/entry is turned into bytes:
 |------|----------|------|
 | `SerializerBase` | `src/server/serializer_base.h` | Shared base: traversal coordination, PIT isolation, change listener |
 | `SliceSnapshot` | `src/server/snapshot.h` | RDB serialization of a shard |
-| `RestoreStreamer` | `src/server/journal/streamer.h` | `RESTORE`-command serialization for slot migration |
+| `SlotMigrationStreamer` | `src/server/journal/streamer.h` | `RESTORE`-command serialization for slot migration |
 | `RdbSerializer` | `src/server/rdb_save.h` | Serializes entries into RDB-format buffers |
 | `SnapshotDataConsumerInterface` | `src/server/snapshot.h` | Downstream sink interface (socket or file) |
 | `DbSlice::ChangeConsumerInterface` | `src/server/db_slice.h` | Change-listener interface implemented by `SerializerBase` |
@@ -282,8 +282,8 @@ what makes the ordering invariant hold for tiered values: a mutation or deletion
 is blocked (via `BucketDependencies::Wait` / `WaitForUnblockedJournalWrites`) until the key's
 delayed baseline has been emitted.
 
-> Both `SliceSnapshot` and `RestoreStreamer` use this same per-bucket `DelayedEntryHandler`. (An
-> earlier design had `SliceSnapshot` use a global deque and `RestoreStreamer` a separate keyed
+> Both `SliceSnapshot` and `SlotMigrationStreamer` use this same per-bucket `DelayedEntryHandler`. (An
+> earlier design had `SliceSnapshot` use a global deque and `SlotMigrationStreamer` a separate keyed
 > map; they are now unified, fixing the ordering hazard tracked in PR #6824.)
 
 ## `BucketDependencies` — Per-Bucket In-Flight Work

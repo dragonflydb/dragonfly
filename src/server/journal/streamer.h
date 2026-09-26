@@ -8,129 +8,89 @@
 #include "server/cluster/slot_set.h"
 #include "server/common_types.h"
 #include "server/execution_state.h"
+#include "server/journal/buffered_socket_writer.h"
 #include "server/journal/journal.h"
-#include "server/journal/pending_buf.h"
 #include "server/serializer_base.h"
 #include "server/synchronization.h"
 #include "util/fiber_socket_base.h"
 
 namespace dfly {
 
-// Buffered single-shard journal streamer that listens for journal changes with a
-// journal listener and writes them to a destination sink in a separate fiber.
-class JournalStreamer : public journal::JournalConsumerInterface {
+// Streams a single shard's journal to a replica during stable sync.
+// Optionally catches up from the partial sync buffer first, and periodically sends LSN markers.
+class ReplicaStreamer : public journal::JournalConsumerInterface {
  public:
-  struct Config {
-    bool should_sent_lsn = false;
-    bool init_from_stable_sync = false;
-    LSN start_partial_sync_at = 0;
-  };
+  // start_partial_sync_at: if not 0, first stream journal entries from this LSN from the
+  // partial sync buffer, and only then register for new journal changes.
+  ReplicaStreamer(ExecutionState* cntx, LSN start_partial_sync_at);
+  ~ReplicaStreamer();
 
-  JournalStreamer(ExecutionState* cntx, Config config);
-
-  virtual ~JournalStreamer();
-
-  // Self referential.
-  JournalStreamer(const JournalStreamer& other) = delete;
-  JournalStreamer(JournalStreamer&& other) = delete;
-
-  // Register journal listener and start writer in fiber.
-  virtual void Start(util::FiberSocketBase* dest);
-
-  void ConsumeJournalChange(const journal::JournalChangeItem& item);
+  // Register journal listener and start the periodic flush fiber.
+  void Start(util::FiberSocketBase* dest);
 
   // Must be called on context cancellation for unblocking
   // and manual cleanup. If it unregistered a listener, returns true.
-  virtual bool Cancel();
+  bool Cancel();
 
-  size_t UsedBytes() const;
+  size_t UsedBytes() const {
+    return writer_.pending_bytes();
+  }
 
   // For debugging purposes. Return string with formatted internal state.
   std::string FormatInternalState() const;
 
- protected:
-  // TODO: we copy the string on each write because JournalItem may be passed to multiple
-  // streamers so we can not move it. However, if we would either wrap JournalItem in shared_ptr
-  // or wrap JournalItem::data in shared_ptr, we can avoid the cost of copying strings.
-  // Also, for small strings it's more peformant to copy to the intermediate buffer than
-  // to issue an io operation.
-  void Write(std::string str);
-
-  // Blocks the if the consumer if not keeping up.
+ private:
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) final;
   void ThrottleIfNeeded() final;
 
-  virtual bool ShouldWrite(const journal::JournalChangeItem& item) const {
-    return cntx_->IsRunning();
-  }
-
-  void WaitForInflightToComplete(bool with_timeout);
-
-  size_t inflight_bytes() const {
-    return in_flight_bytes_;
-  }
-
-  util::FiberSocketBase* dest_ = nullptr;
-  ExecutionState* cntx_;
-  uint64_t throttle_count_ = 0;
-  uint64_t total_throttle_wait_usec_ = 0;
-  uint32_t throttle_waiters_ = 0;
-
-  PendingBuf pending_buf_;
-
- private:
-  // Return true if all lsn's from config_.start_partial_sync_at were sent (or if started from 0).
+  // Return true if all lsn's from start_partial_sync_at_ were sent (or if started from 0).
   // Return false if not all lsn's were sent (stalled) in time. Cancels the context with error.
   bool MaybePartialStreamLSNs();
 
-  void AsyncWrite(bool force_send);
-  void OnCompletion(std::error_code ec, size_t len);
+  void PeriodicFlushFiber(std::chrono::milliseconds period);
 
-  bool IsStalled() const;
+  ExecutionState* cntx_;
+  const LSN start_partial_sync_at_;
+  BufferedSocketWriter writer_;
 
-  util::fb2::Fiber stalled_data_writer_;
-  util::fb2::Done stalled_data_writer_done_;
-  void StartStalledDataWriterFiber();
-  void StopStalledDataWriterFiber();
-  void StalledDataWriterFiber(std::chrono::milliseconds period_ms, util::fb2::Done* waiter);
+  util::fb2::Fiber flush_fiber_;
+  util::fb2::Done flush_fiber_done_;
 
-  const Config config_;
-  // If we are replication in stable sync we can aggregate data before sending
-  size_t in_flight_bytes_ = 0, total_sent_ = 0;
-
-  // Last time we sent async data, as base::CycleClock::Now() cycles.
-  uint64_t last_async_write_time_ = 0;
   time_t last_lsn_time_ = 0;
   LSN last_lsn_writen_ = 0;
-  util::fb2::EventCount waker_;
   uint32_t journal_cb_id_{0};
 };
 
 class CmdSerializer;
 
+// Streams the migrated slots of a single shard to the target node during slot migration.
 // Serializes existing DB as RESTORE commands, and sends updates as regular commands.
 // Only handles relevant slots, while ignoring all others.
-class RestoreStreamer : public JournalStreamer, public SerializerBase {
+class SlotMigrationStreamer : public journal::JournalConsumerInterface, public SerializerBase {
  public:
-  RestoreStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx);
-  ~RestoreStreamer() override;
+  SlotMigrationStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx);
+  ~SlotMigrationStreamer() override;
 
-  void Start(util::FiberSocketBase* dest) override;
+  void Start(util::FiberSocketBase* dest);
 
   void Run();
 
   // Cancel() must be called if Start() is called
-  bool Cancel() override;
+  bool Cancel();
 
   void SendFinalize(long attempt);
 
  private:
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) final;
+  void ThrottleIfNeeded() final;
+
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                  bool on_update) override;
 
   void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             time_t expire, uint32_t mc_flags) override;
 
-  bool ShouldWrite(const journal::JournalChangeItem& item) const override;
+  bool ShouldWrite(const journal::JournalChangeItem& item) const;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
@@ -143,12 +103,16 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
     uint64_t iter_skips = 0;
   };
 
+  ExecutionState* cntx_;
+  BufferedSocketWriter writer_;
   cluster::SlotSet my_slots_;
 
   std::unique_ptr<CmdSerializer> cmd_serializer_;
 
   Stats stats_;
   base::RealTimeAggregator cpu_aggregator_;
+  LSN last_lsn_writen_ = 0;
+  uint32_t journal_cb_id_{0};
 };
 
 }  // namespace dfly
