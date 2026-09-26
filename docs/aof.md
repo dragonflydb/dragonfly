@@ -238,6 +238,9 @@ AOF refuses to start.
   - segment seq
   - `segment_uid`: a random 64-bit id, generated each time a file is prepared as a spare. It
     seeds the block CRCs, so a block can only validate in the segment it was written to.
+  - `reserved`: a 64-bit field, always 0 in this version. Writers set it to 0, and readers ignore
+    it. A later feature can use it, such as a per-run `run_id`, without changing the header
+    layout or the format version.
   - header CRC
 
   The header omits the start LSN and checkpoint id because neither is known when the writer
@@ -901,9 +904,10 @@ This rule leaves the following scenarios unprotected:
     [Multi-Shard Tail Atomicity](#multi-shard-tail-atomicity). A shard that got no writes after
     a restart still has records from the previous run in its tail. A new-run transaction on
     another shard with the same txid could then be matched with one of them.
-  - A per-run `run_id` in each segment header, with pairing by `(run_id, txid)`, partially solves
-    this: it separates runs, but only at segment granularity. Starting the txid counter past the
-    highest txid seen during replay would make txids unique across the AOF's lifetime.
+  - A per-run `run_id` in each segment header (the `reserved` field), with pairing by `(run_id,
+    txid)`, partially solves this: it separates runs, but only at segment granularity. Starting the
+    txid counter past the highest txid seen during replay would make txids unique across the AOF's
+    lifetime.
 
 What can be added later, if any of these turn out to matter:
 - A durable-offset record in each segment header (two alternating slots holding the last synced
