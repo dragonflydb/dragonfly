@@ -8,10 +8,13 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
+#include <filesystem>
+
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "io/file_util.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/test_utils.h"
@@ -19,6 +22,7 @@
 using namespace testing;
 
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
+ABSL_DECLARE_FLAG(std::string, aclfile);
 
 namespace dfly {
 
@@ -887,6 +891,23 @@ TEST_F(AclFamilyTest, AclInfoMetrics) {
 
   // TotalBytes must be positive even with only the default user.
   EXPECT_GT(stats.TotalBytes(), 0u);
+}
+
+TEST_F(AclFamilyTest, AclLoadMinimalUserRule) {
+  TestInitAclFam();
+  std::string path = (std::filesystem::temp_directory_path() / "dfly_minimal_rule.acl").string();
+  io::WriteStringToFileOrDie("user default off\nuser worker on nopass ~* &* +@all\n", path);
+
+  absl::SetFlag(&FLAGS_aclfile, path);
+  auto resp = Run("ACL LOAD");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run("ACL LIST");
+  auto vec = resp.GetVec();
+  EXPECT_THAT(vec, UnorderedElementsAre("user default off resetchannels -@all $all",
+                                        "user worker on nopass ~* &* +@all $all"));
+
+  std::filesystem::remove(path);
 }
 
 }  // namespace dfly
