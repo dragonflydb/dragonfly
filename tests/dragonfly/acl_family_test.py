@@ -526,6 +526,19 @@ async def test_set_acl_file(async_client: aioredis.Redis, tmp_dir):
     assert result == "OK"
 
 
+async def test_set_acl_file_minimal_user_rule(async_client: aioredis.Redis, tmp_dir):
+    acl_file_content = "USER default off\nUSER worker on nopass ~* &* +@all"
+    acl = create_temp_file(acl_file_content, tmp_dir)
+
+    await async_client.execute_command(f"CONFIG SET aclfile {acl}")
+    await async_client.execute_command("ACL LOAD")
+
+    result = await async_client.execute_command("ACL LIST")
+    assert 2 == len(result)
+    assert "user default off resetchannels -@all $all" in result
+    assert "user worker on nopass ~* &* +@all $all" in result
+
+
 @dfly_args({"proactor_threads": 1})
 async def test_set_len_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
