@@ -450,6 +450,9 @@ class DflyInstanceFactory:
         vmod = "dragonfly_connection=1,db_slice=1,listener_interface=1,main_service=1,rdb_save=1,rdb_load=1,replica=1,cluster_family=1,engine_shard=1,dflycmd=1,snapshot=1,streamer=1"
         args.setdefault("vmodule", vmod)
         args.setdefault("jsonpathv2")
+        if version == 100:
+            args.setdefault("disable_scope_based_mem_track", "false")
+
         # Disable replica_delete_expired by default so consistency tests that compare master/replica
         # data signatures are not broken by replicas proactively deleting expired keys.
         if version > 1.37:

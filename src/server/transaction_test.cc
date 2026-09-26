@@ -6,6 +6,7 @@
 
 #include <gmock/gmock.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/facade_stats.h"
@@ -22,6 +23,8 @@
 #include "util/fibers/pool.h"
 #include "util/fibers/synchronization.h"
 
+ABSL_DECLARE_FLAG(bool, disable_scope_based_mem_track);
+
 namespace dfly {
 
 using namespace std;
@@ -37,6 +40,7 @@ class TransactionTest : public Test {
   void TearDown() override;
 
   static void SetUpTestSuite() {
+    absl::SetFlag(&FLAGS_disable_scope_based_mem_track, false);
     ServerState::Init(kNumThreads, kNumThreads, nullptr, nullptr);
     facade::tl_facade_stats = new facade::FacadeStats;
   }
@@ -443,7 +447,7 @@ void AllButOneDeltaIs(const TypeMemDeltas& deltas, size_t pos, int64_t expected)
 }
 
 template <typename F> auto WithMemTrack(int obj_type, F f) {
-  MemoryScope scope(obj_type);
+  AtomicMemoryScope scope(obj_type);
   return f();
 }
 
@@ -482,7 +486,7 @@ TEST_F(TransactionTest, DeltaSuspendResume) {
     void* q = nullptr;
 
     {
-      MemoryScope scope_for_string{OBJ_STRING};
+      TxMemoryScope scope_for_string{OBJ_STRING, nullptr};
       p = mr->allocate(1024);
 
       scope_for_string.Suspend();
@@ -497,6 +501,54 @@ TEST_F(TransactionTest, DeltaSuspendResume) {
 
     mr->deallocate(p, 1024);
     mr->deallocate(q, 128);
+  });
+}
+
+TEST_F(TransactionTest, DeltaNested) {
+  // runs three operations nested, for string->list->hash type
+  // each type must track its own delta correctly
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+    std::vector<std::pair<void*, size_t>> tracked;
+
+    // these allocations of size s are actually counted for the size, and cleaned up later
+    auto track = [&](size_t s) { tracked.emplace_back(mr->allocate(s), s); };
+
+    auto hash_cb = [&] {
+      // create some temp. allocations which are cleaned up immediately, and should not count
+      // towards OBJ_HASH
+      void* p = mr->allocate(256);
+      track(128);
+      mr->deallocate(p, 256);
+    };
+
+    auto list_cb = [&] {
+      track(512);
+      WithMemTrack(OBJ_HASH, hash_cb);
+    };
+
+    auto str_cb = [&] {
+      track(1024);
+      WithMemTrack(OBJ_LIST, list_cb);
+    };
+
+    const auto before = shard->type_mem_delta();
+    WithMemTrack(OBJ_STRING, str_cb);
+    auto deltas = DeltaDiff(before, shard->type_mem_delta());
+
+    ASSERT_EQ(deltas[OBJ_STRING], 1024);
+    ASSERT_EQ(deltas[OBJ_LIST], 512);
+    ASSERT_EQ(deltas[OBJ_HASH], 128);
+
+    deltas[OBJ_HASH] = 0;
+    deltas[OBJ_LIST] = 0;
+    deltas[OBJ_STRING] = 0;
+
+    ASSERT_THAT(deltas, Each(0));
+
+    for (const auto& [ptr, size] : tracked)
+      mr->deallocate(ptr, size);
   });
 }
 
