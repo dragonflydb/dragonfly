@@ -174,7 +174,7 @@ The MVP imposes these restrictions, which the later
 - AOF can only be enabled at startup with `--aof`. `CONFIG SET appendonly` is not supported.
 - AOF is not supported on replicas: `--aof` together with `--replicaof`, and `REPLICAOF` while
   AOF is on, are rejected.
-- `DFLY LOAD`, `DEBUG RELOAD` and `DEBUG LOAD` are rejected while AOF is on.
+- `DFLY LOAD`, `DEBUG RELOAD` are rejected while AOF is on.
 
 ---
 
@@ -238,9 +238,6 @@ AOF refuses to start.
   - segment seq
   - `segment_uid`: a random 64-bit id, generated each time a file is prepared as a spare. It
     seeds the block CRCs, so a block can only validate in the segment it was written to.
-  - `run_id`: a random 64-bit id of the process run that prepared the segment. Transaction ids
-    restart in every process (`op_seq` starts at 1), so replay pairs records across shards by
-    `(run_id, txid)`, not by txid alone.
   - header CRC
 
   The header omits the start LSN and checkpoint id because neither is known when the writer
@@ -760,8 +757,8 @@ exists. That load goes through
    - An LSN discontinuity means an earlier segment ended early, for example because a crash
      during rotation tore its tail while the next segment already had blocks on disk. The chain
      then ends at that point (step 5).
-   - At startup, empty segments at the end of the chain are re-prepared as the next spare, with a
-     new header and the current `run_id`, or deleted.
+   - At startup, empty segments at the end of the chain are reused as the next spare, or
+     deleted.
 4. **Replay each chain in its own fiber.** There is one fiber per source-shard chain, all
    running in parallel. They are distributed over the current proactor pool (chain i on proactor
    `i % pool size`), as replica flows are in `replica.cc`. A source shard id can exceed the
@@ -785,10 +782,14 @@ exists. That load goes through
      order. Per-key ordering is therefore preserved. This is the same argument that makes
      replication between masters and replicas with different shard counts correct.
    - **Global commands** (FLUSHALL, FLUSHDB, FLUSHSLOTS) meet at the `MultiShardExecution`
-     barrier, keyed by `(run_id, txid)`. The `run_id` comes from each record's segment header,
-     because txids restart in every process. The barrier's participant count is not fixed at
-     `shard_count`. It
+     barrier, keyed by txid. The barrier's participant count is not fixed at `shard_count`. It
      is the number of chains that have not reached end of log.
+     - **The txid alone is enough.** Txids restart in every process, and a chain can span
+       restarts. But global commands run on every shard in one global order, so every chain holds
+       the same sequence of them. Each barrier waits for all live chains, so chains pass their
+       global commands in lockstep, and a completed entry is erased. A reused txid can therefore
+       never pair the wrong commands. The case that breaks lockstep, a chain that ended early,
+       forces a checkpoint (step 6).
      - A chain that reaches end of log counts as having arrived at every pending and future
        barrier. Reaching end of log also wakes fibers already waiting at a barrier.
      - Without this, a truncated tail can deadlock replay. Chain A may have a FLUSHALL on disk
@@ -892,6 +893,17 @@ This rule leaves the following scenarios unprotected:
 - **Operator errors.** Partially copied directories and files mixed in from another node are
   caught only in part: by `shard_id`, `shard_count`, `segment_uid`, seq and LSN checks. For
   example, a whole chain copied from an older backup of the same node passes all of these checks.
+- **Transaction ids reused across restarts.** This is not corruption, but a related replay gap.
+  Txids restart at 1 in every process, and a chain spans restarts.
+  - The MVP is not affected: it pairs only global commands by txid, and those pass through replay
+    in lockstep (see [Replay](#replay-at-startup), step 4).
+  - Pairing that is not in lockstep is affected, such as
+    [Multi-Shard Tail Atomicity](#multi-shard-tail-atomicity). A shard that got no writes after
+    a restart still has records from the previous run in its tail. A new-run transaction on
+    another shard with the same txid could then be matched with one of them.
+  - A per-run `run_id` in each segment header, with pairing by `(run_id, txid)`, partially solves
+    this: it separates runs, but only at segment granularity. Starting the txid counter past the
+    highest txid seen during replay would make txids unique across the AOF's lifetime.
 
 What can be added later, if any of these turn out to matter:
 - A durable-offset record in each segment header (two alternating slots holding the last synced
@@ -1039,7 +1051,7 @@ This stage lifts the MVP constraints:
   - From then on AOF works on the replica with no further special handling. Stable sync already
     records applied entries into the replica's own journal (see the PING handling in
     `replica.cc`).
-- **Other `RdbLoader`-driven loads:** `DFLY LOAD`, `DEBUG RELOAD`, `DEBUG LOAD`.
+- **Other `RdbLoader`-driven loads:** `DFLY LOAD`, `DEBUG RELOAD`.
 
 Incoming slot-migration data needs nothing extra. The target applies it through the journal
 executor and journals it like any other write.
@@ -1056,9 +1068,10 @@ across a crash: shard A's part can be durable while shard B's is not.
 Possible fix:
 - Reuse the deprecated per-entry field (currently always written as `1u`) to carry the number
   of shards that participate in the transaction.
-- During replay, hold back multi-shard transactions, identified by `(run_id, txid)`, at the tail
-  until every other chain has shown its
-  part or reached end of log.
+- During replay, hold back multi-shard transactions at the tail until every other chain has
+  shown its part or reached end of log.
+- This needs transaction ids that are unique across restarts, because tails are not in lockstep
+  (see [Corruption Scenarios Not Covered](#corruption-scenarios-not-covered)).
 - Drop the incomplete ones. Only the tail of the log can contain them.
 - Dropping a transaction's part leaves that part on disk in the middle of a chain. As with a
   global command completed by an exhausted chain, the files no longer match the replayed state.
@@ -1194,8 +1207,8 @@ authoritative source; the aux field provides diagnostic information only.
   - buffers queued while waiting for a spare count against `--aof_max_buffered_bytes`
   - a crash right after the replay truncation and renames does not bring discarded segments back,
     and the resumed segment keeps seqs contiguous
-  - global commands from different runs with the same txid are not paired, because the barrier is
-    keyed by `(run_id, txid)`
+  - global commands from different runs that reuse a txid are paired correctly, because chains
+    pass global commands in lockstep
   - out-of-order write completions advance `written_lsn` only over the contiguous prefix
   - blocks sealed in one proactor loop iteration are submitted as one write
   - a torn tail gets truncated at the first invalid block, including valid blocks after a hole
