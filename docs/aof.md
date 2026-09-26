@@ -61,7 +61,9 @@ Non-goals:
 - The epoll backend. AOF requires io_uring and refuses to start with `--proactor_type=epoll`.
 - Loading or producing Valkey-format AOF files.
 - Tiered AOF storage (S3). The AOF is local only for now, keeping the metadata simple: a
-  manifest and self-describing segment files, with no index of remote objects.
+  manifest and self-describing segment files, with no index of remote objects. In the MVP, only
+  local saves become checkpoints. Using an S3 save as the base is an extension (see
+  [Other Extensions](#other-extensions)).
 - A hard bound on disk usage. Checkpoints keep the log proportional to the dataset, but nothing
   stops writes when the disk fills up. A full disk surfaces as metrics and, depending on the
   error policy, as failed write replies (see [Checkpoints](#checkpoints-bounding-file-growth)).
@@ -595,7 +597,7 @@ on where its output lives:
 |---|---|---|
 | Automatic trigger, shard-count change at restart | `--aof_dir` | Yes |
 | SAVE, BGSAVE or `--snapshot_cron` to a local path on the same filesystem as `--aof_dir` | The user's path | Yes: its files are hard-linked into `--aof_dir` |
-| A save to S3 or other cloud storage, or to a local path on another filesystem | The user's destination | No: it stays a plain save |
+| A save to S3 or other cloud storage, or to a local path on another filesystem | The user's destination | No in the MVP: it stays a plain save. S3 saves can count in a later extension ([Other Extensions](#other-extensions)). |
 
 - **Hard links.** The AOF owns its links. The user can move or delete their dump files without
   breaking recovery, and garbage collection deletes only the AOF's links, never the user's
@@ -624,8 +626,10 @@ on where its output lives:
   `auto-aof-rewrite-*` rule. The defaults are 64MB and 100%.
 - **Any qualifying save:** SAVE, BGSAVE, or `--snapshot_cron`. With scheduled saves, the AOF
   stays bounded without extra snapshots.
-- **Manual:** a SAVE or BGSAVE to a qualifying destination. There is no separate checkpoint
-  command. `BGREWRITEAOF` is not implemented (see [Other Extensions](#other-extensions)).
+- **Manual:** a SAVE or BGSAVE to a qualifying destination. There is no separate checkpoint command.
+  In the MVP, a deployment that saves only to S3 or to another filesystem has no manual checkpoint,
+  and relies on the automatic trigger. `BGREWRITEAOF` is not implemented (see [Other
+  Extensions](#other-extensions)).
 - **Shard count change at restart:** see [Replay](#replay-at-startup), step 6.
 - Later stages add more forced checkpoints; see
   [Re-base](#re-base-paths-that-bypass-the-journal).
@@ -1004,8 +1008,21 @@ Possible fix:
 - **`dfly-aof-check --fix`**, a repair tool for corrupted segments.
 - **Corruption detection** for data that was already synced; see
   [Corruption Scenarios Not Covered](#corruption-scenarios-not-covered).
-- **Cloud saves as checkpoints.** A save to S3 could also count, by teeing its stream into a
-  local base file in `--aof_dir`: one serialization, two destinations.
+- **S3 saves as checkpoints.** A completed save to S3 commits the manifest with the base
+  object's URI, and resets the AOF like a local save.
+  - **Replay:** startup loads that base through the existing S3 snapshot loader, then replays the
+    local segments as usual. The save path already finishes the upload before it returns, so the
+    manifest never references an incomplete object.
+  - **Retention requirement:** the AOF cannot own an S3 object the way it owns a hard link. The S3
+    object that the manifest references must therefore be kept until the next checkpoint
+    replaces it. Garbage collection never deletes S3 objects, and bucket lifecycle rules or
+    retention scripts must not remove that object.
+  - **Failure mode:** recovery depends on reaching S3 at startup. If the referenced base cannot
+    be fetched (network, credentials, or a deleted object), startup fails loudly and names the
+    missing object, instead of starting with partial data.
+  - **Alternative:** tee the save stream into a local base file in `--aof_dir` as well. That is
+    one serialization to two destinations. Recovery stays local and the AOF owns its base, at
+    the cost of local disk space and write bandwidth for a second copy.
 - **`BGREWRITEAOF`** as a thin alias for a checkpoint, if Valkey tooling compatibility calls for
   it.
 
@@ -1121,8 +1138,8 @@ authoritative source; the aux field provides diagnostic information only.
     data matches.
   - A BGSAVE to a local path on the same filesystem becomes the checkpoint. Deleting the user's
     dump file afterwards does not break replay.
-  - A save to S3, or to another filesystem, stays a plain save: no manifest commit, and the
-    automatic trigger is not reset.
+  - A save to S3 (in the MVP), or to another filesystem, stays a plain save: no manifest commit, and
+    the automatic trigger is not reset.
   - An automatic checkpoint that comes due during a qualifying BGSAVE is dropped, and that
     BGSAVE commits as the checkpoint.
   - With `--snapshot_cron`, the AOF stays bounded with no extra snapshots.
