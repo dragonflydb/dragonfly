@@ -2886,6 +2886,89 @@ TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
   EXPECT_GE(GetMetrics().events.expired_keys, 1u);
 }
 
+namespace {
+
+TypeMemDeltas Snapshot() {
+  TypeMemDeltas total{};
+  for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
+    auto local = shard_set->Await(sid, [] { return EngineShard::tlocal()->type_mem_delta(); });
+    ranges::transform(total, local, total.begin(), plus{});
+  }
+  return total;
+}
+
+}  // namespace
+
+TEST_F(GenericFamilyTest, DeleteTrackMemByType) {
+  const string value(4096, 'x');
+  Run({"SET", "s", value});
+  Run({"HSET", "h", "field", value});
+  Run({"LPUSH", "l", value});
+
+  const auto before = Snapshot();
+  ASSERT_THAT(Run({"DEL", "s", "h", "l"}), IntArg(3));
+  const auto after = Snapshot();
+
+  for (size_t type = 0; type < before.size(); ++type)
+    if (type == OBJ_STRING || type == OBJ_HASH || type == OBJ_LIST)
+      EXPECT_LT(after[type] - before[type], 0);
+    else
+      EXPECT_EQ(after[type], before[type]);
+
+  // deleting missing items doesnt change the memory
+  ASSERT_THAT(Run({"DEL", "s", "h", "l"}), IntArg(0));
+  EXPECT_EQ(Snapshot(), after);
+}
+
+TEST_F(GenericFamilyTest, AsyncDelTrackMemByType) {
+  // Compares that memory deltas produced by async unlink are the same as those from sync deletes
+  constexpr auto key = "big-collection";
+  auto populate = [&] {
+    for (size_t i = 0; i < 1000; ++i) {
+      std::string value(1024, 'x');
+      Run({"SADD", key, StrCat(value, i)});
+    }
+  };
+
+  populate();
+  auto before_del = Snapshot();
+  ASSERT_THAT(Run({"DEL", key}), IntArg(1));
+
+  auto diff = [](TypeMemDeltas deltas, const TypeMemDeltas& before) {
+    ranges::transform(deltas, before, deltas.begin(), minus{});
+    return deltas;
+  };
+
+  const auto del_diff = diff(Snapshot(), before_del);
+  EXPECT_LT(del_diff[OBJ_SET], 0);
+
+  populate();
+  const auto before_unlink = Snapshot();
+
+  auto invokes = [] {
+    uint64_t total = 0;
+    for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
+      total += shard_set->Await(
+          sid, [] { return EngineShard::tlocal()->stats().async_delete_task_invocation_total; });
+    }
+    return total;
+  };
+  const auto invocations_before = invokes();
+  ASSERT_THAT(Run({"UNLINK", key}), IntArg(1));
+
+  // wait for all the async deletes to finish before checking memory
+  ASSERT_TRUE(WaitUntilCondition(
+      [&] {
+        return ranges::all_of(views::iota(ShardId{0}, shard_set->size()), [&](auto sid) {
+          return shard_set->Await(sid, [] { return DbSlice::TEST_IsAsyncDeletionQueueEmpty(); });
+        });
+      },
+      std::chrono::seconds{5}));
+
+  EXPECT_GT(invokes(), invocations_before);
+  EXPECT_EQ(diff(Snapshot(), before_unlink), del_diff);
+}
+
 // Each iteration traverses the whole database, including command dispatch and RESP serialization
 // to a reusable in-memory sink. Run with --bench --gtest_filter='-*'
 // --benchmark_filter=BM_ScanCommand --benchmark_min_time=1s.
