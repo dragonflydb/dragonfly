@@ -28,10 +28,10 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
-#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 
 ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
@@ -252,6 +252,10 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
   me->ShiftRight(bucket_it);
 
   return 1;
+}
+
+std::optional<AtomicMemoryScope> ScopeIfEnabled(int obj_type) {
+  return MemoryScopeEnabled() ? std::make_optional<AtomicMemoryScope>(obj_type) : std::nullopt;
 }
 
 class AsyncDeleter {
@@ -2084,6 +2088,10 @@ void DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
 
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async) {
   FiberAtomicGuard guard;
+
+  const int obj_type = del_it->second.ObjType();
+  auto scope = ScopeIfEnabled(obj_type);
+
   size_t table_before = table->table_memory();
 
   if (del_it->second.HasFlag()) {

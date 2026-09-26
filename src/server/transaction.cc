@@ -8,7 +8,6 @@
 
 #include <memory>
 
-#include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
@@ -85,33 +84,30 @@ uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
-thread_local MemoryScope* tl_mem_scope = nullptr;
+thread_local MemoryScope* tl_top_scope = nullptr;
+thread_local TxMemoryScope* tl_tx_scope = nullptr;
 
 void MemTrackerHook(fb2::FiberSwitchHookEvent event) noexcept {
-  DCHECK_NE(tl_mem_scope, nullptr);
+  DCHECK_NE(tl_tx_scope, nullptr);
 
   using enum fb2::FiberSwitchHookEvent;
   switch (event) {
     case SUSPEND:
-      tl_mem_scope->Suspend();
+      tl_tx_scope->Suspend();
       break;
     case RESUME:
-      tl_mem_scope->Resume();
+      tl_tx_scope->Resume();
       break;
   }
 }
 
-template <typename Func> auto WithHook(int obj_type, Func func) {
-  MemoryScope scope(obj_type);
-  const auto prev_hook = ThisFiber::SetSwitchHook({MemTrackerHook});
-  // there is probably no prev. hook but restore just in case
-  auto cleanup = absl::MakeCleanup([prev_hook] { ThisFiber::SetSwitchHook(prev_hook); });
+template <typename Func> auto WithTxScope(int obj_type, const DbSlice* db_slice, Func func) {
+  TxMemoryScope scope(obj_type, db_slice);
   return func();
 }
 
 int ObjectType(const CommandId* cid) {
-  static const bool kTrackScopeMem = !absl::GetFlag(FLAGS_disable_scope_based_mem_track);
-  return kTrackScopeMem && cid && cid->HasFamily() ? TypeForFamily(cid->GetFamily()) : -1;
+  return MemoryScopeEnabled() && cid && cid->HasFamily() ? TypeForFamily(cid->GetFamily()) : -1;
 }
 
 }  // namespace
@@ -716,9 +712,11 @@ void Transaction::RunCallback(EngineShard* shard) {
   shard->set_running_tx(this);
 
   RunnableResult result;
+  auto& db_slice = GetDbSlice(shard->shard_id());
+
   try {
     if (const int obj_typ = ObjectType(cid_); obj_typ >= 0)
-      result = WithHook(obj_typ, [&] { return (*cb_ptr_)(this, shard); });
+      result = WithTxScope(obj_typ, &db_slice, [&] { return (*cb_ptr_)(this, shard); });
     else
       result = (*cb_ptr_)(this, shard);
 
@@ -742,7 +740,6 @@ void Transaction::RunCallback(EngineShard* shard) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
-  auto& db_slice = GetDbSlice(shard->shard_id());
   db_slice.OnCbFinishBlocking();
 
   // Handle result flags to alter behaviour.
@@ -1566,7 +1563,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   RunnableResult result;
   try {
     if (const int obj_typ = ObjectType(cid_); obj_typ >= 0)
-      result = WithHook(obj_typ, [&] { return cb(this, shard); });
+      result = WithTxScope(obj_typ, &db_slice, [&] { return cb(this, shard); });
     else
       result = cb(this, shard);
   } catch (std::bad_alloc&) {
@@ -1939,57 +1936,96 @@ std::vector<Transaction::PerShardCache>& Transaction::TLTmpSpace::GetShardIndex(
 
 namespace {
 
-int64_t TrackedMemory() {
+int64_t TrackedMemory(const DbSlice* db_slice) {
   const EngineShard* shard = EngineShard::tlocal();
-  // Full search index memory accounting scans all indices. Keep command-scope sampling O(1).
+  DCHECK_NE(shard, nullptr);
+
+  // Full search index memory accounting scans all indices, so skip it
   const int64_t used_memory = shard->UsedMemoryWithoutSearch();
+  // in certain cases such as async delete, we do not care about table memory because it will not
+  // change.
+  const int64_t table_memory = db_slice ? db_slice->table_memory() : 0;
+  return used_memory - table_memory;
+}
 
-  const DbSlice* db_slice = nullptr;
-  if (const Transaction* tx = shard->running_tx(); tx != nullptr)
-    db_slice = &tx->GetDbSlice(shard->shard_id());
-  // for unit tests which do not run in transactions
-  else if (namespaces != nullptr)
-    db_slice = &namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
-
-  return used_memory - db_slice->table_memory();
+// This wrapper is used to add validation when creating a MemoryScope object which is inside
+// TxMemoryScope. Even in release mode we must not initialize a tx scope if another is active, or
+// set fiber hooks which will reference it. If ever a tx mem. scope is created inside another, on
+// exit the child scope will wipe out tl_tx_scope, and then the parent on next suspend/resume will
+// dereference a null ptr.
+int ValidateState(int obj_type) {
+  CHECK_EQ(tl_tx_scope, nullptr);
+  CHECK_EQ(tl_top_scope, nullptr);
+  return obj_type;
 }
 
 }  // namespace
 
-MemoryScope::MemoryScope(int obj_type) : obj_type_(obj_type), mem_baseline_(TrackedMemory()) {
+bool MemoryScopeEnabled() {
+  static const bool enabled = !absl::GetFlag(FLAGS_disable_scope_based_mem_track);
+  return enabled;
+}
+
+MemoryScope::MemoryScope(int obj_type, const DbSlice* db_slice)
+    : obj_type_(obj_type),
+      // child measures memory the same way as its parent
+      db_slice_(tl_top_scope ? tl_top_scope->db_slice_ : db_slice),
+      mem_baseline_(TrackedMemory(db_slice_)),
+      parent_(tl_top_scope) {
   DCHECK_GE(obj_type_, 0);
-  DCHECK_EQ(tl_mem_scope, nullptr);
-  tl_mem_scope = this;
-}
-
-void MemoryScope::Suspend() {
-  DCHECK_EQ(tl_mem_scope, this);
-  DCHECK(!suspended_);
-
-  Checkpoint(TrackedMemory());
-  suspended_ = true;
-}
-
-void MemoryScope::Resume() {
-  DCHECK_EQ(tl_mem_scope, this);
-  DCHECK(suspended_);
-
-  mem_baseline_ = TrackedMemory();
-  suspended_ = false;
+  DCHECK(parent_ == nullptr || db_slice == nullptr)
+      << "child scope must inherit db slice from parent";
+  tl_top_scope = this;
 }
 
 MemoryScope::~MemoryScope() {
-  DCHECK_EQ(tl_mem_scope, this);
+  // hard check here, if the top scope is not "this", and "this" gets destroyed, then a child scope
+  // might hold address to this scope and dereference it later, a use after free bug.
+  CHECK_EQ(tl_top_scope, this) << "scope destroyed while not at the top of chain";
+
+  Checkpoint(TrackedMemory(db_slice_));
+
+  if (parent_)
+    parent_->child_delta_ += delta_;
+
+  tl_top_scope = parent_;
+  EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta_ - child_delta_);
+}
+
+TxMemoryScope::TxMemoryScope(int obj_type, const DbSlice* db_slice)
+    : core_(ValidateState(obj_type), db_slice),
+      prev_hook_(ThisFiber::SetSwitchHook({MemTrackerHook})) {
+  DCHECK_EQ(tl_tx_scope, nullptr) << "tx scope created while another tx scope exists";
+  DCHECK_EQ(core_.parent_, nullptr) << "tx scope must not be child";
+  tl_tx_scope = this;
+}
+
+TxMemoryScope::~TxMemoryScope() {
+  DCHECK(!suspended_);
+  DCHECK_EQ(tl_tx_scope, this);
+  tl_tx_scope = nullptr;
+  ThisFiber::SetSwitchHook(prev_hook_);
+}
+
+void TxMemoryScope::Suspend() {
+  DCHECK_EQ(tl_top_scope, &core_);
   DCHECK(!suspended_);
 
-  Checkpoint(TrackedMemory());
-  tl_mem_scope = nullptr;
+  core_.Checkpoint(TrackedMemory(core_.db_slice_));
+  tl_top_scope = nullptr;
+  suspended_ = true;
+}
 
-  EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta_);
+void TxMemoryScope::Resume() {
+  DCHECK_EQ(tl_top_scope, nullptr);
+  DCHECK(suspended_);
+
+  core_.mem_baseline_ = TrackedMemory(core_.db_slice_);
+  tl_top_scope = &core_;
+  suspended_ = false;
 }
 
 void MemoryScope::Checkpoint(int64_t used_memory) {
-  DCHECK(!suspended_);
   delta_ += used_memory - mem_baseline_;
   mem_baseline_ = used_memory;
 }
