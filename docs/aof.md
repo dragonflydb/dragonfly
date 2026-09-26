@@ -252,7 +252,8 @@ The MVP imposes these restrictions, which the later
     (`EngineShard::journal()` is null), so `StartInThread()` is required. The registration then
     holds the reference for as long as AOF is on, so `MaybeStop()` never stops the journal.
   - AOF does not use the replication ring buffer. That buffer and its retention policy stay
-    unchanged. **TODO**: consider dropping it for replication if AOF is enabled.
+    unchanged. A later stage can drop it when AOF is on (see
+    [Other Extensions](#other-extensions)).
 - **`AofSegmentWriter`** owns the segment files: writes, syncs, rotation, and spare segments.
   It runs on the shard's own proactor and uses `fb2::LinuxFile` over io_uring.
   - Unlike a socket write, a file write specifies its offset, so sealed blocks can be submitted
@@ -1131,8 +1132,16 @@ Possible fix:
 - **Size-based rotation** (`--aof_segment_max_bytes`), if a later feature needs fixed-size
   segments. For example, partial sync of replicas from AOF segments may want them. It does not
   affect disk usage (see [Checkpoints](#checkpoints-bounding-file-growth)).
-- **Partial sync for replicas from AOF segments.** This is cheap because AOF LSN equals journal
-  LSN.
+- **Partial sync for replicas from AOF segments, replacing the ring buffer.** AOF LSNs are
+  journal LSNs, so a reconnecting replica's LSN points directly into the AOF chain.
+  - With AOF on, partial sync can read the missing records from the segments instead of from the
+    in-memory replication ring buffer. The ring buffer can then be dropped, which saves its
+    memory (by default about maxmemory / shard count / 200 per shard).
+  - It also extends the partial-sync window from seconds of retention to everything since the
+    last checkpoint.
+  - The cost is reading from disk on reconnect instead of from memory. Serving a replica could
+    also delay deleting segments that the replica still needs; garbage collection would have to
+    account for connected replicas.
 - **`dfly-aof-check --fix`**, a repair tool for corrupted segments.
 - **Corruption detection** for data that was already synced; see
   [Corruption Scenarios Not Covered](#corruption-scenarios-not-covered).
