@@ -260,8 +260,12 @@ std::optional<AtomicMemoryScope> ScopeIfEnabled(int obj_type) {
 
 class AsyncDeleter {
  public:
-  template <typename Set> static void EnqueDeletion(uint32_t next, Set* ds);
+  template <typename Set> static void EnqueDeletion(uint32_t next, int obj_type, Set* ds);
   static void Shutdown();
+
+  static bool Empty() {
+    return head_ == nullptr;
+  }
 
  private:
   static constexpr uint32_t kClearStepSize = 1024;
@@ -272,6 +276,7 @@ class AsyncDeleter {
     // when the set is fully cleared; otherwise updates cursor and returns false.
     bool (*step)(ClearNode*);
     ClearNode* next;
+    int obj_type;
   };
 
   static int32_t IdleCb();
@@ -290,7 +295,7 @@ template <typename Set> uint32_t ClearStepEnd(Set* s) {
     return s->BucketCount();
 }
 
-template <typename Set> void AsyncDeleter::EnqueDeletion(uint32_t next, Set* ds) {
+template <typename Set> void AsyncDeleter::EnqueDeletion(uint32_t next, int obj_type, Set* ds) {
   auto step = +[](ClearNode* n) {
     auto* s = static_cast<Set*>(n->ds);
     n->cursor = s->ClearStep(n->cursor, kClearStepSize);
@@ -301,7 +306,7 @@ template <typename Set> void AsyncDeleter::EnqueDeletion(uint32_t next, Set* ds)
     return false;
   };
   bool launch_task = (head_ == nullptr);
-  head_ = new ClearNode{ds, next, step, head_};
+  head_ = new ClearNode{ds, next, step, head_, obj_type};
   ProactorBase* pb = ProactorBase::me();
   DCHECK(pb);
   DVLOG(2) << "Adding async deletion task, thread " << pb->GetPoolIndex() << " " << launch_task;
@@ -330,6 +335,7 @@ int32_t AsyncDeleter::IdleCb() {
 
   auto* current = head_;
   DVLOG(2) << "IdleCb " << current->cursor;
+  auto scope = ScopeIfEnabled(current->obj_type);
   if (current->step(current)) {
     head_ = current->next;
     delete current;
@@ -497,6 +503,10 @@ DbSlice::~DbSlice() {
 
 void DbSlice::ShutdownThreadLocal() {
   AsyncDeleter::Shutdown();
+}
+
+bool DbSlice::TEST_IsAsyncDeletionQueueEmpty() {
+  return AsyncDeleter::Empty();
 }
 
 void DbSlice::PrepareForSingleShotHeapDestroy() {
@@ -2122,21 +2132,21 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
   } else {
     AccountObjectMemory(del_it.key(), OBJ_KEY, -key_size_used, table);  // Key
   }
-  AccountObjectMemory(del_it.key(), pv.ObjType(), -value_heap_size, table);  // Value
+  AccountObjectMemory(del_it.key(), obj_type, -value_heap_size, table);  // Value
 
   if (async && MayDeleteAsynchronously(pv)) {
-    auto schedule = [](auto* ds) {
+    auto schedule = [obj_type](auto* ds) {
       using Ds = std::remove_pointer_t<decltype(ds)>;
       uint32_t next = ds->ClearStep(0, 512);
       if (next < ClearStepEnd(ds))
-        AsyncDeleter::EnqueDeletion(next, ds);
+        AsyncDeleter::EnqueDeletion(next, obj_type, ds);
       else
         CompactObj::DeleteMR<Ds>(ds);
     };
     void* obj_ptr = pv.RObjPtr();
     pv.SetRObjPtr(nullptr);
     // SET dispatches via VisitSet (StringSet/OAHSet); HASH is always StringMap (DenseSet-derived).
-    if (pv.ObjType() == OBJ_SET)
+    if (obj_type == OBJ_SET)
       VisitSet(obj_ptr, schedule);
     else
       schedule(static_cast<DenseSet*>(obj_ptr));
