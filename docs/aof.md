@@ -724,8 +724,7 @@ exists. That load goes through
 
 1. **Enter LOADING.** Switch to `GlobalState::LOADING` using the existing `ServerFamily::Load`
    machinery. Clients get `-LOADING` until replay finishes.
-2. **Load the base.** Load base C through the existing parallel DFS load path. Base files are
-   not tied to shards; each key goes to whichever shard owns it.
+2. **Load the base without expiring data.** Load base C through the existing snapshot load path, but add an AOF-replay mode that preserves keys and collection members even when their absolute deadlines are already past. Expiry remains suspended from base loading through tail replay; otherwise a tail command that ran before the deadline can observe a different base state. Base files are not tied to shards; each key goes to whichever shard owns it.
 3. **Validate the segment chains.** For each shard i:
    - Glob its segments and read their headers.
    - Starting at `cut_seq_i`, require that segment seqs are contiguous.
