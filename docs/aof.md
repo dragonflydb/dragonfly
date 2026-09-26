@@ -13,6 +13,7 @@ serialization point. Periodic DFS checkpoints keep the logs bounded.
 **Part 1: MVP**
 
 - [Building Blocks We Reuse](#building-blocks-we-reuse)
+- [Definitions](#definitions)
 - [MVP Scope](#mvp-scope)
 - [Architecture](#architecture)
 - [On-Disk Layout](#on-disk-layout)
@@ -91,11 +92,94 @@ Non-goals:
 - **Journal records are deterministic.** TTLs are journaled as absolute times (PEXPIREAT, PXAT).
   Expiry and eviction are journaled as `DEL`. Replaying the log hours later therefore produces
   the same state, provided replay does not expire keys on its own (see
-  [Replay](#replay-at-startup), step 4).
+  [Replay](#replay-at-startup), steps 2 and 4).
 - **Snapshots are point-in-time per shard.** The cut happens at
   `SerializerBase::RegisterChangeListener`. Replication full sync registers the journal consumer
   at that same point ([snapshot.cc](../src/server/snapshot.cc)). This is exactly the
   "base + log from LSN L" cut that AOF checkpoints need.
+
+---
+
+## Definitions
+
+Terms used throughout this document. They are per shard unless stated otherwise.
+
+**Journal and positions**
+- **Journal record:** one serialized entry that `JournalSlice` produces for a write on a shard,
+  for example one shard's part of a command. The AOF stores these bytes unchanged.
+- **LSN:** the journal's per-shard sequence number of a record. AOF LSNs are journal LSNs; there
+  is no second counter.
+- **`last_appended_lsn`:** the LSN of the newest record the `AofStreamer` has accepted. It may not
+  be written to the file yet.
+- **`written_lsn`:** the end of the contiguous prefix of records whose writes have completed.
+  Writes complete out of order, so this can lag behind records that are already on disk.
+- **`durable_lsn`:** the end of the prefix covered by a completed `fdatasync` of the segments that
+  hold it. `always` mode holds replies until this reaches their records.
+- **Global command:** FLUSHALL, FLUSHDB or FLUSHSLOTS. Such a command runs on every shard, and
+  replay pairs its copies across shards.
+- **`txid`:** a transaction id. It is unique only within one process run, because it restarts at
+  1 on every start.
+
+**Log structure**
+- **Block:** the unit of writing and of validation. A block is a 21-byte header (with a CRC) plus
+  the concatenated journal records sealed together. See [Segment format](#segment-format).
+- **Sealing:** closing the open block, so that it can be written. It happens in
+  `ThrottleIfNeeded()`.
+- **Batch:** consecutive sealed blocks submitted as one write.
+- **Segment:** one AOF file of one shard: a header followed by blocks.
+- **Segment seq:** the sequence number of a segment within its shard's files. Seqs are
+  contiguous; a gap means a file is missing.
+- **Chain:** all segments of one shard, from the checkpoint's cut segment onward, in seq order.
+  Replay reads one chain per source shard.
+- **Active segment:** the segment a shard currently appends to.
+- **Spare segment:** a segment prepared in the background, with a durable header and directory
+  entry, that the next rotation switches to.
+- **Empty segment:** a segment with a valid header but no valid first block, such as an unused
+  spare. Replay skips empty segments.
+- **Recycled segment:** an old, garbage-collected segment renamed and reused as a spare. Its
+  stale content stays in place until overwritten.
+- **`segment_uid`:** a random id written to a segment header every time the file is prepared. It
+  seeds the block CRCs, so stale blocks in a recycled file never validate.
+- **`run_id`:** a random id of the process run that prepared a segment. Replay pairs records
+  across shards by `(run_id, txid)`.
+- **Rotation:** switching a shard from its active segment to the spare. It happens only at a
+  checkpoint cut, and when the log resumes after a restart.
+
+**Checkpoints**
+- **Base:** a full snapshot (DFS or RDB) of the dataset, taken at a checkpoint's cut. Replay
+  starts from the base and applies the chains after it.
+- **Cut:** the point on each shard where a snapshot starts. Every record before it is reflected
+  in the snapshot, and every record from it on is not.
+- **Cut LSN (`L_i`, `cut_lsn`):** the LSN of shard i's first record after the cut. Shard i's
+  chain starts there.
+- **Checkpoint:** a committed base together with its per-shard cut LSNs. Once it commits,
+  segments before the cuts can be deleted. While AOF is on, every save takes the cut, and a
+  qualifying save becomes the checkpoint.
+- **Qualifying save:** a save whose output can serve as the base. In the MVP, that is a save
+  into `--aof_dir`, or to a local path on the same filesystem, whose files are hard-linked into
+  `--aof_dir`.
+- **Manifest:** the small file that names the current base and each shard's cut LSN and cut seq.
+  It is the source of truth, and is replaced atomically.
+- **Re-base:** a checkpoint forced because data changed without going through the journal, for
+  example after a replica full sync. See [Re-base](#re-base-paths-that-bypass-the-journal).
+
+**Crash and recovery**
+- **Torn block:** a block only partly written when the node crashed. Its CRC does not validate.
+- **Hole:** a region inside the log that was never written, because a later write reached the
+  disk before an earlier one. It reads as zeros, so `len == 0`.
+- **Torn tail:** the damaged end of a chain after a crash, with holes, torn blocks, and possibly
+  valid blocks after them.
+- **End of log:** the first invalid position in a chain: end of file, `len == 0`, a CRC mismatch,
+  or an unexpected `first_lsn`.
+- **Longest valid prefix:** everything in a chain before its end of log. Replay applies it and
+  discards the rest.
+- **Discarded segment:** a later segment of a chain that replay did not reach. It is renamed with
+  a `.discarded` suffix and kept until the next checkpoint.
+
+**Later-stage terms**
+- **Group commit:** one `fdatasync` covering the writes of many transactions (`always` mode).
+- **Atomic group:** the records of one multi-command transaction on one shard. Replay applies
+  them all or none (see [Atomic Groups](#atomic-groups)).
 
 ---
 
@@ -161,16 +245,16 @@ The MVP imposes these restrictions, which the later
 ```
 
 - **`AofStreamer`** is a new `JournalConsumerInterface`, one per shard (thread-local, like the
-  journal slice). It turns journal records into blocks.
+  journal slice) that turns journal records into blocks.
   - It first starts the journal on its shard (`journal::StartInThread()`), then registers with
     `journal::RegisterConsumer`. Registration only increments a user count; it does not start
     the journal. On a standalone node without replicas, journaling is off
     (`EngineShard::journal()` is null), so `StartInThread()` is required. The registration then
-    holds that user for as long as AOF is on, so `MaybeStop()` never stops the journal.
+    holds the reference for as long as AOF is on, so `MaybeStop()` never stops the journal.
   - AOF does not use the replication ring buffer. That buffer and its retention policy stay
-    unchanged.
-- **`AofSegmentWriter`** owns the segment files: writes, syncs, rotation, and spare segments. It
-  runs on the shard's own proactor and uses `fb2::LinuxFile` over io_uring.
+    unchanged. **TODO**: consider dropping it for replication if AOF is enabled.
+- **`AofSegmentWriter`** owns the segment files: writes, syncs, rotation, and spare segments.
+  It runs on the shard's own proactor and uses `fb2::LinuxFile` over io_uring.
   - Unlike a socket write, a file write specifies its offset, so sealed blocks can be submitted
     in parallel and still land in order (see [Write Path](#write-path)).
   - [Pure Async Disk I/O vs. Writer Fiber](#pure-async-disk-io-vs-writer-fiber) compares
@@ -185,7 +269,9 @@ The MVP imposes these restrictions, which the later
 
 ## On-Disk Layout
 
-All files live in `--aof_dir`, which defaults to `--dir`:
+All files live in `--aof_dir`, which defaults to `--dir` if empty and if `--dir` points
+to a local file system. If `--dir` is remote (for example `s3://...`) and `--aof_dir` is empty,
+AOF refuses to start.
 
 ```
 <name>.manifest                       # source of truth; replaced atomically
@@ -724,7 +810,11 @@ exists. That load goes through
 
 1. **Enter LOADING.** Switch to `GlobalState::LOADING` using the existing `ServerFamily::Load`
    machinery. Clients get `-LOADING` until replay finishes.
-2. **Load the base without expiring data.** Load base C through the existing snapshot load path, but add an AOF-replay mode that preserves keys and collection members even when their absolute deadlines are already past. Expiry remains suspended from base loading through tail replay; otherwise a tail command that ran before the deadline can observe a different base state. Base files are not tied to shards; each key goes to whichever shard owns it.
+2. **Load the base without expiring data.** Load base C through the existing snapshot load path, but
+   add an AOF-replay mode that preserves keys and collection members even when their absolute
+   deadlines are already past. Expiry remains suspended from base loading through tail replay;
+   otherwise a tail command that ran before the deadline can observe a different base state. Base
+   files are not tied to shards; each key goes to whichever shard owns it.
 3. **Validate the segment chains.** For each shard i:
    - Glob its segments and read their headers.
    - Starting at `cut_seq_i`, require that segment seqs are contiguous.
