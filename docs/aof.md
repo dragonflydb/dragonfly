@@ -112,7 +112,8 @@ What the MVP provides:
     does not cap how long a stalled sync takes.
   - `aof_fsync_latency` and `aof_inflight_bytes` in `INFO persistence` show when the window
     grows.
-- **Bounded disk usage:** automatic checkpoints.
+- **Bounded disk usage:** automatic checkpoints. Every local save (SAVE, BGSAVE, scheduled
+  saves) doubles as a checkpoint, so there is no second snapshot next to regular backups.
 - **Recovery:** parallel replay at startup, including a changed shard count.
 - **Errors:** a failed write or sync puts the shard into a not-durable state (subject to the
   error policy). Write failures clear once the failed ranges are rewritten and synced. Sync
@@ -428,7 +429,8 @@ cgroup memory limit.
 
 **Checkpoint base files** keep using the existing O_DIRECT snapshot path. Those are large
 sequential writes that are already aligned. The only change is a final `FSync()` before the
-rename, since snapshot files are not fsynced today.
+rename, since snapshot files are not fsynced today. While AOF is on, this applies to every save,
+because any save may become the base (see [Checkpoints](#checkpoints-bounding-file-growth)).
 
 ---
 
@@ -582,11 +584,46 @@ This is what Valkey's `BGREWRITEAOF` does as well. It never reads the old AOF. A
 dumps the in-memory dataset as the new BASE while the parent starts a new INCR file at the fork
 point. Here, the snapshot's point-in-time cut takes the place of `fork()`.
 
+### Saves and checkpoints are one operation
+
+While AOF is on, there is no separate checkpoint mechanism. Every save takes the AOF cut, and
+a checkpoint is simply a save whose output can serve as the base. This covers SAVE, BGSAVE,
+`--snapshot_cron`, the automatic trigger, and `DEBUG AOF CHECKPOINT`. Whether a save commits as
+a checkpoint depends only on where its output lives:
+
+| Save | Output | Becomes the checkpoint? |
+|---|---|---|
+| Automatic trigger, `DEBUG AOF CHECKPOINT`, shard-count change at restart | `--aof_dir` | Yes |
+| SAVE, BGSAVE or `--snapshot_cron` to a local path on the same filesystem as `--aof_dir` | The user's path | Yes: its files are hard-linked into `--aof_dir` |
+| A save to S3 or other cloud storage, or to a local path on another filesystem | The user's destination | No: it stays a plain save |
+
+- **Hard links.** The AOF owns its links. The user can move or delete their dump files without
+  breaking recovery, and garbage collection deletes only the AOF's links, never the user's
+  files. A save qualifies when its destination directory and `--aof_dir` are on the same
+  filesystem (same `st_dev`).
+- **Plain saves take the cut too.** A save that does not qualify still captures the cut and
+  rotates the log, so there is one code path. It just does not commit a manifest, and it does
+  not reset the automatic trigger. The extra segment boundary is harmless, because the chain
+  stays continuous.
+- **Fsync.** While AOF is on, every save fsyncs its files, because a base must be durable.
+  That adds some latency to SAVE. Saves without AOF are unchanged.
+- **Formats.** Both DFS and RDB output work as a base. Both come from per-shard
+  `SliceSnapshot`s, each with its own cut. The manifest records which format the base uses.
+- **One save at a time.** This is the existing `SaveStagesController` rule, not an extra one.
+  If an automatic checkpoint comes due while a save is running, it waits. If that running save
+  qualifies, it becomes the checkpoint, and the automatic one is dropped.
+- **Result reporting.** SAVE's reply reports the save itself. If the AOF part fails after the
+  save succeeded (hard links, fsync, or the manifest), SAVE still reports success. The failure
+  is reported through [checkpoint health](#checkpoint-health), and the next save or trigger
+  retries.
+
 ### Triggers
 
 - **Automatic:** the log size since the last base exceeds
   `max(--aof_rewrite_min_size, base_size * --aof_rewrite_percentage / 100)`. This is Valkey's
   `auto-aof-rewrite-*` rule. The defaults are 64MB and 100%.
+- **Any qualifying save:** SAVE, BGSAVE, or `--snapshot_cron`. With scheduled saves, the AOF
+  stays bounded without extra snapshots.
 - **Manual:** `DEBUG AOF CHECKPOINT`, meant for tests and operations. `BGREWRITEAOF` is not
   implemented (see [Other Extensions](#other-extensions)).
 - **Shard count change at restart:** see [Replay](#replay-at-startup), step 6.
@@ -595,8 +632,7 @@ point. Here, the snapshot's point-in-time cut takes the place of `fork()`.
 
 ### Flow for checkpoint C
 
-1. Use `SaveStagesController` to prevent checkpoints from overlapping with BGSAVE or another
-   save. Do not start the checkpoint while a save is running.
+1. At most one save runs at a time, through `SaveStagesController`.
 2. **Take the cut.**
    - Run the cut as a *global* transaction, like SAVE. That guarantees every shard orders
      global commands the same way relative to the cut.
@@ -609,11 +645,14 @@ point. Here, the snapshot's point-in-time cut takes the place of `fork()`.
      cut segment onward.
    - Because the log rotates exactly at the cut, each older segment lies entirely before L_i.
      Garbage collection can then delete whole files.
-3. Serialize the base with the existing `RdbSaver`/`SliceSnapshot` (`stream_journal = false`)
-   into `<name>-base-C-*.dfs.tmp`. Appending to the log continues the whole time.
-4. `fsync` every base file, rename it into place, and `fsync` the directory.
+3. Serialize with the existing `RdbSaver`/`SliceSnapshot` (`stream_journal = false`) to the
+   save's destination: `<name>-base-C-*.dfs.tmp` in `--aof_dir`, or the user's path. Appending to
+   the log continues the whole time.
+4. `fsync` every file, rename it into place, and `fsync` the directory. For a save to the user's
+   path, then hard-link each file into `--aof_dir` as `<name>-base-C-*`, and `fsync` `--aof_dir`.
 5. Commit by writing the new manifest atomically.
-6. Delete base C-1, and every segment of shard i whose seq is below `cut_seq_i`.
+6. Delete base C-1 (the AOF's own files or links, never the user's files), and every segment of
+   shard i whose seq is below `cut_seq_i`.
 
 ### Crash safety
 
@@ -621,6 +660,8 @@ point. Here, the snapshot's point-in-time cut takes the place of `fork()`.
   a gap from the old cut through L_i and onward, because nothing has been deleted.
 - **Crash between steps 5 and 6:** at startup, files the manifest doesn't reference are
   garbage-collected.
+- **Crash after a save to the user's path, before step 5:** the user's dump files exist and are
+  valid. The AOF's links are not referenced by the manifest, so startup removes them.
 - **Checkpoint failure:** the temp files are deleted and appending simply continues. The chain
   stays intact.
 
@@ -963,6 +1004,8 @@ Possible fix:
 - **`dfly-aof-check --fix`**, a repair tool for corrupted segments.
 - **Corruption detection** for data that was already synced; see
   [Corruption Scenarios Not Covered](#corruption-scenarios-not-covered).
+- **Cloud saves as checkpoints.** A save to S3 could also count, by teeing its stream into a
+  local base file in `--aof_dir`: one serialization, two destinations.
 - **`BGREWRITEAOF`** as a thin alias for a checkpoint, if Valkey tooling compatibility calls for
   it.
 
@@ -1014,7 +1057,7 @@ authoritative source; the aux field provides diagnostic information only.
 | Shared apply logic for replica and AOF replay | `src/server/journal/journal_applier.{h,cc}` (new, extracted from `replica.cc`) | MVP |
 | End-of-log-aware global-command barrier | [tx_executor.cc](../src/server/journal/tx_executor.cc) (`MultiShardExecution`) | MVP |
 | Always-on journal user; seal and rotate at the cut | [journal_slice.cc](../src/server/journal/journal_slice.cc), [journal.cc](../src/server/journal/journal.cc) | MVP |
-| Atomic cut capture, fsync of base files, checkpoint mode | [snapshot.cc](../src/server/snapshot.cc), [save_stages_controller.cc](../src/server/detail/save_stages_controller.cc) | MVP |
+| Atomic cut capture on every save, fsync, hard links for qualifying saves, manifest commit | [snapshot.cc](../src/server/snapshot.cc), [save_stages_controller.cc](../src/server/detail/save_stages_controller.cc) | MVP |
 | Startup precedence, INFO, `-MISCONF` gating | [server_family.cc](../src/server/server_family.cc), [main_service.cc](../src/server/main_service.cc) | MVP |
 | Durability wait for `always` | [main_service.cc](../src/server/main_service.cc), connection reply flush | Fsync Policy |
 | `AtomicGroupGuard` around multi-command transactions | [journal.h](../src/server/journal/journal.h), [transaction.cc](../src/server/transaction.cc) | Atomic Groups |
@@ -1076,6 +1119,13 @@ authoritative source; the aux field provides diagnostic information only.
     window.
   - Checkpoint under load, with a crash injected at each checkpoint step: after restart, the
     data matches.
+  - A BGSAVE to a local path on the same filesystem becomes the checkpoint. Deleting the user's
+    dump file afterwards does not break replay.
+  - A save to S3, or to another filesystem, stays a plain save: no manifest commit, and the
+    automatic trigger is not reset.
+  - An automatic checkpoint that comes due during a qualifying BGSAVE is dropped, and that
+    BGSAVE commits as the checkpoint.
+  - With `--snapshot_cron`, the AOF stays bounded with no extra snapshots.
   - Checkpoints forced to fail repeatedly: the log keeps growing, `aof_checkpoint_failures`
     counts up, and the next successful checkpoint reclaims the space.
   - A FLUSHALL in the middle of the log replays correctly through the barrier.
