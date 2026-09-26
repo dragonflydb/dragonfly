@@ -740,6 +740,22 @@ TEST_F(CompactObjectTest, CuckooFilter) {
   EXPECT_FALSE(cf->Exists(hash));
 }
 
+namespace {
+struct ThrowingCtor {
+  explicit ThrowingCtor(int) {
+    throw std::bad_alloc{};
+  }
+};
+}  // namespace
+
+TEST_F(CompactObjectTest, AllocateMRFreesOnConstructorThrow) {
+  auto* mr = CompactObj::memory_resource();
+  size_t before = static_cast<MiMemoryResource*>(mr)->used();
+  EXPECT_THROW(CompactObj::AllocateMR<ThrowingCtor>(1), std::bad_alloc);
+  size_t after = static_cast<MiMemoryResource*>(mr)->used();
+  EXPECT_EQ(before, after);
+}
+
 TEST_F(CompactObjectTest, MimallocUnderutilzation) {
   // We are testing with the same object size allocation here
   // This test is for https://github.com/dragonflydb/dragonfly/issues/448
