@@ -102,89 +102,32 @@ Non-goals:
 
 ## Definitions
 
-Terms used throughout this document. They are per shard unless stated otherwise.
+Key terms. They are per shard unless stated otherwise.
 
-**Journal and positions**
-- **Journal record:** one serialized entry that `JournalSlice` produces for a write on a shard,
-  for example one shard's part of a command. The AOF stores these bytes unchanged.
-- **LSN:** the journal's per-shard sequence number of a record. AOF LSNs are journal LSNs; there
-  is no second counter.
-- **`last_appended_lsn`:** the LSN of the newest record the `AofStreamer` has accepted. It may not
-  be written to the file yet.
-- **`written_lsn`:** the end of the contiguous prefix of records whose writes have completed.
-  Writes complete out of order, so this can lag behind records that are already on disk.
-- **`durable_lsn`:** the end of the prefix covered by a completed `fdatasync` of the segments that
-  hold it. `always` mode holds replies until this reaches their records.
-- **Global command:** FLUSHALL, FLUSHDB or FLUSHSLOTS. Such a command runs on every shard, and
-  replay pairs its copies across shards.
-- **`txid`:** a transaction id. It is unique only within one process run, because it restarts at
-  1 on every start.
-
-**Log structure**
-- **Block:** the unit of writing and of validation. A block is a 21-byte header (with a CRC) plus
-  the concatenated journal records sealed together. See [Segment format](#segment-format).
-- **Sealing:** closing the open block, so that it can be written. It happens in
-  `ThrottleIfNeeded()`.
-- **Batch:** consecutive sealed blocks submitted as one write.
-- **Segment:** one AOF file of one shard: a header followed by blocks. The file name carries a
-  sequence number that orders a shard's segments.
+- **Journal record:** one serialized write as produced by `JournalSlice`. The AOF stores these
+  bytes unchanged.
+- **LSN:** the journal's per-shard sequence number of a record. AOF LSNs are journal LSNs.
+- **Block:** a 21-byte header with a CRC, followed by journal records. The unit of writing and
+  of validation ([Segment format](#segment-format)).
+- **Segment:** one AOF file of one shard: a header followed by blocks.
 - **Chain:** the segments of one shard that replay reads, starting at the checkpoint's cut.
-  - **Normally a single segment.** Segments rotate only at a checkpoint cut and when the log
-    resumes after a restart. A committed checkpoint deletes everything before its cut. So in
-    steady state, each shard has exactly one segment, its active one.
-  - **More than one only for a while:** while a checkpoint is in progress (the segments before
-    and after its cut), after a checkpoint that failed, or after a restart. The next committed
-    checkpoint deletes the older ones.
-  - Replay reads one chain per source shard.
-- **Active segment:** the segment a shard currently appends to.
-- **Spare segment:** a segment prepared in the background, with a durable header and directory
-  entry, that the next rotation switches to.
-- **Empty segment:** a segment with a valid header but no valid first block, such as an unused
-  spare. Replay skips empty segments.
-- **Recycled segment:** an old, garbage-collected segment renamed and reused as a spare. Its
-  stale content stays in place until overwritten.
-- **`segment_uid`:** a random id written to a segment header every time the file is prepared. It
-  seeds the block CRCs, so stale blocks in a recycled file never validate.
-- **`run_id`:** a random id of the process run that prepared a segment. Replay pairs records
-  across shards by `(run_id, txid)`.
-- **Rotation:** switching a shard from its active segment to the spare. It happens only at a
-  checkpoint cut, and when the log resumes after a restart.
-
-**Checkpoints**
-- **Base:** a full snapshot (DFS or RDB) of the dataset, taken at a checkpoint's cut. Replay
-  starts from the base and applies the chains after it.
-- **Cut:** the point on each shard where a snapshot starts. Every record before it is reflected
-  in the snapshot, and every record from it on is not.
-- **Cut LSN (`L_i`, `cut_lsn`):** the LSN of shard i's first record after the cut. Shard i's
-  chain starts there.
-- **Checkpoint:** a committed base together with its per-shard cut LSNs. Once it commits,
-  segments before the cuts can be deleted. While AOF is on, every qualifying save takes the cut
-  and becomes the checkpoint.
-- **Qualifying save:** a save whose output can serve as the base. In the MVP, that is a save
-  into `--aof_dir`, or to a local path on the same filesystem, whose files are hard-linked into
-  `--aof_dir`.
-- **Manifest:** the small file that names the current base and each shard's cut LSN and cut seq.
-  It is the source of truth, and is replaced atomically.
-- **Re-base:** a checkpoint forced because data changed without going through the journal, for
-  example after a replica full sync. See [Re-base](#re-base-paths-that-bypass-the-journal).
-
-**Crash and recovery**
-- **Torn block:** a block only partly written when the node crashed. Its CRC does not validate.
-- **Hole:** a region inside the log that was never written, because a later write reached the
-  disk before an earlier one. It reads as zeros, so `len == 0`.
-- **Torn tail:** the damaged end of a chain after a crash, with holes, torn blocks, and possibly
-  valid blocks after them.
-- **End of log:** the first invalid position in a chain: end of file, `len == 0`, a CRC mismatch,
-  or an unexpected `first_lsn`.
-- **Longest valid prefix:** everything in a chain before its end of log. Replay applies it and
-  discards the rest.
-- **Discarded segment:** a later segment of a chain that replay did not reach. It is renamed with
-  a `.discarded` suffix and kept until the next checkpoint.
-
-**Later-stage terms**
-- **Group commit:** one `fdatasync` covering the writes of many transactions (`always` mode).
-- **Atomic group:** the records of one multi-command transaction on one shard. Replay applies
-  them all or none (see [Atomic Groups](#atomic-groups)).
+  Normally this is a single segment, because segments rotate only at a checkpoint cut and at
+  restart, and a committed checkpoint deletes everything before its cut.
+- **Spare segment:** a segment prepared in the background, so that rotation never waits on file
+  creation.
+- **`durable_lsn`:** the end of the prefix of records covered by a completed `fdatasync`.
+- **Base:** a full snapshot of the dataset, taken at a checkpoint's cut.
+- **Cut and cut LSN:** the point on each shard where the base's snapshot starts. Records before
+  it are in the base. The cut LSN (`L_i`) is shard i's first record after it.
+- **Checkpoint:** a committed base plus its per-shard cut LSNs. While AOF is on, a qualifying
+  save (a local save; see [Checkpoints](#checkpoints-bounding-file-growth)) is a checkpoint.
+- **Manifest:** the file naming the current base and each shard's cut. It is the source of
+  truth, and is replaced atomically.
+- **Global command:** FLUSHALL, FLUSHDB or FLUSHSLOTS. It runs on every shard, and replay pairs
+  its copies across shards.
+- **Torn tail and end of log:** after a crash, a chain can end in torn blocks and holes. Its end
+  of log is the first invalid block. Replay keeps everything before it (the longest valid
+  prefix) and discards the rest.
 
 ---
 
@@ -293,8 +236,8 @@ AOF refuses to start.
   - magic `DFAOF1`, format version
   - shard_id, shard_count
   - segment seq
-  - `segment_uid`: a random 64-bit id, generated each time the file is prepared as a spare
-    (including when a recycled file is reused).
+  - `segment_uid`: a random 64-bit id, generated each time a file is prepared as a spare. It
+    seeds the block CRCs, so a block can only validate in the segment it was written to.
   - `run_id`: a random 64-bit id of the process run that prepared the segment. Transaction ids
     restart in every process (`op_seq` starts at 1), so replay pairs records across shards by
     `(run_id, txid)`, not by txid alone.
@@ -321,14 +264,12 @@ AOF refuses to start.
     `JournalItem::data`. Nothing is serialized a second time.
   - **CRC.** `crc32c` is computed over the header's `segment_uid` (8 bytes, little-endian),
     followed by the block's `len`, `first_lsn`, `n_records`, `flags` and `payload`, in that
-    order. The CRC field itself is excluded. Stale blocks left in a recycled file were written
-    under a different uid, so they never validate, whatever their LSN.
+    order. The CRC field itself is excluded.
   - `flags` is reserved in the MVP (always 0). [Atomic groups](#atomic-groups) use one bit of it
     later.
   - Replay treats the log as ended at the first of: end of file; a block with `len == 0` (a hole
     or unwritten space reads as zeros); a block whose CRC does not validate; or a block whose
-    `first_lsn` is not the expected next LSN. That rule is what allows segments to be recycled
-    (see [I/O Mode](#io-mode)).
+    `first_lsn` is not the expected next LSN.
 
 ### Manifest
 
@@ -423,8 +364,7 @@ When rotating:
 **Spare segments.** A new segment's directory entry must be durable before any record in it is
 reported durable. Otherwise, a power loss could remove the file and its acknowledged records.
 Each shard therefore keeps one spare segment ready in the background:
-1. Create an empty file under a temporary name (`<name>-<shard>.spare.tmp`), or rename a
-   recycled segment to that temporary name.
+1. Create an empty file under a temporary name (`<name>-<shard>.spare.tmp`).
 2. Write the header (a new `segment_uid` and seq), and `fdatasync` the file.
 3. Rename it to its final segment name, and `fsync` the directory.
 
@@ -435,9 +375,7 @@ so startup either deletes the file or reuses it as the next spare.
 Apart from the header, no data is written while preparing a spare. There is no zero-filling and
 no `fallocate` (see [I/O Mode](#io-mode)).
 
-A file with a valid header but no valid first block is an **empty segment**. The file ends
-after the header, or, in a recycled file, the first block fails its CRC under the new
-`segment_uid`. A crash can leave more than one:
+A header-only file is an **empty segment**. A crash can leave more than one:
 - an unused spare;
 - an active segment that had not received a block yet;
 - several of them in a row, when a checkpoint cut rotates to the spare and the next spare is
@@ -495,23 +433,11 @@ device cache.
 - `fallocate` latency can be significant. It also leaves *unwritten* extents on ext4 and XFS,
   and converting them on the first write is a metadata change anyway.
 
-**What an append costs at sync time.** Appending to a fresh segment grows the file, so each
-`fdatasync` also persists the new file size: one filesystem journal commit per sync. With the
-MVP's periodic sync per shard, that cost is negligible.
-
-**Recycling removes that metadata cost in steady state.**
-- After a checkpoint, each shard renames and overwrites its obsolete segments for reuse,
-  following PostgreSQL's WAL recycling approach. Shards recycle only their own segments.
-- Writes into a recycled file stay within its existing size and allocated blocks, so
-  `fdatasync` flushes data only.
-- Once checkpoints run, recycling is the steady state. A fresh AOF appends until the first
-  checkpoint.
-- This matters most for `always` ([Fsync Policy](#fsync-policy)), which syncs many times per
-  second. Until the first checkpoint, `always` pays the size-metadata commit on every group
-  commit; this should be measured.
-- **Why recycling is safe:** block CRCs are seeded with the new segment's `segment_uid`. Stale
-  blocks left in the file do not validate, so replay reads them as end of log, even if their
-  LSNs are higher than the expected one.
+**What an append costs at sync time.** The MVP only ever appends to fresh segments. Each
+`fdatasync` therefore also persists the new file size and extents: one filesystem journal commit
+per sync. With the MVP's periodic sync per shard, that cost is negligible. Garbage collection
+simply deletes old segments. Reusing them to avoid this cost only pays off with frequent syncs,
+so it belongs to the [Fsync Policy](#fsync-policy) stage.
 
 **Page cache.** AOF data is written once and almost never read, so it should not push other data
 out of the page cache. Keeping it out also caps the dirty pages that count against a container's
@@ -686,8 +612,7 @@ collection can delete all segments before those cuts.
 This is also why segments rotate only at the cut. The rotation puts everything before the cut in
 older files, so garbage collection deletes whole files, and never has to trim the front of a live
 file (with a hole punch or a rewrite). Rotating by size between cuts would free nothing earlier,
-because nothing can be deleted before the next checkpoint anyway. With one segment per checkpoint
-interval, the previous interval's file becomes the recycle candidate for the next spare.
+because nothing can be deleted before the next checkpoint anyway.
 
 This is what Valkey's `BGREWRITEAOF` does as well. It never reads the old AOF. A forked child
 dumps the in-memory dataset as the new BASE while the parent starts a new INCR file at the fork
@@ -887,8 +812,6 @@ exists. That load goes through
    - **What is kept.** Replay applies every valid record before the chain's end.
    - **What is discarded.** Everything after the end: valid blocks after a hole, and any later
      segments of the chain.
-   - **Stale data.** Stale blocks in a recycled file fail their CRC under the new
-     `segment_uid`, so they end the log like any other invalid block.
    - **Before resuming:**
      - Truncate the segment containing the end of the valid log at that position. Rename later
        segments with a `.discarded` suffix and retain them until the next successful checkpoint.
@@ -931,7 +854,7 @@ exists. That load goes through
 ## Corruption Scenarios Not Covered
 
 Replay handles crash damage by recovering a valid prefix: it stops at torn blocks, holes left
-by reordered writeback, or stale blocks in recycled files. It uses the same rule for corruption
+by reordered writeback. It uses the same rule for corruption
 of previously synced data, without distinguishing the cause. At the first invalid block,
 replay ends that shard's log and discards the remaining chain.
 
@@ -1024,6 +947,21 @@ while new commands get `-MISCONF`.
   serving reads.
 
 `INFO persistence` adds `aof_delayed_fsync`.
+
+### Segment recycling
+
+Under `always`, a shard syncs many times per second. Appending to a fresh file makes each sync
+also commit file-size and extent metadata, which adds latency to every group commit. This stage
+can reuse garbage-collected segments instead, the way PostgreSQL recycles WAL segments:
+- A shard renames one of its own obsolete segments to the spare's temporary name, and writes a
+  new header with a new `segment_uid`.
+- Writes stay within the file's existing size and allocated blocks, so `fdatasync` flushes data
+  only.
+- Stale blocks left in the file were written under a different `segment_uid`, so they fail their
+  CRC and read as end of log. For the same reason, an empty segment can also be a recycled file
+  whose first block does not validate.
+- This should be benchmarked first. With a single segment per checkpoint interval, the recycled
+  file is often smaller than needed, and appending past its end brings the metadata cost back.
 
 ---
 
@@ -1232,8 +1170,8 @@ authoritative source; the aux field provides diagnostic information only.
    - `AofStreamer` and `AofSegmentWriter`: parallel async writes, periodic sync, spare segments,
      rotation at the cut, `-MISCONF`.
    - Segment format and manifest.
-   - Checkpoints: the cut on every save, hard links for qualifying saves, garbage collection,
-     recycling, the automatic trigger, and checkpoint-health reporting.
+   - Checkpoints: the cut on qualifying saves, hard links, garbage collection, the automatic
+     trigger, and checkpoint-health reporting.
    - Replay, including the global-command barrier, the torn-tail rules, and restart with a
      changed shard count.
 2. **Fsync policy:** `always` with group commit and reply gating coalesced across a pipeline,
@@ -1274,8 +1212,6 @@ authoritative source; the aux field provides diagnostic information only.
     and synced
   - a failed sync is never retried as proof of durability; the shard stays failed until a
     checkpoint starts a new chain
-  - stale blocks in a recycled segment are read as end of log, including stale blocks whose LSN is
-    higher than the expected one
   - rotation at a checkpoint cut and at restart keeps LSNs continuous
   - a failed checkpoint leaves a valid chain from the old cut, across the extra segment it
     started
