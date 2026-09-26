@@ -291,10 +291,10 @@ called inside an atomic section. It appends `item.journal_item.data` to the open
 
 `ThrottleIfNeeded()` runs after records, at points where the journal allows a flush (outside a
 `DisableFlushGuard` section). It does two things:
-1. **Seal a full block.** If the open block has reached `--aof_block_bytes`, seal it: assign it
-   the next file offset (`next_offset += block size`), and submit it as one async write. The
-   write does not wait for earlier writes to complete. The block's buffer stays alive until its
-   write completes.
+1. **Seal a full block.** If the open block has reached `kAofBlockBytes` (a hard-coded 8KB), seal
+   it: assign it the next file offset (`next_offset += block size`), and submit it as one async
+   write. The write does not wait for earlier writes to complete. The block's buffer stays alive
+   until its write completes.
 2. **Apply backpressure** (below).
 
 `ThrottleIfNeeded()` does not seal on every call. Outside a `DisableFlushGuard` section it runs
@@ -1140,7 +1140,6 @@ Possible fix:
 | `--aof_name` | `appendonly` | MVP | File name prefix |
 | `--aof_rewrite_percentage` | 100 | MVP | Auto-checkpoint growth factor |
 | `--aof_rewrite_min_size` | 64MB | MVP | Auto-checkpoint minimum size |
-| `--aof_block_bytes` | TBD | MVP | Size at which `ThrottleIfNeeded()` seals the open block and writes it |
 | `--aof_max_buffered_bytes` | TBD | MVP | Backpressure threshold per shard: queued, retrying and in-flight write buffers |
 | `--aof_fsync` | `everysec` | Fsync Policy | `always` / `everysec` / `no`; alias `appendfsync` |
 | `--aof_exit_on_sync_error` | `false` | Fsync Policy | Exit on a sync failure under `always`, as Valkey does |
@@ -1217,7 +1216,7 @@ authoritative source; the aux field provides diagnostic information only.
   - global commands from different runs that reuse a txid are paired correctly, because chains
     pass global commands in lockstep
   - out-of-order write completions advance `written_lsn` only over the contiguous prefix
-  - small records accumulate in one block until `--aof_block_bytes` or the end of the proactor
+  - small records accumulate in one block until `kAofBlockBytes` or the end of the proactor
     loop iteration, so there is no header per record
   - a torn tail gets truncated at the first invalid block, including valid blocks after a hole
   - a crash during rotation that tears the old segment's tail, while the new segment already has
@@ -1291,8 +1290,8 @@ authoritative source; the aux field provides diagnostic information only.
 
 ## Open Questions
 
-- **Defaults.** What should the defaults for `--aof_block_bytes` and
-  `--aof_max_buffered_bytes` be?
+- **Defaults.** What should the default for `--aof_max_buffered_bytes` be? Is 8KB right for
+  `kAofBlockBytes`?
 - **Blocking vs. dropping under backpressure.** Should `ThrottleIfNeeded` ever give up on AOF
   instead of stalling the shard, for example after a timeout? Or should it always block?
 - **Group latency coupling** (atomic groups stage). Under `always`, an open atomic group holds
