@@ -107,7 +107,7 @@ Key terms. They are per shard unless stated otherwise.
 - **Journal record:** one serialized write as produced by `JournalSlice`. The AOF stores these
   bytes unchanged.
 - **LSN:** the journal's per-shard sequence number of a record. AOF LSNs are journal LSNs.
-- **Block:** a 21-byte header with a CRC, followed by journal records. The unit of writing and
+- **Block:** a 25-byte header with a CRC, followed by journal records. The unit of writing and
   of validation ([Segment format](#segment-format)).
 - **Segment:** one AOF file of one shard: a header followed by blocks.
 - **Chain:** the segments of one shard that replay reads, starting at the checkpoint's cut.
@@ -241,7 +241,7 @@ AOF refuses to start.
   - `reserved`: a 64-bit field, always 0 in this version. Writers set it to 0, and readers ignore
     it. A later feature can use it, such as a per-run `run_id`, without changing the header
     layout or the format version.
-  - header CRC
+  - header CRC32c
 
   The header omits the start LSN and checkpoint id because neither is known when the writer
   prepares the spare. The first block's `first_lsn` identifies the segment's start LSN.
@@ -249,14 +249,15 @@ AOF refuses to start.
 - **Body:** a sequence of blocks, each laid out as:
 
   ```
-  [u32 len][u32 crc32c][u64 first_lsn][u32 n_records][u8 flags][payload]
+  [u64 len][u32 crc32c][u64 first_lsn][u32 n_records][u8 flags][payload]
   ```
 
-  - The block header is 21 bytes. All integers are fixed-width and little-endian. `len` is the
-    size of the whole block, header included, so a valid block has `len >= 21`. `len == 0`
-    therefore always means a hole or unwritten space, never a real block, even one with no
-    records.
-  - **Bounds.** A block is valid only if `len >= 21` and the `len` bytes fit in what remains of
+  - The block header is 25 bytes. All integers are fixed-width and little-endian. `len` is the size
+    of the whole block, header included, so a valid block has `len >= 25`. It is 64-bit, because a
+    single journal record can exceed 4GB (a `SET` of a very large value), and a block holds whole
+    records. `len == 0` therefore always means a hole or unwritten space, never a real block, even
+    one with no records.
+  - **Bounds.** A block is valid only if `len >= 25` and the `len` bytes fit in what remains of
     the file. Replay checks this before it reads or allocates anything. A torn `len` is thus
     just an invalid block, and a reader never allocates more than the file size.
 
@@ -1000,7 +1001,7 @@ transaction boundaries explicitly:
     guard is still open. So the transaction's last record is sealed with `GROUP_CONT` as well.
   - To end the group, closing the guard seals the open block with the bit cleared. If that block
     is empty, because the last record was already sealed, it writes a group-end block instead:
-    no records, `GROUP_CONT` cleared. Its `len` is 21, the header alone, so replay does not
+    no records, `GROUP_CONT` cleared. Its `len` is 25, the header alone, so replay does not
     mistake it for a hole.
   - Without this explicit end, a group whose last block is followed by no further record would
     never close. `durable_lsn` could then not advance past it, and an `always` reply could wait
@@ -1204,7 +1205,7 @@ authoritative source; the aux field provides diagnostic information only.
 
 - **MVP unit tests** in `aof_test.cc`, alongside `journal_test.cc`:
   - block framing and CRC checks, including the exact CRC byte range
-  - a `len` below 21, or one that does not fit in the remaining file, makes the block invalid,
+  - a `len` below 25, or one that does not fit in the remaining file, makes the block invalid,
     with no large allocation
   - during a rotation with writes outstanding on both segments, `durable_lsn` does not advance
     into the new segment before the old segment's final sync
