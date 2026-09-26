@@ -588,12 +588,12 @@ point. Here, the snapshot's point-in-time cut takes the place of `fork()`.
 
 While AOF is on, there is no separate checkpoint mechanism. Every save takes the AOF cut, and
 a checkpoint is simply a save whose output can serve as the base. This covers SAVE, BGSAVE,
-`--snapshot_cron`, the automatic trigger, and `DEBUG AOF CHECKPOINT`. Whether a save commits as
-a checkpoint depends only on where its output lives:
+`--snapshot_cron`, and the automatic trigger. Whether a save commits as a checkpoint depends only
+on where its output lives:
 
 | Save | Output | Becomes the checkpoint? |
 |---|---|---|
-| Automatic trigger, `DEBUG AOF CHECKPOINT`, shard-count change at restart | `--aof_dir` | Yes |
+| Automatic trigger, shard-count change at restart | `--aof_dir` | Yes |
 | SAVE, BGSAVE or `--snapshot_cron` to a local path on the same filesystem as `--aof_dir` | The user's path | Yes: its files are hard-linked into `--aof_dir` |
 | A save to S3 or other cloud storage, or to a local path on another filesystem | The user's destination | No: it stays a plain save |
 
@@ -624,8 +624,8 @@ a checkpoint depends only on where its output lives:
   `auto-aof-rewrite-*` rule. The defaults are 64MB and 100%.
 - **Any qualifying save:** SAVE, BGSAVE, or `--snapshot_cron`. With scheduled saves, the AOF
   stays bounded without extra snapshots.
-- **Manual:** `DEBUG AOF CHECKPOINT`, meant for tests and operations. `BGREWRITEAOF` is not
-  implemented (see [Other Extensions](#other-extensions)).
+- **Manual:** a SAVE or BGSAVE to a qualifying destination. There is no separate checkpoint
+  command. `BGREWRITEAOF` is not implemented (see [Other Extensions](#other-extensions)).
 - **Shard count change at restart:** see [Replay](#replay-at-startup), step 6.
 - Later stages add more forced checkpoints; see
   [Re-base](#re-base-paths-that-bypass-the-journal).
@@ -1028,7 +1028,7 @@ Possible fix:
 | `--aof_exit_on_sync_error` | `false` | Fsync Policy | Exit on a sync failure under `always`, as Valkey does |
 
 Commands:
-- `DEBUG AOF CHECKPOINT` (MVP)
+- No new command in the MVP. SAVE and BGSAVE trigger checkpoints.
 - `CONFIG SET appendfsync` ([Fsync Policy](#fsync-policy))
 - `CONFIG SET appendonly` ([Re-base](#re-base-paths-that-bypass-the-journal))
 
@@ -1072,8 +1072,8 @@ authoritative source; the aux field provides diagnostic information only.
    - `AofStreamer` and `AofSegmentWriter`: parallel async writes, periodic sync, spare segments,
      rotation at the cut, `-MISCONF`.
    - Segment format and manifest.
-   - Checkpoints: the cut, garbage collection, recycling, the automatic trigger,
-     `DEBUG AOF CHECKPOINT`, and checkpoint-health reporting.
+   - Checkpoints: the cut on every save, hard links for qualifying saves, garbage collection,
+     recycling, the automatic trigger, and checkpoint-health reporting.
    - Replay, including the global-command barrier, the torn-tail rules, and restart with a
      changed shard count.
 2. **Fsync policy:** `always` with group commit and reply gating coalesced across a pipeline,
