@@ -126,11 +126,16 @@ Terms used throughout this document. They are per shard unless stated otherwise.
 - **Sealing:** closing the open block, so that it can be written. It happens in
   `ThrottleIfNeeded()`.
 - **Batch:** consecutive sealed blocks submitted as one write.
-- **Segment:** one AOF file of one shard: a header followed by blocks.
-- **Segment seq:** the sequence number of a segment within its shard's files. Seqs are
-  contiguous; a gap means a file is missing.
-- **Chain:** all segments of one shard, from the checkpoint's cut segment onward, in seq order.
-  Replay reads one chain per source shard.
+- **Segment:** one AOF file of one shard: a header followed by blocks. The file name carries a
+  sequence number that orders a shard's segments.
+- **Chain:** the segments of one shard that replay reads, starting at the checkpoint's cut.
+  - **Normally a single segment.** Segments rotate only at a checkpoint cut and when the log
+    resumes after a restart. A committed checkpoint deletes everything before its cut. So in
+    steady state, each shard has exactly one segment, its active one.
+  - **More than one only for a while:** while a checkpoint is in progress (the segments before
+    and after its cut), after a checkpoint that failed, or after a restart. The next committed
+    checkpoint deletes the older ones.
+  - Replay reads one chain per source shard.
 - **Active segment:** the segment a shard currently appends to.
 - **Spare segment:** a segment prepared in the background, with a durable header and directory
   entry, that the next rotation switches to.
