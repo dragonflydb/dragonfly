@@ -107,8 +107,8 @@ Key terms. They are per shard unless stated otherwise.
 - **Journal record:** one serialized write as produced by `JournalSlice`. The AOF stores these
   bytes unchanged.
 - **LSN:** the journal's per-shard sequence number of a record. AOF LSNs are journal LSNs.
-- **Block:** a 25-byte header with a CRC, followed by journal records. The unit of writing and
-  of validation ([Segment format](#segment-format)).
+- **Block:** a 25-byte header with a CRC, followed by one or more journal records. The unit of
+  writing and of validation ([Segment format](#segment-format)).
 - **Segment:** one AOF file of one shard: a header followed by blocks.
 - **Chain:** the segments of one shard that replay reads, starting at the checkpoint's cut.
   Normally this is a single segment, because segments rotate only at a checkpoint cut and at
@@ -253,10 +253,7 @@ AOF refuses to start.
   ```
 
   - The block header is 25 bytes. All integers are fixed-width and little-endian. `len` is the size
-    of the whole block, header included, so a valid block has `len >= 25`. It is 64-bit, because a
-    single journal record can exceed 4GB (a `SET` of a very large value), and a block holds whole
-    records. `len == 0` therefore always means a hole or unwritten space, never a real block, even
-    one with no records.
+    of the whole block, header included, so a valid block has `len >= 25`.
   - **Bounds.** A block is valid only if `len >= 25` and the `len` bytes fit in what remains of
     the file. Replay checks this before it reads or allocates anything. A torn `len` is thus
     just an invalid block, and a reader never allocates more than the file size.
@@ -292,33 +289,37 @@ the manifest. The manifest changes only when a checkpoint commits.
 called inside an atomic section. It appends `item.journal_item.data` to the open block and bumps
 `last_appended_lsn`.
 
-`ThrottleIfNeeded()` seals the open block and queues it for submission:
-1. Assign the block the next file offset (`next_offset += block size`).
-2. Append the block to the current submission batch. Each flush point seals a block, often once
-   per transaction. These blocks are typically only a few hundred bytes. Submitting each block
-   separately would require one submission and one completion per block, plus one io-wq work
-   item on ext4.
+`ThrottleIfNeeded()` runs after records, at points where the journal allows a flush (outside a
+`DisableFlushGuard` section). It does two things:
+1. **Seal a full block.** If the open block has reached `--aof_block_bytes`, seal it: assign it
+   the next file offset (`next_offset += block size`), and submit it as one async write. The
+   write does not wait for earlier writes to complete. The block's buffer stays alive until its
+   write completes.
+2. **Apply backpressure** (below).
 
-   The writer combines consecutive sealed blocks into one batch and submits it as an async
-   write at the first block's offset when either:
+`ThrottleIfNeeded()` does not seal on every call. Outside a `DisableFlushGuard` section it runs
+after *every* record, so sealing each time would make one block per record. Every record would
+then pay a 25-byte header, its own CRC, and its own submission.
 
-   - it reaches `--aof_write_batch_bytes`, or
-   - the current proactor loop iteration ends, i.e. before the proactor waits for events again
-     (for example from a `ProactorBase::AddOnIdleTask` hook).
+**Small blocks.** A block below the threshold keeps accumulating records. At the end of each
+proactor loop iteration, just before the proactor waits for events again, an idle hook
+(`ProactorBase::AddOnIdleTask`) seals and submits whatever is open. A small block therefore
+waits at most one loop iteration.
+- The idle hook runs between fiber runs, never inside one. Like `ThrottleIfNeeded()`, it seals
+  only at a point where the journal allows a flush.
+- Sealing is thus the one batching step: a block is a batch, and one block is one write.
 
-   Batching never waits for earlier writes to complete; it only groups blocks sealed close
-   together in time. The batch buffer stays alive until its write completes.
-3. Apply backpressure. The limit covers every AOF buffer that is not yet written: batches that are
-   queued (for example while waiting for a spare segment), writes being retried, and writes in
-   flight. If their total exceeds `--aof_max_buffered_bytes`, wait on an `EventCount` until it falls
-   below the limit. Completion callbacks notify the `EventCount`. This applies backpressure in the
-   same way as replication throttling in `BufferedSocketWriter`.
+**Backpressure.** The limit covers every AOF buffer that is not yet written: sealed blocks that are
+queued (for example while waiting for a spare segment), writes being retried, and writes in flight.
+If their total exceeds `--aof_max_buffered_bytes`, wait on an `EventCount` until it falls below the
+limit. Completion callbacks notify the `EventCount`. This applies backpressure in the same way as
+replication throttling in `BufferedSocketWriter`.
 
 **Why parallel writes.** On a socket, the next write must wait for the previous one, so data has
 to be buffered until then. A file write specifies its offset, so order is encoded in the offset
 and writes do not need to be serialized.
-- The logic is simpler: there is no pending buffer that waits for the previous write. The
-  batching above only bounds the number of requests; it is not tied to completions.
+- The logic is simpler: there is no pending buffer that waits for the previous write. Sealing
+  only bounds the number of requests; it is not tied to completions.
 - Several requests in flight let the kernel merge adjacent writes, and keep the device busy at a
   higher queue depth.
 - [Buffered writes in io_uring](#buffered-writes-in-io_uring) explains how filesystem support
@@ -394,7 +395,7 @@ finds the spare not ready, sealed blocks accumulate and normal backpressure appl
 
 **Write failures.** A successful later write does not repair an earlier failed range;
 `written_lsn` cannot advance past it.
-- The writer retains the failed write's batch buffer and retries at the same offset with backoff.
+- The writer retains the failed write's block buffer and retries at the same offset with backoff.
 - While a retry is pending, write commands are rejected with `-MISCONF`.
 - The error clears once the failed ranges are written, `written_lsn` is contiguous past them,
   and a sync covering them completes.
@@ -402,7 +403,7 @@ finds the spare not ready, sealed blocks accumulate and normal backpressure appl
 **Sync failures cannot be retried.** After a failed `fsync` or `fdatasync`, Linux may already have
 marked the affected dirty pages clean or dropped them. A later sync can then succeed without
 that data ever reaching the disk. PostgreSQL ran into this in 2018 ("fsyncgate"). By then the
-batch buffers are already released, so the data cannot be rewritten from them either. A sync
+block buffers are already released, so the data cannot be rewritten from them either. A sync
 failure therefore breaks the shard's chain:
 - The shard's AOF enters a failed state. `durable_lsn` stops advancing, and write commands are
   rejected with `-MISCONF`.
@@ -997,8 +998,9 @@ transaction boundaries explicitly:
   be written.
   - Blocks sealed inside a group carry the `GROUP_CONT` bit in `flags`: the block ends inside a
     group that continues in the next block.
-  - `JournalSlice::AddLogRecord` calls `ThrottleIfNeeded()` right after each record, while the
-    guard is still open. So the transaction's last record is sealed with `GROUP_CONT` as well.
+  - A block can be sealed while the guard is still open: by the size threshold, or by the idle
+    hook between the hops of a multi-hop transaction. The transaction's last record can
+    therefore end up in a block sealed with `GROUP_CONT` as well.
   - To end the group, closing the guard seals the open block with the bit cleared. If that block
     is empty, because the last record was already sealed, it writes a group-end block instead:
     no records, `GROUP_CONT` cleared. Its `len` is 25, the header alone, so replay does not
@@ -1138,7 +1140,7 @@ Possible fix:
 | `--aof_name` | `appendonly` | MVP | File name prefix |
 | `--aof_rewrite_percentage` | 100 | MVP | Auto-checkpoint growth factor |
 | `--aof_rewrite_min_size` | 64MB | MVP | Auto-checkpoint minimum size |
-| `--aof_write_batch_bytes` | TBD | MVP | Maximum size of one submitted batch of sealed blocks |
+| `--aof_block_bytes` | TBD | MVP | Size at which `ThrottleIfNeeded()` seals the open block and writes it |
 | `--aof_max_buffered_bytes` | TBD | MVP | Backpressure threshold per shard: queued, retrying and in-flight write buffers |
 | `--aof_fsync` | `everysec` | Fsync Policy | `always` / `everysec` / `no`; alias `appendfsync` |
 | `--aof_exit_on_sync_error` | `false` | Fsync Policy | Exit on a sync failure under `always`, as Valkey does |
@@ -1215,7 +1217,8 @@ authoritative source; the aux field provides diagnostic information only.
   - global commands from different runs that reuse a txid are paired correctly, because chains
     pass global commands in lockstep
   - out-of-order write completions advance `written_lsn` only over the contiguous prefix
-  - blocks sealed in one proactor loop iteration are submitted as one write
+  - small records accumulate in one block until `--aof_block_bytes` or the end of the proactor
+    loop iteration, so there is no header per record
   - a torn tail gets truncated at the first invalid block, including valid blocks after a hole
   - a crash during rotation that tears the old segment's tail, while the new segment already has
     blocks, ends the chain at the tear; the later segment is renamed `.discarded`
@@ -1288,7 +1291,7 @@ authoritative source; the aux field provides diagnostic information only.
 
 ## Open Questions
 
-- **Defaults.** What should the defaults for `--aof_write_batch_bytes` and
+- **Defaults.** What should the defaults for `--aof_block_bytes` and
   `--aof_max_buffered_bytes` be?
 - **Blocking vs. dropping under backpressure.** Should `ThrottleIfNeeded` ever give up on AOF
   instead of stalling the shard, for example after a timeout? Or should it always block?
