@@ -15,7 +15,9 @@
 #include <algorithm>
 #include <memory>
 #include <numeric>
+#ifdef DFLY_TRACY_PLOTS
 #include <unordered_map>
+#endif
 #include <variant>
 
 #include "base/cycle_clock.h"
@@ -1265,7 +1267,15 @@ unsigned Connection::GetSendWaitTimeSec() const {
 std::error_code Connection::FlushReplies() {  // NOLINT must not be const due to flush side effect
   DFLY_TRACY_REPLY_ZONE(kConnFlushReplies);
   DCHECK(reply_builder_);
+#ifdef DFLY_TRACY_PLOTS
+  if (ioloop_v2_)
+    tracy_v2_flush_bytes_ = reply_builder_->BufferedBytes();
+#endif
   reply_builder_->Flush();
+#ifdef DFLY_TRACY_PLOTS
+  if (ioloop_v2_)
+    EmitV2QueueTelemetry();
+#endif
   return reply_builder_->GetError();
 }
 
@@ -1834,9 +1844,11 @@ auto Connection::ParseLoop() -> ParserStatus {
       parse_status = (this->*parse_func)(io_buf_);
     }
 
+#ifdef DFLY_TRACY_PLOTS
     if (ioloop_v2_) {
       EmitV2QueueTelemetry();
     }
+#endif
 
     // V2 large-batch prioritization (pipeline_prioritize_large_batches):
     // - When a real pipeline is forming (>1 queued) and more socket data is expected
@@ -1854,16 +1866,20 @@ auto Connection::ParseLoop() -> ParserStatus {
     if (execute_result == ExecuteBatchResult::kFailure)
       return ERROR;
 
+#ifdef DFLY_TRACY_PLOTS
     if (ioloop_v2_) {
       EmitV2QueueTelemetry();
     }
+#endif
 
     if (!ReplyBatch())
       return ERROR;
 
+#ifdef DFLY_TRACY_PLOTS
     if (ioloop_v2_) {
       EmitV2QueueTelemetry();
     }
+#endif
 
     // Surface a protocol error to the caller (HandleRequests/IoLoopV2) so it can send the
     // protocol error reply (using parser_error_) and close the connection.
@@ -3281,6 +3297,9 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
   ConnectionMemoryTracker memory_tracker(this);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
   auto& conn_stats = tl_facade_stats->conn_stats;
+#ifdef DFLY_TRACY_PLOTS
+  tracy_v2_batch_commands_ = dispatch_waiting_count_;
+#endif
 
   bool is_true_pipeline = (parsed_to_execute_->next) != nullptr;
 
@@ -3518,9 +3537,11 @@ bool Connection::ReplyBatch() {
     }
   }
 
+#ifdef DFLY_TRACY_PLOTS
   if (ioloop_v2_) {
     EmitV2QueueTelemetry();
   }
+#endif
 
   // Release all the commands that replied
   {
@@ -3747,14 +3768,21 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
   const uint64_t start_epoch = fb2::FiberSwitchEpoch();
   const uint64_t initial_read_count = GetLocalConnStats().io_read_cnt;
   ProcessRecvNotification(n);
+#ifdef DFLY_TRACY_PLOTS
   if (ioloop_v2_) {
     EmitV2QueueTelemetry();
   }
+#endif
 
   auto parse_in_proactor = [this](auto&& parse_cb) {
     size_t cmds_before = parsed_cmd_q_len_;
     ParserStatus status = parse_cb();
+#ifdef DFLY_TRACY_PLOTS
+    tracy_v2_proactor_parse_commands_ = parsed_cmd_q_len_ - cmds_before;
+    if (tracy_v2_proactor_parse_commands_ > 0)
+#else
     if (parsed_cmd_q_len_ > cmds_before)
+#endif
       ++GetLocalConnStats().proactor_parse;
     // The recv callback cannot return a status. If parsing hit a protocol error, flag it so
     // IoLoopV2 surfaces ParserStatus::ERROR and sends the protocol-error reply.
@@ -3791,9 +3819,11 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
     }
   }
 
+#ifdef DFLY_TRACY_PLOTS
   if (ioloop_v2_) {
     EmitV2QueueTelemetry();
   }
+#endif
 
   if (GetLocalConnStats().io_read_cnt > initial_read_count)
     ++GetLocalConnStats().proactor_reads;
@@ -4002,6 +4032,10 @@ Connection::ParserStatus Connection::ReadAndParseShared(bool from_proactor_callb
     conn_stats.shared_buf_borrow_cycles_callback += borrow_cycles;
   else
     conn_stats.shared_buf_borrow_cycles_fiber += borrow_cycles;
+#ifdef DFLY_TRACY_PLOTS
+  tracy_v2_shared_borrow_usec_ = CycleClock::ToUsec(borrow_cycles);
+  EmitV2QueueTelemetry();
+#endif
   return status;
 }
 
@@ -4197,6 +4231,7 @@ bool Connection::IsOverPipelineLimit() const {
                                       GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
 }
 
+#ifdef DFLY_TRACY_PLOTS
 size_t Connection::CountReplyReadyCommands() const {
   size_t ready_count{};
   for (ParsedCommand* command = parsed_head_; command != parsed_to_execute_;
@@ -4210,12 +4245,11 @@ size_t Connection::CountReplyReadyCommands() const {
 }
 
 void Connection::EmitV2QueueTelemetry() const {
-#ifndef TRACY_ENABLE
-  return;
-#else
   if (!IsTracyScopeEnabled(TracyScope::kConnection) && !IsTracyScopeEnabled(TracyScope::kManual)) {
     return;
   }
+  if (!ShouldEmitTracyQueueTelemetry(id_, fb2::ProactorBase::me()->GetPoolIndex()))
+    return;
 
   if (!TracyIsConnected) {
     tracy_queue_plots_configured_ = false;
@@ -4230,7 +4264,7 @@ void Connection::EmitV2QueueTelemetry() const {
     tracy_queue_plot_values_valid_ = false;
   }
 
-  constexpr std::array<TracyManualZone, 12> kQueuePlotZones{
+  constexpr std::array<TracyManualZone, 16> kQueuePlotZones{
       TracyManualZone::kV2PendingInput,
       TracyManualZone::kV2IoBufUnreadBytes,
       TracyManualZone::kV2AdminQueueLength,
@@ -4243,6 +4277,10 @@ void Connection::EmitV2QueueTelemetry() const {
       TracyManualZone::kV2PipelineReplyReady,
       TracyManualZone::kV2ReplyBufferedBytes,
       TracyManualZone::kV2ReplyBufferedIovecs,
+      TracyManualZone::kV2ProactorParseCommands,
+      TracyManualZone::kV2BatchCommands,
+      TracyManualZone::kV2FlushBytes,
+      TracyManualZone::kV2SharedBorrowUsec,
   };
   constexpr size_t kPendingInput = 0;
   constexpr size_t kIoBufUnreadBytes = 1;
@@ -4256,12 +4294,16 @@ void Connection::EmitV2QueueTelemetry() const {
   constexpr size_t kPipelineReplyReady = 9;
   constexpr size_t kReplyBufferedBytes = 10;
   constexpr size_t kReplyBufferedIovecs = 11;
+  constexpr size_t kProactorParseCommands = 12;
+  constexpr size_t kBatchCommands = 13;
+  constexpr size_t kFlushBytes = 14;
+  constexpr size_t kSharedBorrowUsec = 15;
 
-  static thread_local std::unordered_map<uint32_t, std::unique_ptr<std::array<std::string, 12> > >
+  static thread_local std::unordered_map<uint32_t, std::unique_ptr<std::array<std::string, 16> > >
       plot_names_by_connection;
   auto [names_it, inserted] = plot_names_by_connection.try_emplace(id_);
   if (inserted) {
-    names_it->second = std::make_unique<std::array<std::string, 12> >();
+    names_it->second = std::make_unique<std::array<std::string, 16> >();
     for (size_t index{}; index < kQueuePlotZones.size(); ++index) {
       const std::string_view metric_name{TracyManualZoneName(kQueuePlotZones[index])};
       (*names_it->second)[index] =
@@ -4271,11 +4313,13 @@ void Connection::EmitV2QueueTelemetry() const {
   const auto& plot_names = *names_it->second;
 
   if (!tracy_queue_plots_configured_) {
-    constexpr std::array<tracy::PlotFormatType, 12> kQueuePlotFormats{
+    constexpr std::array<tracy::PlotFormatType, 16> kQueuePlotFormats{
         tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory, tracy::PlotFormatType::Number,
         tracy::PlotFormatType::Memory, tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory,
         tracy::PlotFormatType::Number, tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory,
         tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory, tracy::PlotFormatType::Number,
+        tracy::PlotFormatType::Number, tracy::PlotFormatType::Number, tracy::PlotFormatType::Memory,
+        tracy::PlotFormatType::Number,
     };
     for (size_t index{}; index < plot_names.size(); ++index) {
       TracyPlotConfig(plot_names[index].c_str(), kQueuePlotFormats[index], true, false, 0);
@@ -4283,7 +4327,7 @@ void Connection::EmitV2QueueTelemetry() const {
     tracy_queue_plots_configured_ = true;
   }
 
-  const std::array<int64_t, 12> values{
+  const std::array<int64_t, 16> values{
       static_cast<int64_t>(pending_input_),
       static_cast<int64_t>(GetUnreadInputLen()),
       static_cast<int64_t>(dispatch_q_.size()),
@@ -4296,6 +4340,10 @@ void Connection::EmitV2QueueTelemetry() const {
       static_cast<int64_t>(CountReplyReadyCommands()),
       static_cast<int64_t>(reply_builder_ ? reply_builder_->BufferedBytes() : 0),
       static_cast<int64_t>(reply_builder_ ? reply_builder_->BufferedIovecs() : 0),
+      tracy_v2_proactor_parse_commands_,
+      tracy_v2_batch_commands_,
+      tracy_v2_flush_bytes_,
+      tracy_v2_shared_borrow_usec_,
   };
   const auto should_emit = [this](size_t index, int64_t value) {
     if (tracy_queue_plot_values_valid_ && (tracy_queue_plot_values_[index] == value)) {
@@ -4357,9 +4405,59 @@ void Connection::EmitV2QueueTelemetry() const {
                                      plot_names[kReplyBufferedIovecs].c_str(),
                                      values[kReplyBufferedIovecs]);
   }
+  if (should_emit(kProactorParseCommands, values[kProactorParseCommands])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2ProactorParseCommands,
+                                     plot_names[kProactorParseCommands].c_str(),
+                                     values[kProactorParseCommands]);
+  }
+  if (should_emit(kBatchCommands, values[kBatchCommands])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2BatchCommands, plot_names[kBatchCommands].c_str(),
+                                     values[kBatchCommands]);
+  }
+  if (should_emit(kFlushBytes, values[kFlushBytes])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2FlushBytes, plot_names[kFlushBytes].c_str(),
+                                     values[kFlushBytes]);
+  }
+  if (should_emit(kSharedBorrowUsec, values[kSharedBorrowUsec])) {
+    DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2SharedBorrowUsec, plot_names[kSharedBorrowUsec].c_str(),
+                                     values[kSharedBorrowUsec]);
+  }
   tracy_queue_plot_values_valid_ = true;
-#endif
 }
+
+void Connection::EmitV2BackpressureTelemetry() const {
+  if ((!IsTracyScopeEnabled(TracyScope::kConnection) &&
+       !IsTracyScopeEnabled(TracyScope::kManual)) ||
+      !TracyIsConnected || !TracyBackpressurePlotsEnabled() ||
+      !ShouldEmitTracyQueueTelemetry(id_, fb2::ProactorBase::me()->GetPoolIndex())) {
+    return;
+  }
+
+  const unsigned proactor_id = fb2::ProactorBase::me()->GetPoolIndex();
+  static thread_local std::unordered_map<unsigned, std::unique_ptr<std::array<std::string, 3> > >
+      plot_names_by_proactor;
+  auto [names_it, inserted] = plot_names_by_proactor.try_emplace(proactor_id);
+  if (inserted) {
+    names_it->second = std::make_unique < std::array<std::string, 3> >>
+                       (std::array<std::string, 3>{
+                           absl::StrCat("v2.proactor_", proactor_id, ".pipeline_bytes"),
+                           absl::StrCat("v2.proactor_", proactor_id, ".pipeline_bytes_limit"),
+                           absl::StrCat("v2.proactor_", proactor_id, ".pipeline_queue_limit")});
+    TracyPlotConfig((*names_it->second)[0].c_str(), tracy::PlotFormatType::Memory, true, false, 0);
+    TracyPlotConfig((*names_it->second)[1].c_str(), tracy::PlotFormatType::Memory, true, false, 0);
+    TracyPlotConfig((*names_it->second)[2].c_str(), tracy::PlotFormatType::Number, true, false, 0);
+  }
+
+  const auto& queue_backpressure = GetQueueBackpressure();
+  const auto& plot_names = *names_it->second;
+  DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2ProactorPipelineBytes, plot_names[0].c_str(),
+                                   static_cast<int64_t>(GetLocalConnStats().pipeline_queue_bytes));
+  DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2ProactorPipelineBytesLimit, plot_names[1].c_str(),
+                                   static_cast<int64_t>(queue_backpressure.pipeline_buffer_limit));
+  DFLY_TRACY_CONNECTION_PLOT_NAMED(kV2ProactorPipelineQueueLimit, plot_names[2].c_str(),
+                                   static_cast<int64_t>(queue_backpressure.pipeline_queue_max_len));
+}
+#endif
 
 void Connection::NotifyIfMemReleased(size_t bytes_before) {
   // Executing and replying to commands frees up memory. Because those internal functions only
@@ -4445,6 +4543,10 @@ void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_wait
   // prevent a busy-spin.
   if (!IsOverPipelineLimit())
     return;
+
+#ifdef DFLY_TRACY_PLOTS
+  EmitV2BackpressureTelemetry();
+#endif
 
   auto& conn_stats = GetLocalConnStats();
   conn_stats.pipeline_throttle_count++;

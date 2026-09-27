@@ -22,6 +22,10 @@ enum class TracyScope : uint32_t {
 };
 
 void InitTracyScopes();
+#ifdef DFLY_TRACY_PLOTS
+bool ShouldEmitTracyQueueTelemetry(uint32_t client_id, unsigned proactor_id);
+bool TracyBackpressurePlotsEnabled();
+#endif
 extern std::atomic_uint32_t tracy_enabled_scopes;
 inline constexpr size_t kTracyManualZoneMaskWords = (DFLY_TRACY_MANUAL_ZONE_COUNT / 64) + 1;
 extern std::array<std::atomic_uint64_t, kTracyManualZoneMaskWords> tracy_enabled_manual_zones;
@@ -89,7 +93,15 @@ inline bool IsTracyScopeEnabled(TracyScope scope) {
 #define DFLY_TRACY_ZONE_TEXT_F(...) ZoneTextF(__VA_ARGS__)
 #define DFLY_TRACY_ZONE_VALUE(value) ZoneValue(value)
 #define DFLY_TRACY_FRAME_MARK() FrameMark
+#ifdef DFLY_TRACY_PLOTS
 #define DFLY_TRACY_PLOT(name, val) TracyPlot(name, val)
+#else
+#define DFLY_TRACY_PLOT(name, val) \
+  do {                             \
+    (void)sizeof(name);            \
+    (void)sizeof(val);             \
+  } while (0)
+#endif
 #define DFLY_TRACY_MESSAGE(txt, size) TracyMessage(txt, size)
 #define DFLY_TRACY_THREAD_NAME(name) tracy::SetThreadName(name)
 // Scoped zone with an explicit 0xRRGGBB color.
@@ -156,6 +168,7 @@ inline bool IsTracyScopeEnabled(TracyScope scope) {
         if (::facade::IsTracyZoneEnabled(tracy_scope, ::facade::TracyManualZone::symbol)) \
           ZoneTextF(__VA_ARGS__);                                                         \
       } while (0))
+#ifdef DFLY_TRACY_PLOTS
 #define DFLY_TRACY_PLOT_IMPL(scope, tracy_scope, symbol, value)                               \
   DFLY_TRACY_IF(                                                                              \
       DFLY_TRACY_SITE_ENABLED(scope, symbol), do {                                            \
@@ -182,6 +195,14 @@ inline bool IsTracyScopeEnabled(TracyScope scope) {
         if (::facade::IsTracyZoneEnabled(tracy_scope, ::facade::TracyManualZone::symbol))       \
           TracyPlotConfig(name, format, step, fill, color);                                     \
       } while (0))
+#else
+#define DFLY_TRACY_PLOT_IMPL(scope, tracy_scope, symbol, value) (void)sizeof(value)
+#define DFLY_TRACY_PLOT_NAMED_IMPL(scope, tracy_scope, symbol, name, value) (void)sizeof(value)
+#define DFLY_TRACY_PLOT_CONFIG_IMPL(scope, tracy_scope, symbol, format, step, fill, color) (void)0
+#define DFLY_TRACY_PLOT_CONFIG_NAMED_IMPL(scope, tracy_scope, symbol, name, format, step, fill, \
+                                          color)                                                \
+  (void)0
+#endif
 
 #define DFLY_TRACY_CONNECTION_ZONE(symbol) \
   DFLY_TRACY_ZONE_IMPL(CONNECTION, ::facade::TracyScope::kConnection, symbol)

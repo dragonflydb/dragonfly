@@ -770,12 +770,17 @@ class Connection : public util::Connection {
     return parsed_head_ != parsed_to_execute_;
   }
 
+#ifdef DFLY_TRACY_PLOTS
   // Counts the reply-ready prefix of dispatched commands. Replies after the first incomplete
   // command cannot be sent yet because RESP replies preserve request order.
   size_t CountReplyReadyCommands() const;
 
   // Emits a snapshot of V2 queue and reply state for the current proactor thread.
   void EmitV2QueueTelemetry() const;
+
+  // Emits per-proactor pipeline budget values while a selected V2 connection is parked.
+  void EmitV2BackpressureTelemetry() const;
+#endif
 
   // Returns true if the head command is ready to execute (nothing in-flight ahead of it).
   bool HasCommandToExecute() const {
@@ -793,11 +798,15 @@ class Connection : public util::Connection {
   }
 
   uint32_t id_;
-#ifdef TRACY_ENABLE
+#ifdef DFLY_TRACY_PLOTS
   mutable uint64_t tracy_queue_plot_connection_id_ = 0;
   mutable bool tracy_queue_plots_configured_ = false;
   mutable bool tracy_queue_plot_values_valid_ = false;
-  mutable std::array<int64_t, 12> tracy_queue_plot_values_;
+  mutable std::array<int64_t, 16> tracy_queue_plot_values_;
+  mutable int64_t tracy_v2_proactor_parse_commands_ = 0;
+  mutable int64_t tracy_v2_batch_commands_ = 0;
+  mutable int64_t tracy_v2_flush_bytes_ = 0;
+  mutable int64_t tracy_v2_shared_borrow_usec_ = 0;
 #endif
   Protocol protocol_;
   Phase phase_ = SETUP;

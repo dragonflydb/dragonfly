@@ -158,7 +158,10 @@ endif()
 # binary only starts capturing once a Tracy viewer/capture connects (the runtime on/off switch).
 option(WITH_TRACY "Enable the Tracy profiler client (on-demand)" OFF)
 option(WITH_TRACY_FORENSIC "Enable high-volume per-command Tracy zones" OFF)
-set(DFLY_TRACY_SCOPES "all" CACHE STRING
+option(WITH_TRACY_PLOTS "Enable Tracy plot instrumentation" OFF)
+option(WITH_TRACY_SAMPLING "Enable Tracy statistical call-stack sampling" OFF)
+option(WITH_TRACY_CONTEXT_SWITCH "Enable Tracy context-switch tracing" OFF)
+set(DFLY_TRACY_SCOPES "" CACHE STRING
   "Comma-separated Tracy scopes: connection,dispatch,squasher,reply,memory,manual,all")
 set(DFLY_TRACY_MANUAL_ZONES "" CACHE STRING
   "Comma-separated manual Tracy zone IDs or names, or all (see TRACY.md)")
@@ -173,6 +176,30 @@ if (WITH_TRACY)
   set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
   set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
   set(TRACY_FIBERS ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_WAIT_STACKS ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_FRAME_IMAGE ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_VSYNC_CAPTURE ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_BROADCAST ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_CODE_TRANSFER ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_CRASH_HANDLER ON CACHE BOOL "" FORCE)
+
+  if (WITH_TRACY_SAMPLING OR WITH_TRACY_CONTEXT_SWITCH)
+    set(TRACY_NO_SYSTEM_TRACING OFF CACHE BOOL "" FORCE)
+  else()
+    set(TRACY_NO_SYSTEM_TRACING ON CACHE BOOL "" FORCE)
+  endif()
+  if (WITH_TRACY_SAMPLING)
+    set(TRACY_NO_SAMPLING OFF CACHE BOOL "" FORCE)
+    set(TRACY_NO_CALLSTACK OFF CACHE BOOL "" FORCE)
+  else()
+    set(TRACY_NO_SAMPLING ON CACHE BOOL "" FORCE)
+    set(TRACY_NO_CALLSTACK ON CACHE BOOL "" FORCE)
+  endif()
+  if (WITH_TRACY_CONTEXT_SWITCH)
+    set(TRACY_NO_CONTEXT_SWITCH OFF CACHE BOOL "" FORCE)
+  else()
+    set(TRACY_NO_CONTEXT_SWITCH ON CACHE BOOL "" FORCE)
+  endif()
 
   # Force the client macros on for EVERY translation unit (dragonfly + the helio submodule), so the
   # guards activate regardless of how INTERFACE compile-defs propagate across helio's custom
@@ -185,6 +212,9 @@ if (WITH_TRACY)
   # preprocessor macro. Symbol resolution still comes from linking Tracy::TracyClient to dfly_facade
   # and fibers2 (see the respective CMakeLists).
   add_compile_definitions(TRACY_ENABLE TRACY_FIBERS)
+  if (WITH_TRACY_PLOTS)
+    add_compile_definitions(DFLY_TRACY_PLOTS)
+  endif()
   string(REPLACE "," ";" _dfly_tracy_scope_list "${DFLY_TRACY_SCOPES}")
   set(_dfly_tracy_known_scopes connection dispatch squasher reply memory)
   set(_dfly_tracy_build_scopes ${_dfly_tracy_known_scopes} manual)

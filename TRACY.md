@@ -15,24 +15,24 @@ capturing traces, reading them, and extending the instrumentation.
 ## TL;DR (the reliable workflow)
 
 ```bash
-# 1. Build Dragonfly with Tracy (on-demand client, fiber-aware)
-./helio/blaze.sh -release -DUSE_MOLD=ON -DWITH_AWS=OFF -DWITH_TRACY=ON
+# 1. Build Dragonfly with selected fiber-aware Tracy zones (on-demand client).
+./helio/blaze.sh -release -DUSE_MOLD=ON -DWITH_AWS=OFF -DWITH_TRACY=ON \
+  -DDFLY_TRACY_SCOPES=connection,dispatch,squasher,reply
 cd build-opt && ninja dragonfly && cd ..
 
-# 2. (once) allow call-stack sampling + context switches — see §6
-echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid
+# Sampling and context switches are opt-in; see §6 when either is needed.
 
-# 3. Run the server (it listens for a profiler on :8086, but records nothing until one connects)
+# 2. Run the server (it listens for a profiler on :8086, but records nothing until one connects)
 taskset -c 0,1 ./build-opt/dragonfly --proactor_threads=2 --enable_resp_io_loop_v2=true --port=6379
 
-# 4. Capture 15 s to a file while load runs (headless, rock solid).
+# 3. Capture 15 s to a file while load runs (headless, rock solid).
 #    $TRACY = your Tracy tools checkout (see §2: `git clone …; export TRACY=$PWD`).
 $TRACY/capture/build/tracy-capture -o /tmp/df.tracy -a 127.0.0.1 -p 8086 -f -s 15
 memtier_benchmark -s127.0.0.1 -p6379 -t2 -c20 --pipeline=30 --ratio=1:1 --test-time=15
 
-# 5a. Open the FILE in the GUI (stable — avoid a live connect):
+# 4a. Open the FILE in the GUI (stable — avoid a live connect):
 $TRACY/profiler/build/tracy-profiler /tmp/df.tracy
-# 5b. …or dump stats headless (no GUI):
+# 4b. …or dump stats headless (no GUI):
 $TRACY/csvexport/build/tracy-csvexport -e /tmp/df.tracy > /tmp/zones.csv
 ```
 
@@ -44,10 +44,16 @@ with the groups that might be useful, then choose a smaller subset at startup fo
 | Control | When chosen | Effect |
 |---|---|---|
 | `-DWITH_TRACY=ON` | build time | Includes the Tracy client. With `OFF` (the default), there is no Tracy client or manual instrumentation code. |
-| `-DDFLY_TRACY_SCOPES=...` | build time | Decides which broad manual zone groups are compiled into the binary. Excluded groups have no Tracy work at runtime. |
+| `-DDFLY_TRACY_SCOPES=...` | build time | Decides which broad manual zone groups are compiled into the binary. It defaults to empty; excluded groups have no Tracy work at runtime. |
 | `-DDFLY_TRACY_MANUAL_ZONES=...` | build time | Compiles only the listed exact manual zones, selected by stable numeric ID or explicit Tracy name. It does not broaden any scope group. |
+| `-DWITH_TRACY_PLOTS=ON` | build time | Includes V2 queue and backpressure telemetry. The default `OFF` omits its flags, state, queue scans, dynamic names, and call sites. |
+| `-DWITH_TRACY_SAMPLING=ON` | build time | Enables Tracy statistical call-stack sampling. The default is `OFF`. |
+| `-DWITH_TRACY_CONTEXT_SWITCH=ON` | build time | Enables Tracy context-switch tracing. The default is `OFF`. |
 | `--tracy_scopes=...` | server startup | Selects which compiled groups emit in this server run. No rebuild is needed to add or remove an already compiled group. |
-| `--tracy_manual_zones=...` | server startup | Selects exact manual zone IDs or names when `manual` is present in `--tracy_scopes`. |
+| `--tracy_manual_zones=...` | server startup | Selects exact manual zone IDs or names when `manual` is present in `--tracy_scopes`. Empty disables manual zones; an invalid list logs a warning and disables them. |
+| `--tracy_queue_connections=...` | server startup | With `WITH_TRACY_PLOTS=ON`, restricts V2 queue/lifecycle plots to comma-separated client IDs; empty selects all clients. |
+| `--tracy_queue_proactors=...` | server startup | With `WITH_TRACY_PLOTS=ON`, restricts V2 queue/lifecycle plots to comma-separated proactor IDs; empty selects all proactors. |
+| `--tracy_backpressure_plots` | server startup | With `WITH_TRACY_PLOTS=ON`, emits per-proactor pipeline bytes and configured limits only when a selected V2 connection parks on backpressure. |
 | `-DWITH_TRACY_FORENSIC=ON` | build time | Adds high-volume nested per-command detail within the selected compiled groups. Leave it `OFF` for ordinary captures. |
 
 The broad groups are `connection`, `dispatch`, `squasher`, `reply`, and `memory`. `manual` is the
@@ -58,7 +64,7 @@ this binary at runtime; it does not implicitly enable the `manual` scope.
 
 `manual` is a permanent special scope for an exact subset of the existing manual instrumentation.
 The authoritative registry is [src/facade/tracy_manual_zones.h](src/facade/tracy_manual_zones.h):
-it assigns every current label a stable ID from `1` through `118`. Do not renumber or reuse an ID;
+it assigns every current label a stable ID from `1` through `125`. Do not renumber or reuse an ID;
 append new zones instead. Grouped source macros use its symbolic token, and Tracy display names come
 only from the registry, so exact selection never needs a runtime zone-name lookup.
 
@@ -78,7 +84,7 @@ The build and runtime lists are intersected. For example, a binary built with `7
 another zone through `manual`, even if that other zone is named at startup. A broad scope and
 `manual` may be combined; their result is a union, so `--tracy_scopes=dispatch,manual` enables all
 compiled dispatch zones plus the selected exact manual zones from other groups. Requesting `manual`
-when no exact manual zones were compiled fails at startup.
+when no exact manual zones are enabled logs a warning and disables only the manual scope.
 
 The IDs most useful for the V1/V2 squashing investigation are `72` (`InvokeCmd.Handler`), `73`
 (`Squash.DispatchBatch`), `77` (`Squash.Dispatch.Command`), `89` (`Squasher.Hop.Work`), and `97`
@@ -88,7 +94,7 @@ The IDs most useful for the V1/V2 squashing investigation are `72` (`InvokeCmd.H
 
 | Scope | Main zones and data | Source owner |
 |---|---|---|
-| `connection` | input, parse loops, idle/backpressure waits, control handling, migration, and V2 queue-state plots | `src/facade/dragonfly_connection.cc` |
+| `connection` | input, parse loops, idle/backpressure waits, control handling, migration, and V2 queue-state plots when `WITH_TRACY_PLOTS=ON` | `src/facade/dragonfly_connection.cc` |
 | `dispatch` | command dispatch and execution, including `Dispatch.*`, `Squash.Dispatch.*`, `InvokeCmd.Handler`, and `V2.ExecuteBatch` | `src/server/main_service.cc`, `src/facade/dragonfly_connection.cc` |
 | `squasher` | pipeline squash structure, shard hops, scheduling, merge, and squasher wait zones | `src/server/multi_command_squasher.cc`, `src/facade/dragonfly_connection.cc` |
 | `reply` | reply batching, send/release/flush, plus `ReplyBuilder.*` when forensic detail is compiled | `src/facade/dragonfly_connection.cc`, `src/facade/reply_builder.cc` |
@@ -183,7 +189,11 @@ blocking-recv/join) are colored **red** via `DFLY_TRACY_WAIT(...)`. Everything e
 "work that may internally preempt" — its fiber-lane gaps still reveal any preemption.
 
 V2 queue plots include Dragonfly's client ID as `v2.conn_<id>.*`, so samples from different
-connections are never merged. A capture with $N$ active connections therefore has up to $12N$ queue plots.
+connections are never merged. A capture with $N$ active connections therefore has up to $16N$ queue plots.
+Use `--tracy_queue_connections=11,12` and/or `--tracy_queue_proactors=0,3` to reduce capture
+volume; when both flags are set, a connection must match both filters. Empty filters select all.
+For a backpressure investigation, add `--tracy_backpressure_plots`; its per-proactor plots are
+emitted only when a selected V2 connection actually parks above the pipeline limit.
 
 | Scope | Zone | Applies to | Meaning | Kind |
 |---|---|---|---|---|
@@ -199,6 +209,9 @@ connections are never merged. A capture with $N$ active connections therefore ha
 | `connection` | `v2.conn_<id>.admin.queue_length`, `v2.conn_<id>.admin.queue_bytes` | V2 | control/admin queue depth and owned bytes | plot |
 | `connection` | `v2.conn_<id>.pipeline.queue_length`, `v2.conn_<id>.pipeline.queue_bytes`, `v2.conn_<id>.pipeline.waiting_dispatch`, `v2.conn_<id>.pipeline.dispatched`, `v2.conn_<id>.pipeline.reply_ready` | V2 | parsed-command queue depth/bytes, undispatched commands, dispatched-but-not-released commands, and the contiguous reply-ready prefix | plot |
 | `connection` | `v2.conn_<id>.reply.buffered_bytes`, `v2.conn_<id>.reply.buffered_iovecs` | V2 | bytes and writev segments accumulated in `SinkReplyBuilder` and ready for the next flush | plot |
+| `connection` | `v2.conn_<id>.proactor_parse.commands`, `v2.conn_<id>.batch.commands` | V2 | commands parsed by the receive callback and commands waiting when `ExecuteBatch` begins | plot |
+| `connection` | `v2.conn_<id>.flush.bytes`, `v2.conn_<id>.shared.borrow_usec` | V2 | bytes buffered immediately before `FlushReplies` clears them and elapsed shared-read-buffer ownership time | plot |
+| `connection` | `v2.proactor_<id>.pipeline_bytes`, `.pipeline_bytes_limit`, `.pipeline_queue_limit` | V2 backpressure | thread-local pipeline bytes and the configured byte/count limits; requires `--tracy_backpressure_plots` and a V2 backpressure park | plot |
 | `connection` | `Conn.Pipeline.Enqueue`, `Conn.Pipeline.Enqueue.Finalize`, `Conn.Pipeline.ReleasePipelined`, `Conn.Pipeline.ReleaseParsed` | shared | pipeline-queue insertion and release detail; forensic only | work |
 | `dispatch` | `Dispatch.Command`, `InvokeCmd.Handler` | shared | command dispatch and command-handler body | work/preempt |
 | `dispatch` | `V1.Admin` | V1 | administrative or pub/sub command dispatch | work/preempt |
@@ -398,8 +411,8 @@ Notes (Tracy manual §"Call stack sampling"):
 
 ### 6.1 Kernel setup for sampling (3 knobs, per boot)
 
-Call‑stack sampling is **not a build flag** — the Tracy client is always compiled with sampling
-enabled (`-DWITH_TRACY=ON`, Tracy default). Whether you actually *get* stacks is decided at
+Call-stack sampling is an opt-in build capability: configure with
+`-DWITH_TRACY_SAMPLING=ON`. Whether an enabled build actually *gets* stacks is decided at
 **capture time** by the Linux kernel's `perf` permissions. If these aren't set, you get the
 half‑granted signature seen in an early capture: **Info → `Hardware samples: 304,893` but
 `Call stack samples: 0`** (counters sampled, stacks refused). Set these **three** sysctls **once per

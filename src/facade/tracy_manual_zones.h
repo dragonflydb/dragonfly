@@ -126,9 +126,16 @@
   X(115, kV2SharedOverflowBytes, "v2.shared.overflow_bytes")                         \
   X(116, kV2PipelineReplyReady, "v2.pipeline.reply_ready")                           \
   X(117, kV2ReplyBufferedBytes, "v2.reply.buffered_bytes")                           \
-  X(118, kV2ReplyBufferedIovecs, "v2.reply.buffered_iovecs")
+  X(118, kV2ReplyBufferedIovecs, "v2.reply.buffered_iovecs")                         \
+  X(119, kV2ProactorParseCommands, "v2.proactor_parse.commands")                     \
+  X(120, kV2BatchCommands, "v2.batch.commands")                                      \
+  X(121, kV2FlushBytes, "v2.flush.bytes")                                            \
+  X(122, kV2SharedBorrowUsec, "v2.shared.borrow_usec")                               \
+  X(123, kV2ProactorPipelineBytes, "v2.proactor.pipeline_bytes")                     \
+  X(124, kV2ProactorPipelineBytesLimit, "v2.proactor.pipeline_bytes_limit")          \
+  X(125, kV2ProactorPipelineQueueLimit, "v2.proactor.pipeline_queue_limit")
 
-#define DFLY_TRACY_MANUAL_ZONE_COUNT 118
+#define DFLY_TRACY_MANUAL_ZONE_COUNT 125
 
 namespace facade {
 
