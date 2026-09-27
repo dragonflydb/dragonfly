@@ -1927,6 +1927,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
 }
 
 Connection::ParserStatus Connection::ParseRedisSpan(io::Bytes input) {
+  DFLY_TRACY_CONNECTION_ZONE(kV2ProvidedBufferParse);
   DCHECK(ioloop_v2_);
   DCHECK(parsed_cmd_);
   CHECK(!redis_parser_active_);
@@ -3499,16 +3500,11 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
       DVLOG(2) << CONN_ID << "Squashing pipeline " << dispatch_waiting_count_ << " commands "
                << pending_input_ << " " << GetUnreadInputLen();
 
-      bool squashed = SquashPipelineV2();
-      if (squashed) {
-        // - This helps with throughput. Explanation:
-        //   when we suspend the thread calls io-callbacks that fill up the input buffer.
-        //   By breaking now we give the io-loop a chance to add more commands to the pipeline.
-        // - Skip the break when parse-in-proactor is on: the proactor already parsed those bytes
-        //   into the queue during the squash wait, so keep squashing in place instead.
-        if (!pipeline_parse_in_proactor_cached && (pending_input_ || GetUnreadInputLen() > 0))
-          break;
-        continue;
+      if (SquashPipelineV2()) {
+        // Let ParseLoop call ReplyBatch before dispatching another squash. A client with a bounded
+        // pipeline needs completed replies to replenish its requests. Delaying them reduces
+        // throughput even when more commands are ready to execute.
+        break;
       }
     }
 
