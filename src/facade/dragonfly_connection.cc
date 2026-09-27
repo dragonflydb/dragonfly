@@ -4299,11 +4299,11 @@ void Connection::EmitV2QueueTelemetry() const {
   constexpr size_t kFlushBytes = 14;
   constexpr size_t kSharedBorrowUsec = 15;
 
-  static thread_local std::unordered_map<uint32_t, std::unique_ptr<std::array<std::string, 16> > >
+  static thread_local std::unordered_map<uint32_t, std::unique_ptr<std::array<std::string, 16>>>
       plot_names_by_connection;
   auto [names_it, inserted] = plot_names_by_connection.try_emplace(id_);
   if (inserted) {
-    names_it->second = std::make_unique<std::array<std::string, 16> >();
+    names_it->second = std::make_unique<std::array<std::string, 16>>();
     for (size_t index{}; index < kQueuePlotZones.size(); ++index) {
       const std::string_view metric_name{TracyManualZoneName(kQueuePlotZones[index])};
       (*names_it->second)[index] =
@@ -4434,15 +4434,14 @@ void Connection::EmitV2BackpressureTelemetry() const {
   }
 
   const unsigned proactor_id = fb2::ProactorBase::me()->GetPoolIndex();
-  static thread_local std::unordered_map<unsigned, std::unique_ptr<std::array<std::string, 3> > >
+  static thread_local std::unordered_map<unsigned, std::unique_ptr<std::array<std::string, 3>>>
       plot_names_by_proactor;
   auto [names_it, inserted] = plot_names_by_proactor.try_emplace(proactor_id);
   if (inserted) {
-    names_it->second = std::make_unique < std::array<std::string, 3> >>
-                       (std::array<std::string, 3>{
-                           absl::StrCat("v2.proactor_", proactor_id, ".pipeline_bytes"),
-                           absl::StrCat("v2.proactor_", proactor_id, ".pipeline_bytes_limit"),
-                           absl::StrCat("v2.proactor_", proactor_id, ".pipeline_queue_limit")});
+    names_it->second = std::make_unique<std::array<std::string, 3>>(std::array<std::string, 3>{
+        absl::StrCat("v2.proactor_", proactor_id, ".pipeline_bytes"),
+        absl::StrCat("v2.proactor_", proactor_id, ".pipeline_bytes_limit"),
+        absl::StrCat("v2.proactor_", proactor_id, ".pipeline_queue_limit")});
     TracyPlotConfig((*names_it->second)[0].c_str(), tracy::PlotFormatType::Memory, true, false, 0);
     TracyPlotConfig((*names_it->second)[1].c_str(), tracy::PlotFormatType::Memory, true, false, 0);
     TracyPlotConfig((*names_it->second)[2].c_str(), tracy::PlotFormatType::Number, true, false, 0);
