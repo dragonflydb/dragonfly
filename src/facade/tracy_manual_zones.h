@@ -133,9 +133,10 @@
   X(122, kV2SharedBorrowUsec, "v2.shared.borrow_usec")                               \
   X(123, kV2ProactorPipelineBytes, "v2.proactor.pipeline_bytes")                     \
   X(124, kV2ProactorPipelineBytesLimit, "v2.proactor.pipeline_bytes_limit")          \
-  X(125, kV2ProactorPipelineQueueLimit, "v2.proactor.pipeline_queue_limit")
+  X(125, kV2ProactorPipelineQueueLimit, "v2.proactor.pipeline_queue_limit")          \
+  X(126, kV2ProvidedBufferParse, "V2.ProvidedBufferParse")
 
-#define DFLY_TRACY_MANUAL_ZONE_COUNT 125
+#define DFLY_TRACY_MANUAL_ZONE_COUNT 126
 
 namespace facade {
 
