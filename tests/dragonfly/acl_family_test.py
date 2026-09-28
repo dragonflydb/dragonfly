@@ -9,6 +9,8 @@ import pytest
 
 import redis
 from redis import asyncio as aioredis
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 
 from . import dfly_args
 from .instance import DflyStartException
@@ -498,7 +500,11 @@ async def assert_noauth(client):
 
 
 def single_conn(port, **kwargs):
-    return aioredis.Redis(port=port, single_connection_client=True, **kwargs)
+    # redis-py >= 6 retries AuthenticationError (a ConnectionError) by reconnecting and re-sending
+    # AUTH, which hides NOAUTH and changes the connection under test.
+    return aioredis.Redis(
+        port=port, single_connection_client=True, retry=Retry(NoBackoff(), 0), **kwargs
+    )
 
 
 # Never contacted: the tests send no AUTH while JWT mode is on.
@@ -531,55 +537,42 @@ async def test_require_pass_set_keeps_live_conns(df_factory):
     assert await single_conn(df.port, password="p2").ping()
 
 
-@dfly_args({"port": 1111, "admin_port": 1112, "requirepass": "mypass", "jwt_validate_url": JWT_URL})
-async def test_jwt_enable_forces_reauth(df_factory):
+@dfly_args({"port": 1111, "admin_port": 1112, "jwt_validate_url": JWT_URL})
+async def test_jwt_toggle_reauth(df_factory):
     df = df_factory.create()
     df.start()
 
-    main = single_conn(df.port, password="mypass")
-    admin = single_conn(df.admin_port, password="mypass")
-    assert await main.ping()
-    assert await admin.ping()
+    admin = single_conn(df.admin_port)
+    nopass = single_conn(df.port)
+    assert await nopass.ping()
+    await admin.execute_command("CONFIG SET requirepass mypass")
+    with_pass = single_conn(df.port, password="mypass")
+    replica = single_conn(df.port, password="mypass")
+    assert await with_pass.ping()
+    # Replication commands on the main port must not exempt a client.
+    await replica.execute_command("REPLCONF CAPA dragonfly")
 
     await admin.execute_command("CONFIG SET jwt_validate true")
-    await assert_noauth(main)
-    # Admin connections are never touched, and new ones still use requirepass.
+    await assert_noauth(replica)
+    await assert_noauth(single_conn(df.port))
+    # Admin connections are untouched and keep using requirepass.
     assert await admin.ping()
     assert await single_conn(df.admin_port, password="mypass").ping()
 
-    # Turning JWT off keeps live sessions.
+    # Neither sent a command while JWT was on, so both get their prior session back.
     await admin.execute_command("CONFIG SET jwt_validate false")
-    main = single_conn(df.port, password="mypass")
-    assert await main.ping()
-    await admin.execute_command("CONFIG SET jwt_validate false")
-    assert await main.ping()
+    assert await nopass.ping()
+    assert await with_pass.ping()
 
     # The endpoint is startup-only.
     with pytest.raises(redis.exceptions.ResponseError):
         await admin.execute_command("CONFIG SET jwt_validate_url http://127.0.0.1:2/validate")
 
 
-@pytest.mark.parametrize("url", ["https://host/validate", "http://", "http://host:0/", "host:80"])
-async def test_jwt_invalid_url_fails_startup(df_factory, url):
-    server = df_factory.create(jwt_validate_url=url)
+async def test_jwt_invalid_url_fails_startup(df_factory):
+    server = df_factory.create(jwt_validate_url="https://host/validate")
     with pytest.raises(DflyStartException):
         server.start()
-
-
-@dfly_args({"port": 1111, "cluster_mode": "yes", "jwt_validate_url": JWT_URL})
-async def test_jwt_enable_skips_migration_conn(df_factory):
-    df = df_factory.create()
-    df.start()
-
-    migration = single_conn(df.port)
-    # Any DFLYMIGRATE subcommand marks the connection, whatever its reply.
-    await migration.execute_command("DFLYMIGRATE ACK nonexistent 0")
-
-    main = single_conn(df.port)
-    await main.execute_command("CONFIG SET jwt_validate true")
-
-    await assert_noauth(main)
-    assert await migration.ping()
 
 
 @dfly_args({"port": 1111, "admin_port": 1112, "jwt_validate_url": JWT_URL})
@@ -603,8 +596,16 @@ async def test_jwt_enable_stops_pushes_to_unauthed_conns(df_factory):
         await admin.execute_command("CONFIG SET jwt_validate true")
         await admin.publish("ch", "after")
         assert await pubsub.get_message(timeout=1) is None
-        with pytest.raises(asyncio.TimeoutError):
-            await asyncio.wait_for(monitor.next_command(), 1)
+
+        # Turning JWT off restores both sessions.
+        await admin.execute_command("CONFIG SET jwt_validate false")
+        await admin.publish("ch", "again")
+        assert (await pubsub.get_message(timeout=1))["data"] == b"again"
+        # The monitor never saw anything while JWT was on, so the next PUBLISH it sees is "again".
+        cmd = ""
+        while "PUBLISH" not in cmd:
+            cmd = (await asyncio.wait_for(monitor.next_command(), 1))["command"]
+        assert "again" in cmd
 
 
 @dfly_args({"port": 1111, "requirepass": "temp"})

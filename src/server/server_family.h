@@ -230,8 +230,8 @@ class ServerFamily {
   // with a cancellation error (DfylCmd::CancelReplicas) and resetting the journal
   void ForceReplicasToFullSync();
 
-  // Forces live non-admin RESP connections to re-AUTH; call when JWT auth turns on.
-  void ForceReauthOnLiveConnections();
+  // Enabling forces live main-port connections to re-AUTH; disabling restores them.
+  void OnJwtModeChanged(bool jwt_enabled);
 
   std::optional<LastMasterSyncData> GetLastMasterData() const {
     return last_master_data_;

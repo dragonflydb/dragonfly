@@ -121,6 +121,8 @@ unsigned ChannelStore::SendMessages(string_view channel, facade::ArgRange messag
     last_thread = sub_thread;
   }
 
+  // The returned count includes subscribers skipped below (closing, or needing re-AUTH): they are
+  // filtered on their own threads after PUBLISH has already replied.
   auto subscribers_ptr = make_shared<decltype(subscribers)>(std::move(subscribers));
   auto cb = [subscribers_ptr, send = BuildSender(channel, messages, sharded)](unsigned idx, auto*) {
     auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,

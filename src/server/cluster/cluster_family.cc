@@ -856,9 +856,6 @@ void ClusterFamily::DflyMigrate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   string sub_cmd = absl::AsciiStrToUpper(parser.Next());
 
-  // Exempt from forced re-auth on auth config changes.
-  cmd_cntx->server_conn_cntx()->migration_conn = true;
-
   if (sub_cmd == "INIT") {
     InitMigration(parser, cmd_cntx);
   } else if (sub_cmd == "FLOW") {

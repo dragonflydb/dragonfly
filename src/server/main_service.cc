@@ -1080,12 +1080,11 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
-  // JWT sessions expire but existing sessions don't, so turning JWT on forces a reauth.
   jwt_enabled_ = acl::JwtValidator::IsEnabled();
   auto on_jwt_change = [this](const absl::CommandLineFlag&) {
     const bool was_enabled = std::exchange(jwt_enabled_, acl::JwtValidator::IsEnabled());
-    if (jwt_enabled_ && !was_enabled)
-      server_family_.ForceReauthOnLiveConnections();
+    if (jwt_enabled_ != was_enabled)
+      server_family_.OnJwtModeChanged(jwt_enabled_);
     return true;
   };
   config_registry.RegisterMutable("jwt_validate", on_jwt_change);
@@ -2007,6 +2006,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   cntx->ns = &namespaces->GetOrInsert("");
   cntx->authenticated = false;
   cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
+  cntx->pre_jwt_auth.reset();
 
   rb->SendSimpleString("RESET");
 }

@@ -2079,6 +2079,7 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
     cntx->SetAclCredentials(std::move(cred));
     cntx->authenticated = true;
     cntx->auth_expires_at = auth_expires_at;
+    cntx->pre_jwt_auth.reset();
     if (db_index == std::numeric_limits<size_t>::max()) {
       cntx->conn_state.db_index = 0;
     } else {
@@ -3422,26 +3423,28 @@ void ServerFamily::ForceReplicasToFullSync() {
   });
 }
 
-void ServerFamily::ForceReauthOnLiveConnections() {
-  auto cb = [](unsigned, util::Connection* conn) {
+void ServerFamily::OnJwtModeChanged(bool jwt_enabled) {
+  auto cb = [jwt_enabled](unsigned, util::Connection* conn) {
     facade::Connection* dconn = static_cast<facade::Connection*>(conn);
-    // Admin and UDS connections don't use JWT; memcache has no AUTH.
+    // Only the listener decides: admin and UDS connections don't use JWT; memcache has no AUTH.
+    // Replication/migration on the main port get no exemption, as it could be forged by commands.
     if (dconn->IsPrivileged() || dconn->socket()->IsUDS() ||
-        dconn->GetProtocol() == facade::Protocol::MEMCACHE)
+        dconn->GetProtocol() == facade::Protocol::MEMCACHE || dconn->cntx() == nullptr)
       return;
 
-    facade::ConnectionContext* base_cntx = dconn->cntx();
-    if (base_cntx == nullptr || base_cntx->replica_conn)
-      return;
-
-    auto* dfly_cntx = static_cast<ConnectionContext*>(base_cntx);
-    if (dfly_cntx->migration_conn)
-      return;
-
-    // Also covers connections opened while "default" was nopass.
-    dfly_cntx->req_auth = true;
-    dfly_cntx->authenticated = false;
-    dfly_cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
+    auto* cntx = static_cast<ConnectionContext*>(dconn->cntx());
+    if (jwt_enabled) {
+      // Existing sessions never expire, so all must AUTH with a JWT, including nopass ones.
+      cntx->pre_jwt_auth = ConnectionContext::PreJwtAuth{cntx->req_auth, cntx->authenticated};
+      cntx->req_auth = true;
+      cntx->authenticated = false;
+    } else if (cntx->pre_jwt_auth) {
+      cntx->req_auth = cntx->pre_jwt_auth->req_auth;
+      cntx->authenticated = cntx->pre_jwt_auth->authenticated;
+      cntx->pre_jwt_auth.reset();
+    }
+    // ACL sessions don't expire; JWT sessions keep working as ACL sessions once JWT is off.
+    cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
   };
 
   for (auto* listener : listeners_) {

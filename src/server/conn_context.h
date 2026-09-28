@@ -8,6 +8,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <optional>
 
 #include "facade/conn_context.h"
 #include "facade/parsed_command.h"
@@ -414,6 +415,13 @@ class ConnectionContext : public facade::ConnectionContext {
   std::chrono::steady_clock::time_point auth_expires_at =
       std::chrono::steady_clock::time_point::max();
 
+  // Auth state before enabling JWT forced a reauth; restored if JWT is disabled before a new AUTH.
+  struct PreJwtAuth {
+    bool req_auth;
+    bool authenticated;
+  };
+  std::optional<PreJwtAuth> pre_jwt_auth;
+
   // False once the session needs AUTH again (forced reauth or expired JWT).
   bool IsAuthValid() const {
     return (!req_auth || authenticated) && auth_expires_at > std::chrono::steady_clock::now();
@@ -437,9 +445,6 @@ class ConnectionContext : public facade::ConnectionContext {
 
   // Skip ACL validation, used by internal commands and commands run on admin port
   bool skip_acl_validation = false;
-
-  // Node-to-node slot migration connection on the target side.
-  bool migration_conn = false;
 
  private:
   void EnableMonitoring() {
