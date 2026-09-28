@@ -4,6 +4,7 @@
 
 #include "server/serializer_base.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
@@ -15,6 +16,7 @@
 #include "server/engine_shard.h"
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
+#include "server/server_state.h"
 #include "server/synchronization.h"
 #include "server/table.h"
 #include "server/tiered_storage.h"
@@ -221,6 +223,62 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
 
   if (EngineShard::tlocal()->tiered_storage() != nullptr)
     ProcessDelayedEntries(false, on_update ? it.bucket_address() : 0, base_cntx_);
+
+  return true;
+}
+
+// The algorithm is to go over all the buckets and serialize those with
+// version < snapshot_version_. In order to serialize each physical bucket exactly once we update
+// bucket version to snapshot_version_ once it has been serialized.
+// We handle serialization at physical bucket granularity.
+// To further complicate things, Table::Traverse covers a logical bucket that may comprise of
+// several physical buckets in dash table. For example, items belonging to logical bucket 0
+// can reside in buckets 0,1 and stash buckets 56-59.
+// PrimeTable::Traverse guarantees an atomic traversal of a single logical bucket,
+// it also guarantees 100% coverage of all items that exists when the traversal started
+// and survived until it finished.
+bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
+  // Covers cancellation exits; on the normal path the entries were already drained.
+  absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
+
+  for (DbIndex db_index = 0; db_index < db_array_.size(); ++db_index) {
+    if (!base_cntx_->IsRunning())
+      return false;
+
+    if (!db_array_[db_index])
+      continue;
+
+    PrimeTable* pt = &db_array_[db_index]->prime;
+    VLOG(1) << "Start traversing " << pt->size() << " items for index " << db_index;
+
+    PrimeTable::Cursor cursor;
+    do {
+      if (!base_cntx_->IsRunning())
+        return false;
+
+      cursor = pt->TraverseBuckets(
+          cursor,
+          [&](PrimeTable::bucket_iterator it) {
+            if (!base_cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
+              return;
+
+            OnTraverseBucket();
+            ProcessBucket(db_index, it, false);
+          },
+          visit_empty);
+
+      PaceTraversal(!cursor);
+
+      // Suspend the traversal loop if we are exceeding the egress budget, letting
+      // high priority writes drain first. Guarantees the loop its reserved share.
+      ServerState::tlocal()->GetEgressThrottler().Throttle();
+    } while (cursor);
+
+    // Wait for all the outstanding delayed entries and serialize them as well.
+    ProcessDelayedEntries(true, 0, base_cntx_);
+
+    OnDbTraversed(db_index);
+  }
 
   return true;
 }

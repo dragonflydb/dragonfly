@@ -84,18 +84,25 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
   void ConsumeJournalChange(const journal::JournalChangeItem& item) final;
   void ThrottleIfNeeded() final;
 
+  void OnTraverseBucket() override;
+
+  // Stalls the traversal while the socket writer is backlogged or the CPU budget is exhausted.
+  void PaceTraversal(bool done) override;
+
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
                                  bool on_update) override;
 
   void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             time_t expire, uint32_t mc_flags) override;
 
+  // Number of buckets serialized by the traversal flow.
+  uint64_t BucketsLooped() const;
+
   bool ShouldWrite(const journal::JournalChangeItem& item) const;
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
   struct MigrationStats {
-    uint64_t buckets_loop = 0;
     uint64_t keys_skipped = 0;
     uint64_t commands = 0;
     uint64_t iter_skips = 0;
@@ -108,6 +115,7 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
 
   MigrationStats migration_stats_;
   base::RealTimeAggregator cpu_aggregator_;
+  uint32_t steps_since_sleep_ = 0;
   LSN last_lsn_writen_ = 0;
   uint32_t journal_cb_id_{0};
 };

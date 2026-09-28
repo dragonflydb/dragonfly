@@ -4,7 +4,6 @@
 
 #include "server/serializer_base.h"
 
-#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/random/distributions.h>
 #include <absl/random/random.h>
@@ -136,6 +135,8 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
 
   // TODO: possibly replace with unified loop if we decide on this?
   void Loop();
+  void PaceTraversal(bool done) override;
+  void OnDbTraversed(DbIndex db_index) override;
 
   void Serialize(BucketIdentity bucket, std::string key, unsigned obj_type) {
     if (obj_type == OBJ_STRING && absl::Bernoulli(bg_, params_.delay_prob)) {
@@ -209,7 +210,6 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   absl::InsecureBitGen bg_;
 
   util::fb2::Fiber snapshot_fb_;
-  PrimeTable::Cursor snapshot_cursor_;
   uint32_t journal_id_;
 
   // subdriver for delayed entries
@@ -228,34 +228,17 @@ void TestDriver::Loop() {
   if (params_.start_paused)
     resume_traversal_.Wait();
 
-  // Covers cancellation exits; on the normal path the entries were already drained.
-  absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
+  TraverseAllBuckets(false);
+}
 
-  for (DbIndex snapshot_db_indx = 0; snapshot_db_indx < db_array_.size(); ++snapshot_db_indx) {
-    if (!base_cntx_->IsRunning())
-      return;
-
-    if (!db_array_[snapshot_db_indx])
-      continue;
-
-    PrimeTable* pt = &db_array_[snapshot_db_indx]->prime;
-    do {
-      if (!base_cntx_->IsRunning())
-        return;
-
-      snapshot_cursor_ = pt->TraverseBuckets(snapshot_cursor_, [this, snapshot_db_indx](auto it) {
-        ProcessBucket(snapshot_db_indx, it, false);
-      });
-
-      // Simualte yield due to socket flushes
-      for (unsigned i = 0; i < 2; ++i)
-        util::ThisFiber::Yield();
-    } while (snapshot_cursor_);
-
-    ProcessDelayedEntries(true, 0, base_cntx_);
-
+void TestDriver::PaceTraversal(bool done) {
+  // Simualte yield due to socket flushes
+  for (unsigned i = 0; i < 2; ++i)
     util::ThisFiber::Yield();
-  }  // for (dbindex)
+}
+
+void TestDriver::OnDbTraversed(DbIndex db_index) {
+  util::ThisFiber::Yield();
 }
 
 void TestDriver::ConsumeJournalChange(const journal::JournalChangeItem& item) {

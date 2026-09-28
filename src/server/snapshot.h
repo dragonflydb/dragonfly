@@ -86,6 +86,12 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Main snapshotting fiber that iterates over all buckets in the db slice.
   void IterateBucketsFb(bool send_full_sync_cut);
 
+  // Flushes the serializer and yields between traversal steps.
+  void PaceTraversal(bool done) override;
+
+  // Force-flushes the serializer after each database.
+  void OnDbTraversed(DbIndex db_index) override;
+
   // Serialize single bucket.
   // Returns number of serialized entries.
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
@@ -111,8 +117,6 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   // Used for explicit flushes at safe points (e.g. between entries). Can block.
   size_t FlushSerialized();
-
-  PrimeTable::Cursor snapshot_cursor_;
 
   std::unique_ptr<RdbSerializer> serializer_;
 
