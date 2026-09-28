@@ -651,6 +651,19 @@ TEST_F(DflyEngineTest, PSubscribe) {
   EXPECT_EQ("a*", msg.pattern);
 }
 
+TEST_F(DflyEngineTest, SubscriberWithExpiredAuthGetsNoMessages) {
+  single_response_ = false;
+  auto resp = pp_->at(1)->Await([&] { return Run({"subscribe", "ch"}); });
+  EXPECT_THAT(resp, ArrLen(3));
+  SetAuthExpiresAt("IO1", chrono::steady_clock::now() - chrono::seconds(1));
+
+  resp = pp_->at(0)->Await([&] { return Run({"publish", "ch", "foo"}); });
+  EXPECT_THAT(resp, IntArg(1));
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+
+  EXPECT_EQ(0, SubscriberMessagesLen("IO1"));
+}
+
 TEST_F(DflyEngineTest, PSubscribeMatchOnlyStar) {
   single_response_ = false;
   auto resp = pp_->at(1)->Await([&] { return Run({"psubscribe", "*"}); });

@@ -3425,7 +3425,9 @@ void ServerFamily::ForceReplicasToFullSync() {
 void ServerFamily::ForceReauthOnLiveConnections() {
   auto cb = [](unsigned, util::Connection* conn) {
     facade::Connection* dconn = static_cast<facade::Connection*>(conn);
-    if (dconn->GetProtocol() == facade::Protocol::MEMCACHE)
+    // Admin and UDS connections don't use JWT; memcache has no AUTH.
+    if (dconn->IsPrivileged() || dconn->socket()->IsUDS() ||
+        dconn->GetProtocol() == facade::Protocol::MEMCACHE)
       return;
 
     facade::ConnectionContext* base_cntx = dconn->cntx();
@@ -3433,9 +3435,11 @@ void ServerFamily::ForceReauthOnLiveConnections() {
       return;
 
     auto* dfly_cntx = static_cast<ConnectionContext*>(base_cntx);
-    if (dfly_cntx->skip_acl_validation)
+    if (dfly_cntx->migration_conn)
       return;
 
+    // Also covers connections opened while "default" was nopass.
+    dfly_cntx->req_auth = true;
     dfly_cntx->authenticated = false;
     dfly_cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
   };

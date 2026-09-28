@@ -333,8 +333,10 @@ void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid,
 
     VLOG(2) << "Sending command '" << msg << "' from " << ProactorBase::me()->GetPoolIndex()
             << " to " << monitors.size() << " monitors";
-    for (auto monitor_conn : monitors)
-      monitor_conn->SendMonitorMessageAsync(msg);
+    for (auto monitor_conn : monitors) {
+      if (static_cast<ConnectionContext*>(monitor_conn->cntx())->IsAuthValid())
+        monitor_conn->SendMonitorMessageAsync(msg);
+    }
   };
   shard_set->pool()->DispatchBrief(std::move(cb));
 }
@@ -1078,24 +1080,22 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
-  // TODO: CONFIG SET currently lets any authenticated client flip jwt_validate off at
-  // runtime, bypassing JWT enforcement without a restart. This breaks the security
-  // guarantee that req_auth depends on in Service::CreateContext.
-  config_registry.RegisterMutable("jwt_validate", [this](const absl::CommandLineFlag&) {
-    server_family_.ForceReauthOnLiveConnections();
+  // JWT sessions expire but existing sessions don't, so turning JWT on forces a reauth.
+  jwt_enabled_ = acl::JwtValidator::IsEnabled();
+  auto on_jwt_change = [this](const absl::CommandLineFlag&) {
+    const bool was_enabled = std::exchange(jwt_enabled_, acl::JwtValidator::IsEnabled());
+    if (jwt_enabled_ && !was_enabled)
+      server_family_.ForceReauthOnLiveConnections();
     return true;
-  });
-  config_registry.RegisterMutable("jwt_validate_url", [this](const absl::CommandLineFlag&) {
-    server_family_.ForceReauthOnLiveConnections();
-    return true;
-  });
+  };
+  config_registry.RegisterMutable("jwt_validate", on_jwt_change);
 #ifdef WITH_SEARCH
   config_registry.RegisterMutable("MAXSEARCHRESULTS");
   config_registry.RegisterMutable("search_query_string_bytes");
 #endif
 
   // dfly_main validates before the pidfile/listeners exist; backstop for other embeddings.
-  if (!ValidateNotifyKeyspaceEventsFlag()) {
+  if (!ValidateNotifyKeyspaceEventsFlag() || !acl::JwtValidator::ValidateUrlFlag()) {
     exit(1);
   }
 
@@ -1141,8 +1141,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
   if (!tcp_disabled && main_listener) {
-    acl_family_.Init(main_listener, &user_registry_,
-                     [this] { server_family_.ForceReauthOnLiveConnections(); });
+    acl_family_.Init(main_listener, &user_registry_);
   }
 
   // Initialize shard_set with a callback running once in a while in the shard threads.

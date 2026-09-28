@@ -57,6 +57,7 @@ ABSL_DECLARE_FLAG(std::string, dir);
 #include "io/file.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
+#include "server/acl/jwt_validator.h"
 #include "server/common.h"
 #include "server/generic_family.h"
 #include "server/main_service.h"
@@ -1133,7 +1134,8 @@ Usage: dragonfly [FLAGS]
   // cleanly (code 1) here, before the fiber runtime exists, which avoids a stale pidfile and
   // aborting during fiber-runtime teardown.
   if (!dfly::ValidateServerTlsFlags() || !dfly::ValidateClientTlsFlags() ||
-      !dfly::ValidateSnapshotFilenameFlags() || !dfly::ValidateNotifyKeyspaceEventsFlag()) {
+      !dfly::ValidateSnapshotFilenameFlags() || !dfly::ValidateNotifyKeyspaceEventsFlag() ||
+      !dfly::acl::JwtValidator::ValidateUrlFlag()) {
     return 1;
   }
 

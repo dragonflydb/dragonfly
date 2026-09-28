@@ -5,7 +5,6 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -36,10 +35,7 @@ class AclFamily final {
   explicit AclFamily(UserRegistry* registry, util::ProactorPool* pool);
 
   void Register(CommandRegistry* registry);
-
-  // `on_requirepass_changed` fires after a runtime CONFIG SET requirepass.
-  void Init(facade::Listener* listener, UserRegistry* registry,
-            std::function<void()> on_requirepass_changed = {});
+  void Init(facade::Listener* listener, UserRegistry* registry);
 
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;

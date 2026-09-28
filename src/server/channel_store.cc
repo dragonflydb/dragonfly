@@ -126,7 +126,8 @@ unsigned ChannelStore::SendMessages(string_view channel, facade::ArgRange messag
     auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
                           ChannelStore::Subscriber::ByThreadId);
     while (it != subscribers_ptr->end() && it->LastKnownThreadId() == idx) {
-      if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr)
+      if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr &&
+                                 static_cast<ConnectionContext*>(ptr->cntx())->IsAuthValid())
         send(ptr, it->pattern);
       it++;
     }

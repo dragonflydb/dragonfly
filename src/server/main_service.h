@@ -202,6 +202,9 @@ class Service : public facade::ServiceInterface {
 
   acl::UserRegistry user_registry_;
   acl::AclFamily acl_family_;
+
+  // Last observed JWT mode; only touched by CONFIG SET callbacks, which ConfigRegistry serializes.
+  bool jwt_enabled_ = false;
   ServerFamily server_family_;
   cluster::ClusterFamily cluster_family_;
   CommandRegistry registry_;

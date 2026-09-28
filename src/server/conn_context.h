@@ -414,6 +414,11 @@ class ConnectionContext : public facade::ConnectionContext {
   std::chrono::steady_clock::time_point auth_expires_at =
       std::chrono::steady_clock::time_point::max();
 
+  // False once the session needs AUTH again (forced reauth or expired JWT).
+  bool IsAuthValid() const {
+    return (!req_auth || authenticated) && auth_expires_at > std::chrono::steady_clock::now();
+  }
+
   // Each entry in the list is a bitfield representing a specific command family,
   // where each bit corresponds to an individual command within that family.
   // Together, these entries encode the user's full ACL to commands.
@@ -432,6 +437,9 @@ class ConnectionContext : public facade::ConnectionContext {
 
   // Skip ACL validation, used by internal commands and commands run on admin port
   bool skip_acl_validation = false;
+
+  // Node-to-node slot migration connection on the target side.
+  bool migration_conn = false;
 
  private:
   void EnableMonitoring() {

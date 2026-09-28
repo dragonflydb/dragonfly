@@ -11,6 +11,7 @@ import redis
 from redis import asyncio as aioredis
 
 from . import dfly_args
+from .instance import DflyStartException
 from .utility import assert_eventually
 
 
@@ -489,6 +490,121 @@ async def test_require_pass(df_factory):
     await client.execute_command("SET foo 44")
     res = await client.execute_command("GET foo")
     assert res == "44"
+
+
+async def assert_noauth(client):
+    with pytest.raises(redis.exceptions.AuthenticationError, match="Authentication required"):
+        await client.ping()
+
+
+def single_conn(port, **kwargs):
+    return aioredis.Redis(port=port, single_connection_client=True, **kwargs)
+
+
+# Never contacted: the tests send no AUTH while JWT mode is on.
+JWT_URL = "http://127.0.0.1:1/validate"
+
+
+@dfly_args({"port": 1111, "admin_port": 1112})
+async def test_require_pass_set_keeps_live_conns(df_factory):
+    # Matches Redis: changing requirepass only affects new authentications.
+    df = df_factory.create()
+    df.start()
+
+    nopass = single_conn(df.port)
+    admin_nopass = single_conn(df.admin_port)
+    assert await nopass.ping()
+    assert await admin_nopass.ping()
+    await nopass.execute_command("CONFIG SET requirepass p1")
+    assert await nopass.ping()
+    assert await admin_nopass.ping()
+
+    main = single_conn(df.port, password="p1")
+    admin = single_conn(df.admin_port, password="p1")
+    assert await main.ping()
+    assert await admin.ping()
+
+    await main.execute_command("CONFIG SET requirepass p2")
+    assert await nopass.ping()
+    assert await main.ping()
+    assert await admin.ping()
+    assert await single_conn(df.port, password="p2").ping()
+
+
+@dfly_args({"port": 1111, "admin_port": 1112, "requirepass": "mypass", "jwt_validate_url": JWT_URL})
+async def test_jwt_enable_forces_reauth(df_factory):
+    df = df_factory.create()
+    df.start()
+
+    main = single_conn(df.port, password="mypass")
+    admin = single_conn(df.admin_port, password="mypass")
+    assert await main.ping()
+    assert await admin.ping()
+
+    await admin.execute_command("CONFIG SET jwt_validate true")
+    await assert_noauth(main)
+    # Admin connections are never touched, and new ones still use requirepass.
+    assert await admin.ping()
+    assert await single_conn(df.admin_port, password="mypass").ping()
+
+    # Turning JWT off keeps live sessions.
+    await admin.execute_command("CONFIG SET jwt_validate false")
+    main = single_conn(df.port, password="mypass")
+    assert await main.ping()
+    await admin.execute_command("CONFIG SET jwt_validate false")
+    assert await main.ping()
+
+    # The endpoint is startup-only.
+    with pytest.raises(redis.exceptions.ResponseError):
+        await admin.execute_command("CONFIG SET jwt_validate_url http://127.0.0.1:2/validate")
+
+
+@pytest.mark.parametrize("url", ["https://host/validate", "http://", "http://host:0/", "host:80"])
+async def test_jwt_invalid_url_fails_startup(df_factory, url):
+    server = df_factory.create(jwt_validate_url=url)
+    with pytest.raises(DflyStartException):
+        server.start()
+
+
+@dfly_args({"port": 1111, "cluster_mode": "yes", "jwt_validate_url": JWT_URL})
+async def test_jwt_enable_skips_migration_conn(df_factory):
+    df = df_factory.create()
+    df.start()
+
+    migration = single_conn(df.port)
+    # Any DFLYMIGRATE subcommand marks the connection, whatever its reply.
+    await migration.execute_command("DFLYMIGRATE ACK nonexistent 0")
+
+    main = single_conn(df.port)
+    await main.execute_command("CONFIG SET jwt_validate true")
+
+    await assert_noauth(main)
+    assert await migration.ping()
+
+
+@dfly_args({"port": 1111, "admin_port": 1112, "jwt_validate_url": JWT_URL})
+async def test_jwt_enable_stops_pushes_to_unauthed_conns(df_factory):
+    df = df_factory.create()
+    df.start()
+
+    admin = single_conn(df.admin_port)
+    assert await admin.ping()
+    pubsub = single_conn(df.port).pubsub()
+    await pubsub.subscribe("ch")
+    assert (await pubsub.get_message(timeout=1))["type"] == "subscribe"
+
+    monitor_client = single_conn(df.port, decode_responses=True)
+    async with monitor_client.monitor() as monitor:
+        await admin.publish("ch", "before")
+        assert (await pubsub.get_message(timeout=1))["data"] == b"before"
+        while "before" not in (await asyncio.wait_for(monitor.next_command(), 1))["command"]:
+            pass
+
+        await admin.execute_command("CONFIG SET jwt_validate true")
+        await admin.publish("ch", "after")
+        assert await pubsub.get_message(timeout=1) is None
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(monitor.next_command(), 1)
 
 
 @dfly_args({"port": 1111, "requirepass": "temp"})
