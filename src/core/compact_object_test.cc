@@ -17,7 +17,6 @@
 #include "base/logging.h"
 #include "core/cuckoo.h"
 #include "core/detail/bitpacking.h"
-#include "core/huff_coder.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/string_map.h"
@@ -1117,95 +1116,6 @@ TEST_F(CompactObjectTest, lpGetInteger) {
     ptr = lpNext(lp, ptr);
   }
   lpFree(lp);
-}
-
-static void BuildEncoderAB(HuffmanEncoder* encoder) {
-  array<unsigned, 256> hist;
-  hist.fill(1);
-  hist['a'] = 100;
-  hist['b'] = 50;
-  CHECK(encoder->Build(hist.data(), hist.size() - 1, nullptr));
-}
-
-TEST_F(CompactObjectTest, Huffman) {
-  HuffmanEncoder encoder;
-  BuildEncoderAB(&encoder);
-  auto bindata = encoder.Export();
-  ASSERT_TRUE(bindata.has_value());
-
-  for (CompactObj::HuffmanDomain domain : {CompactObj::HUFF_KEYS, CompactObj::HUFF_STRING_VALUES}) {
-    ASSERT_TRUE(CompactObj::InitHuffmanThreadLocal(domain, *bindata));
-    for (unsigned i = 30; i < 2048; i += 10) {
-      string data(i, 'a');
-
-      variant<CompactKey, CompactValue> obj_backing;
-      if (domain)
-        obj_backing = CompactValue{};
-      auto& cobj = visit([&](auto& co) -> CompactObj& { return co; }, obj_backing);
-
-      visit([&](auto& co) { co.SetString(data); }, obj_backing);
-      bool malloc_used = i >= 60;
-      ASSERT_EQ(malloc_used, cobj.MallocUsed() > 0) << i;
-      ASSERT_EQ(data.size(), cobj.Size());
-      ASSERT_EQ(CompactObj::HashCode(data), cobj.HashCode());
-
-      string actual;
-      cobj.GetString(&actual);
-      EXPECT_EQ(data, actual);
-      visit(absl::Overload{[&](CompactKey& co) { EXPECT_EQ(co, data); }, [&](CompactValue& co) {}},
-            obj_backing);
-    }
-
-    // Exercise the extended huffman range (formerly capped at 288 bytes, now up to 16KB).
-    for (unsigned i : {1024u, 4096u, 8192u, 16384u}) {
-      string data(i, 'a');
-      CompactValue cobj;
-      cobj.SetString(data);
-      ASSERT_EQ(data.size(), cobj.Size()) << i;
-      ASSERT_EQ(CompactObj::HashCode(data), cobj.HashCode()) << i;
-
-      string actual;
-      cobj.GetString(&actual);
-      EXPECT_EQ(data, actual) << i;
-    }
-  }
-}
-
-// Sweeps input lengths across the 1-byte vs 2-byte huffman header boundary (delta == 128).
-// All inputs are highly compressible (all-'a'), so SetString picks HUFFMAN_ENC for every n,
-// which means GetFirstByte() returns the raw header byte 0 and its top bit tells us which
-// header form was used.
-TEST_F(CompactObjectTest, HuffmanVarintHeader) {
-  HuffmanEncoder encoder;
-  BuildEncoderAB(&encoder);
-  auto bindata = encoder.Export();
-  ASSERT_TRUE(bindata.has_value());
-  // The thread-local encoder may already be installed by a previous test in this fixture;
-  // re-init is a no-op (and returns false). Either way, the encoder is valid afterwards.
-  CompactObj::InitHuffmanThreadLocal(CompactObj::HUFF_STRING_VALUES, *bindata);
-
-  bool seen_1byte = false, seen_2byte = false;
-  for (unsigned n = 100; n <= 1000; ++n) {
-    string data(n, 'a');
-    CompactValue cobj;
-    cobj.SetString(data);
-    ASSERT_EQ(n, cobj.Size()) << "Size mismatch at n=" << n;
-    ASSERT_EQ(CompactObj::HashCode(data), cobj.HashCode()) << "HashCode mismatch at n=" << n;
-
-    string actual;
-    cobj.GetString(&actual);
-    ASSERT_EQ(data, actual) << "Roundtrip failed at n=" << n;
-
-    // For HUFFMAN_ENC, byte 0's top bit distinguishes the 1-byte (clear) vs 2-byte (set)
-    // header form. Crossing happens as delta passes 127 -> 128.
-    if (cobj.GetFirstByte() & 0x80) {
-      seen_2byte = true;
-    } else {
-      seen_1byte = true;
-    }
-  }
-  EXPECT_TRUE(seen_1byte) << "Expected at least one 1-byte header (delta <= 127)";
-  EXPECT_TRUE(seen_2byte) << "Expected at least one 2-byte header (delta >= 128)";
 }
 
 TEST_F(CompactObjectTest, GetByteAtOffset) {

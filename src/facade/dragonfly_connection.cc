@@ -1558,8 +1558,8 @@ void Connection::ConnectionFlow() {
     }
   }
 
-  // After the client disconnected.
-  cc_->conn_closing = true;  // Signal dispatch to close.
+  // After the client disconnected. Signals dispatch to close and lets the context react.
+  BreakOnce(POLLHUP);
   cnd_.notify_one();
   phase_ = SHUTTING_DOWN;
   VLOG(2) << CONN_ID << "Before dispatch_fb.join()";
@@ -1858,7 +1858,6 @@ void Connection::OnBreakCb(int32_t mask) {
   VLOG(1) << CONN_ID << "Got event " << mask << " " << unsigned(phase_) << " "
           << reply_builder_->IsSendActive() << " " << reply_builder_->GetError();
 
-  cc_->conn_closing = true;
   BreakOnce(mask);
   cnd_.notify_one();  // Notify dispatch fiber.
 }
@@ -2447,6 +2446,10 @@ void Connection::AsyncFiber() {
   DCHECK(cc_->conn_closing || reply_builder_->GetError());
 
   cc_->conn_closing = true;
+  // The loop can exit mid-drain with batching still on (it is armed per iteration while more
+  // messages are queued, and never disarmed on exit). ConnectionFlow writes the protocol error
+  // after joining us, so leaving it armed buries that reply in a batch nobody will flush.
+  reply_builder_->SetBatchMode(false);
   qbp.NotifyPipelineWaiters();
 
   // If shutdown was requested, we need to break the receive call in case the i/o fiber
@@ -2489,6 +2492,11 @@ void Connection::ShutdownSelfBlocking() {
 }
 
 bool Connection::Migrate(util::fb2::ProactorBase* dest) {
+  // A connection holding a borrowed interpreter must not move; refuse before the CHECKs below.
+  if (cc_->IsMigrationBlocked()) {
+    return false;
+  }
+
   // Migrate() runs synchronously and only supports connections without subscriptions and with no
   // background command processing, as enforced by the CHECKs below.
   //
@@ -2705,6 +2713,9 @@ void Connection::SendAsync(MessageHandle msg) {
       request_shutdown_ = true;
       // We don't shutdown here. The reason is that TLS socket is preemptive
       // and SendAsync is atomic.
+      // Same signals as OnShutdown: the v1 loop leaves on cnd_, the v2 loop only on io_ec_.
+      io_ec_ = make_error_code(errc::connection_aborted);
+      io_event_.notify();
       cnd_.notify_one();
       return;
     }
@@ -3012,8 +3023,12 @@ void Connection::UnregisterReadBufCapacity() {
   read_buf_capacity_registered_ = false;
 }
 
+// Every path that tears a connection down funnels through here: it marks the context as closing
+// and lets the context react (cancel a blocking transaction, and so on). Callers must not rely on
+// conn_closing being unset afterwards.
 void Connection::BreakOnce(uint32_t ev_mask) {
   if (cc_) {
+    cc_->conn_closing = true;
     cc_->OnSocketError(ev_mask);
   }
 }

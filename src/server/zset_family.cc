@@ -30,7 +30,6 @@ extern "C" {
 #include "server/error.h"
 #include "server/family_utils.h"
 #include "server/namespaces.h"
-#include "server/set_family.h"
 #include "server/transaction.h"
 
 namespace rng = std::ranges;
@@ -833,7 +832,7 @@ ScoredMap UnionShardKeysWithScore(const KeyIterWeightVec& key_iter_weight_vec, A
   // Safe to delete now — the loop above no longer references iterators.
   for (const auto& key : emptied_set_keys) {
     if (auto res = db_slice.FindReadOnly(db_cntx, key, OBJ_SET); res) {
-      SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, (*res)->second);
+      DeleteCollectionIfEmpty(db_slice, db_cntx, key, (*res)->second);
     }
   }
 
@@ -956,7 +955,7 @@ OpResult<ScoredMap> OpInter(EngineShard* shard, Transaction* t, string_view dest
   auto& db_slice = t->GetDbSlice(shard->shard_id());
   for (const auto& key : emptied_set_keys) {
     if (auto res = db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_SET); res) {
-      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), key, (*res)->second);
+      DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), key, (*res)->second);
     }
   }
 
@@ -1106,8 +1105,7 @@ void BZPopMinMax(facade::ParsedArgs args, bool is_max, CommandContext* cmd_cntx)
 
   auto* cntx = cmd_cntx->server_conn_cntx();
   OpResult<string> popped_key = container_utils::RunCbOnFirstNonEmptyBlocking(
-      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), &cntx->blocked,
-      &cntx->paused);
+      cmd_cntx->tx(), OBJ_ZSET, std::move(cb), unsigned(timeout * 1000), cntx);
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (popped_key) {
@@ -1529,7 +1527,8 @@ OpResult<ScoredArray> OpRandMember(int count, const ZSetFamily::RangeParams& par
     for (std::size_t i = 0; i < picks_count; i++) {
       const std::size_t picked_index = generator->Generate();
 
-      IntervalVisitor iv{Action::RANGE, params, &pv};
+      // The previous pick may have yielded and moved the entry; re-fetch via the laundering it.
+      IntervalVisitor iv{Action::RANGE, params, &const_cast<PrimeValue&>(it.value()->second)};
       iv(ZSetFamily::IndexInterval{picked_index, picked_index});
 
       result[i] = iv.PopResult().front();
@@ -2518,8 +2517,7 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
 
     DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
                                    // `WaitOnWatch`
-    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, &cntx->blocked,
-                                     &cntx->paused);
+    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, cntx);
 
     if (status != OpStatus::OK) {
       status == OpStatus::UNBLOCKED ? response_builder->SendError(status)
@@ -2826,17 +2824,33 @@ LoadBlobResult ZSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv
 }
 
 LoadBlobResult ZSetFamily::LoadListpackBlob(std::string_view blob, bool deep, PrimeValue* pv) {
-  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), deep ? 1 : 0, nullptr, nullptr)) {
+  // Validate deeply on every load path, not only RESTORE: a sorted set is read pairwise (member,
+  // score), so an odd or count-mismatched listpack would later NULL-deref a missing score.
+  if (!lpValidateIntegrity((uint8_t*)blob.data(), blob.size(), /*deep=*/1, nullptr, nullptr)) {
     LOG(ERROR) << "Zset listpack integrity check failed.";
     return LoadBlobResult::kCorrupted;
   }
 
   unsigned char* src_lp = (unsigned char*)blob.data();
 
-  // Reject an unpaired tail; gated on deep since counting may scan not-yet-validated entries.
-  if (deep && lpLength(src_lp) % 2 != 0) {
+  // Deep validation matched count to body, so lpLength is exact; reject an odd (unpaired) count.
+  if (lpLength(src_lp) % 2 != 0) {
     LOG(ERROR) << "Zset listpack has an odd number of entries.";
     return LoadBlobResult::kCorrupted;
+  }
+
+  if (deep) {  // untrusted input only; a duplicate member is corruption
+    absl::flat_hash_set<std::string> seen;
+    for (uint8_t* p = lpFirst(src_lp); p; p = lpNext(src_lp, lpNext(src_lp, p))) {
+      unsigned slen = 0;
+      long long lval = 0;
+      uint8_t* vstr = lpGetValue(p, &slen, &lval);
+      std::string member = vstr ? std::string((char*)vstr, slen) : absl::StrCat(lval);
+      if (!seen.insert(std::move(member)).second) {
+        LOG(ERROR) << "Zset listpack has a duplicate member.";
+        return LoadBlobResult::kCorrupted;
+      }
+    }
   }
 
   unsigned long long bytes = lpBytes(src_lp);
@@ -2853,10 +2867,12 @@ void ZSetFamily::Register(CommandRegistry* registry) {
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   // We break up chain into multiple calls to reduce stack usage in this function.
   *registry << CI{"ZADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
-            << CI{"BZPOPMIN", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+            << CI{"BZPOPMIN",
+                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
                   1, -2}
                    .HFUNC(BZPopMin)
-            << CI{"BZPOPMAX", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3,
+            << CI{"BZPOPMAX",
+                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
                   1, -2}
                    .HFUNC(BZPopMax)
             << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
@@ -2868,7 +2884,7 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
             << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
             << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
-            << CI{"ZLEXCOUNT", CO::READONLY, 4, 1, 1}.HFUNC(ZLexCount)
+            << CI{"ZLEXCOUNT", CO::READONLY | CO::FAST, 4, 1, 1}.HFUNC(ZLexCount)
             << CI{"ZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(
                    ZMPop)
             << CI{"BZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
@@ -2883,8 +2899,10 @@ void ZSetFamily::Register(CommandRegistry* registry) {
             << CI{"ZRANK", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZRank)
             << CI{"ZRANGEBYLEX", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByLex)
             << CI{"ZRANGEBYSCORE", CO::READONLY, -4, 1, 1}.HFUNC(ZRangeByScore)
-            << CI{"ZRANGESTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -5, 1, 2}.HFUNC(
-                   ZRangeStore);
+            << CI{"ZRANGESTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -5, 1,
+                  2}
+                   .HFUNC(ZRangeStore);
 
   *registry << CI{"ZSCORE", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(ZScore)
             << CI{"ZMSCORE", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(ZMScore)

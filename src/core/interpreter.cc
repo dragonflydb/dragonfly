@@ -5,6 +5,7 @@
 #include "core/interpreter.h"
 
 #include <absl/base/casts.h>
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
@@ -207,7 +208,8 @@ class RedisTranslator : public ObjectExplorer {
 
   lua_State* lua_;
   bool has_error_{false};
-  vector<unsigned> array_index_{};
+  // Keep nesting indices inline to avoid a heap allocation for each shallow redis.call array reply.
+  absl::InlinedVector<unsigned, 4> array_index_;
 };
 
 void RedisTranslator::OnBool(bool b) {
@@ -518,14 +520,14 @@ end
   register_polyfills(lua);
 }
 
-// dest must have at least 41 chars.
-void ToHex(const uint8_t* src, char* dest) {
+array<char, 40> ToHex(const uint8_t* src) {
+  array<char, 40> dest;
   const char cset[] = "0123456789abcdef";
-  for (size_t j = 0; j < 20; j++) {
+  for (size_t j = 0; j < dest.size() / 2; j++) {
     dest[j * 2] = cset[((src[j] & 0xF0) >> 4)];
     dest[j * 2 + 1] = cset[(src[j] & 0xF)];
   }
-  dest[40] = '\0';
+  return dest;
 }
 
 int DragonflyHashCommand(lua_State* lua) {
@@ -640,13 +642,8 @@ int RedisSha1Command(lua_State* lua) {
   size_t len;
   const char* s = lua_tolstring(lua, 1, &len);
 
-  uint8_t digest[EVP_MAX_MD_SIZE];
-  EVPDigest(s, len, digest, NULL);
-
-  char hex[41];
-  ToHex(digest, hex);
-
-  lua_pushstring(lua, hex);
+  auto hex = Interpreter::FuncSha1({s, len});
+  lua_pushlstring(lua, hex.data(), hex.size());
   return 1;
 }
 
@@ -838,17 +835,24 @@ Interpreter::Interpreter() {
   UpdateGCParameters();
 }
 
+Interpreter::Interpreter(InterpreterManager* owner, uint64_t generation) : Interpreter() {
+  pool_owner_ = owner;
+  pool_generation_ = generation;
+}
+
 Interpreter::~Interpreter() {
   InterpreterManager::tl_stats().interpreter_cnt--;
 
   lua_close(lua_);
+  // lua_close drove used_bytes_ negative; harvest it so our share leaves the stat.
+  InterpreterManager::tl_stats().used_bytes += TakeUsedBytes();
 }
 
-void Interpreter::FuncSha1(string_view body, char* fp) {
+array<char, 40> Interpreter::FuncSha1(string_view body) {
   uint8_t digest[EVP_MAX_MD_SIZE];
   EVPDigest(body.data(), body.size(), digest, NULL);
 
-  ToHex(digest, fp);
+  return ToHex(digest);
 }
 
 auto Interpreter::AddFunction(string_view sha, string_view body, string* result) -> AddResult {
@@ -1370,15 +1374,19 @@ bool Interpreter::PrepareArgs() {
         if (lua_isinteger(lua_, idx)) {
           char* next = absl::numbers_internal::FastIntToBuffer(lua_tointeger(lua_, idx), tmpbuf);
           backed_args_.PushArg(string_view{tmpbuf, size_t(next - tmpbuf)});
-        } else if (lua_isnumber(lua_, idx)) {
+        } else {
           int fmt_len = absl::SNPrintF(tmpbuf, sizeof(tmpbuf), "%.17g", lua_tonumber(lua_, idx));
           CHECK_GT(fmt_len, 0);
           backed_args_.PushArg(string_view{tmpbuf, size_t(fmt_len)});
         }
         break;
-      case LUA_TSTRING:
-        backed_args_.PushArg(string_view{lua_tostring(lua_, idx), lua_rawlen(lua_, idx)});
+      case LUA_TSTRING: {
+        // Fetch the data and byte length together to avoid a second Lua stack lookup.
+        size_t len;
+        const char* str = lua_tolstring(lua_, idx, &len);
+        backed_args_.PushArg(string_view{str, len});
         break;
+      }
     }
   }
 
@@ -1482,15 +1490,21 @@ InterpreterManager::Stats& InterpreterManager::tl_stats() {
   return stats;
 }
 
-Interpreter* InterpreterManager::Get() {
-  // Grow if none is available and we have unused capacity left.
-  if (available_.empty() && storage_.size() < storage_.capacity()) {
-    storage_.emplace_back();
-    return &storage_.back();
-  }
+InterpreterManager::~InterpreterManager() {
+  DCHECK_EQ(available_.size(), total_alive_);  // nothing is borrowed at this point
+  for (Interpreter* ir : available_)
+    delete ir;
+}
 
-  bool blocked = waker_.await([this]() { return !available_.empty(); });
+Interpreter* InterpreterManager::Get() {
+  // Stale (not-yet-returned) interpreters still count against num_, else a Reset could double it.
+  bool blocked = waker_.await([this]() { return !available_.empty() || total_alive_ < num_; });
   tl_stats().blocked_cnt += (uint64_t)blocked;
+
+  if (available_.empty()) {
+    ++total_alive_;
+    return new Interpreter(this, generation_);
+  }
 
   Interpreter* ir = available_.back();
   available_.pop_back();
@@ -1501,6 +1515,20 @@ void InterpreterManager::Return(Interpreter* ir) {
   const uint64_t max_memory_usage = absl::GetFlag(FLAGS_lua_mem_gc_threshold);
   using namespace chrono;
   ++tl_stats().interpreter_return;
+
+  // A foreign interpreter (thread migrated mid-borrow) would corrupt our count; refuse it.
+  if (ir->pool_owner_ != this) {
+    LOG(DFATAL) << "Returning an interpreter to a foreign manager";
+    return;
+  }
+
+  if (ir->pool_generation_ != generation_) {  // stale: a Reset happened while it was borrowed
+    delete ir;
+    --total_alive_;
+    waker_.notify();
+    return;
+  }
+
   int64_t delta = ir->TakeUsedBytes();
   if (max_memory_usage != 0 && (tl_stats().used_bytes + delta) > max_memory_usage) {
     ++tl_stats().force_gc_calls;
@@ -1518,41 +1546,27 @@ void InterpreterManager::Return(Interpreter* ir) {
     tl_stats().gc_duration_ns += duration_cast<nanoseconds>(after - before).count();
   }
   tl_stats().used_bytes += delta;
-  if (ir >= storage_.data() && ir < storage_.data() + storage_.size()) {
-    available_.push_back(ir);
-    waker_.notify();
-  } else if (return_untracked_ > 0) {
-    return_untracked_--;
-    if (return_untracked_ == 0) {
-      reset_ec_.notify();
-    }
-  } else {
-    LOG(DFATAL) << "Returning untracked interpreter";
-  }
+
+  DCHECK(find(available_.begin(), available_.end(), ir) == available_.end());
+  available_.push_back(ir);
+  waker_.notify();
 }
 
 void InterpreterManager::Reset() {
-  lock_guard guard{reset_mu_};
-
-  // we perform double buffer swapping with storage and wait for the old interepreters to be
-  // returned.
-  return_untracked_ = storage_.size() - available_.size();
-
-  std::vector<Interpreter> next_storage;
-  next_storage.reserve(storage_.capacity());
-  next_storage.resize(storage_.size());
-  next_storage.swap(storage_);
-
+  // Must not block: the caller may hold one of these, or a lock its holder waits for. Runs to
+  // completion without preemption, so concurrent resets on this thread can't interleave.
+  ++generation_;
+  for (Interpreter* ir : available_)
+    delete ir;
+  total_alive_ -= available_.size();
   available_.clear();
-  for (auto& ir : storage_) {
-    available_.push_back(&ir);
-  }
 
-  reset_ec_.await([this]() { return return_untracked_ == 0; });
-  VLOG(1) << "InterpreterManager::Reset ended";
+  waker_.notifyAll();
+  VLOG(1) << "InterpreterManager::Reset ended, " << total_alive_ << " interpreters left borrowed";
 }
 
 void InterpreterManager::Alter(std::function<void(Interpreter*)> modf) {
+  // A Reset() during modf bumps the generation, so Return() destroys the stale taken ones.
   vector<Interpreter*> taken;
   swap(taken, available_);  // swap data because modf can preempt
 

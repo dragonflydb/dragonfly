@@ -31,6 +31,7 @@
 #ifndef __ZMALLOC_H
 #define __ZMALLOC_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* Double expansion needed for stringification of macro values. */
@@ -124,10 +125,6 @@ int zmalloc_get_allocator_wasted_blocks(float ratio, size_t* allocated, size_t* 
                                         size_t* wasted);
 struct fragmentation_info {
   size_t committed;
-
-  // a temporary metric to compare against "committed" in production.
-  // TODO: delete it once we are confident committed is computed correctly.
-  size_t committed_golden;
   size_t wasted;
   unsigned bin;
 };
@@ -147,7 +144,17 @@ void zmalloc_page_is_underutilized(void* ptr, float ratio, int collect_stats, st
 char* zstrdup(const char* s);
 
 void init_zmalloc_threadlocal(void* heap);
+
+// Get/set the thread-local heap zmalloc allocates from. Unlike init_zmalloc_threadlocal(),
+// the setter is unconditional, so callers can scope it to a different heap temporarily.
+void* zmalloc_get_threadlocal_heap(void);
+void zmalloc_set_threadlocal_heap(void* heap);
+
 extern __thread ssize_t zmalloc_used_memory_tl;
+
+// When true, zmalloc/zfree skip zmalloc_used_memory_tl: it reports data-heap usage, so
+// allocations on any other heap (e.g. the backing heap) must not count toward it.
+extern __thread bool zmalloc_skip_accounting_tl;
 
 #undef __zm_str
 #undef __xstr

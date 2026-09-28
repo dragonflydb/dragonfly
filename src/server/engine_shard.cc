@@ -12,6 +12,8 @@
 #include "base/flags.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
+#include "core/search/stateless_allocator.h"
+#include "core/small_string.h"
 #include "io/proc_reader.h"
 
 extern "C" {
@@ -225,8 +227,7 @@ EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequ
     return MemoryTooLow;
   }
 
-  thread_local fragmentation_info finfo{
-      .committed = 0, .committed_golden = 0, .wasted = 0, .bin = 0};
+  thread_local fragmentation_info finfo{.committed = 0, .wasted = 0, .bin = 0};
 
   const std::size_t global_threshold = double(limit) * GetFlag(FLAGS_mem_defrag_threshold);
   if (global_threshold > rss_mem_current.load(memory_order_relaxed)) {
@@ -244,7 +245,7 @@ EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequ
     }
 
     // start checking.
-    finfo.committed = finfo.committed_golden = 0;
+    finfo.committed = 0;
     finfo.wasted = 0;
     page_utilization_threshold = GetFlag(FLAGS_mem_defrag_page_utilization_threshold);
   }
@@ -257,11 +258,6 @@ EngineShard::DefragTaskState::SkipReason EngineShard::DefragTaskState::CheckRequ
   if (res == 0) {
     // finished checking.
     last_check_time = time(nullptr);
-
-    if (finfo.committed != finfo.committed_golden) {
-      LOG_FIRST_N(ERROR, 100) << "committed memory computed incorrectly: " << finfo.committed
-                              << " vs " << finfo.committed_golden;
-    }
 
     const double waste_threshold = GetFlag(FLAGS_mem_defrag_waste_threshold);
     if (finfo.wasted > size_t(finfo.committed * waste_threshold)) {
@@ -552,11 +548,18 @@ void EngineShard::DestroyThreadLocal() {
   shard_->~EngineShard();
   CleanupStatelessAllocMR();
 
-  mi_free(shard_);
+  // shard_ itself lives in `tlh`; mi_heap_destroy below reclaims it, no need to mi_free it.
   shard_ = nullptr;
+  CompactObj::ClearThreadLocalStats();
   CompactObj::InitThreadLocal(nullptr);
+  SmallString::ShutdownThreadLocal();
+  InitTLSearchMR(nullptr);
+  zmalloc_set_threadlocal_heap(nullptr);
 
-  mi_heap_delete(tlh);
+  // Bulk-reclaim bypasses destructors
+  zmalloc_used_memory_tl = 0;
+  mi_heap_destroy(tlh);
+
   VLOG(1) << "Shard reset " << shard_id;
 }
 

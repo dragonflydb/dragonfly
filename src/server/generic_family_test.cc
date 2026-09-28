@@ -7,6 +7,8 @@
 #include <absl/cleanup/cleanup.h>
 
 #include <array>
+#include <cstring>
+#include <limits>
 
 extern "C" {
 #include "redis/crc64.h"
@@ -845,6 +847,110 @@ TEST_F(GenericFamilyTest, ScanWithAttr) {
   ASSERT_EQ(0, vec.size());
 }
 
+TEST_F(GenericFamilyTest, ScanExpiredButPaused) {
+  absl::Cleanup unpause = [this] { Run({"client", "unpause"}); };
+  Run({"set", "hello", "world"});
+
+  Run({"expire", "hello", "1"});
+  Run({"CLIENT", "PAUSE", "5000", "WRITE"});
+  {
+    const auto resp = Run({"scan", "0", "attr", "v"});
+    const auto vec = StrArray(resp.GetVec()[1]);
+    EXPECT_THAT(vec, ElementsAre("hello"));
+    EXPECT_THAT(Run({"keys", "*"}), RespElementsAre("hello"));
+  }
+
+  AdvanceTime(2000);
+  {
+    const auto resp = Run({"scan", "0", "attr", "v"});
+    ASSERT_TRUE(StrArray(resp.GetVec()[1]).empty());
+    EXPECT_THAT(Run({"keys", "*"}), RespElementsAre());
+  }
+}
+
+TEST(ScanResultTest, AppendBufferAndOwnership) {
+  ScanResult result{numeric_limits<size_t>::max()};
+  string member = "member";
+  memcpy(result.AppendBuffer(member.size()), member.data(), member.size());
+  member = "changed";
+  EXPECT_EQ(result[0], "member");
+
+  const string binary("x\0\xff", 3);
+  memcpy(result.AppendBuffer(binary.size()), binary.data(), binary.size());
+  EXPECT_EQ(result[1], binary);
+  char* empty = result.AppendBuffer(0);
+  EXPECT_EQ(result.size(), 3u);
+  EXPECT_TRUE(result[2].empty());
+
+  result.UndoAppend(empty);
+  EXPECT_EQ(result.size(), 2u);
+  EXPECT_EQ(result[0], "member");
+  EXPECT_EQ(result[1], binary);
+}
+
+TEST(ScanResultTest, GrowthMoveAndPop) {
+  ScanResult result{1};
+  const array<string, 8> entries = {
+      "first", "", string("x\0y", 3), string(511, 'a'), string(512, 'b'), string(1 << 20, 'c'),
+      "tail",  ""};
+  for (const auto& entry : entries) {
+    // Undo each entry once before retaining it, including small entries after overflow.
+    char* buffer = result.AppendBuffer(entry.size());
+    memcpy(buffer, entry.data(), entry.size());
+    result.UndoAppend(buffer);
+    memcpy(result.AppendBuffer(entry.size()), entry.data(), entry.size());
+  }
+
+  auto moved = std::move(result);
+  ASSERT_EQ(moved.size(), entries.size());
+  // Small entries stay packed after large ones; indexing follows packed then overflow storage.
+  const array<size_t, 8> order = {0, 1, 2, 3, 6, 7, 4, 5};
+  for (size_t i = 0; i < order.size(); ++i)
+    EXPECT_EQ(moved[i], entries[order[i]]);
+}
+
+TEST_F(GenericFamilyTest, ScanResultBuffer) {
+  // Exercise SCAN and KEYS buffer growth, empty/integer/binary keys, and oversized replies.
+  StringVec keys = {"", "42", string("binary\0\xff", 8), "keep:" + string(1 << 20, 'x')};
+  for (unsigned i = 0; i < 128; ++i) {
+    keys.push_back(
+        StrCat(i % 2 ? "keep:" : "drop:", i, ":", string(8192 + i, i % 3 ? 'a' : '\xff')));
+  }
+  for (const auto& key : keys)
+    ASSERT_EQ(Run({"set", key, "value"}), "OK");
+
+  ASSERT_THAT(Run({"expire", keys.back(), "1000"}), IntArg(1));
+  ASSERT_EQ(Run({"set", string(64, 'a'), "value", "px", "1"}), "OK");
+  AdvanceTime(1);
+
+  for (string_view pattern : {"*", "keep:*", "missing:*"}) {
+    SCOPED_TRACE(pattern);
+    StringVec expected;
+    for (const auto& key : keys) {
+      if (pattern == "*" || (pattern == "keep:*" && key.starts_with("keep:")))
+        expected.push_back(key);
+    }
+
+    auto keys_resp = Run({"keys", pattern});
+    ASSERT_THAT(keys_resp, ArrLen(expected.size()));
+    EXPECT_THAT(StrArray(keys_resp), UnorderedElementsAreArray(expected));
+
+    string cursor = "0";
+    StringVec actual;
+    do {
+      // A huge COUNT must not cause an equally huge eager allocation.
+      auto resp = Run({"scan", cursor, "count", "5000000000", "match", pattern});
+      ASSERT_THAT(resp, ArrLen(2));
+      cursor = resp.GetVec()[0].GetString();
+      auto batch = StrArray(resp.GetVec()[1]);
+      actual.insert(actual.end(), make_move_iterator(batch.begin()),
+                    make_move_iterator(batch.end()));
+    } while (cursor != "0");
+    EXPECT_THAT(actual, UnorderedElementsAreArray(expected));
+  }
+  EXPECT_THAT(Run({"dbsize"}), IntArg(keys.size()));
+}
+
 TEST_F(GenericFamilyTest, ScanMallocSize) {
   Run({"set", "k1", string(1000, 'a')});
   Run({"set", "k2", string(500, 'b')});
@@ -1538,6 +1644,22 @@ TEST_F(GenericFamilyTest, RestoreRejectsDuplicateHashField) {
   }
 }
 
+// A zset with a duplicate member is never serialized; RESTORE must reject it.
+TEST_F(GenericFamilyTest, RestoreRejectsDuplicateZsetMember) {
+  uint8_t zset_lp_dup[] = {0x11, 0x13, 0x13, 0x00, 0x00, 0x00, 0x04, 0x00, 0x81, 0x61, 0x02,
+                           0x81, 0x31, 0x02, 0x81, 0x61, 0x02, 0x81, 0x32, 0x02, 0xff, 0x0b,
+                           0x00, 0xfe, 0xb5, 0x95, 0x69, 0x22, 0x9b, 0x70, 0x56};
+  EXPECT_THAT(Run({"restore", "z", "0", ToSV(zset_lp_dup)}), ErrArg("ERR Bad data format"));
+  EXPECT_THAT(Run({"exists", "z"}), IntArg(0));
+
+  // The same shape with distinct members still loads.
+  uint8_t zset_lp_ok[] = {0x11, 0x13, 0x13, 0x00, 0x00, 0x00, 0x04, 0x00, 0x81, 0x61, 0x02,
+                          0x81, 0x31, 0x02, 0x81, 0x62, 0x02, 0x81, 0x32, 0x02, 0xff, 0x0b,
+                          0x00, 0x32, 0x79, 0x24, 0x32, 0x1c, 0x9b, 0x57, 0x1e};
+  EXPECT_EQ(Run({"restore", "z", "0", ToSV(zset_lp_ok)}), "OK");
+  EXPECT_THAT(Run({"zcard", "z"}), IntArg(2));
+}
+
 TEST_F(GenericFamilyTest, RestoreOobZsetListpack) {
   uint8_t payload[] = {0x11, 0x0c, 0x0c, 0x00, 0x00, 0x00, 0x02, 0x00, 0xf0, 0xff, 0xff, 0xff,
                        0x7f, 0xff, 0x0b, 0x00, 0xc1, 0xf6, 0xd5, 0x74, 0xd3, 0x02, 0x6a, 0x79};
@@ -1683,7 +1805,9 @@ TEST_F(GenericFamilyTest, FieldTtl) {
   EXPECT_EQ(2, CheckedInt({"HSETEX", "k2", "1", "f1", "v1", "f2", "v2"}));
   EXPECT_EQ(1, CheckedInt({"HSET", "k2", "f3", "v3"}));
 
-  EXPECT_EQ(1, CheckedInt({"fieldttl", "k2", "f1"}));
+  // The clock is 1.1s past a whole second, so the 2.1s deadline rounds up to 3s and FIELDTTL,
+  // which subtracts the current whole second, reports 2 (1.9s of actual lifetime left).
+  EXPECT_EQ(2, CheckedInt({"fieldttl", "k2", "f1"}));
   EXPECT_EQ(-1, CheckedInt({"fieldttl", "k2", "f3"}));
   EXPECT_EQ(-3, CheckedInt({"fieldttl", "k2", "f4"}));
 }
@@ -1722,6 +1846,7 @@ TEST_F(GenericFamilyTest, FieldExpireSet) {
 }
 
 TEST_F(GenericFamilyTest, FieldExpireHset) {
+  TEST_current_time_ms = kMemberExpiryBase * 1000;
   for (int i = 0; i < 3; ++i) {
     EXPECT_EQ(CheckedInt({"HSET", "key", absl::StrCat("k", i), "v"}), 1);
   }
@@ -1742,9 +1867,13 @@ TEST_F(GenericFamilyTest, FieldExpireNoSuchField) {
               RespArray(ElementsAre(IntArg(1), IntArg(-2))));
 }
 
-TEST_F(GenericFamilyTest, FieldExpireNoSuchKey) {
+TEST_F(GenericFamilyTest, FieldExpireInvalidKey) {
   EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b"}),
               RespArray(ElementsAre(IntArg(-2), IntArg(-2))));
+
+  EXPECT_EQ(Run({"SET", "key", "value"}), "OK");
+  EXPECT_THAT(Run({"FIELDEXPIRE", "key", "10", "a", "b"}), ErrArg("WRONGTYPE"));
+  EXPECT_EQ(Run({"GET", "key"}), "value");
 }
 
 TEST_F(GenericFamilyTest, IterateMapSetStaleTimeZombie) {
@@ -2386,6 +2515,22 @@ TEST_F(GenericFamilyTest, RmInsideMulti) {
 
   EXPECT_EQ(Run({"exists", "y"}), 0);
   EXPECT_EQ(Run({"get", "x"}), "2");
+}
+
+TEST_F(GenericFamilyTest, RmDuringClientPauseDeletes) {
+  absl::Cleanup unpause = [this] { Run({"client", "unpause"}); };
+
+  Run({"set", "hello", "world", "px", "1000"});
+  Run({"client", "pause", "60000", "write"});
+
+  AdvanceTime(2000);
+
+  EXPECT_THAT(Run({"keys", "*"}), RespElementsAre());
+  ASSERT_THAT(Run({"dbsize"}), IntArg(1));
+
+  const auto resp = RunPrivileged({"rm", "0", "match", "hello"});
+  EXPECT_EQ(resp.GetVec()[1].GetInt().value(), 1);
+  EXPECT_THAT(Run({"dbsize"}), IntArg(0));
 }
 
 // Verifies that long-running container iteration is yielding.

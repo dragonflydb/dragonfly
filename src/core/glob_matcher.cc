@@ -6,151 +6,159 @@
 
 #include <absl/strings/ascii.h>
 
+#include <algorithm>
+#include <cstdint>
+#include <utility>
+
 #include "base/logging.h"
 
 namespace dfly {
 using namespace std;
 
-/* Glob-style pattern matching taken from Valkey. */
-static int stringmatchlen_impl(const char* pattern, int patternLen, const char* string,
-                               int stringLen, int nocase, int* skipLongerMatches, int nesting) {
-  /* Protection against abusive patterns. */
-  if (nesting > 1000)
-    return 0;
+namespace {
 
-  while (patternLen && stringLen) {
-    switch (pattern[0]) {
-      case '*':
-        while (patternLen && pattern[1] == '*') {
-          pattern++;
-          patternLen--;
-        }
-        if (patternLen == 1)
-          return 1; /* match */
-        while (stringLen) {
-          if (stringmatchlen_impl(pattern + 1, patternLen - 1, string, stringLen, nocase,
-                                  skipLongerMatches, nesting + 1))
-            return 1; /* match */
-          if (*skipLongerMatches)
-            return 0; /* no match */
-          string++;
-          stringLen--;
-        }
-        /* There was no match for the rest of the pattern starting
-         * from anywhere in the rest of the string. If there were
-         * any '*' earlier in the pattern, we can terminate the
-         * search early without trying to match them to longer
-         * substrings. This is because a longer match for the
-         * earlier part of the pattern would require the rest of the
-         * pattern to match starting later in the string, and we
-         * have just determined that there is no match for the rest
-         * of the pattern starting from anywhere in the current
-         * string. */
-        *skipLongerMatches = 1;
-        return 0; /* no match */
-        break;
-      case '?':
-        string++;
-        stringLen--;
-        break;
-      case '[': {
-        int not_op, match;
+// Glob syntax, the upstream dialect, matched byte by byte:
+//   *      any run of bytes, including none
+//   ?      exactly one byte
+//   [...]  one byte from the set; a leading ^ negates it. A member is a byte, a range lo-hi or
+//          \x for the literal byte x. ] ^ - are ordinary bytes outside a class.
+//   \x     the literal byte x; a trailing lone \ is a literal backslash
+//   x      any other byte matches itself
+// Kept for compatibility with upstream:
+//   - the empty string matches only the empty pattern, so "*" does not match ""
+//   - reversed range bounds are ordered first and lowered afterwards, so "[a-Z]" is "[Z-a]" and
+//     matches nothing case-insensitively
+//   - an unclosed class runs to the end of the pattern; "[]" matches nothing; "[^]" is "?"
+//   - escaped members of a class are compared case-sensitively even when case-insensitive
+// Ranges compare unsigned byte values. Upstream promotes plain char, so for bytes >= 0x80 its
+// result depends on whether char is signed; this does not.
 
-        pattern++;
-        patternLen--;
-        not_op = patternLen && pattern[0] == '^';
-        if (not_op) {
-          pattern++;
-          patternLen--;
-        }
-        match = 0;
-        while (1) {
-          if (patternLen >= 2 && pattern[0] == '\\') {
-            pattern++;
-            patternLen--;
-            if (pattern[0] == string[0])
-              match = 1;
-          } else if (patternLen == 0) {
-            pattern--;
-            patternLen++;
-            break;
-          } else if (pattern[0] == ']') {
-            break;
-          } else if (patternLen >= 3 && pattern[1] == '-') {
-            int start = pattern[0];
-            int end = pattern[2];
-            int c = string[0];
-            if (start > end) {
-              int t = start;
-              start = end;
-              end = t;
-            }
-            if (nocase) {
-              start = tolower(start);
-              end = tolower(end);
-              c = tolower(c);
-            }
-            pattern += 2;
-            patternLen -= 2;
-            if (c >= start && c <= end)
-              match = 1;
-          } else {
-            if (!nocase) {
-              if (pattern[0] == string[0])
-                match = 1;
-            } else {
-              if (tolower((int)pattern[0]) == tolower((int)string[0]))
-                match = 1;
-            }
-          }
-          pattern++;
-          patternLen--;
-        }
-        if (not_op)
-          match = !match;
-        if (!match)
-          return 0; /* no match */
-        string++;
-        stringLen--;
-        break;
-      }
-      case '\\':
-        if (patternLen >= 2) {
-          pattern++;
-          patternLen--;
-        }
-        /* fall through */
-      default:
-        if (!nocase) {
-          if (pattern[0] != string[0])
-            return 0; /* no match */
-        } else {
-          if (tolower((int)pattern[0]) != tolower((int)string[0]))
-            return 0; /* no match */
-        }
-        string++;
-        stringLen--;
-        break;
-    }
-    pattern++;
-    patternLen--;
-    if (stringLen == 0) {
-      while (patternLen && *pattern == '*') {
-        pattern++;
-        patternLen--;
-      }
-      break;
-    }
-  }
-  if (patternLen == 0 && stringLen == 0)
-    return 1;
-  return 0;
+template <bool kCaseSensitive> bool EqualChars(char a, char b) {
+  if constexpr (kCaseSensitive)
+    return a == b;
+  else
+    return absl::ascii_tolower(a) == absl::ascii_tolower(b);
 }
 
-int stringmatchlen(const char* pattern, int patternLen, const char* string, int stringLen,
-                   int nocase) {
-  int skipLongerMatches = 0;
-  return stringmatchlen_impl(pattern, patternLen, string, stringLen, nocase, &skipLongerMatches, 0);
+constexpr bool IsMeta(char c) {
+  return c == '*' || c == '?' || c == '[' || c == '\\';
+}
+
+string_view SkipStars(string_view pattern) {
+  while (!pattern.empty() && pattern.front() == '*')
+    pattern.remove_prefix(1);
+  return pattern;
+}
+
+template <bool kCaseSensitive> bool InRange(uint8_t lo, uint8_t hi, uint8_t c) {
+  const auto [low, high] = minmax({lo, hi});  // The list overload returns values, not references.
+  if constexpr (kCaseSensitive) {
+    return low <= c && c <= high;
+  } else {
+    const uint8_t lo_folded = absl::ascii_tolower(low), hi_folded = absl::ascii_tolower(high),
+                  c_folded = absl::ascii_tolower(c);
+    return lo_folded <= c_folded && c_folded <= hi_folded;
+  }
+}
+
+// Consumes the class that follows '[', matched or not. An unclosed class runs to the pattern end.
+template <bool kCaseSensitive> bool MatchClass(string_view* pattern, char c) {
+  string_view items = *pattern;
+  const bool negate = !items.empty() && items.front() == '^';
+  if (negate)
+    items.remove_prefix(1);
+
+  bool match = false;
+  while (!items.empty() && items.front() != ']') {
+    const bool is_escape = items.size() >= 2 && items[0] == '\\';
+    const bool is_range = !is_escape && items.size() >= 3 && items[1] == '-';
+    if (is_escape) {
+      match |= items[1] == c;  // Escaped members are always case sensitive.
+      items.remove_prefix(2);
+    } else if (is_range) {
+      match |= InRange<kCaseSensitive>(items[0], items[2], c);
+      items.remove_prefix(3);
+    } else {
+      match |= EqualChars<kCaseSensitive>(items[0], c);
+      items.remove_prefix(1);
+    }
+  }
+  if (!items.empty())
+    items.remove_prefix(1);
+  *pattern = items;
+  return match != negate;
+}
+
+// Consumes the non-'*' token at the front, matched or not: the caller resets pattern on mismatch.
+template <bool kCaseSensitive> bool MatchToken(string_view* pattern, char c) {
+  DCHECK(!pattern->empty());
+  char token = pattern->front();
+  pattern->remove_prefix(1);
+  switch (token) {
+    case '?':
+      return true;
+    case '[':
+      return MatchClass<kCaseSensitive>(pattern, c);
+    case '\\':
+      if (!pattern->empty()) {  // A trailing lone backslash is a literal.
+        token = pattern->front();
+        pattern->remove_prefix(1);
+      }
+      [[fallthrough]];
+    default:
+      return EqualChars<kCaseSensitive>(token, c);
+  }
+}
+
+// Iterative on purpose: the recursive upstream matcher overflows small fiber stacks.
+template <bool kCaseSensitive> bool MatchGlobImpl(string_view pattern, string_view str) {
+  if (str.empty())  // "*" does not match an empty string.
+    return pattern.empty();
+
+  // Fast path for the common "prefix*" shape: leading literal bytes have to match in place.
+  while (!pattern.empty() && !str.empty() && !IsMeta(pattern.front())) {
+    if (!EqualChars<kCaseSensitive>(pattern.front(), str.front()))
+      return false;
+    pattern.remove_prefix(1);
+    str.remove_prefix(1);
+  }
+
+  string_view star_pattern;   // pattern after the last '*', empty until a '*' is seen
+  string_view star_str;       // where the last '*' currently stops absorbing
+  bool star_literal = false;  // star_pattern starts with a literal byte that find() can look for
+
+  while (!str.empty()) {
+    if (!pattern.empty() && pattern.front() == '*') {
+      pattern = SkipStars(pattern);
+      if (pattern.empty())
+        return true;
+      star_pattern = pattern;
+      star_str = str;
+      star_literal = kCaseSensitive && !IsMeta(pattern.front());
+    } else if (!pattern.empty() && MatchToken<kCaseSensitive>(&pattern, str.front())) {
+      str.remove_prefix(1);
+    } else if (star_pattern.empty()) {
+      return false;
+    } else {
+      // Only the last '*' is ever retried: it absorbs up to where its next token can match.
+      star_str.remove_prefix(1);
+      if (star_literal && !star_str.empty() && star_str.front() != star_pattern.front()) {
+        const size_t pos = star_str.find(star_pattern.front());
+        if (pos == string_view::npos)
+          return false;
+        star_str.remove_prefix(pos);
+      }
+      pattern = star_pattern;
+      str = star_str;
+    }
+  }
+  return SkipStars(pattern).empty();
+}
+
+}  // namespace
+
+bool GlobMatcher::MatchGlob(string_view pattern, string_view str, bool case_sensitive) {
+  return case_sensitive ? MatchGlobImpl<true>(pattern, str) : MatchGlobImpl<false>(pattern, str);
 }
 
 string GlobMatcher::Glob2Regex(string_view glob) {
@@ -272,7 +280,7 @@ GlobMatcher::GlobMatcher(string_view pattern, bool case_sensitive)
 bool GlobMatcher::Matches(std::string_view str) const {
 #ifdef REFLEX_PERFORMANCE
   if (str.size() < 16) {
-    return stringmatchlen(glob_.data(), glob_.size(), str.data(), str.size(), !case_sensitive_);
+    return MatchGlob(glob_, str, case_sensitive_);
   }
   if (glob_.empty()) {
     return true;
@@ -302,7 +310,7 @@ bool GlobMatcher::Matches(std::string_view str) const {
   return true;
 #elif defined(USE_PCRE2)
   if (!re_ || str.size() < 16) {
-    return stringmatchlen(glob_.data(), glob_.size(), str.data(), str.size(), !case_sensitive_);
+    return MatchGlob(glob_, str, case_sensitive_);
   }
 
   if (glob_.empty()) {
@@ -313,7 +321,7 @@ bool GlobMatcher::Matches(std::string_view str) const {
   return rc > 0;
 
 #else
-  return stringmatchlen(glob_.data(), glob_.size(), str.data(), str.size(), !case_sensitive_);
+  return MatchGlob(glob_, str, case_sensitive_);
 #endif
 }
 

@@ -87,8 +87,6 @@ struct SliceEvents {
   // how many journal omit optimizations were performed
   size_t journal_omit = 0;
 
-  uint64_t huff_encode_total = 0, huff_encode_success = 0;
-
   SliceEvents& operator+=(const SliceEvents& o);
 };
 
@@ -237,8 +235,8 @@ class DbSlice {
   struct ExpireParams {
     ExpireParams() = default;
 
-    // if now_ms = 0 the value is absolute; cap applies to relative dispatch only;
-    // cap=true silently clamps to kMaxExpireDeadlineMs;
+    // Non-positive values expire immediately; cap=true clamps relative TTLs to
+    // kMaxExpireDeadlineMs. The TimeUnit overload treats now_ms=0 as an absolute deadline.
     ExpireParams(TimeUnit unit, int64_t value, uint64_t now_ms = 0, bool cap = false);
     ExpireParams(ExpT type, int64_t value, uint64_t now_ms = 0, bool cap = false);
 
@@ -246,8 +244,23 @@ class DbSlice {
       return persist || ms_timestamp >= 0;
     }
 
+    // Checks overflow and that the TTL does not exceed max_ttl_ms. Expired deadlines and PERSIST
+    // are valid.
+    bool IsValid(uint64_t now_ms, int64_t max_ttl_ms = kMaxExpireDeadlineMs) const;
+
+    // True for finite deadlines at or before now_ms. Undefined expiry and PERSIST never expire.
+    bool IsExpired(uint64_t now_ms) const;
+
     // Returns (relative_ms, absolute_ms). On overflow returns {0, -1}.
     std::pair<int64_t, int64_t> Calculate(uint64_t now_msec, bool cap) const;
+
+    // Rounds the absolute deadline up to whole seconds so second-resolution storage never
+    // expires early. Requires a defined, finite expiry, without PERSIST.
+    uint64_t DeadlineSec() const;
+
+    // Returns the TTL counted from the current whole second to DeadlineSec(), or 0 if the
+    // original deadline has already passed. Has the same requirements as DeadlineSec().
+    uint64_t TtlSec(uint64_t now_ms) const;
 
     // INT64_MAX is the year 292M AD — never a real expiration.
     static constexpr int64_t kOverflow = std::numeric_limits<int64_t>::max();
@@ -259,6 +272,12 @@ class DbSlice {
 
   DbSlice(uint32_t index, bool cache_mode, EngineShard* owner, Namespace* ns);
   ~DbSlice();
+
+  // Drops pending shard-local async deletions without freeing the queued objects.
+  static void ShutdownThreadLocal();
+
+  // Marks db_arr_'s DbTables arena-destruct before the shard's mi_heap_destroy() runs.
+  void PrepareForSingleShotHeapDestroy();
 
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
@@ -420,6 +439,30 @@ class DbSlice {
   // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
   // and returns Iterator{}.
   Iterator ExpireIfNeeded(const Context& cntx, Iterator it) const;
+
+  enum class ExpireResult : uint8_t {
+    Valid,
+    ExpiredHidden,
+    Deleted,
+  };
+
+  // Erases 'it' if its embedded expire time has already passed, returning Deleted and invalidating
+  // 'it' in that case. Entries without a TTL are accepted and simply return Valid, unlike in
+  // ExpireIfNeeded. It is also cheaper: no key materialization and no iterator laundering.
+  // The caller must disable journal flushing before calling, using journal::DisableFlushGuard
+  // or journal::SetFlushMode(false). If allow_hiding_expired is set, then even if a key is expired,
+  // do not expire it or invalidate it, but instead hide the value.
+  ExpireResult TryExpire(const Context& cntx, PrimeIterator it,
+                         bool allow_hiding_expired = false) const {
+    if (!it->first.IsExpired(cntx.time_now_ms))
+      return ExpireResult::Valid;
+
+    if (allow_hiding_expired && !expire_allowed_)
+      return ExpireResult::ExpiredHidden;
+
+    const auto expired = Expire(cntx, it, nullptr);
+    return expired ? ExpireResult::Deleted : ExpireResult::Valid;
+  }
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -612,6 +655,12 @@ class DbSlice {
   // will send notifications later). If null, the notification is sent immediately (read path).
   PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it,
                                std::vector<std::string>* events = nullptr) const;
+
+  // Erases an entry whose expire time has already passed - the caller must have verified that
+  // with it->first.IsExpired(cntx.time_now_ms). Returns false without erasing when expiration is
+  // disabled or when we are a replica that does not delete expired keys on its own.
+  // 'events' has the same meaning as in ExpireIfNeeded above.
+  bool Expire(const Context& cntx, PrimeIterator it, std::vector<std::string>* events) const;
 
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
                                            std::optional<unsigned> req_obj_type);

@@ -337,7 +337,7 @@ StringMap* GetStringMap(const PrimeValue& pv, const DbContext& db_context) {
 
 OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_type,
                                               BlockingResultCb func, unsigned limit_ms,
-                                              bool* block_flag, bool* pause_flag) {
+                                              facade::ConnectionContext* cntx) {
   string result_key;
 
   // Fast path. If we have only a single shard, we can run opportunistically with a single hop.
@@ -401,8 +401,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return KeyReadyResult::kKeyNotFound;
   };
 
-  auto status =
-      trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, block_flag, pause_flag);
+  auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, cntx);
 
   if (status != OpStatus::OK)
     return status;

@@ -9,6 +9,7 @@
 #include <absl/strings/str_cat.h>
 #include <fast_float/fast_float.h>
 
+#include <algorithm>
 #include <system_error>
 
 extern "C" {
@@ -21,6 +22,7 @@ extern "C" {
 #include "core/glob_matcher.h"
 #include "core/interpreter.h"
 #include "facade/cmd_arg_parser.h"
+#include "facade/reply_builder.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
@@ -216,6 +218,51 @@ std::ostream& operator<<(std::ostream& os, const GlobalState& state) {
 }
 
 ScanOpts::~ScanOpts() {
+}
+
+ScanResult::ScanResult(size_t count) {
+  // COUNT is an untrusted hint, not a bound on the number or size of returned entries.
+  count = min<size_t>(count, 1024);
+  entries_.Reserve(count, count * kEstimatedEntrySize);
+}
+
+char* ScanResult::AppendBuffer(size_t len) {
+  // Keep large entries separate so growing the packed buffer does not copy them.
+  // Cap packed bytes at 1 MiB to limit buffer reallocations/copying for large replies.
+  constexpr size_t kMaxPackedBytes = 1 << 20;
+  if (len >= 8 * kEstimatedEntrySize || len + packed_bytes_ >= kMaxPackedBytes) {
+    return overflow_.emplace_back(len, '\0').data();
+  }
+
+  entries_.PushArg(len);
+  packed_bytes_ += len + 1;
+  return entries_.data(entries_.size() - 1);
+}
+
+void ScanResult::UndoAppend(char* buffer) {
+  if (!overflow_.empty() && overflow_.back().data() == buffer) {
+    overflow_.pop_back();
+  } else {
+    DCHECK(!entries_.empty());
+    DCHECK(entries_.back().data() == buffer);
+    packed_bytes_ -= entries_.back().size() + 1;
+    entries_.PopArg();
+  }
+}
+
+string_view ScanResult::operator[](size_t index) const {
+  DCHECK_LT(index, size());
+  if (index < entries_.size())
+    return entries_[index];
+  return overflow_[index - entries_.size()];
+}
+
+void ScanResult::Send(facade::RedisReplyBuilder* builder) const {
+  facade::RedisReplyBuilder::ArrayScope scope{builder, size()};
+  for (string_view entry : entries_.view())
+    builder->SendBulkString(entry);
+  for (const auto& entry : overflow_)
+    builder->SendBulkString(entry);
 }
 
 BorrowedInterpreter::BorrowedInterpreter(Transaction* tx, ConnectionState* state) {

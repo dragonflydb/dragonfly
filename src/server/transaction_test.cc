@@ -7,6 +7,7 @@
 #include <gmock/gmock.h>
 
 #include "base/logging.h"
+#include "facade/conn_context.h"
 #include "facade/facade_stats.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
@@ -246,14 +247,13 @@ TEST_F(TransactionTest, AwakenedPollNotDroppedWhenBlockedTxPresent) {
   };
 
   // Phase 1: BL schedules a first hop, then suspends watching key "x".
-  bool bl_blocked = false, bl_paused = false;
+  facade::ConnectionContext bl_cntx{nullptr};
   fb2::Done bl_done;
   auto fb_bl = pp_->at(1)->LaunchFiber([&] {
     tx_bl->Execute(Noop, false);  // schedule + first (non-concluding) hop -> stays scheduled
     std::string key = "x";
     auto tp = Transaction::time_point::max();
-    OpStatus st =
-        tx_bl->WaitOnWatch(tp, std::string_view{key}, ready_checker, &bl_blocked, &bl_paused);
+    OpStatus st = tx_bl->WaitOnWatch(tp, std::string_view{key}, ready_checker, &bl_cntx);
     ASSERT_EQ(OpStatus::OK, st);
     tx_bl->Execute(Noop, true);  // action hop after wakeup
     bl_done.Notify();

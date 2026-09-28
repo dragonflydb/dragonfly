@@ -262,19 +262,20 @@ optional<ClusterExtendedNodeInfo> ParseClusterNode(const TmpJson& json) {
     if (!health.is_null()) {
       if (!health.is_string()) {
         LOG(ERROR) << kInvalidConfigPrefix << "invalid health status for node " << json;
+        return nullopt;
+      }
+      auto health_str = std::move(health).as_string();
+      if (absl::EqualsIgnoreCase(health_str, "FAIL")) {
+        node.health = NodeHealth::FAIL;
+      } else if (absl::EqualsIgnoreCase(health_str, "LOADING")) {
+        node.health = NodeHealth::LOADING;
+      } else if (absl::EqualsIgnoreCase(health_str, "ONLINE")) {
+        node.health = NodeHealth::ONLINE;
+      } else if (absl::EqualsIgnoreCase(health_str, "HIDDEN")) {
+        node.health = NodeHealth::HIDDEN;
       } else {
-        auto health_str = std::move(health).as_string();
-        if (absl::EqualsIgnoreCase(health_str, "FAIL")) {
-          node.health = NodeHealth::FAIL;
-        } else if (absl::EqualsIgnoreCase(health_str, "LOADING")) {
-          node.health = NodeHealth::LOADING;
-        } else if (absl::EqualsIgnoreCase(health_str, "ONLINE")) {
-          node.health = NodeHealth::ONLINE;
-        } else if (absl::EqualsIgnoreCase(health_str, "HIDDEN")) {
-          node.health = NodeHealth::HIDDEN;
-        } else {
-          LOG(ERROR) << kInvalidConfigPrefix << "invalid health status for node: " << health_str;
-        }
+        LOG(ERROR) << kInvalidConfigPrefix << "invalid health status for node: " << health_str;
+        return nullopt;
       }
     }
   }

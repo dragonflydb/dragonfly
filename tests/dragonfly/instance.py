@@ -50,36 +50,22 @@ class DflyStartException(Exception):
     pass
 
 
-def symbolize_stack_trace(binary_path, lines):
-    addr2line_proc = subprocess.Popen(
-        ["/usr/bin/addr2line", "-fCa", "-e", binary_path], stdin=subprocess.PIPE
-    )
-    for line in lines:
-        addr2line_proc.stdin.write(line.encode())
-
-    addr2line_proc.stdin.close()
-    addr2line_proc.wait()
-
-
-def read_sedout(pipe, stacktrace):
+def read_sedout(pipe, raw_log_path=None):
+    # Each instance writes to its own file (not shared stdout), so concurrent crashes
+    # don't interleave. Already symbolized live by the crashing process; no addr2line needed.
+    raw_log = open(raw_log_path, "a") if raw_log_path else None
     try:
-        seen = set()
-        pattern = r"@\s*(0x[0-9a-fA-F]+)"
-        matcher = re.compile(pattern)
-
-        for line in iter(pipe.readline, b""):
-            # Deduplicate output - we somewhere duplicate the output, probably due
-            # to tty redirections.
-            if line not in seen:
-                seen.add(line)
-                print(line)
-                res = matcher.search(line)
-                if res:
-                    stacktrace.append(res.group(1) + "\n")
+        for line in iter(pipe.readline, ""):
+            # No dedup: a repeated line (e.g. recursive frames) is real content, not noise.
+            if raw_log:
+                raw_log.write(line)
+                raw_log.flush()
     except ValueError:
         pass
     finally:
         pipe.close()
+        if raw_log:
+            raw_log.close()
 
 
 class DflyInstance:
@@ -214,9 +200,23 @@ class DflyInstance:
                 bufsize=1,
                 universal_newlines=True,
             )
-            self.stacktrace = []
+            raw_log_path = (
+                os.path.join(self.params.log_dir, f"console.{self.proc.pid}.log")
+                if self.params.log_dir
+                else None
+            )
+            if raw_log_path:
+                with open(raw_log_path, "w") as raw_log:
+                    header = (
+                        f"=== instance pid={self.proc.pid} port={self.port} "
+                        f"binary={os.path.realpath(self.params.path)} ==="
+                    )
+                    raw_log.write(header + "\n")
+                    raw_log.write("=" * len(header) + "\n")
             self.sed_thread = threading.Thread(
-                target=read_sedout, args=(self.sed_proc.stdout, self.stacktrace), daemon=True
+                target=read_sedout,
+                args=(self.sed_proc.stdout, raw_log_path),
+                daemon=True,
             )
             self.sed_thread.start()
 
@@ -234,7 +234,8 @@ class DflyInstance:
                 proc.kill()
             else:
                 proc.terminate()
-                proc.communicate(timeout=120)
+                # wait(), not communicate(): communicate() would race sed for stdout bytes.
+                proc.wait(timeout=120)
                 # if the return code is 0 it means normal termination
                 # if the return code is negative it means termination by signal
                 # if the return code is positive it means abnormal exit
@@ -257,13 +258,13 @@ class DflyInstance:
             logging.debug("INFO LOGS of DF are:")
             self.print_info_logs_to_debug_log()
             proc.kill()
-            proc.communicate()
+            proc.wait()
             raise Exception("Unable to terminate DragonflyDB gracefully, it was killed")
         finally:
             if self.sed_proc:
-                self.sed_proc.communicate()
+                # join() first, not communicate(): read_sedout already drains sed_proc.stdout.
                 self.sed_thread.join()
-                symbolize_stack_trace(proc.args[0], self.stacktrace)
+                self.sed_proc.wait()
 
     def wait(self):
         if self.proc is not None:
@@ -365,14 +366,20 @@ class DflyInstance:
         return rv
 
     def print_info_logs_to_debug_log(self):
+        # Captured (not inherited stdout) so concurrent instances can't interleave here;
+        # logged at ERROR since nothing raises the pytest log level above default WARNING.
         logs = self.log_files
         sed_format = f"s/[^ ]*/{self.port}{Colors.next()}➜{Colors.CLEAR}/"
         sed_cmd = ["sed", "-e", sed_format]
         for log in logs:
             if "INFO" in log:
-                with open(log) as file:
-                    print(f"🪵🪵🪵🪵🪵🪵 LOG name {log} 🪵🪵🪵🪵🪵🪵")
-                    subprocess.call(sed_cmd, stdin=file)
+                with open(log, "rb") as file:
+                    result = subprocess.run(sed_cmd, stdin=file, stdout=subprocess.PIPE)
+                    logging.error(
+                        "🪵🪵🪵🪵🪵🪵 LOG name %s 🪵🪵🪵🪵🪵🪵\n%s",
+                        log,
+                        result.stdout.decode(errors="replace"),
+                    )
 
     @staticmethod
     def format_args(args):

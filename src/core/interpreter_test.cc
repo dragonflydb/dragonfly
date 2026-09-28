@@ -123,9 +123,8 @@ void InterpreterTest::SetGlobalArray(const char* name, const vector<string_view>
 }
 
 bool InterpreterTest::Execute(string_view script) {
-  char sha_buf[64];
-  Interpreter::FuncSha1(script, sha_buf);
-  string_view sha{sha_buf, std::strlen(sha_buf)};
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   string result;
   Interpreter::AddResult add_res = intptr_.AddFunction(sha, script, &result);
@@ -233,11 +232,10 @@ TEST_F(InterpreterTest, Add) {
   const char* s1 = "return 0";
   const char* s2 = "foobar";
 
-  char sha_buf1[64], sha_buf2[64];
-  Interpreter::FuncSha1(s1, sha_buf1);
-  Interpreter::FuncSha1(s2, sha_buf2);
-  string_view sha1{sha_buf1, std::strlen(sha_buf1)};
-  string_view sha2{sha_buf2, std::strlen(sha_buf2)};
+  auto sha_buf1 = Interpreter::FuncSha1(s1);
+  auto sha_buf2 = Interpreter::FuncSha1(s2);
+  string_view sha1{sha_buf1.data(), sha_buf1.size()};
+  string_view sha2{sha_buf2.data(), sha_buf2.size()};
 
   string err;
 
@@ -323,7 +321,7 @@ TEST_F(InterpreterTest, Call) {
   EXPECT_EQ("[str(table) status(mystatus)]", ser_.res);
 }
 
-TEST_F(InterpreterTest, CallTableFirstArg) {
+TEST_F(InterpreterTest, CallArguments) {
   auto cb = [](auto ca) { ca.translator->OnStatus("OK"); };
 
   intptr_.SetRedisFunc(cb);
@@ -341,14 +339,22 @@ TEST_F(InterpreterTest, CallTableFirstArg) {
 
   // A numeric command name is converted deterministically (not via the
   // evaluation-order-dependent lua_tostring/lua_rawlen path).
-  string captured;
+  vector<string> captured;
   auto capture_cb = [&captured](auto ca) {
-    captured = string{ca.args->at(0)};
+    captured.clear();
+    for (string_view arg : ca.args->view())
+      captured.emplace_back(arg);
     ca.translator->OnStatus("OK");
   };
   intptr_.SetRedisFunc(capture_cb);
   EXPECT_TRUE(Execute("return redis.call(123)")) << error_;
-  EXPECT_EQ("123", captured);
+  EXPECT_THAT(captured, testing::ElementsAre("123"));
+
+  EXPECT_TRUE(
+      Execute(R"(return redis.call('set', 'key\0suffix', '', 42, 1.5, string.rep('x', 256)))"))
+      << error_;
+  EXPECT_THAT(captured,
+              testing::ElementsAre("set", "key\0suffix"s, "", "42", "1.5", string(256, 'x')));
 }
 
 TEST_F(InterpreterTest, CallArray) {
@@ -782,9 +788,8 @@ TEST_F(InterpreterTest, LuaGcStatistic) {
         end
        )";
 
-  char sha_buf[64];
-  Interpreter::FuncSha1(script, sha_buf);
-  string_view sha{sha_buf, std::strlen(sha_buf)};
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   string result;
   Interpreter::AddResult add_res = interpreter->AddFunction(sha, script, &result);
@@ -835,13 +840,12 @@ TEST_F(InterpreterTest, GcAccountingAfterReturn) {
 
   // Generate ~100KB of garbage.
   string script = "local s = string.rep('x', 1024 * 100) return #s";
-  char sha_buf[64];
-  Interpreter::FuncSha1(script, sha_buf);
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   string result;
-  ASSERT_EQ(Interpreter::ADD_OK,
-            interpreter->AddFunction({sha_buf, strlen(sha_buf)}, script, &result));
-  ASSERT_EQ(Interpreter::RUN_OK, interpreter->RunFunction({sha_buf, strlen(sha_buf)}, &error_));
+  ASSERT_EQ(Interpreter::ADD_OK, interpreter->AddFunction(sha, script, &result));
+  ASSERT_EQ(Interpreter::RUN_OK, interpreter->RunFunction(sha, &error_));
 
   auto& stats = InterpreterManager::tl_stats();
   uint64_t gc_before = stats.force_gc_calls;
@@ -900,6 +904,57 @@ TEST_F(InterpreterTest, RandstrValidation) {
   // Invalid: count exceeds max
   ASSERT_FALSE(Execute(absl::StrCat("return dragonfly.randstr(1, ", kMaxRandstrCount + 1, ")")));
   EXPECT_THAT(error_, testing::HasSubstr("randstr: count must be between 1 and"));
+}
+
+TEST_F(InterpreterTest, ResetRetiresOnlyBorrowed) {
+  const uint64_t before = InterpreterManager::tl_stats().interpreter_cnt;
+  InterpreterManager im(2);
+
+  Interpreter* borrowed = im.Get();
+  Interpreter* idle = im.Get();
+  im.Return(idle);
+
+  im.Reset();
+  // The idle one is gone already, the borrowed one lives until it comes back.
+  EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt - before, 1u);
+
+  im.Return(borrowed);
+  EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt, before);
+
+  // Repeated resets must not stack up generations.
+  for (int i = 0; i < 5; ++i) {
+    Interpreter* ir = im.Get();
+    im.Reset();
+    im.Return(ir);
+  }
+  EXPECT_EQ(InterpreterManager::tl_stats().interpreter_cnt, before);
+}
+
+TEST_F(InterpreterTest, UsedBytesDropsWithInterpreter) {
+  const uint64_t before = InterpreterManager::tl_stats().used_bytes;
+  InterpreterManager im(2);
+
+  std::string err;
+  auto sha_buf = Interpreter::FuncSha1("return 1");
+  string_view sha{sha_buf.data(), sha_buf.size()};
+
+  Interpreter* ir = im.Get();
+  ASSERT_EQ(Interpreter::ADD_OK, ir->AddFunction(sha, "return 1", &err));
+  im.Return(ir);
+  EXPECT_GT(InterpreterManager::tl_stats().used_bytes, before);
+
+  im.Reset();  // destroying the interpreter must take its memory out of the stat
+  EXPECT_EQ(InterpreterManager::tl_stats().used_bytes, before);
+}
+
+TEST_F(InterpreterTest, ForeignReturnIsRefused) {
+  InterpreterManager im_a(2), im_b(2);
+
+  Interpreter* ir = im_a.Get();
+  // Returning to the wrong pool must be refused, not absorbed (else its next Reset underflows).
+  EXPECT_DEBUG_DEATH(im_b.Return(ir), "foreign manager");
+
+  im_a.Return(ir);
 }
 
 }  // namespace dfly

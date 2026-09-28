@@ -26,7 +26,7 @@
 #include "core/string_map.h"
 #include "server/container_utils.h"
 #include "server/engine_shard.h"
-#include "server/hset_family.h"
+#include "server/family_utils.h"
 #include "server/namespaces.h"
 
 extern "C" {
@@ -217,7 +217,7 @@ StringMapAccessor::~StringMapAccessor() {
     return;
 
   auto& db_slice = db_cntx_.ns->GetDbSlice(EngineShard::tlocal()->shard_id());
-  HSetFamily::DeleteIfEmpty(db_slice, db_cntx_, cleanup_key_, *cleanup_pv_);
+  DeleteCollectionIfEmpty(db_slice, db_cntx_, cleanup_key_, *cleanup_pv_);
 }
 
 std::optional<BaseAccessor::StringList> StringMapAccessor::GetStrings(

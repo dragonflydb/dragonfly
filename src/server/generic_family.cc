@@ -10,10 +10,6 @@
 
 #include <optional>
 
-#include "facade/cmd_arg_parser.h"
-#include "facade/reply_builder.h"
-#include "server/tx_base.h"
-
 extern "C" {
 #include "redis/crc64.h"
 }
@@ -23,12 +19,13 @@ extern "C" {
 #include "base/logging.h"
 #include "core/glob_matcher.h"
 #include "core/qlist.h"
-#include "core/string_set.h"
+#include "facade/reply_builder.h"
 #include "redis/rdb.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
 #include "server/cmd_support.h"
 #include "server/command_registry.h"
+#include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/db_slice.h"
@@ -205,7 +202,7 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(io::Source* sourc
     return std::nullopt;
   }
 
-  return std::optional<OpaqueObj>(std::move(obj));
+  return std::optional(std::move(obj));
 }
 
 OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_view data,
@@ -331,7 +328,7 @@ class Renamer {
 
  private:
   void FetchData(bool materialize_destination);
-  facade::OpStatus FinalizeRename();
+  OpStatus FinalizeRename();
 
   bool KeyExists(Transaction* t, EngineShard* shard, std::string_view key) const;
   OpStatus PrepareDest(Transaction* t, EngineShard* shard);
@@ -645,48 +642,62 @@ OpStatus OpRestore(const OpArgs& op_args, std::string_view key, std::string_view
   return add_res.status();
 }
 
-bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, StringVec* res) {
+// Appends 'key' to 'res' unless it is filtered out by MATCH. Materializes the key exactly once.
+bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, ScanResult* res) {
+  size_t len = key.Size();
+  char* buffer = res->AppendBuffer(len);
+  key.GetString(buffer);
+  if (opts.matcher && !opts.matcher->Matches(string_view{buffer, len})) {
+    res->UndoAppend(buffer);
+    return false;
+  }
+  return true;
+}
+
+bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, ScanResult* res) {
   auto& db_slice = op_args.GetDbSlice();
 
-  DbSlice::Iterator it = DbSlice::Iterator::FromPrime(prime_it);
-  if (prime_it->first.HasExpire()) {
-    it = db_slice.ExpireIfNeeded(op_args.db_cntx, it);
-    if (!IsValid(it))
+  // Hide expired keys when expiry is blocked, except for mutation commands
+  const bool allow_hiding_expired = !opts.for_mutation;
+
+  // Passing the raw iterator is safe: OpScan prevents preemption for the whole traversal.
+  // clang-format off
+  switch (db_slice.TryExpire(op_args.db_cntx, prime_it, allow_hiding_expired)) {
+    case DbSlice::ExpireResult::Valid:
+      break;
+    [[unlikely]] case DbSlice::ExpireResult::ExpiredHidden:
+    [[unlikely]] case DbSlice::ExpireResult::Deleted:
       return false;
   }
+  // clang-format on
 
-  bool matches = !opts.type_filter || it->second.ObjType() == opts.type_filter;
+  bool matches = !opts.type_filter || prime_it->second.ObjType() == opts.type_filter;
   if (opts.mask.has_value()) {
     if (opts.mask == ScanOpts::Mask::Volatile) {
-      matches &= it->first.HasExpire();
+      matches &= prime_it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Permanent) {
-      matches &= !it->first.HasExpire();
+      matches &= !prime_it->first.HasExpire();
     } else if (opts.mask == ScanOpts::Mask::Accessed) {
-      matches &= it->first.WasTouched();
+      matches &= prime_it->first.WasTouched();
     } else if (opts.mask == ScanOpts::Mask::Untouched) {
-      matches &= !it->first.WasTouched();
+      matches &= !prime_it->first.WasTouched();
     }
   }
   if (!matches)
     return false;
 
-  if (opts.min_malloc_size > 0 && it->second.MallocUsed() < opts.min_malloc_size) {
+  if (opts.min_malloc_size > 0 && prime_it->second.MallocUsed() < opts.min_malloc_size) {
     return false;
   }
 
-  if (opts.bucket_id != UINT_MAX && opts.bucket_id != it.GetInnerIt().bucket_id()) {
+  if (opts.bucket_id != UINT_MAX && opts.bucket_id != prime_it.bucket_id()) {
     return false;
   }
 
-  if (!opts.Matches(it.key())) {
-    return false;
-  }
-  res->emplace_back(it.key());
-
-  return true;
+  return MatchAndAppendKey(prime_it->first, opts, res);
 }
 
-void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, StringVec* vec) {
+void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, ScanResult* vec) {
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
 
@@ -695,7 +706,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // the bucket might change as we Traverse and yield.
   db_slice.WaitForUnblockedJournalWrites();
 
-  // Disable flush journal changes to prevent preemtion in traverse.
+  // Disable flush journal changes to prevent preemption in traverse.
   journal::DisableFlushGuard journal_flush_guard(op_args.shard->journal());
   unsigned cnt = 0;
 
@@ -721,7 +732,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   *cursor = cur.token();
 }
 
-uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys,
+uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, ScanResult* keys,
                      ConnectionContext* cntx) {
   ShardId sid = cursor % 1024;
 
@@ -778,12 +789,13 @@ uint64_t ScanGeneric(uint64_t cursor, const ScanOpts& scan_opts, StringVec* keys
 
 void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor,
                      uint32_t* deleted) {
-  StringVec keys;
+  ScanResult keys{scan_opts.limit};
   OpScan(op_args, scan_opts, cursor, &keys);
 
   auto& db_slice = op_args.GetDbSlice();
   uint32_t count = 0;
-  for (const auto& key : keys) {
+  for (size_t i = 0; i < keys.size(); ++i) {
+    string_view key = keys[i];
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater runs immediately
     if (!IsValid(it))
       continue;
@@ -882,44 +894,45 @@ OpResult<vector<long>> OpFieldExpire(const OpArgs& op_args, string_view key, uin
   auto& db_slice = op_args.GetDbSlice();
   auto [it, auto_updater, is_new, _] = db_slice.FindMutable(op_args.db_cntx, key);
 
-  if (!IsValid(it) || (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)) {
+  if (!IsValid(it)) {
     std::vector<long> res(values.size(), -2);
     return res;
   }
+  if (it->second.ObjType() != OBJ_SET && it->second.ObjType() != OBJ_HASH)
+    return OpStatus::WRONG_TYPE;
 
   PrimeValue* pv = &it->second;
+  if (pv->ObjType() == OBJ_HASH) {
+    auto_updater.Run();
+    return HSetFamily::ExpireFields(op_args, key, ttl_sec, values);
+  }
   if (pv->IsExternal() && !pv->IsCool())
     return OpStatus::CANCELLED;  // can't mutate offloaded values synchronously
 
-  const bool is_set = pv->ObjType() == OBJ_SET;
-  // Only a TTL-carrying StringMap/StringSet can hold lazily expired members needing compensation.
+  // Only a TTL-carrying StringSet can hold lazily expired members needing compensation.
   const bool had_member_expiry = pv->Encoding() == kEncodingStrMap2 && pv->HasMemberExpiration();
+  auto result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
+  // Finalize memory accounting before potential deletion.
+  auto_updater.Run();
+  bool key_deleted = DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, key, *pv);
 
-  vector<long> result;
-  bool key_deleted;
-  if (is_set) {
-    result = SetFamily::SetFieldsExpireTime(op_args, ttl_sec, values, pv);
-    // Finalize memory accounting before potential deletion.
-    auto_updater.Run();
-    key_deleted = SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, *pv);
-  } else {
-    result = HSetFamily::SetFieldsExpireTime(op_args, ttl_sec, ExpireFlags::EXPIRE_ALWAYS, key,
-                                             values, pv);
-    auto_updater.Run();
-    key_deleted = HSetFamily::DeleteIfEmpty(db_slice, op_args.db_cntx, key, *pv);
-  }
-
-  // A member probed while lazily expired is still alive on a lagging replica and the replayed
-  // command would re-arm it there; delete it explicitly. Delete*IfEmpty journaled a DEL itself
-  // and may have yielded, so only locals are touched from here on.
-  if (!key_deleted && had_member_expiry && op_args.shard->journal()) {
-    absl::InlinedVector<std::string_view, 4> missing{key};
-    for (size_t i = 0; i < values.size(); ++i) {
-      if (result[i] == -2)
-        missing.push_back(values[i]);
+  // Delete lazily expired members on lagging replicas so replay cannot revive them.
+  // The cleanup above may journal DEL and yield; use only locals from here on.
+  if (!key_deleted && op_args.shard->journal()) {
+    if (had_member_expiry) {
+      absl::InlinedVector<std::string_view, 4> missing{key};
+      for (size_t i = 0; i < values.size(); ++i) {
+        if (result[i] == -2)
+          missing.push_back(values[i]);
+      }
+      if (missing.size() > 1)
+        RecordJournal(op_args, "SREM"sv, missing);
     }
-    if (missing.size() > 1)
-      RecordJournal(op_args, is_set ? "SREM"sv : "HDEL"sv, missing);
+    // FIELDEXPIRE is NO_AUTOJOURNAL because the hash branch above journals its own effect.
+    string ttl = absl::StrCat(ttl_sec);
+    absl::InlinedVector<std::string_view, 6> args{key, ttl};
+    args.insert(args.end(), values.begin(), values.end());
+    RecordJournal(op_args, "FIELDEXPIRE"sv, args);
   }
   return result;
 }
@@ -939,15 +952,8 @@ OpResult<long> OpFieldTtl(Transaction* t, EngineShard* shard, string_view key, s
   if (it->second.IsExternal() && !it->second.IsCool())
     return OpStatus::CANCELLED;  // can't inspect offloaded values synchronously
 
-  int32_t res = -1;
-  if (it->second.ObjType() == OBJ_SET) {
-    res = SetFamily::FieldExpireTime(db_cntx, it->second, field);
-    SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, it->second);
-  } else {
-    DCHECK_EQ(OBJ_HASH, it->second.ObjType());
-    res = HSetFamily::FieldExpireTime(db_cntx, it->second, field);
-    HSetFamily::DeleteIfEmpty(db_slice, db_cntx, key, it->second);
-  }
+  int32_t res = FieldExpireTime(db_cntx, it->second, field);
+  DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
   return res <= 0 ? res : int32_t(res - MemberTimeSeconds(db_cntx.time_now_ms));
 }
 #else
@@ -1116,6 +1122,17 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
   // we keep the value we want to move.
   PrimeValue from_obj = std::move(from_res.it->second);
 
+  // When tiering is enabled, update tiered-storage metadata to the new key. Must run before
+  // any post_updater.Run() so the size delta from the (possibly longer) new key's storage is
+  // captured by that updater's memory accounting, instead of being silently dropped.
+  auto retier_key = [&](const DbSlice::Iterator& it) {
+    if (EngineShard::tlocal()->tiered_storage() && it->second.ObjType() == OBJ_LIST &&
+        it->second.Encoding() == kEncodingQL2) {
+      auto* ql = static_cast<QList*>(it->second.RObjPtr());
+      ql->SetKey(to_key);
+    }
+  };
+
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
     db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, to_key, &to_res.it->second);
@@ -1128,6 +1145,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     }
 
     to_res.it->first.SetSticky(sticky);
+    retier_key(to_res.it);
     to_res.post_updater.Run();
 
     db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
@@ -1140,17 +1158,10 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
     RETURN_ON_BAD_STATUS(op_result);
     to_res = std::move(*op_result);
     to_res.it->first.SetSticky(sticky);
+    retier_key(to_res.it);
   }
 
   AddKeyToIndexesIfNeeded(to_key, op_args.db_cntx, to_res.it->second, op_args.shard);
-
-  // When tiering is enabled, update tiered-storage metadata to the new key.
-  if (EngineShard::tlocal()->tiered_storage()) {
-    if (to_res.it->second.ObjType() == OBJ_LIST && to_res.it->second.Encoding() == kEncodingQL2) {
-      auto* ql = static_cast<QList*>(to_res.it->second.RObjPtr());
-      ql->SetKey(to_key);
-    }
-  }
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(es->shard_id());
   if (!is_prior_list && to_res.it->second.ObjType() == OBJ_LIST && bc) {
@@ -1237,27 +1248,26 @@ void TtlGeneric(string_view key, TimeUnit unit, CommandContext* cmd_cntx) {
 struct ExpireArgs {
   string_view key;
   int64_t value = 0;
-  int32_t flags = ExpireFlags::EXPIRE_ALWAYS;
+  int32_t flags = EXPIRE_ALWAYS;
 };
 
 ExpireArgs ParseExpireArgs(CmdArgParser* parser) {
   static constexpr auto kGrammar =
       Compile(Args(&ExpireArgs::key, &ExpireArgs::value),
-              Options(Flags(&ExpireArgs::flags, "NX", int32_t{ExpireFlags::EXPIRE_NX}, "XX",
-                            int32_t{ExpireFlags::EXPIRE_XX}, "GT", int32_t{ExpireFlags::EXPIRE_GT},
-                            "LT", int32_t{ExpireFlags::EXPIRE_LT})));
+              Options(Flags(&ExpireArgs::flags, "NX", int32_t{EXPIRE_NX}, "XX", int32_t{EXPIRE_XX},
+                            "GT", int32_t{EXPIRE_GT}, "LT", int32_t{EXPIRE_LT})));
   auto args = kGrammar.Apply(parser);
   parser->Finalize("Unsupported option: ");
 
   // NX with GT/LT is allowed as a deliberate extension, see docs/differences.md.
-  if ((args.flags & ExpireFlags::EXPIRE_NX) && (args.flags & ExpireFlags::EXPIRE_XX))
+  if ((args.flags & EXPIRE_NX) && (args.flags & EXPIRE_XX))
     parser->ReportCustom("NX and XX, GT or LT options at the same time are not compatible");
-  if ((args.flags & ExpireFlags::EXPIRE_GT) && (args.flags & ExpireFlags::EXPIRE_LT))
+  if ((args.flags & EXPIRE_GT) && (args.flags & EXPIRE_LT))
     parser->ReportCustom("GT and LT options at the same time are not compatible");
   return args;
 }
 
-// New version of OpDel with possible journal omits - autojournaling must be disabled
+// Deletion with possible journal omits - autojournaling must be disabled
 OpResult<uint32_t> OpDelV2(const OpArgs& op_args, const ShardArgs& keys, bool async) {
   bool journal_enabled = op_args.shard->journal();
   auto& db_slice = op_args.GetDbSlice();
@@ -1292,24 +1302,6 @@ OpResult<uint32_t> OpDelV2(const OpArgs& op_args, const ShardArgs& keys, bool as
 
 }  // namespace
 
-OpResult<uint32_t> GenericFamily::OpDel(const OpArgs& op_args, const ShardArgs& keys, bool async) {
-  DVLOG(1) << "Del: " << keys.Front() << " async: " << async;
-  auto& db_slice = op_args.GetDbSlice();
-
-  uint32_t res = 0;
-
-  for (string_view key : keys) {
-    auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater will run immediately
-    if (!IsValid(it))
-      continue;
-
-    db_slice.Del(op_args.db_cntx, it, nullptr, async);
-    ++res;
-  }
-
-  return res;
-}
-
 static cmd::CmdR CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool async_unlink =
       cmd_cntx->cid()->name() == "UNLINK" && absl::GetFlag(FLAGS_unlink_experimental_async);
@@ -1339,7 +1331,7 @@ static cmd::CmdR CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   co_return std::nullopt;
 }
 
-void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Delex(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1358,11 +1350,11 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
     if (!parser.HasNext()) {
       // DELEX key <something> - invalid, needs both condition and value
       // TODO: include error type in error reply
-      return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+      return cmd_cntx->SendError(WrongNumArgsError("DELEX"), kSyntaxErrType);
     }
     compare_value = parser.Next();
     if (parser.HasNext()) {
-      return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+      return cmd_cntx->SendError(WrongNumArgsError("DELEX"), kSyntaxErrType);
     }
 
     if (absl::EqualsIgnoreCase(opt, "IFEQ")) {
@@ -1374,19 +1366,19 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
     } else if (absl::EqualsIgnoreCase(opt, "IFDNE")) {
       cond = Condition::IFDNE;
     } else {
-      return cmd_cntx->SendError(facade::UnknownSubCmd(opt, "DELEX"), kSyntaxErrType);
+      return cmd_cntx->SendError(UnknownSubCmd(opt, "DELEX"), kSyntaxErrType);
     }
   }
 
   if (auto err = parser.TakeError(); err) {
     // DELEX key <something> - invalid, needs both condition and value
     // TODO: include error type in error reply
-    return cmd_cntx->SendError(facade::WrongNumArgsError("DELEX"), kSyntaxErrType);
+    return cmd_cntx->SendError(WrongNumArgsError("DELEX"), kSyntaxErrType);
   }
 
   // If no condition, delegate to standard DEL
   if (cond == Condition::NONE) {
-    CmdDel(facade::CmdArgParser{cmd_cntx->tail_args()}, cmd_cntx);
+    CmdDel(CmdArgParser{cmd_cntx->tail_args()}, cmd_cntx);
     return;
   }
 
@@ -1452,11 +1444,11 @@ void GenericFamily::Delex(facade::CmdArgParser parser, CommandContext* cmd_cntx)
   }
 }
 
-void GenericFamily::Ping(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Ping(CmdArgParser parser, CommandContext* cmd_cntx) {
   const bool has_msg = parser.HasNext();
   string_view msg = parser.NextOrDefault();
   if (parser.HasNext()) {
-    return cmd_cntx->SendError(facade::WrongNumArgsError("ping"), kSyntaxErrType);
+    return cmd_cntx->SendError(WrongNumArgsError("ping"), kSyntaxErrType);
   }
 
   // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
@@ -1479,7 +1471,7 @@ void GenericFamily::Ping(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   return cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Exists(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Exists(CmdArgParser parser, CommandContext* cmd_cntx) {
   VLOG(1) << "Exists " << parser.Peek();
 
   atomic_uint32_t result{0};
@@ -1498,7 +1490,7 @@ void GenericFamily::Exists(facade::CmdArgParser parser, CommandContext* cmd_cntx
   return cmd_cntx->SendLong(result.load(memory_order_acquire));
 }
 
-void GenericFamily::Persist(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Persist(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpPersist(t->GetOpArgs(shard), key); };
@@ -1507,7 +1499,7 @@ void GenericFamily::Persist(facade::CmdArgParser parser, CommandContext* cmd_cnt
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Expire(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.Next(ParseExpireArgs);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1525,7 +1517,7 @@ void GenericFamily::Expire(facade::CmdArgParser parser, CommandContext* cmd_cntx
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::ExpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::ExpireAt(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.Next(ParseExpireArgs);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1547,11 +1539,9 @@ void GenericFamily::ExpireAt(facade::CmdArgParser parser, CommandContext* cmd_cn
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Keys(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view pattern = parser.Next();
   uint64_t cursor = 0;
-
-  StringVec keys;
 
   ScanOpts scan_opts;
   if (pattern != "*") {
@@ -1560,16 +1550,17 @@ void GenericFamily::Keys(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
   scan_opts.limit = 512;
   auto output_limit = absl::GetFlag(FLAGS_keys_output_limit);
+  ScanResult keys{scan_opts.limit};
 
   do {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cmd_cntx->server_conn_cntx());
   } while (cursor != 0 && keys.size() < output_limit);
 
-  auto replier = [keys = std::move(keys)](RedisReplyBuilder* rb) { rb->SendBulkStrArr(keys); };
+  auto replier = [keys = std::move(keys)](RedisReplyBuilder* rb) { keys.Send(rb); };
   return cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::PexpireAt(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.Next(ParseExpireArgs);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1591,7 +1582,7 @@ void GenericFamily::PexpireAt(facade::CmdArgParser parser, CommandContext* cmd_c
   }
 }
 
-void GenericFamily::Pexpire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Pexpire(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.Next(ParseExpireArgs);
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
@@ -1612,7 +1603,7 @@ void GenericFamily::Pexpire(facade::CmdArgParser parser, CommandContext* cmd_cnt
   cmd_cntx->SendLong(status == OpStatus::OK);
 }
 
-void GenericFamily::Stick(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Stick(CmdArgParser parser, CommandContext* cmd_cntx) {
   Transaction* transaction = cmd_cntx->tx();
   VLOG(1) << "Stick " << parser.Peek();
 
@@ -1634,6 +1625,8 @@ void GenericFamily::Stick(facade::CmdArgParser parser, CommandContext* cmd_cntx)
   uint32_t match_cnt = result.load(memory_order_relaxed);
   cmd_cntx->SendLong(match_cnt);
 }
+
+namespace {
 
 struct SortEntryBase {
   string key;
@@ -1765,7 +1758,7 @@ OpResult<CompactObjType> OpFetchSortEntries(const OpArgs& op_args, std::string_v
   // IterateSet may trigger lazy member expiry on sets with member-level TTL.
   // If all members expired, delete the now-empty key.
   if (obj_type == OBJ_SET && it->second.Size() == 0) {
-    SetFamily::DeleteSetIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
+    DeleteCollectionIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
   }
 
   return obj_type;
@@ -1801,7 +1794,7 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
 
   // IterateSet may trigger lazy member expiry.  Clean up empty set.
   if (obj_type == OBJ_SET && it->second.Size() == 0) {
-    SetFamily::DeleteSetIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
+    DeleteCollectionIfEmpty(op_args.GetDbSlice(), op_args.db_cntx, key, it->second);
   }
 
   return std::make_pair(std::move(elements), obj_type);
@@ -2009,7 +2002,7 @@ struct SortVisitor {
   vector<string> raw_elements;
 
   template <typename T> void operator()(T& entries) {
-    using value_t = typename std::decay_t<decltype(entries)>::value_type;
+    using value_t = std::decay_t<decltype(entries)>::value_type;
     auto cmp = params.reversed ? &value_t::greater : &value_t::less;
 
     DCHECK(params.to_sort);
@@ -2172,7 +2165,7 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
 
   // Validate BY pattern has exactly one '*'
   if (params.by_pattern) {
-    size_t star_count = std::count(params.by_pattern->begin(), params.by_pattern->end(), '*');
+    size_t star_count = rng::count(*params.by_pattern, '*');
     if (star_count == 0) {
       // "nosort" pattern - no '*' means skip sorting, preserve insertion order
       params.to_sort = false;
@@ -2187,7 +2180,7 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
     if (pattern == "#") {
       continue;  // Special pattern, always valid
     }
-    size_t star_count = std::count(pattern.begin(), pattern.end(), '*');
+    size_t star_count = rng::count(pattern, '*');
     if (star_count > 1) {
       return cmd_cntx->SendError(kSyntaxErr);
     }
@@ -2370,15 +2363,17 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Sort(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+}  // namespace
+
+void GenericFamily::Sort(CmdArgParser parser, CommandContext* cmd_cntx) {
   SortGeneric(std::move(parser), cmd_cntx, false);
 }
 
-void GenericFamily::Sort_RO(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Sort_RO(CmdArgParser parser, CommandContext* cmd_cntx) {
   SortGeneric(std::move(parser), cmd_cntx, true);
 }
 
-void GenericFamily::Restore(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Restore(CmdArgParser parser, CommandContext* cmd_cntx) {
   static constexpr auto kGrammar = Compile(
       Args(&RestoreArgs::key, &RestoreArgs::expiration, &RestoreArgs::serialized_value),
       Options(Exist("REPLACE", &RestoreArgs::replace), Exist("ABSTTL", &RestoreArgs::abs_time),
@@ -2422,13 +2417,13 @@ void GenericFamily::Restore(facade::CmdArgParser parser, CommandContext* cmd_cnt
   }
 }
 
-void GenericFamily::FieldExpire(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::FieldExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   uint32_t ttl_sec = parser.Next<FInt<uint32_t{1}, uint32_t{kMaxExpireDeadlineSec}>>();
   if (auto err = parser.TakeError(); err) {
     return cmd_cntx->SendError(err.MakeReply());
   }
-  facade::CmdArgVec fields;
+  CmdArgVec fields;
   auto field_args = parser.RemainingRange();
   fields.assign(field_args.begin(), field_args.end());
 
@@ -2450,7 +2445,7 @@ void GenericFamily::FieldExpire(facade::CmdArgParser parser, CommandContext* cmd
 
 // Returns -2 if key not found, WRONG_TYPE if key is not a set or hash
 // -1 if the field does not have associated TTL on it, and -3 if field is not found.
-void GenericFamily::FieldTtl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::FieldTtl(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, field] = parser.Next<string_view, string_view>();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2468,7 +2463,7 @@ void GenericFamily::FieldTtl(facade::CmdArgParser parser, CommandContext* cmd_cn
   cmd_cntx->SendError(result.status());
 }
 
-void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Move(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [key, target_db] = parser.Next<string_view, int32_t>();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2513,7 +2508,7 @@ void GenericFamily::Move(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   cmd_cntx->SendLong(res == OpStatus::OK);
 }
 
-void GenericFamily::Rename(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Rename(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src_key, dest_key] = parser.Next<string_view, string_view>();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2522,7 +2517,7 @@ void GenericFamily::Rename(facade::CmdArgParser parser, CommandContext* cmd_cntx
   cmd_cntx->SendError(reply);
 }
 
-void GenericFamily::RenameNx(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::RenameNx(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [src_key, dest_key] = parser.Next<string_view, string_view>();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2542,7 +2537,7 @@ void GenericFamily::RenameNx(facade::CmdArgParser parser, CommandContext* cmd_cn
   }
 }
 
-void GenericFamily::Copy(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Copy(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto [k1, k2] = parser.Next<std::string_view, std::string_view>();
   bool replace = parser.Check("REPLACE");
   if (!parser.Finalize()) {
@@ -2572,7 +2567,7 @@ void GenericFamily::Copy(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   }
 }
 
-void GenericFamily::ExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::ExpireTime(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2580,7 +2575,7 @@ void GenericFamily::ExpireTime(facade::CmdArgParser parser, CommandContext* cmd_
   ExpireTimeGeneric(key, TimeUnit::SEC, cmd_cntx);
 }
 
-void GenericFamily::PExpireTime(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::PExpireTime(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2588,7 +2583,7 @@ void GenericFamily::PExpireTime(facade::CmdArgParser parser, CommandContext* cmd
   ExpireTimeGeneric(key, TimeUnit::MSEC, cmd_cntx);
 }
 
-void GenericFamily::Ttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Ttl(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2596,7 +2591,7 @@ void GenericFamily::Ttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   TtlGeneric(key, TimeUnit::SEC, cmd_cntx);
 }
 
-void GenericFamily::Pttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Pttl(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
@@ -2604,7 +2599,7 @@ void GenericFamily::Pttl(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   TtlGeneric(key, TimeUnit::MSEC, cmd_cntx);
 }
 
-void GenericFamily::Select(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Select(CmdArgParser parser, CommandContext* cmd_cntx) {
   int64_t index = parser.Next<int64_t>();
   if (parser.TakeError()) {
     return cmd_cntx->SendError(kInvalidDbIndErr);
@@ -2643,7 +2638,7 @@ void GenericFamily::Select(facade::CmdArgParser parser, CommandContext* cmd_cntx
   return cmd_cntx->SendOk();
 }
 
-void GenericFamily::Dump(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Dump(CmdArgParser parser, CommandContext* cmd_cntx) {
   std::string_view key = parser.Next();
   DVLOG(1) << "Dumping before ::ScheduleSingleHopT " << key;
   auto cb = [&](Transaction* t, EngineShard* shard) { return OpDump(t->GetOpArgs(shard), key); };
@@ -2659,7 +2654,7 @@ void GenericFamily::Dump(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   }
 }
 
-void GenericFamily::Type(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Type(CmdArgParser parser, CommandContext* cmd_cntx) {
   std::string_view key = parser.Next();
 
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<CompactObjType> {
@@ -2679,7 +2674,7 @@ void GenericFamily::Type(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   }
 }
 
-void GenericFamily::Time(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Time(CmdArgParser parser, CommandContext* cmd_cntx) {
   (void)parser;
 
   uint64_t now_usec;
@@ -2698,7 +2693,7 @@ void GenericFamily::Time(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Echo(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Echo(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   auto replier = [key = string(key)](RedisReplyBuilder* rb) { rb->SendBulkString(key); };
   cmd_cntx->ReplyWith(std::move(replier));
@@ -2706,7 +2701,7 @@ void GenericFamily::Echo(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
 // SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
 // [ATTR <mask>] [MLCGE <len>]
-void GenericFamily::Scan(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Scan(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view token = parser.Next();
   uint64_t cursor = 0;
   if (!absl::SimpleAtoi(token, &cursor)) {
@@ -2740,20 +2735,20 @@ void GenericFamily::Scan(facade::CmdArgParser parser, CommandContext* cmd_cntx) 
 
   const ScanOpts& scan_op = ops.value();
 
-  StringVec keys;
+  ScanResult keys{scan_op.limit};
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx->server_conn_cntx());
 
   auto replier = [cursor, keys = std::move(keys)](RedisReplyBuilder* builder) {
     std::string cursor_str = absl::StrCat(cursor);
     RedisReplyBuilder::ArrayScope scope{builder, 2};
     builder->SendBulkString(cursor_str);
-    builder->SendBulkStrArr(keys);
+    keys.Send(builder);
   };
 
   cmd_cntx->ReplyWith(std::move(replier));
 }
 
-void GenericFamily::Rm(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::Rm(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view token = parser.Next();
   uint64_t cursor = 0;
   if (!absl::SimpleAtoi(token, &cursor)) {
@@ -2777,6 +2772,7 @@ void GenericFamily::Rm(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(ops.status());
   }
 
+  ops->for_mutation = true;
   uint32_t deleted = 0;
   cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->tx());
 
@@ -2801,7 +2797,7 @@ OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArg
   return res;
 }
 
-void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void GenericFamily::RandomKey(CmdArgParser parser, CommandContext* cmd_cntx) {
   (void)parser;
 
   const static size_t kMaxAttempts = 3;
@@ -2812,7 +2808,7 @@ void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_c
   DbContext db_cntx{cntx->ns, cntx->conn_state.db_index, GetCurrentTimeMs()};
   ScanOpts scan_opts;
   scan_opts.limit = 3;  // number of entries per shard
-  std::vector<StringVec> candidates_collection(shard_set->size());
+  std::vector<ScanResult> candidates_collection(shard_set->size());
 
   // OpScan can preempt (WaitForUnblockedJournalWrites suspends on CondVar during BGSAVE),
   // so we must run on a regular fiber rather than the dispatcher (RunBriefInParallel).
@@ -2822,7 +2818,7 @@ void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_c
       return;
     }
 
-    StringVec* candidates = &candidates_collection[shard->shard_id()];
+    ScanResult* candidates = &candidates_collection[shard->shard_id()];
 
     // Per-shard RNG; absl::BitGen is not thread-safe.
     absl::BitGen local_gen;
@@ -2847,8 +2843,8 @@ void GenericFamily::RandomKey(facade::CmdArgParser parser, CommandContext* cmd_c
     if (random_idx >= candidate.size()) {
       random_idx -= candidate.size();
     } else {
-      auto replier = [key = std::move(candidate[random_idx])](RedisReplyBuilder* builder) {
-        builder->SendBulkString(key);
+      auto replier = [keys = std::move(candidate), random_idx](RedisReplyBuilder* builder) {
+        builder->SendBulkString(keys[random_idx]);
       };
       return cmd_cntx->ReplyWith(std::move(replier));
     }
@@ -2863,6 +2859,7 @@ using CI = CommandId;
 namespace acl {
 
 constexpr uint32_t kDel = KEYSPACE | WRITE | SLOW;
+constexpr uint32_t kDelEx = STRING | WRITE | FAST;
 constexpr uint32_t kPing = FAST | CONNECTION;
 constexpr uint32_t kEcho = FAST | CONNECTION;
 constexpr uint32_t kExists = KEYSPACE | READ | FAST;
@@ -2894,6 +2891,7 @@ constexpr uint32_t kRestore = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kPExpireTime = KEYSPACE | READ | FAST;
 constexpr uint32_t kFieldExpire = WRITE | HASH | SET | FAST;
+constexpr uint32_t kRandomKey = KEYSPACE | READ | SLOW;
 }  // namespace acl
 
 void GenericFamily::Register(CommandRegistry* registry) {
@@ -2901,7 +2899,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"DEL", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kDel}.SetAsyncHandler(CmdDel)
-      << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDel}.HFUNC(Delex)
+      << CI{"DELEX", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::kDelEx}.HFUNC(Delex)
       /* Redis compatibility:
        * We don't allow PING during loading since in Redis PING is used as
        * failure detection, and a loading server is considered to be
@@ -2920,13 +2918,17 @@ void GenericFamily::Register(CommandRegistry* registry) {
              .HFUNC(PexpireAt)
       << CI{"PEXPIRE", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -3, 1, 1, acl::kPExpire}
              .HFUNC(Pexpire)
-      << CI{"FIELDEXPIRE", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1, acl::kFieldExpire}
+      << CI{"FIELDEXPIRE",    CO::JOURNALED | CO::FAST | CO::DENYOOM | CO::NO_AUTOJOURNAL, -4, 1, 1,
+            acl::kFieldExpire}
              .HFUNC(FieldExpire)
       << CI{"RENAME", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
-      << CI{"COPY", CO::JOURNALED | CO::NO_AUTOJOURNAL, -3, 1, 2, acl::kCopy}.HFUNC(Copy)
-      << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRenamNX}.HFUNC(RenameNx)
+      << CI{"COPY",    CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_1, -3, 1, 2,
+            acl::kCopy}
+             .HFUNC(Copy)
+      << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 2, acl::kRenamNX}
+             .HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
-      << CI{"SCAN", CO::READONLY | CO::FAST | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
+      << CI{"SCAN", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
       << CI{"RM",
             CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::JOURNALED | CO::NO_AUTOJOURNAL,
             -2,
@@ -2940,16 +2942,17 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"TIME", CO::LOADING | CO::FAST, 1, 0, 0, acl::kTime}.HFUNC(Time)
       << CI{"TYPE", CO::READONLY | CO::FAST | CO::LOADING, 2, 1, 1, acl::kType}.HFUNC(Type)
       << CI{"DUMP", CO::READONLY, 2, 1, 1, acl::kDump}.HFUNC(Dump)
-      << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL, -2, 1, -1, acl::kUnlink}.SetAsyncHandler(
-             CmdDel)
-      << CI{"STICK", CO::JOURNALED, -2, 1, -1, acl::kStick}.HFUNC(Stick)
+      << CI{"UNLINK", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, -2, 1, -1, acl::kUnlink}
+             .SetAsyncHandler(CmdDel)
+      << CI{"STICK", CO::JOURNALED | CO::FAST, -2, 1, -1, acl::kStick}.HFUNC(Stick)
       << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -2, 1, 1, acl::kSort}
              .HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
-      << CI{"MOVE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 1, 1, acl::kMove}
+      << CI{"MOVE",    CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 1,
+            acl::kMove}
              .HFUNC(Move)
       << CI{"RESTORE", CO::JOURNALED, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
-      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, 0}.HFUNC(RandomKey)
+      << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, acl::kRandomKey}.HFUNC(RandomKey)
       << CI{"EXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kExpireTime}.HFUNC(ExpireTime)
       << CI{"PEXPIRETIME", CO::READONLY | CO::FAST, 2, 1, 1, acl::kPExpireTime}.HFUNC(PExpireTime);
 }

@@ -1,3 +1,6 @@
+// Keep in sync with SCHEMA_VERSION in build_dashboard.py.
+const schemaVersion = 3;
+
 const state = {
   manifest: null,
   data: null,
@@ -40,7 +43,6 @@ const statusRank = {
   unknown: 0,
 };
 
-const failStatuses = new Set(['failed', 'error']);
 const recentFailureDays = 7;
 
 async function boot() {
@@ -57,11 +59,17 @@ async function boot() {
 }
 
 async function fetchJson(path) {
-  const response = await fetch(path);
+  // Revalidate even fresh cached files: their URLs survive schema changes.
+  const response = await fetch(path, {cache: 'no-cache'});
   if (!response.ok) {
     throw new Error(`${path}: HTTP ${response.status}`);
   }
-  return response.json();
+  const data = await response.json();
+  if (data?.schema_version !== schemaVersion) {
+    throw new Error(`${path}: Unsupported data schema ${
+        data?.schema_version ?? 'missing'} (expected ${schemaVersion})`);
+  }
+  return data;
 }
 
 function rangesFromManifest(manifest) {
@@ -248,7 +256,7 @@ function renderDetails() {
   const detail = source ? state.detailCache.get(source.id) : null;
   const detailError = source ? state.detailErrors.get(source.id) : null;
   const needsDetail = Boolean(source?.detail_file && !detail && !detailError);
-  const test = source ? deriveRow(detailForSelectedRange(source, detail)) : null;
+  const test = source ? detailForSelectedRange(source, detail) : null;
   if (!test) {
     pane.className = 'empty-state';
     pane.textContent = 'Select a test row.';
@@ -327,36 +335,14 @@ function detailForSelectedRange(source, detail) {
   if (!detail) {
     return source;
   }
-
-  const activeDates = activeDateSet(source);
-  const segments = Array.isArray(detail.segments) ?
-      detail.segments.filter((segment) => inActiveDateSet(activeDates, segment.date)) :
-      [];
-  const failureExamples = Array.isArray(detail.failure_examples) ?
-      detail.failure_examples.filter(
-          (example) => inActiveDateSet(activeDates, datePart(example.time))) :
-      [];
+  const samples = detail.ranges?.[state.range];
 
   return {
     ...source,
-    ...detail,
-    segments,
-    failure_examples: failureExamples,
+    recent: samples?.recent ?? [],
+    failure_runs: samples?.failure_runs ?? [],
+    failure_examples: samples?.failure_examples ?? [],
   };
-}
-
-function activeDateSet(source) {
-  const dates = source.active_dates ?? state.data?.date_range?.days ?? [];
-  return new Set(dates.filter(Boolean));
-}
-
-function inActiveDateSet(activeDates, date) {
-  return activeDates.size === 0 || activeDates.has(date);
-}
-
-function datePart(value) {
-  const match = String(value ?? '').match(/^(\d{4}-\d{2}-\d{2})/);
-  return match ? match[1] : '';
 }
 
 function chips(label, values) {
@@ -472,119 +458,7 @@ function visibleTests() {
 
 function baseFilteredRows() {
   return (state.data?.tests ?? [])
-      .filter((test) => state.suite === 'all' || test.suite === state.suite)
-      .map(deriveRow)
-      .filter(Boolean);
-}
-
-function deriveRow(test) {
-  if (!test.segments) {
-    return normalizedSummaryRow(test);
-  }
-
-  const segments = test.segments;
-  if (segments.length === 0) {
-    return null;
-  }
-
-  let total = 0;
-  let passed = 0;
-  let failed = 0;
-  let errored = 0;
-  let skipped = 0;
-  let totalTime = 0;
-  let firstSeen = null;
-  let lastFailed = null;
-  let lastFailedSegment = null;
-  let lastSegment = null;
-
-  for (const segment of segments) {
-    total += segment.total;
-    passed += segment.passed;
-    failed += segment.failed;
-    errored += segment.errored;
-    skipped += segment.skipped;
-    totalTime += segment.total_time;
-
-    if (!firstSeen || segment.first_seen < firstSeen) {
-      firstSeen = segment.first_seen;
-    }
-    if (segment.last_failed && (!lastFailed || segment.last_failed >= lastFailed)) {
-      lastFailed = segment.last_failed;
-      lastFailedSegment = segment;
-    }
-    if (!lastSegment || segment.last_seen >= lastSegment.last_seen) {
-      lastSegment = segment;
-    }
-  }
-
-  const failures = failed + errored;
-  const actionable = passed + failed + errored;
-  const failureRate = actionable ? failures / actionable : 0;
-  const recent = segments
-                     .map((segment) => ({
-                            status: segment.last_status,
-                            time: segment.last_seen,
-                            label: `${segment.last_status} ${segment.workflow} ${segment.variant}`,
-                          }))
-                     .sort((left, right) => left.time.localeCompare(right.time))
-                     .slice(-12);
-  const failureRuns = failureRunsFromSegments(segments);
-
-  return {
-    ...test,
-    total,
-    passed,
-    failed,
-    errored,
-    skipped,
-    failures,
-    failure_rate: failureRate,
-    avg_time: total ? totalTime / total : 0,
-    first_seen: firstSeen,
-    last_seen: lastSegment?.last_seen ?? null,
-    last_failed: lastFailed,
-    last_failed_run_id: lastFailedSegment?.last_failed_run_id ?? '',
-    last_failed_run_attempt: lastFailedSegment?.last_failed_run_attempt ?? '',
-    last_failed_report: lastFailedSegment?.last_failed_report ?? '',
-    last_status: lastSegment?.last_status ?? 'unknown',
-    last_workflow: lastSegment?.workflow ?? '',
-    last_run_id: lastSegment?.last_run_id ?? '',
-    last_variant: lastSegment?.variant ?? '',
-    last_report: lastSegment?.last_report ?? '',
-    is_currently_failing: failStatuses.has(lastSegment?.last_status),
-    is_flaky: failures > 0 && passed > 0,
-    started_failing_in_sample: startedFailingInHistory(recent),
-    recent,
-    failure_runs: failureRuns,
-    active_dates: uniqueSorted(segments.map((segment) => segment.date)),
-    active_workflows: uniqueSorted(segments.map((segment) => segment.workflow)),
-    active_variants: uniqueSorted(segments.map((segment) => segment.variant)),
-  };
-}
-
-function normalizedSummaryRow(test) {
-  return {
-    ...test,
-    active_dates: test.active_dates ?? [],
-    active_workflows: test.active_workflows ?? [],
-    active_variants: test.active_variants ?? [],
-  };
-}
-
-function failureRunsFromSegments(segments) {
-  return segments.filter((segment) => segment.last_failed)
-      .map((segment) => ({
-             time: segment.last_failed,
-             workflow: segment.workflow,
-             run_id: segment.last_failed_run_id,
-             run_attempt: segment.last_failed_run_attempt,
-             variant: segment.variant,
-             report: segment.last_failed_report,
-             failures: (segment.failed ?? 0) + (segment.errored ?? 0),
-           }))
-      .sort((left, right) => compareNullableDates(right.time, left.time))
-      .slice(0, 20);
+      .filter((test) => state.suite === 'all' || test.suite === state.suite);
 }
 
 function summarizeRows(rows) {
@@ -611,22 +485,6 @@ function summarizeRows(rows) {
         flaky: 0,
       },
   );
-}
-
-function startedFailingInHistory(recent) {
-  if (recent.length < 4) {
-    return false;
-  }
-  const split = Math.max(1, Math.floor(recent.length * 0.7));
-  const earlier = recent.slice(0, split);
-  const later = recent.slice(split);
-  return (
-      earlier.every((item) => !failStatuses.has(item.status)) &&
-      later.some((item) => failStatuses.has(item.status)));
-}
-
-function uniqueSorted(values) {
-  return [...new Set(values.filter(Boolean))].sort();
 }
 
 function firstVisibleTest() {

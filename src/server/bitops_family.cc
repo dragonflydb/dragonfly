@@ -1477,8 +1477,10 @@ void RegisterBitopsFamily(CommandRegistry* registry) {
             << CI{"BITCOUNT", CO::READONLY, -2, 1, 1}.SetHandler(&BitCount)
             << CI{"BITFIELD", CO::JOURNALED | CO::DENYOOM, -2, 1, 1}.SetHandler(&BitField)
             << CI{"BITFIELD_RO", CO::FAST | CO::READONLY, -2, 1, 1}.SetHandler(&BitFieldRo)
-            << CI{"BITOP", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::DENYOOM, -4, 2, -1}.SetHandler(
-                   &BitOp)
+            << CI{"BITOP",
+                  CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::DENYOOM | CO::WRITE_KEY_OFFSET_0, -4, 2,
+                  -1}
+                   .SetHandler(&BitOp)
             << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1}.SetHandler(&GetBit)
             << CI{"SETBIT", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetHandler(&SetBit);
 }

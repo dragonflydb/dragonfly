@@ -11,6 +11,7 @@
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/conn_context.h"
 #include "facade/facade_stats.h"
 #include "facade/op_status.h"
 #include "server/blocking_controller.h"
@@ -285,14 +286,15 @@ void Transaction::InitShardData(absl::Span<const PerShardCache> shard_index, siz
   }
 }
 
-void Transaction::PrepareMultiFps(CmdArgList keys) {
+void Transaction::PrepareMultiFps(const facade::ParsedArgs& args, size_t num_keys) {
   DCHECK_EQ(multi_->mode, LOCK_AHEAD);
-  DCHECK_GT(keys.size(), 0u);
+  DCHECK_GT(num_keys, 0u);
 
   auto& tag_fps = multi_->tag_fps;
 
-  tag_fps.reserve(keys.size());
-  for (string_view str : keys) {
+  tag_fps.reserve(num_keys);
+  for (size_t i = 0; i < num_keys; ++i) {
+    string_view str = args[i];
     ShardId sid = Shard(str, shard_set->size());
     tag_fps.emplace(sid, LockTag(str).Fingerprint());
   }
@@ -488,18 +490,18 @@ void Transaction::StartMultiGlobal(Namespace* ns, DbIndex dbid) {
   ScheduleInternal();
 }
 
-void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, CmdArgList keys,
-                                        bool skip_scheduling) {
-  DVLOG(1) << "StartMultiLockedAhead on " << keys.size() << " keys";
+void Transaction::StartMultiLockedAhead(Namespace* ns, DbIndex dbid, const facade::ParsedArgs& args,
+                                        size_t num_keys, bool skip_scheduling) {
+  DVLOG(1) << "StartMultiLockedAhead on " << num_keys << " keys";
   DCHECK(multi_);
 
   multi_->mode = LOCK_AHEAD;
   multi_->lock_mode = LockMode();
 
-  PrepareMultiFps(keys);
+  PrepareMultiFps(args, num_keys);
 
-  InitBase(ns, dbid, keys);
-  InitByKeys(KeyIndex(0, keys.size()));
+  InitBase(ns, dbid, args);
+  InitByKeys(KeyIndex(0, num_keys));
 
   if (!skip_scheduling)
     ScheduleInternal();
@@ -598,10 +600,11 @@ string Transaction::DebugId(std::optional<ShardId> sid) const {
   return res;
 }
 
-void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db, CmdArgList keys,
+void Transaction::PrepareSingleSquash(Namespace* ns, ShardId sid, DbIndex db,
+                                      const facade::ParsedArgs& args, size_t num_keys,
                                       MultiMode mode) {
   if (mode == LOCK_AHEAD) {
-    StartMultiLockedAhead(ns, db, keys, true);  // delay locking until first hop
+    StartMultiLockedAhead(ns, db, args, num_keys, true);  // delay locking until first hop
   } else {
     DCHECK_EQ(mode, GLOBAL);
     StartMultiGlobal(ns, db);
@@ -1447,7 +1450,7 @@ ShardArgs Transaction::GetShardArgs(ShardId sid) const {
 }
 
 OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReadyChecker krc,
-                                  bool* block_flag, bool* pause_flag) {
+                                  facade::ConnectionContext* cntx) {
   if (blocking_barrier_.IsClaimed()) {  // Might have been cancelled ahead by a dropping connection
     Conclude();
     return OpStatus::CANCELLED;
@@ -1477,16 +1480,16 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
 
   // Wait for the blocking barrier to be closed.
   // Note: It might return immediately if another thread already notified us.
-  *block_flag = true;
+  cntx->blocked = true;
   cv_status status = blocking_barrier_.Wait(tp);
-  *block_flag = false;
+  cntx->blocked = false;
 
   DVLOG(1) << "WaitOnWatch done " << int(status) << " " << DebugId();
   --stats->num_blocked_clients;
 
-  *pause_flag = true;
-  ServerState::tlocal()->AwaitPauseState(true);  // blocking are always write commands
-  *pause_flag = false;
+  cntx->paused = true;
+  ServerState::tlocal()->AwaitPauseState(true, cntx);  // blocking are always write commands
+  cntx->paused = false;
 
   OpStatus result = OpStatus::OK;
   if (status == cv_status::timeout) {
@@ -1494,6 +1497,9 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
   } else if (coordinator_state_ & COORD_CANCELLED) {
     DCHECK_GT(block_cancel_result_, OpStatus::OK);
     result = block_cancel_result_;
+  } else if (cntx->conn_closing) {
+    // Woken after the client left: expiring hands the wake to the next waiter.
+    result = OpStatus::CANCELLED;
   }
 
   // If we don't follow up with an "action" hop, we must clean up manually on all shards.
@@ -1878,10 +1884,23 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs&
 
       if ((name == "GEORADIUSBYMEMBER" && args.size() >= 5) ||
           (name == "GEORADIUS" && args.size() >= 6)) {
-        // key member radius .. STORE destkey
-        string_view opt = args[args.size() - 2];
-        if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
-          bonus = args.size() - 1;
+        // Options (WITHCOORD/WITHDIST/WITHHASH/COUNT/ASC/DESC/STORE/STOREDIST) are
+        // order-independent (see ParseGeoResultOptions), so walk them by arity instead of
+        // assuming STORE/STOREDIST is the penultimate argument.
+        size_t i = name == "GEORADIUSBYMEMBER" ? 4 : 5;
+        while (i < args.size()) {
+          string_view opt = args[i];
+          if (absl::EqualsIgnoreCase(opt, "STORE") || absl::EqualsIgnoreCase(opt, "STOREDIST")) {
+            if (i + 1 < args.size())
+              bonus = i + 1;
+            i += 2;
+          } else if (absl::EqualsIgnoreCase(opt, "COUNT")) {
+            i += 2;
+            if (i < args.size() && absl::EqualsIgnoreCase(args[i], "ANY"))
+              i += 1;
+          } else {
+            i += 1;
+          }
         }
       }
 

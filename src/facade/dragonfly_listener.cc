@@ -121,24 +121,24 @@ atomic_int ssl_init_refcount = 0;
 
 void* OverriddenSSLMalloc(size_t size, const char* file, int line) {
   void* res = mi_malloc(size);
-  listener_tl_stats.tls_allocated_bytes += mi_malloc_usable_size(res);
+  listener_tl_stats.tls_allocated_bytes += mi_usable_size(res);
   return res;
 }
 
 void* OverriddenSSLRealloc(void* addr, size_t size, const char* file, int line) {
-  size_t prev_size = mi_malloc_usable_size(addr);
+  size_t prev_size = mi_usable_size(addr);
   void* res = mi_realloc(addr, size);
   // On failure the original block stays allocated and will be freed (and subtracted) later,
   // so adjusting the counter here would subtract it twice.
   if (res) {
-    listener_tl_stats.tls_allocated_bytes += mi_malloc_usable_size(res);
+    listener_tl_stats.tls_allocated_bytes += mi_usable_size(res);
     listener_tl_stats.tls_allocated_bytes -= prev_size;
   }
   return res;
 }
 
 void OverriddenSSLFree(void* addr, const char* file, int line) {
-  listener_tl_stats.tls_allocated_bytes -= mi_malloc_usable_size(addr);
+  listener_tl_stats.tls_allocated_bytes -= mi_usable_size(addr);
   mi_free(addr);
 }
 

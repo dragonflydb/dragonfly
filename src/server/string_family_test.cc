@@ -1046,9 +1046,9 @@ TEST_F(StringFamilyTest, MSetNxOddArgs) {
 
 // Exercises the zero-copy GET fast path (CompactObj::TryBorrow() →
 // BorrowStringOrRead). The value must be a NONE_ENC large string: random
-// binary avoids inline storage and the ASCII/Huffman heuristics in
-// EncodeString. All sizes must clear BorrowStringOrRead's borrow threshold
-// (currently 16 KiB) so TryBorrow actually fires; we test a spread above it.
+// binary avoids inline storage and ASCII encoding in EncodeString. All sizes
+// must clear BorrowStringOrRead's borrow threshold (currently 16 KiB) so
+// TryBorrow actually fires; we test a spread above it.
 TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
   auto get_info_stat = [this](std::string_view name) -> uint64_t {
     std::string stats = Run({"info", "stats"}).GetString();

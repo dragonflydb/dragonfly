@@ -44,6 +44,7 @@ extern "C" {
 #include "facade/reply_capture.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_family.h"
+#include "server/acl/jwt_validator.h"
 #include "server/acl/user_registry.h"
 #include "server/acl/validator.h"
 #include "server/channel_store.h"
@@ -751,6 +752,8 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case NO_KEY_TRANSACTIONAL:
     case NO_KEY_TX_SPAN_ALL:
     case IDEMPOTENT:
+    case WRITE_KEY_OFFSET_0:
+    case WRITE_KEY_OFFSET_1:
       return "";
   }
   return "";
@@ -796,19 +799,21 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
   }
 }
 
-// Check CLIENT PAUSE state and block if needed
-void CheckPauseState(facade::Connection* conn, ConnectionContext* dfly_cntx, const CommandId* cid) {
+// Blocks the command while CLIENT PAUSE holds it. Returns true if a pause was active.
+bool PauseConnection(const CommandId* cid, bool is_privileged, ConnectionContext* dfly_cntx) {
   auto& etl = *ServerState::tlocal();
-  if (etl.IsPaused() && !conn->IsPrivileged()) {
+  if (etl.IsPaused() && !is_privileged) {
     bool is_write = cid->IsJournaled();
     // PUBLISH and writable EVAL/EVALSHA (not the *_RO variants) count as writes here.
     is_write |= cid->IsPublish() || (cid->IsEvalGroup() && !cid->IsReadOnly());
     is_write |= cid->IsExec() && dfly_cntx->conn_state.exec_info.is_write;
 
     dfly_cntx->paused = true;
-    etl.AwaitPauseState(is_write);
+    etl.AwaitPauseState(is_write, dfly_cntx);
     dfly_cntx->paused = false;
+    return true;
   }
+  return false;
 }
 
 // Prepare transaction for DispatchCommand.
@@ -1073,6 +1078,9 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
+  // TODO: CONFIG SET currently lets any authenticated client flip jwt_validate off at
+  // runtime, bypassing JWT enforcement without a restart. This breaks the security
+  // guarantee that req_auth depends on in Service::CreateContext.
   config_registry.RegisterMutable("jwt_validate", [this](const absl::CommandLineFlag&) {
     server_family_.ForceReauthOnLiveConnections();
     return true;
@@ -1177,12 +1185,15 @@ void Service::Shutdown() {
   cluster_family_.Shutdown();
   server_family_.Shutdown();
 
-  shutdown_watchdog.emplace(pp_);
-
   engine_varz.reset();
 
+  uint64_t shard_shutdown_start = absl::GetCurrentTimeNanos();
   shard_set->PreShutdown();
   shard_set->Shutdown();
+  LOG(INFO) << "Shard set shutdown took "
+            << (absl::GetCurrentTimeNanos() - shard_shutdown_start) / 1000 << "us";
+
+  shutdown_watchdog.emplace(pp_);
 
   delete channel_store;
   channel_store = nullptr;
@@ -1544,8 +1555,11 @@ DispatchResult Service::DispatchCommand(
     }
 
     // Check pause state only if it is a top level transaction.
-    if (dfly_cntx->transaction == nullptr)
-      CheckPauseState(conn, dfly_cntx, cid);
+    if (dfly_cntx->transaction == nullptr &&
+        PauseConnection(cid, conn->IsPrivileged(), dfly_cntx) && dfly_cntx->conn_closing) {
+      cmd_cntx->SendError("connection is closing");  // resolves a deferred reply as well
+      return DispatchResult::ERROR;
+    }
   }
 
   // Verify command state
@@ -1903,12 +1917,14 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
-    // Memcached protocol doesn't support authentication, so we don't require it
+    // Memcached protocol doesn't support authentication, so we don't require it.
+    // This also means JWT validation is not supported/enforced for Memcached connections.
     if (owner->GetProtocol() == Protocol::MEMCACHE) {
       res->req_auth = false;
       res->authenticated = true;  // Automatically authenticated for Memcached protocol
     } else {
-      res->req_auth = !user_registry_.AuthUser("default", "");
+      // JWT validation must gate every connection even if the local "default" user is nopass.
+      res->req_auth = acl::JwtValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
     }
   }
 
@@ -2159,7 +2175,7 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
       {
         CmdArgVec keys(info->key_backing.begin(), info->key_backing.end());
         tx->MultiSwitchCmd(registry_.Find("EVAL"));
-        tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), keys, false);
+        tx->StartMultiLockedAhead(cntx->ns, cntx->db_index(), CmdArgList{keys}, keys.size(), false);
       }
       return;
     case CT::ACALL:
@@ -2237,7 +2253,7 @@ void Service::CallSHA(const facade::ParsedArgs& args, string_view sha, Interpret
 
   auto script_data = script_mgr->Find(sha);
   if (!script_data) {
-    // Unreachable: params are cached only for scripts that have a body.
+    // Rare: a concurrent SCRIPT FLUSH can clear db_ between the params check and this lookup.
     LOG_EVERY_T(WARNING, 1) << "Script " << sha << " has cached params but no body";
     return false;
   }
@@ -2264,7 +2280,8 @@ Transaction::MultiMode DetermineMultiMode(ScriptMgr::ScriptParams params) {
 
 // Starts multi transaction. Returns true if transaction was scheduled.
 // Skips scheduling if multi mode requires declaring keys, but no keys were declared.
-bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgList keys) {
+bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode,
+                const facade::ParsedArgs& args, size_t num_keys) {
   Transaction* tx = cntx->transaction;
   DCHECK(tx);
   Namespace* ns = cntx->ns;
@@ -2275,9 +2292,9 @@ bool StartMulti(ConnectionContext* cntx, Transaction::MultiMode tx_mode, CmdArgL
       tx->StartMultiGlobal(ns, dbid);
       return true;
     case Transaction::LOCK_AHEAD:
-      if (keys.empty())
+      if (num_keys == 0)
         return false;
-      tx->StartMultiLockedAhead(ns, dbid, keys);
+      tx->StartMultiLockedAhead(ns, dbid, args, num_keys);
       return true;
     case Transaction::NON_ATOMIC:
       tx->StartMultiNonAtomic(Transaction::DEFAULT);
@@ -2385,11 +2402,6 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
 
-  CmdArgVec tx_keys;  // TODO: remove this once we get rid of CmdArgList in transaction
-  tx_keys.reserve(eval_args.num_keys);
-  for (unsigned i = 0; i < eval_args.num_keys; ++i)
-    tx_keys.push_back(eval_args.keys_args[i]);
-
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
     sinfo->stats.tx_shards = 1;
     // It might be that there are no declared keys, but there is only a single shard
@@ -2408,7 +2420,8 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     });
 
     ++ss->stats.eval_shardlocal_coordination_cnt;
-    tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), tx_keys, script_mode);
+    tx->PrepareSingleSquash(conn_cntx->ns, real_sid, conn_cntx->db_index(), eval_args.keys_args,
+                            eval_args.num_keys, script_mode);
 
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
       boost::intrusive_ptr<Transaction> stub_tx =
@@ -2440,7 +2453,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
         return cmd_cntx->SendError(err);
       }
     } else {
-      scheduled = StartMulti(conn_cntx, script_mode, tx_keys);
+      scheduled = StartMulti(conn_cntx, script_mode, eval_args.keys_args, eval_args.num_keys);
       sinfo->stats.tx_shards = tx->GetUniqueShardCnt();
     }
 
@@ -2610,7 +2623,7 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
 
   bool scheduled = false;
   if (multi_mode != Transaction::NOT_DETERMINED) {
-    scheduled = StartMulti(cntx, multi_mode, keys);
+    scheduled = StartMulti(cntx, multi_mode, CmdArgList{keys}, keys.size());
   }
 
   // EXEC should not run if any of the watched keys expired.
@@ -3104,8 +3117,8 @@ void Service::Register(CommandRegistry* registry) {
       << CI{"QUIT", CO::FAST, 1, 0, 0, acl::kQuit}.HFUNC(Quit)
       << CI{"RESET", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kReset}.HFUNC(Reset)
       << CI{"MULTI", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kMulti}.HFUNC(Multi)
-      << CI{"WATCH", CO::LOADING, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
-      << CI{"UNWATCH", CO::LOADING, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
+      << CI{"WATCH", CO::LOADING | CO::FAST, -2, 1, -1, acl::kWatch}.HFUNC(Watch)
+      << CI{"UNWATCH", CO::LOADING | CO::FAST, 1, 0, 0, acl::kUnwatch}.HFUNC(Unwatch)
       << CI{"DISCARD", CO::NOSCRIPT | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDiscard}.MFUNC(Discard)
       << CI{"EVAL", CO::NOSCRIPT | CO::VARIADIC_KEYS, -3, 3, 3, acl::kEval}
              .MFUNC(Eval)
@@ -3134,7 +3147,7 @@ void Service::Register(CommandRegistry* registry) {
              PUnsubscribe)
       << CI{"FUNCTION", CO::NOSCRIPT, 2, 0, 0, acl::kFunction}.MFUNC(Function)
       << CI{"MONITOR", CO::ADMIN, 1, 0, 0, acl::kMonitor}.MFUNC(Monitor)
-      << CI{"PUBSUB", CO::LOADING | CO::FAST, -1, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
+      << CI{"PUBSUB", CO::LOADING, -1, 0, 0, acl::kPubSub}.MFUNC(Pubsub)
       << CI{"COMMAND", CO::LOADING | CO::NOSCRIPT, -1, 0, 0, acl::kCommand}.MFUNC(Command);
 }
 

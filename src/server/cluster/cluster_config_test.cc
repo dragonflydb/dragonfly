@@ -832,4 +832,26 @@ TEST_F(ClusterConfigTest, NodesHealth) {
   EXPECT_EQ(config1->GetConfig().begin()->replicas.back().health, NodeHealth::FAIL);
 }
 
+TEST_F(ClusterConfigTest, NodesInvalidHealth) {
+  auto config1 = ClusterConfig::CreateFromConfig("id0", R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 16383 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000, "health" : "faill" },
+      "replicas": []
+    }
+  ])json");
+  EXPECT_EQ(config1, nullptr);
+
+  auto config2 = ClusterConfig::CreateFromConfig("id0", R"json(
+  [
+    {
+      "slot_ranges": [ { "start": 0, "end": 16383 } ],
+      "master": { "id": "id0", "ip": "localhost", "port": 3000, "health" : 123 },
+      "replicas": []
+    }
+  ])json");
+  EXPECT_EQ(config2, nullptr);
+}
+
 }  // namespace dfly::cluster

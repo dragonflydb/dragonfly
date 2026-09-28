@@ -430,6 +430,9 @@ class RdbLoader : protected RdbLoaderBase {
   void FlushShardAsync(ShardId sid);
   void FlushAllShards();
 
+  // Flush buffered items to shards and block until processed, so stop_early_ becomes visible.
+  void FlushAndWaitShards();
+
   void LoadItemsBuffer(const ItemsBuf& ib);
 
   void CreateObjectOnShard(const DbContext& db_cntx, const Item* item, DbSlice* db_slice);
@@ -489,6 +492,9 @@ class RdbLoader : protected RdbLoaderBase {
   // We use atomics here because shard threads can notify RdbLoader fiber from another thread
   // that it should stop early.
   std::atomic_bool stop_early_{false};
+
+  // Set once the final shard drain has run, so FinishLoad does not repeat it.
+  bool shards_drained_ = false;
 
   // Callback when receiving RDB_OPCODE_FULLSYNC_END
   std::function<void()> full_sync_cut_cb;

@@ -131,8 +131,8 @@ sequenceDiagram
 
 On the master, the flow handler validates `master_id`, resolves `flow_id` and the session,
 migrates the connection to the shard's own thread, and lazily initializes that shard's journal
-ring buffer if not already active (buffer capacity is `--shard_repl_backlog_len`, default 8192
-entries).
+ring buffer if not already active (retention is bounded by age and size, see
+[Partial sync buffer & its limits](#partial-sync-buffer--its-limits)).
 
 It then decides full vs. partial sync (only while the session state is still `PREPARATION`):
 
@@ -358,8 +358,14 @@ on the journal streamer's own backpressure timeout instead.
 
 ## Partial sync buffer & its limits
 
-The partial-sync "recent history" is a per-shard ring buffer sized by `--shard_repl_backlog_len`
-(default 8192 entries - a count of entries, not bytes). It is populated by every journal write
+The partial-sync "recent history" is a per-shard ring buffer bounded by age and size. Entries
+older than `--shard_repl_backlog_time_ms` (default 5000) are evicted on later journal writes, and
+the buffer is capped at `--shard_repl_backlog_max_bytes` (default 0, meaning maxmemory / shard
+count / 200); a single record larger than the cap is still kept until the next write replaces
+it. It starts at 8192 entries and grows while it stays under the byte limit. The
+deprecated `--shard_repl_backlog_len` still works: a nonzero value switches to a fixed entry
+count with no time or byte eviction, unless either of the two newer flags is also set. It is
+populated by every journal write
 regardless of whether any replica is currently connected (journaling for a shard starts once a
 replica first attaches and, notably, also when *this* node was demoted from master to
 replica-of-someone-else and later resumes acting as a source, see below). A replica reconnecting

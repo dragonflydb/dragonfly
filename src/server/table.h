@@ -168,6 +168,9 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   explicit DbTable(PMR_NS::memory_resource* mr, DbIndex index);
   ~DbTable();
 
+  // Marks prime/mcflag arena-destruct before the shard's mi_heap_destroy() runs.
+  void PrepareForSingleShotHeapDestroy();
+
   void Clear();
   PrimeIterator Launder(PrimeIterator it, std::string_view key);
 

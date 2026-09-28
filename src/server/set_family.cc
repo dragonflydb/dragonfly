@@ -30,7 +30,7 @@ extern "C" {
 #include "server/journal/journal.h"
 #include "server/transaction.h"
 
-ABSL_FLAG(bool, use_oah_set, false, "If true, store SET values in OAHSet instead of StringSet.");
+ABSL_FLAG(bool, use_oah_set, true, "If true, store SET values in OAHSet instead of StringSet.");
 
 namespace rng = std::ranges;
 
@@ -266,25 +266,6 @@ bool IsInSet(const DbContext& db_context, const SetType& st, string_view member)
     return intsetFind((intset*)st.first, llval);
   } else {
     return StringSetWrapper(st, db_context).Contains(member);
-  }
-}
-
-// returns -3 if member is not found, -1 if no ttl is associated with this member.
-int32_t GetExpiry(const DbContext& db_context, const SetType& st, string_view member) {
-  if (st.second == kEncodingIntSet) {
-    long long llval;
-    if (!string2ll(member.data(), member.size(), &llval))
-      return -3;
-
-    return -1;
-  } else {
-    StringSetWrapper ss{st, db_context};
-    return VisitSet(ss.obj(), [member](auto* s) -> int32_t {
-      auto it = s->Find(member);
-      if (it == s->end())
-        return -3;
-      return it.HasExpiry() ? it.ExpiryTime() : -1;
-    });
   }
 }
 
@@ -719,7 +700,7 @@ OpStatus Mover::OpFind(Transaction* t, EngineShard* es) {
       const PrimeValue& pv = res.value()->second;
       SetType st{pv.RObjPtr(), pv.Encoding()};
       found_[0] = IsInSet(t->GetDbContext(), st, member_);
-      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), k, pv);
+      DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), k, pv);
     } else {
       found_[index] = res.status();
     }
@@ -791,7 +772,8 @@ OpResult<StringVec> OpUnion(const OpArgs& op_args, ShardArgs::Iterator start,
         uniques.emplace(ce.ToString());
         return true;
       });
-      SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv);
+      // IterateSet may yield and pv may have moved; re-fetch via the laundering iterator.
+      DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, *start, find_res.value()->second);
       continue;
     }
 
@@ -826,7 +808,8 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
 
   // Lazy per-member TTL expiry during iteration may have emptied the set.
   // Delete the stale key and return KEY_NOTFOUND per Redis empty-key semantics.
-  if (SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, pv)) {
+  // IterateSet may yield and pv may have moved; re-fetch via the laundering iterator.
+  if (DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, *start, find_res.value()->second)) {
     return OpStatus::KEY_NOTFOUND;
   }
 
@@ -853,7 +836,7 @@ OpResult<StringVec> OpDiff(const OpArgs& op_args, ShardArgs::Iterator start,
       }
     } else {
       DiffStrSet(op_args.db_cntx, st2, &uniques);
-      SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, *start, diff_pv);
+      DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, *start, diff_pv);
     }
   }
 
@@ -885,7 +868,8 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
                                   result.push_back(ce.ToString());
                                   return true;
                                 });
-    SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), *it, pv);
+    // IterateSet may yield and pv may have moved; re-fetch via the laundering iterator.
+    DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), *it, find_res.value()->second);
     return result;
   }
 
@@ -947,8 +931,7 @@ OpResult<StringVec> OpInter(const Transaction* t, EngineShard* es, bool remove_f
   for (; cleanup_it != args.end(); ++cleanup_it) {
     auto find_res = db_slice.FindReadOnly(t->GetDbContext(), *cleanup_it, OBJ_SET);
     if (find_res)
-      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), *cleanup_it,
-                                  find_res.value()->second);
+      DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), *cleanup_it, find_res.value()->second);
   }
 
   return result;
@@ -983,9 +966,7 @@ OpStatus OpRandMember(const OpArgs& op_args, std::string_view key, int count,
 
   RandMemberSet(op_args.db_cntx, pv, *generator, picks_count, dest);
 
-  // pv may be invalidated by DeleteSetIfEmpty (FindMutable + DelMutable), so
-  // we must not reference it afterwards.
-  SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, pv);
+  DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, key, pv);
   return OpStatus::OK;
 }
 
@@ -1103,7 +1084,7 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, string_view key, uint64_t* cur
     *cursor = 0;
   } else {
     *cursor = StringSetWrapper{it->second, op_args.db_cntx}.Scan(*cursor, scan_op, &res);
-    if (SetFamily::DeleteSetIfEmpty(db_slice, op_args.db_cntx, key, it->second))
+    if (DeleteCollectionIfEmpty(db_slice, op_args.db_cntx, key, it->second))
       *cursor = 0;
   }
 
@@ -1177,7 +1158,7 @@ void CmdSIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
       const PrimeValue& pv = find_res.value()->second;
       SetType st{pv.RObjPtr(), pv.Encoding()};
       auto result = IsInSet(t->GetDbContext(), st, val) ? OpStatus::OK : OpStatus::KEY_NOTFOUND;
-      SetFamily::DeleteSetIfEmpty(db_slice, t->GetDbContext(), key, pv);
+      DeleteCollectionIfEmpty(db_slice, t->GetDbContext(), key, pv);
       return result;
     }
 
@@ -1204,7 +1185,7 @@ void CmdSMIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
       SetType st{pv.RObjPtr(), pv.Encoding()};
       for (size_t i = 0; i < members.size(); ++i)
         memberships[i] = IsInSet(db_cntx, st, members[i]);
-      SetFamily::DeleteSetIfEmpty(db_slice, db_cntx, key, pv);
+      DeleteCollectionIfEmpty(db_slice, db_cntx, key, pv);
       return OpStatus::OK;
     }
     return find_res.status();
@@ -1643,24 +1624,6 @@ void CmdSAddEx(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 }  // namespace
 
-bool SetFamily::DeleteSetIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, string_view key,
-                                 const PrimeValue& pv) {
-  if (!IsDenseEncoding(pv))
-    return false;
-
-  if (!VisitSet(pv.RObjPtr(), [](auto* s) { return s->Empty(); }))
-    return false;
-
-  if (auto res = db_slice.FindMutable(db_cntx, key, OBJ_SET); res) {
-    db_slice.DelMutable(db_cntx, std::move(*res));
-    if (db_slice.shard_owner()->journal()) {
-      RecordDelete(db_cntx.db_index, key);
-    }
-    return true;
-  }
-  return false;
-}
-
 auto SetFamily::LoadIntSetBlob(std::string_view blob, bool deep, PrimeValue* pv) -> LoadBlobResult {
   if (!intsetValidateIntegrity((const uint8_t*)blob.data(), blob.size(), deep ? 1 : 0)) {
     LOG(ERROR) << "Intset integrity check failed.";
@@ -1752,11 +1715,15 @@ void SetFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::SET);
   *registry << CI{"SADD", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(SAdd)
             << CI{"SDIFF", CO::READONLY, -2, 1, -1}.HFUNC(SDiff)
-            << CI{"SDIFFSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
-                   SDiffStore)
+            << CI{"SDIFFSTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
+                  -1}
+                   .HFUNC(SDiffStore)
             << CI{"SINTER", CO::READONLY, -2, 1, -1}.HFUNC(SInter)
-            << CI{"SINTERSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
-                   SInterStore)
+            << CI{"SINTERSTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
+                  -1}
+                   .HFUNC(SInterStore)
             << CI{"SINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(SInterCard)
             << CI{"SMEMBERS", CO::READONLY, 2, 1, 1}.HFUNC(SMembers)
             << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(SIsMember)
@@ -1767,22 +1734,16 @@ void SetFamily::Register(CommandRegistry* registry) {
             << CI{"SPOP", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(SPop)
             << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(SRandMember)
             << CI{"SUNION", CO::READONLY, -2, 1, -1}.HFUNC(SUnion)
-            << CI{"SUNIONSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL, -3, 1, -1}.HFUNC(
-                   SUnionStore)
+            << CI{"SUNIONSTORE",
+                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
+                  -1}
+                   .HFUNC(SUnionStore)
             << CI{"SSCAN", CO::READONLY, -3, 1, 1}.HFUNC(SScan)
             << CI{"SADDEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(SAddEx);
 }
 
 uint32_t SetFamily::MaxIntsetEntries() {
   return kMaxIntSetEntries;
-}
-
-int32_t SetFamily::FieldExpireTime(const DbContext& db_context, const PrimeValue& pv,
-                                   std::string_view field) {
-  DCHECK_EQ(OBJ_SET, pv.ObjType());
-
-  SetType st{pv.RObjPtr(), pv.Encoding()};
-  return GetExpiry(db_context, st, field);
 }
 
 vector<long> SetFamily::SetFieldsExpireTime(const OpArgs& op_args, uint32_t ttl_sec,

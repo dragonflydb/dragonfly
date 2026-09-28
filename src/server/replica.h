@@ -11,7 +11,6 @@
 #include <variant>
 
 #include "facade/facade_types.h"
-#include "facade/redis_parser.h"
 #include "io/io_buf.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/execution_state.h"

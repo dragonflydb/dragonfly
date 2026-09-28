@@ -17,6 +17,10 @@ using facade::kInvalidIntErr;
 using facade::kSyntaxErr;
 using facade::kWrongTypeErr;
 
+inline std::string MigrationBlockedErr(std::string_view cmd) {
+  return std::string(cmd) + " not allowed while holding a Lua interpreter";
+}
+
 #ifndef RETURN_ON_ERR
 
 #define RETURN_ON_ERR_T(T, x)                                          \

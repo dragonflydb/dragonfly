@@ -33,7 +33,6 @@ extern "C" {
 #include "server/tiered_storage.h"
 #include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
-#include "util/fibers/stacktrace.h"
 
 ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
           "The maximum number of key-value pairs that will be deleted in each eviction "
@@ -434,7 +433,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 144, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 128, "You should update this function with new fields");
 
   ADD(evicted_keys);
   ADD(hard_evictions);
@@ -451,8 +450,6 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(ram_hits);
   ADD(ram_cool_hits);
   ADD(ram_misses);
-  ADD(huff_encode_total);
-  ADD(huff_encode_success);
   ADD(journal_omit);
   return *this;
 }
@@ -491,7 +488,29 @@ DbSlice::~DbSlice() {
     db.reset();
   }
 
+  ShutdownThreadLocal();
+}
+
+void DbSlice::ShutdownThreadLocal() {
   AsyncDeleter::Shutdown();
+}
+
+void DbSlice::PrepareForSingleShotHeapDestroy() {
+  client_tracking_map_.clear();
+  pending_send_map_.clear();
+  doc_del_cb_ = {};
+
+  // These use the default allocator, not the arena, and therefore destructed normally.
+  DCHECK(uniq_fps_.empty());
+  DCHECK(fetched_items_.empty());
+  DCHECK(change_cb_.empty());
+
+  for (auto& db : db_arr_) {
+    if (!db)
+      continue;
+    DCHECK_EQ(db->use_count(), 1u);
+    db->PrepareForSingleShotHeapDestroy();
+  }
 }
 
 auto DbSlice::GetStats() const -> Stats {
@@ -511,8 +530,6 @@ auto DbSlice::GetStats() const -> Stats {
   }
   auto co_stats = CompactObj::GetStatsThreadLocal();
   s.small_string_bytes = co_stats.small_string_bytes;
-  s.events.huff_encode_total = co_stats.huff_encode_total;
-  s.events.huff_encode_success = co_stats.huff_encode_success;
 
   return s;
 }
@@ -679,8 +696,15 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     return OpStatus::WRONG_TYPE;
   }
 
-  if (it->first.HasExpire()) {  // check expiry state
-    it = ExpireIfNeeded(cntx, it);
+  if (it->first.HasExpire()) {
+    // If expire is not allowed hide expired keys from read lookups during pause, but retain them
+    // for mutable lookups.
+    if (stats_mode == UpdateStatsMode::kReadStats && !expire_allowed_ &&
+        it->first.IsExpired(cntx.time_now_ms)) {
+      it = PrimeIterator{};
+    } else {
+      it = ExpireIfNeeded(cntx, it);
+    }
     if (!IsValid(it)) {
       events_.misses += miss_weight;
       db.stats.events.misses += miss_weight;
@@ -1240,6 +1264,16 @@ DbSlice::ExpireParams::ExpireParams(TimeUnit unit, int64_t svalue, uint64_t now_
   ms_timestamp = ms_value + now_ms;
 }
 
+bool DbSlice::ExpireParams::IsValid(uint64_t now_ms, int64_t max_ttl_ms) const {
+  auto [ttl_ms, expire_at_ms] = Calculate(now_ms, false);
+  return expire_at_ms >= 0 && ttl_ms <= max_ttl_ms;
+}
+
+bool DbSlice::ExpireParams::IsExpired(uint64_t now_ms) const {
+  return !persist && ms_timestamp >= 0 && ms_timestamp < kOverflow &&
+         static_cast<uint64_t>(ms_timestamp) <= now_ms;
+}
+
 pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool cap) const {
   if (persist)
     return {0, 0};
@@ -1253,6 +1287,19 @@ pair<int64_t, int64_t> DbSlice::ExpireParams::Calculate(uint64_t now_ms, bool ca
   }
 
   return {rel_ms, ms_timestamp};
+}
+
+uint64_t DbSlice::ExpireParams::DeadlineSec() const {
+  DCHECK(!persist);
+  DCHECK_GE(ms_timestamp, 0);
+  DCHECK_LT(ms_timestamp, kOverflow);
+  return ms_timestamp / 1000 + (ms_timestamp % 1000 != 0);
+}
+
+uint64_t DbSlice::ExpireParams::TtlSec(uint64_t now_ms) const {
+  if (IsExpired(now_ms))
+    return 0;
+  return DeadlineSec() - now_ms / 1000;
 }
 
 void DbSlice::ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv) {
@@ -1271,11 +1318,11 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return kPersistValue;
   }
 
-  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms, false);
-  if (abs_msec < 0 || rel_msec > kMaxExpireDeadlineMs) {
+  if (!params.IsValid(cntx.time_now_ms)) {
     return OpStatus::OUT_OF_RANGE;
   }
 
+  const int64_t abs_msec = params.ms_timestamp;
   int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
   const bool has_expire = prime_it->first.HasExpire();
   if (has_expire)
@@ -1295,9 +1342,8 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return OpStatus::SKIPPED;
   }
 
-  // If we update and the new value is already expired, delete the key
-  // Already-expired new value: delete; the caller emits the expired event after journaling.
-  if (rel_msec <= 0) {
+  // Delete an already expired key; the caller emits the event after journaling.
+  if (params.IsExpired(cntx.time_now_ms)) {
     Del(cntx, prime_it);
     ++events_.expired_keys;
     db_arr_[cntx.db_index]->stats.events.expired_keys++;
@@ -1472,13 +1518,20 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
     return it;
   }
 
-  int64_t expire_time = it->first.GetExpireTime();
+  if (!it->first.IsExpired(cntx.time_now_ms) || !Expire(cntx, it, events)) {
+    return it;
+  }
+
+  return PrimeIterator{};
+}
+
+bool DbSlice::Expire(const Context& cntx, PrimeIterator it, vector<string>* events) const {
+  DCHECK(it->first.IsExpired(cntx.time_now_ms));
 
   // Never do expiration if expiration is disabled, or on replicas unless replica_delete_expired
   // is enabled (which allows replicas to proactively delete expired keys on the read path).
-  if (int64_t(cntx.time_now_ms) < expire_time || !expire_allowed_ ||
-      (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
-    return it;
+  if (!expire_allowed_ || (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))) {
+    return false;
   }
 
   string scratch;
@@ -1506,7 +1559,7 @@ PrimeIterator DbSlice::ExpireIfNeeded(const Context& cntx, PrimeIterator it,
   ++events_.expired_keys;
   db->stats.events.expired_keys++;
 
-  return PrimeIterator{};
+  return true;
 }
 
 void DbSlice::ExpireAllIfNeeded() {

@@ -20,6 +20,7 @@
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(uint32_t, num_shards);
+ABSL_DECLARE_FLAG(uint32_t, interpreter_per_thread);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 ABSL_DECLARE_FLAG(bool, lua_auto_async);
 ABSL_DECLARE_FLAG(bool, lua_allow_undeclared_auto_correct);
@@ -58,6 +59,15 @@ class MultiTest : public BaseFamilyTest {
   MultiTest() : BaseFamilyTest() {
     num_threads_ = kPoolThreadCount;
   }
+};
+
+class ScriptJournalTest : public MultiTest, public testing::WithParamInterface<string_view> {
+ protected:
+  ScriptJournalTest() {
+    absl::SetFlag(&FLAGS_interpreter_per_thread, 1);
+  }
+
+  absl::FlagSaver saver_;
 };
 
 class SingleShardMultiTest : public BaseFamilyTest {
@@ -178,7 +188,7 @@ TEST_F(MultiTxTest, MultiUnlock) {
   auto* ns = &namespaces->GetDefaultNamespace();
   string_view keys[4] = {kKey1, kKey2, kKey3, kKey4};
 
-  pp_->at(0)->Await([&] { tx->StartMultiLockedAhead(ns, 0, keys); });
+  pp_->at(0)->Await([&] { tx->StartMultiLockedAhead(ns, 0, CmdArgList{keys}, std::size(keys)); });
 
   for (auto key : keys)
     EXPECT_TRUE(IsLocked(0, key));
@@ -1030,6 +1040,37 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_global_cnt);
 }
 
+TEST_P(ScriptJournalTest, ReleasesResourcesBeforeJournaling) {
+  pp_->at(0)->Await([&] {
+    string sha = Run({"script", "load", "return 1"}).GetString();
+
+    // Release the shard locks on success or timeout so a regression still permits cleanup.
+    bool evaluated = false;
+    auto suspension = ExpectConditionWithSuspension([&] { return evaluated; });
+    Fiber command_fb([&] {
+      if (GetParam() == "LOAD") {
+        // Keep LOAD uncached so it must borrow an interpreter and compile.
+        EXPECT_THAT(Run("pending", {"script", "load", "return 3"}), ArgType(RespExpr::STRING));
+      } else {
+        EXPECT_EQ(Run("pending", {"script", "flags", sha, "legacy-float"}), "OK");
+      }
+    });
+    ExpectConditionWithinTimeout([&] {
+      auto* tx = GetTransaction("pending");
+      return tx != nullptr && tx->IsScheduled();
+    });
+
+    // A new script needs an interpreter and the registry, but this EVAL needs no shard locks.
+    EXPECT_THAT(Run({"eval", "--!df flags=disable-atomicity\nreturn 2", "0"}), IntArg(2));
+    evaluated = true;
+    command_fb.Join();
+    suspension.Join();
+  });
+}
+
+INSTANTIATE_TEST_SUITE_P(ScriptCommands, ScriptJournalTest, testing::Values("LOAD"sv, "FLAGS"sv),
+                         [](const auto& info) { return string{info.param}; });
+
 TEST_F(MultiTest, ScriptFlagsCommand) {
   if (auto flags = absl::GetFlag(FLAGS_default_lua_flags); flags != "") {
     GTEST_SKIP() << "Skipped ScriptFlagsCommand test because default_lua_flags is set";
@@ -1056,9 +1097,8 @@ TEST_F(MultiTest, ScriptFlagsCommand) {
 
   // Check SCRIPT FLAGS can be applied by sha before loading.
   {
-    char sha_buf[41];
-    Interpreter::FuncSha1(kUndeclared2, sha_buf);
-    string_view sha{sha_buf, 40};
+    auto sha_buf = Interpreter::FuncSha1(kUndeclared2);
+    string_view sha{sha_buf.data(), sha_buf.size()};
 
     EXPECT_THAT(Run({"script", "flags", sha, "allow-undeclared-keys"}), "OK");
 
@@ -1130,9 +1170,8 @@ TEST_F(MultiTest, LegacyFloatFlag) {
   EXPECT_THAT(Run({"eval", "return 42.9", "0"}), DoubleArg(42.9));
 
   const char* script = "return 42.9";
-  char sha_buf[41];
-  Interpreter::FuncSha1(script, sha_buf);
-  string_view sha{sha_buf, 40};
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
 
   EXPECT_EQ(Run({"script", "flags", string(sha), "legacy-float"}), "OK");
 

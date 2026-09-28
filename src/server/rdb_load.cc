@@ -67,7 +67,6 @@ extern "C" {
 
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 ABSL_DECLARE_FLAG(int32_t, list_compress_depth);
-ABSL_DECLARE_FLAG(uint32_t, list_compress_dict_threshold);
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
 ABSL_FLAG(bool, deserialize_hnsw_index, false, "Deserialize HNSW vector index graph structure");
 ABSL_FLAG(bool, rdb_load_dry_run, false, "Dry run RDB load without applying changes");
@@ -719,9 +718,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
   } else {
     qlv2 = CompactObj::AllocateMR<QList>(GetFlag(FLAGS_list_max_listpack_size),
                                          GetFlag(FLAGS_list_compress_depth));
-    if (uint32_t zstd_thresh = GetFlag(FLAGS_list_compress_dict_threshold); zstd_thresh > 0) {
-      qlv2->set_compr_threshold(zstd_thresh);
-    }
+    qlv2->set_compr_policy(QList::PolicyFromFlags());
   }
 
   auto cleanup = absl::Cleanup([&] {
@@ -794,7 +791,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateList(const LoadTrace* ltrace) {
 
   // Learn a thread-local ZSTD dictionary from the loaded data and compress interior
   // nodes if the list is large and compressible. Controlled by
-  // --list_compress_dict_threshold; a no-op when the flag is 0. Runs per
+  // --list_compress_policy; a no-op when compression is disabled. Runs per
   // chunk for chunked lists, so newly appended interior nodes get compressed too.
   qlv2->CompressAfterLoad();
 
@@ -2753,8 +2750,13 @@ error_code RdbLoader::Load(io::Source* src) {
 
   DVLOG(1) << "RdbLoad loop finished";
 
+  // Drain and wait so a corruption that sets stop_early_ surfaces here, not in the deferred flush.
+  FlushAndWaitShards();
+
   if (stop_early_) {
-    return *ec_;
+    std::error_code ec = *ec_;
+    // stop()/Cancel() raises stop_early_ without an error; don't report an aborted load as success.
+    return ec ? ec : std::make_error_code(std::errc::operation_canceled);
   }
 
   /* Verify the checksum if RDB version is >= 5 */
@@ -2790,7 +2792,7 @@ void RdbLoader::DiscardChunkedValuesOnFinish() {
   bc->Wait();
 }
 
-void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
+void RdbLoader::FlushAndWaitShards() {
   BlockingCounter bc(shard_set->size());
   for (unsigned i = 0; i < shard_set->size(); ++i) {
     // Flush the remaining items.
@@ -2800,6 +2802,12 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
     shard_set->Add(i, [bc]() mutable { bc->Dec(); });
   }
   bc->Wait();  // wait for sentinels to report.
+  shards_drained_ = true;
+}
+
+void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
+  if (!shards_drained_)  // early-return paths skip the in-Load drain
+    FlushAndWaitShards();
   // Decrement local one if it exists
   if (EngineShard* es = EngineShard::tlocal(); es) {
     GetCurrentDbSlice().DecrLoadInProgress();

@@ -4,28 +4,26 @@
 
 #include <absl/strings/escaping.h>
 
-#include <cstdint>
 #include <fstream>
 #include <iostream>
 
 #include "base/flags.h"
 #include "base/init.h"
-#include "facade/redis_parser.h"
-#include "io/io.h"
+#include "facade/resp_parser.h"
 
 using namespace facade;
 using namespace std;
 
 ABSL_FLAG(string, input, "", "If not empty - reads data from the file instead of stdin. ");
 
-// Validates RESP3 server responses by using RespParser.
+// Validates RESP3 server responses by using RESPParser.
 // Server traffic can be recorded using:
 // tcpflow  -i any port 6379 -o /tmp/tcp_flow
 int main(int argc, char* argv[]) {
   MainInitGuard guard(&argc, &argv);
 
-  RedisParser parser(RedisParser::Mode::CLIENT);
-  RedisParser::Result parse_result = RedisParser::OK;
+  RESPParser parser;
+  bool input_pending = false;
   char buf[1024];
   istream* input_stream = &cin;
   if (!absl::GetFlag(FLAGS_input).empty()) {
@@ -35,45 +33,39 @@ int main(int argc, char* argv[]) {
       return -1;
     }
   }
-  size_t len = 0, offset = 0;
+  size_t offset = 0;
   do {
-    input_stream->read(buf + len, sizeof(buf) - len);
+    input_stream->read(buf, sizeof(buf));
     size_t read = input_stream->gcount();
     if (read == 0) {
-      if (parse_result != RedisParser::OK) {
-        cerr << "unexpected: " << parse_result << "\n";
-      }
       break;
     }
     DVLOG(1) << "Read " << read << " bytes from input stream, offset: " << offset;
-    len += read;
 
-    RespExpr::Vec args;
-    uint32_t consumed = 0;
-    char* next = buf;
-    while (len) {
-      string_view sv{next, len};
-      parse_result = parser.Parse(io::Buffer(sv), &consumed, &args);
-      if (parse_result != RedisParser::OK && parse_result != RedisParser::INPUT_PENDING) {
-        cerr << "Parse error: " << int(parse_result) << " at offset " << offset
-             << " when parsing: " << absl::CHexEscape({reinterpret_cast<const char*>(next), len})
-             << "\n";
+    size_t consumed = 0;
+    auto reply = parser.Feed(buf, read, &consumed);
+    while (true) {
+      if (!reply) {
+        cerr << "Parse error at offset " << offset
+             << " when parsing: " << absl::CHexEscape({buf, read}) << "\n";
         return -1;
       }
+      offset += consumed;
 
-      if (consumed == 0) {  // not enough data to parse.
-        DVLOG(1) << "No data consumed, waiting for more input.";
-        memcpy(buf, next, len);  // move the remaining data to the start of the buffer.
+      input_pending = reply->Empty();
+      if (input_pending || !parser.HasBufferedInput()) {
         break;
       }
-      len -= consumed;
-      next += consumed;
-      offset += consumed;
+      reply = parser.Feed(nullptr, 0, &consumed);
     }
   } while (!input_stream->eof());
 
   if (input_stream != &cin) {
     delete input_stream;
+  }
+  if (input_pending) {
+    cerr << "Unexpected end of input at offset " << offset << "\n";
+    return -1;
   }
   cout << "LGTM\n";
   return 0;

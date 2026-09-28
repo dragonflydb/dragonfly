@@ -200,6 +200,7 @@ void ClusterFamily::ClusterHelp(SinkReplyBuilder* builder) {
 namespace {
 void ClusterShardsImpl(const ClusterShardInfos& config, SinkReplyBuilder* builder) {
   // For more details https://redis.io/commands/cluster-shards/
+  SinkReplyBuilder::ReplyAggregator agg(builder);
   constexpr unsigned int kEntrySize = 4;
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
@@ -259,6 +260,7 @@ void ClusterFamily::ClusterShards(SinkReplyBuilder* builder, ConnectionContext* 
 namespace {
 void ClusterSlotsImpl(ClusterShardInfos config, SinkReplyBuilder* builder) {
   // For more details https://redis.io/commands/cluster-slots/
+  SinkReplyBuilder::ReplyAggregator agg(builder);
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
 
   auto WriteNode = [&](const ClusterNodeInfo& node) {
@@ -1019,6 +1021,11 @@ void ClusterFamily::DflyMigrateFlow(CmdArgParser parser, CommandContext* cmd_cnt
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
+  // Refuse before the SendOk + sync_dispatch flip below; a declined Migrate would reply twice.
+  if (cmd_cntx->server_conn_cntx()->IsMigrationBlocked()) {
+    return cmd_cntx->SendError(MigrationBlockedErr("DFLYMIGRATE FLOW"));
+  }
+
   VLOG(1) << "Create flow " << source_id << " shard_id: " << shard_id;
 
   cmd_cntx->conn()->SetName(absl::StrCat("migration_flow_", source_id));
@@ -1249,12 +1256,12 @@ inline CommandId::Handler HandlerFunc(ClusterFamily* se, EngineFunc f) {
 
 void ClusterFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
-  *registry << CI{"CLUSTER", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
+  *registry << CI{"CLUSTER", CO::LOADING, -2, 0, 0, acl::kCluster}.HFUNC(Cluster)
             << CI{"DFLYCLUSTER",    CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0,
                   acl::kDflyCluster}
                    .HFUNC(DflyCluster)
-            << CI{"READONLY", CO::READONLY, 1, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
-            << CI{"READWRITE", CO::READONLY, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite)
+            << CI{"READONLY", CO::FAST, 1, 0, 0, acl::kReadOnly}.HFUNC(ReadOnly)
+            << CI{"READWRITE", CO::FAST, 1, 0, 0, acl::kReadWrite}.HFUNC(ReadWrite)
             << CI{"DFLYMIGRATE", CO::ADMIN | CO::HIDDEN, -1, 0, 0, acl::kDflyMigrate}.HFUNC(
                    DflyMigrate);
 }

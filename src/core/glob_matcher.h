@@ -13,7 +13,7 @@
 
 // For some regex, Reflex (and pcre2) have extremely slow compile times(70+ms).
 // This latency is significant for the hot path and therefore both are disabled
-// and we fall back to the plain old stringmatchlen. For more info, refer to #5547 on gh.
+// and we fall back to the plain MatchGlob below. For more info, refer to #5547 on gh.
 //#define REFLEX_PERFORMANCE
 
 #ifndef REFLEX_PERFORMANCE
@@ -38,8 +38,11 @@ class GlobMatcher {
   // Exposed for testing purposes.
   static std::string Glob2Regex(std::string_view glob);
 
+  // Stateless matcher behind Matches(): iterative, no allocation. Exposed for tests and benchmarks.
+  static bool MatchGlob(std::string_view pattern, std::string_view str, bool case_sensitive);
+
  private:
-  // TODO: we fix the problem of stringmatchlen being much
+  // TODO: we fix the problem of MatchGlob being much
   // faster when the result is immediately known to be false, for example: "a*" vs "bxxxxx".
   // The goal is to demonstrate on-par performance for the following case:
   // > debug populate 5000000 keys 32 RAND

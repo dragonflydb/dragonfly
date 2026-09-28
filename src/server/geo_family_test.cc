@@ -350,6 +350,12 @@ TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   EXPECT_THAT(resp,
               RespArray(ElementsAre("Madrid", DoubleArg(0), "Lisbon", DoubleArg(502.207695))));
 
+  // STORE need not be the penultimate argument: other options can follow it.
+  EXPECT_EQ(2, CheckedInt({"GEORADIUSBYMEMBER", "Europe", "Madrid", "700", "KM", "STORE",
+                           "store_key_count_after", "COUNT", "10"}));
+  resp = Run({"ZRANGE", "store_key_count_after", "0", "-1"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "Lisbon")));
+
   resp = Run(
       {"GEORADIUSBYMEMBER", "Europe", "Madrid", "900", "KM", "STORE", "store_key", "WITHCOORD"});
   EXPECT_THAT(resp, ErrArg("ERR STORE option in GEORADIUSBYMEMBER is not compatible with WITHDIST, "
@@ -455,6 +461,12 @@ TEST_F(GeoFamilyTest, GeoRadius) {
   resp = Run({"ZRANGE", "store_dist_key", "0", "-1", "WITHSCORES"});
   EXPECT_THAT(resp,
               RespArray(ElementsAre("Madrid", DoubleArg(0), "Lisbon", DoubleArg(502.207694))));
+
+  // STORE need not be the penultimate argument: other options can follow it.
+  EXPECT_EQ(2, CheckedInt({"GEORADIUS", "Europe", "3.7038", "40.4168", "700", "KM", "STORE",
+                           "store_key_count_after", "COUNT", "10"}));
+  resp = Run({"ZRANGE", "store_key_count_after", "0", "-1"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("Madrid", "Lisbon")));
 
   // Test with STORE and other options
   resp = Run({"GEORADIUS", "key:poq6moq\\r", "111.38360132204588", "-71.17374967857494",

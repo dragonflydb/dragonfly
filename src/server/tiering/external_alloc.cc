@@ -371,6 +371,7 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
   if (sz > kMediumObjMaxSize) {
     size_t align_sz = alignup(sz, 4_KB);
     extent_tree_.Add(offset, align_sz);
+    allocated_bytes_ -= align_sz;
     return;
   }
 
@@ -490,6 +491,7 @@ int64_t ExternalAllocator::LargeMalloc(size_t size) {
     return -int64_t(align_sz);
   }
 
+  allocated_bytes_ += align_sz;
   return op_range->first;
 }
 

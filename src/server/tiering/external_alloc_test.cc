@@ -147,11 +147,37 @@ TEST_F(ExternalAllocatorTest, EmptyFull) {
 }
 
 TEST_F(ExternalAllocatorTest, AllocLarge) {
-  ext_alloc_.AddStorage(0, kSegSize);
+  constexpr size_t kFirstSize = 1_MB + 1;
+  constexpr size_t kSecondSize = 2_MB + 1;
 
-  off_t offs = ext_alloc_.Malloc(2_MB - 1);
-  EXPECT_EQ(offs, 0);
-  ext_alloc_.Free(offs, 2_MB - 1);
+  EXPECT_EQ(ext_alloc_.Malloc(kFirstSize), -kSegSize);
+  EXPECT_EQ(ext_alloc_.allocated_bytes(), 0u);
+
+  ext_alloc_.AddStorage(0, 2 * kSegSize);
+  int64_t first = ext_alloc_.Malloc(kFirstSize);
+  ASSERT_EQ(first, 0);
+  EXPECT_EQ(ext_alloc_.allocated_bytes(), ExternalAllocator::GoodSize(kFirstSize));
+
+  int64_t second = ext_alloc_.Malloc(kSecondSize);
+  ASSERT_GE(second, 0);
+  size_t large_bytes =
+      ExternalAllocator::GoodSize(kFirstSize) + ExternalAllocator::GoodSize(kSecondSize);
+  EXPECT_EQ(ext_alloc_.allocated_bytes(), large_bytes);
+
+  int64_t small = ext_alloc_.Malloc(kMinBlockSize);
+  ASSERT_GE(small, 0);
+  EXPECT_EQ(ext_alloc_.allocated_bytes(), large_bytes + kMinBlockSize);
+
+  ext_alloc_.Free(first, kFirstSize);
+  EXPECT_EQ(ext_alloc_.allocated_bytes(), ExternalAllocator::GoodSize(kSecondSize) + kMinBlockSize);
+  int64_t reused = ext_alloc_.Malloc(kFirstSize);
+  ASSERT_EQ(reused, first);
+  EXPECT_EQ(ext_alloc_.allocated_bytes(), large_bytes + kMinBlockSize);
+
+  ext_alloc_.Free(second, kSecondSize);
+  ext_alloc_.Free(reused, kFirstSize);
+  ext_alloc_.Free(small, kMinBlockSize);
+  EXPECT_EQ(ext_alloc_.allocated_bytes(), 0u);
 }
 
 }  // namespace dfly::tiering

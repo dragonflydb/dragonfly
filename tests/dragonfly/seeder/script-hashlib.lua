@@ -35,7 +35,16 @@ function LH_funcs.stream(key, hash)
 end
 
 function LH_funcs.cf(key, hash)
-    return dragonfly.ihash(hash, false, 'CF.INFO', key)
+    local info = redis.call('CF.INFO', key)
+    local fields = {key}
+    for i = 1, #info, 2 do
+        -- Allocated vector capacity can differ after compaction and full sync.
+        if info[i] ~= 'Size' then
+            table.insert(fields, info[i])
+            table.insert(fields, tostring(info[i + 1]))
+        end
+    end
+    return dragonfly.ihash(hash, false, 'ECHO', cjson.encode(fields))
 end
 
 function LH_funcs.sbf(key, hash)
