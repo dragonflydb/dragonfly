@@ -376,6 +376,9 @@ unsigned SlotMigrationStreamer::SerializeBucketLocked(DbIndex db_index,
 void SlotMigrationStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,
                                                  const PrimeValue& pv, time_t expire,
                                                  uint32_t mc_flags) {
+  // Cluster mode supports only db 0. CmdSerializer hard-codes db index 0 into the journal entries
+  // it produces, so to remove this DCHECK we must first pass db_index through CmdSerializer.
+  DCHECK_EQ(db_index, 0u);
   migration_stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
 }
 
