@@ -1985,6 +1985,11 @@ void TxMemoryScope::Resume() {
   suspended_ = false;
 }
 
+void TxMemoryScope::Checkpoint(int64_t used_memory) {
+  delta_ += used_memory - mem_baseline_;
+  mem_baseline_ = used_memory;
+}
+
 AtomicMemoryScope::AtomicMemoryScope(int obj_type)
     : obj_type_(obj_type), mem_baseline_(TrackedMemory(nullptr)) {
   DCHECK_GE(obj_type_, 0);

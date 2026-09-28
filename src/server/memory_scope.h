@@ -32,9 +32,7 @@ class TxMemoryScope {
   }
 
  private:
-  void Checkpoint(int64_t used_memory) {
-    delta_ += used_memory - mem_baseline_;
-  }
+  void Checkpoint(int64_t used_memory);
 
   int obj_type_;
   // if present then use the table used memory for this slice during accounting
