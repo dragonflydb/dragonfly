@@ -6,7 +6,6 @@
 
 #include <gmock/gmock.h>
 
-#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/facade_stats.h"
@@ -17,8 +16,6 @@
 #include "server/server_state.h"
 #include "server/transaction.h"
 #include "util/fibers/pool.h"
-
-ABSL_DECLARE_FLAG(bool, disable_scope_based_mem_track);
 
 namespace dfly {
 
@@ -37,7 +34,6 @@ class BlockingControllerTest : public Test {
   void TearDown() override;
 
   static void SetUpTestSuite() {
-    absl::SetFlag(&FLAGS_disable_scope_based_mem_track, false);
     ServerState::Init(kNumThreads, kNumThreads, nullptr, nullptr);
     facade::tl_facade_stats = new facade::FacadeStats;
   }

@@ -12,60 +12,9 @@ namespace dfly {
 
 class DbSlice;
 
-// Scopes on shard form a chain through `MemoryScope::parent_`
-// thread local variables in transaction.cc:
-// 1. `tl_top_scope` points to the current scope, head of the chain
-// 2. `tl_tx_scope` points to the single scope which may be suspended.
-//
-// In below examples A is AtomicMemoryScope, T is TxMemoryScope, and "X <-- Y" means Y.parent_ == X
-//
-// Transaction with nested atomic scopes eg SET command triggers evictions:
-//   tl_tx_scope == T
-//   T <-- A1 <-- A2 == tl_top_scope
-//
-// On destruction scope adds its total delta to its parent's `child_delta_` and records only
-// `delta_ - child_delta_` for its own type. A2 is destroyed, then A1, then T.
-//
-// If T's fiber is suspended then T leaves the chain but remains in tl_tx_scope. Scopes of other
-// fibers eg heartbeat eviction start with no parent, and being atomic will finish before T resumes:
-//   tl_tx_scope == T (suspended)
-//   null <-- B == tl_top_scope
-//
-// later, T's fiber resumed: the chain must be empty. T rejoins it:
-//   tl_tx_scope == T == tl_top_scope
-
 bool MemoryScopeEnabled();
 
-class MemoryScope {
- public:
-  MemoryScope(const MemoryScope&) = delete;
-  MemoryScope& operator=(const MemoryScope&) = delete;
-
-  ~MemoryScope();
-
- private:
-  friend class TxMemoryScope;
-  friend class AtomicMemoryScope;
-
-  explicit MemoryScope(int obj_type, const DbSlice* db_slice = nullptr);
-
-  void Checkpoint(int64_t used_memory);
-
-  int obj_type_;
-  // used to check for table memory usage. if null then table memory is not subtracted in scope
-  // delta calculation. child scopes inherit it from their parent.
-  const DbSlice* db_slice_;
-  int64_t mem_baseline_ = 0;
-
-  // naive computed delta by comparing baseline to current memory use
-  int64_t delta_ = 0;
-  // sum of all deltas that child scopes report
-  int64_t child_delta_ = 0;
-
-  MemoryScope* parent_ = nullptr;
-};
-
-// Created in transactions, sets helio fiber hook, can be suspended
+// Owns the thread's single transaction scope and its fiber hook, including while suspended.
 class TxMemoryScope {
  public:
   TxMemoryScope(int obj_type, const DbSlice* db_slice);
@@ -77,26 +26,38 @@ class TxMemoryScope {
   void Suspend();
   void Resume();
 
+  void Deduct(int64_t delta) {
+    if (!suspended_)
+      delta_ -= delta;
+  }
+
  private:
-  MemoryScope core_;
+  void Checkpoint(int64_t used_memory) {
+    delta_ += used_memory - mem_baseline_;
+  }
+
+  int obj_type_;
+  // if present then use the table used memory for this slice during accounting
+  const DbSlice* db_slice_;
+  int64_t mem_baseline_ = 0;
+  int64_t delta_ = 0;
   util::fb2::FiberSwitchHook prev_hook_;
   bool suspended_ = false;
 };
 
-// must not suspend, created for example to wrap PerformDeletionAtomic operations. Usually as child
-// of a TxMemoryScope
+// non-yielding operation scope records delta for own type, adjusts transaction scope if present
 class AtomicMemoryScope {
  public:
-  explicit AtomicMemoryScope(int obj_type) : core_(obj_type) {
-  }
+  explicit AtomicMemoryScope(int obj_type);
+  ~AtomicMemoryScope();
 
-  MemoryScope* TEST_GetParent() const {
-    return core_.parent_;
-  }
+  AtomicMemoryScope(const AtomicMemoryScope&) = delete;
+  AtomicMemoryScope& operator=(const AtomicMemoryScope&) = delete;
 
  private:
   util::FiberAtomicGuard guard_;
-  MemoryScope core_;
+  int obj_type_;
+  int64_t mem_baseline_;
 };
 
 }  // namespace dfly

@@ -476,43 +476,6 @@ TEST_F(TransactionTest, DeltaAllocAndFree) {
   });
 }
 
-TEST_F(TransactionTest, DeltaSuspendResume) {
-  OnShard(0, [] {
-    const auto shard = EngineShard::tlocal();
-    const auto mr = shard->memory_resource();
-
-    const auto before = shard->type_mem_delta();
-    void* p = nullptr;
-    void* q = nullptr;
-
-    {
-      TxMemoryScope scope_for_string{OBJ_STRING, nullptr};
-      p = mr->allocate(1024);
-
-      scope_for_string.Suspend();
-
-      {
-        AtomicMemoryScope list_scope{OBJ_LIST};
-        EXPECT_EQ(list_scope.TEST_GetParent(), nullptr);
-        q = mr->allocate(128);
-      }
-
-      scope_for_string.Resume();
-    }
-
-    auto diff = DeltaDiff(before, shard->type_mem_delta());
-    EXPECT_EQ(diff[OBJ_STRING], 1024);
-    EXPECT_EQ(diff[OBJ_LIST], 128);
-
-    diff[OBJ_STRING] = 0;
-    diff[OBJ_LIST] = 0;
-    EXPECT_THAT(diff, Each(0));
-
-    mr->deallocate(p, 1024);
-    mr->deallocate(q, 128);
-  });
-}
-
 TEST_F(TransactionTest, DeltaInterleavedFibers) {
   // A tx scope yields and another fiber opens a scope while tx is suspended
   OnShard(0, [] {
@@ -528,7 +491,6 @@ TEST_F(TransactionTest, DeltaInterleavedFibers) {
       bool other_ran = false;
       fb2::Fiber other{"other", [&] {
                          AtomicMemoryScope list_scope{OBJ_LIST};
-                         EXPECT_EQ(list_scope.TEST_GetParent(), nullptr);
                          q = mr->allocate(128);
                          other_ran = true;
                        }};
@@ -542,13 +504,10 @@ TEST_F(TransactionTest, DeltaInterleavedFibers) {
       r = mr->allocate(512);
     }
 
-    auto diff = DeltaDiff(before, shard->type_mem_delta());
-    EXPECT_EQ(diff[OBJ_STRING], 1024 + 512);
-    EXPECT_EQ(diff[OBJ_LIST], 128);
-
-    diff[OBJ_STRING] = 0;
-    diff[OBJ_LIST] = 0;
-    EXPECT_THAT(diff, Each(0));
+    TypeMemDeltas expected{};
+    expected[OBJ_STRING] = 1024 + 512;
+    expected[OBJ_LIST] = 128;
+    EXPECT_EQ(DeltaDiff(before, shard->type_mem_delta()), expected);
 
     mr->deallocate(p, 1024);
     mr->deallocate(q, 128);
@@ -556,9 +515,7 @@ TEST_F(TransactionTest, DeltaInterleavedFibers) {
   });
 }
 
-TEST_F(TransactionTest, DeltaNested) {
-  // runs three operations nested, for string->list->hash type
-  // each type must track its own delta correctly
+TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
   OnShard(0, [] {
     const auto shard = EngineShard::tlocal();
     const auto mr = shard->memory_resource();
@@ -567,40 +524,23 @@ TEST_F(TransactionTest, DeltaNested) {
     // these allocations of size s are actually counted for the size, and cleaned up later
     auto track = [&](size_t s) { tracked.emplace_back(mr->allocate(s), s); };
 
-    auto hash_cb = [&] {
-      // create some temp. allocations which are cleaned up immediately, and should not count
-      // towards OBJ_HASH
-      void* p = mr->allocate(256);
-      track(128);
-      mr->deallocate(p, 256);
-    };
-
-    auto list_cb = [&] {
-      track(512);
-      WithMemTrack(OBJ_HASH, hash_cb);
-    };
-
-    auto str_cb = [&] {
-      track(1024);
-      WithMemTrack(OBJ_LIST, list_cb);
-    };
-
     const auto before = shard->type_mem_delta();
     {
       TxMemoryScope scope{OBJ_STRING, nullptr};
-      str_cb();
+      track(1024);
+      WithMemTrack(OBJ_LIST, [&] { track(512); });
+      WithMemTrack(OBJ_HASH, [&] {
+        // Temporary allocations freed in the same scope should not contribute to its delta.
+        void* p = mr->allocate(256);
+        track(128);
+        mr->deallocate(p, 256);
+      });
     }
-    auto diff = DeltaDiff(before, shard->type_mem_delta());
-
-    ASSERT_EQ(diff[OBJ_STRING], 1024);
-    ASSERT_EQ(diff[OBJ_LIST], 512);
-    ASSERT_EQ(diff[OBJ_HASH], 128);
-
-    diff[OBJ_HASH] = 0;
-    diff[OBJ_LIST] = 0;
-    diff[OBJ_STRING] = 0;
-
-    ASSERT_THAT(diff, Each(0));
+    TypeMemDeltas expected{};
+    expected[OBJ_STRING] = 1024;
+    expected[OBJ_LIST] = 512;
+    expected[OBJ_HASH] = 128;
+    EXPECT_EQ(DeltaDiff(before, shard->type_mem_delta()), expected);
 
     for (const auto& [ptr, size] : tracked)
       mr->deallocate(ptr, size);

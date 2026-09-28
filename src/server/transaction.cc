@@ -84,7 +84,6 @@ uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
-thread_local MemoryScope* tl_top_scope = nullptr;
 thread_local TxMemoryScope* tl_tx_scope = nullptr;
 
 void MemTrackerHook(fb2::FiberSwitchHookEvent event) noexcept {
@@ -1942,21 +1941,8 @@ int64_t TrackedMemory(const DbSlice* db_slice) {
 
   // Full search index memory accounting scans all indices, so skip it
   const int64_t used_memory = shard->UsedMemoryWithoutSearch();
-  // in certain cases such as async delete, we do not care about table memory because it will not
-  // change.
   const int64_t table_memory = db_slice ? db_slice->table_memory() : 0;
   return used_memory - table_memory;
-}
-
-// This wrapper is used to add validation when creating a MemoryScope object which is inside
-// TxMemoryScope. Even in release mode we must not initialize a tx scope if another is active, or
-// set fiber hooks which will reference it. If ever a tx mem. scope is created inside another, on
-// exit the child scope will wipe out tl_tx_scope, and then the parent on next suspend/resume will
-// dereference a null ptr.
-int ValidateState(int obj_type) {
-  CHECK_EQ(tl_tx_scope, nullptr);
-  CHECK_EQ(tl_top_scope, nullptr);
-  return obj_type;
 }
 
 }  // namespace
@@ -1966,68 +1952,49 @@ bool MemoryScopeEnabled() {
   return enabled;
 }
 
-MemoryScope::MemoryScope(int obj_type, const DbSlice* db_slice)
-    : obj_type_(obj_type),
-      // child measures memory the same way as its parent
-      db_slice_(tl_top_scope ? tl_top_scope->db_slice_ : db_slice),
-      mem_baseline_(TrackedMemory(db_slice_)),
-      parent_(tl_top_scope) {
-  DCHECK_GE(obj_type_, 0);
-  DCHECK(parent_ == nullptr || db_slice == nullptr)
-      << "child scope must inherit db slice from parent";
-  tl_top_scope = this;
-}
-
-MemoryScope::~MemoryScope() {
-  // hard check here, if the top scope is not "this", and "this" gets destroyed, then a child scope
-  // might hold address to this scope and dereference it later, a use after free bug.
-  CHECK_EQ(tl_top_scope, this) << "scope destroyed while not at the top of chain";
-
-  Checkpoint(TrackedMemory(db_slice_));
-
-  if (parent_)
-    parent_->child_delta_ += delta_;
-
-  tl_top_scope = parent_;
-  EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta_ - child_delta_);
-}
-
 TxMemoryScope::TxMemoryScope(int obj_type, const DbSlice* db_slice)
-    : core_(ValidateState(obj_type), db_slice),
-      prev_hook_(ThisFiber::SetSwitchHook({MemTrackerHook})) {
-  DCHECK_EQ(tl_tx_scope, nullptr) << "tx scope created while another tx scope exists";
-  DCHECK_EQ(core_.parent_, nullptr) << "tx scope must not be child";
+    : obj_type_(obj_type), db_slice_(db_slice) {
+  CHECK_EQ(tl_tx_scope, nullptr) << "tx scope created while another tx scope exists";
+  DCHECK_GE(obj_type_, 0);
+  mem_baseline_ = TrackedMemory(db_slice_);
   tl_tx_scope = this;
+  prev_hook_ = ThisFiber::SetSwitchHook({MemTrackerHook});
 }
 
 TxMemoryScope::~TxMemoryScope() {
+  CHECK_EQ(tl_tx_scope, this) << "tx scope destroyed without owning the tracking pointer";
   DCHECK(!suspended_);
-  DCHECK_EQ(tl_tx_scope, this);
-  tl_tx_scope = nullptr;
   ThisFiber::SetSwitchHook(prev_hook_);
+  tl_tx_scope = nullptr;
+
+  Checkpoint(TrackedMemory(db_slice_));
+  EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta_);
 }
 
 void TxMemoryScope::Suspend() {
-  DCHECK_EQ(tl_top_scope, &core_);
   DCHECK(!suspended_);
 
-  core_.Checkpoint(TrackedMemory(core_.db_slice_));
-  tl_top_scope = nullptr;
+  Checkpoint(TrackedMemory(db_slice_));
   suspended_ = true;
 }
 
 void TxMemoryScope::Resume() {
-  DCHECK_EQ(tl_top_scope, nullptr);
   DCHECK(suspended_);
 
-  core_.mem_baseline_ = TrackedMemory(core_.db_slice_);
-  tl_top_scope = &core_;
+  mem_baseline_ = TrackedMemory(db_slice_);
   suspended_ = false;
 }
 
-void MemoryScope::Checkpoint(int64_t used_memory) {
-  delta_ += used_memory - mem_baseline_;
-  mem_baseline_ = used_memory;
+AtomicMemoryScope::AtomicMemoryScope(int obj_type)
+    : obj_type_(obj_type), mem_baseline_(TrackedMemory(nullptr)) {
+  DCHECK_GE(obj_type_, 0);
+}
+
+AtomicMemoryScope::~AtomicMemoryScope() {
+  const int64_t delta = TrackedMemory(nullptr) - mem_baseline_;
+  EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta);
+  if (tl_tx_scope)
+    tl_tx_scope->Deduct(delta);
 }
 
 }  // namespace dfly
