@@ -15,12 +15,26 @@
 #include <absl/strings/str_split.h>
 
 #include "base/logging.h"
+#include "util/fibers/fibers.h"
+#include "util/fibers/proactor_base.h"
 
 ABSL_FLAG(
     std::string, tracy_scopes, "all",
     "Comma-separated Tracy scopes to emit: connection,dispatch,squasher,reply,memory,manual,all");
 ABSL_FLAG(std::string, tracy_manual_zones, "all",
           "Comma-separated manual Tracy zone IDs or names to emit, all, or empty to disable");
+ABSL_FLAG(std::string, tracy_sampled_scopes, "",
+          "Comma-separated Tracy scopes to emit only during sample windows");
+ABSL_FLAG(std::string, tracy_sampled_manual_zones, "",
+          "Comma-separated manual Tracy zone IDs or names to emit only during sample windows");
+ABSL_FLAG(uint32_t, tracy_sample_every_fiber_switches, 0,
+          "Open a Tracy sample window every N fiber switches per proactor; 0 disables sampling");
+ABSL_FLAG(uint32_t, tracy_sample_window_fiber_switches, 0,
+          "Number of fiber switches per Tracy sample window");
+ABSL_FLAG(std::string, tracy_proactors, "",
+          "Comma-separated proactor IDs whose connection-fiber Tracy zones are emitted");
+ABSL_FLAG(std::string, tracy_connections, "",
+          "Comma-separated connection IDs whose connection-fiber Tracy zones are emitted");
 #ifdef DFLY_TRACY_PLOTS
 ABSL_FLAG(std::string, tracy_queue_connections, "",
           "Comma-separated client IDs whose V2 queue plots are emitted; empty selects all");
@@ -37,9 +51,27 @@ namespace {
 #ifdef TRACY_ENABLE
 using ManualZoneMask = std::array<uint64_t, kTracyManualZoneMaskWords>;
 
-#ifdef DFLY_TRACY_PLOTS
-std::unordered_set<uint32_t> tracy_queue_connections;
-std::unordered_set<unsigned> tracy_queue_proactors;
+constexpr uint32_t kCompiledTracyScopes =
+#if DFLY_TRACY_BUILD_CONNECTION
+    static_cast<uint32_t>(TracyScope::kConnection) |
+#endif
+#if DFLY_TRACY_BUILD_DISPATCH
+    static_cast<uint32_t>(TracyScope::kDispatch) |
+#endif
+#if DFLY_TRACY_BUILD_SQUASHER
+    static_cast<uint32_t>(TracyScope::kSquasher) |
+#endif
+#if DFLY_TRACY_BUILD_REPLY
+    static_cast<uint32_t>(TracyScope::kReply) |
+#endif
+#if DFLY_TRACY_BUILD_MEMORY
+    static_cast<uint32_t>(TracyScope::kMemory) |
+#endif
+    0;
+
+std::unordered_set<uint32_t> tracy_connections;
+std::unordered_set<unsigned> tracy_proactors;
+bool tracy_connection_target_filter_enabled = false;
 
 template <typename T> bool ParseIdFilter(std::string_view value, std::unordered_set<T>* output) {
   output->clear();
@@ -54,6 +86,10 @@ template <typename T> bool ParseIdFilter(std::string_view value, std::unordered_
   }
   return true;
 }
+
+#ifdef DFLY_TRACY_PLOTS
+std::unordered_set<uint32_t> tracy_queue_connections;
+std::unordered_set<unsigned> tracy_queue_proactors;
 #endif
 
 bool ParseManualZones(std::string_view zone_list, ManualZoneMask* zones) {
@@ -90,41 +126,74 @@ bool ParseManualZones(std::string_view zone_list, ManualZoneMask* zones) {
   return true;
 }
 
-constexpr uint32_t kCompiledTracyScopes =
-#if DFLY_TRACY_BUILD_CONNECTION
-    static_cast<uint32_t>(TracyScope::kConnection) |
-#endif
-#if DFLY_TRACY_BUILD_DISPATCH
-    static_cast<uint32_t>(TracyScope::kDispatch) |
-#endif
-#if DFLY_TRACY_BUILD_SQUASHER
-    static_cast<uint32_t>(TracyScope::kSquasher) |
-#endif
-#if DFLY_TRACY_BUILD_REPLY
-    static_cast<uint32_t>(TracyScope::kReply) |
-#endif
-#if DFLY_TRACY_BUILD_MEMORY
-    static_cast<uint32_t>(TracyScope::kMemory) |
-#endif
-    0;
+uint32_t ParseScopes(std::string_view scope_list, std::string_view flag_name) {
+  uint32_t scopes = 0;
+  for (std::string_view scope : absl::StrSplit(scope_list, ',')) {
+    std::string normalized_scope = absl::AsciiStrToLower(absl::StripAsciiWhitespace(scope));
+    if (normalized_scope.empty())
+      continue;
+    if (normalized_scope == "all") {
+      scopes = kCompiledTracyScopes;
+      break;
+    }
+    if (normalized_scope == "connection")
+      scopes |= static_cast<uint32_t>(TracyScope::kConnection);
+    else if (normalized_scope == "dispatch")
+      scopes |= static_cast<uint32_t>(TracyScope::kDispatch);
+    else if (normalized_scope == "squasher")
+      scopes |= static_cast<uint32_t>(TracyScope::kSquasher);
+    else if (normalized_scope == "reply")
+      scopes |= static_cast<uint32_t>(TracyScope::kReply);
+    else if (normalized_scope == "memory")
+      scopes |= static_cast<uint32_t>(TracyScope::kMemory);
+    else if (normalized_scope == "manual")
+      scopes |= static_cast<uint32_t>(TracyScope::kManual);
+    else
+      LOG(FATAL) << "Unknown --" << flag_name << " entry: " << normalized_scope;
+  }
+
+  constexpr uint32_t kRuntimeOnlyScopes = static_cast<uint32_t>(TracyScope::kManual);
+  if (scopes & ~(kCompiledTracyScopes | kRuntimeOnlyScopes)) {
+    LOG(FATAL) << "--" << flag_name << " requests scopes excluded by DFLY_TRACY_SCOPES";
+  }
+  return scopes;
+}
+
+bool HasEnabledManualZone(const std::array<uint64_t, kTracyManualZoneMaskWords>& zones) {
+  for (uint64_t word : zones) {
+    if (word != 0)
+      return true;
+  }
+  return false;
+}
+
 #endif
 
 }  // namespace
 
-std::array<std::atomic_uint64_t, kTracyManualZoneMaskWords> tracy_enabled_manual_zones;
+std::array<uint64_t, kTracyManualZoneMaskWords> tracy_enabled_manual_zones;
+std::array<uint64_t, kTracyManualZoneMaskWords> tracy_sampled_manual_zones;
+uint32_t tracy_sampled_scopes = 0;
+bool tracy_has_sampled_manual_zones = false;
+uint32_t tracy_sample_every_fiber_switches = 0;
+uint32_t tracy_sample_window_fiber_switches = 0;
 
-std::atomic_uint32_t tracy_enabled_scopes{
+uint32_t tracy_enabled_scopes =
 #ifdef TRACY_ENABLE
-    kCompiledTracyScopes
+    kCompiledTracyScopes;
 #else
-    0
+    0;
 #endif
-};
 
 void InitTracyScopes() {
 #ifndef TRACY_ENABLE
   return;
 #else
+  if (!ParseIdFilter(absl::GetFlag(FLAGS_tracy_connections), &tracy_connections))
+    LOG(FATAL) << "Invalid --tracy_connections list";
+  if (!ParseIdFilter(absl::GetFlag(FLAGS_tracy_proactors), &tracy_proactors))
+    LOG(FATAL) << "Invalid --tracy_proactors list";
+  tracy_connection_target_filter_enabled = !tracy_connections.empty() || !tracy_proactors.empty();
 #ifdef DFLY_TRACY_PLOTS
   if (!ParseIdFilter(absl::GetFlag(FLAGS_tracy_queue_connections), &tracy_queue_connections))
     LOG(FATAL) << "Invalid --tracy_queue_connections list";
@@ -147,52 +216,26 @@ void InitTracyScopes() {
     requested_manual_zones.fill(0);
   }
   for (size_t word = 0; word < kTracyManualZoneMaskWords; ++word) {
-    tracy_enabled_manual_zones[word].store(
-        compiled_manual_zones[word] & requested_manual_zones[word], std::memory_order_relaxed);
+    tracy_enabled_manual_zones[word] = compiled_manual_zones[word] & requested_manual_zones[word];
+  }
+
+  ManualZoneMask requested_sampled_manual_zones;
+  const std::string sampled_manual_zone_list = absl::GetFlag(FLAGS_tracy_sampled_manual_zones);
+  if (!ParseManualZones(sampled_manual_zone_list, &requested_sampled_manual_zones)) {
+    LOG(FATAL) << "Invalid --tracy_sampled_manual_zones value '" << sampled_manual_zone_list << "'";
+  }
+  for (size_t word = 0; word < kTracyManualZoneMaskWords; ++word) {
+    tracy_sampled_manual_zones[word] =
+        compiled_manual_zones[word] & requested_sampled_manual_zones[word];
   }
 #else
-  for (std::atomic_uint64_t& word : tracy_enabled_manual_zones)
-    word.store(0, std::memory_order_relaxed);
+  tracy_enabled_manual_zones.fill(0);
+  tracy_sampled_manual_zones.fill(0);
 #endif
 
-  std::string scope_list = absl::GetFlag(FLAGS_tracy_scopes);
-  if (scope_list.empty()) {
-    tracy_enabled_scopes.store(0, std::memory_order_relaxed);
-    return;
-  }
-
-  uint32_t scopes = 0;
-  for (std::string_view scope : absl::StrSplit(scope_list, ',')) {
-    std::string normalized_scope = absl::AsciiStrToLower(scope);
-    if (normalized_scope == "all") {
-      scopes = kCompiledTracyScopes;
-      break;
-    }
-    if (normalized_scope == "connection")
-      scopes |= static_cast<uint32_t>(TracyScope::kConnection);
-    else if (normalized_scope == "dispatch")
-      scopes |= static_cast<uint32_t>(TracyScope::kDispatch);
-    else if (normalized_scope == "squasher")
-      scopes |= static_cast<uint32_t>(TracyScope::kSquasher);
-    else if (normalized_scope == "reply")
-      scopes |= static_cast<uint32_t>(TracyScope::kReply);
-    else if (normalized_scope == "memory")
-      scopes |= static_cast<uint32_t>(TracyScope::kMemory);
-    else if (normalized_scope == "manual")
-      scopes |= static_cast<uint32_t>(TracyScope::kManual);
-    else
-      LOG(FATAL) << "Unknown --tracy_scopes entry: " << normalized_scope;
-  }
-  constexpr uint32_t kRuntimeOnlyScopes = static_cast<uint32_t>(TracyScope::kManual);
-  if (scopes & ~(kCompiledTracyScopes | kRuntimeOnlyScopes)) {
-    LOG(FATAL) << "--tracy_scopes requests scopes excluded by DFLY_TRACY_SCOPES";
-  }
+  uint32_t scopes = ParseScopes(absl::GetFlag(FLAGS_tracy_scopes), "tracy_scopes");
   if ((scopes & static_cast<uint32_t>(TracyScope::kManual)) != 0) {
-    bool has_enabled_manual_zone = false;
-    for (const std::atomic_uint64_t& word : tracy_enabled_manual_zones) {
-      has_enabled_manual_zone |= word.load(std::memory_order_relaxed) != 0;
-    }
-    if (!has_enabled_manual_zone) {
+    if (!HasEnabledManualZone(tracy_enabled_manual_zones)) {
       if (empty_manual_zone_list) {
         LOG(WARNING) << "--tracy_manual_zones is empty; disabling manual Tracy scope";
       } else if (!invalid_manual_zone_list) {
@@ -202,7 +245,71 @@ void InitTracyScopes() {
       scopes &= ~static_cast<uint32_t>(TracyScope::kManual);
     }
   }
-  tracy_enabled_scopes.store(scopes, std::memory_order_relaxed);
+  tracy_enabled_scopes = scopes;
+
+  uint32_t sampled_scopes =
+      ParseScopes(absl::GetFlag(FLAGS_tracy_sampled_scopes), "tracy_sampled_scopes");
+  if ((sampled_scopes & static_cast<uint32_t>(TracyScope::kManual)) != 0 &&
+      !HasEnabledManualZone(tracy_sampled_manual_zones)) {
+    LOG(WARNING) << "--tracy_sampled_scopes=manual requested but no sampled manual Tracy zones "
+                    "are enabled; disabling sampled manual scope";
+    sampled_scopes &= ~static_cast<uint32_t>(TracyScope::kManual);
+  }
+  tracy_sampled_scopes = sampled_scopes;
+
+  const bool has_sampled_selection =
+      sampled_scopes != 0 || HasEnabledManualZone(tracy_sampled_manual_zones);
+  const uint32_t sample_every = absl::GetFlag(FLAGS_tracy_sample_every_fiber_switches);
+  const uint32_t sample_window = absl::GetFlag(FLAGS_tracy_sample_window_fiber_switches);
+  if (has_sampled_selection && (sample_every == 0 || sample_window == 0)) {
+    LOG(FATAL) << "Sampled Tracy scopes require positive --tracy_sample_every_fiber_switches "
+                  "and --tracy_sample_window_fiber_switches";
+  }
+  if (sample_window > sample_every && sample_every != 0) {
+    LOG(FATAL) << "--tracy_sample_window_fiber_switches must not exceed "
+                  "--tracy_sample_every_fiber_switches";
+  }
+  tracy_has_sampled_manual_zones = HasEnabledManualZone(tracy_sampled_manual_zones);
+  tracy_sample_every_fiber_switches = sample_every;
+  tracy_sample_window_fiber_switches = sample_window;
+#endif
+}
+
+bool IsTracySampleWindowActive() {
+#ifndef TRACY_ENABLE
+  return false;
+#else
+  const uint32_t sample_every = tracy_sample_every_fiber_switches;
+  if (sample_every == 0)
+    return false;
+  thread_local uint64_t cached_epoch = std::numeric_limits<uint64_t>::max();
+  thread_local bool sample_window_active;
+  const uint64_t epoch = util::fb2::FiberSwitchEpoch();
+  if (epoch != cached_epoch) {
+    cached_epoch = epoch;
+    sample_window_active = epoch % sample_every < tracy_sample_window_fiber_switches;
+  }
+  return sample_window_active;
+#endif
+}
+
+bool IsTracyProactorTargetEnabled() {
+#ifndef TRACY_ENABLE
+  return false;
+#else
+  if (!tracy_connection_target_filter_enabled)
+    return true;
+  auto* proactor = util::fb2::ProactorBase::me();
+  return proactor && tracy_proactors.contains(proactor->GetPoolIndex());
+#endif
+}
+
+bool IsTracyConnectionTargetEnabled(uint32_t connection_id, unsigned proactor_id) {
+#ifndef TRACY_ENABLE
+  return false;
+#else
+  return !tracy_connection_target_filter_enabled || tracy_connections.contains(connection_id) ||
+         tracy_proactors.contains(proactor_id);
 #endif
 }
 

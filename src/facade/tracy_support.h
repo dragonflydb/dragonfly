@@ -4,8 +4,8 @@
 #pragma once
 
 #include <array>
-#include <atomic>
 #include <cstdint>
+#include <limits>
 #include <string_view>
 
 #include "facade/tracy_manual_zones.h"
@@ -22,28 +22,56 @@ enum class TracyScope : uint32_t {
 };
 
 void InitTracyScopes();
+bool IsTracySampleWindowActive();
+bool IsTracyProactorTargetEnabled();
+bool IsTracyConnectionTargetEnabled(uint32_t connection_id, unsigned proactor_id);
 #ifdef DFLY_TRACY_PLOTS
 bool ShouldEmitTracyQueueTelemetry(uint32_t client_id, unsigned proactor_id);
 bool TracyBackpressurePlotsEnabled();
 #endif
-extern std::atomic_uint32_t tracy_enabled_scopes;
+extern uint32_t tracy_enabled_scopes;
+extern uint32_t tracy_sampled_scopes;
+extern bool tracy_has_sampled_manual_zones;
 inline constexpr size_t kTracyManualZoneMaskWords = (DFLY_TRACY_MANUAL_ZONE_COUNT / 64) + 1;
-extern std::array<std::atomic_uint64_t, kTracyManualZoneMaskWords> tracy_enabled_manual_zones;
+extern std::array<uint64_t, kTracyManualZoneMaskWords> tracy_enabled_manual_zones;
+extern std::array<uint64_t, kTracyManualZoneMaskWords> tracy_sampled_manual_zones;
 
-inline bool IsTracyZoneEnabled(TracyScope scope, TracyManualZone zone) {
-  const uint32_t enabled_scopes = tracy_enabled_scopes.load(std::memory_order_relaxed);
-  if ((enabled_scopes & static_cast<uint32_t>(scope)) != 0)
+inline bool IsTracyZoneSelected(TracyScope scope, TracyManualZone zone) {
+  const unsigned id = static_cast<unsigned>(zone);
+  const uint32_t scope_mask = static_cast<uint32_t>(scope);
+  if (tracy_sampled_scopes & scope_mask)
+    return IsTracySampleWindowActive();
+  if (tracy_sampled_manual_zones[id / 64] & (uint64_t{1} << (id % 64)))
+    return IsTracySampleWindowActive();
+
+  if (tracy_enabled_scopes & scope_mask)
     return true;
-  if ((enabled_scopes & static_cast<uint32_t>(TracyScope::kManual)) == 0)
+  if ((tracy_enabled_scopes & static_cast<uint32_t>(TracyScope::kManual)) == 0)
     return false;
 
-  const unsigned id = static_cast<unsigned>(zone);
-  return (tracy_enabled_manual_zones[id / 64].load(std::memory_order_relaxed) &
-          (uint64_t{1} << (id % 64))) != 0;
+  return (tracy_enabled_manual_zones[id / 64] & (uint64_t{1} << (id % 64))) != 0;
+}
+
+inline bool IsTracyZoneEnabled(TracyScope scope, TracyManualZone zone) {
+  return IsTracyProactorTargetEnabled() && IsTracyZoneSelected(scope, zone);
+}
+
+inline bool IsTracyConnectionZoneEnabled(uint32_t connection_id, unsigned proactor_id,
+                                         TracyScope scope, TracyManualZone zone) {
+  return IsTracyConnectionTargetEnabled(connection_id, proactor_id) &&
+         IsTracyZoneSelected(scope, zone);
 }
 
 inline bool IsTracyScopeEnabled(TracyScope scope) {
-  return tracy_enabled_scopes.load(std::memory_order_relaxed) & static_cast<uint32_t>(scope);
+  if (!IsTracyProactorTargetEnabled())
+    return false;
+  const uint32_t scope_mask = static_cast<uint32_t>(scope);
+  if (tracy_enabled_scopes & scope_mask)
+    return true;
+  if (tracy_sampled_scopes & scope_mask)
+    return IsTracySampleWindowActive();
+  return scope == TracyScope::kManual && tracy_has_sampled_manual_zones &&
+         IsTracySampleWindowActive();
 }
 
 }  // namespace facade

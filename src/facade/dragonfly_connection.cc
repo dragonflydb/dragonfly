@@ -183,6 +183,101 @@ using nonstd::make_unexpected;
 
 namespace facade {
 
+#ifdef TRACY_ENABLE
+#define DFLY_TRACY_CONNECTION_TARGET_ENABLED(scope, symbol)                                    \
+  ::facade::IsTracyConnectionZoneEnabled(id_, ::util::fb2::ProactorBase::me()->GetPoolIndex(), \
+                                         scope, ::facade::TracyManualZone::symbol)
+#define DFLY_TRACY_CONNECTION_TARGET_ZONE(scope, tracy_scope, symbol)                             \
+  DFLY_TRACY_IF(                                                                                  \
+      DFLY_TRACY_SITE_ENABLED(scope, symbol),                                                     \
+      SuppressVarShadowWarning(ZoneNamedN(                                                        \
+          ___tracy_scoped_zone, ::facade::TracyManualZoneName(::facade::TracyManualZone::symbol), \
+          DFLY_TRACY_CONNECTION_TARGET_ENABLED(tracy_scope, symbol))))
+#define DFLY_TRACY_CONNECTION_TARGET_WAIT(scope, tracy_scope, symbol)                             \
+  DFLY_TRACY_IF(                                                                                  \
+      DFLY_TRACY_SITE_ENABLED(scope, symbol),                                                     \
+      SuppressVarShadowWarning(ZoneNamedNC(                                                       \
+          ___tracy_scoped_zone, ::facade::TracyManualZoneName(::facade::TracyManualZone::symbol), \
+          0xC0392B, DFLY_TRACY_CONNECTION_TARGET_ENABLED(tracy_scope, symbol))))
+#define DFLY_TRACY_CONNECTION_TARGET_VALUE(scope, tracy_scope, symbol, value) \
+  DFLY_TRACY_IF(                                                              \
+      DFLY_TRACY_SITE_ENABLED(scope, symbol), do {                            \
+        if (DFLY_TRACY_CONNECTION_TARGET_ENABLED(tracy_scope, symbol))        \
+          ZoneValue(value);                                                   \
+      } while (0))
+#define DFLY_TRACY_CONNECTION_TARGET_TEXT(scope, tracy_scope, symbol, value) \
+  DFLY_TRACY_IF(                                                             \
+      DFLY_TRACY_SITE_ENABLED(scope, symbol), do {                           \
+        if (DFLY_TRACY_CONNECTION_TARGET_ENABLED(tracy_scope, symbol))       \
+          DFLY_TRACY_ZONE_TEXT_SV(value);                                    \
+      } while (0))
+
+#undef DFLY_TRACY_CONNECTION_ZONE
+#undef DFLY_TRACY_CONNECTION_WAIT
+#undef DFLY_TRACY_CONNECTION_FORENSIC_ZONE
+#undef DFLY_TRACY_CONNECTION_TEXT_SV
+#undef DFLY_TRACY_DISPATCH_ZONE
+#undef DFLY_TRACY_DISPATCH_FORENSIC_ZONE
+#undef DFLY_TRACY_DISPATCH_FORENSIC_TEXT_SV
+#undef DFLY_TRACY_SQUASHER_ZONE
+#undef DFLY_TRACY_SQUASHER_VALUE
+#undef DFLY_TRACY_SQUASHER_FORENSIC_ZONE
+#undef DFLY_TRACY_REPLY_ZONE
+#undef DFLY_TRACY_REPLY_VALUE
+#undef DFLY_TRACY_REPLY_FORENSIC_ZONE
+#undef DFLY_TRACY_MEMORY_ZONE
+#define DFLY_TRACY_CONNECTION_ZONE(symbol) \
+  DFLY_TRACY_CONNECTION_TARGET_ZONE(CONNECTION, ::facade::TracyScope::kConnection, symbol)
+#define DFLY_TRACY_CONNECTION_WAIT(symbol) \
+  DFLY_TRACY_CONNECTION_TARGET_WAIT(CONNECTION, ::facade::TracyScope::kConnection, symbol)
+#ifdef DFLY_TRACY_FORENSIC
+#define DFLY_TRACY_CONNECTION_FORENSIC_ZONE(symbol) DFLY_TRACY_CONNECTION_ZONE(symbol)
+#else
+#define DFLY_TRACY_CONNECTION_FORENSIC_ZONE(symbol) (void)0
+#endif
+#define DFLY_TRACY_CONNECTION_TEXT_SV(symbol, value) \
+  DFLY_TRACY_CONNECTION_TARGET_TEXT(CONNECTION, ::facade::TracyScope::kConnection, symbol, value)
+#define DFLY_TRACY_DISPATCH_ZONE(symbol) \
+  DFLY_TRACY_CONNECTION_TARGET_ZONE(DISPATCH, ::facade::TracyScope::kDispatch, symbol)
+#ifdef DFLY_TRACY_FORENSIC
+#define DFLY_TRACY_DISPATCH_FORENSIC_ZONE(symbol) DFLY_TRACY_DISPATCH_ZONE(symbol)
+#define DFLY_TRACY_DISPATCH_FORENSIC_TEXT_SV(symbol, value) \
+  DFLY_TRACY_CONNECTION_TARGET_TEXT(DISPATCH, ::facade::TracyScope::kDispatch, symbol, value)
+#else
+#define DFLY_TRACY_DISPATCH_FORENSIC_ZONE(symbol) (void)0
+#define DFLY_TRACY_DISPATCH_FORENSIC_TEXT_SV(symbol, value) (void)sizeof(value)
+#endif
+#define DFLY_TRACY_SQUASHER_ZONE(symbol) \
+  DFLY_TRACY_CONNECTION_TARGET_ZONE(SQUASHER, ::facade::TracyScope::kSquasher, symbol)
+#define DFLY_TRACY_SQUASHER_VALUE(symbol, value) \
+  DFLY_TRACY_CONNECTION_TARGET_VALUE(SQUASHER, ::facade::TracyScope::kSquasher, symbol, value)
+#ifdef DFLY_TRACY_FORENSIC
+#define DFLY_TRACY_SQUASHER_FORENSIC_ZONE(symbol) DFLY_TRACY_SQUASHER_ZONE(symbol)
+#else
+#define DFLY_TRACY_SQUASHER_FORENSIC_ZONE(symbol) (void)0
+#endif
+#define DFLY_TRACY_REPLY_ZONE(symbol) \
+  DFLY_TRACY_CONNECTION_TARGET_ZONE(REPLY, ::facade::TracyScope::kReply, symbol)
+#define DFLY_TRACY_REPLY_VALUE(symbol, value) \
+  DFLY_TRACY_CONNECTION_TARGET_VALUE(REPLY, ::facade::TracyScope::kReply, symbol, value)
+#ifdef DFLY_TRACY_FORENSIC
+#define DFLY_TRACY_REPLY_FORENSIC_ZONE(symbol) DFLY_TRACY_REPLY_ZONE(symbol)
+#else
+#define DFLY_TRACY_REPLY_FORENSIC_ZONE(symbol) (void)0
+#endif
+#define DFLY_TRACY_MEMORY_ZONE(symbol) \
+  DFLY_TRACY_CONNECTION_TARGET_ZONE(MEMORY, ::facade::TracyScope::kMemory, symbol)
+#ifdef DFLY_TRACY_PLOTS
+#undef DFLY_TRACY_CONNECTION_PLOT_NAMED
+#define DFLY_TRACY_CONNECTION_PLOT_NAMED(symbol, name, value)                                \
+  DFLY_TRACY_IF(                                                                             \
+      DFLY_TRACY_SITE_ENABLED(CONNECTION, symbol), do {                                      \
+        if (DFLY_TRACY_CONNECTION_TARGET_ENABLED(::facade::TracyScope::kConnection, symbol)) \
+          TracyPlot(name, value);                                                            \
+      } while (0))
+#endif
+#endif
+
 namespace {
 
 // Multiplier applied to the soft publish_buffer_limit to derive the hard Pub/Sub back-pressure

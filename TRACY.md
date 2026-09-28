@@ -51,6 +51,12 @@ with the groups that might be useful, then choose a smaller subset at startup fo
 | `-DWITH_TRACY_CONTEXT_SWITCH=ON` | build time | Enables Tracy context-switch tracing. The default is `OFF`. |
 | `--tracy_scopes=...` | server startup | Selects which compiled groups emit in this server run. No rebuild is needed to add or remove an already compiled group. |
 | `--tracy_manual_zones=...` | server startup | Selects exact manual zone IDs or names when `manual` is present in `--tracy_scopes`. Empty disables manual zones; an invalid list logs a warning and disables them. |
+| `--tracy_sampled_scopes=...` | server startup | Selects compiled broad scopes that emit only while a fiber-switch sample window is active. |
+| `--tracy_sampled_manual_zones=...` | server startup | Selects exact manual zone IDs or names that emit only while a fiber-switch sample window is active. |
+| `--tracy_sample_every_fiber_switches=N` | server startup | Opens a sample window every $N$ scheduler fiber switches per proactor. Required with a sampled scope or manual zone. |
+| `--tracy_sample_window_fiber_switches=N` | server startup | Number of scheduler fiber switches emitted in each sample window. It must be positive and no greater than `--tracy_sample_every_fiber_switches`. |
+| `--tracy_connections=...` | server startup | Restricts connection-fiber trace sites to comma-separated numeric connection IDs, such as `6` for `DflyConn_6`. |
+| `--tracy_proactors=...` | server startup | Restricts trace sites to comma-separated numeric proactor pool IDs, such as `0` for `Proactor0`. |
 | `--tracy_queue_connections=...` | server startup | With `WITH_TRACY_PLOTS=ON`, restricts V2 queue/lifecycle plots to comma-separated client IDs; empty selects all clients. |
 | `--tracy_queue_proactors=...` | server startup | With `WITH_TRACY_PLOTS=ON`, restricts V2 queue/lifecycle plots to comma-separated proactor IDs; empty selects all proactors. |
 | `--tracy_backpressure_plots` | server startup | With `WITH_TRACY_PLOTS=ON`, emits per-proactor pipeline bytes and configured limits only when a selected V2 connection parks on backpressure. |
@@ -59,6 +65,44 @@ with the groups that might be useful, then choose a smaller subset at startup fo
 The broad groups are `connection`, `dispatch`, `squasher`, `reply`, and `memory`. `manual` is the
 exact-zone scope. `all` means every broad group at build time, or every broad group compiled into
 this binary at runtime; it does not implicitly enable the `manual` scope.
+
+### Runtime Targeting and Sampling
+
+The runtime decisions are composed in this order:
+
+1. A trace site must match a target. `--tracy_proactors` and `--tracy_connections` are **ORed**:
+   a connection-fiber site emits when its current proactor or its connection ID matches. With both
+   filters empty, every target matches. A connection selector applies to the connection-fiber
+   instrumentation in `dragonfly_connection.cc`; a proactor selector also filters instrumentation
+   outside connection fibers.
+2. The site must match the requested broad scope or manual zone.
+3. If that site was selected by a sampled scope or sampled manual zone, its proactor-local sample
+   window must be active.
+
+Connection and proactor inputs are numeric comma-separated IDs only. They are not checked against
+the running server: an ID that does not currently exist is accepted and simply matches no events.
+`DflyConn_<id>` names in the Tracy fiber view use these same connection IDs.
+
+Sampled selection has precedence over always-on selection for the same site. For example,
+`--tracy_manual_zones=45 --tracy_sampled_manual_zones=45` samples zone `45`; it does not emit it
+continuously. Sample windows use each proactor's scheduler switch epoch, not wall-clock time or a
+per-connection clock. A narrow window can therefore contain no work from a particular connection.
+
+```bash
+# Record the full selected manual-zone trace for one connection fiber.
+./build-opt/dragonfly --tracy_scopes=manual --tracy_manual_zones=45,30,31 \
+  --tracy_connections=6
+
+# Sample all compiled broad scopes only on Proactor0: 200 scheduler switches per 1000-switch cycle.
+./build-opt/dragonfly --tracy_sampled_scopes=all \
+  --tracy_sample_every_fiber_switches=1000 \
+  --tracy_sample_window_fiber_switches=200 --tracy_proactors=0
+
+# Record all selected connection fibers, regardless of their current proactor, plus every event on
+# Proactor0. Target selectors are ORed.
+./build-opt/dragonfly --tracy_scopes=manual --tracy_manual_zones=45 \
+  --tracy_connections=6,12 --tracy_proactors=0
+```
 
 ### Exact Manual Zones
 
