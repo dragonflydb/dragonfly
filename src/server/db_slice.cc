@@ -254,10 +254,6 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
   return 1;
 }
 
-std::optional<AtomicMemoryScope> ScopeIfEnabled(int obj_type) {
-  return MemoryScopeEnabled() ? std::make_optional<AtomicMemoryScope>(obj_type) : std::nullopt;
-}
-
 class AsyncDeleter {
  public:
   template <typename Set> static void EnqueDeletion(uint32_t next, Set* ds);
@@ -2090,7 +2086,7 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
   FiberAtomicGuard guard;
 
   const int obj_type = del_it->second.ObjType();
-  auto scope = ScopeIfEnabled(obj_type);
+  AtomicMemoryScope scope(obj_type);
 
   size_t table_before = table->table_memory();
 

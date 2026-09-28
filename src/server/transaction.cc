@@ -1986,16 +1986,22 @@ void TxMemoryScope::Resume() {
 }
 
 void TxMemoryScope::Checkpoint(int64_t used_memory) {
+  DCHECK(!suspended_);
   delta_ += used_memory - mem_baseline_;
   mem_baseline_ = used_memory;
 }
 
 AtomicMemoryScope::AtomicMemoryScope(int obj_type)
-    : obj_type_(obj_type), mem_baseline_(TrackedMemory(nullptr)) {
-  DCHECK_GE(obj_type_, 0);
+    : enabled_(MemoryScopeEnabled()),
+      obj_type_(obj_type),
+      mem_baseline_(enabled_ ? TrackedMemory(nullptr) : 0) {
+  DCHECK_GE(obj_type, 0);
 }
 
 AtomicMemoryScope::~AtomicMemoryScope() {
+  if (!enabled_)
+    return;
+
   const int64_t delta = TrackedMemory(nullptr) - mem_baseline_;
   EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta);
   if (tl_tx_scope)

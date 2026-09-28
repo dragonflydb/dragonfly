@@ -54,6 +54,7 @@ class AtomicMemoryScope {
 
  private:
   util::FiberAtomicGuard guard_;
+  bool enabled_;
   int obj_type_;
   int64_t mem_baseline_;
 };
