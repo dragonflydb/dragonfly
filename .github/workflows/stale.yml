@@ -1,0 +1,51 @@
+# - Mark open issues with no activity for 90 days as stale, and close them 14 days later.
+# - Mark open pull requests with no activity for 120 days as stale, and close them 30 days later.
+# - Any comment, commit or update removes the stale label and resets the timer.
+name: Stale issues and PRs
+
+on:
+  schedule:
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+
+jobs:
+  stale:
+    if: github.repository == 'dragonflydb/dragonfly'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write         # required to label, comment on and close issues
+      pull-requests: write  # required to label, comment on and close pull requests
+      actions: write        # required to persist the action's state cache between runs
+    steps:
+      - uses: actions/stale@v11
+        with:
+          days-before-issue-stale: 90
+          days-before-issue-close: 14
+          days-before-pr-stale: 120
+          days-before-pr-close: 30
+          stale-issue-label: stale
+          stale-pr-label: stale
+          close-issue-reason: not_planned
+          exempt-issue-labels: >-
+            important,urgent,prod-attention,Next Up,good first issue,help wanted,failing-test
+          exempt-all-issue-assignees: true
+          exempt-all-issue-milestones: true
+          exempt-pr-labels: important,urgent,prod-attention,Next Up
+          exempt-all-pr-assignees: true
+          exempt-all-pr-milestones: true
+          # Spread the initial backlog over several runs instead of one large burst.
+          operations-per-run: 50
+          stale-issue-message: >
+            This issue has had no activity for 90 days and has been marked as stale.
+            It will be closed in 14 days unless there is new activity.
+            If it is still relevant, please leave a comment with any updated details.
+          close-issue-message: >
+            Closing this issue due to inactivity. If it is still relevant,
+            feel free to reopen it or file a new issue with up-to-date details.
+          stale-pr-message: >
+            This pull request has had no activity for 120 days and has been marked as stale.
+            It will be closed in 30 days unless there is new activity.
+            Push a commit or leave a comment to keep it open.
+          close-pr-message: >
+            Closing this pull request due to inactivity. Feel free to reopen it
+            if you plan to continue working on it.
