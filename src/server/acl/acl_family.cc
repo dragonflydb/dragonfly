@@ -650,9 +650,9 @@ void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
     User::UpdateRequest rqst;
     string pass = flag.CurrentValue();
     if (pass.empty()) {
-      rqst.passwords.push_back({.nopass = true});
+      rqst.passwords.push_back({.password = {}, .nopass = true});
     } else {
-      rqst.passwords.push_back({.reset_password = true});
+      rqst.passwords.push_back({.password = {}, .reset_password = true});
       rqst.passwords.push_back({std::move(pass)});
     }
     registry_->MaybeAddAndUpdate("default", std::move(rqst));
