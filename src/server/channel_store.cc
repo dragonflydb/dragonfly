@@ -126,7 +126,9 @@ unsigned ChannelStore::SendMessages(string_view channel, facade::ArgRange messag
     auto it = lower_bound(subscribers_ptr->begin(), subscribers_ptr->end(), idx,
                           ChannelStore::Subscriber::ByThreadId);
     while (it != subscribers_ptr->end() && it->LastKnownThreadId() == idx) {
-      if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr)
+      // Subscribers with an expired JWT get nothing until they re-AUTH.
+      if (auto* ptr = it->Get(); ptr && ptr->cntx() != nullptr &&
+                                 !static_cast<ConnectionContext*>(ptr->cntx())->IsAuthExpired())
         send(ptr, it->pattern);
       it++;
     }

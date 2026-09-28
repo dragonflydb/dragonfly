@@ -28,8 +28,7 @@ ABSL_FLAG(bool, jwt_validate, false,
           "Master on/off switch for JWT-mode auth. When true, every AUTH credential is "
           "sent to --jwt_validate_url for validation instead of being checked against "
           "the local ACL password store; --jwt_validate_url must already be set (at "
-          "startup) for this to take effect. Runtime-mutable via CONFIG SET, so JWT auth "
-          "can be toggled on/off without a restart once the endpoint is configured.");
+          "startup) for this to take effect. Startup-only: not settable via CONFIG SET.");
 
 ABSL_FLAG(uint32_t, jwt_validate_timeout_ms, 300,
           "Deadline (ms) for the whole JWT validation HTTP call (connect + request), "
