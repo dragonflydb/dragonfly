@@ -175,7 +175,7 @@ void ReplicaStreamer::PeriodicFlushFiber(chrono::milliseconds period) {
 
 SlotMigrationStreamer::SlotMigrationStreamer(DbSlice* slice, cluster::SlotSet slots,
                                              ExecutionState* cntx)
-    : SerializerBase(slice, cntx), cntx_(cntx), writer_(cntx, {}), my_slots_(std::move(slots)) {
+    : SerializerBase(slice, cntx), writer_(cntx, {}), my_slots_(std::move(slots)) {
   DCHECK(slice != nullptr);
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
@@ -190,7 +190,7 @@ SlotMigrationStreamer::SlotMigrationStreamer(DbSlice* slice, cluster::SlotSet sl
 }
 
 void SlotMigrationStreamer::Start(util::FiberSocketBase* dest) {
-  if (!cntx_->IsRunning())
+  if (!base_cntx_->IsRunning())
     return;
 
   VLOG(1) << "SlotMigrationStreamer start";
@@ -204,7 +204,8 @@ void SlotMigrationStreamer::Run() {
 
   // If the context was cancelled before Start() ran, RegisterChangeListener was skipped and
   // db_array_ is empty (see SlotMigrationStreamer::Start). Guard the db_array_.front() access
-  // below; mid-traversal cancellation is handled by the cntx_->IsRunning() check inside the loop.
+  // below; mid-traversal cancellation is handled by the base_cntx_->IsRunning() check inside the
+  // loop.
   if (db_array_.empty())
     return;
 
@@ -219,7 +220,7 @@ void SlotMigrationStreamer::Run() {
   PrimeTable* pt = &table->prime;
 
   do {
-    if (!cntx_->IsRunning())
+    if (!base_cntx_->IsRunning())
       return;
 
     // If someone else throtles due to huge pending_buf_, give it priority.
@@ -241,7 +242,7 @@ void SlotMigrationStreamer::Run() {
       // the next sample is taken. So we add this sample to ensure cpu_aggregator_
       // refreshes its state.
       base::CpuTimeGuard guard(&cpu_aggregator_);
-      stats_.iter_skips++;
+      migration_stats_.iter_skips++;
       continue;
     }
 
@@ -249,13 +250,13 @@ void SlotMigrationStreamer::Run() {
     ServerState::tlocal()->GetEgressThrottler().Throttle();
 
     cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
-      if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
+      if (!base_cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
         return;
 
       // Do not progress if we are stalled.
       ThrottleIfNeeded();
 
-      stats_.buckets_loop += ProcessBucket(0, it, false);
+      migration_stats_.buckets_loop += ProcessBucket(0, it, false);
     });
 
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
@@ -269,24 +270,24 @@ void SlotMigrationStreamer::Run() {
   } while (cursor);
 
   // Force serialize of all delayed entries.
-  ProcessDelayedEntries(true, 0, cntx_);
+  ProcessDelayedEntries(true, 0, base_cntx_);
 
   VLOG(1) << "SlotMigrationStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
-          << ", shard " << db_slice_->shard_id() << ". Buckets looped " << stats_.buckets_loop;
+          << ", shard " << db_slice_->shard_id() << ". Buckets looped "
+          << migration_stats_.buckets_loop;
 }
 
 void SlotMigrationStreamer::SendFinalize(long attempt) {
   auto base_stats = SerializerBase::GetStats();
   VLOG(1) << "SlotMigrationStreamer LSN of " << my_slots_.ToSlotRanges().ToString() << ", shard "
-          << db_slice_->shard_id() << " attempt " << attempt << " with " << stats_.commands
-          << " commands. Buckets looped " << stats_.buckets_loop << ", buckets on_db_update "
+          << db_slice_->shard_id() << " attempt " << attempt << " with "
+          << migration_stats_.commands << " commands. Buckets looped "
+          << migration_stats_.buckets_loop << ", buckets on_db_update "
           << base_stats.buckets_on_change << ", buckets skipped " << base_stats.buckets_skipped
           << ", buckets written " << base_stats.buckets_serialized << ". Keys skipped "
-          << stats_.keys_skipped << ", keys written " << base_stats.keys_serialized
+          << migration_stats_.keys_skipped << ", keys written " << base_stats.keys_serialized
           << " throttle count: " << writer_.throttle_count()
-          << ", throttle on db update: " << stats_.throttle_on_db_update
-          << ", throttle usec on db update: " << stats_.throttle_usec_on_db_update
-          << ", iter_skips: " << stats_.iter_skips;
+          << ", iter_skips: " << migration_stats_.iter_skips;
 
   // Drain all pending journal data before sending the finalize marker.
   // At this point client pause is active, so no new entries can arrive.
@@ -312,7 +313,7 @@ bool SlotMigrationStreamer::Cancel() {
   // cancels the flow while it is between ChangeState(C_SYNC) and PrepareSync()). Start() bails out
   // early when the context is cancelled, which prevents the streamer from being registered (and
   // leaked) after cancellation.
-  cntx_->Cancel();
+  base_cntx_->Cancel();
 
   // UnregisterOnChange is idempotent and returns true only for the caller that actually removed the
   // listener, so racing Cancel() calls (e.g. Finish() vs ~SliceSlotMigration) can't double-erase.
@@ -347,7 +348,7 @@ bool SlotMigrationStreamer::ShouldWrite(const journal::JournalChangeItem& item) 
   if (item.cmd == "FLUSHALL" || item.cmd == "FLUSHDB") {
     // On FLUSH* we restart the migration
     CHECK(writer_.dest() != nullptr);
-    cntx_->ReportError("FLUSH command during migration");
+    base_cntx_->ReportError("FLUSH command during migration");
     std::ignore = writer_.dest()->Shutdown(SHUT_RDWR);
     return false;
   }
@@ -385,7 +386,7 @@ unsigned SlotMigrationStreamer::SerializeBucketLocked(DbIndex db_index,
       SerializerBase::SerializeEntry(it.bucket_address(), db_index, it->first, pv);
       ++written;
     } else {
-      stats_.keys_skipped++;
+      migration_stats_.keys_skipped++;
     }
   }
 
@@ -393,14 +394,10 @@ unsigned SlotMigrationStreamer::SerializeBucketLocked(DbIndex db_index,
   return written;
 }
 
-// TODO: Update those
-// stats_.throttle_on_db_update += throttle_count_ - throttle_start;
-// stats_.throttle_usec_on_db_update += total_throttle_wait_usec_ - throttle_usec_start;
-
 void SlotMigrationStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,
                                                  const PrimeValue& pv, time_t expire,
                                                  uint32_t mc_flags) {
-  stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
+  migration_stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
 }
 
 }  // namespace dfly

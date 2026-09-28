@@ -94,22 +94,19 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
   bool ShouldWrite(std::string_view key) const;
   bool ShouldWrite(SlotId slot_id) const;
 
-  struct Stats {
+  struct MigrationStats {
     uint64_t buckets_loop = 0;
-    uint64_t throttle_on_db_update = 0;
-    uint64_t throttle_usec_on_db_update = 0;
     uint64_t keys_skipped = 0;
     uint64_t commands = 0;
     uint64_t iter_skips = 0;
   };
 
-  ExecutionState* cntx_;
   BufferedSocketWriter writer_;
   cluster::SlotSet my_slots_;
 
   std::unique_ptr<CmdSerializer> cmd_serializer_;
 
-  Stats stats_;
+  MigrationStats migration_stats_;
   base::RealTimeAggregator cpu_aggregator_;
   LSN last_lsn_writen_ = 0;
   uint32_t journal_cb_id_{0};

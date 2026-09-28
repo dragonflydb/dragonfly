@@ -217,9 +217,8 @@ void BufferedSocketWriter::Throttle() {
   // We currently do not solve this problem, but at least we will be more verbose about it.
   std::cv_status status = waker_.await_until(
       [&] {
-        bool finished = !IsStalled() || !cntx_->IsRunning();
-        if (finished)
-          return finished;
+        if (!IsStalled() || !cntx_->IsRunning())
+          return true;
 
         // Log every second that we are stalled and for how long.
         auto current = chrono::steady_clock::now();
