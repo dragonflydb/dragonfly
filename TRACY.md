@@ -108,9 +108,10 @@ per-connection clock. A narrow window can therefore contain no work from a parti
 
 `manual` is a permanent special scope for an exact subset of the existing manual instrumentation.
 The authoritative registry is [src/facade/tracy_manual_zones.h](src/facade/tracy_manual_zones.h):
-it assigns every current label a stable ID from `1` through `125`. Do not renumber or reuse an ID;
-append new zones instead. Grouped source macros use its symbolic token, and Tracy display names come
-only from the registry, so exact selection never needs a runtime zone-name lookup.
+it assigns stable IDs by category: timing and wait zones are `1-107`; plots are `500-519`.
+The gap is reserved so the categories remain visually distinct. Do not renumber or reuse an ID;
+append new zones in the appropriate range. Grouped source macros use its symbolic token, and Tracy
+display names come only from the registry, so exact selection never needs a runtime zone-name lookup.
 
 Both selection inputs accept comma-separated IDs, exact names (case-insensitive), or `all`:
 

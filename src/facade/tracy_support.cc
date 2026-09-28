@@ -99,14 +99,17 @@ bool ParseManualZones(std::string_view zone_list, ManualZoneMask* zones) {
     if (entry.empty())
       continue;
     if (absl::EqualsIgnoreCase(entry, "all")) {
-      zones->fill(~uint64_t{0});
-      (*zones)[0] &= ~uint64_t{1};
+      for (unsigned id = 1; id <= DFLY_TRACY_MANUAL_ZONE_COUNT; ++id) {
+        if (kTracyManualZoneNames[id] != nullptr)
+          (*zones)[id / 64] |= uint64_t{1} << (id % 64);
+      }
       continue;
     }
 
     unsigned id{};
     if (absl::SimpleAtoi(entry, &id)) {
-      if ((id == 0) || (id > DFLY_TRACY_MANUAL_ZONE_COUNT))
+      if ((id == 0) || (id > DFLY_TRACY_MANUAL_ZONE_COUNT) ||
+          (kTracyManualZoneNames[id] == nullptr))
         return false;
       (*zones)[id / 64] |= uint64_t{1} << (id % 64);
       continue;
@@ -114,7 +117,8 @@ bool ParseManualZones(std::string_view zone_list, ManualZoneMask* zones) {
 
     bool found = false;
     for (unsigned id = 1; id <= DFLY_TRACY_MANUAL_ZONE_COUNT; ++id) {
-      if (absl::EqualsIgnoreCase(entry, kTracyManualZoneNames[id])) {
+      if (kTracyManualZoneNames[id] != nullptr &&
+          absl::EqualsIgnoreCase(entry, kTracyManualZoneNames[id])) {
         (*zones)[id / 64] |= uint64_t{1} << (id % 64);
         found = true;
         break;
