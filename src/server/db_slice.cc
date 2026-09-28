@@ -873,6 +873,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
+  DeductFromTxScope(table_increase);
   memory_budget_ -= table_increase;
 
   if (memory_budget_ < 0 && apply_memory_limit) {

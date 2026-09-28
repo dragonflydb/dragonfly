@@ -494,7 +494,7 @@ TEST_F(TransactionTest, DeltaInterleavedFibers) {
                          q = mr->allocate(128);
                          other_ran = true;
                        }};
-      TxMemoryScope scope_for_string{OBJ_STRING, nullptr};
+      TxMemoryScope scope_for_string{OBJ_STRING};
       p = mr->allocate(1024);
 
       ThisFiber::Yield();
@@ -526,7 +526,7 @@ TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
 
     const auto before = shard->type_mem_delta();
     {
-      TxMemoryScope scope{OBJ_STRING, nullptr};
+      TxMemoryScope scope{OBJ_STRING};
       track(1024);
       WithMemTrack(OBJ_LIST, [&] { track(512); });
       WithMemTrack(OBJ_HASH, [&] {

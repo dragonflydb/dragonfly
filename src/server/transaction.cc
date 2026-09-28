@@ -100,8 +100,8 @@ void MemTrackerHook(fb2::FiberSwitchHookEvent event) noexcept {
   }
 }
 
-template <typename Func> auto WithTxScope(int obj_type, const DbSlice* db_slice, Func func) {
-  TxMemoryScope scope(obj_type, db_slice);
+template <typename Func> auto WithTxScope(int obj_type, Func func) {
+  TxMemoryScope scope(obj_type);
   return func();
 }
 
@@ -711,11 +711,9 @@ void Transaction::RunCallback(EngineShard* shard) {
   shard->set_running_tx(this);
 
   RunnableResult result;
-  auto& db_slice = GetDbSlice(shard->shard_id());
-
   try {
     if (const int obj_typ = ObjectType(cid_); obj_typ >= 0)
-      result = WithTxScope(obj_typ, &db_slice, [&] { return (*cb_ptr_)(this, shard); });
+      result = WithTxScope(obj_typ, [&] { return (*cb_ptr_)(this, shard); });
     else
       result = (*cb_ptr_)(this, shard);
 
@@ -739,6 +737,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
+  auto& db_slice = GetDbSlice(shard->shard_id());
   db_slice.OnCbFinishBlocking();
 
   // Handle result flags to alter behaviour.
@@ -1562,7 +1561,7 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   RunnableResult result;
   try {
     if (const int obj_typ = ObjectType(cid_); obj_typ >= 0)
-      result = WithTxScope(obj_typ, &db_slice, [&] { return cb(this, shard); });
+      result = WithTxScope(obj_typ, [&] { return cb(this, shard); });
     else
       result = cb(this, shard);
   } catch (std::bad_alloc&) {
@@ -1935,14 +1934,12 @@ std::vector<Transaction::PerShardCache>& Transaction::TLTmpSpace::GetShardIndex(
 
 namespace {
 
-int64_t TrackedMemory(const DbSlice* db_slice) {
+int64_t TrackedMemory() {
   const EngineShard* shard = EngineShard::tlocal();
   DCHECK_NE(shard, nullptr);
 
   // Full search index memory accounting scans all indices, so skip it
-  const int64_t used_memory = shard->UsedMemoryWithoutSearch();
-  const int64_t table_memory = db_slice ? db_slice->table_memory() : 0;
-  return used_memory - table_memory;
+  return shard->UsedMemoryWithoutSearch();
 }
 
 }  // namespace
@@ -1952,11 +1949,15 @@ bool MemoryScopeEnabled() {
   return enabled;
 }
 
-TxMemoryScope::TxMemoryScope(int obj_type, const DbSlice* db_slice)
-    : obj_type_(obj_type), db_slice_(db_slice) {
+void DeductFromTxScope(int64_t delta) {
+  if (tl_tx_scope)
+    tl_tx_scope->Deduct(delta);
+}
+
+TxMemoryScope::TxMemoryScope(int obj_type) : obj_type_(obj_type) {
   CHECK_EQ(tl_tx_scope, nullptr) << "tx scope created while another tx scope exists";
   DCHECK_GE(obj_type_, 0);
-  mem_baseline_ = TrackedMemory(db_slice_);
+  mem_baseline_ = TrackedMemory();
   tl_tx_scope = this;
   prev_hook_ = ThisFiber::SetSwitchHook({MemTrackerHook});
 }
@@ -1967,21 +1968,21 @@ TxMemoryScope::~TxMemoryScope() {
   ThisFiber::SetSwitchHook(prev_hook_);
   tl_tx_scope = nullptr;
 
-  Checkpoint(TrackedMemory(db_slice_));
+  Checkpoint(TrackedMemory());
   EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta_);
 }
 
 void TxMemoryScope::Suspend() {
   DCHECK(!suspended_);
 
-  Checkpoint(TrackedMemory(db_slice_));
+  Checkpoint(TrackedMemory());
   suspended_ = true;
 }
 
 void TxMemoryScope::Resume() {
   DCHECK(suspended_);
 
-  mem_baseline_ = TrackedMemory(db_slice_);
+  mem_baseline_ = TrackedMemory();
   suspended_ = false;
 }
 
@@ -1994,7 +1995,7 @@ void TxMemoryScope::Checkpoint(int64_t used_memory) {
 AtomicMemoryScope::AtomicMemoryScope(int obj_type)
     : enabled_(MemoryScopeEnabled()),
       obj_type_(obj_type),
-      mem_baseline_(enabled_ ? TrackedMemory(nullptr) : 0) {
+      mem_baseline_(enabled_ ? TrackedMemory() : 0) {
   DCHECK_GE(obj_type, 0);
 }
 
@@ -2002,10 +2003,9 @@ AtomicMemoryScope::~AtomicMemoryScope() {
   if (!enabled_)
     return;
 
-  const int64_t delta = TrackedMemory(nullptr) - mem_baseline_;
+  const int64_t delta = TrackedMemory() - mem_baseline_;
   EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta);
-  if (tl_tx_scope)
-    tl_tx_scope->Deduct(delta);
+  DeductFromTxScope(delta);
 }
 
 }  // namespace dfly

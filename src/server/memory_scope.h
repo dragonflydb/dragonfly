@@ -10,14 +10,15 @@
 
 namespace dfly {
 
-class DbSlice;
-
 bool MemoryScopeEnabled();
+
+// Excludes delta from the active (non-suspended) transaction scope, if any.
+void DeductFromTxScope(int64_t delta);
 
 // Owns the thread's single transaction scope and its fiber hook, including while suspended.
 class TxMemoryScope {
  public:
-  TxMemoryScope(int obj_type, const DbSlice* db_slice);
+  explicit TxMemoryScope(int obj_type);
   ~TxMemoryScope();
 
   TxMemoryScope(const TxMemoryScope&) = delete;
@@ -35,8 +36,6 @@ class TxMemoryScope {
   void Checkpoint(int64_t used_memory);
 
   int obj_type_;
-  // if present then use the table used memory for this slice during accounting
-  const DbSlice* db_slice_;
   int64_t mem_baseline_ = 0;
   int64_t delta_ = 0;
   util::fb2::FiberSwitchHook prev_hook_;
