@@ -6,6 +6,8 @@
 
 #include <mimalloc.h>
 
+#include <sstream>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 
@@ -117,6 +119,32 @@ TEST_F(RESPParserTest, StreamingState) {
 
 TEST_F(RESPParserTest, ArrayLimit) {
   EXPECT_FALSE(RESPParser({.max_array_len = 2}).Feed("*3\r\n", 4).has_value());
+}
+
+TEST_F(RESPParserTest, ReplyDiagnostics) {
+  const pair<string_view, string_view> cases[] = {
+      {"+OK\r\n", "OK"},
+      {"-ERR migration failed\r\n", "ERR migration failed"},
+      {"$4\r\nFAIL\r\n", "FAIL"},
+      {":42\r\n", "42"},
+      {",1.5\r\n", "1.5"},
+      {"$-1\r\n", "NIL"},
+      {"*0\r\n", "[]"},
+      {"%0\r\n", "[]"},
+      {"~0\r\n", "[]"},
+      {"*3\r\n-ERR migration failed\r\n:42\r\n*0\r\n", "[ERR migration failed, 42, []]"},
+  };
+  for (auto [message, expected] : cases) {
+    SCOPED_TRACE(message);
+    RESPParser parser;
+    auto reply = parser.Feed(message.data(), message.size());
+    ASSERT_TRUE(reply.has_value());
+    ASSERT_FALSE(reply->Empty());
+
+    ostringstream os;
+    os << *reply;
+    EXPECT_EQ(os.str(), expected);
+  }
 }
 
 TEST_F(RESPParserTest, SurvivesDataHeapDestruction) {

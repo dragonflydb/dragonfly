@@ -6,6 +6,8 @@
 
 #include <absl/flags/flag.h>
 
+#include <sstream>
+
 #include "absl/cleanup/cleanup.h"
 #include "base/logging.h"
 #include "cluster_family.h"
@@ -43,6 +45,12 @@ bool IsSimpleReply(const RESPObj& reply, string_view expected) {
 
 bool IsSimpleError(const RESPObj& reply, string_view expected) {
   return reply.GetType() == RESPObj::Type::ERROR && reply.As<string_view>() == expected;
+}
+
+string FormatReply(const RESPObj& reply) {
+  ostringstream os;
+  os << reply;
+  return os.str();
 }
 
 }  // namespace
@@ -96,9 +104,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
     }
 
     if (!IsSimpleReply(*reply, "OK")) {
-      exec_st_.ReportError(
-          absl::StrCat("Incorrect response for FLOW cmd: ",
-                       reply->As<string_view>().value_or("Unexpected reply type")));
+      exec_st_.ReportError(absl::StrCat("Incorrect response for FLOW cmd: ", FormatReply(*reply)));
       return;
     }
   }
@@ -327,7 +333,7 @@ void OutgoingMigration::SyncFb() {
           ThisFiber::SleepFor(500ms);  // to prevent too many attempts
         }
       } else {
-        exec_st_.ReportError(GenericError(reply->As<string>().value_or("Unexpected reply type")));
+        exec_st_.ReportError(GenericError(FormatReply(*reply)));
       }
       continue;
     }
@@ -487,7 +493,7 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     if (!ack_attempt) {
       LOG(WARNING) << "Incorrect response type for " << cf_->MyID() << " : "
                    << migration_info_.node_info.id << " attempt " << attempt
-                   << " type: " << static_cast<int>(reply->GetType());
+                   << " type: " << static_cast<int>(reply->GetType()) << " msg: " << *reply;
       return false;
     }
 

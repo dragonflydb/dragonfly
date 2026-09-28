@@ -58,7 +58,6 @@ std::string_view GetErrorType(std::string_view err) {
 class RedisReplyBuilderTest : public testing::Test {
  public:
   struct ParsingResults {
-    bool parsed = false;
     RespExpr::Vec args;
     std::uint32_t consumed = 0;
 
@@ -69,16 +68,10 @@ class RedisReplyBuilderTest : public testing::Test {
 
       holder_.emplace(std::move(*obj));
 
-      parsed = true;
       consumed = buf_pos;
 
       if (holder_->GetType() == RESPObj::Type::ARRAY) {
         auto arr = holder_->As<RESPArray>();
-        if (!arr.has_value()) {
-          parsed = false;
-          return;
-        }
-
         args.reserve(arr->Size());
         for (size_t i = 0; i < arr->Size(); ++i) {
           args.push_back(expr_builder_.BuildExpr((*arr)[i]));
@@ -90,11 +83,11 @@ class RedisReplyBuilderTest : public testing::Test {
     }
 
     bool Verify(std::uint32_t expected) const {
-      return parsed && consumed == expected;
+      return holder_.has_value() && consumed == expected;
     }
 
     bool IsError() const {
-      return !parsed || (args.size() == 1 && args[0].type == RespExpr::ERROR);
+      return !holder_.has_value() || (args.size() == 1 && args[0].type == RespExpr::ERROR);
     }
 
     bool IsOk() const {
@@ -102,12 +95,14 @@ class RedisReplyBuilderTest : public testing::Test {
     }
 
     bool IsNull() const {
-      return parsed && args.size() == 1 && args.at(0).type == RespExpr::NIL;
+      return holder_.has_value() && args.size() == 1 && args.at(0).type == RespExpr::NIL;
     }
 
     bool IsString() const {
-      return parsed && args.size() == 1 && args[0].type == RespExpr::STRING;
+      return holder_.has_value() && args.size() == 1 && args[0].type == RespExpr::STRING;
     }
+
+    friend std::ostream& operator<<(std::ostream& os, const ParsingResults& res);
 
    private:
     std::optional<RESPObj> holder_;
@@ -208,8 +203,8 @@ std::vector<std::string_view> RedisReplyBuilderTest::TokenizeMessage() const {
 }
 
 std::ostream& operator<<(std::ostream& os, const RedisReplyBuilderTest::ParsingResults& res) {
-  os << "result{consumed bytes:" << res.consumed << ", parsed: " << res.parsed << " result count "
-     << res.args.size() << ", first entry result: ";
+  os << "result{consumed bytes:" << res.consumed << ", parsed: " << res.holder_.has_value()
+     << " result count " << res.args.size() << ", first entry result: ";
   if (!res.args.empty()) {
     if (res.args.size() > 1) {
       os << "ARRAY: ";

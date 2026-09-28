@@ -190,12 +190,14 @@ std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
 }
 
 std::ostream& operator<<(std::ostream& os, const RESPArray& arr) {
-  os << "[";
-  for (int64_t i = 0; i < (int64_t)arr.Size() - 1; ++i) {
-    os << arr[i] << ", ";
+  if (arr.Empty()) {
+    return os << "[]";
   }
-  os << arr[arr.Size() - 1] << "]";
-  return os;
+  os << "[" << arr[0];
+  for (size_t i = 1; i < arr.Size(); ++i) {
+    os << ", " << arr[i];
+  }
+  return os << "]";
 }
 
 }  // namespace facade
