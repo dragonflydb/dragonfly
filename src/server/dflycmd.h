@@ -78,7 +78,7 @@ struct FlowInfo {
 //    access.
 //  3. Lock-free snapshot.
 //    A copy of `replica_infos_` is published to a thread-local on every proactor via
-//    `UpdateReplicaInfoCacheLocked()` (which must be called from each mutator of replica_infos_).
+//    `UpdateReplicaInfoCacheLocked()` when replicas are added or removed.
 //    Readers (INFO REPLICATION, metrics) load this snapshot and access ReplicaInfo state via
 //    its atomic getters (GetReplicaState, etc.) without taking any lock.
 //
@@ -150,10 +150,9 @@ class DflyCmd {
       id_set_.store(true, std::memory_order_relaxed);
     }
 
-    // Atomic to allow cross-thread access: SetDflyClientVersion writes from the
-    // REPLCONF CLIENT-VERSION handler without locking, while Flow() reads under
-    // an exclusive lock on mutex(). Relaxed ordering: version is independent of
-    // other state.
+    // Atomic to allow cross-thread access: SetDflyClientVersion writes under DflyCmd::mu_,
+    // while Flow() reads under the per-replica mutex. Relaxed ordering: version is
+    // independent of other state.
     DflyVersion GetVersion() const {
       return version_.load(std::memory_order_relaxed);
     }
@@ -253,6 +252,11 @@ class DflyCmd {
   // Master-side command. Provides Replica info.
   std::vector<ReplicaRoleInfo> GetReplicasRoleInfo() const ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Oldest connected replica version, or CURRENT_VER if none. Reads the cache without locking.
+  static DflyVersion GetMinReplicaVersion() {
+    return min_replica_version_.load(std::memory_order_relaxed);
+  }
+
   // Must be called on the given shard's thread (e.g. from the GetMetrics
   // fan-out). Lock-free: reads thread-local replica infos.
   static ReplicationMemoryStats GetReplicationMemoryStats(EngineShard* shard);
@@ -261,7 +265,7 @@ class DflyCmd {
   std::vector<std::shared_ptr<ReplicaInfo>> GetReplicaInfoSnapshot() const ABSL_LOCKS_EXCLUDED(mu_);
 
   // Sets metadata.
-  void SetDflyClientVersion(ConnectionState* state, DflyVersion version);
+  void SetDflyClientVersion(ConnectionState* state, DflyVersion version) ABSL_LOCKS_EXCLUDED(mu_);
 
   // Tries to break those flows that stuck on socket write for too long time.
   void BreakStalledFlowsInShard() ABSL_NO_THREAD_SAFETY_ANALYSIS;
@@ -339,7 +343,10 @@ class DflyCmd {
   // between the master's LSN and the last acknowledged LSN in over all shards.
   std::map<uint32_t, LSN> ReplicationLags(const ReplicaInfoMap& replicas_local_cache) const;
 
-  // Publishes a fresh copy of replica_infos_ to a thread-local on every proactor.
+  // Recomputes the minimum version when replicas or their versions change.
+  void UpdateMinReplicaVersionLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+
+  // Updates the minimum version and publishes a fresh replica_infos_ snapshot to every proactor.
   // Caller must hold mu_. Readers (INFO/metrics) load this view lock-free.
   void UpdateReplicaInfoCacheLocked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
@@ -347,6 +354,9 @@ class DflyCmd {
   uint32_t next_sync_id_ = 1;
 
   ReplicaInfoMap replica_infos_ ABSL_GUARDED_BY(mu_);
+
+  // Writes are serialized by mu_. Readers only need the version, so relaxed ordering suffices.
+  static std::atomic<DflyVersion> min_replica_version_;
 
   mutable util::fb2::Mutex mu_;  // Guard global operations. See header top for locking levels.
 };

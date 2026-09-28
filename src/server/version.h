@@ -42,8 +42,11 @@ enum class DflyVersion {
   // - hnsw-index-metadata AUX field
   VER6,
 
+  // - Valkey hash field expiration encoding in snapshots and full sync
+  VER7,
+
   // Always points to the latest version
-  CURRENT_VER = VER6,
+  CURRENT_VER = VER7,
 };
 
 }  // namespace dfly

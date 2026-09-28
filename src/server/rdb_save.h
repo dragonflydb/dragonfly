@@ -32,7 +32,7 @@ namespace dfly {
 // keys are RDB_TYPE_xxx constants.
 using RdbTypeFreqMap = absl::flat_hash_map<unsigned, size_t>;
 
-uint8_t RdbObjectType(const CompactObj& pv);
+uint8_t RdbObjectType(const CompactObj& pv, DflyVersion version = DflyVersion::CURRENT_VER);
 
 class EngineShard;
 class Service;
@@ -265,12 +265,16 @@ class RdbSerializer {
   using ConsumeFun = std::function<std::error_code(std::string)>;
 
   explicit RdbSerializer(CompressionMode compression_mode, ConsumeFun consume_fun = {},
-                         size_t flush_threshold = 0);
+                         size_t flush_threshold = 0,
+                         DflyVersion version = DflyVersion::CURRENT_VER);
 
   ~RdbSerializer();
 
-  // Dumps `obj` in DUMP command format into `out`. Uses default compression mode.
-  static std::string DumpValue(const PrimeValue& obj, bool ignore_crc = false);
+  // Returns `obj` in DUMP command format using features supported by version.
+  // Uses default compression mode.
+  static std::string DumpValue(const PrimeValue& obj,
+                               DflyVersion version = DflyVersion::CURRENT_VER,
+                               bool ignore_crc = false);
   static std::string DumpValue(RdbSerializer* serializer, const PrimeValue& obj,
                                bool ignore_crc = false);
 
@@ -351,6 +355,7 @@ class RdbSerializer {
   std::error_code SaveListObject(const PrimeValue& pv);
   std::error_code SaveSetObject(const PrimeValue& pv);
   std::error_code SaveHSetObject(const PrimeValue& pv);
+  std::error_code SaveHSetExpiry(int64_t expiry);
   std::error_code SaveZSetObject(const PrimeValue& pv);
   std::error_code SaveStreamObject(const PrimeValue& obj);
   std::error_code SaveJsonObject(const PrimeValue& pv);
@@ -379,6 +384,7 @@ class RdbSerializer {
   };
 
   CompressionMode compression_mode_;
+  DflyVersion version_;
   std::unique_ptr<detail::CompressorImpl> compressor_impl_;
   std::optional<CompressionStats> compression_stats_;
   base::PODArray<uint8_t> tmp_buf_;

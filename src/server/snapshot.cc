@@ -101,7 +101,8 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
                          absl::GetFlag(FLAGS_serialize_hnsw_index) &&
                          replica_dfly_version_ >= DflyVersion::VER6;
 
-  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold);
+  serializer_ = std::make_unique<RdbSerializer>(compression_mode_, consume_fun, flush_threshold,
+                                                replica_dfly_version_);
 
   if (allow_flush == SnapshotFlush::kAllow) {
     serializer_->SetTagEntries(absl::GetFlag(FLAGS_serialization_tagged_chunks));
