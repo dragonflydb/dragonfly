@@ -278,7 +278,7 @@ bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
     ProcessDelayedEntries(true, 0, base_cntx_);
   }
 
-  return true;
+  return base_cntx_->IsRunning();
 }
 
 void SerializerBase::WaitForNoBucketBlocked() const {

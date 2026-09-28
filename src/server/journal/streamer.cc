@@ -201,8 +201,7 @@ void SlotMigrationStreamer::Start(util::FiberSocketBase* dest) {
 void SlotMigrationStreamer::Run() {
   VLOG(1) << "SlotMigrationStreamer run";
 
-  // If the context was cancelled before Start() ran, RegisterChangeListener was skipped and
-  // db_array_ is empty (see SlotMigrationStreamer::Start), so there is nothing to traverse.
+  // Returns false if cancelled, including before Start() ran (see SlotMigrationStreamer::Start).
   if (!TraverseAllBuckets(false /* skip empty buckets */))
     return;
 
@@ -350,6 +349,12 @@ bool SlotMigrationStreamer::ShouldWrite(SlotId slot_id) const {
 unsigned SlotMigrationStreamer::SerializeBucketLocked(DbIndex db_index,
                                                       PrimeTable::bucket_iterator it,
                                                       bool on_update) {
+  // Cluster mode blocks SELECT, but loading an RDB file taken from a non-cluster instance can
+  // still activate other databases. Slot ownership (and FlushSlots) covers only db 0, so keys
+  // in other databases are not migrated. This applies to both the traversal and OnChange flows.
+  if (db_index != 0)
+    return 0;
+
   auto& shard_stats = EngineShard::tlocal()->stats();
 
   unsigned written = 0;
@@ -376,8 +381,9 @@ unsigned SlotMigrationStreamer::SerializeBucketLocked(DbIndex db_index,
 void SlotMigrationStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,
                                                  const PrimeValue& pv, time_t expire,
                                                  uint32_t mc_flags) {
-  // Cluster mode supports only db 0. CmdSerializer hard-codes db index 0 into the journal entries
-  // it produces, so to remove this DCHECK we must first pass db_index through CmdSerializer.
+  // SerializeBucketLocked filters out other databases. CmdSerializer hard-codes db index 0 into
+  // the journal entries it produces, so to remove this DCHECK we must first pass db_index through
+  // CmdSerializer.
   DCHECK_EQ(db_index, 0u);
   migration_stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
 }
