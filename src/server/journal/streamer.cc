@@ -207,7 +207,7 @@ void SlotMigrationStreamer::Run() {
     return;
 
   VLOG(1) << "SlotMigrationStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
-          << ", shard " << db_slice_->shard_id() << ". Buckets looped " << BucketsLooped();
+          << ", shard " << db_slice_->shard_id() << ". Buckets looped " << GetBucketsLooped();
 }
 
 void SlotMigrationStreamer::OnTraverseBucket() {
@@ -252,7 +252,7 @@ void SlotMigrationStreamer::PaceTraversal(bool done) {
   }
 }
 
-uint64_t SlotMigrationStreamer::BucketsLooped() const {
+uint64_t SlotMigrationStreamer::GetBucketsLooped() const {
   const auto& stats = SerializerBase::GetStats();
   return stats.buckets_serialized - stats.buckets_on_change;
 }
@@ -261,7 +261,7 @@ void SlotMigrationStreamer::SendFinalize(long attempt) {
   auto base_stats = SerializerBase::GetStats();
   VLOG(1) << "SlotMigrationStreamer LSN of " << my_slots_.ToSlotRanges().ToString() << ", shard "
           << db_slice_->shard_id() << " attempt " << attempt << " with "
-          << migration_stats_.commands << " commands. Buckets looped " << BucketsLooped()
+          << migration_stats_.commands << " commands. Buckets looped " << GetBucketsLooped()
           << ", buckets on_db_update " << base_stats.buckets_on_change << ", buckets skipped "
           << base_stats.buckets_skipped << ", buckets written " << base_stats.buckets_serialized
           << ". Keys skipped " << migration_stats_.keys_skipped << ", keys written "

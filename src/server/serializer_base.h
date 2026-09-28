@@ -205,11 +205,6 @@ class SerializerBase : public BucketDependencies,
   // (yielding, flushing, stalling). done is true if the current database was fully traversed.
   virtual void PaceTraversal(bool done) = 0;
 
-  // Called by TraverseAllBuckets after db_index was fully traversed and its delayed entries were
-  // serialized.
-  virtual void OnDbTraversed(DbIndex db_index) {
-  }
-
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,

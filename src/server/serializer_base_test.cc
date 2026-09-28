@@ -133,10 +133,8 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   void ThrottleIfNeeded() override {
   }
 
-  // TODO: possibly replace with unified loop if we decide on this?
   void Loop();
   void PaceTraversal(bool done) override;
-  void OnDbTraversed(DbIndex db_index) override;
 
   void Serialize(BucketIdentity bucket, std::string key, unsigned obj_type) {
     if (obj_type == OBJ_STRING && absl::Bernoulli(bg_, params_.delay_prob)) {
@@ -235,10 +233,6 @@ void TestDriver::PaceTraversal(bool done) {
   // Simualte yield due to socket flushes
   for (unsigned i = 0; i < 2; ++i)
     util::ThisFiber::Yield();
-}
-
-void TestDriver::OnDbTraversed(DbIndex db_index) {
-  util::ThisFiber::Yield();
 }
 
 void TestDriver::ConsumeJournalChange(const journal::JournalChangeItem& item) {

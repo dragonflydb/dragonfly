@@ -96,7 +96,7 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
                             time_t expire, uint32_t mc_flags) override;
 
   // Number of buckets serialized by the traversal flow.
-  uint64_t BucketsLooped() const;
+  uint64_t GetBucketsLooped() const;
 
   bool ShouldWrite(const journal::JournalChangeItem& item) const;
   bool ShouldWrite(std::string_view key) const;

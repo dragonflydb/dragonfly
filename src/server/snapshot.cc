@@ -159,6 +159,8 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   if (!TraverseAllBuckets(true /* include empty buckets */))
     return;
 
+  PushSerialized(true);
+
   CHECK(!serialize_bucket_running_);
   if (send_full_sync_cut) {
     CHECK(!serializer_->SendFullSyncCut());
@@ -189,10 +191,6 @@ void SliceSnapshot::PaceTraversal(bool done) {
   if (!PushSerialized(false) && ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
     ThisFiber::Yield();
   }
-}
-
-void SliceSnapshot::OnDbTraversed(DbIndex db_index) {
-  PushSerialized(true);
 }
 
 unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,

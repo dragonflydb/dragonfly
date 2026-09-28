@@ -89,9 +89,6 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Flushes the serializer and yields between traversal steps.
   void PaceTraversal(bool done) override;
 
-  // Force-flushes the serializer after each database.
-  void OnDbTraversed(DbIndex db_index) override;
-
   // Serialize single bucket.
   // Returns number of serialized entries.
   unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,

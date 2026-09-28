@@ -276,8 +276,6 @@ bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
 
     // Wait for all the outstanding delayed entries and serialize them as well.
     ProcessDelayedEntries(true, 0, base_cntx_);
-
-    OnDbTraversed(db_index);
   }
 
   return true;
