@@ -424,7 +424,7 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     await nodes[1].client.execute_command("debug migration pause")
 
     await wait_for_error(
-        nodes[0].admin_client, nodes[1].id, "JournalStreamer write operation timeout", 30
+        nodes[0].admin_client, nodes[1].id, "BufferedSocketWriter write operation timeout", 30
     )
 
     logging.debug("debug migration resume")

@@ -30,7 +30,7 @@ class EngineShard;
 class EngineShardSet;
 class ServerFamily;
 class RdbSaver;
-class JournalStreamer;
+class ReplicaStreamer;
 struct ReplicaRoleInfo;
 struct ReplicationMemoryStats;
 
@@ -47,7 +47,7 @@ struct FlowInfo {
   // Owned by the shard that this flow corresponds to; only that shard's proactor
   // ever reads or writes these pointers, so no synchronization is needed.
   std::unique_ptr<RdbSaver> saver;            // Saver for full sync phase.
-  std::unique_ptr<JournalStreamer> streamer;  // Streamer for stable sync phase
+  std::unique_ptr<ReplicaStreamer> streamer;  // Streamer for stable sync phase
   std::string eof_token;
 
   std::optional<LSN> start_partial_sync_at;

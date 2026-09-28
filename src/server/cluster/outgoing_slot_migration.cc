@@ -123,7 +123,7 @@ class OutgoingMigration::SliceSlotMigration : private ProtocolClient {
 
  private:
   ExecutionState exec_st_;
-  RestoreStreamer streamer_;
+  SlotMigrationStreamer streamer_;
   bool cancel_started_ = false;
   BlockingCounter cancel_done_{1};
 };
