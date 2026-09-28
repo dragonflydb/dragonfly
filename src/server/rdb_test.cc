@@ -1158,6 +1158,34 @@ TEST_F(RdbTest, DebugReloadOnReplicaKeepsData) {
   pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = true; });
 }
 
+// A replica must load already-expired keys as-is; the master owns expiry and will send DELs.
+TEST_F(RdbTest, ReplicaLoadKeepsExpiredKeys) {
+  TEST_current_time_ms = 1000;
+  Run({"set", "expired", "v", "px", "100"});
+  Run({"set", "no_ttl", "v"});
+  Run({"set", "future_ttl", "v", "px", "1000000"});
+  EXPECT_EQ(Run({"save", "rdb"}), "OK");
+  string file_name = service_->server_family().GetLastSaveInfo().file_name;
+  Run({"flushall"});
+
+  // The key's TTL has passed but the master still holds it, as with the heartbeat backlog.
+  TEST_current_time_ms = 2000;
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = false; });
+  auto ec = pp_->at(0)->Await([&] {
+    auto open_res = io::OpenRead(file_name, io::ReadonlyFile::Options{});
+    CHECK(open_res) << file_name;
+    io::FileSource fs(*open_res);
+    RdbLoadContext load_context;
+    RdbLoader loader(service_.get(), &load_context);
+    return loader.Load(&fs);
+  });
+  ASSERT_FALSE(ec) << ec.message();
+  size_t loaded = CheckedInt({"dbsize"});
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = true; });
+
+  EXPECT_EQ(loaded, 3u);
+}
+
 TEST_F(RdbTest, DebugReloadSnapshotDirectoryKeepsData) {
   // Single-file .rdb: a directory shadowing the path passes fs::canonical, so it must be
   // rejected as a non-regular file before the flush.

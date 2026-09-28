@@ -816,6 +816,30 @@ async def test_expiry_on_replica(replication):
     assert val == "new-value", "Replication SET should overwrite expired key on replica"
 
 
+async def test_full_sync_keeps_expired_keys(df_factory: DflyInstanceFactory):
+    # hz=0 disables the heartbeat expiry sweep, so expired keys stay in the master's table.
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"proactor_threads": 2, "hz": 0},
+        replica_args={"proactor_threads": 2, "hz": 0},
+        connect=False,
+    )
+
+    n_keys = 100
+    for i in range(n_keys):
+        await c_master.execute_command("SET", f"expired-{i}", "v", "PX", 100)
+        await c_master.execute_command("SET", f"live-{i}", "v")
+    await asyncio.sleep(0.5)
+    # DBSIZE does not touch keys, so the expired ones are still counted.
+    assert await c_master.dbsize() == 2 * n_keys
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    async with async_timeout.timeout(30):
+        await wait_for_replicas_state(c_replica)
+
+    assert await c_replica.dbsize() == await c_master.dbsize()
+
+
 @dfly_args({"proactor_threads": 4})
 @pytest.mark.replication(replicas=2)
 async def test_simple_scripts(replication):
