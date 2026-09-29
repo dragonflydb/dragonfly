@@ -230,7 +230,7 @@ void SlotMigrationStreamer::PaceTraversal(bool done) {
   // If someone else throtles due to huge pending_buf_, give it priority.
   // In addition if bucket writing was too intensive on CPU and we are overloaded.
   // Note that we account for CPU time from OnChangeBlocking and here as well
-  // (inside SerializerBase::SerializeBucketLocked).
+  // (inside SerializerBase::SerializeBucket).
   // But we only throttle here, so if we migrated lots of slots during mutations, we
   // won't progress here but if we have not, then this fiber will progress withing the
   // CPU budget we defined for it.

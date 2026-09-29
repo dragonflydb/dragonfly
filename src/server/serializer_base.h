@@ -137,7 +137,7 @@ struct DelayedEntryHandler {
 //                      │
 //                      ▼
 // ┌───────────────────────────────────────────────┐
-// │             SerializeBucketLocked             │  (serializer_base.cc)
+// │                SerializeBucket                │  (serializer_base.cc)
 // │  Serializes entries passing ShouldSerialize   │
 // └────────────────────┬──────────────────────────┘
 //                      │
@@ -214,9 +214,10 @@ class SerializerBase : public BucketDependencies,
   }
 
   // Serialize a single bucket. Returns the number of entries serialized.
-  // Serializes the entries accepted by ShouldSerialize. Virtual only for testing.
-  virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                         bool on_update);
+  // Serializes the entries accepted by ShouldSerialize. Called without holding stream_mu_, which
+  // SerializeEntry takes per entry. Virtual only for testing.
+  virtual unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                   bool on_update);
 
   // Serialize single entry with expire/flags
   virtual void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
@@ -247,7 +248,7 @@ class SerializerBase : public BucketDependencies,
 
   Stats stats_;
 
-  // Accounts the time spent in SerializeBucketLocked, from both the traversal and OnChange flows.
+  // Accounts the time spent in SerializeBucket, from both the traversal and OnChange flows.
   base::RealTimeAggregator cpu_aggregator_;
 
   // Guards output stream (serializer) to not be used from multiple fibers
