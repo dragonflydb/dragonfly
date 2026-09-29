@@ -2886,6 +2886,40 @@ TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
   EXPECT_GE(GetMetrics().events.expired_keys, 1u);
 }
 
+namespace {
+
+TypeMemDeltas Snapshot() {
+  TypeMemDeltas total{};
+  for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
+    auto local = shard_set->Await(sid, [] { return EngineShard::tlocal()->type_mem_delta(); });
+    ranges::transform(total, local, total.begin(), plus{});
+  }
+  return total;
+}
+
+}  // namespace
+
+TEST_F(GenericFamilyTest, DeleteTrackMemByType) {
+  const string value(4096, 'x');
+  Run({"SET", "s", value});
+  Run({"HSET", "h", "field", value});
+  Run({"LPUSH", "l", value});
+
+  const auto before = Snapshot();
+  ASSERT_THAT(Run({"DEL", "s", "h", "l"}), IntArg(3));
+  const auto after = Snapshot();
+
+  for (size_t type = 0; type < before.size(); ++type)
+    if (type == OBJ_STRING || type == OBJ_HASH || type == OBJ_LIST)
+      EXPECT_LT(after[type] - before[type], 0);
+    else
+      EXPECT_EQ(after[type], before[type]);
+
+  // deleting missing items doesnt change the memory
+  ASSERT_THAT(Run({"DEL", "s", "h", "l"}), IntArg(0));
+  EXPECT_EQ(Snapshot(), after);
+}
+
 // Each iteration traverses the whole database, including command dispatch and RESP serialization
 // to a reusable in-memory sink. Run with --bench --gtest_filter='-*'
 // --benchmark_filter=BM_ScanCommand --benchmark_min_time=1s.

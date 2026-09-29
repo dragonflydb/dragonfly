@@ -37,6 +37,7 @@ ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 ABSL_DECLARE_FLAG(bool, enable_heartbeat_rss_eviction);
+ABSL_DECLARE_FLAG(bool, disable_scope_based_mem_track);
 
 namespace dfly {
 
@@ -191,6 +192,7 @@ BaseFamilyTest::~BaseFamilyTest() {
 void BaseFamilyTest::SetUpTestSuite() {
   kInitSegmentLog = 1;
 
+  absl::SetFlag(&FLAGS_disable_scope_based_mem_track, false);
   absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
   absl::SetFlag(&FLAGS_dbfilename, "");
   // We don't want rss eviction

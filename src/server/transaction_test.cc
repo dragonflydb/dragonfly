@@ -6,6 +6,7 @@
 
 #include <gmock/gmock.h>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/facade_stats.h"
@@ -22,6 +23,8 @@
 #include "util/fibers/pool.h"
 #include "util/fibers/synchronization.h"
 
+ABSL_DECLARE_FLAG(bool, disable_scope_based_mem_track);
+
 namespace dfly {
 
 using namespace std;
@@ -37,6 +40,7 @@ class TransactionTest : public Test {
   void TearDown() override;
 
   static void SetUpTestSuite() {
+    absl::SetFlag(&FLAGS_disable_scope_based_mem_track, false);
     ServerState::Init(kNumThreads, kNumThreads, nullptr, nullptr);
     facade::tl_facade_stats = new facade::FacadeStats;
   }
@@ -443,7 +447,7 @@ void AllButOneDeltaIs(const TypeMemDeltas& deltas, size_t pos, int64_t expected)
 }
 
 template <typename F> auto WithMemTrack(int obj_type, F f) {
-  MemoryScope scope(obj_type);
+  AtomicMemoryScope scope(obj_type);
   return f();
 }
 
@@ -472,7 +476,8 @@ TEST_F(TransactionTest, DeltaAllocAndFree) {
   });
 }
 
-TEST_F(TransactionTest, DeltaSuspendResume) {
+TEST_F(TransactionTest, DeltaInterleavedFibers) {
+  // A tx scope yields and another fiber opens a scope while tx is suspended
   OnShard(0, [] {
     const auto shard = EngineShard::tlocal();
     const auto mr = shard->memory_resource();
@@ -480,23 +485,65 @@ TEST_F(TransactionTest, DeltaSuspendResume) {
     const auto before = shard->type_mem_delta();
     void* p = nullptr;
     void* q = nullptr;
+    void* r = nullptr;
 
     {
-      MemoryScope scope_for_string{OBJ_STRING};
+      bool other_ran = false;
+      fb2::Fiber other{"other", [&] {
+                         AtomicMemoryScope list_scope{OBJ_LIST};
+                         q = mr->allocate(128);
+                         other_ran = true;
+                       }};
+      TxMemoryScope scope_for_string{OBJ_STRING};
       p = mr->allocate(1024);
 
-      scope_for_string.Suspend();
+      ThisFiber::Yield();
+      other.Join();
+      ASSERT_TRUE(other_ran);
 
-      q = mr->allocate(128);
-
-      scope_for_string.Resume();
+      r = mr->allocate(512);
     }
 
-    const auto diff = DeltaDiff(before, shard->type_mem_delta());
-    AllButOneDeltaIs(diff, OBJ_STRING, 1024);
+    TypeMemDeltas expected{};
+    expected[OBJ_STRING] = 1024 + 512;
+    expected[OBJ_LIST] = 128;
+    EXPECT_EQ(DeltaDiff(before, shard->type_mem_delta()), expected);
 
     mr->deallocate(p, 1024);
     mr->deallocate(q, 128);
+    mr->deallocate(r, 512);
+  });
+}
+
+TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
+  OnShard(0, [] {
+    const auto shard = EngineShard::tlocal();
+    const auto mr = shard->memory_resource();
+    std::vector<std::pair<void*, size_t>> tracked;
+
+    // these allocations of size s are actually counted for the size, and cleaned up later
+    auto track = [&](size_t s) { tracked.emplace_back(mr->allocate(s), s); };
+
+    const auto before = shard->type_mem_delta();
+    {
+      TxMemoryScope scope{OBJ_STRING};
+      track(1024);
+      WithMemTrack(OBJ_LIST, [&] { track(512); });
+      WithMemTrack(OBJ_HASH, [&] {
+        // Temporary allocations freed in the same scope should not contribute to its delta.
+        void* p = mr->allocate(256);
+        track(128);
+        mr->deallocate(p, 256);
+      });
+    }
+    TypeMemDeltas expected{};
+    expected[OBJ_STRING] = 1024;
+    expected[OBJ_LIST] = 512;
+    expected[OBJ_HASH] = 128;
+    EXPECT_EQ(DeltaDiff(before, shard->type_mem_delta()), expected);
+
+    for (const auto& [ptr, size] : tracked)
+      mr->deallocate(ptr, size);
   });
 }
 

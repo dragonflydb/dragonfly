@@ -28,10 +28,10 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
-#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 
 ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
@@ -873,6 +873,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
+  DeductFromTxScope(table_increase);
   memory_budget_ -= table_increase;
 
   if (memory_budget_ < 0 && apply_memory_limit) {
@@ -2084,6 +2085,10 @@ void DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
 
 void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async) {
   FiberAtomicGuard guard;
+
+  const int obj_type = del_it->second.ObjType();
+  AtomicMemoryScope scope(obj_type);
+
   size_t table_before = table->table_memory();
 
   if (del_it->second.HasFlag()) {
