@@ -435,7 +435,7 @@ void InitLua(lua_State* lua) {
    * information about the caller, that's what makes sense from the point
    * of view of the user debugging a script. */
   {
-    const char errh_func[] =
+    constexpr char errh_func[] =
         "local dbg = debug\n"
         "function __redis__err__handler(err)\n"
         "  local i = dbg.getinfo(2,'nSl')\n"
@@ -558,7 +558,7 @@ int DragonflyHashCommand(lua_State* lua) {
                                                             &translator);
 
   if (requires_sort)
-    sort(translator.values.begin(), translator.values.end());
+    ranges::sort(translator.values);
 
   // Compute new hash and return it
   for (string_view str : translator.values)
@@ -1133,9 +1133,8 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
         is_target = false;
       } else if (!found_real_line) {
         is_target = true;  // nothing but blanks/comments above - treat as start of script
-      } else if (kContOperators.count(last_n(last_word, 2)) > 0 ||
-                 kContOperators.count(last_n(last_word, 1)) > 0 ||
-                 kContTokens.count(last_word) > 0) {
+      } else if (kContOperators.contains(last_n(last_word, 2)) ||
+                 kContOperators.contains(last_n(last_word, 1)) || kContTokens.contains(last_word)) {
         is_target = false;
       } else {
         is_target = true;
@@ -1150,7 +1149,7 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
     return nullopt;
 
   // Insert 'a' before 'call' and 'pcall'. Reverse order to preserve positions
-  reverse(targets.begin(), targets.end());
+  ranges::reverse(targets);
   body.reserve(body.size() + targets.size());
   for (auto pos : targets)
     body.insert(pos, "a");
@@ -1486,7 +1485,7 @@ InterpreterManager::Stats& InterpreterManager::Stats::operator+=(const Stats& ot
 }
 
 InterpreterManager::Stats& InterpreterManager::tl_stats() {
-  static thread_local Stats stats;
+  thread_local Stats stats;
   return stats;
 }
 
