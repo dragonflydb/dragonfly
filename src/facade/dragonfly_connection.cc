@@ -664,16 +664,16 @@ void QueueBackpressure::SubSubscriberBytes(size_t mem) {
 // Global array for each io thread to keep track of the total memory usage of the dispatch queues.
 QueueBackpressure* thread_queue_backpressure = nullptr;
 
-QueueBackpressure& GetQueueBackpressure() {
+// A fiber can resume on a different OS thread after suspension, making earlier TLS-derived state
+// stale. Keep these accessors out of line so each lookup is redone after a possible migration.
+// This comment is valid for all same pattern functions ahead.
+QueueBackpressure& __attribute__((noinline)) GetQueueBackpressure() {
   DCHECK(thread_queue_backpressure != nullptr);
+  asm volatile("");
 
   return thread_queue_backpressure[ProactorBase::me()->GetPoolIndex()];
 }
 
-// A special accessor for accessing thread local ConnectionStats that is robust to fiber-thread
-// migrations. Compiler optimizations can cache a stale thread local pointer, and not refresh it
-// after HandleMigrateRequest() is called. This function should be used to force loading
-// the variable from memory every time, preventing such bugs.
 ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
   // https://stackoverflow.com/a/75622732
   asm volatile("");
@@ -681,8 +681,6 @@ ConnectionStats& __attribute__((noinline)) GetLocalConnStats() {
   return tl_facade_stats->conn_stats;
 }
 
-// See GetLocalConnStats() above. Connection fibers can migrate between proactors, so reload this
-// thread-local buffer after every possible migration point.
 ProactorReadBuffer& __attribute__((noinline)) GetSharedReadBuffer() {
   asm volatile("");
 
