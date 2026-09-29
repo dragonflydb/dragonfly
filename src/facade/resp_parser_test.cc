@@ -6,6 +6,8 @@
 
 #include <mimalloc.h>
 
+#include <sstream>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 
@@ -117,6 +119,91 @@ TEST_F(RESPParserTest, StreamingState) {
 
 TEST_F(RESPParserTest, ArrayLimit) {
   EXPECT_FALSE(RESPParser({.max_array_len = 2}).Feed("*3\r\n", 4).has_value());
+}
+
+TEST_F(RESPParserTest, ReplyLimits) {
+  string nested;
+  for (size_t i = 0; i < 64; ++i) {
+    nested += "*1\r\n";
+  }
+  struct TestCase {
+    RESPParser::Limits limits;
+    string message;
+    bool accepted;
+  };
+  const TestCase cases[] = {
+      {{.max_array_len = 0}, "*0\r\n", true},
+      {{.max_array_len = 0}, "*-1\r\n", true},
+      {{.max_array_len = 0}, "*1\r\n", false},
+      {{.max_bulk_len = 4}, "$4\r\nPING\r\n", true},
+      {{.max_bulk_len = 4}, "$5\r\n", false},
+      {{.max_bulk_len = 4}, "*1\r\n$5\r\n", false},
+      {{.max_bulk_len = 0}, "$0\r\n\r\n", true},
+      {{.max_bulk_len = 0}, "$-1\r\n", true},
+      {{.max_bulk_len = 0}, "$1\r\n", false},
+      {{.max_depth = 64}, nested + "+OK\r\n", true},
+      {{.max_depth = 64}, nested + "*0\r\n", true},
+      {{.max_depth = 64}, nested + "*-1\r\n", true},
+      {{.max_depth = 64}, nested + "*1\r\n", false},
+      {{.max_depth = 2}, "*2\r\n*1\r\n:1\r\n*1\r\n:2\r\n", true},
+      {{.max_depth = 2}, "*1\r\n~1\r\n%1\r\n", false},
+      {{.max_depth = 0}, "*1\r\n", false},
+  };
+  for (const auto& [limits, message, accepted] : cases) {
+    SCOPED_TRACE(message);
+    RESPParser parser(limits);
+    string buffered = "+OK\r\n" + message;
+    auto reply = parser.Feed(buffered.data(), buffered.size());
+    ASSERT_TRUE(reply.has_value());
+    EXPECT_EQ(reply->As<string_view>(), "OK");
+    reply = parser.Feed(nullptr, 0);
+    ASSERT_EQ(reply.has_value(), accepted);
+    if (accepted) {
+      EXPECT_FALSE(reply->Empty());
+    }
+  }
+}
+
+TEST_F(RESPParserTest, UnterminatedLengthHeaders) {
+  for (char type : {'$', '=', '*', '%', '~'}) {
+    SCOPED_TRACE(type);
+    RESPParser parser;
+    string header = string(1, type) + string(21, '9');
+    auto reply = parser.Feed(header.data(), header.size());
+    ASSERT_TRUE(reply.has_value());
+    EXPECT_TRUE(reply->Empty());
+    EXPECT_FALSE(parser.Feed("9", 1).has_value());
+  }
+}
+
+TEST_F(RESPParserTest, ReplyDiagnostics) {
+  const pair<string_view, string_view> cases[] = {
+      {"+OK\r\n", "OK"},
+      {"-ERR migration failed\r\n", "ERR migration failed"},
+      {"$4\r\nFAIL\r\n", "FAIL"},
+      {":42\r\n", "42"},
+      {",1.5\r\n", "1.5"},
+      {"$-1\r\n", "NIL"},
+      {"*-1\r\n", "NIL"},
+      {"%-1\r\n", "NIL"},
+      {"~-1\r\n", "NIL"},
+      {"*0\r\n", "[]"},
+      {"%0\r\n", "[]"},
+      {"~0\r\n", "[]"},
+      {"*3\r\n-ERR migration failed\r\n:42\r\n*0\r\n", "[ERR migration failed, 42, []]"},
+      {"*3\r\n*-1\r\n$-1\r\n*0\r\n", "[NIL, NIL, []]"},
+  };
+  for (auto [message, expected] : cases) {
+    SCOPED_TRACE(message);
+    RESPParser parser;
+    auto reply = parser.Feed(message.data(), message.size());
+    ASSERT_TRUE(reply.has_value());
+    ASSERT_FALSE(reply->Empty());
+
+    ostringstream os;
+    os << *reply;
+    EXPECT_EQ(os.str(), expected);
+  }
 }
 
 TEST_F(RESPParserTest, SurvivesDataHeapDestruction) {

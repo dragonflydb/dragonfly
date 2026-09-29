@@ -65,6 +65,8 @@ void RESPParser::Reset(Limits limits) {
   CHECK(reader_);
 
   reader_->maxelements = limits.max_array_len;
+  reader_->maxbulklen = limits.max_bulk_len;
+  reader_->maxdepth = limits.max_depth;
 }
 
 RESPParser::~RESPParser() {
@@ -190,12 +192,18 @@ std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
 }
 
 std::ostream& operator<<(std::ostream& os, const RESPArray& arr) {
-  os << "[";
-  for (int64_t i = 0; i < (int64_t)arr.Size() - 1; ++i) {
-    os << arr[i] << ", ";
+  // Hiredis preserves null aggregates with SIZE_MAX elements.
+  if (arr.Size() == SIZE_MAX) {
+    return os << "NIL";
   }
-  os << arr[arr.Size() - 1] << "]";
-  return os;
+  if (arr.Empty()) {
+    return os << "[]";
+  }
+  os << "[" << arr[0];
+  for (size_t i = 1; i < arr.Size(); ++i) {
+    os << ", " << arr[i];
+  }
+  return os << "]";
 }
 
 }  // namespace facade

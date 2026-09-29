@@ -370,14 +370,6 @@ io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBu
   return nonstd::make_unexpected(ec);
 }
 
-io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(uint32_t timeout) {
-  auto prev_timeout = sock_->timeout();
-  sock_->set_timeout(timeout);
-  auto res = ReadRespReply();
-  sock_->set_timeout(prev_timeout);
-  return res;
-}
-
 io::Result<ProtocolClient::ReadCommandRes> ProtocolClient::ReadRespCommand(
     base::IoBuf* buffer, cmn::BackedArguments* dest) {
   DCHECK(!parser_);
@@ -433,12 +425,14 @@ io::Result<dfly::RESPObj> ProtocolClient::TakeRespReply(uint32_t timeout, base::
 
   last_resp_ = "";
 
-  uint32_t processed_bytes = 0;
   std::optional<dfly::RESPObj> resp;
 
   do {
     resp = resp_parser_.Feed(nullptr, 0);  // check if previous data produced a reply
-    if (resp && !resp->Empty()) {
+    if (!resp) {
+      break;
+    }
+    if (!resp->Empty()) {
       VLOG(2) << "return reply from previous data read";
       return std::move(resp).value();  // success path
     }
@@ -453,7 +447,6 @@ io::Result<dfly::RESPObj> ProtocolClient::TakeRespReply(uint32_t timeout, base::
 
     auto input_buf = buffer->InputBuffer();
     resp = resp_parser_.Feed(reinterpret_cast<char*>(input_buf.data()), input_buf.size());
-    processed_bytes += input_buf.size();
     if (copy_msg)
       last_resp_ +=
           std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), input_buf.size());
@@ -549,10 +542,30 @@ error_code ProtocolClient::SendCommandAndReadResponse(string_view command) {
   return response_res.has_value() ? error_code{} : response_res.error();
 }
 
+io::Result<RESPObj> ProtocolClient::SendCommandAndTakeReply(string_view command) {
+  last_cmd_ = command;
+  if (auto ec = SendCommand(command); ec)
+    return nonstd::make_unexpected(ec);
+  return TakeRespReply(sock_->timeout());
+}
+
 void ProtocolClient::ResetParser() {
   parser_ = make_unique<RedisParser>(RedisParser::Mode::CLIENT, GetFlag(FLAGS_max_multi_bulk_len),
                                      GetFlag(FLAGS_max_bulk_len));
   resp_parser_.Reset();
+}
+
+void ProtocolClient::ResetReplyParser() {
+  // TODO: Remove this transition cleanup once RedisParser is fully removed.
+  // The legacy authentication reader leaves its reply in resp_buf_.
+  parser_.reset();
+  resp_args_.clear();
+  resp_buf_.Clear();
+
+  // Preserve the legacy reply parser's bulk-size and nesting limits.
+  resp_parser_.Reset({.max_array_len = GetFlag(FLAGS_max_multi_bulk_len),
+                      .max_bulk_len = min<uint64_t>(GetFlag(FLAGS_max_bulk_len), UINT32_MAX),
+                      .max_depth = 64});
 }
 
 void ProtocolClient::ResetCommandParser() {
@@ -560,8 +573,10 @@ void ProtocolClient::ResetCommandParser() {
 
   // An upstream master's commands may contain more arguments than regular client requests.
   uint32_t max_array_len = max(GetFlag(FLAGS_max_multi_bulk_len), 1u << 20);
-  // TODO: Add bulk-length, line-length, and nesting-depth limits to RESPParser.
-  resp_parser_.Reset({.max_array_len = max_array_len});
+  // TODO: Add a line-length limit to RESPParser.
+  resp_parser_.Reset({.max_array_len = max_array_len,
+                      .max_bulk_len = min<uint64_t>(GetFlag(FLAGS_max_bulk_len), UINT32_MAX),
+                      .max_depth = 64});
 }
 
 uint64_t ProtocolClient::LastIoTime() const {
