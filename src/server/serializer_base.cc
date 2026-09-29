@@ -281,6 +281,28 @@ bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
   return base_cntx_->IsRunning();
 }
 
+unsigned SerializerBase::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                               bool on_update) {
+  base::CpuTimeGuard guard(&cpu_aggregator_);
+
+  unsigned serialized = 0;
+  for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+    // Version is already stamped by ProcessBucket.
+    DCHECK_EQ(it.GetVersion(), snapshot_version_);
+
+    if (!ShouldSerialize(db_index, it->first)) {
+      ++stats_.keys_skipped;
+      continue;
+    }
+
+    // Might preempt due to big value serialization.
+    SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
+    ++serialized;
+  }
+
+  return serialized;
+}
+
 void SerializerBase::WaitForNoBucketBlocked() const {
   BucketDependencies::WaitEmpty();
 }

@@ -230,7 +230,7 @@ void SlotMigrationStreamer::PaceTraversal(bool done) {
   // If someone else throtles due to huge pending_buf_, give it priority.
   // In addition if bucket writing was too intensive on CPU and we are overloaded.
   // Note that we account for CPU time from OnChangeBlocking and here as well
-  // (inside SerializeBucketLocked).
+  // (inside SerializerBase::SerializeBucketLocked).
   // But we only throttle here, so if we migrated lots of slots during mutations, we
   // won't progress here but if we have not, then this fiber will progress withing the
   // CPU budget we defined for it.
@@ -263,7 +263,7 @@ void SlotMigrationStreamer::SendFinalize(long attempt) {
           << migration_stats_.commands << " commands. Buckets looped " << GetBucketsLooped()
           << ", buckets on_db_update " << base_stats.buckets_on_change << ", buckets skipped "
           << base_stats.buckets_skipped << ", buckets written " << base_stats.buckets_serialized
-          << ". Keys skipped " << migration_stats_.keys_skipped << ", keys written "
+          << ". Keys skipped " << base_stats.keys_skipped << ", keys written "
           << base_stats.keys_serialized << " throttle count: " << writer_.throttle_count()
           << ", iter_skips: " << migration_stats_.iter_skips;
 
@@ -346,45 +346,25 @@ bool SlotMigrationStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-unsigned SlotMigrationStreamer::SerializeBucketLocked(DbIndex db_index,
-                                                      PrimeTable::bucket_iterator it,
-                                                      bool on_update) {
+bool SlotMigrationStreamer::ShouldSerialize(DbIndex db_index, const PrimeKey& pk) const {
   // Cluster mode blocks SELECT, but loading an RDB file taken from a non-cluster instance can
   // still activate other databases. Slot ownership (and FlushSlots) covers only db 0, so keys
   // in other databases are not migrated. This applies to both the traversal and OnChange flows.
   if (db_index != 0)
-    return 0;
+    return false;
 
-  auto& shard_stats = EngineShard::tlocal()->stats();
-
-  unsigned written = 0;
   std::string key_buffer;
-
-  base::CpuTimeGuard guard(&cpu_aggregator_);
-
-  for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-    const auto& pv = it->second;
-    string_view key = it->first.GetSlice(&key_buffer);
-    if (ShouldWrite(key)) {
-      ++shard_stats.total_migrated_keys;
-      SerializerBase::SerializeEntry(it.bucket_address(), db_index, it->first, pv);
-      ++written;
-    } else {
-      migration_stats_.keys_skipped++;
-    }
-  }
-
-  // we don't need throttle here, because we throttle after every entry written
-  return written;
+  return ShouldWrite(pk.GetSlice(&key_buffer));
 }
 
 void SlotMigrationStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,
                                                  const PrimeValue& pv, time_t expire,
                                                  uint32_t mc_flags) {
-  // SerializeBucketLocked filters out other databases. CmdSerializer hard-codes db index 0 into
+  // ShouldSerialize filters out other databases. CmdSerializer hard-codes db index 0 into
   // the journal entries it produces, so to remove this DCHECK we must first pass db_index through
   // CmdSerializer.
   DCHECK_EQ(db_index, 0u);
+  ++EngineShard::tlocal()->stats().total_migrated_keys;
   migration_stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
 }
 

@@ -161,7 +161,6 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
   PushSerialized(true);
 
-  CHECK(!serialize_bucket_running_);
   if (send_full_sync_cut) {
     CHECK(!serializer_->SendFullSyncCut());
     PushSerialized(true);
@@ -191,27 +190,6 @@ void SliceSnapshot::PaceTraversal(bool done) {
   if (!PushSerialized(false) && ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
     ThisFiber::Yield();
   }
-}
-
-unsigned SliceSnapshot::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                              bool on_update) {
-  // traverse physical bucket and write it into string file.
-  serialize_bucket_running_ = true;
-
-  unsigned serialized = 0;
-
-  for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
-    // Version is already stamped by SerializerBase::ProcessBucket.
-    DCHECK_EQ(it.GetVersion(), snapshot_version_);
-
-    ++serialized;
-
-    // might preempt due to big value serialization.
-    SerializerBase::SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
-  }
-
-  serialize_bucket_running_ = false;
-  return serialized;
 }
 
 void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,

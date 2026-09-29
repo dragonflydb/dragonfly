@@ -9,6 +9,7 @@
 #include <memory>
 #include <vector>
 
+#include "base/cycle_clock.h"
 #include "io/io.h"
 #include "server/db_slice.h"
 #include "server/synchronization.h"
@@ -136,8 +137,8 @@ struct DelayedEntryHandler {
 //                      │
 //                      ▼
 // ┌───────────────────────────────────────────────┐
-// │        SerializeBucketLocked (virtual)        │  (snapshot.cc / streamer.cc)
-// │  Iterates bucket entries, serializes each one │
+// │             SerializeBucketLocked             │  (serializer_base.cc)
+// │  Serializes entries passing ShouldSerialize   │
 // └────────────────────┬──────────────────────────┘
 //                      │
 //          ┌───────────┴───────────┐
@@ -168,6 +169,7 @@ class SerializerBase : public BucketDependencies,
     uint64_t buckets_serialized = 0;           // total number of buckets serialized
     uint64_t buckets_on_change = 0;            // buckets serialized by OnChangeBlocking flow
     uint64_t buckets_skipped = 0;              // already Covered when seen
+    uint64_t keys_skipped = 0;                 // rejected by ShouldSerialize
     uint64_t change_during_serialization = 0;  // change hit an in-flight bucket
   };
 
@@ -205,10 +207,16 @@ class SerializerBase : public BucketDependencies,
   // (yielding, flushing, stalling). done is true if the current database was fully traversed.
   virtual void PaceTraversal(bool done) = 0;
 
+  // Returns false if the entry should not be serialized, e.g. because it does not belong to
+  // the serialized subset of the data.
+  virtual bool ShouldSerialize(DbIndex db_index, const PrimeKey& pk) const {
+    return true;
+  }
+
   // Serialize a single bucket. Returns the number of entries serialized.
-  // To be implemented by classses extending this base class.
+  // Serializes the entries accepted by ShouldSerialize. Virtual only for testing.
   virtual unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                         bool on_update) = 0;
+                                         bool on_update);
 
   // Serialize single entry with expire/flags
   virtual void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
@@ -238,6 +246,9 @@ class SerializerBase : public BucketDependencies,
   DbTableArray db_array_;
 
   Stats stats_;
+
+  // Accounts the time spent in SerializeBucketLocked, from both the traversal and OnChange flows.
+  base::RealTimeAggregator cpu_aggregator_;
 
   // Guards output stream (serializer) to not be used from multiple fibers
   // as buffered changes can be flushed amid writing a value (logical stream)
