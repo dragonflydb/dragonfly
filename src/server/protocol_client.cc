@@ -425,7 +425,6 @@ io::Result<dfly::RESPObj> ProtocolClient::TakeRespReply(uint32_t timeout, base::
 
   last_resp_ = "";
 
-  uint32_t processed_bytes = 0;
   std::optional<dfly::RESPObj> resp;
 
   do {
@@ -448,7 +447,6 @@ io::Result<dfly::RESPObj> ProtocolClient::TakeRespReply(uint32_t timeout, base::
 
     auto input_buf = buffer->InputBuffer();
     resp = resp_parser_.Feed(reinterpret_cast<char*>(input_buf.data()), input_buf.size());
-    processed_bytes += input_buf.size();
     if (copy_msg)
       last_resp_ +=
           std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), input_buf.size());
@@ -575,8 +573,10 @@ void ProtocolClient::ResetCommandParser() {
 
   // An upstream master's commands may contain more arguments than regular client requests.
   uint32_t max_array_len = max(GetFlag(FLAGS_max_multi_bulk_len), 1u << 20);
-  // TODO: Apply bulk-length/nesting limits here and add a line-length limit to RESPParser.
-  resp_parser_.Reset({.max_array_len = max_array_len});
+  // TODO: Add a line-length limit to RESPParser.
+  resp_parser_.Reset({.max_array_len = max_array_len,
+                      .max_bulk_len = min<uint64_t>(GetFlag(FLAGS_max_bulk_len), UINT32_MAX),
+                      .max_depth = 64});
 }
 
 uint64_t ProtocolClient::LastIoTime() const {
