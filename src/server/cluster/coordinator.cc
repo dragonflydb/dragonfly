@@ -6,7 +6,6 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "facade/redis_parser.h"
 #include "facade/socket_utils.h"
 #include "server/cluster/cluster_config.h"
 
@@ -79,7 +78,7 @@ class Coordinator::CrossShardClient : public ProtocolClient {
       return false;
     }
 
-    ResetParser();
+    ResetReplyParser();
     send_fb_ = util::fb2::Fiber("CSS_SendFb", &CrossShardClient::SendFb, this);
     resp_fb_ = util::fb2::Fiber("CSS_RespFb", &CrossShardClient::RespFb, this);
     return true;
