@@ -10,6 +10,7 @@ import redis
 from redis import asyncio as aioredis
 
 from . import dfly_args
+from .fake_node import FakeRedisNode
 from .instance import DflyInstanceFactory
 from .replication_utils import (
     ADMIN_PORT,
@@ -39,6 +40,37 @@ M_SLOW = [pytest.mark.large]
 
 M_STRESS = [pytest.mark.large, pytest.mark.opt_only]
 M_NOT_EPOLL = [pytest.mark.exclude_epoll]
+
+
+@pytest.mark.parametrize("rdb_framing", ["length", "eof"])
+async def test_replication_stops_on_unsupported_rdb(df_factory, unsupported_rdb, rdb_framing):
+    rdb, error = unsupported_rdb
+    async with FakeRedisNode(rdb, rdb_framing=rdb_framing) as master:
+        replica = df_factory.create(proactor_threads=2, replicaof=f"{master.host}:{master.port}")
+        with replica:
+            client = replica.client()
+            await asyncio.wait_for(master.disconnected.wait(), timeout=10)
+            # The reconnect loop waits 500 ms. An incompatible format must stop it.
+            await asyncio.sleep(1.5)
+            assert master.sync_attempts == 1
+
+            info = await client.info("replication")
+            assert info["role"] == "slave"
+            assert info["master_link_status"] == "down"
+            assert info["master_sync_in_progress"] == 0
+            with pytest.raises(redis.exceptions.ReadOnlyError):
+                await client.set("key", "value")
+            assert await client.dbsize() == 0
+
+            # REPLICAOF must allow recovery after a terminal error.
+            compatible_master = df_factory.create(proactor_threads=2)
+            compatible_master.start()
+            await compatible_master.client().set("key", "value")
+            await client.execute_command("REPLICAOF", "127.0.0.1", compatible_master.port)
+            await asyncio.wait_for(wait_for_replicas_state(client), timeout=10)
+            assert await client.get("key") == "value"
+
+    assert replica.is_in_logs(f"Replication stopped.*{error}")
 
 
 """

@@ -25,6 +25,7 @@ extern "C" {
 #include "io/file.h"
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
+#include "server/error.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/rdb_extensions.h"
@@ -82,7 +83,16 @@ class RdbTest : public BaseFamilyTest {
 
   io::FileSource GetSource(string name);
 
-  std::error_code LoadRdb(const string& filename) {
+  std::error_code LoadRdb(const string& filename, string_view header = {}) {
+    if (!header.empty()) {
+      auto data = io::ReadFileToString(base::ProgramRunfile("testdata/" + filename));
+      CHECK(data) << filename;
+      data->replace(0, header.size(), header);
+      // Disable the checksum after changing the header.
+      data->replace(data->size() - 8, 8, 8, '\0');
+      return LoadRdbBytes(reinterpret_cast<const uint8_t*>(data->data()), data->size());
+    }
+
     return pp_->at(0)->Await([&] {
       io::FileSource fs = GetSource(filename);
 
@@ -179,14 +189,27 @@ TEST_F(RdbTest, LoadEmpty) {
   ASSERT_FALSE(ec) << ec;
 }
 
-TEST_F(RdbTest, LoadValkeyHashWithExpiry) {
-  auto ec = LoadRdb("valkey9_hash_expiry.rdb");
-  ASSERT_FALSE(ec) << ec.message();
+TEST_F(RdbTest, UnsupportedVersion) {
+  for (string_view header : {"REDIS0004", "VALKEY079"}) {
+    SCOPED_TRACE(header);
+    auto ec = LoadRdbBytes(to_byte(header.data()), header.size());
+    EXPECT_EQ(ec, RdbError(rdb::errc::bad_version));
+    EXPECT_EQ(ec.message(), "Unsupported RDB version");
+  }
+}
 
-  EXPECT_THAT(Run({"HGETALL", "hash"}).GetVec(),
-              UnorderedElementsAre("expiring", "one", "persistent", "two", "overflow", "three"));
-  EXPECT_THAT(Run({"HPEXPIRETIME", "hash", "FIELDS", "2", "expiring", "persistent"}),
-              RespElementsAre(2524608000000, -1));
+TEST_F(RdbTest, LoadValkeyHashWithExpiry) {
+  for (string_view header : {"", "VALKEY081", "VALKEY999"}) {
+    SCOPED_TRACE(header);
+    EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+    auto ec = LoadRdb("valkey9_hash_expiry.rdb", header);
+    ASSERT_FALSE(ec) << ec.message();
+
+    EXPECT_THAT(Run({"HGETALL", "hash"}).GetVec(),
+                UnorderedElementsAre("expiring", "one", "persistent", "two", "overflow", "three"));
+    EXPECT_THAT(Run({"HPEXPIRETIME", "hash", "FIELDS", "2", "expiring", "persistent"}),
+                RespElementsAre(2524608000000, -1));
+  }
 }
 
 TEST_F(RdbTest, LoadSmall6) {
@@ -702,37 +725,37 @@ TEST_P(HllRdbTest, Hll) {
 INSTANTIATE_TEST_SUITE_P(HllRdbTest, HllRdbTest, Values("key-sparse", "key-dense"));
 
 TEST_F(RdbTest, LoadSmall7) {
-  // Contains 3 keys
-  // 1. A list called my-list encoded as RDB_TYPE_LIST_QUICKLIST_2
-  // 2. A hashtable called my-hset encoded as RDB_TYPE_HASH_LISTPACK
-  // 3. A set called my-set encoded as RDB_TYPE_SET_LISTPACK
-  // 4. A zset called my-zset encoded as RDB_TYPE_ZSET_LISTPACK
-  auto ec = LoadRdb("redis7_small.rdb");
+  // Covers quicklist2 lists and listpack hashes, sets, and sorted sets.
+  for (string_view header : {"", "REDIS0015", "REDIS9999"}) {
+    SCOPED_TRACE(header);
+    EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+    auto ec = LoadRdb("redis7_small.rdb", header);
 
-  ASSERT_FALSE(ec) << ec.message();
+    ASSERT_FALSE(ec) << ec.message();
 
-  auto resp = Run({"scan", "0"});
+    auto resp = Run({"scan", "0"});
 
-  ASSERT_THAT(resp, ArrLen(2));
+    ASSERT_THAT(resp, ArrLen(2));
 
-  EXPECT_THAT(StrArray(resp.GetVec()[1]),
-              UnorderedElementsAre("my-set", "my-hset", "my-list", "zset"));
+    EXPECT_THAT(StrArray(resp.GetVec()[1]),
+                UnorderedElementsAre("my-set", "my-hset", "my-list", "zset"));
 
-  resp = Run({"smembers", "my-set"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("redis", "acme"));
+    resp = Run({"smembers", "my-set"});
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("redis", "acme"));
 
-  resp = Run({"hgetall", "my-hset"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("acme", "44", "field", "22"));
+    resp = Run({"hgetall", "my-hset"});
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("acme", "44", "field", "22"));
 
-  resp = Run({"lrange", "my-list", "0", "-1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("list1", "list2"));
+    resp = Run({"lrange", "my-list", "0", "-1"});
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    EXPECT_THAT(resp.GetVec(), ElementsAre("list2", "list1"));
 
-  resp = Run({"zrange", "zset", "0", "-1"});
-  ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(resp.GetVec(), ElementsAre("einstein", "schrodinger"));
+    resp = Run({"zrange", "zset", "0", "-1"});
+    ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
+    EXPECT_THAT(resp.GetVec(), ElementsAre("einstein", "schrodinger"));
+  }
 }
 
 TEST_F(RdbTest, RedisJson) {
@@ -1778,6 +1801,58 @@ struct InterleaveHarness {
 };
 
 }  // namespace
+
+TEST_F(RdbTest, UnsupportedTypeOrOpcode) {
+  // Redis hash metadata (22) and newer types overlap with Dragonfly's custom types.
+  // Reject them before attempting to read their payload, even after loading a supported key.
+  for (string_view header : {"REDIS0012", "REDIS0015", "VALKEY081"}) {
+    SCOPED_TRACE(header);
+    for (int type : {22, 24, 27, 30, 200, 220, 243}) {
+      if (header == "VALKEY081" && type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS)
+        continue;
+      SCOPED_TRACE(type);
+      EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+      string body(1, RDB_TYPE_STRING);
+      AddKV(&body, "supported", "value");
+      body.push_back(type);
+      auto data = WrapInRdb(body);
+      data.replace(0, 9, header);
+
+      auto ec = LoadRdbBytes(to_byte(data.data()), data.size());
+      EXPECT_EQ(ec, RdbError(rdb::errc::invalid_rdb_type));
+      EXPECT_EQ(ec.message(), "Unsupported RDB object type or opcode");
+      EXPECT_EQ(Run({"GET", "supported"}), "value");
+    }
+  }
+}
+
+TEST_F(RdbTest, DragonflyExtensions) {
+  for (string_view header : {"REDIS0009", "REDIS0015"}) {
+    SCOPED_TRACE(header);
+    EXPECT_EQ(Run({"FLUSHALL"}), "OK");
+    string body;
+    // Legacy Dragonfly snapshots have no df-ver marker; newer versions require it.
+    if (header != "REDIS0009") {
+      body.push_back(RDB_OPCODE_AUX);
+      AddKV(&body, "df-ver", "test");
+    }
+    body.push_back(RDB_OPCODE_AUX);
+    AddKV(&body, "redis-ver", "6.2.11");
+    body.push_back(RDB_OPCODE_DF_MASK);
+    uint8_t flags[4];
+    absl::little_endian::Store32(flags, DF_MASK_FLAG_STICKY);
+    body.append(reinterpret_cast<const char*>(flags), sizeof(flags));
+    body.push_back(RDB_TYPE_JSON);
+    AddKV(&body, "json", R"({"value":42})");
+    auto data = WrapInRdb(body);
+    data.replace(0, 9, header);
+
+    auto ec = LoadRdbBytes(to_byte(data.data()), data.size());
+    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_EQ(Run({"JSON.GET", "json"}), R"({"value":42})");
+    EXPECT_THAT(Run({"STICK", "json"}), IntArg(0));
+  }
+}
 
 TEST_F(RdbTest, HashExpiryEncoding) {
   absl::FlagSaver fs;

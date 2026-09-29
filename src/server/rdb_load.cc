@@ -1149,8 +1149,9 @@ string_view RdbLoaderBase::OpaqueObjLoader::ToSV(const RdbVariant& obj, ScratchB
 
 bool RdbLoaderBase::OpaqueObjLoader::EnsureObjEncoding(CompactObjType type, unsigned encoding) {
   if (pv_->ObjType() != type) {
-    LOG(DFATAL) << "Invalid RDB type " << pv_->ObjType() << "; expected " << type;
-    ec_ = RdbError(errc::invalid_rdb_type);
+    LOG(DFATAL) << "Unexpected decoded object type " << pv_->ObjType() << "; expected " << type;
+    // Reserve invalid_rdb_type for unsupported on-disk types.
+    ec_ = RdbError(errc::invalid_encoding);
     return false;
   }
   if (pv_->Encoding() != encoding) {
@@ -1435,9 +1436,8 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadCuckoo();
       break;
     default:
-      LOG(ERROR) << "Unsupported rdb type " << rdbtype;
-
-      return RdbError(errc::invalid_encoding);
+      LOG(ERROR) << "Unsupported RDB object type " << rdbtype;
+      return RdbError(errc::invalid_rdb_type);
   }
 
   if (!iores)
@@ -2472,10 +2472,10 @@ error_code RdbLoader::Load(io::Source* src) {
 
   mem_buf_->CommitWrite(bytes_read_);
 
+  const bool is_valkey = memcmp(mem_buf_->InputBuffer().data(), "VALKEY", 6) == 0;
   {
     auto cb = mem_buf_->InputBuffer();
 
-    const bool is_valkey = memcmp(cb.data(), "VALKEY", 6) == 0;
     const size_t magic_size = is_valkey ? 6 : 5;
     if (!is_valkey && memcmp(cb.data(), "REDIS", 5) != 0) {
       VLOG(1) << "Bad header: " << absl::CHexEscape(facade::ToSV(cb));
@@ -2486,10 +2486,10 @@ error_code RdbLoader::Load(io::Source* src) {
     ::memcpy(buf, cb.data() + magic_size, 9 - magic_size);
 
     rdb_version_ = atoi(buf);
-    const bool unsupported_version = is_valkey ? rdb_version_ != RDB_VERSION_VALKEY
-                                               : (rdb_version_ < 5 || rdb_version_ > RDB_VERSION);
-    if (unsupported_version) {  // We accept Redis RDBs starting from 5.
-      LOG(ERROR) << "RDB Version " << rdb_version_ << " is not supported";
+    // Accept newer versions when their types and opcodes are supported.
+    if (rdb_version_ < (is_valkey ? RDB_VERSION_VALKEY : 5)) {
+      LOG(ERROR) << "Unsupported " << (is_valkey ? "Valkey" : "Redis") << " RDB version "
+                 << rdb_version_ << ". Minimum versions: Redis 5, Valkey " << RDB_VERSION_VALKEY;
       return RdbError(errc::bad_version);
     }
 
@@ -2510,6 +2510,18 @@ error_code RdbLoader::Load(io::Source* src) {
     GetCurrentDbSlice().IncrLoadInProgress();
   }
 
+  auto unsupported_type = [&](int type) {
+    LOG(ERROR) << "Unsupported RDB object type or opcode " << type << " in "
+               << (is_df_snapshot_ ? "Dragonfly"
+                   : is_valkey     ? "Valkey"
+                                   : "Redis")
+               << " RDB version " << rdb_version_;
+    return RdbError(errc::invalid_rdb_type);
+  };
+
+  // Dragonfly snapshots predating df-ver use version 9, before Redis reused our type IDs.
+  bool allow_df_extensions = !is_valkey && rdb_version_ == 9;
+
   while (!stop_early_.load(memory_order_relaxed)) {
     if (pause_) {
       ThisFiber::SleepFor(100ms);
@@ -2521,11 +2533,13 @@ error_code RdbLoader::Load(io::Source* src) {
 
     DVLOG(3) << "Opcode type: " << type;
 
+    // Dragonfly reserves 200-240 for its own opcodes. Other producers may reuse these IDs.
+    if (!allow_df_extensions && type >= 200 && type <= 240)
+      return unsupported_type(type);
+
     /* Handle special types. */
     if (type == RDB_OPCODE_EXPIRETIME) {
-      LOG(ERROR) << "opcode RDB_OPCODE_EXPIRETIME not supported";
-
-      return RdbError(errc::invalid_encoding);
+      return unsupported_type(type);
     }
 
     if (type == RDB_OPCODE_EXPIRETIME_MS) {
@@ -2647,6 +2661,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
     if (type == RDB_OPCODE_AUX) {
       RETURN_ON_ERR(HandleAux());
+      allow_df_extensions |= is_df_snapshot_;
       continue; /* Read type again. */
     }
 
@@ -2723,18 +2738,15 @@ error_code RdbLoader::Load(io::Source* src) {
       continue;
     }
 
-    if (!rdbIsObjectTypeDF(type)) {
-      LOG(ERROR) << "Unrecognized rdb object type: " << type;
-      LOG(ERROR) << "Last iteration: ";
-      LOG(ERROR) << "key loaded: " << absl::CHexEscape(last_key_loaded_);
-      LOG(ERROR) << "pending_read_.remaining: " << pending_read_.remaining
-                 << "\npending_read_.reserve: " << pending_read_.reserve;
-      // In case we encounter an error, it might worth peeking the InputBuffer()
-      return RdbError(errc::invalid_rdb_type);
-    }
+    // Redis uses some of the same IDs as Dragonfly and Valkey for different encodings.
+    if (!__rdbIsObjectType(type) && !(allow_df_extensions && rdbIsObjectTypeDF(type)) &&
+        !(is_valkey && type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS))
+      return unsupported_type(type);
 
     ++keys_loaded;
     if (auto ec = LoadKeyValPair(type, &settings); ec) {
+      if (ec == RdbError(errc::invalid_rdb_type))
+        return unsupported_type(type);
       if (ec != RdbError(errc::empty_key))
         return ec;
       // Nothing is left of the value to consume; skip the key and keep loading.
@@ -3093,6 +3105,7 @@ error_code RdbLoader::HandleAux() {
   } else if (auxkey == "redis-ver") {
     VLOG(1) << "Loading RDB produced by Redis version " << auxval;
   } else if (auxkey == "df-ver") {
+    is_df_snapshot_ = true;
     VLOG(1) << "Loading RDB produced by Dragonfly version " << auxval;
   } else if (auxkey == "ctime") {
     int64_t ctime;
