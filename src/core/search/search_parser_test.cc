@@ -2,6 +2,10 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/strings/str_cat.h>
+
+#include <array>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/search/base.h"
@@ -11,6 +15,82 @@
 namespace dfly::search {
 
 using namespace std;
+
+// Compact textual form of a parsed query tree, used to pin exact ASTs in tests.
+struct AstDumper {
+  string operator()(monostate) const {
+    return "<empty>";
+  }
+  string operator()(const AstStarNode&) const {
+    return "*";
+  }
+  string operator()(const AstStarFieldNode&) const {
+    return "@*";
+  }
+  string operator()(const AstTermNode& n) const {
+    return absl::StrCat("T(", n.affix, ")");
+  }
+  string operator()(const AstPrefixNode& n) const {
+    return absl::StrCat("P(", n.affix, ")");
+  }
+  string operator()(const AstSuffixNode& n) const {
+    return absl::StrCat("S(", n.affix, ")");
+  }
+  string operator()(const AstInfixNode& n) const {
+    return absl::StrCat("I(", n.affix, ")");
+  }
+  string operator()(const AstWildcardNode& n) const {
+    return absl::StrCat("W(", n.affix, ")");
+  }
+  string operator()(const AstPhraseNode& n) const {
+    return absl::StrCat("PH(", n.raw, "~", n.slop, ")");
+  }
+  string operator()(const AstRangeNode& n) const {
+    return absl::StrCat("R[", n.lo, ",", n.hi, "]");
+  }
+  string operator()(const AstGeoNode& n) const {
+    return absl::StrCat("GEO(", n.lon, ",", n.lat, ",", n.radius, n.unit, ")");
+  }
+  string operator()(const AstNegateNode& n) const {
+    return absl::StrCat("NOT(", Dump(*n.node), ")");
+  }
+  string operator()(const AstOptionalNode& n) const {
+    return absl::StrCat("OPT(", Dump(*n.node), ")");
+  }
+  string operator()(const AstAttributeNode& n) const {
+    return absl::StrCat("ATTR(", Dump(*n.node), ",w=", n.weight, ")");
+  }
+  string operator()(const AstLogicalNode& n) const {
+    string res = n.op == AstLogicalNode::AND ? "AND{" : "OR{";
+    for (size_t i = 0; i < n.nodes.size(); ++i)
+      absl::StrAppend(&res, i ? " " : "", Dump(n.nodes[i]));
+    return res + "}";
+  }
+  string operator()(const AstFieldNode& n) const {
+    return absl::StrCat(n.field, ":", Dump(*n.node));
+  }
+  string operator()(const AstTagsNode& n) const {
+    string res = "TAGS{";
+    for (size_t i = 0; i < n.tags.size(); ++i)
+      absl::StrAppend(&res, i ? "|" : "", visit(*this, n.tags[i]));
+    return res + "}";
+  }
+  string operator()(const AstKnnNode& n) const {
+    return absl::StrCat("KNN(", n.filter ? Dump(*n.filter) : "", ";", n.limit, ";", n.field, ";",
+                        n.score_alias, ")");
+  }
+  string operator()(const AstVectorRangeNode& n) const {
+    return absl::StrCat("VRANGE(", n.field, ";", n.radius, ")");
+  }
+
+  string Dump(const AstNode& n) const {
+    return visit(*this, static_cast<const NodeVariants&>(n));
+  }
+};
+
+string DumpAst(const AstNode& n) {
+  return AstDumper{}.Dump(n);
+}
 
 class SearchParserTest : public ::testing::Test {
  protected:
@@ -35,6 +115,17 @@ class SearchParserTest : public ::testing::Test {
 
   void SetParams(const QueryParams* params) {
     query_driver_.SetParams(params);
+  }
+
+  // The dumped AST of `str`, or "error" if it does not parse.
+  string ParseDump(const string& str) {
+    try {
+      if (Parse(str) != 0)
+        return "error";
+    } catch (const std::exception&) {
+      return "error";
+    }
+    return DumpAst(query_driver_.Take());
   }
 
   QueryDriver query_driver_;
@@ -848,6 +939,177 @@ TEST_F(SearchParserTest, ResetClearsStaleAst) {
 
   EXPECT_NE(0, Parse("("));
   EXPECT_TRUE(std::holds_alternative<std::monostate>(query_driver_.Take()));
+}
+
+// Word atoms joined by separator characters without whitespace form one glued word.
+TEST_F(SearchParserTest, GluedWordAst) {
+  QueryParams params;
+  params["v"] = "abcd";
+  params["n"] = "10";
+  SetParams(&params);
+
+  for (char sep : string{".,!#&=<>^?+/'"}) {
+    string query = absl::StrCat("x", string(1, sep), "y");
+    EXPECT_EQ(ParseDump(query), "AND{T(x) T(y)}") << query;
+    EXPECT_EQ(ParseDump("@f:" + query), "f:AND{T(x) T(y)}") << query;
+    string run = absl::StrCat("@f:x", string(1, sep), ",y");  // a comma later in the run
+    EXPECT_EQ(ParseDump(run), "f:AND{T(x) T(y)}") << run;
+  }
+
+  const pair<string, string> kCases[] = {
+      {"@email:example.com", "email:AND{T(example) T(com)}"},
+      {"@email:*example.com*", "email:AND{S(example) P(com)}"},
+      {"-@email:example.com", "NOT(email:AND{T(example) T(com)})"},
+      {"@email:jane.2024.example.com", "email:AND{T(jane) T(2024) T(example) T(com)}"},
+      {"@email:jane.2x.com", "email:AND{T(jane) T(2x) T(com)}"},
+      {"@email:v1.2.3*", "email:AND{T(v1) T(2) P(3)}"},
+      {"@email:a.b.5c*", "email:AND{T(a) T(b) P(5c)}"},
+      {"@email:*0.0.1*", "email:AND{S(0) T(0) P(1)}"},
+      {"@email:.5*", "email:P(5)"},
+      {"@email:.example", "email:T(example)"},
+      {"@email:example.", "email:T(example)"},
+      {"@email:example..com", "email:AND{T(example) T(com)}"},
+      {"foo.5 x.y", "AND{T(foo) T(.5) AND{T(x) T(y)}}"},
+      {"@email:(example.com | john.doe)", "email:OR{AND{T(example) T(com)} AND{T(john) T(doe)}}"},
+      {"@email:(example.com=>{$weight:2})", "email:ATTR(AND{T(example) T(com)},w=2)"},
+      {"@email:example.com.=>[KNN 10 @vec $v AS d]", "KNN(email:AND{T(example) T(com)};10;vec;d)"},
+      {"*=>.[KNN 10 @vec $v AS d]", "KNN(*;10;vec;d)"},
+      {"@email:a.b.5$v", "AND{email:AND{T(a) T(b) T(5)} T(abcd)}"},
+      {R"(a.b.5x\$y)", "AND{T(a) T(b) T(5x$y)}"},
+      {"@f:x.$v", "f:AND{T(x) T(abcd)}"},
+      {"@f:$v.x", "f:AND{T(abcd) T(x)}"},
+      {"@email:john.as", "email:AND{T(john) T(as)}"},
+      {"@email:as.example.com", "email:AND{T(as) T(example) T(com)}"},
+      {"@t:foo.KNN.vector_range", "t:AND{T(foo) T(KNN) T(vector_range)}"},
+      {"ef_runtime/as", "AND{T(ef_runtime) T(as)}"},
+      {"*=>[KNN 10 @vec $v AS.d]", "KNN(*;10;vec;d)"},
+      {"@email:as.2024.example.com", "email:AND{T(as) T(2024) T(example) T(com)}"},
+      {"knn+5", "AND{T(knn) T(+5)}"},
+      {"x.y.5as", "AND{T(x) T(y) T(5as)}"},
+      {"as,'..5.6", "AND{T(as) T(5) T(6)}"},
+      {"@email:.5*!.6", "email:AND{P(5) T(6)}"},
+      {"@email:v1.5*.jane.5", "email:AND{T(v1) P(5) T(jane) T(5)}"},
+      {"@f:x.5*,.5", "f:AND{T(x) P(5) T(5)}"},
+      {"@f:x.5*.as", "f:AND{T(x) P(5) T(as)}"},
+      {"@f:.5*.5", "AND{f:P(5) T(.5)}"},
+      {".5*#as", "AND{P(5) T(as)}"},
+      {"@f:x,+5.1e3", "AND{f:AND{T(x) T(5.1)} T(e3)}"},
+      {"@f:x,+5inf", "f:AND{T(x) T(5inf)}"},
+      {"@f:x.-5", "f:AND{T(x) T(-5)}"},
+      {"@f:x!.1.5", "f:AND{T(x) T(1) T(5)}"},
+      {"@f:(x!.5)", "f:AND{T(x) T(5)}"},
+      {"@f:x!+5.5w'q'", "AND{f:AND{T(x) T(5.5)} W(q)}"},
+      {"@f:x!.5 w'q'", "AND{f:AND{T(x) T(5)} W(q)}"},
+      {"@f:x.+inf$n", "AND{f:AND{T(x) T(inf)} T(10)}"},
+      {"@n:[1 5] @email:example.com", "AND{n:R[1,5] email:AND{T(example) T(com)}}"},
+      {"@t:{a} @f:x.y", "AND{t:TAGS{T(a)} f:AND{T(x) T(y)}}"},
+  };
+  for (const auto& [query, ast] : kCases)
+    EXPECT_EQ(ParseDump(query), ast) << query;
+}
+
+// Queries that parse without glued words must keep their exact tree.
+TEST_F(SearchParserTest, GluedWordUnchangedAst) {
+  const pair<string, string> kCases[] = {
+      {"v1.2.3", "AND{T(v1) T(.2) T(.3)}"},
+      {"10.0.0.1", "AND{T(10.0) T(.0) T(.1)}"},
+      {"foo.5", "AND{T(foo) T(.5)}"},
+      {"@email:jane.2024", "AND{email:T(jane) T(.2024)}"},
+      {R"(example\.com)", "T(example.com)"},
+      {R"(@email:"example.com")", "email:PH(example.com~0)"},
+      {"''''", "AND{PH(~0) PH(~0)}"},
+      {"''+5", "AND{PH(~0) T(+5)}"},
+      {"'.<'.3.14+5", "AND{PH(.<~0) T(.3) T(.14) T(+5)}"},
+      {"foo=>{$weight:.5}", "ATTR(T(foo),w=0.5)"},
+      {"@n:[1,5]", "n:R[1,5]"},
+      {"@n:[1,.5]", "n:R[1,0.5]"},
+      {"@n:[(1 5]", "n:R[1,5]"},
+      {"a--b", "AND{T(a) NOT(NOT(T(b)))}"},
+  };
+  for (const auto& [query, ast] : kCases)
+    EXPECT_EQ(ParseDump(query), ast) << query;
+}
+
+// Phrases and quotes are not word atoms: a separator next to them is skipped.
+TEST_F(SearchParserTest, GluedWordPhrasesAndQuotes) {
+  const pair<string, string> kCases[] = {
+      {"@email:example.'com'~2", "AND{email:T(example) PH(com~2)}"},
+      {R"(@email:"foo".bar)", "AND{email:PH(foo~0) T(bar)}"},
+      {"@email:w'ex*'.com", "AND{email:W(ex*) T(com)}"},
+      // A second apostrophe pairs into a phrase before either one can glue.
+      {"@email:O'Brien | @name:'x'", "AND{email:T(O) PH(Brien | @name:~0) T(x)}"},
+      {"@last:O'Brien @first:D'Arcy", "AND{last:T(O) PH(Brien @first:D~0) T(Arcy)}"},
+  };
+  for (const auto& [query, ast] : kCases)
+    EXPECT_EQ(ParseDump(query), ast) << query;
+}
+
+TEST_F(SearchParserTest, GluedWordErrors) {
+  for (string query : {".", "'", "@email:*.com", "@email:.*", "@email:10.0*", "@n:[1,,5]",
+                       "@email_tag:{example.com}", "@email:as", "@email:.as", "@email:as.",
+                       "@email:foo*as", "x.5as", "john.$ef_runtime", "x.y.5$ef_runtime", "x.5 *",
+                       "+5.5*", "@f:x+5.5*", "@f:x.5**", "@n:[.5* 1]"}) {
+    EXPECT_EQ(ParseDump(query), "error") << query;
+  }
+  // A split `.5`/`+inf` would lex differently next to these word parts, e.g. `5*y` is P(5) T(y).
+  for (string query : {"@f:x!.5*y", "@f:x!+5*y*", ".5*example.com*", "@f:x.y.+inf*z", "x!.5w'q'",
+                       "-@f:x.+inf0", "@f:x.+inf5.5"}) {
+    EXPECT_EQ(ParseDump(query), "error") << query;
+  }
+}
+
+// Separators in [..], {..} or not between two atoms are skipped like spaces; numbers keep `.`/`+`.
+TEST_F(SearchParserTest, GluedWordSkippedSeparators) {
+  QueryParams params;
+  params["v"] = "abcd";
+  SetParams(&params);
+
+  const pair<string, string> kCases[] = {
+      {"@n:[1!5]", "n:R[1,5]"},
+      {"@n:[(1.5/2.5]", "n:R[1.5,2.5]"},
+      {"@n:[.5!1]", "n:R[0.5,1]"},
+      {"@n:[1!.5]", "n:R[1,0.5]"},
+      {"@n:[1 !+.5]", "n:R[1,0.5]"},
+      {"@g:[1.2!3.4!5!km]", "g:GEO(1.2,3.4,5KM)"},
+      {"@f:[VECTOR_RANGE 1!$v]", "VRANGE(f;1)"},
+      {"foo=>{$weight:!.5}", "ATTR(T(foo),w=0.5)"},
+      {"@t:{!.5}", "t:TAGS{T(.5)}"},
+      {"@t:{!+.5}", "t:TAGS{T(+.5)}"},
+      {"@t:{!+Inf}", "t:TAGS{T(+Inf)}"},
+      {"@n:[1 .5!]", "n:R[1,0.5]"},
+      {"@email_tag:{.com}", "email_tag:TAGS{T(com)}"},
+      {"foo=>{$weight:!2}", "ATTR(T(foo),w=2)"},
+      {"@n:[1 5]!.5", "AND{n:R[1,5] T(.5)}"},
+      {"@t:{a} !.5", "AND{t:TAGS{T(a)} T(.5)}"},
+      {"@f:.5,,", "f:T(.5)"},
+      {"@f:,!.5", "f:T(.5)"},
+      {"@f:!.5*.5", "AND{f:P(5) T(.5)}"},
+      {"@f:x .5*", "AND{f:T(x) P(5)}"},
+      {"@f:x. !y", "AND{f:T(x) T(y)}"},
+      {"@f:y. z", "AND{f:T(y) T(z)}"},
+      {"* .", "*"},
+      {"! *", "*"},
+  };
+  for (const auto& [query, ast] : kCases)
+    EXPECT_EQ(ParseDump(query), ast) << query;
+}
+
+// A driver reused without ResetScanner() must not carry glue state over to the next input.
+TEST_F(SearchParserTest, GluedWordReusedDriver) {
+  // Each failed parse leaves brackets, buffered, pending or previous-token state behind.
+  const array<array<string, 3>, 5> kCases = {{{"@n:[1", "@f:x.y", "f:AND{T(x) T(y)}"},
+                                              {"@n:[1!2!3!4]", "@f:x.y", "f:AND{T(x) T(y)}"},
+                                              {"@f:x.*", "@f:x.y", "f:AND{T(x) T(y)}"},
+                                              {"* x", "   .y", "T(y)"},
+                                              {"* x", ".y", "T(y)"}}};
+  for (const auto& [bad, good, ast] : kCases) {
+    query_driver_.ResetScanner();
+    query_driver_.SetInput(bad);
+    EXPECT_NE(Parser(&query_driver_)(), 0) << bad;
+    query_driver_.SetInput(good);
+    ASSERT_EQ(Parser(&query_driver_)(), 0) << bad;
+    EXPECT_EQ(DumpAst(query_driver_.Take()), ast) << bad;
+  }
 }
 
 }  // namespace dfly::search

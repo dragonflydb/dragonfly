@@ -62,7 +62,7 @@
 #include "core/search/search.h"
 #include "core/search/vector_utils.h"
 
-#define yylex driver->scanner()->Lex
+#define yylex driver->NextToken
 
 using namespace std;
 
@@ -104,6 +104,7 @@ string UnescapeTerm(string_view src);
   VECTOR_RANGE      "VECTOR_RANGE"
   YIELD_DISTANCE_AS "$YIELD_DISTANCE_AS"
   WEIGHT      "$WEIGHT"
+  GLUE        "glue"
 ;
 
 %token AND_OP
@@ -130,7 +131,7 @@ string UnescapeTerm(string_view src);
 %nterm <AstExpr> final_query filter star_expr search_expr search_unary_expr search_primary
 %nterm <AstExpr> attributed_search_primary search_or_expr search_and_expr bracket_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
-%nterm <AstExpr> term_atom
+%nterm <AstExpr> term_atom glued_word
 %nterm <AstTagsNode::TagValueProxy> tag_list_element
 
 %nterm <AstKnnNode> knn_query
@@ -360,6 +361,13 @@ term_atom:
   | UINT32    { $$ = AstTermNode(std::move($1));   }
   | DOUBLE    { $$ = AstTermNode(std::move($1));   }
 
+// Word atoms joined by separators without whitespace (example.com): AND of the atoms.
+glued_word:
+  term_atom GLUE term_atom
+    { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::AND); }
+  | glued_word GLUE term_atom
+    { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::AND); }
+
 search_unary_expr:
   attributed_search_primary           { $$ = std::move($1);                  }
   | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2));   }
@@ -374,10 +382,12 @@ attributed_search_primary:
 search_primary:
   LPAREN search_expr RPAREN           { $$ = std::move($2);                  }
   | term_atom                         { $$ = std::move($1);                  }
+  | glued_word                        { $$ = std::move($1);                  }
   | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
 
 field_cond:
   term_atom                                             { $$ = std::move($1);                }
+  | glued_word                                          { $$ = std::move($1);                }
   | STAR                                                { $$ = AstStarFieldNode();           }
   | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
   | TILDE field_cond                                    { $$ = AstOptionalNode(std::move($2)); }
@@ -449,11 +459,13 @@ field_or_expr:
   | field_cond_expr OR_OP field_and_expr          { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
 
 field_unary_expr:
-  LPAREN field_cond_expr RPAREN { $$ = std::move($2);                  }
-  | NOT_OP field_unary_expr     { $$ = AstNegateNode(std::move($2));   }
-  | TILDE field_unary_expr      { $$ = AstOptionalNode(std::move($2)); }
-  | term_atom                   { $$ = std::move($1);                  }
-  | term_atom text_attrs_clause { $$ = AstAttributeNode(std::move($1), $2.weight.value_or(1.0)); }
+  LPAREN field_cond_expr RPAREN  { $$ = std::move($2);                  }
+  | NOT_OP field_unary_expr      { $$ = AstNegateNode(std::move($2));   }
+  | TILDE field_unary_expr       { $$ = AstOptionalNode(std::move($2)); }
+  | term_atom                    { $$ = std::move($1);                  }
+  | term_atom text_attrs_clause  { $$ = AstAttributeNode(std::move($1), $2.weight.value_or(1.0)); }
+  | glued_word                   { $$ = std::move($1);                  }
+  | glued_word text_attrs_clause { $$ = AstAttributeNode(std::move($1), $2.weight.value_or(1.0)); }
 
 tag_list:
   tag_list_element                       { $$ = AstTagsNode(std::move($1));                }
