@@ -132,6 +132,9 @@ TEST_F(RESPParserTest, ReplyLimits) {
     bool accepted;
   };
   const TestCase cases[] = {
+      {{.max_array_len = 0}, "*0\r\n", true},
+      {{.max_array_len = 0}, "*-1\r\n", true},
+      {{.max_array_len = 0}, "*1\r\n", false},
       {{.max_bulk_len = 4}, "$4\r\nPING\r\n", true},
       {{.max_bulk_len = 4}, "$5\r\n", false},
       {{.max_bulk_len = 4}, "*1\r\n$5\r\n", false},
