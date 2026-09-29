@@ -4,7 +4,6 @@
 
 #include "server/journal/streamer.h"
 
-#include <absl/cleanup/cleanup.h>
 #include <sys/socket.h>
 
 #include <chrono>
@@ -202,91 +201,70 @@ void SlotMigrationStreamer::Start(util::FiberSocketBase* dest) {
 void SlotMigrationStreamer::Run() {
   VLOG(1) << "SlotMigrationStreamer run";
 
-  // If the context was cancelled before Start() ran, RegisterChangeListener was skipped and
-  // db_array_ is empty (see SlotMigrationStreamer::Start). Guard the db_array_.front() access
-  // below; mid-traversal cancellation is handled by the base_cntx_->IsRunning() check inside the
-  // loop.
-  if (db_array_.empty())
+  // Returns false if cancelled, including before Start() ran (see SlotMigrationStreamer::Start).
+  if (!TraverseAllBuckets(false /* skip empty buckets */))
     return;
 
-  // Covers cancellation exits; on the normal path the entries were already drained.
-  absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
-
-  PrimeTable::Cursor cursor;
-  uint64_t last_yield = 0;
-
-  // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
-  boost::intrusive_ptr<DbTable> table = db_array_.front();
-  PrimeTable* pt = &table->prime;
-
-  do {
-    if (!base_cntx_->IsRunning())
-      return;
-
-    // If someone else throtles due to huge pending_buf_, give it priority.
-    // Apparently, continue goes through the loop by checking the condition below, so we check
-    // cursor here as well.
-    // In addition if bucket writing was too intensive on CPU and we are overloaded.
-    // Note that we account for CPU time from OnChangeBlocking and here as well
-    // (inside WriteBucket).
-    // But we only throttle here, so if we migrated lots of slots during mutations, we
-    // won't progress here but if we have not, then this fiber will progress withing the
-    // CPU budget we defined for it.
-    bool should_stall =
-        writer_.throttle_waiters() > 0 || (writer_.pending_bytes() >= writer_.output_limit() / 3) ||
-        cpu_aggregator_.IsOverloaded(absl::GetFlag(FLAGS_migration_buckets_cpu_budget));
-    if (cursor && should_stall) {
-      ThisFiber::SleepFor(300us);
-
-      // We have a design bug in RealTimeAggregator that resets it measurements only when
-      // the next sample is taken. So we add this sample to ensure cpu_aggregator_
-      // refreshes its state.
-      base::CpuTimeGuard guard(&cpu_aggregator_);
-      migration_stats_.iter_skips++;
-      continue;
-    }
-
-    // Throttle main loop if we are over the egress limit
-    ServerState::tlocal()->GetEgressThrottler().Throttle();
-
-    cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
-      if (!base_cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
-        return;
-
-      // Do not progress if we are stalled.
-      ThrottleIfNeeded();
-
-      migration_stats_.buckets_loop += ProcessBucket(0, it, false);
-    });
-
-    // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
-    // setting that controls how agressive we are with migration pace.
-    // Once we gain confidence with FLAGS_migration_buckets_cpu_budget we should retire
-    // migration_buckets_serialization_threshold and migration_buckets_sleep_usec.
-    if (++last_yield >= migration_buckets_serialization_threshold_cached) {
-      ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
-      last_yield = 0;
-    }
-  } while (cursor);
-
-  // Force serialize of all delayed entries.
-  ProcessDelayedEntries(true, 0, base_cntx_);
-
   VLOG(1) << "SlotMigrationStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
-          << ", shard " << db_slice_->shard_id() << ". Buckets looped "
-          << migration_stats_.buckets_loop;
+          << ", shard " << db_slice_->shard_id() << ". Buckets looped " << GetBucketsLooped();
+}
+
+void SlotMigrationStreamer::OnTraverseBucket() {
+  // Do not progress if we are stalled.
+  ThrottleIfNeeded();
+}
+
+void SlotMigrationStreamer::PaceTraversal(bool done) {
+  // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
+  // setting that controls how agressive we are with migration pace.
+  // Once we gain confidence with FLAGS_migration_buckets_cpu_budget we should retire
+  // migration_buckets_serialization_threshold and migration_buckets_sleep_usec.
+  if (++steps_since_sleep_ >= migration_buckets_serialization_threshold_cached) {
+    ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
+    steps_since_sleep_ = 0;
+  }
+
+  if (done)
+    return;
+
+  // If someone else throtles due to huge pending_buf_, give it priority.
+  // In addition if bucket writing was too intensive on CPU and we are overloaded.
+  // Note that we account for CPU time from OnChangeBlocking and here as well
+  // (inside SerializeBucketLocked).
+  // But we only throttle here, so if we migrated lots of slots during mutations, we
+  // won't progress here but if we have not, then this fiber will progress withing the
+  // CPU budget we defined for it.
+  auto should_stall = [this] {
+    return writer_.throttle_waiters() > 0 ||
+           (writer_.pending_bytes() >= writer_.output_limit() / 3) ||
+           cpu_aggregator_.IsOverloaded(absl::GetFlag(FLAGS_migration_buckets_cpu_budget));
+  };
+
+  while (base_cntx_->IsRunning() && should_stall()) {
+    ThisFiber::SleepFor(300us);
+
+    // We have a design bug in RealTimeAggregator that resets it measurements only when
+    // the next sample is taken. So we add this sample to ensure cpu_aggregator_
+    // refreshes its state.
+    base::CpuTimeGuard guard(&cpu_aggregator_);
+    migration_stats_.iter_skips++;
+  }
+}
+
+uint64_t SlotMigrationStreamer::GetBucketsLooped() const {
+  const auto& stats = SerializerBase::GetStats();
+  return stats.buckets_serialized - stats.buckets_on_change;
 }
 
 void SlotMigrationStreamer::SendFinalize(long attempt) {
   auto base_stats = SerializerBase::GetStats();
   VLOG(1) << "SlotMigrationStreamer LSN of " << my_slots_.ToSlotRanges().ToString() << ", shard "
           << db_slice_->shard_id() << " attempt " << attempt << " with "
-          << migration_stats_.commands << " commands. Buckets looped "
-          << migration_stats_.buckets_loop << ", buckets on_db_update "
-          << base_stats.buckets_on_change << ", buckets skipped " << base_stats.buckets_skipped
-          << ", buckets written " << base_stats.buckets_serialized << ". Keys skipped "
-          << migration_stats_.keys_skipped << ", keys written " << base_stats.keys_serialized
-          << " throttle count: " << writer_.throttle_count()
+          << migration_stats_.commands << " commands. Buckets looped " << GetBucketsLooped()
+          << ", buckets on_db_update " << base_stats.buckets_on_change << ", buckets skipped "
+          << base_stats.buckets_skipped << ", buckets written " << base_stats.buckets_serialized
+          << ". Keys skipped " << migration_stats_.keys_skipped << ", keys written "
+          << base_stats.keys_serialized << " throttle count: " << writer_.throttle_count()
           << ", iter_skips: " << migration_stats_.iter_skips;
 
   // Drain all pending journal data before sending the finalize marker.
@@ -371,6 +349,12 @@ bool SlotMigrationStreamer::ShouldWrite(SlotId slot_id) const {
 unsigned SlotMigrationStreamer::SerializeBucketLocked(DbIndex db_index,
                                                       PrimeTable::bucket_iterator it,
                                                       bool on_update) {
+  // Cluster mode blocks SELECT, but loading an RDB file taken from a non-cluster instance can
+  // still activate other databases. Slot ownership (and FlushSlots) covers only db 0, so keys
+  // in other databases are not migrated. This applies to both the traversal and OnChange flows.
+  if (db_index != 0)
+    return 0;
+
   auto& shard_stats = EngineShard::tlocal()->stats();
 
   unsigned written = 0;
@@ -397,6 +381,10 @@ unsigned SlotMigrationStreamer::SerializeBucketLocked(DbIndex db_index,
 void SlotMigrationStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,
                                                  const PrimeValue& pv, time_t expire,
                                                  uint32_t mc_flags) {
+  // SerializeBucketLocked filters out other databases. CmdSerializer hard-codes db index 0 into
+  // the journal entries it produces, so to remove this DCHECK we must first pass db_index through
+  // CmdSerializer.
+  DCHECK_EQ(db_index, 0u);
   migration_stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
 }
 

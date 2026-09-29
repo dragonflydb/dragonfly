@@ -4,7 +4,6 @@
 
 #include "server/snapshot.h"
 
-#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 
 #include <mutex>
@@ -151,71 +150,16 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
   }
 }
 
-// The algorithm is to go over all the buckets and serialize those with
-// version < snapshot_version_. In order to serialize each physical bucket exactly once we update
-// bucket version to snapshot_version_ once it has been serialized.
-// We handle serialization at physical bucket granularity.
-// To further complicate things, Table::Traverse covers a logical bucket that may comprise of
-// several physical buckets in dash table. For example, items belonging to logical bucket 0
-// can reside in buckets 0,1 and stash buckets 56-59.
-// PrimeTable::Traverse guarantees an atomic traversal of a single logical bucket,
-// it also guarantees 100% coverage of all items that exists when the traversal started
-// and survived until it finished.
-
 // Serializes all the entries with version less than snapshot_version_.
 void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
-  const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
-
-  // Covers cancellation exits; on the normal path the entries were already drained.
-  absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
-
   for (DbIndex db_indx = 0; db_indx < db_array_.size(); ++db_indx) {
     stats_.keys_total += db_slice_->DbSize(db_indx);
   }
 
-  for (DbIndex snapshot_db_indx = 0; snapshot_db_indx < db_array_.size(); ++snapshot_db_indx) {
-    if (!base_cntx_->IsRunning())
-      return;
+  if (!TraverseAllBuckets(true /* include empty buckets */))
+    return;
 
-    if (!db_array_[snapshot_db_indx])
-      continue;
-
-    PrimeTable* pt = &db_array_[snapshot_db_indx]->prime;
-    VLOG(1) << "Start traversing " << pt->size() << " items for index " << snapshot_db_indx;
-
-    do {
-      if (!base_cntx_->IsRunning())
-        return;
-
-      snapshot_cursor_ = pt->TraverseBuckets(
-          snapshot_cursor_,
-          [this, snapshot_db_indx](auto it) { ProcessBucket(snapshot_db_indx, it, false); },
-          true /* include empty buckets */);
-
-      if (use_background_mode_) {
-        // Yielding for background fibers has low overhead if the time slice isn't used up.
-        // Do it after every bucket for maximum responsiveness.
-        DCHECK(ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND);
-        ThisFiber::Yield();
-        PushSerialized(false);
-      } else {
-        if (!PushSerialized(false)) {
-          if (!use_background_mode_ && ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
-            ThisFiber::Yield();
-          }
-        }
-      }
-
-      // Suspend the traversal loop if we are exceeding the egress budget, letting
-      // high priority writes drain first. Guarantees the loop its reserved share.
-      ServerState::tlocal()->GetEgressThrottler().Throttle();
-    } while (snapshot_cursor_);
-
-    // Wait for all the outstanding delayed entries and serialize them as well.
-    ProcessDelayedEntries(true, 0, base_cntx_);
-
-    PushSerialized(true);
-  }  // for (dbindex)
+  PushSerialized(true);
 
   CHECK(!serialize_bucket_running_);
   if (send_full_sync_cut) {
@@ -230,6 +174,22 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     VLOG(1) << "Exit SnapshotSerializer total_serialized: " << stats.keys_serialized
             << ", buckets side saved " << stats.buckets_on_change << ", total bucket saved "
             << stats.buckets_serialized << ", journal_saved " << stats_.jounal_changes;
+  }
+}
+
+void SliceSnapshot::PaceTraversal(bool done) {
+  if (use_background_mode_) {
+    // Yielding for background fibers has low overhead if the time slice isn't used up.
+    // Do it after every bucket for maximum responsiveness.
+    DCHECK(ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND);
+    ThisFiber::Yield();
+    PushSerialized(false);
+    return;
+  }
+
+  const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
+  if (!PushSerialized(false) && ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
+    ThisFiber::Yield();
   }
 }
 

@@ -125,7 +125,7 @@ struct DelayedEntryHandler {
 //
 // ┌────────────────────┐     ┌───────────────────┐
 // │  Traversal fiber   │     │ OnChange          │
-// │ (IterateBucketsFb) │     │ (db_slice change) │
+// │(TraverseAllBuckets)│     │ (db_slice change) │
 // └────────┬───────────┘     └────────┬──────────┘
 //          │                          │
 //          ▼                          ▼
@@ -190,6 +190,20 @@ class SerializerBase : public BucketDependencies,
   // on_update is true if it's being called in the OnChangeBlocking flow,
   // and false if called by the traversal loop.
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
+
+  // Traversal flow: goes over all buckets of every database in db_array_ and processes them with
+  // ProcessBucket, serializing the delayed entries after each database. Pending delayed entries
+  // are discarded on cancellation. visit_empty controls whether empty buckets are processed.
+  // Returns false if the traversal was cancelled.
+  bool TraverseAllBuckets(bool visit_empty);
+
+  // Called by TraverseAllBuckets before processing each bucket.
+  virtual void OnTraverseBucket() {
+  }
+
+  // Called by TraverseAllBuckets after each TraverseBuckets step. Implements the pacing policy
+  // (yielding, flushing, stalling). done is true if the current database was fully traversed.
+  virtual void PaceTraversal(bool done) = 0;
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // To be implemented by classses extending this base class.
