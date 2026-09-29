@@ -353,8 +353,7 @@ bool SlotMigrationStreamer::ShouldSerialize(DbIndex db_index, const PrimeKey& pk
   if (db_index != 0)
     return false;
 
-  std::string key_buffer;
-  return ShouldWrite(pk.GetSlice(&key_buffer));
+  return ShouldWrite(pk.GetSlice(&key_buffer_));
 }
 
 void SlotMigrationStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,

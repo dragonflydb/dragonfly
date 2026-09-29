@@ -111,6 +111,10 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
   std::unique_ptr<CmdSerializer> cmd_serializer_;
 
   MigrationStats migration_stats_;
+
+  // Scratch buffer for decoding keys in ShouldSerialize. Reused to avoid allocating per key; safe
+  // to share across fibers because ShouldSerialize does not preempt.
+  mutable std::string key_buffer_;
   uint32_t steps_since_sleep_ = 0;
   LSN last_lsn_writen_ = 0;
   uint32_t journal_cb_id_{0};
