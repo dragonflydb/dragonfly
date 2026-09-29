@@ -65,7 +65,8 @@ async def test_network_disconnect_during_migration(df_factory, proxy_factory):
             await nodes[0].admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS")
         )
 
-    await wait_for_status(nodes[0].admin_client, nodes[1].id, "SYNC", 20)
+    # Migration may finish between disconnects; FINISHED cannot transition back to SYNC.
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, ["SYNC", "FINISHED"], 20)
 
     await proxy.close()
     await proxy.start_serving()
