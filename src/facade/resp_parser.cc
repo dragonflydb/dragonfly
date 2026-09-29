@@ -65,6 +65,8 @@ void RESPParser::Reset(Limits limits) {
   CHECK(reader_);
 
   reader_->maxelements = limits.max_array_len;
+  reader_->maxbulklen = limits.max_bulk_len;
+  reader_->maxdepth = limits.max_depth;
 }
 
 RESPParser::~RESPParser() {
@@ -190,6 +192,10 @@ std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
 }
 
 std::ostream& operator<<(std::ostream& os, const RESPArray& arr) {
+  // Hiredis preserves null aggregates with SIZE_MAX elements.
+  if (arr.Size() == SIZE_MAX) {
+    return os << "NIL";
+  }
   if (arr.Empty()) {
     return os << "[]";
   }

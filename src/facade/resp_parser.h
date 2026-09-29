@@ -86,6 +86,9 @@ class RESPParser {
  public:
   struct Limits {
     uint32_t max_array_len = UINT32_MAX;
+    uint64_t max_bulk_len = UINT64_MAX;
+    // Maximum number of nested nonempty aggregates.
+    uint32_t max_depth = UINT32_MAX;
   };
 
   RESPParser();

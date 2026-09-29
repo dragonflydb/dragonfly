@@ -49,6 +49,9 @@
 /* Initial size of our nested reply stack and how much we grow it when needd */
 #define REDIS_READER_STACK_SIZE 9
 
+/* A signed 64-bit length needs at most 20 characters, followed by CRLF. */
+#define REDIS_READER_MAX_LENGTH_HEADER 22
+
 static void __redisReaderSetError(redisReader *r, int type, const char *str) {
     size_t len;
 
@@ -414,7 +417,8 @@ static int processBulkItem(redisReader *r) {
             return REDIS_ERR;
         }
 
-        if (len < -1 || (LLONG_MAX > SIZE_MAX && len > (long long)SIZE_MAX)) {
+        if (len < -1 || (LLONG_MAX > SIZE_MAX && len > (long long)SIZE_MAX) ||
+            (len > 0 && (uint64_t)len > r->maxbulklen)) {
             __redisReaderSetError(r,REDIS_ERR_PROTOCOL,
                     "Bulk string length out of range");
             return REDIS_ERR;
@@ -461,6 +465,8 @@ static int processBulkItem(redisReader *r) {
             moveToNextTask(r);
             return REDIS_OK;
         }
+    } else if (r->len-r->pos >= REDIS_READER_MAX_LENGTH_HEADER) {
+        __redisReaderSetError(r,REDIS_ERR_PROTOCOL,"Bad bulk string length");
     }
 
     return REDIS_ERR;
@@ -521,6 +527,12 @@ static int processAggregateItem(redisReader *r) {
             return REDIS_ERR;
         }
 
+        if (elements > 0 && (uint32_t)r->ridx >= r->maxdepth) {
+            __redisReaderSetError(r,REDIS_ERR_PROTOCOL,
+                    "Aggregate nesting is too deep");
+            return REDIS_ERR;
+        }
+
         if (elements == -1) {
             if (r->fn && r->fn->createNil)
                 obj = r->fn->createNil(cur);
@@ -565,6 +577,8 @@ static int processAggregateItem(redisReader *r) {
         /* Set reply if this is the root object. */
         if (root) r->reply = obj;
         return REDIS_OK;
+    } else if (r->len-r->pos >= REDIS_READER_MAX_LENGTH_HEADER) {
+        __redisReaderSetError(r,REDIS_ERR_PROTOCOL,"Bad multi-bulk length");
     }
 
     return REDIS_ERR;
@@ -679,6 +693,8 @@ redisReader *redisReaderCreateWithFunctions(redisReplyObjectFunctions *fn) {
     r->fn = fn;
     r->maxbuf = REDIS_READER_MAX_BUF;
     r->maxelements = REDIS_READER_MAX_ARRAY_ELEMENTS;
+    r->maxbulklen = UINT64_MAX;
+    r->maxdepth = UINT32_MAX;
     r->ridx = -1;
 
     return r;

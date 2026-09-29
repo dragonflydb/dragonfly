@@ -32,6 +32,7 @@
 
 #ifndef __HIREDIS_READ_H
 #define __HIREDIS_READ_H
+#include <stdint.h>
 #include <stdio.h> /* for size_t */
 
 #define REDIS_ERR -1
@@ -101,6 +102,8 @@ typedef struct redisReader {
     size_t len; /* Buffer length */
     size_t maxbuf; /* Max length of unused buffer */
     long long maxelements; /* Max multi-bulk elements */
+    uint64_t maxbulklen; /* Max bulk string length */
+    uint32_t maxdepth; /* Max nested nonempty aggregates */
 
     redisReadTask **task;
     int tasks;

@@ -430,7 +430,10 @@ io::Result<dfly::RESPObj> ProtocolClient::TakeRespReply(uint32_t timeout, base::
 
   do {
     resp = resp_parser_.Feed(nullptr, 0);  // check if previous data produced a reply
-    if (resp && !resp->Empty()) {
+    if (!resp) {
+      break;
+    }
+    if (!resp->Empty()) {
       VLOG(2) << "return reply from previous data read";
       return std::move(resp).value();  // success path
     }
@@ -561,7 +564,10 @@ void ProtocolClient::ResetReplyParser() {
   resp_args_.clear();
   resp_buf_.Clear();
 
-  resp_parser_.Reset({.max_array_len = GetFlag(FLAGS_max_multi_bulk_len)});
+  // Preserve the legacy reply parser's bulk-size and nesting limits.
+  resp_parser_.Reset({.max_array_len = GetFlag(FLAGS_max_multi_bulk_len),
+                      .max_bulk_len = min<uint64_t>(GetFlag(FLAGS_max_bulk_len), UINT32_MAX),
+                      .max_depth = 64});
 }
 
 void ProtocolClient::ResetCommandParser() {
@@ -569,7 +575,7 @@ void ProtocolClient::ResetCommandParser() {
 
   // An upstream master's commands may contain more arguments than regular client requests.
   uint32_t max_array_len = max(GetFlag(FLAGS_max_multi_bulk_len), 1u << 20);
-  // TODO: Add bulk-length, line-length, and nesting-depth limits to RESPParser.
+  // TODO: Apply bulk-length/nesting limits here and add a line-length limit to RESPParser.
   resp_parser_.Reset({.max_array_len = max_array_len});
 }
 
