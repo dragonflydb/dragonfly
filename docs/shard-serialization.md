@@ -55,13 +55,13 @@ flowchart TD
   subgraph ShardThread[Shard thread / fibers]
     MUT[DB mutation] -->|change callback| ODC["OnChange<br/>(SerializerBase)"]
     ODC -->|per affected bucket| PB1["ProcessBucket<br/>(on_update = true)"]
-    PB1 -->|version &lt; snapshot_version_| SBL1["SerializeBucketLocked"]
+    PB1 -->|version &lt; snapshot_version_| SBL1["SerializeBucket"]
     PB1 -->|already serialized| WAIT["BucketDependencies::Wait<br/>(block mutation until<br/>in-flight work resolves)"]
     SBL1 --> SE1["SerializeEntry"]
 
     TRAV["Snapshot fiber: IterateBucketsFb"] --> PB2["ProcessBucket<br/>(on_update = false)"]
     PB2 --> FCE["FlushChangeToEarlierCallbacks"]
-    PB2 --> SBL2["SerializeBucketLocked"]
+    PB2 --> SBL2["SerializeBucket"]
     SBL2 --> SE2["SerializeEntry"]
 
     SE2 -->|in-memory| SAVE2["SerializeEntryLocked<br/>(lock stream_mu_)"]
@@ -100,7 +100,7 @@ bucket. The snapshot serializes all buckets with version `< snapshot_version_`.
 - `snapshot_version_` is assigned in `DbSlice::RegisterOnChange` (= `NextVersion()`), when the
   `SerializerBase` registers itself as a change listener at `Start`.
 - `ProcessBucket` stamps the bucket version to `snapshot_version_` *before* calling
-  `SerializeBucketLocked`, ensuring each physical bucket is serialized exactly once.
+  `SerializeBucket`, ensuring each physical bucket is serialized exactly once.
 - Mutations bump bucket versions, so a bucket mutated after the snapshot started has version
   `>= snapshot_version_` and is skipped by the traversal.
 - Buckets not yet traversed but about to be mutated require **serialize-before-mutate**,
@@ -210,7 +210,7 @@ ProcessBucket(db_index, it, on_update):      // serializer_base.cc
 
   it.SetVersion(snapshot_version_)                 // stamp BEFORE serializing
   BucketDependencies::Increment(it.bucket_address())
-  keys_serialized += SerializeBucketLocked(db_index, it, on_update)
+  keys_serialized += SerializeBucket(db_index, it, on_update)
   buckets_serialized++; buckets_on_change += on_update
   BucketDependencies::Decrement(it.bucket_address())
 
@@ -229,11 +229,12 @@ earlier-registered snapshot (lower version) that has not yet serialized this buc
 first — otherwise the version stamp would cause the earlier snapshot's traversal/callbacks to skip
 it and miss the bucket entirely.
 
-### `SerializeBucketLocked` and `SerializeEntry`
+### `SerializeBucket` and `SerializeEntry`
 
-`SerializeBucketLocked` (implemented per subclass) iterates the occupied slots of a physical
-bucket and calls the shared `SerializerBase::SerializeEntry` for each. The base sets the sanity
-flag `serialize_bucket_running_` for the duration.
+`SerializeBucket` (in `serializer_base.cc`) iterates the occupied slots of a physical bucket and
+calls `SerializeEntry` for each entry accepted by the virtual `ShouldSerialize` hook (all entries
+by default; slot migration keeps db 0 and its owned slots). No lock is held for the whole bucket:
+`SerializeEntry` takes `stream_mu_` per entry.
 
 `SerializeEntry` (in `serializer_base.cc`) dispatches based on value location:
 
@@ -517,8 +518,8 @@ protocol.
 ```mermaid
 flowchart TD
   subgraph PERENTRY["Per-entry serialization (stream_mu_ held briefly)"]
-    A1["OnChange → ProcessBucket(on_update=true)"] --> SBL1["SerializeBucketLocked → SerializeEntry"]
-    A2["IterateBucketsFb → ProcessBucket(on_update=false)"] --> SBL2["SerializeBucketLocked → SerializeEntry"]
+    A1["OnChange → ProcessBucket(on_update=true)"] --> SBL1["SerializeBucket → SerializeEntry"]
+    A2["IterateBucketsFb → ProcessBucket(on_update=false)"] --> SBL2["SerializeBucket → SerializeEntry"]
     A3["ProcessDelayedEntries → SerializeFetchedEntry"] --> SBL3["SerializeEntryLocked (tiered)"]
     SBL1 --> SE["SaveEntry"]
     SBL2 --> SE

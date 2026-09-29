@@ -211,11 +211,11 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   if (it.GetVersion() >= snapshot_version_)
     return ProcessBucket(db_index, it, on_update);  // for the false path
 
-  // We call it before SerializeBucketLocked because it dchecks on bucket version.
+  // We call it before SerializeBucket because it dchecks on bucket version.
   it.SetVersion(snapshot_version_);
   BucketDependencies::Increment(it.bucket_address());
 
-  stats_.keys_serialized += SerializeBucketLocked(db_index, it, on_update);
+  stats_.keys_serialized += SerializeBucket(db_index, it, on_update);
   stats_.buckets_serialized++;
   stats_.buckets_on_change += unsigned(on_update);
 
@@ -279,6 +279,28 @@ bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
   }
 
   return base_cntx_->IsRunning();
+}
+
+unsigned SerializerBase::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                         bool on_update) {
+  base::CpuTimeGuard guard(&cpu_aggregator_);
+
+  unsigned serialized = 0;
+  for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+    // Version is already stamped by ProcessBucket.
+    DCHECK_EQ(it.GetVersion(), snapshot_version_);
+
+    if (!ShouldSerialize(db_index, it->first)) {
+      ++stats_.keys_skipped;
+      continue;
+    }
+
+    // Might preempt due to big value serialization.
+    SerializeEntry(it.bucket_address(), db_index, it->first, it->second);
+    ++serialized;
+  }
+
+  return serialized;
 }
 
 void SerializerBase::WaitForNoBucketBlocked() const {

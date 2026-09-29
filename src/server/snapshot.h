@@ -89,11 +89,6 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Flushes the serializer and yields between traversal steps.
   void PaceTraversal(bool done) override;
 
-  // Serialize single bucket.
-  // Returns number of serialized entries.
-  unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator bucket_it,
-                                 bool on_update) override;
-
   // Called under stream_mu_ to perform RDB serialization of a single entry.
   void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             time_t expire, uint32_t mc_flags) override;
@@ -117,8 +112,6 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   std::unique_ptr<RdbSerializer> serializer_;
 
-  // Used for sanity checks.
-  bool serialize_bucket_running_ = false;
   uint32_t journal_cb_id_ = 0;
 
   util::fb2::Fiber snapshot_fb_;

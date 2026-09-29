@@ -114,8 +114,8 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
       : SerializerBase(slice, cntx), params_{params}, reg_{reg} {
   }
 
-  unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                 bool on_update) override;
+  unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                           bool on_update) override;
 
   void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             time_t expire, uint32_t mc_flags) override {
@@ -262,8 +262,8 @@ void TestDriver::ConsumeJournalChange(const journal::JournalChangeItem& item) {
     journal_writes_[key]++;
 }
 
-unsigned TestDriver::SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                           bool on_update) {
+unsigned TestDriver::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                                     bool on_update) {
   if (on_update && params_.block_on_update) {
     on_update_entered_.Notify();
     on_update_release_.Wait();

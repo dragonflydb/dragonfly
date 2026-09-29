@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include "base/cycle_clock.h"
 #include "server/cluster/slot_set.h"
 #include "server/common_types.h"
 #include "server/execution_state.h"
@@ -89,8 +88,7 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
   // Stalls the traversal while the socket writer is backlogged or the CPU budget is exhausted.
   void PaceTraversal(bool done) override;
 
-  unsigned SerializeBucketLocked(DbIndex db_index, PrimeTable::bucket_iterator it,
-                                 bool on_update) override;
+  bool ShouldSerialize(DbIndex db_index, const PrimeKey& pk) const override;
 
   void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                             time_t expire, uint32_t mc_flags) override;
@@ -103,7 +101,6 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
   bool ShouldWrite(SlotId slot_id) const;
 
   struct MigrationStats {
-    uint64_t keys_skipped = 0;
     uint64_t commands = 0;
     uint64_t iter_skips = 0;
   };
@@ -114,7 +111,10 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
   std::unique_ptr<CmdSerializer> cmd_serializer_;
 
   MigrationStats migration_stats_;
-  base::RealTimeAggregator cpu_aggregator_;
+
+  // Scratch buffer for decoding keys in ShouldSerialize. Reused to avoid allocating per key; safe
+  // to share across fibers because ShouldSerialize does not preempt.
+  mutable std::string key_buffer_;
   uint32_t steps_since_sleep_ = 0;
   LSN last_lsn_writen_ = 0;
   uint32_t journal_cb_id_{0};
