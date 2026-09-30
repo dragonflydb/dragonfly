@@ -275,8 +275,12 @@ async def test_emulated_cluster_replica_advertises_announced_addresses(df_factor
 
     # The announced address is captured at handshake time: a runtime change on the master reaches
     # the replica on its next connection.
-    assert await c_master.execute_command("CONFIG SET cluster_announce_ip 127.0.0.4") == "OK"
-    assert await c_master.execute_command("CONFIG SET announce_port 1339") == "OK"
+    assert (
+        await c_master.execute_command(
+            "CONFIG SET cluster_announce_ip 127.0.0.4 announce_port 1339"
+        )
+        == "OK"
+    )
     assert await c_replica.execute_command("CLUSTER SLOTS") == expected
 
     assert await c_replica.execute_command("REPLICAOF NO ONE") == "OK"
