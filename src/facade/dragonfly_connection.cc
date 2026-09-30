@@ -1834,7 +1834,7 @@ auto Connection::ParseLoop() -> ParserStatus {
 
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
     // earlier replies in order before we report it.
-    ExecuteBatchResult execute_result = ExecuteBatch();
+    ExecuteBatchResult execute_result = ExecuteBatch(/*parser_error=*/parse_status == ERROR);
     if (execute_result == ExecuteBatchResult::kFailure)
       return ERROR;
 
@@ -3189,7 +3189,7 @@ bool Connection::SquashPipelineV2() {
   return true;
 }
 
-Connection::ExecuteBatchResult Connection::ExecuteBatch() {
+Connection::ExecuteBatchResult Connection::ExecuteBatch(bool parser_error) {
   // Invariant: batched_ must be false on entry.
   // Both ReplyBatch() and ExecuteBatch() reset it via absl::Cleanup guards on all return paths.
   DCHECK(!reply_builder_->IsBatchMode());
@@ -3248,13 +3248,14 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
                << pending_input_ << " " << GetUnreadInputLen();
 
       if (SquashPipelineV2()) {
-        // - This helps with throughput. Explanation:
-        //   when we suspend the thread calls io-callbacks that fill up the input buffer.
-        //   By breaking now we give the io-loop a chance to add more commands to the pipeline.
-        // - Skip the break when parse-in-proactor is on: the proactor already parsed those bytes
-        //   into the queue during the squash wait, so keep squashing in place instead.
-        if (!pipeline_parse_in_proactor_cached && (pending_input_ || GetUnreadInputLen() > 0))
+        // Return after a successful squash to allow the caller to process replies.
+        // A client with a bounded pipeline needs completed replies to replenish its requests.
+        // Delaying them might reduce throughput and stall both client and connection fiber, even
+        // when more commands are ready to execute.
+        // parse-in-proactor can set proactor_parse_error_ during the squash hop.
+        if (!parser_error && !proactor_parse_error_)
           break;
+        // Drain dispatchable commands before closing on a parser error.
         continue;
       }
     }
@@ -4143,7 +4144,7 @@ void Connection::DrainQueuedCommands() {
 
   if (parsed_head_) {
     if (HasCommandToExecute()) {
-      ExecuteBatchResult execute_result = ExecuteBatch();
+      ExecuteBatchResult execute_result = ExecuteBatch(/*parser_error*/ false);
       if (execute_result == ExecuteBatchResult::kFailure)
         return;  // IoLoopV2 observes the reply-builder error.
       if (execute_result == ExecuteBatchResult::kDeferToControlPath)
