@@ -524,6 +524,8 @@ class DbSlice {
     cache_mode_ = 1;
   }
 
+  static bool TEST_IsAsyncDeletionQueueEmpty();
+
   bool IsCacheMode() const {
     // During loading time we never bump elements.
     return cache_mode_ && (load_ref_count_ == 0);
