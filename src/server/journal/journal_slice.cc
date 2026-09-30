@@ -165,6 +165,7 @@ void JournalSlice::AddLogRecord(const Entry& entry) {
     // only used by SlotMigrationStreamer
     item.cmd = entry.payload.cmd;
     item.slot = entry.slot;
+    item.tx_time_ms = entry.tx_time_ms;
 
     io::StringSink sink;
     JournalWriter writer{&sink};

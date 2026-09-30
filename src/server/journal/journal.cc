@@ -103,13 +103,13 @@ LSN GetLsn() {
 }
 
 void RecordEntry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot,
-                 Entry::Payload payload) {
+                 Entry::Payload payload, uint64_t tx_time_ms) {
   // Some commands write multiple records after checking journal() only once, and MaybeStop might
   // stop the journal.
   if (!EngineShard::tlocal()->journal())
     return;
 
-  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, slot, std::move(payload)});
+  journal_slice.AddLogRecord(Entry{txid, opcode, dbid, slot, std::move(payload), tx_time_ms});
   MaybeStop();
 }
 
