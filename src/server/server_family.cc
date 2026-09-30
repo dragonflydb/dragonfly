@@ -2239,8 +2239,9 @@ void ServerFamily::Config(facade::CmdArgParser parser, CommandContext* cmd_cntx)
         "CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
         "GET <pattern>",
         "    Return parameters matching the glob-like <pattern> and their values.",
-        "SET <directive> <value>",
-        "    Set the configuration <directive> to <value>.",
+        "SET <directive> <value> [<directive> <value> ...]",
+        "    Set one or more configuration directives to their respective values.",
+        "    Either all directives are set, or, in case of an error, none are.",
         "RESETSTAT",
         "    Reset statistics reported by the INFO command.",
         "REWRITE",
@@ -2253,31 +2254,46 @@ void ServerFamily::Config(facade::CmdArgParser parser, CommandContext* cmd_cntx)
   }
 
   if (sub_cmd == "SET") {
-    if (args.size() != 3) {
+    // args[0] is "SET", followed by one or more <directive> <value> pairs.
+    if (args.size() < 3 || (args.size() - 1) % 2 != 0) {
       return cmd_cntx->SendError(WrongNumArgsError("config|set"), kConfigErrType);
     }
 
-    string param = absl::AsciiStrToLower(args[1]);
-
-    ConfigRegistry::SetResult result = config_registry.Set(param, args[2]);
-
-    const char kErrPrefix[] = "CONFIG SET failed (possibly related to argument '";
-    switch (result) {
-      case ConfigRegistry::SetResult::OK:
-        return builder->SendOk();
-      case ConfigRegistry::SetResult::UNKNOWN:
-        return cmd_cntx->SendError(
-            absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", param, "'"),
-            kConfigErrType);
-
-      case ConfigRegistry::SetResult::READONLY:
-        return cmd_cntx->SendError(
-            absl::StrCat(kErrPrefix, param, "') - can't set immutable config"), kConfigErrType);
-      case ConfigRegistry::SetResult::INVALID:
-        return cmd_cntx->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
-                                   kConfigErrType);
+    size_t num_params = (args.size() - 1) / 2;
+    vector<string> params_lower(num_params);
+    vector<pair<string_view, string_view>> params(num_params);
+    for (size_t i = 0; i < num_params; ++i) {
+      params_lower[i] = absl::AsciiStrToLower(args[1 + i * 2]);
+      params[i] = {params_lower[i], args[2 + i * 2]};
     }
-    ABSL_UNREACHABLE();
+
+    ConfigRegistry::MultiSetResult multi_result = config_registry.SetMultiple(params);
+    if (multi_result.result != ConfigRegistry::SetResult::OK) {
+      string_view err_param = params[multi_result.failed_index].first;
+      const char kErrPrefix[] = "CONFIG SET failed (possibly related to argument '";
+      switch (multi_result.result) {
+        case ConfigRegistry::SetResult::UNKNOWN:
+          return cmd_cntx->SendError(
+              absl::StrCat("Unknown option or number of arguments for CONFIG SET - '", err_param,
+                           "'"),
+              kConfigErrType);
+        case ConfigRegistry::SetResult::READONLY:
+          return cmd_cntx->SendError(
+              absl::StrCat(kErrPrefix, err_param, "') - can't set immutable config"),
+              kConfigErrType);
+        case ConfigRegistry::SetResult::INVALID:
+          return cmd_cntx->SendError(
+              absl::StrCat(kErrPrefix, err_param, "') - argument can not be set"), kConfigErrType);
+        case ConfigRegistry::SetResult::DUPLICATE:
+          return cmd_cntx->SendError(
+              absl::StrCat(kErrPrefix, err_param, "') - duplicate parameter"), kConfigErrType);
+        case ConfigRegistry::SetResult::OK:
+          break;
+      }
+      ABSL_UNREACHABLE();
+    }
+
+    return builder->SendOk();
   }
 
   if (sub_cmd == "GET" && args.size() == 2) {
