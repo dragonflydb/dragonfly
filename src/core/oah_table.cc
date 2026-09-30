@@ -20,13 +20,10 @@ template <typename Entry> void OAHTable<Entry>::Shrink(size_t new_size) {
     return;
 
   size_t prev_size = entries_.size();
+  const uint32_t prev_capacity_log = capacity_log_;
   capacity_log_ = absl::bit_width(target) - 1;
 
-  // Process from low to high (opposite of Grow/Rehash).
-  for (size_t i = 0; i < prev_size; ++i) {
-    ShrinkBucket(i);
-  }
-
+  Rehash<true>(prev_size, prev_capacity_log);
   entries_.resize(Capacity());
   entries_.shrink_to_fit();
 }
@@ -80,10 +77,11 @@ template <typename Entry> size_t OAHTable<Entry>::SizeSlow() {
 template <typename Entry> void OAHTable<Entry>::GrowCapacity(size_t bucket_capacity) {
   bucket_capacity = std::max(kMinBucketCount, absl::bit_ceil(bucket_capacity));
   if (bucket_capacity > entries_.size()) {
+    const uint32_t prev_capacity_log = capacity_log_;
     capacity_log_ = uint32_t(absl::bit_width(bucket_capacity) - 1);
     size_t prev_size = entries_.size();
     entries_.resize(Capacity());
-    Rehash(prev_size);
+    Rehash<false>(prev_size, prev_capacity_log);
   }
   assert(entries_.size() >= kDisplacementSize);
 }

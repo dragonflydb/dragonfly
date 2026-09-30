@@ -695,8 +695,9 @@ TEST_F(OAHMapTest, Extract) {
   EXPECT_FALSE(m_->Contains("f1"));
   EXPECT_TRUE(m_->Contains("f2"));
 
-  // Extract half of many entries (exercises rehash-sized tables).
+  // Extract half of many entries; dropping below half the bucket count shrinks the table.
   m_->Clear();
+  m_->Reserve(32 * OAHMap::kOverloadFactor);
   for (unsigned i = 0; i < 20; i++)
     m_->AddOrUpdate(to_string(i), "val" + to_string(i));
   EXPECT_EQ(m_->UpperBoundSize(), 20u);
@@ -706,6 +707,7 @@ TEST_F(OAHMapTest, Extract) {
     EXPECT_EQ(entry.pair().Value(), ("val" + to_string(i)));
   }
   EXPECT_EQ(m_->UpperBoundSize(), 10u);
+  EXPECT_EQ(m_->BucketCount(), 16u);
   for (unsigned i = 1; i < 20; i += 2)
     EXPECT_TRUE(m_->Contains(to_string(i)));
 }

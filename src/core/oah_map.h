@@ -91,6 +91,7 @@ class OAHMap : public OAHTable<OAHPair> {
       }
     }
 
+    TryShrink();
     if (expired)  // already-expired target => report absent (like Redis); result frees the blob
       return {};
     return result;
