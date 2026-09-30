@@ -26,7 +26,6 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
-#include "facade/redis_parser.h"
 #include "facade/reply_capture.h"
 #include "facade/resp_parser.h"
 #include "facade/socket_utils.h"
@@ -51,6 +50,16 @@ extern "C" {
       VLOG(1) << msg;                                               \
     }                                                               \
   } while (0)
+
+#define GET_OR_RETURN_ERR_T(T, expr) \
+  ({                                 \
+    auto expr_res = (expr);          \
+    if (!expr_res)                   \
+      return (T)(expr_res.error());  \
+    std::move(expr_res).value();     \
+  })
+
+#define GET_OR_RETURN_ERR(expr) GET_OR_RETURN_ERR_T(std::error_code, expr)
 
 ABSL_FLAG(int, replication_acks_interval, 1000, "Interval between acks in milliseconds.");
 ABSL_FLAG(int, master_connect_timeout_ms, 20000,
@@ -336,70 +345,71 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
 }
 
 error_code Replica::Greet() {
-  ResetParser();
+  ResetReplyParser();
   VLOG(1) << "greeting message handling";
   // Corresponds to server.repl_state == REPL_STATE_CONNECTING state in redis
-  RETURN_ON_ERR(SendCommandAndReadResponse("PING"));  // optional.
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("PONG"));
+  auto reply = GET_OR_RETURN_ERR(SendCommandAndTakeReply("PING"));  // optional.
+  PC_RETURN_ON_BAD_RESPONSE(ReplyString(reply) == "PONG");
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_HANDSHAKE condition in replication.c
   uint16_t port = cluster::ClusterFamily::AnnouncedPort();
-  RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF listening-port ", port)));
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  reply = GET_OR_RETURN_ERR(SendCommandAndTakeReply(StrCat("REPLCONF listening-port ", port)));
+  PC_RETURN_ON_BAD_RESPONSE(ReplyString(reply) == "OK");
 
   auto announce_ip = absl::GetFlag(FLAGS_replica_announce_ip);
   if (!announce_ip.empty()) {
-    RETURN_ON_ERR(SendCommandAndReadResponse(StrCat("REPLCONF ip-address ", announce_ip)));
-    LOG_IF(WARNING, !CheckRespIsSimpleReply("OK"))
+    reply = GET_OR_RETURN_ERR(SendCommandAndTakeReply(StrCat("REPLCONF ip-address ", announce_ip)));
+    LOG_IF(WARNING, ReplyString(reply) != "OK")
         << "Master did not OK announced IP address, perhaps it is using an old version";
   }
 
   // Corresponds to server.repl_state == REPL_STATE_SEND_CAPA
-  RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa eof capa psync2"));
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  reply = GET_OR_RETURN_ERR(SendCommandAndTakeReply("REPLCONF capa eof capa psync2"));
+  PC_RETURN_ON_BAD_RESPONSE(ReplyString(reply) == "OK");
 
   // Announce that we are the dragonfly client.
   // Note that we currently do not support dragonfly->redis replication.
-  RETURN_ON_ERR(SendCommandAndReadResponse("REPLCONF capa dragonfly"));
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespFirstTypes({RespExpr::STRING}));
+  reply = GET_OR_RETURN_ERR(SendCommandAndTakeReply("REPLCONF capa dragonfly"));
 
   // The address belongs to the master we are greeting now, which may be a different server.
   master_context_.announced.reset();
 
-  if (LastResponseArgs().size() == 1) {  // Redis
-    PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
-  } else if (LastResponseArgs().size() >= 3) {  // it's dragonfly master.
-    PC_RETURN_ON_BAD_RESPONSE(!HandleCapaDflyResp());
+  if (auto args = reply.As<RESPArray>()) {  // Dragonfly
+    PC_RETURN_ON_BAD_RESPONSE(!HandleCapaDflyResp(*args));
     if (auto ec = ConfigureDflyMaster(); ec)
       return ec;
-  } else {
-    PC_RETURN_ON_BAD_RESPONSE(false);
+  } else {  // Redis
+    PC_RETURN_ON_BAD_RESPONSE(ReplyString(reply) == "OK");
   }
 
   state_mask_ |= R_GREETED;
   return error_code{};
 }
 
-std::error_code Replica::HandleCapaDflyResp() {
+std::error_code Replica::HandleCapaDflyResp(const RESPArray& args) {
   // Response is: <master_repl_id> <syncid> <num_shards> [<version> [<lineage_id>
   //   [<announced_ip> <announced_port>]]]
-  if (!CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING, RespExpr::INT64}) ||
-      LastResponseArgs()[0].GetBuf().size() != CONFIG_RUN_ID_SIZE)
+  if (args.Size() < 3 || args.Size() == SIZE_MAX)
     return make_error_code(errc::bad_message);
 
-  int64 param_num_flows = get<int64_t>(LastResponseArgs()[2].u);
-  if (param_num_flows <= 0 || param_num_flows > 1024) {
+  auto repl_id = ReplyString(args[0]);
+  auto session_id = ReplyString(args[1]);
+  auto num_flows = args[2].As<int64_t>();
+  if (!repl_id || repl_id->size() != CONFIG_RUN_ID_SIZE || !session_id || !num_flows)
+    return make_error_code(errc::bad_message);
+
+  if (*num_flows <= 0 || *num_flows > 1024) {
     // sanity check, we support upto 1024 shards.
     // It's not that we can not support more but it's probably highly unlikely that someone
     // will run dragonfly with more than 1024 cores.
-    LOG(ERROR) << "Invalid flow count " << param_num_flows;
+    LOG(ERROR) << "Invalid flow count " << *num_flows;
     return make_error_code(errc::bad_message);
   }
 
   DCHECK(proactor_ == Proactor());
 
   // If we're syncing a different replication ID, drop the saved LSNs.
-  string_view master_repl_id = ToSV(LastResponseArgs()[0].GetBuf());
+  string_view master_repl_id = *repl_id;
 
   // If we tried to replicate from ourself return an error
   if (master_repl_id == id_) {
@@ -418,34 +428,34 @@ std::error_code Replica::HandleCapaDflyResp() {
     last_journal_LSNs_.reset();
   }
   master_context_.master_repl_id = master_repl_id;
-  master_context_.dfly_session_id = ToSV(LastResponseArgs()[1].GetBuf());
-  master_context_.num_flows = param_num_flows;
+  master_context_.dfly_session_id = *session_id;
+  master_context_.num_flows = *num_flows;
 
-  if (LastResponseArgs().size() >= 4) {
-    PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[3].type == RespExpr::INT64);
-    master_context_.version = DflyVersion(get<int64_t>(LastResponseArgs()[3].u));
+  if (args.Size() >= 4) {
+    auto version = args[3].As<int64_t>();
+    PC_RETURN_ON_BAD_RESPONSE(version.has_value());
+    master_context_.version = DflyVersion(*version);
   }
 
   // If our master is itself a replica (cascaded), parse lineage id (grandparent id)
-  if (LastResponseArgs().size() >= 5) {
-    PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[4].type == RespExpr::STRING);
-    master_context_.lineage_id = ToSV(LastResponseArgs()[4].GetBuf());
+  if (args.Size() >= 5) {
+    auto lineage_id = ReplyString(args[4]);
+    PC_RETURN_ON_BAD_RESPONSE(lineage_id.has_value());
+    master_context_.lineage_id = *lineage_id;
   } else {
     master_context_.lineage_id = master_context_.master_repl_id;
   }
 
-  if (LastResponseArgs().size() >= 7) {
-    PC_RETURN_ON_BAD_RESPONSE(LastResponseArgs()[5].type == RespExpr::STRING &&
-                              LastResponseArgs()[6].type == RespExpr::INT64);
-    int64_t announced_port = get<int64_t>(LastResponseArgs()[6].u);
-    PC_RETURN_ON_BAD_RESPONSE(announced_port >= 0 && announced_port <= UINT16_MAX);
-    master_context_.announced = {string(ToSV(LastResponseArgs()[5].GetBuf())),
-                                 static_cast<uint16_t>(announced_port)};
+  if (args.Size() >= 7) {
+    auto announced_ip = ReplyString(args[5]);
+    auto announced_port = args[6].As<int64_t>();
+    PC_RETURN_ON_BAD_RESPONSE(announced_ip && announced_port);
+    PC_RETURN_ON_BAD_RESPONSE(*announced_port >= 0 && *announced_port <= UINT16_MAX);
+    master_context_.announced = {string(*announced_ip), static_cast<uint16_t>(*announced_port)};
   }
 
   VLOG(1) << "Master id: " << master_context_.master_repl_id
-          << ", sync id: " << master_context_.dfly_session_id
-          << ", num journals: " << param_num_flows
+          << ", sync id: " << master_context_.dfly_session_id << ", num journals: " << *num_flows
           << ", version: " << unsigned(master_context_.version)
           << ", lineage: " << master_context_.lineage_id << ", announced address: "
           << (master_context_.announced
@@ -459,15 +469,15 @@ std::error_code Replica::ConfigureDflyMaster() {
   // We need to send this because we may require to use this for cluster commands.
   // this reason to send this here is that in other context we can get an error reply
   // since we are budy with the replication
-  RETURN_ON_ERR(
-      SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-ID ", service_.cluster_family().MyID())));
-  if (!CheckRespIsSimpleReply("OK")) {
+  auto reply = GET_OR_RETURN_ERR(
+      SendCommandAndTakeReply(StrCat("REPLCONF CLIENT-ID ", service_.cluster_family().MyID())));
+  if (ReplyString(reply) != "OK") {
     LOG(WARNING) << "Bad REPLCONF CLIENT-ID response";
   }
 
-  RETURN_ON_ERR(
-      SendCommandAndReadResponse(StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER)));
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  reply = GET_OR_RETURN_ERR(
+      SendCommandAndTakeReply(StrCat("REPLCONF CLIENT-VERSION ", DflyVersion::CURRENT_VER)));
+  PC_RETURN_ON_BAD_RESPONSE(ReplyString(reply) == "OK");
 
   return error_code{};
 }
@@ -537,7 +547,7 @@ error_code Replica::InitiatePSync() {
       io::Result<size_t> eof_res = chained.Read(io::MutableBytes{buf});
       CHECK(eof_res && *eof_res == kRdbEofMarkSize);
 
-      VLOG(1) << "Comparing token " << ToSV(buf);
+      VLOG(1) << "Comparing token " << io::View(io::Bytes{buf});
 
       // TODO: handle gracefully...
       CHECK_EQ(0, memcmp(token->data(), buf, kRdbEofMarkSize));
@@ -983,9 +993,9 @@ error_code Replica::SendNextPhaseRequest(string_view kind) {
   string request = StrCat("DFLY ", kind, " ", master_context_.dfly_session_id);
 
   VLOG(1) << "Sending: " << request;
-  RETURN_ON_ERR(SendCommandAndReadResponse(request));
+  auto reply = GET_OR_RETURN_ERR(SendCommandAndTakeReply(request));
 
-  PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+  PC_RETURN_ON_BAD_RESPONSE(ReplyString(reply) == "OK");
 
   return std::error_code{};
 }
@@ -1018,35 +1028,33 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
     VLOG(1) << "Sending last master sync flow " << last_master_data.value().id << " " << lsn_str;
   }
 
-  ResetParser();
+  ResetReplyParser();
   leftover_buf_.emplace(128);
   RETURN_ON_ERR_T(make_unexpected, SendCommand(cmd));
-  auto read_resp = ReadRespReply(&*leftover_buf_);
-  if (!read_resp.has_value()) {
-    return make_unexpected(read_resp.error());
-  }
+  auto reply = GET_OR_RETURN_ERR_T(make_unexpected, TakeRespReply(Sock()->timeout()));
 
+  auto args = reply.As<RESPArray>();
   PC_RETURN_ON_BAD_RESPONSE_T(make_unexpected,
-                              CheckRespFirstTypes({RespExpr::STRING, RespExpr::STRING}));
+                              args && args->Size() >= 2 && args->Size() != SIZE_MAX);
 
-  string_view flow_directive = ToSV(LastResponseArgs()[0].GetBuf());
+  auto flow_directive = ReplyString((*args)[0]);
+  auto eof_token = ReplyString((*args)[1]);
 
-  string eof_token;
-  PC_RETURN_ON_BAD_RESPONSE_T(make_unexpected,
-                              flow_directive == "FULL" || flow_directive == "PARTIAL");
+  PC_RETURN_ON_BAD_RESPONSE_T(
+      make_unexpected, (flow_directive == "FULL" || flow_directive == "PARTIAL") && eof_token);
   bool is_full_sync = flow_directive == "FULL";
 
-  eof_token = ToSV(LastResponseArgs()[1].GetBuf());
-
-  leftover_buf_->ConsumeInput(read_resp->left_in_buffer);
+  // The binary stream following the reply may have arrived with it; hand it to the binary reader
+  // and discard the parser's copy.
+  string_view unparsed = UnparsedInput();
+  leftover_buf_->WriteAndCommit(unparsed.data(), unparsed.size());
+  ResetReplyParser();
 
   // Skip full sync if we are doing partial. Clean up will take care mixed state, e.g,
   // some flows receive partial while others receive full.
   if (is_full_sync) {
-    // We can not discard io_buf because it may contain data
-    // besides the response we parsed. Therefore we pass it further to ReplicateDFFb.
     sync_fb_ = fb2::Fiber("shard_full_sync", &DflyShardReplica::FullSyncDflyFb, this,
-                          std::move(eof_token), sb, cntx);
+                          string(*eof_token), sb, cntx);
   } else if (last_master_data) {
     // Only needed when we are rotating masters.
     SetRecordsExecuted(last_master_data->last_journal_LSNs[flow_id_]);

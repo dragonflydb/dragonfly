@@ -2478,7 +2478,7 @@ error_code RdbLoader::Load(io::Source* src) {
 
     const size_t magic_size = is_valkey ? 6 : 5;
     if (!is_valkey && memcmp(cb.data(), "REDIS", 5) != 0) {
-      VLOG(1) << "Bad header: " << absl::CHexEscape(facade::ToSV(cb));
+      VLOG(1) << "Bad header: " << absl::CHexEscape(io::View(cb));
       return RdbError(errc::wrong_signature);
     }
 

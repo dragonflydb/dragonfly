@@ -23,7 +23,6 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "facade/dragonfly_connection.h"
-#include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/socket_utils.h"
 #include "server/error.h"
@@ -263,13 +262,15 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
 
   auto masterauth = GetFlag(FLAGS_masterauth);
   auto masteruser = GetFlag(FLAGS_masteruser);
-  ResetParser();
+  ResetReplyParser();
   if (!masterauth.empty()) {
     auto cmd = masteruser.empty() ? StrCat("AUTH ", masterauth)
                                   : StrCat("AUTH ", masteruser, " ", masterauth);
-    RETURN_ON_ERR(SendCommandAndReadResponse(cmd));
+    auto reply = SendCommandAndTakeReply(cmd);
     last_cmd_ = "AUTH";  // Make sure the password is not printed to logs
-    PC_RETURN_ON_BAD_RESPONSE(CheckRespIsSimpleReply("OK"));
+    if (!reply)
+      return reply.error();
+    PC_RETURN_ON_BAD_RESPONSE(ReplyString(*reply) == "OK");
   }
   return error_code{};
 }
@@ -319,60 +320,8 @@ void ProtocolClient::DefaultErrorHandler(const GenericError& err) {
   ShutdownSocket();
 }
 
-io::Result<ProtocolClient::ReadRespRes> ProtocolClient::ReadRespReply(base::IoBuf* buffer,
-                                                                      bool copy_msg) {
-  DCHECK(parser_);
-
-  error_code ec;
-  if (!buffer) {
-    buffer = &resp_buf_;
-    buffer->Clear();
-  }
-  last_resp_ = "";
-
-  uint32_t processed_bytes = 0;
-
-  RedisParser::Result result = RedisParser::OK;
-  while (!ec) {
-    uint32_t consumed;
-    if (buffer->InputLen() == 0 || result == RedisParser::INPUT_PENDING) {
-      DCHECK_GT(buffer->AppendLen(), 0u);
-
-      ec = Recv(sock_.get(), buffer);
-      if (ec) {
-        return nonstd::make_unexpected(ec);
-      }
-    }
-
-    result = parser_->Parse(buffer->InputBuffer(), &consumed, &resp_args_);
-    processed_bytes += consumed;
-    if (copy_msg)
-      last_resp_ +=
-          std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), consumed);
-
-    if (result == RedisParser::OK) {
-      return ReadRespRes{processed_bytes, consumed};  // success path
-    }
-
-    buffer->ConsumeInput(consumed);
-
-    if (result != RedisParser::INPUT_PENDING) {
-      LOG(ERROR) << "Invalid parser status " << result << " for response " << last_resp_;
-      return nonstd::make_unexpected(std::make_error_code(std::errc::bad_message));
-    }
-
-    // We need to read more data. Check that we have enough space.
-    if (buffer->AppendLen() < 64u) {
-      buffer->EnsureCapacity(buffer->Capacity() * 2);
-    }
-  }
-
-  return nonstd::make_unexpected(ec);
-}
-
 io::Result<ProtocolClient::ReadCommandRes> ProtocolClient::ReadRespCommand(
     base::IoBuf* buffer, cmn::BackedArguments* dest) {
-  DCHECK(!parser_);
   DCHECK(buffer);
   DCHECK(dest);
 
@@ -412,76 +361,52 @@ io::Result<ProtocolClient::ReadCommandRes> ProtocolClient::ReadRespCommand(
   return ReadCommandRes{static_cast<uint32_t>(total_read), resp_parser_.HasBufferedInput()};
 }
 
-io::Result<dfly::RESPObj> ProtocolClient::TakeRespReply(uint32_t timeout, base::IoBuf* buffer,
-                                                        bool copy_msg) {
+io::Result<RESPObj> ProtocolClient::TakeRespReply(uint32_t timeout) {
   auto prev_timeout = sock_->timeout();
   sock_->set_timeout(timeout);
   absl::Cleanup on_exit([this, prev_timeout]() { sock_->set_timeout(prev_timeout); });
 
-  error_code ec;
-  if (!buffer) {
-    buffer = &resp_buf_;
+  last_resp_.clear();
+
+  // The parser may already hold a complete reply left over from an earlier read.
+  auto resp = resp_parser_.Feed(nullptr, 0);
+
+  while (resp && resp->Empty()) {
+    DCHECK_EQ(resp_buf_.InputLen(), 0u);
+    if (auto ec = Recv(sock_.get(), &resp_buf_); ec) {
+      VLOG(2) << "error socket reading reply: " << ec;
+      return nonstd::make_unexpected(ec);
+    }
+
+    auto input = resp_buf_.InputBuffer();
+    resp = resp_parser_.Feed(reinterpret_cast<const char*>(input.data()), input.size());
+    last_resp_ += io::View(input);
+    // Feed copies everything it is given, so the buffer can be released right away.
+    resp_buf_.ConsumeInput(input.size());
   }
 
-  last_resp_ = "";
-
-  std::optional<dfly::RESPObj> resp;
-
-  do {
-    resp = resp_parser_.Feed(nullptr, 0);  // check if previous data produced a reply
-    if (!resp) {
-      break;
-    }
-    if (!resp->Empty()) {
-      VLOG(2) << "return reply from previous data read";
-      return std::move(resp).value();  // success path
-    }
-    if (buffer->InputLen() == 0) {
-      DCHECK_GT(buffer->AppendLen(), 0u);
-      ec = Recv(sock_.get(), buffer);
-      if (ec) {
-        VLOG(2) << "error socket reading reply: " << ec;
-        return nonstd::make_unexpected(ec);
-      }
-    }
-
-    auto input_buf = buffer->InputBuffer();
-    resp = resp_parser_.Feed(reinterpret_cast<char*>(input_buf.data()), input_buf.size());
-    if (copy_msg)
-      last_resp_ +=
-          std::string_view(reinterpret_cast<char*>(buffer->InputBuffer().data()), input_buf.size());
-
-    buffer->ConsumeInput(input_buf.size());
-    if (resp && !resp->Empty()) {
-      VLOG(2) << "successfully parsed readed reply";
-      return std::move(resp).value();  // success path
-    }
-
-    // We need to read more data. Check that we have enough space.
-    if (buffer->AppendLen() < 64u) {
-      buffer->EnsureCapacity(buffer->Capacity() * 2);
-    }
-  } while (resp);
-
-  VLOG(2) << "protocol issue";
-  return nonstd::make_unexpected(std::make_error_code(std::errc::bad_message));
+  if (!resp) {
+    VLOG(2) << "protocol issue";
+    return nonstd::make_unexpected(make_error_code(errc::bad_message));
+  }
+  return std::move(*resp);
 }
 
 error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
   size_t eol_pos;
-  std::string_view input_str = ToSV(io_buf->InputBuffer());
+  std::string_view input_str = io::View(io_buf->InputBuffer());
 
   // consume whitespace.
   while (true) {
     auto it = find_if_not(input_str.begin(), input_str.end(), absl::ascii_isspace);
     size_t ws_len = it - input_str.begin();
     io_buf->ConsumeInput(ws_len);
-    input_str = ToSV(io_buf->InputBuffer());
+    input_str = io::View(io_buf->InputBuffer());
     if (!input_str.empty())
       break;
 
     RETURN_ON_ERR(Recv(sock_.get(), io_buf));
-    input_str = ToSV(io_buf->InputBuffer());
+    input_str = io::View(io_buf->InputBuffer());
   };
 
   // find eol.
@@ -498,31 +423,17 @@ error_code ProtocolClient::ReadLine(base::IoBuf* io_buf, string_view* line) {
     }
 
     RETURN_ON_ERR(Recv(sock_.get(), io_buf));
-    input_str = ToSV(io_buf->InputBuffer());
+    input_str = io::View(io_buf->InputBuffer());
   }
 
   LOG(ERROR) << "Bad replication header: " << input_str;
   return std::make_error_code(std::errc::illegal_byte_sequence);
 }
 
-bool ProtocolClient::CheckRespIsSimpleReply(string_view reply) const {
-  return resp_args_.size() == 1 && resp_args_.front().type == RespExpr::STRING &&
-         ToSV(resp_args_.front().GetBuf()) == reply;
-}
-
-bool ProtocolClient::CheckRespSimpleError(string_view error) const {
-  return resp_args_.size() == 1 && resp_args_.front().type == RespExpr::ERROR &&
-         ToSV(resp_args_.front().GetBuf()) == error;
-}
-
-bool ProtocolClient::CheckRespFirstTypes(initializer_list<RespExpr::Type> types) const {
-  unsigned i = 0;
-  for (RespExpr::Type type : types) {
-    if (i >= resp_args_.size() || resp_args_[i].type != type)
-      return false;
-    ++i;
-  }
-  return true;
+std::optional<string_view> ProtocolClient::ReplyString(const RESPObj& reply) {
+  if (reply.GetType() != RESPObj::Type::STRING && reply.GetType() != RESPObj::Type::REPLY_STATUS)
+    return std::nullopt;
+  return reply.As<string_view>();
 }
 
 error_code ProtocolClient::SendCommand(string_view command) {
@@ -534,14 +445,6 @@ error_code ProtocolClient::SendCommand(string_view command) {
   return ec;
 }
 
-error_code ProtocolClient::SendCommandAndReadResponse(string_view command) {
-  last_cmd_ = command;
-  if (auto ec = SendCommand(command); ec)
-    return ec;
-  auto response_res = ReadRespReply();
-  return response_res.has_value() ? error_code{} : response_res.error();
-}
-
 io::Result<RESPObj> ProtocolClient::SendCommandAndTakeReply(string_view command) {
   last_cmd_ = command;
   if (auto ec = SendCommand(command); ec)
@@ -549,17 +452,7 @@ io::Result<RESPObj> ProtocolClient::SendCommandAndTakeReply(string_view command)
   return TakeRespReply(sock_->timeout());
 }
 
-void ProtocolClient::ResetParser() {
-  parser_ = make_unique<RedisParser>(RedisParser::Mode::CLIENT, GetFlag(FLAGS_max_multi_bulk_len),
-                                     GetFlag(FLAGS_max_bulk_len));
-  resp_parser_.Reset();
-}
-
 void ProtocolClient::ResetReplyParser() {
-  // TODO: Remove this transition cleanup once RedisParser is fully removed.
-  // The legacy authentication reader leaves its reply in resp_buf_.
-  parser_.reset();
-  resp_args_.clear();
   resp_buf_.Clear();
 
   // Preserve the legacy reply parser's bulk-size and nesting limits.
@@ -569,8 +462,6 @@ void ProtocolClient::ResetReplyParser() {
 }
 
 void ProtocolClient::ResetCommandParser() {
-  parser_.reset();
-
   // An upstream master's commands may contain more arguments than regular client requests.
   uint32_t max_array_len = max(GetFlag(FLAGS_max_multi_bulk_len), 1u << 20);
   // TODO: Add a line-length limit to RESPParser.

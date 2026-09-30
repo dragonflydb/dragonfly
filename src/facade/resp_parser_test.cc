@@ -115,6 +115,34 @@ TEST_F(RESPParserTest, StreamingState) {
   EXPECT_FALSE(reply->Empty());
   EXPECT_EQ(consumed, 9u);
   EXPECT_FALSE(reader.HasBufferedInput());
+  constexpr string_view kReply = "*2\r\n+FULL\r\n$3\r\neof\r\n";
+  const string input = string(kReply) + "REDIS0012\0\xff"s;
+
+  for (size_t split = 0; split < kReply.size(); ++split) {
+    SCOPED_TRACE(split);
+    reader.Reset();
+    reply = reader.Feed(input.data(), split, &consumed);
+    size_t total_consumed = consumed;
+    ASSERT_TRUE(reply.has_value());
+    ASSERT_TRUE(reply->Empty());
+
+    reply = reader.Feed(input.data() + split, input.size() - split, &consumed);
+    total_consumed += consumed;
+    ASSERT_TRUE(reply.has_value());
+    ASSERT_FALSE(reply->Empty());
+    EXPECT_EQ(total_consumed, kReply.size());
+    EXPECT_TRUE(reader.HasBufferedInput());
+    EXPECT_EQ(reader.BufferedInput(), input.substr(kReply.size()));
+
+    reader.Reset();
+    EXPECT_FALSE(reader.HasBufferedInput());
+    EXPECT_TRUE(reader.BufferedInput().empty());
+    auto args = reply->As<RESPArray>();
+    ASSERT_TRUE(args.has_value());
+    ASSERT_EQ(args->Size(), 2);
+    EXPECT_EQ((*args)[0].As<string_view>(), "FULL");
+    EXPECT_EQ((*args)[1].As<string_view>(), "eof");
+  }
 }
 
 TEST_F(RESPParserTest, ArrayLimit) {
