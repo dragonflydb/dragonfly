@@ -333,8 +333,11 @@ void DispatchMonitor(ConnectionContext* cntx, const CommandId* cid,
 
     VLOG(2) << "Sending command '" << msg << "' from " << ProactorBase::me()->GetPoolIndex()
             << " to " << monitors.size() << " monitors";
-    for (auto monitor_conn : monitors)
-      monitor_conn->SendMonitorMessageAsync(msg);
+    for (auto monitor_conn : monitors) {
+      // Monitors can't AUTH, so an expired JWT silences them until RESET + AUTH.
+      if (!static_cast<ConnectionContext*>(monitor_conn->cntx())->IsAuthExpired())
+        monitor_conn->SendMonitorMessageAsync(msg);
+    }
   };
   shard_set->pool()->DispatchBrief(std::move(cb));
 }
@@ -1078,10 +1081,6 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   config_registry.RegisterMutable("timeout");
   config_registry.RegisterMutable("send_timeout");
   config_registry.RegisterMutable("managed_service_info");
-  // TODO: CONFIG SET currently lets any authenticated client flip jwt_validate off at
-  // runtime, bypassing JWT enforcement without a restart. This breaks the security
-  // guarantee that req_auth depends on in Service::CreateContext.
-  config_registry.RegisterMutable("jwt_validate");
 #ifdef WITH_SEARCH
   config_registry.RegisterMutable("MAXSEARCHRESULTS");
   config_registry.RegisterMutable("search_query_string_bytes");
@@ -1404,9 +1403,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
 
   // JWT-derived auth carries its own expiration contract (see acl::JwtValidator): once
   // it lapses, we must force a reauth.
-  if (dfly_cntx.authenticated &&
-      dfly_cntx.auth_expires_at != std::chrono::steady_clock::time_point::max() &&
-      dfly_cntx.auth_expires_at <= std::chrono::steady_clock::now()) {
+  if (dfly_cntx.authenticated && dfly_cntx.IsAuthExpired()) {
     if (cmd_name != "AUTH" && !cid.IsQuit() && !cid.IsReset() && cmd_name != "HELLO") {
       return ErrorReply{"-NOAUTH JWT token expired, please re-authenticate.",
                         facade::kNoAuthErrType};

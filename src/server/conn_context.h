@@ -414,6 +414,11 @@ class ConnectionContext : public facade::ConnectionContext {
   std::chrono::steady_clock::time_point auth_expires_at =
       std::chrono::steady_clock::time_point::max();
 
+  bool IsAuthExpired() const {
+    return auth_expires_at != std::chrono::steady_clock::time_point::max() &&
+           auth_expires_at <= std::chrono::steady_clock::now();
+  }
+
   // Each entry in the list is a bitfield representing a specific command family,
   // where each bit corresponds to an individual command within that family.
   // Together, these entries encode the user's full ACL to commands.
