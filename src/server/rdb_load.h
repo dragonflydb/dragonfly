@@ -189,6 +189,7 @@ class RdbLoaderBase {
     bool append = false;          // Append chunk to existing object
     bool finalize = false;        // Last portion of chunked stream, finalize object
     bool deep_integrity = false;  // Validate every entry (untrusted RESTORE input)
+    uint64_t now_ms = 0;          // Clock for member expiry; 0 means wall clock
   };
 
   class OpaqueObjLoader;

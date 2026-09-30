@@ -528,7 +528,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateSet(const LoadTrace* ltrace) {
         set = static_cast<Set*>(pv_->RObjPtr());
       } else {
         set = CompactObj::AllocateMR<Set>();
-        set->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+        set->set_time(MemberTimeSeconds(config_.now_ms ? config_.now_ms : GetCurrentTimeMs()));
         inner_obj = set;
 
         // Expand the set up front to avoid rehashing.
@@ -652,7 +652,7 @@ void RdbLoaderBase::OpaqueObjLoader::CreateHMap(const LoadTrace* ltrace) {
       string_map = static_cast<StringMap*>(pv_->RObjPtr());
     } else {
       string_map = CompactObj::AllocateMR<StringMap>();
-      string_map->set_time(MemberTimeSeconds(GetCurrentTimeMs()));
+      string_map->set_time(MemberTimeSeconds(config_.now_ms ? config_.now_ms : GetCurrentTimeMs()));
 
       // Expand the map up front to avoid rehashing.
       string_map->Reserve((config_.reserve > len) ? config_.reserve : len);
