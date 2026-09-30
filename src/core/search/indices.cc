@@ -340,9 +340,13 @@ class RangeTreeAdapter : public NumericIndex::RangeTreeBase {
     return range_tree_.GetAllDocIds().Take();
   }
 
-  void FinalizeInitialization() override {
-    builder_->Populate(&range_tree_, {500});
+  void FinalizeInitialization(size_t* done) override {
+    builder_->Populate(&range_tree_, {500}, done);
     builder_.reset();
+  }
+
+  std::optional<size_t> FinalizeWork() const override {
+    return builder_ ? std::optional{builder_->Size()} : std::nullopt;
   }
 
  private:
@@ -443,8 +447,12 @@ void NumericIndex::Remove(DocId id, const DocumentAccessor& doc, string_view fie
   range_tree_->Remove(id, absl::MakeSpan(numbers));
 }
 
-void NumericIndex::FinalizeInitialization() {
-  range_tree_->FinalizeInitialization();
+void NumericIndex::FinalizeInitialization(size_t* done) {
+  range_tree_->FinalizeInitialization(done);
+}
+
+optional<size_t> NumericIndex::FinalizeWork() const {
+  return range_tree_->FinalizeWork();
 }
 
 RangeResult NumericIndex::Range(double l, double r) const {

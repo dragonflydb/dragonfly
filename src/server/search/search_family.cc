@@ -2864,13 +2864,15 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
          infos.back().base_index.schema.fields.size());
 
   bool indexing = false;
-  float percent_indexed = 1.0;
+  double percent_indexed = 1.0;
   size_t total_num_docs = 0;
   for (const auto& info : infos) {
     total_num_docs += info.num_docs;
     indexing |= info.indexing;
     percent_indexed = std::min(percent_indexed, info.percent_indexed);
   }
+  // At most 4 decimals, rounded down so it stays below 1 until the build ends
+  percent_indexed = std::floor(percent_indexed * 10'000) / 10'000;
 
   const auto& info = infos.front();
   const auto& schema = info.base_index.schema;

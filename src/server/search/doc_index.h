@@ -265,7 +265,7 @@ struct DocIndexInfo {
   size_t num_docs = 0;
 
   bool indexing = false;
-  float percent_indexed = 1;
+  double percent_indexed = 1;
 
   // HNSW metadata for vector index (if present)
   // TODO: move to schema
