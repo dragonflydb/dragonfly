@@ -645,9 +645,16 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
 void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
   main_listener_ = main_listener;
   registry_ = registry;
+  // Like Redis: replaces all of default's passwords, and an empty value means nopass.
   config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {
     User::UpdateRequest rqst;
-    rqst.passwords.push_back({flag.CurrentValue()});
+    string pass = flag.CurrentValue();
+    if (pass.empty()) {
+      rqst.passwords.push_back({.password = {}, .nopass = true});
+    } else {
+      rqst.passwords.push_back({.password = {}, .reset_password = true});
+      rqst.passwords.push_back({std::move(pass)});
+    }
     registry_->MaybeAddAndUpdate("default", std::move(rqst));
     return true;
   });

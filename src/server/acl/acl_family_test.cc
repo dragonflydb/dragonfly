@@ -19,6 +19,7 @@
 using namespace testing;
 
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
+ABSL_DECLARE_FLAG(std::string, requirepass);
 
 namespace dfly {
 
@@ -178,6 +179,27 @@ TEST_F(AclFamilyTest, AclList) {
       vec, UnorderedElementsAre("user default on nopass ~* &* +@all $all",
                                 "user kostas off #d74ff0ee8da3b98 resetchannels -@all +@admin $all",
                                 "user adi off #d74ff0ee8da3b98 resetchannels -@all +@fast $all"));
+}
+
+TEST_F(AclFamilyTest, RequirePassReplacesDefaultPasswords) {
+  TestInitAclFam();
+  EXPECT_EQ(Run("ACL SETUSER default >a >b"), "OK");
+
+  EXPECT_EQ(Run("CONFIG SET requirepass c"), "OK");
+  EXPECT_THAT(Run("ACL LIST").GetVec(),
+              ElementsAre("user default on #2e7d2c03a9507ae ~* &* +@all $all"));
+  EXPECT_THAT(Run("AUTH a"), ErrArg("WRONGPASS"));
+  EXPECT_THAT(Run("AUTH b"), ErrArg("WRONGPASS"));
+  EXPECT_EQ(Run("AUTH c"), "OK");
+
+  EXPECT_EQ(Run("CONFIG SET requirepass d"), "OK");
+  EXPECT_THAT(Run("AUTH c"), ErrArg("WRONGPASS"));
+  EXPECT_EQ(Run("AUTH d"), "OK");
+
+  EXPECT_EQ(Run({"CONFIG", "SET", "requirepass", ""}), "OK");
+  EXPECT_THAT(Run("ACL LIST").GetVec(), ElementsAre("user default on nopass ~* &* +@all $all"));
+  EXPECT_EQ(Run({"AUTH", "default", ""}), "OK");
+  absl::SetFlag(&FLAGS_requirepass, "");
 }
 
 TEST_F(AclFamilyTest, AclAuth) {
