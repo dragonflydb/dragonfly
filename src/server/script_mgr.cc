@@ -6,11 +6,11 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/ascii.h>
-#include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 
+#include <algorithm>
 #include <string>
 
 #include "base/flags.h"
@@ -224,8 +224,8 @@ void ScriptMgr::LatencyCmd(Transaction* tx, SinkReplyBuilder* builder) const {
   shard_set->pool()->AwaitFiberOnAll([&](auto* pb) {
     auto* ss = ServerState::tlocal();
     mu.lock();
-    for (const auto& k_v : ss->call_latency_histos()) {
-      result[k_v.first].Merge(k_v.second);
+    for (const auto& [fst, snd] : ss->call_latency_histos()) {
+      result[fst].Merge(snd);
     }
     mu.unlock();
   });
@@ -272,12 +272,16 @@ io::Result<optional<ScriptMgr::ScriptParams>, GenericError> DeduceParams(string_
   return params;
 }
 
+namespace {
+
 unique_ptr<char[]> CharBufFromSV(string_view sv) {
   auto ptr = make_unique<char[]>(sv.size() + 1);
   memcpy(ptr.get(), sv.data(), sv.size());
   ptr[sv.size()] = '\0';
   return ptr;
 }
+
+}  // namespace
 
 nonstd::expected<string, GenericError> ScriptMgr::Insert(string_view body,
                                                          Interpreter* interpreter) {
@@ -319,17 +323,17 @@ nonstd::expected<string, GenericError> ScriptMgr::Insert(string_view body,
       "6990147f5d1999b936dac3b6f7e5d2071908bcf3",  // Cm_Cache_Backend_Redis LUA_GC
   };
 
-  if (find(begin(kUndeclaredShas), end(kUndeclaredShas), sha) != end(kUndeclaredShas)) {
+  if (ranges::find(kUndeclaredShas, sha) != end(kUndeclaredShas)) {
     params.undeclared_keys = true;
   } else {
     auto undeclared_shas = absl::GetFlag(FLAGS_lua_undeclared_keys_shas);
-    if (find(undeclared_shas.begin(), undeclared_shas.end(), sha) != undeclared_shas.end()) {
+    if (ranges::find(undeclared_shas, sha) != undeclared_shas.end()) {
       params.undeclared_keys = true;
     }
   }
 
   auto float_as_int_shas = absl::GetFlag(FLAGS_lua_float_as_int_shas);
-  if (find(float_as_int_shas.begin(), float_as_int_shas.end(), sha) != float_as_int_shas.end()) {
+  if (ranges::find(float_as_int_shas, sha) != float_as_int_shas.end()) {
     params.float_as_int = true;
   }
 
