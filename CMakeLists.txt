@@ -155,22 +155,33 @@ endif()
 include_directories(src)
 include_directories(helio)
 
+# helio/.clangd looks for compile_commands.json in helio/build-dbg/. Point it at Dragonfly's
+# compilation database with a file symlink, keeping helio/build-dbg a real directory so that
+# helio's own blaze.sh can still use it as a standalone build directory.
 if(CMAKE_EXPORT_COMPILE_COMMANDS)
-  set(_helio_clangd_build_dir "${CMAKE_CURRENT_SOURCE_DIR}/helio/build-dbg")
-  file(RELATIVE_PATH _dragonfly_build_dir "${CMAKE_CURRENT_SOURCE_DIR}/helio" "${CMAKE_BINARY_DIR}")
+  set(_helio_clangd_dir "${CMAKE_CURRENT_SOURCE_DIR}/helio/build-dbg")
+  set(_helio_clangd_db "${_helio_clangd_dir}/compile_commands.json")
 
-  if(IS_SYMLINK "${_helio_clangd_build_dir}")
-    file(READ_SYMLINK "${_helio_clangd_build_dir}" _existing_build_dir)
-    if(NOT _existing_build_dir STREQUAL _dragonfly_build_dir)
-      file(REMOVE "${_helio_clangd_build_dir}")
-    endif()
-  elseif(EXISTS "${_helio_clangd_build_dir}")
-    message(WARNING "Not creating ${_helio_clangd_build_dir}: path already exists and is not a symlink")
+  # Earlier versions linked the whole directory; replace such a link.
+  if(IS_SYMLINK "${_helio_clangd_dir}")
+    file(REMOVE "${_helio_clangd_dir}")
   endif()
 
-  if(NOT EXISTS "${_helio_clangd_build_dir}" AND NOT IS_SYMLINK "${_helio_clangd_build_dir}")
-    # helio/.clangd resolves its compilation database relative to the Helio source directory.
-    file(CREATE_LINK "${_dragonfly_build_dir}" "${_helio_clangd_build_dir}" SYMBOLIC)
+  if(EXISTS "${_helio_clangd_dir}/CMakeCache.txt")
+    message(STATUS "${_helio_clangd_dir} is a standalone helio build, not linking compile_commands.json")
+  else()
+    file(MAKE_DIRECTORY "${_helio_clangd_dir}")
+    file(RELATIVE_PATH _dragonfly_db "${_helio_clangd_dir}" "${CMAKE_BINARY_DIR}/compile_commands.json")
+
+    set(_existing_db "")
+    if(IS_SYMLINK "${_helio_clangd_db}")
+      file(READ_SYMLINK "${_helio_clangd_db}" _existing_db)
+    endif()
+
+    if(NOT _existing_db STREQUAL _dragonfly_db)
+      file(REMOVE "${_helio_clangd_db}")
+      file(CREATE_LINK "${_dragonfly_db}" "${_helio_clangd_db}" SYMBOLIC)
+    endif()
   endif()
 endif()
 
