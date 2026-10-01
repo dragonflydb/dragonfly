@@ -415,6 +415,8 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable*
     return;
 
   db->stats.AddTypeMemoryUsage(type, delta);
+  if (type == OBJ_KEY)
+    EngineShard::tlocal()->AddKeyMemDelta(delta);
   UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage", type);
 }
 

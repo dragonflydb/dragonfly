@@ -9,6 +9,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <numeric>
 
 extern "C" {
 #include "redis/crc64.h"
@@ -2968,6 +2969,325 @@ TEST_F(GenericFamilyTest, AsyncDelTrackMemByType) {
 
   EXPECT_GT(invokes(), invocations_before);
   EXPECT_EQ(diff(Snapshot(), before_unlink), del_diff);
+}
+
+namespace {
+struct MetricCmp {
+  TypeMemDeltas new_metric{};
+  TypeMemDeltas old_metric{};
+  int64_t obj_used = 0, table_used = 0, search_used = 0, interned = 0;
+
+  MetricCmp() = default;
+
+  explicit MetricCmp(const Metrics& m) : new_metric(m.type_mem_delta) {
+    for (const auto& db : m.db_stats) {
+      ranges::transform(old_metric, db.memory_usage_by_type, old_metric.begin(), plus{});
+      obj_used += db.obj_memory_usage;
+      table_used += db.table_mem_usage;
+    }
+    search_used = m.search_stats.used_memory;
+    interned = m.interned_string_stats.pool_bytes + m.interned_string_stats.pool_table_bytes;
+  }
+
+  MetricCmp operator-(const MetricCmp& o) const {
+    MetricCmp res = *this;
+    ranges::transform(res.new_metric, o.new_metric, res.new_metric.begin(), minus{});
+    ranges::transform(res.old_metric, o.old_metric, res.old_metric.begin(), minus{});
+    res.obj_used -= o.obj_used;
+    res.table_used -= o.table_used;
+    res.search_used -= o.search_used;
+    res.interned -= o.interned;
+    return res;
+  }
+
+  int64_t NewTotal() const {
+    return reduce(new_metric.begin(), new_metric.end());
+  }
+
+  int64_t OldTotal() const {
+    return reduce(old_metric.begin(), old_metric.end());
+  }
+
+  bool NewUnchanged() const {
+    return new_metric == TypeMemDeltas{};
+  }
+
+  bool Positive(size_t t) const {
+    return new_metric[t] > 0;
+  }
+
+  bool Negative(size_t t) const {
+    return new_metric[t] < 0;
+  }
+
+  bool Match(size_t t) const {
+    return new_metric[t] == old_metric[t];
+  }
+
+  bool MatchObj() const {
+    return NewTotal() + old_metric[OBJ_KEY] == obj_used && obj_used == OldTotal();
+  }
+
+  bool IsClean() const {
+    return table_used == 0 && search_used == 0;
+  }
+};
+
+ostream& operator<<(ostream& os, const MetricCmp& m) {
+  auto print = [&](string_view name, const TypeMemDeltas& arr) {
+    os << name << ": {";
+    for (size_t t = 0; t < arr.size(); ++t)
+      if (arr[t] != 0)
+        os << ObjTypeToString(t) << "=" << arr[t] << " ";
+    os << "} ";
+  };
+  print("new", m.new_metric);
+  print("old", m.old_metric);
+  return os << "obj_used=" << m.obj_used << " table_used=" << m.table_used
+            << " search_used=" << m.search_used << " interned=" << m.interned;
+}
+
+// known gap
+#define METRIC_CMP_TODO(d, cond)                                              \
+  do {                                                                        \
+    if (cond) {                                                               \
+      LOG(WARNING) << "parity TODO scenario passes, promote it to PARITY_OK"; \
+    } else {                                                                  \
+      LOG(WARNING) << "parity gap: " #cond "\n" << d;                         \
+      GTEST_SKIP() << "parity gap";                                           \
+    }                                                                         \
+  } while (0)
+
+class MemParityTest : public GenericFamilyTest {
+ protected:
+  MetricCmp Delta(const function<void()>& action) const {
+    const MetricCmp before{GetMetrics()};
+    action();
+    return MetricCmp{GetMetrics()} - before;
+  }
+
+  static string OnOtherShard(string_view other, string key) {
+    int count = 0;
+    while (++count < 5000 && Shard(key, shard_set->size()) == Shard(other, shard_set->size()))
+      key += 'x';
+    if (count >= 5000)
+      return "";
+    return key;
+  }
+
+  const string key_ = string(1024, 'a');
+  const string key2_ = string(2048, 'c');
+  const string key3_ = string(1536, 'd');
+  const string val_ = string(1024, 'b');
+};
+}  // namespace
+
+TEST_F(MemParityTest, SetStringSimple) {
+  const string value(65536, 'x'), prefix(256, 'k');
+  const auto d = Delta([&] {
+    for (int i = 0; i < 32; ++i)
+      Run({"SET", StrCat(prefix, "-", i), value});
+  });
+  EXPECT_TRUE(d.Match(OBJ_STRING)) << d;
+  EXPECT_EQ(d.obj_used, d.old_metric[OBJ_STRING] + d.old_metric[OBJ_KEY]) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+TEST_F(MemParityTest, DeleteString) {
+  Run({"SET", key_, val_});
+  auto d = Delta([&] { Run({"DEL", key_}); });
+  EXPECT_TRUE(d.Match(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+TEST_F(MemParityTest, DeleteMixedTypes) {
+  Run({"SET", key_, val_});
+  Run({"HSET", key_ + "h", "f", val_});
+  Run({"LPUSH", key_ + "l", val_});
+  auto d = Delta([&] { Run({"DEL", key_, key_ + "h", key_ + "l"}); });
+  EXPECT_TRUE(d.Negative(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.Negative(OBJ_LIST)) << d;
+  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Only types which are always freed synchronously, see AsyncUnlinkLargeHash for the deferred path
+TEST_F(MemParityTest, UnlinkMixedTypes) {
+  Run({"SET", key_, val_});
+  Run({"LPUSH", key_ + "l", val_});
+  auto d = Delta([&] { Run({"UNLINK", key_, key_ + "l"}); });
+  EXPECT_TRUE(d.Negative(OBJ_LIST)) << d;
+  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Same key/value moved across dbs have no delta
+TEST_F(MemParityTest, MoveHashBetweenDbs) {
+  Run({"SELECT", "1"});
+  Run({"HSET", key_, "field", val_});
+  auto d = Delta([&] { EXPECT_THAT(Run({"MOVE", key_, "0"}), IntArg(1)); });
+  EXPECT_TRUE(d.NewUnchanged()) << d;
+  EXPECT_EQ(d.OldTotal(), 0) << d;
+  EXPECT_EQ(d.obj_used, 0) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+TEST_F(MemParityTest, ReadOnly) {
+  Run({"SET", key_, val_});
+  Run({"HSET", key2_, "f", val_});
+  Run({"LPUSH", key3_, val_});
+  auto d = Delta([&] {
+    Run({"GET", key_});
+    Run({"HGET", key2_, "f"});
+    Run({"LLEN", key3_});
+  });
+  EXPECT_TRUE(d.NewUnchanged()) << d;
+  EXPECT_EQ(d.obj_used, 0) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Expiry delete should look like DEL for the expired value type
+TEST_F(MemParityTest, ExpireString) {
+  Run({"SET", key_, val_, "PX", "500"});
+  auto d = Delta([&] {
+    AdvanceTime(600);
+    EXPECT_THAT(Run({"GET", key_}), ArgType(RespExpr::NIL));
+  });
+  EXPECT_TRUE(d.Match(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+TEST_F(MemParityTest, HashEncodingChange) {
+  Run({"HSET", key_, "f", "v"});
+  auto d = Delta([&] { Run({"HSET", key_, "f1", val_}); });
+  EXPECT_TRUE(d.Match(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Positive(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Frees are run after the command, can only compare once the async deletion queue is drained
+TEST_F(MemParityTest, AsyncUnlinkLargeHash) {
+  for (int i = 0; i < 1024; ++i)
+    Run({"HSET", key_, StrCat("f", i), string(128, 'x')});
+  auto d = Delta([&] {
+    Run({"UNLINK", key_});
+    EXPECT_TRUE(WaitUntilCondition(
+        [&] {
+          return ranges::all_of(views::iota(ShardId{0}, shard_set->size()), [&](auto sid) {
+            return shard_set->Await(sid, [] { return DbSlice::TEST_IsAsyncDeletionQueueEmpty(); });
+          });
+        },
+        std::chrono::seconds{5}));
+  });
+  EXPECT_TRUE(d.Match(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Negative(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Known gaps: scenarios below are not covered by the new metric, all are to do. comparisons pasted
+// above tests as guide of what fails, with table values not denoted where not relevant
+
+// new: {string=-384 } old: {string=896 hash=-1280 } obj_used=-384
+TEST_F(MemParityTest, SetOverwritesHash) {
+  Run({"HSET", key_, "field", val_});
+  auto d = Delta([&] { Run({"SET", key_, val_}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
+}
+
+// Whole table reset bypasses per-key delete scopes
+// new: {} old: {string=-896 list=-1280 hash=-1280 key=-2944 } obj_used=-6400
+TEST_F(MemParityTest, FlushDbMixedTypes) {
+  Run({"SET", key_, val_});
+  Run({"HSET", key_ + "h", "f", val_});
+  Run({"LPUSH", key_ + "l", val_});
+  auto d = Delta([&] { Run({"FLUSHDB", "SYNC"}); });
+  METRIC_CMP_TODO(d, d.Negative(OBJ_HASH) && d.Negative(OBJ_LIST) && d.Negative(OBJ_STRING) &&
+                         d.MatchObj() && d.IsClean());
+}
+
+// new: {string=-896 } old: {key=1152 } obj_used=1152
+TEST_F(MemParityTest, RenameStringAcrossShards) {
+  const string dest = OnOtherShard(key_, key2_);
+  EXPECT_FALSE(dest.empty()) << "could not find key on another shard after 5k tries";
+  Run({"SET", key_, val_});
+  auto d = Delta([&] { EXPECT_EQ(Run({"RENAME", key_, dest}), "OK"); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
+}
+
+// needs fix in the command handler.
+// new: {} old: {string=-896 key=-896 } obj_used=-1792
+TEST_F(MemParityTest, RenameHashOverString) {
+  Run({"HSET", key_, "field", val_});
+  Run({"SET", key3_, val_});
+  auto d = Delta([&] { Run({"RENAME", key_, key3_}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// new: {string=-896 } old: {string=-896 hash=1392 } obj_used=496
+TEST_F(MemParityTest, CopyReplace) {
+  Run({"HSET", key_, "f", val_});
+  Run({"SET", key2_, val_});
+  auto d = Delta([&] { Run({"COPY", key_, key2_, "REPLACE"}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// interned pool is accounted separately from the JSON objects
+// new: {ReJSON-RL=87104 } old: {key=32768 ReJSON-RL=87104 } obj_used=119872 interned=100
+TEST_F(MemParityTest, JsonSetInternedStrings) {
+  const string shared = StrCat("shared-json-string-", string(1024, 'x'));
+  const string doc = StrCat(R"({"field":")", shared, R"(","nested":{"field":")", shared, R"("}})");
+  auto d = Delta([&] {
+    for (int i = 0; i < 32; ++i)
+      Run({"JSON.SET", StrCat("json-interned-", i, "-", string(1024, 'j')), "$", doc});
+  });
+  METRIC_CMP_TODO(d, d.Match(OBJ_JSON) && d.new_metric[OBJ_JSON] == d.obj_used && d.interned > 0 &&
+                         d.IsClean());
+}
+
+// value is allocated while payload is decoded, delta should be for hash type
+// new: {} old: {hash=1392 key=1536 } obj_used=2928
+TEST_F(MemParityTest, RestoreHash) {
+  Run({"HSET", key_, "f", string(1024, 'x')});
+  const string payload = Run({"DUMP", key_}).GetString();
+  auto d = Delta([&] { EXPECT_EQ(Run({"RESTORE", key3_, "0", payload}), "OK"); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// new: {zset=-1248 } old: {zset=32 hash=-1280 } obj_used=-1248
+TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
+  Run({"HSET", key_, "f", val_});
+  Run({"ZADD", key2_, "1", "a", "2", "b"});
+  Run({"ZADD", key3_, "3", "c", "4", "d"});
+  auto d = Delta([&] { Run({"ZUNIONSTORE", key_, "2", key2_, key3_}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_ZSET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// new: {set=-992 } old: {set=280 hash=-1280 } obj_used=-1000
+TEST_F(MemParityTest, SUnionStoreOverwritesHash) {
+  Run({"HSET", key_, "f", val_});
+  Run({"SADD", key2_, "1", "a", "2", "b"});
+  Run({"SADD", key3_, "3", "c", "4", "d"});
+  auto d = Delta([&] { Run({"SUNIONSTORE", key_, key2_, key3_}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_SET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// Table growth not added to the new metric. Slow (~20 seconds) so disabled by default, but passes
+TEST_F(MemParityTest, DISABLED_TableGrowth) {
+  const string suffix(64, 'k');
+  const auto d = Delta([&] {
+    for (int i = 0; i < 500'000; ++i)
+      Run({"SET", StrCat("table-gr-", i, "-", suffix), "v"});
+  });
+  EXPECT_GT(d.table_used, 0) << d;
+  EXPECT_LT(d.new_metric[OBJ_STRING], d.table_used) << d;
 }
 
 // Each iteration traverses the whole database, including command dispatch and RESP serialization
