@@ -229,7 +229,7 @@ void SinkReplyBuilder::Send() {
     // send() returns 0 only for zero-length input, and we always pass at least one byte.
     DCHECK_GT(*res, 0u);
 
-    reply_stats.io_write_cnt++;
+    reply_stats.io_write_calls++;
     reply_stats.io_write_bytes += *res;
 
     DCHECK_LE(*res, remaining);

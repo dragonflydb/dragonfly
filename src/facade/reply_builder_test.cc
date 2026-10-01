@@ -737,7 +737,7 @@ TEST_F(RedisReplyBuilderTest, BatchMode) {
     builder_->SendBulkString(val);
     ASSERT_EQ(SinkSize(), 0) << " sink is not empty at iteration number " << count;
     ASSERT_EQ(GetReplyStats().io_write_bytes, 0);
-    ASSERT_EQ(GetReplyStats().io_write_cnt, 0);
+    ASSERT_EQ(GetReplyStats().io_write_calls, 0);
     total_bytes += val.size();
     ++count;
   }
@@ -745,7 +745,7 @@ TEST_F(RedisReplyBuilderTest, BatchMode) {
   // write something
   builder_->SetBatchMode(false);
   builder_->SendBulkString(std::string_view{});
-  ASSERT_EQ(GetReplyStats().io_write_cnt, 1);
+  ASSERT_EQ(GetReplyStats().io_write_calls, 1);
   // We expecting to have more than the total bytes we count,
   // since we are not counting the \r\n and the type char as well
   // as length entries
@@ -774,7 +774,7 @@ TEST_F(RedisReplyBuilderTest, BatchGrowsBuffer) {
     builder_->SendBulkString(value);
 
   EXPECT_EQ(builder_->UsedMemory(), SinkReplyBuilder::kMaxBufferSize);
-  EXPECT_LT(GetReplyStats().io_write_cnt, size_t(kReplies) / 2);
+  EXPECT_LT(GetReplyStats().io_write_calls, size_t(kReplies) / 2);
 
   builder_->SetBatchMode(false);
   builder_->Flush();
@@ -1083,7 +1083,7 @@ TEST_F(RedisReplyBuilderTest, PartialWrites) {
 
   const auto& stats = GetReplyStats();
   EXPECT_EQ(stats.io_write_bytes, expected.size());
-  EXPECT_EQ(stats.io_write_cnt, (expected.size() + kMaxWrite - 1) / kMaxWrite);
+  EXPECT_EQ(stats.io_write_calls, (expected.size() + kMaxWrite - 1) / kMaxWrite);
   EXPECT_EQ(stats.send_stats.count, 1);
 }
 
@@ -1105,7 +1105,7 @@ TEST_F(RedisReplyBuilderTest, PartialWriteError) {
   const auto& stats = GetReplyStats();
   EXPECT_EQ(str().size(), (kFailOn - 1) * kMaxWrite);
   EXPECT_EQ(stats.io_write_bytes, str().size());
-  EXPECT_EQ(stats.io_write_cnt, kFailOn - 1);
+  EXPECT_EQ(stats.io_write_calls, kFailOn - 1);
   EXPECT_EQ(stats.send_stats.count, 1);
 }
 

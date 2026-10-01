@@ -14,6 +14,8 @@ namespace facade {
 
 // Minimal FiberSocketBase subclass that captures writes to a string buffer.
 // Used in tests as a replacement for io::StringSink when constructing reply builders.
+// It has no proactor and supports only writes, so it must not be used where socket I/O
+// beyond WriteSome/AsyncWriteSome is expected.
 class StringSocket : public util::FiberSocketBase {
  public:
   StringSocket() : FiberSocketBase(nullptr) {
@@ -165,6 +167,17 @@ class StringSocket : public util::FiberSocketBase {
   size_t max_write_ = std::numeric_limits<size_t>::max();
   unsigned writes_until_failure_ = 0;  // 0 - never fail
   std::error_code fail_ec_;
+};
+
+// StringSocket that discards written data. A replacement for io::NullSink.
+class NullSocket : public StringSocket {
+ public:
+  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) override {
+    size_t total = 0;
+    for (uint32_t i = 0; i < len; ++i)
+      total += v[i].iov_len;
+    return total;
+  }
 };
 
 }  // namespace facade
