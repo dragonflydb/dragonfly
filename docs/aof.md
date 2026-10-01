@@ -326,21 +326,25 @@ contains:
 Segments describe themselves, so rotation never touches the manifest. Only a checkpoint commit
 does.
 
-Base files store each shard's cut LSN in an `aof-cut-lsn` aux field, replacing the always-zero
-`aof-preamble` (and, with the logical-time option, the cut's time in `aof-cut-time`). Replay
-takes the cuts from the base itself, so a base is never paired with the wrong cuts:
+Base files store each shard's cut in aux fields: the cut LSN in `aof-cut-lsn` (replacing the
+always-zero `aof-preamble`) and the cut segment in `aof-cut-seq` (and, with the logical-time
+option, the cut's time in `aof-cut-time`). Replay takes the cuts from the base itself, so a base
+is never paired with the wrong cuts:
 - A save that reuses a file name renames its new dump over the old base before it commits the
   manifest. After a crash in between, the old manifest points at the new dump. Replay still uses
-  that dump's own cuts, and the chain covers them, because nothing was deleted yet.
+  that dump's own cuts and starts reading at its own cut segment, so the old segments are never
+  read, whether they are torn or damaged by a failed sync.
 - A dump written before AOF was enabled (see [Bootstrap](#bootstrap)) has no aux fields. The
-  manifest's `cut_lsn` (and `cut_time_ms`) apply to it.
+  manifest's `cut_lsn` and `cut_seq` (and `cut_time_ms`) apply to it.
 
 **Open edge cases.**
 - **Encoding logical time** (logical-time option only). A `base_time_ms` in the block header
   plus a varint delta per record (which requires per-record framing in the payload), or a time
   field in the journal record itself (which also changes the replication format).
 - Very large records. A single journal record can be gigabytes (`max_bulk_len` bounds each
-  argument, not the record). Decide whether replay streams a block or the AOF caps record size.
+  argument, not the record). A candidate design, not needed for the MVP: let a record span
+  blocks, and batch many blocks into one write, so a 1GB record does not cost about 125k ring
+  submissions. Alternatives: replay streams a block, or the AOF caps record size.
 - Format versioning and upgrade rules, for both segments and the manifest.
 - The exact manifest grammar.
 - The block size (8KB `kAofBlockBytes`) needs benchmarking.
@@ -358,7 +362,8 @@ takes the cuts from the base itself, so a base is never paired with the wrong cu
   backpressure. It does not seal on every call; that would produce one block per record.
 - **The heartbeat seals small blocks.** `EngineShard::Heartbeat()` seals whatever is open, at
   its very top, before the checks that make it skip its other work. A small block therefore
-  waits at most one heartbeat (`1000 / --hz` ms). Sealing on every loop iteration would instead
+  waits about one heartbeat period (`1000 / --hz` ms), plus however long the previous heartbeat
+  ran. That is not a hard bound (see the edge cases). Sealing on every loop iteration would instead
   issue tiny writes that rewrite the same page over and over.
 - **Sealing** assigns the block the next file offset and submits it as one async write, without
   waiting for earlier writes. The buffer lives until the write completes.
@@ -438,8 +443,10 @@ advancing, and the shard's log can no longer be trusted to hold everything after
 - Write retries have no deadline. Define when a persistent error (ENOSPC, EIO) stops retrying,
   and what happens next.
 - Disk full: a checkpoint needs space too, so it may not be able to recover the shard.
-- `--hz <= 0` disables the heartbeat (`GetPeriodicCycleMs`), and with it the sealing of small
-  blocks. Either require a positive `--hz` with AOF, or give AOF its own flush timer.
+- The heartbeat is not a reliable sealing clock. `--hz <= 0` disables it (`GetPeriodicCycleMs`),
+  and one iteration can stall the next, for example while it blocks on keyspace-notification
+  backpressure. Either require a positive `--hz` and accept the stalls, or give AOF its own flush
+  timer.
 - Verify that no `DisableFlushGuard` section can span a heartbeat, so the heartbeat never seals
   inside one.
 - Cap io-wq workers (`IORING_REGISTER_IOWQ_MAX_WORKERS`) so that a stalled disk does not spawn
@@ -539,9 +546,8 @@ A save becomes the checkpoint depending only on where its output lives:
    continues meanwhile.
 3. `fsync` each file, rename it into place, `fsync` the directory. A failed `fsync` fails the
    save before its rename, so an existing dump with the same name, possibly the current base,
-   stays intact. The rename also waits until every shard's old segment has completed its final
-   sync. Otherwise a crash could leave a torn pre-cut tail that ends the old manifest's chain
-   before the new segment, after the new dump had already replaced the old base.
+   stays intact. The base carries its own cut segment (`aof-cut-seq`), so replay after a
+   same-name rename never depends on the old segments (see [Manifest](#manifest)).
 4. Commit the new manifest atomically.
 5. Delete every segment of shard i with `seq < cut_seq_i`, and base C-1 if it is AOF-owned. User
    dumps are never deleted.
@@ -572,8 +578,8 @@ Checkpoints bound the log only while they succeed. `INFO persistence` reports
   between can leave a mix of old and new files, which the loader rejects on a snapshot-id
   mismatch. Reused DFS names need generation-specific file names, or an atomic commit of the
   whole file set, before such a save can become the base.
-- An older dump restored over the base's path has cuts below the chain's first segment. Replay
-  must reject it as a gap, not replay a partial log onto it.
+- An older dump restored over the base's path has an `aof-cut-seq` that points at deleted
+  segments. Replay must reject it as a gap, not replay a partial log onto it.
 - Frequent plain saves (for example S3-only backups) can keep delaying the automatic checkpoint.
 - A sync failure while a checkpoint is in progress: that checkpoint's cut is too early to clear
   the failed state, so a follow-up checkpoint is needed. The scheduling needs a precise rule.
@@ -610,9 +616,9 @@ A missing manifest does not prove this is the first start, because a manifest ca
 2. **Load base C** without deleting expired keys against the wall clock (see
    [Time-based commands](#time-based-commands)). Background expiry stays off until the tail
    replay ends. Base keys go to whichever shard owns them now.
-3. **Validate each chain.** Starting at `cut_seq_i`, segment seqs must be contiguous; a gap is a
-   hard error. Empty segments are skipped wherever they appear. The first non-empty segment must
-   start at or before the base's cut `L_i`, and each later one where the previous one's valid
+3. **Validate each chain.** Starting at the base's `cut_seq_i`, segment seqs must be contiguous;
+   a gap is a hard error. Empty segments are skipped wherever they appear. The first non-empty
+   segment must start at the base's cut `L_i`, and each later one where the previous one's valid
    records end. An LSN discontinuity ends the chain there (step 5).
 4. **Replay each chain in its own fiber,** all in parallel. Chain i runs on proactor
    `i % pool size`, as replica flows do. Records below `L_i` are skipped. Records are applied
@@ -655,7 +661,8 @@ Two options are under consideration.
     members as `SREM`.
 
   So every deadline in the log was still in the future when its command ran, and every expiry the
-  original server observed is already a `DEL` in the log.
+  original server observed is already a `DEL` in the log. There is one known exception: member
+  expiry by read commands (below).
 - Valkey does the same while loading its AOF: nothing counts as expired during the load.
 - **Requires every journaled deadline to be absolute.** A relative TTL would be re-anchored at
   replay time and extend the key's life. Set-member `FIELDEXPIRE` is journaled with a relative TTL
@@ -683,10 +690,43 @@ Two options are under consideration.
 | Relies on | Every journaled deadline being absolute | Nothing extra |
 | Precedent | Valkey's AOF load | None |
 
+**A gap that affects both options: member expiry by reads.** Read commands lazily expire hash
+fields and set members without journaling it. Example, with hash `h` on shard 0:
+1. At 90s, `HSETEX h EX 10 FIELDS 1 f 5`: `f` expires at 100s.
+2. At 99.999s, a multi-shard transaction takes its clock and queues `HINCRBY h f 1` on shard 0.
+3. At 100.001s, `HGET h f` runs inline on shard 0, expires `f`, and journals nothing.
+4. The queued `HINCRBY` then runs and recreates `f = 1`.
+
+The log holds only `HSETEX` and `HINCRBY`. Originally, `HINCRBY` found no `f` and created
+`f = 1` with no TTL. On replay, with either option, `HINCRBY` finds the stale `f = 5` and makes it
+`f = 6`, keeping its deadline (the hash `AddOrUpdate` wrapper keeps an existing field's TTL).
+Expiry after replay then removes `f`, so `HGET h f` returns `1` originally and `nil` after
+recovery. Option 2 does not help, because the transaction clock (99.999s) does not follow
+execution order.
+
+The silent expiry alone is harmless: if no write follows, expiry after replay gives the same
+state. It diverges only when a later write depends on whether the member existed, or on its TTL.
+Two fixes are under consideration:
+- **Journal member expirations done by reads** (`HDEL` / `SREM`), as key-level lazy expiry already
+  does with `DEL`. This fixes the whole class in one place, and costs a record only when a read
+  actually expires a member.
+- **Journal read-modify-write commands as their effect:** the resulting value plus the member's
+  exact TTL state, for example `HINCRBY` as an `HSETEX`-style record of `f = 1` with no TTL.
+  `HSETEX` already journals its effect with absolute deadlines. The record then no longer depends
+  on prior state, but every affected command needs it: `HINCRBY`, `HINCRBYFLOAT`, `HSETNX`, `SADD`
+  (which would otherwise leave the stale TTL in place), and others to be found.
+
+The two are not exclusive and could both be implemented: journaled expirations as the general
+safety net, and effect records where their independence from prior state is worth the extra
+work. Either fix would also remove the same divergence on replicas today.
+
 **Open edge cases.**
+- Member expiry by reads (see above): journal the expirations, journal read-modify-write
+  commands as their effect, or both. At least one is a prerequisite for both options.
 - Which option to choose.
 - Option 1: audit that every time-based decision is journaled as its outcome, and that every
-  journaled deadline is absolute (starting with `FIELDEXPIRE`).
+  journaled deadline is absolute (starting with `FIELDEXPIRE` and `RESTORE`, which can carry a
+  relative TTL).
 - Option 2: how the time is encoded (see [On-Disk Format](#on-disk-format)); an audit of command
   paths that call `GetCurrentTimeMs()` directly (hash field expiry, `GETEX`, streams, scripts);
   `RdbLoader` deciding expiry against a given time instead of the wall clock.
@@ -752,8 +792,10 @@ differently.
 - **An adopted dump replaced during bootstrap.** An external tool could replace the dump between
   the load and the manifest commit, and the manifest would then reference a file that was never
   loaded. Decide whether the manifest also records the file's identity (inode, size, a checksum).
-- **Txid lockstep.** The lockstep argument needs to be verified in code, or txids made unique
-  across restarts.
+- **Txids across restarts.** Txids restart in every process. Pairing global commands is safe
+  while chains pass them in lockstep, but that argument needs verifying in code. A simple way to
+  make txids unique for the AOF's lifetime: after replay, start the txid counter (`op_seq`) past
+  the highest txid seen in the replayed segments.
 - Replay throughput when the shard count changed, since most records are dispatched to another
   thread.
 - Search index build time during replay.
@@ -818,6 +860,12 @@ WAL segments. Benchmark first.
 **Open edge cases.**
 - A write failure (not only a sync failure) also leaves held replies waiting; the same wake-up
   rule is needed.
+- Sync scheduling. `fdatasync` moves from a periodic task to the hot path, with at most one in
+  flight; the next one is issued when it completes. Blocks are sealed on every write rather than
+  on the heartbeat.
+- Ring pressure. Under load, each transaction can cost a write and a sync, so about 2N ring
+  entries for N transactions. Group commit reduces the syncs; linking a write with its
+  `fdatasync` (`IOSQE_IO_LINK`) is worth evaluating.
 - A recycled file's stale blocks fail their CRC only probabilistically (about 1 in 2^32, plus
   `segment_uid` collisions). Decide whether that is acceptable, or scrub them.
 - Pipelines mixing shards: a connection only keeps a per-shard maximum LSN, so on failure it
@@ -878,8 +926,9 @@ reached end of log. For an incomplete one, end that chain right before its part 
 may depend on it) and force a checkpoint before `ACTIVE`.
 
 **Open edge cases.**
-- Needs txids that are unique across restarts, because tails are not in lockstep. A per-run id
-  in the segment header's `reserved` field helps only at segment granularity.
+- Needs txids that are unique across restarts, because tails are not in lockstep. Starting
+  `op_seq` past the highest replayed txid gives that (see the
+  [Replay Protocol](#replay-protocol) edge cases).
 - On by default, or behind a flag?
 
 ### Other extensions
@@ -939,7 +988,7 @@ and `CONFIG SET appendonly`.
 | Time-based commands in replay: a no-expiry replay mode, or persisted logical time and a pinned clock | [string_family.cc](../src/server/string_family.cc), [generic_family.cc](../src/server/generic_family.cc), [executor.cc](../src/server/journal/executor.cc), [transaction.cc](../src/server/transaction.cc) | MVP |
 | Seal the open block at the top of `Heartbeat()` | [engine_shard.cc](../src/server/engine_shard.cc) | MVP |
 | Always-on journal user; seal and rotate at the cut | [journal_slice.cc](../src/server/journal/journal_slice.cc), [journal.cc](../src/server/journal/journal.cc) | MVP |
-| Cut capture, fsync, `aof-cut-lsn` aux field, manifest commit | [snapshot.cc](../src/server/snapshot.cc), [save_stages_controller.cc](../src/server/detail/save_stages_controller.cc) | MVP |
+| Cut capture, fsync, `aof-cut-lsn` / `aof-cut-seq` aux fields, manifest commit | [snapshot.cc](../src/server/snapshot.cc), [save_stages_controller.cc](../src/server/detail/save_stages_controller.cc) | MVP |
 | Startup precedence, base load as of the cut time, INFO, error policy | [server_family.cc](../src/server/server_family.cc), [main_service.cc](../src/server/main_service.cc), `rdb_load.cc` | MVP |
 | Durability wait for `always` | [main_service.cc](../src/server/main_service.cc), connection reply flush | Fsync policy |
 | `AtomicGroupGuard` | [journal.h](../src/server/journal/journal.h), [transaction.cc](../src/server/transaction.cc) | Atomic groups |
