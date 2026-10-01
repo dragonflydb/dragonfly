@@ -12,6 +12,7 @@
 #include "base/logging.h"
 #include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/tracy_support.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/engine_shard_set.h"
@@ -87,6 +88,7 @@ MultiCommandSquasher::MultiCommandSquasher(CmdGenerator cmd_gen, ConnectionConte
 }
 
 MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(ShardId sid) {
+  DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherPrepareShard);
   if (sharded_.empty()) {
     sharded_.resize(shard_set->size());
     for (size_t i = 0; i < sharded_.size(); i++) {
@@ -113,6 +115,7 @@ MultiCommandSquasher::ShardExecInfo& MultiCommandSquasher::PrepareShardInfo(Shar
 }
 
 MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
+  DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherClassify);
   DCHECK(cmd.cid);
 
   const CommandId& cid = *cmd.cid;
@@ -166,6 +169,7 @@ MultiCommandSquasher::SquashResult MultiCommandSquasher::TrySquash(CmdRef cmd) {
 }
 
 bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) {
+  DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherStandalone);
   DCHECK(order_.empty());  // check no squashed chain is interrupted
 
   // In pipeline mode the reply is captured and deferred into the parsed command, preserving
@@ -185,30 +189,40 @@ bool MultiCommandSquasher::ExecuteStandalone(RedisReplyBuilder* rb, CmdRef cmd) 
   };
 
   auto* tx = cntx_->transaction;
-  if (cmd.cid->IsTransactional()) {
-    tx->MultiSwitchCmd(cmd.cid);
-    auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, cmd.args);
-    if (status != OpStatus::OK) {
-      rb->SendError(status);
-      resolve();
-      return !opts_.error_abort;
+  {
+    DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherStandaloneTransaction);
+    if (cmd.cid->IsTransactional()) {
+      tx->MultiSwitchCmd(cmd.cid);
+      auto status = tx->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, cmd.args);
+      if (status != OpStatus::OK) {
+        rb->SendError(status);
+        resolve();
+        return !opts_.error_abort;
+      }
     }
   }
 
   CommandContext cmd_cntx{rb, cntx_};
   cmd_cntx.SetupTx(cmd.cid, tx);
   cmd_cntx.SetTailArgs(cmd.args);
-  service_->InvokeCmd(cmd.args, &cmd_cntx);
+  {
+    DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherStandaloneInvoke);
+    service_->InvokeCmd(cmd.args, &cmd_cntx);
+  }
 
   DCHECK(!crb || crb->GetRespVersion() == original_resp)
       << cmd.cid->name() << " changed its RESP version while captured";
 
-  resolve();
+  {
+    DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherStandaloneResolveReply);
+    resolve();
+  }
 
   return true;
 }
 
 OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v) {
+  DFLY_TRACY_SQUASHER_ZONE(kSquasherHopWork);
   auto& sinfo = sharded_[es->shard_id()];
   DCHECK(!sinfo.dispatched.empty());
 
@@ -248,6 +262,7 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
     }
 
     for (size_t i = batch_start; i < batch_end; ++i) {
+      DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherHopCommand);
       auto& dispatched = sinfo.dispatched[i];
       auto* ctx = &local_cntx;
       crb.SetReplyMode(dispatched.reply_mode);
@@ -277,23 +292,31 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
       ctx->SetupTx(dispatched.cid, local_cntx.tx());
       ctx->tx()->MultiSwitchCmd(dispatched.cid);
 
-      auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args,
-                                          dispatched.key_index);
-      if (status != OpStatus::OK) {
-        ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
-      } else {
-        ctx->UpdateCid(dispatched.cid);
-        ctx->SetTailArgs(dispatched.args);
+      {
+        DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherHopCommandTransaction);
+        auto status = ctx->tx()->InitByArgs(cntx_->ns, cntx_->conn_state.db_index, dispatched.args,
+                                            dispatched.key_index);
+        if (status != OpStatus::OK) {
+          ctx->SendError(status);  // Calls Resolve() in async, routes to crb in non async
+        } else {
+          ctx->UpdateCid(dispatched.cid);
+          ctx->SetTailArgs(dispatched.args);
 
-        service_->InvokeCmd(dispatched.args, ctx);
+          {
+            DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherHopCommandInvoke);
+            service_->InvokeCmd(dispatched.args, ctx);
+          }
+        }
       }
 
       if (saved_rb)
         ctx->SwapReplyBuilder(saved_rb);
 
       if (!do_async) {
+        DFLY_TRACY_SQUASHER_FORENSIC_ZONE(kSquasherHopCommandCaptureReply);
         move_reply(&dispatched);  // Async commands resolve the context directly
       } else if (!ctx->CanReply()) {
+        DFLY_TRACY_SQUASHER_WAIT(kSquasherHopCommandAsyncReplyWait);
         ctx->Blocker()
             ->Wait();  // Transaction didn't finish inline (likely locked key), wait for it
       }
@@ -304,16 +327,38 @@ OpStatus MultiCommandSquasher::SquashedHopCb(EngineShard* es, RespVersion resp_v
 }
 
 bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
+  DFLY_TRACY_SQUASHER_ZONE(kSquasherExecute);
   DCHECK(!cntx_->conn_state.exec_info.IsCollecting());
 
   if (order_.empty())
     return true;
+
+#ifdef TRACY_ENABLE
+  if (auto* conn = cntx_->conn(); conn != nullptr) {
+    tracy_connection_id_ = conn->GetClientId();
+    tracy_batch_id_ = conn->NextTracySquashBatchId();
+  }
+#endif
 
   unsigned num_shards = 0;
   for (auto& sd : sharded_) {
     if (!sd.dispatched.empty())
       ++num_shards;
   }
+  DFLY_TRACY_SQUASHER_VALUE(kSquasherExecute, static_cast<uint64_t>(order_.size()));
+
+#ifdef TRACY_ENABLE
+  std::string tracy_shard_map;
+  for (unsigned i = 0; i < sharded_.size(); ++i) {
+    if (sharded_[i].dispatched.empty())
+      continue;
+    if (!tracy_shard_map.empty())
+      tracy_shard_map += ",";
+    tracy_shard_map += std::to_string(i);
+    tracy_shard_map += ":";
+    tracy_shard_map += std::to_string(sharded_[i].dispatched.size());
+  }
+#endif
 
   Transaction* tx = cntx_->transaction;
   ServerState::tlocal()->stats.squash_width_freq_arr[num_shards - 1]++;
@@ -333,6 +378,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
   // Atomic transactions (that have all keys locked) perform hops and run squashed commands via
   // stubs, non-atomic ones just run the commands in parallel.
   if (IsAtomic()) {
+    DFLY_TRACY_SQUASHER_ZONE(kSquasherExecuteAtomicHops);
     auto cb = [this](ShardId sid) { return !sharded_[sid].dispatched.empty(); };
     tx->PrepareSquashedMultiHop(base_cid_, cb);
     tx->ScheduleSingleHop(
@@ -344,7 +390,18 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     // Saves work in case logging is disable (i.e. log_squash_threshold_cached is high).
     cb_cntx.min_threshold_cycles = CycleClock::FromUsec(log_squash_threshold_cached / 5);
     auto cb = [bc, &cb_cntx, this]() mutable {
+      DFLY_TRACY_SQUASHER_ZONE(kSquasherHopCallback);
+#ifdef TRACY_ENABLE
+      DFLY_TRACY_SQUASHER_TEXT_F(kSquasherHopCallback, "batch(%llu,%u) shard=%u count=%zu",
+                                 static_cast<unsigned long long>(tracy_batch_id_),
+                                 tracy_connection_id_, EngineShard::tlocal()->shard_id(),
+                                 sharded_[EngineShard::tlocal()->shard_id()].dispatched.size());
+#endif
       uint64_t sched_time = CycleClock::Now() - cb_cntx.start;
+      uint64_t sched_time_ns =
+          (sched_time / CycleClock::Frequency()) * 1'000'000'000ULL +
+          ((sched_time % CycleClock::Frequency()) * 1'000'000'000ULL) / CycleClock::Frequency();
+      DFLY_TRACY_SQUASHER_VALUE(kSquasherHopCallback, sched_time_ns);
 
       // Update max_sched_cycles in lock-free fashion, to avoid contention
       uint64_t current = cb_cntx.max_sched_cycles.load(memory_order_relaxed);
@@ -368,6 +425,7 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
       }
 
       if (ThisFiber::GetRunningTimeCycles() > max_busy_squash_cycles_cached) {
+        DFLY_TRACY_SQUASHER_WAIT(kSquasherHopBusyYield);
         ThisFiber::Yield();
         stats_.yields++;
       }
@@ -384,17 +442,29 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
     };
 
     static_assert(sizeof(cb) <= 32);
-    for (unsigned i = 0; i < sharded_.size(); ++i) {
-      if (!sharded_[i].dispatched.empty())
-        shard_set->AddL2(i, cb);
+    {
+      DFLY_TRACY_SQUASHER_ZONE(kSquasherExecuteScheduleHops);
+      for (unsigned i = 0; i < sharded_.size(); ++i) {
+        if (!sharded_[i].dispatched.empty())
+          shard_set->AddL2(i, cb);
+      }
     }
-    bc.Wait();
+    {
+      DFLY_TRACY_SQUASHER_WAIT(kSquasherExecuteWaitForHops);
+#ifdef TRACY_ENABLE
+      DFLY_TRACY_SQUASHER_TEXT_F(kSquasherExecuteWaitForHops, "batch(%llu,%u) total=%zu shards=%s",
+                                 static_cast<unsigned long long>(tracy_batch_id_),
+                                 tracy_connection_id_, order_.size(), tracy_shard_map.c_str());
+#endif
+      bc.Wait();
+    }
   }
 
   uint64_t after_hop = CycleClock::Now();
   bool aborted = false;
 
   if (!opts_.pipeline_mode) {
+    DFLY_TRACY_SQUASHER_ZONE(kSquasherExecuteMergeReplies);
     size_t total_reply_size = 0;
     for (auto& sinfo : sharded_) {
       total_reply_size += sinfo.reply_size_delta;
@@ -439,19 +509,23 @@ bool MultiCommandSquasher::ExecuteSquashed(facade::RedisReplyBuilder* rb) {
         << CycleClock::ToUsec(ProactorBase::me()->GetCurrentBusyCycles());
   }
 
-  for (auto& sinfo : sharded_) {
-    sinfo.dispatched.clear();
-    sinfo.reply_id = 0;
-    // Reset so a subsequent flush of the same instance does not re-count this batch's
-    // reply size into total_reply_size and underflow squashing_current_reply_size.
-    sinfo.reply_size_delta = 0;
-  }
+  {
+    DFLY_TRACY_SQUASHER_ZONE(kSquasherExecuteCleanup);
+    for (auto& sinfo : sharded_) {
+      sinfo.dispatched.clear();
+      sinfo.reply_id = 0;
+      // Reset so a subsequent flush of the same instance does not re-count this batch's
+      // reply size into total_reply_size and underflow squashing_current_reply_size.
+      sinfo.reply_size_delta = 0;
+    }
 
-  order_.clear();
+    order_.clear();
+  }
   return !aborted;
 }
 
 void MultiCommandSquasher::Run(RedisReplyBuilder* rb) {
+  DFLY_TRACY_SQUASHER_ZONE(kSquasherRun);
   DVLOG(1) << "Trying to squash commands for transaction " << cntx_->transaction->DebugId();
 
   for (CmdRef cmd = cmd_gen_(); cmd.IsValid(); cmd = cmd_gen_()) {

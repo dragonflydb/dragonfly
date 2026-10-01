@@ -109,6 +109,15 @@ class SinkReplyBuilder {
     return send_time_cycles_ > 0;
   }
 
+  size_t BufferedBytes() const {
+    return total_size_;
+  }
+
+  // The current vector count before Flush() splits it to comply with IOV_MAX.
+  size_t BufferedIovecs() const {
+    return vecs_.size();
+  }
+
   void SetBatchMode(bool b) {
     batched_ = b;
   }

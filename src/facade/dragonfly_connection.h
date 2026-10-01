@@ -7,9 +7,11 @@
 #include <absl/container/fixed_array.h>
 #include <sys/socket.h>
 
+#include <array>
 #include <deque>
 #include <memory>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <variant>
@@ -215,6 +217,12 @@ class Connection : public util::Connection {
   std::string LocalBindAddress() const;
 
   uint32_t GetClientId() const;
+
+#ifdef TRACY_ENABLE
+  uint64_t NextTracySquashBatchId() {
+    return ++tracy_squash_batch_id_;
+  }
+#endif
 
   // Reserves an id from the same monotonic pool Connection instances use.
   static uint32_t NextClientId();
@@ -772,6 +780,18 @@ class Connection : public util::Connection {
     return parsed_head_ != parsed_to_execute_;
   }
 
+#ifdef DFLY_TRACY_PLOTS
+  // Counts the reply-ready prefix of dispatched commands. Replies after the first incomplete
+  // command cannot be sent yet because RESP replies preserve request order.
+  size_t CountReplyReadyCommands() const;
+
+  // Emits a snapshot of V2 queue and reply state for the current proactor thread.
+  void EmitV2QueueTelemetry() const;
+
+  // Emits per-proactor pipeline budget values while a selected V2 connection is parked.
+  void EmitV2BackpressureTelemetry() const;
+#endif
+
   // Returns true if the head command is ready to execute (nothing in-flight ahead of it).
   bool HasCommandToExecute() const {
     return parsed_head_ && !HasInFlightCommands();
@@ -788,6 +808,20 @@ class Connection : public util::Connection {
   }
 
   uint32_t id_;
+
+#ifdef TRACY_ENABLE
+  uint64_t tracy_squash_batch_id_ = 0;
+#endif
+#ifdef DFLY_TRACY_PLOTS
+  mutable uint64_t tracy_queue_plot_connection_id_ = 0;
+  mutable bool tracy_queue_plots_configured_ = false;
+  mutable bool tracy_queue_plot_values_valid_ = false;
+  mutable std::array<int64_t, 16> tracy_queue_plot_values_;
+  mutable int64_t tracy_v2_proactor_parse_commands_ = 0;
+  mutable int64_t tracy_v2_batch_commands_ = 0;
+  mutable int64_t tracy_v2_flush_bytes_ = 0;
+  mutable int64_t tracy_v2_shared_borrow_usec_ = 0;
+#endif
   Protocol protocol_;
   Phase phase_ = SETUP;
 

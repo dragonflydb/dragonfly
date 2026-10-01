@@ -98,6 +98,12 @@ struct ConnectionStats {
   // callback.
   uint64_t proactor_parse = 0;
 
+  // V2 Only: Number of times the connection fiber parked at the idle-await (went to sleep).
+  uint64_t pipeline_idle_parks = 0;
+
+  // V2 Only: Subset of pipeline_idle_parks that waited for a dispatched command reply.
+  uint64_t pipeline_reply_wait_parks = 0;
+
   // Local validation metrics for the V2 shared read-buffer path.
   uint64_t shared_buf_overflow_copies = 0;
   uint64_t shared_buf_borrow_cycles_callback = 0;

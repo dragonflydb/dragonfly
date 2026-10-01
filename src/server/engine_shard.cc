@@ -424,8 +424,8 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
       queue2_(kQueueLen / 2, 2, 2),
       shard_id_(pb->GetPoolIndex()),
       mi_resource_(heap) {
-  queue_.Start(absl::StrCat("shard_queue_", shard_id()));
-  queue2_.Start(absl::StrCat("l2_queue_", shard_id()));
+  queue_.Start(absl::StrCat("shard_queue_p", shard_id()));
+  queue2_.Start(absl::StrCat("l2_queue_p", shard_id()));
 }
 
 void EngineShard::Shutdown() {

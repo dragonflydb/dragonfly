@@ -4,6 +4,7 @@
 
 #include "server/server_state.h"
 
+#include <absl/strings/str_cat.h>
 #include <mimalloc.h>
 
 #include "server/detail/egress_throttle.h"
@@ -168,7 +169,7 @@ void ServerState::Init(uint32_t thread_index, uint32_t num_shards,
   state_->stats = Stats(num_shards);
   if (main_listener) {
     state_->watcher_fiber_ = util::fb2::Fiber(
-        util::fb2::Launch::post, "ConnectionsWatcher",
+        util::fb2::Launch::post, absl::StrCat("ConnectionsWatcher_p", thread_index),
         [state = state_, main_listener] { state->ConnectionsWatcherFb(main_listener); });
   }
 }

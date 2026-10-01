@@ -108,6 +108,11 @@ class MultiCommandSquasher {
   size_t num_shards_ = 0;
   size_t num_commands_ = 0;  // Total commands processed
 
+#ifdef TRACY_ENABLE
+  uint32_t tracy_connection_id_ = 0;
+  uint64_t tracy_batch_id_ = 0;
+#endif
+
   Stats stats_;
 };
 

@@ -152,6 +152,186 @@ if(DF_MINIMAL_DEBUG_INFO AND CMAKE_BUILD_TYPE STREQUAL "Debug")
   add_compile_options(-g1)
 endif()
 
+# Optional Tracy profiler client. Compile-time gated so it is zero overhead by default (WITH_TRACY
+# OFF). When ON we (1) force-enable the Tracy client options, (2) globally define the macros our
+# instrumentation guards on, and (3) fetch + build the client. On-demand mode means an enabled
+# binary only starts capturing once a Tracy viewer/capture connects (the runtime on/off switch).
+option(WITH_TRACY "Enable the Tracy profiler client (on-demand)" OFF)
+option(WITH_TRACY_FORENSIC "Enable high-volume per-command Tracy zones" OFF)
+option(WITH_TRACY_PLOTS "Enable Tracy plot instrumentation" OFF)
+option(WITH_TRACY_SAMPLING "Enable Tracy statistical call-stack sampling" OFF)
+option(WITH_TRACY_CONTEXT_SWITCH "Enable Tracy context-switch tracing" OFF)
+set(DFLY_TRACY_SCOPES "" CACHE STRING
+  "Comma-separated Tracy scopes: connection,dispatch,squasher,reply,memory,all")
+set(DFLY_TRACY_MANUAL_ZONES "" CACHE STRING
+  "Comma-separated manual Tracy zone IDs or names, or all (see TRACY.md)")
+if (WITH_TRACY)
+  message(STATUS "Tracy profiler enabled (on-demand). Connect the Tracy viewer to start capture.")
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/facade/tracy_manual_zones.h")
+  file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/facade/tracy_manual_zones.h"
+    _dfly_tracy_registry_contents)
+  string(REGEX MATCHALL "X\\(([0-9]+),[ \\t]*([A-Za-z0-9_]+),[ \\t]*\\\"([^\\\"]+)\\\"\\)"
+    _dfly_tracy_registry_lines "${_dfly_tracy_registry_contents}")
+  set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
+  set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
+  set(TRACY_FIBERS ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_WAIT_STACKS ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_FRAME_IMAGE ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_VSYNC_CAPTURE ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_BROADCAST ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_CODE_TRANSFER ON CACHE BOOL "" FORCE)
+  set(TRACY_NO_CRASH_HANDLER ON CACHE BOOL "" FORCE)
+
+  if (WITH_TRACY_SAMPLING OR WITH_TRACY_CONTEXT_SWITCH)
+    set(TRACY_NO_SYSTEM_TRACING OFF CACHE BOOL "" FORCE)
+  else()
+    set(TRACY_NO_SYSTEM_TRACING ON CACHE BOOL "" FORCE)
+  endif()
+  if (WITH_TRACY_SAMPLING)
+    set(TRACY_NO_SAMPLING OFF CACHE BOOL "" FORCE)
+    set(TRACY_NO_CALLSTACK OFF CACHE BOOL "" FORCE)
+  else()
+    set(TRACY_NO_SAMPLING ON CACHE BOOL "" FORCE)
+    set(TRACY_NO_CALLSTACK ON CACHE BOOL "" FORCE)
+  endif()
+  if (WITH_TRACY_CONTEXT_SWITCH)
+    set(TRACY_NO_CONTEXT_SWITCH OFF CACHE BOOL "" FORCE)
+  else()
+    set(TRACY_NO_CONTEXT_SWITCH ON CACHE BOOL "" FORCE)
+  endif()
+
+  # Force the client macros on for EVERY translation unit (dragonfly + the helio submodule), so the
+  # guards activate regardless of how INTERFACE compile-defs propagate across helio's custom
+  # cxx_link / submodule target boundary:
+  #  - TRACY_ENABLE: activates the app zones in facade/tracy_support.h (and the client itself).
+  #  - TRACY_FIBERS: activates the per-fiber instrumentation in
+  #    helio/util/fibers/detail/fiber_interface.cc. Without this the fiber lanes stay off.
+  # NOTE: WITH_TRACY is a CMake option only - no source #ifdefs on it - so we do NOT define it as a
+  # preprocessor macro. Symbol resolution still comes from linking Tracy::TracyClient to dfly_facade
+  # and fibers2 (see the respective CMakeLists).
+  add_compile_definitions(TRACY_ENABLE TRACY_FIBERS)
+  if (WITH_TRACY_PLOTS)
+    add_compile_definitions(DFLY_TRACY_PLOTS)
+  endif()
+  string(REPLACE "," ";" _dfly_tracy_scope_list "${DFLY_TRACY_SCOPES}")
+  set(_dfly_tracy_known_scopes connection dispatch squasher reply memory)
+  set(_dfly_tracy_all_broad_scopes FALSE)
+  set(_dfly_tracy_named_scope_requested FALSE)
+  foreach(_dfly_tracy_scope IN LISTS _dfly_tracy_scope_list)
+    if (_dfly_tracy_scope STREQUAL "all")
+      if (_dfly_tracy_all_broad_scopes OR _dfly_tracy_named_scope_requested)
+        message(FATAL_ERROR "DFLY_TRACY_SCOPES=all cannot be combined with other scopes")
+      endif()
+      set(_dfly_tracy_all_broad_scopes TRUE)
+    elseif (_dfly_tracy_all_broad_scopes)
+      message(FATAL_ERROR "DFLY_TRACY_SCOPES=all cannot be combined with other scopes")
+    elseif (NOT _dfly_tracy_scope IN_LIST _dfly_tracy_known_scopes)
+      message(FATAL_ERROR "Unknown DFLY_TRACY_SCOPES entry: ${_dfly_tracy_scope}")
+    else()
+      set(_dfly_tracy_named_scope_requested TRUE)
+    endif()
+  endforeach()
+  if (_dfly_tracy_all_broad_scopes)
+    set(_dfly_tracy_scope_list ${_dfly_tracy_known_scopes})
+  endif()
+  foreach(_dfly_tracy_scope IN LISTS _dfly_tracy_known_scopes)
+    set(_dfly_tracy_scope_enabled 0)
+    if (_dfly_tracy_scope IN_LIST _dfly_tracy_scope_list)
+      set(_dfly_tracy_scope_enabled 1)
+    endif()
+    string(TOUPPER "${_dfly_tracy_scope}" _dfly_tracy_scope_upper)
+    add_compile_definitions("DFLY_TRACY_BUILD_${_dfly_tracy_scope_upper}=${_dfly_tracy_scope_enabled}")
+  endforeach()
+
+  set(_dfly_tracy_manual_ids)
+  set(_dfly_tracy_manual_names)
+  set(_dfly_tracy_manual_symbols)
+  foreach(_dfly_tracy_registry_line IN LISTS _dfly_tracy_registry_lines)
+    string(REGEX MATCH "X\\(([0-9]+),[ \\t]*([A-Za-z0-9_]+),[ \\t]*\\\"([^\\\"]+)\\\"\\)"
+           _dfly_tracy_registry_match "${_dfly_tracy_registry_line}")
+    if (NOT _dfly_tracy_registry_match)
+      message(FATAL_ERROR "Malformed Tracy manual zone registry entry: ${_dfly_tracy_registry_line}")
+    endif()
+    set(_dfly_tracy_manual_id "${CMAKE_MATCH_1}")
+    set(_dfly_tracy_manual_symbol "${CMAKE_MATCH_2}")
+    string(TOLOWER "${CMAKE_MATCH_3}" _dfly_tracy_manual_name)
+    list(FIND _dfly_tracy_manual_ids "${_dfly_tracy_manual_id}" _dfly_tracy_existing_id)
+    list(FIND _dfly_tracy_manual_symbols "${_dfly_tracy_manual_symbol}"
+         _dfly_tracy_existing_symbol)
+    list(FIND _dfly_tracy_manual_names "${_dfly_tracy_manual_name}" _dfly_tracy_existing_name)
+    if ((NOT "${_dfly_tracy_existing_id}" STREQUAL "-1") OR
+      (NOT "${_dfly_tracy_existing_symbol}" STREQUAL "-1") OR
+      (NOT "${_dfly_tracy_existing_name}" STREQUAL "-1"))
+      message(FATAL_ERROR "Duplicate Tracy manual zone registry entry: ${_dfly_tracy_registry_line}")
+    endif()
+    list(APPEND _dfly_tracy_manual_ids "${_dfly_tracy_manual_id}")
+    list(APPEND _dfly_tracy_manual_names "${_dfly_tracy_manual_name}")
+    list(APPEND _dfly_tracy_manual_symbols "${_dfly_tracy_manual_symbol}")
+  endforeach()
+
+  set(_dfly_tracy_selected_manual_symbols)
+  set(_dfly_tracy_manual_all_requested FALSE)
+  if (NOT DFLY_TRACY_MANUAL_ZONES STREQUAL "")
+    string(REPLACE "," ";" _dfly_tracy_manual_list "${DFLY_TRACY_MANUAL_ZONES}")
+    foreach(_dfly_tracy_manual_entry IN LISTS _dfly_tracy_manual_list)
+      string(STRIP "${_dfly_tracy_manual_entry}" _dfly_tracy_manual_entry)
+      if (_dfly_tracy_manual_entry STREQUAL "")
+        continue()
+      endif()
+      string(TOLOWER "${_dfly_tracy_manual_entry}" _dfly_tracy_manual_entry_lower)
+      if (_dfly_tracy_manual_entry_lower STREQUAL "all")
+        if (_dfly_tracy_manual_all_requested OR _dfly_tracy_selected_manual_symbols)
+          message(FATAL_ERROR "DFLY_TRACY_MANUAL_ZONES=all cannot be combined with other zones")
+        endif()
+        set(_dfly_tracy_manual_all_requested TRUE)
+        set(_dfly_tracy_selected_manual_symbols ${_dfly_tracy_manual_symbols})
+        continue()
+      endif()
+      if (_dfly_tracy_manual_all_requested)
+        message(FATAL_ERROR "DFLY_TRACY_MANUAL_ZONES=all cannot be combined with other zones")
+      endif()
+      list(FIND _dfly_tracy_manual_ids "${_dfly_tracy_manual_entry}" _dfly_tracy_manual_index)
+      if (_dfly_tracy_manual_index EQUAL -1)
+        list(FIND _dfly_tracy_manual_names "${_dfly_tracy_manual_entry_lower}" _dfly_tracy_manual_index)
+      endif()
+      if (_dfly_tracy_manual_index EQUAL -1)
+        message(FATAL_ERROR "Unknown DFLY_TRACY_MANUAL_ZONES entry: ${_dfly_tracy_manual_entry}")
+      endif()
+      list(GET _dfly_tracy_manual_symbols ${_dfly_tracy_manual_index} _dfly_tracy_manual_symbol)
+      list(APPEND _dfly_tracy_selected_manual_symbols "${_dfly_tracy_manual_symbol}")
+    endforeach()
+    list(REMOVE_DUPLICATES _dfly_tracy_selected_manual_symbols)
+    add_compile_definitions(DFLY_TRACY_BUILD_MANUAL=1
+                            "DFLY_TRACY_MANUAL_BUILD_ZONES=\"${DFLY_TRACY_MANUAL_ZONES}\"")
+  else()
+    add_compile_definitions(DFLY_TRACY_BUILD_MANUAL=0)
+  endif()
+  foreach(_dfly_tracy_manual_symbol IN LISTS _dfly_tracy_manual_symbols)
+    set(_dfly_tracy_manual_enabled 0)
+    if (_dfly_tracy_manual_symbol IN_LIST _dfly_tracy_selected_manual_symbols)
+      set(_dfly_tracy_manual_enabled 1)
+    endif()
+    add_compile_definitions(
+      "DFLY_TRACY_MANUAL_BUILD_${_dfly_tracy_manual_symbol}=${_dfly_tracy_manual_enabled}")
+  endforeach()
+
+  if (WITH_TRACY_FORENSIC)
+    message(STATUS "Tracy forensic per-command zones enabled.")
+    add_compile_definitions(DFLY_TRACY_FORENSIC)
+  endif()
+  message(STATUS "Tracy compiled scopes: ${DFLY_TRACY_SCOPES}")
+
+  FetchContent_Declare(
+    tracy
+    GIT_REPOSITORY https://github.com/wolfpld/tracy.git
+    GIT_TAG v0.14.1
+    GIT_SHALLOW TRUE
+    GIT_PROGRESS TRUE
+  )
+  FetchContent_MakeAvailable(tracy)
+endif()
+
 include_directories(src)
 include_directories(helio)
 
