@@ -155,5 +155,24 @@ endif()
 include_directories(src)
 include_directories(helio)
 
+if(CMAKE_EXPORT_COMPILE_COMMANDS)
+  set(_helio_clangd_build_dir "${CMAKE_CURRENT_SOURCE_DIR}/helio/build-dbg")
+  file(RELATIVE_PATH _dragonfly_build_dir "${CMAKE_CURRENT_SOURCE_DIR}/helio" "${CMAKE_BINARY_DIR}")
+
+  if(IS_SYMLINK "${_helio_clangd_build_dir}")
+    file(READ_SYMLINK "${_helio_clangd_build_dir}" _existing_build_dir)
+    if(NOT _existing_build_dir STREQUAL _dragonfly_build_dir)
+      file(REMOVE "${_helio_clangd_build_dir}")
+    endif()
+  elseif(EXISTS "${_helio_clangd_build_dir}")
+    message(WARNING "Not creating ${_helio_clangd_build_dir}: path already exists and is not a symlink")
+  endif()
+
+  if(NOT EXISTS "${_helio_clangd_build_dir}" AND NOT IS_SYMLINK "${_helio_clangd_build_dir}")
+    # helio/.clangd resolves its compilation database relative to the Helio source directory.
+    file(CREATE_LINK "${_dragonfly_build_dir}" "${_helio_clangd_build_dir}" SYMBOLIC)
+  endif()
+endif()
+
 add_subdirectory(helio)
 add_subdirectory(src)
