@@ -222,6 +222,7 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
 
     LoadConfig config;
     config.deep_integrity = true;  // RESTORE payloads are client-supplied and untrusted
+    config.now_ms = cntx.time_now_ms;
     if (first_parse) {
       first_parse = false;
     } else {
@@ -2045,9 +2046,7 @@ struct SortVisitor {
 
     // Fetch GET pattern values if needed
     if (!params.get_patterns.empty()) {
-      ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
-      DbContext db_cntx{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
-      PopulateGetPatternValues(params, db_cntx, &entries);
+      PopulateGetPatternValues(params, cmd_cntx->tx()->GetDbContext(), &entries);
     }
 
     if (!params.store_key) {
@@ -2215,8 +2214,7 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
            << " and store_key parameter: " << bool(params.store_key);
   DCHECK(((is_read_only && !bool(params.store_key)) || !is_read_only));
 
-  ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
-  DbContext db_cntx{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
+  const DbContext db_cntx = cmd_cntx->tx()->GetDbContext();
 
   CompactObjType source_type = OBJ_STRING;  // undefined in this context
 

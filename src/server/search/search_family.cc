@@ -4302,7 +4302,7 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
         // Rebuild indices only for documents containing terms from the updated group
         index->RebuildForGroup(
             OpArgs{es, nullptr,
-                   DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}},
+                   DbContext{&namespaces->GetDefaultNamespace(), 0, t->GetDbContext().time_now_ms}},
             group_id, terms);
 
         return OpStatus::OK;

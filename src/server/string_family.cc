@@ -553,6 +553,13 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
         return res.status();
       }
     }
+
+    // Journal the resulting state so replay does not depend on the clock.
+    if (op_args.shard->journal()) {
+      const string tat_str = absl::StrCat(new_tat_ns);
+      const string at_str = absl::StrCat(new_tat_ms);
+      RecordJournal(op_args, "SET", {key, tat_str, "PXAT", at_str});
+    }
   }
 
   return array<int64_t, 5>{limited ? 1 : 0, limit, remaining, retry_after_ms, reset_after_ms};
@@ -1264,7 +1271,7 @@ cmd::CmdR CmdSetExGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
     co_return err.MakeReply();
 
   const ExpT type = cmd_name.front() == 'P' ? ExpT::PX : ExpT::EX;
-  const uint64_t now_ms = GetCurrentTimeMs();
+  const uint64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
   DbSlice::ExpireParams expiry{type, exp_int, now_ms};
 
   auto [_, abs_ms] = expiry.Calculate(now_ms, false);
@@ -1859,8 +1866,9 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)
       << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)  // Alias for GetRange
       << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetAsyncHandler(CmdSetRange)
-      << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
-             ClThrottle)
+      << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -5, 1, 1,
+            acl::THROTTLE}
+             .HFUNC(ClThrottle)
       << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}
              .SetAsyncHandler(CmdGAT);
 }

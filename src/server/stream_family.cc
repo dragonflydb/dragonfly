@@ -3208,8 +3208,8 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
     if (sitem.group) {
       tracker = StreamMemTracker{};
       sitem.is_consumer_new = false;
-      range_opts.consumer = FindOrAddConsumer(opts->consumer_name, sitem.group, GetCurrentTimeMs(),
-                                              &sitem.is_consumer_new);
+      range_opts.consumer = FindOrAddConsumer(
+          opts->consumer_name, sitem.group, t->GetDbContext().time_now_ms, &sitem.is_consumer_new);
       sitem.consumer = range_opts.consumer;
       if (!sitem.consumer) {
         result = OpStatus::OUT_OF_MEMORY;
