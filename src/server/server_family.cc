@@ -3410,6 +3410,7 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   }
   CmdArgList args_list = absl::MakeSpan(args_vec);
   facade::StringSocket sock;
+  sock.set_null(true);
   facade::RedisReplyBuilder rb(&sock);
   CommandContext cmd_cntx{&rb, nullptr};
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);

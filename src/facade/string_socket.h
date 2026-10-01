@@ -34,6 +34,11 @@ class StringSocket : public util::FiberSocketBase {
     max_write_ = max_write;
   }
 
+  // When set, written data is discarded instead of captured, like io::NullSink.
+  void set_null(bool null) {
+    null_ = null;
+  }
+
   // Makes the n-th WriteSome call from now (1-based) and all calls after it fail with ec.
   void set_fail_after(unsigned n, std::error_code ec) {
     writes_until_failure_ = n;
@@ -50,7 +55,8 @@ class StringSocket : public util::FiberSocketBase {
     size_t total = 0;
     for (uint32_t i = 0; i < len && total < max_write_; ++i) {
       size_t n = std::min(v[i].iov_len, max_write_ - total);
-      str_.append(reinterpret_cast<const char*>(v[i].iov_base), n);
+      if (!null_)
+        str_.append(reinterpret_cast<const char*>(v[i].iov_base), n);
       total += n;
     }
     return total;
@@ -167,6 +173,7 @@ class StringSocket : public util::FiberSocketBase {
   size_t max_write_ = std::numeric_limits<size_t>::max();
   unsigned writes_until_failure_ = 0;  // 0 - never fail
   std::error_code fail_ec_;
+  bool null_ = false;
 };
 
 }  // namespace facade
