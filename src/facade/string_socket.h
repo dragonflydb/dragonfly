@@ -169,15 +169,4 @@ class StringSocket : public util::FiberSocketBase {
   std::error_code fail_ec_;
 };
 
-// StringSocket that discards written data. A replacement for io::NullSink.
-class NullSocket : public StringSocket {
- public:
-  io::Result<size_t> WriteSome(const iovec* v, uint32_t len) override {
-    size_t total = 0;
-    for (uint32_t i = 0; i < len; ++i)
-      total += v[i].iov_len;
-    return total;
-  }
-};
-
 }  // namespace facade
