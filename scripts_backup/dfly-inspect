@@ -2577,6 +2577,7 @@ def collect_evidence(
     estimate: bool,
     dry_run: bool,
     max_elements: int | None = None,
+    deployment_ssh_connection_command: str | None = None,
 ) -> int:
     if max_elements is not None and max_elements <= 0:
         raise ValueError("--max-elements must be positive")
@@ -2610,6 +2611,7 @@ def collect_evidence(
             )
         )
         return 0
+    preflight_deployment_ssh(deployment_ssh_connection_command)
     if estimate:
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [
@@ -7711,6 +7713,80 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         parser.error(str(error))
 
 
+def parse_collection_includes(value: str, option: str) -> set[str]:
+    includes = {item for item in value.split(",") if item}
+    allowed_includes = {"dfly-logs", "info-dump", "journal", "agent", "clients", "perf"}
+    invalid_includes = includes - allowed_includes
+    if invalid_includes:
+        raise ValueError(f"unknown {option} source: {', '.join(sorted(invalid_includes))}")
+    return includes
+
+
+def validate_local_command_arguments(arguments: argparse.Namespace) -> None:
+    """Reject malformed local arguments before any backend readiness checks."""
+    command = arguments.command
+    if command in {"logs", "log-archiver", "dashboard-panels"}:
+        expected_context = GCX_CONTEXTS[arguments.environment]
+        if arguments.context and arguments.context != expected_context:
+            raise ValueError(
+                f"--context {arguments.context!r} conflicts with --env {arguments.environment}; "
+                f"expected {expected_context!r}"
+            )
+    if command == "collect":
+        arguments.collection_includes = parse_collection_includes(arguments.include, "--include")
+        if arguments.workers <= 0 or arguments.workers > MAX_COLLECTION_WORKERS:
+            raise ValueError("--workers must be between 1 and 2")
+        if arguments.max_normalized_load <= 0:
+            raise ValueError("--max-normalized-load must be positive")
+        if arguments.min_free_kib <= 0:
+            raise ValueError("--min-free-kib must be positive")
+        arguments.collection_since, arguments.collection_until = resolve_time_window(
+            arguments.since, arguments.until
+        )
+    elif command == "bundle":
+        parse_collection_includes(arguments.collect_include, "--collect-include")
+        if arguments.resume and arguments.overwrite:
+            raise ValueError("--resume and --overwrite cannot be used together")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", arguments.incident_id):
+            raise ValueError(
+                "incident-id must be 1-64 letters, digits, '.', '_', or '-', "
+                "starting with a letter or digit"
+            )
+        captured_now = datetime.now(timezone.utc)
+        resolve_utc_timestamp(arguments.around, captured_now)
+        parse_bundle_window(arguments.window)
+    elif command == "slowlog":
+        if not 0 <= arguments.limit <= 128:
+            raise ValueError("--limit must be between 0 and 128")
+        if not 1 <= arguments.workers <= DEFAULT_MULTI_WORKERS:
+            raise ValueError(f"--workers must be between 1 and {DEFAULT_MULTI_WORKERS}")
+        if arguments.max_elements is not None and arguments.max_elements <= 0:
+            raise ValueError("--max-elements must be positive")
+        if arguments.output is not None and arguments.format == "table":
+            raise ValueError("--output requires --format json or --format markdown")
+    elif command == "health":
+        if not 1 <= arguments.workers <= DEFAULT_HEALTH_WORKERS:
+            raise ValueError(f"--workers must be between 1 and {DEFAULT_HEALTH_WORKERS}")
+        if arguments.max_elements is not None and arguments.max_elements <= 0:
+            raise ValueError("--max-elements must be positive")
+    elif command == "slot-ownership":
+        if arguments.workers <= 0:
+            raise ValueError("--workers must be positive")
+        if arguments.slots:
+            parse_slots(arguments.slots)
+    elif command == "scan-compare":
+        if arguments.count <= 0 or arguments.max_iterations <= 0:
+            raise ValueError("--count and --max-iterations must be positive")
+        if arguments.stop_after_diffs is not None and arguments.stop_after_diffs <= 0:
+            raise ValueError("--stop-after-diffs must be positive")
+        if arguments.progress is not None and arguments.progress <= 0:
+            raise ValueError("--progress must be positive")
+        if arguments.confirm_delay < 0:
+            raise ValueError("--confirm-delay must not be negative")
+        if arguments.slots:
+            parse_slots(arguments.slots)
+
+
 def run_command(arguments: argparse.Namespace | None = None) -> int:
     arguments = arguments or parse_arguments()
     command_aliases = {
@@ -7737,6 +7813,11 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
         "so": "slot-ownership",
     }
     arguments.command = command_aliases.get(arguments.command, arguments.command)
+    try:
+        validate_local_command_arguments(arguments)
+    except ValueError as error:
+        print(error_message(str(error)), file=sys.stderr)
+        return 1
     environment = arguments.environment
     requires_dfadmin = arguments.command not in {"dashboard-panels", "explain", "session"}
     requires_deployment_ssh = arguments.command in {
@@ -7747,11 +7828,13 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
         "scan-compare",
         "slot-ownership",
     }
+    defer_deployment_ssh_preflight = arguments.command == "collect"
     supplied_ssh_connection = getattr(arguments, "deployment_ssh_conn_command", None)
     cached_ssh_connection = load_deployment_ssh_connection()
     if (
         not getattr(arguments, "dry_run", False)
         and requires_deployment_ssh
+        and not defer_deployment_ssh_preflight
         and not (supplied_ssh_connection or cached_ssh_connection)
     ):
         raise ValueError(
@@ -7780,7 +7863,7 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
             set_deployment_ssh_connection(supplied_ssh_connection)
             if requires_dfadmin:
                 preflight_dfadmin(environment)
-            if requires_deployment_ssh:
+            if requires_deployment_ssh and not defer_deployment_ssh_preflight:
                 preflight_deployment_ssh(supplied_ssh_connection)
         if arguments.command == "session":
             if arguments.session_action == "list":
@@ -8041,40 +8124,23 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
                 arguments.max_elements,
             )
         if arguments.command == "collect":
-            includes = {item for item in arguments.include.split(",") if item}
-            invalid_includes = includes - {
-                "dfly-logs",
-                "info-dump",
-                "journal",
-                "agent",
-                "clients",
-                "perf",
-            }
-            if invalid_includes:
-                raise ValueError(f"unknown --include source: {', '.join(sorted(invalid_includes))}")
-            if arguments.workers <= 0 or arguments.workers > MAX_COLLECTION_WORKERS:
-                raise ValueError("--workers must be between 1 and 2")
-            if arguments.max_normalized_load <= 0:
-                raise ValueError("--max-normalized-load must be positive")
-            if arguments.min_free_kib <= 0:
-                raise ValueError("--min-free-kib must be positive")
-            since, until = resolve_time_window(arguments.since, arguments.until)
             return collect_evidence(
                 environment,
                 arguments.targets,
                 arguments.output_dir,
-                includes,
+                arguments.collection_includes,
                 arguments.workers,
                 "",
                 arguments.max_normalized_load,
                 arguments.min_free_kib,
-                since,
-                until,
+                arguments.collection_since,
+                arguments.collection_until,
                 arguments.bundle,
                 arguments.raw_transfer,
                 arguments.estimate,
                 arguments.dry_run,
                 arguments.max_elements,
+                supplied_ssh_connection,
             )
         if arguments.command == "bundle":
             includes = {item for item in arguments.collect_include.split(",") if item}
