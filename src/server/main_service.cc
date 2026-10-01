@@ -256,7 +256,7 @@ std::string CreateMonitorTimestamp() {
   timeval tv;
 
   gettimeofday(&tv, nullptr);
-  return absl::StrCat(tv.tv_sec, ".", tv.tv_usec, absl::kZeroPad6);
+  return absl::StrCat(tv.tv_sec, ".", absl::Dec(tv.tv_usec, absl::kZeroPad6));
 }
 
 auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
