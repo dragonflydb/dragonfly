@@ -23,8 +23,6 @@
 #include "util/fibers/pool.h"
 #include "util/fibers/synchronization.h"
 
-ABSL_DECLARE_FLAG(bool, disable_scope_based_mem_track);
-
 namespace dfly {
 
 using namespace std;
@@ -40,7 +38,6 @@ class TransactionTest : public Test {
   void TearDown() override;
 
   static void SetUpTestSuite() {
-    absl::SetFlag(&FLAGS_disable_scope_based_mem_track, false);
     ServerState::Init(kNumThreads, kNumThreads, nullptr, nullptr);
     facade::tl_facade_stats = new facade::FacadeStats;
   }

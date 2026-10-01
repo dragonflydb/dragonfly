@@ -24,7 +24,7 @@
 
 ABSL_FLAG(uint32_t, tx_queue_warning_len, 96,
           "Length threshold for warning about long transaction queue");
-ABSL_FLAG(bool, disable_scope_based_mem_track, true, "Turn off scope based memory metric");
+ABSL_FLAG(bool, disable_scope_based_mem_track, false, "Turn off scope based memory metric");
 
 namespace dfly {
 
@@ -1939,7 +1939,8 @@ int64_t TrackedMemory() {
   DCHECK_NE(shard, nullptr);
 
   // Full search index memory accounting scans all indices, so skip it
-  return shard->UsedMemoryWithoutSearch();
+  const int64_t used_memory = shard->UsedMemoryWithoutSearch();
+  return used_memory - shard->type_mem_delta()[OBJ_KEY];
 }
 
 }  // namespace
