@@ -3248,14 +3248,14 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch(bool parser_error) {
                << pending_input_ << " " << GetUnreadInputLen();
 
       if (SquashPipelineV2()) {
-        // Return after a successful squash to allow the caller to process replies.
-        // A client with a bounded pipeline needs completed replies to replenish its requests.
-        // Delaying them might reduce throughput and stall both client and connection fiber, even
-        // when more commands are ready to execute.
-        // parse-in-proactor can set proactor_parse_error_ during the squash hop.
+        // - Normally: return after a successful squash so the caller can process replies. A client
+        // with a bounded pipeline needs completed replies to replenish requests - delaying them can
+        // stall both it and this connection fiber.
+        // - Continue instead when parsing found an error (on conenction fiber or
+        // parse-in-proactor), so commands parsed before the bad input can execute before the
+        // connection closes.
         if (!parser_error && !proactor_parse_error_)
           break;
-        // Drain dispatchable commands before closing on a parser error.
         continue;
       }
     }
