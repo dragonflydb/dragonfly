@@ -603,7 +603,7 @@ class Connection : public util::Connection {
   // Returns kDeferToControlPath only when V2 stops to let IoLoopV2 drain control messages that
   // precede the next parsed command.
   enum class ExecuteBatchResult : uint8_t { kSuccess, kFailure, kDeferToControlPath };
-  ExecuteBatchResult ExecuteBatch();
+  ExecuteBatchResult ExecuteBatch(bool parser_error);
 
   // V2: Returns true if the connection is currently logging traffic to a file.
   bool ShouldLogTrafficV2() const;
