@@ -66,7 +66,8 @@ Goals:
 - **Fast recovery.** Shards replay their logs in parallel.
 
 Non-goals:
-- The epoll backend. AOF requires io_uring to allow async writes without throttling the request flow.
+- The epoll backend. AOF requires io_uring to allow async writes without throttling the request
+  flow.
 - Loading or producing Valkey-format AOF files.
 - Remote or tiered AOF storage (S3). The AOF is local only.
 - A hard bound on disk usage. A full disk surfaces through metrics and the error policy.
@@ -91,9 +92,6 @@ Terms are per shard unless stated otherwise.
 - **Base:** a full snapshot of the dataset, taken at a checkpoint's cut.
 - **Cut LSN (`L_i`):** shard i's first record after the base's point-in-time cut.
 - **Checkpoint:** a committed base plus its per-shard cut LSNs.
-- **Logical time:** the clock a record's transaction originally ran with
-  (`Transaction::time_now_ms_`, the time its deadline checks used). Replay runs each record at its
-  logical time.
 - **Manifest:** the file naming the current base and each shard's cut. Replaced atomically.
 - **Global command:** a journaled global transaction (`CO::GLOBAL_TRANS`) that writes a record
   on every shard: FLUSHALL, FLUSHDB, FLUSHSLOTS, FT.CREATE, FT.ALTER, FT.DROPINDEX and
@@ -112,8 +110,7 @@ Terms are per shard unless stated otherwise.
 - **Journal records are almost deterministic.** TTLs are journaled as absolute times, and expiry
   and eviction are journaled as `DEL`. Commands still compare deadlines with their transaction's
   clock, though: `SET ... PXAT T` or `PEXPIREAT` with an elapsed `T` deletes the key. A log
-  replayed hours later reproduces the original state only if each record runs at its original
-  time (see [Replay](#replay)).
+  replayed hours later needs special handling for such deadlines (see [Replay](#replay)).
 - **Snapshots are point-in-time per shard.** Replication full sync already starts a journal
   consumer exactly at the snapshot's cut ([snapshot.cc](../src/server/snapshot.cc)). That is
   the "base + log from LSN L" model AOF checkpoints need.
@@ -205,10 +202,14 @@ bases are usually regular dumps.) Startup then proceeds as follows:
    example, after a shard-count change).
 7. Enter `ACTIVE`.
 
-Replay runs each record at its original **logical time**, persisted with the record, and
-background expiry stays off until replay ends. A replayed command therefore sees the state it
-originally saw. Suspending expiry alone is not enough, because commands such as `SET ... PXAT`
-delete a key whose deadline has passed.
+**Time-based commands** need special handling, because replay can run long after a deadline the
+original command still had ahead of it. Suspending background expiry is not enough, because
+commands such as `SET ... EXAT` themselves delete a key whose deadline has passed. Two options are
+under consideration (see [Time-based commands](#time-based-commands)):
+- **No expiry during replay:** commands store a past deadline instead of deleting, as Valkey does
+  while loading its AOF.
+- **Logical time:** persist each record's original time, and replay it with the clock pinned to
+  that time.
 
 On the first start with `--aof` there is no manifest yet. The server loads `--dbfilename` as
 usual, and that dump becomes the first base (adopted directly, or through an initial
@@ -282,7 +283,7 @@ requires a local `--dir`; with a remote one (`s3://...`) it refuses to start. A 
 ### Segment header
 
 Written and synced when the segment is prepared as a spare, before any block:
-- magic `DFAOF1`, format version
+- magic `DFAOF1` (includes format version)
 - `shard_id`, `shard_count`, segment `seq`
 - `segment_uid`: a random 64-bit id per prepared file. It seeds the block CRCs, so a block
   validates only in the segment it was written to.
@@ -301,12 +302,10 @@ block's `first_lsn` gives it.
 - The header is 25 bytes, fixed-width little-endian. `len` covers the whole block, header
   included.
 - `payload` is the concatenated `JournalItem::data` of the block's records. Each record is
-  self-contained (its own `SELECT` prefix and opcode, even for PING), so replay decodes records
-  one by one and counts LSNs from `first_lsn`.
-- Each record also needs its logical time: the transaction's `time_now_ms_`, carried into the
-  journal entry. `JournalItem::time_ms` is not a substitute: `JournalSlice::CallOnChange` sets it
-  from the wall clock, later than the transaction's clock. How the block carries the time is an
-  open edge case below.
+  self-contained (a `SELECT` prefix where needed, then its opcode; a PING is the opcode alone),
+  so replay decodes records one by one and counts LSNs from `first_lsn`.
+- With the logical-time option for [Time-based commands](#time-based-commands), each record
+  also carries its original time. How the block encodes it is an open edge case below.
 - `crc32c` covers `segment_uid`, then `len`, `first_lsn`, `n_records`, `flags` and `payload`.
 - `flags` is 0 in the MVP. Atomic groups use one bit later.
 - A block is valid only if `len >= 25`, it fits in the rest of the file, its CRC matches, and
@@ -320,7 +319,7 @@ contains:
 - format version and `shard_count`
 - current checkpoint id, the base's path (relative to `--dir`) and format (DFS or RDB), and
   whether the base is AOF-owned
-- the cut's logical time, `cut_time_ms`
+- the cut's logical time, `cut_time_ms` (logical-time option only)
 - per shard: `cut_seq` (the first segment to read) and `cut_lsn`
 - a `bootstrapping` state for the very first start (see [Bootstrap](#bootstrap))
 
@@ -328,18 +327,18 @@ Segments describe themselves, so rotation never touches the manifest. Only a che
 does.
 
 Base files store each shard's cut LSN in an `aof-cut-lsn` aux field, replacing the always-zero
-`aof-preamble`, and the cut's logical time in an `aof-cut-time` aux field. Replay takes the cuts
-from the base itself, so a base is never paired with the wrong cuts:
+`aof-preamble` (and, with the logical-time option, the cut's time in `aof-cut-time`). Replay
+takes the cuts from the base itself, so a base is never paired with the wrong cuts:
 - A save that reuses a file name renames its new dump over the old base before it commits the
   manifest. After a crash in between, the old manifest points at the new dump. Replay still uses
   that dump's own cuts, and the chain covers them, because nothing was deleted yet.
 - A dump written before AOF was enabled (see [Bootstrap](#bootstrap)) has no aux fields. The
-  manifest's `cut_lsn` and `cut_time_ms` apply to it.
+  manifest's `cut_lsn` (and `cut_time_ms`) apply to it.
 
 **Open edge cases.**
-- **Encoding logical time.** Options: a `base_time_ms` in the block header plus a varint delta
-  per record (which requires per-record framing in the payload), or a time field in the journal
-  record itself (which also changes the replication format).
+- **Encoding logical time** (logical-time option only). A `base_time_ms` in the block header
+  plus a varint delta per record (which requires per-record framing in the payload), or a time
+  field in the journal record itself (which also changes the replication format).
 - Very large records. A single journal record can be gigabytes (`max_bulk_len` bounds each
   argument, not the record). Decide whether replay streams a block or the AOF caps record size.
 - Format versioning and upgrade rules, for both segments and the manifest.
@@ -540,7 +539,9 @@ A save becomes the checkpoint depending only on where its output lives:
    continues meanwhile.
 3. `fsync` each file, rename it into place, `fsync` the directory. A failed `fsync` fails the
    save before its rename, so an existing dump with the same name, possibly the current base,
-   stays intact.
+   stays intact. The rename also waits until every shard's old segment has completed its final
+   sync. Otherwise a crash could leave a torn pre-cut tail that ends the old manifest's chain
+   before the new segment, after the new dump had already replaced the old base.
 4. Commit the new manifest atomically.
 5. Delete every segment of shard i with `seq < cut_seq_i`, and base C-1 if it is AOF-owned. User
    dumps are never deleted.
@@ -594,9 +595,8 @@ A missing manifest does not prove this is the first start, because a manifest ca
   snapshot therefore becomes the first base, in one of two ways:
   - **Adopt the dump (preferred).** Commit a manifest that references the loaded dump by path.
     No write happens before the load finishes, so the cut is the journal's first LSN on every
-    shard, recorded as the manifest's `cut_lsn`. The load's time is recorded as `cut_time_ms`,
-    so a later replay loads the dump as of that time and drops exactly the keys this load
-    dropped. This avoids a full snapshot at startup.
+    shard, recorded as the manifest's `cut_lsn`. This avoids a full snapshot at startup. A later
+    replay must see the same keys this load kept; see [Time-based commands](#time-based-commands).
   - **Initial checkpoint (alternative).** Take a checkpoint while still in `LOADING`, if adoption
     turns out to be impractical.
   - **No dump:** the base is empty, and the manifest simply has none.
@@ -607,10 +607,9 @@ A missing manifest does not prove this is the first start, because a manifest ca
 ### Steps
 
 1. **Enter LOADING** through the existing `ServerFamily::Load` machinery.
-2. **Load base C as of its cut time.** The loader decides what is expired against the base's
-   `aof-cut-time`, not the wall clock, so it keeps exactly the keys and members that were live at
-   the cut. Background expiry stays off until the tail replay ends. Base keys go to whichever shard
-   owns them now.
+2. **Load base C** without deleting expired keys against the wall clock (see
+   [Time-based commands](#time-based-commands)). Background expiry stays off until the tail
+   replay ends. Base keys go to whichever shard owns them now.
 3. **Validate each chain.** Starting at `cut_seq_i`, segment seqs must be contiguous; a gap is a
    hard error. Empty segments are skipped wherever they appear. The first non-empty segment must
    start at or before the base's cut `L_i`, and each later one where the previous one's valid
@@ -620,19 +619,79 @@ A missing manifest does not prove this is the first start, because a manifest ca
    through `JournalApplier` (`JournalExecutor` → `Service::DispatchCommand`).
    - Per-key order is preserved, because all of a key's records live in one chain. The same
      argument makes replication across different shard counts correct.
-   - **Each record runs at its logical time.** The replayer pins the transaction clock
-     (`Transaction::time_now_ms_`, which `DbContext::time_now_ms` exposes) to the record's
-     persisted time, instead of the wall clock.
-     - Suspending expiry is not enough. `SET ... PXAT` with an elapsed deadline deletes the key
-       (`string_family.cc`), and so does `PEXPIREAT` (`DbSlice::UpdateExpire`), regardless of
-       `expire_allowed_`. Replayed after `T` on the wall clock, `SET k 0 PXAT T; INCR k` would
-       leave `k` without a TTL.
-     - With the pinned clock, lazy expiry during replay also happens exactly where it could have
-       happened originally. Real expirations are in the log as `DEL` anyway.
-     - Active (background) expiry runs on the wall clock, so it stays off until replay ends.
+   - Commands with deadlines are handled as in [Time-based commands](#time-based-commands).
 5. **Find each chain's end of log** (see [End of log](#end-of-log)).
 6. **Resume the log** (see [Resuming the log](#resuming-the-log)).
 7. **Finish.** Run `PerformPostLoad` and `ForceReplicasToFullSync()`, then switch to `ACTIVE`.
+
+### Time-based commands
+
+**Problem.** Replay can run long after the original commands. Say both of these originally ran
+before `T`:
+
+```
+SET k 10 EXAT T
+INCRBY k 5
+```
+
+Originally, `k = 15` with deadline `T`. Replayed after `T`, `SET ... EXAT T` sees an elapsed
+deadline and deletes the key (`SetCmd::DeleteExpiredKey`); `PEXPIREAT` does the same
+(`DbSlice::UpdateExpire`). `INCRBY` then recreates `k` as `5`, with no TTL. Turning off lazy and
+active expiry (`expire_allowed_`) does not help, because the command itself makes the check.
+
+Two options are under consideration.
+
+**Option 1: no expiry during replay.** Replay never deletes anything because of a past deadline:
+- `SET` and the expire family store a past deadline instead of deleting. Lazy and active expiry
+  are off, and the base loader keeps expired keys and members. Normal expiry runs after replay
+  and removes whatever is past due.
+- This is sound because the journal records the *outcome* of every time decision, not the
+  decision itself:
+  - a `SET` whose deadline had already passed is journaled as `DEL`
+    ([string_family.cc](../src/server/string_family.cc), `DeleteExpiredKey`);
+  - the expire family journals an elapsed deadline as `DEL`, and otherwise as
+    `PEXPIREAT <absolute>` ([generic_family.cc](../src/server/generic_family.cc));
+  - lazy and active expiry are journaled as `DEL` (`RecordExpiryBlocking`), and expired set
+    members as `SREM`.
+
+  So every deadline in the log was still in the future when its command ran, and every expiry the
+  original server observed is already a `DEL` in the log.
+- Valkey does the same while loading its AOF: nothing counts as expired during the load.
+- **Requires every journaled deadline to be absolute.** A relative TTL would be re-anchored at
+  replay time and extend the key's life. Set-member `FIELDEXPIRE` is journaled with a relative TTL
+  today, and auto-journaled commands that take relative TTLs need an audit.
+- At bootstrap, the first load of `--dbfilename` must keep expired keys too, so that their removal
+  is journaled as `DEL` rather than dropped silently.
+- Implemented in `JournalExecutor`, the same mode could also fix replicas, which today delete a key
+  when they apply `SET ... PXAT T` after `T`.
+
+**Option 2: logical time.** Replay runs each record at the time it originally ran:
+- Persist each record's logical time: the transaction's `time_now_ms_`, carried into the journal
+  entry. `JournalItem::time_ms` is not a substitute, because `JournalSlice::CallOnChange` sets it
+  from the wall clock, later than the transaction's clock.
+- Replay pins the transaction clock (`DbContext::time_now_ms`) to that time. Commands then make the
+  same decisions as before, and lazy expiry during replay happens where it could have happened
+  originally. Active expiry runs on the wall clock, so it stays off until replay ends.
+- The base is loaded as of its cut time (`aof-cut-time`, or `cut_time_ms` for a dump adopted at
+  bootstrap, recorded as the load time).
+- Handles relative TTLs without changing what is journaled.
+
+| | Option 1: no expiry during replay | Option 2: logical time |
+|---|---|---|
+| Log format | No change | A time per record |
+| Code | A replay mode in the paths that delete on a past deadline (`SET`, the expire family, field expiry, the loader) | A clock hook in `JournalExecutor`, and every time-dependent path reading the transaction clock |
+| Relies on | Every journaled deadline being absolute | Nothing extra |
+| Precedent | Valkey's AOF load | None |
+
+**Open edge cases.**
+- Which option to choose.
+- Option 1: audit that every time-based decision is journaled as its outcome, and that every
+  journaled deadline is absolute (starting with `FIELDEXPIRE`).
+- Option 2: how the time is encoded (see [On-Disk Format](#on-disk-format)); an audit of command
+  paths that call `GetCurrentTimeMs()` directly (hash field expiry, `GETEX`, streams, scripts);
+  `RdbLoader` deciding expiry against a given time instead of the wall clock.
+- Both: whether a snapshot serializes a key whose deadline passes between the cut and its
+  serialization.
 
 ### Global-command barrier
 
@@ -690,13 +749,6 @@ differently.
 - **Global commands other than FLUSH completed by an exhausted chain.** For example,
   `FT.DROPINDEX ... DD` deletes documents on that shard. The "prefix except global commands"
   guarantee, and the forced checkpoint, must be defined for every barriered command.
-- **Loading as of the cut time.** `RdbLoader` drops expired keys, hash fields and set members
-  against the wall clock. It needs a pinned time instead. Also check whether a snapshot
-  serializes a key whose deadline passes between the cut and its serialization.
-- **Clock coverage.** Every time-dependent path in command execution must read the transaction
-  clock, not `GetCurrentTimeMs()` directly. That needs an audit (hash field expiry, `GETEX`,
-  streams, scripts), plus a hook for `JournalExecutor` to set the time of the transaction that
-  `DispatchCommand` creates.
 - **An adopted dump replaced during bootstrap.** An external tool could replace the dump between
   the load and the manifest commit, and the manifest would then reference a file that was never
   loaded. Decide whether the manifest also records the file's identity (inode, size, a checksum).
@@ -884,7 +936,7 @@ and `CONFIG SET appendonly`.
 | Async fsync, `rw_flags`, fallback `sync_file_range` / `fadvise` (option A) | `helio/util/fibers/uring_file.{h,cc}` | MVP |
 | Shared apply logic for replica and replay | `src/server/journal/journal_applier.{h,cc}` (new, from `replica.cc`) | MVP |
 | End-of-log-aware barrier for all global commands; MOVE bypasses it (`IsGlobalCmd` only knows FLUSH\* today) | [tx_executor.cc](../src/server/journal/tx_executor.cc) | MVP |
-| Persist each record's logical time; pin the transaction clock during replay | `src/server/journal/aof.{h,cc}`, [executor.cc](../src/server/journal/executor.cc), [transaction.cc](../src/server/transaction.cc) | MVP |
+| Time-based commands in replay: a no-expiry replay mode, or persisted logical time and a pinned clock | [string_family.cc](../src/server/string_family.cc), [generic_family.cc](../src/server/generic_family.cc), [executor.cc](../src/server/journal/executor.cc), [transaction.cc](../src/server/transaction.cc) | MVP |
 | Seal the open block at the top of `Heartbeat()` | [engine_shard.cc](../src/server/engine_shard.cc) | MVP |
 | Always-on journal user; seal and rotate at the cut | [journal_slice.cc](../src/server/journal/journal_slice.cc), [journal.cc](../src/server/journal/journal.cc) | MVP |
 | Cut capture, fsync, `aof-cut-lsn` aux field, manifest commit | [snapshot.cc](../src/server/snapshot.cc), [save_stages_controller.cc](../src/server/detail/save_stages_controller.cc) | MVP |
@@ -946,6 +998,8 @@ with pipelining.
 
 ## Open Questions
 
+- Time-based commands in replay: no expiry during replay, or logical time (see
+  [Time-based commands](#time-based-commands))?
 - Defaults for `--aof_max_buffered_bytes` and `kAofBlockBytes`.
 - Should `ThrottleIfNeeded` ever drop AOF instead of stalling the shard?
 - Group latency coupling under `always` (see [Atomic groups](#atomic-groups)).
