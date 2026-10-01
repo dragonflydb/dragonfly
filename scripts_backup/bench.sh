@@ -10,7 +10,7 @@ USER_COMMAND_ENV_NAMES=(
     SERVER_IP CLIENT_IP SSH_USER SERVER_TYPE VALKEY_IO_THREADS
     SERVER_PIN SERVER_CPUS CLIENT_CPUS SERVER_MAXMEMORY SERVER_METRICS_PORT
     PIPELINE CMD RATIO PREFILL_KEYS PREFILL_PIPELINE DATA_SIZE KEY_MAXIMUM
-    EXTRA_SERVER_FLAGS MEMTIER_ARGS REDIS_CLI_ARGS NUM_RUNS BENCH_DURATION
+    EXTRA_SERVER_FLAGS MEMTIER_ARGS REDIS_CLI_ARGS NUM_RUNS BENCH_DURATION MULTI_CONN_CONNECTIONS
     CLIENT_TIMEOUT CLIENT_DELAY_US SERVER_LOG_DIR
     TRACY_CAPTURE TRACY_CAPTURE_FILE TRACY_CAPTURE_SECONDS PUBSUB_MESSAGES
 )
@@ -98,7 +98,8 @@ Batch mode (--batch <file> | -b <file>):
 
   Still honored from the environment with --batch (they are global, not per-run):
     SERVER_IP, CLIENT_IP, SSH_USER  - cross-machine topology, applied to every run.
-        PIPELINE, DATA_SIZE, BENCH_DURATION - common matrix dimensions, inherited by every run.
+        PIPELINE, DATA_SIZE, BENCH_DURATION, MULTI_CONN_CONNECTIONS - common matrix dimensions,
+                          inherited by every run.
     BENCH_LOG_DIR                       - directory that collects all logs (see below).
     METRICS_DIR                         - directory for /metrics snapshots (defaults to
                                           BENCH_LOG_DIR/metrics; set METRICS_DIR=off to disable).
@@ -237,7 +238,8 @@ Environment variables (for cross-machine benchmarking):
                 Example: SERVER_TYPE=valkey ./bench_v2.sh valkey-server multi_conn 3 vk_1t
 
 Modes:
-  multi_conn     - 50 clients, heavy saturation (command set by CMD env var).
+    multi_conn     - 2 memtier threads with MULTI_CONN_CONNECTIONS clients each (50 total by default),
+                                     heavy saturation (command set by CMD env var).
   single_conn    - 1 client, isolates per-connection behavior (command set by CMD).
   pubsub         - 10 subscribers, PUBLISH fan-out.
   conn           - multi_conn + single_conn (no pubsub).
@@ -253,7 +255,7 @@ Examples:
   # Run only pipeline=10 cross-machine, V2 only:
   PIPELINE=10 SERVER_IP=172.31.30.209 CLIENT_IP=172.31.20.3 ./bench_v2.sh ./build-opt/dragonfly multi_conn 1 mytag v2
 
-  # Benchmark ZADD (sync command path) with 50 connections:
+    # Benchmark ZADD (sync command path) with the default 50 connections:
   CMD=zadd ./bench_v2.sh ./build-opt/dragonfly multi_conn 1 mytag both
 
   # Run pipeline=10 and pipeline=100 only:
@@ -740,6 +742,7 @@ CLIENT_DELAY_US=${CLIENT_DELAY_US:-0}
 PIPELINE_FILTER=${PIPELINE:-""}
 CMD=${CMD:-"set"}
 BENCH_DURATION=${BENCH_DURATION:-15}
+MULTI_CONN_CONNECTIONS=${MULTI_CONN_CONNECTIONS:-25}
 RATIO=${RATIO:-"1:0"}
 PREFILL_KEYS=${PREFILL_KEYS:-10000}
 PREFILL_PIPELINE=${PREFILL_PIPELINE:-100}
@@ -764,6 +767,10 @@ if [[ "$TRACY_CAPTURE" == "1" ]]; then
         echo "[!] Error: TRACY_CAPTURE_SECONDS must be a positive whole number of seconds."
         exit 1
     fi
+fi
+if ! [[ "$MULTI_CONN_CONNECTIONS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "[!] Error: MULTI_CONN_CONNECTIONS must be a positive integer. Got: '$MULTI_CONN_CONNECTIONS'"
+    exit 1
 fi
 
 # Value size in bytes. For single_conn/multi_conn this is memtier's -d (the SET
@@ -2240,7 +2247,7 @@ print_final_report() {
 }
 
 # ---------- MODE: multi_conn ----------
-# 50 concurrent clients saturate the server. Regression-guard for peak RPS.
+# Two memtier threads with MULTI_CONN_CONNECTIONS clients each saturate the server.
 # Respects CMD env var: "set" (default, 2KB value) or "zadd" (sync command path).
 # For non-dragonfly SERVER_TYPE: runs once with the server type as label (ver ignored).
 run_multi_conn() {
@@ -2251,10 +2258,10 @@ run_multi_conn() {
     if [[ "$SERVER_TYPE" != "dragonfly" ]]; then
         _metrics_verified=0
         if [[ "$CMD" == "zadd" ]]; then
-            run_bench_custom false "$SERVER_TYPE" 2 25 "multi_conn_zadd" "${pipelines[@]}" \
+            run_bench_custom false "$SERVER_TYPE" 2 "$MULTI_CONN_CONNECTIONS" "multi_conn_zadd" "${pipelines[@]}" \
                 -- --command="ZADD __key__ 1 __data__" --command-key-pattern=R -d 32
         else
-            run_bench false "$SERVER_TYPE" 2 25 $DATA_SIZE "multi_conn" "${pipelines[@]}"
+            run_bench false "$SERVER_TYPE" 2 "$MULTI_CONN_CONNECTIONS" $DATA_SIZE "multi_conn" "${pipelines[@]}"
         fi
         return
     fi
@@ -2262,22 +2269,22 @@ run_multi_conn() {
     if [[ "$CMD" == "zadd" ]]; then
         if [[ "$VER" != "v2" ]]; then
             _metrics_verified=0
-            run_bench_custom false "V1" 2 25 "multi_conn_zadd" "${pipelines[@]}" \
+            run_bench_custom false "V1" 2 "$MULTI_CONN_CONNECTIONS" "multi_conn_zadd" "${pipelines[@]}" \
                 -- --command="ZADD __key__ 1 __data__" --command-key-pattern=R -d 32
         fi
         if [[ "$VER" != "v1" ]]; then
             _metrics_verified=0
-            run_bench_custom true  "V2" 2 25 "multi_conn_zadd" "${pipelines[@]}" \
+            run_bench_custom true  "V2" 2 "$MULTI_CONN_CONNECTIONS" "multi_conn_zadd" "${pipelines[@]}" \
                 -- --command="ZADD __key__ 1 __data__" --command-key-pattern=R -d 32
         fi
     else
         if [[ "$VER" != "v2" ]]; then
             _metrics_verified=0
-            run_bench false "V1" 2 25 $DATA_SIZE "multi_conn" "${pipelines[@]}"
+            run_bench false "V1" 2 "$MULTI_CONN_CONNECTIONS" $DATA_SIZE "multi_conn" "${pipelines[@]}"
         fi
         if [[ "$VER" != "v1" ]]; then
             _metrics_verified=0
-            run_bench true  "V2" 2 25 $DATA_SIZE "multi_conn" "${pipelines[@]}"
+            run_bench true  "V2" 2 "$MULTI_CONN_CONNECTIONS" $DATA_SIZE "multi_conn" "${pipelines[@]}"
         fi
     fi
 }
