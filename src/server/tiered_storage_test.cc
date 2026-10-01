@@ -83,7 +83,32 @@ class TieredStorageTest : public BaseFamilyTest {
   }
 
   void UpdateFromFlags() {
-    pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+    shard_set->RunBriefInParallel(
+        [](EngineShard* shard) { shard->tiered_storage()->UpdateFromFlags(); });
+  }
+
+  // src=[1,2] with offloaded BY weights (w_2 < w_1) and GET targets; uploads are disabled so every
+  // later lookup reads from disk. Returns the GET values.
+  pair<string, string> OffloadSortOperands() {
+    SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+    UpdateFromFlags();
+    // The budget turns negative once the heartbeat's CacheStats() has run on every shard.
+    ExpectConditionWithinTimeout([] {
+      vector<int64_t> budgets(shard_set->size());
+      shard_set->RunBriefInParallel([&](EngineShard* shard) {
+        budgets[shard->shard_id()] = shard->tiered_storage()->UploadBudget();
+      });
+      return *std::ranges::max_element(budgets) < 0;
+    });
+
+    string o1 = BuildString(3000, 'a'), o2 = BuildString(3000, 'b');
+    Run({"RPUSH", "src", "1", "2"});
+    Run({"SET", "w_1", absl::StrCat("2.5", string(2997, '0'))});
+    Run({"SET", "w_2", absl::StrCat("1.5", string(2997, '0'))});
+    Run({"SET", "o_1", o1});
+    Run({"SET", "o_2", o2});
+    ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 4; });
+    return {o1, o2};
   }
 
   // A single huge PFADD stays sparse and too small to offload; batch to force dense.
@@ -650,6 +675,44 @@ TEST_F(PureDiskTSTest, SortStoreOverOffloadedDestination) {
 
   Run({"FLUSHALL"});
   EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 0u);
+}
+
+// BY weights and GET targets are read through OpFetchStringValue, which must materialize offloaded
+// strings instead of tripping CHECK(!IsExternal()).
+TEST_F(PureDiskTSTest, SortByGetOffloaded) {
+  auto [o1, o2] = OffloadSortOperands();
+
+  EXPECT_THAT(Run({"SORT", "src", "BY", "w_*"}), RespElementsAre("2", "1"));
+  EXPECT_THAT(Run({"SORT_RO", "src", "BY", "w_*", "GET", "o_*"}), RespElementsAre(o2, o1));
+  EXPECT_THAT(Run({"SORT", "src", "BY", "nosort", "GET", "#", "GET", "o_*"}),
+              RespElementsAre("1", o1, "2", o2));
+  EXPECT_THAT(Run({"SORT", "src", "ALPHA", "GET", "o_1"}), RespElementsAre(o1, o1));
+  EXPECT_THAT(Run({"SORT", "src", "BY", "w_*", "DESC", "GET", "o_*", "STORE", "dst"}), IntArg(2));
+  EXPECT_THAT(Run({"LRANGE", "dst", "0", "-1"}), RespElementsAre(o1, o2));
+  EXPECT_THAT(Run({"SORT", "src", "BY", "nosort", "GET", "o_*", "STORE", "dst"}), IntArg(2));
+  EXPECT_THAT(Run({"LRANGE", "dst", "0", "-1"}), RespElementsAre(o1, o2));
+
+  // The weight is parsed only after it was read back.
+  Run({"SET", "w_1", BuildString(3000, 'x')});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 4; });
+  EXPECT_THAT(Run({"SORT", "src", "BY", "w_*"}), ErrArg("can't be converted into double"));
+
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 4u);  // nothing was uploaded
+}
+
+// The lookups block inside RunBlockingInParallel fibers while the operands live on other shards;
+// a pipeline (the single-key SORTs are squashed, the two-key STORE runs standalone) must neither
+// hang nor crash.
+TEST_F(PureDiskTSMTTest, SortByGetOffloadedSquashed) {
+  auto [o1, o2] = OffloadSortOperands();
+
+  RunMany({{"SORT", "src", "BY", "w_*", "GET", "o_*"},
+           {"SORT_RO", "src", "BY", "w_*"},
+           {"SORT", "src", "BY", "nosort", "GET", "o_*", "STORE", "dst"}});
+
+  EXPECT_TRUE(GetMetrics().facade_stats.reply_stats.err_count.empty());  // RunMany drops replies
+  EXPECT_THAT(Run({"LRANGE", "dst", "0", "-1"}), RespElementsAre(o1, o2));
+  EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 4u);
 }
 
 // The remaining in-place overwrite paths reach the value through DbSlice::AddOrFind and retype it,

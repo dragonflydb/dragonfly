@@ -80,20 +80,6 @@ bool ConvertToDenseIfNeeded(string* hll) {
   return hll_validity == HLL_VALID_DENSE;
 }
 
-// Reads an HLL value, materializing it from tiered storage if offloaded.
-OpResult<string> ReadHll(const OpArgs& op_args, string_view key, const PrimeValue& pv) {
-  if (pv.IsExternal()) {
-    auto res =
-        ReadTieredString(op_args.db_cntx.db_index, key, pv, op_args.shard->tiered_storage()).Get();
-    if (!res)
-      return OpStatus::IO_ERROR;
-    return std::move(res).value();
-  }
-  string hll;
-  pv.GetString(&hll);
-  return hll;
-}
-
 OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values) {
   auto& db_slice = op_args.GetDbSlice();
 
@@ -106,7 +92,8 @@ OpResult<int> AddToHll(const OpArgs& op_args, string_view key, CmdArgList values
     hll.resize(getSparseHllInitSize());
     initSparseHll(StringToHllPtr(hll));
   } else {
-    auto val = ReadHll(op_args, key, res.it->second);
+    auto val = ReadStringValue(op_args.db_cntx.db_index, key, res.it->second,
+                               op_args.shard->tiered_storage());
     res.post_updater.ResyncBaseline();  // the read may have uploaded the value
     RETURN_ON_BAD_STATUS(val);
     hll = std::move(val).value();
@@ -173,7 +160,8 @@ OpResult<int64_t> CountHllsSingle(const OpArgs& op_args, string_view key) {
 
   auto it = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (it.ok()) {
-    auto hll_res = ReadHll(op_args, key, it.value()->second);
+    auto hll_res = ReadStringValue(op_args.db_cntx.db_index, key, it.value()->second,
+                                   op_args.shard->tiered_storage());
     RETURN_ON_BAD_STATUS(hll_res);
     string hll = std::move(hll_res).value();
 
@@ -206,7 +194,8 @@ OpResult<vector<string>> ReadValues(const OpArgs& op_args, const ShardArgs& keys
     for (string_view key : keys) {
       auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
       if (it.ok()) {
-        auto hll_res = ReadHll(op_args, key, it.value()->second);
+        auto hll_res = ReadStringValue(op_args.db_cntx.db_index, key, it.value()->second,
+                                       op_args.shard->tiered_storage());
         RETURN_ON_BAD_STATUS(hll_res);
         string hll = std::move(hll_res).value();
         if (!ConvertToDenseIfNeeded(&hll)) {

@@ -279,14 +279,11 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
 
   auto& res = *it_res;
   if (res.it->second.IsExternal()) {
-    auto tier = ReadTieredString(op_args.db_cntx.db_index, key, res.it->second,
-                                 op_args.shard->tiered_storage())
-                    .Get();
+    auto slice = ReadStringValue(op_args.db_cntx.db_index, key, res.it->second,
+                                 op_args.shard->tiered_storage());
     res.post_updater.ResyncBaseline();  // the read may have uploaded the value
-    if (!tier)
-      return OpStatus::IO_ERROR;
-    string slice = std::move(tier).value();
-    string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
+    RETURN_ON_BAD_STATUS(slice);
+    string new_val = prepend ? absl::StrCat(val, *slice) : absl::StrCat(*slice, val);
     res.post_updater.ReduceHeapUsage();
     if (res.it->second.IsExternal()) {
       op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
@@ -320,19 +317,12 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   const bool was_external = add_res.it->second.IsExternal();
   string tmp;
-  string_view slice;
-  if (was_external) {
-    auto res = ReadTieredString(op_args.db_cntx.db_index, key, add_res.it->second,
-                                op_args.shard->tiered_storage())
-                   .Get();
+  auto cur = ReadStringSlice(op_args.db_cntx.db_index, key, add_res.it->second,
+                             op_args.shard->tiered_storage(), &tmp);
+  if (was_external)
     add_res.post_updater.ResyncBaseline();  // the read may have uploaded the value
-    if (!res)
-      return OpStatus::IO_ERROR;
-    tmp = std::move(res).value();
-    slice = tmp;
-  } else {
-    slice = add_res.it->second.GetSlice(&tmp);
-  }
+  RETURN_ON_BAD_STATUS(cur);
+  string_view slice = *cur;
 
   double base = 0;
   if (!ParseDouble(slice, &base)) {
@@ -1345,24 +1335,11 @@ void CmdDigest(CmdArgParser parser, CommandContext* cmd_cntx) {
       return it_res.status();
     }
 
-    // Read string value (handles tiered storage if needed)
-    StringResult str_result = ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
-
-    // Handle both immediate value and tiered storage future
-    string value;
-    if (holds_alternative<string>(str_result)) {
-      value = std::move(get<string>(str_result));
-    } else {
-      auto& future = get<TieredStorage::TResult<string>>(str_result);
-      io::Result<string> io_res = future.Get();
-      if (!io_res) {
-        return OpStatus::IO_ERROR;
-      }
-      value = std::move(*io_res);
-    }
+    auto value = ReadStringValue(tx->GetDbIndex(), key, (*it_res)->second, es->tiered_storage());
+    RETURN_ON_BAD_STATUS(value);
 
     // Compute XXH3 hash and return as 16-char hex string
-    return XXH3_Digest(value);
+    return XXH3_Digest(*value);
   };
 
   OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);

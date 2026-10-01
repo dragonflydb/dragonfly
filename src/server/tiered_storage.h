@@ -12,6 +12,7 @@
 
 #include "core/dash_internal.h"
 #include "core/tiering_types.h"
+#include "facade/op_status.h"
 #include "io/io.h"  // for io::Result (TODO: replace with nonstd/expected)
 #include "server/stats.h"
 #include "server/table.h"
@@ -417,5 +418,32 @@ inline bool StashListNode(DbIndex dbid, QList* ql, QList::Node* node, TieredStor
 }
 
 #endif  // WITH_TIERING
+
+// Materializes a string value, reading it back from tiered storage if it was offloaded: the
+// CompactObj accessors CHECK(!IsExternal()). Blocks the calling fiber while the read is in flight.
+inline facade::OpResult<std::string> ReadStringValue(DbIndex dbid, std::string_view key,
+                                                     const PrimeValue& pv, TieredStorage* ts) {
+  if (!pv.IsExternal())
+    return pv.ToString();
+
+  auto res = ReadTieredString(dbid, key, pv, ts).Get();
+  if (!res)
+    return facade::OpStatus::IO_ERROR;
+  return std::move(res).value();
+}
+
+// Like ReadStringValue, but borrows an in-memory value; `scratch` backs the view otherwise.
+inline facade::OpResult<std::string_view> ReadStringSlice(DbIndex dbid, std::string_view key,
+                                                          const PrimeValue& pv, TieredStorage* ts,
+                                                          std::string* scratch) {
+  if (!pv.IsExternal())
+    return pv.GetSlice(scratch);
+
+  auto res = ReadStringValue(dbid, key, pv, ts);
+  if (!res)
+    return res.status();
+  *scratch = std::move(*res);
+  return std::string_view{*scratch};
+}
 
 }  // namespace dfly
