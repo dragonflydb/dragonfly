@@ -11,7 +11,6 @@
 #include <variant>
 
 #include "facade/facade_types.h"
-#include "facade/redis_parser.h"
 #include "facade/resp_parser.h"
 #include "io/io_buf.h"
 #include "server/execution_state.h"
@@ -83,49 +82,33 @@ class ProtocolClient {
 
   void DefaultErrorHandler(const GenericError& err);
 
-  struct ReadRespRes {
-    uint32_t total_read;
-    uint32_t left_in_buffer;
-  };
-
   struct ReadCommandRes {
     uint32_t total_read = 0;     // wire bytes this command occupied
     bool has_more_data = false;  // parser still holds buffered input
   };
 
-  // TODO: Remove ReadRespReply, parser_, resp_args_, and their RespExpr-based helpers once all
-  // ProtocolClient response paths have migrated to RESPParser.
-  // This function uses parser_ and resp_args_ in order to consume a single response
-  // from the sock_. The output will reside in resp_args_.
-  // For error reporting purposes, the parsed command would be in last_resp_ if copy_msg is true.
-  // If io_buf is not given, a internal temporary buffer will be used.
-  // It is the responsibility of the caller to call buffer->ConsumeInput(rv.left_in_buffer) when it
-  // is done with the result of the call; Calling ConsumeInput may invalidate the data in the result
-  // if the buffer relocates.
-  io::Result<ReadRespRes> ReadRespReply(base::IoBuf* buffer = nullptr, bool copy_msg = true);
-
   // Reads one flat RESP array into dest. buffer is only a staging area - the parser copies
   // everything it is fed, so this drains buffer completely and the caller must not consume it.
   io::Result<ReadCommandRes> ReadRespCommand(base::IoBuf* buffer, cmn::BackedArguments* dest);
 
-  io::Result<facade::RESPObj> TakeRespReply(uint32_t timeout, base::IoBuf* buffer = nullptr,
-                                            bool copy_msg = true);
+  // Reads one reply. Bytes received after it stay buffered in the parser (see UnparsedInput) and
+  // are returned by the next call. The bytes read while waiting are saved in last_resp_ for
+  // diagnostics.
+  io::Result<facade::RESPObj> TakeRespReply(uint32_t timeout);
+
+  // Bytes received after the last reply that the parser has not consumed yet, e.g. the start of a
+  // binary stream that follows it. Valid until the next read or reset.
+  std::string_view UnparsedInput() const {
+    return resp_parser_.BufferedInput();
+  }
 
   std::error_code ReadLine(base::IoBuf* io_buf, std::string_view* line);
 
-  // Check if reps_args contains a simple reply.
-  bool CheckRespIsSimpleReply(std::string_view reply) const;
-
-  // Check if resp_args contains a simple error
-  bool CheckRespSimpleError(std::string_view error) const;
-
-  // Check resp_args contains the following types at front.
-  bool CheckRespFirstTypes(std::initializer_list<facade::RespExpr::Type> types) const;
+  // Returns the payload of a simple (+) or bulk ($) string reply, nullopt for any other reply.
+  static std::optional<std::string_view> ReplyString(const facade::RESPObj& reply);
 
   // Send command, update last_io_time, return error.
   std::error_code SendCommand(std::string_view command);
-  // Send command, read response into resp_args_.
-  std::error_code SendCommandAndReadResponse(std::string_view command);
   // Send command and return an owning reply parsed with RESPParser.
   io::Result<facade::RESPObj> SendCommandAndTakeReply(std::string_view command);
 
@@ -133,16 +116,9 @@ class ProtocolClient {
     return server_context_;
   }
 
-  void ResetParser();
   // Start reading replies with RESPParser, discarding any previous parser state and input.
   void ResetReplyParser();
   void ResetCommandParser();
-
-  // TODO can return invalid results if response answer was bigger than provided buffer into
-  // ReadRespReply
-  auto& LastResponseArgs() {
-    return resp_args_;
-  }
 
   auto* Proactor() const {
     return sock_->proactor();
@@ -168,8 +144,6 @@ class ProtocolClient {
 
   ServerContext server_context_;
 
-  std::unique_ptr<facade::RedisParser> parser_;
-  facade::RespVec resp_args_;
   base::IoBuf resp_buf_;
 
   facade::RESPParser resp_parser_;
