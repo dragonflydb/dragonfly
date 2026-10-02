@@ -1742,6 +1742,13 @@ TEST_F(GenericFamilyTest, Info) {
       },
       500ms);
   EXPECT_TRUE(cond);
+  cond = WaitUntilCondition(
+      [&]() {
+        resp = Run({"info", "persistence"});
+        return resp.GetString().find("rdb_bgsave_in_progress:0") != string::npos;
+      },
+      500ms);
+  EXPECT_TRUE(cond) << resp.GetString();
 
   EXPECT_EQ(Run({"set", "k3", "3"}), "OK");
   resp = Run({"info", "persistence"});
