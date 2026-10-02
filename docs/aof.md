@@ -282,13 +282,14 @@ requires a local `--dir`; with a remote one (`s3://...`) it refuses to start. A 
 
 ### Segment header
 
-Written and synced when the segment is prepared as a spare, before any block:
-- magic `DFAOF1` (includes format version)
-- `shard_id`, `shard_count`, segment `seq`
-- `segment_uid`: a random 64-bit id per prepared file. It seeds the block CRCs, so a block
+Written and synced when the segment is prepared as a spare, before any block. It is 64 bytes,
+fixed-width little-endian:
+- magic `DFAOF1` (6 bytes, includes format version)
+- `shard_id` (u32), `shard_count` (u32), segment `seq` (u64)
+- `segment_uid` (u64): a random id per prepared file. It seeds the block CRCs, so a block
   validates only in the segment it was written to.
-- `reserved` (64 bits, always 0), for a later field such as a per-run id
-- header CRC32C
+- `reserved` (30 bytes, always 0), for later fields such as a per-run id
+- header CRC32C (u32) over the first 60 bytes
 
 The start LSN is not in the header, because it is unknown when the spare is prepared. The first
 block's `first_lsn` gives it.
@@ -296,20 +297,36 @@ block's `first_lsn` gives it.
 ### Blocks
 
 ```
-[u64 len][u32 crc32c][u64 first_lsn][u32 n_records][u8 flags][payload]
+[u64 total_block_bytes][u32 crc32c][u64 first_lsn][u32 n_records][u8 flags][payload]
 ```
 
-- The header is 25 bytes, fixed-width little-endian. `len` covers the whole block, header
-  included.
-- `payload` is the concatenated `JournalItem::data` of the block's records. Each record is
-  self-contained (a `SELECT` prefix where needed, then its opcode; a PING is the opcode alone),
-  so replay decodes records one by one and counts LSNs from `first_lsn`.
+- The header is 25 bytes, fixed-width little-endian. `total_block_bytes` covers the whole
+  block, header included. The payload is capped at 8KB (`kAofBlockBytes`).
+- `payload` is the journal records' bytes (`JournalItem::data`) back to back, with no
+  per-record framing. Records are self-delimiting (a `SELECT` prefix where needed, then its
+  opcode; a PING is the opcode alone, and every field is length-prefixed).
+- A record can span blocks: when it does not fit, the block is filled, sealed, and the record
+  continues in the next one, so a huge record spans many blocks. Replay therefore joins the
+  payloads of consecutive blocks and decodes them as one stream, like a socket.
+- `first_lsn` is the LSN of the first record with any bytes in the block, a continued one
+  included. `n_records` counts the records that end in the block; a middle block of a huge
+  record has `n_records = 0`. For consecutive blocks, `next.first_lsn == prev.first_lsn +
+  prev.n_records` always holds.
 - With the logical-time option for [Time-based commands](#time-based-commands), each record
   also carries its original time. How the block encodes it is an open edge case below.
-- `crc32c` covers `segment_uid`, then `len`, `first_lsn`, `n_records`, `flags` and `payload`.
-- `flags` is 0 in the MVP. Atomic groups use one bit later.
-- A block is valid only if `len >= 25`, it fits in the rest of the file, its CRC matches, and
-  `first_lsn` is the expected next LSN. A zero `len` (a hole or unwritten space) is invalid.
+- `crc32c` covers, in this order, `segment_uid`, `payload`, then `total_block_bytes`, `first_lsn`,
+  `n_records` and `flags`, each integer in its little-endian on-disk encoding. The CRC field
+  itself is not covered. The payload comes before the header fields so the CRC can be computed
+  incrementally: `segment_uid` seeds it when the block opens, each appended record extends it,
+  and the fields known only when the block is sealed are fed last. The on-disk layout is
+  unchanged; only the order of the CRC input differs from the layout.
+- `flags`: bit 0 (starts with continuation) means the payload begins with the rest of a record
+  from the previous block; bit 1 (ends with partial) means the payload ends with a record that
+  continues in the next block. A record that exactly fills a block is not partial. Atomic groups
+  use another bit later.
+- A block is valid only if `total_block_bytes >= 25`, it fits in the rest of the file, its CRC
+  matches, and `first_lsn` is the expected next LSN (by the rule above). A zero
+  `total_block_bytes` (a hole or unwritten space) is invalid.
   Replay checks the bounds before reading or allocating.
 
 ### Manifest
@@ -342,9 +359,8 @@ is never paired with the wrong cuts:
   plus a varint delta per record (which requires per-record framing in the payload), or a time
   field in the journal record itself (which also changes the replication format).
 - Very large records. A single journal record can be gigabytes (`max_bulk_len` bounds each
-  argument, not the record). A candidate design, not needed for the MVP: let a record span
-  blocks, and batch many blocks into one write, so a 1GB record does not cost about 125k ring
-  submissions. Alternatives: replay streams a block, or the AOF caps record size.
+  argument, not the record). Records already span blocks; still open is batching many blocks
+  into one write, so a 1GB record does not cost about 125k ring submissions.
 - Format versioning and upgrade rules, for both segments and the manifest.
 - The exact manifest grammar.
 - The block size (8KB `kAofBlockBytes`) needs benchmarking.
@@ -880,7 +896,8 @@ fall between them (`DisableFlushGuard` covers only expiry and eviction).
 - Blocks sealed while a group is open carry a `GROUP_CONT` flag. Sealing continues inside a group,
   so a large script neither pins memory nor deadlocks throttling.
 - Closing the guard seals the open block without the flag. If that block is empty, it writes a
-  header-only group-end block (`len == 25`, which replay does not confuse with a hole).
+  header-only group-end block (`total_block_bytes == 25`, which replay does not confuse with a
+  hole).
 - Replay applies a group only after it sees its closing block, and otherwise truncates the chain
   at the group's first block. For large groups, it validates forward to the closing block, then
   seeks back and applies block by block.
@@ -1002,7 +1019,8 @@ and `CONFIG SET appendonly`.
 ## Testing
 
 **MVP unit tests** (`aof_test.cc`, next to `journal_test.cc`):
-- Block format: CRC byte range, bounds checks on `len`, no large allocation from a torn `len`.
+- Block format: CRC byte range, bounds checks on `total_block_bytes`, no large allocation from a
+  torn `total_block_bytes`.
 - Writer: out-of-order completions advance `written_lsn` only over the contiguous prefix; small
   records share a block until the size limit or heartbeat; the heartbeat seals even when it
   skips its other work; queued buffers count against backpressure.
