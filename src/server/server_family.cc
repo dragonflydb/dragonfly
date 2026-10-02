@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -1322,10 +1323,12 @@ void ServerFamily::LoadFromSnapshot() {
       auto future = Load(load_path, LoadExistingKeys::kFail);
       load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([future]() mutable {
         // Wait for load to finish in a dedicated fiber.
-        // Failure to load on start causes Dragonfly to exit with an error code.
         if (!future.has_value() || future->Get()) {
-          // Error was already printed to log at this point.
-          exit(1);
+          // exit() runs destructors and atexit handlers without stopping other server fibers.
+          // On fatal startup errors, use _Exit() to skip that teardown, flushing logs first.
+          // Normal shutdown must still drain and save data.
+          base::FlushLogs();
+          std::_Exit(EXIT_FAILURE);
         }
       });
     }
@@ -1337,7 +1340,8 @@ void ServerFamily::LoadFromSnapshot() {
       loading_stats_.failed_restore_count++;
       loading_stats_mu_.unlock();
       LOG(ERROR) << "Failed to load snapshot with error: " << load_path_result.error().Format();
-      exit(1);
+      base::FlushLogs();
+      std::_Exit(EXIT_FAILURE);
     }
   }
 }

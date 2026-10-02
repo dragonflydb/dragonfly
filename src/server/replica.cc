@@ -291,6 +291,15 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
         ec = InitiatePSync();
 
       if (ec) {
+        if (ec == RdbError(rdb::errc::bad_version) || ec == RdbError(rdb::errc::invalid_rdb_type)) {
+          LOG(ERROR) << "Replication stopped: " << ec.message() << " from "
+                     << server().Description()
+                     << ". Use supported RDB encodings or upgrade Dragonfly, then run REPLICAOF "
+                        "again.";
+          state_mask_ = 0;
+          exec_st_.ReportError(ec);
+          break;
+        }
         LOG(WARNING) << "Error syncing with " << server().Description()
                      << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
                      << ", socket state: " + SockInfo();
@@ -506,11 +515,7 @@ error_code Replica::InitiatePSync() {
 
     absl::Cleanup cleanup = [this]() { service_.RemoveLoadingState(); };
 
-    if (slot_range_.has_value()) {
-      JournalExecutor{&service_}.FlushSlots(slot_range_.value());
-    } else {
-      JournalExecutor{&service_}.FlushAll();
-    }
+    FlushData();
 
     RdbLoadContext load_context;
     RdbLoader loader(NULL, &load_context);
@@ -518,8 +523,11 @@ error_code Replica::InitiatePSync() {
     loader.set_source_limit(snapshot_size);
     // TODO: to allow registering callbacks within loader to send '\n' pings back to master.
     // Also to allow updating last_io_time_.
-    error_code ec = loader.Load(&ps);
-    RETURN_ON_ERR(ec);
+    if (auto ec = loader.Load(&ps); ec) {
+      // Load has drained all shard writes. Discard the incomplete snapshot before leaving LOADING.
+      FlushData();
+      return ec;
+    }
     VLOG(1) << "full sync completed";
 
     if (token) {
@@ -610,6 +618,9 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     // We do the following operations regardless of outcome.
     JoinDflyFlows();
     if (sync_type == "full") {
+      // All loaders have stopped, so no partial data can reappear after this flush.
+      if (!passed_full_sync_)
+        FlushData();
       service_.RemoveLoadingState();
     }
     state_mask_ &= ~R_SYNCING;
@@ -674,11 +685,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       DVLOG(1) << "Calling Flush on all slots " << this;
 
       passed_full_sync_ = false;
-      if (slot_range_.has_value()) {
-        JournalExecutor{&service_}.FlushSlots(slot_range_.value());
-      } else {
-        JournalExecutor{&service_}.FlushAll();
-      }
+      FlushData();
       DVLOG(1) << "Flush on all slots ended " << this;
     } else if (num_full_flows == 0) {
       sync_type = "partial";
@@ -961,6 +968,14 @@ void Replica::SetShardStates(bool replica) {
       journal::ReleaseUser();
     shard->SetReplica(replica);
   });
+}
+
+void Replica::FlushData() {
+  JournalExecutor executor{&service_};
+  if (slot_range_)
+    executor.FlushSlots(*slot_range_);
+  else
+    executor.FlushAll();
 }
 
 error_code Replica::SendNextPhaseRequest(string_view kind) {
