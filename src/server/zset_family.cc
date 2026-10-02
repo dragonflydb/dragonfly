@@ -4,6 +4,8 @@
 
 #include "server/zset_family.h"
 
+#include <climits>
+
 #include <absl/strings/ascii.h>
 
 extern "C" {
@@ -1483,9 +1485,9 @@ OpResult<StringVec> OpScan(const OpArgs& op_args, std::string_view key, uint64_t
     *cursor = 0;
   } else {
     CHECK_EQ(unsigned(OBJ_ENCODING_SKIPLIST), pv.Encoding());
-    uint32_t count = scan_op.limit;
+    size_t count = scan_op.limit;
     detail::SortedMap* sm = (detail::SortedMap*)pv.RObjPtr();
-    long maxiterations = count * 10;
+    long maxiterations = (count > LONG_MAX / 10) ? LONG_MAX : static_cast<long>(count * 10);
     uint64_t cur = *cursor;
 
     auto cb = [&](string_view str, double score) {

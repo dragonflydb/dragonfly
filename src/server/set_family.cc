@@ -4,6 +4,8 @@
 
 #include "server/set_family.h"
 
+#include <climits>
+
 #include "server/family_utils.h"
 
 extern "C" {
@@ -142,8 +144,8 @@ struct StringSetWrapper {
   }
 
   uint64_t Scan(uint64_t curs, const ScanOpts& scan_op, StringVec* res) const {
-    uint32_t count = scan_op.limit;
-    long maxiterations = count * 10;
+    size_t count = scan_op.limit;
+    long maxiterations = (count > LONG_MAX / 10) ? LONG_MAX : static_cast<long>(count * 10);
 
     const auto start_cycles = base::CycleClock::Now();
     // Approximately 100usec
