@@ -1897,21 +1897,20 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
   VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
   bool is_bg_save;
-  {
-    util::fb2::LockGuard lk(save_mu_);
-    // It's possible that another save was initiated and the controller has changed.
-    // We only finalize and reset if it's still the same one we were waiting for.
-    if (save_controller_ == controller) {
-      save_info = save_controller_->Finalize();
-      is_bg_save = save_controller_->IsBgSave();
-      save_controller_.reset();
-    } else {
-      // Another save has started. The old one is already finalized by the new one.
-      // We just need to get the info.
-      return GenericError("Save operation was superseded by another save");
-    }
+  util::fb2::LockGuard lk(save_mu_);
+  // It's possible that another save was initiated and the controller has changed.
+  // We only finalize and reset if it's still the same one we were waiting for.
+  if (save_controller_ == controller) {
+    save_info = save_controller_->Finalize();
+    is_bg_save = save_controller_->IsBgSave();
+    save_controller_.reset();
+  } else {
+    // Another save has started. The old one is already finalized by the new one.
+    // We just need to get the info.
+    return GenericError("Save operation was superseded by another save");
   }
 
+  // Still under save_mu_, so the next save cannot start before its predecessor's state is stored.
   thread_safe_save_info_.Update([&](SaveInfoData* data) {
     if (is_bg_save) {
       data->bgsave_in_progress = false;
