@@ -347,19 +347,11 @@ OpResult<ValueCompressInfo> EstimateCompression(ConnectionContext* cntx, string_
     return info;
   }
 
-  string scratch, materialized;
-  string_view value;
-  if (it->second.IsExternal()) {
-    auto res =
-        ReadTieredString(db_index, key, it->second, EngineShard::tlocal()->tiered_storage()).Get();
-    if (!res) {
-      return OpStatus::IO_ERROR;
-    }
-    materialized = std::move(res).value();
-    value = materialized;
-  } else {
-    value = it->second.GetSlice(&scratch);
-  }
+  string scratch;
+  auto slice =
+      ReadStringSlice(db_index, key, it->second, EngineShard::tlocal()->tiered_storage(), &scratch);
+  RETURN_ON_BAD_STATUS(slice);
+  string_view value = *slice;
 
   info.raw_size = value.size();
   info.compressed_size = info.raw_size;

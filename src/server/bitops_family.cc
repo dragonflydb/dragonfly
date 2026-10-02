@@ -59,12 +59,6 @@ OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, string_view key, 
                                         int64_t end, bool bit_value);
 OpResult<int64_t> FindFirstBitWithValue(const OpArgs& op_args, string_view key, bool value,
                                         int64_t start, int64_t end, bool as_bit);
-string GetString(const PrimeValue& pv);
-// Materializes the full string value, reading it back from tiered storage if it
-// was offloaded. bitops must never touch an external value directly - the
-// CompactObj accessors CHECK(!IsExternal()).
-OpResult<string> ReadStringValue(DbIndex dbid, string_view key, const PrimeValue& pv,
-                                 EngineShard* shard);
 bool SetBitValue(uint32_t offset, bool bit_value, string* entry);
 std::size_t CountBitSetByByteIndices(string_view at, std::size_t start, std::size_t end);
 std::size_t CountBitSet(string_view str, int64_t start, int64_t end, bool bits);
@@ -324,7 +318,8 @@ OpResult<string> ElementAccess::Value() const {
   if (IsNewEntry())
     return OpResult<string>{string{}};
 
-  auto res = ReadStringValue(context_.db_index, key_, updater_.it->second, EngineShard::tlocal());
+  auto res = ReadStringValue(context_.db_index, key_, updater_.it->second,
+                             EngineShard::tlocal()->tiered_storage());
   updater_.post_updater.ResyncBaseline();  // the read may have uploaded the value
   return res;
 }
@@ -488,7 +483,8 @@ OpResult<string> RunBitOpNot(const OpArgs& op_args, string_view key) {
   DbSlice& db_slice = op_args.GetDbSlice();
   auto find_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
   if (find_res) {
-    return ReadStringValue(op_args.db_cntx.db_index, key, find_res.value()->second, op_args.shard);
+    return ReadStringValue(op_args.db_cntx.db_index, key, find_res.value()->second,
+                           op_args.shard->tiered_storage());
   } else {
     return find_res.status();
   }
@@ -511,7 +507,7 @@ OpResult<string> RunBitOpOnShard(string_view op, const OpArgs& op_args, ShardArg
     auto find_res = db_slice.FindReadOnly(op_args.db_cntx, *start, OBJ_STRING);
     if (find_res) {
       auto value = ReadStringValue(op_args.db_cntx.db_index, *start, find_res.value()->second,
-                                   op_args.shard);
+                                   op_args.shard->tiered_storage());
       if (!value)
         return value.status();
       values.emplace_back(std::move(*value));
@@ -1313,23 +1309,6 @@ void SetBit(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
 // ------------------------------------------------------------------------- //
 // This are the "callbacks" that we're using from above
-string GetString(const PrimeValue& pv) {
-  string res;
-  pv.GetString(&res);
-  return res;
-}
-
-OpResult<string> ReadStringValue(DbIndex dbid, string_view key, const PrimeValue& pv,
-                                 EngineShard* shard) {
-  if (!pv.IsExternal())
-    return GetString(pv);
-
-  auto res = ReadTieredString(dbid, key, pv, shard->tiered_storage()).Get();
-  if (!res)
-    return OpStatus::IO_ERROR;
-  return std::move(res).value();
-}
-
 OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_t offset) {
   DbSlice& db_slice = op_args.GetDbSlice();
   auto it_res = db_slice.FindReadOnly(op_args.db_cntx, key, OBJ_STRING);
@@ -1343,7 +1322,8 @@ OpResult<bool> ReadValueBitsetAt(const OpArgs& op_args, string_view key, uint32_
 
   uint8_t byte_value = 0;
   if (pv.IsExternal()) {
-    auto value = ReadStringValue(op_args.db_cntx.db_index, key, pv, op_args.shard);
+    auto value =
+        ReadStringValue(op_args.db_cntx.db_index, key, pv, op_args.shard->tiered_storage());
     if (!value)
       return value.status();
     if (byte_index >= value->size())
@@ -1364,7 +1344,7 @@ OpResult<string> ReadValue(const DbContext& context, string_view key, EngineShar
     return it_res.status();
   }
 
-  return ReadStringValue(context.db_index, key, it_res.value()->second, shard);
+  return ReadStringValue(context.db_index, key, it_res.value()->second, shard->tiered_storage());
 }
 
 OpResult<std::size_t> CountBitsForValue(const OpArgs& op_args, string_view key, int64_t start,
