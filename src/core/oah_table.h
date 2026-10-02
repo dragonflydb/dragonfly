@@ -13,6 +13,7 @@
 #include <cassert>
 #include <functional>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "common/rapidhash.h"
@@ -201,10 +202,11 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     GrowCapacity((sz + kOverloadFactor - 1) / kOverloadFactor);
   }
 
-  // Shrinks toward `new_size` buckets, never below what's needed for live entries at
-  // kOverloadFactor. No-op if not smaller than the current bucket count. Uses the raw
-  // (possibly stale, pre-expiry) size_ as the floor to avoid an extra full-table pass;
-  // ShrinkBucket() still reaps expired entries during compaction.
+  // Shrinks toward `new_size` buckets, never below what's needed for size_ entries at
+  // kOverloadFactor. No-op if not smaller than the current bucket count. Compaction uses
+  // cached hashes without inspecting payloads or expiring entries. Erase and extraction shrink
+  // automatically below half the bucket count, invalidating iterators. Read operations may
+  // expire entries but never shrink the table.
   void Shrink(size_t new_size);
 
   void Clear();
@@ -293,6 +295,7 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
         bucket.Clear();
       }
     }
+    TryShrink();
     return removed;
   }
 
@@ -398,6 +401,14 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     }
   }
 
+  // Keep the load between 50% and 100% after shrinking, with room before the growth threshold.
+  // Call only after a removal operation has finished using bucket/entry handles.
+  void TryShrink() {
+    const uint32_t bucket_count = BucketCount();
+    if (bucket_count > kMinBucketCount && size_ < bucket_count / 2) [[unlikely]]
+      Shrink(size_);
+  }
+
   static uint64_t Hash(std::string_view str) {
     constexpr uint64_t kHashSeed = 24061983;
     return rapidhashMicro_withSeed(str.data(), str.size(), kHashSeed);
@@ -419,75 +430,58 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
   // iterator and Erase do, which is safe under fixed-window displacement probing.
   void CollectExpired();
 
-  // was Grow in StringSet
-  void Rehash(uint32_t prev_size) {
-    if (prev_size == 0) {
+  // Redistributes entries after capacity_log_ changes. Growing walks high to low; shrinking
+  // walks low to high. Specializing keeps the shrink path free of key hashing.
+  template <bool kShrink> void Rehash(uint32_t prev_size, uint32_t prev_capacity_log) {
+    if (prev_size == 0)
       return;
-    }
-    // We should prevent moving elements before current position to avoid double processing.
-    // Detach the first mix_size slots into locals; each `bucket` view is freed explicitly
-    // after its entries are redistributed into entries_ (a TaggedPtr slot has no dtor).
-    constexpr size_t kMixSize = (2 << kShiftLog) - 1;
+
+    // Outside this prefix, growing moves entries strictly forward and shrinking strictly
+    // backward, even with displacement: from slot 2 * kDisplacementSize - 1 on, the home exceeds
+    // any displacement (doubling it passes the slot) and half the slot plus a displacement
+    // falls short of it. Detach the overlapping prefix so each entry is processed exactly
+    // once with its original position and fingerprint.
+    constexpr size_t kMixSize = 2 * kDisplacementSize - 1;
     std::array<TaggedPtr, kMixSize> old_buckets{};
     const size_t mix_size = std::min<size_t>(prev_size, old_buckets.size());
-    for (size_t i = 0; i < mix_size; ++i) {
-      old_buckets[i] = entries_[i];
-      entries_[i] = 0;
-    }
+    for (size_t i = 0; i < mix_size; ++i)
+      old_buckets[i] = std::exchange(entries_[i], 0);
 
-    for (size_t bucket_id = prev_size - 1; bucket_id >= mix_size; --bucket_id) {
-      TaggedPtr slot = entries_[bucket_id];
-      entries_[bucket_id] = 0;
-      RedistributeBucket(slot);
-    }
-
-    for (size_t bucket_id = 0; bucket_id < mix_size; ++bucket_id)
-      RedistributeBucket(old_buckets[bucket_id]);
-  }
-
-  // Rehashes and re-inserts every entry of `slot`'s bucket into entries_, then frees it.
-  void RedistributeBucket(TaggedPtr& slot) {
-    OAHPtr<Entry> bucket(slot);
-    for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
-      if (bucket[pos]) {
-        uint32_t new_bucket_id = FindEmptyAround(RehashEntry(bucket[pos]));
-        ptr_vectors_alloc_used_ += At(new_bucket_id).Insert(bucket.Remove(pos));
+    if constexpr (kShrink) {
+      for (uint32_t bucket_id = 0; bucket_id < mix_size; ++bucket_id)
+        RedistributeBucket<true>(old_buckets[bucket_id], bucket_id, prev_capacity_log);
+      for (uint32_t bucket_id = mix_size; bucket_id < prev_size; ++bucket_id) {
+        TaggedPtr slot = std::exchange(entries_[bucket_id], 0);
+        RedistributeBucket<true>(slot, bucket_id, prev_capacity_log);
+      }
+    } else {
+      for (uint32_t bucket_id = prev_size; bucket_id > mix_size;) {
+        --bucket_id;
+        TaggedPtr slot = std::exchange(entries_[bucket_id], 0);
+        RedistributeBucket<false>(slot, bucket_id, prev_capacity_log);
+      }
+      for (uint32_t bucket_id = mix_size; bucket_id > 0;) {
+        --bucket_id;
+        RedistributeBucket<false>(old_buckets[bucket_id], bucket_id, prev_capacity_log);
       }
     }
-    if (bucket.IsVector())
-      ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
-    bucket.Clear();
   }
 
-  // It is inefficient for now.
-  // TODO: predict new position by current position and extended hash.
-  void ShrinkBucket(uint32_t bucket_id) {
-    // Detach the slot bits into a local; `bucket` views the local and is freed
-    // explicitly below (At(new_bucket_id) writes into entries_, never this local).
-    TaggedPtr slot = entries_[bucket_id];
-    entries_[bucket_id] = 0;
+  // Reinserts a detached bucket's entries, then frees its drained vector.
+  template <bool kShrink>
+  void RedistributeBucket(TaggedPtr& slot, uint32_t bucket_id, uint32_t prev_capacity_log) {
     OAHPtr<Entry> bucket(slot);
-    if (bucket.Empty())
-      return;
-
     for (uint32_t pos = 0, size = bucket.ElementsNum(); pos < size; ++pos) {
       Entry entry = bucket[pos];
       if (!entry)
         continue;
-      // Drop entries whose TTL has passed instead of rehashing them (no-TTL sets skip the check).
-      if (expiration_used_ && IsExpired(entry)) {
-        obj_alloc_used_ -= entry.AllocSize();
-        --size_;
-        continue;
-      }
-      uint32_t new_bucket_id = FindEmptyAround(RehashEntry(entry));
+      const uint32_t new_bucket_id =
+          FindEmptyAround(RehashEntry<kShrink>(entry, bucket_id, prev_capacity_log));
       ptr_vectors_alloc_used_ += At(new_bucket_id).Insert(bucket.Remove(pos));
     }
 
-    if (bucket.IsVector()) {
+    if (bucket.IsVector())
       ptr_vectors_alloc_used_ -= bucket.AsVector().AllocSize();
-    }
-    // Frees the (now drained) collision array and any expired entries left behind.
     bucket.Clear();
   }
 
@@ -769,9 +763,44 @@ template <typename Entry> class OAHTable {  // Open Addressing Hash table
     return h ? h : 1;
   }
 
-  // Recomputes the entry's hash, refreshes its stored ext-hash, and returns its new bucket.
-  uint32_t RehashEntry(Entry entry) {
-    uint64_t hash = Hash(entry.KeyContent());
+  // Rebuilds a hash prefix from the cached fingerprint and physical bucket position. The top
+  // RestoredHashBits(capacity_log) bits match the original hash, covering the home bucket and
+  // fingerprint of any smaller table whose fingerprint window starts at a more significant bit.
+  // The full fingerprint is kept, including a possibly remapped low bit, so CalcExtHash also
+  // reproduces it unchanged when the window stays put (both capacity_log values <= kShiftLog).
+  static uint64_t RestoreHash(uint64_t ext_hash, uint32_t capacity_log, uint32_t bucket_id) {
+    const uint32_t start_hash_bit = capacity_log > kShiftLog ? capacity_log - kShiftLog : 0;
+    const uint32_t ext_hash_shift = 64 - start_hash_bit - oah::kExtHashSize;
+    uint64_t hash = (ext_hash & oah::kExtHashMask) << ext_hash_shift;
+    if (start_hash_bit > 0) {  // smaller tables' prefixes live entirely in the fingerprint
+      const uint32_t home_suffix = ext_hash >> (oah::kExtHashSize - kShiftLog);
+      uint32_t base_bucket = bucket_id & ~(kDisplacementSize - 1);
+      // A displaced entry crossed into the next aligned window if its home suffix exceeds
+      // its physical slot's suffix.
+      if (home_suffix > (bucket_id & (kDisplacementSize - 1)))
+        base_bucket -= kDisplacementSize;
+      hash |= (uint64_t(base_bucket) >> kShiftLog) << (64 - start_hash_bit);
+    }
+    return hash;
+  }
+
+  // Minimum number of leading hash bits RestoreHash reproduces exactly (the 0 -> 1 remap
+  // makes the lowest fingerprint bit ambiguous).
+  static constexpr uint32_t RestoredHashBits(uint32_t capacity_log) {
+    const uint32_t start_hash_bit = capacity_log > kShiftLog ? capacity_log - kShiftLog : 0;
+    return start_hash_bit + oah::kExtHashSize - 1;
+  }
+
+  // Refreshes the fingerprint and returns the new home bucket. Shrinking needs only the
+  // hash prefix restored from the old slot; growing may need additional bits from the key.
+  template <bool kShrink>
+  uint32_t RehashEntry(Entry entry, uint32_t bucket_id, uint32_t prev_capacity_log) {
+    uint64_t hash;
+    if constexpr (kShrink) {
+      hash = RestoreHash(entry.GetHash(), prev_capacity_log, bucket_id);
+    } else {
+      hash = Hash(entry.KeyContent());
+    }
     entry.SetExtHash(CalcExtHash(hash, capacity_log_));
     return BucketId(hash, capacity_log_);
   }

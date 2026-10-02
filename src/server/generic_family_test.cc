@@ -18,6 +18,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/oah_set.h"
 #include "facade/facade_test.h"
 #include "facade/reply_builder.h"
 #include "server/channel_store.h"
@@ -2051,7 +2052,9 @@ TEST_F(GenericFamilyTest, ShrinkDeletesEmptyContainer) {
   Run({"SHRINK", "skey"});
 
   EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
-  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+  // The OAH set already auto-shrank on SREM, so SHRINK is a no-op; OAH's Shrink() also never
+  // expires members, so the key survives either way.
+  EXPECT_EQ(g_use_oah_set ? 1 : 0, CheckedInt({"EXISTS", "skey"}));
 }
 
 TEST_F(GenericFamilyTest, ExpireTime) {

@@ -831,12 +831,13 @@ TEST_F(SetFamilyTest, ShrinkMemoryAccountingSet) {
   const int initial_members = g_use_oah_set ? 200 : 60;
   const int members_to_remove = initial_members - 10;
   for (int i = 0; i < initial_members; i++) {
-    Run({"SADDEX", "s1", "1000", absl::StrCat("temp", i)});
+    Run({"SADDEX", "s1", i < members_to_remove ? "1" : "1000", absl::StrCat("temp", i)});
   }
 
-  // Phase 2: Remove most members while retaining a large bucket array.
+  // Phase 2: Reap most members through lookups, retaining capacity for explicit SHRINK.
+  AdvanceTime(2000);
   for (int i = 0; i < members_to_remove; i++) {
-    Run({"SREM", "s1", absl::StrCat("temp", i)});
+    Run({"SISMEMBER", "s1", absl::StrCat("temp", i)});
   }
 
   // Phase 3: Add 10 members with short TTL.
@@ -848,12 +849,13 @@ TEST_F(SetFamilyTest, ShrinkMemoryAccountingSet) {
   // Phase 4: Expire the short-TTL members.
   AdvanceTime(2000);
 
-  // Reaping leaves 10 live members and must reduce the much larger bucket array.
+  // Compaction must reduce the much larger bucket array.
   int64_t shrink_result = CheckedInt({"SHRINK", "s1"});
   EXPECT_GT(shrink_result, 0) << "SHRINK must actually shrink the set";
 
   // Must not crash in FindMutable → DCHECK.
   Run({"SREM", "s1", absl::StrCat("temp", members_to_remove)});
+  Run({"SMEMBERS", "s1"});  // Expire OAH members through regular access.
   EXPECT_THAT(Run({"SCARD", "s1"}), IntArg(9));
 }
 
