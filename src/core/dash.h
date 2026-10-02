@@ -360,6 +360,11 @@ class DashTable : public detail::DashTableBase {
   // shrinks or grows. Returns: cursor that is guaranteed to be less than 2^40.
   template <typename Cb> Cursor Traverse(Cursor curs, Cb&& cb);
 
+  // Share of the table already traversed when Traverse() returned `curs`, 0 for end().
+  static double TraverseProgress(Cursor curs) {
+    return (curs.bucket_id() + curs.segment_fraction()) / kBucketNum;
+  }
+
   // Traverses over physical buckets. It calls cb once for each bucket by passing a bucket iterator.
   // if cursor=0 starts traversing from the beginning, otherwise continues from where
   // it stopped. returns 0 if the supplied cursor reached end of traversal.

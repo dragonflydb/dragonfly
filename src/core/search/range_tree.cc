@@ -306,7 +306,7 @@ void RangeTree::Builder::Remove(DocId id, double value) {
     delayed_erased_.emplace(id, value);
 }
 
-void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) {
+void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota, size_t* done) {
   // Sort all elements by value
   std::vector<Entry> sorted_entries(updates_.begin(), updates_.end());
   rng::sort(sorted_entries, {}, &Entry::second);
@@ -317,6 +317,13 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
   // Add sorted elements in batches
   size_t max_size = tree->max_range_block_size_;
   RangeBlock* block = &tree->entries_.begin()->second;
+  size_t reported = 0;
+  auto report = [&](size_t idx) {
+    if (done) {
+      *done += idx - reported;
+      reported = idx;
+    }
+  };
   for (size_t idx = 0; idx < sorted_entries.size();) {
     // Create new block for each insertion batch (first goes into only first block)
     if (idx)
@@ -331,10 +338,13 @@ void RangeTree::Builder::Populate(RangeTree* tree, const RenewableQuota& quota) 
       idx++;
 
       // If we filled a new multiple of the block size due to equal entries, check quota
-      if ((block->Size() - 1) / max_size != block->Size() / max_size)
+      if ((block->Size() - 1) / max_size != block->Size() / max_size) {
+        report(idx);
         quota.Check();
+      }
     }
 
+    report(idx);
     quota.Check();  // Yield if needed
   }
 

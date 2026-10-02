@@ -1261,7 +1261,7 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
   return {.base_index = *base_,
           .num_docs = key_index_.Size(),
           .indexing = bool(builder_),
-          .percent_indexed = bool(builder_) ? 0.5f : 1.0f,  // no estimation for now
+          .percent_indexed = builder_ ? builder_->Progress() : 1.0,
           .hnsw_metadata = nullopt};
 }
 

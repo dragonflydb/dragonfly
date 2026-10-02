@@ -195,7 +195,9 @@ class SearchTest : public ::testing::Test {
     shuffle(entries_.begin(), entries_.end(), default_random_engine{});
     for (DocId i = 0; i < entries_.size(); i++)
       index.Add(i, entries_[i].first);
-    index.FinalizeInitialization();
+    size_t work = index.FinalizeWork().value_or(0), done = 0;
+    index.FinalizeInitialization(&done);
+    EXPECT_EQ(done, work);
 
     SearchAlgorithm search_algo{};
     if (!search_algo.Init(query_, &params_)) {

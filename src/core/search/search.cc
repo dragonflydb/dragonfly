@@ -1173,10 +1173,19 @@ SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_
   return it->second->Lookup(doc);
 }
 
-void FieldIndices::FinalizeInitialization() {
+void FieldIndices::FinalizeInitialization(size_t* done) {
   for (auto& [field, index] : indices_) {
-    index->FinalizeInitialization();
+    index->FinalizeInitialization(done);
   }
+}
+
+std::optional<size_t> FieldIndices::FinalizeWork() const {
+  std::optional<size_t> work;
+  for (const auto& [field, index] : indices_) {
+    if (auto index_work = index->FinalizeWork())
+      work = work.value_or(0) + *index_work;
+  }
+  return work;
 }
 
 DefragmentResult FieldIndices::Defragment(PageUsage* page_usage) {

@@ -42,8 +42,14 @@ class RangeTree {
     void Add(DocId id, double value);
     void Remove(DocId id, double value);
 
+    // Number of batched updates Populate() would sort and insert if called now.
+    size_t Size() const {
+      return updates_.size();
+    }
+
     // Build tree from batched updates. Accepts new updates during suspensions.
-    void Populate(RangeTree* tree, const RenewableQuota& quota);
+    // Adds the number of sorted updates inserted so far to `*done`, if set.
+    void Populate(RangeTree* tree, const RenewableQuota& quota, size_t* done = nullptr);
 
    private:
     absl::flat_hash_set<Entry> updates_, delayed_erased_;
