@@ -188,6 +188,37 @@ class SearchFamilyTest : public BaseFamilyTest {
       ThisFiber::SleepFor(std::chrono::milliseconds(5));
     }
   }
+
+  // d:1..d:4 hold "example" and "com" in email, d:5 and d:6 only outside email, d:7 neither.
+  void CreateGluedWordIndex(bool json) {
+    const pair<string, string> docs[] = {
+        {"jane@example.com", ""}, {"example@com.org", ""},          {"com@example.org", ""},
+        {"example-x@y.com", ""},  {"jane@mail.net", "example com"}, {"example", "com"},
+        {"john.doe@acme.io", ""},
+    };
+    string schema = json ? "$.email AS email TEXT NOSTEM $.note AS note TEXT NOSTEM $.vec AS vec"
+                         : "email TEXT NOSTEM note TEXT NOSTEM vec";
+    EXPECT_EQ(Run(absl::StrCat("FT.CREATE idx ON ", json ? "JSON" : "HASH", " PREFIX 1 d: SCHEMA ",
+                               schema, " VECTOR ", json ? "HNSW" : "FLAT",
+                               " 6 TYPE FLOAT32 DIM 1 DISTANCE_METRIC L2")),
+              "OK");
+    for (size_t i = 0; i < std::size(docs); ++i) {
+      const auto& [email, note] = docs[i];
+      string key = absl::StrCat("d:", i + 1);
+      if (json) {
+        string note_json = note.empty() ? "" : absl::StrCat(R"(,"note":")", note, R"(")");
+        Run({"JSON.SET", key, "$",
+             absl::StrCat(R"({"email":")", email, R"(")", note_json, R"(,"vec":[)", i + 1, "]}")});
+      } else if (note.empty()) {
+        Run({"HSET", key, "email", email, "vec", FloatVec1(i + 1)});
+      } else {
+        Run({"HSET", key, "email", email, "note", note, "vec", FloatVec1(i + 1)});
+      }
+    }
+    WaitForIndexReady("idx");
+  }
+
+  void CheckGluedWordCommands();
 };
 
 const auto kNoResults = RespElementsAre(IntArg(0));
@@ -2374,6 +2405,46 @@ TEST_F(SearchFamilyTest, TextPunctuationSeparators) {
   EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:don", "DIALECT", "2"}), AreDocIds("t:3"));
   EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:t", "DIALECT", "2"}), AreDocIds("t:3"));
   EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:14", "DIALECT", "2"}), AreDocIds("t:4"));
+}
+
+// d:5 and d:6 are the binding decoys.
+void SearchFamilyTest::CheckGluedWordCommands() {
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@email:*example.com*"}),
+              AreDocIds("d:1", "d:2", "d:3", "d:4"));
+
+  EXPECT_THAT(
+      Run({"FT.AGGREGATE", "idx", "@email:*example.com*", "LOAD", "1", "@email"}),
+      IsUnordArrayWithSize(IsMap("email", "jane@example.com"), IsMap("email", "example@com.org"),
+                           IsMap("email", "com@example.org"), IsMap("email", "example-x@y.com")));
+
+  // SEARCH matches nothing, so the reply is exactly the FILTER set (K 10 covers all docs).
+  auto hybrid = [this](string_view filter) {
+    return Run({"FT.HYBRID", "idx",   "SEARCH", "@email:zzznomatch",
+                "VSIM",      "@vec",  "$v",     "KNN",
+                "2",         "K",     "10",     "FILTER",
+                filter,      "LIMIT", "0",      "100",
+                "PARAMS",    "2",     "v",      FloatVec1(1.0f)});
+  };
+  auto resp = hybrid("@email:*example.com*");
+  EXPECT_EQ(resp.type, RespExpr::ARRAY) << resp;
+  EXPECT_THAT(HybridKeys(resp), UnorderedElementsAre("d:1", "d:2", "d:3", "d:4"));
+
+  // A trailing separator in FILTER must not swallow the "=>" that FLAT appends.
+  resp = hybrid("@email:*example.com*.");
+  EXPECT_EQ(resp.type, RespExpr::ARRAY) << resp;
+  EXPECT_THAT(HybridKeys(resp), UnorderedElementsAre("d:1", "d:2", "d:3", "d:4"));
+}
+
+// FLAT: FT.HYBRID builds a "<filter>=>[KNN ...]" query.
+TEST_F(SearchFamilyTest, GluedWordHash) {
+  CreateGluedWordIndex(false);
+  CheckGluedWordCommands();
+}
+
+// HNSW: FT.HYBRID parses FILTER on its own.
+TEST_F(SearchFamilyTest, GluedWordJson) {
+  CreateGluedWordIndex(true);
+  CheckGluedWordCommands();
 }
 
 TEST_F(SearchFamilyTest, TextEscapedSpaceJoinsTokens) {

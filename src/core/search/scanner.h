@@ -34,8 +34,13 @@ class Scanner : public Lexer {
     return res;
   }
 
+  // Byte offsets: RE/flex location() rescans the whole line for every token, which is quadratic on
+  // long queries, and locations only reach parse error logs.
   dfly::search::location loc() {
-    return location();
+    auto pos = [](size_t offset) {
+      return dfly::search::position(nullptr, 1, static_cast<int>(offset) + 1);
+    };
+    return {pos(matcher().first()), pos(matcher().last())};
   }
 
   Parser::symbol_type ParseParam(std::string_view name, const Parser::location_type& loc) {

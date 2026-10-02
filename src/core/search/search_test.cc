@@ -605,6 +605,42 @@ TEST_F(SearchTest, StopWordsDroppedFromQuery) {
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
 }
 
+// A glued word under a field binds all of its atoms to that field, in any order and position.
+TEST_F(SearchTest, GluedWordFieldBinding) {
+  PrepareSchema({{"email", SchemaField::TEXT, SchemaField::TextParams{.no_stem = true}},
+                 {"note", SchemaField::TEXT, SchemaField::TextParams{.no_stem = true}}});
+  for (string_view query : {"@email:example.com", "@email:com.example", "@email:example.co*"}) {
+    PrepareQuery(query);
+    ExpectAll(Map{{"email", "jane@example.com"}}, Map{{"email", "example@com.org"}},
+              Map{{"email", "com@example.org"}}, Map{{"email", "example-x@y.com"}});
+    ExpectNone(Map{{"email", "jane@mail.net"}, {"note", "example com"}},
+               Map{{"email", "example"}, {"note", "com"}}, Map{{"email", "examplecom"}},
+               Map{{"email", "com"}});
+    EXPECT_TRUE(Check()) << GetError();
+  }
+}
+
+TEST_F(SearchTest, GluedWordStopwords) {
+  IndicesOptions options{{"the", "a"}};
+  auto schema =
+      MakeSimpleSchema({{"email", SchemaField::TEXT, SchemaField::TextParams{.no_stem = true}}});
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+  vector<string> emails = {"jane@example.com", "john@example.org", "jane@mail.net"};
+  for (size_t i = 0; i < emails.size(); i++) {
+    MockedDocument doc{Map{{"email", emails[i]}}};
+    indices.Add(i, doc);
+  }
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("@email:the.example.com", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0));
+
+  // A bare glued word made only of stopwords is dropped like a single stopword.
+  ASSERT_TRUE(algo.Init("jane the.a", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 2));
+}
+
 class SearchRaxTest
     : public SearchTest,
       public testing::WithParamInterface<pair<bool /* build suffix trie */, bool /* tag index */>> {
