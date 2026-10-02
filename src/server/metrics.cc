@@ -657,6 +657,16 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricValue("tiered_bytes", m.tiered_stats.capacity_bytes, {"type"}, {"capacity"},
                       &resp->body());
 
+    // Allocator bytes: segment, large, free_extent
+    AppendMetricHeader("tiered_alloc_bytes", "Tiered allocator bytes", MetricType::GAUGE,
+                       &resp->body());
+    AppendMetricValue("tiered_alloc_bytes", m.tiered_stats.alloc_segment_bytes, {"type"},
+                      {"segment"}, &resp->body());
+    AppendMetricValue("tiered_alloc_bytes", m.tiered_stats.alloc_large_bytes, {"type"}, {"large"},
+                      &resp->body());
+    AppendMetricValue("tiered_alloc_bytes", m.tiered_stats.alloc_free_extent_bytes, {"type"},
+                      {"free_extent"}, &resp->body());
+
     // Events: stash, fetch, upload, cancel
     AppendMetricHeader("tiered_events", "Tiered events", MetricType::COUNTER, &resp->body());
     AppendMetricValue("tiered_events", m.tiered_stats.total_stashes, {"type"}, {"stash"},

@@ -2907,6 +2907,10 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
 
+    append("tiered_alloc_segment_bytes", m.tiered_stats.alloc_segment_bytes);
+    append("tiered_alloc_large_bytes", m.tiered_stats.alloc_large_bytes);
+    append("tiered_alloc_free_extent_bytes", m.tiered_stats.alloc_free_extent_bytes);
+
     append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
     append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
     append("tiered_pending_stash_bytes", m.tiered_stats.pending_stash_bytes);
