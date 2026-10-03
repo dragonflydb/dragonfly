@@ -24,6 +24,7 @@ extern "C" {
 #include "core/oah_set.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
+#include "facade/string_socket.h"
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
 #include "server/set_family.h"
@@ -158,7 +159,7 @@ class BaseFamilyTest::TestConnWrapper {
   }
 
  private:
-  ::io::StringSink sink_;  // holds the response blob
+  facade::StringSocket sink_;
 
   std::unique_ptr<TestConnection> dummy_conn_;
 

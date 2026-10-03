@@ -31,7 +31,7 @@ ABSL_FLAG(uint32_t, interpreter_per_thread, 10, "Lua interpreters per thread");
 ABSL_FLAG(uint32_t, timeout, 0,
           "Close the connection after it is idle for N seconds (0 to disable)");
 ABSL_FLAG(uint32_t, send_timeout, 0,
-          "Close the connection after it is stuck on send for N seconds (0 to disable)");
+          "Close the connection if no bytes could be sent to it for N seconds (0 to disable)");
 ABSL_FLAG(double, rss_oom_deny_ratio, 1.25,
           "When the ratio between maxmemory and RSS memory exceeds this value, commands marked as "
           "DENYOOM will fail with OOM error and new connections to non-admin port will be "

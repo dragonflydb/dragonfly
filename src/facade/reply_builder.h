@@ -20,6 +20,10 @@ namespace cmn {
 class BorrowedString;
 }  // namespace cmn
 
+namespace util {
+class FiberSocketBase;
+}  // namespace util
+
 namespace facade {
 
 enum class RespVersion { kResp2, kResp3 };
@@ -41,7 +45,9 @@ class SinkReplyBuilder {
 
   struct PendingPin : public boost::intrusive::list_base_hook<
                           ::boost::intrusive::link_mode<::boost::intrusive::normal_link>> {
-    uint64_t timestamp_cycles;  // base::CycleClock::Now() value
+    // base::CycleClock::Now() at Send() entry or at the last write progress.
+    // pending_list is kept sorted by this value.
+    uint64_t timestamp_cycles;
 
     PendingPin(uint64_t v = 0) : timestamp_cycles(v) {
     }
@@ -53,7 +59,11 @@ class SinkReplyBuilder {
 
   static thread_local PendingList pending_list;
 
-  explicit SinkReplyBuilder(io::Sink* sink) : sink_(sink) {
+  explicit SinkReplyBuilder(util::FiberSocketBase* socket) : socket_(socket) {
+  }
+
+  util::FiberSocketBase* socket() {
+    return socket_;
   }
 
   virtual ~SinkReplyBuilder() = default;
@@ -165,7 +175,7 @@ class SinkReplyBuilder {
   std::string last_error_;
 
  private:
-  io::Sink* sink_;
+  util::FiberSocketBase* socket_;
   std::error_code ec_;
 
   bool scoped_ = false, batched_ = false;
@@ -177,13 +187,15 @@ class SinkReplyBuilder {
   // external data (WriteRef). Validity is ensured by FinishScope that either flushes before ref
   // lifetime ends or copies refs to the buffer.
   absl::InlinedVector<iovec, 16> vecs_;
-  size_t guaranteed_pieces_ = 0;   // length of prefix of vecs_ that are guaranteed to be pieces
-  uint64_t send_time_cycles_ = 0;  // base::CycleClock::Now() at Send() entry, 0 when idle
+  size_t guaranteed_pieces_ = 0;  // length of prefix of vecs_ that are guaranteed to be pieces
+
+  // base::CycleClock::Now() at Send() entry or at the last write progress, 0 when idle.
+  uint64_t send_time_cycles_ = 0;
 };
 
 class MCReplyBuilder : public SinkReplyBuilder {
  public:
-  explicit MCReplyBuilder(::io::Sink* sink);
+  explicit MCReplyBuilder(util::FiberSocketBase* socket);
 
   ~MCReplyBuilder() override = default;
 
@@ -209,7 +221,7 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
  public:
   enum VerbatimFormat : uint8_t { TXT, MARKDOWN };
 
-  explicit RedisReplyBuilderBase(io::Sink* sink) : SinkReplyBuilder(sink) {
+  explicit RedisReplyBuilderBase(util::FiberSocketBase* socket) : SinkReplyBuilder(socket) {
   }
 
   ~RedisReplyBuilderBase() override = default;
@@ -275,7 +287,7 @@ class RedisReplyBuilder : public RedisReplyBuilderBase {
  public:
   using ScoredArray = absl::Span<const std::pair<std::string, double>>;
 
-  RedisReplyBuilder(io::Sink* sink) : RedisReplyBuilderBase(sink) {
+  RedisReplyBuilder(util::FiberSocketBase* socket) : RedisReplyBuilderBase(socket) {
   }
 
   ~RedisReplyBuilder() override = default;
