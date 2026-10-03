@@ -2615,6 +2615,76 @@ async def test_timeout(df_server: DflyInstance, async_client: aioredis.Redis):
     assert int(info["timeout_disconnects"]) >= 1
 
 
+@assert_eventually(times=100)
+async def wait_for_conn_count(async_client, expected):
+    # The listener links a freshly accepted socket asynchronously, so a CLIENT LIST issued right
+    # after connect() may not include it yet.
+    clients = await async_client.client_list()
+    assert len(clients) == expected
+
+
+@dfly_args({"timeout": 1})
+async def test_timeout_silent_connection(df_server: DflyInstance, async_client: aioredis.Redis):
+    """A connection that never sends a byte stays in the SETUP phase. It must be reaped by
+    --timeout like an idle connection that already ran commands, otherwise pre-dialled but
+    unused client pool connections accumulate until maxclients is reached."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+
+    # The silent socket is accepted and listed, but has never sent anything.
+    await wait_for_conn_count(async_client, 2)
+
+    await asyncio.sleep(2)
+    await wait_for_conn_drop(async_client)
+
+    # The server closed our end: the read returns EOF instead of hanging.
+    assert await asyncio.wait_for(reader.read(1), timeout=5) == b""
+    writer.close()
+
+    info = await async_client.info("clients")
+    assert int(info["timeout_disconnects"]) >= 1
+
+
+@dfly_args({"timeout": 30})
+async def test_timeout_slow_first_command(df_server: DflyInstance, async_client: aioredis.Redis):
+    """Bytes received during protocol detection count as client activity: they reset the idle
+    counter the --timeout reaper reads, so a client that trickles its first command is not
+    reaped. CLIENT LIST reports that same counter as `idle`, so the check is made there instead
+    of racing the reaper: `timeout` is far above every sleep in this test, and `idle < age`
+    keeps holding however long the test is descheduled afterwards."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
+    addr = "127.0.0.1:%d" % writer.get_extra_info("sockname")[1]
+    await wait_for_conn_count(async_client, 2)
+
+    async def silent_conn():
+        conns = [c for c in await async_client.client_list() if c["addr"] == addr]
+        assert len(conns) == 1
+        return conns[0]
+
+    # Nothing sent yet: idle and age have grown together since accept.
+    await asyncio.sleep(2)
+    conn = await silent_conn()
+    assert conn["phase"] == "setup"
+    assert int(conn["idle"]) == int(conn["age"]) >= 2
+
+    # A partial first command is a probe read. It must reset idle while the connection is still
+    # being classified (a lone "P" could still turn into an HTTP verb).
+    writer.write(b"P")
+    await writer.drain()
+
+    @assert_eventually(times=100)
+    async def idle_was_reset():
+        conn = await silent_conn()
+        assert conn["phase"] == "setup"
+        assert int(conn["idle"]) < int(conn["age"])
+
+    await idle_was_reset()
+
+    writer.write(b"ING\r\n")
+    await writer.drain()
+    assert await asyncio.wait_for(reader.readline(), timeout=5) == b"+PONG\r\n"
+    writer.close()
+
+
 @dfly_args({"send_timeout": 3})
 async def test_send_timeout(df_server, async_client: aioredis.Redis):
     reader, writer = await asyncio.open_connection("127.0.0.1", df_server.port)
