@@ -62,6 +62,41 @@ async def assert_metric_value(inst, metric_name, expected_value):
     ), f"Expected {metric_name} to be {expected_value}, got ${actual_value}"
 
 
+@pytest.mark.parametrize("on_startup", [False, True], ids=["load-command", "startup"])
+async def test_load_unsupported_rdb(df_factory, tmp_dir: Path, unsupported_rdb, on_startup):
+    rdb, error = unsupported_rdb
+    snapshot = tmp_dir / "unsupported.rdb"
+    snapshot.write_bytes(rdb)
+    instance = df_factory.create(
+        proactor_threads=2,
+        dir=str(tmp_dir),
+        dbfilename=snapshot.name if on_startup else "",
+        nodf_snapshot_format=None,
+    )
+    if on_startup:
+        args = {**instance.args, "logtostderr": None}
+        result = subprocess.run(
+            [instance.params.path, *instance.format_args(args)],
+            cwd=instance.params.cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=20,
+        )
+
+        assert result.returncode == 1, result.stdout
+        assert error in result.stdout
+        return
+
+    instance.start()
+    client = instance.client()
+
+    with pytest.raises(redis.exceptions.ResponseError, match=error):
+        await client.execute_command("DFLY", "LOAD", str(snapshot))
+
+    assert await client.set("key", "value")
+
+
 @pytest.mark.opt_only
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @pytest.mark.parametrize(

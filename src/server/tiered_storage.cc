@@ -24,6 +24,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_index.h"
+#include "server/server_state.h"
 #include "server/snapshot.h"
 #include "server/table.h"
 #include "server/tiering/common.h"
@@ -270,7 +271,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
       StashDescriptor blobs{FragmentRef{*pv}.GetSerializationDescr()};
       // The value's bytes leave the RAM ledger; a cool copy is tracked by the cool cache only.
       AccountObjectMemory(key.second, pv->ObjType(), -int64_t(pv->MallocUsed()), table);
-      if (ts_->config_.experimental_cooling) {
+      if (ts_->ShouldCool()) {
         RetireColdEntries(pv->MallocUsed());
         ts_->CoolDown(key.first, key.second, segment, blobs.rep, pv);
       } else {
@@ -631,6 +632,9 @@ TieredStats TieredStorage::GetStats() const {
     stats.pending_stash_cnt = op_stats.pending_stash_cnt;
     stats.allocated_bytes = op_stats.disk_stats.allocated_bytes;
     stats.capacity_bytes = op_stats.disk_stats.capacity_bytes;
+    stats.alloc_segment_bytes = op_stats.disk_stats.segment_bytes;
+    stats.alloc_large_bytes = op_stats.disk_stats.large_allocated_bytes;
+    stats.alloc_free_extent_bytes = op_stats.disk_stats.free_extent_bytes;
     stats.pending_stash_bytes = op_stats.disk_stats.pending_stash_bytes;
     stats.total_heap_buf_allocs = op_stats.disk_stats.heap_buf_alloc_count;
     stats.total_registered_buf_allocs = op_stats.disk_stats.registered_buf_alloc_count;
@@ -884,6 +888,11 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
     return blobs;
   }
   return nullopt;
+}
+
+bool TieredStorage::ShouldCool() const {
+  // Don't cool while loading lots of values into memory as those are not client writes
+  return config_.experimental_cooling && ServerState::tlocal()->gstate() != GlobalState::LOADING;
 }
 
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,

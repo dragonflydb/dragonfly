@@ -740,6 +740,11 @@ class DashCursor {
     return val_ >> (40 - depth);
   }
 
+  // segment_id as a fraction of the segment id space, independent of depth.
+  double segment_fraction() const {
+    return double(val_ >> 8) / (uint64_t(1) << 32);
+  }
+
   uint64_t token() const {
     return val_;
   }

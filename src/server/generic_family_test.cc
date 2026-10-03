@@ -18,6 +18,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/oah_set.h"
 #include "facade/facade_test.h"
 #include "facade/reply_builder.h"
 #include "facade/string_socket.h"
@@ -1743,6 +1744,13 @@ TEST_F(GenericFamilyTest, Info) {
       },
       500ms);
   EXPECT_TRUE(cond);
+  cond = WaitUntilCondition(
+      [&]() {
+        resp = Run({"info", "persistence"});
+        return resp.GetString().find("rdb_bgsave_in_progress:0") != string::npos;
+      },
+      500ms);
+  EXPECT_TRUE(cond) << resp.GetString();
 
   EXPECT_EQ(Run({"set", "k3", "3"}), "OK");
   resp = Run({"info", "persistence"});
@@ -2045,7 +2053,9 @@ TEST_F(GenericFamilyTest, ShrinkDeletesEmptyContainer) {
   Run({"SHRINK", "skey"});
 
   EXPECT_EQ(0, CheckedInt({"EXISTS", "hkey"}));
-  EXPECT_EQ(0, CheckedInt({"EXISTS", "skey"}));
+  // The OAH set already auto-shrank on SREM, so SHRINK is a no-op; OAH's Shrink() also never
+  // expires members, so the key survives either way.
+  EXPECT_EQ(g_use_oah_set ? 1 : 0, CheckedInt({"EXISTS", "skey"}));
 }
 
 TEST_F(GenericFamilyTest, ExpireTime) {

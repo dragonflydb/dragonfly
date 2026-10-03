@@ -9,6 +9,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <set>
 #include <utility>
 
 #include "base/gtest.h"
@@ -611,6 +612,36 @@ TEST_F(BuilderTest, BuilderUpdates) {
     auto all_pairs = ExtractDocPairs(tree.GetAllBlocks());
     std::sort(all_pairs.begin(), all_pairs.end());
     EXPECT_EQ(all_pairs, entries);
+  }
+}
+
+// Populate counts inserted entries in `done` step by step, across blocks and inside equal runs
+TEST_F(BuilderTest, PopulateProgress) {
+  constexpr size_t kNumEntries = 1003;  // the last block is partial
+  for (bool equal : {true, false}) {
+    RangeTree tree{PMR_NS::get_default_resource(), 5};
+    RangeTree::Builder builder;
+    for (size_t i = 0; i < kNumEntries; i++)
+      builder.Add(i, equal ? 42 : double(i));
+    EXPECT_EQ(builder.Size(), kNumEntries);
+
+    size_t done = 0;
+    bool finished = false;
+    util::fb2::Fiber populate_fb{[&] {
+      builder.Populate(&tree, {0}, &done);  // suspend each time
+      finished = true;
+    }};
+
+    std::vector<size_t> seen;
+    while (!finished) {
+      seen.push_back(done);
+      util::ThisFiber::Yield();
+    }
+    populate_fb.Join();
+
+    EXPECT_EQ(done, kNumEntries) << equal;
+    EXPECT_TRUE(rng::is_sorted(seen)) << equal;
+    EXPECT_GT(std::set<size_t>(seen.begin(), seen.end()).size(), 2u) << equal;
   }
 }
 

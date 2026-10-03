@@ -1824,15 +1824,30 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
   return std::make_pair(std::move(elements), obj_type);
 }
 
-// Fetch a string value from a key (for BY pattern lookups)
-// TODO: does not support tiering.
-string OpFetchStringValue(const OpArgs& op_args, std::string_view key) {
+// Fetch a string value from a key (for BY and GET pattern lookups)
+OpResult<string> OpFetchStringValue(const OpArgs& op_args, std::string_view key) {
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (!IsValid(it) || it->second.ObjType() != OBJ_STRING) {
-    return {};  // Missing key defaults to empty string
+    return string{};  // Missing key defaults to empty string
   }
 
-  return it->second.ToString();
+  return ReadStringValue(op_args.db_cntx.db_index, key, it->second,
+                         op_args.shard->tiered_storage());
+}
+
+// Runs `cb` on every shard in parallel fibers (it may block) and returns the first non-OK status.
+template <typename F> OpStatus RunOnShards(F&& cb) {
+  vector<OpStatus> statuses(shard_set->size(), OpStatus::OK);
+  shard_set->RunBlockingInParallel(
+      [&](EngineShard* shard) { statuses[shard->shard_id()] = cb(shard); });
+  auto it = rng::find_if(statuses, [](OpStatus s) { return s != OpStatus::OK; });
+  return it == statuses.end() ? OpStatus::OK : *it;
+}
+
+// A failed GET lookup aborts the command; the STORE hop may still be open.
+void ConcludeWithError(CommandContext* cmd_cntx, OpStatus status) {
+  cmd_cntx->tx()->Conclude();
+  cmd_cntx->SendError(status);
 }
 
 template <typename IteratorBegin, typename IteratorEnd>
@@ -1946,11 +1961,11 @@ template <typename C> auto GetSortRange(const C& entries, const optional<SortBou
 //   string_view ResultSetter: Callable that stores fetched value: (size_t elem_idx, size_t
 //   pattern_idx, string value) -> void
 template <typename ElementContainer, typename ElementAccessor, typename ResultSetter>
-void FetchGetPatternValues(const SortParams& params, const DbContext& db_cntx,
-                           const ElementContainer& elements, ElementAccessor get_element_key,
-                           ResultSetter set_result) {
+OpStatus FetchGetPatternValues(const SortParams& params, const DbContext& db_cntx,
+                               const ElementContainer& elements, ElementAccessor get_element_key,
+                               ResultSetter set_result) {
   if (params.get_patterns.empty())
-    return;
+    return OpStatus::OK;
 
   // Build a list of all external keys to fetch, organized by shard
   // Structure: keys_by_shard[shard_id] = [(elem_idx, pattern_idx, ext_key), ...]
@@ -1984,12 +1999,15 @@ void FetchGetPatternValues(const SortParams& params, const DbContext& db_cntx,
   }
 
   // Fetch all external keys in parallel across shards
-  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+  return RunOnShards([&](EngineShard* shard) {
     ShardId sid = shard->shard_id();
     for (const auto& [elem_idx, pattern_idx, ext_key] : keys_by_shard[sid]) {
-      string value = OpFetchStringValue({shard, nullptr, db_cntx}, ext_key);
-      set_result(elem_idx, pattern_idx, std::move(value));
+      auto value = OpFetchStringValue({shard, nullptr, db_cntx}, ext_key);
+      if (!value)
+        return value.status();
+      set_result(elem_idx, pattern_idx, std::move(*value));
     }
+    return OpStatus::OK;
   });
 }
 
@@ -2008,14 +2026,12 @@ OpStatus PopulateGetPatternValues(const SortParams& params, const DbContext& db_
   }
 
   // Use generic fetcher with lambdas to access ResultKey() and store in entry.get_values
-  FetchGetPatternValues(
+  return FetchGetPatternValues(
       params, db_cntx, *entries,
       [&](size_t idx) -> std::string_view { return (*entries)[idx].ResultKey(); },
       [&](size_t entry_idx, size_t pattern_idx, string value) {
         (*entries)[entry_idx].get_values[pattern_idx] = std::move(value);
       });
-
-  return OpStatus::OK;
 }
 
 // Visitor to handle the actual sorting and reply generation
@@ -2047,7 +2063,9 @@ struct SortVisitor {
     if (!params.get_patterns.empty()) {
       ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
       DbContext db_cntx{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
-      PopulateGetPatternValues(params, db_cntx, &entries);
+      OpStatus status = PopulateGetPatternValues(params, db_cntx, &entries);
+      if (status != OpStatus::OK)
+        return ConcludeWithError(cmd_cntx, status);
     }
 
     if (!params.store_key) {
@@ -2125,31 +2143,23 @@ OpStatus PopulateSortEntriesFromByPattern(const SortParams& params,
   }
 
   std::visit([&](auto& entries) { entries.resize(raw_elements.size()); }, *sorted_entries);
-  atomic_bool parse_error{false};
-  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+  return RunOnShards([&](EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    bool success = std::visit(
-        [&](auto& dest) {
+    return std::visit(
+        [&](auto& dest) -> OpStatus {
           for (const auto& [idx, ext_key] : keys_by_shard[sid]) {
-            string external_value = OpFetchStringValue({shard, nullptr, db_cntx}, ext_key);
+            auto external_value = OpFetchStringValue({shard, nullptr, db_cntx}, ext_key);
+            if (!external_value)
+              return external_value.status();
             auto& entry = dest[idx];
-            if (!entry.Parse(std::move(external_value)))
-              return false;
+            if (!entry.Parse(std::move(*external_value)))
+              return OpStatus::INVALID_NUMERIC_RESULT;
             entry.BindValue(&raw_elements[idx]);
           }
-          return true;
+          return OpStatus::OK;
         },
         *sorted_entries);
-    if (!success) {
-      parse_error.store(true, memory_order_relaxed);
-    }
   });
-
-  if (parse_error.load(memory_order_relaxed)) {
-    return OpStatus::INVALID_NUMERIC_RESULT;
-  }
-
-  return OpStatus::OK;
 }
 
 // STORE with nothing to store still overwrites, i.e. deletes, the destination and replies 0.
@@ -2292,7 +2302,7 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
       if (sort_status == OpStatus::KEY_NOTFOUND && params.store_key)
         return SortStoreNothing(params.store_key.value(), cmd_cntx);
       cmd_cntx->tx()->Conclude();
-      if (sort_status == OpStatus::WRONG_TYPE)
+      if (sort_status == OpStatus::WRONG_TYPE || sort_status == OpStatus::IO_ERROR)
         return cmd_cntx->SendError(sort_status);
       if (sort_status == OpStatus::INVALID_NUMERIC_RESULT)
         return cmd_cntx->SendError("One or more scores can't be converted into double");
@@ -2315,12 +2325,14 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
     get_values_per_element.resize(raw_elements.size(), vector<string>(params.get_patterns.size()));
 
     // Use generic fetcher with lambdas to access raw_elements and store in get_values_per_element
-    FetchGetPatternValues(
+    OpStatus status = FetchGetPatternValues(
         params, db_cntx, raw_elements,
         [&](size_t idx) -> std::string_view { return raw_elements[idx]; },
         [&](size_t elem_idx, size_t pattern_idx, string value) {
           get_values_per_element[elem_idx][pattern_idx] = std::move(value);
         });
+    if (status != OpStatus::OK)
+      return ConcludeWithError(cmd_cntx, status);
   }
 
   if (params.store_key) {

@@ -15,6 +15,8 @@ void ExtentTree::Add(size_t start, size_t len) {
   DCHECK_GT(len, 0u);
   DCHECK_EQ(len_extents_.size(), extents_.size());
 
+  len_ += len;
+
   auto it = extents_.lower_bound(start);
   optional<size_t> prev_extent_key;
 
@@ -108,6 +110,7 @@ optional<pair<size_t, size_t>> ExtentTree::GetRange(size_t len, size_t align) {
   }
 
   DCHECK_EQ(range_end - aligned_start, len);
+  len_ -= len;
 
   return pair{aligned_start, range_end};
 }

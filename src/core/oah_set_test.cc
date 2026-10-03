@@ -113,7 +113,7 @@ TEST(OAHKeyCodec, HeaderContentMatchesDecode) {
 }
 
 TEST_F(OAHSetTest, ShrinkUsesOverloadAwareTarget) {
-  for (unsigned i = 0; i < 4; ++i) {
+  for (unsigned i = 0; i < 5; ++i) {
     EXPECT_TRUE(ss_->Add(absl::StrCat("member", i)));
   }
   ss_->Reserve(128 * OAHSet::kOverloadFactor);
@@ -122,9 +122,40 @@ TEST_F(OAHSetTest, ShrinkUsesOverloadAwareTarget) {
   // The requested target is above OAH's minimum.
   ss_->Shrink(8);
   EXPECT_EQ(ss_->BucketCount(), 8u);
+
+  // Automatic shrinking starts strictly below half the bucket count.
+  ss_->Erase("member4");
+  EXPECT_EQ(ss_->BucketCount(), 8u);
+  ss_->Erase("member3");
+  EXPECT_EQ(ss_->BucketCount(), 4u);
 }
 
 TEST_F(OAHSetTest, ShrinkToMinimumBuckets) {
+  struct HashAccess : OAHSet {
+    using OAHSet::CalcExtHash;
+    using OAHSet::RestoreHash;
+  };
+  // Reconstruct fingerprints across the 16-bucket boundary, including the 0 -> 1 remap and any
+  // displacement into the next aligned window. Every smaller table must derive the same home
+  // bucket and fingerprint as from the original hash.
+  for (uint32_t prev_log = 2; prev_log <= 20; ++prev_log) {
+    for (uint64_t hash : {uint64_t{0}, uint64_t{1} << 52, uint64_t{3} << 52, ~uint64_t{0}}) {
+      const uint64_t ext_hash = HashAccess::CalcExtHash(hash, prev_log);
+      const uint32_t home_bucket = hash >> (64 - prev_log);
+      for (uint32_t displacement = 0; displacement < OAHSet::kDisplacementSize; ++displacement) {
+        SCOPED_TRACE(absl::StrCat("capacity_log=", prev_log, ", hash=", hash,
+                                  ", displacement=", displacement));
+        const uint64_t restored =
+            HashAccess::RestoreHash(ext_hash, prev_log, home_bucket + displacement);
+        for (uint32_t new_log = 1; new_log < prev_log; ++new_log) {
+          EXPECT_EQ(HashAccess::CalcExtHash(restored, new_log),
+                    HashAccess::CalcExtHash(hash, new_log));
+          EXPECT_EQ(restored >> (64 - new_log), hash >> (64 - new_log));
+        }
+      }
+    }
+  }
+
   ss_->Reserve(1);
   EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
 
@@ -133,8 +164,11 @@ TEST_F(OAHSetTest, ShrinkToMinimumBuckets) {
     EXPECT_TRUE(ss_->Add(key));
 
   ss_->Reserve(128 * OAHSet::kOverloadFactor);
+  ss_->Shrink(16);
   ss_->Shrink(1);
   EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
+  for (const string& key : keys)
+    EXPECT_TRUE(ss_->Contains(key));
   ss_->Reserve(16);  // The physical probe slots already satisfy this reservation.
   EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
 
@@ -631,6 +665,11 @@ TEST_F(OAHSetTest, SimdFindEraseStress) {
     EXPECT_EQ(ss_->Find(s), ss_->end()) << s;
   for (const auto& s : ttl_alive)
     EXPECT_EQ(ss_->Find(s), ss_->end()) << s;
+
+  // Erasing below half the bucket count shrank the table step by step down to its minimum,
+  // releasing the spare bucket capacity and collision vectors.
+  EXPECT_EQ(ss_->BucketCount(), OAHSet::kMinBucketCount);
+  EXPECT_EQ(ss_->SetMallocUsed(), ss_->Capacity() * sizeof(oah::TaggedPtr));
 }
 
 TEST_F(OAHSetTest, Resizing) {
@@ -841,6 +880,10 @@ TEST_F(OAHSetTest, Iteration) {
     EXPECT_TRUE(ss_->Add(str));
   }
 
+  ss_->Add("expired", 1);
+  ss_->Reserve(num_items * 4 * OAHSet::kOverloadFactor);
+  ss_->set_time(2);
+
   for (const auto& ptr : *ss_) {
     std::string str(KeyOf(ptr));
     EXPECT_TRUE(to_insert.count(str));
@@ -848,6 +891,7 @@ TEST_F(OAHSetTest, Iteration) {
   }
 
   EXPECT_EQ(to_insert.size(), 0);
+  EXPECT_EQ(ss_->BucketCount(), num_items * 4);
 }
 
 TEST_F(OAHSetTest, SetFieldExpireHasExpiry) {
@@ -887,12 +931,17 @@ TEST_F(OAHSetTest, Ttl) {
   EXPECT_EQ("foo50"sv, KeyOf(*it));
   EXPECT_EQ(2u, it.ExpiryTime());
 
+  ss_->Reserve(256 * OAHSet::kOverloadFactor);
   ss_->set_time(2);
-  // Cleanup all `foo` entries
+  EXPECT_FALSE(ss_->Contains("foo0"));
+  EXPECT_EQ(ss_->BucketCount(), 256u);
+
+  // Cleanup all `foo` entries without changing capacity.
   uint32_t cursor = 0;
   do {
     cursor = ss_->Scan(cursor, [&](std::string_view) {});
   } while (cursor != 0);
+  EXPECT_EQ(ss_->BucketCount(), 256u);
 
   for (unsigned i = 0; i < 100; ++i) {
     EXPECT_TRUE(ss_->Add(absl::StrCat("bar", i)));
@@ -1164,6 +1213,7 @@ TEST_F(OAHSetTest, GetRandomMemberSingle) {
 }
 
 TEST_F(OAHSetTest, GetRandomMemberSkipsExpired) {
+  ss_->Reserve(64 * OAHSet::kOverloadFactor);
   EXPECT_TRUE(ss_->Add("alive"sv, 100));
   EXPECT_TRUE(ss_->Add("dead"sv, 1));
 
@@ -1171,10 +1221,13 @@ TEST_F(OAHSetTest, GetRandomMemberSkipsExpired) {
 
   for (size_t i = 0; i < 200; ++i) {
     auto it = ss_->GetRandomMember();
-    if (it == ss_->end())
-      continue;
+    ASSERT_NE(it, ss_->end());
     EXPECT_EQ(KeyOf(*it), "alive"sv);
   }
+
+  ss_->set_time(100);
+  EXPECT_EQ(ss_->GetRandomMember(), ss_->end());
+  EXPECT_EQ(ss_->BucketCount(), 64u);
 }
 
 TEST_F(OAHSetTest, AddManyKeepTtlFalseSetsExpirationUsed) {
@@ -1620,9 +1673,20 @@ TEST_F(OAHSetTest, ShrinkWithTTL) {
   // Set time to 50 - this will expire elements with TTL <= 50
   ss_->set_time(50);
 
-  // Shrink
+  // Shrinking preserves expired entries without inspecting their payloads.
   ss_->Shrink(1 << 21);
   EXPECT_EQ(ss_->BucketCount(), 1u << 21);
+  EXPECT_EQ(ss_->UpperBoundSize(), num_strs);
+
+  // Expiry collection preserves bucket capacity.
+  EXPECT_EQ(ss_->SizeSlow(), num_strs - expired_strs.size());
+  EXPECT_EQ(ss_->BucketCount(), 1u << 21);
+
+  // Once below half the bucket count, the next erase shrinks to the smallest power of two that
+  // holds the remaining entries; every survivor must stay reachable with its TTL afterwards.
+  EXPECT_TRUE(ss_->Erase(no_ttl_strs.back()));
+  no_ttl_strs.pop_back();
+  EXPECT_EQ(ss_->BucketCount(), 1u << 20);
 
   // Verify expired elements are gone
   for (const auto& str : expired_strs) {

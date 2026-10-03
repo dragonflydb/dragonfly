@@ -1793,7 +1793,7 @@ async def test_hash_field_expiry_replication_lag(df_factory: DflyInstanceFactory
 @pytest.mark.parametrize("container", ["hash", "set"])
 async def test_shrink_emptied_key_replication_lag(df_factory: DflyInstanceFactory, container):
     """
-    Verify that SHRINK journals an explicit DEL when expiring entries during bucket
+    Verify that DenseSet SHRINK journals an explicit DEL when expiring entries during bucket
     compaction empties the key.
 
     Set member TTLs still replay as relative values, so SHRINK must explicitly journal
@@ -1804,9 +1804,13 @@ async def test_shrink_emptied_key_replication_lag(df_factory: DflyInstanceFactor
         # wrapper pauses nothing, SIGSTOP on the child cannot be resumed with SIGCONT.
         pytest.skip("SIGSTOP-based lag simulation cannot pause a gdb-traced server")
 
-    # Set up replication before writing data so any later mismatch is real divergence
+    # DenseSet compaction expires members. OAHSet compaction preserves them and SREM
+    # already compacts its bucket array, so use DenseSet on both sides for this regression.
+    # Set up replication before writing data so any later mismatch is real divergence.
     master, [replica], c_master, [c_replica] = await setup_replication(
-        df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
+        df_factory,
+        master_args={"proactor_threads": 2, "use_oah_set": False},
+        replica_args={"proactor_threads": 2, "use_oah_set": False},
     )
 
     # Seed one entry at a time: a single bulk insert presizes the bucket array

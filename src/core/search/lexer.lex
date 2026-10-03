@@ -44,6 +44,7 @@ term_part  (\w|[^\x00-\x7f]|\\.)
 tag_val_base_ch [^,.<>{}\[\]\\\"\?':;!@#$%^&*()\-+=~\/| ]|\\.
 tag_val_ch {tag_val_base_ch}+(:+{tag_val_base_ch}*)*
 astrsk_ch  \*
+sep_ch     [.!#&=<>^?+/']
 
 
 %{
@@ -110,6 +111,10 @@ w{dq}([^"]|{esc_seq})*{dq}            { if (str()[0] != 'w') { matcher().less(1)
 {astrsk_ch}{tag_val_ch}+            return make_Tag(str(), TagType::SUFFIX, loc());
 {astrsk_ch}{tag_val_ch}+{astrsk_ch} return make_Tag(str(), TagType::INFIX, loc());
 {tag_val_ch}+                       return make_Tag(str(), TagType::REGULAR, loc());
+
+  /* One GLUE per separator character; WordGlue joins a run between two word atoms and drops the
+     rest. Longer matches win: `.5`, `+inf` stay numbers, `=>` an arrow, a paired '...' a phrase. */
+{sep_ch}                            return Parser::make_GLUE(loc());
 
 <<EOF>> return Parser::make_YYEOF(loc());
 %%

@@ -468,6 +468,15 @@ handshake mid-way. Only whether a full sync was ever completed, and the last-see
 (captured at the top of the stop/reconnect path) survive across the reconnect, and only the
 latter is what makes partial sync on reconnect possible.
 
+Newer RDB versions are accepted when their types and opcodes are supported; the minimum versions
+are Redis 5 and Valkey 80. Dragonfly-specific encodings require `df-ver` metadata because their IDs
+can overlap with Redis encodings, except for legacy version 9 snapshots.
+
+Unsupported versions, types, or opcodes stop replication retries and log the reason. The instance
+remains a read-only replica with its master link down. Failed full syncs discard partially loaded
+data before leaving `LOADING`. After upgrading Dragonfly or selecting a compatible source, run
+`REPLICAOF <host> <port>` again.
+
 ## Observability
 
 - `INFO REPLICATION` / `DFLYCLUSTER`-style tooling reports session state as one of
