@@ -963,6 +963,14 @@ TEST_F(GenericFamilyTest, ScanMallocSize) {
   EXPECT_THAT(resp.GetVec()[1], RespArray(UnorderedElementsAre("k1")));
 }
 
+TEST_F(GenericFamilyTest, ScanRejectsZeroCount) {
+  Run({"mset", "a", "1", "b", "2", "c", "3"});
+  // COUNT 0 must be rejected (Redis requires count > 0); it used to be silently clamped to 1.
+  EXPECT_THAT(Run({"scan", "0", "count", "0"}), ErrArg("syntax error"));
+  // A valid COUNT still works.
+  EXPECT_THAT(Run({"scan", "0", "count", "10"}), ArrLen(2));
+}
+
 TEST_F(GenericFamilyTest, Sort) {
   // Test list sort with params
   Run({"del", "list-1"});
