@@ -9,8 +9,6 @@
 #include <facade/resp_parser.h>
 #include <mimalloc.h>
 
-#include <random>
-
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/error.h"
@@ -980,24 +978,6 @@ TEST_F(RedisReplyBuilderTest, CaptureApplyIntoOpenCollection) {
   EXPECT_EQ(expected, TakePayload());
 }
 
-TEST_F(RedisReplyBuilderTest, FormatDouble) {
-  char buf[64];
-
-  auto format = [&](double d) { return RedisReplyBuilder::FormatDouble(d, buf, sizeof(buf)); };
-
-  EXPECT_STREQ("0.1", format(0.1));
-  EXPECT_STREQ("0.2", format(0.2));
-  EXPECT_STREQ("0.8", format(0.8));
-  EXPECT_STREQ("1.1", format(1.1));
-  EXPECT_STREQ("inf", format(INFINITY));
-  EXPECT_STREQ("-inf", format(-INFINITY));
-  EXPECT_STREQ("0", format(-0.0));
-  EXPECT_STREQ("1e-7", format(0.0000001));
-  EXPECT_STREQ("111111111111111110000", format(111111111111111111111.0));
-  EXPECT_STREQ("1.1111111111111111e+21", format(1111111111111111111111.0));
-  EXPECT_STREQ("1e-23", format(1e-23));
-}
-
 TEST_F(RedisReplyBuilderTest, VerbatimString) {
   // test resp3
   std::string str = "A simple string!";
@@ -1062,23 +1042,5 @@ TEST_F(RedisReplyBuilderTest, MCMetaGetLargeValue) {
   EXPECT_THAT(output, HasSubstr("VA 16000"));
   EXPECT_THAT(output, HasSubstr(large_val));
 }
-
-static void BM_FormatDouble(benchmark::State& state) {
-  vector<double> values;
-  char buf[64];
-
-  uniform_real_distribution<double> unif(0, 1e9);
-  default_random_engine re;
-  for (unsigned i = 0; i < 100; i++) {
-    values.push_back(unif(re));
-  }
-
-  while (state.KeepRunning()) {
-    for (auto d : values) {
-      RedisReplyBuilder::FormatDouble(d, buf, sizeof(buf));
-    }
-  }
-}
-BENCHMARK(BM_FormatDouble);
 
 }  // namespace facade
