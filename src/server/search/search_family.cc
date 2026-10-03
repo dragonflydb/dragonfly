@@ -4256,6 +4256,10 @@ void FtConfigSet(CmdArgParser* parser, CommandContext* cmd_cntx) {
     case ConfigRegistry::SetResult::INVALID:
       return cmd_cntx->SendError(absl::StrCat(kErrPrefix, param, "') - argument can not be set"),
                                  kConfigErrType);
+
+    case ConfigRegistry::SetResult::DUPLICATE:
+      // Set() (single parameter) never returns DUPLICATE; only SetMultiple() does.
+      break;
   }
   ABSL_UNREACHABLE();
 }
