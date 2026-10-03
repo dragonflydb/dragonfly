@@ -22,6 +22,8 @@
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
+#include "server/db_slice.h"
+#include "server/engine_shard_set.h"
 #include "server/search/doc_index.h"
 #include "server/test_utils.h"
 
@@ -5167,6 +5169,52 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{non_existing} => [KNN 3 @pos $vec]", "PARAMS", "2",
               "vec", query_vec});
   EXPECT_THAT(resp, kNoResults);
+}
+
+TEST_F(SearchFamilyTest, RestoreHnswVectorsWithConcurrentDeletion) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");
+  ResetService();
+
+  CreateHnswHashIdx();
+  constexpr size_t kNumDocs = 1000;
+  for (size_t i = 0; i < kNumDocs; ++i) {
+    EXPECT_THAT(Run({"HSET", absl::StrCat("h:", i), "title", "document", "vec", FloatVec(i)}),
+                IntArg(2));
+  }
+  WaitForIndexReady("idx");
+
+  pp_->at(0)->Await([&] {
+    auto* shard = EngineShard::tlocal();
+    auto* index = shard->search_indices()->GetIndex("idx");
+    ASSERT_NE(index, nullptr);
+    ASSERT_EQ(index->key_index().Size(), kNumDocs);
+    DbContext db_cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
+
+    // The posted fiber runs at restoration's periodic yield. Delete every document so the
+    // current document is removed regardless of the key snapshot's iteration order.
+    bool deleted = false;
+    Fiber deleter{[&] {
+      for (size_t i = 0; i < kNumDocs; ++i) {
+        string key = absl::StrCat("h:", i);
+        auto it = db_slice.FindMutable(db_cntx, key, OBJ_HASH);
+        ASSERT_TRUE(it.ok());
+        it->post_updater.Run();
+        db_slice.Del(db_cntx, it->it);
+      }
+      deleted = true;
+    }};
+
+    index->RestoreGlobalVectorIndices("idx", OpArgs{shard, nullptr, db_cntx});
+    EXPECT_TRUE(deleted);
+    deleter.Join();
+    EXPECT_EQ(index->key_index().Size(), 0u);
+  });
+
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(0));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*=>[KNN 1 @vec $vec]", "PARAMS", "2", "vec", FloatVec(0)}),
+              kNoResults);
 }
 
 // EF_RUNTIME widens the HNSW candidate list at query time: a large value explores enough of the
