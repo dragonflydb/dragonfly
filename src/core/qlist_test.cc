@@ -1814,16 +1814,25 @@ TEST_F(QListZstdTest, PolicyFlagParsing) {
   ASSERT_TRUE(AbslParseFlag("4096", &policy, &err)) << err;
   EXPECT_TRUE(policy.enabled);
   EXPECT_EQ(policy.min_size, 4096u);
+  EXPECT_EQ(policy.edge_depth, 1u);
+
+  ASSERT_TRUE(AbslParseFlag("min_size=8192, edge_depth=3", &policy, &err)) << err;
+  EXPECT_TRUE(policy.enabled);
+  EXPECT_EQ(policy.min_size, 8192u);
+  EXPECT_EQ(policy.edge_depth, 3u);
+  EXPECT_EQ(AbslUnparseFlag(policy), "min_size=8192,edge_depth=3");
 
   // A bare 0 keeps the deprecated flag's meaning: compression disabled.
   ASSERT_TRUE(AbslParseFlag("0", &policy, &err)) << err;
   EXPECT_FALSE(policy.enabled);
   EXPECT_EQ(AbslUnparseFlag(policy), "");
 
+  // Without an explicit edge_depth the default of 1 is unparsed back.
   ASSERT_TRUE(AbslParseFlag("min_size=8192", &policy, &err)) << err;
   EXPECT_TRUE(policy.enabled);
   EXPECT_EQ(policy.min_size, 8192u);
-  EXPECT_EQ(AbslUnparseFlag(policy), "min_size=8192");
+  EXPECT_EQ(policy.edge_depth, 1u);
+  EXPECT_EQ(AbslUnparseFlag(policy), "min_size=8192,edge_depth=1");
 
   ASSERT_TRUE(AbslParseFlag(" min_size = 4096 ", &policy, &err)) << err;
   EXPECT_TRUE(policy.enabled);
@@ -1834,10 +1843,342 @@ TEST_F(QListZstdTest, PolicyFlagParsing) {
   EXPECT_TRUE(policy.enabled);
   EXPECT_EQ(policy.min_size, 0u);
 
+  // No size requirement, the head and the tail still stay raw. A zero-valued field is omitted
+  // from the unparsed form rather than round-tripped as an explicit "min_size=0".
+  ASSERT_TRUE(AbslParseFlag("edge_depth=1", &policy, &err)) << err;
+  EXPECT_TRUE(policy.enabled);
+  EXPECT_EQ(policy.min_size, 0u);
+  EXPECT_EQ(policy.edge_depth, 1u);
+  EXPECT_EQ(AbslUnparseFlag(policy), "edge_depth=1");
+
   EXPECT_FALSE(AbslParseFlag("min_size=1,", &policy, &err));
   EXPECT_FALSE(AbslParseFlag("min_size", &policy, &err));
   EXPECT_FALSE(AbslParseFlag("min_size=abc", &policy, &err));
   EXPECT_FALSE(AbslParseFlag("foo=1", &policy, &err));
+
+  // The head and the tail are never compressed, so edge_depth must be at least 1.
+  EXPECT_FALSE(AbslParseFlag("edge_depth=0", &policy, &err));
+  EXPECT_FALSE(AbslParseFlag("edge_depth=17", &policy, &err));
+}
+
+TEST_F(QListZstdTest, EdgeDepthTwo) {
+  QList ql(-1, 0);
+  ql.set_compr_policy({.min_size = 1, .edge_depth = 2, .enabled = true});
+
+  constexpr unsigned kNodes = 8;
+  constexpr unsigned kEntriesPerNode = 30;
+  for (unsigned n = 0; n < kNodes; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(kEntriesPerNode, 100000 + n * kEntriesPerNode));
+  }
+  ql.CompressAfterLoad();
+  ASSERT_EQ(ql.node_count(), kNodes);
+
+  unsigned id = 0;
+  for (const QList::Node* node = ql.Head(); node; node = node->next, ++id) {
+    bool is_edge = id < 2 || id + 2 >= kNodes;
+    EXPECT_EQ(node->IsCompressed(), !is_edge) << "node " << id;
+  }
+
+  // Deleting the head promotes compressed node 2 into the edge zone. Only the new head must be
+  // raw; the zone node is restored lazily, on its first read.
+  ASSERT_TRUE(ql.Erase(0, kEntriesPerNode));
+  ASSERT_EQ(ql.node_count(), kNodes - 1);
+  EXPECT_FALSE(ql.Head()->IsCompressed());
+  const QList::Node* zone_node = ql.Head()->next;
+  EXPECT_TRUE(zone_node->IsCompressed());
+
+  auto read_zone_node = [&] {
+    auto cur = ql.GetReadCursor(kEntriesPerNode);
+    ASSERT_TRUE(cur.Valid());
+    EXPECT_THAT(string(cur.Get().view()), HasSubstr(StrCat("job", 100000 + 2 * kEntriesPerNode)));
+  };
+
+  // The first read decompresses it, and it is not recompressed since it is inside the zone.
+  auto decompressions = QList::stats.decompression_calls;
+  read_zone_node();
+  EXPECT_EQ(QList::stats.decompression_calls, decompressions + 1);
+  EXPECT_FALSE(zone_node->IsCompressed());
+  EXPECT_EQ(0, zone_node->recompress);
+
+  // Subsequent reads are free.
+  read_zone_node();
+  EXPECT_EQ(QList::stats.decompression_calls, decompressions + 1);
+  EXPECT_FALSE(zone_node->IsCompressed());
+}
+
+// An insertion inside the edge zone, not only at its very end, displaces the zone's innermost node.
+TEST_F(QListZstdTest, EdgeDepthThreeInteriorInsertPromotes) {
+  QList ql(-1, 0);
+  constexpr unsigned kDepth = 3;
+  ql.set_compr_policy({.min_size = 1, .edge_depth = kDepth, .enabled = true});
+
+  constexpr unsigned kNodes = 10;
+  constexpr unsigned kEntriesPerNode = 30;
+  for (unsigned n = 0; n < kNodes; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(kEntriesPerNode, 100000 + n * kEntriesPerNode));
+  }
+  ql.CompressAfterLoad();
+  ASSERT_EQ(ql.node_count(), kNodes);
+
+  // Insert a node-sized value before the first entry of node 1: neither node 1 nor the head has
+  // room for it, so it becomes its own node at index 1 and shifts old node 2 to index 3.
+  string pivot{ql.GetIterator(kEntriesPerNode).Get().view()};
+  const string big(3500, 'z');
+  ASSERT_TRUE(ql.Insert(pivot, big, QList::BEFORE));
+  ASSERT_EQ(ql.node_count(), kNodes + 1);
+
+  const unsigned len = ql.node_count();
+  unsigned id = 0;
+  for (const QList::Node* node = ql.Head(); node; node = node->next, ++id) {
+    bool is_edge = id < kDepth || id + kDepth >= len;
+    EXPECT_EQ(node->IsCompressed(), !is_edge) << "node " << id << " of " << len;
+  }
+
+  EXPECT_EQ(ql.Size(), kNodes * kEntriesPerNode + 1);
+  EXPECT_EQ(ql.GetIterator(kEntriesPerNode).Get().view(), big);
+  EXPECT_EQ(ql.GetIterator(kEntriesPerNode + 1).Get().view(), pivot);
+}
+
+// Replacing an element with a large one splits its node. The split node is marked dont_compress
+// while it is still being modified, and CoolOff() must not compress it behind Replace()'s back.
+TEST_F(QListZstdTest, ReplaceWithLargeElementInInteriorNode) {
+  QList ql(-1, 0);
+  ql.set_compr_policy({.min_size = 1, .enabled = true});
+
+  constexpr unsigned kNodes = 6;
+  constexpr unsigned kEntriesPerNode = 30;
+  for (unsigned n = 0; n < kNodes; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(kEntriesPerNode, 100000 + n * kEntriesPerNode));
+  }
+  ql.CompressAfterLoad();
+  ASSERT_TRUE(ql.Head()->next->next->IsCompressed());
+
+  // An entry in the middle of node 2, so that the node is split around it.
+  const long index = 2 * kEntriesPerNode + kEntriesPerNode / 2;
+  const string big(5000, 'x');
+  ASSERT_TRUE(ql.Replace(index, big));
+
+  EXPECT_EQ(ql.Size(), kNodes * kEntriesPerNode);
+  unsigned i = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        if (i == index) {
+          EXPECT_EQ(e.view(), big);
+        } else {
+          EXPECT_THAT(string(e.view()), HasSubstr(StrCat("job", 100000 + i, "'"))) << i;
+        }
+        ++i;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(i, kNodes * kEntriesPerNode);
+}
+
+// Random mutations against a reference model with a deep edge zone. The zone is a soft property
+// driven by node index hints; this checks that the hints never break data or the raw head/tail.
+TEST_F(QListZstdTest, EdgeDepthRandomOps) {
+  QList ql(-1, 0);
+  ql.set_compr_policy({.min_size = 1, .edge_depth = 3, .enabled = true});
+  deque<string> model;
+
+  std::mt19937 rng(7);
+  auto make_value = [&](unsigned i) {
+    string v = StrCat("{\"body\": \"W10=\", \"content-type\": \"application/json\", \"id\": ", i,
+                      ", \"argsrepr\": \"('job", i, "',)\"}");
+    if (rng() % 16 == 0)
+      v.append(3000 + rng() % 2000, 'q');  // occasionally a node sized or plain element.
+    return v;
+  };
+
+  const auto compressions = QList::stats.zstd_dict_compressions;
+  const auto decompressions = QList::stats.decompression_calls;
+  unsigned next_val = 0;
+  for (; next_val < 2000; ++next_val) {
+    string v = make_value(next_val);
+    ql.Push(v, QList::TAIL);
+    model.push_back(v);
+  }
+
+  for (unsigned step = 0; step < 4000; ++step) {
+    unsigned op = rng() % 9;
+    long idx = model.empty() ? 0 : long(rng() % model.size());
+    string v = make_value(next_val++);
+    switch (op) {
+      case 0:
+        ql.Push(v, QList::HEAD);
+        model.push_front(v);
+        break;
+      case 1:
+        ql.Push(v, QList::TAIL);
+        model.push_back(v);
+        break;
+      case 2:
+        if (!model.empty()) {
+          EXPECT_EQ(ql.Pop(QList::HEAD), model.front());
+          model.pop_front();
+        }
+        break;
+      case 3:
+        if (!model.empty()) {
+          EXPECT_EQ(ql.Pop(QList::TAIL), model.back());
+          model.pop_back();
+        }
+        break;
+      case 4:
+        if (!model.empty()) {
+          auto it = ql.GetIterator(idx);
+          ASSERT_TRUE(it.Valid());
+          bool after = rng() % 2;
+          ql.Insert(it, v, after ? QList::AFTER : QList::BEFORE);
+          model.insert(model.begin() + idx + after, v);
+        }
+        break;
+      case 5:
+        if (!model.empty()) {
+          unsigned cnt = 1 + rng() % 64;
+          ql.Erase(idx, cnt);
+          model.erase(model.begin() + idx, model.begin() + min<size_t>(model.size(), idx + cnt));
+        }
+        break;
+      case 6:
+        if (!model.empty()) {
+          ASSERT_TRUE(ql.Replace(idx, v));
+          model[idx] = v;
+        }
+        break;
+      case 7:
+        if (!model.empty()) {
+          auto cur = ql.GetReadCursor(idx);
+          ASSERT_TRUE(cur.Valid());
+          EXPECT_EQ(cur.Get().view(), model[idx]);
+        }
+        break;
+      case 8:
+        // Erase forward through an iterator, then insert at wherever it ended up.
+        if (!model.empty()) {
+          auto it = ql.GetIterator(idx);
+          for (unsigned cnt = 1 + rng() % 64; cnt > 0 && it.Valid(); --cnt) {
+            it = ql.Erase(it);
+            model.erase(model.begin() + idx);
+          }
+          if (it.Valid()) {
+            ql.Insert(it, v, QList::BEFORE);
+            model.insert(model.begin() + idx, v);
+          }
+        }
+        break;
+    }
+
+    ASSERT_EQ(ql.Size(), model.size()) << "step " << step;
+    if (ql.node_count() > 0) {
+      ASSERT_FALSE(ql.Head()->IsCompressed()) << "step " << step;
+      ASSERT_FALSE(ql.Tail()->IsCompressed()) << "step " << step;
+    }
+  }
+
+  unsigned i = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        EXPECT_EQ(e.view(), model[i]) << i;
+        ++i;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(i, model.size());
+
+  // The run has to exercise the compressed paths to mean anything.
+  EXPECT_GT(QList::stats.zstd_dict_compressions, compressions);
+  EXPECT_GT(QList::stats.decompression_calls, decompressions);
+}
+
+// Pushing a new node at an end shifts the former edge nodes out of the uncompressed zone. CoolOff
+// only sees the nodes the insertion touched, so without CompressEdgeBoundary() those displaced
+// nodes stayed raw forever and the raw zone grew with every push.
+TEST_F(QListZstdTest, EdgeDepthTwoPushPromotesInteriorNodes) {
+  QList ql(-1, 0);
+  ql.set_compr_policy({.min_size = 1, .edge_depth = 2, .enabled = true});
+
+  constexpr unsigned kNodes = 8;
+  constexpr unsigned kEntriesPerNode = 30;
+  for (unsigned n = 0; n < kNodes; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(kEntriesPerNode, 100000 + n * kEntriesPerNode));
+  }
+  ql.CompressAfterLoad();
+  ASSERT_EQ(ql.node_count(), kNodes);
+
+  // Large payloads so that each push starts its own node instead of extending the head.
+  const string big(3500, 'z');
+  ql.Push(big, QList::HEAD);
+  ql.Push(big, QList::HEAD);
+  ql.Push(big, QList::TAIL);
+  ASSERT_GT(ql.node_count(), kNodes);
+
+  const unsigned len = ql.node_count();
+  unsigned id = 0;
+  for (const QList::Node* node = ql.Head(); node; node = node->next, ++id) {
+    bool is_edge = id < 2 || id + 2 >= len;
+    EXPECT_EQ(node->IsCompressed(), !is_edge) << "node " << id << " of " << len;
+  }
+
+  // The pushed values survive the extra compression.
+  EXPECT_EQ(ql.Pop(QList::HEAD), big);
+  EXPECT_EQ(ql.Pop(QList::TAIL), big);
+}
+
+// A push that opens a new node and a pop that drops it move the same node across the edge zone
+// boundary every time. An incompressible node must not pay for a rejected compression each time.
+TEST_F(QListZstdTest, IncompressibleBoundaryNodeIsNotRetried) {
+  std::mt19937 rng(11);
+  auto random_value = [&] {
+    string v(3500, '\0');
+    for (char& c : v)
+      c = char(rng());
+    return v;
+  };
+
+  for (unsigned depth : {1u, 2u}) {
+    SCOPED_TRACE(depth);
+    QList ql(-1, 0);
+    ql.set_compr_policy({.min_size = 1, .edge_depth = uint8_t(depth), .enabled = true});
+    for (unsigned n = 0; n < 8; ++n)
+      ql.AppendListpack(BuildCeleryListpack(30, 100000 + n * 30));
+    ql.CompressAfterLoad();
+
+    // Random payloads, each large enough to take its own node. After depth + 1 of them the first
+    // one sits right past the edge zone and has been offered for compression once.
+    for (unsigned i = 0; i <= depth; ++i)
+      ql.Push(random_value(), QList::HEAD);
+    const QList::Node* boundary = ql.Head();
+    for (unsigned i = 0; i < depth; ++i)
+      boundary = boundary->next;
+    ASSERT_FALSE(boundary->IsCompressed());
+
+    const auto bad_attempts = QList::stats.bad_compression_attempts;
+    for (unsigned i = 0; i < 10; ++i) {
+      string v = random_value();
+      ql.Pop(QList::HEAD);
+      ql.Push(v, QList::HEAD);
+    }
+    EXPECT_EQ(QList::stats.bad_compression_attempts, bad_attempts);
+    EXPECT_FALSE(boundary->IsCompressed());
+  }
+}
+
+TEST_F(QListZstdTest, NoSizeGate) {
+  // min_size=0 compresses as soon as the list has more than one node.
+  QList ql(-1, 0);
+  ql.set_compr_policy({.min_size = 0, .enabled = true});
+
+  ql.AppendListpack(BuildCeleryListpack(30, 100000));
+  ql.CompressAfterLoad();
+  EXPECT_EQ(ql.node_count(), 1u);
+  EXPECT_FALSE(ql.Head()->IsCompressed());  // single node lists are left raw.
+
+  for (unsigned n = 1; n < 4; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(30, 100000 + n * 30));
+  }
+  ql.CompressAfterLoad();
+  EXPECT_TRUE(ql.Head()->next->IsCompressed());
 }
 
 }  // namespace dfly

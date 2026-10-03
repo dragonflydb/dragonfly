@@ -6,6 +6,7 @@
 
 #include <absl/functional/function_ref.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -47,9 +48,21 @@ class QList {
   // depth-compression and ignored while the latter is enabled (see the `compress` ctor argument).
   // Parsed from --list_compress_policy, see AbslParseFlag in qlist.cc.
   struct ComprPolicy {
+    // Bounds the walk in CompressEdgeBoundary(). Depths beyond a handful have no practical use:
+    // they only shrink the set of compressible nodes.
+    static constexpr uint32_t kMaxEdgeDepth = 16;
+    static constexpr uint32_t kMinEdgeDepth = 1;
+
     // The list's malloc usage must reach this many bytes before compression kicks in.
     // 0 means no size gate: compress as soon as the list has more than a single node.
     uint32_t min_size = 0;
+
+    // How many nodes at *each* end of the list are excluded from compression, mirroring the
+    // semantics of the `compress` depth argument. 1 (the default) keeps the head and the tail
+    // raw, so pushes and pops never need to decompress. The head and the tail are always raw;
+    // deeper zone nodes are never compressed, but a compressed node that a deletion moves into
+    // the zone stays compressed until it is read (or becomes the head or the tail).
+    uint8_t edge_depth = 1;
 
     bool enabled = false;
   };
@@ -62,6 +75,7 @@ class QList {
    * items). recompress: 1 bit, bool, true if node is temporary decompressed for usage.
    * attempted_compress: 1 bit, boolean, used for verifying during testing.
    * dont_compress: 1 bit, boolean, used for preventing compression of entry.
+   * zstd_rejected: 1 bit, boolean, dictionary compression of the current entry did not pay off.
    * */
 
   struct Node {
@@ -85,7 +99,8 @@ class QList {
     uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
     uint16_t offloaded : 1;          /* node is offloaded to colder storage */
     uint16_t io_pending : 1;         /* node has pending io operation */
-    uint16_t reserved1 : 7;          /* reserved for future use */
+    uint16_t zstd_rejected : 1;      /* dict compression rejected, reset when entry changes */
+    uint16_t reserved1 : 6;          /* reserved for future use */
 
     uint16_t reserved2; /* more bits to steal for future usage */
 
@@ -352,6 +367,7 @@ class QList {
   void set_compr_policy(const ComprPolicy& policy) {
     zstd_enabled_ = policy.enabled;
     zstd_min_size_ = policy.min_size;
+    edge_depth_ = policy.edge_depth;
   }
 
   // Returns the compression policy derived from the command line flags.
@@ -419,12 +435,29 @@ class QList {
     return zstd_enabled_ && !AllowLZFCompression() && !tiering_enabled_;
   }
 
-  bool IsInterior(const Node* node) const {
-    return node && node != head_ && node->next != nullptr;
+  // True if `node` lies outside the uncompressed edge zone of the policy and is therefore
+  // eligible for compression. `node_id` is the caller's index of `node` (0 is the head); a linked
+  // list can only answer the distance from an end by walking, so the callers, which track the
+  // index anyway, supply it.
+  //
+  // The head and the tail are checked by pointer and are never eligible regardless of `node_id`:
+  // push/pop and listpack demotion rely on them being raw. The rest of the zone is a soft
+  // property - a stale `node_id` costs at most a needless compression, never correctness.
+  bool IsCompressibleByPolicy(const Node* node, uint32_t node_id) const {
+    if (len_ <= 2u * edge_depth_ || node == head_ || node->next == nullptr)
+      return false;
+    if (edge_depth_ == 1)  // the pointer checks above already covered the whole zone.
+      return true;
+    node_id = std::min(node_id, len_ - 1);
+    return std::min(node_id, len_ - 1 - node_id) >= edge_depth_;
   }
 
-  bool CanCompressWithZstdDict(const Node* node) const {
-    return !dict_bulk_failed_ && IsInterior(node);
+  // An insertion at `new_node_id` inside an edge zone pushes that zone's innermost node out of it,
+  // and CoolOff() only sees the nodes the insertion touched. Compresses that displaced node.
+  void CompressEdgeBoundary(uint32_t new_node_id);
+
+  bool CanCompressWithZstdDict(const Node* node, uint32_t node_id) const {
+    return !dict_bulk_failed_ && IsCompressibleByPolicy(node, node_id);
   }
 
   Node* _Tail() const {
@@ -441,11 +474,13 @@ class QList {
   void CoolOff(Node* node, uint32_t node_id);
 
   // Like the RecompressOnly free function, but also handles ZSTD dict mode.
-  // Updates malloc_size_ with the resulting size delta.
-  void RecompressNode(Node* node);
+  // Updates malloc_size_ with the resulting size delta. `node_id` is the index of `node`.
+  void RecompressNode(Node* node, uint32_t node_id);
 
   void Replace(Iterator it, std::string_view elem);
-  void CompressByDepth(Node* node);
+
+  // `node_id` is the index of `node` and is ignored when `node` is null.
+  void CompressByDepth(Node* node, uint32_t node_id);
   void MoveFrom(QList&& other);
 
   // Trains a ZSTD dictionary from all node data and stores it in thread-local state.
@@ -467,10 +502,11 @@ class QList {
 
   void EndRead(const Iterator& it) const;
 
-  Node* MergeNodes(Node* node);
+  // `center_id` is the index of `center` on input and of the returned node on output.
+  Node* MergeNodes(Node* center, uint32_t* center_id);
 
-  // Deletes one of the nodes and returns the other.
-  Node* ListpackMerge(Node* a, Node* b);
+  // Deletes one of the nodes and returns the other, which takes the index `a_id` of `a`.
+  Node* ListpackMerge(Node* a, Node* b, uint32_t a_id);
 
   void DelNode(Node* node);
   bool DelPackedIndex(Node* node, uint8_t* p);
@@ -489,7 +525,8 @@ class QList {
   uint16_t dict_bulk_finished_ : 1;   /* bulk compression done, per-node compression active */
   uint16_t tiering_enabled_ : 1;      /* tiering storage enabled */
   uint16_t zstd_enabled_ : 1;         /* ZSTD dictionary compression enabled for this list */
-  uint16_t reserved1_ : 11;
+  uint16_t edge_depth_ : 8;           /* nodes at each end excluded from ZSTD compression */
+  uint16_t reserved1_ : 3;
   unsigned compress_ : QL_COMP_BITS; /* depth of end nodes not to compress;0=off */
   unsigned bookmark_count_ : QL_BM_BITS;
   unsigned reserved2_ : 12;
