@@ -29,7 +29,6 @@
 #include "facade/memcache_parser.h"
 #include "facade/op_status.h"
 #include "facade/proactor_read_buffer.h"
-#include "facade/redis_parser.h"
 #include "facade/reply_builder.h"
 #include "facade/resp_srv_parser.h"
 #include "facade/service_interface.h"

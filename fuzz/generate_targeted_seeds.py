@@ -50,7 +50,8 @@ target the changed code paths. You also return a list of Redis commands to focus
 - src/server/*_family.cc — command implementations (e.g. string_family.cc has GET/SET/INCR)
 - src/server/main_service.cc — command dispatch, MULTI/EXEC
 - src/server/db_slice.cc — per-shard key-value storage
-- src/facade/redis_parser.cc — RESP protocol parsing
+- src/facade/resp_srv_parser.cc — RESP command parsing
+- src/facade/resp_parser.cc — RESP reply parsing
 - src/facade/dragonfly_connection.cc — connection handling
 - src/core/ — data structures (dash table, dense_set, compact_object, etc.)
 - src/server/journal/ — replication journal
