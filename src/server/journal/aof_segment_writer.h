@@ -18,6 +18,14 @@ namespace dfly {
 
 class AofSegmentWriter {
  public:
+  enum class Durability : uint8_t {
+    kNormal,
+    // A write failed; new records are dropped until a checkpoint.
+    kWriteFailed,
+    // An fdatasync failed; ends only with a checkpoint. Writes go on as best effort, syncs stop.
+    kSyncFailed,
+  };
+
   AofSegmentWriter(std::string dir, uint32_t shard_id, uint32_t shard_count);
   ~AofSegmentWriter();
 
@@ -29,19 +37,27 @@ class AofSegmentWriter {
   void AddRecord(std::string_view record, uint64_t lsn);
   void Seal();
 
-  // Waits for in-flight writes and fdatasyncs the segment.
+  // Waits for in-flight I/O and fdatasyncs the segment.
+  // Fails if any write or fdatasync failed, even an earlier periodic one.
   std::error_code Shutdown();
 
-  // Blocks the calling fiber until PendingBytes() <= limit or a write fails.
+  // Blocks the calling fiber until PendingBytes() <= limit or a write failed.
   void WaitPending(size_t limit);
 
-  // Open block payload + sealed blocks not yet written.
+  // Open block payload + sealed blocks still held: unwritten, or written behind an unwritten one.
   size_t PendingBytes() const;
 
   // Last record fully written (not necessarily durable), 0 if none.
   uint64_t WrittenLsn() const {
     return written_lsn_;
   }
+
+  // Last record covered by a successful fdatasync before any failed one, 0 if none.
+  uint64_t DurableLsn() const {
+    return durable_lsn_;
+  }
+
+  Durability GetDurability() const;
 
   static std::string SegmentName(uint32_t shard_id, uint64_t seq);
 
@@ -63,6 +79,10 @@ class AofSegmentWriter {
   void Submit(PendingBlock* pb);
   void OnWriteDone(PendingBlock* pb, int res);
 
+  // Runs every kAofSyncMs: syncs completed writes.
+  void OnTick();
+  void OnSyncDone(size_t sync_offset, uint64_t sync_lsn, int res);
+
   std::string dir_;
   uint32_t shard_id_;
   uint32_t shard_count_;
@@ -74,15 +94,25 @@ class AofSegmentWriter {
 
   // Offset order; deque keeps references stable for completions.
   std::deque<PendingBlock> pending_;
-  // Total size of the blocks in pending_.
-  size_t pending_bytes_ = 0;
   // Writes submitted and not yet completed; must be 0 before destruction.
   uint64_t in_flight_ = 0;
+
+  // End of the contiguous written prefix of the file, and of the part covered by a successful
+  // fdatasync. The header is durable after Open.
+  // When written_offset_ == next_offset_ all blocks are written
+  size_t written_offset_ = kAofSegmentHeaderSize;
+  size_t durable_offset_ = kAofSegmentHeaderSize;
   uint64_t written_lsn_ = 0;
-  // Set on a failed write; from then on new records are dropped (fail-stop).
+  uint64_t durable_lsn_ = 0;
+
+  bool sync_in_flight_ = false;
+  uint32_t tick_id_ = 0;
+  // First failed write; from then on new records are dropped (fail-stop) until a checkpoint.
   std::error_code write_ec_;
-  // Notified on every write completion; WaitPending and Shutdown wait on it.
-  util::fb2::EventCount ev_;
+  // First failed fdatasync; sticky until a checkpoint.
+  std::error_code sync_ec_;
+  // Notified on write and sync completions; WaitPending and Shutdown wait on it.
+  util::fb2::CondVarAny cv_;
 };
 
 }  // namespace dfly
