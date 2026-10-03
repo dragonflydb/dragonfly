@@ -323,6 +323,8 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     # repro.env is written by run_fuzzer.sh so flags stay in sync with the fuzz run.
     # Fallback to safe defaults for older archives that don't include repro.env.
     REPRO_ENV="$EXTRACT_DIR/${CRASH_NAME}/repro.env"
+    AMBIG=""
+    MISSING=""
     if [[ -f "$REPRO_ENV" ]]; then
         # The archive knows its protocol (PROTOCOL=, or --memcached_port in older archives);
         # replaying it under the wrong one would silently produce a false positive.
@@ -340,6 +342,9 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
         # flags are defaults, so survival proves nothing about the real configuration.
         GUESSED=0
         grep -q '^GUESSED=1' "$REPRO_ENV" && GUESSED=1
+        # package_crash.sh sets these when the crash's history is ambiguous or missing entirely.
+        AMBIG=$(grep '^HISTORY_AMBIGUOUS=' "$REPRO_ENV" | cut -d= -f2 || true)
+        MISSING=$(grep '^HISTORY_MISSING=' "$REPRO_ENV" | cut -d= -f2 || true)
         MEM_LIMIT_KB=$(grep '^MEM_LIMIT_KB=' "$REPRO_ENV" | cut -d= -f2 || true)
         MEM_LIMIT_KB="${MEM_LIMIT_KB:-$((4 * 1024 * 1024))}"
         # Only flags go to the server; PROTOCOL=, GUESSED= and MEM_LIMIT_KB= are metadata.
@@ -371,6 +376,15 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     if [[ -n "${TRIAGE_MEM_LIMIT_KB:-}" && "$TRIAGE_MEM_LIMIT_KB" != "$MEM_LIMIT_KB" ]]; then
         CONFIG_CHANGED+="memory limit ${MEM_LIMIT_KB} KB overridden to ${TRIAGE_MEM_LIMIT_KB}; "
         MEM_LIMIT_KB="$TRIAGE_MEM_LIMIT_KB"
+    fi
+    # Missing or ambiguous RECORD history: the archive carries none, or possibly another crash's, so a
+    # surviving server is INCONCLUSIVE and a death is a crash under a possibly-different state, not a
+    # clean confirm.
+    if [[ -n "$MISSING" ]]; then
+        CONFIG_CHANGED+="crash history missing (no RECORD set matched the crash input); "
+    fi
+    if [[ -n "$AMBIG" ]]; then
+        CONFIG_CHANGED+="crash history ambiguous (the crash input is the newest record of ${AMBIG} sets); "
     fi
 
     # Both ports must be free before starting: a foreign service already listening there would
