@@ -87,7 +87,7 @@ ABSL_DECLARE_FLAG(uint32_t, proactor_threads);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
 
 #ifdef USE_ABSL_LOG
-ABSL_FLAG(bool, alsologtostderr, false, "also log messages to stderr in addition to logfiles");
+ABSL_DECLARE_FLAG(bool, alsologtostderr);
 #endif
 
 ABSL_FLAG(string, bind, "",
