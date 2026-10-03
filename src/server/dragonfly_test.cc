@@ -31,6 +31,7 @@ ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
+ABSL_DECLARE_FLAG(uint32_t, lua_max_stall_ms);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 ABSL_DECLARE_FLAG(bool, latency_tracking);
@@ -131,6 +132,22 @@ TEST_F(DflyEngineTest, LuaErrors) {
 
   resp = Run({"eval", "return redis.pcall('incrby', 'foo', 'bar')", "1"});
   EXPECT_THAT(resp, ErrArg("ERR Number of keys can't be greater than number of args"));
+}
+
+TEST_F(DflyEngineTest, EvalStallTimeout) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_lua_max_stall_ms, 100);
+
+  auto resp = Run({"eval", "while true do end", "0"});
+  EXPECT_THAT(resp, ErrArg("Script killed: blocked its thread for too long"));
+}
+
+TEST_F(DflyEngineTest, EvalStallTimeoutCaught) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_lua_max_stall_ms, 100);
+
+  auto resp = Run({"eval", "return pcall(function() while true do end end)", "0"});
+  EXPECT_THAT(resp, ErrArg("Script killed: blocked its thread for too long"));
 }
 
 TEST_F(DflyEngineTest, EvalResp) {
