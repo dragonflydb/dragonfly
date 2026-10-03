@@ -31,13 +31,19 @@ add_third_party(
 
 add_third_party(
   reflex
-  URL https://github.com/Genivia/RE-flex/archive/refs/tags/v5.2.2.tar.gz
+  URL https://github.com/Genivia/RE-flex/archive/refs/tags/v6.5.0.tar.gz
   PATCH_COMMAND autoreconf -fi
   CONFIGURE_COMMAND <SOURCE_DIR>/configure --disable-avx2 --prefix=${THIRD_PARTY_LIB_DIR}/reflex
           CXX=${CMAKE_CXX_COMPILER} CC=${CMAKE_C_COMPILER}
 )
 
 set(REFLEX "${THIRD_PARTY_LIB_DIR}/reflex/bin/reflex")
+ExternalProject_Add_Step(reflex_project reflex_executable
+  DEPENDEES install
+  COMMAND ${CMAKE_COMMAND} -E true
+  BYPRODUCTS ${REFLEX}
+)
+ExternalProject_Add_StepTargets(reflex_project reflex_executable)
 
 add_third_party(
   jsoncons
@@ -132,14 +138,14 @@ set_target_properties(TRDP::mimalloc2 PROPERTIES IMPORTED_LOCATION ${MIMALLOC_RO
 
 add_third_party(
   croncpp
-  URL https://github.com/mariusbancila/croncpp/archive/refs/tags/v2023.03.30.tar.gz
+  URL https://github.com/mariusbancila/croncpp/archive/refs/tags/v2026.08.12.tar.gz
   LIB "none"
 )
 
 if (WITH_SEARCH)
   add_third_party(
     uni-algo
-    URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.0.0.tar.gz
+    URL https://github.com/uni-algo/uni-algo/archive/refs/tags/v1.2.0.tar.gz
 
     CMAKE_PASS_FLAGS "-DCMAKE_CXX_STANDARD:STRING=20"
   )
@@ -158,7 +164,7 @@ if (WITH_SEARCH)
   # No autoconf/cmake/install in upstream Makefile; manual install copy.
   add_third_party(
     stemmer
-    URL https://github.com/snowballstem/snowball/archive/refs/tags/v3.0.1.tar.gz
+    URL https://github.com/snowballstem/snowball/archive/refs/tags/v3.1.1.tar.gz
     BUILD_IN_SOURCE 1
     CONFIGURE_COMMAND echo skip
     BUILD_COMMAND ${DFLY_TOOLS_MAKE} -j4 CFLAGS=-O3\ -fPIC libstemmer.a
@@ -172,7 +178,7 @@ endif()
 
 add_third_party(
   fast_float
-  URL https://github.com/fastfloat/fast_float/archive/refs/tags/v5.2.0.tar.gz
+  URL https://github.com/fastfloat/fast_float/archive/refs/tags/v8.3.0.tar.gz
   LIB "none"
 )
 
@@ -186,7 +192,7 @@ add_third_party(
 add_third_party(
   hdr_histogram
   GIT_REPOSITORY https://github.com/HdrHistogram/HdrHistogram_c/
-  GIT_TAG 652d51bcc36744fd1a6debfeb1a8a5f58b14022c
+  GIT_TAG 0.12.0
   CMAKE_PASS_FLAGS "-DHDR_LOG_REQUIRED=OFF -DHDR_HISTOGRAM_BUILD_PROGRAMS=OFF
                     -DHDR_HISTOGRAM_INSTALL_SHARED=OFF"
   LIB libhdr_histogram_static.a
@@ -204,7 +210,7 @@ if(WITH_SIMSIMD)
   # Build statically via add_third_party using the C shim with dynamic dispatch.
   add_third_party(
     simsimd
-    URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.3.tar.gz
+    URL https://github.com/ashvardanian/SimSIMD/archive/refs/tags/v6.5.16.tar.gz
     BUILD_IN_SOURCE 1
     CONFIGURE_COMMAND echo skip
     BUILD_COMMAND bash -c "\
