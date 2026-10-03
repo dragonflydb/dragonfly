@@ -8,12 +8,15 @@
 #include <absl/random/distributions.h>
 #include <absl/random/random.h>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <chrono>
 #include <queue>
+#include <utility>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
 #include "facade/resp_expr.h"
@@ -35,6 +38,9 @@
 #include "util/fibers/synchronization.h"
 
 using namespace std::chrono_literals;
+
+ABSL_DECLARE_FLAG(bool, force_epoll);
+ABSL_DECLARE_FLAG(std::string, tiered_prefix);
 
 namespace dfly {
 
@@ -108,6 +114,7 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
     bool start_paused = false;
     bool block_on_update = false;
     bool eventually_consistent = false;
+    bool park_after_delayed = false;  // park the traversal once after its first delayed entry
   };
 
   TestDriver(Params params, DbSlice* slice, ExecutionState* cntx, CommandRegistry* reg)
@@ -163,6 +170,10 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
     return DelayedEntryHandler::deps_.HasAny();
   }
 
+  bool HasQueuedDelayed() const {
+    return !DelayedEntryHandler::delayed_entries_.empty();
+  }
+
   void RecordSerialized(std::string key) {
     // Simulate occasional yields due to big value flushes
     while (absl::Bernoulli(bg_, 0.4)) {
@@ -214,6 +225,10 @@ struct TestDriver : public SerializerBase, journal::JournalConsumerInterface {
   TestDelayDriver delay_driver_;
 
   util::fb2::Done on_update_entered_, on_update_release_, resume_traversal_;
+  util::fb2::Done traversal_parked_, traversal_release_, traversal_done_;
+
+  bool parked_ = false;
+  bool blocked_after_traversal_ = false;  // IsAnyBucketBlocked() right after the traversal
 
   // Number of delayed entries currently enqueued.
   unsigned delayed_enqueued_ = 0;
@@ -227,9 +242,16 @@ void TestDriver::Loop() {
     resume_traversal_.Wait();
 
   TraverseAllBuckets(false);
+  blocked_after_traversal_ = IsAnyBucketBlocked();
+  traversal_done_.Notify();
 }
 
 void TestDriver::PaceTraversal(bool done) {
+  if (params_.park_after_delayed && delayed_enqueued_ > 0 && !std::exchange(parked_, true)) {
+    traversal_parked_.Notify();
+    traversal_release_.Wait();
+  }
+
   // Simualte yield due to socket flushes
   for (unsigned i = 0; i < 2; ++i)
     util::ThisFiber::Yield();
@@ -368,6 +390,35 @@ class SerializerBaseTest : public BaseFamilyTest {
 
   ExecutionState cntx_;
   std::optional<TestDriver> driver_;
+};
+
+// With tiered storage enabled, OnChange also flushes the delayed entries of the changed bucket.
+class SerializerBaseTieredTest : public SerializerBaseTest {
+ public:
+  void SetUp() override {
+#if defined(__linux__) && defined(WITH_TIERING)
+    bool supported = !absl::GetFlag(FLAGS_force_epoll);
+#else
+    bool supported = false;
+#endif
+    if (!supported)
+      GTEST_SKIP() << "Requires tiered storage on io_uring";
+
+    prev_prefix_ = absl::GetFlag(FLAGS_tiered_prefix);
+    absl::SetFlag(&FLAGS_tiered_prefix,
+                  absl::StrCat(testing::TempDir(), "serializer_base_test_", getpid()));
+    SerializerBaseTest::SetUp();
+  }
+
+  void TearDown() override {
+    if (!prev_prefix_)
+      return;
+    SerializerBaseTest::TearDown();
+    absl::SetFlag(&FLAGS_tiered_prefix, *prev_prefix_);
+  }
+
+ private:
+  std::optional<std::string> prev_prefix_;  // set once SetUp ran
 };
 
 class SerializerBaseParamTest : public SerializerBaseTest,
@@ -611,6 +662,45 @@ TEST_F(SerializerBaseTest, DelayedEntriesErrorReleasesLatches) {
 TEST_F(SerializerBaseTest, CancelledTraversalDiscardsDelayed) {
   Run({"DEBUG", "POPULATE", "1"});
   EXPECT_FALSE(CancelledTraversalLeaksDelayed());
+}
+
+// A writer's OnChange takes the delayed entry of an already traversed bucket and suspends on its
+// unresolved read. A successful traversal must not end while that entry is still pending.
+TEST_F(SerializerBaseTieredTest, TraversalWaitsForDelayedEntryTakenByOnChange) {
+  driver_params = {.delay_prob = 1.0, .park_after_delayed = true};
+
+  Run({"DEBUG", "POPULATE", "1"});
+  Start();
+  Change([](TestDriver& d) { d.traversal_parked_.Wait(); });
+
+  auto writer = pp_->at(0)->LaunchFiber([&] { Run("W1", {"APPEND", "key:0", "D"}); });
+
+  bool taken = false;
+  Change([&taken](TestDriver& d) {
+    for (unsigned i = 0; i < 2000 && d.HasQueuedDelayed(); ++i)
+      util::ThisFiber::SleepFor(1ms);
+    taken = !d.HasQueuedDelayed() && d.delayed_enqueued_ == 1;
+  });
+
+  // Give the traversal time to reach its end while the writer still holds the entry.
+  Change([](TestDriver& d) {
+    d.traversal_release_.Notify();
+    d.traversal_done_.WaitFor(20ms);
+  });
+
+  Change([](TestDriver& d) { d.delay_driver_.Resume(); });
+  writer.Join();
+
+  bool blocked = true;
+  Change([&blocked](TestDriver& d) {
+    d.traversal_done_.Wait();
+    blocked = d.blocked_after_traversal_;
+  });
+  auto [stats, baselines, journal_writes] = Finish();
+
+  ASSERT_TRUE(taken) << "the writer did not take over the delayed entry";
+  EXPECT_FALSE(blocked) << "bucket dependencies are pending after a successful traversal";
+  EXPECT_TRUE(baselines.contains("key:0"));
 }
 
 }  // namespace dfly
