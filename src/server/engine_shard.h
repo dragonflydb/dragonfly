@@ -257,6 +257,14 @@ class EngineShard {
     return type_mem_delta_;
   }
 
+  void AddKeyMemDelta(int64_t delta) {
+    key_mem_delta_ += delta;
+  }
+
+  int64_t key_mem_delta() const {
+    return key_mem_delta_;
+  }
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
@@ -381,6 +389,7 @@ class EngineShard {
   Counter counter_[COUNTER_TOTAL];
 
   TypeMemDeltas type_mem_delta_ = {};
+  int64_t key_mem_delta_ = 0;
 
   static __thread EngineShard* shard_;
 };

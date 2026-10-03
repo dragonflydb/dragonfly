@@ -272,6 +272,24 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
       absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
 
+  {
+    string type_memory_delta_metric;
+    bool added = false;
+    AppendMetricHeader("type_memory_delta_bytes",
+                       "Signed cumulative tracked memory delta per object type", MetricType::GAUGE,
+                       &type_memory_delta_metric);
+    for (size_t type = 0; type < m.type_mem_delta.size(); ++type) {
+      int64_t delta = m.type_mem_delta[type];
+      if (delta == 0)
+        continue;
+      AppendMetricValue("type_memory_delta_bytes", delta, {"type"}, {ObjTypeToString(type)},
+                        &type_memory_delta_metric);
+      added = true;
+    }
+    if (added)
+      absl::StrAppend(&resp->body(), type_memory_delta_metric);
+  }
+
   // Stats metrics
   AppendMetricWithoutLabels("connections_received_total", "", conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
@@ -779,17 +797,17 @@ void Metrics::Merge(const Metrics& src) {
   // Expressed via sizeof so it adapts to different STL/Abseil implementations.
   // If this fires, a field was added/removed - update Merge() and InitFromThread().
   static_assert(
-      sizeof(Metrics) == sizeof(SliceEvents) + sizeof(std::vector<DbStats>) +
-                             sizeof(EngineShard::Stats) + sizeof(facade::FacadeStats) +
-                             sizeof(TieredStats) + sizeof(SearchStats) +
-                             sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
-                             sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
-                             sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
-                             sizeof(absl::flat_hash_map<std::string, uint64_t>) +
-                             sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
-                             sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
-                             sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+      sizeof(Metrics) ==
+          sizeof(SliceEvents) + sizeof(std::vector<DbStats>) + sizeof(EngineShard::Stats) +
+              sizeof(facade::FacadeStats) + sizeof(TieredStats) + sizeof(SearchStats) +
+              sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
+              sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
+              sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
+              sizeof(absl::flat_hash_map<std::string, uint64_t>) +
+              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
+              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
+              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+              sizeof(TypeMemDeltas) + 176,  // scalar fields (19 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
   // Per-db stats / events / small_string_bytes are merged element-wise.
@@ -799,6 +817,8 @@ void Metrics::Merge(const Metrics& src) {
     db_stats[i] += src.db_stats[i];
   events += src.events;
   small_string_bytes += src.small_string_bytes;
+  for (size_t type = 0; type < type_mem_delta.size(); ++type)
+    type_mem_delta[type] += src.type_mem_delta[type];
 
   // Aggregate sub-structs.
   shard_stats += src.shard_stats;
@@ -849,17 +869,17 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
                              unsigned proactor_index, const MetricsCollectOpts& opts,
                              DflyCmd* dfly_cmd) {
   static_assert(
-      sizeof(Metrics) == sizeof(SliceEvents) + sizeof(std::vector<DbStats>) +
-                             sizeof(EngineShard::Stats) + sizeof(facade::FacadeStats) +
-                             sizeof(TieredStats) + sizeof(SearchStats) +
-                             sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
-                             sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
-                             sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
-                             sizeof(absl::flat_hash_map<std::string, uint64_t>) +
-                             sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
-                             sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
-                             sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+      sizeof(Metrics) ==
+          sizeof(SliceEvents) + sizeof(std::vector<DbStats>) + sizeof(EngineShard::Stats) +
+              sizeof(facade::FacadeStats) + sizeof(TieredStats) + sizeof(SearchStats) +
+              sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
+              sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
+              sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
+              sizeof(absl::flat_hash_map<std::string, uint64_t>) +
+              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
+              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
+              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+              sizeof(TypeMemDeltas) + 176,  // scalar fields (19 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
   ServerState* ss = ServerState::tlocal();
@@ -885,6 +905,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
     events = slice_stats.events;
     small_string_bytes = slice_stats.small_string_bytes;
     shard_stats = shard->stats();
+    type_mem_delta = shard->type_mem_delta();
 
     if (shard->tiered_storage()) {
       tiered_stats = shard->tiered_storage()->GetStats();

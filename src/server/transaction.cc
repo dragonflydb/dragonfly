@@ -1939,7 +1939,8 @@ int64_t TrackedMemory() {
   DCHECK_NE(shard, nullptr);
 
   // Full search index memory accounting scans all indices, so skip it
-  return shard->UsedMemoryWithoutSearch();
+  const int64_t used_memory = shard->UsedMemoryWithoutSearch();
+  return used_memory - shard->key_mem_delta();
 }
 
 }  // namespace
