@@ -89,7 +89,7 @@ class SingleThreadDflyEngineTest : public BaseFamilyTest {
 
 class DefragDflyEngineTest : public SingleThreadDflyEngineTest {};
 
-// TODO: to implement equivalent parsing in redis parser.
+// TODO: implement equivalent inline parsing in RespSrvParser.
 TEST_F(DflyEngineTest, Sds) {
   int argc;
   sds* argv = sdssplitargs("\r\n", &argc);

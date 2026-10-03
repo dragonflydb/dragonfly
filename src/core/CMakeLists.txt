@@ -67,7 +67,7 @@ helio_cxx_test(sharded_hash_map_test dfly_core LABELS DFLY)
 helio_cxx_test(page_usage_stats_test dfly_core LABELS DFLY)
 helio_cxx_test(cms_test dfly_core LABELS DFLY)
 helio_cxx_test(cuckoo_filter_test dfly_core LABELS DFLY)
-helio_cxx_test(memory_test TRDP::mimalloc2 LABELS DFLY)
+helio_cxx_test(memory_test TRDP::mimalloc2 absl::flat_hash_set LABELS DFLY)
 
 if(LIB_PCRE2)
   target_compile_definitions(dfly_core_test PRIVATE USE_PCRE2=1)

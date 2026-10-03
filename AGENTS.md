@@ -175,7 +175,8 @@ dragonfly/
 │   │   └── json/             # JSON support
 │   ├── facade/               # Network & command handling
 │   │   ├── dragonfly_connection.cc # Connection management
-│   │   ├── redis_parser.cc   # RESP protocol parser
+│   │   ├── resp_srv_parser.cc # RESP command parser
+│   │   ├── resp_parser.cc    # RESP reply parser
 │   │   └── memcache_parser.cc # Memcached protocol
 │   └── redis/                # Redis-specific implementations
 │       └── lua/              # Lua scripting support
@@ -394,7 +395,8 @@ Quick reference to the most important files in the codebase.
 | String map | `src/core/string_map.h` |
 | **Networking** | |
 | Connection handling | `src/facade/dragonfly_connection.cc` |
-| Redis protocol parser | `src/facade/redis_parser.cc` |
+| RESP command parser | `src/facade/resp_srv_parser.cc` |
+| RESP reply parser | `src/facade/resp_parser.cc` |
 | Memcached protocol parser | `src/facade/memcache_parser.cc` |
 | **Build System** | |
 | Root CMake config | `CMakeLists.txt` |

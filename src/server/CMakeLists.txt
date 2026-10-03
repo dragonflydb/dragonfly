@@ -174,7 +174,8 @@ helio_cxx_test(detail/egress_throttle_test dfly_test_lib LABELS DFLY)
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test
-                 redis_parser_test stream_family_test string_family_test
+                 resp_parser_test resp_srv_parser_test memory_test
+                 stream_family_test string_family_test
                  bitops_family_test set_family_test zset_family_test geo_family_test
                  hll_family_test cluster_config_test cluster_family_test acl_family_test
                  json_family_memory_test jwt_validator_test)

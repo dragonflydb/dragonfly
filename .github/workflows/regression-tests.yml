@@ -24,7 +24,7 @@ on:
 
       # GoogleTest - manual trigger inputs.
       gtest-suites:
-        description: "GoogleTest: manual runs only; optional targets, empty runs every target. Example: dfly_core_test,redis_parser_test"
+        description: "GoogleTest: manual runs only; optional targets, empty runs every target. Example: dfly_core_test,resp_srv_parser_test"
         required: false
         default: ""
         type: string
