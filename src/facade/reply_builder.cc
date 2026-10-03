@@ -7,7 +7,6 @@
 #include <absl/container/fixed_array.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
-#include <double-conversion/double-to-string.h>
 
 #include <limits>
 
@@ -16,6 +15,7 @@
 #include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "common/borrowed_string.h"
+#include "common/dtoa.h"
 #include "facade/error.h"
 #include "util/fibers/proactor_base.h"
 
@@ -27,7 +27,6 @@
 #endif
 
 using namespace std;
-using namespace double_conversion;
 
 namespace facade {
 
@@ -40,11 +39,6 @@ constexpr char kDoublePref[] = ",";
 constexpr char kLongPref[] = ":";
 constexpr char kNullStringR2[] = "$-1\r\n";
 constexpr char kNullStringR3[] = "_\r\n";
-
-constexpr unsigned kConvFlags =
-    DoubleToStringConverter::UNIQUE_ZERO | DoubleToStringConverter::EMIT_POSITIVE_EXPONENT_SIGN;
-
-DoubleToStringConverter dfly_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
 
 template <typename T> size_t piece_size(const T& v) {
   if constexpr (is_array_v<T>)
@@ -362,7 +356,7 @@ void RedisReplyBuilderBase::SendLong(long val) {
 }
 
 void RedisReplyBuilderBase::SendDouble(double val) {
-  char buf[DoubleToStringConverter::kBase10MaximalLength + 8];  // +8 to be on the safe side.
+  char buf[cmn::kMaxDoubleStrLen];
   static_assert(ABSL_ARRAYSIZE(buf) < kMaxInlineSize, "Write temporary string from buf inline");
   string_view val_str = FormatDouble(val, buf, ABSL_ARRAYSIZE(buf));
 
@@ -419,9 +413,9 @@ void RedisReplyBuilderBase::SendProtocolError(std::string_view str) {
 }
 
 char* RedisReplyBuilderBase::FormatDouble(double d, char* dest, unsigned len) {
-  StringBuilder sb(dest, len);
-  CHECK(dfly_conv.ToShortest(d, &sb));
-  return sb.Finalize();
+  DCHECK_GE(len, cmn::kMaxDoubleStrLen);
+  cmn::FormatDoubleShortest(d, true, dest);
+  return dest;
 }
 
 void RedisReplyBuilderBase::SendVerbatimString(std::string_view str, VerbatimFormat format) {

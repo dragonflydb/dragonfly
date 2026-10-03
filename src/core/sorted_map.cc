@@ -16,10 +16,9 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
-#include <double-conversion/double-to-string.h>
-
 #include "base/endian.h"
 #include "base/logging.h"
+#include "common/dtoa.h"
 
 using namespace std;
 
@@ -103,12 +102,7 @@ int zzlCompareElements(unsigned char* eptr, unsigned char* cstr, unsigned int cl
   return cmp;
 }
 
-using double_conversion::DoubleToStringConverter;
-constexpr unsigned kConvFlags = DoubleToStringConverter::UNIQUE_ZERO;
-
-DoubleToStringConverter score_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
-
-// Copied from redis code but uses double_conversion to encode double values.
+// Copied from redis code but uses FormatDoubleShortest to encode double values.
 unsigned char* ZzlInsertAt(unsigned char* zl, unsigned char* eptr, std::string_view ele,
                            double score) {
   unsigned char* sptr;
@@ -117,12 +111,7 @@ unsigned char* ZzlInsertAt(unsigned char* zl, unsigned char* eptr, std::string_v
   long long lscore;
   int score_is_long = double2ll(score, &lscore);
   if (!score_is_long) {
-    // Use double converter to get the shortest representation.
-    double_conversion::StringBuilder sb(scorebuf, sizeof(scorebuf));
-    score_conv.ToShortest(score, &sb);
-    scorelen = sb.position();
-    sb.Finalize();
-    DCHECK_EQ(scorelen, strlen(scorebuf));
+    scorelen = cmn::FormatDoubleShortest(score, false, scorebuf);
   }
 
   // Argument parsing converts empty strings to default initialized string views.

@@ -85,6 +85,7 @@ endfunction()
 # the output file resides in the build directory.
 configure_file(server/version.cc.in "${CMAKE_CURRENT_SOURCE_DIR}/server/version.cc" @ONLY)
 
+add_subdirectory(common)
 add_subdirectory(redis)
 add_subdirectory(core)
 add_subdirectory(facade)

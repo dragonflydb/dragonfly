@@ -11,22 +11,14 @@ add_third_party(
 )
 
 
-if (APPLE OR ${CMAKE_SYSTEM_NAME} MATCHES "FreeBSD")
-  set(SED_REPL sed "-i" '')
-else()
-  set(SED_REPL sed "-i")
-endif()
-
+# Header-only, so we only fetch the headers.
 add_third_party(
-  dconv
-  GIT_REPOSITORY https://github.com/google/double-conversion
-  # URL https://github.com/google/double-conversion/archive/refs/tags/v3.3.1.tar.gz
-  GIT_TAG 0604b4c
-  PATCH_COMMAND ${SED_REPL} "/static const std::ctype/d"
-                <SOURCE_DIR>/double-conversion/string-to-double.cc
-  COMMAND ${SED_REPL} "/std::use_facet</d" <SOURCE_DIR>/double-conversion/string-to-double.cc
-  COMMAND ${SED_REPL} "s/cType.tolower/std::tolower/g" <SOURCE_DIR>/double-conversion/string-to-double.cc
-  LIB libdouble-conversion.a
+  dragonbox
+  URL https://github.com/jk-jeon/dragonbox/archive/beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44.tar.gz
+  CONFIGURE_COMMAND echo skip
+  BUILD_COMMAND echo skip
+  INSTALL_COMMAND cp -r <SOURCE_DIR>/include/dragonbox ${THIRD_PARTY_LIB_DIR}/dragonbox/include/
+  LIB "none"
 )
 
 add_third_party(
@@ -234,6 +226,11 @@ add_library(TRDP::jsoncons INTERFACE IMPORTED)
 add_dependencies(TRDP::jsoncons jsoncons_project)
 set_target_properties(TRDP::jsoncons PROPERTIES
                       INTERFACE_INCLUDE_DIRECTORIES "${JSONCONS_INCLUDE_DIR}")
+
+add_library(TRDP::dragonbox INTERFACE IMPORTED)
+add_dependencies(TRDP::dragonbox dragonbox_project)
+set_target_properties(TRDP::dragonbox PROPERTIES
+                      INTERFACE_INCLUDE_DIRECTORIES "${DRAGONBOX_INCLUDE_DIR}")
 
 add_library(TRDP::croncpp INTERFACE IMPORTED)
 add_dependencies(TRDP::croncpp croncpp_project)
