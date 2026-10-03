@@ -29,10 +29,10 @@ class AofSegmentWriter {
   void AddRecord(std::string_view record, uint64_t lsn);
   void Seal();
 
-  // Waits for in-flight writes and fdatasyncs the segment.
+  // Retries failed writes once, waits for in-flight I/O and fdatasyncs the segment.
   std::error_code Shutdown();
 
-  // Blocks the calling fiber until UnwrittenBytes() <= limit or a write fails.
+  // Blocks the calling fiber until UnwrittenBytes() <= limit.
   void WaitUnwritten(size_t limit);
 
   // Open block payload + sealed blocks not yet written.
@@ -41,6 +41,16 @@ class AofSegmentWriter {
   // Last record fully written (not necessarily durable), 0 if none.
   uint64_t WrittenLsn() const {
     return written_lsn_;
+  }
+
+  // Last record covered by a completed fdatasync, 0 if none.
+  uint64_t DurableLsn() const {
+    return durable_lsn_;
+  }
+
+  // A write is being retried, or an fdatasync failed (cleared only by a checkpoint).
+  bool ReducedDurability() const {
+    return failed_blocks_ > 0 || sync_failed_;
   }
 
   static std::string SegmentName(uint32_t shard_id, uint64_t seq);
@@ -53,11 +63,18 @@ class AofSegmentWriter {
     uint64_t last_lsn;
     size_t written = 0;
     bool done = false;
+    // Write failed; resubmitted on the next tick.
+    bool failed = false;
   };
 
   void OnSealed(AofSealedBlock block);
   void Submit(PendingBlock* pb);
   void OnWriteDone(PendingBlock* pb, int res);
+
+  // Runs every kAofSyncMs: retries failed writes and syncs completed ones.
+  void OnTick();
+  void RetryFailed();
+  void OnSyncDone(uint64_t sync_target, int res);
 
   std::string dir_;
   uint32_t shard_id_;
@@ -69,8 +86,15 @@ class AofSegmentWriter {
   // Offset order; deque keeps references stable for completions.
   std::deque<PendingBlock> pending_;
   size_t pending_bytes_ = 0;
-  unsigned in_flight_ = 0;
+  uint64_t in_flight_ = 0;
+  uint64_t failed_blocks_ = 0;
   uint64_t written_lsn_ = 0;
+  uint64_t durable_lsn_ = 0;
+  bool sync_in_flight_ = false;
+  bool sync_failed_ = false;
+  // Set by Shutdown: failed writes are final instead of retried.
+  bool stopping_ = false;
+  uint32_t tick_id_ = 0;
   std::error_code write_ec_;
   util::fb2::EventCount ev_;
 };

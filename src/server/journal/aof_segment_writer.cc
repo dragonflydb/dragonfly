@@ -14,6 +14,7 @@
 
 #include "base/logging.h"
 #include "server/error.h"
+#include "util/fibers/proactor_base.h"
 
 namespace dfly {
 
@@ -21,6 +22,12 @@ using namespace std;
 using util::fb2::OpenLinux;
 
 namespace {
+
+constexpr uint32_t kAofSyncMs = 1000;
+
+error_code IoError(int res) {
+  return res < 0 ? error_code{-res, system_category()} : make_error_code(errc::io_error);
+}
 
 error_code SyncDir(const string& dir) {
   auto res = OpenLinux(dir, O_RDONLY | O_DIRECTORY, 0);
@@ -42,6 +49,8 @@ AofSegmentWriter::AofSegmentWriter(string dir, uint32_t shard_id, uint32_t shard
 
 AofSegmentWriter::~AofSegmentWriter() {
   DCHECK_EQ(in_flight_, 0u);
+  DCHECK(!sync_in_flight_);
+  DCHECK_EQ(tick_id_, 0u) << "Shutdown() was not called";
 }
 
 string AofSegmentWriter::SegmentName(uint32_t shard_id, uint64_t seq) {
@@ -87,28 +96,34 @@ error_code AofSegmentWriter::Open(uint64_t seq) {
   std::move(cleanup).Cancel();
 
   builder_.emplace(uid, [this](AofSealedBlock block) { OnSealed(std::move(block)); });
+  tick_id_ = util::fb2::ProactorBase::me()->AddPeriodic(kAofSyncMs, [this] { OnTick(); });
   return {};
 }
 
 void AofSegmentWriter::AddRecord(string_view record, uint64_t lsn) {
-  // TODO: fail-stop after a write error for now; retries come later.
-  if (write_ec_)
-    return;
   builder_->Append(record, lsn);
 }
 
 void AofSegmentWriter::Seal() {
-  if (write_ec_)
-    return;
   builder_->Seal();
 }
 
 error_code AofSegmentWriter::Shutdown() {
+  util::fb2::ProactorBase::me()->CancelPeriodic(tick_id_);
+  tick_id_ = 0;
+
+  // Last attempt for failed writes; from now on a write error is final.
+  stopping_ = true;
   Seal();
-  ev_.await([this] { return in_flight_ == 0; });
+  RetryFailed();
+  ev_.await([this] { return in_flight_ == 0 && !sync_in_flight_; });
   if (write_ec_)
     return write_ec_;
+
   RETURN_ON_ERR(file_->FSync(IORING_FSYNC_DATASYNC));
+  // A failed sync may have dropped dirty pages, so a later success proves nothing.
+  if (!sync_failed_)
+    durable_lsn_ = written_lsn_;
   return file_->Close();
 }
 
@@ -137,11 +152,19 @@ void AofSegmentWriter::Submit(PendingBlock* pb) {
 
 void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
   if (res <= 0) {
-    // TODO: fail-stop for now, retries come later.
-    // The block stays pending forever and written_lsn_ gets stuck.
-    write_ec_ = res < 0 ? error_code{-res, system_category()} : make_error_code(errc::io_error);
-    LOG(ERROR) << "AOF write failed at offset " << pb->offset << ": " << write_ec_.message();
+    // Keep the buffer and retry at the same offset on the next tick. Blocks after it can
+    // complete but are not popped, so WrittenLsn stops before the failed block.
+    // TODO: decide when a persistent error (EIO, ENOSPC) stops retrying, e.g. fail-stop after a
+    // deadline; until then backpressure stalls the shard.
+    error_code ec = IoError(res);
+    LOG_EVERY_T(ERROR, 1) << "AOF write failed at offset " << pb->offset << ": " << ec.message();
     --in_flight_;
+    if (stopping_) {
+      write_ec_ = ec;
+    } else {
+      pb->failed = true;
+      ++failed_blocks_;
+    }
     ev_.notifyAll();
     return;
   }
@@ -164,6 +187,45 @@ void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
       written_lsn_ = front.last_lsn;
     pending_bytes_ -= front.bytes.size();
     pending_.pop_front();
+  }
+  ev_.notifyAll();
+}
+
+void AofSegmentWriter::OnTick() {
+  RetryFailed();
+
+  if (sync_in_flight_ || sync_failed_ || written_lsn_ <= durable_lsn_)
+    return;
+  uint64_t sync_target = written_lsn_;
+  sync_in_flight_ = true;
+  file_->FSyncAsync(IORING_FSYNC_DATASYNC,
+                    [this, sync_target](int res) { OnSyncDone(sync_target, res); });
+}
+
+void AofSegmentWriter::RetryFailed() {
+  if (failed_blocks_ == 0)
+    return;
+  // Maybe worth having a failed list separately, not important for now
+  for (PendingBlock& pb : pending_) {
+    if (!pb.failed)
+      continue;
+    pb.failed = false;
+    --failed_blocks_;
+    ++in_flight_;
+    Submit(&pb);
+  }
+}
+
+void AofSegmentWriter::OnSyncDone(uint64_t sync_target, int res) {
+  sync_in_flight_ = false;
+  if (res < 0) {
+    // Never retried: the kernel may have dropped the dirty pages ("fsyncgate").
+    // DurableLsn stops until a checkpoint.
+    // TODO: decide how to trigger an immediate checkpoint (#8410) to clear this state.
+    sync_failed_ = true;
+    LOG(ERROR) << "AOF fdatasync failed: " << IoError(res).message();
+  } else {
+    durable_lsn_ = sync_target;
   }
   ev_.notifyAll();
 }
