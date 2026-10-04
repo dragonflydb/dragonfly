@@ -47,8 +47,30 @@ if [[ -z "$CRASH_FILE" ]]; then
     exit 1
 fi
 
-# Count RECORD files
-RECORD_COUNT=$(find "$CRASHES_DIR" -maxdepth 1 -name "RECORD:${CRASH_ID},cnt:*" | wc -l)
+# AFL numbers RECORD sets by crash event, counting unsaved calibration/trim aborts too, while the
+# crash file's id: counts only saved crashes — so RECORD:${CRASH_ID} is usually another crash's
+# history. The ring saves every testcase before running it, so the crash's own set is the one whose
+# newest (highest-cnt) record is byte-identical to the crash input; pair by that.
+declare -A NEWEST_REC
+while IFS= read -r f; do
+    base=${f##*/}
+    ev=${base#RECORD:}; ev=${ev%%,*}
+    cur=${NEWEST_REC[$ev]:-}
+    if [[ -z "$cur" ]] || (( 10#${base##*,cnt:} > 10#${cur##*,cnt:} )); then
+        NEWEST_REC[$ev]=$base
+    fi
+done < <(find "$CRASHES_DIR" -maxdepth 1 -name 'RECORD:*,cnt:*')
+
+RECORD_EVENT=""
+MATCHES=0
+for ev in $(printf '%s\n' "${!NEWEST_REC[@]}" | sort -n); do
+    if cmp -s "$CRASHES_DIR/${NEWEST_REC[$ev]}" "$CRASH_FILE"; then
+        MATCHES=$((MATCHES + 1))
+        if [[ -z "$RECORD_EVENT" ]]; then
+            RECORD_EVENT="$ev"
+        fi
+    fi
+done
 
 ARCHIVE_NAME="crash-${CRASH_ID}"
 TMPDIR=$(mktemp -d)
@@ -57,12 +79,32 @@ mkdir -p "$DEST/crashes"
 
 print_info "Packaging crash ${CRASH_ID}..."
 print_info "Crash input: $(basename "$CRASH_FILE")"
-print_info "RECORD files: ${RECORD_COUNT}"
 
-# Copy crash input and RECORD files into crashes/ subdirectory
+# Copy the crash input, then this crash's RECORD history renamed to RECORD:${CRASH_ID} so the
+# bundled replay (which keys off the crash id) finds it; the cnt suffix is kept so replay order is
+# unchanged. The set's newest record is byte-identical to the crash input, and replay sends the
+# crash input on its own after the records, so drop that newest record to avoid replaying it twice.
 cp "$CRASH_FILE" "$DEST/crashes/"
-if [[ $RECORD_COUNT -gt 0 ]]; then
-    find "$CRASHES_DIR" -maxdepth 1 -name "RECORD:${CRASH_ID},cnt:*" -exec cp {} "$DEST/crashes/" \;
+RECORD_COUNT=0
+if [[ -n "$RECORD_EVENT" ]]; then
+    if [[ $MATCHES -gt 1 ]]; then
+        print_warn "The crash input is the newest record of ${MATCHES} sets whose earlier inputs"
+        print_warn "differ; their histories cannot be told apart. Using set ${RECORD_EVENT} — replay"
+        print_warn "may rebuild a different state than the fuzz run."
+    fi
+    NEWEST_BASE="${NEWEST_REC[$RECORD_EVENT]}"
+    while IFS= read -r rec; do
+        base=${rec##*/}
+        if [[ "$base" == "$NEWEST_BASE" ]]; then
+            continue
+        fi
+        cp "$rec" "$DEST/crashes/RECORD:${CRASH_ID},${base#*,}"
+        RECORD_COUNT=$((RECORD_COUNT + 1))
+    done < <(find "$CRASHES_DIR" -maxdepth 1 -name "RECORD:${RECORD_EVENT},cnt:*")
+    print_info "RECORD files: ${RECORD_COUNT} (from set ${RECORD_EVENT}; crash input sent separately)"
+else
+    print_warn "No RECORD set matches the crash input by content; its true history was not saved"
+    print_warn "(an unsaved abort reused its number). Packaging the crash input alone."
 fi
 
 # Copy replay_crash.py
@@ -123,6 +165,16 @@ else
         echo "--max_bulk_len=1048576"
         [[ "$GUESSED_PROTOCOL" == "memcache" ]] && echo "--memcached_port=11211"
     } > "$DEST/repro.env"
+fi
+
+# A surviving replay proves a false positive only if it rebuilt the fuzz-run state. Record in the
+# archive when that cannot be guaranteed — the history is missing (no set matched) or ambiguous
+# (several sets share this crash's final input but differ earlier) — so the recipient's triage
+# reports INCONCLUSIVE instead of a confident false positive (the stdout warnings above are not shipped).
+if [[ -z "$RECORD_EVENT" ]]; then
+    echo "HISTORY_MISSING=1" >> "$DEST/repro.env"
+elif [[ $MATCHES -gt 1 ]]; then
+    echo "HISTORY_AMBIGUOUS=${MATCHES}" >> "$DEST/repro.env"
 fi
 
 REPLAY_PORT=6379
