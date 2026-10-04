@@ -115,22 +115,28 @@ error_code AofSegmentWriter::Shutdown() {
   tick_id_ = 0;
 
   Seal();
-  // Last attempt for failed writes; with the tick cancelled, a new failure is final.
+  // Let current writes finish so that every failed block, old or new, gets one last retry.
+  ev_.await([this] { return in_flight_ == 0; });
+  // With the tick cancelled, a failure now is final.
   RetryFailed();
   ev_.await([this] { return in_flight_ == 0 && !sync_in_flight_; });
-  if (written_offset_ < next_offset_) {
-    DCHECK(write_ec_);
-    return write_ec_;
-  }
 
-  RETURN_ON_ERR(file_->FSync(IORING_FSYNC_DATASYNC));
+  // Sync whatever prefix is written, even if a later block failed.
+  error_code ec = file_->FSync(IORING_FSYNC_DATASYNC);
+  if (ec && !sync_ec_)
+    sync_ec_ = ec;
   // A failed sync may have dropped dirty pages, so a later success proves nothing.
   if (!sync_ec_) {
     durable_offset_ = written_offset_;
     durable_lsn_ = written_lsn_;
   }
-  RETURN_ON_ERR(file_->Close());
-  return sync_ec_;
+  error_code close_ec = file_->Close();
+
+  if (written_offset_ < next_offset_) {
+    DCHECK(write_ec_);
+    return write_ec_;
+  }
+  return sync_ec_ ? sync_ec_ : close_ec;
 }
 
 void AofSegmentWriter::WaitUnwritten(size_t limit) {
