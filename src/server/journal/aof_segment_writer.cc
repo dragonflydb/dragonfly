@@ -12,6 +12,8 @@
 #include <linux/io_uring.h>
 #include <unistd.h>
 
+#include <algorithm>
+
 #include "base/logging.h"
 #include "server/error.h"
 #include "util/fibers/proactor_base.h"
@@ -112,30 +114,40 @@ error_code AofSegmentWriter::Shutdown() {
   util::fb2::ProactorBase::me()->CancelPeriodic(tick_id_);
   tick_id_ = 0;
 
-  // Last attempt for failed writes; from now on a write error is final.
-  stopping_ = true;
   Seal();
+  // Last attempt for failed writes; with the tick cancelled, a new failure is final.
   RetryFailed();
   ev_.await([this] { return in_flight_ == 0 && !sync_in_flight_; });
-  if (write_ec_)
+  if (written_offset_ < next_offset_) {
+    DCHECK(write_ec_);
     return write_ec_;
+  }
 
   RETURN_ON_ERR(file_->FSync(IORING_FSYNC_DATASYNC));
   // A failed sync may have dropped dirty pages, so a later success proves nothing.
   if (!sync_ec_) {
+    durable_offset_ = written_offset_;
     durable_lsn_ = written_lsn_;
-    repair_sync_ = 0;
   }
   RETURN_ON_ERR(file_->Close());
   return sync_ec_;
 }
 
 void AofSegmentWriter::WaitUnwritten(size_t limit) {
-  ev_.await([&] { return UnwrittenBytes() <= limit || write_ec_; });
+  ev_.await([&] { return UnwrittenBytes() <= limit; });
 }
 
 size_t AofSegmentWriter::UnwrittenBytes() const {
   return pending_bytes_ + builder_->PayloadSize();
+}
+
+AofSegmentWriter::Durability AofSegmentWriter::GetDurability() const {
+  if (sync_ec_)
+    return Durability::kSyncFailed;
+  // A failed block is unwritten, or written but not yet covered by a sync.
+  if (durable_offset_ < repair_offset_)
+    return Durability::kWriteFailed;
+  return Durability::kNormal;
 }
 
 void AofSegmentWriter::OnSealed(AofSealedBlock block) {
@@ -159,17 +171,12 @@ void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
     // complete but are not popped, so WrittenLsn stops before the failed block.
     // TODO: decide when a persistent error (EIO, ENOSPC) stops retrying, e.g. fail-stop after a
     // deadline; until then backpressure stalls the shard.
-    error_code ec = IoError(res);
-    LOG_EVERY_T(ERROR, 1) << "AOF write failed at offset " << pb->offset << ": " << ec.message();
+    write_ec_ = IoError(res);
+    LOG_EVERY_T(ERROR, 1) << "AOF write failed at offset " << pb->offset << ": "
+                          << write_ec_.message();
     --in_flight_;
-    if (!pb->had_error) {
-      pb->had_error = true;
-      ++failed_blocks_;
-    }
-    if (stopping_)
-      write_ec_ = ec;
-    else
-      pb->failed = true;
+    pb->state = BlockState::kFailed;
+    repair_offset_ = max(repair_offset_, pb->offset + pb->bytes.size());
     ev_.notifyAll();
     return;
   }
@@ -181,15 +188,11 @@ void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
   if (pb->written < pb->bytes.size())
     return Submit(pb);
 
-  pb->done = true;
+  pb->state = BlockState::kDone;
   --in_flight_;
-  if (pb->had_error) {
-    // The repaired range is durable only after a sync issued from now on.
-    --failed_blocks_;
-    repair_sync_ = syncs_issued_ + 1;
-  }
-  while (!pending_.empty() && pending_.front().done) {
+  while (!pending_.empty() && pending_.front().state == BlockState::kDone) {
     PendingBlock& front = pending_.front();
+    written_offset_ = front.offset + front.bytes.size();
     // can be zero for a block that is fully partial. E.g. blk 1(part1) - blk 2(part2) - blk
     // 3(part3, other) blk 2 is fully partial, it's a record whose front/tail belongs to adjacent
     // blocks.
@@ -204,30 +207,31 @@ void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
 void AofSegmentWriter::OnTick() {
   RetryFailed();
 
-  if (sync_in_flight_ || sync_ec_ || (written_lsn_ <= durable_lsn_ && !repair_sync_))
+  // fdatasync covers only writes completed before it is issued, hence the captured targets.
+  if (sync_in_flight_ || sync_ec_ || written_offset_ <= durable_offset_)
     return;
-  uint64_t sync_id = ++syncs_issued_;
-  uint64_t sync_target = written_lsn_;
+  size_t sync_offset = written_offset_;
+  uint64_t sync_lsn = written_lsn_;
   sync_in_flight_ = true;
-  file_->FSyncAsync(IORING_FSYNC_DATASYNC, [this, sync_id, sync_target](int res) {
-    OnSyncDone(sync_id, sync_target, res);
+  file_->FSyncAsync(IORING_FSYNC_DATASYNC, [this, sync_offset, sync_lsn](int res) {
+    OnSyncDone(sync_offset, sync_lsn, res);
   });
 }
 
 void AofSegmentWriter::RetryFailed() {
-  if (failed_blocks_ == 0)
+  // Failed blocks are not written yet, so they all lie before repair_offset_.
+  if (written_offset_ >= repair_offset_)
     return;
-  // Maybe worth having a failed list separately, not important for now
   for (PendingBlock& pb : pending_) {
-    if (!pb.failed)
+    if (pb.state != BlockState::kFailed)
       continue;
-    pb.failed = false;
+    pb.state = BlockState::kInFlight;
     ++in_flight_;
     Submit(&pb);
   }
 }
 
-void AofSegmentWriter::OnSyncDone(uint64_t sync_id, uint64_t sync_target, int res) {
+void AofSegmentWriter::OnSyncDone(size_t sync_offset, uint64_t sync_lsn, int res) {
   sync_in_flight_ = false;
   if (res < 0) {
     // Never retried: the kernel may have dropped the dirty pages ("fsyncgate").
@@ -236,9 +240,8 @@ void AofSegmentWriter::OnSyncDone(uint64_t sync_id, uint64_t sync_target, int re
     sync_ec_ = IoError(res);
     LOG(ERROR) << "AOF fdatasync failed: " << sync_ec_.message();
   } else {
-    durable_lsn_ = sync_target;
-    if (repair_sync_ && sync_id >= repair_sync_)
-      repair_sync_ = 0;
+    durable_offset_ = sync_offset;
+    durable_lsn_ = sync_lsn;
   }
   ev_.notifyAll();
 }
