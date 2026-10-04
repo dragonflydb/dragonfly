@@ -22,6 +22,7 @@ namespace dfly {
 class EngineShardSet;
 class TieredStorage;
 class ShardDocIndices;
+class AofStreamer;
 
 using TypeMemDeltas = std::array<int64_t, OBJ_TYPE_MAX>;
 
@@ -142,6 +143,14 @@ class EngineShard {
   ShardDocIndices* search_indices() const {
     return shard_search_indices_.get();
   }
+
+#ifdef __linux__
+  AofStreamer* aof_streamer() {
+    return aof_streamer_.get();
+  }
+
+  void set_aof_streamer(std::unique_ptr<AofStreamer> streamer);
+#endif
 
   // Moving average counters.
   enum MovingCnt : uint8_t { TTL_TRAVERSE, TTL_DELETE, COUNTER_TOTAL };
@@ -375,6 +384,9 @@ class EngineShard {
   std::unique_ptr<TieredStorage> tiered_storage_;
   // TODO: Move indices to Namespace
   std::unique_ptr<ShardDocIndices> shard_search_indices_;
+#ifdef __linux__
+  std::unique_ptr<AofStreamer> aof_streamer_;
+#endif
   uint64_t stalled_start_ns_ = 0;
   using Counter = util::SlidingCounter<7>;
 

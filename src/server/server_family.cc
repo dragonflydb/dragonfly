@@ -66,6 +66,9 @@ extern "C" {
 #include "server/error.h"
 #include "server/generic_family.h"
 #include "server/journal/journal.h"
+#ifdef __linux__
+#include "server/journal/aof_streamer.h"
+#endif
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
 #include "server/multi_command_squasher.h"
@@ -112,6 +115,7 @@ static bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* 
 static std::string AbslUnparseFlag(const CronExprFlag& flag);
 
 ABSL_FLAG(string, dir, "", "working directory");
+ABSL_FLAG(bool, aof, false, "If true, each shard logs its writes to an append-only file in --dir");
 ABSL_FLAG(string, dbfilename, "dump-{timestamp}",
           "the filename to save/load the DB, instead of/with {timestamp} can be used {Y}, {m}, and "
           "{d} macros");
@@ -992,6 +996,59 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
   rb->SendSimpleStrArr(help_arr);
 }
 
+// Starts an AofStreamer on every shard, or exits if --aof cannot run.
+void StartAof(const string& flag_dir, detail::SnapshotStorage* storage) {
+  string reason;
+#ifdef __linux__
+  string dir = flag_dir.empty() ? "." : flag_dir;
+  if (detail::IsCloudPath(dir)) {
+    reason = "--aof needs a local --dir";
+  } else if (shard_set->pool()->at(0)->GetKind() != ProactorBase::IOURING) {
+    reason = "--aof needs io_uring";
+  } else if (GetFlag(FLAGS_hz) <= 0) {
+    reason = "--aof needs --hz > 0, the heartbeat seals AOF blocks";
+  } else if (GetFlag(FLAGS_replicaof).has_value()) {
+    reason = "--aof is not supported on replicas";
+  } else if (auto path = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename));
+             path && !path->empty()) {
+    // Loading a snapshot bypasses the journal, so the AOF would miss its data.
+    reason = "--aof cannot start from a snapshot yet";
+  } else {
+    atomic_bool failed = false;
+    shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+      auto streamer = make_unique<AofStreamer>(dir, shard->shard_id(), shard_set->size());
+      if (error_code ec = streamer->Start(); ec) {
+        LOG(ERROR) << "Failed to start AOF on shard " << shard->shard_id() << ": " << ec.message();
+        failed = true;
+        return;
+      }
+      shard->set_aof_streamer(std::move(streamer));
+    });
+    if (!failed)
+      return;
+    reason = "failed to open AOF segments";
+  }
+#else
+  reason = "--aof is supported only on Linux";
+#endif
+  LOG(ERROR) << reason;
+  exit(1);
+}
+
+// Seals, writes and syncs every shard's AOF.
+void StopAof() {
+#ifdef __linux__
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    if (AofStreamer* streamer = shard->aof_streamer(); streamer) {
+      error_code ec = streamer->Shutdown();
+      LOG_IF(ERROR, ec) << "AOF shutdown failed on shard " << shard->shard_id() << ": "
+                        << ec.message();
+      shard->set_aof_streamer(nullptr);
+    }
+  });
+#endif
+}
+
 }  // namespace
 
 bool ValidateNotifyKeyspaceEventsFlag() {
@@ -1287,6 +1344,9 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
+  if (GetFlag(FLAGS_aof))
+    StartAof(flag_dir, snapshot_storage_.get());
+
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
     service_.proactor_pool().GetNextProactor()->Await(
@@ -1376,6 +1436,9 @@ void ServerFamily::Shutdown() {
   }
 
   client_pause_ec_.await([this] { return active_pauses_.load() == 0; });
+
+  // Clients no longer write, and the journal is still open.
+  StopAof();
 
   pb_task_->Await([this] {
     auto ec = journal::Close();
@@ -3485,6 +3548,10 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   if (replicaof_args->IsReplicaOfNoOne()) {
     return ReplicaOfNoOne(cmd_cntx->rb());
   }
+
+  // A full sync loads data bypassing the journal, so the AOF would miss it.
+  if (GetFlag(FLAGS_aof))
+    return cmd_cntx->SendError("REPLICAOF is not supported with --aof");
 
   auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                           master_replid(), replicaof_args->slot_range);
