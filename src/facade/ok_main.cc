@@ -645,7 +645,7 @@ void HandleMetrics(ProactorPool* pool, const util::http::QueryArgs&, util::HttpC
   APPEND_BODY("dragonfly_net_input_recv_total ", conn.io_read_cnt, "\n");
 
   APPEND_BODY("# TYPE dragonfly_net_output_send_total counter\n");
-  APPEND_BODY("dragonfly_net_output_send_total ", reply.io_write_cnt, "\n");
+  APPEND_BODY("dragonfly_net_output_send_total ", reply.io_write_calls, "\n");
 
   APPEND_BODY("# TYPE dragonfly_net_read_yields_total counter\n");
   APPEND_BODY("dragonfly_net_read_yields_total ", conn.num_read_yields, "\n");

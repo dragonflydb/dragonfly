@@ -21,6 +21,7 @@ extern "C" {
 #include "core/oah_set.h"
 #include "facade/facade_test.h"
 #include "facade/reply_builder.h"
+#include "facade/string_socket.h"
 #include "server/channel_store.h"
 #include "server/common.h"
 #include "server/conn_context.h"
@@ -3016,7 +3017,7 @@ class ScanBenchmark : public BaseFamilyTest {
       TestConnection conn{service_.get(), Protocol::REDIS};
       auto* cntx = static_cast<ConnectionContext*>(conn.cntx());
       cntx->ns = &namespaces->GetDefaultNamespace();
-      io::StringSink sink;
+      facade::StringSocket sink;
       RedisReplyBuilder builder{&sink};
       CommandContext cmd_cntx{&builder, cntx};
       // Both patterns return every generated key; only "k*" exercises glob matching.
