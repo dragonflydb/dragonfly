@@ -16,7 +16,7 @@ namespace dfly {
 
 // On-disk AOF format: a segment is a fixed header followed by blocks of journal records.
 constexpr std::string_view kAofMagic = "DFAOF1";
-// 44 base + 18 to keep allignment for the future
+// 30 bytes of fields + 30 reserved (zero, for future fields) + 4 CRC.
 constexpr size_t kAofSegmentHeaderSize = 64;
 constexpr size_t kAofBlockHeaderSize = 25;
 // Payload cap
@@ -61,7 +61,8 @@ struct AofSealedBlock {
 // Packs journal records into blocks of at most kAofBlockBytes payload. Never yields.
 class AofBlockBuilder {
  public:
-  // Gets sealed blocks in order, the writer queues them.
+  // Gets sealed blocks in order, the writer queues them. Must not preempt: it runs inside
+  // Append and Seal, which callers use from atomic sections (enforced by a FiberAtomicGuard).
   using SealCb = std::function<void(AofSealedBlock)>;
 
   AofBlockBuilder(uint64_t segment_uid, SealCb seal_cb);
