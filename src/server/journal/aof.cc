@@ -22,34 +22,34 @@ using absl::little_endian::Store64;
 namespace {
 
 // Segment header offsets.
-constexpr size_t kSegShardIdOffset = 6;
-constexpr size_t kSegShardCountOffset = 10;
-constexpr size_t kSegSeqOffset = 14;
-constexpr size_t kSegUidOffset = 22;
-constexpr size_t kSegCrcOffset = 60;
-static_assert(kSegShardIdOffset == kAofMagic.size());
-static_assert(kSegCrcOffset + 4 == kAofSegmentHeaderSize);
+constexpr size_t kSegmentShardIdOffset = 6;
+constexpr size_t kSegmentShardCountOffset = 10;
+constexpr size_t kSegmentSeqOffset = 14;
+constexpr size_t kSegmentUidOffset = 22;
+constexpr size_t kSegmentCrcOffset = 60;
+static_assert(kSegmentShardIdOffset == kAofMagic.size());
+static_assert(kSegmentCrcOffset + 4 == kAofSegmentHeaderSize);
 
 // Block header offsets.
-constexpr size_t kBlkTotalBytesOffset = 0;
-constexpr size_t kBlkCrcOffset = 8;
-constexpr size_t kBlkFirstLsnOffset = 12;
-constexpr size_t kBlkNRecordsOffset = 20;
-constexpr size_t kBlkFlagsOffset = 24;
-static_assert(kBlkFlagsOffset + 1 == kAofBlockHeaderSize);
+constexpr size_t kBlockTotalBytesOffset = 0;
+constexpr size_t kBlockCrcOffset = 8;
+constexpr size_t kBlockFirstLsnOffset = 12;
+constexpr size_t kBlockNRecordsOffset = 20;
+constexpr size_t kBlockFlagsOffset = 24;
+static_assert(kBlockFlagsOffset + 1 == kAofBlockHeaderSize);
 
 void EncodeBlockHeader(const AofBlockHeader& hdr, char* dst) {
-  Store64(dst + kBlkTotalBytesOffset, hdr.total_block_bytes);
-  Store32(dst + kBlkCrcOffset, hdr.crc);
-  Store64(dst + kBlkFirstLsnOffset, hdr.first_lsn);
-  Store32(dst + kBlkNRecordsOffset, hdr.n_records);
-  dst[kBlkFlagsOffset] = hdr.flags;
+  Store64(dst + kBlockTotalBytesOffset, hdr.total_block_bytes);
+  Store32(dst + kBlockCrcOffset, hdr.crc);
+  Store64(dst + kBlockFirstLsnOffset, hdr.first_lsn);
+  Store32(dst + kBlockNRecordsOffset, hdr.n_records);
+  dst[kBlockFlagsOffset] = hdr.flags;
 }
 
 AofBlockHeader DecodeBlockHeader(const char* src) {
-  return {Load64(src + kBlkTotalBytesOffset), Load32(src + kBlkCrcOffset),
-          Load64(src + kBlkFirstLsnOffset), Load32(src + kBlkNRecordsOffset),
-          static_cast<uint8_t>(src[kBlkFlagsOffset])};
+  return {Load64(src + kBlockTotalBytesOffset), Load32(src + kBlockCrcOffset),
+          Load64(src + kBlockFirstLsnOffset), Load32(src + kBlockNRecordsOffset),
+          static_cast<uint8_t>(src[kBlockFlagsOffset])};
 }
 
 absl::crc32c_t SeedCrc(uint64_t segment_uid) {
@@ -62,9 +62,9 @@ absl::crc32c_t SeedCrc(uint64_t segment_uid) {
 uint32_t FinishCrc(absl::crc32c_t crc, const AofBlockHeader& hdr) {
   char buf[kAofBlockHeaderSize];
   EncodeBlockHeader(hdr, buf);
-  crc = absl::ExtendCrc32c(crc, {buf, kBlkCrcOffset});
-  crc =
-      absl::ExtendCrc32c(crc, {buf + kBlkFirstLsnOffset, kAofBlockHeaderSize - kBlkFirstLsnOffset});
+  crc = absl::ExtendCrc32c(crc, {buf, kBlockCrcOffset});
+  crc = absl::ExtendCrc32c(
+      crc, {buf + kBlockFirstLsnOffset, kAofBlockHeaderSize - kBlockFirstLsnOffset});
   return static_cast<uint32_t>(crc);
 }
 
@@ -74,11 +74,12 @@ std::string EncodeAofSegmentHeader(const AofSegmentHeader& hdr) {
   std::string res(kAofSegmentHeaderSize, '\0');
   char* p = res.data();
   kAofMagic.copy(p, kAofMagic.size());
-  Store32(p + kSegShardIdOffset, hdr.shard_id);
-  Store32(p + kSegShardCountOffset, hdr.shard_count);
-  Store64(p + kSegSeqOffset, hdr.seq);
-  Store64(p + kSegUidOffset, hdr.segment_uid);
-  Store32(p + kSegCrcOffset, static_cast<uint32_t>(absl::ComputeCrc32c({p, kSegCrcOffset})));
+  Store32(p + kSegmentShardIdOffset, hdr.shard_id);
+  Store32(p + kSegmentShardCountOffset, hdr.shard_count);
+  Store64(p + kSegmentSeqOffset, hdr.seq);
+  Store64(p + kSegmentUidOffset, hdr.segment_uid);
+  Store32(p + kSegmentCrcOffset,
+          static_cast<uint32_t>(absl::ComputeCrc32c({p, kSegmentCrcOffset})));
   return res;
 }
 
@@ -86,11 +87,11 @@ std::optional<AofSegmentHeader> DecodeAofSegmentHeader(std::string_view src) {
   if (src.size() < kAofSegmentHeaderSize || !src.starts_with(kAofMagic))
     return std::nullopt;
   const char* p = src.data();
-  uint32_t crc = static_cast<uint32_t>(absl::ComputeCrc32c({p, kSegCrcOffset}));
-  if (crc != Load32(p + kSegCrcOffset))
+  uint32_t crc = static_cast<uint32_t>(absl::ComputeCrc32c({p, kSegmentCrcOffset}));
+  if (crc != Load32(p + kSegmentCrcOffset))
     return std::nullopt;
-  return AofSegmentHeader{Load32(p + kSegShardIdOffset), Load32(p + kSegShardCountOffset),
-                          Load64(p + kSegSeqOffset), Load64(p + kSegUidOffset)};
+  return AofSegmentHeader{Load32(p + kSegmentShardIdOffset), Load32(p + kSegmentShardCountOffset),
+                          Load64(p + kSegmentSeqOffset), Load64(p + kSegmentUidOffset)};
 }
 
 std::optional<AofBlockHeader> DecodeAofBlock(std::string_view src, uint64_t segment_uid) {
