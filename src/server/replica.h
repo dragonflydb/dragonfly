@@ -25,7 +25,7 @@ namespace dfly {
 
 class Service;
 class ConnectionContext;
-class JournalExecutor;
+class JournalApplier;
 struct JournalReader;
 class DflyShardReplica;
 
@@ -246,10 +246,6 @@ class DflyShardReplica : public ProtocolClient {
 
   void StableSyncDflyAcksFb(ExecutionState* cntx);
 
-  // Return true if the transaction executed successfully. On error,
-  // or on context cancellation return false.
-  bool ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx);
-
   uint32_t FlowId() const;
 
   uint64_t JournalExecutedCount() const {
@@ -271,7 +267,7 @@ class DflyShardReplica : public ProtocolClient {
 
   util::fb2::EventCount shard_replica_waker_;  // waker for trans_data_queue_
 
-  std::unique_ptr<JournalExecutor> executor_;
+  std::unique_ptr<JournalApplier> applier_;
   std::unique_ptr<RdbLoader> rdb_loader_;
 
   // The master instance has a LSN for each journal record. This counts
@@ -289,7 +285,6 @@ class DflyShardReplica : public ProtocolClient {
   int proactor_index_ = -1;
   bool force_ping_ = false;
 
-  std::shared_ptr<MultiShardExecution> multi_shard_exe_;
   uint32_t flow_id_ = UINT32_MAX;  // Flow id if replica acts as a dfly flow.
 };
 

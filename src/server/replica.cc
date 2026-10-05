@@ -33,6 +33,7 @@ extern "C" {
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/journal.h"
+#include "server/journal/journal_applier.h"
 #include "server/journal/serializer.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
@@ -1160,7 +1161,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
       }
     } else {
-      const bool is_successful = ExecuteTx(std::move(tx_data), cntx);
+      const bool is_successful = applier_->Apply(std::move(tx_data), cntx);
       if (is_successful) {
         // We only increment upon successful execution of the transaction.
         // The reason for this is that during partial sync we sent this
@@ -1175,7 +1176,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         // 1. Context is running
         // 2. We are ACTIVE global state
         if (cntx->IsRunning() && ((*ServerState::tlocal()).gstate() == GlobalState::ACTIVE)) {
-          LOG(DFATAL) << "ExecuteTx() on replica should be successful.";
+          LOG(DFATAL) << "Applying a transaction on replica should be successful.";
         }
       }
     }
@@ -1251,9 +1252,12 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
     : ProtocolClient(server_context),
       service_(*service),
       master_context_(master_context),
-      multi_shard_exe_(multi_shard_exe),
       flow_id_(flow_id) {
-  executor_ = std::make_unique<JournalExecutor>(service);
+  auto log_cmd = [](const TransactionData& tx) {
+    facade::Connection::LogReplicaCommand(tx.command, tx.dbid);
+  };
+  applier_ = std::make_unique<JournalApplier>(service, std::move(multi_shard_exe),
+                                              master_context.num_flows, std::move(log_cmd));
   rdb_loader_ = std::make_unique<RdbLoader>(&service_, load_context);
   rdb_loader_->SetLoadUnownedSlots(true);
   rdb_loader_->SetShardCount(master_context.num_flows);
@@ -1262,68 +1266,6 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
 DflyShardReplica::~DflyShardReplica() {
   CloseSocket();
   JoinFlow();
-}
-
-bool DflyShardReplica::ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
-  if (!cntx->IsRunning()) {
-    return false;
-  }
-
-  if (!tx_data.IsGlobalCmd()) {
-    VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
-    // Traffic logger hook: gate is inside LogReplicaCommand, so the no-op path
-    // (logger disabled) is cheap. Log before Execute so a crash during execute
-    // still leaves the record on disk for post-mortem replay.
-    facade::Connection::LogReplicaCommand(tx_data.command, tx_data.dbid);
-    return executor_->Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
-  }
-
-  bool inserted_by_me =
-      multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, master_context_.num_flows);
-
-  auto& multi_shard_data = multi_shard_exe_->Find(tx_data.txid);
-
-  VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
-  // Wait until shards flows got transaction data and inserted to map.
-  // This step enforces that replica will execute multi shard commands that finished on master
-  // and replica received all the commands from all shards.
-  multi_shard_data.block->Wait();
-  // Check if we woke up due to cancellation.
-  if (!cntx->IsRunning())
-    return false;
-  VLOG(2) << "Execute txid: " << tx_data.txid << " block wait finished";
-
-  VLOG(2) << "Execute txid: " << tx_data.txid << " global command execution";
-  // Wait until all shards flows get to execution step of this transaction.
-  multi_shard_data.barrier.Wait();
-  // Check if we woke up due to cancellation.
-  if (!cntx->IsRunning())
-    return false;
-  // Global command will be executed only from one flow fiber. This ensure corectness of data in
-  // replica.
-  bool execution_res = true;
-  if (inserted_by_me) {
-    // Global command — log exactly once (only the inserter flow runs Execute,
-    // so this guard naturally dedups across per-shard flows).
-    facade::Connection::LogReplicaCommand(tx_data.command, tx_data.dbid);
-    execution_res = executor_->Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
-  }
-  // Wait until exection is done, to make sure we done execute next commands while the global is
-  // executed.
-  multi_shard_data.barrier.Wait();
-  // Check if we woke up due to cancellation.
-  if (!cntx->IsRunning())
-    return false;
-
-  // Erase from map can be done only after all flow fibers executed the transaction commands.
-  // The last fiber which will decrease the counter to 0 will be the one to erase the data from
-  // map
-  auto val = multi_shard_data.counter.fetch_sub(1, std::memory_order_relaxed);
-  VLOG(2) << "txid: " << tx_data.txid << " counter: " << val;
-  if (val == 1) {
-    multi_shard_exe_->Erase(tx_data.txid);
-  }
-  return execution_res;
 }
 
 error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* dest) {
