@@ -29,6 +29,9 @@ using http::TlsClient;
 
 namespace {
 
+// Initialized during static initialization, i.e. at process start.
+const auto kProcessStart = chrono::steady_clock::now();
+
 std::optional<std::string> GetVersionString(const std::string& version_str) {
   // The server sends a message such as {"latest": "0.12.0"}
   const auto reg_match_expr = R"(\{\"latest"\:[ \t]*\"([0-9]+\.[0-9]+\.[0-9]+)\"\})";
@@ -56,7 +59,7 @@ std::optional<std::string> GetRemoteVersion(ProactorBase* proactor, SSL_CTX* ssl
   req.set(bh::field::host, host);
   req.set(bh::field::user_agent, ver_header);
   for (const auto& [name, value] : info_headers) {
-    req.set(name, value);
+    req.set(boost::beast::string_view{name.data(), name.size()}, value);
   }
   ResponseType res;
   TlsClient http_client{proactor};
@@ -188,8 +191,6 @@ void VersionMonitor::Run(ProactorPool* proactor_pool) {
     return;
   }
 
-  start_time_ = time(nullptr);
-
   utsname uts;
   string_view arch = uname(&uts) == 0 ? uts.machine : "unknown";
   bool is_uring = proactor_pool->at(0)->GetKind() == ProactorBase::IOURING;
@@ -216,7 +217,8 @@ void VersionMonitor::Shutdown() {
 
 VersionMonitor::HeaderList VersionMonitor::BuildInfoHeaders() const {
   HeaderList headers = static_headers_;
-  headers.emplace_back("Dfly-Uptime", absl::StrCat(time(nullptr) - start_time_));
+  auto uptime = chrono::duration_cast<chrono::seconds>(chrono::steady_clock::now() - kProcessStart);
+  headers.emplace_back("Dfly-Uptime", absl::StrCat(uptime.count()));
   headers.emplace_back("Dfly-Max-Mem",
                        string(MemoryBucket(max_memory_limit.load(memory_order_relaxed))));
   return headers;
@@ -224,6 +226,8 @@ VersionMonitor::HeaderList VersionMonitor::BuildInfoHeaders() const {
 
 void VersionMonitor::RunTask(SslPtr ssl_ctx) {
   const auto loop_sleep_time = std::chrono::hours(24);  // every 24 hours
+  // Delay the first check so that short-lived or crash-looping processes do not ping the server.
+  const auto initial_delay = std::chrono::minutes(10);
 
   const std::string host_name = "version.dragonflydb.io";
   const std::string_view port = "443";
@@ -233,6 +237,11 @@ void VersionMonitor::RunTask(SslPtr ssl_ctx) {
   current_version.remove_prefix(1);
   const std::string version_header =
       absl::StrCat("DragonflyDB/", current_version, " (", platform_, ")");
+
+  if (monitor_ver_done_.WaitFor(initial_delay)) {
+    VLOG(1) << "finish running version monitor task";
+    return;
+  }
 
   ProactorBase* my_pb = ProactorBase::me();
   while (true) {

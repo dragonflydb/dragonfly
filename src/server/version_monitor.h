@@ -3,7 +3,6 @@
 //
 #pragma once
 
-#include <ctime>
 #include <string>
 #include <utility>
 #include <vector>
@@ -45,7 +44,6 @@ class VersionMonitor {
   // Static deployment info, collected once in Run().
   std::string platform_;  // User-Agent comment: "<arch>; <io backend>; <cloud>".
   HeaderList static_headers_;
-  time_t start_time_ = 0;
 };
 
 }  // namespace dfly
