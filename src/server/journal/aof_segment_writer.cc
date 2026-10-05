@@ -65,7 +65,9 @@ error_code AofSegmentWriter::Open(uint64_t seq) {
       unlink(path.c_str());
   };
 
-  auto res = OpenLinux(tmp_path, O_CREAT | O_WRONLY | O_TRUNC, 0644 /* rw-r--r-- */);
+  // A stale tmp may be a second name of an existing segment: drop the name, never truncate it.
+  unlink(tmp_path.c_str());
+  auto res = OpenLinux(tmp_path, O_CREAT | O_EXCL | O_WRONLY, 0644 /* rw-r--r-- */);
   if (!res)
     return res.error();
   file_ = std::move(*res);

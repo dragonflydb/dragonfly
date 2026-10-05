@@ -69,7 +69,7 @@ class AofSegmentWriter {
   // Offset order; deque keeps references stable for completions.
   std::deque<PendingBlock> pending_;
   size_t pending_bytes_ = 0;
-  unsigned in_flight_ = 0;
+  uint64_t in_flight_ = 0;
   uint64_t written_lsn_ = 0;
   std::error_code write_ec_;
   util::fb2::EventCount ev_;
