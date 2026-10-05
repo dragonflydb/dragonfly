@@ -106,7 +106,9 @@ ABSL_FLAG(
     "Logs stack trace of memory allocation within these ranges. Format is min:max,min:max,....");
 
 ABSL_FLAG(bool, version_check, true,
-          "If true, Will monitor for new releases on Dragonfly servers once a day.");
+          "If true, checks once a day for new Dragonfly releases. The check also reports anonymous "
+          "deployment information, such as uptime, hardware and environment details, to help "
+          "improve Dragonfly.");
 
 ABSL_FLAG(uint16_t, tcp_backlog, 256, "TCP listen(2) backlog parameter.");
 #ifdef __linux__
