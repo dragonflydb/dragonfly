@@ -227,7 +227,7 @@ VersionMonitor::HeaderList VersionMonitor::BuildInfoHeaders() const {
 void VersionMonitor::RunTask(SslPtr ssl_ctx) {
   const auto loop_sleep_time = std::chrono::hours(24);  // every 24 hours
   // Delay the first check so that short-lived or crash-looping processes do not ping the server.
-  const auto initial_delay = std::chrono::minutes(10);
+  const auto initial_delay = std::chrono::seconds(30);
 
   const std::string host_name = "version.dragonflydb.io";
   const std::string_view port = "443";
