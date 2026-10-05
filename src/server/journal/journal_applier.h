@@ -26,7 +26,7 @@ class JournalApplier {
   using ExecuteHook = std::function<void(const TransactionData&)>;
 
   JournalApplier(Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe,
-                 uint32_t num_flows, ExecuteHook execute_hook = {});
+                 ExecuteHook execute_hook = {});
 
   // Return true if the transaction executed successfully. On error,
   // or on context cancellation return false.
@@ -39,7 +39,6 @@ class JournalApplier {
   JournalExecutor executor_;
   // Shared by the appliers of all flows of a sync session; synchronizes their global commands.
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
-  uint32_t num_flows_;
   ExecuteHook execute_hook_;
 };
 
