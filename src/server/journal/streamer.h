@@ -65,6 +65,11 @@ class JournalStreamer : public journal::JournalConsumerInterface {
 
   void WaitForInflightToComplete(bool with_timeout);
 
+  // Wakes fibers blocked on journal backpressure or write completion.
+  void WakeWaiters() {
+    waker_.notifyAll();
+  }
+
   size_t inflight_bytes() const {
     return in_flight_bytes_;
   }
@@ -118,7 +123,8 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
 
   void Run();
 
-  // Cancel() must be called if Start() is called
+  // Cancels the flow and waits for traversal before unregistering its listeners.
+  // Must be called if Start() is called.
   bool Cancel() override;
 
   void SendFinalize(long attempt);
@@ -148,6 +154,7 @@ class RestoreStreamer : public JournalStreamer, public SerializerBase {
   std::unique_ptr<CmdSerializer> cmd_serializer_;
 
   Stats stats_;
+  LocalLatch traversal_latch_;
   base::RealTimeAggregator cpu_aggregator_;
 };
 

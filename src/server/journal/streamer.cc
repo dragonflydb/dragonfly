@@ -443,6 +443,7 @@ void RestoreStreamer::Start(util::FiberSocketBase* dest) {
 }
 
 void RestoreStreamer::Run() {
+  lock_guard traversal_lock{traversal_latch_};
   VLOG(1) << "RestoreStreamer run";
 
   // If the context was cancelled before Start() ran, RegisterChangeListener was skipped and
@@ -565,6 +566,11 @@ bool RestoreStreamer::Cancel() {
   // early when the context is cancelled, which prevents the streamer from being registered (and
   // leaked) after cancellation.
   cntx_->Cancel();
+  WakeWaiters();
+
+  // Run() may be suspended while serializing an entry. Keep the listener and its snapshot version
+  // alive until traversal finishes; UnregisterOnChange only waits for OnChange callbacks.
+  traversal_latch_.Wait();
 
   // UnregisterOnChange is idempotent and returns true only for the caller that actually removed the
   // listener, so racing Cancel() calls (e.g. Finish() vs ~SliceSlotMigration) can't double-erase.
