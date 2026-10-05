@@ -62,6 +62,7 @@ extern "C" {
 #include "server/server_state.h"
 #include "server/set_family.h"
 #include "server/sharding.h"
+#include "server/shutdown_watchdog.h"
 #include "server/stream_family.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -143,42 +144,6 @@ ABSL_FLAG(uint32_t, write_connection_throttling_sleep_usec, 0,
           "Sleep period for write connection in microseconds. 0 disables yielding.");
 
 namespace {
-
-struct ShutdownWatchdog {
-  util::fb2::Fiber watchdog_fb;
-  util::fb2::Done watchdog_done;
-  util::ProactorPool& pool;
-
-  explicit ShutdownWatchdog(util::ProactorPool& pp);
-  void Disarm();
-};
-
-ShutdownWatchdog::ShutdownWatchdog(util::ProactorPool& pp) : pool{pp} {
-  watchdog_fb = pool.GetNextProactor()->LaunchFiber("shutdown_watchdog", [&] {
-    if (!watchdog_done.WaitFor(20s)) {
-      LOG(ERROR) << "Deadlock detected during shutdown";
-#ifdef USE_ABSL_LOG
-      absl::SetStderrThreshold(absl::LogSeverityAtLeast::kInfo);
-#else
-      absl::SetFlag(&FLAGS_alsologtostderr, true);
-#endif
-      util::fb2::Mutex m;
-      pool.AwaitFiberOnAll([&m](unsigned index, auto*) {
-        util::ThisFiber::SetName(absl::StrFormat("print_stack_fib_%u", index));
-        std::unique_lock lk(m);
-        LOG(ERROR) << "Proactor " << index << ":\n";
-        util::fb2::detail::FiberInterface::PrintAllFiberStackTraces();
-      });
-    }
-  });
-}
-
-void ShutdownWatchdog::Disarm() {
-  watchdog_done.Notify();
-  watchdog_fb.JoinIfNeeded();
-}
-
-std::optional<ShutdownWatchdog> shutdown_watchdog = std::nullopt;
 
 thread_local uint32_t tl_write_connection_throttling_sleep_usec =
     absl::GetFlag(FLAGS_write_connection_throttling_sleep_usec);
@@ -1190,6 +1155,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
 void Service::Shutdown() {
   VLOG(1) << "Service::Shutdown";
 
+  ShutdownWatchdog shutdown_watchdog{pp_};
+
   // We mark that we are shutting down. After this incoming requests will be
   // rejected.
   mu_.lock();
@@ -1197,6 +1164,7 @@ void Service::Shutdown() {
   mu_.unlock();
 
   pp_.AwaitFiberOnAll([](ProactorBase* pb) {
+    ShutdownProgressScope progress("shutting down connection thread state");
     ServerState::tlocal()->EnterLameDuck();
     facade::Connection::ShutdownThreadLocal();
   });
@@ -1215,12 +1183,11 @@ void Service::Shutdown() {
   LOG(INFO) << "Shard set shutdown took "
             << (absl::GetCurrentTimeNanos() - shard_shutdown_start) / 1000 << "us";
 
-  shutdown_watchdog.emplace(pp_);
-
   delete channel_store;
   channel_store = nullptr;
 
   pp_.AwaitFiberOnAll([](ProactorBase* pb) {
+    ShutdownProgressScope progress("destroying server state");
 #if defined(DFLY_USE_SSL)
     // Explicitly release OpenSSL thread-local state here.
     // This prevents a potential crash during thread exit where the allocator (e.g. mimalloc)
@@ -1233,8 +1200,6 @@ void Service::Shutdown() {
   // wait for all the pending callbacks to stop.
   ThisFiber::SleepFor(10ms);
   facade::Connection::Shutdown();
-
-  shutdown_watchdog->Disarm();
 }
 
 OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, const facade::ParsedArgs& args) {

@@ -37,7 +37,7 @@ add_library(dfly_transaction db_slice.cc blocking_controller.cc
             cluster_support.cc common.cc command_registry.cc
             execution_state.cc stats.cc synchronization.cc
             ${DF_JOURNAL_SRCS}
-            server_state.cc table.cc  transaction.cc tx_base.cc
+            server_state.cc shutdown_watchdog.cc table.cc transaction.cc tx_base.cc
             serializer_commons.cc
             acl/acl_log.cc slowlog.cc channel_store.cc)
 cxx_link(dfly_transaction dfly_core strings_lib TRDP::fast_float TRDP::hdr_histogram)
@@ -169,6 +169,7 @@ helio_cxx_test(cluster/cluster_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/acl_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(acl/jwt_validator_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(shutdown_watchdog_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(serializer_base_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(detail/egress_throttle_test dfly_test_lib LABELS DFLY)
 

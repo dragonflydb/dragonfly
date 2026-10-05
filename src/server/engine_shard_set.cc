@@ -13,6 +13,7 @@
 #include "server/common.h"
 #include "server/db_slice.h"
 #include "server/namespaces.h"
+#include "server/shutdown_watchdog.h"
 #include "server/tiered_storage.h"
 #include "strings/human_readable.h"
 
@@ -135,10 +136,12 @@ void EngineShardSet::Init(uint32_t sz, std::function<void()> shard_handler) {
 
 void EngineShardSet::PreShutdown() {
   RunBlockingInParallel([](EngineShard* shard) {
+    ShutdownProgressScope progress("stopping periodic shard fibers");
     shard->StopPeriodicFiber();
 
     // We must close tiered_storage before we destroy namespaces that own db slices.
     if (shard->tiered_storage()) {
+      ReportShutdownProgress("closing tiered storage");
       shard->tiered_storage()->Close();
     }
   });

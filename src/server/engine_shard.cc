@@ -27,6 +27,7 @@ extern "C" {
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
+#include "server/shutdown_watchdog.h"
 #include "server/snapshot.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -431,7 +432,9 @@ EngineShard::EngineShard(util::ProactorBase* pb, mi_heap_t* heap)
 void EngineShard::Shutdown() {
   DVLOG(1) << "EngineShard::Shutdown";
 
+  ReportShutdownProgress("shutting down shard queue");
   queue_.Shutdown();
+  ReportShutdownProgress("shutting down secondary shard queue");
   queue2_.Shutdown();
   DCHECK(!fiber_heartbeat_periodic_.IsJoinable());
   DCHECK(!fiber_shard_handler_periodic_.IsJoinable());
@@ -541,11 +544,16 @@ void EngineShard::DestroyThreadLocal() {
   uint32_t shard_id = shard_->shard_id();
   mi_heap_t* tlh = shard_->mi_resource_.heap();
 
+  ReportShutdownProgress("shutting down engine shard");
   shard_->Shutdown();
 
+  ReportShutdownProgress("cleaning shard thread-local state");
   QList::ShutdownThread();
+  ReportShutdownProgress("resetting interned string pool");
   detail::InternedString::ResetPool();
+  ReportShutdownProgress("destroying engine shard");
   shard_->~EngineShard();
+  ReportShutdownProgress("cleaning stateless allocator");
   CleanupStatelessAllocMR();
 
   // shard_ itself lives in `tlh`; mi_heap_destroy below reclaims it, no need to mi_free it.
@@ -556,9 +564,11 @@ void EngineShard::DestroyThreadLocal() {
   InitTLSearchMR(nullptr);
   zmalloc_set_threadlocal_heap(nullptr);
 
-  // Bulk-reclaim bypasses destructors
+  // Bulk-reclaim bypasses destructors.
   zmalloc_used_memory_tl = 0;
+  ReportShutdownProgress("destroying shard memory heap");
   mi_heap_destroy(tlh);
+  ReportShutdownProgress(nullptr);
 
   VLOG(1) << "Shard reset " << shard_id;
 }

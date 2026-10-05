@@ -11,6 +11,7 @@
 #include "server/blocking_controller.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/shutdown_watchdog.h"
 
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
@@ -76,12 +77,14 @@ void Namespaces::Clear() {
 
   shard_set->RunBriefInParallel([&](EngineShard* es) {
     CHECK(es != nullptr);
+    ShutdownProgressScope progress("clearing namespace db slices");
     DbSlice::ShutdownThreadLocal();
 
     for (auto& val : ABSL_TS_UNCHECKED_READ(namespaces_) | std::views::values) {
       auto& db_slice = val.shard_db_slices_[es->shard_id()];
       db_slice->PrepareForSingleShotHeapDestroy();
       db_slice.reset();
+      ReportShutdownProgress("clearing namespace db slices");
     }
   });
 
