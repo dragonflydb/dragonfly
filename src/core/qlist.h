@@ -62,6 +62,7 @@ class QList {
    * items). recompress: 1 bit, bool, true if node is temporary decompressed for usage.
    * attempted_compress: 1 bit, boolean, used for verifying during testing.
    * dont_compress: 1 bit, boolean, used for preventing compression of entry.
+   * zstd_rejected: 1 bit, boolean, dictionary compression of the current entry did not pay off.
    * */
 
   struct Node {
@@ -85,7 +86,8 @@ class QList {
     uint16_t dont_compress : 1;      /* prevent compression of entry that will be used later */
     uint16_t offloaded : 1;          /* node is offloaded to colder storage */
     uint16_t io_pending : 1;         /* node has pending io operation */
-    uint16_t reserved1 : 7;          /* reserved for future use */
+    uint16_t zstd_rejected : 1;      /* dict compression rejected, reset when entry changes */
+    uint16_t reserved1 : 6;          /* reserved for future use */
 
     uint16_t reserved2; /* more bits to steal for future usage */
 

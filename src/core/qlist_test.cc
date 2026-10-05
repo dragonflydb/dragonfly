@@ -1840,4 +1840,90 @@ TEST_F(QListZstdTest, PolicyFlagParsing) {
   EXPECT_FALSE(AbslParseFlag("foo=1", &policy, &err));
 }
 
+// Replacing an element with a large one splits its node. The split node is marked dont_compress
+// while it is still being modified, and CoolOff() must not compress it behind Replace()'s back.
+TEST_F(QListZstdTest, ReplaceWithLargeElementInInteriorNode) {
+  QList ql(-1, 0);
+  ql.set_compr_policy({.min_size = 1, .enabled = true});
+
+  constexpr unsigned kNodes = 6;
+  constexpr unsigned kEntriesPerNode = 30;
+  for (unsigned n = 0; n < kNodes; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(kEntriesPerNode, 100000 + n * kEntriesPerNode));
+  }
+  ql.CompressAfterLoad();
+  ASSERT_TRUE(ql.Head()->next->next->IsCompressed());
+
+  // An entry in the middle of node 2, so that the node is split around it.
+  const long index = 2 * kEntriesPerNode + kEntriesPerNode / 2;
+  const string big(5000, 'x');
+  ASSERT_TRUE(ql.Replace(index, big));
+
+  EXPECT_EQ(ql.Size(), kNodes * kEntriesPerNode);
+  unsigned i = 0;
+  ql.Iterate(
+      [&](const QList::Entry& e) {
+        if (i == index) {
+          EXPECT_EQ(e.view(), big);
+        } else {
+          EXPECT_THAT(string(e.view()), HasSubstr(StrCat("job", 100000 + i, "'"))) << i;
+        }
+        ++i;
+        return true;
+      },
+      0, -1);
+  EXPECT_EQ(i, kNodes * kEntriesPerNode);
+}
+
+// A push that opens a new node and a pop that drops it move the same node in and out of the
+// interior every time. An incompressible node must not pay for a rejected compression each time.
+TEST_F(QListZstdTest, IncompressibleNodeIsNotRetried) {
+  std::mt19937 rng(11);
+  auto random_value = [&] {
+    string v(3500, '\0');
+    for (char& c : v)
+      c = char(rng());
+    return v;
+  };
+
+  QList ql(-1, 0);
+  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  for (unsigned n = 0; n < 8; ++n)
+    ql.AppendListpack(BuildCeleryListpack(30, 100000 + n * 30));
+  ql.CompressAfterLoad();
+
+  // Random payloads, each large enough to take its own node. After two of them the first one is
+  // the first interior node and has been offered for compression once.
+  ql.Push(random_value(), QList::HEAD);
+  ql.Push(random_value(), QList::HEAD);
+  const QList::Node* interior = ql.Head()->next;
+  ASSERT_FALSE(interior->IsCompressed());
+
+  const auto bad_attempts = QList::stats.bad_compression_attempts;
+  for (unsigned i = 0; i < 10; ++i) {
+    string v = random_value();
+    ql.Pop(QList::HEAD);
+    ql.Push(v, QList::HEAD);
+  }
+  EXPECT_EQ(QList::stats.bad_compression_attempts, bad_attempts);
+  EXPECT_FALSE(interior->IsCompressed());
+}
+
+TEST_F(QListZstdTest, NoSizeGate) {
+  // min_size=0 compresses as soon as the list has more than one node.
+  QList ql(-1, 0);
+  ql.set_compr_policy({.min_size = 0, .enabled = true});
+
+  ql.AppendListpack(BuildCeleryListpack(30, 100000));
+  ql.CompressAfterLoad();
+  EXPECT_EQ(ql.node_count(), 1u);
+  EXPECT_FALSE(ql.Head()->IsCompressed());  // single node lists are left raw.
+
+  for (unsigned n = 1; n < 4; ++n) {
+    ql.AppendListpack(BuildCeleryListpack(30, 100000 + n * 30));
+  }
+  ql.CompressAfterLoad();
+  EXPECT_TRUE(ql.Head()->next->IsCompressed());
+}
+
 }  // namespace dfly
