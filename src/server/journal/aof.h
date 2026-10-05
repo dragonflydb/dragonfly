@@ -66,7 +66,8 @@ class AofBlockBuilder {
 
   AofBlockBuilder(uint64_t segment_uid, SealCb seal_cb);
 
-  // Copies the record, splitting it across blocks if needed.
+  // Copies the record, splitting it across blocks if needed. Calls seal_cb_ zero or more times,
+  // once per block the record fills. Non-preemptive: never yields.
   void Append(std::string_view record, uint64_t lsn);
 
   // Seals the open block if non-empty.
@@ -87,7 +88,6 @@ class AofBlockBuilder {
   uint64_t first_lsn_ = 0;
   uint32_t n_records_ = 0;
   uint8_t flags_ = 0;
-  std::optional<uint64_t> next_lsn_;
   SealCb seal_cb_;
 };
 

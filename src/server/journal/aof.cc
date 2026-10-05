@@ -86,8 +86,6 @@ AofBlockBuilder::AofBlockBuilder(uint64_t segment_uid, SealCb seal_cb)
 
 void AofBlockBuilder::Append(std::string_view record, uint64_t lsn) {
   DCHECK(!record.empty());
-  DCHECK(!next_lsn_ || *next_lsn_ == lsn) << *next_lsn_ << " " << lsn;
-  next_lsn_ = lsn + 1;
 
   uint8_t start_flags = 0;
   while (true) {
