@@ -74,7 +74,8 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
 
   void Run();
 
-  // Cancel() must be called if Start() is called
+  // Cancels the flow and waits for traversal before unregistering its listeners.
+  // Must be called if Start() is called.
   bool Cancel();
 
   void SendFinalize(long attempt);
@@ -111,6 +112,7 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
   std::unique_ptr<CmdSerializer> cmd_serializer_;
 
   MigrationStats migration_stats_;
+  LocalLatch traversal_latch_;
 
   // Scratch buffer for decoding keys in ShouldSerialize. Reused to avoid allocating per key; safe
   // to share across fibers because ShouldSerialize does not preempt.

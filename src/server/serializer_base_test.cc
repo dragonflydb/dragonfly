@@ -30,6 +30,7 @@
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
+#include "server/journal/streamer.h"
 #include "server/journal/types.h"
 #include "server/table.h"
 #include "server/test_utils.h"
@@ -332,6 +333,16 @@ class SerializerBaseTest : public BaseFamilyTest {
     pp_->at(0)->Await([this] { cntx_.ReportCancelError(); });
   }
 
+  void WithShardLock(auto cb) {
+    auto* reg = service_->mutable_registry();
+    boost::intrusive_ptr<Transaction> tx = new Transaction{reg->Find("SAVE")};
+    tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+    tx->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
+      cb(t->GetDbSlice(es->shard_id()), reg);
+      return OpStatus::OK;
+    });
+  }
+
   // #1: two offloaded entries both fail to read; the error path must release both bucket latches.
   bool DelayedErrorLeavesBlocked() {
     return pp_->at(0)->Await([this] {
@@ -364,27 +375,17 @@ class SerializerBaseTest : public BaseFamilyTest {
  private:
   // Construct the driver (no snapshot fiber); optionally register it as a db_slice change listener.
   void EmplaceDriverOnThread(bool register_cb) {
-    auto* reg = service_->mutable_registry();
-    boost::intrusive_ptr<Transaction> tx = new Transaction{reg->Find("SAVE")};
-    tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
-    tx->ScheduleSingleHop([this, reg, register_cb](Transaction* t, EngineShard* es) {
-      driver_.emplace(driver_params, &t->GetDbSlice(es->shard_id()), &cntx_, reg);
+    WithShardLock([&](DbSlice& slice, CommandRegistry* reg) {
+      driver_.emplace(driver_params, &slice, &cntx_, reg);
       if (register_cb)
         driver_->RegisterChangeListener(false);
-      return OpStatus::OK;
     });
   }
 
   void StartOnThread() {
-    auto* reg = service_->mutable_registry();
-
-    boost::intrusive_ptr<Transaction> tx = new Transaction{reg->Find("SAVE")};
-    tx->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
-
-    tx->ScheduleSingleHop([this, reg](Transaction* t, EngineShard* es) {
-      driver_.emplace(driver_params, &t->GetDbSlice(es->shard_id()), &cntx_, reg);
+    WithShardLock([this](DbSlice& slice, CommandRegistry* reg) {
+      driver_.emplace(driver_params, &slice, &cntx_, reg);
       driver_->Start();
-      return OpStatus::OK;
     });
   }
 
@@ -650,6 +651,42 @@ TEST_F(SerializerBaseTest, UnregisterWaitsForInflightOnChange) {
 
   writer.Join();
   Finish();
+}
+
+// SlotMigrationStreamer::Run() is driven by an external fiber, so Cancel() must wait for it:
+// unregistering resets snapshot_version_, which a traversal suspended mid-bucket still uses.
+TEST_F(SerializerBaseTest, MigrationCancellationWaitsForTraversal) {
+  struct PausingStreamer : SlotMigrationStreamer {
+    using SlotMigrationStreamer::SlotMigrationStreamer;
+
+    unsigned SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
+                             bool on_update) override {
+      entered.Notify();
+      release.Wait();
+      return SlotMigrationStreamer::SerializeBucket(db_index, it, on_update);
+    }
+
+    util::fb2::Done entered, release;
+  };
+
+  Run({"SET", "key", "value"});
+  pp_->at(0)->Await([this] {
+    ExecutionState cntx;
+    // Owns no slots, so nothing is written and the streamer needs no socket.
+    PausingStreamer streamer{&namespaces->GetDefaultNamespace().GetCurrentDbSlice(),
+                             cluster::SlotSet{}, &cntx};
+    WithShardLock([&](DbSlice&, CommandRegistry*) { streamer.RegisterChangeListener(true); });
+
+    util::fb2::Fiber traversal{[&] { streamer.Run(); }};
+    streamer.entered.Wait();
+
+    util::fb2::Fiber cancel{util::fb2::Launch::dispatch, [&] { EXPECT_TRUE(streamer.Cancel()); }};
+    EXPECT_GT(streamer.snapshot_version_, 0u);  // Cancel() is blocked until the traversal ends
+
+    streamer.release.Notify();
+    traversal.Join();
+    cancel.Join();
+  });
 }
 
 // A failed tiered read must not leak the other extracted entries' bucket latches.
