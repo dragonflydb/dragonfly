@@ -44,7 +44,7 @@ subclasses implement only how a single bucket/entry is turned into bytes:
 | `DbSlice::ChangeConsumerInterface` | `src/server/db_slice.h` | Change-listener interface implemented by `SerializerBase` |
 | `BucketDependencies` | `src/server/serializer_base.h` | Per-bucket dependency counter for in-flight async work |
 | `DelayedEntryHandler` | `src/server/serializer_base.h` | Owns delayed tiered entries, keyed by bucket |
-| `ThreadLocalMutex` | `src/server/synchronization.h` | Fiber-aware mutex guarding the serializer buffer (`stream_mu_`) |
+| `ThreadLocalMutex` | `src/server/synchronization.h` | Fiber-aware mutex guarding the serializer buffer (`stream_mu_`); active only without tagged chunks |
 | `ChangeReq` | `src/server/table.h` | `PrimeTable::BucketSet` — the set of buckets about to be mutated |
 | `BucketIdentity` | `src/server/serializer_base.h` | `uintptr_t` bucket address, stable bucket key |
 
@@ -181,8 +181,9 @@ IterateBucketsFb(send_full_sync_cut)         // snapshot.cc
                    /*include empty buckets=*/true)
       PushSerialized(false)                  // explicit flush between buckets
       yield if background mode, or if CPU time > ~15us
-    ProcessDelayedEntries(force=true, ...)   // drain outstanding tiered reads
-    PushSerialized(true)                     // force-flush after each database
+    ProcessDelayedEntries(force=true, ...)   // drain the queued tiered reads
+  BucketDependencies::WaitEmpty()            // entries taken over by OnChange fibers
+  PushSerialized(true)                       // force-flush after the traversal
   if send_full_sync_cut:                     // replication only
     serializer_->SendFullSyncCut()
     PushSerialized(true)
@@ -272,10 +273,14 @@ Tiered (on-disk, external) string values are not read synchronously. `SerializeE
 `ProcessDelayedEntries(force, flush_bucket, cntx)` drains entries:
 
 - If `flush_bucket` is set, all entries for that bucket are extracted and serialized.
-- Otherwise, entries whose futures are already resolved are serialized (or **all** entries if
+- In addition, entries whose futures are already resolved are serialized (or **all** entries if
   `force` is true, or if the queue exceeds `kMaxDelayedEntries == 512`).
 - Each drained entry is serialized via `SerializeFetchedEntry` (which takes `stream_mu_` and calls
   `SerializeEntryLocked`), then its bucket dependency is decremented.
+
+The calling fiber extracts the entries first and may suspend while it holds them (tiered read,
+chunk flush). Entries taken by an `OnChange` fiber are therefore invisible to the traversal's own
+drain, so `TraverseAllBuckets` reports success only after `BucketDependencies::WaitEmpty()`.
 
 Because delayed entries are **keyed by bucket** and hold a `BucketDependencies` reference, a bucket
 is not considered free of in-flight work until all its tiered reads have been serialized. This is
@@ -316,22 +321,26 @@ preempting) bucket serialization, replacing the older single `db_slice_->GetLatc
 
 ```
 ConsumeJournalChange(item):                  // snapshot.cc
-  lock_guard(stream_mu_)
-  LOG_IF(DFATAL, serialize_bucket_running_)  // interleaving not yet supported
+  lock_guard(stream_mu_)                     // no-op with tagged chunks
   serializer_->WriteJournalEntry(item.journal_item.data)
   ++stats_.jounal_changes
 ```
 
-Active only when streaming the journal (replication / migration). It acquires `stream_mu_` so the
-journal write cannot interleave with an in-progress entry serialization that shares the same
-`serializer_` buffer. It only appends to the buffer; flushing happens later via `ThrottleIfNeeded`
-→ `PushSerialized(false)`, called by `JournalSlice` after the journal callback returns.
+Active only when streaming the journal (replication / migration). It only appends to the buffer;
+flushing happens later via `ThrottleIfNeeded` → `PushSerialized(false)`, called by `JournalSlice`
+after the journal callback returns.
 
-The `DFATAL` guard asserts that a journal write never lands in the middle of a bucket
-serialization. This holds because the bucket being serialized has an outstanding
-`BucketDependencies` entry, and the deletion/journal paths that could race are gated on it (next
-section). The guard's comment notes it can be removed once the wire format supports interleaved
-(tagged) chunks for journal vs bucket streams.
+A journal write can arrive while a large entry is suspended in a mid-entry flush:
+
+- **Tagged chunks (default).** `stream_mu_` is inactive. The journal blob is written between the
+  tagged chunks of the split entry and the loader reassembles the entry by stream id (see
+  [Tagged Chunks](#tagged-chunks)).
+- **Untagged stream (`--serialization_tagged_chunks=false`).** `stream_mu_` is active and keeps the
+  journal blob out of the middle of an entry, which would otherwise corrupt the wire format.
+
+Baseline-before-journal ordering does not come from tagging. A transaction's `OnChange` runs
+before its `ConsumeJournalChange` on the same fiber, and the deletion paths that bypass `OnChange`
+are gated on `BucketDependencies` (next section).
 
 ### Journal Ordering for Non-Transaction Deletes
 
@@ -377,17 +386,23 @@ When a single value is large enough to be flushed across multiple scheduler turn
 be distinguishable on the wire. The **tagged-chunk** wire format wraps such split entries so the
 receiver can reassemble them.
 
-- Enabled master-side via the `--serialization_tagged_chunks` flag, propagated to the serializer
-  with `RdbSerializer::SetTagEntries(...)` in `SliceSnapshot::Start`.
-- `RdbSerializer::PushToConsumerIfNeeded` calls `mem_buf_controller_.MarkEntrySplit()` on a
-  `kFlushMidEntry` flush so the chunk is tagged; single-chunk entries are emitted unchanged (no
-  overhead).
-- The loader detects tagged chunks by the flag bit and reassembles transparently.
+- Controlled master-side by the `--serialization_tagged_chunks` flag (default `true`), propagated
+  to the serializer with `RdbSerializer::SetTagEntries(...)` in `SliceSnapshot::Start` when
+  mid-entry flushing is allowed (`SnapshotFlush::kAllow`).
+- `MemBufController` (`rdb_save.h`) gives every entry an id between `StartEntry` and
+  `FinishEntry`. `RdbSerializer::PushToConsumerIfNeeded` calls `MarkEntrySplit()` on a
+  `kFlushMidEntry` flush; from then on every chunk of that entry, including its tail, is prefixed
+  with `[RDB_OPCODE_TAGGED_CHUNK:1][stream_id:4][payload_length:4]`. Single-chunk entries are
+  emitted unchanged (no overhead).
+- Around the consume callback the entry gives up the buffer (`SaveStateBeforeConsume` /
+  `RestoreStateAfterConsume`), so other entries and journal blobs can be written while it is
+  suspended. Journal blobs are never tagged.
+- The loader (`rdb_load.cc`) keeps per-stream state and reassembles the chunks by stream id.
 
-This format is currently used to allow a *single* large value to be split. The serializer buffer
-is still **shared** between bucket serialization and journal entries (one `serializer_` per
-`SliceSnapshot`); interleaving independent bucket and journal streams over tagged chunks is not
-yet implemented (see [Remaining Work](#remaining-work)).
+The serializer buffer is still **shared** (one `serializer_` per `SliceSnapshot`), but with tagged
+chunks the entries of different fibers and journal blobs may interleave in it. This is why
+`stream_mu_` is constructed inactive in this mode (see
+[Locking and Synchronization](#locking-and-synchronization)).
 
 ## Journal-Omit Optimization
 
@@ -477,21 +492,24 @@ callback is `ConsumeBigValueChunk`.
 
 ### `stream_mu_` (ThreadLocalMutex)
 
-A `ThreadLocalMutex` (`src/server/synchronization.cc`) declared in `SerializerBase`. It guards the
-shared `serializer_` buffer so two fibers cannot write to it concurrently, and so a journal write
-cannot land mid-entry. It is taken **per entry** in `SerializeEntry`/`SerializeFetchedEntry` and
-around the journal write in `ConsumeJournalChange`.
+A `detail::OptionalMutex<ThreadLocalMutex>` declared in `SerializerBase`. For the untagged stream
+it guards the shared `serializer_` buffer so two fibers cannot write to it concurrently, and so a
+journal write cannot land mid-entry. It is taken **per entry** in
+`SerializeEntry`/`SerializeFetchedEntry` and around the journal write in `ConsumeJournalChange`.
 
-**Important:** `ThreadLocalMutex::lock()`/`unlock()` are **no-ops** when
-`serialization_max_chunk_size == 0`. The mutex provides real mutual exclusion only when big-value
-chunked flushing is enabled. When disabled, serialization never preempts mid-bucket and
-correctness relies on cooperative scheduling.
+**Important:** the mutex is active only when both conditions hold:
+
+- `--serialization_tagged_chunks=false`. `SerializerBase` constructs it as
+  `stream_mu_(!FLAGS_serialization_tagged_chunks)`, so with tagged chunks (the default)
+  `lock()`/`unlock()` are no-ops and `is_locked()` is false.
+- `serialization_max_chunk_size != 0`. Otherwise `ThreadLocalMutex::lock()`/`unlock()` are no-ops:
+  serialization never preempts mid-entry and correctness relies on cooperative scheduling.
 
 | Path | Mode | Takes `stream_mu_` | Notes |
 |------|------|--------------------|-------|
 | `SerializeEntry` → `SerializeEntryLocked` | both | per entry | in-memory values |
 | `SerializeFetchedEntry` | both | per delayed entry | tiered values |
-| `ConsumeJournalChange` | replication/migration | per journal entry | DFATAL if mid-bucket |
+| `ConsumeJournalChange` | replication/migration | per journal entry | journal blob |
 
 ### `BucketDependencies` (per-bucket `LocalLatch`)
 
@@ -530,7 +548,7 @@ flowchart TD
 
   subgraph EXPLICIT["Explicit flushes (outside stream_mu_)"]
     B1["IterateBucketsFb (between buckets)"] --> PS1["PushSerialized(false)"]
-    B2["IterateBucketsFb (end of db / full-sync cut)"] --> PS2["PushSerialized(true)"]
+    B2["IterateBucketsFb (end of traversal / full-sync cut)"] --> PS2["PushSerialized(true)"]
     B3["FinalizeJournalStream"] --> PS3["PushSerialized(true)"]
     B4["ThrottleIfNeeded (from JournalSlice)"] --> PS4["PushSerialized(false)"]
     PS1 --> FS[FlushSerialized]
@@ -558,20 +576,15 @@ buffer; the flush happens later from `ThrottleIfNeeded`/`PushSerialized`.
 
 Much of what earlier revisions of this document listed as a roadmap is now implemented: bucket
 completion tracking (`BucketDependencies` + versioning), per-bucket delayed tiered entries, the
-tagged-chunk wire format, and the journal-omit optimization for self-contained single-key writes.
-The following items remain open:
+tagged-chunk wire format with interleaved entry and journal data, and the journal-omit optimization
+for self-contained single-key writes. The following items remain open:
 
-1. **Separate serializer per producer + interleaved tagged streams.** Bucket serialization and
-   journal entries still share one `serializer_` buffer, and `ConsumeJournalChange` still asserts
-   (`DFATAL`) that it never runs mid-bucket. Giving journal and bucket serialization independent
-   serializers — and reassembling their interleaved tagged chunks on the consumer — would let the
-   journal write without waiting on bucket serialization.
+1. **Retire the untagged stream and `stream_mu_`.** With tagged chunks (the default) entries and
+   journal blobs already interleave in the shared `serializer_` buffer and `stream_mu_` is
+   inactive. The mutex and the exclusive-buffer path exist only for
+   `--serialization_tagged_chunks=false`; both can be removed together with that mode.
 
-2. **Narrow / remove `stream_mu_`.** Once buffer exclusivity is provided by per-producer
-   serializers, `stream_mu_` would no longer be needed for buffer exclusivity and could be
-   narrowed or removed.
-
-3. **Bandwidth-based pacing of the snapshot loop.** Backups and full sync can saturate outgoing
+2. **Bandwidth-based pacing of the snapshot loop.** Backups and full sync can saturate outgoing
    network bandwidth, starving foreground client traffic. The only throughput-shaping the snapshot
    loop does today is **CPU-based**: in non-background mode `HandleFlushData` sleeps up to 2ms
    proportional to the CPU cycles just spent serializing/compressing, and background mode yields to
@@ -593,7 +606,7 @@ The following items remain open:
    - Interaction with background mode and with the `seq_cond_` ordering gate (the sleep must not be
      held while blocking other producers behind the ordering gate).
 
-4. **Broaden journal-omit eligibility.** `is_omittable_operation` is currently set only for
+3. **Broaden journal-omit eligibility.** `is_omittable_operation` is currently set only for
    self-contained single-key writes (e.g. `SET`). Extending "skip both" to a wider, individually
    validated set of self-contained commands — and eventually to baseline-dependent commands whose
    post-mutation value the traversal will capture — would further reduce full-sync journal traffic.
