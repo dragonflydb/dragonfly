@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#include <absl/functional/function_ref.h>
+
 #include <unordered_map>
 
 #include "server/execution_state.h"
@@ -13,28 +15,34 @@ namespace dfly {
 
 struct JournalReader;
 
-// Coordinator for multi shard execution.
+// Coordinates global commands across flows applied in parallel (replica flows, AOF shards).
 class MultiShardExecution {
  public:
-  struct TxExecutionSync {
-    util::fb2::Barrier barrier;
-    std::atomic_uint32_t counter;
-    util::fb2::BlockingCounter block;
+  explicit MultiShardExecution(uint32_t num_flows);
 
-    explicit TxExecutionSync(uint32_t counter)
-        : barrier(counter), counter(counter), block(counter) {
-    }
-  };
+  // Blocks until all flows reach txid, runs apply in exactly one of them, then releases them all.
+  // Returns false if cancelled; else apply's result in the flow that ran it, true in the others.
+  bool Execute(TxId txid, absl::FunctionRef<bool()> apply);
 
-  bool InsertTxToSharedMap(TxId txid, uint32_t shard_cnt);
-  TxExecutionSync& Find(TxId txid);
-  void Erase(TxId txid);
+  // Called when a flow reaches end of log: it counts as arrived at every pending and future txid.
+  void RemoveFlow();
+
   void CancelAllBlockingEntities();
 
  private:
-  util::fb2::Mutex map_mu;
-  std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
-  bool cancelled_{false};  // Protected by map_mu
+  struct Barrier {
+    enum class State : uint8_t { kWaiting, kRunning, kDone };
+
+    uint32_t arrived = 0;
+    uint32_t left = 0;
+    State state = State::kWaiting;
+  };
+
+  util::fb2::Mutex mu_;
+  util::fb2::CondVar cv_;
+  std::unordered_map<TxId, Barrier> barriers_;
+  uint32_t flows_;
+  bool cancelled_ = false;
 };
 
 // This class holds the commands of transaction in single shard.

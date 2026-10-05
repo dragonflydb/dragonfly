@@ -15,44 +15,51 @@ using namespace facade;
 
 namespace dfly {
 
-bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
-  std::unique_lock lk(map_mu);
-  auto [it, was_insert] = tx_sync_execution.emplace(txid, shard_cnt);
-  // If CancelAllBlockingEntities() already ran, cancel the new entry immediately
-  // to prevent shard fibers from blocking on entries that will never complete.
-  if (cancelled_) {
-    it->second.barrier.Cancel();
-    it->second.block->Cancel();
+MultiShardExecution::MultiShardExecution(uint32_t num_flows) : flows_(num_flows) {
+}
+
+bool MultiShardExecution::Execute(TxId txid, absl::FunctionRef<bool()> apply) {
+  std::unique_lock lk(mu_);
+  // unordered_map keeps references stable while other barriers are added or erased.
+  Barrier& barrier = barriers_[txid];
+  // Txids never repeat, so a finished barrier is never reused.
+  // TODO: upon AOF replay, set the txid counter to the max replayed txid so this holds.
+  DCHECK(barrier.state != Barrier::State::kDone) << "txid reused: " << txid;
+  ++barrier.arrived;
+  cv_.notify_all();
+  VLOG(2) << "txid: " << txid << " arrived: " << barrier.arrived << " flows: " << flows_;
+
+  cv_.wait(lk, [&] { return cancelled_ || barrier.arrived >= flows_; });
+  bool res = true;
+  if (!cancelled_ && barrier.state == Barrier::State::kWaiting) {
+    barrier.state = Barrier::State::kRunning;
+    lk.unlock();
+    res = apply();
+    lk.lock();
+    barrier.state = Barrier::State::kDone;
+    cv_.notify_all();
   }
-  lk.unlock();
+  cv_.wait(lk, [&] { return cancelled_ || barrier.state == Barrier::State::kDone; });
+  if (cancelled_)
+    res = false;
 
-  VLOG(2) << "txid: " << txid << " unique_shard_cnt_: " << shard_cnt
-          << " was_insert: " << was_insert;
-  it->second.block->Dec();
-
-  return was_insert;
+  // The last flow to leave erases the barrier.
+  if (++barrier.left == barrier.arrived)
+    barriers_.erase(txid);
+  return res;
 }
 
-MultiShardExecution::TxExecutionSync& MultiShardExecution::Find(TxId txid) {
-  std::lock_guard lk(map_mu);
-  VLOG(2) << "Execute txid: " << txid;
-  auto it = tx_sync_execution.find(txid);
-  DCHECK(it != tx_sync_execution.end());
-  return it->second;
-}
-
-void MultiShardExecution::Erase(TxId txid) {
-  std::lock_guard lg{map_mu};
-  tx_sync_execution.erase(txid);
+void MultiShardExecution::RemoveFlow() {
+  std::lock_guard lk(mu_);
+  DCHECK_GT(flows_, 0u);
+  --flows_;
+  cv_.notify_all();
 }
 
 void MultiShardExecution::CancelAllBlockingEntities() {
-  lock_guard lk{map_mu};
+  std::lock_guard lk(mu_);
   cancelled_ = true;
-  for (auto& tx_data : tx_sync_execution) {
-    tx_data.second.barrier.Cancel();
-    tx_data.second.block->Cancel();
-  }
+  cv_.notify_all();
 }
 
 void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
@@ -80,10 +87,14 @@ bool TransactionData::IsGlobalCmd() const {
     return false;
   }
 
+  // Global transactions journaled on every shard. MOVE is journaled once, so it is not here.
+  static constexpr string_view kGlobalCmds[] = {"FLUSHDB",  "FLUSHALL",     "FT.CREATE",
+                                                "FT.ALTER", "FT.DROPINDEX", "FT.SYNUPDATE"};
   string_view front = command.Front();
-
-  if (absl::EqualsIgnoreCase(front, "FLUSHDB"sv) || absl::EqualsIgnoreCase(front, "FLUSHALL"sv))
-    return true;
+  for (string_view cmd : kGlobalCmds) {
+    if (absl::EqualsIgnoreCase(front, cmd))
+      return true;
+  }
 
   if (command.size() > 1 && absl::EqualsIgnoreCase(front, "DFLYCLUSTER"sv) &&
       absl::EqualsIgnoreCase(command[1], "FLUSHSLOTS"sv)) {

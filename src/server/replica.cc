@@ -571,7 +571,8 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   auto start_time = absl::Now();
 
   // Initialize MultiShardExecution.
-  multi_shard_exe_.reset(new MultiShardExecution());
+  // Replication has no end of log: flows never call RemoveFlow, so all take part.
+  multi_shard_exe_.reset(new MultiShardExecution(master_context_.num_flows));
 
   auto load_context = std::make_shared<RdbLoadContext>();
 
@@ -1256,8 +1257,8 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
   auto log_cmd = [](const TransactionData& tx) {
     facade::Connection::LogReplicaCommand(tx.command, tx.dbid);
   };
-  applier_ = std::make_unique<JournalApplier>(service, std::move(multi_shard_exe),
-                                              master_context.num_flows, std::move(log_cmd));
+  applier_ =
+      std::make_unique<JournalApplier>(service, std::move(multi_shard_exe), std::move(log_cmd));
   rdb_loader_ = std::make_unique<RdbLoader>(&service_, load_context);
   rdb_loader_->SetLoadUnownedSlots(true);
   rdb_loader_->SetShardCount(master_context.num_flows);
