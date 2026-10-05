@@ -48,6 +48,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
+#include "facade/string_socket.h"
 #include "facade/tls_helpers.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
@@ -2870,7 +2871,7 @@ string ServerFamily::FormatInfoMetrics(
     append("keyspace_misses", m.events.misses);
     append("keyspace_mutations", m.events.mutations);
     append("total_reads_processed", conn_stats.io_read_cnt);
-    append("total_writes_processed", reply_stats.io_write_cnt);
+    append("total_writes_processed", reply_stats.io_write_calls);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
@@ -3415,8 +3416,9 @@ void ServerFamily::Replicate(string_view host, string_view port) {
     args_vec.emplace_back(MutableSlice{s.data(), s.size()});
   }
   CmdArgList args_list = absl::MakeSpan(args_vec);
-  io::NullSink sink;
-  facade::RedisReplyBuilder rb(&sink);
+  facade::StringSocket sock;
+  sock.set_null(true);
+  facade::RedisReplyBuilder rb(&sock);
   CommandContext cmd_cntx{&rb, nullptr};
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
 }
