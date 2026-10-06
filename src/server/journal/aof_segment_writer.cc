@@ -98,19 +98,18 @@ error_code AofSegmentWriter::Open(uint64_t seq) {
   std::move(cleanup).Cancel();
 
   builder_.emplace(uid, [this](AofSealedBlock block) { OnSealed(std::move(block)); });
-  tick_id_ = util::fb2::ProactorBase::me()->AddPeriodic(kAofSyncMs, [this] { OnTick(); });
+  tick_id_ = util::fb2::ProactorBase::me()->AddPeriodic(kAofSyncMs, [this] { MaybeStartFSync(); });
   return {};
 }
 
 void AofSegmentWriter::AddRecord(string_view record, uint64_t lsn) {
-  // The log has a hole after a failed write, so later records are useless in this segment.
-  if (write_ec_)
+  if (ec_)
     return;
   builder_->Append(record, lsn);
 }
 
 void AofSegmentWriter::Seal() {
-  if (write_ec_)
+  if (ec_)
     return;
   builder_->Seal();
 }
@@ -123,40 +122,26 @@ error_code AofSegmentWriter::Shutdown() {
   util::fb2::NoOpLock lk;
   cv_.wait(lk, [this] { return in_flight_ == 0 && !sync_in_flight_; });
 
-  // Sync whatever prefix is written, even if a later block failed.
-  error_code ec = file_->FSync(IORING_FSYNC_DATASYNC);
-  if (ec && !sync_ec_)
-    sync_ec_ = ec;
-  // A failed sync may have dropped dirty pages, so a later success proves nothing.
-  if (!sync_ec_) {
-    durable_offset_ = written_offset_;
-    durable_lsn_ = written_lsn_;
+  if (!ec_) {
+    if (error_code ec = file_->FSync(IORING_FSYNC_DATASYNC); ec)
+      ec_ = ec;
+    else
+      durable_lsn_ = written_lsn_;
   }
   error_code close_ec = file_->Close();
   // On NFS-like filesystems close can be the only place a deferred write error shows up.
   LOG_IF(ERROR, close_ec) << "AOF close failed: " << close_ec.message();
-
-  if (write_ec_)
-    return write_ec_;
-  return sync_ec_ ? sync_ec_ : close_ec;
+  return ec_ ? ec_ : close_ec;
 }
 
 void AofSegmentWriter::WaitPending(size_t limit) {
   util::fb2::NoOpLock lk;
-  cv_.wait(lk, [&] { return PendingBytes() <= limit || write_ec_; });
+  cv_.wait(lk, [&] { return PendingBytes() <= limit || ec_; });
 }
 
 size_t AofSegmentWriter::PendingBytes() const {
   // pending_ spans [written_offset_, next_offset_) of the file.
   return next_offset_ - written_offset_ + builder_->PayloadSize();
-}
-
-AofSegmentWriter::Durability AofSegmentWriter::GetDurability() const {
-  if (sync_ec_)
-    return Durability::kSyncFailed;
-  if (write_ec_)
-    return Durability::kWriteFailed;
-  return Durability::kNormal;
 }
 
 void AofSegmentWriter::OnSealed(AofSealedBlock block) {
@@ -175,13 +160,13 @@ void AofSegmentWriter::Submit(PendingBlock* pb) {
 
 void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
   if (res <= 0) {
-    // Fail-stop: the block stays unwritten, so WrittenLsn stops before it. Blocks in flight after
-    // it still land and Shutdown's fdatasync persists them, so the segment can hold valid blocks
-    // after a gap: readers must stop at the first invalid block and never resync past it.
+    // The block stays unwritten, so WrittenLsn stops before it. Blocks in flight after it still
+    // land, so the segment can hold valid blocks after a gap: readers must stop at the first
+    // invalid block and never resync past it.
     error_code ec = IoError(res);
     LOG_EVERY_T(ERROR, 1) << "AOF write failed at offset " << pb->offset << ": " << ec.message();
-    if (!write_ec_)
-      write_ec_ = ec;
+    if (!ec_)
+      ec_ = ec;
     --in_flight_;
     cv_.notify_all();
     return;
@@ -209,28 +194,26 @@ void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
   cv_.notify_all();
 }
 
-void AofSegmentWriter::OnTick() {
-  // fdatasync covers only writes completed before it is issued, hence the captured targets.
-  if (sync_in_flight_ || sync_ec_ || written_offset_ <= durable_offset_)
+void AofSegmentWriter::MaybeStartFSync() {
+  // fdatasync covers only writes completed before it is issued, hence the captured target.
+  if (sync_in_flight_ || ec_ || written_lsn_ == durable_lsn_)
     return;
-  size_t sync_offset = written_offset_;
   uint64_t sync_lsn = written_lsn_;
   sync_in_flight_ = true;
-  file_->FSyncAsync(IORING_FSYNC_DATASYNC, [this, sync_offset, sync_lsn](int res) {
-    OnSyncDone(sync_offset, sync_lsn, res);
-  });
+  file_->FSyncAsync(IORING_FSYNC_DATASYNC,
+                    [this, sync_lsn](int res) { OnSyncDone(sync_lsn, res); });
 }
 
-void AofSegmentWriter::OnSyncDone(size_t sync_offset, uint64_t sync_lsn, int res) {
+void AofSegmentWriter::OnSyncDone(uint64_t sync_lsn, int res) {
   sync_in_flight_ = false;
   if (res < 0) {
-    // Never retried: the kernel may have dropped the dirty pages ("fsyncgate").
-    // DurableLsn stops for good; only a new writer on a new segment recovers.
-    // TODO: decide how to trigger an immediate checkpoint (#8410) to clear this state.
-    sync_ec_ = IoError(res);
-    LOG(ERROR) << "AOF fdatasync failed: " << sync_ec_.message();
+    // Never retried: the kernel may have dropped the dirty pages ("fsyncgate"), so a later
+    // success would prove nothing.
+    // TODO: decide how to trigger an immediate checkpoint (#8410) to recover.
+    if (!ec_)
+      ec_ = IoError(res);
+    LOG(ERROR) << "AOF fdatasync failed: " << IoError(res).message();
   } else {
-    durable_offset_ = sync_offset;
     durable_lsn_ = sync_lsn;
   }
   cv_.notify_all();
