@@ -115,6 +115,7 @@ void AofSegmentWriter::Seal() {
 }
 
 error_code AofSegmentWriter::Shutdown() {
+  DCHECK(file_);
   util::fb2::ProactorBase::me()->CancelPeriodic(tick_id_);
   tick_id_ = 0;
 

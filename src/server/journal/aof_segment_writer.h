@@ -16,6 +16,9 @@
 
 namespace dfly {
 
+// Writes one AOF segment. Not thread safe: all calls, including Open and Shutdown, must run
+// on the same proactor thread. Call Shutdown() before destruction if Open() succeeded, and
+// only then; it waits for in-flight I/O and cancels the periodic sync.
 class AofSegmentWriter {
  public:
   AofSegmentWriter(std::string dir, uint32_t shard_id, uint32_t shard_count);
@@ -30,6 +33,7 @@ class AofSegmentWriter {
   void Seal();
 
   // Waits for in-flight I/O and fdatasyncs the segment. Returns error() if one is set.
+  // Must not be called if Open() failed.
   std::error_code Shutdown();
 
   // Blocks the calling fiber until PendingBytes() <= limit or an I/O error stopped the writer.
