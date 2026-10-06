@@ -114,11 +114,11 @@ error_code AofSegmentWriter::Shutdown() {
   return file_->Close();
 }
 
-void AofSegmentWriter::WaitUnwritten(size_t limit) {
-  ev_.await([&] { return UnwrittenBytes() <= limit || write_ec_; });
+void AofSegmentWriter::WaitPending(size_t limit) {
+  ev_.await([&] { return PendingBytes() <= limit || write_ec_; });
 }
 
-size_t AofSegmentWriter::UnwrittenBytes() const {
+size_t AofSegmentWriter::PendingBytes() const {
   return pending_bytes_ + builder_->PayloadSize();
 }
 

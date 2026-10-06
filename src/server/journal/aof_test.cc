@@ -199,7 +199,7 @@ TEST_F(AofSegmentWriterTest, WriteAndReadBack) {
     writer.AddRecord(huge, 2);
 
     // Only the open block remains.
-    writer.WaitUnwritten(small.size());
+    writer.WaitPending(small.size());
     EXPECT_EQ(writer.WrittenLsn(), 1u);
 
     ASSERT_FALSE(writer.Shutdown());
