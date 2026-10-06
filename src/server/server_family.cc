@@ -66,8 +66,12 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/generic_family.h"
+#include "server/journal/aof_chain_reader.h"
 #include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
+#include "server/journal/journal_applier.h"
+#include "server/journal/serializer.h"
+#include "server/journal/tx_executor.h"
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
 #include "server/multi_command_squasher.h"
@@ -1034,38 +1038,162 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
   std::_Exit(EXIT_FAILURE);
 }
 
-// Starts an AofStreamer on every shard, or exits if --aof cannot run.
-void StartAof(const string& flag_dir, detail::SnapshotStorage* storage) {
-  string reason;
-  string dir = flag_dir.empty() ? "." : flag_dir;
-  if (detail::IsCloudPath(dir)) {
-    reason = "--aof needs a local --dir";
-  } else if (shard_set->pool()->at(0)->GetKind() != ProactorBase::IOURING) {
-    reason = "--aof needs io_uring";
-  } else if (GetFlag(FLAGS_hz) <= 0) {
-    reason = "--aof needs --hz > 0, the heartbeat seals AOF blocks";
-  } else if (GetFlag(FLAGS_replicaof).has_value()) {
-    reason = "--aof is not supported on replicas";
-  } else if (auto path = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename));
-             path && !path->empty()) {
-    // Loading a snapshot bypasses the journal, so the AOF would miss its data.
-    reason = "--aof cannot start from a snapshot yet";
-  } else {
-    atomic_bool failed = false;
-    shard_set->RunBlockingInParallel([&](EngineShard* shard) {
-      auto streamer = make_unique<AofStreamer>(dir, shard->shard_id(), shard_set->size());
-      if (error_code ec = streamer->Start(); ec) {
-        LOG(ERROR) << "Failed to start AOF on shard " << shard->shard_id() << ": " << ec.message();
-        failed = true;
-        return;
-      }
-      shard->set_aof_streamer(std::move(streamer));
-    });
-    if (!failed)
-      return;
-    reason = "failed to open AOF segments";
+// Where a shard's log resumes after replay.
+struct AofResume {
+  uint64_t seq = 0;
+  uint64_t next_lsn = 1;
+};
+
+#ifdef __linux__
+// Replays one shard's chain through the applier, then repairs it. Runs on the shard's thread.
+error_code ReplayChain(string_view dir, ShardId sid, Service* service,
+                       shared_ptr<MultiShardExecution> mse, AofResume* resume, TxId* max_txid) {
+  AofChainReader chain(string(dir), sid, shard_set->size());
+  // kNoSegments is a normal first start.
+  if (error_code ec = chain.Open(); ec)
+    return ec;
+
+  ExecutionState cntx;
+  JournalReader reader{&chain, 0};
+  TransactionReader tx_reader;
+  JournalApplier applier(service, std::move(mse));
+  TransactionData tx;
+  // Records read, each with its own LSN.
+  uint64_t records = 0;
+  while (tx_reader.NextTxData(&reader, &cntx, &tx)) {
+    ++records;
+    if (tx.opcode == journal::Op::PING)
+      continue;
+    *max_txid = max(*max_txid, tx.txid);
+    if (!applier.Apply(std::move(tx), &cntx)) {
+      LOG(ERROR) << "Failed to apply an AOF record of shard " << sid;
+      return make_error_code(errc::state_not_recoverable);
+    }
   }
-  ErrorAndExit(reason);
+
+  // JournalReader reports running out of input as an error, so the loop always ends with one. It is
+  // the normal end only if the chain reached the end of its log; otherwise a read or parse failed.
+  if (!chain.AtEnd())
+    return cntx.GetError();
+
+  // Running out of input inside the last record also reaches the end: the count tells them apart.
+  // TODO: start from the cut's LSN, not 1.
+  if (records != chain.LastLsn()) {
+    LOG(ERROR) << "AOF shard " << sid << ": read " << records << " records but the log ends at lsn "
+               << chain.LastLsn();
+    return make_error_code(errc::state_not_recoverable);
+  }
+  RETURN_ON_ERR(chain.Repair());
+  *resume = {chain.NextSeq(), chain.LastLsn() + 1};
+  return {};
+}
+#endif
+
+// Replays every shard's chain in parallel; global commands meet at the barrier.
+error_code ReplayAof(string_view dir, Service* service, vector<AofResume>* resume) {
+#ifdef __linux__
+  uint32_t shard_count = shard_set->size();
+  auto mse = make_shared<MultiShardExecution>(shard_count);
+  vector<error_code> errors(shard_count);
+  vector<TxId> max_txids(shard_count, 0);
+  resume->assign(shard_count, {});
+
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    errors[sid] = ReplayChain(dir, sid, service, mse, &(*resume)[sid], &max_txids[sid]);
+
+    // A chain that ended, cleanly or torn, or has no segments never reaches another barrier: stop
+    // counting it, so longer chains can run a global command it lacks.
+    // TODO: a global command completed after a chain ended exists only in the longer chains, so
+    // resuming the logs as they are can replay later writes before it. Checkpoint in LOADING
+    // instead, see "Resuming the log" in docs/aof.md.
+    if (!errors[sid] || errors[sid] == AofReadError::kNoSegments) {
+      mse->RemoveFlow();
+    } else {
+      LOG(ERROR) << "AOF replay failed on shard " << sid << ": " << errors[sid].message();
+      // The load fails; release the shards waiting at a barrier.
+      mse->CancelAllBlockingEntities();
+    }
+  });
+
+  size_t empty = ranges::count(errors, AofReadError::kNoSegments);
+  // TODO: the manifest will tell a first start from lost segments.
+  if (empty == shard_count)
+    return {};
+
+  // Includes kNoSegments when only some chains are empty.
+  for (const error_code& ec : errors) {
+    if (ec)
+      return ec;
+  }
+  // New txids must not repeat logged ones: replay pairs global commands across shards by txid.
+  SetNextTxIdAtLeast(ranges::max(max_txids) + 1);
+  return {};
+#else
+  // The chain reader needs io_uring files; AofStartupError rejects --aof before replay.
+  return make_error_code(errc::not_supported);
+#endif
+}
+
+// Why --aof cannot run with this configuration, or an empty string.
+string AofStartupError(string_view dir, detail::SnapshotStorage* storage) {
+  if (detail::IsCloudPath(dir))
+    return "--aof needs a local --dir";
+  if (shard_set->pool()->at(0)->GetKind() != ProactorBase::IOURING)
+    return "--aof needs io_uring";
+  if (GetFlag(FLAGS_hz) <= 0)
+    return "--aof needs --hz > 0, the heartbeat seals AOF blocks";
+  if (GetFlag(FLAGS_replicaof).has_value())
+    return "--aof is not supported on replicas";
+  // Loading a snapshot bypasses the journal, so the AOF would miss its data.
+  if (auto path = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename)); path && !path->empty())
+    return "--aof cannot start from a snapshot yet";
+  return {};
+}
+
+// Starts every shard's AofStreamer where its log resumes. False if any failed.
+bool StartStreamers(string_view dir, const vector<AofResume>& resume) {
+  atomic_bool failed = false;
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    auto streamer = make_unique<AofStreamer>(string(dir), sid, shard_set->size());
+    if (error_code ec = streamer->Start(resume[sid].seq, resume[sid].next_lsn); ec) {
+      LOG(ERROR) << "Failed to start AOF on shard " << sid << ": " << ec.message();
+      failed = true;
+      return;
+    }
+    shard->set_aof_streamer(std::move(streamer));
+  });
+  return !failed;
+}
+
+// Turns expiry and eviction on or off on every shard.
+void AllowExpiryOnAllShards(bool allowed) {
+  shard_set->RunBriefInParallel([allowed](EngineShard* shard) {
+    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(allowed);
+  });
+}
+
+// Replays the AOF and starts an AofStreamer on every shard, or exits if --aof cannot run.
+void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service) {
+  string dir = flag_dir.empty() ? "." : flag_dir;
+  if (string reason = AofStartupError(dir, storage); !reason.empty())
+    ErrorAndExit(reason);
+  if (service->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) != GlobalState::ACTIVE)
+    ErrorAndExit("--aof cannot replay: the server is not active");
+
+  // No expiry or eviction during replay: a key may pass its deadline before a later record, such as
+  // PERSIST, changes it. Resumed once the streamers run, so every expiry is logged.
+  AllowExpiryOnAllShards(false);
+
+  vector<AofResume> resume;
+  if (error_code ec = ReplayAof(dir, service, &resume); ec)
+    ErrorAndExit(absl::StrCat("AOF replay failed: ", ec.message()));
+  if (!StartStreamers(dir, resume))
+    ErrorAndExit("failed to open AOF segments");
+
+  AllowExpiryOnAllShards(true);
+  service->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
 }
 
 // Seals, writes and syncs every shard's AOF.
@@ -1376,7 +1504,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   if (GetFlag(FLAGS_aof))
-    StartAof(flag_dir, snapshot_storage_.get());
+    StartAof(flag_dir, snapshot_storage_.get(), &service_);
 
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
