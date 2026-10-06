@@ -16,6 +16,9 @@
 
 namespace dfly {
 
+// Fsyncs a directory, so the names created or removed in it are durable.
+std::error_code AofSyncDir(const std::string& dir);
+
 class AofSegmentWriter {
  public:
   enum class Durability : uint8_t {
