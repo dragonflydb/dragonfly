@@ -27,11 +27,10 @@ AofStreamer::AofStreamer(string dir, uint32_t shard_id, uint32_t shard_count)
       max_buffered_bytes_(absl::GetFlag(FLAGS_aof_max_buffered_bytes)) {
 }
 
-error_code AofStreamer::Start() {
-  // No replay yet, so the log always starts with segment 0.
-  RETURN_ON_ERR(writer_.Open(0));
+error_code AofStreamer::Start(uint64_t seq, uint64_t next_lsn) {
+  RETURN_ON_ERR(writer_.Open(seq));
   // A standalone node has no journal otherwise. Registering also holds a journal user.
-  journal::StartInThread();
+  journal::StartInThreadAtLsn(next_lsn);
   consumer_id_ = journal::RegisterConsumer(this);
   return {};
 }

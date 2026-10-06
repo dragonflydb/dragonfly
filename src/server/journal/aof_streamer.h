@@ -18,8 +18,8 @@ class AofStreamer : public journal::JournalConsumerInterface {
  public:
   AofStreamer(std::string dir, uint32_t shard_id, uint32_t shard_count);
 
-  // Opens the segment, starts the journal and registers as its consumer.
-  std::error_code Start();
+  // Opens segment seq, starts the journal at next_lsn and registers as its consumer.
+  std::error_code Start(uint64_t seq, uint64_t next_lsn);
 
   // Unregisters first, so no record arrives after the segment is closed.
   std::error_code Shutdown();
