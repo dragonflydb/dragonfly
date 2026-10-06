@@ -196,7 +196,7 @@ class SerializerBase : public BucketDependencies,
   // Traversal flow: goes over all buckets of every database in db_array_ and processes them with
   // ProcessBucket, serializing the delayed entries after each database. Pending delayed entries
   // are discarded on cancellation. visit_empty controls whether empty buckets are processed.
-  // Returns false if the traversal was cancelled.
+  // Returns false if the traversal was cancelled, true only once no bucket dependency is pending.
   bool TraverseAllBuckets(bool visit_empty);
 
   // Called by TraverseAllBuckets before processing each bucket.

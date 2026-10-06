@@ -34,7 +34,7 @@ add_library(dfly_core allocation_tracker.cc bloom.cc topk.cc compact_object.cc c
 cxx_link(dfly_core base dfly_search_core dfly_page_usage fibers2 jsonpath
     absl::flat_hash_map absl::str_format absl::random_random redis_lib
     TRDP::lua lua_modules
-    OpenSSL::Crypto TRDP::dconv TRDP::zstd TRDP::hdr_histogram)
+    OpenSSL::Crypto dfly_common TRDP::zstd TRDP::hdr_histogram)
 
 add_executable(dash_bench dash_bench.cc)
 cxx_link(dash_bench dfly_core redis_test_lib)
@@ -67,7 +67,7 @@ helio_cxx_test(sharded_hash_map_test dfly_core LABELS DFLY)
 helio_cxx_test(page_usage_stats_test dfly_core LABELS DFLY)
 helio_cxx_test(cms_test dfly_core LABELS DFLY)
 helio_cxx_test(cuckoo_filter_test dfly_core LABELS DFLY)
-helio_cxx_test(memory_test TRDP::mimalloc2 LABELS DFLY)
+helio_cxx_test(memory_test TRDP::mimalloc2 absl::flat_hash_set LABELS DFLY)
 
 if(LIB_PCRE2)
   target_compile_definitions(dfly_core_test PRIVATE USE_PCRE2=1)

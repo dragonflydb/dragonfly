@@ -199,6 +199,7 @@ void SlotMigrationStreamer::Start(util::FiberSocketBase* dest) {
 }
 
 void SlotMigrationStreamer::Run() {
+  lock_guard traversal_lock{traversal_latch_};
   VLOG(1) << "SlotMigrationStreamer run";
 
   // Returns false if cancelled, including before Start() ran (see SlotMigrationStreamer::Start).
@@ -292,13 +293,17 @@ bool SlotMigrationStreamer::Cancel() {
   // early when the context is cancelled, which prevents the streamer from being registered (and
   // leaked) after cancellation.
   base_cntx_->Cancel();
+  writer_.WakeWaiters();
+
+  // Run() may be suspended while serializing an entry. Keep the listener and its snapshot version
+  // alive until traversal finishes; UnregisterOnChange only waits for OnChange callbacks.
+  traversal_latch_.Wait();
 
   // UnregisterOnChange is idempotent and returns true only for the caller that actually removed the
   // listener, so racing Cancel() calls (e.g. Finish() vs ~SliceSlotMigration) can't double-erase.
   if (!db_slice_->UnregisterOnChange(this))
     return false;
 
-  writer_.WakeWaiters();
   if (journal_cb_id_) {
     auto cb_id = journal_cb_id_;
     journal_cb_id_ = 0;  // Reset to prevent double unregistration in another fiber

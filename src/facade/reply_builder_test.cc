@@ -9,14 +9,13 @@
 #include <facade/resp_parser.h>
 #include <mimalloc.h>
 
-#include <random>
-
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/reply_capture.h"
 #include "facade/resp_expr_test_utils.h"
+#include "facade/string_socket.h"
 
 using namespace testing;
 using namespace std;
@@ -163,7 +162,7 @@ class RedisReplyBuilderTest : public testing::Test {
   // Parse the data in the sink with RESPParser.
   ParsingResults Parse();
 
-  io::StringSink sink_;
+  StringSocket sink_;
   std::unique_ptr<RedisReplyBuilder> builder_;
   std::unique_ptr<std::uint8_t[]> parser_buffer_;
 };
@@ -736,7 +735,7 @@ TEST_F(RedisReplyBuilderTest, BatchMode) {
     builder_->SendBulkString(val);
     ASSERT_EQ(SinkSize(), 0) << " sink is not empty at iteration number " << count;
     ASSERT_EQ(GetReplyStats().io_write_bytes, 0);
-    ASSERT_EQ(GetReplyStats().io_write_cnt, 0);
+    ASSERT_EQ(GetReplyStats().io_write_calls, 0);
     total_bytes += val.size();
     ++count;
   }
@@ -744,7 +743,7 @@ TEST_F(RedisReplyBuilderTest, BatchMode) {
   // write something
   builder_->SetBatchMode(false);
   builder_->SendBulkString(std::string_view{});
-  ASSERT_EQ(GetReplyStats().io_write_cnt, 1);
+  ASSERT_EQ(GetReplyStats().io_write_calls, 1);
   // We expecting to have more than the total bytes we count,
   // since we are not counting the \r\n and the type char as well
   // as length entries
@@ -773,7 +772,7 @@ TEST_F(RedisReplyBuilderTest, BatchGrowsBuffer) {
     builder_->SendBulkString(value);
 
   EXPECT_EQ(builder_->UsedMemory(), SinkReplyBuilder::kMaxBufferSize);
-  EXPECT_LT(GetReplyStats().io_write_cnt, size_t(kReplies) / 2);
+  EXPECT_LT(GetReplyStats().io_write_calls, size_t(kReplies) / 2);
 
   builder_->SetBatchMode(false);
   builder_->Flush();
@@ -980,24 +979,6 @@ TEST_F(RedisReplyBuilderTest, CaptureApplyIntoOpenCollection) {
   EXPECT_EQ(expected, TakePayload());
 }
 
-TEST_F(RedisReplyBuilderTest, FormatDouble) {
-  char buf[64];
-
-  auto format = [&](double d) { return RedisReplyBuilder::FormatDouble(d, buf, sizeof(buf)); };
-
-  EXPECT_STREQ("0.1", format(0.1));
-  EXPECT_STREQ("0.2", format(0.2));
-  EXPECT_STREQ("0.8", format(0.8));
-  EXPECT_STREQ("1.1", format(1.1));
-  EXPECT_STREQ("inf", format(INFINITY));
-  EXPECT_STREQ("-inf", format(-INFINITY));
-  EXPECT_STREQ("0", format(-0.0));
-  EXPECT_STREQ("1e-7", format(0.0000001));
-  EXPECT_STREQ("111111111111111110000", format(111111111111111111111.0));
-  EXPECT_STREQ("1.1111111111111111e+21", format(1111111111111111111111.0));
-  EXPECT_STREQ("1e-23", format(1e-23));
-}
-
 TEST_F(RedisReplyBuilderTest, VerbatimString) {
   // test resp3
   std::string str = "A simple string!";
@@ -1048,7 +1029,7 @@ TEST_F(RedisReplyBuilderTest, Issue4424) {
 }
 
 TEST_F(RedisReplyBuilderTest, MCMetaGetLargeValue) {
-  io::StringSink mc_sink;
+  StringSocket mc_sink;
   MCReplyBuilder mc_builder(&mc_sink);
 
   MemcacheCmdFlags flags;
@@ -1063,22 +1044,49 @@ TEST_F(RedisReplyBuilderTest, MCMetaGetLargeValue) {
   EXPECT_THAT(output, HasSubstr(large_val));
 }
 
-static void BM_FormatDouble(benchmark::State& state) {
-  vector<double> values;
-  char buf[64];
+TEST_F(RedisReplyBuilderTest, PartialWrites) {
+  const string large_value(10000, 'x');
+  const std::vector<std::string_view> values = {"a", "bb", large_value, "ccc"};
 
-  uniform_real_distribution<double> unif(0, 1e9);
-  default_random_engine re;
-  for (unsigned i = 0; i < 100; i++) {
-    values.push_back(unif(re));
-  }
+  builder_->SendBulkStrArr(values);
+  const string expected = TakePayload();
+  ResetStats();
 
-  while (state.KeepRunning()) {
-    for (auto d : values) {
-      RedisReplyBuilder::FormatDouble(d, buf, sizeof(buf));
-    }
-  }
+  constexpr size_t kMaxWrite = 7;
+  sink_.set_max_write(kMaxWrite);
+  builder_->SendBulkStrArr(values);
+
+  EXPECT_EQ(str(), expected);
+  EXPECT_FALSE(builder_->GetError());
+  EXPECT_FALSE(builder_->IsSendActive());
+  EXPECT_TRUE(SinkReplyBuilder::pending_list.empty());
+
+  const auto& stats = GetReplyStats();
+  EXPECT_EQ(stats.io_write_bytes, expected.size());
+  EXPECT_EQ(stats.io_write_calls, (expected.size() + kMaxWrite - 1) / kMaxWrite);
+  EXPECT_EQ(stats.send_stats.count, 1);
 }
-BENCHMARK(BM_FormatDouble);
+
+TEST_F(RedisReplyBuilderTest, PartialWriteError) {
+  const string large_value(10000, 'x');
+  const std::vector<std::string_view> values = {"a", "bb", large_value, "ccc"};
+
+  constexpr size_t kMaxWrite = 7;
+  constexpr unsigned kFailOn = 3;
+  sink_.set_max_write(kMaxWrite);
+  sink_.set_fail_after(kFailOn, make_error_code(errc::connection_reset));
+  builder_->SendBulkStrArr(values);
+
+  EXPECT_EQ(builder_->GetError(), make_error_code(errc::connection_reset));
+  EXPECT_FALSE(builder_->IsSendActive());
+  EXPECT_TRUE(SinkReplyBuilder::pending_list.empty());
+
+  // Only the writes before the failure are accounted for.
+  const auto& stats = GetReplyStats();
+  EXPECT_EQ(str().size(), (kFailOn - 1) * kMaxWrite);
+  EXPECT_EQ(stats.io_write_bytes, str().size());
+  EXPECT_EQ(stats.io_write_calls, kFailOn - 1);
+  EXPECT_EQ(stats.send_stats.count, 1);
+}
 
 }  // namespace facade
