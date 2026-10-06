@@ -211,9 +211,10 @@ TEST_F(AofSegmentWriterTest, WriteAndReadBack) {
     // Seals the first block with huge partial.
     writer.AddRecord(huge, 2);
 
-    // Only the open block remains.
+    // Only the open block remains. The written block ends with huge partial, so it commits
+    // nothing, not even small.
     writer.WaitUnwritten(small.size());
-    EXPECT_EQ(writer.WrittenLsn(), 1u);
+    EXPECT_EQ(writer.WrittenLsn(), 0u);
 
     ASSERT_FALSE(writer.Shutdown());
     EXPECT_EQ(writer.WrittenLsn(), 2u);
@@ -262,14 +263,16 @@ TEST_F(AofSegmentWriterTest, OpenKeepsExistingSegment) {
 
 class AofChainReaderTest : public AofSegmentWriterTest {
  protected:
-  // Writes segment seq with one block per record.
-  void WriteSegment(uint64_t seq, uint64_t first_lsn, const vector<string>& records) {
+  // Writes segment seq, with one block per record if seal_each.
+  void WriteSegment(uint64_t seq, uint64_t first_lsn, const vector<string>& records,
+                    bool seal_each = true) {
     pp_->at(0)->Await([&] {
       AofSegmentWriter writer(dir_, 2, 4);
       ASSERT_FALSE(writer.Open(seq));
       for (size_t i = 0; i < records.size(); ++i) {
         writer.AddRecord(records[i], first_lsn + i);
-        writer.Seal();
+        if (seal_each)
+          writer.Seal();
       }
       ASSERT_FALSE(writer.Shutdown());
     });
@@ -390,11 +393,26 @@ TEST_F(AofChainReaderTest, PartialRecordAtEnd) {
   string seg0 = SegmentPath(0);
   filesystem::resize_file(seg0, filesystem::file_size(seg0) - 10);
 
-  // The record's first block is streamed, but the record never completes.
+  // The cut record's first block is held back and dropped.
   ChainResult res = ReadChain();
-  EXPECT_EQ(res.data, "a1" + huge.substr(0, kAofBlockBytes));
+  EXPECT_EQ(res.data, "a1");
   EXPECT_TRUE(res.torn);
   EXPECT_EQ(res.last_lsn, 1u);
+}
+
+TEST_F(AofChainReaderTest, RecordsBeforeCutRecordInSameBlock) {
+  string huge(2 * kAofBlockBytes, 'h');
+  // The first block holds a1 and b22 complete, then the start of huge.
+  WriteSegment(0, 1, {"a1", "b22", huge}, /*seal_each=*/false);
+  string seg0 = SegmentPath(0);
+  filesystem::resize_file(seg0, filesystem::file_size(seg0) - 1);
+
+  // Repair truncates the first block away, so a1 and b22 must not be streamed either.
+  ChainResult res = ReadChain(/*repair=*/true);
+  EXPECT_EQ(res.data, "");
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 0u);
+  EXPECT_EQ(filesystem::file_size(seg0), kAofSegmentHeaderSize);
 }
 
 class AofStreamerTest : public BaseFamilyTest {

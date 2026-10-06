@@ -217,6 +217,10 @@ error_code AofChainReader::DiscoverAndIndexSegments() {
 
 io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
   while (pending_.empty()) {
+    if (pending_held_) {
+      held_.clear();
+      pending_held_ = false;
+    }
     if (finished_)
       return torn_ ? nonstd::make_unexpected(make_error_code(AofReadError::kTornTail))
                    : io::Result<size_t>(0);
@@ -252,12 +256,20 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
       return Finish(true);
     expected_lsn_ = hdr.first_lsn + hdr.n_records;
     partial_ = hdr.flags & kEndsWithPartial;
-    if (!partial_) {
-      end_seg_ = read_seg_;
-      end_offset_ = scanner_->offset();
-      last_lsn_ = hdr.first_lsn + hdr.n_records - 1;
+    if (partial_) {
+      held_.append(block.payload);
+      continue;
     }
-    pending_ = block.payload;
+    end_seg_ = read_seg_;
+    end_offset_ = scanner_->offset();
+    last_lsn_ = hdr.first_lsn + hdr.n_records - 1;
+    if (held_.empty()) {
+      pending_ = block.payload;
+    } else {
+      held_.append(block.payload);
+      pending_ = held_;
+      pending_held_ = true;
+    }
   }
 
   // Copies from the scanner's buffer into v: a payload is handed out only after its block's CRC
@@ -276,6 +288,8 @@ io::Result<size_t> AofChainReader::Finish(bool torn) {
   finished_ = true;
   torn_ = torn;
   scanner_.reset();
+  // A record that never completed is dropped.
+  held_.clear();
   discarded_bytes_ = segments_[end_seg_].size - end_offset_;
   for (size_t i = end_seg_ + 1; i < segments_.size(); ++i)
     discarded_bytes_ += segments_[i].size;
@@ -287,14 +301,14 @@ io::Result<size_t> AofChainReader::Finish(bool torn) {
 }
 
 error_code AofChainReader::Repair() {
-  if (discarded_bytes_ == 0)
-    return {};
-
   const Segment& end = segments_[end_seg_];
-  if (end_offset_ < end.size) {
-    if (truncate(end.path.c_str(), end_offset_) != 0)
-      return LastErrno();
-    auto file = OpenLinux(end.path, O_WRONLY, 0);
+  if (end_offset_ < end.size && truncate(end.path.c_str(), end_offset_) != 0)
+    return LastErrno();
+
+  // After a process crash the kept data may be only in the page cache. Sync it, so writes after
+  // resuming never land behind a gap that a later machine crash would leave.
+  for (size_t i = 0; i <= end_seg_; ++i) {
+    auto file = OpenLinux(segments_[i].path, O_RDONLY, 0);
     if (!file)
       return file.error();
     RETURN_ON_ERR((*file)->FSync(IORING_FSYNC_DATASYNC));

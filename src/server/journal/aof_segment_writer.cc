@@ -158,7 +158,10 @@ AofSegmentWriter::Durability AofSegmentWriter::GetDurability() const {
 
 void AofSegmentWriter::OnSealed(AofSealedBlock block) {
   size_t len = block.bytes.size();
-  uint64_t last_lsn = block.n_records ? block.first_lsn + block.n_records - 1 : 0;
+  // A block ending with a partial record commits nothing: recovery drops it unless the record
+  // completes, so the block that completes it covers all of its records.
+  bool commits = block.n_records > 0 && !(block.flags & kEndsWithPartial);
+  uint64_t last_lsn = commits ? block.first_lsn + block.n_records - 1 : 0;
   pending_.push_back({std::move(block.bytes), next_offset_, last_lsn});
   next_offset_ += len;
   pending_bytes_ += len;

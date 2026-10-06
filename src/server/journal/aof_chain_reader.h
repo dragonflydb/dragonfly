@@ -39,14 +39,15 @@ class AofChainReader : public io::Source {
   // Finds and validates the segments; reads no blocks.
   std::error_code Open();
 
-  // Streams the valid blocks' payloads. At the end of the log returns 0 if the log ends cleanly,
-  // or AofReadError::kTornTail if a damaged tail follows. A cut record's bytes may be streamed,
-  // but the record never completes.
+  // Streams the payloads of complete records only: a block ending with a partial record is held
+  // back until that record completes. At the end of the log returns 0 if the log ends cleanly, or
+  // AofReadError::kTornTail if a damaged tail follows.
   io::Result<size_t> ReadSome(const iovec* v, uint32_t len) override;
 
   // The accessors and Repair() are valid once ReadSome() reached the end of the log.
 
-  // Drops the damaged tail: truncates the log at its end, renames later segments to *.discarded.
+  // Makes the log durable as read; call it before resuming, torn tail or not. Truncates the log at
+  // its end, fdatasyncs the kept segments and renames later ones to *.discarded.
   std::error_code Repair();
 
   // Last complete record of the log, 0 if none.
@@ -90,6 +91,10 @@ class AofChainReader : public io::Source {
   size_t read_seg_ = 0;
   std::unique_ptr<BlockScanner> scanner_;
   std::string_view pending_;
+  // Payloads of blocks ending with a partial record, held back until that record completes.
+  std::string held_;
+  // pending_ points into held_.
+  bool pending_held_ = false;
   std::optional<uint64_t> expected_lsn_;
   // The last block ended with a record that continues in the next block.
   bool partial_ = false;
