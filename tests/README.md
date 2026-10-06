@@ -26,6 +26,12 @@ for example,
 ```sh
 pytest dragonfly/connection_test.py -s  --df logtostdout --df vmodule=dragonfly_connection=2 -k test_subscribe
 ```
+
+On a pytest timeout, the harness requests fiber stacks from live Dragonfly instances
+before fixture cleanup. The stacks are written to each instance's INFO log and copied
+with the failed test's logs. This requires a binary built with
+`-DPRINT_STACKTRACES_ON_SIGNAL=ON`, which CI enables.
+
 ### Before you start
 Please make sure that you have python 3 installed on you local host.
 If have more both python 2 and python 3 installed on you host, you can run the tests with the following command:
