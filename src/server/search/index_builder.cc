@@ -19,6 +19,12 @@ namespace {
 
 constexpr size_t kOffloadedBatchSize = 64;
 
+// Rough relative duration of the phases: filling HNSW graphs takes the longest.
+constexpr double kScanWeight = 1, kVectorWeight = 8, kFinalizeWeight = 1;
+
+// Progress stays below 1 until the builder is gone
+constexpr double kMaxProgress = 0.9999;
+
 }  // namespace
 
 void IndexBuilder::Start(const OpArgs& op_args, bool is_restored,
@@ -29,13 +35,26 @@ void IndexBuilder::Start(const OpArgs& op_args, bool is_restored,
 
   is_restored_ = is_restored;
 
+  has_hnsw_ = std::ranges::any_of(index_->base_->schema.fields, [](const auto& item) {
+    return item.second.IsIndexableHnswField();
+  });
+  const bool has_finalize = index_->indices_->FinalizeWork().has_value();
+  weights_ = {kScanWeight, has_hnsw_ ? kVectorWeight : 0, has_finalize ? kFinalizeWeight : 0};
+  const double total = weights_[kScan] + weights_[kVector] + weights_[kFinalize];
+  for (double& weight : weights_)
+    weight /= total;
+
   auto cb = [this, table, db_cntx = op_args.db_cntx, on_complete = std::move(on_complete)] {
     CursorLoop(table.get(), db_cntx);
+    phase_done_[kScan] = 1;
     VectorLoop(table.get(), db_cntx);
 
     // TODO: make it step by step + wire cancellation inside
-    if (state_.IsRunning())
-      index_->indices_->FinalizeInitialization();
+    if (state_.IsRunning()) {
+      phase_done_.fill(1);
+      finalize_work_ = index_->indices_->FinalizeWork().value_or(0);
+      index_->indices_->FinalizeInitialization(&finalize_done_);
+    }
 
     // Finish by clearing the fiber reference and calling on_complete as its last action
     {
@@ -56,6 +75,15 @@ void IndexBuilder::Cancel() {
 
 util::fb2::Fiber IndexBuilder::Worker() {
   return std::move(fiber_);
+}
+
+double IndexBuilder::Progress() const {
+  double done = 0;
+  for (size_t i = 0; i < phase_done_.size(); i++)
+    done += weights_[i] * phase_done_[i];
+  if (finalize_work_ > 0)
+    done += weights_[kFinalize] * std::min(1.0, double(finalize_done_) / finalize_work_);
+  return std::min(done, kMaxProgress);
 }
 
 void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
@@ -89,6 +117,8 @@ void IndexBuilder::CursorLoop(dfly::DbTable* table, DbContext db_cntx) {
   PrimeTable::Cursor cursor;
   do {
     cursor = table->prime.Traverse(cursor, cb);
+    if (cursor)
+      phase_done_[kScan] = PrimeTable::TraverseProgress(cursor);
     if (offloaded_keys_.size() >= kOffloadedBatchSize)
       IndexOffloaded(table, db_cntx);
     if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
@@ -228,10 +258,7 @@ void IndexBuilder::IndexEntry(std::string_view key, const DbContext& db_cntx,
 }
 
 void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
-  bool any_vector = std::ranges::any_of(index_->base_->schema.fields, [](const auto& item) {
-    return item.second.IsIndexableHnswField();
-  });
-  if (!any_vector || !state_.IsRunning())
+  if (!has_hnsw_ || !state_.IsRunning())
     return;
 
   // If any HNSW index was restored from RDB, use UpdateVectorData instead of Add.
@@ -261,6 +288,8 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
   PrimeTable::Cursor cursor;
   do {
     cursor = table->prime.Traverse(cursor, cb);
+    if (cursor)
+      phase_done_[kVector] = PrimeTable::TraverseProgress(cursor);
     if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500)
       util::ThisFiber::Yield();
   } while (cursor && state_.IsRunning());

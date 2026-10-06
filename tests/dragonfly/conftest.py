@@ -262,6 +262,23 @@ def tmp_dir():
     shutil.rmtree(tmp_name, ignore_errors=True)
 
 
+@pytest.fixture(
+    params=[
+        pytest.param((b"REDIS0004", "Unsupported RDB version"), id="old-version"),
+        pytest.param(
+            # A supported string (prefix=value), then an unsupported Redis type.
+            (
+                b"REDIS0015\x00\x06prefix\x05value\x1e\xff" + bytes(8),
+                "Unsupported RDB object type or opcode",
+            ),
+            id="overlapping-type",
+        ),
+    ]
+)
+def unsupported_rdb(request):
+    return request.param
+
+
 @pytest.fixture(scope=determine_scope)
 def test_env(tmp_dir: Path):
     """

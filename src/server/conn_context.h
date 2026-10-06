@@ -151,6 +151,7 @@ struct ConnectionState {
     absl::flat_hash_set<LockTag> lock_tags;  // declared tags
     std::vector<std::string> key_backing;    // storage for keys provided from lua
     bool read_only = false;
+    bool wrote = false;
 
     // ACL rules snapshotted from the connection when the script started. That way,
     // concurrent ACL modifications of that user do not affect the script execution.

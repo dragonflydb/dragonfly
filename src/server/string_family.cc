@@ -40,12 +40,14 @@
 #include "server/transaction.h"
 #include "util/fibers/future.h"
 
-ABSL_FLAG(bool, mget_dedup_keys, false, "If true, MGET will deduplicate keys");
+ABSL_RETIRED_FLAG(bool, mget_dedup_keys, false,
+                  "Deprecated: MGET borrows large values via get_zero_copy instead of "
+                  "deduplicating keys; the flag is ignored.");
 
 ABSL_FLAG(bool, get_zero_copy, true,
-          "If true, GET returns a borrowed view into the CompactObj raw payload "
+          "If true, GET and MGET return a borrowed view into the CompactObj raw payload "
           "(zero-copy) for large raw strings; if false, falls back to the "
-          "materializing path. Toggle to A/B benchmark the zero-copy GET path.");
+          "materializing path. Toggle to A/B benchmark the zero-copy read path.");
 
 namespace dfly {
 
@@ -64,7 +66,7 @@ template <typename T> using TResultOrT = variant<T, TieredStorage::TResult<T>>;
 
 // StringResult has either a borrowed-view of a string or a future result from tiered storage or
 // the classical materialized string.
-// BorrowedString is used by read-only commands (GET) that can borrow the
+// BorrowedString is used by read-only commands (GET, MGET) that can borrow the
 // value directly from the shard's CompactObj instead of materializing an
 // owned std::string.
 //
@@ -79,16 +81,21 @@ StringResult ReadString(DbIndex dbid, string_view key, const PrimeValue& pv, Eng
                          : StringResult{pv.ToString()};
 }
 
+// Returns a zero-copy borrow of pv's payload if zero-copy reads are enabled and pv is eligible,
+// std::nullopt otherwise.
+optional<cmn::BorrowedString> TryBorrowString(const PrimeValue& pv) {
+  static bool zero_copy_enabled = absl::GetFlag(FLAGS_get_zero_copy);
+  constexpr size_t kBorrowThreshold = 8_KB;  // only borrow if value is at least this big
+
+  if (zero_copy_enabled && !pv.IsExternal() && pv.Size() >= kBorrowThreshold)
+    return pv.TryBorrow();
+  return std::nullopt;
+}
+
 StringResult BorrowStringOrRead(DbIndex dbid, string_view key, const PrimeValue& pv,
                                 EngineShard* es) {
-  static bool zero_copy_enabled = absl::GetFlag(FLAGS_get_zero_copy);
-  constexpr size_t kBorrowThreshold = 16_KB;  // only borrow if value is at least this big
-
-  if (zero_copy_enabled && !pv.IsExternal() && pv.Size() >= kBorrowThreshold) {
-    if (auto raw = pv.TryBorrow()) {
-      return StringResult{std::move(*raw)};
-    }
-  }
+  if (auto raw = TryBorrowString(pv))
+    return StringResult{std::move(*raw)};
   return ReadString(dbid, key, pv, es);
 }
 
@@ -279,14 +286,11 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
 
   auto& res = *it_res;
   if (res.it->second.IsExternal()) {
-    auto tier = ReadTieredString(op_args.db_cntx.db_index, key, res.it->second,
-                                 op_args.shard->tiered_storage())
-                    .Get();
+    auto slice = ReadStringValue(op_args.db_cntx.db_index, key, res.it->second,
+                                 op_args.shard->tiered_storage());
     res.post_updater.ResyncBaseline();  // the read may have uploaded the value
-    if (!tier)
-      return OpStatus::IO_ERROR;
-    string slice = std::move(tier).value();
-    string new_val = prepend ? absl::StrCat(val, slice) : absl::StrCat(slice, val);
+    RETURN_ON_BAD_STATUS(slice);
+    string new_val = prepend ? absl::StrCat(val, *slice) : absl::StrCat(*slice, val);
     res.post_updater.ReduceHeapUsage();
     if (res.it->second.IsExternal()) {
       op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &res.it->second);
@@ -320,19 +324,12 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
 
   const bool was_external = add_res.it->second.IsExternal();
   string tmp;
-  string_view slice;
-  if (was_external) {
-    auto res = ReadTieredString(op_args.db_cntx.db_index, key, add_res.it->second,
-                                op_args.shard->tiered_storage())
-                   .Get();
+  auto cur = ReadStringSlice(op_args.db_cntx.db_index, key, add_res.it->second,
+                             op_args.shard->tiered_storage(), &tmp);
+  if (was_external)
     add_res.post_updater.ResyncBaseline();  // the read may have uploaded the value
-    if (!res)
-      return OpStatus::IO_ERROR;
-    tmp = std::move(res).value();
-    slice = tmp;
-  } else {
-    slice = add_res.it->second.GetSlice(&tmp);
-  }
+  RETURN_ON_BAD_STATUS(cur);
+  string_view slice = *cur;
 
   double base = 0;
   if (!ParseDouble(slice, &base)) {
@@ -552,7 +549,11 @@ OpResult<array<int64_t, 5>> OpThrottle(const OpArgs& op_args, const string_view 
 }
 
 struct GetResp {
-  string_view value;
+  string_view value;  // points into MGetResponse::storage or into the borrowed payload.
+
+  // Set if the value is borrowed from the shard (zero-copy). For encoded borrows `value` is empty
+  // and the reply must be sent via SendBulkStringBorrowed.
+  optional<cmn::BorrowedString> borrowed;
   uint64_t mc_ver = 0;
   uint32_t mc_flag = 0;
   uint32_t ttl_sec = 0;
@@ -575,8 +576,9 @@ using SearchMut = SearchKey<DbSlice::Iterator>;
 using SearchConst = SearchKey<DbSlice::ConstIterator>;
 
 template <typename Iter>
-MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheCmdFlags cmd_flags,
-                         const Transaction* t, EngineShard* shard, SearchKey<Iter> find_op) {
+MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_mc,
+                         MemcacheCmdFlags cmd_flags, const Transaction* t, EngineShard* shard,
+                         SearchKey<Iter> find_op) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -588,38 +590,33 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
   MGetResponse response(keys.Size());
   struct Item {
     Iter it;
-    int source_index = -1;  // in case of duplicate keys, points to the first occurrence.
+    optional<cmn::BorrowedString> borrowed;
   };
 
   absl::InlinedVector<Item, 32> items(keys.Size());
 
-  // First, fetch all iterators and count total size ahead
+  // First, fetch all iterators, borrow large values and count total size of the rest ahead.
   size_t total_size = 0;
   unsigned index = 0;
-  static bool mget_dedup_keys = absl::GetFlag(FLAGS_mget_dedup_keys);
-
-  // We can not make it thread-local because we may preempt during the Find loop due to
-  // replication of expiry events.
-  absl::flat_hash_map<string_view, unsigned> key_index;
-  if (mget_dedup_keys) {
-    key_index.reserve(keys.Size());
-  }
 
   for (string_view key : keys) {
-    if (mget_dedup_keys) {
-      auto [it, inserted] = key_index.try_emplace(key, index);
-      if (!inserted) {  // duplicate -> point to the first occurrence.
-        items[index++].source_index = it->second;
-        continue;
-      }
-    }
-
     auto it_res = find_op(key);
     auto& dest = items[index++];
-    if (it_res) {
-      dest.it = *it_res;
-      total_size += (*it_res)->second.Size();
-    }
+    if (!it_res)
+      continue;
+
+    dest.it = *it_res;
+    const PrimeValue& pv = dest.it->second;
+    dest.borrowed = TryBorrowString(pv);
+
+    // Memcache replies take the value as a plain string_view, so only raw borrows work there.
+    // TODO: add a BorrowedString overload of MCReplyBuilder::SendValue that decodes via
+    // WriteDecodedAscii, so encoded values can be borrowed too. Will be fixed in a follow-up PR.
+    if (dest.borrowed && is_mc && dest.borrowed->IsEncoded())
+      dest.borrowed.reset();
+
+    if (!dest.borrowed)
+      total_size += pv.Size();
   }
 
   VLOG_IF(1, total_size > 10000000) << "OpMGet: allocating " << total_size << " bytes";
@@ -633,18 +630,18 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
 
   for (size_t i = 0; i < items.size(); ++i) {
     auto it = items[i].it;
-    if (it.is_done()) {
-      if (items[i].source_index >= 0) {
-        response.resp_arr[i] = response.resp_arr[items[i].source_index];
-      }
+    if (it.is_done())
       continue;
-    }
+
     auto& resp = response.resp_arr[i].emplace();
 
-    // Copy to buffer or trigger tiered read that will eventually write to
-    // buffer
+    // Borrow, copy to buffer or trigger tiered read that will eventually write to buffer.
     const PrimeValue& value = it->second;
-    if (value.IsExternal()) {
+    if (items[i].borrowed) {
+      resp.borrowed = std::move(items[i].borrowed);
+      if (!resp.borrowed->IsEncoded())
+        resp.value = resp.borrowed->view();
+    } else if (value.IsExternal()) {
       wait_bc->Add(1);
       auto cb = [next, err, wait_bc](const io::Result<string_view>& v) mutable {
         if (v.has_value())
@@ -658,9 +655,11 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
       value.GetString(next);
     }
 
-    size_t size = value.Size();
-    resp.value = string_view(next, size);
-    next += size;
+    if (!resp.borrowed) {
+      size_t size = value.Size();
+      resp.value = string_view(next, size);
+      next += size;
+    }
 
     // Note - correct behavior is to return TTL before it was updated by GAT,
     // but this is complex to implement so we return the updated TTL.
@@ -679,8 +678,6 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, MemcacheC
       }
     }
   }
-  key_index.clear();
-
   return response;
 }
 
@@ -886,8 +883,8 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   return find_res->it;
 }
 
-MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, MemcacheCmdFlags cmd_flags,
-                    const Transaction* t, EngineShard* shard,
+MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, bool is_mc,
+                    MemcacheCmdFlags cmd_flags, const Transaction* t, EngineShard* shard,
                     const DbSlice::ExpireParams* gat_params = nullptr) {
   if (gat_params) {
     SearchMut find_op = [&](string_view key) {
@@ -898,13 +895,13 @@ MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, MemcacheCmdFla
           .key = key,
       });
     };
-    return CollectKeys(std::move(wait_bc), err, cmd_flags, t, shard, std::move(find_op));
+    return CollectKeys(std::move(wait_bc), err, is_mc, cmd_flags, t, shard, std::move(find_op));
   } else {
     SearchConst find_op = [&](string_view key) {
       const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
       return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
     };
-    return CollectKeys(std::move(wait_bc), err, cmd_flags, t, shard, std::move(find_op));
+    return CollectKeys(std::move(wait_bc), err, is_mc, cmd_flags, t, shard, std::move(find_op));
   }
 }
 
@@ -1345,24 +1342,11 @@ void CmdDigest(CmdArgParser parser, CommandContext* cmd_cntx) {
       return it_res.status();
     }
 
-    // Read string value (handles tiered storage if needed)
-    StringResult str_result = ReadString(tx->GetDbIndex(), key, (*it_res)->second, es);
-
-    // Handle both immediate value and tiered storage future
-    string value;
-    if (holds_alternative<string>(str_result)) {
-      value = std::move(get<string>(str_result));
-    } else {
-      auto& future = get<TieredStorage::TResult<string>>(str_result);
-      io::Result<string> io_res = future.Get();
-      if (!io_res) {
-        return OpStatus::IO_ERROR;
-      }
-      value = std::move(*io_res);
-    }
+    auto value = ReadStringValue(tx->GetDbIndex(), key, (*it_res)->second, es->tiered_storage());
+    RETURN_ON_BAD_STATUS(value);
 
     // Compute XXH3 hash and return as 16-char hex string
-    return XXH3_Digest(value);
+    return XXH3_Digest(*value);
   };
 
   OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
@@ -1526,8 +1510,9 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
   DCHECK_GE(tail_args.size(), 1U);
 
   MemcacheCmdFlags cmd_flags;
+  const bool is_mc = cmd_cntx->mc_command() != nullptr;
 
-  if (cmd_cntx->mc_command()) {
+  if (is_mc) {
     cmd_flags = cmd_cntx->mc_command()->cmd_flags;
   }
 
@@ -1542,7 +1527,7 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
   auto gat_ptr = gat_params ? &*gat_params : nullptr;
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    MGetResponse resp = OpMGet(tiering_bc, &tiering_err, cmd_flags, t, shard, gat_ptr);
+    MGetResponse resp = OpMGet(tiering_bc, &tiering_err, is_mc, cmd_flags, t, shard, gat_ptr);
 
     // Reorder shard resuls based on key indices in commands
     ShardArgs shard_args = t->GetShardArgs(sid);
@@ -1551,7 +1536,7 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
       if (!resp.resp_arr[src_indx])
         continue;
       DCHECK_LT(it.index(), arg_len);
-      mget_results[it.index()] = resp.resp_arr[src_indx];
+      mget_results[it.index()] = std::move(resp.resp_arr[src_indx]);
     }
 
     // Keep the per-shard storage alive: GetResp::value string_views point into resp.storage.
@@ -1586,11 +1571,15 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
     auto* redis_builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
     redis_builder->StartArray(arg_len);
     for (size_t i = 0; i < arg_len; ++i) {
-      const auto& entry = mget_results[i];
-      if (entry) {
-        redis_builder->SendBulkString(entry->value);
-      } else {
+      auto& entry = mget_results[i];
+      if (!entry) {
         redis_builder->SendNull();
+      } else if (entry->borrowed) {
+        // Builders that need the borrow past this call (capture) steal it; otherwise it stays in
+        // mget_results, which outlives the ReplyScope, so queued iovecs remain valid until flush.
+        redis_builder->SendBulkStringBorrowed(std::move(*entry->borrowed));
+      } else {
+        redis_builder->SendBulkString(entry->value);
       }
     }
   }

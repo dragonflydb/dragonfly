@@ -674,14 +674,15 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
   // flat_hash_map iterators.
   auto doc_keys_snapshot = key_index_.GetDocKeysMap();
 
-  for (const auto& [key, local_id] : doc_keys_snapshot) {
+  // Scope the mutable lookup and accessor to one document so cleanup finishes before yielding.
+  auto restore_doc = [&](std::string_view key, DocId local_id) {
     auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
     if (!it || !IsValid(it->it)) {
       ++missing_documents;
       GlobalDocId global_id =
           search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), local_id);
       missing_doc_ids.push_back({std::string(key), local_id, global_id});
-      continue;
+      return false;
     }
 
     PrimeValue& pv = it->it->second;
@@ -707,6 +708,13 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
       pending_vector_updates_.emplace(key);
       ++deferred_updates;
     }
+
+    return true;
+  };
+
+  for (const auto& [key, local_id] : doc_keys_snapshot) {
+    if (!restore_doc(key, local_id))
+      continue;
 
     // Yield periodically to avoid blocking the fiber
     if (++processed % 1000 == 0) {
@@ -1261,7 +1269,7 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
   return {.base_index = *base_,
           .num_docs = key_index_.Size(),
           .indexing = bool(builder_),
-          .percent_indexed = bool(builder_) ? 0.5f : 1.0f,  // no estimation for now
+          .percent_indexed = builder_ ? builder_->Progress() : 1.0,
           .hnsw_metadata = nullopt};
 }
 

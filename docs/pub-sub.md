@@ -467,7 +467,8 @@ For diagnosis, use:
   slow-subscriber events by type — `soft_limit` (soft-limit crossings),
   `hard_limit` (publisher throttle episodes), `forced_disconnect` (subscribers
   closed by the policy), and `messages_discarded`;
-- `send_delay_ms` / `send_delay_seconds`: age of the oldest pending send;
+- `send_delay_ms` / `send_delay_seconds`: longest time an in-flight send has
+  made no progress (no bytes accepted by the socket);
 - `total_net_output_bytes` and `total_writes_processed`: output progress; and
 - `cmdstat_publish`: indirect evidence of publisher waiting.
 

@@ -7,7 +7,6 @@
 #include <absl/container/fixed_array.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
-#include <double-conversion/double-to-string.h>
 
 #include <limits>
 
@@ -16,7 +15,9 @@
 #include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "common/borrowed_string.h"
+#include "common/dtoa.h"
 #include "facade/error.h"
+#include "util/fiber_socket_base.h"
 #include "util/fibers/proactor_base.h"
 
 #ifdef __APPLE__
@@ -27,7 +28,6 @@
 #endif
 
 using namespace std;
-using namespace double_conversion;
 
 namespace facade {
 
@@ -40,11 +40,6 @@ constexpr char kDoublePref[] = ",";
 constexpr char kLongPref[] = ":";
 constexpr char kNullStringR2[] = "$-1\r\n";
 constexpr char kNullStringR3[] = "_\r\n";
-
-constexpr unsigned kConvFlags =
-    DoubleToStringConverter::UNIQUE_ZERO | DoubleToStringConverter::EMIT_POSITIVE_EXPONENT_SIGN;
-
-DoubleToStringConverter dfly_conv(kConvFlags, "inf", "nan", 'e', -6, 21, 6, 0);
 
 template <typename T> size_t piece_size(const T& v) {
   if constexpr (is_array_v<T>)
@@ -198,29 +193,75 @@ uint64_t SinkReplyBuilder::GetLastSendTimeCycles() const {
 }
 
 void SinkReplyBuilder::Send() {
-  DCHECK(sink_ != nullptr);
+  DCHECK(socket_ != nullptr);
   DCHECK(!vecs_.empty());
   auto& reply_stats = tl_facade_stats->reply_stats;
 
-  send_time_cycles_ = base::CycleClock::Now();
-  PendingPin pin(send_time_cycles_);
+  const uint64_t start_cycles = base::CycleClock::Now();
+  send_time_cycles_ = start_cycles;
+  PendingPin pin(start_cycles);
+
+  DVLOG(2) << "Writing " << total_size_ << " bytes";
+
+  // We drive partial writes ourselves instead of calling socket_->Write() so that every bit of
+  // progress refreshes the send timestamps. This way slow-but-progressing sends are not
+  // reported as stuck. vecs_ is consumed in place - Flush() clears it right after Send().
+  iovec* v = vecs_.data();
+  iovec* const end = v + vecs_.size();
+  size_t remaining = total_size_;
 
   pending_list.push_back(pin);
+  while (true) {
+    io::Result<size_t> res = socket_->WriteSome(v, end - v);
+    if (!res) {
+      if (res.error() == errc::interrupted)
+        continue;
+      ec_ = res.error();
+      break;
+    }
 
-  reply_stats.io_write_cnt++;
-  reply_stats.io_write_bytes += total_size_;
-  DVLOG(2) << "Writing " << total_size_ << " bytes";
-  if (auto ec = sink_->Write(vecs_.data(), vecs_.size()); ec)
-    ec_ = ec;
+    // We always pass at least one byte, so 0 means no progress is possible. Treat it as an
+    // error, like io::Sink::Write() does, instead of spinning.
+    if (*res == 0) {
+      LOG(DFATAL) << "Invalid vector write result: 0 bytes written, expected at least 1, iov_len="
+                  << v->iov_len;
+      ec_ = make_error_code(errc::io_error);
+      break;
+    }
 
-  auto it = PendingList::s_iterator_to(pin);
-  pending_list.erase(it);
+    reply_stats.io_write_calls++;
+    reply_stats.io_write_bytes += *res;
+
+    DCHECK_LE(*res, remaining);
+    remaining -= *res;
+    if (remaining == 0)
+      break;
+
+    // Skip fully written iovecs and trim the partially written one. Since some bytes remain,
+    // the written prefix ends strictly inside vecs_, so v never reaches end here.
+    size_t done = *res;
+    while (done >= v->iov_len) {
+      done -= v->iov_len;
+      ++v;
+    }
+    v->iov_base = reinterpret_cast<char*>(v->iov_base) + done;
+    v->iov_len -= done;
+
+    // Restart the stall clock. Moving the pin to the tail keeps pending_list sorted.
+    send_time_cycles_ = pin.timestamp_cycles = base::CycleClock::Now();
+    if (&pending_list.back() != &pin) {
+      pending_list.erase(PendingList::s_iterator_to(pin));
+      pending_list.push_back(pin);
+    }
+  }
+
+  pending_list.erase(PendingList::s_iterator_to(pin));
 
   send_time_cycles_ = 0;
 
   uint64_t after_cycles = base::CycleClock::Now();
   reply_stats.send_stats.count++;
-  reply_stats.send_stats.total_duration += (after_cycles - pin.timestamp_cycles);
+  reply_stats.send_stats.total_duration += (after_cycles - start_cycles);
   DVLOG(2) << "Finished writing " << total_size_ << " bytes";
 }
 
@@ -250,7 +291,7 @@ void SinkReplyBuilder::FinishScope() {
   guaranteed_pieces_ = vecs_.size();  // all vecs are pieces
 }
 
-MCReplyBuilder::MCReplyBuilder(::io::Sink* sink) : SinkReplyBuilder(sink) {
+MCReplyBuilder::MCReplyBuilder(util::FiberSocketBase* socket) : SinkReplyBuilder(socket) {
 }
 
 void MCReplyBuilder::SendValue(MemcacheCmdFlags cmd_flags, std::string_view key,
@@ -362,7 +403,7 @@ void RedisReplyBuilderBase::SendLong(long val) {
 }
 
 void RedisReplyBuilderBase::SendDouble(double val) {
-  char buf[DoubleToStringConverter::kBase10MaximalLength + 8];  // +8 to be on the safe side.
+  char buf[cmn::kMaxDoubleStrLen];
   static_assert(ABSL_ARRAYSIZE(buf) < kMaxInlineSize, "Write temporary string from buf inline");
   string_view val_str = FormatDouble(val, buf, ABSL_ARRAYSIZE(buf));
 
@@ -419,9 +460,9 @@ void RedisReplyBuilderBase::SendProtocolError(std::string_view str) {
 }
 
 char* RedisReplyBuilderBase::FormatDouble(double d, char* dest, unsigned len) {
-  StringBuilder sb(dest, len);
-  CHECK(dfly_conv.ToShortest(d, &sb));
-  return sb.Finalize();
+  DCHECK_GE(len, cmn::kMaxDoubleStrLen);
+  cmn::FormatDoubleShortest(d, true, dest);
+  return dest;
 }
 
 void RedisReplyBuilderBase::SendVerbatimString(std::string_view str, VerbatimFormat format) {

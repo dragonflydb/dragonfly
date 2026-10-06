@@ -1,0 +1,173 @@
+// Copyright 2026, DragonflyDB authors.  All rights reserved.
+// See LICENSE for licensing terms.
+//
+
+#include "server/journal/aof_segment_writer.h"
+
+#include <absl/cleanup/cleanup.h>
+#include <absl/random/random.h>
+#include <absl/strings/str_cat.h>
+#include <fcntl.h>
+// For IORING_FSYNC_DATASYNC.
+#include <linux/io_uring.h>
+#include <unistd.h>
+
+#include "base/logging.h"
+#include "server/error.h"
+
+namespace dfly {
+
+using namespace std;
+using util::fb2::OpenLinux;
+
+namespace {
+
+error_code SyncDir(const string& dir) {
+  auto res = OpenLinux(dir, O_RDONLY | O_DIRECTORY, 0);
+  if (!res)
+    return res.error();
+  RETURN_ON_ERR((*res)->FSync(0));
+  return (*res)->Close();
+}
+
+error_code LastErrno() {
+  return {errno, system_category()};
+}
+
+}  // namespace
+
+AofSegmentWriter::AofSegmentWriter(string dir, uint32_t shard_id, uint32_t shard_count)
+    : dir_(std::move(dir)), shard_id_(shard_id), shard_count_(shard_count) {
+}
+
+AofSegmentWriter::~AofSegmentWriter() {
+  DCHECK_EQ(in_flight_, 0u);
+}
+
+string AofSegmentWriter::SegmentName(uint32_t shard_id, uint64_t seq) {
+  return absl::StrCat("appendonly-", shard_id, "-", seq, ".aof");
+}
+
+error_code AofSegmentWriter::Open(uint64_t seq) {
+  DCHECK(!file_);
+  string path = absl::StrCat(dir_, "/", SegmentName(shard_id_, seq));
+  // tmp because we switch after the header becomes durable
+  string tmp_path = absl::StrCat(path, ".tmp");
+
+  uint64_t uid = absl::Uniform<uint64_t>(absl::BitGen{});
+
+  // On failure, leave neither the tmp file nor a segment we created, so Open can be retried.
+  bool linked = false;
+  absl::Cleanup cleanup = [&] {
+    file_.reset();
+    unlink(tmp_path.c_str());
+    if (linked)
+      unlink(path.c_str());
+  };
+
+  // A stale tmp may be a second name of an existing segment: drop the name, never truncate it.
+  unlink(tmp_path.c_str());
+  auto res = OpenLinux(tmp_path, O_CREAT | O_EXCL | O_WRONLY, 0644 /* rw-r--r-- */);
+  if (!res)
+    return res.error();
+  file_ = std::move(*res);
+
+  string hdr = EncodeAofSegmentHeader({shard_id_, shard_count_, seq, uid});
+  RETURN_ON_ERR(file_->Write(io::Buffer(hdr), 0, 0));
+  RETURN_ON_ERR(file_->FSync(IORING_FSYNC_DATASYNC));
+  // Header is durable now
+
+  // link() fails with EEXIST instead of replacing an existing segment.
+  if (link(tmp_path.c_str(), path.c_str()) != 0)
+    return LastErrno();
+  linked = true;
+  // Fails only if the disk dies; the segment is valid, so a stray tmp is just clutter.
+  if (unlink(tmp_path.c_str()) != 0)
+    LOG(WARNING) << "Failed to remove " << tmp_path << ": " << LastErrno().message();
+  // Only the final name remains.
+  RETURN_ON_ERR(SyncDir(dir_));
+  std::move(cleanup).Cancel();
+
+  builder_.emplace(uid, [this](AofSealedBlock block) { OnSealed(std::move(block)); });
+  return {};
+}
+
+void AofSegmentWriter::AddRecord(string_view record, uint64_t lsn) {
+  // TODO: fail-stop after a write error for now; retries come later.
+  if (write_ec_)
+    return;
+  builder_->Append(record, lsn);
+}
+
+void AofSegmentWriter::Seal() {
+  if (write_ec_)
+    return;
+  builder_->Seal();
+}
+
+error_code AofSegmentWriter::Shutdown() {
+  Seal();
+  ev_.await([this] { return in_flight_ == 0; });
+  if (write_ec_)
+    return write_ec_;
+  RETURN_ON_ERR(file_->FSync(IORING_FSYNC_DATASYNC));
+  return file_->Close();
+}
+
+void AofSegmentWriter::WaitPending(size_t limit) {
+  ev_.await([&] { return PendingBytes() <= limit || write_ec_; });
+}
+
+size_t AofSegmentWriter::PendingBytes() const {
+  return pending_bytes_ + builder_->PayloadSize();
+}
+
+void AofSegmentWriter::OnSealed(AofSealedBlock block) {
+  size_t len = block.bytes.size();
+  uint64_t last_lsn = block.n_records ? block.first_lsn + block.n_records - 1 : 0;
+  pending_.push_back({std::move(block.bytes), next_offset_, last_lsn});
+  next_offset_ += len;
+  pending_bytes_ += len;
+  ++in_flight_;
+  Submit(&pending_.back());
+}
+
+void AofSegmentWriter::Submit(PendingBlock* pb) {
+  io::Bytes src = io::Buffer(pb->bytes).subspan(pb->written);
+  file_->WriteAsync(src, pb->offset + pb->written, [this, pb](int res) { OnWriteDone(pb, res); });
+}
+
+void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
+  if (res <= 0) {
+    // TODO: fail-stop for now, retries come later.
+    // The block stays pending forever and written_lsn_ gets stuck.
+    write_ec_ = res < 0 ? error_code{-res, system_category()} : make_error_code(errc::io_error);
+    LOG(ERROR) << "AOF write failed at offset " << pb->offset << ": " << write_ec_.message();
+    --in_flight_;
+    ev_.notifyAll();
+    return;
+  }
+
+  pb->written += res;
+  // Short writes are retried
+  // TODO This should be a helio utility. Short writes should be resubmitted and driven fully
+  // by WriteAsync. It's easy to implement IMO and we get rid of written field.
+  if (pb->written < pb->bytes.size())
+    return Submit(pb);
+
+  pb->done = true;
+  --in_flight_;
+  while (!pending_.empty() && pending_.front().done) {
+    PendingBlock& front = pending_.front();
+    // can be zero for a block that is fully partial. E.g. blk 1(part1) - blk 2(part2) - blk
+    // 3(part3, other) blk 2 is fully partial, it's a record whose front/tail belongs to adjacent
+    // blocks.
+    if (front.last_lsn)
+      written_lsn_ = front.last_lsn;
+    pending_bytes_ -= front.bytes.size();
+    pending_.pop_front();
+  }
+  ev_.notifyAll();
+}
+
+}  // namespace dfly

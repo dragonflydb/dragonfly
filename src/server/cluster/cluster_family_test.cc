@@ -600,7 +600,7 @@ TEST_F(ClusterFamilyTest, FragmentedSlotsReplyIsBatched) {
                                    ranges[0], ranges[1], GetMyId());
   ASSERT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
 
-  auto writes = [this] { return GetMetrics().facade_stats.reply_stats.io_write_cnt; };
+  auto writes = [this] { return GetMetrics().facade_stats.reply_stats.io_write_calls; };
 
   uint64_t before = writes();
   auto resp = Run({"cluster", "slots"});

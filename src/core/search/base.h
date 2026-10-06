@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -130,8 +131,14 @@ struct BaseIndex {
   virtual std::vector<DocId> GetAllDocsWithNonNullValues() const = 0;
 
   /* Called at the end of indexes rebuilding after all initial Add calls are done.
-     Some indices may need to finalize internal structures. See RangeTree for example. */
-  virtual void FinalizeInitialization() {
+     Some indices may need to finalize internal structures. See RangeTree for example.
+     Adds the amount of FinalizeWork() done to `*done` as it goes, if set. */
+  virtual void FinalizeInitialization(size_t* done) {
+  }
+
+  // Values FinalizeInitialization() would process if called now, nullopt if no finalize step.
+  virtual std::optional<size_t> FinalizeWork() const {
+    return std::nullopt;
   }
 
   // Defragments the index by moving objects in underutilized pages to the current malloc page.

@@ -73,7 +73,7 @@ ReplyStats::ReplyStats(ReplyStats&& other) noexcept {
 
 ReplyStats& ReplyStats::operator+=(const ReplyStats& o) {
   static_assert(sizeof(ReplyStats) == 88u + kSanitizerOverhead);
-  ADD(io_write_cnt);
+  ADD(io_write_calls);
   ADD(io_write_bytes);
 
   for (const auto& k_v : o.err_count) {
@@ -99,7 +99,7 @@ ReplyStats& ReplyStats::operator=(const ReplyStats& o) {
   }
 
   send_stats = o.send_stats;
-  io_write_cnt = o.io_write_cnt;
+  io_write_calls = o.io_write_calls;
   io_write_bytes = o.io_write_bytes;
   err_count = o.err_count;
   script_error_count = o.script_error_count;

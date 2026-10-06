@@ -1411,6 +1411,60 @@ TEST_F(DashTest, Traverse) {
   EXPECT_EQ(kNumItems - 1, nums.back());
 }
 
+TEST_F(DashTest, TraverseProgress) {
+  EXPECT_EQ(Dash64::TraverseProgress(Dash64::Cursor::end()), 0);
+
+  constexpr size_t kNumItems = 20000;
+  for (size_t i = 0; i < kNumItems; ++i) {
+    dt_.Insert(i, i);
+  }
+
+  size_t visited = 0;
+  double prev = 0;
+  Dash64::Cursor cursor;
+  while ((cursor = dt_.Traverse(cursor, [&](Dash64::iterator) { ++visited; }))) {
+    double progress = Dash64::TraverseProgress(cursor);
+    ASSERT_GT(progress, prev);
+    ASSERT_LT(progress, 1);
+    ASSERT_NEAR(progress, double(visited) / kNumItems, 0.02);
+    prev = progress;
+  }
+  EXPECT_EQ(visited, kNumItems);
+}
+
+// Progress keeps growing while the table splits or loses keys under the cursor.
+TEST_F(DashTest, TraverseProgressMutations) {
+  constexpr size_t kInitial = 1000, kMax = 20000;
+  for (size_t i = 0; i < kInitial; ++i) {
+    dt_.Insert(i, i);
+  }
+  const size_t segments = dt_.unique_segments();
+
+  set<uint64_t> visited;
+  uint64_t next_key = kInitial;
+  double prev = 0;
+  Dash64::Cursor cursor;
+  do {
+    cursor = dt_.Traverse(cursor, [&](Dash64::iterator it) { visited.insert(it->first); });
+    for (unsigned i = 0; i < 20 && next_key < kMax; ++i, ++next_key) {
+      dt_.Insert(next_key, next_key);
+      if (next_key % 2)
+        dt_.Erase(next_key - kInitial / 2);
+    }
+    if (cursor) {
+      double progress = Dash64::TraverseProgress(cursor);
+      ASSERT_GT(progress, prev);
+      ASSERT_LT(progress, 1);
+      prev = progress;
+    }
+  } while (cursor);
+
+  EXPECT_GT(dt_.unique_segments(), segments);
+  for (uint64_t i = 0; i < kInitial / 2; ++i) {
+    EXPECT_TRUE(visited.contains(i)) << i;
+  }
+}
+
 TEST_F(DashTest, TraverseSegmentOrder) {
   constexpr auto kNumItems = 50;
   for (size_t i = 0; i < kNumItems; ++i) {

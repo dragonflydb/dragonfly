@@ -9,11 +9,16 @@
 #include <mimalloc/internal.h>
 #include <mimalloc/types.h>
 
+#include <cstdint>
+#include <memory>
+#include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "common/heap_size.h"
 
 // Stub out internal mimalloc assertions that aren't exported
 // These are used by inline functions in internal.h
@@ -24,6 +29,13 @@
 }
 
 namespace dfly {
+
+namespace {
+template <typename T>
+concept HasSlowHeapSize = requires(const T& t) {
+  { cmn::SlowHeapSize(t) } -> std::same_as<size_t>;
+};
+}  // namespace
 
 class MiHeapTest : public ::testing::Test {
  protected:
@@ -215,6 +227,50 @@ TEST_F(MiHeapTest, DISABLED_AbandonedHeapReclamation) {
 
   // Verify memory and abandoned pages are reclaimed
   EXPECT_EQ(main_heap->tld->stats.malloc_normal.current, 0);
+}
+
+TEST(HeapSizeTest, HeapSize) {
+  struct CachedMemory {
+    size_t UsedMemory() const {
+      return 42;
+    }
+  };
+  static_assert(HasSlowHeapSize<std::unique_ptr<std::vector<std::string>>>);
+  static_assert(HasSlowHeapSize<std::unique_ptr<const std::vector<std::string>>>);
+  static_assert(HasSlowHeapSize<std::unique_ptr<absl::flat_hash_set<std::string>>>);
+  static_assert(!HasSlowHeapSize<std::unique_ptr<std::string>>);
+  static_assert(!HasSlowHeapSize<std::unique_ptr<int>>);
+  static_assert(!HasSlowHeapSize<std::unique_ptr<CachedMemory>>);
+  static_assert(!HasSlowHeapSize<std::pair<std::string, std::string>>);
+
+  auto cached = std::make_unique<CachedMemory>();
+  EXPECT_EQ(cmn::HeapSize(cached), sizeof(CachedMemory) + 42);
+  auto text = std::make_unique<std::string>(96, 'x');
+  EXPECT_EQ(cmn::HeapSize(text), sizeof(std::string) + text->capacity());
+  std::pair<std::string, std::string> strings{*text, *text};
+  EXPECT_EQ(cmn::HeapSize(strings), strings.first.capacity() + strings.second.capacity());
+
+  std::vector<std::vector<uint8_t>> blobs;
+  for (size_t i = 0; i < 100; ++i) {
+    blobs.emplace_back(std::vector<uint8_t>(200));
+  }
+  EXPECT_GT(cmn::SlowHeapSize(blobs), 20000);
+
+  EXPECT_EQ(cmn::SlowHeapSize(std::unique_ptr<std::vector<std::string>>{}), 0);
+  auto values = std::make_unique<std::vector<std::string>>(2, *text);
+  EXPECT_EQ(cmn::SlowHeapSize(values), sizeof(*values) + values->capacity() * sizeof(std::string) +
+                                           values->front().capacity() + values->back().capacity());
+  auto names = std::make_unique<absl::flat_hash_set<std::string>>();
+  names->insert(*text);
+  EXPECT_EQ(cmn::SlowHeapSize(names),
+            sizeof(*names) + names->capacity() * sizeof(std::string) + names->begin()->capacity());
+
+  std::vector<std::unique_ptr<std::vector<std::string>>> stash;
+  const std::vector<std::string> vec(10);
+  for (unsigned i = 0; i < 100; ++i) {
+    stash.emplace_back(std::make_unique<std::vector<std::string>>(vec));
+  }
+  EXPECT_GT(cmn::SlowHeapSize(stash), 30000);
 }
 
 }  // namespace dfly

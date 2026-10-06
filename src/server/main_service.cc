@@ -91,6 +91,9 @@ ABSL_FLAG(bool, multi_exec_squash, true,
 ABSL_FLAG(bool, lua_resp2_legacy_float, false,
           "Return rounded down integers instead of floats for lua scripts with RESP2");
 ABSL_FLAG(uint32_t, multi_eval_squash_buffer, 8096, "Max buffer for squashed commands per script");
+ABSL_FLAG(uint32_t, lua_max_stall_ms, 0,
+          "If positive, a lua script that has not written yet is aborted once it keeps its thread "
+          "busy without yielding for longer than this many milliseconds. 0 disables the check.");
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 ABSL_FLAG(size_t, listpack_max_field_len, 64,
@@ -220,6 +223,34 @@ std::optional<VarzFunction> engine_varz;
 
 constexpr size_t kMaxThreadSize = 1024;
 
+bool PreventsScriptAbort(const CommandId& cid) {
+  return cid.IsJournaled() || cid.IsPublish() || cid.IsSPublish();
+}
+
+struct ScriptStallCheck {
+  using Clock = std::chrono::steady_clock;
+
+  const ConnectionState::ScriptInfo* script;
+  std::chrono::milliseconds budget;
+  uint64_t epoch = fb2::FiberSwitchEpoch();
+  Clock::time_point start = Clock::now();
+
+  bool operator()() {
+    if (script->wrote)
+      return false;
+
+    const auto now = Clock::now();
+    const auto current_epoch = fb2::FiberSwitchEpoch();
+    if (current_epoch != epoch) {
+      epoch = current_epoch;
+      start = now;
+      return false;
+    }
+
+    return now - start > budget;
+  }
+};
+
 // Unwatch all keys for a connection and unregister from DbSlices.
 // Used by UNWATCH, DICARD and EXEC.
 void UnwatchAllKeys(Namespace* ns, ConnectionState::ExecInfo* exec_info) {
@@ -256,7 +287,7 @@ std::string CreateMonitorTimestamp() {
   timeval tv;
 
   gettimeofday(&tv, nullptr);
-  return absl::StrCat(tv.tv_sec, ".", tv.tv_usec, absl::kZeroPad6);
+  return absl::StrCat(tv.tv_sec, ".", absl::Dec(tv.tv_usec, absl::kZeroPad6));
 }
 
 auto CmdEntryToMonitorFormat(std::string_view str) -> std::string {
@@ -1463,7 +1494,15 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
     }
   }
 
-  return VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
+  if (auto err = VerifyConnectionAclStatus(&cid, &dfly_cntx, "has no ACL permissions", tail_args);
+      err) {
+    return err;
+  }
+
+  if (under_script)
+    dfly_cntx.conn_state.script_info->wrote |= PreventsScriptAbort(cid);
+
+  return nullopt;
 }
 
 DispatchResult Service::DispatchCommand(
@@ -2111,6 +2150,7 @@ void Service::TryEnqueueEvalAsyncCmd(const Interpreter::CallArgs& ca, CommandCon
       auto reply_mode = abort_on_error ? ReplyMode::ONLY_ERR : ReplyMode::NONE;
       info->async_cmds.emplace_back(cid, tail, reply_mode);
       info->async_cmds_heap_mem += info->async_cmds.back().UsedMemory();
+      info->wrote |= PreventsScriptAbort(*cid);
     } else if (abort_on_error) {  // If we don't abort on errors, we can ignore it completely
       early_async_error = ReportUnknownCmd(ca.args->at(0));
     }
@@ -2388,8 +2428,11 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
                          cid = cmd_cntx->cid()]() {
     conn_cntx->conn_state.db_index = caller_db;
     interpreter->ResetStack();
+    interpreter->SetAbortCheck(nullptr);
     cmd_cntx->SetupTx(cid, cmd_cntx->tx());
   };
+
+  const uint32_t stall_ms = GetFlag(FLAGS_lua_max_stall_ms);
 
   if (CanRunSingleShardMulti(sid.has_value(), script_mode, *tx)) {
     sinfo->stats.tx_shards = 1;
@@ -2413,10 +2456,12 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
                             eval_args.num_keys, script_mode);
 
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
-      boost::intrusive_ptr<Transaction> stub_tx =
-          new Transaction{tx, real_sid, slot_checker.GetUniqueSlotId()};
+      const intrusive_ptr stub_tx = new Transaction{tx, real_sid, slot_checker.GetUniqueSlotId()};
       conn_cntx->transaction = stub_tx.get();
 
+      if (stall_ms > 0)
+        interpreter->SetAbortCheck(
+            ScriptStallCheck{sinfo.get(), std::chrono::milliseconds(stall_ms)});
       result = interpreter->RunFunction(eval_args.sha, &error);
 
       conn_cntx->transaction = tx;
@@ -2450,6 +2495,9 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
     interpreter->SetRedisFunc(
         [cmd_cntx, this](Interpreter::CallArgs args) { CallFromScript(args, cmd_cntx); });
 
+    if (stall_ms > 0)
+      interpreter->SetAbortCheck(
+          ScriptStallCheck{sinfo.get(), std::chrono::milliseconds(stall_ms)});
     result = interpreter->RunFunction(eval_args.sha, &error);
 
     if (auto err = FlushEvalAsyncCmds(conn_cntx, true); err) {

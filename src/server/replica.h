@@ -86,7 +86,7 @@ class Replica : ProtocolClient {
 
   std::error_code Greet();  // Send PING and REPLCONF.
 
-  std::error_code HandleCapaDflyResp();
+  std::error_code HandleCapaDflyResp(const facade::RESPArray& args);
   std::error_code ConfigureDflyMaster();
 
   std::error_code InitiatePSync();                                           // Redis full sync.
@@ -102,6 +102,7 @@ class Replica : ProtocolClient {
   // if a stable sync is interrupted to join the cancelled stable sync fibers.
   void JoinDflyFlows();
   void SetShardStates(bool replica);  // Call SetReplica(replica) on all shards.
+  void FlushData();  // Flush the replicated slot range, or all databases when no range is set.
 
   // Send DFLY ${kind} to the master instance.
   std::error_code SendNextPhaseRequest(std::string_view kind);

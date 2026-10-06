@@ -24,6 +24,7 @@ extern "C" {
 #include "core/oah_set.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/reply_builder.h"
+#include "facade/string_socket.h"
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
 #include "server/set_family.h"
@@ -157,7 +158,7 @@ class BaseFamilyTest::TestConnWrapper {
   }
 
  private:
-  ::io::StringSink sink_;  // holds the response blob
+  facade::StringSocket sink_;
 
   std::unique_ptr<TestConnection> dummy_conn_;
 
@@ -401,10 +402,12 @@ void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double t
   auto step = 50us;
   auto timeout_micro = chrono::duration_cast<chrono::microseconds>(1000ms * timeout);
   int64_t steps = timeout_micro.count() / step.count();
+  bool locked = false;
   do {
     ThisFiber::SleepFor(step);
-  } while (!IsLocked(db_index, key) && --steps > 0);
-  CHECK(IsLocked(db_index, key));
+    locked = IsLocked(db_index, key);
+  } while (!locked && --steps > 0);
+  CHECK(locked);
 }
 
 bool BaseFamilyTest::WaitUntilCondition(std::function<bool()> condition_cb,

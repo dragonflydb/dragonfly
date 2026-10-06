@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -47,6 +48,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
+#include "facade/string_socket.h"
 #include "facade/tls_helpers.h"
 #include "io/file_util.h"
 #include "io/proc_reader.h"
@@ -1322,10 +1324,12 @@ void ServerFamily::LoadFromSnapshot() {
       auto future = Load(load_path, LoadExistingKeys::kFail);
       load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([future]() mutable {
         // Wait for load to finish in a dedicated fiber.
-        // Failure to load on start causes Dragonfly to exit with an error code.
         if (!future.has_value() || future->Get()) {
-          // Error was already printed to log at this point.
-          exit(1);
+          // exit() runs destructors and atexit handlers without stopping other server fibers.
+          // On fatal startup errors, use _Exit() to skip that teardown, flushing logs first.
+          // Normal shutdown must still drain and save data.
+          base::FlushLogs();
+          std::_Exit(EXIT_FAILURE);
         }
       });
     }
@@ -1337,7 +1341,8 @@ void ServerFamily::LoadFromSnapshot() {
       loading_stats_.failed_restore_count++;
       loading_stats_mu_.unlock();
       LOG(ERROR) << "Failed to load snapshot with error: " << load_path_result.error().Format();
-      exit(1);
+      base::FlushLogs();
+      std::_Exit(EXIT_FAILURE);
     }
   }
 }
@@ -1893,21 +1898,20 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
   VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
   bool is_bg_save;
-  {
-    util::fb2::LockGuard lk(save_mu_);
-    // It's possible that another save was initiated and the controller has changed.
-    // We only finalize and reset if it's still the same one we were waiting for.
-    if (save_controller_ == controller) {
-      save_info = save_controller_->Finalize();
-      is_bg_save = save_controller_->IsBgSave();
-      save_controller_.reset();
-    } else {
-      // Another save has started. The old one is already finalized by the new one.
-      // We just need to get the info.
-      return GenericError("Save operation was superseded by another save");
-    }
+  util::fb2::LockGuard lk(save_mu_);
+  // It's possible that another save was initiated and the controller has changed.
+  // We only finalize and reset if it's still the same one we were waiting for.
+  if (save_controller_ == controller) {
+    save_info = save_controller_->Finalize();
+    is_bg_save = save_controller_->IsBgSave();
+    save_controller_.reset();
+  } else {
+    // Another save has started. The old one is already finalized by the new one.
+    // We just need to get the info.
+    return GenericError("Save operation was superseded by another save");
   }
 
+  // Still under save_mu_, so the next save cannot start before its predecessor's state is stored.
   thread_safe_save_info_.Update([&](SaveInfoData* data) {
     if (is_bg_save) {
       data->bgsave_in_progress = false;
@@ -2867,7 +2871,7 @@ string ServerFamily::FormatInfoMetrics(
     append("keyspace_misses", m.events.misses);
     append("keyspace_mutations", m.events.mutations);
     append("total_reads_processed", conn_stats.io_read_cnt);
-    append("total_writes_processed", reply_stats.io_write_cnt);
+    append("total_writes_processed", reply_stats.io_write_calls);
     append("defrag_attempt_total", m.shard_stats.defrag_attempt_total);
     append("defrag_realloc_total", m.shard_stats.defrag_realloc_total);
     append("defrag_task_invocation_total", m.shard_stats.defrag_task_invocation_total);
@@ -2906,6 +2910,10 @@ string ServerFamily::FormatInfoMetrics(
 
     append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
+
+    append("tiered_alloc_segment_bytes", m.tiered_stats.alloc_segment_bytes);
+    append("tiered_alloc_large_bytes", m.tiered_stats.alloc_large_bytes);
+    append("tiered_alloc_free_extent_bytes", m.tiered_stats.alloc_free_extent_bytes);
 
     append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
     append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
@@ -3408,8 +3416,9 @@ void ServerFamily::Replicate(string_view host, string_view port) {
     args_vec.emplace_back(MutableSlice{s.data(), s.size()});
   }
   CmdArgList args_list = absl::MakeSpan(args_vec);
-  io::NullSink sink;
-  facade::RedisReplyBuilder rb(&sink);
+  facade::StringSocket sock;
+  sock.set_null(true);
+  facade::RedisReplyBuilder rb(&sock);
   CommandContext cmd_cntx{&rb, nullptr};
   ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
 }

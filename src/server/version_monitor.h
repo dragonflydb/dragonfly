@@ -3,6 +3,10 @@
 //
 #pragma once
 
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "util/fibers/fibers.h"
 #include "util/fibers/pool.h"
 #include "util/http/http_client.h"
@@ -14,6 +18,8 @@ class VersionMonitor {
   void Run(util::ProactorPool* proactor_pool);
 
   void Shutdown();
+
+  using HeaderList = std::vector<std::pair<std::string_view, std::string>>;
 
  private:
   struct SslDeleter {
@@ -29,8 +35,15 @@ class VersionMonitor {
 
   bool IsVersionOutdated(std::string_view remote, std::string_view current) const;
 
+  // Returns the anonymous deployment info headers sent with each version check.
+  HeaderList BuildInfoHeaders() const;
+
   util::fb2::Fiber version_fiber_;
   util::fb2::Done monitor_ver_done_;
+
+  // Static deployment info, collected once in Run().
+  std::string platform_;  // User-Agent comment: "<arch>; <io backend>; <cloud>".
+  HeaderList static_headers_;
 };
 
 }  // namespace dfly

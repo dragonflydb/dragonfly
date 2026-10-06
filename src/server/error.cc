@@ -34,6 +34,10 @@ string error_category::message(int ev) const {
   switch (ev) {
     case wrong_signature:
       return "Wrong signature while trying to load from rdb file";
+    case bad_version:
+      return "Unsupported RDB version";
+    case invalid_rdb_type:
+      return "Unsupported RDB object type or opcode";
     case out_of_memory:
       return "Out of memory, or used memory is too high";
     case incorrect_snapshot_id:

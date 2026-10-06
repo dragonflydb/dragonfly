@@ -38,7 +38,7 @@ test = [
   "redis-om>=0.3.3",
   "requests>=2.28.0",
   "tomli>=2.0.1",
-  "urllib3>=1.26.0",
+  "urllib3>=2.8.0",
   "valkey>=6.0.2",
   "wrapt>=1.14.1",
 ]

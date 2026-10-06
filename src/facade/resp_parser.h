@@ -109,6 +109,11 @@ class RESPParser {
     return reader_->pos < reader_->len;
   }
 
+  // Fed bytes that have not been parsed yet. Valid until the next Feed or Reset.
+  std::string_view BufferedInput() const {
+    return {reader_->buf + reader_->pos, reader_->len - reader_->pos};
+  }
+
   size_t BufferPos() const {
     return reader_->pos;
   }

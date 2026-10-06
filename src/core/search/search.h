@@ -194,7 +194,10 @@ class FieldIndices {
 
   SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
 
-  void FinalizeInitialization();
+  // Adds the amount of FinalizeWork() done to `*done` as it goes, if set.
+  void FinalizeInitialization(size_t* done = nullptr);
+  // Sum of FinalizeWork() over the indices, nullopt if none has a finalize step.
+  std::optional<size_t> FinalizeWork() const;
 
   DefragmentResult Defragment(PageUsage* page_usage);
 

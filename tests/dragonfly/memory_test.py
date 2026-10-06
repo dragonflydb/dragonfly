@@ -397,8 +397,13 @@ async def test_remove_docs_on_eviction(df_factory):
     assert index_info_num_docs == keyspace_keys
 
 
-async def test_memory_shrink_basic(df_factory: DflyInstanceFactory):
-    df_server = df_factory.create(proactor_threads=2)
+# TODO: Remove this test when DenseSet is removed.
+@pytest.mark.parametrize("use_oah_set", [False, True], ids=["dense", "oah"])
+async def test_memory_shrink_basic(df_factory: DflyInstanceFactory, use_oah_set):
+    if use_oah_set:
+        pytest.skip("OAHSet automatically compacts its bucket array on SREM")
+
+    df_server = df_factory.create(proactor_threads=2, use_oah_set=use_oah_set)
     df_server.start()
     client = df_server.client()
 

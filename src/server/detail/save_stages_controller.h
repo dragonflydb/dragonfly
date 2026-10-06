@@ -139,7 +139,6 @@ struct SaveStagesController : public SaveStagesInputs {
 
   absl::flat_hash_map<string_view, size_t> rdb_name_map_;
   util::fb2::Mutex rdb_name_map_mu_;
-  bool is_bg_save_ = false;
 };
 
 GenericError ValidateFilename(const std::filesystem::path& filename, bool new_version);

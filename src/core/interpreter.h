@@ -15,6 +15,7 @@
 #include "util/fibers/synchronization.h"
 
 typedef struct lua_State lua_State;
+typedef struct lua_Debug lua_Debug;
 
 namespace dfly {
 
@@ -71,6 +72,9 @@ class Interpreter {
   };
 
   using RedisFunc = std::function<void(CallArgs)>;
+
+  // Check periodically while a script runs, returning true aborts the script
+  using AbortCheck = std::function<bool()>;
 
   Interpreter();
   ~Interpreter();
@@ -163,6 +167,11 @@ class Interpreter {
     redis_func_ = std::forward<U>(u);
   }
 
+  // An empty check disables polling.
+  void SetAbortCheck(AbortCheck check) {
+    abort_check_ = std::move(check);
+  }
+
   // Invoke command with arguments from lua stack, given options and possibly custom explorer
   int RedisGenericCommand(CallArgs::Type call_type, ObjectExplorer* explorer = nullptr);
 
@@ -180,9 +189,13 @@ class Interpreter {
   bool PrepareArgs();
   bool CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer);
 
+  static void AbortHook(lua_State* lua, lua_Debug* ar);
+
   lua_State* lua_;
   unsigned cmd_depth_ = 0;
   RedisFunc redis_func_;
+  AbortCheck abort_check_;
+  bool aborted_ = false;
   cmn::BackedArguments backed_args_;
   int64_t used_bytes_ = 0;
 

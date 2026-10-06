@@ -161,8 +161,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 
   PushSerialized(true);
 
-  // The traversal waits for in-flight OnChange serializations of every bucket it visits, so no
-  // bucket serialization or delayed entry may be pending when the full sync cut is sent.
+  // A successful traversal leaves no bucket dependency pending.
   DCHECK(!IsAnyBucketBlocked());
   if (send_full_sync_cut) {
     CHECK(!serializer_->SendFullSyncCut());

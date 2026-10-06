@@ -278,6 +278,9 @@ bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
     ProcessDelayedEntries(true, 0, base_cntx_);
   }
 
+  // Other fibers may still hold delayed entries they took over in OnChange.
+  BucketDependencies::WaitEmpty();
+
   return base_cntx_->IsRunning();
 }
 

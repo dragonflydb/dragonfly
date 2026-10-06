@@ -4,11 +4,15 @@
 
 #include "server/search/search_family.h"
 
+#include <absl/functional/function_ref.h>
+#include <absl/strings/numbers.h>
 #include <absl/strings/str_format.h>
+#include <absl/types/span.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <set>
 #include <string_view>
 
 #include "base/flags.h"
@@ -18,6 +22,8 @@
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
+#include "server/db_slice.h"
+#include "server/engine_shard_set.h"
 #include "server/search/doc_index.h"
 #include "server/test_utils.h"
 
@@ -28,6 +34,7 @@ using namespace facade;
 
 ABSL_DECLARE_FLAG(bool, search_reject_legacy_field);
 ABSL_DECLARE_FLAG(size_t, search_query_string_bytes);
+ABSL_DECLARE_FLAG(bool, use_numeric_range_tree);
 
 namespace {
 
@@ -188,6 +195,37 @@ class SearchFamilyTest : public BaseFamilyTest {
       ThisFiber::SleepFor(std::chrono::milliseconds(5));
     }
   }
+
+  // d:1..d:4 hold "example" and "com" in email, d:5 and d:6 only outside email, d:7 neither.
+  void CreateGluedWordIndex(bool json) {
+    const pair<string, string> docs[] = {
+        {"jane@example.com", ""}, {"example@com.org", ""},          {"com@example.org", ""},
+        {"example-x@y.com", ""},  {"jane@mail.net", "example com"}, {"example", "com"},
+        {"john.doe@acme.io", ""},
+    };
+    string schema = json ? "$.email AS email TEXT NOSTEM $.note AS note TEXT NOSTEM $.vec AS vec"
+                         : "email TEXT NOSTEM note TEXT NOSTEM vec";
+    EXPECT_EQ(Run(absl::StrCat("FT.CREATE idx ON ", json ? "JSON" : "HASH", " PREFIX 1 d: SCHEMA ",
+                               schema, " VECTOR ", json ? "HNSW" : "FLAT",
+                               " 6 TYPE FLOAT32 DIM 1 DISTANCE_METRIC L2")),
+              "OK");
+    for (size_t i = 0; i < std::size(docs); ++i) {
+      const auto& [email, note] = docs[i];
+      string key = absl::StrCat("d:", i + 1);
+      if (json) {
+        string note_json = note.empty() ? "" : absl::StrCat(R"(,"note":")", note, R"(")");
+        Run({"JSON.SET", key, "$",
+             absl::StrCat(R"({"email":")", email, R"(")", note_json, R"(,"vec":[)", i + 1, "]}")});
+      } else if (note.empty()) {
+        Run({"HSET", key, "email", email, "vec", FloatVec1(i + 1)});
+      } else {
+        Run({"HSET", key, "email", email, "note", note, "vec", FloatVec1(i + 1)});
+      }
+    }
+    WaitForIndexReady("idx");
+  }
+
+  void CheckGluedWordCommands();
 };
 
 const auto kNoResults = RespElementsAre(IntArg(0));
@@ -661,6 +699,7 @@ TEST_F(SearchFamilyTest, Indexing) {
   absl::Time deadline = absl::Now() + absl::Seconds(10);
   size_t iterations = 0;
   bool seen_full = false;
+  double prev_percent = 0;
   while (true) {
     auto resp = Run({"ft.info", "i1"});
     auto arr = resp.GetVec();
@@ -683,7 +722,15 @@ TEST_F(SearchFamilyTest, Indexing) {
     EXPECT_FALSE(seen_full);
     seen_full |= num_docs->GetInt() == kNumDocs;
     EXPECT_THAT(*indexing, IntArg(1));
-    EXPECT_NE(*percent_indexed, "1");  // change once we have estimations
+
+    // Progress is past 0, only grows, stays below 1 and has at most 4 decimals ("0.xxxx")
+    double percent = 0;
+    ASSERT_TRUE(absl::SimpleAtod(percent_indexed->GetView(), &percent)) << *percent_indexed;
+    EXPECT_GT(percent, 0);
+    EXPECT_GE(percent, prev_percent);
+    EXPECT_LT(percent, 1);
+    EXPECT_LE(percent_indexed->GetView().size(), 6u) << *percent_indexed;
+    prev_percent = percent;
 
     // Check search doesn't return any errors
     resp = Run({"ft.search", "i1", "@v1:[10 20]"});
@@ -701,6 +748,162 @@ TEST_F(SearchFamilyTest, Indexing) {
   // check added with alter field v2 is fully indexed
   resp = Run({"ft.search", "i1", "@v2:[0 10000]", "LIMIT", "0", "0"});
   EXPECT_THAT(resp, RespElementsAre(IntArg(kNumDocs)));
+}
+
+namespace {
+
+struct BuildSample {
+  double percent;
+  size_t num_docs;
+};
+
+// Runs `start` and samples build progress of `index` on every shard between builder steps.
+vector<vector<BuildSample>> SampleBuildProgress(string_view index,
+                                                absl::FunctionRef<void()> start) {
+  vector<vector<BuildSample>> samples(shard_set->size());
+  vector<fb2::Fiber> samplers;
+  for (unsigned sid = 0; sid < shard_set->size(); sid++) {
+    samplers.push_back(shard_set->pool()->at(sid)->LaunchFiber([&samples, index, sid] {
+      auto* indices = EngineShard::tlocal()->search_indices();
+      auto building = [&] {
+        auto* shard_index = indices->GetIndex(index);
+        return shard_index && shard_index->GetInfo().indexing;
+      };
+      absl::Time deadline = absl::Now() + absl::Seconds(10);
+      while (!building() && absl::Now() < deadline)
+        ThisFiber::Yield();
+
+      while (auto* shard_index = indices->GetIndex(index)) {
+        DocIndexInfo info = shard_index->GetInfo();
+        samples[sid].push_back({info.percent_indexed, info.num_docs});
+        if (!info.indexing)
+          break;
+        ThisFiber::Yield();
+      }
+    }));
+  }
+  start();
+  for (auto& sampler : samplers)
+    sampler.Join();
+  return samples;
+}
+
+// Checks the progress contract per shard; `scan_end` bounds the scan share from both sides
+void ExpectBuildProgress(string_view label, const vector<vector<BuildSample>>& samples,
+                         double scan_end, double last_above) {
+  SCOPED_TRACE(label);
+  bool scan_sampled = false;
+  double last_building = 0;
+  for (size_t sid = 0; sid < samples.size(); sid++) {
+    const auto& shard = samples[sid];
+    ASSERT_GE(shard.size(), 4u) << "shard " << sid;
+    EXPECT_EQ(shard.back().percent, 1.0) << "shard " << sid;
+
+    auto building = absl::MakeConstSpan(shard).first(shard.size() - 1);
+    set<double> distinct;
+    for (size_t i = 0; i < building.size(); i++) {
+      const auto& [percent, num_docs] = building[i];
+      EXPECT_LT(percent, 1) << "shard " << sid << " sample " << i;
+      if (i > 0) {
+        EXPECT_GE(percent, building[i - 1].percent) << "shard " << sid << " sample " << i;
+      }
+      if (num_docs < shard.back().num_docs) {
+        scan_sampled = true;
+        EXPECT_LE(percent, scan_end) << "shard " << sid << " sample " << i;
+      } else if (scan_end < 1) {
+        EXPECT_GE(percent, 0.9 * scan_end) << "shard " << sid << " sample " << i;
+      }
+      distinct.insert(percent);
+    }
+    EXPECT_GE(distinct.size(), 3u) << "shard " << sid;
+    last_building = max(last_building, building.back().percent);
+  }
+  EXPECT_TRUE(scan_sampled);
+  // Some shard was sampled in its last phase past `last_above`
+  EXPECT_GT(last_building, last_above);
+}
+
+}  // namespace
+
+TEST_F(SearchFamilyTest, IndexingProgress) {
+#ifdef NDEBUG
+  constexpr size_t kNumDocs = 100'000, kNumVectors = 5'000;
+#else
+  constexpr size_t kNumDocs = 20'000, kNumVectors = 2'000;
+#endif
+  constexpr size_t kNumCapped = 20'000;  // docs with the `c` field
+
+  // Lua fills the keyspace much faster than separate commands
+  const char* kFillScript = R"(
+    --!df flags=allow-undeclared-keys
+    for i = 0, tonumber(ARGV[1]) - 1 do
+      redis.call('HSET', 'doc-' .. i, 't', 'text ' .. i, 'n', i)
+      if i < tonumber(ARGV[2]) then
+        redis.call('HSET', 'doc-' .. i, 'v', struct.pack('ffff', i, i % 7, i % 11, 1))
+      end
+      if i < tonumber(ARGV[3]) then
+        redis.call('HSET', 'doc-' .. i, 'c', i)
+      end
+    end
+  )";
+  Run({"eval", kFillScript, "0", absl::StrCat(kNumDocs), absl::StrCat(kNumVectors),
+       absl::StrCat(kNumCapped)});
+  ASSERT_THAT(Run({"dbsize"}), IntArg(kNumDocs));
+
+  auto build = [this](string_view index, vector<string_view> cmd) {
+    return SampleBuildProgress(index, [&] { ASSERT_EQ(Run(absl::MakeConstSpan(cmd)), "OK"); });
+  };
+
+  // Key scan only
+  ExpectBuildProgress(
+      "text", build("text", {"ft.create", "text", "prefix", "1", "doc-", "schema", "t", "text"}), 1,
+      0.9);
+
+  // Sortable only numeric fields leave nothing to sort after the key scan
+  ExpectBuildProgress("sort",
+                      build("sort", {"ft.create", "sort", "prefix", "1", "doc-", "schema", "n",
+                                     "numeric", "sortable", "noindex"}),
+                      1, 0.9);
+
+  // Key scan, then numeric sort (half each when sorted); small blocks make sorting yield often
+  const bool sorts_numeric = absl::GetFlag(FLAGS_use_numeric_range_tree);
+  const double numeric_scan_end = sorts_numeric ? 0.5 : 1;
+  const double numeric_last_above = sorts_numeric ? 0.5 : 0.9;
+  ExpectBuildProgress("num",
+                      build("num", {"ft.create", "num", "prefix", "1", "doc-", "schema", "n",
+                                    "numeric", "blocksize", "100"}),
+                      numeric_scan_end, numeric_last_above);
+
+  // One block: no yield while inserting, so the next sample has all values in and is capped
+  auto cap_samples = build("cap", {"ft.create", "cap", "prefix", "1", "doc-", "schema", "c",
+                                   "numeric", "blocksize", "1000000"});
+  ExpectBuildProgress("cap", cap_samples, numeric_scan_end, numeric_last_above);
+  if (sorts_numeric) {
+    EXPECT_TRUE(std::ranges::any_of(cap_samples, [](const auto& shard) {
+      return std::ranges::any_of(shard, [](const BuildSample& s) { return s.percent == 0.9999; });
+    }));
+  }
+
+  // Key scan, then filling the HNSW graph: 1/9 and 8/9 of the build. FT.INFO follows it too.
+  vector<double> ft_info;
+  auto vec_samples = SampleBuildProgress("vec", [&] {
+    ASSERT_EQ(Run({"ft.create", "vec", "prefix", "1", "doc-", "schema", "t", "text", "v", "vector",
+                   "hnsw", "6", "type", "float32", "dim", "4", "distance_metric", "l2"}),
+              "OK");
+    for (auto info = Run({"ft.info", "vec"}).GetVec(); info[info.size() - 3].GetInt() != 0;
+         info = Run({"ft.info", "vec"}).GetVec()) {
+      ASSERT_TRUE(absl::SimpleAtod(info.back().GetView(), &ft_info.emplace_back()));
+    }
+  });
+  ExpectBuildProgress("vec", vec_samples, 1.0 / 9, 0.9);
+  EXPECT_TRUE(std::ranges::is_sorted(ft_info));
+  EXPECT_GE(set<double>(ft_info.begin(), ft_info.end()).size(), 2u);
+
+  // FT.ALTER rebuilds the index from the start
+  ExpectBuildProgress(
+      "text after alter",
+      build("text", {"ft.alter", "text", "schema", "add", "n", "numeric", "blocksize", "100"}),
+      numeric_scan_end, numeric_last_above);
 }
 
 TEST_F(SearchFamilyTest, Simple) {
@@ -2374,6 +2577,46 @@ TEST_F(SearchFamilyTest, TextPunctuationSeparators) {
   EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:don", "DIALECT", "2"}), AreDocIds("t:3"));
   EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:t", "DIALECT", "2"}), AreDocIds("t:3"));
   EXPECT_THAT(Run({"FT.SEARCH", "i", "@val:14", "DIALECT", "2"}), AreDocIds("t:4"));
+}
+
+// d:5 and d:6 are the binding decoys.
+void SearchFamilyTest::CheckGluedWordCommands() {
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@email:*example.com*"}),
+              AreDocIds("d:1", "d:2", "d:3", "d:4"));
+
+  EXPECT_THAT(
+      Run({"FT.AGGREGATE", "idx", "@email:*example.com*", "LOAD", "1", "@email"}),
+      IsUnordArrayWithSize(IsMap("email", "jane@example.com"), IsMap("email", "example@com.org"),
+                           IsMap("email", "com@example.org"), IsMap("email", "example-x@y.com")));
+
+  // SEARCH matches nothing, so the reply is exactly the FILTER set (K 10 covers all docs).
+  auto hybrid = [this](string_view filter) {
+    return Run({"FT.HYBRID", "idx",   "SEARCH", "@email:zzznomatch",
+                "VSIM",      "@vec",  "$v",     "KNN",
+                "2",         "K",     "10",     "FILTER",
+                filter,      "LIMIT", "0",      "100",
+                "PARAMS",    "2",     "v",      FloatVec1(1.0f)});
+  };
+  auto resp = hybrid("@email:*example.com*");
+  EXPECT_EQ(resp.type, RespExpr::ARRAY) << resp;
+  EXPECT_THAT(HybridKeys(resp), UnorderedElementsAre("d:1", "d:2", "d:3", "d:4"));
+
+  // A trailing separator in FILTER must not swallow the "=>" that FLAT appends.
+  resp = hybrid("@email:*example.com*.");
+  EXPECT_EQ(resp.type, RespExpr::ARRAY) << resp;
+  EXPECT_THAT(HybridKeys(resp), UnorderedElementsAre("d:1", "d:2", "d:3", "d:4"));
+}
+
+// FLAT: FT.HYBRID builds a "<filter>=>[KNN ...]" query.
+TEST_F(SearchFamilyTest, GluedWordHash) {
+  CreateGluedWordIndex(false);
+  CheckGluedWordCommands();
+}
+
+// HNSW: FT.HYBRID parses FILTER on its own.
+TEST_F(SearchFamilyTest, GluedWordJson) {
+  CreateGluedWordIndex(true);
+  CheckGluedWordCommands();
 }
 
 TEST_F(SearchFamilyTest, TextEscapedSpaceJoinsTokens) {
@@ -4926,6 +5169,52 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{non_existing} => [KNN 3 @pos $vec]", "PARAMS", "2",
               "vec", query_vec});
   EXPECT_THAT(resp, kNoResults);
+}
+
+TEST_F(SearchFamilyTest, RestoreHnswVectorsWithConcurrentDeletion) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");
+  ResetService();
+
+  CreateHnswHashIdx();
+  constexpr size_t kNumDocs = 1000;
+  for (size_t i = 0; i < kNumDocs; ++i) {
+    EXPECT_THAT(Run({"HSET", absl::StrCat("h:", i), "title", "document", "vec", FloatVec(i)}),
+                IntArg(2));
+  }
+  WaitForIndexReady("idx");
+
+  pp_->at(0)->Await([&] {
+    auto* shard = EngineShard::tlocal();
+    auto* index = shard->search_indices()->GetIndex("idx");
+    ASSERT_NE(index, nullptr);
+    ASSERT_EQ(index->key_index().Size(), kNumDocs);
+    DbContext db_cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    auto& db_slice = db_cntx.GetDbSlice(shard->shard_id());
+
+    // The posted fiber runs at restoration's periodic yield. Delete every document so the
+    // current document is removed regardless of the key snapshot's iteration order.
+    bool deleted = false;
+    Fiber deleter{[&] {
+      for (size_t i = 0; i < kNumDocs; ++i) {
+        string key = absl::StrCat("h:", i);
+        auto it = db_slice.FindMutable(db_cntx, key, OBJ_HASH);
+        ASSERT_TRUE(it.ok());
+        it->post_updater.Run();
+        db_slice.Del(db_cntx, it->it);
+      }
+      deleted = true;
+    }};
+
+    index->RestoreGlobalVectorIndices("idx", OpArgs{shard, nullptr, db_cntx});
+    EXPECT_TRUE(deleted);
+    deleter.Join();
+    EXPECT_EQ(index->key_index().Size(), 0u);
+  });
+
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(0));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*=>[KNN 1 @vec $vec]", "PARAMS", "2", "vec", FloatVec(0)}),
+              kNoResults);
 }
 
 // EF_RUNTIME widens the HNSW candidate list at query time: a large value explores enough of the
@@ -7763,10 +8052,13 @@ TEST_F(SearchFamilyTest, FtInfoResp2AndResp3) {
 
   for (string_view proto : {"2", "3"}) {
     Run({"HELLO", proto});
+    Matcher<const RespExpr&> indexed = AllOf(ArgType(RespExpr::DOUBLE), DoubleArg(1));
+    if (proto == "2")
+      indexed = Eq(string_view{"1"});
     EXPECT_THAT(Run({"FT.INFO", "idx"}),
                 IsArray("index_name", "idx", "index_definition", definition, "index_options",
                         RespArray(IsEmpty()), "attributes", attributes, "num_docs", _, "indexing",
-                        _, "percent_indexed", _))
+                        IntArg(0), "percent_indexed", indexed))
         << "RESP" << proto;
   }
 }

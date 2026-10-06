@@ -11,6 +11,7 @@ extern "C" {
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
+#include <absl/time/clock.h>
 #include <gmock/gmock.h>
 #include <reflex/matcher.h>
 
@@ -30,6 +31,7 @@ ABSL_DECLARE_FLAG(float, mem_defrag_threshold);
 ABSL_DECLARE_FLAG(float, mem_defrag_waste_threshold);
 ABSL_DECLARE_FLAG(uint32_t, mem_defrag_check_sec_interval);
 ABSL_DECLARE_FLAG(bool, lua_resp2_legacy_float);
+ABSL_DECLARE_FLAG(uint32_t, lua_max_stall_ms);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 ABSL_DECLARE_FLAG(bool, latency_tracking);
@@ -88,7 +90,7 @@ class SingleThreadDflyEngineTest : public BaseFamilyTest {
 
 class DefragDflyEngineTest : public SingleThreadDflyEngineTest {};
 
-// TODO: to implement equivalent parsing in redis parser.
+// TODO: implement equivalent inline parsing in RespSrvParser.
 TEST_F(DflyEngineTest, Sds) {
   int argc;
   sds* argv = sdssplitargs("\r\n", &argc);
@@ -130,6 +132,22 @@ TEST_F(DflyEngineTest, LuaErrors) {
 
   resp = Run({"eval", "return redis.pcall('incrby', 'foo', 'bar')", "1"});
   EXPECT_THAT(resp, ErrArg("ERR Number of keys can't be greater than number of args"));
+}
+
+TEST_F(DflyEngineTest, EvalStallTimeout) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_lua_max_stall_ms, 100);
+
+  auto resp = Run({"eval", "while true do end", "0"});
+  EXPECT_THAT(resp, ErrArg("Script killed: blocked its thread for too long"));
+}
+
+TEST_F(DflyEngineTest, EvalStallTimeoutCaught) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_lua_max_stall_ms, 100);
+
+  auto resp = Run({"eval", "return pcall(function() while true do end end)", "0"});
+  EXPECT_THAT(resp, ErrArg("Script killed: blocked its thread for too long"));
 }
 
 TEST_F(DflyEngineTest, EvalResp) {
@@ -712,6 +730,38 @@ TEST_F(DflyEngineTest, MonitorSubscriptionsAccounting) {
   // synchronous dispatch).
   EXPECT_EQ(Run({"quit"}), "OK");
   EXPECT_EQ(0u, NumSubscriptions("IO0"));
+}
+
+// MONITOR stamps every line with "<seconds>.<microseconds>", exactly six fraction digits.
+TEST_F(DflyEngineTest, MonitorTimestamp) {
+  EXPECT_EQ(Run({"monitor"}), "OK");
+
+  constexpr int kCommands = 20;
+  vector<pair<int64_t, int64_t>> windows;  // unix microseconds before and after each command
+  for (int i = 0; i < kCommands; ++i) {
+    int64_t before = absl::ToUnixMicros(absl::Now());
+    Run("cl", {"SET", "k", absl::StrCat(i)});
+    windows.emplace_back(before, absl::ToUnixMicros(absl::Now()));
+  }
+
+  auto messages = pp_->at(0)->Await([&] { return GetConnection("IO0")->monitor_messages; });
+  ASSERT_EQ(messages.size(), size_t(kCommands));
+  for (int i = 0; i < kCommands; ++i) {
+    const string& msg = messages[i];
+    EXPECT_THAT(msg, HasSubstr(absl::StrCat("\"SET\" \"k\" \"", i, "\"")));
+
+    string_view timestamp = string_view(msg).substr(0, msg.find(' '));
+    size_t dot = timestamp.find('.');
+    ASSERT_NE(dot, string_view::npos) << msg;
+    EXPECT_EQ(timestamp.size() - dot - 1, 6u) << msg;
+
+    int64_t sec = 0, usec = 0;
+    ASSERT_TRUE(absl::SimpleAtoi(timestamp.substr(0, dot), &sec)) << msg;
+    ASSERT_TRUE(absl::SimpleAtoi(timestamp.substr(dot + 1), &usec)) << msg;
+    int64_t stamp = sec * 1'000'000 + usec;
+    EXPECT_LE(windows[i].first, stamp) << msg;
+    EXPECT_LE(stamp, windows[i].second) << msg;
+  }
 }
 
 TEST_F(DflyEngineTest, Bug468) {

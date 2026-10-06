@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <functional>
 #include <optional>
 #include <string>
@@ -38,7 +39,12 @@ struct IndexBuilder {
   // Get fiber reference. Temporary to polyfill sync construction places
   util::fb2::Fiber Worker();
 
+  // Share of the build done so far, stays below 1 while the builder exists.
+  double Progress() const;
+
  private:
+  enum Phase : uint8_t { kScan, kVector, kFinalize, kNumPhases };
+
   // Loop with cursor over table and add entries to regular index
   void CursorLoop(DbTable* table, DbContext db_cntx);
 
@@ -61,6 +67,11 @@ struct IndexBuilder {
   };
   std::vector<OffloadedKey> offloaded_keys_;
   util::fb2::Fiber fiber_;
+
+  bool has_hnsw_ = false;
+  std::array<double, kNumPhases> weights_{};    // share of each phase in the build, sum is 1
+  std::array<double, kFinalize> phase_done_{};  // done share of the cursor phases
+  size_t finalize_done_ = 0, finalize_work_ = 0;
 };
 
 }  // namespace dfly::search

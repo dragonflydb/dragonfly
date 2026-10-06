@@ -1047,7 +1047,7 @@ TEST_F(StringFamilyTest, MSetNxOddArgs) {
 // Exercises the zero-copy GET fast path (CompactObj::TryBorrow() →
 // BorrowStringOrRead). The value must be a NONE_ENC large string: random
 // binary avoids inline storage and ASCII encoding in EncodeString. All sizes
-// must clear BorrowStringOrRead's borrow threshold (currently 16 KiB) so
+// must clear TryBorrowString's borrow threshold (currently 8 KiB) so
 // TryBorrow actually fires; we test a spread above it.
 TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
   auto get_info_stat = [this](std::string_view name) -> uint64_t {
@@ -1173,8 +1173,8 @@ TEST_F(StringFamilyTest, PendingReadPinOrphanDrain) {
 }
 
 // Exercises the chunked ASCII decode path for zero-copy GET. Values must be
-// all-ASCII and large enough to clear BorrowStringOrRead's borrow threshold
-// (currently 16 KiB) so TryBorrow + chunked decode actually fires. Tests both
+// all-ASCII and large enough to clear TryBorrowString's borrow threshold
+// (currently 8 KiB) so TryBorrow + chunked decode actually fires. Tests both
 // ASCII1_ENC (decoded size not at the 8-byte binpacked boundary) and
 // ASCII2_ENC (at the boundary). Also crosses the SinkReplyBuilder scratch
 // flush threshold (kMaxBufferSize = 8192) to validate intermediate Flushes
@@ -1194,8 +1194,8 @@ TEST_F(StringFamilyTest, GetLargeAsciiBorrowedChunked) {
     const char* label;
   };
   Case cases[] = {
-      {16384, "16KiB ASCII2 (at borrow threshold + alignment boundary)"},
-      {16391, "ASCII1 (just above threshold, non-aligned tail)"},
+      {16384, "16KiB ASCII2 (above borrow threshold, alignment boundary)"},
+      {16391, "ASCII1 (above threshold, non-aligned tail)"},
       {32768, "32KiB ASCII2 (multiple scratch flushes)"},
       {65535, "ASCII1 (large, with unaligned tail)"},
   };
@@ -1230,6 +1230,68 @@ TEST_F(StringFamilyTest, GetLargeAsciiBorrowedChunkedSquashed) {
   EXPECT_EQ(Run({"get", "k1"}), "QUEUED");
   auto resp = Run({"exec"});
   EXPECT_THAT(resp, RespArray(ElementsAre(v0, v1)));
+}
+
+// Zero-copy MGET: large values (raw and ASCII-packed) are borrowed, small ones are copied.
+// Covers missing and duplicate keys, direct replies and MULTI/EXEC capture + replay.
+TEST_F(StringFamilyTest, MGetLargeBorrowed) {
+  auto borrowed_sent = [this] {
+    auto metrics = GetMetrics();
+    return metrics.facade_stats.reply_stats.borrowed_string_sent_cnt;
+  };
+
+  std::mt19937 rng{0xDF1FDF1F};
+  std::uniform_int_distribution<int> dist(0, 255);
+  std::string raw(32768, '\0');
+  for (char& c : raw)
+    c = static_cast<char>(dist(rng));
+
+  std::string ascii(16391, '\0');  // ASCII1 encoded, unaligned tail
+  for (size_t i = 0; i < ascii.size(); ++i)
+    ascii[i] = static_cast<char>(0x20 + (i % 0x5F));
+
+  EXPECT_EQ(Run({"set", "raw", raw}), "OK");
+  EXPECT_EQ(Run({"set", "ascii", ascii}), "OK");
+  EXPECT_EQ(Run({"set", "small", "foo"}), "OK");
+
+  uint64_t initial_sent = borrowed_sent();
+  auto resp = Run({"mget", "raw", "small", "missing", "ascii", "raw"});
+  EXPECT_THAT(resp, RespArray(ElementsAre(raw, "foo", ArgType(RespExpr::NIL), ascii, raw)));
+  EXPECT_EQ(borrowed_sent(), initial_sent + 3);
+
+  initial_sent = borrowed_sent();
+  EXPECT_EQ(Run({"multi"}), "OK");
+  EXPECT_EQ(Run({"mget", "ascii", "small", "raw"}), "QUEUED");
+  resp = Run({"exec"});
+  EXPECT_THAT(resp.GetVec()[0], RespArray(ElementsAre(ascii, "foo", raw)));
+  EXPECT_EQ(borrowed_sent(), initial_sent + 2);
+}
+
+// Zero-copy memcache multi-key GET: raw large values are borrowed, while ASCII-packed ones
+// fall back to copying because MCReplyBuilder needs a plain view of the bytes.
+TEST_F(StringFamilyTest, MGetLargeBorrowedMC) {
+  using MP = facade::MemcacheParser;
+
+  // The test harness splits MC replies by CRLF and strips whitespace, so avoid both.
+  // High-bit bytes also prevent ASCII packing.
+  std::string raw(32768, '\0');
+  for (size_t i = 0; i < raw.size(); ++i)
+    raw[i] = static_cast<char>(0x80 + (i % 0x7F));
+  std::string ascii(16391, '\0');
+  for (size_t i = 0; i < ascii.size(); ++i)
+    ascii[i] = static_cast<char>(0x21 + (i % 0x5E));  // '!'..'~'
+
+  uint64_t initial_sent = GetMetrics().facade_stats.reply_stats.borrowed_string_sent_cnt;
+
+  EXPECT_THAT(RunMC(MP::SET, "raw", MCArgs{raw, 0}), ElementsAre("STORED"));
+  EXPECT_THAT(RunMC(MP::SET, "ascii", MCArgs{ascii, 0}), ElementsAre("STORED"));
+
+  auto resp = GetMC(MP::GET, {"raw", "missing", "ascii"});
+  EXPECT_THAT(resp, ElementsAre(StrCat("VALUE raw 0 ", raw.size()), raw,
+                                StrCat("VALUE ascii 0 ", ascii.size()), ascii, "END"));
+
+  // MCReplyBuilder references borrowed bytes via plain views, so the counter does not move.
+  EXPECT_EQ(GetMetrics().facade_stats.reply_stats.borrowed_string_sent_cnt, initial_sent);
 }
 
 // Drain on a non-orphaned entry (no mutation during the read window) just

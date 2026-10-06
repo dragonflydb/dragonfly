@@ -113,6 +113,9 @@ using namespace std;
 
 namespace {
 
+constexpr int kAbortCheckInstructions = 100000;
+constexpr char kScriptKilledError[] = "Script killed: blocked its thread for too long";
+
 // EVP_Q_digest is not present in the older versions of OpenSSL.
 int EVPDigest(const void* data, size_t datalen, unsigned char* md, size_t* mdlen) {
   unsigned int temp = 0;
@@ -890,6 +893,23 @@ bool Interpreter::Exists(string_view sha) const {
   return type == LUA_TFUNCTION;
 }
 
+void Interpreter::AbortHook(lua_State* lua, lua_Debug* ar) {
+  // if we are in error handler already don't replace the existing error with "script killed"
+  if (lua_getinfo(lua, "S", ar) && strcmp(ar->source, "@err_handler_def") == 0)
+    return;
+
+  if (Interpreter* self = *static_cast<Interpreter**>(lua_getextraspace(lua)); !self->aborted_) {
+    if (!self->abort_check_())
+      return;
+
+    self->aborted_ = true;
+    lua_sethook(lua, AbortHook, LUA_MASKLINE, 0);
+  }
+
+  lua_pushstring(lua, kScriptKilledError);
+  lua_error(lua);
+}
+
 auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult {
   DVLOG(2) << "RunFunction " << sha << " " << lua_gettop(lua_);
 
@@ -911,9 +931,22 @@ auto Interpreter::RunFunction(string_view sha, std::string* error) -> RunResult 
 
   // At this point lua stack has 2 globals.
 
+  aborted_ = false;
+  if (abort_check_)
+    lua_sethook(lua_, AbortHook, LUA_MASKCOUNT, kAbortCheckInstructions);
+
   /* We have zero arguments and expect
    * a single return value. */
   int err = lua_pcall(lua_, 0, 1, -2);
+
+  if (abort_check_)
+    lua_sethook(lua_, nullptr, 0, 0);
+
+  // A script can catch the hook error and return without triggering another hook.
+  if (aborted_) {
+    *error = kScriptKilledError;
+    return RUN_ERR;
+  }
 
   if (err) {
     *error = lua_tostring(lua_, -1);
