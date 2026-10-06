@@ -450,18 +450,31 @@ async def test_replicate_old_master(
     await c_master.execute_command("HSETEX", "hash", 3600, "expiring", "one")
     await c_master.hset("hash", "persistent", "two")
 
-    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
-    await wait_available_async(c_replica)
+    try:
+        assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+        await wait_available_async(c_replica)
 
-    assert await c_replica.execute_command("get", "k1") == "v1"
-    await assert_hash_expiry(c_master, c_replica)
+        assert await c_replica.execute_command("get", "k1") == "v1"
+        await assert_hash_expiry(c_master, c_replica)
 
-    if cluster_mode == "emulated":
-        # An old master sends no announced address: fall back to the one we replicate from.
-        res = await c_replica.execute_command("CLUSTER SLOTS")
-        master_replid = (await c_replica.execute_command("INFO", "REPLICATION"))["master_replid"]
-        assert res[0][2] == ["localhost", master.port, master_replid]
-        assert res[0][3][1] == replica.port
+        if cluster_mode == "emulated":
+            # An old master sends no announced address: fall back to the one we replicate from.
+            res = await c_replica.execute_command("CLUSTER SLOTS")
+            master_replid = (await c_replica.execute_command("INFO", "REPLICATION"))[
+                "master_replid"
+            ]
+            assert res[0][2] == ["localhost", master.port, master_replid]
+            assert res[0][3][1] == replica.port
+    finally:
+        # Let the old master finish replication cleanup before fixture teardown sends SIGTERM.
+        async with async_timeout.timeout(10):
+            await c_replica.execute_command("REPLICAOF", "NO", "ONE")
+
+            @assert_eventually(timeout=5)
+            async def replica_disconnected():
+                assert (await c_master.info("replication"))["connected_slaves"] == 0
+
+            await replica_disconnected()
 
 
 async def test_replicate_to_old_replica(df_factory: DflyInstanceFactory):
