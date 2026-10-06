@@ -1005,6 +1005,7 @@ Service::Service(ProactorPool* pp)
       util::fb2::LockGuard lk(m);
       util::fb2::detail::FiberInterface::PrintAllFiberStackTraces();
     });
+    base::FlushLogs();
   });
 #endif
 

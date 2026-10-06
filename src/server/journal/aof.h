@@ -52,7 +52,8 @@ struct AofBlockHeader {
 std::optional<AofBlockHeader> DecodeAofBlock(std::string_view src, uint64_t segment_uid);
 
 struct AofSealedBlock {
-  std::string bytes;  // header + payload, ready to write as-is
+  // Header + payload, ready to write as-is.
+  std::string bytes;
   uint64_t first_lsn;
   uint32_t n_records;
   uint8_t flags;
@@ -74,11 +75,12 @@ class AofBlockBuilder {
   // Seals the open block if non-empty.
   void Seal();
 
- private:
+  // Payload bytes in the open block.
   size_t PayloadSize() const {
     return buf_.size() - kAofBlockHeaderSize;
   }
 
+ private:
   void SealOpen();
   void ResetOpen();
 
