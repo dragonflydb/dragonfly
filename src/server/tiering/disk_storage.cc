@@ -187,6 +187,20 @@ io::Result<std::pair<size_t, RegisteredSlice>> DiskStorage::PrepareStash(size_t 
   // Note that `alloc_.Malloc` may fail even if we have enough space due to fragmentation,
   // as internally it uses different 256MB segments for different block sizes.
   if (offset < 0) {
+    auto seg_stats = alloc_.GetSegmentStats();
+    LOG(INFO) << "RequestGrow triggered by Malloc failure: request_size=" << length
+              << " needed=" << -offset << " capacity=" << alloc_.capacity()
+              << " allocated=" << alloc_.allocated_bytes()
+              << " segments_total=" << seg_stats.segments_total
+              << " segments_in_queue=" << seg_stats.segments_in_queue
+              << " (small=" << seg_stats.segments_in_queue_small
+              << " medium=" << seg_stats.segments_in_queue_medium << ")"
+              << " pages_allocated=" << seg_stats.pages_allocated
+              << " (small=" << seg_stats.pages_allocated_small
+              << " medium=" << seg_stats.pages_allocated_medium << ")"
+              << " pages_in_free_list=" << seg_stats.pages_in_free_list
+              << " (small=" << seg_stats.pages_in_free_list_small
+              << " medium=" << seg_stats.pages_in_free_list_medium << ")";
     auto ec = RequestGrow(-offset);
     return make_unexpected(ec ? ec : make_error_code(errc::operation_would_block));
   }
@@ -224,6 +238,16 @@ void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
   size_t available = capacity - alloc_.allocated_bytes();
   if ((available < ExternalAllocator::kExtAlignment) && (available < capacity * 0.15) &&
       !grow_.pending) {
+    auto seg_stats = alloc_.GetSegmentStats();
+    LOG(INFO) << "RequestGrow triggered proactively: available=" << available
+              << " capacity=" << capacity << " allocated=" << alloc_.allocated_bytes()
+              << " segments_in_queue=" << seg_stats.segments_in_queue
+              << " (small=" << seg_stats.segments_in_queue_small
+              << " medium=" << seg_stats.segments_in_queue_medium << ")"
+              << " pages_in_free_list=" << seg_stats.pages_in_free_list
+              << " (small=" << seg_stats.pages_in_free_list_small
+              << " medium=" << seg_stats.pages_in_free_list_medium << ")"
+              << " (available < 256MB and < 15% of capacity)";
     auto ec = RequestGrow(ExternalAllocator::kExtAlignment);
     LOG_IF(ERROR, ec && ec != errc::file_too_large) << "Could not call grow :" << ec.message();
   }
@@ -231,6 +255,7 @@ void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
 
 DiskStorage::Stats DiskStorage::GetStats() const {
   ExternalAllocator::Stats alloc_stats = alloc_.GetStats();
+  ExternalAllocator::SegmentStats seg_stats = alloc_.GetSegmentStats();
   return Stats{.allocated_bytes = alloc_.allocated_bytes(),
                .capacity_bytes = alloc_.capacity(),
                .heap_buf_alloc_count = heap_buf_alloc_cnt_,
@@ -240,7 +265,17 @@ DiskStorage::Stats DiskStorage::GetStats() const {
                .pending_stash_bytes = pending_stash_bytes_,
                .segment_bytes = alloc_stats.segment_bytes,
                .large_allocated_bytes = alloc_stats.large_allocated_bytes,
-               .free_extent_bytes = alloc_stats.free_extent_bytes};
+               .free_extent_bytes = alloc_stats.free_extent_bytes,
+               .segments_total = seg_stats.segments_total,
+               .segments_in_queue = seg_stats.segments_in_queue,
+               .segments_in_queue_small = seg_stats.segments_in_queue_small,
+               .segments_in_queue_medium = seg_stats.segments_in_queue_medium,
+               .pages_allocated = seg_stats.pages_allocated,
+               .pages_allocated_small = seg_stats.pages_allocated_small,
+               .pages_allocated_medium = seg_stats.pages_allocated_medium,
+               .pages_in_free_list = seg_stats.pages_in_free_list,
+               .pages_in_free_list_small = seg_stats.pages_in_free_list_small,
+               .pages_in_free_list_medium = seg_stats.pages_in_free_list_medium};
 }
 
 error_code DiskStorage::RequestGrow(off_t min_size) {

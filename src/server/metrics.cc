@@ -667,6 +667,34 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricValue("tiered_alloc_bytes", m.tiered_stats.alloc_free_extent_bytes, {"type"},
                       {"free_extent"}, &resp->body());
 
+    // Segments: total allocated vs available in queue
+    AppendMetricHeader("tiering_segments", "Tiering segments (256MB chunks)",
+                       MetricType::GAUGE, &resp->body());
+    AppendMetricValue("tiering_segments", m.tiered_stats.segments_total, {"state"}, {"total"},
+                      &resp->body());
+    AppendMetricValue("tiering_segments", m.tiered_stats.segments_in_queue, {"state"},
+                      {"in_queue"}, &resp->body());
+    AppendMetricValue("tiering_segments", m.tiered_stats.segments_in_queue_small,
+                      {"state", "class"}, {"in_queue", "small"}, &resp->body());
+    AppendMetricValue("tiering_segments", m.tiered_stats.segments_in_queue_medium,
+                      {"state", "class"}, {"in_queue", "medium"}, &resp->body());
+
+    // Pages: allocated vs in free lists
+    AppendMetricHeader("tiering_pages", "Tiering pages (1-16MB)", MetricType::GAUGE,
+                       &resp->body());
+    AppendMetricValue("tiering_pages", m.tiered_stats.pages_allocated, {"state"}, {"allocated"},
+                      &resp->body());
+    AppendMetricValue("tiering_pages", m.tiered_stats.pages_allocated_small,
+                      {"state", "class"}, {"allocated", "small"}, &resp->body());
+    AppendMetricValue("tiering_pages", m.tiered_stats.pages_allocated_medium,
+                      {"state", "class"}, {"allocated", "medium"}, &resp->body());
+    AppendMetricValue("tiering_pages", m.tiered_stats.pages_in_free_list, {"state"},
+                      {"in_free_list"}, &resp->body());
+    AppendMetricValue("tiering_pages", m.tiered_stats.pages_in_free_list_small,
+                      {"state", "class"}, {"in_free_list", "small"}, &resp->body());
+    AppendMetricValue("tiering_pages", m.tiered_stats.pages_in_free_list_medium,
+                      {"state", "class"}, {"in_free_list", "medium"}, &resp->body());
+
     // Events: stash, fetch, upload, cancel
     AppendMetricHeader("tiered_events", "Tiered events", MetricType::COUNTER, &resp->body());
     AppendMetricValue("tiered_events", m.tiered_stats.total_stashes, {"type"}, {"stash"},

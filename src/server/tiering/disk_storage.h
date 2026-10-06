@@ -33,6 +33,16 @@ class DiskStorage {
     size_t segment_bytes = 0;
     size_t large_allocated_bytes = 0;
     size_t free_extent_bytes = 0;
+    uint32_t segments_total = 0;
+    uint32_t segments_in_queue = 0;
+    uint32_t segments_in_queue_small = 0;
+    uint32_t segments_in_queue_medium = 0;
+    uint32_t pages_allocated = 0;
+    uint32_t pages_allocated_small = 0;
+    uint32_t pages_allocated_medium = 0;
+    uint32_t pages_in_free_list = 0;
+    uint32_t pages_in_free_list_small = 0;
+    uint32_t pages_in_free_list_medium = 0;
   };
 
   using ReadCb = std::function<void(io::Result<std::string_view>)>;

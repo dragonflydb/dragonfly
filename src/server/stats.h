@@ -93,6 +93,24 @@ struct TieredStats {
   // Total number of client throttle events.
   uint64_t total_clients_throttled = 0;
 
+  // Total number of allocated segments (256MB chunks).
+  uint32_t segments_total = 0;
+
+  // Number of segments in the free segment queue (available for page allocation).
+  uint32_t segments_in_queue = 0;
+  uint32_t segments_in_queue_small = 0;   // SMALL_P class (1MB pages)
+  uint32_t segments_in_queue_medium = 0;  // MEDIUM_P class (16MB pages)
+
+  // Total number of pages with segment_inuse=1 (allocated to bins).
+  uint32_t pages_allocated = 0;
+  uint32_t pages_allocated_small = 0;   // Pages in SMALL_P segments
+  uint32_t pages_allocated_medium = 0;  // Pages in MEDIUM_P segments
+
+  // Number of pages in free_pages_[] lists (have free blocks available).
+  uint32_t pages_in_free_list = 0;
+  uint32_t pages_in_free_list_small = 0;   // SMALL_P pages
+  uint32_t pages_in_free_list_medium = 0;  // MEDIUM_P pages
+
   TieredStats& operator+=(const TieredStats&);
 };
 
