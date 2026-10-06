@@ -1,6 +1,7 @@
 # The AOF segment writer uses io_uring files, available only on Linux.
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
-  SET(DF_AOF_LINUX_SRCS journal/aof_segment_writer.cc journal/aof_streamer.cc)
+  SET(DF_AOF_LINUX_SRCS journal/aof_segment_writer.cc journal/aof_streamer.cc
+      journal/aof_chain_reader.cc)
 endif()
 
 SET(DF_JOURNAL_SRCS

@@ -20,6 +20,7 @@
 #ifdef __linux__
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/aof_chain_reader.h"
 #include "server/journal/aof_segment_writer.h"
 #include "server/journal/serializer.h"
 #include "server/test_utils.h"
@@ -257,6 +258,143 @@ TEST_F(AofSegmentWriterTest, OpenKeepsExistingSegment) {
   EXPECT_FALSE(
       filesystem::exists(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(2, 0), ".tmp")));
   EXPECT_EQ(ReadSegment(0).size(), kAofSegmentHeaderSize + kAofBlockHeaderSize + 1);
+}
+
+class AofChainReaderTest : public AofSegmentWriterTest {
+ protected:
+  // Writes segment seq with one block per record.
+  void WriteSegment(uint64_t seq, uint64_t first_lsn, const vector<string>& records) {
+    pp_->at(0)->Await([&] {
+      AofSegmentWriter writer(dir_, 2, 4);
+      ASSERT_FALSE(writer.Open(seq));
+      for (size_t i = 0; i < records.size(); ++i) {
+        writer.AddRecord(records[i], first_lsn + i);
+        writer.Seal();
+      }
+      ASSERT_FALSE(writer.Shutdown());
+    });
+  }
+
+  struct ChainResult {
+    string data;
+    bool torn = false;
+    uint64_t last_lsn = 0;
+    uint64_t discarded = 0;
+  };
+
+  // Reads the chain on the proactor, as replay does, in small pieces; repairs it if asked.
+  ChainResult ReadChain(bool repair = false) {
+    ChainResult res;
+    pp_->at(0)->Await([&] {
+      AofChainReader reader(dir_, 2, 4);
+      ASSERT_FALSE(reader.Open());
+      char buf[7];
+      while (true) {
+        iovec v{buf, sizeof(buf)};
+        auto n = reader.ReadSome(&v, 1);
+        if (!n) {
+          ASSERT_EQ(n.error(), AofReadError::kTornTail);
+          res.torn = true;
+          break;
+        }
+        if (*n == 0)
+          break;
+        res.data.append(buf, *n);
+      }
+      res.last_lsn = reader.LastLsn();
+      res.discarded = reader.DiscardedBytes();
+      if (repair)
+        EXPECT_FALSE(reader.Repair());
+    });
+    return res;
+  }
+
+  string SegmentPath(uint64_t seq) {
+    return absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(2, seq));
+  }
+};
+
+TEST_F(AofChainReaderTest, CleanChain) {
+  WriteSegment(0, 1, {"a1", "b22", "c333"});
+  WriteSegment(1, 4, {"d4444"});
+
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1b22c333d4444");
+  EXPECT_FALSE(res.torn);
+  EXPECT_EQ(res.last_lsn, 4u);
+  EXPECT_EQ(res.discarded, 0u);
+}
+
+TEST_F(AofChainReaderTest, TornTail) {
+  WriteSegment(0, 1, {"a1", "b22", "c333"});
+  WriteSegment(1, 4, {"d4444"});
+  // Corrupt the second block, so the valid third block and segment 1 lie after a hole.
+  string seg0 = SegmentPath(0);
+  uint64_t second_block = kAofSegmentHeaderSize + kAofBlockHeaderSize + 2;
+  {
+    fstream f(seg0, ios::in | ios::out | ios::binary);
+    f.seekp(second_block + kAofBlockHeaderSize);
+    f.put('X');
+  }
+
+  ChainResult res = ReadChain(/*repair=*/true);
+  EXPECT_EQ(res.data, "a1");
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 1u);
+  EXPECT_GT(res.discarded, 0u);
+  EXPECT_EQ(filesystem::file_size(seg0), second_block);
+  EXPECT_FALSE(filesystem::exists(SegmentPath(1)));
+  EXPECT_TRUE(filesystem::exists(absl::StrCat(SegmentPath(1), ".discarded")));
+
+  ChainResult reopened = ReadChain();
+  EXPECT_EQ(reopened.data, "a1");
+  EXPECT_FALSE(reopened.torn);
+  EXPECT_EQ(reopened.discarded, 0u);
+}
+
+TEST_F(AofChainReaderTest, TornInMiddleOfChain) {
+  WriteSegment(0, 1, {"a1", "b22"});
+  WriteSegment(1, 3, {"c333", "d4444"});
+  WriteSegment(2, 5, {"e5"});
+  // Corrupt the second block of the middle segment, as a crash during a rotation would.
+  string seg0 = SegmentPath(0), seg1 = SegmentPath(1), seg2 = SegmentPath(2);
+  uint64_t seg0_size = filesystem::file_size(seg0);
+  uint64_t second_block = kAofSegmentHeaderSize + kAofBlockHeaderSize + 4;
+  {
+    fstream f(seg1, ios::in | ios::out | ios::binary);
+    f.seekp(second_block + kAofBlockHeaderSize);
+    f.put('X');
+  }
+
+  // The log ends inside segment 1; the valid segment 2 comes after the hole.
+  ChainResult res = ReadChain(/*repair=*/true);
+  EXPECT_EQ(res.data, "a1b22c333");
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 3u);
+
+  EXPECT_EQ(filesystem::file_size(seg0), seg0_size);
+  EXPECT_EQ(filesystem::file_size(seg1), second_block);
+  EXPECT_FALSE(filesystem::exists(seg2));
+  EXPECT_TRUE(filesystem::exists(absl::StrCat(seg2, ".discarded")));
+
+  ChainResult reopened = ReadChain();
+  EXPECT_EQ(reopened.data, "a1b22c333");
+  EXPECT_FALSE(reopened.torn);
+  EXPECT_EQ(reopened.last_lsn, 3u);
+}
+
+TEST_F(AofChainReaderTest, PartialRecordAtEnd) {
+  string huge(2 * kAofBlockBytes, 'h');
+  WriteSegment(0, 1, {"a1", huge});
+  // Cut the last block of the record that spans two blocks.
+  string seg0 = SegmentPath(0);
+  filesystem::resize_file(seg0, filesystem::file_size(seg0) - 10);
+
+  // The record's first block is streamed, but the record never completes.
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1" + huge.substr(0, kAofBlockBytes));
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 1u);
 }
 
 class AofStreamerTest : public BaseFamilyTest {
