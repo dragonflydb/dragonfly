@@ -20,9 +20,9 @@ class AofSegmentWriter {
  public:
   enum class Durability : uint8_t {
     kNormal,
-    // A write failed; new records are dropped until a checkpoint.
+    // A write failed; new records are dropped. Permanent for this writer.
     kWriteFailed,
-    // An fdatasync failed; ends only with a checkpoint. Writes go on as best effort, syncs stop.
+    // An fdatasync failed; writes go on as best effort, syncs stop. Permanent for this writer.
     kSyncFailed,
   };
 
@@ -107,9 +107,10 @@ class AofSegmentWriter {
 
   bool sync_in_flight_ = false;
   uint32_t tick_id_ = 0;
-  // First failed write; from then on new records are dropped (fail-stop) until a checkpoint.
+  // First failed write; from then on new records are dropped (fail-stop). Never cleared: recovery
+  // means Shutdown() and a new writer on a new segment, e.g. at a checkpoint.
   std::error_code write_ec_;
-  // First failed fdatasync; sticky until a checkpoint.
+  // First failed fdatasync; never cleared either.
   std::error_code sync_ec_;
   // Notified on write and sync completions; WaitPending and Shutdown wait on it.
   util::fb2::CondVarAny cv_;

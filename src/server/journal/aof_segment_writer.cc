@@ -103,7 +103,7 @@ error_code AofSegmentWriter::Open(uint64_t seq) {
 }
 
 void AofSegmentWriter::AddRecord(string_view record, uint64_t lsn) {
-  // The log has a hole after a failed write, so later records are useless until a checkpoint.
+  // The log has a hole after a failed write, so later records are useless in this segment.
   if (write_ec_)
     return;
   builder_->Append(record, lsn);
@@ -133,6 +133,8 @@ error_code AofSegmentWriter::Shutdown() {
     durable_lsn_ = written_lsn_;
   }
   error_code close_ec = file_->Close();
+  // On NFS-like filesystems close can be the only place a deferred write error shows up.
+  LOG_IF(ERROR, close_ec) << "AOF close failed: " << close_ec.message();
 
   if (write_ec_)
     return write_ec_;
@@ -173,7 +175,9 @@ void AofSegmentWriter::Submit(PendingBlock* pb) {
 
 void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
   if (res <= 0) {
-    // Fail-stop: the block stays unwritten, so WrittenLsn stops before it.
+    // Fail-stop: the block stays unwritten, so WrittenLsn stops before it. Blocks in flight after
+    // it still land and Shutdown's fdatasync persists them, so the segment can hold valid blocks
+    // after a gap: readers must stop at the first invalid block and never resync past it.
     error_code ec = IoError(res);
     LOG_EVERY_T(ERROR, 1) << "AOF write failed at offset " << pb->offset << ": " << ec.message();
     if (!write_ec_)
@@ -221,7 +225,7 @@ void AofSegmentWriter::OnSyncDone(size_t sync_offset, uint64_t sync_lsn, int res
   sync_in_flight_ = false;
   if (res < 0) {
     // Never retried: the kernel may have dropped the dirty pages ("fsyncgate").
-    // DurableLsn stops until a checkpoint.
+    // DurableLsn stops for good; only a new writer on a new segment recovers.
     // TODO: decide how to trigger an immediate checkpoint (#8410) to clear this state.
     sync_ec_ = IoError(res);
     LOG(ERROR) << "AOF fdatasync failed: " << sync_ec_.message();
