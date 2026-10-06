@@ -389,8 +389,11 @@ async def test_cluster_memory_consumption_migration(df_factory: DflyInstanceFact
 
 @pytest.mark.large
 @pytest.mark.exclude_epoll
+@pytest.mark.parametrize("background_writes", [True, False], ids=["with_writes", "without_writes"])
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes", "migration_buckets_cpu_budget": 1})
-async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_seeder_factory):
+async def test_migration_timeout_on_sync(
+    df_factory: DflyInstanceFactory, df_seeder_factory, background_writes
+):
     # Timeout set to 3 seconds because we must first saturate the socket before we get the timeout
     instances, nodes = await create_cluster(
         df_factory,
@@ -407,9 +410,11 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
 
     await DebugPopulateSeeder(key_target=300000, data_size=1000).run(nodes[0].client)
 
-    # we use this seeder to saturate the pending_buf_ in streamer
-    seeder = df_seeder_factory.create(port=nodes[0].instance.port, cluster_mode=True)
-    fill_task = asyncio.create_task(seeder.run())
+    # Without background writes, snapshot pacing must detect a stalled receiver below the
+    # full-buffer threshold. With writes, other producers can fill the buffer completely.
+    if background_writes:
+        seeder = df_seeder_factory.create(port=nodes[0].instance.port, cluster_mode=True)
+        fill_task = asyncio.create_task(seeder.run())
 
     logging.debug("Start migration")
     nodes[0].migrations.append(
@@ -424,16 +429,16 @@ async def test_migration_timeout_on_sync(df_factory: DflyInstanceFactory, df_see
     logging.debug("debug migration pause")
     await nodes[1].client.execute_command("debug migration pause")
 
-    await wait_for_error(
-        nodes[0].admin_client, nodes[1].id, "BufferedSocketWriter write operation timeout", 30
-    )
-
-    logging.debug("debug migration resume")
-    await nodes[1].client.execute_command("debug migration resume")
-
-    # Stop seeder
-    seeder.stop()
-    await fill_task
+    try:
+        await wait_for_error(
+            nodes[0].admin_client, nodes[1].id, "BufferedSocketWriter write operation timeout", 30
+        )
+    finally:
+        logging.debug("debug migration resume")
+        await nodes[1].client.execute_command("debug migration resume")
+        if background_writes:
+            seeder.stop()
+            await fill_task
 
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED", 300)
     await wait_for_status(nodes[1].admin_client, nodes[0].id, "FINISHED")
