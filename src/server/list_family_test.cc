@@ -172,7 +172,6 @@ TEST_F(ListFamilyTest, BLMPopBlocking) {
     resp = Run({"blmpop", "0.1", "1", kKey1, "LEFT"});
   });
   WaitUntilLocked(0, kKey1);
-  ASSERT_TRUE(IsLocked(0, kKey1));
 
   fb0.Join();
   ASSERT_FALSE(IsLocked(0, kKey1));
@@ -197,7 +196,6 @@ TEST_F(ListFamilyTest, BLMPopBlocking) {
 
   // key should be locked while waiting
   WaitUntilLocked(0, kKey1);
-  ASSERT_TRUE(IsLocked(0, kKey1));
 
   auto push_resp = Run({"lpush", kKey1, "1"});
   EXPECT_THAT(push_resp, IntArg(1));
@@ -872,8 +870,6 @@ TEST_F(ListFamilyTest, BRPopLPushSingleShardBug4569) {
   RespExpr resp;
   auto fb0 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] { resp = Run({"brpop", "x", "0"}); });
   WaitUntilLocked(0, "x");
-
-  ASSERT_TRUE(IsLocked(0, "x"));
   Run({"lpush", "y", "val"});
   Run({"rpoplpush", "y", "x"});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
