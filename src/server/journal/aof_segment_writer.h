@@ -16,6 +16,9 @@
 
 namespace dfly {
 
+// Fsyncs a directory, so the names created or removed in it are durable.
+std::error_code SyncDir(const std::string& dir);
+
 // Writes one AOF segment. Not thread safe: all calls, including Open and Shutdown, must run
 // on the same proactor thread. Call Shutdown() before destruction if Open() succeeded, and
 // only then; it waits for in-flight I/O and cancels the periodic sync.

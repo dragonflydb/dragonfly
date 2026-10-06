@@ -29,6 +29,12 @@ error_code IoError(int res) {
   return res < 0 ? error_code{-res, system_category()} : make_error_code(errc::io_error);
 }
 
+error_code LastErrno() {
+  return {errno, system_category()};
+}
+
+}  // namespace
+
 error_code SyncDir(const string& dir) {
   auto res = OpenLinux(dir, O_RDONLY | O_DIRECTORY, 0);
   if (!res)
@@ -36,12 +42,6 @@ error_code SyncDir(const string& dir) {
   RETURN_ON_ERR((*res)->FSync(0));
   return (*res)->Close();
 }
-
-error_code LastErrno() {
-  return {errno, system_category()};
-}
-
-}  // namespace
 
 AofSegmentWriter::AofSegmentWriter(string dir, uint32_t shard_id, uint32_t shard_count)
     : dir_(std::move(dir)), shard_id_(shard_id), shard_count_(shard_count) {
@@ -147,7 +147,10 @@ size_t AofSegmentWriter::PendingBytes() const {
 
 void AofSegmentWriter::OnSealed(AofSealedBlock block) {
   size_t len = block.bytes.size();
-  uint64_t last_lsn = block.n_records ? block.first_lsn + block.n_records - 1 : 0;
+  // A block ending with a partial record commits nothing: recovery drops it unless the record
+  // completes, so the block that completes it covers all of its records.
+  bool commits = block.n_records > 0 && !(block.flags & kEndsWithPartial);
+  uint64_t last_lsn = commits ? block.first_lsn + block.n_records - 1 : 0;
   pending_.push_back({std::move(block.bytes), next_offset_, last_lsn});
   next_offset_ += len;
   ++in_flight_;
