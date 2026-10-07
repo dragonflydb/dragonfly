@@ -16,6 +16,9 @@
 
 namespace dfly {
 
+// Writes one AOF segment. Not thread safe: all calls, including Open and Shutdown, must run
+// on the same proactor thread. Call Shutdown() before destruction if Open() succeeded, and
+// only then; it waits for in-flight I/O and cancels the periodic sync.
 class AofSegmentWriter {
  public:
   AofSegmentWriter(std::string dir, uint32_t shard_id, uint32_t shard_count);
@@ -29,18 +32,30 @@ class AofSegmentWriter {
   void AddRecord(std::string_view record, uint64_t lsn);
   void Seal();
 
-  // Waits for in-flight writes and fdatasyncs the segment.
+  // Waits for in-flight I/O and fdatasyncs the segment. Returns error() if one is set.
+  // Must not be called if Open() failed.
   std::error_code Shutdown();
 
-  // Blocks the calling fiber until PendingBytes() <= limit or a write fails.
+  // Blocks the calling fiber until PendingBytes() <= limit or an I/O error stopped the writer.
   void WaitPending(size_t limit);
 
-  // Open block payload + sealed blocks not yet written.
+  // Open block payload + sealed blocks still held: unwritten, or written behind an unwritten one.
   size_t PendingBytes() const;
 
   // Last record fully written (not necessarily durable), 0 if none.
   uint64_t WrittenLsn() const {
     return written_lsn_;
+  }
+
+  // Last record covered by a successful fdatasync, 0 if none.
+  uint64_t DurableLsn() const {
+    return durable_lsn_;
+  }
+
+  // First failed write or fdatasync. It stops the writer for good: new records are dropped and
+  // syncs stop. Recovery is Shutdown() and a new writer on a new segment, at a checkpoint.
+  std::error_code error() const {
+    return ec_;
   }
 
   static std::string SegmentName(uint32_t shard_id, uint64_t seq);
@@ -63,6 +78,11 @@ class AofSegmentWriter {
   void Submit(PendingBlock* pb);
   void OnWriteDone(PendingBlock* pb, int res);
 
+  // Runs every kAofSyncMs: starts an fdatasync of completed writes, unless one is running or
+  // nothing new was written.
+  void MaybeStartFSync();
+  void OnSyncDone(uint64_t sync_lsn, int res);
+
   std::string dir_;
   uint32_t shard_id_;
   uint32_t shard_count_;
@@ -74,15 +94,21 @@ class AofSegmentWriter {
 
   // Offset order; deque keeps references stable for completions.
   std::deque<PendingBlock> pending_;
-  // Total size of the blocks in pending_.
-  size_t pending_bytes_ = 0;
   // Writes submitted and not yet completed; must be 0 before destruction.
   uint64_t in_flight_ = 0;
+
+  // End of the contiguous written prefix of the file. The header is durable after Open.
+  // When written_offset_ == next_offset_ all blocks are written
+  size_t written_offset_ = kAofSegmentHeaderSize;
   uint64_t written_lsn_ = 0;
-  // Set on a failed write; from then on new records are dropped (fail-stop).
-  std::error_code write_ec_;
-  // Notified on every write completion; WaitPending and Shutdown wait on it.
-  util::fb2::EventCount ev_;
+  uint64_t durable_lsn_ = 0;
+
+  bool sync_in_flight_ = false;
+  uint32_t tick_id_ = 0;
+  // See error(); never cleared.
+  std::error_code ec_;
+  // Notified on write and sync completions; WaitPending and Shutdown wait on it.
+  util::fb2::CondVarAny cv_;
 };
 
 }  // namespace dfly
