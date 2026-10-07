@@ -50,6 +50,11 @@ class AofSegmentWriter {
   // Open block payload + sealed blocks not yet written.
   size_t UnwrittenBytes() const;
 
+  // Payload of the open block, not sealed yet.
+  size_t OpenBlockBytes() const {
+    return builder_->PayloadSize();
+  }
+
   // End of the contiguous written prefix of the segment.
   size_t WrittenSize() const {
     return written_offset_;

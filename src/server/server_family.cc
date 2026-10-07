@@ -3182,6 +3182,7 @@ string ServerFamily::FormatInfoMetrics(
     for (const auto& st : per_shard) {
       aof.log_size += st.log_size;
       aof.buffered_bytes += st.buffered_bytes;
+      aof.open_block_bytes += st.open_block_bytes;
       aof.unsynced_bytes += st.unsynced_bytes;
       aof.throttle_usec += st.throttle_usec;
       aof.fsync_latency_usec = max(aof.fsync_latency_usec, st.fsync_latency_usec);
@@ -3200,6 +3201,7 @@ string ServerFamily::FormatInfoMetrics(
     append("aof_base_size", 0);
     append("aof_rewrite_trigger_size", 0);
     append("aof_buffered_bytes", aof.buffered_bytes);
+    append("aof_open_block_bytes", aof.open_block_bytes);
     append("aof_unsynced_bytes", aof.unsynced_bytes);
     append("aof_throttle_usec", aof.throttle_usec);
     append("aof_fsync_latency_microseconds", aof.fsync_latency_usec);

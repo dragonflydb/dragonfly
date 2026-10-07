@@ -19,6 +19,7 @@ class AofStreamer : public journal::JournalConsumerInterface {
   struct Stats {
     size_t log_size = 0;
     size_t buffered_bytes = 0;
+    size_t open_block_bytes = 0;
     size_t unsynced_bytes = 0;
     uint64_t throttle_usec = 0;
     uint64_t fsync_latency_usec = 0;

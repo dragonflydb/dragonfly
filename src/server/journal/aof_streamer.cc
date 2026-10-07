@@ -66,6 +66,7 @@ AofStreamer::Stats AofStreamer::GetStats() const {
   Stats st;
   st.log_size = prev_log_size_ + writer_.WrittenSize();
   st.buffered_bytes = writer_.UnwrittenBytes();
+  st.open_block_bytes = writer_.OpenBlockBytes();
   st.unsynced_bytes = writer_.UnsyncedBytes();
   st.throttle_usec = throttle_usec_;
   st.fsync_latency_usec = writer_.LastSyncUsec();
