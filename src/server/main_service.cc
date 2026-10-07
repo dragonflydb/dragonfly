@@ -912,6 +912,7 @@ void StoreInMultiBlock(ConnectionContext* dfly_cntx, const CommandId* cid,
 
   exec_info.stored_cmd_bytes += exec_info.body.back().UsedMemory();
   exec_info.is_write |= cid->IsJournaled();
+  exec_info.has_denyoom |= bool(cid->opt_mask() & CO::DENYOOM);
   ServerState::tlocal()->stats.stored_cmd_bytes += exec_info.GetStoredCmdBytes() - old_size;
 }
 
@@ -1462,6 +1463,19 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
       return ErrorReply{absl::StrCat("'", cmd_name, "' not allowed inside a transaction")};
   }
 
+  // Under maxmemory, MULTI/EXEC is admitted or refused as a whole, like in Valkey: a DENYOOM
+  // command is refused when queued (EXEC then aborts) and EXEC is refused if any queued command
+  // is DENYOOM. Commands of an admitted EXEC are not checked again in InvokeCmd.
+  if (const auto& exec_info = dfly_cntx.conn_state.exec_info; exec_info.IsCollecting()) {
+    bool denyoom = cid.IsExec() ? exec_info.has_denyoom : (cid.opt_mask() & CO::DENYOOM);
+    if (denyoom && etl.ShouldDenyOnOOM(base::CycleClock::ToUsec(base::CycleClock::Now()))) {
+      if (cid.IsExec())
+        return ErrorReply{
+            absl::StrCat("-EXECABORT Transaction discarded because of: ", kOutOfMemory)};
+      return ErrorReply{kOutOfMemory, kOutOfMemory};
+    }
+  }
+
   if (IsClusterEnabled()) {
     if (auto err = CheckKeysOwnership(cid, tail_args, dfly_cntx); err)
       return err;
@@ -1727,7 +1741,9 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
 
   ServerState& ss = *ServerState::tlocal();
 
-  if ((cid->opt_mask() & CO::DENYOOM) &&
+  // EXEC was already admitted as a whole in VerifyCommandState, so its commands are not checked
+  // again: failing a later command after earlier ones applied would break atomicity.
+  if ((cid->opt_mask() & CO::DENYOOM) && !cntx->conn_state.exec_info.IsRunning() &&
       ss.ShouldDenyOnOOM(base::CycleClock::ToUsec(cmd_cntx->start_cycle))) {
     cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
     return DispatchResult::OOM;

@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_replace.h>
@@ -1909,6 +1910,69 @@ TEST_F(MultiTest, SquashedCallbackBadAlloc) {
   // The connection must stay in sync after the failed sub-command.
   EXPECT_EQ(Run({"ping"}), "PONG");
   EXPECT_EQ(Run({"get", kKey2}), "b");
+}
+
+// Under maxmemory, a transaction with DENYOOM commands is admitted or refused as a whole.
+TEST_F(MultiTest, DenyOomAtomic) {
+  absl::FlagSaver fs;
+  // Keep used memory above the tiny limits below, independently of heartbeat updates.
+  constexpr uint64_t kUsedOffset = 1'000'000;
+  used_mem_current.fetch_add(kUsedOffset);
+  const size_t orig_limit = max_memory_limit.load();
+  absl::Cleanup restore = [&] {
+    max_memory_limit = orig_limit;
+    used_mem_current.fetch_sub(kUsedOffset);
+  };
+
+  for (bool squash : {false, true}) {
+    SCOPED_TRACE(squash);
+    absl::SetFlag(&FLAGS_multi_exec_squash, squash);
+    max_memory_limit = orig_limit;
+    Run({"set", kKey1, "a"});
+    Run({"set", kKey2, "b"});
+
+    // Refused when queued: EXEC aborts and nothing applies.
+    max_memory_limit = 1;
+    Run({"multi"});
+    EXPECT_THAT(Run({"set", kKey1, "x"}), ErrArg("Out of memory"));
+    EXPECT_EQ(Run({"del", kKey2}), "QUEUED");
+    EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT"));
+    EXPECT_EQ(Run({"get", kKey1}), "a");
+    EXPECT_EQ(Run({"get", kKey2}), "b");
+
+    // Refused at EXEC: memory ran out after the commands were queued.
+    max_memory_limit = orig_limit;
+    Run({"multi"});
+    EXPECT_EQ(Run({"set", kKey1, "x"}), "QUEUED");
+    EXPECT_EQ(Run({"del", kKey2}), "QUEUED");
+    max_memory_limit = 1;
+    EXPECT_THAT(Run({"exec"}), ErrArg("EXECABORT"));
+    EXPECT_EQ(Run({"ping"}), "PONG");  // the transaction was discarded
+    EXPECT_EQ(Run({"get", kKey1}), "a");
+    EXPECT_EQ(Run({"get", kKey2}), "b");
+
+    // A transaction without DENYOOM commands still runs.
+    Run({"multi"});
+    Run({"get", kKey1});
+    Run({"exists", kKey2});
+    RespExpr resp = Run({"exec"});
+    ASSERT_THAT(resp, ArrLen(2));
+    EXPECT_EQ(resp.GetVec()[0], "a");
+    EXPECT_THAT(resp.GetVec()[1], IntArg(1));
+
+    // Once admitted, commands are not refused even if memory runs out during EXEC.
+    // Existing keys are overwritten so that only the maxmemory check is exercised.
+    max_memory_limit = orig_limit;
+    Run({"multi"});
+    Run({"set", kKey1, "y"});
+    Run({"config", "set", "maxmemory", "1"});
+    Run({"set", kKey2, "z"});
+    resp = Run({"exec"});
+    ASSERT_THAT(resp, ArrLen(3));
+    EXPECT_EQ(resp.GetVec()[0], "OK");
+    EXPECT_EQ(resp.GetVec()[2], "OK");
+    EXPECT_EQ(Run({"get", kKey2}), "z");
+  }
 }
 
 }  // namespace dfly

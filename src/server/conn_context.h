@@ -122,7 +122,8 @@ struct ConnectionState {
     ExecState state = EXEC_INACTIVE;
     std::vector<StoredCmd> body;
     bool is_write = false;
-    bool error = false;  // a queue-time error: keep collecting, but EXEC must abort
+    bool has_denyoom = false;  // Set if any queued command is DENYOOM, checked once at EXEC
+    bool error = false;        // a queue-time error: keep collecting, but EXEC must abort
 
     std::vector<std::pair<DbIndex, std::string>> watched_keys;  // List of keys registered by WATCH
     std::atomic_bool watched_dirty = false;  // Set if a watched key was changed before EXEC
