@@ -57,7 +57,8 @@ void JournalWriter::Write(const journal::Entry::Payload& payload) {
 void JournalWriter::Write(const journal::Entry& entry) {
   // Check if entry has a new db index and we need to emit a SELECT entry.
   if (entry.opcode != journal::Op::SELECT && entry.opcode != journal::Op::LSN &&
-      entry.opcode != journal::Op::PING && (!cur_dbid_ || entry.dbid != *cur_dbid_)) {
+      entry.opcode != journal::Op::PING && entry.opcode != journal::Op::LINEAGE &&
+      (!cur_dbid_ || entry.dbid != *cur_dbid_)) {
     Write(journal::Entry{journal::Op::SELECT, entry.dbid, entry.slot});
     cur_dbid_ = entry.dbid;
   }
@@ -73,6 +74,8 @@ void JournalWriter::Write(const journal::Entry& entry) {
       return Write(entry.lsn);
     case journal::Op::PING:
       return;
+    case journal::Op::LINEAGE:
+      return Write(entry.payload);  // lineage_id is encoded in payload
     case journal::Op::COMMAND:
       Write(entry.txid);
       Write(1u);  // deprecated field, kept for backward compatibility.
@@ -215,8 +218,13 @@ std::error_code JournalReader::ReadEntry(journal::ParsedEntry* dest) {
   dest->dbid = dbid_;
   dest->opcode = opcode;
   dest->cmd.clear();
+
   if (opcode == journal::Op::PING) {
     return {};
+  }
+
+  if (opcode == journal::Op::LINEAGE) {
+    return ReadCommand(&dest->cmd);  // we store lineage id in payload
   }
 
   if (opcode == journal::Op::LSN) {

@@ -64,6 +64,9 @@ void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
       return;
     case journal::Op::PING:
       return;
+    case journal::Op::LINEAGE:
+      command = std::move(entry.cmd);  // lineage id is stored in command
+      return;
     case journal::Op::EXPIRED:
     case journal::Op::COMMAND:
       command = std::move(entry.cmd);
