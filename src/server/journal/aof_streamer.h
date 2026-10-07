@@ -7,10 +7,15 @@
 #include <string>
 #include <system_error>
 
-#include "server/journal/aof_segment_writer.h"
 #include "server/journal/types.h"
 
+#ifdef __linux__
+#include "server/journal/aof_segment_writer.h"
+#endif
+
 namespace dfly {
+
+#ifdef __linux__
 
 // Writes a shard's journal records to its AOF segment. Used only from the shard's thread.
 class AofStreamer : public journal::JournalConsumerInterface {
@@ -37,5 +42,33 @@ class AofStreamer : public journal::JournalConsumerInterface {
   size_t max_buffered_bytes_;
   uint32_t consumer_id_ = 0;
 };
+
+#else
+
+// No-op: the AOF segment writer needs io_uring files, so --aof is rejected at startup.
+class AofStreamer : public journal::JournalConsumerInterface {
+ public:
+  AofStreamer(std::string dir, uint32_t shard_id, uint32_t shard_count) {
+  }
+
+  std::error_code Start() {
+    return std::make_error_code(std::errc::not_supported);
+  }
+
+  std::error_code Shutdown() {
+    return {};
+  }
+
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+  }
+
+  void ThrottleIfNeeded() override {
+  }
+
+  void Seal() {
+  }
+};
+
+#endif  // __linux__
 
 }  // namespace dfly

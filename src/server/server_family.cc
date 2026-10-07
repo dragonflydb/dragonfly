@@ -66,10 +66,8 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/generic_family.h"
-#include "server/journal/journal.h"
-#ifdef __linux__
 #include "server/journal/aof_streamer.h"
-#endif
+#include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
 #include "server/multi_command_squasher.h"
@@ -1000,7 +998,6 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
 // Starts an AofStreamer on every shard, or exits if --aof cannot run.
 void StartAof(const string& flag_dir, detail::SnapshotStorage* storage) {
   string reason;
-#ifdef __linux__
   string dir = flag_dir.empty() ? "." : flag_dir;
   if (detail::IsCloudPath(dir)) {
     reason = "--aof needs a local --dir";
@@ -1029,9 +1026,6 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage) {
       return;
     reason = "failed to open AOF segments";
   }
-#else
-  reason = "--aof is supported only on Linux";
-#endif
   LOG(ERROR) << reason;
   base::FlushLogs();
   std::_Exit(EXIT_FAILURE);
@@ -1039,7 +1033,6 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage) {
 
 // Seals, writes and syncs every shard's AOF.
 void StopAof() {
-#ifdef __linux__
   shard_set->RunBlockingInParallel([](EngineShard* shard) {
     if (AofStreamer* streamer = shard->aof_streamer(); streamer) {
       error_code ec = streamer->Shutdown();
@@ -1048,7 +1041,6 @@ void StopAof() {
       shard->set_aof_streamer(nullptr);
     }
   });
-#endif
 }
 
 }  // namespace
