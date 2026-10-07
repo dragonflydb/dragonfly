@@ -57,4 +57,13 @@ std::error_code WriteAofManifest(std::string_view dir, const AofManifest& manife
 // ENOENT if there is none.
 io::Result<AofManifest> ReadAofManifest(std::string_view dir);
 
+// Paths of the AOF files in dir: the manifest, the segments and their leftovers.
+io::Result<std::vector<std::string>> ListAofFiles(std::string_view dir);
+
+// Deletes every AOF file but the manifest, to redo an interrupted bootstrap.
+std::error_code RemoveAofFilesExceptManifest(std::string_view dir);
+
+// Deletes the segments below each shard's cut and leftover tmp files; keeps *.discarded.
+std::error_code CollectAofGarbage(std::string_view dir, const AofManifest& manifest);
+
 }  // namespace dfly

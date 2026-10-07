@@ -292,7 +292,7 @@ class AofChainReaderTest : public AofSegmentWriterTest {
     ChainResult res;
     pp_->at(0)->Await([&] {
       AofChainReader reader(dir_, 2, 4);
-      ASSERT_FALSE(reader.Open());
+      ASSERT_FALSE(reader.Open(0));
       char buf[7];
       while (true) {
         iovec v{buf, sizeof(buf)};
@@ -471,6 +471,31 @@ TEST_F(AofManifestTest, WriteReplacesAtomically) {
     // The rename consumed the tmp file.
     EXPECT_FALSE(filesystem::exists(ManifestPath() + ".tmp"));
   });
+}
+
+TEST_F(AofManifestTest, CollectGarbage) {
+  // appendonly.aof, appendonly-x.tmp and appendonlydir are not ours, so they must not be deleted.
+  for (string_view name :
+       {"appendonly-0-1.aof", "appendonly-0-2.aof", "appendonly-0-3.aof", "appendonly-1-0.aof",
+        "appendonly-0-4.aof.discarded", "appendonly-1-1.aof.tmp", "appendonly.manifest.tmp",
+        "dump-summary.dfs", "appendonly.aof", "appendonly-x.tmp"}) {
+    ofstream(absl::StrCat(dir_, "/", name)) << "x";
+  }
+  filesystem::create_directory(absl::StrCat(dir_, "/appendonlydir"));
+  AofManifest m = Sample();
+  m.cuts = {{2, 100}, {0, 1}};
+
+  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m)); });
+
+  vector<string> left;
+  for (const auto& entry : filesystem::directory_iterator(dir_))
+    left.push_back(entry.path().filename().string());
+  sort(left.begin(), left.end());
+  // Segments below the cut and our tmp files go; *.discarded and others' files stay.
+  EXPECT_EQ(left, (vector<string>{"appendonly-0-2.aof", "appendonly-0-3.aof",
+                                  "appendonly-0-4.aof.discarded", "appendonly-1-0.aof",
+                                  "appendonly-x.tmp", "appendonly.aof", "appendonlydir",
+                                  "dump-summary.dfs"}));
 }
 
 class AofStreamerTest : public BaseFamilyTest {

@@ -26,6 +26,7 @@ enum class AofError {
   kShardCountChanged,
   kBadManifest,
   kManifestVersion,
+  kCutMismatch,
 };
 
 std::error_code make_error_code(AofError e);

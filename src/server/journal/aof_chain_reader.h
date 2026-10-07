@@ -23,8 +23,8 @@ class AofChainReader : public io::Source {
   AofChainReader(std::string dir, uint32_t shard_id, uint32_t shard_count);
   ~AofChainReader();
 
-  // Finds and validates the segments; reads no blocks.
-  std::error_code Open();
+  // Finds and validates the segments from cut_seq on; reads no blocks.
+  std::error_code Open(uint64_t cut_seq);
 
   // Streams the payloads of complete records only: a block ending with a partial record is held
   // back until that record completes. At the end of the log returns 0 if the log ends cleanly, or
@@ -36,6 +36,11 @@ class AofChainReader : public io::Source {
   // Makes the log durable as read; call it before resuming, torn tail or not. Truncates the log at
   // its end, fdatasyncs the kept segments and renames later ones to *.discarded.
   std::error_code Repair();
+
+  // First record of the log, 0 if none.
+  uint64_t FirstLsn() const {
+    return first_lsn_;
+  }
 
   // Last complete record of the log, 0 if none.
   uint64_t LastLsn() const {
@@ -73,7 +78,7 @@ class AofChainReader : public io::Source {
   class BlockScanner;
 
   // Builds segments_, the chain's files sorted by seq with their header fields; reads no blocks.
-  std::error_code DiscoverAndIndexSegments();
+  std::error_code DiscoverAndIndexSegments(uint64_t cut_seq);
 
   // Marks the end of the log and computes the discarded bytes; returns ReadSome's result.
   io::Result<size_t> Finish(bool torn);
@@ -86,6 +91,7 @@ class AofChainReader : public io::Source {
   // End of the log: the segment and the file offset right after its last complete record.
   size_t end_seg_ = 0;
   uint64_t end_offset_ = kAofSegmentHeaderSize;
+  uint64_t first_lsn_ = 0;
   uint64_t last_lsn_ = 0;
   uint64_t log_size_ = 0;
   uint64_t discarded_bytes_ = 0;

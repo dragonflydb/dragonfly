@@ -127,11 +127,11 @@ AofChainReader::AofChainReader(string dir, uint32_t shard_id, uint32_t shard_cou
 
 AofChainReader::~AofChainReader() = default;
 
-error_code AofChainReader::Open() {
-  return DiscoverAndIndexSegments();
+error_code AofChainReader::Open(uint64_t cut_seq) {
+  return DiscoverAndIndexSegments(cut_seq);
 }
 
-error_code AofChainReader::DiscoverAndIndexSegments() {
+error_code AofChainReader::DiscoverAndIndexSegments(uint64_t cut_seq) {
   auto files = io::StatFiles(absl::StrCat(dir_, "/appendonly-", shard_id_, "-*.aof"));
   if (!files)
     return files.error();
@@ -145,6 +145,9 @@ error_code AofChainReader::DiscoverAndIndexSegments() {
         AofSegmentWriter::SegmentName(shard_id_, seq) != name) {
       return Corrupt(AofError::kBadSegmentName, file.name);
     }
+    // Before the cut: in the base, and garbage.
+    if (seq < cut_seq)
+      continue;
     segments_.push_back({seq, file.name, file.size, 0});
   }
   if (segments_.empty())
@@ -154,7 +157,7 @@ error_code AofChainReader::DiscoverAndIndexSegments() {
   sort(segments_.begin(), segments_.end(),
        [](const Segment& a, const Segment& b) { return a.seq < b.seq; });
 
-  uint64_t next_seq = segments_.front().seq;
+  uint64_t next_seq = cut_seq;
   for (Segment& seg : segments_) {
     // Continuity check
     if (seg.seq != next_seq++)
@@ -222,6 +225,8 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
     bool continues = hdr.flags & kStartsWithContinuation;
     if ((expected_lsn_ && hdr.first_lsn != *expected_lsn_) || continues != partial_)
       return Finish(true);
+    if (!expected_lsn_)
+      first_lsn_ = hdr.first_lsn;
     expected_lsn_ = hdr.first_lsn + hdr.n_records;
     partial_ = hdr.flags & kEndsWithPartial;
     if (partial_) {

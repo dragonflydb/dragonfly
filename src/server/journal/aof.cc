@@ -47,6 +47,8 @@ class AofErrorCategory : public std::error_category {
         return "invalid AOF manifest";
       case AofError::kManifestVersion:
         return "unsupported AOF manifest version";
+      case AofError::kCutMismatch:
+        return "AOF log does not start at its cut";
     }
     return "unknown AOF error";
   }
