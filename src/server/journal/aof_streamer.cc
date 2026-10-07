@@ -37,10 +37,7 @@ error_code AofStreamer::Start() {
 }
 
 error_code AofStreamer::Shutdown() {
-  if (consumer_id_) {
-    journal::UnregisterConsumer(*consumer_id_);
-    consumer_id_.reset();
-  }
+  journal::UnregisterConsumer(consumer_id_);
   return writer_.Shutdown();
 }
 

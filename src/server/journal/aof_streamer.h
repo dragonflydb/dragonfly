@@ -4,7 +4,6 @@
 
 #pragma once
 
-#include <optional>
 #include <string>
 #include <system_error>
 
@@ -36,7 +35,7 @@ class AofStreamer : public journal::JournalConsumerInterface {
  private:
   AofSegmentWriter writer_;
   size_t max_buffered_bytes_;
-  std::optional<uint32_t> consumer_id_;
+  uint32_t consumer_id_ = 0;
 };
 
 }  // namespace dfly
