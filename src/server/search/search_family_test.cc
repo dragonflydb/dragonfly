@@ -965,6 +965,32 @@ TEST_F(SearchFamilyTest, HugeCountNoOOM) {
   EXPECT_EQ(Run({"ping"}), "PONG");
 }
 
+// A deeply nested query must not overflow the small fiber stack. The query tree is walked during
+// evaluation, scoring-stats collection, profiling and destruction; those walks are iterative.
+TEST_F(SearchFamilyTest, DeeplyNestedQueryNoStackOverflow) {
+  // `~` (TILDE/optional) is right-recursive, so `~~~...hello` builds a tree one level per char.
+  const string deep = string(2000, '~') + "hello";
+  ASSERT_LT(deep.size(), 10240u) << "query must stay under the length limit";
+
+  EXPECT_EQ(Run({"FT.CREATE", "i1", "SCHEMA", "t", "TEXT"}), "OK");
+  EXPECT_EQ(Run({"FT.CREATE", "vidx", "ON", "HASH", "SCHEMA", "t", "TEXT", "v", "VECTOR", "FLAT",
+                 "6", "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"}),
+            "OK");
+  Run({"HSET", "doc1", "t", "hello"});
+
+  // SEARCH/AGGREGATE/HYBRID evaluate the query; the server must survive and return correct results.
+  // The ~-chain never filters, so it matches the indexed doc.
+  EXPECT_THAT(Run({"FT.SEARCH", "i1", deep}), AreDocIds("doc1"));
+  Run({"FT.AGGREGATE", "i1", deep});
+  Run({"FT.HYBRID", "vidx", "SEARCH", deep, "VSIM", "@v", "$b", "KNN", "5", "PARAMS", "2", "b",
+       FloatVec(1.0f, 0.0f)});
+
+  // LIMITED keeps the reply shallow while still profiling the deep tree.
+  Run({"FT.PROFILE", "i1", "SEARCH", "LIMITED", "QUERY", deep});
+
+  EXPECT_EQ(Run({"PING"}), "PONG");
+}
+
 TEST_F(SearchFamilyTest, NoPrefix) {
   Run({"hset", "d:1", "a", "one", "k", "v"});
   Run({"hset", "d:2", "a", "two", "k", "v"});
@@ -5126,6 +5152,21 @@ TEST_F(SearchFamilyTest, QueryStringBytesLimit) {
 
   resp = Run({"ft.aggregate", "idx", query, "LOAD", "1", "name"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("name", "alice")));
+
+  // FT.PROFILE and both FT.HYBRID query clauses are bounded by the same limit.
+  absl::SetFlag(&FLAGS_search_query_string_bytes, query_len - 1);
+  const auto too_long =
+      ErrArg(absl::StrCat("Query string is too long, max length is ", query_len - 1, " bytes"));
+  EXPECT_THAT(Run({"ft.profile", "idx", "search", "query", query}), too_long);
+  EXPECT_EQ(Run({"FT.CREATE", "vidx", "ON", "HASH", "SCHEMA", "name", "TEXT", "v", "VECTOR", "FLAT",
+                 "6", "TYPE", "FLOAT32", "DIM", "2", "DISTANCE_METRIC", "L2"}),
+            "OK");
+  EXPECT_THAT(Run({"FT.HYBRID", "vidx", "SEARCH", query, "VSIM", "@v", "$b", "KNN", "1", "PARAMS",
+                   "2", "b", FloatVec(1.0f, 0.0f)}),
+              too_long);
+  EXPECT_THAT(Run({"FT.HYBRID", "vidx", "SEARCH", "*", "VSIM", "@v", "$b", "KNN", "1", "FILTER",
+                   query, "PARAMS", "2", "b", FloatVec(1.0f, 0.0f)}),
+              too_long);
 }
 
 TEST_F(SearchFamilyTest, KnnHnsw) {

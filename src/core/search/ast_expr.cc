@@ -97,6 +97,35 @@ bool AstKnnNode::HasPreFilter() const {
   return filter == nullptr;
 }
 
+AstNode::~AstNode() noexcept {
+  if (holds_alternative<monostate>(*this))
+    return;
+
+  // Reuse a link in each node instead of allocating a work stack. Keep ownership intact while
+  // building reverse preorder, so every descendant appears before its owner in the cleanup list.
+  AstNode* pending = this;
+  AstNode* reverse_order = nullptr;
+  teardown_next_ = nullptr;
+  while (pending) {
+    AstNode* node = pending;
+    pending = node->teardown_next_;
+    ForEachChild(*node, {}, [&pending](AstNode& child, string_view) {
+      child.teardown_next_ = pending;
+      pending = &child;
+    });
+    node->teardown_next_ = reverse_order;
+    reverse_order = node;
+  }
+
+  while (reverse_order) {
+    AstNode* node = reverse_order;
+    reverse_order = node->teardown_next_;
+    // Children are already empty: releasing their unique_ptr/vector storage only invokes the
+    // early return above, keeping the call stack bounded regardless of the tree's depth.
+    node->emplace<monostate>();
+  }
+}
+
 }  // namespace dfly::search
 
 namespace std {

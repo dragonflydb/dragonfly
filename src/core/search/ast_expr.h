@@ -225,6 +225,9 @@ struct AstNode : public NodeVariants {
   AstNode(AstNode&&) noexcept = default;
   AstNode& operator=(AstNode&&) noexcept = default;
 
+  // Iterative, allocation-free teardown: deep queries must be safe to destroy even on OOM.
+  ~AstNode() noexcept;
+
   friend std::ostream& operator<<(std::ostream& stream, const AstNode& matrix) {
     return stream;
   }
@@ -232,9 +235,38 @@ struct AstNode : public NodeVariants {
   const NodeVariants& Variant() const& {
     return *this;
   }
+
+ private:
+  // Only used during destruction to link the traversal and cleanup lists.
+  AstNode* teardown_next_ = nullptr;
 };
 
 using AstExpr = AstNode;
+
+// Invokes cb(child, field) for each direct child, where `field` is the active field the child
+// inherits (a field node overrides it). Skips children nulled by a move.
+template <typename NodeT, typename F>
+void ForEachChild(NodeT& node, std::string_view active_field, F&& cb) {
+  if (auto* n = std::get_if<AstFieldNode>(&node)) {
+    if (n->node)
+      cb(*n->node, std::string_view{n->field});
+  } else if (auto* n = std::get_if<AstAttributeNode>(&node)) {
+    if (n->node)
+      cb(*n->node, active_field);
+  } else if (auto* n = std::get_if<AstNegateNode>(&node)) {
+    if (n->node)
+      cb(*n->node, active_field);
+  } else if (auto* n = std::get_if<AstOptionalNode>(&node)) {
+    if (n->node)
+      cb(*n->node, active_field);
+  } else if (auto* n = std::get_if<AstKnnNode>(&node)) {
+    if (n->filter)
+      cb(*n->filter, active_field);
+  } else if (auto* n = std::get_if<AstLogicalNode>(&node)) {
+    for (auto& child : n->nodes)
+      cb(child, active_field);
+  }
+}
 
 }  // namespace search
 }  // namespace dfly

@@ -470,67 +470,6 @@ struct BasicSearch {
     return IndexResult{};
   }
 
-  // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
-  IndexResult Search(const AstNegateNode& node, string_view active_field) {
-    auto matched = SearchGeneric(*node.node, active_field).Take().first;
-    if (!error_.empty())
-      return IndexResult{};
-
-    vector<DocId> all = indices_->GetAllDocs();
-
-    // To negate a result, we have to find the complement of matched to all documents,
-    // so we remove all matched documents from the set of all documents.
-    auto pred = [&matched](DocId doc) {
-      return binary_search(matched.begin(), matched.end(), doc);
-    };
-    all.erase(remove_if(all.begin(), all.end(), pred), all.end());
-    return IndexResult{std::move(all)};
-  }
-
-  IndexResult Search(const AstOptionalNode& node, string_view active_field) {
-    // ~ tolerates inner failures: it's a soft scoring boost, not a filter.
-    // E.g. @noindex_field:~hello can't actually populate matched_text_terms_
-    // (no index to query) — but the operator should still return all docs.
-    // Save/restore error_ so a transient inner failure doesn't poison the
-    // outer query.
-    string saved_error = std::move(error_);
-    SearchGeneric(*node.node, active_field);
-    error_ = std::move(saved_error);
-    // ~ never filters: return the full doc set, including docs that lack the
-    // active field. Mirrors AstNegateNode which also operates on global all-docs.
-    return IndexResult{&indices_->GetAllDocs()};
-  }
-
-  IndexResult Search(const AstAttributeNode& node, string_view active_field) {
-    double previous_weight = current_weight_;
-    current_weight_ *= node.weight;
-    absl::Cleanup restore_weight = [&] { current_weight_ = previous_weight; };
-    return SearchGeneric(*node.node, active_field);
-  }
-
-  // logical query: unify all sub results
-  IndexResult Search(const AstLogicalNode& node, string_view active_field) {
-    // Stopwords are never indexed, so a bare stopword operand matches nothing: as an AND term it
-    // would zero the whole result (e.g. `@title:(foo) and bar`), as an OR term it adds nothing.
-    // Drop such operands so the surrounding query still matches.
-    vector<IndexResult> sub_results;
-    sub_results.reserve(node.nodes.size());
-    for (const auto& sub : node.nodes) {
-      if (const auto* term = get_if<AstTermNode>(&sub.Variant());
-          term && indices_->IsStopWord(term->affix))
-        continue;
-      sub_results.push_back(SearchGeneric(sub, active_field));
-    }
-    return UnifyResults(std::move(sub_results), node.op);
-  }
-
-  // @field: set active field for sub tree
-  IndexResult Search(const AstFieldNode& node, string_view active_field) {
-    DCHECK(active_field.empty());
-    DCHECK(node.node);
-    return SearchGeneric(*node.node, node.field);
-  }
-
   // {tags | ...}: Unify results for all tags
   IndexResult Search(const AstTagsNode& node, string_view active_field) {
     auto* tag_index = GetIndex<TagIndex>(active_field);
@@ -634,10 +573,23 @@ struct BasicSearch {
     return IndexResult{std::move(out)};
   }
 
+  // Kept out of the large iterative driver: inlining it there made negation ~12% slower.
+  __attribute__((noinline)) IndexResult EvalNegate(IndexResult child) {
+    if (!error_.empty())
+      return IndexResult{};
+    auto matched = std::move(child).Take().first;
+    vector<DocId> all = indices_->GetAllDocs();
+    auto pred = [&matched](DocId doc) {
+      return binary_search(matched.begin(), matched.end(), doc);
+    };
+    all.erase(remove_if(all.begin(), all.end(), pred), all.end());
+    return IndexResult{std::move(all)};
+  }
+
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
-  IndexResult Search(const AstKnnNode& knn, string_view active_field) {
+  // KNN over the (already evaluated) pre-filter result `sub_results`.
+  IndexResult EvalKnn(const AstKnnNode& knn, string_view active_field, IndexResult sub_results) {
     DCHECK(active_field.empty());
-    auto sub_results = SearchGeneric(*knn.filter, active_field);
 
     auto* vec_index = GetIndex<BaseVectorIndex>(knn.field);
     if (!vec_index)
@@ -674,26 +626,139 @@ struct BasicSearch {
   }
 
   // Determine node type and call specific search function
-  IndexResult SearchGeneric(const AstNode& node, string_view active_field, bool top_level = false) {
-    if (!error_.empty())
-      return IndexResult{};
+  // Iterative post-order evaluation: an explicit work stack keeps a deep query tree off the fiber
+  // stack. `top_level` suppresses the sorted-result DCHECK for the root.
+  IndexResult SearchGeneric(const AstNode& root, string_view root_field, bool top_level = false) {
+    struct Frame {
+      Frame(const AstNode* node, string_view active_field, double weight, bool top_level)
+          : node(node), active_field(active_field), weight(weight), top_level(top_level) {
+      }
 
-    ProfileBuilder::Tp start = profile_builder_ ? profile_builder_->Start() : ProfileBuilder::Tp{};
+      const AstNode* node;
+      string_view active_field;
+      double weight;
+      bool top_level;
+      bool entered = false;
+      size_t results_base = 0;  // index into `values` where this node's children begin
+      string saved_error;       // AstOptionalNode only
+      ProfileBuilder::Tp start;
+    };
 
-    auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
-    auto result = visit(cb, node.Variant());
+    vector<IndexResult> values;  // completed results, consumed by parents on their leave pass
+    vector<Frame> stack;
 
-    // Top level results don't need to be sorted, because they will be scored, sorted by fields or
-    // used by knn
-    DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
-           holds_alternative<AstGeoNode>(node.Variant()) ||
-           holds_alternative<AstVectorRangeNode>(node.Variant()) ||
-           visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
+    // Asserts the sorted-result invariant, records the profile event, and hands the result up.
+    auto finalize = [&](const Frame& f, const AstNode& n, IndexResult result) {
+      DCHECK(
+          f.top_level || holds_alternative<AstKnnNode>(n.Variant()) ||
+          holds_alternative<AstGeoNode>(n.Variant()) ||
+          holds_alternative<AstVectorRangeNode>(n.Variant()) ||
+          visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
+      if (profile_builder_)
+        profile_builder_->Finish(f.start, n, result);
+      values.push_back(std::move(result));
+    };
 
-    if (profile_builder_)
-      profile_builder_->Finish(start, node, result);
+    stack.push_back(Frame{&root, root_field, current_weight_, top_level});
 
-    return result;
+    while (!stack.empty()) {
+      Frame& f = stack.back();
+      const AstNode& n = *f.node;
+
+      if (!f.entered) {
+        f.entered = true;
+
+        // A pending error short-circuits to an empty result, unprofiled.
+        if (!error_.empty()) {
+          values.push_back(IndexResult{});
+          stack.pop_back();
+          continue;
+        }
+
+        f.start = profile_builder_ ? profile_builder_->Start() : ProfileBuilder::Tp{};
+        f.results_base = values.size();
+        current_weight_ = f.weight;
+
+        // Copy before pushing: a stack reallocation would dangle f.
+        const string_view af = f.active_field;
+        const double w = f.weight;
+
+        // Expand composite nodes; push in reverse to keep left-to-right evaluation order.
+        if (auto* fld = get_if<AstFieldNode>(&n)) {
+          DCHECK(af.empty());
+          DCHECK(fld->node);
+          stack.push_back(Frame{fld->node.get(), fld->field, w, false});
+        } else if (auto* attr = get_if<AstAttributeNode>(&n)) {
+          stack.push_back(Frame{attr->node.get(), af, w * attr->weight, false});
+        } else if (auto* neg = get_if<AstNegateNode>(&n)) {
+          stack.push_back(Frame{neg->node.get(), af, w, false});
+        } else if (auto* opt = get_if<AstOptionalNode>(&n)) {
+          // ~ never fails outward: save/clear error_ here, restore on leave.
+          const AstNode* child = opt->node.get();
+          f.saved_error = std::move(error_);
+          error_.clear();
+          stack.push_back(Frame{child, af, w, false});
+        } else if (auto* logical = get_if<AstLogicalNode>(&n)) {
+          for (auto it = logical->nodes.rbegin(); it != logical->nodes.rend(); ++it) {
+            // Drop stopword operands: they match nothing.
+            if (const auto* term = get_if<AstTermNode>(&it->Variant());
+                term && indices_->IsStopWord(term->affix))
+              continue;
+            stack.push_back(Frame{&*it, af, w, false});
+          }
+        } else if (auto* knn = get_if<AstKnnNode>(&n)) {
+          if (knn->filter)
+            stack.push_back(Frame{knn->filter.get(), af, w, false});
+        } else {
+          // Leaf: evaluate now. Composite nodes are handled above.
+          IndexResult result = visit(
+              [&](const auto& leaf) -> IndexResult {
+                if constexpr (
+                    requires { leaf.node; } || requires { leaf.nodes; } ||
+                    requires { leaf.filter; }) {
+                  DCHECK(false);
+                  return IndexResult{};
+                } else {
+                  return Search(leaf, af);
+                }
+              },
+              n.Variant());
+          finalize(f, n, std::move(result));
+          stack.pop_back();
+        }
+        continue;
+      }
+
+      // Leave pass: this node's children results occupy values[f.results_base, end).
+      current_weight_ = f.weight;
+      const size_t results_base = f.results_base;
+      IndexResult result;
+      if (holds_alternative<AstNegateNode>(n.Variant())) {
+        result = EvalNegate(std::move(values[results_base]));
+      } else if (get_if<AstFieldNode>(&n) || get_if<AstAttributeNode>(&n)) {
+        result = std::move(values[results_base]);  // pass the single child's result through
+      } else if (get_if<AstOptionalNode>(&n)) {
+        error_ = std::move(f.saved_error);
+        result = IndexResult{&indices_->GetAllDocs()};  // ~ never filters: all docs
+      } else if (auto* logical = get_if<AstLogicalNode>(&n)) {
+        vector<IndexResult> subs(make_move_iterator(values.begin() + results_base),
+                                 make_move_iterator(values.end()));
+        result = UnifyResults(std::move(subs), logical->op);
+      } else if (auto* knn = get_if<AstKnnNode>(&n)) {
+        IndexResult sub =
+            values.size() > results_base ? std::move(values[results_base]) : IndexResult{};
+        result = EvalKnn(*knn, f.active_field, std::move(sub));
+      } else {
+        DCHECK(false);  // leaves are finalized on the enter pass and never reach here
+      }
+
+      values.resize(results_base);
+      finalize(f, n, std::move(result));
+      stack.pop_back();
+    }
+
+    DCHECK_EQ(values.size(), 1u);
+    return std::move(values.back());
   }
 
   SearchResult Search(const AstNode& query, size_t cuttoff_limit) {
@@ -869,37 +934,30 @@ struct StatsCollector {
     return std::move(stats_);
   }
 
-  void Walk(const AstNode& node, string_view active_field) {
-    visit([this, active_field](const auto& inner) { Visit(inner, active_field); }, node.Variant());
+  // Iterative DFS (explicit stack keeps deep trees off the fiber stack): composite nodes enqueue
+  // their children, leaves record stats.
+  void Walk(const AstNode& root, string_view root_field) {
+    vector<pair<const AstNode*, string_view>> stack{{&root, root_field}};
+    while (!stack.empty()) {
+      auto [node, active_field] = stack.back();
+      stack.pop_back();
+
+      size_t before = stack.size();
+      ForEachChild(*node, active_field, [&](const AstNode& child, string_view field) {
+        stack.emplace_back(&child, field);
+      });
+      if (stack.size() == before)  // leaf
+        visit([this, active_field](const auto& inner) { VisitLeaf(inner, active_field); },
+              node->Variant());
+    }
   }
 
  private:
-  // Catch-all for nodes that don't reference text terms; specific overloads below win.
-  template <typename T> void Visit(const T&, string_view) {
+  // Catch-all for leaves that don't reference text terms; specific overloads below win.
+  template <typename T> void VisitLeaf(const T&, string_view) {
   }
 
-  void Visit(const AstFieldNode& node, string_view) {
-    DCHECK(node.node);
-    Walk(*node.node, node.field);
-  }
-  void Visit(const AstLogicalNode& node, string_view active_field) {
-    for (const auto& child : node.nodes)
-      Walk(child, active_field);
-  }
-  void Visit(const AstNegateNode& node, string_view active_field) {
-    Walk(*node.node, active_field);
-  }
-  void Visit(const AstOptionalNode& node, string_view active_field) {
-    Walk(*node.node, active_field);
-  }
-  void Visit(const AstAttributeNode& node, string_view active_field) {
-    Walk(*node.node, active_field);
-  }
-  void Visit(const AstKnnNode& node, string_view active_field) {
-    Walk(*node.filter, active_field);
-  }
-
-  void Visit(const AstTermNode& node, string_view active_field) {
+  void VisitLeaf(const AstTermNode& node, string_view active_field) {
     // Stopwords are dropped from queries (see BasicSearch), so they never contribute matches and
     // must not be recorded as scoring terms either.
     if (indices_->IsStopWord(node.affix))
@@ -919,7 +977,7 @@ struct StatsCollector {
     }
   }
 
-  template <TagType T> void Visit(const AstAffixNode<T>& node, string_view active_field) {
+  template <TagType T> void VisitLeaf(const AstAffixNode<T>& node, string_view active_field) {
     static_assert(T != TagType::REGULAR);
     for (auto* idx : SelectTextIndices(active_field)) {
       auto cb = [this, idx](string_view term, const auto* container) {
@@ -1279,9 +1337,8 @@ std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
     // Save knn score sort option
     knn_hnsw_score_sort_option_ = KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
     auto node = std::move(query_);
-    AstKnnNode* moved_knn_node = reinterpret_cast<AstKnnNode*>(node.get());
-    if (!std::holds_alternative<AstStarNode>(*moved_knn_node->filter))
-      query_.swap(moved_knn_node->filter);
+    if (!std::holds_alternative<AstStarNode>(*knn->filter))
+      query_.swap(knn->filter);
     return node;
   }
   LOG(DFATAL) << "Should not reach here";
@@ -1296,22 +1353,18 @@ void SearchAlgorithm::SetScorer(ScorerSpec scorer) {
   scorer_ = scorer;
 }
 
-// Visits `node` and recurses into its sub-expressions, invoking `cb` on every node in DFS order.
-template <typename F> void WalkAst(const AstNode& node, const F& cb) {
-  cb(node);
-  visit(Overloaded{
-            [&](const AstLogicalNode& n) {
-              for (const auto& child : n.nodes)
-                WalkAst(child, cb);
-            },
-            [&](const AstKnnNode& n) { WalkAst(*n.filter, cb); },
-            // Negate/Optional/Field all wrap a single child `node`; leaves have none (no-op).
-            [&](const auto& n) {
-              if constexpr (requires { n.node; })
-                WalkAst(*n.node, cb);
-            },
-        },
-        node.Variant());
+// Invokes `cb` on every node in pre-order DFS, iteratively (deep trees must not overflow the
+// stack).
+template <typename F> void WalkAst(const AstNode& root, const F& cb) {
+  vector<const AstNode*> stack{&root};
+  while (!stack.empty()) {
+    const AstNode* node = stack.back();
+    stack.pop_back();
+    cb(*node);
+    size_t before = stack.size();
+    ForEachChild(*node, {}, [&](const AstNode& child, string_view) { stack.push_back(&child); });
+    std::reverse(stack.begin() + before, stack.end());  // restore left-to-right order
+  }
 }
 
 vector<const AstVectorRangeNode*> SearchAlgorithm::CollectVectorRangeNodes() const {
