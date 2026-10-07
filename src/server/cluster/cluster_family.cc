@@ -1221,10 +1221,10 @@ void ClusterFamily::ReconcileReplicaSlots() {
     return;
   }
 
-  auto new_config = ClusterConfig::Current()->CloneWithChanges({}, {});
   // Replace master with replica in shard config.
+  ClusterShardInfos new_shards = config->GetConfig();
   bool found = false;
-  for (ClusterShardInfo& info : new_config->GetMutableConfig()) {
+  for (ClusterShardInfo& info : new_shards) {
     for (const auto& replica : info.replicas) {
       if (replica.id == id_) {
         info.master = replica;
@@ -1239,6 +1239,16 @@ void ClusterFamily::ReconcileReplicaSlots() {
   }
 
   LOG_IF(ERROR, !found) << "Did not find replica in the cluster map";
+
+  // Rebuild from the edited topology instead of patching a clone's config_ in place:
+  // is_master_, my_slots_ and the migration lists are all derived from the topology in
+  // CreateFromConfig, and patching config_ directly left them stale after promotion (e.g.
+  // Coordinator::DispatchAll kept treating this, now-promoted, node as a replica).
+  auto new_config = ClusterConfig::CreateFromConfig(id_, new_shards);
+  if (!new_config) {
+    LOG(ERROR) << "Failed to rebuild cluster config after replica promotion";
+    return;
+  }
 
   server_family_->service().proactor_pool().AwaitFiberOnAll(
       [&new_config](util::ProactorBase*) { ClusterConfig::SetCurrent(new_config); });
