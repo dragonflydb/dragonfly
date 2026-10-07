@@ -1041,7 +1041,7 @@ error_code ReplayChain(const string& dir, ShardId sid, Service* service,
   // reached the end of the log; otherwise a record failed to parse.
   error_code ec = cntx.GetError();
   bool clean_end = ec == errc::io_error && chain.AtEnd();
-  if (ec != AofReadError::kTornTail && !clean_end)
+  if (ec != AofError::kTornTail && !clean_end)
     return ec;
   // Also catches an unparsable last record.
   // TODO: start from the cut's LSN, not 1.
@@ -1066,7 +1066,7 @@ error_code ReplayAof(const string& dir, Service* service, vector<AofResume>* res
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     ShardId sid = shard->shard_id();
     errors[sid] = ReplayChain(dir, sid, service, mse, &(*resume)[sid], &max_txids[sid]);
-    if (!errors[sid] || errors[sid] == AofReadError::kNoSegments) {
+    if (!errors[sid] || errors[sid] == AofError::kNoSegments) {
       mse->RemoveFlow();
     } else {
       LOG(ERROR) << "AOF replay failed on shard " << sid << ": " << errors[sid].message();
@@ -1075,12 +1075,12 @@ error_code ReplayAof(const string& dir, Service* service, vector<AofResume>* res
     }
   });
 
-  size_t empty = count(errors.begin(), errors.end(), AofReadError::kNoSegments);
+  size_t empty = count(errors.begin(), errors.end(), AofError::kNoSegments);
   // TODO: the manifest will tell a first start from lost segments.
   if (empty == shard_count)
     return {};
   if (empty > 0)
-    return AofReadError::kNoSegments;
+    return AofError::kNoSegments;
   for (const error_code& ec : errors) {
     if (ec)
       return ec;

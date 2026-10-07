@@ -5,6 +5,7 @@
 #include "server/journal/aof.h"
 
 #include <absl/base/internal/endian.h>
+#include <absl/crc/crc32c.h>
 #include <absl/flags/declare.h>
 #include <absl/flags/flag.h>
 #include <absl/flags/reflection.h>
@@ -21,6 +22,7 @@
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/aof_chain_reader.h"
+#include "server/journal/aof_manifest.h"
 #include "server/journal/aof_segment_writer.h"
 #include "server/journal/serializer.h"
 #include "server/test_utils.h"
@@ -296,7 +298,7 @@ class AofChainReaderTest : public AofSegmentWriterTest {
         iovec v{buf, sizeof(buf)};
         auto n = reader.ReadSome(&v, 1);
         if (!n) {
-          ASSERT_EQ(n.error(), AofReadError::kTornTail);
+          ASSERT_EQ(n.error(), AofError::kTornTail);
           res.torn = true;
           break;
         }
@@ -306,8 +308,9 @@ class AofChainReaderTest : public AofSegmentWriterTest {
       }
       res.last_lsn = reader.LastLsn();
       res.discarded = reader.DiscardedBytes();
-      if (repair)
+      if (repair) {
         EXPECT_FALSE(reader.Repair());
+      }
     });
     return res;
   }
@@ -413,6 +416,61 @@ TEST_F(AofChainReaderTest, RecordsBeforeCutRecordInSameBlock) {
   EXPECT_TRUE(res.torn);
   EXPECT_EQ(res.last_lsn, 0u);
   EXPECT_EQ(filesystem::file_size(seg0), kAofSegmentHeaderSize);
+}
+
+class AofManifestTest : public AofSegmentWriterTest {
+ protected:
+  static AofManifest Sample() {
+    AofManifest m;
+    m.state = AofManifest::State::kActive;
+    m.checkpoint_id = 3;
+    m.base_owned = true;
+    m.base_path = "dump base-3.dfs";
+    m.cuts = {{5, 1234}, {7, 1300}};
+    return m;
+  }
+
+  string ManifestPath() const {
+    return absl::StrCat(dir_, "/", kAofManifestName);
+  }
+};
+
+TEST_F(AofManifestTest, RoundTrip) {
+  AofManifest m = Sample();
+  auto decoded = DecodeAofManifest(EncodeAofManifest(m));
+  ASSERT_TRUE(decoded) << decoded.error().message();
+  EXPECT_EQ(*decoded, m);
+
+  // Bootstrapping, no base.
+  AofManifest empty;
+  empty.cuts = {{0, 1}};
+  decoded = DecodeAofManifest(EncodeAofManifest(empty));
+  ASSERT_TRUE(decoded) << decoded.error().message();
+  EXPECT_EQ(*decoded, empty);
+}
+
+TEST_F(AofManifestTest, WriteReplacesAtomically) {
+  pp_->at(0)->Await([&] {
+    // No manifest yet.
+    EXPECT_EQ(ReadAofManifest(dir_).error(), errc::no_such_file_or_directory);
+
+    AofManifest first = Sample();
+    ASSERT_FALSE(WriteAofManifest(dir_, first));
+    EXPECT_EQ(*ReadAofManifest(dir_), first);
+
+    // A crash before the rename leaves a tmp file, which the reader ignores.
+    ofstream(ManifestPath() + ".tmp") << "garbage";
+    EXPECT_EQ(*ReadAofManifest(dir_), first);
+
+    // The next write truncates the stale tmp, then renames it over the manifest.
+    AofManifest second = Sample();
+    second.checkpoint_id = 4;
+    second.cuts = {{8, 2000}, {9, 2100}};
+    ASSERT_FALSE(WriteAofManifest(dir_, second));
+    EXPECT_EQ(*ReadAofManifest(dir_), second);
+    // The rename consumed the tmp file.
+    EXPECT_FALSE(filesystem::exists(ManifestPath() + ".tmp"));
+  });
 }
 
 class AofStreamerTest : public BaseFamilyTest {

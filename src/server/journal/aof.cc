@@ -21,6 +21,37 @@ using absl::little_endian::Store64;
 
 namespace {
 
+class AofErrorCategory : public std::error_category {
+ public:
+  const char* name() const noexcept final {
+    return "aof";
+  }
+
+  std::string message(int ev) const final {
+    switch (static_cast<AofError>(ev)) {
+      case AofError::kTornTail:
+        return "AOF log ends with a damaged tail";
+      case AofError::kNoSegments:
+        return "no AOF segments";
+      case AofError::kBadSegmentName:
+        return "unexpected AOF segment name";
+      case AofError::kSegmentGap:
+        return "gap in AOF segment seqs";
+      case AofError::kShortSegment:
+        return "AOF segment shorter than its header";
+      case AofError::kBadSegmentHeader:
+        return "invalid AOF segment header";
+      case AofError::kShardCountChanged:
+        return "AOF written with a different shard count";
+      case AofError::kBadManifest:
+        return "invalid AOF manifest";
+      case AofError::kManifestVersion:
+        return "unsupported AOF manifest version";
+    }
+    return "unknown AOF error";
+  }
+};
+
 constexpr size_t kSegmentCrcOffset = 60;
 
 absl::crc32c_t SeedCrc(uint64_t segment_uid) {
@@ -40,6 +71,11 @@ uint32_t FinishCrc(absl::crc32c_t crc, const AofBlockHeader& hdr) {
 }
 
 }  // namespace
+
+std::error_code make_error_code(AofError e) {
+  static const AofErrorCategory category;
+  return {static_cast<int>(e), category};
+}
 
 std::string EncodeAofSegmentHeader(const AofSegmentHeader& hdr) {
   std::string res(kAofSegmentHeaderSize, '\0');

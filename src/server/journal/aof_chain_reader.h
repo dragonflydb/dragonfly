@@ -16,19 +16,6 @@
 
 namespace dfly {
 
-enum class AofReadError {
-  // The log ends with a damaged tail: an invalid block, an LSN break or a cut record.
-  kTornTail = 1,
-  kNoSegments,
-  kBadSegmentName,
-  kSegmentGap,
-  kShortSegment,
-  kBadSegmentHeader,
-  kShardCountChanged,
-};
-
-std::error_code make_error_code(AofReadError e);
-
 // Reads one shard's AOF chain, its segments in seq order, as a single stream of journal records.
 // io::Source cause JournalReader can read from it directly
 class AofChainReader : public io::Source {
@@ -41,7 +28,7 @@ class AofChainReader : public io::Source {
 
   // Streams the payloads of complete records only: a block ending with a partial record is held
   // back until that record completes. At the end of the log returns 0 if the log ends cleanly, or
-  // AofReadError::kTornTail if a damaged tail follows.
+  // AofError::kTornTail if a damaged tail follows.
   io::Result<size_t> ReadSome(const iovec* v, uint32_t len) override;
 
   // The accessors and Repair() are valid once ReadSome() reached the end of the log.
@@ -119,7 +106,3 @@ class AofChainReader : public io::Source {
 };
 
 }  // namespace dfly
-
-namespace std {
-template <> struct is_error_code_enum<dfly::AofReadError> : true_type {};
-}  // namespace std
