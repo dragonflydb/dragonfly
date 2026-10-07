@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
 #include <absl/strings/str_cat.h>
+#include <absl/time/clock.h>
 #include <fcntl.h>
 // For IORING_FSYNC_DATASYNC.
 #include <linux/io_uring.h>
@@ -59,7 +60,7 @@ string AofSegmentWriter::SegmentName(uint32_t shard_id, uint64_t seq) {
   return absl::StrCat("appendonly-", shard_id, "-", seq, ".aof");
 }
 
-error_code AofSegmentWriter::Open(uint64_t seq) {
+error_code AofSegmentWriter::Open(uint64_t seq, uint64_t last_lsn) {
   DCHECK(!file_);
   string path = absl::StrCat(dir_, "/", SegmentName(shard_id_, seq));
   // tmp because we switch after the header becomes durable
@@ -97,12 +98,14 @@ error_code AofSegmentWriter::Open(uint64_t seq) {
   RETURN_ON_ERR(AofSyncDir(dir_));
   std::move(cleanup).Cancel();
 
+  appended_lsn_ = written_lsn_ = durable_lsn_ = last_lsn;
   builder_.emplace(uid, [this](AofSealedBlock block) { OnSealed(std::move(block)); });
   tick_id_ = util::fb2::ProactorBase::me()->AddPeriodic(kAofSyncMs, [this] { OnTick(); });
   return {};
 }
 
 void AofSegmentWriter::AddRecord(string_view record, uint64_t lsn) {
+  appended_lsn_ = lsn;
   builder_->Append(record, lsn);
 }
 
@@ -222,6 +225,7 @@ void AofSegmentWriter::OnTick() {
   size_t sync_offset = written_offset_;
   uint64_t sync_lsn = written_lsn_;
   sync_in_flight_ = true;
+  sync_start_ns_ = absl::GetCurrentTimeNanos();
   file_->FSyncAsync(IORING_FSYNC_DATASYNC, [this, sync_offset, sync_lsn](int res) {
     OnSyncDone(sync_offset, sync_lsn, res);
   });
@@ -242,6 +246,7 @@ void AofSegmentWriter::RetryFailed() {
 
 void AofSegmentWriter::OnSyncDone(size_t sync_offset, uint64_t sync_lsn, int res) {
   sync_in_flight_ = false;
+  last_sync_usec_ = (absl::GetCurrentTimeNanos() - sync_start_ns_) / 1000;
   if (res < 0) {
     // Never retried: the kernel may have dropped the dirty pages ("fsyncgate").
     // DurableLsn stops until a checkpoint.

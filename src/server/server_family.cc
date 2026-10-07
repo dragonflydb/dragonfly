@@ -1005,6 +1005,8 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
 struct AofResume {
   uint64_t seq = 0;
   uint64_t next_lsn = 1;
+  // Size of the kept segments.
+  uint64_t log_size = 0;
 };
 
 // Replays one shard's chain through the applier, then repairs it. Runs on the shard's thread.
@@ -1044,12 +1046,12 @@ error_code ReplayChain(const string& dir, ShardId sid, Service* service,
   // Also catches an unparsable last record.
   // TODO: start from the cut's LSN, not 1.
   if (records != chain.LastLsn()) {
-    LOG(ERROR) << "AOF shard " << sid << ": read " << records << " records but the log ends at lsn "
-               << chain.LastLsn();
+    LOG(DFATAL) << "AOF shard " << sid << ": parsed " << records << " records, block headers say "
+                << chain.LastLsn();
     return make_error_code(errc::state_not_recoverable);
   }
   RETURN_ON_ERR(chain.Repair());
-  *resume = {chain.NextSeq(), chain.LastLsn() + 1};
+  *resume = {chain.NextSeq(), chain.LastLsn() + 1, chain.LogSize()};
   return {};
 }
 
@@ -1110,7 +1112,8 @@ bool StartStreamers(const string& dir, const vector<AofResume>& resume) {
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     ShardId sid = shard->shard_id();
     auto streamer = make_unique<AofStreamer>(dir, sid, shard_set->size());
-    if (error_code ec = streamer->Start(resume[sid].seq, resume[sid].next_lsn); ec) {
+    const AofResume& r = resume[sid];
+    if (error_code ec = streamer->Start(r.seq, r.next_lsn, r.log_size); ec) {
       LOG(ERROR) << "Failed to start AOF on shard " << sid << ": " << ec.message();
       failed = true;
       return;
@@ -1158,6 +1161,18 @@ void StopAof() {
     }
   });
 #endif
+}
+
+// A snapshot of every shard's AOF stats, indexed by shard id.
+vector<AofStreamer::Stats> CollectAofStats() {
+  vector<AofStreamer::Stats> per_shard(shard_set->size());
+#ifdef __linux__
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    if (AofStreamer* streamer = shard->aof_streamer(); streamer)
+      per_shard[shard->shard_id()] = streamer->GetStats();
+  });
+#endif
+  return per_shard;
 }
 
 }  // namespace
@@ -3157,6 +3172,42 @@ string ServerFamily::FormatInfoMetrics(
     append("last_failed_save", save_info.last_error_time);
     append("last_error", save_info.last_error.Format());
     append("last_failed_save_duration_sec", save_info.failed_duration_sec);
+
+    bool aof_enabled = GetFlag(FLAGS_aof);
+    vector<AofStreamer::Stats> per_shard;
+    if (aof_enabled)
+      per_shard = CollectAofStats();
+    // Sizes and throttle time are summed, fsync latency is the max.
+    AofStreamer::Stats aof;
+    for (const auto& st : per_shard) {
+      aof.log_size += st.log_size;
+      aof.buffered_bytes += st.buffered_bytes;
+      aof.unsynced_bytes += st.unsynced_bytes;
+      aof.throttle_usec += st.throttle_usec;
+      aof.fsync_latency_usec = max(aof.fsync_latency_usec, st.fsync_latency_usec);
+    }
+    // Lsns are per shard, so they are listed in shard order.
+    auto join_lsns = [&](uint64_t AofStreamer::Stats::*field) {
+      return absl::StrJoin(per_shard, ",", [field](string* out, const AofStreamer::Stats& st) {
+        absl::StrAppend(out, st.*field);
+      });
+    };
+
+    append("aof_enabled", aof_enabled);
+    // TODO: report once checkpoints exist.
+    append("aof_rewrite_in_progress", 0);
+    append("aof_current_size", aof.log_size);
+    append("aof_base_size", 0);
+    append("aof_rewrite_trigger_size", 0);
+    append("aof_buffered_bytes", aof.buffered_bytes);
+    append("aof_unsynced_bytes", aof.unsynced_bytes);
+    append("aof_throttle_usec", aof.throttle_usec);
+    append("aof_fsync_latency_microseconds", aof.fsync_latency_usec);
+    if (aof_enabled) {
+      append("aof_appended_lsn", join_lsns(&AofStreamer::Stats::appended_lsn));
+      append("aof_written_lsn", join_lsns(&AofStreamer::Stats::written_lsn));
+      append("aof_durable_lsn", join_lsns(&AofStreamer::Stats::durable_lsn));
+    }
   };
 
   auto add_tx_info = [&] {

@@ -33,8 +33,8 @@ class AofSegmentWriter {
   ~AofSegmentWriter();
 
   // Creates segment `seq` with a durable header: tmp -> header -> fdatasync -> link -> fsync dir.
-  // Synchronous
-  std::error_code Open(uint64_t seq);
+  // Synchronous. last_lsn is the last record already in the log, written and durable.
+  std::error_code Open(uint64_t seq, uint64_t last_lsn = 0);
 
   // non blocking
   void AddRecord(std::string_view record, uint64_t lsn);
@@ -50,12 +50,32 @@ class AofSegmentWriter {
   // Open block payload + sealed blocks not yet written.
   size_t UnwrittenBytes() const;
 
-  // Last record fully written (not necessarily durable), 0 if none.
+  // End of the contiguous written prefix of the segment.
+  size_t WrittenSize() const {
+    return written_offset_;
+  }
+
+  // Written but not yet covered by a successful fdatasync.
+  size_t UnsyncedBytes() const {
+    return written_offset_ - durable_offset_;
+  }
+
+  // Duration of the last completed periodic fdatasync, 0 if none.
+  uint64_t LastSyncUsec() const {
+    return last_sync_usec_;
+  }
+
+  // Last record received, last_lsn of Open() if none.
+  uint64_t AppendedLsn() const {
+    return appended_lsn_;
+  }
+
+  // Last record fully written (not necessarily durable).
   uint64_t WrittenLsn() const {
     return written_lsn_;
   }
 
-  // Last record covered by a successful fdatasync before any failed one, 0 if none.
+  // Last record covered by a successful fdatasync before any failed one.
   uint64_t DurableLsn() const {
     return durable_lsn_;
   }
@@ -104,10 +124,13 @@ class AofSegmentWriter {
   size_t durable_offset_ = kAofSegmentHeaderSize;
   // End of the furthest block whose write ever failed.
   size_t repair_offset_ = 0;
+  uint64_t appended_lsn_ = 0;
   uint64_t written_lsn_ = 0;
   uint64_t durable_lsn_ = 0;
 
   bool sync_in_flight_ = false;
+  uint64_t sync_start_ns_ = 0;
+  uint64_t last_sync_usec_ = 0;
   uint32_t tick_id_ = 0;
   // Last write error.
   std::error_code write_ec_;

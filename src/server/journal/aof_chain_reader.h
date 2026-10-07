@@ -55,6 +55,11 @@ class AofChainReader : public io::Source {
     return last_lsn_;
   }
 
+  // Bytes of the log kept by Repair(), segment headers included.
+  uint64_t LogSize() const {
+    return log_size_;
+  }
+
   // Bytes past the end of the log, dropped by Repair().
   uint64_t DiscardedBytes() const {
     return discarded_bytes_;
@@ -95,6 +100,7 @@ class AofChainReader : public io::Source {
   size_t end_seg_ = 0;
   uint64_t end_offset_ = kAofSegmentHeaderSize;
   uint64_t last_lsn_ = 0;
+  uint64_t log_size_ = 0;
   uint64_t discarded_bytes_ = 0;
 
   // Streaming state: the segment being read and the unread part of the current payload.
