@@ -50,7 +50,7 @@ void AofStreamer::ConsumeJournalChange(const journal::JournalChangeItem& item) {
 
 void AofStreamer::ThrottleIfNeeded() {
   // TODO: decide whether backpressure should ever give up instead of stalling the shard.
-  writer_.WaitUnwritten(max_buffered_bytes_);
+  writer_.WaitPending(max_buffered_bytes_);
 }
 
 void AofStreamer::Seal() {
