@@ -40,45 +40,13 @@ error_code LastErrno() {
   return {errno, system_category()};
 }
 
-class AofReadErrorCategory : public error_category {
- public:
-  const char* name() const noexcept final {
-    return "aof_read";
-  }
-
-  string message(int ev) const final {
-    switch (static_cast<AofReadError>(ev)) {
-      case AofReadError::kTornTail:
-        return "AOF log ends with a damaged tail";
-      case AofReadError::kNoSegments:
-        return "no AOF segments";
-      case AofReadError::kBadSegmentName:
-        return "unexpected AOF segment name";
-      case AofReadError::kSegmentGap:
-        return "gap in AOF segment seqs";
-      case AofReadError::kShortSegment:
-        return "AOF segment shorter than its header";
-      case AofReadError::kBadSegmentHeader:
-        return "invalid AOF segment header";
-      case AofReadError::kShardCountChanged:
-        return "AOF written with a different shard count";
-    }
-    return "unknown AOF read error";
-  }
-};
-
-error_code Corrupt(AofReadError err, string_view path) {
+error_code Corrupt(AofError err, string_view path) {
   error_code ec = make_error_code(err);
   LOG(ERROR) << ec.message() << ": " << path;
   return ec;
 }
 
 }  // namespace
-
-error_code make_error_code(AofReadError e) {
-  static const AofReadErrorCategory category;
-  return {static_cast<int>(e), category};
-}
 
 // Iterates the valid blocks of one segment, reading the file in large chunks.
 class AofChainReader::BlockScanner {
@@ -175,12 +143,12 @@ error_code AofChainReader::DiscoverAndIndexSegments() {
     if (!absl::ConsumePrefix(&seq_str, absl::StrCat("appendonly-", shard_id_, "-")) ||
         !absl::ConsumeSuffix(&seq_str, ".aof") || !absl::SimpleAtoi(seq_str, &seq) ||
         AofSegmentWriter::SegmentName(shard_id_, seq) != name) {
-      return Corrupt(AofReadError::kBadSegmentName, file.name);
+      return Corrupt(AofError::kBadSegmentName, file.name);
     }
     segments_.push_back({seq, file.name, file.size, 0});
   }
   if (segments_.empty())
-    return AofReadError::kNoSegments;
+    return AofError::kNoSegments;
 
   // Small sort, chains are not big
   sort(segments_.begin(), segments_.end(),
@@ -190,7 +158,7 @@ error_code AofChainReader::DiscoverAndIndexSegments() {
   for (Segment& seg : segments_) {
     // Continuity check
     if (seg.seq != next_seq++)
-      return Corrupt(AofReadError::kSegmentGap, seg.path);
+      return Corrupt(AofError::kSegmentGap, seg.path);
 
     auto file = OpenLinux(seg.path, O_RDONLY, 0);
     if (!file)
@@ -200,16 +168,16 @@ error_code AofChainReader::DiscoverAndIndexSegments() {
     // This should not really happen, a segment only gets the final name only
     // after we write and fsync the header
     if (seg.size < kAofSegmentHeaderSize)
-      return Corrupt(AofReadError::kShortSegment, seg.path);
+      return Corrupt(AofError::kShortSegment, seg.path);
     RETURN_ON_ERR((*file)->Read(&v, 1, 0, 0));
     RETURN_ON_ERR((*file)->Close());
 
     auto hdr = DecodeAofSegmentHeader(hdr_bytes);
     if (!hdr || hdr->shard_id != shard_id_ || hdr->seq != seg.seq)
-      return Corrupt(AofReadError::kBadSegmentHeader, seg.path);
+      return Corrupt(AofError::kBadSegmentHeader, seg.path);
     // TODO: replay into a different shard count.
     if (hdr->shard_count != shard_count_)
-      return Corrupt(AofReadError::kShardCountChanged, seg.path);
+      return Corrupt(AofError::kShardCountChanged, seg.path);
     seg.uid = hdr->segment_uid;
   }
   return {};
@@ -222,7 +190,7 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
       pending_held_ = false;
     }
     if (finished_)
-      return torn_ ? nonstd::make_unexpected(make_error_code(AofReadError::kTornTail))
+      return torn_ ? nonstd::make_unexpected(make_error_code(AofError::kTornTail))
                    : io::Result<size_t>(0);
     if (!scanner_) {
       auto scanner = BlockScanner::Open(segments_[read_seg_]);
@@ -299,7 +267,7 @@ io::Result<size_t> AofChainReader::Finish(bool torn) {
   LOG_IF(WARNING, torn) << "AOF shard " << shard_id_ << ": damaged tail of " << discarded_bytes_
                         << " bytes after lsn " << last_lsn_;
   if (torn)
-    return nonstd::make_unexpected(make_error_code(AofReadError::kTornTail));
+    return nonstd::make_unexpected(make_error_code(AofError::kTornTail));
   return 0;
 }
 
