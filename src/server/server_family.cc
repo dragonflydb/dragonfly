@@ -1033,7 +1033,8 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage) {
   reason = "--aof is supported only on Linux";
 #endif
   LOG(ERROR) << reason;
-  exit(1);
+  base::FlushLogs();
+  std::_Exit(EXIT_FAILURE);
 }
 
 // Seals, writes and syncs every shard's AOF.
