@@ -290,6 +290,9 @@ io::Result<size_t> AofChainReader::Finish(bool torn) {
   scanner_.reset();
   // A record that never completed is dropped.
   held_.clear();
+  log_size_ = end_offset_;
+  for (size_t i = 0; i < end_seg_; ++i)
+    log_size_ += segments_[i].size;
   discarded_bytes_ = segments_[end_seg_].size - end_offset_;
   for (size_t i = end_seg_ + 1; i < segments_.size(); ++i)
     discarded_bytes_ += segments_[i].size;
