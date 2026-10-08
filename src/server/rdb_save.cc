@@ -328,10 +328,8 @@ io::Result<uint8_t> RdbSerializer::SaveEntry(const PrimeKey& pk, const PrimeValu
   if (auto ec = SaveString(key); ec)
     return make_unexpected(ec);
 
-  if (auto ec = SaveValue(pv); ec) {
-    LOG(ERROR) << "Problems saving value for key " << key << " in dbid=" << dbid;
+  if (auto ec = SaveValue(pv); ec)
     return make_unexpected(ec);
-  }
 
   // We flush here because if the next element in the bucket we are serializing is a container,
   // it will first serialize the first entry and then flush the internal buffer, even if
