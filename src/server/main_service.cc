@@ -1452,12 +1452,12 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   bool is_write_cmd = cid.IsJournaled();
   bool is_trans_cmd = cid.IsExecGroup();
   bool under_script = dfly_cntx.conn_state.script_info != nullptr;
-  bool multi_active = dfly_cntx.conn_state.exec_info.IsCollecting() && !is_trans_cmd;
+  bool is_inside_multi = dfly_cntx.conn_state.exec_info.IsCollecting();
 
   if (!etl.is_master && is_write_cmd && !dfly_cntx.is_replicating)
     return ErrorReply{"-READONLY You can't write against a read only replica."};
 
-  if (multi_active) {
+  if (is_inside_multi && !is_trans_cmd) {
     if (cmd_name == "WATCH" || cmd_name == "FLUSHALL" || cmd_name == "FLUSHDB" ||
         cid.IsSubscribeFamily())
       return ErrorReply{absl::StrCat("'", cmd_name, "' not allowed inside a transaction")};
@@ -1466,8 +1466,9 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
   // Under maxmemory, MULTI/EXEC is admitted or refused as a whole, like in Valkey: a DENYOOM
   // command is refused when queued (EXEC then aborts) and EXEC is refused if any queued command
   // is DENYOOM. Commands of an admitted EXEC are not checked again in InvokeCmd.
-  if (const auto& exec_info = dfly_cntx.conn_state.exec_info; exec_info.IsCollecting()) {
-    bool denyoom = cid.IsExec() ? exec_info.has_denyoom : (cid.opt_mask() & CO::DENYOOM);
+  if (is_inside_multi) {
+    bool denyoom =
+        cid.IsExec() ? dfly_cntx.conn_state.exec_info.has_denyoom : (cid.opt_mask() & CO::DENYOOM);
     if (denyoom && etl.ShouldDenyOnOOM(base::CycleClock::ToUsec(base::CycleClock::Now()))) {
       if (cid.IsExec())
         return ErrorReply{
