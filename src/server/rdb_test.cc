@@ -26,6 +26,8 @@ extern "C" {
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
 #include "io/file_util.h"
+#include "server/detail/save_stages_controller.h"
+#include "server/detail/snapshot_storage.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/serializer.h"
@@ -607,6 +609,157 @@ TEST_F(RdbTest, SaveFlush) {
   auto& k_v = save_info.freq_map.front();
   EXPECT_EQ("string", k_v.first);
   EXPECT_EQ(500000, k_v.second);
+}
+
+class SnapshotLoadingTest : public RdbTest, public WithParamInterface<pair<bool, bool>> {};
+
+TEST_P(SnapshotLoadingTest, CancelSave) {
+  const auto [use_dfs_format, bg_save] = GetParam();
+  const string_view format = use_dfs_format ? "DF" : "RDB";
+  absl::FlagSaver flags;
+  SetTestFlag("background_snapshotting", "true");
+
+  // Cancellation must preserve the previous successful snapshot and its metadata.
+  ASSERT_EQ(Run({"SET", "original", "value"}), "OK");
+  ASSERT_EQ(Run({"SAVE", format}), "OK");
+  const auto previous_save = service_->server_family().GetLastSaveInfo();
+  Run({"DEBUG", "POPULATE", "50000", "key", "256"});
+
+  const string basename = StrCat(absl::GetFlag(FLAGS_dbfilename), "_cancelled");
+  RespExpr save_response;
+  auto save_fb = pp_->at(1)->LaunchFiber([&] {
+    save_response = Run({bg_save ? "BGSAVE" : "SAVE", format, basename});
+  });
+
+  EXPECT_TRUE(WaitUntilCondition([&] { return service_->server_family().TEST_IsSaving(); },
+                                 chrono::seconds(10)));
+  EXPECT_EQ(service_->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING), GlobalState::ACTIVE);
+  EXPECT_THAT(Run({"SAVE", format}), ErrArg("LOADING Dragonfly is loading the dataset in memory"));
+  // Returning to ACTIVE must not revive a save that was cancelled by the transition.
+  EXPECT_EQ(service_->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE), GlobalState::LOADING);
+  save_fb.Join();
+
+  EXPECT_TRUE(WaitUntilCondition(
+      [&] { return bool(service_->server_family().GetLastSaveInfo().last_error); },
+      chrono::seconds(10)));
+  const auto save_info = service_->server_family().GetLastSaveInfo();
+  EXPECT_EQ(static_cast<error_code>(save_info.last_error),
+            make_error_code(errc::operation_canceled));
+  EXPECT_EQ(save_info.save_time, previous_save.save_time);
+  EXPECT_EQ(save_info.file_name, previous_save.file_name);
+  EXPECT_EQ(save_info.freq_map, previous_save.freq_map);
+  EXPECT_FALSE(service_->server_family().TEST_IsSaving());
+  if (bg_save) {
+    EXPECT_EQ(save_response, "OK");
+    EXPECT_FALSE(save_info.bgsave_in_progress);
+    EXPECT_FALSE(save_info.last_bgsave_status);
+  } else {
+    EXPECT_THAT(save_response, ArgType(RespExpr::ERROR));
+    EXPECT_THAT(save_response.GetString(), HasSubstr("Snapshot saving cancelled"));
+  }
+
+  auto files = io::StatFiles(StrCat(basename, "*"));
+  ASSERT_TRUE(files);
+  EXPECT_TRUE(files->empty());
+  EXPECT_TRUE(filesystem::exists(previous_save.file_name));
+  // A subsequent save must be able to use the cancelled save's name.
+  EXPECT_EQ(Run({"SAVE", format, basename}), "OK");
+}
+
+INSTANTIATE_TEST_SUITE_P(SaveModes, SnapshotLoadingTest,
+                         Values(pair{false, false}, pair{false, true}, pair{true, false},
+                                pair{true, true}));
+
+namespace {
+
+// Cloud storage that counts the uploads it opened, published with Close() and aborted.
+class TestCloudStorage : public detail::FileSnapshotStorage {
+ public:
+  enum Failure { kNone, kCancel, kOpenSummary, kWrite, kClose };
+
+  explicit TestCloudStorage(Failure failure) : FileSnapshotStorage(nullptr), failure_(failure) {
+  }
+
+  io::Result<pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(const string& path) override {
+    if (failure_ == kOpenSummary && path.find("summary") != string::npos)
+      return nonstd::make_unexpected(GenericError(make_error_code(errc::io_error)));
+    ++opened;
+    return pair<io::Sink*, uint8_t>{new File(this), detail::FileType::CLOUD};
+  }
+
+  bool IsCloud() const override {
+    return true;
+  }
+
+  atomic_uint opened = 0, published = 0, aborted = 0;
+
+ private:
+  class File : public io::WriteFile {
+   public:
+    explicit File(TestCloudStorage* storage) : WriteFile(""), storage_(storage) {
+    }
+
+    io::Result<size_t> WriteSome(const iovec* v, uint32_t len) override {
+      if (storage_->failure_ == kWrite)
+        return nonstd::make_unexpected(make_error_code(errc::io_error));
+      size_t written = 0;
+      for (uint32_t i = 0; i < len; ++i)
+        written += v[i].iov_len;
+      return written;
+    }
+
+    error_code Close() override {
+      if (storage_->failure_ == kClose)
+        return make_error_code(errc::io_error);
+      ++storage_->published;
+      return {};
+    }
+
+    error_code Abort() override {
+      ++storage_->aborted;
+      return {};
+    }
+
+   private:
+    TestCloudStorage* storage_;
+  };
+
+  Failure failure_;
+};
+
+}  // namespace
+
+// A failed or cancelled cloud save must abort all its uploads instead of publishing them.
+TEST_F(RdbTest, FailedCloudSaveAbortsUploads) {
+  for (auto failure :
+       {TestCloudStorage::kNone, TestCloudStorage::kCancel, TestCloudStorage::kOpenSummary,
+        TestCloudStorage::kWrite, TestCloudStorage::kClose}) {
+    SCOPED_TRACE(failure);
+    auto storage = make_shared<TestCloudStorage>(failure);
+    GenericError error;
+    pp_->at(0)->Await([&] {
+      boost::intrusive_ptr<Transaction> trans(new Transaction{service_->FindCmd("SAVE")});
+      trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+      detail::SaveStagesController controller(
+          {true, {}, {}, trans.get(), service_.get(), storage, false});
+      ASSERT_FALSE(controller.Init());
+      controller.Start();
+      if (failure == TestCloudStorage::kCancel)
+        controller.Cancel();
+      controller.WaitAllSnapshots();
+      error = controller.Finalize().error;
+    });
+
+    if (failure == TestCloudStorage::kNone) {
+      EXPECT_FALSE(error);
+      EXPECT_EQ(storage->published, shard_set->size() + 1);
+      EXPECT_EQ(storage->aborted, 0u);
+    } else {
+      EXPECT_TRUE(error);
+      EXPECT_EQ(storage->published, 0u);
+      EXPECT_EQ(storage->aborted, storage->opened);
+    }
+  }
 }
 
 TEST_F(RdbTest, SaveManyDbs) {
