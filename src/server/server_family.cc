@@ -565,6 +565,40 @@ void ClientTracking(CmdArgParser parser, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendOk();
 }
 
+void ClientTrackingInfo(facade::ParsedArgs args, CommandContext* cmd_cntx) {
+  if (!args.empty())
+    return cmd_cntx->SendError(kSyntaxErr);
+
+  using Tracking = ConnectionState::ClientTracking;
+  const auto& tracking = cmd_cntx->server_conn_cntx()->conn_state.tracking_info_;
+  const bool is_on = tracking.IsTrackingOn();
+
+  vector<string_view> flags;
+  if (!is_on) {
+    flags.push_back("off");
+  } else {
+    flags.push_back("on");
+    if (tracking.HasOption(Tracking::OPTIN))
+      flags.push_back("optin");
+    else if (tracking.HasOption(Tracking::OPTOUT))
+      flags.push_back("optout");
+    if (tracking.IsNoLoop())
+      flags.push_back("noloop");
+    if (tracking.IsCachingPending())
+      flags.push_back(tracking.HasOption(Tracking::OPTIN) ? "caching-yes" : "caching-no");
+  }
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  rb->StartCollection(3, CollectionType::MAP);
+  rb->SendBulkString("flags");
+  rb->SendBulkStrArr(flags, CollectionType::SET);
+  rb->SendBulkString("redirect");
+  // REDIRECT is not supported, so 0 means tracking is on without redirection.
+  rb->SendLong(is_on ? 0 : -1);
+  rb->SendBulkString("prefixes");
+  rb->SendEmptyArray();
+}
+
 void ClientCaching(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!rb->IsResp3())
@@ -2189,6 +2223,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "    * LIB-VER: the client lib version.",
       "TRACKING (ON|OFF) [OPTIN] [OPTOUT] [NOLOOP]",
       "    Control server assisted client side caching.",
+      "TRACKINGINFO",
+      "    Report tracking status for the current connection.",
       "MIGRATE <client-id> <tid>",
       "    Migrates connection specified by client-id to the specified thread id.",
       "HELP",
@@ -2216,6 +2252,8 @@ void ServerFamily::Client(CmdArgParser parser, CommandContext* cmd_cntx) {
     return ClientUnPauseCmd(sub_args, cmd_cntx);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(CmdArgParser{sub_args}, cmd_cntx);
+  } else if (sub_cmd == "TRACKINGINFO") {
+    return ClientTrackingInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "KILL") {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), this, cmd_cntx);
   } else if (sub_cmd == "CACHING") {
