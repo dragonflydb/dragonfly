@@ -613,6 +613,11 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
 
+    // Stop all loaders before any socket goes down: the master closes every flow once one
+    // drops, so a later-cancelled flow would otherwise see a bare EOF.
+    for (auto& flow : shard_flows_)
+      flow->StopLoader();
+
     // Unblock all sockets.
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_)
@@ -1519,9 +1524,13 @@ void DflyShardReplica::JoinFlow() {
   acks_fb_.JoinIfNeeded();
 }
 
-void DflyShardReplica::Cancel() {
+void DflyShardReplica::StopLoader() {
   if (rdb_loader_)
     rdb_loader_->stop();
+}
+
+void DflyShardReplica::Cancel() {
+  StopLoader();
   ShutdownSocket();
   shard_replica_waker_.notifyAll();
 }

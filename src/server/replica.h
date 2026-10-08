@@ -226,6 +226,7 @@ class DflyShardReplica : public ProtocolClient {
   ~DflyShardReplica();
 
   void Cancel();
+  void StopLoader();  // Marks a loader EOF as cancellation, not corruption.
   void JoinFlow();
 
   // Start replica initialized as dfly flow.
