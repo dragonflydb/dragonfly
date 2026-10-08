@@ -73,6 +73,16 @@ namespace {
 const std::string kCurrentFile = std::filesystem::path(__FILE__).filename().string();
 using nonstd::make_unexpected;
 
+// Rejects a query longer than search_query_string_bytes: sends the error and returns false.
+bool CheckQueryLength(string_view query, string_view what, SinkReplyBuilder* rb) {
+  size_t max_query_bytes = absl::GetFlag(FLAGS_search_query_string_bytes);
+  if (query.size() <= max_query_bytes)
+    return true;
+  rb->SendError(
+      absl::StrCat(what, " string is too long, max length is ", max_query_bytes, " bytes"));
+  return false;
+}
+
 template <typename T> using ParseResult = io::Result<T, ErrorReply>;
 
 nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string message) {
@@ -2336,6 +2346,10 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   std::atomic<bool> index_not_found{false};
   const absl::Time t_start = absl::Now();
 
+  if (!CheckQueryLength(params->text_query, "Query", rb) ||
+      !CheckQueryLength(params->vsim_filter, "Query", rb))
+    return false;
+
   search::SearchAlgorithm text_algo;
   if (!text_algo.Init(params->text_query, &params->query_params, nullptr)) {
     rb->SendError("Query syntax error in SEARCH clause");
@@ -2581,50 +2595,51 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   return true;
 }
 
-// Recursively emits events[start] as a MAP and returns the index of the next sibling event.
-// When `limited`, `children` is collapsed to an integer count instead of the nested array.
-size_t RenderProfileEvent(RedisReplyBuilder* rb,
-                          const vector<search::AlgorithmProfile::ProfileEvent>& events,
-                          size_t start, bool limited) {
-  const auto& event = events[start];
+// Emits the profile event subtree as nested MAPs in pre-order DFS, iteratively (the tree is as deep
+// as the query, which must not overflow the fiber stack). `limited` collapses children to a count.
+void RenderProfileEvent(RedisReplyBuilder* rb,
+                        const vector<search::AlgorithmProfile::ProfileEvent>& events, size_t root,
+                        bool limited) {
+  vector<size_t> stack{root};
+  while (!stack.empty()) {
+    const size_t start = stack.back();
+    stack.pop_back();
+    const auto& event = events[start];
 
-  vector<size_t> child_indices;
-  size_t children_micros = 0;
-  for (size_t j = start + 1; j < events.size(); j++) {
-    if (events[j].depth <= event.depth)
-      break;
-    if (events[j].depth == event.depth + 1) {
-      child_indices.push_back(j);
-      children_micros += events[j].micros;
+    vector<size_t> child_indices;
+    size_t children_micros = 0;
+    for (size_t j = start + 1; j < events.size(); j++) {
+      if (events[j].depth <= event.depth)
+        break;
+      if (events[j].depth == event.depth + 1) {
+        child_indices.push_back(j);
+        children_micros += events[j].micros;
+      }
+    }
+
+    const bool has_children = !child_indices.empty();
+    rb->StartCollection(4 + (has_children ? 1 : 0), CollectionType::MAP);
+    rb->SendSimpleString("total_time");
+    rb->SendLong(event.micros);
+    rb->SendSimpleString("operation");
+    rb->SendSimpleString(event.descr);
+    rb->SendSimpleString("self_time");
+    rb->SendLong(event.micros - children_micros);
+    rb->SendSimpleString("processed");
+    rb->SendLong(event.num_processed);
+
+    if (has_children) {
+      rb->SendSimpleString("children");
+      if (limited) {
+        rb->SendLong(static_cast<long>(child_indices.size()));
+      } else {
+        rb->StartArray(child_indices.size());
+        // Push in reverse so children render left-to-right, each subtree before the next sibling.
+        for (auto it = child_indices.rbegin(); it != child_indices.rend(); ++it)
+          stack.push_back(*it);
+      }
     }
   }
-
-  const bool has_children = !child_indices.empty();
-  rb->StartCollection(4 + (has_children ? 1 : 0), CollectionType::MAP);
-  rb->SendSimpleString("total_time");
-  rb->SendLong(event.micros);
-  rb->SendSimpleString("operation");
-  rb->SendSimpleString(event.descr);
-  rb->SendSimpleString("self_time");
-  rb->SendLong(event.micros - children_micros);
-  rb->SendSimpleString("processed");
-  rb->SendLong(event.num_processed);
-
-  if (has_children) {
-    rb->SendSimpleString("children");
-    if (limited) {
-      rb->SendLong(static_cast<long>(child_indices.size()));
-    } else {
-      rb->StartArray(child_indices.size());
-      for (size_t child : child_indices)
-        RenderProfileEvent(rb, events, child, limited);
-    }
-  }
-
-  size_t j = start + 1;
-  while (j < events.size() && events[j].depth > event.depth)
-    j++;
-  return j;
 }
 
 void RenderShardProfileTree(RedisReplyBuilder* rb, const SearchResult& shard_result, bool limited) {
@@ -3078,12 +3093,8 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (SendErrorIfOccurred(params, &parser, cmd_cntx))
     return;
 
-  // Check query string length limit
-  size_t max_query_bytes = absl::GetFlag(FLAGS_search_query_string_bytes);
-  if (query_str.size() > max_query_bytes) {
-    return builder->SendError(
-        absl::StrCat("Query string is too long, max length is ", max_query_bytes, " bytes"));
-  }
+  if (!CheckQueryLength(query_str, "Query", builder))
+    return;
 
   vector<SearchResult> css_docs;
   if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
@@ -3315,6 +3326,7 @@ void CmdFtProfileHybrid(string_view index_name, CmdArgParser* parser, CommandCon
   if (!RunHybridSearch(index_name, &*params, cmd_cntx, /*enable_profile=*/true, &exec))
     return;
 
+  SinkReplyBuilder::ReplyAggregator agg{rb};
   rb->StartArray(2);
   HybridReply(*params, exec.vsim_metric, exec.total_took, exec.doc_map, rb);
 
@@ -3370,6 +3382,7 @@ void SendFtProfileSearchResponse(const SearchParams& params,
 
   // First element -> Result of the search command
   // Second element -> Profile information
+  SinkReplyBuilder::ReplyAggregator agg{rb};
   rb->StartArray(2);
   SearchReply(params, knn_sort_option, inject_score_alias, search_results, rb, false);
 
@@ -3419,6 +3432,9 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto params = ParseSearchParams(&parser);
   if (SendErrorIfOccurred(params, &parser, cmd_cntx))
+    return;
+
+  if (!CheckQueryLength(query_str, "Query", cmd_cntx->rb()))
     return;
 
   search::SearchAlgorithm search_algo;
@@ -3916,12 +3932,8 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (SendErrorIfOccurred(params, &parser, cmd_cntx))
     return;
 
-  // Check query string length limit
-  size_t max_query_bytes = absl::GetFlag(FLAGS_search_query_string_bytes);
-  if (params->query.size() > max_query_bytes) {
-    return builder->SendError(
-        absl::StrCat("Query string is too long, max length is ", max_query_bytes, " bytes"));
-  }
+  if (!CheckQueryLength(params->query, "Query", builder))
+    return;
 
   std::vector<aggregate::DocValues> values;
 
@@ -3994,11 +4006,8 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
 
     for (size_t i = 0; i < params->joins.size(); ++i) {
-      // Check join query string length limit
-      if (params->joins[i].query.size() > max_query_bytes) {
-        return cmd_cntx->SendError(absl::StrCat("Join query string is too long, max length is ",
-                                                max_query_bytes, " bytes"));
-      }
+      if (!CheckQueryLength(params->joins[i].query, "Join query", builder))
+        return;
 
       search::QueryParams empty_params;
       if (!search_algos[i + 1].Init(params->joins[i].query, &empty_params)) {
