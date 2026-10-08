@@ -11,6 +11,7 @@
 #include <system_error>
 
 #include "server/journal/aof.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/synchronization.h"
 #include "util/fibers/uring_file.h"
 
@@ -34,14 +35,23 @@ class AofSegmentWriter {
 
   // Creates segment `seq` with a durable header: tmp -> header -> fdatasync -> link -> fsync dir.
   // Synchronous. last_lsn is the last record already in the log, written and durable.
+  // Then prepares segment seq + 1 as the spare, in the background.
   std::error_code Open(uint64_t seq, uint64_t last_lsn = 0);
 
   // non blocking
   void AddRecord(std::string_view record, uint64_t lsn);
   void Seal();
 
-  // Retries failed writes once, waits for in-flight I/O and fdatasyncs the segment.
-  // Fails if any write or fdatasync failed, even an earlier periodic one.
+  // Seals the open block and switches to the spare, then starts preparing the next one; never
+  // yields. Returns the new segment's seq, or nullopt if the spare is not ready: callers wait with
+  // WaitSpareReady() first, so nullopt means its preparation failed.
+  std::optional<uint64_t> Rotate();
+
+  // Blocks until no spare is being prepared; true if a spare is ready.
+  bool WaitSpareReady();
+
+  // Retries failed writes once, waits for in-flight I/O and fdatasyncs the segments. Deletes the
+  // unused spare. Fails if any write or fdatasync failed, even an earlier periodic one.
   std::error_code Shutdown();
 
   // Blocks the calling fiber until UnwrittenBytes() <= limit.
@@ -55,15 +65,13 @@ class AofSegmentWriter {
     return builder_->PayloadSize();
   }
 
-  // End of the contiguous written prefix of the segment.
+  // Contiguous written bytes of this writer's segments, headers included.
   size_t WrittenSize() const {
-    return written_offset_;
+    return written_bytes_;
   }
 
   // Written but not yet covered by a successful fdatasync.
-  size_t UnsyncedBytes() const {
-    return written_offset_ - durable_offset_;
-  }
+  size_t UnsyncedBytes() const;
 
   // Duration of the last completed periodic fdatasync, 0 if none.
   uint64_t LastSyncUsec() const {
@@ -90,9 +98,28 @@ class AofSegmentWriter {
   static std::string SegmentName(uint32_t shard_id, uint64_t seq);
 
  private:
+  struct Segment {
+    uint64_t seq;
+    uint64_t uid;
+    std::unique_ptr<util::fb2::LinuxFile> file;
+    // Its header is durable and blocks can be written.
+    bool ready = false;
+    size_t next_offset = kAofSegmentHeaderSize;
+    // End of the contiguous written prefix, and of the part covered by a successful fdatasync.
+    size_t written_offset = kAofSegmentHeaderSize;
+    size_t durable_offset = kAofSegmentHeaderSize;
+    // End of the furthest block whose write ever failed.
+    size_t repair_offset = 0;
+    // Last record of the written prefix, 0 if none.
+    uint64_t written_lsn = 0;
+  };
+
   enum class BlockState : uint8_t { kInFlight, kFailed, kDone };
 
   struct PendingBlock {
+    // Bound when sealed.
+    // TODO: old_'s blocks are a prefix of pending_, so a count could replace this pointer.
+    Segment* seg;
     std::string bytes;
     size_t offset;
     // Last record ending in this block, 0 if none.
@@ -101,34 +128,45 @@ class AofSegmentWriter {
     BlockState state = BlockState::kInFlight;
   };
 
+  std::error_code CreateSegment(Segment* seg);
+  // Starts spare_fb_: it waits until the old segment is done, closes it, then prepares spare seq.
+  // So at most one old segment exists, and only one fiber is in flight.
+  void PrepareSpare(uint64_t seq);
+  // Drained, and durable unless a sync failed: nothing more is written or synced to it.
+  bool OldDone() const;
+
   void OnSealed(AofSealedBlock block);
   void Submit(PendingBlock* pb);
+  void Write(PendingBlock* pb);
   void OnWriteDone(PendingBlock* pb, int res);
 
   // Runs every kAofSyncMs: retries failed writes and syncs completed ones.
   void OnTick();
   void RetryFailed();
-  void OnSyncDone(size_t sync_offset, uint64_t sync_lsn, int res);
+  // Syncs the old segment before the current one, so durability advances in log order. A drained
+  // old segment is synced right away; otherwise syncs happen on a tick.
+  void MaybeSync(bool tick);
+  void OnSyncDone(Segment* seg, size_t sync_offset, uint64_t sync_lsn, int res);
 
   std::string dir_;
   uint32_t shard_id_;
   uint32_t shard_count_;
-  std::unique_ptr<util::fb2::LinuxFile> file_;
+  // Receives new blocks.
+  std::unique_ptr<Segment> current_;
+  // The segment before the last rotation, until it is done and closed.
+  std::unique_ptr<Segment> old_;
+  std::unique_ptr<Segment> spare_;
+  bool preparing_ = false;
+  bool stopping_ = false;
+  util::fb2::Fiber spare_fb_;
   std::optional<AofBlockBuilder> builder_;
-  size_t next_offset_ = kAofSegmentHeaderSize;
 
-  // Offset order; deque keeps references stable for completions.
+  // Log order across segments; deque keeps references stable for completions.
   std::deque<PendingBlock> pending_;
   size_t pending_bytes_ = 0;
   uint64_t in_flight_ = 0;
+  size_t written_bytes_ = 0;
 
-  // End of the contiguous written prefix of the file, and of the part covered by a successful
-  // fdatasync. The header is durable after Open.
-  // When written_offset_ == next_offset_ all blocks are written
-  size_t written_offset_ = kAofSegmentHeaderSize;
-  size_t durable_offset_ = kAofSegmentHeaderSize;
-  // End of the furthest block whose write ever failed.
-  size_t repair_offset_ = 0;
   uint64_t appended_lsn_ = 0;
   uint64_t written_lsn_ = 0;
   uint64_t durable_lsn_ = 0;

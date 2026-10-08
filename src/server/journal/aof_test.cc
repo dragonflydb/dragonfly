@@ -418,6 +418,62 @@ TEST_F(AofChainReaderTest, RecordsBeforeCutRecordInSameBlock) {
   EXPECT_EQ(filesystem::file_size(seg0), kAofSegmentHeaderSize);
 }
 
+TEST_F(AofChainReaderTest, RotateWithWritesInFlight) {
+  pp_->at(0)->Await([&] {
+    AofSegmentWriter writer(dir_, 2, 4);
+    ASSERT_FALSE(writer.Open(0));
+    ASSERT_TRUE(writer.WaitSpareReady());
+    // No yield from here to Shutdown, so the writes are still in flight on both segments.
+    vector<string> records = {"a1", "b22", "c333", "d4444", "e5"};
+    for (size_t i = 0; i < records.size(); ++i) {
+      if (i == 3) {
+        ASSERT_EQ(writer.Rotate(), 1u);
+      }
+      writer.AddRecord(records[i], i + 1);
+      writer.Seal();
+    }
+    ASSERT_FALSE(writer.Shutdown());
+    EXPECT_EQ(writer.DurableLsn(), 5u);
+  });
+
+  EXPECT_GT(filesystem::file_size(SegmentPath(0)), kAofSegmentHeaderSize);
+  EXPECT_GT(filesystem::file_size(SegmentPath(1)), kAofSegmentHeaderSize);
+  // Shutdown deleted the unused spare.
+  EXPECT_FALSE(filesystem::exists(SegmentPath(2)));
+  // The LSNs continue across the rotation.
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1b22c333d4444e5");
+  EXPECT_FALSE(res.torn);
+  EXPECT_EQ(res.last_lsn, 5u);
+}
+
+TEST_F(AofChainReaderTest, RotateNeedsReadySpare) {
+  pp_->at(0)->Await([&] {
+    AofSegmentWriter writer(dir_, 2, 4);
+    ASSERT_FALSE(writer.Open(0));
+    writer.AddRecord("a1", 1);
+    // The spare fiber has not run yet.
+    EXPECT_EQ(writer.Rotate(), nullopt);
+    ASSERT_TRUE(writer.WaitSpareReady());
+    ASSERT_EQ(writer.Rotate(), 1u);
+    writer.AddRecord("b22", 2);
+
+    // Segment 2 stays empty, like a spare left by a crash.
+    ASSERT_TRUE(writer.WaitSpareReady());
+    ASSERT_EQ(writer.Rotate(), 2u);
+    ASSERT_FALSE(writer.Shutdown());
+  });
+
+  EXPECT_EQ(filesystem::file_size(SegmentPath(2)), kAofSegmentHeaderSize);
+  // Shutdown deleted the unused spare.
+  EXPECT_FALSE(filesystem::exists(SegmentPath(3)));
+  // An empty last segment ends the log cleanly.
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1b22");
+  EXPECT_FALSE(res.torn);
+  EXPECT_EQ(res.last_lsn, 2u);
+}
+
 class AofManifestTest : public AofSegmentWriterTest {
  protected:
   static AofManifest Sample() {
