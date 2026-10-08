@@ -197,9 +197,17 @@ void SliceSnapshot::PaceTraversal(bool done) {
 void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
                                          time_t expire, uint32_t mc_flags) {
   io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire, mc_flags, db_index);
-  LOG_IF(ERROR, !res.has_value()) << "Serialization error: " << res.error();
-  if (res)
-    ++type_freq_map_[*res];
+  if (!res) {
+    if (res.error() == errc::operation_canceled) {
+      LOG_EVERY_T(WARNING, 1) << "Snapshot cancelled while serializing entry in dbid=" << db_index;
+    } else {
+      string tmp;
+      LOG_EVERY_T(ERROR, 1) << "Snapshot failed to serialize key " << pk.GetSlice(&tmp)
+                            << " in dbid=" << db_index << " with err: " << res.error().message();
+    }
+    return;
+  }
+  ++type_freq_map_[*res];
 }
 
 void SliceSnapshot::HandleFlushData(std::string data) {
