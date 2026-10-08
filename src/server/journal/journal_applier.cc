@@ -25,7 +25,7 @@ JournalApplier::JournalApplier(Service* service,
       execute_hook_(std::move(execute_hook)) {
 }
 
-bool JournalApplier::Execute(TransactionData& tx_data) {
+bool JournalApplier::Execute(TransactionData&& tx_data) {
   // Run the hook first so a crash during execution still leaves the record logged.
   if (execute_hook_)
     execute_hook_(tx_data);
@@ -39,7 +39,7 @@ bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
 
   if (!tx_data.IsGlobalCmd()) {
     VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
-    return Execute(tx_data);
+    return Execute(std::move(tx_data));
   }
 
   bool inserted_by_me = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, num_flows_);
@@ -59,7 +59,7 @@ bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
   // replica.
   bool execution_res = true;
   if (inserted_by_me) {
-    execution_res = Execute(tx_data);
+    execution_res = Execute(std::move(tx_data));
   }
   // Wait until exection is done, to make sure we done execute next commands while the global is
   // executed.
