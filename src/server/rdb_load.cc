@@ -240,6 +240,56 @@ inline auto Unexpected(errc ev) {
 
 const error_code kOk;
 
+using Error = RdbLoaderBase::Error;
+
+// A failure being built: `return Fail(errc::x) << "context " << v;`. Converts to Error and
+// Result<T>. Built from an existing Error, it adds a frame instead of starting a new trace.
+class Fail {
+ public:
+  Fail(errc ev, std::source_location loc = std::source_location::current())
+      : err_{RdbError(ev), {}, loc} {
+  }
+  Fail(std::error_code ec, std::source_location loc = std::source_location::current())
+      : err_{ec, {}, loc} {
+  }
+  Fail(Error err, std::source_location loc = std::source_location::current())
+      : err_{std::move(err)} {
+    err_.trace.push_back({loc, {}});
+  }
+
+  template <typename V> Fail&& operator<<(const V& v) && {
+    absl::StrAppend(&err_.trace.back().ctx, v);
+    return std::move(*this);
+  }
+
+  operator Error() && {
+    return std::move(err_);
+  }
+  template <typename T> operator RdbLoaderBase::Result<T>() && {
+    return make_unexpected(std::move(err_));
+  }
+
+ private:
+  Error err_;
+};
+
+std::string EofCtx(size_t got, size_t want, size_t offset) {
+  return absl::StrCat("EOF: got ", got, "/", want, " bytes at offset ", offset);
+}
+
+// Like RETURN_ON_ERR / SET_OR_RETURN, but record the current frame. Context can be streamed:
+// `RDB_TRY(ReadStringObj(&v)) << "node " << i;` (only evaluated on failure).
+#define RDB_TRY(expr)            \
+  if (auto __e = (expr); !__e) { \
+  } else                         \
+    return Fail(std::move(__e))
+
+#define RDB_TRY_SET(expr, dest) \
+  if (auto __r = (expr); __r)   \
+    dest = std::move(*__r);     \
+  else                          \
+    return Fail(std::move(__r).error())
+
 /* callback for ziplistValidateIntegrity.
  * The ziplist element pointed by 'p' will be converted and stored into listpack. */
 int ziplistEntryConvertAndValidate(unsigned char* p, unsigned int head_count, void* userdata) {
@@ -1163,7 +1213,26 @@ bool RdbLoaderBase::OpaqueObjLoader::EnsureObjEncoding(CompactObjType type, unsi
   return true;
 }
 
-std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
+RdbLoaderBase::Error::Error(error_code ec, string ctx, source_location loc) : ec{ec} {
+  if (ec)
+    trace.push_back({loc, std::move(ctx)});
+}
+
+string RdbLoaderBase::Error::Format() const {
+  string res = ec.message();
+  for (size_t i = 0; i < trace.size(); ++i) {
+    string_view fn = trace[i].loc.function_name();
+    fn = fn.substr(0, fn.find('('));
+    fn = fn.substr(fn.find_last_of(": ") + 1);
+    string frame = absl::StrCat(fn, ":", trace[i].loc.line());
+    absl::StrAppend(&res, "\n  #", i, "  ", frame);
+    if (!trace[i].ctx.empty())
+      absl::StrAppend(&res, string(std::max<int>(1, 30 - frame.size()), ' '), trace[i].ctx);
+  }
+  return res;
+}
+
+auto RdbLoaderBase::FetchBuf(size_t size, void* dest) -> Error {
   if (size == 0)
     return kOk;
 
@@ -1174,7 +1243,7 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   DVLOG(3) << "Copying " << to_copy << " bytes";
 
   ::memcpy(next, mem_buf_->InputBuffer().data(), to_copy);
-  RETURN_ON_ERR(ConsumeInput(to_copy));
+  RDB_TRY(ConsumeInput(to_copy));
   size -= to_copy;
   if (size == 0)
     return kOk;
@@ -1182,18 +1251,17 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
   next += to_copy;
 
   if (size + bytes_read_ > source_limit_) {
-    LOG(ERROR) << "Out of bound read " << size + bytes_read_ << " vs " << source_limit_;
-
-    return RdbError(errc::rdb_file_corrupted);
+    return Fail(errc::rdb_file_corrupted)
+           << "out of bound read " << size + bytes_read_ << " > " << source_limit_;
   }
 
   if (size > 512) {  // Worth reading directly into next.
     io::MutableBytes mb{next, size};
 
-    RETURN_ON_ERR(ConsumeChunkBudget(size));
-    SET_OR_RETURN(src_->Read(mb), bytes_read);
+    RDB_TRY(ConsumeChunkBudget(size));
+    RDB_TRY_SET(src_->Read(mb), bytes_read);
     if (bytes_read < size)
-      return RdbError(errc::rdb_file_corrupted);
+      return Fail(errc::rdb_file_corrupted) << EofCtx(bytes_read, size, bytes_read_);
 
     bytes_read_ += bytes_read;
     DCHECK_LE(bytes_read_, source_limit_);
@@ -1210,17 +1278,17 @@ std::error_code RdbLoaderBase::FetchBuf(size_t size, void* dest) {
     mb = mb.subspan(0, source_limit_ - bytes_read_);
   }
 
-  SET_OR_RETURN(src_->ReadAtLeast(mb, size), bytes_read);
+  RDB_TRY_SET(src_->ReadAtLeast(mb, size), bytes_read);
 
   if (bytes_read < size)
-    return RdbError(errc::rdb_file_corrupted);
+    return Fail(errc::rdb_file_corrupted) << EofCtx(bytes_read, size, bytes_read_);
   bytes_read_ += bytes_read;
 
   DCHECK_LE(bytes_read_, source_limit_);
 
   mem_buf_->CommitWrite(bytes_read);
   ::memcpy(next, mem_buf_->InputBuffer().data(), size);
-  RETURN_ON_ERR(ConsumeInput(size));
+  RDB_TRY(ConsumeInput(size));
 
   return kOk;
 }
@@ -1379,8 +1447,8 @@ auto RdbLoaderBase::ReadKey() -> io::Result<string> {
   return FetchGenericString();
 }
 
-error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
-  io::Result<OpaqueObj> iores;
+auto RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) -> Error {
+  Result<OpaqueObj> iores;
 
   switch (rdbtype) {
     case RDB_TYPE_SET:
@@ -1436,53 +1504,39 @@ error_code RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) {
       iores = ReadCuckoo();
       break;
     default:
-      LOG(ERROR) << "Unsupported RDB object type " << rdbtype;
-      return RdbError(errc::invalid_rdb_type);
+      return Fail(errc::invalid_rdb_type) << "unsupported rdb type " << rdbtype;
   }
 
-  if (!iores)
-    return iores.error();
-  *dest = std::move(*iores);
-  return error_code{};
+  RDB_TRY_SET(std::move(iores), *dest) << "rdb type " << rdbtype;
+  return {};
 }
 
 static const size_t kMaxStringSize = 200_KB;
 
-error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest, bool big_string_split) {
+auto RdbLoaderBase::ReadStringObj(RdbVariant* dest, bool big_string_split) -> Error {
   bool isencoded = false;
   size_t len;
-  SET_OR_RETURN(LoadLen(&isencoded), len);
+  RDB_TRY_SET(LoadLen(&isencoded), len);
 
   if (isencoded) {
     switch (len) {
       case RDB_ENC_INT8:
       case RDB_ENC_INT16:
-      case RDB_ENC_INT32: {
-        io::Result<long long> io_int = ReadIntObj(len);
-        if (!io_int)
-          return io_int.error();
-        dest->emplace<long long>(*io_int);
-        return error_code{};
-      }
-      case RDB_ENC_LZF: {
-        io::Result<LzfString> lzf = ReadLzf();
-        if (!lzf)
-          return lzf.error();
-
-        dest->emplace<LzfString>(std::move(lzf.value()));
-        return error_code{};
-      }
+      case RDB_ENC_INT32:
+        RDB_TRY_SET(ReadIntObj(len), dest->emplace<long long>());
+        return {};
+      case RDB_ENC_LZF:
+        RDB_TRY_SET(ReadLzf(), dest->emplace<LzfString>());
+        return {};
       default:
-        LOG(ERROR) << "Unknown RDB string encoding " << len;
-        return RdbError(errc::rdb_file_corrupted);
+        return Fail(errc::rdb_file_corrupted) << "unknown string encoding " << len;
     }
   }
 
   // Reject a length beyond the remaining input before allocating or reserving it.
-  if (len > RemainingBytes()) {
-    LOG(ERROR) << "Bad string length " << len;
-    return RdbError(errc::rdb_file_corrupted);
-  }
+  if (len > RemainingBytes())
+    return Fail(errc::rdb_file_corrupted)
+           << "string length " << len << " > remaining " << RemainingBytes();
 
   if (big_string_split && len > kMaxStringSize) {
     pending_read_.remaining = len - kMaxStringSize;
@@ -1492,16 +1546,18 @@ error_code RdbLoaderBase::ReadStringObj(RdbVariant* dest, bool big_string_split)
 
   auto& blob = dest->emplace<base::PODArray<char>>();
   blob.resize(len);
-  return FetchBuf(len, blob.data());
+  RDB_TRY(FetchBuf(len, blob.data()));
+  return {};
 }
 
-error_code RdbLoaderBase::ReadRemainingString(RdbVariant* dest) {
+auto RdbLoaderBase::ReadRemainingString(RdbVariant* dest) -> Error {
   size_t read_len = std::min(pending_read_.remaining, kMaxStringSize);
   pending_read_.remaining = pending_read_.remaining - read_len;
 
   auto& blob = dest->emplace<base::PODArray<char>>();
   blob.resize(read_len);
-  return FetchBuf(read_len, blob.data());
+  RDB_TRY(FetchBuf(read_len, blob.data()));
+  return {};
 }
 
 io::Result<long long> RdbLoaderBase::ReadIntObj(int enctype) {
@@ -1547,17 +1603,17 @@ auto RdbLoaderBase::ReadLzf() -> io::Result<LzfString> {
   return res;
 }
 
-auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadSet(int rdbtype) -> Result<OpaqueObj> {
   size_t len;
   if (pending_read_.remaining > 0) {
     len = pending_read_.remaining;
   } else {
-    SET_OR_UNEXPECT(LoadLen(NULL), len);
+    RDB_TRY_SET(LoadLen(NULL), len);
     if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
-      return Unexpected(errc::empty_key);
+      return Fail(errc::empty_key);
     // Reject a member count beyond the remaining input before it is reserved.
     if (len > RemainingBytes())
-      return Unexpected(errc::rdb_file_corrupted);
+      return Fail(errc::rdb_file_corrupted) << "set size " << len;
     if (rdbtype == RDB_TYPE_SET_WITH_EXPIRY) {
       len *= 2;
     }
@@ -1569,12 +1625,8 @@ auto RdbLoaderBase::ReadSet(int rdbtype) -> io::Result<OpaqueObj> {
   size_t n = std::min(len, kMaxBlobLen);
   load_trace->arr.resize(n);
   size_t i = 0;
-  for (; i < n && !ChunkBudgetExhausted(); i++) {
-    error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var);
-    if (ec) {
-      return make_unexpected(ec);
-    }
-  }
+  for (; i < n && !ChunkBudgetExhausted(); i++)
+    RDB_TRY(ReadStringObj(&load_trace->arr[i].rdb_var)) << "member " << i << "/" << len;
   // cut off extra elements we allocated but stopped short due to budget
   load_trace->arr.resize(i);
 
@@ -1612,21 +1664,14 @@ auto RdbLoaderBase::ReadIntSet() -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(obj), RDB_TYPE_SET_INTSET};
 }
 
-auto RdbLoaderBase::ReadGeneric(int rdbtype) -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadGeneric(int rdbtype) -> Result<OpaqueObj> {
   bool is_string_type = RDB_TYPE_STRING == rdbtype;
   RdbVariant str_obj;
-  error_code ec;
-  if (pending_read_.remaining) {
-    ec = ReadRemainingString(&str_obj);
-  } else {
-    ec = ReadStringObj(&str_obj, is_string_type);
-  }
-  if (ec)
-    return make_unexpected(ec);
+  RDB_TRY(pending_read_.remaining ? ReadRemainingString(&str_obj)
+                                  : ReadStringObj(&str_obj, is_string_type));
 
-  if (!is_string_type && StrLen(str_obj) == 0) {
-    return Unexpected(errc::rdb_file_corrupted);
-  }
+  if (!is_string_type && StrLen(str_obj) == 0)
+    return Fail(errc::rdb_file_corrupted) << "empty blob";
 
   return OpaqueObj{std::move(str_obj), rdbtype};
 }
@@ -1682,7 +1727,7 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   if (rdbtype == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS) {
     for (; i < n && !ChunkBudgetExhausted(); ++i) {
       auto* dest = &load_trace->arr[i].rdb_var;
-      error_code ec = i % 3 == 2 ? ReadValkeyHashExpiry(dest) : ReadStringObj(dest);
+      error_code ec = i % 3 == 2 ? ReadValkeyHashExpiry(dest) : error_code(ReadStringObj(dest));
       if (ec)
         return make_unexpected(ec);
     }
@@ -1755,17 +1800,17 @@ auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
   return OpaqueObj{std::move(load_trace), rdbtype};
 }
 
-auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
+auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> Result<OpaqueObj> {
   size_t len;
   if (pending_read_.remaining > 0) {
     len = pending_read_.remaining;
   } else {
-    SET_OR_UNEXPECT(LoadLen(NULL), len);
+    RDB_TRY_SET(LoadLen(NULL), len);
     pending_read_.reserve = len;
   }
 
   if (len == 0)
-    return Unexpected(errc::empty_key);
+    return Fail(errc::empty_key);
 
   unique_ptr<LoadTrace> load_trace(new LoadTrace);
   // Lists pack multiple entries into each list node (8Kb by default),
@@ -1776,23 +1821,18 @@ auto RdbLoaderBase::ReadListQuicklist(int rdbtype) -> io::Result<OpaqueObj> {
   for (; i < n && !ChunkBudgetExhausted(); ++i) {
     uint64_t container = QUICKLIST_NODE_CONTAINER_PACKED;
     if (rdbtype == RDB_TYPE_LIST_QUICKLIST_2) {
-      SET_OR_UNEXPECT(LoadLen(nullptr), container);
+      RDB_TRY_SET(LoadLen(nullptr), container);
 
       if (container != QUICKLIST_NODE_CONTAINER_PACKED &&
-          container != QUICKLIST_NODE_CONTAINER_PLAIN) {
-        LOG(ERROR) << "Quicklist integrity check failed.";
-        return Unexpected(errc::rdb_file_corrupted);
-      }
+          container != QUICKLIST_NODE_CONTAINER_PLAIN)
+        return Fail(errc::rdb_file_corrupted) << "bad quicklist container " << container;
     }
 
     RdbVariant var;
-    error_code ec = ReadStringObj(&var);
-    if (ec)
-      return make_unexpected(ec);
+    RDB_TRY(ReadStringObj(&var)) << "node " << i << "/" << len;
 
-    if (StrLen(var) == 0) {
-      return Unexpected(errc::rdb_file_corrupted);
-    }
+    if (StrLen(var) == 0)
+      return Fail(errc::rdb_file_corrupted) << "empty quicklist node " << i;
     load_trace->arr[i].rdb_var = std::move(var);
     load_trace->arr[i].encoding = container;
   }
@@ -2367,19 +2407,17 @@ io::Result<RdbLoaderBase::OpaqueObj> RdbLoaderBase::ReadCuckoo() {
   return OpaqueObj{std::move(res), RDB_TYPE_CUCKOO};
 }
 
-template <typename T> io::Result<T> RdbLoaderBase::FetchInt() {
-  if (auto ec = EnsureRead(sizeof(T)); ec)
-    return make_unexpected(ec);
+template <typename T> auto RdbLoaderBase::FetchInt() -> Result<T> {
+  RDB_TRY(EnsureRead(sizeof(T)));
 
   char buf[16];
-  if (auto ec = ConsumeChunkBudget(sizeof(T)); ec)
-    return make_unexpected(ec);
+  RDB_TRY(ConsumeChunkBudget(sizeof(T)));
   mem_buf_->ReadAndConsume(sizeof(T), buf);
 
   return base::LE::LoadT<std::make_unsigned_t<T>>(buf);
 }
 
-io::Result<uint8_t> RdbLoaderBase::FetchType() {
+auto RdbLoaderBase::FetchType() -> Result<uint8_t> {
   return FetchInt<uint8_t>();
 }
 
@@ -2452,6 +2490,20 @@ RdbLoader::~RdbLoader() {
 }
 
 error_code RdbLoader::Load(io::Source* src) {
+  Error err = LoadImpl(src);
+  if (!err)
+    return kOk;
+  // Cancel() shuts the socket after raising stop_early_: any read error is a consequence.
+  if (stop_early_ && !*ec_) {
+    err = Fail(std::move(err)) << "stop() requested";
+    LOG(INFO) << "RDB load stopped: " << err.Format();
+  } else {
+    LOG(WARNING) << "RDB load failed: " << err.Format();
+  }
+  return err;
+}
+
+auto RdbLoader::LoadImpl(io::Source* src) -> Error {
   CHECK(!src_ && src);
 
   is_tiered_enabled_ =
@@ -2463,12 +2515,11 @@ error_code RdbLoader::Load(io::Source* src) {
   IoBuf::Bytes bytes = mem_buf_->AppendBuffer();
   io::Result<size_t> read_sz = src_->ReadAtLeast(bytes, 9);
   if (!read_sz)
-    return read_sz.error();
+    return Fail(read_sz.error()) << "reading header";
 
   bytes_read_ = *read_sz;
-  if (bytes_read_ < 9) {
-    return RdbError(errc::wrong_signature);
-  }
+  if (bytes_read_ < 9)
+    return Fail(errc::wrong_signature) << "header too short: " << bytes_read_;
 
   mem_buf_->CommitWrite(bytes_read_);
 
@@ -2477,21 +2528,19 @@ error_code RdbLoader::Load(io::Source* src) {
     auto cb = mem_buf_->InputBuffer();
 
     const size_t magic_size = is_valkey ? 6 : 5;
-    if (!is_valkey && memcmp(cb.data(), "REDIS", 5) != 0) {
-      VLOG(1) << "Bad header: " << absl::CHexEscape(io::View(cb));
-      return RdbError(errc::wrong_signature);
-    }
+    if (!is_valkey && memcmp(cb.data(), "REDIS", 5) != 0)
+      return Fail(errc::wrong_signature)
+             << "bad header '" << absl::CHexEscape(io::View(cb.first(9))) << "'";
 
     char buf[64] = {0};
     ::memcpy(buf, cb.data() + magic_size, 9 - magic_size);
 
     rdb_version_ = atoi(buf);
     // Accept newer versions when their types and opcodes are supported.
-    if (rdb_version_ < (is_valkey ? RDB_VERSION_VALKEY : 5)) {
-      LOG(ERROR) << "Unsupported " << (is_valkey ? "Valkey" : "Redis") << " RDB version "
-                 << rdb_version_ << ". Minimum versions: Redis 5, Valkey " << RDB_VERSION_VALKEY;
-      return RdbError(errc::bad_version);
-    }
+    if (rdb_version_ < (is_valkey ? RDB_VERSION_VALKEY : 5))
+      return Fail(errc::bad_version)
+             << (is_valkey ? "valkey" : "redis") << " version " << rdb_version_
+             << ", minimum versions: redis 5, valkey " << RDB_VERSION_VALKEY;
 
     mem_buf_->ConsumeInput(9);
   }
@@ -2510,13 +2559,16 @@ error_code RdbLoader::Load(io::Source* src) {
     GetCurrentDbSlice().IncrLoadInProgress();
   }
 
-  auto unsupported_type = [&](int type) {
-    LOG(ERROR) << "Unsupported RDB object type or opcode " << type << " in "
-               << (is_df_snapshot_ ? "Dragonfly"
-                   : is_valkey     ? "Valkey"
-                                   : "Redis")
-               << " RDB version " << rdb_version_;
-    return RdbError(errc::invalid_rdb_type);
+  auto unsupported_type_ctx = [&](int type) {
+    return absl::StrCat("unsupported type or opcode ", type, " in ",
+                        is_df_snapshot_ ? "dragonfly"
+                        : is_valkey     ? "valkey"
+                                        : "redis",
+                        " version ", rdb_version_, " after key '",
+                        absl::CHexEscape(last_key_loaded_), "'");
+  };
+  auto unsupported_type = [&](int type) -> Error {
+    return Fail(errc::invalid_rdb_type) << unsupported_type_ctx(type);
   };
 
   // Dragonfly snapshots predating df-ver use version 9, before Redis reused our type IDs.
@@ -2529,7 +2581,7 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     /* Read type. */
-    SET_OR_RETURN(FetchType(), type);
+    RDB_TRY_SET(FetchType(), type) << "record boundary, offset " << bytes_read_;
 
     DVLOG(3) << "Opcode type: " << type;
 
@@ -2538,15 +2590,14 @@ error_code RdbLoader::Load(io::Source* src) {
       return unsupported_type(type);
 
     /* Handle special types. */
-    if (type == RDB_OPCODE_EXPIRETIME) {
+    if (type == RDB_OPCODE_EXPIRETIME)
       return unsupported_type(type);
-    }
 
     if (type == RDB_OPCODE_EXPIRETIME_MS) {
       int64_t val;
       /* EXPIRETIME_MS: milliseconds precision expire times introduced
        * with RDB v3. Like EXPIRETIME but no with more precision. */
-      SET_OR_RETURN(FetchInt<int64_t>(), val);
+      RDB_TRY_SET(FetchInt<int64_t>(), val) << "EXPIRETIME_MS";
       if (!rdb_ignore_expiry_) {
         settings.SetExpire(val);
       }
@@ -2555,11 +2606,11 @@ error_code RdbLoader::Load(io::Source* src) {
 
     if (type == RDB_OPCODE_DF_MASK) {
       uint32_t mask;
-      SET_OR_RETURN(FetchInt<uint32_t>(), mask);
+      RDB_TRY_SET(FetchInt<uint32_t>(), mask) << "DF_MASK";
       settings.is_sticky = mask & DF_MASK_FLAG_STICKY;
       settings.has_mc_flags = mask & DF_MASK_FLAG_MC_FLAGS;
       if (settings.has_mc_flags) {
-        SET_OR_RETURN(FetchInt<uint32_t>(), settings.mc_flags);
+        RDB_TRY_SET(FetchInt<uint32_t>(), settings.mc_flags) << "DF_MASK mc_flags";
       }
       continue; /* Read next opcode. */
     }
@@ -2573,7 +2624,7 @@ error_code RdbLoader::Load(io::Source* src) {
     if (type == RDB_OPCODE_IDLE) {
       /* IDLE: LRU idle time. */
       uint64_t idle;
-      SET_OR_RETURN(LoadLen(nullptr), idle);  // ignore
+      RDB_TRY_SET(LoadLen(nullptr), idle) << "IDLE";
       (void)idle;
       continue; /* Read next opcode. */
     }
@@ -2597,8 +2648,8 @@ error_code RdbLoader::Load(io::Source* src) {
     if (type == RDB_OPCODE_FULLSYNC_END) {
       VLOG(2) << "Read RDB_OPCODE_FULLSYNC_END rss="
               << strings::HumanReadableNumBytes(rss_mem_current.load(std::memory_order_relaxed));
-      RETURN_ON_ERR(EnsureRead(8));
-      RETURN_ON_ERR(ConsumeInput(8));  // ignore 8 bytes
+      RDB_TRY(EnsureRead(8)) << "FULLSYNC_END";
+      RDB_TRY(ConsumeInput(8)) << "FULLSYNC_END";  // ignore 8 bytes
 
       if (full_sync_cut_cb) {
         FlushAllShards();  // Flush as the handler awakes post load handlers
@@ -2610,7 +2661,7 @@ error_code RdbLoader::Load(io::Source* src) {
     if (type == RDB_OPCODE_JOURNAL_OFFSET) {
       VLOG(1) << "Read RDB_OPCODE_JOURNAL_OFFSET";
       uint64_t journal_offset;
-      SET_OR_RETURN(FetchInt<uint64_t>(), journal_offset);
+      RDB_TRY_SET(FetchInt<uint64_t>(), journal_offset) << "JOURNAL_OFFSET";
       VLOG(1) << "Got offset " << journal_offset;
       journal_offset_ = journal_offset;
       continue;
@@ -2620,13 +2671,10 @@ error_code RdbLoader::Load(io::Source* src) {
       unsigned dbid = 0;
 
       /* SELECTDB: Select the specified database. */
-      SET_OR_RETURN(LoadLen(nullptr), dbid);
+      RDB_TRY_SET(LoadLen(nullptr), dbid) << "SELECTDB";
 
-      if (dbid > GetFlag(FLAGS_dbnum)) {
-        LOG(WARNING) << "database id " << dbid << " exceeds dbnum limit. Try increasing the flag.";
-
-        return RdbError(errc::bad_db_index);
-      }
+      if (dbid > GetFlag(FLAGS_dbnum))
+        return Fail(errc::bad_db_index) << "db " << dbid << " > --dbnum " << GetFlag(FLAGS_dbnum);
 
       DVLOG(2) << "Select DB: " << dbid;
       for (unsigned i = 0; i < shard_set->size(); ++i) {
@@ -2648,8 +2696,8 @@ error_code RdbLoader::Load(io::Source* src) {
       /* RESIZEDB: Hint about the size of the keys in the currently
        * selected data base, in order to avoid useless rehashing. */
       uint64_t db_size, expires_size;
-      SET_OR_RETURN(LoadLen(nullptr), db_size);
-      SET_OR_RETURN(LoadLen(nullptr), expires_size);
+      RDB_TRY_SET(LoadLen(nullptr), db_size) << "RESIZEDB";
+      RDB_TRY_SET(LoadLen(nullptr), expires_size) << "RESIZEDB";
 
       VLOG(1) << "RESIZEDB: db_size=" << db_size << ", expires_size=" << expires_size;
 
@@ -2660,71 +2708,65 @@ error_code RdbLoader::Load(io::Source* src) {
     }
 
     if (type == RDB_OPCODE_AUX) {
-      RETURN_ON_ERR(HandleAux());
+      RDB_TRY(HandleAux()) << "AUX";
       allow_df_extensions |= is_df_snapshot_;
       continue; /* Read type again. */
     }
 
     if (type == RDB_OPCODE_MODULE_AUX) {
       uint64_t module_id;
-      SET_OR_RETURN(LoadLen(nullptr), module_id);
+      RDB_TRY_SET(LoadLen(nullptr), module_id) << "MODULE_AUX";
       string module_name = ModuleTypeName(module_id);
 
       LOG(WARNING) << "WARNING: Skipping data for module " << module_name;
-      RETURN_ON_ERR(SkipModuleAuxData());
+      RDB_TRY(SkipModuleAuxData()) << "MODULE_AUX " << module_name;
       continue;
     }
 
     if (type == RDB_OPCODE_COMPRESSED_ZSTD_BLOB_START ||
         type == RDB_OPCODE_COMPRESSED_LZ4_BLOB_START) {
-      RETURN_ON_ERR(HandleCompressedBlob(type));
+      RDB_TRY(HandleCompressedBlob(type)) << "COMPRESSED_BLOB_START";
       continue;
     }
 
     if (type == RDB_OPCODE_COMPRESSED_BLOB_END) {
-      RETURN_ON_ERR(HandleCompressedBlobFinish());
+      RDB_TRY(HandleCompressedBlobFinish()) << "COMPRESSED_BLOB_END";
       continue;
     }
 
     if (type == RDB_OPCODE_JOURNAL_BLOB) {
       FlushAllShards();  // Always flush before applying incremental on top
-      RETURN_ON_ERR(HandleJournalBlob(service_));
+      RDB_TRY(HandleJournalBlob(service_)) << "JOURNAL_BLOB";
       continue;
     }
 
     if (type == RDB_OPCODE_SLOT_INFO) {
       [[maybe_unused]] uint64_t slot_id;
-      SET_OR_RETURN(LoadLen(nullptr), slot_id);
+      RDB_TRY_SET(LoadLen(nullptr), slot_id) << "SLOT_INFO";
       [[maybe_unused]] uint64_t slot_size;
-      SET_OR_RETURN(LoadLen(nullptr), slot_size);
+      RDB_TRY_SET(LoadLen(nullptr), slot_size) << "SLOT_INFO";
       [[maybe_unused]] uint64_t expires_slot_size;
-      SET_OR_RETURN(LoadLen(nullptr), expires_slot_size);
+      RDB_TRY_SET(LoadLen(nullptr), expires_slot_size) << "SLOT_INFO";
       continue;
     }
 
     if (type == RDB_OPCODE_VECTOR_INDEX) {
-      RETURN_ON_ERR(HandleVectorIndex());
+      RDB_TRY(HandleVectorIndex()) << "VECTOR_INDEX";
       continue;
     }
 
     if (type == RDB_OPCODE_SHARD_DOC_INDEX) {
-      RETURN_ON_ERR(HandleShardDocIndex());
+      RDB_TRY(HandleShardDocIndex()) << "SHARD_DOC_INDEX";
       continue;
     }
 
     if (type == RDB_OPCODE_TAGGED_CHUNK) {
       ActiveTaggedChunk state;
-      SET_OR_RETURN(FetchInt<uint32_t>(), state.stream_id);
-      SET_OR_RETURN(FetchInt<uint32_t>(), state.remaining_payload_bytes);
-      if (state.stream_id == 0) {
-        LOG(ERROR) << "invalid stream id 0 with size " << state.remaining_payload_bytes;
-        return RdbError(errc::rdb_file_corrupted);
-      }
-
-      if (state.remaining_payload_bytes == 0) {
-        LOG(ERROR) << "invalid payload of zero size for stream id " << state.stream_id;
-        return RdbError(errc::rdb_file_corrupted);
-      }
+      RDB_TRY_SET(FetchInt<uint32_t>(), state.stream_id);
+      RDB_TRY_SET(FetchInt<uint32_t>(), state.remaining_payload_bytes);
+      if (state.stream_id == 0 || state.remaining_payload_bytes == 0)
+        return Fail(errc::rdb_file_corrupted)
+               << "bad chunk header " << state.stream_id << "/" << state.remaining_payload_bytes;
 
       current_chunk_state_ = state;
 
@@ -2732,8 +2774,8 @@ error_code RdbLoader::Load(io::Source* src) {
       // Otherwise this is the first chunk of a new object, and the normal object-loading
       // path below will read its type and key.
       if (stream_states_.contains(current_chunk_state_->stream_id)) {
-        RETURN_ON_ERR(LoadValueChunk());
-        RETURN_ON_ERR(FinalizeCurrentChunkIfNeeded());
+        RDB_TRY(LoadValueChunk()) << "TAGGED_CHUNK stream " << state.stream_id;
+        RDB_TRY(FinalizeCurrentChunkIfNeeded()) << "TAGGED_CHUNK stream " << state.stream_id;
       }
       continue;
     }
@@ -2744,11 +2786,11 @@ error_code RdbLoader::Load(io::Source* src) {
       return unsupported_type(type);
 
     ++keys_loaded;
-    if (auto ec = LoadKeyValPair(type, &settings); ec) {
-      if (ec == RdbError(errc::invalid_rdb_type))
-        return unsupported_type(type);
-      if (ec != RdbError(errc::empty_key))
-        return ec;
+    if (auto err = LoadKeyValPair(type, &settings); err) {
+      if (err.ec == RdbError(errc::invalid_rdb_type))
+        return Fail(std::move(err)) << unsupported_type_ctx(type);
+      if (err.ec != RdbError(errc::empty_key))
+        return Fail(std::move(err)) << "keys loaded " << keys_loaded;
       // Nothing is left of the value to consume; skip the key and keep loading.
       LOG(WARNING) << "Skipping empty key: " << absl::CHexEscape(last_key_loaded_);
     }
@@ -2756,7 +2798,8 @@ error_code RdbLoader::Load(io::Source* src) {
     VLOG(2) << "LoadKeyValPair key=" << last_key_loaded_ << " rdb_type=" << type
             << " db= " << cur_db_index_;
     settings.Reset();
-    RETURN_ON_ERR(FinalizeCurrentChunkIfNeeded());
+    RDB_TRY(FinalizeCurrentChunkIfNeeded())
+        << "after key '" << absl::CHexEscape(last_key_loaded_) << "'";
   }  // main load loop
 
   DVLOG(1) << "RdbLoad loop finished";
@@ -2765,13 +2808,14 @@ error_code RdbLoader::Load(io::Source* src) {
   FlushAndWaitShards();
 
   if (stop_early_) {
-    std::error_code ec = *ec_;
     // stop()/Cancel() raises stop_early_ without an error; don't report an aborted load as success.
-    return ec ? ec : std::make_error_code(std::errc::operation_canceled);
+    if (std::error_code ec = *ec_)
+      return Fail(ec) << "shard error";
+    return Fail(std::make_error_code(std::errc::operation_canceled));
   }
 
   /* Verify the checksum if RDB version is >= 5 */
-  RETURN_ON_ERR(VerifyChecksum());
+  RDB_TRY(VerifyChecksum()) << "checksum";
 
   return kOk;
 }
@@ -2831,7 +2875,7 @@ void RdbLoader::FinishLoad(absl::Time start_time, size_t* keys_loaded) {
   keys_loaded_ = *keys_loaded;
 }
 
-std::error_code RdbLoaderBase::EnsureRead(size_t min_sz) {
+auto RdbLoaderBase::EnsureRead(size_t min_sz) -> Error {
   // In the flow of reading compressed data, we store the uncompressed data to in uncompressed
   // buffer. When parsing entries we call ensure read with 9 bytes to read the length of
   // key/value. If the key/value is very small (less than 9 bytes) the remainded data in
@@ -2844,7 +2888,7 @@ std::error_code RdbLoaderBase::EnsureRead(size_t min_sz) {
   return EnsureReadInternal(min_sz);
 }
 
-error_code RdbLoaderBase::EnsureReadInternal(size_t min_to_read) {
+auto RdbLoaderBase::EnsureReadInternal(size_t min_to_read) -> Error {
   // We need to include what we already read inside Input buffer. Otherwise we might expect to read
   // more than the minimum
   const size_t min_sz = min_to_read - mem_buf_->InputLen();
@@ -2858,51 +2902,45 @@ error_code RdbLoaderBase::EnsureReadInternal(size_t min_to_read) {
     out_buf = out_buf.subspan(0, source_limit_ - bytes_read_);
   }
 
-  io::Result<size_t> res = src_->ReadAtLeast(out_buf, min_sz);
-  if (!res) {
-    VLOG(1) << "Error reading from source: " << res.error() << " " << min_sz << " bytes";
-    return res.error();
-  }
-  if (*res < min_sz)
-    return RdbError(errc::rdb_file_corrupted);
-  DVLOG(2) << "EnsureRead " << *res << " bytes";
-  bytes_read_ += *res;
+  size_t res;
+  RDB_TRY_SET(src_->ReadAtLeast(out_buf, min_sz), res) << "offset " << bytes_read_;
+  if (res < min_sz)
+    return Fail(errc::rdb_file_corrupted) << EofCtx(res, min_sz, bytes_read_);
+  DVLOG(2) << "EnsureRead " << res << " bytes";
+  bytes_read_ += res;
 
   DCHECK_LE(bytes_read_, source_limit_);
-  mem_buf_->CommitWrite(*res);
+  mem_buf_->CommitWrite(res);
 
   return kOk;
 }
 
-std::error_code RdbLoaderBase::ConsumeInput(size_t n) {
-  RETURN_ON_ERR(ConsumeChunkBudget(n));
+auto RdbLoaderBase::ConsumeInput(size_t n) -> Error {
+  RDB_TRY(ConsumeChunkBudget(n));
   mem_buf_->ConsumeInput(n);
   return kOk;
 }
 
-std::error_code RdbLoaderBase::ConsumeChunkBudget(size_t n) {
+auto RdbLoaderBase::ConsumeChunkBudget(size_t n) -> Error {
   if (!current_chunk_state_)
     return kOk;
 
-  if (n > current_chunk_state_->remaining_payload_bytes) {
-    LOG(ERROR) << "Chunk budget exceeded: requested " << n << " bytes, remaining "
-               << current_chunk_state_->remaining_payload_bytes << ", stream_id "
-               << current_chunk_state_->stream_id << ", bytes_read " << bytes_read_;
-    return RdbError(errc::rdb_chunk_budget_exceeded);
-  }
+  if (n > current_chunk_state_->remaining_payload_bytes)
+    return Fail(errc::rdb_chunk_budget_exceeded)
+           << "requested " << n << " remaining " << current_chunk_state_->remaining_payload_bytes
+           << " stream_id " << current_chunk_state_->stream_id << " offset " << bytes_read_;
 
   current_chunk_state_->remaining_payload_bytes -= n;
   return kOk;
 }
 
-io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
+auto RdbLoaderBase::LoadLen(bool* is_encoded) -> Result<uint64_t> {
   if (is_encoded)
     *is_encoded = false;
 
   // Every RDB file with rdbver >= 5 has 8-bytes checksum at the end,
   // so we can ensure we have 9 bytes to read up until that point.
-  if (error_code ec = EnsureRead(9))
-    return make_unexpected(ec);
+  RDB_TRY(EnsureRead(9));
 
   // Read integer meta info.
   auto bytes = mem_buf_->InputBuffer();
@@ -2911,15 +2949,12 @@ io::Result<uint64_t> RdbLoaderBase::LoadLen(bool* is_encoded) {
 
   // Read integer.
   uint64_t res;
-  SET_OR_UNEXPECT(ReadPackedUInt(meta, bytes), res);
+  RDB_TRY_SET(ReadPackedUInt(meta, bytes), res);
 
   if (meta.Type() == RDB_ENCVAL && is_encoded)
     *is_encoded = true;
 
-  if (auto ec = ConsumeInput(1 + meta.ByteSize()); ec) {
-    return make_unexpected(ec);
-  }
-
+  RDB_TRY(ConsumeInput(1 + meta.ByteSize()));
   return res;
 }
 
@@ -3381,11 +3416,11 @@ void RdbLoader::LoadItemsBuffer(const ItemsBuf& ib) {
 // Huge objects may be loaded in parts, where only a subset of elements are
 // loaded at a time. This reduces the memory required to load huge objects and
 // prevents LoadItemsBuffer blocking.
-error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
+auto RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) -> Error {
   std::string key;
   int64_t start = absl::GetCurrentTimeNanos();
 
-  SET_OR_RETURN(ReadKey(), key);
+  RDB_TRY_SET(ReadKey(), key);
   last_key_loaded_ = key;
 
   auto remaining_payload_bytes = [&] {
@@ -3394,7 +3429,8 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
 
   bool finalized = false;
   do {
-    SET_OR_RETURN(ReadAndDispatchObject(type, key, *settings, cur_db_index_), finalized);
+    RDB_TRY_SET(ReadAndDispatchObject(type, key, *settings, cur_db_index_), finalized)
+        << "key '" << absl::CHexEscape(key.substr(0, 64)) << "' type " << type;
   } while (!finalized && remaining_payload_bytes() > 0 && !stop_early_.load(memory_order_relaxed));
 
   // If the first tagged chunk did not finish the object, save enough state to resume it when
@@ -3409,11 +3445,9 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
     };
     const bool inserted =
         stream_states_.try_emplace(current_chunk_state_->stream_id, std::move(stream_state)).second;
-    if (!inserted) {
-      LOG(ERROR) << "attempt to add first chunk for id " << current_chunk_state_->stream_id
-                 << " which already exists";
-      return RdbError(errc::rdb_file_corrupted);
-    }
+    if (!inserted)
+      return Fail(errc::rdb_file_corrupted)
+             << "duplicate first chunk for stream " << current_chunk_state_->stream_id;
   }
 
   const int delta_ms = (absl::GetCurrentTimeNanos() - start) / 1000'000;
@@ -3423,17 +3457,13 @@ error_code RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) {
   return kOk;
 }
 
-std::error_code RdbLoader::LoadValueChunk() {
-  if (!current_chunk_state_.has_value()) {
-    LOG(ERROR) << "chunk load attempt without expected state";
-    return RdbError(errc::rdb_file_corrupted);
-  }
+auto RdbLoader::LoadValueChunk() -> Error {
+  if (!current_chunk_state_.has_value())
+    return Fail(errc::rdb_file_corrupted) << "chunk without state";
 
   const auto it = stream_states_.find(current_chunk_state_->stream_id);
-  if (it == stream_states_.end()) {
-    LOG(ERROR) << "missing stream id " << current_chunk_state_->stream_id;
-    return RdbError(errc::rdb_file_corrupted);
-  }
+  if (it == stream_states_.end())
+    return Fail(errc::rdb_file_corrupted) << "missing stream " << current_chunk_state_->stream_id;
 
   StreamState& state = it->second;
 
@@ -3442,8 +3472,10 @@ std::error_code RdbLoader::LoadValueChunk() {
 
   bool finalized = false;
   do {
-    SET_OR_RETURN(ReadAndDispatchObject(state.type, state.key, state.settings, state.db_index),
-                  finalized);
+    RDB_TRY_SET(ReadAndDispatchObject(state.type, state.key, state.settings, state.db_index),
+                finalized)
+        << "stream " << current_chunk_state_->stream_id << " key '"
+        << absl::CHexEscape(state.key.substr(0, 64)) << "'";
   } while (!finalized && current_chunk_state_->remaining_payload_bytes > 0 &&
            !stop_early_.load(memory_order_relaxed));
 
@@ -3459,9 +3491,9 @@ std::error_code RdbLoader::LoadValueChunk() {
   return kOk;
 }
 
-io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& key,
-                                                  const ObjSettings& obj_settings,
-                                                  DbIndex db_index) {
+auto RdbLoader::ReadAndDispatchObject(int object_type, std::string& key,
+                                      const ObjSettings& obj_settings, DbIndex db_index)
+    -> Result<bool> {
   const ShardId sid = Shard(key, shard_set->size());
   bool run_inlined = EngineShard::tlocal() && EngineShard::tlocal()->shard_id() == sid;
   Item local_item, *item = &local_item;
@@ -3482,13 +3514,13 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
   const bool was_appending = pending_read_.remaining != 0;
 
   // Read a part of the object. Updates remaining items
-  if (auto ec = ReadObj(object_type, &item->val); ec) {
-    if (ec == RdbError(errc::feature_not_supported)) {
+  if (auto err = ReadObj(object_type, &item->val); err) {
+    if (err.ec == RdbError(errc::feature_not_supported)) {
       LOG(WARNING) << "Skipping unsupported key: " << key;
       pending_read_ = {};
       return true;
     }
-    return make_unexpected(ec);
+    return Fail(std::move(err));
   }
 
   const bool finalized = pending_read_.remaining == 0;
