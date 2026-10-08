@@ -5,7 +5,11 @@
 #include "server/journal/aof.h"
 
 #include <absl/base/internal/endian.h>
+#include <absl/flags/declare.h>
+#include <absl/flags/flag.h>
+#include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
 
 #include <filesystem>
 #include <fstream>
@@ -14,7 +18,15 @@
 #include "util/fibers/pool.h"
 
 #ifdef __linux__
+#include "io/file_util.h"
+#include "server/engine_shard_set.h"
 #include "server/journal/aof_segment_writer.h"
+#include "server/journal/serializer.h"
+#include "server/test_utils.h"
+
+ABSL_DECLARE_FLAG(bool, aof);
+ABSL_DECLARE_FLAG(std::string, dir);
+ABSL_DECLARE_FLAG(bool, force_epoll);
 #endif
 
 namespace dfly {
@@ -245,6 +257,103 @@ TEST_F(AofSegmentWriterTest, OpenKeepsExistingSegment) {
   EXPECT_FALSE(
       filesystem::exists(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(2, 0), ".tmp")));
   EXPECT_EQ(ReadSegment(0).size(), kAofSegmentHeaderSize + kAofBlockHeaderSize + 1);
+}
+
+class AofStreamerTest : public BaseFamilyTest {
+ protected:
+  void SetUp() override {
+    if (absl::GetFlag(FLAGS_force_epoll))
+      GTEST_SKIP() << "--aof needs io_uring";
+    dir_ = base::GetTestTempPath("aof_streamer");
+    filesystem::remove_all(dir_);
+    filesystem::create_directories(dir_);
+    absl::SetFlag(&FLAGS_aof, true);
+    absl::SetFlag(&FLAGS_dir, dir_);
+    BaseFamilyTest::SetUp();
+  }
+
+  void TearDown() override {
+    // The test already shut the service down to read the segments.
+    if (shard_set)
+      BaseFamilyTest::TearDown();
+  }
+
+  absl::FlagSaver saver_;
+  string dir_;
+};
+
+// TODO: remove this test later once we actually test e2e.
+TEST_F(AofStreamerTest, WritesReachSegments) {
+  Run("set a 1");
+  Run("set a 2");
+  Run("hset h f v");
+  Run("lpush l x");
+  Run("mset k1 1 x 2 k2 3 y 4");
+  const uint32_t shard_count = shard_set->size();
+  // Seals, writes and syncs every shard's segment.
+  ShutdownService();
+
+  // Expected commands per shard, in order.
+  vector<vector<string>> expected(shard_count);
+  for (auto [key, cmd] : {pair{"a", "SET a 1"}, pair{"a", "SET a 2"}, pair{"h", "HSET h f v"},
+                          pair{"l", "LPUSH l x"}}) {
+    expected[Shard(key, shard_count)].push_back(cmd);
+  }
+  // The journal records MSET once per shard, with only that shard's keys.
+  vector<string> mset(shard_count);
+  for (auto [key, val] : {pair{"k1", "1"}, pair{"x", "2"}, pair{"k2", "3"}, pair{"y", "4"}}) {
+    string& part = mset[Shard(key, shard_count)];
+    absl::StrAppend(&part, part.empty() ? "MSET " : " ", key, " ", val);
+  }
+  ASSERT_GT(count_if(mset.begin(), mset.end(), [](const string& p) { return !p.empty(); }), 1)
+      << "MSET keys must span shards";
+  for (uint32_t sid = 0; sid < shard_count; ++sid) {
+    if (!mset[sid].empty())
+      expected[sid].push_back(mset[sid]);
+  }
+
+  auto files = io::StatFiles(absl::StrCat(dir_, "/appendonly-*.aof"));
+  ASSERT_TRUE(files);
+  EXPECT_EQ(files->size(), shard_count);
+
+  for (uint32_t sid = 0; sid < shard_count; ++sid) {
+    ifstream in(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, 0)), ios::binary);
+    string file(istreambuf_iterator<char>(in), {});
+    auto seg = DecodeAofSegmentHeader(file);
+    ASSERT_TRUE(seg) << "shard " << sid;
+    EXPECT_EQ(seg->shard_id, sid);
+    EXPECT_EQ(seg->shard_count, shard_count);
+    EXPECT_EQ(seg->seq, 0u);
+
+    string_view rest = string_view(file).substr(kAofSegmentHeaderSize);
+    string payload;
+    uint64_t n_records = 0;
+    optional<AofBlockHeader> prev;
+    while (!rest.empty()) {
+      auto hdr = DecodeAofBlock(rest, seg->segment_uid);
+      ASSERT_TRUE(hdr);
+      if (prev) {
+        EXPECT_EQ(hdr->first_lsn, prev->first_lsn + prev->n_records);
+      }
+      prev = hdr;
+      n_records += hdr->n_records;
+      payload += rest.substr(kAofBlockHeaderSize, hdr->total_block_bytes - kAofBlockHeaderSize);
+      rest.remove_prefix(hdr->total_block_bytes);
+    }
+
+    // The payload must hold exactly n_records whole records.
+    io::BytesSource source(payload);
+    JournalReader reader{&source, 0};
+    journal::ParsedEntry parsed;
+    vector<string> cmds;
+    for (uint64_t i = 0; i < n_records; ++i) {
+      ASSERT_FALSE(reader.ReadEntry(&parsed)) << "shard " << sid << " record " << i;
+      if (parsed.opcode == journal::Op::COMMAND)
+        cmds.push_back(absl::StrJoin(parsed.cmd.view(), " "));
+    }
+    EXPECT_TRUE(reader.ReadEntry(&parsed)) << "trailing data in shard " << sid;
+    EXPECT_EQ(cmds, expected[sid]) << "shard " << sid;
+  }
 }
 
 #endif  // __linux__

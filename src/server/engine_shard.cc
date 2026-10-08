@@ -23,6 +23,7 @@ extern "C" {
 #include "server/channel_store.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
@@ -728,9 +729,17 @@ void EngineShard::RemoveContTx(Transaction* tx) {
   }
 }
 
+void EngineShard::set_aof_streamer(std::unique_ptr<AofStreamer> streamer) {
+  aof_streamer_ = std::move(streamer);
+}
+
 void EngineShard::Heartbeat() {
   DVLOG(3) << " Hearbeat";
   DCHECK(namespaces);
+
+  // Before the skip checks below, so small AOF blocks are written even when the heartbeat stalls.
+  if (aof_streamer_)
+    aof_streamer_->Seal();
 
   // Reap zero-copy GET pins whose refcnt has dropped to 0. Cheap and idempotent.
   CompactObj::DrainPendingReads();
