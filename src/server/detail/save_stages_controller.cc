@@ -123,7 +123,7 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
 }
 
 error_code RdbSnapshot::SaveBody() {
-  return saver_->SaveBody(cntx_);
+  return saver_->SaveBody(*cntx_);
 }
 
 error_code RdbSnapshot::WaitSnapshotInShard(EngineShard* shard) {
@@ -145,6 +145,12 @@ RdbSaver::SnapshotStats RdbSnapshot::GetCurrentSnapshotProgress() const {
 }
 
 error_code RdbSnapshot::Close() {
+  // Closing a cloud file publishes the upload. Leave cancelled uploads uncommitted.
+  // TODO: Add abort support upstream in helio and abort cancelled uploads here; skipping Close()
+  // leaves uploaded S3 multipart parts, GCS resumable sessions, and Azure uncommitted blocks.
+  if (snapshot_storage_->IsCloud() && !cntx_->IsRunning())
+    return cntx_->GetError();
+
 #ifdef __linux__
   if (is_linux_file_) {
     return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
@@ -163,7 +169,7 @@ error_code RdbSnapshot::Close() {
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_->StartSnapshotInShard(false, &cntx_, shard);
+  saver_->StartSnapshotInShard(false, cntx_, shard);
   started_shards_.fetch_add(1, memory_order_relaxed);
 }
 
@@ -188,7 +194,7 @@ std::optional<SaveInfo> SaveStagesController::Init() {
 
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
-    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
+    snapshot = make_unique<RdbSnapshot>(snapshot_storage_.get(), &cntx_);
 
   return {};
 }
@@ -198,6 +204,13 @@ void SaveStagesController::Start() {
     SaveDfs();
   else
     SaveRdb();
+}
+
+void SaveStagesController::Cancel() {
+  // TODO: Store the full cancellation error before ReportError() stops serializers, or use cntx_
+  // as the sole error sink. SaveBody() can otherwise store a plain error_code and lose the message.
+  shared_err_ = cntx_.ReportError(make_error_code(errc::operation_canceled),
+                                  "Snapshot saving cancelled because server is loading");
 }
 
 void SaveStagesController::WaitAllSnapshots() {
@@ -211,6 +224,7 @@ void SaveStagesController::WaitAllSnapshots() {
 
 SaveInfo SaveStagesController::Finalize() {
   RunStage(&SaveStagesController::CloseCb);
+  shared_err_ = cntx_.GetError();
 
   if (auto err = FinalizeFileMovement(); err) {
     shared_err_ = err;
