@@ -119,11 +119,16 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
   saver_.reset(
       new RdbSaver(io_sink_.get(), save_mode, align_writes, snapshot_id, DflyVersion::CURRENT_VER));
 
-  return saver_->SaveHeader(std::move(glob_data));
+  auto ec = saver_->SaveHeader(std::move(glob_data));
+  if (ec) {
+    cntx_->ReportError(ec);
+    Close();  // Aborts the cloud upload because the save has failed.
+  }
+  return ec;
 }
 
 error_code RdbSnapshot::SaveBody() {
-  return saver_->SaveBody(cntx_);
+  return saver_->SaveBody(*cntx_);
 }
 
 error_code RdbSnapshot::WaitSnapshotInShard(EngineShard* shard) {
@@ -156,14 +161,29 @@ error_code RdbSnapshot::Close() {
   // S3 implementation is stack hungry. We use a fiber to close the file to
   // avoid wasting stack space.
   auto fb = ProactorBase::me()->LaunchFiber(
-      fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "write_file_close",
-      [&] { ec = static_cast<io::WriteFile*>(io_sink_.get())->Close(); });
+      fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "write_file_close", [&] {
+        auto* file = static_cast<io::WriteFile*>(io_sink_.get());
+        bool is_cloud = snapshot_storage_->IsCloud();
+        // Closing a cloud file publishes it, so a failed save must not close it.
+        if (is_cloud && !cntx_->IsRunning())
+          ec = make_error_code(errc::operation_canceled);
+        else
+          ec = file->Close();
+
+        // Abort the unpublished upload, including after a failed Close().
+        if (is_cloud && ec) {
+          // Abort can yield, so stop other snapshots before starting cleanup.
+          cntx_->ReportError(ec);
+          error_code abort_ec = file->Abort();
+          LOG_IF(WARNING, abort_ec) << "Failed to abort snapshot upload: " << abort_ec.message();
+        }
+      });
   fb.Join();
   return ec;
 }
 
 void RdbSnapshot::StartInShard(EngineShard* shard) {
-  saver_->StartSnapshotInShard(false, &cntx_, shard);
+  saver_->StartSnapshotInShard(false, cntx_, shard);
   started_shards_.fetch_add(1, memory_order_relaxed);
 }
 
@@ -182,13 +202,13 @@ SaveStagesController::~SaveStagesController() {
 
 std::optional<SaveInfo> SaveStagesController::Init() {
   if (auto err = BuildFullPath(); err) {
-    shared_err_ = err;
+    cntx_.ReportError(err);
     return GetSaveInfo();
   }
 
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
-    snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
+    snapshot = make_unique<RdbSnapshot>(snapshot_storage_.get(), &cntx_);
 
   return {};
 }
@@ -198,6 +218,11 @@ void SaveStagesController::Start() {
     SaveDfs();
   else
     SaveRdb();
+}
+
+void SaveStagesController::Cancel() {
+  cntx_.ReportError(make_error_code(errc::operation_canceled),
+                    "Snapshot saving cancelled because server is loading");
 }
 
 void SaveStagesController::WaitAllSnapshots() {
@@ -213,7 +238,7 @@ SaveInfo SaveStagesController::Finalize() {
   RunStage(&SaveStagesController::CloseCb);
 
   if (auto err = FinalizeFileMovement(); err) {
-    shared_err_ = err;
+    cntx_.ReportError(err);
   }
 
   return GetSaveInfo();
@@ -303,7 +328,7 @@ void SaveStagesController::SaveDfsSingle(EngineShard* shard, const std::string& 
   auto glob_data = RdbSaver::GetGlobalData(service_, is_summary);
 
   if (auto err = snapshot->Start(mode, filename, glob_data, snapshot_id); err) {
-    shared_err_ = err;
+    cntx_.ReportError(err);
     snapshot.reset();
     return;
   }
@@ -326,6 +351,7 @@ void SaveStagesController::SaveRdb() {
   if (auto err =
           snapshot->Start(SaveMode::RDB, filename, RdbSaver::GetGlobalData(service_, true), "");
       err) {
+    cntx_.ReportError(err);
     snapshot.reset();
     return;
   }
@@ -346,8 +372,8 @@ SaveInfo SaveStagesController::GetSaveInfo() {
   info.save_time = start_time_;
   info.duration_sec = GetCurrentSaveDuration();
 
-  if (shared_err_) {
-    info.error = *shared_err_;
+  if (auto err = cntx_.GetError(); err) {
+    info.error = err;
     return info;
   }
 
@@ -376,8 +402,7 @@ GenericError SaveStagesController::FinalizeFileMovement() {
     return {};
   DVLOG(1) << "FinalizeFileMovement start";
 
-  // If the shared_err is set, the snapshot saving failed
-  bool has_error = bool(shared_err_);
+  bool has_error = bool(cntx_.GetError());
 
   std::error_code ec;
   for (const auto& [_, filename] : snapshots_) {
@@ -428,20 +453,23 @@ GenericError SaveStagesController::BuildFullPath() {
 void SaveStagesController::SaveBody(unsigned index) {
   CHECK(!use_dfs_format_ || index == shard_set->size());  // used in rdb and df summary file
   if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted()) {
-    shared_err_ = snapshot->SaveBody();
+    if (auto ec = snapshot->SaveBody(); ec)
+      cntx_.ReportError(ec);
   }
 }
 
 void SaveStagesController::WaitSnapshotInShard(EngineShard* shard) {
   if (auto& snapshot = snapshots_[shard->shard_id()].first; snapshot && snapshot->HasStarted()) {
-    shared_err_ = snapshot->WaitSnapshotInShard(shard);
+    if (auto ec = snapshot->WaitSnapshotInShard(shard); ec)
+      cntx_.ReportError(ec);
   }
 }
 
 void SaveStagesController::CloseCb(unsigned index) {
   if (auto& snapshot = snapshots_[index].first; snapshot && snapshot->HasStarted()) {
     snapshot->FillFreqMap();
-    shared_err_ = snapshot->Close();
+    if (auto ec = snapshot->Close(); ec)
+      cntx_.ReportError(ec);
 
     unique_lock lk{rdb_name_map_mu_};
     for (const auto& k_v : snapshot->freq_map())
