@@ -24,6 +24,8 @@ class JournalApplier {
   bool Apply(TransactionData&& tx_data, ExecutionState* cntx);
 
  private:
+  bool Execute(TransactionData& tx_data);
+
   JournalExecutor executor_;
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
   uint32_t num_flows_;

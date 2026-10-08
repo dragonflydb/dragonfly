@@ -8,6 +8,14 @@
 
 namespace dfly {
 
+// Runs the wait expression and returns false if woken up by cancellation.
+#define WAIT_OR_RETURN(wait_expr) \
+  do {                            \
+    wait_expr;                    \
+    if (!cntx->IsRunning())       \
+      return false;               \
+  } while (0)
+
 JournalApplier::JournalApplier(Service* service,
                                std::shared_ptr<MultiShardExecution> multi_shard_exe,
                                uint32_t num_flows, ExecuteHook execute_hook)
@@ -17,6 +25,13 @@ JournalApplier::JournalApplier(Service* service,
       execute_hook_(std::move(execute_hook)) {
 }
 
+bool JournalApplier::Execute(TransactionData& tx_data) {
+  // Run the hook first so a crash during execution still leaves the record logged.
+  if (execute_hook_)
+    execute_hook_(tx_data);
+  return executor_.Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
+}
+
 bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
   if (!cntx->IsRunning()) {
     return false;
@@ -24,12 +39,7 @@ bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
 
   if (!tx_data.IsGlobalCmd()) {
     VLOG(3) << "Execute cmd without sync between shards. txid: " << tx_data.txid;
-    // Traffic logger hook: gate is inside LogReplicaCommand, so the no-op path
-    // (logger disabled) is cheap. Log before Execute so a crash during execute
-    // still leaves the record on disk for post-mortem replay.
-    if (execute_hook_)
-      execute_hook_(tx_data);
-    return executor_.Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
+    return Execute(tx_data);
   }
 
   bool inserted_by_me = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, num_flows_);
@@ -40,34 +50,20 @@ bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
   // Wait until shards flows got transaction data and inserted to map.
   // This step enforces that replica will execute multi shard commands that finished on master
   // and replica received all the commands from all shards.
-  multi_shard_data.block->Wait();
-  // Check if we woke up due to cancellation.
-  if (!cntx->IsRunning())
-    return false;
-  VLOG(2) << "Execute txid: " << tx_data.txid << " block wait finished";
+  WAIT_OR_RETURN(multi_shard_data.block->Wait());
 
   VLOG(2) << "Execute txid: " << tx_data.txid << " global command execution";
   // Wait until all shards flows get to execution step of this transaction.
-  multi_shard_data.barrier.Wait();
-  // Check if we woke up due to cancellation.
-  if (!cntx->IsRunning())
-    return false;
+  WAIT_OR_RETURN(multi_shard_data.barrier.Wait());
   // Global command will be executed only from one flow fiber. This ensure corectness of data in
   // replica.
   bool execution_res = true;
   if (inserted_by_me) {
-    // Global command — log exactly once (only the inserter flow runs Execute,
-    // so this guard naturally dedups across per-shard flows).
-    if (execute_hook_)
-      execute_hook_(tx_data);
-    execution_res = executor_.Execute(tx_data.dbid, tx_data.command) == facade::DispatchResult::OK;
+    execution_res = Execute(tx_data);
   }
   // Wait until exection is done, to make sure we done execute next commands while the global is
   // executed.
-  multi_shard_data.barrier.Wait();
-  // Check if we woke up due to cancellation.
-  if (!cntx->IsRunning())
-    return false;
+  WAIT_OR_RETURN(multi_shard_data.barrier.Wait());
 
   // Erase from map can be done only after all flow fibers executed the transaction commands.
   // The last fiber which will decrease the counter to 0 will be the one to erase the data from
@@ -79,5 +75,7 @@ bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
   }
   return execution_res;
 }
+
+#undef WAIT_OR_RETURN
 
 }  // namespace dfly
