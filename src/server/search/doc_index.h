@@ -629,6 +629,10 @@ class ShardDocIndices {
   // Drop all indices
   void DropAllIndices();
 
+  // Drop the indices that never started building (a load failed after defining them).
+  // Returns their names.
+  std::vector<std::string> DropUnbuiltIndices();
+
   // Rebuild all indices. Each index decides on its own whether to use the restore
   // path (graph already populated from RDB → only vectors need to be filled in)
   // or a full rebuild from the keyspace, based on its own state at call time.

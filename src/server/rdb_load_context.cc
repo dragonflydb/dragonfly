@@ -294,8 +294,21 @@ void RdbLoadContext::PerformPostLoad(Service* service, bool is_error) {
 
   uint32_t master_shards = master_shard_count_;
 
-  if (is_error)
+  if (is_error) {
+    // A failed replica sync is retried and its next successful run rebuilds every index; only an
+    // exclusive load (DEBUG RELOAD, DFLY LOAD) would leave the unbuilt indices behind.
+    if (!service->IsLoadingExclusively())
+      return;
+    std::vector<std::string> dropped;
+    shard_set->AwaitRunningOnShardQueue([&dropped](EngineShard* es) {
+      auto names = es->search_indices()->DropUnbuiltIndices();
+      if (es->shard_id() == 0)
+        dropped = std::move(names);
+    });
+    for (const auto& name : dropped)
+      LOG(WARNING) << "Dropped search index " << name << ": the load failed before it was built";
     return;
+  }
 
   // When shard counts differ, remap HNSW global_ids and redistribute key mappings on-the-fly.
   bool shard_count_differs = master_shards != 0 && master_shards != shard_set->size();
