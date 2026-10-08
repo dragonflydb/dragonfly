@@ -14,6 +14,7 @@
 
 #include "base/logging.h"
 #include "server/error.h"
+#include "util/fibers/proactor_base.h"
 
 namespace dfly {
 
@@ -21,6 +22,12 @@ using namespace std;
 using util::fb2::OpenLinux;
 
 namespace {
+
+constexpr uint32_t kAofSyncMs = 1000;
+
+error_code IoError(int res) {
+  return res < 0 ? error_code{-res, system_category()} : make_error_code(errc::io_error);
+}
 
 error_code SyncDir(const string& dir) {
   auto res = OpenLinux(dir, O_RDONLY | O_DIRECTORY, 0);
@@ -42,6 +49,8 @@ AofSegmentWriter::AofSegmentWriter(string dir, uint32_t shard_id, uint32_t shard
 
 AofSegmentWriter::~AofSegmentWriter() {
   DCHECK_EQ(in_flight_, 0u);
+  DCHECK(!sync_in_flight_);
+  DCHECK_EQ(tick_id_, 0u) << "Shutdown() was not called";
 }
 
 string AofSegmentWriter::SegmentName(uint32_t shard_id, uint64_t seq) {
@@ -89,37 +98,51 @@ error_code AofSegmentWriter::Open(uint64_t seq) {
   std::move(cleanup).Cancel();
 
   builder_.emplace(uid, [this](AofSealedBlock block) { OnSealed(std::move(block)); });
+  tick_id_ = util::fb2::ProactorBase::me()->AddPeriodic(kAofSyncMs, [this] { MaybeStartFSync(); });
   return {};
 }
 
 void AofSegmentWriter::AddRecord(string_view record, uint64_t lsn) {
-  // TODO: fail-stop after a write error for now; retries come later.
-  if (write_ec_)
+  if (ec_)
     return;
   builder_->Append(record, lsn);
 }
 
 void AofSegmentWriter::Seal() {
-  if (write_ec_)
+  if (ec_)
     return;
   builder_->Seal();
 }
 
 error_code AofSegmentWriter::Shutdown() {
+  DCHECK(file_);
+  util::fb2::ProactorBase::me()->CancelPeriodic(tick_id_);
+  tick_id_ = 0;
+
   Seal();
-  ev_.await([this] { return in_flight_ == 0; });
-  if (write_ec_)
-    return write_ec_;
-  RETURN_ON_ERR(file_->FSync(IORING_FSYNC_DATASYNC));
-  return file_->Close();
+  util::fb2::NoOpLock lk;
+  cv_.wait(lk, [this] { return in_flight_ == 0 && !sync_in_flight_; });
+
+  if (!ec_) {
+    if (error_code ec = file_->FSync(IORING_FSYNC_DATASYNC); ec)
+      ec_ = ec;
+    else
+      durable_lsn_ = written_lsn_;
+  }
+  error_code close_ec = file_->Close();
+  // On NFS-like filesystems close can be the only place a deferred write error shows up.
+  LOG_IF(ERROR, close_ec) << "AOF close failed: " << close_ec.message();
+  return ec_ ? ec_ : close_ec;
 }
 
 void AofSegmentWriter::WaitPending(size_t limit) {
-  ev_.await([&] { return PendingBytes() <= limit || write_ec_; });
+  util::fb2::NoOpLock lk;
+  cv_.wait(lk, [&] { return PendingBytes() <= limit || ec_; });
 }
 
 size_t AofSegmentWriter::PendingBytes() const {
-  return pending_bytes_ + builder_->PayloadSize();
+  // pending_ spans [written_offset_, next_offset_) of the file.
+  return next_offset_ - written_offset_ + builder_->PayloadSize();
 }
 
 void AofSegmentWriter::OnSealed(AofSealedBlock block) {
@@ -127,7 +150,6 @@ void AofSegmentWriter::OnSealed(AofSealedBlock block) {
   uint64_t last_lsn = block.n_records ? block.first_lsn + block.n_records - 1 : 0;
   pending_.push_back({std::move(block.bytes), next_offset_, last_lsn});
   next_offset_ += len;
-  pending_bytes_ += len;
   ++in_flight_;
   Submit(&pending_.back());
 }
@@ -139,12 +161,15 @@ void AofSegmentWriter::Submit(PendingBlock* pb) {
 
 void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
   if (res <= 0) {
-    // TODO: fail-stop for now, retries come later.
-    // The block stays pending forever and written_lsn_ gets stuck.
-    write_ec_ = res < 0 ? error_code{-res, system_category()} : make_error_code(errc::io_error);
-    LOG(ERROR) << "AOF write failed at offset " << pb->offset << ": " << write_ec_.message();
+    // The block stays unwritten, so WrittenLsn stops before it. Blocks in flight after it still
+    // land, so the segment can hold valid blocks after a gap: readers must stop at the first
+    // invalid block and never resync past it.
+    error_code ec = IoError(res);
+    LOG_EVERY_T(ERROR, 1) << "AOF write failed at offset " << pb->offset << ": " << ec.message();
+    if (!ec_)
+      ec_ = ec;
     --in_flight_;
-    ev_.notifyAll();
+    cv_.notify_all();
     return;
   }
 
@@ -159,15 +184,40 @@ void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
   --in_flight_;
   while (!pending_.empty() && pending_.front().done) {
     PendingBlock& front = pending_.front();
+    written_offset_ = front.offset + front.bytes.size();
     // can be zero for a block that is fully partial. E.g. blk 1(part1) - blk 2(part2) - blk
     // 3(part3, other) blk 2 is fully partial, it's a record whose front/tail belongs to adjacent
     // blocks.
     if (front.last_lsn)
       written_lsn_ = front.last_lsn;
-    pending_bytes_ -= front.bytes.size();
     pending_.pop_front();
   }
-  ev_.notifyAll();
+  cv_.notify_all();
+}
+
+void AofSegmentWriter::MaybeStartFSync() {
+  // fdatasync covers only writes completed before it is issued, hence the captured target.
+  if (sync_in_flight_ || ec_ || written_lsn_ == durable_lsn_)
+    return;
+  uint64_t sync_lsn = written_lsn_;
+  sync_in_flight_ = true;
+  file_->FSyncAsync(IORING_FSYNC_DATASYNC,
+                    [this, sync_lsn](int res) { OnSyncDone(sync_lsn, res); });
+}
+
+void AofSegmentWriter::OnSyncDone(uint64_t sync_lsn, int res) {
+  sync_in_flight_ = false;
+  if (res < 0) {
+    // Never retried: the kernel may have dropped the dirty pages ("fsyncgate"), so a later
+    // success would prove nothing.
+    // TODO: decide how to trigger an immediate checkpoint (#8410) to recover.
+    if (!ec_)
+      ec_ = IoError(res);
+    LOG(ERROR) << "AOF fdatasync failed: " << IoError(res).message();
+  } else {
+    durable_lsn_ = sync_lsn;
+  }
+  cv_.notify_all();
 }
 
 }  // namespace dfly

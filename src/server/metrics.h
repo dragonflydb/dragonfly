@@ -142,6 +142,8 @@ struct Metrics {
 
   acl::UserRegistry::AclStats acl_stats;
 
+  TypeMemDeltas type_mem_delta{};
+
   void InitFromThread(Namespace* ns, const CommandRegistry* registry, unsigned proactor_index,
                       const MetricsCollectOpts& opts, DflyCmd* dfly_cmd);
 
