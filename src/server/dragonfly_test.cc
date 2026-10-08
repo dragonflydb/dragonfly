@@ -162,6 +162,9 @@ TEST_F(DflyEngineTest, EvalResp) {
   ASSERT_THAT(resp, ArrLen(4));
   EXPECT_THAT(resp.GetVec(), AnyOf(ElementsAre("a", IntArg(1), "b", IntArg(2)),
                                    ElementsAre("b", IntArg(2), "a", IntArg(1))));
+
+  resp = Run({"eval", "local k = {}; k[1] = k; return {map = {[k] = 1}}", "0"});
+  EXPECT_THAT(resp, ErrArg("reached lua stack limit"));
 }
 
 TEST_F(DflyEngineTest, EvalGetLargeBorrowedStrings) {

@@ -303,26 +303,206 @@ void Require(lua_State* lua, const char* name, lua_CFunction openf) {
 }
 
 string_view TopSv(lua_State* lua) {
-  return string_view{lua_tostring(lua, -1), lua_rawlen(lua, -1)};
+  size_t len = 0;
+  const char* str = lua_tolstring(lua, -1, &len);
+  return {str, len};
 }
 
-optional<int> FetchKey(lua_State* lua, const char* key) {
-  lua_pushcfunction(lua, [](lua_State* lua) -> int {
-    lua_gettable(lua, -3);
-    return 1;
-  });
-  lua_pushstring(lua, key);
-  int status = lua_pcall(lua, 1, 1, 0);
-  if (status != LUA_OK) {
-    lua_pop(lua, 1);
-    return nullopt;
+// Maximal nesting of tables in a script reply, including the root table.
+constexpr int kMaxReplyDepth = 128;
+
+// Stack slots for the wrapper field names and the root table.
+constexpr int kReplyRootSlots = 4;
+
+// Stack slots used per nesting level: the wrapped map, map key and value, and a key copy.
+constexpr int kReplyTableSlots = 4;
+
+enum class ReplyField : uint8_t { kNone, kError, kStatus, kMap };
+
+// Serializes the non-table value at the top of the stack.
+void SerializeReplyScalar(lua_State* lua, int type, ObjectExplorer* serializer) {
+  switch (type) {
+    case LUA_TSTRING:
+      serializer->OnString(TopSv(lua));
+      break;
+    case LUA_TBOOLEAN:
+      serializer->OnBool(lua_toboolean(lua, -1));
+      break;
+    case LUA_TNUMBER:
+      if (lua_isinteger(lua, -1)) {
+        serializer->OnInt(lua_tointeger(lua, -1));
+      } else {
+        serializer->OnDouble(lua_tonumber(lua, -1));
+      }
+      break;
+    case LUA_TNIL:
+      serializer->OnNil();
+      break;
+    default:
+      LOG(ERROR) << "Unsupported type " << lua_typename(lua, type);
+      serializer->OnNil();
   }
-  int type = lua_type(lua, -1);
-  if (type == LUA_TNIL) {
-    lua_pop(lua, 1);
-    return nullopt;
+}
+
+// Converts a table reply in two passes. Planning checks the nesting depth and records how each
+// table is serialized, so serialization does not repeat wrapper-field lookups or length
+// computations. Neither pass allocates Lua objects and growing the stack never runs garbage
+// collection, so the tables can not change between the passes.
+// TODO: Report the depth error in place of the too-deep table, like Redis, and convert the reply
+// in a single pass. This would skip the planning pass (about 5% of a Lua XREAD), but the client
+// would get the outer levels of a too-deep reply with the error nested inside, instead of only
+// the error.
+class TableReply {
+ public:
+  // Pushes the wrapper field names, so that lookups do not intern them for every table.
+  explicit TableReply(lua_State* lua) : lua_{lua} {
+    lua_pushliteral(lua, "err");
+    lua_pushliteral(lua, "ok");
+    lua_pushliteral(lua, "map");
+    map_key_ = lua_gettop(lua);
+    ok_key_ = map_key_ - 1;
+    err_key_ = map_key_ - 2;
   }
-  return type;
+
+  // Plans the table at the top of the stack and its nested tables in serialization order. Returns
+  // false if they nest more than kMaxReplyDepth tables or the stack can not grow. Leaves the
+  // stack unchanged.
+  bool Plan(int depth = 1);
+
+  // Serializes the planned table at the top of the stack, leaving the stack unchanged.
+  void Serialize(ObjectExplorer* serializer);
+
+ private:
+  struct Table {
+    ReplyField field;
+    uint32_t len;  // Number of array elements or map entries.
+  };
+
+  // Determines how the table at the top of the stack is serialized. For maps, pushes the map.
+  ReplyField PushReplyField();
+
+  // Pushes the field of the table at the top of the stack.
+  void PushField(int key) {
+    lua_pushvalue(lua_, key);
+    lua_rawget(lua_, -2);
+  }
+
+  // Serializes the value of the given type at the top of the stack and pops it.
+  void SerializeValue(int type, ObjectExplorer* serializer);
+
+  lua_State* lua_;
+  int err_key_, ok_key_, map_key_;  // Stack indices of the wrapper field names.
+  int reserved_top_ = 0;            // Highest stack index that is guaranteed to be available.
+  absl::InlinedVector<Table, 16> tables_;
+  size_t next_table_ = 0;
+};
+
+ReplyField TableReply::PushReplyField() {
+  // Each lookup reuses the stack slot of the previous one.
+  lua_pushvalue(lua_, err_key_);
+  if (lua_rawget(lua_, -2) == LUA_TSTRING)
+    return ReplyField::kError;
+  lua_copy(lua_, ok_key_, -1);
+  if (lua_rawget(lua_, -2) == LUA_TSTRING)
+    return ReplyField::kStatus;
+  lua_copy(lua_, map_key_, -1);
+  if (lua_rawget(lua_, -2) == LUA_TTABLE)
+    return ReplyField::kMap;
+  lua_pop(lua_, 1);
+  return ReplyField::kNone;
+}
+
+bool TableReply::Plan(int depth) {
+  if (depth > kMaxReplyDepth)
+    return false;
+
+  // The stack grows when planning first reaches a height. Serialization pushes the same slots at
+  // the same heights, so it needs no checks of its own.
+  const int top = lua_gettop(lua_);
+  if (top + kReplyTableSlots > reserved_top_) {
+    if (!lua_checkstack(lua_, kReplyTableSlots))
+      return false;
+    reserved_top_ = top + kReplyTableSlots;
+  }
+
+  const size_t index = tables_.size();
+  const ReplyField field = PushReplyField();
+  tables_.push_back({field, 0});
+
+  bool safe = true;
+  uint32_t len = 0;
+  switch (field) {
+    case ReplyField::kError:
+    case ReplyField::kStatus:
+      break;
+    case ReplyField::kMap:
+      for (lua_pushnil(lua_); safe && lua_next(lua_, -2) != 0; lua_pop(lua_, 1)) {
+        ++len;
+        if (lua_type(lua_, -2) == LUA_TTABLE) {
+          lua_pushvalue(lua_, -2);
+          safe = Plan(depth + 1);
+          lua_pop(lua_, 1);
+        }
+        if (safe && lua_type(lua_, -1) == LUA_TTABLE)
+          safe = Plan(depth + 1);
+      }
+      break;
+    case ReplyField::kNone:
+      len = lua_rawlen(lua_, -1);
+      for (uint32_t i = 0; safe && i < len; ++i) {
+        if (lua_rawgeti(lua_, -1, i + 1) == LUA_TTABLE)
+          safe = Plan(depth + 1);
+        lua_pop(lua_, 1);
+      }
+      break;
+  }
+  tables_[index].len = len;
+  lua_settop(lua_, top);
+  return safe;
+}
+
+void TableReply::SerializeValue(int type, ObjectExplorer* serializer) {
+  if (type == LUA_TTABLE) {
+    Serialize(serializer);
+  } else {
+    SerializeReplyScalar(lua_, type, serializer);
+  }
+  lua_pop(lua_, 1);
+}
+
+void TableReply::Serialize(ObjectExplorer* serializer) {
+  DCHECK_LT(next_table_, tables_.size());
+  const Table table = tables_[next_table_++];
+  switch (table.field) {
+    case ReplyField::kError:
+      PushField(err_key_);
+      serializer->OnError(TopSv(lua_));
+      break;
+    case ReplyField::kStatus:
+      PushField(ok_key_);
+      serializer->OnStatus(TopSv(lua_));
+      break;
+    case ReplyField::kMap: {
+      PushField(map_key_);
+      serializer->OnMapStart(table.len);
+      uint32_t len = 0;
+      for (lua_pushnil(lua_); lua_next(lua_, -2) != 0; ++len) {
+        lua_pushvalue(lua_, -2);  // Serialize a key copy, keeping the key for lua_next.
+        SerializeValue(lua_type(lua_, -1), serializer);  // Pops the key copy.
+        SerializeValue(lua_type(lua_, -1), serializer);  // Pops the value.
+      }
+      DCHECK_EQ(len, table.len);
+      serializer->OnMapEnd();
+      break;
+    }
+    case ReplyField::kNone:
+      serializer->OnArrayStart(table.len);
+      for (uint32_t i = 0; i < table.len; ++i)
+        SerializeValue(lua_rawgeti(lua_, -1, i + 1), serializer);
+      serializer->OnArrayEnd();
+      return;
+  }
+  lua_pop(lua_, 1);  // Pop the wrapped value.
 }
 
 void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::SliceSpan args) {
@@ -1192,24 +1372,6 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   return body;
 }
 
-bool Interpreter::IsResultSafe() const {
-  int top = lua_gettop(lua_);
-  if (top >= 128)
-    return false;
-
-  int t = lua_type(lua_, -1);
-  if (t != LUA_TTABLE)
-    return true;
-
-  bool res = IsTableSafe();
-
-  // Stack can contain intermediate unwindings that were not clean up.
-  DCHECK_GE(lua_gettop(lua_), top);
-  lua_settop(lua_, top);  // restore to the original setting.
-
-  return res;
-}
-
 bool Interpreter::AddInternal(const char* f_id, string_view body, string* error) {
   string script = absl::StrCat("function ", f_id, "() \n");
   absl::StrAppend(&script, body, "\nend");
@@ -1229,128 +1391,22 @@ bool Interpreter::AddInternal(const char* f_id, string_view body, string* error)
   return true;
 }
 
-// Stack is cleaned for us, we can leave it dirty
-bool Interpreter::IsTableSafe() const {
-  auto fres = FetchKey(lua_, "err");
-  if (fres && *fres == LUA_TSTRING) {
-    return true;
+bool Interpreter::SerializeResult(ObjectExplorer* serializer) {
+  const int result = lua_gettop(lua_);
+  bool serialized = true;
+  if (int type = lua_type(lua_, result); type != LUA_TTABLE) {
+    SerializeReplyScalar(lua_, type, serializer);
+  } else if (lua_checkstack(lua_, kReplyRootSlots)) {
+    TableReply reply{lua_};
+    lua_pushvalue(lua_, result);
+    serialized = reply.Plan();
+    if (serialized)
+      reply.Serialize(serializer);
+  } else {
+    serialized = false;
   }
-
-  fres = FetchKey(lua_, "ok");
-  if (fres && *fres == LUA_TSTRING) {
-    return true;
-  }
-
-  // Copy root table because we remove it upon finishing traversal
-  lua_pushnil(lua_);
-  lua_copy(lua_, -2, -1);
-
-  int depth = 1;
-  lua_pushnil(lua_);
-
-  // DFS based on lua stack: [parent-table] [parent-key] [parent-value = table] [key]
-  while (depth > 0) {
-    if (lua_checkstack(lua_, 3) == 0 || depth > 128)
-      return false;
-
-    bool descending = false;
-    for (; lua_next(lua_, -2) != 0; lua_pop(lua_, 1)) {
-      if (lua_type(lua_, -1) != LUA_TTABLE)
-        continue;
-
-      // If we descend, keep value as new table and push nil for start key
-      depth++;
-      lua_pushnil(lua_);
-      descending = true;
-      break;
-    }
-
-    if (!descending) {
-      lua_pop(lua_, 1);
-      depth--;
-    }
-  }
-
-  return true;
-}
-
-void Interpreter::SerializeResult(ObjectExplorer* serializer) {
-  int t = lua_type(lua_, -1);
-
-  switch (t) {
-    case LUA_TSTRING:
-      serializer->OnString(TopSv(lua_));
-      break;
-    case LUA_TBOOLEAN:
-      serializer->OnBool(lua_toboolean(lua_, -1));
-      break;
-    case LUA_TNUMBER:
-      if (lua_isinteger(lua_, -1)) {
-        serializer->OnInt(lua_tointeger(lua_, -1));
-      } else {
-        serializer->OnDouble(lua_tonumber(lua_, -1));
-      }
-      break;
-    case LUA_TTABLE: {
-      auto fres = FetchKey(lua_, "err");
-      if (fres && *fres == LUA_TSTRING) {
-        serializer->OnError(TopSv(lua_));
-        lua_pop(lua_, 1);
-        break;
-      }
-
-      fres = FetchKey(lua_, "ok");
-      if (fres && *fres == LUA_TSTRING) {
-        serializer->OnStatus(TopSv(lua_));
-        lua_pop(lua_, 1);
-        break;
-      }
-
-      fres = FetchKey(lua_, "map");
-      if (fres && *fres == LUA_TTABLE) {
-        // Calculate length of map part, there is sadly no other way
-        unsigned len = 0;
-        for (lua_pushnil(lua_); lua_next(lua_, -2) != 0; lua_pop(lua_, 1))
-          len++;
-
-        serializer->OnMapStart(len);
-        for (lua_pushnil(lua_); lua_next(lua_, -2) != 0;) {
-          // Push key to stack top: key value key
-          lua_pushnil(lua_);
-          lua_copy(lua_, -3, -1);
-          SerializeResult(serializer);  // pops key
-          SerializeResult(serializer);  // pop value
-        }
-        serializer->OnMapEnd();
-
-        lua_pop(lua_, 2);
-        break;
-      }
-
-      unsigned len = lua_rawlen(lua_, -1);
-
-      serializer->OnArrayStart(len);
-      for (unsigned i = 0; i < len; ++i) {
-        t = lua_rawgeti(lua_, -1, i + 1);  // push table element
-
-        // TODO: we should make sure that we have enough stack space
-        // to traverse each object. This can be done as a dry-run before doing real serialization.
-        // Once we are sure we are safe we can simplify the serialization flow and
-        // remove the error factor.
-        SerializeResult(serializer);  // pops the element
-      }
-      serializer->OnArrayEnd();
-      break;
-    }
-    case LUA_TNIL:
-      serializer->OnNil();
-      break;
-    default:
-      LOG(ERROR) << "Unsupported type " << lua_typename(lua_, t);
-      serializer->OnNil();
-  }
-
-  lua_pop(lua_, 1);
+  lua_settop(lua_, result - 1);
+  return serialized;
 }
 
 void Interpreter::ResetStack() {

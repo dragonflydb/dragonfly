@@ -2526,11 +2526,8 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   SinkReplyBuilder::ReplyAggregator agg(builder);
   EvalSerializer ser{builder, params->float_as_int};
-  if (!interpreter->IsResultSafe()) {
+  if (!interpreter->SerializeResult(&ser))
     builder->SendError("reached lua stack limit");
-  } else {
-    interpreter->SerializeResult(&ser);
-  }
 }
 
 void Service::Discard(CmdArgParser, CommandContext* cmd_cntx) {

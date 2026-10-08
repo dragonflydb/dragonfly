@@ -143,13 +143,10 @@ class Interpreter {
   // sha must be 40 char length.
   RunResult RunFunction(std::string_view sha, std::string* err);
 
-  // Checks whether the result is safe to serialize.
-  // Should fit 2 conditions:
-  // 1. Be the only value on the stack.
-  // 2. Should have depth of no more than 128.
-  bool IsResultSafe() const;
-
-  void SerializeResult(ObjectExplorer* serializer);
+  // Serializes the result at the top of the stack and pops it. Like in Redis, the err, ok and map
+  // wrapper fields are read with raw access. Returns false without serializing anything if the
+  // result nests more than 128 tables, which also rejects cycles.
+  bool SerializeResult(ObjectExplorer* serializer);
 
   void ResetStack();
 
@@ -184,7 +181,6 @@ class Interpreter {
   // Returns true if function was successfully added,
   // otherwise returns false and sets the error.
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
-  bool IsTableSafe() const;
 
   bool PrepareArgs();
   bool CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer);

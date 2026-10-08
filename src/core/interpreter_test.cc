@@ -139,7 +139,8 @@ bool InterpreterTest::Execute(string_view script) {
   }
 
   ser_.res.clear();
-  intptr_.SerializeResult(&ser_);
+  if (!intptr_.SerializeResult(&ser_))
+    return false;
   ser_.res.pop_back();
 
   return true;
@@ -212,8 +213,7 @@ return x
             "code1", 1);
 
   ASSERT_EQ(1, lua_gettop(lua()));
-  ASSERT_TRUE(intptr_.IsResultSafe());
-  lua_pop(lua(), 1);
+  ASSERT_TRUE(intptr_.SerializeResult(&ser_));
 
   RunInline(R"(
 local x = {}
@@ -225,7 +225,37 @@ return x
             "code1", 1);
 
   ASSERT_EQ(1, lua_gettop(lua()));
-  ASSERT_FALSE(intptr_.IsResultSafe());
+  ASSERT_FALSE(intptr_.SerializeResult(&ser_));
+
+  // Tables used as map keys take the most stack slots per nesting level.
+  RunInline("local x = {} for i=1,127 do x = {map = {[x] = 1}} end return x", "code2", 1);
+  ASSERT_TRUE(intptr_.SerializeResult(&ser_));
+  RunInline("local x = {} for i=1,128 do x = {map = {[x] = 1}} end return x", "code2", 1);
+  ASSERT_FALSE(intptr_.SerializeResult(&ser_));
+  EXPECT_EQ(0, lua_gettop(lua()));
+
+  // Nothing of a too deep reply is serialized. Cycles through fields that are not serialized do
+  // not count.
+  EXPECT_FALSE(Execute("local t = {}; t[1] = t; return {1, 'a', t}"));
+  EXPECT_EQ("", ser_.res);
+  EXPECT_FALSE(Execute("local t = {}; t.map = t; return t"));
+  EXPECT_TRUE(Execute("local t = {1}; t.self = t; return t"));
+  EXPECT_EQ("[i(1)]", ser_.res);
+  EXPECT_TRUE(Execute("local t = {map = {a = 1}}; t[1] = t; return t"));
+  EXPECT_EQ("{str(a) i(1)}", ser_.res);
+}
+
+TEST_F(InterpreterTest, ShallowReplyStack) {
+  // Garbage collection does not shrink the stack below reserved slots, so a shallow reply must not
+  // reserve the slots of the deepest one (about 8KB).
+  auto used_bytes = [this] {
+    lua_gc(lua(), LUA_GCCOLLECT);
+    return lua_gc(lua(), LUA_GCCOUNT) * 1024 + lua_gc(lua(), LUA_GCCOUNTB);
+  };
+  const int before = used_bytes();
+  RunInline("return {{1}, {map = {a = {}}}}", "shallow", 1);
+  ASSERT_TRUE(intptr_.SerializeResult(&ser_));
+  EXPECT_LT(used_bytes() - before, 1024);
 }
 
 TEST_F(InterpreterTest, Add) {
@@ -281,6 +311,24 @@ TEST_F(InterpreterTest, Execute) {
 
   EXPECT_TRUE(Execute("return {map={a=1,b=2}}"));
   EXPECT_THAT(ser_.res, testing::AnyOf("{str(a) i(1) str(b) i(2)}", "{str(b) i(2) str(a) i(1)}"));
+
+  // Wrapper fields are checked in Redis order: err, ok, map. Fields of other types are ignored.
+  EXPECT_TRUE(Execute("return {err = 'e', ok = 'o', map = {}}"));
+  EXPECT_EQ("err(e)", ser_.res);
+
+  EXPECT_TRUE(Execute("return {err = 42, ok = 'o', map = {}}"));
+  EXPECT_EQ("status(o)", ser_.res);
+
+  EXPECT_TRUE(Execute("return {err = false, ok = {}, map = 'm'}"));
+  EXPECT_EQ("[]", ser_.res);
+
+  // Nested replies leave the stack of their parent unchanged.
+  EXPECT_TRUE(Execute("return {{1, err = 42}, {map = {a = {ok = 'o'}}}, {map = 1}, 'x'}"));
+  EXPECT_EQ("[[i(1)] {str(a) status(o)} [] str(x)]", ser_.res);
+
+  // Map keys can be tables, and map entries come from both the array and the hash parts.
+  EXPECT_TRUE(Execute("return {map = {[{1}] = {map = {10, b = {}}}}}"));
+  EXPECT_EQ("{[i(1)] {i(1) i(10) str(b) []}}", ser_.res);
 }
 
 TEST_F(InterpreterTest, Call) {
@@ -700,10 +748,14 @@ TEST_F(InterpreterTest, ProtectedGlobalAssignment) {
 }
 
 TEST_F(InterpreterTest, Robust) {
-  EXPECT_FALSE(Execute(R"(eval "local a = {}
+  // Like in Redis, wrapper fields are read with raw access, so metamethods never run.
+  EXPECT_TRUE(Execute(R"(local a = {}
       setmetatable(a,{__index=function() foo() end})
-      return a")"));
-  EXPECT_EQ("", ser_.res);
+      return a)"));
+  EXPECT_EQ("[]", ser_.res);
+
+  EXPECT_TRUE(Execute("return setmetatable({}, {__index = {err = 'e'}})"));
+  EXPECT_EQ("[]", ser_.res);
 }
 
 TEST_F(InterpreterTest, LoadBytecodeBlocked) {
@@ -956,5 +1008,106 @@ TEST_F(InterpreterTest, ForeignReturnIsRefused) {
 
   im_a.Return(ir);
 }
+
+// Adds up array lengths and string sizes, much cheaper than TestSerializer.
+class CountingSerializer : public ObjectExplorer {
+ public:
+  size_t count = 0;
+
+  void OnBool(bool b) final {
+  }
+  void OnString(std::string_view str) final {
+    count += str.size();
+  }
+  void OnDouble(double d) final {
+  }
+  void OnInt(int64_t val) final {
+  }
+  void OnArrayStart(unsigned len) final {
+    count += len;
+  }
+  void OnArrayEnd() final {
+  }
+  void OnNil() final {
+  }
+  void OnStatus(std::string_view str) final {
+  }
+  void OnError(std::string_view str) final {
+  }
+};
+
+// Runs a script that returns the reply of redis.call('XREAD', ...), so it measures converting the
+// reply to Lua tables and serializing the script result. Run with
+// --bench --gtest_filter='-*' --benchmark_filter=BM_LuaXReadReply.
+static void BM_LuaXReadReply(benchmark::State& state) {
+  init_zmalloc_threadlocal(mi_heap_get_backing());
+
+  vector<string> keys, ids, fields;
+  for (int64_t i = 0; i < state.range(0); ++i)
+    keys.push_back(absl::StrCat("stream:", i));
+  for (int64_t i = 1; i <= state.range(1); ++i)
+    ids.push_back(absl::StrCat(i, "-0"));
+  for (int64_t i = 0; i < state.range(2); ++i)
+    fields.push_back(absl::StrCat("field:", i));
+  const string value(state.range(3), 'v');
+
+  // Emits a reply shaped like XREAD's: [[key, [[id, [field, value, ...]], ...]], ...].
+  auto emit_reply = [&](ObjectExplorer* reply) {
+    reply->OnArrayStart(keys.size());
+    for (const string& key : keys) {
+      reply->OnArrayStart(2);
+      reply->OnString(key);
+      reply->OnArrayStart(ids.size());
+      for (const string& id : ids) {
+        reply->OnArrayStart(2);
+        reply->OnString(id);
+        reply->OnArrayStart(fields.size() * 2);
+        for (const string& field : fields) {
+          reply->OnString(field);
+          reply->OnString(value);
+        }
+        reply->OnArrayEnd();
+        reply->OnArrayEnd();
+      }
+      reply->OnArrayEnd();
+      reply->OnArrayEnd();
+    }
+    reply->OnArrayEnd();
+  };
+
+  string script = absl::StrCat("return redis.call('XREAD', 'COUNT', ", ids.size(), ", 'STREAMS'");
+  for (const string& key : keys)
+    absl::StrAppend(&script, ", '", key, "'");
+  for (size_t i = 0; i < keys.size(); ++i)
+    script += ", '0'";
+  script += ")";
+
+  Interpreter intptr;
+  intptr.SetRedisFunc([&](Interpreter::CallArgs ca) { emit_reply(ca.translator); });
+  auto sha_buf = Interpreter::FuncSha1(script);
+  string_view sha{sha_buf.data(), sha_buf.size()};
+  string error;
+  CHECK_EQ(Interpreter::ADD_OK, intptr.AddFunction(sha, script, &error)) << error;
+
+  CountingSerializer reply_size, ser;
+  emit_reply(&reply_size);
+  for (auto _ : state) {
+    CHECK_EQ(Interpreter::RUN_OK, intptr.RunFunction(sha, &error)) << error;
+    CHECK(intptr.SerializeResult(&ser));
+    intptr.ResetStack();  // RunFunction leaves the error handler on the stack
+  }
+  CHECK_EQ(ser.count, reply_size.count * state.iterations());
+}
+BENCHMARK(BM_LuaXReadReply)
+    ->ArgNames({"streams", "count", "fields", "value_bytes"})
+    ->Args({1, 1, 1, 8})
+    ->Args({1, 16, 1, 8})
+    ->Args({1, 64, 1, 8})
+    ->Args({1, 16, 4, 128})
+    ->Args({8, 1, 1, 8})
+    ->Args({8, 16, 1, 8})
+    ->Args({32, 1, 1, 8})
+    ->Args({32, 1, 4, 128})
+    ->Unit(benchmark::kMicrosecond);
 
 }  // namespace dfly
