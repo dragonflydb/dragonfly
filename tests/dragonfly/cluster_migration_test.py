@@ -950,14 +950,14 @@ async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory)
     per push, each with its own txid. Replicas rendezvous their flows on this record keyed by
     txid, so a shared txid leaves them waiting for each other forever.
     """
-    # replica=2 traces the rendezvous txid, the only place it is observable. logbuflevel=-1
+    # journal_applier=2 traces the rendezvous txid, the only place it is observable. logbuflevel=-1
     # keeps those records out of the log buffer, which the SIGKILL below would discard.
     master = df_factory.create(port=next(next_port), admin_port=next(next_port), logbuflevel=-1)
     replica = df_factory.create(
         port=next(next_port),
         admin_port=next(next_port),
         logbuflevel=-1,
-        vmodule="replica=2,cluster_family=1,db_slice=1,dflycmd=1",
+        vmodule="replica=2,journal_applier=2,cluster_family=1,db_slice=1,dflycmd=1",
     )
     df_factory.start_all([master, replica])
 
@@ -1125,7 +1125,7 @@ async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory)
     txid_re = r"Execute txid: (\d+) waiting for data in all shards"
     txids = [int(re.search(txid_re, l).group(1)) for l in hits(replica, txid_re)]
     logging.info("RESULT flushslots_txids=%s", sorted(set(txids)))
-    assert txids, "replica logged no global-command rendezvous - is vmodule=replica=2 set?"
+    assert txids, "replica logged no global-command rendezvous - is vmodule=journal_applier=2 set?"
     assert 0 not in txids, "FLUSHSLOTS was journaled with txid 0"
     assert (
         len(set(txids)) == pushes
