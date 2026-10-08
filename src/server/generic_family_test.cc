@@ -2810,7 +2810,7 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
 
   // Drive expiry the same way the heartbeat does: DeleteExpiredStep returns events,
   // which are sent outside the atomic section (see issue #7052).
-  shard_set->RunBriefInParallel([](EngineShard* shard) {
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     DbContext db_cntx;
     db_cntx.db_index = 0;
