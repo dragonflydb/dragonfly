@@ -30,6 +30,7 @@ extern "C" {
 #include "server/journal/types.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
+#include "server/rdb_load_context.h"
 #include "server/rdb_save.h"
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
@@ -100,6 +101,13 @@ class RdbTest : public BaseFamilyTest {
       RdbLoader loader(service_.get(), &load_context);
       return loader.Load(&fs);
     });
+  }
+
+  bool IsIndexingDone(string_view idx_name) {
+    auto resp = Run({"FT.INFO", idx_name});
+    auto arr = resp.GetVec();
+    auto it = rng::find_if(arr, [](const auto& e) { return e == "indexing"; });
+    return it != arr.end() && (++it)->GetInt() == 0;
   }
 
   // Load a raw RDB image through the default (file/replica) loader path (no deep_integrity).
@@ -867,16 +875,9 @@ TEST_P(HnswRestoreTest, RestoreVectorSearchIndexHnsw) {
   EXPECT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
 
   // Wait for async index building to complete on both indices
-  auto is_indexing_done = [this](string_view idx_name) {
-    auto resp = Run({"FT.INFO", idx_name});
-    auto arr = resp.GetVec();
-    auto it = rng::find_if(arr, [](const auto& e) { return e == "indexing"; });
-    return it != arr.end() && (++it)->GetInt() == 0;
-  };
-
-  ASSERT_TRUE(WaitUntilCondition([&] { return is_indexing_done("vec_idx"); },
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsIndexingDone("vec_idx"); },
                                  std::chrono::milliseconds(10000)));
-  ASSERT_TRUE(WaitUntilCondition([&] { return is_indexing_done("only_vec_idx"); },
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsIndexingDone("only_vec_idx"); },
                                  std::chrono::milliseconds(10000)));
 
   // Verify text search still works on the restored index
@@ -910,6 +911,81 @@ INSTANTIATE_TEST_SUITE_P(HnswRestoreTest, HnswRestoreTest, Values(5, 50, 500, 10
                          [](const testing::TestParamInfo<int>& info) {
                            return StrCat("Docs", info.param);
                          });
+
+// A load that fails after the index definitions were replayed must not leave unbuilt indexes
+// behind: they crash every search and report themselves as fully indexed.
+TEST_F(RdbTest, FailedLoadDropsUnbuiltIndex) {
+  const string vec = StrCat(FloatToBytes(1.0f), FloatToBytes(2.0f));
+  auto create = [&] {
+    return Run({"FT.CREATE", "idx", "ON",   "HASH",    "PREFIX", "1", "doc:",
+                "SCHEMA",    "t",   "TEXT", "g",       "TAG",    "v", "VECTOR",
+                "HNSW",      "6",   "TYPE", "FLOAT32", "DIM",    "2", "DISTANCE_METRIC",
+                "L2"});
+  };
+  EXPECT_EQ(create(), "OK");
+  for (int i = 0; i < 10; ++i)
+    Run({"HSET", StrCat("doc:", i), "t", "hello", "g", "a", "v", vec});
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+
+  // An empty shard file fails the load after the summary has replayed the index definitions.
+  string shard_file = service_->server_family().GetLastSaveInfo().file_name;
+  shard_file.replace(shard_file.rfind("summary"), 7, "0000");
+  filesystem::resize_file(shard_file, 0);
+
+  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ArgType(RespExpr::ERROR));
+  EXPECT_GT(CheckedInt({"dbsize"}), 0);
+
+  const auto no_index = ErrArg("idx: no such index");
+  EXPECT_THAT(Run({"ft._list"}).GetVec(), IsEmpty());
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), ErrArg("Index with name 'idx' not found"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), no_index);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
+  EXPECT_THAT(
+      Run({"FT.HYBRID", "idx", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
+      no_index);
+  EXPECT_THAT(Run({"FT.INFO", "idx"}), no_index);
+
+  // The name is free again and the keys that survived the load get indexed.
+  EXPECT_EQ(create(), "OK");
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsIndexingDone("idx"); }, std::chrono::milliseconds(10000)));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "LIMIT", "0", "0"}),
+              RespArray(ElementsAre(IntArg(CheckedInt({"dbsize"})))));
+}
+
+// Between its definition during a load and the rebuild after the load an index has no data
+// structures yet. Queries must fail cleanly and FT.INFO must not call it indexed.
+TEST_F(RdbTest, UnbuiltIndexAnswersWithoutCrash) {
+  const string vec = StrCat(FloatToBytes(1.0f), FloatToBytes(2.0f));
+  pp_->at(0)->Await([&] {
+    service_->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+    LoadSearchCommandFromAux(service_.get(),
+                             "idx ON HASH PREFIX 1 doc: SCHEMA t TEXT g TAG v VECTOR HNSW 6 TYPE "
+                             "FLOAT32 DIM 2 DISTANCE_METRIC L2",
+                             "FT.CREATE", "index definition");
+    service_->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+  });
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), ErrArg("not built"));
+  EXPECT_THAT(
+      Run({"FT.HYBRID", "idx", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
+      ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}).GetVec(), IsEmpty());
+  auto info = Run({"FT.INFO", "idx"}).GetVec();
+  auto it = rng::find_if(info, [](const auto& e) { return e == "percent_indexed"; });
+  ASSERT_NE(it, info.end());
+  EXPECT_EQ(*++it, "0");
+
+  // A failed replica sync keeps the definitions for its next, successful run.
+  pp_->at(0)->Await([&] {
+    service_->RequestLoadingState();
+    RdbLoadContext{}.PerformPostLoad(service_.get(), true);
+    service_->RemoveLoadingState();
+  });
+  EXPECT_THAT(Run({"ft._list"}), RespArray(ElementsAre("idx")));
+  EXPECT_EQ(Run({"FT.DROPINDEX", "idx"}), "OK");
+}
 
 TEST_F(RdbTest, DflyLoadAppend) {
   // Create an RDB with (k1,1) value in it saved as `filename`

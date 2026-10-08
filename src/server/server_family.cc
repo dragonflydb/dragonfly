@@ -1514,8 +1514,10 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     error_code load_ec = pool.GetNextProactor()->Await([&] {
       return LoadRdb(path, existing_keys, &load_opts, load_context.get(), storage.get());
     });
-    if (load_ec)
+    if (load_ec) {
+      load_context->PerformPostLoad(&service_, true);
       return immediate(load_ec);
+    }
   }
 
   auto aggregated_result = std::make_shared<AggregateLoadResult>();

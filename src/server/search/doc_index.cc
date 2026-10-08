@@ -149,6 +149,8 @@ std::pair<std::vector<FieldReference>, std::vector<bool>> GetBasicFields(
   return {std::move(basic_fields), std::move(is_sortable_field)};
 }
 
+constexpr std::string_view kIndexNotBuilt = "index is not built";
+
 auto GetIndexedHnswFields(const search::Schema& schema) {
   return schema.fields |
          std::views::filter([](const auto& item) { return item.second.IsIndexableHnswField(); });
@@ -892,6 +894,9 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
                                    search::SearchAlgorithm* search_algo, bool is_knn_prefilter,
                                    const search::GlobalScoringStats* global_stats) const {
+  if (!indices_)
+    return {facade::ErrorReply(std::string{kIndexNotBuilt})};
+
   size_t limit = params.limit_offset + params.limit_total;
 
   // Disable BasicSearch's per-shard cutoff; we re-rank by (score, key) below.
@@ -1042,6 +1047,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParams& params,
                                         search::SearchAlgorithm* search_algo,
                                         const search::GlobalScoringStats* global_stats) const {
+  if (!indices_)
+    return {facade::ErrorReply(std::string{kIndexNotBuilt})};
+
   auto result = search_algo->Search(&*indices_, numeric_limits<size_t>::max(), global_stats);
   if (!result.error.empty())
     return {facade::ErrorReply(std::move(result.error))};
@@ -1080,12 +1088,17 @@ SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParam
 
 search::ShardScoringStats ShardDocIndex::CollectScoringStats(
     search::SearchAlgorithm* search_algo) const {
+  if (!indices_)
+    return {};
   return search_algo->CollectScoringStats(&*indices_);
 }
 
 vector<SearchDocData> ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
+  if (!indices_)
+    return {};
+
   auto search_results = search_algo->Search(&*indices_, std::numeric_limits<size_t>::max(),
                                             params.global_scoring_stats);
 
@@ -1132,6 +1145,9 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
     const OpArgs& op_args, const AggregateParams& params, absl::Span<const search::DocId> ids,
     std::string_view score_alias, const absl::flat_hash_map<search::DocId, float>& score_map,
     const absl::flat_hash_map<search::DocId, float>& text_score_map) const {
+  if (!indices_)
+    return {};
+
   auto [fields_to_load, sort_indicies] =
       PreprocessAggregateFields(base_->schema, params, params.load_fields);
 
@@ -1172,6 +1188,9 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
 join::Vector<join::OwnedEntry> ShardDocIndex::PreagregateDataForJoin(
     const OpArgs& op_args, absl::Span<const std::string_view> join_fields,
     search::SearchAlgorithm* search_algo) const {
+  if (!indices_)
+    return {};
+
   auto search_results = search_algo->Search(&*indices_);
 
   const size_t fields_count = join_fields.size();
@@ -1226,6 +1245,9 @@ join::Vector<join::OwnedEntry> ShardDocIndex::PreagregateDataForJoin(
 ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
     const OpArgs& op_args, const absl::flat_hash_set<search::DocId>& doc_ids,
     absl::Span<const std::string_view> fields_to_load) const {
+  if (!indices_)
+    return {};
+
   const size_t fields_count = fields_to_load.size();
   const auto [basic_fields, is_sortable_field] = GetBasicFields(fields_to_load, base_->schema);
 
@@ -1269,11 +1291,14 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
   return {.base_index = *base_,
           .num_docs = key_index_.Size(),
           .indexing = bool(builder_),
-          .percent_indexed = builder_ ? builder_->Progress() : 1.0,
+          .percent_indexed = indices_ ? (builder_ ? builder_->Progress() : 1.0) : 0.0,
           .hnsw_metadata = nullopt};
 }
 
 io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {
+  if (!indices_)
+    return StringVec{};
+
   search::BaseIndex* base_index = indices_->GetIndex(field);
   if (base_index == nullptr) {
     return make_unexpected(ErrorReply{"-No such field"});
@@ -1339,6 +1364,21 @@ void ShardDocIndices::DropAllIndices() {
   }
   GlobalHnswIndexRegistry::Instance().Reset();
   // to_destroy goes out of scope here — destructors run outside the map mutation
+}
+
+std::vector<std::string> ShardDocIndices::DropUnbuiltIndices() {
+  std::vector<std::string> names;
+  for (const auto& [name, index] : indices_) {
+    if (!index->indices_)
+      names.push_back(name);
+  }
+  for (const auto& name : names) {
+    auto index = DropIndex(name);
+    DCHECK(index);
+    for (const auto& [_, field] : GetIndexedHnswFields(index->base_->schema))
+      GlobalHnswIndexRegistry::Instance().Remove(name, field.short_name);
+  }
+  return names;
 }
 
 void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index) {
