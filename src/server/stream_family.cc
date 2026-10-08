@@ -5,6 +5,7 @@
 #include "server/stream_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/container/flat_hash_map.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
@@ -677,7 +678,7 @@ struct StreamIDsItem {
 
 struct ReadOpts {
   // Contains a mapping from stream name to the starting stream ID.
-  unordered_map<string_view, StreamIDsItem> stream_ids;
+  absl::flat_hash_map<string_view, StreamIDsItem> stream_ids;
   // Contains the maximum number of entries to return for each stream.
   uint32_t count = kuint32max;
   // Contains the time to block waiting for entries, or -1 if should not block.
@@ -1313,13 +1314,17 @@ OpResult<RecordVec> OpRange(const OpArgs& op_args, string_view key, const RangeO
   streamID sstart = opts.start.val, send = opts.end.val;
 
   // Classify access pattern: fetch-all if start <= first_id and end is MAX.
+  const bool fetch_all = s->length > 0 && streamCompareID(&sstart, &s->first_id) <= 0 &&
+                         send.ms == UINT64_MAX && send.seq == UINT64_MAX;
   StreamAccessKind effective_kind = opts.access_kind;
-  if (effective_kind != StreamAccessKind::kNone && s->length > 0 &&
-      streamCompareID(&sstart, &s->first_id) <= 0 && send.ms == UINT64_MAX &&
-      send.seq == UINT64_MAX) {
+  if (effective_kind != StreamAccessKind::kNone && fetch_all) {
     effective_kind = StreamAccessKind::kFetchAll;
   }
   RecordStreamAccess(op_args, effective_kind);
+
+  // All entries are in range, so the result size is known.
+  if (fetch_all)
+    result.reserve(std::min<uint64_t>(opts.count, s->length));
 
   streamIteratorStart(&si, s, &sstart, &send, opts.is_rev);
   while (streamIteratorGetID(&si, &id, &numfields)) {
@@ -2856,6 +2861,8 @@ std::optional<ReadOpts> ParseReadArgsOrReply(ParsedArgs args, bool read_group,
     return std::nullopt;
   }
 
+  opts.stream_ids.reserve(streams_count);
+
   // Parse the stream IDs.
   for (size_t i = opts.streams_arg + streams_count; i < args.size(); i++) {
     string_view key = args[i - streams_count];
@@ -3356,7 +3363,7 @@ void XReadGeneric2(ParsedArgs args, bool read_group, CommandContext* cmd_cntx) {
 
   vector<vector<RecordVec>> xread_resp;
   if (is_single_shard && have_entries.load(memory_order_relaxed)) {
-    xread_resp = {std::move(fastread_prefetched)};
+    xread_resp.emplace_back(std::move(fastread_prefetched));
   } else {
     xread_resp.resize(shard_set->size());
     auto read_cb = [&](Transaction* t, EngineShard* shard) {
