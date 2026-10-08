@@ -995,6 +995,13 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
   rb->SendSimpleStrArr(help_arr);
 }
 
+// For fatal startup errors: exit() would run destructors while server fibers still run.
+[[noreturn]] void ErrorAndExit(string_view reason) {
+  LOG(ERROR) << reason;
+  base::FlushLogs();
+  std::_Exit(EXIT_FAILURE);
+}
+
 // Starts an AofStreamer on every shard, or exits if --aof cannot run.
 void StartAof(const string& flag_dir, detail::SnapshotStorage* storage) {
   string reason;
@@ -1026,9 +1033,7 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage) {
       return;
     reason = "failed to open AOF segments";
   }
-  LOG(ERROR) << reason;
-  base::FlushLogs();
-  std::_Exit(EXIT_FAILURE);
+  ErrorAndExit(reason);
 }
 
 // Seals, writes and syncs every shard's AOF.
@@ -1377,13 +1382,8 @@ void ServerFamily::LoadFromSnapshot() {
       auto future = Load(load_path, LoadExistingKeys::kFail);
       load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([future]() mutable {
         // Wait for load to finish in a dedicated fiber.
-        if (!future.has_value() || future->Get()) {
-          // exit() runs destructors and atexit handlers without stopping other server fibers.
-          // On fatal startup errors, use _Exit() to skip that teardown, flushing logs first.
-          // Normal shutdown must still drain and save data.
-          base::FlushLogs();
-          std::_Exit(EXIT_FAILURE);
-        }
+        if (!future.has_value() || future->Get())
+          ErrorAndExit("Failed to load snapshot");
       });
     }
   } else {
@@ -1393,9 +1393,8 @@ void ServerFamily::LoadFromSnapshot() {
       loading_stats_mu_.lock();
       loading_stats_.failed_restore_count++;
       loading_stats_mu_.unlock();
-      LOG(ERROR) << "Failed to load snapshot with error: " << load_path_result.error().Format();
-      base::FlushLogs();
-      std::_Exit(EXIT_FAILURE);
+      ErrorAndExit(
+          absl::StrCat("Failed to load snapshot with error: ", load_path_result.error().Format()));
     }
   }
 }
