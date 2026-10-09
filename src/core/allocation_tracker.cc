@@ -59,7 +59,15 @@ absl::Span<const AllocationTracker::TrackingInfo> AllocationTracker::GetRanges()
 }
 
 void AllocationTracker::ProcessNew(void* ptr, size_t size) {
-  if (tracking_.empty() || size < abs_min_size_ || size > abs_max_size_) {
+  // usable size is never smaller than the requested size, so this check is exact.
+  if (tracking_.empty() || size > abs_max_size_ || ptr == nullptr) {
+    return;
+  }
+
+  // Match bands by usable size, as ProcessDelete does, so that allocation and deallocation
+  // logs of the same block always pair up.
+  size_t usable = mi_usable_size(ptr);
+  if (usable < abs_min_size_ || usable > abs_max_size_) {
     return;
   }
 
@@ -70,7 +78,7 @@ void AllocationTracker::ProcessNew(void* ptr, size_t size) {
   // Prevent endless recursion, in case logging allocates memory
   inside_tracker_ = true;
   for (const auto& band : tracking_) {
-    if (size > band.upper_bound || size < band.lower_bound) {
+    if (usable > band.upper_bound || usable < band.lower_bound) {
       continue;
     }
 
@@ -79,7 +87,6 @@ void AllocationTracker::ProcessNew(void* ptr, size_t size) {
       continue;
     }
 
-    size_t usable = mi_usable_size(ptr);
     std::string trace = util::fb2::GetStacktrace();
 
     if (CanCallVlog(trace)) {
@@ -100,7 +107,7 @@ void AllocationTracker::ProcessDelete(void* ptr) {
   inside_tracker_ = true;
   // we partially handle deletes, specifically when specifying a single range with
   // 100% sampling rate.
-  if (tracking_.size() == 1 && tracking_.front().sample_odds == 1) {
+  if (ptr != nullptr && tracking_.size() == 1 && tracking_.front().sample_odds == 1) {
     size_t usable = mi_usable_size(ptr);
     if (usable <= tracking_.front().upper_bound && usable >= tracking_.front().lower_bound) {
       std::string trace = util::fb2::GetStacktrace();
