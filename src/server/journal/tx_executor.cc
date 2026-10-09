@@ -20,34 +20,28 @@ MultiShardExecution::MultiShardExecution(uint32_t num_flows) : flows_(num_flows)
 
 bool MultiShardExecution::Execute(TxId txid, absl::FunctionRef<bool()> apply) {
   std::unique_lock lk(mu_);
-  // unordered_map keeps references stable while other barriers are added or erased.
-  Barrier& barrier = barriers_[txid];
-  // Txids never repeat, so a finished barrier is never reused.
-  // TODO: upon AOF replay, set the txid counter to the max replayed txid so this holds.
-  DCHECK(!barrier.done) << "txid reused: " << txid;
-  ++barrier.arrived;
-  cv_.notify_all();
-  VLOG(2) << "txid: " << txid << " arrived: " << barrier.arrived << " flows: " << flows_;
-
-  cv_.wait(lk, [&] { return cancelled_ || barrier.arrived >= flows_; });
-  bool res = true;
-  // The first flow to wake up runs it, outside the lock.
-  if (!cancelled_ && !barrier.chosen) {
-    barrier.chosen = true;
-    lk.unlock();
-    res = apply();
-    lk.lock();
-    barrier.done = true;
-    cv_.notify_all();
-  }
-  // No flow continues before the global command finished.
-  cv_.wait(lk, [&] { return cancelled_ || barrier.done; });
   if (cancelled_)
-    res = false;
+    return false;
+  uint64_t generation = generation_;
+  if (arrived_++ == 0)
+    round_txid_ = txid;
+  // The flows meet the global commands in the same order.
+  DCHECK_EQ(round_txid_, txid);
+  VLOG(2) << "txid: " << txid << " arrived: " << arrived_ << " flows: " << flows_;
 
-  // The last flow to leave erases the barrier.
-  if (++barrier.left == barrier.arrived)
-    barriers_.erase(txid);
+  // Wait until the round is complete, or another flow ran it.
+  cv_.wait(lk, [&] { return cancelled_ || generation_ != generation || arrived_ >= flows_; });
+  if (cancelled_)
+    return false;
+  if (generation_ != generation)
+    return true;
+
+  // The first flow to see the round complete runs it. Under the lock, so the others cannot pass
+  // before it finished.
+  bool res = apply();
+  arrived_ = 0;
+  ++generation_;
+  cv_.notify_all();
   return res;
 }
 

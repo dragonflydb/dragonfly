@@ -35,8 +35,11 @@ bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
 
   TxId txid = tx_data.txid;
   VLOG(2) << "Execute txid: " << txid << " waiting for data in all shards";
-  return multi_shard_exe_->Execute(txid, [&] { return Execute(std::move(tx_data)); }) &&
-         cntx->IsRunning();
+  // The context stops before its error handler cancels multi_shard_exe_, so check it right before
+  // running the command too.
+  return multi_shard_exe_->Execute(txid, [&] {
+    return cntx->IsRunning() && Execute(std::move(tx_data));
+  }) && cntx->IsRunning();
 }
 
 }  // namespace dfly
