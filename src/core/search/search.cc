@@ -85,7 +85,9 @@ struct ProfileBuilder {
         },
         [](const AstVectorRangeNode& n) { return absl::StrCat("VectorRange{r=", n.radius, "}"); },
     };
-    return visit(node_info, node.Variant());
+    string result;
+    VisitAst(node, [&](const auto& inner) { result = node_info(inner); });
+    return result;
   }
 
   using Tp = std::chrono::steady_clock::time_point;
@@ -646,9 +648,7 @@ struct BasicSearch {
     // Asserts the sorted-result invariant, records the profile event, and hands the result up.
     auto finalize = [&](const Frame& f, const AstNode& n, IndexResult result) {
       DCHECK(
-          f.top_level || holds_alternative<AstKnnNode>(n.Variant()) ||
-          holds_alternative<AstGeoNode>(n.Variant()) ||
-          holds_alternative<AstVectorRangeNode>(n.Variant()) ||
+          f.top_level || n.Is<AstKnnNode>() || n.Is<AstGeoNode>() || n.Is<AstVectorRangeNode>() ||
           visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
       if (profile_builder_)
         profile_builder_->Finish(f.start, n, result);
@@ -680,45 +680,41 @@ struct BasicSearch {
         const double w = f.weight;
 
         // Expand composite nodes; push in reverse to keep left-to-right evaluation order.
-        if (auto* fld = get_if<AstFieldNode>(&n)) {
+        if (auto* fld = n.As<AstFieldNode>()) {
           DCHECK(af.empty());
           DCHECK(fld->node);
           stack.push_back(Frame{fld->node.get(), fld->field, w, false});
-        } else if (auto* attr = get_if<AstAttributeNode>(&n)) {
+        } else if (auto* attr = n.As<AstAttributeNode>()) {
           stack.push_back(Frame{attr->node.get(), af, w * attr->weight, false});
-        } else if (auto* neg = get_if<AstNegateNode>(&n)) {
+        } else if (auto* neg = n.As<AstNegateNode>()) {
           stack.push_back(Frame{neg->node.get(), af, w, false});
-        } else if (auto* opt = get_if<AstOptionalNode>(&n)) {
+        } else if (auto* opt = n.As<AstOptionalNode>()) {
           // ~ never fails outward: save/clear error_ here, restore on leave.
           const AstNode* child = opt->node.get();
           f.saved_error = std::move(error_);
           error_.clear();
           stack.push_back(Frame{child, af, w, false});
-        } else if (auto* logical = get_if<AstLogicalNode>(&n)) {
+        } else if (auto* logical = n.As<AstLogicalNode>()) {
           for (auto it = logical->nodes.rbegin(); it != logical->nodes.rend(); ++it) {
             // Drop stopword operands: they match nothing.
-            if (const auto* term = get_if<AstTermNode>(&it->Variant());
-                term && indices_->IsStopWord(term->affix))
+            if (const auto* term = it->As<AstTermNode>(); term && indices_->IsStopWord(term->affix))
               continue;
             stack.push_back(Frame{&*it, af, w, false});
           }
-        } else if (auto* knn = get_if<AstKnnNode>(&n)) {
+        } else if (auto* knn = n.As<AstKnnNode>()) {
           if (knn->filter)
             stack.push_back(Frame{knn->filter.get(), af, w, false});
         } else {
           // Leaf: evaluate now. Composite nodes are handled above.
-          IndexResult result = visit(
-              [&](const auto& leaf) -> IndexResult {
-                if constexpr (
-                    requires { leaf.node; } || requires { leaf.nodes; } ||
-                    requires { leaf.filter; }) {
-                  DCHECK(false);
-                  return IndexResult{};
-                } else {
-                  return Search(leaf, af);
-                }
-              },
-              n.Variant());
+          IndexResult result;
+          VisitAst(n, [&](const auto& leaf) {
+            if constexpr (
+                requires { leaf.node; } || requires { leaf.nodes; } || requires { leaf.filter; }) {
+              DCHECK(false);
+            } else {
+              result = Search(leaf, af);
+            }
+          });
           finalize(f, n, std::move(result));
           stack.pop_back();
         }
@@ -729,18 +725,18 @@ struct BasicSearch {
       current_weight_ = f.weight;
       const size_t results_base = f.results_base;
       IndexResult result;
-      if (holds_alternative<AstNegateNode>(n.Variant())) {
+      if (n.Is<AstNegateNode>()) {
         result = EvalNegate(std::move(values[results_base]));
-      } else if (get_if<AstFieldNode>(&n) || get_if<AstAttributeNode>(&n)) {
+      } else if (n.As<AstFieldNode>() || n.As<AstAttributeNode>()) {
         result = std::move(values[results_base]);  // pass the single child's result through
-      } else if (get_if<AstOptionalNode>(&n)) {
+      } else if (n.As<AstOptionalNode>()) {
         error_ = std::move(f.saved_error);
         result = IndexResult{&indices_->GetAllDocs()};  // ~ never filters: all docs
-      } else if (auto* logical = get_if<AstLogicalNode>(&n)) {
+      } else if (auto* logical = n.As<AstLogicalNode>()) {
         vector<IndexResult> subs(make_move_iterator(values.begin() + results_base),
                                  make_move_iterator(values.end()));
         result = UnifyResults(std::move(subs), logical->op);
-      } else if (auto* knn = get_if<AstKnnNode>(&n)) {
+      } else if (auto* knn = n.As<AstKnnNode>()) {
         IndexResult sub =
             values.size() > results_base ? std::move(values[results_base]) : IndexResult{};
         result = EvalKnn(*knn, f.active_field, std::move(sub));
@@ -943,8 +939,8 @@ struct StatsCollector {
         stack.emplace_back(&child, field);
       });
       if (stack.size() == before)  // leaf
-        visit([this, active_field](const auto& inner) { VisitLeaf(inner, active_field); },
-              node->Variant());
+        VisitAst(*node,
+                 [this, active_field](const auto& inner) { VisitLeaf(inner, active_field); });
     }
   }
 
@@ -1310,30 +1306,26 @@ std::optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const
   }
 
   // FLAT KNN query
-  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
+  if (auto* knn = GetKnnNode(); knn)
     return KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
 
   return nullopt;
 }
 
 bool SearchAlgorithm::IsKnnQuery() const {
-  DCHECK(query_);
-  return std::holds_alternative<AstKnnNode>(*query_);
+  return GetKnnNode() != nullptr;
 }
 
 AstKnnNode* SearchAlgorithm::GetKnnNode() const {
-  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn) {
-    return knn;
-  }
-  return nullptr;
+  return query_ ? query_->As<AstKnnNode>() : nullptr;
 }
 
 std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
-  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn) {
+  if (auto* knn = GetKnnNode(); knn) {
     // Save knn score sort option
     knn_hnsw_score_sort_option_ = KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
     auto node = std::move(query_);
-    if (!std::holds_alternative<AstStarNode>(*knn->filter))
+    if (!knn->filter->Is<AstStarNode>())
       query_.swap(knn->filter);
     return node;
   }
@@ -1367,7 +1359,7 @@ vector<const AstVectorRangeNode*> SearchAlgorithm::CollectVectorRangeNodes() con
   vector<const AstVectorRangeNode*> out;
   if (query_) {
     WalkAst(*query_, [&out](const AstNode& node) {
-      if (auto* r = get_if<AstVectorRangeNode>(&node))
+      if (auto* r = node.As<AstVectorRangeNode>())
         out.push_back(r);
     });
   }
@@ -1381,23 +1373,23 @@ const AstVectorRangeNode* SearchAlgorithm::GetVectorRangeNode() const {
 
 bool SearchAlgorithm::IsBareVectorRange() const {
   DCHECK(query_);
-  return holds_alternative<AstVectorRangeNode>(*query_);
+  return query_->Is<AstVectorRangeNode>();
 }
 
 bool SearchAlgorithm::IsAndedVectorRange() const {
   DCHECK(query_);
-  auto* logical = get_if<AstLogicalNode>(query_.get());
+  auto* logical = query_->As<AstLogicalNode>();
   if (!logical || logical->op != AstLogicalNode::AND)
     return false;
   return any_of(logical->nodes.begin(), logical->nodes.end(),
-                [](const AstNode& n) { return holds_alternative<AstVectorRangeNode>(n); });
+                [](const AstNode& n) { return n.Is<AstVectorRangeNode>(); });
 }
 
 std::unique_ptr<AstNode> SearchAlgorithm::ExtractVectorRangeAsPrefilter() {
-  auto* logical = get_if<AstLogicalNode>(query_.get());
+  auto* logical = query_->As<AstLogicalNode>();
   DCHECK(logical && logical->op == AstLogicalNode::AND);
   for (auto& child : logical->nodes) {
-    if (holds_alternative<AstVectorRangeNode>(child)) {
+    if (child.Is<AstVectorRangeNode>()) {
       auto extracted = make_unique<AstNode>(std::move(child));
       child = AstStarNode{};  // match-all in its place, leaving query_ as the pure pre-filter
       return extracted;

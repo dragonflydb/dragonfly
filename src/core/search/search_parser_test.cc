@@ -101,7 +101,9 @@ struct AstDumper {
   }
 
   string Dump(const AstNode& n) const {
-    return visit(*this, static_cast<const NodeVariants&>(n));
+    string result;
+    VisitAst(n, [&](const auto& inner) { result = (*this)(inner); });
+    return result;
   }
 };
 

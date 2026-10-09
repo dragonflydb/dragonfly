@@ -1793,7 +1793,7 @@ std::pair<std::unique_ptr<search::AstNode>, search::AstKnnNode*> TryPopHnswKnnNo
   if (search_algo.IsKnnQuery()) {
     if (GlobalHnswIndexRegistry::Instance().Exist(index_name, search_algo.GetKnnNode()->field)) {
       auto knn_node = search_algo.PopKnnNode();
-      auto* knn = std::get_if<search::AstKnnNode>(knn_node.get());
+      auto* knn = knn_node->As<search::AstKnnNode>();
       return {std::move(knn_node), knn};
     }
   }
@@ -3138,7 +3138,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
           hnsw_range = vr;
         } else if (search_algo.IsAndedVectorRange()) {
           hnsw_range_holder = search_algo.ExtractVectorRangeAsPrefilter();
-          hnsw_range_prefilter = &std::get<search::AstVectorRangeNode>(*hnsw_range_holder);
+          hnsw_range_prefilter = hnsw_range_holder->As<search::AstVectorRangeNode>();
         } else {
           return builder->SendError(
               "Combining VECTOR_RANGE with OR/NOT is not supported on HNSW indexes");
@@ -3565,7 +3565,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
         hnsw_range = vr;
       } else if (search_algo.IsAndedVectorRange()) {
         hnsw_range_holder = search_algo.ExtractVectorRangeAsPrefilter();
-        hnsw_range_prefilter = &std::get<search::AstVectorRangeNode>(*hnsw_range_holder);
+        hnsw_range_prefilter = hnsw_range_holder->As<search::AstVectorRangeNode>();
       } else {
         return rb->SendError("Combining VECTOR_RANGE with OR/NOT is not supported on HNSW indexes");
       }
@@ -3859,7 +3859,7 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
       return false;
     }
     range_holder = search_algo.ExtractVectorRangeAsPrefilter();
-    hnsw_range = &std::get<search::AstVectorRangeNode>(*range_holder);
+    hnsw_range = range_holder->As<search::AstVectorRangeNode>();
     has_prefilter = true;
   }
 
