@@ -1174,10 +1174,7 @@ TEST_F(SearchFamilyTest, Tags) {
 
   EXPECT_EQ(Run({"ft.create", "i2", "on", "hash", "schema", "c1", "as", "c2", "tag"}), "OK");
 
-  // TODO: there is a discrepancy here between redis stack and Dragonfly,
-  // we accept the original field when it has alias, while redis stack does not.
-  //
-  // EXPECT_THAT(Run({"ft.tagvals", "i2", "c1"}), ErrArg("No such field"));
+  EXPECT_THAT(Run({"ft.tagvals", "i2", "c1"}), ErrArg("No such field"));
   EXPECT_THAT(Run({"ft.tagvals", "i2", "c2"}), ArrLen(0));
 }
 
@@ -3351,19 +3348,26 @@ TEST_F(SearchFamilyTest, BareIdentifierCollisionRejected) {
               ErrArg("Duplicate field in schema"));
 }
 
-TEST_F(SearchFamilyTest, DuplicateIdentifierRejected) {
-  EXPECT_THAT(Run({"FT.CREATE", "bx",   "ON",      "JSON",     "PREFIX",
-                   "1",         "bx:",  "SCHEMA",  "vector",   "VECTOR",
-                   "HNSW",      "6",    "DIM",     "4",        "DISTANCE_METRIC",
-                   "COSINE",    "TYPE", "FLOAT32", "$.vector", "AS",
-                   "other",     "TAG"}),
-              ErrArg("Duplicate field in schema"));
+TEST_F(SearchFamilyTest, SameIdentifierTwiceAllowed) {
+  EXPECT_EQ(Run({"FT.CREATE", "bx",   "ON",      "JSON",     "PREFIX",
+                 "1",         "bx:",  "SCHEMA",  "vector",   "VECTOR",
+                 "HNSW",      "6",    "DIM",     "4",        "DISTANCE_METRIC",
+                 "COSINE",    "TYPE", "FLOAT32", "$.vector", "AS",
+                 "other",     "TAG"}),
+            "OK");
 
-  EXPECT_THAT(
+  EXPECT_EQ(
       Run({"FT.CREATE",       "by",     "ON",    "JSON",    "PREFIX", "1",  "by:",    "SCHEMA",
            "$.vec",           "AS",     "first", "VECTOR",  "HNSW",   "6",  "DIM",    "4",
            "DISTANCE_METRIC", "COSINE", "TYPE",  "FLOAT32", "$.vec",  "AS", "second", "TAG"}),
-      ErrArg("Duplicate field in schema"));
+      "OK");
+  EXPECT_THAT(Run({"FT.INFO", "by"}),
+              IsArray(_, _, _, _, _, _, "attributes",
+                      IsArray(IsArray("identifier", "$.vec", "attribute", "first", "type", "VECTOR",
+                                      _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _),
+                              IsArray("identifier", "$.vec", "attribute", "second", "type", "TAG",
+                                      "SEPARATOR", ",")),
+                      "num_docs", IntArg(0), _, _, _, _));
 }
 
 TEST_F(SearchFamilyTest, BareIdentifierOnHashUnchanged) {
@@ -3384,6 +3388,236 @@ TEST_F(SearchFamilyTest, HashAllowsSameIdentifierWithDifferentAliases) {
   Run({"HSET", "hx:1", "description", "very fast and elegant"});
   EXPECT_THAT(Run({"FT.SEARCH", "hx", "@description_fts:fast"}),
               IsArray(IntArg(1), "hx:1", IsArray("description", "very fast and elegant")));
+  EXPECT_THAT(Run({"FT.SEARCH", "hx", "@description:{very\\ fast\\ and\\ elegant}"}),
+              IsArray(IntArg(1), "hx:1", IsArray("description", "very fast and elegant")));
+  EXPECT_THAT(Run({"FT.TAGVALS", "hx", "description"}), IsUnordArray("very fast and elegant"));
+  EXPECT_THAT(Run({"FT.INFO", "hx"}),
+              IsArray(_, _, _, _, _, _, "attributes",
+                      IsArray(IsArray("identifier", "description", "attribute", "description",
+                                      "type", "TAG", "SEPARATOR", "|"),
+                              IsArray("identifier", "description", "attribute", "description_fts",
+                                      "type", "TEXT", "WEIGHT", "1.000000")),
+                      "num_docs", IntArg(1), _, _, _, _));
+}
+
+// One identifier, several attributes: every consumer resolves by alias.
+TEST_F(SearchFamilyTest, JsonTwinAttributes) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx",       "ON",       "JSON",   "PREFIX", "1",         "d:",
+                 "SCHEMA",    "$.d.email", "AS",       "e_text", "TEXT",   "$.d.email", "AS",
+                 "e_tag",     "TAG",       "$.d.city", "AS",     "city",   "TEXT",      "SORTABLE",
+                 "$.d.city",  "AS",        "city_tag", "TAG"}),
+            "OK");
+  Run({"JSON.SET", "d:1", "$", R"({"d":{"email":"jane@example.com","city":"Boston"}})"});
+  Run({"JSON.SET", "d:2", "$", R"({"d":{"email":"bob@test.org","city":"Austin"}})"});
+
+  const auto attributes = IsArray(
+      IsArray("identifier", "$.d.email", "attribute", "e_text", "type", "TEXT", "WEIGHT",
+              "1.000000"),
+      IsArray("identifier", "$.d.email", "attribute", "e_tag", "type", "TAG", "SEPARATOR", ","),
+      IsArray("identifier", "$.d.city", "attribute", "city", "type", "TEXT", "SORTABLE", "WEIGHT",
+              "1.000000"),
+      IsArray("identifier", "$.d.city", "attribute", "city_tag", "type", "TAG", "SEPARATOR", ","));
+  EXPECT_THAT(Run({"FT.INFO", "idx"}), IsArray(_, _, _, _, _, _, "attributes", attributes,
+                                               "num_docs", IntArg(2), _, _, _, _));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_text:jane"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_tag:{jane\\@example\\.com}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@city_tag:{Austin}"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "city", "NOCONTENT"}),
+              IsArray(IntArg(2), "d:2", "d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "city_tag", "NOCONTENT"}),
+              IsArray(IntArg(2), "d:2", "d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "city", "RETURN", "1", "e_tag"}),
+              IsArray(IntArg(2), "d:2", IsArray("e_tag", "bob@test.org"), "d:1",
+                      IsArray("e_tag", "jane@example.com")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "city", "RETURN", "1", "$.d.email"}),
+              IsArray(IntArg(2), "d:2", IsArray("$.d.email", "bob@test.org"), "d:1",
+                      IsArray("$.d.email", "jane@example.com")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "LOAD", "2", "@e_text", "@e_tag"}),
+              IsUnordArrayWithSize(IsMap("e_text", "jane@example.com", "e_tag", "jane@example.com"),
+                                   IsMap("e_text", "bob@test.org", "e_tag", "bob@test.org")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "1", "@city_tag", "REDUCE", "COUNT", "0",
+                   "AS", "c"}),
+              IsUnordArrayWithSize(IsMap("city_tag", "Boston", "c", "1"),
+                                   IsMap("city_tag", "Austin", "c", "1")));
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "city_tag"}), IsUnordArray("boston", "austin"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "e_text"}), ErrArg("Not a tag field"));
+
+  // Updates and deletes reach both twins.
+  Run({"JSON.SET", "d:1", "$.d.city", R"("Chicago")"});
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@city_tag:{Chicago}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@city:chicago"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@city_tag:{Boston}"}), kNoResults);
+  Run({"JSON.DEL", "d:1"});
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@city_tag:{Chicago}"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_text:jane"}), kNoResults);
+
+  // FT.ALTER appends a twin; an existing alias is rejected before any rebuild.
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "$.d.city", "AS", "city2", "TEXT"}), "OK");
+  WaitForIndexReady("idx");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@city2:austin"}), AreDocIds("d:2"));
+  EXPECT_THAT(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "$.d.zip", "AS", "city", "TAG"}),
+              ErrArg("Duplicate field in schema - city"));
+  EXPECT_THAT(Run({"FT.INFO", "idx"}),
+              IsArray(_, _, _, _, _, _, "attributes",
+                      IsArray(_, _, _, _,
+                              IsArray("identifier", "$.d.city", "attribute", "city2", "type",
+                                      "TEXT", "WEIGHT", "1.000000")),
+                      "num_docs", IntArg(1), _, _, _, _));
+}
+
+TEST_F(SearchFamilyTest, QueryFieldsResolveByAliasOnly) {
+  EXPECT_EQ(Run({"FT.CREATE", "hx",    "ON",    "HASH",   "PREFIX", "1",      "hx:",
+                 "SCHEMA",    "email", "AS",    "e_text", "TEXT",   "email",  "AS",
+                 "e_tag",     "TAG",   "price", "AS",     "p",      "NUMERIC"}),
+            "OK");
+  Run({"HSET", "hx:1", "email", "jane@example.com", "price", "10"});
+  EXPECT_THAT(Run({"FT.SEARCH", "hx", "@e_text:jane"}), AreDocIds("hx:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "hx", "@e_tag:{jane\\@example\\.com}"}), AreDocIds("hx:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "hx", "@p:[0 100]"}), AreDocIds("hx:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "hx", "@email:jane"}), ErrArg("Invalid field: email"));
+  EXPECT_THAT(Run({"FT.SEARCH", "hx", "*", "FILTER", "price", "0", "100"}),
+              ErrArg("Invalid field: price"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "hx", "email"}), ErrArg("No such field"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "hx", "e_tag"}), IsUnordArray("jane@example.com"));
+  // Projections still accept the raw identifier.
+  EXPECT_THAT(Run({"FT.SEARCH", "hx", "*", "RETURN", "1", "email"}),
+              IsArray(IntArg(1), "hx:1", IsArray("email", "jane@example.com")));
+}
+
+// An alias equal to another attribute's identifier must not redirect lookups.
+TEST_F(SearchFamilyTest, SortByAliasEqualToOtherIdentifier) {
+  EXPECT_EQ(Run({"FT.CREATE", "sx", "ON", "HASH", "PREFIX", "1", "sx:", "SCHEMA", "a", "AS", "b",
+                 "TEXT", "SORTABLE", "b", "AS", "c", "TEXT", "SORTABLE"}),
+            "OK");
+  Run({"HSET", "sx:1", "a", "zzz", "b", "aaa"});
+  Run({"HSET", "sx:2", "a", "aaa", "b", "zzz"});
+  EXPECT_THAT(Run({"FT.SEARCH", "sx", "*", "SORTBY", "c", "NOCONTENT"}),
+              IsArray(IntArg(2), "sx:1", "sx:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "sx", "*", "SORTBY", "b", "NOCONTENT"}),
+              IsArray(IntArg(2), "sx:2", "sx:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "sx", "@c:aaa"}), AreDocIds("sx:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "sx", "@b:aaa"}), AreDocIds("sx:2"));
+}
+
+// A raw identifier in a projection resolves to its SORTABLE attribute first.
+TEST_F(SearchFamilyTest, NumericTwinResolvesTypeBySortableFirst) {
+  EXPECT_EQ(Run({"FT.CREATE", "px", "ON", "HASH", "PREFIX", "1", "px:", "SCHEMA", "price", "AS",
+                 "p_tag", "TAG", "price", "AS", "p_num", "NUMERIC", "SORTABLE"}),
+            "OK");
+  Run({"HSET", "px:1", "price", "10"});
+  Run({"HSET", "px:2", "price", "9"});
+  EXPECT_THAT(Run({"FT.SEARCH", "px", "*", "SORTBY", "price", "NOCONTENT"}),
+              IsArray(IntArg(2), "px:2", "px:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "px", "*", "SORTBY", "p_tag", "NOCONTENT"}),
+              IsArray(IntArg(2), "px:1", "px:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "px", "@p_tag:{10}"}), AreDocIds("px:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "px", "@p_num:[9 9]"}), AreDocIds("px:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "px", "*", "SORTBY", "price", "RETURN", "1", "price"}),
+              IsArray(IntArg(2), "px:2", IsArray("price", "9"), "px:1", IsArray("price", "10")));
+}
+
+// LOAD ... AS may move a SORTABLE field's output name to another field.
+TEST_F(SearchFamilyTest, AggregateLoadAliasReplacesSortableField) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "a", "NUMERIC", "SORTABLE", "b", "NUMERIC"}),
+      "OK");
+  Run({"HSET", "doc", "a", "10", "b", "20"});
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "LOAD", "6", "a", "AS", "moved", "b", "AS", "a"}),
+              IsUnordArrayWithSize(IsMap("moved", "10", "a", "20")));
+}
+
+// The sort value of a vector query comes from the SORTBY attribute, not from the attribute that
+// types the field in a whole-document reply; the reply itself keeps the shape RETURN asks for.
+TEST_F(SearchFamilyTest, HnswSortByTwinIgnoresReturnShape) {
+  Run({"FT.CREATE", "hx",   "ON",    "HASH",    "PREFIX",   "1",     "h:",  "SCHEMA",
+       "price",     "AS",   "p_num", "NUMERIC", "SORTABLE", "price", "TAG", "v",
+       "VECTOR",    "HNSW", "6",     "TYPE",    "FLOAT32",  "DIM",   "2",   "DISTANCE_METRIC",
+       "L2"});
+  WaitForIndexReady("hx");
+  Run({"HSET", "h:1", "price", "10", "qty", "7", "v", FloatVec(1, 0)});
+  Run({"HSET", "h:2", "price", "9", "qty", "8", "v", FloatVec(2, 0)});
+  const string q = FloatVec(2, 0);  // nearest is h:2, SORTBY price puts h:1 first ("10" < "9")
+  auto check = [&](const vector<string>& tail, const auto& content) {
+    for (string_view query : {"*=>[KNN 2 @v $q]", "@v:[VECTOR_RANGE 5 $q]"}) {
+      vector<string_view> cmd{"FT.SEARCH", "hx",     query,   "PARAMS",  "2", "q",
+                              q,           "SORTBY", "price", "DIALECT", "2"};
+      cmd.insert(cmd.end(), tail.begin(), tail.end());
+      auto resp = Run(ArgSlice{cmd});
+      ASSERT_THAT(resp, ArgType(RespExpr::ARRAY)) << query;
+      const auto& v = resp.GetVec();
+      ASSERT_GE(v.size(), 3u);
+      EXPECT_EQ(v[1], "h:1") << query;
+      EXPECT_THAT(v[2], content) << query;
+    }
+  };
+  check({}, AnyOf(IsMap("price", "10", "qty", "7", "v", _),
+                  IsMap("price", "10", "qty", "7", "v", _, "__v_score", _)));
+  check({"NOCONTENT"}, _);
+  check({"RETURN", "1", "price"}, IsMap("price", "10"));
+  check({"RETURN", "6", "price", "AS", "moved", "qty", "AS", "price"},
+        IsMap("moved", "10", "price", "7"));
+}
+
+// An alias wins over a document field spelled the same, in RETURN, LOAD and GROUPBY alike.
+TEST_F(SearchFamilyTest, AliasBeatsSameSpelledPath) {
+  Run({"FT.CREATE", "jx", "ON", "JSON", "PREFIX", "1", "j:", "SCHEMA", "$.a", "AS", "$.b", "TEXT",
+       "$.b", "AS", "c", "TEXT"});
+  Run({"JSON.SET", "j:1", "$", R"({"a":"alpha","b":"bravo"})"});
+  EXPECT_THAT(Run({"FT.SEARCH", "jx", "*", "RETURN", "1", "$.b"}),
+              IsArray(IntArg(1), "j:1", IsArray("$.b", "alpha")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "jx", "*", "LOAD", "1", "$.b"}),
+              IsUnordArrayWithSize(IsMap("$.b", "alpha")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "jx", "*", "GROUPBY", "1", "@$.b"}),
+              IsUnordArrayWithSize(IsMap("$.b", "alpha")));
+}
+
+TEST_F(SearchFamilyTest, TwoSortableTwins) {
+  EXPECT_EQ(Run({"FT.CREATE", "cx", "ON", "HASH", "PREFIX", "1", "cx:", "SCHEMA", "city", "AS",
+                 "c_text", "TEXT", "SORTABLE", "city", "AS", "c_tag", "TAG", "SORTABLE"}),
+            "OK");
+  Run({"HSET", "cx:1", "city", "Boston"});
+  Run({"HSET", "cx:2", "city", "Austin"});
+  for (string_view field : {"c_text", "c_tag", "city"})
+    EXPECT_THAT(Run({"FT.SEARCH", "cx", "*", "SORTBY", field, "DESC", "NOCONTENT"}),
+                IsArray(IntArg(2), "cx:1", "cx:2"));
+  EXPECT_THAT(Run({"FT.INFO", "cx"}),
+              IsArray(_, _, _, _, _, _, "attributes",
+                      IsArray(IsArray("identifier", "city", "attribute", "c_text", "type", "TEXT",
+                                      "SORTABLE", "WEIGHT", "1.000000"),
+                              IsArray("identifier", "city", "attribute", "c_tag", "type", "TAG",
+                                      "SORTABLE", "SEPARATOR", ",")),
+                      "num_docs", IntArg(2), _, _, _, _));
+}
+
+TEST_F(SearchFamilyTest, HybridWithTwinAttributes) {
+  Run({"FT.CREATE", "idx",    "ON",
+       "JSON",      "PREFIX", "1",
+       "d:",        "SCHEMA", "$.content",
+       "AS",        "c_text", "TEXT",
+       "$.content", "AS",     "c_tag",
+       "TAG",       "$.v",    "AS",
+       "v_flat",    "VECTOR", "FLAT",
+       "6",         "TYPE",   "FLOAT32",
+       "DIM",       "3",      "DISTANCE_METRIC",
+       "L2",        "$.v",    "AS",
+       "v_hnsw",    "VECTOR", "HNSW",
+       "6",         "TYPE",   "FLOAT32",
+       "DIM",       "3",      "DISTANCE_METRIC",
+       "L2"});
+  WaitForIndexReady("idx");
+  Run({"JSON.SET", "d:a", "$", R"({"content":"alpha","v":[1,0,0]})"});
+  Run({"JSON.SET", "d:b", "$", R"({"content":"beta","v":[2,0,0]})"});
+
+  const string q = Vec3ToBytes(1.0f, 0.0f, 0.0f);
+  for (string_view vsim : {"@v_flat", "@v_hnsw"}) {
+    auto resp =
+        Run({"FT.HYBRID", "idx", "SEARCH", "alpha", "VSIM", vsim, "$q", "PARAMS", "2", "q", q});
+    const vector<string> expected{"d:a", "d:b"};
+    EXPECT_EQ(HybridKeys(resp), expected) << vsim;
+  }
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@c_tag:{alpha}"}), AreDocIds("d:a"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@c_text:beta"}), AreDocIds("d:b"));
 }
 
 TEST_F(SearchFamilyTest, ReturnTrailingAsRejected) {
@@ -7548,7 +7782,7 @@ TEST(BuildRestoreCommandTest, HnswVectorPreservesAllParams) {
   SchemaField field;
   field.type = SchemaField::VECTOR;
   field.flags = 0;
-  field.short_name = "embedding";
+  field.identifier = "embedding";
 
   SchemaField::VectorParams vparams;
   vparams.use_hnsw = true;
@@ -7598,7 +7832,7 @@ static std::string BuildVectorRestoreCommand(bool use_hnsw, dfly::search::Vector
   SchemaField field;
   field.type = SchemaField::VECTOR;
   field.flags = 0;
-  field.short_name = "embedding";
+  field.identifier = "embedding";
 
   SchemaField::VectorParams vparams;
   vparams.use_hnsw = use_hnsw;
@@ -7680,7 +7914,7 @@ TEST(BuildRestoreCommandTest, TextWithSuffixTriePreserved) {
   SchemaField field;
   field.type = SchemaField::TEXT;
   field.flags = 0;
-  field.short_name = "title";
+  field.identifier = "title";
   field.special_params = SchemaField::TextParams{.with_suffixtrie = true};
 
   DocIndex base;
@@ -7705,7 +7939,7 @@ TEST(BuildRestoreCommandTest, TextNoStemPreserved) {
   SchemaField field;
   field.type = SchemaField::TEXT;
   field.flags = 0;
-  field.short_name = "title";
+  field.identifier = "title";
   field.special_params = SchemaField::TextParams{.no_stem = true};
 
   DocIndex base;
@@ -7727,7 +7961,7 @@ TEST(BuildRestoreCommandTest, TextWeightPreserved) {
   SchemaField field;
   field.type = SchemaField::TEXT;
   field.flags = 0;
-  field.short_name = "title";
+  field.identifier = "title";
   field.special_params = SchemaField::TextParams{.weight = 3.5};
 
   DocIndex base;
@@ -7750,7 +7984,7 @@ TEST(BuildRestoreCommandTest, TagWithSuffixTriePreserved) {
   SchemaField field;
   field.type = SchemaField::TAG;
   field.flags = 0;
-  field.short_name = "tags";
+  field.identifier = "tags";
   field.special_params = SchemaField::TagParams{.separator = ',', .with_suffixtrie = true};
 
   DocIndex base;
@@ -7777,7 +8011,7 @@ TEST(BuildRestoreCommandTest, IndexOptionsPreserved) {
   SchemaField field;
   field.type = SchemaField::TEXT;
   field.flags = 0;
-  field.short_name = "title";
+  field.identifier = "title";
 
   DocIndex base;
   base.type = DocIndex::HASH;

@@ -4,6 +4,7 @@
 
 #include "core/search/search.h"
 
+#include <absl/algorithm/container.h>
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/str_cat.h>
@@ -1029,16 +1030,34 @@ AstExpr OptionalNumericFilter::Node(std::string field) {
   return MakeAstNode<AstFieldNode>("@" + field, MakeAstNode<AstRangeNode>(lo_, false, hi_, false));
 }
 
-string_view Schema::LookupAlias(string_view alias) const {
-  if (auto it = field_names.find(alias); it != field_names.end())
-    return it->second;
-  return alias;
+const SchemaField* Schema::Find(string_view alias) const {
+  auto it = fields.find(alias);
+  return it != fields.end() ? &it->second : nullptr;
 }
 
-string_view Schema::LookupIdentifier(string_view identifier) const {
-  if (auto it = fields.find(identifier); it != fields.end())
-    return it->second.short_name;
-  return identifier;
+Schema::Attribute Schema::FindByIdentifier(string_view identifier) const {
+  Attribute best{{}, nullptr};
+  for (const auto& [alias, field] : fields) {
+    if (field.identifier != identifier)
+      continue;
+    auto rank = [](const Attribute& a) {
+      return std::make_tuple(!(a.second->flags & SchemaField::SORTABLE), a.second->number, a.first);
+    };
+    if (!best.second || rank(Attribute{alias, &field}) < rank(best))
+      best = {alias, &field};
+  }
+  return best;
+}
+
+vector<Schema::Attribute> Schema::Ordered() const {
+  vector<Attribute> out;
+  out.reserve(fields.size());
+  for (const auto& [alias, field] : fields)
+    out.emplace_back(alias, &field);
+  absl::c_sort(out, [](const Attribute& l, const Attribute& r) {
+    return std::make_pair(l.second->number, l.first) < std::make_pair(r.second->number, r.first);
+  });
+  return out;
 }
 
 IndicesOptions::IndicesOptions() {
@@ -1058,100 +1077,88 @@ FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
 }
 
 void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
-  for (const auto& [field_ident, field_info] : schema_.fields) {
-    if ((field_info.flags & SchemaField::NOINDEX) > 0)
+  for (const auto& [alias, field] : schema_.Ordered()) {
+    if ((field->flags & SchemaField::NOINDEX) > 0)
       continue;
 
-    switch (field_info.type) {
+    unique_ptr<BaseIndex> index;
+    switch (field->type) {
       case SchemaField::TEXT: {
-        const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
+        const auto& tparams = std::get<SchemaField::TextParams>(field->special_params);
         auto idx = make_unique<TextIndex>(
             mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie, tparams.no_stem,
             schema_.default_language, schema_.language_field, !options_.no_offsets);
-        idx->set_field_ident(field_ident);
-        indices_[field_ident] = std::move(idx);
+        idx->set_field_ident(alias);
+        text_indices_.push_back(idx.get());
+        index = std::move(idx);
         break;
       }
       case SchemaField::NUMERIC: {
-        const auto& nparams = std::get<SchemaField::NumericParams>(field_info.special_params);
-        indices_[field_ident] = make_unique<NumericIndex>(nparams.block_size, mr);
+        const auto& nparams = std::get<SchemaField::NumericParams>(field->special_params);
+        index = make_unique<NumericIndex>(nparams.block_size, mr);
         break;
       }
       case SchemaField::TAG: {
-        const auto& tparams = std::get<SchemaField::TagParams>(field_info.special_params);
-        indices_[field_ident] = make_unique<TagIndex>(mr, tparams);
+        const auto& tparams = std::get<SchemaField::TagParams>(field->special_params);
+        index = make_unique<TagIndex>(mr, tparams);
         break;
       }
       case SchemaField::VECTOR: {
-        unique_ptr<BaseVectorIndex> vector_index;
-
-        DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
-        const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
-
-        // Use global HNSW index
-        if (vparams.use_hnsw)
+        DCHECK(holds_alternative<SchemaField::VectorParams>(field->special_params));
+        const auto& vparams = std::get<SchemaField::VectorParams>(field->special_params);
+        if (vparams.use_hnsw)  // served by the global HNSW index
           break;
-
-        vector_index = make_unique<FlatVectorIndex>(vparams, mr);
-        indices_[field_ident] = std::move(vector_index);
-
+        index = make_unique<FlatVectorIndex>(vparams, mr);
         break;
       }
       case SchemaField::GEO: {
-        indices_[field_ident] = make_unique<GeoIndex>(mr);
+        index = make_unique<GeoIndex>(mr);
         break;
       }
     }
+    if (!index)
+      continue;
+    add_list_.emplace_back(field->identifier, index.get());
+    indices_[alias] = std::move(index);
   }
 }
 
 void FieldIndices::CreateSortIndices() {
-  for (const auto& [field_ident, field_info] : schema_.fields) {
-    if ((field_info.flags & SchemaField::SORTABLE) == 0)
+  for (const auto& [alias, field] : schema_.Ordered()) {
+    if ((field->flags & SchemaField::SORTABLE) == 0)
       continue;
 
-    switch (field_info.type) {
+    unique_ptr<BaseSortIndex> index;
+    switch (field->type) {
       case SchemaField::TAG:
       case SchemaField::TEXT:
-        sort_indices_[field_ident] = make_unique<StringSortIndex>();
+        index = make_unique<StringSortIndex>();
         break;
       case SchemaField::NUMERIC:
-        sort_indices_[field_ident] = make_unique<NumericSortIndex>();
+        index = make_unique<NumericSortIndex>();
         break;
       case SchemaField::VECTOR:
       case SchemaField::GEO:
         break;
     }
+    if (!index)
+      continue;
+    add_list_.emplace_back(field->identifier, index.get());
+    sort_indices_[alias] = std::move(index);
   }
 }
 
 bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
-  bool was_added = true;
-
-  std::vector<std::pair<std::string_view, BaseIndex*>> successfully_added_indices;
-  successfully_added_indices.reserve(indices_.size() + sort_indices_.size());
-
-  auto try_add = [&](const auto& indices_container) {
-    for (auto& [field, index] : indices_container) {
-      if (index->Add(doc, access, field)) {
-        successfully_added_indices.emplace_back(field, index.get());
-      } else {
-        was_added = false;
-        break;
-      }
-    }
-  };
-
-  try_add(indices_);
-
-  if (was_added) {
-    try_add(sort_indices_);
+  size_t added = 0;
+  for (; added < add_list_.size(); added++) {
+    auto& [identifier, index] = add_list_[added];
+    if (!index->Add(doc, access, identifier))
+      break;
   }
 
-  if (!was_added) {
-    for (auto& [field, index] : successfully_added_indices) {
-      index->Remove(doc, access, field);
-    }
+  if (added < add_list_.size()) {  // all or nothing: roll back what was added
+    for (size_t i = 0; i < added; i++)
+      add_list_[i].second->Remove(doc, access, add_list_[i].first);
     return false;
   }
 
@@ -1167,34 +1174,24 @@ void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
     return;
   }
 
-  for (auto& [field, index] : indices_)
-    index->Remove(doc, access, field);
-  for (auto& [field, sort_index] : sort_indices_)
-    sort_index->Remove(doc, access, field);
+  for (auto& [identifier, index] : add_list_)
+    index->Remove(doc, access, identifier);
 
   all_ids_.erase(it);
 }
 
-BaseIndex* FieldIndices::GetIndex(string_view field) const {
-  auto it = indices_.find(schema_.LookupAlias(field));
+BaseIndex* FieldIndices::GetIndex(string_view alias) const {
+  auto it = indices_.find(alias);
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
-BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
-  auto it = sort_indices_.find(schema_.LookupAlias(field));
+BaseSortIndex* FieldIndices::GetSortIndex(string_view alias) const {
+  auto it = sort_indices_.find(alias);
   return it != sort_indices_.end() ? it->second.get() : nullptr;
 }
 
 std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
-  vector<TextIndex*> out;
-  for (const auto& [field_name, field_info] : schema_.fields) {
-    if (field_info.type != SchemaField::TEXT || (field_info.flags & SchemaField::NOINDEX) > 0)
-      continue;
-    auto* index = dynamic_cast<TextIndex*>(GetIndex(field_name));
-    DCHECK(index);
-    out.push_back(index);
-  }
-  return out;
+  return text_indices_;
 }
 
 const vector<DocId>& FieldIndices::GetAllDocs() const {
@@ -1205,12 +1202,12 @@ size_t FieldIndices::GetNonPmrMemoryUsage() const {
   // all_ids_ scales with document count — the dominant untracked cost.
   size_t mem = all_ids_.capacity() * sizeof(DocId);
   // Hash map bucket arrays scale with field count (typically small).
-  constexpr size_t kIndicesSlotSize =
-      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>>::value_type) + 1;
-  constexpr size_t kSortSlotSize =
-      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>>::value_type) + 1;
+  constexpr size_t kIndicesSlotSize = sizeof(decltype(indices_)::value_type) + 1;
+  constexpr size_t kSortSlotSize = sizeof(decltype(sort_indices_)::value_type) + 1;
   mem += indices_.bucket_count() * kIndicesSlotSize;
   mem += sort_indices_.bucket_count() * kSortSlotSize;
+  mem += add_list_.capacity() * sizeof(add_list_[0]);
+  mem += text_indices_.capacity() * sizeof(text_indices_[0]);
   return mem;
 }
 
@@ -1218,8 +1215,8 @@ const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }
 
-SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_identifier) const {
-  auto it = sort_indices_.find(field_identifier);
+SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view alias) const {
+  auto it = sort_indices_.find(alias);
   DCHECK(it != sort_indices_.end());
   return it->second->Lookup(doc);
 }

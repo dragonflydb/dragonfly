@@ -25,12 +25,9 @@ class StringMap;
 // behind a document interface for quering fields and serializing.
 // Field string_view's are only valid until the next is requested.
 struct BaseAccessor : public search::DocumentAccessor {
-  // Serialize all fields
-  virtual SearchDocData Serialize(const search::Schema& schema) const = 0;
-
-  // Serialize selected fields
-  virtual SearchDocData Serialize(const search::Schema& schema,
-                                  absl::Span<const FieldReference> fields) const;
+  // Listed fields are read with GetStrings; whole documents are serialized per type.
+  virtual SearchDocData Serialize(const DocProjection& projection) const;
+  virtual SearchDocData SerializeAll(const DocProjection& projection) const = 0;
 
   // Default implementation uses GetStrings
   virtual std::optional<VectorInfo> GetVector(std::string_view active_field, size_t dim,
@@ -45,7 +42,7 @@ struct ListPackAccessor : public BaseAccessor {
   }
 
   std::optional<StringList> GetStrings(std::string_view field) const override;
-  SearchDocData Serialize(const search::Schema& schema) const override;
+  SearchDocData SerializeAll(const DocProjection& projection) const override;
 
  private:
   detail::ListpackWrap lw_;
@@ -67,7 +64,7 @@ struct StringMapAccessor : public BaseAccessor {
   ~StringMapAccessor() override;
 
   std::optional<StringList> GetStrings(std::string_view field) const override;
-  SearchDocData Serialize(const search::Schema& schema) const override;
+  SearchDocData SerializeAll(const DocProjection& projection) const override;
 
  private:
   StringMap* hset_;
@@ -91,9 +88,8 @@ struct JsonAccessor : public BaseAccessor {
   std::optional<StringList> GetTags(std::string_view active_field) const override;
 
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
-  SearchDocData Serialize(const search::Schema& schema,
-                          absl::Span<const FieldReference> fields) const override;
-  SearchDocData Serialize(const search::Schema& schema) const override;
+  SearchDocData Serialize(const DocProjection& projection) const override;
+  SearchDocData SerializeAll(const DocProjection& projection) const override;
 
   static void RemoveFieldFromCache(std::string_view field);
 

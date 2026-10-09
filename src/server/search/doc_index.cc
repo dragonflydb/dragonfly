@@ -89,64 +89,52 @@ void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
   } while (cursor);
 }
 
-bool IsSortableField(std::string_view field_identifier, const search::Schema& schema) {
-  auto it = schema.fields.find(field_identifier);
-  return it != schema.fields.end() && (it->second.flags & search::SchemaField::SORTABLE);
+// Sort-index aliases keyed by their output names.
+using SortIndiciesFieldsList =
+    std::vector<std::pair<string_view /*sort index alias*/, string_view /*output name*/>>;
+
+FieldReference::Resolved ResolvedAttribute(std::string_view alias,
+                                           const search::SchemaField& field) {
+  return {alias, field.identifier, field.type, (field.flags & search::SchemaField::SORTABLE) != 0};
 }
 
-using SortIndiciesFieldsList =
-    std::vector<std::pair<string_view /*identifier*/, string_view /*alias*/>>;
-
-std::pair<std::vector<FieldReference>, SortIndiciesFieldsList> PreprocessAggregateFields(
+// Every attribute is available to the pipeline; LOAD adds or overrides entries by output name.
+std::pair<DocProjection, SortIndiciesFieldsList> PreprocessAggregateFields(
     const search::Schema& schema, const AggregateParams& params,
     const std::optional<std::vector<FieldReference>>& load_fields) {
-  absl::flat_hash_map<std::string_view, FieldReference> fields_by_identifier;
-  absl::flat_hash_map<std::string_view, std::string_view> sort_indicies_aliases;
-  fields_by_identifier.reserve(schema.field_names.size());
-  sort_indicies_aliases.reserve(schema.field_names.size());
+  absl::flat_hash_map<std::string_view, FieldReference::Resolved> entries;
+  for (const auto& [alias, field] : schema.fields)
+    entries.emplace(alias, ResolvedAttribute(alias, field));
+  for (const auto& field : load_fields.value_or(vector<FieldReference>{}))
+    entries.insert_or_assign(field.OutputName(), field.Resolve(schema));
 
-  for (const auto& [fname, fident] : schema.field_names) {
-    if (!IsSortableField(fident, schema)) {
-      fields_by_identifier.emplace(fident, FieldReference{fident, fname});
-    } else {
-      sort_indicies_aliases[fident] = fname;
-    }
+  std::vector<DocField> fields;
+  SortIndiciesFieldsList sorts;
+  for (const auto& [output, r] : entries) {
+    if (r.sortable)
+      sorts.emplace_back(r.alias, output);
+    else
+      fields.push_back({output, r.identifier, r.type});
   }
-
-  for (const auto& field : load_fields.value_or(vector<FieldReference>{})) {
-    string_view fident = field.Identifier(schema, false);
-    if (!IsSortableField(fident, schema)) {
-      fields_by_identifier.insert_or_assign(fident, field);
-    } else {
-      sort_indicies_aliases[fident] = field.OutputName();
-    }
-  }
-
-  vector<FieldReference> fields;
-  fields.reserve(fields_by_identifier.size());
-  for (auto& [_, field] : fields_by_identifier) {
-    fields.emplace_back(field);
-  }
-
-  return {std::move(fields), {sort_indicies_aliases.begin(), sort_indicies_aliases.end()}};
+  return {DocProjection{.fields = std::move(fields), .types = {}}, std::move(sorts)};
 }
 
-/* Separate fields into basic and sortable. The second vector contains flags indicating
-   whether the field at the same index in the first vector is sortable or not. */
-std::pair<std::vector<FieldReference>, std::vector<bool>> GetBasicFields(
+/* Separate fields into basic and sortable. The second vector holds, for each input field, the
+   alias of its sort index or an empty view when the field has to be loaded. */
+std::pair<DocProjection, std::vector<std::string_view>> GetBasicFields(
     absl::Span<const std::string_view> fields, const search::Schema& schema) {
   const size_t fields_count = fields.size();
-  std::vector<bool> is_sortable_field(fields_count);
-  std::vector<FieldReference> basic_fields;
+  std::vector<std::string_view> sort_alias(fields_count);
+  std::vector<DocField> basic_fields;
   basic_fields.reserve(fields_count);
   for (size_t i = 0; i < fields_count; ++i) {
-    bool is_sortable = IsSortableField(fields[i], schema);
-    is_sortable_field[i] = is_sortable;
-    if (!is_sortable) {
-      basic_fields.emplace_back(fields[i]);
-    }
+    auto r = FieldReference{fields[i]}.Resolve(schema);
+    if (r.sortable)
+      sort_alias[i] = r.alias;
+    else
+      basic_fields.push_back({fields[i], r.identifier, r.type});
   }
-  return {std::move(basic_fields), std::move(is_sortable_field)};
+  return {DocProjection{.fields = std::move(basic_fields), .types = {}}, std::move(sort_alias)};
 }
 
 constexpr std::string_view kIndexNotBuilt = "index is not built";
@@ -157,11 +145,40 @@ auto GetIndexedHnswFields(const search::Schema& schema) {
 }
 }  // namespace
 
-bool FieldReference::IsJsonPath(std::string_view name) {
-  if (name.size() < 2) {
-    return false;
+FieldReference::Resolved FieldReference::Resolve(const search::Schema& schema) const {
+  std::string_view alias = name_;
+  const search::SchemaField* field = schema.Find(name_);
+  if (!field)
+    std::tie(alias, field) = schema.FindByIdentifier(name_);
+  return field ? ResolvedAttribute(alias, *field) : FieldReference::Resolved{{}, name_};
+}
+
+DocProjection DocProjection::All(const search::Schema& schema) {
+  DocProjection out;
+  absl::flat_hash_set<std::string_view> decided;  // identifiers typed by a SORTABLE attribute
+  for (const auto& [alias, field] : schema.Ordered()) {
+    const bool sortable = field->flags & search::SchemaField::SORTABLE;
+    if (sortable ? decided.insert(field->identifier).second
+                 : !out.types.contains(field->identifier))
+      out.types[field->identifier] = field->type;
   }
-  return name.front() == '$' && (name[1] == '.' || name[1] == '[');
+  return out;
+}
+
+DocProjection DocProjection::Of(const search::Schema& schema,
+                                absl::Span<const FieldReference> fields) {
+  DocProjection out{.fields = std::vector<DocField>{}, .types = {}};
+  out.fields->reserve(fields.size());
+  for (const auto& field : fields) {
+    auto r = field.Resolve(schema);
+    out.fields->push_back({field.OutputName(), r.identifier, r.type});
+  }
+  return out;
+}
+
+search::SchemaField::FieldType DocProjection::TypeOf(std::string_view identifier) const {
+  auto it = types.find(identifier);
+  return it != types.end() ? it->second : search::SchemaField::TEXT;
 }
 
 bool SearchParams::ShouldReturnField(std::string_view alias) const {
@@ -216,9 +233,10 @@ string DocIndexInfo::BuildRestoreCommand() const {
     absl::StrAppend(&out, " LANGUAGE_FIELD ", base_index.schema.language_field);
 
   absl::StrAppend(&out, " SCHEMA");
-  for (const auto& [fident, finfo] : base_index.schema.fields) {
+  for (const auto& [alias, finfo_ptr] : base_index.schema.Ordered()) {
+    const auto& finfo = *finfo_ptr;
     // Store field name, alias and type
-    absl::StrAppend(&out, " ", fident, " AS ", finfo.short_name, " ",
+    absl::StrAppend(&out, " ", finfo.identifier, " AS ", alias, " ",
                     SearchFieldTypeToString(finfo.type));
 
     // Store specific params
@@ -593,10 +611,10 @@ void ShardDocIndex::ClearAllHnswPreservedData() {
 
 void ShardDocIndex::InitHnswShardIndices() {
   hnsw_shard_indices_.clear();
-  for (const auto& [field_ident, field_info] : GetIndexedHnswFields(base_->schema)) {
-    auto global = GlobalHnswIndexRegistry::Instance().Get(base_->name, field_info.short_name);
+  for (const auto& [alias, field_info] : GetIndexedHnswFields(base_->schema)) {
+    auto global = GlobalHnswIndexRegistry::Instance().Get(base_->name, alias);
     if (global) {
-      hnsw_shard_indices_.emplace_back(std::move(global), std::string(field_ident));
+      hnsw_shard_indices_.emplace_back(std::move(global), field_info.identifier);
     }
   }
 }
@@ -806,19 +824,17 @@ void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
 }
 
 ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
-    search::DocId id, const OpArgs& op_args, const search::Schema& schema,
-    const std::optional<std::vector<FieldReference>>& return_fields) {
+    search::DocId id, const OpArgs& op_args, const DocProjection& projection,
+    const DocProjection* sort) {
   auto entry = LoadEntry(id, op_args);
-  if (entry) {
-    if (return_fields) {
-      return std::optional<std::pair<std::string_view, SearchDocData>>{
-          std::make_pair(entry->first, entry->second->Serialize(schema, *return_fields))};
-    } else {
-      return std::optional<std::pair<std::string_view, SearchDocData>>{
-          std::make_pair(entry->first, entry->second->Serialize(schema))};
-    }
+  if (!entry)
+    return std::nullopt;
+  SerializedDoc doc{entry->first, entry->second->Serialize(projection), {}};
+  if (sort) {
+    if (auto values = entry->second->Serialize(*sort); !values.empty())
+      doc.sort_value = std::move(values.begin()->second);
   }
-  return std::nullopt;
+  return doc;
 }
 
 bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
@@ -860,13 +876,14 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
     };
     std::priority_queue<QPair, std::vector<QPair>, decltype(ranks_before)> q(ranks_before);
 
+    const DocProjection projection = DocProjection::Of(base_->schema, {&sort.field, 1});
     for (DocId id : *ids) {
       auto entry = LoadEntry(id, op_args);
       if (!entry)
         continue;
 
       search::SortableValue value = std::monostate{};
-      if (auto result = entry->second->Serialize(base_->schema, {sort.field}); !result.empty())
+      if (auto result = entry->second->Serialize(projection); !result.empty())
         value = std::move(result.begin()->second);
 
       QPair candidate{std::move(value), id};
@@ -941,9 +958,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   vector<search::SortableValue> sort_scores;
   if (params.sort_option && !skip_sort) {
     const auto& so = *params.sort_option;
-    auto fident = so.field.Identifier(base_->schema, false);
-    if (IsSortableField(fident, base_->schema)) {
-      auto* idx = indices_->GetSortIndex(fident);
+    if (auto r = so.field.Resolve(base_->schema); r.sortable) {
+      auto* idx = indices_->GetSortIndex(r.alias);
       sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
     } else {
       sort_scores = KeepTopKSorted(&result.ids, limit, so, op_args);
@@ -998,6 +1014,12 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   vector<SerializedSearchDoc> out;
   out.reserve(min(limit, result.ids.size()));
 
+  const bool serialize_all = params.ShouldReturnAllFields() && !result.ids.empty();
+  const DocProjection all_fields = serialize_all && base_->type == DocIndex::HASH
+                                       ? DocProjection::All(base_->schema)
+                                       : DocProjection{};
+  const DocProjection listed_fields = DocProjection::Of(base_->schema, return_fields);
+
   size_t expired_count = 0;
   for (size_t i = 0; i < result.ids.size(); i++) {
     float knn_score = 0;
@@ -1026,9 +1048,9 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     // Load all specified fields from document
     SearchDocData fields{};
     if (params.ShouldReturnAllFields())
-      fields = accessor->Serialize(base_->schema);
+      fields = accessor->Serialize(all_fields);
 
-    auto more_fields = accessor->Serialize(base_->schema, return_fields);
+    auto more_fields = accessor->Serialize(listed_fields);
     fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
     out.push_back(
         {result.ids[i], string{key}, std::move(fields), knn_score, text_score, sort_score});
@@ -1161,10 +1183,10 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
 
     SearchDocData extracted_sort_indicies;
     extracted_sort_indicies.reserve(sort_indicies.size());
-    for (const auto& [fident, fname] : sort_indicies)
-      extracted_sort_indicies[fname] = indices_->GetSortIndexValue(doc, fident);
+    for (const auto& [alias, output] : sort_indicies)
+      extracted_sort_indicies[output] = indices_->GetSortIndexValue(doc, alias);
 
-    SearchDocData loaded = accessor->Serialize(base_->schema, fields_to_load);
+    SearchDocData loaded = accessor->Serialize(fields_to_load);
     out.emplace_back(make_move_iterator(extracted_sort_indicies.begin()),
                      make_move_iterator(extracted_sort_indicies.end()));
     out.back().insert(make_move_iterator(loaded.begin()), make_move_iterator(loaded.end()));
@@ -1194,7 +1216,7 @@ join::Vector<join::OwnedEntry> ShardDocIndex::PreagregateDataForJoin(
   auto search_results = search_algo->Search(&*indices_);
 
   const size_t fields_count = join_fields.size();
-  const auto [basic_fields, is_sortable_field] = GetBasicFields(join_fields, base_->schema);
+  const auto [basic_fields, sort_alias] = GetBasicFields(join_fields, base_->schema);
 
   join::Vector<join::OwnedEntry> result;
   result.reserve(search_results.ids.size());
@@ -1207,14 +1229,14 @@ join::Vector<join::OwnedEntry> ShardDocIndex::PreagregateDataForJoin(
 
     auto& [key, accessor] = *entry;
 
-    SearchDocData loaded_basic_fields = accessor->Serialize(base_->schema, basic_fields);
+    SearchDocData loaded_basic_fields = accessor->Serialize(basic_fields);
 
     bool insert_key = true;
     join::Vector<join::OwnedJoinableValue> join_fields_values(fields_count);
     for (size_t i = 0; i < fields_count; ++i) {
       search::SortableValue value;
-      if (is_sortable_field[i]) {
-        value = indices_->GetSortIndexValue(doc, join_fields[i]);
+      if (!sort_alias[i].empty()) {
+        value = indices_->GetSortIndexValue(doc, sort_alias[i]);
       } else {
         value = loaded_basic_fields[join_fields[i]];
       }
@@ -1249,7 +1271,7 @@ ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
     return {};
 
   const size_t fields_count = fields_to_load.size();
-  const auto [basic_fields, is_sortable_field] = GetBasicFields(fields_to_load, base_->schema);
+  const auto [basic_fields, sort_alias] = GetBasicFields(fields_to_load, base_->schema);
 
   FieldsValuesPerDocId result;
   result.reserve(doc_ids.size());
@@ -1261,12 +1283,12 @@ ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
 
     auto& [key, accessor] = *entry;
 
-    SearchDocData loaded_basic_fields = accessor->Serialize(base_->schema, basic_fields);
+    SearchDocData loaded_basic_fields = accessor->Serialize(basic_fields);
 
     FieldsValues fields_values(fields_count);
     for (size_t i = 0; i < fields_count; ++i) {
-      if (is_sortable_field[i]) {
-        fields_values[i] = indices_->GetSortIndexValue(doc, fields_to_load[i]);
+      if (!sort_alias[i].empty()) {
+        fields_values[i] = indices_->GetSortIndexValue(doc, sort_alias[i]);
       } else {
         fields_values[i] = loaded_basic_fields[fields_to_load[i]];
       }
@@ -1375,16 +1397,15 @@ std::vector<std::string> ShardDocIndices::DropUnbuiltIndices() {
   for (const auto& name : names) {
     auto index = DropIndex(name);
     DCHECK(index);
-    for (const auto& [_, field] : GetIndexedHnswFields(index->base_->schema))
-      GlobalHnswIndexRegistry::Instance().Remove(name, field.short_name);
+    for (const auto& [alias, _] : GetIndexedHnswFields(index->base_->schema))
+      GlobalHnswIndexRegistry::Instance().Remove(name, alias);
   }
   return names;
 }
 
 void ShardDocIndices::DropIndexCache(const dfly::ShardDocIndex& shard_doc_index) {
-  auto info = shard_doc_index.GetInfo();
-  for (const auto& [fident, field] : info.base_index.schema.fields)
-    JsonAccessor::RemoveFieldFromCache(fident);
+  for (const auto& [_, field] : shard_doc_index.base().schema.fields)
+    JsonAccessor::RemoveFieldFromCache(field.identifier);
 }
 
 void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
@@ -1394,8 +1415,8 @@ void ShardDocIndices::RebuildAllIndices(const OpArgs& op_args) {
     // matching key mappings — otherwise (no graph, no mappings, or a corrupted save
     // that left one without the other) fall back to a full rebuild from the keyspace.
     bool any_hnsw_field_has_nodes = false;
-    for (const auto& [_, field] : GetIndexedHnswFields(ptr->base_->schema)) {
-      if (auto h = GlobalHnswIndexRegistry::Instance().Get(index_name, field.short_name);
+    for (const auto& [alias, _] : GetIndexedHnswFields(ptr->base_->schema)) {
+      if (auto h = GlobalHnswIndexRegistry::Instance().Get(index_name, alias);
           h && h->GetNodeCount() > 0) {
         any_hnsw_field_has_nodes = true;
         break;

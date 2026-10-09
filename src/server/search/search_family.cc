@@ -378,14 +378,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       return CreateSyntaxError("Empty field alias in schema"sv);
     }
 
-    if (schema.field_names.contains(field_alias)) {
+    if (schema.fields.contains(field_alias)) {
       return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_alias));
-    }
-    // Same identifier may appear twice on HASH (e.g. one TAG spec + one TEXT spec with
-    // different aliases). On JSON, a bare identifier expands to $.<id> and would silently
-    // shadow an earlier $.<id> spec; reject that collision instead of last-write-wins.
-    if (index->type == DocIndex::JSON && schema.fields.contains(field_path)) {
-      return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_path));
     }
 
     // Determine type
@@ -440,8 +434,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       flags |= *flag;
     }
 
-    schema.fields[field_path] = {field_type, flags, string{field_alias}, params};
-    schema.field_names[field_alias] = field_path;
+    const uint32_t number = schema.fields.size();
+    schema.fields[field_alias] = {field_type, flags, string{field_path}, params, number};
   }
 
   return false;
@@ -1371,40 +1365,16 @@ void WarmupQueryParser() {
   });
 }
 
-struct HnswLoadOptions {
-  bool set_sort_score = false;
-  bool remove_sort_field = false;
-  std::string sort_score_field;
-  std::optional<std::vector<FieldReference>> return_fields;
-};
+// SORTBY by anything but the KNN score needs the sort value loaded from the document.
+bool HnswLoadsSortValue(const SearchParams& params,
+                        const std::optional<search::KnnScoreSortOption>& knn_score_option) {
+  return params.sort_option &&
+         (!knn_score_option || !params.sort_option->IsSame(*knn_score_option));
+}
 
-HnswLoadOptions PrepareHnswLoadOptions(const SearchParams& params,
-                                       std::optional<search::KnnScoreSortOption> knn_score_option) {
-  HnswLoadOptions options;
-  options.return_fields = params.return_fields;
-
-  options.set_sort_score =
-      params.sort_option && (!knn_score_option || !params.sort_option->IsSame(*knn_score_option));
-  if (!options.set_sort_score)
-    return options;
-
-  auto sort_field = params.sort_option->field.Name();
-  options.sort_score_field = sort_field;
-
-  if (!options.return_fields)
-    return options;
-
-  auto sort_return_field = rng::find_if(
-      *options.return_fields,
-      [sort_field](const FieldReference& field) { return field.Name() == sort_field; });
-
-  if (sort_return_field == options.return_fields->end()) {
-    options.return_fields->push_back(params.sort_option->field);
-    options.remove_sort_field = true;
-  } else {
-    options.sort_score_field = sort_return_field->OutputName();
-  }
-  return options;
+// RETURN-all types a document field by one of its attributes; SORTBY may name another one.
+DocProjection HnswSortProjection(const search::Schema& schema, const SearchParams& params) {
+  return DocProjection::Of(schema, {&params.sort_option->field, 1});
 }
 
 vector<SearchResult> LoadHnswSearchDocs(
@@ -1434,12 +1404,15 @@ vector<SearchResult> LoadHnswSearchDocs(
     }
 
     const auto& schema = index->base().schema;
-    auto load_options = PrepareHnswLoadOptions(params, knn_score_option);
-    const bool ids_only_without_sort_load = params.IdsOnly() && !load_options.set_sort_score;
+    const bool load_sort_value = HnswLoadsSortValue(params, knn_score_option);
+    const bool ids_only_without_sort_load = params.IdsOnly() && !load_sort_value;
 
     // Resize shard with default `true` value
     shard_docs_serialized_indicator[es->shard_id()].resize(shard_docs[es->shard_id()].size(), true);
 
+    const DocProjection projection = DocProjection::For(schema, params.return_fields);
+    const DocProjection sort_projection =
+        load_sort_value ? HnswSortProjection(schema, params) : DocProjection{};
     for (size_t i = 0; i < shard_docs[es->shard_id()].size(); i++) {
       auto& shard_doc = shard_docs[es->shard_id()][i];
 
@@ -1453,23 +1426,12 @@ vector<SearchResult> LoadHnswSearchDocs(
         continue;
       }
 
-      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
-                                                load_options.return_fields);
+      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), projection,
+                                                load_sort_value ? &sort_projection : nullptr);
           doc) {
-        auto& [key, fields] = *doc;
-
-        // Handle sort_score and remove field if we don't need it
-        search::SortableValue sort_score = std::monostate{};
-        if (load_options.set_sort_score) {
-          if (auto it = fields.find(load_options.sort_score_field); it != fields.end())
-            sort_score = it->second;
-          if (load_options.remove_sort_field) {
-            fields.erase(load_options.sort_score_field);
-          }
-        }
-        shard_doc.key = std::string{key};
-        shard_doc.values = std::move(fields);
-        shard_doc.sort_score = sort_score;
+        shard_doc.key = std::string{doc->key};
+        shard_doc.values = std::move(doc->values);
+        shard_doc.sort_score = std::move(doc->sort_value);
       } else {
         // If we couldn't serialize requested doc
         shard_docs_serialized_indicator[es->shard_id()][i] = false;
@@ -1628,28 +1590,23 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
     shard_docs[shard_id].emplace_back(doc);
   }
 
-  auto load_options = PrepareHnswLoadOptions(params, knn_score_option);
+  const bool load_sort_value = HnswLoadsSortValue(params, knn_score_option);
 
   cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* idx = es->search_indices()->GetIndex(index_name);
     if (!idx || shard_docs[es->shard_id()].empty())
       return OpStatus::OK;
     const auto& schema = idx->base().schema;
+    const DocProjection projection = DocProjection::For(schema, params.return_fields);
+    const DocProjection sort_projection =
+        load_sort_value ? HnswSortProjection(schema, params) : DocProjection{};
     for (auto& shard_doc : shard_docs[es->shard_id()]) {
-      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
-                                              load_options.return_fields);
+      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), projection,
+                                              load_sort_value ? &sort_projection : nullptr);
           doc) {
-        auto& [key, fields] = *doc;
-        search::SortableValue sort_score = std::monostate{};
-        if (load_options.set_sort_score) {
-          if (auto it = fields.find(load_options.sort_score_field); it != fields.end())
-            sort_score = it->second;
-          if (load_options.remove_sort_field)
-            fields.erase(load_options.sort_score_field);
-        }
-        shard_doc.key = std::string{key};
-        shard_doc.values = std::move(fields);
-        shard_doc.sort_score = sort_score;
+        shard_doc.key = std::string{doc->key};
+        shard_doc.values = std::move(doc->values);
+        shard_doc.sort_score = std::move(doc->sort_value);
       }
     }
     return OpStatus::OK;
@@ -1709,14 +1666,13 @@ vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
 // Try creating global hnsw indices for given fields and return true on success
 bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
   std::vector<std::string> created_vector_indices;
-  for (const auto& [field_ident, field_info] : index.schema.fields) {
+  for (const auto& [alias, field_info] : index.schema.fields) {
     if (!field_info.IsIndexableHnswField())
       continue;
 
     const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
 
-    bool success = GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name,
-                                                              vparams, index.type);
+    bool success = GlobalHnswIndexRegistry::Instance().Create(idx_name, alias, vparams, index.type);
     if (!success) {
       // Clean created indices
       for (const auto& cfname : created_vector_indices)
@@ -1724,7 +1680,7 @@ bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
       return false;
     }
 
-    created_vector_indices.emplace_back(field_info.short_name);
+    created_vector_indices.emplace_back(alias);
   }
   return true;
 }
@@ -2477,17 +2433,12 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     }
     const auto& schema = idx->base().schema;
     std::call_once(schema_validated, [&] {
-      auto name_it = schema.field_names.find(params->vsim_field);
-      if (name_it == schema.field_names.end()) {
+      const auto* field = schema.Find(params->vsim_field);
+      if (!field || field->type != search::SchemaField::VECTOR) {
         vsim_not_vector = true;
         return;
       }
-      auto field_it = schema.fields.find(name_it->second);
-      if (field_it == schema.fields.end() || field_it->second.type != search::SchemaField::VECTOR) {
-        vsim_not_vector = true;
-        return;
-      }
-      const auto& vp = std::get<search::SchemaField::VectorParams>(field_it->second.special_params);
+      const auto& vp = std::get<search::SchemaField::VectorParams>(field->special_params);
       captured_metric = vp.sim;
       if (!use_hnsw) {
         auto vec_bytes = params->query_params[params->vsim_param];
@@ -2517,11 +2468,11 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
         // Empty optional vs unset: unset would serialize the full hash even when no LOAD is used.
         const std::optional<std::vector<FieldReference>> empty_fields{std::in_place};
         const auto& serialize_fields = emit_fields ? params->return_fields : empty_fields;
+        const DocProjection projection = DocProjection::For(schema, serialize_fields);
         for (auto& doc : hnsw_shard_docs[sid]) {
-          if (auto s = idx->SerializeDocWithKey(doc.id, t->GetOpArgs(es), schema, serialize_fields);
-              s) {
-            doc.key = string{s->first};
-            doc.values = std::move(s->second);
+          if (auto s = idx->SerializeDocWithKey(doc.id, t->GetOpArgs(es), projection); s) {
+            doc.key = string{s->key};
+            doc.values = std::move(s->values);
           }
         }
       }
@@ -2744,26 +2695,16 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("Index not found");
   }
 
-  // Parse additional schema
-  DocIndex new_index{};
-  new_index.type = index_info->type;
-  auto parse_result = ParseSchema(&parser, &new_index);
+  // Parse the additional attributes into the copied definition: they continue its declaration
+  // order and a duplicate alias fails here, before any shard is touched.
+  auto parse_result = ParseSchema(&parser, index_info.get());
   if (SendErrorIfOccurred(parse_result, &parser, cmd_cntx)) {
     cmd_cntx->tx()->Conclude();
     return;
   }
 
-  auto& new_fields = new_index.schema;
-
-  // For logging we copy the whole schema
-  // TODO: Use a more efficient way for logging
-  LOG(INFO) << "Adding "
-            << DocIndexInfo{.base_index = new_index, .hnsw_metadata = {}}.BuildRestoreCommand();
-
-  // Merge schemas
-  search::Schema& schema = index_info->schema;
-  schema.fields.insert(new_fields.fields.begin(), new_fields.fields.end());
-  schema.field_names.insert(new_fields.field_names.begin(), new_fields.field_names.end());
+  LOG(INFO) << "Altering " << idx_name << ": "
+            << DocIndexInfo{.base_index = *index_info, .hnsw_metadata = {}}.BuildRestoreCommand();
 
   // Rebuild index
   // TODO: Introduce partial rebuild
@@ -2837,10 +2778,10 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
       [&dropped](EngineShard* es) { dropped[es->shard_id()].reset(); });
 
   if (index_info) {
-    for (const auto& [field_ident, field_info] : index_info->schema.fields) {
+    for (const auto& [alias, field_info] : index_info->schema.fields) {
       if (field_info.type == search::SchemaField::VECTOR &&
           !(field_info.flags & search::SchemaField::NOINDEX)) {
-        if (GlobalHnswIndexRegistry::Instance().Remove(idx_name, field_info.short_name)) {
+        if (GlobalHnswIndexRegistry::Instance().Remove(idx_name, alias)) {
           num_deleted.fetch_add(1);
         }
       }
@@ -2932,11 +2873,12 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());
-  for (const auto& [field_ident, field_info] : schema.fields) {
+  for (const auto& [alias, field_ptr] : schema.Ordered()) {
+    const auto& field_info = *field_ptr;
     vector<string> info;
 
-    string_view base[] = {"identifier"sv, string_view{field_ident},
-                          "attribute"sv,  field_info.short_name,
+    string_view base[] = {"identifier"sv, field_info.identifier,
+                          "attribute"sv,  alias,
                           "type"sv,       SearchFieldTypeToString(field_info.type)};
     info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
 

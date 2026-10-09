@@ -987,6 +987,36 @@ TEST_F(RdbTest, UnbuiltIndexAnswersWithoutCrash) {
   EXPECT_EQ(Run({"FT.DROPINDEX", "idx"}), "OK");
 }
 
+// Twin attributes and their declaration order come back from a snapshot.
+TEST_F(RdbTest, TwinAttributesSurviveReload) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "email", "AS",
+                 "e_text", "TEXT", "email", "AS", "e_tag", "TAG"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "city", "TEXT"}), "OK");
+  Run({"HSET", "d:1", "email", "jane", "city", "Boston"});
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsIndexingDone("idx"); }, std::chrono::milliseconds(10000)));
+
+  auto info = Run({"FT.INFO", "idx"}).GetVec();
+  auto it = rng::find_if(info, [](const auto& e) { return e == "attributes"; });
+  ASSERT_NE(it, info.end());
+  EXPECT_THAT(*++it, RespArray(ElementsAre(
+                         RespArray(ElementsAre("identifier", "email", "attribute", "e_text", "type",
+                                               "TEXT", "WEIGHT", "1.000000")),
+                         RespArray(ElementsAre("identifier", "email", "attribute", "e_tag", "type",
+                                               "TAG", "SEPARATOR", ",")),
+                         RespArray(ElementsAre("identifier", "city", "attribute", "city", "type",
+                                               "TEXT", "WEIGHT", "1.000000")))));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_text:jane", "NOCONTENT"}),
+              RespArray(ElementsAre(IntArg(1), "d:1")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_tag:{jane}", "NOCONTENT"}),
+              RespArray(ElementsAre(IntArg(1), "d:1")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@city:boston", "NOCONTENT"}),
+              RespArray(ElementsAre(IntArg(1), "d:1")));
+}
+
 TEST_F(RdbTest, DflyLoadAppend) {
   // Create an RDB with (k1,1) value in it saved as `filename`
   EXPECT_EQ(Run({"set", "k1", "1"}), "OK");

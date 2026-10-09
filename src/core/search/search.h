@@ -130,26 +130,28 @@ struct SchemaField {
 
   FieldType type;
   uint8_t flags;
-  std::string short_name;  // equal to ident if none provided
+  std::string identifier;  // document field: HASH field name or JSON path
   ParamsVariant special_params{std::monostate{}};
+  uint32_t number = 0;  // declaration position, keeps FT.INFO and the restore command ordered
 };
 
 // Describes the fields of an index
 struct Schema {
-  // List of fields by identifier.
-  absl::flat_hash_map<std::string /*identifier*/, SchemaField> fields;
+  using Attribute = std::pair<std::string_view /*alias*/, const SchemaField*>;
 
-  // Mapping for short field names (aliases).
-  absl::flat_hash_map<std::string /* short name*/, std::string /*identifier*/> field_names;
+  // Attributes by alias. Several attributes may read the same identifier.
+  absl::flat_hash_map<std::string /*alias*/, SchemaField> fields;
 
   std::string default_language = "english";
   std::string language_field;  // doc field providing per-doc language; empty = none
 
-  // Return identifier for alias if found, otherwise return passed value
-  std::string_view LookupAlias(std::string_view alias) const;
+  const SchemaField* Find(std::string_view alias) const;
 
-  // Return alias for identifier if found, otherwise return passed value
-  std::string_view LookupIdentifier(std::string_view identifier) const;
+  // The attribute standing for a raw identifier: a SORTABLE one first, else the first declared.
+  Attribute FindByIdentifier(std::string_view identifier) const;
+
+  // All attributes in declaration order.
+  std::vector<Attribute> Ordered() const;
 };
 
 struct IndicesOptions {
@@ -179,8 +181,9 @@ class FieldIndices {
   bool Add(DocId doc, const DocumentAccessor& access);
   void Remove(DocId doc, const DocumentAccessor& access);
 
-  BaseIndex* GetIndex(std::string_view field) const;
-  BaseSortIndex* GetSortIndex(std::string_view field) const;
+  // Lookups are by alias only.
+  BaseIndex* GetIndex(std::string_view alias) const;
+  BaseSortIndex* GetSortIndex(std::string_view alias) const;
   std::vector<TextIndex*> GetAllTextIndices() const;
 
   const std::vector<DocId>& GetAllDocs() const;
@@ -192,7 +195,7 @@ class FieldIndices {
   // check so query terms that are stopwords can be dropped instead of matching nothing.
   bool IsStopWord(std::string_view term) const;
 
-  SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
+  SortableValue GetSortIndexValue(DocId doc, std::string_view alias) const;
 
   // Adds the amount of FinalizeWork() done to `*done` as it goes, if set.
   void FinalizeInitialization(size_t* done = nullptr);
@@ -213,8 +216,12 @@ class FieldIndices {
   // These containers use default allocators — tracked manually via GetNonPmrMemoryUsage().
   // If adding new default-allocator containers, update GetNonPmrMemoryUsage() accordingly.
   std::vector<DocId> all_ids_;
-  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
-  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  absl::flat_hash_map<std::string_view /*alias*/, std::unique_ptr<BaseIndex>> indices_;
+  absl::flat_hash_map<std::string_view /*alias*/, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  // (identifier, index) for regular and sort indices: what Add and Remove feed with document
+  // values.
+  std::vector<std::pair<std::string_view, BaseIndex*>> add_list_;
+  std::vector<TextIndex*> text_indices_;  // declaration order
   const Synonyms* synonyms_;
 
   std::string next_defrag_field_;

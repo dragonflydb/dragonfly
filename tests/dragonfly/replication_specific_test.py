@@ -79,6 +79,60 @@ async def test_search(df_factory):
 
 
 @dfly_args({"proactor_threads": 4})
+async def test_search_twin_attributes_replicate(df_factory: DflyInstanceFactory):
+    """Twin attributes survive a full sync and a journaled FT.ALTER; a rejected FT.ALTER leaves
+    the replica untouched."""
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"proactor_threads": 4},
+        replica_args={"proactor_threads": 2},
+        connect=False,
+    )
+    await c_master.execute_command(
+        "FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA",
+        "email", "AS", "e_text", "TEXT", "email", "AS", "e_tag", "TAG",
+    )  # fmt: skip
+    for i in range(20):
+        await c_master.hset(f"d:{i}", mapping={"email": f"user{i}@example.com"})
+
+    # Full sync carries the twin definitions through the snapshot aux section.
+    await start_replication(c_replica, master.port)
+
+    async def attributes(client):
+        info = await client.execute_command("FT.INFO", "idx")
+        return [(a[1], a[3]) for a in info[info.index("attributes") + 1]]
+
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await attributes(c_replica) == [("email", "e_text"), ("email", "e_tag")]
+    assert (await c_replica.ft("idx").search("@e_text:user7")).total == 1
+    assert (await c_replica.ft("idx").search("@e_tag:{user7\\@example\\.com}")).total == 1
+
+    await c_master.execute_command(
+        "FT.ALTER", "idx", "SCHEMA", "ADD", "email", "AS", "e_fts", "TEXT"
+    )
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await attributes(c_replica) == [
+        ("email", "e_text"),
+        ("email", "e_tag"),
+        ("email", "e_fts"),
+    ]
+
+    with pytest.raises(aioredis.ResponseError, match="Duplicate field in schema - e_tag"):
+        await c_master.execute_command(
+            "FT.ALTER", "idx", "SCHEMA", "ADD", "name", "AS", "e_tag", "TAG"
+        )
+    await c_master.hset("d:new", mapping={"email": "new@example.com"})
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await attributes(c_replica) == [
+        ("email", "e_text"),
+        ("email", "e_tag"),
+        ("email", "e_fts"),
+    ]
+    assert (await c_replica.ft("idx").search("@e_fts:new")).total == 1
+    assert (await c_replica.ft("idx").search("@e_fts:user7")).total == 1
+
+
+@dfly_args({"proactor_threads": 4})
 async def test_search_with_stream(df_factory: DflyInstanceFactory):
     master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 

@@ -567,6 +567,42 @@ TEST_F(SearchTest, StopWords) {
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 3));
 }
 
+// One identifier behind two attributes: each alias has its own index and sort index.
+TEST_F(SearchTest, TwinAttributesOnOneIdentifier) {
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+  Schema schema;
+  schema.fields["e_text"] = {SchemaField::TEXT, 0, "email", SchemaField::TextParams{}, 0};
+  schema.fields["e_tag"] = {SchemaField::TAG, SchemaField::SORTABLE, "email",
+                            SchemaField::TagParams{}, 1};
+  IndicesOptions options{};
+  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  MockedDocument jane{{{"email", "jane@example.com"}}};
+  MockedDocument bob{{{"email", "bob@test.org"}}};
+  indices.Add(0, jane);
+  indices.Add(1, bob);
+
+  algo.Init("@e_text:jane", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(0));
+  algo.Init("@e_tag:{bob\\@test\\.org}", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(1));
+  algo.Init("@email:jane", &params);  // identifiers are not query names
+  EXPECT_THAT(algo.Search(&indices).error, HasSubstr("Invalid field: email"));
+
+  EXPECT_EQ(indices.GetSortIndex("e_text"), nullptr);
+  ASSERT_NE(indices.GetSortIndex("e_tag"), nullptr);
+  EXPECT_EQ(std::get<std::string>(indices.GetSortIndexValue(0, "e_tag")), "jane@example.com");
+
+  indices.Remove(0, jane);
+  algo.Init("@e_text:jane", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre());
+  algo.Init("@e_tag:{jane\\@example\\.com}", &params);
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre());
+}
+
 // A stopword among query terms must be dropped, not kept as a required term. Otherwise the
 // implicit-AND query reduces to an empty result because stopwords are never indexed.
 TEST_F(SearchTest, StopWordsDroppedFromQuery) {
