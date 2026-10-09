@@ -24,22 +24,24 @@ bool MultiShardExecution::Execute(TxId txid, absl::FunctionRef<bool()> apply) {
   Barrier& barrier = barriers_[txid];
   // Txids never repeat, so a finished barrier is never reused.
   // TODO: upon AOF replay, set the txid counter to the max replayed txid so this holds.
-  DCHECK(barrier.state != Barrier::State::kDone) << "txid reused: " << txid;
+  DCHECK(!barrier.done) << "txid reused: " << txid;
   ++barrier.arrived;
   cv_.notify_all();
   VLOG(2) << "txid: " << txid << " arrived: " << barrier.arrived << " flows: " << flows_;
 
   cv_.wait(lk, [&] { return cancelled_ || barrier.arrived >= flows_; });
   bool res = true;
-  if (!cancelled_ && barrier.state == Barrier::State::kWaiting) {
-    barrier.state = Barrier::State::kRunning;
+  // The first flow to wake up runs it, outside the lock.
+  if (!cancelled_ && !barrier.chosen) {
+    barrier.chosen = true;
     lk.unlock();
     res = apply();
     lk.lock();
-    barrier.state = Barrier::State::kDone;
+    barrier.done = true;
     cv_.notify_all();
   }
-  cv_.wait(lk, [&] { return cancelled_ || barrier.state == Barrier::State::kDone; });
+  // No flow continues before the global command finished.
+  cv_.wait(lk, [&] { return cancelled_ || barrier.done; });
   if (cancelled_)
     res = false;
 
@@ -53,6 +55,7 @@ void MultiShardExecution::RemoveFlow() {
   std::lock_guard lk(mu_);
   DCHECK_GT(flows_, 0u);
   --flows_;
+  // Wakes the flows waiting for this one, so they re-check against the lower count.
   cv_.notify_all();
 }
 

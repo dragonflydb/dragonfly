@@ -16,6 +16,9 @@ namespace dfly {
 struct JournalReader;
 
 // Coordinates global commands across flows applied in parallel (replica flows, AOF shards).
+// Each global command is a rendezvous keyed by its txid: every flow waits for the others, exactly
+// one executes it, and none continues before it finishes. The participant count is not fixed: a
+// flow whose log ended leaves for good (RemoveFlow), which fixed-count barriers cannot express.
 class MultiShardExecution {
  public:
   explicit MultiShardExecution(uint32_t num_flows);
@@ -24,18 +27,23 @@ class MultiShardExecution {
   // Returns false if cancelled; else apply's result in the flow that ran it, true in the others.
   bool Execute(TxId txid, absl::FunctionRef<bool()> apply);
 
-  // Called when a flow reaches end of log: it counts as arrived at every pending and future txid.
+  // Called when a flow reaches the end of its log. In AOF replay a shard's log can end, cleanly
+  // or at a torn tail, before a global command that the other shards still reach; that flow never
+  // arrives, so without this the others would wait forever. It lowers the participant count, so
+  // the flow counts as arrived at every pending and future txid; one call is enough. A flow reads
+  // its log in order, so it calls this only after leaving every barrier it was in.
   void RemoveFlow();
 
+  // Wakes every waiting flow; Execute() then returns false. Used when sync or replay fails.
   void CancelAllBlockingEntities();
 
  private:
   struct Barrier {
-    enum class State : uint8_t { kWaiting, kRunning, kDone };
-
     uint32_t arrived = 0;
     uint32_t left = 0;
-    State state = State::kWaiting;
+    // A flow was chosen to run apply, and it finished.
+    bool chosen = false;
+    bool done = false;
   };
 
   util::fb2::Mutex mu_;
