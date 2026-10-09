@@ -10,6 +10,8 @@
 #include <iosfwd>
 #include <memory>
 #include <optional>
+#include <type_traits>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -73,41 +75,26 @@ struct AstGeoNode {
 
 // ~subquery: returns all docs, boosts score of those matched by subquery
 struct AstOptionalNode {
-  explicit AstOptionalNode(AstNode&& node);
+  explicit AstOptionalNode(AstExpr node) : node{std::move(node)} {
+  }
 
-  AstOptionalNode(const AstOptionalNode&) = delete;
-  AstOptionalNode& operator=(const AstOptionalNode&) = delete;
-
-  AstOptionalNode(AstOptionalNode&&) noexcept = default;
-  AstOptionalNode& operator=(AstOptionalNode&&) noexcept = default;
-
-  std::unique_ptr<AstNode> node;
+  AstExpr node;
 };
 
 // Negates subtree
 struct AstNegateNode {
-  explicit AstNegateNode(AstNode&& node);
+  explicit AstNegateNode(AstExpr node) : node{std::move(node)} {
+  }
 
-  AstNegateNode(const AstNegateNode&) = delete;
-  AstNegateNode& operator=(const AstNegateNode&) = delete;
-
-  AstNegateNode(AstNegateNode&&) noexcept = default;
-  AstNegateNode& operator=(AstNegateNode&&) noexcept = default;
-
-  std::unique_ptr<AstNode> node;
+  AstExpr node;
 };
 
 // Applies query attributes to a subtree.
 struct AstAttributeNode {
-  AstAttributeNode(AstNode&& node, double weight);
+  AstAttributeNode(AstExpr node, double weight) : node{std::move(node)}, weight{weight} {
+  }
 
-  AstAttributeNode(const AstAttributeNode&) = delete;
-  AstAttributeNode& operator=(const AstAttributeNode&) = delete;
-
-  AstAttributeNode(AstAttributeNode&&) noexcept = default;
-  AstAttributeNode& operator=(AstAttributeNode&&) noexcept = default;
-
-  std::unique_ptr<AstNode> node;
+  AstExpr node;
   double weight = 1.0;
 };
 
@@ -115,31 +102,21 @@ struct AstAttributeNode {
 struct AstLogicalNode {
   enum LogicOp { AND, OR };
 
-  // If either node is already a logical node with the same op, it'll be re-used.
-  AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op);
+  AstLogicalNode(AstExpr l, AstExpr r, LogicOp op);
 
-  AstLogicalNode(const AstLogicalNode&) = delete;
-  AstLogicalNode& operator=(const AstLogicalNode&) = delete;
-
-  AstLogicalNode(AstLogicalNode&&) noexcept = default;
-  AstLogicalNode& operator=(AstLogicalNode&&) noexcept = default;
+  // Reuses either operand if it already has the same logical operation.
+  static AstExpr Combine(AstExpr l, AstExpr r, LogicOp op);
 
   LogicOp op;
-  std::vector<AstNode> nodes;
+  std::vector<AstExpr> nodes;
 };
 
 // Selects specific field for subtree
 struct AstFieldNode {
-  AstFieldNode(std::string field, AstNode&& node);
-
-  AstFieldNode(const AstFieldNode&) = delete;
-  AstFieldNode& operator=(const AstFieldNode&) = delete;
-
-  AstFieldNode(AstFieldNode&&) noexcept = default;
-  AstFieldNode& operator=(AstFieldNode&&) noexcept = default;
+  AstFieldNode(std::string field, AstExpr node);
 
   std::string field;
-  std::unique_ptr<AstNode> node;
+  AstExpr node;
 };
 
 // Stores a list of tags for a tag query
@@ -166,8 +143,6 @@ struct AstKnnNode {
   AstKnnNode(uint32_t limit, std::string_view field, std::string blob, std::string_view score_alias,
              std::optional<uint32_t> ef_runtime);
 
-  AstKnnNode(AstNode&& sub, AstKnnNode&& self);
-
   AstKnnNode(const AstKnnNode&) = delete;
   AstKnnNode& operator=(const AstKnnNode&) = delete;
 
@@ -178,7 +153,7 @@ struct AstKnnNode {
     return stream;
   }
 
-  std::unique_ptr<AstNode> filter;
+  AstExpr filter;
   size_t limit;
   std::string field;
   std::string blob;  // raw query-vector bytes, decoded at search time using the field dtype
@@ -254,35 +229,36 @@ struct AstNode : public NodeVariants {
   AstNode* teardown_next_ = nullptr;
 };
 
-using AstExpr = AstNode;
+// Builds the variant wrapper while callers transfer ownership through AstExpr.
+template <typename Node, typename... Args> AstExpr MakeAstNode(Args&&... args) {
+  return std::make_unique<AstNode>(std::in_place_type<Node>, std::forward<Args>(args)...);
+}
 
 template <typename Callback> void VisitAst(const AstNode& node, Callback&& callback) {
   std::visit([&](const auto& inner) { callback(inner); }, node.Variant());
 }
 
-// Invokes cb(child, field) for each direct child, where `field` is the active field the child
-// inherits (a field node overrides it). Skips children nulled by a move.
-template <typename NodeT, typename F>
-void ForEachChild(NodeT& node, std::string_view active_field, F&& cb) {
-  if (auto* n = node.template As<AstFieldNode>()) {
-    if (n->node)
-      cb(*n->node, std::string_view{n->field});
-  } else if (auto* n = node.template As<AstAttributeNode>()) {
-    if (n->node)
-      cb(*n->node, active_field);
-  } else if (auto* n = node.template As<AstNegateNode>()) {
-    if (n->node)
-      cb(*n->node, active_field);
-  } else if (auto* n = node.template As<AstOptionalNode>()) {
-    if (n->node)
-      cb(*n->node, active_field);
-  } else if (auto* n = node.template As<AstKnnNode>()) {
-    if (n->filter)
-      cb(*n->filter, active_field);
-  } else if (auto* n = node.template As<AstLogicalNode>()) {
-    for (auto& child : n->nodes)
-      cb(child, active_field);
-  }
+// Invokes cb(child, field) for each direct child. Field nodes override the inherited field.
+// Children transferred out of the tree are skipped.
+template <typename F>
+void ForEachChild(const AstNode& node, std::string_view active_field, F&& cb) {
+  VisitAst(node, [&](const auto& inner) {
+    if constexpr (std::is_same_v<std::decay_t<decltype(inner)>, AstFieldNode>) {
+      if (inner.node)
+        cb(*inner.node, std::string_view{inner.field});
+    } else if constexpr (requires { inner.node; }) {
+      if (inner.node)
+        cb(*inner.node, active_field);
+    } else if constexpr (requires { inner.filter; }) {
+      if (inner.filter)
+        cb(*inner.filter, active_field);
+    } else if constexpr (requires { inner.nodes; }) {
+      for (const auto& child : inner.nodes) {
+        if (child)
+          cb(*child, active_field);
+      }
+    }
+  });
 }
 
 }  // namespace search

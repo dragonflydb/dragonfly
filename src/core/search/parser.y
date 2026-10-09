@@ -139,7 +139,7 @@ string UnescapeTerm(string_view src);
 %nterm <KnnAttributes> opt_knn_attrs knn_attrs knn_attr
 %nterm <std::string> geounit
 %nterm <std::optional<uint32_t>> opt_ef_runtime
-%nterm <AstVectorRangeNode> vector_range_query
+%nterm <AstExpr> vector_range_query
 %nterm <VectorRangeAttributes> vector_range_attrs vector_range_attr vector_range_attrs_clause
 %nterm <TextAttributes> text_attrs text_attr text_attrs_clause
 %nterm <double> vec_range_radius
@@ -152,7 +152,11 @@ final_query:
   filter
       { driver->Set(std::move($1)); }
   | filter ARROW knn_query
-      { driver->Set(AstKnnNode(std::move($1), std::move($3))); }
+      {
+        auto knn = std::move($3);
+        knn.filter = std::move($1);
+        driver->Set(MakeAstNode<AstKnnNode>(std::move(knn)));
+      }
 
 knn_query:
   LBRACKET KNN UINT32 FIELD TERM opt_ef_runtime opt_knn_alias RBRACKET opt_knn_attrs
@@ -231,14 +235,14 @@ vector_range_query:
       double radius = $5;
       auto field = std::move($1);
       auto attrs = std::move($8);
-      $$ = AstVectorRangeNode(std::move(field), radius, std::string{$6},
+      $$ = MakeAstNode<AstVectorRangeNode>(std::move(field), radius, std::string{$6},
                               std::move(attrs.score_alias), attrs.epsilon);
     }
   | FIELD COLON LBRACKET VECTOR_RANGE vec_range_radius TERM RBRACKET %prec NO_YIELD
     {
       double radius = $5;
       auto field = std::move($1);
-      $$ = AstVectorRangeNode(std::move(field), radius, std::string{$6}, std::string{}, std::nullopt);
+      $$ = MakeAstNode<AstVectorRangeNode>(std::move(field), radius, std::string{$6}, std::string{}, std::nullopt);
     }
 
 vector_range_attrs_clause:
@@ -334,7 +338,7 @@ filter:
   | star_expr               { $$ = std::move($1); }
 
 star_expr:
-  STAR                      { $$ = AstStarNode(); }
+  STAR                      { $$ = MakeAstNode<AstStarNode>(); }
   | LPAREN star_expr RPAREN { $$ = std::move($2); }
 
 search_expr:
@@ -343,95 +347,95 @@ search_expr:
   | search_or_expr          { $$ = std::move($1); }
 
 search_and_expr:
-  search_unary_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode(std::move($1), std::move($2), AstLogicalNode::AND); }
-  | search_and_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode(std::move($1), std::move($2), AstLogicalNode::AND); }
+  search_unary_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode::Combine(std::move($1), std::move($2), AstLogicalNode::AND); }
+  | search_and_expr search_unary_expr %prec AND_OP { $$ = AstLogicalNode::Combine(std::move($1), std::move($2), AstLogicalNode::AND); }
 
 search_or_expr:
-  search_expr OR_OP search_and_expr                { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
-  | search_expr OR_OP search_unary_expr            { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
+  search_expr OR_OP search_and_expr                { $$ = AstLogicalNode::Combine(std::move($1), std::move($3), AstLogicalNode::OR); }
+  | search_expr OR_OP search_unary_expr            { $$ = AstLogicalNode::Combine(std::move($1), std::move($3), AstLogicalNode::OR); }
 
 // Leaf atoms shared by the top-level, field-condition, and field-grouping positions.
 term_atom:
-  TERM        { $$ = AstTermNode(std::move($1));   }
-  | PHRASE    { auto p = std::move($1); $$ = AstPhraseNode(std::move(p.raw), p.slop); }
-  | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
-  | SUFFIX    { $$ = AstSuffixNode(std::move($1)); }
-  | INFIX     { $$ = AstInfixNode(std::move($1));  }
-  | WILDCARD  { $$ = AstWildcardNode(std::move($1)); }
-  | UINT32    { $$ = AstTermNode(std::move($1));   }
-  | DOUBLE    { $$ = AstTermNode(std::move($1));   }
+  TERM        { $$ = MakeAstNode<AstTermNode>(std::move($1));   }
+  | PHRASE    { auto p = std::move($1); $$ = MakeAstNode<AstPhraseNode>(std::move(p.raw), p.slop); }
+  | PREFIX    { $$ = MakeAstNode<AstPrefixNode>(std::move($1)); }
+  | SUFFIX    { $$ = MakeAstNode<AstSuffixNode>(std::move($1)); }
+  | INFIX     { $$ = MakeAstNode<AstInfixNode>(std::move($1));  }
+  | WILDCARD  { $$ = MakeAstNode<AstWildcardNode>(std::move($1)); }
+  | UINT32    { $$ = MakeAstNode<AstTermNode>(std::move($1));   }
+  | DOUBLE    { $$ = MakeAstNode<AstTermNode>(std::move($1));   }
 
 // Word atoms joined by separators without whitespace (example.com): AND of the atoms.
 glued_word:
   term_atom GLUE term_atom
-    { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::AND); }
+    { $$ = AstLogicalNode::Combine(std::move($1), std::move($3), AstLogicalNode::AND); }
   | glued_word GLUE term_atom
-    { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::AND); }
+    { $$ = AstLogicalNode::Combine(std::move($1), std::move($3), AstLogicalNode::AND); }
 
 search_unary_expr:
   attributed_search_primary           { $$ = std::move($1);                  }
-  | NOT_OP search_unary_expr          { $$ = AstNegateNode(std::move($2));   }
-  | TILDE search_unary_expr           { $$ = AstOptionalNode(std::move($2)); }
+  | NOT_OP search_unary_expr          { $$ = MakeAstNode<AstNegateNode>(std::move($2));   }
+  | TILDE search_unary_expr           { $$ = MakeAstNode<AstOptionalNode>(std::move($2)); }
   | vector_range_query                { $$ = std::move($1);                  }
 
 attributed_search_primary:
   search_primary                      { $$ = std::move($1);                  }
   | search_primary text_attrs_clause
-    { $$ = AstAttributeNode(std::move($1), $2.weight.value_or(1.0)); }
+    { $$ = MakeAstNode<AstAttributeNode>(std::move($1), $2.weight.value_or(1.0)); }
 
 search_primary:
   LPAREN search_expr RPAREN           { $$ = std::move($2);                  }
   | term_atom                         { $$ = std::move($1);                  }
   | glued_word                        { $$ = std::move($1);                  }
-  | FIELD COLON field_cond            { $$ = AstFieldNode(std::move($1), std::move($3)); }
+  | FIELD COLON field_cond            { $$ = MakeAstNode<AstFieldNode>(std::move($1), std::move($3)); }
 
 field_cond:
   term_atom                                             { $$ = std::move($1);                }
   | glued_word                                          { $$ = std::move($1);                }
-  | STAR                                                { $$ = AstStarFieldNode();           }
-  | NOT_OP field_cond                                   { $$ = AstNegateNode(std::move($2)); }
-  | TILDE field_cond                                    { $$ = AstOptionalNode(std::move($2)); }
+  | STAR                                                { $$ = MakeAstNode<AstStarFieldNode>();           }
+  | NOT_OP field_cond                                   { $$ = MakeAstNode<AstNegateNode>(std::move($2)); }
+  | TILDE field_cond                                    { $$ = MakeAstNode<AstOptionalNode>(std::move($2)); }
   | LPAREN field_cond_expr RPAREN                       { $$ = std::move($2); }
   | LBRACKET bracket_filter_expr RBRACKET               { $$ = std::move($2); }
   | LCURLBR tag_list RCURLBR                            { $$ = std::move($2); }
 
 bracket_filter_expr:
   /* Numeric filter has form [(] UINT32|DOUBLE [COMMA] [(] UINT32|DOUBLE */
-  DOUBLE DOUBLE                                { $$ = AstRangeNode(toDouble($1), false, toDouble($2), false); }
-  | LPAREN DOUBLE DOUBLE                       { $$ = AstRangeNode(toDouble($2), true, toDouble($3), false); }
-  | DOUBLE LPAREN DOUBLE                       { $$ = AstRangeNode(toDouble($1), false, toDouble($3), true); }
-  | LPAREN DOUBLE LPAREN DOUBLE                { $$ = AstRangeNode(toDouble($2), true, toDouble($4), true); }
-  | DOUBLE UINT32                              { $$ = AstRangeNode(toDouble($1), false, toUint32($2), false); }
-  | LPAREN DOUBLE UINT32                       { $$ = AstRangeNode(toDouble($2), true, toUint32($3), false); }
-  | DOUBLE LPAREN UINT32                       { $$ = AstRangeNode(toDouble($1), false, toUint32($3), true); }
-  | LPAREN DOUBLE LPAREN UINT32                { $$ = AstRangeNode(toDouble($2), true, toUint32($4), true); }
-  | UINT32 DOUBLE                              { $$ = AstRangeNode(toUint32($1), false, toDouble($2), false); }
-  | LPAREN UINT32 DOUBLE                       { $$ = AstRangeNode(toUint32($2), true, toDouble($3), false); }
-  | UINT32 LPAREN DOUBLE                       { $$ = AstRangeNode(toUint32($1), false, toDouble($3), true); }
-  | LPAREN UINT32 LPAREN DOUBLE                { $$ = AstRangeNode(toUint32($2), true, toDouble($4), true); }
-  | UINT32 UINT32                              { $$ = AstRangeNode(toUint32($1), false, toUint32($2), false); }
-  | LPAREN UINT32 UINT32                       { $$ = AstRangeNode(toUint32($2), true, toUint32($3), false); }
-  | UINT32 LPAREN UINT32                       { $$ = AstRangeNode(toUint32($1), false, toUint32($3), true); }
-  | LPAREN UINT32 LPAREN UINT32                { $$ = AstRangeNode(toUint32($2), true, toUint32($4), true); }
-  | DOUBLE COMMA DOUBLE                        { $$ = AstRangeNode(toDouble($1), false, toDouble($3), false); }
-  | DOUBLE COMMA UINT32                        { $$ = AstRangeNode(toDouble($1), false, toUint32($3), false); }
-  | UINT32 COMMA DOUBLE                        { $$ = AstRangeNode(toUint32($1), false, toDouble($3), false); }
-  | UINT32 COMMA UINT32                        { $$ = AstRangeNode(toUint32($1), false, toUint32($3), false); }
-  | LPAREN DOUBLE COMMA DOUBLE                 { $$ = AstRangeNode(toDouble($2), true, toDouble($4), false); }
-  | DOUBLE COMMA LPAREN DOUBLE                 { $$ = AstRangeNode(toDouble($1), false, toDouble($4), true); }
-  | LPAREN DOUBLE COMMA LPAREN DOUBLE          { $$ = AstRangeNode(toDouble($2), true, toDouble($5), true); }
-  | LPAREN DOUBLE COMMA UINT32                 { $$ = AstRangeNode(toDouble($2), true, toUint32($4), false); }
-  | DOUBLE COMMA LPAREN UINT32                 { $$ = AstRangeNode(toDouble($1), false, toUint32($4), true); }
-  | LPAREN DOUBLE COMMA LPAREN UINT32          { $$ = AstRangeNode(toDouble($2), true, toUint32($5), true); }
-  | LPAREN UINT32 COMMA DOUBLE                 { $$ = AstRangeNode(toUint32($2), true, toDouble($4), false); }
-  | UINT32 COMMA LPAREN DOUBLE                 { $$ = AstRangeNode(toUint32($1), false, toDouble($4), true); }
-  | LPAREN UINT32 COMMA LPAREN DOUBLE          { $$ = AstRangeNode(toUint32($2), true, toDouble($5), true); }
-  | LPAREN UINT32 COMMA UINT32                 { $$ = AstRangeNode(toUint32($2), true, toUint32($4), false); }
-  | UINT32 COMMA LPAREN UINT32                 { $$ = AstRangeNode(toUint32($1), false, toUint32($4), true); }
-  | LPAREN UINT32 COMMA LPAREN UINT32          { $$ = AstRangeNode(toUint32($2), true, toUint32($5), true); }
+  DOUBLE DOUBLE                                { $$ = MakeAstNode<AstRangeNode>(toDouble($1), false, toDouble($2), false); }
+  | LPAREN DOUBLE DOUBLE                       { $$ = MakeAstNode<AstRangeNode>(toDouble($2), true, toDouble($3), false); }
+  | DOUBLE LPAREN DOUBLE                       { $$ = MakeAstNode<AstRangeNode>(toDouble($1), false, toDouble($3), true); }
+  | LPAREN DOUBLE LPAREN DOUBLE                { $$ = MakeAstNode<AstRangeNode>(toDouble($2), true, toDouble($4), true); }
+  | DOUBLE UINT32                              { $$ = MakeAstNode<AstRangeNode>(toDouble($1), false, toUint32($2), false); }
+  | LPAREN DOUBLE UINT32                       { $$ = MakeAstNode<AstRangeNode>(toDouble($2), true, toUint32($3), false); }
+  | DOUBLE LPAREN UINT32                       { $$ = MakeAstNode<AstRangeNode>(toDouble($1), false, toUint32($3), true); }
+  | LPAREN DOUBLE LPAREN UINT32                { $$ = MakeAstNode<AstRangeNode>(toDouble($2), true, toUint32($4), true); }
+  | UINT32 DOUBLE                              { $$ = MakeAstNode<AstRangeNode>(toUint32($1), false, toDouble($2), false); }
+  | LPAREN UINT32 DOUBLE                       { $$ = MakeAstNode<AstRangeNode>(toUint32($2), true, toDouble($3), false); }
+  | UINT32 LPAREN DOUBLE                       { $$ = MakeAstNode<AstRangeNode>(toUint32($1), false, toDouble($3), true); }
+  | LPAREN UINT32 LPAREN DOUBLE                { $$ = MakeAstNode<AstRangeNode>(toUint32($2), true, toDouble($4), true); }
+  | UINT32 UINT32                              { $$ = MakeAstNode<AstRangeNode>(toUint32($1), false, toUint32($2), false); }
+  | LPAREN UINT32 UINT32                       { $$ = MakeAstNode<AstRangeNode>(toUint32($2), true, toUint32($3), false); }
+  | UINT32 LPAREN UINT32                       { $$ = MakeAstNode<AstRangeNode>(toUint32($1), false, toUint32($3), true); }
+  | LPAREN UINT32 LPAREN UINT32                { $$ = MakeAstNode<AstRangeNode>(toUint32($2), true, toUint32($4), true); }
+  | DOUBLE COMMA DOUBLE                        { $$ = MakeAstNode<AstRangeNode>(toDouble($1), false, toDouble($3), false); }
+  | DOUBLE COMMA UINT32                        { $$ = MakeAstNode<AstRangeNode>(toDouble($1), false, toUint32($3), false); }
+  | UINT32 COMMA DOUBLE                        { $$ = MakeAstNode<AstRangeNode>(toUint32($1), false, toDouble($3), false); }
+  | UINT32 COMMA UINT32                        { $$ = MakeAstNode<AstRangeNode>(toUint32($1), false, toUint32($3), false); }
+  | LPAREN DOUBLE COMMA DOUBLE                 { $$ = MakeAstNode<AstRangeNode>(toDouble($2), true, toDouble($4), false); }
+  | DOUBLE COMMA LPAREN DOUBLE                 { $$ = MakeAstNode<AstRangeNode>(toDouble($1), false, toDouble($4), true); }
+  | LPAREN DOUBLE COMMA LPAREN DOUBLE          { $$ = MakeAstNode<AstRangeNode>(toDouble($2), true, toDouble($5), true); }
+  | LPAREN DOUBLE COMMA UINT32                 { $$ = MakeAstNode<AstRangeNode>(toDouble($2), true, toUint32($4), false); }
+  | DOUBLE COMMA LPAREN UINT32                 { $$ = MakeAstNode<AstRangeNode>(toDouble($1), false, toUint32($4), true); }
+  | LPAREN DOUBLE COMMA LPAREN UINT32          { $$ = MakeAstNode<AstRangeNode>(toDouble($2), true, toUint32($5), true); }
+  | LPAREN UINT32 COMMA DOUBLE                 { $$ = MakeAstNode<AstRangeNode>(toUint32($2), true, toDouble($4), false); }
+  | UINT32 COMMA LPAREN DOUBLE                 { $$ = MakeAstNode<AstRangeNode>(toUint32($1), false, toDouble($4), true); }
+  | LPAREN UINT32 COMMA LPAREN DOUBLE          { $$ = MakeAstNode<AstRangeNode>(toUint32($2), true, toDouble($5), true); }
+  | LPAREN UINT32 COMMA UINT32                 { $$ = MakeAstNode<AstRangeNode>(toUint32($2), true, toUint32($4), false); }
+  | UINT32 COMMA LPAREN UINT32                 { $$ = MakeAstNode<AstRangeNode>(toUint32($1), false, toUint32($4), true); }
+  | LPAREN UINT32 COMMA LPAREN UINT32          { $$ = MakeAstNode<AstRangeNode>(toUint32($2), true, toUint32($5), true); }
   /* GEO filter */
-  | DOUBLE DOUBLE UINT32 geounit               { $$ = AstGeoNode(toDouble($1), toDouble($2), toUint32($3), std::move($4)); }
-  | DOUBLE DOUBLE DOUBLE geounit               { $$ = AstGeoNode(toDouble($1), toDouble($2), toDouble($3), std::move($4)); }
+  | DOUBLE DOUBLE UINT32 geounit               { $$ = MakeAstNode<AstGeoNode>(toDouble($1), toDouble($2), toUint32($3), std::move($4)); }
+  | DOUBLE DOUBLE DOUBLE geounit               { $$ = MakeAstNode<AstGeoNode>(toDouble($1), toDouble($2), toDouble($3), std::move($4)); }
 
 geounit:
   TERM
@@ -451,28 +455,27 @@ field_cond_expr:
   | field_or_expr  { $$ = std::move($1); }
 
 field_and_expr:
-  field_unary_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode(std::move($1), std::move($2), AstLogicalNode::AND); }
-  | field_and_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode(std::move($1), std::move($2), AstLogicalNode::AND); }
+  field_unary_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode::Combine(std::move($1), std::move($2), AstLogicalNode::AND); }
+  | field_and_expr field_unary_expr %prec AND_OP  { $$ = AstLogicalNode::Combine(std::move($1), std::move($2), AstLogicalNode::AND); }
 
 field_or_expr:
-  field_cond_expr OR_OP field_unary_expr          { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
-  | field_cond_expr OR_OP field_and_expr          { $$ = AstLogicalNode(std::move($1), std::move($3), AstLogicalNode::OR); }
+  field_cond_expr OR_OP field_unary_expr          { $$ = AstLogicalNode::Combine(std::move($1), std::move($3), AstLogicalNode::OR); }
+  | field_cond_expr OR_OP field_and_expr          { $$ = AstLogicalNode::Combine(std::move($1), std::move($3), AstLogicalNode::OR); }
 
 field_unary_expr:
   LPAREN field_cond_expr RPAREN  { $$ = std::move($2);                  }
-  | NOT_OP field_unary_expr      { $$ = AstNegateNode(std::move($2));   }
-  | TILDE field_unary_expr       { $$ = AstOptionalNode(std::move($2)); }
+  | NOT_OP field_unary_expr      { $$ = MakeAstNode<AstNegateNode>(std::move($2));   }
+  | TILDE field_unary_expr       { $$ = MakeAstNode<AstOptionalNode>(std::move($2)); }
   | term_atom                    { $$ = std::move($1);                  }
-  | term_atom text_attrs_clause  { $$ = AstAttributeNode(std::move($1), $2.weight.value_or(1.0)); }
+  | term_atom text_attrs_clause  { $$ = MakeAstNode<AstAttributeNode>(std::move($1), $2.weight.value_or(1.0)); }
   | glued_word                   { $$ = std::move($1);                  }
-  | glued_word text_attrs_clause { $$ = AstAttributeNode(std::move($1), $2.weight.value_or(1.0)); }
+  | glued_word text_attrs_clause { $$ = MakeAstNode<AstAttributeNode>(std::move($1), $2.weight.value_or(1.0)); }
 
 tag_list:
-  tag_list_element                       { $$ = AstTagsNode(std::move($1));                }
-  | tag_list OR_OP tag_list_element
-      {
+  tag_list_element                       { $$ = MakeAstNode<AstTagsNode>(std::move($1));                }
+  | tag_list OR_OP tag_list_element      {
         $$ = std::move($1);
-        $$.As<AstTagsNode>()->tags.push_back(std::move($3));
+        $$->As<AstTagsNode>()->tags.push_back(std::move($3));
       }
 
 tag_list_element:

@@ -1788,7 +1788,7 @@ std::vector<search::GlobalDocId> CollectPrefilterGlobalIds(
 
 // Try to pop KNN node from search algorithm if HNSW index exists for the field.
 // Returns {knn_node, knn_ptr} pair; both null if not a HNSW KNN query.
-std::pair<std::unique_ptr<search::AstNode>, search::AstKnnNode*> TryPopHnswKnnNode(
+std::pair<search::AstExpr, search::AstKnnNode*> TryPopHnswKnnNode(
     search::SearchAlgorithm& search_algo, std::string_view index_name) {
   if (search_algo.IsKnnQuery()) {
     if (GlobalHnswIndexRegistry::Instance().Exist(index_name, search_algo.GetKnnNode()->field)) {
@@ -3121,7 +3121,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   // HNSW range (mutually exclusive with KNN): bare -> RangeQuery directly; AND-ed with a filter
   // -> pre-filter then intersect; OR/NOT -> no execution path.
   const search::AstVectorRangeNode* hnsw_range = nullptr;
-  std::unique_ptr<search::AstNode> hnsw_range_holder;
+  search::AstExpr hnsw_range_holder;
   const search::AstVectorRangeNode* hnsw_range_prefilter = nullptr;
   if (!knn) {
     auto ranges = search_algo.CollectVectorRangeNodes();
@@ -3548,7 +3548,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   const search::AstVectorRangeNode* hnsw_range = nullptr;
-  std::unique_ptr<search::AstNode> hnsw_range_holder;
+  search::AstExpr hnsw_range_holder;
   const search::AstVectorRangeNode* hnsw_range_prefilter = nullptr;
   auto ranges = search_algo.CollectVectorRangeNodes();
   if (ranges.size() > 1 &&
@@ -3850,7 +3850,7 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
                                const search::AstVectorRangeNode* vr,
                                std::vector<std::vector<SearchDocData>>& query_results) {
   auto* builder = cmd_cntx->rb();
-  std::unique_ptr<search::AstNode> range_holder;
+  search::AstExpr range_holder;
   const search::AstVectorRangeNode* hnsw_range = vr;
   bool has_prefilter = false;
   if (!search_algo.IsBareVectorRange()) {
