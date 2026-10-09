@@ -7,6 +7,7 @@
 
 #include <filesystem>
 
+#include "server/journal/aof_manifest.h"
 #include "server/rdb_save.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 
@@ -37,6 +38,8 @@ struct SaveStagesInputs {
   std::shared_ptr<SnapshotStorage> snapshot_storage_;
   // true if the command that triggered this flow is bgsave. false otherwise.
   bool is_bg_save_;
+  // A local DFS save under --aof: it becomes the AOF checkpoint.
+  bool aof_checkpoint_ = false;
 };
 
 class RdbSnapshot {
@@ -104,6 +107,15 @@ struct SaveStagesController : public SaveStagesInputs {
     return is_bg_save_;
   }
 
+  // The checkpoint's cut on each shard.
+  const std::vector<AofManifest::Cut>& aof_cuts() const {
+    return aof_cuts_;
+  }
+
+  uint64_t aof_cut_time_ms() const {
+    return aof_cut_time_ms_;
+  }
+
  private:
   // In the new version (.dfs) we store a file for every shard and one more summary file.
   // Summary file is always last in snapshots array.
@@ -140,6 +152,9 @@ struct SaveStagesController : public SaveStagesInputs {
   absl::flat_hash_map<string_view, size_t> rdb_name_map_;
   util::fb2::Mutex rdb_name_map_mu_;
   bool is_bg_save_ = false;
+
+  std::vector<AofManifest::Cut> aof_cuts_;
+  uint64_t aof_cut_time_ms_ = 0;
 };
 
 GenericError ValidateFilename(const std::filesystem::path& filename, bool new_version);

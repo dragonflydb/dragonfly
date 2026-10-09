@@ -6,6 +6,11 @@
 #include "server/detail/save_stages_controller.h"
 
 #include <absl/strings/match.h>
+#include <absl/time/clock.h>
+#ifdef __linux__
+// For IORING_FSYNC_DATASYNC.
+#include <linux/io_uring.h>
+#endif
 
 #include <numeric>
 
@@ -13,6 +18,12 @@
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
 #include "server/detail/snapshot_storage.h"
+#include "server/engine_shard.h"
+#include "server/journal/journal.h"
+#ifdef __linux__
+#include "server/journal/aof_segment_writer.h"
+#include "server/journal/aof_streamer.h"
+#endif
 #include "server/main_service.h"
 #include "server/namespaces.h"
 #include "server/script_mgr.h"
@@ -186,6 +197,31 @@ std::optional<SaveInfo> SaveStagesController::Init() {
     return GetSaveInfo();
   }
 
+#ifdef __linux__
+  if (aof_checkpoint_) {
+    DCHECK(use_dfs_format_);
+    // Outside the save's transaction, where waiting is allowed, so the cut finds the spares.
+    atomic_bool ready = true;
+    shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+      if (!shard->aof_streamer()->WaitSpareReady())
+        ready = false;
+    });
+    if (!ready) {
+      shared_err_ = GenericError("cannot checkpoint: an AOF segment could not be prepared");
+      return GetSaveInfo();
+    }
+    // {timestamp} has whole seconds, so a save in the same second would rename over the base.
+    fs::path summary = full_path_;
+    SetExtension("summary", ".dfs", &summary);
+    if (fs::exists(summary)) {
+      shared_err_ = GenericError(make_error_code(errc::file_exists),
+                                 StrCat(summary.string(), " already exists"));
+      return GetSaveInfo();
+    }
+    aof_cuts_.resize(shard_set->size());
+  }
+#endif
+
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
     snapshot = make_unique<RdbSnapshot>(fq_threadpool_, snapshot_storage_.get());
@@ -282,6 +318,7 @@ void SaveStagesController::SaveDfs() {
 
   absl::InsecureBitGen gen;
   std::string snapshot_id = GetRandomHex(gen, 32);
+  aof_cut_time_ms_ = absl::ToUnixMillis(absl::Now());
   // Save summary file.
   SaveDfsSingle(nullptr, snapshot_id);
 
@@ -308,8 +345,22 @@ void SaveStagesController::SaveDfsSingle(EngineShard* shard, const std::string& 
     return;
   }
 
-  if (mode == SaveMode::SINGLE_SHARD)
-    snapshot->StartInShard(shard);
+  if (mode != SaveMode::SINGLE_SHARD)
+    return;
+
+#ifdef __linux__
+  // The AOF cut. No yield from here to the snapshot's change listener, so every record below the
+  // cut lsn is in the snapshot and every later one in the new segment.
+  if (aof_checkpoint_) {
+    uint64_t lsn = journal::GetLsn();
+    // Init() waited for the spare.
+    if (optional<uint64_t> seq = shard->aof_streamer()->Rotate(); seq)
+      aof_cuts_[shard->shard_id()] = {*seq, lsn};
+    else
+      shared_err_ = GenericError("cannot checkpoint: no AOF spare segment");
+  }
+#endif
+  snapshot->StartInShard(shard);
 }
 
 // Save a single rdb file
@@ -379,6 +430,21 @@ GenericError SaveStagesController::FinalizeFileMovement() {
   // If the shared_err is set, the snapshot saving failed
   bool has_error = bool(shared_err_);
 
+#ifdef __linux__
+  // A base must be durable: a failed fsync fails the save before any rename.
+  if (aof_checkpoint_ && !has_error) {
+    for (const auto& [_, filename] : snapshots_) {
+      auto file = OpenLinux(filename.string(), O_RDONLY, 0);
+      error_code ec = file ? (*file)->FSync(IORING_FSYNC_DATASYNC) : file.error();
+      if (ec) {
+        shared_err_ = GenericError(ec, StrCat("Failed to sync ", filename.string()));
+        has_error = true;
+        break;
+      }
+    }
+  }
+#endif
+
   std::error_code ec;
   for (const auto& [_, filename] : snapshots_) {
     if (has_error) {
@@ -389,6 +455,11 @@ GenericError SaveStagesController::FinalizeFileMovement() {
     if (ec)
       break;
   }
+#ifdef __linux__
+  // The renames must be durable before the manifest names the base.
+  if (aof_checkpoint_ && !has_error && !ec)
+    ec = AofSyncDir(full_path_.has_parent_path() ? full_path_.parent_path().string() : ".");
+#endif
   DVLOG(1) << "FinalizeFileMovement end";
   return GenericError(ec);
 }

@@ -158,6 +158,13 @@ bool AofSegmentWriter::WaitSpareReady() {
   return spare_ && spare_->ready;
 }
 
+void AofSegmentWriter::OnCheckpoint(uint64_t cut_seq) {
+  if (sync_ec_ && failed_seq_ < cut_seq) {
+    LOG(INFO) << "AOF checkpoint at segment " << cut_seq << " ends the failed fdatasync state";
+    sync_ec_.clear();
+  }
+}
+
 optional<uint64_t> AofSegmentWriter::Rotate() {
   if (!spare_ || !spare_->ready)
     return nullopt;
@@ -357,6 +364,7 @@ void AofSegmentWriter::OnSyncDone(Segment* seg, size_t sync_offset, uint64_t syn
     // DurableLsn stops until a checkpoint.
     // TODO: decide how to trigger an immediate checkpoint (#8410) to clear this state.
     sync_ec_ = IoError(res);
+    failed_seq_ = seg->seq;
     LOG(ERROR) << "AOF fdatasync failed: " << sync_ec_.message();
   } else {
     seg->durable_offset = sync_offset;

@@ -552,6 +552,10 @@ TEST_F(AofManifestTest, CollectGarbage) {
                                   "appendonly-0-4.aof.discarded", "appendonly-1-0.aof",
                                   "appendonly-x.tmp", "appendonly.aof", "appendonlydir",
                                   "dump-summary.dfs"}));
+
+  // A checkpoint also removes *.discarded.
+  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m, /*remove_discarded=*/true)); });
+  EXPECT_FALSE(filesystem::exists(absl::StrCat(dir_, "/appendonly-0-4.aof.discarded")));
 }
 
 class AofStreamerTest : public BaseFamilyTest {
