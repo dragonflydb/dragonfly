@@ -3,6 +3,7 @@
 //
 
 #include <absl/strings/str_cat.h>
+#include <benchmark/benchmark.h>
 
 #include <array>
 
@@ -72,7 +73,7 @@ struct AstDumper {
   string operator()(const AstTagsNode& n) const {
     string res = "TAGS{";
     for (size_t i = 0; i < n.tags.size(); ++i)
-      absl::StrAppend(&res, i ? "|" : "", visit(*this, n.tags[i]));
+      absl::StrAppend(&res, i ? "|" : "", (*this)(n.tags[i]));
     return res + "}";
   }
   string operator()(const AstKnnNode& n) const {
@@ -81,6 +82,22 @@ struct AstDumper {
   }
   string operator()(const AstVectorRangeNode& n) const {
     return absl::StrCat("VRANGE(", n.field, ";", n.radius, ")");
+  }
+
+  string operator()(const AstTagsNode::TagValue& tag) const {
+    switch (tag.type) {
+      case TagType::REGULAR:
+        return absl::StrCat("T(", tag.affix, ")");
+      case TagType::PREFIX:
+        return absl::StrCat("P(", tag.affix, ")");
+      case TagType::SUFFIX:
+        return absl::StrCat("S(", tag.affix, ")");
+      case TagType::INFIX:
+        return absl::StrCat("I(", tag.affix, ")");
+      case TagType::WILDCARD:
+        return absl::StrCat("W(", tag.affix, ")");
+    }
+    ABSL_UNREACHABLE();
   }
 
   string Dump(const AstNode& n) const {
@@ -724,8 +741,8 @@ TEST_F(SearchParserTest, QuotedTagEscapes) {
     EXPECT_TRUE(std::holds_alternative<AstTagsNode>(tags));
     const auto& tn = std::get<AstTagsNode>(tags);
     EXPECT_EQ(tn.tags.size(), 1u);
-    EXPECT_TRUE(std::holds_alternative<AstTermNode>(tn.tags[0]));
-    return std::get<AstTermNode>(tn.tags[0]).affix;
+    EXPECT_EQ(tn.tags[0].type, TagType::REGULAR);
+    return tn.tags[0].affix;
   };
 
   // Recognized escapes \\ and \" resolve to their single-character values.
@@ -836,7 +853,7 @@ TEST_F(SearchParserTest, WildcardParse) {
   ASSERT_TRUE(std::holds_alternative<AstTagsNode>(tags));
   const auto& tn = std::get<AstTagsNode>(tags);
   ASSERT_EQ(tn.tags.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<AstWildcardNode>(tn.tags[0]));
+  EXPECT_EQ(tn.tags[0].type, TagType::WILDCARD);
 }
 
 // A parenthesized field condition must accept the same atoms as the bare `@field:...` form.
@@ -1111,5 +1128,41 @@ TEST_F(SearchParserTest, GluedWordReusedDriver) {
     EXPECT_EQ(DumpAst(query_driver_.Take()), ast) << bad;
   }
 }
+
+static void BM_ParseQuery(benchmark::State& state) {
+  const pair<string_view, string_view> kQueries[] = {
+      {"term", "hello"},
+      {"field", "@title:hello"},
+      {"logical", "(@title:(hello world) | prefix*) -@tag:{obsolete} ~boost=>{$weight:2}"},
+      {"mixed", "@tag:{red|green*|*blue|*low*|w'bl?ck'} @score:[10 50]"},
+      {"phrase", "@title:\"machine learning\"~2"},
+      {"knn", "@tag:{blue|green} =>[KNN 10 @vector $vec]"},
+      {"vector_range", "@vector:[VECTOR_RANGE 1 $vec] @tag:{blue}"},
+      {"long_and", ""},
+      {"long_tags", ""},
+  };
+  auto [name, input] = kQueries[state.range(0)];
+  string query{input};
+  if (name == "long_and") {
+    for (size_t i = 0; i < 64; ++i)
+      absl::StrAppend(&query, i ? " " : "", "term", i);
+  } else if (name == "long_tags") {
+    query = "@tag:{";
+    for (size_t i = 0; i < 64; ++i)
+      absl::StrAppend(&query, i ? "|" : "", "tag", i);
+    query += "}";
+  }
+
+  QueryParams params;
+  params["vec"] = string(16, '\0');
+  SearchAlgorithm algo;
+  CHECK(algo.Init(query, &params));
+  for (auto _ : state) {
+    CHECK(algo.Init(query, &params));
+    benchmark::DoNotOptimize(algo);
+  }
+  state.SetLabel(string{name});
+}
+BENCHMARK(BM_ParseQuery)->DenseRange(0, 8)->ArgName("query")->Unit(benchmark::kMicrosecond);
 
 }  // namespace dfly::search

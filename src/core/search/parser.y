@@ -132,7 +132,7 @@ string UnescapeTerm(string_view src);
 %nterm <AstExpr> attributed_search_primary search_or_expr search_and_expr bracket_filter_expr
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
 %nterm <AstExpr> term_atom glued_word
-%nterm <AstTagsNode::TagValueProxy> tag_list_element
+%nterm <AstTagsNode::TagValue> tag_list_element
 
 %nterm <AstKnnNode> knn_query
 %nterm <std::string> opt_knn_alias
@@ -469,10 +469,14 @@ field_unary_expr:
 
 tag_list:
   tag_list_element                       { $$ = AstTagsNode(std::move($1));                }
-  | tag_list OR_OP tag_list_element      { $$ = AstTagsNode(std::move($1), std::move($3)); }
+  | tag_list OR_OP tag_list_element
+      {
+        $$ = std::move($1);
+        std::get<AstTagsNode>($$).tags.push_back(std::move($3));
+      }
 
 tag_list_element:
-  TERM        { $$ = AstTermNode(std::move($1));   }
+  TERM        { $$ = {TagType::REGULAR, std::move($1)};   }
   | PHRASE {
       /* Inside {..}, quoted strings are literal tag values with one layer of `\X` escapes,
          matching the unquoted tag path (make_Tag). ~N slop is only meaningful for phrases,
@@ -480,15 +484,15 @@ tag_list_element:
       auto p = std::move($1);
       if (p.slop != 0)
         throw Parser::syntax_error(@$, "slop is not allowed in tag values");
-      $$ = AstTermNode(UnescapeTerm(p.raw));
+      $$ = {TagType::REGULAR, UnescapeTerm(p.raw)};
     }
-  | PREFIX    { $$ = AstPrefixNode(std::move($1)); }
-  | SUFFIX    { $$ = AstSuffixNode(std::move($1)); }
-  | INFIX     { $$ = AstInfixNode(std::move($1));  }
-  | WILDCARD  { $$ = AstWildcardNode(std::move($1)); }
-  | UINT32    { $$ = AstTermNode(std::move($1));   }
-  | DOUBLE    { $$ = AstTermNode(std::move($1));   }
-  | TAG_VAL   { $$ = AstTermNode(std::move($1));   }
+  | PREFIX    { $$ = {TagType::PREFIX, std::move($1)}; }
+  | SUFFIX    { $$ = {TagType::SUFFIX, std::move($1)}; }
+  | INFIX     { $$ = {TagType::INFIX, std::move($1)};  }
+  | WILDCARD  { $$ = {TagType::WILDCARD, std::move($1)}; }
+  | UINT32    { $$ = {TagType::REGULAR, std::move($1)};   }
+  | DOUBLE    { $$ = {TagType::REGULAR, std::move($1)};   }
+  | TAG_VAL   { $$ = {TagType::REGULAR, std::move($1)};   }
 
 
 %%

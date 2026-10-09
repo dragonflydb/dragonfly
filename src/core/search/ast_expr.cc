@@ -54,18 +54,6 @@ AstFieldNode::AstFieldNode(string field, AstNode&& node)
     : field{field.substr(1)}, node{make_unique<AstNode>(std::move(node))} {
 }
 
-AstTagsNode::AstTagsNode(TagValue tag) {
-  tags = {std::move(tag)};
-}
-
-AstTagsNode::AstTagsNode(AstExpr&& l, TagValue tag) {
-  DCHECK(holds_alternative<AstTagsNode>(l));
-  auto& tags_node = get<AstTagsNode>(l);
-
-  tags = std::move(tags_node.tags);
-  tags.push_back(std::move(tag));
-}
-
 AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, std::string blob,
                        std::string_view score_alias, std::optional<uint32_t> ef_runtime)
     : filter{nullptr},
@@ -133,7 +121,4 @@ ostream& operator<<(ostream& os, optional<uint32_t> o) {
   return os;
 }
 
-ostream& operator<<(ostream& os, dfly::search::AstTagsNode::TagValueProxy o) {
-  return os;
-}
 }  // namespace std

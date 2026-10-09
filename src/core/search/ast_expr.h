@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/base/macros.h>
+
 #include <algorithm>
 #include <iosfwd>
 #include <memory>
@@ -142,19 +144,18 @@ struct AstFieldNode {
 
 // Stores a list of tags for a tag query
 struct AstTagsNode {
-  using TagValue =
-      std::variant<AstTermNode, AstPrefixNode, AstSuffixNode, AstInfixNode, AstWildcardNode>;
+  struct TagValue {
+    TagType type = TagType::REGULAR;
+    std::string affix;
 
-  struct TagValueProxy
-      : public AstTagsNode::TagValue {  // bison needs it to be default constructible
-    TagValueProxy() : AstTagsNode::TagValue(AstTermNode("")) {
-    }
-    template <TagType T> TagValueProxy(AstAffixNode<T> tv) : AstTagsNode::TagValue(std::move(tv)) {
+    friend std::ostream& operator<<(std::ostream& os, const TagValue&) {
+      return os;  // Required by bison debug traces.
     }
   };
 
-  explicit AstTagsNode(TagValue);
-  AstTagsNode(AstNode&& l, TagValue);
+  explicit AstTagsNode(TagValue tag) {
+    tags.push_back(std::move(tag));
+  }
 
   std::vector<TagValue> tags;
 };
@@ -273,5 +274,4 @@ void ForEachChild(NodeT& node, std::string_view active_field, F&& cb) {
 
 namespace std {
 ostream& operator<<(ostream& os, optional<uint32_t> o);
-ostream& operator<<(ostream& os, dfly::search::AstTagsNode::TagValueProxy o);
 }  // namespace std
