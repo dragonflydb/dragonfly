@@ -2,6 +2,8 @@ import asyncio
 import logging
 import random
 import re
+import signal
+import subprocess
 import time
 
 import async_timeout
@@ -10,7 +12,7 @@ import redis
 from redis import asyncio as aioredis
 
 from . import dfly_args
-from .fake_node import FakeRedisNode
+from .fake_node import FakeDflyNode, FakeRedisNode
 from .instance import DflyInstanceFactory
 from .replication_utils import (
     ADMIN_PORT,
@@ -71,6 +73,31 @@ async def test_replication_stops_on_unsupported_rdb(df_factory, unsupported_rdb,
             assert await client.get("key") == "value"
 
     assert replica.is_in_logs(f"Replication stopped.*{error}")
+
+
+@pytest.mark.parametrize("stop_by", ["replicaof_no_one", "sigint"])
+async def test_replica_stops_when_master_hangs_in_flow_handshake(df_factory, stop_by):
+    """A master that never answers DFLY FLOW must not prevent the replica from stopping."""
+    async with FakeDflyNode(num_flows=2) as master:
+        replica = df_factory.create(proactor_threads=2, replicaof=f"{master.host}:{master.port}")
+        replica.start()
+        await asyncio.wait_for(master.all_flows_hung.wait(), timeout=10)
+
+        if stop_by == "replicaof_no_one":
+            client = replica.client()
+            await asyncio.wait_for(client.execute_command("REPLICAOF NO ONE"), timeout=10)
+            assert (await client.info("replication"))["role"] == "master"
+            await client.set("key", "value")
+            replica.stop()
+        else:
+            replica.proc.send_signal(signal.SIGINT)
+            try:
+                replica.proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                replica.stop(kill=True)
+                pytest.fail("Replica did not shut down while its flows were stuck in handshake")
+            assert replica.proc.returncode == 0
+            replica.stop()
 
 
 """
