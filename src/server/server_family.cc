@@ -1080,6 +1080,23 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
 // Loads a snapshot, blocking until it finishes.
 using AofLoadFn = std::function<GenericError(const string& path)>;
 
+// Why a local save cannot become the AOF checkpoint, or an empty string.
+string AofSaveError(bool dfs_format, string_view basename) {
+  // TODO: RDB bases.
+  if (!dfs_format)
+    return "--aof supports only DFS snapshots for now";
+  // TODO(#8410): a save to the same name renames over the current base. A crash before the
+  // manifest commit leaves the old manifest pairing the new dump with the old cuts, so replay
+  // would apply the log twice. Lift this once bases carry their own cuts in aux fields.
+  if (!basename.empty() && !absl::StrContains(basename, "{timestamp}"))
+    return "--aof needs {timestamp} in the snapshot file name, so saves never overwrite the base";
+
+  // The manifest names the base on one line; strftime expands %n into a newline.
+  if (basename.find('\n') != string_view::npos || absl::StrContains(basename, "%n"))
+    return "--aof needs a snapshot file name without newlines";
+  return {};
+}
+
 // Why --aof cannot run with this configuration, or an empty string.
 string AofStartupError(string_view dir) {
   if (detail::IsCloudPath(dir))
@@ -1090,8 +1107,38 @@ string AofStartupError(string_view dir) {
     return "--aof needs --hz > 0, the heartbeat seals AOF blocks";
   if (GetFlag(FLAGS_replicaof).has_value())
     return "--aof is not supported on replicas";
-  return {};
+  return AofSaveError(GetFlag(FLAGS_df_snapshot_format), GetFlag(FLAGS_dbfilename));
 }
+
+#ifdef __linux__
+// Makes a finished save the AOF base: commits the manifest, then deletes the segments below the
+// cut. The save itself succeeded, so a failure here is only logged.
+void CommitAofCheckpoint(const string& base_file, const vector<AofManifest::Cut>& cuts) {
+  string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
+  io::Result<AofManifest> manifest = ReadAofManifest(dir);
+  if (!manifest) {
+    LOG(ERROR) << "AOF checkpoint not committed: " << manifest.error().message();
+    return;
+  }
+  manifest->checkpoint_id++;
+  manifest->base_owned = false;
+  manifest->base_path = filesystem::path(base_file).filename().string();
+  manifest->cuts = cuts;
+  if (error_code ec = WriteAofManifest(dir, *manifest); ec) {
+    LOG(ERROR) << "AOF checkpoint not committed: " << ec.message();
+    return;
+  }
+  LOG(INFO) << "AOF checkpoint " << manifest->checkpoint_id << " committed, base "
+            << manifest->base_path;
+
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    if (AofStreamer* streamer = shard->aof_streamer(); streamer)
+      streamer->OnCheckpoint(cuts[shard->shard_id()].lsn);
+  });
+  if (error_code ec = CollectAofGarbage(dir, *manifest, /*remove_discarded=*/true); ec)
+    LOG(WARNING) << "Failed to remove AOF segments below the cut: " << ec.message();
+}
+#endif
 
 // Starts every shard's AofStreamer where its log resumes. False if any failed.
 bool StartStreamers(string_view dir, const vector<AofResume>& resume) {
@@ -2104,8 +2151,16 @@ void ServerFamily::CancelSave() {
 
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
                                                Transaction* trans, DoSaveCheckAndStartOpts opts) {
-  // TODO(#8410): with --aof, a save to the base's name overwrites the base.
   auto [ignore_state, bg_save] = opts;
+
+  // Cloud saves stay plain saves.
+  bool aof_checkpoint = GetFlag(FLAGS_aof) && save_cmd_opts.cloud_uri.empty();
+  if (aof_checkpoint) {
+    string dbfilename = GetFlag(FLAGS_dbfilename);
+    string_view basename = save_cmd_opts.basename.empty() ? dbfilename : save_cmd_opts.basename;
+    if (string err = AofSaveError(save_cmd_opts.new_version, basename); !err.empty())
+      return GenericError{make_error_code(errc::operation_not_supported), err};
+  }
 
   std::shared_ptr<SaveStagesController> controller;
   {
@@ -2136,7 +2191,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
     controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, snapshot_storage, opts.bg_save});
+        &service_, snapshot_storage, opts.bg_save, aof_checkpoint});
     save_controller_ = controller;
   }
 
@@ -2191,6 +2246,11 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   if (save_controller_ == controller) {
     save_info = save_controller_->Finalize();
     is_bg_save = save_controller_->IsBgSave();
+#ifdef __linux__
+    // Under save_mu_, so checkpoints commit in order.
+    if (save_controller_->aof_checkpoint_ && !save_info.error)
+      CommitAofCheckpoint(save_info.file_name, save_controller_->aof_cuts());
+#endif
     save_controller_.reset();
   } else {
     // Another save has started. The old one is already finalized by the new one.

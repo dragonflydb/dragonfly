@@ -13,6 +13,9 @@
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
 #include "server/detail/snapshot_storage.h"
+#include "server/engine_shard.h"
+#include "server/journal/aof_streamer.h"
+#include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
 #include "server/script_mgr.h"
@@ -204,6 +207,11 @@ std::optional<SaveInfo> SaveStagesController::Init() {
     return GetSaveInfo();
   }
 
+  if (auto err = PrepareAofCheckpoint(); err) {
+    cntx_.ReportError(err);
+    return GetSaveInfo();
+  }
+
   snapshots_.resize(use_dfs_format_ ? shard_set->size() + 1 : 1);
   for (auto& [snapshot, _] : snapshots_)
     snapshot = make_unique<RdbSnapshot>(snapshot_storage_.get(), &cntx_);
@@ -305,25 +313,29 @@ void SaveStagesController::SaveDfs() {
 
   absl::InsecureBitGen gen;
   std::string snapshot_id = GetRandomHex(gen, 32);
-  // Save summary file.
-  SaveDfsSingle(nullptr, snapshot_id);
 
-  // Save shard files.
-  auto cb = [this, &snapshot_id](Transaction* t, EngineShard* shard) {
-    SaveDfsSingle(shard, snapshot_id);
+  // Save shard files. The summary's global data (search aliases, synonyms) is collected in the same
+  // hop, so a global command like FT.ALIASADD lands either before every shard's cut or after it.
+  optional<RdbSaver::GlobalData> summary_data;
+  auto cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() == 0)
+      summary_data.emplace(RdbSaver::GetGlobalData(service_, true));
+    SaveDfsSingle(shard, snapshot_id, RdbSaver::GetGlobalData(service_, false));
     return OpStatus::OK;
   };
   trans_->ScheduleSingleHop(std::move(cb));
+
+  // Save summary file.
+  SaveDfsSingle(nullptr, snapshot_id, *summary_data);
 }
 
 // Start saving a dfs file on shard
-void SaveStagesController::SaveDfsSingle(EngineShard* shard, const std::string& snapshot_id) {
+void SaveStagesController::SaveDfsSingle(EngineShard* shard, const std::string& snapshot_id,
+                                         const RdbSaver::GlobalData& glob_data) {
   // for summary file, shard=null and index=shard_set->size(), see SaveDfs() above
   auto& [snapshot, filename] = snapshots_[shard ? shard->shard_id() : shard_set->size()];
 
   SaveMode mode = shard == nullptr ? SaveMode::SUMMARY : SaveMode::SINGLE_SHARD;
-  bool is_summary = (shard == nullptr);
-  auto glob_data = RdbSaver::GetGlobalData(service_, is_summary);
 
   if (auto err = snapshot->Start(mode, filename, glob_data, snapshot_id); err) {
     cntx_.ReportError(err);
@@ -331,8 +343,62 @@ void SaveStagesController::SaveDfsSingle(EngineShard* shard, const std::string& 
     return;
   }
 
-  if (mode == SaveMode::SINGLE_SHARD)
-    snapshot->StartInShard(shard);
+  if (mode != SaveMode::SINGLE_SHARD)
+    return;
+
+  // No yield from the AOF cut to the snapshot's change listener, so every record below the cut lsn
+  // is in the snapshot and every later one in the new segment.
+  util::FiberAtomicGuard guard;
+  TakeAofCut(shard);
+  snapshot->StartInShard(shard);
+}
+
+GenericError SaveStagesController::PrepareAofCheckpoint() {
+  if (!aof_checkpoint_)
+    return {};
+  DCHECK(use_dfs_format_);
+
+  // Outside the save's transaction, where waiting is allowed, so the cut finds the spares.
+  atomic_bool ready = true;
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    if (!shard->aof_streamer()->WaitSpareReady())
+      ready = false;
+  });
+  if (!ready)
+    return GenericError("cannot checkpoint: an AOF segment could not be prepared");
+
+  // {timestamp} has whole seconds, so a save in the same second would rename over the base.
+  fs::path summary = full_path_;
+  SetExtension("summary", ".dfs", &summary);
+  if (fs::exists(summary))
+    return GenericError(make_error_code(errc::file_exists),
+                        StrCat(summary.string(), " already exists"));
+  aof_cuts_.resize(shard_set->size());
+  return {};
+}
+
+void SaveStagesController::TakeAofCut(EngineShard* shard) {
+  if (!aof_checkpoint_)
+    return;
+  uint64_t lsn = journal::GetLsn();
+
+  // PrepareAofCheckpoint() waited for the spare.
+  if (optional<uint64_t> seq = shard->aof_streamer()->Rotate(); seq)
+    aof_cuts_[shard->shard_id()] = {*seq, lsn};
+  else
+    cntx_.ReportError(GenericError("cannot checkpoint: no AOF spare segment"));
+}
+
+error_code SaveStagesController::SyncAofBaseFiles() {
+  if (!aof_checkpoint_)
+    return {};
+  for (const auto& [_, filename] : snapshots_) {
+    if (error_code ec = AofSyncFile(filename.string()); ec) {
+      cntx_.ReportError(GenericError(ec, StrCat("Failed to sync ", filename.string())));
+      return ec;
+    }
+  }
+  return {};
 }
 
 // Save a single rdb file
@@ -402,6 +468,10 @@ GenericError SaveStagesController::FinalizeFileMovement() {
 
   bool has_error = bool(cntx_.GetError());
 
+  // A base must be durable: a failed fsync fails the save before any rename.
+  if (!has_error && SyncAofBaseFiles())
+    has_error = true;
+
   std::error_code ec;
   for (const auto& [_, filename] : snapshots_) {
     if (has_error) {
@@ -412,6 +482,9 @@ GenericError SaveStagesController::FinalizeFileMovement() {
     if (ec)
       break;
   }
+  // The renames must be durable before the manifest names the base.
+  if (aof_checkpoint_ && !has_error && !ec)
+    ec = AofSyncDir(full_path_.has_parent_path() ? full_path_.parent_path().string() : ".");
   DVLOG(1) << "FinalizeFileMovement end";
   return GenericError(ec);
 }
