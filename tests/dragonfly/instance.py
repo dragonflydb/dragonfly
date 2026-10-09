@@ -232,6 +232,7 @@ class DflyInstance:
         try:
             if kill:
                 proc.kill()
+                proc.wait()
             else:
                 proc.terminate()
                 # wait(), not communicate(): communicate() would race sed for stdout bytes.
