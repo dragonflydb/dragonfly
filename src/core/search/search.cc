@@ -58,7 +58,6 @@ struct ProfileBuilder {
 
   string GetNodeInfo(const AstNode& node) {
     Overloaded node_info{
-        [](monostate) -> string { return ""s; },
         [](const AstTermNode& n) { return absl::StrCat("Term{", n.affix, "}"); },
         [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.affix, "}"); },
         [](const AstSuffixNode& n) { return absl::StrCat("Suffix{", n.affix, "}"); },
@@ -205,10 +204,6 @@ struct BasicSearch {
     return result;
   }
 
-  IndexResult Search(monostate, string_view) {
-    return IndexResult{};
-  }
-
   IndexResult Search(const AstStarNode& node, string_view active_field) {
     DCHECK(active_field.empty());
     return IndexResult{&indices_->GetAllDocs()};
@@ -276,7 +271,7 @@ struct BasicSearch {
   // "term": access field's text index or unify results from all text indices if no field is set.
   // When the term is in a synonym group, the search is expanded to (term OR group_ref) so docs
   // matched via stem still join the synonym group's docs.
-  IndexResult Search(const AstAffixNode<TagType::REGULAR> node, string_view active_field) {
+  IndexResult Search(const AstTermNode& node, string_view active_field) {
     const std::string& term = node.affix;
     std::optional<std::string> group_id;
     if (auto synonyms = indices_->GetSynonyms(); synonyms)
@@ -1026,7 +1021,7 @@ struct StatsCollector {
 }  // namespace
 
 AstExpr OptionalNumericFilter::Node(std::string field) {
-  return MakeAstNode<AstFieldNode>("@" + field, MakeAstNode<AstRangeNode>(lo_, false, hi_, false));
+  return make_unique<AstFieldNode>("@" + field, make_unique<AstRangeNode>(lo_, false, hi_, false));
 }
 
 string_view Schema::LookupAlias(string_view alias) const {
@@ -1392,7 +1387,7 @@ AstExpr SearchAlgorithm::ExtractVectorRangeAsPrefilter() {
   for (auto& child : logical->nodes) {
     if (child->Is<AstVectorRangeNode>()) {
       auto extracted = std::move(child);
-      child = MakeAstNode<AstStarNode>();  // match-all in its place, leaving query_ as the pure
+      child = make_unique<AstStarNode>();  // match-all in its place, leaving query_ as the pure
                                            // pre-filter
       return extracted;
     }

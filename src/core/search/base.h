@@ -83,7 +83,17 @@ struct QueryParams {
 struct AstNode;
 
 // Keeps destruction of deeply nested queries iterative and allocation-free.
-using AstExpr = std::unique_ptr<AstNode>;
+struct AstNodeDeleter {
+  AstNodeDeleter() = default;
+
+  // Allow nodes created with std::make_unique to transfer ownership into AstExpr.
+  template <typename T> AstNodeDeleter(std::default_delete<T>) {
+  }
+
+  void operator()(AstNode* node) const noexcept;
+};
+
+using AstExpr = std::unique_ptr<AstNode, AstNodeDeleter>;
 
 struct OptionalFilterBase {
   virtual bool IsEmpty() const = 0;

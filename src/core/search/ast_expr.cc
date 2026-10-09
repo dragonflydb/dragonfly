@@ -36,7 +36,7 @@ AstExpr AstLogicalNode::Combine(AstExpr l, AstExpr r, LogicOp op) {
     }
   }
 
-  return MakeAstNode<AstLogicalNode>(std::move(l), std::move(r), op);
+  return make_unique<AstLogicalNode>(std::move(l), std::move(r), op);
 }
 
 AstFieldNode::AstFieldNode(string field, AstExpr node)
@@ -69,32 +69,19 @@ bool AstKnnNode::HasPreFilter() const {
   return filter == nullptr;
 }
 
-AstNode::~AstNode() noexcept {
-  if (holds_alternative<monostate>(*this))
+void AstNodeDeleter::operator()(AstNode* node) const noexcept {
+  if (!node)
     return;
 
-  // Reuse a link in each node instead of allocating a work stack. Keep ownership intact while
-  // building reverse preorder, so every descendant appears before its owner in the cleanup list.
-  AstNode* pending = this;
-  AstNode* reverse_order = nullptr;
-  teardown_next_ = nullptr;
+  // Detach children before deleting their owner. The intrusive work list needs no allocation,
+  // even when a failed parse is being unwound after an allocation failure.
+  AstNode* pending = node;
+  node->teardown_next_ = nullptr;
   while (pending) {
-    AstNode* node = pending;
+    node = pending;
     pending = node->teardown_next_;
-    ForEachChild(*node, {}, [&pending](AstNode& child, string_view) {
-      child.teardown_next_ = pending;
-      pending = &child;
-    });
-    node->teardown_next_ = reverse_order;
-    reverse_order = node;
-  }
-
-  while (reverse_order) {
-    AstNode* node = reverse_order;
-    reverse_order = node->teardown_next_;
-    // Children are already empty: releasing their unique_ptr/vector storage only invokes the
-    // early return above, keeping the call stack bounded regardless of the tree's depth.
-    node->emplace<monostate>();
+    node->ReleaseChildren(pending);
+    delete node;
   }
 }
 
