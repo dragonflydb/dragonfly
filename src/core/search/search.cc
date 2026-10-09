@@ -51,11 +51,8 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params,
 
 struct ProfileBuilder {
   struct NodeFormatter {
-    template <TagType T> void operator()(std::string* out, const AstAffixNode<T>& node) const {
-      out->append(node.affix);
-    }
     void operator()(std::string* out, const AstTagsNode::TagValue& value) const {
-      visit([this, out](const auto& n) { this->operator()(out, n); }, value);
+      out->append(value.affix);
     }
   };
 
@@ -476,22 +473,21 @@ struct BasicSearch {
     if (!tag_index)
       return IndexResult{};
 
-    Overloaded ov{[tag_index](const AstTermNode& term) -> IndexResult {
-                    return IndexResult{tag_index->Matching(term.affix)};
-                  },
-                  [tag_index, this](const AstPrefixNode& prefix) {
-                    return CollectMatches(tag_index, prefix.affix, &TagIndex::MatchPrefix);
-                  },
-                  [tag_index, this](const AstSuffixNode& suffix) {
-                    return CollectMatches(tag_index, suffix.affix, &TagIndex::MatchSuffix);
-                  },
-                  [tag_index, this](const AstInfixNode& infix) {
-                    return CollectMatches(tag_index, infix.affix, &TagIndex::MatchInfix);
-                  },
-                  [tag_index, this](const AstWildcardNode& wildcard) {
-                    return CollectMatches(tag_index, wildcard.affix, &TagIndex::MatchWildcard);
-                  }};
-    auto mapping = [ov](const auto& tag) { return visit(ov, tag); };
+    auto mapping = [tag_index, this](const AstTagsNode::TagValue& tag) {
+      switch (tag.type) {
+        case TagType::REGULAR:
+          return IndexResult{tag_index->Matching(tag.affix)};
+        case TagType::PREFIX:
+          return CollectMatches(tag_index, tag.affix, &TagIndex::MatchPrefix);
+        case TagType::SUFFIX:
+          return CollectMatches(tag_index, tag.affix, &TagIndex::MatchSuffix);
+        case TagType::INFIX:
+          return CollectMatches(tag_index, tag.affix, &TagIndex::MatchInfix);
+        case TagType::WILDCARD:
+          return CollectMatches(tag_index, tag.affix, &TagIndex::MatchWildcard);
+      }
+      ABSL_UNREACHABLE();
+    };
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
