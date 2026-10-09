@@ -425,6 +425,56 @@ TEST_F(TransactionTest, LazyLockDisjointKeyMarkedOutOfOrder) {
   fb_v.Join();
 }
 
+// Same as LazyLockDisjointKeyMarkedOutOfOrder, but Z is driven by SingleHopAsync (async squashed
+// commands, used when tiering is on) instead of Execute. Z runs optimistically inline and parks
+// while holding running_tx_ (like a snapshot OnChange waiting for tiered reads), so V's poll on
+// shard 0 is deferred via needs_repoll_. Once Z concludes, SingleHopAsync must re-drive that poll,
+// otherwise V is stranded in the tx queue until an unrelated transaction polls shard 0.
+TEST_F(TransactionTest, SingleHopAsyncDrainsDeferredPoll) {
+  ASSERT_EQ(0u, Shard("a", shard_set->size()));
+  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+
+  static CommandId cid_z{"tx_test_async_z", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_v{"tx_test_async_v", 0, -1, 1, -1, acl::NONE};
+
+  auto tx_z = MakeTx(&cid_z, {"a"});
+  auto tx_v = MakeTx(&cid_v, {"x"});  // disjoint key, same shard
+
+  // Phase 1: Z's async hop runs inline on shard 0's thread and parks holding running_tx_.
+  InlineHold z;
+  z.fiber = pp_->at(0)->LaunchFiber([&] {
+    tx_z->SingleHopAsync([&](Transaction*, EngineShard*) {
+      z.parked.Notify();
+      z.release.Wait();  // running_tx_ == Z while parked here
+      return OpStatus::OK;
+    });
+  });
+  ASSERT_TRUE(z.WaitParked()) << "Z's async hop never parked";
+
+  // Phase 2: V schedules on shard 0 from another thread. It is queued behind Z and its poll is
+  // deferred because Z holds running_tx_.
+  fb2::Done v_done;
+  auto fb_v = pp_->at(1)->LaunchFiber([&] {
+    tx_v->Execute(Noop, true);
+    v_done.Notify();
+  });
+
+  ASSERT_TRUE(AwaitOnShard(0, [&] { return tx_v->DEBUG_GetTxqPosInShard(0) != TxQueue::kEnd; }))
+      << "V was never scheduled (queued) on shard 0";
+  Quiesce(50ms);  // let V's poll land on shard 0 and be deferred
+
+  // Phase 3: release Z. Its optimistic async hop concludes and must drain the deferred poll.
+  z.ReleaseAndJoin();
+  EXPECT_TRUE(tx_z->DEBUG_GetLocalMask(0) & Transaction::OPTIMISTIC_EXECUTION)
+      << "Z was expected to run optimistically during scheduling";
+
+  bool v_ran = v_done.WaitFor(5s);
+  if (!v_ran)  // unstick V so the test fails instead of hanging
+    OnShard(0, [] { EngineShard::tlocal()->PollExecution("test_unstick", nullptr); });
+  fb_v.Join();
+  ASSERT_TRUE(v_ran) << "V was stranded: the poll deferred by Z's async hop was never replayed";
+}
+
 namespace {
 
 TypeMemDeltas DeltaDiff(const TypeMemDeltas& before, const TypeMemDeltas& after) {
