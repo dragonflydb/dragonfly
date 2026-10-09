@@ -4,14 +4,9 @@
 
 #include "core/search/ast_expr.h"
 
-#include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 
-#include <algorithm>
 #include <cmath>
-#include <regex>
-
-#include "base/logging.h"
 
 using namespace std;
 
@@ -25,45 +20,27 @@ AstGeoNode::AstGeoNode(double lon, double lat, double radius, std::string unit)
     : lon(lon), lat(lat), radius(radius), unit(std::move(unit)) {
 }
 
-AstOptionalNode::AstOptionalNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
+AstLogicalNode::AstLogicalNode(AstExpr l, AstExpr r, LogicOp op) : op{op} {
+  nodes.reserve(2);
+  nodes.push_back(std::move(l));
+  nodes.push_back(std::move(r));
 }
 
-AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
-}
-
-AstAttributeNode::AstAttributeNode(AstNode&& node, double weight)
-    : node{make_unique<AstNode>(std::move(node))}, weight{weight} {
-}
-
-AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, nodes{} {
+AstExpr AstLogicalNode::Combine(AstExpr l, AstExpr r, LogicOp op) {
   // If either node is already a logical node with the same op,
   // we can re-use it, as logical ops are associative.
   for (auto* node : {&l, &r}) {
-    if (auto* ln = get_if<AstLogicalNode>(node); ln && ln->op == op) {
-      *this = std::move(*ln);
-      nodes.emplace_back(std::move(*(node == &l ? &r : &l)));
-      return;
+    if (auto* logical = (*node)->As<AstLogicalNode>(); logical && logical->op == op) {
+      logical->nodes.push_back(std::move(node == &l ? r : l));
+      return std::move(*node);
     }
   }
 
-  nodes.emplace_back(std::move(l));
-  nodes.emplace_back(std::move(r));
+  return make_unique<AstLogicalNode>(std::move(l), std::move(r), op);
 }
 
-AstFieldNode::AstFieldNode(string field, AstNode&& node)
-    : field{field.substr(1)}, node{make_unique<AstNode>(std::move(node))} {
-}
-
-AstTagsNode::AstTagsNode(TagValue tag) {
-  tags = {std::move(tag)};
-}
-
-AstTagsNode::AstTagsNode(AstExpr&& l, TagValue tag) {
-  DCHECK(holds_alternative<AstTagsNode>(l));
-  auto& tags_node = get<AstTagsNode>(l);
-
-  tags = std::move(tags_node.tags);
-  tags.push_back(std::move(tag));
+AstFieldNode::AstFieldNode(string field, AstExpr node)
+    : field{field.substr(1)}, node{std::move(node)} {
 }
 
 AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, std::string blob,
@@ -75,11 +52,6 @@ AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, std::string blob,
       score_alias{score_alias.empty() ? absl::StrCat("__", field.substr(1), "_score")
                                       : std::string{score_alias}},
       ef_runtime{ef_runtime} {
-}
-
-AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
-  *this = std::move(self);
-  this->filter = make_unique<AstNode>(std::move(filter));
 }
 
 AstVectorRangeNode::AstVectorRangeNode(std::string field, double radius, std::string blob,
@@ -97,32 +69,19 @@ bool AstKnnNode::HasPreFilter() const {
   return filter == nullptr;
 }
 
-AstNode::~AstNode() noexcept {
-  if (holds_alternative<monostate>(*this))
+void AstNodeDeleter::operator()(AstNode* node) const noexcept {
+  if (!node)
     return;
 
-  // Reuse a link in each node instead of allocating a work stack. Keep ownership intact while
-  // building reverse preorder, so every descendant appears before its owner in the cleanup list.
-  AstNode* pending = this;
-  AstNode* reverse_order = nullptr;
-  teardown_next_ = nullptr;
+  // Detach children before deleting their owner. The intrusive work list needs no allocation,
+  // even when a failed parse is being unwound after an allocation failure.
+  AstNode* pending = node;
+  node->teardown_next_ = nullptr;
   while (pending) {
-    AstNode* node = pending;
+    node = pending;
     pending = node->teardown_next_;
-    ForEachChild(*node, {}, [&pending](AstNode& child, string_view) {
-      child.teardown_next_ = pending;
-      pending = &child;
-    });
-    node->teardown_next_ = reverse_order;
-    reverse_order = node;
-  }
-
-  while (reverse_order) {
-    AstNode* node = reverse_order;
-    reverse_order = node->teardown_next_;
-    // Children are already empty: releasing their unique_ptr/vector storage only invokes the
-    // early return above, keeping the call stack bounded regardless of the tree's depth.
-    node->emplace<monostate>();
+    node->ReleaseChildren(pending);
+    delete node;
   }
 }
 
@@ -133,7 +92,4 @@ ostream& operator<<(ostream& os, optional<uint32_t> o) {
   return os;
 }
 
-ostream& operator<<(ostream& os, dfly::search::AstTagsNode::TagValueProxy o) {
-  return os;
-}
 }  // namespace std

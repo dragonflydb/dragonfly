@@ -35,7 +35,7 @@ struct OptionalNumericFilter : public OptionalFilterBase {
     return empty_;
   }
 
-  AstNode Node(std::string field) override;
+  AstExpr Node(std::string field) override;
 
   void AddRange(size_t lo, size_t hi) {
     if (empty_) {
@@ -284,7 +284,7 @@ class SearchAlgorithm {
 
   AstKnnNode* GetKnnNode() const;
 
-  std::unique_ptr<AstNode> PopKnnNode();
+  AstExpr PopKnnNode();
 
   const AstVectorRangeNode* GetVectorRangeNode() const;
 
@@ -298,7 +298,7 @@ class SearchAlgorithm {
 
   // Detaches the range from the top-level AND (replacing it with match-all) and returns it,
   // leaving query_ as the runnable pre-filter. Requires IsAndedVectorRange().
-  std::unique_ptr<AstNode> ExtractVectorRangeAsPrefilter();
+  AstExpr ExtractVectorRangeAsPrefilter();
 
   void EnableProfiling();
 
@@ -307,7 +307,7 @@ class SearchAlgorithm {
  private:
   bool profiling_enabled_ = false;
   std::optional<ScorerSpec> scorer_;
-  std::unique_ptr<AstNode> query_;
+  AstExpr query_;
   std::optional<KnnScoreSortOption> knn_hnsw_score_sort_option_;
 };
 

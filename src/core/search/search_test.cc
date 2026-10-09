@@ -2686,6 +2686,43 @@ static std::vector<float> GenerateRandomVector(size_t dims, unsigned seed = 42) 
   return vec;
 }
 
+static void BM_SearchAst(benchmark::State& state) {
+  const pair<string_view, string_view> kQueries[] = {
+      {"term", "hello"},
+      {"field", "@title:hello"},
+      {"logical", "(@title:(hello world) | prefix*) -@tag:{obsolete}"},
+      {"mixed", "@tag:{blue|green*} @score:[10 50]"},
+      {"phrase", "@title:\"hello world\""},
+      {"optional_weight", "~@title:hello=>{$weight:2} @tag:{blue}"},
+  };
+  auto [name, query] = kQueries[state.range(0)];
+  auto schema = MakeSimpleSchema(
+      {{"title", SchemaField::TEXT}, {"tag", SchemaField::TAG}, {"score", SchemaField::NUMERIC}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  for (DocId i = 0; i < state.range(1); ++i) {
+    indices.Add(i, MockedDocument{Map{{"title", i % 2 ? "hello world prefix" : "prefix elsewhere"},
+                                      {"tag", i % 2 ? "blue" : "green"},
+                                      {"score", to_string(i % 100)}}});
+  }
+  indices.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  CHECK(algo.Init(query, &params));
+  for (auto _ : state) {
+    if (state.range(2))
+      CHECK(algo.Init(query, &params));
+    auto result = algo.Search(&indices);
+    CHECK(result.error.empty());
+    benchmark::DoNotOptimize(result);
+  }
+  state.SetLabel(string{name});
+}
+BENCHMARK(BM_SearchAst)
+    ->ArgsProduct({{0, 1, 2, 3, 4, 5}, {100, 1000}, {0, 1}})
+    ->ArgNames({"query", "docs", "parse"})
+    ->Unit(benchmark::kMicrosecond);
+
 static void BM_SearchDocIds(benchmark::State& state) {
   auto schema = MakeSimpleSchema({{"score", SchemaField::NUMERIC}, {"tag", SchemaField::TAG}});
   FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
