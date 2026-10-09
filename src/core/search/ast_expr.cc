@@ -4,14 +4,9 @@
 
 #include "core/search/ast_expr.h"
 
-#include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
 
-#include <algorithm>
 #include <cmath>
-#include <regex>
-
-#include "base/logging.h"
 
 using namespace std;
 
@@ -25,33 +20,27 @@ AstGeoNode::AstGeoNode(double lon, double lat, double radius, std::string unit)
     : lon(lon), lat(lat), radius(radius), unit(std::move(unit)) {
 }
 
-AstOptionalNode::AstOptionalNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
+AstLogicalNode::AstLogicalNode(AstExpr l, AstExpr r, LogicOp op) : op{op} {
+  nodes.reserve(2);
+  nodes.push_back(std::move(l));
+  nodes.push_back(std::move(r));
 }
 
-AstNegateNode::AstNegateNode(AstNode&& node) : node{make_unique<AstNode>(std::move(node))} {
-}
-
-AstAttributeNode::AstAttributeNode(AstNode&& node, double weight)
-    : node{make_unique<AstNode>(std::move(node))}, weight{weight} {
-}
-
-AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, nodes{} {
+AstExpr AstLogicalNode::Combine(AstExpr l, AstExpr r, LogicOp op) {
   // If either node is already a logical node with the same op,
   // we can re-use it, as logical ops are associative.
   for (auto* node : {&l, &r}) {
-    if (auto* ln = node->As<AstLogicalNode>(); ln && ln->op == op) {
-      *this = std::move(*ln);
-      nodes.emplace_back(std::move(*(node == &l ? &r : &l)));
-      return;
+    if (auto* logical = (*node)->As<AstLogicalNode>(); logical && logical->op == op) {
+      logical->nodes.push_back(std::move(node == &l ? r : l));
+      return std::move(*node);
     }
   }
 
-  nodes.emplace_back(std::move(l));
-  nodes.emplace_back(std::move(r));
+  return MakeAstNode<AstLogicalNode>(std::move(l), std::move(r), op);
 }
 
-AstFieldNode::AstFieldNode(string field, AstNode&& node)
-    : field{field.substr(1)}, node{make_unique<AstNode>(std::move(node))} {
+AstFieldNode::AstFieldNode(string field, AstExpr node)
+    : field{field.substr(1)}, node{std::move(node)} {
 }
 
 AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, std::string blob,
@@ -63,11 +52,6 @@ AstKnnNode::AstKnnNode(uint32_t limit, std::string_view field, std::string blob,
       score_alias{score_alias.empty() ? absl::StrCat("__", field.substr(1), "_score")
                                       : std::string{score_alias}},
       ef_runtime{ef_runtime} {
-}
-
-AstKnnNode::AstKnnNode(AstNode&& filter, AstKnnNode&& self) {
-  *this = std::move(self);
-  this->filter = make_unique<AstNode>(std::move(filter));
 }
 
 AstVectorRangeNode::AstVectorRangeNode(std::string field, double radius, std::string blob,

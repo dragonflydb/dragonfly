@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace dfly {
@@ -81,9 +82,12 @@ struct QueryParams {
 
 struct AstNode;
 
+// Keeps destruction of deeply nested queries iterative and allocation-free.
+using AstExpr = std::unique_ptr<AstNode>;
+
 struct OptionalFilterBase {
   virtual bool IsEmpty() const = 0;
-  virtual AstNode Node(std::string field) = 0;
+  virtual AstExpr Node(std::string field) = 0;
   virtual ~OptionalFilterBase() = default;
 };
 

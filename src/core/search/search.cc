@@ -697,9 +697,10 @@ struct BasicSearch {
         } else if (auto* logical = n.As<AstLogicalNode>()) {
           for (auto it = logical->nodes.rbegin(); it != logical->nodes.rend(); ++it) {
             // Drop stopword operands: they match nothing.
-            if (const auto* term = it->As<AstTermNode>(); term && indices_->IsStopWord(term->affix))
+            if (const auto* term = (*it)->As<AstTermNode>();
+                term && indices_->IsStopWord(term->affix))
               continue;
-            stack.push_back(Frame{&*it, af, w, false});
+            stack.push_back(Frame{it->get(), af, w, false});
           }
         } else if (auto* knn = n.As<AstKnnNode>()) {
           if (knn->filter)
@@ -1024,8 +1025,8 @@ struct StatsCollector {
 
 }  // namespace
 
-AstNode OptionalNumericFilter::Node(std::string field) {
-  return AstFieldNode{"@" + field, AstRangeNode(lo_, false, hi_, false)};
+AstExpr OptionalNumericFilter::Node(std::string field) {
+  return MakeAstNode<AstFieldNode>("@" + field, MakeAstNode<AstRangeNode>(lo_, false, hi_, false));
 }
 
 string_view Schema::LookupAlias(string_view alias) const {
@@ -1265,7 +1266,7 @@ SearchAlgorithm::~SearchAlgorithm() = default;
 bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
                            const OptionalFilters* filters) {
   try {
-    query_ = make_unique<AstExpr>(ParseQuery(query, params, filters));
+    query_ = ParseQuery(query, params, filters);
   } catch (const Parser::syntax_error& se) {
     LOG(INFO) << "Failed to parse query \"" << query << "\":" << se.what();
     return false;
@@ -1274,7 +1275,7 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
     return false;
   }
 
-  if (holds_alternative<monostate>(*query_)) {
+  if (!query_) {
     LOG_EVERY_T(INFO, 10) << "Empty result after parsing query \"" << query << "\"";
     return false;
   }
@@ -1320,7 +1321,7 @@ AstKnnNode* SearchAlgorithm::GetKnnNode() const {
   return query_ ? query_->As<AstKnnNode>() : nullptr;
 }
 
-std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
+AstExpr SearchAlgorithm::PopKnnNode() {
   if (auto* knn = GetKnnNode(); knn) {
     // Save knn score sort option
     knn_hnsw_score_sort_option_ = KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
@@ -1382,16 +1383,17 @@ bool SearchAlgorithm::IsAndedVectorRange() const {
   if (!logical || logical->op != AstLogicalNode::AND)
     return false;
   return any_of(logical->nodes.begin(), logical->nodes.end(),
-                [](const AstNode& n) { return n.Is<AstVectorRangeNode>(); });
+                [](const AstExpr& n) { return n->Is<AstVectorRangeNode>(); });
 }
 
-std::unique_ptr<AstNode> SearchAlgorithm::ExtractVectorRangeAsPrefilter() {
+AstExpr SearchAlgorithm::ExtractVectorRangeAsPrefilter() {
   auto* logical = query_->As<AstLogicalNode>();
   DCHECK(logical && logical->op == AstLogicalNode::AND);
   for (auto& child : logical->nodes) {
-    if (child.Is<AstVectorRangeNode>()) {
-      auto extracted = make_unique<AstNode>(std::move(child));
-      child = AstStarNode{};  // match-all in its place, leaving query_ as the pure pre-filter
+    if (child->Is<AstVectorRangeNode>()) {
+      auto extracted = std::move(child);
+      child = MakeAstNode<AstStarNode>();  // match-all in its place, leaving query_ as the pure
+                                           // pre-filter
       return extracted;
     }
   }
