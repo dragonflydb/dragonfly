@@ -18,10 +18,15 @@ namespace dfly {
 MultiShardExecution::MultiShardExecution(uint32_t num_flows) : flows_(num_flows) {
 }
 
+#define RETURN_ON_CANCELED() \
+  do {                       \
+    if (cancelled_)          \
+      return false;          \
+  } while (0)
+
 bool MultiShardExecution::Execute(TxId txid, absl::FunctionRef<bool()> apply) {
   std::unique_lock lk(mu_);
-  if (cancelled_)
-    return false;
+  RETURN_ON_CANCELED();
   uint64_t generation = generation_;
   if (arrived_++ == 0)
     round_txid_ = txid;
@@ -31,8 +36,7 @@ bool MultiShardExecution::Execute(TxId txid, absl::FunctionRef<bool()> apply) {
 
   // Wait until the round is complete, or another flow ran it.
   cv_.wait(lk, [&] { return cancelled_ || generation_ != generation || arrived_ >= flows_; });
-  if (cancelled_)
-    return false;
+  RETURN_ON_CANCELED();
   if (generation_ != generation)
     return true;
 
@@ -44,6 +48,8 @@ bool MultiShardExecution::Execute(TxId txid, absl::FunctionRef<bool()> apply) {
   cv_.notify_all();
   return res;
 }
+
+#undef RETURN_ON_CANCELED
 
 void MultiShardExecution::RemoveFlow() {
   std::lock_guard lk(mu_);
