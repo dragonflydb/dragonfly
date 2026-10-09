@@ -472,7 +472,7 @@ tag_list:
   | tag_list OR_OP tag_list_element
       {
         $$ = std::move($1);
-        std::get<AstTagsNode>($$).tags.push_back(std::move($3));
+        $$.As<AstTagsNode>()->tags.push_back(std::move($3));
       }
 
 tag_list_element:

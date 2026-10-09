@@ -39,7 +39,7 @@ AstLogicalNode::AstLogicalNode(AstNode&& l, AstNode&& r, LogicOp op) : op{op}, n
   // If either node is already a logical node with the same op,
   // we can re-use it, as logical ops are associative.
   for (auto* node : {&l, &r}) {
-    if (auto* ln = get_if<AstLogicalNode>(node); ln && ln->op == op) {
+    if (auto* ln = node->As<AstLogicalNode>(); ln && ln->op == op) {
       *this = std::move(*ln);
       nodes.emplace_back(std::move(*(node == &l ? &r : &l)));
       return;

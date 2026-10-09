@@ -233,6 +233,18 @@ struct AstNode : public NodeVariants {
     return stream;
   }
 
+  template <typename Node> bool Is() const {
+    return std::holds_alternative<Node>(*this);
+  }
+
+  template <typename Node> Node* As() {
+    return std::get_if<Node>(this);
+  }
+
+  template <typename Node> const Node* As() const {
+    return std::get_if<Node>(this);
+  }
+
   const NodeVariants& Variant() const& {
     return *this;
   }
@@ -244,26 +256,30 @@ struct AstNode : public NodeVariants {
 
 using AstExpr = AstNode;
 
+template <typename Callback> void VisitAst(const AstNode& node, Callback&& callback) {
+  std::visit([&](const auto& inner) { callback(inner); }, node.Variant());
+}
+
 // Invokes cb(child, field) for each direct child, where `field` is the active field the child
 // inherits (a field node overrides it). Skips children nulled by a move.
 template <typename NodeT, typename F>
 void ForEachChild(NodeT& node, std::string_view active_field, F&& cb) {
-  if (auto* n = std::get_if<AstFieldNode>(&node)) {
+  if (auto* n = node.template As<AstFieldNode>()) {
     if (n->node)
       cb(*n->node, std::string_view{n->field});
-  } else if (auto* n = std::get_if<AstAttributeNode>(&node)) {
+  } else if (auto* n = node.template As<AstAttributeNode>()) {
     if (n->node)
       cb(*n->node, active_field);
-  } else if (auto* n = std::get_if<AstNegateNode>(&node)) {
+  } else if (auto* n = node.template As<AstNegateNode>()) {
     if (n->node)
       cb(*n->node, active_field);
-  } else if (auto* n = std::get_if<AstOptionalNode>(&node)) {
+  } else if (auto* n = node.template As<AstOptionalNode>()) {
     if (n->node)
       cb(*n->node, active_field);
-  } else if (auto* n = std::get_if<AstKnnNode>(&node)) {
+  } else if (auto* n = node.template As<AstKnnNode>()) {
     if (n->filter)
       cb(*n->filter, active_field);
-  } else if (auto* n = std::get_if<AstLogicalNode>(&node)) {
+  } else if (auto* n = node.template As<AstLogicalNode>()) {
     for (auto& child : n->nodes)
       cb(child, active_field);
   }
