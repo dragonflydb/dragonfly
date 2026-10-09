@@ -2769,7 +2769,7 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
   // TODO: Introduce partial rebuild
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
   auto upd_cb = [idx_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
-    (void)es->search_indices()->DropIndex(idx_name);
+    (void)es->search_indices()->ExtractIndex(idx_name);
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal);
     return OpStatus::OK;
   };
