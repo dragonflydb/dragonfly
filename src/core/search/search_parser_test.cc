@@ -19,9 +19,6 @@ using namespace std;
 
 // Compact textual form of a parsed query tree, used to pin exact ASTs in tests.
 struct AstDumper {
-  string operator()(monostate) const {
-    return "<empty>";
-  }
   string operator()(const AstStarNode&) const {
     return "*";
   }
