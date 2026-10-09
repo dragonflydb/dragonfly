@@ -111,9 +111,14 @@ struct FieldReference {
       : name_{name}, alias_{alias} {
   }
 
-  std::string_view Identifier(const search::Schema& schema, bool is_json) const {
-    return (is_json && IsJsonPath(name_)) ? name_ : schema.LookupAlias(name_);
-  }
+  // The attribute behind the name: an alias, else a raw identifier. Unknown names are read from
+  // the document as plain TEXT.
+  struct Resolved {
+    std::string_view identifier;
+    search::SchemaField::FieldType type = search::SchemaField::TEXT;
+    bool sortable = false;
+  };
+  Resolved Resolve(const search::Schema& schema) const;
 
   std::string_view Name() const {
     return name_;
@@ -124,9 +129,30 @@ struct FieldReference {
   }
 
  private:
-  static bool IsJsonPath(std::string_view name);
-
   std::string_view name_, alias_;
+};
+
+// A field to read from documents, resolved once per query.
+struct DocField {
+  std::string_view output;
+  std::string_view identifier;
+  search::SchemaField::FieldType type;
+};
+
+// What a query reads from each document: the listed fields, or every document field typed by the
+// attribute standing for its identifier.
+struct DocProjection {
+  static DocProjection All(const search::Schema& schema);
+  static DocProjection Of(const search::Schema& schema, absl::Span<const FieldReference> fields);
+  static DocProjection For(const search::Schema& schema,
+                           const std::optional<std::vector<FieldReference>>& fields) {
+    return fields ? Of(schema, *fields) : All(schema);
+  }
+
+  search::SchemaField::FieldType TypeOf(std::string_view identifier) const;
+
+  std::optional<std::vector<DocField>> fields;  // nullopt: every document field
+  absl::flat_hash_map<std::string_view, search::SchemaField::FieldType> types;
 };
 
 enum class SortOrder { ASC, DESC };
@@ -507,11 +533,16 @@ class ShardDocIndex {
   // so serialization cannot interfere with a concurrent restoration.
   void DrainSerializationUpdates(const OpArgs& op_args);
 
-  // Serialize doc and return with key name
-  using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
-  SerializedEntryWithKey SerializeDocWithKey(
-      search::DocId id, const OpArgs& op_args, const search::Schema& schema,
-      const std::optional<std::vector<FieldReference>>& return_fields);
+  struct SerializedDoc {
+    std::string_view key;
+    SearchDocData values;
+    search::SortableValue sort_value;  // the single value of `sort`, kept apart from `values`
+  };
+  // Serialize doc and return with key name.
+  using SerializedEntryWithKey = std::optional<SerializedDoc>;
+  SerializedEntryWithKey SerializeDocWithKey(search::DocId id, const OpArgs& op_args,
+                                             const DocProjection& projection,
+                                             const DocProjection* sort = nullptr);
 
   search::DefragmentResult Defragment(PageUsage* page_usage) {
     if (indices_) {

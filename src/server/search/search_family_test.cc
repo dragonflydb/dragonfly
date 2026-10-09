@@ -3386,6 +3386,59 @@ TEST_F(SearchFamilyTest, HashAllowsSameIdentifierWithDifferentAliases) {
               IsArray(IntArg(1), "hx:1", IsArray("description", "very fast and elegant")));
 }
 
+// LOAD ... AS may move a SORTABLE field's output name to another field.
+TEST_F(SearchFamilyTest, AggregateLoadAliasReplacesSortableField) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "a", "NUMERIC", "SORTABLE", "b", "NUMERIC"}),
+      "OK");
+  Run({"HSET", "doc", "a", "10", "b", "20"});
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "LOAD", "6", "a", "AS", "moved", "b", "AS", "a"}),
+              IsUnordArrayWithSize(IsMap("moved", "10", "a", "20")));
+}
+
+// A vector query sorted by a document field keeps the reply shape RETURN asks for.
+TEST_F(SearchFamilyTest, HnswSortByKeepsReturnShape) {
+  Run({"FT.CREATE", "hx",      "ON",  "HASH", "PREFIX",          "1",    "h:",
+       "SCHEMA",    "price",   "TAG", "v",    "VECTOR",          "HNSW", "6",
+       "TYPE",      "FLOAT32", "DIM", "2",    "DISTANCE_METRIC", "L2"});
+  WaitForIndexReady("hx");
+  Run({"HSET", "h:1", "price", "10", "qty", "7", "v", FloatVec(1, 0)});
+  Run({"HSET", "h:2", "price", "9", "qty", "8", "v", FloatVec(2, 0)});
+  const string q = FloatVec(2, 0);  // nearest is h:2, SORTBY price puts h:1 first ("10" < "9")
+  auto check = [&](const vector<string>& tail, const auto& content) {
+    for (string_view query : {"*=>[KNN 2 @v $q]", "@v:[VECTOR_RANGE 5 $q]"}) {
+      vector<string_view> cmd{"FT.SEARCH", "hx",     query,   "PARAMS",  "2", "q",
+                              q,           "SORTBY", "price", "DIALECT", "2"};
+      cmd.insert(cmd.end(), tail.begin(), tail.end());
+      auto resp = Run(ArgSlice{cmd});
+      ASSERT_THAT(resp, ArgType(RespExpr::ARRAY)) << query;
+      const auto& v = resp.GetVec();
+      ASSERT_GE(v.size(), 3u);
+      EXPECT_EQ(v[1], "h:1") << query;
+      EXPECT_THAT(v[2], content) << query;
+    }
+  };
+  check({}, AnyOf(IsMap("price", "10", "qty", "7", "v", _),
+                  IsMap("price", "10", "qty", "7", "v", _, "__v_score", _)));
+  check({"NOCONTENT"}, _);
+  check({"RETURN", "1", "price"}, IsMap("price", "10"));
+  check({"RETURN", "6", "price", "AS", "moved", "qty", "AS", "price"},
+        IsMap("moved", "10", "price", "7"));
+}
+
+// An alias wins over a document field spelled the same, in RETURN, LOAD and GROUPBY alike.
+TEST_F(SearchFamilyTest, AliasBeatsSameSpelledPath) {
+  Run({"FT.CREATE", "jx", "ON", "JSON", "PREFIX", "1", "j:", "SCHEMA", "$.a", "AS", "$.b", "TEXT",
+       "$.b", "AS", "c", "TEXT"});
+  Run({"JSON.SET", "j:1", "$", R"({"a":"alpha","b":"bravo"})"});
+  EXPECT_THAT(Run({"FT.SEARCH", "jx", "*", "RETURN", "1", "$.b"}),
+              IsArray(IntArg(1), "j:1", IsArray("$.b", "alpha")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "jx", "*", "LOAD", "1", "$.b"}),
+              IsUnordArrayWithSize(IsMap("$.b", "alpha")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "jx", "*", "GROUPBY", "1", "@$.b"}),
+              IsUnordArrayWithSize(IsMap("$.b", "alpha")));
+}
+
 TEST_F(SearchFamilyTest, ReturnTrailingAsRejected) {
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
   Run({"JSON.SET", "j1", ".", R"({"a":"alpha"})"});

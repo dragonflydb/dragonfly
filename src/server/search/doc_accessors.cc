@@ -98,20 +98,12 @@ FieldValue ToSortableValue(search::SchemaField::FieldType type, string_view valu
   return string{value};
 }
 
-FieldValue ExtractSortableValue(const search::Schema& schema, string_view key, string_view value) {
-  auto it = schema.fields.find(key);
-  if (it == schema.fields.end())
-    return ToSortableValue(search::SchemaField::TEXT, value);
-  return ToSortableValue(it->second.type, value);
-}
-
-FieldValue ExtractSortableValueFromJson(const search::Schema& schema, string_view key,
-                                        const JsonType& json) {
+FieldValue ToSortableValueFromJson(search::SchemaField::FieldType type, const JsonType& json) {
   if (json.is_null()) {
     return std::monostate{};
   }
   auto json_as_string = json.as_string();
-  return ExtractSortableValue(schema, key, json_as_string);
+  return ToSortableValue(type, json_as_string);
 }
 
 /* Returns true if json elements were successfully processed. */
@@ -134,18 +126,19 @@ bool ProcessJsonElements(const std::vector<JsonType>& json_elements,
 
 }  // namespace
 
-SearchDocData BaseAccessor::Serialize(const search::Schema& schema,
-                                      absl::Span<const FieldReference> fields) const {
+SearchDocData BaseAccessor::Serialize(const DocProjection& projection) const {
+  if (!projection.fields)
+    return SerializeAll(projection);
+
   SearchDocData out{};
-  for (const auto& field : fields) {
-    string_view fident = field.Identifier(schema, false);
-    auto strings = GetStrings(fident);
+  for (const auto& field : *projection.fields) {
+    auto strings = GetStrings(field.identifier);
     if (!strings || strings->empty()) {
       continue;
     }
-    auto field_value = ExtractSortableValue(schema, fident, absl::StrJoin(*strings, ","));
+    auto field_value = ToSortableValue(field.type, absl::StrJoin(*strings, ","));
     if (field_value) {
-      out[field.OutputName()] = std::move(field_value).value();
+      out[field.output] = std::move(field_value).value();
     }
   }
   return out;
@@ -198,10 +191,10 @@ std::optional<BaseAccessor::StringList> ListPackAccessor::GetStrings(
   return it != lw_.end() ? StringList{(*it).second} : StringList{};
 }
 
-SearchDocData ListPackAccessor::Serialize(const search::Schema& schema) const {
+SearchDocData ListPackAccessor::SerializeAll(const DocProjection& projection) const {
   SearchDocData out{};
   for (const auto [key, value] : lw_) {
-    if (auto field_value = ExtractSortableValue(schema, key, value); field_value) {
+    if (auto field_value = ToSortableValue(projection.TypeOf(key), value); field_value) {
       out[key] = std::move(field_value).value();
     }
   }
@@ -226,10 +219,10 @@ std::optional<BaseAccessor::StringList> StringMapAccessor::GetStrings(
   return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList{};
 }
 
-SearchDocData StringMapAccessor::Serialize(const search::Schema& schema) const {
+SearchDocData StringMapAccessor::SerializeAll(const DocProjection& projection) const {
   SearchDocData out{};
   for (const auto& [kptr, vptr] : *hset_) {
-    auto field_value = ExtractSortableValue(schema, SdsToSafeSv(kptr), SdsToSafeSv(vptr));
+    auto field_value = ToSortableValue(projection.TypeOf(SdsToSafeSv(kptr)), SdsToSafeSv(vptr));
     if (field_value) {
       out[SdsToSafeSv(kptr)] = std::move(field_value).value();
     }
@@ -451,16 +444,17 @@ JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) c
   return path;
 }
 
-SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
-                                      absl::Span<const FieldReference> fields) const {
+SearchDocData JsonAccessor::Serialize(const DocProjection& projection) const {
+  if (!projection.fields)
+    return SerializeAll(projection);
+
   SearchDocData out{};
-  for (const auto& field : fields) {
-    string_view ident = field.Identifier(schema, true);
-    if (auto* path = GetPath(ident); path) {
+  for (const auto& field : *projection.fields) {
+    if (auto* path = GetPath(field.identifier); path) {
       if (auto res = path->Evaluate(json_); !res.empty()) {
-        auto field_value = ExtractSortableValueFromJson(schema, ident, res[0]);
+        auto field_value = ToSortableValueFromJson(field.type, res[0]);
         if (field_value) {
-          out[field.OutputName()] = std::move(field_value).value();
+          out[field.output] = std::move(field_value).value();
         }
       }
     }
@@ -468,7 +462,7 @@ SearchDocData JsonAccessor::Serialize(const search::Schema& schema,
   return out;
 }
 
-SearchDocData JsonAccessor::Serialize(const search::Schema& schema) const {
+SearchDocData JsonAccessor::SerializeAll(const DocProjection&) const {
   return {{"$", json_.to_string()}};
 }
 
@@ -486,7 +480,7 @@ struct EmptyAccessor : public BaseAccessor {
     return std::optional<StringList>{std::in_place};
   }
 
-  SearchDocData Serialize(const search::Schema& /*schema*/) const override {
+  SearchDocData SerializeAll(const DocProjection&) const override {
     return {};
   }
 };
