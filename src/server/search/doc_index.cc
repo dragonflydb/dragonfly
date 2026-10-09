@@ -1321,6 +1321,49 @@ ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
+ShardDocIndex* ShardDocIndices::ResolveIndex(string_view name) {
+  if (auto* index = GetIndex(name); index != nullptr)
+    return index;
+
+  auto it = aliases_.find(name);
+  return it != aliases_.end() ? GetIndex(it->second) : nullptr;
+}
+
+facade::OpStatus ShardDocIndices::AddAlias(string_view alias, string_view target) {
+  using enum facade::OpStatus;
+  if (GetIndex(target) == nullptr)
+    return KEY_NOTFOUND;
+  if (GetIndex(alias) != nullptr || aliases_.find(alias) != aliases_.end())
+    return KEY_EXISTS;
+
+  aliases_.emplace(alias, target);
+  return OK;
+}
+
+facade::OpStatus ShardDocIndices::UpdateAlias(string_view alias, string_view target) {
+  using enum facade::OpStatus;
+  if (GetIndex(target) == nullptr)
+    return KEY_NOTFOUND;
+  if (GetIndex(alias) != nullptr)
+    return KEY_EXISTS;
+
+  aliases_.insert_or_assign(alias, target);
+  return OK;
+}
+
+facade::OpStatus ShardDocIndices::DeleteAlias(string_view alias) {
+  using enum facade::OpStatus;
+  auto it = aliases_.find(alias);
+  if (it == aliases_.end())
+    return KEY_NOTFOUND;
+  aliases_.erase(it);
+  return OK;
+}
+
+vector<pair<string, string>> ShardDocIndices::GetAliases() const {
+  return vector<pair<string, string>>(aliases_.begin(), aliases_.end());
+}
+
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
                                 shared_ptr<const DocIndex> index_ptr, bool is_journal) {
   auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr), &hash_index_count_);
@@ -1342,7 +1385,7 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
       [this](string_view key, const DbContext& cntx, PrimeValue& pv) { RemoveDoc(key, cntx, pv); });
 }
 
-unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
+unique_ptr<ShardDocIndex> ShardDocIndices::ExtractIndex(string_view name) {
   auto it = indices_.find(name);
   if (it == indices_.end())
     return nullptr;
@@ -1353,12 +1396,27 @@ unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
   return index;
 }
 
+unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
+  auto index = ExtractIndex(name);
+  if (!index)
+    return nullptr;
+
+  for (auto it = aliases_.begin(); it != aliases_.end();) {
+    if (it->second == name)
+      aliases_.erase(it++);
+    else
+      ++it;
+  }
+  return index;
+}
+
 void ShardDocIndices::DropAllIndices() {
   // Move indices out before destroying — ShardDocIndex destructors can yield
   // (CancelBuilder joins a fiber), and destroying inside the map would trigger
   // Abseil's reentrance assert if the heartbeat iterates indices_ mid-clear.
   decltype(indices_) to_destroy;
   std::swap(to_destroy, indices_);
+  aliases_.clear();
   for (auto& [_, idx] : to_destroy) {
     DropIndexCache(*idx);
   }

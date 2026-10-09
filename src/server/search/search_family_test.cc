@@ -24,7 +24,9 @@
 #include "facade/resp_parser.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/rdb_load_context.h"
 #include "server/search/doc_index.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -426,6 +428,151 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
   EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
+}
+
+TEST_F(SearchFamilyTest, AliasResolveEnumerate) {
+  EXPECT_EQ(Run({"ft.create", "idx1", "SCHEMA", "f", "TEXT"}), "OK");
+  EXPECT_EQ(Run({"ft.create", "idx2", "SCHEMA", "f", "TEXT"}), "OK");
+  WaitForIndexReady("idx1");
+  WaitForIndexReady("idx2");
+
+  pp_->at(0)->Await([] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    auto* idx1 = indices->GetIndex("idx1");
+    ASSERT_NE(idx1, nullptr);
+    ASSERT_NE(indices->GetIndex("idx2"), nullptr);
+    EXPECT_EQ(indices->AddAlias("alias1", "idx1"), OpStatus::OK);
+    EXPECT_EQ(indices->AddAlias("alias2", "idx1"), OpStatus::OK);
+    EXPECT_EQ(indices->AddAlias("alias1", "idx2"), OpStatus::KEY_EXISTS);
+    EXPECT_EQ(indices->ResolveIndex("alias1"), idx1);
+
+    string alias_name = "owned-alias";
+    string target_name = "idx1";
+    EXPECT_EQ(indices->AddAlias(alias_name, target_name), OpStatus::OK);
+    alias_name.assign("changed-alias");
+    target_name.assign("idx2");
+    EXPECT_EQ(indices->ResolveIndex("owned-alias"), idx1);
+    EXPECT_EQ(indices->DeleteAlias("owned-alias"), OpStatus::OK);
+
+    EXPECT_EQ(indices->ResolveIndex("alias1"), idx1);
+    EXPECT_EQ(indices->ResolveIndex("idx1"), idx1);
+    EXPECT_EQ(indices->ResolveIndex("missing"), nullptr);
+    EXPECT_EQ(indices->GetIndex("alias1"), nullptr);
+    EXPECT_THAT(indices->GetIndexNames(), UnorderedElementsAre("idx1", "idx2"));
+    EXPECT_THAT(indices->GetAliases(),
+                UnorderedElementsAre(pair<string, string>("alias1", "idx1"),
+                                     pair<string, string>("alias2", "idx1")));
+  });
+}
+
+TEST_F(SearchFamilyTest, AliasUpdate) {
+  EXPECT_EQ(Run({"ft.create", "idx1", "SCHEMA", "f", "TEXT"}), "OK");
+  EXPECT_EQ(Run({"ft.create", "idx2", "SCHEMA", "f", "TEXT"}), "OK");
+  WaitForIndexReady("idx1");
+  WaitForIndexReady("idx2");
+
+  pp_->at(0)->Await([] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    EXPECT_EQ(indices->AddAlias("missing-target", "missing"), OpStatus::KEY_NOTFOUND);
+    EXPECT_EQ(indices->AddAlias("alias-target", "idx1"), OpStatus::OK);
+    EXPECT_EQ(indices->AddAlias("bad-target", "alias-target"), OpStatus::KEY_NOTFOUND);
+    EXPECT_EQ(indices->AddAlias("idx1", "idx1"), OpStatus::KEY_EXISTS);
+    EXPECT_EQ(indices->AddAlias("alias-target", "idx1"), OpStatus::KEY_EXISTS);
+
+    EXPECT_EQ(indices->UpdateAlias("alias-target", "idx2"), OpStatus::OK);
+    EXPECT_EQ(indices->ResolveIndex("alias-target"), indices->GetIndex("idx2"));
+    EXPECT_EQ(indices->UpdateAlias("alias-target", "idx2"), OpStatus::OK);
+    EXPECT_EQ(indices->UpdateAlias("alias-target", "missing"), OpStatus::KEY_NOTFOUND);
+    EXPECT_EQ(indices->UpdateAlias("alias-target", "alias-target"), OpStatus::KEY_NOTFOUND);
+    EXPECT_EQ(indices->UpdateAlias("idx1", "idx2"), OpStatus::KEY_EXISTS);
+    EXPECT_EQ(indices->ResolveIndex("alias-target"), indices->GetIndex("idx2"));
+    EXPECT_EQ(indices->UpdateAlias("new-alias", "idx1"), OpStatus::OK);
+    EXPECT_EQ(indices->ResolveIndex("new-alias"), indices->GetIndex("idx1"));
+    EXPECT_THAT(indices->GetAliases(),
+                UnorderedElementsAre(pair<string, string>("alias-target", "idx2"),
+                                     pair<string, string>("new-alias", "idx1")));
+  });
+}
+
+TEST_F(SearchFamilyTest, AliasDeleteRemovesOnlyAlias) {
+  EXPECT_EQ(Run({"ft.create", "idx1", "SCHEMA", "f", "TEXT"}), "OK");
+  WaitForIndexReady("idx1");
+
+  pp_->at(0)->Await([] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    EXPECT_EQ(indices->AddAlias("alias1", "idx1"), OpStatus::OK);
+    EXPECT_EQ(indices->AddAlias("alias2", "idx1"), OpStatus::OK);
+    EXPECT_EQ(indices->DeleteAlias("idx1"), OpStatus::KEY_NOTFOUND);
+    EXPECT_NE(indices->GetIndex("idx1"), nullptr);
+    EXPECT_EQ(indices->DeleteAlias("missing"), OpStatus::KEY_NOTFOUND);
+    EXPECT_EQ(indices->DeleteAlias("alias1"), OpStatus::OK);
+    EXPECT_EQ(indices->DeleteAlias("alias1"), OpStatus::KEY_NOTFOUND);
+    EXPECT_EQ(indices->ResolveIndex("alias1"), nullptr);
+    EXPECT_NE(indices->ResolveIndex("alias2"), nullptr);
+    EXPECT_NE(indices->GetIndex("idx1"), nullptr);
+    EXPECT_THAT(indices->GetAliases(),
+                UnorderedElementsAre(pair<string, string>("alias2", "idx1")));
+  });
+}
+
+TEST_F(SearchFamilyTest, AliasDropIndex) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx1", "SCHEMA", "f", "TEXT"}), "OK");
+  EXPECT_EQ(Run({"FT.CREATE", "idx2", "SCHEMA", "f", "TEXT"}), "OK");
+  WaitForIndexReady("idx1");
+  WaitForIndexReady("idx2");
+
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    auto* indices = shard->search_indices();
+    EXPECT_EQ(indices->AddAlias("alias1", "idx1"), OpStatus::OK);
+    EXPECT_EQ(indices->AddAlias("alias2", "idx1"), OpStatus::OK);
+    EXPECT_EQ(indices->AddAlias("alias3", "idx2"), OpStatus::OK);
+    EXPECT_EQ(indices->AddAlias("moved", "idx1"), OpStatus::OK);
+    EXPECT_EQ(indices->UpdateAlias("moved", "idx2"), OpStatus::OK);
+  });
+
+  EXPECT_EQ(Run({"FT.DROPINDEX", "idx1"}), "OK");
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    auto* indices = shard->search_indices();
+    EXPECT_EQ(indices->GetIndex("idx1"), nullptr);
+    EXPECT_EQ(indices->ResolveIndex("alias1"), nullptr);
+    EXPECT_EQ(indices->ResolveIndex("alias2"), nullptr);
+    EXPECT_THAT(indices->GetAliases(), UnorderedElementsAre(pair<string, string>("alias3", "idx2"),
+                                                            pair<string, string>("moved", "idx2")));
+  });
+  EXPECT_THAT(Run({"FT.DROPINDEX", "idx1"}), ErrArg("Index with name 'idx1' not found"));
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    EXPECT_THAT(shard->search_indices()->GetAliases(),
+                UnorderedElementsAre(pair<string, string>("alias3", "idx2"),
+                                     pair<string, string>("moved", "idx2")));
+  });
+  EXPECT_EQ(Run({"FT.CREATE", "idx1", "SCHEMA", "f", "TEXT"}), "OK");
+  WaitForIndexReady("idx1");
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    auto* indices = shard->search_indices();
+    EXPECT_EQ(indices->ResolveIndex("alias1"), nullptr);
+    EXPECT_EQ(indices->ResolveIndex("alias2"), nullptr);
+    EXPECT_NE(indices->ResolveIndex("alias3"), nullptr);
+  });
+}
+
+TEST_F(SearchFamilyTest, AliasSurvivesAlter) {
+  Run({"HSET", "doc:1", "f", "text", "cost", "3"});
+  EXPECT_EQ(Run({"FT.CREATE", "idx1", "SCHEMA", "f", "TEXT"}), "OK");
+  WaitForIndexReady("idx1");
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    EXPECT_EQ(shard->search_indices()->AddAlias("alias1", "idx1"), OpStatus::OK);
+  });
+
+  EXPECT_EQ(Run({"FT.ALTER", "idx1", "SCHEMA", "ADD", "cost", "NUMERIC"}), "OK");
+  WaitForIndexReady("idx1");
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    auto* indices = shard->search_indices();
+    auto* index = indices->GetIndex("idx1");
+    ASSERT_NE(index, nullptr);
+    EXPECT_EQ(indices->ResolveIndex("alias1"), index);
+    EXPECT_TRUE(index->base().schema.fields.contains("cost"));
+  });
+  EXPECT_THAT(Run({"FT.SEARCH", "idx1", "@cost:[3 3]"}), AreDocIds("doc:1"));
 }
 
 TEST_F(SearchFamilyTest, InfoMissingIndexUsesRedisCompatibleError) {
