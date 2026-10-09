@@ -3180,6 +3180,7 @@ string ServerFamily::FormatInfoMetrics(
     append("search_memory", m.search_stats.used_memory);
     append("search_num_indices", m.search_stats.num_indices);
     append("search_num_entries", m.search_stats.num_entries);
+    append("search_stale_doc_ids", m.search_stats.stale_doc_ids);
   }
 #endif
 

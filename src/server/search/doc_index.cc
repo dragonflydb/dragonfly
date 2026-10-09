@@ -458,10 +458,12 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
   absl::flat_hash_set<DocId> docs_to_rebuild;
   std::vector<search::TextIndex*> text_indices = indices_->GetAllTextIndices();
 
-  // Find all documents containing any term from the synonyms group
+  // Find all documents containing any term from the synonyms group. Group tokens are attached
+  // to the raw lowercase word (TokenizeWords), so the raw posting list is the exact set; the
+  // index-default stem misses documents stemmed by a per-document LANGUAGE_FIELD stemmer.
   for (auto* text_index : text_indices) {
     for (const auto& term : terms) {
-      if (const auto* container = text_index->Matching(term)) {
+      if (const auto* container = text_index->MatchingNoStem(term)) {
         for (DocId doc_id : *container) {
           docs_to_rebuild.insert(doc_id);
         }
@@ -935,6 +937,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   }
 
   auto return_fields = params.return_fields.value_or(vector<FieldReference>{});
+  size_t expired_count = 0;
 
   // Apply SORTBY
   // TODO(vlad): Write profiling up to here
@@ -968,8 +971,15 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     };
     std::vector<Scored> entries;
     entries.reserve(result.text_scores.size());
-    for (const auto& [doc, score] : result.text_scores)
+    for (const auto& [doc, score] : result.text_scores) {
+      // A posting list may still hold a DocId that was freed meanwhile; never dereference it.
+      if (!key_index_.IsValid(doc)) {
+        stale_doc_ids_++;
+        expired_count++;
+        continue;
+      }
       entries.push_back({score, key_index_.Get(doc), doc});
+    }
 
     const size_t take = std::min(limit, entries.size());
     std::partial_sort(entries.begin(), entries.begin() + take, entries.end(),
@@ -998,7 +1008,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   vector<SerializedSearchDoc> out;
   out.reserve(min(limit, result.ids.size()));
 
-  size_t expired_count = 0;
   for (size_t i = 0; i < result.ids.size(); i++) {
     float knn_score = 0;
     if (auto it = result.knn_scores.find(result.ids[i]); it != result.knn_scores.end())
@@ -1010,6 +1019,11 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     // Don't load entry if we need only its key. Ignore expiration.
     if (params.IdsOnly()) {
+      if (!key_index_.IsValid(result.ids[i])) {
+        stale_doc_ids_++;
+        expired_count++;
+        continue;
+      }
       string_view key = key_index_.Get(result.ids[i]);
       out.push_back({result.ids[i], string{key}, {}, knn_score, text_score, sort_score});
       continue;
@@ -1080,10 +1094,21 @@ SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParam
             std::move(result.profile), max_text_score};
   }
 
-  // NOCONTENT returns ids without a per-id liveness check (ignore-expiration fast path); a winner
-  // deleted before the load hop is dropped there, which can yield <k results — acceptable here.
-  return {result.total, std::move(result.ids), std::move(result.text_scores),
-          std::move(result.profile), result.max_text_score};
+  // NOCONTENT skips the keyspace lookup (ignore-expiration fast path) but still drops ids that
+  // are no longer tracked; a winner deleted before the load hop is dropped there, which can yield
+  // <k results - acceptable here.
+  size_t stale = std::erase_if(result.ids, [this](DocId id) { return !key_index_.IsValid(id); });
+  stale_doc_ids_ += stale;
+  float max_text_score = result.max_text_score;
+  if (stale > 0) {
+    absl::erase_if(result.text_scores,
+                   [this](const auto& kv) { return !key_index_.IsValid(kv.first); });
+    auto max_it = std::ranges::max_element(
+        result.text_scores, [](const auto& a, const auto& b) { return a.second < b.second; });
+    max_text_score = max_it == result.text_scores.end() ? 0.0f : max_it->second;
+  }
+  return {result.total - stale, std::move(result.ids), std::move(result.text_scores),
+          std::move(result.profile), max_text_score};
 }
 
 search::ShardScoringStats ShardDocIndex::CollectScoringStats(
@@ -1322,8 +1347,10 @@ ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
 }
 
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
-                                shared_ptr<const DocIndex> index_ptr, bool is_journal) {
+                                shared_ptr<const DocIndex> index_ptr, bool is_journal,
+                                Synonyms synonyms) {
   auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr), &hash_index_count_);
+  shard_index->GetSynonyms() = std::move(synonyms);
   auto [it, _] = indices_.emplace(name, std::move(shard_index));
 
   it->second->InitHnswShardIndices();
@@ -1466,11 +1493,13 @@ size_t ShardDocIndices::GetUsedMemory() const {
 }
 
 SearchStats ShardDocIndices::GetStats() const {
-  size_t total_entries = 0;
-  for (const auto& [_, index] : indices_)
+  size_t total_entries = 0, stale_doc_ids = 0;
+  for (const auto& [_, index] : indices_) {
     total_entries += index->GetInfo().num_docs;
+    stale_doc_ids += index->stale_doc_ids();
+  }
 
-  return {GetUsedMemory(), indices_.size(), total_entries};
+  return {GetUsedMemory(), indices_.size(), total_entries, stale_doc_ids};
 }
 
 search::DefragmentResult ShardDocIndices::Defragment(PageUsage* page_usage) {

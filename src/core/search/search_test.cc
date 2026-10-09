@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <benchmark/benchmark.h>
 #include <gmock/gmock.h>
@@ -605,6 +606,48 @@ TEST_F(SearchTest, StopWordsDroppedFromQuery) {
   // A non-stopword term still constrains the result as usual.
   algo.Init("found matched", &params);
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
+}
+
+// A term may belong to several synonym groups. Its group tokens depend only on the current groups
+// (sorted, term case-insensitive, group id as given); the document is indexed under every token,
+// reachable through any term of any of its groups, and leaves no posting behind after removal
+// even when the group map was re-laid out between Add and Remove.
+TEST_F(SearchTest, MultiGroupTermIndexedUnderAllGroups) {
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  Synonyms syn;
+  syn.UpdateGroup("g2", {"shared", "two"});
+  syn.UpdateGroup("G1", {"SHARED", "one"});
+  EXPECT_THAT(syn.GetGroupTokens("Shared"), testing::ElementsAre(" G1", " g2"));
+  EXPECT_THAT(syn.GetGroupTokens("one"), testing::ElementsAre(" G1"));
+  EXPECT_THAT(syn.GetGroupTokens("none"), testing::IsEmpty());
+
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), &syn};
+  MockedDocument doc{"shared"};
+  ASSERT_TRUE(index.Add(0, doc));
+
+  auto* text = dynamic_cast<TextIndex*>(index.GetIndex("field"));
+  ASSERT_NE(text, nullptr);
+  for (string_view token : {" G1", " g2", "shared"}) {
+    const auto* c = text->Matching(token, /*strip_whitespace=*/false);
+    ASSERT_NE(c, nullptr) << token;
+    EXPECT_EQ(c->Size(), 1u) << token;
+  }
+  for (string_view query : {"one", "two", "shared"}) {
+    SearchAlgorithm algo;
+    QueryParams params;
+    ASSERT_TRUE(algo.Init(query, &params)) << query;
+    EXPECT_EQ(algo.Search(&index).ids, vector<DocId>{0}) << query;
+  }
+
+  // Re-lay out the group map between Add and Remove; ids differing only by case stay distinct.
+  for (int i = 0; i < 300; i++)
+    syn.UpdateGroup(absl::StrCat("extra", i), {absl::StrCat("term", i)});
+  syn.UpdateGroup("g1", {"shared"});
+  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" G1", " g1", " g2"));
+  index.Remove(0, doc);
+  for (string_view token : {" G1", " g2", "shared"})
+    EXPECT_EQ(text->Matching(token, /*strip_whitespace=*/false), nullptr) << token;
+  EXPECT_TRUE(index.GetAllDocs().empty());
 }
 
 // A glued word under a field binds all of its atoms to that field, in any order and position.

@@ -100,6 +100,7 @@ struct SearchStats {
   size_t used_memory = 0;
   size_t num_indices = 0;
   size_t num_entries = 0;
+  size_t stale_doc_ids = 0;  // posting list entries of freed documents skipped by searches
 
   SearchStats& operator+=(const SearchStats&);
 };
