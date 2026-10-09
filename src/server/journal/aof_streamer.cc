@@ -62,6 +62,18 @@ void AofStreamer::Seal() {
   writer_.Seal();
 }
 
+bool AofStreamer::WaitSpareReady() {
+  return writer_.WaitSpareReady();
+}
+
+optional<uint64_t> AofStreamer::Rotate() {
+  return writer_.Rotate();
+}
+
+void AofStreamer::OnCheckpoint(uint64_t cut_seq) {
+  writer_.OnCheckpoint(cut_seq);
+}
+
 AofStreamer::Stats AofStreamer::GetStats() const {
   Stats st;
   st.log_size = prev_log_size_ + writer_.WrittenSize();

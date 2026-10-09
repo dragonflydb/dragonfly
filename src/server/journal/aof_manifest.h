@@ -63,7 +63,9 @@ io::Result<std::vector<std::string>> ListAofFiles(std::string_view dir);
 // Deletes every AOF file but the manifest, to redo an interrupted bootstrap.
 std::error_code RemoveAofFilesExceptManifest(std::string_view dir);
 
-// Deletes the segments below each shard's cut and leftover tmp files; keeps *.discarded.
-std::error_code CollectAofGarbage(std::string_view dir, const AofManifest& manifest);
+// Deletes the segments below each shard's cut and leftover tmp files. *.discarded are kept until
+// the next checkpoint, which passes remove_discarded.
+std::error_code CollectAofGarbage(std::string_view dir, const AofManifest& manifest,
+                                  bool remove_discarded = false);
 
 }  // namespace dfly

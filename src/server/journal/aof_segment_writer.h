@@ -50,6 +50,10 @@ class AofSegmentWriter {
   // Blocks until no spare is being prepared; true if a spare is ready.
   bool WaitSpareReady();
 
+  // A checkpoint whose cut starts at segment cut_seq committed. Ends a failed-sync state that hit
+  // an earlier segment: the base holds those records.
+  void OnCheckpoint(uint64_t cut_seq);
+
   // Retries failed writes once, waits for in-flight I/O and fdatasyncs the segments. Deletes the
   // unused spare. Fails if any write or fdatasync failed, even an earlier periodic one.
   std::error_code Shutdown();
@@ -177,8 +181,9 @@ class AofSegmentWriter {
   uint32_t tick_id_ = 0;
   // Last write error.
   std::error_code write_ec_;
-  // First failed fdatasync; sticky until a checkpoint.
+  // First failed fdatasync; sticky until a checkpoint whose cut is past failed_seq_.
   std::error_code sync_ec_;
+  uint64_t failed_seq_ = 0;
   util::fb2::EventCount ev_;
 };
 

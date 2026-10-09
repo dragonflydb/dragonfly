@@ -1,4 +1,8 @@
+import asyncio
+import re
+
 import pytest
+import redis
 
 from . import dfly_args
 from .instance import DflyInstanceFactory, DflyStartException
@@ -88,7 +92,7 @@ def write_manifest(aof_dir, body: str):
 
 @dfly_args({"proactor_threads": 2})
 async def test_bootstrap_adopts_dump(df_factory: DflyInstanceFactory, tmp_path):
-    plain = df_factory.create(dir=str(tmp_path), dbfilename="dump")
+    plain = df_factory.create(dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
     plain.start()
     client = plain.client()
     await client.mset({f"key:{i}": i for i in range(100)})
@@ -96,11 +100,11 @@ async def test_bootstrap_adopts_dump(df_factory: DflyInstanceFactory, tmp_path):
     await client.execute_command("SAVE")
     plain.stop()
 
-    df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump")
+    df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
     df.start()
     client = df.client()
     assert await client.dbsize() == 101
-    assert "base dfs user dump-summary.dfs" in read_manifest(tmp_path)
+    assert re.search(r"base dfs user dump-.*-summary\.dfs\n", read_manifest(tmp_path))
     await client.incr("counter")
     await client.mset({"new:1": "a", "new:2": "b"})
     df.stop()
@@ -176,16 +180,134 @@ async def test_replay_starts_at_cut(df_factory: DflyInstanceFactory, tmp_path):
 
 @dfly_args({"proactor_threads": 2})
 async def test_deleted_base_refuses_start(df_factory: DflyInstanceFactory, tmp_path):
-    plain = df_factory.create(dir=str(tmp_path), dbfilename="dump")
+    plain = df_factory.create(dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
     plain.start()
     await plain.client().set("key", 1)
     await plain.client().execute_command("SAVE")
     plain.stop()
 
-    df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump")
+    df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
     df.start()
     df.stop()
 
-    (tmp_path / "dump-summary.dfs").unlink()
+    for summary in tmp_path.glob("dump-*-summary.dfs"):
+        summary.unlink()
     with pytest.raises(DflyStartException):
         df.start()
+
+
+async def wait_log_written(client):
+    # So a kill loses nothing: every record is sealed and written.
+    while True:
+        info = await client.info("persistence")
+        if info["aof_open_block_bytes"] == 0 and info["aof_buffered_bytes"] == 0:
+            return
+        await asyncio.sleep(0.05)
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_save_is_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
+    df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
+    df.start()
+    client = df.client()
+    await client.mset({f"key:{i}": i for i in range(100)})
+    await client.set("counter", 10)
+    await client.execute_command("SAVE")
+
+    # The save is the base, and each shard's log continues in segment 1.
+    manifest = read_manifest(tmp_path)
+    assert "checkpoint 1\n" in manifest
+    assert re.search(r"base dfs user dump-.*-summary\.dfs\n", manifest)
+    assert set(re.findall(r"^cut \d+ (\d+) ", manifest, re.M)) == {"1"}
+    assert not list(tmp_path.glob("appendonly-*-0.aof"))
+
+    await client.incr("counter")
+    df.stop()
+    df.start()
+    client = df.client()
+    assert await client.dbsize() == 101
+    # The log replays on top of the save, once.
+    assert await client.get("counter") == "11"
+
+
+async def test_save_must_keep_the_base(df_factory: DflyInstanceFactory, tmp_path):
+    df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
+    df.start()
+    client = df.client()
+    with pytest.raises(redis.exceptions.ResponseError, match="timestamp"):
+        await client.execute_command("SAVE", "DF", "fixed")
+    with pytest.raises(redis.exceptions.ResponseError, match="DFS"):
+        await client.execute_command("SAVE", "RDB")
+
+    # {timestamp} has whole seconds: back-to-back saves land in the same second, and the later one
+    # must fail instead of renaming over the base.
+    await client.set("key", 1)
+    for _ in range(10):
+        try:
+            await client.execute_command("SAVE")
+        except redis.exceptions.ResponseError as e:
+            assert "already exists" in str(e)
+            break
+    else:
+        pytest.fail("no two saves landed in the same second")
+    df.stop()
+    df.start()
+    assert await df.client().get("key") == "1"
+
+
+async def test_fixed_dbfilename_refuses_start(df_factory: DflyInstanceFactory, tmp_path):
+    df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump")
+    with pytest.raises(DflyStartException):
+        df.start()
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_crash_during_and_after_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
+    df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
+    df.start()
+    client = df.client()
+    value = "x" * 500
+    for i in range(0, 20_000, 1000):
+        await client.mset({f"key:{j}": value for j in range(i, i + 1000)})
+    await client.set("counter", 10)
+    await wait_log_written(client)
+
+    # Killed while the save runs: the old manifest and the whole log still hold the data.
+    await client.execute_command("BGSAVE")
+    df.stop(kill=True)
+    df.start()
+    client = df.client()
+    assert await client.dbsize() == 20_001
+    assert await client.get("counter") == "10"
+
+    # Killed right after a save committed: the new base plus the log after its cut.
+    await client.execute_command("SAVE")
+    await client.incr("counter")
+    await wait_log_written(client)
+    df.stop(kill=True)
+    df.start()
+    client = df.client()
+    assert await client.dbsize() == 20_001
+    assert await client.get("counter") == "11"
+
+
+@dfly_args({"proactor_threads": 4})
+async def test_checkpoint_then_log_restores_data(df_factory: DflyInstanceFactory, tmp_path):
+    df = df_factory.create(aof=True, dir=str(tmp_path), dbfilename="dump-{{timestamp}}")
+    df.start()
+    client = df.client()
+
+    seeder = SeederV2(key_target=100_000)
+    await seeder.run(client, target_deviation=0.1)
+    await client.execute_command("SAVE")
+    assert "checkpoint 1\n" in read_manifest(tmp_path)
+    at_cut = await SeederV2.capture(client)
+
+    # Changes after the cut live only in the log, on top of the base.
+    await seeder.run(client, target_ops=50_000)
+    before = await SeederV2.capture(client)
+    assert before != at_cut
+    df.stop()
+
+    df.start()
+    assert await SeederV2.capture(df.client()) == before

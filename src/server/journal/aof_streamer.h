@@ -46,6 +46,12 @@ class AofStreamer : public journal::JournalConsumerInterface {
   // Called by the heartbeat, so small records reach the disk.
   void Seal();
 
+  // For a checkpoint's cut: waited on before its global transaction, so Rotate() finds a spare.
+  bool WaitSpareReady();
+  // Switches to the spare segment; never yields. Returns its seq, the cut's segment.
+  std::optional<uint64_t> Rotate();
+  void OnCheckpoint(uint64_t cut_seq);
+
   Stats GetStats() const;
 
  private:
