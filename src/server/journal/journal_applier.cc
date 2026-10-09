@@ -34,7 +34,7 @@ bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
   }
 
   TxId txid = tx_data.txid;
-  VLOG(2) << "Execute txid: " << txid << " waiting for all flows";
+  VLOG(2) << "Execute txid: " << txid << " waiting for data in all shards";
   return multi_shard_exe_->Execute(txid, [&] { return Execute(std::move(tx_data)); }) &&
          cntx->IsRunning();
 }
