@@ -6,6 +6,7 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
+#include <sys/ioctl.h>
 
 #include "base/cycle_clock.h"
 #include "base/flags.h"
@@ -19,6 +20,10 @@
 #include "server/journal/tx_executor.h"
 #include "server/main_service.h"
 #include "util/fibers/synchronization.h"
+
+#ifdef __linux__
+#include "util/fibers/uring_socket.h"
+#endif
 
 namespace rng = std::ranges;
 
@@ -166,26 +171,50 @@ class ClusterShardMigration {
     return last_attempt_.load();
   }
 
-  // Returns a diagnostic description if the flow is reading but got no entries for idle_timeout,
-  // otherwise an empty string.
+  // Called by the watchdog about once per second. Returns a diagnostic description if the flow
+  // got no entries for idle_timeout, or if it reads slowly while data waits in its kernel receive
+  // queue. Otherwise returns an empty string.
   std::string GetStallInfo(absl::Duration idle_timeout) ABSL_LOCKS_EXCLUDED(mu_) {
+    constexpr int kBacklogBytes = 64 * 1024;
+    constexpr uint64_t kSlowEntriesPerCheck = 100;
+
     util::fb2::LockGuard lk(mu_);
     if (socket_ == nullptr || pause_) {
       return {};
     }
 
-    const uint64_t idle_usec = base::CycleClock::ToUsec(
-        base::CycleClock::Now() - last_read_cycles_.load(memory_order_relaxed));
-    if (absl::Microseconds(idle_usec) < idle_timeout) {
-      return {};
-    }
+    const uint64_t entries = entries_read_.load(memory_order_relaxed);
+    const uint64_t entries_since_check = entries - entries_at_last_check_;
+    entries_at_last_check_ = entries;
 
-    const int fd = socket_->native_handle();
-    return absl::StrCat("shard ", source_shard_id_, " idle_ms: ", idle_usec / 1000,
-                        " entries_read: ", entries_read_.load(memory_order_relaxed),
-                        " last_attempt: ", last_attempt_.load(),
-                        " thread: ", socket_->proactor()->GetPoolIndex(), " socket: {",
-                        GetSocketQueuesInfo(fd), "} ", GetSocketInfo(fd));
+    // Run on the socket thread, so the socket's receive state is read without races.
+    return socket_->proactor()->Await([&]() -> std::string {
+      const uint64_t idle_usec = base::CycleClock::ToUsec(
+          base::CycleClock::Now() - last_read_cycles_.load(memory_order_relaxed));
+      const int fd = socket_->native_handle();
+      int inq = -1;
+      ioctl(fd, FIONREAD, &inq);
+
+      const bool idle = absl::Microseconds(idle_usec) >= idle_timeout;
+      const bool slow_with_backlog =
+          inq >= kBacklogBytes && entries_since_check < kSlowEntriesPerCheck;
+      if (!idle && !slow_with_backlog) {
+        return {};
+      }
+
+      int has_recv_data = -1;
+#ifdef __linux__
+      if (auto* uring_socket = dynamic_cast<util::fb2::UringSocket*>(socket_)) {
+        has_recv_data = uring_socket->HasRecvData();
+      }
+#endif
+      return absl::StrCat(
+          "shard ", source_shard_id_, " reason: ", idle ? "idle" : "slow_with_backlog",
+          " idle_ms: ", idle_usec / 1000, " entries_read: ", entries,
+          " entries_since_check: ", entries_since_check, " has_recv_data: ", has_recv_data,
+          " last_attempt: ", last_attempt_.load(), " thread: ", socket_->proactor()->GetPoolIndex(),
+          " socket: {", GetSocketQueuesInfo(fd), "} ", GetSocketInfo(fd));
+    });
   }
 
  private:
@@ -228,6 +257,7 @@ class ClusterShardMigration {
   // Stall diagnostics, read by IncomingSlotMigration's watchdog.
   atomic_uint64_t last_read_cycles_{0};
   atomic_uint64_t entries_read_{0};
+  uint64_t entries_at_last_check_ ABSL_GUARDED_BY(mu_) = 0;
 };
 
 IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots)
