@@ -138,6 +138,8 @@ void DbTable::Clear() {
   stats = DbTableStats{};
   expire_cursor = PrimeTable::Cursor::end();
   segment_defrag_cursor = PrimeTable::Cursor::end();
+  pending_tiered_deltas.clear();
+  open_autoupdater_keys.clear();
 }
 
 PrimeIterator DbTable::Launder(PrimeIterator it, string_view key) {
