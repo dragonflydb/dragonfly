@@ -174,7 +174,14 @@ OpResult<ScanOpts> ScanOpts::TryFrom(const facade::ParsedArgs& args, bool allow_
       If(&ScanOpts::allow_novalues, Exist("NOVALUES", &ScanOpts::novalues)),
       Action(
           "COUNT",
-          +[](CmdArgParser* p, ScanOpts* o) { o->limit = max(size_t{1}, p->Next<size_t>()); }),
+          +[](CmdArgParser* p, ScanOpts* o) {
+            size_t count = p->Next<size_t>();
+            if (count == 0) {
+              p->ReportCustom("COUNT must be > 0");
+              return;
+            }
+            o->limit = count;
+          }),
       Action(
           "MATCH",
           +[](CmdArgParser* p, ScanOpts* o) {
