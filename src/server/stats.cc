@@ -51,9 +51,10 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
 }
 
 SearchStats& SearchStats::operator+=(const SearchStats& o) {
-  static_assert(sizeof(SearchStats) == 24);
+  static_assert(sizeof(SearchStats) == 32);
   ADD(used_memory);
   ADD(num_entries);
+  ADD(stale_doc_ids);
 
   // Different shards could have inconsistent num_indices values during concurrent operations.
   // This can happen on concurrent index creation.

@@ -48,6 +48,11 @@ string ToLower(string_view word) {
   return IsAllAscii(word) ? absl::AsciiStrToLower(word) : una::cases::to_lowercase_utf8(word);
 }
 
+// Synonym group tokens carry a leading space (Synonyms::GetGroupTokens); no real word does.
+bool IsGroupSentinel(string_view token) {
+  return !token.empty() && token.front() == ' ';
+}
+
 constexpr std::array<bool, 256> MakeSepTable() {
   std::array<bool, 256> t{};
   for (unsigned char c : std::string_view{" \t\n\r\v\f,.<>{}[]\"':;!@#$%^&*()-+=~?/|`"})
@@ -148,8 +153,8 @@ void TokenizeWords(std::string_view text, const TextIndex::StopWords& stopwords,
       return;
     uint32_t pos = ++(*pos_counter);
     if (synonyms) {
-      if (auto group_id = synonyms->GetGroupToken(word_lc); group_id)
-        emit(*group_id, pos);
+      for (const std::string& group_token : synonyms->GetGroupTokens(word_lc))
+        emit(group_token, pos);
     }
     if (stemmer) {
       std::string stem = stemmer->Stem(word_lc);
@@ -184,21 +189,6 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
   }
 }
 
-// Literal characters of `pat` up to the first unescaped `*` or `?`. Any term matching `pat` must
-// start with this, so it bounds the dictionary range that has to be scanned.
-string GlobLiteralPrefix(string_view pat) {
-  string prefix;
-  for (size_t i = 0; i < pat.size(); ++i) {
-    char c = pat[i];
-    if (c == '*' || c == '?')
-      break;
-    if (c == '\\' && i + 1 < pat.size())
-      c = pat[++i];
-    prefix.push_back(c);
-  }
-  return prefix;
-}
-
 // Longest run of literal characters in `pat` (bounded by unescaped `*`/`?`), with `\` escapes
 // resolved. Every term matching `pat` must contain this run as a contiguous substring, which the
 // suffix trie can test for a cheap early-exit.
@@ -222,6 +212,8 @@ string GlobLongestLiteralSegment(string_view pat) {
   flush();
   return best;
 }
+
+}  // namespace
 
 // Matches `text` against glob `pat`: `*` = any run (incl. empty), `?` = exactly one character,
 // `\` escapes the next character to a literal. Two-pointer scan with backtracking to the last `*`.
@@ -262,6 +254,23 @@ bool GlobMatch(string_view text, string_view pat) {
     ++p;
   return p == pat.size();
 }
+
+// Literal characters of `pat` up to the first unescaped `*` or `?`. Any term matching `pat` must
+// start with this, so it bounds the dictionary range that has to be scanned.
+string GlobLiteralPrefix(string_view pat) {
+  string prefix;
+  for (size_t i = 0; i < pat.size(); ++i) {
+    char c = pat[i];
+    if (c == '*' || c == '?')
+      break;
+    if (c == '\\' && i + 1 < pat.size())
+      c = pat[++i];
+    prefix.push_back(c);
+  }
+  return prefix;
+}
+
+namespace {
 
 // Haversine with earth radius in meters. Used to calculate distance.
 boost::geometry::strategy::distance::haversine haversine_(6372797.560856);
@@ -499,7 +508,8 @@ void BaseStringIndex<C>::MatchPrefix(std::string_view prefix,
   // TODO(vlad): Use right iterator to avoid string comparison?
   for (auto it = entries_.lower_bound(prefix);
        it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
-    cb(&(*it).second);
+    if (!IsGroupSentinel((*it).first))
+      cb(&(*it).second);
   }
 }
 
@@ -518,7 +528,7 @@ void BaseStringIndex<C>::MatchSuffix(std::string_view suffix,
 
   // Otherwise, iterate over all entries and look for the suffix
   for (const auto& entry : entries_) {
-    if (entry.first.ends_with(suffix))
+    if (!IsGroupSentinel(entry.first) && entry.first.ends_with(suffix))
       cb(&entry.second);
   }
 }
@@ -539,7 +549,7 @@ void BaseStringIndex<C>::MatchInfix(std::string_view infix,
 
   // Otherwise, iterate over all entries and check if it contains the entry
   for (const auto& entry : entries_) {
-    if (entry.first.find(infix) != string::npos)
+    if (!IsGroupSentinel(entry.first) && entry.first.find(infix) != string::npos)
       cb(&entry.second);
   }
 }
@@ -553,7 +563,8 @@ void BaseStringIndex<C>::MatchPrefixWithTerm(
 
   for (auto it = entries_.lower_bound(prefix);
        it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
-    cb((*it).first, &(*it).second);
+    if (!IsGroupSentinel((*it).first))
+      cb((*it).first, &(*it).second);
   }
 }
 
@@ -572,7 +583,7 @@ void BaseStringIndex<C>::MatchSuffixWithTerm(
   }
 
   for (const auto& entry : entries_) {
-    if (entry.first.ends_with(suffix))
+    if (!IsGroupSentinel(entry.first) && entry.first.ends_with(suffix))
       cb(entry.first, &entry.second);
   }
 }
@@ -593,7 +604,7 @@ void BaseStringIndex<C>::MatchInfixWithTerm(
   }
 
   for (const auto& entry : entries_) {
-    if (entry.first.find(infix) != string::npos)
+    if (!IsGroupSentinel(entry.first) && entry.first.find(infix) != string::npos)
       cb(entry.first, &entry.second);
   }
 }
@@ -620,7 +631,7 @@ void BaseStringIndex<C>::MatchWildcardWithTerm(
   string prefix = GlobLiteralPrefix(pattern);
   for (auto it = entries_.lower_bound(prefix);
        it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
-    if (GlobMatch((*it).first, pattern))
+    if (!IsGroupSentinel((*it).first) && GlobMatch((*it).first, pattern))
       cb((*it).first, &(*it).second);
   }
 }
@@ -668,7 +679,8 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
   if (suffix_trie_) {
     absl::flat_hash_set<std::string> token_keys;
     for (const auto& [token, _] : tokens)
-      token_keys.insert(token);
+      if (!IsGroupSentinel(token))
+        token_keys.insert(token);
     IterateAllSuffixes(token_keys,
                        [&](string_view str) { GetOrCreate(&*suffix_trie_, str)->Insert(id); });
   }
@@ -701,7 +713,8 @@ void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_vi
   if (suffix_trie_) {
     absl::flat_hash_set<std::string> token_keys;
     for (const auto& [token, _] : tokens)
-      token_keys.insert(token);
+      if (!IsGroupSentinel(token))
+        token_keys.insert(token);
     IterateAllSuffixes(token_keys, [&](string_view str) { Remove(&*suffix_trie_, id, str); });
   }
 }
@@ -754,11 +767,10 @@ StringOrView BaseStringIndex<C>::NormalizeQueryWord(std::string_view query) cons
 
 template <typename C>
 StringOrView BaseStringIndex<C>::NormalizeForExactQuery(std::string_view query) const {
-  if (case_sensitive_)
+  if (case_sensitive_ || IsGroupSentinel(query))
     return StringOrView::FromView(query);
   std::string lc = ToLower(query);
-  // Synonym group tokens are sentinels prefixed with a space by GetGroupToken; never stem them.
-  if (stemmer_ && !lc.empty() && lc.front() != ' ')
+  if (stemmer_)
     lc = stemmer_->Stem(lc);
   return StringOrView::FromString(std::move(lc));
 }

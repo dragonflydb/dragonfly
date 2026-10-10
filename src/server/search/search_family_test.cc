@@ -6,12 +6,14 @@
 
 #include <absl/functional/function_ref.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 #include <absl/types/span.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <map>
 #include <set>
 #include <string_view>
 
@@ -401,6 +403,11 @@ MATCHER_P(IsUnordArrayWithSizeMatcher, expected, "") {
 
 template <typename... Matchers> auto IsUnordArrayWithSize(Matchers... matchers) {
   return IsUnordArrayWithSizeMatcher(std::make_tuple(matchers...));
+}
+
+// Ids of a NOCONTENT reply ([total, id, id, ...]), in any order.
+template <typename... Args> auto AreNoContentDocIds(Args... args) {
+  return IsUnordArrayWithSize(Eq(args)...);
 }
 
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
@@ -3769,6 +3776,210 @@ TEST_F(SearchFamilyTest, PrefixSearchWithSynonyms) {
   // Check that prefix search for mac* only finds macintosh, not apple
   resp = Run({"FT.SEARCH", "prefix_index", "mac*"});
   EXPECT_THAT(resp, AreDocIds("doc:6"));  // Should only find macintosh
+}
+
+// A term in several synonym groups must be reachable through every group. Deleting the document
+// after the group map was re-laid out (many new groups) must leave no posting behind: a stale
+// DocId used to reach DocKeyIndex::Get on the WITHSCORES and NOCONTENT paths.
+TEST_F(SearchFamilyTest, SynonymTermInSeveralGroupsDeleteAfterRehash) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "sidx", "ON", "HASH", "PREFIX", "1", "sd", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", "syn1", "100", "hi", "hey"}), "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", "syn2", "100", "world", "earth"}), "OK");
+  EXPECT_THAT(Run({"HSET", "sd1", "title", "100"}), IntArg(1));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "NOCONTENT"}), AreNoContentDocIds("sd1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "world", "NOCONTENT"}), AreNoContentDocIds("sd1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hey", "WITHSCORES", "NOCONTENT"}),
+              RespElementsAre(IntArg(1), "sd1", testing::_));
+  EXPECT_THAT(Run({"FT.SYNDUMP", "sidx"}),
+              IsUnordArray("100", IsArray("syn1", "syn2"), "hi", IsArray("syn1"), "hey",
+                           IsArray("syn1"), "world", IsArray("syn2"), "earth", IsArray("syn2")));
+
+  for (int i = 0; i < 300; i++) {
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", absl::StrCat("g", i), absl::StrCat("term", i)}), "OK");
+    if (i % 25 == 24) {
+      EXPECT_THAT(Run({"DEL", "sd1"}), IntArg(1));
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "WITHSCORES"}), kNoResults);
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "world", "NOCONTENT"}), kNoResults);
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hey", "WITHSCORES", "NOCONTENT"}), kNoResults);
+      EXPECT_THAT(Run({"HSET", "sd1", "title", "100"}), IntArg(1));
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "earth", "NOCONTENT"}), AreNoContentDocIds("sd1"));
+    }
+  }
+  EXPECT_THAT(Run({"DEL", "sd1"}), IntArg(1));
+  // The freed DocId is reused by the next document; it must not surface for the old terms.
+  EXPECT_THAT(Run({"HSET", "sd2", "title", "unrelated"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "WITHSCORES"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "earth", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "unrelated", "NOCONTENT"}), AreNoContentDocIds("sd2"));
+}
+
+// Every shard must reach its documents through every group of a multi-group term (group ids keep
+// their case), also after the index and its synonyms were reloaded from a snapshot.
+TEST_F(SearchFamilyTest, SynonymMultiGroupTermAcrossShardsAndReload) {
+  InitWithDbFilename();
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "G1", "shared", "one"}), "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g2", "shared", "two"}), "OK");
+  for (int i = 0; i < 12; i++)
+    EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", "shared"}), IntArg(1));
+
+  auto check = [this] {
+    for (string_view query : {"one", "two", "shared"})
+      EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "LIMIT", "0", "100"}),
+                  AreNoContentDocIds("d:0", "d:1", "d:2", "d:3", "d:4", "d:5", "d:6", "d:7", "d:8",
+                                     "d:9", "d:10", "d:11"))
+          << query;
+    EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}), IsUnordArray("shared", IsArray("G1", "g2"), "one",
+                                                         IsArray("G1"), "two", IsArray("g2")));
+  };
+  check();
+
+  EXPECT_EQ(Run({"SAVE", "DF"}), "OK");
+  EXPECT_EQ(Run({"DEBUG", "RELOAD"}), "OK");
+  WaitForIndexReady("idx");
+  check();
+}
+
+// BM25 scores must not depend on the shard count: every shard records the stats of the cursors
+// it may open, including synonym group tokens reached through affix queries and phrase terms.
+TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
+  auto scores = [this] {
+    EXPECT_EQ(
+        Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+        "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "shared", "one"}), "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g2", "shared", "two"}), "OK");
+    const vector<string> titles{"one",          "shared",     "hello world", "hello there world",
+                                "two",          "one shared", "world",       "two words",
+                                "running fast", "runs fast",  "fast",        "run fast",
+                                "run slow"};
+    for (size_t i = 0; i < titles.size(); i++)
+      EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", titles[i]}), IntArg(1));
+
+    std::map<string, double> out;
+    for (string_view query :
+         {"on*", "*ne", "*har*", "one", "shared", "two", "\"hello world\"", "one | two",
+          "@title:(one shared)", "\"running fast\"", "running | \"running fast\"",
+          "\"running fast\" | running", "runn*", "runn* | \"running fast\"",
+          "\"running fast\" | runn*", "ON*", "w'*HAR*'", "w'on*'", "w'sh?red'"}) {
+      auto resp = Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD",
+                       "LIMIT", "0", "20"});
+      const auto& vals = resp.GetVec();
+      for (size_t i = 1; i + 1 < vals.size(); i += 2)
+        out[absl::StrCat(query, " ", vals[i].GetString())] = std::stod(vals[i + 1].GetString());
+    }
+    return out;
+  };
+
+  auto multi_shard = scores();  // the fixture runs 2 shards by default
+  SetTestFlag("num_shards", "1");
+  ResetService();
+  auto single_shard = scores();
+  SetTestFlag("num_shards", "2");
+
+  ASSERT_EQ(multi_shard.size(), single_shard.size());
+  EXPECT_GT(single_shard.size(), 15u);
+  for (const auto& [key, score] : single_shard) {
+    ASSERT_TRUE(multi_shard.count(key)) << key;
+    EXPECT_NEAR(multi_shard[key], score, 1e-4) << key;
+  }
+}
+
+// A query whose only text term is absent from the index still runs the scorer, so equal scores
+// are tie-broken by key and LIMIT returns a prefix of the same ordering.
+TEST_F(SearchFamilyTest, AbsentTermKeepsScoreOrder) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_THAT(Run({"HSET", "t:z", "title", "last"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "t:a", "title", "first"}), IntArg(1));
+  for (string_view query : {"~absent", "-absent"}) {
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "1"}),
+                RespElementsAre(IntArg(2), "t:a", testing::_))
+        << query;
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "2"}),
+                RespElementsAre(IntArg(2), "t:a", testing::_, "t:z", testing::_))
+        << query;
+  }
+}
+
+// A hash field with a TTL expires lazily without re-indexing the document, so its posting lists
+// keep a freed DocId once the key is gone. Searches must skip such ids and count them.
+TEST_F(SearchFamilyTest, FieldExpiryStalePostingIsSkipped) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  EXPECT_THAT(Run({"HSET", "d:1", "title", "hello"}), IntArg(1));
+  EXPECT_THAT(Run({"FIELDEXPIRE", "d:1", "1", "title"}), RespElementsAre(IntArg(1)));
+  AdvanceTime(2000);
+  EXPECT_THAT(Run({"HGET", "d:1", "title"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"EXISTS", "d:1"}), IntArg(0));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "WITHSCORES"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), kNoResults);
+  EXPECT_GE(GetMetrics().search_stats.stale_doc_ids, 2u);
+
+  // The freed DocId is reused by d:2 and found through its own term. The stale "hello" posting
+  // now resolves to d:2; dropping it needs content-independent removal (follow-up).
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "other"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "other", "NOCONTENT"}), AreNoContentDocIds("d:2"));
+}
+
+TEST_F(SearchFamilyTest, FtAlterKeepsSynonyms) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "car", "automobile"}), "OK");
+  EXPECT_THAT(Run({"HSET", "d:1", "title", "car"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "automobile"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}), AreNoContentDocIds("d:1", "d:2"));
+
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "extra", "TEXT"}), "OK");
+  WaitForIndexReady("idx");
+
+  EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}),
+              IsUnordArray("car", IsArray("g1"), "automobile", IsArray("g1")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}), AreNoContentDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"HSET", "d:3", "title", "automobile"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}),
+              AreNoContentDocIds("d:1", "d:2", "d:3"));
+}
+
+// FT.SYNUPDATE must rebuild every document containing the term, including documents stemmed by
+// a per-document LANGUAGE_FIELD stemmer whose stem differs from the index default stem.
+TEST_F(SearchFamilyTest, SynonymRebuildFindsPerDocStemmedDocs) {
+  EXPECT_EQ(Run({"FT.CREATE", "lf_idx", "ON", "HASH", "LANGUAGE", "english", "LANGUAGE_FIELD",
+                 "lang", "SCHEMA", "body", "TEXT", "lang", "TEXT", "NOSTEM"}),
+            "OK");
+  // English stems "running" to "run"; the German stemmer leaves it unchanged.
+  EXPECT_THAT(Run({"HSET", "d:de", "body", "running", "lang", "german"}), IntArg(2));
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "lf_idx", "g1", "running", "sprint"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "sprint", "NOCONTENT"}), AreNoContentDocIds("d:de"));
+  EXPECT_THAT(Run({"DEL", "d:de"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "sprint", "NOCONTENT"}), kNoResults);
+}
+
+// Synonym group sentinels are internal tokens: affix queries must never match them.
+TEST_F(SearchFamilyTest, SynonymSentinelNotMatchedByAffixQueries) {
+  for (bool with_trie : {false, true}) {
+    vector<string> create{"FT.CREATE", "sidx", "ON",     "HASH",  "PREFIX",
+                          "1",         "d:",   "SCHEMA", "title", "TEXT"};
+    if (with_trie)
+      create.push_back("WITHSUFFIXTRIE");
+    EXPECT_EQ(Run(absl::MakeSpan(create)), "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", "syn1", "hello", "hi"}), "OK");
+    EXPECT_THAT(Run({"HSET", "d:1", "title", "hello"}), IntArg(1));
+
+    EXPECT_THAT(Run({"FT.SEARCH", "sidx", "*n1", "NOCONTENT"}), kNoResults);
+    EXPECT_THAT(Run({"FT.SEARCH", "sidx", "*yn*", "NOCONTENT"}), kNoResults);
+    EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "NOCONTENT"}), AreNoContentDocIds("d:1"));
+
+    EXPECT_EQ(Run({"FT.DROPINDEX", "sidx"}), "OK");
+    EXPECT_THAT(Run({"DEL", "d:1"}), IntArg(1));
+  }
 }
 
 TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {

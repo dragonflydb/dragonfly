@@ -467,6 +467,15 @@ class ShardDocIndex {
   void RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
                        const std::vector<std::string_view>& terms);
 
+  // Stops the builder if it is still running. Joins its fiber: never call it from a transaction
+  // callback (see CmdFtDropIndex).
+  void CancelBuilder();
+
+  // Freed DocIds met in posting lists and skipped by searches (INFO search_stale_doc_ids).
+  size_t stale_doc_ids() const {
+    return stale_doc_ids_;
+  }
+
   // Public access to key index for direct operations (e.g., when dropping index with DD)
   // TODO: replace with keys() view
   const DocKeyIndex& key_index() const {
@@ -568,9 +577,6 @@ class ShardDocIndex {
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);
 
-  // Cancel builder if in progress
-  void CancelBuilder();
-
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
 
@@ -593,6 +599,7 @@ class ShardDocIndex {
 
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
+  mutable size_t stale_doc_ids_ = 0;  // freed DocIds met in posting lists by Search/SearchIds
   Synonyms synonyms_;
 
   std::unique_ptr<search::IndexBuilder> builder_;
@@ -621,7 +628,8 @@ class ShardDocIndices {
 
   // Init index: create shard local state for given index with given name.
   void InitIndex(const OpArgs& op_args, std::string_view name,
-                 std::shared_ptr<const DocIndex> index, bool is_journal = false);
+                 std::shared_ptr<const DocIndex> index, bool is_journal = false,
+                 Synonyms synonyms = {});
 
   // Drop index, return the dropped index if it existed or nullptr otherwise
   std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);
