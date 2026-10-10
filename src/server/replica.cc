@@ -610,10 +610,9 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     // Unblock this function.
     sync_block->Cancel();
 
-    // Make sure the flows are not in a state transition
-    lock_guard lk{flows_op_mu_};
-
-    // Unblock all sockets.
+    // Unblock all sockets. Do not take flows_op_mu_ here: the flows may be blocked in the
+    // DFLY FLOW handshake, and only shutting down their sockets can unblock them (#1468).
+    // Cancel() is safe to call concurrently with StartSyncFlow().
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_)
       flow->Cancel();
@@ -671,10 +670,6 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     if (last_journal_LSNs_) {
       ++psync_attempts_;
     }
-
-    // Lock to prevent the error handler from running instantly
-    // while the flows are in a mixed state.
-    lock_guard lk{flows_op_mu_};
 
     shard_set->pool()->AwaitFiberOnAll(std::move(shard_cb));
     if (last_journal_LSNs_) {

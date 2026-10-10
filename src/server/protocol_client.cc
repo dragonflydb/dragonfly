@@ -241,6 +241,13 @@ error_code ProtocolClient::ConnectAndAuth(std::chrono::milliseconds connect_time
     sock_->set_timeout(timeout);
   }
 
+  // The error handler may have shut down sock_ before it was connected, which has no effect on
+  // the connection established afterwards. Check again so that we do not block on it.
+  if (!cntx->IsRunning()) {
+    std::error_code ec = cntx->GetError();
+    return ec ? ec : make_error_code(errc::operation_canceled);
+  }
+
   // For idle connections we enable TCP keepalive to prevent disconnects.
   int yes = 1;
   if (setsockopt(sock_->native_handle(), SOL_SOCKET, SO_KEEPALIVE, &yes, sizeof(yes)) == 0) {
