@@ -1697,7 +1697,7 @@ void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult resul
 
 void Transaction::LogJournalOnShard(journal::Entry::Payload&& payload) const {
   journal::RecordEntry(txid_, journal::Op::COMMAND, db_index_,
-                       unique_slot_checker_.GetUniqueSlotId(), std::move(payload));
+                       unique_slot_checker_.GetUniqueSlotId(), std::move(payload), time_now_ms_);
 }
 
 void Transaction::ReviveAutoJournal() {
