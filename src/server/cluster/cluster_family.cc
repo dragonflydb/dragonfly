@@ -532,7 +532,7 @@ void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
 
   trans->Execute(
       [&slots_ranges, &args_view](Transaction* t, EngineShard* shard) {
-        namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
+        t->GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
 
         // TODO: Break slot migration upon FLUSHSLOTS
         if (shard->journal()) {
@@ -695,6 +695,10 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
+  auto* server_cntx = cmd_cntx->server_conn_cntx();
+  Namespace* ns =
+      (server_cntx && server_cntx->ns) ? server_cntx->ns : &namespaces->GetDefaultNamespace();
+
   fb2::Mutex mu;
 
   auto cb = [&](auto*) ABSL_LOCKS_EXCLUDED(mu) {
@@ -704,7 +708,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
 
     util::fb2::LockGuard lk(mu);
     for (auto& [slot, data] : slots_stats) {
-      data += namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).GetSlotStats(slot);
+      data += ns->GetDbSlice(shard->shard_id()).GetSlotStats(slot);
     }
   };
 

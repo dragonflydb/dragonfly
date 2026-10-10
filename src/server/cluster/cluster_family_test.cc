@@ -1370,6 +1370,42 @@ TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
   }
 }
 
+TEST_F(ClusterFamilyTest, FlushSlotsNamespaceAware) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  EXPECT_EQ(
+      Run({"ACL", "SETUSER", "tenant_user", "ON", ">pass", "+@all", "NAMESPACE:tenant"}),
+      "OK");
+
+  EXPECT_EQ(Run({"SET", "k1", "val_default"}), "OK");
+  EXPECT_EQ(Run({"GET", "k1"}), "val_default");
+  const string slot = absl::StrCat(CheckedInt({"CLUSTER", "KEYSLOT", "k1"}));
+
+  auto default_slot_info = RunPrivileged({"DFLYCLUSTER", "GETSLOTINFO", "SLOTS", slot});
+  auto default_key_count = default_slot_info.GetVec()[0].GetVec()[2].GetInt();
+  EXPECT_EQ(default_key_count, 1);
+
+  EXPECT_EQ(Run({"AUTH", "tenant_user", "pass"}), "OK");
+
+  EXPECT_THAT(Run({"GET", "k1"}), ArgType(RespExpr::NIL));
+
+  EXPECT_EQ(Run({"SET", "k1", "val_tenant"}), "OK");
+  EXPECT_EQ(Run({"GET", "k1"}), "val_tenant");
+
+  auto tenant_slot_info = RunPrivileged({"DFLYCLUSTER", "GETSLOTINFO", "SLOTS", slot});
+  auto tenant_key_count = tenant_slot_info.GetVec()[0].GetVec()[2].GetInt();
+  EXPECT_EQ(tenant_key_count, 1);
+
+  EXPECT_EQ(RunPrivileged({"DFLYCLUSTER", "FLUSHSLOTS", slot, slot}), "OK");
+
+  EXPECT_THAT(Run({"GET", "k1"}), ArgType(RespExpr::NIL));
+
+  EXPECT_EQ(Run({"AUTH", "default", ""}), "OK");
+
+  EXPECT_EQ(Run({"GET", "k1"}), "val_default");
+}
+
+
 // Regression: FlushSlots launches an async fiber. Entries inserted after FlushSlots returns
 // but before the fiber runs must survive, because they were created after the flush was
 // initiated. The bug was that RegisterOnChange (which captures the version threshold) ran
