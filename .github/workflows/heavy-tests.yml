@@ -31,6 +31,11 @@ on:
         required: false
         default: false
         type: boolean
+      df-runtime-flags:
+        description: "Optional space-separated flags passed to every Dragonfly process. Example: uring_recv_poll_first=false"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   build:
@@ -112,6 +117,7 @@ jobs:
           iterations: ${{ inputs.iterations || '1' }}
           max-tests-run-time: ${{ inputs['max-tests-run-time'] || '' }}
           continue-on-test-failure: ${{ inputs['continue-on-test-failure'] || 'false' }}
+          df-runtime-flags: ${{ inputs['df-runtime-flags'] || '' }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
