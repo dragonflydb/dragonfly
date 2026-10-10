@@ -14,6 +14,7 @@
 #include "base/cycle_clock.h"
 #include "base/flags.h"
 #include "base/logging.h"
+#include "facade/socket_utils.h"
 #include "server/server_state.h"
 
 using facade::operator""_MB;
@@ -107,9 +108,16 @@ std::string BufferedSocketWriter::FormatInternalState() const {
       base::CycleClock::ToUsec(base::CycleClock::Now() - last_async_write_time_) / 1000;
   return absl::StrCat(
       "pending_buf_size:", pending_buf_.Size(), " in_flight_bytes:", in_flight_bytes_,
-      " total_sent:", total_sent_, " throttle_count:", throttle_count_,
+      " total_sent:", total_sent_, " total_completed:", total_completed_,
+      " completions:", completions_, " throttle_count:", throttle_count_,
       " total_throttle_wait_usec:", total_throttle_wait_usec_,
       " throttle_waiters:", throttle_waiters_, " last_async_time_ms_ago:", last_async_ms_ago);
+}
+
+std::string BufferedSocketWriter::FormatStallState() const {
+  int fd = dest_ ? dest_->native_handle() : -1;
+  return absl::StrCat(FormatInternalState(), " running:", cntx_->IsRunning(), " socket: {",
+                      GetSocketQueuesInfo(fd), "} ", GetSocketInfo(fd));
 }
 
 void BufferedSocketWriter::Write(std::string str) {
@@ -172,6 +180,8 @@ void BufferedSocketWriter::OnCompletion(std::error_code ec, size_t len) {
   DCHECK_EQ(in_flight_bytes_, len);
 
   DVLOG(3) << "Completing " << in_flight_bytes_;
+  total_completed_ += in_flight_bytes_;
+  ++completions_;
   in_flight_bytes_ = 0;
   pending_buf_.Pop();
   if (cntx_->IsRunning()) {
@@ -226,7 +236,7 @@ void BufferedSocketWriter::Throttle() {
           log_start = current;
           LOG(WARNING) << "Waiting for "
                        << chrono::duration_cast<chrono::milliseconds>(current - start).count()
-                       << "ms " << ThisFiber::GetName();
+                       << "ms " << ThisFiber::GetName() << " " << FormatStallState();
         }
 
         return false;
@@ -238,7 +248,8 @@ void BufferedSocketWriter::Throttle() {
       chrono::duration_cast<chrono::microseconds>(chrono::steady_clock::now() - start).count();
   if (status == std::cv_status::timeout) {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
-                 << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
+                 << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_ << " "
+                 << FormatStallState();
     LogTcpSocketDiagnostics(dest_);
     cntx_->ReportError("BufferedSocketWriter write operation timeout");
   }

@@ -4,6 +4,12 @@
 schedule. To run them manually, use **Actions** > select one of the two workflow > **Run workflow** to choose Pytest
 or GoogleTest inputs. You can also choose your own branch.
 
+Regression workflows exclude tests marked `large`. Those run only in `Heavy Tests`
+on `CI-LARGE-86` and `CI-LARGE-ARM` runners. Its manual trigger accepts the Pytest
+inputs and common inputs below (no GoogleTest inputs), which is the way to repeat a
+flaky large test. Its `max-tests-run-time` defaults to `300` so that failed test logs
+are still uploaded before the six-hour job limit.
+
 ## Execution Model
 
 - Scheduled runs execute Pytest once and do not build or run GoogleTests.

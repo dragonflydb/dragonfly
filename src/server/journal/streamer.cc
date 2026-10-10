@@ -241,8 +241,22 @@ void SlotMigrationStreamer::PaceTraversal(bool done) {
            cpu_aggregator_.IsOverloaded(absl::GetFlag(FLAGS_migration_buckets_cpu_budget));
   };
 
+  const auto stall_start = chrono::steady_clock::now();
+  auto next_stall_log = stall_start + 1s;
   while (base_cntx_->IsRunning() && should_stall()) {
     ThisFiber::SleepFor(300us);
+
+    // Diagnostics for stalls that never resolve: pacing stops below output_limit, so Throttle()
+    // never times out here. Logs once per second per stalled shard.
+    if (auto now = chrono::steady_clock::now(); now > next_stall_log) {
+      next_stall_log = now + 1s;
+      LOG(WARNING) << "Migration traversal stalled for "
+                   << chrono::duration_cast<chrono::milliseconds>(now - stall_start).count()
+                   << "ms, shard " << db_slice_->shard_id() << ", cpu_overloaded: "
+                   << cpu_aggregator_.IsOverloaded(
+                          absl::GetFlag(FLAGS_migration_buckets_cpu_budget))
+                   << ", " << writer_.FormatStallState();
+    }
 
     // We have a design bug in RealTimeAggregator that resets it measurements only when
     // the next sample is taken. So we add this sample to ensure cpu_aggregator_

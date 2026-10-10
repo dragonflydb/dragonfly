@@ -60,6 +60,7 @@ class ClusterShardMigration {
       }
       is_finished_ = true;
       socket_ = source;
+      last_read_cycles_.store(base::CycleClock::Now(), memory_order_relaxed);
     }
 
     absl::Cleanup cleanup([this]() ABSL_LOCKS_EXCLUDED(mu_) {
@@ -88,6 +89,7 @@ class ClusterShardMigration {
         }
         break;
       }
+      OnEntryRead();
 
       while (tx_data.opcode == journal::Op::LSN) {
         VLOG(2) << "Attempt to finalize flow " << source_shard_id_ << " attempt " << tx_data.lsn;
@@ -98,6 +100,7 @@ class ClusterShardMigration {
           VLOG(1) << "Finalized flow " << source_shard_id_;
           return;
         }
+        OnEntryRead();
 
         if (in_migration_->GetState() == MigrationState::C_FATAL) {
           VLOG(1) << "Flow finalization " << source_shard_id_
@@ -163,7 +166,34 @@ class ClusterShardMigration {
     return last_attempt_.load();
   }
 
+  // Returns a diagnostic description if the flow is reading but got no entries for idle_timeout,
+  // otherwise an empty string.
+  std::string GetStallInfo(absl::Duration idle_timeout) ABSL_LOCKS_EXCLUDED(mu_) {
+    util::fb2::LockGuard lk(mu_);
+    if (socket_ == nullptr || pause_) {
+      return {};
+    }
+
+    const uint64_t idle_usec = base::CycleClock::ToUsec(
+        base::CycleClock::Now() - last_read_cycles_.load(memory_order_relaxed));
+    if (absl::Microseconds(idle_usec) < idle_timeout) {
+      return {};
+    }
+
+    const int fd = socket_->native_handle();
+    return absl::StrCat("shard ", source_shard_id_, " idle_ms: ", idle_usec / 1000,
+                        " entries_read: ", entries_read_.load(memory_order_relaxed),
+                        " last_attempt: ", last_attempt_.load(),
+                        " thread: ", socket_->proactor()->GetPoolIndex(), " socket: {",
+                        GetSocketQueuesInfo(fd), "} ", GetSocketInfo(fd));
+  }
+
  private:
+  void OnEntryRead() {
+    entries_read_.fetch_add(1, memory_order_relaxed);
+    last_read_cycles_.store(base::CycleClock::Now(), memory_order_relaxed);
+  }
+
   std::error_code ExecuteTx(TransactionData&& tx_data, ExecutionState* cntx) {
     if (!cntx->IsRunning()) {
       return {};
@@ -194,6 +224,10 @@ class ClusterShardMigration {
   util::fb2::BlockingCounter bc_;
   atomic_long last_attempt_{-1};
   atomic_bool pause_ = false;
+
+  // Stall diagnostics, read by IncomingSlotMigration's watchdog.
+  atomic_uint64_t last_read_cycles_{0};
+  atomic_uint64_t entries_read_{0};
 };
 
 IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, SlotRanges slots)
@@ -201,6 +235,31 @@ IncomingSlotMigration::IncomingSlotMigration(string source_id, Service* se, Slot
 }
 
 IncomingSlotMigration::~IncomingSlotMigration() {
+  StopStallWatchdog();
+}
+
+void IncomingSlotMigration::StartStallWatchdog() {
+  util::fb2::LockGuard lk(watchdog_mu_);
+  DCHECK(!watchdog_fb_.IsJoinable());
+  watchdog_done_.Reset();
+  watchdog_fb_ = fb2::Fiber("migration_stall_watchdog", [this] {
+    constexpr absl::Duration kIdleTimeout = absl::Seconds(3);
+    while (!watchdog_done_.WaitFor(1s)) {
+      for (auto& flow : shard_flows_) {
+        if (string info = flow->GetStallInfo(kIdleTimeout); !info.empty()) {
+          LOG(WARNING) << "Incoming migration flow from " << source_id_ << " is stalled: " << info;
+        }
+      }
+    }
+  });
+}
+
+void IncomingSlotMigration::StopStallWatchdog() {
+  util::fb2::LockGuard lk(watchdog_mu_);
+  if (watchdog_fb_.IsJoinable()) {
+    watchdog_done_.Notify();
+    watchdog_fb_.Join();
+  }
 }
 
 void IncomingSlotMigration::Pause(bool pause) {
@@ -256,6 +315,8 @@ bool IncomingSlotMigration::Join(long attempt) {
 }
 
 void IncomingSlotMigration::Stop() {
+  StopStallWatchdog();
+
   util::fb2::LockGuard lk(state_mu_);
   string_view log_state = state_ == MigrationState::C_FINISHED ? "Finishing" : "Cancelling";
   LOG(INFO) << log_state << " incoming migration of slots " << slots_.ToString();
@@ -292,15 +353,20 @@ void IncomingSlotMigration::Stop() {
 }
 
 void IncomingSlotMigration::Init(uint32_t shards_num) {
-  util::fb2::LockGuard lk(state_mu_);
-  cntx_.Reset(nullptr);
-  state_ = MigrationState::C_SYNC;
+  // The watchdog iterates shard_flows_, stop it before replacing them.
+  StopStallWatchdog();
+  {
+    util::fb2::LockGuard lk(state_mu_);
+    cntx_.Reset(nullptr);
+    state_ = MigrationState::C_SYNC;
 
-  bc_ = BlockingCounter(shards_num);
-  shard_flows_.resize(shards_num);
-  for (unsigned i = 0; i < shards_num; ++i) {
-    shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this, bc_));
+    bc_ = BlockingCounter(shards_num);
+    shard_flows_.resize(shards_num);
+    for (unsigned i = 0; i < shards_num; ++i) {
+      shard_flows_[i].reset(new ClusterShardMigration(i, &service_, this, bc_));
+    }
   }
+  StartStallWatchdog();
 }
 
 void IncomingSlotMigration::StartFlow(uint32_t shard, util::FiberSocketBase* source) {

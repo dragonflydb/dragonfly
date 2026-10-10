@@ -8,6 +8,10 @@
 #include <sys/socket.h>
 
 #ifdef __linux__
+#include <linux/sockios.h>
+#include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -80,6 +84,42 @@ std::string GetSocketInfo(int socket_fd) {
   }
 #else
   return "socket info not available on this platform";
+#endif
+}
+
+std::string GetSocketQueuesInfo(int socket_fd) {
+  if (socket_fd < 0)
+    return "invalid socket";
+
+#ifdef __linux__
+  // outq: bytes not yet acked by the peer, notsent: bytes not yet sent,
+  // inq: bytes received but not yet read by the application.
+  int outq = -1, notsent = -1, inq = -1;
+  ioctl(socket_fd, SIOCOUTQ, &outq);
+  ioctl(socket_fd, SIOCOUTQNSD, &notsent);
+  ioctl(socket_fd, SIOCINQ, &inq);
+
+  pollfd pfd{.fd = socket_fd, .events = POLLIN | POLLOUT, .revents = 0};
+  int poll_res = poll(&pfd, 1, 0);
+
+  std::string res = absl::StrCat("outq: ", outq, ", notsent: ", notsent, ", inq: ", inq,
+                                 ", readable: ", poll_res > 0 && (pfd.revents & POLLIN) ? 1 : 0,
+                                 ", writable: ", poll_res > 0 && (pfd.revents & POLLOUT) ? 1 : 0,
+                                 ", revents: ", poll_res > 0 ? pfd.revents : 0);
+
+  struct tcp_info info;
+  socklen_t info_len = sizeof(info);
+  if (getsockopt(socket_fd, IPPROTO_TCP, TCP_INFO, &info, &info_len) == 0) {
+    absl::StrAppend(&res, ", tcp_state: ", info.tcpi_state, ", unacked: ", info.tcpi_unacked,
+                    ", retransmits: ", info.tcpi_retransmits, ", probes: ", info.tcpi_probes,
+                    ", backoff: ", info.tcpi_backoff, ", snd_cwnd: ", info.tcpi_snd_cwnd,
+                    ", last_data_sent_ms: ", info.tcpi_last_data_sent,
+                    ", last_data_recv_ms: ", info.tcpi_last_data_recv,
+                    ", last_ack_recv_ms: ", info.tcpi_last_ack_recv);
+  }
+  return res;
+#else
+  return "socket queues info not available on this platform";
 #endif
 }
 

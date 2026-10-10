@@ -79,6 +79,9 @@ class BufferedSocketWriter {
   // For debugging purposes. Return string with formatted internal state.
   std::string FormatInternalState() const;
 
+  // For debugging stalled streams: internal state plus kernel queues of the destination socket.
+  std::string FormatStallState() const;
+
  private:
   void AsyncWrite(bool force_send);
   void OnCompletion(std::error_code ec, size_t len);
@@ -92,6 +95,10 @@ class BufferedSocketWriter {
 
   PendingBuf pending_buf_;
   size_t in_flight_bytes_ = 0, total_sent_ = 0;
+
+  // Bytes whose async writes completed, total_sent_ - total_completed_ is what is in flight.
+  size_t total_completed_ = 0;
+  uint64_t completions_ = 0;
 
   uint64_t throttle_count_ = 0;
   uint64_t total_throttle_wait_usec_ = 0;

@@ -4,6 +4,8 @@
 #pragma once
 
 #include "helio/util/fiber_socket_base.h"
+#include "helio/util/fibers/fibers.h"
+#include "helio/util/fibers/synchronization.h"
 #include "server/cluster/cluster_defs.h"
 #include "server/execution_state.h"
 
@@ -84,6 +86,10 @@ class IncomingSlotMigration {
   void Pause(bool pause);
 
  private:
+  // Diagnostics: periodically logs flows that stopped receiving data.
+  void StartStallWatchdog();
+  void StopStallWatchdog() ABSL_LOCKS_EXCLUDED(watchdog_mu_);
+
   std::string source_id_;
   Service& service_;
   std::vector<std::unique_ptr<ClusterShardMigration>> shard_flows_;
@@ -102,6 +108,11 @@ class IncomingSlotMigration {
   size_t keys_number_ = 0;
 
   util::fb2::BlockingCounter bc_;
+
+  // Serializes watchdog start/stop, which may be called from different fibers.
+  util::fb2::Mutex watchdog_mu_;
+  util::fb2::Fiber watchdog_fb_ ABSL_GUARDED_BY(watchdog_mu_);
+  util::fb2::Done watchdog_done_;
 };
 
 }  // namespace dfly::cluster

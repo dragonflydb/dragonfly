@@ -4,11 +4,39 @@ on:
   schedule:
     - cron: "0 0/6 * * *"
   workflow_dispatch:
+    # Manual runs can repeat selected large tests, see .github/REGRESSION-TESTS.md.
+    inputs:
+      test-suites:
+        description: "Optional filenames; empty runs all large suites. Example: cluster_migration_resilience_test"
+        required: false
+        default: ""
+        type: string
+      test-cases:
+        description: "Optional node ID regex. Example: test_migration_timeout_on_sync"
+        required: false
+        default: ""
+        type: string
+      iterations:
+        description: "Number of iterations. Default: 1."
+        required: false
+        default: "1"
+        type: string
+      max-tests-run-time:
+        description: "Time limit (minutes) for test runs. Keep it below 360 minus build time so logs get uploaded."
+        required: false
+        default: "300"
+        type: string
+      continue-on-test-failure:
+        description: "Complete all iterations after failures and archive failed test logs."
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
     if: github.repository == 'dragonflydb/dragonfly'
     strategy:
+      fail-fast: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs['continue-on-test-failure'] != 'true' }}
       matrix:
         # Test of these containers
         container: ["ubuntu-dev:24"]
@@ -34,6 +62,18 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+
+      - name: Init Manual runs
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          ITERATIONS_INPUT: ${{ inputs.iterations || '1' }}
+          TEST_SUITES_INPUT: ${{ inputs['test-suites'] || '' }}
+          TEST_CASES_INPUT: ${{ inputs['test-cases'] || '' }}
+          MAX_TESTS_RUN_TIME_INPUT: ${{ inputs['max-tests-run-time'] || '' }}
+          CONTINUE_ON_TEST_FAILURE_INPUT: ${{ inputs['continue-on-test-failure'] || 'false' }}
+        run: |
+          .github/scripts/run-regression-tests-helper.sh validate
 
       - name: Print environment info
         run: |
@@ -67,6 +107,11 @@ jobs:
           gspace-secret: ${{ secrets.GSPACES_BOT_DF_BUILD }}
           build-folder-name: build
           filter: large
+          test-suites: ${{ inputs['test-suites'] || '' }}
+          test-cases: ${{ inputs['test-cases'] || '' }}
+          iterations: ${{ inputs.iterations || '1' }}
+          max-tests-run-time: ${{ inputs['max-tests-run-time'] || '' }}
+          continue-on-test-failure: ${{ inputs['continue-on-test-failure'] || 'false' }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
