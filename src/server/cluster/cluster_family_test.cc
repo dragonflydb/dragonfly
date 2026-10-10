@@ -22,10 +22,12 @@
 #include "core/detail/gen_utils.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "facade/facade_test.h"
+#include "server/cluster/cluster_config.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/namespaces.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
@@ -1614,6 +1616,70 @@ TEST_F(ClusterFamilyTest, DflyMigrateRealModeWithoutConfig) {
   EXPECT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "1"}), "UNKNOWN_MIGRATION");
   EXPECT_EQ(Run({"DFLYMIGRATE", "ACK", "src", "1"}), "UNKNOWN_MIGRATION");
   EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), ErrArg("syncid not found"));
+}
+
+// After REPLTAKEOVER, ReconcileReplicaSlots must rebuild ClusterConfig's derived state, not just
+// patch the topology in place: the config this node is promoted into says it owns the master
+// role, and is_master() (used by e.g. Coordinator::DispatchAll to decide whether to fan out
+// cluster-wide commands) has to agree with that.
+TEST_F(ClusterFamilyTest, ReconcileReplicaSlotsRecomputesIsMaster) {
+  string my_id = GetMyId();
+
+  // Mirror the real order (ServerFamily::ReplTakeOver): this node was already replicating
+  // before any of this runs, so the runtime role is "replica" by the time the replica-declaring
+  // config below is installed. DflyClusterConfig's own runtime-role check (see
+  // DflyClusterConfigRejectsRuntimeRoleMismatch) would otherwise reject it.
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = false; });
+
+  string config_template = R"json(
+    [
+      {
+        "slot_ranges": [
+          {
+            "start": 0,
+            "end": 16383
+          }
+        ],
+        "master": {
+          "id": "other-master",
+          "ip": "10.0.0.1",
+          "port": 7000,
+          "health": "online"
+        },
+        "replicas": [
+          {
+            "id": "$0",
+            "ip": "10.0.0.2",
+            "port": 7001,
+            "health": "online"
+          }
+        ]
+      }
+    ])json";
+  EXPECT_EQ(RunPrivileged({"dflycluster", "config", absl::Substitute(config_template, my_id)}),
+            "OK");
+  // ClusterConfig::Current() is thread-local and only SetCurrent() on the proactor pool's
+  // threads; read it from one of them rather than the test's own thread.
+  ASSERT_FALSE(pp_->at(0)->Await([] { return ClusterConfig::Current()->is_master(); }));
+
+  // ReconcileReplicaSlots() itself starts by reading ClusterConfig::Current() on its calling
+  // thread, so it needs to run on a pool thread too, not the test's own thread.
+  pp_->at(0)->Await([&] { service_->cluster_family().ReconcileReplicaSlots(); });
+
+  bool is_master = false;
+  bool owns_slot_zero = false;
+  pp_->at(0)->Await([&] {
+    auto config = ClusterConfig::Current();
+    ASSERT_TRUE(config);
+    is_master = config->is_master();
+    owns_slot_zero = config->GetOwnedSlots().Contains(0);
+  });
+  EXPECT_TRUE(is_master);
+  EXPECT_TRUE(owns_slot_zero);
+
+  // Mirror ReplTakeOver's own SetMasterFlagOnAllThreads(true), which runs right after
+  // ReconcileReplicaSlots, so later tests see this node as a master again.
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = true; });
 }
 
 }  // namespace
