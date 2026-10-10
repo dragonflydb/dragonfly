@@ -26,6 +26,7 @@
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/namespaces.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
@@ -1614,6 +1615,79 @@ TEST_F(ClusterFamilyTest, DflyMigrateRealModeWithoutConfig) {
   EXPECT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "1"}), "UNKNOWN_MIGRATION");
   EXPECT_EQ(Run({"DFLYMIGRATE", "ACK", "src", "1"}), "UNKNOWN_MIGRATION");
   EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), ErrArg("syncid not found"));
+}
+
+// DFLYCLUSTER CONFIG must reject a topology that masters a shard this node owns while the node
+// is actually running as a replica (no REPLICAOF applied yet, or applied out of order), rather
+// than silently read-routing for a shard it won't accept writes for.
+TEST_F(ClusterFamilyTest, DflyClusterConfigRejectsRuntimeRoleMismatch) {
+  string my_id = GetMyId();
+
+  // Flip this node to "replica" at the runtime level without an actual REPLICAOF, simulating
+  // a config applied before/without the matching runtime role change.
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = false; });
+
+  string config_template = R"json(
+    [
+      {
+        "slot_ranges": [
+          {
+            "start": 0,
+            "end": 16383
+          }
+        ],
+        "master": {
+          "id": "$0",
+          "ip": "10.0.0.1",
+          "port": 7000,
+          "health": "online"
+        },
+        "replicas": []
+      }
+    ])json";
+  EXPECT_THAT(RunPrivileged({"dflycluster", "config", absl::Substitute(config_template, my_id)}),
+              ErrArg("Cluster configuration conflicts with this node's current replication role."));
+
+  // Restore so later tests (and TearDown) see this node as a master again.
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = true; });
+}
+
+// A retry of an already-installed config must not bypass the runtime-role check via the
+// equal-config early return, even though the config itself hasn't changed since install.
+TEST_F(ClusterFamilyTest, DflyClusterConfigRejectsRuntimeRoleMismatchOnRetry) {
+  string my_id = GetMyId();
+
+  string config_template = R"json(
+    [
+      {
+        "slot_ranges": [
+          {
+            "start": 0,
+            "end": 16383
+          }
+        ],
+        "master": {
+          "id": "$0",
+          "ip": "10.0.0.1",
+          "port": 7000,
+          "health": "online"
+        },
+        "replicas": []
+      }
+    ])json";
+  string config = absl::Substitute(config_template, my_id);
+
+  // Install while still a master.
+  EXPECT_EQ(Run({"dflycluster", "config", config}), "OK");
+
+  // REPLICAOF flips the runtime role without touching the installed cluster config.
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = false; });
+
+  // Retrying the identical, already-installed config must still be rejected.
+  EXPECT_THAT(RunPrivileged({"dflycluster", "config", config}),
+              ErrArg("Cluster configuration conflicts with this node's current replication role."));
+
+  pp_->AwaitFiberOnAll([](auto*) { ServerState::tlocal()->is_master = true; });
 }
 
 }  // namespace
