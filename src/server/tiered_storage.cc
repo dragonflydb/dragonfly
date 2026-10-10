@@ -638,6 +638,16 @@ TieredStats TieredStorage::GetStats() const {
     stats.pending_stash_bytes = op_stats.disk_stats.pending_stash_bytes;
     stats.total_heap_buf_allocs = op_stats.disk_stats.heap_buf_alloc_count;
     stats.total_registered_buf_allocs = op_stats.disk_stats.registered_buf_alloc_count;
+    stats.segments_total = op_stats.disk_stats.segments_total;
+    stats.segments_in_queue = op_stats.disk_stats.segments_in_queue;
+    stats.segments_in_queue_small = op_stats.disk_stats.segments_in_queue_small;
+    stats.segments_in_queue_medium = op_stats.disk_stats.segments_in_queue_medium;
+    stats.pages_allocated = op_stats.disk_stats.pages_allocated;
+    stats.pages_allocated_small = op_stats.disk_stats.pages_allocated_small;
+    stats.pages_allocated_medium = op_stats.disk_stats.pages_allocated_medium;
+    stats.pages_in_free_list = op_stats.disk_stats.pages_in_free_list;
+    stats.pages_in_free_list_small = op_stats.disk_stats.pages_in_free_list_small;
+    stats.pages_in_free_list_medium = op_stats.disk_stats.pages_in_free_list_medium;
   }
 
   {  // SmallBins stats

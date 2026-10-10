@@ -180,4 +180,62 @@ TEST_F(ExternalAllocatorTest, AllocLarge) {
   EXPECT_EQ(ext_alloc_.allocated_bytes(), 0u);
 }
 
+// Regression test: a segment that has just become full is still the head of the segment queue
+// (it's detached lazily by the next FindPage()). Freeing a whole page in such a segment used to
+// link it to itself, cutting the rest of the queue off and leaking the free pages of the other
+// segments (the allocator then grew the backing storage instead of reusing them).
+TEST_F(ExternalAllocatorTest, FullHeadSegmentKeepsQueue) {
+  constexpr size_t kBlock = 64_KB;                // SMALL_P, 16 blocks per 1MB page.
+  constexpr unsigned kBlocksInPage = 1_MB / kBlock;
+  constexpr unsigned kBlocksInSeg = kBlocksInPage * 256;
+
+  ext_alloc_.AddStorage(0, 3 * kSegSize);
+
+  auto alloc_n = [&](unsigned n, vector<int64_t>* out) {
+    for (unsigned i = 0; i < n; ++i) {
+      int64_t res = ext_alloc_.Malloc(kBlock);
+      ASSERT_GE(res, 0);
+      out->push_back(res);
+    }
+  };
+
+  // 1. Fill segment A completely. It stays at the head of the queue.
+  vector<int64_t> a_blocks;
+  alloc_n(kBlocksInSeg, &a_blocks);
+  for (int64_t offs : a_blocks)
+    ASSERT_LT(offs, kSegSize);
+
+  // 2. One more block detaches A (it's full) and opens segment B.
+  vector<int64_t> b_blocks;
+  alloc_n(1, &b_blocks);
+  ASSERT_GE(b_blocks[0], kSegSize);
+  ASSERT_LT(b_blocks[0], 2 * kSegSize);
+
+  // 3. Free a whole page of A: A gets back to the queue, queue is B -> A.
+  for (unsigned i = 0; i < kBlocksInPage; ++i)
+    ext_alloc_.Free(a_blocks[i], kBlock);
+
+  // 4. Fill B. B becomes full but it is still the head of the queue (B -> A).
+  alloc_n(kBlocksInSeg - 1, &b_blocks);
+  for (int64_t offs : b_blocks) {
+    ASSERT_GE(offs, kSegSize);
+    ASSERT_LT(offs, 2 * kSegSize);
+  }
+
+  // 5. Free a whole page of B while B is full and still queued.
+  for (unsigned i = 0; i < kBlocksInPage; ++i)
+    ext_alloc_.Free(b_blocks[i], kBlock);
+
+  // 6. Reuse the free page of B, then the next page must come from the free page of A and
+  // not from a brand new segment C.
+  vector<int64_t> reused;
+  alloc_n(kBlocksInPage, &reused);
+  for (int64_t offs : reused)
+    EXPECT_LT(offs, 2 * kSegSize);
+
+  int64_t res = ext_alloc_.Malloc(kBlock);
+  ASSERT_GE(res, 0);
+  EXPECT_LT(res, kSegSize) << "free page of segment A was leaked, new segment was opened";
+}
+
 }  // namespace dfly::tiering
