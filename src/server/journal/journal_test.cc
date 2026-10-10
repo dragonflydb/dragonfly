@@ -1,6 +1,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_join.h>
+#include <absl/strings/str_split.h>
 
 #include <array>
 #include <random>
@@ -15,6 +16,7 @@
 #include "server/journal/journal_slice.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
+#include "server/journal/tx_executor.h"
 #include "server/journal/types.h"
 #include "server/serializer_commons.h"
 #include "strings/human_readable.h"
@@ -482,6 +484,60 @@ TEST(Journal, BacklogBoundsTimeBasedCleanup) {
   EXPECT_FALSE(slice.IsLSNInBuffer(kExpiredEntries - 1));
   EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries));
   EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries + 1));
+}
+
+TransactionData MakeTx(TxId txid, string_view cmd) {
+  vector<string_view> args = absl::StrSplit(cmd, ' ');
+  TransactionData tx;
+  tx.txid = txid;
+  tx.opcode = Op::COMMAND;
+  tx.command.Assign(args.begin(), args.end(), args.size());
+  return tx;
+}
+
+TEST(MultiShardExecution, EndOfLogWakeup) {
+  MultiShardExecution exe(2);
+  int applied = 0;
+  fb2::Fiber flow0("flow0", [&] {
+    EXPECT_TRUE(exe.Execute(1, [&] {
+      ++applied;
+      return true;
+    }));
+  });
+  // flow0 waits for flow1, which reaches end of log before the global command.
+  ThisFiber::Yield();
+  EXPECT_EQ(applied, 0);
+  exe.RemoveFlow();
+  flow0.Join();
+  EXPECT_EQ(applied, 1);
+}
+
+TEST(MultiShardExecution, MoveThenFlushall) {
+  // MOVE is journaled on one shard only, so it bypasses the barrier: only FLUSHALL is applied.
+  vector<vector<TransactionData>> flows(2);
+  flows[0].push_back(MakeTx(5, "MOVE k 1"));
+  flows[0].push_back(MakeTx(7, "FLUSHALL"));
+  flows[1].push_back(MakeTx(7, "FLUSHALL"));
+
+  MultiShardExecution exe(flows.size());
+  int global_applies = 0;
+  vector<fb2::Fiber> fibers;
+  for (auto& flow : flows) {
+    fibers.emplace_back("flow", [&] {
+      for (const auto& tx : flow) {
+        if (tx.IsGlobalCmd()) {
+          EXPECT_TRUE(exe.Execute(tx.txid, [&] {
+            ++global_applies;
+            return true;
+          }));
+        }
+      }
+      exe.RemoveFlow();
+    });
+  }
+  for (auto& fb : fibers)
+    fb.Join();
+  EXPECT_EQ(global_applies, 1);
 }
 
 }  // namespace journal

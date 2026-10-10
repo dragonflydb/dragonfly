@@ -8,20 +8,11 @@
 
 namespace dfly {
 
-// Runs the wait expression and returns false if woken up by cancellation.
-#define WAIT_OR_RETURN(wait_expr) \
-  do {                            \
-    wait_expr;                    \
-    if (!cntx->IsRunning())       \
-      return false;               \
-  } while (0)
-
 JournalApplier::JournalApplier(Service* service,
                                std::shared_ptr<MultiShardExecution> multi_shard_exe,
-                               uint32_t num_flows, ExecuteHook execute_hook)
+                               ExecuteHook execute_hook)
     : executor_(service),
       multi_shard_exe_(std::move(multi_shard_exe)),
-      num_flows_(num_flows),
       execute_hook_(std::move(execute_hook)) {
 }
 
@@ -42,40 +33,13 @@ bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
     return Execute(std::move(tx_data));
   }
 
-  bool inserted_by_me = multi_shard_exe_->InsertTxToSharedMap(tx_data.txid, num_flows_);
-
-  auto& multi_shard_data = multi_shard_exe_->Find(tx_data.txid);
-
-  VLOG(2) << "Execute txid: " << tx_data.txid << " waiting for data in all shards";
-  // Wait until shards flows got transaction data and inserted to map.
-  // This step enforces that replica will execute multi shard commands that finished on master
-  // and replica received all the commands from all shards.
-  WAIT_OR_RETURN(multi_shard_data.block->Wait());
-
-  VLOG(2) << "Execute txid: " << tx_data.txid << " global command execution";
-  // Wait until all shards flows get to execution step of this transaction.
-  WAIT_OR_RETURN(multi_shard_data.barrier.Wait());
-  // Global command will be executed only from one flow fiber. This ensure corectness of data in
-  // replica.
-  bool execution_res = true;
-  if (inserted_by_me) {
-    execution_res = Execute(std::move(tx_data));
-  }
-  // Wait until exection is done, to make sure we done execute next commands while the global is
-  // executed.
-  WAIT_OR_RETURN(multi_shard_data.barrier.Wait());
-
-  // Erase from map can be done only after all flow fibers executed the transaction commands.
-  // The last fiber which will decrease the counter to 0 will be the one to erase the data from
-  // map
-  auto val = multi_shard_data.counter.fetch_sub(1, std::memory_order_relaxed);
-  VLOG(2) << "txid: " << tx_data.txid << " counter: " << val;
-  if (val == 1) {
-    multi_shard_exe_->Erase(tx_data.txid);
-  }
-  return execution_res;
+  TxId txid = tx_data.txid;
+  VLOG(2) << "Execute txid: " << txid << " waiting for data in all shards";
+  // The context stops before its error handler cancels multi_shard_exe_, so check it right before
+  // running the command too.
+  return multi_shard_exe_->Execute(txid, [&] {
+    return cntx->IsRunning() && Execute(std::move(tx_data));
+  }) && cntx->IsRunning();
 }
-
-#undef WAIT_OR_RETURN
 
 }  // namespace dfly

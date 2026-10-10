@@ -15,44 +15,54 @@ using namespace facade;
 
 namespace dfly {
 
-bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
-  std::unique_lock lk(map_mu);
-  auto [it, was_insert] = tx_sync_execution.emplace(txid, shard_cnt);
-  // If CancelAllBlockingEntities() already ran, cancel the new entry immediately
-  // to prevent shard fibers from blocking on entries that will never complete.
-  if (cancelled_) {
-    it->second.barrier.Cancel();
-    it->second.block->Cancel();
-  }
-  lk.unlock();
-
-  VLOG(2) << "txid: " << txid << " unique_shard_cnt_: " << shard_cnt
-          << " was_insert: " << was_insert;
-  it->second.block->Dec();
-
-  return was_insert;
+MultiShardExecution::MultiShardExecution(uint32_t num_flows) : flows_(num_flows) {
 }
 
-MultiShardExecution::TxExecutionSync& MultiShardExecution::Find(TxId txid) {
-  std::lock_guard lk(map_mu);
-  VLOG(2) << "Execute txid: " << txid;
-  auto it = tx_sync_execution.find(txid);
-  DCHECK(it != tx_sync_execution.end());
-  return it->second;
+#define RETURN_ON_CANCELED() \
+  do {                       \
+    if (cancelled_)          \
+      return false;          \
+  } while (0)
+
+bool MultiShardExecution::Execute(TxId txid, absl::FunctionRef<bool()> apply) {
+  std::unique_lock lk(mu_);
+  RETURN_ON_CANCELED();
+  uint64_t generation = generation_;
+  if (arrived_++ == 0)
+    round_txid_ = txid;
+  // The flows meet the global commands in the same order.
+  DCHECK_EQ(round_txid_, txid);
+  VLOG(2) << "txid: " << txid << " arrived: " << arrived_ << " flows: " << flows_;
+
+  // Wait until the round is complete, or another flow ran it.
+  cv_.wait(lk, [&] { return cancelled_ || generation_ != generation || arrived_ >= flows_; });
+  RETURN_ON_CANCELED();
+  if (generation_ != generation)
+    return true;
+
+  // The first flow to see the round complete runs it. Under the lock, so the others cannot pass
+  // before it finished.
+  bool res = apply();
+  arrived_ = 0;
+  ++generation_;
+  cv_.notify_all();
+  return res;
 }
 
-void MultiShardExecution::Erase(TxId txid) {
-  std::lock_guard lg{map_mu};
-  tx_sync_execution.erase(txid);
+#undef RETURN_ON_CANCELED
+
+void MultiShardExecution::RemoveFlow() {
+  std::lock_guard lk(mu_);
+  DCHECK_GT(flows_, 0u);
+  --flows_;
+  // Wakes the flows waiting for this one, so they re-check against the lower count.
+  cv_.notify_all();
 }
 
 void MultiShardExecution::CancelAllBlockingEntities() {
-  lock_guard lk{map_mu};
+  std::lock_guard lk(mu_);
   cancelled_ = true;
-  for (auto& tx_data : tx_sync_execution) {
-    tx_data.second.barrier.Cancel();
-    tx_data.second.block->Cancel();
-  }
+  cv_.notify_all();
 }
 
 void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
@@ -80,10 +90,14 @@ bool TransactionData::IsGlobalCmd() const {
     return false;
   }
 
+  // Global transactions journaled on every shard. MOVE is journaled once, so it is not here.
+  static constexpr string_view kGlobalCmds[] = {"FLUSHDB",  "FLUSHALL",     "FT.CREATE",
+                                                "FT.ALTER", "FT.DROPINDEX", "FT.SYNUPDATE"};
   string_view front = command.Front();
-
-  if (absl::EqualsIgnoreCase(front, "FLUSHDB"sv) || absl::EqualsIgnoreCase(front, "FLUSHALL"sv))
-    return true;
+  for (string_view cmd : kGlobalCmds) {
+    if (absl::EqualsIgnoreCase(front, cmd))
+      return true;
+  }
 
   if (command.size() > 1 && absl::EqualsIgnoreCase(front, "DFLYCLUSTER"sv) &&
       absl::EqualsIgnoreCase(command[1], "FLUSHSLOTS"sv)) {
