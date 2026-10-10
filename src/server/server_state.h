@@ -284,6 +284,11 @@ class ServerState {  // public struct - to allow initialization.
     return (client_pauses_[0] + client_pauses_[1]) > 0;
   }
 
+  bool IsPaused(bool is_write) const {
+    return client_pauses_[int(ClientPause::ALL)] > 0 ||
+           (is_write && client_pauses_[int(ClientPause::WRITE)] > 0);
+  }
+
   SlowLogShard& GetSlowLog() {
     return slow_log_shard_;
   };
