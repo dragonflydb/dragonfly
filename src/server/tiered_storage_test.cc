@@ -1594,6 +1594,24 @@ TEST_F(ListNodeTieringTest, LPopStashedNodes) {
 
   // List must be gone after all elements are popped.
   EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+
+  // obj_memory_usage must return to 0 (see pending_tiered_deltas).
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+// Regression test for the accounting double-apply in issue #7963 (problems 1 and 2).
+TEST_F(ListNodeTieringTest, PopStashedNodesRepeatedNoMemoryDrift) {
+  const int kItems = 8;
+  for (int round = 0; round < 20; round++) {
+    for (int i = 0; i < kItems; i++) {
+      Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('a' + i))});
+    }
+    for (int i = 0; i < kItems; i++) {
+      Run({"LPOP", "mylist"});
+    }
+    EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0)) << "round " << round;
+    EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u) << "round " << round;
+  }
 }
 
 // MOVE a list whose interior nodes are fully offloaded to a different DB.

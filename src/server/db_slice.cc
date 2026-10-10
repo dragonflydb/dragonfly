@@ -564,7 +564,8 @@ DbSlice::AutoUpdater::AutoUpdater(AutoUpdater&& o) noexcept {
 DbSlice::AutoUpdater& DbSlice::AutoUpdater::operator=(AutoUpdater&& o) noexcept {
   Run();
   fields_ = o.fields_;
-  o.Cancel();
+  // Not o.Cancel(): that would erase the key from open_autoupdater_keys, which `this` still owns.
+  o.fields_ = {};
   return *this;
 }
 
@@ -606,16 +607,29 @@ void DbSlice::AutoUpdater::Run() {
   int64_t current_size = static_cast<int64_t>(pv.MallocUsed());
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
 
+  // Already-applied delta from an async tiered completion racing this window (see
+  // pending_tiered_deltas); folded into the diff below in one call to avoid an intermediate
+  // state that could trip the underflow guard in DbTableStats::AddTypeMemoryUsage.
+  int64_t external_delta = 0;
+  if (!table->pending_tiered_deltas.empty()) {
+    if (auto it = table->pending_tiered_deltas.find(std::string(fields_.key));
+        it != table->pending_tiered_deltas.end()) {
+      external_delta = it->second;
+      table->pending_tiered_deltas.erase(it);
+    }
+  }
+
   if (current_type != fields_.orig_obj_type) {
     // Type changed: remove old size from old type, add new size to new type separately.
     // Applying (current_size - orig_size) to the new type would incorrectly subtract
     // from a counter that never had the original bytes added to it.
     AccountObjectMemory(fields_.key, fields_.orig_obj_type,
                         -static_cast<int64_t>(fields_.orig_value_heap_size), table);
-    AccountObjectMemory(fields_.key, current_type, current_size, table);
+    AccountObjectMemory(fields_.key, current_type, current_size - external_delta, table);
   } else {
-    AccountObjectMemory(fields_.key, current_type,
-                        current_size - static_cast<int64_t>(fields_.orig_value_heap_size), table);
+    AccountObjectMemory(
+        fields_.key, current_type,
+        current_size - static_cast<int64_t>(fields_.orig_value_heap_size) - external_delta, table);
   }
 
   fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
@@ -623,6 +637,10 @@ void DbSlice::AutoUpdater::Run() {
 }
 
 void DbSlice::AutoUpdater::Cancel() {
+  if (fields_.db_slice != nullptr) {
+    fields_.db_slice->GetDBTable(fields_.db_ind)
+        ->open_autoupdater_keys.erase(std::string(fields_.key));
+  }
   this->fields_ = {};
 }
 
@@ -635,6 +653,7 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .orig_value_heap_size = it->second.MallocUsed(),
               .orig_obj_type = it->second.ObjType()} {
   DCHECK(IsValid(it));
+  db_slice->GetDBTable(db_ind)->open_autoupdater_keys.insert(std::string(key));
 }
 
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
