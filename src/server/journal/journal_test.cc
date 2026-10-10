@@ -12,12 +12,15 @@
 #include "core/detail/gen_utils.h"
 #include "server/common.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/buffered_socket_writer.h"
 #include "server/journal/journal_slice.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/serializer_commons.h"
+#include "server/test_utils.h"
 #include "strings/human_readable.h"
+#include "util/fibers/epoll_socket.h"
 #include "util/fibers/fibers.h"
 
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_time_ms);
@@ -206,6 +209,52 @@ TEST(Journal, PendingBuf) {
 
   ASSERT_TRUE(pbuf.Empty());
   ASSERT_EQ(pbuf.Size(), 0);
+}
+
+// Completes writes only on demand to simulate a stalled or slowly progressing receiver.
+class ControlledSocket : public util::fb2::EpollSocket {
+ public:
+  void AsyncWriteSome(const iovec* v, uint32_t len, io::AsyncProgressCb cb) override {
+    size_t bytes = 0;
+    for (uint32_t i = 0; i < len; ++i)
+      bytes += v[i].iov_len;
+    completion_ = [cb = std::move(cb), bytes] { cb(bytes); };
+  }
+
+  void Complete() {
+    std::exchange(completion_, {})();
+  }
+
+ private:
+  std::function<void()> completion_;
+};
+
+class BufferedSocketWriterTest : public BaseFamilyTest {};
+
+TEST_F(BufferedSocketWriterTest, CheckWriteTimeout) {
+  pp_->at(0)->Await([] {
+    constexpr uint64_t kTimeoutUsec = 500'000;
+    ControlledSocket socket;
+    ExecutionState cntx;
+    BufferedSocketWriter writer(&cntx, {});
+    writer.Start(&socket);
+
+    // Writes that keep completing do not time out, even past the timeout.
+    writer.Write(string(512, 'x'));
+    for (unsigned i = 0; i < 12; ++i) {
+      ThisFiber::SleepFor(50ms);
+      writer.Write(string(512, 'x'));
+      socket.Complete();
+      writer.CheckWriteTimeout(kTimeoutUsec);
+    }
+    EXPECT_TRUE(cntx.IsRunning());
+
+    // A write that stays in flight longer than the timeout fails the stream.
+    ThisFiber::SleepFor(600ms);
+    writer.CheckWriteTimeout(kTimeoutUsec);
+    EXPECT_EQ(cntx.GetError().Format(), "BufferedSocketWriter write operation timeout");
+    socket.Complete();
+  });
 }
 
 void AddSetRecord(JournalSlice* slice, string_view value) {
