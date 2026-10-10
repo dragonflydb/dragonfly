@@ -1881,20 +1881,27 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
                 ignore_state);
 }
 
+void ServerFamily::CancelSave() {
+  // Holding save_mu_ keeps cancellation from interleaving with Finalize() closing the files.
+  util::fb2::LockGuard lk(save_mu_);
+  if (save_controller_)
+    save_controller_->Cancel();
+}
+
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
                                                Transaction* trans, DoSaveCheckAndStartOpts opts) {
   auto [ignore_state, bg_save] = opts;
-  auto state = ServerState::tlocal()->gstate();
-
-  // In some cases we want to create a snapshot even if server is not active, f.e in takeover
-  if (!ignore_state && (state != GlobalState::ACTIVE && state != GlobalState::SHUTTING_DOWN)) {
-    return GenericError{make_error_code(errc::operation_in_progress),
-                        StrCat(GlobalStateName(state), " - can not save database")};
-  }
 
   std::shared_ptr<SaveStagesController> controller;
   {
     util::fb2::LockGuard lk(save_mu_);
+    auto state = ServerState::tlocal()->gstate();
+    // Recheck after taking the mutex: waiting for it may have crossed a state transition.
+    // In some cases we want to save even if the server is not active, e.g. during takeover.
+    if (!ignore_state && (state != GlobalState::ACTIVE && state != GlobalState::SHUTTING_DOWN)) {
+      return GenericError{make_error_code(errc::operation_in_progress),
+                          StrCat(GlobalStateName(state), " - can not save database")};
+    }
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
@@ -1906,7 +1913,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
     controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
+        &service_, snapshot_storage, opts.bg_save});
     save_controller_ = controller;
   }
 
@@ -2064,6 +2071,12 @@ void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> stat
   for (auto* listener : listeners_) {
     listener->TraverseConnectionsOnThread(cb, UINT32_MAX, nullptr);
   }
+}
+
+void ServerFamily::UnblockAllClients() {
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase*) {
+    CancelBlockingOnThread([](ArgSlice) { return OpStatus::UNBLOCKED; });
+  });
 }
 
 string GetPassword() {
@@ -3583,9 +3596,7 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   replica_ = new_replica;
   SetMasterFlagOnAllThreads(false);
   // Blocked writers would otherwise consume elements applied from the replication stream.
-  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase*) {
-    CancelBlockingOnThread([](ArgSlice) { return OpStatus::UNBLOCKED; });
-  });
+  UnblockAllClients();
 
   if (on_error == ActionOnConnectionFail::kReturnOnError) {
     replica_->StartMainReplicationFiber(last_master_data);

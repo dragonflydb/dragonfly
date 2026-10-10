@@ -33,7 +33,6 @@ struct SaveStagesInputs {
   std::string_view basename_;
   Transaction* trans_;
   Service* service_;
-  util::fb2::FiberQueueThreadPool* fq_threadpool_;
   std::shared_ptr<SnapshotStorage> snapshot_storage_;
   // true if the command that triggered this flow is bgsave. false otherwise.
   bool is_bg_save_;
@@ -41,8 +40,8 @@ struct SaveStagesInputs {
 
 class RdbSnapshot {
  public:
-  RdbSnapshot(util::fb2::FiberQueueThreadPool* fq_tp, SnapshotStorage* snapshot_storage)
-      : snapshot_storage_{snapshot_storage} {
+  RdbSnapshot(SnapshotStorage* snapshot_storage, ExecutionState* cntx)
+      : snapshot_storage_{snapshot_storage}, cntx_{cntx} {
   }
 
   GenericError Start(SaveMode save_mode, const string& path, const RdbSaver::GlobalData& glob_data,
@@ -76,7 +75,7 @@ class RdbSnapshot {
   unique_ptr<RdbSaver> saver_;
   RdbTypeFreqMap freq_map_;
 
-  ExecutionState cntx_{};
+  ExecutionState* cntx_;
 };
 
 struct SaveStagesController : public SaveStagesInputs {
@@ -87,6 +86,9 @@ struct SaveStagesController : public SaveStagesInputs {
   // Returns empty optional on success and SaveInfo on failure
   std::optional<SaveInfo> Init();
   void Start();
+
+  // Stops serialization even if initialization is still in progress. Thread safe.
+  void Cancel();
 
   ~SaveStagesController();
 
@@ -134,7 +136,10 @@ struct SaveStagesController : public SaveStagesInputs {
   time_t start_time_;
   std::filesystem::path full_path_;
 
+  // TODO: Report all errors to cntx_ and remove shared_err_. Errors recorded only here neither
+  // stop the other snapshots nor prevent cloud uploads from being published.
   AggregateGenericError shared_err_;
+  ExecutionState cntx_;
   std::vector<std::pair<std::unique_ptr<RdbSnapshot>, std::filesystem::path>> snapshots_;
 
   absl::flat_hash_map<string_view, size_t> rdb_name_map_;
