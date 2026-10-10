@@ -2003,6 +2003,27 @@ async def test_reset_clears_client_tracking(df_server: DflyInstance):
     await writer.wait_closed()
 
 
+async def test_client_trackinginfo(df_server: DflyInstance):
+    client = df_server.client(protocol=3, single_connection_client=True)
+
+    async def info():
+        reply = await client.client_trackinginfo()
+        return set(reply["flags"]), reply["redirect"], list(reply["prefixes"])
+
+    assert await info() == ({"off"}, -1, [])
+
+    await client.execute_command("CLIENT", "TRACKING", "ON", "OPTIN", "NOLOOP")
+    assert await info() == ({"on", "optin", "noloop"}, 0, [])
+
+    await client.execute_command("CLIENT", "TRACKING", "ON", "OPTIN")
+    await client.execute_command("CLIENT", "CACHING", "YES")
+    assert await info() == ({"on", "optin", "caching-yes"}, 0, [])
+    assert await info() == ({"on", "optin"}, 0, [])
+
+    await client.execute_command("CLIENT", "TRACKING", "OFF")
+    assert await info() == ({"off"}, -1, [])
+
+
 @dfly_args({"proactor_threads": 1})
 async def test_zmpop_empty_null_array(df_server: DflyInstance):
     """An empty ZMPOP result is a null array on the wire: *-1 under RESP2 and _ under RESP3,

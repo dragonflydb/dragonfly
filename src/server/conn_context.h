@@ -318,6 +318,16 @@ struct ConnectionState {
       return option_ == option;
     }
 
+    bool IsNoLoop() const {
+      return noloop_;
+    }
+
+    // True if CLIENT CACHING YES (OPTIN) or CLIENT CACHING NO (OPTOUT) applies to the
+    // current command.
+    bool IsCachingPending() const {
+      return option_ != NONE && seq_num_ == (1 + caching_seq_num_);
+    }
+
    private:
     // a flag indicating whether the client has turned on client tracking.
     bool tracking_enabled_ = false;

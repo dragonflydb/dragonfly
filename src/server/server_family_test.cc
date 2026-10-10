@@ -404,6 +404,48 @@ TEST_F(ServerFamilyTest, ToggleTrackingOnAndOff) {
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
 }
 
+TEST_F(ServerFamilyTest, ClientTrackingInfo) {
+  auto tracking_info = [](auto&&... flags) {
+    return RespElementsAre("flags", RespElementsAre(flags...), "redirect", _, "prefixes",
+                           ArrLen(0));
+  };
+
+  // Allowed in RESP2 as well.
+  auto resp = Run("CLIENT TRACKINGINFO");
+  EXPECT_THAT(resp, tracking_info("off"));
+  EXPECT_THAT(resp.GetVec()[3], IntArg(-1));
+
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO foo"), ErrArg("syntax error"));
+
+  Run("HELLO 3");
+  Run("CLIENT TRACKING ON");
+  resp = Run("CLIENT TRACKINGINFO");
+  EXPECT_THAT(resp, tracking_info("on"));
+  EXPECT_THAT(resp.GetVec()[3], IntArg(0));
+
+  Run("CLIENT TRACKING ON OPTIN NOLOOP");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optin", "noloop"));
+
+  Run("CLIENT TRACKING ON OPTIN");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optin"));
+
+  // CACHING YES applies only to the next command.
+  Run("CLIENT CACHING YES");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optin", "caching-yes"));
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optin"));
+
+  Run("CLIENT TRACKING ON OPTOUT");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optout"));
+  Run("CLIENT CACHING NO");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optout", "caching-no"));
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optout"));
+
+  Run("CLIENT TRACKING OFF");
+  resp = Run("CLIENT TRACKINGINFO");
+  EXPECT_THAT(resp, tracking_info("off"));
+  EXPECT_THAT(resp.GetVec()[3], IntArg(-1));
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
   // case 1. only read the keys doesn't trigger any notification.
   Run({"HELLO", "3"});

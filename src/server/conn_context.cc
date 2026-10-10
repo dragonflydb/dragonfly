@@ -346,7 +346,7 @@ bool ConnectionState::ClientTracking::ShouldTrackKeys() const {
     return true;
   }
 
-  const bool match = (seq_num_ == (1 + caching_seq_num_));
+  const bool match = IsCachingPending();
   return option_ == OPTIN ? match : !match;
 }
 
