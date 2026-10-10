@@ -469,10 +469,11 @@ class QList {
 
   void EndRead(const Iterator& it) const;
 
-  Node* MergeNodes(Node* node);
+  // `center_id` is the index of `center` on input and of the returned node on output.
+  Node* MergeNodes(Node* center, uint32_t* center_id);
 
-  // Deletes one of the nodes and returns the other.
-  Node* ListpackMerge(Node* a, Node* b);
+  // Deletes one of the nodes and returns the other, which takes the index `a_id` of `a`.
+  Node* ListpackMerge(Node* a, Node* b, uint32_t a_id);
 
   void DelNode(Node* node);
   bool DelPackedIndex(Node* node, uint8_t* p);

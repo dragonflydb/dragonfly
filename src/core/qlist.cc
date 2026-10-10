@@ -961,7 +961,9 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       new_node->sz = lpBytes(new_node->entry);
       new_node->count++;
       InsertNode(node, new_node, node_id, insert_opt);
-      MergeNodes(node);
+      // InsertNode() shifted `node` one slot towards the tail if new_node went before it.
+      uint32_t merge_id = after ? node_id : node_id + 1;
+      MergeNodes(node, &merge_id);
       malloc_size_ += diff_existing;
     }
   }
@@ -1024,17 +1026,17 @@ void QList::Replace(Iterator it, std::string_view elem) {
       unsigned char* p = lpSeek(node->entry, -1);
       DelPackedIndex(node, p);
       node->dont_compress = 0; /* Re-enable compression */
-      new_node = MergeNodes(new_node);
+      uint32_t new_node_id = node_id + 1;
+      new_node = MergeNodes(new_node, &new_node_id);
 
       /* We can't know if the current node and its sibling nodes are correctly compressed,
        * and we don't know if they are within the range of compress depth, so we need to
        * use UpdateCompression() for compression, which checks if node is within compress
        * depth before compressing. */
-      // TODO: node_id might be off after merges.
-      CoolOff(new_node, node_id + 1);
-      CoolOff(new_node->prev, node_id);
+      CoolOff(new_node, new_node_id);
+      CoolOff(new_node->prev, new_node_id - 1);
       if (new_node->next)
-        CoolOff(new_node->next, node_id + 2);
+        CoolOff(new_node->next, new_node_id + 1);
     }
   }
 }
@@ -1207,7 +1209,7 @@ void QList::AccessForReads(bool recompress, Node* node) {
  *
  * Returns the new 'center' after merging.
  */
-auto QList::MergeNodes(Node* center) -> Node* {
+auto QList::MergeNodes(Node* center, uint32_t* center_id) -> Node* {
   Node *prev = NULL, *prev_prev = NULL, *next = NULL;
   Node *next_next = NULL, *target = NULL;
 
@@ -1227,20 +1229,22 @@ auto QList::MergeNodes(Node* center) -> Node* {
 
   /* Try to merge prev_prev and prev */
   if (NodeAllowMerge(prev, prev_prev, fill_)) {
-    ListpackMerge(prev_prev, prev);
+    ListpackMerge(prev_prev, prev, *center_id - 2);
     prev_prev = prev = NULL; /* they could have moved, invalidate them. */
+    --*center_id;
   }
 
   /* Try to merge next and next_next */
   if (NodeAllowMerge(next, next_next, fill_)) {
-    ListpackMerge(next, next_next);
+    ListpackMerge(next, next_next, *center_id + 1);
     next = next_next = NULL; /* they could have moved, invalidate them. */
   }
 
   /* Try to merge center node and previous node */
   if (center != head_ && NodeAllowMerge(center, center->prev, fill_)) {
-    target = ListpackMerge(center->prev, center);
+    target = ListpackMerge(center->prev, center, *center_id - 1);
     center = NULL; /* center could have been deleted, invalidate it. */
+    --*center_id;
   } else {
     /* else, we didn't merge here, but target needs to be valid below. */
     target = center;
@@ -1248,7 +1252,7 @@ auto QList::MergeNodes(Node* center) -> Node* {
 
   /* Use result of center merge (or original) to merge with next node. */
   if (NodeAllowMerge(target, target->next, fill_)) {
-    target = ListpackMerge(target, target->next);
+    target = ListpackMerge(target, target->next, *center_id);
   }
   return target;
 }
@@ -1266,7 +1270,7 @@ auto QList::MergeNodes(Node* center) -> Node* {
  *
  * Returns the input node picked to merge against or NULL if
  * merging was not possible. */
-auto QList::ListpackMerge(Node* a, Node* b) -> Node* {
+auto QList::ListpackMerge(Node* a, Node* b, uint32_t a_id) -> Node* {
   AccessForReads(false, a);
   AccessForReads(false, b);
   if ((lpMerge(&a->entry, &b->entry))) {
@@ -1287,7 +1291,7 @@ auto QList::ListpackMerge(Node* a, Node* b) -> Node* {
 
     nokeep->count = 0;
     DelNode(nokeep);
-    CoolOff(keep, 0);  // TODO: node_id is unknown here, so just pass 0.
+    CoolOff(keep, a_id);
     return keep;
   }
 
@@ -1517,9 +1521,9 @@ auto QList::Erase(Iterator it) -> Iterator {
   // If current node is deleted, we must update iterator node and offset.
   if (deleted_node) {
     if (it.direction_ == FWD) {
+      // `next` slides into the deleted node's slot, so node_id_ already is its index.
       it.current_ = next;
       it.offset_ = 0;
-      it.node_id_++;
     } else if (it.direction_ == REV) {
       it.current_ = len_ ? prev : nullptr;
       it.offset_ = -1;
