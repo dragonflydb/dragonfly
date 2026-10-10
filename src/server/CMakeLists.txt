@@ -12,7 +12,7 @@ endif()
 
 add_executable(dragonfly dfly_main.cc version_monitor.cc)
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
-cxx_link(dragonfly base dragonfly_lib)
+cxx_link(dragonfly base dragonfly_lib cloud_lib)
 
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
