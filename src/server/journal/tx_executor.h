@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#include <absl/functional/function_ref.h>
+
 #include <unordered_map>
 
 #include "server/execution_state.h"
@@ -14,8 +16,18 @@ namespace dfly {
 struct JournalReader;
 
 // Coordinator for multi shard execution.
+// Coordinates global commands across flows applied in parallel (e.g. replica flows).
 class MultiShardExecution {
  public:
+  explicit MultiShardExecution(uint32_t num_flows);
+
+  // Blocks until all flows reach txid, runs apply in exactly one of them, then releases them all.
+  // Returns false if cntx stopped; else apply's result in the flow that ran it, true in the others.
+  bool Execute(TxId txid, ExecutionState* cntx, absl::FunctionRef<bool()> apply);
+
+  void CancelAllBlockingEntities();
+
+ private:
   struct TxExecutionSync {
     util::fb2::Barrier barrier;
     std::atomic_uint32_t counter;
@@ -26,15 +38,14 @@ class MultiShardExecution {
     }
   };
 
-  bool InsertTxToSharedMap(TxId txid, uint32_t shard_cnt);
+  bool InsertTxToSharedMap(TxId txid);
   TxExecutionSync& Find(TxId txid);
   void Erase(TxId txid);
-  void CancelAllBlockingEntities();
 
- private:
-  util::fb2::Mutex map_mu;
-  std::unordered_map<TxId, TxExecutionSync> tx_sync_execution;
-  bool cancelled_{false};  // Protected by map_mu
+  util::fb2::Mutex map_mu_;
+  std::unordered_map<TxId, TxExecutionSync> tx_sync_execution_;
+  uint32_t num_flows_;
+  bool cancelled_{false};  // Protected by map_mu_
 };
 
 // This class holds the commands of transaction in single shard.

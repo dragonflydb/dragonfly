@@ -15,9 +15,58 @@ using namespace facade;
 
 namespace dfly {
 
-bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
-  std::unique_lock lk(map_mu);
-  auto [it, was_insert] = tx_sync_execution.emplace(txid, shard_cnt);
+// Runs the wait expression and returns false if woken up by cancellation.
+#define WAIT_OR_RETURN(wait_expr) \
+  do {                            \
+    wait_expr;                    \
+    if (!cntx->IsRunning())       \
+      return false;               \
+  } while (0)
+
+MultiShardExecution::MultiShardExecution(uint32_t num_flows) : num_flows_(num_flows) {
+}
+
+bool MultiShardExecution::Execute(TxId txid, ExecutionState* cntx,
+                                  absl::FunctionRef<bool()> apply) {
+  bool inserted_by_me = InsertTxToSharedMap(txid);
+
+  auto& multi_shard_data = Find(txid);
+
+  VLOG(2) << "Execute txid: " << txid << " waiting for data in all shards";
+  // Wait until shards flows got transaction data and inserted to map.
+  // This step enforces that replica will execute multi shard commands that finished on master
+  // and replica received all the commands from all shards.
+  WAIT_OR_RETURN(multi_shard_data.block->Wait());
+
+  VLOG(2) << "Execute txid: " << txid << " global command execution";
+  // Wait until all shards flows get to execution step of this transaction.
+  WAIT_OR_RETURN(multi_shard_data.barrier.Wait());
+  // Global command will be executed only from one flow fiber. This ensure corectness of data in
+  // replica.
+  bool execution_res = true;
+  if (inserted_by_me) {
+    execution_res = apply();
+  }
+  // Wait until exection is done, to make sure we done execute next commands while the global is
+  // executed.
+  WAIT_OR_RETURN(multi_shard_data.barrier.Wait());
+
+  // Erase from map can be done only after all flow fibers executed the transaction commands.
+  // The last fiber which will decrease the counter to 0 will be the one to erase the data from
+  // map
+  auto val = multi_shard_data.counter.fetch_sub(1, std::memory_order_relaxed);
+  VLOG(2) << "txid: " << txid << " counter: " << val;
+  if (val == 1) {
+    Erase(txid);
+  }
+  return execution_res;
+}
+
+#undef WAIT_OR_RETURN
+
+bool MultiShardExecution::InsertTxToSharedMap(TxId txid) {
+  std::unique_lock lk(map_mu_);
+  auto [it, was_insert] = tx_sync_execution_.emplace(txid, num_flows_);
   // If CancelAllBlockingEntities() already ran, cancel the new entry immediately
   // to prevent shard fibers from blocking on entries that will never complete.
   if (cancelled_) {
@@ -26,7 +75,7 @@ bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
   }
   lk.unlock();
 
-  VLOG(2) << "txid: " << txid << " unique_shard_cnt_: " << shard_cnt
+  VLOG(2) << "txid: " << txid << " unique_shard_cnt_: " << num_flows_
           << " was_insert: " << was_insert;
   it->second.block->Dec();
 
@@ -34,22 +83,22 @@ bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
 }
 
 MultiShardExecution::TxExecutionSync& MultiShardExecution::Find(TxId txid) {
-  std::lock_guard lk(map_mu);
+  std::lock_guard lk(map_mu_);
   VLOG(2) << "Execute txid: " << txid;
-  auto it = tx_sync_execution.find(txid);
-  DCHECK(it != tx_sync_execution.end());
+  auto it = tx_sync_execution_.find(txid);
+  DCHECK(it != tx_sync_execution_.end());
   return it->second;
 }
 
 void MultiShardExecution::Erase(TxId txid) {
-  std::lock_guard lg{map_mu};
-  tx_sync_execution.erase(txid);
+  std::lock_guard lg{map_mu_};
+  tx_sync_execution_.erase(txid);
 }
 
 void MultiShardExecution::CancelAllBlockingEntities() {
-  lock_guard lk{map_mu};
+  lock_guard lk{map_mu_};
   cancelled_ = true;
-  for (auto& tx_data : tx_sync_execution) {
+  for (auto& tx_data : tx_sync_execution_) {
     tx_data.second.barrier.Cancel();
     tx_data.second.block->Cancel();
   }
