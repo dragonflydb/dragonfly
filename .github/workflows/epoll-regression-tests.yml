@@ -73,7 +73,8 @@ jobs:
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
-      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      # NET_ADMIN lets the limit-loopback-mtu action lower the loopback MTU.
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0" --cap-add=NET_ADMIN
       volumes:
         - /var/crash:/var/crash
         - /:/hostroot

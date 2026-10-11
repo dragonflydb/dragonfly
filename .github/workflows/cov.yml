@@ -23,7 +23,8 @@ jobs:
     timeout-minutes: 300
     container:
       image: ghcr.io/romange/${{ matrix.container }}
-      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      # NET_ADMIN lets the limit-loopback-mtu action lower the loopback MTU.
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0" --cap-add=NET_ADMIN
       volumes:
         - /:/hostroot
         - /mnt:/mnt
@@ -35,6 +36,9 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
+      # Avoids a kernel TCP receive window collapse on loopback, see the action for details.
+      - name: Limit loopback MTU
+        uses: ./.github/actions/limit-loopback-mtu
       - name: Delete Space
         run: |
           df -h
