@@ -504,12 +504,18 @@ void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, BinIdx bin_idx
   // it to other bin sizes.
   UnlinkFreePage(bin_idx, page);
 
-  if (!owner->HasFreePages()) {
-    // Segment was fully booked but now it has a free page.
-    // Add it to the tail of segment queue.
-    DCHECK(owner->next == owner->prev);
+  auto& sq = sq_[owner->page_class()];
 
-    auto& sq = sq_[owner->page_class()];
+  bool seg_detached = (owner->next == owner && sq != owner);
+
+  // When segment was detached was fully booked and detached from the queue by FindPage(),
+  // but now it has a free  - reattach it to the tail of segment queue.
+  // Note that a full segment might still be linked to the queue since FindPage()
+  // detaches full segments lazily.
+  if (seg_detached) {
+    DCHECK(!owner->HasFreePages());
+    DCHECK(owner->prev == owner);
+
     if (sq == nullptr) {
       sq = owner;
     } else {
@@ -517,6 +523,9 @@ void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, BinIdx bin_idx
     }
   }
   owner->ReleasePage(page);
+
+  if (owner->used() == 0)
+    ReleaseSegment(owner);
 }
 
 void ExternalAllocator::LinkFreePage(BinIdx bin_idx, Page* page) {
@@ -542,6 +551,24 @@ void ExternalAllocator::UnlinkFreePage(BinIdx bin_idx, Page* page) {
     page->next_free->prev_free = page->prev_free;
 
   page->next_free = page->prev_free = nullptr;
+}
+
+void ExternalAllocator::ReleaseSegment(SegmentDescr* seg) {
+  DCHECK_EQ(seg->used(), 0u);
+
+  // An empty segment has free pages, hence it is linked into the segment queue.
+  auto& sq = sq_[seg->page_class()];
+  SegmentDescr* next = seg->Detach();
+  if (sq == seg)
+    sq = next;
+
+  size_t offset = seg->offset_;
+  DCHECK(segments_[offset / kSegmentSize] == seg);
+  segments_[offset / kSegmentSize] = nullptr;
+  mi_free(seg);
+
+  extent_tree_.Add(offset, kSegmentSize);
+  segment_bytes_ -= kSegmentSize;
 }
 
 inline auto ExternalAllocator::ToSegDescr(Page* page) -> SegmentDescr* {
