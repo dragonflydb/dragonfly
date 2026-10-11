@@ -5,8 +5,6 @@
 
 #include <absl/functional/function_ref.h>
 
-#include <unordered_map>
-
 #include "server/execution_state.h"
 #include "server/journal/types.h"
 #include "util/fibers/synchronization.h"
@@ -17,35 +15,35 @@ struct JournalReader;
 
 // Coordinator for multi shard execution.
 // Coordinates global commands across flows applied in parallel (e.g. replica flows).
+// Each global command is a rendezvous: every flow waits for the others, exactly one executes it,
+// and none continues before it finishes. Global transactions run in the same order on every
+// shard, so the flows meet them in the same order, one round after another.
 class MultiShardExecution {
  public:
   explicit MultiShardExecution(uint32_t num_flows);
 
   // Blocks until all flows reach txid, runs apply in exactly one of them, then releases them all.
-  // Returns false if cntx stopped; else apply's result in the flow that ran it, true in the others.
-  bool Execute(TxId txid, ExecutionState* cntx, absl::FunctionRef<bool()> apply);
+  // apply runs under mu_: the others cannot pass before it finished anyway. It must not call back
+  // into this object.
+  // Returns false if cancelled before the round's command ran; else apply's result, in every flow.
+  // Each replica flow resumes partial sync from its own count of applied records, so they agree.
+  bool Execute(TxId txid, absl::FunctionRef<bool()> apply);
 
+  // Wakes every waiting flow; Execute() then returns false. Used when sync fails.
   void CancelAllBlockingEntities();
 
  private:
-  struct TxExecutionSync {
-    util::fb2::Barrier barrier;
-    std::atomic_uint32_t counter;
-    util::fb2::BlockingCounter block;
-
-    explicit TxExecutionSync(uint32_t counter)
-        : barrier(counter), counter(counter), block(counter) {
-    }
-  };
-
-  bool InsertTxToSharedMap(TxId txid);
-  TxExecutionSync& Find(TxId txid);
-  void Erase(TxId txid);
-
-  util::fb2::Mutex map_mu_;
-  std::unordered_map<TxId, TxExecutionSync> tx_sync_execution_;
-  uint32_t num_flows_;
-  bool cancelled_{false};  // Protected by map_mu_
+  util::fb2::Mutex mu_;
+  util::fb2::CondVar cv_;
+  const uint32_t flows_;
+  // Flows that arrived at the current round, and its txid.
+  uint32_t arrived_ = 0;
+  TxId round_txid_ = 0;
+  // Bumped when a round's command finished, which releases its flows with global_cmd_result_. The
+  // next round cannot finish before every flow left this one, so they all read this round's result.
+  uint64_t generation_ = 0;
+  bool global_cmd_result_ = false;
+  bool cancelled_ = false;
 };
 
 // This class holds the commands of transaction in single shard.
