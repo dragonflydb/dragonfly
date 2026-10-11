@@ -466,8 +466,11 @@ auto ExternalAllocator::FindPage(PageClass pc, BinIdx bin_idx) -> Page* {
       segments_.resize(seg_idx + 1);
     }
 
-    void* ptr =
-        mi_malloc_aligned(sizeof(SegmentDescr) + num_pages * sizeof(Page), kSegDescrAlignment);
+    static_assert(sizeof(SegmentDescr) + kMaxPagesInSegment * sizeof(Page) <= kSegDescrAlignment);
+
+    // Allocate the whole alignment unit: mimalloc serves it from naturally aligned blocks of
+    // that size, while smaller sizes are over-allocated to satisfy the alignment.
+    void* ptr = mi_malloc_aligned(kSegDescrAlignment, kSegDescrAlignment);
     SegmentDescr* seg = new (ptr) SegmentDescr(pc, op_range->first, num_pages);
     segments_[seg_idx] = seg;
     segment_bytes_ += kSegmentSize;
