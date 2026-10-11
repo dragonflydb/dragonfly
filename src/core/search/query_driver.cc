@@ -20,7 +20,7 @@ void QueryDriver::ResetScanner() {
   StartGlue({});
   // Clear any AST left over from a previous parse: on a reused driver a failed parse never calls
   // Set(), so Take() would otherwise return the stale result of the prior query.
-  expr_ = AstExpr{};
+  expr_.reset();
 }
 
 void QueryDriver::SetInput(std::string str) {
@@ -44,9 +44,9 @@ void QueryDriver::Error(const Parser::location_type& loc, std::string_view msg) 
 }
 
 void QueryDriver::SetOptionalFilters(const OptionalFilters* filters) {
-  if (filters) {
+  if (filters && expr_) {
     for (auto& [field, filter] : *filters) {
-      expr_ = AstLogicalNode(std::move(expr_), filter->Node(field), AstLogicalNode::AND);
+      expr_ = AstLogicalNode::Combine(std::move(expr_), filter->Node(field), AstLogicalNode::AND);
     }
   }
 }

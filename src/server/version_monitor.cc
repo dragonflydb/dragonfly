@@ -19,7 +19,9 @@
 #include "base/logging.h"
 #include "io/file_util.h"
 #include "server/common.h"
+#include "server/server_state.h"
 #include "server/version.h"
+#include "util/cloud/platform_info.h"
 
 namespace dfly {
 
@@ -104,25 +106,67 @@ std::optional<std::string> GetRemoteVersion(ProactorBase* proactor, SSL_CTX* ssl
   return nullopt;
 }
 
-// Maps the DMI system vendor to a coarse cloud provider name. Only the category is reported.
-string_view GetCloudProvider() {
-  auto vendor = io::ReadFileToString("/sys/class/dmi/id/sys_vendor");
-  if (!vendor)
+// Returns the cloud provider, or else the hypervisor, or else whether the machine looks like bare
+// metal. Only the category is reported.
+string_view CloudLabel(const cloud::PlatformInfo& platform) {
+  using cloud::CloudProvider;
+  using cloud::Virtualization;
+  switch (platform.cloud) {
+    case CloudProvider::kAws:
+      return "aws";
+    case CloudProvider::kGcp:
+      return "gcp";
+    case CloudProvider::kAzure:
+      return "azure";
+    case CloudProvider::kOracle:
+      return "oracle";
+    case CloudProvider::kHetzner:
+      return "hetzner";
+    case CloudProvider::kOpenStack:
+      return "openstack";
+    case CloudProvider::kRailway:
+      return "railway";
+    case CloudProvider::kUnknown:
+      break;
+  }
+  switch (platform.virtualization) {
+    case Virtualization::kVmware:
+      return "vmware";
+    case Virtualization::kKvm:
+      return "kvm";
+    case Virtualization::kHyperV:
+      return "hyperv";
+    case Virtualization::kXen:
+      return "xen";
+    case Virtualization::kOther:
+      return "vm";
+    case Virtualization::kUnknown:
+      break;
+  }
+  // Sandboxes such as gVisor hide DMI, and their CPU flags say nothing about the host.
+  if (!platform.dmi.sys_vendor)
     return "unknown";
+  // Only x86 /proc/cpuinfo has a "flags" line, so kAbsent implies an x86 CPU without the
+  // hypervisor flag; we take that for bare metal. A VM hiding both DMI and the flag is misreported.
+  if (platform.cpu && platform.cpu->hypervisor == io::HypervisorStatus::kAbsent)
+    return "metal";
+  return "other";
+}
 
-  string_view v = absl::StripAsciiWhitespace(*vendor);
-  if (absl::StartsWith(v, "Amazon"))
-    return "aws";
-  if (absl::StartsWith(v, "Google"))
-    return "gcp";
-  if (absl::StartsWith(v, "Microsoft"))
-    return "azure";
-
-  // Older Xen-based EC2 instances report "Xen" as the vendor.
-  auto bios = io::ReadFileToString("/sys/class/dmi/id/bios_version");
-  if (bios && absl::StrContains(absl::AsciiStrToLower(*bios), "amazon"))
-    return "aws";
-
+string_view DeploymentLabel(cloud::DeploymentEnv env) {
+  using cloud::DeploymentEnv;
+  switch (env) {
+    case DeploymentEnv::kKubernetes:
+      return "k8s";
+    case DeploymentEnv::kDocker:
+      return "docker";
+    case DeploymentEnv::kContainer:
+      return "container";
+    case DeploymentEnv::kSystemd:
+      return "systemd";
+    case DeploymentEnv::kOther:
+      break;
+  }
   return "other";
 }
 
@@ -197,11 +241,13 @@ void VersionMonitor::Run(ProactorPool* proactor_pool) {
 
   // Low-cardinality platform info goes into the User-Agent comment. The field order is part of
   // the protocol: append new fields at the end and never reorder or remove existing ones.
-  platform_ = absl::StrCat(arch, "; ", is_uring ? "io_uring" : "epoll", "; ", GetCloudProvider());
+  const cloud::PlatformInfo platform = cloud::PlatformInfo::Create();
+  platform_ = absl::StrCat(arch, "; ", is_uring ? "io_uring" : "epoll", "; ", CloudLabel(platform));
 
   static_headers_ = {
       {"Dfly-Threads", absl::StrCat(proactor_pool->size())},
       {"Dfly-Kernel", absl::StrCat(kernel_version / 100, ".", kernel_version % 100)},
+      {"Dfly-Env", string(DeploymentLabel(platform.deployment))},
   };
 
   version_fiber_ = proactor_pool->GetNextProactor()->LaunchFiber(
@@ -221,6 +267,8 @@ VersionMonitor::HeaderList VersionMonitor::BuildInfoHeaders() const {
   headers.emplace_back("Dfly-Uptime", absl::StrCat(uptime.count()));
   headers.emplace_back("Dfly-Max-Mem",
                        string(MemoryBucket(max_memory_limit.load(memory_order_relaxed))));
+  // The role changes with REPLICAOF; it is mirrored on every proactor thread, including ours.
+  headers.emplace_back("Dfly-Role", ServerState::tlocal()->is_master ? "master" : "replica");
   return headers;
 }
 

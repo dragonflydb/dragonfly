@@ -209,6 +209,7 @@ QList::Node* CreateRAW(int container, uint8_t* entry, size_t sz) {
   node->dont_compress = 0;
   node->offloaded = 0;
   node->io_pending = 0;
+  node->zstd_rejected = 0;
 
   return node;
 }
@@ -245,6 +246,7 @@ QList::Node* CreateFromSV(int container, string_view value) {
 // Returns the relative increase in size.
 inline ssize_t NodeSetEntry(QList::Node* node, uint8_t* entry) {
   node->entry = entry;
+  node->zstd_rejected = 0;  // new content, so a previous rejection says nothing about it.
   size_t new_sz = lpBytes(node->entry);
   ssize_t diff = new_sz - node->sz;
   node->sz = new_sz;
@@ -987,6 +989,7 @@ void QList::Replace(Iterator it, std::string_view elem) {
       malloc_size_ += ssize_t(sz) - ssize_t(node->sz);
       node->entry = new_entry;
       node->sz = sz;
+      node->zstd_rejected = 0;
       CoolOff(node, node_id);
     } else {
       Insert(it, elem, AFTER);
@@ -1796,7 +1799,11 @@ void QList::CompressAfterLoad() {
 bool QList::CompressNodeWithDict(Node* node) {
   DCHECK(tl_zstd_dict);
 
-  if (node->encoding != QUICKLIST_NODE_ENCODING_RAW)
+  // dont_compress guards a node its caller is still going to access, see Replace().
+  // zstd_rejected remembers that this exact content did not compress well: the same node is
+  // offered again whenever it is touched, and every retry would pay for a full node-sized
+  // compression only to be rejected again.
+  if (node->encoding != QUICKLIST_NODE_ENCODING_RAW || node->dont_compress || node->zstd_rejected)
     return false;
   if (node->sz < MIN_COMPRESS_BYTES)
     return false;
@@ -1815,6 +1822,7 @@ bool QList::CompressNodeWithDict(Node* node) {
   if (csz + MIN_COMPRESS_IMPROVE >= node->sz || csz > node->sz * 7 / 10) {
     zfree(dest);
     stats.bad_compression_attempts++;
+    node->zstd_rejected = 1;
     return false;
   }
 

@@ -3,6 +3,7 @@
 //
 
 #include <absl/strings/str_cat.h>
+#include <benchmark/benchmark.h>
 
 #include <array>
 
@@ -18,9 +19,6 @@ using namespace std;
 
 // Compact textual form of a parsed query tree, used to pin exact ASTs in tests.
 struct AstDumper {
-  string operator()(monostate) const {
-    return "<empty>";
-  }
   string operator()(const AstStarNode&) const {
     return "*";
   }
@@ -63,7 +61,7 @@ struct AstDumper {
   string operator()(const AstLogicalNode& n) const {
     string res = n.op == AstLogicalNode::AND ? "AND{" : "OR{";
     for (size_t i = 0; i < n.nodes.size(); ++i)
-      absl::StrAppend(&res, i ? " " : "", Dump(n.nodes[i]));
+      absl::StrAppend(&res, i ? " " : "", Dump(*n.nodes[i]));
     return res + "}";
   }
   string operator()(const AstFieldNode& n) const {
@@ -72,7 +70,7 @@ struct AstDumper {
   string operator()(const AstTagsNode& n) const {
     string res = "TAGS{";
     for (size_t i = 0; i < n.tags.size(); ++i)
-      absl::StrAppend(&res, i ? "|" : "", visit(*this, n.tags[i]));
+      absl::StrAppend(&res, i ? "|" : "", (*this)(n.tags[i]));
     return res + "}";
   }
   string operator()(const AstKnnNode& n) const {
@@ -83,13 +81,31 @@ struct AstDumper {
     return absl::StrCat("VRANGE(", n.field, ";", n.radius, ")");
   }
 
+  string operator()(const AstTagsNode::TagValue& tag) const {
+    switch (tag.type) {
+      case TagType::REGULAR:
+        return absl::StrCat("T(", tag.affix, ")");
+      case TagType::PREFIX:
+        return absl::StrCat("P(", tag.affix, ")");
+      case TagType::SUFFIX:
+        return absl::StrCat("S(", tag.affix, ")");
+      case TagType::INFIX:
+        return absl::StrCat("I(", tag.affix, ")");
+      case TagType::WILDCARD:
+        return absl::StrCat("W(", tag.affix, ")");
+    }
+    ABSL_UNREACHABLE();
+  }
+
   string Dump(const AstNode& n) const {
-    return visit(*this, static_cast<const NodeVariants&>(n));
+    string result;
+    VisitAst(n, [&](const auto& inner) { result = (*this)(inner); });
+    return result;
   }
 };
 
-string DumpAst(const AstNode& n) {
-  return AstDumper{}.Dump(n);
+string DumpAst(const AstExpr& n) {
+  return n ? AstDumper{}.Dump(*n) : "<empty>";
 }
 
 class SearchParserTest : public ::testing::Test {
@@ -536,10 +552,10 @@ TEST_F(SearchParserTest, WeightAttributes) {
 
   EXPECT_EQ(0, Parse("@name:(mal)=>{$weight:5.0}"));
   auto ast = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstAttributeNode>(ast.Variant()));
-  const auto& attr = std::get<AstAttributeNode>(ast.Variant());
+  ASSERT_TRUE(ast->Is<AstAttributeNode>());
+  const auto& attr = *ast->As<AstAttributeNode>();
   EXPECT_EQ(attr.weight, 5.0);
-  EXPECT_TRUE(std::holds_alternative<AstFieldNode>(attr.node->Variant()));
+  EXPECT_TRUE(attr.node->Is<AstFieldNode>());
 
   EXPECT_EQ(0, Parse("@name:(mal) => { $weight: 5.0 }"));
   EXPECT_EQ(0, Parse("(@country:(mal)=>{$weight:20.0} | @city:(mal)=>{$weight:10.0})"));
@@ -566,17 +582,17 @@ TEST_F(SearchParserTest, PerTermWeightInFieldGroup) {
   // The weighted term stays scoped to the field: Field{ Or[ Attribute{Term}, Term ] }.
   EXPECT_EQ(0, Parse("@description:(machine=>{$weight:2.0} | learning)"));
   auto ast = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(ast.Variant()));
-  const auto& field = std::get<AstFieldNode>(ast.Variant());
+  ASSERT_TRUE(ast->Is<AstFieldNode>());
+  const auto& field = *ast->As<AstFieldNode>();
   EXPECT_EQ(field.field, "description");
-  ASSERT_TRUE(std::holds_alternative<AstLogicalNode>(field.node->Variant()));
-  const auto& logical = std::get<AstLogicalNode>(field.node->Variant());
+  ASSERT_TRUE(field.node->Is<AstLogicalNode>());
+  const auto& logical = *field.node->As<AstLogicalNode>();
   EXPECT_EQ(logical.op, AstLogicalNode::OR);
   ASSERT_EQ(logical.nodes.size(), 2u);
-  ASSERT_TRUE(std::holds_alternative<AstAttributeNode>(logical.nodes[0].Variant()));
-  const auto& weighted = std::get<AstAttributeNode>(logical.nodes[0].Variant());
+  ASSERT_TRUE(logical.nodes[0]->Is<AstAttributeNode>());
+  const auto& weighted = *logical.nodes[0]->As<AstAttributeNode>();
   EXPECT_EQ(weighted.weight, 2.0);
-  EXPECT_TRUE(std::holds_alternative<AstTermNode>(weighted.node->Variant()));
+  EXPECT_TRUE(weighted.node->Is<AstTermNode>());
 }
 
 TEST_F(SearchParserTest, VectorRangeParse) {
@@ -619,7 +635,7 @@ TEST_F(SearchParserTest, VectorRangeCombinations) {
   // A lone (parenthesized) range still reduces to the range node itself.
   EXPECT_EQ(0, Parse("(@f:[VECTOR_RANGE $radius $vec])"));
   auto ast = query_driver_.Take();
-  EXPECT_TRUE(std::holds_alternative<AstVectorRangeNode>(ast.Variant()));
+  EXPECT_TRUE(ast->Is<AstVectorRangeNode>());
 }
 
 TEST_F(SearchParserTest, KNN) {
@@ -661,8 +677,8 @@ TEST_F(SearchParserTest, KnnQueryAttributes) {
                      "=>{$EF_RUNTIME: $ef; $YIELD_DISTANCE_AS: attr_score}"));
 
   auto ast = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstKnnNode>(ast.Variant()));
-  const auto& knn = std::get<AstKnnNode>(ast.Variant());
+  ASSERT_TRUE(ast->Is<AstKnnNode>());
+  const auto& knn = *ast->As<AstKnnNode>();
   EXPECT_EQ(knn.limit, 3u);
   EXPECT_EQ(knn.score_alias, "attr_score");
   ASSERT_TRUE(knn.ef_runtime);
@@ -688,18 +704,18 @@ TEST_F(SearchParserTest, PhraseSlopLex) {
 TEST_F(SearchParserTest, PhraseSlopParse) {
   ASSERT_EQ(0, Parse("\"machine learning\"~2"));
   AstExpr root = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(root));
-  const auto& p = std::get<AstPhraseNode>(root);
+  ASSERT_TRUE(root->Is<AstPhraseNode>());
+  const auto& p = *root->As<AstPhraseNode>();
   EXPECT_EQ(p.raw, "machine learning");
   EXPECT_EQ(p.slop, 2u);
 
   // Field-scoped slop.
   ASSERT_EQ(0, Parse("@title:\"machine learning\"~5"));
   AstExpr field = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(field));
-  const auto& fnode = std::get<AstFieldNode>(field);
-  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(*fnode.node));
-  EXPECT_EQ(std::get<AstPhraseNode>(*fnode.node).slop, 5u);
+  ASSERT_TRUE(field->Is<AstFieldNode>());
+  const auto& fnode = *field->As<AstFieldNode>();
+  ASSERT_TRUE(fnode.node->Is<AstPhraseNode>());
+  EXPECT_EQ(fnode.node->As<AstPhraseNode>()->slop, 5u);
 }
 
 // Slop inside a tag value (@tag:{"foo"~N}) is meaningless and must be rejected, not silently
@@ -719,13 +735,13 @@ TEST_F(SearchParserTest, QuotedTagEscapes) {
   auto tag_affix = [this](const string& query) -> string {
     EXPECT_EQ(0, Parse(query));
     AstExpr e = query_driver_.Take();
-    EXPECT_TRUE(std::holds_alternative<AstFieldNode>(e));
-    const AstNode& tags = *std::get<AstFieldNode>(e).node;
-    EXPECT_TRUE(std::holds_alternative<AstTagsNode>(tags));
-    const auto& tn = std::get<AstTagsNode>(tags);
+    EXPECT_TRUE(e->Is<AstFieldNode>());
+    const AstNode& tags = *e->As<AstFieldNode>()->node;
+    EXPECT_TRUE(tags.Is<AstTagsNode>());
+    const auto& tn = *tags.As<AstTagsNode>();
     EXPECT_EQ(tn.tags.size(), 1u);
-    EXPECT_TRUE(std::holds_alternative<AstTermNode>(tn.tags[0]));
-    return std::get<AstTermNode>(tn.tags[0]).affix;
+    EXPECT_EQ(tn.tags[0].type, TagType::REGULAR);
+    return tn.tags[0].affix;
   };
 
   // Recognized escapes \\ and \" resolve to their single-character values.
@@ -748,34 +764,34 @@ TEST_F(SearchParserTest, PhraseParse) {
   // Top-level phrase.
   ASSERT_EQ(0, Parse("\"machine learning\""));
   AstExpr root = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(root));
-  EXPECT_EQ(std::get<AstPhraseNode>(root).raw, "machine learning");
+  ASSERT_TRUE(root->Is<AstPhraseNode>());
+  EXPECT_EQ(root->As<AstPhraseNode>()->raw, "machine learning");
 
   // Phrase inside @field:"..."
   ASSERT_EQ(0, Parse("@title:\"fully convolutional network\""));
   AstExpr field = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(field));
-  const auto& fnode = std::get<AstFieldNode>(field);
+  ASSERT_TRUE(field->Is<AstFieldNode>());
+  const auto& fnode = *field->As<AstFieldNode>();
   EXPECT_EQ(fnode.field, "title");
-  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(*fnode.node));
-  EXPECT_EQ(std::get<AstPhraseNode>(*fnode.node).raw, "fully convolutional network");
+  ASSERT_TRUE(fnode.node->Is<AstPhraseNode>());
+  EXPECT_EQ(fnode.node->As<AstPhraseNode>()->raw, "fully convolutional network");
 
   // Single-quoted single token still becomes a phrase (executor handles 1-token case).
   ASSERT_EQ(0, Parse("'foo'"));
   AstExpr single = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(single));
+  ASSERT_TRUE(single->Is<AstPhraseNode>());
 
   // Phrase combined with AND of free terms — RAG-style "...AND \"...\"" queries.
   ASSERT_EQ(0, Parse("machine \"deep learning\""));
   AstExpr and_root = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstLogicalNode>(and_root));
-  const auto& log = std::get<AstLogicalNode>(and_root);
+  ASSERT_TRUE(and_root->Is<AstLogicalNode>());
+  const auto& log = *and_root->As<AstLogicalNode>();
   EXPECT_EQ(log.op, AstLogicalNode::AND);
   bool found_phrase = false;
   for (const auto& child : log.nodes) {
-    if (std::holds_alternative<AstPhraseNode>(child)) {
+    if (child->Is<AstPhraseNode>()) {
       found_phrase = true;
-      EXPECT_EQ(std::get<AstPhraseNode>(child).raw, "deep learning");
+      EXPECT_EQ(child->As<AstPhraseNode>()->raw, "deep learning");
     }
   }
   EXPECT_TRUE(found_phrase);
@@ -818,90 +834,90 @@ TEST_F(SearchParserTest, WildcardLex) {
 TEST_F(SearchParserTest, WildcardParse) {
   ASSERT_EQ(0, Parse("w'hel*'"));
   AstExpr root = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstWildcardNode>(root));
-  EXPECT_EQ(std::get<AstWildcardNode>(root).affix, "hel*");
+  ASSERT_TRUE(root->Is<AstWildcardNode>());
+  EXPECT_EQ(root->As<AstWildcardNode>()->affix, "hel*");
 
   // After a field colon, both bare and parenthesized.
   ASSERT_EQ(0, Parse("@title:w'h?llo'"));
   AstExpr field = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(field));
-  ASSERT_TRUE(std::holds_alternative<AstWildcardNode>(*std::get<AstFieldNode>(field).node));
+  ASSERT_TRUE(field->Is<AstFieldNode>());
+  ASSERT_TRUE(field->As<AstFieldNode>()->node->Is<AstWildcardNode>());
   ASSERT_EQ(0, Parse("@title:(w'h?llo')"));
 
   // As a tag value.
   ASSERT_EQ(0, Parse("@tag:{w'hel*'}"));
   AstExpr tag_field = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(tag_field));
-  const AstNode& tags = *std::get<AstFieldNode>(tag_field).node;
-  ASSERT_TRUE(std::holds_alternative<AstTagsNode>(tags));
-  const auto& tn = std::get<AstTagsNode>(tags);
+  ASSERT_TRUE(tag_field->Is<AstFieldNode>());
+  const AstNode& tags = *tag_field->As<AstFieldNode>()->node;
+  ASSERT_TRUE(tags.Is<AstTagsNode>());
+  const auto& tn = *tags.As<AstTagsNode>();
   ASSERT_EQ(tn.tags.size(), 1u);
-  EXPECT_TRUE(std::holds_alternative<AstWildcardNode>(tn.tags[0]));
+  EXPECT_EQ(tn.tags[0].type, TagType::WILDCARD);
 }
 
 // A parenthesized field condition must accept the same atoms as the bare `@field:...` form.
 TEST_F(SearchParserTest, FieldParenthesizedAtoms) {
-  auto field_child = [this](const std::string& q) -> AstNode {
+  auto field_child = [this](const std::string& q) -> AstExpr {
     EXPECT_EQ(0, Parse(q)) << q;
     AstExpr e = query_driver_.Take();
-    if (auto* f = std::get_if<AstFieldNode>(&e))
-      return std::move(*f->node);
+    if (auto* f = e->As<AstFieldNode>())
+      return std::move(f->node);
     ADD_FAILURE() << "not a field node: " << q;
     return e;
   };
 
   for (const auto& q : {R"(@prefix:("hello"))"s, R"((@prefix:("hello")))"s}) {
-    AstNode n = field_child(q);
-    ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(n)) << q;
-    EXPECT_EQ(std::get<AstPhraseNode>(n).raw, "hello");
-    EXPECT_EQ(std::get<AstPhraseNode>(n).slop, 0u);
+    AstExpr n = field_child(q);
+    ASSERT_TRUE(n->Is<AstPhraseNode>()) << q;
+    EXPECT_EQ(n->As<AstPhraseNode>()->raw, "hello");
+    EXPECT_EQ(n->As<AstPhraseNode>()->slop, 0u);
   }
 
   {
-    AstNode n = field_child(R"(@title:("machine learning"~2))");
-    ASSERT_TRUE(std::holds_alternative<AstPhraseNode>(n));
-    EXPECT_EQ(std::get<AstPhraseNode>(n).raw, "machine learning");
-    EXPECT_EQ(std::get<AstPhraseNode>(n).slop, 2u);
+    AstExpr n = field_child(R"(@title:("machine learning"~2))");
+    ASSERT_TRUE(n->Is<AstPhraseNode>());
+    EXPECT_EQ(n->As<AstPhraseNode>()->raw, "machine learning");
+    EXPECT_EQ(n->As<AstPhraseNode>()->slop, 2u);
   }
 
   {
-    AstNode n = field_child("@prefix:(hel*)");
-    ASSERT_TRUE(std::holds_alternative<AstPrefixNode>(n));
-    EXPECT_EQ(std::get<AstPrefixNode>(n).affix, "hel");
+    AstExpr n = field_child("@prefix:(hel*)");
+    ASSERT_TRUE(n->Is<AstPrefixNode>());
+    EXPECT_EQ(n->As<AstPrefixNode>()->affix, "hel");
   }
   {
-    AstNode n = field_child("@prefix:(*llo)");
-    ASSERT_TRUE(std::holds_alternative<AstSuffixNode>(n));
-    EXPECT_EQ(std::get<AstSuffixNode>(n).affix, "llo");
+    AstExpr n = field_child("@prefix:(*llo)");
+    ASSERT_TRUE(n->Is<AstSuffixNode>());
+    EXPECT_EQ(n->As<AstSuffixNode>()->affix, "llo");
   }
   {
-    AstNode n = field_child("@prefix:(*ell*)");
-    ASSERT_TRUE(std::holds_alternative<AstInfixNode>(n));
-    EXPECT_EQ(std::get<AstInfixNode>(n).affix, "ell");
-  }
-
-  {
-    AstNode n = field_child(R"(@prefix:(-"world"))");
-    ASSERT_TRUE(std::holds_alternative<AstNegateNode>(n));
-    EXPECT_TRUE(std::holds_alternative<AstPhraseNode>(*std::get<AstNegateNode>(n).node));
-  }
-  {
-    AstNode n = field_child(R"(@prefix:(~"hello"))");
-    ASSERT_TRUE(std::holds_alternative<AstOptionalNode>(n));
-    EXPECT_TRUE(std::holds_alternative<AstPhraseNode>(*std::get<AstOptionalNode>(n).node));
+    AstExpr n = field_child("@prefix:(*ell*)");
+    ASSERT_TRUE(n->Is<AstInfixNode>());
+    EXPECT_EQ(n->As<AstInfixNode>()->affix, "ell");
   }
 
   {
-    AstNode n = field_child(R"(@title:("machine" | "deep"))");
-    ASSERT_TRUE(std::holds_alternative<AstLogicalNode>(n));
-    EXPECT_EQ(std::get<AstLogicalNode>(n).op, AstLogicalNode::OR);
-    EXPECT_EQ(std::get<AstLogicalNode>(n).nodes.size(), 2u);
+    AstExpr n = field_child(R"(@prefix:(-"world"))");
+    ASSERT_TRUE(n->Is<AstNegateNode>());
+    EXPECT_TRUE(n->As<AstNegateNode>()->node->Is<AstPhraseNode>());
   }
   {
-    AstNode n = field_child(R"(@title:("machine" "learning"))");
-    ASSERT_TRUE(std::holds_alternative<AstLogicalNode>(n));
-    EXPECT_EQ(std::get<AstLogicalNode>(n).op, AstLogicalNode::AND);
-    EXPECT_EQ(std::get<AstLogicalNode>(n).nodes.size(), 2u);
+    AstExpr n = field_child(R"(@prefix:(~"hello"))");
+    ASSERT_TRUE(n->Is<AstOptionalNode>());
+    EXPECT_TRUE(n->As<AstOptionalNode>()->node->Is<AstPhraseNode>());
+  }
+
+  {
+    AstExpr n = field_child(R"(@title:("machine" | "deep"))");
+    ASSERT_TRUE(n->Is<AstLogicalNode>());
+    EXPECT_EQ(n->As<AstLogicalNode>()->op, AstLogicalNode::OR);
+    EXPECT_EQ(n->As<AstLogicalNode>()->nodes.size(), 2u);
+  }
+  {
+    AstExpr n = field_child(R"(@title:("machine" "learning"))");
+    ASSERT_TRUE(n->Is<AstLogicalNode>());
+    EXPECT_EQ(n->As<AstLogicalNode>()->op, AstLogicalNode::AND);
+    EXPECT_EQ(n->As<AstLogicalNode>()->nodes.size(), 2u);
   }
 
   EXPECT_EQ(0, Parse(R"((@prefix:("u123\.documents") @key:{doc1}))"));
@@ -915,30 +931,30 @@ TEST_F(SearchParserTest, FieldParenthesizedAtoms) {
 TEST_F(SearchParserTest, DoubleAsTerm) {
   ASSERT_EQ(0, Parse("3.14"));
   AstExpr root = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstTermNode>(root));
-  EXPECT_EQ(std::get<AstTermNode>(root).affix, "3.14");
+  ASSERT_TRUE(root->Is<AstTermNode>());
+  EXPECT_EQ(root->As<AstTermNode>()->affix, "3.14");
 
   ASSERT_EQ(0, Parse("@title:3.14"));
   AstExpr field = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(field));
-  ASSERT_TRUE(std::holds_alternative<AstTermNode>(*std::get<AstFieldNode>(field).node));
-  EXPECT_EQ(std::get<AstTermNode>(*std::get<AstFieldNode>(field).node).affix, "3.14");
+  ASSERT_TRUE(field->Is<AstFieldNode>());
+  ASSERT_TRUE(field->As<AstFieldNode>()->node->Is<AstTermNode>());
+  EXPECT_EQ(field->As<AstFieldNode>()->node->As<AstTermNode>()->affix, "3.14");
 
   // Decimal as a term inside a parenthesized field condition.
   ASSERT_EQ(0, Parse("@title:(3.14)"));
   AstExpr paren = query_driver_.Take();
-  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(paren));
-  EXPECT_TRUE(std::holds_alternative<AstTermNode>(*std::get<AstFieldNode>(paren).node));
+  ASSERT_TRUE(paren->Is<AstFieldNode>());
+  EXPECT_TRUE(paren->As<AstFieldNode>()->node->Is<AstTermNode>());
 }
 
 // A failed parse on a reused driver must not leave the previous query's AST behind: ResetScanner()
 // clears it, so a syntax error (which never calls Set()) yields an empty result, not stale state.
 TEST_F(SearchParserTest, ResetClearsStaleAst) {
   ASSERT_EQ(0, Parse("@field:hello"));
-  ASSERT_TRUE(std::holds_alternative<AstFieldNode>(query_driver_.Take()));
+  ASSERT_TRUE(query_driver_.Take()->Is<AstFieldNode>());
 
   EXPECT_NE(0, Parse("("));
-  EXPECT_TRUE(std::holds_alternative<std::monostate>(query_driver_.Take()));
+  EXPECT_EQ(query_driver_.Take(), nullptr);
 }
 
 // Word atoms joined by separator characters without whitespace form one glued word.
@@ -1111,5 +1127,41 @@ TEST_F(SearchParserTest, GluedWordReusedDriver) {
     EXPECT_EQ(DumpAst(query_driver_.Take()), ast) << bad;
   }
 }
+
+static void BM_ParseQuery(benchmark::State& state) {
+  const pair<string_view, string_view> kQueries[] = {
+      {"term", "hello"},
+      {"field", "@title:hello"},
+      {"logical", "(@title:(hello world) | prefix*) -@tag:{obsolete} ~boost=>{$weight:2}"},
+      {"mixed", "@tag:{red|green*|*blue|*low*|w'bl?ck'} @score:[10 50]"},
+      {"phrase", "@title:\"machine learning\"~2"},
+      {"knn", "@tag:{blue|green} =>[KNN 10 @vector $vec]"},
+      {"vector_range", "@vector:[VECTOR_RANGE 1 $vec] @tag:{blue}"},
+      {"long_and", ""},
+      {"long_tags", ""},
+  };
+  auto [name, input] = kQueries[state.range(0)];
+  string query{input};
+  if (name == "long_and") {
+    for (size_t i = 0; i < 64; ++i)
+      absl::StrAppend(&query, i ? " " : "", "term", i);
+  } else if (name == "long_tags") {
+    query = "@tag:{";
+    for (size_t i = 0; i < 64; ++i)
+      absl::StrAppend(&query, i ? "|" : "", "tag", i);
+    query += "}";
+  }
+
+  QueryParams params;
+  params["vec"] = string(16, '\0');
+  SearchAlgorithm algo;
+  CHECK(algo.Init(query, &params));
+  for (auto _ : state) {
+    CHECK(algo.Init(query, &params));
+    benchmark::DoNotOptimize(algo);
+  }
+  state.SetLabel(string{name});
+}
+BENCHMARK(BM_ParseQuery)->DenseRange(0, 8)->ArgName("query")->Unit(benchmark::kMicrosecond);
 
 }  // namespace dfly::search
