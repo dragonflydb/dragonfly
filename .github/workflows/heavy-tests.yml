@@ -22,9 +22,9 @@ on:
         default: "1"
         type: string
       max-tests-run-time:
-        description: "Time limit (minutes) for test runs. Keep it below 360 minus build time so logs get uploaded."
+        description: "Time limit (minutes) for test runs. Default: 360."
         required: false
-        default: "300"
+        default: "360"
         type: string
       continue-on-test-failure:
         description: "Complete all iterations after failures and archive failed test logs."

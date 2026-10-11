@@ -7,8 +7,7 @@ or GoogleTest inputs. You can also choose your own branch.
 Regression workflows exclude tests marked `large`. Those run only in `Heavy Tests`
 on `CI-LARGE-86` and `CI-LARGE-ARM` runners. Its manual trigger accepts the Pytest
 inputs and common inputs below (no GoogleTest inputs), which is the way to repeat a
-flaky large test. Its `max-tests-run-time` defaults to `300` so that failed test logs
-are still uploaded before the six-hour job limit. It also accepts `df-runtime-flags`,
+flaky large test. It also accepts `df-runtime-flags`,
 space-separated flags passed to every Dragonfly process (for example
 `proactor_threads=2`).
 
@@ -67,7 +66,7 @@ selected target whose filter matches no tests is skipped.
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `max-tests-run-time` | `360` manual (`300` in `Heavy Tests`); not used for scheduled runs | Positive shared budget from 1 through 360 minutes. For manual runs, the deadline starts immediately before the main Pytest step and covers Pytest and GoogleTest steps. Scheduled runs retain their existing timeout behavior. |
+| `max-tests-run-time` | `360` manual; not used for scheduled runs | Positive shared budget from 1 through 360 minutes. For manual runs, the deadline starts immediately before the main Pytest step and covers Pytest and GoogleTest steps. Scheduled runs retain their existing timeout behavior. |
 | `continue-on-test-failure` | `false` | When `true`, Pytest and GoogleTest each complete all selected iterations and report failure afterward. When `false`, the first failed iteration stops that test system. |
 
 The iteration count and `max-tests-run-time` are concurrent limits: each test system ends
