@@ -67,7 +67,7 @@ selected target whose filter matches no tests is skipped.
 
 | Input | Default | Description |
 | --- | --- | --- |
-| `max-tests-run-time` | `360` manual; not used for scheduled runs | Positive shared budget from 1 through 360 minutes. For manual runs, the deadline starts immediately before the main Pytest step and covers Pytest and GoogleTest steps. Scheduled runs retain their existing timeout behavior. |
+| `max-tests-run-time` | `360` manual (`300` in `Heavy Tests`); not used for scheduled runs | Positive shared budget from 1 through 360 minutes. For manual runs, the deadline starts immediately before the main Pytest step and covers Pytest and GoogleTest steps. Scheduled runs retain their existing timeout behavior. |
 | `continue-on-test-failure` | `false` | When `true`, Pytest and GoogleTest each complete all selected iterations and report failure afterward. When `false`, the first failed iteration stops that test system. |
 
 The iteration count and `max-tests-run-time` are concurrent limits: each test system ends
