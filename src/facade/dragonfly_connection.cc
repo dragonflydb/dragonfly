@@ -4364,8 +4364,14 @@ Connection::WaitEvent::WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* 
 
 void ResetStats() {
   auto& cstats = tl_facade_stats->conn_stats;
+  // Reset counts together with their latency sums and distributions so that the
+  // pipeline_latency_seconds _count/_sum series stay consistent.
   cstats.pipelined_cmd_cnt = 0;
+  cstats.pipelined_cmd_latency = 0;
   cstats.pipelined_read_cmd_cnt = 0;
+  cstats.pipelined_read_cmd_latency = 0;
+  cstats.pipelined_read_latency_hist.Clear();
+  cstats.pipelined_other_latency_hist.Clear();
   cstats.conn_received_cnt = 0;
   cstats.command_cnt_main = 0;
   cstats.command_cnt_other = 0;

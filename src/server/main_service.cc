@@ -2176,12 +2176,14 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     default: {
       // Save EVAL's state that DispatchCommand overwrites.
       auto saved_tail = cmd_cntx->tail_args();
+      bool saved_read_only = cmd_cntx->IsReadOnly();
 
       auto* prev = cmd_cntx->SwapReplier(&replier);
       DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
       cmd_cntx->SwapReplier(prev);
 
       cmd_cntx->SetTailArgs(saved_tail);
+      cmd_cntx->SetReadOnly(saved_read_only);
     }
   }
 }
