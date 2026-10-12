@@ -23,7 +23,7 @@ using namespace std;
 constexpr size_t kSizeConnStats = sizeof(ConnectionStats);
 
 ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
-  static_assert(kSizeConnStats == 360);
+  static_assert(kSizeConnStats == 432);
 
   ADD(read_buf_capacity);
   ADD(connection_memory_bytes);
@@ -39,7 +39,10 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(command_cnt_other);
   ADD(pipelined_cmd_cnt);
   ADD(pipelined_cmd_latency);
-  pipelined_latency_hist.Merge(o.pipelined_latency_hist);
+  ADD(pipelined_read_cmd_cnt);
+  ADD(pipelined_read_cmd_latency);
+  pipelined_read_latency_hist.Merge(o.pipelined_read_latency_hist);
+  pipelined_other_latency_hist.Merge(o.pipelined_other_latency_hist);
   ADD(pipelined_wait_latency);
   ADD(conn_received_cnt);
   ADD(num_conns_main);

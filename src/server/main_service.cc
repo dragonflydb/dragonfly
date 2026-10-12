@@ -1490,6 +1490,7 @@ DispatchResult Service::DispatchCommand(
     std::tie(cid, args_no_cmd) = registry_.FindExtended(args);
   }
 
+  parsed_cmd->SetReadOnly(cid && cid->IsReadOnly());
   if (cid == nullptr) {
     invoke_pre_dispatch();
     if (async_pref != AsyncPreference::ONLY_SYNC) {
@@ -1843,6 +1844,7 @@ uint32_t Service::DispatchSquashedBatch(
         cid->IsSubscribeFamily())
       break;
 
+    cmd_cntx->SetReadOnly(cid->IsReadOnly());
     if (pre_dispatch_cb)
       (*pre_dispatch_cb)(cmd);
     if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {

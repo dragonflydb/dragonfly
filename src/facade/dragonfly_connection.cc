@@ -3482,13 +3482,23 @@ void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
   conn_stats.pipelined_cmd_cnt++;
   uint64_t latency_usec = CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
   conn_stats.pipelined_cmd_latency += latency_usec;
-  conn_stats.pipelined_latency_hist.Add(latency_usec);
+
+  base::Histogram* hist = &conn_stats.pipelined_other_latency_hist;
+  if (cmd->IsReadOnly()) {
+    conn_stats.pipelined_read_cmd_cnt++;
+    conn_stats.pipelined_read_cmd_latency += latency_usec;
+    hist = &conn_stats.pipelined_read_latency_hist;
+  }
+  hist->Add(latency_usec);
+
   // Decay the histogram every kPipelineLatencyDecayPeriod samples to
   // approximate a moving-window distribution; older observations contribute
   // half as much after each decay period.
   constexpr uint64_t kPipelineLatencyDecayPeriod = 1 << 14;  // 16384
-  if ((conn_stats.pipelined_latency_hist.count() & (kPipelineLatencyDecayPeriod - 1)) == 0) {
-    conn_stats.pipelined_latency_hist.Decay();
+  static_assert(absl::has_single_bit(kPipelineLatencyDecayPeriod));
+
+  if ((hist->count() % kPipelineLatencyDecayPeriod) == 0) {
+    hist->Decay();
   }
 
   ReleaseParsedCommand(cmd);
@@ -4355,6 +4365,7 @@ Connection::WaitEvent::WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* 
 void ResetStats() {
   auto& cstats = tl_facade_stats->conn_stats;
   cstats.pipelined_cmd_cnt = 0;
+  cstats.pipelined_read_cmd_cnt = 0;
   cstats.conn_received_cnt = 0;
   cstats.command_cnt_main = 0;
   cstats.command_cnt_other = 0;
