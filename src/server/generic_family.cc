@@ -2753,6 +2753,8 @@ void GenericFamily::Scan(CmdArgParser parser, CommandContext* cmd_cntx) {
   ScanResult keys{scan_op.limit};
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx->server_conn_cntx());
 
+  // Must be a named variable declared before ArrayScope: the scope may reference it until it
+  // ends, and SendBulkString(std::string&&) DCHECKs when called inside a scope.
   std::string cursor_str = absl::StrCat(cursor);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RedisReplyBuilder::ArrayScope scope{rb, 2};
@@ -2785,6 +2787,8 @@ void GenericFamily::Rm(CmdArgParser parser, CommandContext* cmd_cntx) {
   uint32_t deleted = 0;
   cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->tx());
 
+  // Must be a named variable declared before ArrayScope: the scope may reference it until it
+  // ends, and SendBulkString(std::string&&) DCHECKs when called inside a scope.
   std::string cursor_str = absl::StrCat(cursor);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RedisReplyBuilder::ArrayScope scope{rb, 2};

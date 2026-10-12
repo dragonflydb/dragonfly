@@ -1578,6 +1578,8 @@ void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
+    // Must be a named variable declared before ArrayScope: the scope may reference it until it
+    // ends, and SendBulkString(std::string&&) DCHECKs when called inside a scope.
     std::string cursor_str = absl::StrCat(cursor);
     auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
     RedisReplyBuilder::ArrayScope scope{rb, 2};
