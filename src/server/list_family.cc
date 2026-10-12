@@ -189,7 +189,7 @@ class ListWrapper {
       ql->EnableTiering(std::move(params), mr);
     }
 
-    ql->set_compr_policy(QList::PolicyFromFlags());
+    ql->InitFromFlags();
     if (lp.Size() > 0) {
       ql->AppendListpack(lp.GetPointer());
     }

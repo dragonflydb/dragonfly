@@ -470,7 +470,12 @@ string AbslUnparseFlag(const QList::ComprPolicy& policy) {
   return absl::StrCat("min_size=", policy.min_size);
 }
 
-auto QList::PolicyFromFlags() -> ComprPolicy {
+void QList::SetComprPolicy(const ComprPolicy& policy) {
+  zstd_enabled_ = policy.enabled;
+  zstd_min_size_ = policy.min_size;
+}
+
+void QList::InitFromFlags() {
   ComprPolicy policy = absl::GetFlag(FLAGS_list_compress_policy);
   if (!policy.enabled) {
     if (uint32_t threshold = absl::GetFlag(FLAGS_list_compress_dict_threshold); threshold > 0) {
@@ -480,7 +485,7 @@ auto QList::PolicyFromFlags() -> ComprPolicy {
       policy.enabled = true;
     }
   }
-  return policy;
+  SetComprPolicy(policy);
 }
 
 __thread QList::Stats QList::stats;
