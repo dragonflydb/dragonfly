@@ -27,6 +27,8 @@ namespace dfly::tiering {
 namespace detail {
 struct Page;
 
+using BinIdx = uint8_t;
+
 constexpr unsigned kNumFreePages = 29;
 
 /**
@@ -92,18 +94,23 @@ class ExternalAllocator {
   class SegmentDescr;
   using Page = detail::Page;
 
-  // Returns a page if there is a segment of that class.
+  // Returns a page assigned to bin_idx if there is a segment of that class.
   // Returns NULL if no page is found.
-  Page* FindPage(detail::PageClass sc);
+  Page* FindPage(detail::PageClass sc, detail::BinIdx bin_idx);
 
   int64_t LargeMalloc(size_t size);
   SegmentDescr* GetNewSegment(detail::PageClass sc);
-  void FreePage(Page* page, SegmentDescr* owner, size_t block_size);
+  void FreePage(Page* page, SegmentDescr* owner, detail::BinIdx bin_idx);
+
+  void LinkFreePage(detail::BinIdx bin_idx, Page* page);
+  void UnlinkFreePage(detail::BinIdx bin_idx, Page* page);
 
   static SegmentDescr* ToSegDescr(Page*);
 
-  SegmentDescr* sq_[2];                      // map: PageClass -> free Segment.
-  Page* free_pages_[detail::kNumFreePages];  // intrusive linked lists of pages with free blocks
+  SegmentDescr* sq_[2];  // map: PageClass -> free Segment.
+
+  // Intrusive doubly linked lists of pages with free blocks, per bin.
+  Page* free_pages_[detail::kNumFreePages];
 
   // A segment for each 256MB range. To get a segment id from the offset, shift right by 28.
   std::vector<SegmentDescr*> segments_;
