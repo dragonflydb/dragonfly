@@ -3484,11 +3484,12 @@ void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
   uint64_t latency_usec = CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
   conn_stats.pipelined_cmd_latency += latency_usec;
 
-  base::Histogram* hist = &conn_stats.pipelined_other_latency_hist;
-  if (cmd->IsReadOnly()) {
+  const bool is_read_only = cmd->IsReadOnly();
+  base::Histogram* hist = is_read_only ? &conn_stats.pipelined_read_latency_hist
+                                       : &conn_stats.pipelined_other_latency_hist;
+  if (is_read_only) {
     conn_stats.pipelined_read_cmd_cnt++;
     conn_stats.pipelined_read_cmd_latency += latency_usec;
-    hist = &conn_stats.pipelined_read_latency_hist;
   }
   hist->Add(latency_usec);
 
