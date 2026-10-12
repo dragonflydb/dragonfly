@@ -8,7 +8,6 @@
 #include <variant>
 
 #include "base/cycle_clock.h"
-#include "base/function2.hpp"
 #include "common/backed_args.h"
 #include "facade/memcache_parser.h"
 #include "facade/reply_payload.h"
@@ -54,13 +53,7 @@ class ParsedCommand : public cmn::BackedArguments {
 
   ParsedCommand() = default;
 
-  // Helper function to get the only argument type
-  template <typename C, typename Arg> static Arg OnlyArgType(void (C::*)(Arg) const);
-
  public:
-  using ReplyFunc = fu2::function_base<true, false, fu2::capacity_fixed<16, 8>, false, false,
-                                       void(SinkReplyBuilder*)>;
-
   virtual ~ParsedCommand() = default;
 
   virtual size_t GetSize() const {
@@ -138,13 +131,6 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   void SendLong(long val);
-
-  // Deprecated: use Resolve instead for deferred replies.
-  template <typename F> void ReplyWith(F&& func) {
-    assert(!is_deferred_reply_);
-    using RbType = decltype(OnlyArgType(&std::decay_t<F>::operator()));
-    func(static_cast<RbType>(rb_));
-  }
 
   // Whether SendReply() can be called. Only valid in deferred mode.
   // If the reply is not ready yet, it is guaranteed to be tracked by non-null Blocker()
