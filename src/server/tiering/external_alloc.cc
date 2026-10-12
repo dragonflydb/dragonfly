@@ -279,6 +279,7 @@ class ExternalAllocator::SegmentDescr {
  private:
   uint64_t offset_;  // size_ - relevant for large segments.
   PageClass page_class_;
+  bool in_queue = false;
 
   struct PageInfo {
     uint16_t capacity, used;  // in number of pages.
@@ -458,6 +459,7 @@ auto ExternalAllocator::FindPage(PageClass pc) -> Page* {
 
     // remove head.
     SegmentDescr* next = seg->Detach();
+    seg->in_queue = false;
     sq_[pc] = next;
     seg = next;
   }
@@ -486,6 +488,7 @@ auto ExternalAllocator::FindPage(PageClass pc) -> Page* {
     DCHECK(seg->next == seg->prev && seg == seg->next);
 
     sq_[pc] = seg;
+    seg->in_queue = true;
     return seg->FindPageSegment();
   }
 
@@ -527,10 +530,10 @@ void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, size_t block_s
   page->available = 0;
   page->next_free = nullptr;
 
-  if (!owner->HasFreePages()) {
-    // Segment was fully booked but now it has a free page.
-    // Add it to the tail of segment queue.
-    DCHECK(owner->next == owner->prev);
+  // Segment was fully booked and was detached from the queue by FindPage(), but now it has a free
+  // page. Add it to the tail of segment queue.
+  if (!owner->in_queue) {
+    DCHECK(owner->next == owner && owner->prev == owner);
 
     auto& sq = sq_[owner->page_class()];
     if (sq == nullptr) {
@@ -538,6 +541,7 @@ void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, size_t block_s
     } else {
       sq->LinkBefore(owner);
     }
+    owner->in_queue = true;
   }
   --owner->page_info_.used;
 }
@@ -552,6 +556,66 @@ inline auto ExternalAllocator::ToSegDescr(Page* page) -> SegmentDescr* {
   DCHECK(res->GetPage(page->id) == page);
 
   return res;
+}
+
+ExternalAllocator::SegmentStats ExternalAllocator::GetSegmentStats() const {
+  SegmentStats stats;
+
+  // Count total segments and allocated pages (per-class)
+  for (const auto* seg : segments_) {
+    if (seg) {
+      ++stats.segments_total;
+      // Count allocated pages in this segment
+      for (unsigned i = 0; i < seg->capacity(); ++i) {
+        if (seg->page_info_.pages[i].segment_inuse) {
+          ++stats.pages_allocated;
+          // Track per-class
+          if (seg->page_class() == detail::SMALL_P) {
+            ++stats.pages_allocated_small;
+          } else if (seg->page_class() == detail::MEDIUM_P) {
+            ++stats.pages_allocated_medium;
+          }
+        }
+      }
+    }
+  }
+
+  // Count segments in queues (reusable for new pages), per-class
+  for (unsigned pc = 0; pc < 2; ++pc) {  // SMALL_P and MEDIUM_P
+    const SegmentDescr* seg = sq_[pc];
+    if (!seg)
+      continue;
+
+    const SegmentDescr* start = seg;
+    do {
+      ++stats.segments_in_queue;
+      // Track per-class
+      if (pc == detail::SMALL_P) {
+        ++stats.segments_in_queue_small;
+      } else if (pc == detail::MEDIUM_P) {
+        ++stats.segments_in_queue_medium;
+      }
+      seg = seg->next;
+    } while (seg != start);
+  }
+
+  // Count pages in free lists (have available blocks), per-class
+  for (unsigned bin_idx = 0; bin_idx < kNumBins; ++bin_idx) {
+    const Page* page = free_pages_[bin_idx];
+    while (page && page->available > 0) {
+      ++stats.pages_in_free_list;
+      // Track per-class
+      SegmentDescr* owner = ToSegDescr(const_cast<Page*>(page));
+      if (owner->page_class() == detail::SMALL_P) {
+        ++stats.pages_in_free_list_small;
+      } else if (owner->page_class() == detail::MEDIUM_P) {
+        ++stats.pages_in_free_list_medium;
+      }
+      page = page->next_free;
+    }
+  }
+
+  return stats;
 }
 
 }  // namespace dfly::tiering

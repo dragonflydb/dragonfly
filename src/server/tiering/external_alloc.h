@@ -88,6 +88,21 @@ class ExternalAllocator {
 
   Stats GetStats() const;
 
+  struct SegmentStats {
+    uint32_t segments_total = 0;            // Total allocated segments
+    uint32_t segments_in_queue = 0;         // Segments in sq_[] (available for pages)
+    uint32_t segments_in_queue_small = 0;   // SMALL_P segments in queue
+    uint32_t segments_in_queue_medium = 0;  // MEDIUM_P segments in queue
+    uint32_t pages_allocated = 0;           // Pages with segment_inuse=1
+    uint32_t pages_allocated_small = 0;     // SMALL_P pages allocated
+    uint32_t pages_allocated_medium = 0;    // MEDIUM_P pages allocated
+    uint32_t pages_in_free_list = 0;        // Pages in free_pages_[] lists
+    uint32_t pages_in_free_list_small = 0;  // SMALL_P pages in free list
+    uint32_t pages_in_free_list_medium = 0;  // MEDIUM_P pages in free list
+  };
+
+  SegmentStats GetSegmentStats() const;
+
  private:
   class SegmentDescr;
   using Page = detail::Page;
