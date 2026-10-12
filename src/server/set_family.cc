@@ -1110,11 +1110,7 @@ struct SetReplies {
   template <typename T> void Send(vector<T> sv) {
     if (script)  // output is sorted under scripts
       sort(sv.begin(), sv.end());
-    auto replier = [vec = std::move(sv)](facade::SinkReplyBuilder* builder) {
-      auto* rb = static_cast<RedisReplyBuilder*>(builder);
-      rb->SendBulkStrArr(vec, CollectionType::SET);
-    };
-    cmd_cntx->ReplyWith(std::move(replier));
+    static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBulkStrArr(sv, CollectionType::SET);
   }
 
   void Send(const ResultSetView& rsv) {
@@ -1193,15 +1189,11 @@ void CmdSMIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
-  auto replier = [result, memberships = std::move(memberships)](facade::SinkReplyBuilder* builder) {
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    if (result || result == OpStatus::KEY_NOTFOUND) {
-      rb->SendLongArr(absl::MakeConstSpan(memberships));
-    } else {
-      rb->SendError(result.status());
-    }
-  };
-  cmd_cntx->ReplyWith(std::move(replier));
+  if (result || result == OpStatus::KEY_NOTFOUND) {
+    static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendLongArr(absl::MakeConstSpan(memberships));
+  } else {
+    cmd_cntx->SendError(result.status());
+  }
 }
 
 void CmdSMove(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -1586,14 +1578,13 @@ void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
-    auto replier = [cursor, result = std::move(result)](facade::SinkReplyBuilder* builder) {
-      auto* rb = static_cast<RedisReplyBuilder*>(builder);
-      std::string cursor_str = absl::StrCat(cursor);
-      RedisReplyBuilder::ArrayScope scope{rb, 2};
-      rb->SendBulkString(cursor_str);
-      rb->SendBulkStrArr(*result);
-    };
-    cmd_cntx->ReplyWith(std::move(replier));
+    // Must be a named variable declared before ArrayScope: the scope may reference it until it
+    // ends, and SendBulkString(std::string&&) DCHECKs when called inside a scope.
+    std::string cursor_str = absl::StrCat(cursor);
+    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+    RedisReplyBuilder::ArrayScope scope{rb, 2};
+    rb->SendBulkString(cursor_str);
+    rb->SendBulkStrArr(*result);
   } else {
     cmd_cntx->SendError(result.status());
   }

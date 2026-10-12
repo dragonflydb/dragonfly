@@ -1478,11 +1478,8 @@ void GenericFamily::Ping(CmdArgParser parser, CommandContext* cmd_cntx) {
   // If a client in the subscribe state and in resp2 mode, it returns an array for some reason.
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (cmd_cntx->server_conn_cntx()->conn_state.subscribe_info && !rb->IsResp3()) {
-    auto replier = [msg = string(msg)](RedisReplyBuilder* rb) {
-      string_view resp[2] = {"pong", msg};
-      rb->SendBulkStrArr(resp);
-    };
-    return cmd_cntx->ReplyWith(std::move(replier));
+    string_view resp[2] = {"pong", msg};
+    return rb->SendBulkStrArr(resp);
   }
 
   if (!has_msg) {
@@ -1491,8 +1488,7 @@ void GenericFamily::Ping(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   DVLOG(2) << "Ping " << msg;
 
-  auto replier = [msg = string(msg)](RedisReplyBuilder* rb) { rb->SendBulkString(msg); };
-  return cmd_cntx->ReplyWith(std::move(replier));
+  rb->SendBulkString(msg);
 }
 
 void GenericFamily::Exists(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -1580,8 +1576,7 @@ void GenericFamily::Keys(CmdArgParser parser, CommandContext* cmd_cntx) {
     cursor = ScanGeneric(cursor, scan_opts, &keys, cmd_cntx->server_conn_cntx());
   } while (cursor != 0 && keys.size() < output_limit);
 
-  auto replier = [keys = std::move(keys)](RedisReplyBuilder* rb) { keys.Send(rb); };
-  return cmd_cntx->ReplyWith(std::move(replier));
+  keys.Send(static_cast<RedisReplyBuilder*>(cmd_cntx->rb()));
 }
 
 void GenericFamily::PexpireAt(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2071,32 +2066,28 @@ struct SortVisitor {
     if (!params.store_key) {
       bool is_set = (result_type == OBJ_SET || result_type == OBJ_ZSET);
       bool has_get_patterns = !params.get_patterns.empty();
-      auto replier = [entries = std::move(entries), bounds = params.bounds, is_set,
-                      has_get_patterns,
-                      raw_elements = std::move(raw_elements)](RedisReplyBuilder* rb) {
-        DVLOG(2) << "Replying with sorted entries, count: " << entries.size();
-        auto [start_it, end_it] = GetSortRange(entries, bounds);
+      DVLOG(2) << "Replying with sorted entries, count: " << entries.size();
+      auto [start_it, end_it] = GetSortRange(entries, params.bounds);
 
-        size_t num_entries = std::distance(start_it, end_it);
-        size_t collection_size = has_get_patterns && !entries.empty()
-                                     ? num_entries * entries.front().get_values.size()
-                                     : num_entries;
+      size_t num_entries = std::distance(start_it, end_it);
+      size_t collection_size = has_get_patterns && !entries.empty()
+                                   ? num_entries * entries.front().get_values.size()
+                                   : num_entries;
 
-        rb->StartCollection(collection_size, is_set ? CollectionType::SET : CollectionType::ARRAY);
+      auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+      rb->StartCollection(collection_size, is_set ? CollectionType::SET : CollectionType::ARRAY);
 
-        for (auto it = start_it; it != end_it; ++it) {
-          if (has_get_patterns && !it->get_values.empty()) {
-            // Send all GET pattern values for this entry
-            for (const auto& value : it->get_values) {
-              rb->SendBulkString(value);
-            }
-          } else {
-            // No GET patterns - send the element itself
-            rb->SendBulkString(it->ResultKey());
+      for (auto it = start_it; it != end_it; ++it) {
+        if (has_get_patterns && !it->get_values.empty()) {
+          // Send all GET pattern values for this entry
+          for (const auto& value : it->get_values) {
+            rb->SendBulkString(value);
           }
+        } else {
+          // No GET patterns - send the element itself
+          rb->SendBulkString(it->ResultKey());
         }
-      };
-      cmd_cntx->ReplyWith(std::move(replier));
+      }
     } else {
       std::string_view store_key_sv = params.store_key.value();
       ShardId dest_sid = Shard(store_key_sv, shard_set->size());
@@ -2375,28 +2366,26 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
     return;
   }
 
-  auto replier = [raw_elements = std::move(raw_elements), params, source_type,
-                  get_values = std::move(get_values_per_element)](RedisReplyBuilder* rb) {
-    auto [start_it, end_it] = GetSortRange(raw_elements, params.bounds);
-    bool is_set = (source_type == OBJ_SET || source_type == OBJ_ZSET);
-    size_t num_entries = std::distance(start_it, end_it);
-    size_t collection_size =
-        !get_values.empty() ? num_entries * get_values.front().size() : num_entries;
+  const auto& get_values = get_values_per_element;
+  auto [start_it, end_it] = GetSortRange(raw_elements, params.bounds);
+  bool is_set = (source_type == OBJ_SET || source_type == OBJ_ZSET);
+  size_t num_entries = std::distance(start_it, end_it);
+  size_t collection_size =
+      !get_values.empty() ? num_entries * get_values.front().size() : num_entries;
 
-    rb->StartCollection(collection_size, is_set ? CollectionType::SET : CollectionType::ARRAY);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  rb->StartCollection(collection_size, is_set ? CollectionType::SET : CollectionType::ARRAY);
 
-    size_t elem_idx = start_it - raw_elements.begin();
-    for (auto it = start_it; it != end_it; ++it, ++elem_idx) {
-      if (!get_values.empty() && !get_values[elem_idx].empty()) {
-        for (const auto& value : get_values[elem_idx]) {
-          rb->SendBulkString(value);
-        }
-      } else {
-        rb->SendBulkString(*it);
+  size_t elem_idx = start_it - raw_elements.begin();
+  for (auto it = start_it; it != end_it; ++it, ++elem_idx) {
+    if (!get_values.empty() && !get_values[elem_idx].empty()) {
+      for (const auto& value : get_values[elem_idx]) {
+        rb->SendBulkString(value);
       }
+    } else {
+      rb->SendBulkString(*it);
     }
-  };
-  cmd_cntx->ReplyWith(std::move(replier));
+  }
 }
 
 }  // namespace
@@ -2470,10 +2459,7 @@ void GenericFamily::FieldExpire(CmdArgParser parser, CommandContext* cmd_cntx) {
   OpResult<vector<long>> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
 
   if (result) {
-    auto replier = [vec = std::move(result.value())](RedisReplyBuilder* rb) {
-      rb->SendLongArr(absl::MakeConstSpan(vec));
-    };
-    cmd_cntx->ReplyWith(std::move(replier));
+    static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendLongArr(absl::MakeConstSpan(*result));
   } else {
     cmd_cntx->SendError(result.status());
   }
@@ -2683,8 +2669,7 @@ void GenericFamily::Dump(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (result) {
     DVLOG(1) << "Dump " << cmd_cntx->tx()->DebugId() << ": " << key << ", dump size "
              << result.value().size();
-    auto reply = [data = std::move(*result)](RedisReplyBuilder* rb) { rb->SendBulkString(data); };
-    cmd_cntx->ReplyWith(std::move(reply));
+    static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBulkString(*result);
   } else {
     static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendNull();
   }
@@ -2721,18 +2706,15 @@ void GenericFamily::Time(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
   DCHECK_GT(now_usec, 0u);
 
-  auto replier = [now_usec](RedisReplyBuilder* rb) {
-    rb->StartArray(2);
-    rb->SendLong(now_usec / 1000000);
-    rb->SendLong(now_usec % 1000000);
-  };
-  cmd_cntx->ReplyWith(std::move(replier));
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  rb->StartArray(2);
+  rb->SendLong(now_usec / 1000000);
+  rb->SendLong(now_usec % 1000000);
 }
 
 void GenericFamily::Echo(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
-  auto replier = [key = string(key)](RedisReplyBuilder* rb) { rb->SendBulkString(key); };
-  cmd_cntx->ReplyWith(std::move(replier));
+  static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBulkString(key);
 }
 
 // SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [BUCKET <bucket_id>]
@@ -2742,23 +2724,20 @@ void GenericFamily::Scan(CmdArgParser parser, CommandContext* cmd_cntx) {
   uint64_t cursor = 0;
   if (!absl::SimpleAtoi(token, &cursor)) {
     if (absl::EqualsIgnoreCase(token, "HELP")) {
-      auto replier = [](RedisReplyBuilder* rb) {
-        string_view help_arr[] = {
-            "SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [ATTR <mask>] [MINMSZ "
-            "<len>]",
-            "    MATCH <glob> - pattern to match keys against",
-            "    TYPE <type> - type of values to match",
-            "    COUNT <count> - number of keys to return",
-            "    ATTR <v|p|a|u> - filter by attributes: v - volatile (ttl), ",
-            "    p - persistent (no ttl), a - accessed since creation, u - untouched",
-            "    MINMSZ <len> - keeps keys with values, whose allocated size is greater or equal "
-            "to",
-            "        the specified length",
-        };
-
-        rb->SendSimpleStrArr(help_arr);
+      string_view help_arr[] = {
+          "SCAN cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>] [ATTR <mask>] [MINMSZ "
+          "<len>]",
+          "    MATCH <glob> - pattern to match keys against",
+          "    TYPE <type> - type of values to match",
+          "    COUNT <count> - number of keys to return",
+          "    ATTR <v|p|a|u> - filter by attributes: v - volatile (ttl), ",
+          "    p - persistent (no ttl), a - accessed since creation, u - untouched",
+          "    MINMSZ <len> - keeps keys with values, whose allocated size is greater or equal "
+          "to",
+          "        the specified length",
       };
-      return cmd_cntx->ReplyWith(std::move(replier));
+
+      return static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendSimpleStrArr(help_arr);
     }
     return cmd_cntx->SendError("invalid cursor");
   }
@@ -2774,14 +2753,13 @@ void GenericFamily::Scan(CmdArgParser parser, CommandContext* cmd_cntx) {
   ScanResult keys{scan_op.limit};
   cursor = ScanGeneric(cursor, scan_op, &keys, cmd_cntx->server_conn_cntx());
 
-  auto replier = [cursor, keys = std::move(keys)](RedisReplyBuilder* builder) {
-    std::string cursor_str = absl::StrCat(cursor);
-    RedisReplyBuilder::ArrayScope scope{builder, 2};
-    builder->SendBulkString(cursor_str);
-    keys.Send(builder);
-  };
-
-  cmd_cntx->ReplyWith(std::move(replier));
+  // Must be a named variable declared before ArrayScope: the scope may reference it until it
+  // ends, and SendBulkString(std::string&&) DCHECKs when called inside a scope.
+  std::string cursor_str = absl::StrCat(cursor);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  RedisReplyBuilder::ArrayScope scope{rb, 2};
+  rb->SendBulkString(cursor_str);
+  keys.Send(rb);
 }
 
 void GenericFamily::Rm(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2789,16 +2767,13 @@ void GenericFamily::Rm(CmdArgParser parser, CommandContext* cmd_cntx) {
   uint64_t cursor = 0;
   if (!absl::SimpleAtoi(token, &cursor)) {
     if (absl::EqualsIgnoreCase(token, "HELP")) {
-      auto replier = [](RedisReplyBuilder* rb) {
-        string_view help_arr[] = {
-            "RM cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>]",
-            "    MATCH <glob> - pattern to match keys against",
-            "    TYPE <type> - type of values to match (string, list, set, zset, hash, stream)",
-            "    COUNT <count> - number of keys to delete per call",
-        };
-        rb->SendSimpleStrArr(help_arr);
+      string_view help_arr[] = {
+          "RM cursor [MATCH <glob>] [TYPE <type>] [COUNT <count>]",
+          "    MATCH <glob> - pattern to match keys against",
+          "    TYPE <type> - type of values to match (string, list, set, zset, hash, stream)",
+          "    COUNT <count> - number of keys to delete per call",
       };
-      return cmd_cntx->ReplyWith(std::move(replier));
+      return static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendSimpleStrArr(help_arr);
     }
     return cmd_cntx->SendError("invalid cursor", kSyntaxErrType);
   }
@@ -2812,13 +2787,13 @@ void GenericFamily::Rm(CmdArgParser parser, CommandContext* cmd_cntx) {
   uint32_t deleted = 0;
   cursor = RmGeneric(cursor, ops.value(), &deleted, cmd_cntx->tx());
 
-  auto replier = [cursor, deleted](RedisReplyBuilder* rb) {
-    std::string cursor_str = absl::StrCat(cursor);
-    RedisReplyBuilder::ArrayScope scope{rb, 2};
-    rb->SendBulkString(cursor_str);
-    rb->SendLong(deleted);
-  };
-  cmd_cntx->ReplyWith(std::move(replier));
+  // Must be a named variable declared before ArrayScope: the scope may reference it until it
+  // ends, and SendBulkString(std::string&&) DCHECKs when called inside a scope.
+  std::string cursor_str = absl::StrCat(cursor);
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  RedisReplyBuilder::ArrayScope scope{rb, 2};
+  rb->SendBulkString(cursor_str);
+  rb->SendLong(deleted);
 }
 
 OpResult<uint32_t> GenericFamily::OpExists(const OpArgs& op_args, const ShardArgs& keys) {
@@ -2879,10 +2854,7 @@ void GenericFamily::RandomKey(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (random_idx >= candidate.size()) {
       random_idx -= candidate.size();
     } else {
-      auto replier = [keys = std::move(candidate), random_idx](RedisReplyBuilder* builder) {
-        builder->SendBulkString(keys[random_idx]);
-      };
-      return cmd_cntx->ReplyWith(std::move(replier));
+      return static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBulkString(candidate[random_idx]);
     }
   }
   static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendNull();
