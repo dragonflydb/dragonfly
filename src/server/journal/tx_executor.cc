@@ -18,28 +18,45 @@ namespace dfly {
 MultiShardExecution::MultiShardExecution(uint32_t num_flows) : flows_(num_flows) {
 }
 
-#define RETURN_ON_CANCELED() \
-  do {                       \
-    if (cancelled_)          \
-      return false;          \
+#define RETURN_ON_CANCELED()  \
+  do {                        \
+    if (cancelled_)           \
+      return Status::kFailed; \
   } while (0)
 
-bool MultiShardExecution::Execute(TxId txid, absl::FunctionRef<bool()> apply) {
+bool MultiShardExecution::JoinRound(TxId txid) {
+  if (arrived_ == 0)
+    round_txid_ = txid;
+  if (round_txid_ != txid) {
+    LOG(DFATAL) << "Global commands out of order across flows: " << round_txid_ << " vs " << txid;
+    cancelled_ = true;
+    cv_.notify_all();
+    return false;
+  }
+  ++arrived_;
+  return true;
+}
+
+// One round per global command, all under mu_:
+//   arrive:  join the round; a different txid cancels the rendezvous (kOutOfOrder).
+//   gather:  wait until all flows arrived.
+//   run:     the flow that sees the round complete runs apply; the others stay blocked.
+//   release: arrived_ = 0, ++generation_; every flow returns the round's result.
+// A cancel fails a round only before it ran; a finished round's result stands.
+MultiShardExecution::Status MultiShardExecution::Execute(TxId txid,
+                                                         absl::FunctionRef<bool()> apply) {
   std::unique_lock lk(mu_);
   RETURN_ON_CANCELED();
+  if (!JoinRound(txid))
+    return Status::kOutOfOrder;
   uint64_t generation = generation_;
-  if (arrived_++ == 0)
-    round_txid_ = txid;
-  // The flows meet the global commands in the same order.
-  LOG_IF(ERROR, round_txid_ != txid)
-      << "Global commands out of order across flows: " << round_txid_ << " and " << txid;
   VLOG(2) << "Execute txid: " << txid << " waiting for data in all shards";
 
   // Wait until the round is complete, or another flow ran it.
   cv_.wait(lk, [&] { return cancelled_ || generation_ != generation || arrived_ >= flows_; });
   // Once the round finished, every flow returns its result, even if cancelled since.
   if (generation_ != generation)
-    return global_cmd_result_;
+    return global_cmd_result_ ? Status::kOk : Status::kFailed;
   RETURN_ON_CANCELED();
 
   // The first flow to see the round complete runs it. Under the lock, so the others cannot pass
@@ -48,7 +65,7 @@ bool MultiShardExecution::Execute(TxId txid, absl::FunctionRef<bool()> apply) {
   arrived_ = 0;
   ++generation_;
   cv_.notify_all();
-  return global_cmd_result_;
+  return global_cmd_result_ ? Status::kOk : Status::kFailed;
 }
 
 #undef RETURN_ON_CANCELED

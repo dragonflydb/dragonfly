@@ -20,19 +20,31 @@ struct JournalReader;
 // shard, so the flows meet them in the same order, one round after another.
 class MultiShardExecution {
  public:
+  enum class Status : uint8_t {
+    kOk,
+    // Cancelled before the round's command ran, or apply failed.
+    kFailed,
+    // The flows reached different global commands. The rendezvous is cancelled for good.
+    kOutOfOrder,
+  };
+
   explicit MultiShardExecution(uint32_t num_flows);
 
   // Blocks until all flows reach txid, runs apply in exactly one of them, then releases them all.
   // apply runs under mu_: the others cannot pass before it finished anyway. It must not call back
   // into this object.
-  // Returns false if cancelled before the round's command ran; else apply's result, in every flow.
-  // Each replica flow resumes partial sync from its own count of applied records, so they agree.
-  bool Execute(TxId txid, absl::FunctionRef<bool()> apply);
+  // Once the round's command ran, every flow gets its result, even if cancelled since: each
+  // replica flow resumes partial sync from its own count of applied records, so they must agree.
+  Status Execute(TxId txid, absl::FunctionRef<bool()> apply);
 
-  // Wakes every waiting flow; Execute() then returns false. Used when sync fails.
+  // Wakes every waiting flow; Execute() then fails. Used when sync fails.
   void CancelAllBlockingEntities();
 
  private:
+  // Adds the flow to the current round. False if txid is not the round's: the flows got out of
+  // order, so it cancels the rendezvous rather than combining different commands in one round.
+  bool JoinRound(TxId txid);
+
   util::fb2::Mutex mu_;
   util::fb2::CondVar cv_;
   const uint32_t flows_;
