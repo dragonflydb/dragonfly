@@ -111,9 +111,14 @@ struct FieldReference {
       : name_{name}, alias_{alias} {
   }
 
-  std::string_view Identifier(const search::Schema& schema, bool is_json) const {
-    return (is_json && IsJsonPath(name_)) ? name_ : schema.LookupAlias(name_);
-  }
+  // The attribute behind the name: an alias, else a raw identifier. Unknown names are read from
+  // the document as plain TEXT.
+  struct Resolved {
+    std::string_view identifier;
+    search::SchemaField::FieldType type = search::SchemaField::TEXT;
+    bool sortable = false;
+  };
+  Resolved Resolve(const search::Schema& schema) const;
 
   std::string_view Name() const {
     return name_;
@@ -124,10 +129,21 @@ struct FieldReference {
   }
 
  private:
-  static bool IsJsonPath(std::string_view name);
-
   std::string_view name_, alias_;
 };
+
+// A field to read from documents, resolved once per query.
+struct DocField {
+  std::string_view output;
+  std::string_view identifier;
+  search::SchemaField::FieldType type;
+};
+
+// Resolve the listed fields once per query; nullopt (whole document) stays nullopt.
+std::vector<DocField> ResolveFields(const search::Schema& schema,
+                                    const std::vector<FieldReference>& fields);
+std::optional<std::vector<DocField>> ResolveFields(
+    const search::Schema& schema, const std::optional<std::vector<FieldReference>>& fields);
 
 enum class SortOrder { ASC, DESC };
 
@@ -507,11 +523,11 @@ class ShardDocIndex {
   // so serialization cannot interfere with a concurrent restoration.
   void DrainSerializationUpdates(const OpArgs& op_args);
 
-  // Serialize doc and return with key name
+  // Serialize doc and return with key name; `fields` lists what to read, nullopt reads the whole
+  // document.
   using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
-  SerializedEntryWithKey SerializeDocWithKey(
-      search::DocId id, const OpArgs& op_args, const search::Schema& schema,
-      const std::optional<std::vector<FieldReference>>& return_fields);
+  SerializedEntryWithKey SerializeDocWithKey(search::DocId id, const OpArgs& op_args,
+                                             const std::optional<std::vector<DocField>>& fields);
 
   search::DefragmentResult Defragment(PageUsage* page_usage) {
     if (indices_) {

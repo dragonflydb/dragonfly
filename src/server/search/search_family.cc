@@ -1440,6 +1440,7 @@ vector<SearchResult> LoadHnswSearchDocs(
     // Resize shard with default `true` value
     shard_docs_serialized_indicator[es->shard_id()].resize(shard_docs[es->shard_id()].size(), true);
 
+    const auto doc_fields = ResolveFields(schema, load_options.return_fields);
     for (size_t i = 0; i < shard_docs[es->shard_id()].size(); i++) {
       auto& shard_doc = shard_docs[es->shard_id()][i];
 
@@ -1453,9 +1454,7 @@ vector<SearchResult> LoadHnswSearchDocs(
         continue;
       }
 
-      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
-                                                load_options.return_fields);
-          doc) {
+      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields); doc) {
         auto& [key, fields] = *doc;
 
         // Handle sort_score and remove field if we don't need it
@@ -1635,10 +1634,9 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
     if (!idx || shard_docs[es->shard_id()].empty())
       return OpStatus::OK;
     const auto& schema = idx->base().schema;
+    const auto doc_fields = ResolveFields(schema, load_options.return_fields);
     for (auto& shard_doc : shard_docs[es->shard_id()]) {
-      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
-                                              load_options.return_fields);
-          doc) {
+      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields); doc) {
         auto& [key, fields] = *doc;
         search::SortableValue sort_score = std::monostate{};
         if (load_options.set_sort_score) {
@@ -2517,9 +2515,9 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
         // Empty optional vs unset: unset would serialize the full hash even when no LOAD is used.
         const std::optional<std::vector<FieldReference>> empty_fields{std::in_place};
         const auto& serialize_fields = emit_fields ? params->return_fields : empty_fields;
+        const auto doc_fields = ResolveFields(schema, serialize_fields);
         for (auto& doc : hnsw_shard_docs[sid]) {
-          if (auto s = idx->SerializeDocWithKey(doc.id, t->GetOpArgs(es), schema, serialize_fields);
-              s) {
+          if (auto s = idx->SerializeDocWithKey(doc.id, t->GetOpArgs(es), doc_fields); s) {
             doc.key = string{s->first};
             doc.values = std::move(s->second);
           }

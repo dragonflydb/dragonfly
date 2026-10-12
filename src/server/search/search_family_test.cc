@@ -3386,6 +3386,29 @@ TEST_F(SearchFamilyTest, HashAllowsSameIdentifierWithDifferentAliases) {
               IsArray(IntArg(1), "hx:1", IsArray("description", "very fast and elegant")));
 }
 
+// LOAD ... AS may move a SORTABLE field's output name to another field.
+TEST_F(SearchFamilyTest, AggregateLoadAliasReplacesSortableField) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "a", "NUMERIC", "SORTABLE", "b", "NUMERIC"}),
+      "OK");
+  Run({"HSET", "doc", "a", "10", "b", "20"});
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "LOAD", "6", "a", "AS", "moved", "b", "AS", "a"}),
+              IsUnordArrayWithSize(IsMap("moved", "10", "a", "20")));
+}
+
+// An alias wins over a document field spelled the same, in RETURN, LOAD and GROUPBY alike.
+TEST_F(SearchFamilyTest, AliasBeatsSameSpelledPath) {
+  Run({"FT.CREATE", "jx", "ON", "JSON", "PREFIX", "1", "j:", "SCHEMA", "$.a", "AS", "$.b", "TEXT",
+       "$.b", "AS", "c", "TEXT"});
+  Run({"JSON.SET", "j:1", "$", R"({"a":"alpha","b":"bravo"})"});
+  EXPECT_THAT(Run({"FT.SEARCH", "jx", "*", "RETURN", "1", "$.b"}),
+              IsArray(IntArg(1), "j:1", IsArray("$.b", "alpha")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "jx", "*", "LOAD", "1", "$.b"}),
+              IsUnordArrayWithSize(IsMap("$.b", "alpha")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "jx", "*", "GROUPBY", "1", "@$.b"}),
+              IsUnordArrayWithSize(IsMap("$.b", "alpha")));
+}
+
 TEST_F(SearchFamilyTest, ReturnTrailingAsRejected) {
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
   Run({"JSON.SET", "j1", ".", R"({"a":"alpha"})"});
