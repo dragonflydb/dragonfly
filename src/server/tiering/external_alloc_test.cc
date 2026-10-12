@@ -180,4 +180,38 @@ TEST_F(ExternalAllocatorTest, AllocLarge) {
   EXPECT_EQ(ext_alloc_.allocated_bytes(), 0u);
 }
 
+// Pages that become fully free are unlinked from the middle and the tail of the free pages list
+// and returned to the segment.
+TEST_F(ExternalAllocatorTest, FreePageInsideFreeList) {
+  constexpr size_t kBlock = 64_KB;  // 16 blocks per 1MB page.
+  constexpr unsigned kBlocksInPage = 1_MB / kBlock;
+
+  ext_alloc_.AddStorage(0, kSegSize);
+
+  // Fill pages 0, 1 and 2.
+  vector<int64_t> blocks;
+  for (unsigned i = 0; i < 3 * kBlocksInPage; ++i) {
+    blocks.push_back(ext_alloc_.Malloc(kBlock));
+    ASSERT_EQ(blocks.back(), i * kBlock);
+  }
+
+  // Free the first block of each page, so the free list of the bin is: 2 -> 1 -> 0.
+  for (unsigned page = 0; page < 3; ++page)
+    ext_alloc_.Free(blocks[page * kBlocksInPage], kBlock);
+
+  // Fully free page 1 (middle of the list), then page 0 (tail of the list).
+  for (unsigned page : {1, 0}) {
+    for (unsigned i = 1; i < kBlocksInPage; ++i)
+      ext_alloc_.Free(blocks[page * kBlocksInPage + i], kBlock);
+  }
+  EXPECT_EQ(ext_alloc_.allocated_bytes(), (kBlocksInPage - 1) * kBlock);
+
+  // Page 0 went back to the segment and can host another bin.
+  EXPECT_EQ(ext_alloc_.Malloc(4_KB), 0);
+
+  // Page 2 is the only page left in the list, then page 1 is taken from the segment.
+  EXPECT_EQ(ext_alloc_.Malloc(kBlock), 2_MB);
+  EXPECT_EQ(ext_alloc_.Malloc(kBlock), 1_MB);
+}
+
 }  // namespace dfly::tiering
