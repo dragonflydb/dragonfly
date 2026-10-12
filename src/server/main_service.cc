@@ -1490,6 +1490,7 @@ DispatchResult Service::DispatchCommand(
     std::tie(cid, args_no_cmd) = registry_.FindExtended(args);
   }
 
+  parsed_cmd->SetReadOnly(cid && cid->IsReadOnly());
   if (cid == nullptr) {
     invoke_pre_dispatch();
     if (async_pref != AsyncPreference::ONLY_SYNC) {
@@ -1843,6 +1844,7 @@ uint32_t Service::DispatchSquashedBatch(
         cid->IsSubscribeFamily())
       break;
 
+    cmd_cntx->SetReadOnly(cid->IsReadOnly());
     if (pre_dispatch_cb)
       (*pre_dispatch_cb)(cmd);
     if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
@@ -2174,12 +2176,14 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     default: {
       // Save EVAL's state that DispatchCommand overwrites.
       auto saved_tail = cmd_cntx->tail_args();
+      bool saved_read_only = cmd_cntx->IsReadOnly();
 
       auto* prev = cmd_cntx->SwapReplier(&replier);
       DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
       cmd_cntx->SwapReplier(prev);
 
       cmd_cntx->SetTailArgs(saved_tail);
+      cmd_cntx->SetReadOnly(saved_read_only);
     }
   }
 }

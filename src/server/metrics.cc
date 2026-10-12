@@ -93,19 +93,19 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-void AppendPipelineLatencySummary(string_view name, string_view help, const base::Histogram& hist,
+// Appends the samples of one `type` series of a summary family. The header is emitted by the
+// caller.
+void AppendPipelineLatencySummary(string_view name, string_view type, const base::Histogram& hist,
                                   uint64_t total_count, double total_sum_usec, string* dest) {
-  AppendMetricHeader(name, help, MetricType::SUMMARY, dest);
-  const string full_name = GetMetricFullName(name);
   if (hist.count() > 0) {
     auto [p95, p99] = hist.Percentiles(95, 99);
-    AppendMetricValue(name, p95 * 1e-6, {"quantile"}, {"0.95"}, dest);
-    AppendMetricValue(name, p99 * 1e-6, {"quantile"}, {"0.99"}, dest);
+    AppendMetricValue(name, p95 * 1e-6, {"type", "quantile"}, {type, "0.95"}, dest);
+    AppendMetricValue(name, p99 * 1e-6, {"type", "quantile"}, {type, "0.99"}, dest);
   }
   // Use monotonically increasing counters for _sum/_count so that Prometheus
   // rate()/irate() functions work correctly even though the histogram is decayed.
-  absl::StrAppend(dest, full_name, "_sum ", total_sum_usec * 1e-6, "\n");
-  absl::StrAppend(dest, full_name, "_count ", total_count, "\n");
+  AppendMetricValue(StrCat(name, "_sum"), total_sum_usec * 1e-6, {"type"}, {type}, dest);
+  AppendMetricValue(StrCat(name, "_count"), total_count, {"type"}, {type}, dest);
 }
 
 }  // namespace
@@ -190,9 +190,16 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 
   // pipelined_cmd_cnt/pipelined_cmd_latency are monotonically increasing counters used for
   // Prometheus _count/_sum; the histogram is decayed and therefore not monotonic.
-  AppendPipelineLatencySummary("pipeline_latency_seconds", "Pipeline command latency distribution",
-                               conn_stats.pipelined_latency_hist, conn_stats.pipelined_cmd_cnt,
-                               conn_stats.pipelined_cmd_latency, &resp->body());
+  // Read-only commands are reported separately from all the others (type="other").
+  AppendMetricHeader("pipeline_latency_seconds", "Pipeline command latency distribution",
+                     MetricType::SUMMARY, &resp->body());
+  AppendPipelineLatencySummary(
+      "pipeline_latency_seconds", "read", conn_stats.pipelined_read_latency_hist,
+      conn_stats.pipelined_read_cmd_cnt, conn_stats.pipelined_read_cmd_latency, &resp->body());
+  AppendPipelineLatencySummary(
+      "pipeline_latency_seconds", "other", conn_stats.pipelined_other_latency_hist,
+      conn_stats.pipelined_cmd_cnt - conn_stats.pipelined_read_cmd_cnt,
+      conn_stats.pipelined_cmd_latency - conn_stats.pipelined_read_cmd_latency, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_hops,
                             MetricType::COUNTER, &resp->body());

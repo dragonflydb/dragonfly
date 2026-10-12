@@ -7,6 +7,7 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
+#include <absl/numeric/bits.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -3482,13 +3483,24 @@ void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
   conn_stats.pipelined_cmd_cnt++;
   uint64_t latency_usec = CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
   conn_stats.pipelined_cmd_latency += latency_usec;
-  conn_stats.pipelined_latency_hist.Add(latency_usec);
+
+  const bool is_read_only = cmd->IsReadOnly();
+  base::Histogram* hist = is_read_only ? &conn_stats.pipelined_read_latency_hist
+                                       : &conn_stats.pipelined_other_latency_hist;
+  if (is_read_only) {
+    conn_stats.pipelined_read_cmd_cnt++;
+    conn_stats.pipelined_read_cmd_latency += latency_usec;
+  }
+  hist->Add(latency_usec);
+
   // Decay the histogram every kPipelineLatencyDecayPeriod samples to
   // approximate a moving-window distribution; older observations contribute
   // half as much after each decay period.
   constexpr uint64_t kPipelineLatencyDecayPeriod = 1 << 14;  // 16384
-  if ((conn_stats.pipelined_latency_hist.count() & (kPipelineLatencyDecayPeriod - 1)) == 0) {
-    conn_stats.pipelined_latency_hist.Decay();
+  static_assert(absl::has_single_bit(kPipelineLatencyDecayPeriod));
+
+  if ((hist->count() % kPipelineLatencyDecayPeriod) == 0) {
+    hist->Decay();
   }
 
   ReleaseParsedCommand(cmd);
@@ -4354,7 +4366,14 @@ Connection::WaitEvent::WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* 
 
 void ResetStats() {
   auto& cstats = tl_facade_stats->conn_stats;
+  // Reset counts together with their latency sums and distributions so that the
+  // pipeline_latency_seconds _count/_sum series stay consistent.
   cstats.pipelined_cmd_cnt = 0;
+  cstats.pipelined_cmd_latency = 0;
+  cstats.pipelined_read_cmd_cnt = 0;
+  cstats.pipelined_read_cmd_latency = 0;
+  cstats.pipelined_read_latency_hist.Clear();
+  cstats.pipelined_other_latency_hist.Clear();
   cstats.conn_received_cnt = 0;
   cstats.command_cnt_main = 0;
   cstats.command_cnt_other = 0;

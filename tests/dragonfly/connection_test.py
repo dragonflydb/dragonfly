@@ -4487,3 +4487,37 @@ async def test_awakened_blocked_client_closed_under_pause(df_factory):
     blocked["second"].close()
     await client.aclose()
     await admin.aclose()
+
+
+async def _pipeline_latency_counts(df_server: DflyInstance) -> dict[str, int]:
+    # Read the _count samples of pipeline_latency_seconds keyed by the `type` label.
+    family = (await df_server.metrics())["dragonfly_pipeline_latency_seconds"]
+    return {
+        s.labels["type"]: int(s.value)
+        for s in family.samples
+        if s.name == "dragonfly_pipeline_latency_seconds_count"
+    }
+
+
+async def test_pipeline_latency_by_type(df_server: DflyInstance, async_client: aioredis.Redis):
+    await async_client.set("key", "val")
+    before = await _pipeline_latency_counts(df_server)
+
+    p = async_client.pipeline(transaction=False)
+    for _ in range(100):
+        p.get("key")
+    await p.execute()
+
+    after_reads = await _pipeline_latency_counts(df_server)
+    assert after_reads["read"] - before["read"] == 100
+
+    p = async_client.pipeline(transaction=False)
+    for i in range(50):
+        p.set(f"key{i}", "val")
+    for _ in range(10):
+        p.ping()
+    await p.execute()
+
+    after_writes = await _pipeline_latency_counts(df_server)
+    assert after_writes["read"] == after_reads["read"]
+    assert after_writes["other"] - after_reads["other"] >= 60

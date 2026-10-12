@@ -119,6 +119,15 @@ class ParsedCommand : public cmn::BackedArguments {
     return is_deferred_reply_;
   }
 
+  // Set by the server once the command is resolved. Used to split latency stats by command type.
+  void SetReadOnly(bool read_only) {
+    is_read_only_ = read_only;
+  }
+
+  bool IsReadOnly() const {
+    return is_read_only_;
+  }
+
   void ResetForReuse();
 
   void SendError(std::string_view str, std::string_view type = std::string_view{});
@@ -189,6 +198,7 @@ class ParsedCommand : public cmn::BackedArguments {
   // if false then the reply was sent directly to reply builder,
   // otherwise, moved asynchronously into reply_payload_
   bool is_deferred_reply_ = false;
+  bool is_read_only_ = false;  // whether this command is read-only
 
   std::variant<payload::Payload, SuspendedCommand> reply_;
 };

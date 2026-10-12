@@ -59,8 +59,15 @@ struct ConnectionStats {
   uint64_t command_cnt_main = 0;
   uint64_t command_cnt_other = 0;
   uint64_t pipelined_cmd_cnt = 0;
-  uint64_t pipelined_cmd_latency = 0;      // in microseconds
-  base::Histogram pipelined_latency_hist;  // distribution of per-command latencies (usec)
+  uint64_t pipelined_cmd_latency = 0;  // in microseconds
+
+  // Subset of pipelined_cmd_cnt/pipelined_cmd_latency for read-only commands.
+  uint64_t pipelined_read_cmd_cnt = 0;
+  uint64_t pipelined_read_cmd_latency = 0;  // in microseconds
+
+  // Distributions of per-command latencies (usec) for read-only and all other commands.
+  base::Histogram pipelined_read_latency_hist;
+  base::Histogram pipelined_other_latency_hist;
 
   // in microseconds, time spent waiting for the pipelined commands to start executing
   uint64_t pipelined_wait_latency = 0;
