@@ -148,8 +148,8 @@ void TokenizeWords(std::string_view text, const TextIndex::StopWords& stopwords,
       return;
     uint32_t pos = ++(*pos_counter);
     if (synonyms) {
-      if (auto group_id = synonyms->GetGroupToken(word_lc); group_id)
-        emit(*group_id, pos);
+      for (const std::string& group_token : synonyms->GetGroupTokens(word_lc))
+        emit(group_token, pos);
     }
     if (stemmer) {
       std::string stem = stemmer->Stem(word_lc);
@@ -757,7 +757,7 @@ StringOrView BaseStringIndex<C>::NormalizeForExactQuery(std::string_view query) 
   if (case_sensitive_)
     return StringOrView::FromView(query);
   std::string lc = ToLower(query);
-  // Synonym group tokens are sentinels prefixed with a space by GetGroupToken; never stem them.
+  // Synonym group tokens are sentinels prefixed with a space by GetGroupTokens; never stem them.
   if (stemmer_ && !lc.empty() && lc.front() != ' ')
     lc = stemmer_->Stem(lc);
   return StringOrView::FromString(std::move(lc));

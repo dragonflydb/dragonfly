@@ -232,10 +232,9 @@ struct BasicSearch {
       indices = indices_->GetAllTextIndices();
     }
 
-    // Single trie walk dispatches each match to scoring (AddMatchedTerm) and
-    // to the union (for the result set). Synonym shadow entries (freq=0) are
-    // resolved to the group token so TakeScoredTopK looks up the group's
-    // posting list instead.
+    // Single trie walk dispatches each match to scoring (AddMatchedTerm) and to the union (for
+    // the result set). A matched term that belongs to synonym groups is scored through the group
+    // tokens instead of its own posting list.
     vector<IndexResult> sub_results;
     sub_results.reserve(indices.size());
     for (auto* index : indices) {
@@ -244,13 +243,15 @@ struct BasicSearch {
       auto term_cb = [&per_index, &scored_terms, this, index](string_view term,
                                                               const auto* container) {
         if (scorer_) {
-          std::string resolved{term};
-          if (auto synonyms = indices_->GetSynonyms(); synonyms) {
-            if (auto group_id = synonyms->GetGroupToken(resolved); group_id)
-              resolved = std::move(*group_id);
+          absl::Span<const string> group_tokens = SynonymTokens(term);
+          if (group_tokens.empty()) {
+            if (scored_terms.insert(string{term}).second)
+              AddMatchedTerm(index, string{term});
           }
-          if (scored_terms.insert(resolved).second)
-            AddMatchedTerm(index, std::move(resolved));
+          for (const string& group_token : group_tokens) {
+            if (scored_terms.insert(group_token).second)
+              AddMatchedTerm(index, group_token);
+          }
         }
         Merge(IndexResult{container}, &per_index, LogicOp::OR);
       };
@@ -269,24 +270,25 @@ struct BasicSearch {
   }
 
   // "term": access field's text index or unify results from all text indices if no field is set.
-  // When the term is in a synonym group, the search is expanded to (term OR group_ref) so docs
-  // matched via stem still join the synonym group's docs.
+  // When the term is in synonym groups, the search is expanded to (term OR every group token) so
+  // docs matched via stem still join the docs of all of the term's groups.
   IndexResult Search(const AstTermNode& node, string_view active_field) {
     const std::string& term = node.affix;
-    std::optional<std::string> group_id;
-    if (auto synonyms = indices_->GetSynonyms(); synonyms)
-      group_id = synonyms->GetGroupToken(term);
+    absl::Span<const string> group_tokens = SynonymTokens(term);
 
     auto match_in = [&](TextIndex* index) {
       if (scorer_)
         AddMatchedTerm(index, term);
       IndexResult r{index->Matching(term, /*strip_whitespace=*/true)};
-      if (group_id) {
-        if (scorer_)
-          AddMatchedTerm(index, *group_id);
+      if (!group_tokens.empty()) {
         vector<IndexResult> parts;
+        parts.reserve(group_tokens.size() + 1);
         parts.push_back(std::move(r));
-        parts.push_back(IndexResult{index->Matching(*group_id, /*strip_whitespace=*/false)});
+        for (const string& group_token : group_tokens) {
+          if (scorer_)
+            AddMatchedTerm(index, group_token);
+          parts.push_back(IndexResult{index->Matching(group_token, /*strip_whitespace=*/false)});
+        }
         r = UnifyResults(std::move(parts), LogicOp::OR);
       }
       return r;
@@ -874,6 +876,12 @@ struct BasicSearch {
     return std::get<SchemaField::TextParams>(it->second.special_params).weight;
   }
 
+  // Group tokens of every synonym group the term belongs to (empty without synonyms).
+  absl::Span<const string> SynonymTokens(string_view term) const {
+    const Synonyms* synonyms = indices_->GetSynonyms();
+    return synonyms ? synonyms->GetGroupTokens(term) : absl::Span<const string>{};
+  }
+
   void AddMatchedTerm(TextIndex* index, string term) {
     auto [it, inserted] =
         matched_terms_index_.try_emplace(std::make_pair(index, term), matched_text_terms_.size());
@@ -951,34 +959,29 @@ struct StatsCollector {
     if (indices_->IsStopWord(node.affix))
       return;
 
-    string term = node.affix;
-    bool strip_whitespace = true;
-    if (auto* syn = indices_->GetSynonyms(); syn) {
-      if (auto group_id = syn->GetGroupToken(term); group_id) {
-        term = *group_id;
-        strip_whitespace = false;
-      }
-    }
+    // Same cursors as BasicSearch: the term's own posting list plus one per group token.
+    const Synonyms* syn = indices_->GetSynonyms();
+    absl::Span<const string> group_tokens =
+        syn ? syn->GetGroupTokens(node.affix) : absl::Span<const string>{};
     for (auto* idx : SelectTextIndices(active_field)) {
-      const auto* container = idx->Matching(term, strip_whitespace);
-      Record(idx, term, container);
+      Record(idx, node.affix, idx->Matching(node.affix));
+      for (const string& group_token : group_tokens)
+        Record(idx, group_token, idx->Matching(group_token, /*strip_whitespace=*/false));
     }
   }
 
   template <TagType T> void VisitLeaf(const AstAffixNode<T>& node, string_view active_field) {
     static_assert(T != TagType::REGULAR);
+    const Synonyms* syn = indices_->GetSynonyms();
     for (auto* idx : SelectTextIndices(active_field)) {
-      auto cb = [this, idx](string_view term, const auto* container) {
-        string resolved{term};
-        // Synonym shadow has freq=0; stats must come from the group's posting list.
-        const auto* effective = container;
-        if (auto* syn = indices_->GetSynonyms(); syn) {
-          if (auto group_id = syn->GetGroupToken(resolved); group_id) {
-            resolved = std::move(*group_id);
-            effective = idx->Matching(resolved, /*strip_whitespace=*/false);
-          }
-        }
-        Record(idx, std::move(resolved), effective);
+      auto cb = [this, idx, syn](string_view term, const auto* container) {
+        // A grouped term is scored through its group tokens (mirrors BasicSearch).
+        absl::Span<const string> group_tokens =
+            syn ? syn->GetGroupTokens(term) : absl::Span<const string>{};
+        if (group_tokens.empty())
+          Record(idx, string{term}, container);
+        for (const string& group_token : group_tokens)
+          Record(idx, group_token, idx->Matching(group_token, /*strip_whitespace=*/false));
       };
       if constexpr (T == TagType::PREFIX)
         idx->MatchPrefixWithTerm(node.affix, cb);
