@@ -25,9 +25,9 @@ MultiShardExecution::MultiShardExecution(uint32_t num_flows) : flows_(num_flows)
   } while (0)
 
 bool MultiShardExecution::JoinRound(TxId txid) {
-  if (arrived_ == 0)
+  if (arrived_ == 0) {
     round_txid_ = txid;
-  if (round_txid_ != txid) {
+  } else if (round_txid_ != txid) {
     LOG(DFATAL) << "Global commands out of order across flows: " << round_txid_ << " vs " << txid;
     cancelled_ = true;
     cv_.notify_all();

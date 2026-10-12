@@ -22,7 +22,10 @@ class MultiShardExecution {
  public:
   enum class Status : uint8_t {
     kOk,
-    // Cancelled before the round's command ran, or apply failed.
+    // The round's command did not succeed, the same in every flow of the round. Either the
+    // session was cancelled before it ran (CancelAllBlockingEntities), which is permanent:
+    // cancelled_ stays set, so every later Execute fails too. Or apply returned false, which is
+    // per round: later rounds still run, like any failed record on the replica.
     kFailed,
     // The flows reached different global commands. The rendezvous is cancelled for good.
     kOutOfOrder,
