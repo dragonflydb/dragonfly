@@ -1,23 +1,28 @@
-# Manual Regression Tests
+# Manual CI Test Runs
 
-`Regression Tests` and `Epoll Regression Tests` run Pytest automatically on a
-schedule. To run them manually, use **Actions** > select one of the two workflow > **Run workflow** to choose Pytest
-or GoogleTest inputs. You can also choose your own branch.
+Dragonfly provides three test workflows that run on a schedule and can also be
+dispatched manually. Use **Actions**, select a workflow, choose **Run workflow**,
+select the branch, and enter the optional inputs.
 
-Regression workflows exclude tests marked `large`. Those run only in `Heavy Tests`
-on `CI-LARGE-86` and `CI-LARGE-ARM` runners. Its manual trigger accepts the Pytest
-inputs and common inputs below (no GoogleTest inputs), which is the way to repeat a
-flaky large test. It also accepts `df-runtime-flags`,
-space-separated flags passed to every Dragonfly process (for example
-`proactor_threads=2`).
+| Workflow | Pytest selection | Runners | Build | GoogleTests | Runtime flags |
+| --- | --- | --- | --- | --- | --- |
+| `Regression Tests` | All tests except `large` | `ubuntu-latest`, self-hosted ARM64 | Debug, Release | Supported | Set by the matrix: `enable_resp_io_loop_v2=false/true` |
+| `Epoll Regression Tests` | All tests except `large` and `exclude_epoll` | `ubuntu-latest`, self-hosted ARM64 | Debug | Supported | Set by the matrix: `enable_resp_io_loop_v2=false/true`; forces Epoll |
+| `Heavy Tests` | Only tests marked `large` | `CI-LARGE-86`, `CI-LARGE-ARM` | Release | Not supported | Optional `df-runtime-flags` input |
+
+All three workflows accept the Pytest and common inputs below; only the two
+regression workflows accept the GoogleTest inputs. `Heavy Tests` also accepts
+`df-runtime-flags`, space-separated flags passed to every Dragonfly process (for
+example `proactor_threads=2`).
 
 ## Execution Model
 
 - Scheduled runs execute Pytest once and do not build or run GoogleTests.
 - Manual runs execute the Pytest step first when `iterations` is positive.
-  GoogleTests are disabled when `gtest-iterations` is `0` and run when it is
-  positive. When both test families are enabled, they run one after another:
-  GoogleTests are attempted after Pytest even if Pytest fails.
+- In `Regression Tests` and `Epoll Regression Tests`, GoogleTests are disabled when
+  `gtest-iterations` is `0` and run when it is positive. When both test families are
+  enabled, they run one after another: GoogleTests are attempted after Pytest even if
+  Pytest fails. `Heavy Tests` runs only Pytest.
 - Each workflow fans out across its configured matrix. Inputs apply to every
   matrix job; they cannot select an architecture, runner, or build type.
 
@@ -44,7 +49,8 @@ test-cases:  (^|/)connection_test\.py::(test_case_one|test_case_two)$|(^|/)eval_
 
 ## GoogleTest Inputs
 
-GoogleTests run only for manual dispatches of these two regression workflows.
+GoogleTests run only for manual dispatches of `Regression Tests` and
+`Epoll Regression Tests`; `Heavy Tests` does not support them.
 `gtest-iterations=0` disables them, including when GoogleTest selectors are supplied.
 Set `gtest-iterations` to a positive value to enable them. With no selectors, every
 discovered target runs. Targets are found by recursively scanning `CMakeLists.txt`
@@ -92,7 +98,8 @@ For manual runs, Pytest keeps `/tmp/failed/` between processes and the helper
 clears it once before the run begins. With continuation enabled, every failed
 iteration archives the complete `/tmp/dragonfly_logs/` directory as
 `/tmp/failed/iteration_<n>_logs.tar.gz`. Clean iteration logs are deleted. The
-failed matrix job uploads its `logs` artifact from `/tmp/failed/*`, containing all
+failed matrix job uploads its logs artifact (`logs` in the regression workflows,
+`logs-<runner>` in `Heavy Tests`) from `/tmp/failed/*`, containing all
 failed-iteration archives and `pytest-failures-by-iteration.txt`. The report lists
 failed cases from every failed Pytest iteration. Archives are standard gzip tar
 files. Scheduled runs retain the existing cleanup behavior.
@@ -105,9 +112,10 @@ are checked after CMake configuration because target availability can vary by bu
 configuration.
 
 Iteration counts apply per matrix job. For example, three Pytest iterations in the
-regular Uring workflow run across eight matrix jobs, producing 24 Pytest runs. The
-lint job does not add test iterations.
+regular Uring workflow run across eight matrix jobs, producing 24 Pytest runs, while
+`Heavy Tests` has two matrix jobs. The lint job does not add test iterations.
 
 Before every Pytest or GoogleTest iteration, the regression action logs an iteration
-banner and the exact shell-escaped command. Expand `Run regression tests action` in
-the job log to inspect them.
+banner and the exact shell-escaped command. To inspect them, expand
+`Run regression tests action` in the regression workflows or `Run heavy tests` in
+`Heavy Tests` in the job log.

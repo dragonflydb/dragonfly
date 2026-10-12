@@ -4,38 +4,40 @@ on:
   schedule:
     - cron: "0 0/6 * * *"
   workflow_dispatch:
-    # Manual runs can repeat selected large tests, see .github/REGRESSION-TESTS.md.
     inputs:
+      # Pytest - manual trigger inputs. Only tests marked large are selected.
       test-suites:
-        description: "Optional filenames; empty runs all large suites. Example: cluster_migration_resilience_test"
+        description: "Pytest: optional filenames; empty runs all suites, only tests marked large. See .github/MANUAL-CI-TESTS.md for details. Example: cluster_migration_resilience_test"
         required: false
         default: ""
         type: string
       test-cases:
-        description: "Optional node ID regex. Example: test_migration_timeout_on_sync"
+        description: "Pytest: optional node ID regex. Example: test_migration_timeout_on_sync"
         required: false
         default: ""
         type: string
       iterations:
-        description: "Number of iterations. Default: 1."
+        description: "Pytest: optional number of iterations. Default: 1."
         required: false
         default: "1"
         type: string
+      df-runtime-flags:
+        description: "Pytest: optional space-separated flags passed to every Dragonfly process. Example: proactor_threads=2"
+        required: false
+        default: ""
+        type: string
+
+      # Common inputs.
       max-tests-run-time:
-        description: "Time limit (minutes) for test runs. Default: 360."
+        description: "Common: time limit (minutes) for Pytest runs; Default: 360"
         required: false
         default: "360"
         type: string
       continue-on-test-failure:
-        description: "Complete all iterations after failures and archive failed test logs."
+        description: "Common: failure handling for Pytest; true completes iterations, archives failed Pytest logs, and deletes clean logs."
         required: false
         default: false
         type: boolean
-      df-runtime-flags:
-        description: "Optional space-separated flags passed to every Dragonfly process. Example: proactor_threads=2"
-        required: false
-        default: ""
-        type: string
 
 jobs:
   build:
