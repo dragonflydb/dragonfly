@@ -49,13 +49,13 @@ MultiShardExecution::Status MultiShardExecution::Execute(TxId txid,
   RETURN_ON_CANCELED();
   if (!JoinRound(txid))
     return Status::kOutOfOrder;
-  uint64_t generation = generation_;
+  uint64_t my_round = generation_;
   VLOG(2) << "Execute txid: " << txid << " waiting for data in all shards";
 
   // Wait until the round is complete, or another flow ran it.
-  cv_.wait(lk, [&] { return cancelled_ || generation_ != generation || arrived_ >= flows_; });
+  cv_.wait(lk, [&] { return cancelled_ || generation_ != my_round || arrived_ >= flows_; });
   // Once the round finished, every flow returns its result, even if cancelled since.
-  if (generation_ != generation)
+  if (generation_ != my_round)
     return global_cmd_status_;
   RETURN_ON_CANCELED();
 
