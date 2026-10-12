@@ -652,7 +652,7 @@ RespExpr BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   // freeing it, since BuildExpr copies string data into owned_strings_.
   auto& parsed = *obj;
 
-  // BuildExpr handles scalars and arrays recursively, preserving array cardinality.
+  // BuildExpr handles scalars and arrays iteratively, preserving array cardinality.
   // parsed (RESPObj) goes out of scope here, freeing zmalloc-allocated hiredis
   // reply data on this thread. All needed string data has been copied into
   // expr_builder_.owned_strings_.

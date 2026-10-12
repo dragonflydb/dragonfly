@@ -18,6 +18,7 @@ class RespExprBuilder {
   RespExpr BuildExpr(const RESPObj& obj);
 
  private:
+  RespExpr BuildNode(const RESPObj& obj);
   void SetStringPayload(const RESPObj& obj, RespExpr* expr);
 
   std::vector<std::unique_ptr<RespExpr::Vec>> owned_arrays_;
