@@ -303,10 +303,12 @@ void Require(lua_State* lua, const char* name, lua_CFunction openf) {
 }
 
 string_view TopSv(lua_State* lua) {
-  return string_view{lua_tostring(lua, -1), lua_rawlen(lua, -1)};
+  size_t len = 0;
+  const char* str = lua_tolstring(lua, -1, &len);
+  return {str, len};
 }
 
-optional<int> FetchKey(lua_State* lua, const char* key) {
+optional<int> FetchKey(lua_State* lua, const char* key, int expected_type) {
   lua_pushcfunction(lua, [](lua_State* lua) -> int {
     lua_gettable(lua, -3);
     return 1;
@@ -318,7 +320,7 @@ optional<int> FetchKey(lua_State* lua, const char* key) {
     return nullopt;
   }
   int type = lua_type(lua, -1);
-  if (type == LUA_TNIL) {
+  if (type != expected_type) {
     lua_pop(lua, 1);
     return nullopt;
   }
@@ -1231,12 +1233,12 @@ bool Interpreter::AddInternal(const char* f_id, string_view body, string* error)
 
 // Stack is cleaned for us, we can leave it dirty
 bool Interpreter::IsTableSafe() const {
-  auto fres = FetchKey(lua_, "err");
+  auto fres = FetchKey(lua_, "err", LUA_TSTRING);
   if (fres && *fres == LUA_TSTRING) {
     return true;
   }
 
-  fres = FetchKey(lua_, "ok");
+  fres = FetchKey(lua_, "ok", LUA_TSTRING);
   if (fres && *fres == LUA_TSTRING) {
     return true;
   }
@@ -1292,21 +1294,21 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
       }
       break;
     case LUA_TTABLE: {
-      auto fres = FetchKey(lua_, "err");
+      auto fres = FetchKey(lua_, "err", LUA_TSTRING);
       if (fres && *fres == LUA_TSTRING) {
         serializer->OnError(TopSv(lua_));
         lua_pop(lua_, 1);
         break;
       }
 
-      fres = FetchKey(lua_, "ok");
+      fres = FetchKey(lua_, "ok", LUA_TSTRING);
       if (fres && *fres == LUA_TSTRING) {
         serializer->OnStatus(TopSv(lua_));
         lua_pop(lua_, 1);
         break;
       }
 
-      fres = FetchKey(lua_, "map");
+      fres = FetchKey(lua_, "map", LUA_TTABLE);
       if (fres && *fres == LUA_TTABLE) {
         // Calculate length of map part, there is sadly no other way
         unsigned len = 0;
@@ -1323,7 +1325,7 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
         }
         serializer->OnMapEnd();
 
-        lua_pop(lua_, 2);
+        lua_pop(lua_, 1);  // The final pop below removes the wrapper table.
         break;
       }
 
