@@ -51,10 +51,10 @@ class MultiShardExecution {
   // Flows that arrived at the current round, and its txid.
   uint32_t arrived_ = 0;
   TxId round_txid_ = 0;
-  // Bumped when a round's command finished, which releases its flows with global_cmd_result_. The
+  // Bumped when a round's command finished, which releases its flows with global_cmd_status_. The
   // next round cannot finish before every flow left this one, so they all read this round's result.
   uint64_t generation_ = 0;
-  bool global_cmd_result_ = false;
+  Status global_cmd_status_ = Status::kFailed;
   bool cancelled_ = false;
 };
 
