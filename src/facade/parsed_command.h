@@ -150,11 +150,6 @@ class ParsedCommand : public cmn::BackedArguments {
   // Requires CanReply(). Either sends stored reply or wakes up coroutine to send reply
   void SendReply();
 
-  // Resolve deferred command immediately with an error reply.
-  void Resolve(const facade::ErrorReply& error) {
-    SendError(error);
-  }
-
   // Resolve deferred command with a captured payload.
   void Resolve(payload::Payload&& pl);
 
