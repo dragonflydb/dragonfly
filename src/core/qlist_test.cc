@@ -313,6 +313,30 @@ TEST_F(QListTest, EraseLastElementInNodeAdvancesToNextNode) {
   EXPECT_EQ(2, ql_.Size());
 }
 
+TEST_F(QListTest, ReverseEraseOfHeadNodeEndsIteration) {
+  // Erasing the head node while iterating towards the head must end the iteration rather than
+  // follow head_->prev, which wraps around to the tail.
+  ql_ = QList(2, QUICKLIST_NOCOMPRESS);
+  ql_.Push("y", QList::TAIL);
+  ql_.Push("y", QList::TAIL);
+  ql_.Push("x", QList::HEAD);  // [x] [y, y]
+  ASSERT_EQ(2u, ql_.node_count());
+
+  // Same loop as LREM with a negative count.
+  vector<string> visited;
+  auto it = ql_.GetIterator(QList::TAIL);
+  while (it.Valid()) {
+    visited.push_back(it.Get().to_string());
+    if (it.Get() == "x")
+      it = ql_.Erase(it);
+    else
+      it.Next();
+  }
+
+  EXPECT_THAT(visited, ElementsAre("y", "y", "x"));
+  EXPECT_THAT(ToItems(), ElementsAre("y", "y"));
+}
+
 TEST_F(QListTest, PushPlain) {
   // push a value large enough to trigger plain node insertion.
   string val(9000, 'a');
@@ -584,6 +608,68 @@ TEST_F(QListTest, InsertPivotSplitMergeMallocSize) {
   // DCHECK_EQ(malloc_size_, head_->sz) at exit of Erase(Iterator) catches the drift.
   auto it = ql.GetIterator(QList::HEAD);
   ql.Erase(it);
+}
+
+// CoolOff() decides on offloading by the node index its caller passes in. A stale index after
+// splits, merges or erases makes it offload nodes near the edges, so the offload callback here
+// checks the node's real position against the interior range.
+TEST_F(QListTest, TieringOffloadsOnlyInteriorNodes) {
+  constexpr uint32_t kThreshold = 2;
+  static unsigned offloads;
+  offloads = 0;
+
+  auto offload = [](QList* ql, QList::Node* node) {
+    uint32_t idx = 0;
+    for (const QList::Node* n = ql->Head(); n != node; n = n->next)
+      ++idx;
+    ++offloads;
+    EXPECT_TRUE(idx >= kThreshold && idx + kThreshold < ql->node_count())
+        << "offloaded node " << idx << " of " << ql->node_count();
+  };
+  auto no_op = [](QList*, QList::Node*) {};
+
+  ql_ = QList(4, QUICKLIST_NOCOMPRESS);
+  ql_.EnableTiering(
+      QList::TieringParams{kThreshold, offload, no_op, no_op,
+                           PMR_NS::string("test", PMR_NS::polymorphic_allocator<char>(&mr_))},
+      &mr_);
+
+  // Large values become plain nodes and force the split branches of Insert() and Replace().
+  const string large(10000, 'L');
+  mt19937 gen(42);
+  auto value = [&](unsigned i) { return gen() % 4 == 0 ? large : StrCat("v", i); };
+  auto index = [&] { return long(gen() % ql_.Size()); };
+
+  for (unsigned i = 0; i < 40; ++i)
+    ql_.Push(StrCat("v", i), QList::TAIL);
+
+  for (unsigned i = 0; i < 3000; ++i) {
+    switch (gen() % 6) {
+      case 0:
+        ql_.Push(value(i), gen() % 2 ? QList::HEAD : QList::TAIL);
+        break;
+      case 1:
+        if (ql_.Size() > 20)
+          ql_.Pop(gen() % 2 ? QList::HEAD : QList::TAIL);
+        break;
+      case 2:
+        ql_.Insert(ql_.GetIterator(index()), value(i), gen() % 2 ? QList::BEFORE : QList::AFTER);
+        break;
+      case 3:
+        ql_.Replace(index(), value(i));
+        break;
+      case 4:
+        if (ql_.Size() > 20)
+          ql_.Erase(ql_.GetIterator(index()));
+        break;
+      case 5:
+        if (ql_.Size() > 20)
+          ql_.Erase(index(), 1 + gen() % 8);
+        break;
+    }
+    ASSERT_FALSE(HasFailure()) << "op " << i;
+  }
+  EXPECT_GT(offloads, 0u);
 }
 
 using FillCompress = tuple<int, unsigned>;
