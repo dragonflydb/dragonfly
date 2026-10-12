@@ -15,6 +15,12 @@ regression workflows accept the GoogleTest inputs. `Heavy Tests` also accepts
 `df-runtime-flags`, space-separated flags passed to every Dragonfly process (for
 example `proactor_threads=2`).
 
+Besides the selection above, each workflow first runs the S3 snapshot tests
+(`pytest -k s3 dragonfly/snapshot_test.py`) against a local MinIO, regardless of the
+`large` marker. This happens on scheduled runs and on manual runs with default
+selection inputs; setting `test-suites` or `test-cases`, or `iterations` other than
+`1`, skips it.
+
 ## Execution Model
 
 - Scheduled runs execute Pytest once and do not build or run GoogleTests.
