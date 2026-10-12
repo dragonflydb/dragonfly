@@ -56,16 +56,16 @@ MultiShardExecution::Status MultiShardExecution::Execute(TxId txid,
   cv_.wait(lk, [&] { return cancelled_ || generation_ != my_round || arrived_ >= flows_; });
   // Once the round finished, every flow returns its result, even if cancelled since.
   if (generation_ != my_round)
-    return global_cmd_status_;
+    return round_result_;
   RETURN_ON_CANCELED();
 
   // The first flow to see the round complete runs it. Under the lock, so the others cannot pass
   // before it finished.
-  global_cmd_status_ = apply() ? Status::kOk : Status::kFailed;
+  round_result_ = apply() ? Status::kOk : Status::kFailed;
   arrived_ = 0;
   ++generation_;
   cv_.notify_all();
-  return global_cmd_status_;
+  return round_result_;
 }
 
 #undef RETURN_ON_CANCELED
