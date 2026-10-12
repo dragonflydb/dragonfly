@@ -5,9 +5,9 @@ on:
     - cron: "0 0/3 * * *"
   workflow_dispatch:
     inputs:
-      # Pytest - manual trigger inputs
+      # Pytest - manual trigger inputs.
       test-suites:
-        description: "Pytest: optional filenames; empty runs all Pytest suites. See .github/REGRESSION-TESTS.md for details. Example: connection_test,eval_test"
+        description: "Pytest: optional filenames; empty runs all Pytest suites. See .github/MANUAL-CI-TESTS.md for details. Example: connection_test,eval_test"
         required: false
         default: ""
         type: string
