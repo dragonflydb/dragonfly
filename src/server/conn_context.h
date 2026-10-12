@@ -322,8 +322,7 @@ struct ConnectionState {
       return noloop_;
     }
 
-    // True if CLIENT CACHING YES (OPTIN) or CLIENT CACHING NO (OPTOUT) applies to the
-    // current command.
+    // True while the one-shot override set by the last CLIENT CACHING is active.
     bool IsCachingPending() const {
       return option_ != NONE && seq_num_ == (1 + caching_seq_num_);
     }
