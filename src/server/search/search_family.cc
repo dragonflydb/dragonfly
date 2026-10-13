@@ -1371,40 +1371,13 @@ void WarmupQueryParser() {
   });
 }
 
-struct HnswLoadOptions {
-  bool set_sort_score = false;
-  bool remove_sort_field = false;
-  std::string sort_score_field;
-  std::optional<std::vector<FieldReference>> return_fields;
-};
-
-HnswLoadOptions PrepareHnswLoadOptions(const SearchParams& params,
-                                       std::optional<search::KnnScoreSortOption> knn_score_option) {
-  HnswLoadOptions options;
-  options.return_fields = params.return_fields;
-
-  options.set_sort_score =
-      params.sort_option && (!knn_score_option || !params.sort_option->IsSame(*knn_score_option));
-  if (!options.set_sort_score)
-    return options;
-
-  auto sort_field = params.sort_option->field.Name();
-  options.sort_score_field = sort_field;
-
-  if (!options.return_fields)
-    return options;
-
-  auto sort_return_field = rng::find_if(
-      *options.return_fields,
-      [sort_field](const FieldReference& field) { return field.Name() == sort_field; });
-
-  if (sort_return_field == options.return_fields->end()) {
-    options.return_fields->push_back(params.sort_option->field);
-    options.remove_sort_field = true;
-  } else {
-    options.sort_score_field = sort_return_field->OutputName();
-  }
-  return options;
+// SORTBY by anything but the KNN score needs the sort value loaded from the document.
+std::optional<DocField> HnswSortField(
+    const search::Schema& schema, const SearchParams& params,
+    const std::optional<search::KnnScoreSortOption>& knn_score_option) {
+  if (!params.sort_option || (knn_score_option && params.sort_option->IsSame(*knn_score_option)))
+    return std::nullopt;
+  return ResolveField(schema, params.sort_option->field);
 }
 
 vector<SearchResult> LoadHnswSearchDocs(
@@ -1434,13 +1407,13 @@ vector<SearchResult> LoadHnswSearchDocs(
     }
 
     const auto& schema = index->base().schema;
-    auto load_options = PrepareHnswLoadOptions(params, knn_score_option);
-    const bool ids_only_without_sort_load = params.IdsOnly() && !load_options.set_sort_score;
+    const std::optional<DocField> sort_field = HnswSortField(schema, params, knn_score_option);
+    const bool ids_only_without_sort_load = params.IdsOnly() && !sort_field;
 
     // Resize shard with default `true` value
     shard_docs_serialized_indicator[es->shard_id()].resize(shard_docs[es->shard_id()].size(), true);
 
-    const auto doc_fields = ResolveFields(schema, load_options.return_fields);
+    const auto doc_fields = ResolveFields(schema, params.return_fields);
     for (size_t i = 0; i < shard_docs[es->shard_id()].size(); i++) {
       auto& shard_doc = shard_docs[es->shard_id()][i];
 
@@ -1454,21 +1427,12 @@ vector<SearchResult> LoadHnswSearchDocs(
         continue;
       }
 
-      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields); doc) {
-        auto& [key, fields] = *doc;
-
-        // Handle sort_score and remove field if we don't need it
-        search::SortableValue sort_score = std::monostate{};
-        if (load_options.set_sort_score) {
-          if (auto it = fields.find(load_options.sort_score_field); it != fields.end())
-            sort_score = it->second;
-          if (load_options.remove_sort_field) {
-            fields.erase(load_options.sort_score_field);
-          }
-        }
-        shard_doc.key = std::string{key};
-        shard_doc.values = std::move(fields);
-        shard_doc.sort_score = sort_score;
+      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
+                                                sort_field ? &*sort_field : nullptr);
+          doc) {
+        shard_doc.key = std::string{doc->key};
+        shard_doc.values = std::move(doc->values);
+        shard_doc.sort_score = std::move(doc->sort_value);
       } else {
         // If we couldn't serialize requested doc
         shard_docs_serialized_indicator[es->shard_id()][i] = false;
@@ -1627,27 +1591,20 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
     shard_docs[shard_id].emplace_back(doc);
   }
 
-  auto load_options = PrepareHnswLoadOptions(params, knn_score_option);
-
   cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* idx = es->search_indices()->GetIndex(index_name);
     if (!idx || shard_docs[es->shard_id()].empty())
       return OpStatus::OK;
     const auto& schema = idx->base().schema;
-    const auto doc_fields = ResolveFields(schema, load_options.return_fields);
+    const auto doc_fields = ResolveFields(schema, params.return_fields);
+    const std::optional<DocField> sort_field = HnswSortField(schema, params, knn_score_option);
     for (auto& shard_doc : shard_docs[es->shard_id()]) {
-      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields); doc) {
-        auto& [key, fields] = *doc;
-        search::SortableValue sort_score = std::monostate{};
-        if (load_options.set_sort_score) {
-          if (auto it = fields.find(load_options.sort_score_field); it != fields.end())
-            sort_score = it->second;
-          if (load_options.remove_sort_field)
-            fields.erase(load_options.sort_score_field);
-        }
-        shard_doc.key = std::string{key};
-        shard_doc.values = std::move(fields);
-        shard_doc.sort_score = sort_score;
+      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
+                                              sort_field ? &*sort_field : nullptr);
+          doc) {
+        shard_doc.key = std::string{doc->key};
+        shard_doc.values = std::move(doc->values);
+        shard_doc.sort_score = std::move(doc->sort_value);
       }
     }
     return OpStatus::OK;
@@ -2518,8 +2475,8 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
         const auto doc_fields = ResolveFields(schema, serialize_fields);
         for (auto& doc : hnsw_shard_docs[sid]) {
           if (auto s = idx->SerializeDocWithKey(doc.id, t->GetOpArgs(es), doc_fields); s) {
-            doc.key = string{s->first};
-            doc.values = std::move(s->second);
+            doc.key = string{s->key};
+            doc.values = std::move(s->values);
           }
         }
       }

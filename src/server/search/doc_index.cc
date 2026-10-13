@@ -152,14 +152,17 @@ FieldReference::Resolved FieldReference::Resolve(const search::Schema& schema) c
                                    : FieldReference::Resolved{name_};
 }
 
+DocField ResolveField(const search::Schema& schema, const FieldReference& field) {
+  auto r = field.Resolve(schema);
+  return {field.OutputName(), r.identifier, r.type};
+}
+
 std::vector<DocField> ResolveFields(const search::Schema& schema,
                                     const std::vector<FieldReference>& fields) {
   std::vector<DocField> out;
   out.reserve(fields.size());
-  for (const auto& field : fields) {
-    auto r = field.Resolve(schema);
-    out.push_back({field.OutputName(), r.identifier, r.type});
-  }
+  for (const auto& field : fields)
+    out.push_back(ResolveField(schema, field));
   return out;
 }
 
@@ -812,13 +815,20 @@ void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
 }
 
 ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
-    search::DocId id, const OpArgs& op_args, const std::optional<std::vector<DocField>>& fields) {
+    search::DocId id, const OpArgs& op_args, const std::optional<std::vector<DocField>>& fields,
+    const DocField* sort_field) {
   auto entry = LoadEntry(id, op_args);
   if (!entry)
     return std::nullopt;
-  SearchDocData values =
-      fields ? entry->second->Serialize(*fields) : entry->second->SerializeAll(base_->schema);
-  return std::make_pair(entry->first, std::move(values));
+  const auto& accessor = entry->second;
+  SerializedDoc doc{entry->first,
+                    fields ? accessor->Serialize(*fields) : accessor->SerializeAll(base_->schema),
+                    {}};
+  if (sort_field) {
+    if (auto values = accessor->Serialize(absl::MakeConstSpan(sort_field, 1)); !values.empty())
+      doc.sort_value = std::move(values.begin()->second);
+  }
+  return doc;
 }
 
 bool ShardDocIndex::Matches(string_view key, unsigned obj_code) const {
@@ -860,14 +870,15 @@ vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, 
     };
     std::priority_queue<QPair, std::vector<QPair>, decltype(ranks_before)> q(ranks_before);
 
-    const std::vector<DocField> sort_fields = ResolveFields(base_->schema, {sort.field});
+    const DocField sort_field = ResolveField(base_->schema, sort.field);
     for (DocId id : *ids) {
       auto entry = LoadEntry(id, op_args);
       if (!entry)
         continue;
 
       search::SortableValue value = std::monostate{};
-      if (auto result = entry->second->Serialize(sort_fields); !result.empty())
+      if (auto result = entry->second->Serialize(absl::MakeConstSpan(&sort_field, 1));
+          !result.empty())
         value = std::move(result.begin()->second);
 
       QPair candidate{std::move(value), id};
