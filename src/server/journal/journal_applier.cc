@@ -34,7 +34,15 @@ bool JournalApplier::Apply(TransactionData&& tx_data, ExecutionState* cntx) {
   }
 
   TxId txid = tx_data.txid;
-  return multi_shard_exe_->Execute(txid, cntx, [&] { return Execute(std::move(tx_data)); });
+  // The context stops before its error handler cancels multi_shard_exe_, so check it right before
+  // running the command too. The result is the same in every flow.
+  auto status = multi_shard_exe_->Execute(
+      txid, [&] { return cntx->IsRunning() && Execute(std::move(tx_data)); });
+  if (status == MultiShardExecution::Status::kOutOfOrder) {
+    cntx->ReportError(std::make_error_code(std::errc::state_not_recoverable),
+                      "global commands out of order across flows");
+  }
+  return status == MultiShardExecution::Status::kOk;
 }
 
 }  // namespace dfly

@@ -5,8 +5,6 @@
 
 #include <absl/functional/function_ref.h>
 
-#include <unordered_map>
-
 #include "server/execution_state.h"
 #include "server/journal/types.h"
 #include "util/fibers/synchronization.h"
@@ -17,35 +15,50 @@ struct JournalReader;
 
 // Coordinator for multi shard execution.
 // Coordinates global commands across flows applied in parallel (e.g. replica flows).
+// Each global command is a rendezvous: every flow waits for the others, exactly one executes it,
+// and none continues before it finishes. Global transactions run in the same order on every
+// shard, so the flows meet them in the same order, one round after another.
 class MultiShardExecution {
  public:
+  enum class Status : uint8_t {
+    kOk,
+    // The round's command did not succeed, the same in every flow of the round. Either the
+    // session was cancelled before it ran (CancelAllBlockingEntities), which is permanent:
+    // cancelled_ stays set, so every later Execute fails too. Or apply returned false, which is
+    // per round: later rounds still run, like any failed record on the replica.
+    kFailed,
+    // The flows reached different global commands. The rendezvous is cancelled for good.
+    kOutOfOrder,
+  };
+
   explicit MultiShardExecution(uint32_t num_flows);
 
   // Blocks until all flows reach txid, runs apply in exactly one of them, then releases them all.
-  // Returns false if cntx stopped; else apply's result in the flow that ran it, true in the others.
-  bool Execute(TxId txid, ExecutionState* cntx, absl::FunctionRef<bool()> apply);
+  // apply runs under mu_: the others cannot pass before it finished anyway. It must not call back
+  // into this object.
+  // Once the round's command ran, every flow gets its result, even if cancelled since: each
+  // replica flow resumes partial sync from its own count of applied records, so they must agree.
+  Status Execute(TxId txid, absl::FunctionRef<bool()> apply);
 
+  // Wakes every waiting flow; Execute() then fails. Used when sync fails.
   void CancelAllBlockingEntities();
 
  private:
-  struct TxExecutionSync {
-    util::fb2::Barrier barrier;
-    std::atomic_uint32_t counter;
-    util::fb2::BlockingCounter block;
+  // Adds the flow to the current round. False if txid is not the round's: the flows got out of
+  // order, so it cancels the rendezvous rather than combining different commands in one round.
+  bool JoinRound(TxId txid);
 
-    explicit TxExecutionSync(uint32_t counter)
-        : barrier(counter), counter(counter), block(counter) {
-    }
-  };
-
-  bool InsertTxToSharedMap(TxId txid);
-  TxExecutionSync& Find(TxId txid);
-  void Erase(TxId txid);
-
-  util::fb2::Mutex map_mu_;
-  std::unordered_map<TxId, TxExecutionSync> tx_sync_execution_;
-  uint32_t num_flows_;
-  bool cancelled_{false};  // Protected by map_mu_
+  util::fb2::Mutex mu_;
+  util::fb2::CondVar cv_;
+  const uint32_t flows_;
+  // Flows that arrived at the current round, and its txid.
+  uint32_t arrived_ = 0;
+  TxId round_txid_ = 0;
+  // Bumped when a round's command finished, which releases its flows with round_result_. The
+  // next round cannot finish before every flow left this one, so they all read this round's result.
+  uint64_t generation_ = 0;
+  Status round_result_ = Status::kFailed;
+  bool cancelled_ = false;
 };
 
 // This class holds the commands of transaction in single shard.
