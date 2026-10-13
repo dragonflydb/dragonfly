@@ -1373,9 +1373,8 @@ TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
 TEST_F(ClusterFamilyTest, FlushSlotsNamespaceAware) {
   ConfigSingleNodeCluster(GetMyId());
 
-  EXPECT_EQ(
-      Run({"ACL", "SETUSER", "tenant_user", "ON", ">pass", "+@all", "NAMESPACE:tenant"}),
-      "OK");
+  EXPECT_EQ(Run({"ACL", "SETUSER", "tenant_user", "ON", ">pass", "+@all", "NAMESPACE:tenant"}),
+            "OK");
 
   EXPECT_EQ(Run({"SET", "k1", "val_default"}), "OK");
   EXPECT_EQ(Run({"GET", "k1"}), "val_default");
@@ -1404,7 +1403,6 @@ TEST_F(ClusterFamilyTest, FlushSlotsNamespaceAware) {
 
   EXPECT_EQ(Run({"GET", "k1"}), "val_default");
 }
-
 
 // Regression: FlushSlots launches an async fiber. Entries inserted after FlushSlots returns
 // but before the fiber runs must survive, because they were created after the flush was
