@@ -184,21 +184,6 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
   }
 }
 
-// Literal characters of `pat` up to the first unescaped `*` or `?`. Any term matching `pat` must
-// start with this, so it bounds the dictionary range that has to be scanned.
-string GlobLiteralPrefix(string_view pat) {
-  string prefix;
-  for (size_t i = 0; i < pat.size(); ++i) {
-    char c = pat[i];
-    if (c == '*' || c == '?')
-      break;
-    if (c == '\\' && i + 1 < pat.size())
-      c = pat[++i];
-    prefix.push_back(c);
-  }
-  return prefix;
-}
-
 // Longest run of literal characters in `pat` (bounded by unescaped `*`/`?`), with `\` escapes
 // resolved. Every term matching `pat` must contain this run as a contiguous substring, which the
 // suffix trie can test for a cheap early-exit.
@@ -222,6 +207,8 @@ string GlobLongestLiteralSegment(string_view pat) {
   flush();
   return best;
 }
+
+}  // namespace
 
 // Matches `text` against glob `pat`: `*` = any run (incl. empty), `?` = exactly one character,
 // `\` escapes the next character to a literal. Two-pointer scan with backtracking to the last `*`.
@@ -262,6 +249,23 @@ bool GlobMatch(string_view text, string_view pat) {
     ++p;
   return p == pat.size();
 }
+
+// Literal characters of `pat` up to the first unescaped `*` or `?`. Any term matching `pat` must
+// start with this, so it bounds the dictionary range that has to be scanned.
+string GlobLiteralPrefix(string_view pat) {
+  string prefix;
+  for (size_t i = 0; i < pat.size(); ++i) {
+    char c = pat[i];
+    if (c == '*' || c == '?')
+      break;
+    if (c == '\\' && i + 1 < pat.size())
+      c = pat[++i];
+    prefix.push_back(c);
+  }
+  return prefix;
+}
+
+namespace {
 
 // Haversine with earth radius in meters. Used to calculate distance.
 boost::geometry::strategy::distance::haversine haversine_(6372797.560856);
