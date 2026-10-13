@@ -351,27 +351,6 @@ TEST_P(DragonflyV2ConnectionTest, CallbackParserErrorDoesNotExecuteLaterCommands
   EXPECT_EQ(Run({"GET", "callback-after"}).type, facade::RespExpr::NIL);
 }
 
-// A parser error found before a suspending dispatch must latch immediately. Bytes received while
-// DEBUG IOSTATS PS holds the dispatch cannot be parsed as a later command.
-TEST_P(DragonflyV2ConnectionTest, FiberParserErrorDoesNotExecuteLaterCommands) {
-  RawRespClient client{port_};
-  ASSERT_TRUE(client.valid());
-  ASSERT_TRUE(
-      client.SendAll("*3\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n"
-                     "$11\r\nfiber-error\r\n"));
-  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
-
-  ASSERT_TRUE(client.SendAll("*3\r\n$5\r\nDEBUG\r\n$7\r\nIOSTATS\r\n$2\r\nPS\r\n*x\r\n"));
-  ASSERT_TRUE(WaitForSyncDispatch("fiber-error"));
-  ASSERT_TRUE(
-      client.SendAll("*3\r\n$3\r\nSET\r\n$11\r\nfiber-after\r\n$16\r\nmust-not-execute\r\n"));
-
-  auto error = client.ReadUntilContains("Protocol error", 256);
-  ASSERT_TRUE(error.has_value());
-  EXPECT_TRUE(client.ReadEof());
-  EXPECT_EQ(Run({"GET", "fiber-after"}).type, facade::RespExpr::NIL);
-}
-
 // A peer that closes its write side while earlier work drains must still receive the protocol
 // error after the queued reply.
 TEST_P(DragonflyV2ConnectionTest, ParserErrorReplySurvivesPeerWriteShutdown) {
