@@ -1333,7 +1333,11 @@ facade::OpStatus ShardDocIndices::AddAlias(string_view alias, string_view target
   using enum facade::OpStatus;
   if (!GetIndex(target))
     return KEY_NOTFOUND;
-  if (GetIndex(alias) || aliases_.contains(alias))
+
+  if (GetIndex(alias))
+    return KEY_EXISTS;
+
+  if (aliases_.contains(alias))
     return KEY_EXISTS;
 
   aliases_.emplace(alias, target);
@@ -1342,9 +1346,10 @@ facade::OpStatus ShardDocIndices::AddAlias(string_view alias, string_view target
 
 facade::OpStatus ShardDocIndices::UpdateAlias(string_view alias, string_view target) {
   using enum facade::OpStatus;
-  if (GetIndex(target) == nullptr)
+  if (!GetIndex(target))
     return KEY_NOTFOUND;
-  if (GetIndex(alias) != nullptr)
+
+  if (GetIndex(alias))
     return KEY_EXISTS;
 
   aliases_.insert_or_assign(alias, target);
@@ -1353,7 +1358,7 @@ facade::OpStatus ShardDocIndices::UpdateAlias(string_view alias, string_view tar
 
 facade::OpStatus ShardDocIndices::DeleteAlias(string_view alias) {
   using enum facade::OpStatus;
-  auto it = aliases_.find(alias);
+  const auto it = aliases_.find(alias);
   if (it == aliases_.end())
     return KEY_NOTFOUND;
   aliases_.erase(it);
@@ -1361,7 +1366,7 @@ facade::OpStatus ShardDocIndices::DeleteAlias(string_view alias) {
 }
 
 vector<pair<string, string>> ShardDocIndices::GetAliases() const {
-  return vector<pair<string, string>>(aliases_.begin(), aliases_.end());
+  return {aliases_.begin(), aliases_.end()};
 }
 
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
