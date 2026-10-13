@@ -2376,6 +2376,27 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   text_sp.limit_total = params->num_candidates;
   apply_return_fields(text_sp);
 
+  string_view requested_index_name = index_name;
+  bool needs_conclude = true;
+  absl::Cleanup conclude_tx = [&] {
+    if (needs_conclude)
+      cmd_cntx->tx()->Conclude();
+  };
+
+  std::optional<string> canonical_name;
+  auto resolve_cb = [&](Transaction*, EngineShard* es) {
+    if (es->shard_id() == 0)
+      if (auto* index = es->search_indices()->ResolveIndex(requested_index_name); index)
+        canonical_name = index->base().name;
+    return OpStatus::OK;
+  };
+  cmd_cntx->tx()->Execute(resolve_cb, false);
+  if (!canonical_name) {
+    cmd_cntx->SendError(string{requested_index_name} + ": no such index");
+    return false;
+  }
+  index_name = *canonical_name;
+
   const bool use_hnsw = GlobalHnswIndexRegistry::Instance().Exist(index_name, params->vsim_field);
   const bool have_filter = !params->vsim_filter.empty();
 
@@ -2440,8 +2461,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   search::GlobalScoringStats global_stats;
   if (needs_global_stats && !CollectGlobalScoringStats(index_name, text_algo, cmd_cntx->tx(),
                                                        shard_count, global_stats)) {
-    cmd_cntx->tx()->Conclude();
-    cmd_cntx->SendError(string{index_name} + ": no such index");
+    cmd_cntx->SendError(string{requested_index_name} + ": no such index");
     return false;
   }
   const search::GlobalScoringStats* stats_ptr = needs_global_stats ? &global_stats : nullptr;
@@ -2451,8 +2471,6 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   if (use_hnsw && !have_filter) {
     const absl::Time t = absl::Now();
     if (auto err = RunHnswPreSearch(index_name, *params, hnsw_shard_docs)) {
-      if (needs_global_stats)
-        cmd_cntx->tx()->Conclude();
       rb->SendError(*err);
       return false;
     }
@@ -2538,9 +2556,10 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     cmd_cntx->tx()->Execute(std::move(shard_cb), true);
   else
     cmd_cntx->tx()->ScheduleSingleHop(std::move(shard_cb));
+  needs_conclude = false;
 
   if (index_not_found.load(std::memory_order_relaxed)) {
-    cmd_cntx->SendError(string{index_name} + ": no such index");
+    cmd_cntx->SendError(string{requested_index_name} + ": no such index");
     return false;
   }
   if (vsim_not_vector) {
