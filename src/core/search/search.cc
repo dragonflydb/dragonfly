@@ -938,13 +938,14 @@ struct StatsCollector {
       auto [node, active_field] = stack.back();
       stack.pop_back();
 
-      size_t before = stack.size();
-      ForEachChild(*node, active_field, [&](const AstNode& child, string_view field) {
-        stack.emplace_back(&child, field);
+      VisitAst(*node, [this, &stack, active_field](const auto& inner) {
+        size_t before = stack.size();
+        ForEachChild(inner, active_field, [&](const AstNode& child, string_view field) {
+          stack.emplace_back(&child, field);
+        });
+        if (stack.size() == before)
+          VisitLeaf(inner, active_field);
       });
-      if (stack.size() == before)  // leaf
-        VisitAst(*node,
-                 [this, active_field](const auto& inner) { VisitLeaf(inner, active_field); });
     }
   }
 
