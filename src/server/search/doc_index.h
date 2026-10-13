@@ -617,13 +617,16 @@ class ShardDocIndices {
  public:
   ShardDocIndices();
 
-  // Get sharded document index by its name or nullptr if not found
+  // Get sharded document index by its name or nullptr if not found. Does not search aliases.
   ShardDocIndex* GetIndex(std::string_view name);
 
+  // Find document index by name, and also search for aliases.
   ShardDocIndex* ResolveIndex(std::string_view name);
 
+  // target must exist, there must not be an alias already, or an index by the name of alias
   facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
 
+  // changes alias to point to target, creates new if no map exists
   facade::OpStatus UpdateAlias(std::string_view alias, std::string_view target);
 
   facade::OpStatus DeleteAlias(std::string_view alias);

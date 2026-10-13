@@ -1325,7 +1325,7 @@ ShardDocIndex* ShardDocIndices::ResolveIndex(string_view name) {
   if (auto* index = GetIndex(name); index != nullptr)
     return index;
 
-  auto it = aliases_.find(name);
+  const auto it = aliases_.find(name);
   return it != aliases_.end() ? GetIndex(it->second) : nullptr;
 }
 

@@ -2755,16 +2755,16 @@ void RunAliasCommand(string_view command, ArgSlice journal_args, CommandContext*
     DCHECK_EQ(shard_status, status);
   switch (status) {
     case OK:
-      cmd_cntx->SendOk();
+      return cmd_cntx->SendOk();
     case KEY_EXISTS:
-      cmd_cntx->SendError("Alias already exists");
+      return cmd_cntx->SendError("Alias already exists");
     case KEY_NOTFOUND:
-      cmd_cntx->SendError(command == "FT.ALIASDEL" ? "Alias does not exist"
-                                                   : "Unknown index name or name is alias");
+      return cmd_cntx->SendError(command == "FT.ALIASDEL" ? "Alias does not exist"
+                                                          : "Unknown index name or name is alias");
     case INVALID_VALUE:
-      cmd_cntx->SendError("Alias name conflicts with an existing index");
+      return cmd_cntx->SendError("Alias name conflicts with an existing index");
     default:
-      cmd_cntx->SendError("Alias command failed");
+      return cmd_cntx->SendError("Alias command failed");
   }
 }
 
@@ -2928,7 +2928,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   vector<DocIndexInfo> infos(shard_set->size());
 
   cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(idx_name);
+    auto* index = es->search_indices()->ResolveIndex(idx_name);
     if (index != nullptr)
       infos[es->shard_id()] = index->GetInfo();
     return OpStatus::OK;
@@ -3795,13 +3795,10 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
 
+  const auto err_reply = make_unexpected(ErrorReply(IndexNotFoundMsg(index_name)));
   cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(index_name); index)
-      shard_results[es->shard_id()] = index->GetTagVals(field_name);
-    else
-      shard_results[es->shard_id()] =
-          nonstd::make_unexpected(ErrorReply(IndexNotFoundMsg(index_name)));
-
+    const auto* index = es->search_indices()->ResolveIndex(index_name);
+    shard_results[es->shard_id()] = index ? index->GetTagVals(field_name) : err_reply;
     return OpStatus::OK;
   });
 
@@ -4206,7 +4203,7 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Collect synonym data from all shards
   cmd_cntx->tx()->Execute(
       [&](Transaction* t, EngineShard* es) {
-        auto* index = es->search_indices()->GetIndex(index_name);
+        auto* index = es->search_indices()->ResolveIndex(index_name);
         if (!index)
           return OpStatus::OK;
 
