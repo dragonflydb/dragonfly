@@ -87,9 +87,7 @@ class TieredStorageTest : public BaseFamilyTest {
         [](EngineShard* shard) { shard->tiered_storage()->UpdateFromFlags(); });
   }
 
-  // src=[1,2] with offloaded BY weights (w_2 < w_1) and GET targets; uploads are disabled so every
-  // later lookup reads from disk. Returns the GET values.
-  pair<string, string> OffloadSortOperands() {
+  void DisableUploads() {
     SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
     UpdateFromFlags();
     // The budget turns negative once the heartbeat's CacheStats() has run on every shard.
@@ -100,6 +98,10 @@ class TieredStorageTest : public BaseFamilyTest {
       });
       return *std::ranges::max_element(budgets) < 0;
     });
+  }
+
+  pair<string, string> OffloadSortOperands() {
+    DisableUploads();
 
     string o1 = BuildString(3000, 'a'), o2 = BuildString(3000, 'b');
     Run({"RPUSH", "src", "1", "2"});
@@ -2433,5 +2435,53 @@ TEST_P(IndexedHashTieringTest, BorrowedHnswVectorsStayResident) {
 }
 
 #endif  // WITH_SEARCH
+
+TEST_F(PureDiskTSMTTest, MGetRescheduleWithPendingReads) {
+  DisableUploads();
+
+  const auto sz = shard_set->size();
+  // will go in tiered storage and take a while to read back due to large value
+  const string big = "big";
+  const string value(1 << 20, 'x');
+
+  // will be contended, by using it both in writers and readers
+  const string hot = "hot";
+
+  // used to make writer fibers multi-shard so they do not run with unique shard cnt=1 and do not do
+  // optimistic_exec
+  const string other = "y";
+
+  ASSERT_NE(Shard(big, sz), Shard(hot, sz));
+  ASSERT_NE(Shard(other, sz), Shard(big, sz));
+  ASSERT_NE(Shard(other, sz), Shard(hot, sz));
+
+  Run({"SET", big, value});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+  Run({"SET", hot, "v"});
+
+  atomic_bool done{false};
+  vector<Fiber> writers;
+  for (size_t i = 0; i < 4; i++) {
+    writers.push_back(pp_->at(i)->LaunchFiber([&, i] {
+      while (!done.load(memory_order_relaxed))
+        // use "other" to make the command multi-shard and not run inline etc
+        Run(absl::StrCat("writer", i), {"MSET", hot, "v", other, "v"});
+    }));
+  }
+
+  for (size_t i = 0; i < 500; i++) {
+    // if read of "big" runs inline, then it issues TS read request which has to use MGetResponse
+    // backing storage, even while tx is being scheduled. then the read of "hot" is to be contended
+    // and causes a retry of scheduling. the initial read will be orphaned. MGET is idempotent so it
+    // allows inline optimistic_exec. the buffers for tiered storage read must remain alive as long
+    // as requests are not finished.
+    auto resp = Run({"MGET", big, hot});
+    EXPECT_EQ(resp.GetVec()[0].GetString().size(), value.size());
+  }
+
+  done = true;
+  for (auto& fb : writers)
+    fb.Join();
+}
 
 }  // namespace dfly

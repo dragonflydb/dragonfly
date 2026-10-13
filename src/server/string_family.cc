@@ -563,7 +563,8 @@ struct alignas(64) MGetResponse {
   explicit MGetResponse(size_t size = 0) : resp_arr(size) {
   }
 
-  std::unique_ptr<char[]> storage;
+  // use shared ptr so that reads from tiered storage can hold reference to the backing storage.
+  std::shared_ptr<char[]> storage;
   absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
 };
 
@@ -622,7 +623,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_m
   VLOG_IF(1, total_size > 10000000) << "OpMGet: allocating " << total_size << " bytes";
 
   // Allocate enough for all values
-  response.storage = make_unique<char[]>(total_size);
+  response.storage = make_shared<char[]>(total_size);
   char* next = response.storage.get();
   bool fetch_mcflag = cmd_flags.return_flags;
   bool fetch_cas = cmd_flags.return_cas;
@@ -643,9 +644,13 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_m
         resp.value = resp.borrowed->view();
     } else if (value.IsExternal()) {
       wait_bc->Add(1);
-      auto cb = [next, err, wait_bc](const io::Result<string_view>& v) mutable {
+      // if the mget callback is retried, then this buffer needs to be alive until a previous read
+      // is finished, so copy a handle to it.
+      auto s = response.storage;
+      const auto offs = next - s.get();
+      auto cb = [s = std::move(s), offs, err, wait_bc](const io::Result<string_view>& v) mutable {
         if (v.has_value())
-          memcpy(next, v->data(), v->size());
+          memcpy(s.get() + offs, v->data(), v->size());
         else
           *err = v.error();
         wait_bc->Dec();
@@ -1532,9 +1537,9 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
     // Reorder shard resuls based on key indices in commands
     ShardArgs shard_args = t->GetShardArgs(sid);
     unsigned src_indx = 0;
+    // if the callback is rerun, results of the previous run must be overwritten, they point into
+    // its storage.
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
-      if (!resp.resp_arr[src_indx])
-        continue;
       DCHECK_LT(it.index(), arg_len);
       mget_results[it.index()] = std::move(resp.resp_arr[src_indx]);
     }
