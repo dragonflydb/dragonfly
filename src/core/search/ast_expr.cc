@@ -21,7 +21,6 @@ AstGeoNode::AstGeoNode(double lon, double lat, double radius, std::string unit)
 }
 
 AstLogicalNode::AstLogicalNode(AstExpr l, AstExpr r, LogicOp op) : op{op} {
-  nodes.reserve(2);
   nodes.push_back(std::move(l));
   nodes.push_back(std::move(r));
 }
@@ -80,8 +79,7 @@ void AstNodeDeleter::operator()(AstNode* node) const noexcept {
   while (pending) {
     node = pending;
     pending = node->teardown_next_;
-    node->ReleaseChildren(pending);
-    delete node;
+    node->Destroy(pending);
   }
 }
 
