@@ -324,7 +324,7 @@ constexpr int kMaxReplyDepth = 128;
 // Stack slots used per nesting level: the wrapped map, map key and value, and a key copy.
 constexpr int kReplyTableSlots = 4;
 
-// Replaces a table that is nested too deep or for which the stack can not grow.
+// Replaces a table nested too deep or for which the stack can not grow, and the tables after it.
 constexpr string_view kReplyDepthError = "ERR reached lua stack limit";
 
 void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::SliceSpan args) {
@@ -1194,24 +1194,6 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   return body;
 }
 
-bool Interpreter::IsResultSafe() const {
-  int top = lua_gettop(lua_);
-  if (top >= 128)
-    return false;
-
-  int t = lua_type(lua_, -1);
-  if (t != LUA_TTABLE)
-    return true;
-
-  bool res = IsTableSafe();
-
-  // Stack can contain intermediate unwindings that were not clean up.
-  DCHECK_GE(lua_gettop(lua_), top);
-  lua_settop(lua_, top);  // restore to the original setting.
-
-  return res;
-}
-
 bool Interpreter::AddInternal(const char* f_id, string_view body, string* error) {
   string script = absl::StrCat("function ", f_id, "() \n");
   absl::StrAppend(&script, body, "\nend");
@@ -1231,51 +1213,6 @@ bool Interpreter::AddInternal(const char* f_id, string_view body, string* error)
   return true;
 }
 
-// Stack is cleaned for us, we can leave it dirty
-bool Interpreter::IsTableSafe() const {
-  auto fres = FetchKey(lua_, "err", LUA_TSTRING);
-  if (fres && *fres == LUA_TSTRING) {
-    return true;
-  }
-
-  fres = FetchKey(lua_, "ok", LUA_TSTRING);
-  if (fres && *fres == LUA_TSTRING) {
-    return true;
-  }
-
-  // Copy root table because we remove it upon finishing traversal
-  lua_pushnil(lua_);
-  lua_copy(lua_, -2, -1);
-
-  int depth = 1;
-  lua_pushnil(lua_);
-
-  // DFS based on lua stack: [parent-table] [parent-key] [parent-value = table] [key]
-  while (depth > 0) {
-    if (lua_checkstack(lua_, 3) == 0 || depth > 128)
-      return false;
-
-    bool descending = false;
-    for (; lua_next(lua_, -2) != 0; lua_pop(lua_, 1)) {
-      if (lua_type(lua_, -1) != LUA_TTABLE)
-        continue;
-
-      // If we descend, keep value as new table and push nil for start key
-      depth++;
-      lua_pushnil(lua_);
-      descending = true;
-      break;
-    }
-
-    if (!descending) {
-      lua_pop(lua_, 1);
-      depth--;
-    }
-  }
-
-  return true;
-}
-
 // An array or a wrapped map whose values are being serialized.
 struct Interpreter::ReplyFrame {
   enum State { kDone, kArray, kMapKey, kMapValue } state;
@@ -1288,8 +1225,9 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
   // SerializeResultInternal opens at most kMaxReplyDepth nested tables.
   ReplyFrame frames[kMaxReplyDepth];
   int depth = 0;
+  int max_depth = kMaxReplyDepth;
   do {
-    ReplyFrame frame = SerializeResultInternal(serializer, depth + 1);
+    ReplyFrame frame = SerializeResultInternal(serializer, depth + 1, &max_depth);
     if (frame.state != ReplyFrame::kDone)
       frames[depth++] = frame;
 
@@ -1321,7 +1259,7 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
 
 // Serialize one value, leaving array/map traversal to SerializeResult, whose loop inlines it.
 inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
-    ObjectExplorer* serializer, int depth) -> ReplyFrame {
+    ObjectExplorer* serializer, int depth, int* max_depth) -> ReplyFrame {
   int t = lua_type(lua_, -1);
 
   switch (t) {
@@ -1339,7 +1277,10 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
       }
       break;
     case LUA_TTABLE: {
-      if (depth > kMaxReplyDepth || !lua_checkstack(lua_, kReplyTableSlots)) {
+      if (depth > *max_depth || !lua_checkstack(lua_, kReplyTableSlots)) {
+        // Cut the following tables too, so a cycle with several branches, such as t = {t, t},
+        // is not expanded into 2^128 tables.
+        *max_depth = 0;
         serializer->OnError(kReplyDepthError);
         break;
       }

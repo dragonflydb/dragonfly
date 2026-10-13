@@ -201,33 +201,6 @@ TEST_F(InterpreterTest, UnknownFunc) {
   ASSERT_EQ(LUA_TNIL, type);
 }
 
-TEST_F(InterpreterTest, Stack) {
-  RunInline(R"(
-local x = {}
-for i=1,127 do
-   x = {x}
-end
-return x
-)",
-            "code1", 1);
-
-  ASSERT_EQ(1, lua_gettop(lua()));
-  ASSERT_TRUE(intptr_.IsResultSafe());
-  lua_pop(lua(), 1);
-
-  RunInline(R"(
-local x = {}
-for i=1,128 do
-   x = {x}
-end
-return x
-)",
-            "code1", 1);
-
-  ASSERT_EQ(1, lua_gettop(lua()));
-  ASSERT_FALSE(intptr_.IsResultSafe());
-}
-
 TEST_F(InterpreterTest, ReplyDepth) {
   auto repeat = [](string_view str, int n) {
     string res;
@@ -256,6 +229,10 @@ TEST_F(InterpreterTest, ReplyDepth) {
   EXPECT_EQ("[i(1)]", ser_.res);
   EXPECT_TRUE(Execute("local t = {map = {a = 1}}; t[1] = t; return t"));
   EXPECT_EQ("{str(a) i(1)}", ser_.res);
+
+  // The tables after a cut one are cut too, so a cycle with several branches is not expanded.
+  EXPECT_TRUE(Execute("local t = {}; t[1] = t; t[2] = t; return t"));
+  EXPECT_EQ(repeat("[", 128) + depth_err + repeat(" " + depth_err + "]", 128), ser_.res);
 }
 
 TEST_F(InterpreterTest, ShallowReplyStack) {
@@ -1110,7 +1087,6 @@ static void BM_LuaXReadReply(benchmark::State& state) {
   emit_reply(&reply_size);
   for (auto _ : state) {
     CHECK_EQ(Interpreter::RUN_OK, intptr.RunFunction(sha, &error)) << error;
-    CHECK(intptr.IsResultSafe());
     intptr.SerializeResult(&ser);
     intptr.ResetStack();  // RunFunction leaves the error handler on the stack
   }

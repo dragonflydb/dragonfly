@@ -143,15 +143,9 @@ class Interpreter {
   // sha must be 40 char length.
   RunResult RunFunction(std::string_view sha, std::string* err);
 
-  // Checks whether the result is safe to serialize.
-  // Should fit 2 conditions:
-  // 1. Be the only value on the stack.
-  // 2. Should have depth of no more than 128.
-  bool IsResultSafe() const;
-
   // Serializes the result at the top of the stack and pops it. The err, ok and map wrapper fields
-  // are read with raw access, and a table nested deeper than 128 levels, as in a cycle, is replaced
-  // by the error "reached lua stack limit".
+  // are read with raw access. A table nested deeper than 128 levels, as in a cycle, and all tables
+  // after it are replaced by the error "reached lua stack limit".
   void SerializeResult(ObjectExplorer* serializer);
 
   void ResetStack();
@@ -187,9 +181,8 @@ class Interpreter {
   // Returns true if function was successfully added,
   // otherwise returns false and sets the error.
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
-  bool IsTableSafe() const;
   struct ReplyFrame;
-  ReplyFrame SerializeResultInternal(ObjectExplorer* serializer, int depth);
+  ReplyFrame SerializeResultInternal(ObjectExplorer* serializer, int depth, int* max_depth);
 
   bool PrepareArgs();
   bool CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer);
