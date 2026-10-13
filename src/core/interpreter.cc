@@ -309,23 +309,23 @@ string_view TopSv(lua_State* lua) {
 }
 
 optional<int> FetchKey(lua_State* lua, const char* key, int expected_type) {
-  lua_pushcfunction(lua, [](lua_State* lua) -> int {
-    lua_gettable(lua, -3);
-    return 1;
-  });
   lua_pushstring(lua, key);
-  int status = lua_pcall(lua, 1, 1, 0);
-  if (status != LUA_OK) {
-    lua_pop(lua, 1);
-    return nullopt;
-  }
-  int type = lua_type(lua, -1);
+  int type = lua_rawget(lua, -2);
   if (type != expected_type) {
     lua_pop(lua, 1);
     return nullopt;
   }
   return type;
 }
+
+// Maximal nesting of tables in a script reply, including the root table.
+constexpr int kMaxReplyDepth = 128;
+
+// Stack slots used per nesting level: the wrapped map, map key and value, and a key copy.
+constexpr int kReplyTableSlots = 4;
+
+// Replaces a table that is nested too deep or for which the stack can not grow.
+constexpr string_view kReplyDepthError = "ERR reached lua stack limit";
 
 void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::SliceSpan args) {
   lua_createtable(lua, args.size(), 0);
@@ -1276,7 +1276,52 @@ bool Interpreter::IsTableSafe() const {
   return true;
 }
 
+// An array or a wrapped map whose values are being serialized.
+struct Interpreter::ReplyFrame {
+  enum State { kDone, kArray, kMapKey, kMapValue } state;
+  unsigned index;  // Array elements pushed so far.
+  unsigned len;
+};
+
 void Interpreter::SerializeResult(ObjectExplorer* serializer) {
+  // Track nesting explicitly instead of recursing on the fiber's C++ stack.
+  // SerializeResultInternal opens at most kMaxReplyDepth nested tables.
+  ReplyFrame frames[kMaxReplyDepth];
+  int depth = 0;
+  do {
+    ReplyFrame frame = SerializeResultInternal(serializer, depth + 1);
+    if (frame.state != ReplyFrame::kDone)
+      frames[depth++] = frame;
+
+    // Push the next value to serialize, closing the tables that have none left.
+    while (depth > 0) {
+      ReplyFrame& parent = frames[depth - 1];
+      if (parent.state == ReplyFrame::kArray) {
+        if (parent.index < parent.len) {
+          lua_rawgeti(lua_, -1, ++parent.index);
+          break;
+        }
+        serializer->OnArrayEnd();
+        lua_pop(lua_, 1);
+      } else if (parent.state == ReplyFrame::kMapValue) {
+        parent.state = ReplyFrame::kMapKey;
+        break;  // The value is already at the top of the stack.
+      } else if (lua_next(lua_, -2) != 0) {
+        parent.state = ReplyFrame::kMapValue;
+        lua_pushvalue(lua_, -2);  // Serialize a copy of the key, lua_next needs the original.
+        break;
+      } else {
+        serializer->OnMapEnd();
+        lua_pop(lua_, 2);  // Remove the wrapped map and its wrapper table.
+      }
+      --depth;
+    }
+  } while (depth > 0);
+}
+
+// Serialize one value, leaving array/map traversal to SerializeResult, whose loop inlines it.
+inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
+    ObjectExplorer* serializer, int depth) -> ReplyFrame {
   int t = lua_type(lua_, -1);
 
   switch (t) {
@@ -1294,6 +1339,11 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
       }
       break;
     case LUA_TTABLE: {
+      if (depth > kMaxReplyDepth || !lua_checkstack(lua_, kReplyTableSlots)) {
+        serializer->OnError(kReplyDepthError);
+        break;
+      }
+
       auto fres = FetchKey(lua_, "err", LUA_TSTRING);
       if (fres && *fres == LUA_TSTRING) {
         serializer->OnError(TopSv(lua_));
@@ -1316,33 +1366,14 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
           len++;
 
         serializer->OnMapStart(len);
-        for (lua_pushnil(lua_); lua_next(lua_, -2) != 0;) {
-          // Push key to stack top: key value key
-          lua_pushnil(lua_);
-          lua_copy(lua_, -3, -1);
-          SerializeResult(serializer);  // pops key
-          SerializeResult(serializer);  // pop value
-        }
-        serializer->OnMapEnd();
-
-        lua_pop(lua_, 1);  // The final pop below removes the wrapper table.
-        break;
+        lua_pushnil(lua_);  // The first key for lua_next.
+        return {ReplyFrame::kMapKey, 0, 0};
       }
 
       unsigned len = lua_rawlen(lua_, -1);
 
       serializer->OnArrayStart(len);
-      for (unsigned i = 0; i < len; ++i) {
-        t = lua_rawgeti(lua_, -1, i + 1);  // push table element
-
-        // TODO: we should make sure that we have enough stack space
-        // to traverse each object. This can be done as a dry-run before doing real serialization.
-        // Once we are sure we are safe we can simplify the serialization flow and
-        // remove the error factor.
-        SerializeResult(serializer);  // pops the element
-      }
-      serializer->OnArrayEnd();
-      break;
+      return {ReplyFrame::kArray, 0, len};
     }
     case LUA_TNIL:
       serializer->OnNil();
@@ -1353,6 +1384,7 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
   }
 
   lua_pop(lua_, 1);
+  return {};
 }
 
 void Interpreter::ResetStack() {

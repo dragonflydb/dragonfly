@@ -149,6 +149,9 @@ class Interpreter {
   // 2. Should have depth of no more than 128.
   bool IsResultSafe() const;
 
+  // Serializes the result at the top of the stack and pops it. The err, ok and map wrapper fields
+  // are read with raw access, and a table nested deeper than 128 levels, as in a cycle, is replaced
+  // by the error "reached lua stack limit".
   void SerializeResult(ObjectExplorer* serializer);
 
   void ResetStack();
@@ -185,6 +188,8 @@ class Interpreter {
   // otherwise returns false and sets the error.
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
   bool IsTableSafe() const;
+  struct ReplyFrame;
+  ReplyFrame SerializeResultInternal(ObjectExplorer* serializer, int depth);
 
   bool PrepareArgs();
   bool CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer);
