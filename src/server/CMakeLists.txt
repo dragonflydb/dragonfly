@@ -137,6 +137,7 @@ add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
 
 helio_cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(dragonfly_connection_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(multi_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(hset_family_test dfly_test_lib LABELS DFLY)
