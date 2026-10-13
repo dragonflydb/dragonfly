@@ -936,6 +936,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   }
 
   auto return_fields = params.return_fields.value_or(vector<FieldReference>{});
+  size_t expired_count = 0;
 
   // Apply SORTBY
   // TODO(vlad): Write profiling up to here
@@ -968,8 +969,14 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     };
     std::vector<Scored> entries;
     entries.reserve(result.text_scores.size());
-    for (const auto& [doc, score] : result.text_scores)
+    for (const auto& [doc, score] : result.text_scores) {
+      // A posting list may still hold a DocId that was freed meanwhile; never dereference it.
+      if (!key_index_.IsValid(doc)) {
+        expired_count++;
+        continue;
+      }
       entries.push_back({score, key_index_.Get(doc), doc});
+    }
 
     const size_t take = std::min(limit, entries.size());
     std::partial_sort(entries.begin(), entries.begin() + take, entries.end(),
@@ -1000,7 +1007,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
   const std::vector<DocField> listed_fields = ResolveFields(base_->schema, return_fields);
 
-  size_t expired_count = 0;
   for (size_t i = 0; i < result.ids.size(); i++) {
     float knn_score = 0;
     if (auto it = result.knn_scores.find(result.ids[i]); it != result.knn_scores.end())
@@ -1012,6 +1018,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     // Don't load entry if we need only its key. Ignore expiration.
     if (params.IdsOnly()) {
+      if (!key_index_.IsValid(result.ids[i])) {
+        expired_count++;
+        continue;
+      }
       string_view key = key_index_.Get(result.ids[i]);
       out.push_back({result.ids[i], string{key}, {}, knn_score, text_score, sort_score});
       continue;
@@ -1082,10 +1092,20 @@ SearchIdResult ShardDocIndex::SearchIds(const OpArgs& op_args, const SearchParam
             std::move(result.profile), max_text_score};
   }
 
-  // NOCONTENT returns ids without a per-id liveness check (ignore-expiration fast path); a winner
-  // deleted before the load hop is dropped there, which can yield <k results — acceptable here.
-  return {result.total, std::move(result.ids), std::move(result.text_scores),
-          std::move(result.profile), result.max_text_score};
+  // NOCONTENT skips the keyspace lookup (ignore-expiration fast path) but still drops ids that
+  // are no longer tracked; a winner deleted before the load hop is dropped there, which can yield
+  // <k results - acceptable here.
+  size_t stale = std::erase_if(result.ids, [this](DocId id) { return !key_index_.IsValid(id); });
+  float max_text_score = result.max_text_score;
+  if (stale > 0) {
+    absl::erase_if(result.text_scores,
+                   [this](const auto& kv) { return !key_index_.IsValid(kv.first); });
+    auto max_it = std::ranges::max_element(
+        result.text_scores, [](const auto& a, const auto& b) { return a.second < b.second; });
+    max_text_score = max_it == result.text_scores.end() ? 0.0f : max_it->second;
+  }
+  return {result.total - stale, std::move(result.ids), std::move(result.text_scores),
+          std::move(result.profile), max_text_score};
 }
 
 search::ShardScoringStats ShardDocIndex::CollectScoringStats(

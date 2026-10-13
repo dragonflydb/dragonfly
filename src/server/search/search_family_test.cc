@@ -6,6 +6,7 @@
 
 #include <absl/functional/function_ref.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 #include <absl/types/span.h>
 
@@ -401,6 +402,11 @@ MATCHER_P(IsUnordArrayWithSizeMatcher, expected, "") {
 
 template <typename... Matchers> auto IsUnordArrayWithSize(Matchers... matchers) {
   return IsUnordArrayWithSizeMatcher(std::make_tuple(matchers...));
+}
+
+// Ids of a NOCONTENT reply ([total, id, id, ...]), in any order.
+template <typename... Args> auto AreNoContentDocIds(Args... args) {
+  return IsUnordArrayWithSize(Eq(args)...);
 }
 
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
@@ -3792,6 +3798,94 @@ TEST_F(SearchFamilyTest, PrefixSearchWithSynonyms) {
   // Check that prefix search for mac* only finds macintosh, not apple
   resp = Run({"FT.SEARCH", "prefix_index", "mac*"});
   EXPECT_THAT(resp, AreDocIds("doc:6"));  // Should only find macintosh
+}
+
+// A term in several synonym groups must be reachable through every group. Deleting the document
+// after the group map was re-laid out (many new groups) must leave no posting behind: a stale
+// DocId used to reach DocKeyIndex::Get on the WITHSCORES and NOCONTENT paths.
+TEST_F(SearchFamilyTest, SynonymTermInSeveralGroupsDeleteAfterRehash) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "sidx", "ON", "HASH", "PREFIX", "1", "sd", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", "syn1", "100", "hi", "hey"}), "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", "syn2", "100", "world", "earth"}), "OK");
+  EXPECT_THAT(Run({"HSET", "sd1", "title", "100"}), IntArg(1));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "NOCONTENT"}), AreNoContentDocIds("sd1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "world", "NOCONTENT"}), AreNoContentDocIds("sd1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hey", "WITHSCORES", "NOCONTENT"}),
+              RespElementsAre(IntArg(1), "sd1", testing::_));
+  EXPECT_THAT(Run({"FT.SYNDUMP", "sidx"}),
+              IsUnordArray("100", IsArray("syn1", "syn2"), "hi", IsArray("syn1"), "hey",
+                           IsArray("syn1"), "world", IsArray("syn2"), "earth", IsArray("syn2")));
+
+  for (int i = 0; i < 300; i++) {
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", absl::StrCat("g", i), absl::StrCat("term", i)}), "OK");
+    if (i % 25 == 24) {
+      EXPECT_THAT(Run({"DEL", "sd1"}), IntArg(1));
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "WITHSCORES"}), kNoResults);
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "world", "NOCONTENT"}), kNoResults);
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hey", "WITHSCORES", "NOCONTENT"}), kNoResults);
+      EXPECT_THAT(Run({"HSET", "sd1", "title", "100"}), IntArg(1));
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "earth", "NOCONTENT"}), AreNoContentDocIds("sd1"));
+    }
+  }
+  EXPECT_THAT(Run({"DEL", "sd1"}), IntArg(1));
+  // The freed DocId is reused by the next document; it must not surface for the old terms.
+  EXPECT_THAT(Run({"HSET", "sd2", "title", "unrelated"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "WITHSCORES"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "earth", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "unrelated", "NOCONTENT"}), AreNoContentDocIds("sd2"));
+}
+
+// Every shard must reach its documents through every group of a multi-group term, also after the
+// index and its synonyms were reloaded from a snapshot.
+TEST_F(SearchFamilyTest, SynonymMultiGroupTermAcrossShardsAndReload) {
+  InitWithDbFilename();
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "shared", "one"}), "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g2", "shared", "two"}), "OK");
+  for (int i = 0; i < 12; i++)
+    EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", "shared"}), IntArg(1));
+
+  auto check = [this] {
+    for (string_view query : {"one", "two", "shared"})
+      EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "LIMIT", "0", "100"}),
+                  AreNoContentDocIds("d:0", "d:1", "d:2", "d:3", "d:4", "d:5", "d:6", "d:7", "d:8",
+                                     "d:9", "d:10", "d:11"))
+          << query;
+    EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}), IsUnordArray("shared", IsArray("g1", "g2"), "one",
+                                                         IsArray("g1"), "two", IsArray("g2")));
+  };
+  check();
+
+  EXPECT_EQ(Run({"SAVE", "DF"}), "OK");
+  EXPECT_EQ(Run({"DEBUG", "RELOAD"}), "OK");
+  WaitForIndexReady("idx");
+  check();
+}
+
+// A hash field with a TTL expires lazily without re-indexing the document, so its posting lists
+// keep a freed DocId once the key is gone. Searches must skip such ids.
+TEST_F(SearchFamilyTest, FieldExpiryStalePostingIsSkipped) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  EXPECT_THAT(Run({"HSET", "d:1", "title", "hello"}), IntArg(1));
+  EXPECT_THAT(Run({"FIELDEXPIRE", "d:1", "1", "title"}), RespElementsAre(IntArg(1)));
+  AdvanceTime(2000);
+  EXPECT_THAT(Run({"HGET", "d:1", "title"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"EXISTS", "d:1"}), IntArg(0));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "WITHSCORES"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), kNoResults);
+
+  // The freed DocId is reused by d:2 and found through its own term. The stale "hello" posting
+  // now resolves to d:2; dropping it needs content-independent removal (follow-up).
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "other"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "other", "NOCONTENT"}), AreNoContentDocIds("d:2"));
 }
 
 TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
