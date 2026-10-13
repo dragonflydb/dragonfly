@@ -17,7 +17,8 @@ struct JournalReader;
 // Coordinates global commands across flows applied in parallel (e.g. replica flows).
 // Each global command is a rendezvous: every flow waits for the others, exactly one executes it,
 // and none continues before it finishes. Global transactions run in the same order on every
-// shard, so the flows meet them in the same order, one round after another.
+// shard, so the flows meet them in the same order, one round after another. The participant
+// count is not fixed: a flow whose log ended leaves for good (RemoveFlow).
 class MultiShardExecution {
  public:
   enum class Status : uint8_t {
@@ -40,7 +41,14 @@ class MultiShardExecution {
   // replica flow resumes partial sync from its own count of applied records, so they must agree.
   Status Execute(TxId txid, absl::FunctionRef<bool()> apply);
 
-  // Wakes every waiting flow; Execute() then fails. Used when sync fails.
+  // Called when a flow reaches the end of its log. In AOF replay a shard's log can end, cleanly
+  // or at a torn tail, before a global command that the other shards still reach; that flow never
+  // arrives, so without this the others would wait forever. It lowers the participant count, so
+  // the flow counts as arrived at the current and every future round; one call is enough. A flow
+  // reads its log in order, so it calls this only after leaving every round it was in.
+  void RemoveFlow();
+
+  // Wakes every waiting flow; Execute() then fails. Used when sync or replay fails.
   void CancelAllBlockingEntities();
 
  private:
@@ -50,7 +58,8 @@ class MultiShardExecution {
 
   util::fb2::Mutex mu_;
   util::fb2::CondVar cv_;
-  const uint32_t flows_;
+  // Flows still taking part; RemoveFlow lowers it.
+  uint32_t flows_;
   // Flows that arrived at the current round, and its txid.
   uint32_t arrived_ = 0;
   TxId round_txid_ = 0;
