@@ -4421,7 +4421,7 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Update synonym groups in all shards
   cmd_cntx->tx()->Execute(
       [&](Transaction* t, EngineShard* es) {
-        auto* index = es->search_indices()->GetIndex(index_name);
+        auto* index = es->search_indices()->ResolveIndex(index_name);
         if (!index)
           return OpStatus::OK;
 
