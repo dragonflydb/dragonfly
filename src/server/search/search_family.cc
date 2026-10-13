@@ -4004,6 +4004,7 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
 
   std::vector<aggregate::DocValues> values;
+  std::optional<string> canonical_name;
 
   if (params->joins.empty()) {
     search::SearchAlgorithm search_algo;
@@ -4015,6 +4016,25 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
       search_algo.SetScorer(*params->scorer);
     else if (params->add_scores)
       search_algo.SetScorer(search::ScorerSpec{});
+
+    string_view requested_index_name = params->index;
+    bool needs_conclude = true;
+    absl::Cleanup conclude_tx = [&] {
+      if (needs_conclude)
+        cmd_cntx->tx()->Conclude();
+    };
+
+    auto resolve_cb = [&](Transaction*, EngineShard* es) {
+      if (es->shard_id() == 0) {
+        if (auto* index = es->search_indices()->ResolveIndex(requested_index_name); index)
+          canonical_name = index->base().name;
+      }
+      return OpStatus::OK;
+    };
+    cmd_cntx->tx()->Execute(resolve_cb, false);
+    if (!canonical_name)
+      return builder->SendError(string{requested_index_name} + ": no such index");
+    params->index = *canonical_name;
 
     std::vector<std::vector<SearchDocData>> query_results(shard_set->size());
 
@@ -4046,6 +4066,8 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     } else {
       AggregateGeneric(cmd_cntx, params.value(), search_algo, query_results);
     }
+
+    needs_conclude = false;
 
     // ResultContainer is absl::flat_hash_map<std::string, search::SortableValue>
     // DocValues is absl::flat_hash_map<std::string_view, SortableValue>
@@ -4097,7 +4119,8 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
         [&](Transaction* t, EngineShard* es) {
           auto& shard_data = preaggregated_shard_data[es->shard_id()];
           for (size_t i = 0; i < indexes_count; ++i) {
-            if (auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]); index) {
+            if (auto* index = es->search_indices()->ResolveIndex(data_for_join->indexes[i]);
+                index) {
               shard_data[i] = index->PreagregateDataForJoin(
                   t->GetOpArgs(es), data_for_join->needed_fields[i], &search_algos[i]);
             }
@@ -4131,7 +4154,8 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
           const auto& doc_ids_per_index = doc_ids_per_shard[shard_id];
 
           for (size_t i = 0; i < indexes_count; ++i) {
-            if (auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]); index) {
+            if (auto* index = es->search_indices()->ResolveIndex(data_for_join->indexes[i]);
+                index) {
               shard_keys_data[i] = index->LoadKeysData(t->GetOpArgs(es), doc_ids_per_index[i],
                                                        data_for_join->fields_to_load_per_index[i]);
             }
