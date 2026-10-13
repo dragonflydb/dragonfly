@@ -3415,6 +3415,56 @@ TEST_F(SearchFamilyTest, AliasBeatsSameSpelledPath) {
               IsUnordArrayWithSize(IsMap("$.b", "alpha")));
 }
 
+// A vector query sorted by a document field keeps the reply shape RETURN asks for, on HASH and
+// JSON.
+TEST_F(SearchFamilyTest, HnswSortByKeepsReturnShape) {
+  Run({"FT.CREATE", "hx",    "ON",   "HASH",    "PREFIX", "1", "h:",
+       "SCHEMA",    "price", "TAG",  "qty",     "TAG",    "v", "VECTOR",
+       "HNSW",      "6",     "TYPE", "FLOAT32", "DIM",    "2", "DISTANCE_METRIC",
+       "L2"});
+  Run({"FT.CREATE", "jx",     "ON",
+       "JSON",      "PREFIX", "1",
+       "j:",        "SCHEMA", "$.price",
+       "AS",        "price",  "TAG",
+       "$.qty",     "AS",     "qty",
+       "TAG",       "$.v",    "AS",
+       "v",         "VECTOR", "HNSW",
+       "6",         "TYPE",   "FLOAT32",
+       "DIM",       "2",      "DISTANCE_METRIC",
+       "L2"});
+  WaitForIndexReady("hx");
+  WaitForIndexReady("jx");
+  Run({"HSET", "h:1", "price", "10", "qty", "7", "v", FloatVec(1, 0)});
+  Run({"HSET", "h:2", "price", "9", "qty", "8", "v", FloatVec(2, 0)});
+  Run({"JSON.SET", "j:1", "$", R"({"price":"10","qty":"7","v":[1,0]})"});
+  Run({"JSON.SET", "j:2", "$", R"({"price":"9","qty":"8","v":[2,0]})"});
+  const string q = FloatVec(2, 0);  // nearest is doc 2, SORTBY price puts doc 1 first ("10" < "9")
+  auto check = [&](string_view index, const vector<string>& tail, const auto& content) {
+    for (string_view query : {"*=>[KNN 2 @v $q]", "@v:[VECTOR_RANGE 5 $q]"}) {
+      vector<string_view> cmd{"FT.SEARCH", index,    query,   "PARAMS",  "2", "q",
+                              q,           "SORTBY", "price", "DIALECT", "2"};
+      cmd.insert(cmd.end(), tail.begin(), tail.end());
+      auto resp = Run(ArgSlice{cmd});
+      ASSERT_THAT(resp, ArgType(RespExpr::ARRAY)) << index << " " << query;
+      const auto& v = resp.GetVec();
+      ASSERT_GE(v.size(), 3u);
+      EXPECT_THAT(v[1], AnyOf("h:1", "j:1")) << index << " " << query;
+      EXPECT_THAT(v[2], content) << index << " " << query;
+    }
+  };
+  check("hx", {},
+        AnyOf(IsMap("price", "10", "qty", "7", "v", _),
+              IsMap("price", "10", "qty", "7", "v", _, "__v_score", _)));
+  check("jx", {}, AnyOf(IsMap("$", _), IsMap("$", _, "__v_score", _)));
+  for (string_view index : {"hx", "jx"}) {
+    check(index, {"NOCONTENT"}, _);
+    check(index, {"RETURN", "1", "price"}, IsMap("price", "10"));
+    check(index, {"RETURN", "3", "qty", "AS", "price"}, IsMap("price", "7"));
+    check(index, {"RETURN", "6", "price", "AS", "moved", "qty", "AS", "price"},
+          IsMap("moved", "10", "price", "7"));
+  }
+}
+
 TEST_F(SearchFamilyTest, ReturnTrailingAsRejected) {
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
   Run({"JSON.SET", "j1", ".", R"({"a":"alpha"})"});

@@ -140,6 +140,7 @@ struct DocField {
 };
 
 // Resolve the listed fields once per query; nullopt (whole document) stays nullopt.
+DocField ResolveField(const search::Schema& schema, const FieldReference& field);
 std::vector<DocField> ResolveFields(const search::Schema& schema,
                                     const std::vector<FieldReference>& fields);
 std::optional<std::vector<DocField>> ResolveFields(
@@ -523,11 +524,17 @@ class ShardDocIndex {
   // so serialization cannot interfere with a concurrent restoration.
   void DrainSerializationUpdates(const OpArgs& op_args);
 
+  struct SerializedDoc {
+    std::string_view key;
+    SearchDocData values;
+    search::SortableValue sort_value;  // value of `sort_field`, kept apart from the reply
+  };
   // Serialize doc and return with key name; `fields` lists what to read, nullopt reads the whole
   // document.
-  using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
+  using SerializedEntryWithKey = std::optional<SerializedDoc>;
   SerializedEntryWithKey SerializeDocWithKey(search::DocId id, const OpArgs& op_args,
-                                             const std::optional<std::vector<DocField>>& fields);
+                                             const std::optional<std::vector<DocField>>& fields,
+                                             const DocField* sort_field = nullptr);
 
   search::DefragmentResult Defragment(PageUsage* page_usage) {
     if (indices_) {
