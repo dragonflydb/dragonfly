@@ -15,6 +15,7 @@
 #include "server/journal/journal_slice.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
+#include "server/journal/tx_executor.h"
 #include "server/journal/types.h"
 #include "server/serializer_commons.h"
 #include "strings/human_readable.h"
@@ -482,6 +483,25 @@ TEST(Journal, BacklogBoundsTimeBasedCleanup) {
   EXPECT_FALSE(slice.IsLSNInBuffer(kExpiredEntries - 1));
   EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries));
   EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries + 1));
+}
+
+TEST(MultiShardExecution, EndOfLogWakeup) {
+  MultiShardExecution exe(2);
+  int applied = 0;
+  fb2::Fiber flow0("flow0", [&] {
+    EXPECT_EQ(exe.Execute(1,
+                          [&] {
+                            ++applied;
+                            return true;
+                          }),
+              MultiShardExecution::Status::kOk);
+  });
+  // flow0 waits for flow1, which reaches end of log before the global command.
+  ThisFiber::Yield();
+  EXPECT_EQ(applied, 0);
+  exe.RemoveFlow();
+  flow0.Join();
+  EXPECT_EQ(applied, 1);
 }
 
 }  // namespace journal
