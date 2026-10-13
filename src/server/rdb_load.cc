@@ -3143,6 +3143,9 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
+  } else if (auxkey == "search-alias") {
+    if (!LoadSearchAliasFromAux(service_, auxval))
+      return RdbError(errc::rdb_file_corrupted);
   } else if (auxkey == "search-synonyms") {
     LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
