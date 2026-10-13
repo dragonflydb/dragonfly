@@ -1537,7 +1537,7 @@ void Connection::ConnectionFlow() {
   error_code ec = reply_builder_->GetError();
 
   // Main loop.
-  if (parse_status != ERROR && !ec) {
+  if (((parse_status != ERROR) || parser_error_draining_) && !ec) {
     {
       ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonPrivateConnectionFlowReserve);
       io_buf_.EnsureCapacity(64);
@@ -1580,11 +1580,14 @@ void Connection::ConnectionFlow() {
   if (parse_status == ERROR) {
     VLOG(1) << CONN_ID << "Error parser status " << parser_error_;
 
-    if (redis_parser_) {
-      SendProtocolError(RespSrvParser::Result(parser_error_), reply_builder_.get());
-    } else {
-      DCHECK(memcache_parser_);
-      reply_builder_->SendProtocolError("bad command line format");
+    // V2 sends protocol errors inside IoLoopV2().
+    if (!ioloop_v2_) {
+      if (redis_parser_) {
+        SendProtocolError(RespSrvParser::Result(parser_error_), reply_builder_.get());
+      } else {
+        DCHECK(memcache_parser_);
+        reply_builder_->SendProtocolError("bad command line format");
+      }
     }
 
     // Shut down the servers side of the socket to send a FIN to the client
@@ -1832,9 +1835,14 @@ auto Connection::ParseLoop() -> ParserStatus {
         pending_input_ && (parsed_cmd_q_len_ > 1) && !IsOverPipelineLimit())
       return parse_status;
 
+    // ExecuteBatch may suspend while dispatching parsed commands. Record the error before it
+    // yields so a recv callback cannot parse bytes after this parser error.
+    if (ioloop_v2_ && (parse_status == ERROR))
+      EnterParserErrorDrainMode();
+
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
     // earlier replies in order before we report it.
-    ExecuteBatchResult execute_result = ExecuteBatch(/*parser_error=*/parse_status == ERROR);
+    ExecuteBatchResult execute_result = ExecuteBatch();
     if (execute_result == ExecuteBatchResult::kFailure)
       return ERROR;
 
@@ -3147,6 +3155,21 @@ void Connection::LogTrafficV2(ParsedCommand* cmd) {
   LogTraffic(id_, cmd->has_unparsed_input, *cmd, service_->GetContextInfo(cc_.get()));
 }
 
+void Connection::EnterParserErrorDrainMode() {
+  DCHECK(ioloop_v2_);
+  DCHECK(!parser_error_draining_);
+  parser_error_draining_ = true;
+  pending_input_ = false;
+  io_buf_.Clear();
+  if (overflow_buf_) {
+    if (read_buf_capacity_registered_) {
+      ReadBufTracker::Update(overflow_buf_->Capacity(), 0, id_,
+                             ReadBufTracker::kReasonConnectionOverflowBuffer);
+    }
+    overflow_buf_.reset();
+  }
+}
+
 bool Connection::SquashPipelineV2() {
   // vectorized squash phase: pack multiple commands and dispatch at once.
   // dispatch_waiting_count_ is the exact length of the run starting at parsed_to_execute_, so the
@@ -3189,7 +3212,7 @@ bool Connection::SquashPipelineV2() {
   return true;
 }
 
-Connection::ExecuteBatchResult Connection::ExecuteBatch(bool parser_error) {
+Connection::ExecuteBatchResult Connection::ExecuteBatch() {
   // Invariant: batched_ must be false on entry.
   // Both ReplyBatch() and ExecuteBatch() reset it via absl::Cleanup guards on all return paths.
   DCHECK(!reply_builder_->IsBatchMode());
@@ -3254,7 +3277,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch(bool parser_error) {
         // - Continue instead when parsing found an error (on conenction fiber or
         // parse-in-proactor), so commands parsed before the bad input can execute before the
         // connection closes.
-        if (!parser_error && !proactor_parse_error_)
+        if (!parser_error_draining_)
           break;
         continue;
       }
@@ -3647,6 +3670,9 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
 void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotification& n) {
   DVLOG(2) << CONN_ID << "OnRecvNotification: io_buf_ input_len=" << io_buf_.InputLen()
            << " pending_input=" << pending_input_;
+  if (parser_error_draining_)
+    return;
+
   const uint64_t start_epoch = fb2::FiberSwitchEpoch();
   const uint64_t initial_read_count = GetLocalConnStats().io_read_cnt;
   ProcessRecvNotification(n);
@@ -3656,10 +3682,10 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
     ParserStatus status = parse_cb();
     if (parsed_cmd_q_len_ > cmds_before)
       ++GetLocalConnStats().proactor_parse;
-    // The recv callback cannot return a status. If parsing hit a protocol error, flag it so
-    // IoLoopV2 surfaces ParserStatus::ERROR and sends the protocol-error reply.
     if (status == ERROR)
-      proactor_parse_error_ = true;
+      // Move to drain mode before waking the parked V2 fiber, so later recv callbacks cannot parse
+      // bytes after the error while earlier queued commands are still draining.
+      EnterParserErrorDrainMode();
     DVLOG(1) << CONN_ID << "Parse-in-proactor added " << (parsed_cmd_q_len_ - cmds_before)
              << " commands, pq_len=" << parsed_cmd_q_len_;
   };
@@ -3933,7 +3959,9 @@ void Connection::ReadPendingInput() {
 }
 
 void Connection::MaybeAdjustIoBufCapacity(ParserStatus parse_status, bool reached_capacity) {
-  DCHECK_NE(parse_status, ERROR);
+  if (parse_status == ERROR)
+    return;
+
   if (shared_read_buf_enabled_)
     return;
 
@@ -4106,10 +4134,8 @@ bool Connection::HasControlEvent() const {
   // a reply became ready, control-plane messages are queued (dispatch_q_), the socket errored or
   // closed (io_ec_), or a thread migration is pending and actionable.
 
-  // A callback parse error must wake the V2 fiber even if the callback did not read more input.
-  // So we must include proactor_parse_error_.
   return (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
-         proactor_parse_error_ || IsReadyToMigrate();
+         IsReadyToMigrate();
 }
 
 bool Connection::ShouldWakeIdle() const {
@@ -4118,6 +4144,10 @@ bool Connection::ShouldWakeIdle() const {
 
   // On top of the control events, the idle park also wakes for incoming data and for a head command
   // that is now ready to run.
+
+  if (parser_error_draining_)
+    return HasCommandToExecute() || HasControlEvent();
+
   return GetUnreadInputLen() > 0 || pending_input_ || HasCommandToExecute() || HasControlEvent();
 }
 
@@ -4155,7 +4185,7 @@ void Connection::DrainQueuedCommands() {
 
   if (parsed_head_) {
     if (HasCommandToExecute()) {
-      ExecuteBatchResult execute_result = ExecuteBatch(/*parser_error*/ false);
+      ExecuteBatchResult execute_result = ExecuteBatch();
       if (execute_result == ExecuteBatchResult::kFailure)
         return;  // IoLoopV2 observes the reply-builder error.
       if (execute_result == ExecuteBatchResult::kDeferToControlPath)
@@ -4204,6 +4234,25 @@ void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_wait
   });
 }
 
+variant<error_code, Connection::ParserStatus> Connection::FinalizeV2ParserError() {
+  DCHECK(ioloop_v2_);
+  DCHECK(parser_error_draining_);
+  DCHECK(!HasPendingMessages());
+  ReleaseDeferredCheckpoints();
+
+  if (redis_parser_) {
+    SendProtocolError(RespSrvParser::Result(parser_error_), reply_builder_.get());
+  } else {
+    DCHECK(memcache_parser_);
+    reply_builder_->SendProtocolError("bad command line format");
+  }
+
+  if (auto ec = FlushReplies(); ec) {
+    return ec;
+  }
+  return ERROR;
+}
+
 variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
@@ -4249,13 +4298,20 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
     }
 
-    if (shared_read_buf_enabled_) {
-      parse_status = ReadAndParseShared(/*from_proactor_callback=*/false);
-      if (ERROR == parse_status) {
-        break;
+    if (!parser_error_draining_) {
+      if (shared_read_buf_enabled_) {
+        parse_status = ReadAndParseShared(/*from_proactor_callback=*/false);
+        if (ERROR == parse_status)
+          EnterParserErrorDrainMode();
+      } else {
+        ReadPendingInput();
       }
-    } else {
-      ReadPendingInput();
+    }
+
+    // Finalize an empty parser-error drain before idle parking because drain mode intentionally
+    // ignores additional client input.
+    if (parser_error_draining_ && !HasPendingMessages()) {
+      return FinalizeV2ParserError();
     }
 
     // Idle park: flush and sleep only when the fiber is truly idle (ShouldWakeIdle() is false).
@@ -4298,7 +4354,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     //   Entered either because there is no new input to parse, or because pipeline
     //   backpressure prevents further parsing (which would only grow the queue).
     bool over_limit = IsOverPipelineLimit();
-    if (shared_read_buf_enabled_ || (io_buf_.InputLen() == 0) || over_limit) {
+    if (parser_error_draining_ || shared_read_buf_enabled_ || (io_buf_.InputLen() == 0) ||
+        over_limit) {
       DrainQueuedCommands();
       if (over_limit)
         ParkOnBackpressure(&backpressure_waiter);
@@ -4310,6 +4367,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     } else {
       // Input available and under budget: parse, execute, reply.
       parse_status = RunParsePath();
+      if (parse_status == ERROR && !parser_error_draining_) {
+        EnterParserErrorDrainMode();
+      }
     }
 
     // Release any checkpoints deferred while async commands were in flight, now that the in-flight
@@ -4318,15 +4378,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       ReleaseDeferredCheckpoints();
     }
 
-    // A protocol error detected by parse-in-proactor (which runs in the recv callback and cannot
-    // return a status) is surfaced here by setting parse_status = ERROR.
-    if (proactor_parse_error_) {
-      proactor_parse_error_ = false;
-      parse_status = ERROR;
-    }
-
     if (reply_builder_->GetError()) {
       return reply_builder_->GetError();
+    }
+
+    // The peer may close its write side while we drain commands parsed before a protocol error.
+    // Finalize that error first so a half-closed peer can still receive it.
+    if (parser_error_draining_ && !HasPendingMessages()) {
+      return FinalizeV2ParserError();
     }
 
     // Check io_ec_ after parsing and flushing replies, so that half-closed
@@ -4337,10 +4396,6 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
       LOG_IF(WARNING, cntx()->replica_conn) << CONN_ID << "async io error: " << io_ec_;
       return std::exchange(io_ec_, {});
-    }
-
-    if (parse_status == ERROR) {
-      break;
     }
 
     // Migration requested and actionable: skip buffer bookkeeping, jump to HandleMigrateRequest().
