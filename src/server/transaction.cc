@@ -799,7 +799,7 @@ void Transaction::ScheduleInternal() {
       run_barrier_.Dec();
 
       // If the optimistic run above held running_tx_ and deferred any poll on this shard,
-      // drain it now. Uses the same needs_repoll_ mechanism as PollExecution's re-drive loop.
+      // drain it now, like PollExecution does after its own run.
       EngineShard::tlocal()->PollExecutionIfDeferred();
       break;
     }
