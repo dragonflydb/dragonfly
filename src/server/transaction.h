@@ -295,6 +295,12 @@ class Transaction {
   // Returns if the transaction spans this shard. Safe only when the transaction is armed.
   bool IsActive(ShardId sid) const;
 
+  // Whether the transaction is armed on this shard while blocked (suspended or awakened).
+  bool IsBlockedInShard(ShardId sid) const {
+    const auto& sd = shard_data_[SidToId(sid)];
+    return sd.is_armed.load(std::memory_order_acquire) && (sd.local_mask & WAS_SUSPENDED);
+  }
+
   // Whether shard sid woke this blocking transaction.
   bool IsWokenOn(ShardId sid) const;
 
