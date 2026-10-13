@@ -475,6 +475,92 @@ TEST_F(TransactionTest, SingleHopAsyncDrainsDeferredPoll) {
   ASSERT_TRUE(v_ran) << "V was stranded: the poll deferred by Z's async hop was never replayed";
 }
 
+// A blocked tx's dropped poll is replayed at once, or after the continuation if awakened here.
+TEST_F(TransactionTest, BlockedTxPollDroppedDuringReplay) {
+  ASSERT_EQ(0u, Shard("a", shard_set->size()));
+  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+  ASSERT_EQ(2u, Shard("z", shard_set->size()));
+
+  static CommandId cid_t{"tx_test_rp_t", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_h{"tx_test_rp_h", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_x{"tx_test_rp_x", 0, -1, 1, -1, acl::NONE};
+
+  // Whether the poll of `tx`, coordinated from proactor 1, ran on shard 0 and was dropped.
+  auto poll_dropped = [this](Transaction* tx) {
+    if (!AwaitOnShard(0, [tx] { return tx->DEBUG_IsArmedInShard(0); }))
+      return false;
+    OnShard(1, [] {});           // the coordinator has queued the poll
+    shard_set->Await(0, [] {});  // and the shard queue has run it
+    return OnShard(0, [tx] { return tx->DEBUG_IsArmedInShard(0); });
+  };
+
+  for (auto [wake_sid, wake_key] : {std::pair{0u, "x"}, std::pair{2u, "z"}}) {
+    auto tx_t = MakeTx(&cid_t, {"x", "z"});
+    auto tx_h = MakeTx(&cid_h, {"a"});
+    auto tx_x = MakeTx(&cid_x, {"a"});
+
+    // T: first hop, then it watches once t_watch fires, then its action hop.
+    fb2::Done t_first_hop, t_watch, t_done;
+    auto fb_t = pp_->at(1)->LaunchFiber([&] {
+      tx_t->Execute(Noop, false);
+      t_first_hop.Notify();
+      t_watch.Wait();
+      auto ready = [](EngineShard*, const DbContext&, std::string_view) {
+        return KeyReadyResult::kReady;
+      };
+      facade::ConnectionContext cntx{nullptr};
+      auto tp = Transaction::time_point::max();
+      ASSERT_EQ(OpStatus::OK, tx_t->WaitOnWatch(tp, Transaction::kShardArgs, ready, &cntx));
+      tx_t->Execute(Noop, true);
+      t_done.Notify();
+    });
+    ASSERT_TRUE(t_first_hop.WaitFor(5s));
+
+    // H parks inline holding running_tx_: the polls of T's watch hop and X's first hop drop.
+    auto h = ParkHoldingRunningTx(0, tx_h.get());
+    ASSERT_TRUE(h->WaitParked());
+    t_watch.Notify();
+    ASSERT_TRUE(poll_dropped(tx_t.get()));
+
+    fb2::Done x_parked, x_release, x_last;
+    auto fb_x = pp_->at(1)->LaunchFiber([&] {
+      tx_x->Execute(
+          [&](Transaction*, EngineShard*) {
+            x_parked.Notify();
+            x_release.Wait();
+            return OpStatus::OK;
+          },
+          false);
+      x_last.Wait();
+      tx_x->Execute(Noop, true);
+    });
+    ASSERT_TRUE(poll_dropped(tx_x.get()));
+
+    // H's re-drive parks X; T's action hop poll drops and X stays the continuation.
+    h->release.Notify();
+    ASSERT_TRUE(x_parked.WaitFor(5s));
+    OnShard(wake_sid, [sid = wake_sid, key = wake_key] {
+      auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(sid);
+      bc->Awaken(0, key);
+      bc->NotifyPending();
+    });
+    ASSERT_TRUE(poll_dropped(tx_t.get()));
+    x_release.Notify();
+    h->fiber.Join();
+
+    if (wake_sid == 0)  // T was awakened on shard 0, so it runs only once X concludes
+      x_last.Notify();
+    bool t_ran = t_done.WaitFor(5s);
+    if (!t_ran)  // unstick T so the test fails instead of hanging
+      shard_set->Await(0,
+                       [&] { EngineShard::tlocal()->PollExecution("test_unstick", tx_t.get()); });
+    fb_t.Join();
+    EXPECT_TRUE(t_ran) << "T woken on shard " << wake_sid << " was stranded";
+    x_last.Notify();
+    fb_x.Join();
+  }
+}
+
 namespace {
 
 TypeMemDeltas DeltaDiff(const TypeMemDeltas& before, const TypeMemDeltas& after) {

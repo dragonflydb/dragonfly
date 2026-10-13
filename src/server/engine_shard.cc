@@ -4,6 +4,8 @@
 
 #include "server/engine_shard.h"
 
+#include <absl/algorithm/container.h>
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
@@ -571,7 +573,11 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     // Check that trans doesn't need processing or is guaranteed to be found via txq/continuation
     DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(shard_id())  // tx was already disarmed
            || trans->DEBUG_GetTxqPosInShard(shard_id()) != TxQueue::kEnd ||
-           continuation_trans_ == trans);
+           continuation_trans_ == trans || trans->IsBlockedInShard(shard_id()));
+
+    // A repoll without trans does not reach blocked transactions, so their polls are kept.
+    if (trans && trans->IsBlockedInShard(shard_id()))
+      deferred_polls_.push_back({trans, trans->GetWakeKey(shard_id()).has_value()});
     needs_repoll_ = true;
     return;
   }
@@ -581,13 +587,25 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   // Executing `trans` out of order above would not follow up with queue processing, so
   // we need to issue another poll if we interruped another poll request.
-  // Because it runs with trans=nullptr, it progresses only on the loop and does not need follow ups
   PollExecutionIfDeferred();
 }
 
 void EngineShard::PollExecutionIfDeferred() {
-  if (std::exchange(needs_repoll_, false))
-    PollExecutionInternal("repoll", nullptr);
+  // A transaction awakened on this shard can not run while a continuation is active.
+  auto runnable = [this](const DeferredPoll& poll) { return !continuation_trans_ || !poll.awaked; };
+
+  // Replayed polls can be interrupted again. A running callback or poll replays them when done.
+  while (running_tx_ == nullptr && poll_depth_ == 0) {
+    if (auto it = absl::c_find_if(deferred_polls_, runnable); it != deferred_polls_.end()) {
+      boost::intrusive_ptr<Transaction> trans = std::move(it->trans);
+      deferred_polls_.erase(it);
+      PollExecutionInternal("repoll", trans.get());
+    } else if (std::exchange(needs_repoll_, false)) {
+      PollExecutionInternal("repoll", nullptr);
+    } else {
+      break;
+    }
+  }
 }
 
 void EngineShard::PollExecutionInternal(const char* context, Transaction* trans) {
@@ -597,6 +615,8 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
   DCHECK(running_tx_ == nullptr) << running_tx_->DebugId();
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
+  ++poll_depth_;
+  absl::Cleanup poll_done = [this] { --poll_depth_; };
 
   // If any of the following flags are present, we are guaranteed to run in this function:
   // 1. AWAKED_Q -> Blocking transactions are executed immediately after waking up, they don't
@@ -631,7 +651,6 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
   }
 
   bool update_stats = false;
-  ++poll_concurrent_factor_;
 
   auto run = [this, &update_stats](Transaction* tx, bool allow_removal) -> bool /* concluding */ {
     update_stats = true;
@@ -716,7 +735,6 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
       LOG_IF(DFATAL, trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd);
     }
   }
-  --poll_concurrent_factor_;
   if (update_stats) {
     CacheStats();
   }
