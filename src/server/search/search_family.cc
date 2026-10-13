@@ -3480,7 +3480,8 @@ void SendFtProfileSearchResponse(const SearchParams& params,
 }
 
 void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
-  string_view index_name = parser.Next();
+  string_view requested_index_name = parser.Next();
+  string_view index_name = requested_index_name;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   const bool is_hybrid = parser.Check("HYBRID");
@@ -3523,19 +3524,29 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   absl::Time start = absl::Now();
   const size_t shards_count = shard_set->size();
 
-  // Prefilter/range profile flows leave the transaction open between hops; conclude it if an
-  // exception unwinds out of the command so the scheduled global tx cannot leak.
-  const int uncaught_on_entry = std::uncaught_exceptions();
-  absl::Cleanup conclude_on_unwind = [&] {
-    if (std::uncaught_exceptions() > uncaught_on_entry)
+  bool needs_conclude = true;
+  absl::Cleanup conclude_tx = [&] {
+    if (needs_conclude)
       cmd_cntx->tx()->Conclude();
   };
+
+  std::optional<string> canonical_name;
+  auto resolve_cb = [&](Transaction*, EngineShard* es) {
+    if (es->shard_id() == 0)
+      if (auto* index = es->search_indices()->ResolveIndex(requested_index_name); index)
+        canonical_name = index->base().name;
+    return OpStatus::OK;
+  };
+  cmd_cntx->tx()->Execute(resolve_cb, false);
+  if (!canonical_name)
+    return rb->SendError(string{requested_index_name} + ": no such index");
+  index_name = *canonical_name;
 
   auto [profile_knn_node, profile_knn] = TryPopHnswKnnNode(search_algo, index_name);
   if (profile_knn) {
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, profile_knn->field);
     if (!hnsw_index)
-      return rb->SendError(std::string{index_name} + ": no such global hnsw index");
+      return rb->SendError(std::string{requested_index_name} + ": no such global hnsw index");
     if (auto err = ValidateHnswKnnBlob(profile_knn, *hnsw_index))
       return rb->SendError(*err);
 
@@ -3552,8 +3563,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (needs_global_stats) {
       if (!CollectGlobalScoringStats(index_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
-        cmd_cntx->tx()->Conclude();
-        return rb->SendError(std::string{index_name} + ": no such index");
+        return rb->SendError(std::string{requested_index_name} + ": no such index");
       }
       global_stats_ptr = &global_scoring_stats;
     }
@@ -3579,34 +3589,30 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
           },
           false);
 
-      if (index_not_found.load(memory_order_relaxed)) {
-        cmd_cntx->tx()->Conclude();
-        return rb->SendError(std::string{index_name} + ": no such index");
-      }
+      if (index_not_found.load(memory_order_relaxed))
+        return rb->SendError(std::string{requested_index_name} + ": no such index");
 
       bool empty_prefilter_result = true;
       for (size_t shard_id = 0; shard_id < knn_prefilter_docs.size(); shard_id++) {
         auto& res = knn_prefilter_docs[shard_id];
         empty_prefilter_result &= res.ids.empty();
-        if (res.error) {
-          cmd_cntx->tx()->Conclude();
+        if (res.error)
           return cmd_cntx->SendError(*res.error);
-        }
         profile_search_results[shard_id].total_hits = res.total_hits;
         profile_search_results[shard_id].profile = std::move(res.profile);
       }
 
-      if (empty_prefilter_result) {
-        cmd_cntx->tx()->Conclude();
-      } else {
+      if (!empty_prefilter_result) {
         search_results = SearchGlobalHnswIndex(profile_knn, hnsw_index, index_name,
                                                search_algo.GetKnnScoreSortOption(),
                                                knn_prefilter_docs, *params, *cmd_cntx);
+        needs_conclude = false;
       }
     } else {
       search_results = SearchGlobalHnswIndex(profile_knn, hnsw_index, index_name,
                                              search_algo.GetKnnScoreSortOption(), *params,
                                              *cmd_cntx, shards_count);
+      needs_conclude = false;
       profile_search_results.clear();
       profile_results.clear();
     }
@@ -3658,6 +3664,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     auto search_results = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, index_name,
                                                      hnsw_range_sort_option, *params, *cmd_cntx);
+    needs_conclude = false;
     std::vector<SearchResult> profile_search_results;
     std::vector<absl::Duration> profile_results;
     auto took = absl::Now() - start;
@@ -3678,8 +3685,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (needs_global_stats) {
       if (!CollectGlobalScoringStats(index_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
-        cmd_cntx->tx()->Conclude();
-        return rb->SendError(std::string{index_name} + ": no such index");
+        return rb->SendError(std::string{requested_index_name} + ": no such index");
       }
       global_stats_ptr = &global_scoring_stats;
     }
@@ -3699,9 +3705,10 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
           return OpStatus::OK;
         },
         true);
+    needs_conclude = false;
 
     if (index_not_found.load(memory_order_relaxed))
-      return rb->SendError(std::string{index_name} + ": no such index");
+      return rb->SendError(std::string{requested_index_name} + ": no such index");
 
     bool result_is_empty = true;
     for (const auto& res : prefilter_results) {
@@ -3728,7 +3735,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   std::atomic<bool> index_not_found{false};
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
@@ -3739,8 +3745,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (needs_global_stats) {
     if (!CollectGlobalScoringStats(index_name, search_algo, cmd_cntx->tx(), shards_count,
                                    global_scoring_stats)) {
-      cmd_cntx->tx()->Conclude();
-      return rb->SendError(std::string{index_name} + ": no such index");
+      return rb->SendError(std::string{requested_index_name} + ": no such index");
     }
     global_stats_ptr = &global_scoring_stats;
   }
@@ -3765,9 +3770,10 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     cmd_cntx->tx()->Execute(std::move(search_cb), true);
   else
     cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
+  needs_conclude = false;
 
   if (index_not_found.load())
-    return rb->SendError(std::string{index_name} + ": no such index");
+    return rb->SendError(std::string{requested_index_name} + ": no such index");
 
   auto took = absl::Now() - start;
 
