@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/base/macros.h>
+#include <absl/container/inlined_vector.h>
 
 #include <iosfwd>
 #include <memory>
@@ -121,7 +122,7 @@ struct AstNode {
 
  private:
   friend struct AstNodeDeleter;
-  virtual void ReleaseChildren(AstNode*& pending) noexcept = 0;
+  virtual void Destroy(AstNode*& pending) noexcept = 0;
 
   const Type type_;
   AstNode* teardown_next_ = nullptr;
@@ -139,7 +140,7 @@ template <typename Derived, AstNode::Type type> struct TypedAstNode : AstNode {
   }
 
  private:
-  void ReleaseChildren(AstNode*& pending) noexcept final {
+  void Destroy(AstNode*& pending) noexcept final {
     auto& self = static_cast<Derived&>(*this);
     if constexpr (requires { self.node; }) {
       EnqueueChild(self.node, pending);
@@ -149,6 +150,7 @@ template <typename Derived, AstNode::Type type> struct TypedAstNode : AstNode {
       for (auto& child : self.nodes)
         EnqueueChild(child, pending);
     }
+    delete &self;
   }
 };
 
@@ -312,7 +314,7 @@ struct AstLogicalNode final : TypedAstNode<AstLogicalNode, AstNode::Type::LOGICA
   static AstExpr Combine(AstExpr l, AstExpr r, LogicOp op);
 
   LogicOp op;
-  std::vector<AstExpr> nodes;
+  absl::InlinedVector<AstExpr, 2> nodes;
 };
 
 // Selects specific field for subtree
