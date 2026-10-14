@@ -1191,6 +1191,12 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     }
 
     shard_replica_waker_.notifyAll();
+
+    // On epoll a read with data pending does not suspend, so a lagging flow would monopolize
+    // its thread and starve every other fiber on it.
+    if (base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) > 1000) {  // 1ms
+      ThisFiber::Yield();
+    }
   }
 }
 
