@@ -4309,38 +4309,31 @@ async def _wait_client(admin, name, pred, what):
     assert False, f"client {name} did not reach: {what}"
 
 
-async def test_v1_protocol_error_flushed_on_close(df_factory):
-    """The v1 dispatch loop arms reply batching while more messages are queued behind the command
-    it runs, and used to leave it armed when it exits on a closing connection. ConnectionFlow
-    writes the protocol error only after joining that loop, so the reply landed in a batch nobody
-    would ever flush and the client saw a bare FIN instead of an error.
-
-    v1 only: the v2 loop runs commands in the read fiber, so the malformed tail below is never
-    parsed while an earlier command is still in flight.
-    """
-    server = df_factory.create(proactor_threads=2, enable_resp_io_loop_v2=False)
+async def test_v2_proactor_parse_error_closes_connection(df_factory):
+    """Parse-in-proactor can find a protocol error while a pipelined write is parked. The v2 loop
+    must still report it and close the connection once the pause ends."""
+    server = df_factory.create(proactor_threads=2, enable_resp_io_loop_v2=True)
+    if not is_resp_io_loop_v2(server):  # a global --df enable_resp_io_loop_v2=false wins
+        pytest.skip("v2 io loop only")
     server.start()
     admin = server.client()
+    assert await admin.execute_command("CLIENT PAUSE 100000 WRITE") == "OK"
 
     client = _named_raw_client(server.port, "piped")
-    # DEBUG POPULATE is slow and preempts, but is not a blocking command - a blocking one would
-    # not do, since the dispatch loop flushes pending replies before parking on one. The second
-    # command keeps the queue non-empty (which is what arms batching) and the incomplete third
-    # keeps the io fiber in recv.
-    client.sendall(
-        _resp("DEBUG", "POPULATE", "50000") + _resp("SET", "k2", "v") + b"*3\r\n$3\r\nSET\r\n"
-    )
-    # Flag 'a' is async_dispatch: the dispatch fiber is inside DEBUG POPULATE.
-    await _wait_client(admin, "piped", lambda c: "a" in c.get("flags", ""), "in dispatch")
-
-    client.sendall(b"$abc\r\n")  # malformed continuation, ends the read loop
+    client.sendall(_resp("SET", "k", "v") + _resp("SET", "k2", "v") + b"*3\r\n$3\r\nSET\r\n")
+    entry = await _wait_client(admin, "piped", lambda c: "a" in c.get("flags", ""), "parked")
+    tail = b"$abc\r\n"  # malformed continuation
+    client.sendall(tail)
+    # The recv callback that counts the tail also parses it, as the write is still parked.
+    net_in = int(entry["tot-net-in"]) + len(tail)
+    await _wait_client(admin, "piped", lambda c: int(c["tot-net-in"]) == net_in, "tail parsed")
+    assert await admin.execute_command("CLIENT UNPAUSE") == "OK"
 
     buf = b""
-    while b"-ERR Protocol error" not in buf:
-        chunk = client.recv(4096)
-        assert chunk, f"connection closed without the protocol error, got {buf!r}"
+    while chunk := client.recv(4096):
         buf += chunk
     client.close()
+    assert b"-ERR Protocol error" in buf, buf
     await admin.aclose()
 
 
@@ -4440,6 +4433,7 @@ async def test_paused_client_released_on_protocol_error(df_factory):
 
     client = _named_raw_client(server.port, "piped")
     # Two complete writes go to the dispatch fiber, the incomplete third keeps the io fiber reading.
+    # The queued second write arms reply batching, which the dispatch fiber must disarm on exit.
     client.sendall(_resp("SET", "k", "v") + _resp("SET", "k2", "v") + b"*3\r\n$3\r\nSET\r\n")
     # Flag 'a' means the dispatch fiber is inside a command, which under the pause is parked.
     await _wait_client(admin, "piped", lambda c: "a" in c.get("flags", ""), "parked in pause")
