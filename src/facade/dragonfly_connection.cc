@@ -2713,6 +2713,15 @@ void Connection::SendAsync(MessageHandle msg) {
   // here.
   DCHECK(!(checkpoint && cc_->conn_closing && ioloop_v2_));
 
+  if (parser_error_draining_) {
+    DCHECK(ioloop_v2_);
+    // Preserve checkpoints so their blocking counters are released only after any command that
+    // was already dispatching has completed. All other control messages are cut off by draining.
+    if (!checkpoint) {
+      return;
+    }
+  }
+
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
   if (!cc_->conn_closing && !ioloop_v2_) {
     LaunchAsyncFiberIfNeeded();
