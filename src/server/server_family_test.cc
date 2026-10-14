@@ -417,6 +417,21 @@ TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
 }
 
+// Expiry deletes the entry through a key view that points into the entry itself. The tracking
+// invalidation must not read that key after the entry has been erased.
+TEST_F(ServerFamilyTest, ClientTrackingExpiredKey) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+
+  Run({"SET", "FOO", "10", "PX", "10"});
+  Run({"GET", "FOO"});
+  AdvanceTime(20);
+
+  EXPECT_THAT(Run({"GET", "FOO"}), ArgType(RespExpr::NIL));
+  ASSERT_EQ(InvalidationMessagesLen("IO0"), 1);
+  EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "FOO");
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingOptin) {
   Run({"HELLO", "3"});
   Run({"CLIENT", "TRACKING", "ON", "OPTIN"});
