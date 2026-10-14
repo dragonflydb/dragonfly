@@ -41,6 +41,11 @@ inputs:
 runs:
   using: "composite"
   steps:
+    # Avoids a kernel TCP receive window collapse on loopback, see the action for details.
+    # Requires the job container to run with --cap-add=NET_ADMIN.
+    - name: Limit loopback MTU
+      uses: ./.github/actions/limit-loopback-mtu
+
     - name: Repeat pytests
       id: main
       shell: bash

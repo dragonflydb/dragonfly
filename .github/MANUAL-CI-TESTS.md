@@ -125,3 +125,21 @@ Before every Pytest or GoogleTest iteration, the regression action logs an itera
 banner and the exact shell-escaped command. To inspect them, expand
 `Run regression tests action` in the regression workflows or `Run heavy tests` in
 `Heavy Tests` in the job log.
+
+## Loopback MTU
+
+Every workflow that runs the regression tests (`tests/dragonfly`) lowers the loopback MTU
+of its job container from the default `65536` to `9000` before the tests, using
+`.github/actions/limit-loopback-mtu`. The `regression-tests` and `repeat` actions run it
+automatically, and `cov.yml`, which calls `pytest` directly, runs it as an explicit step.
+
+With loopback's ~64 KB MSS, some Linux kernels collapse a socket's receive buffer and
+window to about the MSS, and the sender then crawls in a 200 ms zero-window probe loop.
+This made replication and slot migration tests hang on CI
+([#4834](https://github.com/dragonflydb/dragonfly/issues/4834)). A NIC sized MTU avoids
+that path.
+
+The job container has its own network namespace, so only its loopback changes. Changing
+an interface MTU needs the `NET_ADMIN` capability, which Docker does not grant even to
+root, so these jobs run their container with `--cap-add=NET_ADMIN`. A new workflow that
+runs the regression tests needs both the capability and the action.
