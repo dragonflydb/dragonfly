@@ -239,7 +239,7 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
     }
     if (*status == BlockScanner::Status::kEndOfFile) {
       // A record cut at the end of the segment.
-      if (partial_) {
+      if (EndsMidRecord()) {
         Finish(true);
         continue;
       }
@@ -256,12 +256,13 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
 
     const AofBlockHeader& hdr = block.hdr;
     bool continues = hdr.flags & kStartsWithContinuation;
-    if ((expected_lsn_ && hdr.first_lsn != *expected_lsn_) || continues != partial_) {
+    bool lsn_break =
+        prev_block_ && hdr.first_lsn != prev_block_->first_lsn + prev_block_->n_records;
+    if (lsn_break || continues != EndsMidRecord()) {
       Finish(true);
       continue;
     }
-    expected_lsn_ = hdr.first_lsn + hdr.n_records;
-    partial_ = hdr.flags & kEndsWithPartial;
+    prev_block_ = hdr;
     // Every valid block is handed out right away, so memory stays bounded by the read buffer. A
     // record that continues in the next block is buffered by JournalReader until it completes,
     // like a socket read that returned half a message.
@@ -270,7 +271,7 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
     // it that replay already applied, even across several blocks. Keep those blocks instead and
     // abandon only the incomplete record: the resumed segment's header marks it abandoned, and
     // replay resets its JournalReader at that segment boundary, which drops the record's bytes.
-    if (!partial_) {
+    if (!EndsMidRecord()) {
       end_seg_ = read_seg_;
       end_offset_ = scanner_->offset();
       last_lsn_ = hdr.first_lsn + hdr.n_records - 1;

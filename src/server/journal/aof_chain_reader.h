@@ -79,6 +79,11 @@ class AofChainReader : public io::Source {
   // Marks the end of the log and computes the discarded bytes.
   void Finish(bool torn);
 
+  // The last valid block ends with a record that continues in the next block.
+  bool EndsMidRecord() const {
+    return prev_block_ && (prev_block_->flags & kEndsWithPartial);
+  }
+
   std::string dir_;
   uint32_t shard_id_;
   uint32_t shard_count_;
@@ -94,9 +99,9 @@ class AofChainReader : public io::Source {
   size_t read_seg_ = 0;
   std::unique_ptr<BlockScanner> scanner_;
   std::string_view pending_;
-  std::optional<uint64_t> expected_lsn_;
-  // The last block ended with a record that continues in the next block.
-  bool partial_ = false;
+  // The last valid block's header, nullopt before the first one. The next block must start at
+  // first_lsn + n_records, with a continuation exactly when this one ends mid-record.
+  std::optional<AofBlockHeader> prev_block_;
   // The end of the log: not reached yet, or reached cleanly or at a damaged tail.
   enum class End : uint8_t { kNotYet, kTailReached, kTailTorn };
   End end_ = End::kNotYet;
