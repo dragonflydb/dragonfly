@@ -224,6 +224,47 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
   }
 }
 
+bool LoadSearchAliasFromAux(Service* service, std::string_view def) {
+  if (def.empty() || def.front() != '*' || def.size() > std::numeric_limits<uint32_t>::max()) {
+    LOG(ERROR) << "Bad search alias definition";
+    return false;
+  }
+
+  uint32_t consumed = 0;
+  cmn::BackedArguments parsed_args;
+  facade::RespSrvParser parser{2};
+  facade::RespSrvParser::Buffer buffer{reinterpret_cast<const uint8_t*>(def.data()), def.size()};
+  auto res = parser.Parse(buffer, &consumed, &parsed_args);
+  if (res != facade::RespSrvParser::OK || consumed != def.size() || parsed_args.size() != 2) {
+    LOG(ERROR) << "Bad search alias definition";
+    return false;
+  }
+
+  if (!service->FindCmd("FT.ALIASADD"))
+    return true;
+
+  facade::CapturingReplyBuilder crb;
+  ConnectionContext cntx{nullptr, acl::UserCredentials{}};
+  cntx.is_replicating = true;
+  cntx.skip_acl_validation = true;
+  cntx.ns = &namespaces->GetDefaultNamespace();
+
+  CommandContext cntx_cmd;
+  cntx_cmd.Init(&crb, &cntx);
+  cntx_cmd.PushArg("FT.ALIASADD");
+  cntx_cmd.PushArg(parsed_args[0]);
+  cntx_cmd.PushArg(parsed_args[1]);
+  service->DispatchCommand(facade::ParsedArgs{cntx_cmd}, &cntx_cmd,
+                           facade::AsyncPreference::ONLY_SYNC, nullptr);
+
+  auto response = crb.Take();
+  if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
+    LOG(ERROR) << "Bad search alias definition: " << err->first;
+    return false;
+  }
+  return true;
+}
+
 void RdbLoadContext::AddPendingSynonymCommand(std::string cmd) {
   util::fb2::LockGuard<util::fb2::Mutex> lk(mu_);
   pending_synonym_cmds_.push_back(std::move(cmd));

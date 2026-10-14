@@ -1590,6 +1590,7 @@ namespace {
 void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
                           [[maybe_unused]] StringVec* search_indices,
                           [[maybe_unused]] StringVec* search_synonyms,
+                          [[maybe_unused]] StringVec* search_aliases,
                           [[maybe_unused]] bool is_summary) {
 #ifdef WITH_SEARCH
   auto* indices = shard.search_indices();
@@ -1614,22 +1615,30 @@ void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
       }
     }
   }
+
+  if (is_summary) {
+    for (const auto& [alias, target] : indices->GetAliases()) {
+      constexpr auto fmt = "*2\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n";
+      search_aliases->push_back(absl::StrFormat(fmt, alias.size(), alias, target.size(), target));
+    }
+  }
 #endif
 }
 
 }  // namespace
 
 RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_summary) {
-  StringVec script_bodies, search_indices, search_synonyms;
+  StringVec script_bodies, search_indices, search_synonyms, search_aliases;
   size_t table_mem_result = 0;
 
   if (!is_summary) {
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
       if (shard->shard_id() == 0)
-        CollectSearchIndices(*shard, &search_indices, &search_synonyms, is_summary);
+        CollectSearchIndices(*shard, &search_indices, &search_synonyms, &search_aliases,
+                             is_summary);
     });
-    return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
-                                std::move(search_synonyms), table_mem_result};
+    return GlobalData{std::move(script_bodies), std::move(search_indices),
+                      std::move(search_synonyms), std::move(search_aliases), table_mem_result};
   }
   {
     // For summary file: collect all global data
@@ -1642,7 +1651,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   atomic<size_t> table_mem{0};
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     if (shard->shard_id() == 0)
-      CollectSearchIndices(*shard, &search_indices, &search_synonyms, is_summary);
+      CollectSearchIndices(*shard, &search_indices, &search_synonyms, &search_aliases, is_summary);
 
     auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     size_t shard_table_mem = 0;
@@ -1655,8 +1664,8 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
     table_mem.fetch_add(shard_table_mem, memory_order_relaxed);
   });
 
-  return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
-                              std::move(search_synonyms), table_mem.load(memory_order_relaxed)};
+  return GlobalData{std::move(script_bodies), std::move(search_indices), std::move(search_synonyms),
+                    std::move(search_aliases), table_mem.load(memory_order_relaxed)};
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -1802,6 +1811,10 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
       for (const string& s : glob_state.search_indices)
         RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
     }
+
+    DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_aliases.empty());
+    for (const string& s : glob_state.search_aliases)
+      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-alias", s));
 
     // Save synonyms only in summary file
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_synonyms.empty());

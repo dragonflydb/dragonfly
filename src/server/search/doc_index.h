@@ -22,6 +22,7 @@
 #include "core/search/search.h"
 #include "core/search/sort_indices.h"
 #include "core/search/synonyms.h"
+#include "facade/op_status.h"
 #include "server/search/aggregator.h"
 #include "server/search/index_join.h"
 #include "server/stats.h"
@@ -639,17 +640,33 @@ class ShardDocIndices {
  public:
   ShardDocIndices();
 
-  // Get sharded document index by its name or nullptr if not found
+  // Get sharded document index by its name or nullptr if not found. Does not search aliases.
   ShardDocIndex* GetIndex(std::string_view name);
+
+  // Find document index by name, and also search for aliases.
+  ShardDocIndex* ResolveIndex(std::string_view name);
+
+  // target must exist, there must not be an alias already, or an index by the name of alias
+  facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
+
+  // changes alias to point to target, creates new if no map exists
+  facade::OpStatus UpdateAlias(std::string_view alias, std::string_view target);
+
+  facade::OpStatus DeleteAlias(std::string_view alias);
+
+  std::vector<std::pair<std::string, std::string>> GetAliases() const;
 
   // Init index: create shard local state for given index with given name.
   void InitIndex(const OpArgs& op_args, std::string_view name,
                  std::shared_ptr<const DocIndex> index, bool is_journal = false);
 
-  // Drop index, return the dropped index if it existed or nullptr otherwise
+  // Extract an index for replacement while preserving aliases, returning nullptr if absent.
+  std::unique_ptr<ShardDocIndex> ExtractIndex(std::string_view name);
+
+  // Permanently drop an index and its aliases, returning it if it existed or nullptr otherwise.
   std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);
 
-  // Drop all indices
+  // Drop all indices and aliases.
   void DropAllIndices();
 
   // Drop the indices that never started building (a load failed after defining them).
@@ -694,6 +711,7 @@ class ShardDocIndices {
   MiMemoryResource local_mr_;
   unsigned hash_index_count_ = 0;
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
+  absl::flat_hash_map<std::string, std::string> aliases_;
 
   std::string next_defrag_index_;
 };
