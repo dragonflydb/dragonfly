@@ -2895,7 +2895,16 @@ TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
   const auto& msg = GetPublishedMessage("IO1", 0);
   EXPECT_EQ("__keyevent@0__:expired", msg.channel);
   EXPECT_EQ("foo", msg.message);
-  EXPECT_GE(GetMetrics().events.expired_keys, 1u);
+  EXPECT_GE(GetMetrics().db_stats[0].events.expired_keys, 1u);
+}
+
+// Expiry counters are cumulative and must survive a flush.
+TEST_F(GenericFamilyTest, ExpiredKeysSurviveFlush) {
+  Run({"SET", "foo", "bar"});
+  EXPECT_THAT(Run({"EXPIRE", "foo", "-1"}), IntArg(1));
+  Run({"FLUSHALL"});
+  EXPECT_EQ(1u, GetMetrics().db_stats[0].events.expired_keys);
+  EXPECT_THAT(Run({"INFO", "STATS"}).GetString(), HasSubstr("expired_keys:1\r\n"));
 }
 
 namespace {
