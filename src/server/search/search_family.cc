@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
+#include <absl/functional/function_ref.h>
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_format.h>
@@ -46,6 +47,7 @@
 #include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+#include "server/tx_base.h"
 #include "src/core/overloaded.h"
 
 namespace rng = std::ranges;
@@ -2605,6 +2607,63 @@ void RenderShardProfileTree(RedisReplyBuilder* rb, const SearchResult& shard_res
   RenderProfileEvent(rb, shard_result.profile->events, 0, limited);
 }
 
+void RunAliasCommand(CommandContext* cmd_cntx, string_view command, string_view alias,
+                     ArgSlice journal_args, absl::FunctionRef<OpStatus(ShardDocIndices*)> mutate) {
+  using enum OpStatus;
+  vector statuses(shard_set->size(), OK);
+
+  auto cb = [&](Transaction* tx, EngineShard* es) {
+    ShardDocIndices* indices = es->search_indices();
+    OpStatus status = mutate(indices);
+
+    if (status == KEY_EXISTS && indices->GetIndex(alias) != nullptr)
+      status = INVALID_VALUE;
+
+    statuses[es->shard_id()] = status;
+
+    if (status == OK && es->journal())
+      RecordJournal(tx->GetOpArgs(es), command, journal_args);
+
+    return OK;
+  };
+  cmd_cntx->tx()->Execute(cb, true);
+
+  DCHECK(rng::all_of(statuses, [&](auto status) { return status == statuses.front(); }));
+  switch (statuses.front()) {
+    case OK:
+      return cmd_cntx->rb()->SendOk();
+    case KEY_EXISTS:
+      return cmd_cntx->SendError("Alias already exists");
+    case KEY_NOTFOUND:
+      return cmd_cntx->SendError(command == "FT.ALIASDEL" ? "Alias does not exist"
+                                                          : "Unknown index name or name is alias");
+    case INVALID_VALUE:
+      return cmd_cntx->SendError("Alias name conflicts with an existing index");
+    default:
+      return cmd_cntx->SendError("Alias operation failed");
+  }
+}
+
+void CmdFtAliasAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view alias = parser.Next();
+  string_view target = parser.Next();
+  RunAliasCommand(cmd_cntx, "FT.ALIASADD", alias, ArgSlice{alias, target},
+                  [alias, target](auto* indices) { return indices->AddAlias(alias, target); });
+}
+
+void CmdFtAliasUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view alias = parser.Next();
+  string_view target = parser.Next();
+  RunAliasCommand(cmd_cntx, "FT.ALIASUPDATE", alias, ArgSlice{alias, target},
+                  [alias, target](auto* indices) { return indices->UpdateAlias(alias, target); });
+}
+
+void CmdFtAliasDel(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view alias = parser.Next();
+  RunAliasCommand(cmd_cntx, "FT.ALIASDEL", alias, ArgSlice{alias},
+                  [alias](auto* indices) { return indices->DeleteAlias(alias); });
+}
+
 }  // namespace
 
 void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -4341,6 +4400,15 @@ void SearchFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"FT.CREATE", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
+      << CI{"FT.ALIASADD", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
+            acl::FT_SEARCH}
+             .HFUNC(FtAliasAdd)
+      << CI{"FT.ALIASUPDATE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
+            acl::FT_SEARCH}
+             .HFUNC(FtAliasUpdate)
+      << CI{"FT.ALIASDEL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 2, 0, 0,
+            acl::FT_SEARCH}
+             .HFUNC(FtAliasDel)
       << CI{"FT.ALTER", CO::JOURNALED | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
       << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtDropIndex)
