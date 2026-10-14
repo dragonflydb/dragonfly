@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <deque>
+
 #include "server/detail/egress_throttle.h"
 #include "server/journal/types.h"
 #include "server/rdb_save.h"
@@ -101,8 +103,18 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Handles data provided by RdbSerializer when its internal buffer exceeds the threshold
   // during big value serialization (e.g. huge sets/lists or large strings).
   // The data has already been extracted from the serializer and is owned here, ensuring correct
-  // plumbing and making it safe to move.
-  void HandleFlushData(std::string data);
+  // plumbing and making it safe to move. Queues the chunk for flush_fb_. At a safe point the
+  // traversal fiber then waits for the chunk to be written; any other call returns while the
+  // queue holds at most pending_limit_ bytes, so a bucket dependency held mid-value is never
+  // kept across a sink write.
+  void HandleFlushData(std::string data, bool safe_point);
+
+  // Body of flush_fb_: writes pending_ to the consumer in FIFO order until StopFlushFb.
+  void FlushPendingFb();
+
+  // Drains pending_ and joins flush_fb_. Every producer must be unregistered by then: no
+  // HandleFlushData call may follow. Idempotent.
+  void StopFlushFb();
 
   // Callback of RdbSerializer to push big value chunks
   std::error_code ConsumeBigValueChunk(std::string data);
@@ -115,15 +127,28 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   uint32_t journal_cb_id_ = 0;
 
   util::fb2::Fiber snapshot_fb_;
-  util::fb2::CondVarAny seq_cond_;
+
+  // Chunks produced by HandleFlushData, written to the consumer by flush_fb_ in FIFO order.
+  struct PendingChunk {
+    std::string data;
+    bool high_prio;  // not produced by the traversal fiber, for the egress throttler
+  };
+  std::deque<PendingChunk> pending_;
+  // Sum of the capacities of the strings in pending_.
+  size_t pending_bytes_ = 0;
+  uint64_t produced_seq_ = 0, written_seq_ = 0;  // chunk sequence numbers
+  // Bytes of pending_ a mutation fiber may leave queued without waiting.
+  size_t pending_limit_ = 0;
+  bool stop_flush_ = false;
+  util::fb2::Fiber flush_fb_;
+  util::fb2::CondVarAny flush_cv_;  // wakes flush_fb_
+  util::fb2::CondVarAny drain_cv_;  // wakes producers waiting on pending_bytes_
 
   const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 
   bool use_background_mode_ = false;
   DflyVersion replica_dfly_version_ = DflyVersion::CURRENT_VER;
-
-  uint64_t rec_id_ = 1, last_pushed_id_ = 0;
 
   // Limits this snapshot's socket egress to a configured bandwidth budget.
   detail::EgressThrottler throttler_{0};
