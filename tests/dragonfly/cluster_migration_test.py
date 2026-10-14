@@ -953,10 +953,12 @@ async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory)
     # tx_executor=2 traces the rendezvous txid, the only place it is observable. logbuflevel=-1
     # keeps those records out of the log buffer, which the SIGKILL below would discard.
     master = df_factory.create(port=next(next_port), admin_port=next(next_port), logbuflevel=-1)
+    # A flow fiber that runs 100ms without switching starves its thread; the warning is the detector.
     replica = df_factory.create(
         port=next(next_port),
         admin_port=next(next_port),
         logbuflevel=-1,
+        fiber_run_warning_threshold_ms=100,
         vmodule="replica=2,tx_executor=2,cluster_family=1,db_slice=1,dflycmd=1",
     )
     df_factory.start_all([master, replica])
@@ -1008,7 +1010,8 @@ async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory)
                 pipe = c.pipeline(transaction=False)
                 for _ in range(50):
                     pipe.set(f"{{a}}:{i}", value)
-                    i += 1
+                    # Bounded key space: a stalled push must not grow the data set without limit.
+                    i = (i + 1) % 10_000
                 try:
                     await pipe.execute()
                 except Exception as e:
@@ -1033,7 +1036,12 @@ async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory)
         # assertions at the end are the detector.
         pushes, step = 15, 500
         for start in range(step, step * pushes + 1, step):
-            await push_config(make_config(start), [c_master_admin, c_replica_admin])
+            try:
+                await asyncio.wait_for(
+                    push_config(make_config(start), [c_master_admin, c_replica_admin]), timeout=30
+                )
+            except asyncio.TimeoutError:
+                pytest.fail(f"config push owning slots {start}-16383 did not complete in 30s")
             logging.info("pushed config owning slots %d-16383", start)
 
         stop = True
@@ -1111,9 +1119,13 @@ async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory)
 
     timeouts = hits(master, "Stream timed out")
     disconnects = hits(master, "Disconnecting from replica")
+    stalls = hits(replica, "Fiber shard_stable_sync_read ran for")
     logging.info("RESULT stream_timeouts=%d master_disconnects=%d", len(timeouts), len(disconnects))
     for line in timeouts:
         logging.info("  MASTER %s", line)
+    logging.info("RESULT flow_fiber_stalls=%d", len(stalls))
+    for line in stalls:
+        logging.info("  REPLICA %s", line)
     logging.info(
         "RESULT master_alive=%s replica_alive=%s converged=%s",
         master_alive,
@@ -1132,4 +1144,5 @@ async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory)
     ), f"expected one distinct txid per FLUSHSLOTS, got {sorted(set(txids))}"
 
     assert not timeouts, "replication stalled past replication_timeout during repeated FLUSHSLOTS"
+    assert not stalls, "a replica flow fiber ran 100ms+ without yielding and starved its thread"
     assert converged, "replication never converged after repeated FLUSHSLOTS"
