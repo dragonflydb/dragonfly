@@ -3546,6 +3546,14 @@ TEST_F(ScoringTest, IndexStats) {
   EXPECT_EQ(ti->GetFieldDocLength(1), 1u);
   EXPECT_EQ(ti->GetFieldDocLength(2), 2u);
   EXPECT_DOUBLE_EQ(ti->GetFieldAvgDocLen(), 2.0);  // (3+1+2)/3
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("@field:(hello world)", &params));
+  auto stats = algo.CollectScoringStats(&index);
+  EXPECT_EQ(stats.num_docs, 3u);
+  EXPECT_EQ(stats.term_stats.at("field").at("hello"), 2u);
+  EXPECT_EQ(stats.term_stats.at("field").at("world"), 1u);
 }
 
 TEST_F(ScoringTest, IndexStatsAfterRemove) {
