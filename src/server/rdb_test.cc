@@ -3000,6 +3000,35 @@ TEST_F(RdbTest, SnapshotEgressThrottle) {
   EXPECT_GT(t_lim, t_base * 3);
 }
 
+// The output buffer lets mutation fibers queue inline-serialized chunks for the flush fiber
+// instead of waiting on the sink. Save while another fiber overwrites keys the traversal has not
+// reached yet, with the buffer off, on, and off again (the flag is runtime-mutable and read when
+// a snapshot starts), and check the file loads back whole.
+TEST_F(RdbTest, SnapshotOutputBuffer) {
+  Run({"debug", "populate", "20000", "key", "1000"});
+  for (string_view limit : {"0", "1mb", "0"}) {
+    ASSERT_EQ(Run({"config", "set", "snapshot_output_buffer_limit", limit}), "OK");
+
+    auto save_fb = pp_->at(0)->LaunchFiber([&] { ASSERT_EQ(Run({"save", "rdb"}), "OK"); });
+    do {
+      usleep(10);
+    } while (!service_->server_family().TEST_IsSaving());
+
+    // Every write to a bucket not yet traversed serializes that bucket inline and queues it.
+    pp_->at(1)->Await([&] {
+      for (unsigned i = 0; i < 20000; i += 7) {
+        Run({"set", StrCat("key:", i), "updated"});
+      }
+    });
+    save_fb.Join();
+
+    auto save_info = service_->server_family().GetLastSaveInfo();
+    ASSERT_EQ(Run({"flushall"}), "OK");
+    ASSERT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
+    EXPECT_THAT(Run({"dbsize"}), IntArg(20000));
+  }
+}
+
 TEST_F(RdbTest, EofWithRemoteShardChunksPending) {
   // This test creates a key whose RDB chunk is dispatched to a remote shard (not the shard
   // driving the load), and simulates the source stream ending (EOF) before all of that chunk's
