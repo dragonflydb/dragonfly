@@ -113,8 +113,8 @@ void RecordEntry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot,
   MaybeStop();
 }
 
-void SetFlushMode(bool allow_flush) {
-  journal_slice.SetFlushMode(allow_flush);
+bool SetFlushMode(bool allow_flush) {
+  return journal_slice.SetFlushMode(allow_flush);
 }
 
 size_t LsnBufferSize() {
@@ -124,8 +124,6 @@ size_t LsnBufferSize() {
 size_t LsnBufferBytes() {
   return journal_slice.GetRingBufferBytes();
 }
-
-size_t thread_local DisableFlushGuard::counter_ = 0;
 
 }  // namespace journal
 }  // namespace dfly

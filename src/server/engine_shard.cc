@@ -818,7 +818,7 @@ void EngineShard::RetireExpiredAndEvict() {
   {
     // Disable journal flush to prevent preemption. Scoped so that SendMessages below,
     // which may suspend on backpressure, runs outside the atomic section.
-    journal::DisableFlushGuard journal_flush_guard(journal_);
+    journal::DisableFlushGuard journal_flush_guard;
 
     for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
       if (!db_slice.IsDbValid(i))

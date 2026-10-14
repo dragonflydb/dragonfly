@@ -185,7 +185,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
   }
 
   // Disable flush journal changes to prevent preemtion in GarbageCollect.
-  journal::DisableFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
+  journal::DisableFlushGuard journal_flush_guard;
 
   // bool should_print = (eb.key_hash % 128) == 0;
 
@@ -221,7 +221,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
     return 0;
 
   // Disable flush journal changes to prevent preemtion in evict.
-  journal::DisableFlushGuard journal_flush_guard(db_slice_->shard_owner()->journal());
+  journal::DisableFlushGuard journal_flush_guard;
 
   constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.stash_buckets);
 
@@ -1593,7 +1593,7 @@ void DbSlice::ExpireAllIfNeeded() {
   vector<vector<string>> per_db_events(db_arr_.size());
   {
     // Disable flush journal changes to prevent preemtion in traverse.
-    journal::DisableFlushGuard journal_flush_guard(owner_->journal());
+    journal::DisableFlushGuard journal_flush_guard;
 
     for (DbIndex db_index = 0; db_index < db_arr_.size(); db_index++) {
       if (!db_arr_[db_index])
@@ -1740,7 +1740,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
                                                               size_t increase_goal_bytes,
                                                               vector<string>* key_events) {
   // Disable flush journal changes to prevent preemtion
-  journal::DisableFlushGuard journal_flush_guard(shard_owner()->journal());
+  journal::DisableFlushGuard journal_flush_guard;
   FiberAtomicGuard guard;
   DCHECK(!owner_->IsReplica());
 
