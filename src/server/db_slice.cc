@@ -2167,6 +2167,12 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
     table->slots_stats[sid].key_count -= 1;
   }
 
+  // Before Erase: del_it.key() may be a view into the entry (e.g. on expiry or eviction), and
+  // Erase destroys the key it points to.
+  if (!client_tracking_map_.empty()) {
+    QueueInvalidationTrackingMessageAtomic(del_it.key());
+  }
+
   table->prime.Erase(del_it.GetInnerIt());
 
   // Note, currently we do not shrink our tables upon deletion.
@@ -2176,10 +2182,6 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
 
   --entries_count_;
   memory_budget_ += (value_heap_size + key_size_used);
-
-  if (!client_tracking_map_.empty()) {
-    QueueInvalidationTrackingMessageAtomic(del_it.key());
-  }
 }
 
 void DbSlice::OnCbFinishBlocking() {
