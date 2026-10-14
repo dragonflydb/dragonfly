@@ -44,6 +44,7 @@ error_code AofChainReader::Open() {
   if (!files)
     return files.error();
 
+  // Collect the shard's segments; the seq is in the file name.
   string prefix = absl::StrCat("appendonly-", shard_id_, "-");
   for (const auto& file : *files) {
     string_view seq_str = string_view(file.name).substr(file.name.rfind('/') + 1);
@@ -57,11 +58,13 @@ error_code AofChainReader::Open() {
   if (segments_.empty())
     return make_error_code(errc::no_such_file_or_directory);
 
+  // The log runs through the segments in seq order.
   sort(segments_.begin(), segments_.end(),
        [](const Segment& a, const Segment& b) { return a.seq < b.seq; });
 
   for (size_t i = 0; i < segments_.size(); ++i) {
     Segment& seg = segments_[i];
+    // A missing seq or a file without a full header.
     if (seg.seq != segments_.front().seq + i || seg.size < kAofSegmentHeaderSize)
       return make_error_code(errc::illegal_byte_sequence);
 
@@ -73,24 +76,29 @@ error_code AofChainReader::Open() {
     iovec v{hdr_bytes.data(), hdr_bytes.size()};
     RETURN_ON_ERR(seg.file->Read(&v, 1, 0, 0));
 
+    // The header must be valid and match the file's name and the chain.
     auto hdr = DecodeAofSegmentHeader(hdr_bytes);
     if (!hdr || hdr->shard_id != shard_id_ || hdr->shard_count != shard_count_ ||
         hdr->seq != seg.seq) {
       return make_error_code(errc::illegal_byte_sequence);
     }
+    // Seeds the CRCs of the segment's blocks.
     seg.uid = hdr->segment_uid;
   }
   return {};
 }
 
 error_code AofChainReader::ReadBlock() {
-  const Segment& seg = segments_[read_seg_];
+  const Segment& seg = segments_[read_seg_id_];
+  // Up to one maximum-size block; a smaller block leaves the next block's bytes for the next read.
   buf_.resize(min<uint64_t>(kMaxBlockBytes, seg.size - offset_));
   iovec v{buf_.data(), buf_.size()};
   RETURN_ON_ERR(seg.file->Read(&v, 1, offset_, 0));
+  // Bad CRC, size or flags.
   auto hdr = DecodeAofBlock(buf_, seg.uid);
   if (!hdr)
     return make_error_code(errc::illegal_byte_sequence);
+  // Hand out the payload, without the block header.
   pending_ =
       string_view(buf_).substr(kAofBlockHeaderSize, hdr->total_block_bytes - kAofBlockHeaderSize);
   offset_ += hdr->total_block_bytes;
@@ -99,10 +107,12 @@ error_code AofChainReader::ReadBlock() {
 
 io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
   while (pending_.empty()) {
-    if (read_seg_ == segments_.size())
+    // Read past the last segment: the end of the log.
+    if (read_seg_id_ == segments_.size())
       return 0;
-    if (offset_ == segments_[read_seg_].size) {
-      ++read_seg_;
+    // Reached the end of the current segment: continue with the next one, after its header.
+    if (offset_ == segments_[read_seg_id_].size) {
+      ++read_seg_id_;
       offset_ = kAofSegmentHeaderSize;
       continue;
     }
@@ -110,6 +120,7 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
       return nonstd::make_unexpected(ec);
   }
 
+  // Copy as much of the current payload as fits in v.
   size_t copied = 0;
   for (uint32_t i = 0; i < len && !pending_.empty(); ++i) {
     size_t n = min(v[i].iov_len, pending_.size());

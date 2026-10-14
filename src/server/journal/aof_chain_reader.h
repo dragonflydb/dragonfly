@@ -53,7 +53,7 @@ class AofChainReader : public io::Source {
   std::vector<Segment> segments_;
 
   // The segment being read and the offset of its next block.
-  size_t read_seg_ = 0;
+  size_t read_seg_id_ = 0;
   uint64_t offset_ = kAofSegmentHeaderSize;
   std::string buf_;
   // The unread part of the current block's payload, in buf_.
