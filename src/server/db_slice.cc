@@ -717,8 +717,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     if (!events.empty())
       SendExpiredKeyEvents(cntx.db_index, events);
 
-    // If expire is paused, hide expired keys from read lookups, but retain them for mutable
-    // lookups.
+    // If expiry is paused, hide expired keys from read lookups. Mutable lookups must still see
+    // them: the entry is physically present, and reporting it missing would make AddOrFind insert
+    // a duplicate.
     if (res == ExpireResult::Deleted ||
         (res == ExpireResult::ExpiryPaused && stats_mode == UpdateStatsMode::kReadStats)) {
       events_.misses += miss_weight;
