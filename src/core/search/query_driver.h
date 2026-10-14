@@ -66,7 +66,7 @@ class QueryDriver {
  private:
   void StartGlue(std::string_view input);
 
-  const QueryParams* params_;
+  const QueryParams* params_ = nullptr;
   AstExpr expr_;
 
   std::string cur_str_;

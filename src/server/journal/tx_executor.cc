@@ -70,6 +70,14 @@ MultiShardExecution::Status MultiShardExecution::Execute(TxId txid,
 
 #undef RETURN_ON_CANCELED
 
+void MultiShardExecution::RemoveFlow() {
+  std::lock_guard lk(mu_);
+  DCHECK_GT(flows_, 0u);
+  --flows_;
+  // Wakes the flows waiting for this one, so they re-check against the lower count.
+  cv_.notify_all();
+}
+
 void MultiShardExecution::CancelAllBlockingEntities() {
   std::lock_guard lk(mu_);
   cancelled_ = true;
@@ -101,10 +109,16 @@ bool TransactionData::IsGlobalCmd() const {
     return false;
   }
 
+  // Global transactions journaled on every shard. MOVE is a global transaction too, but it journals
+  // itself once, on its key's shard, so replay and replicas apply it directly: waiting for copies
+  // that never come would deadlock.
+  static constexpr string_view kGlobalCmds[] = {"FLUSHDB",  "FLUSHALL",     "FT.CREATE",
+                                                "FT.ALTER", "FT.DROPINDEX", "FT.SYNUPDATE"};
   string_view front = command.Front();
-
-  if (absl::EqualsIgnoreCase(front, "FLUSHDB"sv) || absl::EqualsIgnoreCase(front, "FLUSHALL"sv))
-    return true;
+  for (string_view cmd : kGlobalCmds) {
+    if (absl::EqualsIgnoreCase(front, cmd))
+      return true;
+  }
 
   if (command.size() > 1 && absl::EqualsIgnoreCase(front, "DFLYCLUSTER"sv) &&
       absl::EqualsIgnoreCase(command[1], "FLUSHSLOTS"sv)) {

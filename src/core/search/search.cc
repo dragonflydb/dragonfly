@@ -6,9 +6,11 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
+#include <absl/types/span.h>
 #include <uni_algo/case.h>
 
 #include <chrono>
@@ -35,7 +37,6 @@ namespace {
 AstExpr ParseQuery(std::string_view query, const QueryParams* params,
                    const OptionalFilters* filters) {
   QueryDriver driver{};
-  driver.ResetScanner();
   driver.SetParams(params);
   driver.SetInput(std::string{query});
   (void)Parser (&driver)();  // can throw
@@ -230,7 +231,8 @@ struct BasicSearch {
   }
 
   // Efficiently unify multiple sub results with specified logical op
-  IndexResult UnifyResults(vector<IndexResult>&& sub_results, LogicOp op) {
+  // Consumes the results in place, including views into the evaluation buffer.
+  template <typename Results> IndexResult UnifyResults(Results&& sub_results, LogicOp op) {
     if (sub_results.empty())
       return IndexResult{};
 
@@ -783,9 +785,7 @@ struct BasicSearch {
         error_ = std::move(f.saved_error);
         result = IndexResult{&indices_->GetAllDocs()};  // ~ never filters: all docs
       } else if (auto* logical = n.As<AstLogicalNode>()) {
-        vector<IndexResult> subs(make_move_iterator(values.begin() + results_base),
-                                 make_move_iterator(values.end()));
-        result = UnifyResults(std::move(subs), logical->op);
+        result = UnifyResults(absl::MakeSpan(values).subspan(results_base), logical->op);
       } else if (auto* knn = n.As<AstKnnNode>()) {
         IndexResult sub =
             values.size() > results_base ? std::move(values[results_base]) : IndexResult{};
@@ -946,7 +946,7 @@ struct BasicSearch {
   double current_weight_ = 1.0;
 
   string error_;
-  optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
+  optional<ProfileBuilder> profile_builder_;
 
   absl::flat_hash_map<DocId, float> knn_scores_;
   vector<pair<float, DocId>> knn_distances_;
@@ -982,18 +982,19 @@ struct StatsCollector {
   // Iterative DFS (explicit stack keeps deep trees off the fiber stack): composite nodes enqueue
   // their children, leaves record stats.
   void Walk(const AstNode& root, string_view root_field) {
-    vector<pair<const AstNode*, string_view>> stack{{&root, root_field}};
+    absl::InlinedVector<pair<const AstNode*, string_view>, 4> stack{{&root, root_field}};
     while (!stack.empty()) {
       auto [node, active_field] = stack.back();
       stack.pop_back();
 
-      size_t before = stack.size();
-      ForEachChild(*node, active_field, [&](const AstNode& child, string_view field) {
-        stack.emplace_back(&child, field);
+      VisitAst(*node, [this, &stack, active_field](const auto& inner) {
+        size_t before = stack.size();
+        ForEachChild(inner, active_field, [&](const AstNode& child, string_view field) {
+          stack.emplace_back(&child, field);
+        });
+        if (stack.size() == before)
+          VisitLeaf(inner, active_field);
       });
-      if (stack.size() == before)  // leaf
-        VisitAst(*node,
-                 [this, active_field](const auto& inner) { VisitLeaf(inner, active_field); });
     }
   }
 
@@ -1409,7 +1410,7 @@ void SearchAlgorithm::SetScorer(ScorerSpec scorer) {
 // Invokes `cb` on every node in pre-order DFS, iteratively (deep trees must not overflow the
 // stack).
 template <typename F> void WalkAst(const AstNode& root, const F& cb) {
-  vector<const AstNode*> stack{&root};
+  absl::InlinedVector<const AstNode*, 4> stack{&root};
   while (!stack.empty()) {
     const AstNode* node = stack.back();
     stack.pop_back();

@@ -360,7 +360,6 @@ class Connection : public util::Connection {
 
  private:
   enum ParserStatus : uint8_t { OK, NEED_MORE, ERROR };
-
   struct AsyncOperations;
 
   // Check protocol and handle connection.
@@ -464,6 +463,9 @@ class Connection : public util::Connection {
 
   // Main loop reading client messages and passing requests to dispatch queue.
   std::variant<std::error_code, ParserStatus> IoLoopV2();
+
+  // Sends and flushes V2's protocol error after previously parsed commands have drained.
+  std::variant<std::error_code, ParserStatus> FinalizeV2ParserError();
 
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto();
@@ -598,12 +600,16 @@ class Connection : public util::Connection {
   // Call appropriate ParseBatch function, proceed with Execute and Reply all why input is remaining
   ParserStatus ParseLoop();
 
+  // Stops V2 input processing after a parser error while retaining the parsed command
+  // queue so its replies can drain before the final protocol error.
+  void EnterParserErrorDrainMode();
+
   // Loop over enqueued async commands and enqueue them for async execution.
   // If async execution is not possible, handle them in synchronous mode one by one.
   // Returns kDeferToControlPath only when V2 stops to let IoLoopV2 drain control messages that
   // precede the next parsed command.
   enum class ExecuteBatchResult : uint8_t { kSuccess, kFailure, kDeferToControlPath };
-  ExecuteBatchResult ExecuteBatch(bool parser_error);
+  ExecuteBatchResult ExecuteBatch();
 
   // V2: Returns true if the connection is currently logging traffic to a file.
   bool ShouldLogTrafficV2() const;
@@ -869,10 +875,9 @@ class Connection : public util::Connection {
       bool migration_allowed_to_register_ : 1;
       bool pending_input_ : 1;
 
-      // Set by parse-in-proactor (OnRecvNotification) when its ParseRedis hits a protocol error.
-      // The recv callback cannot return a status, so IoLoopV2 observes this flag and surfaces
-      // ParserStatus::ERROR to close the connection and send the protocol-error reply.
-      bool proactor_parse_error_ : 1;
+      // V2 parser-error state: when set, stop accepting input but drain commands parsed before
+      // the error so their replies precede the final protocol error.
+      bool parser_error_draining_ : 1;
 
       // Shared read buffer: only valid for RESP IoLoop V2 connections.
       bool shared_read_buf_enabled_ : 1;

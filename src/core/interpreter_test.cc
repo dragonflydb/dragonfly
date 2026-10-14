@@ -228,6 +228,49 @@ return x
   ASSERT_FALSE(intptr_.IsResultSafe());
 }
 
+TEST_F(InterpreterTest, ReplyDepth) {
+  auto repeat = [](string_view str, int n) {
+    string res;
+    for (int i = 0; i < n; ++i)
+      res += str;
+    return res;
+  };
+
+  // A table nested deeper than 128 levels is replaced by an error.
+  const string depth_err = "err(ERR reached lua stack limit)";
+  EXPECT_TRUE(Execute("local x = {} for i = 1, 127 do x = {x} end return x"));
+  EXPECT_EQ(repeat("[", 128) + repeat("]", 128), ser_.res);
+  EXPECT_TRUE(Execute("local x = {} for i = 1, 128 do x = {x} end return x"));
+  EXPECT_EQ(repeat("[", 128) + depth_err + repeat("]", 128), ser_.res);
+
+  // Tables used as map keys take the most stack slots per nesting level.
+  EXPECT_TRUE(Execute("local x = {} for i = 1, 128 do x = {map = {[x] = 1}} end return x"));
+  EXPECT_EQ(repeat("{", 128) + depth_err + repeat(" i(1)}", 128), ser_.res);
+
+  // Cycles are cut at the same depth, unless they go through fields that are not serialized.
+  EXPECT_TRUE(Execute("local t = {}; t[1] = t; return {1, 'a', t}"));
+  EXPECT_EQ("[i(1) str(a) " + repeat("[", 127) + depth_err + repeat("]", 128), ser_.res);
+  EXPECT_TRUE(Execute("local t = {}; t.map = t; return t"));
+  EXPECT_EQ(repeat("{str(map) ", 128) + depth_err + repeat("}", 128), ser_.res);
+  EXPECT_TRUE(Execute("local t = {1}; t.self = t; return t"));
+  EXPECT_EQ("[i(1)]", ser_.res);
+  EXPECT_TRUE(Execute("local t = {map = {a = 1}}; t[1] = t; return t"));
+  EXPECT_EQ("{str(a) i(1)}", ser_.res);
+}
+
+TEST_F(InterpreterTest, ShallowReplyStack) {
+  // Garbage collection does not shrink the stack below reserved slots, so a shallow reply must not
+  // reserve the slots of the deepest one (about 8KB).
+  auto used_bytes = [this] {
+    lua_gc(lua(), LUA_GCCOLLECT);
+    return lua_gc(lua(), LUA_GCCOUNT) * 1024 + lua_gc(lua(), LUA_GCCOUNTB);
+  };
+  const int before = used_bytes();
+  RunInline("return {{1}, {map = {a = {}}}}", "shallow", 1);
+  intptr_.SerializeResult(&ser_);
+  EXPECT_LT(used_bytes() - before, 1024);
+}
+
 TEST_F(InterpreterTest, Add) {
   const char* s1 = "return 0";
   const char* s2 = "foobar";
@@ -722,10 +765,14 @@ TEST_F(InterpreterTest, ProtectedGlobalAssignment) {
 }
 
 TEST_F(InterpreterTest, Robust) {
-  EXPECT_FALSE(Execute(R"(eval "local a = {}
+  // Wrapper fields are read with raw access, so metamethods never run.
+  EXPECT_TRUE(Execute(R"(local a = {}
       setmetatable(a,{__index=function() foo() end})
-      return a")"));
-  EXPECT_EQ("", ser_.res);
+      return a)"));
+  EXPECT_EQ("[]", ser_.res);
+
+  EXPECT_TRUE(Execute("return setmetatable({}, {__index = {err = 'e'}})"));
+  EXPECT_EQ("[]", ser_.res);
 }
 
 TEST_F(InterpreterTest, LoadBytecodeBlocked) {

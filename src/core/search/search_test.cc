@@ -207,6 +207,7 @@ class SearchTest : public ::testing::Test {
     }
 
     auto matched = search_algo.Search(&index);
+    EXPECT_FALSE(matched.profile);
 
     if (!is_sorted(matched.ids.begin(), matched.ids.end()))
       LOG(FATAL) << "Search result is not sorted";
@@ -3438,6 +3439,7 @@ TEST_F(ScoringTest, SearchWithScorer) {
   // doc1 and doc2 should match, doc3 should not
   ASSERT_EQ(result.ids.size(), 2u);
   EXPECT_EQ(result.text_scores.size(), 2u);
+  EXPECT_FALSE(result.profile);
 
   // Both scores should be positive
   for (auto& [doc, score] : result.text_scores) {
@@ -3453,6 +3455,15 @@ TEST_F(ScoringTest, SearchWithScorer) {
       score1 = score;
   }
   EXPECT_GT(score0, score1) << "Doc with higher TF should score higher";
+
+  algo.EnableProfiling();
+  auto profiled = algo.Search(&index);
+  ASSERT_TRUE(profiled.profile);
+  EXPECT_FALSE(profiled.profile->events.empty());
+  EXPECT_EQ(profiled.ids, result.ids);
+  EXPECT_EQ(profiled.total, result.total);
+  EXPECT_EQ(profiled.text_scores, result.text_scores);
+  EXPECT_EQ(profiled.max_text_score, result.max_text_score);
 }
 
 TEST_F(ScoringTest, SearchPrefixWithScorer) {
@@ -3535,6 +3546,14 @@ TEST_F(ScoringTest, IndexStats) {
   EXPECT_EQ(ti->GetFieldDocLength(1), 1u);
   EXPECT_EQ(ti->GetFieldDocLength(2), 2u);
   EXPECT_DOUBLE_EQ(ti->GetFieldAvgDocLen(), 2.0);  // (3+1+2)/3
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("@field:(hello world)", &params));
+  auto stats = algo.CollectScoringStats(&index);
+  EXPECT_EQ(stats.num_docs, 3u);
+  EXPECT_EQ(stats.term_stats.at("field").at("hello"), 2u);
+  EXPECT_EQ(stats.term_stats.at("field").at("world"), 1u);
 }
 
 TEST_F(ScoringTest, IndexStatsAfterRemove) {

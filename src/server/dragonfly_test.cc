@@ -162,6 +162,16 @@ TEST_F(DflyEngineTest, EvalResp) {
   ASSERT_THAT(resp, ArrLen(4));
   EXPECT_THAT(resp.GetVec(), AnyOf(ElementsAre("a", IntArg(1), "b", IntArg(2)),
                                    ElementsAre("b", IntArg(2), "a", IntArg(1))));
+
+  // The cycle is replaced by an error where it gets nested deeper than 128 tables.
+  resp = Run({"eval", "local k = {}; k[1] = k; return {map = {[k] = 1}}", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(1));
+  for (int depth = 2; depth <= 128; ++depth) {
+    ASSERT_THAT(resp.GetVec()[0], ArrLen(1));
+    resp = resp.GetVec()[0];
+  }
+  EXPECT_THAT(resp.GetVec()[0], ErrArg("reached lua stack limit"));
 }
 
 TEST_F(DflyEngineTest, EvalGetLargeBorrowedStrings) {

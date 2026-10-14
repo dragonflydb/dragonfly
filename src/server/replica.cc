@@ -581,6 +581,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
   auto start_time = absl::Now();
 
   // Initialize MultiShardExecution.
+  // Replication has no end of log: flows never call RemoveFlow, so all take part.
   multi_shard_exe_.reset(new MultiShardExecution(master_context_.num_flows));
 
   auto load_context = std::make_shared<RdbLoadContext>();

@@ -5,7 +5,9 @@
 #pragma once
 
 #include <absl/base/macros.h>
+#include <absl/container/inlined_vector.h>
 
+#include <array>
 #include <iosfwd>
 #include <memory>
 #include <optional>
@@ -45,26 +47,19 @@ struct AstVectorRangeNode;
 
 // A visitor handles each concrete node; AstNode::Visit dispatches through the node's vtable.
 struct AstVisitor {
-  virtual ~AstVisitor() = default;
+  template <typename Node> void Visit(const Node& node) {
+    handlers_[static_cast<size_t>(Node::kType)](*this, node);
+  }
 
-  virtual void Visit(const AstStarNode& node) = 0;
-  virtual void Visit(const AstStarFieldNode& node) = 0;
-  virtual void Visit(const AstTermNode& node) = 0;
-  virtual void Visit(const AstPrefixNode& node) = 0;
-  virtual void Visit(const AstSuffixNode& node) = 0;
-  virtual void Visit(const AstInfixNode& node) = 0;
-  virtual void Visit(const AstWildcardNode& node) = 0;
-  virtual void Visit(const AstPhraseNode& node) = 0;
-  virtual void Visit(const AstRangeNode& node) = 0;
-  virtual void Visit(const AstGeoNode& node) = 0;
-  virtual void Visit(const AstNegateNode& node) = 0;
-  virtual void Visit(const AstOptionalNode& node) = 0;
-  virtual void Visit(const AstAttributeNode& node) = 0;
-  virtual void Visit(const AstLogicalNode& node) = 0;
-  virtual void Visit(const AstFieldNode& node) = 0;
-  virtual void Visit(const AstTagsNode& node) = 0;
-  virtual void Visit(const AstKnnNode& node) = 0;
-  virtual void Visit(const AstVectorRangeNode& node) = 0;
+ protected:
+  using Handler = void (*)(AstVisitor&, const AstNode&);
+
+  explicit AstVisitor(const Handler* handlers) : handlers_{handlers} {
+  }
+  ~AstVisitor() = default;
+
+ private:
+  const Handler* handlers_;
 };
 
 // Nodes own their children through AstExpr. A null expression denotes an empty/failed parse.
@@ -88,6 +83,7 @@ struct AstNode {
     TAGS,
     KNN,
     VECTOR_RANGE,
+    COUNT,
   };
 
   virtual ~AstNode() = default;
@@ -121,7 +117,7 @@ struct AstNode {
 
  private:
   friend struct AstNodeDeleter;
-  virtual void ReleaseChildren(AstNode*& pending) noexcept = 0;
+  virtual void Destroy(AstNode*& pending) noexcept = 0;
 
   const Type type_;
   AstNode* teardown_next_ = nullptr;
@@ -139,7 +135,7 @@ template <typename Derived, AstNode::Type type> struct TypedAstNode : AstNode {
   }
 
  private:
-  void ReleaseChildren(AstNode*& pending) noexcept final {
+  void Destroy(AstNode*& pending) noexcept final {
     auto& self = static_cast<Derived&>(*this);
     if constexpr (requires { self.node; }) {
       EnqueueChild(self.node, pending);
@@ -149,66 +145,46 @@ template <typename Derived, AstNode::Type type> struct TypedAstNode : AstNode {
       for (auto& child : self.nodes)
         EnqueueChild(child, pending);
     }
+    delete &self;
   }
 };
 
-// Adapts a callback to the virtual visitor without allocating.
-template <typename Callback> struct AstVisitorAdapter final : AstVisitor {
+namespace detail {
+
+// Generate the typed callbacks in one base, without a virtual overload for each node type.
+template <typename Derived, typename... Nodes> struct AstVisitorCallbacks : AstVisitor {
+  static_assert(sizeof...(Nodes) == static_cast<size_t>(AstNode::Type::COUNT));
+
+ protected:
+  AstVisitorCallbacks() : AstVisitor(kHandlers.data()) {
+  }
+
+ private:
+  template <typename Node> static void Dispatch(AstVisitor& visitor, const AstNode& node) {
+    static_cast<Derived&>(visitor)(static_cast<const Node&>(node));
+  }
+
+  static constexpr auto kHandlers = [] {
+    std::array<Handler, sizeof...(Nodes)> handlers{};
+    ((handlers[static_cast<size_t>(Nodes::kType)] = &Dispatch<Nodes>), ...);
+    return handlers;
+  }();
+};
+
+}  // namespace detail
+
+// Adapts a callback to node visitation without allocating.
+template <typename Callback>
+struct AstVisitorAdapter final
+    : detail::AstVisitorCallbacks<AstVisitorAdapter<Callback>, AstStarNode, AstStarFieldNode,
+                                  AstTermNode, AstPrefixNode, AstSuffixNode, AstInfixNode,
+                                  AstWildcardNode, AstPhraseNode, AstRangeNode, AstGeoNode,
+                                  AstNegateNode, AstOptionalNode, AstAttributeNode, AstLogicalNode,
+                                  AstFieldNode, AstTagsNode, AstKnnNode, AstVectorRangeNode> {
   explicit AstVisitorAdapter(Callback& callback) : callback_{callback} {
   }
 
-  void Visit(const AstStarNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstStarFieldNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstTermNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstPrefixNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstSuffixNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstInfixNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstWildcardNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstPhraseNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstRangeNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstGeoNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstNegateNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstOptionalNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstAttributeNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstLogicalNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstFieldNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstTagsNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstKnnNode& node) override {
-    callback_(node);
-  }
-  void Visit(const AstVectorRangeNode& node) override {
+  template <typename Node> void operator()(const Node& node) {
     callback_(node);
   }
 
@@ -312,7 +288,7 @@ struct AstLogicalNode final : TypedAstNode<AstLogicalNode, AstNode::Type::LOGICA
   static AstExpr Combine(AstExpr l, AstExpr r, LogicOp op);
 
   LogicOp op;
-  std::vector<AstExpr> nodes;
+  absl::InlinedVector<AstExpr, 2> nodes;
 };
 
 // Selects specific field for subtree
@@ -370,25 +346,25 @@ struct AstVectorRangeNode final : TypedAstNode<AstVectorRangeNode, AstNode::Type
 
 // Invokes cb(child, field) for each direct child. Field nodes override the inherited field.
 // Children transferred out of the tree are skipped.
-template <typename F>
-void ForEachChild(const AstNode& node, std::string_view active_field, F&& cb) {
-  VisitAst(node, [&](const auto& inner) {
-    if constexpr (std::is_same_v<std::decay_t<decltype(inner)>, AstFieldNode>) {
-      if (inner.node)
-        cb(*inner.node, std::string_view{inner.field});
-    } else if constexpr (requires { inner.node; }) {
-      if (inner.node)
-        cb(*inner.node, active_field);
-    } else if constexpr (requires { inner.filter; }) {
-      if (inner.filter)
-        cb(*inner.filter, active_field);
-    } else if constexpr (requires { inner.nodes; }) {
-      for (const auto& child : inner.nodes) {
-        if (child)
-          cb(*child, active_field);
-      }
+template <typename Node, typename F>
+void ForEachChild(const Node& node, std::string_view active_field, F&& cb) {
+  if constexpr (std::is_same_v<Node, AstNode>) {
+    VisitAst(node, [&](const auto& inner) { ForEachChild(inner, active_field, cb); });
+  } else if constexpr (std::is_same_v<Node, AstFieldNode>) {
+    if (node.node)
+      cb(*node.node, std::string_view{node.field});
+  } else if constexpr (requires { node.node; }) {
+    if (node.node)
+      cb(*node.node, active_field);
+  } else if constexpr (requires { node.filter; }) {
+    if (node.filter)
+      cb(*node.filter, active_field);
+  } else if constexpr (requires { node.nodes; }) {
+    for (const auto& child : node.nodes) {
+      if (child)
+        cb(*child, active_field);
     }
-  });
+  }
 }
 
 }  // namespace dfly::search
