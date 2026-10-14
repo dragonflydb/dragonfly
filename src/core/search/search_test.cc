@@ -610,15 +610,15 @@ TEST_F(SearchTest, StopWordsDroppedFromQuery) {
 }
 
 // A term may belong to several synonym groups. Its group tokens depend only on the current groups
-// (sorted, term case-insensitive); the document is indexed under every token, reachable through
-// any term of any of its groups, and leaves no posting behind after removal even when the group
-// map was re-laid out between Add and Remove.
+// (sorted; terms are stored and looked up in lowercase); the document is indexed under every
+// token, reachable through any term of any of its groups, and leaves no posting behind after
+// removal even when the group map was re-laid out between Add and Remove.
 TEST_F(SearchTest, MultiGroupTermIndexedUnderAllGroups) {
   auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
   Synonyms syn;
   syn.UpdateGroup("g2", {"shared", "two"});
   syn.UpdateGroup("g1", {"SHARED", "one"});
-  EXPECT_THAT(syn.GetGroupTokens("Shared"), testing::ElementsAre(" g1", " g2"));
+  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" g1", " g2"));
   EXPECT_THAT(syn.GetGroupTokens("one"), testing::ElementsAre(" g1"));
   EXPECT_THAT(syn.GetGroupTokens("none"), testing::IsEmpty());
 

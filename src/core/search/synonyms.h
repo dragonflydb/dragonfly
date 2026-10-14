@@ -33,10 +33,10 @@ class Synonyms {
   // Update or create a synonym group
   void UpdateGroup(const std::string_view& id, const std::vector<std::string_view>& terms);
 
-  // Group tokens of every group the term belongs to, sorted. The result depends only on the
-  // current groups, never on insertion order or hash map layout, so a document is removed with
-  // exactly the tokens it was indexed with.
-  absl::Span<const std::string> GetGroupTokens(std::string_view term) const;
+  // Group tokens of every group the lowercase term belongs to, sorted. The result depends only on
+  // the current groups, never on insertion order or hash map layout, so a document is removed
+  // with exactly the tokens it was indexed with.
+  absl::Span<const std::string> GetGroupTokens(std::string_view lowercase_term) const;
 
   // Every lowercase term with its sorted group tokens, ordered by term so that a prefix selects a
   // contiguous range.

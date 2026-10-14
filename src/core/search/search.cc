@@ -124,10 +124,11 @@ string TermKey(const TextIndex* index, string_view term) {
   return string{index->NormalizeForExactQuery(absl::StripAsciiWhitespace(term)).view()};
 }
 
-// Group tokens of every synonym group the term belongs to (empty without synonyms).
-absl::Span<const string> SynonymTokens(const FieldIndices* indices, string_view term) {
+// Group tokens of every synonym group the lowercase term belongs to (empty without synonyms).
+// Index keys are lowercase already; a query term is folded once by its leaf.
+absl::Span<const string> SynonymTokens(const FieldIndices* indices, string_view lowercase_term) {
   const Synonyms* synonyms = indices->GetSynonyms();
-  return synonyms ? synonyms->GetGroupTokens(term) : absl::Span<const string>{};
+  return synonyms ? synonyms->GetGroupTokens(lowercase_term) : absl::Span<const string>{};
 }
 
 // The test BaseStringIndex::Match*WithTerm applies to index keys.
@@ -328,7 +329,8 @@ struct BasicSearch {
   // docs matched via stem still join the docs of all of the term's groups.
   IndexResult Search(const AstTermNode& node, string_view active_field) {
     const std::string& term = node.affix;
-    absl::Span<const string> group_tokens = SynonymTokens(indices_, term);
+    absl::Span<const string> group_tokens =
+        SynonymTokens(indices_, una::cases::to_lowercase_utf8(term));
 
     auto match_in = [&](TextIndex* index) {
       const auto* own = index->Matching(term, /*strip_whitespace=*/true);
@@ -990,6 +992,13 @@ struct StatsCollector {
       VisitAst(*node, [this, &stack, active_field](const auto& inner) {
         size_t before = stack.size();
         ForEachChild(inner, active_field, [&](const AstNode& child, string_view field) {
+          // BasicSearch drops stopword operands of AND/OR only (a stopword elsewhere is searched,
+          // for example through its synonym group), so the stats follow the same rule.
+          if constexpr (std::is_same_v<std::decay_t<decltype(inner)>, AstLogicalNode>) {
+            if (const auto* term = child.As<AstTermNode>();
+                term && indices_->IsStopWord(term->affix))
+              return;
+          }
           stack.emplace_back(&child, field);
         });
         if (stack.size() == before)
@@ -1004,13 +1013,9 @@ struct StatsCollector {
   }
 
   void VisitLeaf(const AstTermNode& node, string_view active_field) {
-    // Stopwords are dropped from queries (see BasicSearch), so they never contribute matches and
-    // must not be recorded as scoring terms either.
-    if (indices_->IsStopWord(node.affix))
-      return;
-
     // Same cursors as BasicSearch: the term's own posting list plus one per group token.
-    absl::Span<const string> group_tokens = SynonymTokens(indices_, node.affix);
+    absl::Span<const string> group_tokens =
+        SynonymTokens(indices_, una::cases::to_lowercase_utf8(node.affix));
     for (auto* idx : SelectTextIndices(active_field)) {
       Record(idx, TermKey(idx, node.affix), idx->Matching(node.affix));
       for (const string& group_token : group_tokens)

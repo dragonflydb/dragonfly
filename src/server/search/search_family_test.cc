@@ -3926,7 +3926,7 @@ TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
         Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
         "OK");
     EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "shared", "one"}), "OK");
-    EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g2", "shared", "two"}), "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g2", "shared", "two", "it"}), "OK");
     const vector<string> titles{"one",          "shared",     "hello world", "hello there world",
                                 "two",          "one shared", "world",       "two words",
                                 "running fast", "runs fast",  "fast",        "run fast",
@@ -3934,12 +3934,34 @@ TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
     for (size_t i = 0; i < titles.size(); i++)
       EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", titles[i]}), IntArg(1));
 
+    // Stopwords in synonym groups ("it") still score through the group token when the term is not
+    // an AND/OR operand, and the stats must follow.
+    const vector<string_view> queries{"on*",
+                                      "*ne",
+                                      "*e",
+                                      "*har*",
+                                      "~*ne*",
+                                      "one",
+                                      "shared",
+                                      "two",
+                                      "\"hello world\"",
+                                      "one | two",
+                                      "@title:(one shared)",
+                                      "\"running fast\"",
+                                      "running | \"running fast\"",
+                                      "\"running fast\" | running",
+                                      "runn*",
+                                      "runn* | \"running fast\"",
+                                      "\"running fast\" | runn*",
+                                      "~ON*",
+                                      "w'*HAR*'",
+                                      "~w'tw?'",
+                                      "w'sh?red'",
+                                      "it",
+                                      "~it",
+                                      "@title:it"};
     std::map<string, double> out;
-    for (string_view query :
-         {"on*", "*ne", "*har*", "one", "shared", "two", "\"hello world\"", "one | two",
-          "@title:(one shared)", "\"running fast\"", "running | \"running fast\"",
-          "\"running fast\" | running", "runn*", "runn* | \"running fast\"",
-          "\"running fast\" | runn*", "~ON*", "w'*HAR*'", "~w'tw?'", "w'sh?red'"}) {
+    for (string_view query : queries) {
       auto resp = Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD",
                        "LIMIT", "0", "20"});
       const auto& vals = resp.GetVec();
@@ -3961,6 +3983,12 @@ TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
     ASSERT_TRUE(multi_shard.count(key)) << key;
     EXPECT_NEAR(multi_shard[key], score, 1e-4) << key;
   }
+
+  // The pattern is case folded before it is matched against the synonym terms; a fold shared by
+  // the cursors and the stats is invisible to the comparison above, so compare equal cursor sets.
+  EXPECT_NEAR(single_shard.at("~ON* d:0"), single_shard.at("on* d:0"), 1e-4);
+  EXPECT_NEAR(single_shard.at("w'*HAR*' d:1"), single_shard.at("*har* d:1"), 1e-4);
+  EXPECT_GT(single_shard.at("it d:4"), 0.0);
 }
 
 // A query whose only text term is absent from the index still runs the scorer, so equal scores
