@@ -20,7 +20,6 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 #include "server/blocking_controller.h"
-#include "server/channel_store.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/aof_streamer.h"
@@ -878,8 +877,7 @@ void EngineShard::RetireExpiredAndEvict() {
   for (unsigned i = 0; i < per_db_events.size(); ++i) {
     if (per_db_events[i].empty())
       continue;
-    channel_store->SendMessages(absl::StrCat("__keyevent@", i, "__:expired"), per_db_events[i],
-                                false);
+    db_slice.SendExpiredKeyEvents(i, per_db_events[i]);
   }
 
   // Track deleted bytes only if we expect to lower memory

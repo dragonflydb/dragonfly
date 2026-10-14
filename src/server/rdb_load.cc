@@ -3360,16 +3360,20 @@ void RdbLoader::LoadItemsBuffer(const ItemsBuf& ib) {
   const uint64_t now_ms = GetCurrentTimeMs();
   Namespace* ns = &namespaces->GetDefaultNamespace();
 
+  DbSlice& db_slice = ns->GetDbSlice(es->shard_id());
+  DCHECK(!db_slice.IsCacheMode());
   for (const auto* item : ib) {
     DbContext db_cntx{ns, item->db_index, now_ms};
-    DbSlice& db_slice = db_cntx.GetDbSlice(es->shard_id());
-    DCHECK(!db_slice.IsCacheMode());
     CreateObjectOnShard(db_cntx, item, &db_slice);
     if (stop_early_) {
       // force all items in ib to move into item_queue_ so they can be cleaned up later.
       break;
     }
   }
+
+  // Inserts may garbage-collect expired keys. We run outside a transaction callback, so
+  // OnCbFinishBlocking will not send their expired events.
+  db_slice.SendQueuedExpiredKeyEvents();
 
   for (auto* item : ib) {
     item_queue_.Push(item);
@@ -3530,7 +3534,10 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
 
   if (run_inlined) {
     const DbContext db_cntx{&namespaces->GetDefaultNamespace(), db_index, GetCurrentTimeMs()};
-    CreateObjectOnShard(db_cntx, item, &db_cntx.GetDbSlice(sid));
+    DbSlice& db_slice = db_cntx.GetDbSlice(sid);
+    CreateObjectOnShard(db_cntx, item, &db_slice);
+    // See LoadItemsBuffer: no transaction callback will send GC expired events for us.
+    db_slice.SendQueuedExpiredKeyEvents();
   } else {
     auto& out_buf = shard_buf_[sid];
     out_buf.emplace_back(item);
