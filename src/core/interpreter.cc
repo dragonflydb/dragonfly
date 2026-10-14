@@ -1331,12 +1331,15 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
         return {ReplyFrame::kMapKey, 0, 0};
       }
 
-      unsigned len = lua_rawlen(lua_, -1);
-      if (len > *budget) {
+      // lua_rawlen returns size_t: keep the border wide so a huge array can't wrap below the
+      // budget and bypass the check. Past it, the border fits unsigned.
+      size_t border = lua_rawlen(lua_, -1);
+      if (border > *budget) {
         serializer->OnError(kReplySizeError);
         break;
       }
 
+      unsigned len = border;
       *budget -= len;
       serializer->OnArrayStart(len);
       return {ReplyFrame::kArray, 0, len};
