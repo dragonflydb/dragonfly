@@ -690,8 +690,22 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     return OpStatus::KEY_NOTFOUND;
   }
 
+  // TryExpire must not suspend between journaling an expiry and deleting the entry. If it is going
+  // to journal one and the append would block, wait here, before we hold an iterator, and look the
+  // key up again: the entry may have been deleted, rewritten or moved meanwhile.
+  // A lookup of the wrong type returns before expiry, so it never waits.
+  auto must_wait = [&](PrimeIterator it) {
+    return IsValid(it) && it->first.IsExpired(cntx.time_now_ms) &&
+           (!req_obj_type || it->second.ObjType() == *req_obj_type) && DeletesExpiredKeys() &&
+           owner_->journal() && WillBlockOnJournalWrite();
+  };
+  PrimeIterator it = db_arr_[cntx.db_index]->prime.Find(key);
+  while (must_wait(it)) {
+    WaitForUnblockedJournalWrites();
+    it = db_arr_[cntx.db_index]->prime.Find(key);
+  }
+
   auto& db = *db_arr_[cntx.db_index];
-  PrimeIterator it = db.prime.Find(key);
   int miss_weight = (stats_mode == UpdateStatsMode::kReadStats);
 
   if (!IsValid(it)) {
@@ -723,7 +737,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     if (res == ExpireResult::Deleted ||
         (res == ExpireResult::ExpiryPaused && stats_mode == UpdateStatsMode::kReadStats)) {
       events_.misses += miss_weight;
-      db.stats.events.misses += miss_weight;
+      // TryExpire may suspend after the deletion (journal throttling), and a flush may have
+      // replaced the table meanwhile, so do not use `db`.
+      db_arr_[cntx.db_index]->stats.events.misses += miss_weight;
       return OpStatus::KEY_NOTFOUND;
     }
   }
@@ -1530,6 +1546,12 @@ void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
   }
 }
 
+bool DbSlice::DeletesExpiredKeys() const {
+  // Replicas do not expire keys on their own unless replica_delete_expired is set (which allows
+  // them to proactively delete expired keys on the read path).
+  return expire_allowed_ && !(owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired));
+}
+
 auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it, vector<string>* events) const
     -> ExpireResult {
   DCHECK(events);
@@ -1539,18 +1561,23 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it, vector<string>* e
   if (!expire_allowed_)
     return ExpireResult::ExpiryPaused;
 
-  // Replicas do not expire keys on their own unless replica_delete_expired is set (which allows
-  // them to proactively delete expired keys on the read path).
-  if (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))
+  if (!DeletesExpiredKeys())
     return ExpireResult::Valid;
 
   string scratch;
   string_view key = it->first.GetSlice(&scratch);
 
-  // Replicate expiry
-  if (auto journal = owner_->journal(); journal) {
+  // Journal the expiry and delete the entry atomically. If we suspended in between, other fibers
+  // could expire, rewrite or move the entry, and we would delete through a stale iterator.
+  // The journal append blocks while a snapshot serializes a bucket, so the caller must have
+  // waited for that. Journal consumers are throttled when the guard is destroyed, after the
+  // deletion.
+  auto journal = owner_->journal();
+  DCHECK(!journal || !WillBlockOnJournalWrite());
+  journal::DisableFlushGuard flush_guard(journal);
+
+  if (journal)
     RecordExpiryBlocking(cntx.db_index, key);
-  }
 
   if (expired_keys_events_recording_)
     events->emplace_back(key);

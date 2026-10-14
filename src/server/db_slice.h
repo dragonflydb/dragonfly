@@ -443,8 +443,9 @@ class DbSlice {
   };
 
   // The single expiry primitive: journals and deletes 'it' if its expire time passed at
-  // cntx.time_now_ms. Entries without a TTL are Valid. The journal append may suspend unless the
-  // caller disabled journal flushing (journal::DisableFlushGuard).
+  // cntx.time_now_ms. Entries without a TTL are Valid. Journaling and deletion are atomic; when the
+  // journal is enabled, the caller must ensure !WillBlockOnJournalWrite(). May suspend after the
+  // deletion (journal throttling) unless the caller holds a journal::DisableFlushGuard.
   // Never sends keyspace notifications: when they are enabled, the expired key is appended to
   // 'events' and the caller sends them outside any atomic section (see SendExpiredKeyEvents).
   ExpireResult TryExpire(const Context& cntx, PrimeIterator it,
@@ -650,6 +651,10 @@ class DbSlice {
     kReadStats,
     kMutableStats,
   };
+
+  // True if TryExpire deletes expired entries: expiry is not paused, and this is not a replica that
+  // leaves expiry to its master.
+  bool DeletesExpiredKeys() const;
 
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
                                            std::optional<unsigned> req_obj_type);
