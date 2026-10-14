@@ -443,11 +443,9 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 128, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 112, "You should update this function with new fields");
 
-  ADD(evicted_keys);
   ADD(hard_evictions);
-  ADD(expired_keys);
   ADD(garbage_collected);
   ADD(stash_unloaded);
   ADD(bumpups);
@@ -933,7 +931,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   events_.garbage_collected = db.prime.garbage_collected();
   events_.stash_unloaded = db.prime.stash_unloaded();
-  events_.evicted_keys += evp.evicted();
   db.stats.events.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
   if (db.slots_stats) {
@@ -1128,6 +1125,7 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     std::swap(db_arr_[index]->trans_locks, flush_db_arr[index]->trans_locks);
 
     // Unlike the key_count/memory_bytes gauges, traffic counters are cumulative history.
+    db_arr_[index]->stats.events = flush_db_arr[index]->stats.events;
     const auto& old_slots = flush_db_arr[index]->slots_stats;
     auto& new_slots = db_arr_[index]->slots_stats;
     if (old_slots && new_slots) {
@@ -1368,7 +1366,6 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   // Delete an already expired key; the caller emits the event after journaling.
   if (params.IsExpired(cntx.time_now_ms)) {
     Del(cntx, prime_it);
-    ++events_.expired_keys;
     db_arr_[cntx.db_index]->stats.events.expired_keys++;
     return -1;
   }
@@ -1559,7 +1556,6 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it, vector<string>* e
   auto& db = db_arr_[cntx.db_index];
   const_cast<DbSlice*>(this)->Del(cntx, Iterator(it, StringOrView::FromView(key)), db.get());
 
-  ++events_.expired_keys;
   db->stats.events.expired_keys++;
 
   return ExpireResult::Deleted;
@@ -1828,7 +1824,6 @@ finish:
   // declaration.
   SendQueuedInvalidationMessagesAsync();
   auto time_finish = absl::GetCurrentTimeNanos();
-  events_.evicted_keys += evicted_items;
   db_arr_[db_ind]->stats.events.evicted_keys += evicted_items;
   DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;
   return pair<uint64_t, size_t>{evicted_items, evicted_bytes};

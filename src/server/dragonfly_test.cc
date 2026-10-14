@@ -577,12 +577,17 @@ TEST_F(DflyEngineTest, Bug207) {
   }
 
   auto metrics = GetMetrics();
-  EXPECT_GT(metrics.events.evicted_keys, 0) << FormatMetrics(metrics);
+  size_t evicted = metrics.db_stats[0].events.evicted_keys;
+  EXPECT_GT(evicted, 0) << FormatMetrics(metrics);
 
   for (; i > 0; --i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
     ASSERT_EQ(resp, "OK");
   }
+
+  // Eviction counters are cumulative and must survive a flush.
+  Run({"FLUSHALL"});
+  EXPECT_GE(GetMetrics().db_stats[0].events.evicted_keys, evicted);
 }
 
 TEST_F(DflyEngineTest, StickyEviction) {

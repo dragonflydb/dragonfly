@@ -57,12 +57,8 @@ struct DbStats : public DbTableStats {
 };
 
 struct SliceEvents {
-  // Number of eviction events.
-  size_t evicted_keys = 0;
-
   // evictions that were performed when we have a negative memory budget.
   size_t hard_evictions = 0;
-  size_t expired_keys = 0;
   size_t garbage_checked = 0;
   size_t garbage_collected = 0;
   size_t stash_unloaded = 0;
