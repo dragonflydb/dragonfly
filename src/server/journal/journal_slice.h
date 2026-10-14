@@ -68,7 +68,9 @@ class JournalSlice {
   // since the last call with allow_flush=false. This call may preempt.
   // The caller must ensure that no preemptions occur between the initial call
   // with allow_flush=false and the subsequent call with allow_flush=true.
-  void SetFlushMode(bool allow_flush);
+  // Returns the previous mode, so that callers can restore it. Setting the current mode again
+  // is a no-op.
+  bool SetFlushMode(bool allow_flush);
 
   size_t GetRingBufferSize() const {
     return ring_buffer_.size();
