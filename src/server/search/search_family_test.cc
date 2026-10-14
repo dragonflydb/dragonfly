@@ -5445,7 +5445,7 @@ TEST_F(SearchFamilyTest, RestoreHnswVectorsWithConcurrentDeletion) {
         auto it = db_slice.FindMutable(db_cntx, key, OBJ_HASH);
         ASSERT_TRUE(it.ok());
         it->post_updater.Run();
-        db_slice.Del(db_cntx, it->it);
+        db_slice.DelAtomic(db_cntx, it->it.GetInnerIt());
       }
       deleted = true;
     }};

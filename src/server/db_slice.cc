@@ -247,7 +247,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       RecordExpiryBlocking(cntx_.db_index, key);
     }
-    db_slice_->Del(cntx_, DbSlice::Iterator(last_slot_it, StringOrView::FromView(key)));
+    db_slice_->DelAtomic(cntx_, last_slot_it);
 
     ++evicted_;
   }
@@ -951,11 +951,15 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
+void DbSlice::DelAtomic(Context cntx, PrimeIterator it, DbTable* db_table, bool async) {
   CHECK(IsValid(it));
+  // 'it' is a raw iterator, so nothing below may suspend.
+  FiberAtomicGuard guard;
 
   DbTable* table = db_table ? db_table : db_arr_[cntx.db_index].get();
   auto obj_type = it->second.ObjType();
+  string scratch;
+  string_view key = it->first.GetSlice(&scratch);
 
   if (obj_type == OBJ_STREAM) {
     // A blocked XREADGROUP watches a key that can never become ready again once the stream is
@@ -963,21 +967,18 @@ void DbSlice::Del(Context cntx, Iterator it, DbTable* db_table, bool async) {
     // that its consumer group disappeared. The awakened keys are dispatched by the transaction
     // that performs this deletion when it concludes.
     if (auto* bc = ns_->GetBlockingController(owner_->shard_id()); bc) {
-      string tmp;
-      bc->Awaken(table->index, it->first.GetSlice(&tmp));
+      bc->Awaken(table->index, key);
     }
   } else if (doc_del_cb_ && (obj_type == OBJ_JSON || obj_type == OBJ_HASH)) {
-    string tmp;
-    string_view key = it->first.GetSlice(&tmp);
     doc_del_cb_(key, cntx, it->second);
   }
 
-  PerformDeletionAtomic(it, table, async);
+  PerformDeletionAtomic(it, key, table, async);
 }
 
 void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
   it_updater.post_updater.Run();
-  Del(cntx, it_updater.it);
+  DelAtomic(cntx, it_updater.it.GetInnerIt());
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
@@ -1007,7 +1008,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
         // We use copy of table smart pointer and pass it as table because FLUSHALL can drop table.
-        Del(db_cntx, Iterator::FromPrime(it), table.get());
+        DelAtomic(db_cntx, it, table.get());
         ++del_count;
       }
       ++it;
@@ -1023,9 +1024,9 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     cursor = next;
     ThisFiber::Yield();
 
-    // Del above only marks the watchers of a deleted stream as awakened; normally the deleting
-    // transaction dispatches them when it concludes. This fiber has no such transaction, so
-    // dispatch here - between bucket traversals, where preempting in a readiness check is safe.
+    // DelAtomic above only marks the watchers of a deleted stream as awakened; normally the
+    // deleting transaction dispatches them when it concludes. This fiber has no such transaction,
+    // so dispatch here - between bucket traversals, where preempting in a readiness check is safe.
     if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
         bc && owner_->GetContTx() == nullptr) {
       bc->NotifyPending();
@@ -1080,7 +1081,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
           DbContext cntx;
           cntx.time_now_ms = GetCurrentTimeMs();
           cntx.db_index = db_index;
-          Del(cntx, Iterator::FromPrime(it), table.get());
+          DelAtomic(cntx, it, table.get());
         }
         ++it;
       }
@@ -1365,7 +1366,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
 
   // Delete an already expired key; the caller emits the event after journaling.
   if (params.IsExpired(cntx.time_now_ms)) {
-    Del(cntx, prime_it);
+    DelAtomic(cntx, prime_it.GetInnerIt());
     db_arr_[cntx.db_index]->stats.events.expired_keys++;
     return -1;
   }
@@ -1552,9 +1553,9 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it, vector<string>* e
   if (expired_keys_events_recording_)
     events->emplace_back(key);
 
-  // Route through Del so that expiry runs the same per-type hooks as an explicit DEL.
+  // Route through DelAtomic so that expiry runs the same per-type hooks as an explicit DEL.
   auto& db = db_arr_[cntx.db_index];
-  const_cast<DbSlice*>(this)->Del(cntx, Iterator(it, StringOrView::FromView(key)), db.get());
+  const_cast<DbSlice*>(this)->DelAtomic(cntx, it, db.get());
 
   db->stats.events.expired_keys++;
 
@@ -1800,7 +1801,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
         evicted_bytes += evict_it->first.MallocUsed() + evict_it->second.MallocUsed();
         ++evicted_items;
 
-        Del(cntx, Iterator(evict_it, StringOrView::FromView(key)));
+        DelAtomic(cntx, evict_it);
 
         // returns when whichever condition is met first
         if ((evicted_items == max_eviction_per_hb) || (evicted_bytes >= increase_goal_bytes))
@@ -2101,7 +2102,8 @@ void DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
   db_table->segment_defrag_cursor = cursor;
 }
 
-void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async) {
+void DbSlice::PerformDeletionAtomic(PrimeIterator del_it, string_view key, DbTable* table,
+                                    bool async) {
   FiberAtomicGuard guard;
 
   const int obj_type = del_it->second.ObjType();
@@ -2124,20 +2126,18 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
   PrimeValue& pv = del_it->second;
 
   if (pv.HasStashPending()) {
-    string scratch;
-    string_view key = del_it->first.GetSlice(&scratch);
     shard_owner()->tiered_storage()->CancelStash(std::make_pair(table->index, key), &pv);
   } else if (pv.IsExternal()) {
-    shard_owner()->tiered_storage()->Delete(table->index, del_it.key(), &del_it->second);
+    shard_owner()->tiered_storage()->Delete(table->index, key, &del_it->second);
   }
 
   ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
   if (del_it->first.IsInline()) {
     --stats.inline_keys;
   } else {
-    AccountObjectMemory(del_it.key(), OBJ_KEY, -key_size_used, table);  // Key
+    AccountObjectMemory(key, OBJ_KEY, -key_size_used, table);  // Key
   }
-  AccountObjectMemory(del_it.key(), obj_type, -value_heap_size, table);  // Value
+  AccountObjectMemory(key, obj_type, -value_heap_size, table);  // Value
 
   if (async && MayDeleteAsynchronously(pv)) {
     auto schedule = [obj_type](auto* ds) {
@@ -2158,17 +2158,16 @@ void DbSlice::PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool
   }
 
   if (table->slots_stats) {
-    SlotId sid = KeySlot(del_it.key());
+    SlotId sid = KeySlot(key);
     table->slots_stats[sid].key_count -= 1;
   }
 
-  // Before Erase: del_it.key() may be a view into the entry (e.g. on expiry or eviction), and
-  // Erase destroys the key it points to.
+  // Before Erase: 'key' may point into the entry, and Erase destroys it.
   if (!client_tracking_map_.empty()) {
-    QueueInvalidationTrackingMessageAtomic(del_it.key());
+    QueueInvalidationTrackingMessageAtomic(key);
   }
 
-  table->prime.Erase(del_it.GetInnerIt());
+  table->prime.Erase(del_it);
 
   // Note, currently we do not shrink our tables upon deletion.
   // This DCHECK ensures that if we decide to do so, we will have to update table_memory_

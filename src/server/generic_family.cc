@@ -833,7 +833,7 @@ void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t*
     auto it = db_slice.FindMutable(op_args.db_cntx, key).it;  // post_updater runs immediately
     if (!IsValid(it))
       continue;
-    db_slice.Del(op_args.db_cntx, it);
+    db_slice.DelAtomic(op_args.db_cntx, it.GetInnerIt());
     if (op_args.shard->journal()) {
       RecordDelete(op_args.db_cntx.db_index, key);
     }
@@ -1316,7 +1316,7 @@ OpResult<uint32_t> OpDelV2(const OpArgs& op_args, const ShardArgs& keys, bool as
     if (!IsValid(it.it))
       continue;
 
-    db_slice.Del(op_args.db_cntx, it.it, nullptr, async);
+    db_slice.DelAtomic(op_args.db_cntx, it.it.GetInnerIt(), nullptr, async);
     ++deleted_cnt;
 
     // If journal write was not omitted, append to journal

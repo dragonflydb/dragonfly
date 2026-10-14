@@ -359,11 +359,13 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  // Deletes the iterator. The iterator must be valid.
+  // Deletes the entry at 'it', which must be valid. Never suspends, so it takes a raw iterator:
+  // a caller holding a DbSlice::Iterator passes it.GetInnerIt(), which launders it if the caller
+  // was suspended since it found the entry.
   // Context argument is used only for document removal and it just needs
   // timestamp field. Last argument, db_table, is optional and is used only in FlushSlotsCb.
   // If async is set, AsyncDeleter will enqueue deletion of the object
-  void Del(Context cntx, Iterator it, DbTable* db_table = nullptr, bool async = false);
+  void DelAtomic(Context cntx, PrimeIterator it, DbTable* db_table = nullptr, bool async = false);
 
   // Deletes a key after FindMutable(). Runs post_updater before deletion
   // to update memory accounting while the key is still valid.
@@ -626,7 +628,9 @@ class DbSlice {
   void RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
                                                const DbTableArray& db_arr) const;
 
-  void PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async = false);
+  // 'key' is the entry's key. It may point into the entry, so it is not used after Erase.
+  void PerformDeletionAtomic(PrimeIterator del_it, std::string_view key, DbTable* table,
+                             bool async = false);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
