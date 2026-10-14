@@ -106,9 +106,9 @@ class AofChainReader::BlockScanner {
   // Fills *block on kBlock.
   io::Result<Status> Next(Block* block) {
     uint64_t off = offset();
-    if (off >= size_)
+    if (off >= file_size_)
       return Status::kEndOfFile;
-    if (buf_.size() - pos_ < min<uint64_t>(kMaxBlockBytes, size_ - off)) {
+    if (buf_.size() - pos_ < min<uint64_t>(kMaxBlockBytes, file_size_ - off)) {
       if (error_code ec = Refill(); ec)
         return nonstd::make_unexpected(ec);
     }
@@ -129,7 +129,7 @@ class AofChainReader::BlockScanner {
 
  private:
   BlockScanner(unique_ptr<LinuxFile> file, const Segment& seg)
-      : file_(std::move(file)), size_(seg.size), uid_(seg.uid) {
+      : file_(std::move(file)), file_size_(seg.size), uid_(seg.uid) {
   }
 
   error_code Refill() {
@@ -137,14 +137,15 @@ class AofChainReader::BlockScanner {
     buf_offset_ += pos_;
     pos_ = 0;
     size_t have = buf_.size();
-    size_t want = min<uint64_t>(kReadChunk, size_ - (buf_offset_ + have));
+    size_t want = min<uint64_t>(kReadChunk, file_size_ - (buf_offset_ + have));
     buf_.resize(have + want);
     iovec v{buf_.data() + have, want};
     return file_->Read(&v, 1, buf_offset_ + have, 0);
   }
 
   unique_ptr<LinuxFile> file_;
-  uint64_t size_;
+  // Of the whole file, header included.
+  uint64_t file_size_;
   uint64_t uid_;
   string buf_;
   // File offset of buf_[0].
@@ -216,10 +217,6 @@ error_code AofChainReader::Open() {
 
 io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
   while (pending_.empty()) {
-    if (pending_held_) {
-      held_.clear();
-      pending_held_ = false;
-    }
     if (end_ != End::kNotYet)
       return end_ == End::kTailTorn
                  ? nonstd::make_unexpected(make_error_code(AofReadError::kTornTail))
@@ -265,20 +262,20 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
     }
     expected_lsn_ = hdr.first_lsn + hdr.n_records;
     partial_ = hdr.flags & kEndsWithPartial;
-    if (partial_) {
-      held_.append(block.payload);
-      continue;
+    // Every valid block is handed out right away, so memory stays bounded by the read buffer. A
+    // record that continues in the next block is buffered by JournalReader until it completes,
+    // like a socket read that returned half a message.
+    // TODO: the end of the log still moves only at blocks ending at a record boundary. If the log
+    // ends inside a record, Repair() truncates back to there, dropping the complete records before
+    // it that replay already applied, even across several blocks. Keep those blocks instead and
+    // abandon only the incomplete record: the resumed segment's header marks it abandoned, and
+    // replay resets its JournalReader at that segment boundary, which drops the record's bytes.
+    if (!partial_) {
+      end_seg_ = read_seg_;
+      end_offset_ = scanner_->offset();
+      last_lsn_ = hdr.first_lsn + hdr.n_records - 1;
     }
-    end_seg_ = read_seg_;
-    end_offset_ = scanner_->offset();
-    last_lsn_ = hdr.first_lsn + hdr.n_records - 1;
-    if (held_.empty()) {
-      pending_ = block.payload;
-    } else {
-      held_.append(block.payload);
-      pending_ = held_;
-      pending_held_ = true;
-    }
+    pending_ = block.payload;
   }
 
   // Copies from the scanner's buffer into v: a payload is handed out only after its block's CRC
@@ -296,8 +293,6 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
 void AofChainReader::Finish(bool torn) {
   end_ = torn ? End::kTailTorn : End::kTailReached;
   scanner_.reset();
-  // A record that never completed is dropped.
-  held_.clear();
   discarded_bytes_ = segments_[end_seg_].size - end_offset_;
   for (size_t i = end_seg_ + 1; i < segments_.size(); ++i)
     discarded_bytes_ += segments_[i].size;

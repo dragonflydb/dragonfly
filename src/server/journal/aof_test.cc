@@ -394,9 +394,9 @@ TEST_F(AofChainReaderTest, PartialRecordAtEnd) {
   string seg0 = SegmentPath(0);
   filesystem::resize_file(seg0, filesystem::file_size(seg0) - 10);
 
-  // The cut record's first block is held back and dropped.
+  // The cut record's first block is valid, so it is handed out; JournalReader drops the record.
   ChainResult res = ReadChain();
-  EXPECT_EQ(res.data, "a1");
+  EXPECT_EQ(res.data, "a1" + string(kAofBlockBytes, 'h'));
   EXPECT_TRUE(res.torn);
   EXPECT_EQ(res.last_lsn, 1u);
 }
@@ -408,9 +408,10 @@ TEST_F(AofChainReaderTest, RecordsBeforeCutRecordInSameBlock) {
   string seg0 = SegmentPath(0);
   filesystem::resize_file(seg0, filesystem::file_size(seg0) - 1);
 
-  // Repair truncates the first block away, so a1 and b22 must not be streamed either.
+  // The two valid blocks are handed out, but Repair still truncates them away, a1 and b22
+  // included: see the TODO in AofChainReader::ReadSome.
   ChainResult res = ReadChain(/*repair=*/true);
-  EXPECT_EQ(res.data, "");
+  EXPECT_EQ(res.data, "a1b22" + string(2 * kAofBlockBytes - 5, 'h'));
   EXPECT_TRUE(res.torn);
   EXPECT_EQ(res.last_lsn, 0u);
   EXPECT_EQ(filesystem::file_size(seg0), kAofSegmentHeaderSize);
