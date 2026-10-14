@@ -434,6 +434,42 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
 }
 
+TEST_F(SearchFamilyTest, AliasCommandsLifecycle) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+
+  EXPECT_EQ(Run({"FT.ALIASADD", "live", "idx-a"}), "OK");
+  EXPECT_EQ(Run({"FT.ALIASUPDATE", "live", "idx-b"}), "OK");
+  EXPECT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
+  EXPECT_EQ(Run({"FT.ALIASADD", "live", "idx-a"}), "OK");
+  EXPECT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
+
+  EXPECT_EQ(Run({"FT.ALIASUPDATE", "upserted", "idx-b"}), "OK");
+  EXPECT_THAT(Run({"FT.ALIASADD", "upserted", "idx-a"}), ErrArg("Alias already exists"));
+  EXPECT_EQ(Run({"FT.ALIASDEL", "upserted"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, AliasCommandsErrors) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx-a"}), "OK");
+
+  EXPECT_THAT(Run({"FT.ALIASADD", "live", "idx-b"}), ErrArg("Alias already exists"));
+  EXPECT_THAT(Run({"FT.ALIASADD", "bad", "missing"}),
+              ErrArg("Unknown index name or name is alias"));
+  EXPECT_THAT(Run({"FT.ALIASUPDATE", "live", "missing"}),
+              ErrArg("Unknown index name or name is alias"));
+  EXPECT_THAT(Run({"FT.ALIASADD", "alias-target", "live"}),
+              ErrArg("Unknown index name or name is alias"));
+  EXPECT_THAT(Run({"FT.ALIASUPDATE", "live", "live"}),
+              ErrArg("Unknown index name or name is alias"));
+  EXPECT_THAT(Run({"FT.ALIASADD", "idx-a", "idx-b"}),
+              ErrArg("Alias name conflicts with an existing index"));
+  EXPECT_THAT(Run({"FT.ALIASUPDATE", "idx-a", "idx-b"}),
+              ErrArg("Alias name conflicts with an existing index"));
+  EXPECT_THAT(Run({"FT.ALIASDEL", "missing"}), ErrArg("Alias does not exist"));
+}
+
 TEST_F(SearchFamilyTest, InfoMissingIndexUsesRedisCompatibleError) {
   EXPECT_THAT(Run({"FT.INFO", "missing-index"}), ErrArg("missing-index: no such index"));
 }
