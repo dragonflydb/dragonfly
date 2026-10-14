@@ -50,7 +50,7 @@ class AofChainReader : public io::Source {
   std::string dir_;
   uint32_t shard_id_;
   uint32_t shard_count_;
-  std::vector<Segment> segments_;
+  std::vector<Segment> segment_chain_;
 
   // The segment being read and the offset of its next block.
   size_t read_seg_id_ = 0;

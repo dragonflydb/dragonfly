@@ -53,19 +53,19 @@ error_code AofChainReader::Open() {
         !absl::SimpleAtoi(seq_str, &seq)) {
       return make_error_code(errc::illegal_byte_sequence);
     }
-    segments_.push_back({seq, file.size, 0, nullptr});
+    segment_chain_.push_back({seq, file.size, 0, nullptr});
   }
-  if (segments_.empty())
+  if (segment_chain_.empty())
     return make_error_code(errc::no_such_file_or_directory);
 
   // The log runs through the segments in seq order.
-  sort(segments_.begin(), segments_.end(),
+  sort(segment_chain_.begin(), segment_chain_.end(),
        [](const Segment& a, const Segment& b) { return a.seq < b.seq; });
 
-  for (size_t i = 0; i < segments_.size(); ++i) {
-    Segment& seg = segments_[i];
+  for (size_t i = 0; i < segment_chain_.size(); ++i) {
+    Segment& seg = segment_chain_[i];
     // A missing seq or a file without a full header.
-    if (seg.seq != segments_.front().seq + i || seg.size < kAofSegmentHeaderSize)
+    if (seg.seq != segment_chain_.front().seq + i || seg.size < kAofSegmentHeaderSize)
       return make_error_code(errc::illegal_byte_sequence);
 
     auto file = OpenLinux(SegmentPath(seg.seq), O_RDONLY, 0);
@@ -89,7 +89,7 @@ error_code AofChainReader::Open() {
 }
 
 error_code AofChainReader::ReadBlock() {
-  const Segment& seg = segments_[read_seg_id_];
+  const Segment& seg = segment_chain_[read_seg_id_];
   // Up to one maximum-size block; a smaller block leaves the next block's bytes for the next read.
   buf_.resize(min<uint64_t>(kMaxBlockBytes, seg.size - offset_));
   iovec v{buf_.data(), buf_.size()};
@@ -108,10 +108,10 @@ error_code AofChainReader::ReadBlock() {
 io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
   while (pending_.empty()) {
     // Read past the last segment: the end of the log.
-    if (read_seg_id_ == segments_.size())
+    if (read_seg_id_ == segment_chain_.size())
       return 0;
     // Reached the end of the current segment: continue with the next one, after its header.
-    if (offset_ == segments_[read_seg_id_].size) {
+    if (offset_ == segment_chain_[read_seg_id_].size) {
       ++read_seg_id_;
       offset_ = kAofSegmentHeaderSize;
       continue;
