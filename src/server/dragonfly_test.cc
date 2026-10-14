@@ -172,6 +172,10 @@ TEST_F(DflyEngineTest, EvalResp) {
     resp = resp.GetVec()[0];
   }
   EXPECT_THAT(resp.GetVec()[0], ErrArg("reached lua stack limit"));
+
+  // EVAL must accept cycles in fields that are not serialized.
+  resp = Run({"eval", "local t = {1}; t.self = t; return t", "0"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 TEST_F(DflyEngineTest, EvalGetLargeBorrowedStrings) {

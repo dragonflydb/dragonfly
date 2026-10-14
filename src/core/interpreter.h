@@ -143,16 +143,17 @@ class Interpreter {
   // sha must be 40 char length.
   RunResult RunFunction(std::string_view sha, std::string* err);
 
-  // Checks whether the result is safe to serialize.
-  // Should fit 2 conditions:
-  // 1. Be the only value on the stack.
-  // 2. Should have depth of no more than 128.
-  bool IsResultSafe() const;
-
   // Serializes the result at the top of the stack and pops it. The err, ok and map wrapper fields
   // are read with raw access, and a table nested deeper than 128 levels, as in a cycle, is replaced
-  // by the error "reached lua stack limit".
+  // by the error "reached lua stack limit". Each table charges its array elements or map entries
+  // to a budget when it opens, and is replaced by the error "reached lua reply size limit" if they
+  // do not fit. The budget is 2^20 plus one element per 16 bytes of Lua memory in use. Every
+  // element takes at least 16 bytes, so only tables reached several times (shared or cyclic) or
+  // sparse arrays can exceed it.
   void SerializeResult(ObjectExplorer* serializer);
+
+  // Same as above with a budget of max_elements.
+  void SerializeResult(ObjectExplorer* serializer, size_t max_elements);
 
   void ResetStack();
 
@@ -187,9 +188,8 @@ class Interpreter {
   // Returns true if function was successfully added,
   // otherwise returns false and sets the error.
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
-  bool IsTableSafe() const;
   struct ReplyFrame;
-  ReplyFrame SerializeResultInternal(ObjectExplorer* serializer, int depth);
+  ReplyFrame SerializeResultInternal(ObjectExplorer* serializer, int depth, size_t* budget);
 
   bool PrepareArgs();
   bool CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer);

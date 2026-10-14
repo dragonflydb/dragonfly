@@ -104,8 +104,9 @@ class InterpreterTest : public ::testing::Test {
 
   void SetGlobalArray(const char* name, const vector<string_view>& vec);
 
-  // returns true if script run successfully.
-  bool Execute(string_view script);
+  // returns true if script run successfully. Serializes the result with the default reply budget
+  // if max_elements is 0.
+  bool Execute(string_view script, size_t max_elements = 0);
 
   Interpreter intptr_;
   TestSerializer ser_;
@@ -122,7 +123,7 @@ void InterpreterTest::SetGlobalArray(const char* name, const vector<string_view>
   intptr_.SetGlobalArray(name, SliceSpan{slices});
 }
 
-bool InterpreterTest::Execute(string_view script) {
+bool InterpreterTest::Execute(string_view script, size_t max_elements) {
   auto sha_buf = Interpreter::FuncSha1(script);
   string_view sha{sha_buf.data(), sha_buf.size()};
 
@@ -139,7 +140,10 @@ bool InterpreterTest::Execute(string_view script) {
   }
 
   ser_.res.clear();
-  intptr_.SerializeResult(&ser_);
+  if (max_elements)
+    intptr_.SerializeResult(&ser_, max_elements);
+  else
+    intptr_.SerializeResult(&ser_);
   ser_.res.pop_back();
 
   return true;
@@ -201,33 +205,6 @@ TEST_F(InterpreterTest, UnknownFunc) {
   ASSERT_EQ(LUA_TNIL, type);
 }
 
-TEST_F(InterpreterTest, Stack) {
-  RunInline(R"(
-local x = {}
-for i=1,127 do
-   x = {x}
-end
-return x
-)",
-            "code1", 1);
-
-  ASSERT_EQ(1, lua_gettop(lua()));
-  ASSERT_TRUE(intptr_.IsResultSafe());
-  lua_pop(lua(), 1);
-
-  RunInline(R"(
-local x = {}
-for i=1,128 do
-   x = {x}
-end
-return x
-)",
-            "code1", 1);
-
-  ASSERT_EQ(1, lua_gettop(lua()));
-  ASSERT_FALSE(intptr_.IsResultSafe());
-}
-
 TEST_F(InterpreterTest, ReplyDepth) {
   auto repeat = [](string_view str, int n) {
     string res;
@@ -238,6 +215,13 @@ TEST_F(InterpreterTest, ReplyDepth) {
 
   // A table nested deeper than 128 levels is replaced by an error.
   const string depth_err = "err(ERR reached lua stack limit)";
+  const string size_err = "err(ERR reached lua reply size limit)";
+  auto count_errors = [&](string_view s) {
+    size_t n = 0;
+    for (size_t p = s.find(depth_err); p != string_view::npos; p = s.find(depth_err, p + 1))
+      ++n;
+    return n;
+  };
   EXPECT_TRUE(Execute("local x = {} for i = 1, 127 do x = {x} end return x"));
   EXPECT_EQ(repeat("[", 128) + repeat("]", 128), ser_.res);
   EXPECT_TRUE(Execute("local x = {} for i = 1, 128 do x = {x} end return x"));
@@ -256,6 +240,67 @@ TEST_F(InterpreterTest, ReplyDepth) {
   EXPECT_EQ("[i(1)]", ser_.res);
   EXPECT_TRUE(Execute("local t = {map = {a = 1}}; t[1] = t; return t"));
   EXPECT_EQ("{str(a) i(1)}", ser_.res);
+
+  // A cycle with several branches, such as t = {t, t}, is bounded by the budget instead of being
+  // expanded into 2^128 tables.
+  EXPECT_TRUE(Execute("local t = {}; t[1] = t; t[2] = t; return t", 50));
+  EXPECT_LT(ser_.res.size(), 2000u);
+
+  // A wide cycle charges its elements at each level, so it is cut once they use up the budget
+  // instead of serializing them at each of 128 levels.
+  EXPECT_TRUE(Execute("local t = {}; t[1] = t; t[2] = 2; t[3] = 3; return t", 7));
+  EXPECT_EQ("[[" + size_err + " i(2) i(3)] i(2) i(3)]", ser_.res);
+
+  // The depth limit is a constant, so cutting an over-deep branch does not change how a sibling
+  // after it is serialized. A within-limit sibling that follows a cut branch is still sent in full:
+  // the whole reply holds a single error (for the cut branch), not one per table of the sibling.
+  const string deep_cut = "local a = {} for i = 1, 200 do a = {a} end ";
+  const string deep_ok = "local b = {} for i = 1, 126 do b = {b} end ";
+  EXPECT_TRUE(Execute(deep_ok + "return {b}"));
+  EXPECT_EQ(count_errors(ser_.res), 0u);
+  EXPECT_TRUE(Execute(deep_cut + deep_ok + "return {a, b}"));
+  EXPECT_EQ(count_errors(ser_.res), 1u);
+
+  // A shallow table is still serialized after a deeper one is cut.
+  EXPECT_TRUE(Execute("local d = {} for i = 1, 128 do d = {d} end return {d, {1}}"));
+  EXPECT_EQ(repeat("[", 128) + depth_err + repeat("]", 127) + " [i(1)]]", ser_.res);
+
+  // A table that does not fit in the budget is cut, while tables without elements, such as empty or
+  // status ones, are never cut.
+  EXPECT_TRUE(Execute("return {{1}, {}, {map = {}}, {ok = 'OK'}, {err = 'e'}}", 5));
+  EXPECT_EQ("[" + size_err + " [] {} status(OK) err(e)]", ser_.res);
+  EXPECT_TRUE(Execute("return {1, 2, 3}", 3));
+  EXPECT_EQ("[i(1) i(2) i(3)]", ser_.res);
+  EXPECT_TRUE(Execute("return {1, 2, 3}", 2));
+  EXPECT_EQ(size_err, ser_.res);
+
+  // Scalars count towards the budget, not just tables: the five elements of the first leaf use up
+  // a budget of 7, so the sibling table after it is cut.
+  EXPECT_TRUE(Execute("return {{1, 2, 3, 4, 5}, {6}}", 7));
+  EXPECT_EQ("[[i(1) i(2) i(3) i(4) i(5)] " + size_err + "]", ser_.res);
+
+  // A map that does not fit uses up the budget, as its entries were counted.
+  EXPECT_TRUE(Execute("return {{map = {a = 1, b = 2}}, {1}, {}}", 4));
+  EXPECT_EQ("[" + size_err + " " + size_err + " []]", ser_.res);
+
+  // A shared (DAG) result whose leaf is a large array is bounded by the budget. Without it the leaf
+  // below, reachable through 2^40 paths, would be re-serialized an exponential number of times.
+  EXPECT_TRUE(
+      Execute("local x = {} for i = 1, 100 do x[i] = i end "
+              "for i = 1, 40 do x = {map = {a = x, b = x}} end return x",
+              1000));
+  EXPECT_LT(ser_.res.size(), 20000u);
+
+  // The default budget grows with the Lua memory in use, so a reply that reaches each of its tables
+  // once is sent in full, however large.
+  EXPECT_TRUE(Execute("local t = {} for i = 1, 400000 do t[i] = {i, i} end return t"));
+  EXPECT_EQ(ser_.res.find("err("), string::npos);
+  EXPECT_THAT(ser_.res, testing::EndsWith("[i(399999) i(399999)] [i(400000) i(400000)]]"));
+
+  // A sparse array, here a cyclic one whose length is 2^31, does not fit in the default budget and
+  // is cut instead of serializing 2^31 elements.
+  EXPECT_TRUE(Execute("local t = {} for i = 0, 31 do t[2^i] = t end t[5] = t return t"));
+  EXPECT_EQ(size_err, ser_.res);
 }
 
 TEST_F(InterpreterTest, ShallowReplyStack) {
@@ -1110,7 +1155,6 @@ static void BM_LuaXReadReply(benchmark::State& state) {
   emit_reply(&reply_size);
   for (auto _ : state) {
     CHECK_EQ(Interpreter::RUN_OK, intptr.RunFunction(sha, &error)) << error;
-    CHECK(intptr.IsResultSafe());
     intptr.SerializeResult(&ser);
     intptr.ResetStack();  // RunFunction leaves the error handler on the stack
   }

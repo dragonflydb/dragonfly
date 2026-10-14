@@ -327,6 +327,13 @@ constexpr int kReplyTableSlots = 4;
 // Replaces a table that is nested too deep or for which the stack can not grow.
 constexpr string_view kReplyDepthError = "ERR reached lua stack limit";
 
+// Elements a reply may have beyond one per 16 bytes of Lua memory in use. It bounds the expansion
+// of tables reached several times (shared or cyclic), which are serialized once per reference.
+constexpr size_t kExtraReplyElements = 1 << 20;
+
+// Replaces a table whose elements do not fit in the reply's budget.
+constexpr string_view kReplySizeError = "ERR reached lua reply size limit";
+
 void SetGlobalArrayInternal(lua_State* lua, const char* name, Interpreter::SliceSpan args) {
   lua_createtable(lua, args.size(), 0);
   for (size_t j = 0; j < args.size(); j++) {
@@ -1194,24 +1201,6 @@ optional<string> Interpreter::DetectPossibleAsyncCalls(string_view body_sv) {
   return body;
 }
 
-bool Interpreter::IsResultSafe() const {
-  int top = lua_gettop(lua_);
-  if (top >= 128)
-    return false;
-
-  int t = lua_type(lua_, -1);
-  if (t != LUA_TTABLE)
-    return true;
-
-  bool res = IsTableSafe();
-
-  // Stack can contain intermediate unwindings that were not clean up.
-  DCHECK_GE(lua_gettop(lua_), top);
-  lua_settop(lua_, top);  // restore to the original setting.
-
-  return res;
-}
-
 bool Interpreter::AddInternal(const char* f_id, string_view body, string* error) {
   string script = absl::StrCat("function ", f_id, "() \n");
   absl::StrAppend(&script, body, "\nend");
@@ -1231,51 +1220,6 @@ bool Interpreter::AddInternal(const char* f_id, string_view body, string* error)
   return true;
 }
 
-// Stack is cleaned for us, we can leave it dirty
-bool Interpreter::IsTableSafe() const {
-  auto fres = FetchKey(lua_, "err", LUA_TSTRING);
-  if (fres && *fres == LUA_TSTRING) {
-    return true;
-  }
-
-  fres = FetchKey(lua_, "ok", LUA_TSTRING);
-  if (fres && *fres == LUA_TSTRING) {
-    return true;
-  }
-
-  // Copy root table because we remove it upon finishing traversal
-  lua_pushnil(lua_);
-  lua_copy(lua_, -2, -1);
-
-  int depth = 1;
-  lua_pushnil(lua_);
-
-  // DFS based on lua stack: [parent-table] [parent-key] [parent-value = table] [key]
-  while (depth > 0) {
-    if (lua_checkstack(lua_, 3) == 0 || depth > 128)
-      return false;
-
-    bool descending = false;
-    for (; lua_next(lua_, -2) != 0; lua_pop(lua_, 1)) {
-      if (lua_type(lua_, -1) != LUA_TTABLE)
-        continue;
-
-      // If we descend, keep value as new table and push nil for start key
-      depth++;
-      lua_pushnil(lua_);
-      descending = true;
-      break;
-    }
-
-    if (!descending) {
-      lua_pop(lua_, 1);
-      depth--;
-    }
-  }
-
-  return true;
-}
-
 // An array or a wrapped map whose values are being serialized.
 struct Interpreter::ReplyFrame {
   enum State { kDone, kArray, kMapKey, kMapValue } state;
@@ -1284,12 +1228,19 @@ struct Interpreter::ReplyFrame {
 };
 
 void Interpreter::SerializeResult(ObjectExplorer* serializer) {
+  // Each array element or map entry takes at least 16 bytes (a TValue) of Lua memory, so a reply
+  // that reaches each of its tables once always fits.
+  size_t lua_bytes = size_t(max(lua_gc(lua_, LUA_GCCOUNT), 0)) << 10;
+  SerializeResult(serializer, kExtraReplyElements + lua_bytes / 16);
+}
+
+void Interpreter::SerializeResult(ObjectExplorer* serializer, size_t max_elements) {
   // Track nesting explicitly instead of recursing on the fiber's C++ stack.
   // SerializeResultInternal opens at most kMaxReplyDepth nested tables.
   ReplyFrame frames[kMaxReplyDepth];
   int depth = 0;
   do {
-    ReplyFrame frame = SerializeResultInternal(serializer, depth + 1);
+    ReplyFrame frame = SerializeResultInternal(serializer, depth + 1, &max_elements);
     if (frame.state != ReplyFrame::kDone)
       frames[depth++] = frame;
 
@@ -1321,7 +1272,7 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
 
 // Serialize one value, leaving array/map traversal to SerializeResult, whose loop inlines it.
 inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
-    ObjectExplorer* serializer, int depth) -> ReplyFrame {
+    ObjectExplorer* serializer, int depth, size_t* budget) -> ReplyFrame {
   int t = lua_type(lua_, -1);
 
   switch (t) {
@@ -1358,20 +1309,38 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
         break;
       }
 
+      // A table charges its elements to the budget when it opens, or is replaced by an error if
+      // they do not fit. Each serialized value is charged once, so the budget bounds the work.
       fres = FetchKey(lua_, "map", LUA_TTABLE);
       if (fres && *fres == LUA_TTABLE) {
-        // Calculate length of map part, there is sadly no other way
+        // Calculate length of map part, there is sadly no other way. Stop counting past the
+        // budget, and use it up then, so a shared map is not counted again for each reference.
         unsigned len = 0;
-        for (lua_pushnil(lua_); lua_next(lua_, -2) != 0; lua_pop(lua_, 1))
+        for (lua_pushnil(lua_); len <= *budget && lua_next(lua_, -2) != 0; lua_pop(lua_, 1))
           len++;
+        if (len > *budget) {
+          lua_pop(lua_, 2);  // The last key and the map.
+          *budget = 0;
+          serializer->OnError(kReplySizeError);
+          break;
+        }
 
+        *budget -= len;
         serializer->OnMapStart(len);
         lua_pushnil(lua_);  // The first key for lua_next.
         return {ReplyFrame::kMapKey, 0, 0};
       }
 
-      unsigned len = lua_rawlen(lua_, -1);
+      // lua_rawlen returns size_t: keep the border wide so a huge array can't wrap below the
+      // budget and bypass the check. Past it, the border fits unsigned.
+      size_t border = lua_rawlen(lua_, -1);
+      if (border > *budget) {
+        serializer->OnError(kReplySizeError);
+        break;
+      }
 
+      unsigned len = border;
+      *budget -= len;
       serializer->OnArrayStart(len);
       return {ReplyFrame::kArray, 0, len};
     }
