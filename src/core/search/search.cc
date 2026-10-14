@@ -4,6 +4,7 @@
 
 #include "core/search/search.h"
 
+#include <absl/algorithm/container.h>
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
@@ -224,12 +225,13 @@ struct BasicSearch {
   }
 
   template <TagType T> IndexResult Search(const AstAffixNode<T>& node, string_view active_field) {
-    vector<TextIndex*> indices;
+    TextIndex* single = nullptr;
+    absl::Span<TextIndex* const> indices;
     if (!active_field.empty()) {
-      if (auto* index = GetIndex<TextIndex>(active_field); index)
-        indices = {index};
-      else
+      single = GetIndex<TextIndex>(active_field);
+      if (!single)
         return IndexResult{};
+      indices = absl::MakeConstSpan(&single, 1);
     } else {
       indices = indices_->GetAllTextIndices();
     }
@@ -964,17 +966,17 @@ struct StatsCollector {
     const Synonyms* syn = indices_->GetSynonyms();
     absl::Span<const string> group_tokens =
         syn ? syn->GetGroupTokens(node.affix) : absl::Span<const string>{};
-    for (auto* idx : SelectTextIndices(active_field)) {
+    ForEachTextIndex(active_field, [&](TextIndex* idx) {
       Record(idx, node.affix, idx->Matching(node.affix));
       for (const string& group_token : group_tokens)
         Record(idx, group_token, idx->Matching(group_token, /*strip_whitespace=*/false));
-    }
+    });
   }
 
   template <TagType T> void VisitLeaf(const AstAffixNode<T>& node, string_view active_field) {
     static_assert(T != TagType::REGULAR);
     const Synonyms* syn = indices_->GetSynonyms();
-    for (auto* idx : SelectTextIndices(active_field)) {
+    ForEachTextIndex(active_field, [&](TextIndex* idx) {
       auto cb = [this, idx, syn](string_view term, const auto* container) {
         // A grouped term is scored through its group tokens (mirrors BasicSearch).
         absl::Span<const string> group_tokens =
@@ -992,14 +994,17 @@ struct StatsCollector {
         idx->MatchInfixWithTerm(node.affix, cb);
       else if constexpr (T == TagType::WILDCARD)
         idx->MatchWildcardWithTerm(node.affix, cb);
-    }
+    });
   }
 
-  vector<TextIndex*> SelectTextIndices(string_view active_field) {
-    if (active_field.empty())
-      return indices_->GetAllTextIndices();
-    auto* idx = dynamic_cast<TextIndex*>(indices_->GetIndex(active_field));
-    return idx ? vector<TextIndex*>{idx} : vector<TextIndex*>{};
+  // All text indices for an empty field, else the named one if it is a text index.
+  template <typename F> void ForEachTextIndex(string_view active_field, F&& f) {
+    if (active_field.empty()) {
+      for (auto* idx : indices_->GetAllTextIndices())
+        f(idx);
+    } else if (auto* idx = dynamic_cast<TextIndex*>(indices_->GetIndex(active_field)); idx) {
+      f(idx);
+    }
   }
 
   void Record(TextIndex* idx, string term, const TextIndex::Container* container) {
@@ -1040,6 +1045,17 @@ string_view Schema::LookupIdentifier(string_view identifier) const {
   return identifier;
 }
 
+Schema::OrderedFields Schema::Ordered() const {
+  auto attributes = fields | std::views::transform([](const auto& kv) {
+                      return OrderedFields::value_type{kv.first, &kv.second};
+                    });
+  OrderedFields out(attributes.begin(), attributes.end());
+  absl::c_sort(out, [](const auto& l, const auto& r) {
+    return std::tie(l.second->number, l.first) < std::tie(r.second->number, r.first);
+  });
+  return out;
+}
+
 IndicesOptions::IndicesOptions() {
   static absl::flat_hash_set<std::string> kDefaultStopwords{
       "a",    "is",    "the",  "an",    "and",   "are",  "as",   "at", "be",  "but",  "by",
@@ -1057,100 +1073,84 @@ FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
 }
 
 void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
-  for (const auto& [field_ident, field_info] : schema_.fields) {
-    if ((field_info.flags & SchemaField::NOINDEX) > 0)
+  for (const auto& [field_ident, field] : schema_.Ordered()) {
+    if ((field->flags & SchemaField::NOINDEX) > 0)
       continue;
 
-    switch (field_info.type) {
+    unique_ptr<BaseIndex> index;
+    switch (field->type) {
       case SchemaField::TEXT: {
-        const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
+        const auto& tparams = std::get<SchemaField::TextParams>(field->special_params);
         auto idx = make_unique<TextIndex>(
             mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie, tparams.no_stem,
             schema_.default_language, schema_.language_field, !options_.no_offsets);
         idx->set_field_ident(field_ident);
-        indices_[field_ident] = std::move(idx);
+        text_indices_.push_back(idx.get());
+        index = std::move(idx);
         break;
       }
       case SchemaField::NUMERIC: {
-        const auto& nparams = std::get<SchemaField::NumericParams>(field_info.special_params);
-        indices_[field_ident] = make_unique<NumericIndex>(nparams.block_size, mr);
+        const auto& nparams = std::get<SchemaField::NumericParams>(field->special_params);
+        index = make_unique<NumericIndex>(nparams.block_size, mr);
         break;
       }
       case SchemaField::TAG: {
-        const auto& tparams = std::get<SchemaField::TagParams>(field_info.special_params);
-        indices_[field_ident] = make_unique<TagIndex>(mr, tparams);
+        const auto& tparams = std::get<SchemaField::TagParams>(field->special_params);
+        index = make_unique<TagIndex>(mr, tparams);
         break;
       }
       case SchemaField::VECTOR: {
-        unique_ptr<BaseVectorIndex> vector_index;
-
-        DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
-        const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
-
-        // Use global HNSW index
-        if (vparams.use_hnsw)
-          break;
-
-        vector_index = make_unique<FlatVectorIndex>(vparams, mr);
-        indices_[field_ident] = std::move(vector_index);
-
+        DCHECK(holds_alternative<SchemaField::VectorParams>(field->special_params));
+        const auto& vparams = std::get<SchemaField::VectorParams>(field->special_params);
+        if (vparams.use_hnsw)  // served by the global HNSW index
+          continue;
+        index = make_unique<FlatVectorIndex>(vparams, mr);
         break;
       }
       case SchemaField::GEO: {
-        indices_[field_ident] = make_unique<GeoIndex>(mr);
+        index = make_unique<GeoIndex>(mr);
         break;
       }
     }
+    add_list_.emplace_back(field_ident, index.get());
+    indices_[field_ident] = std::move(index);
   }
 }
 
 void FieldIndices::CreateSortIndices() {
-  for (const auto& [field_ident, field_info] : schema_.fields) {
-    if ((field_info.flags & SchemaField::SORTABLE) == 0)
+  for (const auto& [field_ident, field] : schema_.Ordered()) {
+    if ((field->flags & SchemaField::SORTABLE) == 0)
       continue;
 
-    switch (field_info.type) {
+    unique_ptr<BaseSortIndex> index;
+    switch (field->type) {
       case SchemaField::TAG:
       case SchemaField::TEXT:
-        sort_indices_[field_ident] = make_unique<StringSortIndex>();
+        index = make_unique<StringSortIndex>();
         break;
       case SchemaField::NUMERIC:
-        sort_indices_[field_ident] = make_unique<NumericSortIndex>();
+        index = make_unique<NumericSortIndex>();
         break;
       case SchemaField::VECTOR:
       case SchemaField::GEO:
-        break;
+        continue;
     }
+    add_list_.emplace_back(field_ident, index.get());
+    sort_indices_[field_ident] = std::move(index);
   }
 }
 
 bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
-  bool was_added = true;
-
-  std::vector<std::pair<std::string_view, BaseIndex*>> successfully_added_indices;
-  successfully_added_indices.reserve(indices_.size() + sort_indices_.size());
-
-  auto try_add = [&](const auto& indices_container) {
-    for (auto& [field, index] : indices_container) {
-      if (index->Add(doc, access, field)) {
-        successfully_added_indices.emplace_back(field, index.get());
-      } else {
-        was_added = false;
-        break;
-      }
-    }
-  };
-
-  try_add(indices_);
-
-  if (was_added) {
-    try_add(sort_indices_);
+  size_t added = 0;
+  for (; added < add_list_.size(); added++) {
+    auto& [identifier, index] = add_list_[added];
+    if (!index->Add(doc, access, identifier))
+      break;
   }
 
-  if (!was_added) {
-    for (auto& [field, index] : successfully_added_indices) {
-      index->Remove(doc, access, field);
-    }
+  if (added < add_list_.size()) {  // all or nothing: roll back what was added
+    for (size_t i = 0; i < added; i++)
+      add_list_[i].second->Remove(doc, access, add_list_[i].first);
     return false;
   }
 
@@ -1166,10 +1166,8 @@ void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
     return;
   }
 
-  for (auto& [field, index] : indices_)
-    index->Remove(doc, access, field);
-  for (auto& [field, sort_index] : sort_indices_)
-    sort_index->Remove(doc, access, field);
+  for (auto& [identifier, index] : add_list_)
+    index->Remove(doc, access, identifier);
 
   all_ids_.erase(it);
 }
@@ -1184,16 +1182,8 @@ BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
   return it != sort_indices_.end() ? it->second.get() : nullptr;
 }
 
-std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
-  vector<TextIndex*> out;
-  for (const auto& [field_name, field_info] : schema_.fields) {
-    if (field_info.type != SchemaField::TEXT || (field_info.flags & SchemaField::NOINDEX) > 0)
-      continue;
-    auto* index = dynamic_cast<TextIndex*>(GetIndex(field_name));
-    DCHECK(index);
-    out.push_back(index);
-  }
-  return out;
+absl::Span<TextIndex* const> FieldIndices::GetAllTextIndices() const {
+  return text_indices_;
 }
 
 const vector<DocId>& FieldIndices::GetAllDocs() const {
@@ -1204,12 +1194,15 @@ size_t FieldIndices::GetNonPmrMemoryUsage() const {
   // all_ids_ scales with document count — the dominant untracked cost.
   size_t mem = all_ids_.capacity() * sizeof(DocId);
   // Hash map bucket arrays scale with field count (typically small).
-  constexpr size_t kIndicesSlotSize =
-      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>>::value_type) + 1;
-  constexpr size_t kSortSlotSize =
-      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>>::value_type) + 1;
+  constexpr size_t kIndicesSlotSize = sizeof(decltype(indices_)::value_type) + 1;
+  constexpr size_t kSortSlotSize = sizeof(decltype(sort_indices_)::value_type) + 1;
   mem += indices_.bucket_count() * kIndicesSlotSize;
   mem += sort_indices_.bucket_count() * kSortSlotSize;
+  // The field lists leave their inline storage only for schemas with more than 16 fields.
+  if (add_list_.size() > 16)
+    mem += add_list_.capacity() * sizeof(add_list_[0]);
+  if (text_indices_.size() > 16)
+    mem += text_indices_.capacity() * sizeof(text_indices_[0]);
   return mem;
 }
 

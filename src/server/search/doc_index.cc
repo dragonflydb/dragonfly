@@ -225,7 +225,8 @@ string DocIndexInfo::BuildRestoreCommand() const {
     absl::StrAppend(&out, " LANGUAGE_FIELD ", base_index.schema.language_field);
 
   absl::StrAppend(&out, " SCHEMA");
-  for (const auto& [fident, finfo] : base_index.schema.fields) {
+  for (const auto& [fident, finfo_ptr] : base_index.schema.Ordered()) {
+    const auto& finfo = *finfo_ptr;
     // Store field name, alias and type
     absl::StrAppend(&out, " ", fident, " AS ", finfo.short_name, " ",
                     SearchFieldTypeToString(finfo.type));
@@ -465,7 +466,7 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
     return;
 
   absl::flat_hash_set<DocId> docs_to_rebuild;
-  std::vector<search::TextIndex*> text_indices = indices_->GetAllTextIndices();
+  absl::Span<search::TextIndex* const> text_indices = indices_->GetAllTextIndices();
 
   // Find all documents containing any term from the synonyms group
   for (auto* text_index : text_indices) {
