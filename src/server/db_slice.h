@@ -365,7 +365,7 @@ class DbSlice {
   // Context argument is used only for document removal and it just needs
   // timestamp field. Last argument, db_table, is optional and is used only in FlushSlotsCb.
   // If async is set, AsyncDeleter will enqueue deletion of the object
-  void Del(Context cntx, PrimeIterator it, DbTable* db_table = nullptr, bool async = false);
+  void DelAtomic(Context cntx, PrimeIterator it, DbTable* db_table = nullptr, bool async = false);
 
   // Deletes a key after FindMutable(). Runs post_updater before deletion
   // to update memory accounting while the key is still valid.

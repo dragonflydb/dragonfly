@@ -247,7 +247,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
     if (auto journal = db_slice_->shard_owner()->journal(); journal) {
       RecordExpiryBlocking(cntx_.db_index, key);
     }
-    db_slice_->Del(cntx_, last_slot_it);
+    db_slice_->DelAtomic(cntx_, last_slot_it);
 
     ++evicted_;
   }
@@ -951,7 +951,7 @@ void DbSlice::ActivateDb(DbIndex db_ind) {
   CreateDb(db_ind);
 }
 
-void DbSlice::Del(Context cntx, PrimeIterator it, DbTable* db_table, bool async) {
+void DbSlice::DelAtomic(Context cntx, PrimeIterator it, DbTable* db_table, bool async) {
   CHECK(IsValid(it));
   // 'it' is a raw iterator, so nothing below may suspend.
   FiberAtomicGuard guard;
@@ -978,7 +978,7 @@ void DbSlice::Del(Context cntx, PrimeIterator it, DbTable* db_table, bool async)
 
 void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
   it_updater.post_updater.Run();
-  Del(cntx, it_updater.it.GetInnerIt());
+  DelAtomic(cntx, it_updater.it.GetInnerIt());
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
@@ -1008,7 +1008,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
         // We use copy of table smart pointer and pass it as table because FLUSHALL can drop table.
-        Del(db_cntx, it, table.get());
+        DelAtomic(db_cntx, it, table.get());
         ++del_count;
       }
       ++it;
@@ -1024,9 +1024,9 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     cursor = next;
     ThisFiber::Yield();
 
-    // Del above only marks the watchers of a deleted stream as awakened; normally the deleting
-    // transaction dispatches them when it concludes. This fiber has no such transaction, so
-    // dispatch here - between bucket traversals, where preempting in a readiness check is safe.
+    // DelAtomic above only marks the watchers of a deleted stream as awakened; normally the
+    // deleting transaction dispatches them when it concludes. This fiber has no such transaction,
+    // so dispatch here - between bucket traversals, where preempting in a readiness check is safe.
     if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
         bc && owner_->GetContTx() == nullptr) {
       bc->NotifyPending();
@@ -1081,7 +1081,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
           DbContext cntx;
           cntx.time_now_ms = GetCurrentTimeMs();
           cntx.db_index = db_index;
-          Del(cntx, it, table.get());
+          DelAtomic(cntx, it, table.get());
         }
         ++it;
       }
@@ -1366,7 +1366,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
 
   // Delete an already expired key; the caller emits the event after journaling.
   if (params.IsExpired(cntx.time_now_ms)) {
-    Del(cntx, prime_it.GetInnerIt());
+    DelAtomic(cntx, prime_it.GetInnerIt());
     db_arr_[cntx.db_index]->stats.events.expired_keys++;
     return -1;
   }
@@ -1553,9 +1553,9 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it, vector<string>* e
   if (expired_keys_events_recording_)
     events->emplace_back(key);
 
-  // Route through Del so that expiry runs the same per-type hooks as an explicit DEL.
+  // Route through DelAtomic so that expiry runs the same per-type hooks as an explicit DEL.
   auto& db = db_arr_[cntx.db_index];
-  const_cast<DbSlice*>(this)->Del(cntx, it, db.get());
+  const_cast<DbSlice*>(this)->DelAtomic(cntx, it, db.get());
 
   db->stats.events.expired_keys++;
 
@@ -1801,7 +1801,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
         evicted_bytes += evict_it->first.MallocUsed() + evict_it->second.MallocUsed();
         ++evicted_items;
 
-        Del(cntx, evict_it);
+        DelAtomic(cntx, evict_it);
 
         // returns when whichever condition is met first
         if ((evicted_items == max_eviction_per_hb) || (evicted_bytes >= increase_goal_bytes))
