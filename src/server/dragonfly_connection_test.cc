@@ -329,6 +329,47 @@ TEST_P(DragonflyV2ConnectionTest, DrainsWouldBlockCommandBeforeProtocolError) {
   EXPECT_THAT(*error, HasSubstr("Protocol error"));
   EXPECT_TRUE(client.ReadEof());
 }
+
+// A parser error received by the proactor callback must reject bytes after the malformed frame.
+TEST_P(DragonflyV2ConnectionTest, CallbackParserErrorDoesNotExecuteLaterCommands) {
+  RawRespClient client{port_};
+  ASSERT_TRUE(client.valid());
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n"
+                     "$14\r\ncallback-error\r\n"));
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+  ASSERT_TRUE(client.SendAll("*3\r\n$5\r\nDEBUG\r\n$7\r\nIOSTATS\r\n$2\r\nPS\r\n"));
+  ASSERT_TRUE(WaitForSyncDispatch("callback-error"));
+
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$3\r\nSET\r\n$15\r\ncallback-prefix\r\n$5\r\nvalue\r\n"
+                     "*x\r\n"
+                     "*3\r\n$3\r\nSET\r\n$14\r\ncallback-after\r\n$16\r\nmust-not-execute\r\n"));
+  auto error = client.ReadUntilContains("Protocol error", 256);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_TRUE(client.ReadEof());
+  EXPECT_EQ(Run({"GET", "callback-prefix"}), "value");
+  EXPECT_EQ(Run({"GET", "callback-after"}).type, facade::RespExpr::NIL);
+}
+
+// A peer write-side shutdown must not prevent delivery of the terminal protocol error.
+TEST_P(DragonflyV2ConnectionTest, TerminalParserErrorSurvivesPeerWriteShutdown) {
+  RawRespClient client{port_};
+  ASSERT_TRUE(client.valid());
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n"
+                     "$15\r\neof-after-error\r\n"));
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+
+  ASSERT_TRUE(client.SendAll("*3\r\n$5\r\nDEBUG\r\n$7\r\nIOSTATS\r\n$2\r\nPS\r\n*x\r\n"));
+  ASSERT_TRUE(WaitForSyncDispatch("eof-after-error"));
+  ASSERT_TRUE(client.ShutdownWrite());
+
+  auto error = client.ReadUntilContains("Protocol error", 256);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_TRUE(client.ReadEof());
+}
+
 // A checkpoint sent during parser-error draining must wait for the command that was dispatching
 // when the error latched.
 TEST_P(DragonflyV2ConnectionTest, CheckpointWaitsForDispatchDuringParserErrorDrain) {
@@ -379,6 +420,7 @@ TEST_P(DragonflyV2ConnectionTest, RejectsControlMessagesAfterProtocolError) {
   EXPECT_THAT(*error, HasSubstr("Protocol error"));
   EXPECT_TRUE(client.ReadEof());
 }
+
 INSTANTIATE_TEST_SUITE_P(PrivateAndSharedReadBuffer, DragonflyV2ConnectionTest,
                          testing::Values(false, true));
 
