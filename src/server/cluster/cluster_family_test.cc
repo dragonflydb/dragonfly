@@ -780,15 +780,6 @@ class ClusterTieredTest : public ClusterMemoryTest {
     ASSERT_EQ(CheckedInt({"DBSIZE"}), count);
   }
 
-  uint32_t StartJournalWithConsumer(journal::JournalConsumerInterface* consumer) {
-    uint32_t id = 0;
-    pp_->at(0)->AwaitBrief([&] {
-      journal::StartInThread();
-      id = journal::RegisterConsumer(consumer);
-    });
-    return id;
-  }
-
   std::optional<absl::FlagSaver> flag_saver_;
 };
 

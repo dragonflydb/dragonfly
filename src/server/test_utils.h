@@ -24,6 +24,10 @@ using namespace facade;
 using util::fb2::Fiber;
 using util::fb2::Launch;
 
+namespace journal {
+struct JournalConsumerInterface;
+}  // namespace journal
+
 // Test hook defined in common.cc.
 void TEST_InvalidateLockTagOptions();
 
@@ -158,6 +162,11 @@ class BaseFamilyTest : public ::testing::Test {
   void AdvanceTime(int64_t ms) {
     TEST_current_time_ms += ms;
   }
+
+  // Starts the journal on proactor `index`, which must own a shard, and registers `consumer` there.
+  // Returns the consumer id for journal::UnregisterConsumer, which must run on the same proactor.
+  uint32_t StartJournalWithConsumer(journal::JournalConsumerInterface* consumer,
+                                    unsigned index = 0);
 
   // Wait for a locked key to unlock. Aborts after timeout seconds passed.
   void WaitUntilLocked(DbIndex db_index, std::string_view key, double timeout = 3);

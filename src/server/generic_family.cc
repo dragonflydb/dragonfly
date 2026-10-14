@@ -749,7 +749,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   vector<string> expired_events;
   {
     // Disable flush journal changes to prevent preemption in traverse.
-    journal::DisableFlushGuard journal_flush_guard(op_args.shard->journal());
+    journal::DisableFlushGuard journal_flush_guard;
     do {
       cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
         cnt += ScanCb(op_args, it, scan_opts, vec, &expired_events);
