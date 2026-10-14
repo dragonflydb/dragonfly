@@ -24,6 +24,7 @@
 #include "base/logging.h"
 #include "base/stl_util.h"
 #include "common/heap_size.h"
+#include "core/time_utils.h"
 #include "facade/conn_context.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_types.h"
@@ -1278,9 +1279,13 @@ std::string FormatClientInfo(const ClientInfo& ci) {
   absl::StrAppend(&out, " tid=", ci.tid, " irqmatch=", int(ci.irqmatch));
   if (ci.pipeline.has_value())
     absl::StrAppend(&out, " pipeline=", *ci.pipeline, " pbuf=", ci.pbuf.value_or(0));
-  absl::StrAppend(&out, " age=", ci.age, " idle=", ci.idle, " tot-cmds=", ci.tot_cmds,
-                  " tot-net-in=", ci.tot_net_in, " tot-read-calls=", ci.tot_read_calls,
-                  " tot-dispatches=", ci.tot_dispatches);
+  const auto& stats = ci.stats;
+  absl::StrAppend(&out, " age=", ci.age, " idle=", ci.idle, " tot-cmds=", stats.cmds,
+                  " tot-net-in=", stats.net_bytes_in, " tot-read-calls=", stats.read_cnt,
+                  " tot-dispatches=", stats.dispatch_entries_added, " squashes=", stats.squashes,
+                  " resquashes=", stats.resquashes, " reply-batches=", stats.reply_batches,
+                  " idle-waits=", stats.idle_waits, " reply-waits=", stats.reply_waits,
+                  " idle-wait-usec=", dfly::CyclesToUsec(stats.idle_wait_cycles));
   if (ci.db.has_value())
     absl::StrAppend(&out, " db=", *ci.db);
   if (!ci.flags.empty())
@@ -1342,10 +1347,7 @@ ClientInfo Connection::BuildClientInfo(unsigned thread_id) const {
   }
   ci.age = now - creation_time_;
   ci.idle = now - last_interaction_;
-  ci.tot_cmds = local_stats_.cmds;
-  ci.tot_net_in = local_stats_.net_bytes_in;
-  ci.tot_read_calls = local_stats_.read_cnt;
-  ci.tot_dispatches = local_stats_.dispatch_entries_added;
+  ci.stats = local_stats_;
 
   string_view phase_name = PHASE_NAMES[phase_];
   if (cc_) {
@@ -3226,6 +3228,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
   ConnectionMemoryTracker memory_tracker(this);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
   auto& conn_stats = tl_facade_stats->conn_stats;
+  bool squashed_in_batch = false;
 
   bool is_true_pipeline = (parsed_to_execute_->next) != nullptr;
 
@@ -3271,6 +3274,12 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
                << pending_input_ << " " << GetUnreadInputLen();
 
       if (SquashPipelineV2()) {
+        if (squashed_in_batch)
+          ++local_stats_.resquashes;
+        else
+          squashed_in_batch = true;
+        ++local_stats_.squashes;
+
         // - Normally: return after a successful squash so the caller can process replies. A client
         // with a bounded pipeline needs completed replies to replenish requests - delaying them can
         // stall both it and this connection fiber.
@@ -3452,6 +3461,10 @@ bool Connection::ReplyBatch() {
     auto* next = release_head->next;
     ReleasePipelinedCommand(release_head);
     release_head = next;
+  }
+
+  if (ioloop_v2_ && (replied > 0)) {
+    ++local_stats_.reply_batches;
   }
 
   if (reply_builder_->GetError())
@@ -4320,14 +4333,22 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     // whole pipeline execute in-memory before a single sendmsg at the end.
     if (!ShouldWakeIdle()) {
       phase_ = READ_SOCKET;
-
       if (auto ec = FlushReplies(); ec) {
         return ec;
       }
+      const bool wait_for_reply = HasInFlightCommands();
+      const uint64_t idle_wait_start = CycleClock::Now();
 
       fiber_park_spot_ = FiberParkSpot::kIdleAwait;
-      io_event_.await([this] { return ShouldWakeIdle(); });
+      const bool parked = io_event_.await([this] { return ShouldWakeIdle(); });
       fiber_park_spot_ = FiberParkSpot::kNone;
+
+      if (parked) {
+        ++local_stats_.idle_waits;
+        if (wait_for_reply)
+          ++local_stats_.reply_waits;
+        local_stats_.idle_wait_cycles += CycleClock::Now() - idle_wait_start;
+      }
     }
 
     phase_ = PROCESS;

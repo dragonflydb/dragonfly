@@ -1450,10 +1450,10 @@ string Replica::GetClientInfo() const {
     ci.tid = proactor_->GetPoolIndex();
     ci.age = now - creation_time_;
     for (uint64_t offs : GetReplicaOffset()) {
-      ci.tot_cmds += offs;
+      ci.stats.cmds += offs;
     }
     if (repl_offs_ >= initial_repl_offs_)
-      ci.tot_net_in = repl_offs_ - initial_repl_offs_;
+      ci.stats.net_bytes_in = repl_offs_ - initial_repl_offs_;
     ci.db = 0;
     ci.flags = "M";
     ci.repl_phase = absl::AsciiStrToLower(GetCurrentPhase());
