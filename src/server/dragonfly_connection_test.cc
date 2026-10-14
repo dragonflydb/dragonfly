@@ -352,9 +352,8 @@ TEST_P(DragonflyV2ConnectionTest, CallbackParserErrorDoesNotExecuteLaterCommands
   EXPECT_EQ(Run({"GET", "callback-after"}).type, facade::RespExpr::NIL);
 }
 
-// A peer that closes its write side while earlier work drains must still receive the protocol
-// error after the queued reply.
-TEST_P(DragonflyV2ConnectionTest, ParserErrorReplySurvivesPeerWriteShutdown) {
+// A peer write-side shutdown must not prevent delivery of the terminal protocol error.
+TEST_P(DragonflyV2ConnectionTest, TerminalParserErrorSurvivesPeerWriteShutdown) {
   RawRespClient client{port_};
   ASSERT_TRUE(client.valid());
   ASSERT_TRUE(
