@@ -652,7 +652,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ParsedArg
   find_res->post_updater.Run();
 
   if (isempty) {
-    db_slice.Del(op_args.db_cntx, find_res->it);
+    db_slice.Del(op_args.db_cntx, find_res->it.GetInnerIt());
   }
   if (removed && journal_rewrite && op_args.shard->journal()) {
     vector<string_view> mapped(vals.size() + 1);

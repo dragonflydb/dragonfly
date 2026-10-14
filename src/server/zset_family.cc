@@ -1070,7 +1070,7 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   auto zlen = pv.Size();
   if (zlen == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
-    db_slice.Del(t->GetDbContext(), it_res->it);
+    db_slice.Del(t->GetDbContext(), it_res->it.GetInnerIt());
   }
 
   OpArgs op_args = t->GetOpArgs(shard);
@@ -1192,7 +1192,7 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
 
   auto zlen = pv.Size();
   if (zlen == 0) {
-    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
+    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it.GetInnerIt());
   }
 
   // Checking if command conatins flag with no autojournal
@@ -1239,7 +1239,7 @@ OpResult<unsigned> OpRemRange(const OpArgs& op_args, string_view key,
 
   auto zlen = pv.Size();
   if (zlen == 0) {
-    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
+    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it.GetInnerIt());
   }
 
   return iv.removed();
@@ -1422,7 +1422,7 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ParsedA
   res_it->post_updater.Run();
 
   if (zlen == 0) {
-    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
+    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it.GetInnerIt());
   }
 
   return deleted;

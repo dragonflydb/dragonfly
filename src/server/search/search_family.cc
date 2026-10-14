@@ -2831,7 +2831,7 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
       for (const auto& [key, doc_id] : doc_keys) {
         auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
         if (IsValid(it)) {
-          db_slice.Del(op_args.db_cntx, it);
+          db_slice.Del(op_args.db_cntx, it.GetInnerIt());
         }
       }
     }

@@ -346,7 +346,7 @@ void ElementAccess::Commit(string_view new_value) const {
       // No need to run, it was a new entry and it got removed
       updater_.post_updater.Cancel();
     }
-    context_.ns->GetCurrentDbSlice().Del(context_, updater_.it);
+    context_.ns->GetCurrentDbSlice().Del(context_, updater_.it.GetInnerIt());
   } else {
     const bool is_external = IsExternal();
     // The value is replaced wholesale below, so drop the old heap accounting once.
