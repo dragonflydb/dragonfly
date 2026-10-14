@@ -140,10 +140,12 @@ bool InterpreterTest::Execute(string_view script, size_t max_elements) {
   }
 
   ser_.res.clear();
+  int top = lua_gettop(lua());
   if (max_elements)
     intptr_.SerializeResult(&ser_, max_elements);
   else
     intptr_.SerializeResult(&ser_);
+  EXPECT_EQ(top - 1, lua_gettop(lua()));  // Only the result is popped.
   ser_.res.pop_back();
 
   return true;

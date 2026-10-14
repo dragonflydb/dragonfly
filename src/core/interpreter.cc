@@ -308,16 +308,6 @@ string_view TopSv(lua_State* lua) {
   return {str, len};
 }
 
-optional<int> FetchKey(lua_State* lua, const char* key, int expected_type) {
-  lua_pushstring(lua, key);
-  int type = lua_rawget(lua, -2);
-  if (type != expected_type) {
-    lua_pop(lua, 1);
-    return nullopt;
-  }
-  return type;
-}
-
 // Maximal nesting of tables in a script reply, including the root table.
 constexpr int kMaxReplyDepth = 128;
 
@@ -1235,12 +1225,27 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
 }
 
 void Interpreter::SerializeResult(ObjectExplorer* serializer, size_t max_elements) {
+  // Push the wrapper keys once, below a table result, instead of for each of its tables.
+  int keys = lua_gettop(lua_);
+  int type = lua_type(lua_, keys);
+  if (type == LUA_TTABLE) {
+    if (!lua_checkstack(lua_, 3)) {
+      serializer->OnError(kReplyDepthError);
+      lua_pop(lua_, 1);
+      return;
+    }
+    lua_pushliteral(lua_, "err");
+    lua_pushliteral(lua_, "ok");
+    lua_pushliteral(lua_, "map");
+    lua_rotate(lua_, keys, -1);  // Move the result above them.
+  }
+
   // Track nesting explicitly instead of recursing on the fiber's C++ stack.
   // SerializeResultInternal opens at most kMaxReplyDepth nested tables.
   ReplyFrame frames[kMaxReplyDepth];
   int depth = 0;
   do {
-    ReplyFrame frame = SerializeResultInternal(serializer, depth + 1, &max_elements);
+    ReplyFrame frame = SerializeResultInternal(serializer, type, keys, depth + 1, &max_elements);
     if (frame.state != ReplyFrame::kDone)
       frames[depth++] = frame;
 
@@ -1249,17 +1254,19 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer, size_t max_element
       ReplyFrame& parent = frames[depth - 1];
       if (parent.state == ReplyFrame::kArray) {
         if (parent.index < parent.len) {
-          lua_rawgeti(lua_, -1, ++parent.index);
+          type = lua_rawgeti(lua_, -1, ++parent.index);
           break;
         }
         serializer->OnArrayEnd();
         lua_pop(lua_, 1);
       } else if (parent.state == ReplyFrame::kMapValue) {
         parent.state = ReplyFrame::kMapKey;
+        type = lua_type(lua_, -1);
         break;  // The value is already at the top of the stack.
       } else if (lua_next(lua_, -2) != 0) {
         parent.state = ReplyFrame::kMapValue;
         lua_pushvalue(lua_, -2);  // Serialize a copy of the key, lua_next needs the original.
+        type = lua_type(lua_, -1);
         break;
       } else {
         serializer->OnMapEnd();
@@ -1268,14 +1275,15 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer, size_t max_element
       --depth;
     }
   } while (depth > 0);
+  lua_settop(lua_, keys - 1);  // Pop the wrapper keys, if pushed.
 }
 
-// Serialize one value, leaving array/map traversal to SerializeResult, whose loop inlines it.
+// Serialize the value of the given type at the top of the stack, leaving array/map traversal to
+// SerializeResult, whose loop inlines it. The wrapper keys "err", "ok" and "map" are at stack
+// indices keys, keys + 1 and keys + 2.
 inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
-    ObjectExplorer* serializer, int depth, size_t* budget) -> ReplyFrame {
-  int t = lua_type(lua_, -1);
-
-  switch (t) {
+    ObjectExplorer* serializer, int type, int keys, int depth, size_t* budget) -> ReplyFrame {
+  switch (type) {
     case LUA_TSTRING:
       serializer->OnString(TopSv(lua_));
       break;
@@ -1295,15 +1303,16 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
         break;
       }
 
-      auto fres = FetchKey(lua_, "err", LUA_TSTRING);
-      if (fres && *fres == LUA_TSTRING) {
+      // Each lookup reuses the stack slot of the previous one.
+      lua_pushvalue(lua_, keys);
+      if (lua_rawget(lua_, -2) == LUA_TSTRING) {
         serializer->OnError(TopSv(lua_));
         lua_pop(lua_, 1);
         break;
       }
 
-      fres = FetchKey(lua_, "ok", LUA_TSTRING);
-      if (fres && *fres == LUA_TSTRING) {
+      lua_copy(lua_, keys + 1, -1);
+      if (lua_rawget(lua_, -2) == LUA_TSTRING) {
         serializer->OnStatus(TopSv(lua_));
         lua_pop(lua_, 1);
         break;
@@ -1311,8 +1320,8 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
 
       // A table charges its elements to the budget when it opens, or is replaced by an error if
       // they do not fit. Each serialized value is charged once, so the budget bounds the work.
-      fres = FetchKey(lua_, "map", LUA_TTABLE);
-      if (fres && *fres == LUA_TTABLE) {
+      lua_copy(lua_, keys + 2, -1);
+      if (lua_rawget(lua_, -2) == LUA_TTABLE) {
         // Calculate length of map part, there is sadly no other way. Stop counting past the
         // budget, and use it up then, so a shared map is not counted again for each reference.
         unsigned len = 0;
@@ -1330,6 +1339,7 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
         lua_pushnil(lua_);  // The first key for lua_next.
         return {ReplyFrame::kMapKey, 0, 0};
       }
+      lua_pop(lua_, 1);  // The map field, which is not a table.
 
       // lua_rawlen returns size_t: keep the border wide so a huge array can't wrap below the
       // budget and bypass the check. Past it, the border fits unsigned.
@@ -1348,7 +1358,7 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
       serializer->OnNil();
       break;
     default:
-      LOG(ERROR) << "Unsupported type " << lua_typename(lua_, t);
+      LOG(ERROR) << "Unsupported type " << lua_typename(lua_, type);
       serializer->OnNil();
   }
 

@@ -189,7 +189,8 @@ class Interpreter {
   // otherwise returns false and sets the error.
   bool AddInternal(const char* f_id, std::string_view body, std::string* error);
   struct ReplyFrame;
-  ReplyFrame SerializeResultInternal(ObjectExplorer* serializer, int depth, size_t* budget);
+  ReplyFrame SerializeResultInternal(ObjectExplorer* serializer, int type, int keys, int depth,
+                                     size_t* budget);
 
   bool PrepareArgs();
   bool CallRedisFunction(CallArgs::Type call_type, ObjectExplorer* explorer);
