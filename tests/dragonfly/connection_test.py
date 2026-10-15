@@ -38,11 +38,11 @@ def is_resp_io_loop_v2(server: DflyInstance) -> bool:
     """Check if the server is running with enable_resp_io_loop_v2 enabled.
 
     When the flag is passed as a bare flag (--enable_resp_io_loop_v2), the test runner
-    stores its value as None instead of "true". This function checks both has_arg() and
-    != "false" to correctly detect V2 while safely defaulting to V1 otherwise.
+    stores its value as None instead of "true". When the flag is absent, the server uses its
+    V2 default. Explicit false values select V1.
     """
     if not server.has_arg("enable_resp_io_loop_v2"):
-        return False
+        return True
     value = server.args.get("enable_resp_io_loop_v2")
     if value is None:  # bare flag
         return True

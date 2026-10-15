@@ -11,8 +11,9 @@ select the branch, and enter the optional inputs.
 | `Heavy Tests` | Only tests marked `large` | `CI-LARGE-86`, `CI-LARGE-ARM` | Release | Not supported |
 
 All three workflows accept the Pytest and common inputs below; only the two
-regression workflows accept the GoogleTest inputs. `df-runtime-flags` is a
-space-separated list passed to every Dragonfly process (for example `proactor_threads=2`).
+regression workflows accept the GoogleTest inputs. Only `Heavy Tests` accepts
+`df-runtime-flags`, a space-separated list passed to every Dragonfly process (for example
+`proactor_threads=2`).
 
 Besides the selection above, each workflow first runs the S3 snapshot tests
 (`pytest -k s3 dragonfly/snapshot_test.py`) against a local MinIO, regardless of the
