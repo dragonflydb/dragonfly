@@ -623,7 +623,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_m
   VLOG_IF(1, total_size > 10000000) << "OpMGet: allocating " << total_size << " bytes";
 
   // Allocate enough for all values
-  response.storage = make_shared<char[]>(total_size);
+  response.storage = make_shared_for_overwrite<char[]>(total_size);
   char* next = response.storage.get();
   bool fetch_mcflag = cmd_flags.return_flags;
   bool fetch_cas = cmd_flags.return_cas;

@@ -17,6 +17,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
+#include "server/server_state.h"
 #ifdef WITH_SEARCH
 #include "server/search/doc_index.h"
 #endif
@@ -87,6 +88,7 @@ class TieredStorageTest : public BaseFamilyTest {
         [](EngineShard* shard) { shard->tiered_storage()->UpdateFromFlags(); });
   }
 
+  // Disables uploads on all shards so that offloaded values will stay on disk
   void DisableUploads() {
     SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
     UpdateFromFlags();
@@ -100,6 +102,7 @@ class TieredStorageTest : public BaseFamilyTest {
     });
   }
 
+  // src=[1,2] with offloaded BY weights (w_2 < w_1) and GET targets. uploads are disabled
   pair<string, string> OffloadSortOperands() {
     DisableUploads();
 
@@ -2440,9 +2443,9 @@ TEST_F(PureDiskTSMTTest, MGetRescheduleWithPendingReads) {
   DisableUploads();
 
   const auto sz = shard_set->size();
-  // will go in tiered storage and take a while to read back due to large value
+  // every read of "big" is tiered read
   const string big = "big";
-  const string value(1 << 20, 'x');
+  const string value(8_KB, 'x');
 
   // will be contended, by using it both in writers and readers
   const string hot = "hot";
@@ -2469,19 +2472,28 @@ TEST_F(PureDiskTSMTTest, MGetRescheduleWithPendingReads) {
     }));
   }
 
-  for (size_t i = 0; i < 500; i++) {
-    // if read of "big" runs inline, then it issues TS read request which has to use MGetResponse
-    // backing storage, even while tx is being scheduled. then the read of "hot" is to be contended
-    // and causes a retry of scheduling. the initial read will be orphaned. MGET is idempotent so it
-    // allows inline optimistic_exec. the buffers for tiered storage read must remain alive as long
-    // as requests are not finished.
-    auto resp = Run({"MGET", big, hot});
-    EXPECT_EQ(resp.GetVec()[0].GetString().size(), value.size());
-  }
+  constexpr auto kMinCancels = 50;
+  const auto deadline = absl::Now() + absl::Seconds(30);
+  auto cancels = 0;
+
+  // MGET= shard(hot), shard(big)
+  // MSET= shard(hot), shard(other)
+  // shard(big) can run mget inline. shard(hot) sees contention and causes retrying of command
+  pp_->at(pp_->size() - 1)->Await([&] {
+    const auto& stats = ServerState::tlocal()->stats;
+    const auto base = stats.tx_schedule_cancel_cnt;
+    while (cancels < kMinCancels && absl::Now() < deadline) {
+      auto resp = Run({"MGET", big, hot});
+      EXPECT_EQ(resp.GetVec()[0].GetString(), value);
+      cancels = stats.tx_schedule_cancel_cnt - base;
+    }
+  });
 
   done = true;
   for (auto& fb : writers)
     fb.Join();
+
+  EXPECT_GE(cancels, kMinCancels);
 }
 
 }  // namespace dfly
