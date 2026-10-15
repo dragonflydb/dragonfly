@@ -653,6 +653,31 @@ async def _open_stuck_subscriber(port: int):
     return reader, writer
 
 
+async def _pubsub_slow_subscriber_snapshot(
+    async_client: aioredis.Redis, df_server: DflyInstance, subscriber_port: int
+) -> dict:
+    info = await async_client.info()
+    clients = await async_client.client_list()
+    subscriber = next(
+        (
+            client
+            for client in clients
+            if client.get("addr", "").rsplit(":", 1)[-1] == str(subscriber_port)
+        ),
+        {},
+    )
+    return {
+        "subscriber_bytes": int(info["dispatch_queue_subscriber_bytes"]),
+        "connection_limit": 32 * 1024 * 1024 // 16,
+        "stats": await _pubsub_backpressure_stats(df_server),
+        "subscriber": {
+            field: subscriber[field]
+            for field in ("id", "addr", "age", "idle", "flags", "cmd", "omem", "obl", "qbuf", "sub")
+            if field in subscriber
+        },
+    }
+
+
 # A single slow subscriber is evicted after its blocked send exceeds the per-connection limit.
 @dfly_args(
     {
@@ -663,6 +688,7 @@ async def _open_stuck_subscriber(port: int):
 )
 async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_client: aioredis.Redis):
     reader, writer = await _open_stuck_subscriber(df_server.port)
+    subscriber_port = writer.get_extra_info("sockname")[1]
 
     async def pub_task():
         # The connection threshold is 1/16 of the 32 MiB publish buffer (2 MiB). Send a
@@ -680,10 +706,17 @@ async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_clie
 
     try:
         # Wait until the policy force-closes the stuck subscriber.
+        last_snapshot = {}
+
         @assert_eventually(timeout=15)
         async def wait_for_forced_disconnect():
-            stats = await _pubsub_backpressure_stats(df_server)
-            assert stats["forced_disconnect"] >= 1
+            nonlocal last_snapshot
+            last_snapshot = await _pubsub_slow_subscriber_snapshot(
+                async_client, df_server, subscriber_port
+            )
+            last_snapshot["publisher_done"] = publishers[0].done()
+            stats = last_snapshot["stats"]
+            assert stats["forced_disconnect"] >= 1, last_snapshot
             return stats
 
         stats = await wait_for_forced_disconnect()

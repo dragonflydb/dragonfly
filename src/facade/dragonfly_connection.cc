@@ -2630,6 +2630,16 @@ void Connection::SendPubMessageAsync(PubMessage msg) {
       RequestPubsubClose();
       return;  // discard the message that triggered the close
     }
+
+    LOG_EVERY_T(INFO, 1) << "Slow Pub/Sub subscriber remains below close thresholds " << DebugInfo()
+                         << " tid=" << ProactorBase::me()->GetPoolIndex()
+                         << " thread_subscriber_bytes="
+                         << qbp.subscriber_bytes.load(memory_order_relaxed)
+                         << " thread_soft_limit=" << qbp.publish_buffer_limit
+                         << " connection_subscriber_bytes=" << dispatch_q_subscriber_bytes_
+                         << " connection_soft_limit=" << conn_soft_limit << " blocked_send_usec="
+                         << base::CycleClock::ToUsec(base::CycleClock::Now() -
+                                                     async_op_start_cycle_);
   }
 
   SendAsync({make_unique<PubMessage>(std::move(msg))});
