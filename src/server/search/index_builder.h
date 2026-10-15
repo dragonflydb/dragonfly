@@ -31,7 +31,9 @@ struct IndexBuilder {
   // for HNSW indices (restored from RDB). This flag is passed from PerformPostLoad.
   void Start(const OpArgs& op_args, bool is_restored, std::function<void()> on_complete);
 
-  // Cancel building and wait for worker to finish. Safe to delete after.
+  // Cancel building and wait for worker to finish. Safe to delete after. Several fibers may
+  // call it for the same build; every caller returns once the worker has finished (a broadcast
+  // wake-up: fb2::Done would wake a single waiter).
   // WARNING: Must NOT be called from the shard's FiberQueue context if VectorLoop
   // may have dispatched work to the same queue — that would deadlock.
   void Cancel();
@@ -67,6 +69,8 @@ struct IndexBuilder {
   };
   std::vector<OffloadedKey> offloaded_keys_;
   util::fb2::Fiber fiber_;
+  util::fb2::EventCount finished_ec_;
+  bool finished_ = false;  // set by the worker when it was cancelled
 
   bool has_hnsw_ = false;
   std::array<double, kNumPhases> weights_{};    // share of each phase in the build, sum is 1

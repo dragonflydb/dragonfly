@@ -4066,6 +4066,54 @@ TEST_F(SearchFamilyTest, FieldExpiryStalePostingIsSkipped) {
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "other", "NOCONTENT"}), AreNoContentDocIds("d:2"));
 }
 
+TEST_F(SearchFamilyTest, FtAlterKeepsSynonyms) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "car", "automobile"}), "OK");
+  EXPECT_THAT(Run({"HSET", "d:1", "title", "car"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "automobile"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}), AreNoContentDocIds("d:1", "d:2"));
+
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "extra", "TEXT"}), "OK");
+  WaitForIndexReady("idx");
+
+  EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}),
+              IsUnordArray("car", IsArray("g1"), "automobile", IsArray("g1")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}), AreNoContentDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"HSET", "d:3", "title", "automobile"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}),
+              AreNoContentDocIds("d:1", "d:2", "d:3"));
+
+  // The copied groups stay the live state of the index: a later update is seen by indexing.
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "vehicle"}), "OK");
+  EXPECT_THAT(Run({"HSET", "d:4", "title", "vehicle"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}),
+              AreNoContentDocIds("d:1", "d:2", "d:3", "d:4"));
+  EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}), IsUnordArray("car", IsArray("g1"), "automobile",
+                                                       IsArray("g1"), "vehicle", IsArray("g1")));
+}
+
+// A second FT.ALTER stops the rebuild of the first one wherever it is; the final index must be
+// complete and keep the synonyms whatever the interleaving.
+TEST_F(SearchFamilyTest, FtAlterWhileBuilding) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "car", "automobile"}), "OK");
+  for (int i = 0; i < 500; i++)
+    EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", i % 2 ? "car" : "automobile"}),
+                IntArg(1));
+
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "extra", "TEXT"}), "OK");
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "more", "TEXT"}), "OK");
+  WaitForIndexReady("idx");
+
+  for (string_view query : {"car", "automobile", "@extra:x | car"})
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "LIMIT", "0", "0"}), RespElementsAre(IntArg(500)))
+        << query;
+  EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}),
+              IsUnordArray("car", IsArray("g1"), "automobile", IsArray("g1")));
+}
+
 TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
   Run({"JSON.SET", "json1", "$", R"({"text":"2"})"});
   Run({"JSON.SET", "json2", "$", R"({"text":"1"})"});
