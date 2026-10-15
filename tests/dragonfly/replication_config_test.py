@@ -427,11 +427,11 @@ async def test_replicate_old_master(
     if cpu not in ("x86_64", "aarch64"):
         pytest.skip(f"No release binaries for {cpu}")
 
-    dfly_version = "v1.19.2"
+    dfly_version = "v1.25.3"
     released_dfly_path = download_dragonfly_release(dfly_version)
     master, [replica], c_master, [c_replica] = await setup_replication(
         df_factory,
-        master_args={"version": 1.19, "path": released_dfly_path, "cluster_mode": cluster_mode},
+        master_args={"version": 1.25, "path": released_dfly_path, "cluster_mode": cluster_mode},
         replica_args={
             "cluster_mode": cluster_mode,
             "cluster_announce_ip": announce_ip,
@@ -477,10 +477,10 @@ async def test_replicate_to_old_replica(df_factory: DflyInstanceFactory):
     if cpu not in ("x86_64", "aarch64"):
         pytest.skip(f"No release binaries for {cpu}")
 
-    dfly_version = "v1.19.2"
+    dfly_version = "v1.25.3"
     released_dfly_path = download_dragonfly_release(dfly_version)
     master = df_factory.create(cluster_mode="emulated", admin_port=ADMIN_PORT)
-    replica = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode="emulated")
+    replica = df_factory.create(version=1.25, path=released_dfly_path, cluster_mode="emulated")
     df_factory.start_all([master, replica])
 
     c_master = master.client()
