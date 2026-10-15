@@ -321,6 +321,7 @@ void ConnectionState::ExecInfo::Clear() {
   const size_t cleared_size = ClearStoredCmds();
   ServerState::tlocal()->stats.stored_cmd_bytes -= cleared_size;
   is_write = false;
+  has_denyoom = false;
   ClearWatched();
 }
 
