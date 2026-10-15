@@ -15,6 +15,7 @@
 #include <uni_algo/case.h>
 
 #include <chrono>
+#include <ranges>
 #include <type_traits>
 #include <variant>
 
