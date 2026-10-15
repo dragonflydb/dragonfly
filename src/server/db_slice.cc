@@ -244,9 +244,7 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
       return 0;
 
     // log the evicted keys to journal.
-    if (auto journal = db_slice_->shard_owner()->journal(); journal) {
-      RecordExpiryBlocking(cntx_.db_index, key);
-    }
+    RecordExpiryBlocking(cntx_.db_index, key);
     db_slice_->DelAtomic(cntx_, last_slot_it);
 
     ++evicted_;
@@ -702,12 +700,6 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   TouchHllIfNeeded(key, db.sample_unique_keys);
   TouchValuesHistogramIfNeeded(it->second, db.sample_values_hist);
 
-  if (req_obj_type.has_value() && it->second.ObjType() != req_obj_type.value()) {
-    events_.misses += miss_weight;
-    db.stats.events.misses += miss_weight;
-    return OpStatus::WRONG_TYPE;
-  }
-
   if (it->first.HasExpire()) {
     vector<string> events;
     ExpireResult res = TryExpire(cntx, it, &events);
@@ -721,12 +713,22 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     if (res == ExpireResult::Deleted ||
         (res == ExpireResult::ExpiryPaused && stats_mode == UpdateStatsMode::kReadStats)) {
       events_.misses += miss_weight;
-      db.stats.events.misses += miss_weight;
+
+      // TryExpire may suspend on the journal append and SendExpiredKeyEvents may suspend too,
+      // and a flush may have replaced the table meanwhile, so do not use `db`.
+      db_arr_[cntx.db_index]->stats.events.misses += miss_weight;
       return OpStatus::KEY_NOTFOUND;
     }
   }
 
   DCHECK(IsValid(it));
+
+  // Preemptions happen only if the entry is being deleted during expiry, so `db` is valid here.
+  if (req_obj_type.has_value() && it->second.ObjType() != req_obj_type.value()) {
+    events_.misses += miss_weight;
+    db.stats.events.misses += miss_weight;
+    return OpStatus::WRONG_TYPE;
+  }
 
   if (IsCacheMode()) {
     fetched_items_.insert({it->first.HashCode(), cntx.db_index});
@@ -783,7 +785,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
                                                            std::optional<unsigned> req_obj_type) {
   DCHECK(IsDbValid(cntx.db_index));
 
-  DbTable& db = *db_arr_[cntx.db_index];
   auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
 
   if (res.ok()) {
@@ -812,6 +813,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
 
   // Call change callbacks on the computed set of buckets that can be affected by the insert
   bool omit_journal = false;
+  DbTable& db = *db_arr_[cntx.db_index];
+
   if (!change_cb_.empty()) {
     for (bool consistent = false; !consistent;) {
       auto bucket_set = db.prime.CVCUponInsert(key);
@@ -1528,27 +1531,25 @@ void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
   }
 }
 
+bool DbSlice::AllowExpiredDeletions() const {
+  // Replicas do not expire keys on their own unless replica_delete_expired is set (which allows
+  // them to proactively delete expired keys on the read path).
+  return expire_allowed_ && !(owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired));
+}
+
 auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it, vector<string>* events) const
     -> ExpireResult {
   DCHECK(events);
   if (!it->first.IsExpired(cntx.time_now_ms))
     return ExpireResult::Valid;
 
-  if (!expire_allowed_)
-    return ExpireResult::ExpiryPaused;
-
-  // Replicas do not expire keys on their own unless replica_delete_expired is set (which allows
-  // them to proactively delete expired keys on the read path).
-  if (owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired))
-    return ExpireResult::Valid;
+  if (!AllowExpiredDeletions())
+    return expire_allowed_ ? ExpireResult::Valid : ExpireResult::ExpiryPaused;
 
   string scratch;
   string_view key = it->first.GetSlice(&scratch);
 
-  // Replicate expiry
-  if (auto journal = owner_->journal(); journal) {
-    RecordExpiryBlocking(cntx.db_index, key);
-  }
+  RecordExpiryBlocking(cntx.db_index, key);
 
   if (expired_keys_events_recording_)
     events->emplace_back(key);
@@ -1813,9 +1814,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
 finish:
   // send the deletion to the replicas.
   for (string_view key : keys_to_journal) {
-    if (auto journal = owner_->journal(); journal)
-      // Won't block because we disabled journal flushing. See first line of this function.
-      RecordExpiryBlocking(db_ind, key);
+    RecordExpiryBlocking(db_ind, key);
 
     if (expired_keys_events_recording_ && key_events)
       key_events->emplace_back(key);

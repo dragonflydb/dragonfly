@@ -651,6 +651,10 @@ class DbSlice {
     kMutableStats,
   };
 
+  // Returns true if deletion of expired entries is allowed (i.e., expiry is not paused
+  // and this is not a replica that leaves expiry to its master)
+  bool AllowExpiredDeletions() const;
+
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
                                            std::optional<unsigned> req_obj_type);
 

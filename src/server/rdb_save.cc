@@ -2005,8 +2005,8 @@ void MemBufController::MaybeTagEntryTail() {
 }
 
 bool MemBufController::MaybeShrinkTo(uint32_t max_capacity) {
-  DCHECK_EQ(buffer_.InputLen(), 0) << "attempt to reset non-empty buffer";
-  DCHECK_EQ(prefix_len_, 0) << "attempt to reset buffer with pending prefix data";
+  DCHECK_EQ(buffer_.InputLen(), 0u) << "attempt to reset non-empty buffer";
+  DCHECK_EQ(prefix_len_, 0u) << "attempt to reset buffer with pending prefix data";
   return buffer_.ShrinkTo(max_capacity);
 }
 
