@@ -262,6 +262,13 @@ TEST_F(SearchTest, MatchNotTerm) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
+TEST_F(SearchTest, MatchDeepNegation) {
+  PrepareQuery(string(16384, '-') + "hello");
+  ExpectAll("hello");
+  ExpectNone("world");
+  EXPECT_TRUE(Check()) << GetError();
+}
+
 TEST_F(SearchTest, MatchLogicalNode) {
   {
     PrepareQuery("foo bar");
@@ -3778,10 +3785,15 @@ TEST_F(SearchTest, MatchOptionalSwallowsInnerErrors) {
 
   SearchAlgorithm algo;
   QueryParams params;
-  ASSERT_TRUE(algo.Init("~@invalid_field:hello", &params));
-  auto result = algo.Search(&index);
-  EXPECT_TRUE(result.error.empty()) << "~ should swallow inner errors, got: " << result.error;
-  EXPECT_EQ(result.ids.size(), 1u) << "~ should still return all docs";
+  for (auto query : {"~@invalid_field:hello", "~(@invalid_field:hello @text:anything)",
+                     "~(~@invalid_field:hello | @text:anything)"}) {
+    ASSERT_TRUE(algo.Init(query, &params)) << query;
+    auto result = algo.Search(&index);
+    EXPECT_TRUE(result.error.empty()) << query << ": " << result.error;
+    EXPECT_EQ(result.ids.size(), 1u) << query;
+  }
+  ASSERT_TRUE(algo.Init("@invalid_field:hello ~@text:anything", &params));
+  EXPECT_FALSE(algo.Search(&index).error.empty());
 }
 
 TEST_F(SearchTest, MatchEscapedTermLiteral) {
