@@ -4,16 +4,15 @@ Dragonfly provides three test workflows that run on a schedule and can also be
 dispatched manually. Use **Actions**, select a workflow, choose **Run workflow**,
 select the branch, and enter the optional inputs.
 
-| Workflow | Pytest selection | Runners | Build | GoogleTests | Runtime flags |
-| --- | --- | --- | --- | --- | --- |
-| `Regression Tests` | All tests except `large` | `ubuntu-latest`, self-hosted ARM64 | Debug, Release | Supported | Set by the matrix: `enable_resp_io_loop_v2=false/true` |
-| `Epoll Regression Tests` | All tests except `large` and `exclude_epoll` | `ubuntu-latest`, self-hosted ARM64 | Debug | Supported | Set by the matrix: `enable_resp_io_loop_v2=false/true`; forces Epoll |
-| `Heavy Tests` | Only tests marked `large` | `CI-LARGE-86`, `CI-LARGE-ARM` | Release | Not supported | Optional `df-runtime-flags` input |
+| Workflow | Pytest selection | Runners | Build | GoogleTests |
+| --- | --- | --- | --- | --- |
+| `Regression Tests` | All tests except `large` | `ubuntu-latest`, self-hosted ARM64 | Debug, Release | Supported |
+| `Epoll Regression Tests` | All tests except `large` and `exclude_epoll` | `ubuntu-latest`, self-hosted ARM64 | Debug | Supported; forces Epoll |
+| `Heavy Tests` | Only tests marked `large` | `CI-LARGE-86`, `CI-LARGE-ARM` | Release | Not supported |
 
 All three workflows accept the Pytest and common inputs below; only the two
-regression workflows accept the GoogleTest inputs. `Heavy Tests` also accepts
-`df-runtime-flags`, space-separated flags passed to every Dragonfly process (for
-example `proactor_threads=2`).
+regression workflows accept the GoogleTest inputs. `df-runtime-flags` is a
+space-separated list passed to every Dragonfly process (for example `proactor_threads=2`).
 
 Besides the selection above, each workflow first runs the S3 snapshot tests
 (`pytest -k s3 dragonfly/snapshot_test.py`) against a local MinIO, regardless of the
