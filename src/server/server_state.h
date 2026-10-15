@@ -193,13 +193,7 @@ class ServerState {  // public struct - to allow initialization.
     gstate_ = s;
   }
 
-  struct MemoryUsageStats {
-    uint64_t used_mem = 0;
-    uint64_t rss_mem = 0;
-  };
-
-  MemoryUsageStats GetMemoryUsage(uint64_t now_usec) const;
-  bool ShouldDenyOnOOM(uint64_t now_usec);
+  bool ShouldDenyOnOOM();
 
   bool AllowInlineScheduling() const;
 
@@ -341,10 +335,6 @@ class ServerState {  // public struct - to allow initialization.
   uint32_t thread_index_ = 0;
 
   detail::EgressThrottler egress_throttler_{0};
-
-  mutable uint64_t used_mem_last_read_usec_ = 0;
-  mutable MemoryUsageStats
-      memory_stats_cached_;  // thread local cache of used and rss memory current
 
   static __thread ServerState* state_;
 };
