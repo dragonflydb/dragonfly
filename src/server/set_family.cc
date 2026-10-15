@@ -32,6 +32,13 @@ extern "C" {
 
 ABSL_FLAG(bool, use_oah_set, true, "If true, store SET values in OAHSet instead of StringSet.");
 
+// Shared by HRANDFIELD / ZRANDMEMBER / SRANDMEMBER. A negative COUNT means "with duplicates" and
+// its magnitude sizes an allocation/result directly, decoupled from the collection size. Reject
+// magnitudes above this bound so a tiny request cannot force an unbounded allocation (DoS).
+ABSL_FLAG(uint64_t, max_rand_count, 1ULL << 20,
+          "Maximum magnitude of a negative COUNT for HRANDFIELD/ZRANDMEMBER/SRANDMEMBER "
+          "(with-duplicates mode); larger values are rejected to bound memory use.");
+
 namespace rng = std::ranges;
 
 namespace dfly {
@@ -1376,6 +1383,12 @@ void CmdSRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
+
+  if (count < 0) {
+    const uint64_t limit = absl::GetFlag(FLAGS_max_rand_count);
+    if (static_cast<uint64_t>(-static_cast<int64_t>(count)) > limit)
+      return cmd_cntx->SendError(absl::StrCat("COUNT magnitude exceeds the maximum of ", limit));
+  }
 
   cmn::BackedArguments vals;
   auto cb = [&](Transaction* t, EngineShard* shard) {

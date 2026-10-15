@@ -8,8 +8,11 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "base/flags.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
+
+ABSL_DECLARE_FLAG(uint64_t, max_rand_count);
 
 using namespace testing;
 using namespace std;
@@ -239,6 +242,24 @@ TEST_F(ZSetFamilyTest, ZRem) {
   EXPECT_THAT(resp, IntArg(1));
   EXPECT_THAT(Run({"zrange", "x", "0", "3", "byscore"}), RespElementsAre("a"));
   EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), RespElementsAre("a"));
+}
+
+TEST_F(ZSetFamilyTest, ZRandMemberNegativeCountBound) {
+  // Regression: an unbounded negative COUNT must not drive the result allocation.
+  const uint64_t prev = absl::GetFlag(FLAGS_max_rand_count);
+  absl::SetFlag(&FLAGS_max_rand_count, 4);
+
+  Run({"ZADD", "z", "1", "a"});
+
+  EXPECT_THAT(Run({"zrandmember", "z", "-5"}), ErrArg("COUNT magnitude exceeds the maximum"));
+  // INT_MIN previously hit std::abs() signed-overflow UB; now rejected, never a crash.
+  EXPECT_THAT(Run({"zrandmember", "z", "-2147483648"}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  EXPECT_THAT(Run({"zrandmember", "z", "-4"}).GetVec(), ElementsAre("a", "a", "a", "a"));
+  // Positive COUNT stays clamped to the set size.
+  EXPECT_THAT(Run({"zrandmember", "z", "1000000"}).GetVec(), ElementsAre("a"));
+
+  absl::SetFlag(&FLAGS_max_rand_count, prev);
 }
 
 TEST_F(ZSetFamilyTest, ZRandMember) {
