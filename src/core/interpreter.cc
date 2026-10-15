@@ -1226,8 +1226,8 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer) {
 
 void Interpreter::SerializeResult(ObjectExplorer* serializer, size_t max_elements) {
   // Push the wrapper keys once, below a table result, instead of for each of its tables.
-  int keys = lua_gettop(lua_);
-  int type = lua_type(lua_, keys);
+  int wrapper_keys_base = lua_gettop(lua_);
+  int type = lua_type(lua_, wrapper_keys_base);
   if (type == LUA_TTABLE) {
     if (!lua_checkstack(lua_, 3)) {
       serializer->OnError(kReplyDepthError);
@@ -1237,7 +1237,7 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer, size_t max_element
     lua_pushliteral(lua_, "err");
     lua_pushliteral(lua_, "ok");
     lua_pushliteral(lua_, "map");
-    lua_rotate(lua_, keys, -1);  // Move the result above them.
+    lua_rotate(lua_, wrapper_keys_base, -1);  // Move the result above them.
   }
 
   // Track nesting explicitly instead of recursing on the fiber's C++ stack.
@@ -1245,7 +1245,8 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer, size_t max_element
   ReplyFrame frames[kMaxReplyDepth];
   int depth = 0;
   do {
-    ReplyFrame frame = SerializeResultInternal(serializer, type, keys, depth + 1, &max_elements);
+    ReplyFrame frame =
+        SerializeResultInternal(serializer, type, wrapper_keys_base, depth + 1, &max_elements);
     if (frame.state != ReplyFrame::kDone)
       frames[depth++] = frame;
 
@@ -1275,14 +1276,15 @@ void Interpreter::SerializeResult(ObjectExplorer* serializer, size_t max_element
       --depth;
     }
   } while (depth > 0);
-  lua_settop(lua_, keys - 1);  // Pop the wrapper keys, if pushed.
+  lua_settop(lua_, wrapper_keys_base - 1);  // Pop the wrapper keys, if pushed.
 }
 
 // Serialize the value of the given type at the top of the stack, leaving array/map traversal to
 // SerializeResult, whose loop inlines it. The wrapper keys "err", "ok" and "map" are at stack
 // indices keys, keys + 1 and keys + 2.
 inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
-    ObjectExplorer* serializer, int type, int keys, int depth, size_t* budget) -> ReplyFrame {
+    ObjectExplorer* serializer, int type, int wrapper_keys_base, int depth, size_t* budget)
+    -> ReplyFrame {
   switch (type) {
     case LUA_TSTRING:
       serializer->OnString(TopSv(lua_));
@@ -1304,14 +1306,14 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
       }
 
       // Each lookup reuses the stack slot of the previous one.
-      lua_pushvalue(lua_, keys);
+      lua_pushvalue(lua_, wrapper_keys_base);
       if (lua_rawget(lua_, -2) == LUA_TSTRING) {
         serializer->OnError(TopSv(lua_));
         lua_pop(lua_, 1);
         break;
       }
 
-      lua_copy(lua_, keys + 1, -1);
+      lua_copy(lua_, wrapper_keys_base + 1, -1);
       if (lua_rawget(lua_, -2) == LUA_TSTRING) {
         serializer->OnStatus(TopSv(lua_));
         lua_pop(lua_, 1);
@@ -1320,7 +1322,7 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
 
       // A table charges its elements to the budget when it opens, or is replaced by an error if
       // they do not fit. Each serialized value is charged once, so the budget bounds the work.
-      lua_copy(lua_, keys + 2, -1);
+      lua_copy(lua_, wrapper_keys_base + 2, -1);
       if (lua_rawget(lua_, -2) == LUA_TTABLE) {
         // Calculate length of map part, there is sadly no other way. Stop counting past the
         // budget, and use it up then, so a shared map is not counted again for each reference.
