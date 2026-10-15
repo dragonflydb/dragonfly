@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <map>
 #include <set>
 #include <string_view>
 
@@ -3950,6 +3951,97 @@ TEST_F(SearchFamilyTest, SynonymMultiGroupTermAcrossShardsAndReload) {
   EXPECT_EQ(Run({"DEBUG", "RELOAD"}), "OK");
   WaitForIndexReady("idx");
   check();
+}
+
+// BM25 scores must not depend on the shard count: every shard opens the same cursors and records
+// their stats, including the synonym group tokens of affix queries and phrase terms. Optional
+// affix queries also score documents that only contain another term of a matched group.
+TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
+  auto scores = [this] {
+    EXPECT_EQ(
+        Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+        "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "shared", "one"}), "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g2", "shared", "two", "it"}), "OK");
+    const vector<string> titles{"one",          "shared",     "hello world", "hello there world",
+                                "two",          "one shared", "world",       "two words",
+                                "running fast", "runs fast",  "fast",        "run fast",
+                                "run slow"};
+    for (size_t i = 0; i < titles.size(); i++)
+      EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", titles[i]}), IntArg(1));
+
+    // Stopwords in synonym groups ("it") still score through the group token when the term is not
+    // an AND/OR operand, and the stats must follow.
+    const vector<string_view> queries{"on*",
+                                      "*ne",
+                                      "*e",
+                                      "*har*",
+                                      "~*ne*",
+                                      "one",
+                                      "shared",
+                                      "two",
+                                      "\"hello world\"",
+                                      "one | two",
+                                      "@title:(one shared)",
+                                      "\"running fast\"",
+                                      "running | \"running fast\"",
+                                      "\"running fast\" | running",
+                                      "runn*",
+                                      "runn* | \"running fast\"",
+                                      "\"running fast\" | runn*",
+                                      "~ON*",
+                                      "w'*HAR*'",
+                                      "~w'tw?'",
+                                      "w'sh?red'",
+                                      "it",
+                                      "~it",
+                                      "@title:it"};
+    std::map<string, double> out;
+    for (string_view query : queries) {
+      auto resp = Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD",
+                       "LIMIT", "0", "20"});
+      const auto& vals = resp.GetVec();
+      for (size_t i = 1; i + 1 < vals.size(); i += 2)
+        out[absl::StrCat(query, " ", vals[i].GetString())] = std::stod(vals[i + 1].GetString());
+    }
+    return out;
+  };
+
+  auto multi_shard = scores();  // the fixture runs 2 shards by default
+  SetTestFlag("num_shards", "1");
+  ResetService();
+  auto single_shard = scores();
+  SetTestFlag("num_shards", "2");
+
+  ASSERT_EQ(multi_shard.size(), single_shard.size());
+  EXPECT_GT(single_shard.size(), 15u);
+  for (const auto& [key, score] : single_shard) {
+    ASSERT_TRUE(multi_shard.count(key)) << key;
+    EXPECT_NEAR(multi_shard[key], score, 1e-4) << key;
+  }
+
+  // The pattern is case folded before it is matched against the synonym terms; a fold shared by
+  // the cursors and the stats is invisible to the comparison above, so compare equal cursor sets.
+  EXPECT_NEAR(single_shard.at("~ON* d:0"), single_shard.at("on* d:0"), 1e-4);
+  EXPECT_NEAR(single_shard.at("w'*HAR*' d:1"), single_shard.at("*har* d:1"), 1e-4);
+  EXPECT_GT(single_shard.at("it d:4"), 0.0);
+}
+
+// A query whose only text term is absent from the index still runs the scorer, so equal scores
+// are tie-broken by key and LIMIT returns a prefix of the same ordering.
+TEST_F(SearchFamilyTest, AbsentTermKeepsScoreOrder) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_THAT(Run({"HSET", "t:z", "title", "last"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "t:a", "title", "first"}), IntArg(1));
+  for (string_view query : {"~absent", "-absent"}) {
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "1"}),
+                RespElementsAre(IntArg(2), "t:a", testing::_))
+        << query;
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "2"}),
+                RespElementsAre(IntArg(2), "t:a", testing::_, "t:z", testing::_))
+        << query;
+  }
 }
 
 // A hash field with a TTL expires lazily without re-indexing the document, so its posting lists
