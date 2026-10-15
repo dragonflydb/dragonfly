@@ -38,16 +38,9 @@ void Synonyms::UpdateGroup(const std::string_view& id, const std::vector<std::st
   }
 }
 
-absl::Span<const std::string> Synonyms::GetGroupTokens(std::string_view term) const {
-  if (term_tokens_.empty())
-    return {};
-  // Indexed words arrive lowercase already; fold case only when the raw lookup misses.
-  auto it = term_tokens_.find(term);
-  if (it == term_tokens_.end())
-    it = term_tokens_.find(una::cases::to_lowercase_utf8(term));
-  if (it == term_tokens_.end())
-    return {};
-  return it->second;
+absl::Span<const std::string> Synonyms::GetGroupTokens(std::string_view lowercase_term) const {
+  auto it = term_tokens_.find(lowercase_term);
+  return it == term_tokens_.end() ? absl::Span<const std::string>{} : it->second;
 }
 
 }  // namespace dfly::search

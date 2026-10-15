@@ -112,8 +112,9 @@ bool TransactionData::IsGlobalCmd() const {
   // Global transactions journaled on every shard. MOVE is a global transaction too, but it journals
   // itself once, on its key's shard, so replay and replicas apply it directly: waiting for copies
   // that never come would deadlock.
-  static constexpr string_view kGlobalCmds[] = {"FLUSHDB",  "FLUSHALL",     "FT.CREATE",
-                                                "FT.ALTER", "FT.DROPINDEX", "FT.SYNUPDATE"};
+  static constexpr string_view kGlobalCmds[] = {"FLUSHDB",     "FLUSHALL",       "FT.CREATE",
+                                                "FT.ALTER",    "FT.DROPINDEX",   "FT.SYNUPDATE",
+                                                "FT.ALIASADD", "FT.ALIASUPDATE", "FT.ALIASDEL"};
   string_view front = command.Front();
   for (string_view cmd : kGlobalCmds) {
     if (absl::EqualsIgnoreCase(front, cmd))

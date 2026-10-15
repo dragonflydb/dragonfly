@@ -2911,8 +2911,8 @@ string ServerFamily::FormatInfoMetrics(
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);
-    append("expired_keys", m.events.expired_keys);
-    append("evicted_keys", m.events.evicted_keys);
+    append("expired_keys", total.events.expired_keys);
+    append("evicted_keys", total.events.evicted_keys);
     append("total_heartbeat_expired_keys", m.shard_stats.total_heartbeat_expired_keys);
     append("total_heartbeat_expired_bytes", m.shard_stats.total_heartbeat_expired_bytes);
     append("total_heartbeat_expired_calls", m.shard_stats.total_heartbeat_expired_calls);

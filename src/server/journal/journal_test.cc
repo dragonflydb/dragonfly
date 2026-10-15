@@ -544,5 +544,37 @@ TEST(MultiShardExecution, MoveThenFlushall) {
   EXPECT_EQ(global_applies, 1);
 }
 
+TEST(MultiShardExecution, AliasCommandsAreGlobal) {
+  vector<vector<TransactionData>> flows(2);
+  for (auto& flow : flows) {
+    flow.push_back(MakeTx(11, "FT.ALIASADD live idx-a"));
+    flow.push_back(MakeTx(12, "FT.ALIASUPDATE live idx-b"));
+    flow.push_back(MakeTx(13, "FT.ALIASDEL live"));
+  }
+
+  MultiShardExecution exe(flows.size());
+  vector<TxId> applied;
+  auto run_flow = [&](auto& flow) {
+    for (const auto& tx : flow) {
+      auto apply = [&] {
+        applied.push_back(tx.txid);
+        return true;
+      };
+      ASSERT_TRUE(tx.IsGlobalCmd());
+      EXPECT_EQ(exe.Execute(tx.txid, apply), MultiShardExecution::Status::kOk);
+    }
+    exe.RemoveFlow();
+  };
+
+  fb2::Fiber first_flow("first", [&] { run_flow(flows[0]); });
+  ThisFiber::Yield();
+  EXPECT_TRUE(applied.empty());
+
+  fb2::Fiber second_flow("second", [&] { run_flow(flows[1]); });
+  first_flow.Join();
+  second_flow.Join();
+  EXPECT_EQ(applied, (vector<TxId>{11, 12, 13}));
+}
+
 }  // namespace journal
 }  // namespace dfly

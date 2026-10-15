@@ -800,17 +800,13 @@ async def test_subscribers_with_active_publisher(df_server: DflyInstance, max_co
 async def test_pubsub_unsubscribe(df_server: DflyInstance):
     long_message = "a" * 100_000
     pub_sent = 0
-    pub_ready_ev = asyncio.Event()
 
     async def publisher():
         nonlocal pub_sent
         async with df_server.client(single_connection_client=True) as c:
             for _ in range(32):
                 await c.execute_command("PUBLISH", "chan", long_message)
-                # Unblock subscriber after a sufficient amount of publish requests accumulated
                 pub_sent += 1
-                if pub_sent >= 16:
-                    pub_ready_ev.set()
 
     # Get raw connection from the client and subscribe to chan
     cl = df_server.client(single_connection_client=True)
@@ -821,8 +817,17 @@ async def test_pubsub_unsubscribe(df_server: DflyInstance):
     # Flood our only subscriber with large messages to make publishers stop
     tasks = [asyncio.create_task(publisher()) for _ in range(16)]
 
+    # Wait until back-pressure stops the publishers. How many publishes fit before that depends
+    # on the kernel socket buffers (and so on the loopback MTU), so wait for the count to stop
+    # growing rather than for a fixed number of publishes. The deadline keeps slow but steady
+    # progress from stalling the test; unsubscribing then still races in-flight publishes.
+    last_sent = -1
+    deadline = time.monotonic() + 10
+    while (pub_sent == 0 or pub_sent != last_sent) and time.monotonic() < deadline:
+        last_sent = pub_sent
+        await asyncio.sleep(0.2)
+
     # Unsubscribe in the process
-    await pub_ready_ev.wait()
     await conn.send_command("UNSUBSCRIBE")
 
     # No messages should be received after we've read unsubscribe reply

@@ -24,6 +24,7 @@ extern "C" {
 #include "redis/redis_aux.h"
 #include "server/command_registry.h"
 #include "server/main_service.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 #include "util/accept_server.h"
 
@@ -172,6 +173,10 @@ TEST_F(DflyEngineTest, EvalResp) {
     resp = resp.GetVec()[0];
   }
   EXPECT_THAT(resp.GetVec()[0], ErrArg("reached lua stack limit"));
+
+  // EVAL must accept cycles in fields that are not serialized.
+  resp = Run({"eval", "local t = {1}; t.self = t; return t", "0"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 TEST_F(DflyEngineTest, EvalGetLargeBorrowedStrings) {
@@ -550,6 +555,23 @@ TEST_F(DflyEngineTest, OOM) {
   }
 }
 
+TEST_F(DflyEngineTest, DenyOnOOMReadsLiveCounters) {
+  auto [denied, allowed, denials] = pp_->at(0)->Await([] {
+    ServerState* ss = ServerState::tlocal();
+    uint64_t before = ss->stats.oom_error_cmd_cnt;
+    max_memory_limit = 1ULL << 29;
+    used_mem_current = 1ULL << 30;
+    bool denied = ss->ShouldDenyOnOOM();
+    used_mem_current = 1ULL << 28;
+    bool allowed = !ss->ShouldDenyOnOOM();
+    used_mem_current = 0;
+    return tuple{denied, allowed, ss->stats.oom_error_cmd_cnt - before};
+  });
+  EXPECT_TRUE(denied);
+  EXPECT_TRUE(allowed);
+  EXPECT_EQ(denials, 1u);
+}
+
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
@@ -573,12 +595,17 @@ TEST_F(DflyEngineTest, Bug207) {
   }
 
   auto metrics = GetMetrics();
-  EXPECT_GT(metrics.events.evicted_keys, 0) << FormatMetrics(metrics);
+  size_t evicted = metrics.db_stats[0].events.evicted_keys;
+  EXPECT_GT(evicted, 0) << FormatMetrics(metrics);
 
   for (; i > 0; --i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
     ASSERT_EQ(resp, "OK");
   }
+
+  // Eviction counters are cumulative and must survive a flush.
+  Run({"FLUSHALL"});
+  EXPECT_GE(GetMetrics().db_stats[0].events.evicted_keys, evicted);
 }
 
 TEST_F(DflyEngineTest, StickyEviction) {

@@ -57,12 +57,8 @@ struct DbStats : public DbTableStats {
 };
 
 struct SliceEvents {
-  // Number of eviction events.
-  size_t evicted_keys = 0;
-
   // evictions that were performed when we have a negative memory budget.
   size_t hard_evictions = 0;
-  size_t expired_keys = 0;
   size_t garbage_checked = 0;
   size_t garbage_collected = 0;
   size_t stash_unloaded = 0;
@@ -363,11 +359,13 @@ class DbSlice {
   // Creates a database with index `db_ind`. If such database exists does nothing.
   void ActivateDb(DbIndex db_ind);
 
-  // Deletes the iterator. The iterator must be valid.
+  // Deletes the entry at 'it', which must be valid. Never suspends, so it takes a raw iterator:
+  // a caller holding a DbSlice::Iterator passes it.GetInnerIt(), which launders it if the caller
+  // was suspended since it found the entry.
   // Context argument is used only for document removal and it just needs
   // timestamp field. Last argument, db_table, is optional and is used only in FlushSlotsCb.
   // If async is set, AsyncDeleter will enqueue deletion of the object
-  void Del(Context cntx, Iterator it, DbTable* db_table = nullptr, bool async = false);
+  void DelAtomic(Context cntx, PrimeIterator it, DbTable* db_table = nullptr, bool async = false);
 
   // Deletes a key after FindMutable(). Runs post_updater before deletion
   // to update memory accounting while the key is still valid.
@@ -436,33 +434,27 @@ class DbSlice {
     return &db_arr_[db_ind]->stats;
   }
 
-  // Check whether 'it' has not expired. Returns it if it's still valid. Otherwise, erases it
-  // and returns Iterator{}.
-  Iterator ExpireIfNeeded(const Context& cntx, Iterator it) const;
-
   enum class ExpireResult : uint8_t {
-    Valid,
-    ExpiredHidden,
-    Deleted,
+    Valid,         // Not expired, or expired on a replica that does not delete expired keys.
+    ExpiryPaused,  // Expired, but expiry is paused. The caller decides whether to hide it.
+    Deleted,       // Expired, journaled and deleted. 'it' is invalidated.
   };
 
-  // Erases 'it' if its embedded expire time has already passed, returning Deleted and invalidating
-  // 'it' in that case. Entries without a TTL are accepted and simply return Valid, unlike in
-  // ExpireIfNeeded. It is also cheaper: no key materialization and no iterator laundering.
-  // The caller must disable journal flushing before calling, using journal::DisableFlushGuard
-  // or journal::SetFlushMode(false). If allow_hiding_expired is set, then even if a key is expired,
-  // do not expire it or invalidate it, but instead hide the value.
+  // The single expiry primitive: journals and deletes 'it' if its expire time passed at
+  // cntx.time_now_ms. Entries without a TTL are Valid. The journal append may suspend unless the
+  // caller disabled journal flushing (journal::DisableFlushGuard).
+  // Never sends keyspace notifications: when they are enabled, the expired key is appended to
+  // 'events' and the caller sends them outside any atomic section (see SendExpiredKeyEvents).
   ExpireResult TryExpire(const Context& cntx, PrimeIterator it,
-                         bool allow_hiding_expired = false) const {
-    if (!it->first.IsExpired(cntx.time_now_ms))
-      return ExpireResult::Valid;
+                         std::vector<std::string>* events) const;
 
-    if (allow_hiding_expired && !expire_allowed_)
-      return ExpireResult::ExpiredHidden;
+  // Sends the expired keyspace event for 'keys'. May suspend: never call it in an atomic section.
+  void SendExpiredKeyEvents(DbIndex db_index, const std::vector<std::string>& keys) const;
 
-    const auto expired = Expire(cntx, it, nullptr);
-    return expired ? ExpireResult::Deleted : ExpireResult::Valid;
-  }
+  // Sends the expired events queued by garbage collection during inserts. OnCbFinishBlocking
+  // calls it; code that inserts outside a transaction callback (e.g. RDB loading) must call it
+  // itself. May suspend.
+  void SendQueuedExpiredKeyEvents();
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -636,12 +628,18 @@ class DbSlice {
   void RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> indices,
                                                const DbTableArray& db_arr) const;
 
-  void PerformDeletionAtomic(const Iterator& del_it, DbTable* table, bool async = false);
+  // 'key' is the entry's key. It may point into the entry, so it is not used after Erase.
+  void PerformDeletionAtomic(PrimeIterator del_it, std::string_view key, DbTable* table,
+                             bool async = false);
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
   void SendQueuedInvalidationMessages();
   void SendQueuedInvalidationMessagesAsync();
+
+  // Queues expired events of keys deleted inside an atomic section, to be sent later by
+  // SendQueuedExpiredKeyEvents.
+  void QueueExpiredKeyEvents(DbIndex db_index, std::vector<std::string> keys);
 
   void CreateDb(DbIndex index);
 
@@ -652,17 +650,6 @@ class DbSlice {
     kReadStats,
     kMutableStats,
   };
-
-  // events: if non-null, the expired key is appended to it (caller is in an atomic section and
-  // will send notifications later). If null, the notification is sent immediately (read path).
-  PrimeIterator ExpireIfNeeded(const Context& cntx, PrimeIterator it,
-                               std::vector<std::string>* events = nullptr) const;
-
-  // Erases an entry whose expire time has already passed - the caller must have verified that
-  // with it->first.IsExpired(cntx.time_now_ms). Returns false without erasing when expiration is
-  // disabled or when we are a replica that does not delete expired keys on its own.
-  // 'events' has the same meaning as in ExpireIfNeeded above.
-  bool Expire(const Context& cntx, PrimeIterator it, std::vector<std::string>* events) const;
 
   OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
                                            std::optional<unsigned> req_obj_type);
@@ -767,6 +754,10 @@ class DbSlice {
                           absl::container_internal::hash_default_hash<std::string>,
                           absl::container_internal::hash_default_eq<std::string>, AllocatorType>;
   TrackingMap client_tracking_map_, pending_send_map_;
+
+  // Expired events of keys deleted by garbage collection inside PrimeTable::InsertNew, an atomic
+  // section. Sent in OnCbFinishBlocking. Consecutive events of the same db share one entry.
+  std::vector<std::pair<DbIndex, std::vector<std::string>>> pending_expired_events_;
 
   void SendQueuedInvalidationMessagesCb(const TrackingMap& track_map, unsigned idx) const;
 

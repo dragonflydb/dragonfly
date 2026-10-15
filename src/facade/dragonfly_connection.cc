@@ -1542,7 +1542,7 @@ void Connection::ConnectionFlow() {
       ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonPrivateConnectionFlowReserve);
       io_buf_.EnsureCapacity(64);
     }
-    variant<error_code, Connection::ParserStatus> res;
+    IoLoopResult res;
     if (ioloop_v2_) {
       res = IoLoopV2();
     } else {
@@ -1690,7 +1690,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
                                                 bool enqueue_only) {
   DCHECK_EQ(enqueue_only, ioloop_v2_)
       << "enqueue_only==true should only be used for ioloop_v2_ and vice versa";
-  // Account memory once after parsing completes, including every terminal parser status.
+  // Account memory once after parsing completes, including every parser status.
   absl::Cleanup refresh_memory_usage = [this] { RefreshConnectionMemoryUsage(); };
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
@@ -1992,7 +1992,7 @@ io::Result<size_t> Connection::HandleRecvSocket() {
   return recv_sz;
 }
 
-variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
+auto Connection::IoLoop() -> IoLoopResult {
   error_code ec;
   ParserStatus parse_status = OK;
 
@@ -2712,6 +2712,15 @@ void Connection::SendAsync(MessageHandle msg) {
   // A checkpoint on a closing V2 connection is always dropped-and-healed above, never enqueued
   // here.
   DCHECK(!(checkpoint && cc_->conn_closing && ioloop_v2_));
+
+  if (parser_error_draining_) {
+    DCHECK(ioloop_v2_);
+    // Preserve checkpoints so their blocking counters are released only after any command that
+    // was already dispatching has completed. All other control messages are cut off by draining.
+    if (!checkpoint) {
+      return;
+    }
+  }
 
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
   if (!cc_->conn_closing && !ioloop_v2_) {
@@ -3696,17 +3705,19 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
   };
 
   if (shared_read_buf_enabled_ && can_parse_in_proactor()) {
-    // TODO: Bound callback read/parse work to prevent a busy connection from starving the proactor.
+    // TODO: Bound callback read/parse work to prevent a busy connection from starving the
+    // proactor.
     parse_in_proactor([this] { return ReadAndParseShared(/*from_proactor_callback=*/true); });
   } else if (!shared_read_buf_enabled_ && !IsOverPipelineLimit()) {
-    // Drain the socket while the fiber is suspended (no-op when io_buf_ is full / no append room).
+    // Drain the socket while the fiber is suspended (no-op when io_buf_ is full / no append
+    // room).
     ReadPendingInput();
 
     // Parse In Proactor: parse newly-read bytes while the fiber is parked, so the next batch is
-    // already larger on resume. Enabled only at parks where the parser is idle AND the fiber waits
-    // on parallel progress (a remote shard or the kernel, possibly on another CPU), so the parse
-    // overlaps real work. Parks that run nothing in parallel (e.g. a self-preemption yield) are
-    // excluded - offloading them buys nothing.
+    // already larger on resume. Enabled only at parks where the parser is idle AND the fiber
+    // waits on parallel progress (a remote shard or the kernel, possibly on another CPU), so the
+    // parse overlaps real work. Parks that run nothing in parallel (e.g. a self-preemption yield)
+    // are excluded - offloading them buys nothing.
     // - Calling ParseRedis() with max_busy_cycles==0: proactor's callbacks must not suspend.
     if (can_parse_in_proactor() && redis_parser_ && (io_buf_.InputLen() > 0)) {
       parse_in_proactor([this] { return ParseRedis(io_buf_, 0, /*enqueue_only=*/true); });
@@ -3742,16 +3753,9 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
       ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonPrivateProvidedBufferReceive);
       io_buf_.WriteAndCommit(buf.data(), buf.size());
     }
-    last_interaction_ = time(nullptr);
+    RecordRecvBytes(buf.size());
     UpdateIoBufReadState();
-
-    DCHECK(tl_facade_stats);
-    auto& conn_stats = tl_facade_stats->conn_stats;
-    conn_stats.io_read_bytes += buf.size();
-    local_stats_.net_bytes_in += buf.size();
-    ++conn_stats.io_read_cnt;
-    ++local_stats_.read_cnt;
-    ++conn_stats.num_recv_provided_calls;
+    ++GetLocalConnStats().num_recv_provided_calls;
   } else {
     LOG(FATAL) << CONN_ID << "Should not reach here";
   }
@@ -3935,7 +3939,7 @@ void Connection::ReadPendingInput() {
   // - EAGAIN/EWOULDBLOCK: a wake is coming (drained kernel, or a TLS read deferred behind a
   //   background write) - clear pending_input_ and park.
   // - EBUSY (device_or_resource_busy, TLS only): another fiber holds the socket, no wake - keep it
-  //   latched and retry on a later pass (neither clear it nor set io_ec_).
+  //   set and retry on a later pass (neither clear it nor set io_ec_).
   // - Any other error: a real I/O failure - surface via io_ec_.
   bool done_read = false;
   while (!buf.empty()) {
@@ -4234,7 +4238,7 @@ void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_wait
   });
 }
 
-variant<error_code, Connection::ParserStatus> Connection::FinalizeV2ParserError() {
+auto Connection::FinalizeV2ParserError() -> IoLoopResult {
   DCHECK(ioloop_v2_);
   DCHECK(parser_error_draining_);
   DCHECK(!HasPendingMessages());
@@ -4253,7 +4257,7 @@ variant<error_code, Connection::ParserStatus> Connection::FinalizeV2ParserError(
   return ERROR;
 }
 
-variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
+auto Connection::IoLoopV2() -> IoLoopResult {
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
 

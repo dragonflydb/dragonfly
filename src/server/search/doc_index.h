@@ -642,6 +642,13 @@ class ShardDocIndices {
   // Get sharded document index by its name or nullptr if not found
   ShardDocIndex* GetIndex(std::string_view name);
 
+  // Add an alias for an existing index.
+  facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
+  // Create or update an alias for an existing index.
+  facade::OpStatus UpdateAlias(std::string_view alias, std::string_view target);
+  // Delete an alias.
+  facade::OpStatus DeleteAlias(std::string_view alias);
+
   // Init index: create shard local state for given index with given name.
   void InitIndex(const OpArgs& op_args, std::string_view name,
                  std::shared_ptr<const DocIndex> index, bool is_journal = false);
@@ -694,6 +701,7 @@ class ShardDocIndices {
   MiMemoryResource local_mr_;
   unsigned hash_index_count_ = 0;
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
+  absl::flat_hash_map<std::string, std::string> aliases_;
 
   std::string next_defrag_index_;
 };

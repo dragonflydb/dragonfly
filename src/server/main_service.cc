@@ -1688,8 +1688,7 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
 
   ServerState& ss = *ServerState::tlocal();
 
-  if ((cid->opt_mask() & CO::DENYOOM) &&
-      ss.ShouldDenyOnOOM(base::CycleClock::ToUsec(cmd_cntx->start_cycle))) {
+  if ((cid->opt_mask() & CO::DENYOOM) && ss.ShouldDenyOnOOM()) {
     cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
     return DispatchResult::OOM;
   }
@@ -2491,11 +2490,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   SinkReplyBuilder::ReplyAggregator agg(builder);
   EvalSerializer ser{builder, params->float_as_int};
-  if (!interpreter->IsResultSafe()) {
-    builder->SendError("reached lua stack limit");
-  } else {
-    interpreter->SerializeResult(&ser);
-  }
+  interpreter->SerializeResult(&ser);
 }
 
 void Service::Discard(CmdArgParser, CommandContext* cmd_cntx) {

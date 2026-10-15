@@ -20,6 +20,7 @@
 #ifdef __linux__
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/aof_chain_reader.h"
 #include "server/journal/aof_segment_writer.h"
 #include "server/journal/serializer.h"
 #include "server/test_utils.h"
@@ -354,6 +355,48 @@ TEST_F(AofStreamerTest, WritesReachSegments) {
     EXPECT_TRUE(reader.ReadEntry(&parsed)) << "trailing data in shard " << sid;
     EXPECT_EQ(cmds, expected[sid]) << "shard " << sid;
   }
+}
+
+class AofChainReaderTest : public AofSegmentWriterTest {
+ protected:
+  // Writes segment seq, one block per record.
+  void WriteSegment(uint64_t seq, uint64_t first_lsn, const vector<string>& records) {
+    pp_->at(0)->Await([&] {
+      AofSegmentWriter writer(dir_, 2, 4);
+      ASSERT_FALSE(writer.Open(seq));
+      for (size_t i = 0; i < records.size(); ++i) {
+        writer.AddRecord(records[i], first_lsn + i);
+        writer.Seal();
+      }
+      ASSERT_FALSE(writer.Shutdown());
+    });
+  }
+
+  // Reads the whole chain on the proactor, as replay does, in small pieces.
+  string ReadChain() {
+    string data;
+    pp_->at(0)->Await([&] {
+      AofChainReader reader(dir_, 2, 4);
+      ASSERT_FALSE(reader.Open());
+      char buf[7];
+      while (true) {
+        iovec v{buf, sizeof(buf)};
+        auto n = reader.ReadSome(&v, 1);
+        ASSERT_TRUE(n) << n.error().message();
+        if (*n == 0)
+          break;
+        data.append(buf, *n);
+      }
+    });
+    return data;
+  }
+};
+
+TEST_F(AofChainReaderTest, CleanChain) {
+  WriteSegment(0, 1, {"a1", "b22", "c333"});
+  WriteSegment(1, 4, {"d4444"});
+
+  EXPECT_EQ(ReadChain(), "a1b22c333d4444");
 }
 
 #endif  // __linux__

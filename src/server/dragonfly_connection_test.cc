@@ -288,6 +288,26 @@ TEST_P(DragonflyV2ConnectionTest, DoesNotExecuteCommandsAfterProtocolError) {
   EXPECT_EQ(Run({"GET", "prefix-before-error"}), "value");
   EXPECT_EQ(Run({"GET", "after-error"}).type, facade::RespExpr::NIL);
 }
+
+// An older control message must reply before a later parsed prefix and terminal protocol error.
+TEST_P(DragonflyV2ConnectionTest, DrainsOlderControlMessageBeforePipelinePrefix) {
+  RawRespClient client{port_};
+  ASSERT_TRUE(client.valid());
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n"
+                     "$13\r\ncontrol-order\r\n"));
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+
+  ASSERT_TRUE(SendMonitorMessage("control-order", "older-control-message"));
+  ASSERT_TRUE(client.SendAll("*1\r\n$4\r\nPING\r\n*x\r\n"));
+  ASSERT_EQ(client.ReadLine(), "+older-control-message\r\n");
+  ASSERT_EQ(client.ReadLine(), "+PONG\r\n");
+  auto error = client.ReadLine();
+  ASSERT_TRUE(error.has_value());
+  EXPECT_THAT(*error, HasSubstr("Protocol error"));
+  EXPECT_TRUE(client.ReadEof());
+}
+
 // A synchronous command behind an async prefix returns WOULD_BLOCK until that prefix drains.
 TEST_P(DragonflyV2ConnectionTest, DrainsWouldBlockCommandBeforeProtocolError) {
   RawRespClient client{port_};
@@ -303,6 +323,97 @@ TEST_P(DragonflyV2ConnectionTest, DrainsWouldBlockCommandBeforeProtocolError) {
   ASSERT_EQ(client.ReadLine(), "+OK\r\n");
   ASSERT_EQ(client.ReadLine(), "+QUEUED\r\n");
   ASSERT_EQ(client.ReadLine(), "*1\r\n");
+  ASSERT_EQ(client.ReadLine(), "+PONG\r\n");
+  auto error = client.ReadLine();
+  ASSERT_TRUE(error.has_value());
+  EXPECT_THAT(*error, HasSubstr("Protocol error"));
+  EXPECT_TRUE(client.ReadEof());
+}
+
+// A parser error received by the proactor callback must reject bytes after the malformed frame.
+TEST_P(DragonflyV2ConnectionTest, CallbackParserErrorDoesNotExecuteLaterCommands) {
+  RawRespClient client{port_};
+  ASSERT_TRUE(client.valid());
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n"
+                     "$14\r\ncallback-error\r\n"));
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+  ASSERT_TRUE(client.SendAll("*3\r\n$5\r\nDEBUG\r\n$7\r\nIOSTATS\r\n$2\r\nPS\r\n"));
+  ASSERT_TRUE(WaitForSyncDispatch("callback-error"));
+
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$3\r\nSET\r\n$15\r\ncallback-prefix\r\n$5\r\nvalue\r\n"
+                     "*x\r\n"
+                     "*3\r\n$3\r\nSET\r\n$14\r\ncallback-after\r\n$16\r\nmust-not-execute\r\n"));
+  auto error = client.ReadUntilContains("Protocol error", 256);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_TRUE(client.ReadEof());
+  EXPECT_EQ(Run({"GET", "callback-prefix"}), "value");
+  EXPECT_EQ(Run({"GET", "callback-after"}).type, facade::RespExpr::NIL);
+}
+
+// A peer write-side shutdown must not prevent delivery of the terminal protocol error.
+TEST_P(DragonflyV2ConnectionTest, TerminalParserErrorSurvivesPeerWriteShutdown) {
+  RawRespClient client{port_};
+  ASSERT_TRUE(client.valid());
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n"
+                     "$15\r\neof-after-error\r\n"));
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+
+  ASSERT_TRUE(client.SendAll("*3\r\n$5\r\nDEBUG\r\n$7\r\nIOSTATS\r\n$2\r\nPS\r\n*x\r\n"));
+  ASSERT_TRUE(WaitForSyncDispatch("eof-after-error"));
+  ASSERT_TRUE(client.ShutdownWrite());
+
+  auto error = client.ReadUntilContains("Protocol error", 256);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_TRUE(client.ReadEof());
+}
+
+// A checkpoint sent during parser-error draining must wait for the command that was dispatching
+// when the error latched.
+TEST_P(DragonflyV2ConnectionTest, CheckpointWaitsForDispatchDuringParserErrorDrain) {
+  RawRespClient client{port_};
+  ASSERT_TRUE(client.valid());
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n"
+                     "$16\r\ncheckpoint-drain\r\n"));
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+
+  ASSERT_TRUE(client.SendAll("*3\r\n$5\r\nDEBUG\r\n$7\r\nIOSTATS\r\n$2\r\nPS\r\n*x\r\n"));
+  ASSERT_TRUE(WaitForSyncDispatch("checkpoint-drain"));
+  ASSERT_FALSE(client.HasPendingData(100ms));
+  facade::DispatchTracker tracker{{listener_}, nullptr, true, true};
+  tracker.TrackAll();
+  EXPECT_FALSE(tracker.Wait(absl::Milliseconds(100)));
+
+  auto error = client.ReadUntilContains("Protocol error", 256);
+  ASSERT_TRUE(error.has_value());
+  EXPECT_TRUE(client.ReadEof());
+  EXPECT_TRUE(tracker.Wait(absl::Milliseconds(100)));
+}
+
+// Control work produced after terminal draining starts must not enter dispatch_q_.
+TEST_P(DragonflyV2ConnectionTest, RejectsControlMessagesAfterProtocolError) {
+  RawRespClient client{port_};
+  ASSERT_TRUE(client.valid());
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$6\r\nCLIENT\r\n$7\r\nSETNAME\r\n"
+                     "$11\r\ngated-drain\r\n"));
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+  ASSERT_TRUE(
+      client.SendAll("*3\r\n$5\r\nBLPOP\r\n$16\r\ngated-drain-list\r\n$1\r\n0\r\n"
+                     "*1\r\n$4\r\nPING\r\n"
+                     "*x\r\n"));
+  ASSERT_TRUE(WaitForBlockedConnection("gated-drain"));
+  ASSERT_TRUE(SendMonitorMessage("gated-drain", "must-not-be-enqueued"));
+
+  EXPECT_THAT(Run({"RPUSH", "gated-drain-list", "value"}), IntArg(1));
+  ASSERT_EQ(client.ReadLine(), "*2\r\n");
+  ASSERT_EQ(client.ReadLine(), "$16\r\n");
+  ASSERT_EQ(client.ReadLine(), "gated-drain-list\r\n");
+  ASSERT_EQ(client.ReadLine(), "$5\r\n");
+  ASSERT_EQ(client.ReadLine(), "value\r\n");
   ASSERT_EQ(client.ReadLine(), "+PONG\r\n");
   auto error = client.ReadLine();
   ASSERT_TRUE(error.has_value());

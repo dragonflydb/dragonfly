@@ -27,6 +27,7 @@ extern "C" {
 #include "facade/string_socket.h"
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
+#include "server/journal/journal.h"
 #include "server/set_family.h"
 #include "util/fibers/pool.h"
 
@@ -396,6 +397,17 @@ void BaseFamilyTest::ClearMetrics() {
 
 string BaseFamilyTest::FormatMetrics(const Metrics& metrics) const {
   return service_->server_family().FormatInfoMetrics(metrics, "ALL", true, nullptr);
+}
+
+uint32_t BaseFamilyTest::StartJournalWithConsumer(journal::JournalConsumerInterface* consumer,
+                                                  unsigned index) {
+  uint32_t id = 0;
+  pp_->at(index)->AwaitBrief([&] {
+    CHECK(EngineShard::tlocal()) << "proactor " << index << " owns no shard";
+    journal::StartInThread();
+    id = journal::RegisterConsumer(consumer);
+  });
+  return id;
 }
 
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {

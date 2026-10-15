@@ -27,3 +27,8 @@ one additional second.
 ## Lua
 We use lua 5.4.4 that has been released in 2022.
 That means we also support [lua integers](https://github.com/redis/redis/issues/5261).
+
+Script replies may nest tables at most 128 levels deep; a deeper table is replaced by the error
+`reached lua stack limit`. A table reached several times, such as a shared or cyclic one, is
+serialized once per reference, and a reply may expand to 2^20 elements beyond one per 16 bytes of
+Lua memory in use. Past that, tables are replaced by the error `reached lua reply size limit`.

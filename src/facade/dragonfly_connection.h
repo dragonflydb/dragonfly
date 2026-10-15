@@ -360,6 +360,8 @@ class Connection : public util::Connection {
 
  private:
   enum ParserStatus : uint8_t { OK, NEED_MORE, ERROR };
+  using IoLoopResult = std::variant<std::error_code, ParserStatus>;
+
   struct AsyncOperations;
 
   // Check protocol and handle connection.
@@ -369,7 +371,7 @@ class Connection : public util::Connection {
   void ConnectionFlow();
 
   // Main loop reading client messages and passing requests to dispatch queue.
-  std::variant<std::error_code, ParserStatus> IoLoop();
+  IoLoopResult IoLoop();
 
   // Ingests a single proactor recv notification, updating connection I/O state:
   // - io_ec_ on error/abort, pending_input_ for multishot completions
@@ -462,10 +464,10 @@ class Connection : public util::Connection {
   bool ShrinkIoBufTo(size_t target_capacity, std::string_view reason);
 
   // Main loop reading client messages and passing requests to dispatch queue.
-  std::variant<std::error_code, ParserStatus> IoLoopV2();
+  IoLoopResult IoLoopV2();
 
   // Sends and flushes V2's protocol error after previously parsed commands have drained.
-  std::variant<std::error_code, ParserStatus> FinalizeV2ParserError();
+  IoLoopResult FinalizeV2ParserError();
 
   // Returns true if HTTP header is detected.
   io::Result<bool> CheckForHttpProto();

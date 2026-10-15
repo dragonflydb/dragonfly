@@ -33,6 +33,7 @@ namespace dfly {
 
 using namespace std;
 using facade::ErrorReply;
+using facade::OpStatus;
 using nonstd::make_unexpected;
 
 namespace {
@@ -1353,6 +1354,43 @@ ShardDocIndices::ShardDocIndices() : local_mr_{ServerState::tlocal()->data_heap(
 ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
   auto it = indices_.find(name);
   return it != indices_.end() ? it->second.get() : nullptr;
+}
+
+OpStatus ShardDocIndices::AddAlias(string_view alias, string_view target) {
+  using enum OpStatus;
+  if (GetIndex(target) == nullptr)
+    return KEY_NOTFOUND;
+
+  if (GetIndex(alias) != nullptr)
+    return KEY_EXISTS;
+
+  if (aliases_.contains(alias))
+    return KEY_EXISTS;
+
+  aliases_.emplace(alias, target);
+  return OK;
+}
+
+OpStatus ShardDocIndices::UpdateAlias(string_view alias, string_view target) {
+  using enum OpStatus;
+  if (GetIndex(target) == nullptr)
+    return KEY_NOTFOUND;
+
+  if (GetIndex(alias) != nullptr)
+    return KEY_EXISTS;
+
+  aliases_.insert_or_assign(alias, target);
+  return OK;
+}
+
+OpStatus ShardDocIndices::DeleteAlias(string_view alias) {
+  using enum OpStatus;
+  const auto it = aliases_.find(alias);
+  if (it == aliases_.end())
+    return KEY_NOTFOUND;
+
+  aliases_.erase(it);
+  return OK;
 }
 
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,

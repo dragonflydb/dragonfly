@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <absl/container/btree_map.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/types/span.h>
@@ -32,16 +33,22 @@ class Synonyms {
   // Update or create a synonym group
   void UpdateGroup(const std::string_view& id, const std::vector<std::string_view>& terms);
 
-  // Group tokens of every group the term belongs to, sorted. The result depends only on the
-  // current groups, never on insertion order or hash map layout, so a document is removed with
-  // exactly the tokens it was indexed with.
-  absl::Span<const std::string> GetGroupTokens(std::string_view term) const;
+  // Group tokens of every group the lowercase term belongs to, sorted. The result depends only on
+  // the current groups, never on insertion order or hash map layout, so a document is removed
+  // with exactly the tokens it was indexed with.
+  absl::Span<const std::string> GetGroupTokens(std::string_view lowercase_term) const;
+
+  // Every lowercase term with its sorted group tokens, ordered by term so that a prefix selects a
+  // contiguous range.
+  const absl::btree_map<std::string, std::vector<std::string>>& TermTokens() const {
+    return term_tokens_;
+  }
 
  private:
   // Maps group ID to synonym group
   absl::flat_hash_map<std::string, Group> groups_;
   // Maps lowercase term to its sorted group tokens
-  absl::flat_hash_map<std::string, std::vector<std::string>> term_tokens_;
+  absl::btree_map<std::string, std::vector<std::string>> term_tokens_;
 };
 
 }  // namespace dfly::search

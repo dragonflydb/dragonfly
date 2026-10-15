@@ -8,6 +8,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 #include <absl/types/span.h>
@@ -116,6 +117,56 @@ struct ProfileBuilder {
   size_t depth_;
   AlgorithmProfile profile_;
 };
+
+// Posting list key of a query term as Matching() resolves it (the index stemmer applies). Scoring
+// cursors and the per-shard stats are keyed by posting list keys, so both describe the same list
+// whichever query leaf matched it; the trie walk and phrase terms use their raw entry keys.
+string TermKey(const TextIndex* index, string_view term) {
+  return string{index->NormalizeForExactQuery(absl::StripAsciiWhitespace(term)).view()};
+}
+
+// Group tokens of every synonym group the lowercase term belongs to (empty without synonyms).
+// Index keys are lowercase already; a query term is folded once by its leaf.
+absl::Span<const string> SynonymTokens(const FieldIndices* indices, string_view lowercase_term) {
+  const Synonyms* synonyms = indices->GetSynonyms();
+  return synonyms ? synonyms->GetGroupTokens(lowercase_term) : absl::Span<const string>{};
+}
+
+// The test BaseStringIndex::Match*WithTerm applies to index keys.
+template <TagType T> bool MatchesAffix(string_view term, string_view affix) {
+  if constexpr (T == TagType::PREFIX)
+    return term.starts_with(affix);
+  else if constexpr (T == TagType::SUFFIX)
+    return term.ends_with(affix);
+  else if constexpr (T == TagType::INFIX)
+    return term.find(affix) != string_view::npos;
+  else
+    return GlobMatch(term, affix);
+}
+
+// Group tokens of the synonym terms matching the affix, deduplicated. Which grouped keys the
+// local walk reaches differs per shard while the synonym terms are the same everywhere, so every
+// shard records this superset. Prefix and wildcard patterns narrow the scan to a sorted range.
+template <TagType T> vector<string_view> GroupTokensForAffix(const Synonyms& syn, string_view raw) {
+  // Text indices fold the pattern the same way (NormalizeQueryWord).
+  const string affix = una::cases::to_lowercase_utf8(raw);
+  string prefix;
+  if constexpr (T == TagType::PREFIX)
+    prefix = affix;
+  else if constexpr (T == TagType::WILDCARD)
+    prefix = GlobLiteralPrefix(affix);
+
+  const auto& terms = syn.TermTokens();
+  vector<string_view> tokens;
+  for (auto it = terms.lower_bound(prefix); it != terms.end() && it->first.starts_with(prefix);
+       ++it) {
+    if (MatchesAffix<T>(it->first, affix))
+      tokens.insert(tokens.end(), it->second.begin(), it->second.end());
+  }
+  sort(tokens.begin(), tokens.end());
+  tokens.erase(unique(tokens.begin(), tokens.end()), tokens.end());
+  return tokens;
+}
 
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
@@ -238,7 +289,12 @@ struct BasicSearch {
 
     // Single trie walk dispatches each match to scoring (AddMatchedTerm) and to the union (for
     // the result set). A matched term that belongs to synonym groups is scored through the group
-    // tokens instead of its own posting list.
+    // tokens instead of its own posting list. Which grouped terms the local walk reaches differs
+    // per shard, so the tokens come from the synonym terms matching the pattern, the same set on
+    // every shard (as in StatsCollector).
+    vector<string_view> group_tokens;
+    if (const Synonyms* syn = indices_->GetSynonyms(); scorer_ && syn)
+      group_tokens = GroupTokensForAffix<T>(*syn, node.affix);
     vector<IndexResult> sub_results;
     sub_results.reserve(indices.size());
     for (auto* index : indices) {
@@ -246,17 +302,9 @@ struct BasicSearch {
       absl::flat_hash_set<string> scored_terms;
       auto term_cb = [&per_index, &scored_terms, this, index](string_view term,
                                                               const auto* container) {
-        if (scorer_) {
-          absl::Span<const string> group_tokens = SynonymTokens(term);
-          if (group_tokens.empty()) {
-            if (scored_terms.insert(string{term}).second)
-              AddMatchedTerm(index, string{term});
-          }
-          for (const string& group_token : group_tokens) {
-            if (scored_terms.insert(group_token).second)
-              AddMatchedTerm(index, group_token);
-          }
-        }
+        if (scorer_ && SynonymTokens(indices_, term).empty() &&
+            scored_terms.insert(string{term}).second)
+          AddMatchedTerm(index, string{term}, container);
         Merge(IndexResult{container}, &per_index, LogicOp::OR);
       };
       if constexpr (T == TagType::PREFIX)
@@ -267,6 +315,11 @@ struct BasicSearch {
         index->MatchInfixWithTerm(node.affix, term_cb);
       else if constexpr (T == TagType::WILDCARD)
         index->MatchWildcardWithTerm(node.affix, term_cb);
+      for (string_view group_token : group_tokens) {
+        if (scored_terms.insert(string{group_token}).second)
+          AddMatchedTerm(index, string{group_token},
+                         index->Matching(group_token, /*strip_whitespace=*/false));
+      }
       sub_results.push_back(std::move(per_index));
     }
 
@@ -278,20 +331,23 @@ struct BasicSearch {
   // docs matched via stem still join the docs of all of the term's groups.
   IndexResult Search(const AstTermNode& node, string_view active_field) {
     const std::string& term = node.affix;
-    absl::Span<const string> group_tokens = SynonymTokens(term);
+    absl::Span<const string> group_tokens =
+        SynonymTokens(indices_, una::cases::to_lowercase_utf8(term));
 
     auto match_in = [&](TextIndex* index) {
+      const auto* own = index->Matching(term, /*strip_whitespace=*/true);
       if (scorer_)
-        AddMatchedTerm(index, term);
-      IndexResult r{index->Matching(term, /*strip_whitespace=*/true)};
+        AddMatchedTerm(index, TermKey(index, term), own);
+      IndexResult r{own};
       if (!group_tokens.empty()) {
         vector<IndexResult> parts;
         parts.reserve(group_tokens.size() + 1);
         parts.push_back(std::move(r));
         for (const string& group_token : group_tokens) {
+          const auto* c = index->Matching(group_token, /*strip_whitespace=*/false);
           if (scorer_)
-            AddMatchedTerm(index, group_token);
-          parts.push_back(IndexResult{index->Matching(group_token, /*strip_whitespace=*/false)});
+            AddMatchedTerm(index, group_token, c);
+          parts.push_back(IndexResult{c});
         }
         r = UnifyResults(std::move(parts), LogicOp::OR);
       }
@@ -356,20 +412,18 @@ struct BasicSearch {
     if (terms.empty())
       return lists;
 
-    if (scorer_) {
-      for (const auto& t : terms)
-        AddMatchedTerm(text_index, t);
-    }
-
     lists.reserve(terms.size());
+    bool complete = true;
     for (const auto& t : terms) {
       const auto* c = text_index->MatchingNoStem(t);
-      if (!c || c->Empty()) {
-        lists.clear();
-        return lists;
-      }
+      if (scorer_)
+        AddMatchedTerm(text_index, t, c);
+      if (!c || c->Empty())
+        complete = false;
       lists.push_back(c);
     }
+    if (!complete)
+      lists.clear();
     return lists;
   }
 
@@ -812,12 +866,12 @@ struct BasicSearch {
     cursors.reserve(matched_text_terms_.size());
     for (const auto& matched : matched_text_terms_) {
       auto* index = matched.index;
-      auto* container = index->Matching(matched.term, /*strip_whitespace=*/false);
+      const auto* container = matched.container;
       if (!container)
         continue;
       string_view field_ident = index->field_ident();
       size_t term_docs =
-          global_stats_ ? global_stats_->GetTermDocs(field_ident, matched.term) : container->Size();
+          global_stats_ ? global_stats_->GetTermDocs(field_ident, matched.key) : container->Size();
       double avg = global_stats_ ? global_stats_->GetFieldAvgDocLen(field_ident)
                                  : index->GetFieldAvgDocLen();
       cursors.push_back({index, term_docs, avg, matched.weight, GetSchemaTextWeight(index),
@@ -878,17 +932,13 @@ struct BasicSearch {
     return std::get<SchemaField::TextParams>(it->second.special_params).weight;
   }
 
-  // Group tokens of every synonym group the term belongs to (empty without synonyms).
-  absl::Span<const string> SynonymTokens(string_view term) const {
-    const Synonyms* synonyms = indices_->GetSynonyms();
-    return synonyms ? synonyms->GetGroupTokens(term) : absl::Span<const string>{};
-  }
-
-  void AddMatchedTerm(TextIndex* index, string term) {
+  // Registers the posting list a query leaf matched under the key the shard stats use for it.
+  // An absent term registers a null list: scoring still runs, so ties are broken by key.
+  void AddMatchedTerm(TextIndex* index, string key, const TextIndex::Container* container) {
     auto [it, inserted] =
-        matched_terms_index_.try_emplace(std::make_pair(index, term), matched_text_terms_.size());
+        matched_terms_index_.try_emplace(std::make_pair(index, key), matched_text_terms_.size());
     if (inserted) {
-      matched_text_terms_.push_back({index, std::move(term), current_weight_});
+      matched_text_terms_.push_back({index, std::move(key), container, current_weight_});
     } else {
       matched_text_terms_[it->second].weight += current_weight_;
     }
@@ -907,12 +957,13 @@ struct BasicSearch {
 
   struct MatchedTextTerm {
     TextIndex* index;
-    string term;
+    string key;
+    const TextIndex::Container* container;
     double weight;
   };
 
-  // Tracked text terms for scoring. Repeated query occurrences accumulate weight per
-  // (TextIndex*, term); individual expansion sites still dedupe their own synonym aliases.
+  // Tracked posting lists for scoring. Repeated query occurrences accumulate weight per
+  // (TextIndex*, key); individual expansion sites still dedupe their own synonym aliases.
   vector<MatchedTextTerm> matched_text_terms_;
   absl::flat_hash_map<pair<TextIndex*, string>, size_t> matched_terms_index_;
 };
@@ -943,6 +994,13 @@ struct StatsCollector {
       VisitAst(*node, [this, &stack, active_field](const auto& inner) {
         size_t before = stack.size();
         ForEachChild(inner, active_field, [&](const AstNode& child, string_view field) {
+          // BasicSearch drops stopword operands of AND/OR only (a stopword elsewhere is searched,
+          // for example through its synonym group), so the stats follow the same rule.
+          if constexpr (std::is_same_v<std::decay_t<decltype(inner)>, AstLogicalNode>) {
+            if (const auto* term = child.As<AstTermNode>();
+                term && indices_->IsStopWord(term->affix))
+              return;
+          }
           stack.emplace_back(&child, field);
         });
         if (stack.size() == before)
@@ -957,17 +1015,11 @@ struct StatsCollector {
   }
 
   void VisitLeaf(const AstTermNode& node, string_view active_field) {
-    // Stopwords are dropped from queries (see BasicSearch), so they never contribute matches and
-    // must not be recorded as scoring terms either.
-    if (indices_->IsStopWord(node.affix))
-      return;
-
     // Same cursors as BasicSearch: the term's own posting list plus one per group token.
-    const Synonyms* syn = indices_->GetSynonyms();
     absl::Span<const string> group_tokens =
-        syn ? syn->GetGroupTokens(node.affix) : absl::Span<const string>{};
+        SynonymTokens(indices_, una::cases::to_lowercase_utf8(node.affix));
     ForEachTextIndex(active_field, [&](TextIndex* idx) {
-      Record(idx, node.affix, idx->Matching(node.affix));
+      Record(idx, TermKey(idx, node.affix), idx->Matching(node.affix));
       for (const string& group_token : group_tokens)
         Record(idx, group_token, idx->Matching(group_token, /*strip_whitespace=*/false));
     });
@@ -975,16 +1027,14 @@ struct StatsCollector {
 
   template <TagType T> void VisitLeaf(const AstAffixNode<T>& node, string_view active_field) {
     static_assert(T != TagType::REGULAR);
-    const Synonyms* syn = indices_->GetSynonyms();
+    vector<string_view> group_tokens;
+    if (const Synonyms* syn = indices_->GetSynonyms(); syn)
+      group_tokens = GroupTokensForAffix<T>(*syn, node.affix);
     ForEachTextIndex(active_field, [&](TextIndex* idx) {
-      auto cb = [this, idx, syn](string_view term, const auto* container) {
-        // A grouped term is scored through its group tokens (mirrors BasicSearch).
-        absl::Span<const string> group_tokens =
-            syn ? syn->GetGroupTokens(term) : absl::Span<const string>{};
-        if (group_tokens.empty())
+      RecordField(idx);
+      auto cb = [this, idx](string_view term, const auto* container) {
+        if (SynonymTokens(indices_, term).empty())
           Record(idx, string{term}, container);
-        for (const string& group_token : group_tokens)
-          Record(idx, group_token, idx->Matching(group_token, /*strip_whitespace=*/false));
       };
       if constexpr (T == TagType::PREFIX)
         idx->MatchPrefixWithTerm(node.affix, cb);
@@ -994,6 +1044,16 @@ struct StatsCollector {
         idx->MatchInfixWithTerm(node.affix, cb);
       else if constexpr (T == TagType::WILDCARD)
         idx->MatchWildcardWithTerm(node.affix, cb);
+      // Grouped terms are scored through their group tokens (mirrors BasicSearch).
+      for (string_view group_token : group_tokens)
+        Record(idx, string{group_token}, idx->Matching(group_token, /*strip_whitespace=*/false));
+    });
+  }
+
+  void VisitLeaf(const AstPhraseNode& node, string_view active_field) {
+    ForEachTextIndex(active_field, [&](TextIndex* idx) {
+      for (const string& term : idx->TokenizePhraseQuery(node.raw))
+        Record(idx, term, idx->MatchingNoStem(term));
     });
   }
 
@@ -1007,11 +1067,11 @@ struct StatsCollector {
     }
   }
 
-  void Record(TextIndex* idx, string term, const TextIndex::Container* container) {
+  // Field stats are summed over shards, so a shard reports them even when the query reaches no
+  // term of the field on it (an affix walk may match nothing locally).
+  void RecordField(TextIndex* idx) {
     string_view field_ident = idx->field_ident();
     if (field_ident.empty())
-      return;
-    if (!seen_.emplace(idx, term).second)
       return;
     auto [it, inserted] =
         stats_.field_stats.try_emplace(string{field_ident}, ShardScoringStats::FieldStats{});
@@ -1019,7 +1079,18 @@ struct StatsCollector {
       it->second.num_docs = idx->GetFieldNumDocs();
       it->second.total_docs_len = idx->GetFieldTotalDocsLen();
     }
-    stats_.term_stats[string{field_ident}][std::move(term)] = container ? container->Size() : 0;
+  }
+
+  // Same (key, posting list) pairs as BasicSearch::AddMatchedTerm, so the global stats describe
+  // the lists the scoring cursors read.
+  void Record(TextIndex* idx, string key, const TextIndex::Container* container) {
+    string_view field_ident = idx->field_ident();
+    if (field_ident.empty())
+      return;
+    if (!seen_.emplace(idx, key).second)
+      return;
+    RecordField(idx);
+    stats_.term_stats[string{field_ident}][std::move(key)] = container ? container->Size() : 0;
   }
 
   const FieldIndices* indices_;

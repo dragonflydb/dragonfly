@@ -105,6 +105,10 @@ class ExternalAllocator {
   void LinkFreePage(detail::BinIdx bin_idx, Page* page);
   void UnlinkFreePage(detail::BinIdx bin_idx, Page* page);
 
+  // Returns an empty segment back to the extent tree, so its range can be reused by any
+  // page class or by large allocations.
+  void ReleaseSegment(SegmentDescr* seg);
+
   static SegmentDescr* ToSegDescr(Page*);
 
   SegmentDescr* sq_[2];  // map: PageClass -> free Segment.
