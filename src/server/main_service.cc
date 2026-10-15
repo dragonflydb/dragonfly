@@ -1688,8 +1688,7 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
 
   ServerState& ss = *ServerState::tlocal();
 
-  if ((cid->opt_mask() & CO::DENYOOM) &&
-      ss.ShouldDenyOnOOM(base::CycleClock::ToUsec(cmd_cntx->start_cycle))) {
+  if ((cid->opt_mask() & CO::DENYOOM) && ss.ShouldDenyOnOOM()) {
     cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
     return DispatchResult::OOM;
   }
