@@ -181,7 +181,7 @@ class Replica : ProtocolClient {
   std::optional<std::vector<LSN>> last_journal_LSNs_;
   std::shared_ptr<MultiShardExecution> multi_shard_exe_;
 
-  // Guard operations where flows might be in a mixed state (transition/setup)
+  // Guard operations where flows might be in a mixed state (transition into stable sync)
   util::fb2::Mutex flows_op_mu_;
 
   // repl_offs - till what offset we've already read from the master.
