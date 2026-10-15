@@ -2439,52 +2439,65 @@ TEST_P(IndexedHashTieringTest, BorrowedHnswVectorsStayResident) {
 
 #endif  // WITH_SEARCH
 
+// MGET runs optimistically and when cancelled reruns its shard callback while tiered reads of the
+// previous attempt may still be in flight. These orphaned reads must not write into the response
+// buffer, which the new attempt reuses or reallocates.
 TEST_F(PureDiskTSMTTest, MGetRescheduleWithPendingReads) {
   DisableUploads();
 
   const auto sz = shard_set->size();
-  // every read of "big" is tiered read
-  const string big = "big";
-  const string value(8_KB, 'x');
-
-  // will be contended, by using it both in writers and readers
-  const string hot = "hot";
-
-  // used to make writer fibers multi-shard so they do not run with unique shard cnt=1 and do not do
-  // optimistic_exec
-  const string other = "y";
+  // big - tiered, read from disk
+  // pad - keep flipping size, always allocated before big in the resp storage
+  // hot - on another shard concurrent write so that MGET's optimistic run there is cancelled.
+  // other - makes the writers of hot multi-shard and prevent inlining
+  const string big = "big", hot = "hot", other = "y";
+  string pad;
+  unsigned i = 0;
+  do {
+    pad = absl::StrCat("pad", i++);
+  } while (Shard(pad, sz) != Shard(big, sz));
 
   ASSERT_NE(Shard(big, sz), Shard(hot, sz));
   ASSERT_NE(Shard(other, sz), Shard(big, sz));
   ASSERT_NE(Shard(other, sz), Shard(hot, sz));
 
+  const string value(8_KB, 'x');
+  const string small_pad(16, 'a'), large_pad(48, 'b');
+
   Run({"SET", big, value});
   ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
   Run({"SET", hot, "v"});
+  Run({"SET", pad, small_pad});
 
   atomic_bool done{false};
   vector<Fiber> writers;
   for (size_t i = 0; i < 4; i++) {
-    writers.push_back(pp_->at(i)->LaunchFiber([&, i] {
+    writers.push_back(pp_->at(i)->LaunchFiber([&] {
+      // contends with mget hot
       while (!done.load(memory_order_relaxed))
-        // use "other" to make the command multi-shard and not run inline etc
-        Run(absl::StrCat("writer", i), {"MSET", hot, "v", other, "v"});
+        Run({"MSET", hot, "v", other, "v"});
     }));
   }
+  writers.push_back(pp_->at(4)->LaunchFiber([&] {
+    // keep changing the size of pad, so that on retries the location for big also changes (next to
+    // pad)
+    for (unsigned i = 0; !done.load(memory_order_relaxed); ++i)
+      Run({"SET", pad, i % 2 ? small_pad : large_pad});
+  }));
 
-  constexpr auto kMinCancels = 50;
+  // Run MGETs until enough of them were rescheduled. The counter is incremented on the coordinator
+  // thread, so reading it on the MGET thread counts only the MGET cancellations.
+  constexpr uint64_t kMinCancels = 50;
   const auto deadline = absl::Now() + absl::Seconds(30);
-  auto cancels = 0;
-
-  // MGET= shard(hot), shard(big)
-  // MSET= shard(hot), shard(other)
-  // shard(big) can run mget inline. shard(hot) sees contention and causes retrying of command
+  uint64_t cancels = 0;
   pp_->at(pp_->size() - 1)->Await([&] {
     const auto& stats = ServerState::tlocal()->stats;
     const auto base = stats.tx_schedule_cancel_cnt;
     while (cancels < kMinCancels && absl::Now() < deadline) {
-      auto resp = Run({"MGET", big, hot});
-      EXPECT_EQ(resp.GetVec()[0].GetString(), value);
+      // if our attempt comparison is broken we would get mixed bytes here due to overwriting the
+      // buffer
+      EXPECT_THAT(Run({"MGET", pad, big, hot}),
+                  RespElementsAre(AnyOf(small_pad, large_pad), value, "v"));
       cancels = stats.tx_schedule_cancel_cnt - base;
     }
   });
