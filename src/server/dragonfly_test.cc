@@ -1374,6 +1374,94 @@ TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
   EXPECT_EQ(command_histograms.at("ping"), command_histograms.at("___ping"));
 }
 
+namespace {
+
+// Stands in for a snapshot that is serializing one bucket (e.g. a big value, pausing between
+// chunks). Only the dependency matters: IsAnyBucketBlocked() reports it for the whole slice.
+struct OneBlockedBucket : public DbSlice::ChangeConsumerInterface {
+  void OnChange(DbIndex, const DbSlice::ChangeReq&) override {
+  }
+
+  bool IsAnyBucketBlocked() const override {
+    return blocked;
+  }
+
+  void WaitForNoBucketBlocked() const override {
+    released.Wait();
+  }
+
+  bool blocked = true;
+  mutable util::fb2::Done released;
+};
+
+void RegisterOnShard0(OneBlockedBucket* consumer) {
+  shard_set->pool()->at(0)->Await([consumer] {
+    EngineShard* shard = EngineShard::tlocal();
+    shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    namespaces->GetDefaultNamespace().GetDbSlice(0).RegisterOnChange(consumer);
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+  });
+}
+
+// Ends the dependency. Unregister separately: UnregisterOnChange waits on the latch that a
+// fiber blocked in WaitForUnblockedJournalWrites holds until it observes the release.
+void ReleaseOnShard0(OneBlockedBucket* consumer) {
+  shard_set->pool()->at(0)->Await([consumer] {
+    consumer->blocked = false;
+    consumer->released.Notify();
+  });
+}
+
+void UnregisterOnShard0(OneBlockedBucket* consumer) {
+  shard_set->pool()->at(0)->Await(
+      [consumer] { namespaces->GetDefaultNamespace().GetDbSlice(0).UnregisterOnChange(consumer); });
+}
+
+size_t DbSizeOnShard0() {
+  return shard_set->Await(0,
+                          [] { return namespaces->GetDefaultNamespace().GetDbSlice(0).DbSize(0); });
+}
+
+}  // namespace
+
+// One blocked bucket stops all active expiry on the shard: the heartbeat skips
+// RetireExpiredAndEvict while WillBlockOnJournalWrite() is true, although the expired key lives
+// in a different bucket and, with tagged chunks (the default), no journal write would block.
+TEST_F(DflyEngineTest, ReproBlockedBucketStallsActiveExpiry) {
+  Run({"set", kKeySid0, "v", "PX", "10"});
+  OneBlockedBucket snapshot;
+  RegisterOnShard0(&snapshot);
+  AdvanceTime(20);
+
+  ThisFiber::SleepFor(100ms);  // ~10 heartbeats at the default hz=100
+  EXPECT_EQ(DbSizeOnShard0(), 1u) << "heartbeat expired the key despite the blocked bucket";
+
+  ReleaseOnShard0(&snapshot);
+  UnregisterOnShard0(&snapshot);
+  ThisFiber::SleepFor(100ms);
+  EXPECT_EQ(DbSizeOnShard0(), 0u) << "heartbeat did not expire the key after the release";
+}
+
+// One blocked bucket makes SCAN wait (OpScan calls WaitForUnblockedJournalWrites), even when no
+// scanned key is in that bucket and nothing has expired.
+TEST_F(DflyEngineTest, ReproBlockedBucketBlocksScan) {
+  Run({"set", kKeySid0, "v"});
+  OneBlockedBucket snapshot;
+  RegisterOnShard0(&snapshot);
+
+  util::fb2::Done scanned;
+  auto scan = pp_->at(1)->LaunchFiber([&] {
+    Run({"scan", "0", "count", "100"});
+    scanned.Notify();
+  });
+  EXPECT_FALSE(scanned.WaitFor(200ms)) << "SCAN finished while an unrelated bucket was blocked";
+
+  ReleaseOnShard0(&snapshot);
+  EXPECT_TRUE(scanned.WaitFor(5s));
+  scan.Join();
+  UnregisterOnShard0(&snapshot);
+}
+
 static void BM_FindExtended(benchmark::State& state) {
   CommandRegistry registry;
 
