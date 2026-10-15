@@ -56,6 +56,14 @@ inline string GetMetricFullName(string_view metric_name) {
   return StrCat("dragonfly_", metric_name);
 }
 
+constexpr double UsecToSec(double usec) {
+  return usec * 1e-6;
+}
+
+constexpr double NsecToSec(double ns) {
+  return ns * 1e-9;
+}
+
 void AppendMetricHeader(string_view metric_name, string_view metric_help, MetricType type,
                         string* dest) {
   const auto full_metric_name = GetMetricFullName(metric_name);
@@ -99,12 +107,12 @@ void AppendPipelineLatencySummary(string_view name, string_view type, const base
                                   uint64_t total_count, double total_sum_usec, string* dest) {
   if (hist.count() > 0) {
     auto [p95, p99] = hist.Percentiles(95, 99);
-    AppendMetricValue(name, p95 * 1e-6, {"type", "quantile"}, {type, "0.95"}, dest);
-    AppendMetricValue(name, p99 * 1e-6, {"type", "quantile"}, {type, "0.99"}, dest);
+    AppendMetricValue(name, UsecToSec(p95), {"type", "quantile"}, {type, "0.95"}, dest);
+    AppendMetricValue(name, UsecToSec(p99), {"type", "quantile"}, {type, "0.99"}, dest);
   }
   // Use monotonically increasing counters for _sum/_count so that Prometheus
   // rate()/irate() functions work correctly even though the histogram is decayed.
-  AppendMetricValue(StrCat(name, "_sum"), total_sum_usec * 1e-6, {"type"}, {type}, dest);
+  AppendMetricValue(StrCat(name, "_sum"), UsecToSec(total_sum_usec), {"type"}, {type}, dest);
   AppendMetricValue(StrCat(name, "_count"), total_count, {"type"}, {type}, dest);
 }
 
@@ -175,14 +183,28 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             conn_stats.pipeline_dispatch_flush_count, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_flush_duration_seconds", "",
-                            conn_stats.pipeline_dispatch_flush_usec * 1e-6, MetricType::COUNTER,
+                            UsecToSec(conn_stats.pipeline_dispatch_flush_usec), MetricType::COUNTER,
                             &resp->body());
+  AppendMetricWithoutLabels("pipeline_squashes_total", "", conn_stats.pipeline_squashes,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_resquashes_total", "", conn_stats.pipeline_resquashes,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_reply_batches_total", "", conn_stats.pipeline_reply_batches,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_idle_waits_total", "", conn_stats.pipeline_idle_waits,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_reply_waits_total", "", conn_stats.pipeline_reply_waits,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels(
+      "pipeline_idle_wait_duration_seconds", "",
+      UsecToSec(base::CycleClock::ToUsec(conn_stats.pipeline_idle_wait_cycles)),
+      MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
-                            conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
+                            UsecToSec(conn_stats.pipelined_cmd_latency), MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
-                            conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
+                            UsecToSec(conn_stats.pipelined_wait_latency), MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("pipeline_blocking_commands_total", "",
                             m.coordinator_stats.blocking_commands_in_pipelines, MetricType::COUNTER,
@@ -208,10 +230,10 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_hop_duration_seconds", "",
-                            m.coordinator_stats.multi_squash_exec_hop_usec * 1e-6,
+                            UsecToSec(m.coordinator_stats.multi_squash_exec_hop_usec),
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("cmd_squash_hop_reply_seconds", "",
-                            m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
+                            UsecToSec(m.coordinator_stats.multi_squash_exec_reply_usec),
                             MetricType::COUNTER, &resp->body());
 
   string connections_libs;
@@ -318,7 +340,7 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("lua_force_gc_calls", "", m.lua_stats.force_gc_calls,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("lua_gc_duration_total_sec", "", m.lua_stats.gc_duration_ns * 1e-9,
+  AppendMetricWithoutLabels("lua_gc_duration_total_sec", "", NsecToSec(m.lua_stats.gc_duration_ns),
                             MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("backups_total", "", m.loading_stats.backup_count, MetricType::COUNTER,
@@ -360,7 +382,7 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   {
     AppendMetricWithoutLabels(
         "reply_duration_seconds", "",
-        base::CycleClock::ToUsec(m.facade_stats.reply_stats.send_stats.total_duration) * 1e-6,
+        UsecToSec(base::CycleClock::ToUsec(m.facade_stats.reply_stats.send_stats.total_duration)),
         MetricType::COUNTER, &resp->body());
     AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
                               MetricType::COUNTER, &resp->body());
@@ -504,7 +526,7 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
                        MetricType::COUNTER, &command_metrics);
     for (const auto& [name, stat] : cmd_stats) {
-      const double duration_seconds = stat.second * 1e-6;
+      const double duration_seconds = UsecToSec(stat.second);
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
                         &command_metrics);
     }
@@ -548,13 +570,13 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 
   AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
                             &resp->body());
-  double delay_seconds = m.fiber_switch_delay_usec * 1e-6;
+  double delay_seconds = UsecToSec(m.fiber_switch_delay_usec);
   AppendMetricWithoutLabels("fiber_switch_delay_seconds_total", "", delay_seconds,
                             MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("fiber_longrun_total", "", m.fiber_longrun_cnt, MetricType::COUNTER,
                             &resp->body());
-  double longrun_seconds = m.fiber_longrun_usec * 1e-6;
+  double longrun_seconds = UsecToSec(m.fiber_longrun_usec);
   AppendMetricWithoutLabels("fiber_longrun_seconds", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
