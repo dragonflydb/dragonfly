@@ -9,6 +9,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/facade_test.h"
+#include "server/family_utils.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -239,6 +240,24 @@ TEST_F(ZSetFamilyTest, ZRem) {
   EXPECT_THAT(resp, IntArg(1));
   EXPECT_THAT(Run({"zrange", "x", "0", "3", "byscore"}), RespElementsAre("a"));
   EXPECT_THAT(Run({"zrange", "x", "(-inf", "(+inf", "byscore"}), RespElementsAre("a"));
+}
+
+TEST_F(ZSetFamilyTest, ZRandMemberNegativeCountBound) {
+  // Regression: an unbounded negative COUNT must not drive the result allocation.
+  Run({"ZADD", "z", "1", "a"});
+
+  EXPECT_THAT(Run({"zrandmember", "z", "-200000000"}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  EXPECT_THAT(Run({"zrandmember", "z", "-" + std::to_string(dfly::kMaxRandCount + 1)}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  // INT_MIN previously hit std::abs() signed-overflow UB; now rejected, never a crash.
+  EXPECT_THAT(Run({"zrandmember", "z", "-2147483648"}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  EXPECT_THAT(Run({"zrandmember", "z", "-" + std::to_string(dfly::kMaxRandCount)}).GetVec(),
+              SizeIs(dfly::kMaxRandCount));
+  EXPECT_THAT(Run({"zrandmember", "z", "-4"}).GetVec(), ElementsAre("a", "a", "a", "a"));
+  // Positive COUNT stays clamped to the set size.
+  EXPECT_THAT(Run({"zrandmember", "z", "1000000"}).GetVec(), ElementsAre("a"));
 }
 
 TEST_F(ZSetFamilyTest, ZRandMember) {
