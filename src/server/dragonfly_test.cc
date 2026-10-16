@@ -7,6 +7,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
@@ -22,7 +23,9 @@ extern "C" {
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "redis/redis_aux.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
+#include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/server_state.h"
 #include "server/test_utils.h"
@@ -51,6 +54,7 @@ using testing::ElementsAre;
 using testing::HasSubstr;
 using testing::Key;
 using testing::Pair;
+using testing::UnorderedElementsAre;
 
 namespace {
 
@@ -1253,6 +1257,114 @@ TEST_F(DflyEngineTest, ExpireInlineKeyAccounting) {
   EXPECT_EQ(stats.inline_keys, 0u);
   EXPECT_EQ(stats.expire_count, 0u);
   EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
+}
+
+namespace {
+
+// Calls `probe` in the throttle that follows the first journaled DEL, i.e. on the fiber that
+// appended it, right after the append.
+class FirstDelThrottleProbe : public journal::JournalConsumerInterface {
+ public:
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+    if (!seen_del_ && item.cmd == "DEL") {
+      seen_del_ = true;
+      probe_pending_ = true;
+    }
+  }
+
+  void ThrottleIfNeeded() override {
+    if (std::exchange(probe_pending_, false))
+      probe();
+  }
+
+  std::function<void()> probe;
+
+ private:
+  bool seen_del_ = false;
+  bool probe_pending_ = false;
+};
+
+}  // namespace
+
+// NotifyPending's readiness checks may find the watched keys expired. Expiring them inline used
+// to suspend in the journal throttle in the middle of the iteration over the watch tables,
+// letting other fibers change them (#8553). Now the checks report the keys as missing, and
+// NotifyPending expires them after the iteration: by the first DEL, every check has run.
+TEST_F(DflyEngineTest, NotifyPendingExpiresAfterIteration) {
+  string key2;
+  for (unsigned i = 0; key2.empty(); ++i) {
+    string candidate = StrCat("s", i);
+    if (candidate != kKeySid0 && Shard(candidate, shard_set->size()) == 0)
+      key2 = candidate;
+  }
+
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "Ex"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+  single_response_ = false;
+  ASSERT_THAT(pp_->at(3)->Await([&] {
+    return Run({"subscribe", "__keyevent@0__:expired"});
+  }),
+              ArrLen(3));
+  single_response_ = true;
+
+  for (string_view key : {string_view{kKeySid0}, string_view{key2}}) {
+    Run({"xadd", key, "*", "f", "v"});
+    Run({"xgroup", "create", key, "g", "$"});
+    Run({"pexpire", key, "10"});
+  }
+
+  // Block a consumer group reader on each stream. The keys are locked by the blocked
+  // transactions, so the heartbeat will not expire them.
+  RespExpr resp1, resp2;
+  auto reader1 = pp_->at(1)->LaunchFiber([&] {
+    resp1 =
+        Run("reader1", {"xreadgroup", "group", "g", "c", "block", "0", "streams", kKeySid0, ">"});
+  });
+  auto reader2 = pp_->at(2)->LaunchFiber([&] {
+    resp2 = Run("reader2", {"xreadgroup", "group", "g", "c", "block", "0", "streams", key2, ">"});
+  });
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsConnBlocked("reader1") && IsConnBlocked("reader2"); }, 1s));
+
+  auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(0);
+  ASSERT_NE(bc, nullptr);
+
+  // A missing stream wakes a blocked XREADGROUP, so each completed check notifies its reader.
+  size_t notified_at_first_del = 0;
+  FirstDelThrottleProbe consumer;
+  consumer.probe = [&] { notified_at_first_del = bc->awakened_transactions().size(); };
+  const uint32_t consumer_id = StartJournalWithConsumer(&consumer, 0);
+  absl::Cleanup unregister = [&] {
+    pp_->at(0)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+
+  // Expire both streams and run the readiness checks, as the heartbeat does. The clock advances
+  // on the shard thread right before, so the heartbeat cannot interleave.
+  pp_->at(0)->Await([&] {
+    AdvanceTime(20);
+    bc->Awaken(0, kKeySid0);
+    bc->Awaken(0, key2);
+    bc->NotifyPending();
+  });
+  EXPECT_EQ(notified_at_first_del, 2u);
+
+  reader1.Join();
+  reader2.Join();
+
+  // A blocked XREADGROUP wakes on a deleted stream and reports the missing group.
+  EXPECT_THAT(resp1, ErrArg("NOGROUP"));
+  EXPECT_THAT(resp2, ErrArg("NOGROUP"));
+  EXPECT_THAT(Run({"exists", kKeySid0, key2}), IntArg(0));
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});  // flush pending publishes
+  ASSERT_EQ(2u, SubscriberMessagesLen("IO3"));
+  vector<string> expired = {string(GetPublishedMessage("IO3", 0).message),
+                            string(GetPublishedMessage("IO3", 1).message)};
+  EXPECT_THAT(expired, UnorderedElementsAre(kKeySid0, key2));
 }
 
 // AddListener picks the accept-loop proactor via the pool's shared round-robin, so listener

@@ -48,7 +48,7 @@ class BlockingController {
   // Mark all watched keys in a specific db as awakened.
   void AwakenWatched(DbIndex db_index);
 
-  // Notify transactions of awakened keys
+  // Notify transactions of awakened keys. May suspend, but not while it iterates the watch tables.
   void NotifyPending();
 
   // Used in tests and debugging functions.
@@ -58,6 +58,10 @@ class BlockingController {
  private:
   struct WatchQueue;
   struct DbWatchTable;
+
+  // Runs the readiness checks of the awakened keys. Must not suspend. The checks report expired
+  // keys as missing and append them to 'expired', for NotifyPending to expire afterwards.
+  void NotifyPendingAtomic(std::vector<std::pair<DbIndex, std::string>>* expired);
 
   void NotifyWatchQueue(std::string_view key, WatchQueue* wqm, const DbContext& context);
 

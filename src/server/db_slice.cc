@@ -700,6 +700,16 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   TouchHllIfNeeded(key, db.sample_unique_keys);
   TouchValuesHistogramIfNeeded(it->second, db.sample_values_hist);
 
+  // Readiness checks must not suspend, and expiry may suspend. They report an expired key as
+  // missing, whatever its type, and leave its expiry to the caller, which counts the miss then.
+  // Write lookups expire as usual: reporting a present entry as missing would make AddOrFind
+  // insert a duplicate.
+  if (cntx.deferred_expiry && stats_mode == UpdateStatsMode::kReadStats &&
+      it->first.IsExpired(cntx.time_now_ms) && AllowExpiredDeletions()) {
+    cntx.deferred_expiry->emplace_back(cntx.db_index, key);
+    return OpStatus::KEY_NOTFOUND;
+  }
+
   if (it->first.HasExpire()) {
     vector<string> events;
     ExpireResult res = TryExpire(cntx, it, &events);
