@@ -7,6 +7,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/search/base.h"
@@ -20,6 +21,9 @@ class Service;
 // Dispatches a search command (FT.CREATE / FT.SYNUPDATE) from a serialized AUX string.
 void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_view command_name,
                               std::string_view error_context, bool add_NX = false);
+
+// Restores one RESP alias/target pair. Returns false for malformed or rejected metadata.
+bool LoadSearchAliasFromAux(Service* service, std::string_view def);
 
 // Pending index key-to-DocId mappings to apply after indices are created.
 struct PendingIndexMapping {
