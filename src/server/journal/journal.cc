@@ -18,6 +18,7 @@ namespace {
 
 // Active only in shard threads.
 thread_local JournalSlice journal_slice;
+thread_local std::string journal_lineage;
 
 void MaybeStop() {
   EngineShard* shard = EngineShard::tlocal();
@@ -43,6 +44,14 @@ void StartInThreadAtLsn(LSN lsn) {
   StartInThread();
   journal_slice.ResetRingBuffer();
   journal_slice.SetStartingLSN(lsn);
+}
+
+void SetLineage(std::string lineage_id) {
+  journal_lineage = std::move(lineage_id);
+}
+
+const std::string& GetLineage() {
+  return journal_lineage;
 }
 
 void ClearBuffer() {

@@ -467,6 +467,35 @@ async def test_promoted_lineage_propagates(nodes, promote):
     assert_syncs(r3, full=[r2], partial=[r1])
 
 
+async def test_promote_during_full_sync(nodes):
+    """
+    A promotion that overlaps a downstream full sync still forks the downstream lineage.
+
+    M -> R1 -> R2 (full sync in progress)
+
+    R1 is promoted mid-sync, both R1 and M write, R2 must not psync back to M afterwards:
+
+    R1 -> R2
+    M -> R2 (full)
+    """
+    m, r1, r2 = nodes(3)
+    await m.c.execute_command("DEBUG POPULATE 200000 key 500")
+    await chain(m, r1)
+
+    await r2.c.execute_command(f"REPLICAOF localhost {r1.port}")
+    while (await r2.c.info("replication")).get("master_sync_in_progress") != 1:
+        await asyncio.sleep(0.01)
+    await r1.promote()
+    await write(r1, prefix="r1:")
+    await write(m, n=200, prefix="m:")
+    await wait_for_replicas_state(r2.c)
+    await r2.caught_up(r1)
+
+    await r2.replicaof(m, psync=False)
+    await r2.caught_up(m)
+    await assert_same_data(m, r2)
+
+
 async def test_split_brain(nodes):
     """
     After a split brain, a replica psyncs only within its own lineage.

@@ -16,6 +16,7 @@
 #include "server/engine_shard_set.h"
 #include "server/execution_state.h"
 #include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_save.h"
 #include "server/search/global_hnsw_index.h"
@@ -26,6 +27,8 @@
 #include "util/fibers/fibers.h"
 #include "util/fibers/stacktrace.h"
 #include "util/fibers/synchronization.h"
+
+ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
 
 ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a background fiber");
 
@@ -105,6 +108,17 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
 
   if (allow_flush == SnapshotFlush::kAllow) {
     serializer_->SetTagEntries(absl::GetFlag(FLAGS_serialization_tagged_chunks));
+  }
+
+  // Markers recorded before the journal consumer was registered won't reach the replica, so
+  // start the stream with this shard's current lineage.
+  if (stream_journal && absl::GetFlag(FLAGS_experimental_cascaded_partial_sync) &&
+      !journal::GetLineage().empty()) {
+    io::StringSink sink;
+    JournalWriter writer{&sink};
+    writer.Write(journal::Entry{
+        0, journal::Op::LINEAGE, 0, std::nullopt, {journal::GetLineage(), ArgSlice{}}});
+    std::ignore = serializer_->WriteJournalEntry(std::move(sink).str());
   }
 
   VLOG(1) << "DbSaver::Start - saving entries with version less than " << snapshot_version_;
