@@ -464,7 +464,7 @@ std::error_code Replica::HandleCapaDflyResp(const RESPArray& args) {
       VLOG(1) << "Lineage changed from " << prev_lineage_id << ", disabling partial sync";
       last_journal_LSNs_.reset();
     }
-    forked_lineage_ = std::string{};
+    forked_lineage_.clear();
   }
 
   VLOG(1) << "Master id: " << master_context_.master_repl_id
@@ -608,8 +608,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
     }
     shard_flows_[i].reset(new DflyShardReplica(server(), master_context_, i, &service_,
-                                               multi_shard_exe_, load_context.get(),
-                                               &forked_lineage_));
+                                               multi_shard_exe_, load_context.get()));
     if (partial_sync_lsn > 0) {
       shard_flows_[i]->SetRecordsExecuted(partial_sync_lsn);
     }
@@ -709,8 +708,10 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
       // Our dataset and LSN space are replaced, so sub-replicas (cascaded replication) can't
       // continue their stream. Drop them; they reconnect once we leave LOADING and full sync.
-      if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync))
+      if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
         service_.server_family().GetDflyCmd()->CancelReplicas();
+        shard_set->RunBriefInParallel([](EngineShard*) { journal::SetLineage({}); });
+      }
 
       DVLOG(1) << "Calling Flush on all slots " << this;
 
@@ -977,6 +978,21 @@ error_code Replica::ConsumeDflyStream() {
     last_journal_LSNs_->push_back(flow->JournalExecutedCount());
   }
 
+  // Flows process LINEAGE markers independently. They can only disagree if replication broke
+  // while a fork marker was propagating: then our data spans two lineages and no single id can be
+  // advertised safely, so disable partial sync. Without the flag no markers are ever streamed.
+  if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
+    const string& lineage = shard_flows_.front()->Lineage();
+    bool agree = all_of(shard_flows_.begin(), shard_flows_.end(),
+                        [&](const auto& flow) { return flow->Lineage() == lineage; });
+    if (!agree) {
+      LOG(WARNING) << "Flows disagree on the lineage, disabling partial sync";
+      last_journal_LSNs_.reset();
+    } else if (!lineage.empty()) {
+      forked_lineage_ = lineage;
+    }
+  }
+
   LOG(INFO) << "Exit stable sync";
   // The only option to unblock is to cancel the context.
   CHECK(exec_st_.GetError());
@@ -1190,7 +1206,7 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
     } else if (tx_data.opcode == journal::Op::LINEAGE) {
       // One of our ancestors forked the lineage and updated us with the new roots master id
       string_view new_lineage_id = tx_data.command.Front();
-      *forked_lineage_ = string(new_lineage_id);
+      AdoptLineage(new_lineage_id);
       journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
 
       if (EngineShard::tlocal() && EngineShard::tlocal()->journal()) {  // pass further
@@ -1290,12 +1306,10 @@ void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
 DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext master_context,
                                    uint32_t flow_id, Service* service,
                                    std::shared_ptr<MultiShardExecution> multi_shard_exe,
-                                   RdbLoadContext* load_context,
-                                   cmn::ThreadSafeValue<std::string>* forked_lineage)
+                                   RdbLoadContext* load_context)
     : ProtocolClient(server_context),
       service_(*service),
       master_context_(master_context),
-      forked_lineage_(forked_lineage),
       flow_id_(flow_id) {
   auto log_cmd = [](const TransactionData& tx) {
     facade::Connection::LogReplicaCommand(tx.command, tx.dbid);
@@ -1305,6 +1319,13 @@ DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext m
   rdb_loader_ = std::make_unique<RdbLoader>(&service_, load_context);
   rdb_loader_->SetLoadUnownedSlots(true);
   rdb_loader_->SetShardCount(master_context.num_flows);
+  rdb_loader_->SetLineageCallback([this](string_view id) { AdoptLineage(id); });
+}
+
+void DflyShardReplica::AdoptLineage(string_view lineage_id) {
+  lineage_ = lineage_id;
+  if (EngineShard::tlocal())
+    journal::SetLineage(string(lineage_id));
 }
 
 DflyShardReplica::~DflyShardReplica() {

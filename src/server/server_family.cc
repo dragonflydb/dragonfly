@@ -3496,8 +3496,11 @@ void ServerFamily::ForkLineage() {
   // Emit a LINEAGE marker carrying our own replication id (the new lineage root) so downstream
   // replicas adopt it: they can still partial-sync within our new lineage, but will full-sync if
   // they reconnect to the old ancestor (split-brain safety).
+  // Must run after replication stopped, so no upstream entry is journaled after the marker.
+  // RecordEntry may block on slow replicas.
   std::string_view new_lineage_id = master_replid_;
-  shard_set->RunBriefInParallel([new_lineage_id](EngineShard* shard) {
+  shard_set->RunBlockingInParallel([new_lineage_id](EngineShard* shard) {
+    journal::SetLineage(string(new_lineage_id));
     if (shard->journal())
       journal::RecordEntry(0, journal::Op::LINEAGE, 0, nullopt, {new_lineage_id, ArgSlice{}});
   });
@@ -3510,15 +3513,20 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     CHECK(replica_);
 
     auto repl_ptr = replica_;
-    if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
+    const bool start_journal = absl::GetFlag(FLAGS_replicaof_no_one_start_journal);
+    if (start_journal) {
       // Start journal and keep offsets.
       repl_ptr->StartJournalAtOwnLSN();
-      ForkLineage();
     }
+
+    // Stop replication before forking the lineage; writes stay disabled until the master flag
+    // flips.
+    last_master_data_ = replica_->Stop();
+    if (start_journal)
+      ForkLineage();
+
     // flip flag before clearing replica_
     SetMasterFlagOnAllThreads(true);
-
-    last_master_data_ = replica_->Stop();
     replica_.reset();
     StopAllClusterReplicas();
   }
@@ -3660,17 +3668,36 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
     service().cluster_family().ReconcileReplicaSlots();
   }
 
-  ForkLineage();
   last_master_data_ = replica_->Stop();
+  ForkLineage();
   replica_.reset();
 
   SetMasterFlagOnAllThreads(true);
   return builder->SendOk();
 }
 
-std::string ServerFamily::GetLineageId() const {
+std::string ServerFamily::GetBaseLineageId() const {
   util::fb2::LockGuard lk(replicaof_mu_);
-  return replica_ ? replica_->GetLineageId() : master_replid_;
+  return replica_ ? replica_->GetMasterLineageId() : master_replid_;
+}
+
+// See header comments
+std::string ServerFamily::GetLineageId() const {
+  std::vector<std::string> shard_lineages(shard_set->size());
+  shard_set->RunBriefInParallel(
+      [&](EngineShard* shard) { shard_lineages[shard->shard_id()] = journal::GetLineage(); });
+
+  if (!std::all_of(shard_lineages.begin(), shard_lineages.end(),
+                   [&](const auto& id) { return id == shard_lineages.front(); })) {
+    return master_replid_;
+  }
+  return shard_lineages.front().empty() ? GetBaseLineageId() : shard_lineages.front();
+}
+
+std::string ServerFamily::GetShardLineageId() const {
+  DCHECK(EngineShard::tlocal());
+  const std::string& lineage = journal::GetLineage();
+  return lineage.empty() ? GetBaseLineageId() : lineage;
 }
 
 void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {

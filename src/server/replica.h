@@ -10,7 +10,6 @@
 #include <queue>
 #include <variant>
 
-#include "common/thread_safe_value.h"
 #include "facade/facade_types.h"
 #include "io/io_buf.h"
 #include "server/cluster/cluster_defs.h"
@@ -132,9 +131,13 @@ class Replica : ProtocolClient {
   // ancestor's id. Used to negotiate partial sync when reconnecting up the chain.
   // After a lineage fork (a promoted ancestor sent a LINEAGE marker), we adopt the new lineage
   // root's id carried by the marker instead of the old ancestor's id.
+  // The forked lineage is collected from the flows when replication stops or breaks.
   std::string GetLineageId() const {
-    if (std::string forked = *forked_lineage_; !forked.empty())
-      return forked;
+    return forked_lineage_.empty() ? master_context_.lineage_id : forked_lineage_;
+  }
+
+  // Lineage advertised by our master. Live forks are tracked by the shards' journal lineage.
+  const std::string& GetMasterLineageId() const {
     return master_context_.lineage_id;
   }
 
@@ -178,8 +181,8 @@ class Replica : ProtocolClient {
   util::fb2::Fiber acks_fb_;
   util::fb2::EventCount replica_waker_;
 
-  // Lineage id adopted from a LINEAGE marker after a promoted ancestor forked; last-wins.
-  cmn::ThreadSafeValue<std::string> forked_lineage_;
+  // Lineage adopted by all flows from LINEAGE markers, collected when the flows are joined.
+  std::string forked_lineage_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
   std::vector<std::vector<unsigned>> thread_flow_map_;  // a map from proactor id to flow list.
@@ -230,8 +233,7 @@ class DflyShardReplica : public ProtocolClient {
  public:
   DflyShardReplica(ServerContext server_context, MasterContext master_context, uint32_t flow_id,
                    Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe,
-                   class RdbLoadContext* load_context,
-                   cmn::ThreadSafeValue<std::string>* forked_lineage);
+                   class RdbLoadContext* load_context);
   ~DflyShardReplica();
 
   void Cancel();
@@ -265,6 +267,11 @@ class DflyShardReplica : public ProtocolClient {
     return journal_rec_executed_ = value;
   }
 
+  // Must only be read after the flow fibers are joined.
+  const std::string& Lineage() const {
+    return lineage_;
+  }
+
   // Can be called from any thread.
   void Pause(bool pause);
 
@@ -272,8 +279,11 @@ class DflyShardReplica : public ProtocolClient {
   Service& service_;
   MasterContext master_context_;
 
-  // Points at the owning Replica's forked lineage holder; assigned when a LINEAGE marker arrives.
-  cmn::ThreadSafeValue<std::string>* forked_lineage_;
+  // Called when a LINEAGE marker arrives, either in the stable sync stream or in a snapshot.
+  void AdoptLineage(std::string_view lineage_id);
+
+  // Lineage from the last LINEAGE marker of this flow, empty if none. Owned by the flow fiber.
+  std::string lineage_;
 
   std::optional<base::IoBuf> leftover_buf_;
 

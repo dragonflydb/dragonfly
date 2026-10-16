@@ -3050,6 +3050,12 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
 
     done++;
 
+    if (entry.opcode == journal::Op::LINEAGE) {
+      if (lineage_cb_ && !entry.cmd.empty())
+        lineage_cb_(entry.cmd[0]);
+      continue;
+    }
+
     if (entry.cmd.empty()) {
       if (entry.opcode == journal::Op::PING) {
         continue;

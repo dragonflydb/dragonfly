@@ -365,9 +365,9 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
         my_last_master && replica_last_master && replica_last_master->id == my_last_master->id;
 
     // Skip full sync if we have the same parent in a cascaded setup
-    const bool cascaded_match = replica_last_master &&
-                                replica_last_master->id == sf_->GetLineageId() &&
-                                absl::GetFlag(FLAGS_experimental_cascaded_partial_sync);
+    const bool cascaded_match = absl::GetFlag(FLAGS_experimental_cascaded_partial_sync) &&
+                                replica_last_master &&
+                                replica_last_master->id == sf_->GetShardLineageId();
 
     // Case for partial sync
     if (failover_match || cascaded_match) {

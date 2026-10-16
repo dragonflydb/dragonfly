@@ -52,6 +52,11 @@ void UnregisterConsumer(uint32_t id);
 void RecordEntry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot,
                  Entry::Payload payload);
 
+// Lineage id of the data journaled by this shard: set by LINEAGE markers (own promotion or
+// received from upstream), empty when it equals the node's base lineage.
+void SetLineage(std::string lineage_id);
+const std::string& GetLineage();
+
 size_t LsnBufferSize();
 size_t LsnBufferBytes();
 
