@@ -644,10 +644,10 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
       trans = nullptr;
 
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
-      if (bool concludes = run(continuation_trans_, true); concludes) {
-        continuation_trans_ = nullptr;
-        continuation_debug_id_.clear();
-      } else {
+      // A concluding hop releases the continuation itself (RemoveContTx) and then notifies blocked
+      // transactions, which may suspend; another poll may install the next continuation
+      // meanwhile, so do not reset it here.
+      if (bool concludes = run(continuation_trans_, true); !concludes) {
         continuation_debug_id_ = continuation_trans_->DebugId(sid);
       }
     }
@@ -886,7 +886,7 @@ void EngineShard::RetireExpiredAndEvict() {
   }
 
   // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
-  // section, because readiness checks read the db slice and may preempt.
+  // section, because NotifyPending may preempt after its readiness checks.
   if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
       bc && GetContTx() == nullptr) {
     bc->NotifyPending();

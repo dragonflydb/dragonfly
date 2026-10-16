@@ -13,6 +13,7 @@
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
 
 namespace dfly {
 
@@ -151,9 +152,41 @@ void BlockingController::NotifyPending() {
   const Transaction* tx = owner_->GetContTx();
   CHECK(tx == nullptr) << tx->DebugId();
 
+  // Readiness checks may find the watched keys expired, and expiry may suspend: in the journal
+  // throttle, on a snapshot serializing a bucket, or while sending keyspace events. A suspension
+  // would let other fibers change the watch tables we iterate. So the checks report expired keys
+  // as missing without deleting them, and we expire those keys after the iteration.
+  vector<pair<DbIndex, string>> expired;
+  do {
+    {
+      util::FiberAtomicGuard guard;
+      NotifyPendingAtomic(&expired);
+    }
+    if (expired.empty())
+      return;
+
+    // May suspend. A deleted stream awakens its watchers again, so check them once more, unless
+    // a transaction started running meanwhile; it notifies when it concludes.
+    DbSlice& db_slice = ns_->GetDbSlice(owner_->shard_id());
+    for (const auto& [db_index, key] : expired) {
+      // Expiry ignores key locks, so do not delete while a transaction is suspended in its
+      // callback: it may hold the key (e.g. a stream it reads). The heartbeat, which skips
+      // expiry in this case too, later expires the key or awakens its watchers again.
+      if (owner_->running_tx() != nullptr)
+        return;
+
+      if (db_slice.IsDbValid(db_index))
+        db_slice.FindReadOnly(DbContext{ns_, db_index, GetCurrentTimeMs()}, key);
+    }
+    expired.clear();
+  } while (!awakened_indices_.empty() && owner_->GetContTx() == nullptr);
+}
+
+void BlockingController::NotifyPendingAtomic(vector<pair<DbIndex, string>>* expired) {
   DbContext context;
   context.ns = ns_;
   context.time_now_ms = GetCurrentTimeMs();
+  context.deferred_expiry = expired;
 
   for (DbIndex index : awakened_indices_) {
     auto dbit = watched_dbs_.find(index);

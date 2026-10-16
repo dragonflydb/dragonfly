@@ -8,6 +8,9 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "base/iterator.h"
 #include "facade/facade_types.h"
@@ -66,6 +69,10 @@ struct DbContext {
   // snapshots (replicas) - the change callbacks and journal consumers.
   // Optimizes unnecessary serialization reordering
   bool is_omittable_operation = false;
+
+  // If set, read lookups report expired keys as missing without deleting them, and append them
+  // here for the caller to expire later. Used by readiness checks, which must not suspend.
+  std::vector<std::pair<DbIndex, std::string>>* deferred_expiry = nullptr;
 
   // Convenience method.
   DbSlice& GetDbSlice(ShardId shard_id) const;
