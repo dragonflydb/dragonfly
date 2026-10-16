@@ -117,6 +117,10 @@ bool SetFlushMode(bool allow_flush) {
   return journal_slice.SetFlushMode(allow_flush);
 }
 
+bool GetFlushMode() {
+  return journal_slice.GetFlushMode();
+}
+
 size_t LsnBufferSize() {
   return journal_slice.GetRingBufferSize();
 }

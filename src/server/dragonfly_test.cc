@@ -1345,6 +1345,127 @@ TEST_F(DflyEngineTest, NotifyPendingExpiresWithoutSuspending) {
   EXPECT_THAT(expired, UnorderedElementsAre(kKeySid0, key2));
 }
 
+// Expiry appends DEL to the journal and deletes the key, and the journal append can suspend
+// (journal throttling, snapshot consumers). For a lookup outside a transaction callback, another
+// command could expire and rewrite the key during such a wait, and the resumed expiry would delete
+// the new value while the journal ends with the SET.
+// TryExpire journals and deletes atomically and throttles only after the deletion, so the key is
+// already gone when the consumer parks, and the rewrite survives.
+TEST_F(DflyEngineTest, ExpireKeepsKeyRewrittenDuringJournalWait) {
+  Run({"set", kKeySid0, "BAR", "PX", "10"});
+
+  ParkFirstDel consumer;
+  const uint32_t consumer_id = StartJournalWithConsumer(&consumer, 0);
+  absl::Cleanup unregister = [&] {
+    pp_->at(0)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+
+  // An expiring lookup outside any transaction. The clock advances on the shard thread right
+  // before it, so the heartbeat cannot expire the key first.
+  auto lookup = pp_->at(0)->LaunchFiber([&] {
+    AdvanceTime(20);
+    auto& ns = namespaces->GetDefaultNamespace();
+    DbContext cntx{&ns, 0, GetCurrentTimeMs()};
+    EXPECT_FALSE(ns.GetDbSlice(0).FindReadOnly(cntx, kKeySid0, OBJ_STRING).ok());
+  });
+  if (!consumer.parked.WaitFor(5s)) {
+    consumer.release.Notify();  // In case the lookup parks right after the timeout.
+    lookup.Join();
+    FAIL() << "the expiry never reached the journal";
+  }
+
+  // The expiry is parked in the throttle, after the deletion. The key is rewritten meanwhile.
+  EXPECT_THAT(Run({"get", kKeySid0}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"set", kKeySid0, "1"}), "OK");
+
+  consumer.release.Notify();
+  lookup.Join();
+
+  vector<string> cmds = pp_->at(0)->Await([&] { return consumer.cmds(); });
+  EXPECT_THAT(cmds, ElementsAre("DEL", "SET"));
+  EXPECT_EQ(Run({"get", kKeySid0}), "1");
+}
+
+namespace {
+
+// Reports a bucket blocked mid-serialization until released, like a snapshot that serializes a
+// big value.
+struct BlockedBucketConsumer : public DbSlice::ChangeConsumerInterface {
+  void OnChange(DbIndex, const DbSlice::ChangeReq&) override {
+  }
+
+  bool IsAnyBucketBlocked() const override {
+    return blocked;
+  }
+
+  void WaitForNoBucketBlocked() const override {
+    waiting.Notify();
+    unblocked.Wait();
+  }
+
+  bool blocked = true;
+  mutable fb2::Done waiting, unblocked;
+};
+
+}  // namespace
+
+// While a snapshot blocks journal writes, an expiring lookup must wait before it journals the
+// expiry, since TryExpire may not suspend between journaling and deleting.
+TEST_F(DflyEngineTest, ExpiryWaitsForBlockedJournalWrites) {
+  Run({"set", kKeySid0, "BAR", "PX", "10"});
+
+  ParkFirstDel journal_consumer;
+  journal_consumer.release.Notify();  // Do not park.
+  const uint32_t consumer_id = StartJournalWithConsumer(&journal_consumer, 0);
+
+  BlockedBucketConsumer snapshot;
+  pp_->at(0)->Await([&] {
+    EngineShard* shard = EngineShard::tlocal();
+    // RegisterOnChange requires the shard lock to be held (see #7153).
+    shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    namespaces->GetDefaultNamespace().GetDbSlice(0).RegisterOnChange(&snapshot);
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+  });
+  absl::Cleanup cleanup = [&] {
+    pp_->at(0)->Await([&] {
+      namespaces->GetDefaultNamespace().GetDbSlice(0).UnregisterOnChange(&snapshot);
+      journal::UnregisterConsumer(consumer_id);
+    });
+  };
+
+  auto lookup = pp_->at(0)->LaunchFiber([&] {
+    AdvanceTime(20);
+    auto& ns = namespaces->GetDefaultNamespace();
+    DbContext cntx{&ns, 0, GetCurrentTimeMs()};
+    EXPECT_FALSE(ns.GetDbSlice(0).FindReadOnly(cntx, kKeySid0, OBJ_STRING).ok());
+  });
+  if (!snapshot.waiting.WaitFor(5s)) {
+    pp_->at(0)->Await([&] {
+      snapshot.blocked = false;
+      snapshot.unblocked.Notify();
+    });
+    lookup.Join();
+    FAIL() << "the lookup never waited for the blocked journal write";
+  }
+
+  // The lookup waits before journaling anything or deleting the key.
+  EXPECT_THAT(pp_->at(0)->Await([&] { return journal_consumer.cmds(); }), ElementsAre());
+  EXPECT_EQ(
+      pp_->at(0)->Await([&] { return namespaces->GetDefaultNamespace().GetDbSlice(0).DbSize(0); }),
+      1u);
+
+  pp_->at(0)->Await([&] {
+    snapshot.blocked = false;
+    snapshot.unblocked.Notify();
+  });
+  lookup.Join();
+
+  EXPECT_THAT(pp_->at(0)->Await([&] { return journal_consumer.cmds(); }), ElementsAre("DEL"));
+  EXPECT_EQ(
+      pp_->at(0)->Await([&] { return namespaces->GetDefaultNamespace().GetDbSlice(0).DbSize(0); }),
+      0u);
+}
+
 // AddListener picks the accept-loop proactor via the pool's shared round-robin, so listener
 // construction (see MakeListener in dfly_main.cc) must not call GetNextProactor() in between —
 // that would stack several accept loops on one proactor.
