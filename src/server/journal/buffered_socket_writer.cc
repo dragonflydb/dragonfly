@@ -244,6 +244,16 @@ void BufferedSocketWriter::Throttle() {
   }
 }
 
+void BufferedSocketWriter::CheckWriteTimeout(uint64_t timeout_usec) {
+  if (in_flight_bytes_ == 0 || !cntx_->IsRunning() ||
+      base::CycleClock::ToUsec(base::CycleClock::Now() - last_async_write_time_) < timeout_usec)
+    return;
+
+  LOG(WARNING) << "Stream write timed out: " << FormatInternalState();
+  LogTcpSocketDiagnostics(dest_);
+  cntx_->ReportError("BufferedSocketWriter write operation timeout");
+}
+
 void BufferedSocketWriter::WaitForInflightToComplete(bool with_timeout) {
   const auto start = chrono::steady_clock::now();
   const auto max_timeout = start + chrono::milliseconds(absl::GetFlag(FLAGS_replication_timeout));

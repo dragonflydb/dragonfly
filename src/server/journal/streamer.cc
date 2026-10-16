@@ -32,6 +32,8 @@ ABSL_FLAG(float, migration_buckets_cpu_budget, 0.2,
 ABSL_FLAG(uint32_t, replication_dispatch_threshold, 1500,
           "Number of bytes to aggregate before replication");
 
+ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
+
 namespace dfly {
 using namespace util;
 using namespace journal;
@@ -179,6 +181,7 @@ SlotMigrationStreamer::SlotMigrationStreamer(DbSlice* slice, cluster::SlotSet sl
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
+  replication_timeout_usec_ = absl::GetFlag(FLAGS_replication_timeout) * 1000ULL;
 
   cmd_serializer_ = std::make_unique<CmdSerializer>(
       [&](std::string s) {
@@ -243,6 +246,9 @@ void SlotMigrationStreamer::PaceTraversal(bool done) {
 
   while (base_cntx_->IsRunning() && should_stall()) {
     ThisFiber::SleepFor(300us);
+    // Pacing stops below output_limit, where Throttle() would detect a stuck socket. Checked
+    // after sleeping, so completions of already finished writes have been processed.
+    writer_.CheckWriteTimeout(replication_timeout_usec_);
 
     // We have a design bug in RealTimeAggregator that resets it measurements only when
     // the next sample is taken. So we add this sample to ensure cpu_aggregator_
