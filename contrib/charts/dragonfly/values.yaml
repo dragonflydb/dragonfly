@@ -7,7 +7,7 @@ replicaCount: 1
 
 image:
   # -- Container Image Registry to pull the image from
-  repository: docker.dragonflydb.io/dragonflydb/dragonfly
+  repository: ghcr.io/dragonflydb/dragonfly
   # -- Dragonfly image pull policy
   pullPolicy: IfNotPresent
   # -- Overrides the image tag whose default is the chart appVersion.
