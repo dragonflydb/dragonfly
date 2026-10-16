@@ -5,6 +5,7 @@
 #pragma once
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
@@ -137,6 +138,13 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   std::unique_ptr<SlotStats[]> slots_stats;
   PrimeTable::Cursor expire_cursor;
   PrimeTable::Cursor segment_defrag_cursor;
+
+  // Keys with a currently open DbSlice::AutoUpdater window (see pending_tiered_deltas).
+  absl::flat_hash_set<std::string> open_autoupdater_keys;
+
+  // Deltas an async tiered completion (list-node stash/load) applied directly while an
+  // AutoUpdater window was open for that key; AutoUpdater::Run() nets these out.
+  absl::flat_hash_map<std::string, int64_t> pending_tiered_deltas;
 
   struct SampleTopKeys {
     TopKeys* top_keys = nullptr;

@@ -308,6 +308,11 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
     AccountSlotTieredBytes(ql->GetKey(), segment.length, table);
     AccountObjectMemory(ql->GetKey(), OBJ_LIST, -int64_t(segment.length), table);
+    // Only record if a command is actually blocked on this key right now; otherwise a later,
+    // unrelated command's Run() would wrongly net out this stale entry.
+    if (table->open_autoupdater_keys.contains(std::string(ql->GetKey()))) {
+      table->pending_tiered_deltas[std::string(ql->GetKey())] -= int64_t(segment.length);
+    }
   }
 
   // If any backpressure (throttling) is active, notify that the operation finished
@@ -406,7 +411,13 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
     ++stats_.total_uploads;
     decoder->Upload(node);
-    AccountTieredUpload(node, segment.length, ql->GetKey(), db_slice_.GetDBTable(db_id));
+    DbTable* table = db_slice_.GetDBTable(db_id);
+    int64_t uploaded = int64_t(FragmentRef{*node}.MallocUsed());
+    AccountTieredUpload(node, segment.length, ql->GetKey(), table);
+    // See the matching comment in SetExternal above.
+    if (table->open_autoupdater_keys.contains(std::string(ql->GetKey()))) {
+      table->pending_tiered_deltas[std::string(ql->GetKey())] += uploaded;
+    }
     return true;
   }
 
