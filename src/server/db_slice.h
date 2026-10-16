@@ -34,8 +34,9 @@ class BlockingController;
 using facade::OpResult;
 
 // Applies a delta to the per-db/per-type counters and to the owning slot's memory_bytes.
-// All of them track resident RAM.
-void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db);
+// All of them track resident RAM. A set `slot` must equal KeySlot(key) and spares computing it.
+void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db,
+                         std::optional<SlotId> slot = std::nullopt);
 
 // Applies a delta to the owning slot's tiered_bytes - disk bytes held by the slot's entries.
 void AccountSlotTieredBytes(std::string_view key, int64_t delta, DbTable* db);
@@ -205,9 +206,16 @@ class DbSlice {
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
       CompactObjType orig_obj_type = 0;
+
+      // KeySlot(key), computed at most once and only if per-slot stats are tracked.
+      std::optional<SlotId> slot;
     };
 
-    AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
+    AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice,
+                std::optional<SlotId> slot = std::nullopt);
+
+    // Returns KeySlot(key) if `table` tracks per-slot stats, nullopt otherwise.
+    std::optional<SlotId> StatsSlot(const DbTable& table);
 
     friend class DbSlice;
 
@@ -608,7 +616,8 @@ class DbSlice {
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, const Iterator& it);
-  void PostUpdate(DbIndex db_ind, std::string_view key);
+  // `slot` is KeySlot(key) if per-slot stats are tracked; computed here if not provided.
+  void PostUpdate(DbIndex db_ind, std::string_view key, std::optional<SlotId> slot);
 
   OpResult<ItAndUpdater> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                              PrimeValue obj, uint64_t expire_at_ms,
