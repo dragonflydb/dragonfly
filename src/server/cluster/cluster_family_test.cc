@@ -1361,6 +1361,26 @@ TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
   }
 }
 
+TEST_F(ClusterFamilyTest, FlushSlotsNamespaceAware) {
+  ConfigSingleNodeCluster(GetMyId());
+
+  EXPECT_EQ(Run({"SET", "k1", "val_default"}), "OK");
+  const string slot = absl::StrCat(CheckedInt({"CLUSTER", "KEYSLOT", "k1"}));
+
+  // Run() resets the connection namespace, so AUTH does not affect the next command.
+  EXPECT_EQ(RunInNamespace("tenant", {"SET", "k1", "val_tenant"}), "OK");
+  EXPECT_EQ(RunInNamespace("tenant", {"GET", "k1"}), "val_tenant");
+  EXPECT_EQ(Run({"GET", "k1"}), "val_default");
+
+  auto tenant_slot_info = RunInNamespace("tenant", {"DFLYCLUSTER", "GETSLOTINFO", "SLOTS", slot});
+  EXPECT_EQ(tenant_slot_info.GetVec()[0].GetVec()[2].GetInt(), 1);
+
+  EXPECT_EQ(RunInNamespace("tenant", {"DFLYCLUSTER", "FLUSHSLOTS", slot, slot}), "OK");
+
+  EXPECT_THAT(RunInNamespace("tenant", {"GET", "k1"}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(Run({"GET", "k1"}), "val_default");
+}
+
 // Regression: FlushSlots launches an async fiber. Entries inserted after FlushSlots returns
 // but before the fiber runs must survive, because they were created after the flush was
 // initiated. The bug was that RegisterOnChange (which captures the version threshold) ran

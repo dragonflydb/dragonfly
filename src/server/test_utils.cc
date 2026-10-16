@@ -449,6 +449,27 @@ RespExpr BaseFamilyTest::Run(std::string_view command) {
   return Run(command_list);
 }
 
+RespExpr BaseFamilyTest::RunInNamespace(std::string_view ns,
+                                        std::initializer_list<const std::string_view> list) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->RunInNamespace(ns, list); });
+  }
+  string id = GetId();
+  TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
+  conn_wrapper->conn()->SetPrivileged(true);
+  CmdArgVec args = conn_wrapper->Args(ArgSlice{list.begin(), list.size()});
+  ConnectionContext* context = conn_wrapper->cmd_cntx();
+  context->ns = &namespaces->GetOrInsert(ns);
+  DCHECK(context->transaction == nullptr) << id;
+  CommandContext cmd_cntx;
+  cmd_cntx.Init(conn_wrapper->builder(), context);
+  cmd_cntx.Assign(args.begin(), args.end(), args.size());
+  service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
+  DCHECK(context->transaction == nullptr);
+  conn_wrapper->conn()->SetPrivileged(false);
+  return conn_wrapper->ParseResponse(single_response_);
+}
+
 RespExpr BaseFamilyTest::RunPrivileged(std::initializer_list<const std::string_view> list) {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->RunPrivileged(list); });

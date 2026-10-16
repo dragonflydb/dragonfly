@@ -92,6 +92,9 @@ class BaseFamilyTest : public ::testing::Test {
   // Use for running commands which are allowed only when using admin connection.
   RespExpr RunPrivileged(std::initializer_list<const std::string_view> list);
 
+  // Run() forces the default namespace. This runs one privileged command in ns.
+  RespExpr RunInNamespace(std::string_view ns, std::initializer_list<const std::string_view> list);
+
   RespExpr Run(ArgSlice list);
   RespExpr Run(absl::Span<const std::string> list);
 
