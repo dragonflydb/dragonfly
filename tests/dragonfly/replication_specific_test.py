@@ -226,11 +226,15 @@ async def test_save_with_replication(df_factory, action_during_save):
 
     if action_during_save == "disconnect":
         await c_replica.execute_command("replicaof no one")
+        assert await is_saving(c_replica)
+        await save_task
     else:
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        # Full sync enters LOADING, which cancels the in-progress save.
+        with pytest.raises(aioredis.ResponseError, match="Operation canceled"):
+            await save_task
+        await wait_available_async(c_replica)
 
-    assert await is_saving(c_replica)
-    await save_task
     assert not await is_saving(c_replica)
 
 

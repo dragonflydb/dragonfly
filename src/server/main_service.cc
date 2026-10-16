@@ -2974,6 +2974,11 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
       DCHECK(db.IsLoadRefCountZero());
     }
   });
+  if (to == GlobalState::LOADING) {
+    // Unblocking waits for in-flight connection migrations, so it can't run in Await() above.
+    server_family_.UnblockAllClients();
+    server_family_.CancelSave();
+  }
   return prev;
 }
 
