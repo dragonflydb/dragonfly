@@ -1392,6 +1392,10 @@ OpStatus ShardDocIndices::DeleteAlias(string_view alias) {
   return OK;
 }
 
+vector<pair<string, string>> ShardDocIndices::GetAliases() const {
+  return {aliases_.begin(), aliases_.end()};
+}
+
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
                                 shared_ptr<const DocIndex> index_ptr, bool is_journal) {
   auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr), &hash_index_count_);
