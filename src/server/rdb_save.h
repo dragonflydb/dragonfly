@@ -178,6 +178,7 @@ class RdbSaver {
   struct GlobalData {
     const StringVec lua_scripts;      // bodies of lua scripts
     const StringVec search_indices;   // ft.create commands to re-create search indices
+    const StringVec search_aliases;   // binary-safe RESP alias/target pairs
     const StringVec search_synonyms;  // ft.synupdate commands to restore synonyms
     size_t table_used_memory = 0;     // total memory used by all tables in all shards
   };

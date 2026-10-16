@@ -3100,6 +3100,14 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
       return RdbError(errc::unsupported_operation);
     }
 
+    if (absl::EqualsIgnoreCase(entry.cmd[0], "FT.ALIASADD") ||
+        absl::EqualsIgnoreCase(entry.cmd[0], "FT.ALIASUPDATE") ||
+        absl::EqualsIgnoreCase(entry.cmd[0], "FT.ALIASDEL")) {
+      // Alias metadata comes from the summary flow; other flows may have newer mutations to
+      // replay before restoration. Retry full sync from a fresh snapshot.
+      return RdbError(errc::unsupported_operation);
+    }
+
     DVLOG(2) << "Executing item: " << entry.ToString();
     journal_executor_->Execute(entry.dbid, entry.cmd);
   }
@@ -3178,6 +3186,9 @@ error_code RdbLoader::HandleAux() {
     /* Just ignored. */
   } else if (auxkey == "search-index") {
     LoadSearchIndexDefFromAux(std::move(auxval));
+  } else if (auxkey == "search-alias") {
+    if (!LoadSearchAliasFromAux(service_, auxval))
+      return RdbError(errc::rdb_file_corrupted);
   } else if (auxkey == "search-synonyms") {
     LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
