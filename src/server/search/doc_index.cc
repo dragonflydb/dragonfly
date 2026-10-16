@@ -1425,6 +1425,7 @@ unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
 }
 
 void ShardDocIndices::DropAllIndices() {
+  aliases_.clear();
   // Move indices out before destroying — ShardDocIndex destructors can yield
   // (CancelBuilder joins a fiber), and destroying inside the map would trigger
   // Abseil's reentrance assert if the heartbeat iterates indices_ mid-clear.
@@ -1443,6 +1444,8 @@ std::vector<std::string> ShardDocIndices::DropUnbuiltIndices() {
     if (!index->indices_)
       names.push_back(name);
   }
+  absl::erase_if(aliases_,
+                 [&](const auto& entry) { return rng::find(names, entry.second) != names.end(); });
   for (const auto& name : names) {
     auto index = DropIndex(name);
     DCHECK(index);
