@@ -324,6 +324,10 @@ class ServerFamily {
 
   void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
+  // On promotion (REPLICAOF NO ONE / REPLTAKEOVER) start a new lineage rooted at this node by
+  // journaling a LINEAGE marker that propagates down the replica subtree.
+  void ForkLineage() ABSL_EXCLUSIVE_LOCKS_REQUIRED(replicaof_mu_);
+
   struct LoadOptions {
     std::string snapshot_id;
     uint32_t shard_count = 0;      // Shard count of the snapshot being loaded.

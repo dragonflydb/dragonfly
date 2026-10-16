@@ -29,6 +29,7 @@ extern "C" {
 #include "facade/reply_capture.h"
 #include "facade/resp_parser.h"
 #include "facade/socket_utils.h"
+#include "server/dflycmd.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/journal.h"
@@ -439,6 +440,7 @@ std::error_code Replica::HandleCapaDflyResp(const RESPArray& args) {
   }
 
   // If our master is itself a replica (cascaded), parse lineage id (grandparent id)
+  std::string prev_lineage_id = GetLineageId();
   if (args.Size() >= 5) {
     auto lineage_id = ReplyString(args[4]);
     PC_RETURN_ON_BAD_RESPONSE(lineage_id.has_value());
@@ -453,6 +455,16 @@ std::error_code Replica::HandleCapaDflyResp(const RESPArray& args) {
     PC_RETURN_ON_BAD_RESPONSE(announced_ip && announced_port);
     PC_RETURN_ON_BAD_RESPONSE(*announced_port >= 0 && *announced_port <= UINT16_MAX);
     master_context_.announced = {string(*announced_ip), static_cast<uint16_t>(*announced_port)};
+  }
+
+  // The master's lineage changed since we last synced with it (e.g. it re-pointed to another
+  // master and full synced), so its data no longer continues ours: drop the saved LSNs.
+  if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
+    if (!prev_lineage_id.empty() && prev_lineage_id != master_context_.lineage_id) {
+      VLOG(1) << "Lineage changed from " << prev_lineage_id << ", disabling partial sync";
+      last_journal_LSNs_.reset();
+    }
+    forked_lineage_ = std::string{};
   }
 
   VLOG(1) << "Master id: " << master_context_.master_repl_id
@@ -596,7 +608,8 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
     }
     shard_flows_[i].reset(new DflyShardReplica(server(), master_context_, i, &service_,
-                                               multi_shard_exe_, load_context.get()));
+                                               multi_shard_exe_, load_context.get(),
+                                               &forked_lineage_));
     if (partial_sync_lsn > 0) {
       shard_flows_[i]->SetRecordsExecuted(partial_sync_lsn);
     }
@@ -693,6 +706,11 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
                                     "Failed to enter LOADING state");
       }
       sync_type = "full";
+
+      // Our dataset and LSN space are replaced, so sub-replicas (cascaded replication) can't
+      // continue their stream. Drop them; they reconnect once we leave LOADING and full sync.
+      if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync))
+        service_.server_family().GetDflyCmd()->CancelReplicas();
 
       DVLOG(1) << "Calling Flush on all slots " << this;
 
@@ -1169,6 +1187,15 @@ void DflyShardReplica::StableSyncDflyReadFb(ExecutionState* cntx) {
         // if journal is active.
         journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
       }
+    } else if (tx_data.opcode == journal::Op::LINEAGE) {
+      // One of our ancestors forked the lineage and updated us with the new roots master id
+      string_view new_lineage_id = tx_data.command.Front();
+      *forked_lineage_ = string(new_lineage_id);
+      journal_rec_executed_.fetch_add(1, std::memory_order_relaxed);
+
+      if (EngineShard::tlocal() && EngineShard::tlocal()->journal()) {  // pass further
+        journal::RecordEntry(0, journal::Op::LINEAGE, 0, nullopt, {new_lineage_id, ArgSlice{}});
+      }
     } else {
       const bool is_successful = applier_->Apply(std::move(tx_data), cntx);
       if (is_successful) {
@@ -1263,10 +1290,12 @@ void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
 DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext master_context,
                                    uint32_t flow_id, Service* service,
                                    std::shared_ptr<MultiShardExecution> multi_shard_exe,
-                                   RdbLoadContext* load_context)
+                                   RdbLoadContext* load_context,
+                                   cmn::ThreadSafeValue<std::string>* forked_lineage)
     : ProtocolClient(server_context),
       service_(*service),
       master_context_(master_context),
+      forked_lineage_(forked_lineage),
       flow_id_(flow_id) {
   auto log_cmd = [](const TransactionData& tx) {
     facade::Connection::LogReplicaCommand(tx.command, tx.dbid);
