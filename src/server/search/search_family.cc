@@ -349,6 +349,7 @@ constexpr std::array<const std::string_view, 1> kIgnoredOptionsWithArg = {"PHONE
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
   auto& schema = index->schema;
+  const size_t existing = schema.field_names.size();  // FT.ALTER parses into the live definition
 
   if (!parser->HasNext()) {
     return CreateSyntaxError("Fields arguments are missing"sv);
@@ -383,10 +384,11 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
     if (schema.field_names.contains(field_alias)) {
       return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_alias));
     }
-    // Same identifier may appear twice on HASH (e.g. one TAG spec + one TEXT spec with
-    // different aliases). On JSON, a bare identifier expands to $.<id> and would silently
-    // shadow an earlier $.<id> spec; reject that collision instead of last-write-wins.
-    if (index->type == DocIndex::JSON && schema.fields.contains(field_path)) {
+    // Several attributes on one field are not accepted yet: never on JSON, and not through
+    // FT.ALTER on HASH (FT.CREATE keeps the last declaration, as before).
+    if (auto it = schema.fields.find(field_path);
+        it != schema.fields.end() &&
+        (index->type == DocIndex::JSON || it->second.number < existing)) {
       return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_path));
     }
 
@@ -442,7 +444,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       flags |= *flag;
     }
 
-    schema.fields[field_path] = {field_type, flags, string{field_alias}, params};
+    const uint32_t number = schema.field_names.size();
+    schema.fields[field_path] = {field_type, flags, string{field_alias}, params, number};
     schema.field_names[field_alias] = field_path;
   }
 
@@ -2758,26 +2761,16 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("Index not found");
   }
 
-  // Parse additional schema
-  DocIndex new_index{};
-  new_index.type = index_info->type;
-  auto parse_result = ParseSchema(&parser, &new_index);
+  // Parse the additional attributes into the copied definition: they continue its declaration
+  // order, and an alias or field that already exists fails here, before any shard is touched.
+  auto parse_result = ParseSchema(&parser, index_info.get());
   if (SendErrorIfOccurred(parse_result, &parser, cmd_cntx)) {
     cmd_cntx->tx()->Conclude();
     return;
   }
 
-  auto& new_fields = new_index.schema;
-
-  // For logging we copy the whole schema
-  // TODO: Use a more efficient way for logging
-  LOG(INFO) << "Adding "
-            << DocIndexInfo{.base_index = new_index, .hnsw_metadata = {}}.BuildRestoreCommand();
-
-  // Merge schemas
-  search::Schema& schema = index_info->schema;
-  schema.fields.insert(new_fields.fields.begin(), new_fields.fields.end());
-  schema.field_names.insert(new_fields.field_names.begin(), new_fields.field_names.end());
+  LOG(INFO) << "Altering " << idx_name << ": "
+            << DocIndexInfo{.base_index = *index_info, .hnsw_metadata = {}}.BuildRestoreCommand();
 
   // Rebuild index
   // TODO: Introduce partial rebuild
@@ -2946,7 +2939,8 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());
-  for (const auto& [field_ident, field_info] : schema.fields) {
+  for (const auto& [field_ident, field_ptr] : schema.Ordered()) {
+    const auto& field_info = *field_ptr;
     vector<string> info;
 
     string_view base[] = {"identifier"sv, string_view{field_ident},

@@ -9039,6 +9039,28 @@ TEST_F(SearchFamilyTest, TextWeightsInfoAndScoring) {
   EXPECT_GT(std::stod(vals[2].GetString()), std::stod(vals[4].GetString()));
 }
 
+// FT.INFO lists attributes in declaration order, also after a repeated HASH identifier, and
+// FT.ALTER appends to it; an attribute whose alias or field already exists is rejected before
+// any rebuild.
+TEST_F(SearchFamilyTest, AlterKeepsDeclarationOrder) {
+  EXPECT_EQ(Run({"FT.CREATE", "ox", "ON", "HASH", "SCHEMA", "zeta", "TEXT", "zeta", "AS", "z2",
+                 "TAG", "alpha", "NUMERIC"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.ALTER", "ox", "SCHEMA", "ADD", "beta", "TEXT"}), "OK");
+  EXPECT_THAT(Run({"FT.ALTER", "ox", "SCHEMA", "ADD", "other", "AS", "alpha", "TEXT"}),
+              ErrArg("Duplicate field in schema - alpha"));
+  EXPECT_THAT(Run({"FT.ALTER", "ox", "SCHEMA", "ADD", "zeta", "AS", "z3", "TEXT"}),
+              ErrArg("Duplicate field in schema - zeta"));
+  auto attributes = [&] {
+    vector<string> out;
+    auto info = Run({"FT.INFO", "ox"});
+    for (const auto& attr : info.GetVec()[7].GetVec())
+      out.push_back(string{attr.GetVec()[3].GetString()});
+    return out;
+  };
+  EXPECT_EQ(attributes(), (vector<string>{"z2", "alpha", "beta"}));
+}
+
 TEST_F(SearchFamilyTest, AlterTextWeight) {
   Run({"HSET", "d:1", "title", "hello", "body", "weighted"});
   EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
