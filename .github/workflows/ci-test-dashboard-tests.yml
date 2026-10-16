@@ -1,0 +1,29 @@
+name: CI Dashboard Tests
+
+on:
+  pull_request:
+    paths:
+      - "tools/ci_test_dashboard/**/*.py"
+      - ".github/scripts/publish-ci-dashboard-site-to-s3.py"
+      - ".github/workflows/ci-test-dashboard-tests.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Run dashboard tests
+        run: python3 -m unittest discover -b -s tools/ci_test_dashboard
