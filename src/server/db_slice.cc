@@ -14,8 +14,6 @@ extern "C" {
 #include "redis/hyperloglog.h"
 }
 
-#include <absl/cleanup/cleanup.h>
-
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/top_keys.h"
@@ -111,10 +109,6 @@ class PrimeEvictionPolicy {
     return checked_;
   }
 
-  std::vector<std::string>& expired_events() {
-    return expired_events_;
-  }
-
  private:
   DbSlice* db_slice_;
   ssize_t mem_offset_;
@@ -123,7 +117,6 @@ class PrimeEvictionPolicy {
 
   unsigned evicted_ = 0;
   unsigned checked_ = 0;
-  std::vector<std::string> expired_events_;
 
   // unlike static constexpr can_evict, this parameter tells whether we can evict
   // items in runtime.
@@ -206,8 +199,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
         // it already accessed is not expired from this GC's point of view. Locks held by
         // queued (not yet running) transactions don't matter - they hold no references, and
         // for them the key just expired a moment earlier.
-        if (db_slice_->TryExpire(cntx_, bucket_it, &expired_events_) ==
-            DbSlice::ExpireResult::Deleted)
+        if (db_slice_->TryExpire(cntx_, bucket_it) == DbSlice::ExpireResult::Deleted)
           ++res;
       }
     }
@@ -701,11 +693,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   TouchValuesHistogramIfNeeded(it->second, db.sample_values_hist);
 
   if (it->first.HasExpire()) {
-    vector<string> events;
-    ExpireResult res = TryExpire(cntx, it, &events);
-    // Not in an atomic section, safe to send now.
-    if (!events.empty())
-      SendExpiredKeyEvents(cntx.db_index, events);
+    ExpireResult res = TryExpire(cntx, it);
 
     // If expiry is paused, hide expired keys from read lookups. Mutable lookups must still see
     // them: the entry is physically present, and reporting it missing would make AddOrFind insert
@@ -714,8 +702,8 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
         (res == ExpireResult::ExpiryPaused && stats_mode == UpdateStatsMode::kReadStats)) {
       events_.misses += miss_weight;
 
-      // TryExpire may suspend on the journal append and SendExpiredKeyEvents may suspend too,
-      // and a flush may have replaced the table meanwhile, so do not use `db`.
+      // TryExpire may suspend on the journal append, and a flush may have replaced the table
+      // meanwhile, so do not use `db`.
       db_arr_[cntx.db_index]->stats.events.misses += miss_weight;
       return OpStatus::KEY_NOTFOUND;
     }
@@ -878,12 +866,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   PrimeIterator it;
 
   ssize_t table_before = db.prime.mem_usage();
-
-  // GarbageCollect runs inside InsertNew, an atomic section: send its events later.
-  absl::Cleanup queue_gc_events = [&] {
-    if (!evp.expired_events().empty())
-      QueueExpiredKeyEvents(cntx.db_index, std::move(evp.expired_events()));
-  };
 
   try {
     it = db.prime.InsertNew(key, PrimeValue{}, evp);
@@ -1537,9 +1519,7 @@ bool DbSlice::AllowExpiredDeletions() const {
   return expire_allowed_ && !(owner_->IsReplica() && !absl::GetFlag(FLAGS_replica_delete_expired));
 }
 
-auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it, vector<string>* events) const
-    -> ExpireResult {
-  DCHECK(events);
+auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it) const -> ExpireResult {
   if (!it->first.IsExpired(cntx.time_now_ms))
     return ExpireResult::Valid;
 
@@ -1550,9 +1530,7 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it, vector<string>* e
   string_view key = it->first.GetSlice(&scratch);
 
   RecordExpiryBlocking(cntx.db_index, key);
-
-  if (expired_keys_events_recording_)
-    events->emplace_back(key);
+  QueueExpiredKeyEvent(cntx.db_index, key);
 
   // Route through DelAtomic so that expiry runs the same per-type hooks as an explicit DEL.
   auto& db = db_arr_[cntx.db_index];
@@ -1567,17 +1545,13 @@ void DbSlice::SendExpiredKeyEvents(DbIndex db_index, const vector<string>& keys)
   channel_store->SendMessages(absl::StrCat("__keyevent@", db_index, "__:expired"), keys, false);
 }
 
-void DbSlice::QueueExpiredKeyEvents(DbIndex db_index, vector<string> keys) {
-  DCHECK(!keys.empty());
-  if (pending_expired_events_.empty() || pending_expired_events_.back().first != db_index) {
-    pending_expired_events_.emplace_back(db_index, std::move(keys));
-  } else {
-    auto& pending = pending_expired_events_.back().second;
-    pending.insert(pending.end(), make_move_iterator(keys.begin()), make_move_iterator(keys.end()));
-  }
+void DbSlice::QueueExpiredKeyEventSlow(DbIndex db_index, string_view key) const {
+  if (pending_expired_events_.empty() || pending_expired_events_.back().first != db_index)
+    pending_expired_events_.emplace_back(db_index, vector<string>{});
+  pending_expired_events_.back().second.emplace_back(key);
 }
 
-void DbSlice::SendQueuedExpiredKeyEvents() {
+void DbSlice::SendQueuedExpiredKeyEventsSlow() {
   // SendExpiredKeyEvents may suspend and more events may be queued meanwhile.
   while (!pending_expired_events_.empty()) {
     auto pending = std::move(pending_expired_events_);
@@ -1592,7 +1566,6 @@ void DbSlice::ExpireAllIfNeeded() {
   // we don't preempt in TryExpire
   WaitForUnblockedJournalWrites();
 
-  vector<vector<string>> per_db_events(db_arr_.size());
   {
     // Disable flush journal changes to prevent preemtion in traverse.
     journal::DisableFlushGuard journal_flush_guard;
@@ -1603,8 +1576,7 @@ void DbSlice::ExpireAllIfNeeded() {
       auto& db = *db_arr_[db_index];
 
       auto cb = [&](PrimeTable::iterator prime_it) {
-        TryExpire(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it,
-                  &per_db_events[db_index]);
+        TryExpire(Context{nullptr, db_index, GetCurrentTimeMs()}, prime_it);
       };
 
       PrimeTable::Cursor cursor;
@@ -1614,11 +1586,7 @@ void DbSlice::ExpireAllIfNeeded() {
     }
   }
 
-  for (DbIndex i = 0; i < per_db_events.size(); ++i) {
-    if (per_db_events[i].empty())
-      continue;
-    SendExpiredKeyEvents(i, per_db_events[i]);
-  }
+  SendQueuedExpiredKeyEvents();
 }
 
 void DbSlice::RegisterOnChange(ChangeConsumerInterface* consumer) {
@@ -1706,7 +1674,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     }
 
     result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
-    TryExpire(cntx, it, &result.key_events);
+    TryExpire(cntx, it);
     ++result.deleted;
   };
 
@@ -1739,8 +1707,7 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
 
 pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, const Context& cntx,
                                                               size_t starting_segment_id,
-                                                              size_t increase_goal_bytes,
-                                                              vector<string>* key_events) {
+                                                              size_t increase_goal_bytes) {
   // Disable flush journal changes to prevent preemtion
   journal::DisableFlushGuard journal_flush_guard;
   FiberAtomicGuard guard;
@@ -1815,9 +1782,7 @@ finish:
   // send the deletion to the replicas.
   for (string_view key : keys_to_journal) {
     RecordExpiryBlocking(db_ind, key);
-
-    if (expired_keys_events_recording_ && key_events)
-      key_events->emplace_back(key);
+    QueueExpiredKeyEvent(db_ind, key);
   }
 
   // This might not always be atomic on exceptional cases -- see comments on the function
@@ -1961,7 +1926,7 @@ void DbSlice::SendQueuedInvalidationMessagesCb(const TrackingMap& track_map,
   }
 }
 
-void DbSlice::SendQueuedInvalidationMessages() {
+void DbSlice::SendQueuedInvalidationMessagesSlow() {
   // We run while loop because when we block below, we might have new items added to
   // pending_send_map_.
   while (!pending_send_map_.empty()) {

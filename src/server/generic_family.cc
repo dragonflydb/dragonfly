@@ -678,13 +678,12 @@ bool MatchAndAppendKey(const CompactKey& key, const ScanOpts& opts, ScanResult* 
   return true;
 }
 
-bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, ScanResult* res,
-            vector<string>* expired_events) {
+bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts, ScanResult* res) {
   auto& db_slice = op_args.GetDbSlice();
 
   // Passing the raw iterator is safe: OpScan prevents preemption for the whole traversal.
   // clang-format off
-  switch (db_slice.TryExpire(op_args.db_cntx, prime_it, expired_events)) {
+  switch (db_slice.TryExpire(op_args.db_cntx, prime_it)) {
     case DbSlice::ExpireResult::Valid:
       break;
     // Hide expired keys when expiry is paused, except for mutation commands.
@@ -746,21 +745,18 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   // Approximately 30 microseconds.
   const uint64_t timeout_cycles = base::CycleClock::Frequency() >> 15;
 
-  vector<string> expired_events;
   {
     // Disable flush journal changes to prevent preemption in traverse.
     journal::DisableFlushGuard journal_flush_guard;
     do {
-      cur = prime_table->Traverse(cur, [&](PrimeIterator it) {
-        cnt += ScanCb(op_args, it, scan_opts, vec, &expired_events);
-      });
+      cur = prime_table->Traverse(
+          cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
     } while (cur && cnt < scan_opts.limit &&
              (base::CycleClock::Now() - start_cycles) < timeout_cycles);
   }
 
   // Outside the atomic section: sending may suspend.
-  if (!expired_events.empty())
-    db_slice.SendExpiredKeyEvents(op_args.db_cntx.db_index, expired_events);
+  db_slice.SendQueuedExpiredKeyEvents();
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.token();
   *cursor = cur.token();
