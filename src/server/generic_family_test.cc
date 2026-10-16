@@ -2823,16 +2823,15 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
   Run({"expire", "mykey", "1"});
   AdvanceTime(1100);
 
-  // Drive expiry the same way the heartbeat does: DeleteExpiredStep returns events,
+  // Drive expiry the same way the heartbeat does: DeleteExpiredStep queues events,
   // which are sent outside the atomic section (see issue #7052).
   shard_set->RunBlockingInParallel([](EngineShard* shard) {
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     DbContext db_cntx;
     db_cntx.db_index = 0;
     db_cntx.time_now_ms = TEST_current_time_ms;
-    DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, 100);
-    if (!stats.key_events.empty())
-      channel_store->SendMessages("__keyevent@0__:expired", stats.key_events, false);
+    db_slice.DeleteExpiredStep(db_cntx, 100);
+    db_slice.SendQueuedExpiredKeyEvents();
   });
 
   // Flush all async dispatch callbacks so the subscriber's thread receives the message.
