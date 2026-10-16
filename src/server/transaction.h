@@ -227,12 +227,15 @@ class Transaction {
   // or b) tp is reached. If tp is time_point::max() then waits indefinitely.
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
+  // With reserve_all_ready, every watched key that is ready on the waking shard is reserved for
+  // this transaction (see IsWakeKey), for commands that consume all of them, like XREADGROUP.
+  // Otherwise only the key that woke it is, so other waiters on the rest wake in parallel.
   facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeys keys, KeyReadyChecker krc,
-                               facade::ConnectionContext* cntx);
+                               facade::ConnectionContext* cntx, bool reserve_all_ready = false);
 
   // Called when this transaction heads the watch queue of a ready key on shard sid. Returns true
-  // if this call woke it, which reserves the key for it. Returns false if it was already woken
-  // (or cancelled) and can be dropped from the queue.
+  // if the key is reserved for it: either this call woke it, or this shard already did and the
+  // transaction reserves all ready keys. Returns false if it can be dropped from the queue.
   bool NotifySuspended(ShardId sid);
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
@@ -298,7 +301,7 @@ class Transaction {
   // Whether key was reserved for this blocking transaction when this shard woke it.
   bool IsWakeKey(ShardId sid, std::string_view key) const;
 
-  // If blocking tx was woken up on this shard, the key reserved for it.
+  // If blocking tx was woken up on this shard, the first reserved key in argument order.
   std::optional<std::string_view> GetWakeKey(ShardId sid) const;
 
   // Get OpArgs for specific shard
@@ -666,6 +669,9 @@ class Transaction {
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};
+
+  // Set by WaitOnWatch before registering the watches, read by shards in NotifySuspended.
+  bool reserve_all_ready_ = false;
 
   // Stores status if COORD_CANCELLED was set. Apart from cancelled, it can be moved for cluster
   // changes

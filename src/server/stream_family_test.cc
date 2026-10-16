@@ -1042,6 +1042,120 @@ TEST_F(StreamFamilyTest, XReadGroupBlockHonorsCount) {
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(2)));
 }
 
+// Repro for #8071: a blocked multi-stream read woken by a transaction that makes several of its
+// streams ready must return all of them.
+TEST_F(StreamFamilyTest, XReadBlockMultiStreamWakeSameShard) {
+  const unsigned num_shards = shard_set->size();
+  string s1 = "s1", s2;
+  for (unsigned i = 2; s2.empty(); ++i) {
+    string candidate = absl::StrCat("s", i);
+    if (Shard(candidate, num_shards) == Shard(s1, num_shards))
+      s2 = candidate;
+  }
+
+  for (bool group : {false, true}) {
+    Run({"del", s1, s2});
+    Run({"xgroup", "create", s1, "g", "0", "MKSTREAM"});
+    Run({"xgroup", "create", s2, "g", "0", "MKSTREAM"});
+
+    RespExpr resp;
+    auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+      if (group)
+        resp = Run({"xreadgroup", "group", "g", "c", "block", "0", "streams", s1, s2, ">", ">"});
+      else
+        resp = Run({"xread", "block", "0", "streams", s1, s2, "$", "$"});
+    });
+    ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+    pp_->at(1)->Await([&] {
+      Run({"multi"});
+      Run({"xadd", s1, "1-0", "f", "one"});
+      Run({"xadd", s2, "1-0", "f", "two"});
+      return Run({"exec"});
+    });
+    reader.Join();
+
+    ASSERT_THAT(resp, ArrLen(2)) << "group=" << group;
+    EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre(s1, ArrLen(1))) << "group=" << group;
+    EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre(s2, ArrLen(1))) << "group=" << group;
+    if (group) {
+      EXPECT_THAT(Run({"xpending", s1, "g"}), RespElementsAre(IntArg(1), _, _, _));
+      EXPECT_THAT(Run({"xpending", s2, "g"}), RespElementsAre(IntArg(1), _, _, _));
+    }
+  }
+}
+
+// Two consumers of one group: A waits on s1+s2, B on s2 only. Reservation must never wake B to an
+// empty read, whichever of them heads the s2 queue.
+TEST_F(StreamFamilyTest, XReadGroupBlockMultiStreamWakeNoSteal) {
+  const unsigned num_shards = shard_set->size();
+  string s1 = "s1", s2;
+  for (unsigned i = 2; s2.empty(); ++i) {
+    string candidate = absl::StrCat("s", i);
+    if (Shard(candidate, num_shards) == Shard(s1, num_shards))
+      s2 = candidate;
+  }
+
+  for (bool b_first : {false, true}) {
+    Run({"del", s1, s2});
+    Run({"xgroup", "create", s1, "g", "0", "MKSTREAM"});
+    Run({"xgroup", "create", s2, "g", "0", "MKSTREAM"});
+
+    RespExpr resp_a, resp_b;
+    auto block_a = [&] {
+      return pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+        resp_a =
+            Run("a", {"xreadgroup", "group", "g", "a", "block", "0", "streams", s1, s2, ">", ">"});
+      });
+    };
+    auto block_b = [&] {
+      return pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+        resp_b = Run("b", {"xreadgroup", "group", "g", "b", "block", "0", "streams", s2, ">"});
+      });
+    };
+    util::fb2::Fiber fa, fb;
+    if (b_first) {
+      fb = block_b();
+      ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("b"); }, 500ms));
+      fa = block_a();
+      ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("a"); }, 500ms));
+    } else {
+      fa = block_a();
+      ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("a"); }, 500ms));
+      fb = block_b();
+      ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("b"); }, 500ms));
+    }
+
+    pp_->at(1)->Await([&] {
+      Run({"multi"});
+      Run({"xadd", s1, "1-0", "f", "one"});
+      Run({"xadd", s2, "1-0", "f", "two"});
+      return Run({"exec"});
+    });
+    fa.Join();
+
+    if (b_first) {
+      // B heads s2, so s2 is reserved for B and A only gets s1.
+      fb.Join();
+      ASSERT_THAT(resp_a, ArrLen(1)) << resp_a;
+      EXPECT_THAT(resp_a.GetVec()[0].GetVec(), ElementsAre(s1, ArrLen(1))) << resp_a;
+      EXPECT_THAT(resp_b.GetVec()[0].GetVec(), ElementsAre(s2, ArrLen(1))) << resp_b;
+    } else {
+      // A heads both queues and takes both streams; B stays blocked until s2 grows again.
+      ASSERT_THAT(resp_a, ArrLen(2)) << resp_a;
+      EXPECT_THAT(resp_a.GetVec()[1].GetVec(), ElementsAre(s2, ArrLen(1)));
+      ThisFiber::SleepFor(20ms);
+      EXPECT_TRUE(IsConnBlocked("b"));
+      Run({"xadd", s2, "2-0", "f", "three"});
+      fb.Join();
+      // B gets the new entry, not the one A already consumed.
+      EXPECT_THAT(resp_b.GetVec()[0].GetVec(),
+                  ElementsAre(s2, RespElementsAre(RespElementsAre("2-0", _))))
+          << resp_b;
+    }
+  }
+}
+
 TEST_F(StreamFamilyTest, XReadInvalidArgs) {
   // Invalid COUNT value.
   auto resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});

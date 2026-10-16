@@ -1451,13 +1451,14 @@ ShardArgs Transaction::GetShardArgs(ShardId sid) const {
 }
 
 OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReadyChecker krc,
-                                  facade::ConnectionContext* cntx) {
+                                  facade::ConnectionContext* cntx, bool reserve_all_ready) {
   if (blocking_barrier_.IsClaimed()) {  // Might have been cancelled ahead by a dropping connection
     Conclude();
     return OpStatus::CANCELLED;
   }
 
   DCHECK(!IsAtomicMulti());  // blocking inside MULTI is not allowed
+  reserve_all_ready_ = reserve_all_ready;
 
   // Register keys on active shards blocking controllers and mark shard state as suspended.
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1622,24 +1623,24 @@ bool Transaction::IsGlobal() const {
 }
 
 // Runs only in the shard thread.
-// Returns true if the transacton has changed its state from suspended to awakened,
-// false, otherwise.
 bool Transaction::NotifySuspended(ShardId sid) {
+  auto& sd = shard_data_[SidToId(sid)];
+
+  // This shard already woke us and we have not run yet. Commands that consume every ready key
+  // reserve this one as well; others leave it to the next waiter.
+  if (sd.local_mask & AWAKED_Q)
+    return reserve_all_ready_;
+
   // Wake a transaction only once on the first notify.
   // We don't care about preserving the strict order with multiple operations running on blocking
   // keys in parallel, because the internal order is not observable from outside either way.
   if (!blocking_barrier_.TryClaim())
     return false;
 
-  auto& sd = shard_data_[SidToId(sid)];
-
   DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << sd.local_mask;
 
   // We're the first and only to wake this transaction, expect the shard to be suspended.
   CHECK(sd.local_mask & WAS_SUSPENDED);
-
-  // We wake at most once.
-  CHECK_EQ(sd.local_mask & AWAKED_Q, 0);
 
   // Change state to awaked. The key that woke it stays reserved for it in the blocking controller:
   // its watch queue is ACTIVE with this transaction at the head (see IsWakeKey).

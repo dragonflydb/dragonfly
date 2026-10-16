@@ -3124,12 +3124,14 @@ void XReadBlock(ParsedArgs args, ReadOpts* opts, Transaction* tx, SinkReplyBuild
                                                          : KeyReadyResult::kNotReady;
   };
 
-  if (auto status = tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, cntx);
+  if (auto status =
+          tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, cntx, opts->read_group);
       status != OpStatus::OK)
     return status == OpStatus::UNBLOCKED ? rb->SendError(status) : rb->SendNullArray();
 
-  // Read the streams reserved for us on the waking shard: the stream that woke us. Others may be
-  // reserved for other waiters.
+  // Read the streams on the waking shard. XREADGROUP consumes what it reads, so it only reads the
+  // streams reserved for it; others may be reserved for other consumers of the group. A plain
+  // XREAD consumes nothing and reads all of them.
   vector<RecordVec> results(opts->stream_ids.size());
   OpStatus wake_status = OpStatus::OK;
 
@@ -3262,12 +3264,18 @@ void XReadBlock(ParsedArgs args, ReadOpts* opts, Transaction* tx, SinkReplyBuild
     const OpArgs op_args = t->GetOpArgs(shard);
     const ShardArgs keys = t->GetShardArgs(sid);
 
+    if (!opts->read_group) {
+      vector<RecordVec> shard_results = OpRead(op_args, keys, *opts);
+      size_t i = 0;
+      for (auto it = keys.begin(); it != keys.end(); ++it)
+        results[it.index() - opts->streams_arg] = std::move(shard_results[i++]);
+      return OpStatus::OK;
+    }
+
     // Validates the woken keys too, so the action hop never trusts a stale group pointer.
-    if (opts->read_group) {
-      if (OpStatus status = validate_shard_keys(op_args, keys); status != OpStatus::OK) {
-        wake_status = status;
-        return OpStatus::OK;
-      }
+    if (OpStatus status = validate_shard_keys(op_args, keys); status != OpStatus::OK) {
+      wake_status = status;
+      return OpStatus::OK;
     }
 
     for (auto it = keys.begin(); it != keys.end(); ++it) {
