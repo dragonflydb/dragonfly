@@ -834,9 +834,7 @@ void OpScanAndDelete(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t*
     if (!IsValid(it))
       continue;
     db_slice.DelAtomic(op_args.db_cntx, it.GetInnerIt());
-    if (op_args.shard->journal()) {
-      RecordDelete(op_args.db_cntx.db_index, key);
-    }
+    RecordDelete(op_args.db_cntx.db_index, key);
     ++count;
   }
   *deleted += count;

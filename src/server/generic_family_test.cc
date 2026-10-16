@@ -144,6 +144,21 @@ TEST_F(GenericFamilyTest, Expire) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+// An expired key is missing even when a lookup asks for another type.
+TEST_F(GenericFamilyTest, ExpiredKeyOfOtherType) {
+  Run({"hset", "key", "f", "v"});
+  Run({"pexpire", "key", "1"});
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"get", "key"}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(1u, GetMetrics().db_stats[0].events.expired_keys);
+
+  Run({"set", "key", "val", "px", "1"});
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"lpush", "key", "x"}), IntArg(1));
+  EXPECT_EQ(2u, GetMetrics().db_stats[0].events.expired_keys);
+  EXPECT_EQ(Run({"type", "key"}), "list");
+}
+
 TEST_F(GenericFamilyTest, ExpireCornerCases) {
   // EXPIRE / PEXPIRE with non-positive TTL deletes the key immediately and reports success.
   Run({"set", "key", "val"});
