@@ -58,6 +58,9 @@ size_t LsnBufferBytes();
 // Returns the previous mode. See JournalSlice::SetFlushMode.
 bool SetFlushMode(bool allow_flush);
 
+// Returns true if journal flushing is permitted.
+bool GetFlushMode();
+
 // Disables journal flushing and enters a fiber atomic section for its lifetime. Guards nest:
 // each one restores the mode it found, so only the outermost guard re-enables flushing, which
 // throttles journal consumers and may preempt, after the atomic section ends. The mode is
