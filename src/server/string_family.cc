@@ -567,7 +567,7 @@ struct alignas(64) MGetResponse {
   // Starts a new attempt for num_keys keys. Reads issued by previous attempts see the new attempt
   // and write nothing.
   void Reset(size_t num_keys) {
-    ++attempt;
+    ++seq_id;
     err = {};
     resp_arr.clear();
     resp_arr.resize(num_keys);
@@ -584,7 +584,7 @@ struct alignas(64) MGetResponse {
 
   std::unique_ptr<char[]> storage;  // GetResp::value points into it unless borrowed
   size_t capacity = 0;              // size of storage
-  uint32_t attempt = 0;             // bumped at the start of every attempt
+  uint32_t seq_id = 0;              // bumped at the start of every attempt
   std::error_code err;              // tiered read error of the current attempt
   absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
 };
@@ -598,9 +598,9 @@ using SearchMut = SearchKey<DbSlice::Iterator>;
 using SearchConst = SearchKey<DbSlice::ConstIterator>;
 
 template <typename Iter>
-void CollectKeys(MGetResponse* response, BlockingCounter wait_bc, bool is_mc,
-                 MemcacheCmdFlags cmd_flags, const Transaction* t, EngineShard* shard,
-                 SearchKey<Iter> find_op) {
+void CollectKeys(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags,
+                 const Transaction* t, EngineShard* shard, SearchKey<Iter> find_op,
+                 MGetResponse* response) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -667,9 +667,9 @@ void CollectKeys(MGetResponse* response, BlockingCounter wait_bc, bool is_mc,
       // A read orphaned by a newer attempt writes nothing, `next` may point into a freed or reused
       // buffer. Read callbacks and attempts run on the shard thread, and the callback does not
       // suspend, so a new attempt can't start between the check and the write.
-      auto cb = [response, attempt = response->attempt, next,
+      auto cb = [response, cb_seq_id = response->seq_id, next,
                  wait_bc](const io::Result<string_view>& v) mutable {
-        if (attempt == response->attempt) {
+        if (cb_seq_id == response->seq_id) {
           if (v.has_value())
             memcpy(next, v->data(), v->size());
           else
@@ -909,9 +909,8 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   return find_res->it;
 }
 
-void OpMGet(MGetResponse* response, BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags,
-            const Transaction* t, EngineShard* shard,
-            const DbSlice::ExpireParams* gat_params = nullptr) {
+void OpMGet(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags, const Transaction* t,
+            EngineShard* shard, const DbSlice::ExpireParams* gat_params, MGetResponse* response) {
   if (gat_params) {
     SearchMut find_op = [&](string_view key) {
       return FindKeyAndSetExpiry(GetAndTouchParams{
@@ -921,7 +920,7 @@ void OpMGet(MGetResponse* response, BlockingCounter wait_bc, bool is_mc, Memcach
           .key = key,
       });
     };
-    CollectKeys(response, std::move(wait_bc), is_mc, cmd_flags, t, shard, std::move(find_op));
+    CollectKeys(std::move(wait_bc), is_mc, cmd_flags, t, shard, std::move(find_op), response);
     return;
   }
 
@@ -929,7 +928,7 @@ void OpMGet(MGetResponse* response, BlockingCounter wait_bc, bool is_mc, Memcach
     const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
     return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
   };
-  CollectKeys(response, std::move(wait_bc), is_mc, cmd_flags, t, shard, std::move(find_op));
+  CollectKeys(std::move(wait_bc), is_mc, cmd_flags, t, shard, std::move(find_op), response);
 }
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
@@ -1554,7 +1553,7 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
     MGetResponse& resp = mget_resp[sid];
-    OpMGet(&resp, tiering_bc, is_mc, cmd_flags, t, shard, gat_ptr);
+    OpMGet(tiering_bc, is_mc, cmd_flags, t, shard, gat_ptr, &resp);
 
     // Reorder shard resuls based on key indices in commands
     ShardArgs shard_args = t->GetShardArgs(sid);
