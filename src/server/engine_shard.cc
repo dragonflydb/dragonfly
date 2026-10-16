@@ -644,10 +644,8 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
       trans = nullptr;
 
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
-      if (bool concludes = run(continuation_trans_, true); concludes) {
-        continuation_trans_ = nullptr;
-        continuation_debug_id_.clear();
-      } else {
+      // A concluding hop releases the continuation itself (RemoveContTx).
+      if (bool concludes = run(continuation_trans_, true); !concludes) {
         continuation_debug_id_ = continuation_trans_->DebugId(sid);
       }
     }
