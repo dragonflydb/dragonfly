@@ -2517,7 +2517,8 @@ void ZMPopGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_blockin
 
     DCHECK(trans->IsScheduled());  // Checking if the transaction is scheduled before calling
                                    // `WaitOnWatch`
-    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, cntx);
+    auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker,
+                                     WakeMode::kSingleKey, cntx);
 
     if (status != OpStatus::OK) {
       status == OpStatus::UNBLOCKED ? response_builder->SendError(status)

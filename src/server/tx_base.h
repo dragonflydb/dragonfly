@@ -123,6 +123,17 @@ enum class KeyReadyResult {
 using KeyReadyChecker =
     std::function<KeyReadyResult(EngineShard*, const DbContext& context, std::string_view)>;
 
+// Which ready keys a blocking transaction is woken with on the shard that wakes it: the keys
+// reserved for it there (see BlockingController), as reported by Transaction::IsWakeKey.
+enum class WakeMode : uint8_t {
+  // Only the key that woke it; other ready keys go to other waiters. For commands that consume a
+  // single key, like BLPOP.
+  kSingleKey,
+  // Every ready key whose watch queue it heads, for commands that consume all of them, like
+  // XREADGROUP.
+  kAllReadyKeys,
+};
+
 // References arguments in another array.
 using IndexSlice = std::pair<uint32_t, uint32_t>;  // [begin, end)
 

@@ -1033,7 +1033,7 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
   }
 
   // Block
-  auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, cntx);
+  auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, WakeMode::kSingleKey, cntx);
   if (status != OpStatus::OK)
     return status;
 
@@ -1057,7 +1057,8 @@ OpResult<string> BPopPusher::RunPair(time_point tp, Transaction* tx, ConnectionC
   // Therefore we follow the regular flow of watching the key but for the destination shard it
   // will never be triggerred.
   // This allows us to run Transaction::Execute on watched transactions in both shards.
-  if (auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, cntx); status != OpStatus::OK)
+  if (auto status = tx->WaitOnWatch(tp, pop_key_, ListKeyChecker, WakeMode::kSingleKey, cntx);
+      status != OpStatus::OK)
     return status;
 
   return MoveTwoShards(tx, pop_key_, push_key_, popdir_, pushdir_, true);

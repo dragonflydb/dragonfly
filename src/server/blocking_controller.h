@@ -16,6 +16,13 @@ namespace dfly {
 // Used for tracking keys of blocking transactions and properly notifying them.
 // First, keys are marked as watched and associated with an owner transaction. A mutating
 // transaction marks them as touched, and once it concludes, the watching transactions are notified.
+//
+// Each watched key has a FIFO queue of waiting transactions. Notifying wakes the first waiter for
+// which the key is ready and reserves the key for it: the queue turns ACTIVE with the woken
+// transaction at its head, and no other waiter on the key is woken until that transaction
+// concludes. Then the queue is SUSPENDED again and the key is re-checked for the next waiter.
+// The shard also pauses its transaction queue while a woken transaction is pending, so other
+// transactions cannot take the data it was woken for before it runs.
 class BlockingController {
  public:
   explicit BlockingController(EngineShard* owner, Namespace* ns);

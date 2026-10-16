@@ -228,11 +228,11 @@ class Transaction {
   // Expects that the transaction had been scheduled before, and uses Execute(.., true) to register.
   // Returns false if timeout occurred, true if was notified by one of the keys.
   facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeys keys, KeyReadyChecker krc,
-                               facade::ConnectionContext* cntx);
+                               WakeMode wake_mode, facade::ConnectionContext* cntx);
 
   // Called when this transaction heads the watch queue of a ready key on shard sid. Returns true
-  // if this call woke it, which reserves the key for it. Returns false if it was already woken
-  // (or cancelled) and can be dropped from the queue.
+  // if the key is reserved for it: either this call woke it, or this shard already did and the
+  // wake mode is kAllReadyKeys. Returns false if it can be dropped from the queue.
   bool NotifySuspended(ShardId sid);
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
@@ -302,8 +302,8 @@ class Transaction {
   // Runs only in the shard thread, since it queries the shard's BlockingController.
   bool IsWakeKey(ShardId sid, std::string_view key) const;
 
-  // If blocking tx was woken up on this shard, the key reserved for it. Runs only in the shard
-  // thread, like IsWakeKey.
+  // If blocking tx was woken up on this shard, the first reserved key in argument order. Runs only
+  // in the shard thread, like IsWakeKey.
   std::optional<std::string_view> GetWakeKey(ShardId sid) const;
 
   // Get OpArgs for specific shard
@@ -671,6 +671,9 @@ class Transaction {
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};
+
+  // Set by WaitOnWatch before registering the watches, read by shards in NotifySuspended.
+  WakeMode wake_mode_ = WakeMode::kSingleKey;
 
   // Stores status if COORD_CANCELLED was set. Apart from cancelled, it can be moved for cluster
   // changes
