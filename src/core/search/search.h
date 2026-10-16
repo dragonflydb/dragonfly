@@ -188,6 +188,7 @@ class FieldIndices {
 
   BaseIndex* GetIndex(std::string_view field) const;
   BaseSortIndex* GetSortIndex(std::string_view field) const;
+  TextIndex* GetTextIndex(std::string_view field) const;  // nullptr unless a TEXT attribute
   absl::Span<TextIndex* const> GetAllTextIndices() const;
 
   const std::vector<DocId>& GetAllDocs() const;
@@ -214,6 +215,10 @@ class FieldIndices {
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices();
+  // nullptr when the attribute has no index of that kind.
+  std::unique_ptr<BaseIndex> CreateIndex(std::string_view field_ident, const SchemaField& field,
+                                         PMR_NS::memory_resource* mr);
+  static std::unique_ptr<BaseSortIndex> CreateSortIndex(const SchemaField& field);
 
   const Schema& schema_;
   const IndicesOptions& options_;

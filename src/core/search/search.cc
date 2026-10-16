@@ -1063,7 +1063,7 @@ struct StatsCollector {
     if (active_field.empty()) {
       for (auto* idx : indices_->GetAllTextIndices())
         f(idx);
-    } else if (auto* idx = dynamic_cast<TextIndex*>(indices_->GetIndex(active_field)); idx) {
+    } else if (auto* idx = indices_->GetTextIndex(active_field); idx) {
       f(idx);
     }
   }
@@ -1146,70 +1146,68 @@ FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
 
 void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
   for (const auto& [field_ident, field] : schema_.Ordered()) {
-    if ((field->flags & SchemaField::NOINDEX) > 0)
+    if (field->flags & SchemaField::NOINDEX)
       continue;
-
-    unique_ptr<BaseIndex> index;
-    switch (field->type) {
-      case SchemaField::TEXT: {
-        const auto& tparams = std::get<SchemaField::TextParams>(field->special_params);
-        auto idx = make_unique<TextIndex>(
-            mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie, tparams.no_stem,
-            schema_.default_language, schema_.language_field, !options_.no_offsets);
-        idx->set_field_ident(field_ident);
-        text_indices_.push_back(idx.get());
-        index = std::move(idx);
-        break;
-      }
-      case SchemaField::NUMERIC: {
-        const auto& nparams = std::get<SchemaField::NumericParams>(field->special_params);
-        index = make_unique<NumericIndex>(nparams.block_size, mr);
-        break;
-      }
-      case SchemaField::TAG: {
-        const auto& tparams = std::get<SchemaField::TagParams>(field->special_params);
-        index = make_unique<TagIndex>(mr, tparams);
-        break;
-      }
-      case SchemaField::VECTOR: {
-        DCHECK(holds_alternative<SchemaField::VectorParams>(field->special_params));
-        const auto& vparams = std::get<SchemaField::VectorParams>(field->special_params);
-        if (vparams.use_hnsw)  // served by the global HNSW index
-          continue;
-        index = make_unique<FlatVectorIndex>(vparams, mr);
-        break;
-      }
-      case SchemaField::GEO: {
-        index = make_unique<GeoIndex>(mr);
-        break;
-      }
+    if (auto index = CreateIndex(field_ident, *field, mr); index) {
+      add_list_.emplace_back(field_ident, index.get());
+      indices_[field_ident] = std::move(index);
     }
-    add_list_.emplace_back(field_ident, index.get());
-    indices_[field_ident] = std::move(index);
   }
+}
+
+unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view field_ident, const SchemaField& field,
+                                                PMR_NS::memory_resource* mr) {
+  switch (field.type) {
+    case SchemaField::TEXT: {
+      const auto& tparams = std::get<SchemaField::TextParams>(field.special_params);
+      auto idx = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
+                                        tparams.no_stem, schema_.default_language,
+                                        schema_.language_field, !options_.no_offsets);
+      idx->set_field_ident(field_ident);
+      text_indices_.push_back(idx.get());
+      return idx;
+    }
+    case SchemaField::NUMERIC: {
+      const auto& nparams = std::get<SchemaField::NumericParams>(field.special_params);
+      return make_unique<NumericIndex>(nparams.block_size, mr);
+    }
+    case SchemaField::TAG:
+      return make_unique<TagIndex>(mr, std::get<SchemaField::TagParams>(field.special_params));
+    case SchemaField::VECTOR: {
+      const auto& vparams = std::get<SchemaField::VectorParams>(field.special_params);
+      if (vparams.use_hnsw)  // served by the global HNSW index
+        return nullptr;
+      return make_unique<FlatVectorIndex>(vparams, mr);
+    }
+    case SchemaField::GEO:
+      return make_unique<GeoIndex>(mr);
+  }
+  return nullptr;
 }
 
 void FieldIndices::CreateSortIndices() {
   for (const auto& [field_ident, field] : schema_.Ordered()) {
-    if ((field->flags & SchemaField::SORTABLE) == 0)
+    if (!(field->flags & SchemaField::SORTABLE))
       continue;
-
-    unique_ptr<BaseSortIndex> index;
-    switch (field->type) {
-      case SchemaField::TAG:
-      case SchemaField::TEXT:
-        index = make_unique<StringSortIndex>();
-        break;
-      case SchemaField::NUMERIC:
-        index = make_unique<NumericSortIndex>();
-        break;
-      case SchemaField::VECTOR:
-      case SchemaField::GEO:
-        continue;
+    if (auto index = CreateSortIndex(*field); index) {
+      add_list_.emplace_back(field_ident, index.get());
+      sort_indices_[field_ident] = std::move(index);
     }
-    add_list_.emplace_back(field_ident, index.get());
-    sort_indices_[field_ident] = std::move(index);
   }
+}
+
+unique_ptr<BaseSortIndex> FieldIndices::CreateSortIndex(const SchemaField& field) {
+  switch (field.type) {
+    case SchemaField::TAG:
+    case SchemaField::TEXT:
+      return make_unique<StringSortIndex>();
+    case SchemaField::NUMERIC:
+      return make_unique<NumericSortIndex>();
+    case SchemaField::VECTOR:
+    case SchemaField::GEO:
+      return nullptr;
+  }
+  return nullptr;
 }
 
 bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
@@ -1252,6 +1250,13 @@ BaseIndex* FieldIndices::GetIndex(string_view field) const {
 BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
   auto it = sort_indices_.find(schema_.LookupAlias(field));
   return it != sort_indices_.end() ? it->second.get() : nullptr;
+}
+
+TextIndex* FieldIndices::GetTextIndex(string_view field) const {
+  auto it = schema_.fields.find(schema_.LookupAlias(field));
+  if (it == schema_.fields.end() || it->second.type != SchemaField::TEXT)
+    return nullptr;
+  return static_cast<TextIndex*>(GetIndex(field));  // CreateIndex builds a TextIndex for TEXT
 }
 
 absl::Span<TextIndex* const> FieldIndices::GetAllTextIndices() const {
