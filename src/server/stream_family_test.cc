@@ -706,6 +706,53 @@ TEST_F(StreamFamilyTest, XReadBlockOnMaxMsId) {
               ElementsAre("18446744073709551615-2", ArrLen(2)));
 }
 
+// A woken XREAD replies only with the streams that have records. The other requested streams are
+// omitted, whether they share the waking shard or not, are missing or hold only older entries.
+TEST_F(StreamFamilyTest, XReadBlockOmitsStreamsWithoutRecords) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  const string key_a = "omit-a";
+  auto find_key = [&](string_view prefix, bool same_shard) {
+    for (unsigned i = 0;; ++i) {
+      string candidate = absl::StrCat(prefix, "-", i);
+      if ((Shard(candidate, shard_set->size()) == Shard(key_a, shard_set->size())) == same_shard)
+        return candidate;
+    }
+  };
+  const string key_b = find_key("omit-b", true);
+  const string key_c = find_key("omit-c", false);
+
+  // key_a only holds an entry below the requested id, key_b and key_c do not exist yet.
+  Run({"XADD", key_a, "1-0", "f", "v"});
+
+  auto block_and_wake = [&](const string& wake_key) {
+    RespExpr resp;
+    auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+      resp = Run({"XREAD", "BLOCK", "0", "STREAMS", key_a, key_b, key_c, "$", "$", "$"});
+    });
+    EXPECT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+    pp_->at(1)->Await([&] { return Run({"XADD", wake_key, "*", "f", "v"}); });
+    reader.Join();
+    return resp;
+  };
+
+  // key_b wakes the reader on the shard it shares with key_a, key_c lives on another shard.
+  auto resp = block_and_wake(key_b);
+  ASSERT_THAT(resp, ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[0], RespElementsAre(key_b, ArrLen(1)));
+
+  // key_c wakes the reader on its own shard, key_b now only holds the entry from the last round.
+  resp = block_and_wake(key_c);
+  ASSERT_THAT(resp, ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[0], RespElementsAre(key_c, ArrLen(1)));
+
+  // RESP3 replies with a map that holds only the stream with records.
+  Run({"HELLO", "3"});
+  resp = block_and_wake(key_a);
+  EXPECT_THAT(resp, RespElementsAre(key_a, ArrLen(1)));
+}
+
 // Wake paths differ: DEL/UNLINK/FLUSH and expiry remove the key, while BITOP/RENAME/SUNIONSTORE
 // overwrite it in place.
 TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnInvalidatedStream) {
