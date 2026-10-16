@@ -1020,6 +1020,11 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   PrimeTable::Cursor cursor;
 
   do {
+    // This fiber deletes keys without taking transaction locks. A woken transaction relies on its
+    // keys staying unchanged between its hops, so don't delete anything while one is in progress.
+    // TraverseBuckets below doesn't preempt, so the condition holds for the whole chunk.
+    owner_->AwaitNoResumedTx();
+
     PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
     cursor = next;
     ThisFiber::Yield();

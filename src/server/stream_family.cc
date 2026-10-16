@@ -3154,7 +3154,9 @@ void XReadBlock(ReadOpts* opts, Transaction* tx, SinkReplyBuilder* builder,
   // must not touch the woken key if another stream already invalidated the request. Streams on the
   // woken shard are validated inside the action hop, so only cross shard reads pay for this hop.
   // It cannot be folded into the action hop: waiting for sibling shards from inside a transaction
-  // callback stalls the shard and can deadlock two interleaved multi shard readers.
+  // callback stalls the shard and can deadlock two interleaved multi shard readers. Queued
+  // transactions and slot flushing can't change the validated streams before the action hop: a
+  // woken transaction holds them back on its shards between hops (EngineShard::BeginResumedHops).
   if (opts->read_group && tx->GetUniqueShardCnt() > 1) {
     auto validate_cb = [&](Transaction* t, EngineShard* shard) {
       validate_shard_keys(t->GetOpArgs(shard), t->GetShardArgs(shard->shard_id()));

@@ -349,7 +349,8 @@ Step by step:
 
 ### Key design constraints
 
-- The suspended transaction holds its locks throughout the blocking period, preventing interleaving with other transactions on the same keys.
+- The suspended transaction holds its locks throughout the blocking period, so other transactions on the same keys can't run out of order. Locks don't stop a transaction that reaches the head of the tx-queue, though, and the suspended transaction is no longer in it.
+- A woken transaction with more than one hop left (e.g. XREADGROUP over streams on several shards, which validates every stream before reading from the wake key) needs its keys to stay unchanged between hops. After its first post-wake hop, each of its shards halts its tx-queue until the transaction concludes (`RESUMED` flag, `EngineShard::BeginResumedHops`), and slot flushing, which deletes keys without locks, waits as well.
 - BLPOP within a MULTI/EXEC block disables blocking behavior and returns immediately (with a timeout response if no data is available).
 - When a multi-transaction pushes to multiple keys atomically, BLPOP is only woken after the entire multi-transaction completes.
 

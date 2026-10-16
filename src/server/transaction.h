@@ -174,6 +174,9 @@ class Transaction {
     // Whether it was suspended (by WatchInShard()). This flag is sticky and stays forever once set.
     WAS_SUSPENDED = 1 << 4,
     AWAKED_Q = 1 << 5,  // Whether it was awakened (by NotifySuspended())
+    // Whether it was woken and has more hops to run on this shard. Halts the shard's tx-queue
+    // until it concludes, see EngineShard::BeginResumedHops().
+    RESUMED = 1 << 6,
   };
 
   struct Guard {
