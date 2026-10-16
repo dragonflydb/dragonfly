@@ -2782,18 +2782,13 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Rebuild index
   // TODO: Introduce partial rebuild
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
-  // A builder of the old index that is still running is stopped first, outside the transaction
-  // callback (joining it there can deadlock, see CmdFtDropIndex) and before the replacement
-  // builder starts (both would feed the same global vector index). The index stays registered
-  // meanwhile, so a concurrent SAVE still sees it together with its synonyms. With its builder
-  // gone the old index is destroyed inside the callback without joining anything.
-  shard_set->RunBlockingInParallel([idx_name](EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(idx_name); index)
-      index->StopForReplacement();
-  });
   auto upd_cb = [idx_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
     unique_ptr<ShardDocIndex> old_index = es->search_indices()->DropIndex(idx_name);
     Synonyms synonyms = old_index ? old_index->GetSynonyms() : Synonyms{};
+    // Destroying the old index waits for its builder, so the replacement builder never runs next
+    // to it on the same global vector index. The old index is already unregistered, so no new
+    // caller can reach that builder meanwhile.
+    old_index.reset();
     es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal,
                                     std::move(synonyms));
     return OpStatus::OK;

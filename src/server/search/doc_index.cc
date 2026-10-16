@@ -427,8 +427,6 @@ ShardDocIndex::~ShardDocIndex() {
 
 void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored) {
   CancelBuilder();
-  if (retiring_)
-    return;
 
   // When restoring, preserve key_index_ populated by RestoreKeyIndex() so that DocIds
   // match the GlobalDocIds stored in the serialized HNSW graph. CursorLoop will use
@@ -447,7 +445,7 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, 
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
 
   // Create builder and start indexing
-  builder_ = std::make_shared<search::IndexBuilder>(this);
+  builder_ = std::make_unique<search::IndexBuilder>(this);
   builder_->Start(op_args, is_restored, [this] {
     VLOG(1) << "Indexed " << key_index_.Size()
             << " docs on prefixes: " << absl::StrJoin(base_->prefixes, ", ");
@@ -456,11 +454,10 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, 
 }
 
 void ShardDocIndex::CancelBuilder() {
-  // Several fibers may cancel the same build (FT.ALTER outside the transaction, a rebuild on the
-  // shard queue, the destructor); each keeps the builder alive until the worker has finished.
-  // The worker clears builder_ itself, so nothing here touches the index after the wait.
-  if (std::shared_ptr<search::IndexBuilder> builder = builder_; builder)
-    builder->Cancel();
+  if (builder_) {
+    builder_->Cancel();
+    builder_.reset();
+  }
 }
 
 void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,

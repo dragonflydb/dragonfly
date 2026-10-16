@@ -56,19 +56,12 @@ void IndexBuilder::Start(const OpArgs& op_args, bool is_restored,
       index_->indices_->FinalizeInitialization(&finalize_done_);
     }
 
-    // Finish by clearing the fiber reference, then either wake every cancelling fiber (each holds
-    // a reference to the builder; the index's own reference is dropped here so that no caller
-    // touches the index after the wait) or call on_complete as the last action.
+    // Finish by clearing the fiber reference and calling on_complete as its last action
     {
       util::FiberAtomicGuard guard{};  // preserve cancellation
       fiber_.Detach();                 // builder is now safely deleteable
-      if (state_.IsCancelled()) {
-        index_->builder_.reset();
-        finished_ = true;
-        finished_ec_.notifyAll();
-      } else {
+      if (!state_.IsCancelled())
         on_complete();
-      }
     }
   };
 
@@ -77,7 +70,7 @@ void IndexBuilder::Start(const OpArgs& op_args, bool is_restored,
 
 void IndexBuilder::Cancel() {
   state_.Cancel();
-  finished_ec_.await([this] { return finished_; });
+  util::fb2::Fiber{std::move(fiber_)}.JoinIfNeeded();  // steal and wait for finish
 }
 
 util::fb2::Fiber IndexBuilder::Worker() {

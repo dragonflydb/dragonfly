@@ -484,17 +484,6 @@ class ShardDocIndex {
   void RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
                        const std::vector<std::string_view>& terms);
 
-  // Stops the builder if it is still running. Joins its fiber: never call it from a transaction
-  // callback (see CmdFtDropIndex).
-  void CancelBuilder();
-
-  // Stops the builder of an index that is about to be replaced (FT.ALTER). A rebuild that waited
-  // for the same builder must not start another one, the replacement rebuilds everything.
-  void StopForReplacement() {
-    retiring_ = true;
-    CancelBuilder();
-  }
-
   // Public access to key index for direct operations (e.g., when dropping index with DD)
   // TODO: replace with keys() view
   const DocKeyIndex& key_index() const {
@@ -602,6 +591,9 @@ class ShardDocIndex {
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);
 
+  // Cancel builder if in progress
+  void CancelBuilder();
+
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
 
@@ -626,8 +618,7 @@ class ShardDocIndex {
   DocKeyIndex key_index_;
   Synonyms synonyms_;
 
-  std::shared_ptr<search::IndexBuilder> builder_;
-  bool retiring_ = false;  // set by StopForReplacement, checked by Rebuild
+  std::unique_ptr<search::IndexBuilder> builder_;
 
   // Per-shard HNSW wrappers, one per indexed vector field.
   std::vector<HnswShardIndex> hnsw_shard_indices_;
