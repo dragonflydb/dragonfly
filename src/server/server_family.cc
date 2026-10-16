@@ -1278,6 +1278,10 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   LOG_FIRST_N(INFO, 1) << "Host OS: " << os_string << " with " << shard_set->pool()->size()
                        << " threads";
   SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
+
+  // A master's data is rooted in its own lineage until it becomes a replica.
+  shard_set->RunBriefInParallel([this](EngineShard*) { journal::SetLineage(master_replid_); });
+
   config_registry.RegisterSetter<uint32_t>(
       "maxclients", [this](uint32_t val) { SetMaxClients(listeners_, val); });
 
@@ -3676,30 +3680,6 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
   return builder->SendOk();
 }
 
-std::string ServerFamily::GetBaseLineageId() const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  return replica_ ? replica_->GetMasterLineageId() : master_replid_;
-}
-
-// See header comments
-std::string ServerFamily::GetLineageId() const {
-  std::vector<std::string> shard_lineages(shard_set->size());
-  shard_set->RunBriefInParallel(
-      [&](EngineShard* shard) { shard_lineages[shard->shard_id()] = journal::GetLineage(); });
-
-  if (!std::all_of(shard_lineages.begin(), shard_lineages.end(),
-                   [&](const auto& id) { return id == shard_lineages.front(); })) {
-    return master_replid_;
-  }
-  return shard_lineages.front().empty() ? GetBaseLineageId() : shard_lineages.front();
-}
-
-std::string ServerFamily::GetShardLineageId() const {
-  DCHECK(EngineShard::tlocal());
-  const std::string& lineage = journal::GetLineage();
-  return lineage.empty() ? GetBaseLineageId() : lineage;
-}
-
 void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
   facade::ParsedArgs args = parser.UnparsedArgs();
   auto* builder = cmd_cntx->rb();
@@ -3737,9 +3717,9 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
         cntx->replica_conn = true;
 
         // The response for 'capa dragonfly' is <master_repl_id> <syncid> <num_shards> <version>
-        // <lineage_id> <announced_ip> <announced_port>. It may only grow at the end, and the ip
-        // is a bulk string because it is operator-supplied.
-        std::string lineage_id = GetLineageId();
+        // <reserved> <announced_ip> <announced_port>. It may only grow at the end, and the ip
+        // is a bulk string because it is operator-supplied. The reserved field used to carry
+        // the lineage id, which now arrives per shard as a LINEAGE marker in the stream.
         auto announced = cluster::ClusterFamily::AnnouncedNodeInfo(cntx->conn());
 
         auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -3748,7 +3728,7 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
         rb->SendSimpleString(sync_id);
         rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
-        rb->SendSimpleString(lineage_id);
+        rb->SendSimpleString("");
         rb->SendBulkString(announced.ip);
         rb->SendLong(announced.port);
         return;

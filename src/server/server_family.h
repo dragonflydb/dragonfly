@@ -218,15 +218,6 @@ class ServerFamily {
     return master_replid_;
   }
 
-  // The lineage root replication id of this node: its own replid if it is a true master, or the
-  // ancestor id advertised by its master when it is itself a replica (cascaded replication).
-  // Shards that saw a LINEAGE marker (journal::GetLineage) override it. If shards disagree,
-  // returns our own replid, which only matches nodes that synced from us.
-  std::string GetLineageId() const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  // Lineage of the current shard's data. Must run in a shard thread.
-  std::string GetShardLineageId() const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
   DflyCmd* GetDflyCmd() const {
     return dfly_cmd_.get();
   }
@@ -332,9 +323,6 @@ class ServerFamily {
   // On promotion (REPLICAOF NO ONE / REPLTAKEOVER) start a new lineage rooted at this node by
   // journaling a LINEAGE marker that propagates down the replica subtree.
   void ForkLineage() ABSL_EXCLUSIVE_LOCKS_REQUIRED(replicaof_mu_);
-
-  // Our master's advertised lineage if we are a replica, else our own replid.
-  std::string GetBaseLineageId() const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   struct LoadOptions {
     std::string snapshot_id;

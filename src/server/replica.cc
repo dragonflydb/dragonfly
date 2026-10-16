@@ -198,10 +198,9 @@ std::optional<Replica::LastMasterSyncData> Replica::Stop() {
   }
 
   if (last_journal_LSNs_.has_value()) {
-    std::string lineage_id = absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)
-                                 ? GetLineageId()
-                                 : master_context_.master_repl_id;
-    return LastMasterSyncData{lineage_id, last_journal_LSNs_.value()};
+    bool cascaded = absl::GetFlag(FLAGS_experimental_cascaded_partial_sync) && !lineage_id_.empty();
+    return LastMasterSyncData{cascaded ? lineage_id_ : master_context_.master_repl_id,
+                              last_journal_LSNs_.value()};
   }
   return nullopt;
 }
@@ -389,7 +388,7 @@ error_code Replica::Greet() {
 }
 
 std::error_code Replica::HandleCapaDflyResp(const RESPArray& args) {
-  // Response is: <master_repl_id> <syncid> <num_shards> [<version> [<lineage_id>
+  // Response is: <master_repl_id> <syncid> <num_shards> [<version> [<reserved>
   //   [<announced_ip> <announced_port>]]]
   if (args.Size() < 3 || args.Size() == SIZE_MAX)
     return make_error_code(errc::bad_message);
@@ -439,16 +438,6 @@ std::error_code Replica::HandleCapaDflyResp(const RESPArray& args) {
     master_context_.version = DflyVersion(*version);
   }
 
-  // If our master is itself a replica (cascaded), parse lineage id (grandparent id)
-  std::string prev_lineage_id = GetLineageId();
-  if (args.Size() >= 5) {
-    auto lineage_id = ReplyString(args[4]);
-    PC_RETURN_ON_BAD_RESPONSE(lineage_id.has_value());
-    master_context_.lineage_id = *lineage_id;
-  } else {
-    master_context_.lineage_id = master_context_.master_repl_id;
-  }
-
   if (args.Size() >= 7) {
     auto announced_ip = ReplyString(args[5]);
     auto announced_port = args[6].As<int64_t>();
@@ -457,20 +446,9 @@ std::error_code Replica::HandleCapaDflyResp(const RESPArray& args) {
     master_context_.announced = {string(*announced_ip), static_cast<uint16_t>(*announced_port)};
   }
 
-  // The master's lineage changed since we last synced with it (e.g. it re-pointed to another
-  // master and full synced), so its data no longer continues ours: drop the saved LSNs.
-  if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
-    if (!prev_lineage_id.empty() && prev_lineage_id != master_context_.lineage_id) {
-      VLOG(1) << "Lineage changed from " << prev_lineage_id << ", disabling partial sync";
-      last_journal_LSNs_.reset();
-    }
-    forked_lineage_.clear();
-  }
-
   VLOG(1) << "Master id: " << master_context_.master_repl_id
           << ", sync id: " << master_context_.dfly_session_id << ", num journals: " << *num_flows
-          << ", version: " << unsigned(master_context_.version)
-          << ", lineage: " << master_context_.lineage_id << ", announced address: "
+          << ", version: " << unsigned(master_context_.version) << ", announced address: "
           << (master_context_.announced
                   ? StrCat(master_context_.announced->ip, ":", master_context_.announced->port)
                   : "none");
@@ -598,6 +576,11 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
   auto load_context = std::make_shared<RdbLoadContext>();
 
+  // Re-pointed from another master: a partial sync continues the claimed lineage, while a full sync
+  // replaces it with the snapshot's LINEAGE marker.
+  if (last_master_sync_data)
+    lineage_id_ = last_master_sync_data->id;
+
   // Initialize shard flows.
   shard_flows_.resize(master_context_.num_flows);
   DCHECK(!shard_flows_.empty());
@@ -608,7 +591,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       partial_sync_lsn = shard_flows_[i]->JournalExecutedCount();
     }
     shard_flows_[i].reset(new DflyShardReplica(server(), master_context_, i, &service_,
-                                               multi_shard_exe_, load_context.get()));
+                                               multi_shard_exe_, load_context.get(), lineage_id_));
     if (partial_sync_lsn > 0) {
       shard_flows_[i]->SetRecordsExecuted(partial_sync_lsn);
     }
@@ -667,13 +650,21 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     // cell contain. Do not remove the memset below.
     std::memset(is_full_sync.get(), 0, num_df_flows);
     DCHECK(!last_journal_LSNs_ || last_journal_LSNs_->size() == num_df_flows);
+
+    // Reconnecting to the same master: claim our lineage, so the master accepts the LSNs only if
+    // its data still continues ours (it may have re-pointed to another master and full synced).
+    if (!last_master_sync_data && last_journal_LSNs_ && !lineage_id_.empty() &&
+        absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
+      last_master_sync_data = LastMasterSyncData{lineage_id_, *last_journal_LSNs_};
+    }
+
     auto shard_cb = [&](unsigned index, auto*) {
       for (auto id : thread_flow_map_[index]) {
-        auto ec = shard_flows_[id]->StartSyncFlow(sync_block, &exec_st_,
-                                                  last_journal_LSNs_.has_value()
-                                                      ? std::optional((*last_journal_LSNs_)[id])
-                                                      : std::nullopt,
-                                                  last_master_sync_data);
+        std::optional<LSN> lsn;
+        if (last_journal_LSNs_ && !last_master_sync_data)
+          lsn = (*last_journal_LSNs_)[id];
+        auto ec =
+            shard_flows_[id]->StartSyncFlow(sync_block, &exec_st_, lsn, last_master_sync_data);
         if (ec.has_value())
           is_full_sync[id] = ec.value();
         else
@@ -708,6 +699,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
 
       // Our dataset and LSN space are replaced, so sub-replicas (cascaded replication) can't
       // continue their stream. Drop them; they reconnect once we leave LOADING and full sync.
+      // The lineage is unknown until each snapshot's LINEAGE marker arrives.
       if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
         service_.server_family().GetDflyCmd()->CancelReplicas();
         shard_set->RunBriefInParallel([](EngineShard*) { journal::SetLineage({}); });
@@ -988,8 +980,9 @@ error_code Replica::ConsumeDflyStream() {
     if (!agree) {
       LOG(WARNING) << "Flows disagree on the lineage, disabling partial sync";
       last_journal_LSNs_.reset();
-    } else if (!lineage.empty()) {
-      forked_lineage_ = lineage;
+      lineage_id_.clear();
+    } else {
+      lineage_id_ = lineage;
     }
   }
 
@@ -1089,6 +1082,7 @@ io::Result<bool> DflyShardReplica::StartSyncFlow(
   // Skip full sync if we are doing partial. Clean up will take care mixed state, e.g,
   // some flows receive partial while others receive full.
   if (is_full_sync) {
+    lineage_.clear();  // The snapshot starts with the master's lineage marker.
     sync_fb_ = fb2::Fiber("shard_full_sync", &DflyShardReplica::FullSyncDflyFb, this,
                           string(*eof_token), sb, cntx);
   } else if (last_master_data) {
@@ -1306,10 +1300,11 @@ void DflyShardReplica::StableSyncDflyAcksFb(ExecutionState* cntx) {
 DflyShardReplica::DflyShardReplica(ServerContext server_context, MasterContext master_context,
                                    uint32_t flow_id, Service* service,
                                    std::shared_ptr<MultiShardExecution> multi_shard_exe,
-                                   RdbLoadContext* load_context)
+                                   RdbLoadContext* load_context, std::string lineage_id)
     : ProtocolClient(server_context),
       service_(*service),
       master_context_(master_context),
+      lineage_(std::move(lineage_id)),
       flow_id_(flow_id) {
   auto log_cmd = [](const TransactionData& tx) {
     facade::Connection::LogReplicaCommand(tx.command, tx.dbid);

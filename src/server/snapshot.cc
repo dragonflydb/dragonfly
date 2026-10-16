@@ -110,8 +110,8 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     serializer_->SetTagEntries(absl::GetFlag(FLAGS_serialization_tagged_chunks));
   }
 
-  // Markers recorded before the journal consumer was registered won't reach the replica, so
-  // start the stream with this shard's current lineage.
+  // Start the stream with this shard's lineage, so the replica learns which lineage the data
+  // belongs to. Later forks arrive as LINEAGE entries in the journal stream.
   if (stream_journal && absl::GetFlag(FLAGS_experimental_cascaded_partial_sync) &&
       !journal::GetLineage().empty()) {
     io::StringSink sink;
