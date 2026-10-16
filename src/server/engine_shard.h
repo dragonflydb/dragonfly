@@ -13,6 +13,7 @@
 #include "core/tx_queue.h"
 #include "redis/redis_aux.h"
 #include "server/common_types.h"
+#include "util/fibers/synchronization.h"
 #include "util/sliding_counter.h"
 
 typedef char* sds;
@@ -121,6 +122,20 @@ class EngineShard {
 
   // Remove current continuation trans if its equal to tx.
   void RemoveContTx(Transaction* tx);
+
+  // A woken (previously suspended) transaction ran a non-concluding hop on this shard. Until the
+  // matching EndResumedHops(), the tx-queue is halted so that its keys here can't be changed by
+  // another transaction between its hops.
+  void BeginResumedHops();
+  void EndResumedHops();
+
+  bool HasResumedTx() const {
+    return resumed_tx_cnt_ > 0;
+  }
+
+  // Suspends the calling fiber while a woken transaction is between hops on this shard.
+  // For background work that changes keys without taking transaction locks.
+  void AwaitNoResumedTx();
 
   const Stats& stats() const {
     return stats_;
@@ -364,6 +379,10 @@ class EngineShard {
   Transaction* continuation_trans_ = nullptr;
   Transaction* running_tx_ = nullptr;
   bool needs_repoll_ = false;  // set when running_tx_ interrupted a PollExecution call
+
+  // Number of woken transactions between hops on this shard, see BeginResumedHops().
+  uint32_t resumed_tx_cnt_ = 0;
+  util::fb2::EventCount resumed_tx_ec_;
 
   std::string continuation_debug_id_;
   unsigned poll_concurrent_factor_ = 0;

@@ -645,6 +645,15 @@ bool Transaction::RunInShard(EngineShard* shard, bool allow_q_removal) {
 
   bool is_concluding = coordinator_state_ & COORD_CONCLUDING;
 
+  // A woken transaction validates its keys in one hop and acts on them in the next. It holds the
+  // locks of a suspended transaction but no longer sits in the tx-queue, and locks only prevent
+  // out of order runs, so the queue head could change its keys in between. Halt the queue on
+  // every shard it still runs on until it concludes.
+  if (was_suspended && !is_concluding && !(sd.local_mask & RESUMED)) {
+    sd.local_mask |= RESUMED;
+    shard->BeginResumedHops();
+  }
+
   // If we're allowed, we remove ourselves upon first invocation from the queue,
   // and successive hops are run by continuation_trans_ in engine shard.
   // Otherwise we can remove ourselves only when we're concluding (so no more hops follow).
@@ -682,6 +691,11 @@ bool Transaction::RunInShard(EngineShard* shard, bool allow_q_removal) {
     // The position is important because we check below if `shard->GetContTx() == nullptr`
     // so we must clear it before we notify awaked transactions.
     shard->RemoveContTx(this);
+
+    if (sd.local_mask & RESUMED) {
+      sd.local_mask &= ~RESUMED;
+      shard->EndResumedHops();
+    }
 
     // It has 2 responsibilities.
     // 1: to go over potential wakened keys, verify them and activate watch queues.

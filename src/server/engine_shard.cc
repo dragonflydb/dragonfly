@@ -652,9 +652,10 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
   }
 
   // Progress on the transaction queue if no transaction is running currently.
+  // A woken transaction between hops halts the queue as well, see BeginResumedHops().
   Transaction* head = nullptr;
 
-  while (continuation_trans_ == nullptr && !txq_.Empty()) {
+  while (continuation_trans_ == nullptr && resumed_tx_cnt_ == 0 && !txq_.Empty()) {
     head = get<Transaction*>(txq_.Front());
 
     // Break if there are any awakened transactions, as we must give way to them
@@ -724,6 +725,26 @@ void EngineShard::RemoveContTx(Transaction* tx) {
     continuation_trans_ = nullptr;
     continuation_debug_id_.clear();
   }
+}
+
+void EngineShard::BeginResumedHops() {
+  ++resumed_tx_cnt_;
+}
+
+void EngineShard::EndResumedHops() {
+  DCHECK_GT(resumed_tx_cnt_, 0u);
+  if (--resumed_tx_cnt_ > 0)
+    return;
+
+  resumed_tx_ec_.notifyAll();
+
+  // The concluding hop runs after PollExecutionInternal skipped the halted queue, re-drive it.
+  if (!txq_.Empty())
+    needs_repoll_ = true;
+}
+
+void EngineShard::AwaitNoResumedTx() {
+  resumed_tx_ec_.await([this] { return resumed_tx_cnt_ == 0; });
 }
 
 void EngineShard::set_aof_streamer(std::unique_ptr<AofStreamer> streamer) {

@@ -12,6 +12,7 @@
 #include "facade/facade_stats.h"
 #include "server/acl/acl_commands_def.h"
 #include "server/blocking_controller.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/command_registry.h"
 #include "server/common.h"
 #include "server/db_slice.h"
@@ -122,9 +123,56 @@ class TransactionTest : public Test {
   std::unique_ptr<ProactorPool> pp_;
   // Keep argument backing storage alive for the duration of the test.
   std::vector<std::pair<StringVec, std::shared_ptr<CmdArgVec>>> arg_holders_;
+
+  // Handle for a blocking transaction that was woken and paused between two hops.
+  struct WokenHold {
+    fb2::Done validated, release, done;
+    fb2::Fiber fiber;
+    facade::ConnectionContext cntx{nullptr};
+  };
+
+  // Suspends `tx` on all its keys (on shards `sids`) and wakes it via `wake_key` on shard
+  // `wake_sid`. Once woken it runs a non-concluding hop (like XREADGROUP's validation hop) and
+  // parks between the hops until released, then concludes with `action`.
+  std::unique_ptr<WokenHold> WakeAndPauseBetweenHops(
+      Transaction* tx, std::vector<ShardId> sids, ShardId wake_sid, std::string wake_key,
+      std::function<OpStatus(Transaction*, EngineShard*)> action) {
+    auto hold = std::make_unique<WokenHold>();
+    WokenHold* h = hold.get();
+    h->fiber = pp_->at(1)->LaunchFiber([tx, h, action = std::move(action)] {
+      auto ready = [](EngineShard*, const DbContext&, std::string_view) {
+        return KeyReadyResult::kReady;
+      };
+      tx->Execute(Noop, false);
+      OpStatus st =
+          tx->WaitOnWatch(Transaction::time_point::max(), Transaction::kShardArgs, ready, &h->cntx);
+      CHECK_EQ(OpStatus::OK, st);
+      tx->Execute(Noop, false);
+      h->validated.Notify();
+      h->release.Wait();
+      tx->Execute([&](Transaction* t, EngineShard* shard) { return action(t, shard); }, true);
+      h->done.Notify();
+    });
+
+    for (ShardId sid : sids) {
+      CHECK(AwaitOnShard(
+          sid, [&] { return (tx->DEBUG_GetLocalMask(sid) & Transaction::WAS_SUSPENDED) != 0; }))
+          << "never suspended on shard " << sid;
+    }
+
+    OnShard(wake_sid, [&] {
+      auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(wake_sid);
+      CHECK(bc != nullptr);
+      bc->Awaken(0, wake_key);
+      bc->NotifyPending();
+    });
+    CHECK(h->validated.WaitFor(5s)) << "woken transaction never ran its first hop";
+    return hold;
+  }
 };
 
 void TransactionTest::SetUp() {
+  max_memory_limit = INT_MAX;  // so that tests can add entries to the db slice
   pp_.reset(fb2::Pool::Epoll(kNumThreads));
   pp_->Run();
   pp_->AwaitBrief([](unsigned index, ProactorBase* p) {
@@ -295,6 +343,115 @@ TEST_F(TransactionTest, AwakenedPollNotDroppedWhenBlockedTxPresent) {
       << "awakened BL was stranded: its PollExecution on shard 0 was never run";
 
   fb_bl.Join();
+}
+
+// A woken multi shard transaction validates its keys in one hop and acts on them in the next, e.g.
+// XREADGROUP over streams on several shards (#8074). It keeps the locks of a suspended transaction
+// but no longer sits in the tx-queue, and locks only prevent out of order runs. So without halting
+// the queue, a conflicting transaction W reaching the head of a sibling shard's queue changes the
+// validated key before the action hop.
+TEST_F(TransactionTest, WokenTxHaltsSiblingQueueBetweenHops) {
+  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+  ASSERT_EQ(2u, Shard("z", shard_set->size()));
+
+  static CommandId cid_bl{"tx_test_woken_bl", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_w{"tx_test_woken_w", 0, -1, 1, -1, acl::NONE};
+
+  auto tx_bl = MakeTx(&cid_bl, {"x", "z"});
+  auto tx_w = MakeTx(&cid_w, {"z"});
+
+  std::atomic_bool w_ran{false};
+  bool w_ran_before_action = true;
+  auto bl =
+      WakeAndPauseBetweenHops(tx_bl.get(), {0, 2}, 0, "x", [&](Transaction*, EngineShard* es) {
+        if (es->shard_id() == 2)
+          w_ran_before_action = w_ran.load(memory_order_relaxed);
+        return OpStatus::OK;
+      });
+
+  // W conflicts with the woken transaction's lock on "z", so it is queued in order on shard 2.
+  fb2::Done w_done;
+  auto fb_w = pp_->at(1)->LaunchFiber([&] {
+    tx_w->Execute(
+        [&](Transaction*, EngineShard*) {
+          w_ran.store(true, memory_order_relaxed);
+          return OpStatus::OK;
+        },
+        true);
+    w_done.Notify();
+  });
+  ASSERT_TRUE(AwaitOnShard(2, [&] { return tx_w->DEBUG_GetTxqPosInShard(2) != TxQueue::kEnd; }))
+      << "W was never queued on shard 2";
+  ASSERT_TRUE(OnShard(2, [] { return EngineShard::tlocal()->HasResumedTx(); }));
+
+  Quiesce(50ms);
+  EXPECT_FALSE(w_ran.load(memory_order_relaxed)) << "W ran between the hops of the woken tx";
+
+  bl->release.Notify();
+  ASSERT_TRUE(bl->done.WaitFor(5s));
+  EXPECT_FALSE(w_ran_before_action);
+
+  // The concluding hop lifts the halt and W runs.
+  ASSERT_TRUE(w_done.WaitFor(5s)) << "W was stranded after the woken tx concluded";
+  EXPECT_TRUE(w_ran.load(memory_order_relaxed));
+  EXPECT_FALSE(OnShard(2, [] { return EngineShard::tlocal()->HasResumedTx(); }));
+
+  bl->fiber.Join();
+  fb_w.Join();
+}
+
+// Same as above for slot flushing (#8074), which deletes keys from a detached fiber without
+// transaction locks. It must not delete a key of a woken transaction between its hops.
+TEST_F(TransactionTest, FlushSlotsWaitsForWokenTxBetweenHops) {
+  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+  ASSERT_EQ(2u, Shard("z", shard_set->size()));
+
+  static CommandId cid_bl{"tx_test_woken_flush", 0, -1, 1, -1, acl::NONE};
+  auto tx_bl = MakeTx(&cid_bl, {"x", "z"});
+
+  auto z_exists = [](Transaction* t) {
+    DbContext cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    return t->GetDbSlice(2).FindReadOnly(cntx, "z", OBJ_STRING).ok();
+  };
+
+  OnShard(2, [] {
+    DbContext cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    PrimeValue val;
+    val.SetString("v");
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(2);
+    CHECK(db_slice.AddOrUpdate(cntx, "z", std::move(val), 0).ok());
+  });
+
+  bool z_in_action = false;
+  auto bl =
+      WakeAndPauseBetweenHops(tx_bl.get(), {0, 2}, 0, "x", [&](Transaction* t, EngineShard* es) {
+        if (es->shard_id() == 2)
+          z_in_action = z_exists(t);
+        return OpStatus::OK;
+      });
+
+  OnShard(2, [] {
+    auto* es = EngineShard::tlocal();
+    es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);  // RegisterOnChange requires it (#7153)
+    namespaces->GetDefaultNamespace().GetDbSlice(2).FlushSlots(
+        cluster::SlotRanges({{0, cluster::SlotRange::kMaxSlotId}}));
+    es->shard_lock()->Release(IntentLock::EXCLUSIVE);
+  });
+
+  Quiesce(50ms);
+  EXPECT_TRUE(OnShard(2, [&] { return z_exists(tx_bl.get()); }))
+      << "flush deleted a key between the hops of the woken tx";
+
+  bl->release.Notify();
+  ASSERT_TRUE(bl->done.WaitFor(5s));
+  EXPECT_TRUE(z_in_action);
+
+  // The flush resumes once the woken tx concluded.
+  EXPECT_TRUE(AwaitOnShard(2, [&] {
+    return !z_exists(tx_bl.get()) && !tx_bl->GetDbSlice(2).HasRegisteredCallbacks();
+  })) << "flush never finished after the woken tx concluded";
+
+  bl->fiber.Join();
 }
 
 // Verifies Task 2.1 of issue #7458: an uncontended, concluding single-shard transaction with an
