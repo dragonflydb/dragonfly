@@ -2010,6 +2010,54 @@ TEST_F(RdbTest, SearchAliasAuxValidation) {
               RdbError(rdb::errc::rdb_file_corrupted));
   }
 }
+
+TEST_F(RdbTest, AliasJournalMutationsAbortFullSync) {
+  auto aliases_on_all_shards = [&] {
+    vector<vector<pair<string, string>>> aliases(shard_set->size());
+    pp_->at(0)->Await([&] {
+      shard_set->RunBriefInParallel([&](EngineShard* es) {
+        aliases[es->shard_id()] = es->search_indices()->GetAliases();
+        sort(aliases[es->shard_id()].begin(), aliases[es->shard_id()].end());
+      });
+    });
+    return aliases;
+  };
+
+  auto make_journal_command = [](std::string_view command, std::string_view alias,
+                                 std::string_view target) {
+    io::StringSink sink;
+    JournalWriter writer(&sink);
+    const std::string_view args[] = {alias, target};
+    writer.Write(journal::Entry{
+        1, journal::Op::COMMAND, 0, std::nullopt,
+        journal::Entry::Payload(command, ArgSlice{args, command == "FT.ALIASDEL" ? 1u : 2u})});
+    RdbSerializer serializer(CompressionMode::NONE);
+    CHECK(!serializer.WriteJournalEntry(std::move(sink).str()));
+    return serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+  };
+
+  auto expect_rejected_without_mutation = [&](std::string_view command, std::string_view alias,
+                                              std::string_view target, bool initially_exists) {
+    SCOPED_TRACE(command);
+    ASSERT_EQ(Run({"FLUSHALL"}), "OK");
+    ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+    ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+    if (initially_exists) {
+      ASSERT_EQ(Run({"FT.ALIASADD", string(alias), "idx-a"}), "OK");
+    }
+    auto before = aliases_on_all_shards();
+
+    const auto rdb = WrapInRdb(make_journal_command(command, alias, target));
+    EXPECT_EQ(LoadRdbBytes(to_byte(rdb.data()), rdb.size()),
+              RdbError(rdb::errc::unsupported_operation));
+    auto after = aliases_on_all_shards();
+    EXPECT_EQ(after, before);
+  };
+
+  expect_rejected_without_mutation("FT.ALIASADD", "new", "idx-a", false);
+  expect_rejected_without_mutation("FT.ALIASUPDATE", "live", "idx-b", true);
+  expect_rejected_without_mutation("FT.ALIASDEL", "live", "", true);
+}
 #endif
 
 TEST_F(RdbTest, HashExpiryEncoding) {
