@@ -2831,7 +2831,7 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
     db_cntx.db_index = 0;
     db_cntx.time_now_ms = TEST_current_time_ms;
     db_slice.DeleteExpiredStep(db_cntx, 100);
-    db_slice.SendQueuedExpiredKeyEvents();
+    db_slice.SendQueuedExpiredKeyEventsSlow();
   });
 
   // Flush all async dispatch callbacks so the subscriber's thread receives the message.

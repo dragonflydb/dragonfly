@@ -1530,7 +1530,7 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it) const -> ExpireRe
   string_view key = it->first.GetSlice(&scratch);
 
   RecordExpiryBlocking(cntx.db_index, key);
-  QueueExpiredKeyEvent(cntx.db_index, key);
+  QueueExpiredKeyEventSlow(cntx.db_index, key);
 
   // Route through DelAtomic so that expiry runs the same per-type hooks as an explicit DEL.
   auto& db = db_arr_[cntx.db_index];
@@ -1546,6 +1546,8 @@ void DbSlice::SendExpiredKeyEvents(DbIndex db_index, const vector<string>& keys)
 }
 
 void DbSlice::QueueExpiredKeyEventSlow(DbIndex db_index, string_view key) const {
+  if (!expired_keys_events_recording_)
+    return;
   if (pending_expired_events_.empty() || pending_expired_events_.back().first != db_index)
     pending_expired_events_.emplace_back(db_index, vector<string>{});
   pending_expired_events_.back().second.emplace_back(key);
@@ -1586,7 +1588,7 @@ void DbSlice::ExpireAllIfNeeded() {
     }
   }
 
-  SendQueuedExpiredKeyEvents();
+  SendQueuedExpiredKeyEventsSlow();
 }
 
 void DbSlice::RegisterOnChange(ChangeConsumerInterface* consumer) {
@@ -1782,7 +1784,7 @@ finish:
   // send the deletion to the replicas.
   for (string_view key : keys_to_journal) {
     RecordExpiryBlocking(db_ind, key);
-    QueueExpiredKeyEvent(db_ind, key);
+    QueueExpiredKeyEventSlow(db_ind, key);
   }
 
   // This might not always be atomic on exceptional cases -- see comments on the function
@@ -2178,9 +2180,8 @@ void DbSlice::OnCbFinishBlocking() {
     }
   }
 
-  // Sends only if !pending_send_map_.empty()
-  SendQueuedInvalidationMessages();
-  SendQueuedExpiredKeyEvents();
+  SendQueuedInvalidationMessagesSlow();
+  SendQueuedExpiredKeyEventsSlow();
 }
 
 void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {

@@ -756,7 +756,7 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   }
 
   // Outside the atomic section: sending may suspend.
-  db_slice.SendQueuedExpiredKeyEvents();
+  db_slice.SendQueuedExpiredKeyEventsSlow();
 
   VLOG(1) << "OpScan " << db_slice.shard_id() << " cursor: " << cur.token();
   *cursor = cur.token();

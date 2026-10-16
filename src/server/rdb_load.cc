@@ -3373,7 +3373,7 @@ void RdbLoader::LoadItemsBuffer(const ItemsBuf& ib) {
 
   // Inserts may garbage-collect expired keys. We run outside a transaction callback, so
   // OnCbFinishBlocking will not send their expired events.
-  db_slice.SendQueuedExpiredKeyEvents();
+  db_slice.SendQueuedExpiredKeyEventsSlow();
 
   for (auto* item : ib) {
     item_queue_.Push(item);
@@ -3537,7 +3537,7 @@ io::Result<bool> RdbLoader::ReadAndDispatchObject(int object_type, std::string& 
     DbSlice& db_slice = db_cntx.GetDbSlice(sid);
     CreateObjectOnShard(db_cntx, item, &db_slice);
     // See LoadItemsBuffer: no transaction callback will send GC expired events for us.
-    db_slice.SendQueuedExpiredKeyEvents();
+    db_slice.SendQueuedExpiredKeyEventsSlow();
   } else {
     auto& out_buf = shard_buf_[sid];
     out_buf.emplace_back(item);

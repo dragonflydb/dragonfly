@@ -444,17 +444,14 @@ class DbSlice {
   // cntx.time_now_ms. Entries without a TTL are Valid. The journal append may suspend unless the
   // caller disabled journal flushing (journal::DisableFlushGuard).
   // Never sends keyspace notifications, so it is safe in atomic sections: when they are enabled,
-  // the expired event is queued for SendQueuedExpiredKeyEvents.
+  // the expired event is queued for SendQueuedExpiredKeyEventsSlow.
   ExpireResult TryExpire(const Context& cntx, PrimeIterator it) const;
 
   // Sends the expired events queued by TryExpire and eviction. OnCbFinishBlocking calls it, so
   // transaction callbacks need not; code that expires keys elsewhere (e.g. RDB loading, the
   // heartbeat, NotifyPending, SCAN) must call it itself once it is safe to suspend.
   // May suspend: never call it in an atomic section.
-  void SendQueuedExpiredKeyEvents() {
-    if (!pending_expired_events_.empty())
-      SendQueuedExpiredKeyEventsSlow();
-  }
+  void SendQueuedExpiredKeyEventsSlow();
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -499,7 +496,7 @@ class DbSlice {
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
   // Returns number of (elements,bytes) freed due to evictions. Queues expired events for the
-  // evicted keys (see SendQueuedExpiredKeyEvents).
+  // evicted keys (see SendQueuedExpiredKeyEventsSlow).
   std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx, const Context& cntx,
                                                             size_t starting_segment_id,
                                                             size_t increase_goal_bytes);
@@ -632,20 +629,11 @@ class DbSlice {
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
-  void SendQueuedInvalidationMessages() {
-    if (!pending_send_map_.empty())
-      SendQueuedInvalidationMessagesSlow();
-  }
   void SendQueuedInvalidationMessagesSlow();
   void SendQueuedInvalidationMessagesAsync();
 
   // Queues the expired event of 'key' if keyspace notifications are enabled. Never suspends.
-  void QueueExpiredKeyEvent(DbIndex db_index, std::string_view key) const {
-    if (expired_keys_events_recording_)
-      QueueExpiredKeyEventSlow(db_index, key);
-  }
   void QueueExpiredKeyEventSlow(DbIndex db_index, std::string_view key) const;
-  void SendQueuedExpiredKeyEventsSlow();
 
   // Sends the expired keyspace event for 'keys'. May suspend: never call it in an atomic section.
   void SendExpiredKeyEvents(DbIndex db_index, const std::vector<std::string>& keys) const;
@@ -764,7 +752,7 @@ class DbSlice {
                           absl::container_internal::hash_default_eq<std::string>, AllocatorType>;
   TrackingMap client_tracking_map_, pending_send_map_;
 
-  // Expired events queued by QueueExpiredKeyEvent, sent by SendQueuedExpiredKeyEvents.
+  // Expired events queued by QueueExpiredKeyEventSlow, sent by SendQueuedExpiredKeyEventsSlow.
   // Consecutive events of the same db share one entry.
   mutable std::vector<std::pair<DbIndex, std::vector<std::string>>> pending_expired_events_;
 

@@ -182,7 +182,7 @@ void BlockingController::NotifyPending() {
 
   // The readiness checks may expire keys. Send their events now that the iteration is done:
   // sending may suspend.
-  ns_->GetDbSlice(owner_->shard_id()).SendQueuedExpiredKeyEvents();
+  ns_->GetDbSlice(owner_->shard_id()).SendQueuedExpiredKeyEventsSlow();
 }
 
 void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* trans) {
