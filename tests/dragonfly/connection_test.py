@@ -3019,7 +3019,8 @@ async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
 
     await wait_for_first_shrink()
     after_first_shrink = await get_client_read_buffer_bytes(observer)
-    await asyncio.sleep(IOBUF_WAIT_SEC)
+    # cooldown uses time() and shrink late inside a second shortens cooldown by 1 second, so adjust
+    await asyncio.sleep(IOBUF_COOLDOWN_SEC - 2)
     assert await get_client_read_buffer_bytes(observer) == after_first_shrink
 
     await client.aclose()
