@@ -1391,7 +1391,7 @@ TEST_F(QListZstdTest, CompressAfterLoad) {
   }
   EXPECT_EQ(compressed_before, 0u);
 
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   auto initial_compressions = QList::stats.zstd_dict_compressions;
   ql.CompressAfterLoad();
 
@@ -1420,7 +1420,7 @@ TEST_F(QListZstdTest, CompressAfterLoad) {
 
 TEST_F(QListZstdTest, CompressAfterLoadChunkedAppend) {
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
 
   constexpr unsigned kEntriesPerNode = 30;
   for (unsigned n = 0; n < 4; ++n) {
@@ -1478,7 +1478,7 @@ TEST_F(QListZstdTest, CompressAfterLoadPlainNode) {
   const QList::Node* plain_node = ql.Head()->next;
   ASSERT_EQ(plain_node->container, QUICKLIST_NODE_CONTAINER_PLAIN);
 
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   ql.CompressAfterLoad();
 
   // The interior plain node is now ZSTD-compressed.
@@ -1507,8 +1507,7 @@ TEST_F(QListZstdTest, CompressAfterLoadDisabled) {
 
 TEST_F(QListZstdTest, CompressAndReadAll) {
   QList ql(-1, 0);  // 4KB nodes, no depth-based compression (ZSTD dict replaces it)
-  ql.set_compr_policy(
-      {.min_size = 1, .enabled = true});  // threshold 1 = trigger as soon as possible
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});  // threshold 1 = trigger as soon as possible
   PopulateWithCeleryData(ql, 500);
 
   size_t after = ql.MallocUsed(true);
@@ -1530,7 +1529,7 @@ TEST_F(QListZstdTest, CompressAndReadAll) {
 
 TEST_F(QListZstdTest, PushAfterCompress) {
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
 
   // Push new entries after compression.
@@ -1550,7 +1549,7 @@ TEST_F(QListZstdTest, PushAfterCompress) {
 
 TEST_F(QListZstdTest, PopAfterCompress) {
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
 
   EXPECT_EQ(ql.Size(), 500u);
@@ -1564,7 +1563,7 @@ TEST_F(QListZstdTest, PopAfterCompress) {
 
 TEST_F(QListZstdTest, PopDrainsHeadNode) {
   QList ql(-1, 0);  // fill=-1 means 4KB nodes
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
 
   unsigned initial_nodes = ql.node_count();
@@ -1591,7 +1590,7 @@ TEST_F(QListZstdTest, SmallListSkipped) {
 
   size_t size = ql.MallocUsed(true);
   // Set threshold higher than the list size — dict should not be trained.
-  ql.set_compr_policy({.min_size = uint32_t(size + 1000), .enabled = true});
+  ql.SetComprPolicy({.min_size = uint32_t(size + 1000), .enabled = true});
 
   auto initial_compressions = QList::stats.zstd_dict_compressions;
   PopulateWithCeleryData(ql, 5);
@@ -1600,7 +1599,7 @@ TEST_F(QListZstdTest, SmallListSkipped) {
 
 TEST_F(QListZstdTest, IndexAccess) {
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
 
   // Access by positive index.
@@ -1621,7 +1620,7 @@ TEST_F(QListZstdTest, IndexAccess) {
 // dictionary mode (list_compress_policy instead of list_compress_depth).
 TEST_F(QListZstdTest, PartialReadIsFootprintNeutral) {
   QList ql(-1, 0);  // compress=0 so the ZSTD dict path is active (LZF disabled)
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
   ASSERT_GT(ql.node_count(), 4u);
 
@@ -1656,7 +1655,7 @@ TEST_F(QListZstdTest, PartialReadIsFootprintNeutral) {
 
 TEST_F(QListZstdTest, TieredListSkipsLzfRecompression) {
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
   ASSERT_GT(ql.node_count(), 2u);
 
@@ -1681,7 +1680,7 @@ TEST_F(QListZstdTest, TieredListSkipsLzfRecompression) {
 
 TEST_F(QListZstdTest, IteratorClearsIneligibleRecompression) {
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
   ASSERT_GT(ql.node_count(), 2u);
 
@@ -1698,7 +1697,7 @@ TEST_F(QListZstdTest, IteratorClearsIneligibleRecompression) {
 TEST_F(QListZstdTest, IncrementalCompression) {
   // Verify that a newly interior node gets compressed incrementally.
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
 
   // Head and tail must be uncompressed.
@@ -1738,7 +1737,7 @@ TEST_F(QListZstdTest, MallocUsedTracksSteadyStateCompression) {
   // Most of the nodes below are compressed by the steady-state branch of CoolOff(), which used
   // to skip the malloc_size_ update and left the tracked size at the uncompressed value.
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
 
   size_t compressed_nodes = 0;
@@ -1776,7 +1775,7 @@ TEST_F(QListZstdTest, DelNodeReleasesCompressionStats) {
   };
 
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
   ASSERT_GT(ql.node_count(), 10u);
 
@@ -1798,7 +1797,7 @@ TEST_F(QListZstdTest, DelNodeReleasesCompressionStats) {
 
 TEST_F(QListZstdTest, EraseWholeCompressedNodesKeepsMallocSize) {
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
   ASSERT_GT(ql.node_count(), 10u);
 
@@ -1831,13 +1830,13 @@ TEST_F(QListZstdTest, EraseWholeLzfNodesKeepsMallocSize) {
 TEST_F(QListZstdTest, IncompressibleDataNotCompressed) {
   // Train a dictionary with compressible Celery data.
   QList ql_train(-1, 0);
-  ql_train.set_compr_policy({.min_size = 1, .enabled = true});
+  ql_train.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql_train, 500);
 
   // Dictionary is now trained in thread-local state.
   // Create a new list with random (incompressible) data.
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
 
   auto initial_bad = QList::stats.bad_compression_attempts;
   auto initial_attempts = QList::stats.compression_attempts;
@@ -1875,7 +1874,7 @@ TEST_F(QListZstdTest, StatsTracking) {
   auto initial_bad = QList::stats.bad_compression_attempts;
 
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   PopulateWithCeleryData(ql, 500);
 
   uint64_t attempts = QList::stats.compression_attempts - initial_attempts;
@@ -1930,7 +1929,7 @@ TEST_F(QListZstdTest, PolicyFlagParsing) {
 // while it is still being modified, and CoolOff() must not compress it behind Replace()'s back.
 TEST_F(QListZstdTest, ReplaceWithLargeElementInInteriorNode) {
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
 
   constexpr unsigned kNodes = 6;
   constexpr unsigned kEntriesPerNode = 30;
@@ -1973,7 +1972,7 @@ TEST_F(QListZstdTest, IncompressibleNodeIsNotRetried) {
   };
 
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 1, .enabled = true});
+  ql.SetComprPolicy({.min_size = 1, .enabled = true});
   for (unsigned n = 0; n < 8; ++n)
     ql.AppendListpack(BuildCeleryListpack(30, 100000 + n * 30));
   ql.CompressAfterLoad();
@@ -1998,7 +1997,7 @@ TEST_F(QListZstdTest, IncompressibleNodeIsNotRetried) {
 TEST_F(QListZstdTest, NoSizeGate) {
   // min_size=0 compresses as soon as the list has more than one node.
   QList ql(-1, 0);
-  ql.set_compr_policy({.min_size = 0, .enabled = true});
+  ql.SetComprPolicy({.min_size = 0, .enabled = true});
 
   ql.AppendListpack(BuildCeleryListpack(30, 100000));
   ql.CompressAfterLoad();

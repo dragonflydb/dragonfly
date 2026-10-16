@@ -351,19 +351,16 @@ class QList {
 
   // Sets the ZSTD dictionary compression policy of this list. A disabled policy (the default)
   // turns ZSTD dictionary compression off.
-  void set_compr_policy(const ComprPolicy& policy) {
-    zstd_enabled_ = policy.enabled;
-    zstd_min_size_ = policy.min_size;
-  }
+  void SetComprPolicy(const ComprPolicy& policy);
 
-  // Returns the compression policy derived from the command line flags.
-  static ComprPolicy PolicyFromFlags();
+  // Initializes this list's ZSTD dictionary compression policy from the command line flags.
+  void InitFromFlags();
 
   // Trains a thread-local ZSTD dictionary (if not yet trained) and bulk-compresses
   // the list's interior nodes. Intended to be called once after a list has been
   // bulk-populated via AppendListpack/AppendPlain (e.g. during RDB/replication load),
   // where the per-push CoolOff() compression hook does not run. No-op unless
-  // set_compr_policy() enabled compression and LZF depth-compression is disabled.
+  // the compression policy is enabled and LZF depth-compression is disabled.
   void CompressAfterLoad();
 
   // Enable tiered storage. `params.key` must already be allocated with `mr`.
