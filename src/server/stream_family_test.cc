@@ -558,20 +558,24 @@ TEST_F(StreamFamilyTest, XReadGroupBlock) {
 
   // Run XREADGROUP BLOCK from 2 fibers.
   RespExpr resp0, resp1;
+  atomic_int num_done = 0;
   auto fb0 = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
     resp0 = Run(
         {"xreadgroup", "group", "group", "alice", "block", "0", "streams", "foo", "bar", ">", ">"});
+    ++num_done;
   });
   auto fb1 = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
     resp1 = Run(
         {"xreadgroup", "group", "group", "alice", "block", "0", "streams", "foo", "bar", ">", ">"});
+    ++num_done;
   });
   ThisFiber::SleepFor(50us);
 
   pp_->at(1)->Await([&] { return Run("xadd", {"xadd", "foo", "1-*", "k5", "v5"}); });
-  // Only one xreadgroup call should have been unblocked.
+  // Only one xreadgroup call should have been unblocked. Let it finish, otherwise its wake also
+  // re-scans "bar" and could consume the entry added below.
+  ASSERT_TRUE(WaitUntilCondition([&] { return num_done.load() == 1; }, 500ms));
 
-  ThisFiber::SleepFor(50us);
   pp_->at(1)->Await([&] { return Run("xadd", {"xadd", "bar", "1-*", "k5", "v5"}); });
   // The second one should be unblocked
   ThisFiber::SleepFor(50us);
@@ -977,6 +981,81 @@ TEST_F(StreamFamilyTest, XReadGroupErrorFollowsArgumentOrder) {
 
   reader.Join();
   EXPECT_THAT(blocked_resp, ErrArg("WRONGTYPE"));
+}
+
+// A blocked multi-stream read must reply with every stream that became ready together, in
+// argument order, and XREADGROUP must add all delivered entries to the PEL.
+TEST_F(StreamFamilyTest, XReadBlockMultiStreamWake) {
+  for (bool same_shard : {true, false}) {
+    SCOPED_TRACE(same_shard ? "same shard" : "different shards");
+    const string prefix = same_shard ? "same" : "diff";
+    const string key_a = absl::StrCat(prefix, "-a");
+    string key_b;
+    for (unsigned i = 0; key_b.empty(); ++i) {
+      string candidate = absl::StrCat(prefix, "-b-", i);
+      const bool collocated =
+          Shard(candidate, shard_set->size()) == Shard(key_a, shard_set->size());
+      if (collocated == same_shard)
+        key_b = std::move(candidate);
+    }
+
+    Run({"XGROUP", "CREATE", key_a, "group", "0", "MKSTREAM"});
+    Run({"XGROUP", "CREATE", key_b, "group", "0", "MKSTREAM"});
+
+    RespExpr group_resp;
+    auto group_reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+      group_resp = Run(
+          {"XREADGROUP", "GROUP", "group", "c", "BLOCK", "0", "STREAMS", key_a, key_b, ">", ">"});
+    });
+    ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+    RespExpr read_resp;
+    auto reader = pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+      read_resp = Run({"XREAD", "BLOCK", "0", "STREAMS", key_a, key_b, "$", "$"});
+    });
+    ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO2"); }, 500ms));
+
+    // Add to the second stream first, the reply must still follow the argument order.
+    Run({"MULTI"});
+    Run({"XADD", key_b, "1-0", "f", "two"});
+    Run({"XADD", key_a, "1-0", "f", "one"});
+    Run({"EXEC"});
+
+    group_reader.Join();
+    reader.Join();
+
+    for (const RespExpr* resp : {&group_resp, &read_resp}) {
+      ASSERT_THAT(*resp, ArrLen(2));
+      EXPECT_THAT(resp->GetVec()[0].GetVec(), ElementsAre(key_a, ArrLen(1)));
+      EXPECT_THAT(resp->GetVec()[1].GetVec(), ElementsAre(key_b, ArrLen(1)));
+    }
+
+    for (const string& key : {key_a, key_b}) {
+      SCOPED_TRACE(key);
+      auto pending = Run({"XPENDING", key, "group"});
+      EXPECT_THAT(pending.GetVec()[0], IntArg(1));
+    }
+  }
+}
+
+// When only some of the streams are ready on wake, the reply contains just those streams.
+TEST_F(StreamFamilyTest, XReadGroupBlockWakeSkipsEmptyStreams) {
+  Run({"XGROUP", "CREATE", "foo", "group", "0", "MKSTREAM"});
+  Run({"XGROUP", "CREATE", "bar", "group", "0", "MKSTREAM"});
+
+  RespExpr resp;
+  auto reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    resp =
+        Run({"XREADGROUP", "GROUP", "group", "c", "BLOCK", "0", "STREAMS", "foo", "bar", ">", ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO1"); }, 500ms));
+
+  Run({"XADD", "bar", "1-0", "f", "v"});
+  reader.Join();
+
+  ASSERT_THAT(resp, ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("bar", ArrLen(1)));
+  EXPECT_THAT(Run({"XPENDING", "foo", "group"}).GetVec()[0], IntArg(0));
 }
 
 TEST_F(StreamFamilyTest, XReadGroupBlockLazyExpireDuringWakeDoesNotCrash) {
