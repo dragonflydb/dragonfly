@@ -120,6 +120,97 @@ TEST(Journal, WriteRead) {
   }
 }
 
+// Returns at most max_chunk bytes per read, so entries are split across reader buffer refills.
+class ChunkedSource final : public io::Source {
+ public:
+  ChunkedSource(string_view data, size_t max_chunk) : data_{data}, max_chunk_{max_chunk} {
+  }
+
+  io::Result<size_t> ReadSome(const iovec* v, uint32_t len) final {
+    size_t read = 0;
+    for (uint32_t i = 0; i < len && read < max_chunk_ && !data_.empty(); ++i) {
+      size_t n = min({v[i].iov_len, max_chunk_ - read, data_.size()});
+      memcpy(v[i].iov_base, data_.data(), n);
+      data_.remove_prefix(n);
+      read += n;
+    }
+    return read;
+  }
+
+ private:
+  string_view data_;
+  size_t max_chunk_;
+};
+
+// Entries must parse the same whether they are fully buffered or split at any position.
+TEST(Journal, ReadSplitEntries) {
+  struct TestEntry {
+    Op opcode;
+    TxId txid = 0;
+    DbIndex dbid = 0;
+    LSN lsn = 0;
+    vector<string> cmd = {};
+  };
+
+  const vector<TestEntry> test_entries = {
+      {Op::COMMAND, 1, 0, 0, {"SET", "key", "value"}},
+      {Op::LSN, 0, 0, 7},
+      {Op::COMMAND, 1ULL << 40, 3, 0, {"SET", "k", string(300, 'm')}},
+      {Op::PING},
+      {Op::COMMAND, 2, 3, 0, {"SET", "", ""}},
+      {Op::COMMAND, 3, 0, 0, {"SET", "big", string(5000, 'b')}},
+      {Op::COMMAND, 4, 300, 0, {"PING"}},
+      {Op::COMMAND, 5, 300, 0, {"SET", "a", "b"}},
+  };
+
+  io::StringSink sink;
+  JournalWriter writer{&sink};
+  for (const TestEntry& te : test_entries) {
+    if (te.opcode == Op::LSN) {
+      writer.Write(Entry{Op::LSN, te.lsn});
+    } else if (te.opcode == Op::PING) {
+      writer.Write(Entry{Op::PING, te.dbid, nullopt});
+    } else {
+      vector<string_view> args(te.cmd.begin() + 1, te.cmd.end());
+      writer.Write(
+          Entry{te.txid, Op::COMMAND, te.dbid, nullopt, Entry::Payload(te.cmd[0], ArgSlice{args})});
+    }
+  }
+  const string data = std::move(sink).str();
+
+  for (size_t chunk : {1, 2, 3, 5, 8, 64, 1000, 4096, 100000}) {
+    SCOPED_TRACE(chunk);
+    ChunkedSource source{data, chunk};
+    JournalReader reader{&source, 0};
+    ParsedEntry res;
+    for (const TestEntry& te : test_entries) {
+      ASSERT_FALSE(reader.ReadEntry(&res));
+      ASSERT_EQ(te.opcode, res.opcode);
+      if (te.opcode == Op::LSN) {
+        EXPECT_EQ(te.lsn, res.lsn);
+      } else if (te.opcode == Op::COMMAND) {
+        EXPECT_EQ(te.txid, res.txid);
+        EXPECT_EQ(te.dbid, res.dbid);
+        vector<string> parsed;
+        for (string_view arg : res.cmd.view())
+          parsed.emplace_back(arg);
+        EXPECT_EQ(te.cmd, parsed);
+      }
+    }
+    EXPECT_TRUE(reader.ReadEntry(&res));  // end of stream
+  }
+
+  // A buffered argument larger than the remaining command size is still rejected.
+  string corrupted{char(Op::PING)};
+  corrupted += {char(Op::COMMAND), 0, 1, 2, 1, 3, 'S', 'E', 'T', 1, 'k'};
+  io::BytesSource source{corrupted};
+  JournalReader reader{&source, 0};
+  ParsedEntry res;
+  ASSERT_FALSE(reader.ReadEntry(&res));  // buffers the whole input
+  EXPECT_EQ(Op::PING, res.opcode);
+  EXPECT_EQ(make_error_code(errc::io_error), reader.ReadEntry(&res));
+}
+
 TEST(Journal, PendingBuf) {
   PendingBuf pbuf;
 

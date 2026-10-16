@@ -22,10 +22,15 @@
 
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/crc16.h"
 #include "core/glob_matcher.h"
 #include "core/huff_coder.h"
 #include "core/intent_lock.h"
 #include "core/tx_queue.h"
+
+extern "C" {
+#include "redis/crc16.h"
+}
 
 namespace dfly {
 
@@ -108,6 +113,24 @@ TEST_F(IntentLockTest, Basic) {
   ASSERT_FALSE(lk_.Check(IntentLock::EXCLUSIVE));
   lk_.Release(IntentLock::SHARED);
   ASSERT_TRUE(lk_.Check(IntentLock::EXCLUSIVE));
+}
+
+TEST(Crc16Test, MatchesRedis) {
+  EXPECT_EQ(0, Crc16(""));
+  EXPECT_EQ(0x31C3, Crc16("123456789"));  // The CRC16-XMODEM check value.
+
+  std::mt19937 rng(42);
+  string buf(320, '\0');
+  for (char& c : buf)
+    c = char(rng());
+
+  // Cover every block/tail split and unaligned starts.
+  for (size_t offset = 0; offset < 8; ++offset) {
+    for (size_t len = 0; len + offset <= buf.size(); ++len) {
+      ASSERT_EQ(crc16(buf.data() + offset, len), Crc16(string_view{buf}.substr(offset, len)))
+          << "offset " << offset << " len " << len;
+    }
+  }
 }
 
 class StringMatchTest : public ::testing::Test {
@@ -524,6 +547,25 @@ static void BM_ParseDoubleAbsl(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_ParseDoubleAbsl);
+
+// Hashes a key the way KeySlot() does. algo 0: Redis crc16, algo 1: Crc16.
+static void BM_Crc16(benchmark::State& state) {
+  string key(state.range(1), '\0');
+  std::mt19937 rng(42);
+  for (char& c : key)
+    c = 'a' + rng() % 26;
+
+  if (state.range(0) == 0) {
+    while (state.KeepRunning()) {
+      DoNotOptimize(crc16(key.data(), key.size()));
+    }
+  } else {
+    while (state.KeepRunning()) {
+      DoNotOptimize(Crc16(key));
+    }
+  }
+}
+BENCHMARK(BM_Crc16)->ArgNames({"algo", "len"})->ArgsProduct({{0, 1}, {8, 16, 32, 64}});
 
 template <clockid_t cid> void BM_ClockType(benchmark::State& state) {
   timespec ts;
