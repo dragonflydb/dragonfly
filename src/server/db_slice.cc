@@ -376,11 +376,13 @@ template <typename F> struct CallbackConsumer : public DbSlice::ChangeConsumerIn
 namespace {
 
 void UpdateSlotStat(string_view key, int64_t delta, DbTable* db, uint64_t SlotStats::*stat,
-                    string_view name, std::optional<unsigned> obj_type = std::nullopt) {
+                    string_view name, std::optional<unsigned> obj_type = std::nullopt,
+                    std::optional<SlotId> slot = std::nullopt) {
   if (delta == 0 || !db->slots_stats)
     return;
 
-  const SlotId sid = KeySlot(key);
+  DCHECK(!slot || *slot == KeySlot(key));
+  const SlotId sid = slot ? *slot : KeySlot(key);
   uint64_t& value = db->slots_stats[sid].*stat;
   if (delta < 0 && value < static_cast<uint64_t>(-delta)) {
     // Legacy glog used in release builds does not support LOG_EVERY_T(DFATAL, ...).
@@ -399,9 +401,16 @@ void UpdateSlotStat(string_view key, int64_t delta, DbTable* db, uint64_t SlotSt
   value += delta;
 }
 
+// Returns KeySlot(key) if `db` tracks per-slot stats (cluster mode only), nullopt otherwise.
+// Lets an operation compute the slot once for all of its per-slot stat updates.
+std::optional<SlotId> StatsSlotOf(string_view key, const DbTable& db) {
+  return db.slots_stats ? std::optional<SlotId>(KeySlot(key)) : std::nullopt;
+}
+
 }  // namespace
 
-void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable* db) {
+void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable* db,
+                         std::optional<SlotId> slot) {
   DCHECK_NE(db, nullptr);
   if (delta == 0)
     return;
@@ -409,7 +418,7 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable*
   db->stats.AddTypeMemoryUsage(type, delta);
   if (type == OBJ_KEY)
     EngineShard::tlocal()->AddTypeMemDelta(OBJ_KEY, delta);
-  UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage", type);
+  UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage", type, slot);
 }
 
 void AccountSlotTieredBytes(string_view key, int64_t delta, DbTable* db) {
@@ -565,8 +574,9 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
   // The baseline is up to date even if a blocking tiered read uploaded the value mid-scope:
   // such reads are followed by ResyncBaseline(). Subtracting it keeps this call idempotent.
+  DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
   AccountObjectMemory(fields_.key, fields_.orig_obj_type, -int64_t(fields_.orig_value_heap_size),
-                      fields_.db_slice->GetDBTable(fields_.db_ind));
+                      table, StatsSlot(*table));
 
   // Reset to avoid double accounting, and sync the type after accounting.
   fields_.orig_value_heap_size = 0;
@@ -595,20 +605,22 @@ void DbSlice::AutoUpdater::Run() {
   CompactObjType current_type = pv.ObjType();
   int64_t current_size = static_cast<int64_t>(pv.MallocUsed());
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
+  const std::optional<SlotId> slot = StatsSlot(*table);
 
   if (current_type != fields_.orig_obj_type) {
     // Type changed: remove old size from old type, add new size to new type separately.
     // Applying (current_size - orig_size) to the new type would incorrectly subtract
     // from a counter that never had the original bytes added to it.
     AccountObjectMemory(fields_.key, fields_.orig_obj_type,
-                        -static_cast<int64_t>(fields_.orig_value_heap_size), table);
-    AccountObjectMemory(fields_.key, current_type, current_size, table);
+                        -static_cast<int64_t>(fields_.orig_value_heap_size), table, slot);
+    AccountObjectMemory(fields_.key, current_type, current_size, table, slot);
   } else {
     AccountObjectMemory(fields_.key, current_type,
-                        current_size - static_cast<int64_t>(fields_.orig_value_heap_size), table);
+                        current_size - static_cast<int64_t>(fields_.orig_value_heap_size), table,
+                        slot);
   }
 
-  fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key);
+  fields_.db_slice->PostUpdate(fields_.db_ind, fields_.key, slot);
   Cancel();  // Reset to not run again
 }
 
@@ -616,14 +628,21 @@ void DbSlice::AutoUpdater::Cancel() {
   this->fields_ = {};
 }
 
+std::optional<SlotId> DbSlice::AutoUpdater::StatsSlot(const DbTable& table) {
+  if (!fields_.slot)
+    fields_.slot = StatsSlotOf(fields_.key, table);
+  return fields_.slot;
+}
+
 DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it,
-                                  DbSlice* db_slice)
+                                  DbSlice* db_slice, std::optional<SlotId> slot)
     : fields_{.db_slice = db_slice,
               .db_ind = db_ind,
               .it = it,
               .key = key,
               .orig_value_heap_size = it->second.MallocUsed(),
-              .orig_obj_type = it->second.ObjType()} {
+              .orig_obj_type = it->second.ObjType(),
+              .slot = slot} {
   DCHECK(IsValid(it));
 }
 
@@ -900,10 +919,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   table_memory_ += table_increase;
   entries_count_++;
 
+  const std::optional<SlotId> slot = StatsSlotOf(key, db);
   if (it->first.IsInline()) {
     ++db.stats.inline_keys;
   } else {
-    AccountObjectMemory(key, OBJ_KEY, it->first.MallocUsed(), &db);  // Account for key
+    AccountObjectMemory(key, OBJ_KEY, it->first.MallocUsed(), &db, slot);  // Account for key
   }
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
@@ -918,14 +938,13 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
   events_.stash_unloaded = db.prime.stash_unloaded();
   db.stats.events.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
-  if (db.slots_stats) {
-    SlotId sid = KeySlot(key);
-    db.slots_stats[sid].key_count += 1;
+  if (slot) {
+    db.slots_stats[*slot].key_count += 1;
   }
 
   return ItAndUpdater{
       .it = Iterator(it, StringOrView::FromView(key)),
-      .post_updater{cntx.db_index, key, Iterator(it, StringOrView::FromView(key)), this},
+      .post_updater{cntx.db_index, key, Iterator(it, StringOrView::FromView(key)), this, slot},
       .is_new = true,
       .omitted_journal = omit_journal};
 }
@@ -1482,7 +1501,7 @@ void DbSlice::PreUpdateBlocking(DbIndex db_ind, const Iterator& it) {
   inner_it.SetVersion(NextVersion());
 }
 
-void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
+void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key, std::optional<SlotId> slot) {
   // A blocked reader may watch this key expecting a different type, e.g. XREADGROUP when the
   // stream is overwritten by BITOP/RENAME/SUNIONSTORE. Let the readiness check re-evaluate it.
   if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
@@ -1505,7 +1524,8 @@ void DbSlice::PostUpdate(DbIndex db_ind, std::string_view key) {
   ++events_.update;
 
   if (db.slots_stats) {
-    db.slots_stats[KeySlot(key)].total_writes += 1;
+    DCHECK(!slot || *slot == KeySlot(key));
+    db.slots_stats[slot ? *slot : KeySlot(key)].total_writes += 1;
   }
 
   if (!client_tracking_map_.empty()) {
@@ -2096,12 +2116,13 @@ void DbSlice::PerformDeletionAtomic(PrimeIterator del_it, string_view key, DbTab
   }
 
   ssize_t value_heap_size = pv.MallocUsed(), key_size_used = del_it->first.MallocUsed();
+  const std::optional<SlotId> slot = StatsSlotOf(key, *table);
   if (del_it->first.IsInline()) {
     --stats.inline_keys;
   } else {
-    AccountObjectMemory(key, OBJ_KEY, -key_size_used, table);  // Key
+    AccountObjectMemory(key, OBJ_KEY, -key_size_used, table, slot);  // Key
   }
-  AccountObjectMemory(key, obj_type, -value_heap_size, table);  // Value
+  AccountObjectMemory(key, obj_type, -value_heap_size, table, slot);  // Value
 
   if (async && MayDeleteAsynchronously(pv)) {
     auto schedule = [obj_type](auto* ds) {
@@ -2121,9 +2142,8 @@ void DbSlice::PerformDeletionAtomic(PrimeIterator del_it, string_view key, DbTab
       schedule(static_cast<DenseSet*>(obj_ptr));
   }
 
-  if (table->slots_stats) {
-    SlotId sid = KeySlot(key);
-    table->slots_stats[sid].key_count -= 1;
+  if (slot) {
+    table->slots_stats[*slot].key_count -= 1;
   }
 
   // Before Erase: 'key' may point into the entry, and Erase destroys it.
