@@ -179,6 +179,31 @@ void SetIntersection(FirstIterator first_begin, FirstIterator first_end,
   }
 }
 
+// Same result as std::set_union, but compares document ids instead of iterators: std::set_union
+// passes iterators to its comparator by value, and copying a posting list iterator also copies
+// the positions of its current document.
+template <typename FirstIterator, typename SecondIterator>
+void SetUnion(FirstIterator l_it, FirstIterator l_end, SecondIterator r_it, SecondIterator r_end,
+              BackInserter out) {
+  while (l_it != l_end && r_it != r_end) {
+    DocId l_value = *l_it;
+    DocId r_value = *r_it;
+
+    // Emit the smaller id and advance every side that holds it. A single emit site keeps the loop
+    // small enough for GCC to inline the iterator increments.
+    *out++ = std::min(l_value, r_value);
+    if (l_value <= r_value) {
+      ++l_it;
+    }
+    if (r_value <= l_value) {
+      ++r_it;
+    }
+  }
+
+  out = std::copy(l_it, l_end, out);
+  std::copy(r_it, r_end, out);
+}
+
 }  // namespace details
 
 inline std::vector<DocId> MergeIndexResults(const IndexResult& left, const IndexResult& right,
@@ -195,7 +220,7 @@ inline std::vector<DocId> MergeIndexResults(const IndexResult& left, const Index
   } else {
     result.reserve(std::max(left.ApproximateSize(), right.ApproximateSize()));
     auto cb = [&result](auto* s1, auto* s2) {
-      std::set_union(s1->begin(), s1->end(), s2->begin(), s2->end(), std::back_inserter(result));
+      details::SetUnion(s1->begin(), s1->end(), s2->begin(), s2->end(), std::back_inserter(result));
     };
     std::visit(cb, left.Borrowed(), right.Borrowed());
   }
