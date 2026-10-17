@@ -4,7 +4,10 @@
 
 #pragma once
 
+#include <absl/container/inlined_vector.h>
+
 #include <array>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
@@ -365,8 +368,14 @@ class EngineShard {
   Transaction* running_tx_ = nullptr;
   bool needs_repoll_ = false;  // set when running_tx_ interrupted a PollExecution call
 
+  struct DeferredPoll {
+    boost::intrusive_ptr<Transaction> trans;  // owning: a stale entry can outlive its hop
+    bool awaked;                              // awakened on this shard
+  };
+  absl::InlinedVector<DeferredPoll, 4> deferred_polls_;  // polls a repoll can't reach
+
   std::string continuation_debug_id_;
-  unsigned poll_concurrent_factor_ = 0;
+  unsigned poll_depth_ = 0;  // PollExecutionInternal calls in progress
 
   IntentLock shard_lock_;
 
