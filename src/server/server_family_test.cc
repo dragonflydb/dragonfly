@@ -310,6 +310,35 @@ TEST_F(ServerFamilyTest, ClientPause) {
   EXPECT_GT((absl::Now() - start), absl::Milliseconds(50));
 }
 
+TEST_F(ServerFamilyTest, AwakenedBlockedCommandUnderPauseQueueStallBug8326) {
+  RespExpr blpop_resp;
+  auto fb_blpop = pp_->at(1)->LaunchFiber(Launch::dispatch,
+                                          [&] { blpop_resp = Run("id1", {"blpop", "l", "0"}); });
+
+  WaitUntilCondition([&] { return IsConnBlocked("id1"); });
+
+  // Install CLIENT PAUSE WRITE.
+  Run({"CLIENT", "PAUSE", "10000", "WRITE"});
+
+  // A write via privileged connection wakes the blocked BLPOP,
+  // which parks in WaitOnWatch behind the pause on thread 1.
+  EXPECT_THAT(RunPrivileged({"rpush", "l", "a"}), IntArg(1));
+
+  // Verify that an admin/privileged read does not hang on the shard queue behind the parked BLPOP.
+  EXPECT_THAT(RunPrivileged({"llen", "l"}), IntArg(1));
+
+  // Also verify that a read from a normal connection (allowed under CLIENT PAUSE WRITE) does not
+  // hang.
+  EXPECT_THAT(Run("id2", {"llen", "l"}), IntArg(1));
+
+  // Lift the pause.
+  EXPECT_THAT(RunPrivileged({"CLIENT", "UNPAUSE"}), "OK");
+
+  fb_blpop.Join();
+  EXPECT_THAT(blpop_resp.GetVec(), ElementsAre("l", "a"));
+  EXPECT_THAT(RunPrivileged({"llen", "l"}), IntArg(0));
+}
+
 TEST_F(ServerFamilyTest, ClientListAccepted) {
   const std::vector<std::vector<std::string>> ok = {
       {"CLIENT", "LIST"},
