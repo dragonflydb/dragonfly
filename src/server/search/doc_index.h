@@ -651,7 +651,8 @@ class ShardDocIndices {
 
   // Init index: create shard local state for given index with given name.
   void InitIndex(const OpArgs& op_args, std::string_view name,
-                 std::shared_ptr<const DocIndex> index, bool is_journal = false);
+                 std::shared_ptr<const DocIndex> index, bool is_journal = false,
+                 Synonyms synonyms = {});
 
   // Drop index, return the dropped index if it existed or nullptr otherwise
   std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);

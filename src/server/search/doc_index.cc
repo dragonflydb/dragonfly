@@ -1394,8 +1394,10 @@ OpStatus ShardDocIndices::DeleteAlias(string_view alias) {
 }
 
 void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
-                                shared_ptr<const DocIndex> index_ptr, bool is_journal) {
+                                shared_ptr<const DocIndex> index_ptr, bool is_journal,
+                                Synonyms synonyms) {
   auto shard_index = make_unique<ShardDocIndex>(std::move(index_ptr), &hash_index_count_);
+  shard_index->GetSynonyms() = std::move(synonyms);
   auto [it, _] = indices_.emplace(name, std::move(shard_index));
 
   it->second->InitHnswShardIndices();

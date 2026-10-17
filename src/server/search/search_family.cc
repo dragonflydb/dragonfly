@@ -2776,8 +2776,14 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
   // TODO: Introduce partial rebuild
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
   auto upd_cb = [idx_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
-    (void)es->search_indices()->DropIndex(idx_name);
-    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal);
+    unique_ptr<ShardDocIndex> old_index = es->search_indices()->DropIndex(idx_name);
+    Synonyms synonyms = old_index ? old_index->GetSynonyms() : Synonyms{};
+    // Destroying the old index waits for its builder, so the replacement builder never runs next
+    // to it on the same global vector index. The old index is already unregistered, so no new
+    // caller can reach that builder meanwhile.
+    old_index.reset();
+    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal,
+                                    std::move(synonyms));
     return OpStatus::OK;
   };
   cmd_cntx->tx()->Execute(upd_cb, true);
