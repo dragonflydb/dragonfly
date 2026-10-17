@@ -21,6 +21,7 @@
 
 #include "base/flags.h"
 #include "core/interpreter_polyfill.h"
+#include "core/lua_internals.h"
 #include "overloaded.h"
 
 extern "C" {
@@ -1305,43 +1306,47 @@ inline __attribute__((always_inline)) auto Interpreter::SerializeResultInternal(
         break;
       }
 
-      // Each lookup reuses the stack slot of the previous one.
-      lua_pushvalue(lua_, wrapper_keys_base);
-      if (lua_rawget(lua_, -2) == LUA_TSTRING) {
-        serializer->OnError(TopSv(lua_));
-        lua_pop(lua_, 1);
-        break;
-      }
-
-      lua_copy(lua_, wrapper_keys_base + 1, -1);
-      if (lua_rawget(lua_, -2) == LUA_TSTRING) {
-        serializer->OnStatus(TopSv(lua_));
-        lua_pop(lua_, 1);
-        break;
-      }
-
-      // A table charges its elements to the budget when it opens, or is replaced by an error if
-      // they do not fit. Each serialized value is charged once, so the budget bounds the work.
-      lua_copy(lua_, wrapper_keys_base + 2, -1);
-      if (lua_rawget(lua_, -2) == LUA_TTABLE) {
-        // Calculate length of map part, there is sadly no other way. Stop counting past the
-        // budget, and use it up then, so a shared map is not counted again for each reference.
-        unsigned len = 0;
-        for (lua_pushnil(lua_); len <= *budget && lua_next(lua_, -2) != 0; lua_pop(lua_, 1))
-          len++;
-        if (len > *budget) {
-          lua_pop(lua_, 2);  // The last key and the map.
-          *budget = 0;
-          serializer->OnError(kReplySizeError);
+      // Without a hash part, the table has no wrapper fields. Reply arrays and most arrays built
+      // by scripts have none, so this skips the lookups for most tables.
+      if (LuaTableHasHashPart(lua_, -1)) {
+        // Each lookup reuses the stack slot of the previous one.
+        lua_pushvalue(lua_, wrapper_keys_base);
+        if (lua_rawget(lua_, -2) == LUA_TSTRING) {
+          serializer->OnError(TopSv(lua_));
+          lua_pop(lua_, 1);
           break;
         }
 
-        *budget -= len;
-        serializer->OnMapStart(len);
-        lua_pushnil(lua_);  // The first key for lua_next.
-        return {ReplyFrame::kMapKey, 0, 0};
+        lua_copy(lua_, wrapper_keys_base + 1, -1);
+        if (lua_rawget(lua_, -2) == LUA_TSTRING) {
+          serializer->OnStatus(TopSv(lua_));
+          lua_pop(lua_, 1);
+          break;
+        }
+
+        // A table charges its elements to the budget when it opens, or is replaced by an error if
+        // they do not fit. Each serialized value is charged once, so the budget bounds the work.
+        lua_copy(lua_, wrapper_keys_base + 2, -1);
+        if (lua_rawget(lua_, -2) == LUA_TTABLE) {
+          // Calculate length of map part, there is sadly no other way. Stop counting past the
+          // budget, and use it up then, so a shared map is not counted again for each reference.
+          unsigned len = 0;
+          for (lua_pushnil(lua_); len <= *budget && lua_next(lua_, -2) != 0; lua_pop(lua_, 1))
+            len++;
+          if (len > *budget) {
+            lua_pop(lua_, 2);  // The last key and the map.
+            *budget = 0;
+            serializer->OnError(kReplySizeError);
+            break;
+          }
+
+          *budget -= len;
+          serializer->OnMapStart(len);
+          lua_pushnil(lua_);  // The first key for lua_next.
+          return {ReplyFrame::kMapKey, 0, 0};
+        }
+        lua_pop(lua_, 1);  // The map field, which is not a table.
       }
-      lua_pop(lua_, 1);  // The map field, which is not a table.
 
       // lua_rawlen returns size_t: keep the border wide so a huge array can't wrap below the
       // budget and bypass the check. Past it, the border fits unsigned.
