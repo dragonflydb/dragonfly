@@ -1002,6 +1002,79 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
             await collect_expiring_events(pclient, keys)
 
 
+async def _v2_pipeline_stats(client: aioredis.Redis, client_id: int) -> dict[str, int]:
+    connections = parse_client_list(await client.execute_command("CLIENT LIST ID", client_id))
+    assert len(connections) == 1
+    connection = connections[0]
+    # CLIENT LIST uses hyphens in multiword field names (so we call replace(...))
+    return {
+        name: int(connection[name.replace("_", "-")])
+        for name in (
+            "squashes",
+            "resquashes",
+            "reply_batches",
+            "idle_waits",
+            "reply_waits",
+            "idle_wait_usec",
+        )
+    }
+
+
+@dfly_args(
+    {
+        "proactor_threads": "1",
+        "enable_resp_io_loop_v2": "true",
+        "enable_pipeline_squashing_v2": "true",
+    }
+)
+async def test_v2_pipeline_squash_metrics(df_server: DflyInstance):
+    """Check V2 pipeline metrics for single connection.
+
+    Send squashable GET commands and one regular GET on a raw connection. Another
+    connection reads its CLIENT LIST counters to verify squash and reply batching.
+    """
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 pipeline squash metrics")
+
+    observer = df_server.client()
+    reader, writer = await _open_raw_resp_connection(df_server, authenticate=False)
+    try:
+        writer.write(_encode_resp_command(("CLIENT", "ID")))
+        await writer.drain()
+        client_id = int((await _read_resp_frame(reader))[1:-2])
+
+        before = await _v2_pipeline_stats(observer, client_id)
+        writer.write(b"".join(_encode_resp_command(("GET", f"missing-{i}")) for i in range(32)))
+        await writer.drain()
+        assert [await _read_resp_frame(reader) for _ in range(32)] == [b"$-1\r\n"] * 32
+
+        @assert_eventually(timeout=2)
+        async def wait_for_idle_wait():
+            stats = await _v2_pipeline_stats(observer, client_id)
+            assert stats["idle_waits"] > before["idle_waits"]
+            assert stats["idle_wait_usec"] > before["idle_wait_usec"]
+            return stats
+
+        after = await wait_for_idle_wait()
+        squashes = after["squashes"] - before["squashes"]
+        reply_batches = after["reply_batches"] - before["reply_batches"]
+        assert squashes >= 1
+        assert 1 <= reply_batches <= 32
+        assert after["reply_waits"] <= after["idle_waits"]
+
+        writer.write(_encode_resp_command(("GET", "missing-single")))
+        await writer.drain()
+        assert await _read_resp_frame(reader) == b"$-1\r\n"
+        single_after = await _v2_pipeline_stats(observer, client_id)
+
+        assert single_after["squashes"] == after["squashes"]
+        assert single_after["reply_batches"] > after["reply_batches"]
+    finally:
+        writer.close()
+        await writer.wait_closed()
+        await observer.aclose()
+
+
 @dfly_multi_test_args(
     {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "false"},
     {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "true"},
