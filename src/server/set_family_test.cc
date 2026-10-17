@@ -417,6 +417,14 @@ TEST_F(SetFamilyTest, SScan) {
   EXPECT_THAT(vec, UnorderedElementsAre("str-1", "str-10", "str-11", "str-12", "str-13", "str-14"));
 }
 
+TEST_F(SetFamilyTest, SScanRejectsZeroCount) {
+  for (int i = 0; i < 5; i++) {
+    Run({"sadd", "myset", absl::StrCat(i)});
+  }
+  EXPECT_THAT(Run({"sscan", "myset", "0", "count", "0"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"sscan", "myset", "0", "count", "10"}), ArrLen(2));
+}
+
 TEST_F(SetFamilyTest, HugeSScan) {
   for (int i = 0; i < 60000; i += 5) {
     Run({"sadd", "myintset", absl::StrCat(i), absl::StrCat(i + 1), absl::StrCat(i + 2),
