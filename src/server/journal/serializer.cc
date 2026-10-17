@@ -4,7 +4,13 @@
 
 #include "server/journal/serializer.h"
 
+#include <absl/base/internal/endian.h>
+
 #include <system_error>
+
+extern "C" {
+#include "redis/rdb.h"
+}
 
 #include "base/logging.h"
 #include "io/io.h"
@@ -18,6 +24,43 @@
 using namespace std;
 
 namespace dfly {
+
+namespace {
+
+// Decodes an integer written by WritePackedUInt from [*pos, end) and advances *pos past it.
+// Returns false if the integer is truncated or uses an encoding WritePackedUInt does not produce.
+inline bool ParseBufferedUInt(const uint8_t** pos, const uint8_t* end, uint64_t* dest) {
+  const uint8_t* p = *pos;
+  if (p == end)
+    return false;
+
+  const uint8_t first = *p++;
+  switch (first >> 6) {
+    case RDB_6BITLEN:
+      *dest = first & 0x3F;
+      break;
+    case RDB_14BITLEN:
+      if (p == end)
+        return false;
+      *dest = (uint64_t(first & 0x3F) << 8) | *p++;
+      break;
+    default:
+      if (first == RDB_32BITLEN && end - p >= 4) {
+        *dest = absl::big_endian::Load32(p);
+        p += 4;
+      } else if (first == RDB_64BITLEN && end - p >= 8) {
+        *dest = absl::big_endian::Load64(p);
+        p += 8;
+      } else {
+        return false;
+      }
+  }
+
+  *pos = p;
+  return true;
+}
+
+}  // namespace
 
 JournalWriter::JournalWriter(io::Sink* sink) : sink_{sink} {
 }
@@ -202,7 +245,63 @@ std::error_code JournalReader::ReadCommand(journal::ParsedEntry::CmdData* data) 
   return {};
 }
 
+bool JournalReader::TryReadBufferedCommand(journal::ParsedEntry* dest) {
+  const io::Bytes input = buf_.InputBuffer();
+  const uint8_t* pos = input.data();
+  const uint8_t* const end = pos + input.size();
+
+  uint64_t opcode = 0, dbid = dbid_;
+  if (!ParseBufferedUInt(&pos, end, &opcode))
+    return false;
+
+  if (opcode == uint8_t(journal::Op::SELECT)) {
+    if (!ParseBufferedUInt(&pos, end, &dbid) || dbid > numeric_limits<DbIndex>::max() ||
+        !ParseBufferedUInt(&pos, end, &opcode)) {
+      return false;
+    }
+  }
+
+  uint64_t txid = 0, unused = 0, num_strings = 0, cmd_size = 0;
+  if (opcode != uint8_t(journal::Op::COMMAND) || !ParseBufferedUInt(&pos, end, &txid) ||
+      !ParseBufferedUInt(&pos, end, &unused) || unused > numeric_limits<uint32_t>::max() ||
+      !ParseBufferedUInt(&pos, end, &num_strings) || !ParseBufferedUInt(&pos, end, &cmd_size)) {
+    return false;
+  }
+
+  // Each argument has a size prefix of at least one byte, so a fully buffered command needs at
+  // least num_strings + cmd_size bytes. This also bounds the reservation below.
+  const uint64_t left = end - pos;
+  if (num_strings > left || cmd_size > left - num_strings)
+    return false;
+
+  // On failure below, the generic path clears dest->cmd before parsing the entry again.
+  journal::ParsedEntry::CmdData& cmd = dest->cmd;
+  cmd.clear();
+  cmd.Reserve(num_strings, cmd_size + num_strings /* +\0 char*/);
+  for (uint64_t i = 0; i < num_strings; ++i) {
+    uint64_t size = 0;
+    if (!ParseBufferedUInt(&pos, end, &size) || size > cmd_size || size > uint64_t(end - pos))
+      return false;
+
+    cmd.PushArg(string_view{reinterpret_cast<const char*>(pos), size});
+    pos += size;
+    cmd_size -= size;
+  }
+
+  dbid_ = dbid;
+  dest->dbid = dbid_;
+  dest->opcode = journal::Op::COMMAND;
+  dest->txid = txid;
+  buf_.ConsumeInput(pos - input.data());
+
+  VLOG(1) << "Read entry " << dest->ToString();
+  return true;
+}
+
 std::error_code JournalReader::ReadEntry(journal::ParsedEntry* dest) {
+  if (TryReadBufferedCommand(dest))
+    return {};
+
   uint8_t int_op;
   SET_OR_RETURN(ReadUInt<uint8_t>(), int_op);
   journal::Op opcode = static_cast<journal::Op>(int_op);

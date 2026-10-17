@@ -58,6 +58,11 @@ struct JournalReader {
   // Read argument array into string buffer.
   std::error_code ReadCommand(journal::ParsedEntry::CmdData* entry);
 
+  // Fast path for ReadEntry: parses a COMMAND entry, optionally preceded by SELECT, directly from
+  // the buffered input. Returns false without consuming input if the entry is not fully buffered,
+  // has another opcode or an unexpected encoding; ReadEntry then falls back to the generic path.
+  bool TryReadBufferedCommand(journal::ParsedEntry* dest);
+
  private:
   io::Source* source_;
   base::IoBuf buf_;
