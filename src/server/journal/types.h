@@ -46,8 +46,9 @@ struct Entry : public EntryBase {
     }
   };
 
-  Entry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot_id, Payload pl)
-      : EntryBase{txid, opcode, dbid, slot_id}, payload{std::move(pl)} {
+  Entry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot_id, Payload pl,
+        uint64_t tx_time_ms = 0)
+      : EntryBase{txid, opcode, dbid, slot_id}, payload{std::move(pl)}, tx_time_ms{tx_time_ms} {
   }
 
   Entry(journal::Op opcode, DbIndex dbid, std::optional<SlotId> slot_id)
@@ -68,6 +69,9 @@ struct Entry : public EntryBase {
   std::string ToString() const;
 
   Payload payload;
+
+  // Transaction clock (Transaction::time_now_ms_) at execution. 0 if none. Not serialized.
+  uint64_t tx_time_ms = 0;
 };
 
 struct ParsedEntry : public EntryBase {
@@ -91,6 +95,9 @@ struct JournalChangeItem {
 
   std::string_view cmd;
   std::optional<SlotId> slot;
+
+  // Transaction clock of the originating entry, 0 if none. Not part of the wire format.
+  uint64_t tx_time_ms = 0;
 };
 
 struct JournalConsumerInterface {
