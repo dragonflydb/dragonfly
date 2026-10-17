@@ -3925,13 +3925,13 @@ TEST_F(SearchFamilyTest, SynonymTermInSeveralGroupsDeleteAfterRehash) {
   EXPECT_THAT(Run({"FT.SEARCH", "sidx", "unrelated", "NOCONTENT"}), AreNoContentDocIds("sd2"));
 }
 
-// Every shard must reach its documents through every group of a multi-group term, also after the
-// index and its synonyms were reloaded from a snapshot.
+// Every shard must reach its documents through every group of a multi-group term (group ids keep
+// their case), also after the index and its synonyms were reloaded from a snapshot.
 TEST_F(SearchFamilyTest, SynonymMultiGroupTermAcrossShardsAndReload) {
   InitWithDbFilename();
   EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
             "OK");
-  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "shared", "one"}), "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "G1", "shared", "one"}), "OK");
   EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g2", "shared", "two"}), "OK");
   for (int i = 0; i < 12; i++)
     EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", "shared"}), IntArg(1));
@@ -3942,8 +3942,8 @@ TEST_F(SearchFamilyTest, SynonymMultiGroupTermAcrossShardsAndReload) {
                   AreNoContentDocIds("d:0", "d:1", "d:2", "d:3", "d:4", "d:5", "d:6", "d:7", "d:8",
                                      "d:9", "d:10", "d:11"))
           << query;
-    EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}), IsUnordArray("shared", IsArray("g1", "g2"), "one",
-                                                         IsArray("g1"), "two", IsArray("g2")));
+    EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}), IsUnordArray("shared", IsArray("G1", "g2"), "one",
+                                                         IsArray("G1"), "two", IsArray("g2")));
   };
   check();
 
@@ -3995,7 +3995,9 @@ TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
                                       "w'sh?red'",
                                       "it",
                                       "~it",
-                                      "@title:it"};
+                                      "@title:it",
+                                      "\"\\ g1\" | one",
+                                      "one | \"\\ g1\""};
     std::map<string, double> out;
     for (string_view query : queries) {
       auto resp = Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD",
@@ -4025,6 +4027,9 @@ TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
   EXPECT_NEAR(single_shard.at("~ON* d:0"), single_shard.at("on* d:0"), 1e-4);
   EXPECT_NEAR(single_shard.at("w'*HAR*' d:1"), single_shard.at("*har* d:1"), 1e-4);
   EXPECT_GT(single_shard.at("it d:4"), 0.0);
+  // A phrase that would hit a group token matches nothing and must not disturb the group's cursor.
+  for (const char* key : {"\"\\ g1\" | one d:0", "one | \"\\ g1\" d:0"})
+    EXPECT_NEAR(single_shard.at(key), single_shard.at("one d:0"), 1e-4) << key;
 }
 
 // A query whose only text term is absent from the index still runs the scorer, so equal scores
@@ -4112,6 +4117,49 @@ TEST_F(SearchFamilyTest, FtAlterWhileBuilding) {
         << query;
   EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}),
               IsUnordArray("car", IsArray("g1"), "automobile", IsArray("g1")));
+}
+
+// FT.SYNUPDATE must rebuild every document containing the term, including documents stemmed by
+// a per-document LANGUAGE_FIELD stemmer whose stem differs from the index default stem.
+TEST_F(SearchFamilyTest, SynonymRebuildFindsPerDocStemmedDocs) {
+  EXPECT_EQ(Run({"FT.CREATE", "lf_idx", "ON", "HASH", "LANGUAGE", "english", "LANGUAGE_FIELD",
+                 "lang", "SCHEMA", "body", "TEXT", "lang", "TEXT", "NOSTEM"}),
+            "OK");
+  // English stems "running" to "run"; the German stemmer leaves it unchanged.
+  EXPECT_THAT(Run({"HSET", "d:de", "body", "running", "lang", "german"}), IntArg(2));
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "lf_idx", "g1", "running", "sprint"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "sprint", "NOCONTENT"}), AreNoContentDocIds("d:de"));
+  EXPECT_THAT(Run({"DEL", "d:de"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "sprint", "NOCONTENT"}), kNoResults);
+}
+
+// Synonym group sentinels are internal tokens: affix and phrase queries must never match them.
+TEST_F(SearchFamilyTest, SynonymSentinelNotMatchedByQueries) {
+  for (bool with_trie : {false, true}) {
+    vector<string> create{"FT.CREATE", "sidx", "ON",     "HASH",  "PREFIX",
+                          "1",         "d:",   "SCHEMA", "title", "TEXT"};
+    if (with_trie)
+      create.push_back("WITHSUFFIXTRIE");
+    EXPECT_EQ(Run(absl::MakeSpan(create)), "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", "syn1", "hello", "hi"}), "OK");
+    EXPECT_THAT(Run({"HSET", "d:1", "title", "hello"}), IntArg(1));
+
+    // An escaped leading space reaches the dictionary walks and phrase lookups directly.
+    for (string_view query : {"*n1", "*yn*", "w'*n1'", "\\ syn*", "\\ *", "\"\\ syn1\""})
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", query, "NOCONTENT"}), kNoResults) << query;
+    EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "NOCONTENT"}), AreNoContentDocIds("d:1"));
+
+    EXPECT_EQ(Run({"FT.DROPINDEX", "sidx"}), "OK");
+    EXPECT_THAT(Run({"DEL", "d:1"}), IntArg(1));
+  }
+
+  // Not even a custom stopword that starts with a space lets such a phrase match.
+  EXPECT_EQ(Run({"FT.CREATE", "widx", "ON", "HASH", "PREFIX", "1", "w:", "STOPWORDS", "1", " syn1",
+                 "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_THAT(Run({"HSET", "w:1", "title", "hello"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "widx", "\"\\ syn1 hello\"", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "widx", "\"hello\"", "NOCONTENT"}), AreNoContentDocIds("w:1"));
 }
 
 TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
