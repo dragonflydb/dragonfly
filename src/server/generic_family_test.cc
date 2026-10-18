@@ -2919,6 +2919,21 @@ TEST_F(GenericFamilyTest, ConfigSetRejectedValueRollsBack) {
 
 // CONFIG SET notify_keyspace_events must apply to every namespace, not only the default one,
 // and namespaces created afterwards must inherit the current setting.
+// Regression for https://github.com/dragonflydb/dragonfly/issues/8069
+TEST_F(GenericFamilyTest, HeartbeatExpiresAclNamespaceKeys) {
+  ASSERT_EQ(Run({"ACL", "SETUSER", "hbns", "ON", ">pass", "+@all", "~*", "NAMESPACE:hbns"}), "OK");
+
+  ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"AUTH", "hbns", "pass"}); }), "OK");
+  ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"SET", "expkey", "v"}); }), "OK");
+  ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"PEXPIRE", "expkey", "100"}); }).GetInt(), 1);
+
+  AdvanceTime(200);
+
+  shard_set->RunBlockingInParallel([](EngineShard* shard) { shard->Heartbeat(); });
+
+  EXPECT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"EXISTS", "expkey"}); }).GetInt(), 0);
+}
+
 TEST_F(GenericFamilyTest, ConfigNotifyAppliesToAllNamespaces) {
   Namespace* ns = pp_->at(0)->Await([] { return &namespaces->GetOrInsert("ns1"); });
 
