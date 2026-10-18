@@ -65,7 +65,7 @@ ConnectionStats& ConnectionStats::operator+=(const ConnectionStats& o) {
   ADD(pipeline_reply_batches);
   ADD(pipeline_idle_waits);
   ADD(pipeline_reply_waits);
-  ADD(pipeline_idle_wait_cycles);
+  ADD(pipeline_idle_wait_usec);
   ADD(proactor_reads);
   ADD(proactor_parse);
   ADD(shared_buf_overflow_copies);

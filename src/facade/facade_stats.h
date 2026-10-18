@@ -112,8 +112,8 @@ struct ConnectionStats {
   uint64_t pipeline_idle_waits = 0;
   // Subset of pipeline_idle_waits that started while dispatched commands awaited their replies.
   uint64_t pipeline_reply_waits = 0;
-  // Total time spent in idle waits, in CycleClock cycles.
-  uint64_t pipeline_idle_wait_cycles = 0;
+  // Total time spent in idle waits, in microseconds to prevent the aggregate cycle count wrapping.
+  uint64_t pipeline_idle_wait_usec = 0;
 
   // V2 Only: Number of times the proactor OnRecv callback actually drained bytes into io_buf_.
   uint64_t proactor_reads = 0;

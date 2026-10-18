@@ -195,10 +195,9 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("pipeline_reply_waits_total", "", conn_stats.pipeline_reply_waits,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels(
-      "pipeline_idle_wait_duration_seconds", "",
-      UsecToSec(base::CycleClock::ToUsec(conn_stats.pipeline_idle_wait_cycles)),
-      MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_idle_wait_duration_seconds", "",
+                            UsecToSec(conn_stats.pipeline_idle_wait_usec), MetricType::COUNTER,
+                            &resp->body());
 
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
                             UsecToSec(conn_stats.pipelined_cmd_latency), MetricType::COUNTER,

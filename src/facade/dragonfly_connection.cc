@@ -4351,7 +4351,8 @@ auto Connection::IoLoopV2() -> IoLoopResult {
         ++conn_stats.pipeline_idle_waits;
         if (wait_for_reply)
           ++conn_stats.pipeline_reply_waits;
-        conn_stats.pipeline_idle_wait_cycles += CycleClock::Now() - idle_wait_start;
+        conn_stats.pipeline_idle_wait_usec +=
+            CycleClock::ToUsec(CycleClock::Now() - idle_wait_start);
       }
     }
 
