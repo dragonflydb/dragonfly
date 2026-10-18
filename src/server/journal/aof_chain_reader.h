@@ -5,7 +5,6 @@
 #pragma once
 
 #include <memory>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -40,7 +39,7 @@ class AofChainReader : public io::Source {
 
   // Last complete record read so far, 0 if none; the log's last once the end was reached.
   uint64_t LastLsn() const {
-    return prev_block_ ? prev_block_->first_lsn + prev_block_->n_records - 1 : 0;
+    return expected_first_lsn_ ? expected_first_lsn_ - 1 : 0;
   }
 
   // Bytes past the end of the log. Valid once the end was reached.
@@ -53,6 +52,7 @@ class AofChainReader : public io::Source {
     uint64_t seq;
     uint64_t size;
     uint64_t uid;
+
     // Opened by Open() and kept until the reader is destroyed.
     std::unique_ptr<util::fb2::LinuxFile> file;
   };
@@ -79,11 +79,6 @@ class AofChainReader : public io::Source {
     return read_seg_id_ == segment_chain_.size();
   }
 
-  // The last valid block ends with a record that continues in the next block.
-  bool EndsMidRecord() const {
-    return prev_block_ && (prev_block_->flags & kEndsWithPartial);
-  }
-
   std::string dir_;
   uint32_t shard_id_;
   uint32_t shard_count_;
@@ -95,11 +90,16 @@ class AofChainReader : public io::Source {
   size_t read_seg_id_ = 0;
   uint64_t offset_ = kAofSegmentHeaderSize;
   std::string buf_;
+
   // The unread part of the current block's payload, in buf_.
   std::string_view pending_;
-  // The last valid block's header, nullopt before the first one. The next block must start at
-  // first_lsn + n_records, with a continuation exactly when this one ends mid-record.
-  std::optional<AofBlockHeader> prev_block_;
+
+  // The LSN the next block must start at, 0 before the first block.
+  uint64_t expected_first_lsn_ = 0;
+
+  // The last valid block ends with a record that continues in the next block.
+  bool ends_mid_record_ = false;
+
   End end_ = End::kNotYet;
 };
 

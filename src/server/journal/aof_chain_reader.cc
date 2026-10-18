@@ -64,6 +64,7 @@ error_code AofChainReader::Open() {
 
   for (size_t i = 0; i < segment_chain_.size(); ++i) {
     Segment& seg = segment_chain_[i];
+
     // A missing seq or a file without a full header.
     if (seg.seq != segment_chain_.front().seq + i || seg.size < kAofSegmentHeaderSize)
       return make_error_code(errc::illegal_byte_sequence);
@@ -82,6 +83,7 @@ error_code AofChainReader::Open() {
         hdr->seq != seg.seq) {
       return make_error_code(errc::illegal_byte_sequence);
     }
+
     // Seeds the CRCs of the segment's blocks.
     seg.uid = hdr->segment_uid;
   }
@@ -90,26 +92,31 @@ error_code AofChainReader::Open() {
 
 error_code AofChainReader::ReadBlock() {
   const Segment& seg = segment_chain_[read_seg_id_];
+
   // Up to one maximum-size block; a smaller block leaves the next block's bytes for the next read.
   buf_.resize(min<uint64_t>(kMaxBlockBytes, seg.size - offset_));
   iovec v{buf_.data(), buf_.size()};
   RETURN_ON_ERR(seg.file->Read(&v, 1, offset_, 0));
+
   // Bad CRC or size: a torn write or a hole.
   auto hdr = DecodeAofBlock(buf_, seg.uid);
   if (!hdr) {
     MarkEndOfLog(End::kTailTorn);
     return {};
   }
+
   // A block that does not follow the previous one: a stale block past the end of the log.
-  bool lsn_break = prev_block_ && hdr->first_lsn != prev_block_->first_lsn + prev_block_->n_records;
-  bool continues = hdr->flags & kStartsWithContinuation;
-  if (lsn_break || continues != EndsMidRecord()) {
+  bool lsn_break = expected_first_lsn_ && hdr->first_lsn != expected_first_lsn_;
+  bool starts_mid_record = hdr->flags & kStartsMidRecord;
+  if (lsn_break || starts_mid_record != ends_mid_record_) {
     MarkEndOfLog(End::kTailTorn);
     return {};
   }
 
-  prev_block_ = *hdr;
+  expected_first_lsn_ = hdr->first_lsn + hdr->n_records;
+  ends_mid_record_ = hdr->flags & kEndsMidRecord;
   offset_ += hdr->total_block_bytes;
+
   // Every valid block is handed out right away, so memory stays bounded by one block. A record
   // that continues in the next block is buffered by JournalReader until it completes.
   // TODO: a log that ends mid-record keeps the complete records before the cut, but resuming after
@@ -130,16 +137,18 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
       return 0;
     if (SegmentFullyRead()) {
       // A record cut at the end of the segment.
-      if (EndsMidRecord()) {
+      if (ends_mid_record_) {
         MarkEndOfLog(End::kTailTorn);
         continue;
       }
       ++read_seg_id_;
+
       // Read past the last segment: the log ends cleanly.
       if (AllSegmentsRead()) {
         MarkEndOfLog(End::kTailReached);
         continue;
       }
+
       // Continue with the next segment, after its header.
       offset_ = kAofSegmentHeaderSize;
       continue;
@@ -161,9 +170,11 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
 
 void AofChainReader::MarkEndOfLog(End end) {
   end_ = end;
+
   // A clean end read every segment to its end, so nothing is discarded.
   if (end == End::kTailReached)
     return;
+
   // The log ends at the read position, right after the last valid block.
   discarded_bytes_ = segment_chain_[read_seg_id_].size - offset_;
   for (size_t i = read_seg_id_ + 1; i < segment_chain_.size(); ++i)

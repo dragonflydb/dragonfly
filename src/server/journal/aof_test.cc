@@ -157,9 +157,9 @@ TEST_F(AofTest, SpanningRecord) {
   auto blocks = TakeSealed();
   ASSERT_EQ(blocks.size(), 3u);
 
-  EXPECT_EQ(blocks[0].flags, kEndsWithPartial);
-  EXPECT_EQ(blocks[1].flags, kEndsWithPartial | kStartsWithContinuation);
-  EXPECT_EQ(blocks[2].flags, kStartsWithContinuation);
+  EXPECT_EQ(blocks[0].flags, kEndsMidRecord);
+  EXPECT_EQ(blocks[1].flags, kEndsMidRecord | kStartsMidRecord);
+  EXPECT_EQ(blocks[2].flags, kStartsMidRecord);
   EXPECT_EQ(blocks[0].n_records, 1u);
   EXPECT_EQ(blocks[1].n_records, 0u);
   EXPECT_EQ(blocks[2].n_records, 1u);
@@ -239,8 +239,8 @@ TEST_F(AofSegmentWriterTest, WriteAndReadBack) {
     rest.remove_prefix(hdr->total_block_bytes);
   }
   ASSERT_EQ(blocks.size(), 2u);
-  EXPECT_EQ(blocks[0].flags, kEndsWithPartial);
-  EXPECT_EQ(blocks[1].flags, kStartsWithContinuation);
+  EXPECT_EQ(blocks[0].flags, kEndsMidRecord);
+  EXPECT_EQ(blocks[1].flags, kStartsMidRecord);
   EXPECT_EQ(blocks[1].first_lsn, 2u);
   EXPECT_EQ(payload, small + huge);
 }
@@ -430,6 +430,7 @@ TEST_F(AofChainReaderTest, CleanChain) {
 TEST_F(AofChainReaderTest, TornTail) {
   WriteSegment(0, 1, {"a1", "b22", "c333"});
   WriteSegment(1, 4, {"d4444"});
+
   // Corrupt the second block, so the valid third block and segment 1 lie after a hole.
   CorruptBlock(SegmentPath(0), kAofSegmentHeaderSize + kAofBlockHeaderSize + 2);
 
@@ -445,6 +446,7 @@ TEST_F(AofChainReaderTest, TornInMiddleOfChain) {
   WriteSegment(0, 1, {"a1", "b22"});
   WriteSegment(1, 3, {"c333", "d4444"});
   WriteSegment(2, 5, {"e5"});
+
   // Corrupt the second block of the middle segment, as a crash during a rotation would.
   CorruptBlock(SegmentPath(1), kAofSegmentHeaderSize + kAofBlockHeaderSize + 4);
 
@@ -458,6 +460,7 @@ TEST_F(AofChainReaderTest, TornInMiddleOfChain) {
 TEST_F(AofChainReaderTest, PartialRecordAtEnd) {
   string huge(2 * kAofBlockBytes, 'h');
   WriteSegment(0, 1, {"a1", huge});
+
   // Cut the last block of the record that spans two blocks.
   string seg0 = SegmentPath(0);
   filesystem::resize_file(seg0, filesystem::file_size(seg0) - 10);
