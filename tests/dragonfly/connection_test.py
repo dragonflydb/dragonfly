@@ -1002,6 +1002,76 @@ async def test_keyspace_events_config_set(async_client: aioredis.Redis):
             await collect_expiring_events(pclient, keys)
 
 
+@dfly_args(
+    {
+        "proactor_threads": "1",
+        "enable_resp_io_loop_v2": "true",
+        "enable_pipeline_squashing_v2": "true",
+    }
+)
+async def test_v2_pipeline_squash_metrics(df_server: DflyInstance):
+    """Check aggregated V2 pipeline metrics.
+
+    Send squashable GET commands and one regular GET on a raw connection, then
+    verify the server's exported squash and reply-batch counters.
+    """
+    if not is_resp_io_loop_v2(df_server):
+        pytest.skip("targets V2 pipeline squash metrics")
+
+    async def pipeline_metrics() -> dict[str, int]:
+        metrics = await df_server.metrics()
+        return {
+            "squashes": int(metrics["dragonfly_pipeline_squashes"].samples[0].value),
+            "reply_batches": int(metrics["dragonfly_pipeline_reply_batches"].samples[0].value),
+            "idle_waits": int(metrics["dragonfly_pipeline_idle_waits"].samples[0].value),
+            "reply_waits": int(metrics["dragonfly_pipeline_reply_waits"].samples[0].value),
+            "idle_wait_usec": int(
+                metrics["dragonfly_pipeline_idle_wait_duration_seconds"].samples[0].value * 1e6
+            ),
+        }
+
+    reader, writer = await _open_raw_resp_connection(df_server, authenticate=False)
+    try:
+        # Send 32 commands (GET) pipeline, non exist (expect get nil replies)
+        before = await pipeline_metrics()
+        writer.write(b"".join(_encode_resp_command(("GET", f"missing-{i}")) for i in range(32)))
+        await writer.drain()
+        assert [await _read_resp_frame(reader) for _ in range(32)] == [b"$-1\r\n"] * 32
+
+        after_pipeline = await pipeline_metrics()
+        squashes = after_pipeline["squashes"] - before["squashes"]
+        reply_batches = after_pipeline["reply_batches"] - before["reply_batches"]
+        # Verify the pipeline was squashed and replied to
+        assert squashes >= 1
+        assert 1 <= reply_batches <= 32  # batching and parsing boundaries can vary
+
+        # Idle waits are counted after EventCount::await returns, so let the connection park and
+        # use the lone GET below to wake it.
+        await asyncio.sleep(0.1)
+        #  Send one regular, standalone GET
+        writer.write(_encode_resp_command(("GET", "missing-single")))
+        await writer.drain()
+        # Read the server’s reply to the one standalone command
+        # and verify it is Redis RESP’s nil bulk-string reply
+        assert await _read_resp_frame(reader) == b"$-1\r\n"
+
+        @assert_eventually(timeout=2)
+        async def wait_for_idle_wait():
+            stats = await pipeline_metrics()
+            assert stats["idle_waits"] > before["idle_waits"]
+            assert stats["idle_wait_usec"] > before["idle_wait_usec"]
+            return stats
+
+        after_single = await wait_for_idle_wait()
+        # Verify the independent counter behavior (no squashes for a single GET)
+        assert after_single["reply_waits"] <= after_single["idle_waits"]
+        assert after_single["squashes"] == after_pipeline["squashes"]
+        assert after_single["reply_batches"] > after_pipeline["reply_batches"]
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
 @dfly_multi_test_args(
     {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "false"},
     {"max_busy_read_usec": 50000, "enable_resp_io_loop_v2": "true"},
