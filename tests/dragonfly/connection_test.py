@@ -654,31 +654,90 @@ async def _open_stuck_subscriber(port: int):
 
 
 # A single slow subscriber is evicted after its blocked send exceeds the per-connection limit.
+PUBSUB_SLOW_SUBSCRIBER_PUBLISH_BUFFER_LIMIT = 32 * 1024 * 1024
+PUBSUB_SLOW_SUBSCRIBER_TIMEOUT_MS = 100
+
+
 @dfly_args(
     {
         "proactor_threads": "1",
-        "publish_buffer_limit": "32mb",
-        "pubsub_slow_subscriber_timeout_ms": "100",
+        "publish_buffer_limit": PUBSUB_SLOW_SUBSCRIBER_PUBLISH_BUFFER_LIMIT,
+        "pubsub_slow_subscriber_timeout_ms": PUBSUB_SLOW_SUBSCRIBER_TIMEOUT_MS,
     }
 )
 async def test_pubsub_slow_subscriber_closed(df_server: DflyInstance, async_client: aioredis.Redis):
+    PUBSUB_CONNECTION_LIMIT_DIVISOR = 16
+    PUBSUB_MESSAGE_SIZE_BYTES = 16 * 1024
+    PUBSUB_MESSAGES_PER_BATCH = 16
+    PUBSUB_BATCH_DELAY_MS = 10
+    PUBSUB_SETUP_BUDGET_DIVISOR = 2
+    PUBSUB_POST_THRESHOLD_TIMEOUT_MULTIPLIER = 2
+
     reader, writer = await _open_stuck_subscriber(df_server.port)
+    publish_buffer_limit = int(df_server["publish_buffer_limit"])
+    slow_subscriber_timeout_ms = int(df_server["pubsub_slow_subscriber_timeout_ms"])
+    # 2MB for the default 32MB publish buffer
+    connection_limit = publish_buffer_limit // PUBSUB_CONNECTION_LIMIT_DIVISOR
+    # Number of extra publish batches sent after the test has observed that the subscriber
+    # queue reached the connection limit.
+    post_threshold_batches = (
+        PUBSUB_POST_THRESHOLD_TIMEOUT_MULTIPLIER * slow_subscriber_timeout_ms
+        + PUBSUB_BATCH_DELAY_MS
+        - 1
+    ) // PUBSUB_BATCH_DELAY_MS
+    queue_reached_limit = asyncio.Event()
+    last_subscriber_bytes = 0
 
     async def pub_task():
-        # The connection threshold is 1/16 of the 32 MiB publish buffer (2 MiB). Send a
-        # bounded 6 MiB workload over ~240 ms. This both exceeds the threshold and leaves
-        # enough time for the 100 ms slow-subscriber timeout to be observed by a later publish.
-        payload = "msg" * (16 * 1024 // 3)
-        for _ in range(24):
+        nonlocal last_subscriber_bytes
+        payload = "msg" * (PUBSUB_MESSAGE_SIZE_BYTES // len("msg"))
+        batch_payload_bytes = len(payload) * PUBSUB_MESSAGES_PER_BATCH
+        max_setup_batches = (
+            publish_buffer_limit // PUBSUB_SETUP_BUDGET_DIVISOR
+        ) // batch_payload_bytes
+
+        async def publish_batch():
             p = async_client.pipeline(transaction=False)
-            for _ in range(16):
+            for _ in range(PUBSUB_MESSAGES_PER_BATCH):
                 p.publish("channel", payload)
             await p.execute()
-            await asyncio.sleep(0.01)
+            await asyncio.sleep(PUBSUB_BATCH_DELAY_MS / 1000)
+
+        # Check the observed queue instead of assuming that sent bytes remain queued. Keep the
+        # setup workload below half the soft limit, then publish for two timeout periods after
+        # reaching the connection limit so a later message observes the overdue send.
+        for _ in range(max_setup_batches):
+            await publish_batch()
+            last_subscriber_bytes = int(
+                (await async_client.info())["dispatch_queue_subscriber_bytes"]
+            )
+            if last_subscriber_bytes >= connection_limit:
+                queue_reached_limit.set()
+                for _ in range(post_threshold_batches):
+                    await publish_batch()
+                return
 
     publishers = [asyncio.create_task(pub_task())]
 
     try:
+
+        @assert_eventually(timeout=5)
+        async def wait_for_queue_or_forced_disconnect():
+            if queue_reached_limit.is_set():
+                return
+            stats = await _pubsub_backpressure_stats(df_server)
+            assert stats["forced_disconnect"] >= 1
+
+        try:
+            await wait_for_queue_or_forced_disconnect()
+        except AssertionError:
+            if publishers[0].done():
+                await publishers[0]
+            raise AssertionError(
+                f"Pub/Sub subscriber queue did not reach {connection_limit} bytes and the policy "
+                f"did not force a disconnect; last observed {last_subscriber_bytes} bytes"
+            ) from None
+
         # Wait until the policy force-closes the stuck subscriber.
         @assert_eventually(timeout=15)
         async def wait_for_forced_disconnect():
