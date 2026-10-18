@@ -2233,6 +2233,47 @@ TEST_F(RdbTest, SplitCuckoo) {
   }
 }
 
+// Twin attributes, also one added by FT.ALTER or on an HNSW field, and their declaration order
+// come back from a snapshot.
+TEST_F(RdbTest, TwinAttributesSurviveReload) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "email", "AS",
+                 "e_text", "TEXT", "city", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "email", "AS", "e_tag", "TAG"}), "OK");
+  Run({"HSET", "d:1", "email", "jane", "city", "Boston"});
+  EXPECT_EQ(Run("FT.CREATE vx ON HASH PREFIX 1 v: SCHEMA "
+                "v AS h1 VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2 "
+                "v AS h2 VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC COSINE"),
+            "OK");
+  Run({"HSET", "v:1", "v", StrCat(FloatToBytes(1.0f), FloatToBytes(0.0f))});
+  Run({"HSET", "v:2", "v", StrCat(FloatToBytes(0.0f), FloatToBytes(1.0f))});
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsIndexingDone("idx"); }, std::chrono::milliseconds(10000)));
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsIndexingDone("vx"); }, std::chrono::milliseconds(10000)));
+
+  auto info = Run({"FT.INFO", "idx"}).GetVec();
+  auto it = rng::find_if(info, [](const auto& e) { return e == "attributes"; });
+  ASSERT_NE(it, info.end());
+  vector<string> aliases;
+  for (const auto& attr : (++it)->GetVec())
+    aliases.push_back(string{attr.GetVec()[3].GetString()});
+  EXPECT_THAT(aliases, ElementsAre("e_text", "city", "e_tag"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_text:jane", "NOCONTENT"}),
+              RespArray(ElementsAre(IntArg(1), "d:1")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_tag:{jane}", "NOCONTENT"}),
+              RespArray(ElementsAre(IntArg(1), "d:1")));
+  for (auto [field, q, nearest] :
+       {std::tuple{"h1", FloatToBytes(0.9f) + FloatToBytes(0.0f), "v:1"},
+        std::tuple{"h2", FloatToBytes(0.0f) + FloatToBytes(0.9f), "v:2"}})
+    EXPECT_THAT(Run({"FT.SEARCH", "vx", StrCat("*=>[KNN 1 @", field, " $q]"), "PARAMS", "2", "q", q,
+                     "NOCONTENT"}),
+                RespArray(ElementsAre(IntArg(1), nearest)))
+        << field;
+}
+
 TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
   absl::FlagSaver fs;
   SetTestFlag("cache_mode", "false");

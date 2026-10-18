@@ -1134,16 +1134,18 @@ AstExpr OptionalNumericFilter::Node(std::string field) {
   return make_unique<AstFieldNode>("@" + field, make_unique<AstRangeNode>(lo_, false, hi_, false));
 }
 
-string_view Schema::LookupAlias(string_view alias) const {
-  if (auto it = field_names.find(alias); it != field_names.end())
-    return it->second;
-  return alias;
+const SchemaField* Schema::Find(string_view alias) const {
+  auto it = fields.find(alias);
+  return it != fields.end() ? &it->second : nullptr;
 }
 
-string_view Schema::LookupIdentifier(string_view identifier) const {
-  if (auto it = fields.find(identifier); it != fields.end())
-    return it->second.short_name;
-  return identifier;
+Schema::Attribute Schema::FindByIdentifier(string_view identifier) const {
+  Attribute best{{}, nullptr};
+  for (const auto& [alias, field] : fields) {
+    if (field.identifier == identifier && (!best.second || field.StandsBefore(*best.second)))
+      best = {alias, &field};
+  }
+  return best;
 }
 
 Schema::OrderedFields Schema::Ordered() const {
@@ -1174,17 +1176,17 @@ FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
 }
 
 void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
-  for (const auto& [field_ident, field] : schema_.Ordered()) {
+  for (const auto& [alias, field] : schema_.Ordered()) {
     if (field->flags & SchemaField::NOINDEX)
       continue;
-    if (auto index = CreateIndex(field_ident, *field, mr); index) {
-      add_list_.emplace_back(field_ident, index.get());
-      indices_[field_ident] = std::move(index);
+    if (auto index = CreateIndex(alias, *field, mr); index) {
+      add_list_.emplace_back(field->identifier, index.get());
+      indices_[alias] = std::move(index);
     }
   }
 }
 
-unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view field_ident, const SchemaField& field,
+unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view alias, const SchemaField& field,
                                                 PMR_NS::memory_resource* mr) {
   switch (field.type) {
     case SchemaField::TEXT: {
@@ -1192,7 +1194,7 @@ unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view field_ident, const S
       auto idx = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
                                         tparams.no_stem, schema_.default_language,
                                         schema_.language_field, !options_.no_offsets);
-      idx->set_field_ident(field_ident);
+      idx->set_field_ident(alias);  // scoring stats and the schema weight are per attribute
       text_indices_.push_back(idx.get());
       return idx;
     }
@@ -1215,12 +1217,12 @@ unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view field_ident, const S
 }
 
 void FieldIndices::CreateSortIndices() {
-  for (const auto& [field_ident, field] : schema_.Ordered()) {
+  for (const auto& [alias, field] : schema_.Ordered()) {
     if (!(field->flags & SchemaField::SORTABLE))
       continue;
     if (auto index = CreateSortIndex(*field); index) {
-      add_list_.emplace_back(field_ident, index.get());
-      sort_indices_[field_ident] = std::move(index);
+      add_list_.emplace_back(field->identifier, index.get());
+      sort_indices_[alias] = std::move(index);
     }
   }
 }
@@ -1272,17 +1274,17 @@ void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
-  auto it = indices_.find(schema_.LookupAlias(field));
+  auto it = indices_.find(field);
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
 BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
-  auto it = sort_indices_.find(schema_.LookupAlias(field));
+  auto it = sort_indices_.find(field);
   return it != sort_indices_.end() ? it->second.get() : nullptr;
 }
 
 TextIndex* FieldIndices::GetTextIndex(string_view field) const {
-  auto it = schema_.fields.find(schema_.LookupAlias(field));
+  auto it = schema_.fields.find(field);
   if (it == schema_.fields.end() || it->second.type != SchemaField::TEXT)
     return nullptr;
   return static_cast<TextIndex*>(GetIndex(field));  // CreateIndex builds a TextIndex for TEXT
@@ -1316,8 +1318,8 @@ const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }
 
-SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_identifier) const {
-  auto it = sort_indices_.find(field_identifier);
+SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view alias) const {
+  auto it = sort_indices_.find(alias);
   DCHECK(it != sort_indices_.end());
   return it->second->Lookup(doc);
 }

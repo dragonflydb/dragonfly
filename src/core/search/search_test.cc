@@ -2407,7 +2407,7 @@ TEST_F(SearchTest, InvalidVectorParameter) {
   schema.fields["v"] = search::SchemaField{
       search::SchemaField::VECTOR,
       0,   // flags
-      "v"  // short_name
+      "v"  // identifier
   };
 
   search::SchemaField::VectorParams params;
