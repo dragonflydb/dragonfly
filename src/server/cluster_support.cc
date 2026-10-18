@@ -2,14 +2,12 @@
 // See LICENSE for licensing terms.
 //
 
-extern "C" {
-#include "redis/crc16.h"
-}
+#include "cluster_support.h"
 
 #include "base/flags.h"
 #include "base/logging.h"
-#include "cluster_support.h"
 #include "common.h"
+#include "core/crc16.h"
 
 using namespace std;
 
@@ -72,8 +70,7 @@ void InitializeCluster() {
 }
 
 SlotId KeySlot(std::string_view key) {
-  string_view tag = LockTagOptions::instance().Tag(key);
-  return crc16(tag.data(), tag.length()) & kMaxSlotNum;
+  return Crc16(LockTagOptions::instance().Tag(key)) & kMaxSlotNum;
 }
 
 bool IsClusterShardedByTag() {
