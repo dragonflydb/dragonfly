@@ -148,10 +148,10 @@ ABSL_FLAG(
     "parked waiting on parallel work, so the next batch is already grown when execution resumes.");
 
 ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
-          "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
+          "Enable the event-driven IoLoopV2 for Memcache connections.");
 
-ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
-          "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
+ABSL_FLAG(bool, enable_resp_io_loop_v2, true,
+          "Enable the event-driven IoLoopV2 for RESP connections.");
 
 ABSL_FLAG(bool, enable_shared_read_buffer, false,
           "Use one read buffer per proactor for eligible RESP IoLoopV2 connections.");
