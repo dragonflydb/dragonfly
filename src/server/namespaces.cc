@@ -7,7 +7,6 @@
 #include <ranges>
 
 #include "base/flags.h"
-#include "server/synchronization.h"
 #include "base/logging.h"
 #include "server/blocking_controller.h"
 #include "server/db_slice.h"
@@ -106,13 +105,6 @@ void Namespaces::SetExpiredEventsRecording(bool enable) {
       }
     }
   });
-}
-
-void Namespaces::ForEach(const std::function<void(Namespace&)>& cb) const {
-  dfly::SharedLock guard(mu_);
-  for (auto& entry : ABSL_TS_UNCHECKED_READ(namespaces_)) {
-    cb(entry.second);
-  }
 }
 
 Namespace& Namespaces::GetOrInsert(std::string_view ns) {

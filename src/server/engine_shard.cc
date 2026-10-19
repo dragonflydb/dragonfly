@@ -868,9 +868,8 @@ void EngineShard::RetireExpiredAndEvict() {
   // Send keyspace notifications for expired/evicted keys outside the atomic section
   // because SendMessages may suspend on connection backpressure (see issue #7052).
   // This also sends events that other code queued but left unsent.
-  namespaces->ForEach([&](Namespace& ns) {
-    ns.GetDbSlice(shard_id()).SendQueuedExpiredKeyEvents();
-  });
+  namespaces->ForEach(
+      [&](Namespace& ns) { ns.GetDbSlice(shard_id()).SendQueuedExpiredKeyEvents(); });
 
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
