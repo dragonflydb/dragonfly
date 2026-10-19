@@ -64,6 +64,7 @@ error_code AofChainReader::Open() {
 
   for (size_t i = 0; i < segment_chain_.size(); ++i) {
     Segment& seg = segment_chain_[i];
+
     // A missing seq or a file without a full header.
     if (seg.seq != segment_chain_.front().seq + i || seg.size < kAofSegmentHeaderSize)
       return make_error_code(errc::illegal_byte_sequence);
@@ -82,6 +83,7 @@ error_code AofChainReader::Open() {
         hdr->seq != seg.seq) {
       return make_error_code(errc::illegal_byte_sequence);
     }
+
     // Seeds the CRCs of the segment's blocks.
     seg.uid = hdr->segment_uid;
   }
@@ -90,29 +92,64 @@ error_code AofChainReader::Open() {
 
 error_code AofChainReader::ReadBlock() {
   const Segment& seg = segment_chain_[read_seg_id_];
+
   // Up to one maximum-size block; a smaller block leaves the next block's bytes for the next read.
   buf_.resize(min<uint64_t>(kMaxBlockBytes, seg.size - offset_));
   iovec v{buf_.data(), buf_.size()};
   RETURN_ON_ERR(seg.file->Read(&v, 1, offset_, 0));
-  // Bad CRC, size or flags.
+
+  // Bad CRC or size: a torn write or a hole.
   auto hdr = DecodeAofBlock(buf_, seg.uid);
-  if (!hdr)
-    return make_error_code(errc::illegal_byte_sequence);
+  if (!hdr) {
+    MarkEndOfLog(End::kTailTorn);
+    return {};
+  }
+
+  // A block that does not follow the previous one: a stale block past the end of the log.
+  bool lsn_break = expected_first_lsn_ && hdr->first_lsn != expected_first_lsn_;
+  bool starts_mid_record = hdr->flags & kStartsMidRecord;
+  if (lsn_break || starts_mid_record != ends_mid_record_) {
+    MarkEndOfLog(End::kTailTorn);
+    return {};
+  }
+
+  expected_first_lsn_ = hdr->first_lsn + hdr->n_records;
+  ends_mid_record_ = hdr->flags & kEndsMidRecord;
+  offset_ += hdr->total_block_bytes;
+
+  // Every valid block is handed out right away, so memory stays bounded by one block. A record
+  // that continues in the next block is buffered by JournalReader until it completes.
+  // TODO: a log that ends mid-record keeps the complete records before the cut, but resuming after
+  // it starts a new record, which the continuation check above rejects as torn. The resumed
+  // segment's header must mark the cut record abandoned, and replay must reset its JournalReader
+  // at that segment boundary.
   // Hand out the payload, without the block header.
   pending_ =
       string_view(buf_).substr(kAofBlockHeaderSize, hdr->total_block_bytes - kAofBlockHeaderSize);
-  offset_ += hdr->total_block_bytes;
   return {};
 }
 
 io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
   while (pending_.empty()) {
-    // Read past the last segment: the end of the log.
-    if (read_seg_id_ == segment_chain_.size())
+    if (end_ == End::kTailTorn)
+      return nonstd::make_unexpected(make_error_code(errc::illegal_byte_sequence));
+    if (end_ == End::kTailReached)
       return 0;
-    // Reached the end of the current segment: continue with the next one, after its header.
-    if (offset_ == segment_chain_[read_seg_id_].size) {
+    if (SegmentFullyRead()) {
+      // A record cut at the end of the segment.
+      if (ends_mid_record_) {
+        MarkEndOfLog(End::kTailTorn);
+        continue;
+      }
       ++read_seg_id_;
+
+      // Read past the last segment: the log ends cleanly.
+      if (AllSegmentsRead()) {
+        MarkEndOfLog(End::kTailReached);
+        continue;
+      }
+
+      // Continue with the next segment, after its header.
       offset_ = kAofSegmentHeaderSize;
       continue;
     }
@@ -129,6 +166,21 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
     copied += n;
   }
   return copied;
+}
+
+void AofChainReader::MarkEndOfLog(End end) {
+  end_ = end;
+
+  // A clean end read every segment to its end, so nothing is discarded.
+  if (end == End::kTailReached)
+    return;
+
+  // The log ends at the read position, right after the last valid block.
+  discarded_bytes_ = segment_chain_[read_seg_id_].size - offset_;
+  for (size_t i = read_seg_id_ + 1; i < segment_chain_.size(); ++i)
+    discarded_bytes_ += segment_chain_[i].size;
+  LOG(WARNING) << "AOF shard " << shard_id_ << ": damaged tail of " << discarded_bytes_
+               << " bytes after lsn " << LastLsn();
 }
 
 }  // namespace dfly

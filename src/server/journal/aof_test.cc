@@ -157,9 +157,9 @@ TEST_F(AofTest, SpanningRecord) {
   auto blocks = TakeSealed();
   ASSERT_EQ(blocks.size(), 3u);
 
-  EXPECT_EQ(blocks[0].flags, kEndsWithPartial);
-  EXPECT_EQ(blocks[1].flags, kEndsWithPartial | kStartsWithContinuation);
-  EXPECT_EQ(blocks[2].flags, kStartsWithContinuation);
+  EXPECT_EQ(blocks[0].flags, kEndsMidRecord);
+  EXPECT_EQ(blocks[1].flags, kEndsMidRecord | kStartsMidRecord);
+  EXPECT_EQ(blocks[2].flags, kStartsMidRecord);
   EXPECT_EQ(blocks[0].n_records, 1u);
   EXPECT_EQ(blocks[1].n_records, 0u);
   EXPECT_EQ(blocks[2].n_records, 1u);
@@ -239,8 +239,8 @@ TEST_F(AofSegmentWriterTest, WriteAndReadBack) {
     rest.remove_prefix(hdr->total_block_bytes);
   }
   ASSERT_EQ(blocks.size(), 2u);
-  EXPECT_EQ(blocks[0].flags, kEndsWithPartial);
-  EXPECT_EQ(blocks[1].flags, kStartsWithContinuation);
+  EXPECT_EQ(blocks[0].flags, kEndsMidRecord);
+  EXPECT_EQ(blocks[1].flags, kStartsMidRecord);
   EXPECT_EQ(blocks[1].first_lsn, 2u);
   EXPECT_EQ(payload, small + huge);
 }
@@ -372,9 +372,16 @@ class AofChainReaderTest : public AofSegmentWriterTest {
     });
   }
 
-  // Reads the whole chain on the proactor, as replay does, in small pieces.
-  string ReadChain() {
+  struct ChainResult {
     string data;
+    bool torn = false;
+    uint64_t last_lsn = 0;
+    uint64_t discarded = 0;
+  };
+
+  // Reads the whole chain on the proactor, as replay does, in small pieces.
+  ChainResult ReadChain() {
+    ChainResult res;
     pp_->at(0)->Await([&] {
       AofChainReader reader(dir_, 2, 4);
       ASSERT_FALSE(reader.Open());
@@ -382,13 +389,30 @@ class AofChainReaderTest : public AofSegmentWriterTest {
       while (true) {
         iovec v{buf, sizeof(buf)};
         auto n = reader.ReadSome(&v, 1);
-        ASSERT_TRUE(n) << n.error().message();
+        if (!n) {
+          ASSERT_EQ(n.error(), errc::illegal_byte_sequence);
+          res.torn = true;
+          break;
+        }
         if (*n == 0)
           break;
-        data.append(buf, *n);
+        res.data.append(buf, *n);
       }
+      res.last_lsn = reader.LastLsn();
+      res.discarded = reader.DiscardedBytes();
     });
-    return data;
+    return res;
+  }
+
+  string SegmentPath(uint64_t seq) {
+    return absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(2, seq));
+  }
+
+  // Flips the first payload byte of the block at offset.
+  void CorruptBlock(const string& path, uint64_t offset) {
+    fstream f(path, ios::in | ios::out | ios::binary);
+    f.seekp(offset + kAofBlockHeaderSize);
+    f.put('X');
   }
 };
 
@@ -396,7 +420,56 @@ TEST_F(AofChainReaderTest, CleanChain) {
   WriteSegment(0, 1, {"a1", "b22", "c333"});
   WriteSegment(1, 4, {"d4444"});
 
-  EXPECT_EQ(ReadChain(), "a1b22c333d4444");
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1b22c333d4444");
+  EXPECT_FALSE(res.torn);
+  EXPECT_EQ(res.last_lsn, 4u);
+  EXPECT_EQ(res.discarded, 0u);
+}
+
+TEST_F(AofChainReaderTest, TornTail) {
+  WriteSegment(0, 1, {"a1", "b22", "c333"});
+  WriteSegment(1, 4, {"d4444"});
+
+  // Corrupt the second block, so the valid third block and segment 1 lie after a hole.
+  CorruptBlock(SegmentPath(0), kAofSegmentHeaderSize + kAofBlockHeaderSize + 2);
+
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1");
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 1u);
+  EXPECT_EQ(res.discarded, filesystem::file_size(SegmentPath(0)) - kAofSegmentHeaderSize -
+                               kAofBlockHeaderSize - 2 + filesystem::file_size(SegmentPath(1)));
+}
+
+TEST_F(AofChainReaderTest, TornInMiddleOfChain) {
+  WriteSegment(0, 1, {"a1", "b22"});
+  WriteSegment(1, 3, {"c333", "d4444"});
+  WriteSegment(2, 5, {"e5"});
+
+  // Corrupt the second block of the middle segment, as a crash during a rotation would.
+  CorruptBlock(SegmentPath(1), kAofSegmentHeaderSize + kAofBlockHeaderSize + 4);
+
+  // The log ends inside segment 1; the valid segment 2 comes after the hole.
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1b22c333");
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 3u);
+}
+
+TEST_F(AofChainReaderTest, PartialRecordAtEnd) {
+  string huge(2 * kAofBlockBytes, 'h');
+  WriteSegment(0, 1, {"a1", huge});
+
+  // Cut the last block of the record that spans two blocks.
+  string seg0 = SegmentPath(0);
+  filesystem::resize_file(seg0, filesystem::file_size(seg0) - 10);
+
+  // The cut record's first block is valid, so it is handed out; JournalReader drops the record.
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1" + string(kAofBlockBytes, 'h'));
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 1u);
 }
 
 #endif  // __linux__
