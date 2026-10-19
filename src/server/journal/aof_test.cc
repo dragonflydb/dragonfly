@@ -472,6 +472,23 @@ TEST_F(AofChainReaderTest, PartialRecordAtEnd) {
   EXPECT_EQ(res.last_lsn, 1u);
 }
 
+TEST_F(AofChainReaderTest, BlocksAcrossReadChunks) {
+  // 5000-byte records sealed one per block: 5025-byte blocks don't divide the 128 KB read chunk,
+  // so refills keep a partial block and some blocks span two reads.
+  vector<string> records;
+  string expected;
+  for (int i = 0; i < 60; ++i) {
+    records.push_back(string(5000, 'a' + i % 26));
+    expected += records.back();
+  }
+  WriteSegment(0, 1, records);
+
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, expected);
+  EXPECT_FALSE(res.torn);
+  EXPECT_EQ(res.last_lsn, 60u);
+}
+
 #endif  // __linux__
 
 }  // namespace dfly
