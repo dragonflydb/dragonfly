@@ -73,8 +73,7 @@ class Namespaces {
   bool expired_events_recording_default_ ABSL_GUARDED_BY(mu_) = false;
 };
 
-template <typename F>
-void Namespaces::ForEach(F&& cb) {
+template <typename F> void Namespaces::ForEach(F&& cb) {
   dfly::SharedLock guard(mu_);
   for (auto& entry : ABSL_TS_UNCHECKED_READ(namespaces_)) {
     cb(entry.second);

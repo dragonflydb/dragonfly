@@ -2925,7 +2925,12 @@ TEST_F(GenericFamilyTest, HeartbeatExpiresAclNamespaceKeys) {
 
   ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"AUTH", "hbns", "pass"}); }), "OK");
   ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"SET", "expkey", "v"}); }), "OK");
-  ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"PEXPIRE", "expkey", "100"}); }).GetInt(), 1);
+  ASSERT_EQ(pp_->at(1)
+                ->Await([&] {
+                  return Run("IO1", {"PEXPIRE", "expkey", "100"});
+                })
+                .GetInt(),
+            1);
 
   AdvanceTime(200);
 
