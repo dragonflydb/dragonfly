@@ -1798,7 +1798,10 @@ TEST_F(GenericFamilyTest, BgSaveSchedule) {
     EXPECT_EQ(Run({"set", "k", "1"}), "OK");
     EXPECT_EQ(Run(cmd), "OK");
     EXPECT_TRUE(WaitUntilCondition(
-        [&] { return changes_since_save(Run({"info", "persistence"}).GetString()) == 0; }, 500ms));
+        [&] {
+          return changes_since_save(Run({"info", "persistence"}).GetString()) == 0;
+        },
+        500ms));
   };
 
   bgsave_and_wait({"bgsave", "SCHEDULE"});
@@ -2926,7 +2929,11 @@ TEST_F(GenericFamilyTest, HeartbeatExpiresAclNamespaceKeys) {
 
   ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"AUTH", "hbns", "pass"}); }), "OK");
   ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"SET", "expkey", "v"}); }), "OK");
-  ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"PEXPIRE", "expkey", "100"}); }).GetInt(),
+  ASSERT_EQ(pp_->at(1)
+                ->Await([&] {
+                  return Run("IO1", {"PEXPIRE", "expkey", "100"});
+                })
+                .GetInt(),
             1);
 
   AdvanceTime(200);
