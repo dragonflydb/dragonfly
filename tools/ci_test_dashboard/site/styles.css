@@ -218,7 +218,7 @@ select {
 .content-grid {
   display: grid;
   gap: 16px;
-  grid-template-columns: minmax(0, 1fr) minmax(460px, 34vw);
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 28vw);
 }
 
 .panel {
@@ -246,16 +246,71 @@ select {
 
 table {
   border-collapse: collapse;
-  min-width: 1040px;
+  font-size: 12px;
+  min-width: 1100px;
   width: 100%;
 }
 
 th,
 td {
   border-bottom: 1px solid var(--line);
-  padding: 10px 12px;
+  padding: 8px;
   text-align: left;
   vertical-align: top;
+}
+
+th:nth-child(2),
+td:nth-child(2),
+th:nth-child(3),
+td:nth-child(3),
+th:nth-child(4),
+td:nth-child(4),
+th:nth-child(5),
+td:nth-child(5),
+th:nth-child(7),
+td:nth-child(7),
+th:nth-child(8),
+td:nth-child(8),
+th:nth-child(9),
+td:nth-child(9) {
+  white-space: nowrap;
+}
+
+th:nth-child(2),
+td:nth-child(2) {
+  width: 64px;
+}
+
+th:nth-child(3),
+td:nth-child(3),
+th:nth-child(7),
+td:nth-child(7),
+th:nth-child(8),
+td:nth-child(8),
+th:nth-child(9),
+td:nth-child(9) {
+  width: 58px;
+}
+
+th:nth-child(4),
+td:nth-child(4),
+th:nth-child(5),
+td:nth-child(5) {
+  width: 88px;
+}
+
+th:nth-child(6),
+td:nth-child(6) {
+  width: 82px;
+}
+
+th:nth-child(10),
+td:nth-child(10),
+th:nth-child(11),
+td:nth-child(11),
+th:nth-child(12),
+td:nth-child(12) {
+  width: 78px;
 }
 
 th {
@@ -281,7 +336,7 @@ tbody tr.selected {
 .test-name {
   display: grid;
   gap: 4px;
-  min-width: 260px;
+  min-width: 220px;
 }
 
 .test-name strong {
@@ -294,6 +349,20 @@ tbody tr.selected {
   color: var(--muted);
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+.related-links {
+  display: inline;
+  overflow-wrap: anywhere;
+}
+
+.link-state {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.unavailable {
+  color: var(--muted);
 }
 
 .badge {
@@ -446,17 +515,19 @@ tbody tr.selected {
   white-space: pre-wrap;
 }
 
-@media (max-width: 1100px) {
-  .metrics {
-    grid-template-columns: repeat(3, minmax(120px, 1fr));
-  }
-
+@media (max-width: 1400px) {
   .content-grid {
     grid-template-columns: 1fr;
   }
 
   .details {
     max-height: none;
+  }
+}
+
+@media (max-width: 1100px) {
+  .metrics {
+    grid-template-columns: repeat(3, minmax(120px, 1fr));
   }
 }
 
