@@ -504,7 +504,7 @@ class Transaction {
    private:
     std::atomic_bool claimed_{false};
     std::atomic_bool closed_{false};
-    util::fb2::EventCount ec_{};
+    util::fb2::EventCount ec_;
   };
 
   // Init basic fields and reset re-usable.
@@ -691,7 +691,6 @@ class Transaction {
 
   std::function<void(Transaction* trans)> tracking_cb_;
 
- private:
   struct TLTmpSpace {
     std::vector<PerShardCache>& GetShardIndex(unsigned size);
 

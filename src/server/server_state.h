@@ -102,7 +102,7 @@ class ServerState {  // public struct - to allow initialization.
 
  public:
   struct Stats {
-    Stats(unsigned num_shards = 0);  // Default initialization should be valid for Add()
+    explicit Stats(unsigned num_shards = 0);  // Default initialization should be valid for Add()
 
     Stats(Stats&& other) = default;
     Stats& operator=(Stats&& other) = default;

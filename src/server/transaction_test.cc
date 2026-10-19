@@ -57,7 +57,7 @@ class TransactionTest : public Test {
   // Runs `pool` and brings up the shard set on top of it.
   void StartShards(ProactorPool* pool);
 
-  static OpStatus Noop(Transaction*, EngineShard*) {
+  static OpStatus Noop(Transaction* /*tx*/, EngineShard* /*shard*/) {
     return OpStatus::OK;
   }
 
