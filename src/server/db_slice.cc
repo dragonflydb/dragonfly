@@ -698,7 +698,8 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   }
 
   auto& db = *db_arr_[cntx.db_index];
-  PrimeIterator it = db.prime.Find(key);
+  const uint64_t key_hash = db.prime.DoHash(key);
+  PrimeIterator it = db.prime.Find(key, key_hash);
   int miss_weight = (stats_mode == UpdateStatsMode::kReadStats);
 
   if (!IsValid(it)) {
@@ -737,8 +738,13 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     return OpStatus::WRONG_TYPE;
   }
 
-  if (IsCacheMode()) {
-    fetched_items_.insert({it->first.HashCode(), cntx.db_index});
+  // A bump moves an entry one slot left in its regular bucket or out of a stash bucket, so an
+  // entry in the first slot of a regular bucket is not recorded. If this callback also bumps the
+  // entry in slot 1, the two swap and this one is not bumped back. Both were looked up in the same
+  // callback, so neither order is more recent; recording both made the outcome depend on the order
+  // fetched_items_ iterates in.
+  if (IsCacheMode() && (it.bucket_id() >= PrimeTable::kBucketNum || it.slot_id() > 0)) {
+    fetched_items_.insert({key_hash, cntx.db_index});
   }
 
   switch (stats_mode) {
@@ -2147,17 +2153,18 @@ void DbSlice::PerformDeletionAtomic(PrimeIterator del_it, string_view key, DbTab
 }
 
 void DbSlice::OnCbFinishBlocking() {
-  if (IsCacheMode()) {
-    // move fetched items to local variable
+  if (IsCacheMode() && !fetched_items_.empty()) {
+    // The loop below may suspend and lookups may refill fetched_items_ meanwhile, so iterate a
+    // moved-out local.
     auto fetched_items = std::move(fetched_items_);
     fetched_items_ = {};
     for (const auto& [key_hash, db_index] : fetched_items) {
       auto& db = *db_arr_[db_index];
 
-      // We intentionally don't do extra key checking on this callback to speedup
-      // fetching. Probability of having hash collision is quite low and for bumpup
-      // purposes it should be fine if different key (with same hash) is returned.
-      auto predicate = [](const PrimeKey&) { return true; };
+      // FindFirst matches only short fingerprints, so compare the full hash: BumpUp relies on it
+      // to locate the entry's home bucket. It is computed only for entries whose fingerprint
+      // matches, usually just the fetched one.
+      auto predicate = [&](const PrimeKey& key) { return db.prime.DoHash(key) == key_hash; };
 
       PrimeIterator it = db.prime.FindFirst(key_hash, predicate);
 
@@ -2169,16 +2176,23 @@ void DbSlice::OnCbFinishBlocking() {
         auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
           CallChangeCallbacks(db_index, ChangeReq{bit});
         };
-        db.prime.CVCUponBump(it, bump_cb);
+        db.prime.CVCUponBump(it, key_hash, bump_cb);
       }
 
       // We must not change the bucket's internal order during serialization
       WaitForUnblockedJournalWrites();
       PrimeBumpPolicy policy;
-      auto bump_it = db.prime.BumpUp(it, policy);
+      auto bump_it = db.prime.BumpUp(it, key_hash, policy);
       if (bump_it != it) {  // the item was bumped
         ++events_.bumpups;
       }
+    }
+
+    // Hand the allocation back unless lookups refilled the set while the loop was suspended.
+    // clear() keeps small allocations.
+    if (fetched_items_.empty()) {
+      fetched_items.clear();
+      fetched_items_ = std::move(fetched_items);
     }
   }
 
