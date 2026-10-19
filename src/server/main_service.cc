@@ -310,11 +310,9 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
 
   absl::StrAppend(&message, "\"", cid->name(), "\"");
 
-  if (cid->name() == "AUTH")
-    return message;
-
-  for (auto arg : tail_args)
-    absl::StrAppend(&message, " ", CmdEntryToMonitorFormat(arg));
+  size_t num_args = cid->NonSecretArgCount(tail_args);
+  for (size_t i = 0; i < num_args; ++i)
+    absl::StrAppend(&message, " ", CmdEntryToMonitorFormat(tail_args[i]));
 
   return message;
 }
@@ -644,14 +642,14 @@ string ConnectionLogContext(const facade::Connection* conn) {
   return absl::StrCat("(", conn->RemoteEndpointStr(), ")");
 }
 
-string FailedCommandToString(std::string_view command, const facade::ParsedArgs& args,
+string FailedCommandToString(const CommandId& cid, const facade::ParsedArgs& args,
                              std::string_view reason) {
   constexpr size_t kMaxArgCount = 31;
   constexpr size_t kMaxArgLength = 128;
   constexpr size_t kMaxReasonLength = 256;
 
   string result;
-  absl::StrAppend(&result, " ", command);
+  absl::StrAppend(&result, " ", cid.name());
 
   auto AppendArg = [&](string_view arg) {
     if (arg.size() > kMaxArgLength) {
@@ -662,22 +660,20 @@ string FailedCommandToString(std::string_view command, const facade::ParsedArgs&
     }
   };
 
-  const bool is_eval = absl::StartsWith(command, "EVAL");
+  const bool is_eval = cid.IsEvalGroup();
 
-  if (command == "AUTH" || absl::StartsWith(command, "ACL")) {
-    // skip all args to protect passwords
-  } else if (is_eval) {
+  if (is_eval) {
     // log only script/SHA and numkeys, skip KEYS and ARGV to avoid PII leaks
     for (size_t i = 0; i < std::min(args.size(), size_t{2}); ++i) {
       AppendArg(args[i]);
     }
   } else {
-    size_t num_args = std::min(args.size(), kMaxArgCount);
+    size_t num_args = std::min(cid.NonSecretArgCount(args), kMaxArgCount);
     for (size_t i = 0; i < num_args; ++i) {
       AppendArg(args[i]);
     }
     if (args.size() > kMaxArgCount) {
-      absl::StrAppend(&result, " ... (", args.size() - kMaxArgCount, " more arguments)");
+      absl::StrAppend(&result, " ... (", args.size() - num_args, " more arguments)");
     }
   }
 
@@ -1721,9 +1717,9 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
       if (reason == kOutOfMemory) {
         res = DispatchResult::OOM;
       }
-      VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
+      VLOG(2) << FailedCommandToString(*cid, tail_args, reason);
       if (ShouldLogError(*cid, reason, tail_args)) {
-        LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+        LOG_EVERY_T(WARNING, 1) << FailedCommandToString(*cid, tail_args, reason);
       }
     }
 
