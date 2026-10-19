@@ -174,12 +174,6 @@ SmallBins::BinInfo SmallBins::Delete(DiskSegment segment) {
   return {segment};
 }
 
-bool SmallBins::IsFragmented(size_t offset) {
-  if (auto it = stashed_bins_.Find(offset); it != stashed_bins_.end())
-    return it->second.bytes < kFragmentedCutoff;
-  return false;
-}
-
 ::dfly::detail::DashCursor SmallBins::TraverseFragmented(::dfly::detail::DashCursor cursor,
                                                          absl::FunctionRef<void(size_t)> f) {
   return stashed_bins_.TraverseBySegmentOrder(cursor, [f](Dash::iterator it) {

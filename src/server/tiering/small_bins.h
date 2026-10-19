@@ -83,9 +83,6 @@ class SmallBins {
   // the need for external actions like deleting empty segments or triggering defragmentation
   BinInfo Delete(DiskSegment segment);
 
-  // Returns true if the page exists and is fragmented
-  bool IsFragmented(size_t offset);
-
   // Delete stashed bin. Returns list of recovered item key hashes and db indices.
   // Mainly used for defragmentation
   KeyHashDbList DeleteBin(DiskSegment segment, std::string_view value);
