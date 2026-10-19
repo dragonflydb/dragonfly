@@ -408,54 +408,6 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
 using MP = MemcacheParser;
 
 TEST_F(DflyEngineTest, Memcache) {
-#if 0
-  auto resp = RunMC(MP::SET, "key", MCArgs{"bar", 1});
-  EXPECT_THAT(resp, ElementsAre("STORED"));
-
-  resp = RunMC(MP::GETS, "key");
-  EXPECT_THAT(resp, ElementsAre("VALUE key 1 3 0", "bar", "END"));
-
-  resp = RunMC(MP::GET, "key");
-  EXPECT_THAT(resp, ElementsAre("VALUE key 1 3", "bar", "END"));
-
-  resp = RunMC(MP::ADD, "key", MCArgs{"bar", 1});
-  EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
-
-  resp = RunMC(MP::REPLACE, "key2", MCArgs{"bar", 1});
-  EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
-
-  resp = RunMC(MP::ADD, "key2", MCArgs{"bar2", 2});
-  EXPECT_THAT(resp, ElementsAre("STORED"));
-
-  resp = GetMC(MP::GET, {"key2", "key"});
-  EXPECT_THAT(resp, ElementsAre("VALUE key2 2 4", "bar2", "VALUE key 1 3", "bar", "END"));
-
-  resp = RunMC(MP::APPEND, "key2", MCArgs{"val2", 0});
-  EXPECT_THAT(resp, ElementsAre("STORED"));
-  resp = RunMC(MP::GET, "key2");
-  EXPECT_THAT(resp, ElementsAre("VALUE key2 2 8", "bar2val2", "END"));
-
-  resp = RunMC(MP::APPEND, "unkn", MCArgs{"val2", 0});
-  EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
-
-  resp = RunMC(MP::GET, "unkn");
-  EXPECT_THAT(resp, ElementsAre("END"));
-
-  resp = GetMC(MP::GETS, {"key", "key2", "unknown"});
-  EXPECT_THAT(resp, ElementsAre("VALUE key 1 3 0", "bar", "VALUE key2 2 8 0", "bar2val2", "END"));
-
-  EXPECT_THAT(RunMC(MP::SET, "foo", MCArgs{"bar"}), ElementsAre("STORED"));
-
-  EXPECT_THAT(RunMC(MP::SET, "foo", MCArgs{"bar"}), ElementsAre("STORED"));
-
-  // 30 seconds into the future
-  auto future_ts = time(nullptr) + 30;
-  EXPECT_THAT(GetMC(MP::GAT, {StrCat(future_ts), "foo", "abc", "def", "ghi"}),
-              ElementsAre("VALUE foo 0 3", "bar", "END"));
-
-  EXPECT_THAT(GetMC(MP::GAT, {"1000"}),
-              ElementsAre("SERVER_ERROR wrong number of arguments for 'gat' command"));
-#endif
   EXPECT_THAT(RunMC(MP::SET, "persisted-key", MCArgs{"bar"}), ElementsAre("STORED"));
   // expiry of 0 removes the key expiry
   EXPECT_THAT(GetMC(MP::GAT, {"0", "persisted-key"}),

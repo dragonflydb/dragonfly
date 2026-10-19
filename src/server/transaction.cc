@@ -1145,23 +1145,6 @@ const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps(
   return multi_->tag_fps;
 }
 
-#if 0
-string Transaction::DEBUG_PrintFailState(ShardId sid) const {
-  auto res = StrCat(
-      "usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
-      ", usecnt:", use_count_.load(memory_order_relaxed), ", runcnt: ", run_barrier_.DEBUG_Count(),
-      ", coordstate: ", coordinator_state_, ", coord native thread: ", stats_.coordinator_index,
-      ", schedule attempts: ", stats_.schedule_attempts, ", report from sid: ", sid, "\n");
-  std::atomic_thread_fence(memory_order_acquire);
-  for (unsigned i = 0; i < shard_data_.size(); ++i) {
-    const auto& sd = shard_data_[i];
-    absl::StrAppend(&res, "- shard: ", i, " local_mask:", sd.local_mask,
-                    " total_runs: ", sd.stats.total_runs, "\n");
-  }
-  return res;
-}
-#endif
-
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;

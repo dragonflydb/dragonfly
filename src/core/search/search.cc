@@ -1140,12 +1140,6 @@ string_view Schema::LookupAlias(string_view alias) const {
   return alias;
 }
 
-string_view Schema::LookupIdentifier(string_view identifier) const {
-  if (auto it = fields.find(identifier); it != fields.end())
-    return it->second.short_name;
-  return identifier;
-}
-
 Schema::OrderedFields Schema::Ordered() const {
   auto attributes = fields | std::views::transform([](const auto& kv) {
                       return OrderedFields::value_type{kv.first, &kv.second};
