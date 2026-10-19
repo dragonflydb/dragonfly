@@ -23,7 +23,6 @@ class EngineShardSet;
 class TieredStorage;
 class ShardDocIndices;
 class AofStreamer;
-class GenericFamilyTest;
 
 using TypeMemDeltas = std::array<int64_t, OBJ_TYPE_MAX>;
 
@@ -265,7 +264,7 @@ class EngineShard {
     return type_mem_delta_;
   }
 
-  friend class GenericFamilyTest;
+  friend void RetireExpiredAndEvictForTest(EngineShard*);
 
  private:
   struct DefragTaskState {
