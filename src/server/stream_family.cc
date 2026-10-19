@@ -3124,9 +3124,10 @@ void XReadBlock(ParsedArgs args, ReadOpts* opts, Transaction* tx, SinkReplyBuild
                                                          : KeyReadyResult::kNotReady;
   };
 
-  // XREADGROUP consumes the streams it reads, so every ready one must be reserved for it.
-  const auto wake_mode = opts->read_group ? WakeMode::kAllReadyKeys : WakeMode::kSingleKey;
-  if (auto status = tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, wake_mode, cntx);
+  // XREADGROUP consumes the streams it reads, so it is registered with CO::WAKE_ALL_READY_KEYS:
+  // when woken, every ready stream it heads on the waking shard is reserved for it.
+  DCHECK_EQ(opts->read_group, (tx->GetCId()->opt_mask() & CO::WAKE_ALL_READY_KEYS) != 0);
+  if (auto status = tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, cntx);
       status != OpStatus::OK)
     return status == OpStatus::UNBLOCKED ? rb->SendError(status) : rb->SendNullArray();
 
@@ -4336,7 +4337,8 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, acl::kXRevRange}.HFUNC(XRevRange)
             << CI{"XREAD", kReadFlags, -3, 3, 3, acl::kXRead}.HFUNC(XRead)
             << CI{"XREADGROUP",
-                  CO::VARIADIC_KEYS | CO::BLOCKING | CO::JOURNALED | CO::NO_AUTOJOURNAL,
+                  CO::VARIADIC_KEYS | CO::BLOCKING | CO::JOURNALED | CO::NO_AUTOJOURNAL |
+                      CO::WAKE_ALL_READY_KEYS,
                   -6,
                   6,
                   6,

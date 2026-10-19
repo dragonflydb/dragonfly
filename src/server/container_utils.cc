@@ -401,8 +401,7 @@ OpResult<string> RunCbOnFirstNonEmptyBlocking(Transaction* trans, int req_obj_ty
     return KeyReadyResult::kKeyNotFound;
   };
 
-  auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker,
-                                   WakeMode::kSingleKey, cntx);
+  auto status = trans->WaitOnWatch(limit_tp, Transaction::kShardArgs, key_checker, cntx);
 
   if (status != OpStatus::OK)
     return status;

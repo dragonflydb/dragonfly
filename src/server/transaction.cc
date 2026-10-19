@@ -1434,14 +1434,13 @@ ShardArgs Transaction::GetShardArgs(ShardId sid) const {
 }
 
 OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReadyChecker krc,
-                                  WakeMode wake_mode, facade::ConnectionContext* cntx) {
+                                  facade::ConnectionContext* cntx) {
   if (blocking_barrier_.IsClaimed()) {  // Might have been cancelled ahead by a dropping connection
     Conclude();
     return OpStatus::CANCELLED;
   }
 
   DCHECK(!IsAtomicMulti());  // blocking inside MULTI is not allowed
-  wake_mode_ = wake_mode;
 
   // Register keys on active shards blocking controllers and mark shard state as suspended.
   auto cb = [&](Transaction* t, EngineShard* shard) {
@@ -1609,10 +1608,10 @@ bool Transaction::IsGlobal() const {
 bool Transaction::NotifySuspended(ShardId sid) {
   auto& sd = shard_data_[SidToId(sid)];
 
-  // This shard already woke us and we have not run yet. With kAllReadyKeys we reserve this key as
-  // well; otherwise it is left to the next waiter.
+  // This shard already woke us and we have not run yet. Commands that consume every ready key
+  // (CO::WAKE_ALL_READY_KEYS) reserve this one as well; others leave it to the next waiter.
   if (sd.local_mask & AWAKED_Q)
-    return wake_mode_ == WakeMode::kAllReadyKeys;
+    return (cid_->opt_mask() & CO::WAKE_ALL_READY_KEYS) != 0;
 
   // Wake a transaction only once on the first notify.
   // We don't care about preserving the strict order with multiple operations running on blocking

@@ -273,8 +273,7 @@ TEST_F(TransactionTest, AwakenedPollNotDroppedWhenBlockedTxPresent) {
     tx_bl->Execute(Noop, false);  // schedule + first (non-concluding) hop -> stays scheduled
     std::string key = "x";
     auto tp = Transaction::time_point::max();
-    OpStatus st = tx_bl->WaitOnWatch(tp, std::string_view{key}, ready_checker, WakeMode::kSingleKey,
-                                     &bl_cntx);
+    OpStatus st = tx_bl->WaitOnWatch(tp, std::string_view{key}, ready_checker, &bl_cntx);
     ASSERT_EQ(OpStatus::OK, st);
     tx_bl->Execute(Noop, true);  // action hop after wakeup
     bl_done.Notify();

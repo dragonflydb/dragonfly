@@ -144,8 +144,7 @@ TEST_F(BlockingControllerTest, Timeout) {
   facade::ConnectionContext cntx{nullptr};
 
   facade::OpStatus status = trans_->WaitOnWatch(
-      tp, Transaction::kShardArgs, [](auto...) { return KeyReadyResult::kReady; },
-      WakeMode::kSingleKey, &cntx);
+      tp, Transaction::kShardArgs, [](auto...) { return KeyReadyResult::kReady; }, &cntx);
 
   EXPECT_EQ(status, facade::OpStatus::TIMED_OUT);
   unsigned num_watched = shard_set->Await(
