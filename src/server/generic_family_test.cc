@@ -2929,20 +2929,8 @@ TEST_F(GenericFamilyTest, HeartbeatExpiresAclNamespaceKeys) {
   ASSERT_EQ(Run({"ACL", "SETUSER", "hbns", "ON", ">pass", "+@all", "~*", "NAMESPACE:hbns"}), "OK");
   Namespace& hbns_ns = namespaces->GetOrInsert("hbns");
 
-  auto run_io1_hbns = [this](ArgSlice slice) -> RespExpr {
-    return pp_->at(1)->Await([&]() -> RespExpr {
-      TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, "IO1");
-      CmdArgVec args = conn_wrapper->Args(slice);
-      ConnectionContext* context = conn_wrapper->cmd_cntx();
-      context->ns = &hbns_ns;
-      CommandContext cmd_cntx;
-      cmd_cntx.Init(conn_wrapper->builder(), context);
-      cmd_cntx.Assign(args.begin(), args.end(), args.size());
-      service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC,
-                                nullptr);
-      unique_lock lk(mu_);
-      return conn_wrapper->ParseResponse(single_response_);
-    });
+  auto run_io1_hbns = [this, &hbns_ns](ArgSlice slice) -> RespExpr {
+    return pp_->at(1)->Await([&] { return RunInNamespace("IO1", hbns_ns, slice); });
   };
 
   ASSERT_EQ(run_io1_hbns({"AUTH", "hbns", "pass"}), "OK");
