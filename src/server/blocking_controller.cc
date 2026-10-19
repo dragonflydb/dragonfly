@@ -270,7 +270,7 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
     } else if (result == KeyReadyResult::kReady) {
       DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
                << owner_->committed_txid();
-      if (head->NotifySuspended(sid, key)) {
+      if (head->NotifySuspended(sid)) {
         wq->state = WatchQueue::ACTIVE;
         // We deliberately keep the notified transaction in the queue to know which queue
         // must handled when this transaction finished.
@@ -284,6 +284,19 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
     queue.pop_front();
   }
   std::move(skipped.begin(), skipped.end(), std::back_inserter(queue));
+}
+
+bool BlockingController::IsReserved(DbIndex db_index, string_view key,
+                                    const Transaction* tx) const {
+  auto dbit = watched_dbs_.find(db_index);
+  if (dbit == watched_dbs_.end())
+    return false;
+  auto it = dbit->second->queue_map.find(key);
+  if (it == dbit->second->queue_map.end())
+    return false;
+  const WatchQueue& wq = *it->second;
+  DCHECK(!wq.items.empty());
+  return wq.state == WatchQueue::ACTIVE && wq.items.front().get() == tx;
 }
 
 size_t BlockingController::NumWatched(DbIndex db_indx) const {

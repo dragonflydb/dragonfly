@@ -1624,7 +1624,7 @@ bool Transaction::IsGlobal() const {
 // Runs only in the shard thread.
 // Returns true if the transacton has changed its state from suspended to awakened,
 // false, otherwise.
-bool Transaction::NotifySuspended(ShardId sid, string_view key) {
+bool Transaction::NotifySuspended(ShardId sid) {
   // Wake a transaction only once on the first notify.
   // We don't care about preserving the strict order with multiple operations running on blocking
   // keys in parallel, because the internal order is not observable from outside either way.
@@ -1641,26 +1641,32 @@ bool Transaction::NotifySuspended(ShardId sid, string_view key) {
   // We wake at most once.
   CHECK_EQ(sd.local_mask & AWAKED_Q, 0);
 
-  // Find index of awakened key
-  ShardArgs args = GetShardArgs(sid);
-  auto it = find_if(args.cbegin(), args.cend(), [key](string_view arg) { return arg == key; });
-  CHECK(it != args.cend());
-
-  // Change state to awaked and store index of awakened key
+  // Change state to awaked. The key that woke it stays reserved for it in the blocking controller:
+  // its watch queue is ACTIVE with this transaction at the head (see IsWakeKey).
   sd.local_mask |= AWAKED_Q;
-  sd.wake_key_pos = it.index();
 
   blocking_barrier_.Close();
   return true;
 }
 
+bool Transaction::IsWokenOn(ShardId sid) const {
+  return shard_data_[SidToId(sid)].local_mask & AWAKED_Q;
+}
+
+bool Transaction::IsWakeKey(ShardId sid, string_view key) const {
+  return IsWokenOn(sid) && namespace_->GetBlockingController(sid)->IsReserved(db_index_, key, this);
+}
+
 optional<string_view> Transaction::GetWakeKey(ShardId sid) const {
-  auto& sd = shard_data_[SidToId(sid)];
-  if ((sd.local_mask & AWAKED_Q) == 0)
+  if (!IsWokenOn(sid))
     return nullopt;
 
-  CHECK_LT(sd.wake_key_pos, full_args_.size());
-  return full_args_[sd.wake_key_pos];
+  const BlockingController* bc = namespace_->GetBlockingController(sid);
+  for (string_view key : GetShardArgs(sid)) {
+    if (bc->IsReserved(db_index_, key, this))
+      return key;
+  }
+  return nullopt;
 }
 
 void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult result) {

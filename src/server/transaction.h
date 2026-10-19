@@ -230,9 +230,10 @@ class Transaction {
   facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeys keys, KeyReadyChecker krc,
                                facade::ConnectionContext* cntx);
 
-  // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
-  // blocking queue.
-  bool NotifySuspended(ShardId sid, std::string_view key);
+  // Called when this transaction heads the watch queue of a ready key on shard sid. Returns true
+  // if this call woke it, which reserves the key for it. Returns false if it was already woken
+  // (or cancelled) and can be dropped from the queue.
+  bool NotifySuspended(ShardId sid);
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
   // Must be called from coordinator thread.
@@ -294,7 +295,15 @@ class Transaction {
   // Returns if the transaction spans this shard. Safe only when the transaction is armed.
   bool IsActive(ShardId sid) const;
 
-  // If blocking tx was woken up on this shard, get wake key.
+  // Whether shard sid woke this blocking transaction.
+  bool IsWokenOn(ShardId sid) const;
+
+  // Whether key was reserved for this blocking transaction when this shard woke it.
+  // Runs only in the shard thread, since it queries the shard's BlockingController.
+  bool IsWakeKey(ShardId sid, std::string_view key) const;
+
+  // If blocking tx was woken up on this shard, the key reserved for it. Runs only in the shard
+  // thread, like IsWakeKey.
   std::optional<std::string_view> GetWakeKey(ShardId sid) const;
 
   // Get OpArgs for specific shard
@@ -436,9 +445,6 @@ class Transaction {
 
     // Position in the tx queue. OOO or cancelled schedules remove themselves by this index.
     TxQueue::Iterator pq_pos = TxQueue::kEnd;
-
-    // Index of key relative to args in shard that the shard was woken up after blocking wait.
-    uint32_t wake_key_pos = UINT32_MAX;
 
     // Irrational stats purely for debugging purposes.
     struct Stats {

@@ -51,6 +51,10 @@ class BlockingController {
   // Notify transactions of awakened keys
   void NotifyPending();
 
+  // Whether key's watch queue is reserved for tx, i.e. tx was woken while heading it and has not
+  // concluded yet.
+  bool IsReserved(DbIndex db_index, std::string_view key, const Transaction* tx) const;
+
   // Used in tests and debugging functions.
   size_t NumWatched(DbIndex db_indx) const;
   std::vector<std::string> GetWatchedKeys(DbIndex db_indx) const;
