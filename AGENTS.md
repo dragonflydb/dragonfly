@@ -107,6 +107,7 @@ git log --oneline -10
 **Code Style**: [.clang-format](.clang-format) - snake_case vars, PascalCase functions, kPascalCase constants
 
 **DO ✅**:
+- Function parameters: inputs first, output arguments (pointers the function writes to) last
 - Fiber-aware: `util::fb2::Mutex`, `util::fb2::Fiber` → [helio/util/fibers/](helio/util/fibers/)
 - Per-shard ops (no global state) → [docs/df-share-nothing.md](docs/df-share-nothing.md)
 - Command pattern → [src/server/set_family.cc](src/server/set_family.cc)

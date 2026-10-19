@@ -559,11 +559,33 @@ struct GetResp {
   uint32_t ttl_sec = 0;
 };
 
+// Per shard MGET state, updated in place by every attempt of the shard callback. The callback is
+// retried when an optimistic schedule is cancelled, tiered reads of a discarded attempt may still
+// be in flight. They reference this struct, so it must outlive all of them. MGetGeneric waits for
+// the reads of all attempts before destroying it.
 struct alignas(64) MGetResponse {
-  explicit MGetResponse(size_t size = 0) : resp_arr(size) {
+  // Starts a new attempt for num_keys keys. Reads issued by previous attempts see the new attempt
+  // and write nothing.
+  void Reset(size_t num_keys) {
+    ++seq_id;
+    err = {};
+    resp_arr.clear();
+    resp_arr.resize(num_keys);
   }
 
-  std::unique_ptr<char[]> storage;
+  // Returns a buffer of at least size bytes, reusing the buffer of a previous attempt if it fits.
+  char* Reserve(size_t size) {
+    if (!storage || size > capacity) {
+      storage = make_unique_for_overwrite<char[]>(size);
+      capacity = size;
+    }
+    return storage.get();
+  }
+
+  std::unique_ptr<char[]> storage;  // GetResp::value points into it unless borrowed
+  size_t capacity = 0;              // size of storage
+  uint32_t seq_id = 0;              // bumped at the start of every attempt
+  std::error_code err;              // tiered read error of the current attempt
   absl::InlinedVector<std::optional<GetResp>, 2> resp_arr;
 };
 
@@ -576,9 +598,9 @@ using SearchMut = SearchKey<DbSlice::Iterator>;
 using SearchConst = SearchKey<DbSlice::ConstIterator>;
 
 template <typename Iter>
-MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_mc,
-                         MemcacheCmdFlags cmd_flags, const Transaction* t, EngineShard* shard,
-                         SearchKey<Iter> find_op) {
+void CollectKeys(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags,
+                 const Transaction* t, EngineShard* shard, SearchKey<Iter> find_op,
+                 MGetResponse* response) {
   ShardArgs keys = t->GetShardArgs(shard->shard_id());
   DCHECK(!keys.Empty());
 
@@ -587,7 +609,8 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_m
     DCHECK(!cid->IsReadOnly()) << "mutable iterator used with read-only command " << cid->name();
   }
 
-  MGetResponse response(keys.Size());
+  response->Reset(keys.Size());
+
   struct Item {
     Iter it;
     optional<cmn::BorrowedString> borrowed;
@@ -621,9 +644,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_m
 
   VLOG_IF(1, total_size > 10000000) << "OpMGet: allocating " << total_size << " bytes";
 
-  // Allocate enough for all values
-  response.storage = make_unique<char[]>(total_size);
-  char* next = response.storage.get();
+  char* next = response->Reserve(total_size);
   bool fetch_mcflag = cmd_flags.return_flags;
   bool fetch_cas = cmd_flags.return_cas;
   const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
@@ -633,7 +654,7 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_m
     if (it.is_done())
       continue;
 
-    auto& resp = response.resp_arr[i].emplace();
+    auto& resp = response->resp_arr[i].emplace();
 
     // Borrow, copy to buffer or trigger tiered read that will eventually write to buffer.
     const PrimeValue& value = it->second;
@@ -643,11 +664,17 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_m
         resp.value = resp.borrowed->view();
     } else if (value.IsExternal()) {
       wait_bc->Add(1);
-      auto cb = [next, err, wait_bc](const io::Result<string_view>& v) mutable {
-        if (v.has_value())
-          memcpy(next, v->data(), v->size());
-        else
-          *err = v.error();
+      // A read orphaned by a newer attempt writes nothing, `next` may point into a freed or reused
+      // buffer. Read callbacks and attempts run on the shard thread, and the callback does not
+      // suspend, so a new attempt can't start between the check and the write.
+      auto cb = [response, cb_seq_id = response->seq_id, next,
+                 wait_bc](const io::Result<string_view>& v) mutable {
+        if (cb_seq_id == response->seq_id) {
+          if (v.has_value())
+            memcpy(next, v->data(), v->size());
+          else
+            response->err = v.error();
+        }
         wait_bc->Dec();
       };
       ReadTiered(t->GetDbIndex(), it.key(), value, std::move(cb), shard->tiered_storage());
@@ -678,7 +705,6 @@ MGetResponse CollectKeys(BlockingCounter wait_bc, AggregateError* err, bool is_m
       }
     }
   }
-  return response;
 }
 
 // Extend key with value, either prepend or append. Return size of stored string
@@ -883,9 +909,8 @@ OpResult<DbSlice::Iterator> FindKeyAndSetExpiry(const GetAndTouchParams& params)
   return find_res->it;
 }
 
-MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, bool is_mc,
-                    MemcacheCmdFlags cmd_flags, const Transaction* t, EngineShard* shard,
-                    const DbSlice::ExpireParams* gat_params = nullptr) {
+void OpMGet(BlockingCounter wait_bc, bool is_mc, MemcacheCmdFlags cmd_flags, const Transaction* t,
+            EngineShard* shard, const DbSlice::ExpireParams* gat_params, MGetResponse* response) {
   if (gat_params) {
     SearchMut find_op = [&](string_view key) {
       return FindKeyAndSetExpiry(GetAndTouchParams{
@@ -895,14 +920,15 @@ MGetResponse OpMGet(BlockingCounter wait_bc, AggregateError* err, bool is_mc,
           .key = key,
       });
     };
-    return CollectKeys(std::move(wait_bc), err, is_mc, cmd_flags, t, shard, std::move(find_op));
-  } else {
-    SearchConst find_op = [&](string_view key) {
-      const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
-      return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
-    };
-    return CollectKeys(std::move(wait_bc), err, is_mc, cmd_flags, t, shard, std::move(find_op));
+    CollectKeys(std::move(wait_bc), is_mc, cmd_flags, t, shard, std::move(find_op), response);
+    return;
   }
+
+  SearchConst find_op = [&](string_view key) {
+    const DbSlice& db_slice = t->GetDbSlice(shard->shard_id());
+    return db_slice.FindReadOnly(t->GetDbContext(), key, OBJ_STRING);
+  };
+  CollectKeys(std::move(wait_bc), is_mc, cmd_flags, t, shard, std::move(find_op), response);
 }
 
 OpStatus SetCmd::Set(const SetParams& params, string_view key, string_view value) {
@@ -1516,41 +1542,40 @@ cmd::CmdR MGetGeneric(CommandContext* cmd_cntx, std::optional<DbSlice::ExpirePar
     cmd_flags = cmd_cntx->mc_command()->cmd_flags;
   }
 
-  fb2::BlockingCounter tiering_bc{0};  // Count of pending tiered reads
-  AggregateError tiering_err;          // First tiering error
-
   unique_ptr<MGetResponse[]> mget_resp(new MGetResponse[shard_set->size()]);
 
   size_t arg_len = tail_args.size();
   unique_ptr<optional<GetResp>[]> mget_results(new optional<GetResp>[arg_len]);
 
+  BlockingCounter tiering_bc{0};  // Count of pending tiered reads of all attempts
+
   auto gat_ptr = gat_params ? &*gat_params : nullptr;
   auto cb = [&](Transaction* t, EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    MGetResponse resp = OpMGet(tiering_bc, &tiering_err, is_mc, cmd_flags, t, shard, gat_ptr);
+    MGetResponse& resp = mget_resp[sid];
+    OpMGet(tiering_bc, is_mc, cmd_flags, t, shard, gat_ptr, &resp);
 
     // Reorder shard resuls based on key indices in commands
     ShardArgs shard_args = t->GetShardArgs(sid);
     unsigned src_indx = 0;
+    // if the callback is rerun, results of the previous run must be overwritten, they point into
+    // its storage.
     for (auto it = shard_args.begin(); it != shard_args.end(); ++it, ++src_indx) {
-      if (!resp.resp_arr[src_indx])
-        continue;
       DCHECK_LT(it.index(), arg_len);
       mget_results[it.index()] = std::move(resp.resp_arr[src_indx]);
     }
-
-    // Keep the per-shard storage alive: GetResp::value string_views point into resp.storage.
-    mget_resp[sid] = std::move(resp);
     return OpStatus::OK;
   };
 
   co_await cmd::SingleHop(cb);
 
-  // wait for all tiered reads to finish and check for errors
+  // Wait for the tiered reads of all attempts, orphaned ones included: they reference mget_resp.
   tiering_bc->Wait();
-  if (auto err = std::move(tiering_err).Destroy(); err) {
-    cmd_cntx->rb()->SendError(err.message());
-    co_return std::nullopt;
+  for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
+    if (const auto& err = mget_resp[sid].err; err) {
+      cmd_cntx->rb()->SendError(err.message());
+      co_return std::nullopt;
+    }
   }
 
   SinkReplyBuilder::ReplyScope scope{cmd_cntx->rb()};

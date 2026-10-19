@@ -151,9 +151,6 @@ struct Schema {
   // Return identifier for alias if found, otherwise return passed value
   std::string_view LookupAlias(std::string_view alias) const;
 
-  // Return alias for identifier if found, otherwise return passed value
-  std::string_view LookupIdentifier(std::string_view identifier) const;
-
   // Fields in declaration order.
   using OrderedFields = absl::InlinedVector<std::pair<std::string_view, const SchemaField*>, 16>;
   OrderedFields Ordered() const;

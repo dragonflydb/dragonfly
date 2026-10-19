@@ -63,33 +63,6 @@ PreservedEntry ExtractField(PrimeValue& pv, string_view field) {
   return PreservedEntry(old.release(), deleter);
 }
 
-template <typename F>
-void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
-  auto& db_slice = op_args.GetDbSlice();
-  DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
-  auto* prime_table = db_slice.GetTables(op_args.db_cntx.db_index);
-
-  string scratch;
-  auto cb = [&](PrimeTable::iterator it) {
-    PrimeValue& pv = it->second;
-    string_view key = it->first.GetSlice(&scratch);
-
-    if (!index.Matches(key, pv.ObjType()))
-      return;
-
-    f(key, op_args.db_cntx, pv);
-  };
-
-  PrimeTable::Cursor cursor;
-  do {
-    cursor = prime_table->Traverse(cursor, cb);
-    // Yield if the fiber has been running for long.
-    if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500) {  // 500us
-      util::ThisFiber::Yield();
-    }
-  } while (cursor);
-}
-
 // Sort-index identifiers keyed by their output names.
 using SortIndiciesFieldsList =
     std::vector<std::pair<string_view /*sort index identifier*/, string_view /*output name*/>>;

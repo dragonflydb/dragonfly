@@ -121,11 +121,6 @@ class ThreadSafeSaveInfo {
   SaveInfoData data_;
 };
 
-struct SnapshotSpec {
-  std::string hour_spec;
-  std::string minute_spec;
-};
-
 struct ReplicaOffsetInfo {
   std::string sync_id;
   std::vector<uint64_t> flow_offsets;

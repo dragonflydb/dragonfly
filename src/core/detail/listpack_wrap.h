@@ -63,8 +63,6 @@ struct ListpackWrap {
   size_t size() const;  // number of entries
   size_t UsedBytes() const;
 
-  size_t DataBytes() const;
-
   // Get view from raw listpack iterator
   static std::string_view GetView(uint8_t* lp_it, uint8_t int_buf[]);
 

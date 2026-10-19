@@ -89,3 +89,6 @@ CheckOptions:
     value: false
   - key: bugprone-narrowing-conversions.WarnOnEquivalentBitWidth
     value: false
+  # int8_t is used as a small integer (e.g. key positions), not as a character.
+  - key: bugprone-signed-char-misuse.CharTypdefsToIgnore
+    value: int8_t
