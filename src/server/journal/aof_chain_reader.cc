@@ -47,6 +47,7 @@ string AofChainReader::SegmentPath(uint64_t seq) const {
 }
 
 error_code AofChainReader::Open() {
+  DCHECK(segment_chain_.empty());
   auto files = io::StatFiles(absl::StrCat(dir_, "/appendonly-", shard_id_, "-*.aof"));
   if (!files)
     return files.error();
@@ -99,6 +100,8 @@ error_code AofChainReader::Open() {
 
 error_code AofChainReader::RefillFromDisk() {
   const Segment& seg = segment_chain_[read_seg_id_];
+  DCHECK(pending_.empty());
+  DCHECK_LT(buf_.size() - pos_, kMaxBlockBytes);
 
   // The decoded bytes were all handed out: drop them and move the unread ones, less than one
   // block, to the front, so no byte is read twice.
@@ -121,6 +124,7 @@ error_code AofChainReader::ReadBlock() {
   // more when buf_ holds fewer unread bytes than that.
   if (buf_.size() - pos_ < min<uint64_t>(kMaxBlockBytes, seg.size - offset_))
     RETURN_ON_ERR(RefillFromDisk());
+  DCHECK_GE(buf_.size() - pos_, min<uint64_t>(kMaxBlockBytes, seg.size - offset_));
 
   // Bad CRC or size: a torn write or a hole.
   string_view avail = string_view(buf_).substr(pos_);
@@ -176,6 +180,7 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
 
       // Continue with the next segment, after its header. buf_ holds nothing unread: reads stop at
       // the segment's end.
+      DCHECK_EQ(pos_, buf_.size());
       offset_ = kAofSegmentHeaderSize;
       continue;
     }
@@ -195,11 +200,14 @@ io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
 }
 
 void AofChainReader::MarkEndOfLog(End end) {
+  DCHECK(end_ == End::kNotYet);
   end_ = end;
 
   // A clean end read every segment to its end, so nothing is discarded.
-  if (end == End::kTailReached)
+  if (end == End::kTailReached) {
+    DCHECK(AllSegmentsRead());
     return;
+  }
 
   // The log ends at the read position, right after the last valid block.
   discarded_bytes_ = segment_chain_[read_seg_id_].size - offset_;
