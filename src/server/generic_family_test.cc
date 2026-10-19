@@ -2927,19 +2927,24 @@ TEST_F(GenericFamilyTest, ConfigSetRejectedValueRollsBack) {
 // Regression for https://github.com/dragonflydb/dragonfly/issues/8069
 TEST_F(GenericFamilyTest, HeartbeatExpiresAclNamespaceKeys) {
   ASSERT_EQ(Run({"ACL", "SETUSER", "hbns", "ON", ">pass", "+@all", "~*", "NAMESPACE:hbns"}), "OK");
-  Namespace& hbns_ns = namespaces->GetOrInsert("hbns");
+  Namespace& hbns_ns = pp_->at(0)->Await([] { return namespaces->GetOrInsert("hbns"); });
 
   auto run_io1_hbns = [this, &hbns_ns](ArgSlice slice) -> RespExpr {
     return pp_->at(1)->Await([&] { return RunInNamespace("IO1", hbns_ns, slice); });
   };
 
+  auto hbns_expire_count = [&hbns_ns]() {
+    uint64_t count = 0;
+    for (unsigned i = 0; i < shard_set->size(); ++i) {
+      count += hbns_ns.GetDbSlice(i).GetDBTable(0)->stats.expire_count;
+    }
+    return count;
+  };
+
   ASSERT_EQ(run_io1_hbns({"AUTH", "hbns", "pass"}), "OK");
   ASSERT_EQ(run_io1_hbns({"SET", "expkey", "v"}), "OK");
   ASSERT_EQ(run_io1_hbns({"PEXPIRE", "expkey", "100"}).GetInt(), 1);
-
-  for (unsigned i = 0; i < shard_set->size(); ++i) {
-    ASSERT_EQ(hbns_ns.GetDbSlice(i).GetDBTable(0)->stats.expire_count, 1u) << i;
-  }
+  ASSERT_EQ(hbns_expire_count(), 1u);
 
   AdvanceTime(200);
 
@@ -2953,10 +2958,8 @@ TEST_F(GenericFamilyTest, HeartbeatExpiresAclNamespaceKeys) {
   shard_set->RunBriefInParallel(
       [&](EngineShard* shard) { expired_after += shard->stats().total_heartbeat_expired_keys; });
   EXPECT_GE(expired_after, expired_before + 1);
-
-  for (unsigned i = 0; i < shard_set->size(); ++i) {
-    EXPECT_EQ(hbns_ns.GetDbSlice(i).GetDBTable(0)->stats.expire_count, 0u) << i;
-  }
+  EXPECT_EQ(run_io1_hbns({"EXISTS", "expkey"}).GetInt(), 0);
+  EXPECT_EQ(hbns_expire_count(), 0u);
 }
 
 TEST_F(GenericFamilyTest, ConfigNotifyAppliesToAllNamespaces) {
