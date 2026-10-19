@@ -2944,16 +2944,14 @@ TEST_F(GenericFamilyTest, HeartbeatExpiresAclNamespaceKeys) {
   AdvanceTime(200);
 
   uint64_t expired_before = 0;
-  shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    expired_before += shard->stats().total_heartbeat_expired_keys;
-  });
+  shard_set->RunBriefInParallel(
+      [&](EngineShard* shard) { expired_before += shard->stats().total_heartbeat_expired_keys; });
 
   shard_set->RunBlockingInParallel([](EngineShard* shard) { RetireExpiredAndEvictForTest(shard); });
 
   uint64_t expired_after = 0;
-  shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    expired_after += shard->stats().total_heartbeat_expired_keys;
-  });
+  shard_set->RunBriefInParallel(
+      [&](EngineShard* shard) { expired_after += shard->stats().total_heartbeat_expired_keys; });
   EXPECT_GE(expired_after, expired_before + 1);
 
   for (unsigned i = 0; i < shard_set->size(); ++i) {
