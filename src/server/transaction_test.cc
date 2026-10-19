@@ -4,9 +4,18 @@
 
 #include "server/transaction.h"
 
+#include <absl/base/config.h>
 #include <gmock/gmock.h>
 
+// Like dfly_main, route operator new/delete through mimalloc, so that benchmarks measure the
+// production allocator. Skipped under ASAN, which must track these allocations to catch lifetime
+// bugs.
+#ifndef ABSL_HAVE_ADDRESS_SANITIZER
+#include <mimalloc-new-delete.h>
+#endif
+
 #include "base/flags.h"
+#include "base/gtest.h"
 #include "base/logging.h"
 #include "facade/conn_context.h"
 #include "facade/facade_stats.h"
@@ -22,6 +31,8 @@
 #include "server/server_state.h"
 #include "util/fibers/pool.h"
 #include "util/fibers/synchronization.h"
+
+ABSL_DECLARE_FLAG(bool, force_epoll);
 
 namespace dfly {
 
@@ -39,8 +50,12 @@ class TransactionTest : public Test {
 
   static void SetUpTestSuite() {
     ServerState::Init(kNumThreads, kNumThreads, nullptr, nullptr);
-    facade::tl_facade_stats = new facade::FacadeStats;
+    if (facade::tl_facade_stats == nullptr)
+      facade::tl_facade_stats = new facade::FacadeStats;
   }
+
+  // Runs `pool` and brings up the shard set on top of it.
+  void StartShards(ProactorPool* pool);
 
   static OpStatus Noop(Transaction*, EngineShard*) {
     return OpStatus::OK;
@@ -125,7 +140,11 @@ class TransactionTest : public Test {
 };
 
 void TransactionTest::SetUp() {
-  pp_.reset(fb2::Pool::Epoll(kNumThreads));
+  StartShards(fb2::Pool::Epoll(kNumThreads));
+}
+
+void TransactionTest::StartShards(ProactorPool* pool) {
+  pp_.reset(pool);
   pp_->Run();
   pp_->AwaitBrief([](unsigned index, ProactorBase* p) {
     ServerState::Init(index, kNumThreads, nullptr, nullptr);
@@ -593,5 +612,136 @@ TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
       mr->deallocate(ptr, size);
   });
 }
+
+// Measures the overhead of the transactional framework for single-key commands like GET/SET.
+// Every iteration repeats what command dispatch does for such a command: allocate a transaction,
+// InitByArgs and run a single concluding hop. The hop callback is empty, so only the transaction
+// code is measured.
+//
+// remote=0: the coordinator fiber runs on the key's shard thread and the hop runs inline, i.e.
+//           the pure CPU cost of the transaction code.
+// remote=1: the coordinator runs on another thread, so every hop is a cross-thread round trip.
+// fibers:   the number of coordinator fibers issuing transactions concurrently.
+// The `inline` and `optimistic` counters report the fraction of transactions that took these paths.
+//
+// Run with: ./transaction_test --bench --gtest_filter='-*' --benchmark_filter=BM_TxSingleKey
+class TxBenchmark : public TransactionTest {
+ public:
+  TxBenchmark();
+
+  ~TxBenchmark() override {
+    TearDown();
+  }
+
+  void TestBody() override {
+  }
+
+  void Run(benchmark::State& state);
+
+ private:
+  static constexpr ShardId kShard = 0;  // Owns all the benchmark keys.
+
+  struct PathStats {
+    uint64_t inline_runs;      // Transactions that ran inline on the coordinator thread.
+    uint64_t optimistic_runs;  // Transactions that ran on kShard while being scheduled.
+  };
+
+  PathStats ReadPathStats(unsigned coordinator);
+
+  // Runs the benchmark loop, issuing transactions from `num_fibers` fibers on the current thread.
+  void RunCoordinators(unsigned num_fibers, benchmark::State& state);
+
+  // Runs a transaction with a single empty hop on `key`, like a GET or a SET.
+  void RunTx(string_view key);
+
+  // A minimal SET-like command with a single key at a fixed position.
+  CommandId cid_{"BENCH_SET", CO::JOURNALED | CO::DENYOOM, -3, 1, 1, acl::NONE};
+  Namespace* ns_ = nullptr;
+  vector<string> keys_;
+};
+
+TxBenchmark::TxBenchmark() {
+  SetUpTestSuite();
+#ifdef __linux__
+  StartShards(absl::GetFlag(FLAGS_force_epoll) ? fb2::Pool::Epoll(kNumThreads)
+                                               : fb2::Pool::IOUring(16, kNumThreads));
+#else
+  StartShards(fb2::Pool::Epoll(kNumThreads));
+#endif
+
+  // Make it a string family command (see kFamilyToType in command_registry.cc), so that
+  // RunCallback does the same memory accounting as for real string commands.
+  constexpr size_t kStringFamily = 4;
+  CHECK_EQ(TypeForFamily(kStringFamily), int(OBJ_STRING));
+  cid_.SetFamily(kStringFamily);
+
+  ns_ = &namespaces->GetDefaultNamespace();
+  for (unsigned i = 0; keys_.size() < 1024; ++i) {
+    string key = absl::StrCat("key:", i);
+    if (Shard(key, shard_set->size()) == kShard)
+      keys_.push_back(std::move(key));
+  }
+}
+
+void TxBenchmark::Run(benchmark::State& state) {
+  const bool remote = state.range(0);
+  const unsigned num_fibers = state.range(1);
+  const unsigned coordinator = remote ? kShard + 1 : kShard;
+
+  const PathStats before = ReadPathStats(coordinator);
+  OnShard(coordinator, [&] { RunCoordinators(num_fibers, state); });
+  const PathStats after = ReadPathStats(coordinator);
+
+  const double iterations = state.iterations();
+  state.SetItemsProcessed(state.iterations());
+  state.counters["inline"] = (after.inline_runs - before.inline_runs) / iterations;
+  state.counters["optimistic"] = (after.optimistic_runs - before.optimistic_runs) / iterations;
+}
+
+TxBenchmark::PathStats TxBenchmark::ReadPathStats(unsigned coordinator) {
+  PathStats stats;
+  stats.inline_runs =
+      OnShard(coordinator, [] { return ServerState::tlocal()->stats.tx_inline_runs; });
+  stats.optimistic_runs =
+      OnShard(kShard, [] { return EngineShard::tlocal()->stats().tx_optimistic_total; });
+  return stats;
+}
+
+void TxBenchmark::RunCoordinators(unsigned num_fibers, benchmark::State& state) {
+  // All iterations form a single batch, so the fibers are launched once and share the budget.
+  // They run on the same thread, so `next` needs no synchronization.
+  const size_t total = state.max_iterations;
+  size_t next = 0;
+  vector<fb2::Fiber> fibers(num_fibers);
+  while (state.KeepRunningBatch(total)) {  // Runs once, the second call stops the timer.
+    for (auto& fb : fibers) {
+      fb = fb2::Fiber("coordinator", [&] {
+        while (next < total)
+          RunTx(keys_[next++ % keys_.size()]);
+      });
+    }
+    for (auto& fb : fibers)
+      fb.Join();
+  }
+}
+
+void TxBenchmark::RunTx(string_view key) {
+  string_view args[] = {key, "value"};
+  boost::intrusive_ptr<Transaction> tx(new Transaction{&cid_});
+  tx->InitByArgs(ns_, 0, CmdArgList{args});
+  tx->ScheduleSingleHop(Noop);
+}
+
+static void BM_TxSingleKey(benchmark::State& state) {
+  TxBenchmark bench;
+  bench.Run(state);
+}
+BENCHMARK(BM_TxSingleKey)
+    ->ArgNames({"remote", "fibers"})
+    ->Args({0, 1})
+    ->Args({1, 1})
+    ->Args({1, 16})
+    ->MeasureProcessCPUTime()
+    ->UseRealTime();
 
 }  // namespace dfly
