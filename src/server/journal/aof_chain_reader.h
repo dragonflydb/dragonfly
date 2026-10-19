@@ -62,7 +62,10 @@ class AofChainReader : public io::Source {
 
   std::string SegmentPath(uint64_t seq) const;
 
-  // Reads the next block of the current segment and points pending_ at its payload, or ends the
+  // Reads the next chunk of the current segment into buf_, after its unread bytes.
+  std::error_code RefillFromDisk();
+
+  // Decodes the next block of the current segment and points pending_ at its payload, or ends the
   // log if the block is not valid.
   std::error_code ReadBlock();
 
@@ -89,7 +92,10 @@ class AofChainReader : public io::Source {
   // The segment being read and the offset of its next block.
   size_t read_seg_id_ = 0;
   uint64_t offset_ = kAofSegmentHeaderSize;
+
+  // Bytes read from the current segment; the ones from pos_ on are not decoded yet.
   std::string buf_;
+  size_t pos_ = 0;
 
   // The unread part of the current block's payload, in buf_.
   std::string_view pending_;
