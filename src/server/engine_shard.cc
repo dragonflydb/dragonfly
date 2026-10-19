@@ -450,7 +450,7 @@ void EngineShard::StopPeriodicFiber() {
   }
 }
 
-static void RunFPeriodically(std::function<void()> f, std::chrono::milliseconds period_ms,
+static void RunFPeriodically(const std::function<void()>& f, std::chrono::milliseconds period_ms,
                              std::string_view error_msg, util::fb2::Done* waiter) {
   int64_t last_heartbeat_ms = INT64_MAX;
 
@@ -501,8 +501,7 @@ void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
   fiber_shard_handler_periodic_ = MakeFiber(
       [this, index = pb->GetPoolIndex(), period_ms, handler = std::move(shard_handler)]() mutable {
         ThisFiber::SetName(absl::StrCat("shard_handler_periodic", index));
-        RunFPeriodically(std::move(handler), period_ms, "shard handler",
-                         &fiber_shard_handler_periodic_done_);
+        RunFPeriodically(handler, period_ms, "shard handler", &fiber_shard_handler_periodic_done_);
       });
 }
 
@@ -527,9 +526,8 @@ void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
 
     // TODO: enable tiered storage on non-default namespace
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-    auto* shard = EngineShard::tlocal();
-    shard->tiered_storage_ = make_unique<TieredStorage>(max_file_size, &db_slice);
-    error_code ec = shard->tiered_storage_->Open(backing_prefix);
+    tiered_storage_ = make_unique<TieredStorage>(max_file_size, &db_slice);
+    error_code ec = tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();
   }
 }

@@ -3148,7 +3148,7 @@ ostream& operator<<(ostream& os, const MetricCmp& m) {
     if (cond) {                                                               \
       LOG(WARNING) << "parity TODO scenario passes, promote it to PARITY_OK"; \
     } else {                                                                  \
-      LOG(WARNING) << "parity gap: " #cond "\n" << d;                         \
+      LOG(WARNING) << "parity gap: " #cond "\n" << (d);                       \
       GTEST_SKIP() << "parity gap";                                           \
     }                                                                         \
   } while (0)
@@ -3413,7 +3413,7 @@ class ScanBenchmark : public BaseFamilyTest {
     }
     auto populate_resp = Run(absl::Span<const string>{populate_args});
     DCHECK_EQ(populate_resp.GetView(), "OK");
-    DCHECK_EQ(Run({"dbsize"}).GetInt().value(), key_count);
+    DCHECK_EQ(Run({"dbsize"}).GetInt().value(), int64_t(key_count));
 
     // A real connection runs many commands in one fiber. Run() would create a fiber per command
     // and retain all parsed replies until teardown, so use the normal dispatcher directly here.
