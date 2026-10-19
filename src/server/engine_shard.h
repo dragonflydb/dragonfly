@@ -390,6 +390,8 @@ class EngineShard {
 
   Counter counter_[COUNTER_TOTAL];
 
+  uint32_t heartbeat_ns_rotation_ = 0;
+
   TypeMemDeltas type_mem_delta_ = {};
 
   static __thread EngineShard* shard_;

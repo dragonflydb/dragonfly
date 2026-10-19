@@ -7,6 +7,7 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
+#include <algorithm>
 #include <memory>
 
 #include "base/flags.h"
@@ -30,6 +31,7 @@ extern "C" {
 #include "server/snapshot.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
 
 using namespace std;
@@ -808,13 +810,20 @@ void EngineShard::RetireExpiredAndEvict() {
   size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
 
+  std::vector<Namespace*> ns_snapshot = namespaces->SnapshotAll();
+  if (!ns_snapshot.empty() && ns_snapshot.size() > 1) {
+    const size_t rot = heartbeat_ns_rotation_++ % ns_snapshot.size();
+    std::rotate(ns_snapshot.begin(), ns_snapshot.begin() + rot, ns_snapshot.end());
+  }
+
   {
     // Disable journal flush to prevent preemption. Scoped so that the expired events queued
     // meanwhile are sent below, outside the atomic section.
     journal::DisableFlushGuard journal_flush_guard;
 
-    namespaces->ForEach([&](Namespace& ns) {
-      DbSlice& db_slice = ns.GetDbSlice(shard_id());
+    for (Namespace* ns : ns_snapshot) {
+      const uint64_t ns_running_time_start = util::ThisFiber::GetRunningTimeCycles();
+      DbSlice& db_slice = ns->GetDbSlice(shard_id());
       for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
         if (!db_slice.IsDbValid(i))
           continue;
@@ -833,8 +842,8 @@ void EngineShard::RetireExpiredAndEvict() {
             unsigned ratio = std::min<uint64_t>(pt->size() / expire_count, 7);
             db_ttl_delete_target = ttl_delete_target * ratio;
           }
-          DbSlice::DeleteExpiredStats stats =
-              db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
+          DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(
+              db_cntx, db_ttl_delete_target, ns_running_time_start);
 
           deleted_bytes += stats.deleted_bytes;
           eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
@@ -862,14 +871,15 @@ void EngineShard::RetireExpiredAndEvict() {
           eviction_goal -= std::min(eviction_goal, evicted_bytes);
         }
       }
-    });
+    }
   }  // journal_flush_guard destroyed here — atomic section ends before sending the events
 
   // Send keyspace notifications for expired/evicted keys outside the atomic section
   // because SendMessages may suspend on connection backpressure (see issue #7052).
   // This also sends events that other code queued but left unsent.
-  namespaces->ForEach(
-      [&](Namespace& ns) { ns.GetDbSlice(shard_id()).SendQueuedExpiredKeyEvents(); });
+  for (Namespace* ns : ns_snapshot) {
+    ns->GetDbSlice(shard_id()).SendQueuedExpiredKeyEvents();
+  }
 
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
@@ -879,11 +889,14 @@ void EngineShard::RetireExpiredAndEvict() {
   // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
   // section, because readiness checks read the db slice and may preempt.
   if (GetContTx() == nullptr) {
-    namespaces->ForEach([&](Namespace& ns) {
-      if (auto* bc = ns.GetBlockingController(shard_id()); bc) {
+    for (Namespace* ns : ns_snapshot) {
+      if (GetContTx() != nullptr) {
+        break;
+      }
+      if (auto* bc = ns->GetBlockingController(shard_id()); bc) {
         bc->NotifyPending();
       }
-    });
+    }
   }
 }
 

@@ -1664,7 +1664,8 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
   }
 }
 
-auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
+auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count,
+                                uint64_t running_time_cycles_start) -> DeleteExpiredStats {
   auto& db = *db_arr_[cntx.db_index];
   DeleteExpiredStats result;
 
@@ -1698,9 +1699,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     ++result.deleted;
   };
 
-  auto quota_remains = [] {
+  auto quota_remains = [running_time_cycles_start] {
     // Break out of traversal if we spent more than 1ms
-    return base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) < 1000;
+    uint64_t elapsed = ThisFiber::GetRunningTimeCycles();
+    if (running_time_cycles_start != 0) {
+      elapsed -= running_time_cycles_start;
+    }
+    return base::CycleClock::ToUsec(elapsed) < 1000;
   };
 
   constexpr unsigned kStep = 8;

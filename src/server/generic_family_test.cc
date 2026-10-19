@@ -27,6 +27,7 @@ extern "C" {
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/engine_shard.h"
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
@@ -2926,21 +2927,50 @@ TEST_F(GenericFamilyTest, ConfigSetRejectedValueRollsBack) {
 // Regression for https://github.com/dragonflydb/dragonfly/issues/8069
 TEST_F(GenericFamilyTest, HeartbeatExpiresAclNamespaceKeys) {
   ASSERT_EQ(Run({"ACL", "SETUSER", "hbns", "ON", ">pass", "+@all", "~*", "NAMESPACE:hbns"}), "OK");
+  Namespace& hbns_ns = namespaces->GetOrInsert("hbns");
 
-  ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"AUTH", "hbns", "pass"}); }), "OK");
-  ASSERT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"SET", "expkey", "v"}); }), "OK");
-  ASSERT_EQ(pp_->at(1)
-                ->Await([&] {
-                  return Run("IO1", {"PEXPIRE", "expkey", "100"});
-                })
-                .GetInt(),
-            1);
+  auto run_io1_hbns = [this](ArgSlice slice) -> RespExpr {
+    return pp_->at(1)->Await([&]() -> RespExpr {
+      TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, "IO1");
+      CmdArgVec args = conn_wrapper->Args(slice);
+      ConnectionContext* context = conn_wrapper->cmd_cntx();
+      context->ns = &hbns_ns;
+      CommandContext cmd_cntx;
+      cmd_cntx.Init(conn_wrapper->builder(), context);
+      cmd_cntx.Assign(args.begin(), args.end(), args.size());
+      service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC,
+                                nullptr);
+      unique_lock lk(mu_);
+      return conn_wrapper->ParseResponse(single_response_);
+    });
+  };
+
+  ASSERT_EQ(run_io1_hbns({"AUTH", "hbns", "pass"}), "OK");
+  ASSERT_EQ(run_io1_hbns({"SET", "expkey", "v"}), "OK");
+  ASSERT_EQ(run_io1_hbns({"PEXPIRE", "expkey", "100"}).GetInt(), 1);
+
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    ASSERT_EQ(hbns_ns.GetDbSlice(i).GetDBTable(0)->stats.expire_count, 1u) << i;
+  }
 
   AdvanceTime(200);
 
+  uint64_t expired_before = 0;
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    expired_before += shard->stats().total_heartbeat_expired_keys;
+  });
+
   shard_set->RunBlockingInParallel([](EngineShard* shard) { RetireExpiredAndEvictForTest(shard); });
 
-  EXPECT_EQ(pp_->at(1)->Await([&] { return Run("IO1", {"EXISTS", "expkey"}); }).GetInt(), 0);
+  uint64_t expired_after = 0;
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    expired_after += shard->stats().total_heartbeat_expired_keys;
+  });
+  EXPECT_GE(expired_after, expired_before + 1);
+
+  for (unsigned i = 0; i < shard_set->size(); ++i) {
+    EXPECT_EQ(hbns_ns.GetDbSlice(i).GetDBTable(0)->stats.expire_count, 0u) << i;
+  }
 }
 
 TEST_F(GenericFamilyTest, ConfigNotifyAppliesToAllNamespaces) {

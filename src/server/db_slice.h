@@ -502,7 +502,8 @@ class DbSlice {
   };
 
   // Deletes some amount of possible expired items.
-  DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count);
+  DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count,
+                                       uint64_t running_time_cycles_start = 0);
 
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.

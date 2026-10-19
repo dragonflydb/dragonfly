@@ -65,6 +65,9 @@ class Namespaces {
 
   template <typename F> void ForEach(F&& cb) ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Stable pointers: namespaces are never removed after creation.
+  std::vector<Namespace*> SnapshotAll() ABSL_LOCKS_EXCLUDED(mu_);
+
  private:
   util::fb2::SharedMutex mu_{};
   absl::node_hash_map<std::string, Namespace> namespaces_ ABSL_GUARDED_BY(mu_);
