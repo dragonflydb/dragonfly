@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import signal
 import time
 
@@ -76,6 +77,82 @@ async def test_search(df_factory):
     assert (await c_replica.ft("idx-m2").search(Query("*").sort_by("f2").paging(0, 1))).docs[
         0
     ].id == "k0"
+
+
+async def saved_aliases(client, summary_path) -> dict[str, str]:
+    # This low level byte check will be removed when we can query aliases.
+    assert await client.execute_command("SAVE", "DF")
+    data = summary_path.read_bytes()
+    aliases = {}
+    for m in re.finditer(re.escape(b"\xfa\x0csearch-alias"), data):
+        n = data[m.end()]
+        assert n < 64  # 6-bit length encoding
+        alias, target = data[m.end() + 1 : m.end() + 1 + n].decode().split(" ")
+        aliases[alias] = target
+    return aliases
+
+
+async def test_search_alias_replication(df_factory, tmp_dir):
+    master, _, c_master, [c_replica] = await setup_replication(
+        df_factory,
+        replica_args={"dbfilename": "alias-replica"},
+        connect=False,
+    )
+
+    await c_replica.execute_command("FT.CREATE", "stale-idx", "SCHEMA", "f", "text")
+    await c_replica.execute_command("FT.ALIASADD", "stale-alias", "stale-idx")
+
+    for index in ("idx-a", "idx-b"):
+        await c_master.execute_command("FT.CREATE", index, "SCHEMA", "f", "text")
+    await c_master.execute_command("FT.ALIASADD", "stable", "idx-a")
+    await c_master.execute_command("FT.ALIASADD", "stable-too", "idx-a")
+
+    await start_replication(c_replica, master.port)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    summary = tmp_dir / "alias-replica-summary.dfs"
+    assert await saved_aliases(c_replica, summary) == {"stable": "idx-a", "stable-too": "idx-a"}
+
+    await c_master.execute_command("FT.ALIASADD", "new", "idx-b")
+    await c_master.execute_command("FT.ALIASUPDATE", "stable", "idx-b")
+    await c_master.execute_command("FT.ALIASDEL", "stable-too")
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await saved_aliases(c_replica, summary) == {"new": "idx-b", "stable": "idx-b"}
+
+
+async def test_search_alias_update_retries_full_sync(df_factory, tmp_dir):
+    master, _, c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"snapshot_egress_limit_bytes": "100kb"},
+        replica_args={"dbfilename": "alias-replica"},
+        connect=False,
+    )
+
+    for index in ("idx-a", "idx-b"):
+        await c_master.execute_command("FT.CREATE", index, "SCHEMA", "f", "text")
+    await c_master.execute_command("FT.ALIASADD", "live", "idx-a")
+    # keep full sync journal window open
+    await c_master.execute_command("DEBUG", "POPULATE", "20000", "key", "1000", "RAND")
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    @assert_eventually(timeout=10)
+    async def wait_until_primary_starts_full_sync():
+        info = await c_master.info("replication")
+        assert info.get("slave0", {}).get("state") == "full_sync"
+
+    await wait_until_primary_starts_full_sync()
+    syncid, _ = await c_replica.execute_command("DEBUG", "REPLICA", "OFFSET")
+    await c_master.execute_command("FT.ALIASUPDATE", "live", "idx-b")
+    # Remove the throttle so the retry completes promptly
+    await c_master.execute_command("CONFIG", "SET", "snapshot_egress_limit_bytes", "0")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    new_syncid, _ = await c_replica.execute_command("DEBUG", "REPLICA", "OFFSET")
+    assert new_syncid != syncid
+
+    summary = tmp_dir / "alias-replica-summary.dfs"
+    assert await saved_aliases(c_replica, summary) == {"live": "idx-b"}
 
 
 @dfly_args({"proactor_threads": 4})
