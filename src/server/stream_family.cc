@@ -3124,12 +3124,14 @@ void XReadBlock(ParsedArgs args, ReadOpts* opts, Transaction* tx, SinkReplyBuild
                                                          : KeyReadyResult::kNotReady;
   };
 
+  // XREADGROUP consumes the streams it reads, so it is registered with CO::WAKE_ALL_READY_KEYS:
+  // when woken, every ready stream it heads on the waking shard is reserved for it.
+  DCHECK_EQ(opts->read_group, (tx->GetCId()->opt_mask() & CO::WAKE_ALL_READY_KEYS) != 0);
   if (auto status = tx->WaitOnWatch(tp, Transaction::kShardArgs, key_checker, cntx);
       status != OpStatus::OK)
     return status == OpStatus::UNBLOCKED ? rb->SendError(status) : rb->SendNullArray();
 
-  // Read the streams reserved for us on the waking shard: the stream that woke us. Others may be
-  // reserved for other waiters.
+  // Records read on the waking shard, indexed by the stream's position among the STREAMS arguments.
   vector<RecordVec> results(opts->stream_ids.size());
   OpStatus wake_status = OpStatus::OK;
 
@@ -3195,8 +3197,9 @@ void XReadBlock(ParsedArgs args, ReadOpts* opts, Transaction* tx, SinkReplyBuild
     }
   }
 
-  // Reads one reserved stream, moving the delivered entries into the consumer PEL for XREADGROUP.
-  auto read_woken_stream = [&](const OpArgs& op_args, string_view wake_key) -> OpResult<RecordVec> {
+  // Reads one stream on the waking shard. XREADGROUP also moves the delivered entries into the
+  // consumer PEL.
+  auto read_woken_stream = [&](const OpArgs& op_args, string_view key) -> OpResult<RecordVec> {
     RangeOpts range_opts;
     // Ensure the woken read honors COUNT like the non-blocking path
     // (OpRead) does: without it, a consumer woken by a transaction that
@@ -3206,7 +3209,7 @@ void XReadBlock(ParsedArgs args, ReadOpts* opts, Transaction* tx, SinkReplyBuild
                                         .ms = UINT64_MAX,
                                         .seq = UINT64_MAX,
                                     }};
-    StreamIDsItem& sitem = opts->stream_ids.at(wake_key);
+    StreamIDsItem& sitem = opts->stream_ids.at(key);
     range_opts.start = sitem.id;
 
     // '>' is encoded as UINT64_MAX-UINT64_MAX and is only accepted for XREADGROUP, so the start
@@ -3236,7 +3239,7 @@ void XReadBlock(ParsedArgs args, ReadOpts* opts, Transaction* tx, SinkReplyBuild
         return OpStatus::CANCELLED;
       }
 
-      auto it = op_args.GetDbSlice().FindMutable(op_args.db_cntx, wake_key, OBJ_STREAM);
+      auto it = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_STREAM);
       DCHECK(it);
       if (it) {
         tracker->UpdateStreamSize(it->it->second);
@@ -3246,10 +3249,14 @@ void XReadBlock(ParsedArgs args, ReadOpts* opts, Transaction* tx, SinkReplyBuild
     range_opts.noack = opts->noack;
     range_opts.access_kind = StreamAccessKind::kSequential;
 
-    auto result = OpRange(op_args, wake_key, range_opts);
+    auto result = OpRange(op_args, key, range_opts);
+    // A plain XREAD also reads streams that did not wake it. A missing stream or another type has
+    // nothing to serve.
+    if (!result && !opts->read_group)
+      return RecordVec{};
     if (result) {
-      JournalConsumerCreationIfNeeded(op_args, *opts, wake_key);
-      JournalXReadGroupIfNeeded(op_args, *opts, *result, wake_key);
+      JournalConsumerCreationIfNeeded(op_args, *opts, key);
+      JournalXReadGroupIfNeeded(op_args, *opts, *result, key);
     }
     return result;
   };
@@ -3271,7 +3278,9 @@ void XReadBlock(ParsedArgs args, ReadOpts* opts, Transaction* tx, SinkReplyBuild
     }
 
     for (auto it = keys.begin(); it != keys.end(); ++it) {
-      if (!t->IsWakeKey(sid, *it))
+      // XREADGROUP consumes what it reads, so it skips streams reserved for other waiters. XREAD
+      // consumes nothing and reads every stream on the waking shard.
+      if (opts->read_group && !t->IsWakeKey(sid, *it))
         continue;
       auto result = read_woken_stream(op_args, *it);
       if (!result) {
@@ -4328,7 +4337,8 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XREVRANGE", CO::READONLY, -4, 1, 1, acl::kXRevRange}.HFUNC(XRevRange)
             << CI{"XREAD", kReadFlags, -3, 3, 3, acl::kXRead}.HFUNC(XRead)
             << CI{"XREADGROUP",
-                  CO::VARIADIC_KEYS | CO::BLOCKING | CO::JOURNALED | CO::NO_AUTOJOURNAL,
+                  CO::VARIADIC_KEYS | CO::BLOCKING | CO::JOURNALED | CO::NO_AUTOJOURNAL |
+                      CO::WAKE_ALL_READY_KEYS,
                   -6,
                   6,
                   6,

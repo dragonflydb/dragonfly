@@ -55,6 +55,11 @@ enum CommandOpt : uint32_t {
   // ACL: only the key at this offset among the command's keys needs write; others need read.
   WRITE_KEY_OFFSET_0 = 1U << 19,
   WRITE_KEY_OFFSET_1 = 1U << 20,
+
+  // Blocking command that consumes every ready key it waits on, like XREADGROUP. When it is woken,
+  // each watched key that is ready on the waking shard is reserved for it, not only the key that
+  // woke it (see BlockingController).
+  WAKE_ALL_READY_KEYS = 1U << 21,
 };
 
 };  // namespace CO
