@@ -427,6 +427,94 @@ TEST_F(AclFamilyTest, ClusterReadonlyIsNotReadCategory) {
   EXPECT_THAT(resp, "OK");
 }
 
+TEST_F(AclFamilyTest, SlowlogLatencyMemoryCategories) {
+  TestInitAclFam();
+
+  auto resp = Run("ACL SETUSER non-admin ON >p +@all -@admin -@dangerous");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN non-admin SLOWLOG GET");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'SLOWLOG' command");
+  resp = Run("ACL DRYRUN non-admin LATENCY LATEST");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'LATENCY' command");
+
+  resp = Run("ACL SETUSER reader ON >p ~* +@read");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN reader MEMORY USAGE key");
+  EXPECT_THAT(resp, "OK");
+
+  resp = Run({"COMMAND", "INFO", "SLOWLOG", "MEMORY"});
+  EXPECT_THAT(resp.GetVec()[0].GetVec()[2].GetVec(), IsSupersetOf({"admin", "loading"}));
+  EXPECT_THAT(resp.GetVec()[1].GetVec()[2].GetVec(), Contains("readonly"));
+}
+
+TEST_F(AclFamilyTest, AclCatAndHelpAreNotAdminCategory) {
+  TestInitAclFam();
+
+  auto resp = Run("ACL SETUSER non-admin ON >p +@all -@admin -@dangerous");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN non-admin ACL CAT");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN non-admin ACL HELP");
+  EXPECT_THAT(resp, "OK");
+}
+
+TEST_F(AclFamilyTest, ContainerCommandsCategories) {
+  TestInitAclFam();
+
+  auto resp = Run("ACL SETUSER no-stream ON >p ~* +@all -@stream");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN no-stream XGROUP CREATE s g $ MKSTREAM");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'XGROUP' command");
+  resp = Run("ACL DRYRUN no-stream XINFO STREAM s");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'XINFO' command");
+
+  resp = Run("ACL SETUSER no-pubsub ON >p +@all -@pubsub");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN no-pubsub PUBSUB CHANNELS");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'PUBSUB' command");
+
+  resp = Run("ACL SETUSER no-write ON >p +@all -@write");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN no-write FUNCTION FLUSH");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'FUNCTION' command");
+
+  resp = Run("ACL SETUSER scripter ON >p +@scripting");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN scripter FUNCTION FLUSH");
+  EXPECT_THAT(resp, "OK");
+}
+
+TEST_F(AclFamilyTest, KeyAfterSubcommandIsChecked) {
+  TestInitAclFam();
+
+  EXPECT_EQ(Run("ACL SETUSER tenant ON >p ~public:* +@all"), "OK");
+  for (std::string_view cmd :
+       {"XINFO STREAM", "XINFO GROUPS", "JSON.DEBUG MEMORY", "JSON.DEBUG FIELDS", "MEMORY usage"}) {
+    std::string name{cmd.substr(0, cmd.find(' '))};
+    EXPECT_EQ(Run(absl::StrCat("ACL DRYRUN tenant ", cmd, " secret:k")),
+              absl::StrCat("This user has no permissions to run the '", name, "' command"));
+    EXPECT_EQ(Run(absl::StrCat("ACL DRYRUN tenant ", cmd, " public:k")), "OK") << cmd;
+  }
+  EXPECT_EQ(Run("ACL DRYRUN tenant XINFO CONSUMERS secret:k g"),
+            "This user has no permissions to run the 'XINFO' command");
+  EXPECT_EQ(Run("ACL DRYRUN tenant MEMORY STATS"), "OK");
+
+  EXPECT_EQ(Run("ACL SETUSER reader ON >p %R~public:* +@all"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN reader XINFO STREAM public:k"), "OK");
+  EXPECT_EQ(Run("ACL SETUSER writer ON >p %W~public:* +@all"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN writer XINFO STREAM public:k"),
+            "This user has no permissions to run the 'XINFO' command");
+}
+
+TEST_F(AclFamilyTest, DelexIsKeyspaceCategory) {
+  TestInitAclFam();
+
+  auto resp = Run("ACL SETUSER no-keyspace ON >p ~* +@all -@keyspace");
+  EXPECT_THAT(resp, "OK");
+  resp = Run("ACL DRYRUN no-keyspace DELEX key");
+  EXPECT_THAT(resp, "This user has no permissions to run the 'DELEX' command");
+}
+
 TEST_F(AclFamilyTest, TestGetUser) {
   TestInitAclFam();
   auto resp = Run("ACL GETUSER kostas");
