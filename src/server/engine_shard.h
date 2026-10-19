@@ -23,6 +23,7 @@ class EngineShardSet;
 class TieredStorage;
 class ShardDocIndices;
 class AofStreamer;
+class GenericFamilyTest;
 
 using TypeMemDeltas = std::array<int64_t, OBJ_TYPE_MAX>;
 
@@ -263,6 +264,8 @@ class EngineShard {
   const TypeMemDeltas& type_mem_delta() const {
     return type_mem_delta_;
   }
+
+  friend class GenericFamilyTest;
 
  private:
   struct DefragTaskState {

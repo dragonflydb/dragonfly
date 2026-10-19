@@ -6,6 +6,7 @@
 
 #include <absl/container/node_hash_map.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -62,7 +63,7 @@ class Namespaces {
   // Applies to all namespaces and becomes the default for namespaces created later.
   void SetExpiredEventsRecording(bool enable) ABSL_LOCKS_EXCLUDED(mu_);
 
-  template <typename F> void ForEach(F&& cb) const ABSL_LOCKS_EXCLUDED(mu_);
+  void ForEach(const std::function<void(Namespace&)>& cb) const ABSL_LOCKS_EXCLUDED(mu_);
 
  private:
   util::fb2::SharedMutex mu_{};
@@ -71,13 +72,5 @@ class Namespaces {
   // Kept apart from the raw flag, which briefly holds unvalidated input during CONFIG SET.
   bool expired_events_recording_default_ ABSL_GUARDED_BY(mu_) = false;
 };
-
-template <typename F>
-void Namespaces::ForEach(F&& cb) const {
-  dfly::SharedLock guard(mu_);
-  for (auto& entry : ABSL_TS_UNCHECKED_READ(namespaces_)) {
-    cb(entry.second);
-  }
-}
 
 }  // namespace dfly
