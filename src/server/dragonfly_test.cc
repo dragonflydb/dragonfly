@@ -7,6 +7,7 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_join.h>
@@ -22,7 +23,9 @@ extern "C" {
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "redis/redis_aux.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
+#include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/server_state.h"
 #include "server/test_utils.h"
@@ -51,6 +54,7 @@ using testing::ElementsAre;
 using testing::HasSubstr;
 using testing::Key;
 using testing::Pair;
+using testing::UnorderedElementsAre;
 
 namespace {
 
@@ -1205,6 +1209,140 @@ TEST_F(DflyEngineTest, ExpireInlineKeyAccounting) {
   EXPECT_EQ(stats.inline_keys, 0u);
   EXPECT_EQ(stats.expire_count, 0u);
   EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
+}
+
+namespace {
+
+// Records the journaled commands. The first DEL parks in ThrottleIfNeeded, i.e. after the record
+// has been appended but before control returns to the code that appended it.
+class ParkFirstDel : public journal::JournalConsumerInterface {
+ public:
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+    cmds_.emplace_back(item.cmd);
+    if (armed_ && item.cmd == "DEL") {
+      armed_ = false;
+      park_pending_ = true;
+    }
+  }
+
+  void ThrottleIfNeeded() override {
+    if (std::exchange(park_pending_, false)) {
+      parked.Notify();
+      release.Wait();  // A blocking wait that pauses the execution until the release is notified
+    }
+  }
+
+  // Call on the proactor that the consumer is registered on.
+  vector<string> cmds() const {
+    return cmds_;
+  }
+
+  // parked and release are used to coordinate the blocking and resuming of the first DEL command.
+  fb2::Done parked, release;
+
+ private:
+  bool armed_ = true;
+  bool park_pending_ = false;
+  vector<string> cmds_;
+};
+
+}  // namespace
+
+// NotifyPending's readiness checks may expire the watched keys. Expiry used to suspend in the
+// journal throttle in the middle of the iteration over the watch tables, and fibers that ran
+// meanwhile could erase the queues and the table being iterated (#8553). Here the blocked readers
+// finish while the first expiry is parked: had the iteration been suspended, they would time out
+// and free their watch queues under it. Now the checks run with journal flushing disabled: both
+// expiries are journaled and both readers are woken before the first throttle, and the keyspace
+// events are sent after the iteration.
+TEST_F(DflyEngineTest, NotifyPendingExpiresWithoutSuspending) {
+  string key2;
+  for (unsigned i = 0; key2.empty(); ++i) {
+    string candidate = StrCat("s", i);
+    if (candidate != kKeySid0 && Shard(candidate, shard_set->size()) == 0)
+      key2 = candidate;
+  }
+
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "Ex"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+  single_response_ = false;
+  ASSERT_THAT(pp_->at(3)->Await([&] {
+    return Run({"subscribe", "__keyevent@0__:expired"});
+  }),
+              ArrLen(3));
+  single_response_ = true;
+
+  for (string_view key : {string_view{kKeySid0}, string_view{key2}}) {
+    Run({"xadd", key, "*", "f", "v"});
+    Run({"xgroup", "create", key, "g", "$"});
+    Run({"pexpire", key, "10"});
+  }
+
+  // Block a consumer group reader on each stream, with a timeout so that it can give up while the
+  // expiry below is parked. The keys are locked by the blocked transactions, so the heartbeat will
+  // not expire them.
+  constexpr string_view kBlockMs = "5000";
+  RespExpr resp1, resp2;
+  auto reader1 = pp_->at(1)->LaunchFiber([&] {
+    resp1 = Run("reader1",
+                {"xreadgroup", "group", "g", "c", "block", kBlockMs, "streams", kKeySid0, ">"});
+  });
+  auto reader2 = pp_->at(2)->LaunchFiber([&] {
+    resp2 =
+        Run("reader2", {"xreadgroup", "group", "g", "c", "block", kBlockMs, "streams", key2, ">"});
+  });
+  // On an early failure, wait for the readers to time out instead of leaving them running.
+  absl::Cleanup join_readers = [&] {
+    reader1.JoinIfNeeded();
+    reader2.JoinIfNeeded();
+  };
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsConnBlocked("reader1") && IsConnBlocked("reader2"); }, 1s));
+
+  ParkFirstDel consumer;
+  const uint32_t consumer_id = StartJournalWithConsumer(&consumer, 0);
+  absl::Cleanup unregister = [&] {
+    pp_->at(0)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+
+  // Expire both streams and run the readiness checks, as the heartbeat does. The clock advances
+  // on the shard thread right before, so the heartbeat cannot interleave.
+  auto notify = pp_->at(0)->LaunchFiber([&] {
+    AdvanceTime(20);
+    auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(0);
+    bc->Awaken(0, kKeySid0);
+    bc->Awaken(0, key2);
+    bc->NotifyPending();
+  });
+  if (!consumer.parked.WaitFor(5s)) {
+    consumer.release.Notify();
+    notify.Join();
+    FAIL() << "the expiry never reached the journal";
+  }
+
+  // The first throttle came after both checks had expired their keys.
+  EXPECT_THAT(pp_->at(0)->Await([&] { return consumer.cmds(); }), ElementsAre("DEL", "DEL"));
+
+  // The readers finish while the expiry is still parked.
+  reader1.Join();
+  reader2.Join();
+
+  consumer.release.Notify();
+  notify.Join();
+
+  // A blocked XREADGROUP wakes on a deleted stream and reports the missing group.
+  EXPECT_THAT(resp1, ErrArg("NOGROUP"));
+  EXPECT_THAT(resp2, ErrArg("NOGROUP"));
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});  // flush pending publishes
+  ASSERT_EQ(2u, SubscriberMessagesLen("IO3"));
+  vector<string> expired = {string(GetPublishedMessage("IO3", 0).message),
+                            string(GetPublishedMessage("IO3", 1).message)};
+  EXPECT_THAT(expired, UnorderedElementsAre(kKeySid0, key2));
 }
 
 // AddListener picks the accept-loop proactor via the pool's shared round-robin, so listener

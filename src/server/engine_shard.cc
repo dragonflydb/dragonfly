@@ -873,7 +873,7 @@ void EngineShard::RetireExpiredAndEvict() {
   }
 
   // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
-  // section, because readiness checks read the db slice and may preempt.
+  // section, because NotifyPending may preempt before and after its readiness checks.
   if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
       bc && GetContTx() == nullptr) {
     bc->NotifyPending();

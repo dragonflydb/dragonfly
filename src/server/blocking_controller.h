@@ -48,7 +48,7 @@ class BlockingController {
   // Mark all watched keys in a specific db as awakened.
   void AwakenWatched(DbIndex db_index);
 
-  // Notify transactions of awakened keys
+  // Notify transactions of awakened keys. May suspend, but not while it iterates the watch tables.
   void NotifyPending();
 
   // Whether key's watch queue is reserved for tx, i.e. tx was woken while heading it and has not
@@ -62,6 +62,10 @@ class BlockingController {
  private:
   struct WatchQueue;
   struct DbWatchTable;
+
+  // Runs the readiness checks of the awakened keys. Must not suspend: called with journal flushing
+  // disabled, in an atomic section.
+  void NotifyPendingAtomic();
 
   void NotifyWatchQueue(std::string_view key, WatchQueue* wqm, const DbContext& context);
 
