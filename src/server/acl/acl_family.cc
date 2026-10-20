@@ -19,6 +19,7 @@
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/flags/commandlineflag.h"
+#include "absl/numeric/bits.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
@@ -468,11 +469,12 @@ void AclFamily::Cat(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
 
     const uint32_t cid_mask = cat_table_.find(category)->second;
-    std::vector<std::string_view> results;
+    std::vector<std::string> results;
     // TODO replace this with indexer
     auto cb = [cid_mask, &results](auto name, auto& cid) {
       if (cid_mask & cid.acl_categories()) {
-        results.push_back(name);
+        std::string& rule = results.emplace_back(name);
+        std::replace(rule.begin(), rule.end(), ' ', '|');  // the form rules use
       }
     };
 
@@ -637,7 +639,8 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  auto msg = absl::StrCat("This user has no permissions to run the '", cid->name(), "' command");
+  auto msg = absl::StrCat("This user has no permissions to run the '",
+                          cid->AclTarget(simulated_args).first, "' command");
 
   rb->SendBulkString(msg);
 }
@@ -690,13 +693,10 @@ std::string AclFamily::AclCommandToString(size_t family, uint64_t mask, User::Si
     return res;
   }
 
-  size_t pos = 0;
-  while (mask != 0) {
-    ++pos;
-    mask = mask >> 1;
-  }
-  --pos;
-  absl::StrAppend(&res, prefix, absl::AsciiStrToLower(rev_index[family][pos]));
+  // A +name rule also sets the bits of name's ACL-only subcommands, registered after name.
+  std::string name = absl::AsciiStrToLower(rev_index[family][absl::countr_zero(mask)]);
+  std::replace(name.begin(), name.end(), ' ', '|');  // one token in the ACL file
+  absl::StrAppend(&res, prefix, name);
   return res;
 }
 
@@ -1066,21 +1066,28 @@ std::optional<std::string> AclFamily::MaybeParseNamespace(std::string_view comma
 
 std::pair<AclFamily::OptCommand, bool> AclFamily::MaybeParseAclCommand(
     std::string_view command) const {
+  // "cmd|sub" names a subcommand, the form ACL SAVE writes.
+  auto find = [this](std::string_view rule) {
+    std::string name{rule.substr(1)};
+    std::replace(name.begin(), name.end(), '|', ' ');
+    return cmd_registry_->Find(name);
+  };
+
   if (absl::StartsWith(command, "+")) {
-    auto res = cmd_registry_->Find(command.substr(1));
+    auto res = find(command);
     if (!res || res->IsAlias()) {
       return {};
     }
-    std::pair<size_t, uint64_t> cmd{res->GetFamily(), res->GetBitIndex()};
+    std::pair<size_t, uint64_t> cmd{res->GetFamily(), res->AclRuleMask()};
     return {cmd, true};
   }
 
   if (absl::StartsWith(command, "-")) {
-    auto res = cmd_registry_->Find(command.substr(1));
+    auto res = find(command);
     if (!res || res->IsAlias()) {
       return {};
     }
-    std::pair<size_t, uint64_t> cmd{res->GetFamily(), res->GetBitIndex()};
+    std::pair<size_t, uint64_t> cmd{res->GetFamily(), res->AclRuleMask()};
     return {cmd, false};
   }
 

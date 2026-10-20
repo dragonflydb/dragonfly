@@ -2908,7 +2908,7 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
     // One entry per requested name; an unknown name gets a null entry.
     rb->StartArray(names.size());
     for (const string& name : names) {
-      if (const auto* cid = registry_.Find(name); cid) {
+      if (const auto* cid = registry_.Find(name); cid && !cid->IsAclOnly()) {
         serialize_command(name, *cid);
       } else {
         rb->SendNull();

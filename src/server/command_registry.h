@@ -273,7 +273,20 @@ class CommandId : public facade::CommandId {
     return kind_mask_ & SUPPORT_ASYNC;
   }
 
+  // A handler-less "NAME SUB" entry: only SUB's ACL bit and categories, NAME runs it.
+  bool IsAclOnly() const {
+    return kind_mask_ & ACL_ONLY;
+  }
+
+  // Name and ACL bit to check: the ACL-only subcommand tail_args starts with, else own.
+  std::pair<std::string_view, uint64_t> AclTarget(const facade::ParsedArgs& tail_args) const;
+
+  // Bits that a +name/-name rule sets: this command's and its ACL-only subcommands'.
+  uint64_t AclRuleMask() const;
+
  private:
+  friend class CommandRegistry;
+
   // Engine-derived command identity and attributes, computed once in the constructor from the
   // command name and opt_mask, and stored in kind_mask_ so that hot-path queries are single bit
   // tests instead of string comparisons. This is an internal detail of CommandId, distinct from
@@ -312,6 +325,8 @@ class CommandId : public facade::CommandId {
     FIXED_SINGLE_KEY = 1U << 15,  // last bit of the low uint16_t half of kind_mask_.
 
     RESET = 1U << 16,  // RESET only
+
+    ACL_ONLY = 1U << 17,  // see IsAclOnly()
   };
 
   // CmdKind bits. Trivially copied by the move ctor.
@@ -326,6 +341,7 @@ class CommandId : public facade::CommandId {
   Handler handler_;
   ArgValidator validator_;
   MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
+  std::vector<std::pair<std::string, uint64_t>> acl_subcommands_;  // full name and ACL bit
 };
 
 class CommandRegistry {

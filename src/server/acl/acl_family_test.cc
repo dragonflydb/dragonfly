@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_replace.h>
 
 #include <filesystem>
 
@@ -329,20 +330,22 @@ TEST_F(AclFamilyTest, TestAllCommands) {
       // argument via the list form; the plain-string Run() overload naively splits on spaces.
       auto resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("+", command_name)});
       EXPECT_THAT(resp, "OK");
+      const std::string printed =
+          absl::StrReplaceAll(absl::AsciiStrToLower(command_name), {{" ", "|"}});
 
       resp = Run("ACL LIST");
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass ~* &* +@all $all",
-                                       absl::StrCat("user kostas off resetchannels -@all ", "+",
-                                                    absl::AsciiStrToLower(command_name), " $all")));
+                  UnorderedElementsAre(
+                      "user default on nopass ~* &* +@all $all",
+                      absl::StrCat("user kostas off resetchannels -@all ", "+", printed, " $all")));
 
       resp = Run({"ACL", "SETUSER", "kostas", absl::StrCat("-", command_name)});
 
       resp = Run("ACL LIST");
       EXPECT_THAT(resp.GetVec(),
-                  UnorderedElementsAre("user default on nopass ~* &* +@all $all",
-                                       absl::StrCat("user kostas off resetchannels -@all ", "-",
-                                                    absl::AsciiStrToLower(command_name), " $all")));
+                  UnorderedElementsAre(
+                      "user default on nopass ~* &* +@all $all",
+                      absl::StrCat("user kostas off resetchannels -@all ", "-", printed, " $all")));
 
       resp = Run("ACL DELUSER kostas");
       EXPECT_THAT(resp, IntArg(1));
@@ -504,6 +507,70 @@ TEST_F(AclFamilyTest, KeyAfterSubcommandIsChecked) {
   EXPECT_EQ(Run("ACL SETUSER writer ON >p %W~public:* +@all"), "OK");
   EXPECT_EQ(Run("ACL DRYRUN writer XINFO STREAM public:k"),
             "This user has no permissions to run the 'XINFO' command");
+}
+
+TEST_F(AclFamilyTest, RmRequiresWriteAccessToAllKeys) {
+  TestInitAclFam();
+
+  const std::string denied = "This user has no permissions to run the 'RM' command";
+  EXPECT_EQ(Run("ACL SETUSER tenant ON >p ~public:* +@all"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN tenant RM 0 MATCH public:*"), denied);
+  EXPECT_EQ(Run("ACL SETUSER reader ON >p %R~* +@all"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN reader RM 0"), denied);
+  EXPECT_EQ(Run("ACL SETUSER writer ON >p %W~* +@all"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN writer RM 0"), "OK");
+  EXPECT_EQ(Run("ACL SETUSER read-write ON >p %RW~* +@all"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN read-write RM 0"), "OK");
+  EXPECT_EQ(Run("ACL SETUSER any ON >p ~* +@all"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN any RM 0"), "OK");
+}
+
+TEST_F(AclFamilyTest, AdminSubcommandsHaveOwnCategories) {
+  TestInitAclFam();
+
+  auto denied = [](std::string_view cmd) {
+    std::string name{cmd.substr(0, cmd.find(' ', cmd.find(' ') + 1))};
+    return absl::StrCat("This user has no permissions to run the '", absl::AsciiStrToUpper(name),
+                        "' command");
+  };
+  EXPECT_EQ(Run("ACL SETUSER non-admin ON >p ~* +@all -@admin -@dangerous"), "OK");
+  EXPECT_EQ(Run("ACL SETUSER reader ON >p ~* +@read"), "OK");
+  EXPECT_EQ(Run("ACL SETUSER admin ON >p ~* -@all +@admin"), "OK");
+  EXPECT_EQ(Run("ACL SETUSER dangerous ON >p ~* -@all +@dangerous"), "OK");
+  for (std::string_view cmd :
+       {"client kill ID 1", "CLIENT LIST", "CLIENT PAUSE 10", "CLIENT UNPAUSE",
+        "CLIENT MIGRATE 1 1", "MEMORY ARENA", "MEMORY DECOMMIT", "MEMORY DEFRAGMENT",
+        "MEMORY DEFRAGMENT-SEGMENTS", "MEMORY TRACK GET"}) {
+    EXPECT_EQ(Run(absl::StrCat("ACL DRYRUN non-admin ", cmd)), denied(cmd));
+    EXPECT_EQ(Run(absl::StrCat("ACL DRYRUN reader ", cmd)), denied(cmd));
+    EXPECT_EQ(Run(absl::StrCat("ACL DRYRUN admin ", cmd)), "OK") << cmd;
+    EXPECT_EQ(Run(absl::StrCat("ACL DRYRUN dangerous ", cmd)), "OK") << cmd;
+  }
+
+  for (std::string_view cmd :
+       {"client SETNAME x", "CLIENT ID", "CLIENT SETINFO LIB-NAME x", "CLIENT TRACKING ON"}) {
+    EXPECT_EQ(Run(absl::StrCat("ACL DRYRUN non-admin ", cmd)), "OK") << cmd;
+  }
+  for (std::string_view cmd : {"memory USAGE k", "MEMORY STATS", "MEMORY MALLOC-STATS", "MEMORY"}) {
+    EXPECT_EQ(Run(absl::StrCat("ACL DRYRUN reader ", cmd)), "OK") << cmd;
+  }
+
+  // A rule naming the command still covers all of its subcommands.
+  EXPECT_EQ(Run("ACL SETUSER only-client ON >p -@all +client"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN only-client CLIENT KILL ID 1"), "OK");
+  EXPECT_EQ(Run("ACL SETUSER only-client -client|kill"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN only-client CLIENT KILL ID 1"), denied("CLIENT KILL"));
+  EXPECT_EQ(Run("ACL DRYRUN only-client CLIENT LIST"), "OK");
+  EXPECT_EQ(Run("ACL GETUSER only-client").GetVec()[5], "-@all +client -client|kill");
+  EXPECT_EQ(Run("ACL SETUSER no-client ON >p +@all -client"), "OK");
+  EXPECT_EQ(Run("ACL DRYRUN no-client CLIENT KILL ID 1"), denied("CLIENT KILL"));
+
+  EXPECT_THAT(Run("ACL CAT admin").GetVec(), IsSupersetOf({"CLIENT|KILL", "MEMORY|DEFRAGMENT"}));
+
+  // An ACL-only entry is not a command.
+  EXPECT_THAT(Run({"CLIENT KILL"}), ErrArg("unknown command"));
+  EXPECT_THAT(Run({"COMMAND", "INFO", "CLIENT KILL"}),
+              RespArray(ElementsAre(ArgType(RespExpr::NIL))));
 }
 
 TEST_F(AclFamilyTest, DelexIsKeyspaceCategory) {
@@ -1016,6 +1083,25 @@ TEST_F(AclFamilyTest, AclLoadMinimalUserRule) {
   auto vec = resp.GetVec();
   EXPECT_THAT(vec, UnorderedElementsAre("user default off resetchannels -@all $all",
                                         "user worker on nopass ~* &* +@all $all"));
+
+  std::filesystem::remove(path);
+}
+
+TEST_F(AclFamilyTest, AclSaveLoadKeepsSubcommandRules) {
+  TestInitAclFam();
+  std::string path =
+      (std::filesystem::temp_directory_path() / "dfly_subcommand_rules.acl").string();
+  absl::SetFlag(&FLAGS_aclfile, path);
+
+  EXPECT_EQ(Run("ACL SETUSER u ON nopass -@all +acl|whoami +client"), "OK");
+  EXPECT_EQ(Run({"ACL", "SETUSER", "u", "-client kill"}), "OK");
+  const std::string rules =
+      "user u on nopass resetchannels -@all +acl|whoami +client -client|kill $all";
+  EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules));
+
+  EXPECT_EQ(Run("ACL SAVE"), "OK");
+  EXPECT_EQ(Run("ACL LOAD"), "OK");
+  EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules));
 
   std::filesystem::remove(path);
 }
