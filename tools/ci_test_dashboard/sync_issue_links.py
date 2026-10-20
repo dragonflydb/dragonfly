@@ -162,6 +162,8 @@ def aliases_for_test(test: dict[str, Any]) -> list[tuple[str, str]]:
 
 def match_aliases(aliases: list[tuple[str, str]], text: str) -> str | None:
     for alias, match in aliases:
+        if alias not in text:
+            continue
         right_boundary = r"(?![\w]|\[|/)" if match == "parameterized" else r"(?![\w])"
         if match == "parameterized" and re.search(rf"{re.escape(alias)}(?:\[[^]]*\]|/)", text):
             continue
@@ -169,7 +171,7 @@ def match_aliases(aliases: list[tuple[str, str]], text: str) -> str | None:
             match == "parameterized" and "::" not in alias and "/" not in alias
         )
         left_boundary = r"(?<![\w.:/])" if bare_name else r"(?<![\w])"
-        if alias in text and re.search(rf"{left_boundary}{re.escape(alias)}{right_boundary}", text):
+        if re.search(rf"{left_boundary}{re.escape(alias)}{right_boundary}", text):
             return match
     return None
 
