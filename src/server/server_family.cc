@@ -87,7 +87,6 @@ extern "C" {
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
-#include "util/aws/aws.h"
 
 namespace rng = std::ranges;
 
@@ -151,10 +150,8 @@ ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
 // to load the credentials.
 ABSL_FLAG(bool, s3_ec2_metadata, false,
           "whether to load credentials and configuration from EC2 metadata");
-// Enables S3 payload signing over HTTP. This reduces the latency and resource
-// usage when writing snapshots to S3, at the expense of security.
-ABSL_FLAG(bool, s3_sign_payload, true,
-          "whether to sign the s3 request payload when uploading snapshots");
+ABSL_RETIRED_FLAG(bool, s3_sign_payload, true,
+                  "Deprecated: S3 snapshot uploads always use an unsigned payload.");
 
 ABSL_FLAG(bool, info_replication_valkey_compatible, true,
           "when true - output valkey compatible values for info-replication");
@@ -311,9 +308,9 @@ string UnknownCmd(string cmd, facade::ParsedArgs args) {
 
 std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
   if (detail::IsS3Path(uri)) {
-    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(
-        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
-        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
+    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(absl::GetFlag(FLAGS_s3_endpoint),
+                                                              absl::GetFlag(FLAGS_s3_use_https),
+                                                              absl::GetFlag(FLAGS_s3_ec2_metadata));
     auto ec = shard_set->pool()->GetNextProactor()->Await(
         [&] { return aws->Init(detail::kBucketConnectMs); });
     if (ec) {

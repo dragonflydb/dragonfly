@@ -686,12 +686,11 @@ error_code AzureSnapshotStorage::CheckPath(const std::string& path) {
 }
 
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool https,
-                                           bool ec2_metadata, bool sign_payload)
+                                           bool ec2_metadata)
     : creds_provider_({}, endpoint), https_(https) {
   if (!ec2_metadata) {
     setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
   }
-  (void)sign_payload;  // Uploads in cloud::aws always use UNSIGNED-PAYLOAD.
   LOG(INFO) << "Creating AWS S3 client; https=" << std::boolalpha << https
             << "; endpoint=" << endpoint;
 }

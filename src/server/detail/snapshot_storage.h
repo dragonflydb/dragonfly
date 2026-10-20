@@ -164,8 +164,7 @@ class AzureSnapshotStorage : public SnapshotStorage {
 
 class AwsS3SnapshotStorage : public SnapshotStorage {
  public:
-  AwsS3SnapshotStorage(const std::string& endpoint, bool https, bool ec2_metadata,
-                       bool sign_payload);
+  AwsS3SnapshotStorage(const std::string& endpoint, bool https, bool ec2_metadata);
   ~AwsS3SnapshotStorage();
 
   std::error_code Init(unsigned connect_ms);
