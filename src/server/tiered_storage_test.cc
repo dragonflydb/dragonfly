@@ -9,6 +9,8 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <algorithm>
+
 #include "absl/flags/internal/flag.h"
 #include "absl/flags/reflection.h"
 #include "base/flags.h"
@@ -17,6 +19,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
+#include "server/server_state.h"
 #ifdef WITH_SEARCH
 #include "server/search/doc_index.h"
 #endif
@@ -84,6 +87,21 @@ class TieredStorageTest : public BaseFamilyTest {
 
   void UpdateFromFlags() {
     pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+  }
+
+  // Keep offloaded values on disk, including when reads run on multiple shards.
+  void DisableUploads() {
+    SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
+    shard_set->RunBriefInParallel(
+        [](EngineShard* shard) { shard->tiered_storage()->UpdateFromFlags(); });
+    // Wait for every shard's heartbeat to refresh its memory statistics.
+    ExpectConditionWithinTimeout([] {
+      vector<int64_t> budgets(shard_set->size());
+      shard_set->RunBriefInParallel([&](EngineShard* shard) {
+        budgets[shard->shard_id()] = shard->tiered_storage()->UploadBudget();
+      });
+      return all_of(budgets.begin(), budgets.end(), [](int64_t budget) { return budget < 0; });
+    });
   }
 
   // A single huge PFADD stays sparse and too small to offload; batch to force dense.
@@ -2370,5 +2388,75 @@ TEST_P(IndexedHashTieringTest, BorrowedHnswVectorsStayResident) {
 }
 
 #endif  // WITH_SEARCH
+
+// MGET runs optimistically and when cancelled reruns its shard callback while tiered reads of the
+// previous attempt may still be in flight. These orphaned reads must not write into the response
+// buffer, which the new attempt reuses or reallocates.
+TEST_F(PureDiskTSMTTest, MGetRescheduleWithPendingReads) {
+  DisableUploads();
+
+  const auto sz = shard_set->size();
+  // big - tiered, read from disk
+  // pad - keep flipping size, always allocated before big in the resp storage
+  // hot - on another shard concurrent write so that MGET's optimistic run there is cancelled.
+  // other - makes the writers of hot multi-shard and prevent inlining
+  const string big = "big", hot = "hot", other = "y";
+  string pad;
+  unsigned i = 0;
+  do {
+    pad = absl::StrCat("pad", i++);
+  } while (Shard(pad, sz) != Shard(big, sz));
+
+  ASSERT_NE(Shard(big, sz), Shard(hot, sz));
+  ASSERT_NE(Shard(other, sz), Shard(big, sz));
+  ASSERT_NE(Shard(other, sz), Shard(hot, sz));
+
+  const string value(8_KB, 'x');
+  const string small_pad(16, 'a'), large_pad(48, 'b');
+
+  Run({"SET", big, value});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+  Run({"SET", hot, "v"});
+  Run({"SET", pad, small_pad});
+
+  atomic_bool done{false};
+  vector<Fiber> writers;
+  for (size_t i = 0; i < 4; i++) {
+    writers.push_back(pp_->at(i)->LaunchFiber([&] {
+      // contends with mget hot
+      while (!done.load(memory_order_relaxed))
+        Run({"MSET", hot, "v", other, "v"});
+    }));
+  }
+  writers.push_back(pp_->at(4)->LaunchFiber([&] {
+    // keep changing the size of pad, so that on retries the location for big also changes (next to
+    // pad)
+    for (unsigned i = 0; !done.load(memory_order_relaxed); ++i)
+      Run({"SET", pad, i % 2 ? small_pad : large_pad});
+  }));
+
+  // Run MGETs until enough of them were rescheduled. The counter is incremented on the coordinator
+  // thread, so reading it on the MGET thread counts only the MGET cancellations.
+  constexpr uint64_t kMinCancels = 50;
+  const auto deadline = absl::Now() + absl::Seconds(30);
+  uint64_t cancels = 0;
+  pp_->at(pp_->size() - 1)->Await([&] {
+    const auto& stats = ServerState::tlocal()->stats;
+    const auto base = stats.tx_schedule_cancel_cnt;
+    while (cancels < kMinCancels && absl::Now() < deadline) {
+      // if our attempt comparison is broken we would get mixed bytes here due to overwriting the
+      // buffer
+      EXPECT_THAT(Run({"MGET", pad, big, hot}),
+                  RespElementsAre(AnyOf(small_pad, large_pad), value, "v"));
+      cancels = stats.tx_schedule_cancel_cnt - base;
+    }
+  });
+
+  done = true;
+  for (auto& fb : writers)
+    fb.Join();
+
+  EXPECT_GE(cancels, kMinCancels);
+}
 
 }  // namespace dfly
