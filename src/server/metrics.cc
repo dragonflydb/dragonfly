@@ -708,6 +708,19 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricValue("tiered_scan_usec", m.tiered_stats.total_repack_usec, {"type"}, {"repack"},
                       &resp->body());
 
+    AppendMetricWithoutLabels("tiered_max_shard_file_utilization",
+                              "Highest per-shard ratio of allocated bytes to the max file size",
+                              m.tiered_stats.max_shard_file_utilization, MetricType::GAUGE,
+                              &resp->body());
+
+    // Background offloading scan activity
+    AppendMetricHeader("tiered_offloading", "Background offloading scan activity",
+                       MetricType::COUNTER, &resp->body());
+    AppendMetricValue("tiered_offloading", m.tiered_stats.total_offloading_runs, {"type"}, {"runs"},
+                      &resp->body());
+    AppendMetricValue("tiered_offloading", m.tiered_stats.total_offloading_visited, {"type"},
+                      {"visited"}, &resp->body());
+
     // Hits: ram, cool, missed
     AppendMetricHeader("tiered_hits", "Tiered hits", MetricType::COUNTER, &resp->body());
     AppendMetricValue("tiered_hits", m.events.ram_hits, {"type"}, {"ram"}, &resp->body());
@@ -721,6 +734,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                       {"client throttling"}, &resp->body());
     AppendMetricValue("tiered_overload", m.tiered_stats.total_stash_overflows, {"type"},
                       {"stash overflows"}, &resp->body());
+    AppendMetricValue("tiered_overload", m.tiered_stats.total_failed_grows, {"type"},
+                      {"failed grows"}, &resp->body());
 
     AppendMetricWithoutLabels("tiered_clients_throttled", "Currently throttled clients",
                               m.tiered_stats.clients_throttled, MetricType::GAUGE, &resp->body());

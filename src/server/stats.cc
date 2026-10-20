@@ -12,7 +12,7 @@ namespace dfly {
 #define UMAX(x) (x) = std::max((x), o.x)
 
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 232);
+  static_assert(sizeof(TieredStats) == 256);
 
   ADD(total_stashes);
   ADD(total_fetches);
@@ -43,8 +43,12 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
   ADD(total_defrag_usec);
   ADD(total_repack_usec);
   ADD(total_offloading_stashes);
+  ADD(total_offloading_runs);
+  ADD(total_offloading_visited);
+  ADD(total_failed_grows);
   ADD(total_repacks);
   UMAX(estimated_bin_bucket_fragmentation);
+  UMAX(max_shard_file_utilization);
 
   ADD(clients_throttled);
   ADD(total_clients_throttled);

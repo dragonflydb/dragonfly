@@ -31,6 +31,7 @@ class DiskStorage {
     size_t pending_ops = 0;
     size_t pending_stash_bytes = 0;
     size_t pending_read_bytes = 0;  // Real volume of in-flight read bytes to disk
+    uint64_t grow_failures = 0;     // Grow requests rejected by max size or failed fallocate
   };
 
   using ReadCb = std::function<void(io::Result<std::string_view>)>;
@@ -73,6 +74,8 @@ class DiskStorage {
 
   // how many times we allocate registered/heap buffers.
   uint64_t heap_buf_alloc_cnt_ = 0, reg_buf_alloc_cnt_ = 0;
+
+  uint64_t grow_failures_ = 0;
 
   struct {
     bool pending = false;  // currently in progress

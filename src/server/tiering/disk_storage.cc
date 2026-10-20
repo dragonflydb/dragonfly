@@ -232,9 +232,15 @@ void DiskStorage::Stash(DiskSegment segment, RegisteredSlice buf, StashCb cb) {
 }
 
 DiskStorage::Stats DiskStorage::GetStats() const {
-  return {
-      alloc_.allocated_bytes(),       alloc_.capacity(), heap_buf_alloc_cnt_,  reg_buf_alloc_cnt_,
-      static_cast<size_t>(max_size_), pending_ops_,      pending_stash_bytes_, pending_read_bytes_};
+  return {alloc_.allocated_bytes(),
+          alloc_.capacity(),
+          heap_buf_alloc_cnt_,
+          reg_buf_alloc_cnt_,
+          static_cast<size_t>(max_size_),
+          pending_ops_,
+          pending_stash_bytes_,
+          pending_read_bytes_,
+          grow_failures_};
 }
 
 error_code DiskStorage::RequestGrow(off_t min_size) {
@@ -254,8 +260,10 @@ error_code DiskStorage::RequestGrow(off_t min_size) {
   VLOG(1) << "Requesting grow by " << grow_size << " current capacity: " << alloc_.capacity();
 
   DCHECK_EQ(grow_size % ExternalAllocator::kExtAlignment, 0u);
-  if (alloc_.capacity() + grow_size >= static_cast<size_t>(max_size_))
+  if (alloc_.capacity() + grow_size >= static_cast<size_t>(max_size_)) {
+    ++grow_failures_;
     return make_error_code(errc::file_too_large);
+  }
 
   // Don't try again immediately, most likely it won't succeed ever.
   const uint64_t kCooldownCycles = base::CycleClock::FromUsec(100'000);  // 100ms
@@ -273,7 +281,9 @@ error_code DiskStorage::RequestGrow(off_t min_size) {
     grow_.pending = false;
     grow_.last_err = ec;
     grow_.timestamp_cycles = base::CycleClock::Now();
-    if (!ec)
+    if (ec)
+      ++grow_failures_;
+    else
       alloc_.AddStorage(end, grow_size);
   });
 

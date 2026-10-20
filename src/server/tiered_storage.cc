@@ -558,13 +558,14 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
   DCHECK_GT(est_size, 0u);
 
   tiering::OpManager::PendingId id;
+  std::optional<tiering::SmallBins::FilledBin> bin;
   error_code ec;
 
   if (OccupiesWholePages(est_size)) {  // large enough for own page
     id = KeyRef(dbid, key);
     auto serialize = absl::bind_front(&StashDescriptor::Serialize, &blobs);
     ec = op_manager_->PrepareAndStash(id, est_size, serialize);
-  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(blobs)); bin) {
+  } else if (bin = bins_->Stash(dbid, key, SerializeToString(blobs)); bin) {
     id = bin->id;
     auto serialize = absl::bind_front(&tiering::SmallBins::SerializeBin, bins_.get(), &*bin);
     ec = op_manager_->PrepareAndStash(id, 4_KB, serialize);
@@ -579,7 +580,13 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
     bool to_log = ec != errc::file_too_large && ec != errc::operation_would_block &&
                   ec != errc::operation_in_progress;
     LOG_IF(ERROR, to_log) << "Stash failed: " << ec.message();
-    visit([this](auto id) { op_manager_->ClearStashPending(id); }, id);
+    if (bin) {
+      // The bin was never serialized, so SmallBins doesn't track it as pending.
+      for (const auto& bin_key : bins_->ReportStashFailed(std::move(*bin)))
+        op_manager_->ClearStashPending(bin_key);
+    } else {
+      visit([this](auto id) { op_manager_->ClearStashPending(id); }, id);
+    }
     return;
   }
 
@@ -641,6 +648,11 @@ TieredStats TieredStorage::GetStats() const {
     stats.pending_stash_bytes = op_stats.disk_stats.pending_stash_bytes;
     stats.total_heap_buf_allocs = op_stats.disk_stats.heap_buf_alloc_count;
     stats.total_registered_buf_allocs = op_stats.disk_stats.registered_buf_alloc_count;
+    stats.total_failed_grows = op_stats.disk_stats.grow_failures;
+    if (op_stats.disk_stats.max_file_size > 0) {
+      stats.max_shard_file_utilization =
+          float(op_stats.disk_stats.allocated_bytes) / op_stats.disk_stats.max_file_size;
+    }
   }
 
   {  // SmallBins stats
@@ -660,6 +672,8 @@ TieredStats TieredStorage::GetStats() const {
     stats.total_defrag_usec = stats_.defrag_usec;
     stats.total_repack_usec = stats_.repack_usec;
     stats.total_offloading_stashes = stats_.offloading_stashes;
+    stats.total_offloading_runs = stats_.offloading_runs;
+    stats.total_offloading_visited = stats_.offloading_visited;
     stats.total_repacks = stats_.total_repacks;
     stats.estimated_bin_bucket_fragmentation = stats_.estimated_bin_bucket_fragmentation;
     stats.clients_throttled = stash_backpressure_.size();
@@ -752,6 +766,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   string tmp;
   auto cb = [this, dbid, &tmp](PrimeIterator it) mutable {
+    stats_.offloading_visited++;
     auto blobs = ShouldStash(it->second, StashContext{.key_expire_ms = it->first.GetExpireTime()});
     if (blobs) {
       if (it->second.WasTouched()) {
@@ -766,6 +781,7 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
 
   PrimeTable& table = op_manager_->db_slice_.GetDBTable(dbid)->prime;
 
+  stats_.offloading_runs++;
   const auto start_cycles = base::CycleClock::Now();
 
   // Loop over entry with time and max stash budget.

@@ -30,6 +30,7 @@ ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
 ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_file_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
@@ -860,6 +861,67 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   // finished even after all the fibers joined, so expect the condition with a timeout
   ExpectConditionWithinTimeout(
       [&] { return GetMetrics().tiered_stats.total_stashes == fibs.size(); });
+}
+
+// Backing file can't grow beyond its initial 256MB size
+class FullDiskTSTest : public TieredStorageTest {
+ protected:
+  void SetUp() override {
+    fs.emplace();
+    SetFlag(&FLAGS_tiered_offload_threshold, 1.0);
+    SetFlag(&FLAGS_tiered_experimental_cooling, false);
+    SetFlag(&FLAGS_tiered_max_file_size, strings::MemoryBytesFlag{300_MB});
+    TieredStorageTest::SetUp();
+  }
+
+  optional<absl::FlagSaver> fs;
+};
+
+// Small bins that fail to stash because the disk is full must release their entries,
+// so they can be offloaded again once space is available.
+TEST_F(FullDiskTSTest, SmallBinStashFailure) {
+  const string big_value = BuildString(4_MB);
+  int num_big = 0;
+  while (GetMetrics().tiered_stats.total_failed_grows == 0) {
+    ASSERT_LT(num_big, 100) << "disk never filled up";
+    Run({"SET", absl::StrCat("big", num_big++), big_value});
+  }
+
+  const int kNumSmall = 500;
+  const string small_value = BuildString(100);
+  const uint64_t cancels_before = GetMetrics().tiered_stats.total_cancels;
+  for (int i = 0; i < kNumSmall; i++)
+    Run({"SET", absl::StrCat("small", i), small_value});
+
+  auto metrics = GetMetrics();
+  EXPECT_GT(metrics.tiered_stats.total_cancels, cancels_before);
+
+  // Free disk space and wait for background offloading to stash the small values.
+  for (int i = 0; i < num_big; i++)
+    Run({"DEL", absl::StrCat("big", i)});
+
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().tiered_stats.small_bins_entries_cnt >= kNumSmall - 50; });
+
+  metrics = GetMetrics();
+  EXPECT_GT(metrics.tiered_stats.total_offloading_runs, 0u);
+  EXPECT_GT(metrics.tiered_stats.total_offloading_visited, 0u);
+}
+
+TEST_F(FullDiskTSTest, FileUtilization) {
+  const string value = BuildString(64_KB);
+  for (int i = 0; GetMetrics().tiered_stats.total_failed_grows == 0; i++) {
+    ASSERT_LT(i, 10000) << "disk never filled up";
+    Run({"SET", absl::StrCat("k", i), value});
+  }
+
+  // The 256MB file can't grow within the 300MB limit, so it's mostly full.
+  EXPECT_GT(GetMetrics().tiered_stats.max_shard_file_utilization, 0.6);
+
+  string shards = Run({"DEBUG", "SHARDS"}).GetString();
+  EXPECT_THAT(shards, HasSubstr("shard0_tiered_entries: "));
+  EXPECT_THAT(shards, HasSubstr("max_tiered_used_bytes: "));
+  EXPECT_THAT(shards, Not(HasSubstr("max_tiered_used_bytes: 0\n")));
 }
 
 TEST_F(TieredStorageTest, Expiry) {

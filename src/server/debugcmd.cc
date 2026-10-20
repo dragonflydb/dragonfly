@@ -1414,6 +1414,8 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
     uint64_t expire_count = 0;
     uint64_t key_reads = 0;
     size_t avg_object_size = 0;
+    uint64_t tiered_entries = 0;
+    uint64_t tiered_used_bytes = 0;
   };
 
   vector<ShardInfo> infos(shard_set->size());
@@ -1428,6 +1430,8 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
       stats.key_count += db_stats.key_count;
       stats.prime_capacity += db_stats.prime_capacity;
       stats.expire_count += db_stats.expire_count;
+      stats.tiered_entries += db_stats.tiered_entries;
+      stats.tiered_used_bytes += db_stats.tiered_used_bytes;
     }
     stats.avg_object_size = db_slice.bytes_per_object();
     stats.key_reads = slice_stats.events.hits + slice_stats.events.misses;
@@ -1459,12 +1463,16 @@ void DebugCmd::Shards(CommandContext* cmd_cntx) {
                     "_prime_utilization: ", double(infos[i].key_count) / infos[i].prime_capacity,
                     "\n");
     absl::StrAppend(&out, "shard", i, "_avg_object_size: ", infos[i].avg_object_size, "\n");
+    ADD_STAT(i, tiered_entries);
+    ADD_STAT(i, tiered_used_bytes);
   }
 
   MAXMIN_STAT(used_memory);
   MAXMIN_STAT(key_count);
   MAXMIN_STAT(expire_count);
   MAXMIN_STAT(key_reads);
+  MAXMIN_STAT(tiered_entries);
+  MAXMIN_STAT(tiered_used_bytes);
 
 #undef ADD_STAT
 #undef MAXMIN_STAT
