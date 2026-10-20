@@ -227,17 +227,10 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   return true;
 }
 
-// The algorithm is to go over all the buckets and serialize those with
-// version < snapshot_version_. In order to serialize each physical bucket exactly once we update
-// bucket version to snapshot_version_ once it has been serialized.
-// We handle serialization at physical bucket granularity.
-// To further complicate things, Table::Traverse covers a logical bucket that may comprise of
-// several physical buckets in dash table. For example, items belonging to logical bucket 0
-// can reside in buckets 0,1 and stash buckets 56-59.
-// PrimeTable::Traverse guarantees an atomic traversal of a single logical bucket,
-// it also guarantees 100% coverage of all items that exists when the traversal started
-// and survived until it finished.
-bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
+// Serializes every physical bucket with version < snapshot_version_ exactly once, stamping it with
+// snapshot_version_ afterwards. Empty buckets are stamped too, as journal omits rely on it.
+// TraverseBuckets is stable under table mutations and covers all items that existed at the start.
+bool SerializerBase::TraverseAllBuckets() {
   // Covers cancellation exits; on the normal path the entries were already drained.
   absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
 
@@ -262,10 +255,10 @@ bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
             if (!base_cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
               return;
 
-            OnTraverseBucket();
+            OnTraverseBucket(it);
             ProcessBucket(db_index, it, false);
           },
-          visit_empty);
+          true /* visit empty buckets */);
 
       PaceTraversal(!cursor);
 
