@@ -39,6 +39,8 @@ ABSL_DECLARE_FLAG(uint32_t, lua_max_stall_ms);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 ABSL_DECLARE_FLAG(bool, latency_tracking);
+ABSL_DECLARE_FLAG(bool, enable_heartbeat_eviction);
+ABSL_DECLARE_FLAG(double, table_growth_margin);
 
 namespace dfly {
 
@@ -643,6 +645,49 @@ TEST_F(DflyEngineTest, ZeroAllocationEviction) {
   // Should have evicted some entries with zero-allocation values
   // but not external (disk storage) entries
   EXPECT_GT(evicted_count, 0) << "Zero-allocation entries should be evicted under memory pressure";
+}
+
+// In a full table each new key evicts the tail of the stash bucket chosen by its hash. A command
+// must not evict its own keys: the eviction journals a DEL before the MSET itself, so the replica
+// would keep the key.
+TEST_F(SingleThreadDflyEngineTest, MSetDoesNotEvictItsOwnKeys) {
+  absl::FlagSaver fs;
+  SetFlag(&FLAGS_enable_heartbeat_eviction, false);
+  SetFlag(&FLAGS_table_growth_margin, 1e9);  // the table can not grow
+  shard_set->TEST_EnableCacheMode();
+  max_memory_limit = 1ULL << 30;
+  used_mem_current.fetch_add(900ULL << 20);
+  PrimeTable* pt = pp_->at(0)->Await([] {
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(0);
+    db_slice.UpdateMemoryParams(100LL << 20, db_slice.bytes_per_object());
+    return db_slice.GetTables(0);
+  });
+
+  for (unsigned i = 0;; ++i) {
+    auto [size, capacity, segments] = pp_->at(0)->Await([&] {
+      return tuple{pt->size(), pt->capacity(), pt->GetSegmentCount()};
+    });
+    ASSERT_EQ(segments, 2u) << "the table grew";
+    if (size == capacity)
+      break;
+    Run({"set", StrCat("filler:", i), string(32, 'v')});
+  }
+
+  // kSlotNum + 1 keys of the same segment and stash bucket: the last one evicts the first one.
+  auto stash = [&](string_view key) {
+    uint64_t hash = pt->DoHash(key);
+    return pair{hash >> 63, hash % PrimeTable::Segment_t::kStashBucketNum};
+  };
+  vector<string> args = {"MSET"};
+  for (unsigned i = 0; args.size() < 2 * PrimeTable::kSlotNum + 3; ++i) {
+    if (string key = StrCat("k", i); stash(key) == stash("k0"))
+      args.insert(args.end(), {key, "v"});
+  }
+
+  size_t evicted = GetMetrics().db_stats[0].events.evicted_keys;
+  Run(args);
+  EXPECT_GE(GetMetrics().db_stats[0].events.evicted_keys - evicted, PrimeTable::kSlotNum);
+  EXPECT_EQ(1, CheckedInt({"exists", "k0"}));
 }
 
 TEST_F(DflyEngineTest, PSubscribe) {
