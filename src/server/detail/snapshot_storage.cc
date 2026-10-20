@@ -3,7 +3,6 @@
 
 #include "server/detail/snapshot_storage.h"
 
-#include <absl/base/optimization.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_replace.h>
@@ -11,19 +10,6 @@
 #include <absl/strings/strip.h>
 
 #include <algorithm>
-
-#ifdef WITH_AWS
-#include <aws/core/auth/AWSCredentialsProvider.h>
-#include <aws/s3/S3Client.h>
-#include <aws/s3/model/ListObjectsV2Request.h>
-#include <aws/s3/model/PutObjectRequest.h>
-
-#include "util/aws/aws.h"
-#include "util/aws/credentials_provider_chain.h"
-#include "util/aws/s3_endpoint_provider.h"
-#include "util/aws/s3_read_file.h"
-#include "util/aws/s3_write_file.h"
-#endif
 
 #include "util/cloud/aws/s3_storage.h"
 
@@ -41,10 +27,8 @@
 #include "util/cloud/azure/storage.h"
 #include "util/fibers/fiber_file.h"
 
-// Selects between the helio-native S3 client (util::cloud::aws) and aws-sdk-cpp.
-// Only meaningful when WITH_AWS is compiled in; otherwise the helio client is used.
-ABSL_FLAG(bool, s3_use_helio_client, true,
-          "If true, use helio's native S3 client; if false, use aws-sdk-cpp");
+ABSL_RETIRED_FLAG(bool, s3_use_helio_client, true,
+                  "Deprecated: the helio native S3 client is always used.");
 
 namespace rng = std::ranges;
 namespace dfly {
@@ -703,49 +687,13 @@ error_code AzureSnapshotStorage::CheckPath(const std::string& path) {
 
 AwsS3SnapshotStorage::AwsS3SnapshotStorage(const std::string& endpoint, bool https,
                                            bool ec2_metadata, bool sign_payload)
-    : creds_provider_({}, endpoint) {
-#ifdef WITH_AWS
-  use_helio_ = absl::GetFlag(FLAGS_s3_use_helio_client);
-#else
-  use_helio_ = true;
-#endif
-
-  if (use_helio_) {
-    https_ = https;
-    if (!ec2_metadata) {
-      setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
-    }
-    (void)sign_payload;  // Uploads in cloud::aws always use UNSIGNED-PAYLOAD.
-    LOG(INFO) << "Creating AWS S3 client (helio); https=" << std::boolalpha << https
-              << "; endpoint=" << endpoint;
-    return;
+    : creds_provider_({}, endpoint), https_(https) {
+  if (!ec2_metadata) {
+    setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
   }
-
-#ifdef WITH_AWS
-  shard_set->pool()->GetNextProactor()->Await([&] {
-    util::aws::Init();
-    if (!ec2_metadata) {
-      setenv("AWS_EC2_METADATA_DISABLED", "true", 0);
-    }
-    // S3ClientConfiguration may request configuration and credentials from
-    // EC2 metadata so must be run in a proactor thread.
-    Aws::S3::S3ClientConfiguration s3_conf;
-    s3_conf.checksumConfig.responseChecksumValidation =
-        Aws::Client::ResponseChecksumValidation::WHEN_REQUIRED;
-
-    LOG(INFO) << "Creating AWS S3 client (sdk); region=" << s3_conf.region
-              << "; https=" << std::boolalpha << https << "; endpoint=" << endpoint;
-    if (!sign_payload) {
-      s3_conf.payloadSigningPolicy = Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never;
-    }
-    std::shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider =
-        std::make_shared<aws::CredentialsProviderChain>();
-    // Pass a custom endpoint. If empty uses the S3 endpoint.
-    std::shared_ptr<Aws::S3::S3EndpointProviderBase> endpoint_provider =
-        std::make_shared<aws::S3EndpointProvider>(endpoint, https);
-    s3_ = std::make_shared<Aws::S3::S3Client>(credentials_provider, endpoint_provider, s3_conf);
-  });
-#endif
+  (void)sign_payload;  // Uploads in cloud::aws always use UNSIGNED-PAYLOAD.
+  LOG(INFO) << "Creating AWS S3 client; https=" << std::boolalpha << https
+            << "; endpoint=" << endpoint;
 }
 
 AwsS3SnapshotStorage::~AwsS3SnapshotStorage() {
@@ -755,10 +703,6 @@ AwsS3SnapshotStorage::~AwsS3SnapshotStorage() {
 }
 
 error_code AwsS3SnapshotStorage::Init(unsigned connect_ms) {
-  if (!use_helio_) {
-    return {};
-  }
-
   RETURN_ERROR(creds_provider_.Init(connect_ms));
 
   if (https_) {
@@ -772,43 +716,17 @@ error_code AwsS3SnapshotStorage::Init(unsigned connect_ms) {
 
 io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::OpenWriteFile(
     const std::string& path) {
-  if (use_helio_) {
-    auto [bucket, key] = GetBucketPath(path);
-    cloud::aws::WriteFileOptions opts;
-    opts.creds_provider = &creds_provider_;
-    opts.ssl_cntx = ctx_;
+  auto [bucket, key] = GetBucketPath(path);
+  cloud::aws::WriteFileOptions opts;
+  opts.creds_provider = &creds_provider_;
+  opts.ssl_cntx = ctx_;
 
-    io::Result<io::WriteFile*> dest_res = cloud::aws::OpenWriteFile(bucket, key, opts);
-    if (!dest_res) {
-      return nonstd::make_unexpected(GenericError(dest_res.error(), "Could not open file"));
-    }
-
-    return std::pair<io::Sink*, uint8_t>(*dest_res, FileType::CLOUD);
+  io::Result<io::WriteFile*> dest_res = cloud::aws::OpenWriteFile(bucket, key, opts);
+  if (!dest_res) {
+    return nonstd::make_unexpected(GenericError(dest_res.error(), "Could not open file"));
   }
 
-#ifdef WITH_AWS
-  auto [bucket, key] = GetBucketPath(path);
-  fb2::ProactorBase* proactor = ProactorBase::me();
-
-  // We run S3 operations via a temporary fiber to avoid agressive stack consumption.
-  io::Result<std::pair<io::Sink*, uint8_t>, GenericError> result;
-  auto fb = proactor->LaunchFiber(
-      fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "open_s3_write", [&] {
-        io::Result<aws::S3WriteFile> file = aws::S3WriteFile::Open(bucket, key, s3_);
-        if (!file) {
-          result = nonstd::make_unexpected(GenericError(file.error(), "Failed to open write file"));
-          return;
-        }
-
-        aws::S3WriteFile* f = new aws::S3WriteFile(std::move(*file));
-        result = std::pair<io::Sink*, uint8_t>(f, FileType::CLOUD);
-      });
-  fb.Join();
-
-  return result;
-#else
-  ABSL_UNREACHABLE();
-#endif
+  return std::pair<io::Sink*, uint8_t>(*dest_res, FileType::CLOUD);
 }
 
 io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& path) {
@@ -817,18 +735,10 @@ io::ReadonlyFileOrError AwsS3SnapshotStorage::OpenReadFile(const std::string& pa
     return nonstd::make_unexpected(GenericError("Invalid S3 path"));
 
   auto [bucket, key] = GetBucketPath(path);
-  if (use_helio_) {
-    cloud::aws::ReadFileOptions opts;
-    opts.creds_provider = &creds_provider_;
-    opts.ssl_cntx = ctx_;
-    return cloud::aws::OpenReadFile(bucket, key, opts);
-  }
-
-#ifdef WITH_AWS
-  return new aws::S3ReadFile(bucket, key, s3_);
-#else
-  ABSL_UNREACHABLE();
-#endif
+  cloud::aws::ReadFileOptions opts;
+  opts.creds_provider = &creds_provider_;
+  opts.ssl_cntx = ctx_;
+  return cloud::aws::OpenReadFile(bucket, key, opts);
 }
 
 io::Result<std::string, GenericError> AwsS3SnapshotStorage::LoadPath(std::string_view dir,
@@ -906,98 +816,34 @@ AwsS3SnapshotStorage::ListObjects(std::string_view bucket_name, std::string_view
 
   // Each list objects request has a 1000 object limit, so page through the
   // objects if needed.
-  std::string continuation_token;
   std::vector<SnapStat> keys;
 
   // We use a random proactor because this function might be called from the main thread.
   fb2::ProactorBase* proactor = shard_set->pool()->GetNextProactor();
 
-  if (use_helio_) {
-    string adjusted_prefix(prefix);
-    if (!prefix.empty() && prefix.back() != '/') {
-      adjusted_prefix.push_back('/');
-    }
-    string cursor;
-
-    do {
-      error_code ec = proactor->Await([&]() -> error_code {
-        cloud::aws::S3Storage s3(&creds_provider_, ctx_, proactor);
-        return s3.List(
-            bucket_name, adjusted_prefix, false, 1000,
-            [&keys](const cloud::StorageListItem& item) {
-              keys.emplace_back(string(item.key), item.mtime_ns);
-            },
-            &cursor);
-      });
-
-      if (ec) {
-        return nonstd::make_unexpected(GenericError(ec, "Failed list objects in S3 bucket"));
-      }
-    } while (!cursor.empty());
-
-    return keys;
+  string adjusted_prefix(prefix);
+  if (!prefix.empty() && prefix.back() != '/') {
+    adjusted_prefix.push_back('/');
   }
+  string cursor;
 
-#ifdef WITH_AWS
   do {
-    Aws::S3::Model::ListObjectsV2Request request;
-    request.SetBucket(std::string(bucket_name));
-    if (!prefix.empty()) {
-      // Ensure prefix ends with '/' to treat it as a directory-like namespace and avoid
-      // matching objects with similar prefix names.
-      if (prefix.back() == '/') {
-        request.SetPrefix(std::string(prefix));
-      } else {
-        request.SetPrefix(std::string(prefix) + '/');
-      }
+    error_code ec = proactor->Await([&]() -> error_code {
+      cloud::aws::S3Storage s3(&creds_provider_, ctx_, proactor);
+      return s3.List(
+          bucket_name, adjusted_prefix, false, 1000,
+          [&keys](const cloud::StorageListItem& item) {
+            keys.emplace_back(string(item.key), item.mtime_ns);
+          },
+          &cursor);
+    });
+
+    if (ec) {
+      return nonstd::make_unexpected(GenericError(ec, "Failed list objects in S3 bucket"));
     }
-    request.SetDelimiter("/");
+  } while (!cursor.empty());
 
-    if (!continuation_token.empty()) {
-      request.SetContinuationToken(continuation_token);
-    }
-
-    Aws::S3::Model::ListObjectsV2Outcome outcome;
-
-    // We use fibers to wrap the s3 call to avoid stack exhaustion.
-    auto fb = proactor->LaunchFiber(
-        fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "list_s3",
-        [&, &bucket_name = bucket_name] { outcome = s3_->ListObjectsV2(request); });
-
-    fb.Join();
-
-    if (outcome.IsSuccess()) {
-      continuation_token = outcome.GetResult().GetNextContinuationToken();
-      for (const auto& object : outcome.GetResult().GetContents()) {
-        keys.emplace_back(object.GetKey(), object.GetLastModified().Millis());
-      }
-    } else if (outcome.GetError().GetExceptionName() == "PermanentRedirect") {
-      return nonstd::make_unexpected(
-          GenericError{"Failed list objects in S3 bucket: Permanent redirect; Ensure your "
-                       "configured AWS region matches the S3 bucket region"});
-    } else if (outcome.GetError().GetErrorType() == Aws::S3::S3Errors::NO_SUCH_BUCKET) {
-      return nonstd::make_unexpected(GenericError{
-          "Failed list objects in S3 bucket: Bucket not found: " + std::string(bucket_name)});
-    } else if (outcome.GetError().GetErrorType() == Aws::S3::S3Errors::INVALID_ACCESS_KEY_ID) {
-      return nonstd::make_unexpected(
-          GenericError{"Failed list objects in S3 bucket: Invalid access key ID"});
-    } else if (outcome.GetError().GetErrorType() == Aws::S3::S3Errors::SIGNATURE_DOES_NOT_MATCH) {
-      return nonstd::make_unexpected(
-          GenericError{"Failed list objects in S3 bucket: Invalid signature; Check your AWS "
-                       "credentials are correct"});
-    } else if (outcome.GetError().GetExceptionName() == "InvalidToken") {
-      return nonstd::make_unexpected(
-          GenericError{"Failed list objects in S3 bucket: Invalid token; Check your AWS "
-                       "credentials are correct"});
-    } else {
-      return nonstd::make_unexpected(GenericError{"Failed list objects in S3 bucket: " +
-                                                  outcome.GetError().GetExceptionName()});
-    }
-  } while (!continuation_token.empty());
   return keys;
-#else
-  ABSL_UNREACHABLE();
-#endif
 }
 
 #ifdef __linux__
