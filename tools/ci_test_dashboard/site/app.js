@@ -11,6 +11,9 @@ const state = {
   selectedId: null,
   detailCache: new Map(),
   detailErrors: new Map(),
+  issueLinks: null,
+  issueLinksStatus: 'loading',
+  rangeLoading: false,
 };
 
 const suiteOptions = [
@@ -50,11 +53,29 @@ async function boot() {
     state.manifest = await fetchJson('data/manifest.json');
     rangeOptions = rangesFromManifest(state.manifest);
     state.range = state.manifest.default_range ?? rangeOptions[0]?.[0] ?? 'all';
+    const issueLinks = loadIssueLinks();
     await loadRange(state.range, false);
     render();
+    issueLinks.then(() => {
+      if (!state.rangeLoading) {
+        renderTable();
+        renderDetails();
+      }
+    });
   } catch (error) {
     document.getElementById('dataStatus').textContent = 'No data';
     document.getElementById('detailsPane').textContent = String(error);
+  }
+}
+
+async function loadIssueLinks() {
+  try {
+    state.issueLinks = await fetchJson('data/issue-links.json');
+    state.issueLinksStatus = 'ready';
+  } catch (error) {
+    // The dashboard remains useful if an older artifact lacks this optional metadata.
+    console.warn('Unable to load issue links', error);
+    state.issueLinksStatus = 'unavailable';
   }
 }
 
@@ -83,11 +104,16 @@ function rangesFromManifest(manifest) {
 async function loadRange(rangeId, shouldRender = true) {
   const range = rangeFile(rangeId);
   document.getElementById('dataStatus').textContent = 'Loading';
-  state.data = await fetchJson(`data/${range.file}`);
-  state.range = range.id;
-  state.selectedId = currentSelectionInData() ? state.selectedId : firstVisibleTest()?.id ?? null;
-  if (shouldRender) {
-    render();
+  state.rangeLoading = true;
+  try {
+    state.data = await fetchJson(`data/${range.file}`);
+    state.range = range.id;
+    state.selectedId = currentSelectionInData() ? state.selectedId : firstVisibleTest()?.id ?? null;
+    if (shouldRender) {
+      render();
+    }
+  } finally {
+    state.rangeLoading = false;
   }
 }
 
@@ -236,6 +262,9 @@ function renderTable() {
         <td>${formatPercent(test.failure_rate)}</td>
         <td>${formatNumber(test.total)}</td>
         <td>${formatDuration(test.avg_time)}</td>
+        <td>${issueLinksHtml(test)}</td>
+        <td>${assigneesHtml(test)}</td>
+        <td>${pullRequestsHtml(test)}</td>
       </tr>
     `;
   });
@@ -280,6 +309,9 @@ function renderDetails() {
       <span>Run</span><span>${runLink(test.last_run_id)}</span>
       <span>Variant</span><span>${escapeHtml(test.last_variant)}</span>
       <span>Report</span><span>${escapeHtml(test.last_report || 'unknown')}</span>
+      <span>Related Issues</span><span>${issueLinksHtml(test)}</span>
+      <span>Assignees</span><span>${assigneesHtml(test)}</span>
+      <span>Related PRs</span><span>${pullRequestsHtml(test)}</span>
     </div>
 
     ${chips('Groups', test.groups)}
@@ -307,6 +339,77 @@ function renderDetails() {
           }
         });
   }
+}
+
+// Returns the generated GitHub metadata for `test`, when available.
+function linksFor(test) {
+  return state.issueLinks?.links?.[test.id] ?? null;
+}
+
+// Chooses the label when related issues or pull requests are unavailable or absent.
+function unavailableLinkValue(test) {
+  if (state.issueLinksStatus === 'loading') {
+    return 'Loading...';
+  }
+  if (state.issueLinksStatus !== 'ready' || test.failures === 0) {
+    return 'N/A';
+  }
+  return 'Not found';
+}
+
+// Renders matched issues with their current GitHub state and title tooltip.
+function issueLinksHtml(test) {
+  const links = linksFor(test);
+  if (!links?.issues?.length) {
+    return `<span class="unavailable">${unavailableLinkValue(test)}</span>`;
+  }
+  return `<span class="related-links">${
+      links.issues
+          .map((issue) => {
+            const assignees = issue.eligible_for_assignee && issue.assignees?.length ?
+                `, assigned: ${issue.assignees.join(', ')}` :
+                '';
+            return `<a href="${
+                escapeHtml(issue.url)}" target="_blank" rel="noopener noreferrer" title="${
+                escapeHtml(
+                    issue.title)}">#${escapeHtml(issue.number)}</a><span class="link-state"> (${
+                escapeHtml(issue.state)}${escapeHtml(assignees)})</span>`;
+          })
+          .join(', ')}</span>`;
+}
+
+// Shows ownership and the open issue that directly identifies this test.
+function assigneesHtml(test) {
+  const links = linksFor(test);
+  if (!links?.issues?.length) {
+    return `<span class="unavailable">${
+        state.issueLinksStatus === 'loading' ? 'Loading...' : 'N/A'}</span>`;
+  }
+  const dedicatedIssues = links.issues.filter((issue) => issue.eligible_for_assignee);
+  if (!dedicatedIssues.length) {
+    return '<span class="unavailable">N/A</span>';
+  }
+  const assignees = dedicatedIssues.flatMap(
+      (issue) => (issue.assignees ?? []).map((assignee) => `${assignee} (#${issue.number})`));
+  return assignees.length ? escapeHtml(assignees.join(', ')) :
+                            '<span class="unavailable">Unassigned</span>';
+}
+
+// Renders matched pull requests with their current GitHub state and title tooltip.
+function pullRequestsHtml(test) {
+  const links = linksFor(test);
+  if (!links?.pull_requests?.length) {
+    return `<span class="unavailable">${unavailableLinkValue(test)}</span>`;
+  }
+  return `<span class="related-links">${
+      links.pull_requests
+          .map(
+              (pullRequest) => `<a href="${
+                  escapeHtml(pullRequest.url)}" target="_blank" rel="noopener noreferrer" title="${
+                  escapeHtml(pullRequest.title)}">#${
+                  escapeHtml(pullRequest.number)}</a><span class="link-state"> (${
+                  escapeHtml(pullRequest.state)})</span>`)
+          .join(', ')}</span>`;
 }
 
 function detailLoading(isLoading) {
