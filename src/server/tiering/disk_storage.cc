@@ -243,7 +243,8 @@ DiskStorage::Stats DiskStorage::GetStats() const {
                .pending_read_bytes = pending_read_bytes_,
                .segment_bytes = alloc_stats.segment_bytes,
                .large_allocated_bytes = alloc_stats.large_allocated_bytes,
-               .free_extent_bytes = alloc_stats.free_extent_bytes};
+               .free_extent_bytes = alloc_stats.free_extent_bytes,
+               .grow_failures = grow_failures_};
 }
 
 error_code DiskStorage::RequestGrow(off_t min_size) {
@@ -263,8 +264,10 @@ error_code DiskStorage::RequestGrow(off_t min_size) {
   VLOG(1) << "Requesting grow by " << grow_size << " current capacity: " << alloc_.capacity();
 
   DCHECK_EQ(grow_size % ExternalAllocator::kExtAlignment, 0u);
-  if (alloc_.capacity() + grow_size >= static_cast<size_t>(max_size_))
+  if (alloc_.capacity() + grow_size >= static_cast<size_t>(max_size_)) {
+    ++grow_failures_;
     return make_error_code(errc::file_too_large);
+  }
 
   // Don't try again immediately, most likely it won't succeed ever.
   const uint64_t kCooldownCycles = base::CycleClock::FromUsec(100'000);  // 100ms
@@ -282,7 +285,9 @@ error_code DiskStorage::RequestGrow(off_t min_size) {
     grow_.pending = false;
     grow_.last_err = ec;
     grow_.timestamp_cycles = base::CycleClock::Now();
-    if (!ec)
+    if (ec)
+      ++grow_failures_;
+    else
       alloc_.AddStorage(end, grow_size);
   });
 

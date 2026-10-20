@@ -125,9 +125,24 @@ std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashAborted(BinId
   std::vector<std::pair<DbIndex, std::string>> out;
 
   auto node = pending_bins_.extract(id);
+  DCHECK(!node.empty()) << id;
+  if (node.empty())
+    return out;
+
   auto& entries = node.mapped();
   while (!entries.empty())
     out.emplace_back(std::move(entries.extract(entries.begin()).key()));
+
+  return out;
+}
+
+std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashFailed(FilledBin bin) {
+  DCHECK(!pending_bins_.contains(bin.id));
+
+  std::vector<std::pair<DbIndex, std::string>> out;
+  out.reserve(bin.entries_.size());
+  while (!bin.entries_.empty())
+    out.emplace_back(std::move(bin.entries_.extract(bin.entries_.begin()).key()));
 
   return out;
 }
