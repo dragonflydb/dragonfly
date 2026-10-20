@@ -1722,7 +1722,8 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
 
 pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, const Context& cntx,
                                                               size_t starting_segment_id,
-                                                              size_t increase_goal_bytes) {
+                                                              size_t increase_goal_bytes,
+                                                              size_t max_eviction_items) {
   // Disable flush journal changes to prevent preemtion
   journal::DisableFlushGuard journal_flush_guard;
   FiberAtomicGuard guard;
@@ -1736,10 +1737,10 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
       return {0, evicted_bytes};
   }
 
-  if ((!IsCacheMode()) || !expire_allowed_)
+  if ((!IsCacheMode()) || !expire_allowed_ || max_eviction_items == 0)
     return {0, 0};
 
-  auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);
+  auto max_eviction_per_hb = max_eviction_items;
   auto max_segment_to_consider = GetFlag(FLAGS_max_segment_to_consider);
 
   auto time_start = absl::GetCurrentTimeNanos();

@@ -807,6 +807,7 @@ void EngineShard::RetireExpiredAndEvict() {
 
   size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
+  size_t eviction_items_budget = GetFlag(FLAGS_max_eviction_per_heartbeat);
 
   std::vector<Namespace*> ns_snapshot = namespaces->SnapshotAll();
   if (!ns_snapshot.empty() && ns_snapshot.size() > 1) {
@@ -855,18 +856,18 @@ void EngineShard::RetireExpiredAndEvict() {
                   << stats_.total_heartbeat_expired_calls;
         }
 
-        if (eviction_goal) {
+        if (eviction_goal && eviction_items_budget) {
           uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
           auto [evicted_items, evicted_bytes] = db_slice.FreeMemWithEvictionStepAtomic(
-              i, db_cntx, starting_segment_id, eviction_goal);
+              i, db_cntx, starting_segment_id, eviction_goal, eviction_items_budget);
 
           VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
                   << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
-                  << " bytes. Max eviction per heartbeat: "
-                  << GetFlag(FLAGS_max_eviction_per_heartbeat);
+                  << " bytes. Remaining eviction items budget: " << eviction_items_budget;
 
           deleted_bytes += evicted_bytes;
           eviction_goal -= std::min(eviction_goal, evicted_bytes);
+          eviction_items_budget -= std::min(eviction_items_budget, size_t(evicted_items));
         }
       }
     }

@@ -511,7 +511,8 @@ class DbSlice {
   // evicted keys (see SendQueuedExpiredKeyEvents).
   std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx, const Context& cntx,
                                                             size_t starting_segment_id,
-                                                            size_t increase_goal_bytes);
+                                                            size_t increase_goal_bytes,
+                                                            size_t max_eviction_items);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
