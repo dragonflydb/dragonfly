@@ -249,8 +249,8 @@ TEST_F(StringFamilyTest, MGetSet) {
 
   auto set_fb = pp_->at(1)->LaunchFiber([&] {
     for (size_t i = 1; i < 2000; ++i) {
-      Run({"set", "x", StrCat(i)});
-      Run({"set", "b", StrCat(i)});
+      Run({"set", kShard1Key, StrCat(i)});
+      Run({"set", kShard0Key, StrCat(i)});
     }
   });
 
@@ -347,7 +347,7 @@ TEST_F(StringFamilyTest, MSetGet) {
   Run({"mset", kShard1Key, "0", kShard1AltKey, "0"});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
 
-  Run({"mset", "x", "1", "b", "5", "x", "0"});
+  Run({"mset", kShard1Key, "1", kShard0Key, "5", kShard1Key, "0"});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
 
   int64_t val = CheckedInt({"get", kShard1Key});
