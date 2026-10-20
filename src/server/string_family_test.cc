@@ -19,6 +19,11 @@ using namespace std;
 using namespace util;
 using absl::StrCat;
 
+constexpr char kShard0Key[] = "b";
+constexpr char kShard1Key[] = "x";
+constexpr char kShard1AltKey[] = "y";
+constexpr char kShard1AltKey2[] = "a";
+
 namespace dfly {
 
 class StringFamilyTest : public BaseFamilyTest {
@@ -228,13 +233,13 @@ TEST_F(StringFamilyTest, MGetSet) {
   auto resp = Run({"mget", "z"});  // single key
   EXPECT_THAT(resp, RespElementsAre("0"));
 
-  Run({"mset", "x", "0", "b", "0"});
+  Run({"mset", kShard1Key, "0", kShard0Key, "0"});
 
   ASSERT_EQ(2, GetDebugInfo("IO0").shards_count);
 
   auto mget_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 1000; ++i) {
-      RespExpr resp = Run({"mget", "b", "x"});
+      RespExpr resp = Run({"mget", kShard0Key, kShard1Key});
       ASSERT_THAT(resp, ArrLen(2));
       auto ivec = ToIntArr(resp);
 
@@ -336,24 +341,24 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
 }
 
 TEST_F(StringFamilyTest, MSetGet) {
-  Run({"mset", "x", "0", "y", "0", "a", "0", "b", "0"});
+  Run({"mset", kShard1Key, "0", kShard1AltKey, "0", kShard1AltKey2, "0", kShard0Key, "0"});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
 
-  Run({"mset", "x", "0", "y", "0"});
+  Run({"mset", kShard1Key, "0", kShard1AltKey, "0"});
   ASSERT_EQ(1, GetDebugInfo().shards_count);
 
   Run({"mset", "x", "1", "b", "5", "x", "0"});
   ASSERT_EQ(2, GetDebugInfo().shards_count);
 
-  int64_t val = CheckedInt({"get", "x"});
+  int64_t val = CheckedInt({"get", kShard1Key});
   EXPECT_EQ(0, val);
 
-  val = CheckedInt({"get", "b"});
+  val = CheckedInt({"get", kShard0Key});
   EXPECT_EQ(5, val);
 
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 1000; ++i) {
-      RespExpr resp = Run({"mset", "x", StrCat(i), "b", StrCat(i)});
+      RespExpr resp = Run({"mset", kShard1Key, StrCat(i), kShard0Key, StrCat(i)});
       ASSERT_EQ(resp, "OK") << i;
     }
   });
@@ -361,8 +366,8 @@ TEST_F(StringFamilyTest, MSetGet) {
   // A problematic order when mset is not atomic: set x, get x, get b (old), set b
   auto get_fb = pp_->at(2)->LaunchFiber([&] {
     for (size_t i = 0; i < 1000; ++i) {
-      int64_t x = CheckedInt({"get", "x"});
-      int64_t z = CheckedInt({"get", "b"});
+      int64_t x = CheckedInt({"get", kShard1Key});
+      int64_t z = CheckedInt({"get", kShard0Key});
 
       ASSERT_LE(x, z) << "Inconsistency at " << i;
     }
@@ -396,26 +401,26 @@ TEST_F(StringFamilyTest, IntKey) {
 }
 
 TEST_F(StringFamilyTest, SingleShard) {
-  Run({"mset", "x", "1", "y", "1"});
+  Run({"mset", kShard1Key, "1", kShard1AltKey, "1"});
   ASSERT_EQ(1, GetDebugInfo("IO0").shards_count);
 
-  Run({"mget", "x", "y", "b"});
+  Run({"mget", kShard1Key, kShard1AltKey, kShard0Key});
   ASSERT_EQ(2, GetDebugInfo("IO0").shards_count);
 
-  auto resp = Run({"mget", "x", "y"});
+  auto resp = Run({"mget", kShard1Key, kShard1AltKey});
   ASSERT_EQ(1, GetDebugInfo("IO0").shards_count);
   ASSERT_THAT(ToIntArr(resp), ElementsAre(1, 1));
 
   auto mset_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 100; ++i) {
-      Run({"mset", "x", "0", "y", "0"});
+      Run({"mset", kShard1Key, "0", kShard1AltKey, "0"});
     }
   });
 
   // Specially multiple shards to avoid fast-path.
   auto mget_fb = pp_->at(1)->LaunchFiber([&] {
     for (size_t i = 0; i < 100; ++i) {
-      Run({"mget", "x", "b", "y"});
+      Run({"mget", kShard1Key, kShard0Key, kShard1AltKey});
     }
   });
   mset_fb.Join();

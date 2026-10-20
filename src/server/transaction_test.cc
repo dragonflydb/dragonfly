@@ -43,6 +43,10 @@ using namespace testing;
 
 constexpr size_t kNumThreads = 3;
 
+constexpr char kShard0Key[] = "x";
+constexpr char kShard0AltKey[] = "a";
+constexpr char kShard2Key[] = "z";
+
 class TransactionTest : public Test {
  protected:
   void SetUp() override;
@@ -182,15 +186,16 @@ void TransactionTest::TearDown() {
 //      running_tx_, simulating a snapshot/journal preemption inside RunCallback.
 TEST_F(TransactionTest, ContinuationPollDroppedByInlineTx) {
   // Sanity check the key->shard mapping the scenario relies on.
-  ASSERT_EQ(0u, Shard("x", shard_set->size()));
-  ASSERT_EQ(2u, Shard("z", shard_set->size()));
-  ASSERT_EQ(0u, Shard("a", shard_set->size()));
+  ASSERT_EQ(0u, Shard(kShard0Key, shard_set->size()));
+  ASSERT_EQ(2u, Shard(kShard2Key, shard_set->size()));
+  ASSERT_EQ(0u, Shard(kShard0AltKey, shard_set->size()));
+  ;
 
   static CommandId cid_a{"tx_test_a", 0, -1, 1, -1, acl::NONE};
   static CommandId cid_b{"tx_test_b", 0, -1, 1, -1, acl::NONE};
 
-  auto tx_a = MakeTx(&cid_a, {"x", "z"});  // multi-shard: shard 0 + shard 2
-  auto tx_b = MakeTx(&cid_b, {"a"});       // single shard: shard 0
+  auto tx_a = MakeTx(&cid_a, {kShard0Key, kShard2Key});  // multi-shard: shard 0 + shard 2
+  auto tx_b = MakeTx(&cid_b, {kShard0AltKey});           // single shard: shard 0
 
   // Phase 1: A's first (non-concluding) hop -> A becomes continuation on 0 and 2.
   OnShard(1, [&] { tx_a->Execute(Noop, false); });
@@ -253,14 +258,14 @@ TEST_F(TransactionTest, ContinuationPollDroppedByInlineTx) {
 //       running_tx_, simulating a snapshot/journal preemption. Without the fix it would run
 //       inline and drop BL's awaken poll; with the fix it is forced non-inline.
 TEST_F(TransactionTest, AwakenedPollNotDroppedWhenBlockedTxPresent) {
-  ASSERT_EQ(0u, Shard("x", shard_set->size()));
-  ASSERT_EQ(0u, Shard("a", shard_set->size()));
+  ASSERT_EQ(0u, Shard(kShard0Key, shard_set->size()));
+  ASSERT_EQ(0u, Shard(kShard0AltKey, shard_set->size()));
 
   static CommandId cid_bl{"tx_test_bl", 0, -1, 1, -1, acl::NONE};
   static CommandId cid_z{"tx_test_z", 0, -1, 1, -1, acl::NONE};
 
-  auto tx_bl = MakeTx(&cid_bl, {"x"});
-  auto tx_z = MakeTx(&cid_z, {"a"});
+  auto tx_bl = MakeTx(&cid_bl, {kShard0Key});
+  auto tx_z = MakeTx(&cid_z, {kShard0AltKey});
 
   auto ready_checker = [](EngineShard*, const DbContext&, std::string_view) {
     return KeyReadyResult::kReady;
@@ -271,7 +276,7 @@ TEST_F(TransactionTest, AwakenedPollNotDroppedWhenBlockedTxPresent) {
   fb2::Done bl_done;
   auto fb_bl = pp_->at(1)->LaunchFiber([&] {
     tx_bl->Execute(Noop, false);  // schedule + first (non-concluding) hop -> stays scheduled
-    std::string key = "x";
+    std::string key = kShard0Key;
     auto tp = Transaction::time_point::max();
     OpStatus st = tx_bl->WaitOnWatch(tp, std::string_view{key}, ready_checker, &bl_cntx);
     ASSERT_EQ(OpStatus::OK, st);
@@ -297,7 +302,7 @@ TEST_F(TransactionTest, AwakenedPollNotDroppedWhenBlockedTxPresent) {
   OnShard(0, [&] {
     auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(0);
     ASSERT_TRUE(bc != nullptr);
-    bc->Awaken(0, "x");
+    bc->Awaken(0, kShard0Key);
     bc->NotifyPending();
   });
 
@@ -414,14 +419,14 @@ TEST_F(TransactionTest, LazyLockConflictingKey) {
 // queue order. It only actually executes once Z concludes and releases running_tx_, since at most
 // one callback may run per shard at a time.
 TEST_F(TransactionTest, LazyLockDisjointKeyMarkedOutOfOrder) {
-  ASSERT_EQ(0u, Shard("a", shard_set->size()));
-  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+  ASSERT_EQ(0u, Shard(kShard0AltKey, shard_set->size()));
+  ASSERT_EQ(0u, Shard(kShard0Key, shard_set->size()));
 
   static CommandId cid_z{"tx_test_lz2_z", 0, -1, 1, -1, acl::NONE};
   static CommandId cid_v{"tx_test_lz2_v", 0, -1, 1, -1, acl::NONE};
 
-  auto tx_z = MakeTx(&cid_z, {"a"});
-  auto tx_v = MakeTx(&cid_v, {"x"});  // disjoint key, same shard
+  auto tx_z = MakeTx(&cid_z, {kShard0AltKey});
+  auto tx_v = MakeTx(&cid_v, {kShard0Key});  // disjoint key, same shard
 
   auto z = ParkHoldingRunningTx(0, tx_z.get());
   ASSERT_TRUE(z->WaitParked()) << "Z's concluding hop never parked";
