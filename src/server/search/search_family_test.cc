@@ -6308,7 +6308,8 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
 
   EXPECT_THAT(
       Run({"FT.SEARCH", "users", "jones", "WITHSORTKEYS", "NOCONTENT"}),
-      IsUnordArray(IntArg(2), "user1", ArgType(RespExpr::NIL), "user2", ArgType(RespExpr::NIL)));
+      AnyOf(IsArray(IntArg(2), "user1", ArgType(RespExpr::NIL), "user2", ArgType(RespExpr::NIL)),
+            IsArray(IntArg(2), "user2", ArgType(RespExpr::NIL), "user1", ArgType(RespExpr::NIL))));
 
   EXPECT_THAT(
       Run({"FT.SEARCH", "users", "jones", "SORTBY", "last_name", "WITHSORTKEYS"}),
