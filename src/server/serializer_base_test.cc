@@ -477,8 +477,9 @@ TEST_P(SerializerBaseParamTest, StaticWithSetAndAppend) {
   // Pre-existing keys always exist and must be strictly covered by a baseline (emitted before any
   // journal write by the ordering invariant).
   for (unsigned i = 0; i < kKeys; i++) {
-    if (kept(i))
+    if (kept(i)) {
       EXPECT_TRUE(baselines.contains(absl::StrCat("key:", i)));
+    }
   }
 
   // New keys are inserted mid-sweep, so a surviving one must be covered by a baseline or a journal
