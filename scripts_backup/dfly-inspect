@@ -65,6 +65,7 @@ DEFAULT_SCAN_CONFIRM_DELAY_SECONDS = 5.0
 DEFAULT_MAX_NORMALIZED_LOAD = 0.70
 DEFAULT_MIN_FREE_KIB = 524288
 DEFAULT_CONTROL_PLANE_TIMEOUT_SECONDS = 120
+MAX_LOKI_ENTRIES_PER_QUERY = 5000
 GCX_CONTEXTS = {"prod": "dragonfly-prod", "staging": "dragonfly-staging"}
 TARGETS_HELP = "Customer (cus_...), datastore (dst_...), shard (shard_...), or node (node_...)"
 EXIT_DIVERGED = 2
@@ -76,6 +77,8 @@ SCRIPT_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 ANSI_RESET = "\033[0m"
 ANSI_RED = "\033[31m"
 ANSI_YELLOW = "\033[33m"
+ANSI_BLUE = "\033[34m"
+ANSI_BOLD = "\033[1m"
 
 NodeResult = TypeVar("NodeResult")
 _deployment_ssh_connection_command: str | None = None
@@ -137,6 +140,19 @@ def deployment_ssh_command(_bastion: str | None, remote_command: list[str]) -> l
     )
 
 
+def dfadmin_failure_message(environment: str, detail: str) -> str:
+    normalized_detail = detail.lower()
+    if "oauth2:" in normalized_detail and "invalid_grant" in normalized_detail:
+        return (
+            f"dfadmin authentication for --env {environment} is invalid or expired; "
+            "the OAuth refresh token was rejected. This is unrelated to bastion connectivity.\n"
+            f"{color_message(ANSI_BOLD + ANSI_BLUE, 'HINT:', sys.stderr)} "
+            f"Log in again using 'dfadmin auth login --env {environment}', then retry the command.\n"
+            f"Details: {detail}"
+        )
+    return detail
+
+
 def preflight_dfadmin(environment: str) -> None:
     try:
         result = subprocess.run(
@@ -153,9 +169,15 @@ def preflight_dfadmin(environment: str) -> None:
         ) from error
     if result.returncode:
         detail = result.stderr.strip() or result.stdout.strip() or "no output"
+        failure_message = dfadmin_failure_message(environment, detail)
+        authentication_hint = (
+            ""
+            if failure_message != detail
+            else f"\nAuthenticate before retrying: dfadmin auth login --env {environment}"
+        )
         raise RuntimeError(
-            f"dfadmin is not ready for --env {environment}: {detail}\n"
-            f"Authenticate before retrying: dfadmin auth login --env {environment}"
+            f"dfadmin is not ready for --env {environment}: "
+            f"{failure_message}{authentication_hint}"
         )
 
 
@@ -323,6 +345,20 @@ def format_audit_event_for_display(event: object) -> object:
     )
     display_event["created_at"] = f"{created_at} ({created_at_utc})"
     return display_event
+
+
+def add_audit_event_timestamps(event: object) -> object:
+    """Add unambiguous UTC and local renderings while preserving the source epoch."""
+    if not isinstance(event, dict):
+        return event
+    created_at = event.get("created_at")
+    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+        return event
+    timestamp_utc = datetime.fromtimestamp(created_at, timezone.utc)
+    enriched_event = dict(event)
+    enriched_event["created_at_utc"] = timestamp_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    enriched_event["created_at_local"] = timestamp_utc.astimezone().isoformat(timespec="seconds")
+    return enriched_event
 
 
 def normalize_time_window_arguments(argv: list[str]) -> list[str]:
@@ -597,6 +633,14 @@ def build_log_query(source: str, node_id: str, datastore_id: str, shard_id: str)
             f" | node_id=`{node_id}` |= ``"
         )
     raise ValueError("source must be 'dfly' or 'agent'")
+
+
+def validate_loki_limit(limit: int | None, option: str) -> None:
+    if limit is not None and not 1 <= limit <= MAX_LOKI_ENTRIES_PER_QUERY:
+        raise ValueError(
+            f"{option} must be between 1 and {MAX_LOKI_ENTRIES_PER_QUERY}; "
+            "Loki rejects larger per-query limits"
+        )
 
 
 def build_log_command(
@@ -906,8 +950,7 @@ def get_logs(
         raise ValueError("datastore_id must begin with 'dst_'")
     if shard_id and not shard_id.startswith("shard_"):
         raise ValueError("shard_id must begin with 'shard_'")
-    if limit is not None and limit <= 0:
-        raise ValueError("limit must be positive")
+    validate_loki_limit(limit, "limit")
 
     start_time = datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ")
     end_time = datetime.strptime(end, "%Y-%m-%dT%H:%M:%SZ")
@@ -1026,7 +1069,9 @@ def run_dfadmin(environment: str, *arguments: str, allow_failure: bool = False) 
         ) from error
     if result.returncode != 0 and not allow_failure:
         error = result.stderr.strip() or result.stdout.strip() or "no output"
-        raise RuntimeError(f"{' '.join(command)} failed: {error}")
+        raise RuntimeError(
+            f"{' '.join(command)} failed: {dfadmin_failure_message(environment, error)}"
+        )
     return result.stdout.strip()
 
 
@@ -1109,7 +1154,9 @@ def audit_log(
         "--limit",
         str(limit),
     )
-    events = [redact_audit_value(event) for event in audit_events(payload)]
+    events = [
+        add_audit_event_timestamps(redact_audit_value(event)) for event in audit_events(payload)
+    ]
     report = {
         "schema_version": AUDIT_SCHEMA_VERSION,
         "command": "audit",
@@ -1427,6 +1474,31 @@ def get_nested_value(value: object, path: str) -> object | None:
     return current
 
 
+def get_nested_path(value: object, path: str) -> tuple[bool, object | None]:
+    current = value
+    for component in path.split("."):
+        if not isinstance(current, dict) or component not in current:
+            return False, None
+        current = current[component]
+    return True, current
+
+
+def nested_field_paths(value: object, prefix: str = "") -> set[str]:
+    if not isinstance(value, dict):
+        return {prefix} if prefix else set()
+    paths = set()
+    for name, child in value.items():
+        path = f"{prefix}.{name}" if prefix else name
+        paths.add(path)
+        paths.update(nested_field_paths(child, path))
+    return paths
+
+
+def closest_field_paths(path: str, available_paths: set[str]) -> str:
+    matches = get_close_matches(path, sorted(available_paths), n=3, cutoff=0.45)
+    return f" Closest paths: {', '.join(matches)}." if matches else ""
+
+
 def display_multi_value(value: object, path: str) -> str:
     if value is None:
         return "nil"
@@ -1539,21 +1611,80 @@ def multi_show(
             resource_id, payload, error = future.result()
             results[resource_id] = (payload, error)
 
+    successful_payloads = {
+        resource_id: payload
+        for resource_id, (payload, error) in results.items()
+        if error is None and payload is not None
+    }
+    available_paths = set().union(
+        *(nested_field_paths(payload) for payload in successful_payloads.values())
+    )
     columns = list(dict.fromkeys(fields))
-    if prefix:
-        prefix_values = [
-            get_nested_value(payload, prefix)
-            for payload, error in results.values()
-            if error is None and payload is not None
+    for field in columns:
+        field_values = {
+            resource_id: flatten_scalar_fields(payload)
+            for resource_id, payload in successful_payloads.items()
+        }
+        scalar_nodes = [
+            resource_id for resource_id, values in field_values.items() if field in values
         ]
-        if not any(value is not None for value in prefix_values):
+        object_nodes = [
+            resource_id
+            for resource_id, payload in successful_payloads.items()
+            if (path_result := get_nested_path(payload, field))[0]
+            and isinstance(path_result[1], dict)
+        ]
+        if object_nodes and not scalar_nodes:
+            print(
+                warning_message(
+                    f"--field {field!r} is an object on {', '.join(sorted(object_nodes))}; "
+                    f"use --prefix {field}."
+                ),
+                file=sys.stderr,
+            )
+        elif not scalar_nodes:
+            print(
+                warning_message(
+                    f"--field {field!r} does not exist on selected {resource_type} records."
+                    f"{closest_field_paths(field, available_paths)}"
+                ),
+                file=sys.stderr,
+            )
+        elif len(scalar_nodes) < len(successful_payloads):
+            missing_nodes = sorted(set(successful_payloads) - set(scalar_nodes))
+            object_hint = (
+                f"; it is an object on {', '.join(sorted(object_nodes))}, "
+                f"so use --prefix {field} there"
+                if object_nodes
+                else ""
+            )
+            print(
+                warning_message(
+                    f"--field {field!r} is absent on {', '.join(missing_nodes)}; "
+                    f"those rows show nil{object_hint}."
+                ),
+                file=sys.stderr,
+            )
+    if prefix:
+        prefix_paths = [
+            (resource_id, *get_nested_path(payload, prefix))
+            for resource_id, payload in successful_payloads.items()
+        ]
+        if not any(found for _, found, _ in prefix_paths):
             hint = (
                 " Try --resource node to compare every node selected by the target."
                 if resource_type != "node"
                 else ""
             )
             raise ValueError(
-                f"--prefix {prefix!r} does not exist on {resource_type} records.{hint}"
+                f"--prefix {prefix!r} does not exist on {resource_type} records."
+                f"{closest_field_paths(prefix, available_paths)}{hint}"
+            )
+        prefix_values = [value for _, found, value in prefix_paths if found]
+        if not any(value is not None for value in prefix_values):
+            raise ValueError(
+                f"--prefix {prefix!r} is null on selected {resource_type} records; "
+                f"use --field {prefix}."
             )
         prefix_columns = sorted(
             {
@@ -1677,8 +1808,7 @@ def archive_logs(
     max_elements: int | None = None,
     datasource: str | None = None,
 ) -> int:
-    if limit is not None and limit <= 0:
-        raise ValueError("limit must be positive")
+    validate_loki_limit(limit, "limit")
     if max_workers is not None and max_workers <= 0:
         raise ValueError("max-workers must be positive")
     if max_elements is not None and max_elements <= 0:
@@ -2229,7 +2359,15 @@ def collection_script(
 ) -> str:
     selected = {
         name: "1" if name in includes else "0"
-        for name in ("dfly-logs", "info-dump", "perf", "journal", "agent", "clients")
+        for name in (
+            "dfly-logs",
+            "info-dump",
+            "perf",
+            "journal",
+            "agent",
+            "clients",
+            "memory-arenas",
+        )
     }
     collection_window = f"--since {shlex.quote(since)}"
     if until:
@@ -2295,6 +2433,10 @@ run_redis INFO stats > "$work_dir/commands/info_stats.txt" 2>&1 || true
 run_redis INFO commandstats > "$work_dir/commands/info_commandstats.txt" 2>&1 || true
 run_redis INFO keyspace > "$work_dir/commands/info_keyspace.txt" 2>&1 || true
 run_redis MEMORY STATS > "$work_dir/commands/memory_stats.txt" 2>&1 || true
+if [[ {selected['memory-arenas']} == 1 ]]; then
+    run_redis MEMORY ARENA SUMMARY > "$work_dir/commands/memory_arena_summary.txt" 2>&1 || true
+    run_redis MEMORY ARENA SUMMARY BACKING > "$work_dir/commands/memory_arena_backing_summary.txt" 2>&1 || true
+fi
 run_redis DBSIZE > "$work_dir/commands/dbsize.txt" 2>&1 || true
 if [[ {selected['clients']} == 1 ]]; then run_redis CLIENT LIST > "$work_dir/commands/client_list.txt" 2>&1 || true; fi
 run_redis SLOWLOG GET 128 > "$work_dir/commands/slowlog.txt" 2>&1 || true
@@ -4274,8 +4416,6 @@ def health_report(
     datastore_id = health_datastore_id(environment, target)
     all_nodes = get_datastore_nodes(environment, datastore_id)
     total_nodes = len(all_nodes)
-    if max_elements is not None and total_nodes == 1:
-        raise ValueError("--max-elements cannot be used when only one node is selected")
     selected_items = sorted(all_nodes.items())[:max_elements]
     nodes = dict(selected_items)
     truncated = len(nodes) < total_nodes
@@ -6872,7 +7012,7 @@ All commands use production by default.""",
         "--json",
         action="store_true",
         dest="json_output",
-        help="Write versioned redacted JSON to stdout",
+        help="Write versioned redacted JSON with UTC and local event timestamps to stdout",
     )
 
     health_parser = commands.add_parser(
@@ -7187,7 +7327,12 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         required=True,
         help="Log source to retrieve",
     )
-    logs_parser.add_argument("-l", "--limit", type=int, help="Maximum log lines to retrieve")
+    logs_parser.add_argument(
+        "-l",
+        "--limit",
+        type=int,
+        help=f"Maximum log lines to retrieve (1-{MAX_LOKI_ENTRIES_PER_QUERY})",
+    )
     logs_parser.add_argument(
         "--datastore-id", help="Optional datastore label (dst_...) to match Grafana's full selector"
     )
@@ -7246,7 +7391,10 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         help="Loki datasource UID for gcx log queries; required if the gcx context has multiple Loki datasources",
     )
     archiver_parser.add_argument(
-        "-l", "--limit", type=int, help="Maximum log lines per node to retrieve"
+        "-l",
+        "--limit",
+        type=int,
+        help=f"Maximum log lines per node to retrieve (1-{MAX_LOKI_ENTRIES_PER_QUERY})",
     )
     archiver_parser.add_argument(
         "-w",
@@ -7295,14 +7443,19 @@ Tables warn when they exceed the current terminal width or select more than 10 f
     collect_parser.add_argument("targets", nargs="+", help=TARGETS_HELP)
     collect_parser.add_argument(
         "--include",
-        default="",
+        action="append",
+        default=[],
+        metavar="SOURCE[,SOURCE...]",
         help=(
-            "Baseline command evidence includes INFO, MEMORY STATS, DBSIZE, and bounded SLOWLOG GET 128. Add sources:\n"
+            "Optional sources; supply once as a comma-separated list. Whitespace around commas is allowed.\n"
+            "Example: --include memory-arenas,journal,agent\n"
+            "Baseline command evidence includes INFO, MEMORY STATS, DBSIZE, and bounded SLOWLOG GET 128. Sources:\n"
             "  dfly-logs: Dragonfly INFO/WARNING files\n"
             "  info-dump: high-CPU diagnostic snapshot\n"
             "  journal: Dragonfly/kernel journal\n"
             "  agent: dfcloud-agent journal\n"
             "  clients: client list (may be expensive on highly connected nodes)\n"
+            "  memory-arenas: normal and backing allocator-arena summaries for RSS investigation\n"
             "  perf: perf data; disables compression"
         ),
     )
@@ -7400,7 +7553,9 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         "--collect-include", default="", help="Comma-separated optional collect sources"
     )
     bundle_parser.add_argument(
-        "--log-limit", type=int, help="Maximum archived log records per node/source"
+        "--log-limit",
+        type=int,
+        help=f"Maximum archived log records per node/source (1-{MAX_LOKI_ENTRIES_PER_QUERY})",
     )
     bundle_parser.add_argument(
         "--loki-datasource",
@@ -7713,9 +7868,30 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         parser.error(str(error))
 
 
-def parse_collection_includes(value: str, option: str) -> set[str]:
-    includes = {item for item in value.split(",") if item}
-    allowed_includes = {"dfly-logs", "info-dump", "journal", "agent", "clients", "perf"}
+def parse_collection_includes(value: str | Sequence[str], option: str) -> set[str]:
+    if isinstance(value, str):
+        values = [value]
+    else:
+        values = list(value)
+    if len(values) > 1:
+        raise ValueError(
+            f"{option} may be supplied once; provide multiple sources as a comma-separated list"
+        )
+    if not values:
+        return set()
+    items = [item.strip() for item in values[0].split(",")]
+    if not all(items):
+        raise ValueError(f"{option} must be a comma-separated list without empty source names")
+    includes = set(items)
+    allowed_includes = {
+        "dfly-logs",
+        "info-dump",
+        "journal",
+        "agent",
+        "clients",
+        "memory-arenas",
+        "perf",
+    }
     invalid_includes = includes - allowed_includes
     if invalid_includes:
         raise ValueError(f"unknown {option} source: {', '.join(sorted(invalid_includes))}")
@@ -7732,6 +7908,8 @@ def validate_local_command_arguments(arguments: argparse.Namespace) -> None:
                 f"--context {arguments.context!r} conflicts with --env {arguments.environment}; "
                 f"expected {expected_context!r}"
             )
+    if command in {"logs", "log-archiver"}:
+        validate_loki_limit(arguments.limit, "--limit")
     if command == "collect":
         arguments.collection_includes = parse_collection_includes(arguments.include, "--include")
         if arguments.workers <= 0 or arguments.workers > MAX_COLLECTION_WORKERS:
@@ -7745,6 +7923,7 @@ def validate_local_command_arguments(arguments: argparse.Namespace) -> None:
         )
     elif command == "bundle":
         parse_collection_includes(arguments.collect_include, "--collect-include")
+        validate_loki_limit(arguments.log_limit, "--log-limit")
         if arguments.resume and arguments.overwrite:
             raise ValueError("--resume and --overwrite cannot be used together")
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", arguments.incident_id):
