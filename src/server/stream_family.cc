@@ -4305,8 +4305,8 @@ namespace acl {
 constexpr uint32_t kXAdd = WRITE | STREAM | FAST;
 constexpr uint32_t kXClaim = WRITE | STREAM | FAST;
 constexpr uint32_t kXDel = WRITE | STREAM | FAST;
-constexpr uint32_t kXGroup = SLOW;
-constexpr uint32_t kXInfo = SLOW;
+constexpr uint32_t kXGroup = WRITE | STREAM | SLOW;
+constexpr uint32_t kXInfo = READ | STREAM | SLOW;
 constexpr uint32_t kXLen = READ | STREAM | FAST;
 constexpr uint32_t kXPending = READ | STREAM | SLOW;
 constexpr uint32_t kXRange = READ | STREAM | SLOW;

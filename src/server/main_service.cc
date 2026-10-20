@@ -3101,9 +3101,9 @@ constexpr uint32_t kSubscribe = PUBSUB | SLOW;
 constexpr uint32_t kUnsubscribe = PUBSUB | SLOW;
 constexpr uint32_t kPSubscribe = PUBSUB | SLOW;
 constexpr uint32_t kPUnsubsribe = PUBSUB | SLOW;
-constexpr uint32_t kFunction = SLOW;
+constexpr uint32_t kFunction = WRITE | SLOW | SCRIPTING;
 constexpr uint32_t kMonitor = ADMIN | SLOW | DANGEROUS;
-constexpr uint32_t kPubSub = SLOW;
+constexpr uint32_t kPubSub = PUBSUB | SLOW;
 constexpr uint32_t kCommand = SLOW | CONNECTION;
 constexpr uint32_t kReset = FAST | CONNECTION;
 }  // namespace acl
