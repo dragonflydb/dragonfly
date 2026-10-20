@@ -183,7 +183,7 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
                                    bool on_update) {
   // Check if this bucket is stale
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
-    stats_.buckets_skipped++;
+    stats_.buckets_skipped += unsigned(!it.is_done());  // empty buckets are not skips
 
     // Update versions for empty buckets to mark that won't visit them anymore
     // TODO: Flush changes to earlier callbacks
