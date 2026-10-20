@@ -95,8 +95,9 @@ class SyncDashboardTest(unittest.TestCase):
 
     def test_changed_listing_is_not_cached(self):
         self.s3.change_during_download = True
-        self.build()
+        snapshot = self.build()
         self.assertEqual(self.s3.cache, {})
+        self.assertEqual(len(snapshot["ranges/all.json"]["tests"]), 1)
 
     def test_download_size_mismatch_fails_without_caching(self):
         self.s3.wrong_size = True

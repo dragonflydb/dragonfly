@@ -99,7 +99,11 @@ class BuildDashboardTest(unittest.TestCase):
             ("17", "<failure message='boundary'/>"),
             ("23", ""),
         ):
-            xml = f'<testsuite timestamp="2026-09-{day}T12:00:00Z"><testcase classname="Suite" name="case" time="2">{child}</testcase></testsuite>'
+            xml = (
+                f'<testsuite timestamp="2026-09-{day}T12:00:00Z">'
+                f'<testcase classname="Suite" name="case" time="2">{child}</testcase>'
+                "</testsuite>"
+            )
             summaries.append((f"2026-09-{day}", self.parse([self.report(day, day, xml)])))
         output = self.root / "output"
         dashboard.build_from_summaries(

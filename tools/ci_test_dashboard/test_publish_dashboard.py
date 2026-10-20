@@ -76,6 +76,7 @@ class PublishDashboardTest(unittest.TestCase):
                 self.assertEqual(args[-1], "public,max-age=300")
             else:
                 self.assertEqual(args[0:3], ("sync", f"{self.site}/", "s3://bucket/prefix/"))
+                self.assertIn("--delete", args)
                 self.assertEqual(args[args.index("--exclude") + 1], "*.json")
 
         with (

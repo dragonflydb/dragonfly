@@ -6,12 +6,13 @@ on:
       - "tools/ci_test_dashboard/**/*.py"
       - ".github/scripts/publish-ci-dashboard-site-to-s3.py"
       - ".github/workflows/ci-test-dashboard-tests.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
