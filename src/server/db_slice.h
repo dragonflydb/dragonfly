@@ -10,6 +10,7 @@
 #include <atomic>
 #include <limits>
 
+#include "base/cycle_clock.h"
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
 #include "facade/connection_ref.h"
@@ -731,6 +732,9 @@ class DbSlice {
   // ordered from the smallest to largest version.
   std::list<ChangeConsumerInterface*> change_cb_;
   mutable LocalLatch change_cb_latch_;  // to avoid deletion during traversal
+
+  // Shared by overlapping slot sweeps and their foreground on-change callbacks.
+  base::RealTimeAggregator flush_slots_cpu_aggregator_;
 
   // Cache mode only: <key hash, db> of the entries looked up during the current transaction
   // callback. OnCbFinishBlocking bumps them up after the callback finishes, because a bump moves

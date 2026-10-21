@@ -27,7 +27,7 @@ ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 500,
           "migration_buckets_serialization_threshold");
 
 ABSL_FLAG(float, migration_buckets_cpu_budget, 0.2,
-          "How much CPU budget to use for migration buckets serialization");
+          "How much CPU budget to use for migration buckets serialization and slot flushing");
 
 ABSL_FLAG(uint32_t, replication_dispatch_threshold, 1500,
           "Number of bytes to aggregate before replication");
