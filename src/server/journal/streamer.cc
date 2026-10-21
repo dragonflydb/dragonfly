@@ -492,21 +492,29 @@ void RestoreStreamer::Run() {
     // Throttle main loop if we are over the egress limit or the tiered read queue is saturated.
     Throttle();
 
-    cursor = pt->TraverseBuckets(cursor, [&](PrimeTable::bucket_iterator it) {
-      if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
-        return;
+    cursor = pt->TraverseBuckets(
+        cursor,
+        [&](PrimeTable::bucket_iterator it) {
+          if (!cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
+            return;
 
-      // Do not progress if we are stalled.
-      ThrottleIfNeeded();
+          // Empty buckets are only stamped with the snapshot version so that journal omits into
+          // them are not lost; they don't count towards pacing.
+          if (!it.is_done())
+            ++last_yield;
 
-      stats_.buckets_loop += ProcessBucket(0, it, false);
-    });
+          // Do not progress if we are stalled.
+          ThrottleIfNeeded();
+
+          stats_.buckets_loop += ProcessBucket(0, it, false);
+        },
+        true /* visit empty buckets */);
 
     // TODO: FLAGS_migration_buckets_cpu_budget should eventually be a single configurable
     // setting that controls how agressive we are with migration pace.
     // Once we gain confidence with FLAGS_migration_buckets_cpu_budget we should retire
     // migration_buckets_serialization_threshold and migration_buckets_sleep_usec.
-    if (++last_yield >= migration_buckets_serialization_threshold_cached) {
+    if (last_yield >= migration_buckets_serialization_threshold_cached) {
       ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
       last_yield = 0;
     }
