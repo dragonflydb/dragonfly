@@ -963,6 +963,17 @@ TEST_F(ListFamilyTest, BlockingTimeoutValidation) {
   EXPECT_THAT(Run({"blpop", "k", "4000000"}).GetVec(), ElementsAre("k", "v"));
 }
 
+// A single shard BLMOVE that finds data must conclude in a single (optimistic) hop instead of
+// holding the shard's tx queue until a separate concluding hop arrives.
+TEST_F(ListFamilyTest, BLMoveSingleHop) {
+  Run({"rpush", "l", "a", "b"});
+  auto before = GetMetrics().shard_stats.tx_optimistic_total;
+  EXPECT_EQ(Run({"blmove", "l", "l", "RIGHT", "LEFT", "0"}), "b");
+  EXPECT_EQ(Run({"brpoplpush", "l", "l", "0"}), "a");
+  EXPECT_EQ(GetMetrics().shard_stats.tx_optimistic_total, before + 2);
+  EXPECT_THAT(Run({"lrange", "l", "0", "-1"}), RespArray(ElementsAre("a", "b")));
+}
+
 // Wake two BLMOVEs on the same shard simultaneously
 TEST_F(ListFamilyTest, BLMoveSimultaneously) {
   EXPECT_EQ(Shard("src1", shard_set->size()),
