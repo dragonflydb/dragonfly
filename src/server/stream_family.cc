@@ -2807,10 +2807,6 @@ std::optional<ReadOpts> ParseReadArgsOrReply(ParsedArgs args, bool read_group,
     id_indx++;
     opts.group_name = args[id_indx];
     opts.consumer_name = args[++id_indx];
-    if (opts.consumer_name.empty()) {
-      builder->SendError("consumer name can't be empty", kSyntaxErrType);
-      return std::nullopt;
-    }
     id_indx++;
   }
 
@@ -3633,10 +3629,6 @@ void CmdXClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
   opts.group = parser.Next();
   opts.consumer = parser.Next();
 
-  if (opts.group.empty() || opts.consumer.empty()) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
-
   if (!absl::SimpleAtoi(parser.Next(), &opts.min_idle_time)) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
@@ -4227,10 +4219,6 @@ void CmdXAutoClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
   opts.group = args[1];
   opts.consumer = args[2];
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-
-  if (opts.group.empty() || opts.consumer.empty()) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
 
   if (!absl::SimpleAtoi(args[3], &opts.min_idle_time)) {
     return rb->SendError(kSyntaxErr);

@@ -1319,6 +1319,24 @@ TEST_F(StreamFamilyTest, XGroupConsumer) {
   EXPECT_THAT(resp, ErrArg("NOGROUP"));
 }
 
+TEST_F(StreamFamilyTest, XGroupCreateConsumerEmptyName) {
+  Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
+  EXPECT_THAT(Run({"xgroup", "createconsumer", "foo", "group", ""}), IntArg(1));
+  auto resp = Run({"dump", "foo"});
+  EXPECT_EQ(Run({"restore", "bar", "0", ToSV(resp.GetBuf())}), "OK");
+  EXPECT_THAT(Run({"xgroup", "createconsumer", "bar", "group", ""}), IntArg(0));
+}
+
+TEST_F(StreamFamilyTest, XClaimEmptyNames) {
+  Run({"xadd", "foo", "1-0", "k", "v"});
+  Run({"xgroup", "create", "foo", "", "0"});
+  Run({"xreadgroup", "group", "", "alice", "streams", "foo", ">"});
+  EXPECT_THAT(Run({"xclaim", "foo", "", "", "0", "1-0", "justid"}), RespElementsAre("1-0"));
+  EXPECT_THAT(
+      Run({"xautoclaim", "foo", "", "", "0", "0-0", "justid"}),
+      RespArray(ElementsAre("0-0", RespArray(ElementsAre("1-0")), RespArray(ElementsAre()))));
+}
+
 TEST_F(StreamFamilyTest, Xclaim) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});
   Run({"xadd", "foo", "1-1", "k2", "v2"});
@@ -1557,7 +1575,7 @@ TEST_F(StreamFamilyTest, XReadGroupEmptyConsumer) {
   Run({"xadd", "s", "*", "x", "y"});
   Run({"xgroup", "create", "s", "g", "0"});
   auto resp = Run({"xreadgroup", "group", "g", "", "streams", "s", ">"});
-  EXPECT_THAT(resp, ErrArg("consumer name can't be empty"));
+  EXPECT_THAT(resp, RespElementsAre(RespArray(ElementsAre("s", ArrLen(1)))));
 }
 
 TEST_F(StreamFamilyTest, XPendingInvalidArgs) {
