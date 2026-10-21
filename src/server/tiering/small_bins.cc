@@ -158,9 +158,14 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
     return std::nullopt;
   }
 
-  for (auto& [id, keys] : pending_bins_) {
-    if (keys.erase(make_pair(dbid, key)))
-      return keys.empty() ? std::make_optional(id) : std::nullopt;
+  for (auto it = pending_bins_.begin(); it != pending_bins_.end(); ++it) {
+    if (it->second.erase(make_pair(dbid, key))) {
+      if (!it->second.empty())
+        return std::nullopt;
+      BinId id = it->first;
+      pending_bins_.erase(it);  // don't leave the drained bin behind
+      return id;
+    }
   }
   return std::nullopt;
 }

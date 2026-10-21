@@ -285,10 +285,12 @@ error_code DiskStorage::RequestGrow(off_t min_size) {
     grow_.pending = false;
     grow_.last_err = ec;
     grow_.timestamp_cycles = base::CycleClock::Now();
-    if (ec)
+    if (ec) {
+      LOG_EVERY_T(WARNING, 120) << "Failed to grow " << ec.message();
       ++grow_failures_;
-    else
+    } else {
       alloc_.AddStorage(end, grow_size);
+    }
   });
 
   return {};
