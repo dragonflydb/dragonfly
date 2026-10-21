@@ -17,8 +17,40 @@ using namespace std;
 
 ABSL_FLAG(string, shard_round_robin_prefix, "", "Deprecated -- will be removed");
 
+ABSL_FLAG(bool, shard_sidekiq_private_queues, false,
+          "If true, Sidekiq Pro super_fetch private queues ([<prefix>:]queue:sq|<identity>|<q>) "
+          "are placed on the same shard as their public queue ([<prefix>:]queue:<q>). Ignored "
+          "with --experimental_cluster_shard_by_slot.");
+
 namespace dfly {
 namespace {
+
+thread_local bool shard_sidekiq_private_queues = false;
+
+// Sidekiq Pro super_fetch hardcodes private queue names as "queue:sq|<identity>|<q>" (since 2017).
+// Apps may monkeypatch SuperFetch#private_queue to return any name; Pro's orphan recovery scans
+// "queue:sq|*" and splits on '|', so patched names usually keep this shape, but nothing enforces
+// it. Names that don't match are sharded as usual.
+// Maps "[<prefix>:]queue:sq|<identity>|<q>[|...]" to "[<prefix>:]queue:<q>".
+bool SidekiqPublicQueue(string_view key, string* out) {
+  constexpr string_view kQueue = "queue:";
+  constexpr string_view kPrivate = "queue:sq|";
+
+  size_t pos = key.find(kPrivate);
+  if (pos == string_view::npos)
+    return false;
+
+  size_t id_end = key.find('|', pos + kPrivate.size());
+  if (id_end == string_view::npos)
+    return false;
+
+  string_view q = key.substr(id_end + 1);
+  q = q.substr(0, q.find('|'));
+  out->assign(key.substr(0, pos + kQueue.size()));
+  out->append(q);
+  return true;
+}
+
 // RoundRobinSharder implements a way to distribute keys that begin with some prefix.
 // Round-robin is disabled by default. It is not a general use-case optimization, but instead only
 // reasonable when there are a few highly contended keys, which we'd like to spread between the
@@ -108,8 +140,15 @@ ShardId Shard(string_view v, ShardId shard_num) {
     return KeySlot(v) % shard_num;
   }
 
-  if (IsClusterShardedByTag()) {
+  const bool by_tag = IsClusterShardedByTag();
+  if (by_tag) {
     v = LockTagOptions::instance().Tag(v);
+  }
+
+  // Map the lock tag, not the key, so keys sharing a lock tag stay on the same shard.
+  string public_queue;
+  if (shard_sidekiq_private_queues && SidekiqPublicQueue(v, &public_queue)) {
+    v = by_tag ? LockTagOptions::instance().Tag(public_queue) : string_view{public_queue};
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
@@ -126,6 +165,7 @@ ShardId Shard(string_view v, ShardId shard_num) {
 
 namespace sharding {
 void InitThreadLocals(uint32_t shard_set_size) {
+  shard_sidekiq_private_queues = absl::GetFlag(FLAGS_shard_sidekiq_private_queues);
   RoundRobinSharder::Init(shard_set_size);
 }
 }  // namespace sharding

@@ -1059,6 +1059,61 @@ TEST_F(ListFamilyTest, BLMoveMultiNull) {
   ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::NIL))));
 }
 
+TEST_F(ListFamilyTest, SidekiqPrivateQueueSameShard) {
+  absl::FlagSaver fs;
+  SetTestFlag("shard_sidekiq_private_queues", "true");
+
+  for (string_view lock_on_hashtags : {"false", "true"}) {
+    SetTestFlag("lock_on_hashtags", lock_on_hashtags);
+    ResetService();
+
+    // Shard() reads a thread local that is initialized only on proactor threads.
+    pp_->at(0)->Await([] {
+      const pair<string_view, string_view> kQueues[] = {
+          {"app:queue:mail_p0", "app:queue:sq|worker-5c8d7f-x2k9q:1:0a1b2c3d4e5f|mail_p0"},
+          {"app:queue:{search_p1}", "app:queue:sq|worker-5c8d7f-x2k9q:1:0a1b2c3d4e5f|{search_p1}"},
+          {"app:queue:mail_p0",
+           "app:queue:sq|worker-5c8d7f-x2k9q:1:0a1b2c3d4e5f|mail_p0|{app:queue:mail_p0}"},
+      };
+      for (auto [pub, priv] : kQueues) {
+        EXPECT_EQ(Shard(pub, shard_set->size()), Shard(priv, shard_set->size())) << priv;
+      }
+    });
+  }
+}
+
+// With lock tags, a private queue must stay on the shard of its own lock tag.
+TEST_F(ListFamilyTest, SidekiqPrivateQueueKeepsLockTag) {
+  absl::FlagSaver fs;
+  SetTestFlag("shard_sidekiq_private_queues", "true");
+  SetTestFlag("lock_on_hashtags", "true");
+  ResetService();
+
+  pp_->at(0)->Await([] {
+    const pair<string_view, string_view> kSameTag[] = {
+        {"{dest110}x", "queue:sq|{dest110}|{src1}"},
+        {"{x}y", "app:queue:sq|w:1:ab|q|{x}"},
+    };
+    for (auto [tagged, priv] : kSameTag) {
+      EXPECT_EQ(Shard(tagged, shard_set->size()), Shard(priv, shard_set->size())) << priv;
+    }
+  });
+
+  // The script runs on the shard of {dest110}, which must own the private queue too.
+  ASSERT_NE(Shard("dest110", shard_set->size()), Shard("src1", shard_set->size()));
+  auto resp = Run(
+      {"eval", "return redis.call('rpush', 'queue:sq|{dest110}|{src1}', 'v')", "1", "{dest110}a"});
+  EXPECT_THAT(resp, IntArg(1));
+
+  SetTestFlag("locktag_delimiter", "|");
+  ResetService();
+
+  pp_->at(0)->Await([] {
+    EXPECT_EQ(Shard("|w:1:ab|z", shard_set->size()),
+              Shard("app:queue:sq|w:1:ab|crm", shard_set->size()));
+  });
+}
+
 // A single shard BLMOVE that finds data must conclude in a single (optimistic) hop instead of
 // holding the shard's tx queue until a separate concluding hop arrives.
 TEST_F(ListFamilyTest, BLMoveSingleHop) {
