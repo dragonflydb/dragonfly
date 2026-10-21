@@ -17,38 +17,30 @@ using namespace std;
 
 ABSL_FLAG(string, shard_round_robin_prefix, "", "Deprecated -- will be removed");
 
-ABSL_FLAG(bool, shard_sidekiq_private_queues, false,
-          "If true, Sidekiq Pro super_fetch private queues ([<prefix>:]queue:sq|<identity>|<q>) "
-          "are placed on the same shard as their public queue ([<prefix>:]queue:<q>). Ignored "
-          "with --experimental_cluster_shard_by_slot.");
+ABSL_FLAG(bool, shard_sidekiq_queues, false,
+          "If true, Sidekiq queues (<prefix>queue:<q>) and Sidekiq Pro super_fetch private queues "
+          "(<prefix>queue:sq|<identity>|<q>) are sharded by the queue name <q> only, so a queue "
+          "and its private queues share a shard. Ignored with "
+          "--experimental_cluster_shard_by_slot.");
 
 namespace dfly {
 namespace {
 
-thread_local bool shard_sidekiq_private_queues = false;
+thread_local bool shard_sidekiq_queues = false;
 
 // Sidekiq Pro super_fetch hardcodes private queue names as "queue:sq|<identity>|<q>" (since 2017).
-// Apps may monkeypatch SuperFetch#private_queue to return any name; Pro's orphan recovery scans
-// "queue:sq|*" and splits on '|', so patched names usually keep this shape, but nothing enforces
-// it. Names that don't match are sharded as usual.
-// Maps "[<prefix>:]queue:sq|<identity>|<q>[|...]" to "[<prefix>:]queue:<q>".
-bool SidekiqPublicQueue(string_view key, string* out) {
+// Returns <q> for "<prefix>queue:<q>" and "<prefix>queue:sq|<identity>|<q>", empty otherwise.
+string_view SidekiqQueueName(string_view key) {
   constexpr string_view kQueue = "queue:";
-  constexpr string_view kPrivate = "queue:sq|";
 
-  size_t pos = key.find(kPrivate);
+  size_t pos = key.rfind(kQueue);
   if (pos == string_view::npos)
-    return false;
+    return {};
 
-  size_t id_end = key.find('|', pos + kPrivate.size());
-  if (id_end == string_view::npos)
-    return false;
-
-  string_view q = key.substr(id_end + 1);
-  q = q.substr(0, q.find('|'));
-  out->assign(key.substr(0, pos + kQueue.size()));
-  out->append(q);
-  return true;
+  string_view q = key.substr(pos + kQueue.size());
+  if (absl::StartsWith(q, "sq|"))
+    q = q.substr(q.rfind('|') + 1);
+  return q;
 }
 
 // RoundRobinSharder implements a way to distribute keys that begin with some prefix.
@@ -140,15 +132,15 @@ ShardId Shard(string_view v, ShardId shard_num) {
     return KeySlot(v) % shard_num;
   }
 
-  const bool by_tag = IsClusterShardedByTag();
-  if (by_tag) {
+  if (IsClusterShardedByTag()) {
     v = LockTagOptions::instance().Tag(v);
   }
 
   // Map the lock tag, not the key, so keys sharing a lock tag stay on the same shard.
-  string public_queue;
-  if (shard_sidekiq_private_queues && SidekiqPublicQueue(v, &public_queue)) {
-    v = by_tag ? LockTagOptions::instance().Tag(public_queue) : string_view{public_queue};
+  if (shard_sidekiq_queues) {
+    if (string_view q = SidekiqQueueName(v); !q.empty()) {
+      v = q;
+    }
   }
 
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
@@ -165,7 +157,7 @@ ShardId Shard(string_view v, ShardId shard_num) {
 
 namespace sharding {
 void InitThreadLocals(uint32_t shard_set_size) {
-  shard_sidekiq_private_queues = absl::GetFlag(FLAGS_shard_sidekiq_private_queues);
+  shard_sidekiq_queues = absl::GetFlag(FLAGS_shard_sidekiq_queues);
   RoundRobinSharder::Init(shard_set_size);
 }
 }  // namespace sharding

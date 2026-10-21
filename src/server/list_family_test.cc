@@ -1061,7 +1061,7 @@ TEST_F(ListFamilyTest, BLMoveMultiNull) {
 
 TEST_F(ListFamilyTest, SidekiqPrivateQueueSameShard) {
   absl::FlagSaver fs;
-  SetTestFlag("shard_sidekiq_private_queues", "true");
+  SetTestFlag("shard_sidekiq_queues", "true");
 
   for (string_view lock_on_hashtags : {"false", "true"}) {
     SetTestFlag("lock_on_hashtags", lock_on_hashtags);
@@ -1072,8 +1072,7 @@ TEST_F(ListFamilyTest, SidekiqPrivateQueueSameShard) {
       const pair<string_view, string_view> kQueues[] = {
           {"app:queue:mail_p0", "app:queue:sq|worker-5c8d7f-x2k9q:1:0a1b2c3d4e5f|mail_p0"},
           {"app:queue:{search_p1}", "app:queue:sq|worker-5c8d7f-x2k9q:1:0a1b2c3d4e5f|{search_p1}"},
-          {"app:queue:mail_p0",
-           "app:queue:sq|worker-5c8d7f-x2k9q:1:0a1b2c3d4e5f|mail_p0|{app:queue:mail_p0}"},
+          {"queue:mail_p0", "other:queue:sq|worker-5c8d7f-x2k9q:1:0a1b2c3d4e5f|mail_p0"},
       };
       for (auto [pub, priv] : kQueues) {
         EXPECT_EQ(Shard(pub, shard_set->size()), Shard(priv, shard_set->size())) << priv;
@@ -1085,7 +1084,7 @@ TEST_F(ListFamilyTest, SidekiqPrivateQueueSameShard) {
 // With lock tags, a private queue must stay on the shard of its own lock tag.
 TEST_F(ListFamilyTest, SidekiqPrivateQueueKeepsLockTag) {
   absl::FlagSaver fs;
-  SetTestFlag("shard_sidekiq_private_queues", "true");
+  SetTestFlag("shard_sidekiq_queues", "true");
   SetTestFlag("lock_on_hashtags", "true");
   ResetService();
 
