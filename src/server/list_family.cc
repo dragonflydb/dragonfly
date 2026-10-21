@@ -1008,8 +1008,9 @@ OpResult<string> BPopPusher::Run(unsigned limit_ms, Transaction* tx, ConnectionC
 
 OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, ConnectionContext* cntx) {
   OpResult<string> op_res;
-  bool is_multi = tx->IsMulti();
-  auto cb_move = [&](Transaction* t, EngineShard* shard) {
+  // Blocking is not allowed inside MULTI/scripts, and only the first hop may decide to block.
+  bool may_block = !tx->IsMulti();
+  auto cb_move = [&](Transaction* t, EngineShard* shard) -> Transaction::RunnableResult {
     OpArgs op_args = t->GetOpArgs(shard);
     op_res = OpMoveSingleShard(op_args, pop_key_, push_key_, popdir_, pushdir_);
     if (op_res) {
@@ -1020,15 +1021,20 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
         RecordJournal(op_args, cmd, ArgSlice{push_key_, op_res.value()}, 1);
       }
     }
+
+    // Keep the transaction (and its locks) open only if we are going to block. This way the
+    // common case of a non-empty source list concludes in a single hop and does not stall
+    // the shard's tx queue waiting for a separate concluding hop from the coordinator.
+    if (may_block && op_res.status() == OpStatus::KEY_NOTFOUND)
+      return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
     return OpStatus::OK;
   };
-  tx->Execute(cb_move, false);
+  tx->Execute(cb_move, true);
 
-  if (is_multi || op_res.status() != OpStatus::KEY_NOTFOUND) {
+  if (!may_block || op_res.status() != OpStatus::KEY_NOTFOUND) {
     if (op_res.status() == OpStatus::KEY_NOTFOUND) {
       op_res = OpStatus::TIMED_OUT;
     }
-    tx->Conclude();
     return op_res;
   }
 
@@ -1037,6 +1043,7 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
   if (status != OpStatus::OK)
     return status;
 
+  may_block = false;
   tx->Execute(cb_move, true);
   return op_res;
 }
