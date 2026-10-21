@@ -516,7 +516,7 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 }
 
 struct ParsedStreamId {
-  streamID val;
+  streamID val{};
 
   // Was an ID different than "ms-*" specified? for XADD only.
   bool has_seq = false;
@@ -732,12 +732,11 @@ inline const uint8_t* SafePtr(MutableSlice field) {
                        : reinterpret_cast<const uint8_t*>(field.data());
 }
 
-bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamId* dest) {
+// allow_auto_seq accepts XADD's "<ms>-*" form.
+bool ParseID(string_view strid, bool strict, uint64_t missing_seq, bool allow_auto_seq,
+             ParsedStreamId* dest) {
   if (strid.empty() || strid.size() > 127)
     return false;
-
-  if (strid == "*")
-    return true;
 
   dest->id_given = true;
   dest->has_seq = true;
@@ -769,7 +768,7 @@ bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamI
     if (dash_pos + 1 == strid.size())
       return false;
 
-    if (dash_pos + 2 == strid.size() && strid[dash_pos + 1] == '*') {
+    if (allow_auto_seq && dash_pos + 2 == strid.size() && strid[dash_pos + 1] == '*') {
       result.seq = 0;
       dest->has_seq = false;
     } else if (!absl::SimpleAtoi(strid.substr(dash_pos + 1), &result.seq)) {
@@ -780,6 +779,10 @@ bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamI
   dest->val = result;
 
   return true;
+}
+
+bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamId* dest) {
+  return ParseID(strid, strict, missing_seq, false, dest);
 }
 
 enum class RangeBoundary { kStart, kEnd };
@@ -2486,6 +2489,8 @@ void CreateGroup(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   switch (result) {
     case OpStatus::KEY_NOTFOUND:
       return cmd_cntx->SendError(kXGroupKeyNotFound);
+    case OpStatus::SYNTAX_ERR:
+      return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
     default:
       cmd_cntx->SendError(result);
   }
@@ -2598,6 +2603,8 @@ void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
       return cmd_cntx->SendError(kXGroupKeyNotFound);
+    case OpStatus::SYNTAX_ERR:
+      return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
     default:
       cmd_cntx->SendError(result);
   }
@@ -2674,8 +2681,8 @@ ParseResult<TrimOpts> ParseTrimOpts(bool max_len, CmdArgParser* parser) {
     opts.length_or_id = parser->Next<uint32_t>();
   } else {
     ParsedStreamId parsed_id;
-    if (!ParseID(parser->Next(), false, 0, &parsed_id)) {
-      return CreateSyntaxError(kSyntaxErr);
+    if (!ParseID(parser->Next(), true, 0, &parsed_id)) {
+      return CreateSyntaxError(kInvalidStreamId);
     }
 
     opts.length_or_id = parsed_id;  // trivial copy
@@ -2694,8 +2701,8 @@ ParseResult<TrimOpts> ParseTrimOpts(bool max_len, CmdArgParser* parser) {
 
 ParseResult<TrimOpts> ParseTrimOpts(CmdArgParser* parser) {
   bool max_len = parser->Check("MAXLEN");
-  if (!max_len) {
-    parser->ExpectTag("MINID");
+  if (!max_len && !parser->Check("MINID")) {
+    return CreateSyntaxError(kSyntaxErr);
   }
 
   auto res = ParseTrimOpts(max_len, parser);
@@ -2730,7 +2737,7 @@ ParseResult<AddOpts> ParseAddOpts(CmdArgParser* parser) {
     } else {
       // It is StreamId
       std::string_view id = parser->Next();
-      if (!ParseID(id, true, 0, &opts.parsed_id)) {
+      if (id != "*" && !ParseID(id, true, 0, /*allow_auto_seq=*/true, &opts.parsed_id)) {
         return CreateSyntaxError(kInvalidStreamId);
       }
       break;
@@ -4230,7 +4237,7 @@ void CmdXAutoClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
   RangeId rs;
 
   if (!ParseRangeId(start, RangeBoundary::kStart, &rs)) {
-    return rb->SendError(kSyntaxErr);
+    return rb->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   if (rs.exclude && StreamDecrID(&rs.parsed_id.val) != C_OK) {
