@@ -102,6 +102,18 @@ def error_message(message: str) -> str:
     return f"{color_message(ANSI_RED, 'ERROR:', sys.stderr)} {message}"
 
 
+def deployment_ssh_configuration_message() -> str:
+    return (
+        "deployment SSH is not configured. This command needs the exact "
+        "'gcloud compute ssh' command used to connect to the production deployment bastion.\n"
+        f"{color_message(ANSI_BOLD + ANSI_BLUE, 'HINT:', sys.stderr)} Run this command once:\n"
+        "  dfly-inspect <command> <target> --deployment-ssh-conn-command "
+        '\'gcloud compute ssh --zone "ZONE" "BASTION_INSTANCE" --project "PROJECT_ID"\'\n'
+        "Replace ZONE, BASTION_INSTANCE, and PROJECT_ID with the values from your approved "
+        "deployment SSH command. The command is verified and cached for future use."
+    )
+
+
 def load_deployment_ssh_connection() -> str | None:
     try:
         value = json.loads(DEPLOYMENT_SSH_CONNECTION_PATH.read_text())
@@ -134,10 +146,7 @@ def deployment_ssh_command(_bastion: str | None, remote_command: list[str]) -> l
         if command[:3] != ["gcloud", "compute", "ssh"]:
             raise ValueError("--deployment-ssh-conn-command must start with 'gcloud compute ssh'")
         return [*command, f"--command={shlex.join(remote_command)}"]
-    raise ValueError(
-        "deployment SSH is not configured; provide --deployment-ssh-conn-command once "
-        "to verify and cache the deployment connection"
-    )
+    raise ValueError(deployment_ssh_configuration_message())
 
 
 def dfadmin_failure_message(environment: str, detail: str) -> str:
@@ -204,7 +213,9 @@ def preflight_deployment_ssh(supplied_command: str | None) -> None:
             save_deployment_ssh_connection(supplied_command)
             print(
                 f"Deployment SSH connection cached: {DEPLOYMENT_SSH_CONNECTION_PATH}\n"
-                "Future commands will use it automatically; do not repeat --deployment-ssh-conn-command."
+                f"{color_message(ANSI_BOLD + ANSI_BLUE, 'NOTE:', sys.stdout)} "
+                "Future commands will use it automatically; do not repeat "
+                "--deployment-ssh-conn-command."
             )
 
 
@@ -4415,8 +4426,14 @@ def health_report(
 
     datastore_id = health_datastore_id(environment, target)
     all_nodes = get_datastore_nodes(environment, datastore_id)
-    total_nodes = len(all_nodes)
-    selected_items = sorted(all_nodes.items())[:max_elements]
+    if target.startswith("node_"):
+        node = all_nodes.get(target)
+        if node is None:
+            raise RuntimeError(f"node {target} was not returned for datastore {datastore_id}")
+        selected_items = [(target, node)]
+    else:
+        selected_items = sorted(all_nodes.items())[:max_elements]
+    total_nodes = len(selected_items) if target.startswith("node_") else len(all_nodes)
     nodes = dict(selected_items)
     truncated = len(nodes) < total_nodes
 
@@ -4441,6 +4458,7 @@ def health_report(
             "image_timestamp": "nil",
             "uptime_seconds": "nil",
             "used_memory": "nil",
+            "used_memory_rss": "nil",
             "maxmemory": "nil",
             "memory_used_percent": "nil",
             "api_ipv4": "unavailable",
@@ -4499,6 +4517,7 @@ def health_report(
         if used_memory is not None and configured_maxmemory and configured_maxmemory > 0:
             row["memory_used_percent"] = f"{100 * used_memory / configured_maxmemory:.1f}"
         used_memory_rss = parse_info_integer(sections["memory"], "used_memory_rss")
+        row["used_memory_rss"] = str(used_memory_rss) if used_memory_rss is not None else "nil"
         if used_memory and used_memory_rss is not None:
             row["rss_to_used_memory_ratio"] = f"{used_memory_rss / used_memory:.2f}"
         row["evicted_keys"] = sections["stats"].get("evicted_keys", "nil")
@@ -4574,6 +4593,7 @@ def health_report(
         "image_timestamp",
         "uptime_seconds",
         "used_memory",
+        "used_memory_rss",
         "maxmemory",
         "memory_used_percent",
         "rss_to_used_memory_ratio",
@@ -6794,7 +6814,7 @@ Commands:
     slot-ownership         so             Compare current CLUSTER SLOTS ownership for a datastore or node list.
     migrations             mg             Summarize local migration history by shard, node, or datastore scope.
     audit                  au             Retrieve a bounded, redacted audit history for a resource.
-    health                 hl             Summarize bounded Redis health signals for every datastore node.
+    health                 hl             Summarize bounded Redis health signals for the selected target nodes.
     diff-config            dc             Compare explicit CONFIG GET parameters across nodes.
     multi                  mu             Inspect compact schemas before comparing read-only resource fields.
     logs                   lg             Retrieve one archived Dragonfly or agent log stream.
@@ -8016,10 +8036,8 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
         and not defer_deployment_ssh_preflight
         and not (supplied_ssh_connection or cached_ssh_connection)
     ):
-        raise ValueError(
-            "deployment SSH is not configured; provide --deployment-ssh-conn-command once "
-            "to verify and cache the deployment connection"
-        )
+        print(error_message(deployment_ssh_configuration_message()), file=sys.stderr)
+        return 1
     executables = []
     if not getattr(arguments, "dry_run", False):
         executables = (
