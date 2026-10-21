@@ -6,6 +6,7 @@
 
 #include "base/logging.h"
 #include "facade/facade_types.h"
+#include "server/command_registry.h"
 
 namespace dfly {
 
@@ -19,7 +20,7 @@ void SlowLogShard::Reset() {
   log_entries_.clear();
 }
 
-void SlowLogShard::Add(const string_view command_name, const facade::ParsedArgs& args,
+void SlowLogShard::Add(const CommandId& cid, const facade::ParsedArgs& args,
                        const string_view client_name, const string_view client_ip,
                        uint64_t exec_time_usec, uint64_t unix_ts_usec) {
   DCHECK_GT(log_entries_.capacity(), 0u);
@@ -31,8 +32,9 @@ void SlowLogShard::Add(const string_view command_name, const facade::ParsedArgs&
     // for telling how many further arguments there are
     slowlog_effective_length = kMaximumSlowlogArgCount - 1;
   }
+  slowlog_effective_length = std::min(slowlog_effective_length, cid.NonSecretArgCount(args));
   slowlog_args.reserve(slowlog_effective_length);
-  slowlog_args.emplace_back(command_name, 0);
+  slowlog_args.emplace_back(cid.name(), 0);
 
   for (size_t i = 0; i < slowlog_effective_length; ++i) {
     string_view arg = args[i];

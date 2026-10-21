@@ -304,9 +304,10 @@ struct CmdArgListFormatter {
   }
 };
 
-string UnknownCmd(string cmd, facade::ParsedArgs args) {
+string UnknownCmd(string cmd, facade::ParsedArgs args, size_t num_args) {
+  auto end = std::next(args.begin(), num_args);
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
-                      absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
+                      absl::StrJoin(args.begin(), end, ", ", CmdArgListFormatter()));
 }
 
 std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
@@ -3381,7 +3382,7 @@ void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;
     if (!valid_proto_version) {
-      cmd_cntx->SendError(UnknownCmd("HELLO", args));
+      cmd_cntx->SendError(UnknownCmd("HELLO", args, cmd_cntx->cid()->NonSecretArgCount(args)));
       return;
     }
 

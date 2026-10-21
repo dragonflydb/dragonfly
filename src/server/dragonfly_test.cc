@@ -10,8 +10,10 @@ extern "C" {
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
+#include <absl/synchronization/mutex.h>
 #include <absl/time/clock.h>
 #include <gmock/gmock.h>
 #include <reflex/matcher.h>
@@ -802,6 +804,68 @@ TEST_F(DflyEngineTest, MonitorTimestamp) {
   }
 }
 
+#ifdef USE_ABSL_LOG
+// Collects failed-command lines from their VLOG(2) twin; the WARNING copy is rate-limited.
+class FailedCmdSink : public absl::LogSink {
+ public:
+  FailedCmdSink() : vlog_level_(absl::SetVLogLevel("main_service", 2)) {
+    absl::AddLogSink(this);
+  }
+
+  ~FailedCmdSink() override {
+    absl::RemoveLogSink(this);
+    absl::SetVLogLevel("main_service", vlog_level_);
+  }
+
+  void Send(const absl::LogEntry& entry) override {
+    if (absl::StrContains(entry.text_message(), "failed with reason")) {
+      absl::MutexLock lk(&mu_);
+      lines_.emplace_back(entry.text_message());
+    }
+  }
+
+  vector<string> Lines() {
+    absl::MutexLock lk(&mu_);
+    return lines_;
+  }
+
+ private:
+  int vlog_level_;
+  absl::Mutex mu_;
+  vector<string> lines_;
+};
+
+TEST_F(DflyEngineTest, HelloAuthHidden) {
+  absl::FlagSaver fs;
+  Run({"config", "set", "slowlog_log_slower_than", "0"});
+  EXPECT_EQ(Run({"monitor"}), "OK");
+
+  FailedCmdSink sink;
+  Run("cl", {"hello", "3", "auth", "u", "secret"});
+  Run("cl", {"hello", "3", "auht", "u", "secret"});
+  Run("cl", {"hello"});
+  auto resp = Run("cl", {"hello", "4", "AUTH", "u", "secret"});
+  Run("cl", {"auth", "u", "secret"});
+  Run("cl", {"acl", "setuser", "v", ">secret", "nosuchrule"});
+
+  EXPECT_EQ(resp.GetString(), "ERR unknown command 'HELLO' with args beginning with: `4`");
+  EXPECT_THAT(sink.Lines(), Contains(HasSubstr(" HELLO 3 failed with reason: syntax error")));
+  EXPECT_THAT(sink.Lines(), testing::Each(testing::Not(HasSubstr("secret"))));
+
+  auto monitor = pp_->at(0)->Await([&] { return GetConnection("IO0")->monitor_messages; });
+  EXPECT_THAT(monitor, Contains(testing::EndsWith(R"("HELLO" "3")")));
+  EXPECT_THAT(monitor, testing::Each(testing::Not(HasSubstr("secret"))));
+
+  vector<vector<string>> slowlog;
+  resp = Run("cl", {"slowlog", "get", "100"});
+  for (const auto& entry : resp.GetVec())
+    slowlog.push_back(StrArray(entry.GetVec()[3]));
+  EXPECT_THAT(slowlog, Contains(ElementsAre("HELLO", "3", "... (3 more arguments)")));
+  EXPECT_THAT(slowlog, Contains(ElementsAre("AUTH", "... (2 more arguments)")));
+  EXPECT_THAT(slowlog, testing::Each(testing::Not(Contains(HasSubstr("secret")))));
+}
+#endif
+
 TEST_F(DflyEngineTest, Bug468) {
   RespExpr resp = Run({"multi"});
   ASSERT_EQ(resp, "OK");
@@ -1460,7 +1524,8 @@ TEST_F(DflyEngineTest, TypeForFamilyMatchesRegisteredCommands) {
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
-    SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping"});
+    SetFlag(&FLAGS_command_alias,
+            {"___set=set", "___ping=ping", "___hello=hello", "evalauth=auth"});
     SetFlag(&FLAGS_latency_tracking, true);
   }
 
@@ -1508,6 +1573,21 @@ TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
   EXPECT_EQ(command_histograms.at("set"), command_histograms.at("___set"));
   EXPECT_EQ(command_histograms.at("ping"), command_histograms.at("___ping"));
 }
+
+#ifdef USE_ABSL_LOG
+TEST_F(DflyCommandAliasTest, AliasHidesSecretArgs) {
+  EXPECT_EQ(Run({"monitor"}), "OK");
+  FailedCmdSink sink;
+  Run("cl", {"___hello", "3", "auth", "u", "secret"});
+  Run("cl", {"evalauth", "u", "secret"});
+
+  auto monitor = pp_->at(0)->Await([&] { return GetConnection("IO0")->monitor_messages; });
+  EXPECT_THAT(monitor,
+              ElementsAre(testing::EndsWith(R"("3")"), testing::EndsWith(R"("EVALAUTH")")));
+  EXPECT_THAT(sink.Lines(), Contains(HasSubstr(" EVALAUTH failed with reason")));
+  EXPECT_THAT(sink.Lines(), testing::Each(testing::Not(HasSubstr("secret"))));
+}
+#endif
 
 static void BM_FindExtended(benchmark::State& state) {
   CommandRegistry registry;
