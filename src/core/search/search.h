@@ -13,7 +13,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <tuple>
 #include <variant>
 
 #include "base/pmr/memory_resource.h"
@@ -136,7 +135,9 @@ struct SchemaField {
   // Whether this attribute rather than `other` stands for their shared document field: one with a
   // sort index first, else the first declared.
   bool StandsBefore(const SchemaField& other) const {
-    return std::tuple(!HasSortIndex(), number) < std::tuple(!other.HasSortIndex(), other.number);
+    if (HasSortIndex() != other.HasSortIndex())
+      return HasSortIndex();
+    return number < other.number;
   }
 
   using ParamsVariant =
