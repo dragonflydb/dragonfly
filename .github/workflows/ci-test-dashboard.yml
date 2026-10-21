@@ -96,13 +96,18 @@ jobs:
             --work-dir "${RUNNER_TEMP}/ci-test-dashboard" \
             "${DASHBOARD_ROOT}/site/data"
 
-      # Create data/issue-links.json - containing related issue/PR/assignee lookup data.
-      # The artifact upload/S3 publish include that additional static file.
+      # DATAPLANE_PRIVATE_READ_TOKEN must read issues and pull requests in both source repositories.
       - name: Link tests to GitHub issues and pull requests
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 "${DASHBOARD_ROOT}/sync_issue_links.py" "${DASHBOARD_ROOT}/site/data"
+          GITHUB_TOKEN: ${{ secrets.DATAPLANE_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${GITHUB_TOKEN}" || {
+            echo "DATAPLANE_PRIVATE_READ_TOKEN is required to read dragonflydb/dataplane-private" >&2
+            false
+          }
+          python3 "${DASHBOARD_ROOT}/sync_issue_links.py" "${DASHBOARD_ROOT}/site/data"
 
       - name: Upload dashboard artifact
         uses: actions/upload-artifact@v7

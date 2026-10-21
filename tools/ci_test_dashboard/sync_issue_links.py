@@ -16,10 +16,10 @@ from typing import Any
 
 SCHEMA_VERSION = 3
 DEFAULT_REPOSITORY = "dragonflydb/dragonfly"
+DEFAULT_REPOSITORIES = (DEFAULT_REPOSITORY, "dragonflydb/dataplane-private")
 NAME_ONLY_MIN_LENGTH = 12
 MIN_ALIAS_LENGTH = 8
 CLOSED_HISTORY_DAYS = 180
-MAX_CLOSED_HISTORY_RECORDS = 500
 
 
 def github_api(url: str, token: str) -> Any:
@@ -56,7 +56,7 @@ def github_pages(endpoint: str, token: str) -> list[dict[str, Any]]:
 
 
 def github_recent_pages(
-    endpoint: str, token: str, cutoff: datetime, maximum: int, include: Any = lambda item: True
+    endpoint: str, token: str, cutoff: datetime, include: Any = lambda item: True
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     page = 1
@@ -78,8 +78,6 @@ def github_recent_pages(
             if closed_at >= cutoff and include(item):
                 recent_items.append(item)
         items.extend(recent_items)
-        if len(items) >= maximum:
-            return items[:maximum]
         if len(page_items) < 100 or reached_cutoff:
             return items
         page += 1
@@ -185,20 +183,36 @@ def pull_request_references_issue(
 ) -> bool:
     text = record_text(pull_request)
     escaped_repository = re.escape(repository)
-    return any(
-        re.search(pattern, text) is not None
-        for pattern in (
-            rf"(?<![\w/])#{issue_number}\b",
-            rf"(?<![\w/]){escaped_repository}#{issue_number}\b",
-            rf"https?://github\.com/{escaped_repository}/issues/{issue_number}\b",
-        )
-    )
+    patterns = [
+        rf"(?<![\w/]){escaped_repository}#{issue_number}\b",
+        rf"https?://github\.com/{escaped_repository}/issues/{issue_number}\b",
+    ]
+    if pull_request.get("repository", DEFAULT_REPOSITORY) == repository:
+        patterns.append(rf"(?<![\w/])#{issue_number}\b")
+    return any(re.search(pattern, text) is not None for pattern in patterns)
 
 
 def record_state(record: dict[str, Any]) -> str:
     if record.get("merged_at"):
         return "merged"
     return record.get("state", "closed")
+
+
+def record_repository(record: dict[str, Any], fallback: str) -> str:
+    return record.get("repository", fallback)
+
+
+def link_record(record: dict[str, Any], fallback: str) -> dict[str, Any]:
+    source_repository = record_repository(record, fallback)
+    if source_repository != DEFAULT_REPOSITORY:
+        return {"number": record["number"], "repository": source_repository}
+    return {
+        "number": record["number"],
+        "repository": source_repository,
+        "url": record["html_url"],
+        "title": record["title"],
+        "state": record_state(record),
+    }
 
 
 def build_links(
@@ -218,33 +232,32 @@ def build_links(
         for issue, text in issue_records:
             match = match_aliases(aliases, text)
             if match:
-                matched_issues.append(
-                    {
-                        "number": issue["number"],
-                        "url": issue["html_url"],
-                        "title": issue["title"],
-                        "state": record_state(issue),
-                        "match": match,
-                        "eligible_for_assignee": record_state(issue) == "open"
-                        and match in {"exact", "parameterized"},
-                        "assignees": [assignee["login"] for assignee in issue.get("assignees", [])],
-                    }
-                )
+                issue_repository = record_repository(issue, repository)
+                issue_link = link_record(issue, repository)
+                if issue_repository == DEFAULT_REPOSITORY:
+                    issue_link.update(
+                        {
+                            "match": match,
+                            "eligible_for_assignee": record_state(issue) == "open"
+                            and match in {"exact", "parameterized"},
+                            "assignees": [
+                                assignee["login"] for assignee in issue.get("assignees", [])
+                            ],
+                        }
+                    )
+                matched_issues.append(issue_link)
         matched_issues.sort(key=lambda issue: issue["number"], reverse=True)
-        issue_numbers = {issue["number"] for issue in matched_issues}
         matched_prs = []
         for pull_request, text in pull_request_records:
             if match_aliases(aliases, text) or any(
-                pull_request_references_issue(pull_request, number, repository)
-                for number in issue_numbers
+                pull_request_references_issue(pull_request, issue["number"], issue["repository"])
+                for issue in matched_issues
             ):
                 matched_prs.append(
-                    {
-                        "number": pull_request["number"],
-                        "url": pull_request["html_url"],
-                        "title": pull_request["title"],
-                        "state": record_state(pull_request),
-                    }
+                    link_record(
+                        pull_request,
+                        repository,
+                    )
                 )
         matched_prs.sort(key=lambda pull_request: pull_request["number"], reverse=True)
         if matched_issues or matched_prs:
@@ -261,40 +274,61 @@ def load_tests(data_dir: Path) -> list[dict[str, Any]]:
     return list(tests.values())
 
 
-def write_links(data_dir: Path, repository: str, token: str) -> None:
+def with_repository(records: list[dict[str, Any]], repository: str) -> list[dict[str, Any]]:
+    return [{**record, "repository": repository} for record in records]
+
+
+def write_links(
+    data_dir: Path,
+    repositories: list[str] | tuple[str, ...],
+    token: str,
+    closed_history_days: int = CLOSED_HISTORY_DAYS,
+) -> None:
     tests = load_tests(data_dir)
-    base_url = f"https://api.github.com/repos/{urllib.parse.quote(repository, safe='/')}"
-    issues = github_pages(f"{base_url}/issues?state=open", token)
-    pull_requests = github_pages(f"{base_url}/pulls?state=open", token)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=CLOSED_HISTORY_DAYS)
-    issues.extend(
-        github_recent_pages(
-            f"{base_url}/issues?state=closed",
-            token,
-            cutoff,
-            MAX_CLOSED_HISTORY_RECORDS,
-            lambda item: "pull_request" not in item,
+    issues: list[dict[str, Any]] = []
+    pull_requests: list[dict[str, Any]] = []
+    cutoff = datetime.now(timezone.utc) - timedelta(days=closed_history_days)
+    for repository in repositories:
+        base_url = f"https://api.github.com/repos/{urllib.parse.quote(repository, safe='/')}"
+        issues.extend(
+            with_repository(github_pages(f"{base_url}/issues?state=open", token), repository)
         )
-    )
-    pull_requests.extend(
-        github_recent_pages(
-            f"{base_url}/pulls?state=closed", token, cutoff, MAX_CLOSED_HISTORY_RECORDS
+        pull_requests.extend(
+            with_repository(github_pages(f"{base_url}/pulls?state=open", token), repository)
         )
-    )
-    links = build_links(tests, issues, pull_requests, repository)
-    write_link_payload(data_dir, repository, links)
+        issues.extend(
+            with_repository(
+                github_recent_pages(
+                    f"{base_url}/issues?state=closed",
+                    token,
+                    cutoff,
+                    lambda item: "pull_request" not in item,
+                ),
+                repository,
+            )
+        )
+        pull_requests.extend(
+            with_repository(
+                github_recent_pages(f"{base_url}/pulls?state=closed", token, cutoff),
+                repository,
+            )
+        )
+    links = build_links(tests, issues, pull_requests)
+    write_link_payload(data_dir, repositories, links)
     print(
         f"Matched {len(links)} dashboard tests to open or recent closed records from "
-        f"{repository}",
+        f"{', '.join(repositories)}",
         flush=True,
     )
 
 
-def write_link_payload(data_dir: Path, repository: str, links: dict[str, dict[str, Any]]) -> None:
+def write_link_payload(
+    data_dir: Path, repositories: list[str] | tuple[str, ...], links: dict[str, dict[str, Any]]
+) -> None:
     payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "repository": repository,
+        "repositories": repositories,
         "links": links,
     }
     (data_dir / "issue-links.json").write_text(json.dumps(payload, separators=(",", ":")))
@@ -303,11 +337,29 @@ def write_link_payload(data_dir: Path, repository: str, links: dict[str, dict[st
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("data_dir", type=Path)
-    parser.add_argument("--repository", default=DEFAULT_REPOSITORY)
+    parser.add_argument(
+        "--repository",
+        dest="repositories",
+        action="append",
+        help="Source repository to query; repeat to override the two default repositories",
+    )
+    parser.add_argument(
+        "--closed-history-days",
+        type=int,
+        default=CLOSED_HISTORY_DAYS,
+        help=f"Include closed records from the last N days (default: {CLOSED_HISTORY_DAYS})",
+    )
     parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN", ""))
     args = parser.parse_args()
+    if args.closed_history_days < 0:
+        parser.error("--closed-history-days must be non-negative")
     try:
-        write_links(args.data_dir, args.repository, args.token)
+        write_links(
+            args.data_dir,
+            args.repositories or DEFAULT_REPOSITORIES,
+            args.token,
+            args.closed_history_days,
+        )
     except (RuntimeError, urllib.error.URLError, TimeoutError) as error:
         print(f"GitHub link lookup failed: {error}", flush=True)
         return 1

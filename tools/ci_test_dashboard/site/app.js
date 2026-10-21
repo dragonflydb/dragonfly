@@ -346,6 +346,24 @@ function linksFor(test) {
   return state.issueLinks?.links?.[test.id] ?? null;
 }
 
+function linkReference(record) {
+  const repository = record.repository ?? state.issueLinks?.repository;
+  return repository ? `${repository}#${record.number}` : `#${record.number}`;
+}
+
+function relatedLinkHtml(record, kind) {
+  const label = escapeHtml(linkReference(record));
+  const url = record.url ??
+      (record.repository ? `https://github.com/${record.repository}/${kind}/${record.number}` :
+                           null);
+  if (!url) {
+    return label;
+  }
+  const title = record.title ? ` title="${escapeHtml(record.title)}"` : '';
+  return `<a href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer"${title}>${
+      label}</a>`;
+}
+
 // Chooses the label when related issues or pull requests are unavailable or absent.
 function unavailableLinkValue(test) {
   if (state.issueLinksStatus === 'loading') {
@@ -369,11 +387,9 @@ function issueLinksHtml(test) {
             const assignees = issue.eligible_for_assignee && issue.assignees?.length ?
                 `, assigned: ${issue.assignees.join(', ')}` :
                 '';
-            return `<a href="${
-                escapeHtml(issue.url)}" target="_blank" rel="noopener noreferrer" title="${
-                escapeHtml(
-                    issue.title)}">#${escapeHtml(issue.number)}</a><span class="link-state"> (${
-                escapeHtml(issue.state)}${escapeHtml(assignees)})</span>`;
+            const state =
+                issue.state ? ` (${escapeHtml(issue.state)}${escapeHtml(assignees)})` : '';
+            return `${relatedLinkHtml(issue, 'issues')}<span class="link-state">${state}</span>`;
           })
           .join(', ')}</span>`;
 }
@@ -390,7 +406,8 @@ function assigneesHtml(test) {
     return '<span class="unavailable">N/A</span>';
   }
   const assignees = dedicatedIssues.flatMap(
-      (issue) => (issue.assignees ?? []).map((assignee) => `${assignee} (#${issue.number})`));
+      (issue) =>
+          (issue.assignees ?? []).map((assignee) => `${assignee} (${linkReference(issue)})`));
   return assignees.length ? escapeHtml(assignees.join(', ')) :
                             '<span class="unavailable">Unassigned</span>';
 }
@@ -404,11 +421,8 @@ function pullRequestsHtml(test) {
   return `<span class="related-links">${
       links.pull_requests
           .map(
-              (pullRequest) => `<a href="${
-                  escapeHtml(pullRequest.url)}" target="_blank" rel="noopener noreferrer" title="${
-                  escapeHtml(pullRequest.title)}">#${
-                  escapeHtml(pullRequest.number)}</a><span class="link-state"> (${
-                  escapeHtml(pullRequest.state)})</span>`)
+              (pullRequest) => `${relatedLinkHtml(pullRequest, 'pull')}<span class="link-state">${
+                  pullRequest.state ? ` (${escapeHtml(pullRequest.state)})` : ''}</span>`)
           .join(', ')}</span>`;
 }
 
