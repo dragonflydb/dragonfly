@@ -32,6 +32,8 @@ extern "C" {
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
 
+ABSL_DECLARE_FLAG(float, migration_buckets_cpu_budget);
+
 ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
           "The maximum number of key-value pairs that will be deleted in each eviction "
           "when heartbeat based eviction is triggered under memory pressure.");
@@ -1006,7 +1008,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
         // We use copy of table smart pointer and pass it as table because FLUSHALL can drop table.
-        DelAtomic(db_cntx, it, table.get());
+        DelAtomic(db_cntx, it, table.get(), /*async=*/true);
         ++del_count;
       }
       ++it;
@@ -1014,20 +1016,30 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   };
 
   ServerState& etl = *ServerState::tlocal();
+  const float cpu_budget = GetFlag(FLAGS_migration_buckets_cpu_budget);
   PrimeTable* pt = &table->prime;
   PrimeTable::Cursor cursor;
 
   do {
-    PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
-    cursor = next;
-    ThisFiber::Yield();
-
+    {
+      base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
+      cursor = pt->TraverseBuckets(cursor, iterate_bucket);
+    }
     // DelAtomic above only marks the watchers of a deleted stream as awakened; normally the
     // deleting transaction dispatches them when it concludes. This fiber has no such transaction,
     // so dispatch here - between bucket traversals, where preempting in a readiness check is safe.
     if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
         bc && owner_->GetContTx() == nullptr) {
       bc->NotifyPending();
+    }
+
+    while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN &&
+           flush_slots_cpu_aggregator_.IsOverloaded(cpu_budget)) {
+      ThisFiber::SleepFor(300us);
+      // IsOverloaded does not advance the measurement windows. Refresh them after sleeping
+      // without charging the sleep to the CPU budget.
+      uint64_t now = base::CycleClock::Now();
+      flush_slots_cpu_aggregator_.Add(now, now);
     }
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
@@ -1068,6 +1080,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
       return;
 
     FiberAtomicGuard fg;
+    base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
 
     auto process_bucket = [&](PrimeTable::bucket_iterator it) {
       std::string tmp;
@@ -1079,7 +1092,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
           DbContext cntx;
           cntx.time_now_ms = GetCurrentTimeMs();
           cntx.db_index = db_index;
-          DelAtomic(cntx, it, table.get());
+          DelAtomic(cntx, it, table.get(), /*async=*/true);
         }
         ++it;
       }
@@ -1094,7 +1107,8 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   auto consumer = std::make_unique<CallbackConsumer<decltype(on_change)>>(std::move(on_change));
   RegisterOnChange(consumer.get());
 
-  fb2::Fiber("flush_slots", [this, shared_slots, next_version, consumer = std::move(consumer)]() {
+  fb2::Fiber::Opts opts{.priority = fb2::FiberPriority::BACKGROUND, .name = "flush_slots"};
+  fb2::Fiber(opts, [this, shared_slots, next_version, consumer = std::move(consumer)]() {
     FlushSlotsFb(*shared_slots, next_version, consumer.get());
   }).Detach();
 }

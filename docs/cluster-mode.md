@@ -308,8 +308,10 @@ background sweep:
   hook deletes any newly written key in those slot ranges if its version predates the
   stamp; this catches writes that race the sweep.
 - A detached fiber walks the local hash table, deleting entries whose slot id falls in
-  the unowned ranges and whose version predates the stamp. The fiber yields per bucket
-  so foreground commands keep making progress.
+  the unowned ranges and whose version predates the stamp. The fiber runs at background
+  priority and sleeps when over budget so foreground commands keep making progress. Slot sweeps
+  on each shard share a CPU budget controlled by `migration_buckets_cpu_budget`, including
+  work performed by their on-change hooks. Large hashes and sets are reclaimed incrementally.
 - Once the walk completes, the node also drops sharded pub/sub subscriptions
   associated with the flushed slots.
 
