@@ -310,11 +310,9 @@ std::string MakeMonitorMessage(const ConnectionContext* cntx, const CommandId* c
 
   absl::StrAppend(&message, "\"", cid->name(), "\"");
 
-  if (cid->name() == "AUTH")
-    return message;
-
-  for (auto arg : tail_args)
-    absl::StrAppend(&message, " ", CmdEntryToMonitorFormat(arg));
+  size_t num_args = cid->NonSecretArgCount(tail_args);
+  for (size_t i = 0; i < num_args; ++i)
+    absl::StrAppend(&message, " ", CmdEntryToMonitorFormat(tail_args[i]));
 
   return message;
 }
@@ -644,14 +642,14 @@ string ConnectionLogContext(const facade::Connection* conn) {
   return absl::StrCat("(", conn->RemoteEndpointStr(), ")");
 }
 
-string FailedCommandToString(std::string_view command, const facade::ParsedArgs& args,
+string FailedCommandToString(const CommandId& cid, const facade::ParsedArgs& args,
                              std::string_view reason) {
   constexpr size_t kMaxArgCount = 31;
   constexpr size_t kMaxArgLength = 128;
   constexpr size_t kMaxReasonLength = 256;
 
   string result;
-  absl::StrAppend(&result, " ", command);
+  absl::StrAppend(&result, " ", cid.name());
 
   auto AppendArg = [&](string_view arg) {
     if (arg.size() > kMaxArgLength) {
@@ -662,22 +660,20 @@ string FailedCommandToString(std::string_view command, const facade::ParsedArgs&
     }
   };
 
-  const bool is_eval = absl::StartsWith(command, "EVAL");
+  const bool is_eval = cid.IsEvalGroup();
 
-  if (command == "AUTH" || absl::StartsWith(command, "ACL")) {
-    // skip all args to protect passwords
-  } else if (is_eval) {
+  if (is_eval) {
     // log only script/SHA and numkeys, skip KEYS and ARGV to avoid PII leaks
     for (size_t i = 0; i < std::min(args.size(), size_t{2}); ++i) {
       AppendArg(args[i]);
     }
   } else {
-    size_t num_args = std::min(args.size(), kMaxArgCount);
+    size_t num_args = std::min(cid.NonSecretArgCount(args), kMaxArgCount);
     for (size_t i = 0; i < num_args; ++i) {
       AppendArg(args[i]);
     }
     if (args.size() > kMaxArgCount) {
-      absl::StrAppend(&result, " ... (", args.size() - kMaxArgCount, " more arguments)");
+      absl::StrAppend(&result, " ... (", args.size() - num_args, " more arguments)");
     }
   }
 
@@ -752,6 +748,7 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case IDEMPOTENT:
     case WRITE_KEY_OFFSET_0:
     case WRITE_KEY_OFFSET_1:
+    case WAKE_ALL_READY_KEYS:
       return "";
   }
   return "";
@@ -1490,6 +1487,7 @@ DispatchResult Service::DispatchCommand(
     std::tie(cid, args_no_cmd) = registry_.FindExtended(args);
   }
 
+  parsed_cmd->SetReadOnly(cid && cid->IsReadOnly());
   if (cid == nullptr) {
     invoke_pre_dispatch();
     if (async_pref != AsyncPreference::ONLY_SYNC) {
@@ -1687,8 +1685,7 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
 
   ServerState& ss = *ServerState::tlocal();
 
-  if ((cid->opt_mask() & CO::DENYOOM) &&
-      ss.ShouldDenyOnOOM(base::CycleClock::ToUsec(cmd_cntx->start_cycle))) {
+  if ((cid->opt_mask() & CO::DENYOOM) && ss.ShouldDenyOnOOM()) {
     cmd_cntx->SendError(ErrorReply{OpStatus::OUT_OF_MEMORY});
     return DispatchResult::OOM;
   }
@@ -1721,9 +1718,9 @@ DispatchResult Service::InvokeCmd(const facade::ParsedArgs& tail_args, CommandCo
       if (reason == kOutOfMemory) {
         res = DispatchResult::OOM;
       }
-      VLOG(2) << FailedCommandToString(cid->name(), tail_args, reason);
+      VLOG(2) << FailedCommandToString(*cid, tail_args, reason);
       if (ShouldLogError(*cid, reason, tail_args)) {
-        LOG_EVERY_T(WARNING, 1) << FailedCommandToString(cid->name(), tail_args, reason);
+        LOG_EVERY_T(WARNING, 1) << FailedCommandToString(*cid, tail_args, reason);
       }
     }
 
@@ -1843,6 +1840,7 @@ uint32_t Service::DispatchSquashedBatch(
         cid->IsSubscribeFamily())
       break;
 
+    cmd_cntx->SetReadOnly(cid->IsReadOnly());
     if (pre_dispatch_cb)
       (*pre_dispatch_cb)(cmd);
     if (auto err = VerifyCommandState(*cid, tail_args, *dfly_cntx); err) {
@@ -2174,12 +2172,14 @@ void Service::CallFromScript(Interpreter::CallArgs& ca, CommandContext* cmd_cntx
     default: {
       // Save EVAL's state that DispatchCommand overwrites.
       auto saved_tail = cmd_cntx->tail_args();
+      bool saved_read_only = cmd_cntx->IsReadOnly();
 
       auto* prev = cmd_cntx->SwapReplier(&replier);
       DispatchCommand(ParsedArgs{*ca.args}, cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
       cmd_cntx->SwapReplier(prev);
 
       cmd_cntx->SetTailArgs(saved_tail);
+      cmd_cntx->SetReadOnly(saved_read_only);
     }
   }
 }
@@ -2487,11 +2487,7 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   SinkReplyBuilder::ReplyAggregator agg(builder);
   EvalSerializer ser{builder, params->float_as_int};
-  if (!interpreter->IsResultSafe()) {
-    builder->SendError("reached lua stack limit");
-  } else {
-    interpreter->SerializeResult(&ser);
-  }
+  interpreter->SerializeResult(&ser);
 }
 
 void Service::Discard(CmdArgParser, CommandContext* cmd_cntx) {
@@ -3101,9 +3097,9 @@ constexpr uint32_t kSubscribe = PUBSUB | SLOW;
 constexpr uint32_t kUnsubscribe = PUBSUB | SLOW;
 constexpr uint32_t kPSubscribe = PUBSUB | SLOW;
 constexpr uint32_t kPUnsubsribe = PUBSUB | SLOW;
-constexpr uint32_t kFunction = SLOW;
+constexpr uint32_t kFunction = WRITE | SLOW | SCRIPTING;
 constexpr uint32_t kMonitor = ADMIN | SLOW | DANGEROUS;
-constexpr uint32_t kPubSub = SLOW;
+constexpr uint32_t kPubSub = PUBSUB | SLOW;
 constexpr uint32_t kCommand = SLOW | CONNECTION;
 constexpr uint32_t kReset = FAST | CONNECTION;
 }  // namespace acl

@@ -144,6 +144,21 @@ TEST_F(GenericFamilyTest, Expire) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+// An expired key is missing even when a lookup asks for another type.
+TEST_F(GenericFamilyTest, ExpiredKeyOfOtherType) {
+  Run({"hset", "key", "f", "v"});
+  Run({"pexpire", "key", "1"});
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"get", "key"}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(1u, GetMetrics().db_stats[0].events.expired_keys);
+
+  Run({"set", "key", "val", "px", "1"});
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"lpush", "key", "x"}), IntArg(1));
+  EXPECT_EQ(2u, GetMetrics().db_stats[0].events.expired_keys);
+  EXPECT_EQ(Run({"type", "key"}), "list");
+}
+
 TEST_F(GenericFamilyTest, ExpireCornerCases) {
   // EXPIRE / PEXPIRE with non-positive TTL deletes the key immediately and reports success.
   Run({"set", "key", "val"});
@@ -2808,16 +2823,15 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
   Run({"expire", "mykey", "1"});
   AdvanceTime(1100);
 
-  // Drive expiry the same way the heartbeat does: DeleteExpiredStep returns events,
+  // Drive expiry the same way the heartbeat does: DeleteExpiredStep queues events,
   // which are sent outside the atomic section (see issue #7052).
   shard_set->RunBlockingInParallel([](EngineShard* shard) {
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     DbContext db_cntx;
     db_cntx.db_index = 0;
     db_cntx.time_now_ms = TEST_current_time_ms;
-    DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, 100);
-    if (!stats.key_events.empty())
-      channel_store->SendMessages("__keyevent@0__:expired", stats.key_events, false);
+    db_slice.DeleteExpiredStep(db_cntx, 100);
+    db_slice.SendQueuedExpiredKeyEvents();
   });
 
   // Flush all async dispatch callbacks so the subscriber's thread receives the message.
@@ -2827,6 +2841,67 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
   const auto& msg = GetPublishedMessage("IO1", 0);
   EXPECT_EQ("__keyevent@0__:expired", msg.channel);
   EXPECT_EQ("mykey", msg.message);
+}
+
+// SCAN expires keys while traversing inside an atomic section. The expired event must be sent
+// after the traversal, not from inside it.
+TEST_F(GenericFamilyTest, KeyspaceNotificationOnScanExpiry) {
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  Run({"set", "mykey", "myval", "PX", "10"});
+  AdvanceTime(20);
+
+  auto resp = Run({"scan", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], ArrLen(0));
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("mykey", GetPublishedMessage("IO1", 0).message);
+}
+
+// Inserting into a full bucket garbage-collects expired keys inside an atomic section. Their
+// expired events must be sent after the insert, not from inside it.
+TEST_F(GenericFamilyTest, KeyspaceNotificationOnGarbageCollect) {
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  constexpr unsigned kNumKeys = 20000;
+  Run({"debug", "populate", absl::StrCat(kNumKeys), "old", "8", "EXPIRE", "1", "2"});
+  AdvanceTime(3000);
+  Run({"debug", "populate", absl::StrCat(kNumKeys), "new", "8"});
+
+  EXPECT_GT(GetMetrics().events.garbage_collected, 0u);
+
+  // The heartbeat expires some of the old keys too. Expire the rest with a full SCAN, so every
+  // old key must have produced exactly one event, whichever path expired it.
+  string cursor = "0";
+  do {
+    auto resp = Run({"scan", cursor, "count", "1000"});
+    ASSERT_THAT(resp, ArrLen(2));
+    cursor = resp.GetVec()[0].GetString();
+  } while (cursor != "0");
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+  EXPECT_EQ(SubscriberMessagesLen("IO1"), kNumKeys);
 }
 
 // A rejected CONFIG SET must not leave the invalid value observable: CONFIG GET has to keep
@@ -2895,7 +2970,16 @@ TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
   const auto& msg = GetPublishedMessage("IO1", 0);
   EXPECT_EQ("__keyevent@0__:expired", msg.channel);
   EXPECT_EQ("foo", msg.message);
-  EXPECT_GE(GetMetrics().events.expired_keys, 1u);
+  EXPECT_GE(GetMetrics().db_stats[0].events.expired_keys, 1u);
+}
+
+// Expiry counters are cumulative and must survive a flush.
+TEST_F(GenericFamilyTest, ExpiredKeysSurviveFlush) {
+  Run({"SET", "foo", "bar"});
+  EXPECT_THAT(Run({"EXPIRE", "foo", "-1"}), IntArg(1));
+  Run({"FLUSHALL"});
+  EXPECT_EQ(1u, GetMetrics().db_stats[0].events.expired_keys);
+  EXPECT_THAT(Run({"INFO", "STATS"}).GetString(), HasSubstr("expired_keys:1\r\n"));
 }
 
 namespace {
@@ -3064,7 +3148,7 @@ ostream& operator<<(ostream& os, const MetricCmp& m) {
     if (cond) {                                                               \
       LOG(WARNING) << "parity TODO scenario passes, promote it to PARITY_OK"; \
     } else {                                                                  \
-      LOG(WARNING) << "parity gap: " #cond "\n" << d;                         \
+      LOG(WARNING) << "parity gap: " #cond "\n" << (d);                       \
       GTEST_SKIP() << "parity gap";                                           \
     }                                                                         \
   } while (0)
@@ -3329,7 +3413,7 @@ class ScanBenchmark : public BaseFamilyTest {
     }
     auto populate_resp = Run(absl::Span<const string>{populate_args});
     DCHECK_EQ(populate_resp.GetView(), "OK");
-    DCHECK_EQ(Run({"dbsize"}).GetInt().value(), key_count);
+    DCHECK_EQ(Run({"dbsize"}).GetInt().value(), int64_t(key_count));
 
     // A real connection runs many commands in one fiber. Run() would create a fiber per command
     // and retain all parsed replies until teardown, so use the normal dispatcher directly here.

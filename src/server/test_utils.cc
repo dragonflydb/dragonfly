@@ -27,6 +27,7 @@ extern "C" {
 #include "facade/string_socket.h"
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
+#include "server/journal/journal.h"
 #include "server/set_family.h"
 #include "util/fibers/pool.h"
 
@@ -398,6 +399,17 @@ string BaseFamilyTest::FormatMetrics(const Metrics& metrics) const {
   return service_->server_family().FormatInfoMetrics(metrics, "ALL", true, nullptr);
 }
 
+uint32_t BaseFamilyTest::StartJournalWithConsumer(journal::JournalConsumerInterface* consumer,
+                                                  unsigned index) {
+  uint32_t id = 0;
+  pp_->at(index)->AwaitBrief([&] {
+    CHECK(EngineShard::tlocal()) << "proactor " << index << " owns no shard";
+    journal::StartInThread();
+    id = journal::RegisterConsumer(consumer);
+  });
+  return id;
+}
+
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
   auto step = 50us;
   auto timeout_micro = chrono::duration_cast<chrono::microseconds>(1000ms * timeout);
@@ -652,7 +664,7 @@ RespExpr BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   // freeing it, since BuildExpr copies string data into owned_strings_.
   auto& parsed = *obj;
 
-  // BuildExpr handles scalars and arrays recursively, preserving array cardinality.
+  // BuildExpr handles scalars and arrays iteratively, preserving array cardinality.
   // parsed (RESPObj) goes out of scope here, freeing zmalloc-allocated hiredis
   // reply data on this thread. All needed string data has been copied into
   // expr_builder_.owned_strings_.

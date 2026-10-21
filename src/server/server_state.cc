@@ -183,28 +183,18 @@ void ServerState::EnterLameDuck() {
   watcher_cv_.notify_all();
 }
 
-ServerState::MemoryUsageStats ServerState::GetMemoryUsage(uint64_t now_usec) const {
-  if (now_usec != used_mem_last_read_usec_) {
-    used_mem_last_read_usec_ = now_usec;
-    memory_stats_cached_.used_mem = used_mem_current.load(std::memory_order_relaxed);
-    memory_stats_cached_.rss_mem = rss_mem_current.load(std::memory_order_relaxed);
-  }
-  return memory_stats_cached_;
-}
+bool ServerState::ShouldDenyOnOOM() {
+  if (!is_master)
+    return false;
 
-bool ServerState::ShouldDenyOnOOM(uint64_t now_usec) {
-  DCHECK_NE(now_usec, 0u);
-  if (is_master) {
-    auto memory_stats = GetMemoryUsage(now_usec);
-
-    size_t limit = max_memory_limit.load(memory_order_relaxed);
-    if (memory_stats.used_mem > limit ||
-        (rss_oom_deny_ratio > 0 && memory_stats.rss_mem > (limit * rss_oom_deny_ratio))) {
-      DLOG(WARNING) << "Out of memory, used " << memory_stats.used_mem << " ,rss "
-                    << memory_stats.rss_mem << " ,limit " << limit;
-      stats.oom_error_cmd_cnt++;
-      return true;
-    }
+  size_t limit = max_memory_limit.load(memory_order_relaxed);
+  size_t used_mem = used_mem_current.load(memory_order_relaxed);
+  size_t rss_mem = rss_mem_current.load(memory_order_relaxed);
+  if (used_mem > limit || (rss_oom_deny_ratio > 0 && rss_mem > limit * rss_oom_deny_ratio)) {
+    DLOG(WARNING) << "Out of memory, used " << used_mem << " ,rss " << rss_mem << " ,limit "
+                  << limit;
+    stats.oom_error_cmd_cnt++;
+    return true;
   }
   return false;
 }
@@ -335,13 +325,20 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       facade::Connection* dfly_conn = static_cast<facade::Connection*>(conn);
       using Phase = facade::Connection::Phase;
       auto phase = dfly_conn->phase();
-      bool is_replica = true;
+      bool is_replica = false;
       if (dfly_conn->cntx()) {
         is_replica = dfly_conn->cntx()->replica_conn;
       }
 
-      bool idle_read = timeout != 0 && !is_replica && phase == Phase::READ_SOCKET &&
-                       dfly_conn->idle_time() > timeout;
+      // A SETUP connection without a context is still in protocol detection, e.g. a pre-dialled
+      // client pool connection that never sent a byte. It occupies a maxclients slot like any
+      // other client and Redis applies `timeout` to it too, so reap it with idle READ_SOCKET ones.
+      // HTTP connections get a context and stay in SETUP while helio serves them without
+      // refreshing last_interaction_, so they are left out to keep them from being reaped by age.
+      bool idle_phase =
+          phase == Phase::READ_SOCKET || (phase == Phase::SETUP && !dfly_conn->cntx());
+      bool idle_read =
+          timeout != 0 && !is_replica && idle_phase && dfly_conn->idle_time() > timeout;
       bool stuck_sending = send_timeout != 0 && !is_replica && dfly_conn->IsSending() &&
                            dfly_conn->GetSendWaitTimeSec() > send_timeout;
 

@@ -304,7 +304,11 @@ OpResult<int> PFMergeInternal(string_view key, Transaction* tx, SinkReplyBuilder
   hll.resize(getDenseHllSize());
   createDenseHll(StringToHllPtr(hll));
   int result = pfmerge(ptrs.data(), ptrs.size(), StringToHllPtr(hll));
+  const ShardId dest_shard = Shard(key, shard_set->size());
   auto set_cb = [&](Transaction* t, EngineShard* shard) {
+    if (shard->shard_id() != dest_shard)
+      return OpStatus::OK;
+
     const OpArgs& op_args = t->GetOpArgs(shard);
     auto& db_slice = op_args.GetDbSlice();
     auto op_res = db_slice.AddOrFind(t->GetDbContext(), key, OBJ_STRING);

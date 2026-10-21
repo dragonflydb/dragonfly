@@ -15,44 +15,73 @@ using namespace facade;
 
 namespace dfly {
 
-bool MultiShardExecution::InsertTxToSharedMap(TxId txid, uint32_t shard_cnt) {
-  std::unique_lock lk(map_mu);
-  auto [it, was_insert] = tx_sync_execution.emplace(txid, shard_cnt);
-  // If CancelAllBlockingEntities() already ran, cancel the new entry immediately
-  // to prevent shard fibers from blocking on entries that will never complete.
-  if (cancelled_) {
-    it->second.barrier.Cancel();
-    it->second.block->Cancel();
+MultiShardExecution::MultiShardExecution(uint32_t num_flows) : flows_(num_flows) {
+}
+
+#define RETURN_ON_CANCELED()  \
+  do {                        \
+    if (cancelled_)           \
+      return Status::kFailed; \
+  } while (0)
+
+bool MultiShardExecution::JoinRound(TxId txid) {
+  if (arrived_ == 0) {
+    round_txid_ = txid;
+  } else if (round_txid_ != txid) {
+    LOG(DFATAL) << "Global commands out of order across flows: " << round_txid_ << " vs " << txid;
+    cancelled_ = true;
+    cv_.notify_all();
+    return false;
   }
-  lk.unlock();
-
-  VLOG(2) << "txid: " << txid << " unique_shard_cnt_: " << shard_cnt
-          << " was_insert: " << was_insert;
-  it->second.block->Dec();
-
-  return was_insert;
+  ++arrived_;
+  return true;
 }
 
-MultiShardExecution::TxExecutionSync& MultiShardExecution::Find(TxId txid) {
-  std::lock_guard lk(map_mu);
-  VLOG(2) << "Execute txid: " << txid;
-  auto it = tx_sync_execution.find(txid);
-  DCHECK(it != tx_sync_execution.end());
-  return it->second;
+// One round per global command, all under mu_:
+//   arrive:  join the round; a different txid cancels the rendezvous (kOutOfOrder).
+//   gather:  wait until all flows arrived.
+//   run:     the flow that sees the round complete runs apply; the others stay blocked.
+//   release: arrived_ = 0, ++generation_; every flow returns the round's result.
+// A cancel fails a round only before it ran; a finished round's result stands.
+MultiShardExecution::Status MultiShardExecution::Execute(TxId txid,
+                                                         absl::FunctionRef<bool()> apply) {
+  std::unique_lock lk(mu_);
+  RETURN_ON_CANCELED();
+  if (!JoinRound(txid))
+    return Status::kOutOfOrder;
+  uint64_t my_round = generation_;
+  VLOG(2) << "Execute txid: " << txid << " waiting for data in all shards";
+
+  // Wait until the round is complete, or another flow ran it.
+  cv_.wait(lk, [&] { return cancelled_ || generation_ != my_round || arrived_ >= flows_; });
+  // Once the round finished, every flow returns its result, even if cancelled since.
+  if (generation_ != my_round)
+    return round_result_;
+  RETURN_ON_CANCELED();
+
+  // The first flow to see the round complete runs it. Under the lock, so the others cannot pass
+  // before it finished.
+  round_result_ = apply() ? Status::kOk : Status::kFailed;
+  arrived_ = 0;
+  ++generation_;
+  cv_.notify_all();
+  return round_result_;
 }
 
-void MultiShardExecution::Erase(TxId txid) {
-  std::lock_guard lg{map_mu};
-  tx_sync_execution.erase(txid);
+#undef RETURN_ON_CANCELED
+
+void MultiShardExecution::RemoveFlow() {
+  std::lock_guard lk(mu_);
+  DCHECK_GT(flows_, 0u);
+  --flows_;
+  // Wakes the flows waiting for this one, so they re-check against the lower count.
+  cv_.notify_all();
 }
 
 void MultiShardExecution::CancelAllBlockingEntities() {
-  lock_guard lk{map_mu};
+  std::lock_guard lk(mu_);
   cancelled_ = true;
-  for (auto& tx_data : tx_sync_execution) {
-    tx_data.second.barrier.Cancel();
-    tx_data.second.block->Cancel();
-  }
+  cv_.notify_all();
 }
 
 void TransactionData::AddEntry(journal::ParsedEntry&& entry) {
@@ -80,10 +109,17 @@ bool TransactionData::IsGlobalCmd() const {
     return false;
   }
 
+  // Global transactions journaled on every shard. MOVE is a global transaction too, but it journals
+  // itself once, on its key's shard, so replay and replicas apply it directly: waiting for copies
+  // that never come would deadlock.
+  static constexpr string_view kGlobalCmds[] = {"FLUSHDB",     "FLUSHALL",       "FT.CREATE",
+                                                "FT.ALTER",    "FT.DROPINDEX",   "FT.SYNUPDATE",
+                                                "FT.ALIASADD", "FT.ALIASUPDATE", "FT.ALIASDEL"};
   string_view front = command.Front();
-
-  if (absl::EqualsIgnoreCase(front, "FLUSHDB"sv) || absl::EqualsIgnoreCase(front, "FLUSHALL"sv))
-    return true;
+  for (string_view cmd : kGlobalCmds) {
+    if (absl::EqualsIgnoreCase(front, cmd))
+      return true;
+  }
 
   if (command.size() > 1 && absl::EqualsIgnoreCase(front, "DFLYCLUSTER"sv) &&
       absl::EqualsIgnoreCase(command[1], "FLUSHSLOTS"sv)) {

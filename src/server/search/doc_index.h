@@ -111,9 +111,14 @@ struct FieldReference {
       : name_{name}, alias_{alias} {
   }
 
-  std::string_view Identifier(const search::Schema& schema, bool is_json) const {
-    return (is_json && IsJsonPath(name_)) ? name_ : schema.LookupAlias(name_);
-  }
+  // The attribute behind the name: an alias, else a raw identifier. Unknown names are read from
+  // the document as plain TEXT.
+  struct Resolved {
+    std::string_view identifier;
+    search::SchemaField::FieldType type = search::SchemaField::TEXT;
+    bool sortable = false;
+  };
+  Resolved Resolve(const search::Schema& schema) const;
 
   std::string_view Name() const {
     return name_;
@@ -124,10 +129,22 @@ struct FieldReference {
   }
 
  private:
-  static bool IsJsonPath(std::string_view name);
-
   std::string_view name_, alias_;
 };
+
+// A field to read from documents, resolved once per query.
+struct DocField {
+  std::string_view output;
+  std::string_view identifier;
+  search::SchemaField::FieldType type;
+};
+
+// Resolve the listed fields once per query; nullopt (whole document) stays nullopt.
+DocField ResolveField(const search::Schema& schema, const FieldReference& field);
+std::vector<DocField> ResolveFields(const search::Schema& schema,
+                                    const std::vector<FieldReference>& fields);
+std::optional<std::vector<DocField>> ResolveFields(
+    const search::Schema& schema, const std::optional<std::vector<FieldReference>>& fields);
 
 enum class SortOrder { ASC, DESC };
 
@@ -507,11 +524,17 @@ class ShardDocIndex {
   // so serialization cannot interfere with a concurrent restoration.
   void DrainSerializationUpdates(const OpArgs& op_args);
 
-  // Serialize doc and return with key name
-  using SerializedEntryWithKey = std::optional<std::pair<std::string_view, SearchDocData>>;
-  SerializedEntryWithKey SerializeDocWithKey(
-      search::DocId id, const OpArgs& op_args, const search::Schema& schema,
-      const std::optional<std::vector<FieldReference>>& return_fields);
+  struct SerializedDoc {
+    std::string_view key;
+    SearchDocData values;
+    search::SortableValue sort_value;  // value of `sort_field`, kept apart from the reply
+  };
+  // Serialize doc and return with key name; `fields` lists what to read, nullopt reads the whole
+  // document.
+  using SerializedEntryWithKey = std::optional<SerializedDoc>;
+  SerializedEntryWithKey SerializeDocWithKey(search::DocId id, const OpArgs& op_args,
+                                             const std::optional<std::vector<DocField>>& fields,
+                                             const DocField* sort_field = nullptr);
 
   search::DefragmentResult Defragment(PageUsage* page_usage) {
     if (indices_) {
@@ -619,9 +642,17 @@ class ShardDocIndices {
   // Get sharded document index by its name or nullptr if not found
   ShardDocIndex* GetIndex(std::string_view name);
 
+  // Add an alias for an existing index.
+  facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
+  // Create or update an alias for an existing index.
+  facade::OpStatus UpdateAlias(std::string_view alias, std::string_view target);
+  // Delete an alias.
+  facade::OpStatus DeleteAlias(std::string_view alias);
+
   // Init index: create shard local state for given index with given name.
   void InitIndex(const OpArgs& op_args, std::string_view name,
-                 std::shared_ptr<const DocIndex> index, bool is_journal = false);
+                 std::shared_ptr<const DocIndex> index, bool is_journal = false,
+                 Synonyms synonyms = {});
 
   // Drop index, return the dropped index if it existed or nullptr otherwise
   std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);
@@ -671,6 +702,7 @@ class ShardDocIndices {
   MiMemoryResource local_mr_;
   unsigned hash_index_count_ = 0;
   absl::flat_hash_map<std::string, std::unique_ptr<ShardDocIndex>> indices_;
+  absl::flat_hash_map<std::string, std::string> aliases_;
 
   std::string next_defrag_index_;
 };

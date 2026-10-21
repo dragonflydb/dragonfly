@@ -930,13 +930,19 @@ void Transaction::SingleHopAsync(RunnableType cb) {
     use_count_.fetch_add(1, memory_order_relaxed);
 
     auto shard_cb = [this] {
-      bool success = ScheduleInShard(EngineShard::tlocal(), true);
+      EngineShard* shard = EngineShard::tlocal();
+      bool success = ScheduleInShard(shard, true);
       CHECK(success);  // single shard scheduling can't fail
 
       auto& sd = shard_data_[SidToId(unique_shard_id_)];
       if (sd.local_mask & OPTIMISTIC_EXECUTION) {  // executed during schedule
         run_barrier_.Dec();
         intrusive_ptr_release(this);
+
+        // The optimistic run above held running_tx_ and might have deferred polls on this shard
+        // if it preempted (e.g. snapshot OnChange waiting for tiered reads). Drain them now,
+        // like the inlined branch of ScheduleInternal does.
+        shard->PollExecutionIfDeferred();
       } else {
         sd.is_armed.store(true, memory_order_relaxed);
         // do we really need to submit a shard callback?
@@ -1139,23 +1145,6 @@ const absl::flat_hash_set<std::pair<ShardId, LockFp>>& Transaction::GetMultiFps(
   return multi_->tag_fps;
 }
 
-#if 0
-string Transaction::DEBUG_PrintFailState(ShardId sid) const {
-  auto res = StrCat(
-      "usc: ", unique_shard_cnt_, ", name:", GetCId()->name(),
-      ", usecnt:", use_count_.load(memory_order_relaxed), ", runcnt: ", run_barrier_.DEBUG_Count(),
-      ", coordstate: ", coordinator_state_, ", coord native thread: ", stats_.coordinator_index,
-      ", schedule attempts: ", stats_.schedule_attempts, ", report from sid: ", sid, "\n");
-  std::atomic_thread_fence(memory_order_acquire);
-  for (unsigned i = 0; i < shard_data_.size(); ++i) {
-    const auto& sd = shard_data_[i];
-    absl::StrAppend(&res, "- shard: ", i, " local_mask:", sd.local_mask,
-                    " total_runs: ", sd.stats.total_runs, "\n");
-  }
-  return res;
-}
-#endif
-
 void Transaction::EnableShard(ShardId sid) {
   unique_shard_cnt_ = 1;
   unique_shard_id_ = sid;
@@ -1322,8 +1311,10 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
     // lock: if we finish without preempting (the common case), no one will ever observe it; if
     // we do preempt, whoever schedules next on this shard will lazily register it for us (see
     // above), so the lock table stays accurate throughout.
+    // In cache mode an insert can evict keys inline, and eviction spares only the keys found in
+    // the lock table, so the callback must register its keys there.
     bool skip_acquire = execute_optimistic && running == nullptr && shard_unlocked &&
-                        db_slice.IsLockFree(mode, lock_args);
+                        !db_slice.IsCacheMode() && db_slice.IsLockFree(mode, lock_args);
     if (!skip_acquire) {
       // Slow path: either contended, or a callback is mid-flight on this shard, or we're not
       // eligible for immediate execution. Acquire intent locks as usual - they're always
@@ -1616,45 +1607,51 @@ bool Transaction::IsGlobal() const {
 }
 
 // Runs only in the shard thread.
-// Returns true if the transacton has changed its state from suspended to awakened,
-// false, otherwise.
-bool Transaction::NotifySuspended(ShardId sid, string_view key) {
+bool Transaction::NotifySuspended(ShardId sid) {
+  auto& sd = shard_data_[SidToId(sid)];
+
+  // This shard already woke us and we have not run yet. Commands that consume every ready key
+  // (CO::WAKE_ALL_READY_KEYS) reserve this one as well; others leave it to the next waiter.
+  if (sd.local_mask & AWAKED_Q)
+    return (cid_->opt_mask() & CO::WAKE_ALL_READY_KEYS) != 0;
+
   // Wake a transaction only once on the first notify.
   // We don't care about preserving the strict order with multiple operations running on blocking
   // keys in parallel, because the internal order is not observable from outside either way.
   if (!blocking_barrier_.TryClaim())
     return false;
 
-  auto& sd = shard_data_[SidToId(sid)];
-
   DVLOG(1) << "NotifySuspended " << DebugId() << ", local_mask:" << sd.local_mask;
 
   // We're the first and only to wake this transaction, expect the shard to be suspended.
   CHECK(sd.local_mask & WAS_SUSPENDED);
 
-  // We wake at most once.
-  CHECK_EQ(sd.local_mask & AWAKED_Q, 0);
-
-  // Find index of awakened key
-  ShardArgs args = GetShardArgs(sid);
-  auto it = find_if(args.cbegin(), args.cend(), [key](string_view arg) { return arg == key; });
-  CHECK(it != args.cend());
-
-  // Change state to awaked and store index of awakened key
+  // Change state to awaked. The key that woke it stays reserved for it in the blocking controller:
+  // its watch queue is ACTIVE with this transaction at the head (see IsWakeKey).
   sd.local_mask |= AWAKED_Q;
-  sd.wake_key_pos = it.index();
 
   blocking_barrier_.Close();
   return true;
 }
 
+bool Transaction::IsWokenOn(ShardId sid) const {
+  return shard_data_[SidToId(sid)].local_mask & AWAKED_Q;
+}
+
+bool Transaction::IsWakeKey(ShardId sid, string_view key) const {
+  return IsWokenOn(sid) && namespace_->GetBlockingController(sid)->IsReserved(db_index_, key, this);
+}
+
 optional<string_view> Transaction::GetWakeKey(ShardId sid) const {
-  auto& sd = shard_data_[SidToId(sid)];
-  if ((sd.local_mask & AWAKED_Q) == 0)
+  if (!IsWokenOn(sid))
     return nullopt;
 
-  CHECK_LT(sd.wake_key_pos, full_args_.size());
-  return full_args_[sd.wake_key_pos];
+  const BlockingController* bc = namespace_->GetBlockingController(sid);
+  for (string_view key : GetShardArgs(sid)) {
+    if (bc->IsReserved(db_index_, key, this))
+      return key;
+  }
+  return nullopt;
 }
 
 void Transaction::LogAutoJournalOnShard(EngineShard* shard, RunnableResult result) {

@@ -223,6 +223,7 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, const ShardArgs&
                    uint32_t unused = 1);
 void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args, uint32_t unused = 1);
 
+// Does nothing if the journal is disabled.
 void RecordDelete(DbIndex dbid, std::string_view key);
 
 // Record expiry in journal with independent transaction.

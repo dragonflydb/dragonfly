@@ -20,7 +20,6 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 #include "server/blocking_controller.h"
-#include "server/channel_store.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/aof_streamer.h"
@@ -451,7 +450,7 @@ void EngineShard::StopPeriodicFiber() {
   }
 }
 
-static void RunFPeriodically(std::function<void()> f, std::chrono::milliseconds period_ms,
+static void RunFPeriodically(const std::function<void()>& f, std::chrono::milliseconds period_ms,
                              std::string_view error_msg, util::fb2::Done* waiter) {
   int64_t last_heartbeat_ms = INT64_MAX;
 
@@ -502,8 +501,7 @@ void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
   fiber_shard_handler_periodic_ = MakeFiber(
       [this, index = pb->GetPoolIndex(), period_ms, handler = std::move(shard_handler)]() mutable {
         ThisFiber::SetName(absl::StrCat("shard_handler_periodic", index));
-        RunFPeriodically(std::move(handler), period_ms, "shard handler",
-                         &fiber_shard_handler_periodic_done_);
+        RunFPeriodically(handler, period_ms, "shard handler", &fiber_shard_handler_periodic_done_);
       });
 }
 
@@ -528,9 +526,8 @@ void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
 
     // TODO: enable tiered storage on non-default namespace
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-    auto* shard = EngineShard::tlocal();
-    shard->tiered_storage_ = make_unique<TieredStorage>(max_file_size, &db_slice);
-    error_code ec = shard->tiered_storage_->Open(backing_prefix);
+    tiered_storage_ = make_unique<TieredStorage>(max_file_size, &db_slice);
+    error_code ec = tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();
   }
 }
@@ -645,10 +642,8 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
       trans = nullptr;
 
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
-      if (bool concludes = run(continuation_trans_, true); concludes) {
-        continuation_trans_ = nullptr;
-        continuation_debug_id_.clear();
-      } else {
+      // A concluding hop releases the continuation itself (RemoveContTx).
+      if (bool concludes = run(continuation_trans_, true); !concludes) {
         continuation_debug_id_ = continuation_trans_->DebugId(sid);
       }
     }
@@ -813,13 +808,10 @@ void EngineShard::RetireExpiredAndEvict() {
   size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
 
-  // Accumulate keyspace notification events per-db during the atomic section; send after.
-  vector<vector<string>> per_db_events(db_slice.db_array_size());
-
   {
-    // Disable journal flush to prevent preemption. Scoped so that SendMessages below,
-    // which may suspend on backpressure, runs outside the atomic section.
-    journal::DisableFlushGuard journal_flush_guard(journal_);
+    // Disable journal flush to prevent preemption. Scoped so that the expired events queued
+    // meanwhile are sent below, outside the atomic section.
+    journal::DisableFlushGuard journal_flush_guard;
 
     for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
       if (!db_slice.IsDbValid(i))
@@ -842,9 +834,6 @@ void EngineShard::RetireExpiredAndEvict() {
         DbSlice::DeleteExpiredStats stats =
             db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
 
-        if (!stats.key_events.empty())
-          per_db_events[i] = std::move(stats.key_events);
-
         deleted_bytes += stats.deleted_bytes;
         eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
         counter_[TTL_TRAVERSE].IncBy(stats.traversed);
@@ -859,8 +848,8 @@ void EngineShard::RetireExpiredAndEvict() {
 
       if (eviction_goal) {
         uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-        auto [evicted_items, evicted_bytes] = db_slice.FreeMemWithEvictionStepAtomic(
-            i, db_cntx, starting_segment_id, eviction_goal, &per_db_events[i]);
+        auto [evicted_items, evicted_bytes] =
+            db_slice.FreeMemWithEvictionStepAtomic(i, db_cntx, starting_segment_id, eviction_goal);
 
         VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
                 << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
@@ -871,16 +860,12 @@ void EngineShard::RetireExpiredAndEvict() {
         eviction_goal -= std::min(eviction_goal, evicted_bytes);
       }
     }
-  }  // journal_flush_guard destroyed here — atomic section ends before SendMessages
+  }  // journal_flush_guard destroyed here — atomic section ends before sending the events
 
   // Send keyspace notifications for expired/evicted keys outside the atomic section
   // because SendMessages may suspend on connection backpressure (see issue #7052).
-  for (unsigned i = 0; i < per_db_events.size(); ++i) {
-    if (per_db_events[i].empty())
-      continue;
-    channel_store->SendMessages(absl::StrCat("__keyevent@", i, "__:expired"), per_db_events[i],
-                                false);
-  }
+  // This also sends events that other code queued but left unsent.
+  db_slice.SendQueuedExpiredKeyEvents();
 
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
@@ -888,7 +873,7 @@ void EngineShard::RetireExpiredAndEvict() {
   }
 
   // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
-  // section, because readiness checks read the db slice and may preempt.
+  // section, because NotifyPending may preempt before and after its readiness checks.
   if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
       bc && GetContTx() == nullptr) {
     bc->NotifyPending();

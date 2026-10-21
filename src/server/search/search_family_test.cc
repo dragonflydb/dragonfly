@@ -6,12 +6,14 @@
 
 #include <absl/functional/function_ref.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 #include <absl/types/span.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <map>
 #include <set>
 #include <string_view>
 
@@ -403,6 +405,11 @@ template <typename... Matchers> auto IsUnordArrayWithSize(Matchers... matchers) 
   return IsUnordArrayWithSizeMatcher(std::make_tuple(matchers...));
 }
 
+// Ids of a NOCONTENT reply ([total, id, id, ...]), in any order.
+template <typename... Args> auto AreNoContentDocIds(Args... args) {
+  return IsUnordArrayWithSize(Eq(args)...);
+}
+
 TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_EQ(
       Run({"ft.create", "idx-1", "ON", "HASH", "PREFIX", "1", "prefix-1", "SCHEMA", "f", "TEXT"}),
@@ -426,6 +433,42 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
   EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
+}
+
+TEST_F(SearchFamilyTest, AliasCommandsLifecycle) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+
+  EXPECT_EQ(Run({"FT.ALIASADD", "live", "idx-a"}), "OK");
+  EXPECT_EQ(Run({"FT.ALIASUPDATE", "live", "idx-b"}), "OK");
+  EXPECT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
+  EXPECT_EQ(Run({"FT.ALIASADD", "live", "idx-a"}), "OK");
+  EXPECT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
+
+  EXPECT_EQ(Run({"FT.ALIASUPDATE", "upserted", "idx-b"}), "OK");
+  EXPECT_THAT(Run({"FT.ALIASADD", "upserted", "idx-a"}), ErrArg("Alias already exists"));
+  EXPECT_EQ(Run({"FT.ALIASDEL", "upserted"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, AliasCommandsErrors) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx-a"}), "OK");
+
+  EXPECT_THAT(Run({"FT.ALIASADD", "live", "idx-b"}), ErrArg("Alias already exists"));
+  EXPECT_THAT(Run({"FT.ALIASADD", "bad", "missing"}),
+              ErrArg("Unknown index name or name is alias"));
+  EXPECT_THAT(Run({"FT.ALIASUPDATE", "live", "missing"}),
+              ErrArg("Unknown index name or name is alias"));
+  EXPECT_THAT(Run({"FT.ALIASADD", "alias-target", "live"}),
+              ErrArg("Unknown index name or name is alias"));
+  EXPECT_THAT(Run({"FT.ALIASUPDATE", "live", "live"}),
+              ErrArg("Unknown index name or name is alias"));
+  EXPECT_THAT(Run({"FT.ALIASADD", "idx-a", "idx-b"}),
+              ErrArg("Alias name conflicts with an existing index"));
+  EXPECT_THAT(Run({"FT.ALIASUPDATE", "idx-a", "idx-b"}),
+              ErrArg("Alias name conflicts with an existing index"));
+  EXPECT_THAT(Run({"FT.ALIASDEL", "missing"}), ErrArg("Alias does not exist"));
 }
 
 TEST_F(SearchFamilyTest, InfoMissingIndexUsesRedisCompatibleError) {
@@ -3386,6 +3429,79 @@ TEST_F(SearchFamilyTest, HashAllowsSameIdentifierWithDifferentAliases) {
               IsArray(IntArg(1), "hx:1", IsArray("description", "very fast and elegant")));
 }
 
+// LOAD ... AS may move a SORTABLE field's output name to another field.
+TEST_F(SearchFamilyTest, AggregateLoadAliasReplacesSortableField) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "a", "NUMERIC", "SORTABLE", "b", "NUMERIC"}),
+      "OK");
+  Run({"HSET", "doc", "a", "10", "b", "20"});
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "LOAD", "6", "a", "AS", "moved", "b", "AS", "a"}),
+              IsUnordArrayWithSize(IsMap("moved", "10", "a", "20")));
+}
+
+// An alias wins over a document field spelled the same, in RETURN, LOAD and GROUPBY alike.
+TEST_F(SearchFamilyTest, AliasBeatsSameSpelledPath) {
+  Run({"FT.CREATE", "jx", "ON", "JSON", "PREFIX", "1", "j:", "SCHEMA", "$.a", "AS", "$.b", "TEXT",
+       "$.b", "AS", "c", "TEXT"});
+  Run({"JSON.SET", "j:1", "$", R"({"a":"alpha","b":"bravo"})"});
+  EXPECT_THAT(Run({"FT.SEARCH", "jx", "*", "RETURN", "1", "$.b"}),
+              IsArray(IntArg(1), "j:1", IsArray("$.b", "alpha")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "jx", "*", "LOAD", "1", "$.b"}),
+              IsUnordArrayWithSize(IsMap("$.b", "alpha")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "jx", "*", "GROUPBY", "1", "@$.b"}),
+              IsUnordArrayWithSize(IsMap("$.b", "alpha")));
+}
+
+// A vector query sorted by a document field keeps the reply shape RETURN asks for, on HASH and
+// JSON.
+TEST_F(SearchFamilyTest, HnswSortByKeepsReturnShape) {
+  Run({"FT.CREATE", "hx",    "ON",   "HASH",    "PREFIX", "1", "h:",
+       "SCHEMA",    "price", "TAG",  "qty",     "TAG",    "v", "VECTOR",
+       "HNSW",      "6",     "TYPE", "FLOAT32", "DIM",    "2", "DISTANCE_METRIC",
+       "L2"});
+  Run({"FT.CREATE", "jx",     "ON",
+       "JSON",      "PREFIX", "1",
+       "j:",        "SCHEMA", "$.price",
+       "AS",        "price",  "TAG",
+       "$.qty",     "AS",     "qty",
+       "TAG",       "$.v",    "AS",
+       "v",         "VECTOR", "HNSW",
+       "6",         "TYPE",   "FLOAT32",
+       "DIM",       "2",      "DISTANCE_METRIC",
+       "L2"});
+  WaitForIndexReady("hx");
+  WaitForIndexReady("jx");
+  Run({"HSET", "h:1", "price", "10", "qty", "7", "v", FloatVec(1, 0)});
+  Run({"HSET", "h:2", "price", "9", "qty", "8", "v", FloatVec(2, 0)});
+  Run({"JSON.SET", "j:1", "$", R"({"price":"10","qty":"7","v":[1,0]})"});
+  Run({"JSON.SET", "j:2", "$", R"({"price":"9","qty":"8","v":[2,0]})"});
+  const string q = FloatVec(2, 0);  // nearest is doc 2, SORTBY price puts doc 1 first ("10" < "9")
+  auto check = [&](string_view index, const vector<string>& tail, const auto& content) {
+    for (string_view query : {"*=>[KNN 2 @v $q]", "@v:[VECTOR_RANGE 5 $q]"}) {
+      vector<string_view> cmd{"FT.SEARCH", index,    query,   "PARAMS",  "2", "q",
+                              q,           "SORTBY", "price", "DIALECT", "2"};
+      cmd.insert(cmd.end(), tail.begin(), tail.end());
+      auto resp = Run(ArgSlice{cmd});
+      ASSERT_THAT(resp, ArgType(RespExpr::ARRAY)) << index << " " << query;
+      const auto& v = resp.GetVec();
+      ASSERT_GE(v.size(), 3u);
+      EXPECT_THAT(v[1], AnyOf("h:1", "j:1")) << index << " " << query;
+      EXPECT_THAT(v[2], content) << index << " " << query;
+    }
+  };
+  check("hx", {},
+        AnyOf(IsMap("price", "10", "qty", "7", "v", _),
+              IsMap("price", "10", "qty", "7", "v", _, "__v_score", _)));
+  check("jx", {}, AnyOf(IsMap("$", _), IsMap("$", _, "__v_score", _)));
+  for (string_view index : {"hx", "jx"}) {
+    check(index, {"NOCONTENT"}, _);
+    check(index, {"RETURN", "1", "price"}, IsMap("price", "10"));
+    check(index, {"RETURN", "3", "qty", "AS", "price"}, IsMap("price", "7"));
+    check(index, {"RETURN", "6", "price", "AS", "moved", "qty", "AS", "price"},
+          IsMap("moved", "10", "price", "7"));
+  }
+}
+
 TEST_F(SearchFamilyTest, ReturnTrailingAsRejected) {
   Run({"FT.CREATE", "idx", "ON", "JSON", "SCHEMA", "$.a", "AS", "a", "TEXT"});
   Run({"JSON.SET", "j1", ".", R"({"a":"alpha"})"});
@@ -3769,6 +3885,281 @@ TEST_F(SearchFamilyTest, PrefixSearchWithSynonyms) {
   // Check that prefix search for mac* only finds macintosh, not apple
   resp = Run({"FT.SEARCH", "prefix_index", "mac*"});
   EXPECT_THAT(resp, AreDocIds("doc:6"));  // Should only find macintosh
+}
+
+// A term in several synonym groups must be reachable through every group. Deleting the document
+// after the group map was re-laid out (many new groups) must leave no posting behind: a stale
+// DocId used to reach DocKeyIndex::Get on the WITHSCORES and NOCONTENT paths.
+TEST_F(SearchFamilyTest, SynonymTermInSeveralGroupsDeleteAfterRehash) {
+  EXPECT_EQ(
+      Run({"FT.CREATE", "sidx", "ON", "HASH", "PREFIX", "1", "sd", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", "syn1", "100", "hi", "hey"}), "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", "syn2", "100", "world", "earth"}), "OK");
+  EXPECT_THAT(Run({"HSET", "sd1", "title", "100"}), IntArg(1));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "NOCONTENT"}), AreNoContentDocIds("sd1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "world", "NOCONTENT"}), AreNoContentDocIds("sd1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hey", "WITHSCORES", "NOCONTENT"}),
+              RespElementsAre(IntArg(1), "sd1", testing::_));
+  EXPECT_THAT(Run({"FT.SYNDUMP", "sidx"}),
+              IsUnordArray("100", IsArray("syn1", "syn2"), "hi", IsArray("syn1"), "hey",
+                           IsArray("syn1"), "world", IsArray("syn2"), "earth", IsArray("syn2")));
+
+  for (int i = 0; i < 300; i++) {
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", absl::StrCat("g", i), absl::StrCat("term", i)}), "OK");
+    if (i % 25 == 24) {
+      EXPECT_THAT(Run({"DEL", "sd1"}), IntArg(1));
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "WITHSCORES"}), kNoResults);
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "world", "NOCONTENT"}), kNoResults);
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hey", "WITHSCORES", "NOCONTENT"}), kNoResults);
+      EXPECT_THAT(Run({"HSET", "sd1", "title", "100"}), IntArg(1));
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", "earth", "NOCONTENT"}), AreNoContentDocIds("sd1"));
+    }
+  }
+  EXPECT_THAT(Run({"DEL", "sd1"}), IntArg(1));
+  // The freed DocId is reused by the next document; it must not surface for the old terms.
+  EXPECT_THAT(Run({"HSET", "sd2", "title", "unrelated"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "WITHSCORES"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "earth", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "sidx", "unrelated", "NOCONTENT"}), AreNoContentDocIds("sd2"));
+}
+
+// Every shard must reach its documents through every group of a multi-group term (group ids keep
+// their case), also after the index and its synonyms were reloaded from a snapshot.
+TEST_F(SearchFamilyTest, SynonymMultiGroupTermAcrossShardsAndReload) {
+  InitWithDbFilename();
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "G1", "shared", "one"}), "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g2", "shared", "two"}), "OK");
+  for (int i = 0; i < 12; i++)
+    EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", "shared"}), IntArg(1));
+
+  auto check = [this] {
+    for (string_view query : {"one", "two", "shared"})
+      EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "LIMIT", "0", "100"}),
+                  AreNoContentDocIds("d:0", "d:1", "d:2", "d:3", "d:4", "d:5", "d:6", "d:7", "d:8",
+                                     "d:9", "d:10", "d:11"))
+          << query;
+    EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}), IsUnordArray("shared", IsArray("G1", "g2"), "one",
+                                                         IsArray("G1"), "two", IsArray("g2")));
+  };
+  check();
+
+  EXPECT_EQ(Run({"SAVE", "DF"}), "OK");
+  EXPECT_EQ(Run({"DEBUG", "RELOAD"}), "OK");
+  WaitForIndexReady("idx");
+  check();
+}
+
+// BM25 scores must not depend on the shard count: every shard opens the same cursors and records
+// their stats, including the synonym group tokens of affix queries and phrase terms. Optional
+// affix queries also score documents that only contain another term of a matched group.
+TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
+  auto scores = [this] {
+    EXPECT_EQ(
+        Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+        "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "shared", "one"}), "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g2", "shared", "two", "it"}), "OK");
+    const vector<string> titles{"one",          "shared",     "hello world", "hello there world",
+                                "two",          "one shared", "world",       "two words",
+                                "running fast", "runs fast",  "fast",        "run fast",
+                                "run slow"};
+    for (size_t i = 0; i < titles.size(); i++)
+      EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", titles[i]}), IntArg(1));
+
+    // Stopwords in synonym groups ("it") still score through the group token when the term is not
+    // an AND/OR operand, and the stats must follow.
+    const vector<string_view> queries{"on*",
+                                      "*ne",
+                                      "*e",
+                                      "*har*",
+                                      "~*ne*",
+                                      "one",
+                                      "shared",
+                                      "two",
+                                      "\"hello world\"",
+                                      "one | two",
+                                      "@title:(one shared)",
+                                      "\"running fast\"",
+                                      "running | \"running fast\"",
+                                      "\"running fast\" | running",
+                                      "runn*",
+                                      "runn* | \"running fast\"",
+                                      "\"running fast\" | runn*",
+                                      "~ON*",
+                                      "w'*HAR*'",
+                                      "~w'tw?'",
+                                      "w'sh?red'",
+                                      "it",
+                                      "~it",
+                                      "@title:it",
+                                      "\"\\ g1\" | one",
+                                      "one | \"\\ g1\""};
+    std::map<string, double> out;
+    for (string_view query : queries) {
+      auto resp = Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "SCORER", "BM25STD",
+                       "LIMIT", "0", "20"});
+      const auto& vals = resp.GetVec();
+      for (size_t i = 1; i + 1 < vals.size(); i += 2)
+        out[absl::StrCat(query, " ", vals[i].GetString())] = std::stod(vals[i + 1].GetString());
+    }
+    return out;
+  };
+
+  auto multi_shard = scores();  // the fixture runs 2 shards by default
+  SetTestFlag("num_shards", "1");
+  ResetService();
+  auto single_shard = scores();
+  SetTestFlag("num_shards", "2");
+
+  ASSERT_EQ(multi_shard.size(), single_shard.size());
+  EXPECT_GT(single_shard.size(), 15u);
+  for (const auto& [key, score] : single_shard) {
+    ASSERT_TRUE(multi_shard.count(key)) << key;
+    EXPECT_NEAR(multi_shard[key], score, 1e-4) << key;
+  }
+
+  // The pattern is case folded before it is matched against the synonym terms; a fold shared by
+  // the cursors and the stats is invisible to the comparison above, so compare equal cursor sets.
+  EXPECT_NEAR(single_shard.at("~ON* d:0"), single_shard.at("on* d:0"), 1e-4);
+  EXPECT_NEAR(single_shard.at("w'*HAR*' d:1"), single_shard.at("*har* d:1"), 1e-4);
+  EXPECT_GT(single_shard.at("it d:4"), 0.0);
+  // A phrase that would hit a group token matches nothing and must not disturb the group's cursor.
+  for (const char* key : {"\"\\ g1\" | one d:0", "one | \"\\ g1\" d:0"})
+    EXPECT_NEAR(single_shard.at(key), single_shard.at("one d:0"), 1e-4) << key;
+}
+
+// A query whose only text term is absent from the index still runs the scorer, so equal scores
+// are tie-broken by key and LIMIT returns a prefix of the same ordering.
+TEST_F(SearchFamilyTest, AbsentTermKeepsScoreOrder) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_THAT(Run({"HSET", "t:z", "title", "last"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "t:a", "title", "first"}), IntArg(1));
+  for (string_view query : {"~absent", "-absent"}) {
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "1"}),
+                RespElementsAre(IntArg(2), "t:a", testing::_))
+        << query;
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "2"}),
+                RespElementsAre(IntArg(2), "t:a", testing::_, "t:z", testing::_))
+        << query;
+  }
+}
+
+// A hash field with a TTL expires lazily without re-indexing the document, so its posting lists
+// keep a freed DocId once the key is gone. Searches must skip such ids.
+TEST_F(SearchFamilyTest, FieldExpiryStalePostingIsSkipped) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  EXPECT_THAT(Run({"HSET", "d:1", "title", "hello"}), IntArg(1));
+  EXPECT_THAT(Run({"FIELDEXPIRE", "d:1", "1", "title"}), RespElementsAre(IntArg(1)));
+  AdvanceTime(2000);
+  EXPECT_THAT(Run({"HGET", "d:1", "title"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"EXISTS", "d:1"}), IntArg(0));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "WITHSCORES"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), kNoResults);
+
+  // The freed DocId is reused by d:2 and found through its own term. The stale "hello" posting
+  // now resolves to d:2; dropping it needs content-independent removal (follow-up).
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "other"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "other", "NOCONTENT"}), AreNoContentDocIds("d:2"));
+}
+
+TEST_F(SearchFamilyTest, FtAlterKeepsSynonyms) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "car", "automobile"}), "OK");
+  EXPECT_THAT(Run({"HSET", "d:1", "title", "car"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "automobile"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}), AreNoContentDocIds("d:1", "d:2"));
+
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "extra", "TEXT"}), "OK");
+  WaitForIndexReady("idx");
+
+  EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}),
+              IsUnordArray("car", IsArray("g1"), "automobile", IsArray("g1")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}), AreNoContentDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"HSET", "d:3", "title", "automobile"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}),
+              AreNoContentDocIds("d:1", "d:2", "d:3"));
+
+  // The copied groups stay the live state of the index: a later update is seen by indexing.
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "vehicle"}), "OK");
+  EXPECT_THAT(Run({"HSET", "d:4", "title", "vehicle"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}),
+              AreNoContentDocIds("d:1", "d:2", "d:3", "d:4"));
+  EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}), IsUnordArray("car", IsArray("g1"), "automobile",
+                                                       IsArray("g1"), "vehicle", IsArray("g1")));
+}
+
+// A second FT.ALTER stops the rebuild of the first one wherever it is; the final index must be
+// complete and keep the synonyms whatever the interleaving.
+TEST_F(SearchFamilyTest, FtAlterWhileBuilding) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g1", "car", "automobile"}), "OK");
+  for (int i = 0; i < 500; i++)
+    EXPECT_THAT(Run({"HSET", absl::StrCat("d:", i), "title", i % 2 ? "car" : "automobile"}),
+                IntArg(1));
+
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "extra", "TEXT"}), "OK");
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "more", "TEXT"}), "OK");
+  WaitForIndexReady("idx");
+
+  for (string_view query : {"car", "automobile", "@extra:x | car"})
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "LIMIT", "0", "0"}), RespElementsAre(IntArg(500)))
+        << query;
+  EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}),
+              IsUnordArray("car", IsArray("g1"), "automobile", IsArray("g1")));
+}
+
+// FT.SYNUPDATE must rebuild every document containing the term, including documents stemmed by
+// a per-document LANGUAGE_FIELD stemmer whose stem differs from the index default stem.
+TEST_F(SearchFamilyTest, SynonymRebuildFindsPerDocStemmedDocs) {
+  EXPECT_EQ(Run({"FT.CREATE", "lf_idx", "ON", "HASH", "LANGUAGE", "english", "LANGUAGE_FIELD",
+                 "lang", "SCHEMA", "body", "TEXT", "lang", "TEXT", "NOSTEM"}),
+            "OK");
+  // English stems "running" to "run"; the German stemmer leaves it unchanged.
+  EXPECT_THAT(Run({"HSET", "d:de", "body", "running", "lang", "german"}), IntArg(2));
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "lf_idx", "g1", "running", "sprint"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "sprint", "NOCONTENT"}), AreNoContentDocIds("d:de"));
+  EXPECT_THAT(Run({"DEL", "d:de"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "sprint", "NOCONTENT"}), kNoResults);
+}
+
+// Synonym group sentinels are internal tokens: affix and phrase queries must never match them.
+TEST_F(SearchFamilyTest, SynonymSentinelNotMatchedByQueries) {
+  for (bool with_trie : {false, true}) {
+    vector<string> create{"FT.CREATE", "sidx", "ON",     "HASH",  "PREFIX",
+                          "1",         "d:",   "SCHEMA", "title", "TEXT"};
+    if (with_trie)
+      create.push_back("WITHSUFFIXTRIE");
+    EXPECT_EQ(Run(absl::MakeSpan(create)), "OK");
+    EXPECT_EQ(Run({"FT.SYNUPDATE", "sidx", "syn1", "hello", "hi"}), "OK");
+    EXPECT_THAT(Run({"HSET", "d:1", "title", "hello"}), IntArg(1));
+
+    // An escaped leading space reaches the dictionary walks and phrase lookups directly.
+    for (string_view query : {"*n1", "*yn*", "w'*n1'", "\\ syn*", "\\ *", "\"\\ syn1\""})
+      EXPECT_THAT(Run({"FT.SEARCH", "sidx", query, "NOCONTENT"}), kNoResults) << query;
+    EXPECT_THAT(Run({"FT.SEARCH", "sidx", "hi", "NOCONTENT"}), AreNoContentDocIds("d:1"));
+
+    EXPECT_EQ(Run({"FT.DROPINDEX", "sidx"}), "OK");
+    EXPECT_THAT(Run({"DEL", "d:1"}), IntArg(1));
+  }
+
+  // Not even a custom stopword that starts with a space lets such a phrase match.
+  EXPECT_EQ(Run({"FT.CREATE", "widx", "ON", "HASH", "PREFIX", "1", "w:", "STOPWORDS", "1", " syn1",
+                 "SCHEMA", "title", "TEXT"}),
+            "OK");
+  EXPECT_THAT(Run({"HSET", "w:1", "title", "hello"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "widx", "\"\\ syn1 hello\"", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "widx", "\"hello\"", "NOCONTENT"}), AreNoContentDocIds("w:1"));
 }
 
 TEST_F(SearchFamilyTest, SearchSortByOptionNonSortableFieldJson) {
@@ -5242,7 +5633,7 @@ TEST_F(SearchFamilyTest, RestoreHnswVectorsWithConcurrentDeletion) {
         auto it = db_slice.FindMutable(db_cntx, key, OBJ_HASH);
         ASSERT_TRUE(it.ok());
         it->post_updater.Run();
-        db_slice.Del(db_cntx, it->it);
+        db_slice.DelAtomic(db_cntx, it->it.GetInnerIt());
       }
       deleted = true;
     }};
@@ -8742,6 +9133,28 @@ TEST_F(SearchFamilyTest, TextWeightsInfoAndScoring) {
   EXPECT_EQ(vals[1].GetString(), "d:1");
   EXPECT_EQ(vals[3].GetString(), "d:2");
   EXPECT_GT(std::stod(vals[2].GetString()), std::stod(vals[4].GetString()));
+}
+
+// FT.INFO lists attributes in declaration order, also after a repeated HASH identifier, and
+// FT.ALTER appends to it; an attribute whose alias or field already exists is rejected before
+// any rebuild.
+TEST_F(SearchFamilyTest, AlterKeepsDeclarationOrder) {
+  EXPECT_EQ(Run({"FT.CREATE", "ox", "ON", "HASH", "SCHEMA", "zeta", "TEXT", "zeta", "AS", "z2",
+                 "TAG", "alpha", "NUMERIC"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.ALTER", "ox", "SCHEMA", "ADD", "beta", "TEXT"}), "OK");
+  EXPECT_THAT(Run({"FT.ALTER", "ox", "SCHEMA", "ADD", "other", "AS", "alpha", "TEXT"}),
+              ErrArg("Duplicate field in schema - alpha"));
+  EXPECT_THAT(Run({"FT.ALTER", "ox", "SCHEMA", "ADD", "zeta", "AS", "z3", "TEXT"}),
+              ErrArg("Duplicate field in schema - zeta"));
+  auto attributes = [&] {
+    vector<string> out;
+    auto info = Run({"FT.INFO", "ox"});
+    for (const auto& attr : info.GetVec()[7].GetVec())
+      out.push_back(string{attr.GetVec()[3].GetString()});
+    return out;
+  };
+  EXPECT_EQ(attributes(), (vector<string>{"z2", "alpha", "beta"}));
 }
 
 TEST_F(SearchFamilyTest, AlterTextWeight) {

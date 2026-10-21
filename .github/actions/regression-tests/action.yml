@@ -125,6 +125,11 @@ runs:
         echo '/tmp/core_dumps/core.%e.%p.%t' >/proc/sys/kernel/core_pattern 2>/dev/null \
           || echo "Warning: could not write core_pattern; relying on systemd-coredump instead"
 
+    # Avoids a kernel TCP receive window collapse on loopback, see the action for details.
+    # Requires the job container to run with --cap-add=NET_ADMIN.
+    - name: Limit loopback MTU
+      uses: ./.github/actions/limit-loopback-mtu
+
     - name: Sync valkey-search tests
       uses: ./.github/actions/sync-valkey-tests
 

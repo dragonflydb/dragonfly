@@ -304,9 +304,10 @@ struct CmdArgListFormatter {
   }
 };
 
-string UnknownCmd(string cmd, facade::ParsedArgs args) {
+string UnknownCmd(string cmd, facade::ParsedArgs args, size_t num_args) {
+  auto end = std::next(args.begin(), num_args);
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
-                      absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
+                      absl::StrJoin(args.begin(), end, ", ", CmdArgListFormatter()));
 }
 
 std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
@@ -565,6 +566,40 @@ void ClientTracking(CmdArgParser parser, CommandContext* cmd_cntx) {
   conn_cntx->conn_state.tracking_info_.SetOption(option);
   conn_cntx->conn_state.tracking_info_.SetNoLoop(noloop);
   return cmd_cntx->rb()->SendOk();
+}
+
+void ClientTrackingInfo(facade::ParsedArgs args, CommandContext* cmd_cntx) {
+  if (!args.empty())
+    return cmd_cntx->SendError(kSyntaxErr);
+
+  using Tracking = ConnectionState::ClientTracking;
+  const auto& tracking = cmd_cntx->server_conn_cntx()->conn_state.tracking_info_;
+  const bool is_on = tracking.IsTrackingOn();
+
+  vector<string_view> flags;
+  if (!is_on) {
+    flags.push_back("off");
+  } else {
+    flags.push_back("on");
+    if (tracking.HasOption(Tracking::OPTIN))
+      flags.push_back("optin");
+    else if (tracking.HasOption(Tracking::OPTOUT))
+      flags.push_back("optout");
+    if (tracking.IsNoLoop())
+      flags.push_back("noloop");
+    if (tracking.IsCachingPending())
+      flags.push_back(tracking.HasOption(Tracking::OPTIN) ? "caching-yes" : "caching-no");
+  }
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  rb->StartCollection(3, CollectionType::MAP);
+  rb->SendBulkString("flags");
+  rb->SendBulkStrArr(flags, CollectionType::SET);
+  rb->SendBulkString("redirect");
+  // REDIRECT is not supported, so 0 means tracking is on without redirection.
+  rb->SendLong(is_on ? 0 : -1);
+  rb->SendBulkString("prefixes");
+  rb->SendEmptyArray();
 }
 
 void ClientCaching(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2246,6 +2281,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "    * LIB-VER: the client lib version.",
       "TRACKING (ON|OFF) [OPTIN] [OPTOUT] [NOLOOP]",
       "    Control server assisted client side caching.",
+      "TRACKINGINFO",
+      "    Report tracking status for the current connection.",
       "MIGRATE <client-id> <tid>",
       "    Migrates connection specified by client-id to the specified thread id.",
       "HELP",
@@ -2273,6 +2310,8 @@ void ServerFamily::Client(CmdArgParser parser, CommandContext* cmd_cntx) {
     return ClientUnPauseCmd(sub_args, cmd_cntx);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(CmdArgParser{sub_args}, cmd_cntx);
+  } else if (sub_cmd == "TRACKINGINFO") {
+    return ClientTrackingInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "KILL") {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), this, cmd_cntx);
   } else if (sub_cmd == "CACHING") {
@@ -2911,8 +2950,8 @@ string ServerFamily::FormatInfoMetrics(
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);
-    append("expired_keys", m.events.expired_keys);
-    append("evicted_keys", m.events.evicted_keys);
+    append("expired_keys", total.events.expired_keys);
+    append("evicted_keys", total.events.evicted_keys);
     append("total_heartbeat_expired_keys", m.shard_stats.total_heartbeat_expired_keys);
     append("total_heartbeat_expired_bytes", m.shard_stats.total_heartbeat_expired_bytes);
     append("total_heartbeat_expired_calls", m.shard_stats.total_heartbeat_expired_calls);
@@ -3343,7 +3382,7 @@ void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;
     if (!valid_proto_version) {
-      cmd_cntx->SendError(UnknownCmd("HELLO", args));
+      cmd_cntx->SendError(UnknownCmd("HELLO", args, cmd_cntx->cid()->NonSecretArgCount(args)));
       return;
     }
 
@@ -4163,8 +4202,8 @@ constexpr uint32_t kFlushAll = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kInfo = SLOW | DANGEROUS;
 constexpr uint32_t kHello = FAST | CONNECTION;
 constexpr uint32_t kLastSave = ADMIN | FAST | DANGEROUS;
-constexpr uint32_t kLatency = SLOW;
-constexpr uint32_t kMemory = SLOW;
+constexpr uint32_t kLatency = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kMemory = READ | SLOW;
 constexpr uint32_t kShrink = WRITE | FAST;
 constexpr uint32_t kSave = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kShutDown = ADMIN | SLOW | DANGEROUS;
@@ -4174,7 +4213,7 @@ constexpr uint32_t kReplTakeOver = DANGEROUS;
 constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kWait = SLOW | CONNECTION | BLOCKING;
-constexpr uint32_t kSlowLog = SLOW;
+constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
 constexpr uint32_t kModule = ADMIN | SLOW | DANGEROUS;
 // TODO(check this)
@@ -4183,7 +4222,7 @@ constexpr uint32_t kDfly = ADMIN;
 
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
-  constexpr auto kMemOpts = CO::LOADING;
+  constexpr auto kMemOpts = CO::LOADING | CO::READONLY;
   registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
@@ -4214,7 +4253,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"WAIT", CO::NOSCRIPT | CO::BLOCKING, 3, 0, 0, acl::kWait}.HFUNC(Wait)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)
-      << CI{"SLOWLOG", CO::LOADING, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
+      << CI{"SLOWLOG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly)
       << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);

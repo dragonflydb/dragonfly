@@ -1303,12 +1303,12 @@ void AclFamily::Register(dfly::CommandRegistry* registry) {
   *registry << CI{"ACL LOAD", kAclMask, 1, 0, 0, acl::kLoad}.HFUNC(Load);
   *registry << CI{"ACL LOG", kAclMask, 0, 0, 0, acl::kLog}.HFUNC(Log);
   *registry << CI{"ACL USERS", kAclMask, 1, 0, 0, acl::kUsers}.HFUNC(Users);
-  *registry << CI{"ACL CAT", kAclMask, -1, 0, 0, acl::kCat}.HFUNC(Cat);
+  *registry << CI{"ACL CAT", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kCat}.HFUNC(Cat);
   *registry << CI{"ACL GETUSER", kAclMask, 2, 0, 0, acl::kGetUser}.HFUNC(GetUser);
   *registry << CI{"ACL DRYRUN", kAclMask, -3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
   *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kGenPass}.HFUNC(
       GenPass);
-  *registry << CI{"ACL HELP", kAclMask, 0, 0, 0, acl::kHelp}.HFUNC(Help);
+  *registry << CI{"ACL HELP", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, acl::kHelp}.HFUNC(Help);
   cmd_registry_ = registry;
 
   // build indexers

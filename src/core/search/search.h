@@ -6,6 +6,8 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/container/inlined_vector.h>
+#include <absl/types/span.h>
 
 #include <cmath>
 #include <memory>
@@ -132,6 +134,7 @@ struct SchemaField {
   uint8_t flags;
   std::string short_name;  // equal to ident if none provided
   ParamsVariant special_params{std::monostate{}};
+  uint32_t number = 0;  // declaration position, keeps FT.INFO and the restore command ordered
 };
 
 // Describes the fields of an index
@@ -148,8 +151,9 @@ struct Schema {
   // Return identifier for alias if found, otherwise return passed value
   std::string_view LookupAlias(std::string_view alias) const;
 
-  // Return alias for identifier if found, otherwise return passed value
-  std::string_view LookupIdentifier(std::string_view identifier) const;
+  // Fields in declaration order.
+  using OrderedFields = absl::InlinedVector<std::pair<std::string_view, const SchemaField*>, 16>;
+  OrderedFields Ordered() const;
 };
 
 struct IndicesOptions {
@@ -181,7 +185,8 @@ class FieldIndices {
 
   BaseIndex* GetIndex(std::string_view field) const;
   BaseSortIndex* GetSortIndex(std::string_view field) const;
-  std::vector<TextIndex*> GetAllTextIndices() const;
+  TextIndex* GetTextIndex(std::string_view field) const;  // nullptr unless a TEXT attribute
+  absl::Span<TextIndex* const> GetAllTextIndices() const;
 
   const std::vector<DocId>& GetAllDocs() const;
   const Schema& GetSchema() const;
@@ -207,6 +212,10 @@ class FieldIndices {
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices();
+  // nullptr when the attribute has no index of that kind.
+  std::unique_ptr<BaseIndex> CreateIndex(std::string_view field_ident, const SchemaField& field,
+                                         PMR_NS::memory_resource* mr);
+  static std::unique_ptr<BaseSortIndex> CreateSortIndex(const SchemaField& field);
 
   const Schema& schema_;
   const IndicesOptions& options_;
@@ -215,6 +224,10 @@ class FieldIndices {
   std::vector<DocId> all_ids_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
   absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  // (identifier, index) for regular and sort indices: what Add and Remove feed with document
+  // values.
+  absl::InlinedVector<std::pair<std::string_view, BaseIndex*>, 16> add_list_;
+  absl::InlinedVector<TextIndex*, 16> text_indices_;  // declaration order
   const Synonyms* synonyms_;
 
   std::string next_defrag_field_;

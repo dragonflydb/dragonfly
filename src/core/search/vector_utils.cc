@@ -89,11 +89,6 @@ FAST_MATH float CosineDistance(const float* u, const float* v, size_t dims) {
 #endif
 }
 
-OwnedFtVector BytesToFtVector(string_view value) {
-  DCHECK_EQ(value.size() % sizeof(float), 0u) << value.size();
-  return ConvertToFtVector(value);
-}
-
 std::optional<OwnedFtVector> BytesToFtVectorSafe(string_view value) {
   if (value.size() % sizeof(float)) {
     return std::nullopt;

@@ -5,9 +5,9 @@ on:
     - cron: "0 0/3 * * *"
   workflow_dispatch:
     inputs:
-      # Pytest - manual trigger inputs
+      # Pytest - manual trigger inputs.
       test-suites:
-        description: "Pytest: optional filenames; empty runs all Pytest suites. See .github/REGRESSION-TESTS.md for details. Example: connection_test,eval_test"
+        description: "Pytest: optional filenames; empty runs all Pytest suites. See .github/MANUAL-CI-TESTS.md for details. Example: connection_test,eval_test"
         required: false
         default: ""
         type: string
@@ -62,7 +62,6 @@ jobs:
         proactor: [Epoll]
         build-type: [Debug]
         runner: [ubuntu-latest, [self-hosted, linux, ARM64]]
-        enable_resp_io_loop_v2: [false, true]
 
     runs-on: ${{ matrix.runner }}
 
@@ -73,7 +72,8 @@ jobs:
 
     container:
       image: ghcr.io/romange/${{ matrix.container }}
-      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      # NET_ADMIN lets the limit-loopback-mtu action lower the loopback MTU.
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0" --cap-add=NET_ADMIN
       volumes:
         - /var/crash:/var/crash
         - /:/hostroot
@@ -138,7 +138,6 @@ jobs:
           gtest-iterations: ${{ inputs['gtest-iterations'] || '' }}
           run-gtests: 'true'
           continue-on-test-failure: ${{ inputs['continue-on-test-failure'] || 'false' }}
-          df-runtime-flags: enable_resp_io_loop_v2=${{ matrix.enable_resp_io_loop_v2 }}
           s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           junit-s3-bucket: ${{ secrets.S3_REGTEST_BUCKET }}
           aws-role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}

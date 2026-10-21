@@ -506,7 +506,7 @@ template <typename F> void TraverseAllEntries(bool background, ConnectionContext
         do {
           {
             // No preemption inside Traverse (raw segment ptrs); journal flushes after the step.
-            journal::DisableFlushGuard flush_guard(shard->journal());
+            journal::DisableFlushGuard flush_guard;
             cursor = dbt->prime.Traverse(cursor, bound_f);
           }
           if (background) {

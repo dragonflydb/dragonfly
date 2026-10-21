@@ -8,8 +8,8 @@ Two independent checks:
                   constant. No network access required.
   --check valkey: diffs Dragonfly's effective ACL categories against real Valkey's
                   (ground truth), for commands Dragonfly shares with Valkey. Requires
-                  a Valkey checkout (--valkey-dir), or clones the latest valkey/valkey
-                  default branch itself if omitted -- this needs network access.
+                  a Valkey checkout (--valkey-dir), or clones valkey/valkey at
+                  VALKEY_REF itself if omitted -- this needs network access.
 
 Default is --check all (both checks), matching the CI job -- so a plain, no-argument
 invocation clones Valkey and needs network access. Pass --check self explicitly, or
@@ -127,18 +127,18 @@ STANDARD_ACL_NAMES = {
 ACL_REV = {v: k for k, v in ACL.items()}
 CO_REV = {v: k for k, v in CO.items()}
 
-# Container commands: Dragonfly registers these as a single flat command, while Valkey gives
-# each subcommand its own real categories and leaves the container itself with just @slow.
-# Not modeled here (no per-subcommand ACL categories in Dragonfly yet). Every other mismatch
-# is a real one and must be fixed, not added here.
+# Pinned so that unrelated changes upstream cannot fail CI; bump deliberately. Releases before 9.1
+# list only explicit categories in their command JSON, so they cannot be compared.
+VALKEY_REF = "9.1.2"
+
+# Not compared with Valkey: commands whose Valkey categories (for a flat container, the union of
+# its subcommands' categories, see valkey_command_categories) do not fit what Dragonfly runs. Every
+# other mismatch is a real one and must be fixed, not added here.
 VALKEY_SKIP = {
-    "CLIENT": "container command, Valkey categorizes per-subcommand only",
-    "CONFIG": "container command, Valkey categorizes per-subcommand only",
-    "SCRIPT": "container command, Valkey categorizes per-subcommand only",
-    "MODULE": "container command, Valkey categorizes per-subcommand only",
-    "CLUSTER": "container command, Valkey categorizes per-subcommand only",
-    "XGROUP": "container command, Valkey categorizes per-subcommand only",
-    "XINFO": "container command, Valkey categorizes per-subcommand only",
+    "ACL": "the bare command only replies an error, its subcommands are compared one by one",
+    "CLIENT": "KILL/LIST/PAUSE are @admin, SETNAME/ID are not",
+    "CLUSTER": "runs only the @slow subcommands, the @admin ones are in DFLYCLUSTER",
+    "DELEX": "without a condition it deletes a key of any type, like DEL",
 }
 
 
@@ -338,24 +338,36 @@ def ensure_valkey_checkout(valkey_dir):
             sys.exit(f"--valkey-dir {valkey_dir} has no src/commands -- not a valkey checkout")
         return valkey_dir
     tmp = tempfile.mkdtemp(prefix="valkey-acl-check-")
-    print(f"Cloning latest valkey/valkey into {tmp} ...", file=sys.stderr)
+    print(f"Cloning valkey/valkey {VALKEY_REF} into {tmp} ...", file=sys.stderr)
     subprocess.run(
-        ["git", "clone", "--depth", "1", "https://github.com/valkey-io/valkey.git", tmp],
+        [
+            "git",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            VALKEY_REF,
+            "https://github.com/valkey-io/valkey.git",
+            tmp,
+        ],
         check=True,
     )
     return tmp
 
 
 def valkey_command_categories(valkey_dir):
-    """Returns {command_name: set(acl_category_names)} for top-level commands only."""
+    """Returns {command_name: set(acl_category_names)}, subcommands keyed as "CONTAINER SUB". A
+    container's set also holds every category of its subcommands: Dragonfly's single command may
+    run any of them, so a -@category rule that denies one of them in Valkey must deny the whole
+    command."""
     result = {}
     for path in glob.glob(os.path.join(valkey_dir, "src", "commands", "*.json")):
-        base = os.path.basename(path)[: -len(".json")]
-        if "-" in base:
-            continue  # subcommand (e.g. acl-cat.json) -- not modeled here yet
         data = json.load(open(path))
         for name, spec in data.items():
-            result[name.upper()] = set(spec.get("acl_categories") or [])
+            cats = set(spec.get("acl_categories") or [])
+            if "container" in spec:
+                result[f"{spec['container']} {name}".upper()] = cats
+            result.setdefault(spec.get("container", name).upper(), set()).update(cats)
     return result
 
 
@@ -364,8 +376,6 @@ def check_valkey(commands, valkey_dir):
     issues = []
     checked = 0
     for name, (final, _mask, f) in commands.items():
-        if " " in name:
-            continue  # subcommand, not modeled here yet
         if name in VALKEY_SKIP:
             continue
         if name not in vk:
@@ -397,7 +407,7 @@ def main():
         help="'all' (default) clones/needs Valkey and network access; 'self' is offline-only",
     )
     ap.add_argument(
-        "--valkey-dir", help="path to an existing valkey checkout; default clones latest"
+        "--valkey-dir", help="path to an existing valkey checkout; default clones VALKEY_REF"
     )
     ap.add_argument("--repo-root", default=".")
     args = ap.parse_args()

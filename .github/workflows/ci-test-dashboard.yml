@@ -18,20 +18,46 @@ on:
         description: "Optional prefix within the publish bucket"
         required: false
         type: string
+  pull_request:
+    branches: [main]
+    # Run the test job only when dashboard code or this workflow changes.
+    paths:
+      - "tools/ci_test_dashboard/**"
+      - ".github/workflows/ci-test-dashboard.yml"
 
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Runs if a PR triggers
+  test-links:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Test CI dashboard GitHub links
+        run: python3 -m unittest tools/ci_test_dashboard/test_sync_issue_links.py
+
+  # Runs if a schedule or workflow_dispatch triggers
   publish:
-    if: github.repository == 'dragonflydb/dragonfly'
+    if: github.event_name != 'pull_request' && github.repository == 'dragonflydb/dragonfly'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    concurrency:
+      group: ci-test-dashboard-publish-${{ github.repository }}
+      cancel-in-progress: false
 
     permissions:
       contents: read
       id-token: write
+      issues: read        # read public issues
+      pull-requests: read # read PRs
 
     env:
       DASHBOARD_ROOT: tools/ci_test_dashboard
@@ -69,6 +95,14 @@ jobs:
             --lookback-days "${LOOKBACK_DAYS}" \
             --work-dir "${RUNNER_TEMP}/ci-test-dashboard" \
             "${DASHBOARD_ROOT}/site/data"
+
+      # Create data/issue-links.json - containing related issue/PR/assignee lookup data.
+      # The artifact upload/S3 publish include that additional static file.
+      - name: Link tests to GitHub issues and pull requests
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 "${DASHBOARD_ROOT}/sync_issue_links.py" "${DASHBOARD_ROOT}/site/data"
 
       - name: Upload dashboard artifact
         uses: actions/upload-artifact@v7

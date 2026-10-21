@@ -427,11 +427,11 @@ async def test_replicate_old_master(
     if cpu not in ("x86_64", "aarch64"):
         pytest.skip(f"No release binaries for {cpu}")
 
-    dfly_version = "v1.19.2"
+    dfly_version = "v1.25.3"
     released_dfly_path = download_dragonfly_release(dfly_version)
     master, [replica], c_master, [c_replica] = await setup_replication(
         df_factory,
-        master_args={"version": 1.19, "path": released_dfly_path, "cluster_mode": cluster_mode},
+        master_args={"version": 1.25, "path": released_dfly_path, "cluster_mode": cluster_mode},
         replica_args={
             "cluster_mode": cluster_mode,
             "cluster_announce_ip": announce_ip,
@@ -440,17 +440,19 @@ async def test_replicate_old_master(
         connect=False,
     )
 
-    assert (
-        f"df-{dfly_version}"
-        == (await c_master.execute_command("info", "server"))["dragonfly_version"]
-    )
-    assert dfly_version != (await c_replica.execute_command("info", "server"))["dragonfly_version"]
-
-    await c_master.execute_command("set", "k1", "v1")
-    await c_master.execute_command("HSETEX", "hash", 3600, "expiring", "one")
-    await c_master.hset("hash", "persistent", "two")
-
     try:
+        assert (
+            f"df-{dfly_version}"
+            == (await c_master.execute_command("info", "server"))["dragonfly_version"]
+        )
+        assert (
+            dfly_version != (await c_replica.execute_command("info", "server"))["dragonfly_version"]
+        )
+
+        await c_master.execute_command("set", "k1", "v1")
+        await c_master.execute_command("HSETEX", "hash", 3600, "expiring", "one")
+        await c_master.hset("hash", "persistent", "two")
+
         assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
         await wait_available_async(c_replica)
 
@@ -466,15 +468,8 @@ async def test_replicate_old_master(
             assert res[0][2] == ["localhost", master.port, master_replid]
             assert res[0][3][1] == replica.port
     finally:
-        # Let the old master finish replication cleanup before fixture teardown sends SIGTERM.
-        async with async_timeout.timeout(10):
-            await c_replica.execute_command("REPLICAOF", "NO", "ONE")
-
-            @assert_eventually(timeout=5)
-            async def replica_disconnected():
-                assert (await c_master.info("replication"))["connected_slaves"] == 0
-
-            await replica_disconnected()
+        # This test checks replication compatibility; the released master's shutdown can hang.
+        master.stop(kill=True)
 
 
 async def test_replicate_to_old_replica(df_factory: DflyInstanceFactory):
@@ -482,10 +477,10 @@ async def test_replicate_to_old_replica(df_factory: DflyInstanceFactory):
     if cpu not in ("x86_64", "aarch64"):
         pytest.skip(f"No release binaries for {cpu}")
 
-    dfly_version = "v1.19.2"
+    dfly_version = "v1.25.3"
     released_dfly_path = download_dragonfly_release(dfly_version)
     master = df_factory.create(cluster_mode="emulated", admin_port=ADMIN_PORT)
-    replica = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode="emulated")
+    replica = df_factory.create(version=1.25, path=released_dfly_path, cluster_mode="emulated")
     df_factory.start_all([master, replica])
 
     c_master = master.client()

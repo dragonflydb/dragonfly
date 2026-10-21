@@ -128,9 +128,9 @@ void AofBlockBuilder::Append(std::string_view record, uint64_t lsn) {
     record.remove_prefix(n);
     if (record.empty())
       break;
-    flags_ |= kEndsWithPartial;
+    flags_ |= kEndsMidRecord;
     SealOpen();
-    start_flags = kStartsWithContinuation;
+    start_flags = kStartsMidRecord;
   }
 
   ++n_records_;

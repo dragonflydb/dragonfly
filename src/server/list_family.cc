@@ -189,7 +189,7 @@ class ListWrapper {
       ql->EnableTiering(std::move(params), mr);
     }
 
-    ql->set_compr_policy(QList::PolicyFromFlags());
+    ql->InitFromFlags();
     if (lp.Size() > 0) {
       ql->AppendListpack(lp.GetPointer());
     }
@@ -444,7 +444,7 @@ std::string OpBPop(Transaction* t, EngineShard* shard, std::string_view key, Lis
   OpArgs op_args = t->GetOpArgs(shard);
   if (len == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
-    op_args.GetDbSlice().Del(op_args.db_cntx, it);
+    op_args.GetDbSlice().DelAtomic(op_args.db_cntx, it.GetInnerIt());
   }
 
   if (op_args.shard->journal()) {
@@ -511,7 +511,7 @@ OpResult<string> OpMoveSingleShard(const OpArgs& op_args, string_view src, strin
   dest_res.post_updater.Run();
 
   if (prev_len == 1) {
-    db_slice.Del(op_args.db_cntx, src_it);
+    db_slice.DelAtomic(op_args.db_cntx, src_it.GetInnerIt());
   }
 
   return val;
@@ -610,7 +610,7 @@ OpResult<StringVec> OpPop(const OpArgs& op_args, string_view key, ListDir dir, u
   it_res->post_updater.Run();
 
   if (count == prev_len) {
-    db_slice.Del(op_args.db_cntx, it);
+    db_slice.DelAtomic(op_args.db_cntx, it.GetInnerIt());
   }
 
   if (op_args.shard->journal() && journal_rewrite) {
@@ -777,7 +777,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, string_view ele
   it_res->post_updater.Run();
 
   if (len == 0) {
-    db_slice.Del(op_args.db_cntx, it_res->it);
+    db_slice.DelAtomic(op_args.db_cntx, it_res->it.GetInnerIt());
   }
 
   return removed;
@@ -839,7 +839,7 @@ OpStatus OpTrim(const OpArgs& op_args, string_view key, long start, long end) {
   it_res->post_updater.Run();
 
   if (it->second.Size() == 0) {
-    db_slice.Del(op_args.db_cntx, it);
+    db_slice.DelAtomic(op_args.db_cntx, it.GetInnerIt());
   }
   return OpStatus::OK;
 }

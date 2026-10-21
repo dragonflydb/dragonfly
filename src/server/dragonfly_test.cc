@@ -7,10 +7,13 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/strings/ascii.h>
+#include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/strip.h>
+#include <absl/synchronization/mutex.h>
 #include <absl/time/clock.h>
 #include <gmock/gmock.h>
 #include <reflex/matcher.h>
@@ -22,8 +25,11 @@ extern "C" {
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "redis/redis_aux.h"
+#include "server/blocking_controller.h"
 #include "server/command_registry.h"
+#include "server/journal/journal.h"
 #include "server/main_service.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 #include "util/accept_server.h"
 
@@ -35,6 +41,8 @@ ABSL_DECLARE_FLAG(uint32_t, lua_max_stall_ms);
 ABSL_DECLARE_FLAG(double, eviction_memory_budget_threshold);
 ABSL_DECLARE_FLAG(std::vector<std::string>, command_alias);
 ABSL_DECLARE_FLAG(bool, latency_tracking);
+ABSL_DECLARE_FLAG(bool, enable_heartbeat_eviction);
+ABSL_DECLARE_FLAG(double, table_growth_margin);
 
 namespace dfly {
 
@@ -50,6 +58,7 @@ using testing::ElementsAre;
 using testing::HasSubstr;
 using testing::Key;
 using testing::Pair;
+using testing::UnorderedElementsAre;
 
 namespace {
 
@@ -162,6 +171,20 @@ TEST_F(DflyEngineTest, EvalResp) {
   ASSERT_THAT(resp, ArrLen(4));
   EXPECT_THAT(resp.GetVec(), AnyOf(ElementsAre("a", IntArg(1), "b", IntArg(2)),
                                    ElementsAre("b", IntArg(2), "a", IntArg(1))));
+
+  // The cycle is replaced by an error where it gets nested deeper than 128 tables.
+  resp = Run({"eval", "local k = {}; k[1] = k; return {map = {[k] = 1}}", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], IntArg(1));
+  for (int depth = 2; depth <= 128; ++depth) {
+    ASSERT_THAT(resp.GetVec()[0], ArrLen(1));
+    resp = resp.GetVec()[0];
+  }
+  EXPECT_THAT(resp.GetVec()[0], ErrArg("reached lua stack limit"));
+
+  // EVAL must accept cycles in fields that are not serialized.
+  resp = Run({"eval", "local t = {1}; t.self = t; return t", "0"});
+  EXPECT_THAT(resp, RespElementsAre(IntArg(1)));
 }
 
 TEST_F(DflyEngineTest, EvalGetLargeBorrowedStrings) {
@@ -393,54 +416,6 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
 using MP = MemcacheParser;
 
 TEST_F(DflyEngineTest, Memcache) {
-#if 0
-  auto resp = RunMC(MP::SET, "key", MCArgs{"bar", 1});
-  EXPECT_THAT(resp, ElementsAre("STORED"));
-
-  resp = RunMC(MP::GETS, "key");
-  EXPECT_THAT(resp, ElementsAre("VALUE key 1 3 0", "bar", "END"));
-
-  resp = RunMC(MP::GET, "key");
-  EXPECT_THAT(resp, ElementsAre("VALUE key 1 3", "bar", "END"));
-
-  resp = RunMC(MP::ADD, "key", MCArgs{"bar", 1});
-  EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
-
-  resp = RunMC(MP::REPLACE, "key2", MCArgs{"bar", 1});
-  EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
-
-  resp = RunMC(MP::ADD, "key2", MCArgs{"bar2", 2});
-  EXPECT_THAT(resp, ElementsAre("STORED"));
-
-  resp = GetMC(MP::GET, {"key2", "key"});
-  EXPECT_THAT(resp, ElementsAre("VALUE key2 2 4", "bar2", "VALUE key 1 3", "bar", "END"));
-
-  resp = RunMC(MP::APPEND, "key2", MCArgs{"val2", 0});
-  EXPECT_THAT(resp, ElementsAre("STORED"));
-  resp = RunMC(MP::GET, "key2");
-  EXPECT_THAT(resp, ElementsAre("VALUE key2 2 8", "bar2val2", "END"));
-
-  resp = RunMC(MP::APPEND, "unkn", MCArgs{"val2", 0});
-  EXPECT_THAT(resp, ElementsAre("NOT_STORED"));
-
-  resp = RunMC(MP::GET, "unkn");
-  EXPECT_THAT(resp, ElementsAre("END"));
-
-  resp = GetMC(MP::GETS, {"key", "key2", "unknown"});
-  EXPECT_THAT(resp, ElementsAre("VALUE key 1 3 0", "bar", "VALUE key2 2 8 0", "bar2val2", "END"));
-
-  EXPECT_THAT(RunMC(MP::SET, "foo", MCArgs{"bar"}), ElementsAre("STORED"));
-
-  EXPECT_THAT(RunMC(MP::SET, "foo", MCArgs{"bar"}), ElementsAre("STORED"));
-
-  // 30 seconds into the future
-  auto future_ts = time(nullptr) + 30;
-  EXPECT_THAT(GetMC(MP::GAT, {StrCat(future_ts), "foo", "abc", "def", "ghi"}),
-              ElementsAre("VALUE foo 0 3", "bar", "END"));
-
-  EXPECT_THAT(GetMC(MP::GAT, {"1000"}),
-              ElementsAre("SERVER_ERROR wrong number of arguments for 'gat' command"));
-#endif
   EXPECT_THAT(RunMC(MP::SET, "persisted-key", MCArgs{"bar"}), ElementsAre("STORED"));
   // expiry of 0 removes the key expiry
   EXPECT_THAT(GetMC(MP::GAT, {"0", "persisted-key"}),
@@ -540,6 +515,23 @@ TEST_F(DflyEngineTest, OOM) {
   }
 }
 
+TEST_F(DflyEngineTest, DenyOnOOMReadsLiveCounters) {
+  auto [denied, allowed, denials] = pp_->at(0)->Await([] {
+    ServerState* ss = ServerState::tlocal();
+    uint64_t before = ss->stats.oom_error_cmd_cnt;
+    max_memory_limit = 1ULL << 29;
+    used_mem_current = 1ULL << 30;
+    bool denied = ss->ShouldDenyOnOOM();
+    used_mem_current = 1ULL << 28;
+    bool allowed = !ss->ShouldDenyOnOOM();
+    used_mem_current = 0;
+    return tuple{denied, allowed, ss->stats.oom_error_cmd_cnt - before};
+  });
+  EXPECT_TRUE(denied);
+  EXPECT_TRUE(allowed);
+  EXPECT_EQ(denials, 1u);
+}
+
 /// Reproduces the case where items with expiry data were evicted,
 /// and then written with the same key.
 TEST_F(DflyEngineTest, Bug207) {
@@ -563,12 +555,17 @@ TEST_F(DflyEngineTest, Bug207) {
   }
 
   auto metrics = GetMetrics();
-  EXPECT_GT(metrics.events.evicted_keys, 0) << FormatMetrics(metrics);
+  size_t evicted = metrics.db_stats[0].events.evicted_keys;
+  EXPECT_GT(evicted, 0) << FormatMetrics(metrics);
 
   for (; i > 0; --i) {
     resp = Run({"setex", StrCat("key", i), "30", "bar"});
     ASSERT_EQ(resp, "OK");
   }
+
+  // Eviction counters are cumulative and must survive a flush.
+  Run({"FLUSHALL"});
+  EXPECT_GE(GetMetrics().db_stats[0].events.evicted_keys, evicted);
 }
 
 TEST_F(DflyEngineTest, StickyEviction) {
@@ -650,6 +647,49 @@ TEST_F(DflyEngineTest, ZeroAllocationEviction) {
   // Should have evicted some entries with zero-allocation values
   // but not external (disk storage) entries
   EXPECT_GT(evicted_count, 0) << "Zero-allocation entries should be evicted under memory pressure";
+}
+
+// In a full table each new key evicts the tail of the stash bucket chosen by its hash. A command
+// must not evict its own keys: the eviction journals a DEL before the MSET itself, so the replica
+// would keep the key.
+TEST_F(SingleThreadDflyEngineTest, MSetDoesNotEvictItsOwnKeys) {
+  absl::FlagSaver fs;
+  SetFlag(&FLAGS_enable_heartbeat_eviction, false);
+  SetFlag(&FLAGS_table_growth_margin, 1e9);  // the table can not grow
+  shard_set->TEST_EnableCacheMode();
+  max_memory_limit = 1ULL << 30;
+  used_mem_current.fetch_add(900ULL << 20);
+  PrimeTable* pt = pp_->at(0)->Await([] {
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(0);
+    db_slice.UpdateMemoryParams(100LL << 20, db_slice.bytes_per_object());
+    return db_slice.GetTables(0);
+  });
+
+  for (unsigned i = 0;; ++i) {
+    auto [size, capacity, segments] = pp_->at(0)->Await([&] {
+      return tuple{pt->size(), pt->capacity(), pt->GetSegmentCount()};
+    });
+    ASSERT_EQ(segments, 2u) << "the table grew";
+    if (size == capacity)
+      break;
+    Run({"set", StrCat("filler:", i), string(32, 'v')});
+  }
+
+  // kSlotNum + 1 keys of the same segment and stash bucket: the last one evicts the first one.
+  auto stash = [&](string_view key) {
+    uint64_t hash = pt->DoHash(key);
+    return pair{hash >> 63, hash % PrimeTable::Segment_t::kStashBucketNum};
+  };
+  vector<string> args = {"MSET"};
+  for (unsigned i = 0; args.size() < 2 * PrimeTable::kSlotNum + 3; ++i) {
+    if (string key = StrCat("k", i); stash(key) == stash("k0"))
+      args.insert(args.end(), {key, "v"});
+  }
+
+  size_t evicted = GetMetrics().db_stats[0].events.evicted_keys;
+  Run(args);
+  EXPECT_GE(GetMetrics().db_stats[0].events.evicted_keys - evicted, PrimeTable::kSlotNum);
+  EXPECT_EQ(1, CheckedInt({"exists", "k0"}));
 }
 
 TEST_F(DflyEngineTest, PSubscribe) {
@@ -763,6 +803,68 @@ TEST_F(DflyEngineTest, MonitorTimestamp) {
     EXPECT_LE(stamp, windows[i].second) << msg;
   }
 }
+
+#ifdef USE_ABSL_LOG
+// Collects failed-command lines from their VLOG(2) twin; the WARNING copy is rate-limited.
+class FailedCmdSink : public absl::LogSink {
+ public:
+  FailedCmdSink() : vlog_level_(absl::SetVLogLevel("main_service", 2)) {
+    absl::AddLogSink(this);
+  }
+
+  ~FailedCmdSink() override {
+    absl::RemoveLogSink(this);
+    absl::SetVLogLevel("main_service", vlog_level_);
+  }
+
+  void Send(const absl::LogEntry& entry) override {
+    if (absl::StrContains(entry.text_message(), "failed with reason")) {
+      absl::MutexLock lk(&mu_);
+      lines_.emplace_back(entry.text_message());
+    }
+  }
+
+  vector<string> Lines() {
+    absl::MutexLock lk(&mu_);
+    return lines_;
+  }
+
+ private:
+  int vlog_level_;
+  absl::Mutex mu_;
+  vector<string> lines_;
+};
+
+TEST_F(DflyEngineTest, HelloAuthHidden) {
+  absl::FlagSaver fs;
+  Run({"config", "set", "slowlog_log_slower_than", "0"});
+  EXPECT_EQ(Run({"monitor"}), "OK");
+
+  FailedCmdSink sink;
+  Run("cl", {"hello", "3", "auth", "u", "secret"});
+  Run("cl", {"hello", "3", "auht", "u", "secret"});
+  Run("cl", {"hello"});
+  auto resp = Run("cl", {"hello", "4", "AUTH", "u", "secret"});
+  Run("cl", {"auth", "u", "secret"});
+  Run("cl", {"acl", "setuser", "v", ">secret", "nosuchrule"});
+
+  EXPECT_EQ(resp.GetString(), "ERR unknown command 'HELLO' with args beginning with: `4`");
+  EXPECT_THAT(sink.Lines(), Contains(HasSubstr(" HELLO 3 failed with reason: syntax error")));
+  EXPECT_THAT(sink.Lines(), testing::Each(testing::Not(HasSubstr("secret"))));
+
+  auto monitor = pp_->at(0)->Await([&] { return GetConnection("IO0")->monitor_messages; });
+  EXPECT_THAT(monitor, Contains(testing::EndsWith(R"("HELLO" "3")")));
+  EXPECT_THAT(monitor, testing::Each(testing::Not(HasSubstr("secret"))));
+
+  vector<vector<string>> slowlog;
+  resp = Run("cl", {"slowlog", "get", "100"});
+  for (const auto& entry : resp.GetVec())
+    slowlog.push_back(StrArray(entry.GetVec()[3]));
+  EXPECT_THAT(slowlog, Contains(ElementsAre("HELLO", "3", "... (3 more arguments)")));
+  EXPECT_THAT(slowlog, Contains(ElementsAre("AUTH", "... (2 more arguments)")));
+  EXPECT_THAT(slowlog, testing::Each(testing::Not(Contains(HasSubstr("secret")))));
+}
+#endif
 
 TEST_F(DflyEngineTest, Bug468) {
   RespExpr resp = Run({"multi"});
@@ -1218,6 +1320,140 @@ TEST_F(DflyEngineTest, ExpireInlineKeyAccounting) {
   EXPECT_EQ(stats.memory_usage_by_type[OBJ_KEY], 0);
 }
 
+namespace {
+
+// Records the journaled commands. The first DEL parks in ThrottleIfNeeded, i.e. after the record
+// has been appended but before control returns to the code that appended it.
+class ParkFirstDel : public journal::JournalConsumerInterface {
+ public:
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+    cmds_.emplace_back(item.cmd);
+    if (armed_ && item.cmd == "DEL") {
+      armed_ = false;
+      park_pending_ = true;
+    }
+  }
+
+  void ThrottleIfNeeded() override {
+    if (std::exchange(park_pending_, false)) {
+      parked.Notify();
+      release.Wait();  // A blocking wait that pauses the execution until the release is notified
+    }
+  }
+
+  // Call on the proactor that the consumer is registered on.
+  vector<string> cmds() const {
+    return cmds_;
+  }
+
+  // parked and release are used to coordinate the blocking and resuming of the first DEL command.
+  fb2::Done parked, release;
+
+ private:
+  bool armed_ = true;
+  bool park_pending_ = false;
+  vector<string> cmds_;
+};
+
+}  // namespace
+
+// NotifyPending's readiness checks may expire the watched keys. Expiry used to suspend in the
+// journal throttle in the middle of the iteration over the watch tables, and fibers that ran
+// meanwhile could erase the queues and the table being iterated (#8553). Here the blocked readers
+// finish while the first expiry is parked: had the iteration been suspended, they would time out
+// and free their watch queues under it. Now the checks run with journal flushing disabled: both
+// expiries are journaled and both readers are woken before the first throttle, and the keyspace
+// events are sent after the iteration.
+TEST_F(DflyEngineTest, NotifyPendingExpiresWithoutSuspending) {
+  string key2;
+  for (unsigned i = 0; key2.empty(); ++i) {
+    string candidate = StrCat("s", i);
+    if (candidate != kKeySid0 && Shard(candidate, shard_set->size()) == 0)
+      key2 = candidate;
+  }
+
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "Ex"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+  single_response_ = false;
+  ASSERT_THAT(pp_->at(3)->Await([&] {
+    return Run({"subscribe", "__keyevent@0__:expired"});
+  }),
+              ArrLen(3));
+  single_response_ = true;
+
+  for (string_view key : {string_view{kKeySid0}, string_view{key2}}) {
+    Run({"xadd", key, "*", "f", "v"});
+    Run({"xgroup", "create", key, "g", "$"});
+    Run({"pexpire", key, "10"});
+  }
+
+  // Block a consumer group reader on each stream, with a timeout so that it can give up while the
+  // expiry below is parked. The keys are locked by the blocked transactions, so the heartbeat will
+  // not expire them.
+  constexpr string_view kBlockMs = "5000";
+  RespExpr resp1, resp2;
+  auto reader1 = pp_->at(1)->LaunchFiber([&] {
+    resp1 = Run("reader1",
+                {"xreadgroup", "group", "g", "c", "block", kBlockMs, "streams", kKeySid0, ">"});
+  });
+  auto reader2 = pp_->at(2)->LaunchFiber([&] {
+    resp2 =
+        Run("reader2", {"xreadgroup", "group", "g", "c", "block", kBlockMs, "streams", key2, ">"});
+  });
+  // On an early failure, wait for the readers to time out instead of leaving them running.
+  absl::Cleanup join_readers = [&] {
+    reader1.JoinIfNeeded();
+    reader2.JoinIfNeeded();
+  };
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsConnBlocked("reader1") && IsConnBlocked("reader2"); }, 1s));
+
+  ParkFirstDel consumer;
+  const uint32_t consumer_id = StartJournalWithConsumer(&consumer, 0);
+  absl::Cleanup unregister = [&] {
+    pp_->at(0)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
+
+  // Expire both streams and run the readiness checks, as the heartbeat does. The clock advances
+  // on the shard thread right before, so the heartbeat cannot interleave.
+  auto notify = pp_->at(0)->LaunchFiber([&] {
+    AdvanceTime(20);
+    auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(0);
+    bc->Awaken(0, kKeySid0);
+    bc->Awaken(0, key2);
+    bc->NotifyPending();
+  });
+  if (!consumer.parked.WaitFor(5s)) {
+    consumer.release.Notify();
+    notify.Join();
+    FAIL() << "the expiry never reached the journal";
+  }
+
+  // The first throttle came after both checks had expired their keys.
+  EXPECT_THAT(pp_->at(0)->Await([&] { return consumer.cmds(); }), ElementsAre("DEL", "DEL"));
+
+  // The readers finish while the expiry is still parked.
+  reader1.Join();
+  reader2.Join();
+
+  consumer.release.Notify();
+  notify.Join();
+
+  // A blocked XREADGROUP wakes on a deleted stream and reports the missing group.
+  EXPECT_THAT(resp1, ErrArg("NOGROUP"));
+  EXPECT_THAT(resp2, ErrArg("NOGROUP"));
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});  // flush pending publishes
+  ASSERT_EQ(2u, SubscriberMessagesLen("IO3"));
+  vector<string> expired = {string(GetPublishedMessage("IO3", 0).message),
+                            string(GetPublishedMessage("IO3", 1).message)};
+  EXPECT_THAT(expired, UnorderedElementsAre(kKeySid0, key2));
+}
+
 // AddListener picks the accept-loop proactor via the pool's shared round-robin, so listener
 // construction (see MakeListener in dfly_main.cc) must not call GetNextProactor() in between —
 // that would stack several accept loops on one proactor.
@@ -1288,7 +1524,8 @@ TEST_F(DflyEngineTest, TypeForFamilyMatchesRegisteredCommands) {
 class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
-    SetFlag(&FLAGS_command_alias, {"___set=set", "___ping=ping", "___msetex=msetex"});
+    SetFlag(&FLAGS_command_alias,
+            {"___set=set", "___ping=ping", "___hello=hello", "evalauth=auth", "___msetex=msetex"});
     SetFlag(&FLAGS_latency_tracking, true);
   }
 
@@ -1343,6 +1580,21 @@ TEST_F(DflyCommandAliasTest, AliasesShareHistogramPtr) {
   EXPECT_EQ(command_histograms.at("set"), command_histograms.at("___set"));
   EXPECT_EQ(command_histograms.at("ping"), command_histograms.at("___ping"));
 }
+
+#ifdef USE_ABSL_LOG
+TEST_F(DflyCommandAliasTest, AliasHidesSecretArgs) {
+  EXPECT_EQ(Run({"monitor"}), "OK");
+  FailedCmdSink sink;
+  Run("cl", {"___hello", "3", "auth", "u", "secret"});
+  Run("cl", {"evalauth", "u", "secret"});
+
+  auto monitor = pp_->at(0)->Await([&] { return GetConnection("IO0")->monitor_messages; });
+  EXPECT_THAT(monitor,
+              ElementsAre(testing::EndsWith(R"("3")"), testing::EndsWith(R"("EVALAUTH")")));
+  EXPECT_THAT(sink.Lines(), Contains(HasSubstr(" EVALAUTH failed with reason")));
+  EXPECT_THAT(sink.Lines(), testing::Each(testing::Not(HasSubstr("secret"))));
+}
+#endif
 
 static void BM_FindExtended(benchmark::State& state) {
   CommandRegistry registry;

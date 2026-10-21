@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
+#include <absl/functional/function_ref.h>
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_format.h>
@@ -46,6 +47,7 @@
 #include "server/search/global_hnsw_index.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
+#include "server/tx_base.h"
 #include "src/core/overloaded.h"
 
 namespace rng = std::ranges;
@@ -347,6 +349,7 @@ constexpr std::array<const std::string_view, 1> kIgnoredOptionsWithArg = {"PHONE
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
   auto& schema = index->schema;
+  const size_t existing = schema.field_names.size();  // FT.ALTER parses into the live definition
 
   if (!parser->HasNext()) {
     return CreateSyntaxError("Fields arguments are missing"sv);
@@ -381,10 +384,11 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
     if (schema.field_names.contains(field_alias)) {
       return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_alias));
     }
-    // Same identifier may appear twice on HASH (e.g. one TAG spec + one TEXT spec with
-    // different aliases). On JSON, a bare identifier expands to $.<id> and would silently
-    // shadow an earlier $.<id> spec; reject that collision instead of last-write-wins.
-    if (index->type == DocIndex::JSON && schema.fields.contains(field_path)) {
+    // Several attributes on one field are not accepted yet: never on JSON, and not through
+    // FT.ALTER on HASH (FT.CREATE keeps the last declaration, as before).
+    if (auto it = schema.fields.find(field_path);
+        it != schema.fields.end() &&
+        (index->type == DocIndex::JSON || it->second.number < existing)) {
       return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_path));
     }
 
@@ -440,7 +444,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       flags |= *flag;
     }
 
-    schema.fields[field_path] = {field_type, flags, string{field_alias}, params};
+    const uint32_t number = schema.field_names.size();
+    schema.fields[field_path] = {field_type, flags, string{field_alias}, params, number};
     schema.field_names[field_alias] = field_path;
   }
 
@@ -1371,40 +1376,13 @@ void WarmupQueryParser() {
   });
 }
 
-struct HnswLoadOptions {
-  bool set_sort_score = false;
-  bool remove_sort_field = false;
-  std::string sort_score_field;
-  std::optional<std::vector<FieldReference>> return_fields;
-};
-
-HnswLoadOptions PrepareHnswLoadOptions(const SearchParams& params,
-                                       std::optional<search::KnnScoreSortOption> knn_score_option) {
-  HnswLoadOptions options;
-  options.return_fields = params.return_fields;
-
-  options.set_sort_score =
-      params.sort_option && (!knn_score_option || !params.sort_option->IsSame(*knn_score_option));
-  if (!options.set_sort_score)
-    return options;
-
-  auto sort_field = params.sort_option->field.Name();
-  options.sort_score_field = sort_field;
-
-  if (!options.return_fields)
-    return options;
-
-  auto sort_return_field = rng::find_if(
-      *options.return_fields,
-      [sort_field](const FieldReference& field) { return field.Name() == sort_field; });
-
-  if (sort_return_field == options.return_fields->end()) {
-    options.return_fields->push_back(params.sort_option->field);
-    options.remove_sort_field = true;
-  } else {
-    options.sort_score_field = sort_return_field->OutputName();
-  }
-  return options;
+// SORTBY by anything but the KNN score needs the sort value loaded from the document.
+std::optional<DocField> HnswSortField(
+    const search::Schema& schema, const SearchParams& params,
+    const std::optional<search::KnnScoreSortOption>& knn_score_option) {
+  if (!params.sort_option || (knn_score_option && params.sort_option->IsSame(*knn_score_option)))
+    return std::nullopt;
+  return ResolveField(schema, params.sort_option->field);
 }
 
 vector<SearchResult> LoadHnswSearchDocs(
@@ -1434,12 +1412,13 @@ vector<SearchResult> LoadHnswSearchDocs(
     }
 
     const auto& schema = index->base().schema;
-    auto load_options = PrepareHnswLoadOptions(params, knn_score_option);
-    const bool ids_only_without_sort_load = params.IdsOnly() && !load_options.set_sort_score;
+    const std::optional<DocField> sort_field = HnswSortField(schema, params, knn_score_option);
+    const bool ids_only_without_sort_load = params.IdsOnly() && !sort_field;
 
     // Resize shard with default `true` value
     shard_docs_serialized_indicator[es->shard_id()].resize(shard_docs[es->shard_id()].size(), true);
 
+    const auto doc_fields = ResolveFields(schema, params.return_fields);
     for (size_t i = 0; i < shard_docs[es->shard_id()].size(); i++) {
       auto& shard_doc = shard_docs[es->shard_id()][i];
 
@@ -1453,23 +1432,12 @@ vector<SearchResult> LoadHnswSearchDocs(
         continue;
       }
 
-      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
-                                                load_options.return_fields);
+      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
+                                                sort_field ? &*sort_field : nullptr);
           doc) {
-        auto& [key, fields] = *doc;
-
-        // Handle sort_score and remove field if we don't need it
-        search::SortableValue sort_score = std::monostate{};
-        if (load_options.set_sort_score) {
-          if (auto it = fields.find(load_options.sort_score_field); it != fields.end())
-            sort_score = it->second;
-          if (load_options.remove_sort_field) {
-            fields.erase(load_options.sort_score_field);
-          }
-        }
-        shard_doc.key = std::string{key};
-        shard_doc.values = std::move(fields);
-        shard_doc.sort_score = sort_score;
+        shard_doc.key = std::string{doc->key};
+        shard_doc.values = std::move(doc->values);
+        shard_doc.sort_score = std::move(doc->sort_value);
       } else {
         // If we couldn't serialize requested doc
         shard_docs_serialized_indicator[es->shard_id()][i] = false;
@@ -1628,28 +1596,20 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
     shard_docs[shard_id].emplace_back(doc);
   }
 
-  auto load_options = PrepareHnswLoadOptions(params, knn_score_option);
-
   cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
     auto* idx = es->search_indices()->GetIndex(index_name);
     if (!idx || shard_docs[es->shard_id()].empty())
       return OpStatus::OK;
     const auto& schema = idx->base().schema;
+    const auto doc_fields = ResolveFields(schema, params.return_fields);
+    const std::optional<DocField> sort_field = HnswSortField(schema, params, knn_score_option);
     for (auto& shard_doc : shard_docs[es->shard_id()]) {
-      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), schema,
-                                              load_options.return_fields);
+      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
+                                              sort_field ? &*sort_field : nullptr);
           doc) {
-        auto& [key, fields] = *doc;
-        search::SortableValue sort_score = std::monostate{};
-        if (load_options.set_sort_score) {
-          if (auto it = fields.find(load_options.sort_score_field); it != fields.end())
-            sort_score = it->second;
-          if (load_options.remove_sort_field)
-            fields.erase(load_options.sort_score_field);
-        }
-        shard_doc.key = std::string{key};
-        shard_doc.values = std::move(fields);
-        shard_doc.sort_score = sort_score;
+        shard_doc.key = std::string{doc->key};
+        shard_doc.values = std::move(doc->values);
+        shard_doc.sort_score = std::move(doc->sort_value);
       }
     }
     return OpStatus::OK;
@@ -2517,11 +2477,11 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
         // Empty optional vs unset: unset would serialize the full hash even when no LOAD is used.
         const std::optional<std::vector<FieldReference>> empty_fields{std::in_place};
         const auto& serialize_fields = emit_fields ? params->return_fields : empty_fields;
+        const auto doc_fields = ResolveFields(schema, serialize_fields);
         for (auto& doc : hnsw_shard_docs[sid]) {
-          if (auto s = idx->SerializeDocWithKey(doc.id, t->GetOpArgs(es), schema, serialize_fields);
-              s) {
-            doc.key = string{s->first};
-            doc.values = std::move(s->second);
+          if (auto s = idx->SerializeDocWithKey(doc.id, t->GetOpArgs(es), doc_fields); s) {
+            doc.key = string{s->key};
+            doc.values = std::move(s->values);
           }
         }
       }
@@ -2650,6 +2610,63 @@ void RenderShardProfileTree(RedisReplyBuilder* rb, const SearchResult& shard_res
   RenderProfileEvent(rb, shard_result.profile->events, 0, limited);
 }
 
+void RunAliasCommand(CommandContext* cmd_cntx, string_view command, string_view alias,
+                     ArgSlice journal_args, absl::FunctionRef<OpStatus(ShardDocIndices*)> mutate) {
+  using enum OpStatus;
+  vector statuses(shard_set->size(), OK);
+
+  auto cb = [&](Transaction* tx, EngineShard* es) {
+    ShardDocIndices* indices = es->search_indices();
+    OpStatus status = mutate(indices);
+
+    if (status == KEY_EXISTS && indices->GetIndex(alias) != nullptr)
+      status = INVALID_VALUE;
+
+    statuses[es->shard_id()] = status;
+
+    if (status == OK && es->journal())
+      RecordJournal(tx->GetOpArgs(es), command, journal_args);
+
+    return OK;
+  };
+  cmd_cntx->tx()->Execute(cb, true);
+
+  DCHECK(rng::all_of(statuses, [&](auto status) { return status == statuses.front(); }));
+  switch (statuses.front()) {
+    case OK:
+      return cmd_cntx->rb()->SendOk();
+    case KEY_EXISTS:
+      return cmd_cntx->SendError("Alias already exists");
+    case KEY_NOTFOUND:
+      return cmd_cntx->SendError(command == "FT.ALIASDEL" ? "Alias does not exist"
+                                                          : "Unknown index name or name is alias");
+    case INVALID_VALUE:
+      return cmd_cntx->SendError("Alias name conflicts with an existing index");
+    default:
+      return cmd_cntx->SendError("Alias operation failed");
+  }
+}
+
+void CmdFtAliasAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view alias = parser.Next();
+  string_view target = parser.Next();
+  RunAliasCommand(cmd_cntx, "FT.ALIASADD", alias, ArgSlice{alias, target},
+                  [alias, target](auto* indices) { return indices->AddAlias(alias, target); });
+}
+
+void CmdFtAliasUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view alias = parser.Next();
+  string_view target = parser.Next();
+  RunAliasCommand(cmd_cntx, "FT.ALIASUPDATE", alias, ArgSlice{alias, target},
+                  [alias, target](auto* indices) { return indices->UpdateAlias(alias, target); });
+}
+
+void CmdFtAliasDel(CmdArgParser parser, CommandContext* cmd_cntx) {
+  string_view alias = parser.Next();
+  RunAliasCommand(cmd_cntx, "FT.ALIASDEL", alias, ArgSlice{alias},
+                  [alias](auto* indices) { return indices->DeleteAlias(alias); });
+}
+
 }  // namespace
 
 void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2744,33 +2761,29 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("Index not found");
   }
 
-  // Parse additional schema
-  DocIndex new_index{};
-  new_index.type = index_info->type;
-  auto parse_result = ParseSchema(&parser, &new_index);
+  // Parse the additional attributes into the copied definition: they continue its declaration
+  // order, and an alias or field that already exists fails here, before any shard is touched.
+  auto parse_result = ParseSchema(&parser, index_info.get());
   if (SendErrorIfOccurred(parse_result, &parser, cmd_cntx)) {
     cmd_cntx->tx()->Conclude();
     return;
   }
 
-  auto& new_fields = new_index.schema;
-
-  // For logging we copy the whole schema
-  // TODO: Use a more efficient way for logging
-  LOG(INFO) << "Adding "
-            << DocIndexInfo{.base_index = new_index, .hnsw_metadata = {}}.BuildRestoreCommand();
-
-  // Merge schemas
-  search::Schema& schema = index_info->schema;
-  schema.fields.insert(new_fields.fields.begin(), new_fields.fields.end());
-  schema.field_names.insert(new_fields.field_names.begin(), new_fields.field_names.end());
+  LOG(INFO) << "Altering " << idx_name << ": "
+            << DocIndexInfo{.base_index = *index_info, .hnsw_metadata = {}}.BuildRestoreCommand();
 
   // Rebuild index
   // TODO: Introduce partial rebuild
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
   auto upd_cb = [idx_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
-    (void)es->search_indices()->DropIndex(idx_name);
-    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal);
+    unique_ptr<ShardDocIndex> old_index = es->search_indices()->DropIndex(idx_name);
+    Synonyms synonyms = old_index ? old_index->GetSynonyms() : Synonyms{};
+    // Destroying the old index waits for its builder, so the replacement builder never runs next
+    // to it on the same global vector index. The old index is already unregistered, so no new
+    // caller can reach that builder meanwhile.
+    old_index.reset();
+    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal,
+                                    std::move(synonyms));
     return OpStatus::OK;
   };
   cmd_cntx->tx()->Execute(upd_cb, true);
@@ -2817,7 +2830,7 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
       for (const auto& [key, doc_id] : doc_keys) {
         auto it = db_slice.FindMutable(op_args.db_cntx, key).it;
         if (IsValid(it)) {
-          db_slice.Del(op_args.db_cntx, it);
+          db_slice.DelAtomic(op_args.db_cntx, it.GetInnerIt());
         }
       }
     }
@@ -2932,7 +2945,8 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());
-  for (const auto& [field_ident, field_info] : schema.fields) {
+  for (const auto& [field_ident, field_ptr] : schema.Ordered()) {
+    const auto& field_info = *field_ptr;
     vector<string> info;
 
     string_view base[] = {"identifier"sv, string_view{field_ident},
@@ -4386,6 +4400,15 @@ void SearchFamily::Register(CommandRegistry* registry) {
   registry->StartFamily();
   *registry
       << CI{"FT.CREATE", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
+      << CI{"FT.ALIASADD", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
+            acl::FT_SEARCH}
+             .HFUNC(FtAliasAdd)
+      << CI{"FT.ALIASUPDATE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
+            acl::FT_SEARCH}
+             .HFUNC(FtAliasUpdate)
+      << CI{"FT.ALIASDEL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 2, 0, 0,
+            acl::FT_SEARCH}
+             .HFUNC(FtAliasDel)
       << CI{"FT.ALTER", CO::JOURNALED | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
       << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtDropIndex)

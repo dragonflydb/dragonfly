@@ -108,9 +108,7 @@ bool DeleteCollectionIfEmpty(DbSlice& db_slice, const DbContext& db_cntx, string
 
   if (auto res = db_slice.FindMutable(db_cntx, key, obj_type); res) {
     db_slice.DelMutable(db_cntx, std::move(*res));
-    if (db_slice.shard_owner()->journal()) {
-      RecordDelete(db_cntx.db_index, key);
-    }
+    RecordDelete(db_cntx.db_index, key);
     return true;
   }
   return false;
@@ -154,7 +152,6 @@ RandomPick UniquePicksGenerator::Generate() {
 
 streamConsumer* StreamCreateConsumer(streamCG* cg, string_view name, uint64_t now_ms, int flags) {
   DCHECK(cg);
-  DCHECK(!name.empty());
   if (cg == NULL)
     return NULL;
 

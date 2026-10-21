@@ -7,6 +7,7 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
+#include <absl/numeric/bits.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
@@ -147,10 +148,10 @@ ABSL_FLAG(
     "parked waiting on parallel work, so the next batch is already grown when execution resumes.");
 
 ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
-          "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
+          "Enable the event-driven IoLoopV2 for Memcache connections.");
 
-ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
-          "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
+ABSL_FLAG(bool, enable_resp_io_loop_v2, true,
+          "Enable the event-driven IoLoopV2 for RESP connections.");
 
 ABSL_FLAG(bool, enable_shared_read_buffer, false,
           "Use one read buffer per proactor for eligible RESP IoLoopV2 connections.");
@@ -1277,9 +1278,10 @@ std::string FormatClientInfo(const ClientInfo& ci) {
   absl::StrAppend(&out, " tid=", ci.tid, " irqmatch=", int(ci.irqmatch));
   if (ci.pipeline.has_value())
     absl::StrAppend(&out, " pipeline=", *ci.pipeline, " pbuf=", ci.pbuf.value_or(0));
-  absl::StrAppend(&out, " age=", ci.age, " idle=", ci.idle, " tot-cmds=", ci.tot_cmds,
-                  " tot-net-in=", ci.tot_net_in, " tot-read-calls=", ci.tot_read_calls,
-                  " tot-dispatches=", ci.tot_dispatches);
+  const auto& stats = ci.stats;
+  absl::StrAppend(&out, " age=", ci.age, " idle=", ci.idle, " tot-cmds=", stats.cmds,
+                  " tot-net-in=", stats.net_bytes_in, " tot-read-calls=", stats.read_cnt,
+                  " tot-dispatches=", stats.dispatch_entries_added);
   if (ci.db.has_value())
     absl::StrAppend(&out, " db=", *ci.db);
   if (!ci.flags.empty())
@@ -1341,10 +1343,7 @@ ClientInfo Connection::BuildClientInfo(unsigned thread_id) const {
   }
   ci.age = now - creation_time_;
   ci.idle = now - last_interaction_;
-  ci.tot_cmds = local_stats_.cmds;
-  ci.tot_net_in = local_stats_.net_bytes_in;
-  ci.tot_read_calls = local_stats_.read_cnt;
-  ci.tot_dispatches = local_stats_.dispatch_entries_added;
+  ci.stats = local_stats_;
 
   string_view phase_name = PHASE_NAMES[phase_];
   if (cc_) {
@@ -1471,6 +1470,9 @@ io::Result<bool> Connection::CheckForHttpProto() {
 
     io_buf_.CommitWrite(*recv_sz);
     UpdateIoBufReadState();
+    // Bytes received while still detecting the protocol are client activity for the idle
+    // timeout (see ServerState::ConnectionsWatcherFb), same as reads in the command loop.
+    last_interaction_ = time(nullptr);
     string_view ib = io::View(io_buf_.InputBuffer());
     if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
       // We matched the TLS handshake raw data, which means "peer" is a TCP socket.
@@ -1536,12 +1538,12 @@ void Connection::ConnectionFlow() {
   error_code ec = reply_builder_->GetError();
 
   // Main loop.
-  if (parse_status != ERROR && !ec) {
+  if (((parse_status != ERROR) || parser_error_draining_) && !ec) {
     {
       ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonPrivateConnectionFlowReserve);
       io_buf_.EnsureCapacity(64);
     }
-    variant<error_code, Connection::ParserStatus> res;
+    IoLoopResult res;
     if (ioloop_v2_) {
       res = IoLoopV2();
     } else {
@@ -1579,11 +1581,14 @@ void Connection::ConnectionFlow() {
   if (parse_status == ERROR) {
     VLOG(1) << CONN_ID << "Error parser status " << parser_error_;
 
-    if (redis_parser_) {
-      SendProtocolError(RespSrvParser::Result(parser_error_), reply_builder_.get());
-    } else {
-      DCHECK(memcache_parser_);
-      reply_builder_->SendProtocolError("bad command line format");
+    // V2 sends protocol errors inside IoLoopV2().
+    if (!ioloop_v2_) {
+      if (redis_parser_) {
+        SendProtocolError(RespSrvParser::Result(parser_error_), reply_builder_.get());
+      } else {
+        DCHECK(memcache_parser_);
+        reply_builder_->SendProtocolError("bad command line format");
+      }
     }
 
     // Shut down the servers side of the socket to send a FIN to the client
@@ -1686,7 +1691,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
                                                 bool enqueue_only) {
   DCHECK_EQ(enqueue_only, ioloop_v2_)
       << "enqueue_only==true should only be used for ioloop_v2_ and vice versa";
-  // Account memory once after parsing completes, including every terminal parser status.
+  // Account memory once after parsing completes, including every parser status.
   absl::Cleanup refresh_memory_usage = [this] { RefreshConnectionMemoryUsage(); };
   uint32_t consumed = 0;
   RespSrvParser::Result result = RespSrvParser::OK;
@@ -1831,9 +1836,14 @@ auto Connection::ParseLoop() -> ParserStatus {
         pending_input_ && (parsed_cmd_q_len_ > 1) && !IsOverPipelineLimit())
       return parse_status;
 
+    // ExecuteBatch may suspend while dispatching parsed commands. Record the error before it
+    // yields so a recv callback cannot parse bytes after this parser error.
+    if (ioloop_v2_ && (parse_status == ERROR))
+      EnterParserErrorDrainMode();
+
     // Execute/reply the commands parsed so far first, so a trailing protocol error still flushes
     // earlier replies in order before we report it.
-    ExecuteBatchResult execute_result = ExecuteBatch(/*parser_error=*/parse_status == ERROR);
+    ExecuteBatchResult execute_result = ExecuteBatch();
     if (execute_result == ExecuteBatchResult::kFailure)
       return ERROR;
 
@@ -1983,7 +1993,7 @@ io::Result<size_t> Connection::HandleRecvSocket() {
   return recv_sz;
 }
 
-variant<error_code, Connection::ParserStatus> Connection::IoLoop() {
+auto Connection::IoLoop() -> IoLoopResult {
   error_code ec;
   ParserStatus parse_status = OK;
 
@@ -2704,6 +2714,15 @@ void Connection::SendAsync(MessageHandle msg) {
   // here.
   DCHECK(!(checkpoint && cc_->conn_closing && ioloop_v2_));
 
+  if (parser_error_draining_) {
+    DCHECK(ioloop_v2_);
+    // Preserve checkpoints so their blocking counters are released only after any command that
+    // was already dispatching has completed. All other control messages are cut off by draining.
+    if (!checkpoint) {
+      return;
+    }
+  }
+
   // If we launch while closing, it won't be awaited. Control messages will be processed on cleanup.
   if (!cc_->conn_closing && !ioloop_v2_) {
     LaunchAsyncFiberIfNeeded();
@@ -3146,12 +3165,25 @@ void Connection::LogTrafficV2(ParsedCommand* cmd) {
   LogTraffic(id_, cmd->has_unparsed_input, *cmd, service_->GetContextInfo(cc_.get()));
 }
 
+void Connection::EnterParserErrorDrainMode() {
+  DCHECK(ioloop_v2_);
+  DCHECK(!parser_error_draining_);
+  parser_error_draining_ = true;
+  pending_input_ = false;
+  io_buf_.Clear();
+  if (overflow_buf_) {
+    if (read_buf_capacity_registered_) {
+      ReadBufTracker::Update(overflow_buf_->Capacity(), 0, id_,
+                             ReadBufTracker::kReasonConnectionOverflowBuffer);
+    }
+    overflow_buf_.reset();
+  }
+}
+
 bool Connection::SquashPipelineV2() {
   // vectorized squash phase: pack multiple commands and dispatch at once.
   // dispatch_waiting_count_ is the exact length of the run starting at parsed_to_execute_, so the
   // squash works even when earlier commands are still in flight.
-  auto& conn_stats = tl_facade_stats->conn_stats;
-
   uint64_t dispatch_start = CycleClock::Now();
   fiber_park_spot_ = FiberParkSpot::kSquashHop;
   // DispatchSquashedBatch is synchronous - raise sync_dispatch so DispatchTracker sees this
@@ -3173,6 +3205,8 @@ bool Connection::SquashPipelineV2() {
   if (squashed == 0)
     return false;
 
+  auto& conn_stats = GetLocalConnStats();
+
   // Like V1's SquashPipeline, sample once before the blocking squash and attribute it to every
   // squashed command's parse->dispatch wait.
   for (unsigned i = 0; i < squashed; i++) {
@@ -3188,7 +3222,7 @@ bool Connection::SquashPipelineV2() {
   return true;
 }
 
-Connection::ExecuteBatchResult Connection::ExecuteBatch(bool parser_error) {
+Connection::ExecuteBatchResult Connection::ExecuteBatch() {
   // Invariant: batched_ must be false on entry.
   // Both ReplyBatch() and ExecuteBatch() reset it via absl::Cleanup guards on all return paths.
   DCHECK(!reply_builder_->IsBatchMode());
@@ -3201,7 +3235,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch(bool parser_error) {
 
   ConnectionMemoryTracker memory_tracker(this);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
-  auto& conn_stats = tl_facade_stats->conn_stats;
+  bool squashed_in_batch = false;
 
   bool is_true_pipeline = (parsed_to_execute_->next) != nullptr;
 
@@ -3247,13 +3281,19 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch(bool parser_error) {
                << pending_input_ << " " << GetUnreadInputLen();
 
       if (SquashPipelineV2()) {
+        if (squashed_in_batch)
+          ++GetLocalConnStats().pipeline_resquashes;
+        else
+          squashed_in_batch = true;
+        ++GetLocalConnStats().pipeline_squashes;
+
         // - Normally: return after a successful squash so the caller can process replies. A client
         // with a bounded pipeline needs completed replies to replenish requests - delaying them can
         // stall both it and this connection fiber.
         // - Continue instead when parsing found an error (on conenction fiber or
         // parse-in-proactor), so commands parsed before the bad input can execute before the
         // connection closes.
-        if (!parser_error && !proactor_parse_error_)
+        if (!parser_error_draining_)
           break;
         continue;
       }
@@ -3344,6 +3384,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch(bool parser_error) {
     if (dispatch_res == DispatchResult::WOULD_BLOCK)
       break;  // Sync command. Wait for current async commands to finish
 
+    auto& conn_stats = GetLocalConnStats();
     conn_stats.pipelined_wait_latency += CycleClock::ToUsec(dispatch_start - cmd->parsed_cycle);
     conn_stats.pipeline_dispatch_commands++;
     if (is_head)
@@ -3430,6 +3471,10 @@ bool Connection::ReplyBatch() {
     release_head = next;
   }
 
+  if (ioloop_v2_ && (replied > 0)) {
+    ++GetLocalConnStats().pipeline_reply_batches;
+  }
+
   if (reply_builder_->GetError())
     return false;
 
@@ -3482,13 +3527,24 @@ void Connection::ReleasePipelinedCommand(ParsedCommand* cmd) {
   conn_stats.pipelined_cmd_cnt++;
   uint64_t latency_usec = CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle);
   conn_stats.pipelined_cmd_latency += latency_usec;
-  conn_stats.pipelined_latency_hist.Add(latency_usec);
+
+  const bool is_read_only = cmd->IsReadOnly();
+  base::Histogram* hist = is_read_only ? &conn_stats.pipelined_read_latency_hist
+                                       : &conn_stats.pipelined_other_latency_hist;
+  if (is_read_only) {
+    conn_stats.pipelined_read_cmd_cnt++;
+    conn_stats.pipelined_read_cmd_latency += latency_usec;
+  }
+  hist->Add(latency_usec);
+
   // Decay the histogram every kPipelineLatencyDecayPeriod samples to
   // approximate a moving-window distribution; older observations contribute
   // half as much after each decay period.
   constexpr uint64_t kPipelineLatencyDecayPeriod = 1 << 14;  // 16384
-  if ((conn_stats.pipelined_latency_hist.count() & (kPipelineLatencyDecayPeriod - 1)) == 0) {
-    conn_stats.pipelined_latency_hist.Decay();
+  static_assert(absl::has_single_bit(kPipelineLatencyDecayPeriod));
+
+  if ((hist->count() % kPipelineLatencyDecayPeriod) == 0) {
+    hist->Decay();
   }
 
   ReleaseParsedCommand(cmd);
@@ -3635,6 +3691,9 @@ bool ConnectionRef::operator==(const ConnectionRef& other) const {
 void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotification& n) {
   DVLOG(2) << CONN_ID << "OnRecvNotification: io_buf_ input_len=" << io_buf_.InputLen()
            << " pending_input=" << pending_input_;
+  if (parser_error_draining_)
+    return;
+
   const uint64_t start_epoch = fb2::FiberSwitchEpoch();
   const uint64_t initial_read_count = GetLocalConnStats().io_read_cnt;
   ProcessRecvNotification(n);
@@ -3644,10 +3703,10 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
     ParserStatus status = parse_cb();
     if (parsed_cmd_q_len_ > cmds_before)
       ++GetLocalConnStats().proactor_parse;
-    // The recv callback cannot return a status. If parsing hit a protocol error, flag it so
-    // IoLoopV2 surfaces ParserStatus::ERROR and sends the protocol-error reply.
     if (status == ERROR)
-      proactor_parse_error_ = true;
+      // Move to drain mode before waking the parked V2 fiber, so later recv callbacks cannot parse
+      // bytes after the error while earlier queued commands are still draining.
+      EnterParserErrorDrainMode();
     DVLOG(1) << CONN_ID << "Parse-in-proactor added " << (parsed_cmd_q_len_ - cmds_before)
              << " commands, pq_len=" << parsed_cmd_q_len_;
   };
@@ -3658,17 +3717,19 @@ void Connection::OnRecvNotification(const util::FiberSocketBase::RecvNotificatio
   };
 
   if (shared_read_buf_enabled_ && can_parse_in_proactor()) {
-    // TODO: Bound callback read/parse work to prevent a busy connection from starving the proactor.
+    // TODO: Bound callback read/parse work to prevent a busy connection from starving the
+    // proactor.
     parse_in_proactor([this] { return ReadAndParseShared(/*from_proactor_callback=*/true); });
   } else if (!shared_read_buf_enabled_ && !IsOverPipelineLimit()) {
-    // Drain the socket while the fiber is suspended (no-op when io_buf_ is full / no append room).
+    // Drain the socket while the fiber is suspended (no-op when io_buf_ is full / no append
+    // room).
     ReadPendingInput();
 
     // Parse In Proactor: parse newly-read bytes while the fiber is parked, so the next batch is
-    // already larger on resume. Enabled only at parks where the parser is idle AND the fiber waits
-    // on parallel progress (a remote shard or the kernel, possibly on another CPU), so the parse
-    // overlaps real work. Parks that run nothing in parallel (e.g. a self-preemption yield) are
-    // excluded - offloading them buys nothing.
+    // already larger on resume. Enabled only at parks where the parser is idle AND the fiber
+    // waits on parallel progress (a remote shard or the kernel, possibly on another CPU), so the
+    // parse overlaps real work. Parks that run nothing in parallel (e.g. a self-preemption yield)
+    // are excluded - offloading them buys nothing.
     // - Calling ParseRedis() with max_busy_cycles==0: proactor's callbacks must not suspend.
     if (can_parse_in_proactor() && redis_parser_ && (io_buf_.InputLen() > 0)) {
       parse_in_proactor([this] { return ParseRedis(io_buf_, 0, /*enqueue_only=*/true); });
@@ -3704,16 +3765,9 @@ void Connection::ProcessRecvNotification(const util::FiberSocketBase::RecvNotifi
       ReadBufTracker tracker(io_buf_, id_, ReadBufTracker::kReasonPrivateProvidedBufferReceive);
       io_buf_.WriteAndCommit(buf.data(), buf.size());
     }
-    last_interaction_ = time(nullptr);
+    RecordRecvBytes(buf.size());
     UpdateIoBufReadState();
-
-    DCHECK(tl_facade_stats);
-    auto& conn_stats = tl_facade_stats->conn_stats;
-    conn_stats.io_read_bytes += buf.size();
-    local_stats_.net_bytes_in += buf.size();
-    ++conn_stats.io_read_cnt;
-    ++local_stats_.read_cnt;
-    ++conn_stats.num_recv_provided_calls;
+    ++GetLocalConnStats().num_recv_provided_calls;
   } else {
     LOG(FATAL) << CONN_ID << "Should not reach here";
   }
@@ -3897,7 +3951,7 @@ void Connection::ReadPendingInput() {
   // - EAGAIN/EWOULDBLOCK: a wake is coming (drained kernel, or a TLS read deferred behind a
   //   background write) - clear pending_input_ and park.
   // - EBUSY (device_or_resource_busy, TLS only): another fiber holds the socket, no wake - keep it
-  //   latched and retry on a later pass (neither clear it nor set io_ec_).
+  //   set and retry on a later pass (neither clear it nor set io_ec_).
   // - Any other error: a real I/O failure - surface via io_ec_.
   bool done_read = false;
   while (!buf.empty()) {
@@ -3921,7 +3975,9 @@ void Connection::ReadPendingInput() {
 }
 
 void Connection::MaybeAdjustIoBufCapacity(ParserStatus parse_status, bool reached_capacity) {
-  DCHECK_NE(parse_status, ERROR);
+  if (parse_status == ERROR)
+    return;
+
   if (shared_read_buf_enabled_)
     return;
 
@@ -4094,10 +4150,8 @@ bool Connection::HasControlEvent() const {
   // a reply became ready, control-plane messages are queued (dispatch_q_), the socket errored or
   // closed (io_ec_), or a thread migration is pending and actionable.
 
-  // A callback parse error must wake the V2 fiber even if the callback did not read more input.
-  // So we must include proactor_parse_error_.
   return (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
-         proactor_parse_error_ || IsReadyToMigrate();
+         IsReadyToMigrate();
 }
 
 bool Connection::ShouldWakeIdle() const {
@@ -4106,6 +4160,10 @@ bool Connection::ShouldWakeIdle() const {
 
   // On top of the control events, the idle park also wakes for incoming data and for a head command
   // that is now ready to run.
+
+  if (parser_error_draining_)
+    return HasCommandToExecute() || HasControlEvent();
+
   return GetUnreadInputLen() > 0 || pending_input_ || HasCommandToExecute() || HasControlEvent();
 }
 
@@ -4143,7 +4201,7 @@ void Connection::DrainQueuedCommands() {
 
   if (parsed_head_) {
     if (HasCommandToExecute()) {
-      ExecuteBatchResult execute_result = ExecuteBatch(/*parser_error*/ false);
+      ExecuteBatchResult execute_result = ExecuteBatch();
       if (execute_result == ExecuteBatchResult::kFailure)
         return;  // IoLoopV2 observes the reply-builder error.
       if (execute_result == ExecuteBatchResult::kDeferToControlPath)
@@ -4192,7 +4250,26 @@ void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_wait
   });
 }
 
-variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
+auto Connection::FinalizeV2ParserError() -> IoLoopResult {
+  DCHECK(ioloop_v2_);
+  DCHECK(parser_error_draining_);
+  DCHECK(!HasPendingMessages());
+  ReleaseDeferredCheckpoints();
+
+  if (redis_parser_) {
+    SendProtocolError(RespSrvParser::Result(parser_error_), reply_builder_.get());
+  } else {
+    DCHECK(memcache_parser_);
+    reply_builder_->SendProtocolError("bad command line format");
+  }
+
+  if (auto ec = FlushReplies(); ec) {
+    return ec;
+  }
+  return ERROR;
+}
+
+auto Connection::IoLoopV2() -> IoLoopResult {
   auto* peer = socket_.get();
   recv_buf_.res_len = 0;
 
@@ -4237,13 +4314,20 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
     }
 
-    if (shared_read_buf_enabled_) {
-      parse_status = ReadAndParseShared(/*from_proactor_callback=*/false);
-      if (ERROR == parse_status) {
-        break;
+    if (!parser_error_draining_) {
+      if (shared_read_buf_enabled_) {
+        parse_status = ReadAndParseShared(/*from_proactor_callback=*/false);
+        if (ERROR == parse_status)
+          EnterParserErrorDrainMode();
+      } else {
+        ReadPendingInput();
       }
-    } else {
-      ReadPendingInput();
+    }
+
+    // Finalize an empty parser-error drain before idle parking because drain mode intentionally
+    // ignores additional client input.
+    if (parser_error_draining_ && !HasPendingMessages()) {
+      return FinalizeV2ParserError();
     }
 
     // Idle park: flush and sleep only when the fiber is truly idle (ShouldWakeIdle() is false).
@@ -4252,14 +4336,24 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     // whole pipeline execute in-memory before a single sendmsg at the end.
     if (!ShouldWakeIdle()) {
       phase_ = READ_SOCKET;
-
       if (auto ec = FlushReplies(); ec) {
         return ec;
       }
+      const bool wait_for_reply = HasInFlightCommands();
+      const uint64_t idle_wait_start = CycleClock::Now();
 
       fiber_park_spot_ = FiberParkSpot::kIdleAwait;
-      io_event_.await([this] { return ShouldWakeIdle(); });
+      const bool parked = io_event_.await([this] { return ShouldWakeIdle(); });
       fiber_park_spot_ = FiberParkSpot::kNone;
+
+      if (parked) {
+        auto& conn_stats = GetLocalConnStats();
+        ++conn_stats.pipeline_idle_waits;
+        if (wait_for_reply)
+          ++conn_stats.pipeline_reply_waits;
+        conn_stats.pipeline_idle_wait_usec +=
+            CycleClock::ToUsec(CycleClock::Now() - idle_wait_start);
+      }
     }
 
     phase_ = PROCESS;
@@ -4286,7 +4380,8 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     //   Entered either because there is no new input to parse, or because pipeline
     //   backpressure prevents further parsing (which would only grow the queue).
     bool over_limit = IsOverPipelineLimit();
-    if (shared_read_buf_enabled_ || (io_buf_.InputLen() == 0) || over_limit) {
+    if (parser_error_draining_ || shared_read_buf_enabled_ || (io_buf_.InputLen() == 0) ||
+        over_limit) {
       DrainQueuedCommands();
       if (over_limit)
         ParkOnBackpressure(&backpressure_waiter);
@@ -4298,6 +4393,9 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
     } else {
       // Input available and under budget: parse, execute, reply.
       parse_status = RunParsePath();
+      if (parse_status == ERROR && !parser_error_draining_) {
+        EnterParserErrorDrainMode();
+      }
     }
 
     // Release any checkpoints deferred while async commands were in flight, now that the in-flight
@@ -4306,15 +4404,14 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       ReleaseDeferredCheckpoints();
     }
 
-    // A protocol error detected by parse-in-proactor (which runs in the recv callback and cannot
-    // return a status) is surfaced here by setting parse_status = ERROR.
-    if (proactor_parse_error_) {
-      proactor_parse_error_ = false;
-      parse_status = ERROR;
-    }
-
     if (reply_builder_->GetError()) {
       return reply_builder_->GetError();
+    }
+
+    // The peer may close its write side while we drain commands parsed before a protocol error.
+    // Finalize that error first so a half-closed peer can still receive it.
+    if (parser_error_draining_ && !HasPendingMessages()) {
+      return FinalizeV2ParserError();
     }
 
     // Check io_ec_ after parsing and flushing replies, so that half-closed
@@ -4325,10 +4422,6 @@ variant<error_code, Connection::ParserStatus> Connection::IoLoopV2() {
       }
       LOG_IF(WARNING, cntx()->replica_conn) << CONN_ID << "async io error: " << io_ec_;
       return std::exchange(io_ec_, {});
-    }
-
-    if (parse_status == ERROR) {
-      break;
     }
 
     // Migration requested and actionable: skip buffer bookkeeping, jump to HandleMigrateRequest().
@@ -4354,7 +4447,14 @@ Connection::WaitEvent::WaitEvent(ParsedCommand* cmd, util::fb2::detail::Waiter* 
 
 void ResetStats() {
   auto& cstats = tl_facade_stats->conn_stats;
+  // Reset counts together with their latency sums and distributions so that the
+  // pipeline_latency_seconds _count/_sum series stay consistent.
   cstats.pipelined_cmd_cnt = 0;
+  cstats.pipelined_cmd_latency = 0;
+  cstats.pipelined_read_cmd_cnt = 0;
+  cstats.pipelined_read_cmd_latency = 0;
+  cstats.pipelined_read_latency_hist.Clear();
+  cstats.pipelined_other_latency_hist.Clear();
   cstats.conn_received_cnt = 0;
   cstats.command_cnt_main = 0;
   cstats.command_cnt_other = 0;

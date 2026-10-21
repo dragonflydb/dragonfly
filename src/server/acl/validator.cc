@@ -4,6 +4,7 @@
 
 #include "server/acl/validator.h"
 
+#include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
@@ -60,6 +61,12 @@ bool KeyGlobAllowed(const AclKeys& keys, std::string_view target, KeyPermissions
       return true;
   }
   return false;
+}
+
+// These commands have no key position because a subcommand comes first; the key follows it.
+bool ReadsKeyAfterSubcommand(std::string_view cmd, std::string_view sub) {
+  return cmd == "XINFO" || cmd == "JSON.DEBUG" ||
+         (cmd == "MEMORY" && absl::EqualsIgnoreCase(sub, "USAGE"));
 }
 
 }  // namespace
@@ -198,6 +205,9 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
       keys_allowed &= KeyGlobAllowed(keys, tail_args[*keys_index->bonus], {false, true});
     }
   }
+
+  if (!keys.all_keys && tail_args.size() >= 2 && ReadsKeyAfterSubcommand(id.name(), tail_args[0]))
+    keys_allowed &= KeyGlobAllowed(keys, tail_args[1], {true, false});
 
   return {keys_allowed, AclLog::Reason::KEY};
 }

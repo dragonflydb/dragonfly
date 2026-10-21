@@ -102,7 +102,7 @@ class ServerState {  // public struct - to allow initialization.
 
  public:
   struct Stats {
-    Stats(unsigned num_shards = 0);  // Default initialization should be valid for Add()
+    explicit Stats(unsigned num_shards = 0);  // Default initialization should be valid for Add()
 
     Stats(Stats&& other) = default;
     Stats& operator=(Stats&& other) = default;
@@ -173,18 +173,6 @@ class ServerState {  // public struct - to allow initialization.
 
   void EnterLameDuck();
 
-  void TxCountInc() {
-    ++live_transactions_;
-  }
-
-  void TxCountDec() {
-    --live_transactions_;  // can go negative since we can start on one thread and end on another.
-  }
-
-  int64_t live_transactions() const {
-    return live_transactions_;
-  }
-
   GlobalState gstate() const {
     return gstate_;
   }
@@ -193,13 +181,7 @@ class ServerState {  // public struct - to allow initialization.
     gstate_ = s;
   }
 
-  struct MemoryUsageStats {
-    uint64_t used_mem = 0;
-    uint64_t rss_mem = 0;
-  };
-
-  MemoryUsageStats GetMemoryUsage(uint64_t now_usec) const;
-  bool ShouldDenyOnOOM(uint64_t now_usec);
+  bool ShouldDenyOnOOM();
 
   bool AllowInlineScheduling() const;
 
@@ -312,7 +294,6 @@ class ServerState {  // public struct - to allow initialization.
   // A fiber constantly watching connections on the main listener.
   void ConnectionsWatcherFb(util::ListenerInterface* main);
 
-  int64_t live_transactions_ = 0;
   SlowLogShard slow_log_shard_;
   mi_heap_t* data_heap_;
 
@@ -341,10 +322,6 @@ class ServerState {  // public struct - to allow initialization.
   uint32_t thread_index_ = 0;
 
   detail::EgressThrottler egress_throttler_{0};
-
-  mutable uint64_t used_mem_last_read_usec_ = 0;
-  mutable MemoryUsageStats
-      memory_stats_cached_;  // thread local cache of used and rss memory current
 
   static __thread ServerState* state_;
 };

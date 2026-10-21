@@ -139,10 +139,9 @@ std::string_view JournalSlice::GetEntry(LSN lsn) const {
   return ring_buffer_[lsn - start].data;
 }
 
-void JournalSlice::SetFlushMode(bool allow_flush) {
-  DCHECK(allow_flush != enable_journal_flush_);
-  enable_journal_flush_ = allow_flush;
-  if (allow_flush) {
+bool JournalSlice::SetFlushMode(bool allow_flush) {
+  const bool prev = std::exchange(enable_journal_flush_, allow_flush);
+  if (allow_flush && !prev) {
     // This lock is never blocking because it contends with UnregisterOnChange, which is cpu only.
     // Hence this lock prevents the UnregisterOnChange to start running in the middle of
     // SetFlushMode.
@@ -151,6 +150,7 @@ void JournalSlice::SetFlushMode(bool allow_flush) {
       k_v.second->ThrottleIfNeeded();
     }
   }
+  return prev;
 }
 
 void JournalSlice::AddLogRecord(const Entry& entry) {

@@ -210,7 +210,7 @@ void DeleteHw(HMapWrap& hw, const OpArgs& op_args, std::string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   if (auto del_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); del_it) {
     del_it->post_updater.Run();
-    db_slice.Del(op_args.db_cntx, del_it->it);
+    db_slice.DelAtomic(op_args.db_cntx, del_it->it.GetInnerIt());
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, {key});
     }
