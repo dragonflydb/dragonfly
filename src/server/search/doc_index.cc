@@ -442,10 +442,12 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
   absl::flat_hash_set<DocId> docs_to_rebuild;
   absl::Span<search::TextIndex* const> text_indices = indices_->GetAllTextIndices();
 
-  // Find all documents containing any term from the synonyms group
+  // Find all documents containing any term from the synonyms group. Group tokens are attached
+  // to the raw lowercase word (TokenizeWords), so the raw posting list is the exact set; the
+  // index-default stem misses documents stemmed by a per-document LANGUAGE_FIELD stemmer.
   for (auto* text_index : text_indices) {
     for (const auto& term : terms) {
-      if (const auto* container = text_index->Matching(term)) {
+      if (const auto* container = text_index->MatchingNoStem(term)) {
         for (DocId doc_id : *container) {
           docs_to_rebuild.insert(doc_id);
         }

@@ -619,16 +619,16 @@ TEST_F(SearchTest, StopWordsDroppedFromQuery) {
 }
 
 // A term may belong to several synonym groups. Its group tokens depend only on the current groups
-// (sorted; terms are stored and looked up in lowercase); the document is indexed under every
-// token, reachable through any term of any of its groups, and leaves no posting behind after
-// removal even when the group map was re-laid out between Add and Remove.
+// (sorted; terms are stored and looked up in lowercase, group ids keep their case); the document
+// is indexed under every token, reachable through any term of any of its groups, and leaves no
+// posting behind after removal even when the group map was re-laid out between Add and Remove.
 TEST_F(SearchTest, MultiGroupTermIndexedUnderAllGroups) {
   auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
   Synonyms syn;
   syn.UpdateGroup("g2", {"shared", "two"});
-  syn.UpdateGroup("g1", {"SHARED", "one"});
-  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" g1", " g2"));
-  EXPECT_THAT(syn.GetGroupTokens("one"), testing::ElementsAre(" g1"));
+  syn.UpdateGroup("G1", {"SHARED", "one"});
+  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" G1", " g2"));
+  EXPECT_THAT(syn.GetGroupTokens("one"), testing::ElementsAre(" G1"));
   EXPECT_THAT(syn.GetGroupTokens("none"), testing::IsEmpty());
 
   FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), &syn};
@@ -637,7 +637,7 @@ TEST_F(SearchTest, MultiGroupTermIndexedUnderAllGroups) {
 
   auto* text = dynamic_cast<TextIndex*>(index.GetIndex("field"));
   ASSERT_NE(text, nullptr);
-  for (string_view token : {" g1", " g2", "shared"}) {
+  for (string_view token : {" G1", " g2", "shared"}) {
     const auto* c = text->Matching(token, /*strip_whitespace=*/false);
     ASSERT_NE(c, nullptr) << token;
     EXPECT_EQ(c->Size(), 1u) << token;
@@ -649,15 +649,49 @@ TEST_F(SearchTest, MultiGroupTermIndexedUnderAllGroups) {
     EXPECT_EQ(algo.Search(&index).ids, vector<DocId>{0}) << query;
   }
 
-  // Re-lay out the group map between Add and Remove.
+  // Re-lay out the group map between Add and Remove; ids differing only by case stay distinct.
   for (int i = 0; i < 300; i++)
     syn.UpdateGroup(absl::StrCat("extra", i), {absl::StrCat("term", i)});
-  syn.UpdateGroup("g3", {"shared"});
-  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" g1", " g2", " g3"));
+  syn.UpdateGroup("g1", {"shared"});
+  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" G1", " g1", " g2"));
   index.Remove(0, doc);
-  for (string_view token : {" g1", " g2", "shared"})
+  for (string_view token : {" G1", " g2", "shared"})
     EXPECT_EQ(text->Matching(token, /*strip_whitespace=*/false), nullptr) << token;
   EXPECT_TRUE(index.GetAllDocs().empty());
+}
+
+// Group tokens are internal: ids that differ only by case stay distinct groups, and the suffix
+// trie never stores group tokens.
+TEST_F(SearchTest, SynonymGroupTokensStayInternal) {
+  auto schema = MakeSimpleSchema(
+      {{"field", SchemaField::TEXT, SchemaField::TextParams{.with_suffixtrie = true}}});
+  Synonyms syn;
+  syn.UpdateGroup("A", {"x"});
+  syn.UpdateGroup("a", {"y"});
+  syn.UpdateGroup("syn1", {"z"});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), &syn};
+  ASSERT_TRUE(index.Add(0, MockedDocument{"x z"}));
+  ASSERT_TRUE(index.Add(1, MockedDocument{"y"}));
+
+  auto search = [&index](string_view query) {
+    SearchAlgorithm algo;
+    QueryParams params;
+    EXPECT_TRUE(algo.Init(query, &params)) << query;
+    return algo.Search(&index).ids;
+  };
+  EXPECT_EQ(search("x"), vector<DocId>{0});
+  EXPECT_EQ(search("y"), vector<DocId>{1});
+
+  auto* text = dynamic_cast<TextIndex*>(index.GetIndex("field"));
+  ASSERT_NE(text, nullptr);
+  size_t calls = 0, hits = 0;
+  text->MatchSuffix("n1", [&](const auto* c) {
+    ++calls;
+    hits += c != nullptr;
+  });
+  text->MatchInfix("yn", [&hits](const auto* c) { hits += c != nullptr; });
+  EXPECT_EQ(calls, 1u);  // answered by the suffix trie
+  EXPECT_EQ(hits, 0u);
 }
 
 // A glued word under a field binds all of its atoms to that field, in any order and position.
