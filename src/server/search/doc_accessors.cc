@@ -98,13 +98,6 @@ FieldValue ToSortableValue(search::SchemaField::FieldType type, string_view valu
   return string{value};
 }
 
-FieldValue ExtractSortableValue(const search::Schema& schema, string_view key, string_view value) {
-  auto it = schema.fields.find(key);
-  if (it == schema.fields.end())
-    return ToSortableValue(search::SchemaField::TEXT, value);
-  return ToSortableValue(it->second.type, value);
-}
-
 FieldValue ToSortableValueFromJson(search::SchemaField::FieldType type, const JsonType& json) {
   if (json.is_null()) {
     return std::monostate{};
@@ -195,10 +188,10 @@ std::optional<BaseAccessor::StringList> ListPackAccessor::GetStrings(
   return it != lw_.end() ? StringList{(*it).second} : StringList{};
 }
 
-SearchDocData ListPackAccessor::SerializeAll(const search::Schema& schema) const {
+SearchDocData ListPackAccessor::SerializeAll(const DocFieldTypes& types) const {
   SearchDocData out{};
   for (const auto [key, value] : lw_) {
-    if (auto field_value = ExtractSortableValue(schema, key, value); field_value) {
+    if (auto field_value = ToSortableValue(types.Of(key), value); field_value) {
       out[key] = std::move(field_value).value();
     }
   }
@@ -223,10 +216,10 @@ std::optional<BaseAccessor::StringList> StringMapAccessor::GetStrings(
   return it != hset_->end() ? StringList{SdsToSafeSv(it->second)} : StringList{};
 }
 
-SearchDocData StringMapAccessor::SerializeAll(const search::Schema& schema) const {
+SearchDocData StringMapAccessor::SerializeAll(const DocFieldTypes& types) const {
   SearchDocData out{};
   for (const auto& [kptr, vptr] : *hset_) {
-    auto field_value = ExtractSortableValue(schema, SdsToSafeSv(kptr), SdsToSafeSv(vptr));
+    auto field_value = ToSortableValue(types.Of(SdsToSafeSv(kptr)), SdsToSafeSv(vptr));
     if (field_value) {
       out[SdsToSafeSv(kptr)] = std::move(field_value).value();
     }
@@ -463,7 +456,7 @@ SearchDocData JsonAccessor::Serialize(absl::Span<const DocField> fields) const {
   return out;
 }
 
-SearchDocData JsonAccessor::SerializeAll(const search::Schema&) const {
+SearchDocData JsonAccessor::SerializeAll(const DocFieldTypes&) const {
   return {{"$", json_.to_string()}};
 }
 
@@ -481,7 +474,7 @@ struct EmptyAccessor : public BaseAccessor {
     return std::optional<StringList>{std::in_place};
   }
 
-  SearchDocData SerializeAll(const search::Schema&) const override {
+  SearchDocData SerializeAll(const DocFieldTypes&) const override {
     return {};
   }
 };
