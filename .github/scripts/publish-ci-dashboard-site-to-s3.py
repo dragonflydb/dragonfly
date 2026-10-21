@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Compress dashboard JSON in place, in parallel, then publish the site using the AWS CLI."""
+"""Stage compressed dashboard JSON in parallel, then publish using the AWS CLI."""
 
 import gzip
 import os
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -14,15 +15,17 @@ def aws(*args: str) -> None:
     subprocess.run(["aws", "s3", *args], check=True)
 
 
-def compress_json(json_file: Path) -> None:
-    json_file.write_bytes(gzip.compress(json_file.read_bytes(), compresslevel=9))
+def compress_json(json_file: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(gzip.compress(json_file.read_bytes(), compresslevel=9))
 
 
-def compress_site(json_files: list[Path]) -> None:
+def compress_site(json_files: list[Path], site_dir: Path, staging_dir: Path) -> None:
     total = len(json_files)
     print(f"Compressing {total} dashboard JSON files", flush=True)
     with ThreadPoolExecutor() as pool:
-        for completed, _ in enumerate(pool.map(compress_json, json_files), 1):
+        destinations = (staging_dir / path.relative_to(site_dir) for path in json_files)
+        for completed, _ in enumerate(pool.map(compress_json, json_files, destinations), 1):
             if completed % 1000 == 0 or completed == total:
                 print(f"Compressed {completed}/{total} JSON files", flush=True)
 
@@ -67,18 +70,20 @@ def publish(site_dir: Path, destination: str) -> None:
     if not manifest.is_file():
         raise FileNotFoundError(f"Missing generated manifest: {manifest}")
     json_files = list(path for path in (site_dir / "data").rglob("*.json"))
-    compress_site(json_files)
-    upload_json(site_dir, destination, len(json_files) - 1)
+    with tempfile.TemporaryDirectory(prefix="ci-dashboard-gzip-") as temporary:
+        staging_dir = Path(temporary)
+        compress_site(json_files, site_dir, staging_dir)
+        upload_json(staging_dir, destination, len(json_files) - 1)
 
-    print("Publishing dashboard manifest", flush=True)
-    aws(
-        "cp",
-        str(manifest),
-        f"{destination}/data/manifest.json",
-        *GZIP_JSON,
-        "--cache-control",
-        "public,max-age=300",
-    )
+        print("Publishing dashboard manifest", flush=True)
+        aws(
+            "cp",
+            str(staging_dir / "data" / "manifest.json"),
+            f"{destination}/data/manifest.json",
+            *GZIP_JSON,
+            "--cache-control",
+            "public,max-age=300",
+        )
 
     print(f"Publishing dashboard assets to {destination}/", flush=True)
     aws(

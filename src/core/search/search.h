@@ -6,6 +6,8 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/container/inlined_vector.h>
+#include <absl/types/span.h>
 
 #include <cmath>
 #include <memory>
@@ -125,31 +127,47 @@ struct SchemaField {
     return type == VECTOR && !(flags & NOINDEX) && std::get<VectorParams>(special_params).use_hnsw;
   }
 
+  // SORTABLE builds a sort index only for these types.
+  bool HasSortIndex() const {
+    return (flags & SORTABLE) && (type == TAG || type == TEXT || type == NUMERIC);
+  }
+
+  // Whether this attribute rather than `other` stands for their shared document field: one with a
+  // sort index first, else the first declared.
+  bool StandsBefore(const SchemaField& other) const {
+    if (HasSortIndex() != other.HasSortIndex())
+      return HasSortIndex();
+    return number < other.number;
+  }
+
   using ParamsVariant =
       std::variant<std::monostate, VectorParams, TagParams, TextParams, NumericParams>;
 
   FieldType type;
   uint8_t flags;
-  std::string short_name;  // equal to ident if none provided
+  std::string identifier;  // document field: HASH field name or JSON path
   ParamsVariant special_params{std::monostate{}};
+  uint32_t number = 0;  // declaration position, keeps FT.INFO and the restore command ordered
 };
 
 // Describes the fields of an index
 struct Schema {
-  // List of fields by identifier.
-  absl::flat_hash_map<std::string /*identifier*/, SchemaField> fields;
+  using Attribute = std::pair<std::string_view /*alias*/, const SchemaField*>;
 
-  // Mapping for short field names (aliases).
-  absl::flat_hash_map<std::string /* short name*/, std::string /*identifier*/> field_names;
+  // Attributes by alias; several may index the same document field.
+  absl::flat_hash_map<std::string /*alias*/, SchemaField> fields;
 
   std::string default_language = "english";
   std::string language_field;  // doc field providing per-doc language; empty = none
 
-  // Return identifier for alias if found, otherwise return passed value
-  std::string_view LookupAlias(std::string_view alias) const;
+  const SchemaField* Find(std::string_view alias) const;
 
-  // Return alias for identifier if found, otherwise return passed value
-  std::string_view LookupIdentifier(std::string_view identifier) const;
+  // The attribute standing for a document field: one with a sort index, else the first declared.
+  Attribute FindByIdentifier(std::string_view identifier) const;
+
+  // Fields in declaration order.
+  using OrderedFields = absl::InlinedVector<Attribute, 16>;
+  OrderedFields Ordered() const;
 };
 
 struct IndicesOptions {
@@ -181,7 +199,8 @@ class FieldIndices {
 
   BaseIndex* GetIndex(std::string_view field) const;
   BaseSortIndex* GetSortIndex(std::string_view field) const;
-  std::vector<TextIndex*> GetAllTextIndices() const;
+  TextIndex* GetTextIndex(std::string_view field) const;  // nullptr unless a TEXT attribute
+  absl::Span<TextIndex* const> GetAllTextIndices() const;
 
   const std::vector<DocId>& GetAllDocs() const;
   const Schema& GetSchema() const;
@@ -192,7 +211,7 @@ class FieldIndices {
   // check so query terms that are stopwords can be dropped instead of matching nothing.
   bool IsStopWord(std::string_view term) const;
 
-  SortableValue GetSortIndexValue(DocId doc, std::string_view field_identifier) const;
+  SortableValue GetSortIndexValue(DocId doc, std::string_view alias) const;
 
   // Adds the amount of FinalizeWork() done to `*done` as it goes, if set.
   void FinalizeInitialization(size_t* done = nullptr);
@@ -207,14 +226,22 @@ class FieldIndices {
  private:
   void CreateIndices(PMR_NS::memory_resource* mr);
   void CreateSortIndices();
+  // nullptr when the attribute has no index of that kind.
+  std::unique_ptr<BaseIndex> CreateIndex(std::string_view alias, const SchemaField& field,
+                                         PMR_NS::memory_resource* mr);
+  static std::unique_ptr<BaseSortIndex> CreateSortIndex(const SchemaField& field);
 
   const Schema& schema_;
   const IndicesOptions& options_;
   // These containers use default allocators — tracked manually via GetNonPmrMemoryUsage().
   // If adding new default-allocator containers, update GetNonPmrMemoryUsage() accordingly.
   std::vector<DocId> all_ids_;
-  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>> indices_;
-  absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  absl::flat_hash_map<std::string_view /*alias*/, std::unique_ptr<BaseIndex>> indices_;
+  absl::flat_hash_map<std::string_view /*alias*/, std::unique_ptr<BaseSortIndex>> sort_indices_;
+  // (identifier, index) for regular and sort indices: what Add and Remove feed with document
+  // values.
+  absl::InlinedVector<std::pair<std::string_view, BaseIndex*>, 16> add_list_;
+  absl::InlinedVector<TextIndex*, 16> text_indices_;  // declaration order
   const Synonyms* synonyms_;
 
   std::string next_defrag_field_;

@@ -35,8 +35,8 @@ std::string EncodeAofSegmentHeader(const AofSegmentHeader& hdr);
 std::optional<AofSegmentHeader> DecodeAofSegmentHeader(std::string_view src);
 
 enum AofBlockFlags : uint8_t {
-  kStartsWithContinuation = 1,
-  kEndsWithPartial = 2,
+  kStartsMidRecord = 1,
+  kEndsMidRecord = 2,
 };
 
 struct AofBlockHeader {

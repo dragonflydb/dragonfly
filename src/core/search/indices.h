@@ -175,7 +175,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
     return field_total_docs_len_;
   }
 
-  // Schema canonical identifier of this field. Set by FieldIndices after
+  // Alias of the attribute this index serves. Set by FieldIndices after
   // construction; empty when the index is built outside that path.
   std::string_view field_ident() const {
     return field_ident_;

@@ -614,6 +614,11 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     // Make sure the flows are not in a state transition
     lock_guard lk{flows_op_mu_};
 
+    // Stop all loaders before any socket goes down: the master closes every flow once one
+    // drops, so a later-cancelled flow would otherwise see a bare EOF.
+    for (auto& flow : shard_flows_)
+      flow->StopLoader();
+
     // Unblock all sockets.
     DefaultErrorHandler(ge);
     for (auto& flow : shard_flows_)
@@ -1456,10 +1461,10 @@ string Replica::GetClientInfo() const {
     ci.tid = proactor_->GetPoolIndex();
     ci.age = now - creation_time_;
     for (uint64_t offs : GetReplicaOffset()) {
-      ci.tot_cmds += offs;
+      ci.stats.cmds += offs;
     }
     if (repl_offs_ >= initial_repl_offs_)
-      ci.tot_net_in = repl_offs_ - initial_repl_offs_;
+      ci.stats.net_bytes_in = repl_offs_ - initial_repl_offs_;
     ci.db = 0;
     ci.flags = "M";
     ci.repl_phase = absl::AsciiStrToLower(GetCurrentPhase());
@@ -1526,9 +1531,13 @@ void DflyShardReplica::JoinFlow() {
   acks_fb_.JoinIfNeeded();
 }
 
-void DflyShardReplica::Cancel() {
+void DflyShardReplica::StopLoader() {
   if (rdb_loader_)
     rdb_loader_->stop();
+}
+
+void DflyShardReplica::Cancel() {
+  StopLoader();
   ShutdownSocket();
   shard_replica_waker_.notifyAll();
 }

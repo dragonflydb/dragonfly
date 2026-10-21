@@ -200,6 +200,10 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     kind_mask_ |= QUIT;
   } else if (name_ == "RESET") {
     kind_mask_ |= RESET;
+  } else if (name_ == "HELLO") {
+    kind_mask_ |= HELLO;
+  } else if (name_ == "AUTH" || name_.rfind("ACL", 0) == 0) {
+    kind_mask_ |= SECRET_ARGS;
   }
   if ((opt_mask_ & CO::ADMIN) == 0 && name_ != "EXEC")
     kind_mask_ |= CAN_MONITOR;
@@ -248,6 +252,17 @@ CommandId CommandId::Clone(const std::string_view name) const {
     cloned.latency_histogram_ = static_cast<hdr_histogram*>(latency_histogram_);
   }
   return cloned;
+}
+
+size_t CommandId::NonSecretArgCount(const facade::ParsedArgs& args) const {
+  if (kind_mask_ & SECRET_ARGS)
+    return 0;
+
+  // Only the protocol version: a mistyped AUTH must not expose the credentials after it.
+  if (kind_mask_ & HELLO)
+    return std::min<size_t>(args.size(), 1);
+
+  return args.size();
 }
 
 bool CommandId::IsTransactional() const {

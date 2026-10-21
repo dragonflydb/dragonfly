@@ -21,7 +21,8 @@ namespace dfly::search {
 //
 // Group tokens returned by GetGroupTokens are the group identifiers with a space prefix. The
 // space is intentionally added to avoid matching with the term itself during text tokenization
-// and to distinguish the group identifier from regular terms during search.
+// and to distinguish the group identifier from regular terms during search. Group identifiers
+// are case-sensitive, terms are not.
 class Synonyms {
  public:
   // Represents a group of synonymous terms

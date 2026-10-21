@@ -34,8 +34,9 @@ class BlockingController;
 using facade::OpResult;
 
 // Applies a delta to the per-db/per-type counters and to the owning slot's memory_bytes.
-// All of them track resident RAM.
-void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db);
+// All of them track resident RAM. A set `slot` must equal KeySlot(key) and spares computing it.
+void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db,
+                         std::optional<SlotId> slot = std::nullopt);
 
 // Applies a delta to the owning slot's tiered_bytes - disk bytes held by the slot's entries.
 void AccountSlotTieredBytes(std::string_view key, int64_t delta, DbTable* db);
@@ -205,9 +206,16 @@ class DbSlice {
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
       CompactObjType orig_obj_type = 0;
+
+      // KeySlot(key), computed at most once and only if per-slot stats are tracked.
+      std::optional<SlotId> slot;
     };
 
-    AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice);
+    AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice,
+                std::optional<SlotId> slot = std::nullopt);
+
+    // Returns KeySlot(key) if `table` tracks per-slot stats, nullopt otherwise.
+    std::optional<SlotId> StatsSlot(const DbTable& table);
 
     friend class DbSlice;
 
@@ -443,18 +451,18 @@ class DbSlice {
   // The single expiry primitive: journals and deletes 'it' if its expire time passed at
   // cntx.time_now_ms. Entries without a TTL are Valid. The journal append may suspend unless the
   // caller disabled journal flushing (journal::DisableFlushGuard).
-  // Never sends keyspace notifications: when they are enabled, the expired key is appended to
-  // 'events' and the caller sends them outside any atomic section (see SendExpiredKeyEvents).
-  ExpireResult TryExpire(const Context& cntx, PrimeIterator it,
-                         std::vector<std::string>* events) const;
+  // Never sends keyspace notifications, so it is safe in atomic sections: when they are enabled,
+  // the expired event is queued for SendQueuedExpiredKeyEvents.
+  ExpireResult TryExpire(const Context& cntx, PrimeIterator it) const;
 
-  // Sends the expired keyspace event for 'keys'. May suspend: never call it in an atomic section.
-  void SendExpiredKeyEvents(DbIndex db_index, const std::vector<std::string>& keys) const;
-
-  // Sends the expired events queued by garbage collection during inserts. OnCbFinishBlocking
-  // calls it; code that inserts outside a transaction callback (e.g. RDB loading) must call it
-  // itself. May suspend.
-  void SendQueuedExpiredKeyEvents();
+  // Sends the expired events queued by TryExpire and eviction. OnCbFinishBlocking calls it, so
+  // transaction callbacks need not; code that expires keys elsewhere (e.g. RDB loading, the
+  // heartbeat, NotifyPending, SCAN) must call it itself once it is safe to suspend.
+  // May suspend: never call it in an atomic section.
+  void SendQueuedExpiredKeyEvents() {
+    if (!pending_expired_events_.empty())
+      SendQueuedExpiredKeyEventsSlow();
+  }
 
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
@@ -488,10 +496,9 @@ class DbSlice {
   void FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_t upper_bound);
 
   struct DeleteExpiredStats {
-    uint32_t deleted = 0;                 // number of deleted items due to expiry.
-    uint32_t deleted_bytes = 0;           // total bytes of deleted items.
-    uint32_t traversed = 0;               // total number of traversed entries in the prime table.
-    std::vector<std::string> key_events;  // expired key names for keyspace notifications.
+    uint32_t deleted = 0;        // number of deleted items due to expiry.
+    uint32_t deleted_bytes = 0;  // total bytes of deleted items.
+    uint32_t traversed = 0;      // total number of traversed entries in the prime table.
   };
 
   // Deletes some amount of possible expired items.
@@ -499,12 +506,11 @@ class DbSlice {
 
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
-  // Returns number of (elements,bytes) freed due to evictions.
-  // key_events: if non-null, evicted key names are appended for keyspace notifications.
+  // Returns number of (elements,bytes) freed due to evictions. Queues expired events for the
+  // evicted keys (see SendQueuedExpiredKeyEvents).
   std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx, const Context& cntx,
                                                             size_t starting_segment_id,
-                                                            size_t increase_goal_bytes,
-                                                            std::vector<std::string>* key_events);
+                                                            size_t increase_goal_bytes);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
@@ -608,7 +614,8 @@ class DbSlice {
 
  private:
   void PreUpdateBlocking(DbIndex db_ind, const Iterator& it);
-  void PostUpdate(DbIndex db_ind, std::string_view key);
+  // `slot` is KeySlot(key) if per-slot stats are tracked; computed here if not provided.
+  void PostUpdate(DbIndex db_ind, std::string_view key, std::optional<SlotId> slot);
 
   OpResult<ItAndUpdater> AddOrUpdateInternal(const Context& cntx, std::string_view key,
                                              PrimeValue obj, uint64_t expire_at_ms,
@@ -634,12 +641,23 @@ class DbSlice {
 
   // Queues invalidation message to the clients that are tracking the change to a key.
   void QueueInvalidationTrackingMessageAtomic(std::string_view key);
-  void SendQueuedInvalidationMessages();
+  void SendQueuedInvalidationMessages() {
+    if (!pending_send_map_.empty())
+      SendQueuedInvalidationMessagesSlow();
+  }
+  void SendQueuedInvalidationMessagesSlow();
   void SendQueuedInvalidationMessagesAsync();
 
-  // Queues expired events of keys deleted inside an atomic section, to be sent later by
-  // SendQueuedExpiredKeyEvents.
-  void QueueExpiredKeyEvents(DbIndex db_index, std::vector<std::string> keys);
+  // Queues the expired event of 'key' if keyspace notifications are enabled. Never suspends.
+  void QueueExpiredKeyEvent(DbIndex db_index, std::string_view key) const {
+    if (expired_keys_events_recording_)
+      QueueExpiredKeyEventSlow(db_index, key);
+  }
+  void QueueExpiredKeyEventSlow(DbIndex db_index, std::string_view key) const;
+  void SendQueuedExpiredKeyEventsSlow();
+
+  // Sends the expired keyspace event for 'keys'. May suspend: never call it in an atomic section.
+  void SendExpiredKeyEvents(DbIndex db_index, const std::vector<std::string>& keys) const;
 
   void CreateDb(DbIndex index);
 
@@ -714,14 +732,10 @@ class DbSlice {
   std::list<ChangeConsumerInterface*> change_cb_;
   mutable LocalLatch change_cb_latch_;  // to avoid deletion during traversal
 
-  // Used in temporary computations in Find item and CbFinish
-  // This set is used to hold fingerprints of key accessed during the run of
-  // a transaction callback (not the whole transaction).
-  // We track them to avoid bumping them again (in any direction) so that the iterators to
-  // the fetched keys will not be invalidated. We must do it for atomic operations,
-  // for operations that preempt in the middle we have another mechanism -
-  // auto laundering iterators, so in case of preemption we do not mind that fetched_items are
-  // cleared or changed.
+  // Cache mode only: <key hash, db> of the entries looked up during the current transaction
+  // callback. OnCbFinishBlocking bumps them up after the callback finishes, because a bump moves
+  // entries within their segment and would invalidate the iterators the callback holds. Being a
+  // set, a key looked up several times is bumped once.
   mutable absl::flat_hash_set<FetchedItemKey, FpHasher> fetched_items_;
 
   // Registered by shard indices on when first document index is created.
@@ -759,9 +773,9 @@ class DbSlice {
                           absl::container_internal::hash_default_eq<std::string>, AllocatorType>;
   TrackingMap client_tracking_map_, pending_send_map_;
 
-  // Expired events of keys deleted by garbage collection inside PrimeTable::InsertNew, an atomic
-  // section. Sent in OnCbFinishBlocking. Consecutive events of the same db share one entry.
-  std::vector<std::pair<DbIndex, std::vector<std::string>>> pending_expired_events_;
+  // Expired events queued by QueueExpiredKeyEvent, sent by SendQueuedExpiredKeyEvents.
+  // Consecutive events of the same db share one entry.
+  mutable std::vector<std::pair<DbIndex, std::vector<std::string>>> pending_expired_events_;
 
   void SendQueuedInvalidationMessagesCb(const TrackingMap& track_map, unsigned idx) const;
 

@@ -55,6 +55,11 @@ enum CommandOpt : uint32_t {
   // ACL: only the key at this offset among the command's keys needs write; others need read.
   WRITE_KEY_OFFSET_0 = 1U << 19,
   WRITE_KEY_OFFSET_1 = 1U << 20,
+
+  // Blocking command that consumes every ready key it waits on, like XREADGROUP. When it is woken,
+  // each watched key that is ready on the waking shard is reserved for it, not only the key that
+  // woke it (see BlockingController).
+  WAKE_ALL_READY_KEYS = 1U << 21,
 };
 
 };  // namespace CO
@@ -201,6 +206,9 @@ class CommandId : public facade::CommandId {
     return kind_mask_ & IS_ALIAS;
   }
 
+  // Leading args safe to show in logs, MONITOR, SLOWLOG and replies; the rest hold credentials.
+  size_t NonSecretArgCount(const facade::ParsedArgs& args) const;
+
   hdr_histogram* GetLatencyHist() const {
     return latency_histogram_;
   }
@@ -307,6 +315,9 @@ class CommandId : public facade::CommandId {
     FIXED_SINGLE_KEY = 1U << 15,  // last bit of the low uint16_t half of kind_mask_.
 
     RESET = 1U << 16,  // RESET only
+
+    SECRET_ARGS = 1U << 17,  // AUTH and ACL *: every arg may be a credential
+    HELLO = 1U << 18,        // HELLO only: the args after its protocol version may be credentials
   };
 
   // CmdKind bits. Trivially copied by the move ctor.

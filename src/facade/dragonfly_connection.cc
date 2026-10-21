@@ -148,10 +148,10 @@ ABSL_FLAG(
     "parked waiting on parallel work, so the next batch is already grown when execution resumes.");
 
 ABSL_FLAG(bool, enable_memcache_io_loop_v2, true,
-          "Enable the event-driven IoLoopV2 for non-TLS Memcache connections.");
+          "Enable the event-driven IoLoopV2 for Memcache connections.");
 
-ABSL_FLAG(bool, enable_resp_io_loop_v2, false,
-          "Enable the event-driven IoLoopV2 for non-TLS RESP connections.");
+ABSL_FLAG(bool, enable_resp_io_loop_v2, true,
+          "Enable the event-driven IoLoopV2 for RESP connections.");
 
 ABSL_FLAG(bool, enable_shared_read_buffer, false,
           "Use one read buffer per proactor for eligible RESP IoLoopV2 connections.");
@@ -1278,9 +1278,10 @@ std::string FormatClientInfo(const ClientInfo& ci) {
   absl::StrAppend(&out, " tid=", ci.tid, " irqmatch=", int(ci.irqmatch));
   if (ci.pipeline.has_value())
     absl::StrAppend(&out, " pipeline=", *ci.pipeline, " pbuf=", ci.pbuf.value_or(0));
-  absl::StrAppend(&out, " age=", ci.age, " idle=", ci.idle, " tot-cmds=", ci.tot_cmds,
-                  " tot-net-in=", ci.tot_net_in, " tot-read-calls=", ci.tot_read_calls,
-                  " tot-dispatches=", ci.tot_dispatches);
+  const auto& stats = ci.stats;
+  absl::StrAppend(&out, " age=", ci.age, " idle=", ci.idle, " tot-cmds=", stats.cmds,
+                  " tot-net-in=", stats.net_bytes_in, " tot-read-calls=", stats.read_cnt,
+                  " tot-dispatches=", stats.dispatch_entries_added);
   if (ci.db.has_value())
     absl::StrAppend(&out, " db=", *ci.db);
   if (!ci.flags.empty())
@@ -1342,10 +1343,7 @@ ClientInfo Connection::BuildClientInfo(unsigned thread_id) const {
   }
   ci.age = now - creation_time_;
   ci.idle = now - last_interaction_;
-  ci.tot_cmds = local_stats_.cmds;
-  ci.tot_net_in = local_stats_.net_bytes_in;
-  ci.tot_read_calls = local_stats_.read_cnt;
-  ci.tot_dispatches = local_stats_.dispatch_entries_added;
+  ci.stats = local_stats_;
 
   string_view phase_name = PHASE_NAMES[phase_];
   if (cc_) {
@@ -1472,6 +1470,9 @@ io::Result<bool> Connection::CheckForHttpProto() {
 
     io_buf_.CommitWrite(*recv_sz);
     UpdateIoBufReadState();
+    // Bytes received while still detecting the protocol are client activity for the idle
+    // timeout (see ServerState::ConnectionsWatcherFb), same as reads in the command loop.
+    last_interaction_ = time(nullptr);
     string_view ib = io::View(io_buf_.InputBuffer());
     if (ib.size() >= 2 && ib[0] == 22 && ib[1] == 3) {
       // We matched the TLS handshake raw data, which means "peer" is a TCP socket.
@@ -3183,8 +3184,6 @@ bool Connection::SquashPipelineV2() {
   // vectorized squash phase: pack multiple commands and dispatch at once.
   // dispatch_waiting_count_ is the exact length of the run starting at parsed_to_execute_, so the
   // squash works even when earlier commands are still in flight.
-  auto& conn_stats = tl_facade_stats->conn_stats;
-
   uint64_t dispatch_start = CycleClock::Now();
   fiber_park_spot_ = FiberParkSpot::kSquashHop;
   // DispatchSquashedBatch is synchronous - raise sync_dispatch so DispatchTracker sees this
@@ -3205,6 +3204,8 @@ bool Connection::SquashPipelineV2() {
 
   if (squashed == 0)
     return false;
+
+  auto& conn_stats = GetLocalConnStats();
 
   // Like V1's SquashPipeline, sample once before the blocking squash and attribute it to every
   // squashed command's parse->dispatch wait.
@@ -3234,7 +3235,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
 
   ConnectionMemoryTracker memory_tracker(this);
   absl::Cleanup batch_guard = [this] { reply_builder_->SetBatchMode(false); };
-  auto& conn_stats = tl_facade_stats->conn_stats;
+  bool squashed_in_batch = false;
 
   bool is_true_pipeline = (parsed_to_execute_->next) != nullptr;
 
@@ -3280,6 +3281,12 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
                << pending_input_ << " " << GetUnreadInputLen();
 
       if (SquashPipelineV2()) {
+        if (squashed_in_batch)
+          ++GetLocalConnStats().pipeline_resquashes;
+        else
+          squashed_in_batch = true;
+        ++GetLocalConnStats().pipeline_squashes;
+
         // - Normally: return after a successful squash so the caller can process replies. A client
         // with a bounded pipeline needs completed replies to replenish requests - delaying them can
         // stall both it and this connection fiber.
@@ -3377,6 +3384,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
     if (dispatch_res == DispatchResult::WOULD_BLOCK)
       break;  // Sync command. Wait for current async commands to finish
 
+    auto& conn_stats = GetLocalConnStats();
     conn_stats.pipelined_wait_latency += CycleClock::ToUsec(dispatch_start - cmd->parsed_cycle);
     conn_stats.pipeline_dispatch_commands++;
     if (is_head)
@@ -3461,6 +3469,10 @@ bool Connection::ReplyBatch() {
     auto* next = release_head->next;
     ReleasePipelinedCommand(release_head);
     release_head = next;
+  }
+
+  if (ioloop_v2_ && (replied > 0)) {
+    ++GetLocalConnStats().pipeline_reply_batches;
   }
 
   if (reply_builder_->GetError())
@@ -4324,14 +4336,24 @@ auto Connection::IoLoopV2() -> IoLoopResult {
     // whole pipeline execute in-memory before a single sendmsg at the end.
     if (!ShouldWakeIdle()) {
       phase_ = READ_SOCKET;
-
       if (auto ec = FlushReplies(); ec) {
         return ec;
       }
+      const bool wait_for_reply = HasInFlightCommands();
+      const uint64_t idle_wait_start = CycleClock::Now();
 
       fiber_park_spot_ = FiberParkSpot::kIdleAwait;
-      io_event_.await([this] { return ShouldWakeIdle(); });
+      const bool parked = io_event_.await([this] { return ShouldWakeIdle(); });
       fiber_park_spot_ = FiberParkSpot::kNone;
+
+      if (parked) {
+        auto& conn_stats = GetLocalConnStats();
+        ++conn_stats.pipeline_idle_waits;
+        if (wait_for_reply)
+          ++conn_stats.pipeline_reply_waits;
+        conn_stats.pipeline_idle_wait_usec +=
+            CycleClock::ToUsec(CycleClock::Now() - idle_wait_start);
+      }
     }
 
     phase_ = PROCESS;

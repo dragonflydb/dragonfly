@@ -239,7 +239,7 @@ char* ScanResult::AppendBuffer(size_t len) {
   return entries_.data(entries_.size() - 1);
 }
 
-void ScanResult::UndoAppend(char* buffer) {
+void ScanResult::UndoAppend(const char* buffer) {
   if (!overflow_.empty() && overflow_.back().data() == buffer) {
     overflow_.pop_back();
   } else {

@@ -102,7 +102,7 @@ class ServerState {  // public struct - to allow initialization.
 
  public:
   struct Stats {
-    Stats(unsigned num_shards = 0);  // Default initialization should be valid for Add()
+    explicit Stats(unsigned num_shards = 0);  // Default initialization should be valid for Add()
 
     Stats(Stats&& other) = default;
     Stats& operator=(Stats&& other) = default;
@@ -172,18 +172,6 @@ class ServerState {  // public struct - to allow initialization.
   static void Destroy();
 
   void EnterLameDuck();
-
-  void TxCountInc() {
-    ++live_transactions_;
-  }
-
-  void TxCountDec() {
-    --live_transactions_;  // can go negative since we can start on one thread and end on another.
-  }
-
-  int64_t live_transactions() const {
-    return live_transactions_;
-  }
 
   GlobalState gstate() const {
     return gstate_;
@@ -306,7 +294,6 @@ class ServerState {  // public struct - to allow initialization.
   // A fiber constantly watching connections on the main listener.
   void ConnectionsWatcherFb(util::ListenerInterface* main);
 
-  int64_t live_transactions_ = 0;
   SlowLogShard slow_log_shard_;
   mi_heap_t* data_heap_;
 

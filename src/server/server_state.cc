@@ -325,13 +325,20 @@ void ServerState::ConnectionsWatcherFb(util::ListenerInterface* main) {
       facade::Connection* dfly_conn = static_cast<facade::Connection*>(conn);
       using Phase = facade::Connection::Phase;
       auto phase = dfly_conn->phase();
-      bool is_replica = true;
+      bool is_replica = false;
       if (dfly_conn->cntx()) {
         is_replica = dfly_conn->cntx()->replica_conn;
       }
 
-      bool idle_read = timeout != 0 && !is_replica && phase == Phase::READ_SOCKET &&
-                       dfly_conn->idle_time() > timeout;
+      // A SETUP connection without a context is still in protocol detection, e.g. a pre-dialled
+      // client pool connection that never sent a byte. It occupies a maxclients slot like any
+      // other client and Redis applies `timeout` to it too, so reap it with idle READ_SOCKET ones.
+      // HTTP connections get a context and stay in SETUP while helio serves them without
+      // refreshing last_interaction_, so they are left out to keep them from being reaped by age.
+      bool idle_phase =
+          phase == Phase::READ_SOCKET || (phase == Phase::SETUP && !dfly_conn->cntx());
+      bool idle_read =
+          timeout != 0 && !is_replica && idle_phase && dfly_conn->idle_time() > timeout;
       bool stuck_sending = send_timeout != 0 && !is_replica && dfly_conn->IsSending() &&
                            dfly_conn->GetSendWaitTimeSec() > send_timeout;
 

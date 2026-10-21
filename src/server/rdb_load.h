@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <source_location>
 #include <system_error>
 
 extern "C" {
@@ -38,6 +39,32 @@ struct JournalReader;
 using RdbVersion = std::uint16_t;
 
 class RdbLoaderBase {
+ public:
+  // An error code plus the trace of frames it propagated through, innermost first.
+  // Converts implicitly to and from std::error_code: unmigrated code keeps working, but the trace
+  // is dropped at such boundaries.
+  struct Error {
+    struct Frame {
+      std::source_location loc;
+      std::string ctx;
+    };
+
+    Error(std::error_code ec = {}, std::string ctx = {},
+          std::source_location loc = std::source_location::current());
+
+    explicit operator bool() const {
+      return bool(ec);
+    }
+    operator std::error_code() const {
+      return ec;
+    }
+    std::string Format() const;  // Multi-line, innermost frame first.
+
+    std::error_code ec;
+    std::vector<Frame> trace;
+  };
+  template <typename T> using Result = nonstd::expected<T, Error>;
+
  protected:
   RdbLoaderBase();
   ~RdbLoaderBase();
@@ -193,14 +220,14 @@ class RdbLoaderBase {
 
   class OpaqueObjLoader;
 
-  io::Result<uint8_t> FetchType();
+  Result<uint8_t> FetchType();
 
-  template <typename T> io::Result<T> FetchInt();
+  template <typename T> Result<T> FetchInt();
 
   static std::error_code FromOpaque(const OpaqueObj& opaque, LoadConfig config, PrimeValue* pv);
 
-  io::Result<uint64_t> LoadLen(bool* is_encoded);
-  std::error_code FetchBuf(size_t size, void* dest);
+  Result<uint64_t> LoadLen(bool* is_encoded);
+  Error FetchBuf(size_t size, void* dest);
 
   io::Result<std::string> FetchGenericString();
   io::Result<std::string> FetchLzfStringObject();
@@ -211,20 +238,20 @@ class RdbLoaderBase {
 
   ::io::Result<std::string> ReadKey();
 
-  std::error_code ReadObj(int rdbtype, OpaqueObj* dest);
-  std::error_code ReadStringObj(RdbVariant* rdb_variant, bool big_string_split = false);
+  Error ReadObj(int rdbtype, OpaqueObj* dest);
+  Error ReadStringObj(RdbVariant* rdb_variant, bool big_string_split = false);
   // Consumes the expiry following a Valkey hash field/value pair and normalizes it for StringMap.
   std::error_code ReadValkeyHashExpiry(RdbVariant* dest);
-  std::error_code ReadRemainingString(RdbVariant* dest);
+  Error ReadRemainingString(RdbVariant* dest);
   ::io::Result<long long> ReadIntObj(int encoding);
   ::io::Result<LzfString> ReadLzf();
 
-  ::io::Result<OpaqueObj> ReadSet(int rdbtype);
+  Result<OpaqueObj> ReadSet(int rdbtype);
   ::io::Result<OpaqueObj> ReadIntSet();
-  ::io::Result<OpaqueObj> ReadGeneric(int rdbtype);
+  Result<OpaqueObj> ReadGeneric(int rdbtype);
   ::io::Result<OpaqueObj> ReadHMap(int rdbtype);
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
-  ::io::Result<OpaqueObj> ReadListQuicklist(int rdbtype);
+  Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
   ::io::Result<OpaqueObj> ReadRedisModule2();
   ::io::Result<OpaqueObj> ReadSBFImpl(bool filter_is_chunked);
@@ -244,9 +271,9 @@ class RdbLoaderBase {
 
   static size_t StrLen(const RdbVariant& tset);
 
-  std::error_code EnsureRead(size_t min_sz);
+  Error EnsureRead(size_t min_sz);
 
-  std::error_code EnsureReadInternal(size_t min_to_read);
+  Error EnsureReadInternal(size_t min_to_read);
 
   // Upper bound on bytes a bounded source can still supply; SIZE_MAX when unbounded (file load).
   // Used to reject a declared length/count before allocating for it (a crafted RESTORE OOM).
@@ -259,11 +286,11 @@ class RdbLoaderBase {
 
   // Wrapper to consume n bytes from mem buf, and also decrement remaining_payload_bytes if a chunk
   // read is in progress
-  std::error_code ConsumeInput(size_t n);
+  Error ConsumeInput(size_t n);
 
   // If reading a chunk, deducts n bytes from size with error checking. No op if chunk is not being
   // read such as journal data etc
-  std::error_code ConsumeChunkBudget(size_t n);
+  Error ConsumeChunkBudget(size_t n);
 
   bool ChunkBudgetExhausted() const {
     return current_chunk_state_ && current_chunk_state_->remaining_payload_bytes == 0;
@@ -408,14 +435,16 @@ class RdbLoader : protected RdbLoaderBase {
 
   struct StreamState;
 
-  std::error_code LoadKeyValPair(int type, ObjSettings* settings);
+  Error LoadKeyValPair(int type, ObjSettings* settings);
 
   // Loads a continuation tagged chunk. The first chunk has already loaded the key and object type.
   // This restores the saved stream state and continues loading only the remaining payload.
-  std::error_code LoadValueChunk();
+  Error LoadValueChunk();
 
-  io::Result<bool> ReadAndDispatchObject(int object_type, std::string& key,
-                                         const ObjSettings& obj_settings, DbIndex db_index);
+  Result<bool> ReadAndDispatchObject(int object_type, std::string& key,
+                                     const ObjSettings& obj_settings, DbIndex db_index);
+
+  Error LoadImpl(::io::Source* src);
 
   // Returns whether to discard the read key pair.
   bool ShouldDiscardKey(std::string_view key, const ObjSettings& settings) const;

@@ -12,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -151,6 +152,12 @@ template <typename Derived, AstNode::Type type> struct TypedAstNode : AstNode {
 
 namespace detail {
 
+using AstNodeTypes =
+    std::tuple<AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode, AstSuffixNode,
+               AstInfixNode, AstWildcardNode, AstPhraseNode, AstRangeNode, AstGeoNode,
+               AstNegateNode, AstOptionalNode, AstAttributeNode, AstLogicalNode, AstFieldNode,
+               AstTagsNode, AstKnnNode, AstVectorRangeNode>;
+
 // Generate the typed callbacks in one base, without a virtual overload for each node type.
 template <typename Derived, typename... Nodes> struct AstVisitorCallbacks : AstVisitor {
   static_assert(sizeof...(Nodes) == static_cast<size_t>(AstNode::Type::COUNT));
@@ -171,16 +178,19 @@ template <typename Derived, typename... Nodes> struct AstVisitorCallbacks : AstV
   }();
 };
 
+template <typename Derived, typename Types = AstNodeTypes> struct AstVisitorCallbackTypes;
+
+template <typename Derived, typename... Nodes>
+struct AstVisitorCallbackTypes<Derived, std::tuple<Nodes...>> {
+  using type = AstVisitorCallbacks<Derived, Nodes...>;
+};
+
 }  // namespace detail
 
 // Adapts a callback to node visitation without allocating.
 template <typename Callback>
 struct AstVisitorAdapter final
-    : detail::AstVisitorCallbacks<AstVisitorAdapter<Callback>, AstStarNode, AstStarFieldNode,
-                                  AstTermNode, AstPrefixNode, AstSuffixNode, AstInfixNode,
-                                  AstWildcardNode, AstPhraseNode, AstRangeNode, AstGeoNode,
-                                  AstNegateNode, AstOptionalNode, AstAttributeNode, AstLogicalNode,
-                                  AstFieldNode, AstTagsNode, AstKnnNode, AstVectorRangeNode> {
+    : detail::AstVisitorCallbackTypes<AstVisitorAdapter<Callback>>::type {
   explicit AstVisitorAdapter(Callback& callback) : callback_{callback} {
   }
 
