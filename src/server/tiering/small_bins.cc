@@ -125,9 +125,24 @@ std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashAborted(BinId
   std::vector<std::pair<DbIndex, std::string>> out;
 
   auto node = pending_bins_.extract(id);
+  DCHECK(!node.empty()) << id;
+  if (node.empty())
+    return out;
+
   auto& entries = node.mapped();
   while (!entries.empty())
     out.emplace_back(std::move(entries.extract(entries.begin()).key()));
+
+  return out;
+}
+
+std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashFailed(FilledBin bin) {
+  DCHECK(!pending_bins_.contains(bin.id));
+
+  std::vector<std::pair<DbIndex, std::string>> out;
+  out.reserve(bin.entries_.size());
+  while (!bin.entries_.empty())
+    out.emplace_back(std::move(bin.entries_.extract(bin.entries_.begin()).key()));
 
   return out;
 }
@@ -143,9 +158,14 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
     return std::nullopt;
   }
 
-  for (auto& [id, keys] : pending_bins_) {
-    if (keys.erase(make_pair(dbid, key)))
-      return keys.empty() ? std::make_optional(id) : std::nullopt;
+  for (auto it = pending_bins_.begin(); it != pending_bins_.end(); ++it) {
+    if (it->second.erase(make_pair(dbid, key))) {
+      if (!it->second.empty())
+        return std::nullopt;
+      BinId id = it->first;
+      pending_bins_.erase(it);  // don't leave the drained bin behind
+      return id;
+    }
   }
   return std::nullopt;
 }

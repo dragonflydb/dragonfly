@@ -51,6 +51,16 @@ struct TieredStats {
   // Values stashed during background offloading scans (subset of total_stashes).
   uint64_t total_offloading_stashes = 0;
 
+  // Background offloading scans executed.
+  uint64_t total_offloading_runs = 0;
+
+  // Entries visited by background offloading scans.
+  uint64_t total_offloading_visited = 0;
+
+  // Disk file grow requests that failed, either rejected because the file would exceed
+  // tiered_max_file_size or because fallocate failed.
+  uint64_t total_failed_grows = 0;
+
   // Fragmented bin buckets re-uploaded by the background repack scan to regroup small values
   // scattered across disk pages.
   uint64_t total_repacks = 0;
@@ -58,6 +68,10 @@ struct TieredStats {
   // Average number of disk pages a fragmented bin bucket spreads across, estimated by the last
   // completed repack scan pass (1.0 == perfectly packed).
   float estimated_bin_bucket_fragmentation = 0;
+
+  // Highest ratio of allocated bytes to the per-thread max file size across all shards
+  // (aggregated with max). A single shard nearing ~1.0 can't stash anymore.
+  float max_shard_file_utilization = 0;
 
   // Disk space currently in use (tracked by ExternalAllocator).
   size_t allocated_bytes = 0;

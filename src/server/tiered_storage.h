@@ -224,6 +224,8 @@ class TieredStorage : public TieredStorageBase {
     uint64_t offloading_usec = 0;
     uint64_t defrag_usec = 0;
     uint64_t offloading_stashes = 0;
+    uint64_t offloading_runs = 0;
+    uint64_t offloading_visited = 0;
     uint64_t total_clients_throttled = 0;
     size_t cool_memory_used = 0;
     uint64_t total_repacks = 0;
