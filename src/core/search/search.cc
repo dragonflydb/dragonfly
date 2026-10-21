@@ -639,12 +639,20 @@ struct BasicSearch {
     if (!error_.empty())
       return IndexResult{};
     auto matched = std::move(child).Take().first;
-    vector<DocId> all = indices_->GetAllDocs();
-    auto pred = [&matched](DocId doc) {
-      return binary_search(matched.begin(), matched.end(), doc);
-    };
-    all.erase(remove_if(all.begin(), all.end(), pred), all.end());
-    return IndexResult{std::move(all)};
+    const auto& all = indices_->GetAllDocs();
+    if (matched.empty())
+      return IndexResult{vector<DocId>{all}};
+    if (matched.size() == 1) {
+      vector<DocId> out = all;
+      auto it = lower_bound(out.begin(), out.end(), matched.front());
+      if (it != out.end() && *it == matched.front())
+        out.erase(it);
+      return IndexResult{std::move(out)};
+    }
+    vector<DocId> out;
+    out.reserve(all.size());
+    set_difference(all.begin(), all.end(), matched.begin(), matched.end(), back_inserter(out));
+    return IndexResult{std::move(out)};
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
