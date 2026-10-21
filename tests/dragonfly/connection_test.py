@@ -3005,6 +3005,7 @@ IOBUF_COOLDOWN_SEC = 5
 )
 async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
     """Receive-idle shrinking performs at most one resize during each cooldown interval."""
+    assert IOBUF_WAIT_SEC + 1 < IOBUF_COOLDOWN_SEC
     if not is_resp_io_loop_v2(df_server):
         pytest.skip("targets V2 receive-idle IoBuf shrinking")
 
@@ -3016,9 +3017,9 @@ async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
     peak = await get_client_read_buffer_bytes(observer)
 
     @assert_eventually(timeout=IOBUF_COOLDOWN_SEC + IOBUF_WAIT_TIMEOUT_SEC)
-    async def wait_for_shrink(original_value: int):
+    async def wait_for_shrink(limit: int) -> int:
         current = await get_client_read_buffer_bytes(observer)
-        assert current < original_value
+        assert current < limit
         return current
 
     after_first_shrink = await wait_for_shrink(peak)
@@ -3031,7 +3032,7 @@ async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
     await asyncio.sleep(IOBUF_WAIT_SEC)
     assert await get_client_read_buffer_bytes(observer) == after_first_shrink
 
-    # Shrink must happen after the wait period has blocked it, some time within the next few seconds
+    # After the cooldown expires, a second shrink must eventually happen.
     await wait_for_shrink(after_first_shrink)
 
     await client.aclose()
