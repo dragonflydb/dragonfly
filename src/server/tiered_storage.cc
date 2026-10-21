@@ -916,7 +916,7 @@ void TieredStorage::RunRepackScan(DbIndex dbid) {
       string_view key = it->first.GetSlice(&scratch);
       Read(
           tiering::KeyRef{dbid, key}, segment, tiering::StringDecoder{pv},
-          [](io::Result<tiering::StringDecoder*>) {}, /*read_only=*/true);
+          [](io::Result<tiering::StringDecoder*>) {}, tiering::ReadOptions{.read_only = true});
     }
     issued_reads += pages.size();
   };

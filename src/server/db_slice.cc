@@ -2168,9 +2168,8 @@ DbSlice::OmitDecision DbSlice::IsOmittableWrite(const Context& cntx, const Chang
   // Stash entries can be moved backwards relative to the cursor by TryMoveFromStash,
   // breaking our reachability assumption. We must serialize now
   if (req.ContainsStashBucket())
-    return false;
+    return {};
 
-  bool omit_update = false;
   OmitDecision res;
   if (cntx.is_omittable_operation && change_cb_.size() == 1) {
     auto gv = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
