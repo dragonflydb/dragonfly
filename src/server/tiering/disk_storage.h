@@ -30,6 +30,10 @@ class DiskStorage {
     size_t max_file_size = 0;
     size_t pending_ops = 0;
     size_t pending_stash_bytes = 0;
+    size_t pending_read_bytes = 0;  // Real volume of in-flight read bytes to disk
+    size_t segment_bytes = 0;
+    size_t large_allocated_bytes = 0;
+    size_t free_extent_bytes = 0;
   };
 
   using ReadCb = std::function<void(io::Result<std::string_view>)>;
@@ -67,7 +71,8 @@ class DiskStorage {
 
   off_t max_size_;
   size_t pending_ops_ = 0;          // number of ongoing ops for safe shutdown
-  size_t pending_stash_bytes_ = 0;  // bytes currently in-flight to disk
+  size_t pending_stash_bytes_ = 0;  // bytes currently in-flight to disk (writes)
+  size_t pending_read_bytes_ = 0;   // bytes currently in-flight from disk (reads)
 
   // how many times we allocate registered/heap buffers.
   uint64_t heap_buf_alloc_cnt_ = 0, reg_buf_alloc_cnt_ = 0;

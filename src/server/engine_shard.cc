@@ -760,6 +760,13 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
+  if (tiered_storage_) {
+    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+      if (db_slice.IsDbValid(i))
+        tiered_storage_->RunRepackScan(i);
+    }
+  }
+
   if (tiered_storage_ && tiered_storage_->ShouldOffload()) {
     VLOG(1) << "Running Offloading, memory=" << db_slice.memory_budget()
             << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
@@ -1030,9 +1037,8 @@ size_t EngineShard::UsedMemory() const {
 }
 
 bool EngineShard::ShouldThrottleForTiering() const {
-  // Throttle if the tiered storage is busy offloading (at least 30% of allowed capacity)
-  return tiered_storage_ && tiered_storage_->WriteDepthUsage() > 0.3 &&
-         tiered_storage_->ShouldOffload();
+  // Throttle if the tiered storage is busy offloading (at least 50% of allowed capacity)
+  return tiered_storage_ && tiered_storage_->TotalUsage() > 50 && tiered_storage_->ShouldOffload();
 }
 
 void EngineShard::FinalizeMulti(Transaction* tx) {

@@ -7,15 +7,13 @@
 #include <mimalloc.h>
 
 #include <bitset>
-#include <cstring>
 
 #include "base/logging.h"
 
 namespace dfly::tiering {
 using namespace std;
+using detail::BinIdx;
 using detail::PageClass;
-
-using BinIdx = uint8_t;
 
 namespace {
 
@@ -48,6 +46,7 @@ constexpr size_t kSegmentSize = 256_MB;
 
 constexpr unsigned kNumBins = detail::kNumFreePages;
 constexpr unsigned kLargeSizeBin = kNumBins - 1;
+constexpr BinIdx kNoBin = UINT8_MAX;  // marks a page that is not used by its segment.
 constexpr unsigned kMaxPagesInSegment = kSegmentSize / kSmallPageSize;
 constexpr unsigned kSegDescrAlignment = 16_KB;
 
@@ -132,56 +131,28 @@ template <size_t N> size_t FindFirst(const std::bitset<N>& bs) {
 namespace detail {
 
 // Page can be exactly in either these 3 states:
-// 1. unitialized - with no blocks being allocated - segment_inuse will be 0 in that case, 1
-// otherwise.
-// 2. Partly utilized by 1 or more blocks, with available > 0 in that case. It must be present in
-// free_pages_ list then.
-// 3. Fully utilized, with available==0, in that case it's not part of free_pages_ list.
+// 1. Unused - not assigned to any bin, its segment marks it with kNoBin.
+// 2. Partly utilized - has free blocks and is linked into the free_pages_ list of its bin.
+// 3. Fully utilized - has no free blocks and is not linked into any list.
+// To keep Page compact, its bin is stored by the owning segment, its index is derived from its
+// address and the number of free blocks is derived from free_blocks.
 struct Page {
   std::bitset<256> free_blocks;  // bitmask of free blocks (32 bytes).
-  uint8_t id;                    // index inside the Segment.pages array.
+  Page* next_free;               // links in the free_pages_ list.
+  Page* prev_free;
 
-  // need some mapping function to map from block_size to real_block_size given Page class.
-  BinIdx bin_idx;
-  uint8_t segment_inuse : 1;  // true if segment allocated this page.
-  uint8_t reserved[3];
-
-  // can be computed via free_blocks.count().
-  uint16_t available;  // in number of blocks.
-  Page* next_free;     // next page in the free_pages_ list
-
-  // We can not use c'tor because we use the trick in segment where we allocate more pages
-  // than SegmentDescr declares.
-  void Reset(uint8_t new_id) {
-    static_assert(sizeof(Page) == 48);
-
-    memset(&id, 0, sizeof(Page) - offsetof(Page, id));
-    id = new_id;
+  // Marks the first blocks_num blocks as free.
+  void Init(unsigned blocks_num) {
+    DCHECK(blocks_num > 0 && blocks_num <= free_blocks.size());
+    free_blocks.set();
+    free_blocks >>= free_blocks.size() - blocks_num;
   }
-
-  void Init(PageClass pc, BinIdx bin_id);
 };
 
-constexpr size_t kSegDescrDataSize = sizeof(Page) * kMaxPagesInSegment + 128;
+static_assert(sizeof(Page) == 48);
+
+constexpr size_t kSegDescrDataSize = (sizeof(Page) + sizeof(BinIdx)) * kMaxPagesInSegment + 128;
 static_assert(kSegDescrDataSize < kSegDescrAlignment);
-
-void Page::Init(PageClass pc, BinIdx bin_id) {
-  DCHECK_EQ(available, 0);
-  DCHECK(segment_inuse);
-
-  bin_idx = bin_id;
-  if (pc == PageClass::LARGE_P) {
-    available = 1;
-  } else {
-    size_t page_size = (pc == PageClass::SMALL_P) ? kSmallPageSize : kMediumPageSize;
-    available = page_size / ToBlockSize(bin_id);
-  }
-
-  free_blocks.reset();
-  for (unsigned i = 0; i < available; ++i) {
-    free_blocks.set(i, true);
-  }
-}
 
 PageClass ClassFromSize(size_t size) {
   if (size <= kSmallObjMaxSize)
@@ -201,11 +172,11 @@ PageClass ClassFromSize(size_t size) {
  * Each segment has pages of the same type, but each page can host blocks of
  * different sizes upto maximal block size for that page class.
  * SegmentDescr points to the range within external storage space.
- * By using the page.id together with segment->page_shift and segment->offset
+ * By using the page index together with segment->page_shift and segment->offset
  * one can know where the page is located in the storage.
  * Opposite direction: by giving an offset to the file, segment_id = offset / 256MB.
  * Moreover (offset % 256MB) >> segment.page_shift gives us the page id and subsequently
- * page_start.  segment.pages[page_id].block_size gives us the block size and that in turn gives us
+ * page_start.  segment.bins[page_id] gives us the block size and that in turn gives us
  * block id within the page. We can also know block_size if the originally allocated
    size is provided by using round_up function that was used to allocate the block.
  * SegmentDescr be aligned by kSegDescrAlignment boundaries - ToSegDescr relies on that.
@@ -218,17 +189,37 @@ class ExternalAllocator::SegmentDescr {
  public:
   explicit SegmentDescr(PageClass pc, size_t offs, uint16_t capacity);
 
-  Page* FindPageSegment() {
-    return page_info_.FindPageSegment();
+  // Assigns an unused page to bin_idx and marks all its blocks as free.
+  Page* FindPageSegment(BinIdx bin_idx) {
+    Page* page = page_info_.FindPageSegment(bin_idx);
+    if (page)
+      page->Init((1u << page_info_.page_shift) / ToBlockSize(bin_idx));
+    return page;
+  }
+
+  // Returns the page back to the segment.
+  void ReleasePage(const Page* page) {
+    unsigned id = PageId(page);
+    DCHECK_NE(page_info_.bins[id], kNoBin);
+    page_info_.bins[id] = kNoBin;
+    --page_info_.used;
   }
 
   Page* GetPage(unsigned i) {
     return page_info_.pages + i;
   }
 
-  size_t BlockOffset(const Page* page, unsigned blockpos) {
-    return offset_ + page->id * (1 << page_info_.page_shift) +
-           ToBlockSize(page->bin_idx) * blockpos;
+  unsigned PageId(const Page* page) const {
+    return page - page_info_.pages;
+  }
+
+  // Returns the bin of the page or kNoBin if the page is unused.
+  BinIdx PageBin(unsigned page_id) const {
+    return page_info_.bins[page_id];
+  }
+
+  size_t BlockOffset(const Page* page, BinIdx bin_idx, unsigned blockpos) {
+    return offset_ + PageId(page) * (1 << page_info_.page_shift) + ToBlockSize(bin_idx) * blockpos;
   }
 
   bool HasFreePages() const {
@@ -283,15 +274,17 @@ class ExternalAllocator::SegmentDescr {
   struct PageInfo {
     uint16_t capacity, used;  // in number of pages.
     uint8_t page_shift;
-    Page pages[0];  // must be the last field. Can be 1-256 pages.
+    BinIdx bins[kMaxPagesInSegment];  // bin of each page, kNoBin if the page is unused.
+    Page pages[0];                    // must be the last field. Can be 1-256 pages.
 
     PageInfo(uint16_t c) : capacity(c), used(0), page_shift(0) {
+      std::fill(bins, bins + kMaxPagesInSegment, kNoBin);
     }
 
-    auto FindPageSegment() -> Page* {
+    auto FindPageSegment(BinIdx bin_idx) -> Page* {
       for (uint32_t i = 0; i < capacity; ++i) {
-        if (!pages[i].segment_inuse) {
-          pages[i].segment_inuse = 1;
+        if (bins[i] == kNoBin) {
+          bins[i] = bin_idx;
           ++used;
           return pages + i;
         }
@@ -320,15 +313,13 @@ ExternalAllocator::SegmentDescr::SegmentDescr(PageClass pc, size_t offs, uint16_
     page_info_.page_shift = kSmallPageShift;
 
   for (unsigned i = 0; i < page_capacity; ++i) {
-    page_info_.pages[i].Reset(i);
+    page_info_.pages[i] = Page{};
   }
 }
 
-static detail::Page empty_page;
-
 ExternalAllocator::ExternalAllocator() {
   std::fill(sq_, sq_ + ABSL_ARRAYSIZE(sq_), nullptr);
-  std::fill(free_pages_, free_pages_ + detail::kNumFreePages, &empty_page);
+  std::fill(free_pages_, free_pages_ + detail::kNumFreePages, nullptr);
 }
 
 ExternalAllocator::~ExternalAllocator() {
@@ -338,39 +329,40 @@ ExternalAllocator::~ExternalAllocator() {
 }
 
 int64_t ExternalAllocator::Malloc(size_t sz) {
-  uint8_t bin_idx = ToBinIdx(sz);
+  BinIdx bin_idx = ToBinIdx(sz);
   Page* page = free_pages_[bin_idx];
-  if (page->available == 0) {  // empty page.
+  if (page == nullptr) {  // no page with free blocks.
     PageClass pc = detail::ClassFromSize(sz);
     if (pc == PageClass::LARGE_P) {
       return LargeMalloc(sz);
     }
 
-    page = FindPage(pc);
+    page = FindPage(pc, bin_idx);
     if (!page)
       return -int64_t(kSegmentSize);
 
     DVLOG(2) << "Allocated page: for bin " << bin_idx << " class " << static_cast<int>(pc);
-    free_pages_[bin_idx] = page;
-    page->Init(pc, bin_idx);
+    LinkFreePage(bin_idx, page);
   }
 
-  DCHECK(page->available);
+  DCHECK(page->free_blocks.any());
   size_t pos = FindFirst(page->free_blocks);
   page->free_blocks.flip(pos);
 
-  if (--page->available == 0)  // Remove empty page from freelist
-    free_pages_[bin_idx] = page->next_free ? page->next_free : &empty_page;
+  if (page->free_blocks.none())  // Remove full page from freelist
+    UnlinkFreePage(bin_idx, page);
 
-  allocated_bytes_ += ToBlockSize(page->bin_idx);
+  allocated_bytes_ += ToBlockSize(bin_idx);
   SegmentDescr* seg = ToSegDescr(page);
-  return seg->BlockOffset(page, pos);
+  return seg->BlockOffset(page, bin_idx, pos);
 }
 
 void ExternalAllocator::Free(size_t offset, size_t sz) {
   if (sz > kMediumObjMaxSize) {
     size_t align_sz = alignup(sz, 4_KB);
     extent_tree_.Add(offset, align_sz);
+    allocated_bytes_ -= align_sz;
+    large_allocated_bytes_ -= align_sz;
     return;
   }
 
@@ -384,9 +376,12 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
   CHECK_LT(page_id, seg->capacity());
 
   Page* page = seg->GetPage(page_id);
+  BinIdx bin_idx = seg->PageBin(page_id);
+  CHECK_NE(bin_idx, kNoBin) << offset;
+
   unsigned page_size = (1 << seg->page_shift());
   unsigned block_offs = delta % page_size;
-  unsigned block_size = ToBlockSize(page->bin_idx);
+  unsigned block_size = ToBlockSize(bin_idx);
   unsigned block_id = block_offs / block_size;
   unsigned blocks_num = page_size / block_size;
 
@@ -394,18 +389,15 @@ void ExternalAllocator::Free(size_t offset, size_t sz) {
   DCHECK_LT(block_id, blocks_num);
   DCHECK(!page->free_blocks[block_id]) << offset;
 
+  bool was_full = page->free_blocks.none();
   page->free_blocks.set(block_id);
-  ++page->available;
 
-  DCHECK_EQ(page->available, page->free_blocks.count());
   // If page becomes fully free, return it to segment list, otherwise if it just became non-empty,
   // then return it to free pages list
-  if (page->available == blocks_num) {
-    FreePage(page, seg, block_size);
-  } else if (page->available == 1) {
-    DCHECK_NE(page, free_pages_[page->bin_idx]);
-    page->next_free = free_pages_[page->bin_idx];
-    free_pages_[page->bin_idx] = page;
+  if (page->free_blocks.count() == blocks_num) {
+    FreePage(page, seg, bin_idx);
+  } else if (was_full) {
+    LinkFreePage(bin_idx, page);
   }
   allocated_bytes_ -= block_size;
 }
@@ -415,6 +407,13 @@ void ExternalAllocator::AddStorage(size_t start, size_t size) {
 
   extent_tree_.Add(start, size);
   capacity_ += size;
+}
+
+ExternalAllocator::Stats ExternalAllocator::GetStats() const {
+  DCHECK_EQ(capacity_, segment_bytes_ + large_allocated_bytes_ + extent_tree_.len());
+  return Stats{.segment_bytes = segment_bytes_,
+               .large_allocated_bytes = large_allocated_bytes_,
+               .free_extent_bytes = extent_tree_.len()};
 }
 
 size_t ExternalAllocator::GoodSize(size_t sz) {
@@ -438,13 +437,13 @@ size_t ExternalAllocator::GoodSize(size_t sz) {
  */
 
 // private functions
-auto ExternalAllocator::FindPage(PageClass pc) -> Page* {
+auto ExternalAllocator::FindPage(PageClass pc, BinIdx bin_idx) -> Page* {
   DCHECK_NE(pc, PageClass::LARGE_P);
 
   SegmentDescr* seg = sq_[pc];
   while (seg) {
     if (seg->HasFreePages()) {
-      return seg->FindPageSegment();
+      return seg->FindPageSegment(bin_idx);
     }
 
     // remove head.
@@ -467,16 +466,20 @@ auto ExternalAllocator::FindPage(PageClass pc) -> Page* {
       segments_.resize(seg_idx + 1);
     }
 
-    void* ptr =
-        mi_malloc_aligned(sizeof(SegmentDescr) + num_pages * sizeof(Page), kSegDescrAlignment);
+    static_assert(sizeof(SegmentDescr) + kMaxPagesInSegment * sizeof(Page) <= kSegDescrAlignment);
+
+    // Allocate the whole alignment unit: mimalloc serves it from naturally aligned blocks of
+    // that size, while smaller sizes are over-allocated to satisfy the alignment.
+    void* ptr = mi_malloc_aligned(kSegDescrAlignment, kSegDescrAlignment);
     SegmentDescr* seg = new (ptr) SegmentDescr(pc, op_range->first, num_pages);
     segments_[seg_idx] = seg;
+    segment_bytes_ += kSegmentSize;
 
     DCHECK(sq_[pc] == NULL);
     DCHECK(seg->next == seg->prev && seg == seg->next);
 
     sq_[pc] = seg;
-    return seg->FindPageSegment();
+    return seg->FindPageSegment(bin_idx);
   }
 
   return nullptr;
@@ -490,44 +493,82 @@ int64_t ExternalAllocator::LargeMalloc(size_t size) {
     return -int64_t(align_sz);
   }
 
+  allocated_bytes_ += align_sz;
+  large_allocated_bytes_ += align_sz;
   return op_range->first;
 }
 
-void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, size_t block_size) {
+void ExternalAllocator::FreePage(Page* page, SegmentDescr* owner, BinIdx bin_idx) {
   // page is fully free. Return it to the segment even if it's
   // referenced via free_pages_. The allows more elasticity by potentially reassigning
   // it to other bin sizes.
-  BinIdx bidx = ToBinIdx(block_size);
+  UnlinkFreePage(bin_idx, page);
 
-  // Remove fast allocation reference.
-  if (free_pages_[bidx] == page) {
-    free_pages_[bidx] = page->next_free ? page->next_free : &empty_page;
-  } else {
-    for (auto* cur = free_pages_[bidx]; cur != nullptr; cur = cur->next_free) {
-      if (cur->next_free == page) {
-        cur->next_free = page->next_free;
-        break;
-      }
-    }
-  }
+  auto& sq = sq_[owner->page_class()];
 
-  page->segment_inuse = 0;
-  page->available = 0;
-  page->next_free = nullptr;
+  bool seg_detached = (owner->next == owner && sq != owner);
 
-  if (!owner->HasFreePages()) {
-    // Segment was fully booked but now it has a free page.
-    // Add it to the tail of segment queue.
-    DCHECK(owner->next == owner->prev);
+  // When segment was detached was fully booked and detached from the queue by FindPage(),
+  // but now it has a free  - reattach it to the tail of segment queue.
+  // Note that a full segment might still be linked to the queue since FindPage()
+  // detaches full segments lazily.
+  if (seg_detached) {
+    DCHECK(!owner->HasFreePages());
+    DCHECK(owner->prev == owner);
 
-    auto& sq = sq_[owner->page_class()];
     if (sq == nullptr) {
       sq = owner;
     } else {
       sq->LinkBefore(owner);
     }
   }
-  --owner->page_info_.used;
+  owner->ReleasePage(page);
+
+  if (owner->used() == 0)
+    ReleaseSegment(owner);
+}
+
+void ExternalAllocator::LinkFreePage(BinIdx bin_idx, Page* page) {
+  DCHECK(page->next_free == nullptr && page->prev_free == nullptr);
+
+  Page*& head = free_pages_[bin_idx];
+  DCHECK_NE(page, head);
+  page->next_free = head;
+  if (head)
+    head->prev_free = page;
+  head = page;
+}
+
+void ExternalAllocator::UnlinkFreePage(BinIdx bin_idx, Page* page) {
+  DCHECK(page->prev_free || free_pages_[bin_idx] == page);
+
+  if (page->prev_free)
+    page->prev_free->next_free = page->next_free;
+  else
+    free_pages_[bin_idx] = page->next_free;
+
+  if (page->next_free)
+    page->next_free->prev_free = page->prev_free;
+
+  page->next_free = page->prev_free = nullptr;
+}
+
+void ExternalAllocator::ReleaseSegment(SegmentDescr* seg) {
+  DCHECK_EQ(seg->used(), 0u);
+
+  // An empty segment has free pages, hence it is linked into the segment queue.
+  auto& sq = sq_[seg->page_class()];
+  SegmentDescr* next = seg->Detach();
+  if (sq == seg)
+    sq = next;
+
+  size_t offset = seg->offset_;
+  DCHECK(segments_[offset / kSegmentSize] == seg);
+  segments_[offset / kSegmentSize] = nullptr;
+  mi_free(seg);
+
+  extent_tree_.Add(offset, kSegmentSize);
+  segment_bytes_ -= kSegmentSize;
 }
 
 inline auto ExternalAllocator::ToSegDescr(Page* page) -> SegmentDescr* {
@@ -537,7 +578,7 @@ inline auto ExternalAllocator::ToSegDescr(Page* page) -> SegmentDescr* {
   uintptr_t seg_ptr = ptr & ~uintptr_t(kSegDescrAlignment - 1);
   SegmentDescr* res = reinterpret_cast<SegmentDescr*>(seg_ptr);
 
-  DCHECK(res->GetPage(page->id) == page);
+  DCHECK_LT(res->PageId(page), res->capacity());
 
   return res;
 }

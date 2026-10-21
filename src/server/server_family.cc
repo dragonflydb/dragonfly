@@ -168,6 +168,7 @@ ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
 ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
@@ -2884,6 +2885,7 @@ string ServerFamily::FormatInfoMetrics(
     append("lua_gc_duration_total_sec", m.lua_stats.gc_duration_ns * 1e-9);
 
     append("total_journal_omits", m.events.journal_omit);
+    append("total_serialize_skips", m.events.serialize_skip);
   };
 
   auto add_tiered_info = [&] {
@@ -2904,9 +2906,27 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_allocated_bytes", m.tiered_stats.allocated_bytes);
     append("tiered_capacity_bytes", m.tiered_stats.capacity_bytes);
 
+    append("tiered_alloc_segment_bytes", m.tiered_stats.alloc_segment_bytes);
+    append("tiered_alloc_large_bytes", m.tiered_stats.alloc_large_bytes);
+    append("tiered_alloc_free_extent_bytes", m.tiered_stats.alloc_free_extent_bytes);
+
     append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
+    append("tiered_pending_read_bytes", m.tiered_stats.pending_read_bytes);
     append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
     append("tiered_pending_stash_bytes", m.tiered_stats.pending_stash_bytes);
+
+    // Mean device pressure across shards: in-flight IO bytes relative to the aggregate
+    // tiered_max_pending_bytes cap. Read + write usage is exported separately (reads are the
+    // priority traffic; writes yield to total pressure) plus their sum. >= 100 means the device is
+    // at/over its cap.
+    const uint64_t per_shard_cap = absl::GetFlag(FLAGS_tiered_max_pending_bytes).value;
+    const uint64_t total_cap = per_shard_cap * shard_set->size();
+    const uint64_t read_pct = total_cap ? (m.tiered_stats.pending_read_bytes * 100) / total_cap : 0;
+    const uint64_t write_pct =
+        total_cap ? (m.tiered_stats.pending_stash_bytes * 100) / total_cap : 0;
+    append("tiered_device_read_usage_percent", read_pct);
+    append("tiered_device_write_usage_percent", write_pct);
+    append("tiered_device_total_usage_percent", read_pct + write_pct);
 
     append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
@@ -2915,7 +2935,10 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_cold_storage_bytes", m.tiered_stats.cold_storage_bytes);
     append("tiered_offloading_usec", m.tiered_stats.total_offloading_usec);
     append("tiered_defrag_usec", m.tiered_stats.total_defrag_usec);
+    append("tiered_repack_usec", m.tiered_stats.total_repack_usec);
     append("tiered_offloading_stashes", m.tiered_stats.total_offloading_stashes);
+    append("tiered_total_repacks", m.tiered_stats.total_repacks);
+    append("tiered_bin_bucket_fragmentation", m.tiered_stats.estimated_bin_bucket_fragmentation);
     append("tiered_ram_hits", m.events.ram_hits);
     append("tiered_ram_cool_hits", m.events.ram_cool_hits);
     append("tiered_ram_misses", m.events.ram_misses);

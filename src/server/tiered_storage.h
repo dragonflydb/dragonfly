@@ -115,6 +115,11 @@ class TieredStorage : public TieredStorageBase {
   // Run offloading loop until i/o device is loaded or all entries were traversed
   void RunOffloading(DbIndex dbid);
 
+  // Scan prime table buckets for small offloaded values scattered across many disk pages and
+  // re-upload fragmented buckets so their values can be re-grouped. Bounded per call by
+  // tiered_repack_scan_budget_us. Disabled by default.
+  void RunRepackScan(DbIndex dbid);
+
   // Prune cool entries to reach the set memory goal with freed memory
   size_t ReclaimMemory(size_t goal);
 
@@ -131,11 +136,20 @@ class TieredStorage : public TieredStorageBase {
   void UpdateFromFlags();  // Update internal values based on current flag values
   static std::vector<std::string> GetMutableFlagNames();  // Triggers UpdateFromFlags
 
-  bool ShouldOffload() const;     // True if below tiered_offload_threshold
-  float WriteDepthUsage() const;  // Ratio (0-1) of used storage_write_depth for stashes
+  bool ShouldOffload() const;  // True if below tiered_offload_threshold
+
+  // In-flight read pressure as a percentage of tiered_max_pending_bytes
+  unsigned ReadUsage() const;
+
+  // In-flight write pressure as a percentage of tiered_max_pending_bytes
+  unsigned WriteUsage() const;
+
+  // ReadUsage + WriteUsage
+  unsigned TotalUsage() const;
 
   // How much we are above tiered_upload_threshold. Can be negative!
   int64_t UploadBudget() const;
+
   size_t CoolMemoryUsage() const {
     return stats_.cool_memory_used;
   }
@@ -150,6 +164,9 @@ class TieredStorage : public TieredStorageBase {
                     std::function<void(io::Result<tiering::Decoder*>)> cb,
                     tiering::ReadOptions options = {});
 
+  // Whether newly offloaded values should be cooled (added to cool queue) now
+  bool ShouldCool() const;
+
   // Moves pv contents to the cool storage and updates pv to point to it.
   void CoolDown(DbIndex db_ind, std::string_view str, const tiering::DiskSegment& segment,
                 CompactObj::ExternalRep rep, PrimeValue* pv);
@@ -162,6 +179,13 @@ class TieredStorage : public TieredStorageBase {
 
   detail::DashCursor offloading_cursor_;  // where RunOffloading left off
   detail::DashCursor defrag_cursor_;      // where defrag left off
+
+  // Progress and per-pass accumulators for the background repack scan.
+  struct {
+    detail::DashCursor cursor;  // where the repack scan left off
+    size_t cycle_buckets = 0;   // fragmented buckets seen in the current pass
+    size_t cycle_pages = 0;     // disk pages those buckets spread across in the current pass
+  } repack_state_;
 
   // Number of bins the previous defrag scan enqueued. Used to scale the next scan's cpu time-slice.
   unsigned last_defrag_scan_hits_ = 0;
@@ -180,7 +204,7 @@ class TieredStorage : public TieredStorageBase {
   struct {
     size_t min_value_size;
     bool experimental_cooling;
-    size_t max_pending_stash_bytes;
+    size_t max_pending_bytes;
     float offload_threshold;
     float upload_threshold;
     bool experimental_hash_offload;
@@ -189,6 +213,9 @@ class TieredStorage : public TieredStorageBase {
     uint32_t offload_scan_budget_us;
     uint32_t defrag_scan_budget_us;
     uint32_t max_pending_defrags;
+    uint32_t repack_scan_budget_us;
+    uint32_t repack_max_reads;
+    uint32_t repack_acceptable_waste;
   } config_;
 
   mutable struct {
@@ -199,6 +226,9 @@ class TieredStorage : public TieredStorageBase {
     uint64_t offloading_stashes = 0;
     uint64_t total_clients_throttled = 0;
     size_t cool_memory_used = 0;
+    uint64_t total_repacks = 0;
+    uint64_t repack_usec = 0;
+    float estimated_bin_bucket_fragmentation = 0;
   } stats_;
 };
 
@@ -318,7 +348,15 @@ class TieredStorage : public TieredStorageBase {
     return 0;
   }
 
-  float WriteDepthUsage() const {
+  unsigned ReadUsage() const {
+    return 0;
+  }
+
+  unsigned WriteUsage() const {
+    return 0;
+  }
+
+  unsigned TotalUsage() const {
     return 0;
   }
 
@@ -337,6 +375,9 @@ class TieredStorage : public TieredStorageBase {
   }
 
   void RunOffloading(DbIndex dbid) {
+  }
+
+  void RunRepackScan(DbIndex dbid) {
   }
 
   void UpdateFromFlags() {

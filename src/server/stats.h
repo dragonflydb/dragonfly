@@ -45,8 +45,19 @@ struct TieredStats {
   // Cumulative time in microseconds spent in background defragmentation scans.
   uint64_t total_defrag_usec = 0;
 
+  // Cumulative time in microseconds spent in background bin-bucket repack scans.
+  uint64_t total_repack_usec = 0;
+
   // Values stashed during background offloading scans (subset of total_stashes).
   uint64_t total_offloading_stashes = 0;
+
+  // Fragmented bin buckets re-uploaded by the background repack scan to regroup small values
+  // scattered across disk pages.
+  uint64_t total_repacks = 0;
+
+  // Average number of disk pages a fragmented bin bucket spreads across, estimated by the last
+  // completed repack scan pass (1.0 == perfectly packed).
+  float estimated_bin_bucket_fragmentation = 0;
 
   // Disk space currently in use (tracked by ExternalAllocator).
   size_t allocated_bytes = 0;
@@ -54,8 +65,17 @@ struct TieredStats {
   // Total capacity of the disk backing file.
   size_t capacity_bytes = 0;
 
+  // ExternalAllocator breakdown of capacity_bytes.
+  size_t alloc_segment_bytes = 0;
+  size_t alloc_large_bytes = 0;
+  size_t alloc_free_extent_bytes = 0;
+
   // In-flight read operations.
   uint32_t pending_read_cnt = 0;
+
+  // Volume, in bytes, of in-flight disk reads. Counts real pages read (deduped across small
+  // values that share a page/bin), so it reflects device read pressure rather than op count.
+  size_t pending_read_bytes = 0;
 
   // In-flight stash (write) operations.
   uint32_t pending_stash_cnt = 0;

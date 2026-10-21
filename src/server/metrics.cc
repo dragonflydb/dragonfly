@@ -22,9 +22,11 @@
 #include "server/search/doc_index.h"
 #include "server/server_family.h"
 #include "server/snapshot.h"
+#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 
 ABSL_DECLARE_FLAG(uint32_t, maxclients);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 
 namespace dfly {
 
@@ -657,6 +659,16 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricValue("tiered_bytes", m.tiered_stats.capacity_bytes, {"type"}, {"capacity"},
                       &resp->body());
 
+    // Allocator bytes: segment, large, free_extent
+    AppendMetricHeader("tiered_alloc_bytes", "Tiered allocator bytes", MetricType::GAUGE,
+                       &resp->body());
+    AppendMetricValue("tiered_alloc_bytes", m.tiered_stats.alloc_segment_bytes, {"type"},
+                      {"segment"}, &resp->body());
+    AppendMetricValue("tiered_alloc_bytes", m.tiered_stats.alloc_large_bytes, {"type"}, {"large"},
+                      &resp->body());
+    AppendMetricValue("tiered_alloc_bytes", m.tiered_stats.alloc_free_extent_bytes, {"type"},
+                      {"free_extent"}, &resp->body());
+
     // Events: stash, fetch, upload, cancel
     AppendMetricHeader("tiered_events", "Tiered events", MetricType::COUNTER, &resp->body());
     AppendMetricValue("tiered_events", m.tiered_stats.total_stashes, {"type"}, {"stash"},
@@ -673,6 +685,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                       &resp->body());
     AppendMetricValue("tiered_events", m.tiered_stats.total_offloading_stashes, {"type"},
                       {"offload_stash"}, &resp->body());
+    AppendMetricValue("tiered_events", m.tiered_stats.total_repacks, {"type"}, {"repack"},
+                      &resp->body());
 
     // Buffer allocations for disk I/O
     AppendMetricHeader("tiered_buf_allocations", "Tiered buffer allocations", MetricType::COUNTER,
@@ -698,6 +712,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                       {"entries"}, &resp->body());
     AppendMetricValue("tiered_small_bins", m.tiered_stats.small_bins_entries_bytes, {"type"},
                       {"entries_bytes"}, &resp->body());
+    AppendMetricValue("tiered_small_bins", m.tiered_stats.estimated_bin_bucket_fragmentation,
+                      {"type"}, {"bucket_fragmentation"}, &resp->body());
 
     // Cumulative time spent in background scans
     AppendMetricHeader("tiered_scan_usec", "Time in microseconds spent in background scans",
@@ -705,6 +721,8 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricValue("tiered_scan_usec", m.tiered_stats.total_offloading_usec, {"type"},
                       {"offload"}, &resp->body());
     AppendMetricValue("tiered_scan_usec", m.tiered_stats.total_defrag_usec, {"type"}, {"defrag"},
+                      &resp->body());
+    AppendMetricValue("tiered_scan_usec", m.tiered_stats.total_repack_usec, {"type"}, {"repack"},
                       &resp->body());
 
     // Hits: ram, cool, missed
@@ -723,6 +741,20 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 
     AppendMetricWithoutLabels("tiered_clients_throttled", "Currently throttled clients",
                               m.tiered_stats.clients_throttled, MetricType::GAUGE, &resp->body());
+
+    // Device pressure: in-flight IO bytes as a percentage of the aggregate
+    const uint64_t per_shard_cap = GetFlag(FLAGS_tiered_max_pending_bytes).value;
+    const uint64_t total_cap = per_shard_cap * shard_set->size();
+    const uint64_t read_pct = total_cap ? (m.tiered_stats.pending_read_bytes * 100) / total_cap : 0;
+    const uint64_t write_pct =
+        total_cap ? (m.tiered_stats.pending_stash_bytes * 100) / total_cap : 0;
+    AppendMetricHeader("tiered_device_usage_percent",
+                       "Tiered device pressure as percent of tiered_max_pending_bytes cap",
+                       MetricType::GAUGE, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", read_pct, {"type"}, {"read"}, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", write_pct, {"type"}, {"write"}, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", read_pct + write_pct, {"type"}, {"total"},
+                      &resp->body());
 
     AppendMetricHeader("tiered_list_events", "Tiered List Events", MetricType::COUNTER,
                        &resp->body());
