@@ -1004,7 +1004,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
       SlotId sid = KeySlot(key);
       if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
         // We use copy of table smart pointer and pass it as table because FLUSHALL can drop table.
-        DelAtomic(db_cntx, it, table.get(), /*async=*/true);
+        DelAtomic(db_cntx, it, table.get());
         ++del_count;
       }
       ++it;
@@ -1088,7 +1088,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
           DbContext cntx;
           cntx.time_now_ms = GetCurrentTimeMs();
           cntx.db_index = db_index;
-          DelAtomic(cntx, it, table.get(), /*async=*/true);
+          DelAtomic(cntx, it, table.get());
         }
         ++it;
       }
