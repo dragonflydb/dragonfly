@@ -203,14 +203,20 @@ void SlotMigrationStreamer::Run() {
   VLOG(1) << "SlotMigrationStreamer run";
 
   // Returns false if cancelled, including before Start() ran (see SlotMigrationStreamer::Start).
-  if (!TraverseAllBuckets(false /* skip empty buckets */))
+  if (!TraverseAllBuckets())
     return;
 
   VLOG(1) << "SlotMigrationStreamer finished loop of " << my_slots_.ToSlotRanges().ToString()
           << ", shard " << db_slice_->shard_id() << ". Buckets looped " << GetBucketsLooped();
 }
 
-void SlotMigrationStreamer::OnTraverseBucket() {
+void SlotMigrationStreamer::OnTraverseBucket(PrimeTable::bucket_iterator it) {
+  // Empty buckets are only stamped with the snapshot version, so they don't count towards pacing.
+  if (it.is_done())
+    return;
+
+  ++buckets_since_sleep_;
+
   // Do not progress if we are stalled.
   ThrottleIfNeeded();
 }
@@ -220,9 +226,9 @@ void SlotMigrationStreamer::PaceTraversal(bool done) {
   // setting that controls how agressive we are with migration pace.
   // Once we gain confidence with FLAGS_migration_buckets_cpu_budget we should retire
   // migration_buckets_serialization_threshold and migration_buckets_sleep_usec.
-  if (++steps_since_sleep_ >= migration_buckets_serialization_threshold_cached) {
+  if (buckets_since_sleep_ >= migration_buckets_serialization_threshold_cached) {
     ThisFiber::SleepFor(chrono::microseconds(migration_buckets_sleep_usec_cached));
-    steps_since_sleep_ = 0;
+    buckets_since_sleep_ = 0;
   }
 
   if (done)
