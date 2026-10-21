@@ -34,10 +34,13 @@ ABSL_FLAG(dfly::QList::ComprPolicy, list_compress_policy, dfly::QList::ComprPoli
           "Policy for compressing list nodes with a ZSTD dictionary. Empty (the default) disables "
           "compression. Otherwise a comma separated list of options: "
           "min_size=<bytes> - the list must reach this malloc usage before nodes are compressed, "
-          "0 means no size requirement. For example, 'min_size=4096' compresses the interior "
-          "nodes of lists that occupy at least 4KB. A bare integer is also accepted as a "
-          "min_size, where 0 disables compression. Ignored unless --list_compress_depth is 0, "
-          "and ignored for lists backed by tiered storage.");
+          "0 means no size requirement; "
+          "edge_depth=<n> - how many nodes at each end of the list are kept uncompressed, "
+          "at least 1 (the default), which keeps the head and the tail uncompressed. "
+          "For example, 'min_size=4096,edge_depth=2' keeps two nodes at each end of lists that "
+          "occupy at least 4KB uncompressed. A bare integer is also accepted as a min_size, where "
+          "0 disables compression. Ignored unless --list_compress_depth is 0, and ignored for "
+          "lists backed by tiered storage.");
 
 ABSL_FLAG(uint32_t, list_compress_dict_threshold, 0,
           "Deprecated -- use --list_compress_policy=min_size=<bytes> instead.");
@@ -453,6 +456,13 @@ bool AbslParseFlag(string_view in, QList::ComprPolicy* policy, string* err) {
 
     if (key == "min_size") {
       policy->min_size = num;
+    } else if (key == "edge_depth") {
+      if (num < QList::ComprPolicy::kMinEdgeDepth || num > QList::ComprPolicy::kMaxEdgeDepth) {
+        *err = absl::StrCat("edge_depth must be within [", QList::ComprPolicy::kMinEdgeDepth, ", ",
+                            QList::ComprPolicy::kMaxEdgeDepth, "]");
+        return false;
+      }
+      policy->edge_depth = num;
     } else {
       *err = absl::StrCat("unknown option '", key, "'");
       return false;
@@ -467,12 +477,24 @@ string AbslUnparseFlag(const QList::ComprPolicy& policy) {
   if (!policy.enabled)
     return string{};
 
-  return absl::StrCat("min_size=", policy.min_size);
+  string out;
+  if (policy.min_size != 0)
+    absl::StrAppend(&out, "min_size=", policy.min_size);
+  if (policy.edge_depth != 0) {
+    if (!out.empty())
+      absl::StrAppend(&out, ",");
+    absl::StrAppend(&out, "edge_depth=", unsigned(policy.edge_depth));
+  }
+  return out;
 }
 
 void QList::SetComprPolicy(const ComprPolicy& policy) {
+  DCHECK_GE(policy.edge_depth, ComprPolicy::kMinEdgeDepth);
+  DCHECK_LE(policy.edge_depth, ComprPolicy::kMaxEdgeDepth);
+
   zstd_enabled_ = policy.enabled;
   zstd_min_size_ = policy.min_size;
+  edge_depth_ = policy.edge_depth;
 }
 
 void QList::InitFromFlags() {
@@ -578,6 +600,7 @@ QList::QList(int fill, int compress)
       dict_bulk_finished_(0),
       tiering_enabled_(0),
       zstd_enabled_(0),
+      edge_depth_(ComprPolicy{}.edge_depth),
       compress_(compress),
       bookmark_count_(0) {
 }
@@ -623,6 +646,7 @@ void QList::MoveFrom(QList&& other) {
   dict_bulk_finished_ = other.dict_bulk_finished_;
   tiering_enabled_ = other.tiering_enabled_;
   zstd_enabled_ = other.zstd_enabled_;
+  edge_depth_ = other.edge_depth_;
   compress_ = other.compress_;
   bookmark_count_ = other.bookmark_count_;
   db_id_ = other.db_id_;
@@ -875,6 +899,7 @@ void QList::InsertNode(Node* old_node, Node* new_node, uint32_t old_node_id, Ins
     CoolOff(old_node, old_node_id);
 
   CoolOff(new_node, new_node_id);
+  CompressEdgeBoundary(new_node_id);
 }
 
 void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
@@ -928,7 +953,7 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
     uint8_t* new_entry = LP_Insert(node->entry, elem, it.zi_, after ? LP_AFTER : LP_BEFORE);
     malloc_size_ += NodeSetEntry(node, new_entry);
     node->count++;
-    RecompressNode(node);
+    RecompressNode(node, node_id);
   } else {
     bool insert_tail = at_tail && after;
     bool insert_head = at_head && !after;
@@ -939,8 +964,8 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       AccessForReads(true, new_node);
       malloc_size_ += NodeSetEntry(new_node, LP_Prepend(new_node->entry, elem));
       new_node->count++;
-      RecompressNode(new_node);
-      RecompressNode(node);
+      RecompressNode(new_node, node_id + 1);
+      RecompressNode(node, node_id);
     } else if (insert_head && avail_prev) {
       /* If we are: at head, previous has free space, and inserting before:
        *   - insert entry at tail of previous node. */
@@ -948,8 +973,8 @@ void QList::Insert(Iterator it, std::string_view elem, InsertOpt insert_opt) {
       AccessForReads(true, new_node);
       malloc_size_ += NodeSetEntry(new_node, LP_Append(new_node->entry, elem));
       new_node->count++;
-      RecompressNode(new_node);
-      RecompressNode(node);
+      RecompressNode(new_node, node_id - 1);
+      RecompressNode(node, node_id);
     } else if (insert_tail || insert_head) {
       /* If we are: full, and our prev/next has no available space, then:
        *   - create new node and attach to qlist */
@@ -1098,9 +1123,8 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
     // ZSTD dictionary compression (mutually exclusive with LZF depth-compression).
     if (dict_bulk_finished_) {
       // Steady state: compress individual nodes as they appear.
-      if (tl_zstd_dict && CanCompressWithZstdDict(node)) {
+      if (tl_zstd_dict && CanCompressWithZstdDict(node, node_id))
         CompressNodeWithDict(node);
-      }
     } else if (tl_zstd_dict) {
       // Dict exists (trained by this or another instance), bulk-compress all interior nodes.
       BackfillCompressWithZstdDict();
@@ -1116,18 +1140,44 @@ void QList::CoolOff(Node* node, uint32_t node_id) {
     if (node->recompress)
       CompressRaw(node);
     else
-      this->CompressByDepth(node);
+      this->CompressByDepth(node, node_id);
   }
 }
 
-void QList::CompressByDepth(Node* node) {
+void QList::CompressEdgeBoundary(uint32_t new_node_id) {
+  // Only the steady state compresses node by node; before that the backfill handles everything.
+  // The length bound is the one IsCompressibleByPolicy() uses; it also guarantees the walks below
+  // stay inside the list and never reach the opposite edge zone.
+  if (!IsZstdDictMode() || !dict_bulk_finished_ || dict_bulk_failed_ || !tl_zstd_dict ||
+      len_ <= 2u * edge_depth_)
+    return;
+
+  // Inserting at index k shifts the nodes at [k, len_) one slot away from the head, so the node
+  // now at index edge_depth_ was inside the head zone before iff k < edge_depth_. Symmetrically
+  // for the tail. The walk is bounded by kMaxEdgeDepth and runs once per node creation.
+  if (new_node_id < edge_depth_) {
+    Node* node = head_;
+    for (unsigned i = 0; i < edge_depth_; ++i)
+      node = node->next;
+    CompressNodeWithDict(node);
+  }
+
+  if (new_node_id + edge_depth_ >= len_) {
+    Node* node = head_->prev;  // tail
+    for (unsigned i = 0; i < edge_depth_; ++i)
+      node = node->prev;
+    CompressNodeWithDict(node);  // a no-op if the head walk already compressed it.
+  }
+}
+
+void QList::CompressByDepth(Node* node, uint32_t node_id) {
   if (len_ == 0)
     return;
 
   // Without LZF, recompress with ZSTD when available or clear the pending state.
   if (!AllowLZFCompression()) {
     if (IsZstdDictMode() && node && node->recompress && tl_zstd_dict &&
-        CanCompressWithZstdDict(node)) {
+        CanCompressWithZstdDict(node, node_id)) {
       // CompressNodeWithDict updates malloc_size_ itself.
       CompressNodeWithDict(node);
     }
@@ -1349,10 +1399,13 @@ void QList::DelNode(Node* node) {
 
   /* If we deleted a node within our compress depth, we
    * now have compressed nodes needing to be decompressed. */
-  CompressByDepth(NULL);
+  CompressByDepth(nullptr, 0);
 
   // Head and tail must always be materialized and uncompressed. A deletion may promote an
   // offloaded, pending, or ZSTD-compressed interior node to head or tail.
+  //
+  // Deeper nodes of a ZSTD edge zone are restored lazily instead: a compressed node promoted into
+  // the zone stays compressed until it is read, and RecompressNode() then keeps it raw.
   if (head_) {
     Materialize(head_);
     Materialize(head_->prev);
@@ -1506,7 +1559,7 @@ void QList::EndRead(const Iterator& it) const {
     return;
 
   QList* self = const_cast<QList*>(this);
-  self->RecompressNode(it.current_);
+  self->RecompressNode(it.current_, it.node_id_);
 }
 
 auto QList::Erase(Iterator it) -> Iterator {
@@ -1579,6 +1632,7 @@ bool QList::Erase(const long start, unsigned count) {
   Iterator it = GetIterator(start);
   Node* node = it.current_;
   long offset = it.offset_;
+  uint32_t node_id = it.node_id_;
 
   /* iterate over next nodes until everything is deleted. */
   while (extent) {
@@ -1624,7 +1678,8 @@ bool QList::Erase(const long start, unsigned count) {
       if (node->count == 0) {
         DelNode(node);
       } else {
-        RecompressNode(node);
+        RecompressNode(node, node_id);
+        ++node_id;  // a deleted node's successor takes over its index instead.
       }
     }
 
@@ -1673,7 +1728,7 @@ bool QList::Iterator::Next() {
     return true;
 
   // Move to the next node.
-  const_cast<QList*>(owner_)->CompressByDepth(current_);
+  const_cast<QList*>(owner_)->CompressByDepth(current_, node_id_);
 
   if (direction_ == FWD) {
     /* Forward traversal, Jumping to start of next node */
@@ -1765,14 +1820,21 @@ bool QList::TrainZstdDict() {
 void QList::BackfillCompressWithZstdDict() {
   DCHECK(tl_zstd_dict);
 
-  if (len_ < 3)
+  // The candidates are the nodes at indices [edge_depth_, len_ - edge_depth_).
+  if (len_ <= 2u * edge_depth_)
     return;
+
+  const uint32_t num_candidates = len_ - 2u * edge_depth_;
+  Node* node = head_->prev;  // tail
+  for (unsigned i = 0; i < edge_depth_; ++i)
+    node = node->prev;
 
   bool any_compressed = false;
   bool any_attempted = false;
-  // Scan from tail backwards. On chunked loads, the first compressed node marks the already
-  // processed prefix.
-  for (Node* node = head_->prev->prev; node && node != head_; node = node->prev) {
+  // Scan from the tail backwards. On chunked loads, the first compressed node marks the already
+  // processed prefix. Bounded by num_candidates so that we never walk past the head into the
+  // circular head_->prev link.
+  for (uint32_t i = 0; i < num_candidates; ++i, node = node->prev) {
     if (node->encoding != QUICKLIST_NODE_ENCODING_RAW)
       break;
     if (node->sz >= MIN_COMPRESS_BYTES)
@@ -1815,8 +1877,8 @@ bool QList::CompressNodeWithDict(Node* node) {
 
   // dont_compress guards a node its caller is still going to access, see Replace().
   // zstd_rejected remembers that this exact content did not compress well: the same node is
-  // offered again whenever it is touched, and every retry would pay for a full node-sized
-  // compression only to be rejected again.
+  // offered again whenever it is touched or crosses the edge zone boundary, and every retry would
+  // pay for a full node-sized compression only to be rejected again.
   if (node->encoding != QUICKLIST_NODE_ENCODING_RAW || node->dont_compress || node->zstd_rejected)
     return false;
   if (node->sz < MIN_COMPRESS_BYTES)
@@ -1857,14 +1919,16 @@ bool QList::CompressNodeWithDict(Node* node) {
   return true;
 }
 
-void QList::RecompressNode(Node* node) {
+void QList::RecompressNode(Node* node, uint32_t node_id) {
   if (!node->recompress || node->dont_compress)
     return;
 
   if (!AllowLZFCompression()) {
-    // Do not fall back to LZF when it is disabled.
+    // Do not fall back to LZF when it is disabled. A node inside the edge zone reaches here after
+    // it was read, e.g. when a deletion promoted it into the zone while compressed; dropping the
+    // pending recompression is what keeps it raw from now on.
     // CompressNodeWithDict updates malloc_size_ itself.
-    if (IsZstdDictMode() && tl_zstd_dict && CanCompressWithZstdDict(node))
+    if (IsZstdDictMode() && tl_zstd_dict && CanCompressWithZstdDict(node, node_id))
       CompressNodeWithDict(node);
 
     // No recompression remains pending.

@@ -268,6 +268,18 @@ TEST_F(HllFamilyTest, MergeOverlapping) {
   EXPECT_EQ(CheckedInt({"pfcount", "key6"}), 3);
 }
 
+TEST_F(HllFamilyTest, MergeAcrossShardsKeepsSingleDestination) {
+  Run({"exists", "key1", "key4"});
+  ASSERT_EQ(GetDebugInfo().shards_count, 2);  // ensure 2 shards
+
+  EXPECT_EQ(CheckedInt({"pfadd", "key1", "1"}), 1);
+  EXPECT_EQ(Run({"pfmerge", "key4", "key1"}), "OK");
+  EXPECT_EQ(CheckedInt({"dbsize"}), 2);
+
+  EXPECT_EQ(CheckedInt({"del", "key4"}), 1);
+  EXPECT_EQ(CheckedInt({"dbsize"}), 1);
+}
+
 TEST_F(HllFamilyTest, MergeInvalid) {
   Run({"exists", "key1", "key4"});
   ASSERT_EQ(GetDebugInfo().shards_count, 2);  // ensure 2 shards

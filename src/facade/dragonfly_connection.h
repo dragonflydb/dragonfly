@@ -52,6 +52,17 @@ class ServiceInterface;
 class SinkReplyBuilder;
 class RespSrvParser;
 
+struct ConnectionLocalStats {
+  // total number of read calls
+  size_t read_cnt = 0;
+  // total number of bytes read
+  size_t net_bytes_in = 0;
+  // total number of dispatch queue entries
+  size_t dispatch_entries_added = 0;
+  // total number of commands executed
+  size_t cmds = 0;
+};
+
 // Snapshot of fields rendered into one CLIENT LIST line. Both real
 // Connection rows and synthetic rows (outbound replication links) fill
 // this and call FormatClientInfo, ensuring the wire format stays in sync.
@@ -70,10 +81,7 @@ struct ClientInfo {
   std::optional<size_t> pbuf;
   time_t age = 0;
   time_t idle = 0;
-  uint64_t tot_cmds = 0;
-  uint64_t tot_net_in = 0;
-  uint64_t tot_read_calls = 0;
-  uint64_t tot_dispatches = 0;
+  ConnectionLocalStats stats;
   std::optional<unsigned> db;
   std::string flags;
   std::string phase;       // connection lifecycle: setup/readsock/process/...
@@ -824,12 +832,7 @@ class Connection : public util::Connection {
   // current memory usage with this baseline and apply only the delta to the thread-local total.
   size_t accounted_connection_memory_bytes_ = 0;
 
-  struct {
-    size_t read_cnt = 0;                // total number of read calls
-    size_t net_bytes_in = 0;            // total number of bytes read
-    size_t dispatch_entries_added = 0;  // total number of dispatch queue entries
-    size_t cmds = 0;                    // total number of commands executed
-  } local_stats_;
+  ConnectionLocalStats local_stats_;
 
   std::unique_ptr<SinkReplyBuilder> reply_builder_;
   util::HttpListenerBase* http_listener_;

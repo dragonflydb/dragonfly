@@ -63,33 +63,6 @@ PreservedEntry ExtractField(PrimeValue& pv, string_view field) {
   return PreservedEntry(old.release(), deleter);
 }
 
-template <typename F>
-void TraverseAllMatching(const DocIndex& index, const OpArgs& op_args, F&& f) {
-  auto& db_slice = op_args.GetDbSlice();
-  DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
-  auto* prime_table = db_slice.GetTables(op_args.db_cntx.db_index);
-
-  string scratch;
-  auto cb = [&](PrimeTable::iterator it) {
-    PrimeValue& pv = it->second;
-    string_view key = it->first.GetSlice(&scratch);
-
-    if (!index.Matches(key, pv.ObjType()))
-      return;
-
-    f(key, op_args.db_cntx, pv);
-  };
-
-  PrimeTable::Cursor cursor;
-  do {
-    cursor = prime_table->Traverse(cursor, cb);
-    // Yield if the fiber has been running for long.
-    if (base::CycleClock::ToUsec(util::ThisFiber::GetRunningTimeCycles()) > 500) {  // 500us
-      util::ThisFiber::Yield();
-    }
-  } while (cursor);
-}
-
 // Sort-index aliases keyed by their output names.
 using SortIndiciesFieldsList =
     std::vector<std::pair<string_view /*sort index alias*/, string_view /*output name*/>>;
@@ -488,10 +461,12 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
   absl::flat_hash_set<DocId> docs_to_rebuild;
   absl::Span<search::TextIndex* const> text_indices = indices_->GetAllTextIndices();
 
-  // Find all documents containing any term from the synonyms group
+  // Find all documents containing any term from the synonyms group. Group tokens are attached
+  // to the raw lowercase word (TokenizeWords), so the raw posting list is the exact set; the
+  // index-default stem misses documents stemmed by a per-document LANGUAGE_FIELD stemmer.
   for (auto* text_index : text_indices) {
     for (const auto& term : terms) {
-      if (const auto* container = text_index->Matching(term)) {
+      if (const auto* container = text_index->MatchingNoStem(term)) {
         for (DocId doc_id : *container) {
           docs_to_rebuild.insert(doc_id);
         }

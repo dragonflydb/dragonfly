@@ -152,7 +152,6 @@ RandomPick UniquePicksGenerator::Generate() {
 
 streamConsumer* StreamCreateConsumer(streamCG* cg, string_view name, uint64_t now_ms, int flags) {
   DCHECK(cg);
-  DCHECK(!name.empty());
   if (cg == NULL)
     return NULL;
 

@@ -24,6 +24,14 @@ const auto kMatchNil = ArgType(RespExpr::NIL);
 
 class StreamFamilyTest : public BaseFamilyTest {
  protected:
+  // Returns another key, named prefix<N>, that lives on the same shard as key.
+  static string KeyOnShardOf(string_view key, string_view prefix) {
+    for (unsigned i = 0;; ++i) {
+      string candidate = absl::StrCat(prefix, i);
+      if (candidate != key && Shard(candidate, shard_set->size()) == Shard(key, shard_set->size()))
+        return candidate;
+    }
+  }
 };
 
 TEST_F(StreamFamilyTest, Add) {
@@ -706,6 +714,53 @@ TEST_F(StreamFamilyTest, XReadBlockOnMaxMsId) {
               ElementsAre("18446744073709551615-2", ArrLen(2)));
 }
 
+// A woken XREAD replies only with the streams that have records. The other requested streams are
+// omitted, whether they share the waking shard or not, are missing or hold only older entries.
+TEST_F(StreamFamilyTest, XReadBlockOmitsStreamsWithoutRecords) {
+  ASSERT_GT(shard_set->size(), 1u);
+
+  const string key_a = "omit-a";
+  auto find_key = [&](string_view prefix, bool same_shard) {
+    for (unsigned i = 0;; ++i) {
+      string candidate = absl::StrCat(prefix, "-", i);
+      if ((Shard(candidate, shard_set->size()) == Shard(key_a, shard_set->size())) == same_shard)
+        return candidate;
+    }
+  };
+  const string key_b = find_key("omit-b", true);
+  const string key_c = find_key("omit-c", false);
+
+  // key_a only holds an entry below the requested id, key_b and key_c do not exist yet.
+  Run({"XADD", key_a, "1-0", "f", "v"});
+
+  auto block_and_wake = [&](const string& wake_key) {
+    RespExpr resp;
+    auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+      resp = Run({"XREAD", "BLOCK", "0", "STREAMS", key_a, key_b, key_c, "$", "$", "$"});
+    });
+    EXPECT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+    pp_->at(1)->Await([&] { return Run({"XADD", wake_key, "*", "f", "v"}); });
+    reader.Join();
+    return resp;
+  };
+
+  // key_b wakes the reader on the shard it shares with key_a, key_c lives on another shard.
+  auto resp = block_and_wake(key_b);
+  ASSERT_THAT(resp, ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[0], RespElementsAre(key_b, ArrLen(1)));
+
+  // key_c wakes the reader on its own shard, key_b now only holds the entry from the last round.
+  resp = block_and_wake(key_c);
+  ASSERT_THAT(resp, ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[0], RespElementsAre(key_c, ArrLen(1)));
+
+  // RESP3 replies with a map that holds only the stream with records.
+  Run({"HELLO", "3"});
+  resp = block_and_wake(key_a);
+  EXPECT_THAT(resp, RespElementsAre(key_a, ArrLen(1)));
+}
+
 // Wake paths differ: DEL/UNLINK/FLUSH and expiry remove the key, while BITOP/RENAME/SUNIONSTORE
 // overwrite it in place.
 TEST_F(StreamFamilyTest, XReadGroupBlockWakeOnInvalidatedStream) {
@@ -1042,6 +1097,108 @@ TEST_F(StreamFamilyTest, XReadGroupBlockHonorsCount) {
   EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("foo", ArrLen(2)));
 }
 
+// Repro for #8071: a blocked multi-stream read woken by a transaction that makes several of its
+// streams ready must return all of them.
+TEST_F(StreamFamilyTest, XReadBlockMultiStreamWakeSameShard) {
+  const string s1 = "s1", s2 = KeyOnShardOf(s1, "s");
+
+  for (bool group : {false, true}) {
+    Run({"del", s1, s2});
+    Run({"xgroup", "create", s1, "g", "0", "MKSTREAM"});
+    Run({"xgroup", "create", s2, "g", "0", "MKSTREAM"});
+
+    RespExpr resp;
+    auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+      if (group)
+        resp = Run({"xreadgroup", "group", "g", "c", "block", "0", "streams", s1, s2, ">", ">"});
+      else
+        resp = Run({"xread", "block", "0", "streams", s1, s2, "$", "$"});
+    });
+    ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 500ms));
+
+    pp_->at(1)->Await([&] {
+      Run({"multi"});
+      Run({"xadd", s1, "1-0", "f", "one"});
+      Run({"xadd", s2, "1-0", "f", "two"});
+      return Run({"exec"});
+    });
+    reader.Join();
+
+    ASSERT_THAT(resp, ArrLen(2)) << "group=" << group;
+    EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre(s1, ArrLen(1))) << "group=" << group;
+    EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre(s2, ArrLen(1))) << "group=" << group;
+    if (group) {
+      EXPECT_THAT(Run({"xpending", s1, "g"}), RespElementsAre(IntArg(1), _, _, _));
+      EXPECT_THAT(Run({"xpending", s2, "g"}), RespElementsAre(IntArg(1), _, _, _));
+    }
+  }
+}
+
+// Two consumers of one group: A waits on s1+s2, B on s2 only. Reservation must never wake B to an
+// empty read, whichever of them heads the s2 queue.
+TEST_F(StreamFamilyTest, XReadGroupBlockMultiStreamWakeNoSteal) {
+  const string s1 = "s1", s2 = KeyOnShardOf(s1, "s");
+
+  for (bool b_first : {false, true}) {
+    Run({"del", s1, s2});
+    Run({"xgroup", "create", s1, "g", "0", "MKSTREAM"});
+    Run({"xgroup", "create", s2, "g", "0", "MKSTREAM"});
+
+    RespExpr resp_a, resp_b;
+    auto block_a = [&] {
+      return pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+        resp_a =
+            Run("a", {"xreadgroup", "group", "g", "a", "block", "0", "streams", s1, s2, ">", ">"});
+      });
+    };
+    auto block_b = [&] {
+      return pp_->at(2)->LaunchFiber(Launch::dispatch, [&] {
+        resp_b = Run("b", {"xreadgroup", "group", "g", "b", "block", "0", "streams", s2, ">"});
+      });
+    };
+    util::fb2::Fiber fa, fb;
+    if (b_first) {
+      fb = block_b();
+      ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("b"); }, 500ms));
+      fa = block_a();
+      ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("a"); }, 500ms));
+    } else {
+      fa = block_a();
+      ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("a"); }, 500ms));
+      fb = block_b();
+      ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("b"); }, 500ms));
+    }
+
+    pp_->at(1)->Await([&] {
+      Run({"multi"});
+      Run({"xadd", s1, "1-0", "f", "one"});
+      Run({"xadd", s2, "1-0", "f", "two"});
+      return Run({"exec"});
+    });
+    fa.Join();
+
+    if (b_first) {
+      // B heads s2, so s2 is reserved for B and A only gets s1.
+      fb.Join();
+      ASSERT_THAT(resp_a, ArrLen(1)) << resp_a;
+      EXPECT_THAT(resp_a.GetVec()[0].GetVec(), ElementsAre(s1, ArrLen(1))) << resp_a;
+      EXPECT_THAT(resp_b.GetVec()[0].GetVec(), ElementsAre(s2, ArrLen(1))) << resp_b;
+    } else {
+      // A heads both queues and takes both streams; B stays blocked until s2 grows again.
+      ASSERT_THAT(resp_a, ArrLen(2)) << resp_a;
+      EXPECT_THAT(resp_a.GetVec()[1].GetVec(), ElementsAre(s2, ArrLen(1)));
+      ThisFiber::SleepFor(20ms);
+      EXPECT_TRUE(IsConnBlocked("b"));
+      Run({"xadd", s2, "2-0", "f", "three"});
+      fb.Join();
+      // B gets the new entry, not the one A already consumed.
+      EXPECT_THAT(resp_b.GetVec()[0].GetVec(),
+                  ElementsAre(s2, RespElementsAre(RespElementsAre("2-0", _))))
+          << resp_b;
+    }
+  }
+}
+
 TEST_F(StreamFamilyTest, XReadInvalidArgs) {
   // Invalid COUNT value.
   auto resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});
@@ -1160,6 +1317,24 @@ TEST_F(StreamFamilyTest, XGroupConsumer) {
   // nogrouperror
   resp = Run({"xgroup", "createconsumer", "foo", "not-exists", "alice"});
   EXPECT_THAT(resp, ErrArg("NOGROUP"));
+}
+
+TEST_F(StreamFamilyTest, XGroupCreateConsumerEmptyName) {
+  Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
+  EXPECT_THAT(Run({"xgroup", "createconsumer", "foo", "group", ""}), IntArg(1));
+  auto resp = Run({"dump", "foo"});
+  EXPECT_EQ(Run({"restore", "bar", "0", ToSV(resp.GetBuf())}), "OK");
+  EXPECT_THAT(Run({"xgroup", "createconsumer", "bar", "group", ""}), IntArg(0));
+}
+
+TEST_F(StreamFamilyTest, XClaimEmptyNames) {
+  Run({"xadd", "foo", "1-0", "k", "v"});
+  Run({"xgroup", "create", "foo", "", "0"});
+  Run({"xreadgroup", "group", "", "alice", "streams", "foo", ">"});
+  EXPECT_THAT(Run({"xclaim", "foo", "", "", "0", "1-0", "justid"}), RespElementsAre("1-0"));
+  EXPECT_THAT(
+      Run({"xautoclaim", "foo", "", "", "0", "0-0", "justid"}),
+      RespArray(ElementsAre("0-0", RespArray(ElementsAre("1-0")), RespArray(ElementsAre()))));
 }
 
 TEST_F(StreamFamilyTest, Xclaim) {
@@ -1400,7 +1575,7 @@ TEST_F(StreamFamilyTest, XReadGroupEmptyConsumer) {
   Run({"xadd", "s", "*", "x", "y"});
   Run({"xgroup", "create", "s", "g", "0"});
   auto resp = Run({"xreadgroup", "group", "g", "", "streams", "s", ">"});
-  EXPECT_THAT(resp, ErrArg("consumer name can't be empty"));
+  EXPECT_THAT(resp, RespElementsAre(RespArray(ElementsAre("s", ArrLen(1)))));
 }
 
 TEST_F(StreamFamilyTest, XPendingInvalidArgs) {

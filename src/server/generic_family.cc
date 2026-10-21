@@ -2871,7 +2871,7 @@ using CI = CommandId;
 namespace acl {
 
 constexpr uint32_t kDel = KEYSPACE | WRITE | SLOW;
-constexpr uint32_t kDelEx = STRING | WRITE | FAST;
+constexpr uint32_t kDelEx = KEYSPACE | STRING | WRITE | FAST;
 constexpr uint32_t kPing = FAST | CONNECTION;
 constexpr uint32_t kEcho = FAST | CONNECTION;
 constexpr uint32_t kExists = KEYSPACE | READ | FAST;

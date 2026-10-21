@@ -98,6 +98,23 @@ struct ConnectionStats {
   // number of times we flushed when dispatching the pipeline.
   uint64_t pipeline_dispatch_flush_count = 0;
 
+  // V2 Only: Pipeline squashing and reply batching. Use pipeline_squashes / pipeline_reply_batches
+  // for the squash-to-reply-batch ratio.
+  // Successful pipeline squashes.
+  uint64_t pipeline_squashes = 0;
+  // Extra squashes within a single ExecuteBatch call.
+  uint64_t pipeline_resquashes = 0;
+  // Nonempty reply batches written for async/deferred commands.
+  uint64_t pipeline_reply_batches = 0;
+
+  // V2 Only: IO loop idle waits (completed parks only).
+  // Number of times the connection fiber parked waiting for input or command completion.
+  uint64_t pipeline_idle_waits = 0;
+  // Subset of pipeline_idle_waits that started while dispatched commands awaited their replies.
+  uint64_t pipeline_reply_waits = 0;
+  // Total time spent in idle waits, in microseconds to prevent the aggregate cycle count wrapping.
+  uint64_t pipeline_idle_wait_usec = 0;
+
   // V2 Only: Number of times the proactor OnRecv callback actually drained bytes into io_buf_.
   uint64_t proactor_reads = 0;
 

@@ -16,6 +16,7 @@
 #include <mimalloc.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory_resource>
 #include <random>
@@ -25,6 +26,7 @@
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/hnsw_index.h"
+#include "core/search/index_result.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
 #include "core/search/scoring.h"
@@ -617,16 +619,16 @@ TEST_F(SearchTest, StopWordsDroppedFromQuery) {
 }
 
 // A term may belong to several synonym groups. Its group tokens depend only on the current groups
-// (sorted; terms are stored and looked up in lowercase); the document is indexed under every
-// token, reachable through any term of any of its groups, and leaves no posting behind after
-// removal even when the group map was re-laid out between Add and Remove.
+// (sorted; terms are stored and looked up in lowercase, group ids keep their case); the document
+// is indexed under every token, reachable through any term of any of its groups, and leaves no
+// posting behind after removal even when the group map was re-laid out between Add and Remove.
 TEST_F(SearchTest, MultiGroupTermIndexedUnderAllGroups) {
   auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
   Synonyms syn;
   syn.UpdateGroup("g2", {"shared", "two"});
-  syn.UpdateGroup("g1", {"SHARED", "one"});
-  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" g1", " g2"));
-  EXPECT_THAT(syn.GetGroupTokens("one"), testing::ElementsAre(" g1"));
+  syn.UpdateGroup("G1", {"SHARED", "one"});
+  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" G1", " g2"));
+  EXPECT_THAT(syn.GetGroupTokens("one"), testing::ElementsAre(" G1"));
   EXPECT_THAT(syn.GetGroupTokens("none"), testing::IsEmpty());
 
   FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), &syn};
@@ -635,7 +637,7 @@ TEST_F(SearchTest, MultiGroupTermIndexedUnderAllGroups) {
 
   auto* text = dynamic_cast<TextIndex*>(index.GetIndex("field"));
   ASSERT_NE(text, nullptr);
-  for (string_view token : {" g1", " g2", "shared"}) {
+  for (string_view token : {" G1", " g2", "shared"}) {
     const auto* c = text->Matching(token, /*strip_whitespace=*/false);
     ASSERT_NE(c, nullptr) << token;
     EXPECT_EQ(c->Size(), 1u) << token;
@@ -647,15 +649,49 @@ TEST_F(SearchTest, MultiGroupTermIndexedUnderAllGroups) {
     EXPECT_EQ(algo.Search(&index).ids, vector<DocId>{0}) << query;
   }
 
-  // Re-lay out the group map between Add and Remove.
+  // Re-lay out the group map between Add and Remove; ids differing only by case stay distinct.
   for (int i = 0; i < 300; i++)
     syn.UpdateGroup(absl::StrCat("extra", i), {absl::StrCat("term", i)});
-  syn.UpdateGroup("g3", {"shared"});
-  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" g1", " g2", " g3"));
+  syn.UpdateGroup("g1", {"shared"});
+  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" G1", " g1", " g2"));
   index.Remove(0, doc);
-  for (string_view token : {" g1", " g2", "shared"})
+  for (string_view token : {" G1", " g2", "shared"})
     EXPECT_EQ(text->Matching(token, /*strip_whitespace=*/false), nullptr) << token;
   EXPECT_TRUE(index.GetAllDocs().empty());
+}
+
+// Group tokens are internal: ids that differ only by case stay distinct groups, and the suffix
+// trie never stores group tokens.
+TEST_F(SearchTest, SynonymGroupTokensStayInternal) {
+  auto schema = MakeSimpleSchema(
+      {{"field", SchemaField::TEXT, SchemaField::TextParams{.with_suffixtrie = true}}});
+  Synonyms syn;
+  syn.UpdateGroup("A", {"x"});
+  syn.UpdateGroup("a", {"y"});
+  syn.UpdateGroup("syn1", {"z"});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), &syn};
+  ASSERT_TRUE(index.Add(0, MockedDocument{"x z"}));
+  ASSERT_TRUE(index.Add(1, MockedDocument{"y"}));
+
+  auto search = [&index](string_view query) {
+    SearchAlgorithm algo;
+    QueryParams params;
+    EXPECT_TRUE(algo.Init(query, &params)) << query;
+    return algo.Search(&index).ids;
+  };
+  EXPECT_EQ(search("x"), vector<DocId>{0});
+  EXPECT_EQ(search("y"), vector<DocId>{1});
+
+  auto* text = dynamic_cast<TextIndex*>(index.GetIndex("field"));
+  ASSERT_NE(text, nullptr);
+  size_t calls = 0, hits = 0;
+  text->MatchSuffix("n1", [&](const auto* c) {
+    ++calls;
+    hits += c != nullptr;
+  });
+  text->MatchInfix("yn", [&hits](const auto* c) { hits += c != nullptr; });
+  EXPECT_EQ(calls, 1u);  // answered by the suffix trie
+  EXPECT_EQ(hits, 0u);
 }
 
 // A glued word under a field binds all of its atoms to that field, in any order and position.
@@ -2702,6 +2738,7 @@ static void BM_SearchAst(benchmark::State& state) {
       {"mixed", "@tag:{blue|green*} @score:[10 50]"},
       {"phrase", "@title:\"hello world\""},
       {"optional_weight", "~@title:hello=>{$weight:2} @tag:{blue}"},
+      {"union", "@title:(hello | elsewhere)"},
   };
   auto [name, query] = kQueries[state.range(0)];
   auto schema = MakeSimpleSchema(
@@ -2727,7 +2764,7 @@ static void BM_SearchAst(benchmark::State& state) {
   state.SetLabel(string{name});
 }
 BENCHMARK(BM_SearchAst)
-    ->ArgsProduct({{0, 1, 2, 3, 4, 5}, {100, 1000}, {0, 1}})
+    ->ArgsProduct({{0, 1, 2, 3, 4, 5, 6}, {100, 1000}, {0, 1}})
     ->ArgNames({"query", "docs", "parse"})
     ->Unit(benchmark::kMicrosecond);
 
@@ -4253,6 +4290,67 @@ TEST_F(PhraseTest, NoOffsetsErrorIsExplicit) {
   ASSERT_TRUE(algo.Init("\"machine learning\"", &params));
   auto result = algo.Search(&indices);
   EXPECT_THAT(result.error, testing::HasSubstr("phrase queries require offsets"));
+}
+
+// The same document ids stored in every container type that IndexResult can borrow.
+struct IdContainers {
+  explicit IdContainers(const std::vector<DocId>& ids) : vec{ids} {
+    for (DocId id : ids) {
+      compressed.Insert(id);
+      sorted.Insert(id);
+      tree.Add(id, id);
+    }
+  }
+
+  std::array<IndexResult, 4> Results() const {
+    return {IndexResult{&vec}, IndexResult{&compressed}, IndexResult{&sorted},
+            IndexResult{tree.GetAllDocIds()}};  // a single block, so SingleBlockRangeResult
+  }
+
+  std::vector<DocId> vec;
+  // Small blocks, so that iteration crosses block boundaries
+  BlockList<CompressedSortedSet> compressed{PMR_NS::get_default_resource(), 4};
+  BlockList<SortedVector<DocId>> sorted{PMR_NS::get_default_resource(), 4};
+  RangeTree tree{PMR_NS::get_default_resource()};
+};
+
+// MergeIndexResults with OR must match std::set_union for every pair of container types.
+TEST(IndexResultTest, MergeUnion) {
+  auto random_ids = [rnd = std::default_random_engine{}](double density) mutable {
+    std::bernoulli_distribution take{density};
+    std::vector<DocId> ids;
+    for (DocId id = 0; id < 1000; ++id) {
+      if (take(rnd))
+        ids.push_back(id);
+    }
+    return ids;
+  };
+
+  const std::vector<std::pair<std::vector<DocId>, std::vector<DocId>>> cases = {
+      {{}, {}},
+      {{}, {1, 2}},
+      {{1, 2}, {}},
+      {{1, 2, 3}, {1, 2, 3}},
+      {{1, 3, 5, 7}, {2, 3, 6, 7, 8, 9}},
+      {{4, 5, 6, 7}, {1, 2}},
+      {random_ids(0.3), random_ids(0.6)},
+  };
+
+  for (const auto& [left_ids, right_ids] : cases) {
+    std::vector<DocId> expected;
+    std::set_union(left_ids.begin(), left_ids.end(), right_ids.begin(), right_ids.end(),
+                   std::back_inserter(expected));
+
+    IdContainers left{left_ids}, right{right_ids};
+    auto left_results = left.Results(), right_results = right.Results();
+    for (size_t i = 0; i < left_results.size(); ++i) {
+      for (size_t j = 0; j < right_results.size(); ++j) {
+        EXPECT_EQ(MergeIndexResults(left_results[i], right_results[j], AstLogicalNode::OR),
+                  expected)
+            << "container types " << i << " and " << j;
+      }
+    }
+  }
 }
 
 }  // namespace search

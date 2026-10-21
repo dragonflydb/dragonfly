@@ -242,7 +242,7 @@ void TestDriver::Loop() {
   if (params_.start_paused)
     resume_traversal_.Wait();
 
-  TraverseAllBuckets(false);
+  TraverseAllBuckets();
   blocked_after_traversal_ = IsAnyBucketBlocked();
   traversal_done_.Notify();
 }
@@ -423,20 +423,28 @@ class SerializerBaseTieredTest : public SerializerBaseTest {
 };
 
 class SerializerBaseParamTest : public SerializerBaseTest,
-                                public testing::WithParamInterface<bool> {};
+                                public testing::WithParamInterface<std::tuple<bool, bool>> {};
 
-INSTANTIATE_TEST_SUITE_P(WithAppender, SerializerBaseParamTest, testing::Bool());
+INSTANTIATE_TEST_SUITE_P(AppenderSparse, SerializerBaseParamTest,
+                         testing::Combine(testing::Bool(), testing::Bool()));
 
 // Snapshots a populated DB while a writer inserts new (omittable) keys.
-// With an appender it also runs non-omittable APPENDs
+// With an appender it also runs non-omittable APPENDs.
+// When sparse, most keys are deleted before the snapshot to leave many empty buckets: omitted
+// SETs into empty buckets behind the cursor are lost unless the traversal stamps them.
 TEST_P(SerializerBaseParamTest, StaticWithSetAndAppend) {
   driver_params.eventually_consistent = true;
 
-  const bool with_appender = GetParam();
+  const auto [with_appender, sparse] = GetParam();
   const size_t kKeys = 10000;
   const size_t kNew = 30000;
+  auto kept = [sparse](unsigned i) { return !sparse || i % 10 == 0; };
 
   Run({"DEBUG", "POPULATE", std::to_string(kKeys)});
+  for (unsigned i = 0; i < kKeys; i++) {
+    if (!kept(i))
+      Run({"DEL", absl::StrCat("key:", i)});
+  }
   Start();
 
   std::atomic_bool running = true;
@@ -444,6 +452,8 @@ TEST_P(SerializerBaseParamTest, StaticWithSetAndAppend) {
   if (with_appender) {
     appender = pp_->at(0)->LaunchFiber([&] {
       for (unsigned i = 0; running.load(std::memory_order_relaxed) && i < kKeys; i++) {
+        if (!kept(i))
+          continue;
         Run("W2", {"APPEND", absl::StrCat("key:", i), "D"});
         util::ThisFiber::Yield();
       }
@@ -466,8 +476,11 @@ TEST_P(SerializerBaseParamTest, StaticWithSetAndAppend) {
 
   // Pre-existing keys always exist and must be strictly covered by a baseline (emitted before any
   // journal write by the ordering invariant).
-  for (unsigned i = 0; i < kKeys; i++)
-    EXPECT_TRUE(baselines.contains(absl::StrCat("key:", i)));
+  for (unsigned i = 0; i < kKeys; i++) {
+    if (kept(i)) {
+      EXPECT_TRUE(baselines.contains(absl::StrCat("key:", i)));
+    }
+  }
 
   // New keys are inserted mid-sweep, so a surviving one must be covered by a baseline or a journal
   // write; a key omitted past the cursor by a split would be missing from both.

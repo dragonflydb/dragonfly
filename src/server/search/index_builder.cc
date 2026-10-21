@@ -73,10 +73,6 @@ void IndexBuilder::Cancel() {
   util::fb2::Fiber{std::move(fiber_)}.JoinIfNeeded();  // steal and wait for finish
 }
 
-util::fb2::Fiber IndexBuilder::Worker() {
-  return std::move(fiber_);
-}
-
 double IndexBuilder::Progress() const {
   double done = 0;
   for (size_t i = 0; i < phase_done_.size(); i++)

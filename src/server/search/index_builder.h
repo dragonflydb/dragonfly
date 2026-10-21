@@ -36,9 +36,6 @@ struct IndexBuilder {
   // may have dispatched work to the same queue — that would deadlock.
   void Cancel();
 
-  // Get fiber reference. Temporary to polyfill sync construction places
-  util::fb2::Fiber Worker();
-
   // Share of the build done so far, stays below 1 while the builder exists.
   double Progress() const;
 

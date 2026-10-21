@@ -11,6 +11,7 @@
 #include "base/logging.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
 
@@ -151,6 +152,36 @@ void BlockingController::NotifyPending() {
   const Transaction* tx = owner_->GetContTx();
   CHECK(tx == nullptr) << tx->DebugId();
 
+  if (awakened_indices_.empty())
+    return;
+
+  // Readiness checks may expire keys, and journaling an expiry may suspend and let other fibers
+  // change the watch tables. So wait for blocked journal writes up front and iterate with journal
+  // flushing disabled, in an atomic section; the expired events are sent after the iteration.
+  DbSlice& db_slice = ns_->GetDbSlice(owner_->shard_id());
+  db_slice.WaitForUnblockedJournalWrites();
+
+  // A transaction may have started running while we waited; it notifies when it concludes. Check
+  // running_tx() too: a first hop that suspended is not the continuation transaction yet, and
+  // waking a waiter now would let it run ahead of that continuation.
+  if (owner_->GetContTx() != nullptr || owner_->running_tx() != nullptr)
+    return;
+
+  {
+    journal::DisableFlushGuard flush_guard;
+    NotifyPendingAtomic();
+  }
+
+  db_slice.SendQueuedExpiredKeyEvents();
+}
+
+void BlockingController::NotifyPendingAtomic() {
+  DCHECK(util::fb2::detail::IsFiberAtomicSection());
+  // A waiter woken now runs ahead of the transaction queue (see PollExecutionInternal), so no
+  // transaction may be running or continuing.
+  DCHECK(owner_->running_tx() == nullptr) << owner_->running_tx()->DebugId();
+  DCHECK(owner_->GetContTx() == nullptr) << owner_->GetContTx()->DebugId();
+
   DbContext context;
   context.ns = ns_;
   context.time_now_ms = GetCurrentTimeMs();
@@ -179,10 +210,6 @@ void BlockingController::NotifyPending() {
     }
   }
   awakened_indices_.clear();
-
-  // The readiness checks may expire keys. Send their events now that the iteration is done:
-  // sending may suspend.
-  ns_->GetDbSlice(owner_->shard_id()).SendQueuedExpiredKeyEvents();
 }
 
 void BlockingController::AddWatched(Keys watch_keys, KeyReadyChecker krc, Transaction* trans) {
@@ -270,7 +297,7 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
     } else if (result == KeyReadyResult::kReady) {
       DVLOG(2) << "WQ-Pop " << head->DebugId() << " from key " << key << " committed txid "
                << owner_->committed_txid();
-      if (head->NotifySuspended(sid, key)) {
+      if (head->NotifySuspended(sid)) {
         wq->state = WatchQueue::ACTIVE;
         // We deliberately keep the notified transaction in the queue to know which queue
         // must handled when this transaction finished.
@@ -284,6 +311,19 @@ void BlockingController::NotifyWatchQueue(std::string_view key, WatchQueue* wq,
     queue.pop_front();
   }
   std::move(skipped.begin(), skipped.end(), std::back_inserter(queue));
+}
+
+bool BlockingController::IsReserved(DbIndex db_index, string_view key,
+                                    const Transaction* tx) const {
+  auto dbit = watched_dbs_.find(db_index);
+  if (dbit == watched_dbs_.end())
+    return false;
+  auto it = dbit->second->queue_map.find(key);
+  if (it == dbit->second->queue_map.end())
+    return false;
+  const WatchQueue& wq = *it->second;
+  DCHECK(!wq.items.empty());
+  return wq.state == WatchQueue::ACTIVE && wq.items.front().get() == tx;
 }
 
 size_t BlockingController::NumWatched(DbIndex db_indx) const {
