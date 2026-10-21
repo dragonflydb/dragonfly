@@ -70,7 +70,7 @@ struct TieredStats {
   float estimated_bin_bucket_fragmentation = 0;
 
   // Highest ratio of allocated bytes to the per-thread max file size across all shards
-  // (aggregated with max). A single shard reaching ~1.0 can't stash anymore.
+  // (aggregated with max). A single shard nearing ~1.0 can't stash anymore.
   float max_shard_file_utilization = 0;
 
   // Disk space currently in use (tracked by ExternalAllocator).
