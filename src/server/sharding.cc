@@ -87,6 +87,17 @@ class RoundRobinSharder {
   static util::fb2::Mutex mutex_;
 };
 
+// Fibonacci hashing: spreads all 14 slot bits into the top 32 bits, breaking slot-number
+// patterns (e.g. from CRC16 linearity) while keeping contiguous slot ranges evenly balanced.
+// The final multiply-shift maps the 32-bit value onto [0, shard_num) without a division.
+inline ShardId SlotToShard(uint16_t slot, ShardId shard_num) {
+  uint32_t h = (uint64_t{slot} * 0x9E3779B97F4A7C15ULL) >> 32;
+
+  // Why it works: h / 2^32 is approximately uniformly distributed in [0, 1), so multiplying by
+  // shard_num is in range [0, shard_num).
+  return (uint64_t{h} * shard_num) >> 32;
+}
+
 }  // namespace
 
 thread_local string RoundRobinSharder::round_robin_prefix_;
@@ -97,15 +108,11 @@ ShardId RoundRobinSharder::next_shard_;
 util::fb2::Mutex RoundRobinSharder::mutex_;
 
 ShardId Shard(string_view v, ShardId shard_num) {
-  // This cluster sharding is not necessary and may degrade keys distribution among shard threads.
-  // For example, if we have 3 shards, then no single-char keys will be assigned to shard 2 and
-  // 32 single char keys in range ['_' - '~'] will be assigned to shard 0.
-  // Yes, SlotId function does not have great distribution properties.
-  // On the other side, slot based sharding may help with pipeline squashing optimizations,
-  // because they rely on commands being single-sharded.
-  // TODO: once we improve our squashing logic, we can remove this.
+  // Slot based sharding helps with pipeline latency for multi-key commands,
+  // because squashing relies on commands being single-sharded.
   if (IsClusterShardedBySlot()) {
-    return KeySlot(v) % shard_num;
+    // Use Fibonacci hashing to map the slot to a shard, ensuring an even distribution.
+    return SlotToShard(KeySlot(v), shard_num);
   }
 
   if (IsClusterShardedByTag()) {
