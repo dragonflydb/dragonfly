@@ -125,9 +125,11 @@ line number. Suggest what to investigate.>
   Ensure no other Dragonfly or Redis instance is using these ports.
 - The script adds `--restricted_commands` flags to avoid false positives from
   commands like DEBUG SLEEP that the fuzzer might generate.
-- Some crashes are non-deterministic (thread timing). The script reports
-  these as "FALSE POSITIVE" — note this clearly, it doesn't mean the bug
-  is invalid, just that it didn't reproduce on this run.
+- Some crashes depend on the memory layout or timing. The script retries the
+  drain pass (`TRIAGE_ATTEMPTS`, default 5, plus one attempt with ASLR disabled)
+  and reports a crash that never reproduced as "NOT REPRODUCED", printing the
+  fuzz run's own fatal message from `fatal.log` when the archive has one. It
+  doesn't mean the bug is invalid: the fuzz run did crash.
 - The script handles its own cleanup of Dragonfly processes.
 - Do NOT delete `/tmp/fuzz-repro-{run_id}/` — the user may want to inspect it.
 - If `gh run download` fails with permissions, suggest the user authenticate

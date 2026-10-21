@@ -245,6 +245,14 @@ runs:
           fi
         fi
 
+        # The fuzz target's fatal messages, from the fuzzer output run_fuzzer.sh keeps in fuzz.log
+        FUZZ_LOG="fuzz/artifacts/${TARGET}/fuzz.log"
+        if [ "$CRASH_COUNT" -gt 0 ] && [ -f "$FUZZ_LOG" ]; then
+          echo ""
+          echo "Fatal messages of the fuzz target (count, message):"
+          python3 fuzz/extract_fatal.py "$FUZZ_LOG" --summary || echo "  (no crash dump logged)"
+        fi
+
         echo "hang_count=${HANG_COUNT}" >> "$GITHUB_OUTPUT"
         echo "crash_count=${CRASH_COUNT}" >> "$GITHUB_OUTPUT"
 

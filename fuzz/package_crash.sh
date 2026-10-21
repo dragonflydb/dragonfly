@@ -177,6 +177,28 @@ elif [[ $MATCHES -gt 1 ]]; then
     echo "HISTORY_AMBIGUOUS=${MATCHES}" >> "$DEST/repro.env"
 fi
 
+# The fatal output the fuzz run logged for this crash (CHECK failure, assertion, signal report), so
+# a replay that does not reproduce the crash still shows what the fuzzer saw. run_fuzzer.sh keeps
+# the fuzzer output in fuzz.log next to repro.env. The crash file name carries the milliseconds
+# since the campaign started, which AFL_AUTORESUME carries over from earlier sessions: the start is
+# last_update - run_time in fuzzer_stats, start_time is only the current session's.
+FUZZ_LOG="$(dirname "$(dirname "$CRASHES_DIR")")/fuzz.log"
+FUZZER_STATS="$(dirname "$CRASHES_DIR")/fuzzer_stats"
+if [[ -f "$FUZZ_LOG" ]]; then
+    CAMPAIGN_START=$(awk '/^last_update/ {l = $3} /^run_time/ {r = $3}
+        END {if (l != "" && r != "") print l - r}' "$FUZZER_STATS" 2>/dev/null || true)
+    CRASH_MS=$(basename "$CRASH_FILE" | sed -n 's/.*,time:\([0-9]*\),.*/\1/p')
+    if [[ -z "$CAMPAIGN_START" || -z "$CRASH_MS" ]]; then
+        print_warn "Crash time unknown (no fuzzer_stats or no time: in the crash name): no fatal.log"
+    elif python3 "$SCRIPT_DIR/extract_fatal.py" "$FUZZ_LOG" \
+        --crash-time "$((CAMPAIGN_START + CRASH_MS / 1000))" >"$DEST/fatal.log"; then
+        print_info "Fatal output of the fuzz run: fatal.log included"
+    else
+        rm -f "$DEST/fatal.log"
+        print_warn "No crash dump found in $FUZZ_LOG"
+    fi
+fi
+
 REPLAY_PORT=6379
 MODE_HINT="resp"
 if [[ -f "$DEST/repro.env" ]]; then

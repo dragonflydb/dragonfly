@@ -143,13 +143,20 @@ Download the crashes zip from CI artifacts and run:
 ./fuzz/triage_crashes.sh ./build-dbg-plain/dragonfly memcache crashes.zip
 ```
 
-Each crash gets up to two passes on a fresh server: **drain** (a barrier command is appended to
-every input on the same connection and its reply is awaited, so every recorded command before
-it has executed; reproduces deterministic crashes and prints `Server died after input
-cnt:NNNNNN`, the input that ran the fatal command) and, only if the server survived,
-**harness** (the exact fuzzer behaviour byte for byte, for timing-dependent bugs). A confirmed
-crash is printed with the fatal message and stack trace from the server's stderr. With
-`AFL_DEBUG_CHILD=1` (set by `run_fuzzer.sh`) the same message is also visible in the CI job log.
+Each crash gets passes on a fresh server until one of them crashes it: **drain** (a barrier
+command is appended to every input on the same connection and its reply is awaited, so every
+recorded command before it has executed; reproduces deterministic crashes and prints `Server died
+after input cnt:NNNNNN`, the input that ran the fatal command) and, only if the server survived
+every drain attempt, **harness** (the exact fuzzer behaviour byte for byte, for timing-dependent
+bugs). A crash can depend on the process memory layout (hash seeds, allocation addresses), which
+ASLR changes on every start and the fuzzer's forkserver keeps fixed for a whole session, so drain
+runs `TRIAGE_ATTEMPTS` times (default 5) and once more under `setarch -R` (ASLR disabled) when the
+machine allows it. A confirmed crash is printed with the fatal message and stack trace from the
+server's stderr. With `AFL_DEBUG_CHILD=1` (set by `run_fuzzer.sh`) the same message reaches the
+fuzzer output: `run_fuzzer.sh` keeps a copy in `fuzz.log`, `package_crash.sh` puts the crash's own
+dump into the archive as `fatal.log` (matched by time), and the triage prints it next to its
+verdict and says whether a confirmed replay failed the same way. The CI analyze step lists the
+distinct fatal messages of the run (`extract_fatal.py --summary`).
 The server runs under the memory limit recorded in the archive; if it cannot start under it on
 your machine, set `TRIAGE_MEM_LIMIT_KB` (a number, or `unlimited`). Any such deviation from the
 fuzz run's configuration (an overridden memory limit, buffered IO forced because the filesystem
@@ -162,9 +169,14 @@ deviation: the fuzz run keeps its backing files on the runner's own disk and tie
 are IO- and timing-dependent, so locally they can only be INCONCLUSIVE or "crash under a
 different configuration", never a plain CONFIRMED or FALSE POSITIVE.
 
-Exit codes of `triage_crashes.sh`: 0 = every crash a false positive; 1 = at least one crash
-confirmed under the recorded configuration; 2 = some crash failed, was inconclusive, or
-crashed only under a changed configuration; 3 = bad arguments or the triage could not start.
+A crash that no pass reproduces is reported as NOT REPRODUCED, not as a false positive: the
+fuzz run did crash, and replays that survive prove nothing about a layout- or timing-dependent
+bug. A drain pass that could not verify every input makes a surviving server INCONCLUSIVE.
+
+Exit codes of `triage_crashes.sh`: 0 = every crash a false positive (the server exited without a
+signal); 1 = at least one crash confirmed under the recorded configuration; 2 = some crash was not
+reproduced, failed, was inconclusive, or crashed only under a changed configuration; 3 = bad
+arguments or the triage could not start.
 
 ### Replay a single crash
 

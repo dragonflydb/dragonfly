@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Triage AFL++ crash artifacts: replay each crash against a fresh Dragonfly
-# instance and report whether it's confirmed or a false positive.
+# instance and report whether it reproduces.
 #
-# Each crash gets up to two passes on a fresh server:
+# Each crash gets passes on a fresh server until one of them crashes it:
 #   1. drain   - every recorded command executes (replies are read before the next input);
 #                this reproduces deterministic crashes and names the input that ran the fatal
 #                command, which is usually NOT the input the fuzzer saved (the process stays up
 #                for tens of milliseconds after an assertion, so AFL blames the next input).
-#   2. harness - only if pass 1 stayed alive: the exact fuzz-harness behaviour (send, one read,
-#                close), for timing-dependent bugs.
+#                A crash can depend on the process memory layout (hash seeds, addresses), which
+#                ASLR changes on every start, so drain runs TRIAGE_ATTEMPTS times (default 5) and
+#                once more with ASLR disabled (setarch -R) when the machine allows it.
+#   2. harness - only if every drain attempt stayed alive: the exact fuzz-harness behaviour (send,
+#                one read, close), for timing-dependent bugs.
+#
+# A crash no pass reproduces is NOT REPRODUCED, never a false positive: the fuzz run did see it.
+# Its original fatal message is printed when the archive carries fatal.log (package_crash.sh).
 #
 # Usage:
 #   ./fuzz/triage_crashes.sh <dragonfly_binary> <mode> <crashes.zip>
@@ -17,9 +23,10 @@
 #   mode              Protocol: 'resp' or 'memcache'
 #   crashes.zip       .zip downloaded from CI artifacts (contains crash-*.tar.gz files)
 #
-# Exit code: 0 = every crash a false positive; 1 = at least one crash confirmed under the
-# recorded configuration; 2 = some crash could not be triaged, was inconclusive, or crashed only
-# under a changed/guessed configuration; 3 = bad arguments or the triage could not start at all.
+# Exit code: 0 = every crash a false positive (the server exited without a signal); 1 = at least
+# one crash confirmed under the recorded configuration; 2 = some crash was not reproduced, could
+# not be triaged, was inconclusive, or crashed only under a changed/guessed configuration; 3 = bad
+# arguments or the triage could not start at all.
 #
 # Tiering archives: the fuzz run keeps its backing files on the runner's own disk. Replaying
 # them anywhere else is, by policy, always a configuration deviation (INCONCLUSIVE when the
@@ -46,6 +53,7 @@ RESP_PORT=6379
 MC_PORT=11211
 STARTUP_TIMEOUT=5   # seconds to wait for Dragonfly to accept connections
 POST_REPLAY_WAIT=3  # seconds to wait after replay for Dragonfly to crash
+TRIAGE_ATTEMPTS="${TRIAGE_ATTEMPTS:-5}"  # drain attempts with ASLR, before the one without it
 
 print_info()  { echo -e "${GREEN}[INFO]${NC}  $1"; }
 print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
@@ -95,6 +103,21 @@ fi
 if grep -q -a -m1 -e '__afl_area_ptr' -e '__afl_persistent_loop' "$DRAGONFLY_BIN"; then
     print_error "$DRAGONFLY_BIN is AFL-instrumented (USE_AFL=ON); build a plain Debug binary for triage"
     exit 3
+fi
+if [[ ! "$TRIAGE_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+    print_error "TRIAGE_ATTEMPTS must be a positive integer, got: $TRIAGE_ATTEMPTS"
+    exit 3
+fi
+# The extra drain attempt runs with ASLR disabled, so a layout-dependent crash meets one fixed
+# layout too; the personality is inherited across exec.
+NO_ASLR=()
+if setarch "$(uname -m)" -R true 2>/dev/null; then
+    NO_ASLR=(setarch "$(uname -m)" -R)
+else
+    print_warn "setarch -R is not available here: no drain attempt with ASLR disabled"
+fi
+if [[ "$(cat /proc/sys/kernel/randomize_va_space 2>/dev/null)" == "0" ]]; then
+    print_warn "ASLR is disabled on this machine: every drain attempt gets the same memory layout"
 fi
 
 # ─── Working directory ────────────────────────────────────────────────────────
@@ -209,10 +232,29 @@ show_crash_log() {
     fi
 }
 
+# First fatal line without the log timestamp, thread id, signal time or the source directory of an
+# assert (the fuzz build's checkout path differs), for comparing the replay's failure with the
+# fuzz run's, e.g. "doc_index.cc:317] Check failed: ...".
+fatal_head() {
+    grep -a -m1 -E '^F[0-9]{4} |Assertion `|terminate called|\*\*\* SIG' "$1" 2>/dev/null |
+        sed -E 's/^F[0-9]{4} [0-9:.]+ +[0-9]+ //; s#^[^ ]+: /[^:]*/##; s/ at time=[0-9]+.*//; s/[[:space:]]+$//' || true
+}
+
+# The fatal output the fuzz run logged for this crash (fatal.log in the archive), if any. Its first
+# line says whether it is the crash's own dump or, when none matched, the run's fatal messages.
+show_original_fatal() {
+    [[ -s "$ORIGINAL_FATAL" ]] || return 0
+    echo "    the fuzz run's fatal.log:"
+    head -12 "$ORIGINAL_FATAL" | sed 's/^/      /'
+}
+
 # Start Dragonfly with DF_ARGS under MEM_LIMIT_KB on a clean --dir; sets DF_PID.
+# Extra arguments are a launcher command the binary runs under (setarch -R).
 # Returns 1 if it did not come up.
 start_dragonfly() {
     local log_dir="$1" db_dir="$2"
+    shift 2
+    local launcher=("$@")
     # A previous pass may have run SAVE/BGSAVE; the fuzz harness always starts from an empty dir.
     # Every step is checked explicitly: `if ! start_dragonfly` disables set -e inside.
     if ! rm -rf "$db_dir" || ! mkdir -p "$db_dir"; then
@@ -228,7 +270,7 @@ start_dragonfly() {
         if ! ulimit -v "$MEM_LIMIT_KB" 2>"$log_dir/ulimit.err"; then
             exit 99
         fi
-        exec "$DRAGONFLY_BIN" "${DF_ARGS[@]}" >"$log_dir/stderr.log" 2>&1
+        exec "${launcher[@]}" "$DRAGONFLY_BIN" "${DF_ARGS[@]}" >"$log_dir/stderr.log" 2>&1
     ) &
     DF_PID=$!
 
@@ -286,13 +328,14 @@ run_replay() {
 # ─── Main loop ────────────────────────────────────────────────────────────────
 CONFIRMED=0
 DIFF_CONFIRMED=0  # signal death, but under guessed or changed flags: a crash, not the artifact
+NOT_REPRODUCED=0
 FALSE_POSITIVE=0
 FAILED=0
 
 for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     CRASH_NAME=$(basename "$CRASH_ARCHIVE" .tar.gz)   # crash-000000
     CRASH_ID="${CRASH_NAME#crash-}"                    # 000000
-    IDX=$((CONFIRMED + DIFF_CONFIRMED + FALSE_POSITIVE + FAILED + 1))
+    IDX=$((CONFIRMED + DIFF_CONFIRMED + NOT_REPRODUCED + FALSE_POSITIVE + FAILED + 1))
     # Reset per-archive port defaults (may be overridden from repro.env below)
     RESP_PORT=6379
     MC_PORT=11211
@@ -323,6 +366,7 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     # repro.env is written by run_fuzzer.sh so flags stay in sync with the fuzz run.
     # Fallback to safe defaults for older archives that don't include repro.env.
     REPRO_ENV="$EXTRACT_DIR/${CRASH_NAME}/repro.env"
+    ORIGINAL_FATAL="$EXTRACT_DIR/${CRASH_NAME}/fatal.log"
     AMBIG=""
     MISSING=""
     if [[ -f "$REPRO_ENV" ]]; then
@@ -449,28 +493,48 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
     REPLAY_LOG="$WORK_DIR/replay_${CRASH_ID}.log"
     : >"$REPLAY_LOG"
 
-    # Pass 1: drain. Pass 2 (harness) only if the server survived pass 1. A pass counts as
-    # "died" when the replay reports it (exit 3) or the process exits shortly afterwards.
+    # Drain attempts, each on a fresh server, until one dies: TRIAGE_ATTEMPTS with the machine's
+    # ASLR, then one with ASLR disabled. Only if all of them survived, one harness pass. A pass
+    # counts as "died" when the replay reports it (exit 3) or the process exits shortly afterwards.
     DIED=false
-    PASS="drain"
     UNVERIFIED=""
-    if ! start_dragonfly "$LOG_DIR" "$DB_DIR"; then
+    START_FAILED=false
+    DRAIN_ATTEMPTS=$TRIAGE_ATTEMPTS
+    [[ ${#NO_ASLR[@]} -gt 0 ]] && DRAIN_ATTEMPTS=$((TRIAGE_ATTEMPTS + 1))
+    for ((ATTEMPT = 1; ATTEMPT <= DRAIN_ATTEMPTS; ATTEMPT++)); do
+        PASS="drain attempt ${ATTEMPT}/${DRAIN_ATTEMPTS}"
+        LAUNCHER=()
+        if [[ $ATTEMPT -gt $TRIAGE_ATTEMPTS ]]; then
+            PASS+=" (ASLR disabled)"
+            LAUNCHER=("${NO_ASLR[@]}")
+        fi
+        if ! start_dragonfly "$LOG_DIR" "$DB_DIR" "${LAUNCHER[@]}"; then
+            START_FAILED=true
+            break
+        fi
+        run_replay drain "$CRASH_DATA_DIR" "$REPLAY_LOG" "$REPLAY_PORT" && REPLAY_RC=0 || REPLAY_RC=$?
+        if [[ $REPLAY_RC -eq 0 || $REPLAY_RC -eq 3 || $REPLAY_RC -eq 4 ]] && wait_for_death; then
+            DIED=true
+        fi
+        if [[ $REPLAY_RC -eq 4 ]]; then
+            [[ -n "$UNVERIFIED" ]] ||
+                UNVERIFIED=$(grep -m1 '\[WARN\]' "$REPLAY_LOG" | sed 's/.*\[WARN\][^ ]* //' || true)
+            REPLAY_RC=0
+        fi
+        if $DIED || [[ $REPLAY_RC -ne 0 ]]; then
+            break
+        fi
+        stop_dragonfly
+        echo "  ${PASS}: alive"
+    done
+    if $START_FAILED; then
         FAILED=$((FAILED + 1))
         echo ""
         continue
     fi
-    run_replay drain "$CRASH_DATA_DIR" "$REPLAY_LOG" "$REPLAY_PORT" && REPLAY_RC=0 || REPLAY_RC=$?
-    if [[ $REPLAY_RC -eq 0 || $REPLAY_RC -eq 3 || $REPLAY_RC -eq 4 ]] && wait_for_death; then
-        DIED=true
-    fi
-    if [[ $REPLAY_RC -eq 4 ]]; then
-        UNVERIFIED=$(grep -m1 '\[WARN\]' "$REPLAY_LOG" | sed 's/.*\[WARN\][^ ]* //' || true)
-        REPLAY_RC=0
-    fi
 
     if [[ $REPLAY_RC -eq 0 ]] && ! $DIED; then
-        stop_dragonfly
-        PASS="harness"
+        PASS="harness pass"
         if ! start_dragonfly "$LOG_DIR" "$DB_DIR"; then
             FAILED=$((FAILED + 1))
             echo ""
@@ -501,13 +565,14 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
             [[ -n "$UNVERIFIED" ]] && echo "    $UNVERIFIED"
             FAILED=$((FAILED + 1))
         elif [[ -n "$UNVERIFIED" ]]; then
-            echo -e "  ${YELLOW}FALSE POSITIVE${NC} — Dragonfly alive after drain and harness replays, but the drain pass could not verify every input:"
+            echo -e "  ${YELLOW}INCONCLUSIVE${NC} — Dragonfly alive after ${DRAIN_ATTEMPTS} drain attempts and a harness pass, but drain could not verify every input:"
             echo "    $UNVERIFIED"
-            FALSE_POSITIVE=$((FALSE_POSITIVE + 1))
+            FAILED=$((FAILED + 1))
         else
-            echo -e "  ${YELLOW}FALSE POSITIVE${NC} — Dragonfly alive after drain and harness replays (every input verified)"
-            FALSE_POSITIVE=$((FALSE_POSITIVE + 1))
+            echo -e "  ${YELLOW}NOT REPRODUCED${NC} — Dragonfly alive after ${DRAIN_ATTEMPTS} drain attempts$([[ ${#NO_ASLR[@]} -gt 0 ]] && echo " (the last one with ASLR disabled)") and a harness pass; the fuzz run did crash, so the crash may depend on the memory layout or timing"
+            NOT_REPRODUCED=$((NOT_REPRODUCED + 1))
         fi
+        show_original_fatal
         stop_dragonfly
     else
         # Capture signal without triggering set -e (assignment always exits 0)
@@ -518,13 +583,14 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
         # Sanity check: exit code > 128 means killed by signal; otherwise not a signal death
         if [[ $EXIT_CODE -le 128 ]]; then
             if [[ $GUESSED -eq 1 || -n "$CONFIG_CHANGED" ]]; then
-                echo -e "  ${YELLOW}INCONCLUSIVE${NC} — Dragonfly exited cleanly (code $EXIT_CODE) in ${PASS} pass, but not under the fuzz run's configuration: ${CONFIG_CHANGED:-guessed flags}"
+                echo -e "  ${YELLOW}INCONCLUSIVE${NC} — Dragonfly exited cleanly (code $EXIT_CODE) in ${PASS}, but not under the fuzz run's configuration: ${CONFIG_CHANGED:-guessed flags}"
                 FAILED=$((FAILED + 1))
             else
-                echo -e "  ${YELLOW}FALSE POSITIVE${NC} — Dragonfly exited cleanly (code $EXIT_CODE) in ${PASS} pass"
+                echo -e "  ${YELLOW}FALSE POSITIVE${NC} — Dragonfly exited cleanly (code $EXIT_CODE) in ${PASS}"
                 FALSE_POSITIVE=$((FALSE_POSITIVE + 1))
             fi
             [[ -n "$KILLER" ]] && echo "    $KILLER"
+            show_original_fatal
             echo ""
             continue
         fi
@@ -540,17 +606,30 @@ for CRASH_ARCHIVE in "${CRASH_ARCHIVES[@]}"; do
         fi
 
         if [[ $SIGNAL -eq 6 ]]; then
-            echo -e "  ${RED}${VERDICT}${NC} — SIGABRT (signal 6) — assertion / LOG(FATAL) — ${PASS} pass"
+            echo -e "  ${RED}${VERDICT}${NC} — SIGABRT (signal 6) — assertion / LOG(FATAL), in ${PASS}"
         elif [[ $SIGNAL -eq 11 ]]; then
-            echo -e "  ${RED}${VERDICT}${NC} — SIGSEGV (signal 11) — segmentation fault — ${PASS} pass"
+            echo -e "  ${RED}${VERDICT}${NC} — SIGSEGV (signal 11) — segmentation fault, in ${PASS}"
         else
-            echo -e "  ${RED}${VERDICT}${NC} — signal $SIGNAL (exit code $EXIT_CODE) — ${PASS} pass"
+            echo -e "  ${RED}${VERDICT}${NC} — signal $SIGNAL (exit code $EXIT_CODE), in ${PASS}"
         fi
         if [[ $GUESSED -eq 1 || -n "$CONFIG_CHANGED" ]]; then
             echo "    not the fuzz run's configuration: ${CONFIG_CHANGED:-guessed flags}"
         fi
         [[ -n "$KILLER" ]] && echo "    $KILLER"
         show_crash_log "$LOG_DIR"
+        # A replay can die on another bug than the one the fuzzer hit: say so when the fatal lines
+        # match, else show the fuzz run's dump. A signal report alone names no location, so two
+        # different SIGSEGVs have the same line.
+        ORIGINAL_HEAD=""
+        if head -1 "$ORIGINAL_FATAL" 2>/dev/null | grep -q '^# Fatal output'; then
+            ORIGINAL_HEAD=$(fatal_head "$ORIGINAL_FATAL")
+        fi
+        REPLAY_HEAD=$(fatal_head "$LOG_DIR/stderr.log")
+        if [[ -n "$ORIGINAL_HEAD" && "$ORIGINAL_HEAD" == "$REPLAY_HEAD" && "$ORIGINAL_HEAD" != '*** SIG'* ]]; then
+            echo "    same failure as in the fuzz run: $ORIGINAL_HEAD"
+        else
+            show_original_fatal
+        fi
     fi
     echo ""
 done
@@ -560,11 +639,12 @@ echo -e "${CYAN}${BOLD}═══ Triage Summary ═══${NC}"
 printf "  %-18s %d\n" "Total:" "$TOTAL"
 printf "  ${RED}%-18s %d${NC}\n" "Confirmed:" "$CONFIRMED"
 [[ $DIFF_CONFIRMED -gt 0 ]] && printf "  ${RED}%-18s %d${NC}\n" "Crash, other cfg:" "$DIFF_CONFIRMED"
+printf "  ${YELLOW}%-18s %d${NC}\n" "Not reproduced:" "$NOT_REPRODUCED"
 printf "  ${YELLOW}%-18s %d${NC}\n" "False positive:" "$FALSE_POSITIVE"
 [[ $FAILED -gt 0 ]] && printf "  ${RED}%-18s %d${NC}\n" "Failed/skipped:" "$FAILED"
 
-# Exit 1 if any crash was confirmed as recorded; 2 if some crash could not be triaged or crashed
-# only under a changed/guessed configuration; 0 otherwise
+# Exit 1 if any crash was confirmed as recorded; 2 if some crash was not reproduced, could not be
+# triaged or crashed only under a changed/guessed configuration; 0 otherwise
 [[ $CONFIRMED -gt 0 ]] && exit 1
-[[ $FAILED -gt 0 || $DIFF_CONFIRMED -gt 0 ]] && exit 2
+[[ $FAILED -gt 0 || $DIFF_CONFIRMED -gt 0 || $NOT_REPRODUCED -gt 0 ]] && exit 2
 exit 0

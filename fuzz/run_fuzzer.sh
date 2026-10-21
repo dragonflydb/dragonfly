@@ -279,6 +279,11 @@ run_fuzzer() {
         export AFL_PYTHON_MODULE=resp_mutator
     fi
 
+    # Keep a copy of the fuzzer output for package_crash.sh: with AFL_DEBUG_CHILD it carries the
+    # fatal message of every crash. Not for the interactive UI, which redraws the screen.
+    if [[ -n "${AFL_NO_UI:-}" || ! -t 1 ]]; then
+        exec "${AFL_CMD[@]}" > >(tee -a fuzz.log) 2>&1
+    fi
     exec "${AFL_CMD[@]}"
 }
 
