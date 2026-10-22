@@ -134,6 +134,7 @@ class Connection : public util::Connection {
   // Checkpoint message, used to track when the connection finishes executing the current command.
   struct CheckpointMessage {
     util::fb2::BlockingCounter bc;  // Decremented counter when processed
+    uint64_t sent_cycles = 0;       // CycleClock::Now() at SendCheckpoint
   };
 
   struct InvalidationMessage {
@@ -321,6 +322,13 @@ class Connection : public util::Connection {
 
   // Get quick debug info for logs
   std::string DebugInfo() const;
+
+  // Current command, dispatch time and tx, logged when a DispatchTracker times out.
+  std::string DispatchStuckInfo() const;
+
+  uint32_t pending_checkpoints() const {
+    return pending_checkpoints_;
+  }
 
   bool IsHttp() const;
 
@@ -559,6 +567,12 @@ class Connection : public util::Connection {
   // have landed.
   void ReleaseDeferredCheckpoints();
 
+  // Dec()s the checkpoint's counter. If log_late, logs when it waited past the late threshold.
+  void FinishCheckpoint(CheckpointMessage* msg, bool log_late);
+
+  // Records the command about to be dispatched for DispatchTracker diagnostics.
+  void MarkDispatchStart(const ParsedCommand& cmd);
+
   ClientInfo BuildClientInfo(unsigned thread_id) const;
 
   void IncreaseConnStats();
@@ -728,7 +742,10 @@ class Connection : public util::Connection {
   // close.
   // - Assumption: usually this vectors holds 0-1 entries, and at any given (extreme) point of time,
   // the number of deferred checkpoints is minimal (<10, no inlined vector required).
-  std::vector<util::fb2::BlockingCounter> deferred_checkpoints_;
+  std::vector<CheckpointMessage> deferred_checkpoints_;
+
+  // Checkpoints sent to this connection whose counter was not Dec()-ed yet.
+  uint32_t pending_checkpoints_ = 0;
 
   // how many bytes of the current request have been consumed
   size_t request_consumed_bytes_ = 0;
@@ -897,6 +914,10 @@ class Connection : public util::Connection {
   // executing inside ProcessAdminMessage's std::visit, or 0 when none is in progress. Used by the
   // slow-subscriber protection policy to detect a Pub/Sub send that has been blocked too long.
   uint64_t async_op_start_cycle_ = 0;
+
+  // Last dispatched command and its CycleClock start, for DispatchTracker diagnostics.
+  std::string cur_cmd_name_;
+  uint64_t cur_cmd_start_cycle_ = 0;
 
   // V2 with shared read buffer: Raw RESP suffix retained by parser when shared-buffer parsing stops
   // at backpressure.

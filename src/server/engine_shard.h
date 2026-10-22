@@ -186,6 +186,10 @@ class EngineShard {
     running_tx_ = tx;
   }
 
+  bool needs_repoll() const {
+    return needs_repoll_;
+  }
+
   void StopPeriodicFiber();
 
   struct TxQueueItem {

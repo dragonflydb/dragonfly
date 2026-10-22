@@ -66,6 +66,10 @@ class Listener : public util::ListenerInterface {
     return protocol_;
   }
 
+  ServiceInterface* service() const {
+    return service_;
+  }
+
  private:
   util::Connection* NewConnection(ProactorBase* proactor) final;
   ProactorBase* PickConnectionProactor(util::FiberSocketBase* sock) final;
@@ -115,6 +119,9 @@ class DispatchTracker {
 
  private:
   void Handle(unsigned thread_index, util::Connection* conn);
+
+  // Logs the connections still holding checkpoints and the shards' tx queues. Rate-limited.
+  void LogStuckState();
 
   std::vector<facade::Listener*> listeners_;
   facade::Connection* issuer_;

@@ -3077,6 +3077,33 @@ Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) co
           .is_scheduled = is_scheduled};
 }
 
+std::string Service::GetTxDebugInfo(facade::ConnectionContext* cntx) const {
+  ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
+  if (server_cntx->transaction)
+    return server_cntx->transaction->DebugId();
+  return absl::StrCat("last_txid=", server_cntx->last_cmd_stats.clock);
+}
+
+void Service::LogShardsTxState() const {
+  if (!shard_set)
+    return;
+
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    const TxQueue* txq = shard->txq();
+    string head;
+    if (!txq->Empty()) {
+      auto front = txq->Front();
+      if (auto* tx = get_if<Transaction*>(&front); tx)
+        head = (*tx)->DebugId(shard->shard_id());
+    }
+    Transaction* running = shard->running_tx();
+    LOG(WARNING) << "DispatchTrackerStuck: shard " << shard->shard_id() << " txq=" << txq->size()
+                 << " head=" << head
+                 << " running=" << (running ? running->DebugId(shard->shard_id()) : "")
+                 << " needs_repoll=" << shard->needs_repoll();
+  });
+}
+
 #define HFUNC(x) SetHandler(&Service::x)
 #define MFUNC(x) \
   SetHandler([this](CmdArgParser parser, CommandContext* cntx) { this->x(parser, cntx); })

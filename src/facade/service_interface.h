@@ -78,6 +78,15 @@ class ServiceInterface {
   virtual ContextInfo GetContextInfo(ConnectionContext* cntx) const {
     return {};
   }
+
+  // Current transaction of the connection, or the txid of its last command.
+  virtual std::string GetTxDebugInfo(ConnectionContext* cntx) const {
+    return {};
+  }
+
+  // Logs per-shard transaction queue state; called when a DispatchTracker gets stuck.
+  virtual void LogShardsTxState() const {
+  }
 };
 
 }  // namespace facade
