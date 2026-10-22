@@ -1539,14 +1539,9 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto* shard = EngineShard::tlocal();
   auto& db_slice = GetDbSlice(shard->shard_id());
 
-  // In NON_ATOMIC mode SquashedHopCb is invoked directly, without a wrapping RunCallback,
-  // so this stub owns the running_tx_ slot. In atomic modes (LOCK_AHEAD / GLOBAL) the
-  // parent transaction's RunCallback has already set running_tx_ to itself.
-  bool owns_running_tx = multi_->mode == NON_ATOMIC;
-  if (owns_running_tx) {
-    DCHECK(shard->running_tx() == nullptr);
-    shard->set_running_tx(this);
-  }
+  // The caller holds running_tx_ while stubs run: the parent transaction's RunCallback, or
+  // DEBUG POPULATE, which runs its stub without a parent hop.
+  DCHECK(shard->running_tx() != nullptr);
 
   // An escaping exception would skip the cleanup below and leave the EXEC reply incomplete.
   RunnableResult result;
@@ -1563,9 +1558,6 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
 
   LogAutoJournalOnShard(shard, result);
   MaybeInvokeTrackingCb();
-
-  if (owns_running_tx)
-    shard->set_running_tx(nullptr);
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
   return result;
