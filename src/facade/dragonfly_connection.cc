@@ -1697,6 +1697,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   RespSrvParser::Result result = RespSrvParser::OK;
 
   auto dispatch_sync = [this] {
+    parsed_cmd_->FinalizeParsing();  // stamps parsed_cycle, not set on the sync path otherwise
     service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_,
                               facade::AsyncPreference::ONLY_SYNC, nullptr);
   };
@@ -2196,6 +2197,46 @@ void Connection::ReleaseDeferredCheckpoints() {
     bc->Dec();
   }
   deferred_checkpoints_.clear();
+}
+
+size_t Connection::PendingCheckpoints() const {
+  size_t res = deferred_checkpoints_.size();
+
+  // Checkpoints are kept contiguous at the front of dispatch_q_.
+  for (auto it = dispatch_q_.begin(); it != dispatch_q_.end() && it->IsCheckPoint(); ++it)
+    ++res;
+  return res;
+}
+
+string Connection::DispatchStuckInfo(absl::Time wait_start) const {
+  string info = absl::StrCat("addr=", RemoteEndpointStr(), " name=", name_,
+                             " checkpoints=", PendingCheckpoints(),
+                             " waiting_ms=", absl::ToInt64Milliseconds(absl::Now() - wait_start));
+
+  // V2: the head is the oldest in-flight command. V1: only a sync dispatch is still reachable, a
+  // pipelined one is unlinked from the queue before it runs.
+  const ParsedCommand* cmd = nullptr;
+  if (ioloop_v2_)
+    cmd = parsed_head_;
+  else if (cc_ && cc_->sync_dispatch)
+    cmd = parsed_cmd_;
+
+  if (cmd) {
+    string_view name;
+    if (auto* mc_cmd = cmd->mc_command(); mc_cmd)
+      name = MemcacheParser::CmdName(mc_cmd->type);
+    else if (!cmd->empty())
+      name = cmd->Front();
+    absl::StrAppend(&info, " cmd=", name,
+                    " cmd_ms=", CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle) / 1000);
+  }
+
+  absl::StrAppend(&info, " ", DebugInfo());
+
+  // Not GetContextInfo(): it races with shard threads, see its TODO.
+  if (cc_)
+    absl::StrAppend(&info, " tx=", service_->GetTxDebugInfo(cc_.get()));
+  return info;
 }
 
 string Connection::DebugInfo() const {

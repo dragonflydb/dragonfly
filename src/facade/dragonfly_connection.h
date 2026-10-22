@@ -322,6 +322,13 @@ class Connection : public util::Connection {
   // Get quick debug info for logs
   std::string DebugInfo() const;
 
+  // Checkpoints queued in dispatch_q_ or deferred, i.e. not Dec()-ed yet.
+  size_t PendingCheckpoints() const;
+
+  // Oldest unfinished command, its age and tx, logged when a DispatchTracker started at
+  // wait_start times out.
+  std::string DispatchStuckInfo(absl::Time wait_start) const;
+
   bool IsHttp() const;
 
   static void UpdateFromFlags();                          // Set values from flags

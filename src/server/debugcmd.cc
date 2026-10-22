@@ -1152,6 +1152,7 @@ void DebugCmd::Watched(CommandContext* cmd_cntx) {
       lock_guard lk(mu);
       watched_keys.insert(watched_keys.end(), keys.begin(), keys.end());
       for (auto* tx : bc->awakened_transactions()) {
+        // TODO: DebugId() races with the awakened tx's coordinator thread.
         awaked_trans.push_back(StrCat("[", shard->shard_id(), "] ", tx->DebugId()));
       }
     }

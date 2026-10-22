@@ -588,6 +588,8 @@ void EngineShard::PollExecutionIfDeferred() {
 }
 
 void EngineShard::PollExecutionInternal(const char* context, Transaction* trans) {
+  // TODO: DebugId() here and in the CHECKs below may race with the coordinators of trans (unarmed
+  // when the poll expired) and continuation_trans_ (between hops).
   DVLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "") << " "
            << txq_.size() << " " << (continuation_trans_ ? continuation_trans_->DebugId() : "");
 
@@ -1051,7 +1053,25 @@ void EngineShard::FinalizeMulti(Transaction* tx) {
   PollExecution("unlockmulti", nullptr);
 }
 
+string EngineShard::TxQueueSafeInfo() const {
+  string res = absl::StrCat("txq=", txq_.size(), " head=");
+  if (!txq_.Empty()) {
+    auto front = txq_.Front();
+
+    // A queued tx stays alive, its shard_data_ is never reallocated and is_armed is atomic.
+    if (auto* tx = get_if<Transaction*>(&front); tx)
+      absl::StrAppend(&res, absl::Hex(uintptr_t(*tx)),
+                      " armed=", (*tx)->DEBUG_IsArmedInShard(shard_id()));
+  }
+  absl::StrAppend(&res, " running=", absl::Hex(uintptr_t(running_tx_)),
+                  " needs_repoll=", needs_repoll_);
+  return res;
+}
+
 EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
+  // TODO: data races with the coordinators of queued txs. DebugId() on an unarmed head and
+  // GetDbIndex() on every entry read fields the coordinator rewrites between hops, and the armed
+  // check below is a relaxed load, so the armed-branch reads aren't ordered after arming.
   const TxQueue* queue = txq();
 
   ShardId sid = shard_id();

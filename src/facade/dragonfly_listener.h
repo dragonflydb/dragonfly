@@ -66,6 +66,10 @@ class Listener : public util::ListenerInterface {
     return protocol_;
   }
 
+  ServiceInterface* service() const {
+    return service_;
+  }
+
  private:
   util::Connection* NewConnection(ProactorBase* proactor) final;
   ProactorBase* PickConnectionProactor(util::FiberSocketBase* sock) final;
@@ -103,8 +107,9 @@ class Listener : public util::ListenerInterface {
 // visible to all commands and no commands are still running according to the old state / config.
 class DispatchTracker {
  public:
+  // log_stuck: on timeout, log the stuck connections and shards before Wait() returns.
   DispatchTracker(absl::Span<facade::Listener* const>, facade::Connection* issuer,
-                  bool ignore_paused, bool ignore_blocked);
+                  bool ignore_paused, bool ignore_blocked, bool log_stuck = false);
 
   void TrackAll();       // Track busy connection on all threads
   void TrackOnThread();  // Track busy connections on current thread
@@ -116,11 +121,16 @@ class DispatchTracker {
  private:
   void Handle(unsigned thread_index, util::Connection* conn);
 
+  // Logs the connections still holding checkpoints and the shards' tx queues.
+  void LogStuckState();
+
   std::vector<facade::Listener*> listeners_;
   facade::Connection* issuer_;
   util::fb2::BlockingCounter bc_{0};  // tracks number of pending checkpoints
   bool ignore_paused_;
   bool ignore_blocked_;
+  bool log_stuck_;
+  absl::Time start_ = absl::Now();  // kept across the Wait() retry
 };
 
 // Global shutdown tuning flag, controlled by SHUTDOWN options.
