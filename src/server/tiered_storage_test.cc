@@ -980,6 +980,36 @@ TEST_F(PureDiskTSTest, Dump) {
   EXPECT_EQ(resp, "OK");
 }
 
+TEST_F(PureDiskTSTest, DebugObjHist) {
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+  const int kNum = 10;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), BuildString(3000)});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+
+  auto resp = Run({"DEBUG", "OBJHIST"});
+  string hist = resp.GetString();
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\n"
+                              "Count: 10 Average: 3000.0000"));
+  EXPECT_THAT(hist, HasSubstr("Tiered values - Serialized size:\nCount: 10 "));
+
+  // Offloaded hashes must be reported without touching their (absent) in-memory representation.
+  Run({"FLUSHALL"});
+  for (size_t i = 0; i < 100; ++i) {
+    Run({"HSET", absl::StrCat("hash:", i), "field-a", BuildString(40, 'a'), "field-b",
+         BuildString(40, 'b')});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries > 0; });
+
+  resp = Run({"DEBUG", "OBJHIST"});
+  hist = resp.GetString();
+  EXPECT_THAT(hist, HasSubstr("OBJECT:hash"));
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\nCount: 100 "));
+  EXPECT_THAT(hist, HasSubstr("Tiered values - Serialized size:\n"));
+}
+
 TEST_F(PureDiskTSTest, OffloadedStringSnapshotPreservesMemcacheFlags) {
   SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
   InitWithDbFilename();
