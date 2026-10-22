@@ -383,10 +383,6 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
     if (schema.fields.contains(field_alias)) {
       return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_alias));
     }
-    // Several attributes on one JSON path are not accepted yet.
-    if (index->type == DocIndex::JSON && schema.FindByIdentifier(field_path).second) {
-      return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_path));
-    }
 
     // Determine type
     using search::SchemaField;
