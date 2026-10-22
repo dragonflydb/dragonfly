@@ -67,8 +67,30 @@ class AofChainReader : public io::Source {
     return discarded_bytes_;
   }
 
-  // TODO: Repair(), called once the end was reached: truncate the segment at the end of the log,
-  // fdatasync the kept segments and rename later ones to *.discarded, highest seq first.
+  // ReadSome() reached the end of the log, cleanly or at a damaged tail.
+  bool AtEnd() const {
+    return end_ != End::kNotYet;
+  }
+
+  // The log ended at a damaged tail: an invalid block, an LSN break or a record cut at the end.
+  bool TornTail() const {
+    return end_ == End::kTailTorn;
+  }
+
+  // Seq of the segment that resumes the log: right after the one where the log ends. Valid once
+  // the end was reached.
+  uint64_t NextSeq() const {
+    const Segment& end = AllSegmentsRead() ? segment_chain_.back() : segment_chain_[read_seg_id_];
+    return end.seq + 1;
+  }
+
+  // Makes the files match the log as read. Call once the end was reached, before resuming.
+  // TODO: a no-op for now. Truncate the segment at the end of the log, fdatasync the kept segments
+  // and rename later ones to *.discarded, highest seq first. Until then, replay refuses to resume
+  // after a torn tail.
+  std::error_code Repair() {
+    return {};
+  }
 
  private:
   struct Segment {

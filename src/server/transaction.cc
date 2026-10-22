@@ -2006,4 +2006,8 @@ AtomicMemoryScope::~AtomicMemoryScope() {
   DeductFromTxScope(delta);
 }
 
+void AdvanceTxIdPast(TxId txid) {
+  op_seq = max(op_seq.load(), txid + 1);
+}
+
 }  // namespace dfly

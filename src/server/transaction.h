@@ -717,4 +717,9 @@ template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args);
 
+// New transactions get txids above txid. Called after AOF replay, when no transaction runs, so
+// replayed txids never repeat. Replay's own transactions also advance the sequence, so it never
+// moves it backwards.
+void AdvanceTxIdPast(TxId txid);
+
 }  // namespace dfly
