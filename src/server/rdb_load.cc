@@ -3107,7 +3107,11 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     }
 
     DVLOG(2) << "Executing item: " << entry.ToString();
-    journal_executor_->Execute(entry.dbid, entry.cmd);
+    auto result = journal_executor_->Execute(entry.dbid, entry.cmd);
+    if (result != facade::DispatchResult::OK) {
+      return RdbError(result == facade::DispatchResult::OOM ? errc::out_of_memory
+                                                            : errc::rdb_file_corrupted);
+    }
   }
 
   return std::error_code{};

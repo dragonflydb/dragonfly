@@ -10,11 +10,17 @@
 #include <algorithm>
 #include <memory>
 
+#include "base/flags.h"
 #include "base/logging.h"
 #include "facade/reply_capture.h"
 #include "facade/service_interface.h"
+#include "server/db_slice.h"
+#include "server/engine_shard.h"
+#include "server/engine_shard_set.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
+
+ABSL_DECLARE_FLAG(uint32_t, dbnum);
 
 using namespace std;
 
@@ -44,6 +50,11 @@ JournalExecutor::~JournalExecutor() {
 }
 
 facade::DispatchResult JournalExecutor::Execute(DbIndex dbid, journal::ParsedEntry::CmdData& cmd) {
+  if (dbid >= absl::GetFlag(FLAGS_dbnum)) {
+    LOG(ERROR) << "Database index out of range in journal: " << dbid;
+    return facade::DispatchResult::ERROR;
+  }
+
   SelectDb(dbid);
   CommandContext cntx_cmd;
   cntx_cmd.Init(reply_builder_.get(), &conn_context_);
@@ -78,18 +89,13 @@ void JournalExecutor::SelectDb(DbIndex dbid) {
     ensured_dbs_.resize(dbid + 1);
 
   if (!ensured_dbs_[dbid]) {
-    CommandContext cmd;
-
-    cmd.Init(reply_builder_.get(), &conn_context_);
-    BuildFromParts(&cmd, "SELECT", dbid);
-    facade::DispatchResult result = Execute(&cmd);
-    if (result != facade::DispatchResult::OK) {
-      LOG(DFATAL) << "Failed to select DB: " << dbid;
-    }
+    // Journal replay can target nonzero databases even when client SELECT is disabled.
+    shard_set->RunBriefInParallel([ns = conn_context_.ns, dbid](EngineShard* shard) {
+      ns->GetDbSlice(shard->shard_id()).ActivateDb(dbid);
+    });
     ensured_dbs_[dbid] = true;
-  } else {
-    conn_context_.conn_state.db_index = dbid;
   }
+  conn_context_.conn_state.db_index = dbid;
 }
 
 }  // namespace dfly

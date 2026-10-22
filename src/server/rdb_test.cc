@@ -64,6 +64,7 @@ ABSL_DECLARE_FLAG(bool, deserialize_hnsw_index);
 ABSL_DECLARE_FLAG(std::string, dbfilename);
 ABSL_DECLARE_FLAG(bool, df_snapshot_format);
 ABSL_DECLARE_FLAG(uint32_t, max_rdb_save_serialize_buffer_capacity);
+ABSL_DECLARE_FLAG(uint32_t, dbnum);
 
 namespace {
 
@@ -2787,15 +2788,23 @@ TEST_F(RdbTest, TaggedInterleavedRoundTrip) {
   EXPECT_THAT(Run({"HTTL", "A", "FIELDS", "2", "field:0", "field:1"}), RespElementsAre(1000, -1));
 }
 
-std::string MakeJournalDel(std::string_view key) {
+std::string MakeJournalDel(std::string_view key, DbIndex db_index = 0) {
   io::StringSink sink;
   JournalWriter writer(&sink);
-  writer.Write(journal::Entry{1, journal::Op::COMMAND, 0, std::nullopt,
+  writer.Write(journal::Entry{1, journal::Op::COMMAND, db_index, std::nullopt,
                               journal::Entry::Payload("DEL", ArgSlice{key})});
 
   RdbSerializer serializer(CompressionMode::NONE);
   CHECK(!serializer.WriteJournalEntry(std::move(sink).str()));
   return serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+}
+
+TEST_F(RdbTest, JournalRejectsInvalidDatabase) {
+  ASSERT_EQ(Run({"SET", "invalid-db-key", "value"}), "OK");
+  const auto data = WrapInRdb(MakeJournalDel("invalid-db-key", absl::GetFlag(FLAGS_dbnum)));
+  EXPECT_EQ(LoadRdbBytes(to_byte(data.data()), data.size()),
+            RdbError(rdb::errc::rdb_file_corrupted));
+  EXPECT_EQ(Run({"GET", "invalid-db-key"}), "value");
 }
 
 TEST_F(RdbTest, JournalDelWaitsForShardLoads) {
