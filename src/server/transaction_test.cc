@@ -98,6 +98,16 @@ class TransactionTest : public Test {
     OnShard(kNumThreads - 1, [d] { ThisFiber::SleepFor(d); });
   }
 
+  // Whether the poll of `tx`, coordinated from proactor `coord`, ran on shard `sid` and was
+  // dropped, i.e. `tx` is still armed after the shard queue fiber processed the poll.
+  bool PollDropped(Transaction* tx, unsigned sid, unsigned coord) {
+    if (!AwaitOnShard(sid, [tx, sid] { return tx->DEBUG_IsArmedInShard(sid); }))
+      return false;
+    OnShard(coord, [] {});         // the coordinator has queued the poll
+    shard_set->Await(sid, [] {});  // and the shard queue has run it
+    return OnShard(sid, [tx, sid] { return tx->DEBUG_IsArmedInShard(sid); });
+  }
+
   // Handle for a transaction parked mid-callback while holding running_tx_.
   struct InlineHold {
     fb2::Done parked, release;
@@ -492,6 +502,138 @@ TEST_F(TransactionTest, SingleHopAsyncDrainsDeferredPoll) {
     OnShard(0, [] { EngineShard::tlocal()->PollExecution("test_unstick", nullptr); });
   fb_v.Join();
   ASSERT_TRUE(v_ran) << "V was stranded: the poll deferred by Z's async hop was never replayed";
+}
+
+// T is blocked on shards 0 and 2 and woken on shard 2. Its action hop poll on shard 0 is dropped
+// while X, run by a drain on a connection fiber, holds running_tx_. A repoll without trans does
+// not reach T, so the drain must replay the poll with T.
+TEST_F(TransactionTest, BlockedTxPollDroppedDuringReplay) {
+  ASSERT_EQ(0u, Shard("a", shard_set->size()));
+  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+  ASSERT_EQ(2u, Shard("z", shard_set->size()));
+
+  static CommandId cid_t{"tx_test_rp_t", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_h{"tx_test_rp_h", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_x{"tx_test_rp_x", 0, -1, 1, -1, acl::NONE};
+
+  auto tx_t = MakeTx(&cid_t, {"x", "z"});
+  auto tx_h = MakeTx(&cid_h, {"a"});
+  auto tx_x = MakeTx(&cid_x, {"a"});
+
+  // T: first hop, then it watches once t_watch fires, then its action hop.
+  fb2::Done t_first_hop, t_watch, t_done;
+  auto fb_t = pp_->at(1)->LaunchFiber([&] {
+    tx_t->Execute(Noop, false);
+    t_first_hop.Notify();
+    t_watch.Wait();
+    auto ready = [](EngineShard*, const DbContext&, std::string_view) {
+      return KeyReadyResult::kReady;
+    };
+    facade::ConnectionContext cntx{nullptr};
+    auto tp = Transaction::time_point::max();
+    ASSERT_EQ(OpStatus::OK, tx_t->WaitOnWatch(tp, Transaction::kShardArgs, ready, &cntx));
+    tx_t->Execute(Noop, true);
+    t_done.Notify();
+  });
+  ASSERT_TRUE(t_first_hop.WaitFor(5s));
+
+  // H parks inline holding running_tx_: the polls of T's watch hop and X's first hop drop.
+  auto h = ParkHoldingRunningTx(0, tx_h.get());
+  ASSERT_TRUE(h->WaitParked());
+  t_watch.Notify();
+  ASSERT_TRUE(PollDropped(tx_t.get(), 0, 1));
+
+  fb2::Done x_parked, x_release, x_last;
+  auto fb_x = pp_->at(1)->LaunchFiber([&] {
+    tx_x->Execute(
+        [&](Transaction*, EngineShard*) {
+          x_parked.Notify();
+          x_release.Wait();
+          return OpStatus::OK;
+        },
+        false);
+    x_last.Wait();
+    tx_x->Execute(Noop, true);
+  });
+  ASSERT_TRUE(PollDropped(tx_x.get(), 0, 1));
+
+  // H's drain runs T's watch hop and parks X. T's action hop poll drops and X stays the
+  // continuation.
+  h->release.Notify();
+  ASSERT_TRUE(x_parked.WaitFor(5s));
+  OnShard(2, [] {
+    auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(2);
+    bc->Awaken(0, "z");
+    bc->NotifyPending();
+  });
+  ASSERT_TRUE(PollDropped(tx_t.get(), 0, 1));
+  x_release.Notify();
+  h->fiber.Join();
+
+  bool t_ran = t_done.WaitFor(5s);
+  if (!t_ran)  // unstick T so the test fails instead of hanging
+    shard_set->Await(0, [&] { EngineShard::tlocal()->PollExecution("test_unstick", tx_t.get()); });
+  fb_t.Join();
+  EXPECT_TRUE(t_ran) << "T was stranded on shard 0";
+  x_last.Notify();
+  fb_x.Join();
+}
+
+// T is blocked on shard 0 and woken there, but its action hop poll is dropped because a fiber
+// other than the shard queue fiber holds running_tx_, e.g. a drain replaying another blocked
+// transaction. The holder's drain must replay the poll with T. Until T runs, its shard's
+// HasAwakedTransaction() also stops the tx queue.
+TEST_F(TransactionTest, AwakenedTxPollDroppedWhileRunning) {
+  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+
+  static CommandId cid_t{"tx_test_aw_t", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_h{"tx_test_aw_h", 0, -1, 1, -1, acl::NONE};
+
+  auto tx_t = MakeTx(&cid_t, {"x"});
+  auto tx_h = MakeTx(&cid_h, {"a"});  // only stands for the holder of running_tx_
+
+  fb2::Done t_done;
+  auto fb_t = pp_->at(1)->LaunchFiber([&] {
+    tx_t->Execute(Noop, false);
+    auto ready = [](EngineShard*, const DbContext&, std::string_view) {
+      return KeyReadyResult::kReady;
+    };
+    facade::ConnectionContext cntx{nullptr};
+    auto tp = Transaction::time_point::max();
+    ASSERT_EQ(OpStatus::OK, tx_t->WaitOnWatch(tp, Transaction::kShardArgs, ready, &cntx));
+    tx_t->Execute(Noop, true);
+    t_done.Notify();
+  });
+
+  auto blocking_controller = [] {
+    return namespaces->GetDefaultNamespace().GetBlockingController(0);
+  };
+  ASSERT_TRUE(AwaitOnShard(0, [&] {
+    auto* bc = blocking_controller();
+    return bc && bc->HasBlockedTransactions();
+  }));
+
+  // Wake T, then hold running_tx_ from this fiber before T's action hop poll runs.
+  OnShard(0, [&] {
+    auto* bc = blocking_controller();
+    bc->Awaken(0, "x");
+    bc->NotifyPending();
+    EngineShard::tlocal()->set_running_tx(tx_h.get());
+  });
+  ASSERT_TRUE(PollDropped(tx_t.get(), 0, 1));
+
+  // Release running_tx_ and drain, as a holder off the shard queue does when done.
+  OnShard(0, [] {
+    EngineShard* shard = EngineShard::tlocal();
+    shard->set_running_tx(nullptr);
+    shard->PollExecutionIfDeferred();
+  });
+
+  bool t_ran = t_done.WaitFor(5s);
+  if (!t_ran)  // unstick T so the test fails instead of hanging
+    shard_set->Await(0, [&] { EngineShard::tlocal()->PollExecution("test_unstick", tx_t.get()); });
+  fb_t.Join();
+  EXPECT_TRUE(t_ran) << "T awakened on shard 0 was stranded";
 }
 
 namespace {
