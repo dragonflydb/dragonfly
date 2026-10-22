@@ -286,7 +286,7 @@ class DbSlice {
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
 
-  // Returns slot statistics for db 0.
+  // Returns slot statistics summed across all active databases.
   SlotStats GetSlotStats(SlotId sid) const;
 
   void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {

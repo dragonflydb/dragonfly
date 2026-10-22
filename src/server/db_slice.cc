@@ -546,11 +546,13 @@ auto DbSlice::GetStats() const -> Stats {
 }
 
 SlotStats DbSlice::GetSlotStats(SlotId sid) const {
-  CHECK(db_arr_[0]);
-  // slots_stats is null outside real cluster mode.
-  if (!db_arr_[0]->slots_stats)
-    return {};
-  return db_arr_[0]->slots_stats[sid];
+  SlotStats stats;
+  for (const auto& db : db_arr_) {
+    // slots_stats is null outside real cluster mode.
+    if (db && db->slots_stats)
+      stats += db->slots_stats[sid];
+  }
+  return stats;
 }
 
 DbSlice::AutoUpdater::AutoUpdater() {
