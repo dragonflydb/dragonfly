@@ -788,15 +788,12 @@ void Transaction::ScheduleInternal() {
     if (unique_shard_cnt_ > 1)
       txid_ = op_seq.fetch_add(1, memory_order_relaxed);
 
-    run_barrier_.Start(unique_shard_cnt_);
-
     if (CanRunInlined()) {
-      // We increase the barrier above for this branch as well, in order to calm the DCHECKs
-      // in the lower-level code. It's not really needed otherwise because we run inline.
+      // Nobody waits for an inline schedule, so it doesn't use run_barrier_. A callback that runs
+      // optimistically here is covered by running_tx() == this instead (see GetOpArgs).
 
       // single shard schedule operation can't fail
       CHECK(ScheduleInShard(EngineShard::tlocal(), optimistic_exec));
-      run_barrier_.Dec();
 
       // If the optimistic run above held running_tx_ and deferred any poll on this shard,
       // drain it now. Uses the same needs_repoll_ mechanism as PollExecution's re-drive loop.
@@ -804,6 +801,7 @@ void Transaction::ScheduleInternal() {
       break;
     }
 
+    run_barrier_.Start(unique_shard_cnt_);
     atomic_uint32_t fail_cnt{0};
 
     auto cb = [this, optimistic_exec, &fail_cnt] {
@@ -1248,7 +1246,7 @@ IntentLock::Mode Transaction::LockMode() const {
 
 OpArgs Transaction::GetOpArgs(EngineShard* shard) const {
   DCHECK(IsActive(shard->shard_id()));
-  DCHECK((multi_ && multi_->role == SQUASHED_STUB) || (run_barrier_.DEBUG_Count() > 0));
+  DCHECK(IsSquashedStub() || run_barrier_.DEBUG_Count() > 0 || shard->running_tx() == this);
   return OpArgs{shard, this, GetDbContext()};
 }
 
@@ -1598,12 +1596,6 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
   }
 
   shard->FinalizeMulti(this);
-}
-
-bool Transaction::IsGlobal() const {
-  // Please note that a transaction can be non-global even if multi_->mode == GLOBAL.
-  // It happens when a transaction is squashed and switches to execute differrent commands.
-  return global_;
 }
 
 // Runs only in the shard thread.

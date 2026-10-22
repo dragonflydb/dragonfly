@@ -341,6 +341,17 @@ TEST_F(TransactionTest, OptimisticFastPathSkipsLockTable) {
       << "fast path should run inline without ever registering an intent lock";
 }
 
+// NO_KEY_TRANSACTIONAL commands have no fingerprints. Like Acquire and Release, IsLockFree must not
+// access their DB, which might not be active.
+TEST_F(TransactionTest, IsLockFreeWithoutKeys) {
+  OnShard(0, [] {
+    DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(0);
+    db_slice.ActivateDb(3);  // leaves DB 2 inactive
+    ASSERT_FALSE(db_slice.IsDbValid(2));
+    EXPECT_TRUE(db_slice.IsLockFree(IntentLock::EXCLUSIVE, KeyLockArgs{.db_index = 2, .fps = {}}));
+  });
+}
+
 // Verifies Tasks 2.2/2.3/2.4 of issue #7458: while a transaction (Z) is mid-callback (running_tx_
 // set, simulating a preemption) and never registered a real lock for its own key (fast path), a
 // new *conflicting* transaction (W) scheduling on the same shard must lazily register Z's lock on

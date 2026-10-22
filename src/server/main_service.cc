@@ -1004,6 +1004,7 @@ void RegisterMutableFlags(ConfigRegistry* reg, absl::Span<const std::string> nam
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
+  LockTagOptions::InitFromFlags();
   server.max_map_field_len = absl::GetFlag(FLAGS_listpack_max_field_len);
   server.max_listpack_map_bytes = absl::GetFlag(FLAGS_listpack_max_bytes);
   facade::Connection::Init(pp_.size());

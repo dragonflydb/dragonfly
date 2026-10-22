@@ -241,8 +241,6 @@ void BaseFamilyTest::TearDown() {
 
 void BaseFamilyTest::ResetService() {
   if (service_ != nullptr) {
-    TEST_InvalidateLockTagOptions();
-
     ShutdownService();
   }
 
