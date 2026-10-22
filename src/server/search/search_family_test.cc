@@ -4178,8 +4178,8 @@ TEST_F(SearchFamilyTest, AbsentTermKeepsScoreOrder) {
   }
 }
 
-// A hash field with a TTL expires lazily without re-indexing the document, so its posting lists
-// keep a freed DocId once the key is gone. Searches must skip such ids.
+// A hash field with a TTL expires lazily without re-indexing the document. Removing the document
+// must still drop what the field was indexed with, so a reused DocId inherits nothing.
 TEST_F(SearchFamilyTest, FieldExpiryStalePostingIsSkipped) {
   EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
                  "NOSTEM"}),
@@ -4193,11 +4193,98 @@ TEST_F(SearchFamilyTest, FieldExpiryStalePostingIsSkipped) {
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "WITHSCORES"}), kNoResults);
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "LIMIT", "0", "0"}), kNoResults);
 
-  // The freed DocId is reused by d:2 and found through its own term. The stale "hello" posting
-  // now resolves to d:2; dropping it needs content-independent removal (follow-up).
   EXPECT_THAT(Run({"HSET", "d:2", "title", "other"}), IntArg(1));
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "other", "NOCONTENT"}), AreNoContentDocIds("d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+}
+
+// The kept values go with the document: a hash without TTLs that reuses its DocId is removed by
+// its own content.
+TEST_F(SearchFamilyTest, FieldExpiryValuesGoWithDoc) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  EXPECT_THAT(Run({"HSETEX", "d:1", "100", "title", "hello"}), IntArg(1));
+  EXPECT_THAT(Run({"DEL", "d:1"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "other"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "again"}), IntArg(0));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "other", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "again", "NOCONTENT"}), AreNoContentDocIds("d:2"));
+}
+
+// Removal still expires the fields it takes from the kept values, so deleting the last live field
+// deletes the key.
+TEST_F(SearchFamilyTest, FieldExpiryLastFieldDeleteRemovesKey) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  EXPECT_THAT(Run({"HSETEX", "d:1", "1", "title", "hello"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "d:1", "keep", "x"}), IntArg(1));
+  AdvanceTime(2000);
+
+  EXPECT_THAT(Run({"HDEL", "d:1", "keep"}), IntArg(1));
+  EXPECT_THAT(Run({"EXISTS", "d:1"}), IntArg(0));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "LIMIT", "0", "0"}), kNoResults);
+}
+
+// A document that stays alive keeps its DocId across the HSET bracket.
+TEST_F(SearchFamilyTest, FieldExpiryLiveDocDropsExpiredValues) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx",   "ON",   "HASH",   "PREFIX",  "1",  "d:",
+                 "SCHEMA",    "title", "TEXT", "NOSTEM", "title",   "AS", "title_tag",
+                 "TAG",       "t",     "TAG",  "n",      "NUMERIC", "g",  "GEO"}),
+            "OK");
+  Run({"HSETEX", "d:1", "1", "title", "hello", "t", "red", "n", "5", "g", "13.4,52.5"});
+  AdvanceTime(2000);
+  Run({"HSET", "d:1", "title", "world"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@title_tag:{hello}", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@t:{red}", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@n:[5 5]", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@g:[13.4 52.5 10 km]", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "t"}), ArrLen(0));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "world", "NOCONTENT"}), AreNoContentDocIds("d:1"));
+}
+
+// Removal stems with the language the document was indexed with, even after it expired.
+TEST_F(SearchFamilyTest, FieldExpiryLanguageFieldStems) {
+  Run({"FT.CREATE", "lf_idx", "LANGUAGE", "english", "LANGUAGE_FIELD", "lang", "SCHEMA", "body",
+       "TEXT"});
+  Run({"HSET", "d:de", "body", "wir laufen", "lang", "german"});
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "@body:(lauf)", "NOCONTENT"}),
+              AreNoContentDocIds("d:de"));
+
+  EXPECT_THAT(Run({"FIELDEXPIRE", "d:de", "1", "lang"}), RespElementsAre(IntArg(1)));
+  AdvanceTime(2000);
+  Run({"HSET", "d:de", "body", "nichts"});
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "@body:(lauf)", "NOCONTENT"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, FieldExpiryIndexBuiltAfterTtl) {
+  Run({"HSETEX", "d:1", "1", "title", "hello"});
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  WaitForIndexReady("idx");
+  AdvanceTime(2000);
+  Run({"HSET", "d:1", "title", "world"});
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, FieldExpirySynUpdateDropsExpiredTerm) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  Run({"HSET", "d:1", "keep", "x"});
+  Run({"HSETEX", "d:1", "1", "title", "hello"});
+  AdvanceTime(2000);
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g", "hello", "hi"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hi", "NOCONTENT"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, FtAlterKeepsSynonyms) {
@@ -9575,6 +9662,7 @@ TEST_F(SearchFamilyTest, SearchDeletesEmptyHash) {
   for (int i = 0; i < 10; ++i) {
     EXPECT_EQ(0, CheckedInt({"EXISTS", absl::StrCat("d:", i)}));
   }
+  EXPECT_THAT(Run({"ft.search", "idx", "bar0", "LIMIT", "0", "0"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, SynUpdateExpiredDocCrash) {

@@ -6,6 +6,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/container/inlined_vector.h>
 
 #include <cstdint>
 #include <memory>
@@ -621,6 +622,11 @@ class ShardDocIndex {
   // Remove a DocId from all HNSW indices for this index.
   void RemoveFromAllHnswIndices(search::DocId doc_id);
 
+  // FieldIndices::Add/Remove of one document. Lazy field expiry can drop a hash field before its
+  // document is removed, so the values of fields with a TTL are kept until then.
+  bool AddToIndices(DocId id, const DbContext& db_cntx, const PrimeValue& pv);
+  void RemoveFromIndices(DocId id, const DbContext& db_cntx, const PrimeValue& pv);
+
   // Initialize per-shard HNSW wrappers from schema + global registry.
   void InitHnswShardIndices();
 
@@ -634,6 +640,16 @@ class ShardDocIndex {
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
   Synonyms synonyms_;
+
+  // Hash fields read by TEXT, TAG, NUMERIC and GEO removal and by the stemmer choice, sorted.
+  absl::InlinedVector<std::string_view, 4> content_fields_;
+
+  using ExpiringValue = std::pair<std::string_view /*field*/, search::StatelessString>;
+  using ExpiringValues =
+      absl::InlinedVector<ExpiringValue, 1, StatelessSearchAllocator<ExpiringValue>>;
+  absl::flat_hash_map<DocId, ExpiringValues, absl::Hash<DocId>, std::equal_to<DocId>,
+                      StatelessSearchAllocator<std::pair<const DocId, ExpiringValues>>>
+      expiring_values_;
 
   std::unique_ptr<search::IndexBuilder> builder_;
 

@@ -63,6 +63,34 @@ PreservedEntry ExtractField(PrimeValue& pv, string_view field) {
   return PreservedEntry(old.release(), deleter);
 }
 
+// Serves the recorded values, sorted by field name, of fields that had a TTL when the document was
+// indexed.
+class ExpiringValuesAccessor : public BaseAccessor {
+ public:
+  using Values = absl::Span<const std::pair<std::string_view, search::StatelessString>>;
+
+  ExpiringValuesAccessor(const BaseAccessor& doc, Values values) : doc_{doc}, values_{values} {
+  }
+
+  std::optional<StringList> GetStrings(std::string_view field) const override {
+    // Read the hash anyway: the read expires the field, and the caller then checks whether the
+    // hash became empty.
+    auto live = doc_.GetStrings(field);
+    auto it = rng::lower_bound(values_, field, {}, &Values::value_type::first);
+    if (it != values_.end() && it->first == field)
+      return StringList{std::string_view{it->second}};
+    return live;
+  }
+
+  SearchDocData SerializeAll(const DocFieldTypes& types) const override {
+    return doc_.SerializeAll(types);
+  }
+
+ private:
+  const BaseAccessor& doc_;
+  Values values_;
+};
+
 // Sort-index aliases keyed by their output names.
 using SortIndiciesFieldsList =
     std::vector<std::pair<string_view /*sort index alias*/, string_view /*output name*/>>;
@@ -412,6 +440,28 @@ ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index, unsigned* hash_in
       hash_index_lifetime_{base_->type == DocIndex::HASH ? hash_index_count : nullptr},
       key_index_{} {
   DCHECK(base_->type != DocIndex::HASH || hash_index_count);
+  if (base_->type != DocIndex::HASH)
+    return;
+
+  using search::SchemaField;
+  auto add_field = [this](std::string_view field) {
+    if (rng::find(content_fields_, field) == content_fields_.end())
+      content_fields_.push_back(field);
+  };
+  bool stems = false;
+  for (const auto& [_, field] : base_->schema.fields) {
+    if (field.flags & SchemaField::NOINDEX)
+      continue;
+    if (field.type == SchemaField::TEXT || field.type == SchemaField::TAG ||
+        field.type == SchemaField::NUMERIC || field.type == SchemaField::GEO)
+      add_field(field.identifier);
+    if (field.type == SchemaField::TEXT)
+      stems |= !std::get<SchemaField::TextParams>(field.special_params).no_stem;
+  }
+  // Only stemming TEXT indices read the language field.
+  if (stems && !base_->schema.language_field.empty())
+    add_field(base_->schema.language_field);
+  rng::sort(content_fields_);
 }
 
 ShardDocIndex::~ShardDocIndex() {
@@ -436,6 +486,7 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, 
   }
 
   indices_.emplace(base_->schema, base_->options, mr, &synonyms_);
+  expiring_values_.clear();
 
   // Create builder and start indexing
   builder_ = std::make_unique<search::IndexBuilder>(this);
@@ -488,12 +539,11 @@ void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_vie
         continue;
       }
 
-      auto accessor = GetAccessor(op_args.db_cntx, (*it)->second);
       if (remove) {
-        indices_->Remove(doc_id, *accessor);
+        RemoveFromIndices(doc_id, op_args.db_cntx, (*it)->second);
       } else {
         // Add in this case always succeeds, because we are adding the same document again
-        [[maybe_unused]] bool res = indices_->Add(doc_id, *accessor);
+        [[maybe_unused]] bool res = AddToIndices(doc_id, op_args.db_cntx, (*it)->second);
         DCHECK(res);
       }
     }
@@ -529,9 +579,8 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::AddDoc(string_view key, const
   if (key_index_.Find(key))
     return std::nullopt;
 
-  auto accessor = GetAccessor(db_cntx, pv);
   DocId id = key_index_.Add(key);
-  if (!indices_->Add(id, *accessor)) {
+  if (!AddToIndices(id, db_cntx, pv)) {
     key_index_.Remove(id);
     return std::nullopt;
   }
@@ -540,9 +589,38 @@ std::optional<ShardDocIndex::DocId> ShardDocIndex::AddDoc(string_view key, const
 }
 
 void ShardDocIndex::RemoveDoc(DocId id, const DbContext& db_cntx, const PrimeValue& pv) {
-  auto accessor = GetAccessor(db_cntx, pv);
   key_index_.Remove(id);
-  indices_->Remove(id, *accessor);
+  RemoveFromIndices(id, db_cntx, pv);
+}
+
+bool ShardDocIndex::AddToIndices(DocId id, const DbContext& db_cntx, const PrimeValue& pv) {
+  if (!indices_->Add(id, *GetAccessor(db_cntx, pv)))
+    return false;
+
+  // Only hash fields expire; every other change of the content is bracketed by RemoveDoc/AddDoc.
+  if (pv.ObjType() != OBJ_HASH || pv.Encoding() != kEncodingStrMap2 || !pv.HasMemberExpiration())
+    return true;
+
+  ExpiringValues values;
+  auto* sm = static_cast<StringMap*>(pv.RObjPtr());
+  for (string_view field : content_fields_) {
+    if (auto it = sm->Find(field); it != sm->end() && it.HasExpiry())
+      values.emplace_back(field, string_view{it->second, sdslen(it->second)});
+  }
+  if (!values.empty())
+    expiring_values_.insert_or_assign(id, std::move(values));
+  return true;
+}
+
+void ShardDocIndex::RemoveFromIndices(DocId id, const DbContext& db_cntx, const PrimeValue& pv) {
+  auto accessor = GetAccessor(db_cntx, pv);
+  auto it = expiring_values_.find(id);
+  if (it == expiring_values_.end()) {
+    indices_->Remove(id, *accessor);
+    return;
+  }
+  indices_->Remove(id, ExpiringValuesAccessor{*accessor, it->second});
+  expiring_values_.erase(it);
 }
 
 // --- HnswShardIndex implementation ---
