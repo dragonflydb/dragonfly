@@ -145,7 +145,15 @@ def deployment_ssh_command(_bastion: str | None, remote_command: list[str]) -> l
         command = shlex.split(_deployment_ssh_connection_command)
         if command[:3] != ["gcloud", "compute", "ssh"]:
             raise ValueError("--deployment-ssh-conn-command must start with 'gcloud compute ssh'")
-        return [*command, f"--command={shlex.join(remote_command)}"]
+        quiet = [] if "--quiet" in command else ["--quiet"]
+        return [
+            *command,
+            *quiet,
+            f"--command={shlex.join(remote_command)}",
+            "--ssh-flag=-oBatchMode=yes",
+            "--ssh-flag=-oNumberOfPasswordPrompts=0",
+            "--ssh-flag=-oKbdInteractiveAuthentication=no",
+        ]
     raise ValueError(deployment_ssh_configuration_message())
 
 
@@ -217,6 +225,120 @@ def preflight_deployment_ssh(supplied_command: str | None) -> None:
                 "Future commands will use it automatically; do not repeat "
                 "--deployment-ssh-conn-command."
             )
+
+
+def check_dfadmin_authentication(environment: str) -> str | None:
+    try:
+        preflight_dfadmin(environment)
+    except RuntimeError as error:
+        return str(error)
+    return None
+
+
+def check_gcx_authentication(context: str) -> str | None:
+    try:
+        result = subprocess.run(
+            gcx_command(context, "datasources", "list", "-o", "json"),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=DEFAULT_CONTROL_PLANE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return str(error)
+    if result.returncode:
+        return result.stderr.strip() or result.stdout.strip() or "no output"
+    return None
+
+
+def check_deployment_ssh_authentication() -> str | None:
+    try:
+        result = subprocess.run(
+            ["gcloud", "--quiet", "auth", "print-access-token"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return str(error)
+    if result.returncode:
+        return result.stderr.strip() or result.stdout.strip() or "no output"
+    return None
+
+
+def preflight_required_authentication(
+    environment: str,
+    requires_dfadmin: bool,
+    requires_gcx: bool,
+    requires_deployment_ssh: bool,
+    ssh_configured: bool,
+) -> None:
+    failures = []
+    if requires_dfadmin:
+        detail = check_dfadmin_authentication(environment)
+        if detail:
+            failures.append(
+                (
+                    f"dfadmin access via Google Cloud (--env {environment})",
+                    f"{detail}\n"
+                    f"   Authenticate outside dfly-inspect: dfadmin auth login --env {environment}",
+                )
+            )
+    if requires_gcx:
+        detail = check_gcx_authentication(GCX_CONTEXTS[environment])
+        if detail:
+            failures.append(
+                (
+                    f"Grafana dashboard access via gcx (--context {GCX_CONTEXTS[environment]})",
+                    f"{detail}\n"
+                    "   Authenticate outside dfly-inspect using the approved gcx login workflow.",
+                )
+            )
+    if requires_deployment_ssh:
+        if not ssh_configured:
+            failures.append(
+                (
+                    "SSH access through the production proxy server (bastion)",
+                    "The approved gcloud compute ssh command has not been configured.\n"
+                    "   Authenticate to the proxy server outside dfly-inspect, then rerun with "
+                    "--deployment-ssh-conn-command. Example:\n"
+                    "   dfly-inspect <command> <target> --deployment-ssh-conn-command "
+                    '\'gcloud compute ssh --zone "ZONE" "BASTION_INSTANCE" '
+                    '--project "PROJECT_ID"\'\n'
+                    "   BASTION_INSTANCE is the Google Compute Engine instance name, not an IP "
+                    "address or a local SSH host alias.\n"
+                    "   Recommendation: keep the authenticated proxy-server terminal session open "
+                    "in a separate window while using dfly-inspect.",
+                )
+            )
+        else:
+            detail = check_deployment_ssh_authentication()
+            if detail:
+                failures.append(
+                    (
+                        "SSH access through the production proxy server (bastion)",
+                        f"{detail}\n"
+                        "   Authenticate to the proxy server outside dfly-inspect, then retry.\n"
+                        "   Recommendation: keep the authenticated proxy-server terminal session "
+                        "open in a separate window while using dfly-inspect.",
+                    )
+                )
+    if failures:
+        raise RuntimeError(
+            "To continue, authenticate or configure the required access:\n"
+            + "\n".join(
+                f"  {index}. {name}\n     {detail}"
+                for index, (name, detail) in enumerate(failures, start=1)
+            )
+            + "\n"
+            + color_message(
+                ANSI_YELLOW,
+                "NOTE: dfly-inspect does not open interactive authentication prompts. "
+                "Authenticate outside the tool, then retry.",
+                sys.stderr,
+            )
+        )
 
 
 class InspectArgumentParser(argparse.ArgumentParser):
@@ -1392,10 +1514,13 @@ def show_schema(environment: str, target: str, schema: str) -> int:
     print("  name         nested object/map")
     print("  name[]       list/array")
     print("  <node_id>    dynamic-key map; the key is a resource ID, not a literal field name")
-    print("  [sensitive]  values are redacted by multi")
+    print("  [sensitive]  values are redacted by show-multi")
     print("\nCompare fields:")
-    print(f"  dfly-inspect multi {resource_id} --resource {resource_type} --field status.state")
-    print(f"  dfly-inspect multi {resource_id} --resource {resource_type} --prefix status")
+    print(
+        f"  dfly-inspect show-multi {resource_id} --resource {resource_type} "
+        "--field status.state"
+    )
+    print(f"  dfly-inspect show-multi {resource_id} --resource {resource_type} --prefix status")
     return 0
 
 
@@ -1456,6 +1581,12 @@ def infer_multi_resource_type(targets: list[str]) -> str:
 
 def is_sensitive_path(path: str) -> bool:
     return any(is_sensitive_field(component) for component in path.split("."))
+
+
+def validate_max_elements(max_elements: int | None) -> None:
+    """Validate an optional selection cap; redundant caps on one item are harmless."""
+    if max_elements is not None and max_elements <= 0:
+        raise ValueError("--max-elements must be positive")
 
 
 def normalize_show_payload(resource_type: str, payload: object) -> object:
@@ -1591,16 +1722,11 @@ def multi_show(
         raise ValueError(f"--workers must be between 1 and {DEFAULT_MULTI_WORKERS}")
     if maximum_width is not None and maximum_width <= 0:
         raise ValueError("--max-column-width must be positive")
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
-    if not fields and not prefix:
-        raise ValueError("supply at least one --field or --prefix")
+    validate_max_elements(max_elements)
     if isinstance(output_format, bool):
         output_format = "json" if output_format else "table"
     resource_ids = resolve_multi_resource_ids(environment, resource_type, targets)
     total_resources = len(resource_ids)
-    if max_elements is not None and total_resources == 1:
-        raise ValueError("--max-elements cannot be used when only one resource is selected")
     resource_ids = resource_ids[:max_elements]
     truncated = len(resource_ids) < total_resources
 
@@ -1631,6 +1757,14 @@ def multi_show(
         *(nested_field_paths(payload) for payload in successful_payloads.values())
     )
     columns = list(dict.fromkeys(fields))
+    if not columns and not prefix:
+        columns = sorted(
+            {
+                path
+                for payload in successful_payloads.values()
+                for path in flatten_scalar_fields(payload)
+            }
+        )
     for field in columns:
         field_values = {
             resource_id: flatten_scalar_fields(payload)
@@ -1720,7 +1854,7 @@ def multi_show(
             row.update({field: "nil" for field in columns})
         rows.append(row)
     report = {
-        "command": "multi",
+        "command": "show-multi",
         "environment": environment,
         "resource_type": resource_type,
         "targets": targets,
@@ -1822,8 +1956,7 @@ def archive_logs(
     validate_loki_limit(limit, "limit")
     if max_workers is not None and max_workers <= 0:
         raise ValueError("max-workers must be positive")
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
+    validate_max_elements(max_elements)
     if datetime.strptime(end, "%Y-%m-%dT%H:%M:%SZ") <= datetime.strptime(
         start, "%Y-%m-%dT%H:%M:%SZ"
     ):
@@ -1862,8 +1995,6 @@ def archive_logs(
             )
 
     total_nodes = len(resolved_nodes)
-    if max_elements is not None and total_nodes == 1:
-        raise ValueError("--max-elements cannot be used when only one node is selected")
     resolved_nodes = dict(sorted(resolved_nodes.items())[:max_elements])
     truncated = len(resolved_nodes) < total_nodes
 
@@ -1950,8 +2081,7 @@ def archive_logs(
 def show_addresses(
     environment: str, targets: list[str], json_output: bool = False, max_elements: int | None = None
 ) -> int:
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
+    validate_max_elements(max_elements)
     nodes: dict[str, tuple[str, str, str, str]] = {}
     unresolved_node_ids = set()
     for target in targets:
@@ -1974,8 +2104,6 @@ def show_addresses(
             )
     all_node_ids = sorted(set(nodes) | unresolved_node_ids)
     total_nodes = len(all_node_ids)
-    if max_elements is not None and total_nodes == 1:
-        raise ValueError("--max-elements cannot be used when only one node is selected")
     selected_node_ids = all_node_ids[:max_elements]
     truncated = len(selected_node_ids) < total_nodes
     for node_id in selected_node_ids:
@@ -2121,8 +2249,7 @@ def slowlog_report(
         raise ValueError("--limit must be between 0 and 128")
     if workers < 1 or workers > DEFAULT_MULTI_WORKERS:
         raise ValueError(f"--workers must be between 1 and {DEFAULT_MULTI_WORKERS}")
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
+    validate_max_elements(max_elements)
     if output is not None and output_format == "table":
         raise ValueError("--output requires --format json or --format markdown")
     if dry_run:
@@ -2732,15 +2859,12 @@ def collect_evidence(
     max_elements: int | None = None,
     deployment_ssh_connection_command: str | None = None,
 ) -> int:
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
+    validate_max_elements(max_elements)
     nodes, unresolved_targets = resolve_collection_nodes(environment, targets)
     report = list(unresolved_targets)
     total_nodes = len(nodes)
     if not nodes:
         raise RuntimeError("no nodes could be resolved from the supplied targets")
-    if max_elements is not None and total_nodes == 1:
-        raise ValueError("--max-elements cannot be used when only one node is selected")
     nodes = dict(sorted(nodes.items())[:max_elements])
     if len(nodes) < total_nodes:
         unresolved_targets.append(
@@ -4046,8 +4170,7 @@ def run_script_on_nodes(
         raise ValueError(
             f"--timeout-seconds must be between 1 and {MAX_SCRIPT_RUN_TIMEOUT_SECONDS}"
         )
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
+    validate_max_elements(max_elements)
     if script_path is not None:
         if not script_path.is_file():
             raise ValueError(f"--script must name a regular file: {script_path}")
@@ -4070,8 +4193,6 @@ def run_script_on_nodes(
     total_nodes = len(nodes)
     if not nodes:
         raise RuntimeError("no nodes could be resolved from the supplied targets")
-    if max_elements is not None and total_nodes == 1:
-        raise ValueError("--max-elements cannot be used when only one node is selected")
     nodes = dict(sorted(nodes.items())[:max_elements])
     if len(nodes) < total_nodes:
         unresolved_targets.append(
@@ -4421,8 +4542,7 @@ def health_report(
 ) -> int:
     if not 1 <= workers <= DEFAULT_HEALTH_WORKERS:
         raise ValueError(f"--workers must be between 1 and {DEFAULT_HEALTH_WORKERS}")
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
+    validate_max_elements(max_elements)
 
     datastore_id = health_datastore_id(environment, target)
     all_nodes = get_datastore_nodes(environment, datastore_id)
@@ -4808,8 +4928,7 @@ def diff_config(
         raise ValueError("--parameter '*' cannot be combined with named parameters")
     if not 1 <= workers <= DEFAULT_MULTI_WORKERS:
         raise ValueError(f"--workers must be between 1 and {DEFAULT_MULTI_WORKERS}")
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
+    validate_max_elements(max_elements)
     if report_only and output_format == "json":
         raise ValueError("--report-only is only available with table or vertical output")
 
@@ -4817,8 +4936,6 @@ def diff_config(
     total_nodes = len(node_ids)
     if total_nodes < 2:
         raise ValueError("diff-config requires at least two resolved nodes to compare")
-    if max_elements is not None and total_nodes == 1:
-        raise ValueError("--max-elements cannot be used when only one node is selected")
     node_ids = node_ids[:max_elements]
     if len(node_ids) < 2:
         raise ValueError("--max-elements must select at least two nodes for diff-config")
@@ -5573,8 +5690,7 @@ def discover_datastore(
     show_context: bool = True,
     report_out: list[dict[str, object]] | None = None,
 ) -> int:
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
+    validate_max_elements(max_elements)
     target_shard_id = ""
     if target.startswith("node_"):
         target_shard_id, datastore_id = get_node_details(environment, target)
@@ -5646,8 +5762,6 @@ def discover_datastore(
     result_shards = []
     rows = []
     selected_total_shards = len(shards)
-    if max_elements is not None and selected_total_shards == 1:
-        raise ValueError("--max-elements cannot be used when only one shard is selected")
     selected_shards = sorted(shards.items())[:max_elements]
     truncated = len(selected_shards) < selected_total_shards
     for shard_id, members in selected_shards:
@@ -5939,14 +6053,26 @@ def discover_datastores(
 def check_pair(
     environment: str,
     first_node_id: str,
-    second_node_id: str,
+    second_node_id: str | None,
     parameter: str,
     dry_run: bool = False,
 ) -> int:
     if dry_run:
-        if not first_node_id.startswith("node_") or not second_node_id.startswith("node_"):
+        if not first_node_id.startswith("node_") or (
+            second_node_id is not None and not second_node_id.startswith("node_")
+        ):
             raise ValueError("node IDs must begin with 'node_'")
         print("Dry run: no control-plane or Redis requests will be sent.")
+        print(
+            f"Planned command: dfadmin-wrapper --env {environment} node show {first_node_id} "
+            "--output json"
+        )
+        if second_node_id is None:
+            print(
+                "Planned topology validation: resolve the supplied node's shard and require "
+                "exactly one peer."
+            )
+            return 0
         for node_id in (first_node_id, second_node_id):
             print(
                 f"Planned command: dfadmin-wrapper --env {environment} node show {node_id} --output json"
@@ -5964,6 +6090,30 @@ def check_pair(
             )
         return 0
     first_shard, first_datastore = get_node_details(environment, first_node_id)
+    if second_node_id is None:
+        if not first_shard:
+            print(
+                f"Pair validation: NOT APPLICABLE - could not identify a shard for {first_node_id}."
+            )
+            return 2
+        peer_node_ids = sorted(
+            node_id
+            for node_id in get_shard_node_ids(environment, first_shard)
+            if node_id != first_node_id
+        )
+        if not peer_node_ids:
+            print(
+                f"Pair validation: NOT APPLICABLE - {first_node_id} is the only node in "
+                f"{first_shard}; replication is not configured."
+            )
+            return 2
+        if len(peer_node_ids) > 1:
+            print(
+                f"Pair validation: FAIL - {first_shard} has {len(peer_node_ids)} peer nodes "
+                f"({', '.join(peer_node_ids)}). Supply the peer node explicitly."
+            )
+            return 2
+        second_node_id = peer_node_ids[0]
     second_shard, second_datastore = get_node_details(environment, second_node_id)
     first_role, first_replication = get_role(environment, first_node_id)
     second_role, second_replication = get_role(environment, second_node_id)
@@ -6136,8 +6286,7 @@ def migration_report(
     recover_malformed_history: bool,
     max_elements: int | None = None,
 ) -> int:
-    if max_elements is not None and max_elements <= 0:
-        raise ValueError("--max-elements must be positive")
+    validate_max_elements(max_elements)
     try:
         history_text = history_path.read_text()
     except OSError as error:
@@ -6209,8 +6358,6 @@ def migration_report(
         )
     records.sort(key=lambda record: (record["started_at"] or 0, record["migration_id"] or ""))
     total_records = len(records)
-    if max_elements is not None and total_records == 1:
-        raise ValueError("--max-elements cannot be used when only one migration is selected")
     records = records[:max_elements]
     truncated = len(records) < total_records
     result = {
@@ -6807,24 +6954,24 @@ def parse_arguments() -> argparse.Namespace:
 Commands:
     Command                Short command  Description
     ---------------------  -------------  -----------------------------------------------
-    discover               ds             Show primary-to-replica topology for a datastore.
     addresses              ad             Show node roles and public/private IP addresses.
-    replication-gap        rg             Compare key counts and runtime configuration for a node pair.
-    scan-compare           sc             Compare key existence between a primary and replica through bastion.
-    slot-ownership         so             Compare current CLUSTER SLOTS ownership for a datastore or node list.
-    migrations             mg             Summarize local migration history by shard, node, or datastore scope.
     audit                  au             Retrieve a bounded, redacted audit history for a resource.
-    health                 hl             Summarize bounded Redis health signals for the selected target nodes.
-    diff-config            dc             Compare explicit CONFIG GET parameters across nodes.
-    multi                  mu             Inspect compact schemas before comparing read-only resource fields.
-    logs                   lg             Retrieve one archived Dragonfly or agent log stream.
-    log-archiver           la             Retrieve archived logs for selected targets.
     bundle                 bu             Collect incident evidence, archived logs, and dashboard panels into one manifest.
-    slowlog                sl             Retrieve bounded Redis slowlog entries for selected targets.
     collect                co             Collect node evidence through the bastion and report results.
-    run-inspection-script  rs             Run a validated custom script on selected nodes.
-    explain                ex             Ask a named agent an operator question using compact dfadmin context.
     dashboard-panels       dp             Export selected panels, all panels, or a named dashboard section.
+    diff-config            dc             Compare explicit CONFIG GET parameters across nodes.
+    discover               ds             Show primary-to-replica topology for a datastore.
+    explain                ex             Ask a named agent an operator question using compact dfadmin context.
+    health                 hl             Summarize bounded Redis health signals for the selected target nodes.
+    log-archiver           la             Retrieve archived logs for selected targets.
+    logs                   lg             Retrieve one archived Dragonfly or agent log stream.
+    migrations             mg             Summarize local migration history by shard, node, or datastore scope.
+    replication-gap        rg             Compare key counts and runtime configuration for a replication pair.
+    run-inspection-script  rs             Run a validated custom script on selected nodes.
+    scan-compare           sc             Compare key existence between a primary and replica through bastion.
+    show-multi             sm             Show redacted resource fields or compare them across targets.
+    slot-ownership         so             Compare current CLUSTER SLOTS ownership for a datastore or node list.
+    slowlog                sl             Retrieve bounded Redis slowlog entries for selected targets.
 
 Unless stated otherwise, a target is a customer (cus_...), datastore (dst_...), shard (shard_...), or node (node_...).
 All commands use production by default.""",
@@ -6854,13 +7001,19 @@ All commands use production by default.""",
         "replication-gap",
         aliases=["rg"],
         help="compare key counts for a primary and replica pair",
-        description="Validate one primary/replica pair, compare their key counts, and display one runtime CONFIG GET value from both nodes.",
+        description="Validate one primary/replica pair, compare their key counts, and display one runtime CONFIG GET value from both nodes. With one node, resolve its sole shard peer automatically.",
         formatter_class=CommandHelpFormatter,
-        epilog="example: %(prog)s node_primary node_replica",
+        epilog=(
+            "examples:\n"
+            "  %(prog)s node_primary_or_replica\n"
+            "  %(prog)s node_primary node_replica"
+        ),
     )
-    gap_parser.add_argument("first_node_id", help="Either member of the primary and replica pair")
+    gap_parser.add_argument("first_node_id", help="A primary or replica node")
     gap_parser.add_argument(
-        "second_node_id", help="The other member of the primary and replica pair"
+        "second_node_id",
+        nargs="?",
+        help="Optional peer node; required when the shard has more than one peer",
     )
     gap_parser.add_argument(
         "--config-parameter",
@@ -7159,24 +7312,30 @@ All commands use production by default.""",
     )
 
     multi_parser = commands.add_parser(
-        "multi",
-        aliases=["mu"],
-        help="discover schemas or compare fields across topology resources",
-        description="Inspect a compact schema or compare selected read-only fields across targets.",
+        "show-multi",
+        aliases=["sm", "multi", "mu"],
+        help="show redacted resource fields or compare them across topology targets",
+        description=(
+            "Show all redacted scalar fields, inspect a compact schema, or compare selected "
+            "read-only fields across targets."
+        ),
         formatter_class=CommandHelpFormatter,
         epilog="""Schema output is a compact outline of a JSON record, not raw JSON:
     {a, b}       object fields whose values are scalars (string, number, boolean, or null)
     name         nested object/map
     name[]       list/array
     <node_id>    dynamic-key map; the key is a resource ID, not a literal field name
-    [sensitive]  values are redacted by multi
+    [sensitive]  values are redacted by show-multi
 
 Examples:
+    %(prog)s node_example
+    %(prog)s dst_example
+    %(prog)s dst_example --resource node
     %(prog)s node_example --schema
     %(prog)s dst_example --schema=node
     %(prog)s node_a node_b --field status.state
     %(prog)s shard_example --resource node --prefix status.health
-    %(prog)s dst_example --resource node --prefix spec.tier
+    %(prog)s dst_example --resource node --prefix config.version
     %(prog)s dst_example --field config.network.rate_limit --field status.state
     %(prog)s dst_example --resource node --field config.version.dragonfly --prefix instance
     %(prog)s dst_example --prefix status.health.dragonfly.local.replication
@@ -7207,13 +7366,13 @@ Tables warn when they exceed the current terminal width or select more than 10 f
     multi_parser.add_argument(
         "--resource",
         choices=("node", "shard", "datastore"),
-        help="Resource JSON to compare. With --resource node, shard targets expand to their nodes and datastore targets expand to all datastore nodes",
+        help="Resource JSON to show. With --resource node, shard targets expand to their nodes and datastore targets expand to all datastore nodes",
     )
     multi_parser.add_argument(
         "--field",
         action="append",
         default=[],
-        help="Exact dotted JSON field to render as a column; repeat or combine with --prefix",
+        help="Exact dotted JSON field to render as a column; repeat or combine with --prefix. Omit both to show all scalar fields",
     )
     multi_parser.add_argument(
         "--prefix",
@@ -7224,7 +7383,7 @@ Tables warn when they exceed the current terminal width or select more than 10 f
         "--workers",
         type=int,
         default=DEFAULT_MULTI_WORKERS,
-        help=f"Maximum parallel show calls (default: {DEFAULT_MULTI_WORKERS})",
+        help=f"Maximum parallel resource show calls (default: {DEFAULT_MULTI_WORKERS})",
     )
     multi_parser.add_argument(
         "-f",
@@ -8006,7 +8165,9 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
         "rg": "replication-gap",
         "rs": "run-inspection-script",
         "run-script": "run-inspection-script",
-        "mu": "multi",
+        "sm": "show-multi",
+        "multi": "show-multi",
+        "mu": "show-multi",
         "sc": "scan-compare",
         "sl": "slowlog",
         "so": "slot-ownership",
@@ -8019,6 +8180,7 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
         return 1
     environment = arguments.environment
     requires_dfadmin = arguments.command not in {"dashboard-panels", "explain", "session"}
+    requires_gcx = arguments.command in {"bundle", "dashboard-panels", "log-archiver", "logs"}
     requires_deployment_ssh = arguments.command in {
         "bundle",
         "collect",
@@ -8030,25 +8192,12 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
     defer_deployment_ssh_preflight = arguments.command == "collect"
     supplied_ssh_connection = getattr(arguments, "deployment_ssh_conn_command", None)
     cached_ssh_connection = load_deployment_ssh_connection()
-    if (
-        not getattr(arguments, "dry_run", False)
-        and requires_deployment_ssh
-        and not defer_deployment_ssh_preflight
-        and not (supplied_ssh_connection or cached_ssh_connection)
-    ):
-        print(error_message(deployment_ssh_configuration_message()), file=sys.stderr)
-        return 1
     executables = []
     if not getattr(arguments, "dry_run", False):
-        executables = (
-            []
-            if arguments.command in {"explain", "session"}
-            else (
-                ["gcx", "dfadmin-wrapper"]
-                if arguments.command in {"bundle", "logs", "log-archiver", "dashboard-panels"}
-                else ["dfadmin-wrapper"]
-            )
-        )
+        if requires_dfadmin:
+            executables.append("dfadmin-wrapper")
+        if requires_gcx:
+            executables.append("gcx")
         if requires_deployment_ssh:
             executables.append("gcloud")
     missing = next((executable for executable in executables if not shutil.which(executable)), None)
@@ -8058,8 +8207,13 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
     try:
         if not getattr(arguments, "dry_run", False):
             set_deployment_ssh_connection(supplied_ssh_connection)
-            if requires_dfadmin:
-                preflight_dfadmin(environment)
+            preflight_required_authentication(
+                environment,
+                requires_dfadmin,
+                requires_gcx,
+                requires_deployment_ssh,
+                bool(supplied_ssh_connection or cached_ssh_connection),
+            )
             if requires_deployment_ssh and not defer_deployment_ssh_preflight:
                 preflight_deployment_ssh(supplied_ssh_connection)
         if arguments.command == "session":
@@ -8294,7 +8448,7 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
                 arguments.max_elements,
                 arguments.report_only,
             )
-        if arguments.command == "multi":
+        if arguments.command == "show-multi":
             if arguments.schema is not None:
                 if len(arguments.targets) != 1:
                     raise ValueError("--schema requires exactly one target")
