@@ -590,18 +590,15 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 }
 
 void EngineShard::PollExecutionIfDeferred() {
-  // A transaction awakened on this shard can not run while a continuation is active. A stale
-  // entry is not armed anymore, and its replay is a no-op.
-  auto runnable = [this](const boost::intrusive_ptr<Transaction>& trans) {
-    return !continuation_trans_ ||
-           !(trans->IsBlockedInShard(shard_id()) && trans->IsWokenOn(shard_id()));
-  };
-
   // Replayed polls can be interrupted again. A running callback or poll replays them when done.
+  // Any deferred poll can be replayed: a transaction awakened on this shard never meets an
+  // active continuation, since NotifyPending wakes none while one is active and the tx queue
+  // starts none while one is awakened. A stale entry is not armed anymore, so its replay is a
+  // no-op.
   while (running_tx_ == nullptr && poll_depth_ == 0) {
-    if (auto it = absl::c_find_if(deferred_polls_, runnable); it != deferred_polls_.end()) {
-      boost::intrusive_ptr<Transaction> trans = std::move(*it);
-      deferred_polls_.erase(it);
+    if (!deferred_polls_.empty()) {
+      boost::intrusive_ptr<Transaction> trans = std::move(deferred_polls_.back());
+      deferred_polls_.pop_back();
       PollExecutionInternal("repoll", trans.get());
     } else if (std::exchange(needs_repoll_, false)) {
       PollExecutionInternal("repoll", nullptr);
