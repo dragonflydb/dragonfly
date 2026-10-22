@@ -661,10 +661,15 @@ class ShardDocIndices {
 
   // Add an alias for an existing index.
   facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
+
   // Create or update an alias for an existing index.
   facade::OpStatus UpdateAlias(std::string_view alias, std::string_view target);
-  // Delete an alias.
+
   facade::OpStatus DeleteAlias(std::string_view alias);
+
+  std::vector<std::pair<std::string, std::string>> GetAliases() const {
+    return {aliases_.begin(), aliases_.end()};
+  }
 
   // Init index: create shard local state for given index with given name.
   void InitIndex(const OpArgs& op_args, std::string_view name,
