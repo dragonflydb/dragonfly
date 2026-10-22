@@ -188,6 +188,10 @@ Per shard, starting full sync:
 - Once all buckets are traversed, the snapshot writes a "full sync cut" marker into the RDB
   stream.
 
+The RDB snapshot preserves logical database IDs with `SELECTDB` opcodes. Each opcode carries a
+database ID and selects the database for subsequent key/value entries, until the next `SELECTDB`.
+The replica loads those entries into the selected database.
+
 On the replica, each flow feeds its socket into an RDB loader with a callback that decrements a
 shared counter the first time the cut marker is observed. The replica blocks until every flow has
 hit its cut - this is how the replica knows the RDB "photo" portion is done on all shards
@@ -314,11 +318,17 @@ no clean way to leave stable sync; the *only* way out is via an error after canc
 
 ### Wire format & command grouping
 
-Each journal entry carries an opcode (`SELECT`, `EXPIRED`, `COMMAND`, `PING`, `LSN`) plus, for
-`COMMAND`/`EXPIRED`, a transaction id, database index, and the backed command arguments. The
-replica turns the raw stream into per-transaction records one at a time and (when tracking LSNs)
+Each journal entry starts with an opcode (`SELECT`, `EXPIRED`, `COMMAND`, `PING`, `LSN`).
+`COMMAND`/`EXPIRED` entries carry a transaction id and command arguments, and use the database
+selected on that flow. The replica reads records in stream order and (when tracking LSNs)
 cross-checks the LSN opcode's embedded value against its own running counter, logging (not
 failing) on mismatch.
+
+Each journal flow maintains its own selected database. A `SELECT` record carries a database ID
+and sets the database for subsequent commands, until the next `SELECT` record. The master sends
+a selection record before the first command and whenever its database changes. The replica
+replays commands in the selected database. These records also preserve database selection during
+partial sync and for journal data embedded in full-sync snapshots.
 
 Multi-shard transactions (global commands `FLUSHALL`/`FLUSHDB`/`DFLYCLUSTER FLUSHSLOTS`, and
 ordinary cross-shard multi-commands identified by a shared transaction id) are re-synchronized

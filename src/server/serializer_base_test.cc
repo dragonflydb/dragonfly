@@ -14,6 +14,7 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <chrono>
 #include <queue>
+#include <tuple>
 #include <utility>
 
 #include "base/flags.h"
@@ -28,10 +29,12 @@
 #include "server/engine_shard.h"
 #include "server/engine_shard_set.h"
 #include "server/execution_state.h"
+#include "server/journal/cmd_serializer.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/journal/streamer.h"
 #include "server/journal/types.h"
+#include "server/rdb_save.h"
 #include "server/table.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
@@ -664,6 +667,88 @@ TEST_F(SerializerBaseTest, UnregisterWaitsForInflightOnChange) {
 
   writer.Join();
   Finish();
+}
+
+class MigrationSerializerTest : public SerializerBaseTest,
+                                public testing::WithParamInterface<size_t> {};
+
+INSTANTIATE_TEST_SUITE_P(ChunkSizes, MigrationSerializerTest, testing::Values(1, 1024));
+
+TEST_P(MigrationSerializerTest, MigrationPreservesDatabaseIds) {
+  struct CapturingStreamer : SlotMigrationStreamer {
+    CapturingStreamer(DbSlice* slice, cluster::SlotSet slots, ExecutionState* cntx,
+                      CmdSerializer& serializer)
+        : SlotMigrationStreamer(slice, std::move(slots), cntx), serializer(serializer) {
+    }
+
+    void SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
+                              time_t expire, uint32_t mc_flags) override {
+      serializer.SerializeEntry(db_index, pk.ToString(), pk, pv, expire);
+    }
+
+    CmdSerializer& serializer;
+  };
+
+  using Command = std::tuple<DbIndex, std::string, std::string>;
+  std::vector<Command> expected, actual;
+  const std::vector<std::pair<std::string_view, std::string_view>> keys = {
+      {"string", "SET"}, {"set", "SADD"},   {"zset", "ZADD"},
+      {"hash", "HSET"},  {"list", "RPUSH"}, {"stream", "RESTORE"}};
+  cluster::SlotSet slots;
+  for (auto [key, command] : keys)
+    slots.Set(KeySlot(key), true);
+  ASSERT_FALSE(slots.Contains(KeySlot("remaining")));
+
+  for (DbIndex db_index : {0, 1, 2}) {
+    ASSERT_EQ(Run({"SELECT", absl::StrCat(db_index)}), "OK");
+    ASSERT_EQ(Run({"SET", "string", absl::StrCat("value", db_index)}), "OK");
+    ASSERT_THAT(Run({"SADD", "set", "first", "second", "third"}), IntArg(3));
+    ASSERT_THAT(Run({"ZADD", "zset", "1", "first", "2", "second", "3", "third"}), IntArg(3));
+    ASSERT_THAT(Run({"HSET", "hash", "f1", "first", "f2", "second", "f3", "third"}), IntArg(3));
+    ASSERT_THAT(Run({"RPUSH", "list", "first", "second", "third"}), IntArg(3));
+    ASSERT_EQ(Run({"XADD", "stream", "1-0", "field", "value"}), "1-0");
+    ASSERT_EQ(Run({"SET", "remaining", "value"}), "OK");
+    for (auto [key, command] : keys) {
+      bool collection = command != "SET" && command != "RESTORE";
+      size_t chunks = collection && GetParam() == 1 ? 3 : 1;
+      for (size_t i = 0; i < chunks; ++i)
+        expected.emplace_back(db_index, command, key);
+
+      if (db_index == 0)
+        continue;
+      ASSERT_THAT(Run({"STICK", key}), IntArg(1));
+      ASSERT_THAT(Run({"PEXPIRE", key, "10000"}), IntArg(1));
+      if (command != "RESTORE")
+        expected.emplace_back(db_index, "STICK", key);
+      if (collection)
+        expected.emplace_back(db_index, "PEXPIREAT", key);
+    }
+  }
+
+  pp_->at(0)->Await([&] {
+    auto on_command = [&](std::string data) {
+      io::BytesSource source{data};
+      JournalReader reader{&source, 0};
+      journal::ParsedEntry entry;
+      ASSERT_FALSE(reader.ReadEntry(&entry));
+      EXPECT_EQ(entry.opcode, journal::Op::COMMAND);
+      ASSERT_GE(entry.cmd.size(), 2u);
+      actual.emplace_back(entry.dbid, entry.cmd.Front(), entry.cmd[1]);
+    };
+    CmdSerializer serializer{on_command, GetParam()};
+    ExecutionState cntx;
+    CapturingStreamer streamer{&namespaces->GetDefaultNamespace().GetCurrentDbSlice(),
+                               std::move(slots), &cntx, serializer};
+    WithShardLock([&](DbSlice&, CommandRegistry*) { streamer.RegisterChangeListener(true); });
+
+    // Exercise OnChange before traversal in a nonzero database.
+    EXPECT_THAT(Run({"APPEND", "string", "!"}), IntArg(7));
+    EXPECT_THAT(actual, testing::Contains(Command{2, "SET", "string"}));
+
+    streamer.Run();
+    EXPECT_TRUE(streamer.Cancel());
+  });
+  EXPECT_THAT(actual, testing::UnorderedElementsAreArray(expected));
 }
 
 // SlotMigrationStreamer::Run() is driven by an external fiber, so Cancel() must wait for it:
