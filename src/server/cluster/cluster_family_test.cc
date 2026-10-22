@@ -530,6 +530,26 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
                                 "total_writes", IntArg(2), "memory_bytes", IntArg(36))))));
 }
 
+TEST_F(ClusterFamilyTest, GetSlotStatsAcrossDatabases) {
+  shard_set->Await(0, [] {
+    auto& ns = namespaces->GetDefaultNamespace();
+    auto& db_slice = ns.GetCurrentDbSlice();
+    uint64_t memory_bytes = 0;
+
+    for (DbIndex db_index : {0, 2}) {
+      db_slice.ActivateDb(db_index);
+      DbContext cntx{&ns, db_index, GetCurrentTimeMs()};
+      PrimeValue value;
+      value.SetString(string(1'000, '#'));
+      memory_bytes += value.MallocUsed();
+      ASSERT_TRUE(db_slice.AddOrUpdate(cntx, "key", std::move(value), 0).ok());
+      ASSERT_TRUE(IsValid(db_slice.FindReadOnly(cntx, "key")));
+    }
+
+    EXPECT_THAT(db_slice.GetSlotStats(KeySlot("key")), FieldsAre(2, 2, 2, memory_bytes, 0));
+  });
+}
+
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfoRanges) {
   ConfigSingleNodeCluster(GetMyId());
 
@@ -1496,14 +1516,12 @@ class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
 
 // slots_stats is null outside real cluster mode; GetSlotStats must not crash.
 TEST_F(ClusterFamilyEmulatedTest, GetSlotStatsWithoutClusterMode) {
+  EXPECT_EQ(Run({"select", "2"}), "OK");
   EXPECT_EQ(Run({"set", "key", "value"}), "OK");
 
-  pp_->at(0)->Await([&] {
-    auto* es = EngineShard::tlocal();
-    ASSERT_NE(es, nullptr);
-    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
-    SlotStats stats = db_slice.GetSlotStats(0);
-    EXPECT_EQ(stats.key_count, 0u);
+  shard_set->Await(0, [] {
+    auto& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
+    EXPECT_THAT(db_slice.GetSlotStats(0), FieldsAre(0, 0, 0, 0, 0));
   });
 }
 
