@@ -64,6 +64,30 @@ TEST_F(SetFamilyTest, IntConv) {
   EXPECT_THAT(resp, IntArg(0));
 }
 
+TEST_F(SetFamilyTest, SAddIntSetConversion) {
+  for (std::string_view members : {"2 x", "x 2", "1 2 2 x 2 x 1"}) {
+    SCOPED_TRACE(members);
+    ASSERT_THAT(Run({"sadd", "key", "1"}), IntArg(1));
+    EXPECT_THAT(Run(absl::StrCat("sadd key ", members)), IntArg(2));
+    EXPECT_THAT(Run({"scard", "key"}), IntArg(3));
+    EXPECT_THAT(Run({"smembers", "key"}).GetVec(), UnorderedElementsAre("1", "2", "x"));
+    EXPECT_THAT(Run(absl::StrCat("sadd key ", members)), IntArg(0));
+    ASSERT_THAT(Run({"del", "key"}), IntArg(1));
+  }
+}
+
+TEST_F(SetFamilyTest, SAddIntSetSizeLimit) {
+  const uint32_t count = SetFamily::MaxIntsetEntries() + 2;
+  vector<string> args = {"sadd", "key"};
+  for (uint32_t i = 0; i < count; ++i) {
+    args.push_back(absl::StrCat(i));
+  }
+
+  EXPECT_THAT(Run(args), IntArg(count));
+  EXPECT_THAT(Run({"scard", "key"}), IntArg(count));
+  EXPECT_THAT(Run(args), IntArg(0));
+}
+
 TEST_F(SetFamilyTest, SUnionStore) {
   auto resp = Run({"sadd", "b", "1", "2", "3"});
   Run({"sadd", "c", "10", "11"});
