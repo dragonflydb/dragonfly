@@ -942,7 +942,7 @@ void Transaction::SingleHopAsync(RunnableType cb) {
         // The optimistic run above held running_tx_ and might have deferred polls on this shard
         // if it preempted (e.g. snapshot OnChange waiting for tiered reads). Drain them now,
         // like the inlined branch of ScheduleInternal does.
-        shard->PollExecutionIfDeferred();
+        // shard->PollExecutionIfDeferred();  // TEMP: reverted to verify
       } else {
         sd.is_armed.store(true, memory_order_relaxed);
         // do we really need to submit a shard callback?
