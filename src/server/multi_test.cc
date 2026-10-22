@@ -1911,4 +1911,45 @@ TEST_F(MultiTest, SquashedCallbackBadAlloc) {
   EXPECT_EQ(Run({"get", kKey2}), "b");
 }
 
+// Script commands that read their own shard outside the tx must not queue behind the script hop.
+TEST_F(MultiTest, EvalReadsOutsideTxSkipShardQueue) {
+  const ShardId sid1 = Shard(kKeySid1, shard_set->size());
+  ASSERT_NE(sid1, 0u);  // Run() uses thread 0, so the hop on sid1 is not inlined.
+  ASSERT_NE(Shard(kKeySid2, shard_set->size()), sid1);
+
+  auto eval = [&](string_view script, string_view arg) {
+    fb2::Done done;
+    RespExpr resp;
+    auto fb = pp_->at(0)->LaunchFiber([&] {
+      resp = Run({"eval", script, "1", kKeySid1, arg});
+      done.Notify();
+    });
+    // A queue waiting on itself never recovers, so abort instead of hanging in TearDown.
+    CHECK(done.WaitFor(10s)) << "EVAL deadlocked: " << script;
+    fb.Join();
+    return resp;
+  };
+
+  Run({"xgroup", "create", kKeySid1, "g", "$", "mkstream"});
+  EXPECT_THAT(eval("redis.call('xinfo', 'stream', ARGV[1]) "
+                   "redis.call('xinfo', 'consumers', ARGV[1], 'g') "
+                   "return #redis.call('xinfo', 'groups', ARGV[1])",
+                   kKeySid1),
+              IntArg(1));
+
+  Run({"del", kKeySid1});
+  Run({"json.set", kKeySid1, "$", R"({"a":1})"});
+  EXPECT_THAT(eval("redis.call('json.debug', 'memory', ARGV[1]) "
+                   "return redis.call('json.debug', 'fields', ARGV[1])",
+                   kKeySid1),
+              IntArg(1));
+
+  // Another shard is still read via its queue.
+  Run({"xgroup", "create", kKeySid2, "g", "$", "mkstream"});
+  EXPECT_THAT(eval("return #redis.call('xinfo', 'groups', ARGV[1])", kKeySid2), IntArg(1));
+
+  // Every EVAL above ran as a single-shard hop.
+  EXPECT_EQ(GetMetrics().coordinator_stats.eval_shardlocal_coordination_cnt, 3u);
+}
+
 }  // namespace dfly
