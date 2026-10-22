@@ -31,13 +31,15 @@ error_code ReplayChain(string_view dir, ShardId sid, Service* service,
     return ec;
 
   ExecutionState cntx;
-  JournalReader reader{&chain, 0};
+  JournalReader reader{&chain, /*dbid=*/0};
   TransactionReader tx_reader;
   JournalApplier applier(service, std::move(mse));
   TransactionData tx;
-  // Records read, each with its own LSN.
+
+  // Records read, compared with LastLsn() below.
   uint64_t records = 0;
   while (tx_reader.NextTxData(&reader, &cntx, &tx)) {
+    // Before the PING skip: a PING has an LSN too.
     ++records;
     if (tx.opcode == journal::Op::PING)
       continue;
@@ -53,13 +55,24 @@ error_code ReplayChain(string_view dir, ShardId sid, Service* service,
   if (!chain.AtEnd())
     return cntx.GetError();
 
-  // Running out of input inside the last record also reaches the end: the count tells them apart.
+  // The records parsed must match the block headers. A record cut at the end is in neither count.
   // TODO: start from the cut's LSN, not 1.
   if (records != chain.LastLsn()) {
     LOG(ERROR) << "AOF shard " << sid << ": read " << records << " records but the log ends at lsn "
                << chain.LastLsn();
     return make_error_code(errc::state_not_recoverable);
   }
+
+  // TODO: remove once Repair() truncates the damaged tail and the resumed segment can abandon a
+  // cut record. Resuming as is would make the next restart stop at the same point and drop
+  // everything written after this one.
+  if (chain.TornTail()) {
+    LOG(ERROR) << "AOF shard " << sid << ": the log ends at a damaged tail ("
+               << chain.DiscardedBytes() << " bytes after lsn " << chain.LastLsn()
+               << "), repair is not implemented yet";
+    return make_error_code(errc::state_not_recoverable);
+  }
+
   RETURN_ON_ERR(chain.Repair());
   *resume = {chain.NextSeq(), chain.LastLsn() + 1};
   return {};
@@ -79,19 +92,27 @@ error_code ReplayAof(string_view dir, Service* service, vector<AofResume>* resum
 
     // A chain that ended, cleanly or torn, or has no segments never reaches another barrier: stop
     // counting it, so longer chains can run a global command it lacks.
-    // TODO: a global command completed after a chain ended exists only in the longer chains, so
-    // resuming the logs as they are can replay later writes before it. Checkpoint in LOADING
-    // instead, see "Resuming the log" in docs/aof.md.
+    // TODO: that global command then exists only in the longer chains, and resuming the logs as
+    // they are breaks a later restart. For example, with shards A and B:
+    //   Run 1: FLUSHALL G1 reaches B's log but not A's (A's log just ends before it). Crash.
+    //   Restart 1: A ends and leaves; B runs G1 alone. Both logs resume.
+    //   Run 2: new writes, then FLUSHALL G2 is logged on both shards. Crash.
+    //   Restart 2: A's first global command is G2, B's is G1. Their txids differ, so the round
+    //   is cancelled (kOutOfOrder) and startup fails until the files are fixed by hand. Without
+    //   G2, A would end and leave, and B would run G1 alone after run 2's writes, erasing them.
+    // Fix: checkpoint in LOADING after restart 1, see "Resuming the log" in docs/aof.md.
     if (!errors[sid] || errors[sid] == AofReadError::kNoSegments) {
       mse->RemoveFlow();
     } else {
       LOG(ERROR) << "AOF replay failed on shard " << sid << ": " << errors[sid].message();
+
       // The load fails; release the shards waiting at a barrier.
       mse->CancelAllBlockingEntities();
     }
   });
 
   size_t empty = ranges::count(errors, AofReadError::kNoSegments);
+
   // TODO: the manifest will tell a first start from lost segments.
   if (empty == shard_count)
     return {};
@@ -101,8 +122,12 @@ error_code ReplayAof(string_view dir, Service* service, vector<AofResume>* resum
     if (ec)
       return ec;
   }
-  // New txids must not repeat logged ones: replay pairs global commands across shards by txid.
-  SetNextTxIdAtLeast(ranges::max(max_txids) + 1);
+
+  // MultiShardExecution checks that shards meet the same global command by comparing txids.
+  // Txids must not repeat across restarts, or shards that diverged at a crash pass that check: in
+  // the example above, G2 could get G1's txid, and restart 2 would run them as one command.
+  // Multi-shard tail atomicity, planned in docs/aof.md, also needs txids unique across restarts.
+  AdvanceTxIdPast(ranges::max(max_txids));
   return {};
 }
 

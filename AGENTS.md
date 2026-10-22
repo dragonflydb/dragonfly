@@ -106,6 +106,10 @@ git log --oneline -10
 
 **Code Style**: [.clang-format](.clang-format) - snake_case vars, PascalCase functions, kPascalCase constants
 
+**Comments**: Always put an empty line before a comment in code, unless the comment is the first
+line of a block (right after `{`). This applies to comments between statements, before if/for, and
+inside lambdas.
+
 **DO ✅**:
 - Function parameters: inputs first, output arguments (pointers the function writes to) last
 - Fiber-aware: `util::fb2::Mutex`, `util::fb2::Fiber` → [helio/util/fibers/](helio/util/fibers/)
