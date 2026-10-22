@@ -435,6 +435,7 @@ void EngineShard::Shutdown() {
 
   queue_.Shutdown();
   queue2_.Shutdown();
+  deferred_polls_.clear();  // release while the shard's thread-local state is still alive
   DCHECK(!fiber_heartbeat_periodic_.IsJoinable());
   DCHECK(!fiber_shard_handler_periodic_.IsJoinable());
 }
@@ -573,8 +574,9 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
            continuation_trans_ == trans || trans->IsBlockedInShard(shard_id()));
 
     // A repoll without trans does not reach blocked transactions, so their polls are kept.
-    if (trans && trans->IsBlockedInShard(shard_id()))
-      deferred_polls_.push_back({trans, trans->GetWakeKey(shard_id()).has_value()});
+    if (trans && trans->IsBlockedInShard(shard_id()) &&
+        !absl::c_linear_search(deferred_polls_, trans))
+      deferred_polls_.emplace_back(trans);
     needs_repoll_ = true;
     return;
   }
@@ -588,13 +590,17 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 }
 
 void EngineShard::PollExecutionIfDeferred() {
-  // A transaction awakened on this shard can not run while a continuation is active.
-  auto runnable = [this](const DeferredPoll& poll) { return !continuation_trans_ || !poll.awaked; };
+  // A transaction awakened on this shard can not run while a continuation is active. A stale
+  // entry is not armed anymore, and its replay is a no-op.
+  auto runnable = [this](const boost::intrusive_ptr<Transaction>& trans) {
+    return !continuation_trans_ ||
+           !(trans->IsBlockedInShard(shard_id()) && trans->IsWokenOn(shard_id()));
+  };
 
   // Replayed polls can be interrupted again. A running callback or poll replays them when done.
   while (running_tx_ == nullptr && poll_depth_ == 0) {
     if (auto it = absl::c_find_if(deferred_polls_, runnable); it != deferred_polls_.end()) {
-      boost::intrusive_ptr<Transaction> trans = std::move(it->trans);
+      boost::intrusive_ptr<Transaction> trans = std::move(*it);
       deferred_polls_.erase(it);
       PollExecutionInternal("repoll", trans.get());
     } else if (std::exchange(needs_repoll_, false)) {

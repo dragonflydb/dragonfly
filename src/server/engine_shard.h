@@ -368,11 +368,9 @@ class EngineShard {
   Transaction* running_tx_ = nullptr;
   bool needs_repoll_ = false;  // set when running_tx_ interrupted a PollExecution call
 
-  struct DeferredPoll {
-    boost::intrusive_ptr<Transaction> trans;  // owning: a stale entry can outlive its hop
-    bool awaked;                              // awakened on this shard
-  };
-  absl::InlinedVector<DeferredPoll, 4> deferred_polls_;  // polls a repoll can't reach
+  // Dropped polls of blocked transactions, which a repoll without trans can't reach.
+  // Owning: a stale entry can outlive its hop.
+  absl::InlinedVector<boost::intrusive_ptr<Transaction>, 4> deferred_polls_;
 
   std::string continuation_debug_id_;
   unsigned poll_depth_ = 0;  // PollExecutionInternal calls in progress
