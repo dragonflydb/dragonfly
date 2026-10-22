@@ -390,7 +390,7 @@ class AofChainReaderTest : public AofSegmentWriterTest {
         iovec v{buf, sizeof(buf)};
         auto n = reader.ReadSome(&v, 1);
         if (!n) {
-          ASSERT_EQ(n.error(), errc::illegal_byte_sequence);
+          ASSERT_EQ(n.error(), AofReadError::kTornTail);
           res.torn = true;
           break;
         }

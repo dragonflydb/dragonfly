@@ -618,15 +618,25 @@ TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
 // InitByArgs and run a single concluding hop. The hop callback is empty, so only the transaction
 // code is measured.
 //
-// remote=0: the coordinator fiber runs on the key's shard thread and the hop runs inline, i.e.
-//           the pure CPU cost of the transaction code.
-// remote=1: the coordinator runs on another thread, so every hop is a cross-thread round trip.
-// fibers:   the number of coordinator fibers issuing transactions concurrently.
+// BM_TxInline:      the coordinator fiber runs on the key's shard thread and the hop runs inline,
+//                   i.e. the pure CPU cost of the transaction code.
+// BM_TxRemoteSync:  `fibers` coordinator fibers on another thread run blocking hops, so every hop
+//                   is a cross-thread round trip, like commands of non-pipelined clients.
+// BM_TxRemoteAsync: a coordinator fiber on another thread issues `batch` transactions back to back
+//                   with SingleHopAsync and then waits for all of them, like a pipelined connection
+//                   whose commands reply asynchronously. A batch lets one wakeup of the shard queue
+//                   and of the coordinator fiber serve several transactions.
 // The `inline` and `optimistic` counters report the fraction of transactions that took these paths.
 //
-// Run with: ./transaction_test --bench --gtest_filter='-*' --benchmark_filter=BM_TxSingleKey
+// Run with: ./transaction_test --bench --gtest_filter='-*' --benchmark_filter=BM_Tx
 class TxBenchmark : public TransactionTest {
  public:
+  struct Options {
+    bool remote = false;       // Whether the coordinator runs on another thread than the shard.
+    unsigned fibers = 1;       // Number of coordinator fibers issuing transactions concurrently.
+    unsigned async_batch = 0;  // 0 for blocking hops, otherwise the SingleHopAsync batch size.
+  };
+
   TxBenchmark();
 
   ~TxBenchmark() override {
@@ -636,10 +646,14 @@ class TxBenchmark : public TransactionTest {
   void TestBody() override {
   }
 
-  void Run(benchmark::State& state);
+  void Run(const Options& opts, benchmark::State& state);
 
  private:
   static constexpr ShardId kShard = 0;  // Owns all the benchmark keys.
+
+  // Matches the number of tasks the shard queue consumer drains per wakeup, and stays well below
+  // the shard queue capacity, so issuing a batch never blocks on a full queue.
+  static constexpr size_t kMaxAsyncBatch = 16;
 
   struct PathStats {
     uint64_t inline_runs;      // Transactions that ran inline on the coordinator thread.
@@ -649,10 +663,14 @@ class TxBenchmark : public TransactionTest {
   PathStats ReadPathStats(unsigned coordinator);
 
   // Runs the benchmark loop, issuing transactions from `num_fibers` fibers on the current thread.
-  void RunCoordinators(unsigned num_fibers, benchmark::State& state);
+  void RunCoordinators(unsigned num_fibers, unsigned async_batch, benchmark::State& state);
 
   // Runs a transaction with a single empty hop on `key`, like a GET or a SET.
   void RunTx(string_view key);
+
+  // Issues `count` such transactions on consecutive keys starting at index `first` without
+  // waiting, then waits for all of them.
+  void RunAsyncBatch(size_t first, size_t count);
 
   // A minimal SET-like command with a single key at a fixed position.
   CommandId cid_{"BENCH_SET", CO::JOURNALED | CO::DENYOOM, -3, 1, 1, acl::NONE};
@@ -683,13 +701,12 @@ TxBenchmark::TxBenchmark() {
   }
 }
 
-void TxBenchmark::Run(benchmark::State& state) {
-  const bool remote = state.range(0);
-  const unsigned num_fibers = state.range(1);
-  const unsigned coordinator = remote ? kShard + 1 : kShard;
+void TxBenchmark::Run(const Options& opts, benchmark::State& state) {
+  const unsigned coordinator = opts.remote ? kShard + 1 : kShard;
+  CHECK_LE(opts.async_batch, kMaxAsyncBatch);
 
   const PathStats before = ReadPathStats(coordinator);
-  OnShard(coordinator, [&] { RunCoordinators(num_fibers, state); });
+  OnShard(coordinator, [&] { RunCoordinators(opts.fibers, opts.async_batch, state); });
   const PathStats after = ReadPathStats(coordinator);
 
   const double iterations = state.iterations();
@@ -707,7 +724,8 @@ TxBenchmark::PathStats TxBenchmark::ReadPathStats(unsigned coordinator) {
   return stats;
 }
 
-void TxBenchmark::RunCoordinators(unsigned num_fibers, benchmark::State& state) {
+void TxBenchmark::RunCoordinators(unsigned num_fibers, unsigned async_batch,
+                                  benchmark::State& state) {
   // All iterations form a single batch, so the fibers are launched once and share the budget.
   // They run on the same thread, so `next` needs no synchronization.
   const size_t total = state.max_iterations;
@@ -716,8 +734,18 @@ void TxBenchmark::RunCoordinators(unsigned num_fibers, benchmark::State& state) 
   while (state.KeepRunningBatch(total)) {  // Runs once, the second call stops the timer.
     for (auto& fb : fibers) {
       fb = fb2::Fiber("coordinator", [&] {
-        while (next < total)
-          RunTx(keys_[next++ % keys_.size()]);
+        while (next < total) {
+          if (async_batch == 0) {
+            RunTx(keys_[next++ % keys_.size()]);
+            continue;
+          }
+
+          // Claim the range before running it, because waiting lets the other fibers advance.
+          const size_t first = next;
+          const size_t count = std::min<size_t>(async_batch, total - first);
+          next += count;
+          RunAsyncBatch(first, count);
+        }
       });
     }
     for (auto& fb : fibers)
@@ -732,15 +760,48 @@ void TxBenchmark::RunTx(string_view key) {
   tx->ScheduleSingleHop(Noop);
 }
 
-static void BM_TxSingleKey(benchmark::State& state) {
-  TxBenchmark bench;
-  bench.Run(state);
+void TxBenchmark::RunAsyncBatch(size_t first, size_t count) {
+  // A transaction references its arguments until its hop finishes.
+  string_view args[kMaxAsyncBatch][2];
+  boost::intrusive_ptr<Transaction> txs[kMaxAsyncBatch];
+
+  for (size_t i = 0; i < count; ++i) {
+    args[i][0] = keys_[(first + i) % keys_.size()];
+    args[i][1] = "value";
+    txs[i] = new Transaction{&cid_};
+    txs[i]->InitByArgs(ns_, 0, CmdArgList{args[i]});
+    txs[i]->SingleHopAsync(Noop);
+  }
+
+  for (size_t i = 0; i < count; ++i)
+    txs[i]->Blocker()->Wait();
 }
-BENCHMARK(BM_TxSingleKey)
-    ->ArgNames({"remote", "fibers"})
-    ->Args({0, 1})
-    ->Args({1, 1})
-    ->Args({1, 16})
+
+static void BM_TxInline(benchmark::State& state) {
+  TxBenchmark bench;
+  bench.Run({}, state);
+}
+BENCHMARK(BM_TxInline)->MeasureProcessCPUTime()->UseRealTime();
+
+static void BM_TxRemoteSync(benchmark::State& state) {
+  TxBenchmark bench;
+  bench.Run({.remote = true, .fibers = unsigned(state.range(0))}, state);
+}
+BENCHMARK(BM_TxRemoteSync)
+    ->ArgName("fibers")
+    ->Arg(1)
+    ->Arg(16)
+    ->MeasureProcessCPUTime()
+    ->UseRealTime();
+
+static void BM_TxRemoteAsync(benchmark::State& state) {
+  TxBenchmark bench;
+  bench.Run({.remote = true, .async_batch = unsigned(state.range(0))}, state);
+}
+BENCHMARK(BM_TxRemoteAsync)
+    ->ArgName("batch")
+    ->Arg(1)
+    ->Arg(16)
     ->MeasureProcessCPUTime()
     ->UseRealTime();
 

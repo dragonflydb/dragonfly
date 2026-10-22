@@ -118,6 +118,7 @@ class SlotMigrationStreamer : public journal::JournalConsumerInterface, public S
   // to share across fibers because ShouldSerialize does not preempt.
   mutable std::string key_buffer_;
   uint32_t buckets_since_sleep_ = 0;  // non-empty buckets traversed since the last sleep
+  uint64_t replication_timeout_usec_ = 0;
   LSN last_lsn_writen_ = 0;
   uint32_t journal_cb_id_{0};
 };
