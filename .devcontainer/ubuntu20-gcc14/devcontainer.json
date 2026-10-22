@@ -13,7 +13,6 @@
       "settings": {
         "cmake.buildDirectory": "/build",
         "cmake.configureArgs": [
-          "-DWITH_AWS=OFF",
           "-DWITH_GCP=OFF",
           "-DWITH_GPERF=OFF"
         ],
