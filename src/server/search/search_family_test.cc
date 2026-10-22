@@ -3391,19 +3391,20 @@ TEST_F(SearchFamilyTest, BareIdentifierCollisionRejected) {
               ErrArg("Duplicate field in schema"));
 }
 
-TEST_F(SearchFamilyTest, DuplicateIdentifierRejected) {
-  EXPECT_THAT(Run({"FT.CREATE", "bx",   "ON",      "JSON",     "PREFIX",
-                   "1",         "bx:",  "SCHEMA",  "vector",   "VECTOR",
-                   "HNSW",      "6",    "DIM",     "4",        "DISTANCE_METRIC",
-                   "COSINE",    "TYPE", "FLOAT32", "$.vector", "AS",
-                   "other",     "TAG"}),
-              ErrArg("Duplicate field in schema"));
+// A bare identifier and its explicit path name one JSON path; twins on it are accepted.
+TEST_F(SearchFamilyTest, SameIdentifierTwiceAllowed) {
+  EXPECT_EQ(Run({"FT.CREATE", "bx",   "ON",      "JSON",     "PREFIX",
+                 "1",         "bx:",  "SCHEMA",  "vector",   "VECTOR",
+                 "HNSW",      "6",    "DIM",     "4",        "DISTANCE_METRIC",
+                 "COSINE",    "TYPE", "FLOAT32", "$.vector", "AS",
+                 "other",     "TAG"}),
+            "OK");
 
-  EXPECT_THAT(
+  EXPECT_EQ(
       Run({"FT.CREATE",       "by",     "ON",    "JSON",    "PREFIX", "1",  "by:",    "SCHEMA",
            "$.vec",           "AS",     "first", "VECTOR",  "HNSW",   "6",  "DIM",    "4",
            "DISTANCE_METRIC", "COSINE", "TYPE",  "FLOAT32", "$.vec",  "AS", "second", "TAG"}),
-      ErrArg("Duplicate field in schema"));
+      "OK");
 }
 
 TEST_F(SearchFamilyTest, BareIdentifierOnHashUnchanged) {
@@ -3523,6 +3524,37 @@ TEST_F(SearchFamilyTest, HybridWithTwinAttributes) {
     const vector<string> expected{"d:a", "d:b"};
     EXPECT_EQ(HybridKeys(resp), expected) << vsim;
   }
+}
+
+// JSON twins: TEXT and TAG on one path, FLAT and HNSW on another; a raw path in RETURN resolves
+// to the first declared twin.
+TEST_F(SearchFamilyTest, JsonTwinAttributes) {
+  Run("FT.CREATE idx ON JSON PREFIX 1 d: SCHEMA $.email AS e_text TEXT $.email AS e_tag TAG "
+      "$.city AS city TEXT SORTABLE $.city AS city_tag TAG "
+      "$.v AS v_flat VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2 "
+      "$.v AS v_hnsw VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2");
+  WaitForIndexReady("idx");
+  Run({"JSON.SET", "d:1", "$", R"({"email":"jane@example.com","city":"Boston","v":[1,0]})"});
+  Run({"JSON.SET", "d:2", "$", R"({"email":"bob@test.org","city":"Austin","v":[2,0]})"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_text:jane"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_tag:{jane\\@example\\.com}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "city_tag", "RETURN", "1", "$.email"}),
+              IsArray(IntArg(2), "d:2", IsArray("$.email", "bob@test.org"), "d:1",
+                      IsArray("$.email", "jane@example.com")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "GROUPBY", "2", "@city_tag", "@e_tag"}),
+              IsUnordArrayWithSize(IsMap("city_tag", "Boston", "e_tag", "jane@example.com"),
+                                   IsMap("city_tag", "Austin", "e_tag", "bob@test.org")));
+  const string q = FloatVec(1, 0);
+  for (string_view vsim : {"@v_flat", "@v_hnsw"}) {
+    auto resp =
+        Run({"FT.HYBRID", "idx", "SEARCH", "jane", "VSIM", vsim, "$q", "PARAMS", "2", "q", q});
+    const vector<string> expected{"d:1", "d:2"};
+    EXPECT_EQ(HybridKeys(resp), expected) << vsim;
+  }
+  Run({"JSON.SET", "d:1", "$.city", R"("Chicago")"});
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@city_tag:{Chicago}"}), AreDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@city_tag:{Boston}"}), kNoResults);
 }
 
 // LOAD ... AS may move a SORTABLE field's output name to another field.
