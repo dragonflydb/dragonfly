@@ -75,9 +75,6 @@ class GenericError {
   std::string details_;
 };
 
-// Thread safe utility to store the first non null generic error.
-using AggregateGenericError = AggregateValue<GenericError>;
-
 // ExecutionState is a thread-safe utility for managing error reporting and cancellation for complex
 // tasks. There are 3 states: RUN, CANCELLED, ERROR RUN and CANCELLED are just a state without any
 // actions When report an error, only the first is stored, the next ones will be ignored. Then a

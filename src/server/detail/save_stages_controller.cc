@@ -59,6 +59,18 @@ void ExtendDfsFilenameWithShard(int shard, string_view extension, fs::path* file
   SetExtension(absl::Dec(shard, absl::kZeroPad4), extension, filename);
 }
 
+// Closing a cloud file publishes it, so abort the upload if the save failed or Close() fails.
+error_code CloseCloudFile(io::WriteFile* file, ExecutionState* cntx) {
+  error_code ec = cntx->IsRunning() ? file->Close() : make_error_code(errc::operation_canceled);
+  if (ec) {
+    // Abort can yield, so stop other snapshots before starting cleanup.
+    cntx->ReportError(ec);
+    error_code abort_ec = file->Abort();
+    LOG_IF(WARNING, abort_ec) << "Failed to abort snapshot upload: " << abort_ec.message();
+  }
+  return ec;
+}
+
 }  // namespace
 
 GenericError ValidateFilename(const fs::path& filename, bool new_version) {
@@ -157,27 +169,13 @@ error_code RdbSnapshot::Close() {
 #endif
 
   error_code ec;
+  auto* file = static_cast<io::WriteFile*>(io_sink_.get());
 
   // S3 implementation is stack hungry. We use a fiber to close the file to
   // avoid wasting stack space.
   auto fb = ProactorBase::me()->LaunchFiber(
-      fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "write_file_close", [&] {
-        auto* file = static_cast<io::WriteFile*>(io_sink_.get());
-        bool is_cloud = snapshot_storage_->IsCloud();
-        // Closing a cloud file publishes it, so a failed save must not close it.
-        if (is_cloud && !cntx_->IsRunning())
-          ec = make_error_code(errc::operation_canceled);
-        else
-          ec = file->Close();
-
-        // Abort the unpublished upload, including after a failed Close().
-        if (is_cloud && ec) {
-          // Abort can yield, so stop other snapshots before starting cleanup.
-          cntx_->ReportError(ec);
-          error_code abort_ec = file->Abort();
-          LOG_IF(WARNING, abort_ec) << "Failed to abort snapshot upload: " << abort_ec.message();
-        }
-      });
+      fb2::Launch::post, boost::context::fixedsize_stack{40 * 1024}, "write_file_close",
+      [&] { ec = snapshot_storage_->IsCloud() ? CloseCloudFile(file, cntx_) : file->Close(); });
   fb.Join();
   return ec;
 }

@@ -1927,9 +1927,11 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
   std::shared_ptr<SaveStagesController> controller;
   {
     util::fb2::LockGuard lk(save_mu_);
+    // Check under save_mu_, so a concurrent switch to LOADING either rejects this save here or
+    // cancels it in CancelSave().
     auto state = ServerState::tlocal()->gstate();
-    // Recheck after taking the mutex: waiting for it may have crossed a state transition.
-    // In some cases we want to save even if the server is not active, e.g. during takeover.
+
+    // In some cases we want to create a snapshot even if server is not active, f.e in takeover
     if (!ignore_state && (state != GlobalState::ACTIVE && state != GlobalState::SHUTTING_DOWN)) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           StrCat(GlobalStateName(state), " - can not save database")};
