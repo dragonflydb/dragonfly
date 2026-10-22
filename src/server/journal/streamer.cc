@@ -363,25 +363,16 @@ bool SlotMigrationStreamer::ShouldWrite(SlotId slot_id) const {
   return my_slots_.Contains(slot_id);
 }
 
-bool SlotMigrationStreamer::ShouldSerialize(DbIndex db_index, const PrimeKey& pk) const {
-  // Cluster mode blocks SELECT, but loading an RDB file taken from a non-cluster instance can
-  // still activate other databases. Slot ownership (and FlushSlots) covers only db 0, so keys
-  // in other databases are not migrated. This applies to both the traversal and OnChange flows.
-  if (db_index != 0)
-    return false;
-
+bool SlotMigrationStreamer::ShouldSerialize(DbIndex, const PrimeKey& pk) const {
   return ShouldWrite(pk.GetSlice(&key_buffer_));
 }
 
 void SlotMigrationStreamer::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk,
                                                  const PrimeValue& pv, time_t expire,
                                                  uint32_t mc_flags) {
-  // ShouldSerialize filters out other databases. CmdSerializer hard-codes db index 0 into
-  // the journal entries it produces, so to remove this DCHECK we must first pass db_index through
-  // CmdSerializer.
-  DCHECK_EQ(db_index, 0u);
   ++EngineShard::tlocal()->stats().total_migrated_keys;
-  migration_stats_.commands += cmd_serializer_->SerializeEntry(pk.ToString(), pk, pv, expire);
+  migration_stats_.commands +=
+      cmd_serializer_->SerializeEntry(db_index, pk.ToString(), pk, pv, expire);
 }
 
 }  // namespace dfly
