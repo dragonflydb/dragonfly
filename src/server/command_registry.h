@@ -318,6 +318,7 @@ class CommandId : public facade::CommandId {
 
     SECRET_ARGS = 1U << 17,  // AUTH and ACL *: every arg may be a credential
     HELLO = 1U << 18,        // HELLO only: the args after its protocol version may be credentials
+    CONFIG = 1U << 19,       // CONFIG only: the args after its parameter name may be credentials
   };
 
   // CmdKind bits. Trivially copied by the move ctor.
