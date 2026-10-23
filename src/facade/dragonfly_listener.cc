@@ -426,8 +426,32 @@ bool DispatchTracker::Wait(absl::Duration duration) {
     TrackAll();
     res = bc_->WaitFor(absl::ToChronoMilliseconds(duration));
     LOG_IF(INFO, !res) << "DispatchTracker::Wait failed again, bc=" << bc_->DEBUG_Count();
+
+    // Log while clients are still paused, so the stuck state is preserved.
+    if (!res)
+      LogStuckState();
   }
   return res;
+}
+
+void DispatchTracker::LogStuckState() {
+  static std::atomic<int64_t> next_log_ns{0};
+  int64_t now = absl::GetCurrentTimeNanos();
+  int64_t next = next_log_ns.load(std::memory_order_relaxed);
+  if (now < next ||
+      !next_log_ns.compare_exchange_strong(next, now + absl::ToInt64Nanoseconds(absl::Seconds(10))))
+    return;
+
+  LOG(WARNING) << "DispatchTrackerStuck: bc=" << bc_->DEBUG_Count();
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections([](unsigned thread_index, util::Connection* conn) {
+      auto* fconn = static_cast<facade::Connection*>(conn);
+      if (fconn->pending_checkpoints() > 0)
+        LOG(WARNING) << "DispatchTrackerStuck: conn " << fconn->DispatchStuckInfo();
+    });
+  }
+  if (!listeners_.empty())
+    listeners_.front()->service()->LogShardsTxState();
 }
 
 void DispatchTracker::TrackAll() {

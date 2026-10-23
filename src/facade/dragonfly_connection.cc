@@ -163,6 +163,9 @@ ABSL_FLAG(bool, enable_pipeline_squashing_v2, true,
           "Enable vectorized pipeline squashing for the V2 dispatch loop. Groups consecutive "
           "single-shard pipeline commands by shard and executes them in parallel.");
 
+ABSL_FLAG(uint32_t, checkpoint_late_threshold_ms, 500,
+          "Log a DispatchTracker checkpoint processed later than this after it was sent.");
+
 ABSL_FLAG(uint32_t, iobuf_min_shrink_interval_sec, 30,
           "Minimum time (in seconds) before a client input buffer may shrink; 0 disables.");
 
@@ -825,6 +828,7 @@ void Connection::AsyncOperations::operator()(ParsedCommand& cmd) {
            << "Dispatching pipeline: " << cmd.Front();
 
   ++self->local_stats_.cmds;
+  self->MarkDispatchStart(cmd);
   self->service_->DispatchCommand(ParsedArgs{cmd}, &cmd, facade::AsyncPreference::ONLY_SYNC,
                                   nullptr);
 
@@ -849,11 +853,11 @@ void Connection::AsyncOperations::operator()(CheckpointMessage msg) {
   if (self->ioloop_v2_ && self->HasInFlightCommands() && !self->cc_->blocked) {
     DVLOG(2) << "[" << self->id_ << "] "
              << "Deferring checkpoint (in-flight commands) at " << self->DebugInfo();
-    self->deferred_checkpoints_.push_back(std::move(msg.bc));
+    self->deferred_checkpoints_.push_back(std::move(msg));
     return;
   }
 
-  msg.bc->Dec();
+  self->FinishCheckpoint(&msg, true);
 }
 
 void Connection::AsyncOperations::operator()(const InvalidationMessage& msg) {
@@ -1697,6 +1701,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   RespSrvParser::Result result = RespSrvParser::OK;
 
   auto dispatch_sync = [this] {
+    MarkDispatchStart(*parsed_cmd_);
     service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_,
                               facade::AsyncPreference::ONLY_SYNC, nullptr);
   };
@@ -2073,6 +2078,7 @@ void Connection::SquashPipeline() {
   // (incl. Flush), and marks the connection as dispatching for DispatchTracker checkpoints.
   // It must be set before DispatchSquashedBatch, which can preempt on shard hops.
   cc_->async_dispatch = true;
+  MarkDispatchStart(*parsed_to_execute_);
 
   uint32_t squashed =
       service_->DispatchSquashedBatch(parsed_to_execute_, pipeline_count, cc_.get(), nullptr);
@@ -2192,10 +2198,47 @@ void Connection::ReleaseDeferredCheckpoints() {
 
   DVLOG(1) << CONN_ID << " Releasing " << deferred_checkpoints_.size() << " deferred checkpoint(s) "
            << DebugInfo();
-  for (auto& bc : deferred_checkpoints_) {
-    bc->Dec();
+  for (auto& msg : deferred_checkpoints_) {
+    FinishCheckpoint(&msg, true);
   }
   deferred_checkpoints_.clear();
+}
+
+void Connection::FinishCheckpoint(CheckpointMessage* msg, bool log_late) {
+  DCHECK_GT(pending_checkpoints_, 0u);
+  --pending_checkpoints_;
+
+  if (log_late) {
+    uint64_t now = CycleClock::Now();
+    uint64_t age_ms = CycleClock::ToUsec(now - msg->sent_cycles) / 1000;
+    if (age_ms > GetFlag(FLAGS_checkpoint_late_threshold_ms)) {
+      uint64_t cmd_ms = CycleClock::ToUsec(now - cur_cmd_start_cycle_) / 1000;
+      LOG_EVERY_T(WARNING, 1) << "CheckpointLate: " << CONN_ID << "age_ms=" << age_ms
+                              << " cmd=" << cur_cmd_name_ << " cmd_ms=" << cmd_ms
+                              << " tx=" << service_->GetTxDebugInfo(cc_.get());
+    }
+  }
+  msg->bc->Dec();
+}
+
+void Connection::MarkDispatchStart(const ParsedCommand& cmd) {
+  cur_cmd_name_.assign(cmd.Front());
+  cur_cmd_start_cycle_ = CycleClock::Now();
+}
+
+string Connection::DispatchStuckInfo() const {
+  string info = absl::StrCat("id=", id_, " addr=", RemoteEndpointStr(), " name=", name_,
+                             " pending_checkpoints=", pending_checkpoints_);
+  uint64_t cmd_ms = cur_cmd_start_cycle_
+                        ? CycleClock::ToUsec(CycleClock::Now() - cur_cmd_start_cycle_) / 1000
+                        : 0;
+  absl::StrAppend(&info, " cmd=", cur_cmd_name_, " cmd_ms=", cmd_ms,
+                  " deferred=", deferred_checkpoints_.size(), " ", DebugInfo());
+  if (cc_) {
+    absl::StrAppend(&info, " ", service_->GetContextInfo(cc_.get()).Format(),
+                    " tx=", service_->GetTxDebugInfo(cc_.get()));
+  }
+  return info;
 }
 
 string Connection::DebugInfo() const {
@@ -2284,6 +2327,7 @@ void Connection::ProcessPipelineCommandV1() {
 
   cc_->async_dispatch = true;
   local_stats_.cmds++;
+  MarkDispatchStart(*cmd);
   service_->DispatchCommand(ParsedArgs{*cmd}, cmd, facade::AsyncPreference::ONLY_SYNC, nullptr);
   last_interaction_ = time(nullptr);
   skip_next_squashing_ = false;
@@ -2669,7 +2713,8 @@ void Connection::SendCheckpoint(fb2::BlockingCounter bc, bool ignore_paused, boo
   VLOG(2) << CONN_ID << "Sent checkpoint to " << DebugInfo();
 
   bc->Add(1);
-  SendAsync({CheckpointMessage{bc}});
+  ++pending_checkpoints_;
+  SendAsync({CheckpointMessage{bc, CycleClock::Now()}});
 }
 
 void Connection::SendInvalidationMessageAsync(InvalidationMessage msg) {
@@ -2704,7 +2749,7 @@ void Connection::SendAsync(MessageHandle msg) {
       // DispatchTracker leaks and the takeover / pause / migration / shutdown waiting on it hangs.
       if (checkpoint) {
         DVLOG(1) << CONN_ID << "Dropping checkpoint on closing conn " << DebugInfo();
-        checkpoint->bc->Dec();
+        FinishCheckpoint(checkpoint, false);
       }
       return;
     }
@@ -3193,6 +3238,7 @@ bool Connection::SquashPipelineV2() {
   cc_->sync_dispatch = true;
   const bool log_traffic = ShouldLogTrafficV2();
   auto log_command = [this](ParsedCommand* cmd) { LogTrafficV2(cmd); };
+  MarkDispatchStart(*parsed_to_execute_);
   // FunctionRef is non-owning. Keep log_command and the log_command_ref alive through the
   // synchronous dispatch.
   absl::FunctionRef<void(ParsedCommand*)> log_command_ref = log_command;
@@ -3358,6 +3404,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
     const bool log_traffic = ShouldLogTrafficV2();
     auto log_command = [this](ParsedCommand* command) { LogTrafficV2(command); };
     absl::FunctionRef<void(ParsedCommand*)> log_command_ref = log_command;
+    MarkDispatchStart(*cmd);
     auto dispatch_res =
         service_->DispatchCommandSimple(cmd, mode, log_traffic ? &log_command_ref : nullptr);
     if (ioloop_v2_) {
