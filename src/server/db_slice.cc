@@ -1664,7 +1664,8 @@ void DbSlice::FlushChangeToEarlierCallbacks(DbIndex db_ind, Iterator it, uint64_
   }
 }
 
-auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteExpiredStats {
+auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count,
+                                uint64_t running_time_cycles_start) -> DeleteExpiredStats {
   auto& db = *db_arr_[cntx.db_index];
   DeleteExpiredStats result;
 
@@ -1698,9 +1699,13 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
     ++result.deleted;
   };
 
-  auto quota_remains = [] {
+  auto quota_remains = [running_time_cycles_start] {
     // Break out of traversal if we spent more than 1ms
-    return base::CycleClock::ToUsec(ThisFiber::GetRunningTimeCycles()) < 1000;
+    uint64_t elapsed = ThisFiber::GetRunningTimeCycles();
+    if (running_time_cycles_start != 0) {
+      elapsed -= running_time_cycles_start;
+    }
+    return base::CycleClock::ToUsec(elapsed) < 1000;
   };
 
   constexpr unsigned kStep = 8;
@@ -1727,7 +1732,8 @@ int32_t DbSlice::GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) c
 
 pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, const Context& cntx,
                                                               size_t starting_segment_id,
-                                                              size_t increase_goal_bytes) {
+                                                              size_t increase_goal_bytes,
+                                                              size_t max_eviction_items) {
   // Disable flush journal changes to prevent preemtion
   journal::DisableFlushGuard journal_flush_guard;
   FiberAtomicGuard guard;
@@ -1741,10 +1747,10 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
       return {0, evicted_bytes};
   }
 
-  if ((!IsCacheMode()) || !expire_allowed_)
+  if ((!IsCacheMode()) || !expire_allowed_ || max_eviction_items == 0)
     return {0, 0};
 
-  auto max_eviction_per_hb = GetFlag(FLAGS_max_eviction_per_heartbeat);
+  auto max_eviction_per_hb = max_eviction_items;
   auto max_segment_to_consider = GetFlag(FLAGS_max_segment_to_consider);
 
   auto time_start = absl::GetCurrentTimeNanos();
