@@ -2093,7 +2093,8 @@ async def test_set_member_partial_expiry_replication_lag(df_factory: DflyInstanc
     assert await c_replica.sismember("myset", "keep") == 1
 
 
-async def test_wait_with_throttled_replica_stream(df_factory: DflyInstanceFactory):
+@pytest.mark.parametrize("pipeline", [False, True])
+async def test_wait_with_throttled_replica_stream(df_factory: DflyInstanceFactory, pipeline):
     """
     WAIT journals a PING on every shard. With the replica stream over its output limit, recording
     it blocks in the journal throttle, which used to happen on a brief callback and crash the
@@ -2121,7 +2122,13 @@ async def test_wait_with_throttled_replica_stream(df_factory: DflyInstanceFactor
 
         # The stalled replica can't ack, and WAIT must still honor its timeout.
         start = time.monotonic()
-        assert await c_wait.execute_command("WAIT", 1, 1000) == 0
+        if pipeline:
+            pipe = c_wait.pipeline(transaction=False)
+            pipe.execute_command("WAIT", 1, 1000)
+            pipe.ping()
+            assert await asyncio.wait_for(pipe.execute(), timeout=3) == [0, True]
+        else:
+            assert await asyncio.wait_for(c_wait.execute_command("WAIT", 1, 1000), timeout=3) == 0
         assert time.monotonic() - start < 3
         assert await c_master.ping()
     finally:
