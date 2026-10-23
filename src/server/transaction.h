@@ -361,7 +361,11 @@ class Transaction {
     return multi_ && (multi_->mode == LOCK_AHEAD || multi_->mode == GLOBAL);
   }
 
-  bool IsGlobal() const;
+  // Note that a transaction can be non-global even if multi_->mode == GLOBAL.
+  // It happens when a transaction is squashed and switches to execute different commands.
+  bool IsGlobal() const {
+    return global_;
+  }
 
   DbContext GetDbContext() const {
     return DbContext{namespace_, db_index_, time_now_ms_};

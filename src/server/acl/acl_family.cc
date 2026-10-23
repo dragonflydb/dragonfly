@@ -1114,11 +1114,11 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
       auto& [glob, op, all_keys, reset_keys] = *res;
       if ((has_all_keys && !all_keys && !reset_keys) ||
           (req.allow_all_keys && !all_keys && !reset_keys)) {
-        return ErrorReply(absl::StrCat(
-            "Error in ACL SETUSER modifier \'", facade::ToSV(arg),
-            "\': Adding a pattern after the * pattern (or the "
+        // The pattern may be a password given without '>'.
+        return ErrorReply(
+            "Error in ACL SETUSER modifier: Adding a pattern after the * pattern (or the "
             "'allkeys' flag) is not valid and does not have any effect. Try 'resetkeys' to start "
-            "with an empty list of patterns"));
+            "with an empty list of patterns");
       }
 
       req.allow_all_keys = all_keys;
@@ -1134,11 +1134,11 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
       auto& [glob, has_asterisk, all_channels, reset_channels] = *res;
       if ((has_all_channels && !all_channels && !reset_channels) ||
           (req.all_channels && !all_channels && !reset_channels)) {
+        // The pattern may be a password given without '>'.
         return ErrorReply(
-            absl::StrCat("ERR Error in ACL SETUSER modifier \'", facade::ToSV(arg),
-                         "\': Adding a pattern after the * pattern (or the 'allchannels' flag) is "
-                         "not valid and does not have any effect. Try 'resetchannels' to start "
-                         "with an empty list of channels"));
+            "ERR Error in ACL SETUSER modifier: Adding a pattern after the * pattern (or the "
+            "'allchannels' flag) is not valid and does not have any effect. Try 'resetchannels' to "
+            "start with an empty list of channels");
       }
 
       req.all_channels = all_channels;
@@ -1189,7 +1189,8 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
 
     auto [cmd, sign] = MaybeParseAclCommand(command);
     if (!cmd) {
-      return ErrorReply(absl::StrCat("Unrecognized parameter ", command));
+      // The token may be a password given without '>'.
+      return ErrorReply("Unrecognized parameter");
     }
 
     using Sign = User::Sign;

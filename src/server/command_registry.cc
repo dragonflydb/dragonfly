@@ -202,6 +202,8 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     kind_mask_ |= RESET;
   } else if (name_ == "HELLO") {
     kind_mask_ |= HELLO;
+  } else if (name_ == "CONFIG") {
+    kind_mask_ |= CONFIG;
   } else if (name_ == "AUTH" || name_.rfind("ACL", 0) == 0) {
     kind_mask_ |= SECRET_ARGS;
   }
@@ -279,6 +281,14 @@ size_t CommandId::NonSecretArgCount(const facade::ParsedArgs& args) const {
   // Only the protocol version: a mistyped AUTH must not expose the credentials after it.
   if (kind_mask_ & HELLO)
     return std::min<size_t>(args.size(), 1);
+
+  // A mistyped CONFIG subcommand or parameter must not expose the value after it.
+  if (kind_mask_ & CONFIG) {
+    const bool show_param =
+        args.size() > 1 && (absl::EqualsIgnoreCase(args[0], "GET") ||
+                            (args.size() > 2 && absl::EqualsIgnoreCase(args[0], "SET")));
+    return show_param ? 2 : std::min<size_t>(args.size(), 1);
+  }
 
   return args.size();
 }

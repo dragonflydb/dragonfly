@@ -30,8 +30,12 @@ class Namespace {
   DbSlice& GetCurrentDbSlice();
 
   DbSlice& GetDbSlice(ShardId sid);
+
   BlockingController* GetOrAddBlockingController(EngineShard* shard);
-  BlockingController* GetBlockingController(ShardId sid);
+
+  BlockingController* GetBlockingController(ShardId sid) {
+    return shard_blocking_controller_[sid].get();
+  }
 
  private:
   std::vector<std::unique_ptr<DbSlice>> shard_db_slices_;

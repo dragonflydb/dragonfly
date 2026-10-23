@@ -38,10 +38,10 @@ TEST_F(AclFamilyTest, AclSetUser) {
   EXPECT_THAT(resp, ErrArg("ERR wrong number of arguments for 'acl setuser' command"));
 
   resp = Run("ACL SETUSER kostas ONN");
-  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter ONN"));
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter"));
 
   resp = Run("ACL SETUSER kostas +@nonsense");
-  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter +@NONSENSE"));
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter"));
 
   resp = Run("ACL SETUSER vlad");
   EXPECT_THAT(resp, "OK");
@@ -114,7 +114,7 @@ TEST_F(AclFamilyTest, AclSetUser) {
 
   // +@NONE should not exist anymore. It's not in the spec.
   resp = Run("ACL SETUSER rand +@NONE");
-  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter +@NONE"));
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter"));
 
   resp = Run("ACL SETUSER rand ALLCOMMANDS");
   EXPECT_THAT(resp, "OK");
@@ -913,7 +913,7 @@ TEST_F(AclFamilyTest, TestKeys) {
   EXPECT_THAT(vec[7], "~foo ~bar*");
 
   resp = Run("ACL SETUSER temp ~* ~foo");
-  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '~foo': Adding a pattern after the * "
+  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier: Adding a pattern after the * "
                            "pattern (or the 'allkeys' flag) is not valid and does not have any "
                            "effect. Try 'resetkeys' to start with an empty list of patterns"));
 
@@ -921,7 +921,7 @@ TEST_F(AclFamilyTest, TestKeys) {
   EXPECT_THAT(resp, "OK");
 
   resp = Run("ACL SETUSER temp ~foo");
-  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '~foo': Adding a pattern after the * "
+  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier: Adding a pattern after the * "
                            "pattern (or the 'allkeys' flag) is not valid and does not have any "
                            "effect. Try 'resetkeys' to start with an empty list of patterns"));
 
@@ -950,10 +950,10 @@ TEST_F(AclFamilyTest, TestKeys) {
   EXPECT_THAT(resp.GetVec()[7], "~foo");
 
   resp = Run("ACL SETUSER temp resetkeys %K~foo");
-  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter %K~FOO"));
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter"));
 
   resp = Run("ACL SETUSER temp resetkeys %Rfoo");
-  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter %RFOO"));
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter"));
 }
 
 TEST_F(AclFamilyTest, TestPubSub) {
@@ -968,7 +968,7 @@ TEST_F(AclFamilyTest, TestPubSub) {
   EXPECT_THAT(vec[9], "resetchannels &foo &b*r");
 
   resp = Run("ACL SETUSER temp allchannels &bar");
-  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier '&bar': Adding a pattern after the * "
+  EXPECT_THAT(resp, ErrArg("ERR Error in ACL SETUSER modifier: Adding a pattern after the * "
                            "pattern (or the 'allchannels' flag) is "
                            "not valid and does not have any effect. Try 'resetchannels' to start "
                            "with an empty list of channels"));
@@ -1001,10 +1001,10 @@ TEST_F(AclFamilyTest, TestPubSub) {
 
 TEST_F(AclFamilyTest, TestAlias) {
   auto resp = Run("ACL SETUSER luke +___SET");
-  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter +___SET"));
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter"));
 
   resp = Run("ACL SETUSER leia -___SET");
-  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter -___SET"));
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter"));
 
   resp = Run("ACL SETUSER anakin +SET");
   EXPECT_EQ(resp, "OK");
@@ -1102,6 +1102,27 @@ TEST_F(AclFamilyTest, AclSaveLoadKeepsSubcommandRules) {
   EXPECT_EQ(Run("ACL SAVE"), "OK");
   EXPECT_EQ(Run("ACL LOAD"), "OK");
   EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules));
+
+  std::filesystem::remove(path);
+}
+
+TEST_F(AclFamilyTest, AclErrorHidesToken) {
+  TestInitAclFam();
+  auto resp = Run({"ACL", "SETUSER", "u", "on", "secret"});
+  EXPECT_THAT(resp, ErrArg("ERR Unrecognized parameter"));
+  EXPECT_THAT(resp.GetString(), Not(HasSubstr("SECRET")));
+  for (std::string_view rule : {"~secret", "&secret"}) {
+    resp = Run({"ACL", "SETUSER", "u", "allkeys", "allchannels", rule});
+    EXPECT_THAT(resp, ErrArg("Error in ACL SETUSER modifier"));
+    EXPECT_THAT(resp.GetString(), Not(HasSubstr("secret")));
+  }
+
+  std::string path = (std::filesystem::temp_directory_path() / "dfly_hidden_token.acl").string();
+  io::WriteStringToFileOrDie("user bob on secret +@all\n", path);
+  absl::SetFlag(&FLAGS_aclfile, path);
+  resp = Run("ACL LOAD");
+  EXPECT_THAT(resp, ErrArg("Unrecognized parameter"));
+  EXPECT_THAT(resp.GetString(), Not(HasSubstr("SECRET")));
 
   std::filesystem::remove(path);
 }

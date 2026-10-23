@@ -183,7 +183,12 @@ class ServerState {  // public struct - to allow initialization.
 
   bool ShouldDenyOnOOM();
 
-  bool AllowInlineScheduling() const;
+  // We can't allow inline scheduling during a full sync, because then journaling transactions
+  // will be scheduled before RdbLoader::LoadItemsBuffer is finished. We can't use the regular
+  // locking mechanism because RdbLoader is not using transactions.
+  bool AllowInlineScheduling() const {
+    return gstate_ != GlobalState::LOADING;
+  }
 
   // Borrow interpreter from interpreter pool, return it with ReturnInterpreter.
   // Will block if no interpreters are aviable. Use with caution!

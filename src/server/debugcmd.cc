@@ -1654,6 +1654,16 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
     sf_.service().InvokeCmd(args, &cmd_cntx);
   };
 
+  // The stub runs its commands without a parent hop, so hold running_tx_ for it like RunCallback
+  // does, and replay the polls dropped meanwhile once done.
+  EngineShard* shard = EngineShard::tlocal();
+  DCHECK(shard->running_tx() == nullptr);
+  shard->set_running_tx(stub_tx.get());
+  absl::Cleanup release_shard = [shard] {
+    shard->set_running_tx(nullptr);
+    shard->PollExecutionIfDeferred();
+  };
+
   for (unsigned i = 0; i < batch.sz; ++i) {
     string key = StrCat(options.prefix, ":", batch.index[i]);
     uint32_t elements_left = options.elements;
