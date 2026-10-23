@@ -562,8 +562,27 @@ void ClusterFamily::DflyClusterConfig(CmdArgParser parser, CommandContext* cmd_c
   if (new_config == nullptr) {
     LOG(WARNING) << "Can't set cluster config";
     return cmd_cntx->SendError("Invalid cluster configuration.");
-  } else if (ClusterConfig::Current() &&
-             ClusterConfig::Current()->GetConfig() == new_config->GetConfig()) {
+  }
+
+  // `replicas[]` is descriptive: it is independent of this node's actual REPLICAOF state.
+  // Reject a config that disagrees with it for a shard we own, rather than silently installing
+  // a topology that contradicts our runtime role (e.g. a node left running as its own master
+  // would read-route for a shard the topology says it masters, but still accept direct writes
+  // as a replica would, or vice versa). Checked before the equal-config early return below so a
+  // retry of an already-installed config can't bypass this check after REPLICAOF has changed our
+  // runtime role out from under it.
+  if (!new_config->GetOwnedSlots().Empty() &&
+      new_config->is_master() != ServerState::tlocal()->is_master) {
+    LOG(WARNING) << "Rejecting cluster config: topology says this node is "
+                 << (new_config->is_master() ? "a master" : "a replica")
+                 << " for a shard it owns, but it is currently running as "
+                 << (ServerState::tlocal()->is_master ? "a master" : "a replica");
+    return cmd_cntx->SendError(
+        "Cluster configuration conflicts with this node's current replication role.");
+  }
+
+  if (ClusterConfig::Current() &&
+      ClusterConfig::Current()->GetConfig() == new_config->GetConfig()) {
     return cmd_cntx->SendOk();
   }
 
