@@ -771,7 +771,7 @@ void SetupAllocationTracker(ProactorPool* pool) {
     track_ranges.push_back(p);
   }
 
-  pool->AwaitBrief([&](unsigned, ProactorBase*) {
+  auto add_ranges = [&] {
     for (auto range : track_ranges) {
       if (!AllocationTracker::Get().Add(
               {.lower_bound = range.first, .upper_bound = range.second, .sample_odds = 1.0})) {
@@ -779,7 +779,12 @@ void SetupAllocationTracker(ProactorPool* pool) {
         exit(-1);
       }
     }
-  });
+  };
+
+  // The tracker is thread-local. Besides the proactor threads, track the main thread as well:
+  // objects owned by Service (e.g. ServerFamily::replica_) are destroyed there during shutdown.
+  add_ranges();
+  pool->AwaitBrief([&](unsigned, ProactorBase*) { add_ranges(); });
 #endif
 }
 

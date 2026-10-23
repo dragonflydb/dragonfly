@@ -142,6 +142,31 @@ TEST_F(AllocationTrackerTest, UsedTracker) {
   EXPECT_THAT(GetLogsDelta(), Not(Contains(HasSubstr("Deallocating"))));
 }
 
+// Allocations and deallocations must be matched by the same (usable) size, otherwise
+// a block whose requested and usable sizes fall on different sides of a band boundary is logged
+// only once.
+TEST_F(AllocationTrackerTest, BoundsUseUsableSize) {
+  const size_t kRequested = 251;  // std::string of size 250 allocates 251 bytes
+  const size_t usable = mi_good_size(kRequested);
+  ASSERT_GT(usable, kRequested);
+
+  // Requested size is below the band, usable size is inside it.
+  AllocationTracker::Get().Add({.lower_bound = usable, .upper_bound = usable, .sample_odds = 1.0});
+  Allocate(kRequested - 1);
+  EXPECT_THAT(GetLogsDelta(), Contains(HasSubstr("Allocating")));
+  Deallocate();
+  EXPECT_THAT(GetLogsDelta(), Contains(HasSubstr("Deallocating")));
+  AllocationTracker::Get().Clear();
+
+  // Requested size is inside the band, usable size is above it.
+  AllocationTracker::Get().Add(
+      {.lower_bound = kRequested, .upper_bound = usable - 1, .sample_odds = 1.0});
+  Allocate(kRequested - 1);
+  EXPECT_THAT(GetLogsDelta(), Not(Contains(HasSubstr("Allocating"))));
+  Deallocate();
+  EXPECT_THAT(GetLogsDelta(), Not(Contains(HasSubstr("Deallocating"))));
+}
+
 TEST_F(AllocationTrackerTest, MultipleRanges) {
   AllocationTracker::Get().Add(
       {.lower_bound = 1'000'000, .upper_bound = 2'000'000, .sample_odds = 1.0});
