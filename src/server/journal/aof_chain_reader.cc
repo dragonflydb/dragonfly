@@ -34,39 +34,7 @@ constexpr size_t kMaxBlockBytes = kAofBlockHeaderSize + kAofBlockBytes;
 constexpr size_t kReadChunk = 128_KB;
 static_assert(kReadChunk >= kMaxBlockBytes);
 
-class AofReadErrorCategory : public error_category {
- public:
-  const char* name() const noexcept final {
-    return "aof_read";
-  }
-
-  string message(int ev) const final {
-    switch (static_cast<AofReadError>(ev)) {
-      case AofReadError::kTornTail:
-        return "AOF log ends with a damaged tail";
-      case AofReadError::kNoSegments:
-        return "no AOF segments";
-      case AofReadError::kBadSegmentName:
-        return "unexpected AOF segment name";
-      case AofReadError::kSegmentNonContiguous:
-        return "gap in AOF segment seqs";
-      case AofReadError::kShortSegment:
-        return "AOF segment shorter than its header";
-      case AofReadError::kBadSegmentHeader:
-        return "invalid AOF segment header";
-      case AofReadError::kShardCountChanged:
-        return "AOF written with a different shard count";
-    }
-    return "unknown AOF read error";
-  }
-};
-
 }  // namespace
-
-error_code make_error_code(AofReadError e) {
-  static const AofReadErrorCategory category;
-  return {static_cast<int>(e), category};
-}
 
 AofChainReader::AofChainReader(string dir, uint32_t shard_id, uint32_t shard_count)
     : dir_(std::move(dir)), shard_id_(shard_id), shard_count_(shard_count) {
@@ -98,12 +66,12 @@ error_code AofChainReader::Open() {
     if (!absl::ConsumePrefix(&seq_str, prefix) || !absl::ConsumeSuffix(&seq_str, ".aof") ||
         !absl::SimpleAtoi(seq_str, &seq) || AofSegmentWriter::SegmentName(shard_id_, seq) != name) {
       LOG(ERROR) << "Unexpected AOF segment name: " << file.name;
-      return AofReadError::kBadSegmentName;
+      return AofError::kBadSegmentName;
     }
     segment_chain_.push_back({seq, file.size, 0, nullptr});
   }
   if (segment_chain_.empty())
-    return AofReadError::kNoSegments;
+    return AofError::kNoSegments;
 
   // The log runs through the segments in seq order.
   sort(segment_chain_.begin(), segment_chain_.end(),
@@ -114,12 +82,12 @@ error_code AofChainReader::Open() {
 
     if (seg.seq != segment_chain_.front().seq + i) {
       LOG(ERROR) << "Gap in AOF segment seqs before " << SegmentPath(seg.seq);
-      return AofReadError::kSegmentNonContiguous;
+      return AofError::kSegmentNonContiguous;
     }
 
     if (seg.size < kAofSegmentHeaderSize) {
       LOG(ERROR) << "AOF segment shorter than its header: " << SegmentPath(seg.seq);
-      return AofReadError::kShortSegment;
+      return AofError::kShortSegment;
     }
 
     auto file = OpenLinux(SegmentPath(seg.seq), O_RDONLY, 0);
@@ -137,14 +105,14 @@ error_code AofChainReader::Open() {
     auto hdr = DecodeAofSegmentHeader(hdr_bytes);
     if (!hdr || hdr->shard_id != shard_id_ || hdr->seq != seg.seq) {
       LOG(ERROR) << "Invalid AOF segment header: " << SegmentPath(seg.seq);
-      return AofReadError::kBadSegmentHeader;
+      return AofError::kBadSegmentHeader;
     }
 
     // TODO: replay into a different shard count.
     if (hdr->shard_count != shard_count_) {
       LOG(ERROR) << "AOF segment written with " << hdr->shard_count << " shards, now "
                  << shard_count_ << ": " << SegmentPath(seg.seq);
-      return AofReadError::kShardCountChanged;
+      return AofError::kShardCountChanged;
     }
 
     // Seeds the CRCs of the segment's blocks.
@@ -216,7 +184,7 @@ error_code AofChainReader::ReadBlock() {
 io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
   while (pending_.empty()) {
     if (end_ == End::kTailTorn)
-      return nonstd::make_unexpected(make_error_code(AofReadError::kTornTail));
+      return nonstd::make_unexpected(make_error_code(AofError::kTornTail));
     if (end_ == End::kTailReached)
       return 0;
     if (SegmentFullyRead()) {

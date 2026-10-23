@@ -46,6 +46,9 @@ void AofStreamer::ConsumeJournalChange(const journal::JournalChangeItem& item) {
 
 void AofStreamer::ThrottleIfNeeded() {
   // TODO: decide whether backpressure should ever give up instead of stalling the shard.
+  // The open block leaves PendingBytes() only once sealed: when it fills up, or by the heartbeat.
+  // With a limit below kAofBlockBytes, the heartbeat can wait here on the unsealed block holding
+  // its own expiry records, and nothing seals it.
   writer_.WaitPending(max_buffered_bytes_);
 }
 
