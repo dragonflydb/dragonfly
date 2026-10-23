@@ -2974,7 +2974,6 @@ async def test_pipeline_cache_size(df_server: DflyInstance):
 
 
 IOBUF_MIN_SHRINK_INTERVAL_SEC = 1
-IOBUF_COOLDOWN_SEC = 3
 IOBUF_WAIT_SEC = 2
 # We simplify the different timeout required by each test by using a single
 # maximum timeout for all.
@@ -3210,6 +3209,9 @@ async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
     await observer.aclose()
 
 
+IOBUF_COOLDOWN_SEC = 5
+
+
 @dfly_args(
     {
         "proactor_threads": 1,
@@ -3223,6 +3225,7 @@ async def test_iobuf_high_usage_defers_active_shrink(df_server: DflyInstance):
 )
 async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
     """Receive-idle shrinking performs at most one resize during each cooldown interval."""
+    assert IOBUF_WAIT_SEC + 1 < IOBUF_COOLDOWN_SEC
     if not is_resp_io_loop_v2(df_server):
         pytest.skip("targets V2 receive-idle IoBuf shrinking")
 
@@ -3233,14 +3236,24 @@ async def test_iobuf_shrink_respects_cooldown(df_server: DflyInstance):
     await client.set("iobuf-shrink-cooldown", "x" * 2048)
     peak = await get_client_read_buffer_bytes(observer)
 
-    @assert_eventually(timeout=IOBUF_WAIT_TIMEOUT_SEC)
-    async def wait_for_first_shrink():
-        assert await get_client_read_buffer_bytes(observer) < peak
+    @assert_eventually(timeout=IOBUF_COOLDOWN_SEC + IOBUF_WAIT_TIMEOUT_SEC)
+    async def wait_for_shrink(limit: int) -> int:
+        current = await get_client_read_buffer_bytes(observer)
+        assert current < limit
+        return current
 
-    await wait_for_first_shrink()
-    after_first_shrink = await get_client_read_buffer_bytes(observer)
+    after_first_shrink = await wait_for_shrink(peak)
+    # We cannot expect shrinks to be blocked for exactly IOBUF_COOLDOWN_SEC seconds. There are mainly two reasons:
+    # - The c++ code uses time() which only returns whole seconds. So at time 100.99 the time is read as 100,
+    #  which throws off the accounting by at most one second, allowing a shrink before expected
+    # - The python code introduces polling delays, it does not measure on exact time boundary. It can measure well after
+    #  the given time, and a shrink might have become permissible in the gap period
+    # So we measure for a shorter period during which it is guaranteed that the shrink will not happen.
     await asyncio.sleep(IOBUF_WAIT_SEC)
     assert await get_client_read_buffer_bytes(observer) == after_first_shrink
+
+    # After the cooldown expires, a second shrink must eventually happen.
+    await wait_for_shrink(after_first_shrink)
 
     await client.aclose()
     await observer.aclose()

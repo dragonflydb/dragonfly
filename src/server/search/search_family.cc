@@ -349,7 +349,6 @@ constexpr std::array<const std::string_view, 1> kIgnoredOptionsWithArg = {"PHONE
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
   auto& schema = index->schema;
-  const size_t existing = schema.field_names.size();  // FT.ALTER parses into the live definition
 
   if (!parser->HasNext()) {
     return CreateSyntaxError("Fields arguments are missing"sv);
@@ -381,15 +380,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       return CreateSyntaxError("Empty field alias in schema"sv);
     }
 
-    if (schema.field_names.contains(field_alias)) {
+    if (schema.fields.contains(field_alias)) {
       return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_alias));
-    }
-    // Several attributes on one field are not accepted yet: never on JSON, and not through
-    // FT.ALTER on HASH (FT.CREATE keeps the last declaration, as before).
-    if (auto it = schema.fields.find(field_path);
-        it != schema.fields.end() &&
-        (index->type == DocIndex::JSON || it->second.number < existing)) {
-      return CreateSyntaxError(absl::StrCat("Duplicate field in schema - "sv, field_path));
     }
 
     // Determine type
@@ -444,9 +436,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
       flags |= *flag;
     }
 
-    const uint32_t number = schema.field_names.size();
-    schema.fields[field_path] = {field_type, flags, string{field_alias}, params, number};
-    schema.field_names[field_alias] = field_path;
+    const uint32_t number = schema.fields.size();
+    schema.fields[field_alias] = {field_type, flags, string{field_path}, params, number};
   }
 
   return false;
@@ -1666,17 +1657,17 @@ vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
   return results;
 }
 
-// Try creating global hnsw indices for given fields and return true on success
-bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
+// Try creating global hnsw indices for the fields declared from `first` on and return true on
+// success
+bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index, uint32_t first = 0) {
   std::vector<std::string> created_vector_indices;
-  for (const auto& [field_ident, field_info] : index.schema.fields) {
-    if (!field_info.IsIndexableHnswField())
+  for (const auto& [alias, field_info] : index.schema.fields) {
+    if (field_info.number < first || !field_info.IsIndexableHnswField())
       continue;
 
     const auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
 
-    bool success = GlobalHnswIndexRegistry::Instance().Create(idx_name, field_info.short_name,
-                                                              vparams, index.type);
+    bool success = GlobalHnswIndexRegistry::Instance().Create(idx_name, alias, vparams, index.type);
     if (!success) {
       // Clean created indices
       for (const auto& cfname : created_vector_indices)
@@ -1684,7 +1675,7 @@ bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index) {
       return false;
     }
 
-    created_vector_indices.emplace_back(field_info.short_name);
+    created_vector_indices.emplace_back(alias);
   }
   return true;
 }
@@ -2437,17 +2428,12 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     }
     const auto& schema = idx->base().schema;
     std::call_once(schema_validated, [&] {
-      auto name_it = schema.field_names.find(params->vsim_field);
-      if (name_it == schema.field_names.end()) {
+      const auto* field = schema.Find(params->vsim_field);
+      if (!field || field->type != search::SchemaField::VECTOR) {
         vsim_not_vector = true;
         return;
       }
-      auto field_it = schema.fields.find(name_it->second);
-      if (field_it == schema.fields.end() || field_it->second.type != search::SchemaField::VECTOR) {
-        vsim_not_vector = true;
-        return;
-      }
-      const auto& vp = std::get<search::SchemaField::VectorParams>(field_it->second.special_params);
+      const auto& vp = std::get<search::SchemaField::VectorParams>(field->special_params);
       captured_metric = vp.sim;
       if (!use_hnsw) {
         auto vec_bytes = params->query_params[params->vsim_param];
@@ -2762,11 +2748,16 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   // Parse the additional attributes into the copied definition: they continue its declaration
-  // order, and an alias or field that already exists fails here, before any shard is touched.
+  // order, and an alias that already exists fails here, before any shard is touched.
+  const uint32_t first_added = index_info->schema.fields.size();
   auto parse_result = ParseSchema(&parser, index_info.get());
   if (SendErrorIfOccurred(parse_result, &parser, cmd_cntx)) {
     cmd_cntx->tx()->Conclude();
     return;
+  }
+  if (!CreateHnswIndices(idx_name, *index_info, first_added)) {
+    cmd_cntx->tx()->Conclude();
+    return cmd_cntx->SendError("Index already exists");
   }
 
   LOG(INFO) << "Altering " << idx_name << ": "
@@ -2850,10 +2841,10 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
       [&dropped](EngineShard* es) { dropped[es->shard_id()].reset(); });
 
   if (index_info) {
-    for (const auto& [field_ident, field_info] : index_info->schema.fields) {
+    for (const auto& [alias, field_info] : index_info->schema.fields) {
       if (field_info.type == search::SchemaField::VECTOR &&
           !(field_info.flags & search::SchemaField::NOINDEX)) {
-        if (GlobalHnswIndexRegistry::Instance().Remove(idx_name, field_info.short_name)) {
+        if (GlobalHnswIndexRegistry::Instance().Remove(idx_name, alias)) {
           num_deleted.fetch_add(1);
         }
       }
@@ -2945,12 +2936,12 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());
-  for (const auto& [field_ident, field_ptr] : schema.Ordered()) {
+  for (const auto& [alias, field_ptr] : schema.Ordered()) {
     const auto& field_info = *field_ptr;
     vector<string> info;
 
-    string_view base[] = {"identifier"sv, string_view{field_ident},
-                          "attribute"sv,  field_info.short_name,
+    string_view base[] = {"identifier"sv, field_info.identifier,
+                          "attribute"sv,  alias,
                           "type"sv,       SearchFieldTypeToString(field_info.type)};
     info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
 

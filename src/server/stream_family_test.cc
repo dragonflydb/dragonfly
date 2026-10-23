@@ -1319,6 +1319,24 @@ TEST_F(StreamFamilyTest, XGroupConsumer) {
   EXPECT_THAT(resp, ErrArg("NOGROUP"));
 }
 
+TEST_F(StreamFamilyTest, XGroupCreateConsumerEmptyName) {
+  Run({"xgroup", "create", "foo", "group", "$", "MKSTREAM"});
+  EXPECT_THAT(Run({"xgroup", "createconsumer", "foo", "group", ""}), IntArg(1));
+  auto resp = Run({"dump", "foo"});
+  EXPECT_EQ(Run({"restore", "bar", "0", ToSV(resp.GetBuf())}), "OK");
+  EXPECT_THAT(Run({"xgroup", "createconsumer", "bar", "group", ""}), IntArg(0));
+}
+
+TEST_F(StreamFamilyTest, XClaimEmptyNames) {
+  Run({"xadd", "foo", "1-0", "k", "v"});
+  Run({"xgroup", "create", "foo", "", "0"});
+  Run({"xreadgroup", "group", "", "alice", "streams", "foo", ">"});
+  EXPECT_THAT(Run({"xclaim", "foo", "", "", "0", "1-0", "justid"}), RespElementsAre("1-0"));
+  EXPECT_THAT(
+      Run({"xautoclaim", "foo", "", "", "0", "0-0", "justid"}),
+      RespArray(ElementsAre("0-0", RespArray(ElementsAre("1-0")), RespArray(ElementsAre()))));
+}
+
 TEST_F(StreamFamilyTest, Xclaim) {
   Run({"xadd", "foo", "1-0", "k1", "v1"});
   Run({"xadd", "foo", "1-1", "k2", "v2"});
@@ -1473,7 +1491,7 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
   resp = Run({"xtrim", "foo", "maxlen", "-1"});
   EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
   resp = Run({"xtrim", "foo", "minid", "nan"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("Invalid stream ID"));
 
   // Limit with non-approx.
   resp = Run({"xtrim", "foo", "maxlen", "2", "limit", "5"});
@@ -1488,6 +1506,21 @@ TEST_F(StreamFamilyTest, XTrimInvalidArgs) {
   // Invalid limit.
   resp = Run({"xtrim", "foo", "maxlen", "~", "2", "limit", "nan"});
   EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
+}
+
+TEST_F(StreamFamilyTest, SpecialTokensAsExplicitId) {
+  Run({"xadd", "s", "1-0", "a", "1"});
+  Run({"xadd", "s", "2-0", "b", "2"});
+  Run({"xgroup", "create", "s", "g", "0"});
+  EXPECT_THAT(Run({"xtrim", "s", "minid", "*"}), ErrArg("Invalid stream ID"));
+  EXPECT_THAT(Run({"xtrim", "s", "minid", "+"}), ErrArg("Invalid stream ID"));
+  EXPECT_THAT(Run({"xadd", "s", "minid", "+", "3-0", "c", "3"}), ErrArg("Invalid stream ID"));
+  EXPECT_THAT(Run({"xsetid", "s", "*"}), ErrArg("Invalid stream ID"));
+  EXPECT_THAT(Run({"xdel", "s", "1-*"}), ErrArg("Invalid stream ID"));
+  EXPECT_THAT(Run({"xgroup", "create", "s", "g2", "*"}), ErrArg("Invalid stream ID"));
+  EXPECT_THAT(Run({"xgroup", "setid", "s", "g", "*"}), ErrArg("Invalid stream ID"));
+  EXPECT_THAT(Run({"xautoclaim", "s", "g", "c", "0", "*"}), ErrArg("Invalid stream ID"));
+  EXPECT_THAT(Run({"xlen", "s"}), IntArg(2));
 }
 
 TEST_F(StreamFamilyTest, XTrimWrongSyntax) {
@@ -1557,7 +1590,7 @@ TEST_F(StreamFamilyTest, XReadGroupEmptyConsumer) {
   Run({"xadd", "s", "*", "x", "y"});
   Run({"xgroup", "create", "s", "g", "0"});
   auto resp = Run({"xreadgroup", "group", "g", "", "streams", "s", ">"});
-  EXPECT_THAT(resp, ErrArg("consumer name can't be empty"));
+  EXPECT_THAT(resp, RespElementsAre(RespArray(ElementsAre("s", ArrLen(1)))));
 }
 
 TEST_F(StreamFamilyTest, XPendingInvalidArgs) {
@@ -2407,7 +2440,7 @@ TEST_F(StreamFamilyTest, XInfoConsumersArityCrash) {
 
 TEST_F(StreamFamilyTest, GroupCreateInvalidIdMemoryTracking) {
   auto resp = Run({"xgroup", "create", "mystream", "mygroup", "notanumber", "MKSTREAM"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("Invalid stream ID"));
 
   // Verify the stream was not created (no orphan stream after the error)
   resp = Run({"exists", "mystream"});
@@ -2416,7 +2449,7 @@ TEST_F(StreamFamilyTest, GroupCreateInvalidIdMemoryTracking) {
 
 TEST_F(StreamFamilyTest, XAddOnOrphanedStreamMemoryTracking) {
   auto resp = Run({"xgroup", "create", "mystream", "mygroup", "invalid_id", "MKSTREAM"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  EXPECT_THAT(resp, ErrArg("Invalid stream ID"));
 
   resp = Run({"xadd", "mystream", "0-0", "field", "value"});
   EXPECT_THAT(resp, ErrArg("equal or smaller"));

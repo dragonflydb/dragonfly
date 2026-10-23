@@ -799,7 +799,7 @@ void Transaction::ScheduleInternal() {
       run_barrier_.Dec();
 
       // If the optimistic run above held running_tx_ and deferred any poll on this shard,
-      // drain it now. Uses the same needs_repoll_ mechanism as PollExecution's re-drive loop.
+      // drain it now, like PollExecution does after its own run.
       EngineShard::tlocal()->PollExecutionIfDeferred();
       break;
     }
@@ -1311,8 +1311,10 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
     // lock: if we finish without preempting (the common case), no one will ever observe it; if
     // we do preempt, whoever schedules next on this shard will lazily register it for us (see
     // above), so the lock table stays accurate throughout.
+    // In cache mode an insert can evict keys inline, and eviction spares only the keys found in
+    // the lock table, so the callback must register its keys there.
     bool skip_acquire = execute_optimistic && running == nullptr && shard_unlocked &&
-                        db_slice.IsLockFree(mode, lock_args);
+                        !db_slice.IsCacheMode() && db_slice.IsLockFree(mode, lock_args);
     if (!skip_acquire) {
       // Slow path: either contended, or a callback is mid-flight on this shard, or we're not
       // eligible for immediate execution. Acquire intent locks as usual - they're always
@@ -2002,6 +2004,10 @@ AtomicMemoryScope::~AtomicMemoryScope() {
   const int64_t delta = TrackedMemory() - mem_baseline_;
   EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta);
   DeductFromTxScope(delta);
+}
+
+void AdvanceTxIdPast(TxId txid) {
+  op_seq = max(op_seq.load(), txid + 1);
 }
 
 }  // namespace dfly

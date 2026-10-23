@@ -111,9 +111,10 @@ struct FieldReference {
       : name_{name}, alias_{alias} {
   }
 
-  // The attribute behind the name: an alias, else a raw identifier. Unknown names are read from
-  // the document as plain TEXT.
+  // The attribute behind the name: an alias, else a raw identifier (one with a sort index first,
+  // then the first declared). Unknown names are read from the document as plain TEXT.
   struct Resolved {
+    std::string_view alias;  // empty for an unknown name
     std::string_view identifier;
     search::SchemaField::FieldType type = search::SchemaField::TEXT;
     bool sortable = false;
@@ -145,6 +146,21 @@ std::vector<DocField> ResolveFields(const search::Schema& schema,
                                     const std::vector<FieldReference>& fields);
 std::optional<std::vector<DocField>> ResolveFields(
     const search::Schema& schema, const std::optional<std::vector<FieldReference>>& fields);
+
+// Types of document fields by identifier for whole-document replies, decided as by
+// Schema::FindByIdentifier. Views the schema it was built from, which has to outlive it.
+class DocFieldTypes {
+ public:
+  explicit DocFieldTypes(const search::Schema& schema);
+
+  search::SchemaField::FieldType Of(std::string_view identifier) const;  // TEXT when unknown
+
+  size_t GetNonPmrMemoryUsage() const;
+
+ private:
+  // The attribute standing for each document field.
+  absl::flat_hash_map<std::string_view, const search::SchemaField*> fields_;
+};
 
 enum class SortOrder { ASC, DESC };
 
@@ -610,6 +626,7 @@ class ShardDocIndex {
 
  private:
   std::shared_ptr<const DocIndex> base_;
+  DocFieldTypes field_types_;  // derived from base_->schema
 
   // Declared before index resources so its destructor releases the resident gate last.
   HashIndexLifetime hash_index_lifetime_;
@@ -644,10 +661,15 @@ class ShardDocIndices {
 
   // Add an alias for an existing index.
   facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
+
   // Create or update an alias for an existing index.
   facade::OpStatus UpdateAlias(std::string_view alias, std::string_view target);
-  // Delete an alias.
+
   facade::OpStatus DeleteAlias(std::string_view alias);
+
+  std::vector<std::pair<std::string, std::string>> GetAliases() const {
+    return {aliases_.begin(), aliases_.end()};
+  }
 
   // Init index: create shard local state for given index with given name.
   void InitIndex(const OpArgs& op_args, std::string_view name,

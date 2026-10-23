@@ -19,6 +19,24 @@ class LinuxFile;
 
 namespace dfly {
 
+enum class AofReadError {
+  kTornTail = 1,
+  kNoSegments,
+
+  // A file matches the shard's segment pattern, but its name does not parse.
+  kBadSegmentName,
+  kSegmentNonContiguous,
+
+  // A segment is shorter than its header.
+  kShortSegment,
+
+  // A header's CRC, shard id or seq does not match its file.
+  kBadSegmentHeader,
+  kShardCountChanged,
+};
+
+std::error_code make_error_code(AofReadError e);
+
 // Reads one shard's AOF chain, its segments in seq order, as a single stream of journal records.
 // An io::Source, so JournalReader can read from it directly. Runs on a proactor thread, and is
 // destroyed there: it closes the segments' files.
@@ -27,14 +45,16 @@ class AofChainReader : public io::Source {
   AofChainReader(std::string dir, uint32_t shard_id, uint32_t shard_count);
   ~AofChainReader();
 
-  // Finds the chain's segments, sorted by seq, and validates their headers.
+  // Finds the chain's segments, sorted by seq, and validates their headers. A bad name, a seq gap
+  // or a bad header fails it: a segment gets its final name only after its header is durable, so
+  // these mean outside damage, not a crash.
   std::error_code Open();
 
   // Streams the payloads of valid blocks in order; a record cut at the end is left for
   // JournalReader to drop. The log is a prefix by LSN: the first invalid block, LSN break or record
   // cut at a segment's end ends it, even if later segments look valid, since their records may
   // depend on the lost ones. At the end of the log returns 0 if the log ends cleanly, or
-  // illegal_byte_sequence if a damaged tail follows.
+  // AofReadError::kTornTail if a damaged tail follows.
   io::Result<size_t> ReadSome(const iovec* v, uint32_t len) override;
 
   // Last complete record read so far, 0 if none; the log's last once the end was reached.
@@ -45,6 +65,31 @@ class AofChainReader : public io::Source {
   // Bytes past the end of the log. Valid once the end was reached.
   uint64_t DiscardedBytes() const {
     return discarded_bytes_;
+  }
+
+  // ReadSome() reached the end of the log, cleanly or at a damaged tail.
+  bool AtEnd() const {
+    return end_ != End::kNotYet;
+  }
+
+  // The log ended at a damaged tail: an invalid block, an LSN break or a record cut at the end.
+  bool TornTail() const {
+    return end_ == End::kTailTorn;
+  }
+
+  // Seq of the segment that resumes the log: right after the one where the log ends. Valid once
+  // the end was reached.
+  uint64_t NextSeq() const {
+    const Segment& end = AllSegmentsRead() ? segment_chain_.back() : segment_chain_[read_seg_id_];
+    return end.seq + 1;
+  }
+
+  // Makes the files match the log as read. Call once the end was reached, before resuming.
+  // TODO: a no-op for now. Truncate the segment at the end of the log, fdatasync the kept segments
+  // and rename later ones to *.discarded, highest seq first. Until then, replay refuses to resume
+  // after a torn tail.
+  std::error_code Repair() {
+    return {};
   }
 
  private:
@@ -110,3 +155,7 @@ class AofChainReader : public io::Source {
 };
 
 }  // namespace dfly
+
+namespace std {
+template <> struct is_error_code_enum<dfly::AofReadError> : true_type {};
+}  // namespace std

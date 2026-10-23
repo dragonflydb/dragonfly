@@ -56,12 +56,12 @@
 
 ```bash
 # Debug build (for development)
-./helio/blaze.sh -DWITH_AWS=OFF -DWITH_GCP=OFF
+./helio/blaze.sh -DWITH_GCP=OFF
 cd build-dbg && ninja dragonfly              # Build main binary
 cd build-dbg && ninja generic_family_test    # Build specific test
 
 # Release build for local benchmarking
-./helio/blaze.sh -release -DWITH_AWS=OFF -DWITH_GCP=OFF
+./helio/blaze.sh -release -DWITH_GCP=OFF
 cd build-opt && ninja dragonfly
 ```
 
@@ -105,6 +105,10 @@ git log --oneline -10
 ## Architecture Patterns
 
 **Code Style**: [.clang-format](.clang-format) - snake_case vars, PascalCase functions, kPascalCase constants
+
+**Comments**: Always put an empty line before a comment in code, unless the comment is the first
+line of a block (right after `{`). This applies to comments between statements, before if/for, and
+inside lambdas.
 
 **DO ✅**:
 - Function parameters: inputs first, output arguments (pointers the function writes to) last
@@ -355,20 +359,20 @@ pre-commit run --all-files                          # Run all formatters
 Pass options to `helio/blaze.sh` with `-D` prefix:
 
 ```bash
-./helio/blaze.sh -DWITH_SEARCH=OFF -DWITH_AWS=ON
+./helio/blaze.sh -DWITH_SEARCH=OFF -DWITH_GCP=OFF
 ```
 
 **Most useful options**:
 - `WITH_ASAN=ON` / `WITH_USAN=ON` - Enable sanitizers for debugging
 - `WITH_SEARCH=OFF` - Disable search module for faster builds
-- `WITH_AWS=OFF` / `WITH_GCP=OFF` - Disable cloud libraries
+- `WITH_GCP=OFF` - Disable GCP cloud library
 - `WITH_TIERING=OFF` - Disable disk storage
 - `USE_MOLD=ON` - Faster linking with LTO (production builds)
 
 **Quick configurations**:
 ```bash
 # Minimal build (fast compilation)
-./helio/blaze.sh -DWITH_GPERF=OFF -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_TIERING=OFF -DWITH_SEARCH=OFF
+./helio/blaze.sh -DWITH_GPERF=OFF -DWITH_GCP=OFF -DWITH_TIERING=OFF -DWITH_SEARCH=OFF
 
 # Full-featured (all options ON by default)
 ./helio/blaze.sh

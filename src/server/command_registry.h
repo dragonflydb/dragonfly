@@ -206,6 +206,9 @@ class CommandId : public facade::CommandId {
     return kind_mask_ & IS_ALIAS;
   }
 
+  // Leading args safe to show in logs, MONITOR, SLOWLOG and replies; the rest hold credentials.
+  size_t NonSecretArgCount(const facade::ParsedArgs& args) const;
+
   hdr_histogram* GetLatencyHist() const {
     return latency_histogram_;
   }
@@ -326,7 +329,9 @@ class CommandId : public facade::CommandId {
 
     RESET = 1U << 16,  // RESET only
 
-    ACL_ONLY = 1U << 17,  // see IsAclOnly()
+    SECRET_ARGS = 1U << 17,  // AUTH and ACL *: every arg may be a credential
+    HELLO = 1U << 18,        // HELLO only: the args after its protocol version may be credentials
+    ACL_ONLY = 1U << 19,     // see IsAclOnly()
   };
 
   // CmdKind bits. Trivially copied by the move ctor.

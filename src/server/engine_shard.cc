@@ -4,6 +4,7 @@
 
 #include "server/engine_shard.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
@@ -433,6 +434,7 @@ void EngineShard::Shutdown() {
 
   queue_.Shutdown();
   queue2_.Shutdown();
+  deferred_polls_.clear();  // release while the shard's thread-local state is still alive
   DCHECK(!fiber_heartbeat_periodic_.IsJoinable());
   DCHECK(!fiber_shard_handler_periodic_.IsJoinable());
 }
@@ -568,7 +570,12 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     // Check that trans doesn't need processing or is guaranteed to be found via txq/continuation
     DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(shard_id())  // tx was already disarmed
            || trans->DEBUG_GetTxqPosInShard(shard_id()) != TxQueue::kEnd ||
-           continuation_trans_ == trans);
+           continuation_trans_ == trans || trans->IsBlockedInShard(shard_id()));
+
+    // A repoll without trans does not reach blocked transactions, so their polls are kept.
+    // Duplicates are harmless: replaying a transaction that is no longer armed is a no-op.
+    if (trans && trans->IsBlockedInShard(shard_id()))
+      deferred_polls_.emplace_back(trans);
     needs_repoll_ = true;
     return;
   }
@@ -578,13 +585,26 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   // Executing `trans` out of order above would not follow up with queue processing, so
   // we need to issue another poll if we interruped another poll request.
-  // Because it runs with trans=nullptr, it progresses only on the loop and does not need follow ups
   PollExecutionIfDeferred();
 }
 
 void EngineShard::PollExecutionIfDeferred() {
-  if (std::exchange(needs_repoll_, false))
-    PollExecutionInternal("repoll", nullptr);
+  // Replayed polls can be interrupted again. A running callback or poll replays them when done.
+  // Any deferred poll can be replayed: a transaction awakened on this shard never meets an
+  // active continuation, since NotifyPending wakes none while one is active and the tx queue
+  // starts none while one is awakened. A stale entry is not armed anymore, so its replay is a
+  // no-op.
+  while (running_tx_ == nullptr && poll_depth_ == 0) {
+    if (!deferred_polls_.empty()) {
+      boost::intrusive_ptr<Transaction> trans = std::move(deferred_polls_.back());
+      deferred_polls_.pop_back();
+      PollExecutionInternal("repoll", trans.get());
+    } else if (std::exchange(needs_repoll_, false)) {
+      PollExecutionInternal("repoll", nullptr);
+    } else {
+      break;
+    }
+  }
 }
 
 void EngineShard::PollExecutionInternal(const char* context, Transaction* trans) {
@@ -594,6 +614,8 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
   DCHECK(running_tx_ == nullptr) << running_tx_->DebugId();
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
+  ++poll_depth_;
+  absl::Cleanup poll_done = [this] { --poll_depth_; };
 
   // If any of the following flags are present, we are guaranteed to run in this function:
   // 1. AWAKED_Q -> Blocking transactions are executed immediately after waking up, they don't
@@ -628,7 +650,6 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
   }
 
   bool update_stats = false;
-  ++poll_concurrent_factor_;
 
   auto run = [this, &update_stats](Transaction* tx, bool allow_removal) -> bool /* concluding */ {
     update_stats = true;
@@ -711,7 +732,6 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
       LOG_IF(DFATAL, trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd);
     }
   }
-  --poll_concurrent_factor_;
   if (update_stats) {
     CacheStats();
   }

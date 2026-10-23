@@ -98,6 +98,16 @@ class TransactionTest : public Test {
     OnShard(kNumThreads - 1, [d] { ThisFiber::SleepFor(d); });
   }
 
+  // Whether the poll of `tx`, coordinated from proactor `coord`, ran on shard `sid` and was
+  // dropped, i.e. `tx` is still armed after the shard queue fiber processed the poll.
+  bool PollDropped(Transaction* tx, unsigned sid, unsigned coord) {
+    if (!AwaitOnShard(sid, [tx, sid] { return tx->DEBUG_IsArmedInShard(sid); }))
+      return false;
+    OnShard(coord, [] {});         // the coordinator has queued the poll
+    shard_set->Await(sid, [] {});  // and the shard queue has run it
+    return OnShard(sid, [tx, sid] { return tx->DEBUG_IsArmedInShard(sid); });
+  }
+
   // Handle for a transaction parked mid-callback while holding running_tx_.
   struct InlineHold {
     fb2::Done parked, release;
@@ -494,6 +504,138 @@ TEST_F(TransactionTest, SingleHopAsyncDrainsDeferredPoll) {
   ASSERT_TRUE(v_ran) << "V was stranded: the poll deferred by Z's async hop was never replayed";
 }
 
+// T is blocked on shards 0 and 2 and woken on shard 2. Its action hop poll on shard 0 is dropped
+// while X, run by a drain on a connection fiber, holds running_tx_. A repoll without trans does
+// not reach T, so the drain must replay the poll with T.
+TEST_F(TransactionTest, BlockedTxPollDroppedDuringReplay) {
+  ASSERT_EQ(0u, Shard("a", shard_set->size()));
+  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+  ASSERT_EQ(2u, Shard("z", shard_set->size()));
+
+  static CommandId cid_t{"tx_test_rp_t", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_h{"tx_test_rp_h", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_x{"tx_test_rp_x", 0, -1, 1, -1, acl::NONE};
+
+  auto tx_t = MakeTx(&cid_t, {"x", "z"});
+  auto tx_h = MakeTx(&cid_h, {"a"});
+  auto tx_x = MakeTx(&cid_x, {"a"});
+
+  // T: first hop, then it watches once t_watch fires, then its action hop.
+  fb2::Done t_first_hop, t_watch, t_done;
+  auto fb_t = pp_->at(1)->LaunchFiber([&] {
+    tx_t->Execute(Noop, false);
+    t_first_hop.Notify();
+    t_watch.Wait();
+    auto ready = [](EngineShard*, const DbContext&, std::string_view) {
+      return KeyReadyResult::kReady;
+    };
+    facade::ConnectionContext cntx{nullptr};
+    auto tp = Transaction::time_point::max();
+    ASSERT_EQ(OpStatus::OK, tx_t->WaitOnWatch(tp, Transaction::kShardArgs, ready, &cntx));
+    tx_t->Execute(Noop, true);
+    t_done.Notify();
+  });
+  ASSERT_TRUE(t_first_hop.WaitFor(5s));
+
+  // H parks inline holding running_tx_: the polls of T's watch hop and X's first hop drop.
+  auto h = ParkHoldingRunningTx(0, tx_h.get());
+  ASSERT_TRUE(h->WaitParked());
+  t_watch.Notify();
+  ASSERT_TRUE(PollDropped(tx_t.get(), 0, 1));
+
+  fb2::Done x_parked, x_release, x_last;
+  auto fb_x = pp_->at(1)->LaunchFiber([&] {
+    tx_x->Execute(
+        [&](Transaction*, EngineShard*) {
+          x_parked.Notify();
+          x_release.Wait();
+          return OpStatus::OK;
+        },
+        false);
+    x_last.Wait();
+    tx_x->Execute(Noop, true);
+  });
+  ASSERT_TRUE(PollDropped(tx_x.get(), 0, 1));
+
+  // H's drain runs T's watch hop and parks X. T's action hop poll drops and X stays the
+  // continuation.
+  h->release.Notify();
+  ASSERT_TRUE(x_parked.WaitFor(5s));
+  OnShard(2, [] {
+    auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(2);
+    bc->Awaken(0, "z");
+    bc->NotifyPending();
+  });
+  ASSERT_TRUE(PollDropped(tx_t.get(), 0, 1));
+  x_release.Notify();
+  h->fiber.Join();
+
+  bool t_ran = t_done.WaitFor(5s);
+  if (!t_ran)  // unstick T so the test fails instead of hanging
+    shard_set->Await(0, [&] { EngineShard::tlocal()->PollExecution("test_unstick", tx_t.get()); });
+  fb_t.Join();
+  EXPECT_TRUE(t_ran) << "T was stranded on shard 0";
+  x_last.Notify();
+  fb_x.Join();
+}
+
+// T is blocked on shard 0 and woken there, but its action hop poll is dropped because a fiber
+// other than the shard queue fiber holds running_tx_, e.g. a drain replaying another blocked
+// transaction. The holder's drain must replay the poll with T. Until T runs, its shard's
+// HasAwakedTransaction() also stops the tx queue.
+TEST_F(TransactionTest, AwakenedTxPollDroppedWhileRunning) {
+  ASSERT_EQ(0u, Shard("x", shard_set->size()));
+
+  static CommandId cid_t{"tx_test_aw_t", 0, -1, 1, -1, acl::NONE};
+  static CommandId cid_h{"tx_test_aw_h", 0, -1, 1, -1, acl::NONE};
+
+  auto tx_t = MakeTx(&cid_t, {"x"});
+  auto tx_h = MakeTx(&cid_h, {"a"});  // only stands for the holder of running_tx_
+
+  fb2::Done t_done;
+  auto fb_t = pp_->at(1)->LaunchFiber([&] {
+    tx_t->Execute(Noop, false);
+    auto ready = [](EngineShard*, const DbContext&, std::string_view) {
+      return KeyReadyResult::kReady;
+    };
+    facade::ConnectionContext cntx{nullptr};
+    auto tp = Transaction::time_point::max();
+    ASSERT_EQ(OpStatus::OK, tx_t->WaitOnWatch(tp, Transaction::kShardArgs, ready, &cntx));
+    tx_t->Execute(Noop, true);
+    t_done.Notify();
+  });
+
+  auto blocking_controller = [] {
+    return namespaces->GetDefaultNamespace().GetBlockingController(0);
+  };
+  ASSERT_TRUE(AwaitOnShard(0, [&] {
+    auto* bc = blocking_controller();
+    return bc && bc->HasBlockedTransactions();
+  }));
+
+  // Wake T, then hold running_tx_ from this fiber before T's action hop poll runs.
+  OnShard(0, [&] {
+    auto* bc = blocking_controller();
+    bc->Awaken(0, "x");
+    bc->NotifyPending();
+    EngineShard::tlocal()->set_running_tx(tx_h.get());
+  });
+  ASSERT_TRUE(PollDropped(tx_t.get(), 0, 1));
+
+  // Release running_tx_ and drain, as a holder off the shard queue does when done.
+  OnShard(0, [] {
+    EngineShard* shard = EngineShard::tlocal();
+    shard->set_running_tx(nullptr);
+    shard->PollExecutionIfDeferred();
+  });
+
+  bool t_ran = t_done.WaitFor(5s);
+  if (!t_ran)  // unstick T so the test fails instead of hanging
+    shard_set->Await(0, [&] { EngineShard::tlocal()->PollExecution("test_unstick", tx_t.get()); });
+  fb_t.Join();
+  EXPECT_TRUE(t_ran) << "T awakened on shard 0 was stranded";
+}
+
 namespace {
 
 TypeMemDeltas DeltaDiff(const TypeMemDeltas& before, const TypeMemDeltas& after) {
@@ -618,15 +760,25 @@ TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
 // InitByArgs and run a single concluding hop. The hop callback is empty, so only the transaction
 // code is measured.
 //
-// remote=0: the coordinator fiber runs on the key's shard thread and the hop runs inline, i.e.
-//           the pure CPU cost of the transaction code.
-// remote=1: the coordinator runs on another thread, so every hop is a cross-thread round trip.
-// fibers:   the number of coordinator fibers issuing transactions concurrently.
+// BM_TxInline:      the coordinator fiber runs on the key's shard thread and the hop runs inline,
+//                   i.e. the pure CPU cost of the transaction code.
+// BM_TxRemoteSync:  `fibers` coordinator fibers on another thread run blocking hops, so every hop
+//                   is a cross-thread round trip, like commands of non-pipelined clients.
+// BM_TxRemoteAsync: a coordinator fiber on another thread issues `batch` transactions back to back
+//                   with SingleHopAsync and then waits for all of them, like a pipelined connection
+//                   whose commands reply asynchronously. A batch lets one wakeup of the shard queue
+//                   and of the coordinator fiber serve several transactions.
 // The `inline` and `optimistic` counters report the fraction of transactions that took these paths.
 //
-// Run with: ./transaction_test --bench --gtest_filter='-*' --benchmark_filter=BM_TxSingleKey
+// Run with: ./transaction_test --bench --gtest_filter='-*' --benchmark_filter=BM_Tx
 class TxBenchmark : public TransactionTest {
  public:
+  struct Options {
+    bool remote = false;       // Whether the coordinator runs on another thread than the shard.
+    unsigned fibers = 1;       // Number of coordinator fibers issuing transactions concurrently.
+    unsigned async_batch = 0;  // 0 for blocking hops, otherwise the SingleHopAsync batch size.
+  };
+
   TxBenchmark();
 
   ~TxBenchmark() override {
@@ -636,10 +788,14 @@ class TxBenchmark : public TransactionTest {
   void TestBody() override {
   }
 
-  void Run(benchmark::State& state);
+  void Run(const Options& opts, benchmark::State& state);
 
  private:
   static constexpr ShardId kShard = 0;  // Owns all the benchmark keys.
+
+  // Matches the number of tasks the shard queue consumer drains per wakeup, and stays well below
+  // the shard queue capacity, so issuing a batch never blocks on a full queue.
+  static constexpr size_t kMaxAsyncBatch = 16;
 
   struct PathStats {
     uint64_t inline_runs;      // Transactions that ran inline on the coordinator thread.
@@ -649,10 +805,14 @@ class TxBenchmark : public TransactionTest {
   PathStats ReadPathStats(unsigned coordinator);
 
   // Runs the benchmark loop, issuing transactions from `num_fibers` fibers on the current thread.
-  void RunCoordinators(unsigned num_fibers, benchmark::State& state);
+  void RunCoordinators(unsigned num_fibers, unsigned async_batch, benchmark::State& state);
 
   // Runs a transaction with a single empty hop on `key`, like a GET or a SET.
   void RunTx(string_view key);
+
+  // Issues `count` such transactions on consecutive keys starting at index `first` without
+  // waiting, then waits for all of them.
+  void RunAsyncBatch(size_t first, size_t count);
 
   // A minimal SET-like command with a single key at a fixed position.
   CommandId cid_{"BENCH_SET", CO::JOURNALED | CO::DENYOOM, -3, 1, 1, acl::NONE};
@@ -683,13 +843,12 @@ TxBenchmark::TxBenchmark() {
   }
 }
 
-void TxBenchmark::Run(benchmark::State& state) {
-  const bool remote = state.range(0);
-  const unsigned num_fibers = state.range(1);
-  const unsigned coordinator = remote ? kShard + 1 : kShard;
+void TxBenchmark::Run(const Options& opts, benchmark::State& state) {
+  const unsigned coordinator = opts.remote ? kShard + 1 : kShard;
+  CHECK_LE(opts.async_batch, kMaxAsyncBatch);
 
   const PathStats before = ReadPathStats(coordinator);
-  OnShard(coordinator, [&] { RunCoordinators(num_fibers, state); });
+  OnShard(coordinator, [&] { RunCoordinators(opts.fibers, opts.async_batch, state); });
   const PathStats after = ReadPathStats(coordinator);
 
   const double iterations = state.iterations();
@@ -707,7 +866,8 @@ TxBenchmark::PathStats TxBenchmark::ReadPathStats(unsigned coordinator) {
   return stats;
 }
 
-void TxBenchmark::RunCoordinators(unsigned num_fibers, benchmark::State& state) {
+void TxBenchmark::RunCoordinators(unsigned num_fibers, unsigned async_batch,
+                                  benchmark::State& state) {
   // All iterations form a single batch, so the fibers are launched once and share the budget.
   // They run on the same thread, so `next` needs no synchronization.
   const size_t total = state.max_iterations;
@@ -716,8 +876,18 @@ void TxBenchmark::RunCoordinators(unsigned num_fibers, benchmark::State& state) 
   while (state.KeepRunningBatch(total)) {  // Runs once, the second call stops the timer.
     for (auto& fb : fibers) {
       fb = fb2::Fiber("coordinator", [&] {
-        while (next < total)
-          RunTx(keys_[next++ % keys_.size()]);
+        while (next < total) {
+          if (async_batch == 0) {
+            RunTx(keys_[next++ % keys_.size()]);
+            continue;
+          }
+
+          // Claim the range before running it, because waiting lets the other fibers advance.
+          const size_t first = next;
+          const size_t count = std::min<size_t>(async_batch, total - first);
+          next += count;
+          RunAsyncBatch(first, count);
+        }
       });
     }
     for (auto& fb : fibers)
@@ -732,15 +902,48 @@ void TxBenchmark::RunTx(string_view key) {
   tx->ScheduleSingleHop(Noop);
 }
 
-static void BM_TxSingleKey(benchmark::State& state) {
-  TxBenchmark bench;
-  bench.Run(state);
+void TxBenchmark::RunAsyncBatch(size_t first, size_t count) {
+  // A transaction references its arguments until its hop finishes.
+  string_view args[kMaxAsyncBatch][2];
+  boost::intrusive_ptr<Transaction> txs[kMaxAsyncBatch];
+
+  for (size_t i = 0; i < count; ++i) {
+    args[i][0] = keys_[(first + i) % keys_.size()];
+    args[i][1] = "value";
+    txs[i] = new Transaction{&cid_};
+    txs[i]->InitByArgs(ns_, 0, CmdArgList{args[i]});
+    txs[i]->SingleHopAsync(Noop);
+  }
+
+  for (size_t i = 0; i < count; ++i)
+    txs[i]->Blocker()->Wait();
 }
-BENCHMARK(BM_TxSingleKey)
-    ->ArgNames({"remote", "fibers"})
-    ->Args({0, 1})
-    ->Args({1, 1})
-    ->Args({1, 16})
+
+static void BM_TxInline(benchmark::State& state) {
+  TxBenchmark bench;
+  bench.Run({}, state);
+}
+BENCHMARK(BM_TxInline)->MeasureProcessCPUTime()->UseRealTime();
+
+static void BM_TxRemoteSync(benchmark::State& state) {
+  TxBenchmark bench;
+  bench.Run({.remote = true, .fibers = unsigned(state.range(0))}, state);
+}
+BENCHMARK(BM_TxRemoteSync)
+    ->ArgName("fibers")
+    ->Arg(1)
+    ->Arg(16)
+    ->MeasureProcessCPUTime()
+    ->UseRealTime();
+
+static void BM_TxRemoteAsync(benchmark::State& state) {
+  TxBenchmark bench;
+  bench.Run({.remote = true, .async_batch = unsigned(state.range(0))}, state);
+}
+BENCHMARK(BM_TxRemoteAsync)
+    ->ArgName("batch")
+    ->Arg(1)
+    ->Arg(16)
     ->MeasureProcessCPUTime()
     ->UseRealTime();
 

@@ -32,6 +32,9 @@ extern "C" {
 #include "server/rdb_load.h"
 #include "server/rdb_load_context.h"
 #include "server/rdb_save.h"
+#ifdef WITH_SEARCH
+#include "server/search/doc_index.h"
+#endif
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/test_utils.h"
@@ -840,6 +843,45 @@ TEST_F(RdbTest, RestoreSearchIndexNameStartingWithColon) {
   EXPECT_THAT(v.front(), IntArg(1));
 }
 
+#ifdef WITH_SEARCH
+TEST_F(RdbTest, SearchAliasesRoundTrip) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+
+  const string utf8_alias = ":alias-café";
+  ASSERT_EQ(Run({"FT.ALIASADD", "first", "idx-a"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "second", "idx-a"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASUPDATE", "first", "idx-b"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", utf8_alias, "idx-b"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "deleted", "idx-a"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASDEL", "deleted"}), "OK");
+  ASSERT_EQ(Run({"save", "df"}), "OK");
+
+  // Change every kind of alias state before reloading the snapshot.
+  ASSERT_EQ(Run({"FT.ALIASUPDATE", "first", "idx-a"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASDEL", "second"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "new", "idx-b"}), "OK");
+
+  auto expect_aliases = [&](vector<pair<string, string>> expected) {
+    ranges::sort(expected);
+    pp_->at(0)->Await([&] {
+      shard_set->RunBriefInParallel([&](EngineShard* es) {
+        auto actual = es->search_indices()->GetAliases();
+        ranges::sort(actual);
+        EXPECT_EQ(actual, expected) << "shard " << es->shard_id();
+      });
+    });
+  };
+  const vector<pair<string, string>> expected_aliases = {
+      {"first", "idx-b"}, {"second", "idx-a"}, {utf8_alias, "idx-b"}};
+
+  ASSERT_EQ(Run({"debug", "reload", "nosave"}), "OK");
+  expect_aliases(expected_aliases);
+  ASSERT_EQ(Run({"debug", "reload", "nosave"}), "OK");
+  expect_aliases(expected_aliases);
+}
+#endif
+
 // Parametrized test for RestoreVectorSearchIndexHnsw with varying document counts
 class HnswRestoreTest : public RdbTest, public testing::WithParamInterface<int> {};
 
@@ -922,17 +964,20 @@ TEST_F(RdbTest, FailedLoadDropsUnbuiltIndex) {
                 "HNSW",      "6",   "TYPE", "FLOAT32", "DIM",    "2", "DISTANCE_METRIC",
                 "L2"});
   };
-  EXPECT_EQ(create(), "OK");
+  ASSERT_EQ(create(), "OK");
+#ifdef WITH_SEARCH
+  ASSERT_EQ(Run({"FT.ALIASADD", "idx-alias", "idx"}), "OK");
+#endif
   for (int i = 0; i < 10; ++i)
     Run({"HSET", StrCat("doc:", i), "t", "hello", "g", "a", "v", vec});
-  EXPECT_EQ(Run({"save", "df"}), "OK");
+  ASSERT_EQ(Run({"save", "df"}), "OK");
 
   // An empty shard file fails the load after the summary has replayed the index definitions.
   string shard_file = service_->server_family().GetLastSaveInfo().file_name;
   shard_file.replace(shard_file.rfind("summary"), 7, "0000");
   filesystem::resize_file(shard_file, 0);
 
-  EXPECT_THAT(Run({"debug", "reload", "nosave"}), ArgType(RespExpr::ERROR));
+  ASSERT_THAT(Run({"debug", "reload", "nosave"}), ArgType(RespExpr::ERROR));
   EXPECT_GT(CheckedInt({"dbsize"}), 0);
 
   const auto no_index = ErrArg("idx: no such index");
@@ -944,9 +989,18 @@ TEST_F(RdbTest, FailedLoadDropsUnbuiltIndex) {
       Run({"FT.HYBRID", "idx", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
       no_index);
   EXPECT_THAT(Run({"FT.INFO", "idx"}), no_index);
+#ifdef WITH_SEARCH
+  pp_->at(0)->Await([] {
+    shard_set->RunBriefInParallel(
+        [](EngineShard* es) { EXPECT_THAT(es->search_indices()->GetAliases(), IsEmpty()); });
+  });
+#endif
 
   // The name is free again and the keys that survived the load get indexed.
-  EXPECT_EQ(create(), "OK");
+  ASSERT_EQ(create(), "OK");
+#ifdef WITH_SEARCH
+  ASSERT_EQ(Run({"FT.ALIASADD", "idx-alias", "idx"}), "OK");
+#endif
   ASSERT_TRUE(
       WaitUntilCondition([&] { return IsIndexingDone("idx"); }, std::chrono::milliseconds(10000)));
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "LIMIT", "0", "0"}),
@@ -1930,6 +1984,87 @@ TEST_F(RdbTest, DragonflyExtensions) {
   }
 }
 
+#ifdef WITH_SEARCH
+TEST_F(RdbTest, SearchAliasAuxValidation) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "taken", "idx-a"}), "OK");
+
+  const vector<string> malformed = {
+      "taken idx-b",        // conflicting alias
+      "alias",              // missing target
+      "new missing",        // missing index
+      "",                   // empty
+      "alias idx-a extra",  // too many args
+      "idx-a idx-b",        // index name used as alias
+  };
+  for (const auto& def : malformed) {
+    SCOPED_TRACE("definition size: " + std::to_string(def.size()));
+    string body;
+    body.push_back(RDB_OPCODE_AUX);
+    AddKV(&body, "df-ver", "test");
+    body.push_back(RDB_OPCODE_AUX);
+    AddKV(&body, "search-alias", def);
+    const auto data = WrapInRdb(body);
+    // Bad aliases are skipped without failing the load or touching existing aliases.
+    EXPECT_FALSE(LoadRdbBytes(to_byte(data.data()), data.size()));
+    pp_->at(0)->Await([] {
+      shard_set->RunBriefInParallel([](EngineShard* es) {
+        EXPECT_THAT(es->search_indices()->GetAliases(), ElementsAre(Pair("taken", "idx-a")));
+      });
+    });
+  }
+}
+
+TEST_F(RdbTest, AliasJournalMutationsAbortFullSync) {
+  auto aliases_on_all_shards = [&] {
+    vector<vector<pair<string, string>>> aliases(shard_set->size());
+    pp_->at(0)->Await([&] {
+      shard_set->RunBriefInParallel([&](EngineShard* es) {
+        aliases[es->shard_id()] = es->search_indices()->GetAliases();
+        sort(aliases[es->shard_id()].begin(), aliases[es->shard_id()].end());
+      });
+    });
+    return aliases;
+  };
+
+  auto make_journal_command = [](std::string_view command, std::string_view alias,
+                                 std::string_view target) {
+    io::StringSink sink;
+    JournalWriter writer(&sink);
+    const std::string_view args[] = {alias, target};
+    writer.Write(journal::Entry{
+        1, journal::Op::COMMAND, 0, std::nullopt,
+        journal::Entry::Payload(command, ArgSlice{args, command == "FT.ALIASDEL" ? 1u : 2u})});
+    RdbSerializer serializer(CompressionMode::NONE);
+    CHECK(!serializer.WriteJournalEntry(std::move(sink).str()));
+    return serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+  };
+
+  auto expect_rejected_without_mutation = [&](std::string_view command, std::string_view alias,
+                                              std::string_view target, bool initially_exists) {
+    SCOPED_TRACE(command);
+    ASSERT_EQ(Run({"FLUSHALL"}), "OK");
+    ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+    ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+    if (initially_exists) {
+      ASSERT_EQ(Run({"FT.ALIASADD", string(alias), "idx-a"}), "OK");
+    }
+    auto before = aliases_on_all_shards();
+
+    const auto rdb = WrapInRdb(make_journal_command(command, alias, target));
+    EXPECT_EQ(LoadRdbBytes(to_byte(rdb.data()), rdb.size()),
+              RdbError(rdb::errc::unsupported_operation));
+    auto after = aliases_on_all_shards();
+    EXPECT_EQ(after, before);
+  };
+
+  expect_rejected_without_mutation("FT.ALIASADD", "new", "idx-a", false);
+  expect_rejected_without_mutation("FT.ALIASUPDATE", "live", "idx-b", true);
+  expect_rejected_without_mutation("FT.ALIASDEL", "live", "", true);
+}
+#endif
+
 TEST_F(RdbTest, HashExpiryEncoding) {
   absl::FlagSaver fs;
   SetTestFlag("num_shards", "1");
@@ -2231,6 +2366,47 @@ TEST_F(RdbTest, SplitCuckoo) {
   for (size_t i = 0; i < 100; ++i) {
     EXPECT_THAT(Run(StrCat("cf.exists cf_loaded item", i)), IntArg(1));
   }
+}
+
+// Twin attributes, also one added by FT.ALTER or on an HNSW field, and their declaration order
+// come back from a snapshot.
+TEST_F(RdbTest, TwinAttributesSurviveReload) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "email", "AS",
+                 "e_text", "TEXT", "city", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "email", "AS", "e_tag", "TAG"}), "OK");
+  Run({"HSET", "d:1", "email", "jane", "city", "Boston"});
+  EXPECT_EQ(Run("FT.CREATE vx ON HASH PREFIX 1 v: SCHEMA "
+                "v AS h1 VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2 "
+                "v AS h2 VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC COSINE"),
+            "OK");
+  Run({"HSET", "v:1", "v", StrCat(FloatToBytes(1.0f), FloatToBytes(0.0f))});
+  Run({"HSET", "v:2", "v", StrCat(FloatToBytes(0.0f), FloatToBytes(1.0f))});
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsIndexingDone("idx"); }, std::chrono::milliseconds(10000)));
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsIndexingDone("vx"); }, std::chrono::milliseconds(10000)));
+
+  auto info = Run({"FT.INFO", "idx"}).GetVec();
+  auto it = rng::find_if(info, [](const auto& e) { return e == "attributes"; });
+  ASSERT_NE(it, info.end());
+  vector<string> aliases;
+  for (const auto& attr : (++it)->GetVec())
+    aliases.push_back(string{attr.GetVec()[3].GetString()});
+  EXPECT_THAT(aliases, ElementsAre("e_text", "city", "e_tag"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_text:jane", "NOCONTENT"}),
+              RespArray(ElementsAre(IntArg(1), "d:1")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_tag:{jane}", "NOCONTENT"}),
+              RespArray(ElementsAre(IntArg(1), "d:1")));
+  for (auto [field, q, nearest] :
+       {std::tuple{"h1", FloatToBytes(0.9f) + FloatToBytes(0.0f), "v:1"},
+        std::tuple{"h2", FloatToBytes(0.0f) + FloatToBytes(0.9f), "v:2"}})
+    EXPECT_THAT(Run({"FT.SEARCH", "vx", StrCat("*=>[KNN 1 @", field, " $q]"), "PARAMS", "2", "q", q,
+                     "NOCONTENT"}),
+                RespArray(ElementsAre(IntArg(1), nearest)))
+        << field;
 }
 
 TEST_F(RdbTest, TaggedInterleavedRoundTrip) {

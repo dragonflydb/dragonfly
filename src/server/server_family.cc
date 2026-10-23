@@ -66,6 +66,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/generic_family.h"
+#include "server/journal/aof_replay.h"
 #include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
 #include "server/main_service.h"
@@ -87,7 +88,6 @@ extern "C" {
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
-#include "util/aws/aws.h"
 
 namespace rng = std::ranges;
 
@@ -151,10 +151,8 @@ ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
 // to load the credentials.
 ABSL_FLAG(bool, s3_ec2_metadata, false,
           "whether to load credentials and configuration from EC2 metadata");
-// Enables S3 payload signing over HTTP. This reduces the latency and resource
-// usage when writing snapshots to S3, at the expense of security.
-ABSL_FLAG(bool, s3_sign_payload, true,
-          "whether to sign the s3 request payload when uploading snapshots");
+ABSL_RETIRED_FLAG(bool, s3_sign_payload, true,
+                  "Deprecated: S3 snapshot uploads always use an unsigned payload.");
 
 ABSL_FLAG(bool, info_replication_valkey_compatible, true,
           "when true - output valkey compatible values for info-replication");
@@ -304,16 +302,17 @@ struct CmdArgListFormatter {
   }
 };
 
-string UnknownCmd(string cmd, facade::ParsedArgs args) {
+string UnknownCmd(string cmd, facade::ParsedArgs args, size_t num_args) {
+  auto end = std::next(args.begin(), num_args);
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
-                      absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
+                      absl::StrJoin(args.begin(), end, ", ", CmdArgListFormatter()));
 }
 
 std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
   if (detail::IsS3Path(uri)) {
-    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(
-        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
-        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
+    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(absl::GetFlag(FLAGS_s3_endpoint),
+                                                              absl::GetFlag(FLAGS_s3_use_https),
+                                                              absl::GetFlag(FLAGS_s3_ec2_metadata));
     auto ec = shard_set->pool()->GetNextProactor()->Await(
         [&] { return aws->Init(detail::kBucketConnectMs); });
     if (ec) {
@@ -1036,38 +1035,65 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
   std::_Exit(EXIT_FAILURE);
 }
 
-// Starts an AofStreamer on every shard, or exits if --aof cannot run.
-void StartAof(const string& flag_dir, detail::SnapshotStorage* storage) {
-  string reason;
-  string dir = flag_dir.empty() ? "." : flag_dir;
-  if (detail::IsCloudPath(dir)) {
-    reason = "--aof needs a local --dir";
-  } else if (shard_set->pool()->at(0)->GetKind() != ProactorBase::IOURING) {
-    reason = "--aof needs io_uring";
-  } else if (GetFlag(FLAGS_hz) <= 0) {
-    reason = "--aof needs --hz > 0, the heartbeat seals AOF blocks";
-  } else if (GetFlag(FLAGS_replicaof).has_value()) {
-    reason = "--aof is not supported on replicas";
-  } else if (auto path = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename));
-             path && !path->empty()) {
-    // Loading a snapshot bypasses the journal, so the AOF would miss its data.
-    reason = "--aof cannot start from a snapshot yet";
-  } else {
-    atomic_bool failed = false;
-    shard_set->RunBlockingInParallel([&](EngineShard* shard) {
-      auto streamer = make_unique<AofStreamer>(dir, shard->shard_id(), shard_set->size());
-      if (error_code ec = streamer->Start(); ec) {
-        LOG(ERROR) << "Failed to start AOF on shard " << shard->shard_id() << ": " << ec.message();
-        failed = true;
-        return;
-      }
-      shard->set_aof_streamer(std::move(streamer));
-    });
-    if (!failed)
+// Why --aof cannot run with this configuration, or an empty string.
+string AofStartupError(string_view dir, detail::SnapshotStorage* storage) {
+  if (detail::IsCloudPath(dir))
+    return "--aof needs a local --dir";
+  if (shard_set->pool()->at(0)->GetKind() != ProactorBase::IOURING)
+    return "--aof needs io_uring";
+  if (GetFlag(FLAGS_hz) <= 0)
+    return "--aof needs --hz > 0, the heartbeat seals AOF blocks";
+  if (GetFlag(FLAGS_replicaof).has_value())
+    return "--aof is not supported on replicas";
+  // Loading a snapshot bypasses the journal, so the AOF would miss its data.
+  if (auto path = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename)); path && !path->empty())
+    return "--aof cannot start from a snapshot yet";
+  return {};
+}
+
+// Starts every shard's AofStreamer where its log resumes. False if any failed.
+bool StartStreamers(string_view dir, const vector<AofResume>& resume) {
+  atomic_bool failed = false;
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    auto streamer = make_unique<AofStreamer>(string(dir), sid, shard_set->size());
+    if (error_code ec = streamer->Start(resume[sid].seq, resume[sid].next_lsn); ec) {
+      LOG(ERROR) << "Failed to start AOF on shard " << sid << ": " << ec.message();
+      failed = true;
       return;
-    reason = "failed to open AOF segments";
-  }
-  ErrorAndExit(reason);
+    }
+    shard->set_aof_streamer(std::move(streamer));
+  });
+  return !failed;
+}
+
+// Turns expiry and eviction on or off on every shard.
+void AllowExpiryOnAllShards(bool allowed) {
+  shard_set->RunBriefInParallel([allowed](EngineShard* shard) {
+    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(allowed);
+  });
+}
+
+// Replays the AOF and starts an AofStreamer on every shard, or exits if --aof cannot run.
+void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service) {
+  string dir = flag_dir.empty() ? "." : flag_dir;
+  if (string reason = AofStartupError(dir, storage); !reason.empty())
+    ErrorAndExit(reason);
+  if (service->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) != GlobalState::ACTIVE)
+    ErrorAndExit("--aof cannot replay: the server is not active");
+
+  // No expiry or eviction during replay: a key may pass its deadline before a later record, such as
+  // PERSIST, changes it. Resumed once the streamers run, so every expiry is logged.
+  AllowExpiryOnAllShards(false);
+
+  vector<AofResume> resume;
+  if (error_code ec = ReplayAof(dir, service, &resume); ec)
+    ErrorAndExit(absl::StrCat("AOF replay failed: ", ec.message()));
+  if (!StartStreamers(dir, resume))
+    ErrorAndExit("failed to open AOF segments");
+
+  AllowExpiryOnAllShards(true);
+  service->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
 }
 
 // Seals, writes and syncs every shard's AOF.
@@ -1378,7 +1404,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   if (GetFlag(FLAGS_aof))
-    StartAof(flag_dir, snapshot_storage_.get());
+    StartAof(flag_dir, snapshot_storage_.get(), &service_);
 
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
@@ -3381,7 +3407,7 @@ void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;
     if (!valid_proto_version) {
-      cmd_cntx->SendError(UnknownCmd("HELLO", args));
+      cmd_cntx->SendError(UnknownCmd("HELLO", args, cmd_cntx->cid()->NonSecretArgCount(args)));
       return;
     }
 
