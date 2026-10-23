@@ -4234,6 +4234,7 @@ namespace acl {
 constexpr uint32_t kAuth = FAST | CONNECTION;
 constexpr uint32_t kBGSave = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kClient = SLOW | CONNECTION;
+constexpr uint32_t kClientAdmin = ADMIN | SLOW | DANGEROUS | CONNECTION;
 constexpr uint32_t kConfig = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kDbSize = KEYSPACE | READ | FAST;
 constexpr uint32_t kDebug = ADMIN | SLOW | DANGEROUS;
@@ -4244,6 +4245,7 @@ constexpr uint32_t kHello = FAST | CONNECTION;
 constexpr uint32_t kLastSave = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kLatency = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kMemory = READ | SLOW;
+constexpr uint32_t kMemoryAdmin = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kShrink = WRITE | FAST;
 constexpr uint32_t kSave = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kShutDown = ADMIN | SLOW | DANGEROUS;
@@ -4268,6 +4270,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
       << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kBGSave}.HFUNC(BgSave)
       << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kClient}.HFUNC(Client)
+      << CI{"CLIENT KILL", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
+      << CI{"CLIENT LIST", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
+      << CI{"CLIENT MIGRATE", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
+      << CI{"CLIENT PAUSE", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
+      << CI{"CLIENT UNPAUSE", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
       << CI{"CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)
       << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kDebug}.HFUNC(Debug)
@@ -4280,6 +4287,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)
       << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kLatency}.HFUNC(Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
+      << CI{"MEMORY ARENA", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
+      << CI{"MEMORY DECOMMIT", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
+      << CI{"MEMORY DEFRAGMENT", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
+      << CI{"MEMORY DEFRAGMENT-SEGMENTS", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
+      << CI{"MEMORY TRACK", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
       << CI{"SHRINK", CO::JOURNALED | CO::FAST, 2, 1, 1, acl::kShrink}.HFUNC(Shrink)
       << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kSave}.HFUNC(Save)
       << CI{"SHUTDOWN",    CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::DANGEROUS, -1, 0, 0,

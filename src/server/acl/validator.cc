@@ -4,6 +4,7 @@
 
 #include "server/acl/validator.h"
 
+#include <absl/algorithm/container.h>
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 
@@ -25,12 +26,12 @@ bool Matches(std::string_view pattern, std::string_view target) {
   return matcher.Matches(target);
 };
 
-bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId& id) {
+bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId& id,
+                     const facade::ParsedArgs& tail_args) {
   const size_t index = id.GetFamily();
-  const uint64_t command_mask = id.GetBitIndex();
   DCHECK_LT(index, acl_commands.size());
 
-  return (acl_commands[index] & command_mask) != 0;
+  return (acl_commands[index] & id.AclTarget(tail_args).second) != 0;
 }
 
 struct KeyPermissions {
@@ -69,6 +70,13 @@ bool ReadsKeyAfterSubcommand(std::string_view cmd, std::string_view sub) {
          (cmd == "MEMORY" && absl::EqualsIgnoreCase(sub, "USAGE"));
 }
 
+// RM deletes whatever its MATCH selects, so it needs write access to every key.
+bool CanWriteAllKeys(const AclKeys& keys) {
+  return absl::c_any_of(keys.key_globs, [](const GlobType& glob) {
+    return glob.first == "*" && glob.second != KeyOp::READ;
+  });
+}
+
 }  // namespace
 
 // Exported (not anonymous-namespace-local) so callers without a live connection, like ACL DRYRUN's
@@ -80,7 +88,7 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
                                                           const AclPubSub& pub_sub,
                                                           const facade::ParsedArgs& tail_args,
                                                           const CommandId& id) {
-  if (!ValidateCommand(acl_commands, id)) {
+  if (!ValidateCommand(acl_commands, id, tail_args)) {
     return {false, AclLog::Reason::COMMAND};
   }
 
@@ -148,7 +156,7 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
 
   if (!is_authed) {
     auto& log = ServerState::tlocal()->acl_log;
-    log.Add(cntx, std::string(id.name()), reason);
+    log.Add(cntx, std::string(id.AclTarget(tail_args).first), reason);
   }
 
   return is_authed;
@@ -176,7 +184,7 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
       acl_db_idx != max && acl_db_idx != res) {
     return {false, AclLog::Reason::AUTH};
   }
-  if (!ValidateCommand(acl_commands, id)) {
+  if (!ValidateCommand(acl_commands, id, tail_args)) {
     return {false, AclLog::Reason::COMMAND};
   }
 
@@ -204,10 +212,12 @@ std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
     if (has_bonus_dest) {
       keys_allowed &= KeyGlobAllowed(keys, tail_args[*keys_index->bonus], {false, true});
     }
+  } else if (!keys.all_keys && tail_args.size() >= 2 &&
+             ReadsKeyAfterSubcommand(id.name(), tail_args[0])) {
+    keys_allowed = KeyGlobAllowed(keys, tail_args[1], {true, false});
+  } else if (!keys.all_keys && id.name() == "RM") {
+    keys_allowed = CanWriteAllKeys(keys);
   }
-
-  if (!keys.all_keys && tail_args.size() >= 2 && ReadsKeyAfterSubcommand(id.name(), tail_args[0]))
-    keys_allowed &= KeyGlobAllowed(keys, tail_args[1], {true, false});
 
   return {keys_allowed, AclLog::Reason::KEY};
 }
