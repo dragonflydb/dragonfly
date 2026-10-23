@@ -159,4 +159,52 @@ TEST_F(SmallBinsTest, StashedEntriesBytes) {
   EXPECT_EQ(bins_.GetStats().stashed_entries_cnt, 0u);
 }
 
+TEST_F(SmallBinsTest, DeleteAllPendingKeysReleasesBin) {
+  // Fill a single bin and move it to the pending (in-flight) state via SerializeBin.
+  std::optional<SmallBins::FilledBin> bin;
+  unsigned i = 0;
+  for (; !bin; i++)
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+  auto [id, data] = Serialize(*bin);
+
+  EXPECT_EQ(bins_.GetStats().pending_bins_cnt, 1u);
+
+  // Delete every key of the in-flight bin. Only the final delete should report the bin id.
+  std::optional<SmallBins::BinId> reported;
+  for (unsigned j = 0; j < i; j++) {
+    auto res = bins_.Delete(0, absl::StrCat("k", j));
+    if (res) {
+      EXPECT_FALSE(reported) << "bin id reported more than once";
+      reported = res;
+    }
+  }
+
+  ASSERT_TRUE(reported);
+  EXPECT_EQ(*reported, id);
+  // The now-empty pending entry must be released, otherwise empty maps pile up forever.
+  EXPECT_EQ(bins_.GetStats().pending_bins_cnt, 0u);
+}
+
+TEST_F(SmallBinsTest, ReportStashFailedReturnsAllKeys) {
+  // A bin that filled up but failed to stash before serialization is never tracked as pending.
+  std::optional<SmallBins::FilledBin> bin;
+  unsigned i = 0;
+  for (; !bin; i++)
+    bin = bins_.Stash(0, absl::StrCat("k", i), absl::StrCat("v", i));
+
+  EXPECT_EQ(bins_.GetStats().pending_bins_cnt, 0u);  // not serialized yet
+
+  auto keys = bins_.ReportStashFailed(std::move(*bin));
+  sort(keys.begin(), keys.end());
+
+  // The key that triggers the fill opens a new current bin, so the filled bin holds k0..k(i-2).
+  EXPECT_EQ(keys.size(), i - 1);
+  for (unsigned j = 0; j + 1 < i; j++) {
+    std::pair<DbIndex, std::string> needle{0, absl::StrCat("k", j)};
+    EXPECT_TRUE(binary_search(keys.begin(), keys.end(), needle)) << j;
+  }
+  // Recovering a failed bin must not register it as pending.
+  EXPECT_EQ(bins_.GetStats().pending_bins_cnt, 0u);
+}
+
 }  // namespace dfly::tiering
