@@ -2747,6 +2747,16 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError("Index already exists");
   }
 
+  // The rebuild numbers the documents anew, so the existing HNSW attributes start from empty
+  // graphs too. The update below retires the old graphs when it drops the old shard indices.
+  for (const auto& [alias, field] : index_info->schema.fields) {
+    if (field.number < first_added && field.IsIndexableHnswField()) {
+      const auto& vparams = std::get<search::SchemaField::VectorParams>(field.special_params);
+      GlobalHnswIndexRegistry::Instance().Create(idx_name, alias, vparams, index_info->type,
+                                                 /*replace=*/true);
+    }
+  }
+
   LOG(INFO) << "Altering " << idx_name << ": "
             << DocIndexInfo{.base_index = *index_info, .hnsw_metadata = {}}.BuildRestoreCommand();
 
@@ -2818,15 +2828,10 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx()->Execute(cb, true);
+  cmd_cntx->tx()->Execute(cb, false);
 
-  // Destroy indices on their shard threads outside the FiberQueue.
-  // ~ShardDocIndex calls CancelBuilder which joins the builder fiber. We must not run this
-  // on the FiberQueue because the builder's VectorLoop may have work queued on the same
-  // FiberQueue — joining from within the FiberQueue consumer would deadlock.
-  shard_set->RunBlockingInParallel(
-      [&dropped](EngineShard* es) { dropped[es->shard_id()].reset(); });
-
+  // Unregister the graphs while the shards are still held, so that this cannot remove the graphs
+  // of a new index with the same name.
   if (index_info) {
     for (const auto& [alias, field_info] : index_info->schema.fields) {
       if (field_info.type == search::SchemaField::VECTOR &&
@@ -2837,6 +2842,14 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
     }
   }
+  cmd_cntx->tx()->Conclude();
+
+  // Destroy indices on their shard threads outside the FiberQueue.
+  // ~ShardDocIndex calls CancelBuilder which joins the builder fiber. We must not run this
+  // on the FiberQueue because the builder's VectorLoop may have work queued on the same
+  // FiberQueue — joining from within the FiberQueue consumer would deadlock.
+  shard_set->RunBlockingInParallel(
+      [&dropped](EngineShard* es) { dropped[es->shard_id()].reset(); });
 
   if (num_deleted == 0u)
     return cmd_cntx->SendError(IndexNotFoundMsg(idx_name));

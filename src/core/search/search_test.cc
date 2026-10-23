@@ -1555,6 +1555,24 @@ TEST(HnswRestoreInvariant, MissingEntrypointFailsGracefully) {
   EXPECT_FALSE(restored.RestoreFromNodes(nodes, bad_metadata));
 }
 
+struct BorrowedDoc : public DocumentAccessor {
+  const char* data;
+  explicit BorrowedDoc(const char* d) : data(d) {
+  }
+  std::optional<VectorInfo> GetVector(string_view, size_t, VectorDataType) const override {
+    return BorrowedFtVector{data};
+  }
+  std::optional<StringList> GetStrings(string_view) const override {
+    return std::nullopt;
+  }
+  std::optional<StringList> GetTags(string_view) const override {
+    return std::nullopt;
+  }
+  std::optional<NumsList> GetNumbers(string_view) const override {
+    return std::nullopt;
+  }
+};
+
 // Regression: in borrowed mode (copy_vector=false), Remove marks the node deleted
 // but hnswlib still traverses it and dereferences its data pointer.  If the external
 // data is freed (as happens after DEL), the pointer dangles.  The fix in DoRemove
@@ -1575,24 +1593,6 @@ TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
   params.hnsw_m = 16;
   params.hnsw_ef_construction = 200;
   HnswVectorIndex index(params, /*copy_vector=*/false);
-
-  struct BorrowedDoc : public DocumentAccessor {
-    const char* data;
-    explicit BorrowedDoc(const char* d) : data(d) {
-    }
-    std::optional<VectorInfo> GetVector(string_view, size_t, VectorDataType) const override {
-      return BorrowedFtVector{data};
-    }
-    std::optional<StringList> GetStrings(string_view) const override {
-      return std::nullopt;
-    }
-    std::optional<StringList> GetTags(string_view) const override {
-      return std::nullopt;
-    }
-    std::optional<NumsList> GetNumbers(string_view) const override {
-      return std::nullopt;
-    }
-  };
 
   std::mt19937 rng(42);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
@@ -1628,6 +1628,52 @@ TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
   vector<float> query(kDim, 0.0f);
   auto results = index.Knn(query.data(), 5, std::nullopt);
   EXPECT_GT(results.size(), 0u);
+}
+
+// Retire succeeds once the running searches have finished. From then on the index reads no
+// vectors, so the borrowed ones may be freed while searches still hold the index.
+TEST(HnswBorrowedMode, RetiredIndexReadsNoVectors) {
+  constexpr size_t kDim = 256;
+  constexpr size_t kN = 20;
+
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kN * 2;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+  HnswVectorIndex index(params, /*copy_vector=*/false);
+
+  std::vector<std::unique_ptr<float[]>> bufs;
+  std::vector<GlobalDocId> ids;
+  for (size_t i = 0; i < kN; i++) {
+    bufs.push_back(std::make_unique<float[]>(kDim));
+    bufs.back()[0] = static_cast<float>(i);
+    index.Add(i, BorrowedDoc{reinterpret_cast<const char*>(bufs.back().get())}, "vec");
+    ids.push_back(i);
+  }
+  vector<float> query(kDim, 0.0f);
+  ASSERT_EQ(index.Knn(query.data(), 5, std::nullopt).size(), 5u);
+
+  {
+    auto running_search = index.GetReadLock();
+    EXPECT_FALSE(index.Retire());
+  }
+  ASSERT_TRUE(index.Retire());
+  bufs.clear();
+
+  EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt), testing::IsEmpty());
+  EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt, ids), testing::IsEmpty());
+  EXPECT_THAT(index.SubsetKnn(query.data(), 5, ids), testing::IsEmpty());
+  EXPECT_THAT(index.RangeQuery(query.data(), 1e9, std::nullopt), testing::IsEmpty());
+
+  auto extra = std::make_unique<float[]>(kDim);
+  index.Add(kN, BorrowedDoc{reinterpret_cast<const char*>(extra.get())}, "vec");
+  EXPECT_EQ(index.GetNodeCount(), kN);
 }
 
 INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,

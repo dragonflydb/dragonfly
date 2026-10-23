@@ -30,14 +30,14 @@ GlobalHnswIndexRegistry& GlobalHnswIndexRegistry::Instance() {
 
 bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_view field_name,
                                      const search::SchemaField::VectorParams& params,
-                                     DocIndex::DataType data_type) {
+                                     DocIndex::DataType data_type, bool replace) {
   std::string key = MakeKey(index_name, field_name);
 
   std::unique_lock<std::shared_mutex> lock(registry_mutex_);
 
   auto it = indices_.find(key);
 
-  if (it != indices_.end())
+  if (it != indices_.end() && !replace)
     return false;
 
   // We make a copy of vector data when:
