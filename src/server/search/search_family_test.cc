@@ -450,7 +450,7 @@ TEST_F(SearchFamilyTest, AliasCommandsLifecycle) {
   EXPECT_EQ(Run({"FT.ALIASDEL", "upserted"}), "OK");
 }
 
-TEST_F(SearchFamilyTest, AliasCommandsInfo) {
+TEST_F(SearchFamilyTest, AliasCommandsInfoAndTagVals) {
   ASSERT_THAT(Run({"HSET", "a:1", "color", "red"}), IntArg(1));
   ASSERT_THAT(Run({"HSET", "b:1", "color", "blue"}), IntArg(1));
   ASSERT_EQ(
@@ -470,13 +470,18 @@ TEST_F(SearchFamilyTest, AliasCommandsInfo) {
   });
 
   EXPECT_EQ(map_string("index_name", Run({"FT.INFO", "live"}).GetVec()), "idx-a");
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), IsUnordArray("red"));
 
   ASSERT_EQ(Run({"FT.ALIASUPDATE", "live", "idx-b"}), "OK");
   EXPECT_EQ(map_string("index_name", Run({"FT.INFO", "live"}).GetVec()), "idx-b");
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), IsUnordArray("blue"));
 
   ASSERT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
   EXPECT_THAT(Run({"FT.INFO", "live"}), ErrArg("live: no such index"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), ErrArg("Index with name 'live' not found"));
   EXPECT_THAT(Run({"FT.INFO", "missing"}), ErrArg("missing: no such index"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "missing", "color"}),
+              ErrArg("Index with name 'missing' not found"));
 }
 
 TEST_F(SearchFamilyTest, FtSearchResolvesAliasAndReportsRequestedName) {
@@ -604,6 +609,39 @@ TEST_F(SearchFamilyTest, AliasCommandsErrors) {
   EXPECT_THAT(Run({"FT.ALIASUPDATE", "idx-a", "idx-b"}),
               ErrArg("Alias name conflicts with an existing index"));
   EXPECT_THAT(Run({"FT.ALIASDEL", "missing"}), ErrArg("Alias does not exist"));
+}
+
+TEST_F(SearchFamilyTest, CreateRejectsAliasName) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  EXPECT_THAT(Run({"FT.CREATE", "live", "ON", "HASH", "SCHEMA", "title", "TEXT"}),
+              ErrArg("Index already exists"));
+  EXPECT_THAT(Run({"FT.CREATE", "live", "NX", "ON", "HASH", "SCHEMA", "title", "TEXT"}),
+              ErrArg("Index already exists"));
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "NX", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, DropIndexRemovesIndexAndAlias) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  ASSERT_EQ(Run({"FT.DROPINDEX", "idx"}), "OK");
+  EXPECT_THAT(Run({"FT.INFO", "idx"}), ErrArg("idx: no such index"));
+  EXPECT_THAT(Run({"FT.ALIASDEL", "live"}), ErrArg("Alias does not exist"));
+}
+
+TEST_F(SearchFamilyTest, AlterPreservesAlias) {
+  ASSERT_THAT(Run({"HSET", "d:1", "color", "red"}), IntArg(1));
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  ASSERT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "color", "TAG"}), "OK");
+  WaitForIndexReady("idx");
+  EXPECT_EQ(map_string("index_name", Run({"FT.INFO", "live"}).GetVec()), "idx");
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), IsUnordArray("red"));
 }
 
 TEST_F(SearchFamilyTest, InfoMissingIndexUsesRedisCompatibleError) {
@@ -3935,6 +3973,20 @@ TEST_F(SearchFamilyTest, SynonymManagement) {
   EXPECT_THAT(resp, IsUnordArray("cub", IsArray("3"), "cute", IsArray("2"), "adorable",
                                  IsArray("2"), "kitty", IsArray("1", "2", "3"), "feline",
                                  IsArray("1"), "tiger", IsArray("3"), "cat", IsArray("1")));
+}
+
+TEST_F(SearchFamilyTest, SynonymCommandsResolveAliases) {
+  ASSERT_EQ(
+      Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  WaitForIndexReady("idx");
+  ASSERT_THAT(Run({"HSET", "doc:1", "title", "cat"}), IntArg(1));
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "live", "animals", "cat", "feline"}), "OK");
+  EXPECT_THAT(Run({"FT.SYNDUMP", "live"}),
+              IsUnordArray("cat", IsArray("animals"), "feline", IsArray("animals")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "feline"}), AreDocIds("doc:1"));
 }
 
 TEST_F(SearchFamilyTest, SynonymsSearch) {
