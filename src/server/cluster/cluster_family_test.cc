@@ -1381,61 +1381,56 @@ TEST_F(ClusterFamilyTest, FlushSlotsAndImmediatelySetValue) {
   }
 }
 
-// Regression: FlushSlots launches an async fiber. Entries inserted after FlushSlots returns
-// but before the fiber runs must survive, because they were created after the flush was
-// initiated. The bug was that RegisterOnChange (which captures the version threshold) ran
-// inside the detached fiber instead of synchronously in FlushSlots, so the version threshold
-// was captured too late and freshly-inserted entries appeared "old" to the flush.
-TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
+TEST_F(ClusterFamilyTest, FlushSlotsPreservesNewEntriesAcrossDatabases) {
   ConfigSingleNodeCluster(GetMyId());
 
-  // Run on a shard proactor to control fiber scheduling precisely.
   pp_->at(0)->Await([&] {
     auto* es = EngineShard::tlocal();
     ASSERT_NE(es, nullptr);
-
-    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
-
-    // Step 0: Insert pre-existing entries that must be deleted by the flush.
-    // This ensures we can verify the flush fiber actually ran (not just that it was scheduled).
-    DbContext cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
-    for (int i = 0; i < 10; i++) {
-      string key = absl::StrCat("pre:", i);
+    auto& ns = namespaces->GetDefaultNamespace();
+    auto& db_slice = ns.GetDbSlice(es->shard_id());
+    auto put = [&](DbIndex db_index, string_view key, string value) {
+      db_slice.ActivateDb(db_index);
+      DbContext cntx{&ns, db_index, GetCurrentTimeMs()};
       PrimeValue val;
-      val.SetString("old");
+      val.SetString(value);
       auto res = db_slice.AddOrUpdate(cntx, key, std::move(val), 0);
       CHECK(res.ok());
+      return res->is_new;
+    };
+    for (DbIndex db_index : {0, 2}) {
+      put(db_index, "{migrating}stale", string(128, 'x'));
+      put(db_index, "{migrating}updated", string(128, 'x'));
+      put(db_index, "{remaining}key", "keep");
     }
-    EXPECT_EQ(db_slice.DbSize(0), 10u);
+    put(4, "{migrating}stale", string(128, 'x'));
 
-    // Step 1: FlushSlots creates a detached fiber. We do NOT yield, so the fiber
-    // cannot run yet. Acquire the shard lock because RegisterOnChange requires it (#7153).
-    cluster::SlotRanges ranges({{0, 16383}});
+    SlotId slot = KeySlot("{migrating}stale");
+    ASSERT_NE(slot, KeySlot("{remaining}key"));
     es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
-    db_slice.FlushSlots(ranges);
+    db_slice.FlushSlots(SlotRanges({{slot, slot}}));
     es->shard_lock()->Release(IntentLock::EXCLUSIVE);
 
-    // Step 2: Insert entries WITHOUT yielding — the flush fiber still has not executed.
-    // Each insert calls NextVersion(), advancing the global counter.
-    for (int i = 0; i < 50; i++) {
-      string key = absl::StrCat("key:", i);
-      PrimeValue val;
-      val.SetString("val");
-      auto res = db_slice.AddOrUpdate(cntx, key, std::move(val), 0);
-      CHECK(res.ok());
+    // Mutate before the flush fiber starts: callbacks must delete old entries in their own table.
+    for (DbIndex db_index : {0, 2}) {
+      EXPECT_TRUE(put(db_index, "{migrating}updated", string(128, 'y')));
+      put(db_index, "{migrating}new", "new");
     }
-    EXPECT_EQ(db_slice.DbSize(0), 60u);
+    for (DbIndex db_index : {1, 5})
+      put(db_index, "{migrating}new", "new");
 
-    // Step 3: Yield — the detached flush fiber gets scheduled and runs.
-    // BUG: the fiber calls RegisterOnChange NOW, capturing a version AFTER the 50 inserts.
-    //   All 50 entries have version < next_version → deleted.
-    // FIX: version was captured in FlushSlots (step 1), so entries have version > next_version
-    //   → survive.
-    util::ThisFiber::SleepFor(50ms);
-
-    // Step 4: Verify pre-existing entries were flushed (proving the fiber ran) and
-    // post-flush entries survived.
-    EXPECT_EQ(db_slice.DbSize(0), 50u);
+    ASSERT_TRUE(WaitUntilCondition([&] { return !db_slice.HasRegisteredCallbacks(); }, 1s));
+    for (DbIndex db_index : {0, 2}) {
+      DbContext cntx{&ns, db_index, GetCurrentTimeMs()};
+      EXPECT_FALSE(IsValid(db_slice.FindReadOnly(cntx, "{migrating}stale")));
+      auto updated = db_slice.FindReadOnly(cntx, "{migrating}updated", OBJ_STRING);
+      ASSERT_TRUE(updated.ok());
+      EXPECT_EQ(updated.value()->second.ToString(), string(128, 'y'));
+      EXPECT_EQ(db_slice.DbSize(db_index), 3u);
+    }
+    EXPECT_EQ(db_slice.DbSize(4), 0u);
+    for (DbIndex db_index : {1, 5})
+      EXPECT_EQ(db_slice.DbSize(db_index), 1u);
   });
 }
 
@@ -1454,37 +1449,40 @@ TEST_F(ClusterFamilyTest, AclSelectDbNotAllowedInClusterMode) {
   EXPECT_EQ(Run({"acl", "setuser", "u3", "on", ">pw", "~*", "+@all", "$ALL"}), "OK");
 }
 
-// The flush's on_change fires for every db index but must only touch db 0; the bug charged
-// db 0's table for a db 1 deletion (FATAL underflow in debug).
-TEST_F(ClusterFamilyTest, FlushSlotsOnChangeIgnoresNonDefaultDb) {
+TEST_F(ClusterFamilyTest, FlushSlotsInvalidatesWatchesAcrossDatabases) {
   ConfigSingleNodeCluster(GetMyId());
 
   pp_->at(0)->Await([&] {
     auto* es = EngineShard::tlocal();
     ASSERT_NE(es, nullptr);
     auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
-    db_slice.ActivateDb(1);
-    DbContext cntx{&namespaces->GetDefaultNamespace(), 1, GetCurrentTimeMs()};
+    constexpr string_view kMigrating = "{migrating}missing", kRemaining = "{remaining}missing";
+    atomic_bool invalidated[3]{}, retained[3]{};
+    for (DbIndex db_index : {0, 2}) {
+      db_slice.ActivateDb(db_index);
+      db_slice.RegisterWatchedKey(db_index, kMigrating, &invalidated[db_index]);
+      db_slice.RegisterWatchedKey(db_index, kRemaining, &retained[db_index]);
+    }
+    absl::Cleanup unwatch = [&] {
+      for (DbIndex db_index : {0, 2}) {
+        db_slice.UnregisterConnectionWatches({{db_index, string(kMigrating)}},
+                                             &invalidated[db_index]);
+        db_slice.UnregisterConnectionWatches({{db_index, string(kRemaining)}}, &retained[db_index]);
+      }
+    };
 
-    PrimeValue val;
-    val.SetString(string(128, 'x'));
-    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val), 0).ok());
-
-    cluster::SlotRanges ranges({{0, 16383}});
+    SlotId slot = KeySlot(kMigrating);
+    ASSERT_NE(slot, KeySlot(kRemaining));
     es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
-    db_slice.FlushSlots(ranges);
+    db_slice.FlushSlots(SlotRanges({{slot, slot}}));
     es->shard_lock()->Release(IntentLock::EXCLUSIVE);
 
-    // Overwrite without yielding: PreUpdateBlocking fires on_change with db_index=1.
-    PrimeValue val2;
-    val2.SetString(string(128, 'y'));
-    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val2), 0).ok());
-
-    util::ThisFiber::SleepFor(50ms);  // let the flush fiber finish
-
-    // db 1 is not covered by slot operations; the entry stays.
-    EXPECT_EQ(db_slice.DbSize(1), 1u);
-    EXPECT_EQ(db_slice.DbSize(0), 0u);
+    // Missing keys must also be invalidated, synchronously, without touching other slots.
+    for (DbIndex db_index : {0, 2}) {
+      EXPECT_TRUE(invalidated[db_index].load());
+      EXPECT_FALSE(retained[db_index].load());
+    }
+    ASSERT_TRUE(WaitUntilCondition([&] { return !db_slice.HasRegisteredCallbacks(); }, 1s));
   });
 }
 

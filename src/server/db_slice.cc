@@ -980,7 +980,8 @@ void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
                            ChangeConsumerInterface* consumer) {
   VLOG(1) << "Start FlushSlotsFb";
-  // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
+
+  // Slot deletion can take time as it traverses all databases, hence it runs in a fiber.
   // We want to flush all the data of a slot that was added till the time the call to FlushSlots
   // was made. Therefore we delete slots entries with version < next_version.
   // next_version and the on_change callback are registered synchronously in FlushSlots
@@ -988,46 +989,58 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   // get version >= next_version and survive.
   uint64_t del_count = 0;
 
-  // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
-  boost::intrusive_ptr<DbTable> table = db_arr_.front();
-  size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
-
-  DbContext db_cntx;
-  db_cntx.time_now_ms = GetCurrentTimeMs();
-  db_cntx.db_index = table->index;
+  // Copy table smart pointers to keep them alive across yields (FLUSHALL drops them).
+  DbTableArray tables = db_arr_;
+  auto memory_usage = [&tables] {
+    size_t total = 0;
+    for (const auto& table : tables) {
+      if (table)
+        total += table->table_memory() + table->stats.obj_memory_usage;
+    }
+    return total;
+  };
+  size_t memory_before = memory_usage();
 
   std::string tmp;
-  auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
-    it.AdvanceIfNotOccupied();
-    while (!it.is_done()) {
-      std::string_view key = it->first.GetSlice(&tmp);
-      SlotId sid = KeySlot(key);
-      if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
-        // We use copy of table smart pointer and pass it as table because FLUSHALL can drop table.
-        DelAtomic(db_cntx, it, table.get());
-        ++del_count;
-      }
-      ++it;
-    }
-  };
-
   ServerState& etl = *ServerState::tlocal();
-  PrimeTable* pt = &table->prime;
-  PrimeTable::Cursor cursor;
+  for (const auto& table : tables) {
+    if (!table)
+      continue;
+    if (etl.gstate() == GlobalState::SHUTTING_DOWN)
+      break;
 
-  do {
-    PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
-    cursor = next;
-    ThisFiber::Yield();
+    DbContext db_cntx{ns_, table->index, GetCurrentTimeMs()};
+    auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
+      it.AdvanceIfNotOccupied();
+      while (!it.is_done()) {
+        std::string_view key = it->first.GetSlice(&tmp);
+        SlotId sid = KeySlot(key);
+        if (slot_ids.Contains(sid) && it.GetVersion() < next_version) {
+          DelAtomic(db_cntx, it, table.get());
+          ++del_count;
+        }
+        ++it;
+      }
+    };
 
-    // DelAtomic above only marks the watchers of a deleted stream as awakened; normally the
-    // deleting transaction dispatches them when it concludes. This fiber has no such transaction,
-    // so dispatch here - between bucket traversals, where preempting in a readiness check is safe.
-    if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
-        bc && owner_->GetContTx() == nullptr) {
-      bc->NotifyPending();
-    }
-  } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
+    PrimeTable* pt = &table->prime;
+    PrimeTable::Cursor cursor;
+
+    do {
+      PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
+      cursor = next;
+      ThisFiber::Yield();
+
+      // DelAtomic above only marks the watchers of a deleted stream as awakened; normally the
+      // deleting transaction dispatches them when it concludes. This fiber has no such transaction,
+      // so dispatch here - between bucket traversals, where preempting in a readiness check is
+      // safe.
+      if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
+          bc && owner_->GetContTx() == nullptr) {
+        bc->NotifyPending();
+      }
+    } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
+  }
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
   if (!UnregisterOnChange(consumer))
@@ -1037,7 +1050,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     int64_t start = absl::GetCurrentTimeNanos();
     etl.DecommitMemory(ServerState::kDataHeap);
     int64_t took = absl::GetCurrentTimeNanos() - start;
-    size_t memory_after = table->table_memory() + table->stats.obj_memory_usage;
+    size_t memory_after = memory_usage();
 
     LOG(INFO) << "Memory decommit took " << took << "ns, deleted " << del_count << ", memory delta "
               << (static_cast<int64_t>(memory_before) - static_cast<int64_t>(memory_after));
@@ -1053,18 +1066,17 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   uint64_t next_version = NextVersion();
 
   auto shared_slots = std::make_shared<cluster::SlotSet>(std::move(slot_set));
-  boost::intrusive_ptr<DbTable> table = db_arr_.front();
 
   // Register the on_change callback synchronously so that bucket modifications between
   // FlushSlots returning and the fiber starting are caught (the callback deletes old entries
   // before the bucket version is bumped, preventing the traversal from skipping them).
-  auto on_change = [this, shared_slots, next_version, table](DbIndex db_index,
-                                                             const ChangeReq& req) {
-    // The callback fires for every db index, but only db 0 is flushed; deleting a db > 0
-    // entry through db 0's table would corrupt its accounting and prime table.
-    if (db_index != 0)
+  auto on_change = [this, shared_slots, next_version, tables = db_arr_](DbIndex db_index,
+                                                                        const ChangeReq& req) {
+    // Databases activated after the flush contain only new entries, which must survive.
+    if (db_index >= tables.size() || !tables[db_index])
       return;
 
+    const auto& table = tables[db_index];
     FiberAtomicGuard fg;
 
     auto process_bucket = [&](PrimeTable::bucket_iterator it) {
@@ -1074,9 +1086,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
         std::string_view key = it->first.GetSlice(&tmp);
         SlotId sid = KeySlot(key);
         if (shared_slots->Contains(sid) && it.GetVersion() < next_version) {
-          DbContext cntx;
-          cntx.time_now_ms = GetCurrentTimeMs();
-          cntx.db_index = db_index;
+          DbContext cntx{ns_, db_index, GetCurrentTimeMs()};
           DelAtomic(cntx, it, table.get());
         }
         ++it;
@@ -1840,13 +1850,18 @@ void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
 }
 
 void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
-  for (const auto& [key, conn_list] : db_arr_[0]->watched_keys) {
-    SlotId sid = KeySlot(key);
-    if (!slot_ids.Contains(sid)) {
+  for (const auto& table : db_arr_) {
+    if (!table)
       continue;
+
+    for (const auto& [key, conn_list] : table->watched_keys) {
+      SlotId sid = KeySlot(key);
+      if (!slot_ids.Contains(sid)) {
+        continue;
+      }
+      for (auto* dirty_ptr : conn_list)
+        dirty_ptr->store(true, memory_order_relaxed);
     }
-    for (auto* dirty_ptr : conn_list)
-      dirty_ptr->store(true, memory_order_relaxed);
   }
 }
 
