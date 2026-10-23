@@ -463,6 +463,7 @@ ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index, unsigned* hash_in
     if (field.type == SchemaField::TEXT)
       stems |= !std::get<SchemaField::TextParams>(field.special_params).no_stem;
   }
+
   // Only stemming TEXT indices read the language field.
   if (stems && !base_->schema.language_field.empty())
     add_field(base_->schema.language_field);
@@ -626,6 +627,10 @@ void ShardDocIndex::RemoveFromIndices(DocId id, const DbContext& db_cntx, const 
   }
   indices_->Remove(id, ExpiringValuesAccessor{*accessor, it->second});
   expiring_values_.erase(it);
+
+  // erase never shrinks the table. Growth happens at 7/8 load, so shrinking at 1/16 cannot thrash.
+  if (expiring_values_.size() * 16 <= expiring_values_.capacity())
+    expiring_values_.rehash(0);
 }
 
 // --- HnswShardIndex implementation ---
@@ -1402,6 +1407,8 @@ size_t ShardDocIndex::GetNonPmrMemoryUsage() const {
   size_t mem = field_types_.GetNonPmrMemoryUsage();
   if (indices_)
     mem += indices_->GetNonPmrMemoryUsage();
+  if (content_fields_.size() > 4)
+    mem += content_fields_.capacity() * sizeof(string_view);
   return mem;
 }
 
