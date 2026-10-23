@@ -2474,6 +2474,8 @@ TEST_F(SearchTest, InvalidVectorParameter) {
 
 class SortIndexTest : public testing::Test {
  protected:
+  static constexpr auto kNoKey = [](DocId) { return string_view{}; };
+
   void SetUp() override {
     InitTLSearchMR(PMR_NS::get_default_resource());
   }
@@ -2497,11 +2499,11 @@ TEST_F(SortIndexTest, StringSort) {
 
   const auto index = indices.GetSortIndex(field);
 
-  index->Sort(&ids, ids.size(), desc);
+  index->Sort(&ids, ids.size(), desc, kNoKey);
   std::vector<DocId> expected{1, 2, 0};
   EXPECT_EQ(ids, expected);
 
-  index->Sort(&ids, ids.size(), !desc);
+  index->Sort(&ids, ids.size(), !desc, kNoKey);
   expected = {0, 2, 1};
   EXPECT_EQ(ids, expected);
 
@@ -2524,17 +2526,43 @@ TEST_F(SortIndexTest, NumSort) {
   constexpr bool desc = false;
 
   auto index = indices.GetSortIndex(field);
-  index->Sort(&ids, ids.size(), desc);
+  index->Sort(&ids, ids.size(), desc, kNoKey);
   std::vector<DocId> expected{2, 1, 0};
   EXPECT_EQ(ids, expected);
 
-  index->Sort(&ids, ids.size(), !desc);
+  index->Sort(&ids, ids.size(), !desc, kNoKey);
   expected = {0, 1, 2};
   EXPECT_EQ(ids, expected);
 
   auto lookup = index->Lookup(1);
   EXPECT_TRUE(std::holds_alternative<double>(lookup));
   EXPECT_EQ(std::get<double>(lookup), 999);
+}
+
+// Docs without a value rank last in both directions and report no value; equal values are ordered
+// by document key in the sort direction.
+TEST_F(SortIndexTest, MissingLastAndKeyTieBreak) {
+  constexpr auto field = "cost";
+  const auto schema = MakeSimpleSchema({{field, SchemaField::NUMERIC}}, true);
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{field, "5"}}});
+  indices.Add(1, MockedDocument{Map{{field, "5"}}});
+  indices.Add(2, MockedDocument{Map{}});  // no value
+  indices.Add(3, MockedDocument{Map{{field, "1"}}});
+  const vector<string> keys{"k:b", "k:a", "k:c", "k:d"};
+  auto key = [&](DocId id) { return string_view{keys[id]}; };
+
+  auto index = indices.GetSortIndex(field);
+  std::vector<DocId> ids{0, 1, 2, 3};
+  auto values = index->Sort(&ids, ids.size(), false, key);
+  EXPECT_EQ(ids, (vector<DocId>{3, 1, 0, 2}));
+  EXPECT_EQ(get<double>(values[0]), 1);
+  EXPECT_TRUE(holds_alternative<monostate>(values[3]));
+
+  values = index->Sort(&ids, ids.size(), true, key);
+  EXPECT_EQ(ids, (vector<DocId>{0, 1, 3, 2}));
+  EXPECT_TRUE(holds_alternative<monostate>(values[3]));
 }
 
 // Enumeration for different search types

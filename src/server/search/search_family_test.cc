@@ -7360,6 +7360,74 @@ TEST_F(SearchFamilyTest, SortByNonSortableFieldNullsLast) {
               ElementsAre("d0", "d1"));
 }
 
+// Equal sort values are ordered by key on every shard and on the coordinator, so pages see each
+// document once and DESC is the exact reverse of ASC; SORTABLE and loaded fields alike.
+TEST_F(SearchFamilyTest, SortByPagingWithTiesIsStable) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "s", "NUMERIC", "SORTABLE",
+       "n", "NUMERIC"});
+  vector<string> expected;  // value 0 first, then value 1; keys ascending within a value
+  for (int v = 0; v < 2; v++)
+    for (int i = 0; i < 12; i++)
+      if (i % 2 == v)
+        expected.push_back(absl::StrCat("d:", i));
+  for (int v = 0; v < 2; v++)
+    sort(expected.begin() + v * 6, expected.begin() + v * 6 + 6);
+  for (int i = 0; i < 12; i++)
+    Run({"HSET", absl::StrCat("d:", i), "s", absl::StrCat(i % 2), "n", absl::StrCat(i % 2)});
+
+  for (string_view field : {"s", "n"}) {
+    for (string_view order : {"ASC", "DESC"}) {
+      vector<string> paged;
+      for (int offset = 0; offset < 12; offset += 5) {
+        auto resp = Run({"FT.SEARCH", "idx", "*", "SORTBY", field, order, "NOCONTENT", "LIMIT",
+                         absl::StrCat(offset), "5"});
+        const auto& v = resp.GetVec();
+        for (size_t i = 1; i < v.size(); i++)
+          paged.push_back(string{v[i].GetString()});
+      }
+      vector<string> want = expected;
+      if (order == "DESC")
+        reverse(want.begin(), want.end());
+      EXPECT_EQ(paged, want) << field << " " << order;
+    }
+  }
+}
+
+// Docs without a value in the SORTABLE field (absent or null) rank last in both directions, carry
+// a nil sort key and never take a top-K slot.
+TEST_F(SearchFamilyTest, SortBySortableFieldMissingLast) {
+  Run({"FT.CREATE", "idx", "ON", "JSON", "PREFIX", "1", "j:", "SCHEMA", "$.n", "AS", "n", "NUMERIC",
+       "SORTABLE"});
+  Run({"JSON.SET", "j:1", "$", R"({"n":10})"});
+  Run({"JSON.SET", "j:2", "$", R"({"n":20})"});
+  Run({"JSON.SET", "j:3", "$", R"({})"});
+  Run({"JSON.SET", "j:4", "$", R"({"n":null})"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "n", "ASC", "WITHSORTKEYS", "NOCONTENT"}),
+              IsArray(IntArg(4), "j:1", "#10", "j:2", "#20", "j:3", ArgType(RespExpr::NIL), "j:4",
+                      ArgType(RespExpr::NIL)));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "n", "DESC", "WITHSORTKEYS", "NOCONTENT"}),
+              IsArray(IntArg(4), "j:2", "#20", "j:1", "#10", "j:4", ArgType(RespExpr::NIL), "j:3",
+                      ArgType(RespExpr::NIL)));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "n", "DESC", "NOCONTENT", "LIMIT", "0", "2"}),
+              IsArray(IntArg(4), "j:2", "j:1"));
+}
+
+// Postings may still hold DocIds freed by lazy field expiry; SORTBY must rank them without touching
+// their keys and the reply must skip them.
+TEST_F(SearchFamilyTest, SortByOverStalePostingsAfterFieldExpiry) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT", "NOSTEM",
+       "n", "NUMERIC", "SORTABLE"});
+  for (string_view key : {"d:1", "d:2"}) {
+    Run({"HSET", key, "title", "hello"});
+    Run({"FIELDEXPIRE", key, "1", "title"});
+  }
+  AdvanceTime(2000);
+  EXPECT_THAT(Run({"HGET", "d:1", "title"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"HGET", "d:2", "title"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "SORTBY", "n", "NOCONTENT"}), kNoResults);
+}
+
 TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
   // Regression test: HSET with inf/nan values on a NUMERIC field used to crash with
   // DCHECK(std::isfinite(value)) in RangeTree::Add, because absl::SimpleAtod accepts
