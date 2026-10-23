@@ -8,8 +8,11 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 #include <fcntl.h>
+#include <linux/io_uring.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "base/logging.h"
@@ -33,6 +36,10 @@ constexpr size_t kMaxBlockBytes = kAofBlockHeaderSize + kAofBlockBytes;
 // sequential, so the kernel prefetches the next window while we decode this chunk.
 constexpr size_t kReadChunk = 128_KB;
 static_assert(kReadChunk >= kMaxBlockBytes);
+
+error_code LastErrno() {
+  return {errno, system_category()};
+}
 
 class AofReadErrorCategory : public error_category {
  public:
@@ -270,6 +277,36 @@ void AofChainReader::MarkEndOfLog(End end) {
     discarded_bytes_ += segment_chain_[i].size;
   LOG(WARNING) << "AOF shard " << shard_id_ << ": damaged tail of " << discarded_bytes_
                << " bytes after lsn " << LastLsn();
+}
+
+error_code AofChainReader::Repair() {
+  DCHECK(end_ != End::kNotYet);
+
+  // The segment holding the end of the log. A clean end read every segment to its end.
+  size_t end_seg_id = AllSegmentsRead() ? segment_chain_.size() - 1 : read_seg_id_;
+
+  // Cut the bytes after the last valid block. Never a valid block, even one that ends inside a
+  // record: rewriting it could tear the complete records it holds.
+  const Segment& end_seg = segment_chain_[end_seg_id];
+  if (end_ == End::kTailTorn && offset_ < end_seg.size &&
+      truncate(SegmentPath(end_seg.seq).c_str(), offset_) != 0) {
+    return LastErrno();
+  }
+
+  // After a process crash, the kept blocks may be only in the page cache. Sync them, so the log
+  // resumes after data that a later power loss cannot remove.
+  for (size_t i = 0; i <= end_seg_id; ++i)
+    RETURN_ON_ERR(segment_chain_[i].file->FSync(IORING_FSYNC_DATASYNC));
+
+  // Later segments follow a damaged tail. Highest seq first, so an interrupted repair leaves the
+  // remaining *.aof files contiguous and can run again.
+  for (size_t i = segment_chain_.size(); i-- > end_seg_id + 1;) {
+    string path = SegmentPath(segment_chain_[i].seq);
+    if (rename(path.c_str(), absl::StrCat(path, ".discarded").c_str()) != 0)
+      return LastErrno();
+    RETURN_ON_ERR(AofSyncDir(dir_));
+  }
+  return {};
 }
 
 }  // namespace dfly
