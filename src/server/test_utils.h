@@ -28,9 +28,6 @@ namespace journal {
 struct JournalConsumerInterface;
 }  // namespace journal
 
-// Test hook defined in common.cc.
-void TEST_InvalidateLockTagOptions();
-
 class TestConnection : public facade::Connection {
  public:
   explicit TestConnection(facade::ServiceInterface* si, Protocol protocol);
