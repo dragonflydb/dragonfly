@@ -164,6 +164,11 @@ class DocFieldTypes {
 
 enum class SortOrder { ASC, DESC };
 
+// SORTBY order shared by the shards and the coordinator: docs with a value first, then by value and
+// by key in `order`, so equal values page consistently across shards.
+bool SortRanksBefore(const search::SortableValue& lv, std::string_view lk,
+                     const search::SortableValue& rv, std::string_view rk, SortOrder order);
+
 struct SearchParams {
   struct SortOption {
     FieldReference field;
@@ -398,6 +403,9 @@ class ShardDocIndex {
     void Remove(DocId id);
 
     std::string_view Get(DocId id) const;
+
+    // Like Get for ids that lazy field expiry may have freed (stale postings): empty key then.
+    std::string_view GetOrEmpty(DocId id) const;
     bool IsValid(DocId id) const;
     std::optional<DocId> Find(std::string_view key) const;
     size_t Size() const;

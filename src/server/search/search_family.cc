@@ -1219,25 +1219,12 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
   partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
 }
 
-// Global SORTBY merge across shards. ValueCmp (std::less/std::greater) selects the direction for
-// present values; docs missing the field hold a monostate sort_score and always rank last,
-// independent of direction, so that rule wraps ValueCmp (a plain variant comparison would sort
-// monostate first in ASC). ranks_before(l, r) is true when l should be ordered before r.
+// Global SORTBY merge across shards, in the same order the shards used (SortRanksBefore).
 void PartialSortBySortScore(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder order) {
-  auto run = [&](auto value_cmp) {
-    auto ranks_before = [value_cmp](SerializedSearchDoc* l, SerializedSearchDoc* r) {
-      bool l_missing = std::holds_alternative<std::monostate>(l->sort_score);
-      bool r_missing = std::holds_alternative<std::monostate>(r->sort_score);
-      if (l_missing != r_missing)
-        return !l_missing;  // present ranks before missing
-      return value_cmp(l->sort_score, r->sort_score);
-    };
-    partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), ranks_before);
+  auto ranks_before = [order](SerializedSearchDoc* l, SerializedSearchDoc* r) {
+    return SortRanksBefore(l->sort_score, l->key, r->sort_score, r->key, order);
   };
-  if (order == SortOrder::ASC)
-    run(std::less<>{});
-  else
-    run(std::greater<>{});
+  partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), ranks_before);
 }
 
 bool IsBM25StdNorm(const std::optional<search::ScorerSpec>& scorer) {
@@ -3053,6 +3040,9 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
       search_doc.key = it.Next<std::string>();
       if (sorted) {
         auto sort_score = it.Next<std::string_view>();
+
+        // TODO: a nil sort key (document without the sort value) arrives as "NIL" and stops this
+        // node's reply here; decode it as monostate and keep reading when cluster search resumes.
         if (sort_score.empty() || (sort_score[0] != '#' && sort_score[0] != '$')) {
           it.SetError();
           break;

@@ -321,6 +321,11 @@ string_view ShardDocIndex::DocKeyIndex::Get(DocId id) const {
   return keys_[id];
 }
 
+string_view ShardDocIndex::DocKeyIndex::GetOrEmpty(DocId id) const {
+  DCHECK_LT(id, keys_.size());
+  return keys_[id];
+}
+
 bool ShardDocIndex::DocKeyIndex::IsValid(DocId id) const {
   if (id >= last_id_ || id >= keys_.size())
     return false;
@@ -845,58 +850,63 @@ optional<ShardDocIndex::LoadedEntry> ShardDocIndex::LoadEntry(DocId id,
   return {{key, GetAccessor(op_args.db_cntx, (*it)->second, key)}};
 }
 
+bool SortRanksBefore(const search::SortableValue& lv, std::string_view lk,
+                     const search::SortableValue& rv, std::string_view rk, SortOrder order) {
+  const bool l_missing = holds_alternative<monostate>(lv);
+  const bool r_missing = holds_alternative<monostate>(rv);
+  if (l_missing != r_missing)
+    return !l_missing;
+  if (lv != rv)
+    return order == SortOrder::ASC ? lv < rv : rv < lv;
+  return order == SortOrder::ASC ? lk < rk : rk < lk;
+}
+
 vector<search::SortableValue> ShardDocIndex::KeepTopKSorted(vector<DocId>* ids, size_t limit,
                                                             const SearchParams::SortOption& sort,
                                                             const OpArgs& op_args) const {
   DCHECK_GT(limit, 0u) << "Limit=0 still has O(ids->size()) complexity";
 
-  using QPair = std::pair<search::SortableValue, DocId>;
-
-  // ValueCmp (std::less/std::greater) selects the direction for present values; docs missing the
-  // sort field hold a monostate value and always rank last, independent of direction, so that rule
-  // wraps ValueCmp. ranks_before(a, b) is true when a should rank before b; the priority queue
-  // keeps the max (worst) on top, so it is evicted first when a better candidate arrives.
-  auto select = [&](auto value_cmp) {
-    auto ranks_before = [value_cmp](const QPair& a, const QPair& b) {
-      bool a_missing = std::holds_alternative<std::monostate>(a.first);
-      bool b_missing = std::holds_alternative<std::monostate>(b.first);
-      if (a_missing != b_missing)
-        return !a_missing;  // present ranks before missing
-      return value_cmp(a, b);
-    };
-    std::priority_queue<QPair, std::vector<QPair>, decltype(ranks_before)> q(ranks_before);
-
-    const DocField sort_field = ResolveField(base_->schema, sort.field);
-    for (DocId id : *ids) {
-      auto entry = LoadEntry(id, op_args);
-      if (!entry)
-        continue;
-
-      search::SortableValue value = std::monostate{};
-      if (auto result = entry->second->Serialize(absl::MakeConstSpan(&sort_field, 1));
-          !result.empty())
-        value = std::move(result.begin()->second);
-
-      QPair candidate{std::move(value), id};
-      if (q.size() < limit || ranks_before(candidate, q.top())) {
-        if (q.size() >= limit)
-          q.pop();
-        q.push(std::move(candidate));
-      }
-    }
-
-    // Reorder ids and collect scores
-    vector<search::SortableValue> out(q.size());
-    for (int i = 0; !q.empty(); i++) {
-      auto [v, id] = q.top();
-      (*ids)[i] = id;
-      out[i] = std::move(v);
-      q.pop();
-    }
-    return out;
+  // Owns the key: loading a later entry may expire this hash and clear its key index slot.
+  struct Candidate {
+    search::SortableValue value;
+    string key;
+    DocId id;
   };
 
-  return sort.order == SortOrder::ASC ? select(std::less<QPair>{}) : select(std::greater<QPair>{});
+  // ranks_before(a, b) is true when a should rank before b; the priority queue keeps the worst on
+  // top, so it is evicted first when a better candidate arrives.
+  auto ranks_before = [order = sort.order](const Candidate& a, const Candidate& b) {
+    return SortRanksBefore(a.value, a.key, b.value, b.key, order);
+  };
+  std::priority_queue<Candidate, std::vector<Candidate>, decltype(ranks_before)> q(ranks_before);
+
+  const DocField sort_field = ResolveField(base_->schema, sort.field);
+  for (DocId id : *ids) {
+    auto entry = LoadEntry(id, op_args);
+    if (!entry)
+      continue;
+
+    Candidate candidate{std::monostate{}, string{entry->first}, id};
+    if (auto result = entry->second->Serialize(absl::MakeConstSpan(&sort_field, 1));
+        !result.empty())
+      candidate.value = std::move(result.begin()->second);
+
+    if (q.size() < limit || ranks_before(candidate, q.top())) {
+      if (q.size() >= limit)
+        q.pop();
+      q.push(std::move(candidate));
+    }
+  }
+
+  // Reorder ids and collect scores
+  vector<search::SortableValue> out(q.size());
+  for (int i = 0; !q.empty(); i++) {
+    Candidate top = q.top();
+    (*ids)[i] = top.id;
+    out[i] = std::move(top.value);
+    q.pop();
+  }
+  return out;
 }
 
 SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& params,
@@ -952,7 +962,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     const auto& so = *params.sort_option;
     if (auto r = so.field.Resolve(base_->schema); r.sortable) {
       auto* idx = indices_->GetSortIndex(r.alias);
-      sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC);
+      sort_scores = idx->Sort(&result.ids, limit, so.order == SortOrder::DESC,
+                              [this](DocId id) { return key_index_.GetOrEmpty(id); });
     } else {
       sort_scores = KeepTopKSorted(&result.ids, limit, so, op_args);
       // KeepTopKSorted only fills the first sort_scores.size() entries of result.ids;
