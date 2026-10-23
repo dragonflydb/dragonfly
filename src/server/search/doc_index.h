@@ -656,8 +656,11 @@ class ShardDocIndices {
  public:
   ShardDocIndices();
 
-  // Get sharded document index by its name or nullptr if not found
+  // Get sharded document index by its canonical name or nullptr if not found.
   ShardDocIndex* GetIndex(std::string_view name);
+
+  // Resolve a canonical index name or alias without following alias chains.
+  ShardDocIndex* ResolveIndex(std::string_view name);
 
   // Add an alias for an existing index.
   facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
