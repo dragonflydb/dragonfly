@@ -2972,6 +2972,12 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
       DCHECK(db.IsLoadRefCountZero());
     }
   });
+  if (to == GlobalState::LOADING) {
+    // Cancel before client traversal can yield and let an overlapping save publish its files.
+    server_family_.CancelSave();
+    // Unblocking waits for in-flight connection migrations, so it can't run in Await() above.
+    server_family_.UnblockAllClients();
+  }
   return prev;
 }
 
