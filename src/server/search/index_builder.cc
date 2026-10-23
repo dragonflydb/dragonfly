@@ -234,13 +234,12 @@ void IndexBuilder::IndexEntry(std::string_view key, const DbContext& db_cntx,
 
   // Reuse restored DocIds so they stay aligned with ids serialized in the HNSW graph. Vector
   // fields are populated later by VectorLoop.
-  auto accessor = GetAccessor(db_cntx, pv);
   if (auto doc_id = index_->key_index().Find(key); doc_id) {
     const auto& indexed_docs = index_->indices_->GetAllDocs();
     if (std::binary_search(indexed_docs.begin(), indexed_docs.end(), *doc_id))
       return;
 
-    if (!index_->indices_->Add(*doc_id, *accessor)) {
+    if (!index_->AddToIndices(*doc_id, db_cntx, pv)) {
       LOG(WARNING) << "Failed to restore index entry for key: " << key
                    << ", removing from key index";
       index_->RemoveFromAllHnswIndices(*doc_id);
@@ -248,7 +247,7 @@ void IndexBuilder::IndexEntry(std::string_view key, const DbContext& db_cntx,
     }
   } else {
     DocId id = index_->key_index_.AddNew(key);
-    if (!index_->indices_->Add(id, *accessor))
+    if (!index_->AddToIndices(id, db_cntx, pv))
       index_->key_index_.Remove(id);
   }
 }
