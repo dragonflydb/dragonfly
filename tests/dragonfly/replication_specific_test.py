@@ -2091,3 +2091,42 @@ async def test_set_member_partial_expiry_replication_lag(df_factory: DflyInstanc
         "re-arms the stale copy."
     )
     assert await c_replica.sismember("myset", "keep") == 1
+
+
+async def test_wait_with_throttled_replica_stream(df_factory: DflyInstanceFactory):
+    """
+    WAIT journals a PING on every shard. With the replica stream over its output limit, recording
+    it blocks in the journal throttle, which used to happen on a brief callback and crash the
+    master (#8647), and must not hold WAIT past its timeout.
+    """
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
+    )
+    assert await c_master.execute_command("WAIT", 1, 1000) == 1
+
+    c_writer = master.client()
+    c_wait = master.client()
+    value = "x" * (1 << 20)
+    try:
+        # SIGSTOP is sent inside pause_process, so it must already be covered by finally.
+        await pause_process(replica.proc.pid)
+
+        # Far more than the socket buffers can hold, so the stream stays over its output limit.
+        pipe = c_writer.pipeline(transaction=False)
+        for i in range(100):
+            pipe.set(f"k{i}", value)
+        writes = asyncio.create_task(pipe.execute())
+        await asyncio.sleep(2)
+        assert not writes.done(), "writes were expected to be throttled"
+
+        # The stalled replica can't ack, and WAIT must still honor its timeout.
+        start = time.monotonic()
+        assert await c_wait.execute_command("WAIT", 1, 1000) == 0
+        assert time.monotonic() - start < 3
+        assert await c_master.ping()
+    finally:
+        resume_process(replica.proc.pid)
+
+    await writes
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_master.execute_command("WAIT", 1, 5000) == 1

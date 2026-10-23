@@ -3862,17 +3862,32 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Capture the current LSN on each shard and send PING to force replicas to ACK immediately.
   // PING causes replicas to skip their normal ACK interval and send REPLCONF ACK right away.
-  shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    if (!IsMaster()) {
-      role_changed.store(true, std::memory_order_relaxed);
-      return;
-    }
-    if (shard->journal()) {
-      uint32_t sid = shard->shard_id();
-      target_lsns[sid] = journal::GetLsn();
-      journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
-    }
+  // Recording it may block in the throttle of a stalled replica stream, so the fan-out runs on its
+  // own fiber: we wait only for the LSNs and join it after the reply has been sent.
+  fb2::BlockingCounter captured{shard_count};
+  fb2::Fiber ping_fb("wait_ping", [&] {
+    shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+      bool record = false;
+      if (!IsMaster()) {
+        role_changed.store(true, std::memory_order_relaxed);
+      } else if (shard->journal()) {
+        target_lsns[shard->shard_id()] = journal::GetLsn();
+        record = true;
+      }
+      captured->Dec();
+      if (record)
+        journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
+    });
   });
+  absl::Cleanup join_ping = [&ping_fb] { ping_fb.Join(); };
+  captured->Wait();
+
+  // Send the reply right away instead of batching it behind the PING join.
+  rb->SetBatchMode(false);
+
+  if (role_changed.load(std::memory_order_relaxed)) {
+    return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
+  }
 
   // Count replicas that have acknowledged all shards up to their respective target LSN.
   // Runs the check on each shard's proactor to safely read last_acked_lsn.
