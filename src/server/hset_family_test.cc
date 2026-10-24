@@ -299,6 +299,12 @@ TEST_F(HSetFamilyTest, HScanLpMatchBug) {
   EXPECT_THAT(resp, ArrLen(2));
 }
 
+TEST_F(HSetFamilyTest, HScanRejectsZeroCount) {
+  Run({"hset", "myhash", "a", "1", "b", "2"});
+  EXPECT_THAT(Run({"hscan", "myhash", "0", "count", "0"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"hscan", "myhash", "0", "count", "10"}), ArrLen(2));
+}
+
 TEST_F(HSetFamilyTest, HincrbyFloat) {
   Run({"hincrbyfloat", "k", "a", "1.5"});
   EXPECT_EQ(Run({"hget", "k", "a"}), "1.5");
