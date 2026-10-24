@@ -226,11 +226,10 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, ArgSlice args, u
 // Does nothing if the journal is disabled.
 void RecordDelete(DbIndex dbid, std::string_view key);
 
-// Record expiry in journal with independent transaction.
-// Must be called from shard thread owning key.
-// Might block the calling fiber unless journal::SetFlushMode(false) is called.
-inline void RecordExpiryBlocking(DbIndex dbid, std::string_view key) {
-  RecordDelete(dbid, key);
-}
+// Record expiry in journal with independent transaction, if the journal is enabled.
+// Must be called from shard thread owning key, with journal flushing disabled
+// (journal::DisableFlushGuard) and no bucket being serialized
+// (!DbSlice::WillBlockOnJournalWrite()); then it does not preempt.
+void RecordExpiryAtomic(DbIndex dbid, std::string_view key);
 
 }  // namespace dfly
