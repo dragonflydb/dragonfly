@@ -3858,6 +3858,7 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 // WAIT <num_replicas> <timeout_ms>
 void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  const auto start = chrono::steady_clock::now();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!IsMaster()) {
@@ -3870,6 +3871,15 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   const int64_t num_replicas = num_replicas_arg;
   const int64_t timeout_ms = timeout_arg;
+
+  // WAIT does not use Transaction's cancellation machinery; bound even an infinite timeout.
+  constexpr auto kMaxWaitDuration = chrono::minutes(10);
+  const auto timeout = timeout_ms == 0 ? kMaxWaitDuration : chrono::milliseconds(timeout_ms);
+
+  // Clamp before converting milliseconds to the clock's finer-grained duration.
+  const auto max_timeout =
+      chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::time_point::max() - start);
+  const auto deadline = start + min(timeout, max_timeout);
 
   auto replicas = dfly_cmd_->GetReplicaInfoSnapshot();
   if (replicas.empty())
@@ -3889,30 +3899,29 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     if (!shard->journal())
       return;
 
+    LSN last_sent_lsn = journal::GetLsn();
     // Record the currently issued LSN for this shard.
-    target_lsns[shard->shard_id()] = journal::GetLsn();
-  });
+    target_lsns[shard->shard_id()] = last_sent_lsn;
 
-  // PING may throttle, so queue it without capturing request state or waiting for completion.
-  // AddL2 itself may preempt when full and must stay outside the brief callback.
-  for (uint32_t sid = 0; sid < shard_count; ++sid) {
-    if (target_lsns[sid] == 0)
-      continue;
-
-    // Queue a PING entry for this shard to speed-up its ack.
-    shard_set->AddL2(sid, [] {
-      if (IsMaster() && EngineShard::tlocal()->journal())
-        journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
+    // Check if all replicas are already caught up to the last sent LSN for this shard.
+    ShardId sid = shard->shard_id();
+    bool acked = rng::all_of(replicas, [sid, last_sent_lsn](const auto& replica) {
+      return replica->GetFlow(sid).last_acked_lsn >= last_sent_lsn;
     });
-  }
+
+    if (!acked) {
+      // PING accelerates ACKs. Try to expedite the acknowledgment from replicas.
+      // If the queue is full, then we rely on periodic replica ACKs to eventually catch up.
+      shard->GetSecondaryQueue()->TryAdd([] {
+        if (IsMaster() && EngineShard::tlocal()->journal())
+          journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
+      });
+    }
+  });
 
   auto* tx = cmd_cntx->tx();
   bool can_block = !tx || !tx->IsMulti();
 
-  // WAIT does not use Transaction's cancellation machinery; bound even an infinite timeout.
-  constexpr auto kMaxWaitDuration = absl::Minutes(10);
-  absl::Time deadline = timeout_ms == 0 ? absl::Now() + kMaxWaitDuration
-                                        : absl::Now() + absl::Milliseconds(timeout_ms);
   while (true) {
     auto [count, running] = CountAckedReplicas(replicas, target_lsns, &role_changed);
 
@@ -3922,14 +3931,15 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     }
 
     // MULTI never blocks. Once all running replicas in our fixed snapshot ACK, no more can join.
-    if (!can_block || count >= num_replicas || count == running || absl::Now() >= deadline)
+    auto now = chrono::steady_clock::now();
+    if (!can_block || count >= num_replicas || count == running || now >= deadline)
       return rb->SendLong(count);
 
     // Do not hold up takeover/shutdown, including demotion through a partial sync.
     if (!IsMaster() || ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
       return rb->SendLong(count);
 
-    ThisFiber::SleepFor(100ms);
+    ThisFiber::SleepUntil(min(deadline, now + 100ms));
   }
 }
 

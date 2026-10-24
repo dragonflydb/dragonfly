@@ -2093,12 +2093,14 @@ async def test_set_member_partial_expiry_replication_lag(df_factory: DflyInstanc
     assert await c_replica.sismember("myset", "keep") == 1
 
 
-@pytest.mark.parametrize("pipeline", [False, True])
-async def test_wait_with_throttled_replica_stream(df_factory: DflyInstanceFactory, pipeline):
+@pytest.mark.parametrize("pipeline,concurrency", [(False, 1), (True, 1), (False, 100)])
+async def test_wait_with_throttled_replica_stream(
+    df_factory: DflyInstanceFactory, pipeline, concurrency
+):
     """
-    WAIT journals a PING on every shard. With the replica stream over its output limit, recording
-    it blocks in the journal throttle, which used to happen on a brief callback and crash the
-    master (#8647), and must not hold WAIT past its timeout.
+    WAIT requests a journal PING on every shard. With the replica stream over its output limit,
+    recording it blocks in the journal throttle. This used to crash the master from a brief callback
+    (#8647); throttling and full PING queues must not hold WAIT past its timeout.
     """
     master, [replica], c_master, [c_replica] = await setup_replication(
         df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
@@ -2108,6 +2110,7 @@ async def test_wait_with_throttled_replica_stream(df_factory: DflyInstanceFactor
     c_writer = master.client()
     c_wait = master.client()
     value = "x" * (1 << 20)
+    writes = None
     try:
         # SIGSTOP is sent inside pause_process, so it must already be covered by finally.
         await pause_process(replica.proc.pid)
@@ -2120,20 +2123,30 @@ async def test_wait_with_throttled_replica_stream(df_factory: DflyInstanceFactor
         await asyncio.sleep(2)
         assert not writes.done(), "writes were expected to be throttled"
 
-        # The stalled replica can't ack, and WAIT must still honor its timeout.
+        async def wait():
+            if pipeline:
+                pipe = c_wait.pipeline(transaction=False)
+                pipe.execute_command("WAIT", 1, 1000)
+                pipe.ping()
+                assert await pipe.execute() == [0, True]
+            else:
+                assert await c_wait.execute_command("WAIT", 1, 1000) == 0
+
+        # Enough concurrent WAITs fill the PING queue while its workers are throttled.
         start = time.monotonic()
-        if pipeline:
-            pipe = c_wait.pipeline(transaction=False)
-            pipe.execute_command("WAIT", 1, 1000)
-            pipe.ping()
-            assert await asyncio.wait_for(pipe.execute(), timeout=3) == [0, True]
-        else:
-            assert await asyncio.wait_for(c_wait.execute_command("WAIT", 1, 1000), timeout=3) == 0
+        await asyncio.wait_for(asyncio.gather(*(wait() for _ in range(concurrency))), timeout=3)
         assert time.monotonic() - start < 3
+
+        # Short timeouts must not each incur the full 100 ms polling interval.
+        start = time.monotonic()
+        for _ in range(5):
+            assert await c_wait.execute_command("WAIT", 1, 1) == 0
+        assert time.monotonic() - start < 0.25
         assert await c_master.ping()
     finally:
         resume_process(replica.proc.pid)
+        if writes is not None:
+            await writes
 
-    await writes
     await check_all_replicas_finished([c_replica], c_master)
     assert await c_master.execute_command("WAIT", 1, 5000) == 1
