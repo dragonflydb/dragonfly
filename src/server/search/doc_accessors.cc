@@ -201,8 +201,8 @@ SearchDocData ListPackAccessor::SerializeAll(const DocFieldTypes& types) const {
 StringMapAccessor::~StringMapAccessor() {
   // Reads (e.g. Serialize/GetStrings) trigger lazy field expiry on the
   // underlying StringMap.  If all fields expired during our lifetime,
-  // delete the now-empty hash so a later SAVE does not hit the DFATAL for
-  // empty OBJ_HASH in rdb_save.cc.
+  // delete the now-empty hash so a later SAVE does not skip it with an ERROR
+  // for empty OBJ_HASH in rdb_save.cc.
   if (cleanup_key_.empty() || !hset_ || !hset_->Empty())
     return;
 

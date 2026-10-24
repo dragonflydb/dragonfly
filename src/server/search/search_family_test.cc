@@ -4287,6 +4287,28 @@ TEST_F(SearchFamilyTest, FieldExpirySynUpdateDropsExpiredTerm) {
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hi", "NOCONTENT"}), kNoResults);
 }
 
+// The kept values release their memory once the documents are gone.
+TEST_F(SearchFamilyTest, FieldExpiryValuesReleaseMemory) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  auto add_and_delete = [&](bool with_ttl) {
+    constexpr int kNumDocs = 500;
+    for (int i = 0; i < kNumDocs; i++) {
+      if (with_ttl)
+        Run({"HSETEX", absl::StrCat("d:", i), "100", "title", "hello"});
+      else
+        Run({"HSET", absl::StrCat("d:", i), "title", "hello"});
+    }
+    for (int i = 0; i < kNumDocs; i++)
+      Run({"DEL", absl::StrCat("d:", i)});
+    return GetMetrics().search_stats.used_memory;
+  };
+
+  size_t without_ttl = add_and_delete(false);
+  EXPECT_EQ(add_and_delete(true), without_ttl);
+}
+
 TEST_F(SearchFamilyTest, FtAlterKeepsSynonyms) {
   EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
             "OK");
