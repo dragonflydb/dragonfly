@@ -101,7 +101,7 @@ error_code ReplayAof(string_view dir, Service* service, vector<AofResume>* resum
     //   is cancelled (kOutOfOrder) and startup fails until the files are fixed by hand. Without
     //   G2, A would end and leave, and B would run G1 alone after run 2's writes, erasing them.
     // Fix: checkpoint in LOADING after restart 1, see "Resuming the log" in docs/aof.md.
-    if (!errors[sid] || errors[sid] == AofReadError::kNoSegments) {
+    if (!errors[sid] || errors[sid] == AofError::kNoSegments) {
       mse->RemoveFlow();
     } else {
       LOG(ERROR) << "AOF replay failed on shard " << sid << ": " << errors[sid].message();
@@ -111,7 +111,7 @@ error_code ReplayAof(string_view dir, Service* service, vector<AofResume>* resum
     }
   });
 
-  size_t empty = ranges::count(errors, AofReadError::kNoSegments);
+  size_t empty = ranges::count(errors, AofError::kNoSegments);
 
   // TODO: the manifest will tell a first start from lost segments.
   if (empty == shard_count)
