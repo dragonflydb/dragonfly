@@ -4,6 +4,7 @@
 #pragma once
 
 #include <array>
+#include <concepts>
 #include <optional>
 #include <ranges>
 #include <utility>
@@ -370,6 +371,14 @@ class DashTable : public detail::DashTableBase {
   static double TraverseProgress(Cursor curs) {
     return (curs.bucket_id() + curs.segment_fraction()) / kBucketNum;
   }
+
+  // Same contract as Traverse (same cursors, order and coverage guarantees), but hides memory
+  // latency: before calling cb for the entries of a logical bucket, it issues prefetch hints for
+  // the heap data of their keys (if Key_t provides PrefetchString()) and for the next logical
+  // bucket. Entries are handed to cb only after the hints were issued, so cb must not suspend.
+  // cb may erase the entry it is called with, but must not otherwise modify the table.
+  // Intended for scan-like consumers: SCAN, FlushSlots, replication, slot migration.
+  template <std::invocable<iterator> Cb> Cursor TraversePrefetched(Cursor curs, Cb&& cb);
 
   // Traverses over physical buckets. It calls cb once for each bucket by passing a bucket iterator.
   // if cursor=0 starts traversing from the beginning, otherwise continues from where
@@ -1303,6 +1312,63 @@ auto DashTable<_Key, _Value, Policy>::Traverse(Cursor curs, Cb&& cb) -> Cursor {
       if (bid >= Policy::kBucketNum)
         return Cursor::end();
     }
+  } while (!fetched);
+
+  return Cursor{global_depth_, sid, bid};
+}
+
+template <typename _Key, typename _Value, typename Policy>
+template <std::invocable<typename DashTable<_Key, _Value, Policy>::iterator> Cb>
+auto DashTable<_Key, _Value, Policy>::TraversePrefetched(Cursor curs, Cb&& cb) -> Cursor {
+  uint32_t sid = curs.segment_id(global_depth_);
+  uint8_t bid = curs.bucket_id();
+
+  if (bid >= Policy::kBucketNum || sid >= segment_.size())
+    return Cursor::end();
+
+  auto hash_fun = [this](const auto& k) { return policy_.HashFn(k); };
+
+  // A logical bucket rarely holds more than a slot-count of entries; flush when the batch is full.
+  constexpr unsigned kBatch = SegmentType::kSlotNum;
+  std::array<SegmentIterator, kBatch> pending;
+  unsigned pending_size = 0;
+
+  bool fetched = false;
+  do {
+    const uint32_t cur_sid = sid;
+    const uint8_t cur_bid = bid;
+    SegmentType* s = segment_[cur_sid];
+    assert(s);
+
+    sid = NextSeg(sid);
+    if (sid >= segment_.size()) {
+      sid = 0;
+      ++bid;
+    }
+
+    // Fetch the next logical bucket while this one is processed; it lives in another segment.
+    if (bid < Policy::kBucketNum)
+      segment_[sid]->PrefetchLogicalBucket(bid);
+
+    auto flush = [&] {
+      for (unsigned i = 0; i < pending_size; ++i)
+        cb(iterator{this, cur_sid, pending[i].index, pending[i].slot});
+      pending_size = 0;
+    };
+
+    auto dt_cb = [&](const SegmentIterator& it) {
+      if constexpr (requires(const Key_t& key) { key.PrefetchString(); })
+        s->GetBucket(it.index).key[it.slot].PrefetchString();
+      pending[pending_size++] = it;
+      if (pending_size == kBatch)
+        flush();
+    };
+
+    fetched = s->TraverseLogicalBucket(cur_bid, hash_fun, std::move(dt_cb));
+    flush();
+
+    if (bid >= Policy::kBucketNum)
+      return Cursor::end();
   } while (!fetched);
 
   return Cursor{global_depth_, sid, bid};
