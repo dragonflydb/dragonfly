@@ -19,6 +19,7 @@ extern "C" {
 }
 
 #include "absl/flags/declare.h"
+#include "absl/flags/flag.h"
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
 #include "core/overloaded.h"
@@ -40,6 +41,7 @@ extern "C" {
 
 ABSL_DECLARE_FLAG(size_t, listpack_max_field_len);
 ABSL_DECLARE_FLAG(size_t, listpack_max_bytes);
+ABSL_DECLARE_FLAG(uint64_t, max_rand_count);
 
 using namespace std;
 
@@ -1496,6 +1498,12 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!parser.Finalize())
     return rb->SendError(parser.TakeError().MakeReply());
 
+  if (count < 0) {
+    const uint64_t limit = absl::GetFlag(FLAGS_max_rand_count);
+    if (static_cast<uint64_t>(-static_cast<int64_t>(count)) > limit)
+      return rb->SendError(absl::StrCat("COUNT magnitude exceeds the maximum of ", limit));
+  }
+
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
     DbContext db_context = t->GetDbContext();
@@ -1550,7 +1558,9 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
         lpRandomPair(lp, hlen, &key, NULL);
         StrVecEmplaceBack(str_vec, key);
       } else {
-        size_t actual_count = (count >= 0) ? std::min(size_t(count), hlen) : abs(count);
+        // Widen before negating: abs(count) on INT32_MIN is signed-overflow UB.
+        size_t actual_count =
+            (count >= 0) ? std::min(size_t(count), hlen) : size_t(-int64_t(count));
         std::unique_ptr<listpackEntry[]> keys = nullptr, vals = nullptr;
         keys = std::make_unique<listpackEntry[]>(actual_count);
         if (with_values)
