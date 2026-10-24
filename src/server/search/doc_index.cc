@@ -511,8 +511,11 @@ void ShardDocIndex::CancelBuilder() {
 
 void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
                                     const std::vector<std::string_view>& terms) {
-  if (!indices_)
+  // Not built yet, e.g. during a replica full sync: the build indexes the documents with the group.
+  if (!indices_) {
+    synonyms_.UpdateGroup(group_id, terms);
     return;
+  }
 
   absl::flat_hash_set<DocId> docs_to_rebuild;
   absl::Span<search::TextIndex* const> text_indices = indices_->GetAllTextIndices();
