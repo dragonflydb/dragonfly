@@ -13,6 +13,7 @@
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
+#include <absl/types/span.h>
 
 #include <algorithm>
 #include <atomic>
@@ -97,6 +98,34 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 
 string IndexNotFoundMsg(string_view index_name) {
   return absl::StrCat("Index with name '", index_name, "' not found");
+}
+
+std::optional<std::string> ResolveIndexName(string_view requested_name) {
+  std::optional<std::string> canonical_name;
+  auto resolve = [&] {
+    if (const auto* index = EngineShard::tlocal()->search_indices()->ResolveIndex(requested_name))
+      canonical_name = index->base().name;
+  };
+  if (EngineShard::tlocal())
+    resolve();
+  else
+    shard_set->Await(0, resolve);
+  return canonical_name;
+}
+
+std::vector<std::string> ResolveIndexNames(absl::Span<const string_view> requested_names) {
+  std::vector<std::string> canonical_names(requested_names.begin(), requested_names.end());
+  auto resolve = [&] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    for (auto& name : canonical_names)
+      if (const auto* index = indices->ResolveIndex(name))
+        name = index->base().name;
+  };
+  if (EngineShard::tlocal())
+    resolve();
+  else
+    shard_set->Await(0, resolve);
+  return canonical_names;
 }
 
 // Send error from parser or result
@@ -2312,6 +2341,13 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   text_sp.limit_total = params->num_candidates;
   apply_return_fields(text_sp);
 
+  const auto canonical_name = ResolveIndexName(index_name);
+  if (!canonical_name) {
+    cmd_cntx->SendError(string{index_name} + ": no such index");
+    return false;
+  }
+  index_name = *canonical_name;
+
   const bool use_hnsw = GlobalHnswIndexRegistry::Instance().Exist(index_name, params->vsim_field);
   const bool have_filter = !params->vsim_filter.empty();
 
@@ -2849,7 +2885,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   vector<DocIndexInfo> infos(shard_set->size());
 
   cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(idx_name);
+    auto* index = es->search_indices()->ResolveIndex(idx_name);
     if (index != nullptr)
       infos[es->shard_id()] = index->GetInfo();
     return OpStatus::OK;
@@ -2888,7 +2924,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->StartArray((has_custom_stopwords ? 8 : 7) * 2);
 
   rb->SendSimpleString("index_name");
-  rb->SendSimpleString(idx_name);
+  rb->SendSimpleString(info.base_index.name);
 
   rb->SendSimpleString("index_definition");
   {
@@ -3082,6 +3118,8 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   ParsedArgs search_args = parser.UnparsedArgs();
 
   bool is_cross_shard = parser.Check("CSS");
+  const bool should_fan_out =
+      absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled();
 
   auto* builder = cmd_cntx->rb();
   auto params = ParseSearchParams(&parser);
@@ -3091,14 +3129,8 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!CheckQueryLength(query_str, "Query", builder))
     return;
 
-  vector<SearchResult> css_docs;
-  if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
-    if (params->with_scores || params->scorer) {
-      return builder->SendError("WITHSCORES/SCORER is not yet supported in cluster search mode");
-    }
-    std::string args_str = absl::StrJoin(search_args, " ");
-
-    css_docs = FtSearchCSS(index_name, query_str, args_str, *params);
+  if (should_fan_out && (params->with_scores || params->scorer)) {
+    return builder->SendError("WITHSCORES/SCORER is not yet supported in cluster search mode");
   }
 
   search::SearchAlgorithm search_algo;
@@ -3110,6 +3142,11 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     search_algo.SetScorer(*params->scorer);
   else if (params->with_scores)
     search_algo.SetScorer(search::ScorerSpec{});
+
+  const auto canonical_name = ResolveIndexName(index_name);
+  if (!canonical_name)
+    return cmd_cntx->SendError(string{index_name} + ": no such index");
+  index_name = *canonical_name;
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, index_name);
 
@@ -3301,9 +3338,13 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
   }
 
-  // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
-  docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
-              std::make_move_iterator(css_docs.end()));
+  if (should_fan_out) {
+    std::string args_str = absl::StrJoin(search_args, " ");
+    auto css_docs = FtSearchCSS(index_name, query_str, args_str, *params);
+    // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
+    docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
+                std::make_move_iterator(css_docs.end()));
+  }
 
   SearchReply(*params, knn_sort_option, inject_score_alias, absl::MakeSpan(docs), builder,
               is_cross_shard);
@@ -3454,6 +3495,11 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (std::uncaught_exceptions() > uncaught_on_entry)
       cmd_cntx->tx()->Conclude();
   };
+
+  const auto canonical_name = ResolveIndexName(index_name);
+  if (!canonical_name)
+    return cmd_cntx->SendError(std::string{index_name} + ": no such index");
+  index_name = *canonical_name;
 
   auto [profile_knn_node, profile_knn] = TryPopHnswKnnNode(search_algo, index_name);
   if (profile_knn) {
@@ -3945,6 +3991,11 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     std::vector<std::vector<SearchDocData>> query_results(shard_set->size());
 
+    // Keep the requested name on a miss to preserve FT.AGGREGATE's empty-result behavior.
+    const auto canonical_name = ResolveIndexName(params->index);
+    if (canonical_name)
+      params->index = *canonical_name;
+
     auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, params->index);
 
     if (!knn) {
@@ -4014,6 +4065,10 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (!data_for_join) {
       return cmd_cntx->SendError(data_for_join.error());
     }
+
+    const auto canonical_index_names = ResolveIndexNames(data_for_join->indexes);
+    for (size_t i = 0; i < indexes_count; ++i)
+      data_for_join->indexes[i] = canonical_index_names[i];
 
     // preaggregated_shard_data is preaggregation results per index per shard
     // preaggregated_shard_data[shard_id][i] is the results of index i on shard shard_id
