@@ -9,6 +9,7 @@
 #include <hnswlib/space_ip.h>
 #include <hnswlib/space_l2.h>
 
+#include <atomic>
 #include <cstddef>
 
 #include "base/logging.h"
@@ -75,8 +76,12 @@ struct HnswlibAdapter {
   }
 
   void Add(const void* data, GlobalDocId id) {
+    // Checked before locking too, so that insertions do not hold Retire back.
+    if (retired_)
+      return;
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-    DoAdd(data, id);
+    if (!retired_)
+      DoAdd(data, id);
   }
 
   void Remove(GlobalDocId id) {
@@ -84,9 +89,23 @@ struct HnswlibAdapter {
     DoRemove(id);
   }
 
+  bool Retire() {
+    retired_ = true;
+
+    // Writers share the lock and exclude readers: taking it for writing shows that no search is
+    // running, taking it for reading that no insertion is.
+    for (auto mode : {MRMWMutex::LockMode::kWriteLock, MRMWMutex::LockMode::kReadLock}) {
+      if (!MRMWMutexLock(&mrmw_mutex_, mode, std::try_to_lock).locked())
+        return false;
+    }
+    return true;
+  }
+
   vector<pair<float, GlobalDocId>> Knn(const void* target, size_t k, std::optional<uint32_t> ef) {
     uint32_t ef_runtime = ef.value_or(ef_runtime_);
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    if (retired_)
+      return {};
     return QueueToVec(world_.searchKnnWithEf(target, k, nullptr, ef_runtime));
   }
 
@@ -105,6 +124,8 @@ struct HnswlibAdapter {
     uint32_t ef_runtime = ef.value_or(ef_runtime_);
     BinsearchFilter filter{&allowed};
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    if (retired_)
+      return {};
     return QueueToVec(world_.searchKnnWithEf(target, k, &filter, ef_runtime));
   }
 
@@ -113,6 +134,8 @@ struct HnswlibAdapter {
   vector<pair<float, GlobalDocId>> SubsetKnn(const void* target, size_t k,
                                              const vector<GlobalDocId>& docs) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    if (retired_)
+      return {};
     return QueueToVec(world_.subsetKnnSearch(target, k, docs));
   }
 
@@ -123,6 +146,8 @@ struct HnswlibAdapter {
                                                std::optional<double> epsilon) {
     double effective_epsilon = epsilon.value_or(epsilon_);
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
+    if (retired_)
+      return {};
     return world_.searchRange(target, radius, effective_epsilon);
   }
 
@@ -434,6 +459,7 @@ struct HnswlibAdapter {
   HierarchicalNSW<float> world_;
   absl::Mutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
+  std::atomic_bool retired_ = false;
 
   bool copy_vector_;                    // Whether vectors are copied into hnswlib.
   size_t capacity_;                     // Initial max_elements_ — used to reconstruct world_.
@@ -503,6 +529,10 @@ std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::RangeQuery(
 
 void HnswVectorIndex::Remove(GlobalDocId id) {
   adapter_->Remove(id);
+}
+
+bool HnswVectorIndex::Retire() {
+  return adapter_->Retire();
 }
 
 HnswIndexMetadata HnswVectorIndex::GetMetadata() const {

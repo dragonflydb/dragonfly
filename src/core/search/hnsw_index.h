@@ -50,6 +50,11 @@ class HnswVectorIndex {
 
   void Remove(search::GlobalDocId id);
 
+  // Makes searches return nothing and Add do nothing. Returns true once the searches and
+  // insertions that were already running have finished, so the vectors the index borrows may be
+  // freed; until then, call it again.
+  bool Retire();
+
   bool IsVectorCopied() const {
     return copy_vector_;
   }

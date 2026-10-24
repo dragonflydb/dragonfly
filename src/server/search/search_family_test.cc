@@ -27,6 +27,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_index.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -9455,6 +9456,49 @@ TEST_F(SearchFamilyTest, AlterAddsHnswAttributes) {
                      "q", FloatVec(1, 0), "NOCONTENT"}),
                 IsArray(IntArg(1), "h:1"))
         << field;
+}
+
+// FT.ALTER numbers the documents anew, so the graph of an existing HNSW attribute must not keep
+// nodes under the old numbers.
+TEST_F(SearchFamilyTest, AlterRebuildsHnswGraph) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");
+  ResetService();
+
+  Run("FT.CREATE hx ON HASH PREFIX 1 h: SCHEMA v VECTOR HNSW 6 TYPE FLOAT32 DIM 2 "
+      "DISTANCE_METRIC L2");
+  for (int i = 0; i < 10; i++)
+    Run({"HSET", absl::StrCat("h:", i), "v", FloatVec(i, 0)});
+  for (int i = 0; i < 5; i++)
+    Run({"DEL", absl::StrCat("h:", i)});
+
+  EXPECT_EQ(Run("FT.ALTER hx SCHEMA ADD t TEXT"), "OK");
+  WaitForIndexReady("hx");
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "hx", "*=>[KNN 5 @v $q]", "PARAMS", "2", "q", FloatVec(5, 0), "NOCONTENT"}),
+      AreNoContentDocIds("h:5", "h:6", "h:7", "h:8", "h:9"));
+}
+
+// A search that took a graph before FT.ALTER, FT.DROPINDEX or FLUSHALL must not read the vectors
+// the graph borrows from documents, which the shards may free afterwards.
+TEST_F(SearchFamilyTest, DroppedHnswGraphIsRetired) {
+  const string vec(512 * sizeof(float), '\0');
+  for (string_view cmd :
+       {"FT.ALTER hx SCHEMA ADD t TEXT", "FT.DROPINDEX hx", "FT.DROPINDEX hx DD", "FLUSHALL"}) {
+    SCOPED_TRACE(cmd);
+    Run({"FLUSHALL"});
+    Run("FT.CREATE hx ON HASH PREFIX 1 h: SCHEMA v VECTOR HNSW 6 TYPE FLOAT32 DIM 512 "
+        "DISTANCE_METRIC L2");
+    WaitForIndexReady("hx");
+    for (int i = 0; i < 5; i++)
+      Run({"HSET", absl::StrCat("h:", i), "v", vec});
+    auto graph = GlobalHnswIndexRegistry::Instance().Get("hx", "v");
+    ASSERT_TRUE(graph);
+    ASSERT_EQ(graph->Knn(vec.data(), 5, nullopt).size(), 5u);
+
+    EXPECT_EQ(Run(cmd), "OK");
+    EXPECT_THAT(graph->Knn(vec.data(), 5, nullopt), IsEmpty());
+  }
 }
 
 TEST_F(SearchFamilyTest, AlterTextWeight) {
