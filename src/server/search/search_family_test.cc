@@ -450,6 +450,146 @@ TEST_F(SearchFamilyTest, AliasCommandsLifecycle) {
   EXPECT_EQ(Run({"FT.ALIASDEL", "upserted"}), "OK");
 }
 
+TEST_F(SearchFamilyTest, AliasCommandsInfoAndTagVals) {
+  ASSERT_THAT(Run({"HSET", "a:1", "color", "red"}), IntArg(1));
+  ASSERT_THAT(Run({"HSET", "b:1", "color", "blue"}), IntArg(1));
+  ASSERT_EQ(
+      Run({"FT.CREATE", "idx-a", "ON", "HASH", "PREFIX", "1", "a:", "SCHEMA", "color", "TAG"}),
+      "OK");
+  ASSERT_EQ(
+      Run({"FT.CREATE", "idx-b", "ON", "HASH", "PREFIX", "1", "b:", "SCHEMA", "color", "TAG"}),
+      "OK");
+  WaitForIndexReady("idx-a");
+  WaitForIndexReady("idx-b");
+
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx-a"}), "OK");
+  pp_->at(0)->Await([] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    EXPECT_EQ(indices->GetIndex("live"), nullptr);
+    EXPECT_NE(indices->ResolveIndex("live"), nullptr);
+  });
+
+  EXPECT_EQ(map_string("index_name", Run({"FT.INFO", "live"}).GetVec()), "idx-a");
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), IsUnordArray("red"));
+
+  ASSERT_EQ(Run({"FT.ALIASUPDATE", "live", "idx-b"}), "OK");
+  EXPECT_EQ(map_string("index_name", Run({"FT.INFO", "live"}).GetVec()), "idx-b");
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), IsUnordArray("blue"));
+
+  ASSERT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
+  EXPECT_THAT(Run({"FT.INFO", "live"}), ErrArg("live: no such index"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), ErrArg("Index with name 'live' not found"));
+  EXPECT_THAT(Run({"FT.INFO", "missing"}), ErrArg("missing: no such index"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "missing", "color"}),
+              ErrArg("Index with name 'missing' not found"));
+}
+
+TEST_F(SearchFamilyTest, FtSearchResolvesAliasAndReportsRequestedName) {
+  ASSERT_THAT(Run({"HSET", "a:1", "title", "first"}), IntArg(1));
+  ASSERT_THAT(Run({"HSET", "b:1", "title", "second"}), IntArg(1));
+  ASSERT_EQ(
+      Run({"FT.CREATE", "idx-a", "ON", "HASH", "PREFIX", "1", "a:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  ASSERT_EQ(
+      Run({"FT.CREATE", "idx-b", "ON", "HASH", "PREFIX", "1", "b:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  WaitForIndexReady("idx-a");
+  WaitForIndexReady("idx-b");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx-a"}), "OK");
+
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "first"}), AreDocIds("a:1"));
+  ASSERT_EQ(Run({"FT.ALIASUPDATE", "live", "idx-b"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "second"}), AreDocIds("b:1"));
+  ASSERT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "*"}), ErrArg("live: no such index"));
+}
+
+TEST_F(SearchFamilyTest, FtSearchHnswAliasConcludesTransactions) {
+  auto FloatToBytes = [](float f) {
+    return string(reinterpret_cast<const char*>(&f), sizeof(float));
+  };
+  ASSERT_EQ(Run({"FT.CREATE", "idx",     "ON",  "HASH", "PREFIX",          "1",    "d:",
+                 "SCHEMA",    "route",   "TAG", "pos",  "VECTOR",          "HNSW", "6",
+                 "TYPE",      "FLOAT32", "DIM", "1",    "DISTANCE_METRIC", "L2"}),
+            "OK");
+  ASSERT_THAT(Run({"HSET", "d:hit", "route", "yes", "pos", FloatToBytes(1.0f)}), IntArg(2));
+  ASSERT_THAT(Run({"HSET", "d:filtered", "route", "no", "pos", FloatToBytes(2.0f)}), IntArg(2));
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+  const string query = FloatToBytes(1.0f);
+
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "* => [KNN 1 @pos $v]", "PARAMS", "2", "v", query}),
+              AreDocIds("d:hit"));
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "live", "@route:{yes} => [KNN 1 @pos $v]", "PARAMS", "2", "v", query}),
+      AreDocIds("d:hit"));
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "live", "@route:{missing} => [KNN 1 @pos $v]", "PARAMS", "2", "v", query}),
+      kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "@pos:[VECTOR_RANGE 0.5 $v]", "PARAMS", "2", "v", query}),
+              AreDocIds("d:hit"));
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "(@pos:[VECTOR_RANGE 0.5 $v] @route:{yes})", "PARAMS", "2",
+                   "v", query}),
+              AreDocIds("d:hit"));
+
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "live", "@route:{yes} => [KNN 1 @pos $v]", "PARAMS", "2", "v", "bad"}),
+      ErrArg("Parse error of vector parameters"));
+  EXPECT_THAT(Run({"HSET", "d:hit", "extra", "after-error"}), IntArg(1));
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "* => [KNN 1 @pos $v]", "PARAMS", "2", "v", query}),
+              AreDocIds("d:hit"));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateResolvesAlias) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  ASSERT_THAT(Run({"HSET", "d:1", "title", "hello"}), IntArg(1));
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  EXPECT_THAT(Run({"FT.AGGREGATE", "live", "hello", "LOAD", "1", "@title"}),
+              IsUnordArrayWithSize(IsMap("title", "hello")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "missing_alias", "*"}), RespElementsAre(IntArg(0)));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateHnswAliasConcludesTransactions) {
+  CreateHnswHashIdx();
+  ASSERT_THAT(Run({"HSET", "h:1", "title", "first", "vec", FloatVec1(1.0f)}), IntArg(2));
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+  const string query = FloatVec1(1.0f);
+
+  EXPECT_THAT(Run({"FT.AGGREGATE", "live", "*=>[KNN 1 @vec $v AS dist]", "PARAMS", "2", "v",
+                   query + query, "DIALECT", "2"}),
+              ErrArg("Wrong vector index dimensions"));
+  EXPECT_THAT(Run({"HSET", "h:1", "title", "updated"}), IntArg(0));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "live", "*=>[KNN 1 @vec $v AS dist]", "PARAMS", "2", "v", query,
+                   "DIALECT", "2", "LOAD", "1", "@title"}),
+              IsUnordArrayWithSize(IsMap("title", "updated")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "live", "@vec:[VECTOR_RANGE 0.5 $v]", "PARAMS", "2", "v", query,
+                   "LOAD", "1", "@title"}),
+              IsUnordArrayWithSize(IsMap("title", "updated")));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateJoinResolvesAliases) {
+  ASSERT_EQ(
+      Run({"FT.CREATE", "main_idx", "ON", "HASH", "PREFIX", "1", "main:", "SCHEMA", "key", "TAG"}),
+      "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "foreign_idx", "ON", "HASH", "PREFIX", "1", "foreign:", "SCHEMA",
+                 "key", "TAG", "value", "TEXT"}),
+            "OK");
+  ASSERT_THAT(Run({"HSET", "main:1", "key", "same"}), IntArg(1));
+  ASSERT_THAT(Run({"HSET", "foreign:1", "key", "same", "value", "matched"}), IntArg(2));
+  WaitForIndexReady("main_idx");
+  WaitForIndexReady("foreign_idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "main_live", "main_idx"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "foreign_live", "foreign_idx"}), "OK");
+
+  EXPECT_THAT(Run({"FT.AGGREGATE", "main_live", "*", "LOAD", "2", "main_live.key", "other.value",
+                   "LOAD_FROM", "foreign_live", "AS", "other", "1", "other.key=main_live.key"}),
+              IsUnordArrayWithSize(IsMap("main_live.key", "same", "other.value", "matched")));
+}
+
 TEST_F(SearchFamilyTest, AliasCommandsErrors) {
   ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
   ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
@@ -469,6 +609,39 @@ TEST_F(SearchFamilyTest, AliasCommandsErrors) {
   EXPECT_THAT(Run({"FT.ALIASUPDATE", "idx-a", "idx-b"}),
               ErrArg("Alias name conflicts with an existing index"));
   EXPECT_THAT(Run({"FT.ALIASDEL", "missing"}), ErrArg("Alias does not exist"));
+}
+
+TEST_F(SearchFamilyTest, CreateRejectsAliasName) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  EXPECT_THAT(Run({"FT.CREATE", "live", "ON", "HASH", "SCHEMA", "title", "TEXT"}),
+              ErrArg("Index already exists"));
+  EXPECT_THAT(Run({"FT.CREATE", "live", "NX", "ON", "HASH", "SCHEMA", "title", "TEXT"}),
+              ErrArg("Index already exists"));
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "NX", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, DropIndexRemovesIndexAndAlias) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  ASSERT_EQ(Run({"FT.DROPINDEX", "idx"}), "OK");
+  EXPECT_THAT(Run({"FT.INFO", "idx"}), ErrArg("idx: no such index"));
+  EXPECT_THAT(Run({"FT.ALIASDEL", "live"}), ErrArg("Alias does not exist"));
+}
+
+TEST_F(SearchFamilyTest, AlterPreservesAlias) {
+  ASSERT_THAT(Run({"HSET", "d:1", "color", "red"}), IntArg(1));
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  ASSERT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "color", "TAG"}), "OK");
+  WaitForIndexReady("idx");
+  EXPECT_EQ(map_string("index_name", Run({"FT.INFO", "live"}).GetVec()), "idx");
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), IsUnordArray("red"));
 }
 
 TEST_F(SearchFamilyTest, InfoMissingIndexUsesRedisCompatibleError) {
@@ -3832,6 +4005,20 @@ TEST_F(SearchFamilyTest, SynonymManagement) {
   EXPECT_THAT(resp, IsUnordArray("cub", IsArray("3"), "cute", IsArray("2"), "adorable",
                                  IsArray("2"), "kitty", IsArray("1", "2", "3"), "feline",
                                  IsArray("1"), "tiger", IsArray("3"), "cat", IsArray("1")));
+}
+
+TEST_F(SearchFamilyTest, SynonymCommandsResolveAliases) {
+  ASSERT_EQ(
+      Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  WaitForIndexReady("idx");
+  ASSERT_THAT(Run({"HSET", "doc:1", "title", "cat"}), IntArg(1));
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "live", "animals", "cat", "feline"}), "OK");
+  EXPECT_THAT(Run({"FT.SYNDUMP", "live"}),
+              IsUnordArray("cat", IsArray("animals"), "feline", IsArray("animals")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "feline"}), AreDocIds("doc:1"));
 }
 
 TEST_F(SearchFamilyTest, SynonymsSearch) {
@@ -9748,6 +9935,54 @@ TEST_F(SearchFamilyTest, SynUpdateExpiredDocCrash) {
 }
 
 // --- FT.HYBRID tests ---------------------------------------------------------
+
+TEST_F(SearchFamilyTest, FtProfileSearchAliasTextAndVector) {
+  CreateHnswHashIdx();
+  WaitForIndexReady("idx");
+  const string vec = FloatVec1(1.0f);
+  ASSERT_EQ(Run({"HSET", "h:1", "title", "hello", "vec", vec}), 2);
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  auto text_resp = Run({"FT.PROFILE", "live", "SEARCH", "QUERY", "hello", "NOCONTENT"});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(text_resp);
+  EXPECT_THAT(text_resp.GetVec()[0], AreNoContentDocIds("h:1"));
+
+  auto vector_resp = Run({"FT.PROFILE", "live", "SEARCH", "QUERY", "*=>[KNN 1 @vec $v]",
+                          "NOCONTENT", "PARAMS", "2", "v", vec});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(vector_resp);
+  EXPECT_THAT(vector_resp.GetVec()[0], AreNoContentDocIds("h:1"));
+}
+
+TEST_F(SearchFamilyTest, FtHybridAliasAndProfileAliasReleaseTransactionOnError) {
+  CreateHnswHashIdx();
+  WaitForIndexReady("idx");
+  const string vec = FloatVec1(1.0f);
+  ASSERT_EQ(Run({"HSET", "h:1", "title", "hello", "vec", vec}), 2);
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  auto hybrid = Run({"FT.HYBRID", "live", "SEARCH", "hello", "VSIM", "@vec", "$v", "KNN", "1",
+                     "PARAMS", "2", "v", vec});
+  ASSERT_HYBRID_RESP(hybrid);
+  EXPECT_THAT(HybridKeys(hybrid), ElementsAre("h:1"));
+
+  EXPECT_THAT(Run({"FT.HYBRID", "live", "SEARCH", "hello", "VSIM", "@vec", "$v", "KNN", "1",
+                   "PARAMS", "2", "v", "bad"}),
+              ErrArg("does not match index's expected size"));
+  EXPECT_EQ(Run({"HSET", "h:1", "after-error", "hybrid"}), 1);
+
+  auto profile = Run({"FT.PROFILE", "live", "HYBRID", "QUERY", "SEARCH", "hello", "VSIM", "@vec",
+                      "$v", "KNN", "1", "PARAMS", "2", "v", vec});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(profile);
+  ASSERT_HYBRID_RESP(profile.GetVec()[0]);
+  EXPECT_THAT(HybridKeys(profile.GetVec()[0]), ElementsAre("h:1"));
+
+  EXPECT_THAT(Run({"FT.PROFILE", "live", "HYBRID", "QUERY", "SEARCH", "hello", "VSIM", "@vec", "$v",
+                   "KNN", "1", "PARAMS", "2", "v", "bad"}),
+              ErrArg("does not match index's expected size"));
+  EXPECT_EQ(Run({"HSET", "h:1", "after-error", "profile"}), 0);
+  ASSERT_HYBRID_RESP(Run({"FT.HYBRID", "live", "SEARCH", "hello", "VSIM", "@vec", "$v", "KNN", "1",
+                          "PARAMS", "2", "v", vec}));
+}
 
 TEST_F(SearchFamilyTest, FtHybridStaleDocIdAfterMoveAndHashRewrite) {
   const string vec = FloatVec(1.0f, 1.0f);
