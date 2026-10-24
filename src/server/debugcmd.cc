@@ -7,6 +7,7 @@
 
 extern "C" {
 #include "redis/redis_aux.h"
+#include "redis/stream.h"
 }
 
 #include <absl/cleanup/cleanup.h>
@@ -161,6 +162,51 @@ struct ObjHist {
   base::Histogram listpack;     // for listpack encodings - the malloc used of the listpack.
 };
 
+// Sums the lengths of string values and object keys; other scalars count as 8 bytes.
+// Uses an explicit stack to avoid deep recursion on small fiber stacks.
+size_t JsonDataLen(const JsonType& json) {
+  size_t len = 0;
+  vector<const JsonType*> stack{&json};
+  while (!stack.empty()) {
+    const JsonType* node = stack.back();
+    stack.pop_back();
+    if (node->is_object()) {
+      for (const auto& kv : node->object_range()) {
+        len += kv.key().size();
+        stack.push_back(&kv.value());
+      }
+    } else if (node->is_array()) {
+      for (const auto& elem : node->array_range())
+        stack.push_back(&elem);
+    } else if (node->is_string()) {
+      len += node->as_string_view().size();
+    } else {
+      len += 8;  // numbers, booleans and nulls.
+    }
+  }
+  return len;
+}
+
+// Returns the sum of field and value lengths of all stream entries.
+size_t StreamDataLen(stream* s, ObjHist* hist) {
+  size_t len = 0;
+  streamIterator si;
+  streamID id;
+  int64_t numfields;
+  streamIteratorStart(&si, s, nullptr, nullptr, 0);
+  while (streamIteratorGetID(&si, &id, &numfields)) {
+    while (numfields--) {
+      unsigned char *field, *value;
+      int64_t field_len, value_len;
+      streamIteratorGetField(&si, &field, &value, &field_len, &value_len);
+      hist->entry_len.Add(field_len + value_len);
+      len += field_len + value_len;
+    }
+  }
+  streamIteratorStop(&si);
+  return len;
+}
+
 // No yield: runs inside Traverse, which holds a raw segment pointer a yield could free.
 void AddObjHist(PrimeIterator it, ObjHist* hist) {
   using namespace container_utils;
@@ -223,8 +269,16 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
     if (pv.Encoding() == kEncodingListPack) {
       hist->listpack.Add(pv.MallocUsed());
     }
+  } else if (pv.ObjType() == OBJ_STREAM) {
+    stream* s = static_cast<stream*>(pv.RObjPtr());
+    data_len = StreamDataLen(s, hist);
+    hist->card.Add(s->length);
+  } else if (pv.ObjType() == OBJ_JSON) {
+    data_len = JsonDataLen(*pv.GetJson());
+  } else {
+    // Probabilistic types (bloom, cuckoo, count-min sketch, topk) are fixed-size sketches.
+    data_len = pv.MallocUsed();
   }
-  // TODO: streams
 
   if (malloc_used == 0) {
     // Fallback
@@ -233,11 +287,10 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
 
   hist->malloc_used.Add(malloc_used);
 
-  // TODO: data size for json and streams.
-  if (pv.ObjType() != OBJ_JSON && pv.ObjType() != OBJ_STREAM)
-    hist->data_len.Add(data_len);
+  hist->data_len.Add(data_len);
 
-  if (pv.ObjType() != OBJ_STRING && pv.ObjType() != OBJ_JSON)
+  // Stream cardinality is added above since its Size() returns the memory usage.
+  if (pv.ObjType() != OBJ_STRING && pv.ObjType() != OBJ_JSON && pv.ObjType() != OBJ_STREAM)
     hist->card.Add(pv.Size());
 }
 
