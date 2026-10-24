@@ -210,10 +210,10 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
   if ((opt_mask_ & CO::ADMIN) == 0 && name_ != "EXEC")
     kind_mask_ |= CAN_MONITOR;
 
-  if (base::_in(name_, {"MSET", "MSETNX"}))
-    interleave_step_ = 2;
+  if (absl::StartsWith(name_, "MSET"))
+    interleaved_step_ = 2;
   else if (name_ == "JSON.MSET")
-    interleave_step_ = 3;
+    interleaved_step_ = 3;
 
   // A command has a single key at a fixed position when first_key == last_key > 0 and it
   // carries no variadic/store-key or global/no-key semantics. DetermineKeys uses this to
@@ -240,7 +240,7 @@ CommandId CommandId::Clone(const std::string_view name) const {
   cloned.handler_ = handler_;
   cloned.opt_mask_ = opt_mask_ | CO::HIDDEN;
   cloned.acl_categories_ = acl_categories_;
-  cloned.interleave_step_ = interleave_step_;
+  cloned.interleaved_step_ = interleaved_step_;
   // An alias is semantically the same command, so inherit the source's full derived identity and
   // attributes (incl. SUPPORT_ASYNC, pub/sub & exec/eval identity, CAN_MONITOR, IMPLICIT_ACL) -
   // the ctor recomputed these from the alias name, which is not what we want - and mark it as an
@@ -314,7 +314,10 @@ optional<facade::ErrorReply> CommandId::Validate(const facade::ParsedArgs& tail_
     return facade::ErrorReply{prefix + facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 
-  if (interleave_step_ && tail_args.size() % interleave_step_ != 0) {
+  // Variadic interleaved commands (MSETEX) carry a key count and trailing options, so their
+  // arity is validated by DetermineKeys instead. Keyed on opt_mask_ so aliases behave the same.
+  if (interleaved_step_ && (opt_mask_ & CO::VARIADIC_KEYS) == 0 &&
+      tail_args.size() % interleaved_step_ != 0) {
     return facade::ErrorReply{facade::WrongNumArgsError(name()), kSyntaxErrType};
   }
 

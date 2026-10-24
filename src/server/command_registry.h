@@ -153,8 +153,8 @@ class CommandId : public facade::CommandId {
     return kind_mask_ & CAN_MONITOR;
   }
 
-  int8_t interleaved_step() const {
-    return interleave_step_;
+  uint8_t interleaved_step() const {
+    return interleaved_step_;
   }
 
   // Adapts a free-function handler (including coroutine handlers returning cmd::CmdR) into the
@@ -337,7 +337,7 @@ class CommandId : public facade::CommandId {
 
   // CmdKind bits. Trivially copied by the move ctor.
   uint32_t kind_mask_ = 0;
-  int8_t interleave_step_{0};
+  uint8_t interleaved_step_{0};
 
   struct alignas(64) StatsCell {
     CmdCallStats stats;
