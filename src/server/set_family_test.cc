@@ -147,8 +147,10 @@ TEST_F(SetFamilyTest, SInter) {
   ASSERT_THAT(resp, ArgType(RespExpr::ARRAY));
   EXPECT_THAT(resp.GetVec(), UnorderedElementsAre("3", "2"));
 
-  Run({"set", "y", ""});
-  resp = Run({"sinter", "x", "y"});
+  constexpr char kSameShardKey[] = "y";
+
+  Run({"set", kSameShardKey, ""});
+  resp = Run({"sinter", "x", kSameShardKey});
   ASSERT_EQ(1, GetDebugInfo("IO0").shards_count);
   EXPECT_THAT(resp, ErrArg("WRONGTYPE Operation against a key"));
   resp = Run({"sinterstore", "none1", "none2"});

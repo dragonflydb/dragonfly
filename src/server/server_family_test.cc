@@ -246,15 +246,19 @@ TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
 
 // Test how slowlog captures additional information about heavy commands
 TEST_F(ServerFamilyTest, SlowLogExecEval) {
+  constexpr char kShard0Key[] = "b";
+  constexpr char kShard1Key[] = "x";
+  constexpr char kShard1AltKey[] = "y";
+
   Run({"config", "set", "slowlog_max_len", "20"});
   Run({"config", "set", "slowlog_log_slower_than", "0"});
 
   // Run EXEC
   {
     Run({"multi"});
-    Run({"set", "first", "ok"});
-    Run({"set", "second2", "ok"});
-    Run({"get", "third3"});
+    Run({"set", kShard1Key, "ok"});
+    Run({"set", kShard0Key, "ok"});
+    Run({"get", kShard1AltKey});
     Run({"exec"});
   }
 
@@ -269,7 +273,7 @@ for i, key in ipairs(KEYS) do
 end
 return 'OK';
     )";
-    auto resp = Run({"EVAL", script, "3", "first", "second2", "third3", "second2"});
+    auto resp = Run({"EVAL", script, "3", kShard1Key, kShard0Key, kShard1AltKey, kShard0Key});
     EXPECT_EQ(resp, "OK");
   }
 
@@ -284,7 +288,7 @@ return 'OK';
       const auto sha = "41e84cf7973712deda6c1737a69bd1365eeb060f";
       EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "slow_cmds: 6", "tx_mode: 2",
                                           "tx_shards: 2", "is_write: 1", "lock_tags: 3", "3",
-                                          "first", "second2", "third3", "second2"}));
+                                          kShard1Key, kShard0Key, kShard1AltKey, kShard0Key}));
       found++;
     }
   }
