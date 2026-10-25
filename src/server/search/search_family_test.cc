@@ -475,6 +475,24 @@ TEST_F(SearchFamilyTest, AliasResolvesInInfoAndSearch) {
   EXPECT_THAT(Run({"FT.SEARCH", "live", "*"}), ErrArg("live: no such index"));
 }
 
+TEST_F(SearchFamilyTest, AliasNameResolutionWithoutIndex) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  pp_->at(0)->Await([] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    // Reproduce the gap in FT.ALTER: the local index is removed, but its aliases remain.
+    auto index = indices->DropIndex("idx");
+    ASSERT_NE(index, nullptr);
+    ASSERT_EQ(indices->GetIndex("idx"), nullptr);
+
+    EXPECT_EQ(indices->ResolveIndexName("idx"), "idx");
+    EXPECT_EQ(indices->ResolveIndexName("live"), "idx");
+    EXPECT_EQ(indices->ResolveIndexName("missing"), "missing");
+  });
+}
+
 TEST_F(SearchFamilyTest, HnswAliasConcludesTransactions) {
   CreateHnswHashIdx();
   const string query = FloatVec1(1.0f);

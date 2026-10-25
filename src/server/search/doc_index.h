@@ -662,6 +662,9 @@ class ShardDocIndices {
   // Resolve a canonical index name or alias without following alias chains.
   ShardDocIndex* ResolveIndex(std::string_view name);
 
+  // Resolve an alias to its canonical name without requiring the index to exist.
+  std::string ResolveIndexName(std::string_view name) const;
+
   // Add an alias for an existing index.
   facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
 

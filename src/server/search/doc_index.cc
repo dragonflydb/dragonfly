@@ -1358,6 +1358,11 @@ ShardDocIndex* ShardDocIndices::ResolveIndex(string_view name) {
   return it != aliases_.end() ? GetIndex(it->second) : nullptr;
 }
 
+string ShardDocIndices::ResolveIndexName(string_view name) const {
+  auto it = aliases_.find(name);
+  return it != aliases_.end() ? it->second : string{name};
+}
+
 OpStatus ShardDocIndices::AddAlias(string_view alias, string_view target) {
   using enum OpStatus;
   if (GetIndex(target) == nullptr)
