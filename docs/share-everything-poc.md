@@ -2,19 +2,55 @@
 
 ## 1. Overview and Goals
 
-This document specifies the design for bringing the shared-everything, intent-ordered datastore architecture (prototyped in `midi-redis`) into Dragonfly's `src/facade/ok_main.cc`, backed by a **single shared, multi-threaded `DashTable`** (`src/core/dash.h`) with **per-segment concurrency** and a **Shared/Exclusive intent-lock transactional framework**.
+This document specifies the design for bringing the shared-everything, intent-ordered datastore architecture (prototyped in `midi-redis`) into Dragonfly's `src/facade/ok_main.cc`, backed by a **single shared, multi-threaded `DashTable`** (`src/core/dash.h`).
 
-### Core Architectural Principles
+### 1.1 Definitions and Core Terminology
 
-1. **Decouple Logical Ordering from Physical Storage Protection**:
-   - **Logical conflicts** across keys—especially for multi-key operations (`MGET`, `MSET`)—are ordered via striped, key-hash-indexed **FIFO Intent Queues** supporting **Shared (Read)** and **Exclusive (Write)** modes.
+Before describing the architecture, we define the core building blocks used throughout this document:
+
+- **Proactor Thread & Connection Fiber**:
+  Dragonfly runs one event-loop thread (**Proactor**) per CPU core. Client TCP connections live as cooperative fibers on whichever Proactor accepted them. In a **shared-everything** architecture, any connection fiber on any Proactor thread can directly read and write the shared database without sending cross-thread messages (`FiberQueue` RPCs) to a key-owning thread.
+- **Key Hash (`uint64_t hash`)**:
+  A 64-bit integer hash (e.g., `rapidhash(key)`) computed once when a command parses its key arguments. Different bit slices of this 64-bit hash are used to route the key to its lock stripe, DASH segment, bucket, and SIMD slot fingerprint.
+- **Logical Intent (`Intent`)**:
+  A lightweight logical lock request for a single key hash, acquired by multi-key operations (`MGET`, `MSET`, `MULTI`/`EXEC`, `EVAL`) before they touch physical storage. An `Intent` is requested in one of two modes:
+  - **`kShared` (Read)**: Multiple concurrent readers can hold `kShared` intents on the same key hash simultaneously.
+  - **`kExclusive` (Write)**: Only one writer can hold a `kExclusive` intent on a key hash, excluding all other readers and writers on that key hash.
+- **Intent Queue (`IntentQueue`)**:
+  A per-key-hash FIFO wait queue (`wait_head .. wait_tail`) plus active holder counters (`active_readers`, `active_writer`). It orders conflicting multi-key transactions that want the same key at the same time. An `IntentQueue` is created on demand when a multi-key transaction reserves a key and is immediately deleted when the last holder/waiter finishes—so **idle keys consume zero memory in the lock table**.
+- **Key-Hash-Indexed Lock Map (`keys`)**:
+  Instead of storing lock state inside every hash-table entry or indexing locks by variable-length `std::string` key names (which would require heap allocations and string comparisons during lock acquisition), active `IntentQueue`s are stored in a hash map indexed by the 64-bit integer key hash: `absl::flat_hash_map<uint64_t, IntentQueue>`. (If two distinct keys ever produce the same 64-bit hash—a $2^{-64}$ probability—they simply serialize conservatively on the same `IntentQueue` without affecting correctness.)
+- **Lock Stripe (`Stripe`)**:
+  If all CPU cores locked a single global mutex to access one global `flat_hash_map<uint64_t, IntentQueue>`, that mutex would become a severe bottleneck. **Lock striping** partitions the lock table into `kAdmissionStripes = 64` independent, cache-line-aligned shards called **Stripes** (`Stripe stripes_[64]`).
+  - Each `Stripe` has its own `mutex`, its own `keys` map (`flat_hash_map<uint64_t, IntentQueue>`), and an atomic counter `active_keys` tracking how many key hashes currently have an active `IntentQueue` in that stripe.
+  - A key's stripe is selected deterministically from 6 bits of its hash: `stripe_id = (hash >> 24) & 63`.
+  - When `stripe.active_keys == 0`, no multi-key transaction is active on *any* key in that stripe, allowing single-key commands (`GET`, `SET`) to skip locking `stripe.mutex` altogether.
+- **DASH Segment (`detail::Segment`)**:
+  The fixed-capacity physical building block of `DashTable`. Each `Segment` contains 64 regular buckets + 4 stash buckets ($68 \times 12 = 816$ key-value slots, holding ~550–650 keys at typical load factor). In our multi-threaded design, each `Segment` has its own reader-writer lock (`SegmentLock`) that protects physical memory reads and writes inside that segment.
+- **DASH Directory (`Directory`)**:
+  An extendable-hashing pointer array of size $2^{\text{global\_depth}}$ that maps the most significant `global_depth` bits of a key's 64-bit hash (`hash >> (64 - global_depth)`) to the `Segment*` currently responsible for that hash prefix.
+
+```mermaid
+flowchart LR
+    Key["Key: 'user:42'<br/>hash = 0x9A3F...04B2"]
+    Key -->|"Bits [29:24]<br/>stripe_id = (hash >> 24) & 63"| Stripe["Intent Lock Stripe: stripes_[stripe_id]<br/>- mutex<br/>- active_keys (atomic counter)<br/>- keys: flat_hash_map&lt;uint64_t, IntentQueue&gt;"]
+    Stripe -->|"keys[hash]"| IQ["IntentQueue for 0x9A3F...04B2<br/>- active_readers / active_writer<br/>- FIFO wait_head .. wait_tail"]
+
+    Key -->|"Bits [63 : 64-D]<br/>seg_id = hash >> (64 - D)"| Dir["DASH Directory (2^D pointers)"]
+    Dir -->|"segments[seg_id]"| Seg["DASH Segment<br/>- SegmentLock (RwLock)<br/>- 64 Regular + 4 Stash Buckets"]
+```
+
+### 1.2 Core Architectural Principles
+
+1. **Decouple Logical Multi-Key Ordering from Physical Storage Protection**:
+   - **Logical conflicts** across keys—needed for multi-key atomicity (`MGET`, `MSET`, `MULTI`/`EXEC`)—are ordered via the 64 **Lock Stripes**, where each stripe maps active 64-bit key hashes to **FIFO Intent Queues** supporting **Shared (Read)** and **Exclusive (Write)** modes.
    - **Physical storage integrity** is enforced at the granularity of individual **DASH Segments** (`detail::Segment`), allowing operations on different segments—and concurrent reads on the *same* segment—to execute in parallel across proactor threads without permanent shard ownership.
-2. **Eliminate Cross-Thread Queue Hops on the Common Path**:
+2. **Eliminate Cross-Thread Queue Hops and `seq_cst` Barriers on the Common Path**:
    - Any connection fiber on any proactor thread can directly execute commands against the shared `DashTable`.
-   - Uncontended single-key operations (`GET`, `SET`) execute in a single segment lock scope and bypass intent-map mutations when no conflicting multi-key intents are active in their stripe.
+   - Uncontended single-key operations (`GET`, `SET`) execute in a single segment lock scope, bypass `stripe.mutex` when `stripe.active_keys == 0`, and rely purely on standard `acquire`/`release` semantics of `SegmentLock` (**no `seq_cst` / `dmb ish` barrier required**).
 3. **Preserve Strict Serializability and Linearizability**:
-   - `GET`, `SET`, `MGET`, and `MSET` are strictly serializable (linearizable + atomic).
-   - Partial updates of `MSET` are never visible to concurrent `GET`, `MGET`, or `SET`/`MSET` commands, even though segment locks are acquired and released per segment rather than held across all segments simultaneously.
+   - `GET`, `SET`, `MGET`, `MSET`, and `MULTI`/`EXEC` are strictly serializable (linearizable + atomic).
+   - Partial updates of `MSET` or `EXEC` are never visible to concurrent `GET`, `MGET`, or `SET`/`MSET` commands, even though segment locks are acquired and released one segment at a time rather than held across all segments simultaneously.
 
 ---
 
@@ -27,11 +63,11 @@ flowchart TD
 
     %% Single-Key Fast Path
     CmdType -->|"Single-Key<br/>(GET / SET / INCR)"| DirLookup1["1. Atomic Directory Lookup<br/>dir = dir_.load(acquire)<br/>seg = dir->Lookup(hash)"]
-    DirLookup1 --> SegLock1["2. Lock Segment (Shared or Exclusive)<br/>& Verify seg->Owns(hash)"]
-    SegLock1 --> CheckActive{"3. stripe.active_keys == 0?<br/>(after seq_cst barrier)"}
-    CheckActive -->|"Yes (Uncontended Fast Path)"| ExecFast["4a. Execute Directly in Segment<br/>& Unlock Segment"]
+    DirLookup1 --> SegLock1["2. Lock Segment (Shared or Exclusive, acquire)<br/>& Verify seg->Owns(hash)"]
+    SegLock1 --> CheckActive{"3. stripe.active_keys == 0?<br/>(relaxed/acquire load)"}
+    CheckActive -->|"Yes (Uncontended Fast Path)"| ExecFast["4a. Execute Directly in Segment<br/>& Unlock Segment (release)"]
     CheckActive -->|"No (Intent Active in Stripe)"| CheckStripe["4b. Lock stripe.mutex<br/>Check stripe.keys.find(hash)"]
-    CheckStripe -->|"Free or Shared-Compatible"| ExecCompat["Execute in Segment<br/>& Unlock Segment"]
+    CheckStripe -->|"Free or Shared-Compatible"| ExecCompat["Execute in Segment<br/>& Unlock Segment (release)"]
     CheckStripe -->|"Conflicting Intent"| EnqSingle["Enqueue Intent in FIFO Wait List<br/>Unlock Segment & Wait on EventCount"]
     EnqSingle --> SegLock1
 
@@ -462,7 +498,7 @@ stateDiagram-v2
 - Lock `stripes_[id].mutex` for all `id` in `request->stripes` in ascending order.
 - For each `intent` in `request->intents`:
   - Look up or create `IntentQueue& q = stripes_[intent.stripe].keys[intent.hash]`.
-  - If creating a new `IntentQueue`, increment `stripes_[intent.stripe].active_keys` (`std::memory_order_seq_cst`).
+  - If creating a new `IntentQueue`, increment `stripes_[intent.stripe].active_keys.fetch_add(1, std::memory_order_relaxed)` (releasing `stripes_[id].mutex` and later unlocking any `SegmentLock` both perform `std::memory_order_release`).
   - If `(intent.mode == kShared && q.CanGrantShared())`:
     - `q.active_readers++`
   - Else if `(intent.mode == kExclusive && q.CanGrantExclusive())`:
@@ -483,7 +519,7 @@ stateDiagram-v2
     - Verify `seg->Owns(item.hash)`. If a concurrent split moved `item.hash` before lock acquisition (or if an earlier item in the same `MSET` group split `seg`), switch the segment guard to `LockSegmentForHash(item.hash, request->write)`.
     - Execute `Find` (for `MGET`, copying into `request->values[orig_idx]`) or `Insert`/`Overwrite` (for `MSET`).
   - Unlock the segment immediately.
-  -Notice: **At most one segment lock is held at any time**, while logical intents remain held across all keys of the request.
+  - Notice: **At most one segment lock is held at any time**, while logical intents remain held across all keys of the request.
 
 #### 4. `Complete(Request*)`
 - Acquire `stripes_[id].mutex` for all `id` in `request->stripes` in ascending order.
@@ -494,7 +530,7 @@ stateDiagram-v2
     - Else: `q.active_writer = false`.
   - If `!q.active_writer && q.active_readers == 0`:
     - If `q.wait_head == nullptr`:
-      - Erase `it` from `stripes_[intent.stripe].keys` and decrement `stripes_[intent.stripe].active_keys`.
+      - Erase `it` from `stripes_[intent.stripe].keys` and decrement `stripes_[intent.stripe].active_keys.fetch_sub(1, std::memory_order_relaxed)`.
     - Else if `q.wait_head->mode == kExclusive`:
       - Pop `w = q.wait_head`, set `q.active_writer = true`, and if `w->request->pending_keys.fetch_sub(1, std::memory_order_acq_rel) == 1`, add `w->request` to `ready`.
     - Else (`q.wait_head->mode == kShared`):
@@ -503,11 +539,11 @@ stateDiagram-v2
 - Release all stripe mutexes.
 - Wake all `ready` requests (`next_req->eligible.Notify()`).
 
-### 4.4 Single-Key Fast Path (Intent Bypass When Uncontended)
+### 4.4 Single-Key Fast Path Without `seq_cst` Barriers
 
-In typical Redis workloads dominated by single-key `GET` and `SET`, acquiring `stripe.mutex` twice and inserting/erasing in `stripe.keys` on every command adds avoidable overhead.
+In typical Redis workloads dominated by single-key `GET` and `SET`, acquiring `stripe.mutex` twice and inserting/erasing in `stripe.keys` on every command adds avoidable overhead. Furthermore, issuing a `std::memory_order_seq_cst` fence (`dmb ish` on ARM64 / `mfence` on x86-64) on every single-key command would stall the CPU store buffer on weakly ordered architectures like ARM64 (Graviton, Apple Silicon, Ampere).
 
-Because a single-key command `Op(k)` touches only one key `k` inside one segment `S(k)`, its entire physical read or mutation occurs inside `S(k)`'s lock scope. Once `Op(k)` releases `S(k)`'s lock, `Op(k)` is completely finished. Therefore, `Op(k)` only needs to interact with `stripe(k)` if a multi-key command (or an already-queued waiter) currently holds or awaits an intent in `stripe(k)`.
+Fortunately, **we do not need a `seq_cst` barrier on the single-key fast path**. Standard `acquire`/`release` semantics on `SegmentLock::state_` (which is already acquired and released on every segment access) are sufficient to preserve strict serializability and multi-key atomicity.
 
 #### Single-Key Execution Protocol
 
@@ -517,12 +553,14 @@ bool FastSingleKeyGet(std::string_view key, uint64_t hash, std::optional<std::st
   const uint16_t stripe_id = (hash >> 24) & (kAdmissionStripes - 1);
   Stripe& stripe = stripes_[stripe_id];
 
+  // Acquires S(k)->state_ with std::memory_order_acquire.
   SegmentType* seg = table_.LockSegmentForHash(hash, /*exclusive=*/false);
-  // On x86-64, LockSegmentForHash's atomic RMW is already a full barrier; on weakly
-  // ordered architectures, ensure seq_cst ordering between segment lock and active_keys load.
-  std::atomic_thread_fence(std::memory_order_seq_cst);
 
-  if (ABSL_PREDICT_TRUE(stripe.active_keys.load(std::memory_order_relaxed) == 0)) {
+  // No seq_cst fence needed! If any conflicting multi-key transaction M has already
+  // accessed S(k) and unlocked it (std::memory_order_release), M's Unlock(S(k))
+  // synchronizes-with our LockSegmentForHash(S(k)), guaranteeing that M's prior
+  // increment of stripe.active_keys in M.Admit() is visible here.
+  if (ABSL_PREDICT_TRUE(stripe.active_keys.load(std::memory_order_acquire) == 0)) {
     *out = seg->FindValue(key, hash);
     seg->UnlockShared();
     return true;
@@ -547,50 +585,56 @@ bool FastSingleKeyGet(std::string_view key, uint64_t hash, std::optional<std::st
 }
 ```
 
-#### Correctness Proof (Dekker Ordering Between Single-Key Fast Path and Multi-Key `Admit`)
+#### Why `acquire`/`release` on `SegmentLock` Suffices (No `seq_cst` / `dmb ish` Needed)
 
-Consider a conflicting pair: a single-key operation `Op(k)` and a multi-key operation `M(k, k2)` (where at least one is a write, so they require conflicting locks on segment `S(k)`):
+Why might someone initially think a `seq_cst` fence is required between `seg->Lock()` and `stripe.active_keys.load()`, and why is it actually unnecessary?
 
-- **`Op(k)` executes**:
-  1. `S(k)->Lock()` (Shared or Exclusive)
-  2. `seq_cst` fence
-  3. Reads `stripe(k).active_keys`
-- **`M(k, k2)` executes**:
-  1. Under `stripe(k).mutex`: inserts `k` into `stripe(k).keys` and increments `stripe(k).active_keys` (`seq_cst`)
-  2. Releases all stripe mutexes
-  3. Acquires `S(k)->Lock()` (Exclusive or Shared)
+Consider a multi-key operation `M(k1, k2)` and a single-key operation `Op(k1)` that conflict on key `k1` (meaning at least one of `M` or `Op` is a write on `k1`, so at least one acquires `S(k1)` in `Exclusive` mode):
 
-By sequential consistency of the two operations (`S(k)->Lock()` and `stripe(k).active_keys`):
-- **Case 1**: `Op(k)` acquires `S(k)->Lock()` *before* `M(k, k2)` increments `stripe(k).active_keys`.
-  Then `M(k, k2)` has not yet finished `Admit()` on its stripes and has not touched *any* segment (`S(k)` or `S(k2)`). Because `Op(k)` already holds `S(k)->Lock()`, `M(k, k2)` cannot acquire a conflicting lock on `S(k)` until after `Op(k)` finishes its single-key access and unlocks `S(k)`. Furthermore, if any client observes `Op(k)`'s completion and subsequently issues a command on `k2` after `M` finishes `Admit()`, that subsequent command will observe `M`'s intent in `stripe(k2)`. Thus `Op(k)` serializes strictly before `M(k, k2)`.
-- **Case 2**: `M(k, k2)` increments `stripe(k).active_keys` *before* `Op(k)` reads `stripe(k).active_keys`.
-  Then `Op(k)` observes `active_keys > 0`, acquires `stripe(k).mutex`, sees `M(k, k2)`'s intent on `hash(k)`, drops `S(k)->Lock()`, and queues behind `M(k, k2)` until `M(k, k2)` completes across all its segments. Thus `Op(k)` serializes strictly after `M(k, k2)`.
+1. **Both `Op(k1)` and `M(k1, k2)` must acquire conflicting locks on the SAME atomic variable `S(k1)->state_`**:
+   - Because `SegmentLock` does not allow an `Exclusive` lock to overlap with any `Shared` or `Exclusive` lock on `S(k1)`, `Op(k1)` and `M(k1, k2)` cannot hold `S(k1)`'s lock simultaneously.
+   - Furthermore, in `SegmentLock`, every unlock (`UnlockExclusive` `store(0, release)` or `UnlockShared` `fetch_sub(kReaderStep, release)`) is a **release** operation, and all intermediate lock/unlock RMWs (`compare_exchange`, `fetch_sub`, `fetch_or`) form a C++20 **release sequence** (`[atomics.order]`) on `S(k1)->state_`.
+   - Consequently, whichever of `Op(k1)` or `M(k1, k2)` acquires `S(k1)` first **must call `Unlock(S(k1))` (`release`) before the other's `Lock(S(k1))` (`acquire`) succeeds**, establishing a direct hardware `release` $\to$ `acquire` happens-before edge on `S(k1)->state_`.
+
+2. **Case 1: `M(k1, k2)` locks `S(k1)` BEFORE `Op(k1)` locks `S(k1)` (`M -> Op`)**:
+   - This is the critical case where `M` has already accessed `k1` and released `S(k1)->Lock()`, while `M` may still be in flight toward `S(k2)`. `Op(k1)` **must not** take the fast path and observe or overwrite `M`'s uncommitted multi-key state.
+   - Look at the happens-before chain:
+     $$\text{M.Admit}(\texttt{stripe}(k_1).\texttt{active\_keys++}) \xrightarrow{\text{program order}} \text{M.Unlock}(S(k_1))\ [\text{release}] \xrightarrow{\text{sync-with}} \text{Op.Lock}(S(k_1))\ [\text{acquire}] \xrightarrow{\text{program order}} \text{Op.load}(\texttt{active\_keys})$$
+   - Because `M.Unlock(S(k1))` (`release`) synchronizes-with `Op.Lock(S(k1))` (`acquire`) on the **same atomic word `S(k1)->state_`**, `M`'s increment of `stripe(k1).active_keys` in `Admit()` **strictly happens-before** `Op(k1)`'s load of `stripe(k1).active_keys`—even on weakly ordered ARM64 CPUs without any `seq_cst` fence!
+   - Thus `Op(k1)` is guaranteed to observe `active_keys > 0`, lock `stripe(k1).mutex`, see `M`'s intent, and wait until `M` completes across all of its segments.
+
+3. **Case 2: `Op(k1)` locks `S(k1)` BEFORE `M(k1, k2)` locks `S(k1)` (`Op -> M`)**:
+   - Suppose `M` has just incremented `stripe(k1).active_keys` on another core, and `Op(k1)` locks `S(k1)` before `M` reaches `S(k1)`.
+   - Without a `seq_cst` fence, `Op(k1)` might read a stale `active_keys == 0` and execute on the fast path while holding `S(k1)`'s lock.
+   - **Why this is completely safe**: Because `Op(k1)` already holds `S(k1)`'s lock, `M` **cannot acquire its conflicting lock on `S(k1)`** until `Op(k1)` finishes and calls `S(k1)->Unlock()`! Thus `Op(k1)` completes on `k1` strictly before `M` touches `k1`.
+   - Could `Op(k1)` have causally depended on `M`'s effect on another key `k0` that `M` already visited earlier? **No**, because any transaction `T(k0)` that conflicted with `M` on `S(k0)` *after* `M` visited `S(k0)` fell into **Case 1** on `S(k0)` (`M.Unlock(S(k0)) [release] -> T.Lock(S(k0)) [acquire]`), so `T(k0)` saw `stripe(k0).active_keys > 0` and blocked until `M` completed!
+   - Therefore, `Op(k1)` serializes cleanly **before** `M(k1, k2)`.
 
 ```mermaid
 sequenceDiagram
-    participant T1 as Fast Single-Key Op(k)
-    participant Seg as Segment S(k) Lock
-    participant Stripe as Stripe(k) [active_keys & mutex]
-    participant T2 as Multi-Key MSET(k, k2)
-
-    rect rgb(235, 248, 240)
-    Note over T1,T2: Case 1: Op(k) locks S(k) before MSET increments active_keys -> Op(k) < MSET
-    T1->>Seg: 1. S(k)->LockShared() + seq_cst fence
-    T1->>Stripe: 2. Load active_keys == 0 (Fast Path!)
-    T2->>Stripe: 3. Lock stripe.mutex, insert Intent(k), active_keys++ (seq_cst)
-    T1->>Seg: 4. Read k & S(k)->UnlockShared()
-    T2->>Seg: 5. S(k)->LockExclusive() (waits until step 4 finishes)
-    end
+    participant T1 as Fast Single-Key Op(k1)
+    participant Seg as Segment S(k1) Lock [state_]
+    participant Stripe as Stripe(k1) [active_keys & mutex]
+    participant T2 as Multi-Key M(k1, k2)
 
     rect rgb(252, 242, 235)
-    Note over T1,T2: Case 2: MSET increments active_keys before Op(k) reads it -> MSET < Op(k)
-    T2->>Stripe: 1. Lock stripe.mutex, insert Intent(k), active_keys++ (seq_cst)
-    T1->>Seg: 2. S(k)->LockShared() + seq_cst fence
-    T1->>Stripe: 3. Load active_keys > 0 (Slow Check!)
-    T1->>Stripe: 4. Lock stripe.mutex -> sees Intent(k)
-    T1->>Seg: 5. S(k)->UnlockShared() & enqueue behind MSET(k, k2)
-    T2->>Seg: 6. Execute on S(k) and S(k2)
-    T2->>Stripe: 7. Complete: release Intents & wake T1
+    Note over T1,T2: Case 1: M locks S(k1) before Op(k1) -> release/acquire on S(k1) guarantees Op sees active_keys > 0
+    T2->>Stripe: 1. Admit: lock stripe.mutex, insert Intent(k1), active_keys++
+    T2->>Seg: 2. S(k1)->Lock() ... access k1 ... S(k1)->Unlock() [RELEASE]
+    T1->>Seg: 3. S(k1)->Lock() [ACQUIRE — synchronizes-with step 2!]
+    T1->>Stripe: 4. Load active_keys > 0 (guaranteed visible via step 2->3!)
+    T1->>Stripe: 5. Lock stripe.mutex -> sees Intent(k1)
+    T1->>Seg: 6. S(k1)->Unlock() & wait behind M(k1, k2)
+    T2->>Seg: 7. M finishes S(k2), calls Complete(), wakes T1
+    end
+
+    rect rgb(235, 248, 240)
+    Note over T1,T2: Case 2: Op(k1) locks S(k1) before M -> Op(k1) finishes before M can lock S(k1) (Op < M)
+    T1->>Seg: 1. S(k1)->Lock() [ACQUIRE]
+    T2->>Stripe: 2. Admit: lock stripe.mutex, insert Intent(k1), active_keys++
+    T1->>Stripe: 3. Load active_keys (even if 0, Op already holds S(k1)!)
+    T1->>Seg: 4. Access k1 & S(k1)->Unlock() [RELEASE]
+    T2->>Seg: 5. S(k1)->Lock() [ACQUIRE — waits for step 4, sees Op's effect]
     end
 ```
 
@@ -607,7 +651,7 @@ In Dragonfly's shared-nothing architecture, a `MULTI`/`EXEC` block or Lua `EVAL`
 
 In the **shared-everything architecture**, the connection fiber executing `EXEC` or `EVAL` can directly lock and mutate any `Segment` of the shared `DashTable` on its own proactor thread. Multi-command atomicity and isolation require **zero cross-thread RPC hops**: the connection fiber admits logical intents for all transaction keys upfront, executes all commands locally against the shared `DashTable`, and releases the intents on completion.
 
-### 5.2 `WATCH` / `UNWATCH` (Optimistic Concurrency Control)
+### 5.2 `WATCH` / `UNWATCH` (Optimistic Concurrency Control) Without `seq_cst`
 
 Instead of storing watched keys in a per-shard `DbTable::watched_keys` map, watched keys are partitioned across the 64 `Stripe`s alongside the intent queues:
 
@@ -627,14 +671,15 @@ struct alignas(64) Stripe {
 };
 ```
 
-1. **`WATCH k1 k2 ...`**:
+1. **`WATCH k1 k2 ...` (Synchronized via `SegmentLock`)**:
    - For each key `k`, compute `(hash, stripe)`.
-   - Lock `stripes_[stripe].mutex`, append `&conn->exec_info.watched_dirty` to `watched_keys[hash]`, and increment `stripe.watched_count` (`std::memory_order_seq_cst`).
-   - Check key existence (under `Segment::LockShared()`) and increment `exec_info.watched_existed` so silent passive/lazy TTL expiration between `WATCH` and `EXEC` is detected even if no write command explicitly touches `k`.
-2. **Write Notification (`NotifyWatchers`)**:
-   - Whenever any write operation (`SET`, `DEL`, `MSET`, `INCR`, `HSET`, `EXEC`, or lazy expiry) modifies key `k` while holding `S(k)->LockExclusive()`:
-   - After a `seq_cst` barrier (already provided by `LockExclusive()`), it checks `stripe.watched_count.load(std::memory_order_relaxed)`.
-   - **Fast Path (`watched_count == 0`)**: Zero overhead; `stripe.mutex` is not touched.
+   - First acquire `S(k)->LockShared()` (`std::memory_order_acquire`) and check whether `k` currently exists (recording `exec_info.watched_existed` so silent lazy TTL expiration between `WATCH` and `EXEC` is detected).
+   - While still holding `S(k)->LockShared()` (which obeys the global `SegmentLock -> stripe.mutex` lock hierarchy), lock `stripes_[stripe].mutex`, append `&conn->exec_info.watched_dirty` to `watched_keys[hash]`, increment `stripe.watched_count` (`std::memory_order_relaxed`), and unlock `stripes_[stripe].mutex`.
+   - Finally call `S(k)->UnlockShared()` (`std::memory_order_release`).
+2. **Write Notification (`NotifyWatchers`, No `seq_cst` Needed)**:
+   - Whenever any write operation (`SET`, `DEL`, `MSET`, `INCR`, `HSET`, `EXEC`, or lazy expiry) modifies key `k`, it holds `S(k)->LockExclusive()` (`std::memory_order_acquire`).
+   - Because `WATCH k` incremented `stripe.watched_count` *before* calling `S(k)->UnlockShared()` (`release`), any writer acquiring `S(k)->LockExclusive()` (`acquire`) *after* `WATCH k` is **guaranteed by the `release`/`acquire` sequence on `S(k)->state_`** to see `stripe.watched_count > 0` without any `seq_cst` barrier!
+   - **Fast Path (`stripe.watched_count.load(std::memory_order_relaxed) == 0`)**: Zero overhead; `stripe.mutex` is not touched.
    - **Slow Path (`watched_count > 0`)**: Under `stripe.mutex`, look up `hash(k)` in `stripe.watched_keys`. For any matching `(db_ind, key)`, store `true` (`std::memory_order_release`) into every registered `dirty_flag*`, erase the entry, and decrement `stripe.watched_count`.
 3. **`UNWATCH` / `DISCARD` / Connection Close**:
    - Iterates `exec_info.watched_keys`, locks each corresponding `stripe.mutex`, removes `&exec_info.watched_dirty`, and decrements `stripe.watched_count`.
@@ -650,8 +695,9 @@ sequenceDiagram
     participant Segs as DASH Segments
 
     Client->>Fiber: WATCH k1
-    Fiber->>Stripes: Register &watched_dirty in Stripe(k1), watched_count++
-    Fiber->>Segs: LockShared S(k1) -> record watched_existed
+    Fiber->>Segs: LockShared S(k1) [acquire] -> record watched_existed
+    Fiber->>Stripes: Under S(k1) lock: lock Stripe(k1), register &watched_dirty, watched_count++
+    Fiber->>Segs: UnlockShared S(k1) [release]
     Client->>Fiber: MULTI
     Fiber-->>Client: +OK (exec_info.state = EXEC_COLLECT)
     Client->>Fiber: GET k1 / INCR k2 / SET k1 v
