@@ -39,6 +39,22 @@ async def test_password_tracks_requirepass_updates(df_server: DflyInstance):
         assert resp.status == 200
 
 
+@dfly_args({"proactor_threads": "1", "expose_http_api": "true"})
+async def test_empty_password_requires_explicit_http_auth(df_server: DflyInstance):
+    client = df_server.client()
+    assert await client.execute_command("ACL SETUSER default >") == "OK"
+
+    async with get_http_session() as session:
+        resp = await session.post(f"http://localhost:{df_server.port}/api", json=["ping"])
+        assert resp.status == 401
+    async with get_http_session("default", "wrongpassword") as session:
+        resp = await session.post(f"http://localhost:{df_server.port}/api", json=["ping"])
+        assert resp.status == 401
+    async with get_http_session("default", "") as session:
+        resp = await session.post(f"http://localhost:{df_server.port}/api", json=["ping"])
+        assert resp.status == 200
+
+
 @dfly_args({"proactor_threads": "1", "requirepass": "XXX", "admin_port": 1113})
 async def test_skip_metrics(df_server: DflyInstance):
     async with get_http_session("whoops", "whoops") as session:
