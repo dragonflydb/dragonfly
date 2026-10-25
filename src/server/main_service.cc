@@ -3004,19 +3004,30 @@ bool Service::IsLoadingExclusively() {
 }
 
 void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privileged) {
-  // We skip authentication on privileged listener if the flag admin_nopass is set
-  // We also skip authentication if requirepass is empty
-  const bool should_skip_auth =
-      (is_privileged && !RequirePrivilegedAuth()) || GetPassword().empty();
-  if (!should_skip_auth) {
-    base->SetAuthFunctor([pass = GetPassword()](std::string_view path, std::string_view username,
-                                                std::string_view password) {
-      if (path == "/metrics" || path == "/healthz")
-        return true;
-      const bool pass_verified = pass.empty() ? true : password == pass;
-      return username == "default" && pass_verified;
-    });
-  }
+  // Keep the HTTP console's authentication in sync with the live default ACL user. The
+  // requirepass flag only reflects the startup configuration and can become stale after ACL
+  // changes or CONFIG SET requirepass.
+  base->SetAuthFunctor([this, is_privileged](std::string_view path, std::string_view username,
+                                              std::string_view password) {
+    if (path == "/metrics" || path == "/healthz")
+      return true;
+
+    // JWT validation performs blocking I/O, so it cannot be used from this synchronous HTTP
+    // auth functor. Deny the console while JWT mode is enabled.
+    if (acl::JwtValidator::IsEnabled())
+      return false;
+
+    // The privileged listener can explicitly disable authentication.
+    if (is_privileged && !RequirePrivilegedAuth())
+      return true;
+
+    // A nopass default user means this listener is open, as it is for RESP clients.
+    if (user_registry_.AuthUser("default", ""))
+      return true;
+
+    return username == "default" && user_registry_.AuthUser(username, password);
+  });
+
   server_family_.ConfigureMetrics(base);
 
   base->RegisterCb("/healthz", [](const http::QueryArgs&, HttpContext* send) {
