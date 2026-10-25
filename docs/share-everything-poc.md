@@ -29,6 +29,9 @@ Before describing the architecture, we define the core building blocks used thro
   The fixed-capacity physical building block of `DashTable`. Each `Segment` contains 64 regular buckets + 4 stash buckets ($68 \times 12 = 816$ key-value slots, holding ~550–650 keys at typical load factor). In our multi-threaded design, each `Segment` has its own reader-writer lock (`SegmentLock`) that protects physical memory reads and writes inside that segment.
 - **DASH Directory (`Directory`)**:
   An extendable-hashing pointer array of size $2^{\text{global\_depth}}$ that maps the most significant `global_depth` bits of a key's 64-bit hash (`hash >> (64 - global_depth)`) to the `Segment*` currently responsible for that hash prefix.
+- **Logical Partition (`LogicalPartition[0..K-1]`)**:
+  A **dynamically chosen** grouping of `DashTable` segments into $K = 2^p$ disjoint hash-prefix ranges ($j \in [0, K)$), used to drive parallel multi-file serialization (`...-0000.dfs .. ...-(K-1).dfs`) and parallel multi-socket replication (`DFLY FLOW 0..K-1`).
+  - *Note on terminology*: We reserve the word **Stripe** exclusively for the 64 Intent Lock Stripes (`stripes_[0..63]`), and use **Logical Partition** for segment-level partitioning over `DashTable`. Unlike shared-nothing shards, the number of Logical Partitions $K$ is **not fixed at server startup**—it can be chosen dynamically per snapshot or replication session.
 
 ```mermaid
 flowchart LR
@@ -38,6 +41,7 @@ flowchart LR
 
     Key -->|"Bits [63 : 64-D]<br/>seg_id = hash >> (64 - D)"| Dir["DASH Directory (2^D pointers)"]
     Dir -->|"segments[seg_id]"| Seg["DASH Segment<br/>- SegmentLock (RwLock)<br/>- 64 Regular + 4 Stash Buckets"]
+    Seg -.->|"Dynamic top-p bits<br/>j = hash >> (64 - p)"| Part["Logical Partition j (0 .. K-1)<br/>-> File j (.dfs) / Socket j (DFLY FLOW)"]
 ```
 
 ### 1.2 Core Architectural Principles
@@ -406,6 +410,59 @@ Changes required:
 - **Lock-Scoped Accessors Instead of Unlocked Iterators**:
   - Because `InsertUniq` can displace entries between a home bucket, its neighbor bucket (`MoveToOther`), and stash buckets (`TryMoveFromStash` / `UnloadStash`), a slot's `(bucket_id, slot_id)` is only stable while the segment lock is held.
   - Raw `DashTable::iterator` must not be used outside a segment lock scope. Instead, `DashTable` provides lock-scoped operations (`Get`, `Set`, `Delete`) and a `SegmentGuard` for batched segment execution.
+
+### 3.8 Dynamic Logical Partitions Over `DashTable` Segments
+
+To serialize snapshots into **multiple `.dfs` files** and stream replication across **multiple TCP sockets** (`DFLY FLOW`) in parallel, we overlay $K$ **Logical Partitions** ($j \in [0, K)$) on top of the single shared `DashTable`.
+
+#### 1. Why a Single `DashTable` with Dynamic Logical Partitions Beats Pre-Sharded Tables
+- If we used $K$ separate `DashTable` instances (or baked a fixed $K$ into the table at startup), $K$ would be frozen for the lifetime of the process—just like shared-nothing shards.
+- With a **single `DashTable`** and **dynamic logical partitioning over segments**, $K = 2^p$ does **not** need to be chosen in advance:
+  - A local `SAVE` can dynamically partition the table into $K = 8$ partitions ($p = 3$) to write 8 `.dfs` files in parallel.
+  - A replica full sync can dynamically negotiate $K = 16$ partitions ($p = 4$) to stream over 16 parallel TCP sockets, even if the master has 32 CPUs and the replica has 16 CPUs.
+  - A standard single-file `RDB` dump simply uses $K = 1$ ($p = 0$).
+
+#### 2. Segment-Based vs. Bucket-Based Partitioning
+We can define logical partitions at either the **bucket** level (`bucket_id % K == j` inside every segment) or the **segment** level. **Segment-based partitioning is strongly preferred**:
+- Inside a `detail::Segment`, a single insertion can probe home bucket `b`, displace entries into neighbor buckets `b ± 1` (`MoveToOther`), or spill into the segment's 4 shared stash buckets (`stash_[0..3]`). Furthermore, when a segment is full, `CVCOnInsert` and `Split()` operate on **all 68 physical buckets of the segment as an atomic unit**.
+- Under bucket-based partitioning, a single `Insert` or `Split` inside one segment would touch buckets belonging to multiple logical partitions and would have to flush pre-mutation state into multiple files/sockets simultaneously.
+- Under **segment-based partitioning**, all 68 buckets of a `Segment` belong to **one and only one** Logical Partition $j$, keeping `Insert`, `MoveToOther`, `UnloadStash`, `CVCOnInsert`, and `Split` 100% localized to Partition $j$.
+
+#### 3. Preserving Partition Membership Across Splits: Top-$p$-Bit Prefix vs. `segment_id % K`
+A subtle question in extendible hashing is how to map `segment_id` to a partition $j \in [0, K)$ (where $K = 2^p$) so that **segment splits and directory doublings never move keys between partitions**:
+
+- **Pitfall of Low-Bit Modulo (`segment_id % K == j`)**:
+  In `DashTable`, `segment_id = hash >> (64 - global_depth)`.
+  1. When `global_depth` increases from $D$ to $D + 1$ (`IncreaseDepth()`), every key's `segment_id` shifts left by 1 bit (`new_sid = (old_sid << 1) | bit`), which **permutes `segment_id % K` for every key in the table mid-snapshot**!
+  2. Any unsplit segment with `local_depth = d < D` spans $2^{D - d}$ adjacent directory slots (`start, start + 1, ...`), which have *different* values of `sid % K`, so a single physical segment would straddle multiple partitions!
+- **Solution: High-Bit Prefix Partitioning (`partition_id = hash >> (64 - p) = segment_id >> (D - p)`)**:
+  Instead of taking the low $p$ bits of `segment_id`, we define Logical Partition $j \in [0, K)$ ($K = 2^p$) using the **top $p$ MSBs** of the 64-bit hash (and therefore the top $p$ bits of `segment_id` and `Segment::prefix_`):
+  $$\text{partition\_id}(h, K) = h \gg (64 - p) = \texttt{segment\_id} \gg (D - p), \qquad \text{partition\_id}(S, K) = S\text{->prefix\_} \gg (S\text{->local\_depth\_} - p)$$
+  This guarantees four critical properties for any dynamically chosen $K = 2^p$ (with $D \ge p$):
+  1. **Uniform Distribution**: Because `rapidhash` is uniform across all 64 bits, the top $p$ bits distribute segments and keys across $j \in [0, K)$ just as uniformly as `% K`.
+  2. **100% Split and Resize Invariance**: When a segment `S` at `(local_depth = d >= p, prefix = P)` splits into `S` (`(P << 1) | 0`) and `S_new` (`(P << 1) | 1`), **both children have the exact same top $p$ prefix bits (`j`)**. Even if `Directory` doubles (`D -> D + 1`) during a snapshot or replication, zero keys ever cross a Logical Partition boundary.
+  3. **Direct `DashCursor` Range Mapping**: Because `DashCursor(depth, seg_id, bid)` left-aligns `seg_id` at bit 40 (`(uint64_t(seg_id) << (40 - depth)) | bid`), Logical Partition $j \in [0, K)$ is simply the contiguous `DashCursor` range:
+     $$\text{Cursor}_{\text{begin}}(j) = \texttt{DashCursor}(p, j, 0), \qquad \text{Cursor}_{\text{end}}(j) = \texttt{DashCursor}(p, j + 1, 0)$$
+     In a directory of depth $D \ge p$, Partition $j$ is the contiguous directory slice `dir->segments[j << (D - p) .. ((j + 1) << (D - p)) - 1]`.
+  4. **Tiny-Table Edge Case (`local_depth < p`)**: If a snapshot with $K = 2^p$ starts on a nearly empty table where a segment `S` still has `local_depth = d < p`, `S` is assigned deterministically to partition `j = S->prefix_ << (p - d)` (its lowest partition index), while the other $2^{p - d} - 1$ sub-partitions in `S`'s prefix range are empty (or `S` can be pre-split to depth $p$).
+
+```mermaid
+flowchart TB
+    subgraph Dir["Single Shared DashTable Directory (global_depth = D >= p, K = 2^p)"]
+        direction LR
+        P0["Directory Slice j = 0<br/>seg_id in [0, 2^(D-p))<br/>hash top-p bits == 0"]
+        P1["Directory Slice j = 1<br/>seg_id in [2^(D-p), 2*2^(D-p))<br/>hash top-p bits == 1"]
+        PK["Directory Slice j = K-1<br/>seg_id in [(K-1)*2^(D-p), 2^D)<br/>hash top-p bits == K-1"]
+    end
+
+    P0 --> S0["Segments of Partition 0<br/>(splits stay in Partition 0)"]
+    P1 --> S1["Segments of Partition 1<br/>(splits stay in Partition 1)"]
+    PK --> SK["Segments of Partition K-1<br/>(splits stay in Partition K-1)"]
+
+    S0 --> Out0["LogicalPartitionStream[0]<br/>-> File dump-0000.dfs / Socket FLOW 0"]
+    S1 --> Out1["LogicalPartitionStream[1]<br/>-> File dump-0001.dfs / Socket FLOW 1"]
+    PK --> OutK["LogicalPartitionStream[K-1]<br/>-> File dump-(K-1).dfs / Socket FLOW K-1"]
+```
 
 ---
 
@@ -998,10 +1055,14 @@ sequenceDiagram
    - If a bucket contains a huge collection (e.g., a `StringMap` or `QList` with $>1,000$ elements):
      - **Option A (Intent-Protected Snapshot Read)**: The traversal fiber acquires a `kShared` logical intent on `hash(key)` in `Stripe`, releases `S->LockShared()`, serializes the large collection in chunks while yielding/flushing freely (protected from mutations by the `kShared` intent!), and releases the `kShared` intent.
      - **Option B (Tagged Chunked Serialization)**: Use Dragonfly's existing `FLAGS_serialization_tagged_chunks` to stream chunks of the collection across yields.
-4. **Parallel Multi-Fiber `DashTable` Traversal (`SCAN` and Snapshots)**:
-   - `DashCursor` encodes the segment position as the top `d` bits of the hash prefix.
-   - For `SCAN`, a single `DashCursor` steps across segments using `LockSegmentForPrefix` (`LockShared()`), visiting one logical bucket across shared segments per `Traverse` step.
-   - For **Snapshots**, the hash-prefix space $[0, 2^{\text{global\_depth}})$ can be partitioned across $P$ parallel traversal fibers (one per proactor thread!). Thread $p \in [0, P)$ traverses prefixes in $[\frac{p}{P} 2^D, \frac{p+1}{P} 2^D)$, saturating multi-core compression and disk/network bandwidth without any cross-thread coordination!
+4. **Parallel Multi-File Serialization (`K` `.dfs` Files) and Multi-Socket Replication (`K` `DFLY FLOW` Sockets)**:
+   - Using the dynamic $K = 2^p$ **Logical Partitions** defined in Section 3.8 (`partition_id(h, K) = h >> (64 - p)`), any snapshot or replication session spawns $K$ independent `LogicalPartitionStream[0 .. K-1]` instances:
+     - **Multi-File `SAVE` / `BGSAVE`**: Opens $K$ `.dfs` shard files (`...-0000.dfs` through `...-(K-1).dfs` plus `...-summary.dfs`). Fiber $j \in [0, K)$ traverses `DashCursor(p, j, 0) .. DashCursor(p, j + 1, 0)` and writes exclusively to File $j$.
+     - **Multi-Socket Replication (`DFLY FLOW`)**: Master and replica negotiate $K = 2^p$ parallel TCP flows (`flow_id = 0 .. K-1`). During full sync, Flow $j$ traverses Logical Partition $j$ and streams RDB chunks over **Socket $j$**.
+     - **Routing Pre-Modify Hooks & Journal Entries to Stream $j$**:
+       - When a concurrent writer fiber modifies segment `S` (holding `S->LockExclusive()`), it computes $j = S\text{->prefix\_} \gg (S\text{->local\_depth\_} - p)$ in $O(1)$.
+       - Any pre-mutation buckets in `S` with `version < snapshot_version_` are serialized into a buffer and flushed to `LogicalPartitionStream[j]` (File $j$ / Socket $j$).
+       - During stable-state replication, mutations to keys in Logical Partition $j$ append their journal records to `PartitionJournal[j]`, streaming directly over **Socket $j$**.
 
 ---
 
