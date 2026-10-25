@@ -150,12 +150,17 @@ struct Directory {
 - `DashTable` holds:
   - `std::atomic<Directory*> dir_;`
   - `util::fb2::Mutex split_mu_;` (acquired **only** during segment splits, i.e., roughly once per ~800 new insertions).
-  - `std::vector<std::unique_ptr<Directory>> retired_dirs_;` (retains old `Directory` arrays after `IncreaseDepth` until table destruction or quiescent reclamation).
-- **Why retaining old `Directory` arrays is practically free**:
-  - Each `Segment` holds up to $68 \times 12 = 816$ slots (~550–650 keys at typical load factor).
-  - Even at $2^{16} = 65,536$ directory entries (~35M–40M keys), a `Directory` is $512\text{ KB}$, and the sum of **all** prior directories from depth 1 to 15 is $\sum_{d=1}^{15} 2^d \times 8\text{ B} = (2^{16} - 2) \times 8\text{ B} < 512\text{ KB}$—less than $0.01\%$ of the dataset size.
+  - `std::vector<RetiredDirectory> retired_dirs_;` (retains old `Directory` arrays after `IncreaseDepth` until safe reclamation).
 - **Wait-Free Directory Lookup**:
   - Readers and writers resolve a segment with two `memory_order_acquire` loads (`dir_` then `dir->segments[idx]`) and **zero directory locks**.
+  - Crucially, callers **never** hold a `Directory*` across a fiber suspension point (`seg->LockShared()` / `seg->LockExclusive()`); `dir->Lookup(hash)` completes in two CPU instructions before attempting to lock `seg`, and if `seg->Owns(hash)` fails, the retry loop reloads `dir_.load(std::memory_order_acquire)` fresh.
+- **How `retired_dirs_` Are Released**:
+  1. **Quiescent-State / Epoch-Based Reclamation (EBR) on Split or Heartbeat**:
+     Because `dir->Lookup(hash)` is a non-yielding, 2-instruction read, no fiber can remain inside `old_dir->Lookup(hash)` once every proactor thread has advanced past its current event-loop tick / fiber switch (`proactor_epoch[t]`).
+     - When `IncreaseDepth()` replaces `dir_` under `split_mu_`, it pushes `{old_dir, retire_epoch = global_epoch.fetch_add(1)}` onto `retired_dirs_`.
+     - On subsequent `IncreaseDepth()` calls (or in the periodic heartbeat), any entry in `retired_dirs_` with `retire_epoch < min_t(proactor_epoch[t])` is immediately freed (`delete old_dir`).
+  2. **Minimal Fallback (Defer to `Clear()` / `~DashTable()`)**:
+     For the initial `ok_main.cc` POC, even if `retired_dirs_` is only cleared on `DashTable::Clear()` (`FLUSHDB` / `FLUSHALL`) and `~DashTable()`, the total memory of all retired directories from depth $0$ to $D-1$ is a geometric sum $\sum_{d=0}^{D-1} 2^d \times 8\text{ B} = (2^D - 1) \times 8\text{ B}$—which is strictly less than the size of the single active `Directory` ($< 0.18\%$ of the segment memory at depth $D$, e.g., $< 512\text{ KB}$ for 40M keys).
 
 ### 3.3 Segment Prefix Identity and Split Revalidation (`Segment::Owns`)
 
