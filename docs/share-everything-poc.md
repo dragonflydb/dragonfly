@@ -158,13 +158,16 @@ struct Directory {
 - **Wait-Free Directory Lookup**:
   - Readers and writers resolve a segment with two `memory_order_acquire` loads (`dir_` then `dir->segments[idx]`) and **zero directory locks**.
   - Crucially, callers **never** hold a `Directory*` across a fiber suspension point (`seg->LockShared()` / `seg->LockExclusive()`); `dir->Lookup(hash)` completes in two CPU instructions before attempting to lock `seg`, and if `seg->Owns(hash)` fails, the retry loop reloads `dir_.load(std::memory_order_acquire)` fresh.
-- **How `retired_dirs_` Are Released**:
-  1. **Quiescent-State / Epoch-Based Reclamation (EBR) on Split or Heartbeat**:
-     Because `dir->Lookup(hash)` is a non-yielding, 2-instruction read, no fiber can remain inside `old_dir->Lookup(hash)` once every proactor thread has advanced past its current event-loop tick / fiber switch (`proactor_epoch[t]`).
-     - When `IncreaseDepth()` replaces `dir_` under `split_mu_`, it pushes `{old_dir, retire_epoch = global_epoch.fetch_add(1)}` onto `retired_dirs_`.
-     - On subsequent `IncreaseDepth()` calls (or in the periodic heartbeat), any entry in `retired_dirs_` with `retire_epoch < min_t(proactor_epoch[t])` is immediately freed (`delete old_dir`).
-  2. **Minimal Fallback (Defer to `Clear()` / `~DashTable()`)**:
-     For the initial `ok_main.cc` POC, even if `retired_dirs_` is only cleared on `DashTable::Clear()` (`FLUSHDB` / `FLUSHALL`) and `~DashTable()`, the total memory of all retired directories from depth $0$ to $D-1$ is a geometric sum $\sum_{d=0}^{D-1} 2^d \times 8\text{ B} = (2^D - 1) \times 8\text{ B}$—which is strictly less than the size of the single active `Directory` ($< 0.18\%$ of the segment memory at depth $D$, e.g., $< 512\text{ KB}$ for 40M keys).
+- **How `retired_dirs_` Are Released (and Single-Thread Coordinator Option for Directory Resize)**:
+  1. **Option A: Single-Thread Coordinator + Cross-Thread Message Passing (`AwaitBrief`) for Directory Resize**:
+     - Directory doubling (`IncreaseDepth` when `new_depth > global_depth`) is an extremely rare metadata event—occurring at most ~16–20 times across the entire lifetime of a table growing to hundreds of millions of keys.
+     - Instead of maintaining `retired_dirs_` or contending on `split_mu_`, directory doubling (or all directory pointer updates) can be delegated via cross-thread message passing (`pp->at(kCoordinatorThread)->Await(...)`) to a single **Coordinator Thread**:
+       - The Coordinator allocates `new_dir`, populates its pointers, and publishes `dir_.store(new_dir, std::memory_order_release)` (or updates each proactor's thread-local `tl_dir_` pointer via `pp->AwaitBrief(...)` across all proactors).
+       - Because `pp->AwaitBrief(...)` runs a brief callback on every proactor thread and `dir->Lookup(hash)` never yields across fibers, the completion of `AwaitBrief` acts as an exact **RCU grace-period barrier (`synchronize_rcu()`)**: no thread can still be reading `old_dir`, so the Coordinator **immediately runs `delete old_dir`** with zero `retired_dirs_` accumulation!
+  2. **Option B: Quiescent-State / Epoch-Based Reclamation (EBR) on Split or Heartbeat**:
+     - If directory doubling is performed inline under `split_mu_`, `IncreaseDepth()` pushes `{old_dir, retire_epoch = global_epoch.fetch_add(1)}` onto `retired_dirs_`, and any entry with `retire_epoch < min_t(proactor_epoch[t])` is freed on subsequent splits or in the periodic heartbeat.
+  3. **Option C: Minimal Fallback (Defer to `Clear()` / `~DashTable()`)**:
+     - For the initial `ok_main.cc` POC, even if `retired_dirs_` is only cleared on `DashTable::Clear()` (`FLUSHDB` / `FLUSHALL`) and `~DashTable()`, the total memory of all retired directories from depth $0$ to $D-1$ is a geometric sum $\sum_{d=0}^{D-1} 2^d \times 8\text{ B} = (2^D - 1) \times 8\text{ B}$—which is strictly less than the size of the single active `Directory` ($< 0.18\%$ of the segment memory at depth $D$, e.g., $< 512\text{ KB}$ for 40M keys).
 
 ### 3.3 Segment Prefix Identity and Split Revalidation (`Segment::Owns`)
 
@@ -1066,9 +1069,121 @@ sequenceDiagram
 
 ---
 
-## 9. Integration with `src/facade/ok_main.cc`
+## 9. Uniform Migration of `DbSlice`, `DbTable`, and `EngineShard` (Avoiding Lock Proliferation)
 
-### 9.1 Execution Modes and Flags
+### 9.1 The Problem: Thread-Local State Across `DbSlice`, `DbTable`, and `EngineShard`
+
+In Dragonfly's current shared-nothing architecture, `EngineShard` (`src/server/engine_shard.h`), `DbSlice` (`src/server/db_slice.h`), and `DbTable` (`src/server/table.h`) contain ~25 fields that assume single-threaded access without locks:
+- **Multiple database tables**: `db_arr_` (`std::vector<boost::intrusive_ptr<DbTable>>` with non-atomic `thread_unsafe_counter`), `ActivateDb(db_ind)`, `FlushDb(db_ind)`.
+- **Secondary per-key tables & maps**: `DbTable::mcflag` (Memcached flags `DashTable`), `DbTable::watched_keys`, `DbSlice::client_tracking_map_` (`CLIENT TRACKING`), and `BlockingController` (`BLPOP`, `BZPOPMIN`, `XREAD BLOCK`).
+- **Value iterators & inner objects**: `FindReadOnly`, `FindMutable`, `AddOrFind`, `DbSlice::Iterator` / `ConstIterator`, `DbSlice::AutoUpdater`, and inner containers (`CompactObj`, `StringMap`, `DenseSet`, `QList`, `BPlusTree`).
+- **Operational counters, allocators & sampling**: `mi_resource_`, `AsyncDeleter`, `DbTableStats`, `SliceEvents`, `EngineShard::Stats`, `SlotStats[16384]`, `counter_[]` (`MovingCnt`), `sample_top_keys`, `sample_unique_keys`, `sample_values_hist`.
+- **Per-command scratch state**: `fetched_items_` (cache-mode LRU bump-up), `uniq_fps_`, `pending_expired_events_`, `pending_send_map_`.
+- **Rare metadata & cursors**: `DashTable::Directory` resizing, `change_cb_` (snapshot/flush-slots hooks), `expire_cursor`, `segment_defrag_cursor`.
+
+Naively wrapping each of these structures in its own mutex would turn a single `GET` or `SET` into 4–6 lock acquisitions and create complex lock-ordering hazards.
+
+### 9.2 The Uniform 4-Rule Architecture (At Most One Lock on the Hot Path)
+
+Instead of ad-hoc per-structure locks, every piece of state in `DbSlice`, `DbTable`, and `EngineShard` is governed by **four uniform rules** so that **a hot-path key operation acquires at most ONE lock (`SegmentLock`)**:
+
+```mermaid
+flowchart TB
+    subgraph Rule1["Rule 1: Single-Thread Coordinator + AwaitOnAll (Rare Metadata)"]
+        Coord["Coordinator Thread (Proactor 0)<br/>ActivateDb, FlushDb, Directory IncreaseDepth,<br/>RegisterOnChange / UnregisterOnChange"]
+        TLShadow["Per-Proactor Thread-Local Read Copy<br/>tl_db_arr_[0..15], tl_change_cb_<br/>(Zero locks & zero atomics on command read path)"]
+        Coord -->|"pp->AwaitBrief() / RCU Barrier"| TLShadow
+    end
+
+    subgraph Rule2["Rule 2: Scoped SegmentGuard Inside Iterator / AutoUpdater"]
+        SegLock["DashTable SegmentLock<br/>(ConstIterator = Shared, AutoUpdater = Exclusive)"]
+        Inner["Inner Value Structures<br/>CompactObj, StringMap, DenseSet, QList, ZSet<br/>(Remain 100% single-threaded & lock-free)"]
+        InlineMeta["Inline Key/Value Metadata<br/>Expire (SDS_TTL_TAG), Memcached mcflag<br/>(No secondary DashTable needed)"]
+        SegLock --> Inner
+        SegLock --> InlineMeta
+    end
+
+    subgraph Rule3["Rule 3: Piggyback Sparse Key Hooks on Stripe[0..63]"]
+        StripeGate["Stripe Atomic Counter Fast-Path<br/>(watched_count | tracking_count | blocked_count == 0)"]
+        StripeMaps["Stripe-Local Maps (watched_keys,<br/>client_tracking_map_, BlockingController)"]
+        StripeGate -->|"Slow path only when > 0"| StripeMaps
+    end
+
+    subgraph Rule4["Rule 4: Strictly Thread-Local ProactorSlice"]
+        TLState["Per-Proactor Operational State<br/>mi_resource_, AsyncDeleter, DbTableStats, SliceEvents,<br/>SlotStats, TopKeys/HLL Sketches, Per-Fiber Scratch"]
+    end
+```
+
+---
+
+### 9.3 Rule 1: Single-Thread Coordinator + Cross-Thread Message Passing (`AwaitBrief`) for Rare Metadata Operations
+
+We retain Helio's cross-thread message passing (`ProactorPool::at(0)->Await(...)` and `AwaitBrief(...)`), using it **only for rare control-plane / metadata operations** instead of per-key data commands:
+
+1. **Multiple Databases (`db_arr_[0..dbnum]`, `ActivateDb`, `FlushDb`)**:
+   - Each proactor thread $t$ maintains a **thread-local table pointer array** `tl_db_arr_[kMaxDb]` (raw `DbTable*` pointers, no atomic refcounting on lookup).
+   - **Hot Path (`GET`, `SET`, `SELECT`)**: Looking up the active database table is a plain thread-local array read `DbTable* db = tl_db_arr_[cntx.db_index];` — **zero locks, zero atomics, zero `intrusive_ptr` reference count contention**.
+   - **Cold Path (`ActivateDb` on first `SELECT db_ind`, `FLUSHDB`, `FLUSHALL`)**:
+     - If `tl_db_arr_[db_ind] == nullptr` (or on `FLUSHDB`), the fiber hops to the **Coordinator Thread (Proactor 0)**.
+     - The Coordinator allocates the new `DbTable` (or replacement `DbTable` for `FLUSHDB`) and broadcasts the new pointer to all proactors via `pp->AwaitBrief([db_ind, new_db](unsigned idx, ProactorBase*) { tl_db_arr_[db_ind] = new_db; })`.
+     - Because `AwaitBrief` executes after any currently running non-yielding command step on each proactor has completed (or after active transactions finish), `AwaitBrief` acts as an exact **RCU grace-period barrier (`synchronize_rcu()`)**: on `FLUSHDB`, once `AwaitBrief` returns and active snapshots complete, the old `DbTable*` is destroyed and decommitted asynchronously without any per-command reference counting.
+2. **`DashTable` Directory Resize (`IncreaseDepth`)**:
+   - As described in Section 3.2, when a segment split requires doubling the `Directory` (`new_depth > global_depth`, which happens fewer than 20 times in the server's lifetime), the split can delegate directory doubling to the Coordinator Thread + `AwaitBrief` barrier, immediately freeing `old_dir` once `AwaitBrief` returns.
+3. **Snapshot / Slot-Flush Change Callbacks (`RegisterOnChange` / `UnregisterOnChange`)**:
+   - `change_cb_` registration and removal happen only when starting or finishing a snapshot or slot migration.
+   - Broadcasting `tl_change_cb_` updates via `AwaitBrief` lets hot-path writers check `if (ABSL_PREDICT_FALSE(!tl_change_cb_.empty()))` on their own thread-local vector with **zero locks**.
+
+---
+
+### 9.4 Rule 2: Embed `SegmentLock` Inside `DbSlice::ConstIterator` and `AutoUpdater` (Zero Locks for Inner Containers & Secondary Key Metadata)
+
+1. **Automatic Scoped Locking via `ConstIterator` and `AutoUpdater`**:
+   - Dragonfly command families (`StringFamily`, `HashFamily`, `SetFamily`, `ListFamily`, `ZSetFamily`, `JsonFamily`) already access keys through two uniform `DbSlice` RAII types:
+     - `FindReadOnly(cntx, key, type)` $\rightarrow$ returns `OpResult<ConstIterator>`.
+     - `FindMutable(cntx, key, type)` / `AddOrFind(cntx, key, type)` $\rightarrow$ returns `OpResult<ItAndUpdater>` (`{Iterator, AutoUpdater}`).
+   - In shared-everything:
+     - `ConstIterator` embeds a **`SegmentSharedGuard`** (`seg->LockShared()`), releasing it in `~ConstIterator()`.
+     - `AutoUpdater` embeds a **`SegmentExclusiveGuard`** (`seg->LockExclusive()`). Inside `FindMutable` / `AddOrFind`, while holding `seg->LockExclusive()`, `DbSlice` performs `TryExpire` and fires `OnChange` (into the thread-local `tl_rdb_buf`).
+     - While the command handler mutates `it->second` (`StringMap`, `DenseSet`, `QList`, `BPlusTree`, `CompactObj`), `AutoUpdater` remains on the stack holding `seg->LockExclusive()`.
+     - Consequently, **none of the inner data structures (`CompactObj`, `StringMap`, `DenseSet`, `QList`, `ZSet`, `JsonType`) require internal locks or atomic operations**—they remain 100% single-threaded C++ containers protected by the enclosing `SegmentLock`!
+     - When `AutoUpdater::Run()` / `~AutoUpdater()` executes at the end of the command's lexical scope, it records the object memory delta into thread-local stats, checks `NotifyWatchers`, **releases `seg->LockExclusive()`**, and then flushes any buffered `tl_rdb_buf` or expiration notifications outside the lock.
+2. **Eliminating Secondary Per-Key `DashTable`s (`Expire` and `mcflag`)**:
+   - Dragonfly already eliminated the separate `expire` `DashTable` by storing the 8-byte TTL inline inside `PrimeKey` (`SDS_TTL_TAG`, see `DbSlice::AddExpire` / `RemoveExpire`).
+   - We apply the exact same principle to **`DbTable::mcflag`** (the 32-bit Memcached flags table): store the 4-byte flag inline in `PrimeValue` / `PrimeKey` when `flag != 0` (or in a small segment-local side array protected by the same `SegmentLock`).
+   - This eliminates `DbTable::mcflag` as a separate `DashTable`, removing a second hash lookup and a second lock on every Memcached command and every `DEL` / `EVICT`.
+
+---
+
+### 9.5 Rule 3: Co-Locate Sparse Per-Key Hooks (`watched_keys`, `client_tracking_map_`, `BlockingController`) Inside the 64 Intent `Stripe`s
+
+Auxiliary structures that map a key to waiting or subscribed clients (`WATCH`, `CLIENT TRACKING`, and blocking list/zset/stream commands like `BLPOP`/`BZPOPMIN`/`XREAD BLOCK`) are sparse—most keys have zero watchers, zero tracking clients, and zero blocked poppers:
+
+1. **Partition by `Stripe[0..63]`**:
+   - Instead of a global `watched_keys` map, global `client_tracking_map_`, or shard-global `BlockingController`, each of the 64 Intent Stripes (`stripe_id = (hash >> 24) & 63`) holds its own `watched_keys`, `client_tracking_map`, and `blocking_waiters` table under `stripe.mutex`.
+2. **Combined Atomic Fast-Path Gate (`stripe.aux_hooks_count`)**:
+   - Each `Stripe` maintains atomic counters (or a combined counter `aux_hooks_count = watched_count + tracking_count + blocked_count`) modified under `SegmentLock + stripe.mutex`.
+   - When `AutoUpdater` (write) or `FindReadOnly` (read with `CLIENT TRACKING`) holds `SegmentLock`, it checks `if (ABSL_PREDICT_FALSE(stripe.aux_hooks_count.load(std::memory_order_relaxed) != 0))`.
+   - When no `WATCH`, `CLIENT TRACKING`, or `BLPOP` is active on that stripe (the common case), the check costs a single L1-cached load and **zero extra locks**.
+
+---
+
+### 9.6 Rule 4: Keep Operational State Strictly Per-Proactor Thread-Local (`EngineShard` $\rightarrow$ `ProactorSlice`)
+
+State that tracks resource usage, statistics, background deletion, or temporary per-command scratch data does **not** belong in the shared `DbTable`—it remains **100% thread-local on each Proactor thread (`ProactorSlice`)**:
+
+| State Currently in `DbSlice` / `DbTable` / `EngineShard` | Shared-Everything Placement (`ProactorSlice` vs. `SharedDb`) | Why Zero Locks Are Needed on Hot Path |
+| :--- | :--- | :--- |
+| `mi_resource_` (`MiMemoryResource`), `tl_heap_`, `AsyncDeleter` | **Per-Proactor Thread-Local** | Each proactor allocates from its local `mi_heap_t`, tracks signed `int64_t net_used_`, and queues large lazy deletions to its own local `AsyncDeleter` fiber. |
+| `DbTableStats`, `SliceEvents`, `EngineShard::Stats`, `SlotStats`, `MovingCnt` | **Per-Proactor Thread-Local Array (`tl_db_stats_[db_ind]`)** | Commands increment plain non-atomic thread-local counters (`hits++`, `mutations++`, `obj_memory_usage += delta`). `INFO` / `DBSIZE` sums across the $P$ proactors via `AwaitBrief`. |
+| `sample_top_keys`, `sample_unique_keys`, `sample_values_hist` | **Per-Proactor Thread-Local Sketches** | `TopKeys`, HyperLogLog (`DenseHll`), and `Histogram` are updated lock-free on each proactor and merged across proactors when `StopSample*()` is called. |
+| `fetched_items_`, `uniq_fps_`, `pending_expired_events_`, `pending_send_map_` | **Per-Fiber / Per-Command Execution Context** | Collected locally while `SegmentLock` is held (e.g. during `TryExpire` or cache lookup) and drained immediately after `SegmentLock` is released at the end of the command. |
+| `expire_cursor`, `segment_defrag_cursor` | **Per-Proactor Logical Partition Cursor (`cursor_[t]`)** | Proactor $t \in [0, P)$ sweeps Logical Partition $t$ (`DashCursor` prefix $t$) independently without cursor contention. |
+
+---
+
+## 10. Integration with `src/facade/ok_main.cc`
+
+### 10.1 Execution Modes and Flags
 
 Add `--datastore_mode` to `ok_main.cc` to allow direct benchmarking between the existing shared-nothing queue architecture and the new shared-everything architecture:
 - `--datastore_mode=queued` (existing behavior): per-proactor `Shard` with `fb2::FiberQueue` + `absl::flat_hash_map`.
@@ -1083,7 +1198,7 @@ Supported commands in `shared_dash` mode:
 - `PING [message]`
 - `COMMAND`
 
-### 9.2 Interaction with `dfly_facade` Connection Loops (Sync vs. Squashed vs. Coroutines)
+### 10.2 Interaction with `dfly_facade` Connection Loops (Sync vs. Squashed vs. Coroutines)
 
 In `src/facade/dragonfly_connection.cc`, `Connection::ExecuteBatch()` dispatches parsed commands in a pipeline loop:
 - For the head command (`cmd == parsed_head_`), `ExecuteBatch()` passes `AsyncPreference::PREFER_ASYNC` (in V2) or `ONLY_SYNC` (in V1).
@@ -1116,7 +1231,7 @@ This gives `ok_main.cc` three clean execution strategies in `shared_dash` mode:
 - However, if a command in a pipeline blocks on a contended `IntentQueue` (`Admit` returns `waiting > 0`), suspending only the contended command via `AsyncCmd` (`co_await ResolveAwaiter{ctx}` backed by `ctx->blocker`) allows the connection fiber to continue admitting subsequent non-conflicting commands in the pipeline while `ReplyBatch()` preserves strict in-order socket replies.
 - For the initial POC, Strategy 1 + Strategy 2 require no coroutine suspension and avoid coroutine frame overhead entirely; Strategy 3 can be toggled via a flag if benchmarking skewed workloads with deep pipelines.
 
-### 9.3 Allocator Ownership and Shutdown
+### 10.3 Allocator Ownership and Shutdown
 
 - **Allocator (`mimalloc`)**:
   - `ok_main.cc` already includes `<mimalloc-new-delete.h>`.
@@ -1127,7 +1242,7 @@ This gives `ok_main.cc` three clean execution strategies in `shared_dash` mode:
 
 ---
 
-## 10. Implementation Plan and Validation Strategy
+## 11. Implementation Plan and Validation Strategy
 
 ### Phase 1: Multi-Threaded `DashTable` & Memory Accounting (`src/core/dash.h`, `src/core/mi_memory_resource.*`)
 1. Add `SegmentLock` (fiber-aware `RwLock`), `uint64_t prefix_`, `std::atomic<uint32_t> size_`, and `Owns(uint64_t hash)` to `detail::Segment` (controllable via `Policy::kConcurrent = true` so single-threaded Dragonfly `DbSlice` tables pay zero overhead).
