@@ -26,6 +26,19 @@ async def test_password(df_server: DflyInstance):
         assert resp.status == 200
 
 
+@dfly_args({"proactor_threads": "1", "requirepass": "XXX"})
+async def test_password_tracks_requirepass_updates(df_server: DflyInstance):
+    client = df_server.client(password="XXX")
+    assert await client.config_set("requirepass", "newpassword")
+
+    async with get_http_session("default", "XXX") as session:
+        resp = await session.get(f"http://localhost:{df_server.port}/")
+        assert resp.status == 401
+    async with get_http_session("default", "newpassword") as session:
+        resp = await session.get(f"http://localhost:{df_server.port}/")
+        assert resp.status == 200
+
+
 @dfly_args({"proactor_threads": "1", "requirepass": "XXX", "admin_port": 1113})
 async def test_skip_metrics(df_server: DflyInstance):
     async with get_http_session("whoops", "whoops") as session:
