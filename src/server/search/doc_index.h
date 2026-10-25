@@ -682,8 +682,11 @@ class ShardDocIndices {
                  std::shared_ptr<const DocIndex> index, bool is_journal = false,
                  Synonyms synonyms = {});
 
-  // Drop index, return the dropped index if it existed or nullptr otherwise
+  // Drop index and its aliases, returning the index or nullptr if it did not exist.
   std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);
+
+  // Extract an index without removing aliases that point to it, for replacement.
+  std::unique_ptr<ShardDocIndex> ExtractIndex(std::string_view name);
 
   // Drop all indices
   void DropAllIndices();
