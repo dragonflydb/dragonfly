@@ -3022,7 +3022,7 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
       return true;
 
     // A nopass default user means this listener is open, as it is for RESP clients.
-    if (user_registry_.AuthUser("default", ""))
+    if (user_registry_.IsUserNopass("default"))
       return true;
 
     return username == "default" && user_registry_.AuthUser(username, password);

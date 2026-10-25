@@ -51,6 +51,9 @@ class UserRegistry {
   bool IsUserActive(std::string_view username) const;
 
   // Acquires a read lock
+  bool IsUserNopass(std::string_view username) const;
+
+  // Acquires a read lock
   bool AuthUser(std::string_view username, std::string_view password) const;
 
   using RegistryViewWithLock = RegistryWithLock<std::shared_lock, const RegistryType&>;
