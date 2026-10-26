@@ -3,9 +3,18 @@
 
 #include "server/acl/acl_family.h"
 
+#include <sys/stat.h>
+#include <unistd.h>
+#ifdef __linux__
+#include <sys/xattr.h>
+#endif
+
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -14,17 +23,20 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <variant>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/flags/commandlineflag.h"
 #include "absl/numeric/bits.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
+#include "absl/strings/strip.h"
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/overloaded.h"
@@ -52,15 +64,34 @@ using namespace std;
 
 ABSL_FLAG(string, aclfile, "", "Path and name to aclfile");
 ABSL_DECLARE_FLAG(uint32_t, dbnum);
+ABSL_DECLARE_FLAG(string, requirepass);
 
 namespace dfly::acl {
 
 namespace {
 
 string PasswordsToString(const absl::flat_hash_set<string>& passwords, bool nopass, bool full_sha);
-using MaterializedContents = optional<vector<vector<string_view>>>;
+using MaterializedContents = variant<vector<vector<string_view>>, string>;
 
 MaterializedContents MaterializeFileContents(vector<string>* usernames, string_view file_contents);
+
+// Done before fchmod: the ACL may deny the group that the mode bits admit. Without a source ACL
+// the temp drops one inherited from the directory's default ACL.
+bool CopyAccessAcl(const char* from, int to_fd) {
+#ifdef __linux__
+  constexpr char kName[] = "system.posix_acl_access";
+  ssize_t size = getxattr(from, kName, nullptr, 0);
+  if (size < 0) {
+    return (errno == ENODATA || errno == ENOTSUP) &&
+           (fremovexattr(to_fd, kName) == 0 || errno == ENODATA || errno == ENOTSUP);
+  }
+  string acl(size, '\0');
+  size = getxattr(from, kName, acl.data(), acl.size());
+  return size >= 0 && fsetxattr(to_fd, kName, acl.data(), size, 0) == 0;
+#else
+  return true;
+#endif
+}
 
 string AclKeysToString(const AclKeys& keys);
 
@@ -145,7 +176,7 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto reg = registry_->GetRegistryWithWriteLock();
   const bool exists = reg.registry.contains(username);
   const bool has_all_keys = exists ? reg.registry.find(username)->second.Keys().all_keys : false;
-  auto req = ParseAclSetUser(parser.RemainingRange(), false, has_all_keys);
+  auto req = ParseAclSetUser(parser.RemainingRange(), has_all_keys);
 
   auto error_case = [cmd_cntx](ErrorReply&& error) { cmd_cntx->SendError(error); };
 
@@ -263,32 +294,49 @@ void AclFamily::Save(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  auto res = io::OpenWrite(acl_file_path);
-  if (!res) {
-    std::string error = absl::StrCat("Failed to open the aclfile: ", res.error().message());
+  // Written next to the (symlink-resolved) aclfile and renamed over it, so a reader never sees a
+  // partial file; a replaced file keeps its owner, group, mode and access ACL, a new one is 0600.
+  int fd = -1;
+  std::string tmp;
+  auto fail = [&](std::string_view what) {
+    std::error_code ec(errno, std::system_category());
+    std::string error = absl::StrCat("Failed to ", what, ": ", ec.message());
+    if (fd != -1) {
+      close(fd);
+      unlink(tmp.c_str());
+    }
     LOG(ERROR) << error;
     builder->SendError(error);
-    return;
+  };
+  if (char* real = realpath(acl_file_path.c_str(), nullptr)) {
+    acl_file_path = real;
+    free(real);
+  } else if (errno != ENOENT) {
+    return fail("open the aclfile");
+  }
+  tmp = absl::StrCat(acl_file_path, ".tmpXXXXXX");
+  if ((fd = mkstemp(tmp.data())) == -1) {
+    return fail("open the aclfile");
+  }
+  struct stat st;
+  if (stat(acl_file_path.c_str(), &st) == 0 &&
+      (fchown(fd, st.st_uid, st.st_gid) == -1 || !CopyAccessAcl(acl_file_path.c_str(), fd) ||
+       fchmod(fd, st.st_mode & 07777) == -1)) {
+    return fail("keep the aclfile ownership");
   }
 
-  std::unique_ptr<io::WriteFile> file(res.value());
   std::string output = RegistryToString();
-  auto ec = file->Write(output);
-
-  if (ec) {
-    std::string error = absl::StrCat("Failed to write to the aclfile: ", ec.message());
-    LOG(ERROR) << error;
-    builder->SendError(error);
-    return;
+  ssize_t n = 1;
+  for (size_t off = 0; n > 0 && off < output.size(); off += n) {
+    n = write(fd, output.data() + off, output.size() - off);
   }
-
-  ec = file->Close();
-  if (ec) {
-    std::string error = absl::StrCat("Failed to close the aclfile ", ec.message());
-    LOG(WARNING) << error;
-    builder->SendError(error);
-    return;
+  if (n <= 0 || fsync(fd) == -1) {
+    return fail("write to the aclfile");
   }
+  if (rename(tmp.c_str(), acl_file_path.c_str()) == -1) {
+    return fail("rename the aclfile");
+  }
+  close(fd);
 
   builder->SendOk();
 }
@@ -306,27 +354,26 @@ GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
 
   auto file_contents = std::move(is_file_read.value());
 
-  if (file_contents.empty()) {
-    return {"Empty file"};
-  }
-
   std::vector<std::string> usernames;
   auto materialized = MaterializeFileContents(&usernames, file_contents);
 
-  if (!materialized) {
-    std::string error = "Error materializing acl file";
+  if (auto* bad_line = std::get_if<std::string>(&materialized)) {
+    std::string error = std::move(*bad_line);
     LOG(WARNING) << error;
     return {std::move(error)};
   }
 
   std::vector<User::UpdateRequest> requests;
 
-  for (auto& cmds : *materialized) {
-    auto req = ParseAclSetUser(facade::ParsedArgs{cmds}, true);
+  auto& lines = std::get<0>(materialized);
+  for (size_t i = 0; i < lines.size(); ++i) {
+    if (lines[i].empty())
+      continue;
+    auto req = ParseAclSetUser(facade::ParsedArgs{lines[i]});
     if (std::holds_alternative<ErrorReply>(req)) {
-      auto error = std::move(std::get<ErrorReply>(req));
-      LOG(WARNING) << "Error while parsing aclfile: " << error.ToSv();
-      return {std::string(error.ToSv())};
+      auto error = absl::StrCat("line ", i + 1, ": ", std::get<ErrorReply>(req).ToSv());
+      LOG(WARNING) << "Error while parsing aclfile: " << error;
+      return {std::move(error)};
     }
     requests.push_back(std::move(std::get<User::UpdateRequest>(req)));
   }
@@ -353,18 +400,22 @@ GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
   }
 
   if (!registry.contains("default")) {
+    // --requirepass applies when the file does not define default.
+    auto req = registry_->DefaultUserUpdateRequest();
+    if (auto pass = absl::GetFlag(FLAGS_requirepass); !pass.empty()) {
+      req.passwords.front() = {std::move(pass)};
+    }
     auto& user = registry["default"];
-    user.Update(registry_->DefaultUserUpdateRequest(), CategoryToIdx(), reverse_cat_table_,
-                CategoryToCommandsIndex());
+    user.Update(std::move(req), CategoryToIdx(), reverse_cat_table_, CategoryToCommandsIndex());
     registry_->TrackUser({}, user.GetMemoryUsage(), /*is_new=*/true);
   }
 
   return {};
 }
 
-bool AclFamily::Load() {
+GenericError AclFamily::Load() {
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  return !LoadToRegistryFromFile(acl_file, nullptr);
+  return LoadToRegistryFromFile(acl_file, nullptr);
 }
 
 void AclFamily::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -662,7 +713,12 @@ void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
     return true;
   });
   auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  if (!acl_file.empty() && Load()) {
+  if (!acl_file.empty()) {
+    // A file that does not load must not start an open server.
+    if (auto error = Load(); error) {
+      LOG(ERROR) << "Could not load the acl file " << acl_file << ": " << error.Format();
+      exit(1);
+    }
     return;
   }
   registry_->Init(&CategoryToIdx(), &reverse_cat_table_, &CategoryToCommandsIndex());
@@ -732,7 +788,7 @@ MergeResult MergeTables(const User::CategoryChanges& categories,
   return result;
 }
 
-using MaterializedContents = std::optional<std::vector<std::vector<std::string_view>>>;
+using MaterializedContents = std::variant<std::vector<std::vector<std::string_view>>, std::string>;
 
 MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames,
                                              std::string_view file_contents) {
@@ -743,11 +799,16 @@ MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames
   materialized.reserve(commands.size());
   usernames->reserve(commands.size());
   for (auto& command : commands) {
-    if (command.empty())
+    // Only a CRLF's '\r' is dropped: ACL SAVE writes values verbatim, so other whitespace is data
+    // and ' ' alone separates rules. A skipped line keeps an empty entry: the index is the line.
+    absl::ConsumeSuffix(&command, "\r");
+    if (absl::StripAsciiWhitespace(command).empty()) {
+      materialized.emplace_back();
       continue;
+    }
     std::vector<std::string_view> cmds = absl::StrSplit(command, ' ', absl::SkipEmpty());
     if (!absl::EqualsIgnoreCase(cmds[0], "USER") || cmds.size() < 3) {
-      return {};
+      return absl::StrCat("line ", materialized.size() + 1, ": expected USER <name> <rule>...");
     }
 
     usernames->push_back(std::string(cmds[1]));
@@ -845,7 +906,7 @@ std::string PrettyPrintSha(std::string_view pass, bool all) {
   return absl::BytesToHexString(pass.substr(0, 15)).substr(0, 15);
 };
 
-std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, bool hashed) {
+std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command) {
   using UpPass = User::UpdatePass;
   if (command == "nopass") {
     return UpPass{"", false, true};
@@ -855,11 +916,11 @@ std::optional<User::UpdatePass> MaybeParsePassword(std::string_view command, boo
     return UpPass{"", false, false, true};
   }
 
-  if (command[0] == '>' || (hashed && command[0] == '#')) {
-    return UpPass{std::string(command.substr(1))};
+  if (absl::StartsWith(command, ">") || absl::StartsWith(command, "#")) {
+    return UpPass{.password = std::string(command.substr(1)), .is_hashed = command[0] == '#'};
   }
 
-  if (command[0] == '<') {
+  if (absl::StartsWith(command, "<")) {
     return UpPass{std::string(command.substr(1)), true};
   }
 
@@ -1097,16 +1158,19 @@ std::pair<AclFamily::OptCommand, bool> AclFamily::MaybeParseAclCommand(
 using facade::ErrorReply;
 
 std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
-    facade::ParsedArgs args, bool hashed, bool has_all_keys, bool has_all_channels) const {
+    facade::ParsedArgs args, bool has_all_keys, bool has_all_channels) const {
   User::UpdateRequest req;
 
   for (std::string_view arg : args) {
-    if (auto pass = MaybeParsePassword(facade::ToSV(arg), hashed); pass) {
-      req.passwords.push_back(std::move(*pass));
-
-      if (hashed && absl::StartsWith(facade::ToSV(arg), "#")) {
-        req.passwords.back().is_hashed = true;
+    if (auto pass = MaybeParsePassword(facade::ToSV(arg)); pass) {
+      // Not a full SHA-256: it can never match and stays out of the error, it may be a plaintext.
+      if (pass->is_hashed &&
+          (pass->password.size() != 64 || !rng::all_of(pass->password, absl::ascii_isxdigit))) {
+        return ErrorReply(
+            "Error in ACL SETUSER modifier: The password hash must be exactly 64 hexadecimal "
+            "characters");
       }
+      req.passwords.push_back(std::move(*pass));
       continue;
     }
 

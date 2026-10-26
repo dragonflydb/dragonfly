@@ -8,8 +8,16 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_replace.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#ifdef __linux__
+#include <sys/xattr.h>
+#endif
 
+#include <atomic>
 #include <filesystem>
+#include <fstream>
+#include <system_error>
 
 #include "base/flags.h"
 #include "base/gtest.h"
@@ -30,6 +38,27 @@ namespace dfly {
 
 class AclFamilyTest : public BaseFamilyTest {
  protected:
+  void SetUp() override {
+    BaseFamilyTest::SetUp();
+    std::filesystem::create_directory(dir_);
+  }
+
+  void TearDown() override {
+    // A stale aclfile would make the next test's Init load (and now exit on) a deleted file.
+    absl::SetFlag(&FLAGS_aclfile, "");
+    absl::SetFlag(&FLAGS_requirepass, "");
+    BaseFamilyTest::TearDown();
+    std::filesystem::remove_all(dir_);
+  }
+
+  // The aclfile of the test's server; TearDown removes it with its directory.
+  void WriteAclFile(std::string_view contents) {
+    std::ofstream(path_) << contents;  // may be empty, which WriteStringToFileOrDie rejects
+    absl::SetFlag(&FLAGS_aclfile, path_);
+  }
+
+  const std::filesystem::path dir_ = std::filesystem::temp_directory_path() / "dfly_acl_family";
+  const std::string path_ = dir_ / "users.acl";
 };
 
 TEST_F(AclFamilyTest, AclSetUser) {
@@ -1125,6 +1154,166 @@ TEST_F(AclFamilyTest, AclErrorHidesToken) {
   EXPECT_THAT(resp.GetString(), Not(HasSubstr("SECRET")));
 
   std::filesystem::remove(path);
+}
+
+TEST_F(AclFamilyTest, AclFileWhitespaceIsData) {
+  // An empty file, space-only, tab-only and CRLF-only lines carry nothing; only '\r' is dropped.
+  TestInitAclFam();
+  WriteAclFile("");
+  EXPECT_EQ(Run("ACL LOAD"), "OK");
+  WriteAclFile("user u on nopass +@all ~f\t\r\n \n\t\n\r\nuser p on +@all >MKPASS1\t\n");
+  EXPECT_EQ(Run("ACL LOAD"), "OK");
+  EXPECT_THAT(Run("ACL LIST").GetVec(), Contains("user u on nopass ~f\t resetchannels +@all $all"));
+
+  // ACL SAVE writes values verbatim: a tab inside one argument must not become a rule separator.
+  EXPECT_EQ(Run({"ACL", "SETUSER", "t", "on", ">MKPASS1", "+@all", "~a\tnopass", "~b\t~*"}), "OK");
+  const std::string rules = "user t on #5c2098a292be913 ~a\tnopass ~b\t~* resetchannels +@all $all";
+  EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules));
+  EXPECT_EQ(Run("ACL SAVE"), "OK");
+  EXPECT_EQ(Run("ACL LOAD"), "OK");
+  EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules));
+  EXPECT_EQ(Run({"AUTH", "p", "MKPASS1\t"}), "OK");
+}
+
+TEST_F(AclFamilyTest, AclLoadErrorNamesLine) {
+  // Odd length, wrong length and non-hex hashes can never match a password.
+  TestInitAclFam();
+  const std::string bad_hash = "line 1: Error in ACL SETUSER modifier: The password hash";
+  const std::pair<std::string, std::string> cases[] = {
+      {"user ok on nopass +@all\n\nuser bad on nopass +@nope\n", "line 3: Unrecognized parameter"},
+      {"user ok on nopass +@all\nnot a user line\n", "line 2: expected USER <name> <rule>"},
+      {"user u on #abc +@all\n", bad_hash},
+      {"user u on #abcd +@all\n", bad_hash},
+      {"user u on #" + std::string(64, 'x') + " +@all\n", bad_hash},
+  };
+  for (const auto& [contents, error] : cases) {
+    WriteAclFile(contents);
+    EXPECT_THAT(Run("ACL LOAD"), ErrArg(error)) << contents;
+    EXPECT_THAT(Run("ACL LIST").GetVec(), ElementsAre("user default on nopass ~* &* +@all $all"));
+  }
+}
+
+TEST_F(AclFamilyTest, AclSetUserAcceptsPasswordHash) {
+  // sha256("MKPASS1")
+  const std::string hash = "5c2098a292be913a7611332306ea2c98126bf38813808ffa055b07486d636999";
+  TestInitAclFam();
+  EXPECT_EQ(Run({"ACL", "SETUSER", "u", "on", "#" + hash, "+@all"}), "OK");
+  EXPECT_EQ(Run({"AUTH", "u", "MKPASS1"}), "OK");
+  EXPECT_THAT(Run({"ACL", "SETUSER", "u", "#abc"}),
+              ErrArg("password hash must be exactly 64 hexadecimal characters"));
+}
+
+TEST_F(AclFamilyTest, InitKeepsRequirepassWithoutDefaultLine) {
+  WriteAclFile("user worker on nopass +@all\n");
+  absl::SetFlag(&FLAGS_requirepass, "MKPASS1");
+  TestInitAclFam();
+  EXPECT_THAT(Run("ACL LIST").GetVec(),
+              UnorderedElementsAre("user default on #5c2098a292be913 ~* &* +@all $all",
+                                   "user worker on nopass resetchannels +@all $all"));
+}
+
+TEST_F(AclFamilyTest, AclSaveIsAtomic) {
+  TestInitAclFam();
+  absl::SetFlag(&FLAGS_aclfile, path_);
+
+  // Enough users for the serialization to take a while.
+  for (int i = 0; i < 4000; ++i) {
+    ASSERT_EQ(Run({"ACL", "SETUSER", absl::StrCat("u", i), "on", "nopass", "+@all"}), "OK");
+  }
+  ASSERT_EQ(Run("ACL SAVE"), "OK");
+  const std::string saved = io::ReadFileToString(path_).value();
+  ASSERT_FALSE(saved.empty());
+  std::atomic_bool done{false};
+
+  // post, not dispatch: ACL SAVE never yields, so dispatch would finish all saves before returning.
+  auto saver = pp_->at(1)->LaunchFiber(Launch::post, [&] {
+    for (int i = 0; i < 20; ++i) {
+      EXPECT_EQ(Run("ACL SAVE"), "OK");
+    }
+    done = true;
+  });
+
+  // A reader (ACL LOAD, a backup tool) must only ever see a complete file, never a truncated one.
+  std::string seen = saved;
+  while (!done && seen == saved) {
+    seen = io::ReadFileToString(path_).value_or("<unreadable>");
+  }
+  saver.Join();
+  EXPECT_TRUE(seen == saved) << "a reader saw " << seen.size() << " bytes of " << saved.size();
+}
+
+TEST_F(AclFamilyTest, AclSaveKeepsFileMetadata) {
+  TestInitAclFam();
+  absl::SetFlag(&FLAGS_aclfile, path_);
+
+  // A new file holds password hashes: private, whatever the umask.
+  EXPECT_EQ(Run("ACL SAVE"), "OK");
+  struct stat st;
+  ASSERT_EQ(stat(path_.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, 0600u);
+
+  // Saving through symlinks updates the final target and keeps the links, as writing in place did.
+  std::filesystem::create_symlink("users.acl", dir_ / "link");
+  std::filesystem::create_symlink("link", dir_ / "link2");
+  absl::SetFlag(&FLAGS_aclfile, dir_ / "link2");
+  EXPECT_EQ(Run("ACL SETUSER v on nopass +@all"), "OK");
+  EXPECT_EQ(Run("ACL SAVE"), "OK");
+  EXPECT_TRUE(std::filesystem::is_symlink(dir_ / "link"));
+  EXPECT_TRUE(std::filesystem::is_symlink(dir_ / "link2"));
+  EXPECT_THAT(io::ReadFileToString(path_).value(), HasSubstr("USER v "));
+
+  // A link loop is an error, not a file to replace; the libc words it (glibc and musl differ).
+  std::filesystem::create_symlink(dir_ / "self", dir_ / "self");
+  absl::SetFlag(&FLAGS_aclfile, dir_ / "self");
+  EXPECT_THAT(Run("ACL SAVE"),
+              ErrArg(std::make_error_code(std::errc::too_many_symbolic_link_levels).message()));
+
+  // The replaced file keeps its group: root may give it any, another process one of its own.
+  gid_t groups[64] = {getegid() + 1};
+  const int n = geteuid() == 0 ? 1 : std::max(getgroups(64, groups), 0);
+  const gid_t* other = std::find_if(groups, groups + n, [](gid_t g) { return g != getegid(); });
+  if (other == groups + n) {
+    GTEST_SKIP() << "the test process has no second group";
+  }
+  absl::SetFlag(&FLAGS_aclfile, path_);
+  ASSERT_EQ(chown(path_.c_str(), -1, *other), 0);
+  ASSERT_EQ(chmod(path_.c_str(), 0640), 0);
+  EXPECT_EQ(Run("ACL SAVE"), "OK");
+  ASSERT_EQ(stat(path_.c_str(), &st), 0);
+  EXPECT_EQ(st.st_gid, *other);
+  EXPECT_EQ(st.st_mode & 0777, 0640u);
+
+#ifdef __linux__
+  // user::rw- user:root:r-- group::--- mask::r-- other::--- as the kernel stores it, a version and
+  // {tag, perm, id} per entry, little-endian: the mode still shows 0640 but the group may not read.
+  const std::string acl(
+      "\2\0\0\0\1\0\6\0\xff\xff\xff\xff\2\0\4\0\0\0\0\0\4\0\0\0\xff\xff\xff\xff"
+      "\x10\0\4\0\xff\xff\xff\xff\x20\0\0\0\xff\xff\xff\xff",
+      44);
+  if (setxattr(path_.c_str(), "system.posix_acl_access", acl.data(), acl.size(), 0) == -1) {
+    GTEST_SKIP() << "no POSIX ACL support here";
+  }
+  EXPECT_EQ(Run("ACL SAVE"), "OK");
+  std::string kept(acl.size(), '\0');
+  EXPECT_EQ(getxattr(path_.c_str(), "system.posix_acl_access", kept.data(), kept.size()),
+            ssize_t(acl.size()));
+  EXPECT_EQ(kept, acl);
+
+  // A default ACL on the directory must not leak onto a replaced file that had none.
+  ASSERT_EQ(removexattr(path_.c_str(), "system.posix_acl_access"), 0);
+  ASSERT_EQ(setxattr(dir_.c_str(), "system.posix_acl_default", acl.data(), acl.size(), 0), 0);
+  EXPECT_EQ(Run("ACL SAVE"), "OK");
+  EXPECT_EQ(getxattr(path_.c_str(), "system.posix_acl_access", nullptr, 0), -1);
+  EXPECT_EQ(errno, ENODATA);
+#endif
+}
+
+TEST_F(AclFamilyTest, InitExitsOnBrokenAclFile) {
+  // The child re-runs the fixture, so it exits with the server threads alive, like a real start.
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  WriteAclFile("user u on nopass +@nope\n");
+  EXPECT_EXIT(TestInitAclFam(), ExitedWithCode(1),
+              "Could not load the acl file .* line 1: Unrecognized parameter");
 }
 
 }  // namespace dfly
