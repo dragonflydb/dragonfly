@@ -49,6 +49,8 @@ void AofStreamer::ThrottleIfNeeded() {
   // The open block leaves PendingBytes() only once sealed: when it fills up, or by the heartbeat.
   // With a limit below kAofBlockBytes, the heartbeat can wait here on the unsealed block holding
   // its own expiry records, and nothing seals it.
+  // TODO: refuse to start with --aof_max_buffered_bytes below kAofBlockBytes (8KB), or seal the
+  // open block before waiting.
   writer_.WaitPending(max_buffered_bytes_);
 }
 
