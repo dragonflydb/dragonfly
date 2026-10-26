@@ -1439,6 +1439,19 @@ ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
+ShardDocIndex* ShardDocIndices::ResolveIndex(string_view name) {
+  if (auto* index = GetIndex(name); index != nullptr)
+    return index;
+
+  const auto it = aliases_.find(name);
+  return it != aliases_.end() ? GetIndex(it->second) : nullptr;
+}
+
+string ShardDocIndices::ResolveIndexName(string_view name) const {
+  auto it = aliases_.find(name);
+  return it != aliases_.end() ? it->second : string{name};
+}
+
 OpStatus ShardDocIndices::AddAlias(string_view alias, string_view target) {
   using enum OpStatus;
   if (GetIndex(target) == nullptr)
@@ -1500,6 +1513,15 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
 }
 
 unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
+  auto index = ExtractIndex(name);
+  if (!index)
+    return nullptr;
+
+  absl::erase_if(aliases_, [name](const auto& entry) { return entry.second == name; });
+  return index;
+}
+
+unique_ptr<ShardDocIndex> ShardDocIndices::ExtractIndex(string_view name) {
   auto it = indices_.find(name);
   if (it == indices_.end())
     return nullptr;
@@ -1530,8 +1552,6 @@ std::vector<std::string> ShardDocIndices::DropUnbuiltIndices() {
     if (!index->indices_)
       names.push_back(name);
   }
-  absl::erase_if(aliases_,
-                 [&](const auto& entry) { return rng::find(names, entry.second) != names.end(); });
   for (const auto& name : names) {
     auto index = DropIndex(name);
     DCHECK(index);
