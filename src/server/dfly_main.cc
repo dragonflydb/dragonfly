@@ -370,7 +370,10 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   // GetPassword() checks both --requirepass flag and DFLY_PASSWORD env var.
   bool running_under_systemd = getenv("INVOCATION_ID") != nullptr;
   bool protected_mode = running_under_systemd && bind.empty() && GetPassword().empty();
-  const char* default_bind = DefaultBindAddress();
+
+  // Protected mode does not cover the admin port, which keeps its previous IPv4 wildcard there
+  // instead of the dual-stack one, so that protected mode does not expose it to IPv6 clients.
+  const char* default_bind = protected_mode ? nullptr : DefaultBindAddress();
   const char* bind_addr = default_bind;
   if (protected_mode) {
     bind_addr = "127.0.0.1";

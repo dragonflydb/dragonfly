@@ -4800,3 +4800,22 @@ async def test_default_bind_accepts_ipv6(df_factory: DflyInstanceFactory, monkey
         assert info["addr"].startswith("::1:")
         assert info["laddr"] == f"::1:{port}"
         await client.aclose()
+
+
+@pytest.mark.skipif(not is_dual_stack_host(), reason="requires a dual-stack IPv6 host")
+async def test_protected_mode_keeps_ipv4_binds(df_factory: DflyInstanceFactory, monkeypatch):
+    """Under systemd without a password, protected mode binds the main port to 127.0.0.1 and
+    the admin port keeps the IPv4 wildcard, so neither is reachable over IPv6."""
+    monkeypatch.setenv("INVOCATION_ID", "protected-mode-test")
+    server = df_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1)
+    server.start()
+
+    for port in (server.port, server.admin_port):
+        client = aioredis.Redis(host="127.0.0.1", port=port)
+        assert await client.ping()
+        await client.aclose()
+
+        client = aioredis.Redis(host="::1", port=port, retry=Retry(NoBackoff(), 0))
+        with pytest.raises(ConnectionError):
+            await client.ping()
+        await client.aclose()
