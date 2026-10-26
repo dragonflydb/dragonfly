@@ -2,6 +2,7 @@
 """Allowlisted read-only wrapper for dfadmin."""
 
 import os
+import re
 import sys
 
 
@@ -106,9 +107,19 @@ def is_allowed_audit_log(arguments: list[str]) -> bool:
             if index + 1 == len(arguments):
                 return False
             try:
-                if not 1 <= int(arguments[index + 1]) <= 100:
+                if not 1 <= int(arguments[index + 1]) <= 500:
                     return False
             except ValueError:
+                return False
+            index += 2
+            continue
+        if argument == "--event-types":
+            if index + 1 == len(arguments):
+                return False
+            event_types = arguments[index + 1].split(",")
+            if not all(
+                re.fullmatch(r"[A-Za-z][A-Za-z0-9:_-]*", event_type) for event_type in event_types
+            ):
                 return False
             index += 2
             continue
@@ -166,7 +177,11 @@ def is_allowed(arguments: list[str]) -> bool:
         return is_show_options(
             arguments[3:], {"--shards", "--nodes", "--migrations", "--history", "--output"}
         )
-    if len(arguments) == 3 and arguments[:2] in ({"cluster", "status"}, {"cluster", "slots"}):
+    if (
+        len(arguments) == 3
+        and arguments[:2] in (["cluster", "status"], ["cluster", "slots"])
+        and arguments[2].startswith("dst_")
+    ):
         return True
     if len(arguments) >= 3 and arguments[:2] == ["shard", "show"]:
         return is_show_options(arguments[3:], {"--nodes", "--migrations", "--output"})
@@ -188,7 +203,7 @@ def print_help() -> None:
     )
     print("flag-policy list/show, ")
     print(
-        "and bounded audit-log list queries with --from, --to, --resource-id, and --search-metadata"
+        "and bounded audit-log list queries with --from, --to, --resource-id, --search-metadata, and --event-types"
     )
     print("Forwarded node resp commands: INFO, CONFIG GET, MEMORY STATS, LATENCY LATEST,")
     print("DBSIZE, ROLE, PING, and SLOWLOG GET 0..128")
