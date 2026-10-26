@@ -63,13 +63,15 @@ error_code ReplayChain(string_view dir, ShardId sid, Service* service,
     return make_error_code(errc::state_not_recoverable);
   }
 
-  // TODO: remove once Repair() truncates the damaged tail and the resumed segment can abandon a
-  // cut record. Resuming as is would make the next restart stop at the same point and drop
-  // everything written after this one.
-  if (chain.TornTail()) {
-    LOG(ERROR) << "AOF shard " << sid << ": the log ends at a damaged tail ("
-               << chain.DiscardedBytes() << " bytes after lsn " << chain.LastLsn()
-               << "), repair is not implemented yet";
+  // TODO: resume after a record cut at the end. Only a crash leaves one: a record split across
+  // blocks whose first part was written and the rest was not; rotations, shutdowns and heartbeats
+  // never split a record across segments. Repair() keeps that block, since rewriting it could tear
+  // the complete records it holds. Instead, the resumed segment's header must mark the record
+  // abandoned, and replay must drop its bytes at that boundary. Otherwise the next replay sees a
+  // new record where it expects the continuation, and stops there.
+  if (chain.EndsMidRecord()) {
+    LOG(ERROR) << "AOF shard " << sid << ": the log ends inside a record after lsn "
+               << chain.LastLsn() << ", resuming after it is not supported yet";
     return make_error_code(errc::state_not_recoverable);
   }
 
