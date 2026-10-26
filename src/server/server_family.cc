@@ -3889,6 +3889,9 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   std::vector<LSN> target_lsns(shard_count, 0);
   std::atomic<bool> role_changed{false};
 
+  auto* tx = cmd_cntx->tx();
+  bool can_block = !tx || !tx->IsMulti();
+
   // Global shard LSNs cover at least this connection's writes without per-write bookkeeping.
   // Role changes update threads independently, so check the role on each shard before access.
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
@@ -3909,7 +3912,8 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
       return replica->GetFlow(sid).last_acked_lsn >= last_sent_lsn;
     });
 
-    if (!acked) {
+    // MULTI never blocks, so there is no point in expediting ACKs.
+    if (!acked && can_block) {
       // PING accelerates ACKs. Try to expedite the acknowledgment from replicas.
       // If the queue is full, then we rely on periodic replica ACKs to eventually catch up.
       shard->GetSecondaryQueue()->TryAdd([] {
@@ -3918,9 +3922,6 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
       });
     }
   });
-
-  auto* tx = cmd_cntx->tx();
-  bool can_block = !tx || !tx->IsMulti();
 
   while (true) {
     auto [count, running] = CountAckedReplicas(replicas, target_lsns, &role_changed);
