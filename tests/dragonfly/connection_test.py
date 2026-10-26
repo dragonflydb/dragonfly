@@ -4753,3 +4753,50 @@ async def test_pipeline_latency_by_type(df_server: DflyInstance, async_client: a
     after_writes = await _pipeline_latency_counts(df_server)
     assert after_writes["read"] == after_reads["read"]
     assert after_writes["other"] - after_reads["other"] >= 60
+
+
+def is_dual_stack_host() -> bool:
+    """True if IPv6 sockets accept IPv4 by default and the IPv6 loopback is usable."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            if s.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) != 0:
+                return False
+            s.bind(("::1", 0))
+            return True
+    except OSError:
+        return False
+
+
+async def test_default_bind_reports_ipv4_unmapped(df_factory: DflyInstanceFactory, monkeypatch):
+    """Without --bind, IPv4 clients are reported as plain IPv4, not as ::ffff:a.b.c.d."""
+    # Under systemd, protected mode would bind 127.0.0.1 and skip the default bind address.
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    server = df_factory.create(port=BASE_PORT)
+    server.start()
+
+    client = aioredis.Redis(host="127.0.0.1", port=server.port, decode_responses=True)
+    info = await client.client_info()
+    assert info["addr"].startswith("127.0.0.1:")
+    assert info["laddr"] == f"127.0.0.1:{server.port}"
+
+    victim = aioredis.Redis(host="127.0.0.1", port=server.port, decode_responses=True)
+    victim_addr = (await victim.client_info())["addr"]
+    assert await client.execute_command("CLIENT", "KILL", "ADDR", victim_addr) == 1
+
+    await victim.aclose()
+    await client.aclose()
+
+
+@pytest.mark.skipif(not is_dual_stack_host(), reason="requires a dual-stack IPv6 host")
+async def test_default_bind_accepts_ipv6(df_factory: DflyInstanceFactory, monkeypatch):
+    """Without --bind, a dual-stack host serves IPv6 clients on the main and admin ports."""
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    server = df_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1)
+    server.start()
+
+    for port in (server.port, server.admin_port):
+        client = aioredis.Redis(host="::1", port=port, decode_responses=True)
+        info = await client.client_info()
+        assert info["addr"].startswith("::1:")
+        assert info["laddr"] == f"::1:{port}"
+        await client.aclose()

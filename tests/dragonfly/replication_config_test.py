@@ -218,6 +218,23 @@ async def test_ipv6_replication(df_factory: DflyInstanceFactory):
     assert await c_replica.execute_command("REPLICAOF", master["bind"], master["port"]) == "OK"
 
 
+async def test_default_bind_replica_ip(df_factory: DflyInstanceFactory, monkeypatch):
+    """Without --bind, the master reports an IPv4 replica's IP as plain IPv4."""
+    # Under systemd, protected mode would bind 127.0.0.1 and skip the default bind address.
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+    assert await c_replica.execute_command("REPLICAOF", "127.0.0.1", master.port) == "OK"
+    await wait_for_replicas_state(c_replica)
+
+    role = await c_master.role()
+    assert role[1][0][0] == "127.0.0.1"
+
+
 @pytest.mark.parametrize(
     "start_replica_first, disconnect_at_end",
     [
