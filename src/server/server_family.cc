@@ -306,44 +306,53 @@ string UnknownCmd(string cmd, facade::ParsedArgs args) {
                       absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
 }
 
-std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
+// Returns an error instead of terminating the process: this is called at runtime by
+// SAVE/LOAD commands, where a transient failure (e.g. missing credentials) must not kill
+// an already serving instance.
+io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> CreateCloudSnapshotStorage(
+    std::string_view uri) {
+  auto make_err = [](std::error_code ec, std::string_view what) {
+    return nonstd::make_unexpected(GenericError{ec, absl::StrCat("Failed to initialize ", what)});
+  };
+
   if (detail::IsS3Path(uri)) {
     auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(
         absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
         absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
     auto ec = shard_set->pool()->GetNextProactor()->Await(
         [&] { return aws->Init(detail::kBucketConnectMs); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize AWS S3 snapshot storage: " << ec.message();
-      exit(1);
-    }
+    if (ec)
+      return make_err(ec, "AWS S3 snapshot storage");
     return aws;
   } else if (detail::IsGCSPath(uri)) {
 #ifdef WITH_GCP
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
-      exit(1);
-    }
+    if (ec)
+      return make_err(ec, "GCS snapshot storage");
     return gcs;
 #else
-    LOG(ERROR) << "Compiled without GCP support";
-    exit(1);
+    return nonstd::make_unexpected(
+        GenericError{make_error_code(errc::not_supported), "Compiled without GCP support"});
 #endif
   } else if (detail::IsAzurePath(uri)) {
     auto azure = std::make_shared<detail::AzureSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await(
         [&] { return azure->Init(uri, detail::kBucketConnectMs); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize Azure snapshot storage: " << ec.message();
-      exit(1);
-    }
+    if (ec)
+      return make_err(ec, "Azure snapshot storage");
     return azure;
-  } else {
-    LOG(ERROR) << "Unknown cloud storage " << uri;
-    exit(1);
   }
+  return nonstd::make_unexpected(GenericError{make_error_code(errc::invalid_argument),
+                                              absl::StrCat("Unknown cloud storage ", uri)});
+}
+
+// Cloud paths need their own storage, other paths use the server's default storage.
+io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> SelectSnapshotStorage(
+    std::string_view path, std::shared_ptr<detail::SnapshotStorage> default_storage) {
+  if (detail::IsCloudPath(path))
+    return CreateCloudSnapshotStorage(path);
+  return default_storage;
 }
 
 template <typename T> void UpdateMax(T* maxv, T current) {
@@ -1276,7 +1285,12 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   string flag_dir = GetFlag(FLAGS_dir);
 
   if (detail::IsCloudPath(flag_dir)) {
-    snapshot_storage_ = CreateCloudSnapshotStorage(flag_dir);
+    auto res = CreateCloudSnapshotStorage(flag_dir);
+    if (!res) {
+      LOG(ERROR) << res.error().Format();
+      exit(1);
+    }
+    snapshot_storage_ = std::move(*res);
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -1444,8 +1458,10 @@ GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
     return {std::make_error_code(std::errc::operation_not_permitted), "replica cannot load data"};
   if (path.empty())
     return {std::make_error_code(std::errc::invalid_argument), "no snapshot found to load"};
-  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
-  if (auto res = storage->ExpandSnapshot(path); !res)
+  auto storage = SelectSnapshotStorage(path, snapshot_storage_);
+  if (!storage)
+    return storage.error();
+  if (auto res = (*storage)->ExpandSnapshot(path); !res)
     return res.error();
   return {};
 }
@@ -1471,7 +1487,12 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
   // Select the right storage based on the path: cloud paths need their own storage,
   // mirroring what DoSaveCheckAndStart does for saves.
-  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
+  auto storage_res = SelectSnapshotStorage(path, snapshot_storage_);
+  if (!storage_res) {
+    LOG(ERROR) << "Failed to load snapshot: " << storage_res.error().Format();
+    return immediate(storage_res.error());
+  }
+  std::shared_ptr<detail::SnapshotStorage> storage = std::move(*storage_res);
 
   auto expand_result = storage->ExpandSnapshot(path);
   if (!expand_result) {
@@ -1835,9 +1856,15 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
                           "SAVING - can not save database"};
     }
 
-    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                                ? snapshot_storage_
-                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+    std::shared_ptr<detail::SnapshotStorage> snapshot_storage = snapshot_storage_;
+    if (!save_cmd_opts.cloud_uri.empty()) {
+      auto res = CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+      if (!res) {
+        LOG(ERROR) << res.error().Format();
+        return res.error();
+      }
+      snapshot_storage = std::move(*res);
+    }
 
     controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
