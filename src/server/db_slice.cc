@@ -659,7 +659,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx, string_view key,
                                                              std::optional<unsigned> req_obj_type) {
-  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
+  auto res = FindInternal(cntx, key, req_obj_type, LookupMode::kMutable);
   RETURN_ON_BAD_STATUS(res);
 
   auto it = Iterator(*res, StringOrView::FromView(key));
@@ -679,13 +679,13 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 }
 
 DbSlice::ConstIterator DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
-  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats);
+  auto res = FindInternal(cntx, key, std::nullopt, LookupMode::kReadOnly);
   return {*res, StringOrView::FromView(key)};
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
                                                        unsigned req_obj_type) const {
-  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats);
+  auto res = FindInternal(cntx, key, req_obj_type, LookupMode::kReadOnly);
   if (res.ok()) {
     return ConstIterator(*res, StringOrView::FromView(key));
   }
@@ -693,7 +693,7 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, stri
 }
 
 auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsigned> req_obj_type,
-                           UpdateStatsMode stats_mode) const -> OpResult<PrimeIterator> {
+                           LookupMode mode) const -> OpResult<PrimeIterator> {
   if (!IsDbValid(cntx.db_index)) {  // Can it even happen?
     LOG(DFATAL) << "Invalid db index " << cntx.db_index;
     return OpStatus::KEY_NOTFOUND;
@@ -702,11 +702,18 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   auto& db = *db_arr_[cntx.db_index];
   const uint64_t key_hash = db.prime.DoHash(key);
   PrimeIterator it = db.prime.Find(key, key_hash);
-  int miss_weight = (stats_mode == UpdateStatsMode::kReadStats);
+
+  // Only read-only lookups count misses. TryExpire may suspend on the journal append, and a flush
+  // may have replaced the table meanwhile, so do not use `db` here.
+  auto record_miss = [&] {
+    if (mode == LookupMode::kReadOnly) {
+      events_.misses++;
+      db_arr_[cntx.db_index]->stats.events.misses++;
+    }
+  };
 
   if (!IsValid(it)) {
-    events_.misses += miss_weight;
-    db.stats.events.misses += miss_weight;
+    record_miss();
     return OpStatus::KEY_NOTFOUND;
   }
 
@@ -720,13 +727,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     // If expiry is paused, hide expired keys from read lookups. Mutable lookups must still see
     // them: the entry is physically present, and reporting it missing would make AddOrFind insert
     // a duplicate.
-    if (res == ExpireResult::Deleted ||
-        (res == ExpireResult::ExpiryPaused && stats_mode == UpdateStatsMode::kReadStats)) {
-      events_.misses += miss_weight;
-
-      // TryExpire may suspend on the journal append, and a flush may have replaced the table
-      // meanwhile, so do not use `db`.
-      db_arr_[cntx.db_index]->stats.events.misses += miss_weight;
+    const bool hide_paused_expiry = mode == LookupMode::kReadOnly;
+    if (res == ExpireResult::Deleted || (res == ExpireResult::ExpiryPaused && hide_paused_expiry)) {
+      record_miss();
       return OpStatus::KEY_NOTFOUND;
     }
   }
@@ -735,8 +738,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   // Preemptions happen only if the entry is being deleted during expiry, so `db` is valid here.
   if (req_obj_type.has_value() && it->second.ObjType() != req_obj_type.value()) {
-    events_.misses += miss_weight;
-    db.stats.events.misses += miss_weight;
+    record_miss();
     return OpStatus::WRONG_TYPE;
   }
 
@@ -749,11 +751,11 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     fetched_items_.insert({key_hash, cntx.db_index});
   }
 
-  switch (stats_mode) {
-    case UpdateStatsMode::kMutableStats:
+  switch (mode) {
+    case LookupMode::kMutable:
       events_.mutations++;
       break;
-    case UpdateStatsMode::kReadStats:
+    case LookupMode::kReadOnly:
       events_.hits++;
       db.stats.events.hits++;
       if (db.slots_stats) {
@@ -800,7 +802,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, 
                                                            std::optional<unsigned> req_obj_type) {
   DCHECK(IsDbValid(cntx.db_index));
 
-  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
+  auto res = FindInternal(cntx, key, req_obj_type, LookupMode::kMutable);
 
   if (res.ok()) {
     Iterator it(*res, StringOrView::FromView(key));
