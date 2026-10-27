@@ -97,7 +97,7 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 }
 
 string IndexNotFoundMsg(string_view index_name) {
-  return absl::StrCat(index_name, ": no such index");
+  return absl::StrCat("-ERR ", index_name, ": no such index");
 }
 
 std::string ResolveIndexName(string_view requested_name) {
