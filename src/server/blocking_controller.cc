@@ -155,17 +155,14 @@ void BlockingController::NotifyPending() {
   if (awakened_indices_.empty())
     return;
 
-  // Readiness checks may expire keys, and journaling an expiry may suspend and let other fibers
-  // change the watch tables. So wait for blocked journal writes up front and iterate with journal
-  // flushing disabled, in an atomic section; the expired events are sent after the iteration.
-  DbSlice& db_slice = ns_->GetDbSlice(owner_->shard_id());
-  db_slice.WaitForUnblockedJournalWrites();
-
-  // A transaction may have started running while we waited; it notifies when it concludes. Check
-  // running_tx() too: a first hop that suspended is not the continuation transaction yet, and
-  // waking a waiter now would let it run ahead of that continuation.
-  if (owner_->GetContTx() != nullptr || owner_->running_tx() != nullptr)
+  // A first hop that suspended is not the continuation transaction yet, and waking a waiter now
+  // would let it run ahead of it. The running transaction notifies when it concludes.
+  if (owner_->running_tx() != nullptr)
     return;
+
+  // Readiness checks may expire keys. Expiry never suspends before deleting, so iterate with
+  // journal flushing disabled, in an atomic section; the expired events are sent afterwards.
+  DbSlice& db_slice = ns_->GetDbSlice(owner_->shard_id());
 
   {
     journal::DisableFlushGuard flush_guard;

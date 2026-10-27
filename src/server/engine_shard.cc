@@ -881,6 +881,13 @@ void EngineShard::RetireExpiredAndEvict() {
         eviction_goal -= std::min(eviction_goal, evicted_bytes);
       }
     }
+
+    // Expiry/eviction above only marks watchers as awakened. Dispatch them in the same atomic
+    // section: no transaction can start running in between.
+    if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
+        bc && GetContTx() == nullptr) {
+      bc->NotifyPendingAtomic();
+    }
   }  // journal_flush_guard destroyed here — atomic section ends before sending the events
 
   // Send keyspace notifications for expired/evicted keys outside the atomic section
@@ -891,13 +898,6 @@ void EngineShard::RetireExpiredAndEvict() {
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
     eviction_state_.deleted_bytes_at_prev_eviction = deleted_bytes;
-  }
-
-  // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
-  // section, because NotifyPending may preempt before and after its readiness checks.
-  if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
-      bc && GetContTx() == nullptr) {
-    bc->NotifyPending();
   }
 }
 
