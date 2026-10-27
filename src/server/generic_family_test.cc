@@ -1987,6 +1987,58 @@ TEST_F(GenericFamilyTest, DebugObjHistMultiDbCorrectDb) {
   EXPECT_EQ("value", Run({"HGET", "shared", "alive"}));
 }
 
+TEST_F(GenericFamilyTest, DebugObjHistDataSize) {
+  Run({"JSON.SET", "json", "$", R"({"ab":"cde","f":[1,"gh"]})"});
+  Run({"XADD", "stream", "*", "f1", "v1", "f2", "value2"});
+  Run({"XADD", "stream", "*", "f1", "v1"});
+  Run({"BF.ADD", "bloom", "item"});
+
+  string hist = Run({"DEBUG", "OBJHIST"}).GetString();
+  auto section = [&](string_view type) {
+    size_t start = hist.find(absl::StrCat("OBJECT:", type, "\n"));
+    EXPECT_NE(start, string::npos) << type;
+    if (start == string::npos)
+      return string{};
+    size_t end = hist.find("OBJECT:", start + 1);
+    return hist.substr(start, end == string::npos ? string::npos : end - start);
+  };
+  constexpr string_view kDataSize = "Values - Data size (in-memory and tiered):\n";
+  constexpr string_view kMemoryUsed = "Values - Total Memory used:\n";
+
+  string json_hist = section("ReJSON-RL");
+  EXPECT_THAT(json_hist, HasSubstr(absl::StrCat(kMemoryUsed, "Count: 1 ")));
+  EXPECT_THAT(json_hist, Not(HasSubstr(absl::StrCat(kMemoryUsed, "Count: 1 Average: 0.0000"))));
+  EXPECT_THAT(json_hist, Not(HasSubstr(kDataSize)));
+  EXPECT_THAT(json_hist, Not(HasSubstr("Cardinality histogram")));
+  EXPECT_THAT(json_hist, Not(HasSubstr("Items length histogram")));
+
+  string stream_hist = section("stream");
+  EXPECT_THAT(stream_hist, HasSubstr(absl::StrCat(kMemoryUsed, "Count: 1 ")));
+  EXPECT_THAT(stream_hist, HasSubstr(absl::StrCat(kDataSize, "Count: 1 Average: 16.0")));
+  EXPECT_THAT(stream_hist, HasSubstr("Cardinality histogram (number of elements in sets):\n"
+                                     "Count: 1 Average: 2.0"));
+  EXPECT_THAT(stream_hist, HasSubstr("Items length histogram:\nCount: 3 "));
+
+  string bloom_hist = section("MBbloom--");
+  EXPECT_THAT(bloom_hist, HasSubstr(absl::StrCat(kDataSize, "Count: 1 ")));
+  EXPECT_THAT(bloom_hist, Not(HasSubstr(absl::StrCat(kDataSize, "Count: 1 Average: 0.0000"))));
+}
+
+TEST_F(GenericFamilyTest, DebugObjHistStreamTombstonesAndNodes) {
+  for (unsigned i = 1; i <= 256; ++i) {
+    EXPECT_EQ(Run({"XADD", "stream", StrCat(i, "-0"), "123", "456"}), StrCat(i, "-0"));
+  }
+  EXPECT_EQ(Run({"XADD", "stream", "257-0", "field", "value"}), "257-0");
+  EXPECT_THAT(Run({"XDEL", "stream", "2-0"}), IntArg(1));
+
+  string hist = Run({"DEBUG", "OBJHIST"}).GetString();
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\n"
+                              "Count: 1 Average: 1540.0"));
+  EXPECT_THAT(hist, HasSubstr("Cardinality histogram (number of elements in sets):\n"
+                              "Count: 1 Average: 256.0"));
+  EXPECT_THAT(hist, HasSubstr("Items length histogram:\nCount: 256 "));
+}
+
 TEST_F(GenericFamilyTest, ZInterStoreDeletesEmptySet) {
   for (int i = 0; i < 20; ++i) {
     Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
