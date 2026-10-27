@@ -915,11 +915,17 @@ TEST_F(RdbTest, SearchDefinitionsWithSpacesSurviveReload) {
   };
   const auto before = state();
   ASSERT_EQ(Run({"save", "df"}), "OK");
+
+  // Older versions skip these keys instead of misreading the arguments.
+  auto summary = io::ReadFileToString(service_->server_family().GetLastSaveInfo().file_name);
+  ASSERT_TRUE(summary);
+  for (string_view key : {"search-index-resp", "search-alias-resp", "search-synonyms-resp"})
+    EXPECT_TRUE(absl::StrContains(*summary, key)) << key;
   ASSERT_EQ(Run({"debug", "reload"}), "OK");
   EXPECT_EQ(state(), before);
 }
 
-// The restore command of a wide schema is longer than an inline command may be.
+// A wide schema is written inline under the old key, as before, and loads back.
 TEST_F(RdbTest, WideSearchIndexSurvivesReload) {
   vector<string> cmd = {"FT.CREATE", "wide", "ON", "HASH", "SCHEMA"};
   for (int i = 0; i < 800; ++i) {
@@ -928,12 +934,27 @@ TEST_F(RdbTest, WideSearchIndexSurvivesReload) {
   }
   ASSERT_EQ(Run(absl::MakeSpan(cmd)), "OK");
   ASSERT_EQ(Run({"save", "df"}), "OK");
+  auto summary = io::ReadFileToString(service_->server_family().GetLastSaveInfo().file_name);
+  ASSERT_TRUE(summary);
+  EXPECT_TRUE(absl::StrContains(*summary, "wide ON HASH "));
+  EXPECT_FALSE(absl::StrContains(*summary, "-resp"));
   ASSERT_EQ(Run({"debug", "reload"}), "OK");
   EXPECT_THAT(Run({"FT._LIST"}), RespArray(ElementsAre("wide")));
   auto info = Run({"FT.INFO", "wide"}).GetVec();
   auto it = rng::find_if(info, [](const auto& e) { return e == "attributes"; });
   ASSERT_NE(it, info.end());
   EXPECT_EQ((++it)->GetVec().size(), 800u);
+}
+
+// A count below the arguments that follow must fail the field instead of restoring a part of it.
+TEST_F(RdbTest, UnderstatedSearchArgumentCountIsRejected) {
+  string def = "*6\r\n";
+  for (string_view arg : {"my idx", "ON", "HASH", "SCHEMA", "a", "TAG", "b", "TAG"})
+    absl::StrAppend(&def, "$", arg.size(), "\r\n", arg, "\r\n");
+  pp_->at(0)->Await([&] {
+    LoadSearchCommandFromAux(service_.get(), std::move(def), "FT.CREATE", "index definition");
+  });
+  EXPECT_THAT(Run({"FT._LIST"}).GetVec(), IsEmpty());
 }
 
 #ifdef __linux__

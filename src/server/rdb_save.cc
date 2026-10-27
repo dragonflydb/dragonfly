@@ -37,7 +37,6 @@ extern "C" {
 #include "core/string_map.h"
 #include "core/string_set.h"
 #include "core/topk.h"
-#include "facade/resp_srv_parser.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/main_service.h"
@@ -1591,19 +1590,20 @@ string EncodeSearchCommand(absl::Span<const string> args) {
   auto is_inline_safe = [](string_view arg) {
     return !arg.empty() && ranges::all_of(arg, [](unsigned char c) { return c > ' '; });
   };
-  if (ranges::all_of(args, is_inline_safe)) {
-    string cmd = absl::StrJoin(args, " ");
+  if (ranges::all_of(args, is_inline_safe))
+    return absl::StrJoin(args, " ");
 
-    // The reader adds a leading space and the line terminator.
-    if (cmd.size() + 3 <= facade::RespSrvParser::kMaxInlineSize)
-      return cmd;
-  }
   string cmd = absl::StrCat("*", args.size(), "\r\n");
   for (const auto& arg : args)
     absl::StrAppend(&cmd, "$", arg.size(), "\r\n", arg, "\r\n");
   return cmd;
 }
 #endif
+
+// RESP arrays, the only encoded commands with '\r', go under keys that older versions skip.
+string SearchAuxKey(string_view key, string_view value) {
+  return value.find('\r') == string_view::npos ? string{key} : absl::StrCat(key, "-resp");
+}
 
 // Collect search index definitions for replication / RDB.
 // search_indices always gets "index_name args..." restore commands.
@@ -1834,18 +1834,18 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
         (save_mode_ != SaveMode::SINGLE_SHARD) || (replica_dfly_version_ >= DflyVersion::VER6);
     if (send_search_index) {
       for (const string& s : glob_state.search_indices)
-        RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+        RETURN_ON_ERR(impl_->SaveAuxFieldStrStr(SearchAuxKey("search-index", s), s));
     }
 
     // Save aliases only in the summary file.
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_aliases.empty());
     for (const string& s : glob_state.search_aliases)
-      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-alias", s));
+      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr(SearchAuxKey("search-alias", s), s));
 
     // Save synonyms only in summary file
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_synonyms.empty());
     for (const string& s : glob_state.search_synonyms)
-      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-synonyms", s));
+      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr(SearchAuxKey("search-synonyms", s), s));
 
     if (save_mode_ == SaveMode::SINGLE_SHARD_WITH_SUMMARY || save_mode_ == SaveMode::SUMMARY) {
       // We save the shard id in the summary file, so that we can restore it later.

@@ -196,14 +196,16 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
   const std::string inline_def = is_array ? std::string{} : absl::StrCat(" ", def, "\r\n");
   const std::string& input = is_array ? def : inline_def;
 
-  // No count or length can exceed the input, so a corrupt header cannot reserve memory for it.
+  // Limits follow the input: inline definitions have no length limit, and a corrupt header cannot
+  // reserve memory beyond the input.
   const uint32_t max_len = std::min<size_t>(input.size(), std::numeric_limits<uint32_t>::max());
-  facade::RespSrvParser parser{max_len, max_len};
+  facade::RespSrvParser parser{max_len, max_len, max_len};
   facade::RespSrvParser::Buffer buffer{reinterpret_cast<const uint8_t*>(input.data()),
                                        input.size()};
   auto res = parser.Parse(buffer, &consumed, &parsed_args);
 
-  if (res != facade::RespSrvParser::OK) {
+  // The parser stops at the declared count, so bytes left after it mean a corrupt count.
+  if (res != facade::RespSrvParser::OK || (is_array && consumed != input.size())) {
     LOG(ERROR) << "Bad " << error_context << ": " << absl::CHexEscape(def);
     return;
   }
