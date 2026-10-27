@@ -43,19 +43,19 @@ namespace {
 
 constexpr string_view kMagic = "dfaof-manifest";
 
-string_view StateName(AofManifest::State state) {
+string_view FormatState(AofManifest::State state) {
   return state == AofManifest::State::kActive ? "active" : "bootstrapping";
 }
 
 // The value of a "<key> <value>" line, or nullopt if the line has another key.
-optional<string_view> Value(string_view line, string_view key) {
+optional<string_view> ParseValue(string_view line, string_view key) {
   if (!absl::ConsumePrefix(&line, key) || !absl::ConsumePrefix(&line, " "))
     return nullopt;
   return line;
 }
 
-template <typename T> bool NumValue(string_view line, string_view key, T* out) {
-  optional<string_view> val = Value(line, key);
+template <typename T> bool ParseNumValue(string_view line, string_view key, T* out) {
+  optional<string_view> val = ParseValue(line, key);
   return val && absl::SimpleAtoi(*val, out);
 }
 
@@ -92,7 +92,7 @@ bool ParseCut(string_view val, uint32_t shard_id, AofManifest::Cut* cut) {
          absl::SimpleAtoi(parts[1], &cut->seq) && absl::SimpleAtoi(parts[2], &cut->lsn);
 }
 
-error_code BadManifest(string_view what) {
+error_code ReportBadManifest(string_view what) {
   error_code ec = make_error_code(AofError::kBadManifest);
   LOG(ERROR) << ec.message() << ": " << what;
   return ec;
@@ -107,7 +107,7 @@ error_code LastErrno() {
 string EncodeAofManifest(const AofManifest& m) {
   DCHECK_EQ(m.base_path.find('\n'), string::npos);
   string out = absl::StrCat(kMagic, " ", kAofManifestVersion, "\n");
-  absl::StrAppend(&out, "state ", StateName(m.state), "\n");
+  absl::StrAppend(&out, "state ", FormatState(m.state), "\n");
   absl::StrAppend(&out, "checkpoint ", m.checkpoint_id, "\n");
   if (m.base_path.empty()) {
     absl::StrAppend(&out, "base none\n");
@@ -126,48 +126,48 @@ io::Result<AofManifest> DecodeAofManifest(string_view text) {
   // Every line ends with a newline, so the last element is empty.
   vector<string_view> lines = absl::StrSplit(text, '\n');
   if (lines.size() < 2 || !lines.back().empty())
-    return make_unexpected(BadManifest("truncated"));
+    return make_unexpected(ReportBadManifest("truncated"));
   lines.pop_back();
 
   // The crc line is last and covers every byte before it.
   string_view crc_line = lines.back();
   lines.pop_back();
-  optional<string_view> crc_hex = Value(crc_line, "crc32c");
+  optional<string_view> crc_hex = ParseValue(crc_line, "crc32c");
   uint32_t crc;
   if (!crc_hex || !absl::SimpleHexAtoi(*crc_hex, &crc))
-    return make_unexpected(BadManifest("bad crc32c line"));
+    return make_unexpected(ReportBadManifest("bad crc32c line"));
   string_view body = text.substr(0, text.size() - crc_line.size() - 1);
   if (crc != static_cast<uint32_t>(absl::ComputeCrc32c(body)))
-    return make_unexpected(BadManifest("crc32c mismatch"));
+    return make_unexpected(ReportBadManifest("crc32c mismatch"));
 
   // Fixed order: the header lines, then one cut line per shard.
   constexpr size_t kHeaderLines = 5;
   if (lines.size() < kHeaderLines)
-    return make_unexpected(BadManifest("truncated"));
+    return make_unexpected(ReportBadManifest("truncated"));
   uint32_t version;
-  if (!NumValue(lines[0], kMagic, &version))
-    return make_unexpected(BadManifest("not a manifest"));
+  if (!ParseNumValue(lines[0], kMagic, &version))
+    return make_unexpected(ReportBadManifest("not a manifest"));
   if (version != kAofManifestVersion)
     return make_unexpected(make_error_code(AofError::kManifestVersion));
 
   AofManifest m;
-  optional<string_view> state = Value(lines[1], "state");
+  optional<string_view> state = ParseValue(lines[1], "state");
   if (!state || !ParseState(*state, &m.state))
-    return make_unexpected(BadManifest("bad state"));
-  if (!NumValue(lines[2], "checkpoint", &m.checkpoint_id))
-    return make_unexpected(BadManifest("bad checkpoint"));
-  optional<string_view> base = Value(lines[3], "base");
+    return make_unexpected(ReportBadManifest("bad state"));
+  if (!ParseNumValue(lines[2], "checkpoint", &m.checkpoint_id))
+    return make_unexpected(ReportBadManifest("bad checkpoint"));
+  optional<string_view> base = ParseValue(lines[3], "base");
   if (!base || !ParseBase(*base, &m))
-    return make_unexpected(BadManifest("bad base"));
+    return make_unexpected(ReportBadManifest("bad base"));
   uint32_t shard_count;
-  if (!NumValue(lines[4], "shard_count", &shard_count) || shard_count == 0 ||
+  if (!ParseNumValue(lines[4], "shard_count", &shard_count) || shard_count == 0 ||
       lines.size() != kHeaderLines + shard_count)
-    return make_unexpected(BadManifest("bad shard_count"));
+    return make_unexpected(ReportBadManifest("bad shard_count"));
   m.cuts.resize(shard_count);
   for (uint32_t i = 0; i < shard_count; ++i) {
-    optional<string_view> cut = Value(lines[kHeaderLines + i], "cut");
+    optional<string_view> cut = ParseValue(lines[kHeaderLines + i], "cut");
     if (!cut || !ParseCut(*cut, i, &m.cuts[i]))
-      return make_unexpected(BadManifest(absl::StrCat("bad cut of shard ", i)));
+      return make_unexpected(ReportBadManifest(absl::StrCat("bad cut of shard ", i)));
   }
   return m;
 }
