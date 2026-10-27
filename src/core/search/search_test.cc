@@ -157,6 +157,86 @@ Schema MakeSimpleSchema(initializer_list<SchemaFieldInitializer> ilist,
   return schema;
 }
 
+std::string ToBytes(absl::Span<const float> vec) {
+  return string{reinterpret_cast<const char*>(vec.data()), sizeof(float) * vec.size()};
+}
+
+// Own the schema for the full lifetime of its indices. Population does not finalize the index,
+// so callers retain control over the initialization phase exercised by a test or benchmark.
+class SearchDataset {
+ public:
+  explicit SearchDataset(Schema schema)
+      : schema_(std::move(schema)),
+        indices{schema_, kEmptyOptions, PMR_NS::get_default_resource(), nullptr} {
+  }
+
+  template <typename Generator> void Populate(size_t count, Generator generate, DocId first = 0) {
+    for (size_t i = 0; i < count; ++i) {
+      DocId id = first + i;
+      MockedDocument doc{generate(id)};
+      indices.Add(id, doc);
+    }
+  }
+
+ private:
+  Schema schema_;
+
+ public:
+  FieldIndices indices;
+};
+
+static Schema MakeVectorSchema(SchemaField::VectorParams params,
+                               initializer_list<SchemaFieldInitializer> extra_fields = {}) {
+  auto schema = MakeSimpleSchema(extra_fields);
+  schema.fields["pos"] = {SchemaField::VECTOR, 0, "pos", params};
+  return schema;
+}
+
+class VectorDataset : public SearchDataset {
+ public:
+  explicit VectorDataset(SchemaField::VectorParams params,
+                         initializer_list<SchemaFieldInitializer> extra_fields = {})
+      : SearchDataset(MakeVectorSchema(params, extra_fields)) {
+  }
+
+  struct QueryCase {
+    string_view name;
+    string_view query;
+    initializer_list<float> coordinates;
+    testing::Matcher<vector<DocId>> expected_ids;
+    string_view score_alias = {};
+  };
+
+  void CheckQueries(initializer_list<QueryCase> cases) {
+    QueryParams params;
+    SearchAlgorithm algo;
+    for (const auto& tc : cases) {
+      SCOPED_TRACE(tc.name);
+      params["vec"] = ToBytes(tc.coordinates);
+      ASSERT_TRUE(algo.Init(tc.query, &params));
+      if (!tc.score_alias.empty()) {
+        ASSERT_TRUE(algo.GetKnnScoreSortOption());
+        EXPECT_EQ(tc.score_alias, algo.GetKnnScoreSortOption()->score_field_alias);
+      }
+      auto result = algo.Search(&indices);
+      EXPECT_TRUE(result.error.empty()) << result.error;
+      EXPECT_THAT(result.ids, tc.expected_ids);
+    }
+  }
+
+  void PopulateLine(size_t count, float first = 0) {
+    Populate(count, [first](size_t i) {
+      return MockedDocument::Map{{"pos", ToBytes({float(i) + first})}};
+    });
+  }
+
+  template <size_t N> void PopulatePoints(const pair<float, float> (&points)[N]) {
+    Populate(N, [&](size_t i) {
+      return MockedDocument::Map{{"pos", ToBytes({points[i].first, points[i].second})}};
+    });
+  }
+};
+
 class SearchTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
@@ -798,10 +878,6 @@ INSTANTIATE_TEST_SUITE_P(WithTrieText, SearchRaxTest, testing::Values(pair{true,
 INSTANTIATE_TEST_SUITE_P(NoTrieTag, SearchRaxTest, testing::Values(pair{false, true}));
 INSTANTIATE_TEST_SUITE_P(WithTrieTag, SearchRaxTest, testing::Values(pair{true, true}));
 
-std::string ToBytes(absl::Span<const float> vec) {
-  return string{reinterpret_cast<const char*>(vec.data()), sizeof(float) * vec.size()};
-}
-
 TEST_F(SearchTest, Errors) {
   auto schema = MakeSimpleSchema(
       {{"score", SchemaField::NUMERIC}, {"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
@@ -877,61 +953,33 @@ class VectorRangeTest : public ::testing::Test {
 };
 
 TEST_F(VectorRangeTest, FlatRange1D) {
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  // Place 10 points on a line: 1, 2, ..., 10 (avoid zero vector for doc 0)
-  for (size_t i = 0; i < 10; i++) {
-    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
-    indices.Add(i, doc);
-  }
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-
-  // Query at 5.0 with radius 1.5 → points at pos 4,5,6 → doc ids 3,4,5
-  {
-    params["vec"] = ToBytes({5.0f});
-    algo.Init("@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
-    auto result = algo.Search(&indices);
-    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3, 4, 5));
-  }
-
-  // Exact match at pos 4.0 with radius 0 → only doc 3
-  {
-    params["vec"] = ToBytes({4.0f});
-    algo.Init("@pos:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
-    auto result = algo.Search(&indices);
-    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(3));
-  }
-
-  // Large radius → all 10 points
-  {
-    params["vec"] = ToBytes({5.0f});
-    algo.Init("@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
-    auto result = algo.Search(&indices);
-    EXPECT_EQ(result.ids.size(), 10u);
-  }
-
-  // Empty result when radius is too small
-  {
-    params["vec"] = ToBytes({5.5f});
-    algo.Init("@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}", &params);
-    auto result = algo.Search(&indices);
-    EXPECT_TRUE(result.ids.empty());
-  }
+  VectorDataset dataset{{false, 1}};
+  dataset.PopulateLine(10, 1);
+  dataset.CheckQueries({
+      {"near_5",
+       "@pos:[VECTOR_RANGE 1.5 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+       {5.0f},
+       testing::UnorderedElementsAre(3, 4, 5)},
+      {"exact_4",
+       "@pos:[VECTOR_RANGE 0 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+       {4.0f},
+       testing::UnorderedElementsAre(3)},
+      {"all_points",
+       "@pos:[VECTOR_RANGE 100 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+       {5.0f},
+       testing::SizeIs(10)},
+      {"no_points",
+       "@pos:[VECTOR_RANGE 0.1 $vec]=>{$YIELD_DISTANCE_AS: dist}",
+       {5.5f},
+       testing::IsEmpty()},
+  });
 }
 
 TEST_F(VectorRangeTest, FlatRangeWithoutYieldDistanceAs) {
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  VectorDataset dataset{{false, 1}};
+  auto& indices = dataset.indices;
 
-  for (size_t i = 0; i < 10; i++) {
-    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
-    indices.Add(i, doc);
-  }
+  dataset.PopulateLine(10, 1);
 
   SearchAlgorithm algo{};
   QueryParams params;
@@ -948,15 +996,11 @@ TEST_F(VectorRangeTest, FlatRangeWithoutYieldDistanceAs) {
 }
 
 TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  VectorDataset dataset{{false, 1}};
+  auto& indices = dataset.indices;
 
   // Use i+1 so doc positions are 1..5 (query radius 1.5 from pos 2.0 catches docs 0,1,2)
-  for (size_t i = 0; i < 5; i++) {
-    MockedDocument doc{Map{{"pos", ToBytes({float(i + 1)})}}};
-    indices.Add(i, doc);
-  }
+  dataset.PopulateLine(5, 1);
 
   SearchAlgorithm algo{};
   QueryParams params;
@@ -974,9 +1018,8 @@ TEST_F(VectorRangeTest, FlatRangeDistancesStoredInScores) {
 }
 
 TEST_F(VectorRangeTest, FlatRangeRejectsEpsilon) {
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  VectorDataset dataset{{false, 1}};
+  auto& indices = dataset.indices;
 
   indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
 
@@ -990,9 +1033,8 @@ TEST_F(VectorRangeTest, FlatRangeRejectsEpsilon) {
 }
 
 TEST_F(VectorRangeTest, FlatRangeRejectsInfiniteRadius) {
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  VectorDataset dataset{{false, 1}};
+  auto& indices = dataset.indices;
 
   indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
 
@@ -1034,9 +1076,8 @@ TEST_F(VectorRangeTest, RangeOrFilterScoresByDoc) {
 TEST_F(VectorRangeTest, FlatStarQueryZeroVectorIsValid) {
   // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
   // incorrectly skips zero vectors. The zero vector [0.0,...,0.0] is a valid embedding.
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 2};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  VectorDataset dataset{{false, 2}};
+  auto& indices = dataset.indices;
 
   // doc 0: zero vector [0.0, 0.0] — valid embedding, must not be skipped
   indices.Add(0, MockedDocument{Map{{"pos", ToBytes({0.0f, 0.0f})}}});
@@ -1055,9 +1096,8 @@ TEST_F(VectorRangeTest, FlatStarQueryRemovedDocNotMatched) {
   // Regression: @field:* on a FLAT vector index uses GetAllDocsWithNonNullValues(), which
   // iterates entries_ directly and does NOT respect all_ids_. After Remove(), the doc's
   // slot in entries_ is still non-zero, so the removed doc incorrectly appears in results.
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  VectorDataset dataset{{false, 1}};
+  auto& indices = dataset.indices;
 
   indices.Add(0, MockedDocument{Map{{"pos", ToBytes({1.0f})}}});
   indices.Add(1, MockedDocument{Map{{"pos", ToBytes({2.0f})}}});
@@ -1076,63 +1116,31 @@ TEST_F(VectorRangeTest, FlatStarQueryRemovedDocNotMatched) {
 }
 
 TEST_F(KnnTest, Simple1D) {
-  auto schema = MakeSimpleSchema({{"even", SchemaField::TAG}, {"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  // Place points on a straight line
-  for (size_t i = 0; i < 100; i++) {
-    Map values{{{"even", i % 2 == 0 ? "YES" : "NO"}, {"pos", ToBytes({float(i)})}}};
-    MockedDocument doc{values};
-    indices.Add(i, doc);
-  }
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-
-  // Five closest to 50
-  {
-    params["vec"] = ToBytes({50.0});
-    algo.Init("*=>[KNN 5 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(48, 49, 50, 51, 52));
-  }
-
-  // Five closest to 0
-  {
-    params["vec"] = ToBytes({0.0});
-    algo.Init("*=>[KNN 5 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
-  }
-
-  // Five closest to 20, all even
-  {
-    params["vec"] = ToBytes({20.0});
-    algo.Init("@even:{yes} =>[KNN 5 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(16, 18, 20, 22, 24));
-  }
-
-  // Three closest to 31, all odd
-  {
-    params["vec"] = ToBytes({31.0});
-    algo.Init("@even:{no} =>[KNN 3 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(29, 31, 33));
-  }
-
-  // Two closest to 70.5
-  {
-    params["vec"] = ToBytes({70.5});
-    algo.Init("* =>[KNN 2 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(70, 71));
-  }
-
-  // Two closest to 70.5
-  {
-    params["vec"] = ToBytes({70.5});
-    algo.Init("* =>[KNN 2 @pos $vec as vector_distance]", &params);
-    EXPECT_EQ("vector_distance", algo.GetKnnScoreSortOption()->score_field_alias);
-    SearchResult result = algo.Search(&indices);
-    EXPECT_THAT(result.ids, testing::UnorderedElementsAre(70, 71));
-  }
+  VectorDataset dataset{{false, 1}, {{"even", SchemaField::TAG}}};
+  dataset.Populate(100, [](size_t i) {
+    return Map{{"even", i % 2 == 0 ? "YES" : "NO"}, {"pos", ToBytes({float(i)})}};
+  });
+  dataset.CheckQueries({
+      {"near_50",
+       "*=>[KNN 5 @pos $vec]",
+       {50.0f},
+       testing::UnorderedElementsAre(48, 49, 50, 51, 52)},
+      {"near_zero", "*=>[KNN 5 @pos $vec]", {0.0f}, testing::UnorderedElementsAre(0, 1, 2, 3, 4)},
+      {"even_near_20",
+       "@even:{yes} =>[KNN 5 @pos $vec]",
+       {20.0f},
+       testing::UnorderedElementsAre(16, 18, 20, 22, 24)},
+      {"odd_near_31",
+       "@even:{no} =>[KNN 3 @pos $vec]",
+       {31.0f},
+       testing::UnorderedElementsAre(29, 31, 33)},
+      {"near_half", "* =>[KNN 2 @pos $vec]", {70.5f}, testing::UnorderedElementsAre(70, 71)},
+      {"score_alias",
+       "* =>[KNN 2 @pos $vec as vector_distance]",
+       {70.5f},
+       testing::UnorderedElementsAre(70, 71),
+       "vector_distance"},
+  });
 }
 
 TEST_F(KnnTest, Simple2D) {
@@ -1141,149 +1149,60 @@ TEST_F(KnnTest, Simple2D) {
   //    4
   // 0      1
   const pair<float, float> kTestCoords[] = {{0, 0}, {1, 0}, {1, 1}, {0, 1}, {0.5, 0.5}};
-
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 2};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
-    string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
-    MockedDocument doc{Map{{"pos", coords}}};
-    indices.Add(i, doc);
-  }
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-
-  // Single center
-  {
-    params["vec"] = ToBytes({0.5, 0.5});
-    algo.Init("* =>[KNN 1 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(4));
-  }
-
-  // Lower left
-  {
-    params["vec"] = ToBytes({0, 0});
-    algo.Init("* =>[KNN 4 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 3, 4));
-  }
-
-  // Upper right
-  {
-    params["vec"] = ToBytes({1, 1});
-    algo.Init("* =>[KNN 4 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 2, 3, 4));
-  }
-
-  // Request more than there is
-  {
-    params["vec"] = ToBytes({0, 0});
-    algo.Init("* => [KNN 10 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 4));
-  }
-
-  // Test correct order: (0.7, 0.15)
-  {
-    params["vec"] = ToBytes({0.7, 0.15});
-    algo.Init("* => [KNN 10 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(1, 4, 0, 2, 3));
-  }
-
-  // Test correct order: (0.8, 0.9)
-  {
-    params["vec"] = ToBytes({0.8, 0.9});
-    algo.Init("* => [KNN 10 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(2, 4, 3, 1, 0));
-  }
+  VectorDataset dataset{{false, 2}};
+  dataset.PopulatePoints(kTestCoords);
+  dataset.CheckQueries({
+      {"center", "* =>[KNN 1 @pos $vec]", {0.5f, 0.5f}, testing::UnorderedElementsAre(4)},
+      {"lower_left",
+       "* =>[KNN 4 @pos $vec]",
+       {0.0f, 0.0f},
+       testing::UnorderedElementsAre(0, 1, 3, 4)},
+      {"upper_right",
+       "* =>[KNN 4 @pos $vec]",
+       {1.0f, 1.0f},
+       testing::UnorderedElementsAre(1, 2, 3, 4)},
+      {"k_above_population",
+       "* => [KNN 10 @pos $vec]",
+       {0.0f, 0.0f},
+       testing::UnorderedElementsAre(0, 1, 2, 3, 4)},
+      {"ordered_lower_right",
+       "* => [KNN 10 @pos $vec]",
+       {0.7f, 0.15f},
+       testing::ElementsAre(1, 4, 0, 2, 3)},
+      {"ordered_upper_right",
+       "* => [KNN 10 @pos $vec]",
+       {0.8f, 0.9f},
+       testing::ElementsAre(2, 4, 3, 1, 0)},
+  });
 }
 
 TEST_F(KnnTest, Cosine) {
-  // Four arrows, closest cosing distance will be closes by angle
-  // 0 🡢 1 🡣 2 🡠 3 🡡
   const pair<float, float> kTestCoords[] = {{1, 0}, {0, -1}, {-1, 0}, {0, 1}};
-
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params =
-      SchemaField::VectorParams{false, 2, VectorSimilarity::COSINE};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
-    string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
-    MockedDocument doc{Map{{"pos", coords}}};
-    indices.Add(i, doc);
-  }
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-
-  // Point down
-  {
-    params["vec"] = ToBytes({-0.1, -10});
-    algo.Init("* =>[KNN 1 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1));
-  }
-
-  // Point left
-  {
-    params["vec"] = ToBytes({-0.1, -0.01});
-    algo.Init("* =>[KNN 1 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(2));
-  }
-
-  // Point up
-  {
-    params["vec"] = ToBytes({0, 5});
-    algo.Init("* =>[KNN 1 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(3));
-  }
-
-  // Point right
-  {
-    params["vec"] = ToBytes({0.2, 0.05});
-    algo.Init("* =>[KNN 1 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0));
-  }
+  VectorDataset dataset{{false, 2, VectorSimilarity::COSINE}};
+  dataset.PopulatePoints(kTestCoords);
+  dataset.CheckQueries({
+      {"down", "* =>[KNN 1 @pos $vec]", {-0.1f, -10.0f}, testing::UnorderedElementsAre(1)},
+      {"left", "* =>[KNN 1 @pos $vec]", {-0.1f, -0.01f}, testing::UnorderedElementsAre(2)},
+      {"up", "* =>[KNN 1 @pos $vec]", {0.0f, 5.0f}, testing::UnorderedElementsAre(3)},
+      {"right", "* =>[KNN 1 @pos $vec]", {0.2f, 0.05f}, testing::UnorderedElementsAre(0)},
+  });
 }
 
 TEST_F(KnnTest, IP) {
-  // Test with normalized unit vectors for IP distance
-  // Using unit vectors pointing in different directions
+  // Unit vectors in four directions give exact IP matches.
   const pair<float, float> kTestCoords[] = {
       {1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f}, {0.0f, -1.0f}};
-
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 2, VectorSimilarity::IP};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  for (size_t i = 0; i < ABSL_ARRAYSIZE(kTestCoords); i++) {
-    string coords = ToBytes({kTestCoords[i].first, kTestCoords[i].second});
-    MockedDocument doc{Map{{"pos", coords}}};
-    indices.Add(i, doc);
-  }
-
-  SearchAlgorithm algo{};
-  QueryParams params;
-
-  // Query with vector pointing right - should find exact match (highest dot product)
-  {
-    params["vec"] = ToBytes({1.0f, 0.0f});
-    algo.Init("* =>[KNN 1 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0));
-  }
-
-  // Query with vector pointing up - should find exact match (highest dot product)
-  {
-    params["vec"] = ToBytes({0.0f, 1.0f});
-    algo.Init("* =>[KNN 1 @pos $vec]", &params);
-    EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1));
-  }
+  VectorDataset dataset{{false, 2, VectorSimilarity::IP}};
+  dataset.PopulatePoints(kTestCoords);
+  dataset.CheckQueries({
+      {"right", "* =>[KNN 1 @pos $vec]", {1.0f, 0.0f}, testing::UnorderedElementsAre(0)},
+      {"up", "* =>[KNN 1 @pos $vec]", {0.0f, 1.0f}, testing::UnorderedElementsAre(1)},
+  });
 }
 
 TEST_F(KnnTest, AddRemove) {
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, 1, VectorSimilarity::L2};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  VectorDataset dataset{{false, 1, VectorSimilarity::L2}};
+  auto& indices = dataset.indices;
 
   vector<MockedDocument> documents(10);
   for (size_t i = 0; i < 10; i++) {
@@ -1328,15 +1247,10 @@ TEST_F(KnnTest, AutoResize) {
   // Make sure index resizes automatically even with a small initial capacity
   const size_t kInitialCapacity = 5;
 
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params =
-      SchemaField::VectorParams{false, 1, VectorSimilarity::L2, kInitialCapacity};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  VectorDataset dataset{{false, 1, VectorSimilarity::L2, kInitialCapacity}};
+  auto& indices = dataset.indices;
 
-  for (size_t i = 0; i < 100; i++) {
-    MockedDocument doc{Map{{"pos", ToBytes({float(i)})}}};
-    indices.Add(i, doc);
-  }
+  dataset.PopulateLine(100);
 
   EXPECT_EQ(indices.GetAllDocs().size(), 100);
 }
@@ -2367,9 +2281,8 @@ static void BM_VectorSearch(benchmark::State& state) {
   unsigned ndims = state.range(0);
   unsigned nvecs = state.range(1);
 
-  auto schema = MakeSimpleSchema({{"pos", SchemaField::VECTOR}});
-  schema.fields["pos"].special_params = SchemaField::VectorParams{false, ndims};
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  VectorDataset dataset{{false, ndims}};
+  auto& indices = dataset.indices;
 
   auto random_vec = [ndims]() {
     vector<float> coords;
@@ -2824,13 +2737,30 @@ static void BM_SearchDocIds(benchmark::State& state) {
 }
 BENCHMARK(BM_SearchDocIds)->Range(0, 2);
 
-static void BM_SearchNumericIndexes(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
-                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
+static void RunSearchBenchmark(
+    benchmark::State& state, FieldIndices* indices, absl::Span<const string> queries,
+    unordered_map<size_t, vector<size_t>>& expected_results_per_num_docs) {
   SearchAlgorithm algo;
   QueryParams params;
+  const size_t num_docs = state.range(0);
+  while (state.KeepRunning()) {
+    for (size_t i = 0; i < queries.size(); ++i) {
+      CHECK(algo.Init(queries[i], &params));
+      auto result = algo.Search(indices);
+      CHECK(result.error.empty());
+      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
+      CHECK_EQ(result.total, expected_result);
+      CHECK_EQ(result.ids.size(), expected_result);
+    }
+  }
+}
+
+static void BM_SearchNumericIndexes(benchmark::State& state) {
+  SearchDataset dataset{
+      MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
+                         SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}})};
+  auto& indices = dataset.indices;
+
   default_random_engine rnd;
 
   using NumericType = long long;
@@ -2838,10 +2768,7 @@ static void BM_SearchNumericIndexes(benchmark::State& state) {
                                              std::numeric_limits<NumericType>::max());
 
   const size_t num_docs = state.range(0);
-  for (size_t i = 0; i < num_docs; i++) {
-    MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
-    indices.Add(i, doc);
-  }
+  dataset.Populate(num_docs, [&](size_t) { return Map{{"numeric", std::to_string(dist(rnd))}}; });
   indices.FinalizeInitialization();
 
   std::string queries[] = {"@numeric:[15 +inf]", "@numeric:[-inf 20]", "@numeric:[-inf +inf]",
@@ -2853,30 +2780,17 @@ static void BM_SearchNumericIndexes(benchmark::State& state) {
       {1000000, {500853, 499147, 1000000, 0}},
   };
 
-  while (state.KeepRunning()) {
-    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
-      const auto& query = queries[i];
-
-      CHECK(algo.Init(query, &params));
-      auto result = algo.Search(&indices);
-      CHECK(result.error.empty());
-
-      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
-      CHECK_EQ(result.total, expected_result);
-      CHECK_EQ(result.ids.size(), expected_result);
-    }
-  }
+  RunSearchBenchmark(state, &indices, queries, expected_results_per_num_docs);
 }
 
 BENCHMARK(BM_SearchNumericIndexes)->Arg(10000)->Arg(100000)->Arg(1000000)->ArgNames({"num_docs"});
 
 static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
-                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  SearchDataset dataset{
+      MakeSimpleSchema({{"numeric", SchemaField::NUMERIC,
+                         SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}})};
+  auto& indices = dataset.indices;
 
-  SearchAlgorithm algo;
-  QueryParams params;
   default_random_engine rnd;
 
   using NumericType = uint16_t;
@@ -2884,14 +2798,13 @@ static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
 
   const size_t num_docs = state.range(0);
   // Insert zero values
-  for (size_t i = 0; i < num_docs / 50; i++) {
-    MockedDocument doc{Map{{"numeric", "0"}}};
-    indices.Add(i, doc);
-  }
-  for (size_t i = num_docs / 50; i < num_docs; i++) {
-    MockedDocument doc{Map{{"numeric", std::to_string(dist(rnd))}}};
-    indices.Add(i, doc);
-  }
+  dataset.Populate(num_docs / 50, [](size_t) { return Map{{"numeric", "0"}}; });
+  dataset.Populate(
+      num_docs - num_docs / 50,
+      [&](size_t) {
+        return Map{{"numeric", std::to_string(dist(rnd))}};
+      },
+      num_docs / 50);
   indices.FinalizeInitialization();
 
   std::string queries[] = {"@numeric:[0 40000]", "@numeric:[-inf +inf]"};
@@ -2901,19 +2814,7 @@ static void BM_SearchNumericIndexesSmallRanges(benchmark::State& state) {
       {1000000, {618365, 1000000}},
   };
 
-  while (state.KeepRunning()) {
-    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
-      const auto& query = queries[i];
-
-      CHECK(algo.Init(query, &params));
-      auto result = algo.Search(&indices);
-      CHECK(result.error.empty());
-
-      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
-      CHECK_EQ(result.total, expected_result);
-      CHECK_EQ(result.ids.size(), expected_result);
-    }
-  }
+  RunSearchBenchmark(state, &indices, queries, expected_results_per_num_docs);
 }
 
 BENCHMARK(BM_SearchNumericIndexesSmallRanges)
@@ -2922,17 +2823,14 @@ BENCHMARK(BM_SearchNumericIndexesSmallRanges)
     ->ArgNames({"num_docs"});
 
 static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({
+  SearchDataset dataset{MakeSimpleSchema({
       {"numeric1", SchemaField::NUMERIC,
        SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
       {"numeric2", SchemaField::NUMERIC,
        SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
-  });
+  })};
+  auto& indices = dataset.indices;
 
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
-
-  SearchAlgorithm algo;
-  QueryParams params;
   std::default_random_engine rnd;
 
   using NumericType = long long;
@@ -2942,13 +2840,9 @@ static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
                                               std::numeric_limits<NumericType>::max());
 
   const size_t num_docs = state.range(0);
-  for (size_t i = 0; i < num_docs; ++i) {
-    MockedDocument doc{Map{
-        {"numeric1", std::to_string(dist1(rnd))},
-        {"numeric2", std::to_string(dist2(rnd))},
-    }};
-    indices.Add(i, doc);
-  }
+  dataset.Populate(num_docs, [&](size_t) {
+    return Map{{"numeric1", std::to_string(dist1(rnd))}, {"numeric2", std::to_string(dist2(rnd))}};
+  });
   indices.FinalizeInitialization();
 
   std::string queries[] = {absl::StrCat("@numeric1:[15 +inf] @numeric2:[-inf 20]"),
@@ -2962,19 +2856,7 @@ static void BM_SearchTwoNumericIndexes(benchmark::State& state) {
       {1000000, {250623, 250643, 0, 0}},
   };
 
-  while (state.KeepRunning()) {
-    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
-      const auto& query = queries[i];
-
-      CHECK(algo.Init(query, &params));
-      auto result = algo.Search(&indices);
-      CHECK(result.error.empty());
-
-      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
-      CHECK_EQ(result.total, expected_result);
-      CHECK_EQ(result.ids.size(), expected_result);
-    }
-  }
+  RunSearchBenchmark(state, &indices, queries, expected_results_per_num_docs);
 }
 
 BENCHMARK(BM_SearchTwoNumericIndexes)
@@ -2984,13 +2866,12 @@ BENCHMARK(BM_SearchTwoNumericIndexes)
     ->ArgNames({"num_docs"});
 
 static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG},
-                                  {"numeric", SchemaField::NUMERIC,
-                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  SearchDataset dataset{
+      MakeSimpleSchema({{"tag", SchemaField::TAG},
+                        {"numeric", SchemaField::NUMERIC,
+                         SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}})};
+  auto& indices = dataset.indices;
 
-  SearchAlgorithm algo;
-  QueryParams params;
   default_random_engine rnd;
 
   using NumericType = long long;
@@ -3020,19 +2901,7 @@ static void BM_SearchNumericAndTagIndexes(benchmark::State& state) {
       {1000000, {1528, 1518, 1017}},
   };
 
-  while (state.KeepRunning()) {
-    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
-      const auto& query = queries[i];
-
-      CHECK(algo.Init(query, &params));
-      auto result = algo.Search(&indices);
-      CHECK(result.error.empty());
-
-      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
-      CHECK_EQ(result.total, expected_result);
-      CHECK_EQ(result.ids.size(), expected_result);
-    }
-  }
+  RunSearchBenchmark(state, &indices, queries, expected_results_per_num_docs);
 }
 
 BENCHMARK(BM_SearchNumericAndTagIndexes)
@@ -3042,17 +2911,16 @@ BENCHMARK(BM_SearchNumericAndTagIndexes)
     ->ArgNames({"num_docs"});
 
 static void BM_SearchSeveralNumericAndTagIndexes(benchmark::State& state) {
-  auto schema = MakeSimpleSchema({{"tag", SchemaField::TAG},
-                                  {"numeric1", SchemaField::NUMERIC,
-                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
-                                  {"numeric2", SchemaField::NUMERIC,
-                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
-                                  {"numeric3", SchemaField::NUMERIC,
-                                   SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}});
-  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  SearchDataset dataset{
+      MakeSimpleSchema({{"tag", SchemaField::TAG},
+                        {"numeric1", SchemaField::NUMERIC,
+                         SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+                        {"numeric2", SchemaField::NUMERIC,
+                         SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}},
+                        {"numeric3", SchemaField::NUMERIC,
+                         SchemaField::NumericParams{.block_size = kMaxRangeBlockSize}}})};
+  auto& indices = dataset.indices;
 
-  SearchAlgorithm algo;
-  QueryParams params;
   default_random_engine rnd;
 
   using NumericType = uint16_t;
@@ -3089,19 +2957,7 @@ static void BM_SearchSeveralNumericAndTagIndexes(benchmark::State& state) {
       {1000000, {0, 1, 9}},
   };
 
-  while (state.KeepRunning()) {
-    for (size_t i = 0; i < ABSL_ARRAYSIZE(queries); ++i) {
-      const auto& query = queries[i];
-
-      CHECK(algo.Init(query, &params));
-      auto result = algo.Search(&indices);
-      CHECK(result.error.empty());
-
-      const size_t expected_result = expected_results_per_num_docs[num_docs][i];
-      CHECK_EQ(result.total, expected_result);
-      CHECK_EQ(result.ids.size(), expected_result);
-    }
-  }
+  RunSearchBenchmark(state, &indices, queries, expected_results_per_num_docs);
 }
 
 BENCHMARK(BM_SearchSeveralNumericAndTagIndexes)
