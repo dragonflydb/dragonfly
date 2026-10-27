@@ -74,6 +74,9 @@ using CategoryToCommandsIndexStore = absl::flat_hash_map<std::string, std::vecto
 constexpr uint32_t NONE = 0;
 constexpr uint32_t ALL = std::numeric_limits<uint32_t>::max();
 
+// The db index of a user that may access all databases.
+constexpr size_t kAllDbs = std::numeric_limits<size_t>::max();
+
 enum class KeyOp : int8_t { READ, WRITE, READ_WRITE };
 
 using GlobType = std::pair<std::string, KeyOp>;
