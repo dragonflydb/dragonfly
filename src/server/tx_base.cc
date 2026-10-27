@@ -71,6 +71,12 @@ void RecordDelete(DbIndex dbid, string_view key) {
   journal::RecordEntry(0, journal::Op::COMMAND, dbid, KeySlot(key), Payload("DEL", ArgSlice{key}));
 }
 
+void RecordExpiryAtomic(DbIndex dbid, std::string_view key) {
+  DCHECK(!journal::GetFlushMode());
+
+  RecordDelete(dbid, key);
+}
+
 LockTag::LockTag(std::string_view key) {
   if (LockTagOptions::instance().enabled)
     str_ = LockTagOptions::instance().Tag(key);

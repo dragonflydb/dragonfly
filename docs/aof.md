@@ -673,7 +673,7 @@ Two options are under consideration.
     ([string_family.cc](../src/server/string_family.cc), `DeleteExpiredKey`);
   - the expire family journals an elapsed deadline as `DEL`, and otherwise as
     `PEXPIREAT <absolute>` ([generic_family.cc](../src/server/generic_family.cc));
-  - lazy and active expiry are journaled as `DEL` (`RecordExpiryBlocking`), and expired set
+  - lazy and active expiry are journaled as `DEL` (`RecordExpiryAtomic`), and expired set
     members as `SREM`.
 
   So every deadline in the log was still in the future when its command ran, and every expiry the
