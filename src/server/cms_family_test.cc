@@ -28,17 +28,21 @@ TEST_F(CmsFamilyTest, InitByDim) {
 }
 
 TEST_F(CmsFamilyTest, InitByDimRejectsOversizedDimensionsAndPreservesState) {
-  auto resp = Run({"cms.initbydim", "k", "2147483648", "1073741824"});
-  EXPECT_THAT(resp, ErrArg("width must not exceed"));
-  EXPECT_THAT(Run({"exists", "k"}), IntArg(0));
-
-  resp = Run({"cms.incrby", "k", "a", "1"});
-  EXPECT_THAT(resp, ErrArg("CMS: key does not exist"));
-  EXPECT_THAT(Run({"exists", "k"}), IntArg(0));
-
-  EXPECT_EQ(Run({"cms.initbydim", "safe", "100", "5"}), "OK");
-  EXPECT_THAT(Run({"cms.incrby", "safe", "a", "1"}), RespElementsAre(IntArg(1)));
-  EXPECT_THAT(Run({"cms.query", "safe", "a"}), RespElementsAre(IntArg(1)));
+  CheckCommandCases({
+      {"oversized_dimensions",
+       "cms.initbydim k 2147483648 1073741824",
+       ErrArg("width must not exceed"),
+       {},
+       {{"exists k", IntArg(0)}}},
+      {"increment_missing_key",
+       "cms.incrby k a 1",
+       ErrArg("CMS: key does not exist"),
+       {},
+       {{"exists k", IntArg(0)}}},
+  });
+  EXPECT_EQ(Run("cms.initbydim safe 100 5"), "OK");
+  EXPECT_THAT(Run("cms.incrby safe a 1"), RespElementsAre(IntArg(1)));
+  EXPECT_THAT(Run("cms.query safe a"), RespElementsAre(IntArg(1)));
 }
 
 TEST_F(CmsFamilyTest, InitByProb) {

@@ -10,6 +10,7 @@ namespace dfly {
 using facade::RespArray;
 using facade::RespElementsAre;
 using testing::ElementsAre;
+using testing::Eq;
 using testing::HasSubstr;
 
 class TopkFamilyTest : public BaseFamilyTest {
@@ -146,87 +147,80 @@ TEST_F(TopkFamilyTest, ReserveDecayOne) {
                                           "decay", "1")));
 }
 
-// Tests that TOPK.RESERVE fails when k=0.
-TEST_F(TopkFamilyTest, ReserveKZero) {
-  EXPECT_THAT(Run({"topk.reserve", "tk", "0"}), ErrArg("k must be greater than 0"));
-}
-
-// Tests that TOPK.RESERVE fails when k is negative (parsed as uint, so invalid).
-TEST_F(TopkFamilyTest, ReserveKNegative) {
-  auto resp = Run({"topk.reserve", "tk", "-1"});
-  EXPECT_THAT(resp, ErrArg("not an integer"));
-}
-
-// Tests that TOPK.RESERVE fails when k is not a number.
-TEST_F(TopkFamilyTest, ReserveKNotANumber) {
-  auto resp = Run({"topk.reserve", "tk", "abc"});
-  EXPECT_THAT(resp, ErrArg("not an integer"));
-}
-
-// Tests that TOPK.RESERVE fails when width=0.
-TEST_F(TopkFamilyTest, ReserveWidthZero) {
-  EXPECT_THAT(Run({"topk.reserve", "tk", "5", "0", "7", "0.9"}),
-              ErrArg("width and depth must be greater than 0"));
-}
-
-// Tests that TOPK.RESERVE fails when depth=0.
-TEST_F(TopkFamilyTest, ReserveDepthZero) {
-  EXPECT_THAT(Run({"topk.reserve", "tk", "5", "8", "0", "0.9"}),
-              ErrArg("width and depth must be greater than 0"));
-}
-
-// Tests that TOPK.RESERVE fails when decay > 1.0.
-TEST_F(TopkFamilyTest, ReserveDecayAboveOne) {
-  EXPECT_THAT(Run({"topk.reserve", "tk", "5", "8", "7", "1.5"}),
-              ErrArg("decay must be between 0 and 1"));
-}
-
-// Tests that TOPK.RESERVE fails when decay is negative.
-TEST_F(TopkFamilyTest, ReserveDecayNegative) {
-  EXPECT_THAT(Run({"topk.reserve", "tk", "5", "8", "7", "-0.1"}),
-              ErrArg("decay must be between 0 and 1"));
+TEST_F(TopkFamilyTest, ReserveValidation) {
+  CheckCommandCases({
+      {"zero_k",
+       "topk.reserve tk 0",
+       ErrArg("k must be greater than 0"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"negative_k",
+       "topk.reserve tk -1",
+       ErrArg("not an integer"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"invalid_k",
+       "topk.reserve tk abc",
+       ErrArg("not an integer"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"zero_width",
+       "topk.reserve tk 5 0 7 0.9",
+       ErrArg("width and depth must be greater than 0"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"zero_depth",
+       "topk.reserve tk 5 8 0 0.9",
+       ErrArg("width and depth must be greater than 0"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"decay_above_one",
+       "topk.reserve tk 5 8 7 1.5",
+       ErrArg("decay must be between 0 and 1"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"negative_decay",
+       "topk.reserve tk 5 8 7 -0.1",
+       ErrArg("decay must be between 0 and 1"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"missing_k",
+       "topk.reserve tk",
+       ErrArg("wrong number of arguments"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"missing_depth_decay",
+       "topk.reserve tk 5 100",
+       ErrArg("syntax error"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"missing_decay",
+       "topk.reserve tk 5 100 7",
+       ErrArg("syntax error"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"trailing_args",
+       "topk.reserve tk 5 8 7 0.9 extra",
+       ErrArg("syntax error"),
+       {},
+       {{"exists tk", IntArg(0)}}},
+      {"width_cap",
+       "topk.reserve tk1 50 1000001 7 0.9",
+       ErrArg("must not exceed"),
+       {},
+       {{"exists tk1", IntArg(0)}}},
+      {"depth_cap",
+       "topk.reserve tk2 50 100000 101 0.9",
+       ErrArg("must not exceed"),
+       {},
+       {{"exists tk2", IntArg(0)}}},
+  });
 }
 
 // Tests that TOPK.RESERVE rejects a duplicate key (already exists as TOPK).
 TEST_F(TopkFamilyTest, ReserveDuplicateKey) {
   ReserveDefault("tk", 5);
   EXPECT_THAT(Run({"topk.reserve", "tk", "10"}), ErrArg("item exists"));
-}
-
-// Tests that TOPK.RESERVE fails with too few arguments (missing k).
-TEST_F(TopkFamilyTest, ReserveTooFewArgs) {
-  auto resp = Run({"topk.reserve", "tk"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
-}
-
-// Tests that TOPK.RESERVE with partial optional params fails (all-or-nothing:
-// exactly 3 or 6 args after command name). Providing only width without depth/decay
-// should fail.
-TEST_F(TopkFamilyTest, ReservePartialOptionalParams) {
-  // Only width, missing depth and decay — parser OUT_OF_BOUNDS → syntax error
-  auto resp = Run({"topk.reserve", "tk", "5", "100"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // width + depth, missing decay
-  resp = Run({"topk.reserve", "tk", "5", "100", "7"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-}
-
-// Tests that TOPK.RESERVE fails with trailing garbage arguments after valid params.
-TEST_F(TopkFamilyTest, ReserveTrailingArgs) {
-  EXPECT_THAT(Run({"topk.reserve", "tk", "5", "8", "7", "0.9", "extra"}), ErrArg("syntax error"));
-}
-
-// Tests that TOPK.RESERVE safely rejects dimensions that exceed our hard caps,
-// preventing massive memory allocations (DoS protection).
-TEST_F(TopkFamilyTest, ReserveDimensionsExceedCaps) {
-  // width = 1,000,001 (exceeds kMaxWidth of 1,000,000)
-  auto resp1 = Run({"topk.reserve", "tk1", "50", "1000001", "7", "0.9"});
-  EXPECT_THAT(resp1, ErrArg("must not exceed"));
-
-  // depth = 101 (exceeds kMaxDepth of 100)
-  auto resp2 = Run({"topk.reserve", "tk2", "50", "100000", "101", "0.9"});
-  EXPECT_THAT(resp2, ErrArg("must not exceed"));
 }
 
 // =============================================================================
@@ -368,43 +362,40 @@ TEST_F(TopkFamilyTest, IncrByMaxIncrement) {
   EXPECT_THAT(resp, RespElementsAre(ArgType(RespExpr::NIL)));
 }
 
-// Tests that TOPK.INCRBY with increment=0 returns an error.
-TEST_F(TopkFamilyTest, IncrByZeroIncrement) {
-  ReserveDefault("tk", 5);
-  EXPECT_THAT(IncrByItem("tk", "foo", 0), ErrArg("increment must be between 1 and 100000"));
+TEST_F(TopkFamilyTest, IncrByValidation) {
+  CheckCommandCases({
+      {"zero_increment",
+       "topk.incrby tk foo 0",
+       ErrArg("increment must be between 1 and 100000"),
+       {{"FLUSHDB", Eq("OK")}, {"topk.reserve tk 5", Eq("OK")}},
+       {{"topk.query tk foo bar", RespElementsAre(IntArg(0), IntArg(0))}}},
+      {"excess_increment",
+       "topk.incrby tk foo 100001",
+       ErrArg("increment must be between 1 and 100000"),
+       {{"FLUSHDB", Eq("OK")}, {"topk.reserve tk 5", Eq("OK")}},
+       {{"topk.query tk foo bar", RespElementsAre(IntArg(0), IntArg(0))}}},
+      {"invalid_increment",
+       "topk.incrby tk foo notanumber",
+       ErrArg("not an integer"),
+       {{"FLUSHDB", Eq("OK")}, {"topk.reserve tk 5", Eq("OK")}},
+       {{"topk.query tk foo bar", RespElementsAre(IntArg(0), IntArg(0))}}},
+      {"missing_increment",
+       "topk.incrby tk foo",
+       ErrArg("wrong number of arguments"),
+       {{"FLUSHDB", Eq("OK")}, {"topk.reserve tk 5", Eq("OK")}},
+       {{"topk.query tk foo bar", RespElementsAre(IntArg(0), IntArg(0))}}},
+      {"odd_pairs",
+       "topk.incrby tk foo 1 bar",
+       ErrArg("syntax error"),
+       {{"FLUSHDB", Eq("OK")}, {"topk.reserve tk 5", Eq("OK")}},
+       {{"topk.query tk foo bar", RespElementsAre(IntArg(0), IntArg(0))}}},
+      {"no_items",
+       "topk.incrby tk",
+       ErrArg("wrong number of arguments"),
+       {{"FLUSHDB", Eq("OK")}, {"topk.reserve tk 5", Eq("OK")}},
+       {{"topk.query tk foo bar", RespElementsAre(IntArg(0), IntArg(0))}}},
+  });
 }
-
-// Tests that TOPK.INCRBY with increment > 100000 returns an error.
-TEST_F(TopkFamilyTest, IncrByExceedsMaxIncrement) {
-  ReserveDefault("tk", 5);
-  EXPECT_THAT(Run({"topk.incrby", "tk", "foo", "100001"}),
-              ErrArg("increment must be between 1 and 100000"));
-}
-
-// Tests that TOPK.INCRBY with a non-numeric increment returns an error.
-TEST_F(TopkFamilyTest, IncrByNonNumericIncrement) {
-  ReserveDefault("tk", 5);
-  EXPECT_THAT(Run({"topk.incrby", "tk", "foo", "notanumber"}), ErrArg("not an integer"));
-}
-
-// Tests that TOPK.INCRBY with an odd number of item/incr arguments (missing the
-// increment for the last item) returns an error. With arity -4, providing only
-// 3 args (key + 1 item) is rejected by the framework; providing 5 args
-// (key + item + incr + item) hits the handler's syntax check.
-TEST_F(TopkFamilyTest, IncrByOddArgs) {
-  ReserveDefault("tk", 5);
-  // 3 args total: rejected by CommandRegistry arity check
-  EXPECT_THAT(Run({"topk.incrby", "tk", "foo"}), ErrArg("wrong number of arguments"));
-  // 5 args total: passes arity, but handler sees odd item/incr pairs
-  EXPECT_THAT(Run({"topk.incrby", "tk", "foo", "1", "bar"}), ErrArg("syntax error"));
-}
-
-// Tests that TOPK.INCRBY with no item/incr pairs returns an error.
-TEST_F(TopkFamilyTest, IncrByNoItems) {
-  ReserveDefault("tk", 5);
-  EXPECT_THAT(Run({"topk.incrby", "tk"}), ErrArg("wrong number of arguments"));
-}
-
 // =============================================================================
 // V. TOPK.QUERY
 // =============================================================================

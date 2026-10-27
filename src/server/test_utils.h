@@ -98,6 +98,26 @@ class BaseFamilyTest : public ::testing::Test {
 
   void RunMany(const std::vector<std::vector<std::string>>& cmds);
 
+  struct CommandCheck {
+    std::string command;
+    testing::Matcher<RespExpr> expected;
+  };
+
+  struct CommandCase {
+    std::string_view name;
+    std::string command;
+    testing::Matcher<RespExpr> expected;
+    std::vector<CommandCheck> setup = {};
+    std::vector<CommandCheck> postconditions = {};
+  };
+
+  // Execute cases in order, preserving state between them unless setup explicitly resets it.
+  void CheckCommandCases(std::initializer_list<CommandCase> cases);
+
+  // Shared LMPOP/ZMPOP syntax checks, with an optional blocking timeout prefix.
+  void CheckMPopSyntax(std::string_view command, std::string_view timeout,
+                       std::string_view direction, std::string_view alternate_direction);
+
   using MCResponse = std::vector<std::string>;
 
   struct MCArgs {
