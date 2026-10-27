@@ -673,9 +673,6 @@ class DbSlice {
   // and this is not a replica that leaves expiry to its master)
   bool AllowExpiredDeletions() const;
 
-  OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
-                                           std::optional<unsigned> req_obj_type);
-
   OpResult<PrimeIterator> FindInternal(const Context& cntx, std::string_view key,
                                        std::optional<unsigned> req_obj_type, LookupMode mode) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,

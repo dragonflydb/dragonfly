@@ -672,10 +672,13 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   if (res->IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, (*res)->second.MallocUsed());
 
-    return {{it, AutoUpdater{cntx.db_index, key, it, this}, false, omitted}};
-  } else {
-    return OpStatus::KEY_NOTFOUND;
+    return {{.it = it,
+             .post_updater = AutoUpdater{cntx.db_index, key, it, this},
+             .is_new = false,
+             .omitted_journal = omitted}};
   }
+
+  return OpStatus::KEY_NOTFOUND;
 }
 
 DbSlice::ConstIterator DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
@@ -795,38 +798,14 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key,
                                                    std::optional<unsigned> req_obj_type) {
-  return AddOrFindInternal(cntx, key, req_obj_type);
-}
-
-OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, string_view key,
-                                                           std::optional<unsigned> req_obj_type) {
   DCHECK(IsDbValid(cntx.db_index));
 
-  auto res = FindInternal(cntx, key, req_obj_type, LookupMode::kMutable);
-
-  if (res.ok()) {
-    Iterator it(*res, StringOrView::FromView(key));
-
-    bool omitted_journal = IsOmittableWrite(cntx, ChangeReq{it.GetInnerIt()});
-    if (!omitted_journal)
-      PreUpdateBlocking(cntx.db_index, it);
-
-    // PreUpdate() might have caused a deletion of `it`
-    if (res->IsOccupied()) {
-      return ItAndUpdater{.it = it,
-                          .post_updater{cntx.db_index, key, it, this},
-                          .is_new = false,
-                          .omitted_journal = omitted_journal};
-    } else {
-      res = OpStatus::KEY_NOTFOUND;
-    }
-  } else if (res == OpStatus::WRONG_TYPE) {
-    return OpStatus::WRONG_TYPE;
-  }
+  auto res = FindMutableInternal(cntx, key, req_obj_type);
+  if (res.ok() || res.status() == OpStatus::WRONG_TYPE)
+    return res;
 
   // It's a new entry.
-  auto status = res.status();
-  CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
+  CHECK(res.status() == OpStatus::KEY_NOTFOUND) << res.status();
 
   // Call change callbacks on the computed set of buckets that can be affected by the insert
   bool omit_journal = false;
