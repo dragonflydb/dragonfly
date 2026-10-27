@@ -97,7 +97,7 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 }
 
 string IndexNotFoundMsg(string_view index_name) {
-  return absl::StrCat("Index with name '", index_name, "' not found");
+  return absl::StrCat(index_name, ": no such index");
 }
 
 std::string ResolveIndexName(string_view requested_name) {
@@ -2407,7 +2407,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   if (needs_global_stats && !CollectGlobalScoringStats(resolved_name, text_algo, cmd_cntx->tx(),
                                                        shard_count, global_stats)) {
     cmd_cntx->tx()->Conclude();
-    cmd_cntx->SendError(string{index_name} + ": no such index");
+    cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     return false;
   }
   const search::GlobalScoringStats* stats_ptr = needs_global_stats ? &global_stats : nullptr;
@@ -2501,7 +2501,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     cmd_cntx->tx()->ScheduleSingleHop(std::move(shard_cb));
 
   if (index_not_found.load(std::memory_order_relaxed)) {
-    cmd_cntx->SendError(string{index_name} + ": no such index");
+    cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     return false;
   }
   if (vsim_not_vector) {
@@ -2761,19 +2761,22 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // First, extract existing index info
   shared_ptr<DocIndex> index_info;
-  auto idx_cb = [idx_name, &index_info](auto* tx, EngineShard* es) {
+  std::string canonical_name;
+  auto idx_cb = [idx_name, &index_info, &canonical_name](auto* tx, EngineShard* es) {
     if (es->shard_id() > 0)  // all shards have the same data, fetch from first
       return OpStatus::OK;
 
-    if (auto* idx = es->search_indices()->GetIndex(idx_name); idx != nullptr)
+    if (auto* idx = es->search_indices()->ResolveIndex(idx_name); idx != nullptr) {
       index_info = make_shared<DocIndex>(idx->base());
+      canonical_name = idx->base().name;
+    }
     return OpStatus::OK;
   };
   cmd_cntx->tx()->Execute(idx_cb, false);
 
   if (!index_info) {
     cmd_cntx->tx()->Conclude();
-    return cmd_cntx->SendError("Index not found");
+    return cmd_cntx->SendError(IndexNotFoundMsg(idx_name));
   }
 
   // Parse the additional attributes into the copied definition: they continue its declaration
@@ -2784,25 +2787,25 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
     cmd_cntx->tx()->Conclude();
     return;
   }
-  if (!CreateHnswIndices(idx_name, *index_info, first_added)) {
+  if (!CreateHnswIndices(canonical_name, *index_info, first_added)) {
     cmd_cntx->tx()->Conclude();
     return cmd_cntx->SendError("Index already exists");
   }
 
-  LOG(INFO) << "Altering " << idx_name << ": "
+  LOG(INFO) << "Altering " << canonical_name << ": "
             << DocIndexInfo{.base_index = *index_info, .hnsw_metadata = {}}.BuildRestoreCommand();
 
   // Rebuild index
   // TODO: Introduce partial rebuild
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
-  auto upd_cb = [idx_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
-    unique_ptr<ShardDocIndex> old_index = es->search_indices()->ExtractIndex(idx_name);
+  auto upd_cb = [canonical_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
+    unique_ptr<ShardDocIndex> old_index = es->search_indices()->ExtractIndex(canonical_name);
     Synonyms synonyms = old_index ? old_index->GetSynonyms() : Synonyms{};
     // Destroying the old index waits for its builder, so the replacement builder never runs next
     // to it on the same global vector index. The old index is already unregistered, so no new
     // caller can reach that builder meanwhile.
     old_index.reset();
-    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal,
+    es->search_indices()->InitIndex(tx->GetOpArgs(es), canonical_name, index_info, is_journal,
                                     std::move(synonyms));
     return OpStatus::OK;
   };
@@ -2818,6 +2821,7 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool delete_docs = parser.Check("DD");
 
   shared_ptr<DocIndex> index_info;
+  std::string canonical_name;
   atomic_uint num_deleted{0};
 
   // Collect dropped indices per shard. We must NOT destroy ShardDocIndex inside the transaction
@@ -2827,14 +2831,18 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
   vector<unique_ptr<ShardDocIndex>> dropped(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* es) {
-    // Get index info from first shard for global cleanup
+    // Resolve the alias on each shard before dropping the canonical index name.
+    auto* idx = es->search_indices()->ResolveIndex(idx_name);
+    if (!idx)
+      return OpStatus::OK;
+
+    const std::string shard_index_name = idx->base().name;
     if (es->shard_id() == 0) {
-      if (auto* idx = es->search_indices()->GetIndex(idx_name); idx != nullptr) {
-        index_info = make_shared<DocIndex>(idx->base());
-      }
+      index_info = make_shared<DocIndex>(idx->base());
+      canonical_name = shard_index_name;
     }
-    // Drop the index and get its pointer
-    auto index = es->search_indices()->DropIndex(idx_name);
+
+    auto index = es->search_indices()->DropIndex(shard_index_name);
     if (!index)
       return OpStatus::OK;
 
@@ -2873,7 +2881,7 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
     for (const auto& [alias, field_info] : index_info->schema.fields) {
       if (field_info.type == search::SchemaField::VECTOR &&
           !(field_info.flags & search::SchemaField::NOINDEX)) {
-        if (GlobalHnswIndexRegistry::Instance().Remove(idx_name, alias)) {
+        if (GlobalHnswIndexRegistry::Instance().Remove(canonical_name, alias)) {
           num_deleted.fetch_add(1);
         }
       }
@@ -2906,7 +2914,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (num_notfound > 0u)
-    return rb->SendError(absl::StrCat(idx_name, ": no such index"));
+    return rb->SendError(IndexNotFoundMsg(idx_name));
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
@@ -3221,7 +3229,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     if (index_not_found.load(memory_order_relaxed)) {
       cmd_cntx->tx()->Conclude();  // phase 1 ran with conclude=false
-      return cmd_cntx->SendError(string{index_name} + ": no such index");
+      return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     }
 
     for (auto& s : shard_stats)
@@ -3257,7 +3265,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (index_not_found.load(memory_order_relaxed)) {
       if (knn_has_prefilter)
         cmd_cntx->tx()->Conclude();
-      return cmd_cntx->SendError(string{index_name} + ": no such index");
+      return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     }
 
     if (knn_has_prefilter) {
@@ -3526,7 +3534,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
       if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
         cmd_cntx->tx()->Conclude();
-        return rb->SendError(string{index_name} + ": no such index");
+        return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
     }
@@ -3554,7 +3562,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
       if (index_not_found.load(memory_order_relaxed)) {
         cmd_cntx->tx()->Conclude();
-        return rb->SendError(string{index_name} + ": no such index");
+        return rb->SendError(IndexNotFoundMsg(index_name));
       }
 
       bool empty_prefilter_result = true;
@@ -3652,7 +3660,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
       if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
         cmd_cntx->tx()->Conclude();
-        return rb->SendError(string{index_name} + ": no such index");
+        return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
     }
@@ -3674,7 +3682,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
         true);
 
     if (index_not_found.load(memory_order_relaxed))
-      return rb->SendError(string{index_name} + ": no such index");
+      return rb->SendError(IndexNotFoundMsg(index_name));
 
     bool result_is_empty = true;
     for (const auto& res : prefilter_results) {
@@ -3714,7 +3722,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                    global_scoring_stats)) {
       cmd_cntx->tx()->Conclude();
-      return rb->SendError(std::string{index_name} + ": no such index");
+      return rb->SendError(IndexNotFoundMsg(index_name));
     }
     global_stats_ptr = &global_scoring_stats;
   }
@@ -3741,7 +3749,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
 
   if (index_not_found.load())
-    return rb->SendError(string{index_name} + ": no such index");
+    return rb->SendError(IndexNotFoundMsg(index_name));
 
   auto took = absl::Now() - start;
 
@@ -4214,7 +4222,7 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
       true);
 
   if (index_not_found.load(std::memory_order_relaxed))
-    return rb->SendError("Unknown index name");
+    return rb->SendError(IndexNotFoundMsg(index_name));
 
   // Merge data from all shards into a single map
   absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> merged_term_groups;
@@ -4377,7 +4385,7 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
       true);
 
   if (index_not_found.load(std::memory_order_relaxed))
-    return cmd_cntx->SendError(string{index_name} + ": no such index");
+    return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
 
   cmd_cntx->rb()->SendOk();
 }
