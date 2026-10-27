@@ -429,7 +429,7 @@ TEST_F(SearchFamilyTest, CreateDropListIndex) {
   EXPECT_THAT(Run({"ft.create", "idx-1", "ON", "HASH", "SCHEMA", "f", "TEXT"}),
               ErrArg("Index already exists"));
 
-  EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("Index with name 'idx-100' not found"));
+  EXPECT_THAT(Run({"ft.dropindex", "idx-100"}), ErrArg("idx-100: no such index"));
 
   EXPECT_EQ(Run({"ft.dropindex", "idx-1"}), "OK");
   EXPECT_THAT(Run({"ft._list"}), RespElementsAre("idx-3"));
@@ -448,6 +448,229 @@ TEST_F(SearchFamilyTest, AliasCommandsLifecycle) {
   EXPECT_EQ(Run({"FT.ALIASUPDATE", "upserted", "idx-b"}), "OK");
   EXPECT_THAT(Run({"FT.ALIASADD", "upserted", "idx-a"}), ErrArg("Alias already exists"));
   EXPECT_EQ(Run({"FT.ALIASDEL", "upserted"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, AliasResolvesInInfoAndSearch) {
+  ASSERT_THAT(Run({"HSET", "a:1", "title", "first"}), IntArg(1));
+  ASSERT_THAT(Run({"HSET", "b:1", "title", "second"}), IntArg(1));
+  ASSERT_EQ(
+      Run({"FT.CREATE", "idx-a", "ON", "HASH", "PREFIX", "1", "a:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  ASSERT_EQ(
+      Run({"FT.CREATE", "idx-b", "ON", "HASH", "PREFIX", "1", "b:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  WaitForIndexReady("idx-a");
+  WaitForIndexReady("idx-b");
+
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx-a"}), "OK");
+  EXPECT_EQ(map_string("index_name", Run({"FT.INFO", "live"}).GetVec()), "idx-a");
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "*"}), AreDocIds("a:1"));
+
+  ASSERT_EQ(Run({"FT.ALIASUPDATE", "live", "idx-b"}), "OK");
+  EXPECT_EQ(map_string("index_name", Run({"FT.INFO", "live"}).GetVec()), "idx-b");
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "*"}), AreDocIds("b:1"));
+
+  ASSERT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
+  EXPECT_THAT(Run({"FT.INFO", "live"}), ErrArg("live: no such index"));
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "*"}), ErrArg("live: no such index"));
+}
+
+TEST_F(SearchFamilyTest, CreateRejectsAliasName) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  EXPECT_THAT(Run({"FT.CREATE", "live", "ON", "HASH", "SCHEMA", "title", "TEXT"}),
+              ErrArg("Index already exists"));
+  EXPECT_THAT(Run({"FT.CREATE", "live", "NX", "ON", "HASH", "SCHEMA", "title", "TEXT"}),
+              ErrArg("Index already exists"));
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "NX", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+}
+
+TEST_F(SearchFamilyTest, DropIndexRemovesIndexAndAlias) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  ASSERT_EQ(Run({"FT.DROPINDEX", "idx"}), "OK");
+  EXPECT_THAT(Run({"FT.INFO", "idx"}), ErrArg("idx: no such index"));
+  EXPECT_THAT(Run({"FT.ALIASDEL", "live"}), ErrArg("Alias does not exist"));
+}
+
+TEST_F(SearchFamilyTest, DropIndexResolvesAlias) {
+  for (bool delete_docs : {false, true}) {
+    ASSERT_THAT(Run({"HSET", "d:1", "title", "hello"}), IntArg(delete_docs ? 0 : 1));
+    ASSERT_EQ(
+        Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+        "OK");
+    WaitForIndexReady("idx");
+    ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+    ASSERT_EQ(Run({"FT.ALIASADD", "other", "idx"}), "OK");
+
+    ASSERT_EQ(delete_docs ? Run({"FT.DROPINDEX", "live", "DD"}) : Run({"FT.DROPINDEX", "live"}),
+              "OK");
+    EXPECT_THAT(Run({"FT.INFO", "idx"}), ErrArg("idx: no such index"));
+    EXPECT_THAT(Run({"FT.ALIASDEL", "live"}), ErrArg("Alias does not exist"));
+    EXPECT_THAT(Run({"FT.ALIASDEL", "other"}), ErrArg("Alias does not exist"));
+    EXPECT_THAT(Run({"EXISTS", "d:1"}), IntArg(delete_docs ? 0 : 1));
+    EXPECT_THAT(Run({"FT.DROPINDEX", "live"}), ErrArg("live: no such index"));
+  }
+}
+
+TEST_F(SearchFamilyTest, AlterResolvesAndPreservesAlias) {
+  ASSERT_THAT(Run({"HSET", "d:1", "color", "red"}), IntArg(1));
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  ASSERT_EQ(Run({"FT.ALTER", "live", "SCHEMA", "ADD", "color", "TAG"}), "OK");
+  WaitForIndexReady("idx");
+  EXPECT_EQ(map_string("index_name", Run({"FT.INFO", "live"}).GetVec()), "idx");
+  EXPECT_THAT(Run({"FT.SEARCH", "live", "@color:{red}"}), AreDocIds("d:1"));
+}
+
+TEST_F(SearchFamilyTest, AlterAndDropAliasWithHnsw) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "title", "TEXT"}),
+            "OK");
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+  ASSERT_THAT(Run({"HSET", "h:1", "vec", FloatVec1(1)}), IntArg(1));
+  ASSERT_EQ(Run("FT.ALTER live SCHEMA ADD vec VECTOR HNSW 6 TYPE FLOAT32 DIM 1 "
+                "DISTANCE_METRIC L2"),
+            "OK");
+  WaitForIndexReady("idx");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*=>[KNN 1 @vec $q]", "PARAMS", "2", "q", FloatVec1(1),
+                   "NOCONTENT"}),
+              IsArray(IntArg(1), "h:1"));
+
+  ASSERT_EQ(Run({"FT.DROPINDEX", "live"}), "OK");
+
+  // Reusing the canonical name and vector field requires the old registry entry to be removed.
+  EXPECT_EQ(Run("FT.CREATE idx ON HASH SCHEMA vec VECTOR HNSW 6 TYPE FLOAT32 DIM 1 "
+                "DISTANCE_METRIC L2"),
+            "OK");
+}
+
+TEST_F(SearchFamilyTest, TagValsResolvesAlias) {
+  ASSERT_THAT(Run({"HSET", "a:1", "color", "red"}), IntArg(1));
+  ASSERT_THAT(Run({"HSET", "b:1", "color", "blue"}), IntArg(1));
+  for (string_view prefix : {"a:", "b:"}) {
+    ASSERT_EQ(
+        Run({"FT.CREATE", prefix, "ON", "HASH", "PREFIX", "1", prefix, "SCHEMA", "color", "TAG"}),
+        "OK");
+    WaitForIndexReady(prefix);
+  }
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "a:"}), "OK");
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), IsUnordArray("red"));
+  ASSERT_EQ(Run({"FT.ALIASUPDATE", "live", "b:"}), "OK");
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), IsUnordArray("blue"));
+  ASSERT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
+  EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), ErrArg("live: no such index"));
+}
+
+TEST_F(SearchFamilyTest, AliasNameResolutionWithoutIndex) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  pp_->at(0)->Await([] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    // Reproduce the gap in FT.ALTER: the local index is removed, but its aliases remain.
+    auto index = indices->ExtractIndex("idx");
+    ASSERT_NE(index, nullptr);
+    ASSERT_EQ(indices->GetIndex("idx"), nullptr);
+
+    EXPECT_EQ(indices->ResolveIndexName("idx"), "idx");
+    EXPECT_EQ(indices->ResolveIndexName("live"), "idx");
+    EXPECT_EQ(indices->ResolveIndexName("missing"), "missing");
+  });
+}
+
+TEST_F(SearchFamilyTest, HnswAliasConcludesTransactions) {
+  CreateHnswHashIdx();
+  const string query = FloatVec1(1.0f);
+  ASSERT_THAT(Run({"HSET", "h:1", "title", "hello", "vec", query}), IntArg(2));
+  ASSERT_THAT(Run({"HSET", "h:2", "title", "other", "vec", FloatVec1(2.0f)}), IntArg(2));
+  WaitForIndexReady("idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  // Each error is followed by an HSET, which would block if the transaction was left open.
+
+  // FT.SEARCH
+  auto search = [&](string_view q, string_view v) {
+    return Run({"FT.SEARCH", "live", q, "PARAMS", "2", "v", v});
+  };
+  EXPECT_THAT(search("* => [KNN 1 @vec $v]", query), AreDocIds("h:1"));
+  EXPECT_THAT(search("@title:hello => [KNN 1 @vec $v]", query), AreDocIds("h:1"));
+  EXPECT_THAT(search("@title:missing => [KNN 1 @vec $v]", query), kNoResults);
+  EXPECT_THAT(search("@vec:[VECTOR_RANGE 0.5 $v]", query), AreDocIds("h:1"));
+  EXPECT_THAT(search("(@vec:[VECTOR_RANGE 0.5 $v] @title:hello)", query), AreDocIds("h:1"));
+  EXPECT_THAT(search("@title:hello => [KNN 1 @vec $v]", "bad"),
+              ErrArg("Parse error of vector parameters"));
+  EXPECT_THAT(Run({"HSET", "h:1", "search", "after-error"}), IntArg(1));
+
+  // FT.AGGREGATE
+  EXPECT_THAT(Run({"FT.AGGREGATE", "live", "hello", "LOAD", "1", "@title"}),
+              IsUnordArrayWithSize(IsMap("title", "hello")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "missing_alias", "*"}), kNoResults);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "live", "*=>[KNN 1 @vec $v AS dist]", "PARAMS", "2", "v", query,
+                   "DIALECT", "2", "LOAD", "1", "@title"}),
+              IsUnordArrayWithSize(IsMap("title", "hello")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "live", "@vec:[VECTOR_RANGE 0.5 $v]", "PARAMS", "2", "v", query,
+                   "LOAD", "1", "@title"}),
+              IsUnordArrayWithSize(IsMap("title", "hello")));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "live", "*=>[KNN 1 @vec $v AS dist]", "PARAMS", "2", "v",
+                   query + query, "DIALECT", "2"}),
+              ErrArg("Wrong vector index dimensions"));
+  EXPECT_THAT(Run({"HSET", "h:1", "aggregate", "after-error"}), IntArg(1));
+
+  // FT.PROFILE SEARCH
+  auto text_resp = Run({"FT.PROFILE", "live", "SEARCH", "QUERY", "hello", "NOCONTENT"});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(text_resp);
+  EXPECT_THAT(text_resp.GetVec()[0], AreNoContentDocIds("h:1"));
+  auto vector_resp = Run({"FT.PROFILE", "live", "SEARCH", "QUERY", "*=>[KNN 1 @vec $v]",
+                          "NOCONTENT", "PARAMS", "2", "v", query});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(vector_resp);
+  EXPECT_THAT(vector_resp.GetVec()[0], AreNoContentDocIds("h:1"));
+
+  // FT.HYBRID
+  auto hybrid = Run({"FT.HYBRID", "live", "SEARCH", "hello", "VSIM", "@vec", "$v", "KNN", "1",
+                     "PARAMS", "2", "v", query});
+  ASSERT_HYBRID_RESP(hybrid);
+  EXPECT_THAT(HybridKeys(hybrid), ElementsAre("h:1"));
+  EXPECT_THAT(Run({"FT.HYBRID", "live", "SEARCH", "hello", "VSIM", "@vec", "$v", "KNN", "1",
+                   "PARAMS", "2", "v", "bad"}),
+              ErrArg("does not match index's expected size"));
+  EXPECT_THAT(Run({"HSET", "h:1", "hybrid", "after-error"}), IntArg(1));
+
+  // FT.PROFILE HYBRID
+  auto profile = Run({"FT.PROFILE", "live", "HYBRID", "QUERY", "SEARCH", "hello", "VSIM", "@vec",
+                      "$v", "KNN", "1", "PARAMS", "2", "v", query});
+  ASSERT_ARRAY_OF_TWO_ARRAYS(profile);
+  ASSERT_HYBRID_RESP(profile.GetVec()[0]);
+  EXPECT_THAT(HybridKeys(profile.GetVec()[0]), ElementsAre("h:1"));
+  EXPECT_THAT(Run({"FT.PROFILE", "live", "HYBRID", "QUERY", "SEARCH", "hello", "VSIM", "@vec", "$v",
+                   "KNN", "1", "PARAMS", "2", "v", "bad"}),
+              ErrArg("does not match index's expected size"));
+  EXPECT_THAT(Run({"HSET", "h:1", "profile", "after-error"}), IntArg(1));
+}
+
+TEST_F(SearchFamilyTest, FtAggregateJoinResolvesAliases) {
+  ASSERT_EQ(
+      Run({"FT.CREATE", "main_idx", "ON", "HASH", "PREFIX", "1", "main:", "SCHEMA", "key", "TAG"}),
+      "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "foreign_idx", "ON", "HASH", "PREFIX", "1", "foreign:", "SCHEMA",
+                 "key", "TAG", "value", "TEXT"}),
+            "OK");
+  ASSERT_THAT(Run({"HSET", "main:1", "key", "same"}), IntArg(1));
+  ASSERT_THAT(Run({"HSET", "foreign:1", "key", "same", "value", "matched"}), IntArg(2));
+  WaitForIndexReady("main_idx");
+  WaitForIndexReady("foreign_idx");
+  ASSERT_EQ(Run({"FT.ALIASADD", "main_live", "main_idx"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "foreign_live", "foreign_idx"}), "OK");
+
+  EXPECT_THAT(Run({"FT.AGGREGATE", "main_live", "*", "LOAD", "2", "main_live.key", "other.value",
+                   "LOAD_FROM", "foreign_live", "AS", "other", "1", "other.key=main_live.key"}),
+              IsUnordArrayWithSize(IsMap("main_live.key", "same", "other.value", "matched")));
 }
 
 TEST_F(SearchFamilyTest, AliasCommandsErrors) {
@@ -563,7 +786,7 @@ TEST_F(SearchFamilyTest, AlterIndex) {
   EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[100 300]"}), AreDocIds("d:1", "d:2"));
 
   EXPECT_THAT(Run({"ft.alter", "idx-2", "schema", "add", "price", "numeric"}),
-              ErrArg("Index not found"));
+              ErrArg("idx-2: no such index"));
 }
 
 TEST_F(SearchFamilyTest, SuffixPrefixSearch) {
@@ -1197,7 +1420,7 @@ TEST_F(SearchFamilyTest, Tags) {
   EXPECT_EQ(Run({"ft.create", "i1", "on", "hash", "schema", "color", "tag", "dummy", "numeric"}),
             "OK");
   WaitForIndexReady("i1");
-  EXPECT_THAT(Run({"ft.tagvals", "i2", "color"}), ErrArg("Index with name 'i2' not found"));
+  EXPECT_THAT(Run({"ft.tagvals", "i2", "color"}), ErrArg("i2: no such index"));
   EXPECT_THAT(Run({"ft.tagvals", "i1", "foo"}), ErrArg("No such field"));
   EXPECT_THAT(Run({"ft.tagvals", "i1", "dummy"}), ErrArg("Not a tag field"));
   auto resp = Run({"ft.tagvals", "i1", "color"});
@@ -3834,6 +4057,22 @@ TEST_F(SearchFamilyTest, SynonymManagement) {
                                  IsArray("1"), "tiger", IsArray("3"), "cat", IsArray("1")));
 }
 
+TEST_F(SearchFamilyTest, SynonymCommandsResolveAliases) {
+  ASSERT_EQ(
+      Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "doc:", "SCHEMA", "title", "TEXT"}),
+      "OK");
+  WaitForIndexReady("idx");
+  ASSERT_THAT(Run({"HSET", "doc:1", "title", "cat"}), IntArg(1));
+  ASSERT_EQ(Run({"FT.ALIASADD", "live", "idx"}), "OK");
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "live", "animals", "cat", "feline"}), "OK");
+  EXPECT_THAT(Run({"FT.SYNDUMP", "live"}),
+              IsUnordArray("cat", IsArray("animals"), "feline", IsArray("animals")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "feline"}), AreDocIds("doc:1"));
+  ASSERT_EQ(Run({"FT.ALIASDEL", "live"}), "OK");
+  EXPECT_THAT(Run({"FT.SYNDUMP", "live"}), ErrArg("live: no such index"));
+}
+
 TEST_F(SearchFamilyTest, SynonymsSearch) {
   // Create search index
   auto resp =
@@ -4178,8 +4417,8 @@ TEST_F(SearchFamilyTest, AbsentTermKeepsScoreOrder) {
   }
 }
 
-// A hash field with a TTL expires lazily without re-indexing the document, so its posting lists
-// keep a freed DocId once the key is gone. Searches must skip such ids.
+// A hash field with a TTL expires lazily without re-indexing the document. Removing the document
+// must still drop what the field was indexed with, so a reused DocId inherits nothing.
 TEST_F(SearchFamilyTest, FieldExpiryStalePostingIsSkipped) {
   EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
                  "NOSTEM"}),
@@ -4193,11 +4432,98 @@ TEST_F(SearchFamilyTest, FieldExpiryStalePostingIsSkipped) {
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "WITHSCORES"}), kNoResults);
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "LIMIT", "0", "0"}), kNoResults);
 
-  // The freed DocId is reused by d:2 and found through its own term. The stale "hello" posting
-  // now resolves to d:2; dropping it needs content-independent removal (follow-up).
   EXPECT_THAT(Run({"HSET", "d:2", "title", "other"}), IntArg(1));
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "other", "NOCONTENT"}), AreNoContentDocIds("d:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+}
+
+// The kept values go with the document: a hash without TTLs that reuses its DocId is removed by
+// its own content.
+TEST_F(SearchFamilyTest, FieldExpiryValuesGoWithDoc) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  EXPECT_THAT(Run({"HSETEX", "d:1", "100", "title", "hello"}), IntArg(1));
+  EXPECT_THAT(Run({"DEL", "d:1"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "other"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "d:2", "title", "again"}), IntArg(0));
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "other", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "again", "NOCONTENT"}), AreNoContentDocIds("d:2"));
+}
+
+// Removal still expires the fields it takes from the kept values, so deleting the last live field
+// deletes the key.
+TEST_F(SearchFamilyTest, FieldExpiryLastFieldDeleteRemovesKey) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  EXPECT_THAT(Run({"HSETEX", "d:1", "1", "title", "hello"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "d:1", "keep", "x"}), IntArg(1));
+  AdvanceTime(2000);
+
+  EXPECT_THAT(Run({"HDEL", "d:1", "keep"}), IntArg(1));
+  EXPECT_THAT(Run({"EXISTS", "d:1"}), IntArg(0));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "LIMIT", "0", "0"}), kNoResults);
+}
+
+// A document that stays alive keeps its DocId across the HSET bracket.
+TEST_F(SearchFamilyTest, FieldExpiryLiveDocDropsExpiredValues) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx",   "ON",   "HASH",   "PREFIX",  "1",  "d:",
+                 "SCHEMA",    "title", "TEXT", "NOSTEM", "title",   "AS", "title_tag",
+                 "TAG",       "t",     "TAG",  "n",      "NUMERIC", "g",  "GEO"}),
+            "OK");
+  Run({"HSETEX", "d:1", "1", "title", "hello", "t", "red", "n", "5", "g", "13.4,52.5"});
+  AdvanceTime(2000);
+  Run({"HSET", "d:1", "title", "world"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@title_tag:{hello}", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@t:{red}", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@n:[5 5]", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@g:[13.4 52.5 10 km]", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "t"}), ArrLen(0));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "world", "NOCONTENT"}), AreNoContentDocIds("d:1"));
+}
+
+// Removal stems with the language the document was indexed with, even after it expired.
+TEST_F(SearchFamilyTest, FieldExpiryLanguageFieldStems) {
+  Run({"FT.CREATE", "lf_idx", "LANGUAGE", "english", "LANGUAGE_FIELD", "lang", "SCHEMA", "body",
+       "TEXT"});
+  Run({"HSET", "d:de", "body", "wir laufen", "lang", "german"});
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "@body:(lauf)", "NOCONTENT"}),
+              AreNoContentDocIds("d:de"));
+
+  EXPECT_THAT(Run({"FIELDEXPIRE", "d:de", "1", "lang"}), RespElementsAre(IntArg(1)));
+  AdvanceTime(2000);
+  Run({"HSET", "d:de", "body", "nichts"});
+  EXPECT_THAT(Run({"FT.SEARCH", "lf_idx", "@body:(lauf)", "NOCONTENT"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, FieldExpiryIndexBuiltAfterTtl) {
+  Run({"HSETEX", "d:1", "1", "title", "hello"});
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  WaitForIndexReady("idx");
+  AdvanceTime(2000);
+  Run({"HSET", "d:1", "title", "world"});
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+}
+
+TEST_F(SearchFamilyTest, FieldExpirySynUpdateDropsExpiredTerm) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT",
+                 "NOSTEM"}),
+            "OK");
+  Run({"HSET", "d:1", "keep", "x"});
+  Run({"HSETEX", "d:1", "1", "title", "hello"});
+  AdvanceTime(2000);
+
+  EXPECT_EQ(Run({"FT.SYNUPDATE", "idx", "g", "hello", "hi"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hi", "NOCONTENT"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, FtAlterKeepsSynonyms) {
@@ -6483,8 +6809,10 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
       Run({"FT.SEARCH", "users", "jones", "SORTBY", "first_name", "WITHSORTKEYS", "NOCONTENT"}),
       IsArray(IntArg(2), "user1", "$alice", "user2", "$bob"));
 
-  EXPECT_THAT(Run({"FT.SEARCH", "users", "jones", "WITHSORTKEYS", "NOCONTENT"}),
-              IsArray(IntArg(2), "user1", ArgType(RespExpr::NIL), "user2", ArgType(RespExpr::NIL)));
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "users", "jones", "WITHSORTKEYS", "NOCONTENT"}),
+      AnyOf(IsArray(IntArg(2), "user1", ArgType(RespExpr::NIL), "user2", ArgType(RespExpr::NIL)),
+            IsArray(IntArg(2), "user2", ArgType(RespExpr::NIL), "user1", ArgType(RespExpr::NIL))));
 
   EXPECT_THAT(
       Run({"FT.SEARCH", "users", "jones", "SORTBY", "last_name", "WITHSORTKEYS"}),
@@ -7358,6 +7686,74 @@ TEST_F(SearchFamilyTest, SortByNonSortableFieldNullsLast) {
   EXPECT_THAT(ids(Run({"FT.SEARCH", "idx", "@n:[0 100]", "NOCONTENT", "SORTBY", "s", "ASC", "LIMIT",
                        "0", "2"})),
               ElementsAre("d0", "d1"));
+}
+
+// Equal sort values are ordered by key on every shard and on the coordinator, so pages see each
+// document once and DESC is the exact reverse of ASC; SORTABLE and loaded fields alike.
+TEST_F(SearchFamilyTest, SortByPagingWithTiesIsStable) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "s", "NUMERIC", "SORTABLE",
+       "n", "NUMERIC"});
+  vector<string> expected;  // value 0 first, then value 1; keys ascending within a value
+  for (int v = 0; v < 2; v++)
+    for (int i = 0; i < 12; i++)
+      if (i % 2 == v)
+        expected.push_back(absl::StrCat("d:", i));
+  for (int v = 0; v < 2; v++)
+    sort(expected.begin() + v * 6, expected.begin() + v * 6 + 6);
+  for (int i = 0; i < 12; i++)
+    Run({"HSET", absl::StrCat("d:", i), "s", absl::StrCat(i % 2), "n", absl::StrCat(i % 2)});
+
+  for (string_view field : {"s", "n"}) {
+    for (string_view order : {"ASC", "DESC"}) {
+      vector<string> paged;
+      for (int offset = 0; offset < 12; offset += 5) {
+        auto resp = Run({"FT.SEARCH", "idx", "*", "SORTBY", field, order, "NOCONTENT", "LIMIT",
+                         absl::StrCat(offset), "5"});
+        const auto& v = resp.GetVec();
+        for (size_t i = 1; i < v.size(); i++)
+          paged.push_back(string{v[i].GetString()});
+      }
+      vector<string> want = expected;
+      if (order == "DESC")
+        reverse(want.begin(), want.end());
+      EXPECT_EQ(paged, want) << field << " " << order;
+    }
+  }
+}
+
+// Docs without a value in the SORTABLE field (absent or null) rank last in both directions, carry
+// a nil sort key and never take a top-K slot.
+TEST_F(SearchFamilyTest, SortBySortableFieldMissingLast) {
+  Run({"FT.CREATE", "idx", "ON", "JSON", "PREFIX", "1", "j:", "SCHEMA", "$.n", "AS", "n", "NUMERIC",
+       "SORTABLE"});
+  Run({"JSON.SET", "j:1", "$", R"({"n":10})"});
+  Run({"JSON.SET", "j:2", "$", R"({"n":20})"});
+  Run({"JSON.SET", "j:3", "$", R"({})"});
+  Run({"JSON.SET", "j:4", "$", R"({"n":null})"});
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "n", "ASC", "WITHSORTKEYS", "NOCONTENT"}),
+              IsArray(IntArg(4), "j:1", "#10", "j:2", "#20", "j:3", ArgType(RespExpr::NIL), "j:4",
+                      ArgType(RespExpr::NIL)));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "n", "DESC", "WITHSORTKEYS", "NOCONTENT"}),
+              IsArray(IntArg(4), "j:2", "#20", "j:1", "#10", "j:4", ArgType(RespExpr::NIL), "j:3",
+                      ArgType(RespExpr::NIL)));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "n", "DESC", "NOCONTENT", "LIMIT", "0", "2"}),
+              IsArray(IntArg(4), "j:2", "j:1"));
+}
+
+// Postings may still hold DocIds freed by lazy field expiry; SORTBY must rank them without touching
+// their keys and the reply must skip them.
+TEST_F(SearchFamilyTest, SortByOverStalePostingsAfterFieldExpiry) {
+  Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT", "NOSTEM",
+       "n", "NUMERIC", "SORTABLE"});
+  for (string_view key : {"d:1", "d:2"}) {
+    Run({"HSET", key, "title", "hello"});
+    Run({"FIELDEXPIRE", key, "1", "title"});
+  }
+  AdvanceTime(2000);
+  EXPECT_THAT(Run({"HGET", "d:1", "title"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"HGET", "d:2", "title"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "SORTBY", "n", "NOCONTENT"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, NumericIndexRejectsNonFiniteValues) {
@@ -9575,6 +9971,7 @@ TEST_F(SearchFamilyTest, SearchDeletesEmptyHash) {
   for (int i = 0; i < 10; ++i) {
     EXPECT_EQ(0, CheckedInt({"EXISTS", absl::StrCat("d:", i)}));
   }
+  EXPECT_THAT(Run({"ft.search", "idx", "bar0", "LIMIT", "0", "0"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, SynUpdateExpiredDocCrash) {

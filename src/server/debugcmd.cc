@@ -7,6 +7,7 @@
 
 extern "C" {
 #include "redis/redis_aux.h"
+#include "redis/stream.h"
 }
 
 #include <absl/cleanup/cleanup.h>
@@ -153,50 +154,84 @@ const CommandId* GeneratePopulateCommand(string_view type, std::string key, size
 
 struct ObjHist {
   base::Histogram key_len;
-  base::Histogram val_len;    // overall malloc-used size of the value.
-  base::Histogram card;       // for sets, hashmaps etc - it's number of entries.
-  base::Histogram entry_len;  // for sets, hashmaps etc - it's the length of each entry.
-  base::Histogram listpack;   // for listpack encodings - the malloc used of the listpack.
+  base::Histogram malloc_used;  // overall malloc-used size of the value.
+  base::Histogram data_len;     // logical size of the value data, both for in-memory and tiered.
+  base::Histogram tiered_len;   // serialized size of the tiered (external) values.
+  base::Histogram card;         // for sets, hashmaps etc - it's number of entries.
+  base::Histogram entry_len;    // for sets, hashmaps etc - it's the length of each entry.
+  base::Histogram listpack;     // for listpack encodings - the malloc used of the listpack.
 };
+
+size_t StreamDataLen(stream* s, ObjHist* hist) {
+  // Stream IDs fit the rax iterator's inline key/path buffers; fields are read in place.
+  static_assert(sizeof(streamID) <= RAX_ITER_STATIC_LEN);
+  static_assert(sizeof(streamID) + 1 <= RAX_STACK_STATIC_ITEMS);
+  streamIterator si;
+  streamID id;
+  int64_t numfields;
+  size_t len = 0;
+  streamIteratorStart(&si, s, nullptr, nullptr, 0);
+  while (streamIteratorGetID(&si, &id, &numfields)) {
+    while (numfields--) {
+      unsigned char *field, *value;
+      int64_t field_len, value_len;
+      streamIteratorGetField(&si, &field, &value, &field_len, &value_len);
+      size_t entry_len = field_len + value_len;
+      hist->entry_len.Add(entry_len);
+      len += entry_len;
+    }
+  }
+  streamIteratorStop(&si);
+  return len;
+}
 
 // No yield: runs inside Traverse, which holds a raw segment pointer a yield could free.
 void AddObjHist(PrimeIterator it, ObjHist* hist) {
   using namespace container_utils;
   const PrimeValue& pv = it->second;
-  size_t val_len = 0;
+  size_t malloc_used = 0;
+  size_t data_len = 0;
 
   auto per_entry_cb = [&](ContainerEntry entry) {
     if (entry.IsString()) {
-      val_len += entry.size();
+      data_len += entry.size();
       hist->entry_len.Add(entry.size());
     } else {
-      val_len += 8;  // size of long
+      data_len += 8;  // size of long
     }
     return true;
   };
 
   hist->key_len.Add(it->first.MallocUsed());
 
-  if (pv.ObjType() == OBJ_LIST) {
+  // Tiered values have no in-memory representation to inspect, so we only know their size.
+  if (pv.IsExternal()) {
+    size_t serialized_size = pv.GetExternalSlice().second;
+    hist->tiered_len.Add(serialized_size);
+    hist->data_len.Add(pv.ObjType() == OBJ_STRING ? pv.Size() : serialized_size);
+    return;
+  }
+
+  if (pv.ObjType() == OBJ_STRING) {
+    data_len = pv.Size();
+  } else if (pv.ObjType() == OBJ_LIST) {
     IterateList(pv, per_entry_cb, 0, SIZE_MAX, /*allow_yield=*/false);
     if (pv.Encoding() == kEncodingQL2) {
       const QList* ql = static_cast<QList*>(pv.RObjPtr());
-      val_len = ql->MallocUsed(true);
+      malloc_used = ql->MallocUsed(false);
     } else if (pv.Encoding() == kEncodingListPack) {
-      val_len = pv.MallocUsed();
-      hist->listpack.Add(val_len);
+      malloc_used = pv.MallocUsed();
+      hist->listpack.Add(malloc_used);
     }
   } else if (pv.ObjType() == OBJ_ZSET) {
     IterateSortedSet(
         pv, [&](ContainerEntry entry, double) { return per_entry_cb(entry); }, 0, SIZE_MAX,
         /*reverse=*/false, /*use_score=*/false, /*allow_yield=*/false);
-    val_len = 0;  // reset - will be calculated below.
     if (pv.Encoding() == OBJ_ENCODING_LISTPACK) {
       hist->listpack.Add(pv.MallocUsed());
     }
   } else if (pv.ObjType() == OBJ_SET) {
     IterateSet(pv, per_entry_cb, /*allow_yield=*/false);
-    val_len = 0;  // reset - will be calculated below.
     if (pv.Encoding() == kEncodingIntSet) {
       hist->listpack.Add(pv.MallocUsed());
     }
@@ -205,23 +240,35 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
         pv,
         [&](ContainerEntry key, ContainerEntry value) {
           hist->entry_len.Add(key.size() + value.size());
+          data_len += key.size() + value.size();
           return true;
         },
         /*allow_yield=*/false);
     if (pv.Encoding() == kEncodingListPack) {
       hist->listpack.Add(pv.MallocUsed());
     }
+  } else if (pv.ObjType() == OBJ_STREAM) {
+    stream* s = static_cast<stream*>(pv.RObjPtr());
+    data_len = StreamDataLen(s, hist);
+    hist->card.Add(s->length);
+  } else if (pv.ObjType() != OBJ_JSON) {
+    // Probabilistic types (bloom, cuckoo, count-min sketch, topk) are fixed-size sketches.
+    data_len = pv.MallocUsed();
   }
-  // TODO: streams
 
-  if (val_len == 0) {
+  if (malloc_used == 0) {
     // Fallback
-    val_len = pv.MallocUsed(true);
+    malloc_used = pv.MallocUsed();
   }
 
-  hist->val_len.Add(val_len);
+  hist->malloc_used.Add(malloc_used);
 
-  if (pv.ObjType() != OBJ_STRING && pv.ObjType() != OBJ_JSON)
+  // JSON reports only its cached malloc size.
+  if (pv.ObjType() != OBJ_JSON)
+    hist->data_len.Add(data_len);
+
+  // Stream cardinality is added above since its Size() returns the memory usage.
+  if (pv.ObjType() != OBJ_STRING && pv.ObjType() != OBJ_JSON && pv.ObjType() != OBJ_STREAM)
     hist->card.Add(pv.Size());
 }
 
@@ -236,7 +283,9 @@ void MergeObjHistMap(ObjHistMap&& src, ObjHistMap* dest) {
       dest_hist = std::move(src_hist);
     } else {
       dest_hist->key_len.Merge(src_hist->key_len);
-      dest_hist->val_len.Merge(src_hist->val_len);
+      dest_hist->malloc_used.Merge(src_hist->malloc_used);
+      dest_hist->data_len.Merge(src_hist->data_len);
+      dest_hist->tiered_len.Merge(src_hist->tiered_len);
       dest_hist->card.Merge(src_hist->card);
       dest_hist->entry_len.Merge(src_hist->entry_len);
       dest_hist->listpack.Merge(src_hist->listpack);
@@ -572,7 +621,7 @@ void DebugCmd::Run(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "    ELEMENTS specifies how many sub elements if relevant (like entries in a list / set).",
         "    EXPIRE specifies key expire ttl range.",
         "OBJHIST",
-        "    Prints histogram of object sizes.",
+        "    Prints histogram of object sizes, including the data size of tiered values.",
         "STACKTRACE",
         "    Prints the stacktraces of all current fibers to the logs.",
         "REPLDIAG",
@@ -1197,13 +1246,13 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
 
     // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
     // in the currently traversed DB (not the connection-selected one).
-    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
+    if ((obj_type == OBJ_SET || obj_type == OBJ_HASH) &&
+        it->second.Encoding() == kEncodingStrMap2 && it->second.Size() == 0) {
       auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
       DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
       string key;
       it->first.GetString(&key);
-      if (obj_type == OBJ_SET || obj_type == OBJ_HASH)
-        DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
+      DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
     }
   };
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
@@ -1219,12 +1268,22 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
     StrAppend(&result, "OBJECT:", ObjTypeToString(obj_type), "\n");
     StrAppend(&result, "________________________________________________________________\n");
     StrAppend(&result, "Key memory used:\n", hist_ptr->key_len.ToString(), "\n");
-    StrAppend(&result, "Values - Total Memory used:\n", hist_ptr->val_len.ToString(), "\n");
+    StrAppend(&result, "Values - Total Memory used:\n", hist_ptr->malloc_used.ToString(), "\n");
+    if (hist_ptr->data_len.count() > 0) {
+      StrAppend(&result, "Values - Data size (in-memory and tiered):\n",
+                hist_ptr->data_len.ToString(), "\n");
+    }
+    if (hist_ptr->tiered_len.count() > 0) {
+      StrAppend(&result, "Tiered values - Serialized size:\n", hist_ptr->tiered_len.ToString(),
+                "\n");
+    }
     if (hist_ptr->card.count() > 0) {
       StrAppend(&result, "Cardinality histogram (number of elements in sets):\n",
                 hist_ptr->card.ToString(), "\n");
     }
-    StrAppend(&result, "Items length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    if (hist_ptr->entry_len.count() > 0) {
+      StrAppend(&result, "Items length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    }
     if (hist_ptr->listpack.count() > 0) {
       StrAppend(&result, "Listpack histogram:\n", hist_ptr->listpack.ToString(), "\n");
     }
@@ -1652,6 +1711,16 @@ void DebugCmd::DoPopulateBatch(const PopulateOptions& options, const PopulateBat
     cmd_cntx.UpdateCid(cid);
     cmd_cntx.SetTailArgs(args);
     sf_.service().InvokeCmd(args, &cmd_cntx);
+  };
+
+  // The stub runs its commands without a parent hop, so hold running_tx_ for it like RunCallback
+  // does, and replay the polls dropped meanwhile once done.
+  EngineShard* shard = EngineShard::tlocal();
+  DCHECK(shard->running_tx() == nullptr);
+  shard->set_running_tx(stub_tx.get());
+  absl::Cleanup release_shard = [shard] {
+    shard->set_running_tx(nullptr);
+    shard->PollExecutionIfDeferred();
   };
 
   for (unsigned i = 0; i < batch.sz; ++i) {

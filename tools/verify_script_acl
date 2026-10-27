@@ -135,8 +135,8 @@ VALKEY_REF = "9.1.2"
 # its subcommands' categories, see valkey_command_categories) do not fit what Dragonfly runs. Every
 # other mismatch is a real one and must be fixed, not added here.
 VALKEY_SKIP = {
-    "ACL": "the bare command only replies an error, its subcommands are compared one by one",
-    "CLIENT": "KILL/LIST/PAUSE are @admin, SETNAME/ID are not",
+    "CLIENT NO-EVICT": "not implemented, CLIENT replies an unknown subcommand error",
+    "CLIENT UNBLOCK": "not implemented, CLIENT replies an unknown subcommand error",
     "CLUSTER": "runs only the @slow subcommands, the @admin ones are in DFLYCLUSTER",
     "DELEX": "without a condition it deletes a key of any type, like DEL",
 }
@@ -355,24 +355,28 @@ def ensure_valkey_checkout(valkey_dir):
     return tmp
 
 
-def valkey_command_categories(valkey_dir):
+def valkey_command_categories(valkey_dir, own_names):
     """Returns {command_name: set(acl_category_names)}, subcommands keyed as "CONTAINER SUB". A
-    container's set also holds every category of its subcommands: Dragonfly's single command may
-    run any of them, so a -@category rule that denies one of them in Valkey must deny the whole
-    command."""
+    container's set also holds every category of the subcommands it runs under its own ACL bit:
+    a -@category rule that denies one of them in Valkey must deny the whole command. Subcommands
+    registered on their own (own_names) or skipped (VALKEY_SKIP) are left out."""
     result = {}
     for path in glob.glob(os.path.join(valkey_dir, "src", "commands", "*.json")):
         data = json.load(open(path))
         for name, spec in data.items():
             cats = set(spec.get("acl_categories") or [])
+            container = spec.get("container", name).upper()
             if "container" in spec:
-                result[f"{spec['container']} {name}".upper()] = cats
-            result.setdefault(spec.get("container", name).upper(), set()).update(cats)
+                full = f"{container} {name.upper()}"
+                result[full] = cats
+                if full in own_names or full in VALKEY_SKIP:
+                    continue
+            result.setdefault(container, set()).update(cats)
     return result
 
 
 def check_valkey(commands, valkey_dir):
-    vk = valkey_command_categories(valkey_dir)
+    vk = valkey_command_categories(valkey_dir, commands.keys())
     issues = []
     checked = 0
     for name, (final, _mask, f) in commands.items():

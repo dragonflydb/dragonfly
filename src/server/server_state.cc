@@ -199,16 +199,6 @@ bool ServerState::ShouldDenyOnOOM() {
   return false;
 }
 
-bool ServerState::AllowInlineScheduling() const {
-  // We can't allow inline scheduling during a full sync, because then journaling transactions
-  // will be scheduled before RdbLoader::LoadItemsBuffer is finished. We can't use the regular
-  // locking mechanism because RdbLoader is not using transactions.
-  if (gstate_ == GlobalState::LOADING)
-    return false;
-
-  return true;
-}
-
 void ServerState::SetPauseState(ClientPause state, bool start) {
   client_pauses_[int(state)] += (start ? 1 : -1);
   if (!client_pauses_[int(state)]) {

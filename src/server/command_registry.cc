@@ -202,6 +202,8 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
     kind_mask_ |= RESET;
   } else if (name_ == "HELLO") {
     kind_mask_ |= HELLO;
+  } else if (name_ == "CONFIG") {
+    kind_mask_ |= CONFIG;
   } else if (name_ == "AUTH" || name_.rfind("ACL", 0) == 0) {
     kind_mask_ |= SECRET_ARGS;
   }
@@ -254,6 +256,24 @@ CommandId CommandId::Clone(const std::string_view name) const {
   return cloned;
 }
 
+std::pair<std::string_view, uint64_t> CommandId::AclTarget(
+    const facade::ParsedArgs& tail_args) const {
+  if (!acl_subcommands_.empty() && !tail_args.empty()) {
+    for (const auto& [name, bit] : acl_subcommands_) {
+      if (absl::EqualsIgnoreCase(string_view{name}.substr(name_.size() + 1), tail_args.Front()))
+        return {name, bit};
+    }
+  }
+  return {name_, GetBitIndex()};
+}
+
+uint64_t CommandId::AclRuleMask() const {
+  uint64_t mask = GetBitIndex();
+  for (const auto& [_, bit] : acl_subcommands_)
+    mask |= bit;
+  return mask;
+}
+
 size_t CommandId::NonSecretArgCount(const facade::ParsedArgs& args) const {
   if (kind_mask_ & SECRET_ARGS)
     return 0;
@@ -261,6 +281,14 @@ size_t CommandId::NonSecretArgCount(const facade::ParsedArgs& args) const {
   // Only the protocol version: a mistyped AUTH must not expose the credentials after it.
   if (kind_mask_ & HELLO)
     return std::min<size_t>(args.size(), 1);
+
+  // A mistyped CONFIG subcommand or parameter must not expose the value after it.
+  if (kind_mask_ & CONFIG) {
+    const bool show_param =
+        args.size() > 1 && (absl::EqualsIgnoreCase(args[0], "GET") ||
+                            (args.size() > 2 && absl::EqualsIgnoreCase(args[0], "SET")));
+    return show_param ? 2 : std::min<size_t>(args.size(), 1);
+  }
 
   return args.size();
 }
@@ -339,7 +367,6 @@ void CommandRegistry::Init(unsigned int thread_count) {
 
 CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   string k = string(cmd.name());
-  const bool is_sub_command = k.find(' ') != string::npos;
 
   if (restricted_cmds_.find(k) != restricted_cmds_.end()) {
     cmd.SetRestricted(true);
@@ -349,13 +376,14 @@ CommandRegistry& CommandRegistry::operator<<(CommandId cmd) {
   if (acl_category_)
     cmd.SetAclCategory(*acl_category_);
 
-  if (!is_sub_command || absl::StartsWith(cmd.name(), "ACL")) {
-    cmd.SetBitIndex(1ULL << bit_index_);
-    family_of_commands_.back().emplace_back(k);
-    ++bit_index_;
-  } else {
-    DCHECK(absl::StartsWith(k, family_of_commands_.back().back()));
-    cmd.SetBitIndex(1ULL << (bit_index_ - 1));
+  CHECK_LT(bit_index_, 64u) << k;  // ACL rules keep one uint64_t per family
+  cmd.SetBitIndex(1ULL << bit_index_++);
+  family_of_commands_.back().emplace_back(k);
+  if (size_t sp = k.find(' '); sp != string::npos && !cmd.handler_) {
+    CommandId* parent = Find(string_view{k}.substr(0, sp));
+    CHECK(parent && parent->GetFamily() == cmd.GetFamily()) << k;
+    parent->acl_subcommands_.emplace_back(k, cmd.GetBitIndex());
+    cmd.kind_mask_ |= CommandId::ACL_ONLY;
   }
   CHECK(cmd_map_.emplace(k, std::move(cmd)).second) << k;
 
@@ -390,7 +418,7 @@ std::pair<const CommandId*, ParsedArgs> CommandRegistry::FindExtended(ParsedArgs
   }
 
   const CommandId* res = Find(cmd);
-  if (!res)
+  if (!res || res->IsAclOnly())
     return {nullptr, {}};
 
   // A workaround for XGROUP HELP that does not fit our static taxonomy of commands.

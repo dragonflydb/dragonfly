@@ -48,10 +48,6 @@ BlockingController* Namespace::GetOrAddBlockingController(EngineShard* shard) {
   return shard_blocking_controller_[shard->shard_id()].get();
 }
 
-BlockingController* Namespace::GetBlockingController(ShardId sid) {
-  return shard_blocking_controller_[sid].get();
-}
-
 Namespaces::Namespaces() {
   {
     // Startup only: CONFIG SET is not reachable yet, the validated flag is safe to read.

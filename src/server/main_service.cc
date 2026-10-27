@@ -1004,6 +1004,7 @@ void RegisterMutableFlags(ConfigRegistry* reg, absl::Span<const std::string> nam
 
 void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners) {
   InitRedisTables();
+  LockTagOptions::InitFromFlags();
   server.max_map_field_len = absl::GetFlag(FLAGS_listpack_max_field_len);
   server.max_listpack_map_bytes = absl::GetFlag(FLAGS_listpack_max_bytes);
   facade::Connection::Init(pp_.size());
@@ -1126,7 +1127,7 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   // We assume that listeners.front() is the main_listener
   // see dfly_main RunEngine
   if (!tcp_disabled && main_listener) {
-    acl_family_.Init(main_listener, &user_registry_);
+    acl_family_.Init(main_listener);
   }
 
   // Initialize shard_set with a callback running once in a while in the shard threads.
@@ -2866,11 +2867,10 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
     rb->SendLong(cid.interleaved_step() ? cid.interleaved_step() : 1);
 
     {
-      const auto& table = acl_family_.GetRevTable();
       vector<string> cats;
-      for (uint32_t i = 0; i < 32; i++) {
+      for (uint32_t i = 0; i < acl::kCategoryNames.size(); i++) {
         if (cid.acl_categories() & (1 << i)) {
-          cats.emplace_back("@" + table[i]);
+          cats.emplace_back(absl::StrCat("@", acl::kCategoryNames[i]));
         }
       }
       rb->SendSimpleStrArr(cats);
@@ -2904,7 +2904,7 @@ void Service::Command(CmdArgParser parser, CommandContext* cmd_cntx) {
     // One entry per requested name; an unknown name gets a null entry.
     rb->StartArray(names.size());
     for (const string& name : names) {
-      if (const auto* cid = registry_.Find(name); cid) {
+      if (const auto* cid = registry_.Find(name); cid && !cid->IsAclOnly()) {
         serialize_command(name, *cid);
       } else {
         rb->SendNull();
@@ -3207,7 +3207,7 @@ void Service::RegisterCommands() {
 }
 
 const acl::AclFamily* Service::TestInit() {
-  acl_family_.Init(nullptr, &user_registry_);
+  acl_family_.Init(nullptr);
   return &acl_family_;
 }
 

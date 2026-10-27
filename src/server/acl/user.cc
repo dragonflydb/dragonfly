@@ -29,9 +29,7 @@ User::User() {
   commands_ = std::vector<uint64_t>(NumberOfFamilies(), 0);
 }
 
-void User::Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
-                  const ReverseCategoryIndexTable& reverse_cat,
-                  const CategoryToCommandsIndexStore& cat_to_commands) {
+void User::Update(UpdateRequest&& req) {
   for (auto& pass : req.passwords) {
     if (pass.nopass) {
       SetNopass();
@@ -48,13 +46,12 @@ void User::Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
     SetPasswordHash(pass.password, pass.is_hashed);
   }
 
-  auto cat_visitor = [&, this](UpdateRequest::CategoryValueType cat) {
-    auto [sign, category] = cat;
-    if (sign == Sign::PLUS) {
-      SetAclCategoriesAndIncrSeq(category, cat_to_id, reverse_cat, cat_to_commands);
+  auto cat_visitor = [this](const UpdateRequest::CategoryValueType& cat) {
+    if (cat.sign == Sign::PLUS) {
+      SetAclCategoriesAndIncrSeq(cat.category, cat.commands);
       return;
     }
-    UnsetAclCategoriesAndIncrSeq(category, cat_to_id, reverse_cat, cat_to_commands);
+    UnsetAclCategoriesAndIncrSeq(cat.category, cat.commands);
   };
 
   auto cmd_visitor = [this](UpdateRequest::CommandsValueType cmd) {
@@ -68,8 +65,8 @@ void User::Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
 
   Overloaded visitor{cat_visitor, cmd_visitor};
 
-  for (auto req : req.updates) {
-    std::visit(visitor, req);
+  for (const auto& update : req.updates) {
+    std::visit(visitor, update);
   }
 
   if (!req.keys.empty()) {
@@ -132,38 +129,20 @@ bool User::HasPassword(std::string_view password) const {
   return password_hashes_.contains(StringSHA256(password));
 }
 
-void User::SetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& cat_to_id,
-                                      const ReverseCategoryIndexTable& reverse_cat,
-                                      const CategoryToCommandsIndexStore& cat_to_commands) {
+void User::SetAclCategoriesAndIncrSeq(uint32_t cat, const std::vector<uint64_t>& commands) {
   acl_categories_ |= cat;
-  if (cat == acl::ALL) {
-    SetAclCommands(std::numeric_limits<size_t>::max(), 0);
-  } else {
-    auto id = cat_to_id.at(cat);
-    std::string_view name = reverse_cat[id];
-    const auto& commands_group = cat_to_commands.at(name);
-    for (size_t fam_id = 0; fam_id < commands_group.size(); ++fam_id) {
-      SetAclCommands(fam_id, commands_group[fam_id]);
-    }
+  for (size_t fam_id = 0; fam_id < commands.size(); ++fam_id) {
+    SetAclCommands(fam_id, commands[fam_id]);
   }
 
   CategoryChange change{cat};
   cat_changes_[change] = ChangeMetadata{Sign::PLUS, seq_++};
 }
 
-void User::UnsetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& cat_to_id,
-                                        const ReverseCategoryIndexTable& reverse_cat,
-                                        const CategoryToCommandsIndexStore& cat_to_commands) {
+void User::UnsetAclCategoriesAndIncrSeq(uint32_t cat, const std::vector<uint64_t>& commands) {
   acl_categories_ ^= cat;
-  if (cat == acl::ALL) {
-    UnsetAclCommands(std::numeric_limits<size_t>::max(), 0);
-  } else {
-    auto id = cat_to_id.at(cat);
-    std::string_view name = reverse_cat[id];
-    const auto& commands_group = cat_to_commands.at(name);
-    for (size_t fam_id = 0; fam_id < commands_group.size(); ++fam_id) {
-      UnsetAclCommands(fam_id, commands_group[fam_id]);
-    }
+  for (size_t fam_id = 0; fam_id < commands.size(); ++fam_id) {
+    UnsetAclCommands(fam_id, commands[fam_id]);
   }
 
   CategoryChange change{cat};
@@ -171,12 +150,6 @@ void User::UnsetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& 
 }
 
 void User::SetAclCommands(size_t index, uint64_t bit_index) {
-  if (index == std::numeric_limits<size_t>::max()) {
-    for (auto& family : commands_) {
-      family = ALL_COMMANDS;
-    }
-    return;
-  }
   commands_[index] |= bit_index;
 }
 
@@ -187,14 +160,7 @@ void User::SetAclCommandsAndIncrSeq(size_t index, uint64_t bit_index) {
 }
 
 void User::UnsetAclCommands(size_t index, uint64_t bit_index) {
-  if (index == std::numeric_limits<size_t>::max()) {
-    for (auto& family : commands_) {
-      family = NONE_COMMANDS;
-    }
-    return;
-  }
-  SetAclCommands(index, bit_index);
-  commands_[index] ^= bit_index;
+  commands_[index] &= ~bit_index;
 }
 
 void User::UnsetAclCommandsAndIncrSeq(size_t index, uint64_t bit_index) {

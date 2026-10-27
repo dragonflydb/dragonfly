@@ -53,7 +53,16 @@ struct LockTagOptions {
   // Returns the tag according to the rules defined by this options object.
   std::string_view Tag(std::string_view key) const;
 
-  static const LockTagOptions& instance();
+  // Called for every key that is sharded or locked. The options never change at runtime.
+  static const LockTagOptions& instance() {
+    return instance_;
+  }
+
+  // Sets instance() from the flags. Called once at startup, and by tests that change the flags.
+  static void InitFromFlags();
+
+ private:
+  static LockTagOptions instance_;
 };
 
 std::ostream& operator<<(std::ostream& os, const GlobalState& state);

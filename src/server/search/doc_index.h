@@ -6,6 +6,7 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/container/inlined_vector.h>
 
 #include <cstdint>
 #include <memory>
@@ -163,6 +164,11 @@ class DocFieldTypes {
 };
 
 enum class SortOrder { ASC, DESC };
+
+// SORTBY order shared by the shards and the coordinator: docs with a value first, then by value and
+// by key in `order`, so equal values page consistently across shards.
+bool SortRanksBefore(const search::SortableValue& lv, std::string_view lk,
+                     const search::SortableValue& rv, std::string_view rk, SortOrder order);
 
 struct SearchParams {
   struct SortOption {
@@ -398,6 +404,9 @@ class ShardDocIndex {
     void Remove(DocId id);
 
     std::string_view Get(DocId id) const;
+
+    // Like Get for ids that lazy field expiry may have freed (stale postings): empty key then.
+    std::string_view GetOrEmpty(DocId id) const;
     bool IsValid(DocId id) const;
     std::optional<DocId> Find(std::string_view key) const;
     size_t Size() const;
@@ -621,6 +630,11 @@ class ShardDocIndex {
   // Remove a DocId from all HNSW indices for this index.
   void RemoveFromAllHnswIndices(search::DocId doc_id);
 
+  // FieldIndices::Add/Remove of one document. Lazy field expiry can drop a hash field before its
+  // document is removed, so the values of fields with a TTL are kept until then.
+  bool AddToIndices(DocId id, const DbContext& db_cntx, const PrimeValue& pv);
+  void RemoveFromIndices(DocId id, const DbContext& db_cntx, const PrimeValue& pv);
+
   // Initialize per-shard HNSW wrappers from schema + global registry.
   void InitHnswShardIndices();
 
@@ -634,6 +648,16 @@ class ShardDocIndex {
   std::optional<search::FieldIndices> indices_;
   DocKeyIndex key_index_;
   Synonyms synonyms_;
+
+  // Hash fields read by TEXT, TAG, NUMERIC and GEO removal and by the stemmer choice, sorted.
+  absl::InlinedVector<std::string_view, 4> content_fields_;
+
+  using ExpiringValue = std::pair<std::string_view /*field*/, search::StatelessString>;
+  using ExpiringValues =
+      absl::InlinedVector<ExpiringValue, 1, StatelessSearchAllocator<ExpiringValue>>;
+  absl::flat_hash_map<DocId, ExpiringValues, absl::Hash<DocId>, std::equal_to<DocId>,
+                      StatelessSearchAllocator<std::pair<const DocId, ExpiringValues>>>
+      expiring_values_;
 
   std::unique_ptr<search::IndexBuilder> builder_;
 
@@ -656,8 +680,14 @@ class ShardDocIndices {
  public:
   ShardDocIndices();
 
-  // Get sharded document index by its name or nullptr if not found
+  // Get sharded document index by its canonical name or nullptr if not found.
   ShardDocIndex* GetIndex(std::string_view name);
+
+  // Resolve a canonical index name or alias without following alias chains.
+  ShardDocIndex* ResolveIndex(std::string_view name);
+
+  // Resolve an alias to its canonical name without requiring the index to exist.
+  std::string ResolveIndexName(std::string_view name) const;
 
   // Add an alias for an existing index.
   facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
@@ -676,8 +706,11 @@ class ShardDocIndices {
                  std::shared_ptr<const DocIndex> index, bool is_journal = false,
                  Synonyms synonyms = {});
 
-  // Drop index, return the dropped index if it existed or nullptr otherwise
+  // Drop index and its aliases, returning the index or nullptr if it did not exist.
   std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);
+
+  // Extract an index without removing aliases that point to it, for replacement.
+  std::unique_ptr<ShardDocIndex> ExtractIndex(std::string_view name);
 
   // Drop all indices
   void DropAllIndices();

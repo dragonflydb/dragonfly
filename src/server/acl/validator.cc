@@ -4,13 +4,12 @@
 
 #include "server/acl/validator.h"
 
+#include <absl/algorithm/container.h>
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
 
 #include "base/logging.h"
 #include "core/glob_matcher.h"
-#include "facade/dragonfly_connection.h"
-#include "server/acl/acl_commands_def.h"
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/server_state.h"
@@ -20,17 +19,66 @@ namespace dfly::acl {
 
 namespace {
 
-bool Matches(std::string_view pattern, std::string_view target) {
-  GlobMatcher matcher(pattern, true);
-  return matcher.Matches(target);
-};
+using facade::ParsedArgs;
+using std::string_view;
 
-bool ValidateCommand(const std::vector<uint64_t>& acl_commands, const CommandId& id) {
-  const size_t index = id.GetFamily();
-  const uint64_t command_mask = id.GetBitIndex();
-  DCHECK_LT(index, acl_commands.size());
+bool Matches(string_view pattern, string_view target) {
+  return GlobMatcher{pattern, true}.Matches(target);
+}
 
-  return (acl_commands[index] & command_mask) != 0;
+bool IsCommandAllowed(const std::vector<uint64_t>& commands, const CommandId& id,
+                      const ParsedArgs& tail_args) {
+  const size_t family = id.GetFamily();
+  DCHECK_LT(family, commands.size());
+  return (commands[family] & id.AclTarget(tail_args).second) != 0;
+}
+
+// Restrictions for users that may access a single database.
+bool IsDbAllowed(size_t acl_db, size_t db_index, const CommandId& id, const ParsedArgs& tail_args) {
+  if (acl_db == kAllDbs)
+    return true;
+
+  // Once we support db ranges this must change.
+  if (id.name() == "MOVE")
+    return false;
+
+  if (acl_db != db_index && id.IsTransactional())
+    return false;
+
+  size_t target_db = 0;
+  return !(tail_args.size() == 1 && id.name() == "SELECT" &&
+           absl::SimpleAtoi(tail_args[0], &target_db) && target_db != acl_db);
+}
+
+// PSUBSCRIBE patterns are compared literally against the user's channel globs.
+bool IsChannelAllowed(const AclPubSub& pub_sub, string_view channel, bool literal) {
+  return absl::c_any_of(pub_sub.globs, [&](const GlobTypePubSub& glob) {
+    return literal ? glob.first == channel : Matches(glob.first, channel);
+  });
+}
+
+bool AreChannelsAllowed(const AclPubSub& pub_sub, const CommandId& id,
+                        const ParsedArgs& tail_args) {
+  if (pub_sub.all_channels)
+    return true;
+
+  // Valkey never gates unsubscribe on channel ACLs (only PUBLISH/SUBSCRIBE flags are checked).
+  string_view name = id.name();
+  if (name == "UNSUBSCRIBE" || name == "PUNSUBSCRIBE" || name == "SUNSUBSCRIBE")
+    return true;
+
+  const bool literal = id.IsPatternPubSub();
+  if (id.IsPublish() || id.IsSPublish()) {
+    // tail_args can be empty for ACL DRYRUN's simulated commands, which skip arity validation.
+    // Treat a missing channel as permissive, like DRYRUN skips key checks for incomplete args.
+    return tail_args.empty() || IsChannelAllowed(pub_sub, tail_args[0], literal);
+  }
+
+  for (string_view channel : tail_args) {
+    if (!IsChannelAllowed(pub_sub, channel, literal))
+      return false;
+  }
+  return true;
 }
 
 struct KeyPermissions {
@@ -51,164 +99,102 @@ KeyPermissions RequiredKeyPermissions(const CommandId& id, unsigned key_offset) 
   return {id.IsReadOnly(), id.IsJournaled()};
 }
 
-bool KeyGlobAllowed(const AclKeys& keys, std::string_view target, KeyPermissions perms) {
-  for (auto& [elem, op] : keys.key_globs) {
-    if (!Matches(elem, target))
-      continue;
-    if (perms.read && (op == KeyOp::READ || op == KeyOp::READ_WRITE))
-      return true;
-    if (perms.write && (op == KeyOp::WRITE || op == KeyOp::READ_WRITE))
-      return true;
-  }
-  return false;
+bool IsKeyAllowed(const AclKeys& keys, string_view key, KeyPermissions perms) {
+  return absl::c_any_of(keys.key_globs, [&](const GlobType& glob) {
+    const auto& [pattern, op] = glob;
+    const bool grants = (perms.read && op != KeyOp::WRITE) || (perms.write && op != KeyOp::READ);
+    return grants && Matches(pattern, key);
+  });
 }
 
 // This command has no key position because a subcommand comes first; the key follows it.
-bool ReadsKeyAfterSubcommand(std::string_view cmd, std::string_view sub) {
+bool ReadsKeyAfterSubcommand(string_view cmd, string_view sub) {
   return cmd == "MEMORY" && absl::EqualsIgnoreCase(sub, "USAGE");
+}
+
+// RM deletes whatever its MATCH selects, so it needs write access to every key.
+bool CanWriteAllKeys(const AclKeys& keys) {
+  return absl::c_any_of(keys.key_globs, [](const GlobType& glob) {
+    return glob.first == "*" && glob.second != KeyOp::READ;
+  });
+}
+
+bool AreKeysAllowed(const AclKeys& keys, const CommandId& id, const ParsedArgs& tail_args) {
+  if (keys.all_keys)
+    return true;
+
+  if (id.first_key_pos() != 0 && (id.IsReadOnly() || id.IsJournaled())) {
+    auto key_index = DetermineKeys(&id, tail_args);
+
+    // Commands with content-dependent key positions (e.g. ZUNION's numkeys) can fail to parse
+    // arbitrary/malformed tail_args; that's a normal rejection, so fail closed.
+    if (!key_index)
+      return false;
+
+    // The bonus key (dest of Z*STORE/CMS.MERGE/GEORADIUS.../SORT STORE) is the sole write target.
+    const bool has_bonus_dest = key_index->bonus.has_value();
+    for (unsigned idx = key_index->start; idx < key_index->end; idx += key_index->step) {
+      const KeyPermissions perms = has_bonus_dest
+                                       ? KeyPermissions{true, false}
+                                       : RequiredKeyPermissions(id, idx - key_index->start);
+      if (!IsKeyAllowed(keys, tail_args[idx], perms))
+        return false;
+    }
+    return !has_bonus_dest || IsKeyAllowed(keys, tail_args[*key_index->bonus], {false, true});
+  }
+
+  if (tail_args.size() >= 2 && ReadsKeyAfterSubcommand(id.name(), tail_args[0]))
+    return IsKeyAllowed(keys, tail_args[1], {true, false});
+
+  if (id.name() == "RM")
+    return CanWriteAllKeys(keys);
+
+  return true;
 }
 
 }  // namespace
 
-// Exported (not anonymous-namespace-local) so callers without a live connection, like ACL DRYRUN's
-// stub context, can run the pub/sub check directly without going through
-// IsUserAllowedToInvokeCommand and its AclLog::Add side effect, which dereferences a real
-// Connection*.
-std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
-                                                          const std::vector<uint64_t>& acl_commands,
-                                                          const AclPubSub& pub_sub,
-                                                          const facade::ParsedArgs& tail_args,
-                                                          const CommandId& id) {
-  if (!ValidateCommand(acl_commands, id)) {
-    return {false, AclLog::Reason::COMMAND};
+std::optional<AclLog::Reason> CheckCommand(const AclRulesView& rules, size_t db_index,
+                                           const CommandId& id, const ParsedArgs& tail_args) {
+  using Reason = AclLog::Reason;
+
+  if (!id.IsPubSub() && !IsDbAllowed(rules.db, db_index, id, tail_args))
+    return Reason::AUTH;
+
+  if (!IsCommandAllowed(rules.commands, id, tail_args))
+    return Reason::COMMAND;
+
+  if (id.IsPubSub()) {
+    if (!AreChannelsAllowed(rules.pub_sub, id, tail_args))
+      return Reason::PUB_SUB;
+  } else if (!AreKeysAllowed(rules.keys, id, tail_args)) {
+    return Reason::KEY;
   }
-
-  auto iterate_globs = [&](std::string_view target) {
-    for (auto& [glob, has_asterisk] : pub_sub.globs) {
-      if (literal_match && (glob == target)) {
-        return true;
-      }
-      if (!literal_match && Matches(glob, target)) {
-        return true;
-      }
-    }
-    return false;
-  };
-
-  std::string_view name = id.name();
-  // Valkey never gates unsubscribe on channel ACLs (only PUBLISH/SUBSCRIBE flags are checked).
-  if (name == "UNSUBSCRIBE" || name == "PUNSUBSCRIBE" || name == "SUNSUBSCRIBE") {
-    return {true, AclLog::Reason::PUB_SUB};
-  }
-
-  bool allowed = true;
-  if (!pub_sub.all_channels) {
-    if (name == "PUBLISH" || name == "SPUBLISH") {
-      // tail_args can be empty for ACL DRYRUN's simulated commands, which skip arity
-      // validation. Treat a missing channel argument as unknown/permissive, matching how
-      // DryRun skips the key-pattern check for the same incomplete-args case.
-      allowed &= tail_args.empty() || iterate_globs(tail_args[0]);
-    } else {
-      for (auto channel : tail_args) {
-        allowed &= iterate_globs(channel);
-      }
-    }
-  }
-
-  return {allowed, AclLog::Reason::PUB_SUB};
+  return std::nullopt;
 }
 
-[[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
-                                                const facade::ParsedArgs& tail_args) {
-  if (cntx.skip_acl_validation) {
+bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
+                                  const ParsedArgs& tail_args) {
+  if (cntx.skip_acl_validation)
     return true;
-  }
 
-  if (id.IsAlias()) {
+  if (id.IsAlias())
     return false;
-  }
 
   // While a script is running, redis.call() must be checked against the
   // ACL rules that were in effect when the script started.
   const auto* sinfo = cntx.conn_state.script_info.get();
-  const std::vector<uint64_t>& acl_commands = sinfo ? sinfo->acl_commands : cntx.acl_commands;
-  const AclPubSub& pub_sub = sinfo ? sinfo->acl_pub_sub : cntx.pub_sub;
+  const AclRulesView rules =
+      sinfo ? AclRulesView{sinfo->acl_commands, sinfo->acl_keys, sinfo->acl_pub_sub,
+                           sinfo->acl_db_idx}
+            : AclRulesView{cntx.acl_commands, cntx.keys, cntx.pub_sub, cntx.acl_db_idx};
 
-  std::pair<bool, AclLog::Reason> auth_res;
+  const auto denial = CheckCommand(rules, cntx.db_index(), id, tail_args);
+  if (!denial)
+    return true;
 
-  if (id.IsPubSub()) {
-    bool is_pattern = id.IsPatternPubSub();
-    auth_res = IsPubSubCommandAuthorized(is_pattern, acl_commands, pub_sub, tail_args, id);
-  } else {
-    auth_res = IsUserAllowedToInvokeCommandGeneric(cntx, id, tail_args);
-  }
-
-  const auto [is_authed, reason] = auth_res;
-
-  if (!is_authed) {
-    auto& log = ServerState::tlocal()->acl_log;
-    log.Add(cntx, std::string(id.name()), reason);
-  }
-
-  return is_authed;
-}
-
-[[nodiscard]] std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
-    const ConnectionContext& cntx, const CommandId& id, const facade::ParsedArgs& tail_args) {
-  // See the comment in IsUserAllowedToInvokeCommand: while a script is running, checks are done
-  // against the ACL snapshot taken when the script started, not the connection's live rules.
-  const auto* sinfo = cntx.conn_state.script_info.get();
-  const std::vector<uint64_t>& acl_commands = sinfo ? sinfo->acl_commands : cntx.acl_commands;
-  const AclKeys& keys = sinfo ? sinfo->acl_keys : cntx.keys;
-  const size_t acl_db_idx = sinfo ? sinfo->acl_db_idx : cntx.acl_db_idx;
-
-  const size_t max = std::numeric_limits<size_t>::max();
-  // Once we support ranges this must change
-  const bool reject_move_command = acl_db_idx != max && id.name() == "MOVE";
-  const bool reject_trans_command =
-      acl_db_idx != max && acl_db_idx != cntx.db_index() && id.IsTransactional();
-  if (reject_move_command || reject_trans_command) {
-    return {false, AclLog::Reason::AUTH};
-  }
-  size_t res = 0;
-  if (tail_args.size() == 1 && id.name() == "SELECT" && absl::SimpleAtoi(tail_args[0], &res) &&
-      acl_db_idx != max && acl_db_idx != res) {
-    return {false, AclLog::Reason::AUTH};
-  }
-  if (!ValidateCommand(acl_commands, id)) {
-    return {false, AclLog::Reason::COMMAND};
-  }
-
-  const bool is_read_command = id.IsReadOnly();
-  const bool is_write_command = id.IsJournaled();
-
-  bool keys_allowed = true;
-  if (!keys.all_keys && id.first_key_pos() != 0 && (is_read_command || is_write_command)) {
-    auto keys_index = DetermineKeys(&id, tail_args);
-    // Commands with content-dependent key positions (e.g. ZUNION's numkeys) can fail to parse
-    // arbitrary/malformed tail_args; that's a normal rejection, not a broken invariant, so fail
-    // closed instead of asserting.
-    if (!keys_index)
-      return {false, AclLog::Reason::KEY};
-
-    // The bonus key (dest of Z*STORE/CMS.MERGE/GEORADIUS.../SORT STORE) is the sole write target.
-    const bool has_bonus_dest = keys_index->bonus.has_value();
-    for (unsigned idx = keys_index->start; idx < keys_index->end; idx += keys_index->step) {
-      const unsigned key_offset = idx - keys_index->start;
-      KeyPermissions perms =
-          has_bonus_dest ? KeyPermissions{true, false} : RequiredKeyPermissions(id, key_offset);
-      keys_allowed &= KeyGlobAllowed(keys, tail_args[idx], perms);
-    }
-
-    if (has_bonus_dest) {
-      keys_allowed &= KeyGlobAllowed(keys, tail_args[*keys_index->bonus], {false, true});
-    }
-  }
-
-  if (!keys.all_keys && tail_args.size() >= 2 && ReadsKeyAfterSubcommand(id.name(), tail_args[0]))
-    keys_allowed &= KeyGlobAllowed(keys, tail_args[1], {true, false});
-
-  return {keys_allowed, AclLog::Reason::KEY};
+  ServerState::tlocal()->acl_log.Add(cntx, std::string(id.AclTarget(tail_args).first), *denial);
+  return false;
 }
 
 }  // namespace dfly::acl

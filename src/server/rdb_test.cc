@@ -982,7 +982,7 @@ TEST_F(RdbTest, FailedLoadDropsUnbuiltIndex) {
 
   const auto no_index = ErrArg("idx: no such index");
   EXPECT_THAT(Run({"ft._list"}).GetVec(), IsEmpty());
-  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), ErrArg("Index with name 'idx' not found"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), no_index);
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), no_index);
   EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
   EXPECT_THAT(
@@ -2187,10 +2187,13 @@ TEST_F(RdbTest, SplitSBF) {
   // splits. A plain string is also added between the split filter.
 
   // Creates filter in db to copy the fields from
-  auto resp = Run({"BF.RESERVE", "bf_src", "0.01", "10"});
+  constexpr char kShard0Key[] = "bf_src";
+  CHECK_EQ(0u, Shard(kShard0Key, shard_set->size()));
+
+  auto resp = Run({"BF.RESERVE", kShard0Key, "0.01", "10"});
   EXPECT_EQ(resp, "OK");
   for (size_t i = 0; i < 50; ++i) {
-    resp = Run({"BF.ADD", "bf_src", StrCat("item", i)});
+    resp = Run({"BF.ADD", kShard0Key, StrCat("item", i)});
     EXPECT_THAT(resp, AnyOf(0, 1));
   }
 
@@ -2205,7 +2208,7 @@ TEST_F(RdbTest, SplitSBF) {
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
     const auto& db = ctx.GetDbSlice(0);
-    auto it = db.FindReadOnly(ctx, "bf_src", OBJ_SBF);
+    auto it = db.FindReadOnly(ctx, kShard0Key, OBJ_SBF);
     ASSERT_TRUE(it.ok());
 
     const SBF* sbf = it.value()->second.GetSBF();
@@ -2279,10 +2282,13 @@ TEST_F(RdbTest, SplitSBF) {
 }
 
 TEST_F(RdbTest, SplitCuckoo) {
-  auto resp = Run("cf.reserve cf_src 4 expansion 2");
+  constexpr char kShard0Key[] = "cf_src";
+  CHECK_EQ(0u, Shard(kShard0Key, shard_set->size()));
+
+  auto resp = Run(StrCat("cf.reserve ", kShard0Key, " 4 expansion 2"));
   EXPECT_EQ(resp, "OK");
   for (size_t i = 0; i < 100; ++i) {
-    resp = Run(StrCat("cf.add cf_src item", i));
+    resp = Run(StrCat("cf.add ", kShard0Key, " item", i));
     EXPECT_THAT(resp, IntArg(1));
   }
 
@@ -2296,7 +2302,7 @@ TEST_F(RdbTest, SplitCuckoo) {
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
     const auto& db = ctx.GetDbSlice(0);
-    auto it = db.FindReadOnly(ctx, "cf_src", OBJ_CUCKOOFILTER);
+    auto it = db.FindReadOnly(ctx, kShard0Key, OBJ_CUCKOOFILTER);
     ASSERT_TRUE(it.ok());
 
     const CuckooFilter* cf = it.value()->second.GetCuckooFilter();
