@@ -2926,4 +2926,27 @@ TEST(RdbSerializerTest, BufferShrinksIfOverCap) {
   EXPECT_EQ(serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry), tail);
 }
 
+// Deleting an expired key whose value the snapshot is streaming must not free it under the
+// serializer: the deletion waits for the bucket, then expires the key.
+TEST_F(RdbTest, DelExpiredHashDuringSave) {
+  Run({"debug", "populate", "1", "k", "64", "RAND", "TYPE", "hash", "ELEMENTS", "100000"});
+  Run({"pexpire", "k:0", "1000"});
+
+  auto save_fb = pp_->at(1)->LaunchFiber([&] { EXPECT_EQ(Run({"save"}), "OK"); });
+
+  // Wait until the snapshot is suspended in the middle of serializing the hash.
+  ShardId sid = Shard("k:0", shard_set->size());
+  while (!shard_set->Await(sid, [] {
+    return namespaces->GetDefaultNamespace()
+        .GetDbSlice(EngineShard::tlocal()->shard_id())
+        .WillBlockOnJournalWrite();
+  })) {
+    usleep(10);
+  }
+
+  AdvanceTime(2000);
+  EXPECT_THAT(Run({"del", "k:0"}), IntArg(0));
+  save_fb.Join();
+}
+
 }  // namespace dfly

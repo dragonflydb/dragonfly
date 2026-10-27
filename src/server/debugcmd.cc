@@ -1245,9 +1245,11 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
     AddObjHist(it, hist_ptr.get());
 
     // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
-    // in the currently traversed DB (not the connection-selected one).
+    // in the currently traversed DB (not the connection-selected one). Skip expired keys: their
+    // mutable lookup may wait for serialization inside the traversal.
     if ((obj_type == OBJ_SET || obj_type == OBJ_HASH) &&
-        it->second.Encoding() == kEncodingStrMap2 && it->second.Size() == 0) {
+        it->second.Encoding() == kEncodingStrMap2 && it->second.Size() == 0 &&
+        !it->first.IsExpired(GetCurrentTimeMs())) {
       auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
       DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
       string key;
@@ -1649,8 +1651,10 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
       entry->AddZSet(it->second);
 
     // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
-    // in the currently traversed DB (not the connection-selected one).
-    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
+    // in the currently traversed DB (not the connection-selected one). Skip expired keys: their
+    // mutable lookup may wait for serialization inside the traversal.
+    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2 &&
+        !it->first.IsExpired(GetCurrentTimeMs())) {
       auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
       DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
       string key;
