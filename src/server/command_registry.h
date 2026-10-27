@@ -184,9 +184,9 @@ class CommandId : public facade::CommandId {
     return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
   }
 
-  // True for commands with exactly one key at a fixed position (first_key == last_key > 0),
-  // no variadic/store-key handling and no global/no-key semantics. Lets DetermineKeys skip
-  // its generic branching. Precomputed at construction.
+  // True for commands with exactly one key at a fixed position (first_key == last_key > 0) that
+  // the arity guarantees, no variadic/store-key handling and no global/no-key semantics. Lets
+  // DetermineKeys skip its generic branching. Precomputed at construction.
   bool IsFixedSingleKey() const {
     return kind_mask_ & FIXED_SINGLE_KEY;
   }
@@ -310,8 +310,9 @@ class CommandId : public facade::CommandId {
     IS_ALIAS = 1U << 13,
     // Command has an async handler (set via SetAsyncHandler / SetHandler with async_support).
     SUPPORT_ASYNC = 1U << 14,
-    // Command has exactly one key at a fixed position (first_key == last_key > 0) with no
-    // variadic/store-key or global/no-key semantics. Lets DetermineKeys skip its generic branching.
+    // Command has exactly one key at a fixed position (first_key == last_key > 0), guaranteed by
+    // its arity, with no variadic/store-key or global/no-key semantics. Lets DetermineKeys skip
+    // its generic branching.
     FIXED_SINGLE_KEY = 1U << 15,  // last bit of the low uint16_t half of kind_mask_.
 
     RESET = 1U << 16,  // RESET only

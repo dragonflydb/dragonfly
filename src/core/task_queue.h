@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <algorithm>
-
 #include "util/fibers/fiberqueue_threadpool.h"
 #include "util/fibers/fibers.h"
 
@@ -36,10 +34,6 @@ class TaskQueue {
   }
 
   template <typename F> auto Await(F&& f) -> decltype(f()) {
-    // Called from a consumer fiber (e.g. a script hop), queuing f could wait on itself.
-    if (std::ranges::any_of(consumer_fibers_, &util::fb2::Fiber::IsActive))
-      return f();
-
     util::fb2::Done done;
     using ResultType = decltype(f());
     util::detail::ResultMover<ResultType> mover;

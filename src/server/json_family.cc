@@ -1814,16 +1814,11 @@ void CmdDebug(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-    ShardId sid = Shard(key, shard_set->size());
-    ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
-    auto cb = [&]() {
-      EngineShard* shard = EngineShard::tlocal();
-      DbContext db_cntx{cntx->ns, cntx->conn_state.db_index};
-      OpArgs op_args{shard, nullptr, db_cntx};
-      return OpMemory(op_args, key, json_path);
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpMemory(t->GetOpArgs(shard), key, json_path);
     };
 
-    auto result = shard_set->Await(sid, std::move(cb));
+    auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
     reply_generic::Send(result, cmd_cntx);
     return;
   }
@@ -1838,16 +1833,11 @@ void CmdDebug(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-    ShardId sid = Shard(key, shard_set->size());
-    ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
-    auto cb = [&]() {
-      EngineShard* shard = EngineShard::tlocal();
-      DbContext db_cntx{cntx->ns, cntx->conn_state.db_index};
-      OpArgs op_args{shard, nullptr, db_cntx};
-      return OpFields(op_args, key, json_path);
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpFields(t->GetOpArgs(shard), key, json_path);
     };
 
-    auto result = shard_set->Await(sid, std::move(cb));
+    auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
     reply_generic::Send(result, cmd_cntx);
     return;
   }
@@ -2233,7 +2223,7 @@ void RegisterJsonFamily(CommandRegistry* registry) {
                    .HFUNC(ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(ArrIndex);
   *registry
-      << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 0, 0, acl::JSON}.HFUNC(Debug)
+      << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 2, 2, acl::JSON}.HFUNC(Debug)
       << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
       << CI{"JSON.SET", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
       << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)

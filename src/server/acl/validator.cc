@@ -63,10 +63,9 @@ bool KeyGlobAllowed(const AclKeys& keys, std::string_view target, KeyPermissions
   return false;
 }
 
-// These commands have no key position because a subcommand comes first; the key follows it.
+// This command has no key position because a subcommand comes first; the key follows it.
 bool ReadsKeyAfterSubcommand(std::string_view cmd, std::string_view sub) {
-  return cmd == "XINFO" || cmd == "JSON.DEBUG" ||
-         (cmd == "MEMORY" && absl::EqualsIgnoreCase(sub, "USAGE"));
+  return cmd == "MEMORY" && absl::EqualsIgnoreCase(sub, "USAGE");
 }
 
 }  // namespace

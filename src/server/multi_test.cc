@@ -1911,45 +1911,88 @@ TEST_F(MultiTest, SquashedCallbackBadAlloc) {
   EXPECT_EQ(Run({"get", kKey2}), "b");
 }
 
-// Script commands that read their own shard outside the tx must not queue behind the script hop.
-TEST_F(MultiTest, EvalReadsOutsideTxSkipShardQueue) {
+// A shard queue waiting on itself never recovers, so abort instead of hanging in TearDown.
+template <typename F> RespExpr RunOrAbort(ProactorBase* pb, F&& cmd) {
+  fb2::Done done;
+  RespExpr resp;
+  auto fb = pb->LaunchFiber([&] {
+    resp = cmd();
+    done.Notify();
+  });
+  CHECK(done.WaitFor(10s)) << "Command deadlocked";
+  fb.Join();
+  return resp;
+}
+
+// Keyed XINFO and JSON.DEBUG must not wait on the shard queue that runs the script hop.
+TEST_F(MultiTest, EvalKeyedInfoCommands) {
+  if (!absl::GetFlag(FLAGS_default_lua_flags).empty())
+    GTEST_SKIP() << "Expects undeclared keys to be rejected";
+
   const ShardId sid1 = Shard(kKeySid1, shard_set->size());
   ASSERT_NE(sid1, 0u);  // Run() uses thread 0, so the hop on sid1 is not inlined.
   ASSERT_NE(Shard(kKeySid2, shard_set->size()), sid1);
 
-  auto eval = [&](string_view script, string_view arg) {
-    fb2::Done done;
-    RespExpr resp;
-    auto fb = pp_->at(0)->LaunchFiber([&] {
-      resp = Run({"eval", script, "1", kKeySid1, arg});
-      done.Notify();
-    });
-    // A queue waiting on itself never recovers, so abort instead of hanging in TearDown.
-    CHECK(done.WaitFor(10s)) << "EVAL deadlocked: " << script;
-    fb.Join();
-    return resp;
+  // Runs the script on thread `tid`.
+  auto eval = [&](unsigned tid, string_view script, string_view arg) {
+    return RunOrAbort(pp_->at(tid), [&] { return Run({"eval", script, "1", kKeySid1, arg}); });
   };
 
   Run({"xgroup", "create", kKeySid1, "g", "$", "mkstream"});
-  EXPECT_THAT(eval("redis.call('xinfo', 'stream', ARGV[1]) "
+  EXPECT_THAT(eval(0,
+                   "redis.call('xinfo', 'stream', ARGV[1]) "
                    "redis.call('xinfo', 'consumers', ARGV[1], 'g') "
                    "return #redis.call('xinfo', 'groups', ARGV[1])",
                    kKeySid1),
               IntArg(1));
 
+  // A client blocked on the shard keeps the hop off the connection thread as well.
+  RespExpr read;
+  auto reader = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    read = Run({"xreadgroup", "group", "g", "c", "block", "10000", "streams", kKeySid1, ">"});
+  });
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("IO0"); }, 1s));
+  EXPECT_THAT(eval(sid1,
+                   "redis.call('xadd', KEYS[1], '*', 'f', 'v') "
+                   "return #redis.call('xinfo', 'groups', KEYS[1])",
+                   kKeySid1),
+              IntArg(1));
+  reader.Join();
+  EXPECT_THAT(read, ArrLen(1));
+
   Run({"del", kKeySid1});
   Run({"json.set", kKeySid1, "$", R"({"a":1})"});
-  EXPECT_THAT(eval("redis.call('json.debug', 'memory', ARGV[1]) "
+  EXPECT_THAT(eval(0,
+                   "redis.call('json.debug', 'memory', ARGV[1]) "
                    "return redis.call('json.debug', 'fields', ARGV[1])",
                    kKeySid1),
               IntArg(1));
 
-  // Another shard is still read via its queue.
-  Run({"xgroup", "create", kKeySid2, "g", "$", "mkstream"});
-  EXPECT_THAT(eval("return #redis.call('xinfo', 'groups', ARGV[1])", kKeySid2), IntArg(1));
+  // The key-less HELP forms need no declared key.
+  EXPECT_THAT(
+      eval(0, "return #redis.call('xinfo', 'help') + #redis.call('json.debug', 'help')", ""),
+      IntArg(11));
+
+  // A key on another shard is undeclared instead of being read through that shard's queue.
+  EXPECT_THAT(eval(0, "return redis.call('xinfo', 'groups', ARGV[1])", kKeySid2),
+              ErrArg("undeclared key"));
 
   // Every EVAL above ran as a single-shard hop.
-  EXPECT_EQ(GetMetrics().coordinator_stats.eval_shardlocal_coordination_cnt, 3u);
+  EXPECT_EQ(GetMetrics().coordinator_stats.eval_shardlocal_coordination_cnt, 5u);
+}
+
+// With undeclared keys on a single shard the whole script runs in one hop on the shard queue.
+TEST_F(SingleShardMultiTest, EvalKeyedInfoCommandsGlobal) {
+  Run({"xgroup", "create", "s", "g", "$", "mkstream"});
+  Run({"json.set", "j", "$", R"({"a":1})"});
+
+  string_view script = R"(
+--!df flags=allow-undeclared-keys
+return #redis.call('xinfo', 'groups', ARGV[1]) + redis.call('json.debug', 'fields', ARGV[2])
+)";
+  auto resp = RunOrAbort(pp_->at(0), [&] { return Run({"eval", script, "0", "s", "j"}); });
+  EXPECT_THAT(resp, IntArg(2));
+  EXPECT_EQ(GetMetrics().coordinator_stats.eval_shardlocal_coordination_cnt, 1u);
 }
 
 }  // namespace dfly
