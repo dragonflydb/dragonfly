@@ -1710,10 +1710,19 @@ void CmdSet(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (parser.TakeError() || parser.HasNext())  // also clear the parser error dcheck
     return builder->SendError(kSyntaxErr);
 
-  auto cb = [&, &key = key, &path = path, &json_str = json_str](Transaction* t,
-                                                                EngineShard* shard) {
-    return OpSet(t->GetOpArgs(shard), key, path, json_path, json_str, is_nx_condition,
-                 is_xx_condition);
+  auto cb = [&, &key = key, &path = path, &json_str = json_str](
+                Transaction* t, EngineShard* shard) -> OpResult<bool> {
+    OpArgs op_args = t->GetOpArgs(shard);
+    auto res = OpSet(op_args, key, path, json_path, json_str, is_nx_condition, is_xx_condition);
+
+    // Journal only actual writes: a failed NX/XX condition may not hold on a replica.
+    if (res && *res && shard->journal()) {
+      string_view cond = is_nx_condition ? "NX"sv : "XX"sv;
+      std::array<string_view, 4> args{key, path, json_str, cond};
+      bool has_cond = is_nx_condition || is_xx_condition;
+      RecordJournal(op_args, "JSON.SET", ArgSlice{args.data(), has_cond ? 4u : 3u});
+    }
+    return res;
   };
 
   OpResult<bool> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
@@ -2208,6 +2217,7 @@ void CmdGet(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void RegisterJsonFamily(CommandRegistry* registry) {
   constexpr size_t kMsetFlags = CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL;
+  constexpr size_t kSetFlags = CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL;
   registry->StartFamily();
   *registry << CI{"JSON.GET", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Get);
   *registry << CI{"JSON.MGET", CO::READONLY | CO::FAST, -3, 1, -2, acl::JSON}.HFUNC(MGet);
@@ -2232,12 +2242,12 @@ void RegisterJsonFamily(CommandRegistry* registry) {
   *registry << CI{"JSON.ARRAPPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}
                    .HFUNC(ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(ArrIndex);
-  *registry
-      << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 0, 0, acl::JSON}.HFUNC(Debug)
-      << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
-      << CI{"JSON.SET", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
-      << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)
-      << CI{"JSON.MERGE", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(Merge);
+  *registry << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 0, 0, acl::JSON}.HFUNC(Debug)
+            << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
+            << CI{"JSON.SET", kSetFlags, -4, 1, 1, acl::JSON}.HFUNC(Set)
+            << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)
+            << CI{"JSON.MERGE", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(
+                   Merge);
 }
 
 }  // namespace dfly
