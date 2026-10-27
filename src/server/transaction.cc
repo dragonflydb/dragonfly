@@ -57,7 +57,6 @@ void AnalyzeTxQueue(const EngineShard* shard, const TxQueue* txq) {
 
       const Transaction* cont_tx = shard->GetContTx();
       if (cont_tx) {
-        // TODO: DebugId() races with cont_tx's coordinator, which writes its fields between hops.
         absl::StrAppend(&msg, " continuation_tx: ", cont_tx->DebugId(shard->shard_id()), " ",
                         cont_tx->DEBUG_IsArmedInShard(shard->shard_id()) ? " armed" : "");
       }
@@ -580,9 +579,6 @@ void Transaction::MultiBecomeSquasher() {
 }
 
 string Transaction::DebugId(std::optional<ShardId> sid) const {
-  // TODO: not thread-safe off the owning threads. Reads non-atomic fields written by the
-  // coordinator (cid_, unique_shard_cnt_, multi_, cb_ptr_, local_mask) and by shards (txid_,
-  // cb_ptr_), so callers on another thread race with them.
   DCHECK_GT(use_count_.load(memory_order_relaxed), 0u);
   string res = StrCat(Name(), "@", txid_, "/", unique_shard_cnt_);
   if (multi_) {

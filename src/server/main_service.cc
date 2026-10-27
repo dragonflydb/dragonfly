@@ -2417,8 +2417,6 @@ void Service::EvalInternal(const EvalArgs& eval_args, Interpreter* interpreter, 
                             eval_args.num_keys, script_mode);
 
     tx->ScheduleSingleHop([&](Transaction*, EngineShard*) {
-      // TODO: runs on the shard thread, so connection-thread readers of transaction
-      // (GetContextInfo) race with these writes and may dereference the stub after it's freed.
       const intrusive_ptr stub_tx = new Transaction{tx, real_sid, slot_checker.GetUniqueSlotId()};
       conn_cntx->transaction = stub_tx.get();
 
@@ -3067,10 +3065,6 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
 }
 
 Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) const {
-  // TODO: data races on the connection thread (CLIENT LIST, logs). A remote single-shard EVAL
-  // swaps a short-lived stub into transaction from the shard thread (possible use-after-free), and
-  // IsScheduled() reads coordinator_state_, which RunCallback writes on the shard thread.
-  // GetTxDebugInfo() shows the safe pattern.
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
   bool is_scheduled = server_cntx->transaction && server_cntx->transaction->IsScheduled() &&
                       !server_cntx->transaction->Blocker()->IsCompleted();
@@ -3093,17 +3087,6 @@ std::string Service::GetTxDebugInfo(facade::ConnectionContext* cntx) const {
 
   // Pointer only: shards write tx fields concurrently.
   return absl::StrCat(absl::Hex(uintptr_t(server_cntx->transaction)));
-}
-
-void Service::LogShardsTxState() const {
-  if (!shard_set)
-    return;
-
-  // Blocks, so the snapshot is taken before the caller unpauses clients.
-  shard_set->RunBriefInParallel([](EngineShard* shard) {
-    LOG(WARNING) << "DispatchTrackerStuck: shard " << shard->shard_id() << " "
-                 << shard->TxQueueSafeInfo();
-  });
 }
 
 #define HFUNC(x) SetHandler(&Service::x)

@@ -83,10 +83,6 @@ class ServiceInterface {
   virtual std::string GetTxDebugInfo(ConnectionContext* cntx) const {
     return {};
   }
-
-  // Logs per-shard transaction queue state; called when a DispatchTracker times out.
-  virtual void LogShardsTxState() const {
-  }
 };
 
 }  // namespace facade

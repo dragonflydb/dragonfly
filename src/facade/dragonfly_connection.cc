@@ -2199,41 +2199,30 @@ void Connection::ReleaseDeferredCheckpoints() {
   deferred_checkpoints_.clear();
 }
 
-size_t Connection::PendingCheckpoints() const {
-  size_t res = deferred_checkpoints_.size();
-
-  // Checkpoints are kept contiguous at the front of dispatch_q_.
+string Connection::DispatchStuckInfo() const {
+  // Checkpoints sit contiguously at the front of dispatch_q_.
+  size_t checkpoints = deferred_checkpoints_.size();
   for (auto it = dispatch_q_.begin(); it != dispatch_q_.end() && it->IsCheckPoint(); ++it)
-    ++res;
-  return res;
-}
+    ++checkpoints;
+  if (checkpoints == 0)
+    return {};
 
-string Connection::DispatchStuckInfo(absl::Time wait_start) const {
-  string info = absl::StrCat("addr=", RemoteEndpointStr(), " name=", name_,
-                             " checkpoints=", PendingCheckpoints(),
-                             " waiting_ms=", absl::ToInt64Milliseconds(absl::Now() - wait_start));
+  string info =
+      absl::StrCat("addr=", RemoteEndpointStr(), " name=", name_, " checkpoints=", checkpoints);
 
-  // V2: the head is the oldest in-flight command. V1: only a sync dispatch is still reachable, a
-  // pipelined one is unlinked from the queue before it runs.
-  const ParsedCommand* cmd = nullptr;
-  if (ioloop_v2_)
-    cmd = parsed_head_;
-  else if (cc_ && cc_->sync_dispatch)
-    cmd = parsed_cmd_;
-
+  // V2: the head is the oldest in-flight command. V1: only a sync dispatch is reachable.
+  const ParsedCommand* cmd =
+      ioloop_v2_ ? parsed_head_ : (cc_ && cc_->sync_dispatch ? parsed_cmd_ : nullptr);
   if (cmd) {
-    string_view name;
-    if (auto* mc_cmd = cmd->mc_command(); mc_cmd)
-      name = MemcacheParser::CmdName(mc_cmd->type);
-    else if (!cmd->empty())
-      name = cmd->Front();
+    // Memcache args hold only keys.
+    string_view name = cmd->mc_command() || cmd->empty() ? "" : cmd->Front();
     absl::StrAppend(&info, " cmd=", name,
                     " cmd_ms=", CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle) / 1000);
   }
 
   absl::StrAppend(&info, " ", DebugInfo());
 
-  // Not GetContextInfo(): it races with shard threads, see its TODO.
+  // Not GetContextInfo(): it races with shard threads.
   if (cc_)
     absl::StrAppend(&info, " tx=", service_->GetTxDebugInfo(cc_.get()));
   return info;

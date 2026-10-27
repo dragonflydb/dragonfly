@@ -588,8 +588,6 @@ void EngineShard::PollExecutionIfDeferred() {
 }
 
 void EngineShard::PollExecutionInternal(const char* context, Transaction* trans) {
-  // TODO: DebugId() here and in the CHECKs below may race with the coordinators of trans (unarmed
-  // when the poll expired) and continuation_trans_ (between hops).
   DVLOG(2) << "PollExecution " << context << " " << (trans ? trans->DebugId() : "") << " "
            << txq_.size() << " " << (continuation_trans_ ? continuation_trans_->DebugId() : "");
 
@@ -1069,9 +1067,6 @@ string EngineShard::TxQueueSafeInfo() const {
 }
 
 EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
-  // TODO: data races with the coordinators of queued txs. DebugId() on an unarmed head and
-  // GetDbIndex() on every entry read fields the coordinator rewrites between hops, and the armed
-  // check below is a relaxed load, so the armed-branch reads aren't ordered after arming.
   const TxQueue* queue = txq();
 
   ShardId sid = shard_id();
