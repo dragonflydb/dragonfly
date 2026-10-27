@@ -33,6 +33,10 @@ class BlockingController;
 
 using facade::OpResult;
 
+// Opaque identity for a physical DashTable bucket — its memory address.
+// Unique across all databases/segments for the lifetime of a serialization.
+using BucketIdentity = uintptr_t;
+
 // Applies a delta to the per-db/per-type counters and to the owning slot's memory_bytes.
 // All of them track resident RAM. A set `slot` must equal KeySlot(key) and spares computing it.
 void AccountObjectMemory(std::string_view key, unsigned type, int64_t delta, DbTable* db,
@@ -105,6 +109,20 @@ class DbSlice {
 
     // Should wait for IsAnyBucketBlocked to return false
     virtual void WaitForNoBucketBlocked() const {
+    }
+
+    // Should return true if the bucket is mid-serialization or has pending dependencies
+    virtual bool IsBucketBlocked(BucketIdentity bucket) const {
+      return false;
+    }
+
+    // Should wait for IsBucketBlocked(bucket) to return false
+    virtual void WaitForBucketUnblocked(BucketIdentity bucket) const {
+    }
+
+    // Should return true if a journal append would block, regardless of the changed bucket
+    virtual bool IsJournalAppendBlocked() const {
+      return false;
     }
 
     bool eventually_consistent_ = false;
@@ -587,6 +605,15 @@ class DbSlice {
 
   // Block and wait for WillBlockOnJournalWrite to become false
   void WaitForUnblockedJournalWrites() const;
+
+  // Returns true if a journal append would block, e.g. on a stream mutex held by a serializer
+  bool IsJournalAppendBlocked() const;
+
+  // Returns true if an entry of the bucket can be journaled and deleted without suspending
+  bool CanDeleteWithoutBlocking(BucketIdentity bucket) const;
+
+  // Block and wait for no registered snapshot to depend on the bucket
+  void WaitForBucketUnblocked(BucketIdentity bucket) const;
 
   void StartSampleTopK(DbIndex db_ind, uint32_t min_freq);
 

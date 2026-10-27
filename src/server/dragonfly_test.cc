@@ -1481,6 +1481,108 @@ TEST_F(DflyEngineTest, NotifyPendingExpiresWithoutSuspending) {
   EXPECT_THAT(expired, UnorderedElementsAre(kKeySid0, key2));
 }
 
+namespace {
+
+// Stands in for a snapshot that serializes one bucket, e.g. a big value between its chunks.
+// IsAnyBucketBlocked() reports it for the whole slice; writes to the bucket wait like OnChange.
+struct BlockedBucket : public DbSlice::ChangeConsumerInterface {
+  void OnChange(DbIndex, const DbSlice::ChangeReq& req) override {
+    for (auto it : req.buckets())
+      WaitForBucketUnblocked(it.bucket_address());
+  }
+
+  bool IsAnyBucketBlocked() const override {
+    return blocked;
+  }
+
+  void WaitForNoBucketBlocked() const override {
+    released.Wait();
+  }
+
+  bool IsBucketBlocked(BucketIdentity b) const override {
+    return blocked && b == bucket;
+  }
+
+  void WaitForBucketUnblocked(BucketIdentity b) const override {
+    if (IsBucketBlocked(b)) {
+      waiting.Notify();
+      released.Wait();
+    }
+  }
+
+  bool blocked = true;
+  BucketIdentity bucket = 0;  // 0 stands for a bucket no key lives in
+  mutable fb2::Done waiting, released;
+};
+
+BucketIdentity BucketOnShard0(string_view key) {
+  return shard_set->Await(0, [key] {
+    auto* pt = namespaces->GetDefaultNamespace().GetDbSlice(0).GetTables(0);
+    return pt->Find(key).bucket_address();
+  });
+}
+
+void RegisterOnShard0(BlockedBucket* consumer) {
+  shard_set->pool()->at(0)->Await([consumer] {
+    EngineShard* shard = EngineShard::tlocal();
+
+    // RegisterOnChange requires the shard lock to be held (see #7153).
+    shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    namespaces->GetDefaultNamespace().GetDbSlice(0).RegisterOnChange(consumer);
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+  });
+}
+
+// Release before unregistering: UnregisterOnChange waits for the fibers waiting on the consumer.
+void ReleaseOnShard0(BlockedBucket* consumer) {
+  shard_set->pool()->at(0)->Await([consumer] {
+    consumer->blocked = false;
+    consumer->released.Notify();
+  });
+}
+
+void UnregisterOnShard0(BlockedBucket* consumer) {
+  shard_set->pool()->at(0)->Await(
+      [consumer] { namespaces->GetDefaultNamespace().GetDbSlice(0).UnregisterOnChange(consumer); });
+}
+
+size_t DbSizeOnShard0() {
+  return shard_set->Await(0,
+                          [] { return namespaces->GetDefaultNamespace().GetDbSlice(0).DbSize(0); });
+}
+
+}  // namespace
+
+// A bucket blocked by a snapshot does not stop active expiry of keys in other buckets.
+TEST_F(DflyEngineTest, HeartbeatExpiresWhileOtherBucketBlocked) {
+  Run({"set", kKeySid0, "v", "PX", "10"});
+  BlockedBucket snapshot;
+  RegisterOnShard0(&snapshot);
+  absl::Cleanup cleanup = [&] {
+    ReleaseOnShard0(&snapshot);
+    UnregisterOnShard0(&snapshot);
+  };
+  AdvanceTime(20);
+
+  EXPECT_TRUE(WaitUntilCondition([] { return DbSizeOnShard0() == 0; }, 1s));
+}
+
+// Active expiry skips a key whose bucket is blocked and expires it once the bucket is released.
+TEST_F(DflyEngineTest, HeartbeatDefersExpiryInBlockedBucket) {
+  Run({"set", kKeySid0, "v", "PX", "10"});
+  BlockedBucket snapshot;
+  snapshot.bucket = BucketOnShard0(kKeySid0);
+  RegisterOnShard0(&snapshot);
+  absl::Cleanup unregister = [&] { UnregisterOnShard0(&snapshot); };
+  AdvanceTime(20);
+
+  ThisFiber::SleepFor(100ms);  // ~10 heartbeats at the default hz=100
+  EXPECT_EQ(DbSizeOnShard0(), 1u);
+
+  ReleaseOnShard0(&snapshot);
+  EXPECT_TRUE(WaitUntilCondition([] { return DbSizeOnShard0() == 0; }, 1s));
+}
+
 // AddListener picks the accept-loop proactor via the pool's shared round-robin, so listener
 // construction (see MakeListener in dfly_main.cc) must not call GetNextProactor() in between —
 // that would stack several accept loops on one proactor.

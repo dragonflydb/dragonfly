@@ -775,7 +775,8 @@ void EngineShard::Heartbeat() {
   // If this starves expiry/eviction in practice, the design should consider changing direction:
   // lazily register the suspended transaction's locks here (like ScheduleInShard does) and
   // proceed instead of skipping.
-  if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock || running_tx_ != nullptr) {
+  // Entries of buckets that are mid-serialization are skipped by expiry and eviction below.
+  if (db_slice.IsJournalAppendBlocked() || !can_acquire_global_lock || running_tx_ != nullptr) {
     uint64_t now = absl::GetCurrentTimeNanos();
 
     uint64_t elapsed_ms = (now - stalled_start_ns_) / 1000000;
@@ -793,7 +794,7 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
-  if (tiered_storage_ && tiered_storage_->ShouldOffload()) {
+  if (tiered_storage_ && tiered_storage_->ShouldOffload() && !db_slice.WillBlockOnJournalWrite()) {
     VLOG(1) << "Running Offloading, memory=" << db_slice.memory_budget()
             << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
 

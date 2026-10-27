@@ -56,10 +56,6 @@ template <typename T> struct OptionalMutex {
 
 }  // namespace detail
 
-// Opaque identity for a physical DashTable bucket — its memory address.
-// Unique across all databases/segments for the lifetime of a serialization.
-using BucketIdentity = uintptr_t;
-
 // Track dependencies for buckets.
 // Asynchronous processes during bucket serialization like big value streaming and tiered value
 // loading must increase the dependency count for their bucket to hold off changes to it.
@@ -74,6 +70,9 @@ struct BucketDependencies {
   void WaitEmpty() const;
   bool HasAny() const {
     return !deps_.empty();
+  }
+  bool Has(BucketIdentity bucket) const {
+    return deps_.contains(bucket);
   }
 
  private:
@@ -237,6 +236,19 @@ class SerializerBase : public BucketDependencies,
   }
 
   void WaitForNoBucketBlocked() const override;
+
+  bool IsBucketBlocked(BucketIdentity bucket) const override {
+    return BucketDependencies::Has(bucket);
+  }
+
+  void WaitForBucketUnblocked(BucketIdentity bucket) const override {
+    BucketDependencies::Wait(bucket);
+  }
+
+  // Only with tagged chunks disabled: journal changes wait for the entry being streamed
+  bool IsJournalAppendBlocked() const override {
+    return stream_mu_.is_locked();
+  }
 
   // --- Shared members ---
 
