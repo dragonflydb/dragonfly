@@ -692,6 +692,7 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
         return false;
       break;
     [[unlikely]] case DbSlice::ExpireResult::Deleted:
+    [[unlikely]] case DbSlice::ExpireResult::Deferred:
       return false;
   }
   // clang-format on
@@ -725,11 +726,6 @@ bool ScanCb(const OpArgs& op_args, PrimeIterator prime_it, const ScanOpts& opts,
 void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, ScanResult* vec) {
   auto& db_slice = op_args.GetDbSlice();
   DCHECK(db_slice.IsDbValid(op_args.db_cntx.db_index));
-
-  // ScanCb can preempt due to journaling expired entries and we need to make sure that
-  // we enter the callback in a timing when journaling will not cause preemption. Otherwise,
-  // the bucket might change as we Traverse and yield.
-  db_slice.WaitForUnblockedJournalWrites();
 
   unsigned cnt = 0;
 
@@ -2825,7 +2821,7 @@ void GenericFamily::RandomKey(CmdArgParser parser, CommandContext* cmd_cntx) {
   scan_opts.limit = 3;  // number of entries per shard
   std::vector<ScanResult> candidates_collection(shard_set->size());
 
-  // OpScan can preempt (WaitForUnblockedJournalWrites suspends on CondVar during BGSAVE),
+  // OpScan can preempt (sending the queued expired events and journal throttling may suspend),
   // so we must run on a regular fiber rather than the dispatcher (RunBriefInParallel).
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     auto* prime_table = cntx->ns->GetDbSlice(shard->shard_id()).GetTables(db_cntx.db_index);
