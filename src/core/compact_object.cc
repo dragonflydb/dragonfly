@@ -1439,8 +1439,9 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
     return {true, true};
   }
 
-  // LARGE_STR_TAG raw string without encoding: modify the underlying buffer directly.
-  if (taglen_ == LARGE_STR_TAG && !encoding_) {
+  // LARGE_STR_TAG raw string without encoding: modify the underlying buffer directly
+  // unless read_pending is set (in-place modification would corrupt pinned readers).
+  if (taglen_ == LARGE_STR_TAG && !encoding_ && !u_.large_str.read_pending) {
     if (idx >= u_.large_str.Size()) {
       VLOG(1) << "Offset out of bounds for raw string: " << idx << " >= " << u_.large_str.Size();
       return {false, false};
@@ -1449,9 +1450,10 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
     return {true, true};
   }
 
-  // For ASCII encoded large strings we can modify the underlying buffer directly.
+  // For ASCII encoded large strings we can modify the underlying buffer directly
+  // unless read_pending is set.
   if (encoding_ && (encoding_ == ASCII1_ENC || encoding_ == ASCII2_ENC) &&
-      taglen_ == LARGE_STR_TAG && absl::ascii_isascii(val)) {
+      taglen_ == LARGE_STR_TAG && !u_.large_str.read_pending && absl::ascii_isascii(val)) {
     auto* buf = reinterpret_cast<uint8_t*>(u_.large_str.ptr);
     size_t decoded_len = GetStrEncoding().DecodedSize(u_.large_str.Size());
     if (idx >= decoded_len) {
