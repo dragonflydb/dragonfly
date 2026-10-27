@@ -982,7 +982,7 @@ TEST_F(RdbTest, FailedLoadDropsUnbuiltIndex) {
 
   const auto no_index = ErrArg("idx: no such index");
   EXPECT_THAT(Run({"ft._list"}).GetVec(), IsEmpty());
-  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), ErrArg("Index with name 'idx' not found"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), no_index);
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), no_index);
   EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
   EXPECT_THAT(
