@@ -1393,8 +1393,7 @@ std::optional<DocField> HnswSortField(
 vector<SearchResult> LoadHnswSearchDocs(
     const std::string_view index_name,
     const std::optional<search::KnnScoreSortOption>& knn_score_option, const SearchParams& params,
-    const CommandContext& cmd_cntx, std::vector<std::vector<SerializedSearchDoc>> shard_docs,
-    bool finalize) {
+    const CommandContext& cmd_cntx, std::vector<std::vector<SerializedSearchDoc>> shard_docs) {
   std::vector<SearchResult> results(1);
   const ShardId shard_size = shard_docs.size();
 
@@ -1450,10 +1449,7 @@ vector<SearchResult> LoadHnswSearchDocs(
     }
     return OpStatus::OK;
   };
-  if (finalize)
-    cmd_cntx.tx()->Execute(std::move(cb), true);
-  else
-    cmd_cntx.tx()->ScheduleSingleHop(std::move(cb));
+  cmd_cntx.tx()->Execute(std::move(cb), true);
 
   // Transform shard results back to a flat list of serialized docs. A shard whose index went
   // missing during the hop (e.g. dropped between hops) leaves its indicator empty, not resized.
@@ -1530,8 +1526,7 @@ vector<SearchResult> SearchGlobalHnswIndex(
     shard_docs[shard_id].emplace_back(std::move(doc));
   }
 
-  return LoadHnswSearchDocs(index_name, knn_score_option, params, cmd_cntx, std::move(shard_docs),
-                            false);
+  return LoadHnswSearchDocs(index_name, knn_score_option, params, cmd_cntx, std::move(shard_docs));
 }
 
 vector<SearchResult> SearchGlobalHnswIndex(
@@ -1576,8 +1571,7 @@ vector<SearchResult> SearchGlobalHnswIndex(
     shard_docs[shard_id].emplace_back(std::move(doc));
   }
 
-  return LoadHnswSearchDocs(index_name, knn_score_option, params, cmd_cntx, std::move(shard_docs),
-                            true);
+  return LoadHnswSearchDocs(index_name, knn_score_option, params, cmd_cntx, std::move(shard_docs));
 }
 
 // Search HNSW index for all documents within the given radius.
@@ -2495,10 +2489,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     return OpStatus::OK;
   };
 
-  if (needs_global_stats)
-    cmd_cntx->tx()->Execute(std::move(shard_cb), true);
-  else
-    cmd_cntx->tx()->ScheduleSingleHop(std::move(shard_cb));
+  cmd_cntx->tx()->Execute(std::move(shard_cb), true);
 
   if (index_not_found.load(std::memory_order_relaxed)) {
     cmd_cntx->SendError(string{index_name} + ": no such index");
@@ -3246,13 +3237,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
       return OpStatus::OK;
     };
-    if (knn_has_prefilter) {
-      cmd_cntx->tx()->Execute(std::move(search_cb), false);
-    } else if (needs_global_stats) {
-      cmd_cntx->tx()->Execute(std::move(search_cb), true);
-    } else {
-      cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
-    }
+    cmd_cntx->tx()->Execute(std::move(search_cb), /*conclude=*/!knn_has_prefilter);
 
     if (index_not_found.load(memory_order_relaxed)) {
       if (knn_has_prefilter)
@@ -3735,10 +3720,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     return OpStatus::OK;
   };
-  if (needs_global_stats)
-    cmd_cntx->tx()->Execute(std::move(search_cb), true);
-  else
-    cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
+  cmd_cntx->tx()->Execute(std::move(search_cb), true);
 
   if (index_not_found.load())
     return rb->SendError(string{index_name} + ": no such index");
@@ -3826,14 +3808,13 @@ static std::vector<search::GlobalDocId> RunAggregatePrefilter(
   return CollectPrefilterGlobalIds(prefilter_docs);
 }
 
-// Loads HNSW result docs (KNN or VECTOR_RANGE) into query_results. Finalizes the multi-hop tx when
-// `finalize` is set (a prefilter hop already ran), otherwise schedules a single hop.
+// Loads HNSW result docs (KNN or VECTOR_RANGE) into query_results in a concluding hop.
 static void RunHnswAggregateLoad(
     CommandContext* cmd_cntx, const AggregateParams& params,
     std::vector<std::vector<SearchDocData>>& query_results,
     const std::vector<std::vector<std::pair<search::DocId, float>>>& shard_docs,
     std::string_view score_alias,
-    const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores, bool finalize) {
+    const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores) {
   auto cb = [&query_results, &params, &shard_docs, score_alias, &text_scores](Transaction* t,
                                                                               EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(params.index);
@@ -3845,10 +3826,7 @@ static void RunHnswAggregateLoad(
                                               score_alias, text_scores[es->shard_id()]);
     return OpStatus::OK;
   };
-  if (finalize)
-    cmd_cntx->tx()->Execute(std::move(cb), true);
-  else
-    cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->Execute(std::move(cb), true);
 }
 
 // FT.AGGREGATE over a global HNSW KNN query. Returns false if an error was already sent.
@@ -3884,8 +3862,7 @@ static bool AggregateHnswKnn(CommandContext* cmd_cntx, AggregateParams& params,
       prefilter_ids ? hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, *prefilter_ids)
                     : hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime);
   auto shard_docs = GroupByShardId(knn_results, shard_set->size());
-  RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, knn->score_alias, text_scores,
-                       has_prefilter);
+  RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, knn->score_alias, text_scores);
   return true;
 }
 
@@ -3932,7 +3909,7 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
   }
   auto shard_docs = GroupByShardId(range_results, shard_set->size());
   RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, hnsw_range->score_alias,
-                       text_scores, has_prefilter);
+                       text_scores);
   return true;
 }
 
@@ -3965,10 +3942,7 @@ static void AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
           index->SearchForAggregator(t->GetOpArgs(es), params, &search_algo);
     return OpStatus::OK;
   };
-  if (needs_global_stats)
-    cmd_cntx->tx()->Execute(std::move(search_cb), true);
-  else
-    cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
+  cmd_cntx->tx()->Execute(std::move(search_cb), true);
 }
 
 void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
