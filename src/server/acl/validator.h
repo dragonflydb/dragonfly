@@ -4,32 +4,41 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include <utility>
+#include <optional>
 #include <vector>
 
 #include "facade/facade_types.h"
+#include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_log.h"
-#include "server/command_registry.h"
 
-namespace dfly::acl {
+namespace dfly {
 
-struct AclKeys;
-struct AclPubSub;
+class CommandId;
+class ConnectionContext;
 
-std::pair<bool, AclLog::Reason> IsUserAllowedToInvokeCommandGeneric(
-    const ConnectionContext& cntx, const CommandId& id, const facade::ParsedArgs& tail_args);
+namespace acl {
 
-bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
-                                  const facade::ParsedArgs& tail_args);
+// The ACL rules a command is checked against. A non-owning view: the rules must outlive it.
+struct AclRulesView {
+  const std::vector<uint64_t>& commands;  // Per-family bitmasks of the allowed commands.
+  const AclKeys& keys;
+  const AclPubSub& pub_sub;
+  size_t db;  // The only database the user may access, or kAllDbs.
+};
 
-// Exposed so callers without a live Connection (e.g. ACL DRYRUN's stub context) can run the
-// pub/sub channel check directly, bypassing IsUserAllowedToInvokeCommand's AclLog::Add, which
-// requires a real connection.
-std::pair<bool, AclLog::Reason> IsPubSubCommandAuthorized(bool literal_match,
-                                                          const std::vector<uint64_t>& acl_commands,
-                                                          const AclPubSub& pub_sub,
-                                                          const facade::ParsedArgs& tail_args,
-                                                          const CommandId& id);
+// Checks whether `rules` allow running `id` with `tail_args` while `db_index` is selected.
+// Returns the reason of a denial or nullopt if the command is allowed. Has no side effects and
+// needs no connection, so it can also simulate commands (ACL DRYRUN).
+std::optional<AclLog::Reason> CheckCommand(const AclRulesView& rules, size_t db_index,
+                                           const CommandId& id,
+                                           const facade::ParsedArgs& tail_args);
 
-}  // namespace dfly::acl
+// Checks the command against the connection's ACL rules, or against the rules snapshotted when a
+// running script started. Records denials in the ACL log.
+[[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
+                                                const facade::ParsedArgs& tail_args);
+
+}  // namespace acl
+}  // namespace dfly

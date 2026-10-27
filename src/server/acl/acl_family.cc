@@ -610,31 +610,15 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  const auto& user = registry.find(username)->second;
-  acl::UserCredentials cred{.acl_commands = user.AclCommandsRef(),
-                            .keys = user.Keys(),
-                            .pub_sub = user.PubSub(),
-                            .ns = {},
-                            .db = user.Db()};
   // The regular command path validates arity before checking ACLs. DRYRUN historically accepts a
   // command without its arguments, so skip key-pattern validation for an incomplete simulation.
-  if (cid->Validate(simulated_args))
-    cred.keys = {{}, true};
-
-  // Stub, used to mimic connection context for a user.
-  ConnectionContext stub(nullptr, std::move(cred));
-  stub.authed_username = username;
-  stub.conn_state.db_index =
-      stub.acl_db_idx == std::numeric_limits<size_t>::max() ? 0 : stub.acl_db_idx;
-  // Check pub/sub channel ACLs too, the same way a real PUBLISH/SUBSCRIBE/PSUBSCRIBE dispatch
-  // would. We can't use the IsUserAllowedToInvokeCommand wrapper here: on denial it logs to
-  // AclLog, which reads the real Connection* for client info - the stub above has none.
-  const bool is_allowed =
-      cid->IsPubSub() ? IsPubSubCommandAuthorized(cid->IsPatternPubSub(), stub.acl_commands,
-                                                  stub.pub_sub, simulated_args, *cid)
-                            .first
-                      : IsUserAllowedToInvokeCommandGeneric(stub, *cid, simulated_args).first;
-  if (is_allowed) {
+  const auto& user = registry.find(username)->second;
+  const AclKeys all_keys{{}, true};
+  const bool incomplete = cid->Validate(simulated_args).has_value();
+  const AclRulesView rules{user.AclCommandsRef(), incomplete ? all_keys : user.Keys(),
+                           user.PubSub(), user.Db()};
+  const size_t db_index = user.Db() == kAllDbs ? 0 : user.Db();
+  if (!CheckCommand(rules, db_index, *cid, simulated_args)) {
     rb->SendOk();
     return;
   }
