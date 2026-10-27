@@ -13,6 +13,7 @@
 
 #include "absl/strings/str_cat.h"
 #include "base/logging.h"
+#include "common/dtoa.h"
 #include "core/overloaded.h"
 #include "core/search/ast_expr.h"
 #include "core/search/indices.h"
@@ -215,87 +216,102 @@ string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
   return "";
 }
 
-string DocIndexInfo::BuildRestoreCommand() const {
-  std::string out;
+namespace {
+
+// Keeps the usual text of a double when it reads back exactly, so plain definitions do not change.
+string ExactDouble(string text, double value) {
+  double parsed = 0;
+  if (absl::SimpleAtod(text, &parsed) && parsed == value)
+    return text;
+  char buf[cmn::kMaxDoubleStrLen];
+  return string(buf, cmn::FormatDoubleShortest(value, false, buf));
+}
+
+}  // namespace
+
+vector<string> DocIndexInfo::BuildRestoreArgs() const {
+  vector<string> args;
+  auto add = [&args](const auto&... parts) { (args.push_back(absl::StrCat(parts)), ...); };
 
   // ON HASH/JSON
-  absl::StrAppend(&out, "ON", " ", base_index.type == DocIndex::HASH ? "HASH" : "JSON");
+  add("ON", base_index.type == DocIndex::HASH ? "HASH" : "JSON");
 
   // optional PREFIX count *prefix1* *prefix2* ...
   if (!base_index.prefixes.empty()) {
-    absl::StrAppend(&out, " PREFIX", " ", base_index.prefixes.size());
-    for (const auto& prefix : base_index.prefixes) {
-      absl::StrAppend(&out, " ", prefix);
-    }
+    add("PREFIX", base_index.prefixes.size());
+    for (const auto& prefix : base_index.prefixes)
+      add(prefix);
   }
 
   // STOPWORDS — only emit when explicitly configured, so restore preserves the distinction
   if (base_index.options.custom_stopwords) {
-    absl::StrAppend(&out, " STOPWORDS ", base_index.options.stopwords.size());
+    add("STOPWORDS", base_index.options.stopwords.size());
     for (const auto& sw : base_index.options.stopwords)
-      absl::StrAppend(&out, " ", sw);
+      add(sw);
   }
 
   if (base_index.options.no_offsets)
-    absl::StrAppend(&out, " NOOFFSETS");
+    add("NOOFFSETS");
 
-  absl::StrAppend(&out, " LANGUAGE ", base_index.schema.default_language);
+  add("LANGUAGE", base_index.schema.default_language);
 
   if (!base_index.schema.language_field.empty())
-    absl::StrAppend(&out, " LANGUAGE_FIELD ", base_index.schema.language_field);
+    add("LANGUAGE_FIELD", base_index.schema.language_field);
 
-  absl::StrAppend(&out, " SCHEMA");
+  add("SCHEMA");
   for (const auto& [alias, finfo_ptr] : base_index.schema.Ordered()) {
     const auto& finfo = *finfo_ptr;
     // Store field name, alias and type
-    absl::StrAppend(&out, " ", finfo.identifier, " AS ", alias, " ",
-                    SearchFieldTypeToString(finfo.type));
+    add(finfo.identifier, "AS", alias, SearchFieldTypeToString(finfo.type));
 
     // Store specific params
     Overloaded info{
         [](monostate) {},
-        [out = &out](const search::SchemaField::VectorParams& params) {
+        [&add](const search::SchemaField::VectorParams& params) {
           auto sim = search::VectorSimilarityToString(params.sim);
           if (params.use_hnsw) {
-            absl::StrAppend(out, " HNSW 16 TYPE ", search::VectorDataTypeToString(params.data_type),
-                            " DIM ", params.dim, " DISTANCE_METRIC ", sim, " INITIAL_CAP ",
-                            params.capacity, " M ", params.hnsw_m, " EF_CONSTRUCTION ",
-                            params.hnsw_ef_construction, " EF_RUNTIME ", params.hnsw_ef_runtime,
-                            " EPSILON ", params.hnsw_epsilon);
+            add("HNSW", 16, "TYPE", search::VectorDataTypeToString(params.data_type), "DIM",
+                params.dim, "DISTANCE_METRIC", sim, "INITIAL_CAP", params.capacity, "M",
+                params.hnsw_m, "EF_CONSTRUCTION", params.hnsw_ef_construction, "EF_RUNTIME",
+                params.hnsw_ef_runtime, "EPSILON",
+                ExactDouble(absl::StrCat(params.hnsw_epsilon), params.hnsw_epsilon));
           } else {
-            absl::StrAppend(out, " FLAT 8 TYPE ", search::VectorDataTypeToString(params.data_type),
-                            " DIM ", params.dim, " DISTANCE_METRIC ", sim, " INITIAL_CAP ",
-                            params.capacity);
+            add("FLAT", 8, "TYPE", search::VectorDataTypeToString(params.data_type), "DIM",
+                params.dim, "DISTANCE_METRIC", sim, "INITIAL_CAP", params.capacity);
           }
         },
-        [out = &out](const search::SchemaField::TagParams& params) {
-          absl::StrAppend(out, " ", "SEPARATOR", " ", string{params.separator});
+        [&add](const search::SchemaField::TagParams& params) {
+          add("SEPARATOR", string{params.separator});
           if (params.case_sensitive)
-            absl::StrAppend(out, " ", "CASESENSITIVE");
+            add("CASESENSITIVE");
           if (params.with_suffixtrie)
-            absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
+            add("WITHSUFFIXTRIE");
         },
-        [out = &out](const search::SchemaField::TextParams& params) {
-          absl::StrAppend(out, " ", "WEIGHT", " ", std::to_string(params.weight));
+        [&add](const search::SchemaField::TextParams& params) {
+          add("WEIGHT", ExactDouble(std::to_string(params.weight), params.weight));
           if (params.with_suffixtrie)
-            absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
+            add("WITHSUFFIXTRIE");
           if (params.no_stem)
-            absl::StrAppend(out, " ", "NOSTEM");
+            add("NOSTEM");
         },
-        [out = &out](const search::SchemaField::NumericParams& params) {
-          absl::StrAppend(out, " ", "BLOCKSIZE", " ", std::to_string(params.block_size));
+        [&add](const search::SchemaField::NumericParams& params) {
+          add("BLOCKSIZE", params.block_size);
         }};
     visit(info, finfo.special_params);
 
     // Store shared field flags
     if (finfo.flags & search::SchemaField::SORTABLE)
-      absl::StrAppend(&out, " SORTABLE");
+      add("SORTABLE");
 
     if (finfo.flags & search::SchemaField::NOINDEX)
-      absl::StrAppend(&out, " NOINDEX");
+      add("NOINDEX");
   }
 
-  return out;
+  return args;
+}
+
+string DocIndexInfo::BuildRestoreCommand() const {
+  return absl::StrJoin(BuildRestoreArgs(), " ");
 }
 
 ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {

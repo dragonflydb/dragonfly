@@ -8612,6 +8612,33 @@ TEST(BuildRestoreCommandTest, TextWeightPreserved) {
   EXPECT_THAT(info.BuildRestoreCommand(), HasSubstr("WEIGHT 3.500000"));
 }
 
+// Doubles that the six-digit forms would round are written so that they read back exactly.
+TEST(BuildRestoreCommandTest, DoublesReadBackExactly) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+
+  SchemaField::TextParams tparams;
+  tparams.weight = 0.0000004;
+  SchemaField::VectorParams vparams;
+  vparams.use_hnsw = true;
+  vparams.dim = 2;
+  vparams.hnsw_epsilon = 0.0123456789;
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["t"] = {SchemaField::TEXT, 0, "t", tparams};
+  base.schema.fields["v"] = {SchemaField::VECTOR, 0, "v", vparams, 1};
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+  std::string cmd = info.BuildRestoreCommand();
+  EXPECT_THAT(cmd, HasSubstr("WEIGHT 4e-7"));
+  EXPECT_THAT(cmd, HasSubstr("EPSILON 0.0123456789"));
+}
+
 // Verify that BuildRestoreCommand preserves WITHSUFFIXTRIE for TAG fields.
 TEST(BuildRestoreCommandTest, TagWithSuffixTriePreserved) {
   using dfly::DocIndex;

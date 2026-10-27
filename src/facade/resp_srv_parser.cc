@@ -13,7 +13,6 @@
 namespace facade {
 
 namespace {
-constexpr uint32_t kMaxInlineSize = 64 * 1024;
 // Above this declared bulk length the buffer grows as data arrives instead of upfront.
 constexpr size_t kBulkEagerLimit = 1u << 20;
 }  // namespace

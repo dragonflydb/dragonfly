@@ -27,6 +27,10 @@ class RespSrvParser {
     BAD_INLINE,
   };
   using Buffer = absl::Span<const uint8_t>;
+
+  // Longest inline command, including the line terminator.
+  static constexpr uint32_t kMaxInlineSize = 64 * 1024;
+
   explicit RespSrvParser(uint32_t max_arr_len = UINT32_MAX, uint32_t max_bulk_len = UINT32_MAX)
       : max_arr_len_(max_arr_len), max_bulk_len_(max_bulk_len) {
   }
