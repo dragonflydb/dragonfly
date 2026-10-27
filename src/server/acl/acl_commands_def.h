@@ -4,9 +4,11 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -61,14 +63,19 @@ inline size_t NumberOfFamilies(size_t number = 0) {
   return number_of_families;
 }
 
-using CategoryIndexTable = absl::flat_hash_map<std::string_view, uint32_t>;
-using ReverseCategoryIndexTable = std::vector<std::string>;
-// bit index to index in the REVERSE_CATEGORY_INDEX_TABLE
-using CategoryToIdxStore = absl::flat_hash_map<uint32_t, uint32_t>;
+// Category names by bit position: kCategoryNames[i] names the category (1 << i) of AclCat.
+inline constexpr std::array<std::string_view, 32> kCategoryNames = {
+    "KEYSPACE",  "READ",      "WRITE",     "SET",       "SORTEDSET",     "LIST",        "HASH",
+    "STRING",    "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",        "PUBSUB",      "ADMIN",
+    "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS", "CONNECTION",    "TRANSACTION", "SCRIPTING",
+    "_RESERVED", "_RESERVED", "_RESERVED", "_RESERVED", "CUCKOO_FILTER", "TOPK",        "CMS",
+    "BLOOM",     "FT_SEARCH", "THROTTLE",  "JSON"};
 
+constexpr std::string_view kReservedCategory = "_RESERVED";
+
+// Command names of each family, by family index and then by bit position.
 using RevCommandField = std::vector<std::string>;
 using RevCommandsIndexStore = std::vector<RevCommandField>;
-using CategoryToCommandsIndexStore = absl::flat_hash_map<std::string, std::vector<uint64_t>>;
 
 // Special flag/mask for all
 constexpr uint32_t NONE = 0;

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -35,7 +36,7 @@ class AclFamily final {
   explicit AclFamily(UserRegistry* registry, util::ProactorPool* pool);
 
   void Register(CommandRegistry* registry);
-  void Init(facade::Listener* listener, UserRegistry* registry);
+  void Init(facade::Listener* listener);
 
  private:
   using SinkReplyBuilder = facade::SinkReplyBuilder;
@@ -93,6 +94,8 @@ class AclFamily final {
 
   std::optional<std::string> MaybeParseNamespace(std::string_view command) const;
 
+  User::UpdateRequest::CategoryValueType CategoryRule(User::Sign sign, uint32_t category) const;
+
   std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
       facade::ParsedArgs args, bool hashed = false, bool has_all_keys = false,
       bool has_all_channels = false) const;
@@ -106,83 +109,18 @@ class AclFamily final {
   CommandRegistry* cmd_registry_;
   util::ProactorPool* pool_;
 
-  // Indexes
+  // Command names by family and bit position, to print command rules.
+  RevCommandsIndexStore family_commands_;
 
-  // See definitions for NONE and ALL in facade/acl_commands_def.h
-  const CategoryIndexTable cat_table_{{"KEYSPACE", KEYSPACE},
-                                      {"READ", READ},
-                                      {"WRITE", WRITE},
-                                      {"SET", SET},
-                                      {"SORTEDSET", SORTEDSET},
-                                      {"LIST", LIST},
-                                      {"HASH", HASH},
-                                      {"STRING", STRING},
-                                      {"BITMAP", BITMAP},
-                                      {"HYPERLOG", HYPERLOGLOG},
-                                      {"GEO", GEO},
-                                      {"STREAM", STREAM},
-                                      {"PUBSUB", PUBSUB},
-                                      {"ADMIN", ADMIN},
-                                      {"FAST", FAST},
-                                      {"SLOW", SLOW},
-                                      {"BLOCKING", BLOCKING},
-                                      {"DANGEROUS", DANGEROUS},
-                                      {"CONNECTION", CONNECTION},
-                                      {"TRANSACTION", TRANSACTION},
-                                      {"SCRIPTING", SCRIPTING},
-                                      {"CUCKOO_FILTER", CUCKOO_FILTER},
-                                      {"TOPK", TOPK},
-                                      {"CMS", CMS},
-                                      {"BLOOM", BLOOM},
-                                      {"FT_SEARCH", FT_SEARCH},
-                                      {"SEARCH", FT_SEARCH},  // Alias for FT_SEARCH
-                                      {"THROTTLE", THROTTLE},
-                                      {"JSON", JSON},
-                                      {"ALL", ALL}};
-
-  // bit 0 at index 0
-  // bit 1 at index 1
-  // bit n at index n
-  const ReverseCategoryIndexTable reverse_cat_table_{
-      "KEYSPACE",   "READ",          "WRITE",     "SET",       "SORTEDSET", "LIST",
-      "HASH",       "STRING",        "BITMAP",    "HYPERLOG",  "GEO",       "STREAM",
-      "PUBSUB",     "ADMIN",         "FAST",      "SLOW",      "BLOCKING",  "DANGEROUS",
-      "CONNECTION", "TRANSACTION",   "SCRIPTING", "_RESERVED", "_RESERVED", "_RESERVED",
-      "_RESERVED",  "CUCKOO_FILTER", "TOPK",      "CMS",       "BLOOM",     "FT_SEARCH",
-      "THROTTLE",   "JSON"};
-
-  // We need this to act as a const member, since the initialization of const data members
-  // must be done on the constructor. However, these are initialized a little later, when
-  // we Register the commands
-  const CategoryToIdxStore& CategoryToIdx(CategoryToIdxStore store = {}) const {
-    static CategoryToIdxStore cat_idx = std::move(store);
-    return cat_idx;
-  }
-
-  const RevCommandsIndexStore& CommandsRevIndexer(RevCommandsIndexStore store = {}) const {
-    static RevCommandsIndexStore rev_index_store = std::move(store);
-    return rev_index_store;
-  }
-
-  const CategoryToCommandsIndexStore& CategoryToCommandsIndex(
-      CategoryToCommandsIndexStore store = {}) const {
-    static CategoryToCommandsIndexStore index = std::move(store);
-    return index;
-  }
+  // The bits of each category's commands: category_commands_[bit position][family].
+  std::array<std::vector<uint64_t>, kCategoryNames.size()> category_commands_;
 
   size_t dbnum_ = 0;
 
-  // Only for testing interface
  public:
-  // Helper accessors for tests. Do not use them directly.
-  const ReverseCategoryIndexTable& GetRevTable() const {
-    return reverse_cat_table_;
-  }
-
-  // We could make CommandsRevIndexer public, but I want this to be
-  // clear that this is for TESTING so do not use this in the codebase
+  // Only for tests.
   const RevCommandsIndexStore& GetCommandsRevIndexer() const {
-    return CommandsRevIndexer();
+    return family_commands_;
   }
 };
 

@@ -72,6 +72,21 @@ string AclDbToString(size_t db);
 
 template <typename P>
 void TraverseEvictImpl(P predicate, facade::Listener* main_listener, util::ProactorPool* pool);
+
+// Returns the mask of an upper-case category name.
+optional<uint32_t> ParseCategoryName(string_view name) {
+  if (name == "ALL")
+    return ALL;
+  if (name == "SEARCH")  // Alias for FT_SEARCH.
+    return FT_SEARCH;
+  if (name == kReservedCategory)
+    return nullopt;
+
+  auto it = rng::find(kCategoryNames, name);
+  if (it == kCategoryNames.end())
+    return nullopt;
+  return 1u << (it - kCategoryNames.begin());
+}
 }  // namespace
 
 AclFamily::AclFamily(UserRegistry* registry, util::ProactorPool* pool)
@@ -154,12 +169,11 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
     const User::MemoryUsage before = exists ? user.GetMemoryUsage() : User::MemoryUsage{};
     if (!exists) {
       User::UpdateRequest default_req;
-      default_req.updates = {User::UpdateRequest::CategoryValueType{User::Sign::MINUS, acl::ALL}};
-      user.Update(std::move(default_req), CategoryToIdx(), reverse_cat_table_,
-                  CategoryToCommandsIndex());
+      default_req.updates = {CategoryRule(User::Sign::MINUS, acl::ALL)};
+      user.Update(std::move(default_req));
     }
     const bool reset_channels = req.reset_channels;
-    user.Update(std::move(req), CategoryToIdx(), reverse_cat_table_, CategoryToCommandsIndex());
+    user.Update(std::move(req));
     registry_->TrackUser(before, user.GetMemoryUsage(), !exists);
     // Send ok first because the connection might get evicted
     cmd_cntx->SendOk();
@@ -343,19 +357,16 @@ GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
 
   for (size_t i = 0; i < usernames.size(); ++i) {
     User::UpdateRequest default_req;
-    default_req.updates = {User::UpdateRequest::CategoryValueType{User::Sign::MINUS, acl::ALL}};
+    default_req.updates = {CategoryRule(User::Sign::MINUS, acl::ALL)};
     auto& user = registry[usernames[i]];
-    user.Update(std::move(default_req), CategoryToIdx(), reverse_cat_table_,
-                CategoryToCommandsIndex());
-    user.Update(std::move(requests[i]), CategoryToIdx(), reverse_cat_table_,
-                CategoryToCommandsIndex());
+    user.Update(std::move(default_req));
+    user.Update(std::move(requests[i]));
     registry_->TrackUser({}, user.GetMemoryUsage(), /*is_new=*/true);
   }
 
   if (!registry.contains("default")) {
     auto& user = registry["default"];
-    user.Update(registry_->DefaultUserUpdateRequest(), CategoryToIdx(), reverse_cat_table_,
-                CategoryToCommandsIndex());
+    user.Update(registry_->DefaultUserUpdateRequest());
     registry_->TrackUser({}, user.GetMemoryUsage(), /*is_new=*/true);
   }
 
@@ -462,17 +473,17 @@ void AclFamily::Cat(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (!parser.Finalize())
       return rb->SendError(parser.TakeError().MakeReply());
 
-    if (!cat_table_.contains(category)) {
+    const auto cid_mask = ParseCategoryName(category);
+    if (!cid_mask) {
       auto error = absl::StrCat("Unknown category: ", category);
       rb->SendError(error);
       return;
     }
 
-    const uint32_t cid_mask = cat_table_.find(category)->second;
     std::vector<std::string> results;
     // TODO replace this with indexer
     auto cb = [cid_mask, &results](auto name, auto& cid) {
-      if (cid_mask & cid.acl_categories()) {
+      if (*cid_mask & cid.acl_categories()) {
         std::string& rule = results.emplace_back(name);
         std::replace(rule.begin(), rule.end(), ' ', '|');  // the form rules use
       }
@@ -487,19 +498,10 @@ void AclFamily::Cat(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  size_t total_categories = 0;
-  for (auto& elem : reverse_cat_table_) {
-    if (elem != "_RESERVED") {
-      ++total_categories;
-    }
-  }
-
-  rb->StartArray(total_categories);
-  for (auto& elem : reverse_cat_table_) {
-    if (elem != "_RESERVED") {
-      rb->SendSimpleString(elem);
-    }
-  }
+  vector<string_view> categories;
+  rng::copy_if(kCategoryNames, back_inserter(categories),
+               [](string_view name) { return name != kReservedCategory; });
+  rb->SendSimpleStrArr(categories);
 }
 
 void AclFamily::GetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -629,9 +631,8 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->SendBulkString(msg);
 }
 
-void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
+void AclFamily::Init(facade::Listener* main_listener) {
   main_listener_ = main_listener;
-  registry_ = registry;
   // Like Redis: replaces all of default's passwords, and an empty value means nopass.
   config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {
     User::UpdateRequest rqst;
@@ -649,7 +650,7 @@ void AclFamily::Init(facade::Listener* main_listener, UserRegistry* registry) {
   if (!acl_file.empty() && Load()) {
     return;
   }
-  registry_->Init(&CategoryToIdx(), &reverse_cat_table_, &CategoryToCommandsIndex());
+  registry_->Init();
 }
 
 std::string AclFamily::AclCatToString(uint32_t acl_category, User::Sign sign) const {
@@ -659,14 +660,12 @@ std::string AclFamily::AclCatToString(uint32_t acl_category, User::Sign sign) co
     return res;
   }
 
-  const auto& index = CategoryToIdx().at(acl_category);
-  absl::StrAppend(&res, absl::AsciiStrToLower(reverse_cat_table_[index]));
+  absl::StrAppend(&res, absl::AsciiStrToLower(kCategoryNames[absl::countr_zero(acl_category)]));
   return res;
 }
 
 std::string AclFamily::AclCommandToString(size_t family, uint64_t mask, User::Sign sign) const {
-  // This is constant but can be optimized with an indexer
-  const auto& rev_index = CommandsRevIndexer();
+  const auto& rev_index = family_commands_;
   std::string res;
   std::string prefix = (sign == User::Sign::PLUS) ? "+" : "-";
   if (mask == ALL_COMMANDS) {
@@ -1014,30 +1013,29 @@ using OptCat = std::optional<uint32_t>;
 // bool == false if -
 std::pair<OptCat, bool> AclFamily::MaybeParseAclCategory(std::string_view command) const {
   if (absl::EqualsIgnoreCase(command, "ALLCOMMANDS")) {
-    return {cat_table_.at("ALL"), true};
+    return {ALL, true};
   }
 
   if (absl::EqualsIgnoreCase(command, "NOCOMMANDS")) {
-    return {cat_table_.at("ALL"), false};
+    return {ALL, false};
   }
 
   if (absl::StartsWith(command, "+@")) {
-    auto res = cat_table_.find(command.substr(2));
-    if (res == cat_table_.end()) {
-      return {};
-    }
-    return {res->second, true};
+    return {ParseCategoryName(command.substr(2)), true};
   }
 
   if (absl::StartsWith(command, "-@")) {
-    auto res = cat_table_.find(command.substr(2));
-    if (res == cat_table_.end()) {
-      return {};
-    }
-    return {res->second, false};
+    return {ParseCategoryName(command.substr(2)), false};
   }
 
   return {};
+}
+
+User::UpdateRequest::CategoryValueType AclFamily::CategoryRule(User::Sign sign,
+                                                               uint32_t category) const {
+  if (category == ALL)
+    return {sign, ALL, std::vector<uint64_t>(NumberOfFamilies(), ALL_COMMANDS)};
+  return {sign, category, category_commands_[absl::countr_zero(category)]};
 }
 
 std::optional<std::string> AclFamily::MaybeParseNamespace(std::string_view command) const {
@@ -1158,10 +1156,7 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
 
     auto [cat, add] = MaybeParseAclCategory(command);
     if (cat) {
-      using Sign = User::Sign;
-      using Val = std::pair<Sign, uint32_t>;
-      auto val = add ? Val{Sign::PLUS, *cat} : Val{Sign::MINUS, *cat};
-      req.updates.push_back(val);
+      req.updates.push_back(CategoryRule(add ? User::Sign::PLUS : User::Sign::MINUS, *cat));
       continue;
     }
 
@@ -1188,31 +1183,19 @@ std::variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(
 }
 
 void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
-  size_t family_count = acl::NumberOfFamilies(families.size());
-  CommandsRevIndexer(std::move(families));
-  CategoryToCommandsIndexStore index;
-  cmd_registry_->Traverse([&](std::string_view, auto& cid) {
-    const uint32_t cat = cid.acl_categories();
+  const size_t family_count = acl::NumberOfFamilies(families.size());
+  family_commands_ = std::move(families);
+  for (auto& commands : category_commands_)
+    commands.assign(family_count, 0);
+
+  cmd_registry_->Traverse([&](std::string_view, const CommandId& cid) {
     const size_t family = cid.GetFamily();
     DCHECK_LT(family, family_count);
-    const uint64_t bit_index = cid.GetBitIndex();
-    for (size_t i = 0; i < 32; ++i) {
-      if (cat & 1 << i) {
-        std::string_view cat_name = reverse_cat_table_[i];
-        if (index[cat_name].empty()) {
-          index[cat_name].resize(CommandsRevIndexer().size());
-        }
-        index[cat_name][family] |= bit_index;
-      }
+    for (uint32_t categories = cid.acl_categories(); categories != 0;
+         categories &= categories - 1) {
+      category_commands_[absl::countr_zero(categories)][family] |= cid.GetBitIndex();
     }
   });
-
-  CategoryToCommandsIndex(std::move(index));
-  CategoryToIdxStore idx_store;
-  for (size_t i = 0; i < 32; ++i) {
-    idx_store[1 << i] = i;
-  }
-  CategoryToIdx(std::move(idx_store));
 }
 
 void AclFamily::Help(CmdArgParser parser, CommandContext* cmd_cntx) {
