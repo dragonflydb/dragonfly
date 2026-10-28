@@ -1485,7 +1485,12 @@ TEST_F(CompactObjectTest, TryBorrow_CowOnSetByteAtIndexAscii) {
 
     // Old pinned buffer must remain intact and be orphaned.
     EXPECT_TRUE(CompactObj::TEST_PinOrphaned(*borrow));
-    EXPECT_EQ(borrow->view()[0], 'a');
+    CompactObj::StrEncoding str_enc(borrow->encoding(), false);
+    string decoded(str_enc.DecodedSize(borrow->view()), '\0');
+    detail::ascii_unpack(reinterpret_cast<const uint8_t*>(borrow->view().data()),
+                         str_enc.DecodedSize(borrow->view()), decoded.data());
+    EXPECT_EQ(decoded[0], 'a');
+    EXPECT_EQ(decoded, val);
 
     uint8_t modified_byte = 0;
     EXPECT_TRUE(cobj_.GetByteAtIndex(0, &modified_byte));
