@@ -2,6 +2,7 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/str_cat.h>
 
 #include <cmath>
@@ -16,8 +17,10 @@
 #include "server/command_registry.h"
 #include "server/conn_context.h"
 #include "server/db_slice.h"
+#include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/rdb_save.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -468,6 +471,19 @@ void CmdMerge(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
     }
 
+    // Journal the result, not the command: replica flows apply their entries independently, so
+    // the sources may be stale when the merge replays. Failed merges are not journaled.
+    if (shard->journal()) {
+      const PrimeKey& pk = dest_res->it->first;
+      string dump = RdbSerializer::DumpValue(dest_res->it->second, DflyCmd::GetMinReplicaVersion());
+      string expire = absl::StrCat(pk.HasExpire() ? pk.GetExpireTime() : 0);
+      absl::InlinedVector<string_view, 6> args{merge_args.dest_key, expire, dump, "REPLACE"sv,
+                                               "ABSTTL"sv};
+      if (pk.IsSticky())
+        args.push_back("STICK"sv);
+      RecordJournal(t->GetOpArgs(shard), "RESTORE"sv, args);
+    }
+
     return OpStatus::OK;
   };
 
@@ -490,14 +506,16 @@ using CI = CommandId;
 
 void RegisterCmsFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::CMS);
+  constexpr size_t kMergeFlags =
+      CO::JOURNALED | CO::DENYOOM | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL;
 
-  *registry
-      << CI{"CMS.INITBYDIM", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(InitByDim)
-      << CI{"CMS.INITBYPROB", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(InitByProb)
-      << CI{"CMS.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(IncrBy)
-      << CI{"CMS.QUERY", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(Query)
-      << CI{"CMS.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info)
-      << CI{"CMS.MERGE", CO::JOURNALED | CO::DENYOOM | CO::VARIADIC_KEYS, -4, 3, 3}.HFUNC(Merge);
+  *registry << CI{"CMS.INITBYDIM", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(InitByDim)
+            << CI{"CMS.INITBYPROB", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(
+                   InitByProb)
+            << CI{"CMS.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(IncrBy)
+            << CI{"CMS.QUERY", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(Query)
+            << CI{"CMS.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info)
+            << CI{"CMS.MERGE", kMergeFlags, -4, 3, 3}.HFUNC(Merge);
 }
 
 }  // namespace dfly
