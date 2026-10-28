@@ -27,6 +27,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/search/doc_index.h"
+#include "server/search/global_hnsw_index.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -583,6 +584,31 @@ TEST_F(SearchFamilyTest, AliasNameResolutionWithoutIndex) {
     EXPECT_EQ(indices->ResolveIndexName("live"), "idx");
     EXPECT_EQ(indices->ResolveIndexName("missing"), "missing");
   });
+}
+
+TEST_F(SearchFamilyTest, HnswSearchMissingShardIndex) {
+  CreateHnswHashIdx();
+  ASSERT_THAT(Run({"HSET", "h:1", "title", "hello", "vec", FloatVec1(1)}), IntArg(2));
+  WaitForIndexReady("idx");
+  const string query_vec = FloatVec1(1);
+  ASSERT_THAT(Run({"FT.SEARCH", "idx", "*=>[KNN 1 @vec $v]", "PARAMS", "2", "v", query_vec}),
+              AreDocIds("h:1"));
+
+  // Reproduce DROPINDEX's intermediate state: local indices are gone, but the global graph remains.
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    auto index = shard->search_indices()->DropIndex("idx");
+    ASSERT_NE(index, nullptr);
+  });
+  ASSERT_TRUE(GlobalHnswIndexRegistry::Instance().Exist("idx", "vec"));
+
+  for (string_view expr : {"*=>[KNN 1 @vec $v]", "@vec:[VECTOR_RANGE 0.5 $v]"}) {
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", expr, "PARAMS", "2", "v", query_vec}),
+                ErrArg("idx: no such index"));
+    EXPECT_THAT(Run({"FT.PROFILE", "idx", "SEARCH", "QUERY", expr, "PARAMS", "2", "v", query_vec}),
+                ErrArg("idx: no such index"));
+    EXPECT_THAT(Run({"FT.AGGREGATE", "idx", expr, "PARAMS", "2", "v", query_vec}),
+                ErrArg("idx: no such index"));
+  }
 }
 
 TEST_F(SearchFamilyTest, HnswAliasConcludesTransactions) {
