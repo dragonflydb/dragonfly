@@ -5,6 +5,7 @@
 #include "server/generic_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/strings/numbers.h>
 
 #include <array>
 #include <cstring>
@@ -1358,11 +1359,22 @@ TEST_F(GenericFamilyTest, SortROBug3636) {
   ASSERT_THAT(resp, ArrLen(17));
 }
 
+void ExpectTimeReply(const RespExpr& resp) {
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::STRING))));
+  int64_t sec = 0, usec = -1;
+  EXPECT_TRUE(absl::SimpleAtoi(resp.GetVec()[0].GetView(), &sec));
+  EXPECT_TRUE(absl::SimpleAtoi(resp.GetVec()[1].GetView(), &usec));
+  EXPECT_GT(sec, 0);
+  EXPECT_GE(usec, 0);
+  EXPECT_LT(usec, 1000000);
+}
+
 TEST_F(GenericFamilyTest, TimeNoKeys) {
-  auto resp = Run({"time"});
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0], ArgType(RespExpr::INT64));
-  EXPECT_THAT(resp.GetVec()[1], ArgType(RespExpr::INT64));
+  ExpectTimeReply(Run({"time"}));
+
+  // Lua must see the elements as strings, not numbers.
+  auto resp = Run({"eval", "local t = redis.call('TIME'); return {type(t[1]), type(t[2])}", "0"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("string", "string")));
 
   // Check that time is the same inside a transaction.
   Run({"multi"});
@@ -1371,21 +1383,16 @@ TEST_F(GenericFamilyTest, TimeNoKeys) {
   Run({"time"});
   resp = Run({"exec"});
 
-  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre(Not(IntArg(0)), _)),
-                                          RespArray(ElementsAre(Not(IntArg(0)), _)))));
-
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
+  ExpectTimeReply(resp.GetVec()[0]);
+  ExpectTimeReply(resp.GetVec()[1]);
   for (int i = 0; i < 2; ++i) {
-    int64_t val0 = get<int64_t>(resp.GetVec()[0].GetVec()[i].u);
-    int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
-    EXPECT_EQ(val0, val1);
+    EXPECT_EQ(resp.GetVec()[0].GetVec()[i].GetString(), resp.GetVec()[1].GetVec()[i].GetString());
   }
 }
 
 TEST_F(GenericFamilyTest, TimeWithKeys) {
-  auto resp = Run({"time"});
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0], ArgType(RespExpr::INT64));
-  EXPECT_THAT(resp.GetVec()[1], ArgType(RespExpr::INT64));
+  ExpectTimeReply(Run({"time"}));
 
   // Check that time is the same inside a transaction.
   Run({"multi"});
@@ -1393,15 +1400,13 @@ TEST_F(GenericFamilyTest, TimeWithKeys) {
   usleep(2000);
   Run({"time"});
   Run({"get", "x"});
-  resp = Run({"exec"});
+  auto resp = Run({"exec"});
 
-  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre(Not(IntArg(0)), _)),
-                                          RespArray(ElementsAre(Not(IntArg(0)), _)), _)));
-
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2), _)));
+  ExpectTimeReply(resp.GetVec()[0]);
+  ExpectTimeReply(resp.GetVec()[1]);
   for (int i = 0; i < 2; ++i) {
-    int64_t val0 = get<int64_t>(resp.GetVec()[0].GetVec()[i].u);
-    int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
-    EXPECT_EQ(val0, val1);
+    EXPECT_EQ(resp.GetVec()[0].GetVec()[i].GetString(), resp.GetVec()[1].GetVec()[i].GetString());
   }
 }
 
