@@ -664,9 +664,9 @@ class DbSlice {
   // Returns true if this write could be ignored during replication without losing consistency
   bool IsOmittableWrite(const Context& cntx, const ChangeReq& req);
 
-  enum class UpdateStatsMode : uint8_t {
-    kReadStats,
-    kMutableStats,
+  enum class LookupMode : uint8_t {
+    kReadOnly,
+    kMutable,
   };
 
   // Returns true if deletion of expired entries is allowed (i.e., expiry is not paused
@@ -677,8 +677,7 @@ class DbSlice {
                                            std::optional<unsigned> req_obj_type);
 
   OpResult<PrimeIterator> FindInternal(const Context& cntx, std::string_view key,
-                                       std::optional<unsigned> req_obj_type,
-                                       UpdateStatsMode stats_mode) const;
+                                       std::optional<unsigned> req_obj_type, LookupMode mode) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
                                              std::optional<unsigned> req_obj_type);
 

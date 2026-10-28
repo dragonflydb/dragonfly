@@ -683,8 +683,14 @@ class ShardDocIndices {
  public:
   ShardDocIndices();
 
-  // Get sharded document index by its name or nullptr if not found
+  // Get sharded document index by its canonical name or nullptr if not found.
   ShardDocIndex* GetIndex(std::string_view name);
+
+  // Resolve a canonical index name or alias without following alias chains.
+  ShardDocIndex* ResolveIndex(std::string_view name);
+
+  // Resolve an alias to its canonical name without requiring the index to exist.
+  std::string ResolveIndexName(std::string_view name) const;
 
   // Add an alias for an existing index.
   facade::OpStatus AddAlias(std::string_view alias, std::string_view target);
@@ -703,8 +709,11 @@ class ShardDocIndices {
                  std::shared_ptr<const DocIndex> index, bool is_journal = false,
                  Synonyms synonyms = {});
 
-  // Drop index, return the dropped index if it existed or nullptr otherwise
+  // Drop index and its aliases, returning the index or nullptr if it did not exist.
   std::unique_ptr<ShardDocIndex> DropIndex(std::string_view name);
+
+  // Extract an index without removing aliases that point to it, for replacement.
+  std::unique_ptr<ShardDocIndex> ExtractIndex(std::string_view name);
 
   // Drop all indices
   void DropAllIndices();

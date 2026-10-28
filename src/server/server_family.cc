@@ -308,44 +308,53 @@ string UnknownCmd(string cmd, facade::ParsedArgs args, size_t num_args) {
                       absl::StrJoin(args.begin(), end, ", ", CmdArgListFormatter()));
 }
 
-std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
+// Returns an error instead of terminating the process: this is called at runtime by
+// SAVE/LOAD commands, where a transient failure (e.g. missing credentials) must not kill
+// an already serving instance.
+io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> CreateCloudSnapshotStorage(
+    std::string_view uri) {
+  auto make_err = [](std::error_code ec, std::string_view what) {
+    return nonstd::make_unexpected(GenericError{ec, absl::StrCat("Failed to initialize ", what)});
+  };
+
   if (detail::IsS3Path(uri)) {
     auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(absl::GetFlag(FLAGS_s3_endpoint),
                                                               absl::GetFlag(FLAGS_s3_use_https),
                                                               absl::GetFlag(FLAGS_s3_ec2_metadata));
     auto ec = shard_set->pool()->GetNextProactor()->Await(
         [&] { return aws->Init(detail::kBucketConnectMs); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize AWS S3 snapshot storage: " << ec.message();
-      exit(1);
-    }
+    if (ec)
+      return make_err(ec, "AWS S3 snapshot storage");
     return aws;
   } else if (detail::IsGCSPath(uri)) {
 #ifdef WITH_GCP
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
-      exit(1);
-    }
+    if (ec)
+      return make_err(ec, "GCS snapshot storage");
     return gcs;
 #else
-    LOG(ERROR) << "Compiled without GCP support";
-    exit(1);
+    return nonstd::make_unexpected(
+        GenericError{make_error_code(errc::not_supported), "Compiled without GCP support"});
 #endif
   } else if (detail::IsAzurePath(uri)) {
     auto azure = std::make_shared<detail::AzureSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await(
         [&] { return azure->Init(uri, detail::kBucketConnectMs); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize Azure snapshot storage: " << ec.message();
-      exit(1);
-    }
+    if (ec)
+      return make_err(ec, "Azure snapshot storage");
     return azure;
-  } else {
-    LOG(ERROR) << "Unknown cloud storage " << uri;
-    exit(1);
   }
+  return nonstd::make_unexpected(GenericError{make_error_code(errc::invalid_argument),
+                                              absl::StrCat("Unknown cloud storage ", uri)});
+}
+
+// Cloud paths need their own storage, other paths use the server's default storage.
+io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> SelectSnapshotStorage(
+    std::string_view path, std::shared_ptr<detail::SnapshotStorage> default_storage) {
+  if (detail::IsCloudPath(path))
+    return CreateCloudSnapshotStorage(path);
+  return default_storage;
 }
 
 template <typename T> void UpdateMax(T* maxv, T current) {
@@ -1004,6 +1013,38 @@ bool IsMaster() {
   return ServerState::tlocal()->is_master;
 }
 
+// Returns {acked, running} for the supplied replica snapshot, reading ACKs on their owning shards.
+pair<uint32_t, uint32_t> CountAckedReplicas(
+    const vector<shared_ptr<DflyCmd::ReplicaInfo>>& replicas, const vector<LSN>& target_lsns,
+    atomic<bool>* role_changed) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  size_t n = replicas.size();
+  vector<vector<bool>> shard_acked(target_lsns.size(), vector<bool>(n, true));
+
+  shard_set->RunBriefInParallel([&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+    if (!IsMaster()) {
+      role_changed->store(true, std::memory_order_relaxed);
+      return;
+    }
+    uint32_t sid = shard->shard_id();
+    if (!shard->journal() || target_lsns[sid] == 0)
+      return;
+
+    for (size_t i = 0; i < n; i++) {
+      shard_acked[sid][i] = replicas[i]->GetFlow(sid).last_acked_lsn >= target_lsns[sid];
+    }
+  });
+
+  uint32_t acked = 0, running = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (!replicas[i]->GetExecState().IsRunning())
+      continue;
+    ++running;
+    if (rng::all_of(shard_acked, [i](const auto& shard) { return shard[i]; }))
+      ++acked;
+  }
+  return {acked, running};
+}
+
 void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
   static constexpr string_view kSaveHelp[] = {
       "DF",
@@ -1396,7 +1437,12 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   string flag_dir = GetFlag(FLAGS_dir);
 
   if (detail::IsCloudPath(flag_dir)) {
-    snapshot_storage_ = CreateCloudSnapshotStorage(flag_dir);
+    auto res = CreateCloudSnapshotStorage(flag_dir);
+    if (!res) {
+      LOG(ERROR) << res.error().Format();
+      exit(1);
+    }
+    snapshot_storage_ = std::move(*res);
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
@@ -1567,8 +1613,10 @@ GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
     return {std::make_error_code(std::errc::operation_not_permitted), "replica cannot load data"};
   if (path.empty())
     return {std::make_error_code(std::errc::invalid_argument), "no snapshot found to load"};
-  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
-  if (auto res = storage->ExpandSnapshot(path); !res)
+  auto storage = SelectSnapshotStorage(path, snapshot_storage_);
+  if (!storage)
+    return storage.error();
+  if (auto res = (*storage)->ExpandSnapshot(path); !res)
     return res.error();
   return {};
 }
@@ -1594,7 +1642,12 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
   // Select the right storage based on the path: cloud paths need their own storage,
   // mirroring what DoSaveCheckAndStart does for saves.
-  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
+  auto storage_res = SelectSnapshotStorage(path, snapshot_storage_);
+  if (!storage_res) {
+    LOG(ERROR) << "Failed to load snapshot: " << storage_res.error().Format();
+    return immediate(storage_res.error());
+  }
+  std::shared_ptr<detail::SnapshotStorage> storage = std::move(*storage_res);
 
   auto expand_result = storage->ExpandSnapshot(path);
   if (!expand_result) {
@@ -1960,9 +2013,15 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
                           "SAVING - can not save database"};
     }
 
-    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                                ? snapshot_storage_
-                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+    std::shared_ptr<detail::SnapshotStorage> snapshot_storage = snapshot_storage_;
+    if (!save_cmd_opts.cloud_uri.empty()) {
+      auto res = CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+      if (!res) {
+        LOG(ERROR) << res.error().Format();
+        return res.error();
+      }
+      snapshot_storage = std::move(*res);
+    }
 
     controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
@@ -3824,7 +3883,9 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
   return builder->SendOk();
 }
 
+// WAIT <num_replicas> <timeout_ms>
 void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  const auto start = chrono::steady_clock::now();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!IsMaster()) {
@@ -3834,154 +3895,83 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   using NonNegInt = facade::FInt<int64_t{0}, std::numeric_limits<int64_t>::max()>;
   auto [num_replicas_arg, timeout_arg] = parser.Next<NonNegInt, NonNegInt>();
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
   const int64_t num_replicas = num_replicas_arg;
   const int64_t timeout_ms = timeout_arg;
 
-  // Collect currently tracked replicas.
-  auto replicas = dfly_cmd_->GetReplicaInfoSnapshot();
+  // WAIT does not use Transaction's cancellation machinery; bound even an infinite timeout.
+  constexpr auto kMaxWaitDuration = chrono::minutes(10);
+  const auto timeout = timeout_ms == 0 ? kMaxWaitDuration : chrono::milliseconds(timeout_ms);
 
-  if (replicas.empty()) {
+  // Clamp before converting milliseconds to the clock's finer-grained duration.
+  const auto max_timeout =
+      chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::time_point::max() - start);
+  const auto deadline = start + min(timeout, max_timeout);
+
+  auto replicas = dfly_cmd_->GetReplicaInfoSnapshot();
+  if (replicas.empty())
     return rb->SendLong(0);
-  }
 
   uint32_t shard_count = shard_set->size();
   std::vector<LSN> target_lsns(shard_count, 0);
-
-  // We snapshot the global per-shard LSN rather than the calling connection's own last-write
-  // LSN: journal writes happen post-commit on the shard's fiber, decoupled from the issuing
-  // connection, so tracking a per-connection LSN would add bookkeeping to every write's hot
-  // path. This waits for all writes up to now, which is strictly stronger than the Redis
-  // per-connection guarantee.
-  //
-  // Set from within a shard's own dispatched callback whenever that shard observes this node is
-  // no longer master. is_master is per-thread and SetMasterFlagOnAllThreads' fan-out gives no
-  // ordering guarantee across threads, so a check on the connection's own thread is not a
-  // reliable proxy for what a given shard's thread has seen; only checking at the exact site
-  // where we touch that shard's journal/LSN data is race-free.
   std::atomic<bool> role_changed{false};
 
-  // Capture the current LSN on each shard and send PING to force replicas to ACK immediately.
-  // PING causes replicas to skip their normal ACK interval and send REPLCONF ACK right away.
-  // Recording it may block in the throttle of a stalled replica stream, so the fan-out runs on its
-  // own fiber: we wait only for the LSNs and join it after the reply has been sent.
-  fb2::BlockingCounter captured{shard_count};
-  fb2::Fiber ping_fb("wait_ping", [&] {
-    shard_set->RunBlockingInParallel([&](EngineShard* shard) {
-      bool record = false;
-      if (!IsMaster()) {
-        role_changed.store(true, std::memory_order_relaxed);
-      } else if (shard->journal()) {
-        target_lsns[shard->shard_id()] = journal::GetLsn();
-        record = true;
-      }
-      captured->Dec();
-      if (record)
-        journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
-    });
-  });
-  absl::Cleanup join_ping = [&ping_fb] { ping_fb.Join(); };
-  captured->Wait();
+  auto* tx = cmd_cntx->tx();
+  bool can_block = !tx || !tx->IsMulti();
 
-  // Send the reply right away instead of batching it behind the PING join.
-  rb->SetBatchMode(false);
-
-  if (role_changed.load(std::memory_order_relaxed)) {
-    return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
-  }
-
-  // Count replicas that have acknowledged all shards up to their respective target LSN.
-  // Runs the check on each shard's proactor to safely read last_acked_lsn.
-  // Also returns the number of replicas still running (connected), so callers can detect
-  // that the required count can never be reached due to disconnections.
-  auto count_acked = [&]() ABSL_NO_THREAD_SAFETY_ANALYSIS -> std::pair<uint32_t, uint32_t> {
-    size_t n = replicas.size();
-    // Per-shard result: shard_acked[sid][i] == true means replica i caught up on shard sid.
-    std::vector<std::vector<bool>> shard_acked(shard_count, std::vector<bool>(n, true));
-
-    shard_set->RunBriefInParallel([&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
-      if (!IsMaster()) {
-        role_changed.store(true, std::memory_order_relaxed);
-        return;
-      }
-      uint32_t sid = shard->shard_id();
-      if (!shard->journal() || target_lsns[sid] == 0)
-        return;
-      for (size_t i = 0; i < n; i++) {
-        shard_acked[sid][i] = replicas[i]->GetFlow(sid).last_acked_lsn >= target_lsns[sid];
-      }
-    });
-
-    uint32_t acked = 0, running = 0;
-    for (size_t i = 0; i < n; i++) {
-      if (!replicas[i]->GetExecState().IsRunning())
-        continue;
-      ++running;
-      bool all_acked = true;
-      for (uint32_t sid = 0; sid < shard_count; sid++) {
-        if (!shard_acked[sid][i]) {
-          all_acked = false;
-          break;
-        }
-      }
-      if (all_acked)
-        ++acked;
+  // Global shard LSNs cover at least this connection's writes without per-write bookkeeping.
+  // Role changes update threads independently, so check the role on each shard before access.
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    if (!IsMaster()) {
+      role_changed.store(true, std::memory_order_relaxed);
+      return;
     }
-    return {acked, running};
-  };
+    if (!shard->journal())
+      return;
 
-  auto [count, running] = count_acked();
+    LSN last_sent_lsn = journal::GetLsn();
+    // Record the currently issued LSN for this shard.
+    target_lsns[shard->shard_id()] = last_sent_lsn;
 
-  // A shard observed a role change while we were capturing/comparing LSNs: none of the above is
-  // trustworthy anymore (target_lsns may span a stale journal epoch from before the transition),
-  // so fail the same way the upfront check would have if the transition had landed a moment
-  // earlier.
-  if (role_changed.load(std::memory_order_relaxed)) {
-    return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
-  }
+    // Check if all replicas are already caught up to the last sent LSN for this shard.
+    ShardId sid = shard->shard_id();
+    bool acked = rng::all_of(replicas, [sid, last_sent_lsn](const auto& replica) {
+      return replica->GetFlow(sid).last_acked_lsn >= last_sent_lsn;
+    });
 
-  // Inside MULTI/EXEC we must not block: return the currently acked count immediately,
-  // matching Redis semantics for commands issued in a non-blocking context.
-  if (auto* tx = cmd_cntx->tx(); tx && tx->IsMulti()) {
-    return rb->SendLong(count);
-  }
+    // MULTI never blocks, so there is no point in expediting ACKs.
+    if (!acked && can_block) {
+      // PING accelerates ACKs. Try to expedite the acknowledgment from replicas.
+      // If the queue is full, then we rely on periodic replica ACKs to eventually catch up.
+      shard->GetSecondaryQueue()->TryAdd([] {
+        if (IsMaster() && EngineShard::tlocal()->journal())
+          journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
+      });
+    }
+  });
 
-  // Unlike BLPOP et al., this loop isn't tied to Transaction's blocking machinery, so
-  // CancelBlockingOnThread (used by REPLTAKEOVER/shutdown) can't force it to return early -
-  // the connection just looks "busy dispatching" for as long as we keep polling. Cap timeout=0
-  // at a bounded duration instead of blocking forever, so a forgotten/disconnected WAIT client
-  // can't pin a fiber (and its per-tick shard fan-out) indefinitely.
-  constexpr auto kMaxWaitDuration = absl::Minutes(10);
-  absl::Time deadline = timeout_ms == 0 ? absl::Now() + kMaxWaitDuration
-                                        : absl::Now() + absl::Milliseconds(timeout_ms);
-  while (count < num_replicas && absl::Now() < deadline) {
-    // Exit early once every currently-tracked, still-running replica has already acked and
-    // that's still short of what was requested: our replica snapshot is fixed at call time, so
-    // no further polling can improve on this. Checking running < num_replicas alone would be
-    // wrong -- it's true from the very first iteration whenever more replicas were requested
-    // than are tracked, and would cut off replicas that just haven't caught up yet.
-    if (count == running && running < num_replicas)
-      break;
-    // Bail out promptly on takeover/shutdown: otherwise we'd keep this connection "busy" for
-    // the rest of the deadline, which can make REPLTAKEOVER's (much shorter) dispatch-drain
-    // timeout fail spuriously.
-    if (ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
-      break;
-    // Bail out if this node became a replica mid-wait (e.g. a concurrent REPLICAOF): gstate()
-    // only transitions to LOADING for a full sync, not a partial one, so is_master is the only
-    // signal that catches both.
-    if (!IsMaster())
-      break;
-    ThisFiber::SleepFor(100ms);
-    std::tie(count, running) = count_acked();
+  while (true) {
+    auto [count, running] = CountAckedReplicas(replicas, target_lsns, &role_changed);
+
+    // A role change invalidates the captured journal epoch, even if this thread is still master.
     if (role_changed.load(std::memory_order_relaxed)) {
       return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
     }
-  }
 
-  return rb->SendLong(count);
+    // MULTI never blocks. Once all running replicas in our fixed snapshot ACK, no more can join.
+    auto now = chrono::steady_clock::now();
+    if (!can_block || count >= num_replicas || count == running || now >= deadline)
+      return rb->SendLong(count);
+
+    // Do not hold up takeover/shutdown, including demotion through a partial sync.
+    if (!IsMaster() || ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
+      return rb->SendLong(count);
+
+    ThisFiber::SleepUntil(min(deadline, now + 100ms));
+  }
 }
 
-void ServerFamily::Role(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void ServerFamily::Role(facade::CmdArgParser /*parser*/, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   util::fb2::LockGuard lk(replicaof_mu_);
   // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,

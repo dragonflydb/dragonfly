@@ -33,6 +33,10 @@ fi
 # Copy integration directory
 cp -r "$TEMP_DIR/integration" "$INTEGRATION_DIR"
 
+# Dragonfly uses Redis-compatible missing-index wording for FT.DROPINDEX.
+sed -i "s/err_msg = \"Index with name '\" + index_name + \"' not found\"/err_msg = index_name + \": no such index\"/" \
+  "$INTEGRATION_DIR/test_ft_dropindex_consistency.py"
+
 # Patch all Python files for Python 3.8 compatibility
 # Add 'from __future__ import annotations' to support modern type hints
 echo "Patching Python files for Python 3.8 compatibility..."

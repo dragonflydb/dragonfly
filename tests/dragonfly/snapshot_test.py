@@ -452,6 +452,33 @@ async def test_s3_snapshot(async_client, tmp_dir):
         )
 
 
+async def test_s3_init_failure_at_runtime_does_not_exit(df_factory, tmp_path, monkeypatch):
+    """A cloud storage init failure during SAVE/LOAD must return an error, not kill the server."""
+    for var in list(os.environ):
+        if var.startswith("AWS_"):
+            monkeypatch.delenv(var)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MINIO_S3_ENDPOINT", raising=False)
+
+    df_server = df_factory.create(dir=str(tmp_path))
+    df_server.start()
+    client = df_server.client()
+    await client.set("k", "v")
+
+    s3_path = "s3://nonexistent-dfly-test-bucket/dir"
+    for cmd in [
+        ("SAVE", "DF", s3_path, "snap"),
+        ("BGSAVE", "DF", s3_path, "snap"),
+        ("DFLY", "LOAD", s3_path + "/snap-summary.dfs", "APPEND"),
+    ]:
+        with pytest.raises(redis.exceptions.ResponseError, match="Failed to initialize AWS S3"):
+            await client.execute_command(*cmd)
+        assert await client.get("k") == "v"
+
+    await client.aclose()
+    df_server.stop()
+
+
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be
 # configured.
 @pytest.mark.skipif(
