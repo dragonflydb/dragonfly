@@ -255,11 +255,6 @@ void SlotMigrationStreamer::PaceTraversal(bool done) {
     // Pacing stops below output_limit, where Throttle() would detect a stuck socket. Checked
     // after sleeping, so completions of already finished writes have been processed.
     writer_.AbortOnWriteTimeout(replication_timeout_usec_);
-
-    // We have a design bug in RealTimeAggregator that resets it measurements only when
-    // the next sample is taken. So we add this sample to ensure cpu_aggregator_
-    // refreshes its state.
-    base::CpuTimeGuard guard(&cpu_aggregator_);
     migration_stats_.iter_skips++;
   }
 }

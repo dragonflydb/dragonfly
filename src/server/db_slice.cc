@@ -1036,10 +1036,6 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN &&
            flush_slots_cpu_aggregator_.IsOverloaded(cpu_budget)) {
       ThisFiber::SleepFor(300us);
-      // IsOverloaded does not advance the measurement windows. Refresh them after sleeping
-      // without charging the sleep to the CPU budget.
-      uint64_t now = base::CycleClock::Now();
-      flush_slots_cpu_aggregator_.Add(now, now);
     }
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
