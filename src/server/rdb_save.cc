@@ -1587,6 +1587,7 @@ namespace {
 // A search command for an AUX field, read back by LoadSearchCommandFromAux: space-joined when every
 // argument survives inline parsing, otherwise a RESP array.
 string EncodeSearchCommand(absl::Span<const string> args) {
+  // Inline parsing splits arguments at every byte <= ' ' and skips empty ones.
   auto is_inline_safe = [](string_view arg) {
     return !arg.empty() && ranges::all_of(arg, [](unsigned char c) { return c > ' '; });
   };

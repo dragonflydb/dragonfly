@@ -198,7 +198,7 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
 
   // Limits follow the input: inline definitions have no length limit, and a corrupt header cannot
   // reserve memory beyond the input.
-  const uint32_t max_len = std::min<size_t>(input.size(), std::numeric_limits<uint32_t>::max());
+  const uint32_t max_len = input.size();
   facade::RespSrvParser parser{max_len, max_len, max_len};
   facade::RespSrvParser::Buffer buffer{reinterpret_cast<const uint8_t*>(input.data()),
                                        input.size()};
