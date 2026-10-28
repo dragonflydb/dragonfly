@@ -103,6 +103,12 @@ struct Metrics {
   uint32_t tx_queue_len = 0;
   uint32_t worker_fiber_count = 0;
   uint32_t blocked_tasks = 0;
+
+  // Number of IO threads (each thread contributes 1, summed in Merge).
+  uint32_t io_threads = 0;
+
+  // Max number of client connections (main + other listeners) handled by a single IO thread.
+  uint32_t max_connected_clients_per_thread = 0;
   size_t worker_fiber_stack_size = 0;
 
   size_t lsn_buffer_size = 0;
