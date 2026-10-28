@@ -2922,8 +2922,6 @@ string ServerFamily::FormatInfoMetrics(
     append("connected_clients",
            m.facade_stats.conn_stats.num_conns_main + m.facade_stats.conn_stats.num_conns_other);
     append("max_clients", GetFlag(FLAGS_maxclients));
-    append("io_threads", m.io_threads);
-    append("max_connected_clients_per_thread", m.max_connected_clients_per_thread);
     append("client_read_buffer_bytes", m.facade_stats.conn_stats.read_buf_capacity);
     append("blocked_clients", m.facade_stats.conn_stats.num_blocked_clients);
     append("pipeline_queue_length", m.facade_stats.conn_stats.pipeline_queue_entries);

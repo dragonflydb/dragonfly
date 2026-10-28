@@ -236,11 +236,6 @@ async def test_io_thread_conn_metrics(df_server: DflyInstance):
     for c in clients:
         await c.ping()
 
-    info = await clients[0].info("clients")
-    assert info["io_threads"] == 2
-    assert info["connected_clients"] == 5
-    assert info["max_connected_clients_per_thread"] == 3
-
     metrics = await df_server.metrics()
     assert metrics["dragonfly_io_threads"].samples[0].value == 2
     assert metrics["dragonfly_max_connected_clients_per_thread"].samples[0].value == 3
