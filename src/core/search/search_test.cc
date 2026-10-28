@@ -17,9 +17,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <memory_resource>
 #include <random>
+#include <thread>
 
 #include "absl/base/macros.h"
 #include "base/gtest.h"
@@ -1555,7 +1558,7 @@ TEST(HnswRestoreInvariant, MissingEntrypointFailsGracefully) {
   EXPECT_FALSE(restored.RestoreFromNodes(nodes, bad_metadata));
 }
 
-struct BorrowedDoc : public DocumentAccessor {
+struct BorrowedDoc final : public DocumentAccessor {
   const char* data;
   explicit BorrowedDoc(const char* d) : data(d) {
   }
@@ -1659,11 +1662,19 @@ TEST(HnswBorrowedMode, RetiredIndexReadsNoVectors) {
   vector<float> query(kDim, 0.0f);
   ASSERT_EQ(index.Knn(query.data(), 5, std::nullopt).size(), 5u);
 
+  std::atomic_bool retired = false;
+  std::thread retiring;
   {
     auto running_search = index.GetReadLock();
-    EXPECT_FALSE(index.Retire());
+    retiring = std::thread([&] {
+      index.Retire();
+      retired = true;
+    });
+    std::this_thread::sleep_for(50ms);
+    EXPECT_FALSE(retired);
   }
-  ASSERT_TRUE(index.Retire());
+  retiring.join();
+  EXPECT_TRUE(retired);
   bufs.clear();
 
   EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt), testing::IsEmpty());

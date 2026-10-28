@@ -698,10 +698,8 @@ void ShardDocIndex::InitHnswShardIndices() {
 }
 
 void ShardDocIndex::RetireHnswIndices() {
-  for (auto& hnsw_index : hnsw_shard_indices_) {
-    while (!hnsw_index.global_index()->Retire())
-      util::ThisFiber::SleepFor(1ms);
-  }
+  for (auto& hnsw_index : hnsw_shard_indices_)
+    hnsw_index.global_index()->Retire();
 }
 
 void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,

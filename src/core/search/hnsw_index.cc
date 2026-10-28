@@ -76,11 +76,7 @@ struct HnswlibAdapter {
   }
 
   void Add(const void* data, GlobalDocId id) {
-    // Checked before locking too, so that insertions do not hold Retire back.
-    if (retired_)
-      return;
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
-    if (!retired_)
+    if (auto lock = LockIfActive(MRMWMutex::LockMode::kWriteLock))
       DoAdd(data, id);
   }
 
@@ -89,22 +85,19 @@ struct HnswlibAdapter {
     DoRemove(id);
   }
 
-  bool Retire() {
+  void Retire() {
     retired_ = true;
 
-    // Writers share the lock and exclude readers: taking it for writing shows that no search is
-    // running, taking it for reading that no insertion is.
-    for (auto mode : {MRMWMutex::LockMode::kWriteLock, MRMWMutex::LockMode::kReadLock}) {
-      if (!MRMWMutexLock(&mrmw_mutex_, mode, std::try_to_lock).locked())
-        return false;
-    }
-    return true;
+    // Writers share the lock and exclude readers: taking it for writing waits for the searches,
+    // taking it for reading for the insertions.
+    { MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock); }
+    { MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock); }
   }
 
   vector<pair<float, GlobalDocId>> Knn(const void* target, size_t k, std::optional<uint32_t> ef) {
     uint32_t ef_runtime = ef.value_or(ef_runtime_);
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    if (retired_)
+    auto lock = LockIfActive(MRMWMutex::LockMode::kReadLock);
+    if (!lock)
       return {};
     return QueueToVec(world_.searchKnnWithEf(target, k, nullptr, ef_runtime));
   }
@@ -123,8 +116,8 @@ struct HnswlibAdapter {
 
     uint32_t ef_runtime = ef.value_or(ef_runtime_);
     BinsearchFilter filter{&allowed};
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    if (retired_)
+    auto lock = LockIfActive(MRMWMutex::LockMode::kReadLock);
+    if (!lock)
       return {};
     return QueueToVec(world_.searchKnnWithEf(target, k, &filter, ef_runtime));
   }
@@ -133,8 +126,8 @@ struct HnswlibAdapter {
   // Computes distances for all provided document IDs and returns the k nearest neighbors.
   vector<pair<float, GlobalDocId>> SubsetKnn(const void* target, size_t k,
                                              const vector<GlobalDocId>& docs) {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    if (retired_)
+    auto lock = LockIfActive(MRMWMutex::LockMode::kReadLock);
+    if (!lock)
       return {};
     return QueueToVec(world_.subsetKnnSearch(target, k, docs));
   }
@@ -145,8 +138,8 @@ struct HnswlibAdapter {
   vector<pair<float, GlobalDocId>> RangeSearch(const void* target, float radius,
                                                std::optional<double> epsilon) {
     double effective_epsilon = epsilon.value_or(epsilon_);
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
-    if (retired_)
+    auto lock = LockIfActive(MRMWMutex::LockMode::kReadLock);
+    if (!lock)
       return {};
     return world_.searchRange(target, radius, effective_epsilon);
   }
@@ -203,6 +196,17 @@ struct HnswlibAdapter {
   }
 
  private:
+  // The check under the lock orders with Retire; the one before it keeps a retired index cheap.
+  std::optional<MRMWMutexLock> LockIfActive(MRMWMutex::LockMode mode) {
+    std::optional<MRMWMutexLock> lock;
+    if (retired_)
+      return lock;
+    lock.emplace(&mrmw_mutex_, mode);
+    if (retired_)
+      lock.reset();
+    return lock;
+  }
+
   // Discard world_ and reconstruct it with the original ctor parameters — used to
   // recover from a partially-applied RestoreFromNodes when the wire-ordering
   // invariant is violated. Must be called under the write lock.
@@ -531,8 +535,8 @@ void HnswVectorIndex::Remove(GlobalDocId id) {
   adapter_->Remove(id);
 }
 
-bool HnswVectorIndex::Retire() {
-  return adapter_->Retire();
+void HnswVectorIndex::Retire() {
+  adapter_->Retire();
 }
 
 HnswIndexMetadata HnswVectorIndex::GetMetadata() const {

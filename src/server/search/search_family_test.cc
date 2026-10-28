@@ -9742,6 +9742,23 @@ TEST_F(SearchFamilyTest, AlterRebuildsHnswGraph) {
       AreNoContentDocIds("h:5", "h:6", "h:7", "h:8", "h:9"));
 }
 
+// FT.ALTER through an alias must replace the graph of the index, not one under the alias name.
+TEST_F(SearchFamilyTest, AlterThroughAliasRebuildsHnswGraph) {
+  Run("FT.CREATE hx ON HASH PREFIX 1 h: SCHEMA v VECTOR HNSW 6 TYPE FLOAT32 DIM 2 "
+      "DISTANCE_METRIC L2");
+  EXPECT_EQ(Run({"FT.ALIASADD", "hx-alias", "hx"}), "OK");
+  Run({"HSET", "h:1", "v", FloatVec(1, 0)});
+
+  EXPECT_EQ(Run("FT.ALTER hx-alias SCHEMA ADD t TEXT"), "OK");
+  WaitForIndexReady("hx");
+  Run({"HSET", "h:2", "v", FloatVec(0, 1)});
+  for (string_view index : {"hx", "hx-alias"})
+    EXPECT_THAT(Run({"FT.SEARCH", index, "*=>[KNN 2 @v $q]", "PARAMS", "2", "q", FloatVec(1, 0),
+                     "NOCONTENT"}),
+                AreNoContentDocIds("h:1", "h:2"))
+        << index;
+}
+
 // A search that took a graph before FT.ALTER, FT.DROPINDEX or FLUSHALL must not read the vectors
 // the graph borrows from documents, which the shards may free afterwards.
 TEST_F(SearchFamilyTest, DroppedHnswGraphIsRetired) {

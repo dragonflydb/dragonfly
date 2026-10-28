@@ -2788,7 +2788,7 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
   for (const auto& [alias, field] : index_info->schema.fields) {
     if (field.number < first_added && field.IsIndexableHnswField()) {
       const auto& vparams = std::get<search::SchemaField::VectorParams>(field.special_params);
-      GlobalHnswIndexRegistry::Instance().Create(idx_name, alias, vparams, index_info->type,
+      GlobalHnswIndexRegistry::Instance().Create(canonical_name, alias, vparams, index_info->type,
                                                  /*replace=*/true);
     }
   }
