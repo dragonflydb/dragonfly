@@ -44,7 +44,7 @@ std::vector<SortableValue> SimpleValueSortIndex<T>::Sort(
     std::vector<DocId>* ids, size_t limit, bool desc,
     absl::FunctionRef<std::string_view(DocId)> key) const {
   // Docs without a value rank last in both directions; equal values are ordered by key.
-  auto cb = [&](DocId lhs, DocId rhs) {
+  auto cb = [&](DocId lhs, DocId rhs) -> bool {
     if (occupied_[lhs] != occupied_[rhs])
       return occupied_[lhs];
     if (values_[lhs] != values_[rhs])

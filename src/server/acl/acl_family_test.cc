@@ -297,8 +297,8 @@ TEST_F(AclFamilyTest, AclWhoAmI) {
 }
 
 TEST_F(AclFamilyTest, TestAllCategories) {
-  const auto* fam = TestInitAclFam();
-  for (auto& cat : fam->GetRevTable()) {
+  TestInitAclFam();
+  for (auto& cat : acl::kCategoryNames) {
     if (cat != "_RESERVED") {
       auto resp = Run(absl::StrCat("ACL SETUSER kostas +@", cat));
       EXPECT_THAT(resp, "OK");
@@ -323,7 +323,7 @@ TEST_F(AclFamilyTest, TestAllCategories) {
     }
   }
 
-  for (auto& cat : fam->GetRevTable()) {
+  for (auto& cat : acl::kCategoryNames) {
     if (cat != "_RESERVED") {
       auto resp = Run(absl::StrCat("ACL SETUSER kostas +@", cat));
       EXPECT_THAT(resp, "OK");
