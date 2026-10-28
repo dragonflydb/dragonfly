@@ -95,8 +95,6 @@ void User::SetPasswordHash(std::string_view password, bool is_hashed) {
     std::string binary;
     if (absl::HexStringToBytes(password, &binary)) {
       password_hashes_.insert(binary);
-    } else {
-      LOG(ERROR) << "Invalid password hash: " << password;
     }
     return;
   }

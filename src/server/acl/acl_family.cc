@@ -3,11 +3,9 @@
 
 #include "server/acl/acl_family.h"
 
-#include <sys/stat.h>
+#include <fcntl.h>
+#include <libgen.h>
 #include <unistd.h>
-#ifdef __linux__
-#include <sys/xattr.h>
-#endif
 
 #include <algorithm>
 #include <cctype>
@@ -75,22 +73,14 @@ using MaterializedContents = variant<vector<vector<string_view>>, string>;
 
 MaterializedContents MaterializeFileContents(vector<string>* usernames, string_view file_contents);
 
-// Done before fchmod: the ACL may deny the group that the mode bits admit. Without a source ACL
-// the temp drops one inherited from the directory's default ACL.
-bool CopyAccessAcl(const char* from, int to_fd) {
-#ifdef __linux__
-  constexpr char kName[] = "system.posix_acl_access";
-  ssize_t size = getxattr(from, kName, nullptr, 0);
-  if (size < 0) {
-    return (errno == ENODATA || errno == ENOTSUP) &&
-           (fremovexattr(to_fd, kName) == 0 || errno == ENODATA || errno == ENOTSUP);
+// A renamed file is durable only once its directory entry is.
+bool SyncDir(string file_path) {
+  const int fd = open(dirname(file_path.data()), O_RDONLY | O_DIRECTORY);
+  const bool synced = fd != -1 && fsync(fd) == 0;
+  if (fd != -1) {
+    close(fd);
   }
-  string acl(size, '\0');
-  size = getxattr(from, kName, acl.data(), acl.size());
-  return size >= 0 && fsetxattr(to_fd, kName, acl.data(), size, 0) == 0;
-#else
-  return true;
-#endif
+  return synced;
 }
 
 string AclKeysToString(const AclKeys& keys);
@@ -294,10 +284,9 @@ void AclFamily::Save(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  // Written next to the (symlink-resolved) aclfile and renamed over it, so a reader never sees a
-  // partial file; a replaced file keeps its owner, group, mode and access ACL, a new one is 0600.
-  int fd = -1;
-  std::string tmp;
+  // Written next to the aclfile and renamed over it, so a reader never sees a partial file.
+  std::string tmp = absl::StrCat(acl_file_path, ".tmpXXXXXX");
+  int fd = mkstemp(tmp.data());
   auto fail = [&](std::string_view what) {
     std::error_code ec(errno, std::system_category());
     std::string error = absl::StrCat("Failed to ", what, ": ", ec.message());
@@ -308,21 +297,8 @@ void AclFamily::Save(CmdArgParser parser, CommandContext* cmd_cntx) {
     LOG(ERROR) << error;
     builder->SendError(error);
   };
-  if (char* real = realpath(acl_file_path.c_str(), nullptr)) {
-    acl_file_path = real;
-    free(real);
-  } else if (errno != ENOENT) {
+  if (fd == -1) {
     return fail("open the aclfile");
-  }
-  tmp = absl::StrCat(acl_file_path, ".tmpXXXXXX");
-  if ((fd = mkstemp(tmp.data())) == -1) {
-    return fail("open the aclfile");
-  }
-  struct stat st;
-  if (stat(acl_file_path.c_str(), &st) == 0 &&
-      (fchown(fd, st.st_uid, st.st_gid) == -1 || !CopyAccessAcl(acl_file_path.c_str(), fd) ||
-       fchmod(fd, st.st_mode & 07777) == -1)) {
-    return fail("keep the aclfile ownership");
   }
 
   std::string output = RegistryToString();
@@ -337,6 +313,10 @@ void AclFamily::Save(CmdArgParser parser, CommandContext* cmd_cntx) {
     return fail("rename the aclfile");
   }
   close(fd);
+  fd = -1;
+  if (!SyncDir(acl_file_path)) {
+    return fail("sync the aclfile directory");
+  }
 
   builder->SendOk();
 }

@@ -9,15 +9,10 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_replace.h>
 #include <sys/stat.h>
-#include <unistd.h>
-#ifdef __linux__
-#include <sys/xattr.h>
-#endif
 
 #include <atomic>
 #include <filesystem>
 #include <fstream>
-#include <system_error>
 
 #include "base/flags.h"
 #include "base/gtest.h"
@@ -1223,6 +1218,11 @@ TEST_F(AclFamilyTest, AclSaveIsAtomic) {
   ASSERT_EQ(Run("ACL SAVE"), "OK");
   const std::string saved = io::ReadFileToString(path_).value();
   ASSERT_FALSE(saved.empty());
+
+  // The file holds password hashes: private, whatever the umask.
+  struct stat st;
+  ASSERT_EQ(stat(path_.c_str(), &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, 0600u);
   std::atomic_bool done{false};
 
   // post, not dispatch: ACL SAVE never yields, so dispatch would finish all saves before returning.
@@ -1240,72 +1240,6 @@ TEST_F(AclFamilyTest, AclSaveIsAtomic) {
   }
   saver.Join();
   EXPECT_TRUE(seen == saved) << "a reader saw " << seen.size() << " bytes of " << saved.size();
-}
-
-TEST_F(AclFamilyTest, AclSaveKeepsFileMetadata) {
-  TestInitAclFam();
-  absl::SetFlag(&FLAGS_aclfile, path_);
-
-  // A new file holds password hashes: private, whatever the umask.
-  EXPECT_EQ(Run("ACL SAVE"), "OK");
-  struct stat st;
-  ASSERT_EQ(stat(path_.c_str(), &st), 0);
-  EXPECT_EQ(st.st_mode & 0777, 0600u);
-
-  // Saving through symlinks updates the final target and keeps the links, as writing in place did.
-  std::filesystem::create_symlink("users.acl", dir_ / "link");
-  std::filesystem::create_symlink("link", dir_ / "link2");
-  absl::SetFlag(&FLAGS_aclfile, dir_ / "link2");
-  EXPECT_EQ(Run("ACL SETUSER v on nopass +@all"), "OK");
-  EXPECT_EQ(Run("ACL SAVE"), "OK");
-  EXPECT_TRUE(std::filesystem::is_symlink(dir_ / "link"));
-  EXPECT_TRUE(std::filesystem::is_symlink(dir_ / "link2"));
-  EXPECT_THAT(io::ReadFileToString(path_).value(), HasSubstr("USER v "));
-
-  // A link loop is an error, not a file to replace; the libc words it (glibc and musl differ).
-  std::filesystem::create_symlink(dir_ / "self", dir_ / "self");
-  absl::SetFlag(&FLAGS_aclfile, dir_ / "self");
-  EXPECT_THAT(Run("ACL SAVE"),
-              ErrArg(std::make_error_code(std::errc::too_many_symbolic_link_levels).message()));
-
-  // The replaced file keeps its group: root may give it any, another process one of its own.
-  gid_t groups[64] = {getegid() + 1};
-  const int n = geteuid() == 0 ? 1 : std::max(getgroups(64, groups), 0);
-  const gid_t* other = std::find_if(groups, groups + n, [](gid_t g) { return g != getegid(); });
-  if (other == groups + n) {
-    GTEST_SKIP() << "the test process has no second group";
-  }
-  absl::SetFlag(&FLAGS_aclfile, path_);
-  ASSERT_EQ(chown(path_.c_str(), -1, *other), 0);
-  ASSERT_EQ(chmod(path_.c_str(), 0640), 0);
-  EXPECT_EQ(Run("ACL SAVE"), "OK");
-  ASSERT_EQ(stat(path_.c_str(), &st), 0);
-  EXPECT_EQ(st.st_gid, *other);
-  EXPECT_EQ(st.st_mode & 0777, 0640u);
-
-#ifdef __linux__
-  // user::rw- user:root:r-- group::--- mask::r-- other::--- as the kernel stores it, a version and
-  // {tag, perm, id} per entry, little-endian: the mode still shows 0640 but the group may not read.
-  const std::string acl(
-      "\2\0\0\0\1\0\6\0\xff\xff\xff\xff\2\0\4\0\0\0\0\0\4\0\0\0\xff\xff\xff\xff"
-      "\x10\0\4\0\xff\xff\xff\xff\x20\0\0\0\xff\xff\xff\xff",
-      44);
-  if (setxattr(path_.c_str(), "system.posix_acl_access", acl.data(), acl.size(), 0) == -1) {
-    GTEST_SKIP() << "no POSIX ACL support here";
-  }
-  EXPECT_EQ(Run("ACL SAVE"), "OK");
-  std::string kept(acl.size(), '\0');
-  EXPECT_EQ(getxattr(path_.c_str(), "system.posix_acl_access", kept.data(), kept.size()),
-            ssize_t(acl.size()));
-  EXPECT_EQ(kept, acl);
-
-  // A default ACL on the directory must not leak onto a replaced file that had none.
-  ASSERT_EQ(removexattr(path_.c_str(), "system.posix_acl_access"), 0);
-  ASSERT_EQ(setxattr(dir_.c_str(), "system.posix_acl_default", acl.data(), acl.size(), 0), 0);
-  EXPECT_EQ(Run("ACL SAVE"), "OK");
-  EXPECT_EQ(getxattr(path_.c_str(), "system.posix_acl_access", nullptr, 0), -1);
-  EXPECT_EQ(errno, ENODATA);
-#endif
 }
 
 TEST_F(AclFamilyTest, InitExitsOnBrokenAclFile) {
