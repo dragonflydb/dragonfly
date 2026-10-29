@@ -107,10 +107,9 @@ bool IsKeyAllowed(const AclKeys& keys, string_view key, KeyPermissions perms) {
   });
 }
 
-// These commands have no key position because a subcommand comes first; the key follows it.
+// This command has no key position because a subcommand comes first; the key follows it.
 bool ReadsKeyAfterSubcommand(string_view cmd, string_view sub) {
-  return cmd == "XINFO" || cmd == "JSON.DEBUG" ||
-         (cmd == "MEMORY" && absl::EqualsIgnoreCase(sub, "USAGE"));
+  return cmd == "MEMORY" && absl::EqualsIgnoreCase(sub, "USAGE");
 }
 
 // RM deletes whatever its MATCH selects, so it needs write access to every key.

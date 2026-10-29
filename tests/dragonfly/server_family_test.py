@@ -228,6 +228,22 @@ async def test_metric_labels(
             match_label_value(sample, "other", lambda v: v == 1)
 
 
+@dfly_args({"proactor_threads": 2})
+async def test_io_thread_conn_metrics(df_server: DflyInstance):
+    # Connections are assigned to threads round-robin, so with 2 threads and 5 connections
+    # the busiest thread handles 3 of them.
+    clients = [df_server.client() for _ in range(5)]
+    for c in clients:
+        await c.ping()
+
+    metrics = await df_server.metrics()
+    assert metrics["dragonfly_io_threads"].samples[0].value == 2
+    assert metrics["dragonfly_max_connected_clients_per_thread"].samples[0].value == 3
+
+    for c in clients:
+        await c.aclose()
+
+
 async def test_latency_stats(async_client: aioredis.Redis):
     for _ in range(100):
         await async_client.set("foo", "bar")

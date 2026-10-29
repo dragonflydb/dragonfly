@@ -5,6 +5,8 @@
 #include "server/rdb_load_context.h"
 
 #include <absl/container/flat_hash_set.h>
+#include <absl/strings/ascii.h>
+#include <absl/strings/escaping.h>
 
 #include <algorithm>
 #include <limits>
@@ -183,22 +185,28 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
 
   uint32_t consumed = 0;
   cmn::BackedArguments parsed_args;
-  facade::RespSrvParser parser;
+
+  // A RESP array carries arguments the inline form cannot: "*<count>\r\n" (EncodeSearchCommand).
+  const size_t eol = def.find("\r\n");
+  const bool is_array = def.starts_with('*') && eol != std::string::npos && eol > 1 &&
+                        std::all_of(def.begin() + 1, def.begin() + eol,
+                                    [](unsigned char c) { return absl::ascii_isdigit(c); });
 
   // Prepend a whitespace so names starting with ':' are treated as names, not RESP tokens.
-  def.insert(def.begin(), ' ');
+  const std::string inline_def = is_array ? std::string{} : absl::StrCat(" ", def, "\r\n");
+  const std::string& input = is_array ? def : inline_def;
 
-  // Add resp terminator
-  constexpr std::string_view kRespTerminator = "\r\n";
-  def += kRespTerminator;
-
-  std::string_view printable_def{def.data(), def.size() - kRespTerminator.size()};
-
-  facade::RespSrvParser::Buffer buffer{reinterpret_cast<const uint8_t*>(def.data()), def.size()};
+  // Limits follow the input: inline definitions have no length limit, and a corrupt header cannot
+  // reserve memory beyond the input.
+  const uint32_t max_len = input.size();
+  facade::RespSrvParser parser{max_len, max_len, max_len};
+  facade::RespSrvParser::Buffer buffer{reinterpret_cast<const uint8_t*>(input.data()),
+                                       input.size()};
   auto res = parser.Parse(buffer, &consumed, &parsed_args);
 
-  if (res != facade::RespSrvParser::OK) {
-    LOG(ERROR) << "Bad " << error_context << ": " << printable_def;
+  // The parser stops at the declared count, so bytes left after it mean a corrupt count.
+  if (res != facade::RespSrvParser::OK || (is_array && consumed != input.size())) {
+    LOG(ERROR) << "Bad " << error_context << ": " << absl::CHexEscape(def);
     return;
   }
 
@@ -220,7 +228,7 @@ void LoadSearchCommandFromAux(Service* service, std::string&& def, std::string_v
 
   auto response = crb.Take();
   if (auto err = facade::CapturingReplyBuilder::TryExtractError(response); err) {
-    LOG(ERROR) << "Bad " << error_context << ": " << def << " " << err->first;
+    LOG(ERROR) << "Bad " << error_context << ": " << absl::CHexEscape(def) << " " << err->first;
   }
 }
 

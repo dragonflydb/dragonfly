@@ -32,6 +32,8 @@ extern "C" {
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
 
+ABSL_DECLARE_FLAG(float, migration_buckets_cpu_budget);
+
 ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
           "The maximum number of key-value pairs that will be deleted in each eviction "
           "when heartbeat based eviction is triggered under memory pressure.");
@@ -672,10 +674,13 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   if (res->IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, (*res)->second.MallocUsed());
 
-    return {{it, AutoUpdater{cntx.db_index, key, it, this}, false, omitted}};
-  } else {
-    return OpStatus::KEY_NOTFOUND;
+    return {{.it = it,
+             .post_updater = AutoUpdater{cntx.db_index, key, it, this},
+             .is_new = false,
+             .omitted_journal = omitted}};
   }
+
+  return OpStatus::KEY_NOTFOUND;
 }
 
 DbSlice::ConstIterator DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
@@ -795,38 +800,14 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key,
                                                    std::optional<unsigned> req_obj_type) {
-  return AddOrFindInternal(cntx, key, req_obj_type);
-}
-
-OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, string_view key,
-                                                           std::optional<unsigned> req_obj_type) {
   DCHECK(IsDbValid(cntx.db_index));
 
-  auto res = FindInternal(cntx, key, req_obj_type, LookupMode::kMutable);
-
-  if (res.ok()) {
-    Iterator it(*res, StringOrView::FromView(key));
-
-    bool omitted_journal = IsOmittableWrite(cntx, ChangeReq{it.GetInnerIt()});
-    if (!omitted_journal)
-      PreUpdateBlocking(cntx.db_index, it);
-
-    // PreUpdate() might have caused a deletion of `it`
-    if (res->IsOccupied()) {
-      return ItAndUpdater{.it = it,
-                          .post_updater{cntx.db_index, key, it, this},
-                          .is_new = false,
-                          .omitted_journal = omitted_journal};
-    } else {
-      res = OpStatus::KEY_NOTFOUND;
-    }
-  } else if (res == OpStatus::WRONG_TYPE) {
-    return OpStatus::WRONG_TYPE;
-  }
+  auto res = FindMutableInternal(cntx, key, req_obj_type);
+  if (res.ok() || res.status() == OpStatus::WRONG_TYPE)
+    return res;
 
   // It's a new entry.
-  auto status = res.status();
-  CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
+  CHECK(res.status() == OpStatus::KEY_NOTFOUND) << res.status();
 
   // Call change callbacks on the computed set of buckets that can be affected by the insert
   bool omit_journal = false;
@@ -1014,20 +995,26 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   };
 
   ServerState& etl = *ServerState::tlocal();
+  const float cpu_budget = GetFlag(FLAGS_migration_buckets_cpu_budget);
   PrimeTable* pt = &table->prime;
   PrimeTable::Cursor cursor;
 
   do {
-    PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
-    cursor = next;
-    ThisFiber::Yield();
-
+    {
+      base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
+      cursor = pt->TraverseBuckets(cursor, iterate_bucket);
+    }
     // DelAtomic above only marks the watchers of a deleted stream as awakened; normally the
     // deleting transaction dispatches them when it concludes. This fiber has no such transaction,
     // so dispatch here - between bucket traversals, where preempting in a readiness check is safe.
     if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
         bc && owner_->GetContTx() == nullptr) {
       bc->NotifyPending();
+    }
+
+    while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN &&
+           flush_slots_cpu_aggregator_.IsOverloaded(cpu_budget)) {
+      ThisFiber::SleepFor(300us);
     }
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
@@ -1068,6 +1055,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
       return;
 
     FiberAtomicGuard fg;
+    base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
 
     auto process_bucket = [&](PrimeTable::bucket_iterator it) {
       std::string tmp;
@@ -1094,7 +1082,8 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   auto consumer = std::make_unique<CallbackConsumer<decltype(on_change)>>(std::move(on_change));
   RegisterOnChange(consumer.get());
 
-  fb2::Fiber("flush_slots", [this, shared_slots, next_version, consumer = std::move(consumer)]() {
+  fb2::Fiber::Opts opts{.priority = fb2::FiberPriority::BACKGROUND, .name = "flush_slots"};
+  fb2::Fiber(opts, [this, shared_slots, next_version, consumer = std::move(consumer)]() {
     FlushSlotsFb(*shared_slots, next_version, consumer.get());
   }).Detach();
 }

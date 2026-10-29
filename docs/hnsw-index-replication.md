@@ -62,6 +62,8 @@ transmitted; the replica rebuilds them from the (empty) keyspace.
 |-----|---------|-------|
 | `search-index` | `"<index_name> <FT.CREATE arguments…>"` | Summary flow and `SINGLE_SHARD_WITH_SUMMARY` flows unconditionally; per-shard flows only if the replica advertises capability `VER6` or later. Omitted entirely from RDB-to-disk saves. |
 | `search-synonyms` | `"<index_name> <group_id> <terms…>"` | Summary flow. |
+| `search-alias` | `"<alias> <index_name>"` | Summary flow. |
+| `search-index-resp`, `search-synonyms-resp`, `search-alias-resp` | The same arguments as a RESP array (`*N\r\n$len\r\n…`), used when an argument is empty or contains a byte ≤ 0x20. Older versions skip these keys. | Same as the key without `-resp`. |
 | `shard-count` | integer | Summary and `SINGLE_SHARD_WITH_SUMMARY` flows. Load-bearing: controls the remap branch (§6). |
 
 ### 3.2 Opcodes

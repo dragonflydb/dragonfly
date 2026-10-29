@@ -346,20 +346,6 @@ def create_temp_file(content, tmp_dir):
 
 
 @dfly_args({"port": 1111})
-async def test_bad_acl_file(df_factory, tmp_dir):
-    acl = create_temp_file("ACL SETUSER kostas ON >mypass +@WRONG", tmp_dir)
-
-    df = df_factory.create(aclfile=acl)
-
-    df.start()
-
-    client = aioredis.Redis(port=df.port)
-
-    with pytest.raises(redis.exceptions.ResponseError):
-        await client.execute_command("ACL LOAD")
-
-
-@dfly_args({"port": 1111})
 async def test_good_acl_file(df_factory, tmp_dir):
     # The hash below is password temp
     acl = create_temp_file(

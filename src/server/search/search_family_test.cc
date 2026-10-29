@@ -586,6 +586,31 @@ TEST_F(SearchFamilyTest, AliasNameResolutionWithoutIndex) {
   });
 }
 
+TEST_F(SearchFamilyTest, HnswSearchMissingShardIndex) {
+  CreateHnswHashIdx();
+  ASSERT_THAT(Run({"HSET", "h:1", "title", "hello", "vec", FloatVec1(1)}), IntArg(2));
+  WaitForIndexReady("idx");
+  const string query_vec = FloatVec1(1);
+  ASSERT_THAT(Run({"FT.SEARCH", "idx", "*=>[KNN 1 @vec $v]", "PARAMS", "2", "v", query_vec}),
+              AreDocIds("h:1"));
+
+  // Reproduce DROPINDEX's intermediate state: local indices are gone, but the global graph remains.
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    auto index = shard->search_indices()->DropIndex("idx");
+    ASSERT_NE(index, nullptr);
+  });
+  ASSERT_TRUE(GlobalHnswIndexRegistry::Instance().Exist("idx", "vec"));
+
+  for (string_view expr : {"*=>[KNN 1 @vec $v]", "@vec:[VECTOR_RANGE 0.5 $v]"}) {
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", expr, "PARAMS", "2", "v", query_vec}),
+                ErrArg("idx: no such index"));
+    EXPECT_THAT(Run({"FT.PROFILE", "idx", "SEARCH", "QUERY", expr, "PARAMS", "2", "v", query_vec}),
+                ErrArg("idx: no such index"));
+    EXPECT_THAT(Run({"FT.AGGREGATE", "idx", expr, "PARAMS", "2", "v", query_vec}),
+                ErrArg("idx: no such index"));
+  }
+}
+
 TEST_F(SearchFamilyTest, HnswAliasConcludesTransactions) {
   CreateHnswHashIdx();
   const string query = FloatVec1(1.0f);
@@ -8677,6 +8702,33 @@ TEST(BuildRestoreCommandTest, TextWeightPreserved) {
   info.base_index = std::move(base);
 
   EXPECT_THAT(info.BuildRestoreCommand(), HasSubstr("WEIGHT 3.500000"));
+}
+
+// Doubles that the six-digit forms would round are written so that they read back exactly.
+TEST(BuildRestoreCommandTest, DoublesReadBackExactly) {
+  using dfly::DocIndex;
+  using dfly::DocIndexInfo;
+  using dfly::search::IndicesOptions;
+  using dfly::search::SchemaField;
+
+  SchemaField::TextParams tparams;
+  tparams.weight = 0.0000004;
+  SchemaField::VectorParams vparams;
+  vparams.use_hnsw = true;
+  vparams.dim = 2;
+  vparams.hnsw_epsilon = 0.0123456789;
+
+  DocIndex base;
+  base.type = DocIndex::HASH;
+  base.options = IndicesOptions(absl::flat_hash_set<std::string>{});
+  base.schema.fields["t"] = {SchemaField::TEXT, 0, "t", tparams};
+  base.schema.fields["v"] = {SchemaField::VECTOR, 0, "v", vparams, 1};
+
+  DocIndexInfo info;
+  info.base_index = std::move(base);
+  std::string cmd = info.BuildRestoreCommand();
+  EXPECT_THAT(cmd, HasSubstr("WEIGHT 4e-7"));
+  EXPECT_THAT(cmd, HasSubstr("EPSILON 0.0123456789"));
 }
 
 // Verify that BuildRestoreCommand preserves WITHSUFFIXTRIE for TAG fields.

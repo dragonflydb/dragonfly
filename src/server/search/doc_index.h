@@ -310,7 +310,10 @@ struct DocIndexInfo {
   // TODO: move to schema
   std::optional<search::HnswIndexMetadata> hnsw_metadata = std::nullopt;
 
-  // Build original ft.create command that can be used to re-create this index
+  // FT.CREATE arguments after the index name that re-create this index.
+  std::vector<std::string> BuildRestoreArgs() const;
+
+  // The same arguments joined by spaces.
   std::string BuildRestoreCommand() const;
 };
 
