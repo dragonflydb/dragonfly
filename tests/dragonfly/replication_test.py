@@ -257,13 +257,21 @@ async def test_replication_list_double_apply(df_factory: DflyInstanceFactory):
 
 
 @pytest.mark.parametrize("output_buffer", ["0", "64mb"])
-async def test_replication_full_sync_output_buffer(df_factory: DflyInstanceFactory, output_buffer):
+@pytest.mark.parametrize("background", [False, True])
+async def test_replication_full_sync_output_buffer(
+    df_factory: DflyInstanceFactory, output_buffer, background
+):
     """Mutations streamed during full sync replicate correctly with and without the snapshot
     output buffer, which lets mutation fibers queue their inline-serialized chunks for the
-    flush fiber instead of waiting on the replica socket."""
+    flush fiber instead of waiting on the replica socket. In background mode the traversal
+    yields inside HandleFlushData, after queueing its chunk, while mutations keep running."""
     master, [replica], c_master, [c_replica] = await setup_replication(
         df_factory,
-        master_args={"proactor_threads": 2, "snapshot_output_buffer_limit": output_buffer},
+        master_args={
+            "proactor_threads": 2,
+            "snapshot_output_buffer_limit": output_buffer,
+            "background_snapshotting": background,
+        },
         replica_args={"proactor_threads": 1},
         connect=False,
     )

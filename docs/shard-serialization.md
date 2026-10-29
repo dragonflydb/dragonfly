@@ -446,10 +446,13 @@ is the only surviving role of the `eventually_consistent_` flag.
 All serialized data ultimately flows through `HandleFlushData` (`snapshot.cc`):
 
 1. If `stream_mu_.is_locked()`, increments `stats_.flushed_under_lock` (observability).
-2. Optionally yields (background mode).
-3. Appends the chunk to `pending_` and wakes `flush_fb_`. Appending never preempts, so the
-   queue order is the production order across fibers. The chunk is accounted in
-   `pending_bytes_` by its string capacity.
+2. Appends the chunk to `pending_` and wakes `flush_fb_`. Appending never preempts and nothing
+   preempts between extracting the chunk from the serializer and the append, so the queue order
+   is the production order across fibers. The chunk is accounted in `pending_bytes_` by its
+   string capacity.
+3. Optionally yields (background mode), only after the append: a fiber that runs during the
+   yield must queue behind this chunk, or a journal entry could reach the replica before the
+   baseline it modifies.
 4. **Blocks** on `drain_cv_`:
    - the traversal fiber at a safe point (`FlushSerialized`, between entries) waits for its own
      chunk to be written, which paces the traversal at the sink's rate as before;
@@ -466,6 +469,17 @@ All serialized data ultimately flows through `HandleFlushData` (`snapshot.cc`):
 5. On the traversal fiber only, in non-background mode, sleeps up to 2ms proportional to CPU
    spent, to throttle. A mutation fiber holds its shard's transaction queue, so a sleep there
    would land on every queued command.
+
+Traversal chunks handed over mid-value through `ConsumeBigValueChunk` (including an
+end-of-entry flush, which leaves nothing for the next `PushSerialized`) do not wait for the sink.
+`PaceTraversal`, the next safe point, waits in `WaitTraversalWritten` until every chunk the
+traversal queued has been written, so the traversal stays paced by the sink and does not fill the
+queue that the limit reserves for mutation fibers.
+
+For a full sync, `IterateBucketsFb` resets the limit to `0` before pushing the full sync cut. The
+cut push drains the queue, and every journal entry after it waits for its own write as before.
+The replica sends `DFLY STARTSTABLE` only after the cut, and that command stops the flush fiber
+under a global transaction, so it never has a buffered backlog to drain there.
 
 A chunk can never be produced after `StopFlushFb` has joined the flush fiber: every producer is
 unregistered first, and both `UnregisterChangeListener` (`change_cb_latch_`) and the journal's

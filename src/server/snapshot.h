@@ -112,6 +112,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Body of flush_fb_: writes pending_ to the consumer in FIFO order until StopFlushFb.
   void FlushPendingFb();
 
+  // Waits until every chunk the traversal fiber queued has been written. Can block.
+  void WaitTraversalWritten();
+
   // Drains pending_ and joins flush_fb_. Every producer must be unregistered by then: no
   // HandleFlushData call may follow. Idempotent.
   void StopFlushFb();
@@ -137,6 +140,7 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // Sum of the capacities of the strings in pending_.
   size_t pending_bytes_ = 0;
   uint64_t produced_seq_ = 0, written_seq_ = 0;  // chunk sequence numbers
+  uint64_t traversal_seq_ = 0;                   // last chunk queued by the traversal fiber
   // Bytes of pending_ a mutation fiber may leave queued without waiting.
   size_t pending_limit_ = 0;
   bool stop_flush_ = false;
