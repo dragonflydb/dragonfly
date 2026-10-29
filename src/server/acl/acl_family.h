@@ -49,7 +49,7 @@ class AclFamily final {
   void Save(CmdArgParser parser, CommandContext* cmd_cntx);
   void Load(CmdArgParser parser, CommandContext* cmd_cntx);
   // Helper function for bootstrap
-  bool Load();
+  GenericError Load();
   void Log(CmdArgParser parser, CommandContext* cmd_cntx);
   void Users(CmdArgParser parser, CommandContext* cmd_cntx);
   void Cat(CmdArgParser parser, CommandContext* cmd_cntx);
@@ -97,8 +97,7 @@ class AclFamily final {
   User::UpdateRequest::CategoryValueType CategoryRule(User::Sign sign, uint32_t category) const;
 
   std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
-      facade::ParsedArgs args, bool hashed = false, bool has_all_keys = false,
-      bool has_all_channels = false) const;
+      facade::ParsedArgs args, bool has_all_keys = false, bool has_all_channels = false) const;
 
   void BuildIndexers(RevCommandsIndexStore families);
 
