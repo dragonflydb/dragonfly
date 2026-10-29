@@ -17,12 +17,9 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
-#include <chrono>
 #include <cmath>
 #include <memory_resource>
 #include <random>
-#include <thread>
 
 #include "absl/base/macros.h"
 #include "base/gtest.h"
@@ -1633,8 +1630,8 @@ TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
   EXPECT_GT(results.size(), 0u);
 }
 
-// Retire succeeds once the running searches have finished. From then on the index reads no
-// vectors, so the borrowed ones may be freed while searches still hold the index.
+// A retired index reads no vectors, so the borrowed ones may be freed while searches still hold
+// the index.
 TEST(HnswBorrowedMode, RetiredIndexReadsNoVectors) {
   constexpr size_t kDim = 256;
   constexpr size_t kN = 20;
@@ -1662,19 +1659,7 @@ TEST(HnswBorrowedMode, RetiredIndexReadsNoVectors) {
   vector<float> query(kDim, 0.0f);
   ASSERT_EQ(index.Knn(query.data(), 5, std::nullopt).size(), 5u);
 
-  std::atomic_bool retired = false;
-  std::thread retiring;
-  {
-    auto running_search = index.GetReadLock();
-    retiring = std::thread([&] {
-      index.Retire();
-      retired = true;
-    });
-    std::this_thread::sleep_for(50ms);
-    EXPECT_FALSE(retired);
-  }
-  retiring.join();
-  EXPECT_TRUE(retired);
+  index.Retire();
   bufs.clear();
 
   EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt), testing::IsEmpty());

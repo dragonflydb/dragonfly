@@ -90,8 +90,10 @@ struct HnswlibAdapter {
 
     // Writers share the lock and exclude readers: taking it for writing waits for the searches,
     // taking it for reading for the insertions.
-    { MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock); }
-    { MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock); }
+    for (auto mode : {MRMWMutex::LockMode::kWriteLock, MRMWMutex::LockMode::kReadLock}) {
+      mrmw_mutex_.LockInFiber(mode);
+      mrmw_mutex_.Unlock(mode);
+    }
   }
 
   vector<pair<float, GlobalDocId>> Knn(const void* target, size_t k, std::optional<uint32_t> ef) {

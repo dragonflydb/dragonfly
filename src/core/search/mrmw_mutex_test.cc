@@ -278,6 +278,31 @@ TEST_F(MRMWMutexTest, IsReadLockedFalseUnderWriteLock) {
   mutex_.Unlock(MRMWMutex::LockMode::kWriteLock);
 }
 
+// LockInFiber waits on the fiber, so the other fibers of its thread keep running.
+TEST_F(MRMWMutexTest, LockInFiberKeepsThreadRunning) {
+  std::atomic_bool locked{false};
+  auto reader = pp_->at(0)->LaunchFiber(util::fb2::Launch::post, [&] {
+    MRMWMutexLock lock(&mutex_, MRMWMutex::LockMode::kReadLock);
+    util::ThisFiber::SleepFor(std::chrono::milliseconds(kReadTaskSleepTime));
+  });
+  util::ThisFiber::SleepFor(std::chrono::milliseconds(10));
+
+  auto writer = pp_->at(1)->LaunchFiber(util::fb2::Launch::post, [&] {
+    mutex_.LockInFiber(MRMWMutex::LockMode::kWriteLock);
+    locked = true;
+    mutex_.Unlock(MRMWMutex::LockMode::kWriteLock);
+  });
+  util::ThisFiber::SleepFor(std::chrono::milliseconds(10));
+
+  // Runs on the writer's thread while the writer waits for the reader.
+  pp_->at(1)->LaunchFiber(util::fb2::Launch::post, [] {}).Join();
+  EXPECT_FALSE(locked);
+
+  reader.Join();
+  writer.Join();
+  EXPECT_TRUE(locked);
+}
+
 TEST_F(MRMWMutexTest, TryLockSucceedsWhenFree) {
   // TryLock on a free mutex should succeed for both modes.
   EXPECT_TRUE(mutex_.TryLock(MRMWMutex::LockMode::kReadLock));
