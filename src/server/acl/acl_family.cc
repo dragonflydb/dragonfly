@@ -917,6 +917,11 @@ CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &AclFamily::x))
 
+// At namespace scope, so tools/verify_script_acl can resolve acl::kAdminCats.
+constexpr uint32_t kOpts = CO::NOSCRIPT | CO::LOADING;
+constexpr uint32_t kAdminOpts = CO::ADMIN | kOpts;
+constexpr uint32_t kAdminCats = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
+
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
 // based on the second argument) because each of the subcommands has different ACL
@@ -926,23 +931,19 @@ CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
 
 void AclFamily::Register(CommandRegistry* registry) {
   using CI = CommandId;
-  constexpr uint32_t kOpts = CO::NOSCRIPT | CO::LOADING;
-  constexpr uint32_t kAdminOpts = CO::ADMIN | kOpts;
-  constexpr uint32_t kAdminCats = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-
   registry->StartFamily();
   *registry << CI{"ACL", kOpts, 0, 0, 0, acl::SLOW}.HFUNC(Acl);
-  *registry << CI{"ACL LIST", kAdminOpts, 1, 0, 0, kAdminCats}.HFUNC(List);
-  *registry << CI{"ACL SETUSER", kAdminOpts, -2, 0, 0, kAdminCats}.HFUNC(SetUser);
-  *registry << CI{"ACL DELUSER", kAdminOpts, -2, 0, 0, kAdminCats}.HFUNC(DelUser);
+  *registry << CI{"ACL LIST", kAdminOpts, 1, 0, 0, acl::kAdminCats}.HFUNC(List);
+  *registry << CI{"ACL SETUSER", kAdminOpts, -2, 0, 0, acl::kAdminCats}.HFUNC(SetUser);
+  *registry << CI{"ACL DELUSER", kAdminOpts, -2, 0, 0, acl::kAdminCats}.HFUNC(DelUser);
   *registry << CI{"ACL WHOAMI", kOpts, 1, 0, 0, acl::SLOW}.HFUNC(WhoAmI);
-  *registry << CI{"ACL SAVE", kAdminOpts, 1, 0, 0, kAdminCats}.HFUNC(Save);
-  *registry << CI{"ACL LOAD", kAdminOpts, 1, 0, 0, kAdminCats}.HFUNC(Load);
-  *registry << CI{"ACL LOG", kAdminOpts, 0, 0, 0, kAdminCats}.HFUNC(Log);
-  *registry << CI{"ACL USERS", kAdminOpts, 1, 0, 0, kAdminCats}.HFUNC(Users);
+  *registry << CI{"ACL SAVE", kAdminOpts, 1, 0, 0, acl::kAdminCats}.HFUNC(Save);
+  *registry << CI{"ACL LOAD", kAdminOpts, 1, 0, 0, acl::kAdminCats}.HFUNC(Load);
+  *registry << CI{"ACL LOG", kAdminOpts, 0, 0, 0, acl::kAdminCats}.HFUNC(Log);
+  *registry << CI{"ACL USERS", kAdminOpts, 1, 0, 0, acl::kAdminCats}.HFUNC(Users);
   *registry << CI{"ACL CAT", kOpts, -1, 0, 0, acl::SLOW}.HFUNC(Cat);
-  *registry << CI{"ACL GETUSER", kAdminOpts, 2, 0, 0, kAdminCats}.HFUNC(GetUser);
-  *registry << CI{"ACL DRYRUN", kAdminOpts, -3, 0, 0, kAdminCats}.HFUNC(DryRun);
+  *registry << CI{"ACL GETUSER", kAdminOpts, 2, 0, 0, acl::kAdminCats}.HFUNC(GetUser);
+  *registry << CI{"ACL DRYRUN", kAdminOpts, -3, 0, 0, acl::kAdminCats}.HFUNC(DryRun);
   *registry << CI{"ACL GENPASS", kOpts, -1, 0, 0, acl::SLOW}.HFUNC(GenPass);
   *registry << CI{"ACL HELP", kOpts, 0, 0, 0, acl::SLOW}.HFUNC(Help);
   cmd_registry_ = registry;
