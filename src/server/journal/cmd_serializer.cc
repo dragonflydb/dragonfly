@@ -76,8 +76,8 @@ CmdSerializer::CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer
   serializer_ = std::make_unique<RdbSerializer>(GetDefaultCompressionMode());
 }
 
-size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const PrimeValue& pv,
-                                     uint64_t expire_ms) {
+size_t CmdSerializer::SerializeEntry(DbIndex db_index, string_view key, const PrimeKey& pk,
+                                     const PrimeValue& pv, uint64_t expire_ms) {
   DCHECK(!pv.IsExternal());  // Delayed entries are handled separately
 
   // We send RESTORE commands objects we don't support breaking.
@@ -85,23 +85,23 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
   size_t commands = 1;
   switch (pv.ObjType()) {
     case OBJ_SET:
-      commands = SerializeSet(key, pv);
+      commands = SerializeSet(db_index, key, pv);
       use_restore_serialization = false;
       break;
     case OBJ_ZSET:
-      commands = SerializeZSet(key, pv);
+      commands = SerializeZSet(db_index, key, pv);
       use_restore_serialization = false;
       break;
     case OBJ_HASH:
-      commands = SerializeHash(key, pv);
+      commands = SerializeHash(db_index, key, pv);
       use_restore_serialization = false;
       break;
     case OBJ_LIST:
-      commands = SerializeList(key, pv);
+      commands = SerializeList(db_index, key, pv);
       use_restore_serialization = false;
       break;
     case OBJ_STRING:
-      commands = SerializeString(key, pv, expire_ms);
+      commands = SerializeString(db_index, key, pv, expire_ms);
       use_restore_serialization = false;
       // reset expire_ms to skip it in SerializeExpireIfNeeded
       expire_ms = 0;
@@ -117,18 +117,19 @@ size_t CmdSerializer::SerializeEntry(string_view key, const PrimeKey& pk, const 
 
   if (use_restore_serialization) {
     // RESTORE sets STICK and EXPIRE as part of the command.
-    SerializeRestore(key, pk, pv, expire_ms);
+    SerializeRestore(db_index, key, pk, pv, expire_ms);
   } else {
-    SerializeStickIfNeeded(key, pk);
-    SerializeExpireIfNeeded(key, expire_ms);
+    SerializeStickIfNeeded(db_index, key, pk);
+    SerializeExpireIfNeeded(db_index, key, expire_ms);
   }
   return commands;
 }
 
-void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_view> args) {
+void CmdSerializer::SerializeCommand(DbIndex db_index, string_view cmd,
+                                     absl::Span<const string_view> args) {
   journal::Entry entry(0,                     // txid
                        journal::Op::COMMAND,  // single command
-                       0,                     // db index
+                       db_index,              // db index
                        0,                     // slot-id, but it is ignored at this level
                        journal::Entry::Payload(cmd, ArgSlice(args)));
 
@@ -140,30 +141,30 @@ void CmdSerializer::SerializeCommand(string_view cmd, absl::Span<const string_vi
   cb_(std::move(cmd_sink).str());
 }
 
-void CmdSerializer::SerializeStickIfNeeded(string_view key, const PrimeKey& pk) {
+void CmdSerializer::SerializeStickIfNeeded(DbIndex db_index, string_view key, const PrimeKey& pk) {
   if (!pk.IsSticky()) {
     return;
   }
 
-  SerializeCommand("STICK", {key});
+  SerializeCommand(db_index, "STICK", {key});
 }
 
-void CmdSerializer::SerializeExpireIfNeeded(string_view key, uint64_t expire_ms) {
+void CmdSerializer::SerializeExpireIfNeeded(DbIndex db_index, string_view key, uint64_t expire_ms) {
   if (expire_ms == 0) {
     return;
   }
 
-  SerializeCommand("PEXPIREAT", {key, absl::StrCat(expire_ms)});
+  SerializeCommand(db_index, "PEXPIREAT", {key, absl::StrCat(expire_ms)});
 }
 
-size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
+size_t CmdSerializer::SerializeSet(DbIndex db_index, string_view key, const PrimeValue& pv) {
   // Disable lazy expiry during serialization (same as rdb_save.cc).
   // We are called under bucket lock so DeleteIfEmpty is not possible.
   const uint32_t prev_time = pv.MemberTime();
   pv.SetMemberTime(0);
 
   CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { SerializeCommand("SADD", args); },
+      key, [&](absl::Span<const string_view> args) { SerializeCommand(db_index, "SADD", args); },
       max_serialization_buffer_size_);
 
   size_t commands = 0;
@@ -181,9 +182,9 @@ size_t CmdSerializer::SerializeSet(string_view key, const PrimeValue& pv) {
   return commands;
 }
 
-size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
+size_t CmdSerializer::SerializeZSet(DbIndex db_index, string_view key, const PrimeValue& pv) {
   CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { SerializeCommand("ZADD", args); },
+      key, [&](absl::Span<const string_view> args) { SerializeCommand(db_index, "ZADD", args); },
       max_serialization_buffer_size_);
 
   size_t commands = 0;
@@ -198,13 +199,13 @@ size_t CmdSerializer::SerializeZSet(string_view key, const PrimeValue& pv) {
   return commands;
 }
 
-size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
+size_t CmdSerializer::SerializeHash(DbIndex db_index, string_view key, const PrimeValue& pv) {
   // Disable lazy expiry during serialization (same as rdb_save.cc).
   const uint32_t prev_time = pv.MemberTime();
   pv.SetMemberTime(0);
 
   CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { SerializeCommand("HSET", args); },
+      key, [&](absl::Span<const string_view> args) { SerializeCommand(db_index, "HSET", args); },
       max_serialization_buffer_size_);
 
   size_t commands = 0;
@@ -223,9 +224,9 @@ size_t CmdSerializer::SerializeHash(string_view key, const PrimeValue& pv) {
   return commands;
 }
 
-size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
+size_t CmdSerializer::SerializeList(DbIndex db_index, string_view key, const PrimeValue& pv) {
   CommandAggregator aggregator(
-      key, [&](absl::Span<const string_view> args) { SerializeCommand("RPUSH", args); },
+      key, [&](absl::Span<const string_view> args) { SerializeCommand(db_index, "RPUSH", args); },
       max_serialization_buffer_size_);
 
   size_t commands = 0;
@@ -239,24 +240,25 @@ size_t CmdSerializer::SerializeList(string_view key, const PrimeValue& pv) {
   return commands;
 }
 
-size_t CmdSerializer::SerializeString(string_view key, const PrimeValue& pv, uint64_t expire_ms) {
+size_t CmdSerializer::SerializeString(DbIndex db_index, string_view key, const PrimeValue& pv,
+                                      uint64_t expire_ms) {
   string str;
   pv.GetString(&str);
 
   if (expire_ms) {
     std::string expire_ms_str = to_string(expire_ms);
     std::string_view args[] = {key, string_view(str), "PXAT", string_view(expire_ms_str)};
-    SerializeCommand("SET", args);
+    SerializeCommand(db_index, "SET", args);
   } else {
     std::string_view args[] = {key, string_view(str)};
-    SerializeCommand("SET", args);
+    SerializeCommand(db_index, "SET", args);
   }
 
   return 1;
 }
 
-void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const PrimeValue& pv,
-                                     uint64_t expire_ms) {
+void CmdSerializer::SerializeRestore(DbIndex db_index, string_view key, const PrimeKey& pk,
+                                     const PrimeValue& pv, uint64_t expire_ms) {
   absl::InlinedVector<string_view, 5> args;
   args.push_back(key);
 
@@ -274,7 +276,7 @@ void CmdSerializer::SerializeRestore(string_view key, const PrimeKey& pk, const 
     args.push_back("STICK");
   }
 
-  SerializeCommand("RESTORE", args);
+  SerializeCommand(db_index, "RESTORE", args);
 }
 
 }  // namespace dfly
