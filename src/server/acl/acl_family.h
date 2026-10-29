@@ -4,10 +4,12 @@
 
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <variant>
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
@@ -78,26 +80,9 @@ class AclFamily final {
   // Serializes the whole registry into a string
   std::string RegistryToString() const;
 
-  std::string AclCatToString(uint32_t acl_category, User::Sign sign) const;
-
-  std::string AclCommandToString(size_t family, uint64_t mask, User::Sign sign) const;
-
-  // Serializes category and command to string
-  std::string AclCatAndCommandToString(const User::CategoryChanges& cat,
-                                       const User::CommandChanges& cmds) const;
-
-  using OptCat = std::optional<uint32_t>;
-  std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) const;
-
-  using OptCommand = std::optional<std::pair<size_t, uint64_t>>;
-  std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command) const;
-
-  std::optional<std::string> MaybeParseNamespace(std::string_view command) const;
-
-  User::UpdateRequest::CategoryValueType CategoryRule(User::Sign sign, uint32_t category) const;
-
-  std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
-      facade::ParsedArgs args, bool has_all_keys = false, bool has_all_channels = false) const;
+  // `has_all_keys` is whether the updated user can already access all keys.
+  std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(facade::ParsedArgs args,
+                                                                        bool has_all_keys) const;
 
   void BuildIndexers(RevCommandsIndexStore families);
 
@@ -112,7 +97,7 @@ class AclFamily final {
   RevCommandsIndexStore family_commands_;
 
   // The bits of each category's commands: category_commands_[bit position][family].
-  std::array<std::vector<uint64_t>, kCategoryNames.size()> category_commands_;
+  CategoryCommandsIndex category_commands_;
 
   size_t dbnum_ = 0;
 
