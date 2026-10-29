@@ -3001,23 +3001,28 @@ TEST_F(RdbTest, SnapshotEgressThrottle) {
 }
 
 // The output buffer lets mutation fibers queue inline-serialized chunks for the flush fiber
-// instead of waiting on the sink. Save while another fiber overwrites keys the traversal has not
-// reached yet, with the buffer off, on, and off again (the flag is runtime-mutable and read when
-// a snapshot starts), and check the file loads back whole.
+// instead of waiting on the sink. Save in DF format (an RDB save never flushes from a mutation
+// fiber) with values above serialization_max_chunk_size, so a write to a bucket the traversal has
+// not reached yet hands that bucket's chunks over through ConsumeBigValueChunk. Run it with the
+// buffer off, on, and off again (the flag is runtime-mutable and read when a snapshot starts) and
+// check the file loads back whole, with the values as of the save's start.
 TEST_F(RdbTest, SnapshotOutputBuffer) {
-  Run({"debug", "populate", "20000", "key", "1000"});
+  constexpr unsigned kKeys = 5000;
+  ASSERT_EQ(Run({"config", "set", "serialization_max_chunk_size", "1024"}), "OK");
+  const string updated(4000, 'u');
+
   for (string_view limit : {"0", "1mb", "0"}) {
+    Run({"debug", "populate", StrCat(kKeys), "key", "4000"});
     ASSERT_EQ(Run({"config", "set", "snapshot_output_buffer_limit", limit}), "OK");
 
-    auto save_fb = pp_->at(0)->LaunchFiber([&] { ASSERT_EQ(Run({"save", "rdb"}), "OK"); });
+    auto save_fb = pp_->at(0)->LaunchFiber([&] { ASSERT_EQ(Run({"save", "df"}), "OK"); });
     do {
       usleep(10);
     } while (!service_->server_family().TEST_IsSaving());
 
-    // Every write to a bucket not yet traversed serializes that bucket inline and queues it.
     pp_->at(1)->Await([&] {
-      for (unsigned i = 0; i < 20000; i += 7) {
-        Run({"set", StrCat("key:", i), "updated"});
+      for (unsigned i = 0; i < kKeys; i += 7) {
+        Run({"set", StrCat("key:", i), updated});
       }
     });
     save_fb.Join();
@@ -3025,7 +3030,11 @@ TEST_F(RdbTest, SnapshotOutputBuffer) {
     auto save_info = service_->server_family().GetLastSaveInfo();
     ASSERT_EQ(Run({"flushall"}), "OK");
     ASSERT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
-    EXPECT_THAT(Run({"dbsize"}), IntArg(20000));
+    EXPECT_THAT(Run({"dbsize"}), IntArg(kKeys));
+    for (unsigned i = 0; i < kKeys; i += 7) {
+      ASSERT_NE(Run({"get", StrCat("key:", i)}).GetString(), updated) << i;
+    }
+    ASSERT_EQ(Run({"flushall"}), "OK");
   }
 }
 

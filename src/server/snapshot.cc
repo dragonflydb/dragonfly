@@ -187,6 +187,10 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   // A successful traversal leaves no bucket dependency pending.
   DCHECK(!IsAnyBucketBlocked());
   if (send_full_sync_cut) {
+    // Back to waiting on own writes for the journal entries that follow, before the cut: the push
+    // below drains the queue, and DFLY STARTSTABLE, which the replica sends only after the cut,
+    // stops the flush fiber under a global transaction, so it must find no backlog to drain.
+    pending_limit_ = 0;
     CHECK(!serializer_->SendFullSyncCut());
     PushSerialized(true);
   }
@@ -202,6 +206,11 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
 }
 
 void SliceSnapshot::PaceTraversal(bool done) {
+  // Chunks the serializer handed over mid-value did not wait for the sink. This is the next safe
+  // point, so wait for them here even if there is nothing left to flush: the traversal stays paced
+  // by the sink and does not take the queue's room from the mutation fibers.
+  WaitTraversalWritten();
+
   if (use_background_mode_) {
     // Yielding for background fibers has low overhead if the time slice isn't used up.
     // Do it after every bucket for maximum responsiveness.
@@ -241,16 +250,6 @@ void SliceSnapshot::HandleFlushData(std::string data, bool safe_point) {
     ++stats_.flushed_under_lock;
   }
   size_t serialized = data.size();
-
-  if (use_background_mode_) {
-    // Yield after possibly long cpu slice due to compression and serialization
-    // before possbile suspension of ConsumeData resets the cpu time of the last slice
-    if (ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND)
-      ThisFiber::Yield();
-    // else: This function is invoked from the journal with regular priority as well.
-    // TODO: Mavbe Sleep() to provide write backpressure in advance?
-  }
-
   uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
   bool traversal = snapshot_fb_.IsActive();
 
@@ -264,13 +263,25 @@ void SliceSnapshot::HandleFlushData(std::string data, bool safe_point) {
     return;
   }
 
-  // Appending does not preempt, so FIFO order equals production order across fibers. The queue is
-  // accounted by string capacity, which is what it holds.
+  // Appending does not preempt, so FIFO order equals production order across fibers, as long as
+  // nothing preempts between extracting the chunk from the serializer and this append. The queue
+  // is accounted by string capacity, which is what it holds.
   size_t queued = data.capacity();
   pending_.push_back({std::move(data), !traversal});
   pending_bytes_ += queued;
   uint64_t seq = ++produced_seq_;
+  if (traversal)
+    traversal_seq_ = seq;
   flush_cv_.notify_one();
+
+  if (use_background_mode_) {
+    // Yield after possibly long cpu slice due to compression and serialization.
+    // Only after the append: a fiber running during the yield must queue behind this chunk.
+    if (ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND)
+      ThisFiber::Yield();
+    // else: This function is invoked from the journal with regular priority as well.
+    // TODO: Mavbe Sleep() to provide write backpressure in advance?
+  }
 
   // The traversal paces itself at safe points by waiting for its chunk to be written. Every
   // other call (mutation fibers, and any fiber mid-value while it holds a bucket dependency)
@@ -321,6 +332,11 @@ void SliceSnapshot::FlushPendingFb() {
     ++written_seq_;
     drain_cv_.notify_all();
   }
+}
+
+void SliceSnapshot::WaitTraversalWritten() {
+  fb2::NoOpLock lk;
+  drain_cv_.wait(lk, [&] { return written_seq_ >= traversal_seq_ || !base_cntx_->IsRunning(); });
 }
 
 void SliceSnapshot::StopFlushFb() {
