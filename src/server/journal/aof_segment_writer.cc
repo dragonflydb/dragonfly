@@ -6,7 +6,10 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
+#include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
+#include <absl/strings/strip.h>
 #include <fcntl.h>
 // For IORING_FSYNC_DATASYNC.
 #include <linux/io_uring.h>
@@ -55,6 +58,15 @@ AofSegmentWriter::~AofSegmentWriter() {
 
 string AofSegmentWriter::SegmentName(uint32_t shard_id, uint64_t seq) {
   return absl::StrCat("appendonly-", shard_id, "-", seq, ".aof");
+}
+
+bool AofSegmentWriter::ParseSegmentName(string_view name, uint32_t* shard_id, uint64_t* seq) {
+  string_view rest = name;
+  if (!absl::ConsumePrefix(&rest, "appendonly-") || !absl::ConsumeSuffix(&rest, ".aof"))
+    return false;
+  vector<string_view> parts = absl::StrSplit(rest, absl::MaxSplits('-', 1));
+  return parts.size() == 2 && absl::SimpleAtoi(parts[0], shard_id) &&
+         absl::SimpleAtoi(parts[1], seq) && SegmentName(*shard_id, *seq) == name;
 }
 
 error_code AofSegmentWriter::Open(uint64_t seq) {

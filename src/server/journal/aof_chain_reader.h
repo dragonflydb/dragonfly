@@ -27,10 +27,10 @@ class AofChainReader : public io::Source {
   AofChainReader(std::string dir, uint32_t shard_id, uint32_t shard_count);
   ~AofChainReader();
 
-  // Finds the chain's segments, sorted by seq, and validates their headers. A bad name, a seq gap
-  // or a bad header fails it: a segment gets its final name only after its header is durable, so
-  // these mean outside damage, not a crash.
-  std::error_code Open();
+  // Finds the chain's segments from cut_seq on, sorted by seq, and validates their headers. A bad
+  // name, a seq gap or a bad header fails it: a segment gets its final name only after its header
+  // is durable, so these mean outside damage, not a crash.
+  std::error_code Open(uint64_t cut_seq);
 
   // Streams the payloads of valid blocks in order; a record cut at the end is left for
   // JournalReader to drop. The log is a prefix by LSN: the first invalid block, LSN break or record
