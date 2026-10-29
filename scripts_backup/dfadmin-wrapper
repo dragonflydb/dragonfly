@@ -16,6 +16,7 @@ INFO_SECTIONS = {
     "cpu",
     "clients",
     "commandstats",
+    "tiered",
 }
 
 

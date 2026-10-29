@@ -19,11 +19,13 @@ import math
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import textwrap
 import threading
 import time
@@ -44,6 +46,9 @@ DEFAULT_SCRIPT_RUN_WORKERS = 5
 MAX_SCRIPT_RUN_WORKERS = 5
 DEFAULT_SCRIPT_RUN_TIMEOUT_SECONDS = 60
 MAX_SCRIPT_RUN_TIMEOUT_SECONDS = 300
+DEFAULT_TRAFFIC_RECORD_SECONDS = 30
+MAX_TRAFFIC_RECORD_SECONDS = 60
+DEFAULT_TRAFFIC_MIN_FREE_KIB = 2 * 1024 * 1024
 DEFAULT_NODE_SSH_PREFLIGHT_TIMEOUT_SECONDS = 5
 DEFAULT_AGENT_VALIDATOR_TIMEOUT_SECONDS = 30
 MAX_AGENT_CONTEXT_BYTES = 131072
@@ -94,6 +99,8 @@ DEFAULT_SCAN_COMPARE_COUNT = 1000
 DEFAULT_SCAN_CONFIRM_DELAY_SECONDS = 5.0
 DEFAULT_MAX_NORMALIZED_LOAD = 0.70
 DEFAULT_MIN_FREE_KIB = 524288
+DEFAULT_LOCAL_COLLECTION_FREE_KIB = 2 * 1024 * 1024
+DEFAULT_LOCAL_LARGE_COLLECTION_FREE_KIB = 20 * 1024 * 1024
 DEFAULT_CONTROL_PLANE_TIMEOUT_SECONDS = 120
 MAX_LOKI_ENTRIES_PER_QUERY = 5000
 CONFIG_SOURCES = ("launch", "runtime", "file", "custom")
@@ -123,6 +130,8 @@ COMMAND_BACKENDS: dict[str, frozenset[str]] = {
     "show-multi": frozenset({"dfadmin"}),
     "slowlog": frozenset({"dfadmin"}),
     "slot-ownership": frozenset({"dfadmin", "ssh"}),
+    "tiering": frozenset({"dfadmin"}),
+    "traffic": frozenset({"dfadmin", "ssh"}),
 }
 EXIT_DIVERGED = 2
 EXIT_INCONCLUSIVE = 3
@@ -135,6 +144,9 @@ ANSI_RED = "\033[31m"
 ANSI_YELLOW = "\033[33m"
 ANSI_BLUE = "\033[34m"
 ANSI_BOLD = "\033[1m"
+TRAFFIC_ARCHIVE_MARKER = b"DFLY_INSPECT_TRAFFIC_ARCHIVE_V1\n"
+TRAFFIC_STARTED_MARKER = b"DFLY_INSPECT_TRAFFIC_STARTED_V1\n"
+TRAFFIC_STOPPED_MARKER = b"DFLY_INSPECT_TRAFFIC_STOPPED_V1\n"
 
 NodeResult = TypeVar("NodeResult")
 _deployment_ssh_connection_command: str | None = None
@@ -142,6 +154,13 @@ _deployment_ssh_connection_command: str | None = None
 
 class AgentUnavailable(RuntimeError):
     """The selected named agent CLI is not installed locally."""
+
+
+class TrafficArchiveTransferError(RuntimeError):
+    def __init__(self, message: str, started_confirmed: bool, stopped_confirmed: bool):
+        super().__init__(message)
+        self.started_confirmed = started_confirmed
+        self.stopped_confirmed = stopped_confirmed
 
 
 def color_message(color: str, message: str, stream: object = sys.stdout) -> str:
@@ -156,6 +175,22 @@ def warning_message(message: str) -> str:
 
 def error_message(message: str) -> str:
     return f"{color_message(ANSI_RED, 'ERROR:', sys.stderr)} {message}"
+
+
+def note_message(message: str) -> str:
+    return f"{color_message(ANSI_BLUE, 'NOTE:', sys.stdout)} {message}"
+
+
+def print_warning(message: str) -> None:
+    print(warning_message(message), file=sys.stderr)
+
+
+def print_error(message: str) -> None:
+    print(error_message(message), file=sys.stderr)
+
+
+def print_note(message: str) -> None:
+    print(note_message(message))
 
 
 def deployment_ssh_configuration_message() -> str:
@@ -268,9 +303,8 @@ def check_deployment_ssh_access() -> str | None:
 def cache_deployment_ssh_connection(supplied_command: str | None) -> None:
     if supplied_command and supplied_command != load_deployment_ssh_connection():
         save_deployment_ssh_connection(supplied_command)
-        print(
-            f"Deployment SSH connection cached: {DEPLOYMENT_SSH_CONNECTION_PATH}\n"
-            f"{color_message(ANSI_BOLD + ANSI_BLUE, 'NOTE:', sys.stdout)} "
+        print(f"Deployment SSH connection cached: {DEPLOYMENT_SSH_CONNECTION_PATH}")
+        print_note(
             "Future commands will use it automatically; do not repeat "
             "--deployment-ssh-conn-command."
         )
@@ -328,7 +362,7 @@ def raise_preflight_failures(
         for index, (name, detail) in enumerate(failures, start=1)
     )
     if note:
-        message += f"\n{color_message(ANSI_YELLOW, 'NOTE:', sys.stderr)} {note}"
+        message += f"\n{note_message(note)}"
     raise RuntimeError(message)
 
 
@@ -441,7 +475,19 @@ class InspectArgumentParser(argparse.ArgumentParser):
             + "\n\n"
         )
         if getattr(self, "description_first", False):
-            return overview + rendered.replace(description, "", 1)
+            rendered = rendered.replace(description, "", 1)
+            if isinstance(formatter, MainHelpFormatter):
+                options_start = rendered.find("--- Options ---")
+                commands_start = rendered.find("--- Commands ---")
+                if options_start >= 0 and commands_start > options_start:
+                    return (
+                        overview
+                        + rendered[:options_start]
+                        + rendered[commands_start:].rstrip()
+                        + "\n\n"
+                        + rendered[options_start:commands_start]
+                    )
+            return overview + rendered
         return rendered.replace(description, overview, 1)
 
     def error(self, message: str) -> NoReturn:
@@ -497,12 +543,38 @@ class CommandHelpFormatter(argparse.HelpFormatter):
             flags=re.MULTILINE,
         )
 
+    @staticmethod
+    def move_examples_last(text: str) -> str:
+        lines = text.splitlines()
+        try:
+            start = next(index for index, line in enumerate(lines) if line.strip() == "Examples:")
+        except StopIteration:
+            return text
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            if re.fullmatch(r"[A-Za-z][A-Za-z /-]*:", lines[index].strip()):
+                end = index
+                break
+        before = lines[:start]
+        after = lines[end:]
+        while before and not before[-1].strip():
+            before.pop()
+        while after and not after[0].strip():
+            after.pop(0)
+        reordered = before + after
+        while reordered and not reordered[-1].strip():
+            reordered.pop()
+        if reordered:
+            reordered.append("")
+        return "\n".join(reordered + lines[start:end])
+
     def _fill_text(self, text: str, width: int, indent: str) -> str:
         normalized = text.strip()
         if normalized.lower().startswith("example:"):
             normalized = "Examples:\n" + normalized.split(":", 1)[1].strip()
         elif normalized.lower().startswith("examples:"):
             normalized = "Examples:\n" + normalized.split(":", 1)[1].strip()
+        normalized = self.move_examples_last(normalized)
         rendered: list[str] = []
         for line in normalized.splitlines():
             stripped = line.strip()
@@ -515,13 +587,14 @@ class CommandHelpFormatter(argparse.HelpFormatter):
             option_detail = re.fullmatch(r"(--\S+(?: [^ ]+)*) {2,}(.+)", stripped)
             if option_detail:
                 option, detail = option_detail.groups()
+                option_column = max(EPILOG_OPTION_COLUMN, len(option) + 2)
                 detail_lines = textwrap.wrap(
                     detail,
-                    width - len(indent) - EPILOG_OPTION_COLUMN,
+                    width - len(indent) - option_column,
                 )
-                rendered.append(f"{indent}  {option:<{EPILOG_OPTION_COLUMN - 2}}{detail_lines[0]}")
+                rendered.append(f"{indent}{option:<{option_column}}{detail_lines[0]}")
                 rendered.extend(
-                    f"{indent}{' ' * EPILOG_OPTION_COLUMN}{detail_line}"
+                    f"{indent}{' ' * option_column}{detail_line}"
                     for detail_line in detail_lines[1:]
                 )
                 continue
@@ -554,6 +627,46 @@ class MainHelpFormatter(CommandHelpFormatter):
 
     def add_arguments(self, actions: list[argparse.Action]) -> None:
         super().add_arguments(action for action in actions if action.dest != "command")
+
+
+def main_command_index(commands: Any) -> str:
+    entries = []
+    for action in commands._choices_actions:
+        command = str(action.dest)
+        metavar = str(action.metavar)
+        aliases = ""
+        if metavar.startswith(command):
+            aliases = metavar[len(command) :].strip().strip("()")
+        description = textwrap.shorten(str(action.help), width=72, placeholder="...")
+        entries.append((command, aliases, description[:1].upper() + description[1:]))
+    entries.sort(key=lambda entry: entry[0])
+    command_width = max(len("Command"), *(len(command) for command, _, _ in entries))
+    alias_width = max(len("Aliases"), *(len(aliases) for _, aliases, _ in entries))
+    description_width = max(
+        len("Description"), *(len(description) for _, _, description in entries)
+    )
+    lines = [
+        "Commands:",
+        f"  {'Command':<{command_width}}  {'Aliases':<{alias_width}}  "
+        f"{'Description':<{description_width}}",
+        f"  {'-' * command_width}  {'-' * alias_width}  {'-' * description_width}",
+    ]
+    lines.extend(
+        f"  {command:<{command_width}}  {aliases:<{alias_width}}  "
+        f"{description:<{description_width}}"
+        for command, aliases, description in entries
+    )
+    lines.extend(
+        (
+            "",
+            "Unless stated otherwise, a target is a customer (cus_...), datastore (dst_...), "
+            "shard (shard_...), or node (node_...).",
+            "All commands use production by default.",
+            "",
+            "Run %(prog)s <command> --help for that command's arguments, options, and examples.",
+        )
+    )
+    return "\n".join(lines)
 
 
 class RequestPacer:
@@ -1627,9 +1740,9 @@ def audit_log(
         print(f"\nEvent {index}:")
         print(json.dumps(format_audit_event_for_display(event), indent=2, sort_keys=True))
     for warning in scope_warnings:
-        print(f"WARNING: {warning}", file=sys.stderr)
+        print_warning(warning)
     for failure in sorted(failures):
-        print(f"ERROR: audit query failed: {failure}", file=sys.stderr)
+        print_error(f"audit query failed: {failure}")
     return 1 if failures and not events else 0
 
 
@@ -2007,6 +2120,7 @@ def print_multi_table(
     rows: Sequence[Mapping[str, object]],
     maximum_width: int | None,
     render: bool = True,
+    divider_before: Sequence[int] = (),
 ) -> int:
     display_rows = [
         {
@@ -2023,7 +2137,10 @@ def print_multi_table(
     if render:
         print("  ".join(f"{column:<{width}}" for column, width in zip(columns, widths)))
         print("  ".join("-" * width for width in widths))
-        for row in display_rows:
+        table_width = sum(widths) + 2 * (len(widths) - 1)
+        for index, row in enumerate(display_rows):
+            if index in divider_before:
+                print("-" * table_width)
             print("  ".join(f"{row[column]:<{width}}" for column, width in zip(columns, widths)))
     return sum(widths) + 2 * (len(widths) - 1)
 
@@ -2651,7 +2768,7 @@ def slowlog_report(
             print("No slowlog entries returned.")
         for node in nodes:
             if node.get("error"):
-                print(f"ERROR: {node['node_id']}: {node['error']}", file=sys.stderr)
+                print_error(f"{node['node_id']}: {node['error']}")
         rendered = ""
     if output is not None:
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -2874,6 +2991,84 @@ def admission_failure_reason(
                 "no collection scripts were run on it"
             )
     return "node did not meet the safe collection limits; no collection scripts were run on it"
+
+
+def local_output_filesystem(output_dir: Path) -> Path:
+    probe = output_dir.resolve()
+    while not probe.exists():
+        if probe.parent == probe:
+            raise RuntimeError(f"could not locate an existing parent for --output-dir {output_dir}")
+        probe = probe.parent
+    if not probe.is_dir():
+        raise ValueError(f"--output-dir parent is not a directory: {probe}")
+    return probe
+
+
+def local_collection_reserve_kib(
+    node_count: int,
+    includes: set[str],
+    raw_transfer: bool,
+    extract: bool,
+    bundle: bool,
+    override_kib: int | None,
+) -> int:
+    if override_kib is not None:
+        return override_kib
+    per_node_kib = (
+        DEFAULT_LOCAL_LARGE_COLLECTION_FREE_KIB
+        if "perf" in includes or raw_transfer or extract or bundle
+        else DEFAULT_LOCAL_COLLECTION_FREE_KIB
+    )
+    return per_node_kib * node_count
+
+
+def check_local_collection_capacity(
+    output_dir: Path,
+    node_count: int,
+    includes: set[str],
+    raw_transfer: bool,
+    extract: bool,
+    bundle: bool,
+    override_kib: int | None,
+) -> None:
+    filesystem = local_output_filesystem(output_dir)
+    available_kib = shutil.disk_usage(filesystem).free // 1024
+    required_kib = local_collection_reserve_kib(
+        node_count, includes, raw_transfer, extract, bundle, override_kib
+    )
+    if available_kib < required_kib:
+        raise RuntimeError(
+            f"local output filesystem {filesystem} has {available_kib} KiB free; "
+            f"collection requires at least {required_kib} KiB for {node_count} node(s). "
+            "Choose a larger --output-dir filesystem, reduce --max-elements, or set "
+            "--min-local-free-kib only when you have verified the required capacity."
+        )
+    print(
+        f"Local output capacity: {filesystem} - {available_kib} KiB free; "
+        f"reserve {required_kib} KiB"
+    )
+
+
+def prepare_traffic_output_root(output_root: Path) -> None:
+    if output_root.exists() and not output_root.is_dir():
+        raise RuntimeError(f"--output-dir is not a directory: {output_root}")
+
+    try:
+        output_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+    except OSError as error:
+        raise RuntimeError(
+            f"cannot create --output-dir {output_root}: {error.strerror or error}. "
+            "Choose a directory your local user can create files in."
+        ) from error
+
+    if not output_root.is_dir():
+        raise RuntimeError(f"--output-dir is not a directory: {output_root}")
+
+    if not os.access(output_root, os.W_OK | os.X_OK):
+        raise RuntimeError(
+            f"--output-dir is not writable: {output_root}. "
+            "Choose a directory your local user can create files in."
+        )
 
 
 def estimate_script(includes: set[str], since: str, until: str | None) -> str:
@@ -3606,7 +3801,7 @@ def collect_evidence(
     min_free_kib: int,
     since: str,
     until: str | None,
-    compress: bool,
+    bundle_output: bool,
     raw_transfer: bool,
     estimate: bool,
     journal_estimate_size: bool,
@@ -3615,6 +3810,7 @@ def collect_evidence(
     extract: bool,
     max_elements: int | None = None,
     include_only: bool = False,
+    min_local_free_kib: int | None = None,
 ) -> int:
     validate_max_elements(max_elements)
     compatibility_tags: list[str] = list(journal_tags)
@@ -3668,6 +3864,17 @@ def collect_evidence(
         return 0
     if journal_estimate_size:
         return journal_only_report(nodes, access_server, workers, journal_tags, since, until, False)
+    if not estimate:
+        assert output_dir is not None
+        check_local_collection_capacity(
+            output_dir,
+            len(nodes),
+            includes,
+            raw_transfer,
+            extract,
+            bundle_output,
+            min_local_free_kib,
+        )
     preflight_node_ssh_access(nodes, access_server, workers)
     if estimate:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -3768,12 +3975,7 @@ def collect_evidence(
                 if extraction_status == "EXTRACTED":
                     print(f"EXTRACTED: {target} - {extraction['output_dir']}")
                 elif extraction_status == "FAILED":
-                    print(
-                        color_message(
-                            ANSI_RED,
-                            f"ERROR: {target} extraction failed: {extraction['reason']}",
-                        )
-                    )
+                    print_error(f"{target} extraction failed: {extraction['reason']}")
             if warning := entry.get("warning", "").strip():
                 print(warning_message(f"{target} {warning}"), file=sys.stderr)
             if journals := entry.get("journals"):
@@ -3787,7 +3989,7 @@ def collect_evidence(
     if collected:
         print(f"Output directory: {output_dir}")
         print(f"Artifact analysis guide: {analysis_guide}")
-    if collected and compress:
+    if collected and bundle_output:
         archive = output_dir.parent / f"{output_dir.name}.tar"
         with tarfile.open(archive, "w") as bundle:
             bundle.add(output_dir, arcname=output_dir.name)
@@ -5723,6 +5925,881 @@ def print_health_vertical(columns: list[str], rows: list[dict[str, object]]) -> 
             print(f"error: {row['error']}")
 
 
+def traffic_capture_warning(output_dir: Path) -> None:
+    print_warning(
+        "Traffic capture complete. Redis keys and values were not modified, but the capture "
+        "contains command arguments, keys, and values that may be confidential. Delete the "
+        f"local capture manually when it is no longer needed: {output_dir}"
+    )
+
+
+def traffic_target(environment: str, target: str) -> tuple[str, str, str, str, str]:
+    if not target.startswith("node_"):
+        raise ValueError("traffic commands require exactly one node_<id> target")
+    nodes, failures = resolve_collection_nodes(environment, [target])
+    if failures:
+        raise RuntimeError(f"could not resolve traffic target: {failures[0]['reason']}")
+    try:
+        shard_id, role, public_ip, _ = nodes[target]
+    except KeyError as error:
+        raise RuntimeError(f"could not resolve traffic target {target}") from error
+    if not public_ip:
+        raise RuntimeError(f"node {target} has no public IP")
+    return target, shard_id, role or "unknown", public_ip, get_role(environment, target)[0]
+
+
+def traffic_preflight_script(max_normalized_load: float) -> str:
+    return f"""set -euo pipefail
+{load_admission_script(max_normalized_load)}
+command -v redis-cli >/dev/null
+command -v nsenter >/dev/null
+pid=$(systemctl show --property=MainPID --value dragonfly)
+if ! [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'ERROR: could not determine the running dragonfly MainPID\\n' >&2
+  exit 1
+fi
+nsenter -m -t "$pid" -- test -d /var/tmp
+nsenter -m -t "$pid" -- test -w /var/tmp
+filesystem=$(nsenter -m -t "$pid" -- df -Pk /var/tmp)
+printf '%s\\n' "$filesystem"
+available_kib=$(awk 'NR == 2 {{ print $4; exit }}' <<< "$filesystem")
+if ! [[ "$available_kib" =~ ^[0-9]+$ ]] || (( available_kib < {DEFAULT_TRAFFIC_MIN_FREE_KIB} )); then
+  printf 'ERROR: Dragonfly capture filesystem has %s KiB free; at least {DEFAULT_TRAFFIC_MIN_FREE_KIB} KiB is required\\n' "${{available_kib:-unknown}}" >&2
+  exit 1
+fi
+"""
+
+
+def traffic_preflight_failure_reason(detail: str, max_normalized_load: float) -> str:
+    match = re.search(r"normalized_load=([0-9.]+)", detail)
+    if match and float(match.group(1)) > max_normalized_load:
+        return (
+            f"node is busy (load {match.group(1)} exceeds the safe limit "
+            f"{max_normalized_load:.3f}); traffic recording was not started"
+        )
+    if "redis-cli" in detail:
+        return "redis-cli is unavailable on the node; traffic recording was not started"
+    if "nsenter" in detail or "MainPID" in detail:
+        return (
+            "could not access Dragonfly's mount namespace; traffic recording was not started: "
+            f"{detail}"
+        )
+    if "/var/tmp" in detail:
+        return (
+            "Dragonfly's /var/tmp is unavailable or not writable; traffic recording was not "
+            "started"
+        )
+    if "capture filesystem has" in detail:
+        return f"{detail}; traffic recording was not started"
+    return f"traffic preflight failed; traffic recording was not started: {detail}"
+
+
+def run_traffic_preflight(access_server: str, public_ip: str, max_normalized_load: float) -> str:
+    try:
+        result = subprocess.run(
+            remote_ssh_command(access_server, public_ip),
+            input=traffic_preflight_script(max_normalized_load),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=DEFAULT_CONTROL_PLANE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError("traffic preflight timed out") from error
+    if result.returncode:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(traffic_preflight_failure_reason(detail, max_normalized_load))
+    return result.stdout.strip()
+
+
+def print_traffic_preflight_evidence(evidence: str, max_normalized_load: float) -> None:
+    lines = evidence.splitlines()
+    load_line = next((line for line in lines if line.startswith("load1=")), "")
+    disk_lines = [line for line in lines if line != load_line]
+    match = re.fullmatch(
+        r"load1=(?P<load1>[0-9.]+) cpu_count=(?P<cpu_count>\d+) "
+        r"normalized_load=(?P<normalized_load>[0-9.]+)",
+        load_line,
+    )
+    if match:
+        print("--- CPU load admission ---")
+        print(f"Linux 1-minute load average: {match['load1']}")
+        print(f"Available CPUs: {match['cpu_count']}")
+        print(
+            f"Normalized load: {match['normalized_load']} "
+            f"(must be <= {max_normalized_load:.3f})"
+        )
+    elif load_line:
+        print("--- CPU load admission ---")
+        print(load_line)
+    if disk_lines:
+        print()
+        print("--- Capture filesystem (/var/tmp) ---")
+        print("\n".join(disk_lines))
+
+
+def traffic_preflight(
+    environment: str,
+    target: str,
+    listener: str,
+    duration_seconds: int,
+    max_normalized_load: float,
+) -> int:
+    node_id, shard_id, topology_role, public_ip, redis_role = traffic_target(environment, target)
+    evidence = run_traffic_preflight("", public_ip, max_normalized_load)
+    print("--- Traffic recording preflight ---")
+    print(f"Node: {node_id}")
+    print(f"Shard: {shard_id or 'unavailable'}")
+    print(f"Topology role: {topology_role}")
+    print(f"Redis role: {redis_role or 'unknown'}")
+    print(f"Listener: {listener}")
+    print(f"Duration: {duration_seconds}s (maximum: {MAX_TRAFFIC_RECORD_SECONDS}s)")
+    print(
+        "Dragonfly capture filesystem reserve: "
+        f"{DEFAULT_TRAFFIC_MIN_FREE_KIB // (1024 * 1024)} GiB"
+    )
+    if evidence:
+        print()
+        print_traffic_preflight_evidence(evidence, max_normalized_load)
+    print("Preflight passed. No traffic recording was started.")
+    return 0
+
+
+def traffic_record_script(
+    capture_dir: str, listener: str, duration_seconds: int, max_normalized_load: float
+) -> str:
+    quoted_dir = shlex.quote(capture_dir)
+    listener_clause = f"LISTENER {listener}"
+    return f"""set -euo pipefail
+{load_admission_script(max_normalized_load)}
+redis_cli=$(command -v redis-cli)
+command -v nsenter >/dev/null
+pid=$(systemctl show --property=MainPID --value dragonfly)
+if ! [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'ERROR: could not determine the running dragonfly MainPID\\n' >&2
+  exit 1
+fi
+service_uid=$(stat -c '%u' "/proc/$pid")
+service_gid=$(stat -c '%g' "/proc/$pid")
+nsenter -m -t "$pid" -- test -d /var/tmp
+nsenter -m -t "$pid" -- test -w /var/tmp
+capture_dir={quoted_dir}
+prefix="$capture_dir/traffic"
+started=0
+stop_recording() {{
+  if (( started )); then
+    timeout 15s "$redis_cli" -h 127.0.0.1 -p 9999 DEBUG TRAFFIC STOP >/dev/null 2>&1 || true
+    started=0
+  fi
+}}
+abort_recording() {{
+  stop_recording
+  exit 1
+}}
+trap abort_recording HUP INT TERM
+trap stop_recording EXIT
+umask 077
+nsenter -m -t "$pid" -- mkdir -m 700 "$capture_dir"
+nsenter -m -t "$pid" -- chown "$service_uid:$service_gid" "$capture_dir"
+if ! start_reply=$(timeout 15s "$redis_cli" -h 127.0.0.1 -p 9999 DEBUG TRAFFIC START "$prefix" {listener_clause}); then
+  printf 'ERROR: DEBUG TRAFFIC START failed\\n' >&2
+  exit 1
+fi
+if [[ "$start_reply" != "OK" ]]; then
+  printf 'ERROR: DEBUG TRAFFIC START returned: %s\\n' "$start_reply" >&2
+  exit 1
+fi
+started=1
+printf 'DFLY_INSPECT_TRAFFIC_STARTED_V1\\n'
+sleep {duration_seconds}
+if ! stop_reply=$(timeout 15s "$redis_cli" -h 127.0.0.1 -p 9999 DEBUG TRAFFIC STOP); then
+  printf 'ERROR: DEBUG TRAFFIC STOP failed\\n' >&2
+  exit 1
+fi
+if [[ "$stop_reply" != "OK" ]]; then
+  printf 'ERROR: DEBUG TRAFFIC STOP returned: %s\\n' "$stop_reply" >&2
+  exit 1
+fi
+started=0
+trap - HUP INT TERM EXIT
+printf 'DFLY_INSPECT_TRAFFIC_STOPPED_V1\\n'
+printf 'DFLY_INSPECT_TRAFFIC_ARCHIVE_V1\\n'
+nsenter -m -t "$pid" -- bash -c '
+  shopt -s nullglob
+  traffic_files=("$1"/traffic-*.bin)
+  if (( ${{#traffic_files[@]}} == 0 )); then
+    tar -cf - --files-from=/dev/null | base64
+    exit 0
+  fi
+  tar -C "$1" -cf - -- "${{traffic_files[@]##*/}}" | base64
+' bash "$capture_dir"
+nsenter -m -t "$pid" -- rm -rf -- "$capture_dir"
+"""
+
+
+def extract_traffic_archive(stream: Any, output_dir: Path) -> tuple[list[Path], bool]:
+    files = []
+    started_confirmed = False
+    stopped_confirmed = False
+    for _ in range(20):
+        line = stream.readline(8192)
+        if line == TRAFFIC_STARTED_MARKER:
+            started_confirmed = True
+            continue
+        if line == TRAFFIC_STOPPED_MARKER:
+            if not started_confirmed:
+                raise TrafficArchiveTransferError(
+                    "traffic recorder sent STOP confirmation without a START confirmation",
+                    started_confirmed,
+                    stopped_confirmed,
+                )
+            stopped_confirmed = True
+            continue
+        if line == TRAFFIC_ARCHIVE_MARKER:
+            if not stopped_confirmed:
+                raise TrafficArchiveTransferError(
+                    "traffic recorder sent its archive before STOP confirmation",
+                    started_confirmed,
+                    stopped_confirmed,
+                )
+            break
+        if not line:
+            raise TrafficArchiveTransferError(
+                "traffic recorder ended before starting archive transfer",
+                started_confirmed,
+                stopped_confirmed,
+            )
+    else:
+        raise TrafficArchiveTransferError(
+            "traffic recorder did not send its archive transfer marker",
+            started_confirmed,
+            stopped_confirmed,
+        )
+    try:
+        with tempfile.TemporaryFile() as archive_file:
+            base64.decode(stream, archive_file)
+            archive_file.seek(0)
+            with tarfile.open(fileobj=archive_file, mode="r:") as archive:
+                for member in archive:
+                    path = Path(member.name)
+                    if (
+                        not member.isfile()
+                        or path.is_absolute()
+                        or ".." in path.parts
+                        or not re.fullmatch(r"traffic-\d{3}\.bin", path.name)
+                    ):
+                        raise RuntimeError(
+                            "traffic archive contains an unsafe or unexpected member"
+                        )
+                    source = archive.extractfile(member)
+                    if source is None:
+                        raise RuntimeError(f"could not read traffic archive member {member.name}")
+                    destination = output_dir / path.name
+                    with destination.open("wb") as target:
+                        shutil.copyfileobj(source, target)
+                    destination.chmod(0o600)
+                    files.append(destination)
+    except (binascii.Error, ValueError, tarfile.TarError, RuntimeError) as error:
+        raise TrafficArchiveTransferError(
+            "traffic recorder returned an invalid archive transfer",
+            started_confirmed,
+            stopped_confirmed,
+        ) from error
+    return files, stopped_confirmed
+
+
+def traffic_record(
+    environment: str,
+    target: str,
+    output_root: Path,
+    listener: str,
+    duration_seconds: int,
+    max_normalized_load: float,
+    analyze: bool = False,
+    replay_tool: Path | None = None,
+    analysis_output: Path | None = None,
+) -> int:
+    prepare_traffic_output_root(output_root)
+    node_id, shard_id, topology_role, public_ip, redis_role = traffic_target(environment, target)
+    check_local_collection_capacity(output_root, 1, set(), False, False, False, None)
+    run_traffic_preflight("", public_ip, max_normalized_load)
+    capture_id = (
+        f"{node_id}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+        f"{secrets.token_hex(4)}"
+    )
+    output_dir = output_root / capture_id
+    if output_dir.exists():
+        raise RuntimeError(f"traffic output directory already exists: {output_dir}")
+    try:
+        output_dir.mkdir(mode=0o700)
+    except PermissionError as error:
+        raise RuntimeError(
+            f"cannot create traffic output directory {output_dir}; choose a writable --output-dir"
+        ) from error
+    remote_dir = f"/var/tmp/dfly-inspect-traffic-{capture_id}"
+    process: subprocess.Popen[bytes] | None = None
+    stopped_confirmed = False
+    try:
+        process = subprocess.Popen(
+            remote_ssh_command("", public_ip),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+        assert process.stdin is not None and process.stdout is not None
+        process.stdin.write(
+            traffic_record_script(
+                remote_dir, listener, duration_seconds, max_normalized_load
+            ).encode()
+        )
+        process.stdin.close()
+        try:
+            files, stopped_confirmed = extract_traffic_archive(process.stdout, output_dir)
+        except (TrafficArchiveTransferError, tarfile.TarError) as error:
+            process.stdout.close()
+            stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
+            return_code = process.wait()
+            stopped_confirmed = (
+                isinstance(error, TrafficArchiveTransferError) and error.stopped_confirmed
+            )
+            if stopped_confirmed:
+                prefix = "traffic transfer failed after recorder STOP was confirmed"
+            else:
+                prefix = (
+                    "traffic recorder STOP was not confirmed; recording may still be active. "
+                    "On the node, run: arc DEBUG TRAFFIC STOP"
+                )
+            if stderr.strip():
+                raise RuntimeError(f"{prefix}: {stderr.strip().removeprefix('ERROR: ')}") from error
+            if return_code:
+                raise RuntimeError(
+                    f"{prefix} (remote command exit status {return_code})"
+                ) from error
+            raise RuntimeError(prefix) from error
+        stderr = process.stderr.read().decode(errors="replace") if process.stderr else ""
+        if process.wait() != 0:
+            raise RuntimeError(
+                "traffic recording command failed after recorder STOP was confirmed"
+                + (f": {stderr.strip()}" if stderr.strip() else "")
+            )
+    except Exception as error:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        if (
+            process is not None
+            and not stopped_confirmed
+            and not str(error).startswith("traffic recorder STOP was not confirmed")
+        ):
+            raise RuntimeError(
+                "traffic recorder STOP was not confirmed; recording may still be active. "
+                f"On the node, run: arc DEBUG TRAFFIC STOP. Details: {error}"
+            ) from error
+        raise
+    manifest = {
+        "command": "traffic record",
+        "node_id": node_id,
+        "shard_id": shard_id,
+        "topology_role": topology_role,
+        "redis_role": redis_role,
+        "listener": listener,
+        "duration_seconds": duration_seconds,
+        "remote_capture_dir": remote_dir,
+        "files": [file.name for file in files],
+        "empty_capture": not files,
+        "analysis_output": str(analysis_output) if analysis_output is not None else None,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    manifest_path = output_dir / "manifest.json"
+    write_json(manifest_path, manifest)
+    manifest_path.chmod(0o600)
+    print(f"Traffic capture: {output_dir}")
+    if stopped_confirmed:
+        print_note("Recorder STOP was confirmed by the node.")
+    if files:
+        print(f"Files: {', '.join(file.name for file in files)}")
+        if analyze:
+            assert replay_tool is not None
+            print_note("Analyzing the downloaded capture locally; no commands will be replayed.")
+            return traffic_analyze(output_dir, replay_tool, analysis_output)
+        traffic_capture_warning(output_dir)
+    else:
+        print("Files: none")
+        print_note(
+            "Traffic recording completed successfully, but no matching listener commands were "
+            "observed during the requested interval."
+        )
+        if analyze:
+            print_note("Analysis was skipped because the capture contains no traffic files.")
+    return 0
+
+
+def traffic_analyze(
+    capture_dir: Path, replay_tool: Path, analysis_output: Path | None = None
+) -> int:
+    if not capture_dir.is_dir():
+        raise ValueError(f"traffic capture directory does not exist: {capture_dir}")
+    files = sorted(capture_dir.glob("traffic-*.bin"))
+    if not files:
+        raise ValueError(f"no traffic-*.bin files found in {capture_dir}")
+    if not replay_tool.is_file() or not os.access(replay_tool, os.X_OK):
+        raise ValueError(f"--replay-tool must be an executable file: {replay_tool}")
+    replay_tool = replay_tool.resolve()
+    if analysis_output is not None:
+        if analysis_output.exists():
+            raise ValueError(f"--analysis-output already exists: {analysis_output}")
+        try:
+            analysis_output.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        except OSError as error:
+            raise RuntimeError(
+                f"could not create --analysis-output parent directory {analysis_output.parent}: {error}"
+            ) from error
+    result = subprocess.run(
+        [str(replay_tool), "analyze", *(str(file) for file in files)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "traffic analyzer failed")
+    print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if analysis_output is not None:
+        try:
+            analysis_output.write_text(result.stdout)
+            analysis_output.chmod(0o600)
+        except OSError as error:
+            raise RuntimeError(
+                f"could not write --analysis-output {analysis_output}: {error}"
+            ) from error
+        print(f"Analysis report: {analysis_output}")
+    traffic_capture_warning(capture_dir)
+    return 0
+
+
+TIERING_INFO_FIELDS = (
+    "tiered_entries",
+    "tiered_entries_bytes",
+    "tiered_allocated_bytes",
+    "tiered_capacity_bytes",
+    "tiered_pending_read_cnt",
+    "tiered_pending_stash_cnt",
+    "tiered_clients_throttled",
+)
+
+TIERING_VERBOSE_INFO_FIELDS = (
+    "tiered_alloc_segment_bytes",
+    "tiered_alloc_large_bytes",
+    "tiered_alloc_free_extent_bytes",
+    "tiered_cold_storage_bytes",
+    "tiered_total_stashes",
+    "tiered_total_fetches",
+    "tiered_total_cancels",
+    "tiered_total_deletes",
+    "tiered_total_uploads",
+    "tiered_total_defrags",
+    "tiered_total_stash_overflows",
+    "tiered_offloading_usec",
+    "tiered_defrag_usec",
+)
+
+
+def format_tiering_bytes(value: int | None) -> str:
+    if value is None:
+        return "unavailable"
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+    amount = float(value)
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            return f"{amount:.1f} {unit}" if unit != "B" else f"{value} B"
+        amount /= 1024
+    raise AssertionError("unreachable")
+
+
+def tiering_info_values(
+    response: str, fields_to_extract: Sequence[str] = TIERING_INFO_FIELDS
+) -> dict[str, int]:
+    fields = parse_info_response(response)
+    values = {}
+    for name in fields_to_extract:
+        try:
+            values[name] = int(fields[name])
+        except (KeyError, ValueError):
+            continue
+    if not values:
+        raise RuntimeError("INFO TIERED returned no recognized tiering fields")
+    return values
+
+
+def print_tiering_vertical(rows: Sequence[Mapping[str, object]]) -> None:
+    for index, row in enumerate(rows, 1):
+        if index > 1:
+            print()
+        print(f"Node #{index}: {row['node_id']}")
+        print(f"  shard_id: {row['shard_id']}")
+        print(f"  role: {row['role']}")
+        print(f"  tiered_entries: {row['tiered_entries']}")
+        print(f"  tiered_data: {row['tiered_data']}")
+        print(f"  allocated: {row['allocated']}")
+        print(f"  capacity: {row['capacity']}")
+        print(f"  allocation_percent: {row['allocation_percent']}")
+
+
+def tiering_totals(rows: Sequence[Mapping[str, object]]) -> dict[str, int | float | None]:
+    def sum_field(name: str) -> int:
+        return sum(int(row[name] or 0) for row in rows)
+
+    totals = {
+        "reporting_nodes": len(rows),
+        "tiered_entries": sum_field("tiered_entries_count"),
+        "tiered_data_bytes": sum_field("tiered_data_bytes"),
+        "allocated_bytes": sum_field("allocated_bytes"),
+        "capacity_bytes": sum_field("capacity_bytes"),
+        "pending_reads": sum_field("pending_reads_count"),
+        "pending_writes": sum_field("pending_writes_count"),
+        "throttled_clients": sum_field("throttled_clients_count"),
+    }
+    capacity_bytes = totals["capacity_bytes"]
+    totals["allocation_percent"] = (
+        100 * totals["allocated_bytes"] / capacity_bytes if capacity_bytes else None
+    )
+    return totals
+
+
+def format_tiering_allocation(totals: Mapping[str, int | float | None]) -> str:
+    allocation_percent = totals["allocation_percent"]
+    percent = (
+        f"{allocation_percent:.1f}%" if isinstance(allocation_percent, float) else "unavailable"
+    )
+    return (
+        f"{format_tiering_bytes(int(totals['allocated_bytes']))} allocated / "
+        f"{format_tiering_bytes(int(totals['capacity_bytes']))} capacity ({percent})"
+    )
+
+
+def format_tiering_entry_count(value: int) -> str:
+    for divisor, suffix in (
+        (1_000_000_000_000, "T"),
+        (1_000_000_000, "B"),
+        (1_000_000, "M"),
+        (1_000, "K"),
+    ):
+        if value >= divisor:
+            return f"~{value / divisor:.3f}{suffix}"
+    return str(value)
+
+
+def format_tiering_duration(usec: int) -> str:
+    seconds = usec / 1_000_000
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.1f}h"
+
+
+def tiering_verbose_totals(rows: Sequence[Mapping[str, object]]) -> dict[str, int]:
+    totals = {}
+    for field in TIERING_VERBOSE_INFO_FIELDS:
+        values = [int(row["verbose"][field]) for row in rows if field in row.get("verbose", {})]
+        if values:
+            totals[field] = sum(values)
+    return totals
+
+
+def print_tiering_verbose_totals(totals: Mapping[str, int]) -> None:
+    storage_layout = (
+        ("Segment allocations", "tiered_alloc_segment_bytes"),
+        ("Large allocations", "tiered_alloc_large_bytes"),
+        ("Free extents", "tiered_alloc_free_extent_bytes"),
+        ("Cold storage", "tiered_cold_storage_bytes"),
+    )
+    event_counts = (
+        ("Stashes", "tiered_total_stashes"),
+        ("Fetches", "tiered_total_fetches"),
+        ("Uploads", "tiered_total_uploads"),
+        ("Deletes", "tiered_total_deletes"),
+        ("Cancels", "tiered_total_cancels"),
+        ("Defrags", "tiered_total_defrags"),
+        ("Stash overflows", "tiered_total_stash_overflows"),
+    )
+    timing_fields = (
+        ("Cumulative offloading time", "tiered_offloading_usec"),
+        ("Cumulative defrag time", "tiered_defrag_usec"),
+    )
+    has_storage_layout = any(field in totals for _, field in storage_layout)
+    has_lifetime_events = any(field in totals for _, field in event_counts)
+    has_lifetime_timing = any(field in totals for _, field in timing_fields)
+    if not (has_storage_layout or has_lifetime_events or has_lifetime_timing):
+        print(
+            "Verbose tiering data is unavailable: INFO TIERED did not include storage-layout "
+            "or lifetime-counter fields on the reporting nodes."
+        )
+        print()
+        return
+    if has_storage_layout:
+        print("--- Storage layout (all reporting nodes; point-in-time) ---")
+        for label, field in storage_layout:
+            if field in totals:
+                print(f"{label}: {format_tiering_bytes(totals[field])}")
+        print()
+    if has_lifetime_events or has_lifetime_timing:
+        print(
+            "--- Lifetime tiering events (all reporting nodes; counters reset when a node "
+            "restarts) ---"
+        )
+        for label, field in event_counts:
+            if field in totals:
+                print(f"{label}: {format_tiering_entry_count(totals[field])}")
+        for label, field in timing_fields:
+            if field in totals:
+                print(f"{label}: {format_tiering_duration(totals[field])}")
+        print()
+
+
+def tiering_total_row(totals: Mapping[str, int | float | None]) -> dict[str, str]:
+    allocation_percent = totals["allocation_percent"]
+    return {
+        "node_id": "TOTAL (all reporting nodes)",
+        "shard_id": "-",
+        "role": "-",
+        "status": "summary",
+        "tiered_entries": format_tiering_entry_count(int(totals["tiered_entries"])),
+        "tiered_data": format_tiering_bytes(int(totals["tiered_data_bytes"])),
+        "allocated": format_tiering_bytes(int(totals["allocated_bytes"])),
+        "capacity": format_tiering_bytes(int(totals["capacity_bytes"])),
+        "allocation_percent": (
+            f"{allocation_percent:.1f}%" if isinstance(allocation_percent, float) else "unavailable"
+        ),
+        "pending_reads": str(totals["pending_reads"]),
+        "pending_writes": str(totals["pending_writes"]),
+        "throttled_clients": str(totals["throttled_clients"]),
+    }
+
+
+def tiering_report(
+    environment: str,
+    targets: Sequence[str],
+    access_server: str,
+    workers: int,
+    output_format: str,
+    max_elements: int | None = None,
+    verbose: bool = False,
+) -> int:
+    if not 1 <= workers <= DEFAULT_HEALTH_WORKERS:
+        raise ValueError(f"--workers must be between 1 and {DEFAULT_HEALTH_WORKERS}")
+    validate_max_elements(max_elements)
+
+    nodes, failures = resolve_collection_nodes(environment, list(targets))
+    if failures:
+        detail = "; ".join(f"{entry['target']}: {entry['reason']}" for entry in failures)
+        raise RuntimeError(f"could not resolve tiering targets: {detail}")
+    if not nodes:
+        raise RuntimeError("no nodes could be resolved from the supplied targets")
+    total_nodes = len(nodes)
+    selected_items = sorted(nodes.items())[:max_elements]
+    nodes = dict(selected_items)
+    truncated = len(nodes) < total_nodes
+
+    def fetch(node_id: str, shard_id: str, topology_role: str, public_ip: str) -> dict[str, object]:
+        role = {"master": "primary", "slave": "replica"}.get(
+            topology_role, topology_role or "unknown"
+        )
+        row: dict[str, object] = {
+            "node_id": node_id,
+            "shard_id": shard_id or "nil",
+            "role": role,
+            "status": "unavailable",
+            "tiered_entries": "nil",
+            "tiered_data": "nil",
+            "allocated": "nil",
+            "capacity": "nil",
+            "tiered_entries_count": None,
+            "tiered_data_bytes": None,
+            "allocated_bytes": None,
+            "capacity_bytes": None,
+            "allocation_percent": "nil",
+            "pending_reads": "nil",
+            "pending_writes": "nil",
+            "throttled_clients": "nil",
+            "pending_reads_count": None,
+            "pending_writes_count": None,
+            "throttled_clients_count": None,
+            "verbose": {},
+            "error": "",
+        }
+        try:
+            values = tiering_info_values(
+                run_dfadmin(environment, "node", "resp", node_id, "--", "INFO", "tiered"),
+                (
+                    (*TIERING_INFO_FIELDS, *TIERING_VERBOSE_INFO_FIELDS)
+                    if verbose
+                    else TIERING_INFO_FIELDS
+                ),
+            )
+        except RuntimeError as error:
+            row["status"] = "unavailable"
+            row["error"] = str(error)
+            return row
+
+        entries = values.get("tiered_entries", 0)
+        data_bytes = values.get("tiered_entries_bytes")
+        allocated_bytes = values.get("tiered_allocated_bytes")
+        capacity_bytes = values.get("tiered_capacity_bytes")
+        pending_reads = values.get("tiered_pending_read_cnt", 0)
+        pending_writes = values.get("tiered_pending_stash_cnt", 0)
+        throttled_clients = values.get("tiered_clients_throttled", 0)
+        row["tiered_entries"] = str(entries)
+        row["tiered_data"] = format_tiering_bytes(data_bytes)
+        row["allocated"] = format_tiering_bytes(allocated_bytes)
+        row["capacity"] = format_tiering_bytes(capacity_bytes)
+        row["tiered_entries_count"] = entries
+        row["tiered_data_bytes"] = data_bytes or 0
+        row["allocated_bytes"] = allocated_bytes
+        row["capacity_bytes"] = capacity_bytes
+        row["pending_reads"] = str(pending_reads)
+        row["pending_writes"] = str(pending_writes)
+        row["throttled_clients"] = str(throttled_clients)
+        row["pending_reads_count"] = pending_reads
+        row["pending_writes_count"] = pending_writes
+        row["throttled_clients_count"] = throttled_clients
+        if verbose:
+            row["verbose"] = {
+                field: values[field] for field in TIERING_VERBOSE_INFO_FIELDS if field in values
+            }
+        if capacity_bytes and allocated_bytes is not None:
+            row["allocation_percent"] = f"{100 * allocated_bytes / capacity_bytes:.1f}%"
+        if throttled_clients:
+            row["status"] = "pressure"
+        elif pending_reads or pending_writes:
+            row["status"] = "busy"
+        elif entries or data_bytes or allocated_bytes:
+            row["status"] = "active"
+        else:
+            row["status"] = "inactive"
+        return row
+
+    rows = []
+    with ThreadPoolExecutor(max_workers=min(workers, len(nodes))) as executor:
+        futures = {
+            executor.submit(fetch, node_id, shard_id, role, public_ip): node_id
+            for node_id, (shard_id, role, public_ip, _) in nodes.items()
+        }
+        for future in as_completed(futures):
+            rows.append(future.result())
+    role_order = {"primary": 0, "replica": 1}
+    rows.sort(
+        key=lambda row: (
+            str(row["shard_id"]),
+            role_order.get(str(row["role"]), 2),
+            str(row["node_id"]),
+        )
+    )
+
+    successful_rows = [row for row in rows if not row["error"]]
+    error_rows = [row for row in rows if row["error"]]
+    active_rows = [row for row in successful_rows if row["status"] != "inactive"]
+    inactive_rows = [row for row in successful_rows if row["status"] == "inactive"]
+    physical_totals = tiering_totals(successful_rows)
+    verbose_totals = tiering_verbose_totals(successful_rows) if verbose else {}
+    primary_totals = tiering_totals([row for row in successful_rows if row["role"] == "primary"])
+    pending_io_nodes = [
+        row for row in successful_rows if row["pending_reads_count"] or row["pending_writes_count"]
+    ]
+    pressure_nodes = [row for row in successful_rows if row["throttled_clients_count"]]
+
+    report = {
+        "command": "tiering",
+        "environment": environment,
+        "targets": list(targets),
+        "total_nodes": total_nodes,
+        "selected_nodes": len(rows),
+        "truncated": truncated,
+        "reporting_nodes": len(successful_rows),
+        "active_nodes": len(active_rows),
+        "inactive_nodes": len(inactive_rows),
+        "unavailable_nodes": len(error_rows),
+        "allocated_bytes_total": physical_totals["allocated_bytes"],
+        "capacity_bytes_total": physical_totals["capacity_bytes"],
+        "totals": {
+            "all_reporting_nodes": physical_totals,
+            "primary_only": primary_totals,
+            "activity": {
+                "nodes_with_pending_io": len(pending_io_nodes),
+                "nodes_with_throttled_clients": len(pressure_nodes),
+            },
+        },
+        "rows": rows,
+    }
+    if verbose:
+        report["verbose_totals"] = verbose_totals
+        report["verbose_available"] = bool(verbose_totals)
+    if output_format == "json":
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 1 if not successful_rows else 0
+
+    print(
+        "Tiering snapshot: INFO TIERED is a point-in-time view; cumulative counters are not rates."
+    )
+    if truncated:
+        print(
+            warning_message(f"showing {len(rows)} of {total_nodes} nodes; results are partial."),
+            file=sys.stderr,
+        )
+    print(
+        f"Reporting: {len(successful_rows)}/{len(rows)} nodes; active: {len(active_rows)}; "
+        f"inactive: {len(inactive_rows)}; unavailable: {len(error_rows)}"
+    )
+    if successful_rows:
+        total_scope = "selected reporting nodes" if truncated else "all reporting nodes"
+        print(f"Physical ({total_scope}): {format_tiering_allocation(physical_totals)}")
+        print(f"Primary-only: {format_tiering_allocation(primary_totals)}")
+        print()
+        if verbose:
+            print_tiering_verbose_totals(verbose_totals)
+    if error_rows:
+        preview = ", ".join(str(row["node_id"]) for row in error_rows[:10])
+        suffix = "" if len(error_rows) <= 10 else "; use --format json for all failure details"
+        print(
+            warning_message(
+                f"INFO TIERED was unavailable on {len(error_rows)} node(s): {preview}{suffix}"
+            ),
+            file=sys.stderr,
+        )
+    if not successful_rows:
+        return 1
+    columns = [
+        "node_id",
+        "shard_id",
+        "role",
+        "tiered_entries",
+        "tiered_data",
+        "allocated",
+        "capacity",
+        "allocation_percent",
+    ]
+    if output_format == "vertical":
+        print_tiering_vertical(successful_rows)
+    else:
+        dimensions = table_exceeds_terminal_width(columns, successful_rows, None)
+        if dimensions:
+            table_width, terminal_width = dimensions
+            print(
+                warning_message(
+                    f"table width {table_width} exceeds terminal width {terminal_width}; "
+                    "using vertical output."
+                ),
+                file=sys.stderr,
+            )
+            print_tiering_vertical(successful_rows)
+        else:
+            print_multi_table(
+                columns,
+                [*successful_rows, tiering_total_row(physical_totals)],
+                None,
+                divider_before={len(successful_rows)},
+            )
+    return 0
+
+
 def health_report(
     environment: str,
     targets: Sequence[str],
@@ -6382,7 +7459,7 @@ def config_command(
         for index, source_report in enumerate(source_reports):
             if index:
                 print()
-            print(f"Source: {source_report['source']}", flush=True)
+            print(f"--- Source: {source_report['source']} ---", flush=True)
             parameters, rows = source_report["parameters"], source_report["rows"]
             unmatched_patterns = source_report["unmatched_flag_patterns"]
             for error in source_report["errors"]:
@@ -6406,12 +7483,25 @@ def config_command(
             render_format = (
                 "vertical" if output_format == "auto" and len(rows) == 1 else output_format
             )
+            columns = ["configuration_scope", "target", *parameters]
+            if render_format == "auto":
+                width = table_exceeds_terminal_width(columns, rows, None)
+                if width:
+                    table_width, terminal_width = width
+                    print_warning(
+                        f"table width {table_width} exceeds terminal width {terminal_width}; "
+                        "using vertical output."
+                    )
+                    render_format = "vertical"
+                else:
+                    render_format = "table"
             if render_format == "vertical":
-                print_config_vertical(source_report["source"], parameters, rows[0])
+                for row_index, row in enumerate(rows):
+                    if row_index:
+                        print()
+                    print_config_vertical(parameters, row, row_index + 1)
             else:
-                print_multi_table(
-                    ["configuration_scope", "target", *parameters, "read_status"], rows, None
-                )
+                print_multi_table(columns, rows, None)
             if diff:
                 print()
                 if source_report["errors"]:
@@ -6421,20 +7511,11 @@ def config_command(
     return 2 if diff and any_differences else 1 if any_errors else 0
 
 
-def print_config_vertical(source: str, parameters: list[str], row: Mapping[str, str]) -> None:
-    value_headings = {
-        "file": "Values read from the node's rendered configuration file:",
-        "launch": "Values read from the Dragonfly process launch command:",
-        "runtime": "Values returned by Redis CONFIG GET:",
-        "custom": "Values read from the control-plane custom configuration:",
-    }
-    print("Configuration read metadata (dfly-inspect):")
-    print(f"  selected_source: {source}")
-    print(f"  target: {row['target']}")
-    print(f"  configuration_scope: {row['configuration_scope']}")
-    print(f"  read_status: {row['read_status']}")
-    print()
-    print(value_headings[source])
+def print_config_vertical(
+    parameters: list[str], row: Mapping[str, str], resource_number: int
+) -> None:
+    scope = str(row["configuration_scope"]).replace("_", " ").title()
+    print(f"{scope} #{resource_number}: {row['target']}")
     for parameter in parameters:
         print(f"  {parameter}: {row[parameter]}")
 
@@ -8724,35 +9805,7 @@ def parse_arguments() -> argparse.Namespace:
             "incident evidence, bulk diagnostics, and Grafana retrieval."
         ),
         formatter_class=MainHelpFormatter,
-        epilog="""Run %(prog)s <command> --help for that command's arguments, options, and examples.
-
-Commands:
-    Command                Short command  Description
-    ---------------------  -------------  -----------------------------------------------
-    addresses              ad             Show node roles and public/private IP addresses.
-    audit                  au             Retrieve a bounded, redacted audit history for a resource.
-    bundle                 bu             Collect incident evidence, archived logs, and dashboard panels into one manifest.
-    collect                co             Collect node evidence and report results.
-    dashboard-panels       dp             Export selected panels, all panels, or a named dashboard section.
-    config                 cf             Inspect or diff launch, runtime, file, or custom configuration.
-    diff-config            dc             Compare explicit CONFIG GET parameters across nodes.
-    discover               ds             Show primary-to-replica topology for a datastore.
-    explain                ex             Get a shallow AI explanation; not a full investigation.
-    health                 hl             Summarize bounded Redis health signals for the selected target nodes.
-    log-archiver           la             Retrieve archived logs for selected targets.
-    logs                   lg             Retrieve one archived Dragonfly or agent log stream.
-    slot-migration-history mg             Summarize local exported slot migration history by scope.
-    slot-migration-status  ms             Show current live slot migration/rebalance state by scope.
-    replication-gap        rg             Compare key counts and runtime configuration for a replication pair.
-    run-inspection-script  rs             Run a validated custom script on selected nodes.
-    scan-compare           sc             Compare key existence between a primary and replica through access_server.
-    session                ss             Control terminal transcript recording and view local journals.
-    show-multi             sm             Show redacted resource fields or compare them across targets.
-    slot-ownership         so             Compare current CLUSTER SLOTS ownership for a datastore or node list.
-    slowlog                sl             Retrieve bounded Redis slowlog entries for selected targets.
-
-Unless stated otherwise, a target is a customer (cus_...), datastore (dst_...), shard (shard_...), or node (node_...).
-All commands use production by default.""",
+        epilog="",
     )
     parser.description_first = True
     global_options = parser.add_argument_group("global options")
@@ -9088,6 +10141,192 @@ All commands use production by default.""",
         help="Output format: table (default), vertical, or json",
     )
 
+    tiering_parser = commands.add_parser(
+        "tiering",
+        aliases=["ti"],
+        help="show current SSD tiering state for selected targets",
+        description=(
+            "Show the current SSD-tier state for one node, shard, datastore, or customer. "
+            "The command sends one read-only INFO TIERED request per selected node and does "
+            "not open SSH sessions or read configuration files. Terminal output focuses on "
+            "capacity; JSON also includes current I/O and throttling counters."
+        ),
+        formatter_class=CommandHelpFormatter,
+        epilog=(
+            "Output notes:\n"
+            "  table     Default compact capacity comparison of reporting nodes.\n"
+            "  vertical  One reporting node at a time; used automatically when the table is too wide.\n"
+            "  json      Structured report, including status, live counters, errors, and totals.\n"
+            "  totals    Physical totals include replicas; primary-only totals avoid replica copies.\n\n"
+            "  order     Rows are grouped by shard, with the primary before its replicas.\n\n"
+            "  verbose   Add point-in-time storage layout and lifetime counters. Lifetime counters\n"
+            "            reset when a node restarts and are not rates; availability varies by server version.\n\n"
+            "JSON status meanings:\n"
+            "  active      Tiered data or allocated SSD capacity is present.\n"
+            "  busy        Tiered reads or writes are currently pending.\n"
+            "  pressure    One or more clients are currently throttled.\n"
+            "  inactive    INFO TIERED reported no tiered data; this does not prove a configuration is unset.\n"
+            "  unavailable INFO TIERED could not be read for the node.\n\n"
+            "Examples:\n"
+            "  %(prog)s node_7cqiyo1vp\n"
+            "  %(prog)s node_8vpy34363 --format vertical\n"
+            "  %(prog)s shard_4076boh6g\n"
+            "  dfly-inspect ti shard_4076boh6g --format vertical\n"
+            "  %(prog)s shard_4076boh6g --format json\n"
+            "  %(prog)s dst_example\n"
+            "  %(prog)s cus_example --max-elements 20\n"
+            "  %(prog)s dst_example --workers 20"
+        ),
+    )
+    tiering_parser.add_argument("targets", nargs="+", help=TARGETS_HELP)
+    tiering_parser.add_argument(
+        "-w",
+        "--workers",
+        type=int,
+        default=DEFAULT_HEALTH_WORKERS,
+        help=f"Maximum parallel node checks (default: {DEFAULT_HEALTH_WORKERS})",
+    )
+    tiering_parser.add_argument(
+        "-n",
+        "--max-elements",
+        type=int,
+        help="Inspect at most this many lexically sorted nodes; output is marked partial",
+    )
+    tiering_parser.add_argument(
+        "-f",
+        "--format",
+        choices=("table", "vertical", "json"),
+        default="table",
+        help="Output format: table (default), vertical, or json",
+    )
+    tiering_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Add storage layout and lifetime tiering counters to terminal and JSON output",
+    )
+
+    traffic_parser = commands.add_parser(
+        "traffic",
+        aliases=["tr"],
+        help="preflight, record, or analyze a bounded Dragonfly traffic capture",
+        description=(
+            "Traffic recording changes live server state and writes command arguments, keys, and "
+            "values to node-local files. It does not modify Redis keys or values. Record is "
+            "restricted to one node and a maximum of 60 seconds."
+        ),
+        formatter_class=CommandHelpFormatter,
+        epilog=(
+            "Action arguments:\n"
+            "  preflight  TARGET is exactly one node ID (node_...).\n"
+            "  record     TARGET is exactly one node ID (node_...).\n"
+            "  analyze    CAPTURE_DIR is a local directory containing traffic-*.bin files.\n\n"
+            "Action options:\n"
+            "  --listener {main,admin,memcache}  Client listener for preflight and record; "
+            "default: main.\n"
+            "  --duration SECONDS                Planned or actual duration for preflight and "
+            "record; default: 30, maximum: 60.\n"
+            "  --output-dir DIRECTORY            Required local parent directory for record.\n"
+            "  --analyze-capture                 Analyze the downloaded record locally; requires "
+            "--replay-tool.\n"
+            "  --replay-tool PATH                Local reply analyzer path, absolute or relative "
+            "to the current directory. Replay is never run.\n\n"
+            "  --analysis-output FILE            Write the analyzer report to FILE as well as "
+            "the terminal; record requires --analyze-capture.\n\n"
+            "Listeners:\n"
+            "  main      Normal Redis client listener (default).\n"
+            "  admin     Dragonfly administrative listener.\n"
+            "  memcache  Memcached client listener.\n\n"
+            "Safety note:\n"
+            "  Preflight requires at least 2 GiB free on Dragonfly's private /var/tmp capture "
+            "filesystem. Record still stops automatically after the selected duration.\n\n"
+            "Examples:\n"
+            "  %(prog)s preflight node_example --listener main\n"
+            "  %(prog)s record node_example --output-dir /secure/captures --duration 30\n"
+            "  %(prog)s record node_example --output-dir /secure/captures --analyze-capture "
+            "--replay-tool /path/to/reply --analysis-output /secure/reports/traffic.txt\n"
+            "  %(prog)s analyze /secure/captures/node_example-... --replay-tool /path/to/reply "
+            "--analysis-output /secure/reports/traffic.txt"
+        ),
+    )
+    traffic_actions = traffic_parser.add_subparsers(dest="traffic_action", required=True)
+    traffic_preflight_parser = traffic_actions.add_parser(
+        "preflight",
+        help="perform read-only admission checks without recording traffic",
+        formatter_class=CommandHelpFormatter,
+    )
+    traffic_preflight_parser.add_argument("target", help="Exactly one node ID (node_...)")
+    traffic_preflight_parser.add_argument(
+        "--listener",
+        choices=("main", "admin", "memcache"),
+        default="main",
+        help="Client listener to record if a later record command is run (default: main)",
+    )
+    traffic_preflight_parser.add_argument(
+        "--duration",
+        type=int,
+        default=DEFAULT_TRAFFIC_RECORD_SECONDS,
+        help=f"Planned recording duration in seconds (default: {DEFAULT_TRAFFIC_RECORD_SECONDS}; maximum: {MAX_TRAFFIC_RECORD_SECONDS})",
+    )
+    traffic_record_parser = traffic_actions.add_parser(
+        "record",
+        help="start a short traffic recording and download it locally",
+        formatter_class=CommandHelpFormatter,
+    )
+    traffic_record_parser.add_argument("target", help="Exactly one node ID (node_...)")
+    traffic_record_parser.add_argument(
+        "-o", "--output-dir", required=True, type=Path, help="Local directory for the new capture"
+    )
+    traffic_record_parser.add_argument(
+        "--listener",
+        choices=("main", "admin", "memcache"),
+        default="main",
+        help="Listener to record (default: main)",
+    )
+    traffic_record_parser.add_argument(
+        "--duration",
+        type=int,
+        default=DEFAULT_TRAFFIC_RECORD_SECONDS,
+        help=f"Recording duration in seconds (default: {DEFAULT_TRAFFIC_RECORD_SECONDS}; maximum: {MAX_TRAFFIC_RECORD_SECONDS})",
+    )
+    traffic_record_parser.add_argument(
+        "--analyze-capture",
+        dest="analyze_capture",
+        action="store_true",
+        help="Analyze the downloaded capture locally after recording; requires --replay-tool",
+    )
+    traffic_record_parser.add_argument(
+        "--replay-tool",
+        type=Path,
+        help="Local reply analyzer path for --analyze; absolute or relative to the current directory",
+    )
+    traffic_record_parser.add_argument(
+        "--analysis-output",
+        type=Path,
+        help="Write the local analyzer report to this file as well as the terminal; requires --analyze-capture",
+    )
+    traffic_analyze_parser = traffic_actions.add_parser(
+        "analyze",
+        help="analyze already downloaded capture files locally; never replays traffic",
+        formatter_class=CommandHelpFormatter,
+    )
+    traffic_analyze_parser.add_argument(
+        "capture_dir", type=Path, help="Local traffic capture directory containing traffic-*.bin"
+    )
+    traffic_analyze_parser.add_argument(
+        "--replay-tool",
+        required=True,
+        type=Path,
+        help=(
+            "Path to the local reply analyzer executable; absolute or relative to the current "
+            "directory. Only its analyze mode is used"
+        ),
+    )
+    traffic_analyze_parser.add_argument(
+        "--analysis-output",
+        type=Path,
+        help="Write the analyzer report to this file as well as the terminal",
+    )
+
     slowlog_parser = commands.add_parser(
         "slowlog",
         aliases=["sl"],
@@ -9153,9 +10392,8 @@ All commands use production by default.""",
             "requested node, shard, or datastore record.\n"
             "  all      Query file, launch, runtime, and custom separately; values are never "
             "merged across sources.\n\n"
-            "read_status:\n"
-            "  OK       The selected source was read and parsed successfully. This is not a node health assessment.\n"
-            "  ERROR    The selected source could not be read; details are printed separately.\n\n"
+            "errors:\n"
+            "  Failed source reads are printed as ERROR with details; successful reads have no status output.\n\n"
             "cost and concurrency:\n"
             "  --workers limits all node/source reads to 20 by default. --source all performs "
             "four independent reads per resolved node concurrently within that limit. A --flag "
@@ -9203,7 +10441,10 @@ All commands use production by default.""",
         "--format",
         choices=("auto", "table", "vertical", "json"),
         default="auto",
-        help="Output format: auto (default; vertical for one result, table for many), table, vertical, or json",
+        help=(
+            "Output format: auto (default; vertical for one result or a table wider than the "
+            "terminal), table, vertical, or json"
+        ),
     )
 
     config_parser = commands.add_parser(
@@ -9606,6 +10847,7 @@ Examples:
   %(prog)s node_example --output-dir /tmp/dfly-evidence --include memory-arena-summary
   %(prog)s node_example --output-dir /tmp/dfly-evidence --include memory-arena-detailed
   %(prog)s node_example --output-dir /tmp/dfly-evidence --include disk-usage
+  %(prog)s node_example --output-dir /mnt/evidence --include perf --min-local-free-kib 41943040
   %(prog)s node_example --output-dir /tmp/dfly-evidence --extract
   %(prog)s dst_example --output-dir /tmp/dfly-evidence --include memory-arena-summary --max-elements 1
   %(prog)s dst_example --include info-logs --estimate""",
@@ -9669,6 +10911,14 @@ Examples:
         type=int,
         default=DEFAULT_MIN_FREE_KIB,
         help="Skip node below this free disk space on a checked mount (default: 524288)",
+    )
+    collect_parser.add_argument(
+        "--min-local-free-kib",
+        type=int,
+        help=(
+            "Required free space on the --output-dir filesystem. Default: 2 GiB per node, "
+            "or 20 GiB per node for perf, raw transfer, extract, or bundle."
+        ),
     )
     collect_parser.add_argument(
         "-s",
@@ -9985,7 +11235,19 @@ Examples:
         help="export selected dashboard panels (graphs/tables) or all panels",
         description="Export selected Grafana dashboard panels as local JSON evidence for a datastore, shard, node, and time window.",
         formatter_class=CommandHelpFormatter,
-        epilog="Canonical form: %(prog)s --source-folder FOLDER --dashboard DASHBOARD --panels SELECTOR --output-root DIRECTORY --since TIME [--until TIME] --datastore-id DST",
+        epilog=(
+            "Canonical form:\n"
+            "  %(prog)s --source-folder FOLDER --dashboard DASHBOARD --panels SELECTOR "
+            "--output-root DIRECTORY --since TIME [--until TIME] --datastore-id DST\n\n"
+            "Examples:\n"
+            "  %(prog)s --source-folder FOLDER --dashboard 'Datastore Tiering' --panels '*' "
+            "--output-root /tmp/tiering-dashboard --since '2026-10-29 05:00 UTC' "
+            "--until '2026-10-29 08:00 UTC' --datastore-id dst_example\n"
+            "  %(prog)s --source-folder FOLDER --dashboard 'Datastore Tiering' --panels '*' "
+            "--output-root /tmp/tiering-shard --since '2026-10-29 05:00 UTC' "
+            "--until '2026-10-29 08:00 UTC' --datastore-id dst_example "
+            "--shard-id shard_example"
+        ),
     )
     dashboards_parser.add_argument("source_folder", help="Exact Grafana source-folder title")
     dashboards_parser.add_argument("dashboard", help="Exact Grafana dashboard title")
@@ -10030,8 +11292,10 @@ Examples:
 
     viewer_parser = commands.add_parser(
         "dashboard-viewer",
+        aliases=["dv"],
         help="render saved dashboard query responses as a self-contained offline HTML report",
         description="Create an offline HTML report from a completed dashboard-panels export. No network requests are made.",
+        formatter_class=CommandHelpFormatter,
     )
     viewer_parser.add_argument(
         "dashboard_dir",
@@ -10124,6 +11388,7 @@ Examples:
                 default="human",
                 help="Render AI answers as human-readable text (default) or JSON",
             )
+    parser.epilog = main_command_index(commands)
     try:
         arguments = normalize_environment_arguments(sys.argv[1:])
         arguments = normalize_explain_arguments(arguments)
@@ -10296,6 +11561,8 @@ def validate_local_command_arguments(arguments: argparse.Namespace) -> None:
             raise ValueError("--max-normalized-load must be positive")
         if arguments.min_free_kib <= 0:
             raise ValueError("--min-free-kib must be positive")
+        if arguments.min_local_free_kib is not None and arguments.min_local_free_kib <= 0:
+            raise ValueError("--min-local-free-kib must be positive")
         if not arguments.journal_list_tags:
             arguments.collection_since, arguments.collection_until = resolve_time_window(
                 arguments.since, arguments.until
@@ -10324,11 +11591,30 @@ def validate_local_command_arguments(arguments: argparse.Namespace) -> None:
             raise ValueError("--max-elements must be positive")
         if arguments.output is not None and arguments.format == "table":
             raise ValueError("--output requires --format json or --format markdown")
-    elif command == "health":
+    elif command in {"health", "tiering"}:
         if not 1 <= arguments.workers <= DEFAULT_HEALTH_WORKERS:
             raise ValueError(f"--workers must be between 1 and {DEFAULT_HEALTH_WORKERS}")
         if arguments.max_elements is not None and arguments.max_elements <= 0:
             raise ValueError("--max-elements must be positive")
+    elif command == "traffic":
+        if (
+            arguments.traffic_action in {"preflight", "record"}
+            and not 1 <= arguments.duration <= MAX_TRAFFIC_RECORD_SECONDS
+        ):
+            raise ValueError(
+                f"--duration must be between 1 and {MAX_TRAFFIC_RECORD_SECONDS} seconds"
+            )
+        if arguments.traffic_action == "record":
+            if arguments.analyze_capture and arguments.replay_tool is None:
+                raise ValueError("--analyze-capture requires --replay-tool")
+            if arguments.replay_tool is not None and not arguments.analyze_capture:
+                raise ValueError(
+                    "--replay-tool requires --analyze-capture when used with traffic record"
+                )
+            if arguments.analysis_output is not None and not arguments.analyze_capture:
+                raise ValueError(
+                    "--analysis-output requires --analyze-capture when used with traffic record"
+                )
     elif command == "slot-ownership":
         if arguments.workers <= 0:
             raise ValueError("--workers must be positive")
@@ -10350,6 +11636,8 @@ def validate_local_command_arguments(arguments: argparse.Namespace) -> None:
 
 
 def command_backends(arguments: argparse.Namespace) -> frozenset[str]:
+    if arguments.command == "traffic" and arguments.traffic_action == "analyze":
+        return frozenset()
     backends = COMMAND_BACKENDS[arguments.command]
     if arguments.command == "config" and any(
         source in {"launch", "file"} for source in arguments.source
@@ -10391,6 +11679,8 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
         "ss": "session",
         "sl": "slowlog",
         "so": "slot-ownership",
+        "ti": "tiering",
+        "tr": "traffic",
     }
     arguments.command = command_aliases.get(arguments.command, arguments.command)
     try:
@@ -10638,6 +11928,41 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
                 arguments.workers,
                 arguments.format,
                 arguments.max_elements,
+                arguments.verbose,
+            )
+        if arguments.command == "tiering":
+            return tiering_report(
+                environment,
+                arguments.targets,
+                "",
+                arguments.workers,
+                arguments.format,
+                arguments.max_elements,
+                arguments.verbose,
+            )
+        if arguments.command == "traffic":
+            if arguments.traffic_action == "preflight":
+                return traffic_preflight(
+                    environment,
+                    arguments.target,
+                    arguments.listener,
+                    arguments.duration,
+                    DEFAULT_MAX_NORMALIZED_LOAD,
+                )
+            if arguments.traffic_action == "record":
+                return traffic_record(
+                    environment,
+                    arguments.target,
+                    arguments.output_dir,
+                    arguments.listener,
+                    arguments.duration,
+                    DEFAULT_MAX_NORMALIZED_LOAD,
+                    arguments.analyze_capture,
+                    arguments.replay_tool,
+                    arguments.analysis_output,
+                )
+            return traffic_analyze(
+                arguments.capture_dir, arguments.replay_tool, arguments.analysis_output
             )
         if arguments.command == "slowlog":
             return slowlog_report(
@@ -10740,6 +12065,7 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
                 arguments.extract,
                 arguments.max_elements,
                 bool(arguments.collection_include_only),
+                arguments.min_local_free_kib,
             )
         if arguments.command == "bundle":
             includes = parse_collection_includes(arguments.collect_include, "--collect-include")
@@ -10813,7 +12139,7 @@ def run_command(arguments: argparse.Namespace | None = None) -> int:
                 arguments.output_dir,
                 arguments.max_workers,
                 arguments.source,
-                arguments.compress,
+                arguments.bundle,
                 arguments.dry_run,
                 arguments.max_elements,
                 arguments.loki_datasource,
@@ -10880,6 +12206,9 @@ class OutputCapture(io.StringIO):
         self.target.write(value)
         self.target.flush()
         return super().write(value)
+
+    def isatty(self) -> bool:
+        return bool(getattr(self.target, "isatty", lambda: False)())
 
 
 def execute_main(arguments: argparse.Namespace) -> int:
