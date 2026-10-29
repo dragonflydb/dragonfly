@@ -549,12 +549,18 @@ auto DbSlice::GetStats() const -> Stats {
 
 SlotStats DbSlice::GetSlotStats(SlotId sid) const {
   SlotStats stats;
+  AddSlotStats({&sid, 1}, &stats);
+  return stats;
+}
+
+void DbSlice::AddSlotStats(absl::Span<const SlotId> slots, SlotStats* dest) const {
   for (const auto& db : db_arr_) {
     // slots_stats is null outside real cluster mode.
-    if (db && db->slots_stats)
-      stats += db->slots_stats[sid];
+    if (db && db->slots_stats) {
+      for (size_t i = 0; i < slots.size(); ++i)
+        dest[i] += db->slots_stats[slots[i]];
+    }
   }
-  return stats;
 }
 
 DbSlice::AutoUpdater::AutoUpdater() {

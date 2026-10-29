@@ -8,6 +8,7 @@
 #include <gtest/gtest-matchers.h>
 
 #include <atomic>
+#include <iterator>
 #include <string>
 #include <string_view>
 
@@ -531,23 +532,35 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
 }
 
 TEST_F(ClusterFamilyTest, GetSlotStatsAcrossDatabases) {
-  shard_set->Await(0, [] {
-    auto& ns = namespaces->GetDefaultNamespace();
-    auto& db_slice = ns.GetCurrentDbSlice();
-    uint64_t memory_bytes = 0;
+  ConfigSingleNodeCluster(GetMyId());
+  uint64_t memory_bytes = 0;
+  for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
+    memory_bytes += shard_set->Await(sid, [] {
+      auto& ns = namespaces->GetDefaultNamespace();
+      auto& db_slice = ns.GetCurrentDbSlice();
+      uint64_t memory_bytes = 0;
 
-    for (DbIndex db_index : {0, 2}) {
-      db_slice.ActivateDb(db_index);
-      DbContext cntx{&ns, db_index, GetCurrentTimeMs()};
-      PrimeValue value;
-      value.SetString(string(1'000, '#'));
-      memory_bytes += value.MallocUsed();
-      ASSERT_TRUE(db_slice.AddOrUpdate(cntx, "key", std::move(value), 0).ok());
-      ASSERT_TRUE(IsValid(db_slice.FindReadOnly(cntx, "key")));
-    }
+      for (DbIndex db_index : {0, 2}) {
+        db_slice.ActivateDb(db_index);
+        DbContext cntx{&ns, db_index, GetCurrentTimeMs()};
+        PrimeValue value;
+        value.SetString(string(1'000, '#'));
+        memory_bytes += value.MallocUsed();
+        EXPECT_TRUE(db_slice.AddOrUpdate(cntx, "key", std::move(value), 0).ok());
+        EXPECT_TRUE(IsValid(db_slice.FindReadOnly(cntx, "key")));
+      }
 
-    EXPECT_THAT(db_slice.GetSlotStats(KeySlot("key")), FieldsAre(2, 2, 2, memory_bytes, 0));
-  });
+      EXPECT_THAT(db_slice.GetSlotStats(KeySlot("key")), FieldsAre(2, 2, 2, memory_bytes, 0));
+      return memory_bytes;
+    });
+  }
+
+  const uint64_t key_count = 2 * shard_set->size();
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(KeySlot("key"))}),
+              RespElementsAre(RespElementsAre(
+                  IntArg(KeySlot("key")), "key_count", IntArg(key_count), "total_reads",
+                  IntArg(key_count), "total_writes", IntArg(key_count), "memory_bytes",
+                  IntArg(memory_bytes + key_count * sizeof(CompactObj) * 2))));
 }
 
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfoRanges) {
@@ -642,18 +655,34 @@ TEST_F(ClusterFamilyTest, FragmentedSlotsReplyIsBatched) {
 TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
   ConfigSingleNodeCluster(GetMyId());
 
-  Run({"debug", "populate", "10000", "key", "4", "SLOTS", "0", "1000"});
+  constexpr int64_t kKeys = 10'000;
+  Run({"debug", "populate", absl::StrCat(kKeys), "key", "4", "SLOTS", "0", "1000"});
 
-  for (int i = 0; i <= 1'000; ++i) {
-    EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespElementsAre(RespArray(
-                    ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _, _, _))));
+  auto writes = [this] { return GetMetrics().facade_stats.reply_stats.io_write_calls; };
+  const uint64_t writes_before = writes();
+
+  // Collected in two rounds; the second one is partial and spans several ranges.
+  auto result = RunPrivileged({"dflycluster", "getslotinfo", "slots", "0-16383", "16383", "2-0"});
+
+  // Flushing the reply per slot would take more than 16K writes.
+  EXPECT_LT(writes() - writes_before, 1000u);
+
+  // Every slot sums the stats of all shards, in request order and with duplicates.
+  constexpr SlotId kTail[] = {16383, 0, 1, 2};
+  ASSERT_THAT(result, ArrLen(kMaxSlotNum + 1 + std::size(kTail)));
+  const auto& reply = result.GetVec();
+  auto key_count = [&](size_t i) { return *reply[i].GetVec()[2].GetInt(); };
+  int64_t total_keys = 0;
+  for (SlotId slot = 0; slot <= kMaxSlotNum; ++slot) {
+    ASSERT_THAT(reply[slot], RespElementsAre(IntArg(slot), "key_count", _, _, _, _, _, _, _));
+    EXPECT_EQ(key_count(slot) > 0, slot <= 1000) << slot;
+    total_keys += key_count(slot);
   }
-
-  for (int i = 1'001; i <= 16'383; ++i) {
-    EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespElementsAre(
-                    RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _, _, _))));
+  EXPECT_EQ(total_keys, kKeys);
+  for (size_t i = 0; i < std::size(kTail); ++i) {
+    EXPECT_THAT(reply[kMaxSlotNum + 1 + i],
+                RespElementsAre(IntArg(kTail[i]), "key_count", IntArg(key_count(kTail[i])), _, _, _,
+                                _, _, _));
   }
 }
 
