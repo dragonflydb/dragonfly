@@ -3007,6 +3007,7 @@ TEST_F(RdbTest, SnapshotEgressThrottle) {
 // buffer off, on, and off again (the flag is runtime-mutable and read when a snapshot starts) and
 // check the file loads back whole, with the values as of the save's start.
 TEST_F(RdbTest, SnapshotOutputBuffer) {
+  absl::FlagSaver fs;
   constexpr unsigned kKeys = 5000;
   ASSERT_EQ(Run({"config", "set", "serialization_max_chunk_size", "1024"}), "OK");
   const string updated(4000, 'u');
