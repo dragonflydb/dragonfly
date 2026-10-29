@@ -468,7 +468,10 @@ All serialized data ultimately flows through `HandleFlushData` (`snapshot.cc`):
    RSS and `snapshot_serialization_bytes` but not toward `used_memory`.
 5. On the traversal fiber only, in non-background mode, sleeps up to 2ms proportional to CPU
    spent, to throttle. A mutation fiber holds its shard's transaction queue, so a sleep there
-   would land on every queued command.
+   would land on every queued command. Every other producer yields instead, once it has run for
+   ~15us of CPU without preempting: with room in the queue the wait in step 4 returns at once,
+   and a large value would otherwise hand over all its chunks in one slice, keeping the flush
+   fiber, the other connections and the timers of the thread waiting.
 
 Traversal chunks handed over mid-value through `ConsumeBigValueChunk` (including an
 end-of-entry flush, which leaves nothing for the next `PushSerialized`) do not wait for the sink.
