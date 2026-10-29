@@ -1333,6 +1333,51 @@ TEST_F(ClusterFamilyTest, FlushSlotsWakesBlockedXReadGroup) {
   EXPECT_THAT(Run({"EXISTS", "s"}), IntArg(0));
 }
 
+TEST_F(ClusterFamilyTest, FlushSlotsThrottledSweepsComplete) {
+  absl::FlagSaver flag_saver;
+  SetTestFlag("migration_buckets_cpu_budget", "0.001");
+  ConfigSingleNodeCluster(GetMyId());
+  EXPECT_EQ(Run({"debug", "populate", "1000", "key", "4"}), "OK");
+
+  // Overlapping sweeps share the budget. An expired sample must not keep them asleep forever.
+  for (unsigned i = 0; i < 2; ++i)
+    EXPECT_EQ(RunPrivileged({"dflycluster", "flushslots", "0", "16383"}), "OK");
+
+  ExpectConditionWithinTimeout([] {
+    for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
+      if (shard_set->Await(sid, [] {
+            return namespaces->GetDefaultNamespace().GetCurrentDbSlice().HasRegisteredCallbacks();
+          })) {
+        return false;
+      }
+    }
+    return true;
+  });
+  EXPECT_THAT(Run({"dbsize"}), IntArg(0));
+}
+
+TEST_F(ClusterFamilyTest, FlushSlotsShutdownWithExhaustedBudget) {
+  absl::FlagSaver flag_saver;
+  SetTestFlag("migration_buckets_cpu_budget", "0");
+  ConfigSingleNodeCluster(GetMyId());
+  EXPECT_EQ(Run({"debug", "populate", "1000", "key", "4"}), "OK");
+
+  pp_->at(0)->Await([&] {
+    auto* shard = EngineShard::tlocal();
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    shard->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    db_slice.FlushSlots(SlotRanges({{0, 16383}}));
+    shard->shard_lock()->Release(IntentLock::EXCLUSIVE);
+
+    util::ThisFiber::SleepFor(5ms);
+    EXPECT_TRUE(db_slice.HasRegisteredCallbacks());
+  });
+
+  // Shutdown must wake the paused sweep and let it unregister before destroying its slice.
+  ResetService();
+  EXPECT_EQ(Run({"ping"}), "PONG");
+}
+
 TEST_F(ClusterFamilyTest, FlushSlotsOutOfBounds) {
   EXPECT_THAT(RunPrivileged({"dflycluster", "flushslots", "0", "16384"}),
               ErrArg("value is not an integer or out of range"));
