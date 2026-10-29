@@ -13,8 +13,10 @@ extern "C" {
 
 #include <absl/flags/reflection.h>
 #include <mimalloc.h>
+#include <sys/resource.h>
 
 #include <filesystem>
+#include <fstream>
 
 #include "base/flags.h"
 #include "base/gtest.h"
@@ -880,6 +882,102 @@ TEST_F(RdbTest, SearchAliasesRoundTrip) {
   ASSERT_EQ(Run({"debug", "reload", "nosave"}), "OK");
   expect_aliases(expected_aliases);
 }
+
+// Users choose names, prefixes, stop words, separators and synonym terms, spaces and tabs included.
+TEST_F(RdbTest, SearchDefinitionsWithSpacesSurviveReload) {
+  ASSERT_EQ(Run({"FT.CREATE", "my idx", "ON",        "JSON", "PREFIX",    "2",
+                 "my pfx:",   "j:",     "STOPWORDS", "1",    "a b",       "LANGUAGE_FIELD",
+                 "my lang",   "SCHEMA", "$.t",       "AS",   "t",         "TEXT",
+                 "$.d.city",  "AS",     "my city",   "TAG",  "SEPARATOR", " "}),
+            "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "h idx", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "first name",
+                 "TEXT", "a\tb", "TAG"}),
+            "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "my alias", "my idx"}), "OK");
+  ASSERT_EQ(Run({"FT.SYNUPDATE", "h idx", "group one", "new york"}), "OK");
+  Run({"JSON.SET", "j:1", "$", R"({"t":"hello","d":{"city":"New York"}})"});
+  Run({"HSET", "h:1", "first name", "jane", "a\tb", "x"});
+
+  auto state = [&] {
+    vector<string> out;
+    auto names = Run({"FT._LIST"});
+    for (const auto& name : names.GetVec())
+      out.push_back(string{name.GetString()});
+    ranges::sort(out);
+    for (string_view idx : {"my idx", "h idx"}) {
+      EXPECT_TRUE(WaitUntilCondition([&] { return IsIndexingDone(idx); },
+                                     std::chrono::milliseconds(10000)));
+      out.push_back(testing::PrintToString(Run({"FT.INFO", idx})));
+    }
+    out.push_back(testing::PrintToString(Run({"FT.SYNDUMP", "h idx"})));
+    out.push_back(testing::PrintToString(Run({"FT.SEARCH", "my alias", "@t:hello", "NOCONTENT"})));
+    return out;
+  };
+  const auto before = state();
+  ASSERT_EQ(Run({"save", "df"}), "OK");
+
+  // Older versions skip these keys instead of misreading the arguments.
+  auto summary = io::ReadFileToString(service_->server_family().GetLastSaveInfo().file_name);
+  ASSERT_TRUE(summary);
+  for (string_view key : {"search-index-resp", "search-alias-resp", "search-synonyms-resp"})
+    EXPECT_TRUE(absl::StrContains(*summary, key)) << key;
+  ASSERT_EQ(Run({"debug", "reload"}), "OK");
+  EXPECT_EQ(state(), before);
+}
+
+// A wide schema is written inline under the old key, as before, and loads back.
+TEST_F(RdbTest, WideSearchIndexSurvivesReload) {
+  vector<string> cmd = {"FT.CREATE", "wide", "ON", "HASH", "SCHEMA"};
+  for (int i = 0; i < 800; ++i) {
+    cmd.push_back(StrCat("a_rather_long_customer_field_name_", i));
+    cmd.push_back("TEXT");
+  }
+  ASSERT_EQ(Run(absl::MakeSpan(cmd)), "OK");
+  ASSERT_EQ(Run({"save", "df"}), "OK");
+  auto summary = io::ReadFileToString(service_->server_family().GetLastSaveInfo().file_name);
+  ASSERT_TRUE(summary);
+  EXPECT_TRUE(absl::StrContains(*summary, "wide ON HASH "));
+  EXPECT_FALSE(absl::StrContains(*summary, "-resp"));
+  ASSERT_EQ(Run({"debug", "reload"}), "OK");
+  EXPECT_THAT(Run({"FT._LIST"}), RespArray(ElementsAre("wide")));
+  auto info = Run({"FT.INFO", "wide"}).GetVec();
+  auto it = rng::find_if(info, [](const auto& e) { return e == "attributes"; });
+  ASSERT_NE(it, info.end());
+  EXPECT_EQ((++it)->GetVec().size(), 800u);
+}
+
+// A count below the arguments that follow must fail the field instead of restoring a part of it.
+TEST_F(RdbTest, UnderstatedSearchArgumentCountIsRejected) {
+  string def = "*6\r\n";
+  for (string_view arg : {"my idx", "ON", "HASH", "SCHEMA", "a", "TAG", "b", "TAG"})
+    absl::StrAppend(&def, "$", arg.size(), "\r\n", arg, "\r\n");
+  pp_->at(0)->Await([&] {
+    LoadSearchCommandFromAux(service_.get(), std::move(def), "FT.CREATE", "index definition");
+  });
+  EXPECT_THAT(Run({"FT._LIST"}).GetVec(), IsEmpty());
+}
+
+#ifdef __linux__
+// A corrupt argument count must fail the field instead of reserving memory for the count.
+TEST_F(RdbTest, CorruptSearchArgumentCountIsRejected) {
+  // Limit the address space so that hosts which overcommit memory fail a huge reservation too.
+  size_t vm_pages = 0;
+  ifstream{"/proc/self/statm"} >> vm_pages;
+  ASSERT_GT(vm_pages, 0u);
+  rlimit prev;
+  ASSERT_EQ(getrlimit(RLIMIT_AS, &prev), 0);
+  rlimit limit = prev;
+  limit.rlim_cur = min<rlim_t>(prev.rlim_cur, vm_pages * getpagesize() + (2ULL << 30));
+  ASSERT_EQ(setrlimit(RLIMIT_AS, &limit), 0);
+
+  pp_->at(0)->Await([&] {
+    EXPECT_NO_THROW(LoadSearchCommandFromAux(service_.get(), "*4294967295\r\n", "FT.CREATE",
+                                             "index definition"));
+  });
+  ASSERT_EQ(setrlimit(RLIMIT_AS, &prev), 0);
+  EXPECT_THAT(Run({"FT._LIST"}).GetVec(), IsEmpty());
+}
+#endif
 #endif
 
 // Parametrized test for RestoreVectorSearchIndexHnsw with varying document counts

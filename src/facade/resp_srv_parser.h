@@ -27,8 +27,13 @@ class RespSrvParser {
     BAD_INLINE,
   };
   using Buffer = absl::Span<const uint8_t>;
-  explicit RespSrvParser(uint32_t max_arr_len = UINT32_MAX, uint32_t max_bulk_len = UINT32_MAX)
-      : max_arr_len_(max_arr_len), max_bulk_len_(max_bulk_len) {
+
+  // Default limit for an inline command, counting the bytes before its final '\n'.
+  static constexpr uint32_t kMaxInlineSize = 64 * 1024;
+
+  explicit RespSrvParser(uint32_t max_arr_len = UINT32_MAX, uint32_t max_bulk_len = UINT32_MAX,
+                         uint32_t max_inline_len = kMaxInlineSize)
+      : max_arr_len_(max_arr_len), max_bulk_len_(max_bulk_len), max_inline_len_(max_inline_len) {
   }
 
   /**
@@ -78,6 +83,7 @@ class RespSrvParser {
   bool bulk_append_ = false;   // current bulk grows incrementally instead of eager reserve
   uint32_t max_arr_len_;
   uint32_t max_bulk_len_;
+  uint32_t max_inline_len_;
 
   std::string buf_stash_;
   std::array<char, 32> small_buf_;
