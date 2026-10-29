@@ -268,7 +268,7 @@ void SliceSnapshot::HandleFlushData(std::string data, bool safe_point) {
   // is accounted by string capacity, which is what it holds.
   size_t queued = data.capacity();
   pending_.push_back({std::move(data), !traversal});
-  pending_bytes_ += queued;
+  pending_bytes_.fetch_add(queued, std::memory_order_relaxed);
   uint64_t seq = ++produced_seq_;
   if (traversal)
     traversal_seq_ = seq;
@@ -293,7 +293,9 @@ void SliceSnapshot::HandleFlushData(std::string data, bool safe_point) {
     drain_cv_.wait(lk, [&] { return written_seq_ >= seq || !base_cntx_->IsRunning(); });
   } else {
     drain_cv_.wait(lk, [&] {
-      return written_seq_ >= seq || pending_bytes_ <= pending_limit_ || !base_cntx_->IsRunning();
+      return written_seq_ >= seq ||
+             pending_bytes_.load(std::memory_order_relaxed) <= pending_limit_ ||
+             !base_cntx_->IsRunning();
     });
   }
 
@@ -328,7 +330,7 @@ void SliceSnapshot::FlushPendingFb() {
     // Blocking point. ConsumeData returns at once when the context is no longer running.
     consumer_->ConsumeData(std::move(chunk.data), base_cntx_);
 
-    pending_bytes_ -= queued;
+    pending_bytes_.fetch_sub(queued, std::memory_order_relaxed);
     ++written_seq_;
     drain_cv_.notify_all();
   }
@@ -399,7 +401,8 @@ void SliceSnapshot::ThrottleIfNeeded() {
 }
 
 size_t SliceSnapshot::GetBufferCapacity() const {
-  return (serializer_ ? serializer_->GetBufferCapacity() : 0) + pending_bytes_;
+  return (serializer_ ? serializer_->GetBufferCapacity() : 0) +
+         pending_bytes_.load(std::memory_order_relaxed);
 }
 
 size_t SliceSnapshot::GetTempBuffersSize() const {

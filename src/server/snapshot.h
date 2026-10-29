@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <deque>
 
 #include "server/detail/egress_throttle.h"
@@ -137,8 +138,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
     bool high_prio;  // not produced by the traversal fiber, for the egress throttler
   };
   std::deque<PendingChunk> pending_;
-  // Sum of the capacities of the strings in pending_.
-  size_t pending_bytes_ = 0;
+  // Sum of the capacities of the strings in pending_. Atomic only for GetBufferCapacity, which
+  // RdbSaver may call from another thread; every write happens on the shard thread.
+  std::atomic<size_t> pending_bytes_{0};
   uint64_t produced_seq_ = 0, written_seq_ = 0;  // chunk sequence numbers
   uint64_t traversal_seq_ = 0;                   // last chunk queued by the traversal fiber
   // Bytes of pending_ a mutation fiber may leave queued without waiting.
