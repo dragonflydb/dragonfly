@@ -463,6 +463,7 @@ ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index, unsigned* hash_in
     if (field.type == SchemaField::TEXT)
       stems |= !std::get<SchemaField::TextParams>(field.special_params).no_stem;
   }
+
   // Only stemming TEXT indices read the language field.
   if (stems && !base_->schema.language_field.empty())
     add_field(base_->schema.language_field);
@@ -511,8 +512,11 @@ void ShardDocIndex::CancelBuilder() {
 
 void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
                                     const std::vector<std::string_view>& terms) {
-  if (!indices_)
+  // Not built yet, e.g. during a replica full sync: the build indexes the documents with the group.
+  if (!indices_) {
+    synonyms_.UpdateGroup(group_id, terms);
     return;
+  }
 
   absl::flat_hash_set<DocId> docs_to_rebuild;
   absl::Span<search::TextIndex* const> text_indices = indices_->GetAllTextIndices();
@@ -626,6 +630,10 @@ void ShardDocIndex::RemoveFromIndices(DocId id, const DbContext& db_cntx, const 
   }
   indices_->Remove(id, ExpiringValuesAccessor{*accessor, it->second});
   expiring_values_.erase(it);
+
+  // erase never shrinks the table. Growth happens at 7/8 load, so shrinking at 1/16 cannot thrash.
+  if (expiring_values_.size() * 16 <= expiring_values_.capacity())
+    expiring_values_.rehash(0);
 }
 
 // --- HnswShardIndex implementation ---
@@ -1402,6 +1410,8 @@ size_t ShardDocIndex::GetNonPmrMemoryUsage() const {
   size_t mem = field_types_.GetNonPmrMemoryUsage();
   if (indices_)
     mem += indices_->GetNonPmrMemoryUsage();
+  if (content_fields_.size() > 4)
+    mem += content_fields_.capacity() * sizeof(string_view);
   return mem;
 }
 
@@ -1437,6 +1447,19 @@ ShardDocIndices::ShardDocIndices() : local_mr_{ServerState::tlocal()->data_heap(
 ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
   auto it = indices_.find(name);
   return it != indices_.end() ? it->second.get() : nullptr;
+}
+
+ShardDocIndex* ShardDocIndices::ResolveIndex(string_view name) {
+  if (auto* index = GetIndex(name); index != nullptr)
+    return index;
+
+  const auto it = aliases_.find(name);
+  return it != aliases_.end() ? GetIndex(it->second) : nullptr;
+}
+
+string ShardDocIndices::ResolveIndexName(string_view name) const {
+  auto it = aliases_.find(name);
+  return it != aliases_.end() ? it->second : string{name};
 }
 
 OpStatus ShardDocIndices::AddAlias(string_view alias, string_view target) {
@@ -1500,6 +1523,15 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
 }
 
 unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
+  auto index = ExtractIndex(name);
+  if (!index)
+    return nullptr;
+
+  absl::erase_if(aliases_, [name](const auto& entry) { return entry.second == name; });
+  return index;
+}
+
+unique_ptr<ShardDocIndex> ShardDocIndices::ExtractIndex(string_view name) {
   auto it = indices_.find(name);
   if (it == indices_.end())
     return nullptr;
@@ -1530,8 +1562,6 @@ std::vector<std::string> ShardDocIndices::DropUnbuiltIndices() {
     if (!index->indices_)
       names.push_back(name);
   }
-  absl::erase_if(aliases_,
-                 [&](const auto& entry) { return rng::find(names, entry.second) != names.end(); });
   for (const auto& name : names) {
     auto index = DropIndex(name);
     DCHECK(index);

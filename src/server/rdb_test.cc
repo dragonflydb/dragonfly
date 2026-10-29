@@ -982,7 +982,7 @@ TEST_F(RdbTest, FailedLoadDropsUnbuiltIndex) {
 
   const auto no_index = ErrArg("idx: no such index");
   EXPECT_THAT(Run({"ft._list"}).GetVec(), IsEmpty());
-  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), ErrArg("Index with name 'idx' not found"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), no_index);
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), no_index);
   EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
   EXPECT_THAT(
@@ -2062,6 +2062,37 @@ TEST_F(RdbTest, AliasJournalMutationsAbortFullSync) {
   expect_rejected_without_mutation("FT.ALIASADD", "new", "idx-a", false);
   expect_rejected_without_mutation("FT.ALIASUPDATE", "live", "idx-b", true);
   expect_rejected_without_mutation("FT.ALIASDEL", "live", "", true);
+}
+
+// A full sync replays a journaled FT.SYNUPDATE before the index from the header is built.
+TEST_F(RdbTest, FullSyncKeepsSynUpdateOnUnbuiltIndex) {
+  ASSERT_THAT(Run({"HSET", "doc:1", "t", "automobile"}), IntArg(1));
+
+  string body;
+  body.push_back(RDB_OPCODE_AUX);
+  AddKV(&body, "search-index", "idx ON HASH PREFIX 1 doc: SCHEMA t TEXT");
+
+  io::StringSink sink;
+  JournalWriter writer(&sink);
+  const string_view args[] = {"idx", "g1", "car", "automobile"};
+  writer.Write(journal::Entry{1, journal::Op::COMMAND, 0, std::nullopt,
+                              journal::Entry::Payload("FT.SYNUPDATE", ArgSlice{args})});
+  RdbSerializer serializer(CompressionMode::NONE);
+  ASSERT_FALSE(serializer.WriteJournalEntry(std::move(sink).str()));
+  body += serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+
+  const auto rdb = WrapInRdb(body);
+  pp_->at(0)->Await([&] { service_->RequestLoadingState(); });
+  EXPECT_FALSE(LoadRdbBytes(to_byte(rdb.data()), rdb.size()));
+  pp_->at(0)->Await([&] {
+    RdbLoadContext{}.PerformPostLoad(service_.get());
+    service_->RemoveLoadingState();
+  });
+
+  EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}),
+              RespArray(UnorderedElementsAre("car", RespElementsAre("g1"), "automobile",
+                                             RespElementsAre("g1"))));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}), RespElementsAre(IntArg(1), "doc:1"));
 }
 #endif
 

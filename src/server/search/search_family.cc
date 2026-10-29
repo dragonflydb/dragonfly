@@ -13,6 +13,7 @@
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
+#include <absl/types/span.h>
 
 #include <algorithm>
 #include <atomic>
@@ -86,6 +87,7 @@ bool CheckQueryLength(string_view query, string_view what, SinkReplyBuilder* rb)
 }
 
 template <typename T> using ParseResult = io::Result<T, ErrorReply>;
+using HnswSearchResult = io::Result<vector<SearchResult>, OpStatus>;
 
 nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string message) {
   return make_unexpected(ErrorReply{std::move(message), kSyntaxErrType});
@@ -96,7 +98,33 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 }
 
 string IndexNotFoundMsg(string_view index_name) {
-  return absl::StrCat("Index with name '", index_name, "' not found");
+  return absl::StrCat("-ERR ", index_name, ": no such index");
+}
+
+std::string ResolveIndexName(string_view requested_name) {
+  std::string canonical_name;
+  auto resolve = [&] {
+    canonical_name = EngineShard::tlocal()->search_indices()->ResolveIndexName(requested_name);
+  };
+  if (EngineShard::tlocal())
+    resolve();
+  else
+    shard_set->Await(0, resolve);
+  return canonical_name;
+}
+
+std::vector<std::string> ResolveIndexNames(absl::Span<const string_view> requested_names) {
+  std::vector<std::string> canonical_names(requested_names.begin(), requested_names.end());
+  auto resolve = [&] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    for (auto& name : canonical_names)
+      name = indices->ResolveIndexName(name);
+  };
+  if (EngineShard::tlocal())
+    resolve();
+  else
+    shard_set->Await(0, resolve);
+  return canonical_names;
 }
 
 // Send error from parser or result
@@ -1354,6 +1382,12 @@ void WarmupQueryParser() {
   });
 }
 
+struct HnswSearchOptions {
+  std::string_view index_name;
+  std::optional<search::KnnScoreSortOption> score_sort;
+  const SearchParams& params;
+};
+
 // SORTBY by anything but the KNN score needs the sort value loaded from the document.
 std::optional<DocField> HnswSortField(
     const search::Schema& schema, const SearchParams& params,
@@ -1363,11 +1397,9 @@ std::optional<DocField> HnswSortField(
   return ResolveField(schema, params.sort_option->field);
 }
 
-vector<SearchResult> LoadHnswSearchDocs(
-    const std::string_view index_name,
-    const std::optional<search::KnnScoreSortOption>& knn_score_option, const SearchParams& params,
-    const CommandContext& cmd_cntx, std::vector<std::vector<SerializedSearchDoc>> shard_docs,
-    bool finalize) {
+HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
+                                    const CommandContext& cmd_cntx,
+                                    std::vector<std::vector<SerializedSearchDoc>> shard_docs) {
   std::vector<SearchResult> results(1);
   const ShardId shard_size = shard_docs.size();
 
@@ -1379,24 +1411,30 @@ vector<SearchResult> LoadHnswSearchDocs(
 
   // Indicator if we serialized document on shard
   std::vector<std::vector<bool>> shard_docs_serialized_indicator(shard_size);
+  std::atomic missing_index = false;
 
   // Fetch all docs from shards
   auto cb = [&](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(index_name);
+    auto* index = es->search_indices()->GetIndex(options.index_name);
 
-    // No index found or no docs on this shard
-    if (!index || shard_docs[es->shard_id()].empty()) {
+    if (!index) {
+      missing_index.store(true, std::memory_order_relaxed);
+      return OpStatus::OK;
+    }
+
+    if (shard_docs[es->shard_id()].empty()) {
       return OpStatus::OK;
     }
 
     const auto& schema = index->base().schema;
-    const std::optional<DocField> sort_field = HnswSortField(schema, params, knn_score_option);
-    const bool ids_only_without_sort_load = params.IdsOnly() && !sort_field;
+    const std::optional<DocField> sort_field =
+        HnswSortField(schema, options.params, options.score_sort);
+    const bool ids_only_without_sort_load = options.params.IdsOnly() && !sort_field;
 
     // Resize shard with default `true` value
     shard_docs_serialized_indicator[es->shard_id()].resize(shard_docs[es->shard_id()].size(), true);
 
-    const auto doc_fields = ResolveFields(schema, params.return_fields);
+    const auto doc_fields = ResolveFields(schema, options.params.return_fields);
     for (size_t i = 0; i < shard_docs[es->shard_id()].size(); i++) {
       auto& shard_doc = shard_docs[es->shard_id()][i];
 
@@ -1423,13 +1461,12 @@ vector<SearchResult> LoadHnswSearchDocs(
     }
     return OpStatus::OK;
   };
-  if (finalize)
-    cmd_cntx.tx()->Execute(std::move(cb), true);
-  else
-    cmd_cntx.tx()->ScheduleSingleHop(std::move(cb));
+  cmd_cntx.tx()->Execute(std::move(cb), true);
 
-  // Transform shard results back to a flat list of serialized docs. A shard whose index went
-  // missing during the hop (e.g. dropped between hops) leaves its indicator empty, not resized.
+  if (missing_index.load(std::memory_order_relaxed))
+    return make_unexpected(OpStatus::KEY_NOTFOUND);
+
+  // Transform shard results back to a flat list of serialized docs.
   size_t shard_id = 0;
   std::for_each(shard_docs.begin(), shard_docs.end(),
                 [&](const std::vector<SerializedSearchDoc>& shard) {
@@ -1487,11 +1524,10 @@ std::vector<std::pair<float, search::GlobalDocId>> SearchHnswWithPrefilter(
   return index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, ids);
 }
 
-vector<SearchResult> SearchGlobalHnswIndex(
-    const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
-    const std::string_view index_name,
-    const std::optional<search::KnnScoreSortOption>& knn_score_option, const SearchParams& params,
-    const CommandContext& cmd_cntx, ShardId shard_size) {
+HnswSearchResult SearchGlobalHnswIndex(const search::AstKnnNode* knn,
+                                       const shared_ptr<search::HnswVectorIndex>& index,
+                                       const HnswSearchOptions& options,
+                                       const CommandContext& cmd_cntx, ShardId shard_size) {
   auto knn_results = SearchHnswWithPrefilter(knn, index, std::nullopt);
 
   std::vector<std::vector<SerializedSearchDoc>> shard_docs(shard_size);
@@ -1503,19 +1539,17 @@ vector<SearchResult> SearchGlobalHnswIndex(
     shard_docs[shard_id].emplace_back(std::move(doc));
   }
 
-  return LoadHnswSearchDocs(index_name, knn_score_option, params, cmd_cntx, std::move(shard_docs),
-                            false);
+  return LoadHnswSearchDocs(options, cmd_cntx, std::move(shard_docs));
 }
 
-vector<SearchResult> SearchGlobalHnswIndex(
-    const search::AstKnnNode* knn, const shared_ptr<search::HnswVectorIndex>& index,
-    const std::string_view index_name,
-    const std::optional<search::KnnScoreSortOption>& knn_score_option,
-    const std::vector<SearchIdResult>& sharded_prefilter_docs, const SearchParams& params,
-    const CommandContext& cmd_cntx) {
+HnswSearchResult SearchGlobalHnswIndex(const search::AstKnnNode* knn,
+                                       const shared_ptr<search::HnswVectorIndex>& index,
+                                       const HnswSearchOptions& options,
+                                       const std::vector<SearchIdResult>& sharded_prefilter_docs,
+                                       const CommandContext& cmd_cntx) {
   std::vector<search::GlobalDocId> prefilter_global_docs_ids;
   absl::flat_hash_map<search::GlobalDocId, float> text_scores;
-  const bool keep_text_scores = params.with_scores || params.scorer;
+  const bool keep_text_scores = options.params.with_scores || options.params.scorer;
 
   for (size_t shard_id = 0; shard_id < sharded_prefilter_docs.size(); shard_id++) {
     const auto& shard = sharded_prefilter_docs[shard_id];
@@ -1549,16 +1583,15 @@ vector<SearchResult> SearchGlobalHnswIndex(
     shard_docs[shard_id].emplace_back(std::move(doc));
   }
 
-  return LoadHnswSearchDocs(index_name, knn_score_option, params, cmd_cntx, std::move(shard_docs),
-                            true);
+  return LoadHnswSearchDocs(options, cmd_cntx, std::move(shard_docs));
 }
 
 // Search HNSW index for all documents within the given radius.
 // Similar to SearchGlobalHnswIndex but uses RangeQuery instead of Knn.
-vector<SearchResult> SearchGlobalHnswIndexRange(
-    const search::AstVectorRangeNode* range, const shared_ptr<search::HnswVectorIndex>& index,
-    string_view index_name, const std::optional<search::KnnScoreSortOption>& knn_score_option,
-    const SearchParams& params, const CommandContext& cmd_cntx) {
+HnswSearchResult SearchGlobalHnswIndexRange(const search::AstVectorRangeNode* range,
+                                            const shared_ptr<search::HnswVectorIndex>& index,
+                                            const HnswSearchOptions& options,
+                                            const CommandContext& cmd_cntx) {
   std::vector<SearchResult> results(1);
   const ShardId shard_size = shard_set->size();
 
@@ -1574,13 +1607,19 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
     shard_docs[shard_id].emplace_back(doc);
   }
 
+  std::atomic missing_index = false;
   cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    auto* idx = es->search_indices()->GetIndex(index_name);
-    if (!idx || shard_docs[es->shard_id()].empty())
+    auto* idx = es->search_indices()->GetIndex(options.index_name);
+    if (!idx) {
+      missing_index.store(true, std::memory_order_relaxed);
+      return OpStatus::OK;
+    }
+    if (shard_docs[es->shard_id()].empty())
       return OpStatus::OK;
     const auto& schema = idx->base().schema;
-    const auto doc_fields = ResolveFields(schema, params.return_fields);
-    const std::optional<DocField> sort_field = HnswSortField(schema, params, knn_score_option);
+    const auto doc_fields = ResolveFields(schema, options.params.return_fields);
+    const std::optional<DocField> sort_field =
+        HnswSortField(schema, options.params, options.score_sort);
     for (auto& shard_doc : shard_docs[es->shard_id()]) {
       if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
                                               sort_field ? &*sort_field : nullptr);
@@ -1592,6 +1631,9 @@ vector<SearchResult> SearchGlobalHnswIndexRange(
     }
     return OpStatus::OK;
   });
+
+  if (missing_index.load(std::memory_order_relaxed))
+    return make_unexpected(OpStatus::KEY_NOTFOUND);
 
   std::vector<SerializedSearchDoc> serialized_docs;
   serialized_docs.reserve(range_results.size());
@@ -1670,9 +1712,9 @@ bool CreateHnswIndices(std::string_view idx_name, const DocIndex& index, uint32_
 // Validate HNSW VECTOR_RANGE parameters and return the index on success.
 // On failure, sends an error reply via builder and returns nullptr.
 std::shared_ptr<search::HnswVectorIndex> GetValidatedHnswRangeIndex(
-    std::string_view index_name, const search::AstVectorRangeNode* hnsw_range,
-    SinkReplyBuilder* builder) {
-  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, hnsw_range->field);
+    std::string_view resolved_name, std::string_view index_name,
+    const search::AstVectorRangeNode* hnsw_range, SinkReplyBuilder* builder) {
+  auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(resolved_name, hnsw_range->field);
   if (!hnsw_index) {
     builder->SendError(string{index_name} + ": no such global hnsw index");
     return nullptr;
@@ -2312,7 +2354,10 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   text_sp.limit_total = params->num_candidates;
   apply_return_fields(text_sp);
 
-  const bool use_hnsw = GlobalHnswIndexRegistry::Instance().Exist(index_name, params->vsim_field);
+  const std::string resolved_name = ResolveIndexName(index_name);
+
+  const bool use_hnsw =
+      GlobalHnswIndexRegistry::Instance().Exist(resolved_name, params->vsim_field);
   const bool have_filter = !params->vsim_filter.empty();
 
   search::SearchAlgorithm knn_algo;
@@ -2361,7 +2406,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     apply_return_fields(filter_sp);
 
     // Pre-flight dim check spares us a multi-shard text+filter hop on a bad query vector.
-    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, params->vsim_field);
+    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(resolved_name, params->vsim_field);
     if (!hnsw_index) {
       rb->SendError(absl::StrCat("No HNSW index for field: ", params->vsim_field));
       return false;
@@ -2374,10 +2419,10 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   }
 
   search::GlobalScoringStats global_stats;
-  if (needs_global_stats && !CollectGlobalScoringStats(index_name, text_algo, cmd_cntx->tx(),
+  if (needs_global_stats && !CollectGlobalScoringStats(resolved_name, text_algo, cmd_cntx->tx(),
                                                        shard_count, global_stats)) {
     cmd_cntx->tx()->Conclude();
-    cmd_cntx->SendError(string{index_name} + ": no such index");
+    cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     return false;
   }
   const search::GlobalScoringStats* stats_ptr = needs_global_stats ? &global_stats : nullptr;
@@ -2386,7 +2431,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   vector<vector<SerializedSearchDoc>> hnsw_shard_docs(shard_count);
   if (use_hnsw && !have_filter) {
     const absl::Time t = absl::Now();
-    if (auto err = RunHnswPreSearch(index_name, *params, hnsw_shard_docs)) {
+    if (auto err = RunHnswPreSearch(resolved_name, *params, hnsw_shard_docs)) {
       if (needs_global_stats)
         cmd_cntx->tx()->Conclude();
       rb->SendError(*err);
@@ -2408,7 +2453,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   vector<absl::Duration> shard_knn_durations(shard_count);
 
   auto shard_cb = [&](Transaction* t, EngineShard* es) {
-    auto* idx = es->search_indices()->GetIndex(index_name);
+    auto* idx = es->search_indices()->GetIndex(resolved_name);
     if (!idx) {
       index_not_found.store(true, std::memory_order_relaxed);
       return OpStatus::OK;
@@ -2465,13 +2510,10 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     return OpStatus::OK;
   };
 
-  if (needs_global_stats)
-    cmd_cntx->tx()->Execute(std::move(shard_cb), true);
-  else
-    cmd_cntx->tx()->ScheduleSingleHop(std::move(shard_cb));
+  cmd_cntx->tx()->Execute(std::move(shard_cb), true);
 
   if (index_not_found.load(std::memory_order_relaxed)) {
-    cmd_cntx->SendError(string{index_name} + ": no such index");
+    cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     return false;
   }
   if (vsim_not_vector) {
@@ -2488,7 +2530,8 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   absl::Duration hnsw_post_search_took;
   if (use_hnsw && have_filter) {
     const absl::Time t = absl::Now();
-    if (auto err = RunHnswFilteredSearch(index_name, *params, hnsw_filter_docs, hnsw_shard_docs)) {
+    if (auto err =
+            RunHnswFilteredSearch(resolved_name, *params, hnsw_filter_docs, hnsw_shard_docs)) {
       rb->SendError(*err);
       return false;
     }
@@ -2665,17 +2708,28 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
   }
 
-  // Check if index already exists
+  // Check if the name is already occupied by an index or alias.
   atomic_uint exists_cnt = 0;
+  atomic_bool name_is_alias = false;
   cmd_cntx->tx()->Execute(
-      [idx_name, &exists_cnt](auto* tx, auto* es) {
-        if (es->search_indices()->GetIndex(idx_name) != nullptr)
-          exists_cnt.fetch_add(1, std::memory_order_relaxed);
+      [idx_name, &exists_cnt, &name_is_alias](auto* tx, auto* es) {
+        auto* indices = es->search_indices();
+        if (indices->GetIndex(idx_name) != nullptr) {
+          exists_cnt.fetch_add(1, memory_order_relaxed);
+        } else if (indices->ResolveIndex(idx_name) != nullptr) {
+          name_is_alias.store(true, memory_order_relaxed);
+        }
         return OpStatus::OK;
       },
       false);
 
   DCHECK(exists_cnt == 0u || exists_cnt == shard_set->size());
+
+  if (name_is_alias.load(memory_order_relaxed)) {
+    // NX only skips creation for an existing actual index.
+    cmd_cntx->tx()->Conclude();
+    return builder->SendError("Index already exists");
+  }
 
   if (exists_cnt.load(memory_order_relaxed) > 0) {
     cmd_cntx->tx()->Conclude();
@@ -2719,19 +2773,22 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // First, extract existing index info
   shared_ptr<DocIndex> index_info;
-  auto idx_cb = [idx_name, &index_info](auto* tx, EngineShard* es) {
+  std::string canonical_name;
+  auto idx_cb = [idx_name, &index_info, &canonical_name](auto* tx, EngineShard* es) {
     if (es->shard_id() > 0)  // all shards have the same data, fetch from first
       return OpStatus::OK;
 
-    if (auto* idx = es->search_indices()->GetIndex(idx_name); idx != nullptr)
+    if (auto* idx = es->search_indices()->ResolveIndex(idx_name); idx != nullptr) {
       index_info = make_shared<DocIndex>(idx->base());
+      canonical_name = idx->base().name;
+    }
     return OpStatus::OK;
   };
   cmd_cntx->tx()->Execute(idx_cb, false);
 
   if (!index_info) {
     cmd_cntx->tx()->Conclude();
-    return cmd_cntx->SendError("Index not found");
+    return cmd_cntx->SendError(IndexNotFoundMsg(idx_name));
   }
 
   // Parse the additional attributes into the copied definition: they continue its declaration
@@ -2742,25 +2799,25 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
     cmd_cntx->tx()->Conclude();
     return;
   }
-  if (!CreateHnswIndices(idx_name, *index_info, first_added)) {
+  if (!CreateHnswIndices(canonical_name, *index_info, first_added)) {
     cmd_cntx->tx()->Conclude();
     return cmd_cntx->SendError("Index already exists");
   }
 
-  LOG(INFO) << "Altering " << idx_name << ": "
+  LOG(INFO) << "Altering " << canonical_name << ": "
             << DocIndexInfo{.base_index = *index_info, .hnsw_metadata = {}}.BuildRestoreCommand();
 
   // Rebuild index
   // TODO: Introduce partial rebuild
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
-  auto upd_cb = [idx_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
-    unique_ptr<ShardDocIndex> old_index = es->search_indices()->DropIndex(idx_name);
+  auto upd_cb = [canonical_name, index_info, is_journal](Transaction* tx, EngineShard* es) {
+    unique_ptr<ShardDocIndex> old_index = es->search_indices()->ExtractIndex(canonical_name);
     Synonyms synonyms = old_index ? old_index->GetSynonyms() : Synonyms{};
     // Destroying the old index waits for its builder, so the replacement builder never runs next
     // to it on the same global vector index. The old index is already unregistered, so no new
     // caller can reach that builder meanwhile.
     old_index.reset();
-    es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, index_info, is_journal,
+    es->search_indices()->InitIndex(tx->GetOpArgs(es), canonical_name, index_info, is_journal,
                                     std::move(synonyms));
     return OpStatus::OK;
   };
@@ -2776,6 +2833,7 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
   bool delete_docs = parser.Check("DD");
 
   shared_ptr<DocIndex> index_info;
+  std::string canonical_name;
   atomic_uint num_deleted{0};
 
   // Collect dropped indices per shard. We must NOT destroy ShardDocIndex inside the transaction
@@ -2785,14 +2843,18 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
   vector<unique_ptr<ShardDocIndex>> dropped(shard_set->size());
 
   auto cb = [&](Transaction* t, EngineShard* es) {
-    // Get index info from first shard for global cleanup
+    // Resolve the alias on each shard before dropping the canonical index name.
+    auto* idx = es->search_indices()->ResolveIndex(idx_name);
+    if (!idx)
+      return OpStatus::OK;
+
+    const std::string shard_index_name = idx->base().name;
     if (es->shard_id() == 0) {
-      if (auto* idx = es->search_indices()->GetIndex(idx_name); idx != nullptr) {
-        index_info = make_shared<DocIndex>(idx->base());
-      }
+      index_info = make_shared<DocIndex>(idx->base());
+      canonical_name = shard_index_name;
     }
-    // Drop the index and get its pointer
-    auto index = es->search_indices()->DropIndex(idx_name);
+
+    auto index = es->search_indices()->DropIndex(shard_index_name);
     if (!index)
       return OpStatus::OK;
 
@@ -2831,7 +2893,7 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
     for (const auto& [alias, field_info] : index_info->schema.fields) {
       if (field_info.type == search::SchemaField::VECTOR &&
           !(field_info.flags & search::SchemaField::NOINDEX)) {
-        if (GlobalHnswIndexRegistry::Instance().Remove(idx_name, alias)) {
+        if (GlobalHnswIndexRegistry::Instance().Remove(canonical_name, alias)) {
           num_deleted.fetch_add(1);
         }
       }
@@ -2849,7 +2911,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   vector<DocIndexInfo> infos(shard_set->size());
 
   cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(idx_name);
+    auto* index = es->search_indices()->ResolveIndex(idx_name);
     if (index != nullptr)
       infos[es->shard_id()] = index->GetInfo();
     return OpStatus::OK;
@@ -2864,7 +2926,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (num_notfound > 0u)
-    return rb->SendError(absl::StrCat(idx_name, ": no such index"));
+    return rb->SendError(IndexNotFoundMsg(idx_name));
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
@@ -2888,7 +2950,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->StartArray((has_custom_stopwords ? 8 : 7) * 2);
 
   rb->SendSimpleString("index_name");
-  rb->SendSimpleString(idx_name);
+  rb->SendSimpleString(info.base_index.name);
 
   rb->SendSimpleString("index_definition");
   {
@@ -3082,6 +3144,8 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   ParsedArgs search_args = parser.UnparsedArgs();
 
   bool is_cross_shard = parser.Check("CSS");
+  const bool should_fan_out =
+      absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled();
 
   auto* builder = cmd_cntx->rb();
   auto params = ParseSearchParams(&parser);
@@ -3091,14 +3155,8 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!CheckQueryLength(query_str, "Query", builder))
     return;
 
-  vector<SearchResult> css_docs;
-  if (absl::GetFlag(FLAGS_cluster_search) && !is_cross_shard && IsClusterEnabled()) {
-    if (params->with_scores || params->scorer) {
-      return builder->SendError("WITHSCORES/SCORER is not yet supported in cluster search mode");
-    }
-    std::string args_str = absl::StrJoin(search_args, " ");
-
-    css_docs = FtSearchCSS(index_name, query_str, args_str, *params);
+  if (should_fan_out && (params->with_scores || params->scorer)) {
+    return builder->SendError("WITHSCORES/SCORER is not yet supported in cluster search mode");
   }
 
   search::SearchAlgorithm search_algo;
@@ -3111,7 +3169,9 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   else if (params->with_scores)
     search_algo.SetScorer(search::ScorerSpec{});
 
-  auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, index_name);
+  const std::string resolved_name = ResolveIndexName(index_name);
+
+  auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, resolved_name);
 
   // HNSW range (mutually exclusive with KNN): bare -> RangeQuery directly; AND-ed with a filter
   // -> pre-filter then intersect; OR/NOT -> no execution path.
@@ -3122,13 +3182,13 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     auto ranges = search_algo.CollectVectorRangeNodes();
     if (ranges.size() > 1 &&
         std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
-          return GlobalHnswIndexRegistry::Instance().Exist(index_name, r->field);
+          return GlobalHnswIndexRegistry::Instance().Exist(resolved_name, r->field);
         })) {
       return builder->SendError(
           "Combining multiple VECTOR_RANGE clauses with an HNSW index is not supported");
     }
     if (auto* vr = search_algo.GetVectorRangeNode(); vr != nullptr) {
-      if (GlobalHnswIndexRegistry::Instance().Exist(index_name, vr->field)) {
+      if (GlobalHnswIndexRegistry::Instance().Exist(resolved_name, vr->field)) {
         if (search_algo.IsBareVectorRange()) {
           hnsw_range = vr;
         } else if (search_algo.IsAndedVectorRange()) {
@@ -3171,7 +3231,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     std::vector<search::ShardScoringStats> shard_stats(shard_set->size());
     cmd_cntx->tx()->Execute(
         [&](Transaction* t, EngineShard* es) {
-          if (auto* index = es->search_indices()->GetIndex(index_name); index)
+          if (auto* index = es->search_indices()->GetIndex(resolved_name); index)
             shard_stats[es->shard_id()] = index->CollectScoringStats(&search_algo);
           else
             index_not_found.store(true, memory_order_relaxed);
@@ -3181,7 +3241,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     if (index_not_found.load(memory_order_relaxed)) {
       cmd_cntx->tx()->Conclude();  // phase 1 ran with conclude=false
-      return cmd_cntx->SendError(string{index_name} + ": no such index");
+      return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     }
 
     for (auto& s : shard_stats)
@@ -3193,7 +3253,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   // HNSW vector range has no prefilter, so skip per-shard search entirely.
   if ((!knn || knn_has_prefilter) && !hnsw_range) {
     auto search_cb = [&](Transaction* t, EngineShard* es) {
-      if (auto* index = es->search_indices()->GetIndex(index_name); index) {
+      if (auto* index = es->search_indices()->GetIndex(resolved_name); index) {
         if (knn_has_prefilter) {
           knn_prefilter_docs[es->shard_id()] =
               index->SearchIds(t->GetOpArgs(es), *params, &search_algo, global_stats_ptr);
@@ -3206,18 +3266,12 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
       return OpStatus::OK;
     };
-    if (knn_has_prefilter) {
-      cmd_cntx->tx()->Execute(std::move(search_cb), false);
-    } else if (needs_global_stats) {
-      cmd_cntx->tx()->Execute(std::move(search_cb), true);
-    } else {
-      cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
-    }
+    cmd_cntx->tx()->Execute(std::move(search_cb), /*conclude=*/!knn_has_prefilter);
 
     if (index_not_found.load(memory_order_relaxed)) {
       if (knn_has_prefilter)
         cmd_cntx->tx()->Conclude();
-      return cmd_cntx->SendError(string{index_name} + ": no such index");
+      return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     }
 
     if (knn_has_prefilter) {
@@ -3240,7 +3294,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (knn_node && (!knn_has_prefilter || !empty_prefilter_result)) {
-    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, knn->field);
+    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(resolved_name, knn->field);
     if (!hnsw_index) {
       if (knn_has_prefilter)
         cmd_cntx->tx()->Conclude();
@@ -3251,32 +3305,40 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
         cmd_cntx->tx()->Conclude();
       return builder->SendError(*err);
     }
-    if (knn_has_prefilter) {
-      docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
-                                   knn_prefilter_docs, *params, *cmd_cntx);
-    } else {
-      docs = SearchGlobalHnswIndex(knn, hnsw_index, index_name, search_algo.GetKnnScoreSortOption(),
-                                   *params, *cmd_cntx, shard_set->size());
-    }
+    const HnswSearchOptions hnsw_options{.index_name = resolved_name,
+                                         .score_sort = search_algo.GetKnnScoreSortOption(),
+                                         .params = *params};
+    auto result =
+        knn_has_prefilter
+            ? SearchGlobalHnswIndex(knn, hnsw_index, hnsw_options, knn_prefilter_docs, *cmd_cntx)
+            : SearchGlobalHnswIndex(knn, hnsw_index, hnsw_options, *cmd_cntx, shard_set->size());
+    if (!result)
+      return builder->SendError(IndexNotFoundMsg(index_name));
+    docs = std::move(*result);
   }
 
   auto knn_sort_option = search_algo.GetKnnScoreSortOption();
 
   if (hnsw_range) {
-    auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range, builder);
+    auto hnsw_index = GetValidatedHnswRangeIndex(resolved_name, index_name, hnsw_range, builder);
     if (!hnsw_index)
       return;
     if (!hnsw_range->score_alias.empty())
       knn_sort_option =
           search::KnnScoreSortOption{hnsw_range->score_alias, std::numeric_limits<size_t>::max()};
-    docs = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, index_name, knn_sort_option, *params,
-                                      *cmd_cntx);
+    const HnswSearchOptions hnsw_options{
+        .index_name = resolved_name, .score_sort = knn_sort_option, .params = *params};
+    auto result = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, hnsw_options, *cmd_cntx);
+    if (!result)
+      return builder->SendError(IndexNotFoundMsg(index_name));
+    docs = std::move(*result);
   }
 
   // `docs` holds the pre-filter matches from the per-shard search above; intersect RangeQuery
   // with them. Empty pre-filter -> empty result, so `docs` is left as-is.
   if (hnsw_range_prefilter && !empty_prefilter_result) {
-    auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range_prefilter, builder);
+    auto hnsw_index =
+        GetValidatedHnswRangeIndex(resolved_name, index_name, hnsw_range_prefilter, builder);
     if (!hnsw_index)
       return;
     if (!hnsw_range_prefilter->score_alias.empty())
@@ -3301,9 +3363,13 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
   }
 
-  // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
-  docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
-              std::make_move_iterator(css_docs.end()));
+  if (should_fan_out) {
+    std::string args_str = absl::StrJoin(search_args, " ");
+    auto css_docs = FtSearchCSS(resolved_name, query_str, args_str, *params);
+    // TODO add merging of CSS results with local results (SORT, LIMIT, etc)
+    docs.insert(docs.end(), std::make_move_iterator(css_docs.begin()),
+                std::make_move_iterator(css_docs.end()));
+  }
 
   SearchReply(*params, knn_sort_option, inject_score_alias, absl::MakeSpan(docs), builder,
               is_cross_shard);
@@ -3455,17 +3521,22 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
       cmd_cntx->tx()->Conclude();
   };
 
-  auto [profile_knn_node, profile_knn] = TryPopHnswKnnNode(search_algo, index_name);
+  const std::string resolved_name = ResolveIndexName(index_name);
+
+  auto [profile_knn_node, profile_knn] = TryPopHnswKnnNode(search_algo, resolved_name);
   if (profile_knn) {
-    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(index_name, profile_knn->field);
+    auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(resolved_name, profile_knn->field);
     if (!hnsw_index)
-      return rb->SendError(std::string{index_name} + ": no such global hnsw index");
+      return rb->SendError(string{index_name} + ": no such global hnsw index");
     if (auto err = ValidateHnswKnnBlob(profile_knn, *hnsw_index))
       return rb->SendError(*err);
 
     std::vector<SearchResult> search_results(shards_count);
     std::vector<SearchResult> profile_search_results(shards_count);
     std::vector<absl::Duration> profile_results(shards_count);
+    const HnswSearchOptions hnsw_options{.index_name = resolved_name,
+                                         .score_sort = search_algo.GetKnnScoreSortOption(),
+                                         .params = *params};
 
     const bool knn_has_prefilter = profile_knn->HasPreFilter();
     const bool needs_global_stats =
@@ -3474,10 +3545,10 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     const search::GlobalScoringStats* global_stats_ptr = nullptr;
 
     if (needs_global_stats) {
-      if (!CollectGlobalScoringStats(index_name, search_algo, cmd_cntx->tx(), shards_count,
+      if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
         cmd_cntx->tx()->Conclude();
-        return rb->SendError(std::string{index_name} + ": no such index");
+        return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
     }
@@ -3488,7 +3559,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
       cmd_cntx->tx()->Execute(
           [&](Transaction* t, EngineShard* es) {
-            auto* index = es->search_indices()->GetIndex(index_name);
+            auto* index = es->search_indices()->GetIndex(resolved_name);
             if (!index) {
               index_not_found.store(true, memory_order_relaxed);
               return OpStatus::OK;
@@ -3505,7 +3576,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
       if (index_not_found.load(memory_order_relaxed)) {
         cmd_cntx->tx()->Conclude();
-        return rb->SendError(std::string{index_name} + ": no such index");
+        return rb->SendError(IndexNotFoundMsg(index_name));
       }
 
       bool empty_prefilter_result = true;
@@ -3523,14 +3594,18 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
       if (empty_prefilter_result) {
         cmd_cntx->tx()->Conclude();
       } else {
-        search_results = SearchGlobalHnswIndex(profile_knn, hnsw_index, index_name,
-                                               search_algo.GetKnnScoreSortOption(),
-                                               knn_prefilter_docs, *params, *cmd_cntx);
+        auto result = SearchGlobalHnswIndex(profile_knn, hnsw_index, hnsw_options,
+                                            knn_prefilter_docs, *cmd_cntx);
+        if (!result)
+          return rb->SendError(IndexNotFoundMsg(index_name));
+        search_results = std::move(*result);
       }
     } else {
-      search_results = SearchGlobalHnswIndex(profile_knn, hnsw_index, index_name,
-                                             search_algo.GetKnnScoreSortOption(), *params,
-                                             *cmd_cntx, shards_count);
+      auto result =
+          SearchGlobalHnswIndex(profile_knn, hnsw_index, hnsw_options, *cmd_cntx, shards_count);
+      if (!result)
+        return rb->SendError(IndexNotFoundMsg(index_name));
+      search_results = std::move(*result);
       profile_search_results.clear();
       profile_results.clear();
     }
@@ -3548,14 +3623,14 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto ranges = search_algo.CollectVectorRangeNodes();
   if (ranges.size() > 1 &&
       std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
-        return GlobalHnswIndexRegistry::Instance().Exist(index_name, r->field);
+        return GlobalHnswIndexRegistry::Instance().Exist(resolved_name, r->field);
       })) {
     return rb->SendError(
         "Combining multiple VECTOR_RANGE clauses with an HNSW index is not "
         "supported");
   }
   if (auto* vr = search_algo.GetVectorRangeNode(); vr != nullptr) {
-    if (GlobalHnswIndexRegistry::Instance().Exist(index_name, vr->field)) {
+    if (GlobalHnswIndexRegistry::Instance().Exist(resolved_name, vr->field)) {
       if (search_algo.IsBareVectorRange()) {
         hnsw_range = vr;
       } else if (search_algo.IsAndedVectorRange()) {
@@ -3576,12 +3651,16 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (hnsw_range) {
-    auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range, rb);
+    auto hnsw_index = GetValidatedHnswRangeIndex(resolved_name, index_name, hnsw_range, rb);
     if (!hnsw_index)
       return;
 
-    auto search_results = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, index_name,
-                                                     hnsw_range_sort_option, *params, *cmd_cntx);
+    const HnswSearchOptions hnsw_options{
+        .index_name = resolved_name, .score_sort = hnsw_range_sort_option, .params = *params};
+    auto result = SearchGlobalHnswIndexRange(hnsw_range, hnsw_index, hnsw_options, *cmd_cntx);
+    if (!result)
+      return rb->SendError(IndexNotFoundMsg(index_name));
+    auto search_results = std::move(*result);
     std::vector<SearchResult> profile_search_results;
     std::vector<absl::Duration> profile_results;
     auto took = absl::Now() - start;
@@ -3600,17 +3679,17 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     search::GlobalScoringStats global_scoring_stats;
     const search::GlobalScoringStats* global_stats_ptr = nullptr;
     if (needs_global_stats) {
-      if (!CollectGlobalScoringStats(index_name, search_algo, cmd_cntx->tx(), shards_count,
+      if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
         cmd_cntx->tx()->Conclude();
-        return rb->SendError(std::string{index_name} + ": no such index");
+        return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
     }
 
     cmd_cntx->tx()->Execute(
         [&](Transaction* t, EngineShard* es) {
-          auto* index = es->search_indices()->GetIndex(index_name);
+          auto* index = es->search_indices()->GetIndex(resolved_name);
           if (!index) {
             index_not_found.store(true, memory_order_relaxed);
             return OpStatus::OK;
@@ -3625,7 +3704,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
         true);
 
     if (index_not_found.load(memory_order_relaxed))
-      return rb->SendError(std::string{index_name} + ": no such index");
+      return rb->SendError(IndexNotFoundMsg(index_name));
 
     bool result_is_empty = true;
     for (const auto& res : prefilter_results) {
@@ -3638,7 +3717,8 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (result_is_empty) {
       search_results = prefilter_results;
     } else {
-      auto hnsw_index = GetValidatedHnswRangeIndex(index_name, hnsw_range_prefilter, rb);
+      auto hnsw_index =
+          GetValidatedHnswRangeIndex(resolved_name, index_name, hnsw_range_prefilter, rb);
       if (!hnsw_index)
         return;
       search_results = SearchGlobalHnswIndexRangePrefiltered(hnsw_range_prefilter, hnsw_index,
@@ -3661,16 +3741,16 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   search::GlobalScoringStats global_scoring_stats;
   const search::GlobalScoringStats* global_stats_ptr = nullptr;
   if (needs_global_stats) {
-    if (!CollectGlobalScoringStats(index_name, search_algo, cmd_cntx->tx(), shards_count,
+    if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                    global_scoring_stats)) {
       cmd_cntx->tx()->Conclude();
-      return rb->SendError(std::string{index_name} + ": no such index");
+      return rb->SendError(IndexNotFoundMsg(index_name));
     }
     global_stats_ptr = &global_scoring_stats;
   }
 
   auto search_cb = [&](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(index_name);
+    auto* index = es->search_indices()->GetIndex(resolved_name);
     if (!index) {
       index_not_found.store(true, memory_order_relaxed);
       return OpStatus::OK;
@@ -3685,13 +3765,10 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     return OpStatus::OK;
   };
-  if (needs_global_stats)
-    cmd_cntx->tx()->Execute(std::move(search_cb), true);
-  else
-    cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
+  cmd_cntx->tx()->Execute(std::move(search_cb), true);
 
   if (index_not_found.load())
-    return rb->SendError(std::string{index_name} + ": no such index");
+    return rb->SendError(IndexNotFoundMsg(index_name));
 
   auto took = absl::Now() - start;
 
@@ -3721,7 +3798,7 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
 
   cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(index_name); index)
+    if (auto* index = es->search_indices()->ResolveIndex(index_name); index)
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
     else
       shard_results[es->shard_id()] =
@@ -3776,18 +3853,23 @@ static std::vector<search::GlobalDocId> RunAggregatePrefilter(
   return CollectPrefilterGlobalIds(prefilter_docs);
 }
 
-// Loads HNSW result docs (KNN or VECTOR_RANGE) into query_results. Finalizes the multi-hop tx when
-// `finalize` is set (a prefilter hop already ran), otherwise schedules a single hop.
-static void RunHnswAggregateLoad(
+// Loads HNSW result docs (KNN or VECTOR_RANGE) into query_results in a concluding hop.
+// Returns KEY_NOTFOUND if any shard's index is missing.
+static OpStatus RunHnswAggregateLoad(
     CommandContext* cmd_cntx, const AggregateParams& params,
     std::vector<std::vector<SearchDocData>>& query_results,
     const std::vector<std::vector<std::pair<search::DocId, float>>>& shard_docs,
     std::string_view score_alias,
-    const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores, bool finalize) {
-  auto cb = [&query_results, &params, &shard_docs, score_alias, &text_scores](Transaction* t,
-                                                                              EngineShard* es) {
+    const std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores) {
+  std::atomic missing_index = false;
+  auto cb = [&query_results, &params, &shard_docs, score_alias, &text_scores, &missing_index](
+                Transaction* t, EngineShard* es) {
     auto* index = es->search_indices()->GetIndex(params.index);
-    if (!index || shard_docs[es->shard_id()].empty())
+    if (!index) {
+      missing_index.store(true, std::memory_order_relaxed);
+      return OpStatus::OK;
+    }
+    if (shard_docs[es->shard_id()].empty())
       return OpStatus::OK;
     DCHECK_LT(es->shard_id(), text_scores.size());
     query_results[es->shard_id()] =
@@ -3795,19 +3877,18 @@ static void RunHnswAggregateLoad(
                                               score_alias, text_scores[es->shard_id()]);
     return OpStatus::OK;
   };
-  if (finalize)
-    cmd_cntx->tx()->Execute(std::move(cb), true);
-  else
-    cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  cmd_cntx->tx()->Execute(std::move(cb), true);
+  return missing_index.load(std::memory_order_relaxed) ? OpStatus::KEY_NOTFOUND : OpStatus::OK;
 }
 
 // FT.AGGREGATE over a global HNSW KNN query. Returns false if an error was already sent.
 static bool AggregateHnswKnn(CommandContext* cmd_cntx, AggregateParams& params,
-                             search::SearchAlgorithm& search_algo, const search::AstKnnNode* knn,
+                             string_view index_name, search::SearchAlgorithm& search_algo,
+                             const search::AstKnnNode* knn,
                              std::vector<std::vector<SearchDocData>>& query_results) {
   auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(params.index, knn->field);
   if (!hnsw_index) {
-    cmd_cntx->rb()->SendError(string{params.index} + ": no such global hnsw index");
+    cmd_cntx->rb()->SendError(string{index_name} + ": no such global hnsw index");
     return false;
   }
 
@@ -3833,15 +3914,18 @@ static bool AggregateHnswKnn(CommandContext* cmd_cntx, AggregateParams& params,
       prefilter_ids ? hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, *prefilter_ids)
                     : hnsw_index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime);
   auto shard_docs = GroupByShardId(knn_results, shard_set->size());
-  RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, knn->score_alias, text_scores,
-                       has_prefilter);
+  if (RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, knn->score_alias,
+                           text_scores) != OpStatus::OK) {
+    cmd_cntx->rb()->SendError(IndexNotFoundMsg(index_name));
+    return false;
+  }
   return true;
 }
 
 // FT.AGGREGATE over a global HNSW VECTOR_RANGE query. Bare range -> RangeQuery directly; AND-ed
 // with a filter -> pre-filter then intersect; OR/NOT -> unsupported. Returns false on error.
 static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params,
-                               search::SearchAlgorithm& search_algo,
+                               string_view index_name, search::SearchAlgorithm& search_algo,
                                const search::AstVectorRangeNode* vr,
                                std::vector<std::vector<SearchDocData>>& query_results) {
   auto* builder = cmd_cntx->rb();
@@ -3858,7 +3942,7 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
     has_prefilter = true;
   }
 
-  auto hnsw_index = GetValidatedHnswRangeIndex(params.index, hnsw_range, builder);
+  auto hnsw_index = GetValidatedHnswRangeIndex(params.index, index_name, hnsw_range, builder);
   if (!hnsw_index)
     return false;
 
@@ -3880,8 +3964,11 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
     });
   }
   auto shard_docs = GroupByShardId(range_results, shard_set->size());
-  RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, hnsw_range->score_alias,
-                       text_scores, has_prefilter);
+  if (RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, hnsw_range->score_alias,
+                           text_scores) != OpStatus::OK) {
+    builder->SendError(IndexNotFoundMsg(index_name));
+    return false;
+  }
   return true;
 }
 
@@ -3914,10 +4001,7 @@ static void AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
           index->SearchForAggregator(t->GetOpArgs(es), params, &search_algo);
     return OpStatus::OK;
   };
-  if (needs_global_stats)
-    cmd_cntx->tx()->Execute(std::move(search_cb), true);
-  else
-    cmd_cntx->tx()->ScheduleSingleHop(std::move(search_cb));
+  cmd_cntx->tx()->Execute(std::move(search_cb), true);
 }
 
 void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -3945,6 +4029,11 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     std::vector<std::vector<SearchDocData>> query_results(shard_set->size());
 
+    // Keep the requested name on a miss to preserve FT.AGGREGATE's empty-result behavior.
+    const string_view index_name = params->index;
+    const std::string resolved_name = ResolveIndexName(index_name);
+    params->index = resolved_name;
+
     auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, params->index);
 
     if (!knn) {
@@ -3959,11 +4048,12 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
 
     if (knn) {
-      if (!AggregateHnswKnn(cmd_cntx, params.value(), search_algo, knn, query_results))
+      if (!AggregateHnswKnn(cmd_cntx, params.value(), index_name, search_algo, knn, query_results))
         return;
     } else if (auto* vr = search_algo.GetVectorRangeNode(); vr) {
       if (GlobalHnswIndexRegistry::Instance().Exist(params->index, vr->field)) {
-        if (!AggregateHnswRange(cmd_cntx, params.value(), search_algo, vr, query_results))
+        if (!AggregateHnswRange(cmd_cntx, params.value(), index_name, search_algo, vr,
+                                query_results))
           return;
       } else {
         if (vr->epsilon)
@@ -4014,6 +4104,10 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (!data_for_join) {
       return cmd_cntx->SendError(data_for_join.error());
     }
+
+    const auto canonical_index_names = ResolveIndexNames(data_for_join->indexes);
+    for (size_t i = 0; i < indexes_count; ++i)
+      data_for_join->indexes[i] = canonical_index_names[i];
 
     // preaggregated_shard_data is preaggregation results per index per shard
     // preaggregated_shard_data[shard_id][i] is the results of index i on shard shard_id
@@ -4131,7 +4225,7 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Collect synonym data from all shards
   cmd_cntx->tx()->Execute(
       [&](Transaction* t, EngineShard* es) {
-        auto* index = es->search_indices()->GetIndex(index_name);
+        auto* index = es->search_indices()->ResolveIndex(index_name);
         if (!index)
           return OpStatus::OK;
 
@@ -4153,7 +4247,7 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
       true);
 
   if (index_not_found.load(std::memory_order_relaxed))
-    return rb->SendError("Unknown index name");
+    return rb->SendError(IndexNotFoundMsg(index_name));
 
   // Merge data from all shards into a single map
   absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> merged_term_groups;
@@ -4299,7 +4393,7 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Update synonym groups in all shards
   cmd_cntx->tx()->Execute(
       [&](Transaction* t, EngineShard* es) {
-        auto* index = es->search_indices()->GetIndex(index_name);
+        auto* index = es->search_indices()->ResolveIndex(index_name);
         if (!index)
           return OpStatus::OK;
 
@@ -4316,7 +4410,7 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
       true);
 
   if (index_not_found.load(std::memory_order_relaxed))
-    return cmd_cntx->SendError(string{index_name} + ": no such index");
+    return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
 
   cmd_cntx->rb()->SendOk();
 }

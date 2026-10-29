@@ -1847,6 +1847,9 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs&
     if (num_custom_keys >= 0) {
       end = start + num_custom_keys;
     } else {
+      // A command with a key-less form (e.g. XINFO HELP) has no keys in that form.
+      if (start >= args.size())
+        return KeyIndex{};
       end = last > 0 ? last : (int(args.size()) + last + 1);
     }
     if (cid->interleaved_step()) {
