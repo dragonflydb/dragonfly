@@ -3,6 +3,7 @@
 
 #include "server/detail/snapshot_storage.h"
 
+#include <absl/flags/declare.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_replace.h>
@@ -23,12 +24,18 @@
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
 #include "strings/escaping.h"
+#include "strings/human_readable.h"
 #include "util/cloud/azure/creds_provider.h"
 #include "util/cloud/azure/storage.h"
 #include "util/fibers/fiber_file.h"
 
 ABSL_RETIRED_FLAG(bool, s3_use_helio_client, true,
                   "Deprecated: the helio native S3 client is always used.");
+ABSL_FLAG(uint32_t, s3_upload_traffic_mark, 0,
+          "Linux SO_MARK applied to S3 snapshot upload sockets, so they can be assigned to an "
+          "externally configured tc bandwidth class. Requires CAP_NET_ADMIN. When set, socket "
+          "pacing from snapshot_egress_limit_bytes is not applied. 0 leaves sockets unmarked.");
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes);
 
 namespace rng = std::ranges;
 namespace dfly {
@@ -719,6 +726,18 @@ io::Result<std::pair<io::Sink*, uint8_t>, GenericError> AwsS3SnapshotStorage::Op
   cloud::aws::WriteFileOptions opts;
   opts.creds_provider = &creds_provider_;
   opts.ssl_cntx = ctx_;
+  opts.traffic_mark = absl::GetFlag(FLAGS_s3_upload_traffic_mark);
+  uint64_t egress_limit = absl::GetFlag(FLAGS_snapshot_egress_limit_bytes).value;
+
+  // A traffic mark delegates bandwidth shaping to the external tc class, so skip pacing.
+  // Otherwise each file uploads one part at a time over its own connection pool, and pacing
+  // every connection at the per-shard budget keeps 8MB part PUTs from leaving at line rate.
+  if (opts.traffic_mark) {
+    LOG_IF(INFO, egress_limit) << "S3 upload traffic mark " << opts.traffic_mark
+                               << " is set, skipping socket pacing for " << path;
+  } else {
+    opts.max_pacing_rate = egress_limit;
+  }
 
   io::Result<io::WriteFile*> dest_res = cloud::aws::OpenWriteFile(bucket, key, opts);
   if (!dest_res) {
