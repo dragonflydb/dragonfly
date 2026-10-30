@@ -528,6 +528,7 @@ class DflySeeder:
         cluster_mode=False,
         mirror_to_fake_redis=False,
         pipeline=True,
+        client_kwargs=None,
     ):
         if cluster_mode:
             max_multikey = 1
@@ -551,6 +552,7 @@ class DflySeeder:
         self.stop_on_failure = stop_on_failure
         self.fake_redis = None
         self.use_pipeline = pipeline
+        self.client_kwargs = client_kwargs or {}
 
         self.log_file = log_file
         if self.log_file is not None:
@@ -633,6 +635,7 @@ class DflySeeder:
         self.gen.key_cnt_target = key_cnt
 
     def _make_client(self, **kwargs):
+        kwargs = {**self.client_kwargs, **kwargs}
         if self.cluster_mode:
             return aioredis.RedisCluster(host="127.0.0.1", **kwargs)
         else:
