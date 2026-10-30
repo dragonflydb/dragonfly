@@ -108,6 +108,12 @@ bool UserRegistry::IsUserActive(std::string_view username) const {
   return it->second.IsActive();
 }
 
+bool UserRegistry::IsUserNopass(std::string_view username) const {
+  std::shared_lock<fb2::SharedMutex> lock(mu_);
+  auto it = registry_.find(username);
+  return it != registry_.end() && it->second.IsActive() && it->second.HasNopass();
+}
+
 bool UserRegistry::AuthUser(std::string_view username, std::string_view password) const {
   std::shared_lock<fb2::SharedMutex> lock(mu_);
   const auto& user = registry_.find(username);
