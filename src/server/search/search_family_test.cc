@@ -839,10 +839,10 @@ TEST_F(SearchFamilyTest, InfoIndex) {
 
   auto info = Run({"ft.info", "idx-1"});
 
-  auto descriptor_matcher = IsArray("key_type", "HASH", "prefixes", IsArray("doc-"),
-                                    "default_language", "english", "default_score", 1);
-  auto schema_matcher = IsArray(
-      IsArray("identifier", "name", "attribute", "name", "type", "TEXT", "WEIGHT", "1.000000"));
+  auto descriptor_matcher =
+      IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1);
+  auto schema_matcher =
+      IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT", "WEIGHT", "1"));
 
   EXPECT_THAT(info, IsArray(_, _, _, descriptor_matcher, "index_options", RespArray(IsEmpty()),
                             "attributes", schema_matcher, "num_docs", IntArg(15), "indexing",
@@ -3681,7 +3681,7 @@ TEST_F(SearchFamilyTest, HashAllowsSameIdentifierWithDifferentAliases) {
                       IsArray(IsArray("identifier", "description", "attribute", "description",
                                       "type", "TAG", "SEPARATOR", "|"),
                               IsArray("identifier", "description", "attribute", "description_fts",
-                                      "type", "TEXT", "WEIGHT", "1.000000")),
+                                      "type", "TEXT", "WEIGHT", "1")),
                       "num_docs", IntArg(1), _, _, _, _));
   Run({"HSET", "hx:1", "description", "slow"});  // the old value leaves both twins
   EXPECT_THAT(Run({"FT.SEARCH", "hx", "@description_fts:fast"}), kNoResults);
@@ -5138,6 +5138,95 @@ TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
   // Verify that the index was created correctly
   resp = Run({"FT.SEARCH", "idx", "*"});
   EXPECT_THAT(resp, AreDocIds("doc:1"));
+}
+
+// Covers the rules documented on ParseFieldOptions; lower-case option words here name fields.
+TEST_F(SearchFamilyTest, SchemaOptionOrders) {
+  ASSERT_EQ(Run("FT.CREATE i ON HASH SCHEMA a TEXT UNF SORTABLE INDEXEMPTY INDEXMISSING NOSTEM "
+                "weight NUMERIC INDEXEMPTY SORTABLE b TEXT INDEXEMPTY nostem WITHSUFFIXTRIE "
+                "NOINDEX SORTABLE WEIGHT 2 phonetic dm:en nostem TAG INDEXEMPTY CASESENSITIVE "
+                "PHONETIC x SORTABLE separator TEXT unf TEXT indexmissing TEXT indexempty TEXT "
+                "phonetic TEXT"),
+            "OK");
+  EXPECT_THAT(
+      Run({"FT.INFO", "i"}),
+      IsArray(_, _, _, _, _, _, "attributes",
+              IsArray(IsArray("identifier", "a", "attribute", "a", "type", "TEXT", "WEIGHT", "1",
+                              "SORTABLE", "UNF", "NOSTEM", "INDEXEMPTY", "INDEXMISSING"),
+                      IsArray("identifier", "weight", "attribute", "weight", "type", "NUMERIC",
+                              "blocksize", "10000", "SORTABLE", "UNF"),
+                      IsArray("identifier", "b", "attribute", "b", "type", "TEXT", "WEIGHT", "2",
+                              "SORTABLE", "NOSTEM", "NOINDEX", "WITHSUFFIXTRIE", "INDEXEMPTY"),
+                      IsArray("identifier", "nostem", "attribute", "nostem", "type", "TAG",
+                              "SEPARATOR", ",", "CASESENSITIVE", "SORTABLE", "UNF", "INDEXEMPTY"),
+                      _, _, _, _, _),
+              _, _, _, _, _, _));
+  auto stored = pp_->at(0)->Await([] {
+    return EngineShard::tlocal()->search_indices()->GetIndex("i")->GetInfo().BuildRestoreCommand();
+  });
+  EXPECT_THAT(stored, HasSubstr("NOSTEM INDEXEMPTY INDEXMISSING SORTABLE UNF weight"));
+
+  EXPECT_THAT(Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a\r\nb"}),
+              ErrArg("Field `a  b` does not have a type"));
+  EXPECT_THAT(
+      Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a\nb", "TEXT", "INDEXMISSING", "NOINDEX"}),
+      ErrArg("both `NOINDEX` and `INDEXMISSING` `a b`"));
+}
+
+// Every schema that FT.CREATE accepts reads back unchanged from the definition stored for it.
+TEST_F(SearchFamilyTest, EveryAcceptedSchemaRestores) {
+  const vector<vector<string>> options = {
+      {"SORTABLE"}, {"NOINDEX"},        {"UNF"},         {"INDEXMISSING"},      {"INDEXEMPTY"},
+      {"NOSTEM"},   {"WITHSUFFIXTRIE"}, {"WEIGHT", "2"}, {"PHONETIC", "dm:en"}, {"SEPARATOR", ";"}};
+  vector<vector<string>> sequences = {{}};
+  for (const auto& first : options) {
+    sequences.push_back(first);
+    for (const auto& second : options) {
+      sequences.push_back(first);
+      sequences.back().insert(sequences.back().end(), second.begin(), second.end());
+    }
+  }
+  for (string_view type : {"TEXT", "TAG", "NUMERIC"}) {
+    for (const auto& sequence : sequences) {
+      for (string_view name : {"UNF", "unf", "SORTABLE", "INDEXMISSING", "indexempty", "WEIGHT",
+                               "PHONETIC", "NOSTEM", "SEPARATOR", "AS", "TEXT"}) {
+        vector<string> cmd = {"FT.CREATE", "a", "ON", "HASH", "SCHEMA", "t", string{type}};
+        cmd.insert(cmd.end(), sequence.begin(), sequence.end());
+        cmd.insert(cmd.end(), {string{name}, "TEXT"});
+        if (Run(absl::MakeSpan(cmd)) != "OK")
+          continue;
+
+        const string before = testing::PrintToString(Run({"FT.INFO", "a"}).GetVec()[7]);
+        vector<string> restore = {"FT.CREATE", "a"};
+        pp_->at(0)->Await([&] {
+          auto args =
+              EngineShard::tlocal()->search_indices()->GetIndex("a")->GetInfo().BuildRestoreArgs();
+          restore.insert(restore.end(), args.begin(), args.end());
+        });
+        Run({"FT.DROPINDEX", "a"});
+        ASSERT_EQ(Run(absl::MakeSpan(restore)), "OK") << absl::StrJoin(cmd, " ");
+        EXPECT_EQ(testing::PrintToString(Run({"FT.INFO", "a"}).GetVec()[7]), before)
+            << absl::StrJoin(cmd, " ");
+        Run({"FT.DROPINDEX", "a"});
+      }
+    }
+  }
+}
+
+// FT.INFO: a non-default language, CR/LF names as bulk strings, shortest doubles, UNF on JSON.
+TEST_F(SearchFamilyTest, FtInfoRendering) {
+  ASSERT_EQ(Run({"FT.CREATE", "a\r\nb", "ON", "JSON", "LANGUAGE", "german", "LANGUAGE_FIELD",
+                 "l\nm", "SCHEMA", "$.t", "AS", "p\nq", "TEXT", "WEIGHT", "0.0000004", "SORTABLE"}),
+            "OK");
+  EXPECT_THAT(
+      Run({"FT.INFO", "a\r\nb"}),
+      IsArray("index_name", "a\r\nb", "index_definition",
+              IsArray("key_type", "JSON", "prefixes", RespArray(IsEmpty()), "default_language",
+                      "german", "language_field", "l\nm", "default_score", 1),
+              "index_options", RespArray(IsEmpty()), "attributes",
+              IsArray(IsArray("identifier", "$.t", "attribute", "p\nq", "type", "TEXT", "WEIGHT",
+                              "4e-7", "SORTABLE", "UNF")),
+              _, _, _, _, _, _));
 }
 
 TEST_F(SearchFamilyTest, JsonDelIndexesBug) {
@@ -8824,7 +8913,7 @@ TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
   auto vector_field_matcher = IsArray(
       "identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm", "HNSW",
       "data_type", "FLOAT32", "dim", "4", "distance_metric", "COSINE", "initial_cap", "500", "M",
-      "16", "ef_construction", "200", "ef_runtime", "150", "epsilon", "0.070000");
+      "16", "ef_construction", "200", "ef_runtime", "150", "epsilon", "0.07");
 
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsArray(vector_field_matcher), _, _, _,
                             _, _, _));
@@ -8875,7 +8964,7 @@ TEST_F(SearchFamilyTest, InfoIndexTextParams) {
   auto info = Run({"ft.info", "idx"});
 
   auto text_field_matcher = IsArray("identifier", "title", "attribute", "title", "type", "TEXT",
-                                    "WEIGHT", "1.000000", "WITHSUFFIXTRIE");
+                                    "WEIGHT", "1", "WITHSUFFIXTRIE");
 
   EXPECT_THAT(
       info, IsArray(_, _, _, _, _, _, "attributes", IsArray(text_field_matcher), _, _, _, _, _, _));
@@ -9077,8 +9166,7 @@ TEST_F(SearchFamilyTest, NoOffsetsAbsentByDefault) {
 TEST_F(SearchFamilyTest, FtInfoResp2AndResp3) {
   Run({"FT.CREATE", "idx", "ON", "JSON", "PREFIX", "1", "d:", "SCHEMA", "$.id", "AS", "id", "TAG"});
 
-  auto definition = IsArray("key_type", "JSON", "prefixes", IsArray("d:"), "default_language",
-                            "english", "default_score", 1);
+  auto definition = IsArray("key_type", "JSON", "prefixes", IsArray("d:"), "default_score", 1);
   auto attributes =
       IsArray(IsArray("identifier", "$.id", "attribute", "id", "type", "TAG", "SEPARATOR", ","));
 
@@ -9102,11 +9190,10 @@ TEST_F(SearchFamilyTest, StemmingInfoSurface) {
 
   auto info = Run({"FT.INFO", "info_idx"});
   auto title_matcher =
-      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1.000000");
-  auto body_matcher = IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT",
-                              "1.000000", "NOSTEM");
-  auto definition = IsArray("key_type", "HASH", "prefixes", IsArray("doc:"), "default_language",
-                            "english", "default_score", 1);
+      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1");
+  auto body_matcher =
+      IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "1", "NOSTEM");
+  auto definition = IsArray("key_type", "HASH", "prefixes", IsArray("doc:"), "default_score", 1);
   EXPECT_THAT(info, IsArray(_, _, _, definition, _, _, "attributes",
                             IsUnordArray(title_matcher, body_matcher), _, _, _, _, _, _));
 }
@@ -9147,9 +9234,8 @@ TEST_F(SearchFamilyTest, StemmingLanguageFieldPerDoc) {
 
   // FT.INFO exposes language_field.
   auto info = Run({"FT.INFO", "lf_idx"});
-  auto definition =
-      IsArray("key_type", "HASH", "prefixes", RespArray(IsEmpty()), "default_language", "english",
-              "language_field", "lang", "default_score", 1);
+  auto definition = IsArray("key_type", "HASH", "prefixes", RespArray(IsEmpty()), "language_field",
+                            "lang", "default_score", 1);
   EXPECT_THAT(info, IsArray(_, _, _, definition, _, _, _, _, _, _, _, _, _, _));
 }
 
@@ -9715,10 +9801,8 @@ TEST_F(SearchFamilyTest, TextWeightsInfoAndScoring) {
             "OK");
 
   auto info = Run({"FT.INFO", "idx"});
-  auto title =
-      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "5.000000");
-  auto body =
-      IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "1.000000");
+  auto title = IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "5");
+  auto body = IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "1");
   auto tag = IsArray("identifier", "tag", "attribute", "tag", "type", "TAG", "SEPARATOR", ",");
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsUnordArray(title, body, tag), _, _, _,
                             _, _, _));
@@ -9782,10 +9866,8 @@ TEST_F(SearchFamilyTest, AlterTextWeight) {
   WaitForIndexReady("idx");
 
   auto info = Run({"FT.INFO", "idx"});
-  auto title =
-      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1.000000");
-  auto body =
-      IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "4.000000");
+  auto title = IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1");
+  auto body = IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "4");
   EXPECT_THAT(info,
               IsArray(_, _, _, _, _, _, "attributes", IsUnordArray(title, body), _, _, _, _, _, _));
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "@body:weighted"}), AreDocIds("d:1"));

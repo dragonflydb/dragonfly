@@ -60,7 +60,13 @@ struct OptionalNumericFilter : public OptionalFilterBase {
 // Describes a specific index field
 struct SchemaField {
   enum FieldType { TAG, TEXT, NUMERIC, VECTOR, GEO };
-  enum FieldFlags : uint8_t { NOINDEX = 1 << 0, SORTABLE = 1 << 1 };
+  enum FieldFlags : uint8_t {
+    NOINDEX = 1 << 0,
+    SORTABLE = 1 << 1,
+    UNF = 1 << 2,
+    INDEXMISSING = 1 << 3,
+    INDEXEMPTY = 1 << 4,
+  };
 
   struct VectorParams {
     static constexpr double kDefaultHnswEpsilon = 0.01;

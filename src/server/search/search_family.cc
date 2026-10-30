@@ -12,6 +12,7 @@
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_join.h>
+#include <absl/strings/str_replace.h>
 #include <absl/strings/str_split.h>
 #include <absl/types/span.h>
 
@@ -188,9 +189,10 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   return params;
 }
 
-ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser) {
-  search::SchemaField::TagParams params{};
-  while (parser->HasNext()) {
+// Adds the TAG parameters that follow to *params; returns whether there were any.
+ParseResult<bool> ParseTagParams(CmdArgParser* parser, search::SchemaField::TagParams* params) {
+  bool any = false;
+  for (; parser->HasNext(); any = true) {
     if (parser->Check("SEPARATOR")) {
       std::string_view separator = parser->NextOrDefault();
 
@@ -199,23 +201,23 @@ ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser)
             absl::StrCat("Tag separator must be a single character. Got `"sv, separator, "`"sv));
       }
 
-      params.separator = separator.front();
+      params->separator = separator.front();
       continue;
     }
 
     if (parser->Check("CASESENSITIVE")) {
-      params.case_sensitive = true;
+      params->case_sensitive = true;
       continue;
     }
 
     if (parser->Check("WITHSUFFIXTRIE")) {
-      params.with_suffixtrie = true;
+      params->with_suffixtrie = true;
       continue;
     }
 
     break;
   }
-  return params;
+  return any;
 }
 
 ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
@@ -262,11 +264,7 @@ using ParsedSchemaField =
 
 // Tag fields include: [separator char] [casesensitive]
 ParsedSchemaField ParseTag(CmdArgParser* parser) {
-  auto tag_params = ParseTagParams(parser);
-  if (!tag_params) {
-    return make_unexpected(tag_params.error());
-  }
-  return std::make_pair(search::SchemaField::TAG, std::move(tag_params).value());
+  return std::make_pair(search::SchemaField::TAG, search::SchemaField::TagParams{});
 }
 
 ParsedSchemaField ParseText(CmdArgParser* parser) {
@@ -370,9 +368,86 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
-constexpr std::array<const std::string_view, 3> kIgnoredOptions = {"UNF"sv, "INDEXMISSING"sv,
-                                                                   "INDEXEMPTY"sv};
-constexpr std::array<const std::string_view, 1> kIgnoredOptionsWithArg = {"PHONETIC"sv};
+// A name quoted in an error reply, which takes a single line.
+string OneLine(string_view name) {
+  return absl::StrReplaceAll(name, {{"\r", " "}, {"\n", " "}});
+}
+
+// Field options: type parameters before the flags, SORTABLE [UNF] and NOINDEX in any order, and, as
+// in older versions that clients rely on, upper-case UNF, INDEXMISSING, INDEXEMPTY, PHONETIC x and,
+// on TEXT, NOSTEM and WEIGHT n anywhere. Any other argument starts the next field.
+ParseResult<uint8_t> ParseFieldOptions(CmdArgParser* parser, string_view field_alias,
+                                       search::SchemaField::FieldType type,
+                                       search::SchemaField::ParamsVariant* params) {
+  using search::SchemaField;
+  uint8_t flags = 0;
+  bool flag_seen = false;
+  auto is_text_weight = [&] {
+    double weight;
+    return type == SchemaField::TEXT && absl::EqualsIgnoreCase(parser->Peek(), "WEIGHT") &&
+           (!flag_seen || absl::SimpleAtod(parser->Peek(1), &weight));
+  };
+
+  // PHONETIC and its argument are skipped: in upper case always, else on TEXT with a matcher.
+  auto is_phonetic = [&] {
+    string_view word = parser->Peek(), matcher = parser->Peek(1);
+    return parser->HasAtLeast(2) &&
+           (word == "PHONETIC" ||
+            (type == SchemaField::TEXT && absl::EqualsIgnoreCase(word, "PHONETIC") &&
+             matcher.size() == 5 && matcher[2] == ':'));
+  };
+  while (parser->HasNext()) {
+    auto flag =
+        parser->TryMapNext("NOINDEX", SchemaField::NOINDEX, "SORTABLE", SchemaField::SORTABLE);
+    if (flag) {
+      flags |= *flag;
+      flag_seen = true;
+      continue;
+    }
+
+    // In lower case these words name fields, as older versions stored them.
+    string_view word = parser->Peek();
+    if (word == "UNF" || word == "INDEXMISSING" || word == "INDEXEMPTY") {
+      flags |= word == "UNF"            ? SchemaField::UNF
+               : word == "INDEXMISSING" ? SchemaField::INDEXMISSING
+                                        : SchemaField::INDEXEMPTY;
+      parser->Skip(1);
+    } else if (is_phonetic()) {
+      LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: PHONETIC";
+      parser->Skip(2);
+    } else if (is_text_weight()) {
+      parser->Skip(1);
+      ParseTextWeight(parser, &std::get<SchemaField::TextParams>(*params));
+    } else if (type == SchemaField::TEXT && absl::EqualsIgnoreCase(word, "NOSTEM") &&
+               (!flag_seen || word == "NOSTEM")) {
+      std::get<SchemaField::TextParams>(*params).no_stem = true;
+      parser->Skip(1);
+    } else if (flag_seen) {
+      break;
+    } else if (type == SchemaField::TEXT && parser->Check("WITHSUFFIXTRIE")) {
+      std::get<SchemaField::TextParams>(*params).with_suffixtrie = true;
+    } else if (type == SchemaField::TAG) {
+      auto parsed = ParseTagParams(parser, &std::get<SchemaField::TagParams>(*params));
+      if (!parsed)
+        return make_unexpected(parsed.error());
+      if (!*parsed)
+        break;
+    } else {
+      break;
+    }
+  }
+
+  if ((flags & SchemaField::NOINDEX) && (flags & SchemaField::INDEXMISSING)) {
+    return CreateSyntaxError(
+        absl::StrCat("Field cannot be defined with both `NOINDEX` and `INDEXMISSING` `"sv,
+                     OneLine(field_alias), "` "sv));
+  }
+
+  // Accepted on any type, as before; only TEXT and TAG keep it.
+  if (type != SchemaField::TEXT && type != SchemaField::TAG)
+    flags &= ~SchemaField::INDEXEMPTY;
+  return flags;
+}
 
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
@@ -418,6 +493,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
         parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv, &ParseNumeric,
                            "VECTOR"sv, &ParseVector, "GEO", &ParseGeo);
     if (!params_parser) {
+      if (!parser->HasNext())
+        return CreateSyntaxError(
+            absl::StrCat("Field `"sv, OneLine(field_alias), "` does not have a type"sv));
       return CreateSyntaxError(
           absl::StrCat("Field type "sv, parser->Next(), " is not supported"sv));
     }
@@ -429,43 +507,13 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
     auto [field_type, params] = std::move(parsed_params).value();
 
-    // Flags: check for SORTABLE and NOINDEX
-    uint8_t flags = 0;
-    while (parser->HasNext()) {
-      auto flag = parser->TryMapNext("NOINDEX", search::SchemaField::NOINDEX, "SORTABLE",
-                                     search::SchemaField::SORTABLE);
-      if (!flag) {
-        std::string_view option = parser->Peek();
-        if (field_type == search::SchemaField::TEXT && option == "NOSTEM"sv) {
-          std::get<search::SchemaField::TextParams>(params).no_stem = true;
-          parser->Skip(1);
-          continue;
-        }
-        if (field_type == search::SchemaField::TEXT && parser->Check("WEIGHT")) {
-          ParseTextWeight(parser, &std::get<search::SchemaField::TextParams>(params));
-          continue;
-        }
-        if (rng::find(kIgnoredOptions, option) != kIgnoredOptions.end()) {
-          LOG_IF(WARNING, option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv)
-              << "Ignoring unsupported field option in FT.CREATE: " << option;
-          // Ignore these options
-          parser->Skip(1);
-          continue;
-        }
-        if (rng::find(kIgnoredOptionsWithArg, option) != kIgnoredOptionsWithArg.end()) {
-          LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: " << option;
-          // Ignore these options with argument
-          parser->Skip(2);
-          continue;
-        }
-        break;
-      }
-
-      flags |= *flag;
+    auto flags = ParseFieldOptions(parser, field_alias, field_type, &params);
+    if (!flags) {
+      return make_unexpected(flags.error());
     }
 
     const uint32_t number = schema.fields.size();
-    schema.fields[field_alias] = {field_type, flags, string{field_path}, params, number};
+    schema.fields[field_alias] = {field_type, *flags, string{field_path}, params, number};
   }
 
   return false;
@@ -2950,12 +2998,13 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->StartArray((has_custom_stopwords ? 8 : 7) * 2);
 
   rb->SendSimpleString("index_name");
-  rb->SendSimpleString(info.base_index.name);
+  rb->SendBulkString(info.base_index.name);
 
   rb->SendSimpleString("index_definition");
   {
+    const bool has_lang = schema.default_language != "english";
     const bool has_lang_field = !schema.language_field.empty();
-    rb->StartArray((has_lang_field ? 5 : 4) * 2);
+    rb->StartArray((3 + has_lang + has_lang_field) * 2);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefixes");
@@ -2963,11 +3012,13 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
     for (const auto& prefix : info.base_index.prefixes) {
       rb->SendBulkString(prefix);
     }
-    rb->SendSimpleString("default_language");
-    rb->SendSimpleString(schema.default_language);
+    if (has_lang) {
+      rb->SendSimpleString("default_language");
+      rb->SendSimpleString(schema.default_language);
+    }
     if (has_lang_field) {
       rb->SendSimpleString("language_field");
-      rb->SendSimpleString(schema.language_field);
+      rb->SendBulkString(schema.language_field);
     }
     rb->SendSimpleString("default_score");
     rb->SendLong(1);
@@ -2983,22 +3034,18 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       rb->SendSimpleString(opt);
   }
 
+  const bool on_json = info.base_index.type == DocIndex::JSON;
   rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());
   for (const auto& [alias, field_ptr] : schema.Ordered()) {
     const auto& field_info = *field_ptr;
     vector<string> info;
+    char buf[128];
 
     string_view base[] = {"identifier"sv, field_info.identifier,
                           "attribute"sv,  alias,
                           "type"sv,       SearchFieldTypeToString(field_info.type)};
     info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
-
-    if (field_info.flags & search::SchemaField::NOINDEX)
-      info.emplace_back("NOINDEX"sv);
-
-    if (field_info.flags & search::SchemaField::SORTABLE)
-      info.emplace_back("SORTABLE"sv);
 
     if (field_info.type == search::SchemaField::VECTOR) {
       auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
@@ -3020,7 +3067,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
         info.emplace_back("ef_runtime");
         info.emplace_back(std::to_string(vparams.hnsw_ef_runtime));
         info.emplace_back("epsilon");
-        info.emplace_back(std::to_string(vparams.hnsw_epsilon));
+        info.emplace_back(RedisReplyBuilder::FormatDouble(vparams.hnsw_epsilon, buf, sizeof(buf)));
       }
     } else if (field_info.type == search::SchemaField::TAG) {
       auto& tparams = std::get<search::SchemaField::TagParams>(field_info.special_params);
@@ -3028,16 +3075,10 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       info.emplace_back(std::string(1, tparams.separator));
       if (tparams.case_sensitive)
         info.emplace_back("CASESENSITIVE");
-      if (tparams.with_suffixtrie)
-        info.emplace_back("WITHSUFFIXTRIE");
     } else if (field_info.type == search::SchemaField::TEXT) {
       auto& tparams = std::get<search::SchemaField::TextParams>(field_info.special_params);
       info.emplace_back("WEIGHT");
-      info.emplace_back(std::to_string(tparams.weight));
-      if (tparams.with_suffixtrie)
-        info.emplace_back("WITHSUFFIXTRIE");
-      if (tparams.no_stem)
-        info.emplace_back("NOSTEM");
+      info.emplace_back(RedisReplyBuilder::FormatDouble(tparams.weight, buf, sizeof(buf)));
     } else if (field_info.type == search::SchemaField::NUMERIC) {
       auto& numeric_params =
           std::get<search::SchemaField::NumericParams>(field_info.special_params);
@@ -3045,7 +3086,31 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       info.emplace_back(std::to_string(numeric_params.block_size));
     }
 
-    rb->SendSimpleStrArr(info);
+    // Flags in the reference order, with UNF where the reference shows it.
+    const auto* text_params =
+        std::get_if<search::SchemaField::TextParams>(&field_info.special_params);
+    const auto* tag_params =
+        std::get_if<search::SchemaField::TagParams>(&field_info.special_params);
+    if (field_info.flags & search::SchemaField::SORTABLE) {
+      info.emplace_back("SORTABLE"sv);
+      if ((field_info.flags & search::SchemaField::UNF) ||
+          field_info.type == search::SchemaField::NUMERIC ||
+          (tag_params && tag_params->case_sensitive) || on_json)
+        info.emplace_back("UNF"sv);
+    }
+    if (text_params && text_params->no_stem)
+      info.emplace_back("NOSTEM"sv);
+    if (field_info.flags & search::SchemaField::NOINDEX)
+      info.emplace_back("NOINDEX"sv);
+    if ((text_params && text_params->with_suffixtrie) ||
+        (tag_params && tag_params->with_suffixtrie))
+      info.emplace_back("WITHSUFFIXTRIE"sv);
+    if (field_info.flags & search::SchemaField::INDEXEMPTY)
+      info.emplace_back("INDEXEMPTY"sv);
+    if (field_info.flags & search::SchemaField::INDEXMISSING)
+      info.emplace_back("INDEXMISSING"sv);
+
+    rb->SendBulkStrArr(info);
   }
 
   rb->SendSimpleString("num_docs");

@@ -300,8 +300,14 @@ vector<string> DocIndexInfo::BuildRestoreArgs() const {
     visit(info, finfo.special_params);
 
     // Store shared field flags
+    if (finfo.flags & search::SchemaField::INDEXEMPTY)
+      add("INDEXEMPTY");
+    if (finfo.flags & search::SchemaField::INDEXMISSING)
+      add("INDEXMISSING");
     if (finfo.flags & search::SchemaField::SORTABLE)
       add("SORTABLE");
+    if (finfo.flags & search::SchemaField::UNF)
+      add("UNF");
 
     if (finfo.flags & search::SchemaField::NOINDEX)
       add("NOINDEX");
