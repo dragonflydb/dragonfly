@@ -63,6 +63,9 @@ class AofSegmentWriter {
 
   static std::string SegmentName(uint32_t shard_id, uint64_t seq);
 
+  // Parses a SegmentName(). Only exact names, so "-007" or "-+7" fail.
+  static bool ParseSegmentName(std::string_view name, uint32_t* shard_id, uint64_t* seq);
+
  private:
   struct PendingBlock {
     // Header + payload, kept until the block is written.

@@ -66,6 +66,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/generic_family.h"
+#include "server/journal/aof_manifest.h"
 #include "server/journal/aof_replay.h"
 #include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
@@ -1076,8 +1077,11 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
   std::_Exit(EXIT_FAILURE);
 }
 
+// Loads a snapshot, blocking until it finishes.
+using AofLoadFn = std::function<GenericError(const string& path)>;
+
 // Why --aof cannot run with this configuration, or an empty string.
-string AofStartupError(string_view dir, detail::SnapshotStorage* storage) {
+string AofStartupError(string_view dir) {
   if (detail::IsCloudPath(dir))
     return "--aof needs a local --dir";
   if (shard_set->pool()->at(0)->GetKind() != ProactorBase::IOURING)
@@ -1086,9 +1090,6 @@ string AofStartupError(string_view dir, detail::SnapshotStorage* storage) {
     return "--aof needs --hz > 0, the heartbeat seals AOF blocks";
   if (GetFlag(FLAGS_replicaof).has_value())
     return "--aof is not supported on replicas";
-  // Loading a snapshot bypasses the journal, so the AOF would miss its data.
-  if (auto path = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename)); path && !path->empty())
-    return "--aof cannot start from a snapshot yet";
   return {};
 }
 
@@ -1115,11 +1116,58 @@ void AllowExpiryOnAllShards(bool allowed) {
   });
 }
 
-// Replays the AOF and starts an AofStreamer on every shard, or exits if --aof cannot run.
-void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service) {
-  string dir = flag_dir.empty() ? "." : flag_dir;
-  if (string reason = AofStartupError(dir, storage); !reason.empty())
-    ErrorAndExit(reason);
+#ifdef __linux__
+// Loads the base named by the manifest, or exits.
+void LoadAofBase(string_view dir, const string& base_path, const AofLoadFn& load) {
+  string path = absl::StrCat(dir, "/", base_path);
+
+  // The user may have deleted or moved a dump that is the base.
+  if (access(path.c_str(), F_OK) != 0)
+    ErrorAndExit(absl::StrCat("the AOF base ", path, " is missing"));
+  if (GenericError ec = load(path); ec)
+    ErrorAndExit(absl::StrCat("failed to load the AOF base ", path, ": ", ec.Format()));
+}
+
+// First start: adopts the --dbfilename dump, if any, as the base instead of taking a snapshot.
+void BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const AofLoadFn& load) {
+  AofManifest manifest;
+
+  // Nothing is logged before the load finishes, so every shard's cut is the journal's first lsn.
+  manifest.cuts.assign(shard_set->size(), {0, 1});
+  if (error_code ec = WriteAofManifest(dir, manifest); ec)
+    ErrorAndExit(absl::StrCat("failed to write the AOF manifest: ", ec.message()));
+
+  auto dump = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename));
+  if (!dump && error_code(dump.error()) != errc::no_such_file_or_directory)
+    ErrorAndExit(absl::StrCat("failed to find the dump to adopt: ", dump.error().Format()));
+  if (dump && !dump->empty()) {
+    // TODO: adopt RDB dumps too.
+    if (!absl::EndsWith(*dump, "summary.dfs"))
+      ErrorAndExit(absl::StrCat("--aof adopts only DFS dumps for now, found ", *dump));
+
+    // TODO: record the dump's identity, in case it is replaced before the next start.
+    manifest.base_path = filesystem::path(*dump).filename().string();
+    LoadAofBase(dir, manifest.base_path, load);
+  }
+
+  if (!StartStreamers(dir, vector<AofResume>(shard_set->size())))
+    ErrorAndExit("failed to open AOF segments");
+
+  // Committed once the cut segments exist, so an active manifest always has them.
+  manifest.state = AofManifest::State::kActive;
+  if (error_code ec = WriteAofManifest(dir, manifest); ec)
+    ErrorAndExit(absl::StrCat("failed to write the AOF manifest: ", ec.message()));
+}
+
+// Loads the manifest's base, replays the log on top and resumes it.
+void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
+               const AofLoadFn& load) {
+  if (error_code ec = CollectAofGarbage(dir, manifest); ec)
+    ErrorAndExit(absl::StrCat("failed to remove stale AOF files: ", ec.message()));
+  if (!manifest.base_path.empty())
+    LoadAofBase(dir, manifest.base_path, load);
+
+  // Load() already left LOADING; harmless, no connections are accepted yet.
   if (service->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) != GlobalState::ACTIVE)
     ErrorAndExit("--aof cannot replay: the server is not active");
 
@@ -1128,13 +1176,61 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service*
   AllowExpiryOnAllShards(false);
 
   vector<AofResume> resume;
-  if (error_code ec = ReplayAof(dir, service, &resume); ec)
+  if (error_code ec = ReplayAof(dir, manifest, service, &resume); ec)
     ErrorAndExit(absl::StrCat("AOF replay failed: ", ec.message()));
   if (!StartStreamers(dir, resume))
     ErrorAndExit("failed to open AOF segments");
 
   AllowExpiryOnAllShards(true);
   service->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+}
+#endif
+
+// Restores the data from the AOF, or bootstraps it, then starts logging. Exits if it cannot.
+void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service,
+              const AofLoadFn& load) {
+  string dir = flag_dir.empty() ? "." : flag_dir;
+  if (string reason = AofStartupError(dir); !reason.empty())
+    ErrorAndExit(reason);
+
+#ifdef __linux__
+  // TODO: run this in a background fiber, like LoadFromSnapshot(), so the server accepts
+  // connections and answers -LOADING meanwhile; today Init() blocks and the port is closed until
+  // replay ends. Load() switches LOADING -> ACTIVE when the base is loaded, so first keep the
+  // server LOADING until the streamers run: otherwise writes between the base load and the replay
+  // never reach the AOF. Also join the fiber on shutdown, and check that no command allowed during
+  // LOADING changes data.
+  shard_set->pool()->GetNextProactor()->Await([&] {
+    io::Result<AofManifest> manifest = ReadAofManifest(dir);
+    if (!manifest && manifest.error() != errc::no_such_file_or_directory)
+      ErrorAndExit(absl::StrCat("failed to read the AOF manifest: ", manifest.error().message()));
+
+    // We crashed during the first start: its files are incomplete, so start over.
+    if (manifest && manifest->state == AofManifest::State::kBootstrapping) {
+      LOG(WARNING) << "Redoing an interrupted AOF bootstrap";
+      if (error_code ec = RemoveAofFilesExceptManifest(dir); ec)
+        ErrorAndExit(absl::StrCat("failed to remove AOF files: ", ec.message()));
+      return BootstrapAof(dir, storage, load);
+    }
+    if (manifest)
+      return ResumeAof(dir, *manifest, service, load);
+
+    io::Result<vector<string>> files = ListAofFiles(dir);
+    if (!files)
+      ErrorAndExit(absl::StrCat("failed to list AOF files: ", files.error().message()));
+
+    // A tmp file only shows that a write never completed, e.g. a crash during the first manifest
+    // write, not that an AOF existed. The bootstrap overwrites it.
+    erase_if(*files, [](const string& path) { return path.ends_with(".tmp"); });
+
+    // A lost manifest: loading --dbfilename could silently replace a newer AOF.
+    if (!files->empty())
+      ErrorAndExit(absl::StrCat("AOF files in ", dir, " but no manifest, e.g. ", files->front()));
+    BootstrapAof(dir, storage, load);
+  });
+#else
+  ErrorAndExit("--aof is supported only on Linux");
+#endif
 }
 
 // Seals, writes and syncs every shard's AOF.
@@ -1449,14 +1545,18 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
-  if (GetFlag(FLAGS_aof))
-    StartAof(flag_dir, snapshot_storage_.get(), &service_);
+  if (GetFlag(FLAGS_aof)) {
+    StartAof(flag_dir, snapshot_storage_.get(), &service_, [this](const string& path) {
+      auto future = Load(path, LoadExistingKeys::kFail);
+      return future ? future->Get() : GenericError("the server is not active");
+    });
+  }
 
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
     service_.proactor_pool().GetNextProactor()->Await(
         [this, &flag]() { this->Replicate(flag.host, flag.port); });
-  } else {  // load from snapshot only if --replicaof is empty
+  } else if (!GetFlag(FLAGS_aof)) {  // With --aof, the manifest names the base.
     LoadFromSnapshot();
   }
 
@@ -1520,7 +1620,8 @@ void ServerFamily::Shutdown() {
 
   bg_save_fb_.JoinIfNeeded();
 
-  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
+  // With --aof, the log already holds the data, and a save could overwrite the base.
+  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty() && !GetFlag(FLAGS_aof)) {
     shard_set->pool()->GetNextProactor()->Await([this]() ABSL_LOCKS_EXCLUDED(loading_stats_mu_) {
       GenericError ec = DoSave();
 
@@ -1996,6 +2097,7 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
 
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
                                                Transaction* trans, DoSaveCheckAndStartOpts opts) {
+  // TODO(#8410): with --aof, a save to the base's name overwrites the base.
   auto [ignore_state, bg_save] = opts;
   auto state = ServerState::tlocal()->gstate();
 

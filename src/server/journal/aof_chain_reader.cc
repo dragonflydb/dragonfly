@@ -53,7 +53,7 @@ string AofChainReader::SegmentPath(uint64_t seq) const {
   return absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(shard_id_, seq));
 }
 
-error_code AofChainReader::Open() {
+error_code AofChainReader::Open(uint64_t cut_seq) {
   DCHECK(segment_chain_.empty());
 
   // TODO: StatFiles treats dir_ as part of a glob pattern, so a --dir with *, ? or [ breaks it.
@@ -63,18 +63,18 @@ error_code AofChainReader::Open() {
     return files.error();
 
   // Collect the shard's segments; the seq is in the file name.
-  string prefix = absl::StrCat("appendonly-", shard_id_, "-");
   for (const auto& file : *files) {
     string_view name = string_view(file.name).substr(file.name.rfind('/') + 1);
-    string_view seq_str = name;
+    uint32_t sid = 0;
     uint64_t seq = 0;
-
-    // The name must be exactly what the writer gives the segment, so "-007" or "-+7" fail.
-    if (!absl::ConsumePrefix(&seq_str, prefix) || !absl::ConsumeSuffix(&seq_str, ".aof") ||
-        !absl::SimpleAtoi(seq_str, &seq) || AofSegmentWriter::SegmentName(shard_id_, seq) != name) {
+    if (!AofSegmentWriter::ParseSegmentName(name, &sid, &seq) || sid != shard_id_) {
       LOG(ERROR) << "Unexpected AOF segment name: " << file.name;
       return AofError::kBadSegmentName;
     }
+
+    // Before the cut: in the base, and garbage.
+    if (seq < cut_seq)
+      continue;
     segment_chain_.push_back({seq, file.size, 0, nullptr});
   }
   if (segment_chain_.empty())
@@ -87,7 +87,8 @@ error_code AofChainReader::Open() {
   for (size_t i = 0; i < segment_chain_.size(); ++i) {
     Segment& seg = segment_chain_[i];
 
-    if (seg.seq != segment_chain_.front().seq + i) {
+    // The chain starts at the cut segment, which a checkpoint creates before committing the cut.
+    if (seg.seq != cut_seq + i) {
       LOG(ERROR) << "Gap in AOF segment seqs before " << SegmentPath(seg.seq);
       return AofError::kSegmentNonContiguous;
     }
