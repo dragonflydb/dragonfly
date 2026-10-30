@@ -24,6 +24,7 @@
 #include "server/journal/aof_chain_reader.h"
 #include "server/journal/aof_manifest.h"
 #include "server/journal/aof_segment_writer.h"
+#include "server/journal/aof_streamer.h"
 #include "server/journal/serializer.h"
 #include "server/test_utils.h"
 
@@ -437,6 +438,47 @@ TEST_F(AofStreamerTest, WritesReachSegments) {
     }
     EXPECT_TRUE(reader.ReadEntry(&parsed)) << "trailing data in shard " << sid;
     EXPECT_EQ(cmds, expected[sid]) << "shard " << sid;
+  }
+}
+
+// TODO: cover a crash while preparing a spare. Leave each partial state on disk (a leftover
+// appendonly-<shard>-<seq>.aof.tmp, a header-only segment with its tmp twin, a complete unused
+// spare) and check that the restart replays the chain cleanly and startup GC removes the tmp files.
+TEST_F(AofStreamerTest, RotateContinuesInSpare) {
+  Run("mset a 1 b 2 c 3 d 4");
+  const uint32_t shard_count = shard_set->size();
+
+  // As a checkpoint's cut does: wait for the spares first, then rotate without yielding.
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_TRUE(shard->aof_streamer()->WaitSpareReady()); });
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_EQ(shard->aof_streamer()->Rotate(), 1u); });
+  Run("mset a 5 b 6 c 7 d 8");
+  ShutdownService();
+
+  for (uint32_t sid = 0; sid < shard_count; ++sid) {
+    // Shutdown deleted the unused spare.
+    EXPECT_FALSE(filesystem::exists(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, 2))))
+        << "shard " << sid;
+
+    // The LSNs continue from segment 0 into segment 1.
+    optional<uint64_t> next_lsn;
+    for (uint64_t seq : {0, 1}) {
+      ifstream in(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, seq)), ios::binary);
+      string file(istreambuf_iterator<char>(in), {});
+      auto seg = DecodeAofSegmentHeader(file);
+      ASSERT_TRUE(seg) << "shard " << sid << " segment " << seq;
+      string_view rest = string_view(file).substr(kAofSegmentHeaderSize);
+      while (!rest.empty()) {
+        auto hdr = DecodeAofBlock(rest, seg->segment_uid);
+        ASSERT_TRUE(hdr) << "shard " << sid << " segment " << seq;
+        if (next_lsn) {
+          EXPECT_EQ(hdr->first_lsn, *next_lsn) << "shard " << sid << " segment " << seq;
+        }
+        next_lsn = hdr->first_lsn + hdr->n_records;
+        rest.remove_prefix(hdr->total_block_bytes);
+      }
+    }
   }
 }
 
