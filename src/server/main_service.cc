@@ -83,6 +83,13 @@ ABSL_FLAG(uint16_t, announce_port, 0,
 
 ABSL_FLAG(uint32_t, memcached_port, 0, "Memcached port");
 
+ABSL_FLAG(bool, experimental_cluster_allow_multi_slot_same_node, false,
+          "In real cluster mode, allow a multi-key command whose keys span several hash slots "
+          "as long as EVERY slot is owned by this node. Off by default, which keeps the "
+          "Redis-Cluster-compatible CROSSSLOT rejection. Intended for clients that fan out by "
+          "node rather than by slot; a client that does not understand the relaxed behaviour is "
+          "unaffected while this is off.");
+
 ABSL_FLAG(uint32_t, num_shards, 0, "Number of database shards, 0 - to choose automatically");
 
 ABSL_FLAG(bool, multi_exec_squash, true,
@@ -1208,6 +1215,34 @@ OpResult<KeyIndex> Service::FindKeys(const CommandId* cid, const facade::ParsedA
   return DetermineKeys(cid, args);
 }
 
+namespace {
+
+// Returns nullopt when every key's slot is owned by this node, otherwise a MOVED naming the first
+// slot that is not ours. Ownership for ALL slots is resolved against a single ClusterConfig
+// snapshot: re-reading Current() per key could straddle a cutover and let a half-owned batch
+// through, which is exactly the corruption the cross-slot gate exists to prevent.
+optional<ErrorReply> CrossSlotOwnershipError(const KeyIndex& key_index,
+                                             const facade::ParsedArgs& args) {
+  const auto cluster_config = cluster::ClusterConfig::Current();
+  if (!cluster_config) {
+    return ErrorReply{facade::kClusterNotConfigured};
+  }
+
+  for (string_view key : key_index.Range(args)) {
+    const SlotId sid = KeySlot(key);
+    if (!cluster_config->IsMySlot(sid)) {
+      // MOVED (not CROSSSLOT) so a cluster-aware client refreshes its whole slot map and can
+      // regroup correctly on the next attempt. Naming the first offending slot is enough -- a
+      // client reload refetches the entire topology.
+      const cluster::ClusterNodeInfo master = cluster_config->GetMasterNodeForSlot(sid);
+      return ErrorReply{absl::StrCat("-MOVED ", sid, " ", master.ip, ":", master.port), "MOVED"};
+    }
+  }
+  return nullopt;
+}
+
+}  // namespace
+
 optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid,
                                                  const facade::ParsedArgs& args,
                                                  const ConnectionContext& dfly_cntx) {
@@ -1234,7 +1269,14 @@ optional<ErrorReply> Service::CheckKeysOwnership(const CommandId& cid,
   }
 
   if (slot_checker.IsCrossSlot()) {
-    return ErrorReply{kCrossSlotError};
+    // Default (Redis-compatible): a multi-key command must target a single slot.
+    if (!absl::GetFlag(FLAGS_experimental_cluster_allow_multi_slot_same_node)) {
+      return ErrorReply{kCrossSlotError};
+    }
+    // Relaxed: permit the command only when every distinct slot is owned by THIS node, so the
+    // node never serves or creates keys outside its ownership. The engine already executes such
+    // a command -- it is what runs in emulated mode -- so only this validation gate differs.
+    return CrossSlotOwnershipError(key_index, args);
   }
 
   optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
@@ -1271,7 +1313,13 @@ std::optional<facade::ErrorReply> Service::TakenOverSlotError(const CommandId& c
   }
 
   if (slot_checker.IsCrossSlot()) {
-    return ErrorReply{kCrossSlotError};
+    if (!absl::GetFlag(FLAGS_experimental_cluster_allow_multi_slot_same_node)) {
+      return ErrorReply{kCrossSlotError};
+    }
+    // Same relaxation as CheckKeysOwnership: all slots must be locally owned. Kept in sync
+    // deliberately -- these two functions are near-duplicates (see the TODO above), so a patch
+    // to only one would silently leave the other enforcing the old rule.
+    return CrossSlotOwnershipError(key_index, args);
   }
 
   optional<SlotId> keys_slot = slot_checker.GetUniqueSlotId();
