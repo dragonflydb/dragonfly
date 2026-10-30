@@ -652,6 +652,11 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
+  // Only the slots owned by this node are reported, so no stats are collected for the others.
+  // Without a config, the node may hold keys of any slot, e.g. loaded from a snapshot.
+  auto config = ClusterConfig::Current();
+  const SlotSet owned = config ? config->GetOwnedSlots() : SlotSet(true);
+
   // Keep the requested ranges unexpanded, so memory does not grow with the reply size.
   vector<SlotRange> ranges;
   size_t total_slots = 0;
@@ -689,7 +694,8 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
       end_slot = start_slot;
     }
     ranges.push_back({SlotId(start_slot), SlotId(end_slot)});
-    total_slots += end_slot - start_slot + 1;
+    for (uint32_t slot = start_slot; slot <= end_slot; ++slot)
+      total_slots += owned.Contains(slot);
   }
 
   if (ranges.empty()) {
@@ -709,13 +715,15 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
 
   auto range = ranges.begin();
   SlotId next_slot = range->start;
-  while (range != ranges.end()) {
-    size_t count = 0;
-    for (; count < round_size && range != ranges.end(); ++count) {
-      round_slots[count] = next_slot;
+  for (size_t remaining = total_slots; remaining > 0;) {
+    const size_t count = std::min(remaining, round_size);
+    for (size_t i = 0; i < count;) {
+      if (owned.Contains(next_slot))
+        round_slots[i++] = next_slot;
       if (next_slot++ == range->end && ++range != ranges.end())
         next_slot = range->start;
     }
+    remaining -= count;
 
     round_stats.assign(count, SlotStats{});
     for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
