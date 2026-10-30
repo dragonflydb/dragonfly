@@ -721,7 +721,7 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
     for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
       shard_set->pool()->at(sid)->AwaitBrief([&] {
         const auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(sid);
-        db_slice.AddSlotStats({round_slots.data(), count}, round_stats.data());
+        db_slice.AddSlotStats({round_slots.data(), count}, absl::MakeSpan(round_stats));
       });
     }
 
