@@ -50,7 +50,7 @@ uint32_t RegisterConsumer(JournalConsumerInterface* consumer);
 void UnregisterConsumer(uint32_t id);
 
 void RecordEntry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot,
-                 Entry::Payload payload);
+                 Entry::Payload payload, uint64_t tx_time_ms = 0);
 
 size_t LsnBufferSize();
 size_t LsnBufferBytes();
