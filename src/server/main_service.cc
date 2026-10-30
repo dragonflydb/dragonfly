@@ -749,6 +749,8 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case WRITE_KEY_OFFSET_0:
     case WRITE_KEY_OFFSET_1:
     case WAKE_ALL_READY_KEYS:
+    case ACCESS:
+    case ACCESS_KEY_OFFSET_0:
       return "";
   }
   return "";

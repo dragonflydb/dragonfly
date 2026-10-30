@@ -6,6 +6,7 @@
 
 #include <openssl/sha.h>
 
+#include <algorithm>
 #include <limits>
 
 #include "absl/container/flat_hash_set.h"
@@ -258,7 +259,14 @@ void User::SetKeyGlobs(std::vector<UpdateKey> keys) {
       keys_.key_globs.clear();
       keys_.all_keys = false;
     } else {
-      keys_.key_globs.push_back({std::move(key.key), key.op});
+      // Like Redis, repeating a pattern adds to its permissions, so %R~k %W~k equals %RW~k.
+      // The validator requires one pattern to grant every permission a key needs.
+      auto it = std::find_if(keys_.key_globs.begin(), keys_.key_globs.end(),
+                             [&](const GlobType& glob) { return glob.first == key.key; });
+      if (it == keys_.key_globs.end())
+        keys_.key_globs.push_back({std::move(key.key), key.op});
+      else if (it->second != key.op)
+        it->second = KeyOp::READ_WRITE;
     }
   }
 }

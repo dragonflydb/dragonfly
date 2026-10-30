@@ -1616,28 +1616,29 @@ void HSetFamily::Register(CommandRegistry* registry) {
   constexpr auto kExpiryOpts = CO::JOURNALED | CO::FAST | CO::DENYOOM | CO::NO_AUTOJOURNAL;
 
   registry->StartFamily(acl::HASH);
-  *registry << CI{"HDEL", CO::FAST | CO::JOURNALED, -3, 1, 1}.HFUNC(HDel)
-            << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(HLen)
-            << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HExists)
-            << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HGet)
-            << CI{"HGETALL", CO::READONLY, 2, 1, 1}.HFUNC(HGetAll)
-            << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(HMGet)
-            << CI{"HMSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
-            << CI{"HINCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)
-            << CI{"HINCRBYFLOAT", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(
-                   HIncrByFloat)
-            << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
-            << CI{"HEXPIRE", kExpiryOpts, -5, 1, 1}.HFUNC(HExpire)
-            << CI{"HPEXPIRETIME", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HPExpireTime)
-            << CI{"HGETEX", kExpiryOpts, -4, 1, 1}.HFUNC(HGetEx)
-            << CI{"HTTL", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HTtl)
-            << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1}.HFUNC(HRandField)
-            << CI{"HSCAN", CO::READONLY, -3, 1, 1}.HFUNC(HScan)
-            << CI{"HSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
-            << CI{"HSETEX", kExpiryOpts, -5, 1, 1}.SetHandler(HSetEx)
-            << CI{"HSETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HSetNx)
-            << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(HStrLen)
-            << CI{"HVALS", CO::READONLY, 2, 1, 1}.HFUNC(HVals);
+  *registry
+      << CI{"HDEL", CO::FAST | CO::JOURNALED, -3, 1, 1}.HFUNC(HDel)
+      << CI{"HLEN", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(HLen)
+      << CI{"HEXISTS", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HExists)
+      << CI{"HGET", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(HGet)
+      << CI{"HGETALL", CO::READONLY, 2, 1, 1}.HFUNC(HGetAll)
+      << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(HMGet)
+      << CI{"HMSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
+      << CI{"HINCRBY", CO::JOURNALED | CO::ACCESS | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)
+      << CI{"HINCRBYFLOAT", CO::JOURNALED | CO::ACCESS | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(
+             HIncrByFloat)
+      << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
+      << CI{"HEXPIRE", kExpiryOpts, -5, 1, 1}.HFUNC(HExpire)
+      << CI{"HPEXPIRETIME", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HPExpireTime)
+      << CI{"HGETEX", kExpiryOpts | CO::ACCESS, -4, 1, 1}.HFUNC(HGetEx)
+      << CI{"HTTL", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HTtl)
+      << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1}.HFUNC(HRandField)
+      << CI{"HSCAN", CO::READONLY, -3, 1, 1}.HFUNC(HScan)
+      << CI{"HSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
+      << CI{"HSETEX", kExpiryOpts, -5, 1, 1}.SetHandler(HSetEx)
+      << CI{"HSETNX", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HSetNx)
+      << CI{"HSTRLEN", CO::READONLY | CO::FAST, 3, 1, 1}.HFUNC(HStrLen)
+      << CI{"HVALS", CO::READONLY, 2, 1, 1}.HFUNC(HVals);
 }
 
 auto HSetFamily::LoadZiplistBlob(std::string_view blob, PrimeValue* pv) -> LoadBlobResult {
