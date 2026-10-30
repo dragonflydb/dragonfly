@@ -732,7 +732,8 @@ async def test_cluster_flush_slots_after_config_change(df_factory: DflyInstanceF
             c_replica.execute_command("DBSIZE"),
         )
 
-        assert m_slots[0][2] == repl_slots[0][2] == 0
+        # Slot 0 belongs to another node now, so it is not reported.
+        assert m_slots == repl_slots == []
         assert master_size == replica_size == expected_size
 
     await slot_zero_flushed()

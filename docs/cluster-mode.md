@@ -57,7 +57,7 @@ provided for client-library compatibility.
 | `READONLY` | — | `FAST \| CONNECTION` | No-op stub (always replies `+OK`). Provided for client-library compatibility; no replica-read routing today. |
 | `READWRITE` | — | `FAST \| CONNECTION` | No-op stub only in `emulated` mode. In real cluster mode (`--cluster_mode=yes`) it returns `-ERR Cluster is disabled. Use --cluster_mode=yes to enable.` |
 | `DFLYCLUSTER` | `CONFIG <json>` | `ADMIN \| GLOBAL_TRANS \| HIDDEN`, ACL `ADMIN \| SLOW` | Installs new cluster state. Runs as a global transaction. |
-| `DFLYCLUSTER` | `GETSLOTINFO SLOTS <id\|a-b>...` | as above | Per-slot stats: `key_count`, `total_reads`, `total_writes`, `memory_bytes`. |
+| `DFLYCLUSTER` | `GETSLOTINFO SLOTS <id\|a-b>...` | as above | Per-slot stats: `key_count`, `total_reads`, `total_writes`, `memory_bytes`. Reports only the requested slots owned by the node. |
 | `DFLYCLUSTER` | `FLUSHSLOTS <start> <end> [...]` | as above | Deletes data in slot ranges. Journaled to replicas. |
 | `DFLYCLUSTER` | `SLOT-MIGRATION-STATUS [<peer_id>]` | as above | Per-migration status: `[direction, peer_id, state, keys_migrated, error, slot_ranges]`. |
 | `DFLYMIGRATE` | `INIT <source_id> <num_flows> [start end]...` | `ADMIN \| HIDDEN`, ACL `ADMIN \| SLOW \| DANGEROUS` | Source → target: announce migration. |
