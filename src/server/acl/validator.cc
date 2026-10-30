@@ -86,23 +86,63 @@ struct KeyPermissions {
   bool write = false;
 };
 
-// Per-key ACL requirements for commands that read one key and write another (e.g. COPY).
-KeyPermissions RequiredKeyPermissions(const CommandId& id, unsigned key_offset) {
-  if (id.opt_mask() & CO::WRITE_KEY_OFFSET_0)
-    return {key_offset != 0, key_offset == 0};
-  if (id.opt_mask() & CO::WRITE_KEY_OFFSET_1)
-    return {key_offset != 1, key_offset == 1};
-
-  if (id.opt_mask() & CO::STORE_LAST_KEY)
-    return {true, false};
-
-  return {id.IsReadOnly(), id.IsJournaled()};
+// SET needs read only with GET, which returns the old value.
+bool SetReturnsValue(const ParsedArgs& tail_args) {
+  for (size_t i = 2; i < tail_args.size(); ++i) {
+    if (absl::EqualsIgnoreCase(tail_args[i], "GET"))
+      return true;
+  }
+  return false;
 }
 
+// BITFIELD with only GET/OVERFLOW subcommands is a read; anything else also writes.
+bool BitFieldWrites(const ParsedArgs& tail_args) {
+  for (size_t i = 1; i < tail_args.size(); ++i) {
+    const size_t remaining = tail_args.size() - i - 1;
+    if (absl::EqualsIgnoreCase(tail_args[i], "GET") && remaining >= 2)
+      i += 2;
+    else if (absl::EqualsIgnoreCase(tail_args[i], "OVERFLOW") && remaining >= 1)
+      i += 1;
+    else
+      return true;
+  }
+  return false;
+}
+
+// Per-key ACL requirements, following Redis key specs: a key needs read if the command returns or
+// moves its data, and write if the command modifies it.
+KeyPermissions RequiredKeyPermissions(const CommandId& id, const ParsedArgs& tail_args,
+                                      unsigned key_offset) {
+  const uint32_t mask = id.opt_mask();
+  const bool access = mask & CO::ACCESS;
+  if (mask & CO::WRITE_KEY_OFFSET_0)
+    return {key_offset != 0 || access, key_offset == 0};
+  if (mask & CO::WRITE_KEY_OFFSET_1)
+    return {key_offset != 1 || access, key_offset == 1};
+
+  if (mask & CO::STORE_LAST_KEY)
+    return {true, false};
+
+  if (mask & CO::ACCESS_KEY_OFFSET_0)
+    return {key_offset == 0, true};
+
+  // Redis treats XREADGROUP as a read even though it updates the consumer group.
+  string_view name = id.name();
+  if (name == "XREADGROUP")
+    return {true, false};
+  if (name == "SET")
+    return {SetReturnsValue(tail_args), true};
+  if (name == "BITFIELD")
+    return {true, BitFieldWrites(tail_args)};
+
+  return {id.IsReadOnly() || access, id.IsJournaled()};
+}
+
+// Like Redis, a single pattern must grant every permission the key needs.
 bool IsKeyAllowed(const AclKeys& keys, string_view key, KeyPermissions perms) {
   return absl::c_any_of(keys.key_globs, [&](const GlobType& glob) {
     const auto& [pattern, op] = glob;
-    const bool grants = (perms.read && op != KeyOp::WRITE) || (perms.write && op != KeyOp::READ);
+    const bool grants = (!perms.read || op != KeyOp::WRITE) && (!perms.write || op != KeyOp::READ);
     return grants && Matches(pattern, key);
   });
 }
@@ -134,9 +174,9 @@ bool AreKeysAllowed(const AclKeys& keys, const CommandId& id, const ParsedArgs& 
     // The bonus key (dest of Z*STORE/CMS.MERGE/GEORADIUS.../SORT STORE) is the sole write target.
     const bool has_bonus_dest = key_index->bonus.has_value();
     for (unsigned idx = key_index->start; idx < key_index->end; idx += key_index->step) {
-      const KeyPermissions perms = has_bonus_dest
-                                       ? KeyPermissions{true, false}
-                                       : RequiredKeyPermissions(id, idx - key_index->start);
+      const KeyPermissions perms =
+          has_bonus_dest ? KeyPermissions{true, false}
+                         : RequiredKeyPermissions(id, tail_args, idx - key_index->start);
       if (!IsKeyAllowed(keys, tail_args[idx], perms))
         return false;
     }

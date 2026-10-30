@@ -1462,7 +1462,7 @@ void RegisterBitopsFamily(CommandRegistry* registry) {
                   -1}
                    .SetHandler(&BitOp)
             << CI{"GETBIT", CO::READONLY | CO::FAST, 3, 1, 1}.SetHandler(&GetBit)
-            << CI{"SETBIT", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetHandler(&SetBit);
+            << CI{"SETBIT", CO::JOURNALED | CO::ACCESS | CO::DENYOOM, 4, 1, 1}.SetHandler(&SetBit);
 }
 
 }  // namespace dfly

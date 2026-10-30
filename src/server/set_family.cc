@@ -1705,33 +1705,34 @@ using CI = CommandId;
 
 void SetFamily::Register(CommandRegistry* registry) {
   registry->StartFamily(acl::SET);
-  *registry << CI{"SADD", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(SAdd)
-            << CI{"SDIFF", CO::READONLY, -2, 1, -1}.HFUNC(SDiff)
-            << CI{"SDIFFSTORE",
-                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
-                  -1}
-                   .HFUNC(SDiffStore)
-            << CI{"SINTER", CO::READONLY, -2, 1, -1}.HFUNC(SInter)
-            << CI{"SINTERSTORE",
-                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
-                  -1}
-                   .HFUNC(SInterStore)
-            << CI{"SINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(SInterCard)
-            << CI{"SMEMBERS", CO::READONLY, 2, 1, 1}.HFUNC(SMembers)
-            << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(SIsMember)
-            << CI{"SMISMEMBER", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(SMIsMember)
-            << CI{"SMOVE", CO::FAST | CO::JOURNALED | CO::NO_AUTOJOURNAL, 4, 1, 2}.HFUNC(SMove)
-            << CI{"SREM", CO::JOURNALED | CO::FAST, -3, 1, 1}.HFUNC(SRem)
-            << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(SCard)
-            << CI{"SPOP", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(SPop)
-            << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(SRandMember)
-            << CI{"SUNION", CO::READONLY, -2, 1, -1}.HFUNC(SUnion)
-            << CI{"SUNIONSTORE",
-                  CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1,
-                  -1}
-                   .HFUNC(SUnionStore)
-            << CI{"SSCAN", CO::READONLY, -3, 1, 1}.HFUNC(SScan)
-            << CI{"SADDEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(SAddEx);
+  *registry
+      << CI{"SADD", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(SAdd)
+      << CI{"SDIFF", CO::READONLY, -2, 1, -1}.HFUNC(SDiff)
+      << CI{"SDIFFSTORE", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0,
+            -3, 1, -1}
+             .HFUNC(SDiffStore)
+      << CI{"SINTER", CO::READONLY, -2, 1, -1}.HFUNC(SInter)
+      << CI{"SINTERSTORE",
+            CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1, -1}
+             .HFUNC(SInterStore)
+      << CI{"SINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(SInterCard)
+      << CI{"SMEMBERS", CO::READONLY, 2, 1, 1}.HFUNC(SMembers)
+      << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(SIsMember)
+      << CI{"SMISMEMBER", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(SMIsMember)
+      << CI{"SMOVE", CO::FAST | CO::JOURNALED | CO::ACCESS_KEY_OFFSET_0 | CO::NO_AUTOJOURNAL, 4, 1,
+            2}
+             .HFUNC(SMove)
+      << CI{"SREM", CO::JOURNALED | CO::FAST, -3, 1, 1}.HFUNC(SRem)
+      << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(SCard)
+      << CI{"SPOP", CO::JOURNALED | CO::ACCESS | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(
+             SPop)
+      << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(SRandMember)
+      << CI{"SUNION", CO::READONLY, -2, 1, -1}.HFUNC(SUnion)
+      << CI{"SUNIONSTORE",
+            CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_0, -3, 1, -1}
+             .HFUNC(SUnionStore)
+      << CI{"SSCAN", CO::READONLY, -3, 1, 1}.HFUNC(SScan)
+      << CI{"SADDEX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(SAddEx);
 }
 
 uint32_t SetFamily::MaxIntsetEntries() {

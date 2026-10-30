@@ -1549,20 +1549,28 @@ void RegisterListFamily(CommandRegistry* registry) {
   *registry
       << CI{"LPUSH", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPush)
       << CI{"LPUSHX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPushX)
-      << CI{"LPOP", CO::JOURNALED | CO::FAST, -2, 1, 1}.HFUNC(LPop)
-      << CI{"LMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(LMPop)
-      << CI{"BLMPOP", CO::JOURNALED | CO::BLOCKING | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3,
-            3}
+      << CI{"LPOP", CO::JOURNALED | CO::ACCESS | CO::FAST, -2, 1, 1}.HFUNC(LPop)
+      << CI{"LMPOP", CO::JOURNALED | CO::ACCESS | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}
+             .HFUNC(LMPop)
+      << CI{"BLMPOP",
+            CO::JOURNALED | CO::ACCESS | CO::BLOCKING | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5,
+            3, 3}
              .HFUNC(BLMPop)
       << CI{"RPUSH", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPush)
       << CI{"RPUSHX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPushX)
-      << CI{"RPOP", CO::JOURNALED | CO::FAST, -2, 1, 1}.HFUNC(RPop)
-      << CI{"RPOPLPUSH", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2}.SetHandler(RPopLPush)
-      << CI{"BRPOPLPUSH", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2}
+      << CI{"RPOP", CO::JOURNALED | CO::ACCESS | CO::FAST, -2, 1, 1}.HFUNC(RPop)
+      << CI{"RPOPLPUSH", CO::JOURNALED | CO::ACCESS_KEY_OFFSET_0 | CO::NO_AUTOJOURNAL, 3, 1, 2}
+             .SetHandler(RPopLPush)
+      << CI{"BRPOPLPUSH",
+            CO::JOURNALED | CO::ACCESS_KEY_OFFSET_0 | CO::NOSCRIPT | CO::BLOCKING |
+                CO::NO_AUTOJOURNAL,
+            4, 1, 2}
              .SetHandler(BRPopLPush)
-      << CI{"BLPOP", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
+      << CI{"BLPOP", CO::JOURNALED | CO::ACCESS | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL,
+            -3, 1, -2}
              .HFUNC(BLPop)
-      << CI{"BRPOP", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
+      << CI{"BRPOP", CO::JOURNALED | CO::ACCESS | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL,
+            -3, 1, -2}
              .HFUNC(BRPop)
       << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(LLen)
       << CI{"LPOS", CO::READONLY, -3, 1, 1}.HFUNC(LPos)
@@ -1572,9 +1580,11 @@ void RegisterListFamily(CommandRegistry* registry) {
       << CI{"LSET", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(LSet)
       << CI{"LTRIM", CO::JOURNALED, 4, 1, 1}.HFUNC(LTrim)
       << CI{"LREM", CO::JOURNALED, 4, 1, 1}.HFUNC(LRem)
-      << CI{"LMOVE", CO::JOURNALED | CO::NO_AUTOJOURNAL, 5, 1, 2}.HFUNC(LMove)
-      << CI{"BLMOVE", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2}.SetHandler(
-             BLMove);
+      << CI{"LMOVE", CO::JOURNALED | CO::ACCESS_KEY_OFFSET_0 | CO::NO_AUTOJOURNAL, 5, 1, 2}.HFUNC(
+             LMove)
+      << CI{"BLMOVE", CO::JOURNALED | CO::ACCESS_KEY_OFFSET_0 | CO::NO_AUTOJOURNAL | CO::BLOCKING,
+            6, 1, 2}
+             .SetHandler(BLMove);
 }
 
 }  // namespace dfly

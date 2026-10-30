@@ -494,7 +494,8 @@ void RegisterCmsFamily(CommandRegistry* registry) {
   *registry
       << CI{"CMS.INITBYDIM", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(InitByDim)
       << CI{"CMS.INITBYPROB", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(InitByProb)
-      << CI{"CMS.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(IncrBy)
+      << CI{"CMS.INCRBY", CO::JOURNALED | CO::ACCESS | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(
+             IncrBy)
       << CI{"CMS.QUERY", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(Query)
       << CI{"CMS.INFO", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Info)
       << CI{"CMS.MERGE", CO::JOURNALED | CO::DENYOOM | CO::VARIADIC_KEYS, -4, 3, 3}.HFUNC(Merge);

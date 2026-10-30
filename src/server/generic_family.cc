@@ -2933,11 +2933,15 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"FIELDEXPIRE",    CO::JOURNALED | CO::FAST | CO::DENYOOM | CO::NO_AUTOJOURNAL, -4, 1, 1,
             acl::kFieldExpire}
              .HFUNC(FieldExpire)
-      << CI{"RENAME", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
+      << CI{"RENAME",    CO::JOURNALED | CO::ACCESS_KEY_OFFSET_0 | CO::NO_AUTOJOURNAL, 3, 1, 2,
+            acl::kRename}
+             .HFUNC(Rename)
       << CI{"COPY",    CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_1, -3, 1, 2,
             acl::kCopy}
              .HFUNC(Copy)
-      << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 2, acl::kRenamNX}
+      << CI{"RENAMENX", CO::JOURNALED | CO::ACCESS_KEY_OFFSET_0 | CO::NO_AUTOJOURNAL | CO::FAST,
+            3,          1,
+            2,          acl::kRenamNX}
              .HFUNC(RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
       << CI{"SCAN", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
@@ -2960,8 +2964,9 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -2, 1, 1, acl::kSort}
              .HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
-      << CI{"MOVE",    CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 1,
-            acl::kMove}
+      << CI{"MOVE", CO::JOURNALED | CO::ACCESS | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL | CO::FAST,
+            3,      1,
+            1,      acl::kMove}
              .HFUNC(Move)
       << CI{"RESTORE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
       << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, acl::kRandomKey}.HFUNC(RandomKey)

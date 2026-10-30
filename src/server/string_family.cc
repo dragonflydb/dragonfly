@@ -1843,17 +1843,20 @@ void RegisterStringFamily(CommandRegistry* registry) {
              ExtendGeneric)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
              ExtendGeneric)
-      << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdIncr)
-      << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdDecr)
-      << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
-      << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
-      << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
+      << CI{"INCR", CO::JOURNALED | CO::ACCESS | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdIncr)
+      << CI{"DECR", CO::JOURNALED | CO::ACCESS | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdDecr)
+      << CI{"INCRBY", CO::JOURNALED | CO::ACCESS | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
+      << CI{"INCRBYFLOAT", CO::JOURNALED | CO::ACCESS | CO::FAST, 3, 1, 1}.SetAsyncHandler(
+             CmdIncrByFloat)
+      << CI{"DECRBY", CO::JOURNALED | CO::ACCESS | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGet)
-      << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)
+      << CI{"GETDEL", CO::JOURNALED | CO::ACCESS | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
-      << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}
+      << CI{"GETEX", CO::JOURNALED | CO::ACCESS | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2,
+            1, 1}
              .SetAsyncHandler(CmdGetEx)
-      << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdGetSet)
+      << CI{"GETSET", CO::JOURNALED | CO::ACCESS | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
+             CmdGetSet)
       << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.SetAsyncHandler(CmdMGet)
       << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
@@ -1861,9 +1864,11 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)
       << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)  // Alias for GetRange
       << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetAsyncHandler(CmdSetRange)
-      << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
-             ClThrottle)
-      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}
+      << CI{"CL.THROTTLE", CO::JOURNALED | CO::ACCESS | CO::DENYOOM | CO::FAST, -5, 1, 1,
+            acl::THROTTLE}
+             .HFUNC(ClThrottle)
+      << CI{"GAT", CO::JOURNALED | CO::ACCESS | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2,
+            1, -1}
              .SetAsyncHandler(CmdGAT);
 }
 

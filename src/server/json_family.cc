@@ -2205,9 +2205,12 @@ void RegisterJsonFamily(CommandRegistry* registry) {
   *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(StrLen);
   *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ObjLen);
   *registry << CI{"JSON.ARRLEN", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrLen);
-  *registry << CI{"JSON.TOGGLE", CO::JOURNALED | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(Toggle);
-  *registry << CI{"JSON.NUMINCRBY", CO::JOURNALED | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumIncrBy);
-  *registry << CI{"JSON.NUMMULTBY", CO::JOURNALED | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumMultBy);
+  *registry << CI{"JSON.TOGGLE", CO::JOURNALED | CO::ACCESS | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(
+      Toggle);
+  *registry << CI{"JSON.NUMINCRBY", CO::JOURNALED | CO::ACCESS | CO::FAST, 4, 1, 1, acl::JSON}
+                   .HFUNC(NumIncrBy);
+  *registry << CI{"JSON.NUMMULTBY", CO::JOURNALED | CO::ACCESS | CO::FAST, 4, 1, 1, acl::JSON}
+                   .HFUNC(NumMultBy);
   *registry << CI{"JSON.DEL", CO::JOURNALED, -2, 1, 1, acl::JSON}.HFUNC(Del);
   *registry << CI{"JSON.FORGET", CO::JOURNALED, -2, 1, 1, acl::JSON}.HFUNC(
       Del);  // An alias of JSON.DEL.
@@ -2215,7 +2218,8 @@ void RegisterJsonFamily(CommandRegistry* registry) {
   *registry << CI{"JSON.STRAPPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::JSON}
                    .HFUNC(StrAppend);
   *registry << CI{"JSON.CLEAR", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Clear);
-  *registry << CI{"JSON.ARRPOP", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrPop);
+  *registry << CI{"JSON.ARRPOP", CO::JOURNALED | CO::ACCESS | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(
+      ArrPop);
   *registry << CI{"JSON.ARRTRIM", CO::JOURNALED | CO::FAST, 5, 1, 1, acl::JSON}.HFUNC(ArrTrim);
   *registry << CI{"JSON.ARRINSERT", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::JSON}
                    .HFUNC(ArrInsert);
