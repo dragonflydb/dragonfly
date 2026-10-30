@@ -813,10 +813,10 @@ void DebugCmd::Replica(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (opt == "PAUSE" || opt == "RESUME") {
-    sf_.PauseReplication(opt == "PAUSE");
+    sf_.replica_manager().Pause(opt == "PAUSE");
     return rb->SendOk();
   } else if (opt == "OFFSET") {
-    const auto offset_info = sf_.GetReplicaOffsetInfo();
+    const auto offset_info = sf_.replica_manager().GetOffsetInfo();
     if (offset_info) {
       rb->StartArray(2);
       rb->SendBulkString(offset_info.value().sync_id);
@@ -1319,7 +1319,7 @@ void DebugCmd::Stacktrace(CommandContext* cmd_cntx) {
 void DebugCmd::ReplDiag(CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (auto unread = sf_.GetReplicaMasterSocketUnreadBytes(); unread) {
+  if (auto unread = sf_.replica_manager().GetMasterSocketUnreadBytes(); unread) {
     LOG(WARNING) << "DEBUG REPLDIAG: master_socket_unread_bytes=" << *unread;
   } else {
     LOG(WARNING) << "DEBUG REPLDIAG: not a redis-stream replica (no master socket)";

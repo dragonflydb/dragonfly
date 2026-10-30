@@ -320,7 +320,7 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
   VLOG(1) << "Got DFLY FLOW master_id: " << master_id << " sync_id: " << sync_id_str
           << " flow: " << flow_id_str << " seq: " << flow_lsn.value_or(-1);
 
-  if (master_id != sf_->master_replid()) {
+  if (master_id != sf_->replica_manager().master_replid()) {
     return cmd_cntx->SendError(kBadMasterId);
   }
 
@@ -358,7 +358,8 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
       flow.journal_held = true;
     }
 
-    std::optional<Replica::LastMasterSyncData> my_last_master = sf_->GetLastMasterData();
+    std::optional<Replica::LastMasterSyncData> my_last_master =
+        sf_->replica_manager().GetLastMasterData();
 
     // Skip full sync if we stem from the same master and this node was promoted (my_last_master)
     const bool failover_match =
@@ -366,7 +367,7 @@ void DflyCmd::Flow(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     // Skip full sync if we have the same parent in a cascaded setup
     const bool cascaded_match = replica_last_master &&
-                                replica_last_master->id == sf_->GetLineageId() &&
+                                replica_last_master->id == sf_->replica_manager().GetLineageId() &&
                                 absl::GetFlag(FLAGS_experimental_cascaded_partial_sync);
 
     // Case for partial sync
