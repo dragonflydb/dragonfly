@@ -79,9 +79,16 @@ class ReplicaInfo:
     port: int
 
 
+async def client_local_ip(client) -> str:
+    """The local address the client reached the server on: ::1 or 127.0.0.1 for "localhost".
+
+    A node announces itself with this address, while links between nodes stay on IPv4."""
+    return (await client.client_info())["laddr"].rsplit(":", 1)[0]
+
+
 def verify_slots_result(port: int, answer: list, replicas, master_id: str | None = None) -> bool:
     def is_local_host(ip: str) -> bool:
-        return ip == "127.0.0.1" or ip == "localhost"
+        return ip in ("127.0.0.1", "::1", "localhost")
 
     assert answer[0] == 0  # start shard
     assert answer[1] == 16383  # last shard
@@ -138,6 +145,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
         assert rc == "OK"
 
     await wait_available_async(c_replicas)
+    myself_ip = await client_local_ip(c_master)
 
     for replica, replica_id, c_replica in zip(replicas, replica_ids, c_replicas):
         res = await c_replica.execute_command("CLUSTER SLOTS")
@@ -161,7 +169,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
                 "node_id": master_id,
                 "slots": [["0", "16383"]],
             },
-            f"127.0.0.1:{replica.port}": {
+            f"{myself_ip}:{replica.port}": {
                 "connected": True,
                 "epoch": "0",
                 "flags": "myself,slave",
@@ -190,7 +198,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
     )
 
     assert await c_master.execute_command("CLUSTER NODES") == {
-        f"127.0.0.1:{master.port}": {
+        f"{myself_ip}:{master.port}": {
             "connected": True,
             "epoch": "0",
             "flags": "myself,master",
@@ -205,7 +213,7 @@ async def test_emulated_cluster_with_replicas(df_factory):
     }
 
     assert await c_master_admin.execute_command("CLUSTER NODES") == {
-        f"127.0.0.1:{master.port}": {
+        f"{myself_ip}:{master.port}": {
             "connected": True,
             "epoch": "0",
             "flags": "myself,master",
@@ -270,7 +278,8 @@ async def test_emulated_cluster_replica_advertises_announced_addresses(df_factor
     assert await c_replica.execute_command(f"REPLICAOF localhost {master.admin_port}") == "OK"
     await wait_available_async(c_replica)
 
-    expected = [[0, 16383, ["127.0.0.2", 1337, master_id], ["127.0.0.1", replica.port, replica_id]]]
+    replica_ip = await client_local_ip(c_replica)
+    expected = [[0, 16383, ["127.0.0.2", 1337, master_id], [replica_ip, replica.port, replica_id]]]
     assert await c_replica.execute_command("CLUSTER SLOTS") == expected
 
     # The announced address is captured at handshake time: a runtime change on the master reaches
