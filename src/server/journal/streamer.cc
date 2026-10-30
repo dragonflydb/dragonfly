@@ -360,8 +360,8 @@ bool SlotMigrationStreamer::ShouldWrite(SlotId slot_id) const {
 
 bool SlotMigrationStreamer::ShouldSerialize(DbIndex db_index, const PrimeKey& pk) const {
   // Cluster mode blocks SELECT, but loading an RDB file taken from a non-cluster instance can
-  // still activate other databases. Slot ownership (and FlushSlots) covers only db 0, so keys
-  // in other databases are not migrated. This applies to both the traversal and OnChange flows.
+  // still activate other databases. Slot ownership covers only db 0, so keys in other databases
+  // are not migrated. This applies to both the traversal and OnChange flows.
   if (db_index != 0)
     return false;
 
