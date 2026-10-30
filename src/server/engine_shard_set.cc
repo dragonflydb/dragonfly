@@ -137,6 +137,12 @@ void EngineShardSet::PreShutdown() {
   RunBlockingInParallel([](EngineShard* shard) {
     shard->StopPeriodicFiber();
 
+    // Let throttled slot sweeps unregister their callbacks before destroying the slices.
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    while (db_slice.HasRegisteredCallbacks()) {
+      ThisFiber::SleepFor(100us);
+    }
+
     // We must close tiered_storage before we destroy namespaces that own db slices.
     if (shard->tiered_storage()) {
       shard->tiered_storage()->Close();
