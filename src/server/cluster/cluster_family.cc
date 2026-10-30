@@ -8,6 +8,7 @@
 #include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -651,9 +652,13 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  vector<std::pair<SlotId, SlotStats>> slots_stats;
+  // Keep the requested ranges unexpanded, so memory does not grow with the reply size.
+  vector<SlotRange> ranges;
+  size_t total_slots = 0;
   while (parser.HasNext()) {
     auto arg = parser.Next<std::string_view>();
+    uint32_t start_slot, end_slot;
+
     // Check if argument contains a dash for range notation (e.g., "1-100")
     size_t dash_pos = arg.find('-');
     if (dash_pos != std::string_view::npos && dash_pos > 0) {
@@ -661,7 +666,6 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
       std::string_view start_str = arg.substr(0, dash_pos);
       std::string_view end_str = arg.substr(dash_pos + 1);
 
-      uint32_t start_slot, end_slot;
       if (!absl::SimpleAtoi(start_str, &start_slot) || !absl::SimpleAtoi(end_str, &end_slot)) {
         return cmd_cntx->SendError("Invalid slot range format");
       }
@@ -674,65 +678,75 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
       if (start_slot > end_slot) {
         std::swap(start_slot, end_slot);
       }
-
-      for (uint32_t sid = start_slot; sid <= end_slot; ++sid) {
-        slots_stats.emplace_back(sid, SlotStats{});
-      }
     } else {
       // Parse as single slot id
-      uint32_t sid;
-      if (!absl::SimpleAtoi(arg, &sid)) {
+      if (!absl::SimpleAtoi(arg, &start_slot)) {
         return cmd_cntx->SendError(kInvalidIntErr);
       }
-      if (sid > kMaxSlotNum) {
+      if (start_slot > kMaxSlotNum) {
         return cmd_cntx->SendError("Invalid slot id");
       }
-      slots_stats.emplace_back(sid, SlotStats{});
+      end_slot = start_slot;
     }
+    ranges.push_back({SlotId(start_slot), SlotId(end_slot)});
+    total_slots += end_slot - start_slot + 1;
   }
 
-  if (slots_stats.empty()) {
+  if (ranges.empty()) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
-  fb2::Mutex mu;
+  // Collect in rounds of up to all slots, which bounds memory however many slots are requested.
+  // Waking up a shard thread costs more than reading its stats, so every round visits each shard
+  // once. The shards add their stats one after another, which needs no locking.
+  const size_t round_size = std::min<size_t>(total_slots, kMaxSlotNum + 1);
+  vector<SlotId> round_slots(round_size);
+  vector<SlotStats> round_stats;
 
-  auto cb = [&](auto*) ABSL_LOCKS_EXCLUDED(mu) {
-    EngineShard* shard = EngineShard::tlocal();
-    if (shard == nullptr)
-      return;
+  // Reply strings are literals, so they remain valid while waiting for the shards.
+  SinkReplyBuilder::ReplyScope scope(rb);
+  rb->StartArray(total_slots);
 
-    util::fb2::LockGuard lk(mu);
-    for (auto& [slot, data] : slots_stats) {
-      data += namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).GetSlotStats(slot);
+  auto range = ranges.begin();
+  SlotId next_slot = range->start;
+  while (range != ranges.end()) {
+    size_t count = 0;
+    for (; count < round_size && range != ranges.end(); ++count) {
+      round_slots[count] = next_slot;
+      if (next_slot++ == range->end && ++range != ranges.end())
+        next_slot = range->start;
     }
-  };
 
-  shard_set->pool()->AwaitFiberOnAll(std::move(cb));
+    round_stats.assign(count, SlotStats{});
+    for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
+      shard_set->pool()->at(sid)->AwaitBrief([&] {
+        const auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(sid);
+        db_slice.AddSlotStats({round_slots.data(), count}, absl::MakeSpan(round_stats));
+      });
+    }
 
-  rb->StartArray(slots_stats.size());
+    for (size_t i = 0; i < count; ++i) {
+      const SlotStats& stats = round_stats[i];
+      rb->StartArray(stats.tiered_bytes > 0 ? 11 : 9);
+      rb->SendLong(round_slots[i]);
+      rb->SendBulkString("key_count");
+      rb->SendLong(stats.key_count);
+      rb->SendBulkString("total_reads");
+      rb->SendLong(stats.total_reads);
+      rb->SendBulkString("total_writes");
+      rb->SendLong(stats.total_writes);
 
-  for (const auto& slot_data : slots_stats) {
-    rb->StartArray(slot_data.second.tiered_bytes > 0 ? 11 : 9);
-    rb->SendLong(slot_data.first);
-    rb->SendBulkString("key_count");
-    rb->SendLong(slot_data.second.key_count);
-    rb->SendBulkString("total_reads");
-    rb->SendLong(slot_data.second.total_reads);
-    rb->SendBulkString("total_writes");
-    rb->SendLong(slot_data.second.total_writes);
+      // Account for both the values and the table space of the entries.
+      // Each entry is comprised from CompactObj for key and CompactObj for value.
+      // Sometimes the values are very small and table space becomes significant.
+      rb->SendBulkString("memory_bytes");
+      rb->SendLong(stats.memory_bytes + stats.key_count * sizeof(CompactObj) * 2);
 
-    // Account for both the values and the table space of the entries.
-    // Each entry is comprised from CompactObj for key and CompactObj for value.
-    // Sometimes the values are very small and table space becomes significant.
-    rb->SendBulkString("memory_bytes");
-    rb->SendLong(slot_data.second.memory_bytes +
-                 slot_data.second.key_count * sizeof(CompactObj) * 2);
-
-    // Disk bytes held by the slot's offloaded entries; reported only when non-zero.
-    if (slot_data.second.tiered_bytes > 0) {
-      rb->SendBulkString("tiered_bytes");
-      rb->SendLong(slot_data.second.tiered_bytes);
+      // Disk bytes held by the slot's offloaded entries; reported only when non-zero.
+      if (stats.tiered_bytes > 0) {
+        rb->SendBulkString("tiered_bytes");
+        rb->SendLong(stats.tiered_bytes);
+      }
     }
   }
 }
