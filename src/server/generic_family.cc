@@ -748,9 +748,13 @@ void OpScan(const OpArgs& op_args, const ScanOpts& scan_opts, uint64_t* cursor, 
   {
     // Disable flush journal changes to prevent preemption in traverse.
     journal::DisableFlushGuard journal_flush_guard;
+    // Prefetching keys pays off only if keys are decoded before any metadata filter rejects them.
+    const bool use_prefetch = !scan_opts.type_filter && !scan_opts.mask &&
+                              scan_opts.min_malloc_size == 0 && scan_opts.bucket_id == UINT_MAX;
+    auto scan_cb = [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); };
     do {
-      cur = prime_table->Traverse(
-          cur, [&](PrimeIterator it) { cnt += ScanCb(op_args, it, scan_opts, vec); });
+      cur = use_prefetch ? prime_table->TraversePrefetched(cur, scan_cb)
+                         : prime_table->Traverse(cur, scan_cb);
     } while (cur && cnt < scan_opts.limit &&
              (base::CycleClock::Now() - start_cycles) < timeout_cycles);
   }

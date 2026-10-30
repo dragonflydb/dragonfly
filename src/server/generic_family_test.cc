@@ -3470,8 +3470,8 @@ TEST_F(MemParityTest, DISABLED_TableGrowth) {
 }
 
 // Each iteration traverses the whole database, including command dispatch and RESP serialization
-// to a reusable in-memory sink. Run with --bench --gtest_filter='-*'
-// --benchmark_filter=BM_ScanCommand --benchmark_min_time=1s.
+// to a reusable in-memory sink. key_prefix_len selects short (inline) or long (heap) keys.
+// Run with --bench --gtest_filter='-*' --benchmark_filter=BM_ScanCommand --benchmark_min_time=1s.
 class ScanBenchmark : public BaseFamilyTest {
  public:
   ScanBenchmark() {
@@ -3489,9 +3489,11 @@ class ScanBenchmark : public BaseFamilyTest {
     const uint64_t key_count = state.range(0);
     const string count = absl::StrCat(state.range(1));
     const bool expiring = state.range(2);
+    // Short prefixes give inline keys, long ones give heap-allocated keys.
+    const size_t key_prefix_len = state.range(4);
 
-    vector<string> populate_args = {"debug",         "populate", absl::StrCat(key_count),
-                                    string(48, 'k'), "16",       "rand"};
+    vector<string> populate_args = {
+        "debug", "populate", absl::StrCat(key_count), string(key_prefix_len, 'k'), "16", "rand"};
     if (expiring) {
       populate_args.insert(populate_args.end(), {"expire", "86400", "86401"});
     }
@@ -3564,9 +3566,8 @@ static void BM_ScanCommand(benchmark::State& state) {
   server.RunBenchmark(state);
 }
 BENCHMARK(BM_ScanCommand)
-    ->ArgNames({"keys", "count", "expiring", "match"})
-    ->ArgsProduct({{1'000'000}, {10, 100, 1000}, {0, 1}, {0}})
-    ->Args({1'000'000, 1000, 1, 1})
+    ->ArgNames({"keys", "count", "expiring", "match", "key_prefix_len"})
+    ->ArgsProduct({{1'000'000}, {10, 100, 1000}, {0, 1}, {0}, {4, 200, 48}})
     ->MeasureProcessCPUTime()
     ->UseRealTime()
     ->Unit(benchmark::kMillisecond);

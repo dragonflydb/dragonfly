@@ -1465,6 +1465,38 @@ TEST_F(DashTest, TraverseProgressMutations) {
   }
 }
 
+TEST_F(DashTest, TraversePrefetched) {
+  constexpr auto kNumItems = 5000;
+  for (size_t i = 0; i < kNumItems; ++i)
+    dt_.Insert(i, i);
+
+  vector<pair<uint64_t, uint64_t>> plain, prefetched;  // (cursor token, key)
+  Dash64::Cursor cursor;
+  do {
+    uint64_t token = cursor.token();
+    cursor =
+        dt_.Traverse(cursor, [&](Dash64::iterator it) { plain.emplace_back(token, it->first); });
+  } while (cursor);
+
+  do {
+    uint64_t token = cursor.token();
+    cursor = dt_.TraversePrefetched(
+        cursor, [&](Dash64::iterator it) { prefetched.emplace_back(token, it->first); });
+  } while (cursor);
+
+  EXPECT_EQ(plain, prefetched);
+  set<uint64_t> keys;
+  for (auto& [_, k] : prefetched)
+    keys.insert(k);
+  EXPECT_EQ(keys.size(), kNumItems);
+
+  // Erasing the visited entry from the callback is allowed.
+  do {
+    cursor = dt_.TraversePrefetched(cursor, [&](Dash64::iterator it) { dt_.Erase(it); });
+  } while (cursor);
+  EXPECT_EQ(dt_.size(), 0u);
+}
+
 TEST_F(DashTest, TraverseSegmentOrder) {
   constexpr auto kNumItems = 50;
   for (size_t i = 0; i < kNumItems; ++i) {
