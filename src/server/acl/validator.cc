@@ -164,6 +164,13 @@ bool AreKeysAllowed(const AclKeys& keys, const CommandId& id, const ParsedArgs& 
     return true;
 
   if (id.first_key_pos() != 0 && (id.IsReadOnly() || id.IsJournaled())) {
+    // DetermineKeys returns no keys for global transactions, so check MOVE's key directly.
+    if (id.opt_mask() & CO::GLOBAL_TRANS) {
+      const size_t pos = id.first_key_pos() - 1;
+      return pos < tail_args.size() &&
+             IsKeyAllowed(keys, tail_args[pos], RequiredKeyPermissions(id, tail_args, 0));
+    }
+
     auto key_index = DetermineKeys(&id, tail_args);
 
     // Commands with content-dependent key positions (e.g. ZUNION's numkeys) can fail to parse

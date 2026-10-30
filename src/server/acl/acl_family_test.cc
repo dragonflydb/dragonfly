@@ -911,6 +911,11 @@ TEST_F(AclFamilyTest, CommandsReturningDataRequireReadPermission) {
       {"%W~src %W~dst", "RENAME src dst", false},
       {"%R~k", "XREADGROUP GROUP g c STREAMS k >", true},
       {"%W~k", "XREADGROUP GROUP g c STREAMS k >", false},
+      {"%R~k %W~k", "GETDEL k", true},
+      {"%R~k %W~k", "INCR k", true},
+      {"%RW~k", "MOVE k 1", true},
+      {"%W~k", "MOVE k 1", false},
+      {"~other", "MOVE k 1", false},
   };
 
   for (const auto& [keys, command, allowed] : cases) {
