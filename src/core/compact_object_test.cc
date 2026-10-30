@@ -1444,6 +1444,63 @@ TEST_F(CompactObjectTest, TryBorrow_CowOnMutation) {
   cobj_.Reset();
 }
 
+TEST_F(CompactObjectTest, TryBorrow_CowOnSetByteAtIndexRaw) {
+  string val(3000, '\x80');
+  cobj_.SetString(val);
+
+  {
+    auto borrow = cobj_.TryBorrow();
+    ASSERT_TRUE(borrow.has_value());
+
+    // Mutate the value via SetByteAtIndex while read pin is held.
+    auto res = cobj_.SetByteAtIndex(0, '\x81');
+    EXPECT_TRUE(res.first);
+    EXPECT_FALSE(res.second);  // CoW rewrite occurred instead of in-place overwrite
+
+    // Old pinned buffer must remain intact and be orphaned.
+    EXPECT_TRUE(CompactObj::TEST_PinOrphaned(*borrow));
+    EXPECT_EQ(borrow->view()[0], '\x80');
+
+    uint8_t modified_byte = 0;
+    EXPECT_TRUE(cobj_.GetByteAtIndex(0, &modified_byte));
+    EXPECT_EQ(modified_byte, 0x81);
+  }
+
+  CompactObj::DrainPendingReads();
+  cobj_.Reset();
+}
+
+TEST_F(CompactObjectTest, TryBorrow_CowOnSetByteAtIndexAscii) {
+  string val(3000, 'a');
+  cobj_.SetString(val);
+
+  {
+    auto borrow = cobj_.TryBorrow();
+    ASSERT_TRUE(borrow.has_value());
+
+    // Mutate the value via SetByteAtIndex while read pin is held.
+    auto res = cobj_.SetByteAtIndex(0, 'b');
+    EXPECT_TRUE(res.first);
+    EXPECT_FALSE(res.second);  // CoW rewrite occurred instead of in-place overwrite
+
+    // Old pinned buffer must remain intact and be orphaned.
+    EXPECT_TRUE(CompactObj::TEST_PinOrphaned(*borrow));
+    CompactObj::StrEncoding str_enc(borrow->encoding(), false);
+    string decoded(str_enc.DecodedSize(borrow->view()), '\0');
+    detail::ascii_unpack(reinterpret_cast<const uint8_t*>(borrow->view().data()),
+                         str_enc.DecodedSize(borrow->view()), decoded.data());
+    EXPECT_EQ(decoded[0], 'a');
+    EXPECT_EQ(decoded, val);
+
+    uint8_t modified_byte = 0;
+    EXPECT_TRUE(cobj_.GetByteAtIndex(0, &modified_byte));
+    EXPECT_EQ(modified_byte, 'b');
+  }
+
+  CompactObj::DrainPendingReads();
+  cobj_.Reset();
+}
+
 TEST_F(CompactObjectTest, TryBorrow_DefragSkipsWhenPinned) {
   string val(300, '\x80');
   cobj_.SetString(val);
