@@ -8,16 +8,10 @@
 #include <unistd.h>
 
 #include <algorithm>
-#include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <cstdio>
-#include <cstdlib>
-#include <deque>
-#include <limits>
+#include <iterator>
 #include <memory>
-#include <numeric>
-#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -33,31 +27,24 @@
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/strip.h"
 #include "base/flags.h"
 #include "base/logging.h"
-#include "core/overloaded.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
-#include "facade/facade_types.h"
+#include "facade/error.h"
 #include "facade/reply_builder.h"
-#include "io/file.h"
 #include "io/file_util.h"
-#include "server/acl/acl_commands_def.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/validator.h"
 #include "server/cluster_support.h"
-#include "server/command_registry.h"
-#include "server/common.h"
 #include "server/config_registry.h"
 #include "server/conn_context.h"
-#include "server/error.h"
 #include "server/server_state.h"
 #include "util/proactor_pool.h"
-
-namespace rng = std::ranges;
 
 using namespace std;
 
@@ -69,9 +56,13 @@ namespace dfly::acl {
 
 namespace {
 
-using MaterializedContents = variant<vector<vector<string_view>>, string>;
+namespace rng = std::ranges;
 
-MaterializedContents MaterializeFileContents(vector<string>* usernames, string_view file_contents);
+using facade::ErrorReply;
+using facade::RedisReplyBuilder;
+using Sign = User::Sign;
+
+constexpr string_view kNoAclFileErr = "Dragonfly is not configured to use an ACL file.";
 
 // A renamed file is durable only once its directory entry is.
 bool SyncDir(string file_path) {
@@ -83,12 +74,9 @@ bool SyncDir(string file_path) {
   return synced;
 }
 
-void SendAclSecurityEvents(const AclLog::LogEntry& entry, facade::RedisReplyBuilder* rb);
-
-template <typename P>
-void TraverseEvictImpl(P predicate, facade::Listener* main_listener, util::ProactorPool* pool);
-
-using Sign = User::Sign;
+RedisReplyBuilder* GetRedisReplyBuilder(CommandContext* cmd_cntx) {
+  return static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+}
 
 string_view SignPrefix(Sign sign) {
   return sign == Sign::PLUS ? "+" : "-";
@@ -298,11 +286,44 @@ string UserToString(string_view username, const User& user, bool file_format,
                       CommandRulesToString(user, family_commands), " $", DbToString(user.Db()));
 }
 
+string_view ReasonName(AclLog::Reason reason) {
+  switch (reason) {
+    case AclLog::Reason::COMMAND:
+      return "COMMAND";
+    case AclLog::Reason::KEY:
+      return "KEY";
+    case AclLog::Reason::PUB_SUB:
+      return "PUB_SUB";
+    case AclLog::Reason::AUTH:
+      return "AUTH";
+  }
+  return "AUTH";
+}
+
+void SendLogEntry(const AclLog::LogEntry& entry, RedisReplyBuilder* rb) {
+  auto now_diff = chrono::system_clock::now() - entry.entry_creation;
+  auto secs = chrono::duration_cast<chrono::seconds>(now_diff);
+  auto left_over = now_diff - chrono::duration_cast<chrono::microseconds>(secs);
+
+  rb->StartArray(12);
+  rb->SendSimpleString("reason");
+  rb->SendSimpleString(ReasonName(entry.reason));
+  rb->SendSimpleString("object");
+  rb->SendSimpleString(entry.object);
+  rb->SendSimpleString("username");
+  rb->SendSimpleString(entry.username);
+  rb->SendSimpleString("age-seconds");
+  rb->SendSimpleString(absl::StrCat(secs.count(), ".", left_over.count()));
+  rb->SendSimpleString("client-info");
+  rb->SendSimpleString(entry.client_info);
+  rb->SendSimpleString("timestamp-created");
+  rb->SendLong(entry.entry_creation.time_since_epoch().count());
+}
+
 }  // namespace
 
 AclFamily::AclFamily(UserRegistry* registry, util::ProactorPool* pool)
-    : registry_(registry), pool_(pool) {
-  dbnum_ = absl::GetFlag(FLAGS_dbnum);
+    : registry_(registry), pool_(pool), dbnum_(absl::GetFlag(FLAGS_dbnum)) {
 }
 
 void AclFamily::Acl(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -311,381 +332,309 @@ void AclFamily::Acl(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void AclFamily::List(CmdArgParser parser, CommandContext* cmd_cntx) {
   const auto reg = registry_->GetRegistryWithLock();
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
+  auto* rb = GetRedisReplyBuilder(cmd_cntx);
   rb->StartArray(reg.registry.size());
   for (const auto& [username, user] : reg.registry)
     rb->SendSimpleString(UserToString(username, user, false, family_commands_));
 }
 
-void AclFamily::StreamUpdatesToAllProactorConnections(const std::string& user,
-                                                      const Commands& update_commands,
-                                                      const AclKeys& update_keys,
-                                                      const AclPubSub& update_pub_sub, size_t db) {
-  auto update_cb = [&]([[maybe_unused]] size_t id, util::Connection* conn) {
-    DCHECK(conn);
-    auto connection = static_cast<facade::Connection*>(conn);
-    if (!connection->IsHttp() && connection->cntx()) {
-      auto* cntx = static_cast<dfly::ConnectionContext*>(connection->cntx());
-      if (user == cntx->authed_username) {
-        cntx->SetAclCredentials({.acl_commands = update_commands,
-                                 .keys = update_keys,
-                                 .pub_sub = update_pub_sub,
-                                 .ns = {},
-                                 .db = db});
-      }
-    }
-  };
+void AclFamily::StreamUpdatesToConnections(string_view username, const User& user) {
+  if (!main_listener_ || main_listener_->protocol() != facade::Protocol::REDIS)
+    return;
 
-  if (main_listener_ && main_listener_->protocol() == facade::Protocol::REDIS) {
-    main_listener_->TraverseConnections(update_cb);
-  }
+  main_listener_->TraverseConnections([&](unsigned, util::Connection* conn) {
+    auto* connection = static_cast<facade::Connection*>(conn);
+    if (connection->IsHttp() || !connection->cntx())
+      return;
+
+    auto* cntx = static_cast<ConnectionContext*>(connection->cntx());
+    if (cntx->authed_username == username) {
+      cntx->SetAclCredentials({.acl_commands = user.AclCommands(),
+                               .keys = user.Keys(),
+                               .pub_sub = user.PubSub(),
+                               .ns = {},
+                               .db = user.Db()});
+    }
+  });
 }
 
-using facade::ErrorReply;
+void AclFamily::EvictConnections(absl::FunctionRef<bool(string_view username)> pred) {
+  if (!main_listener_)
+    return;
+
+  pool_->AwaitFiberOnAll([&](unsigned, util::ProactorBase* pb) {
+    vector<facade::Connection::WeakRef> connections;
+    auto collect = [&](unsigned, util::Connection* conn) {
+      auto* connection = static_cast<facade::Connection*>(conn);
+      auto* cntx = static_cast<ConnectionContext*>(connection->cntx());
+      if (cntx && pred(cntx->authed_username))
+        connections.push_back(connection->Borrow());
+    };
+    main_listener_->TraverseConnectionsOnThread(collect, UINT32_MAX, nullptr);
+
+    for (auto& weak_conn : connections) {
+      facade::Connection* conn = weak_conn.Get();
+
+      // Preemptive for TlsSocket
+      if (conn && conn->socket()->proactor()->GetPoolIndex() == pb->GetPoolIndex())
+        conn->ShutdownSelfBlocking();
+    }
+  });
+}
+
+User& AclFamily::UpsertUser(string_view username, User::UpdateRequest req,
+                            UserRegistry::RegistryType* registry) {
+  auto [it, is_new] = registry->try_emplace(username);
+  User& user = it->second;
+  const User::MemoryUsage before = is_new ? User::MemoryUsage{} : user.GetMemoryUsage();
+
+  // New users start without permissions, which ACL LIST shows as a leading -@all.
+  if (is_new)
+    req.updates.insert(req.updates.begin(), CategoryRule(Sign::MINUS, ALL, category_commands_));
+
+  user.Update(std::move(req));
+  registry_->TrackUser(before, user.GetMemoryUsage(), is_new);
+  return user;
+}
 
 void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view username = parser.Next();
   auto reg = registry_->GetRegistryWithWriteLock();
-  const bool exists = reg.registry.contains(username);
-  const bool has_all_keys = exists ? reg.registry.find(username)->second.Keys().all_keys : false;
-  auto req = ParseAclSetUser(parser.RemainingRange(), has_all_keys);
+  auto it = reg.registry.find(username);
+  const bool exists = it != reg.registry.end();
+  auto req = ParseAclSetUser(parser.RemainingRange(), exists && it->second.Keys().all_keys);
+  if (const auto* error = get_if<ErrorReply>(&req))
+    return cmd_cntx->SendError(*error);
 
-  auto error_case = [cmd_cntx](ErrorReply&& error) { cmd_cntx->SendError(error); };
+  auto& update = get<User::UpdateRequest>(req);
+  const bool reset_channels = update.reset_channels;
+  const User& user = UpsertUser(username, std::move(update), &reg.registry);
 
-  auto update_case = [username, &reg, cmd_cntx, this, exists](User::UpdateRequest&& req) {
-    auto& user = reg.registry[username];
-    const User::MemoryUsage before = exists ? user.GetMemoryUsage() : User::MemoryUsage{};
-    if (!exists) {
-      User::UpdateRequest default_req;
-      default_req.updates = {CategoryRule(User::Sign::MINUS, acl::ALL, category_commands_)};
-      user.Update(std::move(default_req));
-    }
-    const bool reset_channels = req.reset_channels;
-    user.Update(std::move(req));
-    registry_->TrackUser(before, user.GetMemoryUsage(), !exists);
-    // Send ok first because the connection might get evicted
-    cmd_cntx->SendOk();
-    if (exists) {
-      if (!reset_channels) {
-        StreamUpdatesToAllProactorConnections(string(username), user.AclCommands(), user.Keys(),
-                                              user.PubSub(), user.Db());
-      }
-      // We evict connections that had their channels reseted
-      else {
-        EvictOpenConnectionsOnAllProactors({username});
-      }
-    }
-  };
+  // Reply first because the connection might get evicted.
+  cmd_cntx->SendOk();
+  if (!exists)
+    return;
 
-  std::visit(Overloaded{error_case, update_case}, std::move(req));
-}
-
-void AclFamily::EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<string_view>& users) {
-  return TraverseEvictImpl(
-      [&](auto* ctx) {
-        auto* dfly_ctx = static_cast<dfly::ConnectionContext*>(ctx);
-        return ctx && users.contains(dfly_ctx->authed_username);
-      },
-      main_listener_, pool_);
-}
-
-void AclFamily::EvictOpenConnectionsOnAllProactorsWithRegistry(
-    const UserRegistry::RegistryType& registry) {
-  return TraverseEvictImpl(
-      [&](auto* ctx) {
-        auto* dfly_ctx = static_cast<dfly::ConnectionContext*>(ctx);
-        return ctx && dfly_ctx->authed_username != "default" &&
-               registry.contains(dfly_ctx->authed_username);
-      },
-      main_listener_, pool_);
+  if (reset_channels)
+    EvictConnections([username](string_view name) { return name == username; });
+  else
+    StreamUpdatesToConnections(username, user);
 }
 
 void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto& registry = *registry_;
   absl::flat_hash_set<string_view> users;
-
   for (string_view username : parser.RemainingRange()) {
-    if (username == "default") {
-      continue;
-    }
-    if (registry.RemoveUser(username)) {
+    if (username != "default" && registry_->RemoveUser(username))
       users.insert(username);
-    }
   }
 
-  if (users.empty()) {
-    cmd_cntx->rb()->SendLong(0);
-    return;
+  if (!users.empty()) {
+    VLOG(1) << "Evicting open acl connections";
+    EvictConnections([&users](string_view name) { return users.contains(name); });
+    VLOG(1) << "Done evicting open acl connections";
   }
-  VLOG(1) << "Evicting open acl connections";
-  EvictOpenConnectionsOnAllProactors(users);
-  VLOG(1) << "Done evicting open acl connections";
-  cmd_cntx->rb()->SendLong(users.size());
+  cmd_cntx->SendLong(users.size());
 }
 
 void AclFamily::WhoAmI(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-  rb->SendBulkString(absl::StrCat("User is ", cmd_cntx->server_conn_cntx()->authed_username));
-}
-
-string AclFamily::RegistryToString() const {
-  const auto reg = registry_->GetRegistryWithLock();
-  string result;
-  for (const auto& [username, user] : reg.registry)
-    absl::StrAppend(&result, UserToString(username, user, true, family_commands_), "\n");
-  return result;
+  GetRedisReplyBuilder(cmd_cntx)->SendBulkString(
+      absl::StrCat("User is ", cmd_cntx->server_conn_cntx()->authed_username));
 }
 
 void AclFamily::Save(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto acl_file_path = absl::GetFlag(FLAGS_aclfile);
-  auto* builder = cmd_cntx->rb();
-  if (acl_file_path.empty()) {
-    builder->SendError("Dragonfly is not configured to use an ACL file.");
-    return;
+  const string acl_file = absl::GetFlag(FLAGS_aclfile);
+  if (acl_file.empty())
+    return cmd_cntx->SendError(kNoAclFileErr);
+
+  string contents;
+  {
+    const auto reg = registry_->GetRegistryWithLock();
+    for (const auto& [username, user] : reg.registry)
+      absl::StrAppend(&contents, UserToString(username, user, true, family_commands_), "\n");
   }
 
   // Written next to the aclfile and renamed over it, so a reader never sees a partial file.
-  std::string tmp = absl::StrCat(acl_file_path, ".tmpXXXXXX");
+  string tmp = absl::StrCat(acl_file, ".tmpXXXXXX");
   int fd = mkstemp(tmp.data());
-  auto fail = [&](std::string_view what) {
-    std::error_code ec(errno, std::system_category());
-    std::string error = absl::StrCat("Failed to ", what, ": ", ec.message());
+  auto fail = [&](string_view what) {
+    error_code ec(errno, system_category());
+    string error = absl::StrCat("Failed to ", what, ": ", ec.message());
     if (fd != -1) {
       close(fd);
       unlink(tmp.c_str());
     }
     LOG(ERROR) << error;
-    builder->SendError(error);
+    cmd_cntx->SendError(error);
   };
-  if (fd == -1) {
+  if (fd == -1)
     return fail("open the aclfile");
-  }
 
-  std::string output = RegistryToString();
   ssize_t n = 1;
-  for (size_t off = 0; n > 0 && off < output.size(); off += n) {
-    n = write(fd, output.data() + off, output.size() - off);
-  }
-  if (n <= 0 || fsync(fd) == -1) {
+  for (size_t off = 0; n > 0 && off < contents.size(); off += n)
+    n = write(fd, contents.data() + off, contents.size() - off);
+  if (n <= 0 || fsync(fd) == -1)
     return fail("write to the aclfile");
-  }
-  if (rename(tmp.c_str(), acl_file_path.c_str()) == -1) {
+  if (rename(tmp.c_str(), acl_file.c_str()) == -1)
     return fail("rename the aclfile");
-  }
+
   close(fd);
   fd = -1;
-  if (!SyncDir(acl_file_path)) {
+  if (!SyncDir(acl_file))
     return fail("sync the aclfile directory");
-  }
 
-  builder->SendOk();
+  cmd_cntx->SendOk();
 }
 
-GenericError AclFamily::LoadToRegistryFromFile(std::string_view full_path,
-                                               SinkReplyBuilder* builder) {
-  auto is_file_read = io::ReadFileToString(full_path);
-  if (!is_file_read) {
-    auto error = absl::StrCat("Dragonfly could not load ACL file ", full_path, " with error ",
-                              is_file_read.error().message());
-
+GenericError AclFamily::ParseAclFile(string_view path, UserRequests* requests) const {
+  auto contents = io::ReadFileToString(path);
+  if (!contents) {
+    string error = absl::StrCat("Dragonfly could not load ACL file ", path, " with error ",
+                                contents.error().message());
     LOG(WARNING) << error;
-    return {std::move(error)};
+    return GenericError{std::move(error)};
   }
 
-  auto file_contents = std::move(is_file_read.value());
-
-  std::vector<std::string> usernames;
-  auto materialized = MaterializeFileContents(&usernames, file_contents);
-
-  if (auto* bad_line = std::get_if<std::string>(&materialized)) {
-    std::string error = std::move(*bad_line);
-    LOG(WARNING) << error;
-    return {std::move(error)};
-  }
-
-  std::vector<User::UpdateRequest> requests;
-
-  auto& lines = std::get<0>(materialized);
+  vector<string_view> lines = absl::StrSplit(*contents, '\n');
   for (size_t i = 0; i < lines.size(); ++i) {
-    if (lines[i].empty())
+    // Only a CRLF's '\r' is dropped: ACL SAVE writes values verbatim, so other whitespace is data
+    // and ' ' alone separates rules.
+    string_view line = lines[i];
+    absl::ConsumeSuffix(&line, "\r");
+    if (absl::StripAsciiWhitespace(line).empty())
       continue;
-    auto req = ParseAclSetUser(facade::ParsedArgs{lines[i]}, false);
-    if (std::holds_alternative<ErrorReply>(req)) {
-      auto error = absl::StrCat("line ", i + 1, ": ", std::get<ErrorReply>(req).ToSv());
+
+    vector<string_view> tokens = absl::StrSplit(line, ' ', absl::SkipEmpty());
+    if (tokens.size() < 3 || !absl::EqualsIgnoreCase(tokens[0], "USER")) {
+      string error = absl::StrCat("line ", i + 1, ": expected USER <name> <rule>...");
+      LOG(WARNING) << error;
+      return GenericError{std::move(error)};
+    }
+
+    auto req = ParseAclSetUser(facade::ArgSlice{tokens}.subspan(2), false);
+    if (const auto* reply = get_if<ErrorReply>(&req)) {
+      string error = absl::StrCat("line ", i + 1, ": ", reply->ToSv());
       LOG(WARNING) << "Error while parsing aclfile: " << error;
-      return {std::move(error)};
+      return GenericError{std::move(error)};
     }
-    requests.push_back(std::move(std::get<User::UpdateRequest>(req)));
+    requests->emplace_back(string(tokens[1]), std::move(get<User::UpdateRequest>(req)));
   }
-
-  auto registry_with_wlock = registry_->GetRegistryWithWriteLock();
-  auto& registry = registry_with_wlock.registry;
-  if (builder) {
-    builder->SendOk();
-    // Evict open connections for old users
-    EvictOpenConnectionsOnAllProactorsWithRegistry(registry);
-    registry.clear();
-    registry_->ResetStats();
-  }
-
-  for (size_t i = 0; i < usernames.size(); ++i) {
-    User::UpdateRequest default_req;
-    default_req.updates = {CategoryRule(User::Sign::MINUS, acl::ALL, category_commands_)};
-    auto& user = registry[usernames[i]];
-    user.Update(std::move(default_req));
-    user.Update(std::move(requests[i]));
-    registry_->TrackUser({}, user.GetMemoryUsage(), /*is_new=*/true);
-  }
-
-  if (!registry.contains("default")) {
-    // --requirepass applies when the file does not define default.
-    auto req = registry_->DefaultUserUpdateRequest();
-    if (auto pass = absl::GetFlag(FLAGS_requirepass); !pass.empty()) {
-      req.passwords.front() = {std::move(pass)};
-    }
-    auto& user = registry["default"];
-    user.Update(std::move(req));
-    registry_->TrackUser({}, user.GetMemoryUsage(), /*is_new=*/true);
-  }
-
   return {};
 }
 
-GenericError AclFamily::Load() {
-  auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  return LoadToRegistryFromFile(acl_file, nullptr);
+void AclFamily::AddUsers(UserRequests requests, UserRegistry::RegistryType* registry) {
+  for (auto& [username, req] : requests) {
+    // Each record starts without commands, also when the file repeats a username.
+    if (registry->contains(username))
+      req.updates.insert(req.updates.begin(), CategoryRule(Sign::MINUS, ALL, category_commands_));
+    UpsertUser(username, std::move(req), registry);
+  }
+
+  if (!registry->contains("default")) {
+    // --requirepass applies when the file does not define default.
+    auto req = registry_->DefaultUserUpdateRequest();
+    if (auto pass = absl::GetFlag(FLAGS_requirepass); !pass.empty())
+      req.passwords.front() = {std::move(pass)};
+
+    auto& user = (*registry)["default"];
+    user.Update(std::move(req));
+    registry_->TrackUser({}, user.GetMemoryUsage(), /*is_new=*/true);
+  }
 }
 
 void AclFamily::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-  if (acl_file.empty()) {
-    rb->SendError("Dragonfly is not configured to use an ACL file.");
-    return;
-  }
+  const string acl_file = absl::GetFlag(FLAGS_aclfile);
+  if (acl_file.empty())
+    return cmd_cntx->SendError(kNoAclFileErr);
 
-  const auto load_error = LoadToRegistryFromFile(acl_file, rb);
+  UserRequests requests;
+  if (auto error = ParseAclFile(acl_file, &requests); error)
+    return cmd_cntx->SendError(absl::StrCat("Error loading: ", acl_file, " ", error.Format()));
 
-  if (load_error) {
-    rb->SendError(absl::StrCat("Error loading: ", acl_file, " ", load_error.Format()));
-  }
+  auto reg = registry_->GetRegistryWithWriteLock();
+
+  // Reply first because the connection might get evicted.
+  cmd_cntx->SendOk();
+  EvictConnections(
+      [&reg](string_view name) { return name != "default" && reg.registry.contains(name); });
+  reg.registry.clear();
+  registry_->ResetStats();
+  AddUsers(std::move(requests), &reg.registry);
 }
 
 void AclFamily::Log(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto args = parser.UnparsedArgs();
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-  if (args.size() > 1) {
-    return rb->SendError(facade::OpStatus::OUT_OF_RANGE);
-  }
+  if (args.size() > 1)
+    return cmd_cntx->SendError(facade::OpStatus::OUT_OF_RANGE);
 
   size_t max_output = 10;
   if (!args.empty()) {
-    auto option = args[0];
-    if (absl::EqualsIgnoreCase(option, "RESET")) {
+    if (absl::EqualsIgnoreCase(args[0], "RESET")) {
       pool_->AwaitFiberOnAll(
-          [](auto index, auto* context) { ServerState::tlocal()->acl_log.Reset(); });
-      rb->SendOk();
-      return;
+          [](unsigned, util::ProactorBase*) { ServerState::tlocal()->acl_log.Reset(); });
+      return cmd_cntx->SendOk();
     }
 
-    if (!absl::SimpleAtoi(option, &max_output)) {
-      rb->SendError("Invalid count");
-      return;
-    }
+    if (!absl::SimpleAtoi(args[0], &max_output))
+      return cmd_cntx->SendError("Invalid count");
   }
 
-  std::vector<AclLog::LogType> logs(pool_->size());
-  pool_->AwaitFiberOnAll([&logs, max_output](auto index, auto* context) {
+  vector<AclLog::LogType> logs(pool_->size());
+  pool_->AwaitFiberOnAll([&logs, max_output](unsigned index, util::ProactorBase*) {
     logs[index] = ServerState::tlocal()->acl_log.GetLog(max_output);
   });
 
-  size_t total_entries = 0;
-  for (auto& log : logs) {
-    total_entries += log.size();
-  }
+  vector<AclLog::LogEntry> entries;
+  for (auto& log : logs)
+    rng::move(log, back_inserter(entries));
 
-  if (total_entries == 0) {
-    rb->SendEmptyArray();
-    return;
-  }
+  // Newest first, like the log of each thread.
+  rng::stable_sort(entries, [](const auto& l, const auto& r) { return r < l; });
 
-  auto n_way_minimum = [](const auto& logs) {
-    size_t id = 0;
-    AclLog::LogEntry limit;
-    const AclLog::LogEntry* max = &limit;
-    for (size_t i = 0; i < logs.size(); ++i) {
-      if (!logs[i].empty() && logs[i].front() < *max) {
-        id = i;
-        max = &logs[i].front();
-      }
-    }
-
-    return id;
-  };
-
-  rb->StartArray(total_entries);
-
-  for (size_t i = 0; i < total_entries; ++i) {
-    const auto min = n_way_minimum(logs);
-    SendAclSecurityEvents(logs[min].front(), rb);
-    logs[min].pop_front();
-  }
+  auto* rb = GetRedisReplyBuilder(cmd_cntx);
+  rb->StartArray(entries.size());
+  for (const auto& entry : entries)
+    SendLogEntry(entry, rb);
 }
 
 void AclFamily::Users(CmdArgParser parser, CommandContext* cmd_cntx) {
-  const auto registry_with_lock = registry_->GetRegistryWithLock();
-  const auto& registry = registry_with_lock.registry;
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-
-  rb->StartArray(registry.size());
-  for (const auto& [username, _] : registry) {
+  const auto reg = registry_->GetRegistryWithLock();
+  auto* rb = GetRedisReplyBuilder(cmd_cntx);
+  rb->StartArray(reg.registry.size());
+  for (const auto& [username, _] : reg.registry)
     rb->SendSimpleString(username);
-  }
 }
 
 void AclFamily::Cat(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-
-  if (parser.HasNext()) {
-    string category = absl::AsciiStrToUpper(parser.Next());
-    if (!parser.Finalize())
-      return rb->SendError(parser.TakeError().MakeReply());
-
-    const auto cid_mask = ParseCategoryName(category);
-    if (!cid_mask) {
-      auto error = absl::StrCat("Unknown category: ", category);
-      rb->SendError(error);
-      return;
-    }
-
-    std::vector<std::string> results;
-    // TODO replace this with indexer
-    auto cb = [cid_mask, &results](auto name, auto& cid) {
-      if (*cid_mask & cid.acl_categories()) {
-        std::string& rule = results.emplace_back(name);
-        std::replace(rule.begin(), rule.end(), ' ', '|');  // the form rules use
-      }
-    };
-
-    cmd_registry_->Traverse(cb);
-    rb->StartArray(results.size());
-    for (const auto& command : results) {
-      rb->SendSimpleString(command);
-    }
-
-    return;
+  auto* rb = GetRedisReplyBuilder(cmd_cntx);
+  if (!parser.HasNext()) {
+    vector<string_view> categories;
+    rng::copy_if(kCategoryNames, back_inserter(categories),
+                 [](string_view name) { return name != kReservedCategory; });
+    return rb->SendSimpleStrArr(categories);
   }
 
-  vector<string_view> categories;
-  rng::copy_if(kCategoryNames, back_inserter(categories),
-               [](string_view name) { return name != kReservedCategory; });
-  rb->SendSimpleStrArr(categories);
+  const string category = absl::AsciiStrToUpper(parser.Next());
+  if (!parser.Finalize())
+    return rb->SendError(parser.TakeError().MakeReply());
+
+  const auto mask = ParseCategoryName(category);
+  if (!mask)
+    return rb->SendError(absl::StrCat("Unknown category: ", category));
+
+  vector<string> commands;
+  cmd_registry_->Traverse([&](string_view name, const CommandId& cid) {
+    if (cid.acl_categories() & *mask) {
+      string& rule = commands.emplace_back(name);
+      rng::replace(rule, ' ', '|');  // The form rules use.
+    }
+  });
+  rb->SendSimpleStrArr(commands);
 }
 
 void AclFamily::GetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view username = parser.Next();
   const auto reg = registry_->GetRegistryWithLock();
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
+  auto* rb = GetRedisReplyBuilder(cmd_cntx);
   auto it = reg.registry.find(username);
   if (it == reg.registry.end())
     return rb->SendNull();
@@ -722,43 +671,38 @@ void AclFamily::GetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::GenPass(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto* builder = cmd_cntx->rb();
-
   using GenPassBits = facade::FInt<uint32_t{1}, uint32_t{4096}>;
   uint32_t random_bits = parser.NextOrDefault<GenPassBits>(GenPassBits{256});
   if (!parser.Finalize()) {
     if (parser.TakeError().type == facade::CmdArgParser::UNPROCESSED)
-      return builder->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
-    return builder->SendError(
+      return cmd_cntx->SendError(facade::UnknownSubCmd("GENPASS", "ACL"));
+    return cmd_cntx->SendError(
         "ACL GENPASS argument must be the number of bits for the output password, a positive "
         "number up to 4096");
   }
 
-  std::random_device urandom("/dev/urandom");
+  random_device urandom("/dev/urandom");
   const size_t result_length = (random_bits + 3) / 4;
-  constexpr size_t step_size = sizeof(decltype(std::random_device::max()));
-  std::string response;
+  constexpr size_t step_size = sizeof(decltype(random_device::max()));
+  string response;
   for (size_t bytes_written = 0; bytes_written < result_length; bytes_written += step_size) {
     absl::StrAppendFormat(&response, "%08x", urandom());
   }
 
   response.resize(result_length);
-
-  builder->SendSimpleString(response);
+  cmd_cntx->SendSimpleString(response);
 }
 
 void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-  auto username = parser.Next();
-  const auto registry_with_lock = registry_->GetRegistryWithLock();
-  const auto& registry = registry_with_lock.registry;
-  if (!registry.contains(username)) {
-    auto error = absl::StrCat("User '", username, "' not found");
-    rb->SendError(error);
-    return;
-  }
+  auto* rb = GetRedisReplyBuilder(cmd_cntx);
+  string_view username = parser.Next();
+  const auto reg = registry_->GetRegistryWithLock();
+  auto it = reg.registry.find(username);
+  if (it == reg.registry.end())
+    return rb->SendError(absl::StrCat("User '", username, "' not found"));
 
   const facade::ParsedArgs simulated_cmd = parser.UnparsedArgs();
+
   // Use the same lookup as real dispatch (FindExtended), not a plain single-token Find: multi-word
   // commands like "ACL SETUSER" otherwise resolve to the bare family command ("ACL") and get
   // checked against the wrong, less restrictive ACL category.
@@ -767,36 +711,30 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
     // Mirror the lookup key FindExtended actually used: for ACL sub-commands that's "ACL
     // SUBCMD", not just "ACL", otherwise a bad sub-command misleadingly reports "ACL" itself
     // as not found.
-    std::string looked_up = absl::AsciiStrToUpper(simulated_cmd.Front());
-    if (looked_up == "ACL" && simulated_cmd.size() > 1) {
+    string looked_up = absl::AsciiStrToUpper(simulated_cmd.Front());
+    if (looked_up == "ACL" && simulated_cmd.size() > 1)
       absl::StrAppend(&looked_up, " ", absl::AsciiStrToUpper(simulated_cmd[1]));
-    }
-    auto error = absl::StrCat("Command '", looked_up, "' not found");
-    rb->SendError(error);
-    return;
+    return rb->SendError(absl::StrCat("Command '", looked_up, "' not found"));
   }
 
   // The regular command path validates arity before checking ACLs. DRYRUN historically accepts a
   // command without its arguments, so skip key-pattern validation for an incomplete simulation.
-  const auto& user = registry.find(username)->second;
+  const User& user = it->second;
   const AclKeys all_keys{{}, true};
   const bool incomplete = cid->Validate(simulated_args).has_value();
   const AclRulesView rules{user.AclCommandsRef(), incomplete ? all_keys : user.Keys(),
                            user.PubSub(), user.Db()};
   const size_t db_index = user.Db() == kAllDbs ? 0 : user.Db();
-  if (!CheckCommand(rules, db_index, *cid, simulated_args)) {
-    rb->SendOk();
-    return;
-  }
+  if (!CheckCommand(rules, db_index, *cid, simulated_args))
+    return rb->SendOk();
 
-  auto msg = absl::StrCat("This user has no permissions to run the '",
-                          cid->AclTarget(simulated_args).first, "' command");
-
-  rb->SendBulkString(msg);
+  rb->SendBulkString(absl::StrCat("This user has no permissions to run the '",
+                                  cid->AclTarget(simulated_args).first, "' command"));
 }
 
 void AclFamily::Init(facade::Listener* main_listener) {
   main_listener_ = main_listener;
+
   // Like Redis: replaces all of default's passwords, and an empty value means nopass.
   config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {
     User::UpdateRequest rqst;
@@ -810,112 +748,23 @@ void AclFamily::Init(facade::Listener* main_listener) {
     registry_->MaybeAddAndUpdate("default", std::move(rqst));
     return true;
   });
-  auto acl_file = absl::GetFlag(FLAGS_aclfile);
-  if (!acl_file.empty()) {
-    // A file that does not load must not start an open server.
-    if (auto error = Load(); error) {
-      LOG(ERROR) << "Could not load the acl file " << acl_file << ": " << error.Format();
-      exit(1);
-    }
+
+  const string acl_file = absl::GetFlag(FLAGS_aclfile);
+  if (acl_file.empty()) {
+    registry_->Init();
     return;
   }
-  registry_->Init();
-}
 
-namespace {
-
-using MaterializedContents = std::variant<std::vector<std::vector<std::string_view>>, std::string>;
-
-MaterializedContents MaterializeFileContents(std::vector<std::string>* usernames,
-                                             std::string_view file_contents) {
-  // This is fine, a very large file will top at 1-2 mb. And that's for 5000+ users with 400
-  // characters per line
-  std::vector<std::string_view> commands = absl::StrSplit(file_contents, "\n");
-  std::vector<std::vector<std::string_view>> materialized;
-  materialized.reserve(commands.size());
-  usernames->reserve(commands.size());
-  for (auto& command : commands) {
-    // Only a CRLF's '\r' is dropped: ACL SAVE writes values verbatim, so other whitespace is data
-    // and ' ' alone separates rules. A skipped line keeps an empty entry: the index is the line.
-    absl::ConsumeSuffix(&command, "\r");
-    if (absl::StripAsciiWhitespace(command).empty()) {
-      materialized.emplace_back();
-      continue;
-    }
-    std::vector<std::string_view> cmds = absl::StrSplit(command, ' ', absl::SkipEmpty());
-    if (!absl::EqualsIgnoreCase(cmds[0], "USER") || cmds.size() < 3) {
-      return absl::StrCat("line ", materialized.size() + 1, ": expected USER <name> <rule>...");
-    }
-
-    usernames->push_back(std::string(cmds[1]));
-    cmds.erase(cmds.begin(), cmds.begin() + 2);
-    materialized.push_back(cmds);
-  }
-  return materialized;
-}
-
-void SendAclSecurityEvents(const AclLog::LogEntry& entry, facade::RedisReplyBuilder* rb) {
-  rb->StartArray(12);
-  rb->SendSimpleString("reason");
-  using Reason = AclLog::Reason;
-  std::string reason;
-  if (entry.reason == Reason::COMMAND) {
-    reason = "COMMAND";
-  } else if (entry.reason == Reason::KEY) {
-    reason = "KEY";
-  } else if (entry.reason == Reason::PUB_SUB) {
-    reason = "PUB_SUB";
-  } else {
-    reason = "AUTH";
+  // A file that does not load must not start an open server.
+  UserRequests requests;
+  if (auto error = ParseAclFile(acl_file, &requests); error) {
+    LOG(ERROR) << "Could not load the acl file " << acl_file << ": " << error.Format();
+    exit(1);
   }
 
-  rb->SendSimpleString(reason);
-  rb->SendSimpleString("object");
-  rb->SendSimpleString(entry.object);
-  rb->SendSimpleString("username");
-  rb->SendSimpleString(entry.username);
-  rb->SendSimpleString("age-seconds");
-
-  auto now_diff = std::chrono::system_clock::now() - entry.entry_creation;
-  auto secs = std::chrono::duration_cast<std::chrono::seconds>(now_diff);
-  auto left_over = now_diff - std::chrono::duration_cast<std::chrono::microseconds>(secs);
-  auto age = absl::StrCat(secs.count(), ".", left_over.count());
-  rb->SendSimpleString(absl::StrCat(age));
-  rb->SendSimpleString("client-info");
-  rb->SendSimpleString(entry.client_info);
-  rb->SendSimpleString("timestamp-created");
-  rb->SendLong(entry.entry_creation.time_since_epoch().count());
+  auto reg = registry_->GetRegistryWithWriteLock();
+  AddUsers(std::move(requests), &reg.registry);
 }
-
-// Fetches the connections that predicate P evaluates to true and shuts them
-// down gracefully.
-template <typename P>
-void TraverseEvictImpl(P predicate, facade::Listener* main_listener, util::ProactorPool* pool) {
-  auto close_cb = [&](unsigned idx, util::ProactorBase* p) {
-    std::vector<facade::Connection::WeakRef> connections;
-    auto traverse_cb = [&](unsigned id, util::Connection* conn) {
-      auto connection = static_cast<facade::Connection*>(conn);
-      auto ctx = connection->cntx();
-      if (predicate(ctx)) {
-        connections.push_back(connection->Borrow());
-      }
-    };
-
-    main_listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
-
-    for (auto& tcon : connections) {
-      facade::Connection* conn = tcon.Get();
-      if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
-        // preemptive for TlsSocket
-        conn->ShutdownSelfBlocking();
-      }
-    }
-  };
-
-  pool->AwaitFiberOnAll(close_cb);
-}
-
-}  // namespace
 
 variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(facade::ParsedArgs args,
                                                                     bool has_all_keys) const {
@@ -1009,12 +858,12 @@ variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(facade::Pars
 }
 
 void AclFamily::BuildIndexers(RevCommandsIndexStore families) {
-  const size_t family_count = acl::NumberOfFamilies(families.size());
+  const size_t family_count = NumberOfFamilies(families.size());
   family_commands_ = std::move(families);
   for (auto& commands : category_commands_)
     commands.assign(family_count, 0);
 
-  cmd_registry_->Traverse([&](std::string_view, const CommandId& cid) {
+  cmd_registry_->Traverse([&](string_view, const CommandId& cid) {
     const size_t family = cid.GetFamily();
     DCHECK_LT(family, family_count);
     for (uint32_t categories = cid.acl_categories(); categories != 0;
@@ -1055,8 +904,7 @@ void AclFamily::Help(CmdArgParser parser, CommandContext* cmd_cntx) {
       "    Return the current connection username.",
       "HELP",
       "    Print this help."};
-  auto* rb = static_cast<facade::RedisReplyBuilder*>(cmd_cntx->rb());
-  return rb->SendSimpleStrArr(help_arr);
+  GetRedisReplyBuilder(cmd_cntx)->SendSimpleStrArr(help_arr);
 }
 
 using MemberFunc = void (AclFamily::*)(CmdArgParser parser, CommandContext* cmd_cntx);
@@ -1069,20 +917,10 @@ CommandId::Handler HandlerFunc(AclFamily* acl, MemberFunc f) {
 
 #define HFUNC(x) SetHandler(HandlerFunc(this, &AclFamily::x))
 
-constexpr uint32_t kAcl = acl::SLOW;
-constexpr uint32_t kList = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kSetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kDelUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kWhoAmI = acl::SLOW;
-constexpr uint32_t kSave = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kLoad = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kLog = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kUsers = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kCat = acl::SLOW;
-constexpr uint32_t kGetUser = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kDryRun = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
-constexpr uint32_t kGenPass = acl::SLOW;
-constexpr uint32_t kHelp = acl::SLOW;
+// At namespace scope, so tools/verify_script_acl can resolve acl::kAdminCats.
+constexpr uint32_t kOpts = CO::NOSCRIPT | CO::LOADING;
+constexpr uint32_t kAdminOpts = CO::ADMIN | kOpts;
+constexpr uint32_t kAdminCats = acl::ADMIN | acl::SLOW | acl::DANGEROUS;
 
 // We can't implement the ACL commands and its respective subcommands LIST, CAT, etc
 // the usual way, (that is, one command called ACL which then dispatches to the subcommand
@@ -1091,28 +929,25 @@ constexpr uint32_t kHelp = acl::SLOW;
 // as separate commands in the registry. This is the least intrusive change because it's very
 // easy to handle that case explicitly in `DispatchCommand`.
 
-void AclFamily::Register(dfly::CommandRegistry* registry) {
-  using CI = dfly::CommandId;
-  const uint32_t kAclMask = CO::ADMIN | CO::NOSCRIPT | CO::LOADING;
+void AclFamily::Register(CommandRegistry* registry) {
+  using CI = CommandId;
   registry->StartFamily();
-  *registry << CI{"ACL", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, acl::kAcl}.HFUNC(Acl);
-  *registry << CI{"ACL LIST", kAclMask, 1, 0, 0, acl::kList}.HFUNC(List);
-  *registry << CI{"ACL SETUSER", kAclMask, -2, 0, 0, acl::kSetUser}.HFUNC(SetUser);
-  *registry << CI{"ACL DELUSER", kAclMask, -2, 0, 0, acl::kDelUser}.HFUNC(DelUser);
-  *registry << CI{"ACL WHOAMI", CO::NOSCRIPT | CO::LOADING, 1, 0, 0, acl::kWhoAmI}.HFUNC(WhoAmI);
-  *registry << CI{"ACL SAVE", kAclMask, 1, 0, 0, acl::kSave}.HFUNC(Save);
-  *registry << CI{"ACL LOAD", kAclMask, 1, 0, 0, acl::kLoad}.HFUNC(Load);
-  *registry << CI{"ACL LOG", kAclMask, 0, 0, 0, acl::kLog}.HFUNC(Log);
-  *registry << CI{"ACL USERS", kAclMask, 1, 0, 0, acl::kUsers}.HFUNC(Users);
-  *registry << CI{"ACL CAT", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kCat}.HFUNC(Cat);
-  *registry << CI{"ACL GETUSER", kAclMask, 2, 0, 0, acl::kGetUser}.HFUNC(GetUser);
-  *registry << CI{"ACL DRYRUN", kAclMask, -3, 0, 0, acl::kDryRun}.HFUNC(DryRun);
-  *registry << CI{"ACL GENPASS", CO::NOSCRIPT | CO::LOADING, -1, 0, 0, acl::kGenPass}.HFUNC(
-      GenPass);
-  *registry << CI{"ACL HELP", CO::NOSCRIPT | CO::LOADING, 0, 0, 0, acl::kHelp}.HFUNC(Help);
+  *registry << CI{"ACL", kOpts, 0, 0, 0, acl::SLOW}.HFUNC(Acl);
+  *registry << CI{"ACL LIST", kAdminOpts, 1, 0, 0, acl::kAdminCats}.HFUNC(List);
+  *registry << CI{"ACL SETUSER", kAdminOpts, -2, 0, 0, acl::kAdminCats}.HFUNC(SetUser);
+  *registry << CI{"ACL DELUSER", kAdminOpts, -2, 0, 0, acl::kAdminCats}.HFUNC(DelUser);
+  *registry << CI{"ACL WHOAMI", kOpts, 1, 0, 0, acl::SLOW}.HFUNC(WhoAmI);
+  *registry << CI{"ACL SAVE", kAdminOpts, 1, 0, 0, acl::kAdminCats}.HFUNC(Save);
+  *registry << CI{"ACL LOAD", kAdminOpts, 1, 0, 0, acl::kAdminCats}.HFUNC(Load);
+  *registry << CI{"ACL LOG", kAdminOpts, 0, 0, 0, acl::kAdminCats}.HFUNC(Log);
+  *registry << CI{"ACL USERS", kAdminOpts, 1, 0, 0, acl::kAdminCats}.HFUNC(Users);
+  *registry << CI{"ACL CAT", kOpts, -1, 0, 0, acl::SLOW}.HFUNC(Cat);
+  *registry << CI{"ACL GETUSER", kAdminOpts, 2, 0, 0, acl::kAdminCats}.HFUNC(GetUser);
+  *registry << CI{"ACL DRYRUN", kAdminOpts, -3, 0, 0, acl::kAdminCats}.HFUNC(DryRun);
+  *registry << CI{"ACL GENPASS", kOpts, -1, 0, 0, acl::SLOW}.HFUNC(GenPass);
+  *registry << CI{"ACL HELP", kOpts, 0, 0, 0, acl::SLOW}.HFUNC(Help);
   cmd_registry_ = registry;
 
-  // build indexers
   BuildIndexers(cmd_registry_->GetFamilies());
 }
 
