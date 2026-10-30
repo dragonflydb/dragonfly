@@ -8,6 +8,7 @@
 #include <gtest/gtest-matchers.h>
 
 #include <atomic>
+#include <iterator>
 #include <string>
 #include <string_view>
 
@@ -622,18 +623,34 @@ TEST_F(ClusterFamilyTest, FragmentedSlotsReplyIsBatched) {
 TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
   ConfigSingleNodeCluster(GetMyId());
 
-  Run({"debug", "populate", "10000", "key", "4", "SLOTS", "0", "1000"});
+  constexpr int64_t kKeys = 10'000;
+  Run({"debug", "populate", absl::StrCat(kKeys), "key", "4", "SLOTS", "0", "1000"});
 
-  for (int i = 0; i <= 1'000; ++i) {
-    EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespElementsAre(RespArray(
-                    ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _, _, _))));
+  auto writes = [this] { return GetMetrics().facade_stats.reply_stats.io_write_cnt; };
+  const uint64_t writes_before = writes();
+
+  // Collected in two rounds; the second one is partial and spans several ranges.
+  auto result = RunPrivileged({"dflycluster", "getslotinfo", "slots", "0-16383", "16383", "2-0"});
+
+  // Flushing the reply per slot would take more than 16K writes.
+  EXPECT_LT(writes() - writes_before, 1000u);
+
+  // Every slot sums the stats of all shards, in request order and with duplicates.
+  constexpr SlotId kTail[] = {16383, 0, 1, 2};
+  ASSERT_THAT(result, ArrLen(kMaxSlotNum + 1 + std::size(kTail)));
+  const auto& reply = result.GetVec();
+  auto key_count = [&](size_t i) { return *reply[i].GetVec()[2].GetInt(); };
+  int64_t total_keys = 0;
+  for (SlotId slot = 0; slot <= kMaxSlotNum; ++slot) {
+    ASSERT_THAT(reply[slot], RespElementsAre(IntArg(slot), "key_count", _, _, _, _, _, _, _));
+    EXPECT_EQ(key_count(slot) > 0, slot <= 1000) << slot;
+    total_keys += key_count(slot);
   }
-
-  for (int i = 1'001; i <= 16'383; ++i) {
-    EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespElementsAre(
-                    RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _, _, _))));
+  EXPECT_EQ(total_keys, kKeys);
+  for (size_t i = 0; i < std::size(kTail); ++i) {
+    EXPECT_THAT(reply[kMaxSlotNum + 1 + i],
+                RespElementsAre(IntArg(kTail[i]), "key_count", IntArg(key_count(kTail[i])), _, _, _,
+                                _, _, _));
   }
 }
 

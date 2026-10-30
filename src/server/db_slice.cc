@@ -521,11 +521,20 @@ auto DbSlice::GetStats() const -> Stats {
 }
 
 SlotStats DbSlice::GetSlotStats(SlotId sid) const {
+  SlotStats stats;
+  AddSlotStats({&sid, 1}, {&stats, 1});
+  return stats;
+}
+
+void DbSlice::AddSlotStats(absl::Span<const SlotId> slots, absl::Span<SlotStats> dest) const {
+  DCHECK_EQ(slots.size(), dest.size());
   CHECK(db_arr_[0]);
+
   // slots_stats is null outside real cluster mode.
   if (!db_arr_[0]->slots_stats)
-    return {};
-  return db_arr_[0]->slots_stats[sid];
+    return;
+  for (size_t i = 0; i < slots.size(); ++i)
+    dest[i] += db_arr_[0]->slots_stats[slots[i]];
 }
 
 DbSlice::AutoUpdater::AutoUpdater() {

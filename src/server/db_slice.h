@@ -270,6 +270,10 @@ class DbSlice {
   // Returns slot statistics for db 0.
   SlotStats GetSlotStats(SlotId sid) const;
 
+  // Adds the db 0 statistics of each slot in `slots` to the respective entry of `dest`.
+  // Cheaper than calling GetSlotStats per slot, which repeats the call for every slot.
+  void AddSlotStats(absl::Span<const SlotId> slots, absl::Span<SlotStats> dest) const;
+
   void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {
     memory_budget_ = budget;
     bytes_per_object_ = bytes_per_object;
