@@ -503,6 +503,38 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   return conn_wrapper->ParseResponse(single_response_);
 }
 
+RespExpr BaseFamilyTest::RunInNamespace(std::string_view id, Namespace& ns, ArgSlice slice) {
+  if (!ProactorBase::IsProactorThread()) {
+    return pp_->at(0)->Await([&] { return this->RunInNamespace(id, ns, slice); });
+  }
+
+  TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, id);
+
+  CmdArgVec args = conn_wrapper->Args(slice);
+
+  ConnectionContext* context = conn_wrapper->cmd_cntx();
+  context->ns = &ns;
+
+  DCHECK(context->transaction == nullptr) << id;
+  CommandContext cmd_cntx;
+  cmd_cntx.Init(conn_wrapper->builder(), context);
+  cmd_cntx.Assign(args.begin(), args.end(), args.size());
+  service_->DispatchCommand(ParsedArgs{cmd_cntx}, &cmd_cntx, AsyncPreference::ONLY_SYNC, nullptr);
+
+  DCHECK(context->transaction == nullptr);
+
+  auto cmd = absl::AsciiStrToUpper(slice.front());
+  if (cmd == "EVAL" || cmd == "EVALSHA" || cmd == "EVAL_RO" || cmd == "EVALSHA_RO" ||
+      cmd == "EXEC") {
+    shard_set->AwaitRunningOnShardQueue([](auto*) {});  // Wait for async UnlockMulti.
+  }
+
+  unique_lock lk(mu_);
+  last_cmd_dbg_info_ = context->last_cmd_stats;
+
+  return conn_wrapper->ParseResponse(single_response_);
+}
+
 void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) {
   if (!ProactorBase::IsProactorThread()) {
     return pp_->at(0)->Await([&] { return this->RunMany(cmds); });

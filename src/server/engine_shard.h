@@ -267,6 +267,8 @@ class EngineShard {
     return type_mem_delta_;
   }
 
+  friend void RetireExpiredAndEvictForTest(EngineShard*);
+
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
@@ -394,6 +396,8 @@ class EngineShard {
   using Counter = util::SlidingCounter<7>;
 
   Counter counter_[COUNTER_TOTAL];
+
+  uint32_t heartbeat_ns_rotation_ = 0;
 
   TypeMemDeltas type_mem_delta_ = {};
 

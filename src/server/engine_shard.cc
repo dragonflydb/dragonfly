@@ -8,6 +8,7 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
+#include <algorithm>
 #include <memory>
 
 #include "base/flags.h"
@@ -31,6 +32,7 @@ extern "C" {
 #include "server/snapshot.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
 #include "util/fibers/proactor_base.h"
 
 using namespace std;
@@ -806,8 +808,6 @@ void EngineShard::Heartbeat() {
 }
 
 void EngineShard::RetireExpiredAndEvict() {
-  // TODO: iterate over all namespaces
-  DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
   constexpr double kTtlDeleteLimit = 200;
 
   uint32_t traversed = GetMovingSum6(TTL_TRAVERSE);
@@ -827,57 +827,68 @@ void EngineShard::RetireExpiredAndEvict() {
 
   size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
+  size_t eviction_items_budget = GetFlag(FLAGS_max_eviction_per_heartbeat);
+
+  std::vector<Namespace*> ns_snapshot = namespaces->SnapshotAll();
+  if (!ns_snapshot.empty() && ns_snapshot.size() > 1) {
+    const size_t rot = heartbeat_ns_rotation_++ % ns_snapshot.size();
+    std::rotate(ns_snapshot.begin(), ns_snapshot.begin() + rot, ns_snapshot.end());
+  }
 
   {
     // Disable journal flush to prevent preemption. Scoped so that the expired events queued
     // meanwhile are sent below, outside the atomic section.
     journal::DisableFlushGuard journal_flush_guard;
 
-    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-      if (!db_slice.IsDbValid(i))
-        continue;
+    for (Namespace* ns : ns_snapshot) {
+      const uint64_t ns_running_time_start = util::ThisFiber::GetRunningTimeCycles();
+      DbSlice& db_slice = ns->GetDbSlice(shard_id());
+      for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+        if (!db_slice.IsDbValid(i))
+          continue;
 
-      db_cntx.db_index = i;
-      auto* pt = db_slice.GetTables(i);
-      uint64_t expire_count = db_slice.GetDBTable(i)->stats.expire_count;
-      if (expire_count > 0) {
-        // Scale traversal count to compensate for TTL key dilution in the prime table.
-        // Since we now scan the prime table (not a dedicated expire table), most entries
-        // may not have TTLs. We need more bucket traversals to check the same number of
-        // TTL keys, but cap to avoid excessive work when TTL keys are extremely sparse.
-        unsigned db_ttl_delete_target = ttl_delete_target;
+        db_cntx.db_index = i;
+        auto* pt = db_slice.GetTables(i);
+        uint64_t expire_count = db_slice.GetDBTable(i)->stats.expire_count;
+        if (expire_count > 0) {
+          // Scale traversal count to compensate for TTL key dilution in the prime table.
+          // Since we now scan the prime table (not a dedicated expire table), most entries
+          // may not have TTLs. We need more bucket traversals to check the same number of
+          // TTL keys, but cap to avoid excessive work when TTL keys are extremely sparse.
+          unsigned db_ttl_delete_target = ttl_delete_target;
 
-        if (pt->size() >= expire_count * 2) {
-          unsigned ratio = std::min<uint64_t>(pt->size() / expire_count, 7);
-          db_ttl_delete_target = ttl_delete_target * ratio;
+          if (pt->size() >= expire_count * 2) {
+            unsigned ratio = std::min<uint64_t>(pt->size() / expire_count, 7);
+            db_ttl_delete_target = ttl_delete_target * ratio;
+          }
+          DbSlice::DeleteExpiredStats stats =
+              db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target, ns_running_time_start);
+
+          deleted_bytes += stats.deleted_bytes;
+          eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
+          counter_[TTL_TRAVERSE].IncBy(stats.traversed);
+          counter_[TTL_DELETE].IncBy(stats.deleted);
+          stats_.total_heartbeat_expired_keys += stats.deleted;
+          stats_.total_heartbeat_expired_bytes += stats.deleted_bytes;
+          ++stats_.total_heartbeat_expired_calls;
+          VLOG(2) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
+                  << stats.deleted_bytes << " with total expire flow calls "
+                  << stats_.total_heartbeat_expired_calls;
         }
-        DbSlice::DeleteExpiredStats stats =
-            db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
 
-        deleted_bytes += stats.deleted_bytes;
-        eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
-        counter_[TTL_TRAVERSE].IncBy(stats.traversed);
-        counter_[TTL_DELETE].IncBy(stats.deleted);
-        stats_.total_heartbeat_expired_keys += stats.deleted;
-        stats_.total_heartbeat_expired_bytes += stats.deleted_bytes;
-        ++stats_.total_heartbeat_expired_calls;
-        VLOG(2) << "Heartbeat expired " << stats.deleted << " keys with total bytes "
-                << stats.deleted_bytes << " with total expire flow calls "
-                << stats_.total_heartbeat_expired_calls;
-      }
+        if (eviction_goal && eviction_items_budget) {
+          uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
+          auto [evicted_items, evicted_bytes] = db_slice.FreeMemWithEvictionStepAtomic(
+              i, db_cntx, starting_segment_id, eviction_goal, eviction_items_budget);
 
-      if (eviction_goal) {
-        uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-        auto [evicted_items, evicted_bytes] =
-            db_slice.FreeMemWithEvictionStepAtomic(i, db_cntx, starting_segment_id, eviction_goal);
+          VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
+                  << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
+                  << " bytes. Remaining eviction items budget: " << eviction_items_budget;
 
-        VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
-                << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
-                << " bytes. Max eviction per heartbeat: "
-                << GetFlag(FLAGS_max_eviction_per_heartbeat);
-
-        deleted_bytes += evicted_bytes;
-        eviction_goal -= std::min(eviction_goal, evicted_bytes);
+          deleted_bytes += evicted_bytes;
+          eviction_goal -= std::min(eviction_goal, evicted_bytes);
+          eviction_items_budget -= std::min(eviction_items_budget, size_t(evicted_items));
+        }
       }
     }
   }  // journal_flush_guard destroyed here — atomic section ends before sending the events
@@ -885,7 +896,9 @@ void EngineShard::RetireExpiredAndEvict() {
   // Send keyspace notifications for expired/evicted keys outside the atomic section
   // because SendMessages may suspend on connection backpressure (see issue #7052).
   // This also sends events that other code queued but left unsent.
-  db_slice.SendQueuedExpiredKeyEvents();
+  for (Namespace* ns : ns_snapshot) {
+    ns->GetDbSlice(shard_id()).SendQueuedExpiredKeyEvents();
+  }
 
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
@@ -894,9 +907,15 @@ void EngineShard::RetireExpiredAndEvict() {
 
   // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
   // section, because NotifyPending may preempt before and after its readiness checks.
-  if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
-      bc && GetContTx() == nullptr) {
-    bc->NotifyPending();
+  if (GetContTx() == nullptr) {
+    for (Namespace* ns : ns_snapshot) {
+      if (GetContTx() != nullptr) {
+        break;
+      }
+      if (auto* bc = ns->GetBlockingController(shard_id()); bc) {
+        bc->NotifyPending();
+      }
+    }
   }
 }
 

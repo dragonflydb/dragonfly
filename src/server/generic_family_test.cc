@@ -28,6 +28,7 @@ extern "C" {
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
+#include "server/engine_shard.h"
 #include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
@@ -50,6 +51,10 @@ constexpr char kShard1AltKey[] = "y";   // shard 1
 constexpr char kShard1AltKey2[] = "z";  // shard 1
 
 namespace dfly {
+
+void RetireExpiredAndEvictForTest(EngineShard* shard) {
+  shard->RetireExpiredAndEvict();
+}
 
 class GenericFamilyTest : public BaseFamilyTest {};
 
@@ -3003,6 +3008,44 @@ TEST_F(GenericFamilyTest, ConfigSetRejectedValueRollsBack) {
 
 // CONFIG SET notify_keyspace_events must apply to every namespace, not only the default one,
 // and namespaces created afterwards must inherit the current setting.
+// Regression for https://github.com/dragonflydb/dragonfly/issues/8069
+TEST_F(GenericFamilyTest, HeartbeatExpiresAclNamespaceKeys) {
+  ASSERT_EQ(Run({"ACL", "SETUSER", "hbns", "ON", ">pass", "+@all", "~*", "NAMESPACE:hbns"}), "OK");
+  Namespace* hbns_ns = pp_->at(0)->Await([] { return &namespaces->GetOrInsert("hbns"); });
+
+  auto run_io1_hbns = [this, hbns_ns](ArgSlice slice) -> RespExpr {
+    return pp_->at(1)->Await([&] { return RunInNamespace("IO1", *hbns_ns, slice); });
+  };
+
+  auto hbns_expire_count = [hbns_ns]() {
+    uint64_t count = 0;
+    for (unsigned i = 0; i < shard_set->size(); ++i) {
+      count += hbns_ns->GetDbSlice(i).GetDBTable(0)->stats.expire_count;
+    }
+    return count;
+  };
+
+  ASSERT_EQ(run_io1_hbns({"AUTH", "hbns", "pass"}), "OK");
+  ASSERT_EQ(run_io1_hbns({"SET", "expkey", "v"}), "OK");
+  ASSERT_EQ(run_io1_hbns({"PEXPIRE", "expkey", "100"}).GetInt(), 1);
+  ASSERT_EQ(hbns_expire_count(), 1u);
+
+  AdvanceTime(200);
+
+  uint64_t expired_before = 0;
+  shard_set->RunBriefInParallel(
+      [&](EngineShard* shard) { expired_before += shard->stats().total_heartbeat_expired_keys; });
+
+  shard_set->RunBlockingInParallel([](EngineShard* shard) { RetireExpiredAndEvictForTest(shard); });
+
+  uint64_t expired_after = 0;
+  shard_set->RunBriefInParallel(
+      [&](EngineShard* shard) { expired_after += shard->stats().total_heartbeat_expired_keys; });
+  EXPECT_GE(expired_after, expired_before + 1);
+  EXPECT_EQ(run_io1_hbns({"EXISTS", "expkey"}).GetInt(), 0);
+  EXPECT_EQ(hbns_expire_count(), 0u);
+}
+
 TEST_F(GenericFamilyTest, ConfigNotifyAppliesToAllNamespaces) {
   Namespace* ns = pp_->at(0)->Await([] { return &namespaces->GetOrInsert("ns1"); });
 

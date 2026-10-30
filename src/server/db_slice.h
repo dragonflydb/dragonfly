@@ -508,7 +508,8 @@ class DbSlice {
   };
 
   // Deletes some amount of possible expired items.
-  DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count);
+  DeleteExpiredStats DeleteExpiredStep(const Context& cntx, unsigned count,
+                                       uint64_t running_time_cycles_start = 0);
 
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
@@ -516,7 +517,8 @@ class DbSlice {
   // evicted keys (see SendQueuedExpiredKeyEvents).
   std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx, const Context& cntx,
                                                             size_t starting_segment_id,
-                                                            size_t increase_goal_bytes);
+                                                            size_t increase_goal_bytes,
+                                                            size_t max_eviction_items);
 
   int32_t GetNextSegmentForEviction(int32_t segment_id, DbIndex db_ind) const;
 
