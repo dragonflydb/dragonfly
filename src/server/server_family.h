@@ -17,6 +17,7 @@
 #include "server/engine_shard_set.h"
 #include "server/metrics.h"
 #include "server/replica_types.h"
+#include "server/replication_manager.h"
 #include "server/server_state.h"
 #include "server/stats.h"
 #include "util/fibers/fiberqueue_threadpool.h"
@@ -121,11 +122,6 @@ class ThreadSafeSaveInfo {
   SaveInfoData data_;
 };
 
-struct ReplicaOffsetInfo {
-  std::string sync_id;
-  std::vector<uint64_t> flow_offsets;
-};
-
 struct SaveCmdOptions {
   // if new_version is true, saves DF specific, non redis compatible snapshot.
   bool new_version;
@@ -147,7 +143,7 @@ class ServerFamily {
 
   void Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> listeners);
   void Register(CommandRegistry* registry);
-  void Shutdown() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Shutdown();
 
   // Public because is used by DflyCmd.
   void ShutdownCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
@@ -206,19 +202,28 @@ class ServerFamily {
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
 
-  void PauseReplication(bool pause) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-  std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void PauseReplication(bool pause) {
+    replication_->Pause(pause);
+  }
+
+  std::optional<ReplicaOffsetInfo> GetReplicaOffsetInfo() {
+    return replication_->GetOffsetInfo();
+  }
 
   // Investigation-only (DEBUG REPLDIAG). Remove once closed.
-  std::optional<int> GetReplicaMasterSocketUnreadBytes() ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  std::optional<int> GetReplicaMasterSocketUnreadBytes() {
+    return replication_->GetMasterSocketUnreadBytes();
+  }
 
   const std::string& master_replid() const {
-    return master_replid_;
+    return replication_->master_replid();
   }
 
   // The lineage root replication id of this node: its own replid if it is a true master, or the
   // ancestor id advertised by its master when it is itself a replica (cascaded replication).
-  std::string GetLineageId() const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  std::string GetLineageId() const {
+    return replication_->GetLineageId();
+  }
 
   DflyCmd* GetDflyCmd() const {
     return dfly_cmd_.get();
@@ -229,7 +234,7 @@ class ServerFamily {
   void ForceReplicasToFullSync();
 
   std::optional<LastMasterSyncData> GetLastMasterData() const {
-    return last_master_data_;
+    return replication_->GetLastMasterData();
   }
 
   absl::Span<facade::Listener* const> GetListeners() const {
@@ -240,18 +245,20 @@ class ServerFamily {
 
   // Replica-side method. Returns replication summary if this server is a replica,
   // nullopt otherwise.
-  std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const;
+  std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const {
+    return replication_->GetSummary();
+  }
 
-  struct MasterLinkClientInfo {
-    uint32_t client_id;
-    std::string info;
-  };
+  using MasterLinkClientInfo = ReplicationManager::MasterLinkClientInfo;
 
   // One entry per attached outbound master link; empty if not replicating.
-  std::vector<MasterLinkClientInfo> GetMasterLinkClientInfo() const
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  std::vector<MasterLinkClientInfo> GetMasterLinkClientInfo() const {
+    return replication_->GetMasterLinkClientInfo();
+  }
 
-  bool IsMasterLinkClientId(uint32_t id) const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  bool IsMasterLinkClientId(uint32_t id) const {
+    return replication_->IsMasterLinkClientId(id);
+  }
 
   void OnClose(ConnectionContext* cntx);
 
@@ -293,19 +300,16 @@ class ServerFamily {
   void Memory(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void FlushDb(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Info(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Hello(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void LastSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Latency(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void ReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void AddReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void ReplConf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Role(facade::CmdArgParser parser, CommandContext* cmd_cntx)
-      ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+  void Role(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Save(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void BgSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Script(facade::CmdArgParser parser, CommandContext* cmd_cntx);
@@ -314,16 +318,8 @@ class ServerFamily {
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
 
-  enum ActionOnConnectionFail {
-    kReturnOnError,        // if we fail to connect to master, return to err
-    kContinueReplication,  // continue attempting to connect to master, regardless of initial
-                           // failure
-  };
-
   void ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmnd_cntx,
-                         ActionOnConnectionFail on_error) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  void ReplicaOfNoOne(SinkReplyBuilder* builder) ABSL_LOCKS_EXCLUDED(replicaof_mu_);
+                         ReplicationManager::ActionOnConnectionFail on_error);
 
   struct LoadOptions {
     std::string snapshot_id;
@@ -355,8 +351,6 @@ class ServerFamily {
 
   GenericError WaitUntilSaveFinished(Transaction* trans,
                                      bool ignore_state = false) ABSL_NO_THREAD_SAFETY_ANALYSIS;
-  void StopAllClusterReplicas() ABSL_EXCLUSIVE_LOCKS_REQUIRED(replicaof_mu_);
-
   static bool DoAuth(ConnectionContext* cntx, std::string_view username, std::string_view password);
 
   void ClientPauseCmd(facade::CmdArgParser parser, CommandContext* cmd_cntx);
@@ -375,16 +369,11 @@ class ServerFamily {
   bool accepting_connections_ = true;  // reject connections near oom
   util::ProactorBase* pb_task_ = nullptr;
 
-  mutable util::fb2::Mutex replicaof_mu_, save_mu_;
-  std::shared_ptr<Replica> replica_ ABSL_GUARDED_BY(replicaof_mu_);
-  std::vector<std::unique_ptr<Replica>> cluster_replicas_
-      ABSL_GUARDED_BY(replicaof_mu_);  // used to replicating multiple nodes to single dragonfly
+  mutable util::fb2::Mutex save_mu_;
+  std::unique_ptr<ReplicationManager> replication_;
 
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
-
-  std::string master_replid_;
-  std::optional<LastMasterSyncData> last_master_data_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 
