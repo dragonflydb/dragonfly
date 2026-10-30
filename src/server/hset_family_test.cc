@@ -13,11 +13,14 @@ extern "C" {
 #include "redis/sds.h"
 }
 
+#include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
 #include "server/test_utils.h"
+
+ABSL_DECLARE_FLAG(uint64_t, max_rand_count);
 
 using namespace testing;
 using namespace std;
@@ -1099,6 +1102,28 @@ TEST_F(HSetFamilyTest, HGetExErrors) {
   // Wrong type.
   Run({"SET", "strkey", "val"});
   EXPECT_THAT(Run({"HGETEX", "strkey", "FIELDS", "1", "f"}), ErrArg("WRONGTYPE"));
+}
+
+TEST_F(HSetFamilyTest, HRandFieldNegativeCountBound) {
+  // Regression: a negative COUNT (with-duplicates) must not size an allocation by its
+  // unbounded magnitude. A count whose magnitude exceeds --max_rand_count is rejected at
+  // parse time, before any allocation; valid magnitudes and positive counts are unaffected.
+  const uint64_t prev = absl::GetFlag(FLAGS_max_rand_count);
+  absl::SetFlag(&FLAGS_max_rand_count, 4);
+
+  Run({"HSET", "k", "a", "0"});
+
+  // Over the bound -> rejected (no allocation, no OOM).
+  EXPECT_THAT(Run({"hrandfield", "k", "-5"}), ErrArg("COUNT magnitude exceeds the maximum"));
+  // INT32_MIN previously hit abs() signed-overflow UB; now rejected, never a crash.
+  EXPECT_THAT(Run({"hrandfield", "k", "-2147483648"}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  // At the bound -> allowed, duplicates returned.
+  EXPECT_THAT(Run({"hrandfield", "k", "-4"}).GetVec(), ElementsAre("a", "a", "a", "a"));
+  // Positive COUNT stays clamped to the hash size and is never rejected.
+  EXPECT_THAT(Run({"hrandfield", "k", "1000000"}).GetVec(), ElementsAre("a"));
+
+  absl::SetFlag(&FLAGS_max_rand_count, prev);
 }
 
 TEST_F(HSetFamilyTest, RandomFieldAllExpired) {

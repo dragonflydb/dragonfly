@@ -4,6 +4,8 @@
 
 #include "server/zset_family.h"
 
+#include <absl/flags/declare.h>
+#include <absl/flags/flag.h>
 #include <absl/strings/ascii.h>
 
 extern "C" {
@@ -31,6 +33,8 @@ extern "C" {
 #include "server/family_utils.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
+
+ABSL_DECLARE_FLAG(uint64_t, max_rand_count);
 
 namespace rng = std::ranges;
 
@@ -1515,7 +1519,9 @@ OpResult<ScoredArray> OpRandMember(int count, const ZSetFamily::RangeParams& par
 
   const std::size_t size = pv.Size();
   const std::size_t picks_count =
-      count >= 0 ? std::min(static_cast<std::size_t>(count), size) : std::abs(count);
+      // Widen before negating: std::abs(count) on INT_MIN is signed-overflow UB.
+      count >= 0 ? std::min(static_cast<std::size_t>(count), size)
+                 : static_cast<std::size_t>(-static_cast<std::int64_t>(count));
 
   ScoredArray result{picks_count};
   std::unique_ptr<PicksGenerator> generator =
@@ -2693,6 +2699,12 @@ void CmdZRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  if (count < 0) {
+    const uint64_t limit = absl::GetFlag(FLAGS_max_rand_count);
+    if (static_cast<uint64_t>(-static_cast<int64_t>(count)) > limit)
+      return rb->SendError(absl::StrCat("COUNT magnitude exceeds the maximum of ", limit));
+  }
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRandMember(count, params, t->GetOpArgs(shard), key);

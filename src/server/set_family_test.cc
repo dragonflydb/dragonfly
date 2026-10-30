@@ -17,6 +17,7 @@ extern "C" {
 }
 
 ABSL_DECLARE_FLAG(std::string, shard_round_robin_prefix);
+ABSL_DECLARE_FLAG(uint64_t, max_rand_count);
 
 using namespace testing;
 using namespace std;
@@ -250,6 +251,23 @@ TEST_F(SetFamilyTest, SRandMemberRestoredEmptySet) {
   EXPECT_THAT(Run({"srandmember", "es", "-1"}), ArrLen(0));
   EXPECT_THAT(Run({"srandmember", "es", "2"}), ArrLen(0));
   EXPECT_THAT(Run({"srandmember", "es"}), ArgType(RespExpr::NIL));
+}
+
+TEST_F(SetFamilyTest, SRandMemberNegativeCountBound) {
+  // Regression: an unbounded negative COUNT must not drive the result allocation.
+  const uint64_t prev = absl::GetFlag(FLAGS_max_rand_count);
+  absl::SetFlag(&FLAGS_max_rand_count, 4);
+
+  Run({"SADD", "s", "a"});
+
+  EXPECT_THAT(Run({"srandmember", "s", "-5"}), ErrArg("COUNT magnitude exceeds the maximum"));
+  EXPECT_THAT(Run({"srandmember", "s", "-2147483648"}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  EXPECT_THAT(Run({"srandmember", "s", "-4"}).GetVec(), ElementsAre("a", "a", "a", "a"));
+  // Positive COUNT stays clamped to the set size.
+  EXPECT_THAT(Run({"srandmember", "s", "1000000"}).GetVec(), ElementsAre("a"));
+
+  absl::SetFlag(&FLAGS_max_rand_count, prev);
 }
 
 TEST_F(SetFamilyTest, SRandMember) {
