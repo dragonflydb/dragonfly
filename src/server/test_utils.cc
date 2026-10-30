@@ -23,6 +23,8 @@ extern "C" {
 #include "base/stl_util.h"
 #include "core/oah_set.h"
 #include "facade/dragonfly_connection.h"
+#include "facade/error.h"
+#include "facade/facade_test.h"
 #include "facade/reply_builder.h"
 #include "facade/string_socket.h"
 #include "io/file_util.h"
@@ -445,6 +447,63 @@ RespExpr BaseFamilyTest::Run(ArgSlice list) {
 RespExpr BaseFamilyTest::Run(std::string_view command) {
   std::vector<std::string_view> command_list = absl::StrSplit(command, ' ');
   return Run(command_list);
+}
+
+void BaseFamilyTest::CheckCommandCases(initializer_list<CommandCase> cases) {
+  for (const auto& tc : cases) {
+    SCOPED_TRACE(tc.name);
+    for (const auto& check : tc.setup) {
+      SCOPED_TRACE(check.command);
+      ASSERT_THAT(Run(check.command), check.expected);
+    }
+    {
+      SCOPED_TRACE(tc.command);
+      EXPECT_THAT(Run(tc.command), tc.expected);
+    }
+    for (const auto& check : tc.postconditions) {
+      SCOPED_TRACE(check.command);
+      EXPECT_THAT(Run(check.command), check.expected);
+    }
+  }
+}
+
+void BaseFamilyTest::CheckMPopSyntax(string_view command, string_view timeout,
+                                     string_view direction, string_view alternate_direction) {
+  auto input = [&](string_view suffix, string_view timeout_override = {}) {
+    if (timeout.empty())
+      return absl::StrCat(command, " ", suffix);
+    return absl::StrCat(command, " ", timeout_override.empty() ? timeout : timeout_override, " ",
+                        suffix);
+  };
+  auto args = [&](string_view prefix, string_view suffix) {
+    return absl::StrCat(prefix, direction, suffix);
+  };
+  constexpr string_view kIntegerError = "value is not an integer or out of range";
+  constexpr string_view kCountError = "count should be greater than 0";
+  CheckCommandCases({
+      {"missing_direction", input("1 a"), ErrArg("wrong number of arguments")},
+      {"zero_keys", input(args("0 ", " COUNT 1")), ErrArg("at least 1 input key is needed")},
+      {"invalid_numkeys", input(args("aa a ", "")), ErrArg(kIntegerError)},
+      {"missing_direction_before_count", input("1 a COUNT 1"), ErrArg("syntax error")},
+      {"extra_key", input(absl::StrCat("1 a b ", alternate_direction)), ErrArg("syntax error")},
+      {"missing_count", input(absl::StrCat("1 a ", alternate_direction, " COUNT")),
+       ErrArg("syntax error")},
+      {"invalid_count", input(args("1 a ", " COUNT boo")), ErrArg(kIntegerError)},
+      {"zero_count", input(args("1 a ", " COUNT 0"), "0"), ErrArg(kCountError)},
+      {"negative_count", input(args("1 a ", " COUNT -1"), "0"), ErrArg(kCountError)},
+      {"min_int64_count", input(args("1 a ", " COUNT -9223372036854775808")), ErrArg(kCountError)},
+      {"count_above_uint32", input(args("1 a ", " COUNT 4294967296")), ErrArg(kCountError)},
+      {"max_int64_count", input(args("1 a ", " COUNT 9223372036854775807")), ErrArg(kCountError)},
+      {"zero_count_before_junk", input(args("1 a ", " COUNT 0 foo")), ErrArg(kCountError)},
+      {"trailing_junk", input(absl::StrCat("1 c ", alternate_direction, " COUNT 2 foo")),
+       ErrArg("syntax error")},
+  });
+  if (!timeout.empty()) {
+    CheckCommandCases({
+        {"invalid_timeout", input(args("1 a ", " COUNT 1"), "foo"), ErrArg(kTimeoutNotFloatErr)},
+        {"negative_timeout", input(args("1 a ", " COUNT 1"), "-0.01"), ErrArg(kTimeoutNegativeErr)},
+    });
+  }
 }
 
 RespExpr BaseFamilyTest::RunPrivileged(std::initializer_list<const std::string_view> list) {

@@ -123,67 +123,53 @@ TEST_F(StringFamilyTest, Keepttl) {
 }
 
 TEST_F(StringFamilyTest, SetOptionsSyntaxError) {
-  auto TEST_current_time_s = TEST_current_time_ms / 1000;
-
-  EXPECT_THAT(Run({"set", "key", "val", "EX", "1030", "PX", "1030"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EX", "1030", "EXAT", absl::StrCat(TEST_current_time_s + 1030)}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EX", "1030", "PXAT", absl::StrCat(TEST_current_time_ms + 1030)}),
-      ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(Run({"set", "key", "val", "PX", "1030", "EX", "1030"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PX", "1030", "EXAT", absl::StrCat(TEST_current_time_s + 1030)}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PX", "1030", "PXAT", absl::StrCat(TEST_current_time_ms + 1030)}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EXAT", absl::StrCat(TEST_current_time_s + 1030), "EX", "1030"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EXAT", absl::StrCat(TEST_current_time_s + 1030), "PX", "1030"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "EXAT", absl::StrCat(TEST_current_time_s + 1030), "PXAT",
-                   absl::StrCat(TEST_current_time_ms + 1030)}),
-              ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PXAT", absl::StrCat(TEST_current_time_ms + 1030), "EX", "1030"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PXAT", absl::StrCat(TEST_current_time_ms + 1030), "PX", "1030"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "PXAT", absl::StrCat(TEST_current_time_ms + 1030), "EXAT",
-                   absl::StrCat(TEST_current_time_s + 1030)}),
-              ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(Run({"set", "key", "val", "EX", "1030", "KEEPTTL"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "PX", "1030", "KEEPTTL"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "EXAT", absl::StrCat(TEST_current_time_s + 1030), "KEEPTTL"}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "PXAT", absl::StrCat(TEST_current_time_ms + 1030), "KEEPTTL"}),
-      ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(Run({"set", "key", "val", "KEEPTTL", "PX", "1030"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "KEEPTTL", "PXAT", absl::StrCat(TEST_current_time_ms + 1030)}),
-      ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "KEEPTTL", "EX", "1030"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(
-      Run({"set", "key", "val", "KEEPTTL", "EXAT", absl::StrCat(TEST_current_time_s + 1030)}),
-      ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(Run({"set", "key", "val", "NX", "XX"}), ErrArg("ERR syntax error"));
-  EXPECT_THAT(Run({"set", "key", "val", "XX", "NX"}), ErrArg("ERR syntax error"));
-
-  EXPECT_THAT(Run({"set", "key", "val", "PX", "9223372036854775800"}),
-              ErrArg("invalid expire time"));
-  EXPECT_THAT(Run({"SET", "foo", "bar", "EX", "18446744073709561"}), ErrArg("invalid expire time"));
+  const pair<string_view, string> expiry[] = {
+      {"EX", "1030"},
+      {"PX", "1030"},
+      {"EXAT", absl::StrCat(TEST_current_time_ms / 1000 + 1030)},
+      {"PXAT", absl::StrCat(TEST_current_time_ms + 1030)},
+  };
+  for (const auto& [option, value] : expiry) {
+    SCOPED_TRACE(option);
+    for (const auto& [other_option, other_value] : expiry) {
+      if (option == other_option)
+        continue;
+      SCOPED_TRACE(other_option);
+      CheckCommandCases({
+          {"conflicting_expiry",
+           absl::StrCat("set key val ", option, " ", value, " ", other_option, " ", other_value),
+           ErrArg("ERR syntax error"),
+           {},
+           {{"exists key", IntArg(0)}}},
+      });
+    }
+    CheckCommandCases({
+        {"expiry_before_keepttl",
+         absl::StrCat("set key val ", option, " ", value, " KEEPTTL"),
+         ErrArg("ERR syntax error"),
+         {},
+         {{"exists key", IntArg(0)}}},
+        {"keepttl_before_expiry",
+         absl::StrCat("set key val KEEPTTL ", option, " ", value),
+         ErrArg("ERR syntax error"),
+         {},
+         {{"exists key", IntArg(0)}}},
+    });
+  }
+  CheckCommandCases({
+      {"nx_xx", "set key val NX XX", ErrArg("ERR syntax error"), {}, {{"exists key", IntArg(0)}}},
+      {"xx_nx", "set key val XX NX", ErrArg("ERR syntax error"), {}, {{"exists key", IntArg(0)}}},
+      {"px_overflow",
+       "set key val PX 9223372036854775800",
+       ErrArg("invalid expire time"),
+       {},
+       {{"exists key", IntArg(0)}}},
+      {"ex_overflow",
+       "SET foo bar EX 18446744073709561",
+       ErrArg("invalid expire time"),
+       {},
+       {{"exists foo", IntArg(0)}}},
+  });
 }
 
 TEST_F(StringFamilyTest, Set) {
