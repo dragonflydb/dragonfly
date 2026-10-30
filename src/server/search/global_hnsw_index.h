@@ -23,8 +23,10 @@ class GlobalHnswIndexRegistry {
  public:
   static GlobalHnswIndexRegistry& Instance();
 
+  // Fails if the field already has an index, unless `replace` is set.
   bool Create(std::string_view index_name, std::string_view field_name,
-              const search::SchemaField::VectorParams& params, DocIndex::DataType data_type);
+              const search::SchemaField::VectorParams& params, DocIndex::DataType data_type,
+              bool replace = false);
 
   bool Remove(std::string_view index_name, std::string_view field_name);
 

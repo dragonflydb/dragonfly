@@ -713,6 +713,11 @@ void ShardDocIndex::InitHnswShardIndices() {
   }
 }
 
+void ShardDocIndex::RetireHnswIndices() {
+  for (auto& hnsw_index : hnsw_shard_indices_)
+    hnsw_index.global_index()->Retire();
+}
+
 void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                               PrimeValue* pv) {
   if (hnsw_state_ != HnswState::kBuilding) {
@@ -1555,6 +1560,9 @@ unique_ptr<ShardDocIndex> ShardDocIndices::ExtractIndex(string_view name) {
   DropIndexCache(*it->second);
   auto index = std::move(it->second);
   indices_.erase(it);
+
+  // Searches may still hold the graphs, which point into documents this index no longer guards.
+  index->RetireHnswIndices();
   return index;
 }
 
@@ -1567,6 +1575,7 @@ void ShardDocIndices::DropAllIndices() {
   std::swap(to_destroy, indices_);
   for (auto& [_, idx] : to_destroy) {
     DropIndexCache(*idx);
+    idx->RetireHnswIndices();
   }
   GlobalHnswIndexRegistry::Instance().Reset();
   // to_destroy goes out of scope here — destructors run outside the map mutation

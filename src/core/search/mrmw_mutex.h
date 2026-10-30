@@ -9,6 +9,7 @@
 
 #include "base/logging.h"
 #include "base/spinlock.h"
+#include "util/fibers/synchronization.h"
 
 namespace dfly::search {
 
@@ -39,15 +40,27 @@ class MRMWMutex {
     active_runners_++;
   }
 
+  // Waits on the calling fiber, so its thread keeps running the other fibers. Not for atomic
+  // sections.
+  void LockInFiber(LockMode mode) {
+    fiber_waiters_.await([&] {
+      std::lock_guard lk(mutex_);
+      return TryLockLocked(mode);
+    });
+  }
+
   void Unlock(LockMode mode) {
-    std::lock_guard lk(mutex_);
-    LockMode inverse_mode = GetInverseMode(mode);
-    active_runners_--;
-    // If this was last runner and there are waiters on inverse mode
-    if (!active_runners_ && GetWaiters(inverse_mode) > 0) {
-      lock_mode_ = inverse_mode;
-      GetCondVar(inverse_mode).notify_all();
+    {
+      std::lock_guard lk(mutex_);
+      LockMode inverse_mode = GetInverseMode(mode);
+      active_runners_--;
+      // If this was last runner and there are waiters on inverse mode
+      if (!active_runners_ && GetWaiters(inverse_mode) > 0) {
+        lock_mode_ = inverse_mode;
+        GetCondVar(inverse_mode).notify_all();
+      }
     }
+    fiber_waiters_.notifyAll();
   }
 
   // Check if the mutex is currently held in read mode with at least one active runner.
@@ -61,19 +74,24 @@ class MRMWMutex {
     if (!mutex_.try_lock()) {
       return false;
     }
+    bool locked = TryLockLocked(mode);
+    mutex_.unlock();
+    return locked;
+  }
+
+ private:
+  // Requires mutex_.
+  bool TryLockLocked(LockMode mode) {
     if (active_runners_ && lock_mode_ != mode) {
-      mutex_.unlock();
       return false;
     }
     if (!active_runners_) {
       lock_mode_ = mode;
     }
     active_runners_++;
-    mutex_.unlock();
     return true;
   }
 
- private:
   inline size_t& GetWaiters(LockMode target_mode) {
     return target_mode == LockMode::kReadLock ? reader_waiters_ : writer_waiters_;
   };
@@ -89,6 +107,7 @@ class MRMWMutex {
   // TODO: use fiber sync primitives in future
   base::SpinLock mutex_;
   std::condition_variable_any reader_cond_var_, writer_cond_var_;
+  util::fb2::EventCount fiber_waiters_;
 
   size_t writer_waiters_ = 0, reader_waiters_ = 0;
   size_t active_runners_ = 0;

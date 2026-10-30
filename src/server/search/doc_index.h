@@ -641,6 +641,9 @@ class ShardDocIndex {
   // Initialize per-shard HNSW wrappers from schema + global registry.
   void InitHnswShardIndices();
 
+  // Retire the global HNSW indices this index is bound to (HnswVectorIndex::Retire).
+  void RetireHnswIndices();
+
  private:
   std::shared_ptr<const DocIndex> base_;
   DocFieldTypes field_types_;  // derived from base_->schema
