@@ -189,10 +189,9 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   return params;
 }
 
-// Adds the TAG parameters that follow to *params; returns whether there were any.
-ParseResult<bool> ParseTagParams(CmdArgParser* parser, search::SchemaField::TagParams* params) {
-  bool any = false;
-  for (; parser->HasNext(); any = true) {
+ParseResult<search::SchemaField::TagParams> ParseTagParams(
+    CmdArgParser* parser, search::SchemaField::TagParams params = {}) {
+  while (parser->HasNext()) {
     if (parser->Check("SEPARATOR")) {
       std::string_view separator = parser->NextOrDefault();
 
@@ -201,23 +200,23 @@ ParseResult<bool> ParseTagParams(CmdArgParser* parser, search::SchemaField::TagP
             absl::StrCat("Tag separator must be a single character. Got `"sv, separator, "`"sv));
       }
 
-      params->separator = separator.front();
+      params.separator = separator.front();
       continue;
     }
 
     if (parser->Check("CASESENSITIVE")) {
-      params->case_sensitive = true;
+      params.case_sensitive = true;
       continue;
     }
 
     if (parser->Check("WITHSUFFIXTRIE")) {
-      params->with_suffixtrie = true;
+      params.with_suffixtrie = true;
       continue;
     }
 
     break;
   }
-  return any;
+  return params;
 }
 
 ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
@@ -264,7 +263,11 @@ using ParsedSchemaField =
 
 // Tag fields include: [separator char] [casesensitive]
 ParsedSchemaField ParseTag(CmdArgParser* parser) {
-  return std::make_pair(search::SchemaField::TAG, search::SchemaField::TagParams{});
+  auto tag_params = ParseTagParams(parser);
+  if (!tag_params) {
+    return make_unexpected(tag_params.error());
+  }
+  return std::make_pair(search::SchemaField::TAG, std::move(tag_params).value());
 }
 
 ParsedSchemaField ParseText(CmdArgParser* parser) {
@@ -377,61 +380,45 @@ string OneLine(string_view name) {
 // in older versions that clients rely on, upper-case UNF, INDEXMISSING, INDEXEMPTY, PHONETIC x and,
 // on TEXT, NOSTEM and WEIGHT n anywhere. Any other argument starts the next field.
 ParseResult<uint8_t> ParseFieldOptions(CmdArgParser* parser, string_view field_alias,
-                                       search::SchemaField::FieldType type,
                                        search::SchemaField::ParamsVariant* params) {
   using search::SchemaField;
+  auto* text = std::get_if<SchemaField::TextParams>(params);
+  auto* tag = std::get_if<SchemaField::TagParams>(params);
   uint8_t flags = 0;
   bool flag_seen = false;
-  auto is_text_weight = [&] {
-    double weight;
-    return type == SchemaField::TEXT && absl::EqualsIgnoreCase(parser->Peek(), "WEIGHT") &&
-           (!flag_seen || absl::SimpleAtod(parser->Peek(1), &weight));
-  };
-
-  // PHONETIC and its argument are skipped: in upper case always, else on TEXT with a matcher.
-  auto is_phonetic = [&] {
-    string_view word = parser->Peek(), matcher = parser->Peek(1);
-    return parser->HasAtLeast(2) &&
-           (word == "PHONETIC" ||
-            (type == SchemaField::TEXT && absl::EqualsIgnoreCase(word, "PHONETIC") &&
-             matcher.size() == 5 && matcher[2] == ':'));
-  };
   while (parser->HasNext()) {
-    auto flag =
-        parser->TryMapNext("NOINDEX", SchemaField::NOINDEX, "SORTABLE", SchemaField::SORTABLE);
-    if (flag) {
+    string_view word = parser->Peek(), arg = parser->Peek(1);
+    double weight;
+    if (auto flag = parser->TryMapNext("NOINDEX", SchemaField::NOINDEX, "SORTABLE",
+                                       SchemaField::SORTABLE)) {
       flags |= *flag;
       flag_seen = true;
-      continue;
-    }
-
-    // In lower case these words name fields, as older versions stored them.
-    string_view word = parser->Peek();
-    if (word == "UNF" || word == "INDEXMISSING" || word == "INDEXEMPTY") {
-      flags |= word == "UNF"            ? SchemaField::UNF
-               : word == "INDEXMISSING" ? SchemaField::INDEXMISSING
-                                        : SchemaField::INDEXEMPTY;
-      parser->Skip(1);
-    } else if (is_phonetic()) {
+    } else if (word == "UNF" || word == "INDEXMISSING" || word == "INDEXEMPTY") {
+      // In lower case these words name fields, as older versions stored them.
+      flags |= parser->MapNext("UNF", SchemaField::UNF, "INDEXMISSING", SchemaField::INDEXMISSING,
+                               "INDEXEMPTY", SchemaField::INDEXEMPTY);
+    } else if (parser->HasAtLeast(2) &&
+               (word == "PHONETIC" || (text && arg.size() == 5 && arg[2] == ':')) &&
+               parser->Check("PHONETIC", &arg)) {
+      // Lower case only on TEXT before a matcher such as dm:en.
       LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: PHONETIC";
-      parser->Skip(2);
-    } else if (is_text_weight()) {
-      parser->Skip(1);
-      ParseTextWeight(parser, &std::get<SchemaField::TextParams>(*params));
-    } else if (type == SchemaField::TEXT && absl::EqualsIgnoreCase(word, "NOSTEM") &&
-               (!flag_seen || word == "NOSTEM")) {
-      std::get<SchemaField::TextParams>(*params).no_stem = true;
-      parser->Skip(1);
+    } else if (text && (!flag_seen || absl::SimpleAtod(arg, &weight)) && parser->Check("WEIGHT")) {
+      ParseTextWeight(parser, text);
+    } else if (text && (!flag_seen || word == "NOSTEM") && parser->Check("NOSTEM")) {
+      text->no_stem = true;
     } else if (flag_seen) {
       break;
-    } else if (type == SchemaField::TEXT && parser->Check("WITHSUFFIXTRIE")) {
-      std::get<SchemaField::TextParams>(*params).with_suffixtrie = true;
-    } else if (type == SchemaField::TAG) {
-      auto parsed = ParseTagParams(parser, &std::get<SchemaField::TagParams>(*params));
-      if (!parsed)
-        return make_unexpected(parsed.error());
-      if (!*parsed)
+    } else if (text && parser->Check("WITHSUFFIXTRIE")) {
+      text->with_suffixtrie = true;
+    } else if (tag) {
+      // TAG parameters may also follow INDEXMISSING, INDEXEMPTY, UNF or PHONETIC.
+      size_t start = parser->UnparsedStart();
+      auto tag_params = ParseTagParams(parser, *tag);
+      if (!tag_params)
+        return make_unexpected(tag_params.error());
+      if (parser->UnparsedStart() == start)
         break;
+      *tag = *tag_params;
     } else {
       break;
     }
@@ -444,7 +431,7 @@ ParseResult<uint8_t> ParseFieldOptions(CmdArgParser* parser, string_view field_a
   }
 
   // Accepted on any type, as before; only TEXT and TAG keep it.
-  if (type != SchemaField::TEXT && type != SchemaField::TAG)
+  if (!text && !tag)
     flags &= ~SchemaField::INDEXEMPTY;
   return flags;
 }
@@ -507,7 +494,7 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
     auto [field_type, params] = std::move(parsed_params).value();
 
-    auto flags = ParseFieldOptions(parser, field_alias, field_type, &params);
+    auto flags = ParseFieldOptions(parser, field_alias, &params);
     if (!flags) {
       return make_unexpected(flags.error());
     }
