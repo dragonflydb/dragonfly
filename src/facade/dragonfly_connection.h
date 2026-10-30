@@ -322,6 +322,9 @@ class Connection : public util::Connection {
   // Get quick debug info for logs
   std::string DebugInfo() const;
 
+  // Oldest unfinished command, its age and tx; empty if the connection holds no checkpoints.
+  std::string DispatchStuckInfo() const;
+
   bool IsHttp() const;
 
   static void UpdateFromFlags();                          // Set values from flags

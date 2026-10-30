@@ -1697,6 +1697,7 @@ Connection::ParserStatus Connection::ParseRedis(base::IoBuf& io_buf, uint32_t ma
   RespSrvParser::Result result = RespSrvParser::OK;
 
   auto dispatch_sync = [this] {
+    parsed_cmd_->FinalizeParsing();  // stamps parsed_cycle, not set on the sync path otherwise
     service_->DispatchCommand(ParsedArgs{*parsed_cmd_}, parsed_cmd_,
                               facade::AsyncPreference::ONLY_SYNC, nullptr);
   };
@@ -2196,6 +2197,35 @@ void Connection::ReleaseDeferredCheckpoints() {
     bc->Dec();
   }
   deferred_checkpoints_.clear();
+}
+
+string Connection::DispatchStuckInfo() const {
+  // Checkpoints sit contiguously at the front of dispatch_q_.
+  size_t checkpoints = deferred_checkpoints_.size();
+  for (auto it = dispatch_q_.begin(); it != dispatch_q_.end() && it->IsCheckPoint(); ++it)
+    ++checkpoints;
+  if (checkpoints == 0)
+    return {};
+
+  string info =
+      absl::StrCat("addr=", RemoteEndpointStr(), " name=", name_, " checkpoints=", checkpoints);
+
+  // V2: the head is the oldest in-flight command. V1: only a sync dispatch is reachable.
+  const ParsedCommand* cmd =
+      ioloop_v2_ ? parsed_head_ : (cc_ && cc_->sync_dispatch ? parsed_cmd_ : nullptr);
+  if (cmd) {
+    // Memcache args hold only keys.
+    string_view name = cmd->mc_command() || cmd->empty() ? "" : cmd->Front();
+    absl::StrAppend(&info, " cmd=", name,
+                    " cmd_ms=", CycleClock::ToUsec(CycleClock::Now() - cmd->parsed_cycle) / 1000);
+  }
+
+  absl::StrAppend(&info, " ", DebugInfo());
+
+  // Not GetContextInfo(): it races with shard threads.
+  if (cc_)
+    absl::StrAppend(&info, " tx=", service_->GetTxDebugInfo(cc_.get()));
+  return info;
 }
 
 string Connection::DebugInfo() const {

@@ -411,6 +411,9 @@ class ServerFamily {
   bool legacy_format_metrics_ = true;
 };
 
+// Logs every shard's tx queue with thread-safe reads; DispatchTracker on_stuck callback.
+void LogShardsTxState();
+
 // Reusable CLIENT PAUSE implementation that blocks while polling is_pause_in_progress
 std::optional<util::fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                       facade::Connection* conn, ClientPause pause_state,

@@ -3077,6 +3077,18 @@ Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) co
           .is_scheduled = is_scheduled};
 }
 
+std::string Service::GetTxDebugInfo(facade::ConnectionContext* cntx) const {
+  ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
+
+  // A remote single-shard script swaps a stub into transaction from the shard thread, and only
+  // the coordinator (this thread) sets script_info, so check it before touching transaction.
+  if (server_cntx->conn_state.script_info)
+    return "<in script>";
+
+  // Pointer only: shards write tx fields concurrently.
+  return absl::StrCat(absl::Hex(uintptr_t(server_cntx->transaction)));
+}
+
 #define HFUNC(x) SetHandler(&Service::x)
 #define MFUNC(x) \
   SetHandler([this](CmdArgParser parser, CommandContext* cntx) { this->x(parser, cntx); })

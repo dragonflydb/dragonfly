@@ -189,6 +189,9 @@ class EngineShard {
     running_tx_ = tx;
   }
 
+  // Thread-safe txq snapshot: tx pointers and atomics only, never coordinator-owned tx fields.
+  std::string TxQueueSafeInfo() const;
+
   void StopPeriodicFiber();
 
   struct TxQueueItem {

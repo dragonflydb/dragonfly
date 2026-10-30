@@ -1367,6 +1367,14 @@ void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::Proacto
   }
 }
 
+void LogShardsTxState() {
+  // Blocks, so the snapshot is taken before the caller unpauses clients.
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    LOG(WARNING) << "DispatchTrackerStuck: shard " << shard->shard_id() << " "
+                 << shard->TxQueueSafeInfo();
+  });
+}
+
 std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                 facade::Connection* conn, ClientPause pause_state,
                                 std::function<bool()> is_pause_in_progress,
@@ -1377,7 +1385,7 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   // state after waking from blocking so if the trasaction was waken by another running
   //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
-                          true /*ignore blocking*/};
+                          true /*ignore blocking*/, LogShardsTxState};
   shard_set->pool()->AwaitFiberOnAll([&tracker, pause_state](unsigned, util::ProactorBase*) {
     // Commands don't suspend before checking the pause state, so
     // it's impossible to deadlock on waiting for a command that will be paused.

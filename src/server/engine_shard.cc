@@ -1071,6 +1071,21 @@ void EngineShard::FinalizeMulti(Transaction* tx) {
   PollExecution("unlockmulti", nullptr);
 }
 
+string EngineShard::TxQueueSafeInfo() const {
+  string res = absl::StrCat("txq=", txq_.size(), " head=");
+  if (!txq_.Empty()) {
+    auto front = txq_.Front();
+
+    // A queued tx stays alive, its shard_data_ is never reallocated and is_armed is atomic.
+    if (auto* tx = get_if<Transaction*>(&front); tx)
+      absl::StrAppend(&res, absl::Hex(uintptr_t(*tx)),
+                      " armed=", (*tx)->DEBUG_IsArmedInShard(shard_id()));
+  }
+  absl::StrAppend(&res, " running=", absl::Hex(uintptr_t(running_tx_)),
+                  " needs_repoll=", needs_repoll_);
+  return res;
+}
+
 EngineShard::TxQueueInfo EngineShard::AnalyzeTxQueue() const {
   const TxQueue* queue = txq();
 
