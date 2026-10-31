@@ -1530,8 +1530,8 @@ size_t RdbSaver::Impl::GetTotalBuffersSize() const {
       return;
     if (channel_.has_value())
       channel_bytes.fetch_add(channel_->GetSize(), memory_order_relaxed);
-    serializer_bytes.store(snapshot->GetBufferCapacity() + snapshot->GetTempBuffersSize(),
-                           memory_order_relaxed);
+    serializer_bytes.fetch_add(snapshot->GetBufferCapacity() + snapshot->GetTempBuffersSize(),
+                               memory_order_relaxed);
   };
 
   if (shard_snapshots_.size() == 1) {
