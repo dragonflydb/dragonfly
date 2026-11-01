@@ -34,7 +34,14 @@ def compress_site(json_files: list[Path], site_dir: Path, staging_dir: Path) -> 
 def upload_json(site_dir: Path, destination: str, total: int) -> None:
     """Publish staged JSON before the manifest exposes the corresponding dashboard data."""
     print(f"Publishing {total} dashboard JSON files to {destination}/", flush=True)
-    gcloud("rsync", f"{site_dir}/", f"{destination}/", "--recursive")
+    # First upload all JSON files except the manifest to ensure the manifest doesn't point to missing data.
+    gcloud(
+        "rsync",
+        f"{site_dir}/",
+        f"{destination}/",
+        "--recursive",
+        "--exclude=^data/manifest\\.json$",
+    )
     print(f"Published {total} dashboard JSON files", flush=True)
 
 

@@ -131,7 +131,11 @@ class PublishDashboardGcsTest(unittest.TestCase):
                     with patch.object(publisher, "gcloud") as gcloud:
                         publisher.upload_json(self.site, "gs://bucket", 1)
                     gcloud.assert_called_once_with(
-                        "rsync", f"{self.site}/", "gs://bucket/", "--recursive"
+                        "rsync",
+                        f"{self.site}/",
+                        "gs://bucket/",
+                        "--recursive",
+                        "--exclude=^data/manifest\\.json$",
                     )
 
     def assert_source_unchanged(self):
