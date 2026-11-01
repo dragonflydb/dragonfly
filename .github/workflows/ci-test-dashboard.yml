@@ -1,5 +1,8 @@
 name: CI Test Dashboard
 
+env:
+  DEFAULT_LOOKBACK_DAYS: &default-lookback-days 30
+
 on:
   schedule:
     - cron: "30 4 * * *"
@@ -9,7 +12,7 @@ on:
         description: "Number of recent UTC days to include"
         required: false
         type: number
-        default: 30
+        default: *default-lookback-days
       publish_bucket:
         description: "Optional S3 bucket to publish the static dashboard to"
         required: false
@@ -61,10 +64,11 @@ jobs:
 
     env:
       DASHBOARD_ROOT: tools/ci_test_dashboard
-      LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '30' }}
+      LOOKBACK_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.lookback_days || '' }}
       SOURCE_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
       PUBLISH_BUCKET: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_bucket || secrets.S3_CI_TEST_DASHBOARD_BUCKET }}
       PUBLISH_PREFIX: ${{ github.event_name == 'workflow_dispatch' && inputs.publish_prefix || vars.CI_TEST_DASHBOARD_PREFIX }}
+      GCS_DASHBOARD_DESTINATION: ${{ secrets.GCS_CI_TEST_DASHBOARD_DESTINATION }}
 
     steps:
       - uses: actions/checkout@v7
@@ -92,7 +96,7 @@ jobs:
           set -euo pipefail
           python3 "${DASHBOARD_ROOT}/sync_dashboard.py" \
             --source-bucket "${SOURCE_BUCKET}" \
-            --lookback-days "${LOOKBACK_DAYS}" \
+            --lookback-days "${LOOKBACK_DAYS:-$DEFAULT_LOOKBACK_DAYS}" \
             --work-dir "${RUNNER_TEMP}/ci-test-dashboard" \
             "${DASHBOARD_ROOT}/site/data"
 
@@ -115,6 +119,19 @@ jobs:
         if: env.PUBLISH_BUCKET != ''
         shell: bash
         run: python3 "${GITHUB_WORKSPACE}/.github/scripts/publish-ci-dashboard-site-to-s3.py"
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: dragonflydb
+          credentials_json: ${{ secrets.GCP_BUCKET_CREDENTIALS }}
+
+      - name: Set up gcloud CLI tool
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Publish dashboard site to private GCS
+        shell: bash
+        run: python3 "${GITHUB_WORKSPACE}/.github/scripts/publish-ci-dashboard-site-to-gcs.py"
 
       - name: Skip S3 publish
         if: env.PUBLISH_BUCKET == ''
