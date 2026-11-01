@@ -10,6 +10,7 @@
 #include <atomic>
 #include <limits>
 
+#include "base/cycle_clock.h"
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
 #include "facade/connection_ref.h"
@@ -288,6 +289,11 @@ class DbSlice {
 
   // Returns slot statistics summed across all active databases.
   SlotStats GetSlotStats(SlotId sid) const;
+
+  // Adds the statistics of each slot in `slots`, summed across all active databases, to the
+  // respective entry of `dest`. Cheaper than calling GetSlotStats per slot, which repeats the call
+  // and the walk over the databases for every slot.
+  void AddSlotStats(absl::Span<const SlotId> slots, absl::Span<SlotStats> dest) const;
 
   void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {
     memory_budget_ = budget;
@@ -664,21 +670,17 @@ class DbSlice {
   // Returns true if this write could be ignored during replication without losing consistency
   bool IsOmittableWrite(const Context& cntx, const ChangeReq& req);
 
-  enum class UpdateStatsMode : uint8_t {
-    kReadStats,
-    kMutableStats,
+  enum class LookupMode : uint8_t {
+    kReadOnly,
+    kMutable,
   };
 
   // Returns true if deletion of expired entries is allowed (i.e., expiry is not paused
   // and this is not a replica that leaves expiry to its master)
   bool AllowExpiredDeletions() const;
 
-  OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
-                                           std::optional<unsigned> req_obj_type);
-
   OpResult<PrimeIterator> FindInternal(const Context& cntx, std::string_view key,
-                                       std::optional<unsigned> req_obj_type,
-                                       UpdateStatsMode stats_mode) const;
+                                       std::optional<unsigned> req_obj_type, LookupMode mode) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
                                              std::optional<unsigned> req_obj_type);
 
@@ -731,6 +733,9 @@ class DbSlice {
   // ordered from the smallest to largest version.
   std::list<ChangeConsumerInterface*> change_cb_;
   mutable LocalLatch change_cb_latch_;  // to avoid deletion during traversal
+
+  // Shared by overlapping slot sweeps and their foreground on-change callbacks.
+  base::RealTimeAggregator flush_slots_cpu_aggregator_;
 
   // Cache mode only: <key hash, db> of the entries looked up during the current transaction
   // callback. OnCbFinishBlocking bumps them up after the callback finishes, because a bump moves

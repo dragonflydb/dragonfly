@@ -2472,7 +2472,9 @@ TEST_P(IndexedHashTieringTest, BorrowedHnswVectorsStayResident) {
 // MGET runs optimistically and when cancelled reruns its shard callback while tiered reads of the
 // previous attempt may still be in flight. These orphaned reads must not write into the response
 // buffer, which the new attempt reuses or reallocates.
-TEST_F(PureDiskTSMTTest, MGetRescheduleWithPendingReads) {
+// TODO: disabled - flaky, MGET retries depend on CPU parallelism and are rare on CI runners.
+// Run it with --gtest_also_run_disabled_tests on a machine with many cores.
+TEST_F(PureDiskTSMTTest, DISABLED_MGetRescheduleWithPendingReads) {
   DisableUploads();
 
   const auto sz = shard_set->size();

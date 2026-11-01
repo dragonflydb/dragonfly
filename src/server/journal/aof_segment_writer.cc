@@ -6,7 +6,10 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/random/random.h>
+#include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
+#include <absl/strings/str_split.h>
+#include <absl/strings/strip.h>
 #include <fcntl.h>
 // For IORING_FSYNC_DATASYNC.
 #include <linux/io_uring.h>
@@ -29,19 +32,19 @@ error_code IoError(int res) {
   return res < 0 ? error_code{-res, system_category()} : make_error_code(errc::io_error);
 }
 
-error_code SyncDir(const string& dir) {
+error_code LastErrno() {
+  return {errno, system_category()};
+}
+
+}  // namespace
+
+error_code AofSyncDir(const string& dir) {
   auto res = OpenLinux(dir, O_RDONLY | O_DIRECTORY, 0);
   if (!res)
     return res.error();
   RETURN_ON_ERR((*res)->FSync(0));
   return (*res)->Close();
 }
-
-error_code LastErrno() {
-  return {errno, system_category()};
-}
-
-}  // namespace
 
 AofSegmentWriter::AofSegmentWriter(string dir, uint32_t shard_id, uint32_t shard_count)
     : dir_(std::move(dir)), shard_id_(shard_id), shard_count_(shard_count) {
@@ -55,6 +58,15 @@ AofSegmentWriter::~AofSegmentWriter() {
 
 string AofSegmentWriter::SegmentName(uint32_t shard_id, uint64_t seq) {
   return absl::StrCat("appendonly-", shard_id, "-", seq, ".aof");
+}
+
+bool AofSegmentWriter::ParseSegmentName(string_view name, uint32_t* shard_id, uint64_t* seq) {
+  string_view rest = name;
+  if (!absl::ConsumePrefix(&rest, "appendonly-") || !absl::ConsumeSuffix(&rest, ".aof"))
+    return false;
+  vector<string_view> parts = absl::StrSplit(rest, absl::MaxSplits('-', 1));
+  return parts.size() == 2 && absl::SimpleAtoi(parts[0], shard_id) &&
+         absl::SimpleAtoi(parts[1], seq) && SegmentName(*shard_id, *seq) == name;
 }
 
 error_code AofSegmentWriter::Open(uint64_t seq) {
@@ -94,7 +106,7 @@ error_code AofSegmentWriter::Open(uint64_t seq) {
   if (unlink(tmp_path.c_str()) != 0)
     LOG(WARNING) << "Failed to remove " << tmp_path << ": " << LastErrno().message();
   // Only the final name remains.
-  RETURN_ON_ERR(SyncDir(dir_));
+  RETURN_ON_ERR(AofSyncDir(dir_));
   std::move(cleanup).Cancel();
 
   builder_.emplace(uid, [this](AofSealedBlock block) { OnSealed(std::move(block)); });

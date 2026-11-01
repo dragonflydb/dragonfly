@@ -2712,8 +2712,8 @@ void GenericFamily::Time(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->StartArray(2);
-  rb->SendLong(now_usec / 1000000);
-  rb->SendLong(now_usec % 1000000);
+  rb->SendBulkString(absl::StrCat(now_usec / 1000000));
+  rb->SendBulkString(absl::StrCat(now_usec % 1000000));
 }
 
 void GenericFamily::Echo(CmdArgParser parser, CommandContext* cmd_cntx) {

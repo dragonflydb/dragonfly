@@ -11,8 +11,29 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace dfly {
+
+enum class AofError {
+  kTornTail = 1,
+  kNoSegments,
+
+  // A file matches the shard's segment pattern, but its name does not parse.
+  kBadSegmentName,
+  kSegmentNonContiguous,
+
+  // A segment is shorter than its header.
+  kShortSegment,
+
+  // A header's CRC, shard id or seq does not match its file.
+  kBadSegmentHeader,
+  kShardCountChanged,
+  kBadManifest,
+  kManifestVersion,
+};
+
+std::error_code make_error_code(AofError e);
 
 // On-disk AOF format: a segment is a fixed header followed by blocks of journal records.
 constexpr std::string_view kAofMagic = "DFAOF1";
@@ -95,3 +116,7 @@ class AofBlockBuilder {
 };
 
 }  // namespace dfly
+
+namespace std {
+template <> struct is_error_code_enum<dfly::AofError> : true_type {};
+}  // namespace std

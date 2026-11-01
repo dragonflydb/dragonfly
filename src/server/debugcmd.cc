@@ -7,6 +7,7 @@
 
 extern "C" {
 #include "redis/redis_aux.h"
+#include "redis/stream.h"
 }
 
 #include <absl/cleanup/cleanup.h>
@@ -161,6 +162,29 @@ struct ObjHist {
   base::Histogram listpack;     // for listpack encodings - the malloc used of the listpack.
 };
 
+size_t StreamDataLen(stream* s, ObjHist* hist) {
+  // Stream IDs fit the rax iterator's inline key/path buffers; fields are read in place.
+  static_assert(sizeof(streamID) <= RAX_ITER_STATIC_LEN);
+  static_assert(sizeof(streamID) + 1 <= RAX_STACK_STATIC_ITEMS);
+  streamIterator si;
+  streamID id;
+  int64_t numfields;
+  size_t len = 0;
+  streamIteratorStart(&si, s, nullptr, nullptr, 0);
+  while (streamIteratorGetID(&si, &id, &numfields)) {
+    while (numfields--) {
+      unsigned char *field, *value;
+      int64_t field_len, value_len;
+      streamIteratorGetField(&si, &field, &value, &field_len, &value_len);
+      size_t entry_len = field_len + value_len;
+      hist->entry_len.Add(entry_len);
+      len += entry_len;
+    }
+  }
+  streamIteratorStop(&si);
+  return len;
+}
+
 // No yield: runs inside Traverse, which holds a raw segment pointer a yield could free.
 void AddObjHist(PrimeIterator it, ObjHist* hist) {
   using namespace container_utils;
@@ -194,7 +218,7 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
     IterateList(pv, per_entry_cb, 0, SIZE_MAX, /*allow_yield=*/false);
     if (pv.Encoding() == kEncodingQL2) {
       const QList* ql = static_cast<QList*>(pv.RObjPtr());
-      malloc_used = ql->MallocUsed(true);
+      malloc_used = ql->MallocUsed(false);
     } else if (pv.Encoding() == kEncodingListPack) {
       malloc_used = pv.MallocUsed();
       hist->listpack.Add(malloc_used);
@@ -223,21 +247,28 @@ void AddObjHist(PrimeIterator it, ObjHist* hist) {
     if (pv.Encoding() == kEncodingListPack) {
       hist->listpack.Add(pv.MallocUsed());
     }
+  } else if (pv.ObjType() == OBJ_STREAM) {
+    stream* s = static_cast<stream*>(pv.RObjPtr());
+    data_len = StreamDataLen(s, hist);
+    hist->card.Add(s->length);
+  } else if (pv.ObjType() != OBJ_JSON) {
+    // Probabilistic types (bloom, cuckoo, count-min sketch, topk) are fixed-size sketches.
+    data_len = pv.MallocUsed();
   }
-  // TODO: streams
 
   if (malloc_used == 0) {
     // Fallback
-    malloc_used = pv.MallocUsed(true);
+    malloc_used = pv.MallocUsed();
   }
 
   hist->malloc_used.Add(malloc_used);
 
-  // TODO: data size for json and streams.
-  if (pv.ObjType() != OBJ_JSON && pv.ObjType() != OBJ_STREAM)
+  // JSON reports only its cached malloc size.
+  if (pv.ObjType() != OBJ_JSON)
     hist->data_len.Add(data_len);
 
-  if (pv.ObjType() != OBJ_STRING && pv.ObjType() != OBJ_JSON)
+  // Stream cardinality is added above since its Size() returns the memory usage.
+  if (pv.ObjType() != OBJ_STRING && pv.ObjType() != OBJ_JSON && pv.ObjType() != OBJ_STREAM)
     hist->card.Add(pv.Size());
 }
 
@@ -1215,13 +1246,13 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
 
     // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
     // in the currently traversed DB (not the connection-selected one).
-    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2) {
+    if ((obj_type == OBJ_SET || obj_type == OBJ_HASH) &&
+        it->second.Encoding() == kEncodingStrMap2 && it->second.Size() == 0) {
       auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
       DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
       string key;
       it->first.GetString(&key);
-      if (obj_type == OBJ_SET || obj_type == OBJ_HASH)
-        DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
+      DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
     }
   };
   TraverseAllEntries(absl::GetFlag(FLAGS_background_debug_jobs), cntx_, cb);
@@ -1250,7 +1281,9 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
       StrAppend(&result, "Cardinality histogram (number of elements in sets):\n",
                 hist_ptr->card.ToString(), "\n");
     }
-    StrAppend(&result, "Items length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    if (hist_ptr->entry_len.count() > 0) {
+      StrAppend(&result, "Items length histogram:\n", hist_ptr->entry_len.ToString(), "\n");
+    }
     if (hist_ptr->listpack.count() > 0) {
       StrAppend(&result, "Listpack histogram:\n", hist_ptr->listpack.ToString(), "\n");
     }

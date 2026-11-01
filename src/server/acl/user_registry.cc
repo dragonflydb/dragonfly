@@ -72,7 +72,7 @@ void UserRegistry::MaybeAddAndUpdate(std::string_view username, User::UpdateRequ
   auto& user = registry_[username];
 
   const User::MemoryUsage before = is_new ? User::MemoryUsage{} : user.GetMemoryUsage();
-  user.Update(std::move(req), *cat_to_id_table_, *reverse_cat_table_, *cat_to_commands_table_);
+  user.Update(std::move(req));
   TrackUser(before, user.GetMemoryUsage(), is_new);
 }
 
@@ -138,22 +138,18 @@ User::UpdateRequest UserRegistry::DefaultUserUpdateRequest() const {
   User::UpdateRequest req;
   req.passwords = std::vector<User::UpdatePass>{{"", false, true}};
   req.is_active = true;
-  req.updates = {std::pair<User::Sign, uint32_t>{User::Sign::PLUS, acl::ALL}};
+  req.updates = {User::UpdateRequest::CategoryValueType{
+      User::Sign::PLUS, acl::ALL, std::vector<uint64_t>(NumberOfFamilies(), ALL_COMMANDS)}};
   req.keys = {User::UpdateKey{"~*", KeyOp::READ_WRITE, true, false}};
   req.pub_sub = {User::UpdatePubSub{"", false, true, false}};
   return req;
 }
 
-void UserRegistry::Init(const CategoryToIdxStore* cat_to_id_table,
-                        const ReverseCategoryIndexTable* reverse_cat_table,
-                        const CategoryToCommandsIndexStore* cat_to_commands_table) {
+void UserRegistry::Init() {
   // if there exists an acl file to load from, requirepass
   // will not overwrite the default's user password loaded from
   // that file. Loading the default's user password from a file
   // has higher priority than the deprecated flag
-  cat_to_id_table_ = cat_to_id_table;
-  reverse_cat_table_ = reverse_cat_table;
-  cat_to_commands_table_ = cat_to_commands_table;
   auto default_user = DefaultUserUpdateRequest();
   auto maybe_password = absl::GetFlag(FLAGS_requirepass);
   if (!maybe_password.empty()) {

@@ -97,6 +97,58 @@ async def test_load_unsupported_rdb(df_factory, tmp_dir: Path, unsupported_rdb, 
     assert await client.set("key", "value")
 
 
+@dfly_args({**BASIC_ARGS, "dbfilename": "blocked-load"})
+async def test_load_cancels_blocked_commands(async_client, tmp_dir: Path):
+    await async_client.save()
+    blocked = [
+        asyncio.create_task(async_client.blpop("lfoo", 0)),
+        asyncio.create_task(async_client.execute_command("BLMPOP", 0, 1, "lmfoo", "LEFT")),
+        asyncio.create_task(async_client.bzpopmin("zfoo", 0)),
+        asyncio.create_task(async_client.execute_command("BZMPOP", 0, 1, "zmfoo", "MIN")),
+        asyncio.create_task(async_client.xread({"sfoo": "$"}, block=0)),
+    ]
+
+    @assert_eventually
+    async def blocked_registered():
+        assert (await async_client.info("clients"))["blocked_clients"] == len(blocked)
+
+    await blocked_registered()
+    await async_client.execute_command("DFLY", "LOAD", str(tmp_dir / "blocked-load-summary.dfs"))
+
+    results = await asyncio.wait_for(asyncio.gather(*blocked, return_exceptions=True), 5)
+    for result in results:
+        assert isinstance(result, redis.exceptions.ResponseError)
+        assert "UNBLOCKED" in str(result)
+    assert (await async_client.info("clients"))["blocked_clients"] == 0
+    assert await async_client.set("key", "value")
+
+
+@dfly_args({**BASIC_ARGS, "dbfilename": "migrating-load"})
+async def test_load_while_connections_migrate(df_server, async_client, tmp_dir: Path):
+    # Entering LOADING unblocks clients by traversing connections on every thread. A traversal
+    # waits for in-flight connection migrations, so it must not run on the proactor dispatcher.
+    await async_client.save()
+    loading_done = asyncio.Event()
+
+    async def migrate(client):
+        client_id = await client.client_id()
+        while not loading_done.is_set():
+            for thread in range(BASIC_ARGS["proactor_threads"]):
+                await client.execute_command("CLIENT", "MIGRATE", client_id, thread)
+
+    migrators = [
+        asyncio.create_task(migrate(df_server.client(single_connection_client=True)))
+        for _ in range(8)
+    ]
+    for _ in range(50):
+        await async_client.execute_command(
+            "DFLY", "LOAD", str(tmp_dir / "migrating-load-summary.dfs")
+        )
+    loading_done.set()
+    await asyncio.gather(*migrators)
+    assert await async_client.ping()
+
+
 @pytest.mark.opt_only
 @pytest.mark.parametrize("format", FILE_FORMATS)
 @pytest.mark.parametrize(
@@ -450,6 +502,33 @@ async def test_s3_snapshot(async_client, tmp_dir):
             os.environ["DRAGONFLY_S3_BUCKET"],
             str(tmp_dir)[1:],
         )
+
+
+async def test_s3_init_failure_at_runtime_does_not_exit(df_factory, tmp_path, monkeypatch):
+    """A cloud storage init failure during SAVE/LOAD must return an error, not kill the server."""
+    for var in list(os.environ):
+        if var.startswith("AWS_"):
+            monkeypatch.delenv(var)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("MINIO_S3_ENDPOINT", raising=False)
+
+    df_server = df_factory.create(dir=str(tmp_path))
+    df_server.start()
+    client = df_server.client()
+    await client.set("k", "v")
+
+    s3_path = "s3://nonexistent-dfly-test-bucket/dir"
+    for cmd in [
+        ("SAVE", "DF", s3_path, "snap"),
+        ("BGSAVE", "DF", s3_path, "snap"),
+        ("DFLY", "LOAD", s3_path + "/snap-summary.dfs", "APPEND"),
+    ]:
+        with pytest.raises(redis.exceptions.ResponseError, match="Failed to initialize AWS S3"):
+            await client.execute_command(*cmd)
+        assert await client.get("k") == "v"
+
+    await client.aclose()
+    df_server.stop()
 
 
 # If DRAGONFLY_S3_BUCKET is configured, AWS credentials must also be

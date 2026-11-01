@@ -32,6 +32,8 @@ extern "C" {
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
 
+ABSL_DECLARE_FLAG(float, migration_buckets_cpu_budget);
+
 ABSL_FLAG(uint32_t, max_eviction_per_heartbeat, 100,
           "The maximum number of key-value pairs that will be deleted in each eviction "
           "when heartbeat based eviction is triggered under memory pressure.");
@@ -547,12 +549,19 @@ auto DbSlice::GetStats() const -> Stats {
 
 SlotStats DbSlice::GetSlotStats(SlotId sid) const {
   SlotStats stats;
+  AddSlotStats({&sid, 1}, {&stats, 1});
+  return stats;
+}
+
+void DbSlice::AddSlotStats(absl::Span<const SlotId> slots, absl::Span<SlotStats> dest) const {
+  DCHECK_EQ(slots.size(), dest.size());
   for (const auto& db : db_arr_) {
     // slots_stats is null outside real cluster mode.
-    if (db && db->slots_stats)
-      stats += db->slots_stats[sid];
+    if (db && db->slots_stats) {
+      for (size_t i = 0; i < slots.size(); ++i)
+        dest[i] += db->slots_stats[slots[i]];
+    }
   }
-  return stats;
 }
 
 DbSlice::AutoUpdater::AutoUpdater() {
@@ -659,7 +668,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutable(const Context& cntx, string
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx, string_view key,
                                                              std::optional<unsigned> req_obj_type) {
-  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
+  auto res = FindInternal(cntx, key, req_obj_type, LookupMode::kMutable);
   RETURN_ON_BAD_STATUS(res);
 
   auto it = Iterator(*res, StringOrView::FromView(key));
@@ -672,20 +681,23 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
   if (res->IsOccupied()) {
     DCHECK_GE(db_arr_[cntx.db_index]->stats.obj_memory_usage, (*res)->second.MallocUsed());
 
-    return {{it, AutoUpdater{cntx.db_index, key, it, this}, false, omitted}};
-  } else {
-    return OpStatus::KEY_NOTFOUND;
+    return {{.it = it,
+             .post_updater = AutoUpdater{cntx.db_index, key, it, this},
+             .is_new = false,
+             .omitted_journal = omitted}};
   }
+
+  return OpStatus::KEY_NOTFOUND;
 }
 
 DbSlice::ConstIterator DbSlice::FindReadOnly(const Context& cntx, std::string_view key) const {
-  auto res = FindInternal(cntx, key, std::nullopt, UpdateStatsMode::kReadStats);
+  auto res = FindInternal(cntx, key, std::nullopt, LookupMode::kReadOnly);
   return {*res, StringOrView::FromView(key)};
 }
 
 OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, string_view key,
                                                        unsigned req_obj_type) const {
-  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kReadStats);
+  auto res = FindInternal(cntx, key, req_obj_type, LookupMode::kReadOnly);
   if (res.ok()) {
     return ConstIterator(*res, StringOrView::FromView(key));
   }
@@ -693,7 +705,7 @@ OpResult<DbSlice::ConstIterator> DbSlice::FindReadOnly(const Context& cntx, stri
 }
 
 auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsigned> req_obj_type,
-                           UpdateStatsMode stats_mode) const -> OpResult<PrimeIterator> {
+                           LookupMode mode) const -> OpResult<PrimeIterator> {
   if (!IsDbValid(cntx.db_index)) {  // Can it even happen?
     LOG(DFATAL) << "Invalid db index " << cntx.db_index;
     return OpStatus::KEY_NOTFOUND;
@@ -702,11 +714,18 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   auto& db = *db_arr_[cntx.db_index];
   const uint64_t key_hash = db.prime.DoHash(key);
   PrimeIterator it = db.prime.Find(key, key_hash);
-  int miss_weight = (stats_mode == UpdateStatsMode::kReadStats);
+
+  // Only read-only lookups count misses. TryExpire may suspend on the journal append, and a flush
+  // may have replaced the table meanwhile, so do not use `db` here.
+  auto record_miss = [&] {
+    if (mode == LookupMode::kReadOnly) {
+      events_.misses++;
+      db_arr_[cntx.db_index]->stats.events.misses++;
+    }
+  };
 
   if (!IsValid(it)) {
-    events_.misses += miss_weight;
-    db.stats.events.misses += miss_weight;
+    record_miss();
     return OpStatus::KEY_NOTFOUND;
   }
 
@@ -720,13 +739,9 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     // If expiry is paused, hide expired keys from read lookups. Mutable lookups must still see
     // them: the entry is physically present, and reporting it missing would make AddOrFind insert
     // a duplicate.
-    if (res == ExpireResult::Deleted ||
-        (res == ExpireResult::ExpiryPaused && stats_mode == UpdateStatsMode::kReadStats)) {
-      events_.misses += miss_weight;
-
-      // TryExpire may suspend on the journal append, and a flush may have replaced the table
-      // meanwhile, so do not use `db`.
-      db_arr_[cntx.db_index]->stats.events.misses += miss_weight;
+    const bool hide_paused_expiry = mode == LookupMode::kReadOnly;
+    if (res == ExpireResult::Deleted || (res == ExpireResult::ExpiryPaused && hide_paused_expiry)) {
+      record_miss();
       return OpStatus::KEY_NOTFOUND;
     }
   }
@@ -735,8 +750,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   // Preemptions happen only if the entry is being deleted during expiry, so `db` is valid here.
   if (req_obj_type.has_value() && it->second.ObjType() != req_obj_type.value()) {
-    events_.misses += miss_weight;
-    db.stats.events.misses += miss_weight;
+    record_miss();
     return OpStatus::WRONG_TYPE;
   }
 
@@ -749,11 +763,11 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
     fetched_items_.insert({key_hash, cntx.db_index});
   }
 
-  switch (stats_mode) {
-    case UpdateStatsMode::kMutableStats:
+  switch (mode) {
+    case LookupMode::kMutable:
       events_.mutations++;
       break;
-    case UpdateStatsMode::kReadStats:
+    case LookupMode::kReadOnly:
       events_.hits++;
       db.stats.events.hits++;
       if (db.slots_stats) {
@@ -793,38 +807,14 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
 OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_view key,
                                                    std::optional<unsigned> req_obj_type) {
-  return AddOrFindInternal(cntx, key, req_obj_type);
-}
-
-OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFindInternal(const Context& cntx, string_view key,
-                                                           std::optional<unsigned> req_obj_type) {
   DCHECK(IsDbValid(cntx.db_index));
 
-  auto res = FindInternal(cntx, key, req_obj_type, UpdateStatsMode::kMutableStats);
-
-  if (res.ok()) {
-    Iterator it(*res, StringOrView::FromView(key));
-
-    bool omitted_journal = IsOmittableWrite(cntx, ChangeReq{it.GetInnerIt()});
-    if (!omitted_journal)
-      PreUpdateBlocking(cntx.db_index, it);
-
-    // PreUpdate() might have caused a deletion of `it`
-    if (res->IsOccupied()) {
-      return ItAndUpdater{.it = it,
-                          .post_updater{cntx.db_index, key, it, this},
-                          .is_new = false,
-                          .omitted_journal = omitted_journal};
-    } else {
-      res = OpStatus::KEY_NOTFOUND;
-    }
-  } else if (res == OpStatus::WRONG_TYPE) {
-    return OpStatus::WRONG_TYPE;
-  }
+  auto res = FindMutableInternal(cntx, key, req_obj_type);
+  if (res.ok() || res.status() == OpStatus::WRONG_TYPE)
+    return res;
 
   // It's a new entry.
-  auto status = res.status();
-  CHECK(status == OpStatus::KEY_NOTFOUND || status == OpStatus::OUT_OF_MEMORY) << status;
+  CHECK(res.status() == OpStatus::KEY_NOTFOUND) << res.status();
 
   // Call change callbacks on the computed set of buckets that can be affected by the insert
   bool omit_journal = false;
@@ -1012,20 +1002,26 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   };
 
   ServerState& etl = *ServerState::tlocal();
+  const float cpu_budget = GetFlag(FLAGS_migration_buckets_cpu_budget);
   PrimeTable* pt = &table->prime;
   PrimeTable::Cursor cursor;
 
   do {
-    PrimeTable::Cursor next = pt->TraverseBuckets(cursor, iterate_bucket);
-    cursor = next;
-    ThisFiber::Yield();
-
+    {
+      base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
+      cursor = pt->TraverseBuckets(cursor, iterate_bucket);
+    }
     // DelAtomic above only marks the watchers of a deleted stream as awakened; normally the
     // deleting transaction dispatches them when it concludes. This fiber has no such transaction,
     // so dispatch here - between bucket traversals, where preempting in a readiness check is safe.
     if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
         bc && owner_->GetContTx() == nullptr) {
       bc->NotifyPending();
+    }
+
+    while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN &&
+           flush_slots_cpu_aggregator_.IsOverloaded(cpu_budget)) {
+      ThisFiber::SleepFor(300us);
     }
   } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
 
@@ -1066,6 +1062,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
       return;
 
     FiberAtomicGuard fg;
+    base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
 
     auto process_bucket = [&](PrimeTable::bucket_iterator it) {
       std::string tmp;
@@ -1092,7 +1089,8 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   auto consumer = std::make_unique<CallbackConsumer<decltype(on_change)>>(std::move(on_change));
   RegisterOnChange(consumer.get());
 
-  fb2::Fiber("flush_slots", [this, shared_slots, next_version, consumer = std::move(consumer)]() {
+  fb2::Fiber::Opts opts{.priority = fb2::FiberPriority::BACKGROUND, .name = "flush_slots"};
+  fb2::Fiber(opts, [this, shared_slots, next_version, consumer = std::move(consumer)]() {
     FlushSlotsFb(*shared_slots, next_version, consumer.get());
   }).Detach();
 }

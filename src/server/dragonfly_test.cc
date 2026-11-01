@@ -1296,6 +1296,8 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
   EXPECT_EQ(metrics.facade_stats.conn_stats.command_cnt_main, 0);
   EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_main, 0);
   EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_other, 0);
+  EXPECT_EQ(metrics.io_threads, pp_->size());
+  EXPECT_EQ(metrics.max_connected_clients_per_thread, 0);
 }
 
 TEST_F(DflyEngineTest, MemoryKeys) {

@@ -13,6 +13,7 @@
 
 #include "absl/strings/str_cat.h"
 #include "base/logging.h"
+#include "common/dtoa.h"
 #include "core/overloaded.h"
 #include "core/search/ast_expr.h"
 #include "core/search/indices.h"
@@ -215,87 +216,102 @@ string_view SearchFieldTypeToString(search::SchemaField::FieldType type) {
   return "";
 }
 
-string DocIndexInfo::BuildRestoreCommand() const {
-  std::string out;
+namespace {
+
+// Keeps the usual text of a double when it reads back exactly, so plain definitions do not change.
+string ExactDouble(string text, double value) {
+  double parsed = 0;
+  if (absl::SimpleAtod(text, &parsed) && parsed == value)
+    return text;
+  char buf[cmn::kMaxDoubleStrLen];
+  return string(buf, cmn::FormatDoubleShortest(value, false, buf));
+}
+
+}  // namespace
+
+vector<string> DocIndexInfo::BuildRestoreArgs() const {
+  vector<string> args;
+  auto add = [&args](const auto&... parts) { (args.push_back(absl::StrCat(parts)), ...); };
 
   // ON HASH/JSON
-  absl::StrAppend(&out, "ON", " ", base_index.type == DocIndex::HASH ? "HASH" : "JSON");
+  add("ON", base_index.type == DocIndex::HASH ? "HASH" : "JSON");
 
   // optional PREFIX count *prefix1* *prefix2* ...
   if (!base_index.prefixes.empty()) {
-    absl::StrAppend(&out, " PREFIX", " ", base_index.prefixes.size());
-    for (const auto& prefix : base_index.prefixes) {
-      absl::StrAppend(&out, " ", prefix);
-    }
+    add("PREFIX", base_index.prefixes.size());
+    for (const auto& prefix : base_index.prefixes)
+      add(prefix);
   }
 
   // STOPWORDS — only emit when explicitly configured, so restore preserves the distinction
   if (base_index.options.custom_stopwords) {
-    absl::StrAppend(&out, " STOPWORDS ", base_index.options.stopwords.size());
+    add("STOPWORDS", base_index.options.stopwords.size());
     for (const auto& sw : base_index.options.stopwords)
-      absl::StrAppend(&out, " ", sw);
+      add(sw);
   }
 
   if (base_index.options.no_offsets)
-    absl::StrAppend(&out, " NOOFFSETS");
+    add("NOOFFSETS");
 
-  absl::StrAppend(&out, " LANGUAGE ", base_index.schema.default_language);
+  add("LANGUAGE", base_index.schema.default_language);
 
   if (!base_index.schema.language_field.empty())
-    absl::StrAppend(&out, " LANGUAGE_FIELD ", base_index.schema.language_field);
+    add("LANGUAGE_FIELD", base_index.schema.language_field);
 
-  absl::StrAppend(&out, " SCHEMA");
+  add("SCHEMA");
   for (const auto& [alias, finfo_ptr] : base_index.schema.Ordered()) {
     const auto& finfo = *finfo_ptr;
     // Store field name, alias and type
-    absl::StrAppend(&out, " ", finfo.identifier, " AS ", alias, " ",
-                    SearchFieldTypeToString(finfo.type));
+    add(finfo.identifier, "AS", alias, SearchFieldTypeToString(finfo.type));
 
     // Store specific params
     Overloaded info{
         [](monostate) {},
-        [out = &out](const search::SchemaField::VectorParams& params) {
+        [&add](const search::SchemaField::VectorParams& params) {
           auto sim = search::VectorSimilarityToString(params.sim);
           if (params.use_hnsw) {
-            absl::StrAppend(out, " HNSW 16 TYPE ", search::VectorDataTypeToString(params.data_type),
-                            " DIM ", params.dim, " DISTANCE_METRIC ", sim, " INITIAL_CAP ",
-                            params.capacity, " M ", params.hnsw_m, " EF_CONSTRUCTION ",
-                            params.hnsw_ef_construction, " EF_RUNTIME ", params.hnsw_ef_runtime,
-                            " EPSILON ", params.hnsw_epsilon);
+            add("HNSW", 16, "TYPE", search::VectorDataTypeToString(params.data_type), "DIM",
+                params.dim, "DISTANCE_METRIC", sim, "INITIAL_CAP", params.capacity, "M",
+                params.hnsw_m, "EF_CONSTRUCTION", params.hnsw_ef_construction, "EF_RUNTIME",
+                params.hnsw_ef_runtime, "EPSILON",
+                ExactDouble(absl::StrCat(params.hnsw_epsilon), params.hnsw_epsilon));
           } else {
-            absl::StrAppend(out, " FLAT 8 TYPE ", search::VectorDataTypeToString(params.data_type),
-                            " DIM ", params.dim, " DISTANCE_METRIC ", sim, " INITIAL_CAP ",
-                            params.capacity);
+            add("FLAT", 8, "TYPE", search::VectorDataTypeToString(params.data_type), "DIM",
+                params.dim, "DISTANCE_METRIC", sim, "INITIAL_CAP", params.capacity);
           }
         },
-        [out = &out](const search::SchemaField::TagParams& params) {
-          absl::StrAppend(out, " ", "SEPARATOR", " ", string{params.separator});
+        [&add](const search::SchemaField::TagParams& params) {
+          add("SEPARATOR", string{params.separator});
           if (params.case_sensitive)
-            absl::StrAppend(out, " ", "CASESENSITIVE");
+            add("CASESENSITIVE");
           if (params.with_suffixtrie)
-            absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
+            add("WITHSUFFIXTRIE");
         },
-        [out = &out](const search::SchemaField::TextParams& params) {
-          absl::StrAppend(out, " ", "WEIGHT", " ", std::to_string(params.weight));
+        [&add](const search::SchemaField::TextParams& params) {
+          add("WEIGHT", ExactDouble(std::to_string(params.weight), params.weight));
           if (params.with_suffixtrie)
-            absl::StrAppend(out, " ", "WITHSUFFIXTRIE");
+            add("WITHSUFFIXTRIE");
           if (params.no_stem)
-            absl::StrAppend(out, " ", "NOSTEM");
+            add("NOSTEM");
         },
-        [out = &out](const search::SchemaField::NumericParams& params) {
-          absl::StrAppend(out, " ", "BLOCKSIZE", " ", std::to_string(params.block_size));
+        [&add](const search::SchemaField::NumericParams& params) {
+          add("BLOCKSIZE", params.block_size);
         }};
     visit(info, finfo.special_params);
 
     // Store shared field flags
     if (finfo.flags & search::SchemaField::SORTABLE)
-      absl::StrAppend(&out, " SORTABLE");
+      add("SORTABLE");
 
     if (finfo.flags & search::SchemaField::NOINDEX)
-      absl::StrAppend(&out, " NOINDEX");
+      add("NOINDEX");
   }
 
-  return out;
+  return args;
+}
+
+string DocIndexInfo::BuildRestoreCommand() const {
+  return absl::StrJoin(BuildRestoreArgs(), " ");
 }
 
 ShardDocIndex::DocId ShardDocIndex::DocKeyIndex::Add(string_view key) {
@@ -463,6 +479,7 @@ ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index, unsigned* hash_in
     if (field.type == SchemaField::TEXT)
       stems |= !std::get<SchemaField::TextParams>(field.special_params).no_stem;
   }
+
   // Only stemming TEXT indices read the language field.
   if (stems && !base_->schema.language_field.empty())
     add_field(base_->schema.language_field);
@@ -511,8 +528,11 @@ void ShardDocIndex::CancelBuilder() {
 
 void ShardDocIndex::RebuildForGroup(const OpArgs& op_args, const std::string_view& group_id,
                                     const std::vector<std::string_view>& terms) {
-  if (!indices_)
+  // Not built yet, e.g. during a replica full sync: the build indexes the documents with the group.
+  if (!indices_) {
+    synonyms_.UpdateGroup(group_id, terms);
     return;
+  }
 
   absl::flat_hash_set<DocId> docs_to_rebuild;
   absl::Span<search::TextIndex* const> text_indices = indices_->GetAllTextIndices();
@@ -626,6 +646,10 @@ void ShardDocIndex::RemoveFromIndices(DocId id, const DbContext& db_cntx, const 
   }
   indices_->Remove(id, ExpiringValuesAccessor{*accessor, it->second});
   expiring_values_.erase(it);
+
+  // erase never shrinks the table. Growth happens at 7/8 load, so shrinking at 1/16 cannot thrash.
+  if (expiring_values_.size() * 16 <= expiring_values_.capacity())
+    expiring_values_.rehash(0);
 }
 
 // --- HnswShardIndex implementation ---
@@ -1402,6 +1426,8 @@ size_t ShardDocIndex::GetNonPmrMemoryUsage() const {
   size_t mem = field_types_.GetNonPmrMemoryUsage();
   if (indices_)
     mem += indices_->GetNonPmrMemoryUsage();
+  if (content_fields_.size() > 4)
+    mem += content_fields_.capacity() * sizeof(string_view);
   return mem;
 }
 
@@ -1437,6 +1463,19 @@ ShardDocIndices::ShardDocIndices() : local_mr_{ServerState::tlocal()->data_heap(
 ShardDocIndex* ShardDocIndices::GetIndex(string_view name) {
   auto it = indices_.find(name);
   return it != indices_.end() ? it->second.get() : nullptr;
+}
+
+ShardDocIndex* ShardDocIndices::ResolveIndex(string_view name) {
+  if (auto* index = GetIndex(name); index != nullptr)
+    return index;
+
+  const auto it = aliases_.find(name);
+  return it != aliases_.end() ? GetIndex(it->second) : nullptr;
+}
+
+string ShardDocIndices::ResolveIndexName(string_view name) const {
+  auto it = aliases_.find(name);
+  return it != aliases_.end() ? it->second : string{name};
 }
 
 OpStatus ShardDocIndices::AddAlias(string_view alias, string_view target) {
@@ -1500,6 +1539,15 @@ void ShardDocIndices::InitIndex(const OpArgs& op_args, std::string_view name,
 }
 
 unique_ptr<ShardDocIndex> ShardDocIndices::DropIndex(string_view name) {
+  auto index = ExtractIndex(name);
+  if (!index)
+    return nullptr;
+
+  absl::erase_if(aliases_, [name](const auto& entry) { return entry.second == name; });
+  return index;
+}
+
+unique_ptr<ShardDocIndex> ShardDocIndices::ExtractIndex(string_view name) {
   auto it = indices_.find(name);
   if (it == indices_.end())
     return nullptr;
@@ -1530,8 +1578,6 @@ std::vector<std::string> ShardDocIndices::DropUnbuiltIndices() {
     if (!index->indices_)
       names.push_back(name);
   }
-  absl::erase_if(aliases_,
-                 [&](const auto& entry) { return rng::find(names, entry.second) != names.end(); });
   for (const auto& name : names) {
     auto index = DropIndex(name);
     DCHECK(index);

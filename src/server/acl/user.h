@@ -55,8 +55,12 @@ class User final {
     bool is_hashed{false};
 
     // Categories and commands
-    using CategoryValueType = std::pair<Sign, uint32_t>;
-    // If index s numberic_limits::max() then it's a +all flag
+    struct CategoryValueType {
+      Sign sign;
+      uint32_t category;  // A single AclCat bit or ALL.
+      // The bits of the category's commands, indexed by family.
+      std::vector<uint64_t> commands;
+    };
     using CommandsValueType = std::tuple<Sign, size_t /*index*/, uint64_t /*bit*/>;
     using UpdateType = std::vector<std::variant<CategoryValueType, CommandsValueType>>;
     UpdateType updates;
@@ -98,9 +102,7 @@ class User final {
   User(User&&) = default;
 
   // For single step updates
-  void Update(UpdateRequest&& req, const CategoryToIdxStore& cat_to_id,
-              const ReverseCategoryIndexTable& reverse_cat,
-              const CategoryToCommandsIndexStore& cat_to_commands);
+  void Update(UpdateRequest&& req);
 
   bool HasPassword(std::string_view password) const;
 
@@ -151,12 +153,8 @@ class User final {
   MemoryUsage GetMemoryUsage() const;
 
  private:
-  void SetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& cat_to_id,
-                                  const ReverseCategoryIndexTable& reverse_cat,
-                                  const CategoryToCommandsIndexStore& cat_to_commands);
-  void UnsetAclCategoriesAndIncrSeq(uint32_t cat, const CategoryToIdxStore& cat_to_id,
-                                    const ReverseCategoryIndexTable& reverse_cat,
-                                    const CategoryToCommandsIndexStore& cat_to_commands);
+  void SetAclCategoriesAndIncrSeq(uint32_t cat, const std::vector<uint64_t>& commands);
+  void UnsetAclCategoriesAndIncrSeq(uint32_t cat, const std::vector<uint64_t>& commands);
 
   // For ACL commands
   void SetAclCommands(size_t index, uint64_t bit_index);
@@ -218,9 +216,8 @@ class User final {
 
   std::string namespace_;
 
-  // if db == std::numeric_limits<size_t>::max() then all db's.
-  // Otherwise user restricted to the value of db_
-  size_t db_{std::numeric_limits<size_t>::max()};
+  // The only db the user may access, or kAllDbs.
+  size_t db_{kAllDbs};
 };
 
 }  // namespace dfly::acl

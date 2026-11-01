@@ -140,6 +140,11 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                     &resp->body());
   AppendMetricValue("connected_clients", conn_stats.num_conns_other, {"listener"}, {"other"},
                     &resp->body());
+  AppendMetricWithoutLabels("io_threads", "Number of IO threads", m.io_threads, MetricType::GAUGE,
+                            &resp->body());
+  AppendMetricWithoutLabels("max_connected_clients_per_thread",
+                            "Max number of connected clients on a single IO thread",
+                            m.max_connected_clients_per_thread, MetricType::GAUGE, &resp->body());
   AppendMetricHeader("tls_handshakes_total", "Total TLS handshakes by status", MetricType::COUNTER,
                      &resp->body());
   AppendMetricValue("tls_handshakes_total", conn_stats.handshakes_started, {"status"}, {"started"},
@@ -816,9 +821,10 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 }
 
 void Metrics::Merge(const Metrics& src) {
-  // Sum of all member sizes plus alignment padding (4 bytes after blocked_tasks).
-  // Expressed via sizeof so it adapts to different STL/Abseil implementations.
-  // If this fires, a field was added/removed - update Merge() and InitFromThread().
+  // Sum of all member sizes plus alignment padding (4 bytes after
+  // max_connected_clients_per_thread). Expressed via sizeof so it adapts to different STL/Abseil
+  // implementations. If this fires, a field was added/removed - update Merge() and
+  // InitFromThread().
   static_assert(
       sizeof(Metrics) ==
           sizeof(SliceEvents) + sizeof(std::vector<DbStats>) + sizeof(EngineShard::Stats) +
@@ -830,7 +836,7 @@ void Metrics::Merge(const Metrics& src) {
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeMemDeltas) + 176,  // scalar fields (19 fields) + 4-byte alignment padding
+              sizeof(TypeMemDeltas) + 184,  // scalar fields (21 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
   // Per-db stats / events / small_string_bytes are merged element-wise.
@@ -867,6 +873,7 @@ void Metrics::Merge(const Metrics& src) {
   worker_fiber_stack_size += src.worker_fiber_stack_size;
   worker_fiber_count += src.worker_fiber_count;
   blocked_tasks += src.blocked_tasks;
+  io_threads += src.io_threads;
   tls_bytes += src.tls_bytes;
   refused_conn_max_clients_reached_count += src.refused_conn_max_clients_reached_count;
   lsn_buffer_size += src.lsn_buffer_size;
@@ -874,6 +881,8 @@ void Metrics::Merge(const Metrics& src) {
 
   // Non-sum reductions.
   tx_queue_len = std::max(tx_queue_len, src.tx_queue_len);
+  max_connected_clients_per_thread =
+      std::max(max_connected_clients_per_thread, src.max_connected_clients_per_thread);
   oldest_pending_send_ts = std::min(oldest_pending_send_ts, src.oldest_pending_send_ts);
 
   // Map merges.
@@ -902,7 +911,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeMemDeltas) + 176,  // scalar fields (19 fields) + 4-byte alignment padding
+              sizeof(TypeMemDeltas) + 184,  // scalar fields (21 fields) + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
   ServerState* ss = ServerState::tlocal();
@@ -919,6 +928,9 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
 
   qps = uint64_t(ss->MovingSum6());
   facade_stats = *tl_facade_stats;
+  io_threads = 1;
+  max_connected_clients_per_thread =
+      facade_stats.conn_stats.num_conns_main + facade_stats.conn_stats.num_conns_other;
   serialization_bytes = SliceSnapshot::GetThreadLocalMemoryUsage();
 
   if (shard) {

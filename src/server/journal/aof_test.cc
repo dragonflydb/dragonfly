@@ -5,6 +5,7 @@
 #include "server/journal/aof.h"
 
 #include <absl/base/internal/endian.h>
+#include <absl/crc/crc32c.h>
 #include <absl/flags/declare.h>
 #include <absl/flags/flag.h>
 #include <absl/flags/reflection.h>
@@ -21,6 +22,7 @@
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/aof_chain_reader.h"
+#include "server/journal/aof_manifest.h"
 #include "server/journal/aof_segment_writer.h"
 #include "server/journal/serializer.h"
 #include "server/test_utils.h"
@@ -260,6 +262,87 @@ TEST_F(AofSegmentWriterTest, OpenKeepsExistingSegment) {
   EXPECT_EQ(ReadSegment(0).size(), kAofSegmentHeaderSize + kAofBlockHeaderSize + 1);
 }
 
+class AofManifestTest : public AofSegmentWriterTest {
+ protected:
+  static AofManifest Sample() {
+    AofManifest m;
+    m.state = AofManifest::State::kActive;
+    m.checkpoint_id = 3;
+    m.base_owned = true;
+    m.base_path = "dump base-3.dfs";
+    m.cuts = {{5, 1234}, {7, 1300}};
+    return m;
+  }
+
+  string ManifestPath() const {
+    return absl::StrCat(dir_, "/", kAofManifestName);
+  }
+};
+
+TEST_F(AofManifestTest, RoundTrip) {
+  AofManifest m = Sample();
+  auto decoded = DecodeAofManifest(EncodeAofManifest(m));
+  ASSERT_TRUE(decoded) << decoded.error().message();
+  EXPECT_EQ(*decoded, m);
+
+  // Bootstrapping, no base.
+  AofManifest empty;
+  empty.cuts = {{0, 1}};
+  decoded = DecodeAofManifest(EncodeAofManifest(empty));
+  ASSERT_TRUE(decoded) << decoded.error().message();
+  EXPECT_EQ(*decoded, empty);
+}
+
+TEST_F(AofManifestTest, WriteReplacesAtomically) {
+  pp_->at(0)->Await([&] {
+    // No manifest yet.
+    EXPECT_EQ(ReadAofManifest(dir_).error(), errc::no_such_file_or_directory);
+
+    AofManifest first = Sample();
+    ASSERT_FALSE(WriteAofManifest(dir_, first));
+    EXPECT_EQ(*ReadAofManifest(dir_), first);
+
+    // A crash before the rename leaves a tmp file, which the reader ignores.
+    ofstream(ManifestPath() + ".tmp") << "garbage";
+    EXPECT_EQ(*ReadAofManifest(dir_), first);
+
+    // The next write truncates the stale tmp, then renames it over the manifest.
+    AofManifest second = Sample();
+    second.checkpoint_id = 4;
+    second.cuts = {{8, 2000}, {9, 2100}};
+    ASSERT_FALSE(WriteAofManifest(dir_, second));
+    EXPECT_EQ(*ReadAofManifest(dir_), second);
+    // The rename consumed the tmp file.
+    EXPECT_FALSE(filesystem::exists(ManifestPath() + ".tmp"));
+  });
+}
+
+TEST_F(AofManifestTest, CollectGarbage) {
+  // appendonly.aof, appendonly-x.tmp and appendonlydir are not ours, so they must not be deleted.
+  for (string_view name :
+       {"appendonly-0-1.aof", "appendonly-0-2.aof", "appendonly-0-3.aof", "appendonly-1-0.aof",
+        "appendonly-0-4.aof.discarded", "appendonly-1-1.aof.tmp", "appendonly.manifest.tmp",
+        "dump-summary.dfs", "appendonly.aof", "appendonly-x.tmp"}) {
+    ofstream(absl::StrCat(dir_, "/", name)) << "x";
+  }
+  filesystem::create_directory(absl::StrCat(dir_, "/appendonlydir"));
+  AofManifest m = Sample();
+  m.cuts = {{2, 100}, {0, 1}};
+
+  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m)); });
+
+  vector<string> left;
+  for (const auto& entry : filesystem::directory_iterator(dir_))
+    left.push_back(entry.path().filename().string());
+  sort(left.begin(), left.end());
+
+  // Segments below the cut and our tmp files go; *.discarded and others' files stay.
+  EXPECT_EQ(left, (vector<string>{"appendonly-0-2.aof", "appendonly-0-3.aof",
+                                  "appendonly-0-4.aof.discarded", "appendonly-1-0.aof",
+                                  "appendonly-x.tmp", "appendonly.aof", "appendonlydir",
+                                  "dump-summary.dfs"}));
+}
+
 class AofStreamerTest : public BaseFamilyTest {
  protected:
   void SetUp() override {
@@ -384,13 +467,13 @@ class AofChainReaderTest : public AofSegmentWriterTest {
     ChainResult res;
     pp_->at(0)->Await([&] {
       AofChainReader reader(dir_, 2, 4);
-      ASSERT_FALSE(reader.Open());
+      ASSERT_FALSE(reader.Open(0));
       char buf[7];
       while (true) {
         iovec v{buf, sizeof(buf)};
         auto n = reader.ReadSome(&v, 1);
         if (!n) {
-          ASSERT_EQ(n.error(), AofReadError::kTornTail);
+          ASSERT_EQ(n.error(), AofError::kTornTail);
           res.torn = true;
           break;
         }

@@ -215,10 +215,10 @@ CommandId::CommandId(const char* name, uint32_t mask, int8_t arity, int8_t first
   else if (name_ == "JSON.MSET")
     interleave_step_ = 3;
 
-  // A command has a single key at a fixed position when first_key == last_key > 0 and it
-  // carries no variadic/store-key or global/no-key semantics. DetermineKeys uses this to
-  // skip its generic branching.
-  if (first_key_ > 0 && first_key_ == last_key_ &&
+  // A command has a single key at a fixed position when first_key == last_key > 0, its arity
+  // guarantees the key and it carries no variadic/store-key or global/no-key semantics.
+  // DetermineKeys uses this to skip its generic branching.
+  if (first_key_ > 0 && first_key_ == last_key_ && std::abs(arity_) > first_key_ &&
       (opt_mask_ & (CO::VARIADIC_KEYS | CO::STORE_LAST_KEY | CO::GLOBAL_TRANS |
                     CO::NO_KEY_TRANSACTIONAL)) == 0) {
     kind_mask_ |= FIXED_SINGLE_KEY;
