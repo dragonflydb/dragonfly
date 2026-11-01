@@ -1,5 +1,3 @@
-"""Test publication contracts with all GCS subprocesses mocked."""
-
 import gzip
 import importlib.util
 import json
