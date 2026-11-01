@@ -5,6 +5,7 @@ on:
     paths:
       - "tools/ci_test_dashboard/**/*.py"
       - ".github/scripts/publish-ci-dashboard-site-to-s3.py"
+      - ".github/scripts/publish-ci-dashboard-site-to-gcs.py"
       - ".github/workflows/ci-test-dashboard-tests.yml"
   workflow_dispatch:
 

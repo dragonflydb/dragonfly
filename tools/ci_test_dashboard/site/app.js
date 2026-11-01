@@ -85,12 +85,26 @@ async function fetchJson(path) {
   if (!response.ok) {
     throw new Error(`${path}: HTTP ${response.status}`);
   }
-  const data = await response.json();
+  const data = await jsonFromResponse(response);
   if (data?.schema_version !== schemaVersion) {
     throw new Error(`${path}: Unsupported data schema ${
         data?.schema_version ?? 'missing'} (expected ${schemaVersion})`);
   }
   return data;
+}
+
+async function jsonFromResponse(response) {
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  // Check for gzip magic number (0x1f8b) to detect compressed data.
+  // If the first two bytes match the gzip magic number, decompress the data.
+  if (bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('This browser cannot decompress dashboard data.');
+    }
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+    return new Response(stream).json();
+  }
+  return new Response(bytes).json();
 }
 
 function rangesFromManifest(manifest) {
