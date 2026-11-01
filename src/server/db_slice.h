@@ -31,6 +31,7 @@ class SlotSet;
 }  // namespace cluster
 
 class BlockingController;
+class QList;
 
 using facade::OpResult;
 
@@ -207,6 +208,8 @@ class DbSlice {
       // The following fields are calculated at init time
       size_t orig_value_heap_size = 0;
       CompactObjType orig_obj_type = 0;
+      const QList* orig_list = nullptr;
+      int64_t orig_tiered_memory_delta = 0;
 
       // KeySlot(key), computed at most once and only if per-slot stats are tracked.
       std::optional<SlotId> slot;
@@ -217,6 +220,9 @@ class DbSlice {
 
     // Returns KeySlot(key) if `table` tracks per-slot stats, nullopt otherwise.
     std::optional<SlotId> StatsSlot(const DbTable& table);
+
+    void SnapshotTieredMemory();
+    int64_t TieredMemoryDelta() const;
 
     friend class DbSlice;
 

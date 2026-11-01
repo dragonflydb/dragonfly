@@ -307,6 +307,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     node->SetExternal(segment.offset, segment.length);
 
     AccountSlotTieredBytes(ql->GetKey(), segment.length, table);
+    ql->AddTieredMemoryDelta(-int64_t(segment.length));
     AccountObjectMemory(ql->GetKey(), OBJ_LIST, -int64_t(segment.length), table);
   }
 
@@ -406,6 +407,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
     ++stats_.total_uploads;
     decoder->Upload(node);
+    ql->AddTieredMemoryDelta(node->sz);
     AccountTieredUpload(node, segment.length, ql->GetKey(), db_slice_.GetDBTable(db_id));
     return true;
   }

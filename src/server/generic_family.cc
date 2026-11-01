@@ -1068,6 +1068,14 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = from_res.it->first.GetExpireTime();
   RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, from_res.it->second, op_args.shard);
+
+  // Materialize list nodes while the source updater still owns their memory accounting.
+  if (op_args.shard->tiered_storage() && from_res.it->second.ObjType() == OBJ_LIST &&
+      from_res.it->second.Encoding() == kEncodingQL2) {
+    auto* ql = static_cast<QList*>(from_res.it->second.RObjPtr());
+    ql->SetDbIndex(target_db);
+  }
+
   from_res.post_updater.ReduceHeapUsage();
   PrimeValue from_obj = std::move(from_res.it->second);
 
@@ -1077,14 +1085,6 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
   auto& add_res = *op_result;
   add_res.it->first.SetSticky(sticky);
   AddKeyToIndexesIfNeeded(key, target_cntx, add_res.it->second, op_args.shard);
-
-  // When tiering is enabled, update tiered-storage metadata for partial moved values.
-  if (EngineShard::tlocal()->tiered_storage()) {
-    if (add_res.it->second.ObjType() == OBJ_LIST && add_res.it->second.Encoding() == kEncodingQL2) {
-      auto* ql = static_cast<QList*>(add_res.it->second.RObjPtr());
-      ql->SetDbIndex(target_db);
-    }
-  }
 
   auto bc = op_args.db_cntx.ns->GetBlockingController(op_args.shard->shard_id());
   if (add_res.it->second.ObjType() == OBJ_LIST && bc) {

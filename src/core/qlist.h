@@ -190,6 +190,20 @@ class QList {
     malloc_size_ += delta;
   }
 
+  int64_t GetTieredMemoryDelta() const {
+    return tiering_enabled_ ? tiering_params_->accounted_memory_delta : 0;
+  }
+
+  void AddTieredMemoryDelta(int64_t delta) {
+    if (tiering_enabled_)
+      tiering_params_->accounted_memory_delta += delta;
+  }
+
+  void ResetTieredMemoryDelta() {
+    if (tiering_enabled_)
+      tiering_params_->accounted_memory_delta = 0;
+  }
+
   // Add to the number of offloaded nodes by one.
   void AdjustOffloadNodeCount(int delta) {
     if (tiering_enabled_) {
@@ -219,6 +233,10 @@ class QList {
 
     uint32_t num_offloaded_nodes = 0;
     uint32_t node_depth_threshold;
+
+    // Node byte deltas already charged to memory stats, reset when ownership is transferred.
+    int64_t accounted_memory_delta = 0;
+
     void (*offload)(QList* ql, Node* node);
     void (*load)(QList* ql, Node* node);
     void (*cleanup)(QList* ql, Node* node);

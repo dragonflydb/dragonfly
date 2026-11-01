@@ -8,6 +8,7 @@
 
 #include "core/dense_set.h"
 #include "core/oah_set.h"
+#include "core/qlist.h"
 #include "strings/human_readable.h"
 
 extern "C" {
@@ -409,6 +410,12 @@ std::optional<SlotId> StatsSlotOf(string_view key, const DbTable& db) {
   return db.slots_stats ? std::optional<SlotId>(KeySlot(key)) : std::nullopt;
 }
 
+QList* GetQListForAccounting(const PrimeValue& value) {
+  if (value.ObjType() == OBJ_LIST && value.Encoding() == kEncodingQL2)
+    return static_cast<QList*>(value.RObjPtr());
+  return nullptr;
+}
+
 }  // namespace
 
 void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable* db,
@@ -583,21 +590,42 @@ DbSlice::AutoUpdater::~AutoUpdater() {
 }
 
 void DbSlice::AutoUpdater::ReduceHeapUsage() {
-  // The baseline is up to date even if a blocking tiered read uploaded the value mid-scope:
-  // such reads are followed by ResyncBaseline(). Subtracting it keeps this call idempotent.
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
+  const auto slot = StatsSlot(*table);
+  AccountObjectMemory(fields_.key, OBJ_LIST, -TieredMemoryDelta(), table, slot);
   AccountObjectMemory(fields_.key, fields_.orig_obj_type, -int64_t(fields_.orig_value_heap_size),
-                      table, StatsSlot(*table));
+                      table, slot);
+
+  // The next owner must not inherit tiering deltas charged to this owner's ledger.
+  if (auto* list = GetQListForAccounting(fields_.it->second))
+    list->ResetTieredMemoryDelta();
 
   // Reset to avoid double accounting, and sync the type after accounting.
   fields_.orig_value_heap_size = 0;
   fields_.orig_obj_type = fields_.it->second.ObjType();
+  fields_.orig_list = nullptr;
+  fields_.orig_tiered_memory_delta = 0;
 }
 
 void DbSlice::AutoUpdater::ResyncBaseline() {
   const PrimeValue& pv = fields_.it->second;
   fields_.orig_value_heap_size = pv.MallocUsed();
   fields_.orig_obj_type = pv.ObjType();
+  SnapshotTieredMemory();
+}
+
+void DbSlice::AutoUpdater::SnapshotTieredMemory() {
+  fields_.orig_list = GetQListForAccounting(fields_.it->second);
+  fields_.orig_tiered_memory_delta =
+      fields_.orig_list ? fields_.orig_list->GetTieredMemoryDelta() : 0;
+}
+
+int64_t DbSlice::AutoUpdater::TieredMemoryDelta() const {
+  const auto* list = GetQListForAccounting(fields_.it->second);
+  if (!list)
+    return 0;
+  return list->GetTieredMemoryDelta() -
+         (list == fields_.orig_list ? fields_.orig_tiered_memory_delta : 0);
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -617,6 +645,9 @@ void DbSlice::AutoUpdater::Run() {
   int64_t current_size = static_cast<int64_t>(pv.MallocUsed());
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
   const std::optional<SlotId> slot = StatsSlot(*table);
+
+  // Tiering completions already charged their size changes while this updater was alive.
+  AccountObjectMemory(fields_.key, OBJ_LIST, -TieredMemoryDelta(), table, slot);
 
   if (current_type != fields_.orig_obj_type) {
     // Type changed: remove old size from old type, add new size to new type separately.
@@ -655,6 +686,7 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .orig_obj_type = it->second.ObjType(),
               .slot = slot} {
   DCHECK(IsValid(it));
+  SnapshotTieredMemory();
 }
 
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
@@ -1389,6 +1421,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
 
   auto& it = res.it;
 
+  if (GetQListForAccounting(it->second))
+    res.post_updater.ReduceHeapUsage();
   ReleaseOffloadedValue(cntx.db_index, key, &it->second);
   it->second = std::move(obj);
 

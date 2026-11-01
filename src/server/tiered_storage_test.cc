@@ -46,6 +46,7 @@ ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
 ABSL_DECLARE_FLAG(unsigned, list_tiering_threshold);
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
+ABSL_DECLARE_FLAG(uint32_t, list_tiering_prefetch_depth);
 
 namespace dfly {
 
@@ -1508,6 +1509,9 @@ TEST_F(ListNodeTieringTest, RenameWithStashedNodes) {
 
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.db_stats[0].tiered_entries, 0u);  // after reads nodes come back to memory
+  EXPECT_EQ(Run({"LPOP", "dst"}), expected.front());
+  EXPECT_THAT(Run({"DEL", "dst"}), IntArg(1));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
 }
 
 // RENAME a list while its nodes are still io_pending (stash in flight).
@@ -1530,6 +1534,32 @@ TEST_F(ListNodeTieringTest, RenameWhileNodesPending) {
   }
 
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+  EXPECT_EQ(Run({"LPOP", "dst"}), expected.front());
+  EXPECT_THAT(Run({"DEL", "dst"}), IntArg(1));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+TEST_F(ListNodeTieringTest, RenameOverStashedListMemoryAccounting) {
+  const string destination = "longer-destination";
+  for (int i = 0; i < 8; ++i) {
+    Run({"RPUSH", "src", BuildString(2048, 'A')});
+    Run({"RPUSH", destination, BuildString(2048, 'B')});
+  }
+  ExpectConditionWithinTimeout([this] {
+    auto stats = GetMetrics().tiered_stats;
+    return stats.total_stashes > 0 && stats.pending_stash_cnt == 0;
+  });
+
+  EXPECT_EQ(Run({"RENAME", "src", destination}), "OK");
+  EXPECT_EQ(Run({"LPOP", destination}), BuildString(2048, 'A'));
+  pp_->at(0)->AwaitBrief([&] {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+    auto it = db.GetDBTable(0)->prime.Find(destination);
+    ASSERT_TRUE(IsValid(it));
+    EXPECT_EQ(db.GetDBTable(0)->stats.obj_memory_usage, it->second.MallocUsed());
+  });
+  EXPECT_THAT(Run({"DEL", destination}), IntArg(1));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
 }
 
 // PEXPIRE a list while its nodes are fully offloaded.
@@ -1629,6 +1659,125 @@ TEST_F(ListNodeTieringTest, LPopStashedNodes) {
 
   // List must be gone after all elements are popped.
   EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+TEST_F(ListNodeTieringTest, MemoryAccountingWhileStashing) {
+  for (int i = 0; i < 6; ++i) {
+    Run({"RPUSH", "mylist", BuildString(2048, 'A')});
+  }
+
+  ExpectConditionWithinTimeout([this] {
+    auto stats = GetMetrics().tiered_stats;
+    return stats.total_stashes > 0 && stats.pending_stash_cnt == 0;
+  });
+
+  pp_->at(0)->Await([&] {
+    auto* shard = EngineShard::tlocal();
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    auto res = db.FindMutable({}, "mylist", OBJ_LIST);
+    ASSERT_TRUE(res);
+    auto* ql = static_cast<QList*>(res->it->second.RObjPtr());
+    auto* ts = shard->tiered_storage();
+    const auto stashes_before = ts->GetStats().total_stashes;
+
+    ql->Push(BuildString(2048, 'B'), QList::TAIL);
+    ql->Push(BuildString(2048, 'C'), QList::TAIL);
+
+    // Let stash completions run while the mutable command's updater is still alive.
+    ExpectConditionWithinTimeout([&] {
+      auto stats = ts->GetStats();
+      return stats.total_stashes > stashes_before && stats.pending_stash_cnt == 0;
+    });
+    res->post_updater.Run();
+    EXPECT_EQ(db.GetDBTable(0)->stats.obj_memory_usage, res->it->second.MallocUsed());
+    EXPECT_EQ(db.GetDBTable(0)->stats.memory_usage_by_type[OBJ_LIST], res->it->second.MallocUsed());
+  });
+
+  EXPECT_THAT(Run({"DEL", "mylist"}), IntArg(1));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+TEST_F(ListNodeTieringTest, MemoryAccountingWhileReplacingStashedNodes) {
+  SetFlag(&FLAGS_list_tiering_prefetch_depth, 2u);
+  for (int i = 0; i < 8; ++i) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('A' + i))});
+  }
+
+  ExpectConditionWithinTimeout([this] {
+    auto stats = GetMetrics().tiered_stats;
+    return stats.total_stashes > 0 && stats.pending_stash_cnt == 0;
+  });
+  const auto fetches_before = GetMetrics().tiered_stats.total_fetches;
+  const string replacement = BuildString(3000, 'z');
+  EXPECT_EQ(Run({"LSET", "mylist", "2", replacement}), "OK");
+
+  ExpectConditionWithinTimeout([this] {
+    auto stats = GetMetrics().tiered_stats;
+    return stats.pending_read_cnt == 0 && stats.pending_stash_cnt == 0;
+  });
+  EXPECT_GT(GetMetrics().tiered_stats.total_fetches, fetches_before);
+  pp_->at(0)->AwaitBrief([&] {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+    auto it = db.GetDBTable(0)->prime.Find("mylist");
+    ASSERT_TRUE(IsValid(it));
+    EXPECT_EQ(db.GetDBTable(0)->stats.obj_memory_usage, it->second.MallocUsed());
+  });
+
+  EXPECT_EQ(Run({"LINDEX", "mylist", "2"}), replacement);
+  EXPECT_EQ(Run({"RPOP", "mylist"}), BuildString(2048, 'H'));
+  EXPECT_THAT(Run({"DEL", "mylist"}), IntArg(1));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+TEST_F(ListNodeTieringTest, ReadThenPopMemoryAccounting) {
+  SetFlag(&FLAGS_list_tiering_prefetch_depth, 0u);
+  for (int i = 0; i < 8; ++i) {
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('A' + i))});
+  }
+  ExpectConditionWithinTimeout([this] {
+    auto stats = GetMetrics().tiered_stats;
+    return stats.total_stashes > 0 && stats.pending_stash_cnt == 0;
+  });
+
+  const auto fetches_before = GetMetrics().tiered_stats.total_fetches;
+  EXPECT_EQ(Run({"LINDEX", "mylist", "3"}), BuildString(2048, 'D'));
+  EXPECT_GT(GetMetrics().tiered_stats.total_fetches, fetches_before);
+  EXPECT_EQ(Run({"LPOP", "mylist"}), BuildString(2048, 'A'));
+  pp_->at(0)->AwaitBrief([&] {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+    auto it = db.GetDBTable(0)->prime.Find("mylist");
+    ASSERT_TRUE(IsValid(it));
+    EXPECT_EQ(db.GetDBTable(0)->stats.obj_memory_usage, it->second.MallocUsed());
+  });
+
+  EXPECT_THAT(Run({"DEL", "mylist"}), IntArg(1));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+TEST_F(ListNodeTieringTest, BulkPushAndPopMemoryAccounting) {
+  const int kItems = 128;
+  vector<string> push = {"RPUSH", "mylist"};
+  push.insert(push.end(), kItems, BuildString(2048, 'A'));
+  EXPECT_THAT(Run(absl::MakeSpan(push)), IntArg(kItems));
+  ExpectConditionWithinTimeout([this] {
+    auto stats = GetMetrics().tiered_stats;
+    return stats.total_stashes > 0 && stats.pending_stash_cnt == 0;
+  });
+
+  pp_->at(0)->AwaitBrief([&] {
+    auto& db = namespaces->GetDefaultNamespace().GetDbSlice(EngineShard::tlocal()->shard_id());
+    auto it = db.GetDBTable(0)->prime.Find("mylist");
+    ASSERT_TRUE(IsValid(it));
+    EXPECT_EQ(db.GetDBTable(0)->stats.obj_memory_usage, it->second.MallocUsed());
+  });
+
+  const auto fetches_before = GetMetrics().tiered_stats.total_fetches;
+  auto popped = Run({"RPOP", "mylist", absl::StrCat(kItems)});
+  ASSERT_EQ(popped.GetVec().size(), kItems);
+  EXPECT_GT(GetMetrics().tiered_stats.total_fetches, fetches_before);
+  EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
 }
 
 // MOVE a list whose interior nodes are fully offloaded to a different DB.
@@ -1654,9 +1803,10 @@ TEST_F(ListNodeTieringTest, MoveWithStashedNodes) {
     EXPECT_EQ(Run({"LINDEX", "src", absl::StrCat(i)}), expected[i]) << "index " << i;
   }
 
-  // No nodes should remain offloaded after the move.
-  // auto metrics = GetMetrics();
-  // EXPECT_EQ(metrics.db_stats[1].tiered_entries, 0u);
+  EXPECT_THAT(Run({"DEL", "src"}), IntArg(1));
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].obj_memory_usage, 0u);
+  EXPECT_EQ(metrics.db_stats[1].obj_memory_usage, 0u);
 }
 
 // MOVE a list whose interior nodes are still io_pending (stash in flight).
@@ -1683,12 +1833,14 @@ TEST_F(ListNodeTieringTest, MoveWhileNodesPending) {
   }
 
   ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.allocated_bytes == 0; });
+  EXPECT_THAT(Run({"DEL", "src"}), IntArg(1));
+  auto metrics = GetMetrics();
+  EXPECT_EQ(metrics.db_stats[0].obj_memory_usage, 0u);
+  EXPECT_EQ(metrics.db_stats[1].obj_memory_usage, 0u);
 }
 
 // RPOP exhausts a list from the tail side
-// TODO: disabled - tiered list-node completions double-apply obj_memory_usage deltas
-// inside the AutoUpdater window, tripping DCHECK_GE in DbSlice::FindMutableInternal.
-TEST_F(ListNodeTieringTest, DISABLED_RPopStashedNodes) {
+TEST_F(ListNodeTieringTest, RPopStashedNodes) {
   const int kItems = 8;
   vector<string> expected;
   for (int i = 0; i < kItems; i++) {
@@ -1704,6 +1856,7 @@ TEST_F(ListNodeTieringTest, DISABLED_RPopStashedNodes) {
   }
 
   EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
 }
 
 TEST_F(ListNodeTieringTest, PushAfterOffloadedNodePromotedToTail) {

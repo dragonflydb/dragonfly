@@ -877,6 +877,28 @@ TEST_F(ClusterTieredTest, SlotCountersFollowListNodeOffloadAndDelete) {
   ExpectSlotEmpty(slot);
 }
 
+TEST_F(ClusterTieredTest, SlotCountersFollowListNodePop) {
+  const string kKey = "tiered-list-pop";
+  const SlotId slot = KeySlot(kKey);
+  const int kItems = 8;
+
+  SetTestFlag("tiered_experimental_list_support", "true");
+  SetTestFlag("list_tiering_threshold", "1");
+  SetTestFlag("list_max_listpack_size", "1");
+  pp_->at(0)->AwaitBrief([] { EngineShard::tlocal()->tiered_storage()->UpdateFromFlags(); });
+
+  for (int i = 0; i < kItems; ++i) {
+    EXPECT_THAT(Run({"RPUSH", kKey, string(2048, char('A' + i))}), IntArg(i + 1));
+  }
+  WaitForOffload(6);
+
+  for (int i = kItems - 1; i >= 0; --i) {
+    EXPECT_EQ(Run({"RPOP", kKey}), string(2048, char('A' + i)));
+    ExpectSlotMirrorsDb(slot);
+  }
+  ExpectSlotEmpty(slot);
+}
+
 // The single key lives in one slot, so the slot counters must mirror the db-wide ones exactly.
 TEST_F(ClusterTieredTest, SlotCountersFollowExternalOverwrite) {
   const string kKey = "tiered-set";
