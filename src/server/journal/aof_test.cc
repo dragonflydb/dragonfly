@@ -25,6 +25,7 @@
 #include "server/journal/aof_manifest.h"
 #include "server/journal/aof_segment_writer.h"
 #include "server/journal/aof_streamer.h"
+#include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/test_utils.h"
 
@@ -441,10 +442,18 @@ TEST_F(AofStreamerTest, WritesReachSegments) {
   }
 }
 
+// One shard, so the records after the rotation all land in segment 1.
+class AofStreamerOneShardTest : public AofStreamerTest {
+ protected:
+  AofStreamerOneShardTest() {
+    num_threads_ = 1;
+  }
+};
+
 // TODO: cover a crash while preparing a spare. Leave each partial state on disk (a leftover
 // appendonly-<shard>-<seq>.aof.tmp, a header-only segment with its tmp twin, a complete unused
 // spare) and check that the restart replays the chain cleanly and startup GC removes the tmp files.
-TEST_F(AofStreamerTest, RotateContinuesInSpare) {
+TEST_F(AofStreamerOneShardTest, RotateContinuesInSpare) {
   Run("mset a 1 b 2 c 3 d 4");
   const uint32_t shard_count = shard_set->size();
 
@@ -461,9 +470,10 @@ TEST_F(AofStreamerTest, RotateContinuesInSpare) {
     EXPECT_FALSE(filesystem::exists(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, 2))))
         << "shard " << sid;
 
-    // The LSNs continue from segment 0 into segment 1.
+    // The LSNs continue from segment 0 into segment 1, and both hold records.
     optional<uint64_t> next_lsn;
     for (uint64_t seq : {0, 1}) {
+      size_t blocks = 0;
       ifstream in(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, seq)), ios::binary);
       string file(istreambuf_iterator<char>(in), {});
       auto seg = DecodeAofSegmentHeader(file);
@@ -477,9 +487,29 @@ TEST_F(AofStreamerTest, RotateContinuesInSpare) {
         }
         next_lsn = hdr->first_lsn + hdr->n_records;
         rest.remove_prefix(hdr->total_block_bytes);
+        ++blocks;
       }
+      EXPECT_GT(blocks, 0u) << "shard " << sid << " segment " << seq;
     }
   }
+}
+
+TEST_F(AofStreamerOneShardTest, DurableLsnWaitsForRetiredSegment) {
+  Run("mset a 1 b 2 c 3 d 4");
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    AofStreamer* streamer = shard->aof_streamer();
+    ASSERT_TRUE(streamer->WaitSpareReady());
+    uint64_t before = streamer->DurableLsn();
+    uint64_t cut = journal::GetLsn();
+    ASSERT_EQ(streamer->Rotate(), 1u);
+
+    // Rotating syncs nothing: the old segment's final fdatasync runs in the background.
+    EXPECT_EQ(streamer->DurableLsn(), before);
+
+    // Joins the fiber that retired the old segment: everything before the cut is durable.
+    ASSERT_TRUE(streamer->WaitSpareReady());
+    EXPECT_EQ(streamer->DurableLsn(), cut - 1);
+  });
 }
 
 class AofChainReaderTest : public AofSegmentWriterTest {

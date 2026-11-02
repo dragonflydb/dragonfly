@@ -70,9 +70,10 @@ optional<uint64_t> AofStreamer::Rotate() {
   // Runs in a checkpoint's cut: no record may land between its GetLsn() and the switch.
   util::FiberAtomicGuard guard;
 
-  // WaitSpareReady() joined the fiber before the cut, so nothing here yields.
+  // Needs WaitSpareReady() before the cut: launching the next spare_fb_ must not yield or replace
+  // a joinable fiber.
   DCHECK(!spare_fb_.IsJoinable());
-  if (!spare_ready_)
+  if (spare_fb_.IsJoinable() || !spare_ready_)
     return nullopt;
 
   // Records from here on go to the spare; the old writer finishes in the background. Until then,
@@ -80,7 +81,6 @@ optional<uint64_t> AofStreamer::Rotate() {
   active_->Seal();
   if (!retired_ec_)
     prev_durable_lsn_ = max(prev_durable_lsn_, active_->DurableLsn());
-  retiring_ = true;
   swap(active_, standby_);
   active_->StartPeriodicSync();
   spare_ready_ = false;
@@ -101,12 +101,14 @@ void AofStreamer::PrepareSpare(uint64_t seq) {
       } else if (!retired_ec_) {
         prev_durable_lsn_ = max(prev_durable_lsn_, standby_->DurableLsn());
       }
-      retiring_ = false;
       standby_.reset();
     }
 
     auto spare = make_shared<AofSegmentWriter>(dir_, shard_id_, shard_count_);
-    // TODO: no retries for now; without a spare, the next checkpoint fails before its cut.
+
+    // No retries: a failed open means a failing disk, as with write errors (#8464). Without a
+    // spare, every later checkpoint fails before its cut, so only a restart recovers.
+    // TODO: report it through the checkpoint's error, not only this log line.
     if (error_code ec = spare->Open(seq); ec) {
       LOG(ERROR) << "Failed to prepare AOF segment " << seq << ": " << ec.message();
       return;
@@ -119,7 +121,7 @@ void AofStreamer::PrepareSpare(uint64_t seq) {
 uint64_t AofStreamer::DurableLsn() const {
   // A retirement in progress, or one that failed: nothing past the old segment counts. A failure
   // holds until a committed checkpoint supersedes the segment.
-  if (retiring_ || retired_ec_)
+  if (Retiring() || retired_ec_)
     return prev_durable_lsn_;
   return max(prev_durable_lsn_, active_->DurableLsn());
 }

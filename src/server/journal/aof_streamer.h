@@ -37,7 +37,7 @@ class AofStreamer : public journal::JournalConsumerInterface {
   std::error_code Shutdown();
 
   // Waits until the spare is prepared; true if it is ready. Called before a checkpoint's cut, so
-  // Rotate() finds the spare and never waits.
+  // Rotate() finds the spare and never waits. A failed spare is not retried: false until restart.
   bool WaitSpareReady();
 
   // Seals the active segment and switches the records to the spare, then retires the old writer
@@ -63,6 +63,11 @@ class AofStreamer : public journal::JournalConsumerInterface {
   // then opens a new one on segment seq as the spare.
   void PrepareSpare(uint64_t seq);
 
+  // standby_ holds the writer a rotation left, not a spare, until spare_fb_ shuts it down.
+  bool Retiring() const {
+    return standby_ && !spare_ready_;
+  }
+
   std::string dir_;
   uint32_t shard_id_;
   uint32_t shard_count_;
@@ -81,13 +86,12 @@ class AofStreamer : public journal::JournalConsumerInterface {
   // Durable lsn of the segments before the active one. While a writer a rotation left is being
   // shut down, or after one failed, durability goes no further.
   uint64_t prev_durable_lsn_ = 0;
-  bool retiring_ = false;
 
   // First error of a writer retired by a rotation, returned by Shutdown(). Freezes DurableLsn()
   // across later rotations.
-  // TODO: harmless once the checkpoint that rotated commits, since the old segment is then garbage:
-  // clear it there, with prev_durable_lsn_ at the cut. If it does not commit, the chain has a hole
-  // at the old segment's tail: stop the active writer.
+  // TODO(#8410): harmless once the checkpoint that rotated commits, since the old segment is then
+  // garbage: clear it there, with prev_durable_lsn_ at the cut. If it does not commit, the chain
+  // has a hole at the old segment's tail: stop the active writer.
   std::error_code retired_ec_;
 };
 

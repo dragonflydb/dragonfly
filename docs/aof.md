@@ -156,9 +156,9 @@ appendonly-<shard>-<seq>.aof          # segment files, one chain per shard
    never delayed.
 4. **Backpressure.** If the shard's unwritten AOF buffers exceed `--aof_max_buffered_bytes`,
    the shard throttles, as it does for a slow replica.
-5. **Errors.** A failed write or sync puts the shard into a reduced-durability state. How that
-   state is surfaced depends on the error policy. By default, the server keeps serving, and
-   metrics report the reduced durability until a successful checkpoint fixes it.
+5. **Errors.** A failed write or sync stops the shard's log: replay would discard everything
+   after the hole anyway. The server keeps serving, and the next successful checkpoint resumes
+   the log in a new segment.
 
 Details: [Writer](#writer) and [I/O Mode](#io-mode).
 
@@ -396,8 +396,8 @@ This mirrors Valkey's `everysec`, which writes its buffer on every event-loop it
   `written_lsn` advances over the contiguous prefix of completed writes, and their buffers are
   released.
 - A short write is resubmitted for the remaining bytes.
-- Backpressure counts every AOF buffer that is not yet written: queued (for example while waiting
-  for a spare), being retried, or in flight. Above `--aof_max_buffered_bytes`, the shard waits on
+- Backpressure counts every AOF buffer that is not yet written: sealed but not submitted, or in
+  flight. Above `--aof_max_buffered_bytes`, the shard waits on
   an `EventCount` that completions notify, like replication throttling in
   `BufferedSocketWriter`.
 
@@ -416,15 +416,21 @@ rotation, `durable_lsn` enters the new segment only after the old segment's fina
 A shard rotates only at a checkpoint cut and when the log resumes after a restart. There is no
 size-based rotation.
 
+Each shard keeps two segment writers: the **active** one, which receives the records, and the
+**spare**, an empty next segment prepared in the background.
+
+- A rotation seals the open block and switches the records to the spare. It never yields and
+  never creates a file: a checkpoint first waits until every shard's spare is ready, and only then
+  takes the cut. A shard without a spare fails the checkpoint before the cut.
 - The next block goes into the spare, right after its header.
-- Once all writes to the old segment have completed, the writer issues its final `fdatasync` and
-  closes it.
-- **Spare preparation**, in the background right after each rotation: create
-  `<name>-<shard>.spare.tmp`, write and `fdatasync` the header, rename it to its final segment
-  name, and `fsync` the directory. A final name thus only ever points at a file whose header is
-  durable, and no directory fsync sits on the write path.
+- In the background, the old writer drains its writes, issues its final `fdatasync` and closes.
+  Then the next spare is prepared.
+- **Spare preparation:** create `<segment>.tmp`, write and `fdatasync` the header, link it to its
+  final segment name (never replacing an existing segment), remove the tmp name, and `fsync` the
+  directory. A final name thus only ever points at a file whose header is durable, and no
+  directory fsync sits on the write path.
 - No zero-filling and no `fallocate` (see [I/O Mode](#io-mode)).
-- If rotation finds the spare not ready, sealed blocks queue up under normal backpressure.
+- A clean shutdown deletes the unused spare.
 - A header-only file is an **empty segment**. A crash can leave several in a row (an unused spare,
   an active segment that never got a block). Replay skips them.
 
@@ -435,19 +441,30 @@ boundary, and replay has nothing to discard.
 
 ### Error handling
 
-A failed write or sync puts the shard into a **reduced-durability state**: `durable_lsn` stops
-advancing, and the shard's log can no longer be trusted to hold everything after that point.
-- **Write failure.** The writer keeps the block buffer and retries at the same offset with
-  backoff. A later successful write does not repair the hole, so the state lasts until the
-  failed range is written and a sync covers it, or until a checkpoint.
-- **Sync failure.** A failed `fsync` cannot be retried: Linux may already have dropped the dirty
-  pages, so a later sync can succeed without the data ("fsyncgate", PostgreSQL 2018). Only a
-  successful checkpoint whose cut is *after* the failure fixes it, because its base comes from
-  memory. A new checkpoint is scheduled immediately, or right after the one in progress.
-- **Error policy.** How the state is surfaced to clients is a policy choice. By default the
-  server keeps serving reads and writes, and reports the state through metrics and
-  `INFO persistence` (`aof_last_write_status`). Stricter policies are possible, for example
-  rejecting writes until the state clears.
+**What the MVP does.** No I/O is retried. A failed write leaves a hole, and replay discards
+everything after the first hole, so writing on is pointless.
+- **Write or sync failure.** The segment's writer keeps its first error and drops every later
+  record. `durable_lsn` stops at what that segment had synced. A failed `fsync` could not be
+  retried anyway: Linux may already have dropped the dirty pages, so a later sync can succeed
+  without the data ("fsyncgate", PostgreSQL 2018).
+- **Recovery.** A successful checkpoint whose cut is *after* the failure, because its base comes
+  from memory. Its rotation continues the log in a fresh segment, and its commit makes the broken
+  segment garbage. Until it commits, `durable_lsn` does not advance past the broken segment.
+- **Spare failure.** A spare that fails to open means the disk is failing, as above, and is not
+  retried. The shard's log goes on in the active segment, but every later checkpoint fails before
+  its cut, so only a restart recovers.
+- **Clients.** The server keeps serving reads and writes. Writes accepted while the log is
+  stopped are lost if the server restarts before a checkpoint. For now, the failure shows only in
+  the logs.
+
+**Possible directions.**
+- Report the state through metrics and `INFO persistence` (`aof_last_write_status`).
+- Schedule a checkpoint right after a failure, or right after the one in progress, instead of
+  waiting for the next trigger.
+- Stricter error policies: reject writes until a checkpoint clears the state (like Redis's
+  `MISCONF`), or exit.
+- Retry a failed spare, for example on the next checkpoint, so freeing disk space can recover the
+  log without a restart.
 
 **Open edge cases.**
 - Which error policies to offer (keep serving, reject writes, exit), and which one is the
@@ -456,8 +473,6 @@ advancing, and the shard's log can no longer be trusted to hold everything after
 - Unsynced data that already left AOF's buffers sits in the page cache, and is bounded only by
   the kernel's dirty-page throttling (`vm.dirty_*`, cgroup writeback). Decide whether that is
   enough.
-- Write retries have no deadline. Define when a persistent error (ENOSPC, EIO) stops retrying,
-  and what happens next.
 - Disk full: a checkpoint needs space too, so it may not be able to recover the shard.
 - The heartbeat is not a reliable sealing clock. `--hz <= 0` disables it (`GetPeriodicCycleMs`),
   and one iteration can stall the next, for example while it blocks on keyspace-notification
@@ -555,8 +570,8 @@ A save becomes the checkpoint depending only on where its output lives:
 
 1. Take the cut as a *global* transaction, like SAVE, so every shard orders global commands the
    same way relative to it. On each shard, with no preemption in between:
-   `RegisterChangeListener`, `L_i = journal::GetLsn()`, and
-   `aof_streamer.SealAndRotate(start_lsn = L_i, ckpt = C)`. Every record below `L_i` is in the
+   `RegisterChangeListener`, `L_i = journal::GetLsn()`, and the rotation into the spare. Before
+   the cut, the checkpoint waits until every shard's spare is ready, and fails if one is missing. Every record below `L_i` is in the
    base; every record from `L_i` on is in the new segment or later ones.
 2. Serialize with the existing `RdbSaver` / `SliceSnapshot` (`stream_journal = false`). Logging
    continues meanwhile.
@@ -1026,10 +1041,10 @@ and `CONFIG SET appendonly`.
   skips its other work; queued buffers count against backpressure.
 - Rotation: `durable_lsn` does not enter the new segment before the old one's final sync; LSNs
   stay continuous across rotation.
-- Errors: a failed write is retried at its offset; a failed sync keeps the shard failed until a
-  checkpoint.
+- Errors: a failed write or sync stops the shard's log until a checkpoint; a failed spare fails
+  every later checkpoint before its cut.
 - Replay: truncation at the first invalid block, including valid blocks after a hole; empty
-  segments skipped anywhere, with LSN continuity checked across them; `.spare.tmp` ignored;
+  segments skipped anywhere, with LSN continuity checked across them; `.tmp` files ignored;
   truncation is crash-safe and keeps seqs contiguous; a clean shutdown leaves nothing to
   truncate.
 - Manifest replacement and garbage collection.
