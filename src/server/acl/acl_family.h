@@ -74,7 +74,8 @@ class AclFamily final {
                    UserRegistry::RegistryType* registry);
 
   // `has_all_keys` is whether the updated user can already access all keys.
-  std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(facade::ParsedArgs args,
+  std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(std::string_view username,
+                                                                        facade::ParsedArgs args,
                                                                         bool has_all_keys) const;
 
   void BuildIndexers(RevCommandsIndexStore families);
