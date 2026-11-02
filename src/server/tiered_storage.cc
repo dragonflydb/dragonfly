@@ -530,13 +530,14 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
   DCHECK_GT(est_size, 0u);
 
   tiering::OpManager::PendingId id;
+  std::optional<tiering::SmallBins::FilledBin> bin;
   error_code ec;
 
   if (OccupiesWholePages(est_size)) {  // large enough for own page
     id = KeyRef(dbid, key);
     auto serialize = absl::bind_front(&StashDescriptor::Serialize, &blobs);
     ec = op_manager_->PrepareAndStash(id, est_size, serialize);
-  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(blobs)); bin) {
+  } else if (bin = bins_->Stash(dbid, key, SerializeToString(blobs)); bin) {
     id = bin->id;
     auto serialize = absl::bind_front(&tiering::SmallBins::SerializeBin, bins_.get(), &*bin);
     ec = op_manager_->PrepareAndStash(id, 4_KB, serialize);
@@ -551,7 +552,14 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
     bool to_log = ec != errc::file_too_large && ec != errc::operation_would_block &&
                   ec != errc::operation_in_progress;
     LOG_IF(ERROR, to_log) << "Stash failed: " << ec.message();
-    visit([this](auto id) { op_manager_->ClearStashPending(id); }, id);
+    if (bin) {
+      // The bin filled up but PrepareAndStash failed before serializing it, so SmallBins never
+      // tracked it as pending. Recover its keys directly to clear their stash-pending flags.
+      for (const auto& bin_key : bins_->ReportStashFailed(std::move(*bin)))
+        op_manager_->ClearStashPending(bin_key);
+    } else {
+      visit([this](auto id) { op_manager_->ClearStashPending(id); }, id);
+    }
     return;
   }
 
