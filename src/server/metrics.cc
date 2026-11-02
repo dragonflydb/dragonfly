@@ -309,12 +309,12 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     constexpr unsigned kTypes[] = {OBJ_STRING, OBJ_LIST, OBJ_SET,    OBJ_ZSET,
                                    OBJ_HASH,   OBJ_KEY,  OBJ_STREAM, OBJ_JSON,
                                    OBJ_SBF,    OBJ_CMS,  OBJ_TOPK,   OBJ_CUCKOOFILTER};
-    AppendMetricHeader("type_memory_delta_bytes",
-                       "Signed cumulative tracked memory delta per object type", MetricType::GAUGE,
-                       &resp->body());
+    AppendMetricHeader("type_attributed_memory_bytes",
+                       "Cumulative net memory attributed to operations per object type",
+                       MetricType::GAUGE, &resp->body());
     for (unsigned type : kTypes) {
-      AppendMetricValue("type_memory_delta_bytes", m.type_mem_delta[type], {"type"},
-                        {ObjTypeToString(type)}, &resp->body());
+      AppendMetricValue("type_attributed_memory_bytes", m.type_attributed_memory_bytes[type],
+                        {"type"}, {ObjTypeToString(type)}, &resp->body());
     }
   }
 
@@ -836,7 +836,7 @@ void Metrics::Merge(const Metrics& src) {
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeMemDeltas) + 184,  // scalar fields (21 fields) + 4-byte alignment padding
+              sizeof(TypeAttributedMemory) + 184,  // 21 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
   // Per-db stats / events / small_string_bytes are merged element-wise.
@@ -846,8 +846,8 @@ void Metrics::Merge(const Metrics& src) {
     db_stats[i] += src.db_stats[i];
   events += src.events;
   small_string_bytes += src.small_string_bytes;
-  for (size_t type = 0; type < type_mem_delta.size(); ++type)
-    type_mem_delta[type] += src.type_mem_delta[type];
+  for (size_t type = 0; type < type_attributed_memory_bytes.size(); ++type)
+    type_attributed_memory_bytes[type] += src.type_attributed_memory_bytes[type];
 
   // Aggregate sub-structs.
   shard_stats += src.shard_stats;
@@ -911,7 +911,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeMemDeltas) + 184,  // scalar fields (21 fields) + 4-byte alignment padding
+              sizeof(TypeAttributedMemory) + 184,  // 21 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
   ServerState* ss = ServerState::tlocal();
@@ -940,7 +940,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
     events = slice_stats.events;
     small_string_bytes = slice_stats.small_string_bytes;
     shard_stats = shard->stats();
-    type_mem_delta = shard->type_mem_delta();
+    type_attributed_memory_bytes = shard->type_attributed_memory();
 
     if (shard->tiered_storage()) {
       tiered_stats = shard->tiered_storage()->GetStats();

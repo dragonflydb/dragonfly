@@ -1196,8 +1196,8 @@ void EngineShard::AddTypeMemDelta(size_t type, int64_t delta) {
   if (delta == 0)
     return;
 
-  DCHECK_LT(type, type_mem_delta_.size());
-  type_mem_delta_[type] += delta;
+  DCHECK_LT(type, type_attributed_memory_.size());
+  type_attributed_memory_[type] += delta;
 }
 
 }  // namespace dfly

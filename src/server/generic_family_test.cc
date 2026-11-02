@@ -3068,10 +3068,11 @@ TEST_F(GenericFamilyTest, ExpiredKeysSurviveFlush) {
 
 namespace {
 
-TypeMemDeltas Snapshot() {
-  TypeMemDeltas total{};
+TypeAttributedMemory Snapshot() {
+  TypeAttributedMemory total{};
   for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
-    auto local = shard_set->Await(sid, [] { return EngineShard::tlocal()->type_mem_delta(); });
+    auto local =
+        shard_set->Await(sid, [] { return EngineShard::tlocal()->type_attributed_memory(); });
     ranges::transform(total, local, total.begin(), plus{});
   }
   return total;
@@ -3115,7 +3116,7 @@ TEST_F(GenericFamilyTest, AsyncDelTrackMemByType) {
   auto before_del = Snapshot();
   ASSERT_THAT(Run({"DEL", key}), IntArg(1));
 
-  auto diff = [](TypeMemDeltas deltas, const TypeMemDeltas& before) {
+  auto diff = [](TypeAttributedMemory deltas, const TypeAttributedMemory& before) {
     ranges::transform(deltas, before, deltas.begin(), minus{});
     return deltas;
   };
@@ -3152,13 +3153,13 @@ TEST_F(GenericFamilyTest, AsyncDelTrackMemByType) {
 
 namespace {
 struct MetricCmp {
-  TypeMemDeltas new_metric{};
-  TypeMemDeltas old_metric{};
+  TypeAttributedMemory new_metric{};
+  TypeAttributedMemory old_metric{};
   int64_t obj_used = 0, table_used = 0, search_used = 0, interned = 0;
 
   MetricCmp() = default;
 
-  explicit MetricCmp(const Metrics& m) : new_metric(m.type_mem_delta) {
+  explicit MetricCmp(const Metrics& m) : new_metric(m.type_attributed_memory_bytes) {
     for (const auto& db : m.db_stats) {
       ranges::transform(old_metric, db.memory_usage_by_type, old_metric.begin(), plus{});
       obj_used += db.obj_memory_usage;
@@ -3188,7 +3189,7 @@ struct MetricCmp {
   }
 
   bool NewUnchanged() const {
-    return new_metric == TypeMemDeltas{};
+    return new_metric == TypeAttributedMemory{};
   }
 
   bool Positive(size_t t) const {
@@ -3213,7 +3214,7 @@ struct MetricCmp {
 };
 
 ostream& operator<<(ostream& os, const MetricCmp& m) {
-  auto print = [&](string_view name, const TypeMemDeltas& arr) {
+  auto print = [&](string_view name, const TypeAttributedMemory& arr) {
     os << name << ": {";
     for (size_t t = 0; t < arr.size(); ++t)
       if (arr[t] != 0)
