@@ -27,6 +27,7 @@
 #include "server/search/index_join.h"
 #include "server/stats.h"
 #include "server/table.h"
+#include "util/fibers/fibers.h"
 
 namespace dfly {
 
@@ -636,6 +637,28 @@ class ShardDocIndex {
   // Remove a DocId from all HNSW indices for this index.
   void RemoveFromAllHnswIndices(search::DocId doc_id);
 
+  using HnswWriteLocks = absl::InlinedVector<search::MRMWMutexLock, 2>;
+
+  // Waits on the calling fiber for the write locks of all HNSW indices. While they are held,
+  // HNSW updates apply without waiting or deferral, unless the document has a deferred update.
+  HnswWriteLocks LockHnswIndices();
+
+  // Takes the write locks of all HNSW indices without waiting. Fails when a search holds one or
+  // doc_id has a deferred update.
+  std::optional<HnswWriteLocks> TryLockHnswIndices(DocId doc_id);
+
+  // Defers the HNSW update of doc_id to hnsw_sync_fiber_, which waits for the searches. Until then
+  // the indices keep deferred write locks, so the searches that start later see the update. ns is
+  // the namespace to re-read the document from, or nullptr to only remove it.
+  void DeferHnswUpdate(DocId doc_id, Namespace* ns);
+
+  // Takes the deferred write locks, then applies the deferred updates by re-reading the
+  // documents from their namespaces. Runs in hnsw_sync_fiber_.
+  void SyncDeferredHnsw(HnswWriteLocks locks);
+
+  // Waits for hnsw_sync_fiber_ to apply the deferred updates.
+  void FlushDeferredHnswUpdates();
+
   // FieldIndices::Add/Remove of one document. Lazy field expiry can drop a hash field before its
   // document is removed, so the values of fields with a TTL are kept until then.
   bool AddToIndices(DocId id, const DbContext& db_cntx, const PrimeValue& pv);
@@ -683,6 +706,12 @@ class ShardDocIndex {
   // by key, while their DocIds may be reused by other keys.
   absl::flat_hash_set<DocId> pending_hnsw_removals_;
   HnswState hnsw_state_ = HnswState::kProhibit;
+
+  // HNSW updates that couldn't apply without waiting for the searches, with the namespace passed
+  // by the last one of each document. While any are pending, hnsw_sync_fiber_ holds deferred write
+  // locks of the indices.
+  absl::flat_hash_map<DocId, Namespace*> deferred_hnsw_ids_;
+  util::fb2::Fiber hnsw_sync_fiber_;
 };
 
 // Stores shard doc indices by name on a specific shard.

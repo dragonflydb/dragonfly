@@ -278,9 +278,8 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
       index_->AddDocToGlobalVectorIndex(*local_id, db_cntx, &pv);
   };
 
-  // NOTE(global-hnsw-mutex): HNSW (hnsw_alg) index uses a thread-blocking mutex making
-  // AddDocToGlobalVectorIndex non-fiber-suspendable from a fiber point of view. This makes it safe
-  // to perform add keys without locking them while sleeping of a mutex.
+  // NOTE(global-hnsw-mutex): AddDocToGlobalVectorIndex never suspends: it defers the addition while
+  // a search holds an HNSW index. This makes it safe to add keys while traversing the table.
   PrimeTable::Cursor cursor;
   do {
     cursor = table->prime.Traverse(cursor, cb);
