@@ -406,7 +406,9 @@ This mirrors Valkey's `everysec`, which writes its buffer on every event-loop it
 Every `kFSyncMs` (1s), if the active segment has completed but unsynced writes:
 1. Set `sync_target` to the end of the contiguous completed prefix *within the active segment*.
 2. Issue an async `fdatasync`. At most one is in flight per shard.
-3. On completion, advance `durable_lsn` (atomic, readable from any thread) and wake waiters.
+3. On completion, advance `durable_lsn`. It combines the active segment with the ones before it,
+   so it is read on the shard thread only. That is enough for `everysec`; `always` needs an atomic
+   copy that connection threads can wait on (see [Fsync policy](#fsync-policy)).
 
 An `fdatasync` covers one file, and only writes completed before it was issued. So during a
 rotation, `durable_lsn` enters the new segment only after the old segment's final sync.

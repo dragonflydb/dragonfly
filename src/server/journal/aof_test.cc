@@ -11,6 +11,7 @@
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
+#include <absl/time/clock.h>
 
 #include <filesystem>
 #include <fstream>
@@ -448,6 +449,11 @@ class AofStreamerOneShardTest : public AofStreamerTest {
   AofStreamerOneShardTest() {
     num_threads_ = 1;
   }
+
+  // A retirement finishes within milliseconds, so tests fake one in progress.
+  static void SetRetiring(AofStreamer* streamer, bool retiring) {
+    streamer->spare_ready_ = !retiring;
+  }
 };
 
 // TODO: cover a crash while preparing a spare. Leave each partial state on disk (a leftover
@@ -496,19 +502,27 @@ TEST_F(AofStreamerOneShardTest, RotateContinuesInSpare) {
 
 TEST_F(AofStreamerOneShardTest, DurableLsnWaitsForRetiredSegment) {
   Run("mset a 1 b 2 c 3 d 4");
-  shard_set->RunBlockingInParallel([](EngineShard* shard) {
-    AofStreamer* streamer = shard->aof_streamer();
-    ASSERT_TRUE(streamer->WaitSpareReady());
-    uint64_t before = streamer->DurableLsn();
-    uint64_t cut = journal::GetLsn();
-    ASSERT_EQ(streamer->Rotate(), 1u);
+  AofStreamer* streamer = shard_set->Await(0, [] { return EngineShard::tlocal()->aof_streamer(); });
+  uint64_t cut = shard_set->Await(0, [&] {
+    EXPECT_TRUE(streamer->WaitSpareReady());
+    uint64_t lsn = journal::GetLsn();
+    EXPECT_EQ(streamer->Rotate(), 1u);
 
-    // Rotating syncs nothing: the old segment's final fdatasync runs in the background.
-    EXPECT_EQ(streamer->DurableLsn(), before);
+    // Joins the retirement: everything before the cut is durable.
+    EXPECT_TRUE(streamer->WaitSpareReady());
+    EXPECT_EQ(streamer->DurableLsn(), lsn - 1);
+    return lsn;
+  });
 
-    // Joins the fiber that retired the old segment: everything before the cut is durable.
-    ASSERT_TRUE(streamer->WaitSpareReady());
+  // Record cut lands in segment 1; wait past the 1s periodic sync, so segment 1 covers it.
+  Run("set x 1");
+  absl::SleepFor(absl::Milliseconds(1500));
+  shard_set->Await(0, [&] {
+    // While the old segment retires, segment 1 does not count, though it is synced.
+    SetRetiring(streamer, true);
     EXPECT_EQ(streamer->DurableLsn(), cut - 1);
+    SetRetiring(streamer, false);
+    EXPECT_EQ(streamer->DurableLsn(), cut);
   });
 }
 

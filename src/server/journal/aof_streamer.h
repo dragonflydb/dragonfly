@@ -93,6 +93,8 @@ class AofStreamer : public journal::JournalConsumerInterface {
   // garbage: clear it there, with prev_durable_lsn_ at the cut. If it does not commit, the chain
   // has a hole at the old segment's tail: stop the active writer.
   std::error_code retired_ec_;
+
+  friend class AofStreamerOneShardTest;
 };
 
 #else
