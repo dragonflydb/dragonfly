@@ -1049,6 +1049,177 @@ TEST_F(CmdArgParserTest, CapGrammarTagValue) {
 }
 
 namespace {
+enum IfUpperFlags : uint8_t { kUpA = 1 << 0, kUpB = 1 << 1 };
+struct IfUpperTarget {
+  uint8_t flags = 0;
+  bool other = false;
+};
+consteval auto MakeIfUpperGrammar() {
+  return Compile(Options(IfUpper(Flags(&IfUpperTarget::flags, "A", kUpA, "BB", kUpB)),
+                         Exist("OTHER", &IfUpperTarget::other)));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarIfUpper) {
+  static constexpr auto kGrammar = MakeIfUpperGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, IfUpperTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {
+    IfUpperTarget o;
+    EXPECT_FALSE(run({"BB", "A"}, &o));
+    EXPECT_EQ(o.flags, kUpA | kUpB);
+  }
+  {  // any lower-case letter leaves the token to the rest of the grammar
+    IfUpperTarget o;
+    auto err = run({"A", "Bb"}, &o);
+    EXPECT_EQ(err.type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(err.index, 1u);
+    EXPECT_EQ(o.flags, kUpA);
+  }
+  {  // rules outside IfUpper still match in any case
+    IfUpperTarget o;
+    EXPECT_FALSE(run({"other"}, &o));
+    EXPECT_TRUE(o.other);
+  }
+}
+
+namespace {
+struct IfNextTarget {
+  std::string_view name;
+  double num = 0;
+  std::string_view code;
+};
+bool IsShort(std::string_view arg) {
+  return arg.size() <= 2;
+}
+consteval auto MakeIfNextGrammar() {
+  return Compile(Options(IfNext(Field("NAME", &IfNextTarget::name)),
+                         IfNext<double>(Field("NUM", &IfNextTarget::num)),
+                         IfNext(IsShort, Field("CODE", &IfNextTarget::code))));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarIfNext) {
+  static constexpr auto kGrammar = MakeIfNextGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, IfNextTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {
+    IfNextTarget o;
+    EXPECT_FALSE(run({"NAME", "", "NUM", "-2.5", "CODE", "ab", "NAME", "NUM"}, &o));
+    EXPECT_EQ(o.name, "NUM");
+    EXPECT_EQ(o.num, -2.5);
+    EXPECT_EQ(o.code, "ab");
+  }
+  {  // a tag stays unconsumed, with no error of its own, unless an accepted argument follows
+    IfNextTarget o;
+    auto err = run({"NAME"}, &o);
+    EXPECT_EQ(err.type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(err.index, 0u);
+    EXPECT_EQ(run({"NUM", "x"}, &o).index, 0u);
+    EXPECT_EQ(run({"NUM", ""}, &o).index, 0u);
+    EXPECT_EQ(run({"CODE", "abc"}, &o).index, 0u);
+    EXPECT_EQ(run({"CODE", "ab", "NUM", "NAME", "x"}, &o).index, 2u);
+    EXPECT_EQ(o.num, 0);
+  }
+}
+
+namespace {
+struct GroupTarget {
+  bool a = false;
+  bool b = false;
+  bool c = false;
+};
+constexpr auto kAbRules =
+    Options(OneOf("A and B conflict", Exist("A", &GroupTarget::a), Exist("B", &GroupTarget::b)));
+consteval auto MakeGroupGrammar() {
+  return Compile(Options(kAbRules, Exist("C", &GroupTarget::c)));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarNestedOptions) {
+  static constexpr auto kGrammar = MakeGroupGrammar();
+  static constexpr auto kAbGrammar = Compile(kAbRules);
+  auto run = [&](const auto& grammar, std::initializer_list<std::string_view> args,
+                 GroupTarget* o) {
+    auto parser = Make(args);
+    grammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {
+    GroupTarget o;
+    EXPECT_FALSE(run(kGrammar, {"C", "A", "C"}, &o));
+    EXPECT_TRUE(o.a);
+    EXPECT_TRUE(o.c);
+  }
+  {  // the nested group keeps its state across the outer loop
+    GroupTarget o;
+    EXPECT_EQ(run(kGrammar, {"A", "C", "B"}, &o).MakeReply().ToSv(), "A and B conflict");
+  }
+  {  // the same group as a grammar of its own
+    GroupTarget o;
+    auto err = run(kAbGrammar, {"B", "C"}, &o);
+    EXPECT_EQ(err.type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(err.index, 1u);
+    EXPECT_TRUE(o.b);
+  }
+}
+
+namespace {
+struct VarText {
+  bool no_stem = false;
+};
+struct VarTag {
+  bool case_sensitive = false;
+};
+struct IntoVariantTarget {
+  std::variant<std::monostate, VarText, VarTag> params;
+};
+consteval auto MakeIntoVariantGrammar() {
+  return Compile(
+      Options(Into(&IntoVariantTarget::params, Exist("NOSTEM", &VarText::no_stem)),
+              Into(&IntoVariantTarget::params, Exist("CASESENSITIVE", &VarTag::case_sensitive))));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarIntoVariant) {
+  static constexpr auto kGrammar = MakeIntoVariantGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, IntoVariantTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {
+    IntoVariantTarget o{VarTag{}};
+    EXPECT_FALSE(run({"CASESENSITIVE"}, &o));
+    EXPECT_TRUE(std::get<VarTag>(o.params).case_sensitive);
+  }
+  {  // a rule for another alternative leaves the token unmatched
+    IntoVariantTarget o{VarTag{}};
+    EXPECT_EQ(run({"NOSTEM"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_TRUE(std::holds_alternative<VarTag>(o.params));
+  }
+  {
+    IntoVariantTarget o;
+    EXPECT_EQ(run({"NOSTEM"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_TRUE(std::holds_alternative<std::monostate>(o.params));
+  }
+}
+
+namespace {
 
 enum BenchFlags : uint16_t { kBNx = 1 << 0, kBXx = 1 << 1, kBGet = 1 << 2 };
 enum class BenchUnit : uint8_t { kNone, kSec, kMs };

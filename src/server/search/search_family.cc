@@ -189,35 +189,20 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   return params;
 }
 
-ParseResult<search::SchemaField::TagParams> ParseTagParams(
-    CmdArgParser* parser, search::SchemaField::TagParams params = {}) {
-  while (parser->HasNext()) {
-    if (parser->Check("SEPARATOR")) {
-      std::string_view separator = parser->NextOrDefault();
-
-      if (separator.size() != 1) {
-        return CreateSyntaxError(
-            absl::StrCat("Tag separator must be a single character. Got `"sv, separator, "`"sv));
-      }
-
-      params.separator = separator.front();
-      continue;
-    }
-
-    if (parser->Check("CASESENSITIVE")) {
-      params.case_sensitive = true;
-      continue;
-    }
-
-    if (parser->Check("WITHSUFFIXTRIE")) {
-      params.with_suffixtrie = true;
-      continue;
-    }
-
-    break;
-  }
-  return params;
+void ParseTagSeparator(CmdArgParser* parser, search::SchemaField::TagParams* params) {
+  std::string_view separator = parser->NextOrDefault();
+  if (separator.size() == 1)
+    params->separator = separator.front();
+  else
+    parser->ReportCustom(
+        absl::StrCat("Tag separator must be a single character. Got `"sv, separator, "`"sv));
 }
+
+constexpr auto kTagParams =
+    Options(Action("SEPARATOR", ParseTagSeparator),
+            Exist("CASESENSITIVE", &search::SchemaField::TagParams::case_sensitive),
+            Exist("WITHSUFFIXTRIE", &search::SchemaField::TagParams::with_suffixtrie));
+constexpr auto kTagParamsGrammar = Compile(kTagParams);
 
 ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
   std::string lang = absl::AsciiStrToLower(parser->Next<std::string_view>());
@@ -235,13 +220,10 @@ struct ValidTextWeight : facade::VNum<double> {
   }
 };
 
-void ParseTextWeight(CmdArgParser* parser, TP* params) {
-  params->weight = parser->Next<ValidTextWeight>("Invalid WEIGHT value");
-}
-
-constexpr auto kTextParamsGrammar =
-    Compile(Options(Exist("WITHSUFFIXTRIE", &TP::with_suffixtrie), Exist("NOSTEM", &TP::no_stem),
-                    Field<ValidTextWeight>("WEIGHT", &TP::weight, "Invalid WEIGHT value")));
+constexpr auto kTextWeight = Field<ValidTextWeight>("WEIGHT", &TP::weight, "Invalid WEIGHT value");
+constexpr auto kTextParams = Options(Exist("WITHSUFFIXTRIE", &TP::with_suffixtrie),
+                                     Exist("NOSTEM", &TP::no_stem), kTextWeight);
+constexpr auto kTextParamsGrammar = Compile(kTextParams);
 
 search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
   search::SchemaField::NumericParams params{};
@@ -263,11 +245,7 @@ using ParsedSchemaField =
 
 // Tag fields include: [separator char] [casesensitive]
 ParsedSchemaField ParseTag(CmdArgParser* parser) {
-  auto tag_params = ParseTagParams(parser);
-  if (!tag_params) {
-    return make_unexpected(tag_params.error());
-  }
-  return std::make_pair(search::SchemaField::TAG, std::move(tag_params).value());
+  return std::make_pair(search::SchemaField::TAG, kTagParamsGrammar.Apply(parser));
 }
 
 ParsedSchemaField ParseText(CmdArgParser* parser) {
@@ -376,64 +354,47 @@ string OneLine(string_view name) {
   return absl::StrReplaceAll(name, {{"\r", " "}, {"\n", " "}});
 }
 
+template <class T> void IgnorePhonetic(CmdArgParser* parser, T*) {
+  parser->Skip(1);
+  LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: PHONETIC";
+}
+
+// The matcher after PHONETIC, such as dm:en, that allows it in lower case on TEXT.
+bool IsPhoneticMatcher(string_view arg) {
+  return arg.size() == 5 && arg[2] == ':';
+}
+
 // Field options: type parameters before the flags, SORTABLE [UNF] and NOINDEX in any order, and, as
 // in older versions that clients rely on, upper-case UNF, INDEXMISSING, INDEXEMPTY, PHONETIC x and,
 // on TEXT, NOSTEM and WEIGHT n anywhere. Any other argument starts the next field.
-ParseResult<uint8_t> ParseFieldOptions(CmdArgParser* parser, string_view field_alias,
-                                       search::SchemaField::ParamsVariant* params) {
-  using search::SchemaField;
-  auto* text = std::get_if<SchemaField::TextParams>(params);
-  auto* tag = std::get_if<SchemaField::TagParams>(params);
-  uint8_t flags = 0;
-  bool flag_seen = false;
-  while (parser->HasNext()) {
-    string_view word = parser->Peek(), arg = parser->Peek(1);
-    double weight;
-    if (auto flag = parser->TryMapNext("NOINDEX", SchemaField::NOINDEX, "SORTABLE",
-                                       SchemaField::SORTABLE)) {
-      flags |= *flag;
-      flag_seen = true;
-    } else if (word == "UNF" || word == "INDEXMISSING" || word == "INDEXEMPTY") {
-      // In lower case these words name fields, as older versions stored them.
-      flags |= parser->MapNext("UNF", SchemaField::UNF, "INDEXMISSING", SchemaField::INDEXMISSING,
-                               "INDEXEMPTY", SchemaField::INDEXEMPTY);
-    } else if (parser->HasAtLeast(2) &&
-               (word == "PHONETIC" || (text && arg.size() == 5 && arg[2] == ':')) &&
-               parser->Check("PHONETIC", &arg)) {
-      // Lower case only on TEXT before a matcher such as dm:en.
-      LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: PHONETIC";
-    } else if (text && (!flag_seen || absl::SimpleAtod(arg, &weight)) && parser->Check("WEIGHT")) {
-      ParseTextWeight(parser, text);
-    } else if (text && (!flag_seen || word == "NOSTEM") && parser->Check("NOSTEM")) {
-      text->no_stem = true;
-    } else if (flag_seen) {
-      break;
-    } else if (text && parser->Check("WITHSUFFIXTRIE")) {
-      text->with_suffixtrie = true;
-    } else if (tag) {
-      // TAG parameters may also follow INDEXMISSING, INDEXEMPTY, UNF or PHONETIC.
-      size_t start = parser->UnparsedStart();
-      auto tag_params = ParseTagParams(parser, *tag);
-      if (!tag_params)
-        return make_unexpected(tag_params.error());
-      if (parser->UnparsedStart() == start)
-        break;
-      *tag = *tag_params;
-    } else {
-      break;
-    }
-  }
+ParseResult<search::SchemaField> ParseFieldOptions(CmdArgParser* parser, string_view field_alias,
+                                                   search::SchemaField field) {
+  using SF = search::SchemaField;
 
-  if ((flags & SchemaField::NOINDEX) && (flags & SchemaField::INDEXMISSING)) {
+  // In lower case these words name fields, as older versions stored them.
+  static constexpr auto kAnywhere = Options(
+      IfUpper(Flags(&SF::flags, "UNF", SF::UNF, "INDEXMISSING", SF::INDEXMISSING, "INDEXEMPTY",
+                    SF::INDEXEMPTY)),
+      IfUpper(IfNext(Action("PHONETIC", IgnorePhonetic<SF>))),
+      Into(&SF::special_params, IfNext(IsPhoneticMatcher, Action("PHONETIC", IgnorePhonetic<TP>))));
+  static constexpr auto kGrammar = Compile(
+      Options(kAnywhere, Into(&SF::special_params, kTextParams),
+              Into(&SF::special_params, kTagParams)),
+      Options(Flags(&SF::flags, "SORTABLE", SF::SORTABLE, "NOINDEX", SF::NOINDEX), kAnywhere,
+              Into(&SF::special_params,
+                   Options(IfNext<double>(kTextWeight), IfUpper(Exist("NOSTEM", &TP::no_stem))))));
+  kGrammar.Apply(parser, &field);
+
+  if ((field.flags & SF::NOINDEX) && (field.flags & SF::INDEXMISSING)) {
     return CreateSyntaxError(
         absl::StrCat("Field cannot be defined with both `NOINDEX` and `INDEXMISSING` `"sv,
                      OneLine(field_alias), "` "sv));
   }
 
   // Accepted on any type, as before; only TEXT and TAG keep it.
-  if (!text && !tag)
-    flags &= ~SchemaField::INDEXEMPTY;
-  return flags;
+  if (field.type != SF::TEXT && field.type != SF::TAG)
+    field.flags &= ~SF::INDEXEMPTY;
+  return field;
 }
 
 // SCHEMA field [AS alias] type [flags...]
@@ -494,13 +455,14 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
     auto [field_type, params] = std::move(parsed_params).value();
 
-    auto flags = ParseFieldOptions(parser, field_alias, &params);
-    if (!flags) {
-      return make_unexpected(flags.error());
+    const uint32_t number = schema.fields.size();
+    auto field =
+        ParseFieldOptions(parser, field_alias, {field_type, 0, string{field_path}, params, number});
+    if (!field) {
+      return make_unexpected(field.error());
     }
 
-    const uint32_t number = schema.fields.size();
-    schema.fields[field_alias] = {field_type, *flags, string{field_path}, params, number};
+    schema.fields[field_alias] = std::move(field).value();
   }
 
   return false;
