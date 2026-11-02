@@ -61,11 +61,8 @@ enum CommandOpt : uint32_t {
   // woke it (see BlockingController).
   WAKE_ALL_READY_KEYS = 1U << 21,
 
-  // ACL: the keys the command writes also need read, because it returns their data (GETDEL, LPOP).
-  ACCESS = 1U << 22,
-
-  // ACL: like ACCESS, but only for the first key, the source of a move (RENAME, LMOVE, SMOVE).
-  ACCESS_KEY_OFFSET_0 = 1U << 23,
+  // ACL: keys need read and write (only the source of a two-key move). Implies JOURNALED.
+  RW = 1U << 22,
 };
 
 };  // namespace CO

@@ -259,7 +259,7 @@ void User::SetKeyGlobs(std::vector<UpdateKey> keys) {
       keys_.key_globs.clear();
       keys_.all_keys = false;
     } else {
-      // Like Redis, repeating a pattern adds to its permissions, so %R~k %W~k equals %RW~k.
+      // Like Valkey, repeating a pattern adds to its permissions, so %R~k %W~k equals %RW~k.
       // The validator requires one pattern to grant every permission a key needs.
       auto it = std::find_if(keys_.key_globs.begin(), keys_.key_globs.end(),
                              [&](const GlobType& glob) { return glob.first == key.key; });

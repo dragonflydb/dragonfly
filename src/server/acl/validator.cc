@@ -109,24 +109,25 @@ bool BitFieldWrites(const ParsedArgs& tail_args) {
   return false;
 }
 
-// Per-key ACL requirements, following Redis key specs: a key needs read if the command returns or
+// Per-key ACL requirements, following Valkey key specs: a key needs read if the command returns or
 // moves its data, and write if the command modifies it.
 KeyPermissions RequiredKeyPermissions(const CommandId& id, const ParsedArgs& tail_args,
                                       unsigned key_offset) {
   const uint32_t mask = id.opt_mask();
-  const bool access = mask & CO::ACCESS;
+  const bool rw = mask & CO::RW;
   if (mask & CO::WRITE_KEY_OFFSET_0)
-    return {key_offset != 0 || access, key_offset == 0};
+    return {key_offset != 0 || rw, key_offset == 0};
   if (mask & CO::WRITE_KEY_OFFSET_1)
-    return {key_offset != 1 || access, key_offset == 1};
+    return {key_offset != 1 || rw, key_offset == 1};
 
   if (mask & CO::STORE_LAST_KEY)
     return {true, false};
 
-  if (mask & CO::ACCESS_KEY_OFFSET_0)
+  // A two-key RW command is a move: only the source's data is returned or moved.
+  if (rw && id.first_key_pos() == 1 && id.last_key_pos() == 2)
     return {key_offset == 0, true};
 
-  // Redis treats XREADGROUP as a read even though it updates the consumer group.
+  // Valkey treats XREADGROUP as a read even though it updates the consumer group.
   string_view name = id.name();
   if (name == "XREADGROUP")
     return {true, false};
@@ -135,10 +136,10 @@ KeyPermissions RequiredKeyPermissions(const CommandId& id, const ParsedArgs& tai
   if (name == "BITFIELD")
     return {true, BitFieldWrites(tail_args)};
 
-  return {id.IsReadOnly() || access, id.IsJournaled()};
+  return {id.IsReadOnly() || rw, id.IsJournaled()};
 }
 
-// Like Redis, a single pattern must grant every permission the key needs.
+// Like Valkey, a single pattern must grant every permission the key needs.
 bool IsKeyAllowed(const AclKeys& keys, string_view key, KeyPermissions perms) {
   return absl::c_any_of(keys.key_globs, [&](const GlobType& glob) {
     const auto& [pattern, op] = glob;

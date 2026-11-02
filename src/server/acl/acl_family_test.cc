@@ -1179,6 +1179,22 @@ TEST_F(AclFamilyTest, AclSaveLoadKeepsSubcommandRules) {
   std::filesystem::remove(path);
 }
 
+TEST_F(AclFamilyTest, AclSaveLoadReadWriteStarAsAllKeys) {
+  TestInitAclFam();
+  WriteAclFile("");
+  const std::string rules = "user u on nopass ~* resetchannels +@all $all";
+
+  for (std::string_view keys : {"%R~* %W~* ~foo", "%RW~* ~foo", "%R~* ~foo %W~*"}) {
+    EXPECT_EQ(Run(absl::StrCat("ACL SETUSER u on nopass +@all resetkeys ", keys)), "OK") << keys;
+    EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules)) << keys;
+
+    EXPECT_EQ(Run("ACL SAVE"), "OK") << keys;
+    EXPECT_EQ(Run("ACL LOAD"), "OK") << keys;
+    EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules)) << keys;
+    EXPECT_EQ(Run("ACL DRYRUN u GETDEL anykey"), "OK") << keys;
+  }
+}
+
 TEST_F(AclFamilyTest, AclErrorHidesToken) {
   TestInitAclFam();
   auto resp = Run({"ACL", "SETUSER", "u", "on", "secret"});
