@@ -729,6 +729,11 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
 
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 
+  // Only owned slots are reported.
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}), ArrLen(0));
+
+  // Take the slots back to check that the deletion released their stats.
+  ConfigSingleNodeCluster(GetMyId());
   EXPECT_THAT(
       RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
       RespArray(ElementsAre(
@@ -951,6 +956,8 @@ TEST_F(ClusterTieredTest, SlotCountersReleasedOnConfigSlotRemoval) {
   ConfigSingleNodeCluster("abc");
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 
+  // Only owned slots are reported, so take slot 1 back to read its counters.
+  ConfigSingleNodeCluster(GetMyId());
   ExpectSlotEmpty(1);
 }
 
@@ -1232,10 +1239,17 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
   // Verify that keys for slot 8000 were deleted, while key for slot 7999 was kept
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 1; });
 
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
-              RespArray(ElementsAre(
-                  RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _, _, _)),
-                  RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(0), _, _, _, _, _, _)))));
+  // Slot 8000 belongs to the other master now, so it is not reported.
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
+      RespElementsAre(RespElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _, _, _)));
+
+  // Owned slots keep the request order, also when collected in several rounds.
+  auto resp =
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "0-16383", "0-16383", "0-16383"});
+  ASSERT_THAT(resp, ArrLen(3 * 8000));
+  for (size_t i = 0; i < resp.GetVec().size(); ++i)
+    ASSERT_THAT(resp.GetVec()[i], RespElementsAre(IntArg(i % 8000), _, _, _, _, _, _, _, _));
 }
 
 TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
