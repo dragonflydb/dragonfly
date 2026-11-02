@@ -186,8 +186,19 @@ class QList {
   using IterateFunc = absl::FunctionRef<bool(Entry)>;
   enum InsertOpt : uint8_t { BEFORE, AFTER };
 
+  // Adjusts malloc size on behalf of tiering callbacks (node stash/upload), which account the
+  // change in object memory stats themselves. The delta is also tracked in
+  // TieringAccountedBytes() so that the owner's memory updater does not count it twice.
   void AdjustMallocSize(ssize_t delta) {
     malloc_size_ += delta;
+    if (tiering_enabled_) {
+      tiering_params_->accounted_bytes += delta;
+    }
+  }
+
+  // Cumulative malloc size changes made by AdjustMallocSize().
+  int64_t TieringAccountedBytes() const {
+    return tiering_enabled_ ? tiering_params_->accounted_bytes : 0;
   }
 
   // Add to the number of offloaded nodes by one.
@@ -219,6 +230,7 @@ class QList {
 
     uint32_t num_offloaded_nodes = 0;
     uint32_t node_depth_threshold;
+    int64_t accounted_bytes = 0;  // see AdjustMallocSize()
     void (*offload)(QList* ql, Node* node);
     void (*load)(QList* ql, Node* node);
     void (*cleanup)(QList* ql, Node* node);

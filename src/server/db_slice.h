@@ -25,6 +25,8 @@
 
 namespace dfly {
 
+class QList;
+
 namespace cluster {
 class SlotRanges;
 class SlotSet;
@@ -208,12 +210,20 @@ class DbSlice {
       size_t orig_value_heap_size = 0;
       CompactObjType orig_obj_type = 0;
 
+      // Tiered list whose node stash/upload callbacks account memory on their own, and the
+      // amount they had accounted at init time. Excluded from the delta to avoid double counting.
+      const QList* orig_tiered_list = nullptr;
+      int64_t orig_tiering_accounted = 0;
+
       // KeySlot(key), computed at most once and only if per-slot stats are tracked.
       std::optional<SlotId> slot;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice,
                 std::optional<SlotId> slot = std::nullopt);
+
+    // Captures the tiered list baseline, see Fields::orig_tiered_list.
+    void ResyncTieredList();
 
     // Returns KeySlot(key) if `table` tracks per-slot stats, nullopt otherwise.
     std::optional<SlotId> StatsSlot(const DbTable& table);

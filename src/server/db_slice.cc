@@ -8,6 +8,7 @@
 
 #include "core/dense_set.h"
 #include "core/oah_set.h"
+#include "core/qlist.h"
 #include "strings/human_readable.h"
 
 extern "C" {
@@ -564,6 +565,16 @@ void DbSlice::AddSlotStats(absl::Span<const SlotId> slots, absl::Span<SlotStats>
   }
 }
 
+namespace {
+
+const QList* TieredListOf(const PrimeValue& pv) {
+  if (pv.ObjType() != OBJ_LIST || pv.Encoding() != kEncodingQL2)
+    return nullptr;
+  return static_cast<const QList*>(pv.RObjPtr());
+}
+
+}  // namespace
+
 DbSlice::AutoUpdater::AutoUpdater() {
 }
 
@@ -592,12 +603,20 @@ void DbSlice::AutoUpdater::ReduceHeapUsage() {
   // Reset to avoid double accounting, and sync the type after accounting.
   fields_.orig_value_heap_size = 0;
   fields_.orig_obj_type = fields_.it->second.ObjType();
+  ResyncTieredList();
 }
 
 void DbSlice::AutoUpdater::ResyncBaseline() {
   const PrimeValue& pv = fields_.it->second;
   fields_.orig_value_heap_size = pv.MallocUsed();
   fields_.orig_obj_type = pv.ObjType();
+  ResyncTieredList();
+}
+
+void DbSlice::AutoUpdater::ResyncTieredList() {
+  fields_.orig_tiered_list = TieredListOf(fields_.it->second);
+  fields_.orig_tiering_accounted =
+      fields_.orig_tiered_list ? fields_.orig_tiered_list->TieringAccountedBytes() : 0;
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -615,6 +634,11 @@ void DbSlice::AutoUpdater::Run() {
   const PrimeValue& pv = fields_.it->second;
   CompactObjType current_type = pv.ObjType();
   int64_t current_size = static_cast<int64_t>(pv.MallocUsed());
+
+  // List node tiering callbacks may have run while the operation was blocked on a node load.
+  // They already accounted their changes, so exclude them from the size observed here.
+  if (const QList* ql = TieredListOf(pv); ql && ql == fields_.orig_tiered_list)
+    current_size -= ql->TieringAccountedBytes() - fields_.orig_tiering_accounted;
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
   const std::optional<SlotId> slot = StatsSlot(*table);
 
@@ -655,6 +679,7 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .orig_obj_type = it->second.ObjType(),
               .slot = slot} {
   DCHECK(IsValid(it));
+  ResyncTieredList();
 }
 
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
