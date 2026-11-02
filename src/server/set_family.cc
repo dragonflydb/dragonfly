@@ -1720,10 +1720,10 @@ void SetFamily::Register(CommandRegistry* registry) {
             << CI{"SMEMBERS", CO::READONLY, 2, 1, 1}.HFUNC(SMembers)
             << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(SIsMember)
             << CI{"SMISMEMBER", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(SMIsMember)
-            << CI{"SMOVE", CO::FAST | CO::JOURNALED | CO::NO_AUTOJOURNAL, 4, 1, 2}.HFUNC(SMove)
+            << CI{"SMOVE", CO::FAST | CO::RW | CO::NO_AUTOJOURNAL, 4, 1, 2}.HFUNC(SMove)
             << CI{"SREM", CO::JOURNALED | CO::FAST, -3, 1, 1}.HFUNC(SRem)
             << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(SCard)
-            << CI{"SPOP", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(SPop)
+            << CI{"SPOP", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(SPop)
             << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(SRandMember)
             << CI{"SUNION", CO::READONLY, -2, 1, -1}.HFUNC(SUnion)
             << CI{"SUNIONSTORE",

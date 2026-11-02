@@ -404,8 +404,8 @@ using CI = CommandId;
 void RegisterTopkFamily(CommandRegistry* registry) {
   registry->StartFamily(acl::TOPK);
   *registry << CI{"TOPK.RESERVE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(Reserve)
-            << CI{"TOPK.ADD", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(Add)
-            << CI{"TOPK.INCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(IncrBy)
+            << CI{"TOPK.ADD", CO::RW | CO::DENYOOM | CO::FAST, -3, 1, 1}.HFUNC(Add)
+            << CI{"TOPK.INCRBY", CO::RW | CO::DENYOOM | CO::FAST, -4, 1, 1}.HFUNC(IncrBy)
             << CI{"TOPK.QUERY", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(Query)
             << CI{"TOPK.COUNT", CO::READONLY | CO::FAST, -3, 1, 1}.HFUNC(Count)
             << CI{"TOPK.LIST", CO::READONLY, -2, 1, 1}.HFUNC(List)
