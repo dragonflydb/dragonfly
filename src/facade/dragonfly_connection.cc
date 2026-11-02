@@ -2819,12 +2819,24 @@ void Connection::UpdateDispatchStats(const MessageHandle& msg, bool add) {
   }
 }
 
+namespace {
+
+// Dual-stack IPv6 listeners see IPv4 peers as v4-mapped addresses (::ffff:a.b.c.d).
+// Print those as plain IPv4, so that IPv4 clients look the same regardless of the listener family.
+string AddressToString(const boost::asio::ip::address& addr) {
+  if (addr.is_v6() && addr.to_v6().is_v4_mapped())
+    return boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, addr.to_v6()).to_string();
+  return addr.to_string();
+}
+
+}  // namespace
+
 std::string Connection::LocalBindStr() const {
   if (socket_->IsUDS())
     return "unix-domain-socket";
 
   auto le = socket_->LocalEndpoint();
-  return absl::StrCat(le.address().to_string(), ":", le.port());
+  return absl::StrCat(AddressToString(le.address()), ":", le.port());
 }
 
 std::string Connection::LocalBindAddress() const {
@@ -2832,7 +2844,7 @@ std::string Connection::LocalBindAddress() const {
     return "unix-domain-socket";
 
   auto le = socket_->LocalEndpoint();
-  return le.address().to_string();
+  return AddressToString(le.address());
 }
 
 std::string Connection::RemoteEndpointStr() const {
@@ -2840,7 +2852,7 @@ std::string Connection::RemoteEndpointStr() const {
     return "unix-domain-socket";
 
   auto re = socket_->RemoteEndpoint();
-  return absl::StrCat(re.address().to_string(), ":", re.port());
+  return absl::StrCat(AddressToString(re.address()), ":", re.port());
 }
 
 std::string Connection::RemoteEndpointAddress() const {
@@ -2848,7 +2860,7 @@ std::string Connection::RemoteEndpointAddress() const {
     return "unix-domain-socket";
 
   auto re = socket_->RemoteEndpoint();
-  return re.address().to_string();
+  return AddressToString(re.address());
 }
 
 facade::ConnectionContext* Connection::cntx() {

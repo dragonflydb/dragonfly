@@ -88,12 +88,16 @@ async def test_client_kill(df_factory):
             assert len(await client_conn.execute_command("CLIENT LIST")) == 2
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
 
+            # "localhost" may resolve to ::1 or 127.0.0.1, so kill by the address actually in use.
+            admin_laddr = (await admin_client.client_info())["laddr"]
+            client_laddr = (await client_conn.client_info())["laddr"]
+
             # Can't kill admin from regular connection
             with pytest.raises(ResponseError):
-                await client_conn.execute_command("CLIENT KILL LADDR 127.0.0.1:1112")
+                await client_conn.execute_command(f"CLIENT KILL LADDR {admin_laddr}")
 
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
-            await admin_client.execute_command("CLIENT KILL LADDR 127.0.0.1:1111")
+            await admin_client.execute_command(f"CLIENT KILL LADDR {client_laddr}")
 
             # Shutdown is asynchronous, so wait for the listener to remove the connection.
             @assert_eventually(timeout=10)
