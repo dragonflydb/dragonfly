@@ -401,8 +401,8 @@ TEST_F(ServerFamilyTest, ClientKillMasterLink) {
   TestInitAclFam();
   EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "master"}), IntArg(0));
 
-  // Unlike REPLICAOF, Replicate keeps the link when the master is unreachable.
-  pp_->at(0)->Await([&] { service_->server_family().Replicate("localhost", "1"); });
+  // Unlike REPLICAOF, Replicate keeps the link to an unreachable master; .onion is never resolved.
+  pp_->at(0)->Await([&] { service_->server_family().Replicate("x.onion", "1"); });
   const string row = Run({"CLIENT", "LIST", "TYPE", "master"}).GetString();
   ASSERT_THAT(row, StartsWith("id="));
   const string id = row.substr(3, row.find(' ') - 3);
@@ -413,8 +413,8 @@ TEST_F(ServerFamilyTest, ClientKillMasterLink) {
 
   EXPECT_THAT(kill({"TYPE", "master"}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
   EXPECT_THAT(kill({"ID", id}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
-  EXPECT_THAT(kill({"TYPE", "master", "ADDR", "localhost:1"}), ErrArg("Cannot kill master link"));
-  EXPECT_THAT(kill({"ADDR", "localhost:1"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "ADDR", "x.onion:1"}), ErrArg("Cannot kill master link"));
+  EXPECT_THAT(kill({"ADDR", "x.onion:1"}), IntArg(0));
   EXPECT_THAT(kill({"TYPE", "master", "USER", "default"}), IntArg(0));
   EXPECT_THAT(kill({"TYPE", "master", "ID", "999999"}), IntArg(0));
   EXPECT_THAT(kill({"TYPE", "master", "ADDR", "1.2.3.4:5"}), IntArg(0));
