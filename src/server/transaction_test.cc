@@ -654,14 +654,15 @@ TEST_F(TransactionTest, AwakenedTxPollDroppedWhileRunning) {
 
 namespace {
 
-TypeMemDeltas DeltaDiff(const TypeMemDeltas& before, const TypeMemDeltas& after) {
-  TypeMemDeltas diffs = after;
+TypeAttributedMemory DeltaDiff(const TypeAttributedMemory& before,
+                               const TypeAttributedMemory& after) {
+  TypeAttributedMemory diffs = after;
   for (size_t i = 0; i < before.size(); ++i)
     diffs[i] -= before[i];
   return diffs;
 }
 
-void AllButOneDeltaIs(const TypeMemDeltas& deltas, size_t pos, int64_t expected) {
+void AllButOneDeltaIs(const TypeAttributedMemory& deltas, size_t pos, int64_t expected) {
   ASSERT_GT(deltas.size(), pos);
   for (size_t i = 0; i < deltas.size(); ++i)
     if (i == pos)
@@ -682,9 +683,9 @@ TEST_F(TransactionTest, DeltaChanges) {
     const auto shard = EngineShard::tlocal();
     const auto mr = shard->memory_resource();
     void* p = nullptr;
-    const auto before = shard->type_mem_delta();
+    const auto before = shard->type_attributed_memory();
     WithMemTrack(OBJ_STRING, [&] { p = mr->allocate(1024); });
-    AllButOneDeltaIs(DeltaDiff(before, shard->type_mem_delta()), OBJ_STRING, 1024);
+    AllButOneDeltaIs(DeltaDiff(before, shard->type_attributed_memory()), OBJ_STRING, 1024);
     mr->deallocate(p, 1024);
   });
 }
@@ -694,9 +695,9 @@ TEST_F(TransactionTest, DeltaAllocAndFree) {
     const auto shard = EngineShard::tlocal();
     const auto mr = shard->memory_resource();
     void* p = mr->allocate(1024);
-    const auto before = shard->type_mem_delta();
+    const auto before = shard->type_attributed_memory();
     WithMemTrack(OBJ_LIST, [&] { mr->deallocate(p, 1024); });
-    AllButOneDeltaIs(DeltaDiff(before, shard->type_mem_delta()), OBJ_LIST, -1024);
+    AllButOneDeltaIs(DeltaDiff(before, shard->type_attributed_memory()), OBJ_LIST, -1024);
   });
 }
 
@@ -706,7 +707,7 @@ TEST_F(TransactionTest, DeltaInterleavedFibers) {
     const auto shard = EngineShard::tlocal();
     const auto mr = shard->memory_resource();
 
-    const auto before = shard->type_mem_delta();
+    const auto before = shard->type_attributed_memory();
     void* p = nullptr;
     void* q = nullptr;
     void* r = nullptr;
@@ -728,10 +729,10 @@ TEST_F(TransactionTest, DeltaInterleavedFibers) {
       r = mr->allocate(512);
     }
 
-    TypeMemDeltas expected{};
+    TypeAttributedMemory expected{};
     expected[OBJ_STRING] = 1024 + 512;
     expected[OBJ_LIST] = 128;
-    EXPECT_EQ(DeltaDiff(before, shard->type_mem_delta()), expected);
+    EXPECT_EQ(DeltaDiff(before, shard->type_attributed_memory()), expected);
 
     mr->deallocate(p, 1024);
     mr->deallocate(q, 128);
@@ -748,7 +749,7 @@ TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
     // these allocations of size s are actually counted for the size, and cleaned up later
     auto track = [&](size_t s) { tracked.emplace_back(mr->allocate(s), s); };
 
-    const auto before = shard->type_mem_delta();
+    const auto before = shard->type_attributed_memory();
     {
       TxMemoryScope scope{OBJ_STRING};
       track(1024);
@@ -760,11 +761,11 @@ TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
         mr->deallocate(p, 256);
       });
     }
-    TypeMemDeltas expected{};
+    TypeAttributedMemory expected{};
     expected[OBJ_STRING] = 1024;
     expected[OBJ_LIST] = 512;
     expected[OBJ_HASH] = 128;
-    EXPECT_EQ(DeltaDiff(before, shard->type_mem_delta()), expected);
+    EXPECT_EQ(DeltaDiff(before, shard->type_attributed_memory()), expected);
 
     for (const auto& [ptr, size] : tracked)
       mr->deallocate(ptr, size);
