@@ -523,8 +523,8 @@ void ClientList(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
   bool want_master = !filter->type.has_value() || *filter->type == ClientListType::kMaster;
   if (want_master) {
     for (auto& entry : server_family->GetMasterLinkClientInfo()) {
-      if (filter->ids.empty() || filter->ids.contains(entry.client_id))
-        client_info.push_back(std::move(entry.info));
+      if (filter->ids.empty() || filter->ids.contains(entry.id))
+        client_info.push_back(facade::FormatClientInfo(entry));
     }
   }
 
@@ -772,14 +772,15 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
   if (!filter)
     return;
 
-  // A master link has no user and can match only TYPE master or its own id.
-  if (!filter->user && (!filter->type || *filter->type == ClientListType::kMaster)) {
-    const bool link_id =
-        filter->id && *filter->id <= UINT32_MAX && server_family->IsMasterLinkClientId(*filter->id);
-    const bool link_type =
-        filter->type && !filter->id && !server_family->GetMasterLinkClientInfo().empty();
-    if (link_id || link_type)
-      return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
+  // The master link is not killable; refuse a TYPE master or ID request that matches it.
+  if (!filter->user && (filter->type == ClientListType::kMaster || (filter->id && !filter->type))) {
+    for (const facade::ClientInfo& link : server_family->GetMasterLinkClientInfo()) {
+      if ((!filter->id || link.id == *filter->id) &&
+          (!filter->addr || link.addr == *filter->addr) &&
+          (!filter->laddr || link.laddr == *filter->laddr) &&
+          (!filter->max_age || link.age >= *filter->max_age))
+        return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
+    }
   }
   if (filter->type == ClientListType::kMaster)
     return cmd_cntx->rb()->SendLong(0);
@@ -2110,27 +2111,16 @@ optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {
   return info;
 }
 
-vector<ServerFamily::MasterLinkClientInfo> ServerFamily::GetMasterLinkClientInfo() const {
-  vector<MasterLinkClientInfo> out;
+vector<facade::ClientInfo> ServerFamily::GetMasterLinkClientInfo() const {
+  vector<facade::ClientInfo> out;
   util::fb2::LockGuard lk(replicaof_mu_);
   if (replica_ == nullptr)
     return out;
-  out.push_back({replica_->GetClientId(), replica_->GetClientInfo()});
+  out.push_back(replica_->GetClientInfo());
   for (const auto& cl_repl : cluster_replicas_) {
-    out.push_back({cl_repl->GetClientId(), cl_repl->GetClientInfo()});
+    out.push_back(cl_repl->GetClientInfo());
   }
   return out;
-}
-
-bool ServerFamily::IsMasterLinkClientId(uint32_t id) const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  if (replica_ && replica_->GetClientId() == id)
-    return true;
-  for (const auto& cl_repl : cluster_replicas_) {
-    if (cl_repl->GetClientId() == id)
-      return true;
-  }
-  return false;
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {

@@ -25,6 +25,7 @@
 struct hdr_histogram;
 
 namespace facade {
+struct ClientInfo;
 class Listener;
 struct TlsCertInfo;
 }  // namespace facade
@@ -242,16 +243,9 @@ class ServerFamily {
   // nullopt otherwise.
   std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const;
 
-  struct MasterLinkClientInfo {
-    uint32_t client_id;
-    std::string info;
-  };
-
   // One entry per attached outbound master link; empty if not replicating.
-  std::vector<MasterLinkClientInfo> GetMasterLinkClientInfo() const
+  std::vector<facade::ClientInfo> GetMasterLinkClientInfo() const
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  bool IsMasterLinkClientId(uint32_t id) const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void OnClose(ConnectionContext* cntx);
 

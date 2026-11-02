@@ -413,8 +413,13 @@ TEST_F(ServerFamilyTest, ClientKillMasterLink) {
 
   EXPECT_THAT(kill({"TYPE", "master"}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
   EXPECT_THAT(kill({"ID", id}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
+  EXPECT_THAT(kill({"TYPE", "master", "ADDR", "localhost:1"}), ErrArg("Cannot kill master link"));
+  EXPECT_THAT(kill({"ADDR", "localhost:1"}), IntArg(0));
   EXPECT_THAT(kill({"TYPE", "master", "USER", "default"}), IntArg(0));
   EXPECT_THAT(kill({"TYPE", "master", "ID", "999999"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "ADDR", "1.2.3.4:5"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "MAXAGE", "9223372036854775807"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", id, "LADDR", "1.2.3.4:5"}), IntArg(0));
   EXPECT_THAT(kill({"ID", id, "TYPE", "normal"}), IntArg(0));
   EXPECT_THAT(kill({"ID", absl::StrCat(stoll(id) + (int64_t{1} << 32))}), IntArg(0));
 }
