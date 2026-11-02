@@ -97,13 +97,10 @@ namespace facade {
 // Composition and control rules:
 //   If(&T::condition, rule)               enable rule only when the bool member is true
 //   IfNot(&T::condition, rule)            enable rule only when the bool member is false
-//   IfUpper(rule)                         enable rule only for a token without lower-case letters,
-//                                         so its upper-case tags match only as written
-//   IfNext(rule), IfNext<P>(rule)         enable rule only when an arg follows (and parses as P,
-//                                         a number type or the default std::string_view)
-//   IfNext(pred, rule)                    enable rule only when pred accepts the next arg
-//   Into(&T::nested, rule)                apply a rule to a nested member (engages an optional one)
-//   Into(&T::variant, rule)               apply a rule only while the variant holds its target type
+//   If(pred, rule)                        enable rule only when pred(const CmdArgParser&) (it may
+//                                         Peek() at the token and past it) or pred(const T&) holds
+//   Into(&T::nested, rule)                apply a rule to a nested member (engages an optional one,
+//                                         switches a variant to the rule's type when it matches)
 //   Skip(n)                               consume n positional args, or act as an option fallback
 //
 // Options stops at the first unmatched argument; pair the grammar with Finalize() to reject
@@ -353,7 +350,7 @@ struct CmdArgParser {
   }
 
   // Returns the arg `ahead` positions past the cursor without consuming it (empty if out of range).
-  std::string_view Peek(size_t ahead = 0) {
+  std::string_view Peek(size_t ahead = 0) const {
     return SafeSV(cur_i_ + ahead);
   }
 
@@ -948,48 +945,29 @@ template <class T, class Inner> struct If {
   Inner inner_;
 };
 
-template <class Inner> struct IfUpper {
+// A condition of If(pred, rule): a function of the parser or of the rule's target.
+template <class Pred, class Target>
+concept GrammarPredicate =
+    !std::is_member_pointer_v<Pred> && (std::is_invocable_r_v<bool, Pred, const CmdArgParser&> ||
+                                        std::is_invocable_r_v<bool, Pred, const Target&>);
+
+// Enables the inner rule only while the predicate holds for the parser or for the target.
+template <class Pred, class Inner> struct IfPred {
   using Target = typename Inner::Target;
   using State = typename Inner::State;
-  consteval explicit IfUpper(Inner inner) : inner_(inner) {
+  consteval IfPred(Pred pred, Inner inner) : pred_(pred), inner_(inner) {
   }
   template <class T> bool Consume(CmdArgParser* p, std::string_view cur, T* o, State& st) const {
-    for (char c : cur) {
-      if (c >= 'a' && c <= 'z')
-        return false;
-    }
-    return inner_.Consume(p, cur, o, st);
+    if constexpr (std::is_invocable_v<Pred, const CmdArgParser&>)
+      return pred_(*p) && inner_.Consume(p, cur, o, st);
+    else
+      return pred_(*o) && inner_.Consume(p, cur, o, st);
   }
 
  private:
+  Pred pred_;
   Inner inner_;
 };
-
-// Tries the inner rule only when an argument follows the current one and `accepts` it.
-template <class Inner> struct IfNext {
-  using Target = typename Inner::Target;
-  using State = typename Inner::State;
-  consteval IfNext(bool (*accepts)(std::string_view), Inner inner)
-      : accepts_(accepts), inner_(inner) {
-  }
-  template <class T> bool Consume(CmdArgParser* p, std::string_view cur, T* o, State& st) const {
-    return p->HasAtLeast(2) && accepts_(p->Peek(1)) && inner_.Consume(p, cur, o, st);
-  }
-
- private:
-  bool (*accepts_)(std::string_view);
-  Inner inner_;
-};
-
-// Whether an argument reads as P: any argument reads as a string_view, a number has to parse.
-template <class P> bool ReadsAs(std::string_view arg) {
-  if constexpr (std::is_same_v<P, std::string_view>) {
-    return true;
-  } else {
-    P value{};
-    return TryParseNum(arg, &value);
-  }
-}
 
 template <class A, class V> constexpr bool is_alternative = false;
 
@@ -999,7 +977,8 @@ constexpr bool is_alternative<A, std::variant<U...>> = (std::same_as<A, U> || ..
 // Applies the inner rule to a nested member. A plain member is targeted directly; an optional
 // member has the rule target its contained value, and the optional is engaged only when the rule
 // matches (an existing value is preserved), so its engaged state signals that the keyword was seen.
-// A variant member is targeted only while it holds the rule's target type.
+// A variant member has the rule target its alternative of that type in the same way, and switches
+// to that alternative only when the rule matches.
 template <class T, class Member, class Inner> struct Into {
   using Target = T;
   using State = typename Inner::State;
@@ -1015,8 +994,14 @@ template <class T, class Member, class Inner> struct Into {
       opt = std::move(scratch);
       return true;
     } else if constexpr (is_alternative<typename Inner::Target, Member>) {
-      auto* alt = std::get_if<typename Inner::Target>(&(o->*field_));
-      return alt && inner_.Consume(p, cur, alt, st);
+      using Value = typename Inner::Target;
+      Member& var = o->*field_;
+      Value* alt = std::get_if<Value>(&var);
+      Value scratch = alt ? *alt : Value{};
+      if (!inner_.Consume(p, cur, &scratch, st))
+        return false;
+      var = std::move(scratch);
+      return true;
     } else {
       return inner_.Consume(p, cur, &(o->*field_), st);
     }
@@ -1179,17 +1164,10 @@ template <class T, class Inner> consteval auto If(bool T::*cond, Inner inner) {
 template <class T, class Inner> consteval auto IfNot(bool T::*cond, Inner inner) {
   return cap_detail::If<T, Inner>{cond, false, inner};
 }
-template <class Inner> consteval auto IfUpper(Inner inner) {
-  return cap_detail::IfUpper<Inner>{inner};
-}
-template <class P = std::string_view, class Inner>
-requires std::same_as<P, std::string_view> || std::integral<P> || std::same_as<P, float> ||
-    std::same_as<P, double>
-consteval auto IfNext(Inner inner) {
-  return cap_detail::IfNext<Inner>{&cap_detail::ReadsAs<P>, inner};
-}
-template <class Inner> consteval auto IfNext(bool (*accepts)(std::string_view), Inner inner) {
-  return cap_detail::IfNext<Inner>{accepts, inner};
+template <class Pred, class Inner>
+requires cap_detail::GrammarPredicate<Pred, typename Inner::Target>
+consteval auto If(Pred pred, Inner inner) {
+  return cap_detail::IfPred<Pred, Inner>{pred, inner};
 }
 template <class T, class Member, class Inner>
 requires std::same_as<Member, typename Inner::Target> ||

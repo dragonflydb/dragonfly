@@ -354,14 +354,36 @@ string OneLine(string_view name) {
   return absl::StrReplaceAll(name, {{"\r", " "}, {"\n", " "}});
 }
 
-template <class T> void IgnorePhonetic(CmdArgParser* parser, T*) {
+void IgnorePhonetic(CmdArgParser* parser, search::SchemaField*) {
   parser->Skip(1);
   LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: PHONETIC";
 }
 
+bool IsUpper(const CmdArgParser& parser) {
+  return rng::none_of(parser.Peek(), absl::ascii_islower);
+}
+
+bool BeforeArg(const CmdArgParser& parser) {
+  return parser.HasAtLeast(2);
+}
+
+bool BeforeNumber(const CmdArgParser& parser) {
+  double number;
+  return absl::SimpleAtod(parser.Peek(1), &number);
+}
+
 // The matcher after PHONETIC, such as dm:en, that allows it in lower case on TEXT.
-bool IsPhoneticMatcher(string_view arg) {
+bool BeforeMatcher(const CmdArgParser& parser) {
+  string_view arg = parser.Peek(1);
   return arg.size() == 5 && arg[2] == ':';
+}
+
+bool IsText(const search::SchemaField& field) {
+  return std::holds_alternative<TP>(field.special_params);
+}
+
+bool IsTag(const search::SchemaField& field) {
+  return std::holds_alternative<search::SchemaField::TagParams>(field.special_params);
 }
 
 // Field options: type parameters before the flags, SORTABLE [UNF] and NOINDEX in any order, and, as
@@ -372,17 +394,18 @@ ParseResult<search::SchemaField> ParseFieldOptions(CmdArgParser* parser, string_
   using SF = search::SchemaField;
 
   // In lower case these words name fields, as older versions stored them.
-  static constexpr auto kAnywhere = Options(
-      IfUpper(Flags(&SF::flags, "UNF", SF::UNF, "INDEXMISSING", SF::INDEXMISSING, "INDEXEMPTY",
-                    SF::INDEXEMPTY)),
-      IfUpper(IfNext(Action("PHONETIC", IgnorePhonetic<SF>))),
-      Into(&SF::special_params, IfNext(IsPhoneticMatcher, Action("PHONETIC", IgnorePhonetic<TP>))));
+  static constexpr auto kAnywhere =
+      Options(If(IsUpper, Flags(&SF::flags, "UNF", SF::UNF, "INDEXMISSING", SF::INDEXMISSING,
+                                "INDEXEMPTY", SF::INDEXEMPTY)),
+              If(IsUpper, If(BeforeArg, Action("PHONETIC", IgnorePhonetic))),
+              If(IsText, If(BeforeMatcher, Action("PHONETIC", IgnorePhonetic))));
   static constexpr auto kGrammar = Compile(
-      Options(kAnywhere, Into(&SF::special_params, kTextParams),
-              Into(&SF::special_params, kTagParams)),
+      Options(kAnywhere, If(IsText, Into(&SF::special_params, kTextParams)),
+              If(IsTag, Into(&SF::special_params, kTagParams))),
       Options(Flags(&SF::flags, "SORTABLE", SF::SORTABLE, "NOINDEX", SF::NOINDEX), kAnywhere,
-              Into(&SF::special_params,
-                   Options(IfNext<double>(kTextWeight), IfUpper(Exist("NOSTEM", &TP::no_stem))))));
+              If(IsText,
+                 Into(&SF::special_params, Options(If(BeforeNumber, kTextWeight),
+                                                   If(IsUpper, Exist("NOSTEM", &TP::no_stem)))))));
   kGrammar.Apply(parser, &field);
 
   if ((field.flags & SF::NOINDEX) && (field.flags & SF::INDEXMISSING)) {

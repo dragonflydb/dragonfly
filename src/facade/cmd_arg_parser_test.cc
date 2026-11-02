@@ -1049,64 +1049,32 @@ TEST_F(CmdArgParserTest, CapGrammarTagValue) {
 }
 
 namespace {
-enum IfUpperFlags : uint8_t { kUpA = 1 << 0, kUpB = 1 << 1 };
-struct IfUpperTarget {
+struct IfPredTarget {
   uint8_t flags = 0;
-  bool other = false;
-};
-consteval auto MakeIfUpperGrammar() {
-  return Compile(Options(IfUpper(Flags(&IfUpperTarget::flags, "A", kUpA, "BB", kUpB)),
-                         Exist("OTHER", &IfUpperTarget::other)));
-}
-}  // namespace
-
-TEST_F(CmdArgParserTest, CapGrammarIfUpper) {
-  static constexpr auto kGrammar = MakeIfUpperGrammar();
-  auto run = [&](std::initializer_list<std::string_view> args, IfUpperTarget* o) {
-    auto parser = Make(args);
-    kGrammar.Apply(&parser, o);
-    parser.Finalize();
-    return parser.TakeError();
-  };
-
-  {
-    IfUpperTarget o;
-    EXPECT_FALSE(run({"BB", "A"}, &o));
-    EXPECT_EQ(o.flags, kUpA | kUpB);
-  }
-  {  // any lower-case letter leaves the token to the rest of the grammar
-    IfUpperTarget o;
-    auto err = run({"A", "Bb"}, &o);
-    EXPECT_EQ(err.type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(err.index, 1u);
-    EXPECT_EQ(o.flags, kUpA);
-  }
-  {  // rules outside IfUpper still match in any case
-    IfUpperTarget o;
-    EXPECT_FALSE(run({"other"}, &o));
-    EXPECT_TRUE(o.other);
-  }
-}
-
-namespace {
-struct IfNextTarget {
-  std::string_view name;
   double num = 0;
-  std::string_view code;
+  bool enabled = false;
+  bool seen = false;
 };
-bool IsShort(std::string_view arg) {
-  return arg.size() <= 2;
+bool IsUpperToken(const CmdArgParser& p) {
+  return std::ranges::none_of(p.Peek(), [](char c) { return c >= 'a' && c <= 'z'; });
 }
-consteval auto MakeIfNextGrammar() {
-  return Compile(Options(IfNext(Field("NAME", &IfNextTarget::name)),
-                         IfNext<double>(Field("NUM", &IfNextTarget::num)),
-                         IfNext(IsShort, Field("CODE", &IfNextTarget::code))));
+bool BeforeNumber(const CmdArgParser& p) {
+  double number;
+  return absl::SimpleAtod(p.Peek(1), &number);
+}
+bool IsEnabled(const IfPredTarget& o) {
+  return o.enabled;
+}
+consteval auto MakeIfPredGrammar() {
+  return Compile(Options(If(IsUpperToken, Flags(&IfPredTarget::flags, "A", uint8_t{1})),
+                         If(BeforeNumber, Field("NUM", &IfPredTarget::num)),
+                         If(IsEnabled, Exist("SEEN", &IfPredTarget::seen))));
 }
 }  // namespace
 
-TEST_F(CmdArgParserTest, CapGrammarIfNext) {
-  static constexpr auto kGrammar = MakeIfNextGrammar();
-  auto run = [&](std::initializer_list<std::string_view> args, IfNextTarget* o) {
+TEST_F(CmdArgParserTest, CapGrammarIfPredicate) {
+  static constexpr auto kGrammar = MakeIfPredGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, IfPredTarget* o) {
     auto parser = Make(args);
     kGrammar.Apply(&parser, o);
     parser.Finalize();
@@ -1114,22 +1082,19 @@ TEST_F(CmdArgParserTest, CapGrammarIfNext) {
   };
 
   {
-    IfNextTarget o;
-    EXPECT_FALSE(run({"NAME", "", "NUM", "-2.5", "CODE", "ab", "NAME", "NUM"}, &o));
-    EXPECT_EQ(o.name, "NUM");
+    IfPredTarget o{.enabled = true};
+    EXPECT_FALSE(run({"A", "NUM", "-2.5", "SEEN"}, &o));
+    EXPECT_EQ(o.flags, 1u);
     EXPECT_EQ(o.num, -2.5);
-    EXPECT_EQ(o.code, "ab");
+    EXPECT_TRUE(o.seen);
   }
-  {  // a tag stays unconsumed, with no error of its own, unless an accepted argument follows
-    IfNextTarget o;
-    auto err = run({"NAME"}, &o);
-    EXPECT_EQ(err.type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(err.index, 0u);
-    EXPECT_EQ(run({"NUM", "x"}, &o).index, 0u);
-    EXPECT_EQ(run({"NUM", ""}, &o).index, 0u);
-    EXPECT_EQ(run({"CODE", "abc"}, &o).index, 0u);
-    EXPECT_EQ(run({"CODE", "ab", "NUM", "NAME", "x"}, &o).index, 2u);
-    EXPECT_EQ(o.num, 0);
+  {  // a failed predicate leaves the token to the rest of the grammar
+    IfPredTarget o;
+    EXPECT_EQ(run({"a"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"NUM", "x"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"NUM", ""}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"NUM"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"SEEN"}, &o).type, CmdArgParser::UNPROCESSED);
   }
 }
 
@@ -1182,14 +1147,19 @@ struct VarText {
 };
 struct VarTag {
   bool case_sensitive = false;
+  char separator = ',';
 };
 struct IntoVariantTarget {
   std::variant<std::monostate, VarText, VarTag> params;
 };
+bool HoldsTag(const IntoVariantTarget& o) {
+  return std::holds_alternative<VarTag>(o.params);
+}
 consteval auto MakeIntoVariantGrammar() {
+  using T = IntoVariantTarget;
   return Compile(
-      Options(Into(&IntoVariantTarget::params, Exist("NOSTEM", &VarText::no_stem)),
-              Into(&IntoVariantTarget::params, Exist("CASESENSITIVE", &VarTag::case_sensitive))));
+      Options(Into(&T::params, Exist("NOSTEM", &VarText::no_stem)),
+              If(HoldsTag, Into(&T::params, Exist("CASESENSITIVE", &VarTag::case_sensitive)))));
 }
 }  // namespace
 
@@ -1203,18 +1173,19 @@ TEST_F(CmdArgParserTest, CapGrammarIntoVariant) {
   };
 
   {
-    IntoVariantTarget o{VarTag{}};
+    IntoVariantTarget o{VarTag{.separator = ';'}};
     EXPECT_FALSE(run({"CASESENSITIVE"}, &o));
     EXPECT_TRUE(std::get<VarTag>(o.params).case_sensitive);
+    EXPECT_EQ(std::get<VarTag>(o.params).separator, ';');
   }
-  {  // a rule for another alternative leaves the token unmatched
+  {  // a match switches the variant to the rule's alternative
     IntoVariantTarget o{VarTag{}};
-    EXPECT_EQ(run({"NOSTEM"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_TRUE(std::holds_alternative<VarTag>(o.params));
+    EXPECT_FALSE(run({"NOSTEM"}, &o));
+    EXPECT_TRUE(std::get<VarText>(o.params).no_stem);
   }
-  {
+  {  // If keeps the rule to a variant that already holds its alternative
     IntoVariantTarget o;
-    EXPECT_EQ(run({"NOSTEM"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"CASESENSITIVE"}, &o).type, CmdArgParser::UNPROCESSED);
     EXPECT_TRUE(std::holds_alternative<std::monostate>(o.params));
   }
 }

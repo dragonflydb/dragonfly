@@ -5171,6 +5171,12 @@ TEST_F(SearchFamilyTest, SchemaOptionOrders) {
   EXPECT_THAT(
       Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a\nb", "TEXT", "INDEXMISSING", "NOINDEX"}),
       ErrArg("both `NOINDEX` and `INDEXMISSING` `a b`"));
+  EXPECT_THAT(Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TEXT", "UNf"}),
+              ErrArg("Field `UNf` does not have a type"));
+  EXPECT_THAT(Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TEXT", "PHONETIC"}),
+              ErrArg("Field `PHONETIC` does not have a type"));
+  EXPECT_THAT(Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TAG", "phonetic", "dm:en"}),
+              ErrArg("Field type dm:en is not supported"));
 }
 
 // Every schema that FT.CREATE accepts reads back unchanged from the definition stored for it.
