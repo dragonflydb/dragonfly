@@ -1111,6 +1111,21 @@ TEST_F(AclFamilyTest, AclLoadMinimalUserRule) {
   std::filesystem::remove(path);
 }
 
+TEST_F(AclFamilyTest, AclLoadRepeatedUserResetsCommands) {
+  TestInitAclFam();
+  std::string path = (std::filesystem::temp_directory_path() / "dfly_repeated_user.acl").string();
+  io::WriteStringToFileOrDie("user worker on nopass ~* &* +@all\nuser worker on +get\n", path);
+
+  absl::SetFlag(&FLAGS_aclfile, path);
+  EXPECT_EQ(Run("ACL LOAD"), "OK");
+  EXPECT_THAT(Run("ACL LIST").GetVec(), Contains("user worker on nopass ~* &* -@all +get $all"));
+  EXPECT_EQ(Run("ACL DRYRUN worker GET foo"), "OK");
+  EXPECT_THAT(Run("ACL DRYRUN worker SET foo bar"),
+              "This user has no permissions to run the 'SET' command");
+
+  std::filesystem::remove(path);
+}
+
 TEST_F(AclFamilyTest, AclSaveLoadKeepsSubcommandRules) {
   TestInitAclFam();
   std::string path =
