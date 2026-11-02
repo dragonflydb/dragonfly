@@ -478,6 +478,24 @@ TEST_F(StringFamilyTest, SetEx) {
   ASSERT_THAT(Run({"setex", "key", StrCat(1 << 30), "val"}), "OK");
   ASSERT_THAT(Run({"ttl", "key"}), IntArg(kMaxExpireDeadlineSec));
   ASSERT_THAT(Run({"SETEX", "foo", "18446744073709561", "bar"}), ErrArg("invalid expire time"));
+  ASSERT_EQ(Run({"PSETEX", "key", StrCat(kMaxExpireDeadlineMs + 1), "val"}), "OK");
+  EXPECT_THAT(Run({"PTTL", "key"}), IntArg(kMaxExpireDeadlineMs));
+}
+
+TEST_F(StringFamilyTest, SetExpiryCap) {
+  TEST_current_time_ms = 1'800'000'000'123;
+  const pair<string_view, int64_t> cases[] = {
+      {"EX", kMaxExpireDeadlineSec + 1},
+      {"PX", kMaxExpireDeadlineMs + 1},
+      {"EXAT", TEST_current_time_ms / 1000 + kMaxExpireDeadlineSec + 1},
+      {"PXAT", TEST_current_time_ms + kMaxExpireDeadlineMs + 1}};
+  for (const auto& [option, value] : cases) {
+    SCOPED_TRACE(option);
+    ASSERT_EQ(Run({"SET", "key", "val", option, StrCat(value)}), "OK");
+    EXPECT_EQ(Run({"GET", "key"}), "val");
+    EXPECT_THAT(Run({"PTTL", "key"}), IntArg(kMaxExpireDeadlineMs));
+    EXPECT_THAT(Run({"PEXPIRETIME", "key"}), IntArg(TEST_current_time_ms + kMaxExpireDeadlineMs));
+  }
 }
 
 TEST_F(StringFamilyTest, Range) {
@@ -714,6 +732,64 @@ TEST_F(StringFamilyTest, GetEx) {
 
   AdvanceTime(1);
   EXPECT_THAT(Run({"getex", "foo"}), ArgType(RespExpr::NIL));
+}
+
+TEST_F(StringFamilyTest, GetExExpiryCap) {
+  TEST_current_time_ms = 1'800'000'000'000;
+  struct Case {
+    string_view option;
+    int64_t unit_ms;
+    bool absolute;
+  };
+  const Case cases[] = {
+      {"EX", 1000, false}, {"PX", 1, false}, {"EXAT", 1000, true}, {"PXAT", 1, true}};
+  for (const auto& [option, unit_ms, absolute] : cases) {
+    SCOPED_TRACE(option);
+    for (int64_t delta : {-1, 0, 1, 1'000'000}) {
+      SCOPED_TRACE(delta);
+      const int64_t value =
+          kMaxExpireDeadlineMs / unit_ms + delta + (absolute ? TEST_current_time_ms / unit_ms : 0);
+      const int64_t expected_ttl = kMaxExpireDeadlineMs + min<int64_t>(delta, 0) * unit_ms;
+      ASSERT_EQ(Run({"SET", "key", "val", "PX", "1000"}), "OK");
+      EXPECT_EQ(Run({"GETEX", "key", option, StrCat(value)}), "val");
+      EXPECT_EQ(Run({"GET", "key"}), "val");
+      EXPECT_THAT(Run({"PTTL", "key"}), IntArg(expected_ttl));
+      EXPECT_THAT(Run({"PEXPIRETIME", "key"}), IntArg(TEST_current_time_ms + expected_ttl));
+      EXPECT_THAT(Run({"GETEX", "missing", option, StrCat(value)}), ArgType(RespExpr::NIL));
+    }
+  }
+
+  // Absolute deadlines above the cap retain millisecond precision after clamping.
+  AdvanceTime(123);
+  for (const auto& [option, unit_ms, absolute] : cases) {
+    if (!absolute)
+      continue;
+    SCOPED_TRACE(option);
+    const string value =
+        StrCat(TEST_current_time_ms / unit_ms + kMaxExpireDeadlineMs / unit_ms + 1);
+    EXPECT_EQ(Run({"GETEX", "key", option, value}), "val");
+    EXPECT_THAT(Run({"PTTL", "key"}), IntArg(kMaxExpireDeadlineMs));
+    EXPECT_THAT(Run({"PEXPIRETIME", "key"}), IntArg(TEST_current_time_ms + kMaxExpireDeadlineMs));
+  }
+
+  EXPECT_EQ(Run({"GETEX", "key", "PERSIST"}), "val");
+  EXPECT_THAT(Run({"PTTL", "key"}), IntArg(-1));
+  ASSERT_THAT(Run({"HSET", "hash", "field", "val"}), IntArg(1));
+  EXPECT_THAT(Run({"GETEX", "hash", "EX", StrCat(kMaxExpireDeadlineSec + 1)}), ErrArg("WRONGTYPE"));
+  EXPECT_EQ(Run({"HGET", "hash", "field"}), "val");
+  EXPECT_THAT(Run({"PTTL", "hash"}), IntArg(-1));
+}
+
+TEST_F(StringFamilyTest, GetExExpiryOverflow) {
+  for (string_view option : {"EX", "PX", "EXAT", "PXAT"}) {
+    SCOPED_TRACE(option);
+    ASSERT_EQ(Run({"SET", "key", "val", "PX", "1000"}), "OK");
+    EXPECT_THAT(Run({"GETEX", "key", option, StrCat(INT64_MAX)}),
+                ErrArg("invalid expire time in 'getex' command"));
+    EXPECT_EQ(Run({"GET", "key"}), "val");
+    EXPECT_THAT(Run({"PTTL", "key"}), IntArg(1000));
+    EXPECT_THAT(Run({"GETEX", "missing", option, StrCat(INT64_MAX)}), ArgType(RespExpr::NIL));
+  }
 }
 
 TEST_F(StringFamilyTest, ClThrottle) {

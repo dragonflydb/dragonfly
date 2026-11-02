@@ -208,7 +208,7 @@ TEST_F(GenericFamilyTest, ExpireCornerCases) {
   EXPECT_THAT(Run({"pexpireat", "key", "-1"}), IntArg(1));
   EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
 
-  // Huge absolute timestamps overflow the kMaxExpireDeadlineMs cap and surface OUT_OF_RANGE.
+  // Absolute timestamps that overflow the internal representation remain invalid.
   Run({"set", "key", "val"});
   EXPECT_THAT(Run({"expireat", "key", absl::StrCat(INT64_MAX)}), ErrArg("expiry is out of range"));
   EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
@@ -229,6 +229,85 @@ TEST_F(GenericFamilyTest, ExpireCornerCases) {
   EXPECT_THAT(Run({"expire", "missing", "-1"}), IntArg(0));
   EXPECT_THAT(Run({"expireat", "missing", "0"}), IntArg(0));
   EXPECT_THAT(Run({"pexpireat", "missing", "0"}), IntArg(0));
+}
+
+TEST_F(GenericFamilyTest, ExpireCap) {
+  TEST_current_time_ms = 1'800'000'000'000;
+  struct Case {
+    string_view command;
+    int64_t unit_ms;
+    bool absolute;
+  };
+  const Case cases[] = {{"EXPIRE", 1000, false},
+                        {"PEXPIRE", 1, false},
+                        {"EXPIREAT", 1000, true},
+                        {"PEXPIREAT", 1, true}};
+  for (const auto& [command, unit_ms, absolute] : cases) {
+    SCOPED_TRACE(command);
+    for (int64_t delta : {-1, 0, 1, 1'000'000}) {
+      SCOPED_TRACE(delta);
+      const int64_t value =
+          kMaxExpireDeadlineMs / unit_ms + delta + (absolute ? TEST_current_time_ms / unit_ms : 0);
+      const int64_t expected_ttl = kMaxExpireDeadlineMs + min<int64_t>(delta, 0) * unit_ms;
+      ASSERT_EQ(Run({"SET", "key", "val", "PX", "1000"}), "OK");
+      EXPECT_THAT(Run({command, "key", StrCat(value)}), IntArg(1));
+      EXPECT_EQ(Run({"GET", "key"}), "val");
+      EXPECT_THAT(Run({"PTTL", "key"}), IntArg(expected_ttl));
+      EXPECT_THAT(Run({"PEXPIRETIME", "key"}), IntArg(TEST_current_time_ms + expected_ttl));
+      EXPECT_THAT(Run({command, "missing", StrCat(value)}), IntArg(0));
+    }
+  }
+
+  // Capping an absolute timestamp preserves the command time's millisecond precision.
+  AdvanceTime(123);
+  for (const auto& [command, unit_ms, absolute] : cases) {
+    if (!absolute)
+      continue;
+    SCOPED_TRACE(command);
+    const int64_t value = TEST_current_time_ms / unit_ms + kMaxExpireDeadlineMs / unit_ms + 1;
+    EXPECT_THAT(Run({command, "key", StrCat(value)}), IntArg(1));
+    EXPECT_THAT(Run({"PTTL", "key"}), IntArg(kMaxExpireDeadlineMs));
+    EXPECT_THAT(Run({"PEXPIRETIME", "key"}), IntArg(TEST_current_time_ms + kMaxExpireDeadlineMs));
+  }
+}
+
+TEST_F(GenericFamilyTest, ExpireCapOptions) {
+  TEST_current_time_ms = 1'800'000'000'123;
+  const pair<string_view, int64_t> cases[] = {
+      {"EXPIRE", kMaxExpireDeadlineSec + 1},
+      {"PEXPIRE", kMaxExpireDeadlineMs + 1},
+      {"EXPIREAT", TEST_current_time_ms / 1000 + kMaxExpireDeadlineSec + 1},
+      {"PEXPIREAT", TEST_current_time_ms + kMaxExpireDeadlineMs + 1}};
+  for (const auto& [command, value] : cases) {
+    SCOPED_TRACE(command);
+    const string expiry = StrCat(value);
+    ASSERT_EQ(Run({"SET", "key", "val"}), "OK");
+    EXPECT_THAT(Run({command, "key", expiry, "XX"}), IntArg(0));
+    EXPECT_THAT(Run({command, "key", expiry, "GT"}), IntArg(0));
+    EXPECT_THAT(Run({"PTTL", "key"}), IntArg(-1));
+    EXPECT_THAT(Run({command, "key", expiry, "NX"}), IntArg(1));
+    EXPECT_THAT(Run({"PTTL", "key"}), IntArg(kMaxExpireDeadlineMs));
+
+    // The effective capped deadline equals the current expiry, so neither comparison succeeds.
+    for (string_view flag : {"NX", "GT", "LT"}) {
+      EXPECT_THAT(Run({command, "key", expiry, flag}), IntArg(0));
+      EXPECT_THAT(Run({"PTTL", "key"}), IntArg(kMaxExpireDeadlineMs));
+    }
+
+    ASSERT_EQ(Run({"SET", "key", "val", "PX", "1000"}), "OK");
+    EXPECT_THAT(Run({command, "key", expiry, "LT"}), IntArg(0));
+    EXPECT_THAT(Run({"PTTL", "key"}), IntArg(1000));
+    EXPECT_THAT(Run({command, "key", expiry, "XX", "GT"}), IntArg(1));
+    EXPECT_THAT(Run({"PTTL", "key"}), IntArg(kMaxExpireDeadlineMs));
+
+    for (string_view flag : {"GT", "LT"}) {
+      ASSERT_THAT(Run({"PERSIST", "key"}), IntArg(1));
+      EXPECT_THAT(Run({command, "key", expiry, "NX", flag}), IntArg(1));
+      EXPECT_THAT(Run({command, "key", expiry, "NX", flag}), IntArg(0));
+      EXPECT_THAT(Run({"PTTL", "key"}), IntArg(kMaxExpireDeadlineMs));
+    }
+    EXPECT_EQ(Run({"GET", "key"}), "val");
+  }
 }
 
 TEST_F(GenericFamilyTest, ExpireOptions) {
@@ -1529,6 +1608,15 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"get", "string-key"});
   EXPECT_EQ("hello world", resp);
   EXPECT_EQ(CheckedInt({"pttl", "string-key"}), 2000);
+
+  // RESTORE caps both relative TTLs and absolute deadlines.
+  ASSERT_EQ(Run({"restore", "string-key", StrCat(kMaxExpireDeadlineMs + 1), ToSV(dump), "REPLACE"}),
+            "OK");
+  EXPECT_THAT(Run({"pttl", "string-key"}), IntArg(kMaxExpireDeadlineMs));
+  ASSERT_EQ(Run({"restore", "string-key", StrCat(TEST_current_time_ms + kMaxExpireDeadlineMs + 1),
+                 ToSV(dump), "ABSTTL", "REPLACE"}),
+            "OK");
+  EXPECT_THAT(Run({"pttl", "string-key"}), IntArg(kMaxExpireDeadlineMs));
 
   // Last but not least - just make sure that we are good without TTL as well
   resp = Run({"restore", "string-key", "0", ToSV(STRING_DUMP_REDIS), "REPLACE"});

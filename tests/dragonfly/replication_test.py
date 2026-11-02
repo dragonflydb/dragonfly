@@ -604,6 +604,65 @@ async def test_rewrites(replication):
         assert await is_match_rsp(r"XGROUP SETID mystream mygroup (.*?) ENTRIESREAD 2")
 
 
+@pytest.mark.parametrize(
+    "command, expiry_type",
+    [
+        ("GETEX", "EX"),
+        ("GETEX", "PX"),
+        ("GETEX", "EXAT"),
+        ("GETEX", "PXAT"),
+        ("EXPIREAT", "EXAT"),
+        ("PEXPIREAT", "PXAT"),
+    ],
+)
+@pytest.mark.replication(master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2})
+async def test_expiry_cap_journal(replication: ReplicationSetup, command, expiry_type):
+    """An over-cap expiry must journal the exact deadline stored on the primary."""
+    c_master, c_replica = replication.c_master, replication.c_replica
+    key = "expiry-cap"
+    cap_ms = ((1 << 28) - 1) * 1000
+
+    async def master_time_ms():
+        seconds, microseconds = await c_master.time()
+        return seconds * 1000 + microseconds // 1000
+
+    await c_master.set(key, "value")
+    await check_all_replicas_finished([c_replica], c_master)
+
+    async with c_replica.monitor() as monitor:
+        before_ms = await master_time_ms()
+        expiry = 2 * cap_ms
+        if expiry_type.endswith("AT"):
+            expiry += before_ms
+        if expiry_type.startswith("EX"):
+            expiry //= 1000
+        args = [command, key]
+        if command == "GETEX":
+            args.append(expiry_type)
+        args.append(expiry)
+
+        reply = await c_master.execute_command(*args)
+        assert reply == ("value" if command == "GETEX" else 1)
+        after_ms = await master_time_ms()
+        deadline = await c_master.execute_command("PEXPIRETIME", key)
+        assert before_ms + cap_ms <= deadline <= after_ms + cap_ms
+
+        async with async_timeout.timeout(10):
+            while True:
+                journal_command = (await monitor.next_command())["command"]
+                if journal_command != "SELECT 0" and not journal_command.startswith(
+                    "CLIENT SETINFO"
+                ):
+                    break
+
+        # Comparing the journal itself catches replicas independently clamping the original deadline.
+        assert journal_command == f"PEXPIREAT {key} {deadline}"
+
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_replica.execute_command("PEXPIRETIME", key) == deadline
+    assert await c_replica.get(key) == "value"
+
+
 @pytest.mark.replication(master_args={"proactor_threads": 4}, replica_args={"proactor_threads": 2})
 async def test_georadius_store_cross_shard_precision(replication):
     """
