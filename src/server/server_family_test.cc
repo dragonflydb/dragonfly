@@ -344,6 +344,81 @@ TEST_F(ServerFamilyTest, ClientListRejected) {
   }
 }
 
+TEST_F(ServerFamilyTest, ClientKillRejected) {
+  const std::vector<std::pair<std::vector<std::string>, std::string>> bad = {
+      {{"CLIENT", "KILL"}, "wrong number of arguments for 'client|kill' command"},
+      {{"CLIENT", "KILL", "1.2.3.4:5"}, "No such client"},
+      {{"CLIENT", "KILL", "TYPE"}, "No such client"},
+      {{"CLIENT", "KILL", "FOO", "bar"}, "syntax error"},
+      {{"CLIENT", "KILL", "TYPE", "normal", "USER"}, "syntax error"},
+      {{"CLIENT", "KILL", "SKIPME", "maybe"}, "syntax error"},
+      {{"CLIENT", "KILL", "ID", "0"}, "client-id should be greater than 0"},
+      {{"CLIENT", "KILL", "ID", "-1"}, "client-id should be greater than 0"},
+      {{"CLIENT", "KILL", "ID", "+5"}, "client-id should be greater than 0"},
+      {{"CLIENT", "KILL", "TYPE", "bogus", "TYPE", "normal"}, "Unknown client type 'bogus'"},
+      {{"CLIENT", "KILL", "USER", "nosuchuser", "MAXAGE", "0"}, "No such user 'nosuchuser'"},
+      {{"CLIENT", "KILL", "MAXAGE", "-1"}, "maxage should be greater than 0"},
+      {{"CLIENT", "KILL", "MAXAGE", "abc"}, "maxage is not an integer or out of range"},
+  };
+  for (const auto& [args, msg] : bad) {
+    EXPECT_THAT(Run(args), ErrArg(msg)) << absl::StrJoin(args, " ");
+  }
+
+  // Error stats keys must not grow with user input.
+  const string errorstats = Run({"INFO", "ERRORSTATS"}).GetString();
+  EXPECT_THAT(errorstats, Not(HasSubstr("nosuchuser")));
+  EXPECT_THAT(errorstats, Not(HasSubstr("bogus")));
+}
+
+// The fixture has no listeners, so only the caller itself can match.
+TEST_F(ServerFamilyTest, ClientKillSelf) {
+  TestInitAclFam();
+  const string id = absl::StrCat(*Run({"CLIENT", "ID"}).GetInt());
+  auto kill = [&](std::vector<std::string> args) {
+    args.insert(args.begin(), {"CLIENT", "KILL"});
+    return Run(args);
+  };
+
+  EXPECT_THAT(kill({"ID", id}), IntArg(0));
+  EXPECT_THAT(kill({"SKIPME", "yes"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", absl::StrCat(stoll(id) + (int64_t{1} << 32)), "SKIPME", "no"}),
+              IntArg(0));
+  const std::vector<std::vector<std::string>> mismatches = {
+      {"MAXAGE", "100000"},
+      {"TYPE", "normal", "USER", "default", "ADDR", "", "LADDR", "1.2.3.4:5"},
+  };
+  for (const auto& mismatch : mismatches) {
+    std::vector<std::string> args = {"ID", id, "SKIPME", "no"};
+    args.insert(args.end(), mismatch.begin(), mismatch.end());
+    EXPECT_THAT(kill(args), IntArg(0)) << absl::StrJoin(args, " ");
+  }
+  EXPECT_THAT(kill({"TYPE", "normal", "USER", "default", "ADDR", "", "SKIPME", "no", "ID", id}),
+              IntArg(1));
+  EXPECT_THAT(kill({"ID", "999999", "ID", id, "SKIPME", "no"}), IntArg(1));
+}
+
+TEST_F(ServerFamilyTest, ClientKillMasterLink) {
+  TestInitAclFam();
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "master"}), IntArg(0));
+
+  // Unlike REPLICAOF, Replicate keeps the link when the master is unreachable.
+  pp_->at(0)->Await([&] { service_->server_family().Replicate("localhost", "1"); });
+  const string row = Run({"CLIENT", "LIST", "TYPE", "master"}).GetString();
+  ASSERT_THAT(row, StartsWith("id="));
+  const string id = row.substr(3, row.find(' ') - 3);
+  auto kill = [&](std::vector<std::string> args) {
+    args.insert(args.begin(), {"CLIENT", "KILL"});
+    return Run(args);
+  };
+
+  EXPECT_THAT(kill({"TYPE", "master"}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
+  EXPECT_THAT(kill({"ID", id}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
+  EXPECT_THAT(kill({"TYPE", "master", "USER", "default"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "ID", "999999"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", id, "TYPE", "normal"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", absl::StrCat(stoll(id) + (int64_t{1} << 32))}), IntArg(0));
+}
+
 TEST_F(ServerFamilyTest, ClientInfoSingleDbField) {
   const string info = Run({"CLIENT", "INFO"}).GetString();
   // Regression: "db=" used to be emitted twice (FormatClientInfo + a redundant append).

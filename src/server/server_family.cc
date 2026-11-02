@@ -35,6 +35,7 @@
 
 extern "C" {
 #include "redis/redis_aux.h"
+#include "redis/util.h"
 }
 
 #include "base/cycle_clock.h"
@@ -413,12 +414,28 @@ void ClientInfo(facade::ParsedArgs args, CommandContext* cmd_cntx) {
   return rb->SendBulkString(info);
 }
 
-enum class ClientListType { kNormal, kMaster, kReplica, kPubsub };
+enum class ClientListType { kNormal, kMaster, kReplica, kPubsub, kInternal };
 
 struct ClientListFilter {
   optional<ClientListType> type;
   absl::flat_hash_set<uint32_t> ids;
 };
+
+// Replies with an error itself if the value is missing or unknown.
+optional<ClientListType> ParseClientType(CmdArgParser* parser, CommandContext* cmd_cntx) {
+  if (!parser->HasNext()) {
+    cmd_cntx->SendError(facade::kSyntaxErr);
+    return nullopt;
+  }
+  string_view raw = parser->Peek();
+  auto mapped =
+      parser->TryMapNext("NORMAL", ClientListType::kNormal, "MASTER", ClientListType::kMaster,
+                         "REPLICA", ClientListType::kReplica, "SLAVE", ClientListType::kReplica,
+                         "PUBSUB", ClientListType::kPubsub);
+  if (!mapped)
+    cmd_cntx->SendError(StrCat("Unknown client type '", raw, "'"), kSyntaxErrType);
+  return mapped;
+}
 
 optional<ClientListFilter> ParseClientListFilter(CmdArgParser parser, CommandContext* cmd_cntx) {
   ClientListFilter filter;
@@ -426,20 +443,9 @@ optional<ClientListFilter> ParseClientListFilter(CmdArgParser parser, CommandCon
     return filter;
 
   if (parser.Check("TYPE")) {
-    if (!parser.HasNext()) {
-      cmd_cntx->SendError(facade::kSyntaxErr);
+    filter.type = ParseClientType(&parser, cmd_cntx);
+    if (!filter.type)
       return nullopt;
-    }
-    string_view raw = parser.Peek();
-    auto mapped =
-        parser.TryMapNext("NORMAL", ClientListType::kNormal, "MASTER", ClientListType::kMaster,
-                          "REPLICA", ClientListType::kReplica, "SLAVE", ClientListType::kReplica,
-                          "PUBSUB", ClientListType::kPubsub);
-    if (!mapped) {
-      cmd_cntx->SendError(StrCat("Unknown client type '", raw, "'"));
-      return nullopt;
-    }
-    filter.type = *mapped;
   } else if (parser.Check("ID")) {
     if (!parser.HasNext()) {
       cmd_cntx->SendError(facade::kSyntaxErr);
@@ -469,6 +475,10 @@ ClientListType ClassifyConnection(facade::Connection* conn) {
   // GetMasterLinkClientInfo (not produced here).
   if (base_cntx->replica_conn)
     return ClientListType::kReplica;
+
+  // Slot migration flows match no TYPE.
+  if (base_cntx->slot_migration_conn)
+    return ClientListType::kInternal;
 
   auto* dfly_cntx = static_cast<const ConnectionContext*>(base_cntx);
   const auto& sub_info = dfly_cntx->conn_state.subscribe_info;
@@ -681,46 +691,128 @@ void ClientId(facade::ParsedArgs args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendLong(cmd_cntx->conn()->GetClientId());
 }
 
+struct ClientKillFilter {
+  optional<int64_t> id, max_age;
+  optional<ClientListType> type;
+  optional<string_view> user, addr, laddr;
+  bool skipme = true;
+  bool legacy = false;  // CLIENT KILL <addr>
+};
+
+optional<ClientKillFilter> ParseClientKillFilter(facade::ParsedArgs args,
+                                                 CommandContext* cmd_cntx) {
+  ClientKillFilter filter;
+  if (args.size() == 1) {
+    filter.addr = args[0];
+    filter.skipme = false;
+    filter.legacy = true;
+    return filter;
+  }
+
+  CmdArgParser parser{args};
+  while (parser.HasNext()) {
+    if (!parser.HasAtLeast(2)) {
+      cmd_cntx->SendError(kSyntaxErr);
+      return nullopt;
+    }
+
+    string_view val;
+    long long num = 0;
+    if (parser.Check("ID", &val)) {
+      if (!string2ll(val.data(), val.size(), &num) || num <= 0) {
+        cmd_cntx->SendError("client-id should be greater than 0");
+        return nullopt;
+      }
+      filter.id = num;
+    } else if (parser.Check("TYPE")) {
+      filter.type = ParseClientType(&parser, cmd_cntx);
+      if (!filter.type)
+        return nullopt;
+    } else if (parser.Check("USER", &val)) {
+      if (!ServerState::tlocal()->user_registry->GetRegistryWithLock().registry.contains(val)) {
+        cmd_cntx->SendError(StrCat("No such user '", val, "'"), kSyntaxErrType);
+        return nullopt;
+      }
+      filter.user = val;
+    } else if (parser.Check("ADDR", &val)) {
+      filter.addr = val;
+    } else if (parser.Check("LADDR", &val)) {
+      filter.laddr = val;
+    } else if (parser.Check("SKIPME")) {
+      auto skipme = parser.TryMapNext("YES", true, "NO", false);
+      if (!skipme) {
+        cmd_cntx->SendError(kSyntaxErr);
+        return nullopt;
+      }
+      filter.skipme = *skipme;
+    } else if (parser.Check("MAXAGE", &val)) {
+      if (!string2ll(val.data(), val.size(), &num)) {
+        cmd_cntx->SendError("maxage is not an integer or out of range");
+        return nullopt;
+      }
+      if (num <= 0) {
+        cmd_cntx->SendError("maxage should be greater than 0");
+        return nullopt;
+      }
+      filter.max_age = num;
+    } else {
+      cmd_cntx->SendError(kSyntaxErr);
+      return nullopt;
+    }
+  }
+  return filter;
+}
+
 void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners,
                 ServerFamily* server_family, CommandContext* cmd_cntx) {
-  std::function<bool(facade::Connection * conn)> evaluator;
+  if (args.empty())
+    return cmd_cntx->SendError(WrongNumArgsError("client|kill"), kSyntaxErrType);
 
-  if (args.size() == 1) {
-    string_view ip_port = args[0];
-    if (ip_port.find(':') != ip_port.npos) {
-      evaluator = [ip_port](facade::Connection* conn) {
-        return conn->RemoteEndpointStr() == ip_port;
-      };
-    }
-  } else if (args.size() == 2) {
-    string filter_type = absl::AsciiStrToUpper(args[0]);
-    string_view filter_value = args[1];
-    if (filter_type == "ADDR") {
-      evaluator = [filter_value](facade::Connection* conn) {
-        return conn->RemoteEndpointStr() == filter_value;
-      };
-    } else if (filter_type == "LADDR") {
-      evaluator = [filter_value](facade::Connection* conn) {
-        return conn->LocalBindStr() == filter_value;
-      };
-    } else if (filter_type == "ID") {
-      uint32_t id;
-      if (absl::SimpleAtoi(filter_value, &id)) {
-        if (server_family->IsMasterLinkClientId(id)) {
-          return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
-        }
-        evaluator = [id](facade::Connection* conn) { return conn->GetClientId() == id; };
-      }
-    }
-    // TODO: Add support for KILL USER/TYPE/SKIPME
+  auto filter = ParseClientKillFilter(args, cmd_cntx);
+  if (!filter)
+    return;
+
+  // A master link has no user and can match only TYPE master or its own id.
+  if (!filter->user && (!filter->type || *filter->type == ClientListType::kMaster)) {
+    const bool link_id =
+        filter->id && *filter->id <= UINT32_MAX && server_family->IsMasterLinkClientId(*filter->id);
+    const bool link_type =
+        filter->type && !filter->id && !server_family->GetMasterLinkClientInfo().empty();
+    if (link_id || link_type)
+      return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
   }
+  if (filter->type == ClientListType::kMaster)
+    return cmd_cntx->rb()->SendLong(0);
 
-  if (!evaluator) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
+  facade::Connection* self = cmd_cntx->conn();
+  const bool is_admin_request = self->IsPrivileged();
 
-  const bool is_admin_request = cmd_cntx->conn()->IsPrivileged();
+  // Filters that name specific connections report the admin ones they can not kill.
+  const bool targeted =
+      filter->id || filter->addr || filter->laddr || filter->type == ClientListType::kReplica;
+  const time_t now = time(nullptr);
 
+  auto evaluator = [&](facade::Connection* conn) {
+    auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
+
+    // Already being shut down; do not count it twice.
+    if (cntx && cntx->conn_closing)
+      return false;
+    if (filter->id && conn->GetClientId() != *filter->id)
+      return false;
+    if (filter->type && ClassifyConnection(conn) != *filter->type)
+      return false;
+    if (filter->user && (!cntx || cntx->authed_username != *filter->user))
+      return false;
+    if (filter->max_age && now - conn->creation_time() < *filter->max_age)
+      return false;
+    if (filter->addr && conn->RemoteEndpointStr() != *filter->addr)
+      return false;
+    return !filter->laddr || conn->LocalBindStr() == *filter->laddr;
+  };
+
+  // HTTP API connections have no close-after-reply path.
+  const bool kill_self = !filter->skipme && !self->IsHttp() && evaluator(self);
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
 
@@ -729,10 +821,12 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
     std::vector<facade::Connection::WeakRef> connections;
     auto traverse_cb = [&](unsigned idx, util::Connection* conn) {
       facade::Connection* dconn = static_cast<facade::Connection*>(conn);
-      if (evaluator(dconn)) {
+
+      // The caller is closed after the reply; shut down connections were already killed.
+      if (dconn != self && dconn->socket()->IsOpen() && !dconn->IsMigrating() && evaluator(dconn)) {
         if (is_admin_request || !dconn->IsPrivileged()) {
           connections.push_back(dconn->Borrow());
-        } else {
+        } else if (targeted) {
           kill_errors.fetch_add(1);
         }
       }
@@ -753,13 +847,20 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
 
   shard_set->pool()->AwaitFiberOnAll(cb);
 
-  if (kill_errors.load() == 0) {
-    return cmd_cntx->rb()->SendLong(killed_connections.load());
+  const uint32_t killed = killed_connections.load() + kill_self;
+  if (kill_errors.load() > 0) {
+    cmd_cntx->SendError(absl::StrCat("Killed ", killed, " client(s), but unable to kill ",
+                                     kill_errors.load(), " admin client(s)."));
+  } else if (!filter->legacy) {
+    cmd_cntx->rb()->SendLong(killed);
+  } else if (killed > 0) {
+    cmd_cntx->rb()->SendOk();
   } else {
-    return cmd_cntx->SendError(absl::StrCat("Killed ", killed_connections.load(),
-                                            " client(s), but unable to kill ", kill_errors.load(),
-                                            " admin client(s)."));
+    cmd_cntx->SendError(kNoSuchClient);
   }
+
+  if (kill_self)
+    self->RequestCloseAfterReply();
 }
 
 void ClientMigrate(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners,
@@ -2464,8 +2565,16 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "      Kill connections made from the specified address",
       "    * LADDR (<ip:port>|<unixsocket>:0)",
       "      Kill connections made to specified local address",
+      "    * TYPE (NORMAL|MASTER|REPLICA|PUBSUB)",
+      "      Kill connections by type.",
+      "    * USER <username>",
+      "      Kill connections authenticated by <username>.",
+      "    * SKIPME (YES|NO)",
+      "      Skip killing current connection (default: yes).",
       "    * ID <client-id>",
       "      Kill connections by client id.",
+      "    * MAXAGE <maxage>",
+      "      Kill connections older than the specified age.",
       "INFO",
       "    Return information about the current client connection.",
       "LIST",

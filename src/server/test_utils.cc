@@ -265,7 +265,7 @@ void BaseFamilyTest::ResetService() {
   // value, and if reset after some invocations of heartbeat have run, the accumulated data is
   // lost and can cause test failure.
   used_mem_current = 0;
-  service_->Init(nullptr, {});
+  service_->Init(nullptr, CreateListeners());
 
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
 

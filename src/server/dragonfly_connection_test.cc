@@ -4,6 +4,7 @@
 #include "facade/dragonfly_connection.h"
 
 #include <absl/strings/match.h>
+#include <absl/strings/str_split.h>
 #include <arpa/inet.h>
 #include <gmock/gmock.h>
 #include <netinet/in.h>
@@ -12,9 +13,11 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <deque>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 
 #include "base/flags.h"
 #include "facade/dragonfly_listener.h"
@@ -25,6 +28,7 @@
 
 ABSL_DECLARE_FLAG(bool, enable_resp_io_loop_v2);
 ABSL_DECLARE_FLAG(bool, enable_shared_read_buffer);
+ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 
 namespace dfly {
 namespace {
@@ -423,6 +427,173 @@ TEST_P(DragonflyV2ConnectionTest, RejectsControlMessagesAfterProtocolError) {
 
 INSTANTIATE_TEST_SUITE_P(PrivateAndSharedReadBuffer, DragonflyV2ConnectionTest,
                          testing::Values(false, true));
+
+// Killing itself, a connection still gets the reply but runs no later command.
+TEST_F(DragonflyConnectionTest, ClientKillSelfClosesAfterReply) {
+  auto send_until_eof = [&](std::string_view before, std::string_view after, bool legacy = false) {
+    RawRespClient client{port_};
+    EXPECT_TRUE(client.SendAll("CLIENT INFO\r\n"));
+    client.ReadLine();
+    std::vector<std::string> info =
+        absl::StrSplit(client.ReadLine().value_or(""), absl::ByAnyChar(" ="));
+    std::string kill = absl::StrCat("CLIENT KILL ID ", info.at(1), " SKIPME no\r\n");
+    if (legacy)
+      kill = absl::StrCat("CLIENT KILL ", info.at(3), "\r\n");
+    EXPECT_TRUE(client.SendAll(absl::StrCat(before, kill, after)));
+    std::string reply;
+    while (auto line = client.ReadLine())
+      reply += *line;
+    EXPECT_TRUE(client.ReadEof()) << reply;
+    return reply;
+  };
+
+  // A kill in the first packet must not keep the server side open until the client closes.
+  RawRespClient first{port_};
+  EXPECT_TRUE(first.SendAll("CLIENT KILL SKIPME no\r\n"));
+  EXPECT_EQ(first.ReadLine(), ":1\r\n");
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().facade_stats.conn_stats.num_conns_main == 0; });
+
+  // A connection reads the flag when it starts.
+  for (bool v2 : {false, true}) {
+    SCOPED_TRACE(v2);
+    absl::SetFlag(&FLAGS_enable_resp_io_loop_v2, v2);
+    EXPECT_EQ(send_until_eof("PING\r\n", "SET k1 1\r\nPING\r\n"), "+PONG\r\n:1\r\n");
+    for (bool squash : {true, false}) {
+      SCOPED_TRACE(squash);
+      absl::SetFlag(&FLAGS_multi_exec_squash, squash);
+      EXPECT_EQ(send_until_eof("MULTI\r\n", "PING\r\nSET k2 1\r\nEXEC\r\nSET k3 1\r\n"),
+                "+OK\r\n+QUEUED\r\n+QUEUED\r\n+QUEUED\r\n*3\r\n:1\r\n+PONG\r\n+OK\r\n");
+    }
+    EXPECT_EQ(send_until_eof("PING\r\n", "SET k4 1\r\n", /*legacy=*/true), "+PONG\r\n+OK\r\n");
+
+    // A lone command is dispatched synchronously.
+    EXPECT_EQ(send_until_eof("", ""), ":1\r\n");
+
+    // Over the pipeline limit, the next command waits for the kill and must not run after it.
+    EXPECT_EQ(Run({"CONFIG", "SET", "pipeline_buffer_limit", "1"}), "OK");
+    EXPECT_EQ(send_until_eof("", "SET k5 1\r\n"), ":1\r\n");
+    EXPECT_EQ(Run({"CONFIG", "SET", "pipeline_buffer_limit", "128MB"}), "OK");
+    EXPECT_THAT(Run({"DEL", "k2"}), IntArg(1));
+    EXPECT_THAT(Run({"DEL", "k1", "k3", "k4", "k5"}), IntArg(0));
+  }
+}
+
+// Real listeners for CLIENT KILL. No OpenSSL use: the last destroyed listener cleans it up.
+class ClientKillTest : public BaseFamilyTest {
+ protected:
+  std::vector<facade::Listener*> CreateListeners() override {
+    acceptor_ = std::make_unique<util::AcceptServer>(pp_.get(), /*break_on_int=*/false);
+    std::vector<facade::Listener*> listeners;
+    for (auto role : {facade::Listener::Role::MAIN, facade::Listener::Role::PRIVILEGED}) {
+      listeners.push_back(pp_->at(0)->Await(
+          [&] { return new facade::Listener(facade::Protocol::REDIS, service_.get(), role); }));
+      ports_.push_back(acceptor_->AddListener(0, listeners.back()));
+    }
+    return listeners;
+  }
+
+  void SetUp() override {
+    BaseFamilyTest::SetUp();
+    acceptor_->Run();
+  }
+
+  // The service shuts down before the listeners are freed.
+  void TearDown() override {
+    acceptor_->Stop(/*wait=*/true);
+    BaseFamilyTest::TearDown();
+  }
+
+  std::unique_ptr<util::AcceptServer> acceptor_;
+  std::vector<uint16_t> ports_;
+};
+
+// Sends an inline command and returns the first line of the reply.
+std::optional<std::string> Call(RawRespClient& client, std::string_view cmd) {
+  return client.SendAll(absl::StrCat(cmd, "\r\n")) ? client.ReadLine() : std::nullopt;
+}
+
+std::string ClientId(RawRespClient& client) {
+  std::string reply = Call(client, "CLIENT ID").value_or(":\r\n");
+  return reply.substr(1, reply.size() - 3);
+}
+
+TEST_F(ClientKillTest, Filters) {
+  RawRespClient old{ports_[0]}, admin{ports_[1]}, u1{ports_[0]}, u1_other{ports_[0]}, u2{ports_[0]},
+      monitor{ports_[0]}, caller{ports_[0]};
+  const std::string old_id = ClientId(old);
+  const time_t old_born = time(nullptr);
+  const std::string admin_id = ClientId(admin);
+  for (std::string_view user : {"u1", "u2"})
+    Run({"ACL", "SETUSER", user, "ON", "nopass", "+@all", "~*", "&*"});
+  for (RawRespClient* client : {&u1, &u1_other})
+    ASSERT_EQ(Call(*client, "AUTH u1 x"), "+OK\r\n");
+  ASSERT_EQ(Call(u2, "AUTH u2 x"), "+OK\r\n");
+  std::deque<RawRespClient> subs;
+  for (std::string_view cmd :
+       {"SUBSCRIBE ch", "PSUBSCRIBE ch", "SSUBSCRIBE ch", "HELLO 3\r\nSUBSCRIBE ch"}) {
+    RawRespClient& sub = subs.emplace_back(ports_[0]);
+    ASSERT_TRUE(Call(sub, cmd) && sub.ReadUntilContains("subscribe", 64));
+  }
+  ASSERT_EQ(Call(monitor, "MONITOR"), "+OK\r\n");
+
+  // A rejected command kills nothing; the counts below check it.
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "normal", "MAXAGE", "0"}),
+              ErrArg("maxage should be greater than 0"));
+  ASSERT_THAT(Run({"CLIENT", "KILL", "ID", admin_id}),
+              ErrArg("Killed 0 client(s), but unable to kill 1 admin client(s)."));
+  const std::vector<std::string> admin_info =
+      absl::StrSplit(Run({"CLIENT", "LIST", "ID", admin_id}).GetString(), absl::ByAnyChar(" ="));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "ADDR", admin_info.at(3)}), ErrArg("unable to kill 1 admin"));
+  RawRespClient admin_replica{ports_[1]};
+  ASSERT_TRUE(Call(admin_replica, "REPLCONF CAPA dragonfly"));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "replica"}), ErrArg("unable to kill 1 admin client"));
+  EXPECT_EQ(Call(admin, "CLIENT KILL TYPE replica"), ":1\r\n");
+  EXPECT_THAT(Run({"CLIENT", "KILL", "USER", "u1"}), IntArg(2));
+  EXPECT_TRUE(u1.ReadEof() && u1_other.ReadEof());
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "pubsub"}), IntArg(4));
+
+  // MAXAGE counts from the connection start, not from the last command.
+  while (time(nullptr) <= old_born)
+    absl::SleepFor(absl::Milliseconds(10));
+  ASSERT_EQ(Call(old, "PING"), "+PONG\r\n");
+  EXPECT_THAT(Run({"CLIENT", "KILL", "ID", old_id, "MAXAGE", "1", "LADDR", "1.2.3.4:5"}),
+              IntArg(0));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "ID", old_id, "MAXAGE", "1"}), IntArg(1));
+
+  // Pipelined: the second kill usually runs while the first one's victims are still closing.
+  EXPECT_EQ(Call(caller, "CLIENT KILL TYPE normal\r\nCLIENT KILL TYPE normal"), ":2\r\n");
+  EXPECT_EQ(caller.ReadLine(), ":0\r\n");
+}
+
+// Connections that move to another thread can not be borrowed.
+TEST_F(ClientKillTest, KillDuringConnectionMigration) {
+  std::atomic_bool stop = false;
+  std::vector<std::thread> churn;
+  for (unsigned i = 0; i < 8; ++i) {
+    churn.emplace_back([&] {
+      for (unsigned tid = 0; !stop;) {
+        RawRespClient client{ports_[0]};
+        const std::string id = ClientId(client);
+        const std::string migrate = absl::StrCat("CLIENT MIGRATE ", id, " ");
+        while (!stop && !id.empty() && Call(client, absl::StrCat(migrate, ++tid % 3))) {
+        }
+      }
+    });
+  }
+  const std::string laddr = absl::StrCat("127.0.0.1:", ports_[0]);
+  int64_t killed = 0;
+  for (absl::Time end = absl::Now() + absl::Seconds(2); absl::Now() < end;) {
+    auto reply = Run({"CLIENT", "KILL", "LADDR", laddr});
+    EXPECT_THAT(reply, ArgType(RespExpr::INT64));
+    killed += reply.GetInt().value_or(0);
+    absl::SleepFor(absl::Milliseconds(1));
+  }
+  EXPECT_GT(killed, 0);
+  stop = true;
+  for (auto& thread : churn)
+    thread.join();
+}
 
 }  // namespace
 }  // namespace dfly
