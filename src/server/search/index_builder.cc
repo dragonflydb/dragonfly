@@ -268,6 +268,7 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
   // any pending updates — the full table traversal below will pick up all current documents.
   index_->hnsw_state_ = ShardDocIndex::HnswState::kBuilding;
   index_->pending_vector_updates_.clear();
+  index_->pending_hnsw_removals_.clear();
 
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;
