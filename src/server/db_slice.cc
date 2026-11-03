@@ -961,9 +961,10 @@ void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
-                           ChangeConsumerInterface* consumer) {
+                           const DbTableArray& tables, ChangeConsumerInterface* consumer) {
   VLOG(1) << "Start FlushSlotsFb";
-  // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
+
+  // Slot deletion can take time as it traverses all databases, hence it runs in a fiber.
   // We want to flush all the data of a slot that was added till the time the call to FlushSlots
   // was made. Therefore we delete slots entries with version < next_version.
   // next_version and the on_change callback are registered synchronously in FlushSlots
@@ -995,10 +996,13 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
 
   ServerState& etl = *ServerState::tlocal();
   const float cpu_budget = GetFlag(FLAGS_migration_buckets_cpu_budget);
-  for (DbIndex db_ind = 0; db_ind < db_arr_.size() && etl.gstate() != GlobalState::SHUTTING_DOWN;
+  for (DbIndex db_ind = 0; db_ind < tables.size() && etl.gstate() != GlobalState::SHUTTING_DOWN;
        ++db_ind) {
-    table = db_arr_[db_ind];
-    if (!table)
+    table = tables[db_ind];
+
+    // FLUSHDB/FLUSHALL replaces the table and subtracts its remaining keys from entries_count_.
+    // Skip replaced tables before traversal and after each yield to avoid subtracting keys twice.
+    if (!table || table != db_arr_[db_ind])
       continue;
 
     db_cntx.db_index = db_ind;
@@ -1006,7 +1010,6 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     PrimeTable* pt = &table->prime;
     PrimeTable::Cursor cursor;
 
-    // Stop if FLUSHDB/FLUSHALL replaces the table: the flush already accounted for its entries.
     do {
       {
         base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
@@ -1048,20 +1051,21 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   cluster::SlotSet slot_set(slot_ranges);
   InvalidateSlotWatches(slot_set);
 
-  // Capture the version threshold synchronously, before launching the fiber.
+  // Capture the tables and version synchronously so the callback and fiber use the same snapshot.
   // Entries inserted after this point get version >= next_version and survive the flush.
   uint64_t next_version = NextVersion();
+  auto tables = std::make_shared<const DbTableArray>(db_arr_);
 
   auto shared_slots = std::make_shared<cluster::SlotSet>(std::move(slot_set));
 
   // Register the on_change callback synchronously so that bucket modifications between
   // FlushSlots returning and the fiber starting are caught (the callback deletes old entries
   // before the bucket version is bumped, preventing the traversal from skipping them).
-  auto on_change = [this, shared_slots, next_version, tables = db_arr_](DbIndex db_index,
-                                                                        const ChangeReq& req) {
-    // Skip databases activated or flushed after FlushSlots: new tables hold only newer entries,
-    // and a serializer may still pass buckets of a replaced table (the flush accounted for them).
-    if (db_index >= tables.size() || tables[db_index] != db_arr_[db_index])
+  auto on_change = [this, shared_slots, next_version, tables](DbIndex db_index,
+                                                              const ChangeReq& req) {
+    // New or replaced tables are outside this flush. Serializers may still pass buckets from old
+    // tables, whose keys FLUSHDB/FLUSHALL already subtracted from entries_count_.
+    if (db_index >= tables->size() || (*tables)[db_index] != db_arr_[db_index])
       return;
 
     FiberAtomicGuard fg;
@@ -1093,8 +1097,8 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   RegisterOnChange(consumer.get());
 
   fb2::Fiber::Opts opts{.priority = fb2::FiberPriority::BACKGROUND, .name = "flush_slots"};
-  fb2::Fiber(opts, [this, shared_slots, next_version, consumer = std::move(consumer)]() {
-    FlushSlotsFb(*shared_slots, next_version, consumer.get());
+  fb2::Fiber(opts, [this, shared_slots, next_version, tables, consumer = std::move(consumer)]() {
+    FlushSlotsFb(*shared_slots, next_version, *tables, consumer.get());
   }).Detach();
 }
 

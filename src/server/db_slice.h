@@ -623,7 +623,7 @@ class DbSlice {
                                              bool force_update);
 
   void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
-                    ChangeConsumerInterface* consumer);
+                    const DbTableArray& tables, ChangeConsumerInterface* consumer);
   util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
