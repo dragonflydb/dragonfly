@@ -87,9 +87,6 @@ namespace facade {
 //   Exist(tag, &T::flag)                  set a bool member when tag is present
 //   Field(tag, &T::a, ...)                read values after tag into the listed members
 //   Field<Parsed>(tag, &T::a, error)      parse as Parsed, then convert into the member type
-//   TryField(tag, &T::a, ...)             Field matched only when all its values follow and parse;
-//                                         a parsed value that breaks a rule is still reported
-//   TryField<Parsed>(tag, &T::a, error)   TryField with an explicit parsed type, like Field<Parsed>
 //   Action(tag, fn)                       call fn(CmdArgParser*, T*) after consuming tag
 //   TagValue(tag, &T::kind, k, &T::val)   set a discriminant and read the following value
 //   TagValue<Parsed>(...)                 TagValue with an explicit parsed value type
@@ -100,8 +97,8 @@ namespace facade {
 // Composition and control rules:
 //   If(&T::condition, rule)               enable rule only when the bool member is true
 //   IfNot(&T::condition, rule)            enable rule only when the bool member is false
-//   If(pred, rule)                        enable rule only when pred(const CmdArgParser&) holds,
-//                                         which may Peek() at the token and the args after it
+//   If(pred, rule)                        enable rule only when pred(token) holds
+//   Try(rule)                             run a tagged rule all or nothing; an error leaves its tag
 //   Into(&T::nested, rule)                apply a rule to a nested member (engages an optional one,
 //                                         switches a variant to the rule's type when it matches)
 //   Skip(n)                               consume n positional args, or act as an option fallback
@@ -353,7 +350,7 @@ struct CmdArgParser {
   }
 
   // Returns the arg `ahead` positions past the cursor without consuming it (empty if out of range).
-  std::string_view Peek(size_t ahead = 0) const {
+  std::string_view Peek(size_t ahead = 0) {
     return SafeSV(cur_i_ + ahead);
   }
 
@@ -799,8 +796,12 @@ template <class Derived, class T> struct TaggedRule {
   consteval explicit TaggedRule(std::string_view tag) : tag_(tag) {
   }
 
+  bool Matches(std::string_view cur) const {
+    return TagMatch(cur, tag_);
+  }
+
   bool Consume(CmdArgParser* p, std::string_view cur, T* o, State&) const {
-    if (!TagMatch(cur, tag_))
+    if (!Matches(cur))
       return false;
     p->AdvanceUnchecked();
     static_cast<const Derived*>(this)->OnMatch(p, o);
@@ -848,37 +849,6 @@ template <class P, class T, class M> struct ParsedField : TaggedRule<ParsedField
  private:
   std::string_view err_;
   M T::*field_;
-};
-
-// Whether arg parses as P; a validated number's rules are checked only when it is read.
-template <class P> bool Parses(std::string_view arg) {
-  if constexpr (is_optional<P>) {
-    return Parses<typename P::value_type>(arg);
-  } else if constexpr (as_vnum<P>) {
-    decltype(P::value) value{};
-    return TryParseNum(arg, &value);
-  } else if constexpr (std::is_arithmetic_v<P>) {
-    P value{};
-    return TryParseNum(arg, &value);
-  } else {
-    return true;
-  }
-}
-
-// Runs the inner rule only when the values it reads after its tag all follow and parse.
-template <class Inner, class... P> struct TryRule {
-  using Target = typename Inner::Target;
-  using State = typename Inner::State;
-  consteval explicit TryRule(Inner inner) : inner_(inner) {
-  }
-  bool Consume(CmdArgParser* p, std::string_view cur, Target* o, State& st) const {
-    size_t i = 1;
-    return p->HasAtLeast(1 + sizeof...(P)) && (Parses<P>(p->Peek(i++)) && ...) &&
-           inner_.Consume(p, cur, o, st);
-  }
-
- private:
-  Inner inner_;
 };
 
 template <class T> struct Action : TaggedRule<Action<T>, T> {
@@ -979,18 +949,43 @@ template <class T, class Inner> struct If {
   Inner inner_;
 };
 
-// Enables the inner rule only while the predicate holds for the parser.
-template <class Inner> struct IfPred {
+// Enables the inner rule only while the predicate holds for the token.
+template <class Pred, class Inner> struct IfPred {
   using Target = typename Inner::Target;
   using State = typename Inner::State;
-  consteval IfPred(bool (*pred)(const CmdArgParser&), Inner inner) : pred_(pred), inner_(inner) {
+  consteval IfPred(Pred pred, Inner inner) : pred_(pred), inner_(inner) {
   }
   bool Consume(CmdArgParser* p, std::string_view cur, Target* o, State& st) const {
-    return pred_(*p) && inner_.Consume(p, cur, o, st);
+    return pred_(cur) && inner_.Consume(p, cur, o, st);
   }
 
  private:
-  bool (*pred_)(const CmdArgParser&);
+  Pred pred_;
+  Inner inner_;
+};
+
+// Runs a tagged rule all or nothing: on an error it restores the parser and the target, and leaves
+// the tag to the other rules.
+template <class Inner> struct Try {
+  using Target = typename Inner::Target;
+  using State = typename Inner::State;
+  consteval explicit Try(Inner inner) : inner_(inner) {
+  }
+  bool Consume(CmdArgParser* p, std::string_view cur, Target* o, State& st) const {
+    if (!inner_.Matches(cur))
+      return false;
+    CmdArgParser saved = *p;
+    Target scratch = *o;
+    inner_.Consume(p, cur, &scratch, st);
+    if (p->HasError()) {
+      *p = saved;
+      return false;
+    }
+    *o = std::move(scratch);
+    return true;
+  }
+
+ private:
   Inner inner_;
 };
 
@@ -1151,16 +1146,6 @@ requires std::convertible_to<P, M>
 consteval auto Field(const char* tag, M T::*field, std::string_view err = {}) {
   return cap_detail::ParsedField<P, T, M>{tag, err, field};
 }
-template <class T, class... M>
-requires(sizeof...(M) > 0 && (ParsedArg<M> && ...)) consteval auto TryField(const char* tag,
-                                                                            M T::*... fields) {
-  return cap_detail::TryRule<cap_detail::Field<T, M...>, M...>{{tag, fields...}};
-}
-template <class P, class T, class M>
-requires std::convertible_to<P, M>
-consteval auto TryField(const char* tag, M T::*field, std::string_view err = {}) {
-  return cap_detail::TryRule<cap_detail::ParsedField<P, T, M>, P>{{tag, err, field}};
-}
 template <class T> consteval auto Action(const char* tag, void (*fn)(CmdArgParser*, T*)) {
   return cap_detail::Action<T>{tag, fn};
 }
@@ -1199,8 +1184,15 @@ template <class T, class Inner> consteval auto If(bool T::*cond, Inner inner) {
 template <class T, class Inner> consteval auto IfNot(bool T::*cond, Inner inner) {
   return cap_detail::If<T, Inner>{cond, false, inner};
 }
-template <class Inner> consteval auto If(bool (*pred)(const CmdArgParser&), Inner inner) {
-  return cap_detail::IfPred<Inner>{pred, inner};
+template <class Pred, class Inner>
+requires std::predicate<const Pred&, std::string_view>
+consteval auto If(Pred pred, Inner inner) {
+  return cap_detail::IfPred<Pred, Inner>{pred, inner};
+}
+template <class Inner>
+requires std::derived_from<Inner, cap_detail::TaggedRule<Inner, typename Inner::Target>>
+consteval auto Try(Inner inner) {
+  return cap_detail::Try<Inner>{inner};
 }
 template <class T, class Member, class Inner>
 requires std::same_as<Member, typename Inner::Target> ||

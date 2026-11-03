@@ -1051,17 +1051,14 @@ TEST_F(CmdArgParserTest, CapGrammarTagValue) {
 namespace {
 struct IfPredTarget {
   uint8_t flags = 0;
-  bool last = false;
+  bool other = false;
 };
-bool IsUpperToken(const CmdArgParser& p) {
-  return std::ranges::none_of(p.Peek(), [](char c) { return c >= 'a' && c <= 'z'; });
-}
-bool AtEnd(const CmdArgParser& p) {
-  return !p.HasAtLeast(2);
-}
 consteval auto MakeIfPredGrammar() {
-  return Compile(Options(If(IsUpperToken, Flags(&IfPredTarget::flags, "A", uint8_t{1})),
-                         If(AtEnd, Exist("LAST", &IfPredTarget::last))));
+  auto is_upper = [](std::string_view token) {
+    return std::ranges::none_of(token, [](char c) { return c >= 'a' && c <= 'z'; });
+  };
+  return Compile(Options(If(is_upper, Flags(&IfPredTarget::flags, "A", uint8_t{1})),
+                         Exist("A", &IfPredTarget::other)));
 }
 }  // namespace
 
@@ -1076,35 +1073,41 @@ TEST_F(CmdArgParserTest, CapGrammarIfPredicate) {
 
   {
     IfPredTarget o;
-    EXPECT_FALSE(run({"A", "LAST"}, &o));
+    EXPECT_FALSE(run({"A"}, &o));
     EXPECT_EQ(o.flags, 1u);
-    EXPECT_TRUE(o.last);
+    EXPECT_FALSE(o.other);
   }
   {  // a failed predicate leaves the token to the rest of the grammar
     IfPredTarget o;
-    EXPECT_EQ(run({"a"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(run({"LAST", "A"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_FALSE(run({"a"}, &o));
+    EXPECT_EQ(o.flags, 0u);
+    EXPECT_TRUE(o.other);
   }
 }
 
 namespace {
-struct TryFieldTarget {
+struct TryTarget {
   double num = 0;
   std::string_view first;
   std::optional<int> second;
   uint32_t positive = 0;
+  bool touched = false;
 };
-consteval auto MakeTryFieldGrammar() {
-  using T = TryFieldTarget;
-  return Compile(
-      Options(TryField("NUM", &T::num), TryField("PAIR", &T::first, &T::second),
-              TryField<Positive<uint32_t>>("POS", &T::positive, "POS must be positive")));
+void TouchThenReadInt(CmdArgParser* p, TryTarget* o) {
+  o->touched = true;
+  p->Next<int>();
+}
+consteval auto MakeTryGrammar() {
+  using T = TryTarget;
+  return Compile(Options(Try(Field("NUM", &T::num)), Try(Field("PAIR", &T::first, &T::second)),
+                         Try(Field<Positive<uint32_t>>("POS", &T::positive)),
+                         Try(Action("TOUCH", TouchThenReadInt))));
 }
 }  // namespace
 
-TEST_F(CmdArgParserTest, CapGrammarTryField) {
-  static constexpr auto kGrammar = MakeTryFieldGrammar();
-  auto run = [&](std::initializer_list<std::string_view> args, TryFieldTarget* o) {
+TEST_F(CmdArgParserTest, CapGrammarTry) {
+  static constexpr auto kGrammar = MakeTryGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, TryTarget* o) {
     auto parser = Make(args);
     kGrammar.Apply(&parser, o);
     parser.Finalize();
@@ -1112,25 +1115,25 @@ TEST_F(CmdArgParserTest, CapGrammarTryField) {
   };
 
   {
-    TryFieldTarget o;
-    EXPECT_FALSE(run({"NUM", "-2.5", "PAIR", "", "7", "POS", "3"}, &o));
+    TryTarget o;
+    EXPECT_FALSE(run({"NUM", "-2.5", "PAIR", "", "7", "POS", "3", "TOUCH", "1"}, &o));
     EXPECT_EQ(o.num, -2.5);
     EXPECT_EQ(o.second, 7);
     EXPECT_EQ(o.positive, 3u);
+    EXPECT_TRUE(o.touched);
   }
-  {  // a missing or unparsable value leaves the tag unmatched, without an error of its own
-    TryFieldTarget o;
+  {  // an error leaves the tag to the other rules and the target as it was
+    TryTarget o;
+    o.num = 1.5;
     EXPECT_EQ(run({"NUM", "x"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(run({"NUM", ""}, &o).type, CmdArgParser::UNPROCESSED);
     EXPECT_EQ(run({"NUM"}, &o).type, CmdArgParser::UNPROCESSED);
     EXPECT_EQ(run({"PAIR", "a"}, &o).type, CmdArgParser::UNPROCESSED);
     EXPECT_EQ(run({"PAIR", "a", "x"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(run({"POS", "x"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"POS", "0"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"TOUCH", "x"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(o.num, 1.5);
     EXPECT_EQ(o.first, "");
-  }
-  {  // a value that parses but breaks its rule is still reported
-    TryFieldTarget o;
-    EXPECT_EQ(run({"POS", "0"}, &o).MakeReply().ToSv(), "POS must be positive");
+    EXPECT_FALSE(o.touched);
   }
 }
 

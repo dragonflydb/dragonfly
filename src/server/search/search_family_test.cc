@@ -5179,7 +5179,7 @@ TEST_F(SearchFamilyTest, SchemaOptionOrders) {
               ErrArg("Field type dm:en is not supported"));
   EXPECT_THAT(
       Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TEXT", "SORTABLE", "WEIGHT", "-1"}),
-      ErrArg("Invalid WEIGHT value"));
+      ErrArg("Field type -1 is not supported"));
 }
 
 // Every schema that FT.CREATE accepts reads back unchanged from the definition stored for it.
