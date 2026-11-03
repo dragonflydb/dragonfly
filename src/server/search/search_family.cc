@@ -220,9 +220,9 @@ struct ValidTextWeight : facade::VNum<double> {
   }
 };
 
-constexpr auto kTextWeight = Field<ValidTextWeight>("WEIGHT", &TP::weight, "Invalid WEIGHT value");
-constexpr auto kTextParams = Options(Exist("WITHSUFFIXTRIE", &TP::with_suffixtrie),
-                                     Exist("NOSTEM", &TP::no_stem), kTextWeight);
+constexpr auto kTextParams =
+    Options(Exist("WITHSUFFIXTRIE", &TP::with_suffixtrie), Exist("NOSTEM", &TP::no_stem),
+            Field<ValidTextWeight>("WEIGHT", &TP::weight, "Invalid WEIGHT value"));
 constexpr auto kTextParamsGrammar = Compile(kTextParams);
 
 search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
@@ -367,23 +367,10 @@ bool BeforeArg(const CmdArgParser& parser) {
   return parser.HasAtLeast(2);
 }
 
-bool BeforeNumber(const CmdArgParser& parser) {
-  double number;
-  return absl::SimpleAtod(parser.Peek(1), &number);
-}
-
 // The matcher after PHONETIC, such as dm:en, that allows it in lower case on TEXT.
 bool BeforeMatcher(const CmdArgParser& parser) {
   string_view arg = parser.Peek(1);
   return arg.size() == 5 && arg[2] == ':';
-}
-
-bool IsText(const search::SchemaField& field) {
-  return std::holds_alternative<TP>(field.special_params);
-}
-
-bool IsTag(const search::SchemaField& field) {
-  return std::holds_alternative<search::SchemaField::TagParams>(field.special_params);
 }
 
 // Field options: type parameters before the flags, SORTABLE [UNF] and NOINDEX in any order, and, as
@@ -395,18 +382,28 @@ ParseResult<search::SchemaField> ParseFieldOptions(CmdArgParser* parser, string_
 
   // In lower case these words name fields, as older versions stored them.
   static constexpr auto kAnywhere =
-      Options(If(IsUpper, Flags(&SF::flags, "UNF", SF::UNF, "INDEXMISSING", SF::INDEXMISSING,
-                                "INDEXEMPTY", SF::INDEXEMPTY)),
-              If(IsUpper, If(BeforeArg, Action("PHONETIC", IgnorePhonetic))),
-              If(IsText, If(BeforeMatcher, Action("PHONETIC", IgnorePhonetic))));
-  static constexpr auto kGrammar = Compile(
-      Options(kAnywhere, If(IsText, Into(&SF::special_params, kTextParams)),
-              If(IsTag, Into(&SF::special_params, kTagParams))),
-      Options(Flags(&SF::flags, "SORTABLE", SF::SORTABLE, "NOINDEX", SF::NOINDEX), kAnywhere,
-              If(IsText,
-                 Into(&SF::special_params, Options(If(BeforeNumber, kTextWeight),
-                                                   If(IsUpper, Exist("NOSTEM", &TP::no_stem)))))));
-  kGrammar.Apply(parser, &field);
+      If(IsUpper, Options(Flags(&SF::flags, "UNF", SF::UNF, "INDEXMISSING", SF::INDEXMISSING,
+                                "INDEXEMPTY", SF::INDEXEMPTY),
+                          If(BeforeArg, Action("PHONETIC", IgnorePhonetic))));
+  static constexpr auto kFlags =
+      Flags(&SF::flags, "SORTABLE", SF::SORTABLE, "NOINDEX", SF::NOINDEX);
+  static constexpr auto kTextAnywhere =
+      Options(kAnywhere, If(BeforeMatcher, Action("PHONETIC", IgnorePhonetic)));
+  static constexpr auto kText = Compile(
+      Options(kTextAnywhere, Into(&SF::special_params, kTextParams)),
+      Options(kFlags, kTextAnywhere,
+              Into(&SF::special_params,
+                   Options(TryField<ValidTextWeight>("WEIGHT", &TP::weight, "Invalid WEIGHT value"),
+                           If(IsUpper, Exist("NOSTEM", &TP::no_stem))))));
+  static constexpr auto kTag = Compile(Options(kAnywhere, Into(&SF::special_params, kTagParams)),
+                                       Options(kFlags, kAnywhere));
+  static constexpr auto kOther = Compile(Options(kFlags, kAnywhere));
+  if (field.type == SF::TEXT)
+    kText.Apply(parser, &field);
+  else if (field.type == SF::TAG)
+    kTag.Apply(parser, &field);
+  else
+    kOther.Apply(parser, &field);
 
   if ((field.flags & SF::NOINDEX) && (field.flags & SF::INDEXMISSING)) {
     return CreateSyntaxError(

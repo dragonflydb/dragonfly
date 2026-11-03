@@ -1051,24 +1051,17 @@ TEST_F(CmdArgParserTest, CapGrammarTagValue) {
 namespace {
 struct IfPredTarget {
   uint8_t flags = 0;
-  double num = 0;
-  bool enabled = false;
-  bool seen = false;
+  bool last = false;
 };
 bool IsUpperToken(const CmdArgParser& p) {
   return std::ranges::none_of(p.Peek(), [](char c) { return c >= 'a' && c <= 'z'; });
 }
-bool BeforeNumber(const CmdArgParser& p) {
-  double number;
-  return absl::SimpleAtod(p.Peek(1), &number);
-}
-bool IsEnabled(const IfPredTarget& o) {
-  return o.enabled;
+bool AtEnd(const CmdArgParser& p) {
+  return !p.HasAtLeast(2);
 }
 consteval auto MakeIfPredGrammar() {
   return Compile(Options(If(IsUpperToken, Flags(&IfPredTarget::flags, "A", uint8_t{1})),
-                         If(BeforeNumber, Field("NUM", &IfPredTarget::num)),
-                         If(IsEnabled, Exist("SEEN", &IfPredTarget::seen))));
+                         If(AtEnd, Exist("LAST", &IfPredTarget::last))));
 }
 }  // namespace
 
@@ -1082,19 +1075,62 @@ TEST_F(CmdArgParserTest, CapGrammarIfPredicate) {
   };
 
   {
-    IfPredTarget o{.enabled = true};
-    EXPECT_FALSE(run({"A", "NUM", "-2.5", "SEEN"}, &o));
+    IfPredTarget o;
+    EXPECT_FALSE(run({"A", "LAST"}, &o));
     EXPECT_EQ(o.flags, 1u);
-    EXPECT_EQ(o.num, -2.5);
-    EXPECT_TRUE(o.seen);
+    EXPECT_TRUE(o.last);
   }
   {  // a failed predicate leaves the token to the rest of the grammar
     IfPredTarget o;
     EXPECT_EQ(run({"a"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"LAST", "A"}, &o).type, CmdArgParser::UNPROCESSED);
+  }
+}
+
+namespace {
+struct TryFieldTarget {
+  double num = 0;
+  std::string_view first;
+  std::optional<int> second;
+  uint32_t positive = 0;
+};
+consteval auto MakeTryFieldGrammar() {
+  using T = TryFieldTarget;
+  return Compile(
+      Options(TryField("NUM", &T::num), TryField("PAIR", &T::first, &T::second),
+              TryField<Positive<uint32_t>>("POS", &T::positive, "POS must be positive")));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarTryField) {
+  static constexpr auto kGrammar = MakeTryFieldGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, TryFieldTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {
+    TryFieldTarget o;
+    EXPECT_FALSE(run({"NUM", "-2.5", "PAIR", "", "7", "POS", "3"}, &o));
+    EXPECT_EQ(o.num, -2.5);
+    EXPECT_EQ(o.second, 7);
+    EXPECT_EQ(o.positive, 3u);
+  }
+  {  // a missing or unparsable value leaves the tag unmatched, without an error of its own
+    TryFieldTarget o;
     EXPECT_EQ(run({"NUM", "x"}, &o).type, CmdArgParser::UNPROCESSED);
     EXPECT_EQ(run({"NUM", ""}, &o).type, CmdArgParser::UNPROCESSED);
     EXPECT_EQ(run({"NUM"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(run({"SEEN"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"PAIR", "a"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"PAIR", "a", "x"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(run({"POS", "x"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(o.first, "");
+  }
+  {  // a value that parses but breaks its rule is still reported
+    TryFieldTarget o;
+    EXPECT_EQ(run({"POS", "0"}, &o).MakeReply().ToSv(), "POS must be positive");
   }
 }
 
@@ -1152,14 +1188,10 @@ struct VarTag {
 struct IntoVariantTarget {
   std::variant<std::monostate, VarText, VarTag> params;
 };
-bool HoldsTag(const IntoVariantTarget& o) {
-  return std::holds_alternative<VarTag>(o.params);
-}
 consteval auto MakeIntoVariantGrammar() {
   using T = IntoVariantTarget;
-  return Compile(
-      Options(Into(&T::params, Exist("NOSTEM", &VarText::no_stem)),
-              If(HoldsTag, Into(&T::params, Exist("CASESENSITIVE", &VarTag::case_sensitive)))));
+  return Compile(Options(Into(&T::params, Exist("NOSTEM", &VarText::no_stem)),
+                         Into(&T::params, Exist("CASESENSITIVE", &VarTag::case_sensitive))));
 }
 }  // namespace
 
@@ -1182,11 +1214,6 @@ TEST_F(CmdArgParserTest, CapGrammarIntoVariant) {
     IntoVariantTarget o{VarTag{}};
     EXPECT_FALSE(run({"NOSTEM"}, &o));
     EXPECT_TRUE(std::get<VarText>(o.params).no_stem);
-  }
-  {  // If keeps the rule to a variant that already holds its alternative
-    IntoVariantTarget o;
-    EXPECT_EQ(run({"CASESENSITIVE"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_TRUE(std::holds_alternative<std::monostate>(o.params));
   }
 }
 

@@ -5177,6 +5177,9 @@ TEST_F(SearchFamilyTest, SchemaOptionOrders) {
               ErrArg("Field `PHONETIC` does not have a type"));
   EXPECT_THAT(Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TAG", "phonetic", "dm:en"}),
               ErrArg("Field type dm:en is not supported"));
+  EXPECT_THAT(
+      Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TEXT", "SORTABLE", "WEIGHT", "-1"}),
+      ErrArg("Invalid WEIGHT value"));
 }
 
 // Every schema that FT.CREATE accepts reads back unchanged from the definition stored for it.

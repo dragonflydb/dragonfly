@@ -87,6 +87,9 @@ namespace facade {
 //   Exist(tag, &T::flag)                  set a bool member when tag is present
 //   Field(tag, &T::a, ...)                read values after tag into the listed members
 //   Field<Parsed>(tag, &T::a, error)      parse as Parsed, then convert into the member type
+//   TryField(tag, &T::a, ...)             Field matched only when all its values follow and parse;
+//                                         a parsed value that breaks a rule is still reported
+//   TryField<Parsed>(tag, &T::a, error)   TryField with an explicit parsed type, like Field<Parsed>
 //   Action(tag, fn)                       call fn(CmdArgParser*, T*) after consuming tag
 //   TagValue(tag, &T::kind, k, &T::val)   set a discriminant and read the following value
 //   TagValue<Parsed>(...)                 TagValue with an explicit parsed value type
@@ -97,8 +100,8 @@ namespace facade {
 // Composition and control rules:
 //   If(&T::condition, rule)               enable rule only when the bool member is true
 //   IfNot(&T::condition, rule)            enable rule only when the bool member is false
-//   If(pred, rule)                        enable rule only when pred(const CmdArgParser&) (it may
-//                                         Peek() at the token and past it) or pred(const T&) holds
+//   If(pred, rule)                        enable rule only when pred(const CmdArgParser&) holds,
+//                                         which may Peek() at the token and the args after it
 //   Into(&T::nested, rule)                apply a rule to a nested member (engages an optional one,
 //                                         switches a variant to the rule's type when it matches)
 //   Skip(n)                               consume n positional args, or act as an option fallback
@@ -847,6 +850,37 @@ template <class P, class T, class M> struct ParsedField : TaggedRule<ParsedField
   M T::*field_;
 };
 
+// Whether arg parses as P; a validated number's rules are checked only when it is read.
+template <class P> bool Parses(std::string_view arg) {
+  if constexpr (is_optional<P>) {
+    return Parses<typename P::value_type>(arg);
+  } else if constexpr (as_vnum<P>) {
+    decltype(P::value) value{};
+    return TryParseNum(arg, &value);
+  } else if constexpr (std::is_arithmetic_v<P>) {
+    P value{};
+    return TryParseNum(arg, &value);
+  } else {
+    return true;
+  }
+}
+
+// Runs the inner rule only when the values it reads after its tag all follow and parse.
+template <class Inner, class... P> struct TryRule {
+  using Target = typename Inner::Target;
+  using State = typename Inner::State;
+  consteval explicit TryRule(Inner inner) : inner_(inner) {
+  }
+  bool Consume(CmdArgParser* p, std::string_view cur, Target* o, State& st) const {
+    size_t i = 1;
+    return p->HasAtLeast(1 + sizeof...(P)) && (Parses<P>(p->Peek(i++)) && ...) &&
+           inner_.Consume(p, cur, o, st);
+  }
+
+ private:
+  Inner inner_;
+};
+
 template <class T> struct Action : TaggedRule<Action<T>, T> {
   consteval Action(const char* tag, void (*fn)(CmdArgParser*, T*))
       : TaggedRule<Action<T>, T>(tag), fn_(fn) {
@@ -945,27 +979,18 @@ template <class T, class Inner> struct If {
   Inner inner_;
 };
 
-// A condition of If(pred, rule): a function of the parser or of the rule's target.
-template <class Pred, class Target>
-concept GrammarPredicate =
-    !std::is_member_pointer_v<Pred> && (std::is_invocable_r_v<bool, Pred, const CmdArgParser&> ||
-                                        std::is_invocable_r_v<bool, Pred, const Target&>);
-
-// Enables the inner rule only while the predicate holds for the parser or for the target.
-template <class Pred, class Inner> struct IfPred {
+// Enables the inner rule only while the predicate holds for the parser.
+template <class Inner> struct IfPred {
   using Target = typename Inner::Target;
   using State = typename Inner::State;
-  consteval IfPred(Pred pred, Inner inner) : pred_(pred), inner_(inner) {
+  consteval IfPred(bool (*pred)(const CmdArgParser&), Inner inner) : pred_(pred), inner_(inner) {
   }
-  template <class T> bool Consume(CmdArgParser* p, std::string_view cur, T* o, State& st) const {
-    if constexpr (std::is_invocable_v<Pred, const CmdArgParser&>)
-      return pred_(*p) && inner_.Consume(p, cur, o, st);
-    else
-      return pred_(*o) && inner_.Consume(p, cur, o, st);
+  bool Consume(CmdArgParser* p, std::string_view cur, Target* o, State& st) const {
+    return pred_(*p) && inner_.Consume(p, cur, o, st);
   }
 
  private:
-  Pred pred_;
+  bool (*pred_)(const CmdArgParser&);
   Inner inner_;
 };
 
@@ -1126,6 +1151,16 @@ requires std::convertible_to<P, M>
 consteval auto Field(const char* tag, M T::*field, std::string_view err = {}) {
   return cap_detail::ParsedField<P, T, M>{tag, err, field};
 }
+template <class T, class... M>
+requires(sizeof...(M) > 0 && (ParsedArg<M> && ...)) consteval auto TryField(const char* tag,
+                                                                            M T::*... fields) {
+  return cap_detail::TryRule<cap_detail::Field<T, M...>, M...>{{tag, fields...}};
+}
+template <class P, class T, class M>
+requires std::convertible_to<P, M>
+consteval auto TryField(const char* tag, M T::*field, std::string_view err = {}) {
+  return cap_detail::TryRule<cap_detail::ParsedField<P, T, M>, P>{{tag, err, field}};
+}
 template <class T> consteval auto Action(const char* tag, void (*fn)(CmdArgParser*, T*)) {
   return cap_detail::Action<T>{tag, fn};
 }
@@ -1164,10 +1199,8 @@ template <class T, class Inner> consteval auto If(bool T::*cond, Inner inner) {
 template <class T, class Inner> consteval auto IfNot(bool T::*cond, Inner inner) {
   return cap_detail::If<T, Inner>{cond, false, inner};
 }
-template <class Pred, class Inner>
-requires cap_detail::GrammarPredicate<Pred, typename Inner::Target>
-consteval auto If(Pred pred, Inner inner) {
-  return cap_detail::IfPred<Pred, Inner>{pred, inner};
+template <class Inner> consteval auto If(bool (*pred)(const CmdArgParser&), Inner inner) {
+  return cap_detail::IfPred<Inner>{pred, inner};
 }
 template <class T, class Member, class Inner>
 requires std::same_as<Member, typename Inner::Target> ||
