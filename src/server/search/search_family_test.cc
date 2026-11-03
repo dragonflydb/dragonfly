@@ -5166,56 +5166,46 @@ TEST_F(SearchFamilyTest, SchemaOptionOrders) {
   });
   EXPECT_THAT(stored, HasSubstr("NOSTEM INDEXEMPTY INDEXMISSING SORTABLE UNF weight"));
 
-  EXPECT_THAT(Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a\r\nb"}),
-              ErrArg("Field `a  b` does not have a type"));
-  EXPECT_THAT(
-      Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a\nb", "TEXT", "INDEXMISSING", "NOINDEX"}),
-      ErrArg("both `NOINDEX` and `INDEXMISSING` `a b`"));
-  EXPECT_THAT(Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TEXT", "UNf"}),
-              ErrArg("Field `UNf` does not have a type"));
-  EXPECT_THAT(Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TEXT", "PHONETIC"}),
-              ErrArg("Field `PHONETIC` does not have a type"));
-  EXPECT_THAT(Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TAG", "phonetic", "dm:en"}),
-              ErrArg("Field type dm:en is not supported"));
-  EXPECT_THAT(
-      Run({"FT.CREATE", "f", "ON", "HASH", "SCHEMA", "a", "TEXT", "SORTABLE", "WEIGHT", "-1"}),
-      ErrArg("Field type -1 is not supported"));
+  auto create = [&](string_view schema) {
+    return Run(absl::StrCat("FT.CREATE f ON HASH SCHEMA ", schema));
+  };
+  EXPECT_THAT(create("a\r\nb"), ErrArg("Field `a  b` does not have a type"));
+  EXPECT_THAT(create("a\nb TEXT INDEXMISSING NOINDEX"),
+              ErrArg("both `NOINDEX` and `INDEXMISSING` `a b`"));
+  EXPECT_THAT(create("a TEXT UNf"), ErrArg("Field `UNf` does not have a type"));
+  EXPECT_THAT(create("a TEXT PHONETIC"), ErrArg("Field `PHONETIC` does not have a type"));
+  EXPECT_THAT(create("a TAG phonetic dm:en"), ErrArg("Field type dm:en is not supported"));
+  EXPECT_THAT(create("a TEXT SORTABLE WEIGHT -1"), ErrArg("Field type -1 is not supported"));
 }
 
 // Every schema that FT.CREATE accepts reads back unchanged from the definition stored for it.
 TEST_F(SearchFamilyTest, EveryAcceptedSchemaRestores) {
-  const vector<vector<string>> options = {
-      {"SORTABLE"}, {"NOINDEX"},        {"UNF"},         {"INDEXMISSING"},      {"INDEXEMPTY"},
-      {"NOSTEM"},   {"WITHSUFFIXTRIE"}, {"WEIGHT", "2"}, {"PHONETIC", "dm:en"}, {"SEPARATOR", ";"}};
-  vector<vector<string>> sequences = {{}};
-  for (const auto& first : options) {
-    sequences.push_back(first);
-    for (const auto& second : options) {
-      sequences.push_back(first);
-      sequences.back().insert(sequences.back().end(), second.begin(), second.end());
-    }
+  const vector<string> options = {
+      "SORTABLE", "NOINDEX",        "UNF",      "INDEXMISSING",   "INDEXEMPTY",
+      "NOSTEM",   "WITHSUFFIXTRIE", "WEIGHT 2", "PHONETIC dm:en", "SEPARATOR ;"};
+  vector<string> sequences = {""};
+  for (const string& first : options) {
+    sequences.push_back(" " + first);
+    for (const string& second : options)
+      sequences.push_back(absl::StrCat(" ", first, " ", second));
   }
   for (string_view type : {"TEXT", "TAG", "NUMERIC"}) {
-    for (const auto& sequence : sequences) {
+    for (const string& sequence : sequences) {
       for (string_view name : {"UNF", "unf", "SORTABLE", "INDEXMISSING", "indexempty", "WEIGHT",
                                "PHONETIC", "NOSTEM", "SEPARATOR", "AS", "TEXT"}) {
-        vector<string> cmd = {"FT.CREATE", "a", "ON", "HASH", "SCHEMA", "t", string{type}};
-        cmd.insert(cmd.end(), sequence.begin(), sequence.end());
-        cmd.insert(cmd.end(), {string{name}, "TEXT"});
-        if (Run(absl::MakeSpan(cmd)) != "OK")
+        const string cmd =
+            absl::StrCat("FT.CREATE a ON HASH SCHEMA t ", type, sequence, " ", name, " TEXT");
+        if (Run(cmd) != "OK")
           continue;
 
         const string before = testing::PrintToString(Run({"FT.INFO", "a"}).GetVec()[7]);
-        vector<string> restore = {"FT.CREATE", "a"};
-        pp_->at(0)->Await([&] {
-          auto args =
-              EngineShard::tlocal()->search_indices()->GetIndex("a")->GetInfo().BuildRestoreArgs();
-          restore.insert(restore.end(), args.begin(), args.end());
+        const string restore = pp_->at(0)->Await([] {
+          auto* indices = EngineShard::tlocal()->search_indices();
+          return indices->GetIndex("a")->GetInfo().BuildRestoreCommand();
         });
         Run({"FT.DROPINDEX", "a"});
-        ASSERT_EQ(Run(absl::MakeSpan(restore)), "OK") << absl::StrJoin(cmd, " ");
-        EXPECT_EQ(testing::PrintToString(Run({"FT.INFO", "a"}).GetVec()[7]), before)
-            << absl::StrJoin(cmd, " ");
+        ASSERT_EQ(Run(absl::StrCat("FT.CREATE a ", restore)), "OK") << cmd;
+        EXPECT_EQ(testing::PrintToString(Run({"FT.INFO", "a"}).GetVec()[7]), before) << cmd;
         Run({"FT.DROPINDEX", "a"});
       }
     }

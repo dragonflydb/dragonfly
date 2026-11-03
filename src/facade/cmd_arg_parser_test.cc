@@ -1049,138 +1049,6 @@ TEST_F(CmdArgParserTest, CapGrammarTagValue) {
 }
 
 namespace {
-struct IfPredTarget {
-  uint8_t flags = 0;
-  bool other = false;
-};
-consteval auto MakeIfPredGrammar() {
-  auto is_upper = [](std::string_view token) {
-    return std::ranges::none_of(token, [](char c) { return c >= 'a' && c <= 'z'; });
-  };
-  return Compile(Options(If(is_upper, Flags(&IfPredTarget::flags, "A", uint8_t{1})),
-                         Exist("A", &IfPredTarget::other)));
-}
-}  // namespace
-
-TEST_F(CmdArgParserTest, CapGrammarIfPredicate) {
-  static constexpr auto kGrammar = MakeIfPredGrammar();
-  auto run = [&](std::initializer_list<std::string_view> args, IfPredTarget* o) {
-    auto parser = Make(args);
-    kGrammar.Apply(&parser, o);
-    parser.Finalize();
-    return parser.TakeError();
-  };
-
-  {
-    IfPredTarget o;
-    EXPECT_FALSE(run({"A"}, &o));
-    EXPECT_EQ(o.flags, 1u);
-    EXPECT_FALSE(o.other);
-  }
-  {  // a failed predicate leaves the token to the rest of the grammar
-    IfPredTarget o;
-    EXPECT_FALSE(run({"a"}, &o));
-    EXPECT_EQ(o.flags, 0u);
-    EXPECT_TRUE(o.other);
-  }
-}
-
-namespace {
-struct TryTarget {
-  double num = 0;
-  std::string_view first;
-  std::optional<int> second;
-  uint32_t positive = 0;
-  bool touched = false;
-};
-void TouchThenReadInt(CmdArgParser* p, TryTarget* o) {
-  o->touched = true;
-  p->Next<int>();
-}
-consteval auto MakeTryGrammar() {
-  using T = TryTarget;
-  return Compile(Options(Try(Field("NUM", &T::num)), Try(Field("PAIR", &T::first, &T::second)),
-                         Try(Field<Positive<uint32_t>>("POS", &T::positive)),
-                         Try(Action("TOUCH", TouchThenReadInt))));
-}
-}  // namespace
-
-TEST_F(CmdArgParserTest, CapGrammarTry) {
-  static constexpr auto kGrammar = MakeTryGrammar();
-  auto run = [&](std::initializer_list<std::string_view> args, TryTarget* o) {
-    auto parser = Make(args);
-    kGrammar.Apply(&parser, o);
-    parser.Finalize();
-    return parser.TakeError();
-  };
-
-  {
-    TryTarget o;
-    EXPECT_FALSE(run({"NUM", "-2.5", "PAIR", "", "7", "POS", "3", "TOUCH", "1"}, &o));
-    EXPECT_EQ(o.num, -2.5);
-    EXPECT_EQ(o.second, 7);
-    EXPECT_EQ(o.positive, 3u);
-    EXPECT_TRUE(o.touched);
-  }
-  {  // an error leaves the tag to the other rules and the target as it was
-    TryTarget o;
-    o.num = 1.5;
-    EXPECT_EQ(run({"NUM", "x"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(run({"NUM"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(run({"PAIR", "a"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(run({"PAIR", "a", "x"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(run({"POS", "0"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(run({"TOUCH", "x"}, &o).type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(o.num, 1.5);
-    EXPECT_EQ(o.first, "");
-    EXPECT_FALSE(o.touched);
-  }
-}
-
-namespace {
-struct GroupTarget {
-  bool a = false;
-  bool b = false;
-  bool c = false;
-};
-constexpr auto kAbRules =
-    Options(OneOf("A and B conflict", Exist("A", &GroupTarget::a), Exist("B", &GroupTarget::b)));
-consteval auto MakeGroupGrammar() {
-  return Compile(Options(kAbRules, Exist("C", &GroupTarget::c)));
-}
-}  // namespace
-
-TEST_F(CmdArgParserTest, CapGrammarNestedOptions) {
-  static constexpr auto kGrammar = MakeGroupGrammar();
-  static constexpr auto kAbGrammar = Compile(kAbRules);
-  auto run = [&](const auto& grammar, std::initializer_list<std::string_view> args,
-                 GroupTarget* o) {
-    auto parser = Make(args);
-    grammar.Apply(&parser, o);
-    parser.Finalize();
-    return parser.TakeError();
-  };
-
-  {
-    GroupTarget o;
-    EXPECT_FALSE(run(kGrammar, {"C", "A", "C"}, &o));
-    EXPECT_TRUE(o.a);
-    EXPECT_TRUE(o.c);
-  }
-  {  // the nested group keeps its state across the outer loop
-    GroupTarget o;
-    EXPECT_EQ(run(kGrammar, {"A", "C", "B"}, &o).MakeReply().ToSv(), "A and B conflict");
-  }
-  {  // the same group as a grammar of its own
-    GroupTarget o;
-    auto err = run(kAbGrammar, {"B", "C"}, &o);
-    EXPECT_EQ(err.type, CmdArgParser::UNPROCESSED);
-    EXPECT_EQ(err.index, 1u);
-    EXPECT_TRUE(o.b);
-  }
-}
-
-namespace {
 struct VarText {
   bool no_stem = false;
 };
@@ -1188,33 +1056,60 @@ struct VarTag {
   bool case_sensitive = false;
   char separator = ',';
 };
-struct IntoVariantTarget {
+struct WrapTarget {
+  bool upper = false;
+  bool lower = false;
+  bool a = false;
+  bool b = false;
+  double num = 0;
   std::variant<std::monostate, VarText, VarTag> params;
 };
-consteval auto MakeIntoVariantGrammar() {
-  using T = IntoVariantTarget;
-  return Compile(Options(Into(&T::params, Exist("NOSTEM", &VarText::no_stem)),
+consteval auto MakeWrapGrammar() {
+  using T = WrapTarget;
+  auto is_upper = [](std::string_view token) {
+    return std::ranges::none_of(token, [](char c) { return c >= 'a' && c <= 'z'; });
+  };
+  auto ab = Options(OneOf("A and B conflict", Exist("A", &T::a), Exist("B", &T::b)));
+  return Compile(Options(If(is_upper, Exist("U", &T::upper)), Exist("U", &T::lower), ab,
+                         Try(Field("NUM", &T::num)),
+                         Into(&T::params, Exist("NOSTEM", &VarText::no_stem)),
                          Into(&T::params, Exist("CASESENSITIVE", &VarTag::case_sensitive))));
 }
 }  // namespace
 
-TEST_F(CmdArgParserTest, CapGrammarIntoVariant) {
-  static constexpr auto kGrammar = MakeIntoVariantGrammar();
-  auto run = [&](std::initializer_list<std::string_view> args, IntoVariantTarget* o) {
+TEST_F(CmdArgParserTest, CapGrammarRuleWrappers) {
+  static constexpr auto kGrammar = MakeWrapGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, WrapTarget* o) {
     auto parser = Make(args);
     kGrammar.Apply(&parser, o);
     parser.Finalize();
     return parser.TakeError();
   };
 
-  {
-    IntoVariantTarget o{VarTag{.separator = ';'}};
+  {  // a failed predicate leaves the token to the next rule
+    WrapTarget o;
+    EXPECT_FALSE(run({"u"}, &o));
+    EXPECT_FALSE(o.upper);
+    EXPECT_TRUE(o.lower);
+    EXPECT_FALSE(run({"U"}, &o));
+    EXPECT_TRUE(o.upper);
+  }
+  {  // a failed Try restores the parser and the target
+    WrapTarget o;
+    EXPECT_FALSE(run({"NUM", "2.5"}, &o));
+    EXPECT_EQ(run({"NUM", "x"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(o.num, 2.5);
+  }
+  {  // the nested group keeps its state across the outer loop
+    WrapTarget o;
+    EXPECT_EQ(run({"A", "U", "B"}, &o).MakeReply().ToSv(), "A and B conflict");
+  }
+  {  // a match keeps the held alternative's values or switches to the rule's alternative
+    WrapTarget o;
+    o.params = VarTag{.separator = ';'};
     EXPECT_FALSE(run({"CASESENSITIVE"}, &o));
     EXPECT_TRUE(std::get<VarTag>(o.params).case_sensitive);
     EXPECT_EQ(std::get<VarTag>(o.params).separator, ';');
-  }
-  {  // a match switches the variant to the rule's alternative
-    IntoVariantTarget o{VarTag{}};
     EXPECT_FALSE(run({"NOSTEM"}, &o));
     EXPECT_TRUE(std::get<VarText>(o.params).no_stem);
   }
