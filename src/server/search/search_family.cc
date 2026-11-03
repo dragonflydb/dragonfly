@@ -1149,8 +1149,7 @@ join::Vector<join::Vector<join::Key>> DoJoin(
       if (limit >= joined_entries->size()) {
         rng::sort(*joined_entries, std::move(comparator));
       } else {
-        std::partial_sort(joined_entries->begin(), joined_entries->begin() + limit,
-                          joined_entries->end(), std::move(comparator));
+        rng::partial_sort(*joined_entries, joined_entries->begin() + limit, std::move(comparator));
         joined_entries->resize(limit);
       }
     }
@@ -1244,7 +1243,7 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
   auto cb = [order, field](SerializedSearchDoc* l, SerializedSearchDoc* r) {
     return order == SortOrder::ASC ? l->*field < r->*field : r->*field < l->*field;
   };
-  partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
+  rng::partial_sort(docs, docs.begin() + min(limit, docs.size()), cb);
 }
 
 // Global SORTBY merge across shards, in the same order the shards used (SortRanksBefore).
@@ -1252,7 +1251,7 @@ void PartialSortBySortScore(absl::Span<SerializedSearchDoc*> docs, size_t limit,
   auto ranks_before = [order](SerializedSearchDoc* l, SerializedSearchDoc* r) {
     return SortRanksBefore(l->sort_score, l->key, r->sort_score, r->key, order);
   };
-  partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), ranks_before);
+  rng::partial_sort(docs, docs.begin() + min(limit, docs.size()), ranks_before);
 }
 
 bool IsBM25StdNorm(const std::optional<search::ScorerSpec>& scorer) {
@@ -1262,7 +1261,7 @@ bool IsBM25StdNorm(const std::optional<search::ScorerSpec>& scorer) {
 // Global max raw text score across per-shard results, used to normalize BM25STD.NORM by the
 // max over the full matched set. Returns 0 when there are no scored docs.
 float GlobalMaxTextScore(absl::Span<const SearchResult> results) {
-  auto max_it = std::ranges::max_element(
+  auto max_it = rng::max_element(
       results, [](const auto& a, const auto& b) { return a.max_text_score < b.max_text_score; });
   return max_it == results.end() ? 0.0f : max_it->max_text_score;
 }
@@ -1327,8 +1326,7 @@ void SearchReply(const SearchParams& params,
         return l->text_score > r->text_score;
       return l->key < r->key;
     };
-    partial_sort(docs.begin(), docs.begin() + std::min(end, docs.size()), docs.end(),
-                 by_score_then_key);
+    rng::partial_sort(docs, docs.begin() + std::min(end, docs.size()), by_score_then_key);
   }
 
   // Apply SORTBY if its different from the KNN sort
@@ -1468,15 +1466,14 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
 
   // Transform shard results back to a flat list of serialized docs.
   size_t shard_id = 0;
-  std::for_each(shard_docs.begin(), shard_docs.end(),
-                [&](const std::vector<SerializedSearchDoc>& shard) {
-                  const auto& serialized = shard_docs_serialized_indicator[shard_id];
-                  for (size_t doc_index = 0; doc_index < shard.size(); ++doc_index) {
-                    if (doc_index < serialized.size() && serialized[doc_index])
-                      knn_search_serialized_docs.push_back(shard[doc_index]);
-                  }
-                  shard_id++;
-                });
+  rng::for_each(shard_docs, [&](const std::vector<SerializedSearchDoc>& shard) {
+    const auto& serialized = shard_docs_serialized_indicator[shard_id];
+    for (size_t doc_index = 0; doc_index < shard.size(); ++doc_index) {
+      if (doc_index < serialized.size() && serialized[doc_index])
+        knn_search_serialized_docs.push_back(shard[doc_index]);
+    }
+    shard_id++;
+  });
 
   results[0].total_hits = knn_search_serialized_docs.size();
   for (const auto& doc : knn_search_serialized_docs)
@@ -1518,8 +1515,8 @@ std::vector<std::pair<float, search::GlobalDocId>> SearchHnswWithPrefilter(
     return index->SubsetKnn(knn->blob.data(), knn->limit, ids);
 
   // HnswVectorIndex::Knn(... allowed) uses binary_search for membership.
-  if (!is_sorted(ids.begin(), ids.end()))
-    sort(ids.begin(), ids.end());
+  if (!rng::is_sorted(ids))
+    rng::sort(ids);
 
   return index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, ids);
 }
@@ -1657,9 +1654,7 @@ vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
     std::vector<SearchResult>& sharded_prefilter_docs) {
   // Sort each shard's prefilter docs by local id so a range hit can be matched with binary search.
   for (auto& shard : sharded_prefilter_docs)
-    std::sort(
-        shard.docs.begin(), shard.docs.end(),
-        [](const SerializedSearchDoc& a, const SerializedSearchDoc& b) { return a.id < b.id; });
+    rng::sort(shard.docs, {}, &SerializedSearchDoc::id);
 
   auto range_results =
       index->RangeQuery(range->blob.data(), static_cast<float>(range->radius), range->epsilon);
@@ -1671,9 +1666,7 @@ vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
     if (shard_id >= sharded_prefilter_docs.size())
       continue;
     auto& docs = sharded_prefilter_docs[shard_id].docs;
-    auto it =
-        std::lower_bound(docs.begin(), docs.end(), local_id,
-                         [](const SerializedSearchDoc& d, search::DocId id) { return d.id < id; });
+    auto it = rng::lower_bound(docs, local_id, {}, &SerializedSearchDoc::id);
     if (it != docs.end() && it->id == local_id) {
       out.emplace_back(std::move(*it));
       out.back().knn_score = dist;
@@ -2022,17 +2015,15 @@ void ComputeRrfCombined(float rrf_constant, absl::flat_hash_map<string, HybridDo
       knn_ranked.push_back(&e);
   }
 
-  std::sort(
-      text_ranked.begin(), text_ranked.end(), [](const HybridDocEntry* a, const HybridDocEntry* b) {
-        return a->text_score != b->text_score ? a->text_score > b->text_score : a->key < b->key;
-      });
+  rng::sort(text_ranked, [](const HybridDocEntry* a, const HybridDocEntry* b) {
+    return a->text_score != b->text_score ? a->text_score > b->text_score : a->key < b->key;
+  });
   for (size_t r = 0; r < text_ranked.size(); ++r)
     text_ranked[r]->text_rank = r + 1;
 
-  std::sort(knn_ranked.begin(), knn_ranked.end(),
-            [](const HybridDocEntry* a, const HybridDocEntry* b) {
-              return a->knn_dist != b->knn_dist ? a->knn_dist < b->knn_dist : a->key < b->key;
-            });
+  rng::sort(knn_ranked, [](const HybridDocEntry* a, const HybridDocEntry* b) {
+    return a->knn_dist != b->knn_dist ? a->knn_dist < b->knn_dist : a->key < b->key;
+  });
   for (size_t r = 0; r < knn_ranked.size(); ++r)
     knn_ranked[r]->knn_rank = r + 1;
 
@@ -2052,10 +2043,9 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
   const size_t total_hits = docs.size();
   const size_t end = std::min(params.limit_offset + params.limit_total, docs.size());
 
-  partial_sort(docs.begin(), docs.begin() + end, docs.end(),
-               [](const HybridDocEntry* a, const HybridDocEntry* b) {
-                 return a->combined != b->combined ? a->combined > b->combined : a->key < b->key;
-               });
+  rng::partial_sort(docs, docs.begin() + end, [](const HybridDocEntry* a, const HybridDocEntry* b) {
+    return a->combined != b->combined ? a->combined > b->combined : a->key < b->key;
+  });
 
   const size_t offset = std::min(params.limit_offset, docs.size());
   const size_t limit = std::min(docs.size() - offset, params.limit_total);
@@ -2292,7 +2282,7 @@ void NormalizeAggregateScores(absl::Span<aggregate::DocValues> values) {
   if (values.empty())
     return;
 
-  double max_score = std::ranges::max(values | std::views::transform(get_score));
+  double max_score = rng::max(values | std::views::transform(get_score));
   if (max_score == 0)
     return;
 
@@ -2918,9 +2908,8 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   });
 
   // Count how many shards didn't find the index by checking empty entries.
-  size_t num_notfound = std::count_if(infos.begin(), infos.end(), [](const DocIndexInfo& info) {
-    return info.base_index.schema.fields.empty();
-  });
+  size_t num_notfound = rng::count_if(
+      infos, [](const DocIndexInfo& info) { return info.base_index.schema.fields.empty(); });
 
   DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -3180,10 +3169,9 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   const search::AstVectorRangeNode* hnsw_range_prefilter = nullptr;
   if (!knn) {
     auto ranges = search_algo.CollectVectorRangeNodes();
-    const bool has_hnsw_range =
-        std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
-          return GlobalHnswIndexRegistry::Instance().Exist(resolved_name, r->field);
-        });
+    const bool has_hnsw_range = rng::any_of(ranges, [&](const search::AstVectorRangeNode* r) {
+      return GlobalHnswIndexRegistry::Instance().Exist(resolved_name, r->field);
+    });
     if (ranges.size() > 1 && has_hnsw_range) {
       return builder->SendError(
           "Combining multiple VECTOR_RANGE clauses with an HNSW index is not supported");
@@ -3621,8 +3609,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   search::AstExpr hnsw_range_holder;
   const search::AstVectorRangeNode* hnsw_range_prefilter = nullptr;
   auto ranges = search_algo.CollectVectorRangeNodes();
-  if (ranges.size() > 1 &&
-      std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
+  if (ranges.size() > 1 && rng::any_of(ranges, [&](const search::AstVectorRangeNode* r) {
         return GlobalHnswIndexRegistry::Instance().Exist(resolved_name, r->field);
       })) {
     return rb->SendError(
@@ -3950,7 +3937,7 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
   std::optional<std::vector<search::GlobalDocId>> prefilter_ids;
   if (has_prefilter) {
     auto ids = RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores);
-    std::sort(ids.begin(), ids.end());  // sorted for the binary_search intersection below
+    rng::sort(ids);  // sorted for the binary_search intersection below
     prefilter_ids = std::move(ids);
   }
 
@@ -3959,9 +3946,8 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
   auto range_results = hnsw_index->RangeQuery(
       hnsw_range->blob.data(), static_cast<float>(hnsw_range->radius), hnsw_range->epsilon);
   if (prefilter_ids) {
-    erase_if(range_results, [&](const auto& r) {
-      return !std::binary_search(prefilter_ids->begin(), prefilter_ids->end(), r.second);
-    });
+    erase_if(range_results,
+             [&](const auto& r) { return !rng::binary_search(*prefilter_ids, r.second); });
   }
   auto shard_docs = GroupByShardId(range_results, shard_set->size());
   if (RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, hnsw_range->score_alias,
@@ -4038,8 +4024,7 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     if (!knn) {
       auto ranges = search_algo.CollectVectorRangeNodes();
-      if (ranges.size() > 1 &&
-          std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
+      if (ranges.size() > 1 && rng::any_of(ranges, [&](const search::AstVectorRangeNode* r) {
             return GlobalHnswIndexRegistry::Instance().Exist(params->index, r->field);
           })) {
         return builder->SendError(
@@ -4180,8 +4165,7 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Auto-add __score to visible fields when ADDSCORES is set
   static constexpr std::string_view kScoreField = "__score";
-  if (params->add_scores &&
-      std::find(load_fields.begin(), load_fields.end(), kScoreField) == load_fields.end()) {
+  if (params->add_scores && rng::find(load_fields, kScoreField) == load_fields.end()) {
     load_fields.push_back(kScoreField);
   }
 
