@@ -1129,6 +1129,8 @@ Usage: dragonfly [FLAGS]
   }
 
   LOG(INFO) << "Starting dragonfly " << GetVersion() << "-" << kGitSha;
+  LOG(INFO) << "Starting from 2.1 our license agreement was updated. See "
+            << "https://github.com/dragonflydb/dragonfly/blob/main/LICENSE.md for more details.";
 
   struct sigaction act;
   act.sa_handler = sigill_hdlr;
