@@ -3180,24 +3180,24 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   const search::AstVectorRangeNode* hnsw_range_prefilter = nullptr;
   if (!knn) {
     auto ranges = search_algo.CollectVectorRangeNodes();
-    if (ranges.size() > 1 &&
+    const bool has_hnsw_range =
         std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
           return GlobalHnswIndexRegistry::Instance().Exist(resolved_name, r->field);
-        })) {
+        });
+    if (ranges.size() > 1 && has_hnsw_range) {
       return builder->SendError(
           "Combining multiple VECTOR_RANGE clauses with an HNSW index is not supported");
     }
-    if (auto* vr = search_algo.GetVectorRangeNode(); vr != nullptr) {
-      if (GlobalHnswIndexRegistry::Instance().Exist(resolved_name, vr->field)) {
-        if (search_algo.IsBareVectorRange()) {
-          hnsw_range = vr;
-        } else if (search_algo.IsAndedVectorRange()) {
-          hnsw_range_holder = search_algo.ExtractVectorRangeAsPrefilter();
-          hnsw_range_prefilter = hnsw_range_holder->As<search::AstVectorRangeNode>();
-        } else {
-          return builder->SendError(
-              "Combining VECTOR_RANGE with OR/NOT is not supported on HNSW indexes");
-        }
+    if (has_hnsw_range) {
+      const auto* vr = ranges.front();
+      if (search_algo.IsBareVectorRange()) {
+        hnsw_range = vr;
+      } else if (search_algo.IsAndedVectorRange()) {
+        hnsw_range_holder = search_algo.ExtractVectorRangeAsPrefilter();
+        hnsw_range_prefilter = hnsw_range_holder->As<search::AstVectorRangeNode>();
+      } else {
+        return builder->SendError(
+            "Combining VECTOR_RANGE with OR/NOT is not supported on HNSW indexes");
       }
     }
   }
