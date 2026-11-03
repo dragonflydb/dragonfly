@@ -9933,6 +9933,28 @@ TEST_F(SearchFamilyTest, DroppedHnswGraphIsRetired) {
   }
 }
 
+// The index stays registered while dropping it waits for a search on its graph, so the deletions
+// in between still go through the index.
+TEST_F(SearchFamilyTest, DropIndexRetiresWhileRegistered) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");
+  ResetService();
+
+  Run("FT.CREATE hx ON HASH PREFIX 1 h: SCHEMA v VECTOR HNSW 6 TYPE FLOAT32 DIM 512 "
+      "DISTANCE_METRIC L2");
+  WaitForIndexReady("hx");
+  Fiber dropper;
+  {
+    auto search = GlobalHnswIndexRegistry::Instance().Get("hx", "v")->GetReadLock();
+    dropper = pp_->at(1)->LaunchFiber([&] { EXPECT_EQ(Run({"FT.DROPINDEX", "hx"}), "OK"); });
+    ThisFiber::SleepFor(20ms);
+    pp_->at(0)->Await(
+        [] { EXPECT_NE(EngineShard::tlocal()->search_indices()->GetIndex("hx"), nullptr); });
+  }
+  dropper.Join();
+  EXPECT_THAT(Run({"FT._LIST"}).GetVec(), testing::IsEmpty());
+}
+
 TEST_F(SearchFamilyTest, AlterTextWeight) {
   Run({"HSET", "d:1", "title", "hello", "body", "weighted"});
   EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),

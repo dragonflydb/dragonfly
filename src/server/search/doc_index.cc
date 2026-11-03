@@ -757,6 +757,11 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const
     return;
   }
 
+  // Retired graphs ignore additions, and taking their locks would keep Retire waiting.
+  if (rng::any_of(hnsw_shard_indices_,
+                  [](const auto& hnsw) { return hnsw.global_index()->IsRetired(); }))
+    return;
+
   auto locks = TryLockHnswIndices(doc_id);
   if (!locks) {
     DeferHnswUpdate(doc_id, db_cntx.ns);
@@ -1690,17 +1695,30 @@ unique_ptr<ShardDocIndex> ShardDocIndices::ExtractIndex(string_view name) {
   if (it == indices_.end())
     return nullptr;
 
+  // Searches may still hold the graphs. Retire them while the index is registered, so that the
+  // deletions during the wait still defer and keep what the graphs point into.
+  it->second->RetireHnswIndices();
+
+  // Retiring may suspend.
+  it = indices_.find(name);
+  DCHECK(it != indices_.end());
   DropIndexCache(*it->second);
   auto index = std::move(it->second);
   indices_.erase(it);
-
-  // Searches may still hold the graphs, which point into documents this index no longer guards.
-  index->RetireHnswIndices();
   return index;
 }
 
 void ShardDocIndices::DropAllIndices() {
   aliases_.clear();
+
+  // Retire while the indices are registered, as ExtractIndex does. Retiring may suspend, so don't
+  // iterate the map meanwhile.
+  vector<ShardDocIndex*> registered;
+  for (auto& [_, idx] : indices_)
+    registered.push_back(idx.get());
+  for (auto* idx : registered)
+    idx->RetireHnswIndices();
+
   // Move indices out before destroying — ShardDocIndex destructors can yield
   // (CancelBuilder joins a fiber), and destroying inside the map would trigger
   // Abseil's reentrance assert if the heartbeat iterates indices_ mid-clear.
@@ -1708,7 +1726,6 @@ void ShardDocIndices::DropAllIndices() {
   std::swap(to_destroy, indices_);
   for (auto& [_, idx] : to_destroy) {
     DropIndexCache(*idx);
-    idx->RetireHnswIndices();
   }
   GlobalHnswIndexRegistry::Instance().Reset();
   // to_destroy goes out of scope here — destructors run outside the map mutation

@@ -94,6 +94,10 @@ struct HnswlibAdapter {
     { MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock); }
   }
 
+  bool IsRetired() const {
+    return retired_;
+  }
+
   vector<pair<float, GlobalDocId>> Knn(const void* target, size_t k, std::optional<uint32_t> ef) {
     uint32_t ef_runtime = ef.value_or(ef_runtime_);
     auto lock = LockIfActive(MRMWMutex::LockMode::kReadLock);
@@ -539,6 +543,10 @@ void HnswVectorIndex::Remove(GlobalDocId id) {
 
 void HnswVectorIndex::Retire() {
   adapter_->Retire();
+}
+
+bool HnswVectorIndex::IsRetired() const {
+  return adapter_->IsRetired();
 }
 
 HnswIndexMetadata HnswVectorIndex::GetMetadata() const {
