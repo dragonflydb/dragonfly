@@ -793,15 +793,8 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
-  if (tiered_storage_ && tiered_storage_->ShouldOffload()) {
-    VLOG(1) << "Running Offloading, memory=" << db_slice.memory_budget()
-            << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
-
-    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-      if (!db_slice.IsDbValid(i))
-        continue;
-      tiered_storage_->RunOffloading(i);
-    }
+  if (tiered_storage_) {
+    tiered_storage_->Heartbeat();
   }
 }
 
@@ -1196,8 +1189,8 @@ void EngineShard::AddTypeMemDelta(size_t type, int64_t delta) {
   if (delta == 0)
     return;
 
-  DCHECK_LT(type, type_mem_delta_.size());
-  type_mem_delta_[type] += delta;
+  DCHECK_LT(type, type_attributed_memory_.size());
+  type_attributed_memory_[type] += delta;
 }
 
 }  // namespace dfly

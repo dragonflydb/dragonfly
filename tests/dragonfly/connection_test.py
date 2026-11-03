@@ -409,15 +409,11 @@ the connections is running all commands in its context
 
 
 async def test_pipeline_support(async_client):
-    def generate(max):
-        for i in range(max):
-            yield f"key{i}", f"value={i}"
-
-    messages = {a: b for a, b in generate(5)}
+    messages = {f"key{i}": f"value={i}" for i in range(5)}
     assert await run_pipeline_mode(async_client, messages)
 
 
-async def reader(channel: aioredis.client.PubSub, messages, max: int):
+async def reader(channel: aioredis.client.PubSub, messages):
     message_count = len(messages)
     while message_count > 0:
         try:
@@ -457,11 +453,7 @@ expected results on the subscriber side
 
 
 async def test_pubsub_command(async_client):
-    def generate(max):
-        for i in range(max):
-            yield f"message number {i}"
-
-    messages = [a for a in generate(5)]
+    messages = [f"message number {i}" for i in range(5)]
     assert await run_pubsub(async_client, messages, "channel-1")
 
 
@@ -469,7 +461,7 @@ async def run_pubsub(async_client, messages, channel_name):
     pubsub = async_client.pubsub()
     await pubsub.subscribe(channel_name)
 
-    future = asyncio.create_task(reader(pubsub, messages, len(messages)))
+    future = asyncio.create_task(reader(pubsub, messages))
     success = True
 
     for message in messages:
@@ -491,38 +483,6 @@ async def run_pubsub(async_client, messages, channel_name):
         )
 
 
-async def run_multi_pubsub(async_client, messages, channel_name):
-    subs = [async_client.pubsub() for i in range(5)]
-    for s in subs:
-        await s.subscribe(channel_name)
-
-    tasks = [
-        asyncio.create_task(reader(s, messages, random.randint(0, len(messages)))) for s in subs
-    ]
-
-    success = True
-
-    for message in messages:
-        res = await async_client.publish(channel_name, message)
-        if not res:
-            success = False
-            break
-
-    for f in tasks:
-        await f
-    results = [f.result() for f in tasks]
-
-    for s in subs:
-        await s.close()
-    if success:
-        for status, message in results:
-            if not status:
-                return False, f"failed to process {message}"
-        return True, "success"
-    else:
-        return False, "failed to publish"
-
-
 """
 Test with multiple subscribers for a channel
 We want to stress this to see if we have any issue
@@ -532,14 +492,46 @@ across multiple connections internally
 
 
 async def test_multi_pubsub(async_client):
-    def generate(max):
-        for i in range(max):
-            yield f"this is message number {i} from the publisher on the channel"
+    messages = [f"this is message number {i} from the publisher on the channel" for i in range(500)]
+    channel_name = "my-channel"
+    subs = [async_client.pubsub() for _ in range(5)]
+    tasks = []
+    test_succeeded = False
+    try:
+        for s in subs:
+            await s.subscribe(channel_name)
+            async with async_timeout.timeout(5):
+                ack = await s.get_message(ignore_subscribe_messages=False, timeout=None)
+                assert ack is not None
+                assert ack["type"] == "subscribe"
+                assert ack["channel"] == channel_name
+                assert ack["data"] == 1
 
-    messages = [a for a in generate(500)]
-    state, message = await run_multi_pubsub(async_client, messages, "my-channel")
+        tasks = [asyncio.create_task(reader(s, messages)) for s in subs]
 
-    assert state, message
+        for i, message in enumerate(messages):
+            published = await async_client.publish(channel_name, message)
+            assert published == len(
+                subs
+            ), f"Message {i}: expected {len(subs)} subscribers, got {published}"
+
+        async with async_timeout.timeout(30):
+            results = await asyncio.gather(*tasks)
+        for status, message in results:
+            assert status, message
+        test_succeeded = True
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        close_results = await asyncio.gather(*(s.aclose() for s in subs), return_exceptions=True)
+        close_errors = [result for result in close_results if isinstance(result, BaseException)]
+        if close_errors:
+            logging.warning(f"{len(close_errors)} failures seen:")
+            for error in close_errors:
+                logging.warning("Failed to close pub/sub subscription during cleanup: %r", error)
+            if test_succeeded:
+                raise close_errors[0]
 
 
 """
@@ -4753,3 +4745,69 @@ async def test_pipeline_latency_by_type(df_server: DflyInstance, async_client: a
     after_writes = await _pipeline_latency_counts(df_server)
     assert after_writes["read"] == after_reads["read"]
     assert after_writes["other"] - after_reads["other"] >= 60
+
+
+def is_dual_stack_host() -> bool:
+    """True if IPv6 sockets accept IPv4 by default and the IPv6 loopback is usable."""
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as s:
+            if s.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) != 0:
+                return False
+            s.bind(("::1", 0))
+            return True
+    except OSError:
+        return False
+
+
+async def test_default_bind_reports_ipv4_unmapped(df_factory: DflyInstanceFactory, monkeypatch):
+    """Without --bind, IPv4 clients are reported as plain IPv4, not as ::ffff:a.b.c.d."""
+    # Under systemd, protected mode would bind 127.0.0.1 and skip the default bind address.
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    server = df_factory.create(port=BASE_PORT)
+    server.start()
+
+    client = aioredis.Redis(host="127.0.0.1", port=server.port, decode_responses=True)
+    info = await client.client_info()
+    assert info["addr"].startswith("127.0.0.1:")
+    assert info["laddr"] == f"127.0.0.1:{server.port}"
+
+    victim = aioredis.Redis(host="127.0.0.1", port=server.port, decode_responses=True)
+    victim_addr = (await victim.client_info())["addr"]
+    assert await client.execute_command("CLIENT", "KILL", "ADDR", victim_addr) == 1
+
+    await victim.aclose()
+    await client.aclose()
+
+
+@pytest.mark.skipif(not is_dual_stack_host(), reason="requires a dual-stack IPv6 host")
+async def test_default_bind_accepts_ipv6(df_factory: DflyInstanceFactory, monkeypatch):
+    """Without --bind, a dual-stack host serves IPv6 clients on the main and admin ports."""
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    server = df_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1)
+    server.start()
+
+    for port in (server.port, server.admin_port):
+        client = aioredis.Redis(host="::1", port=port, decode_responses=True)
+        info = await client.client_info()
+        assert info["addr"].startswith("::1:")
+        assert info["laddr"] == f"::1:{port}"
+        await client.aclose()
+
+
+@pytest.mark.skipif(not is_dual_stack_host(), reason="requires a dual-stack IPv6 host")
+async def test_protected_mode_keeps_ipv4_binds(df_factory: DflyInstanceFactory, monkeypatch):
+    """Under systemd without a password, protected mode binds the main port to 127.0.0.1 and
+    the admin port keeps the IPv4 wildcard, so neither is reachable over IPv6."""
+    monkeypatch.setenv("INVOCATION_ID", "protected-mode-test")
+    server = df_factory.create(port=BASE_PORT, admin_port=BASE_PORT + 1)
+    server.start()
+
+    for port in (server.port, server.admin_port):
+        client = aioredis.Redis(host="127.0.0.1", port=port)
+        assert await client.ping()
+        await client.aclose()
+
+        client = aioredis.Redis(host="::1", port=port, retry=Retry(NoBackoff(), 0))
+        with pytest.raises(ConnectionError):
+            await client.ping()
+        await client.aclose()

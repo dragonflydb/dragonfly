@@ -749,6 +749,7 @@ string_view CommandOptName(CO::CommandOpt opt, bool enabled) {
     case WRITE_KEY_OFFSET_0:
     case WRITE_KEY_OFFSET_1:
     case WAKE_ALL_READY_KEYS:
+    case RW:
       return "";
   }
   return "";
@@ -2971,6 +2972,12 @@ GlobalState Service::SwitchState(GlobalState from, GlobalState to) {
       DCHECK(db.IsLoadRefCountZero());
     }
   });
+  if (to == GlobalState::LOADING) {
+    // Cancel before client traversal can yield and let an overlapping save publish its files.
+    server_family_.CancelSave();
+    // Unblocking waits for in-flight connection migrations, so it can't run in Await() above.
+    server_family_.UnblockAllClients();
+  }
   return prev;
 }
 

@@ -9,6 +9,8 @@
 #include <system_error>
 #include <vector>
 
+#include "server/journal/aof_manifest.h"
+
 namespace dfly {
 
 class Service;
@@ -21,15 +23,17 @@ struct AofResume {
 
 #ifdef __linux__
 
-// Replays every shard's AOF chain in parallel, global commands meeting at the barrier, and fills
-// resume with where each shard's log continues. Runs while the server is LOADING.
-std::error_code ReplayAof(std::string_view dir, Service* service, std::vector<AofResume>* resume);
+// Replays every shard's AOF chain from its cut in the manifest, in parallel, global commands
+// meeting at the barrier, and fills resume with where each shard's log continues. Runs while the
+// server is LOADING, after the manifest's base was loaded.
+std::error_code ReplayAof(std::string_view dir, const AofManifest& manifest, Service* service,
+                          std::vector<AofResume>* resume);
 
 #else
 
 // The chain reader needs io_uring files, so --aof is rejected before replay.
-inline std::error_code ReplayAof(std::string_view dir, Service* service,
-                                 std::vector<AofResume>* resume) {
+inline std::error_code ReplayAof(std::string_view dir, const AofManifest& manifest,
+                                 Service* service, std::vector<AofResume>* resume) {
   return std::make_error_code(std::errc::not_supported);
 }
 

@@ -77,6 +77,9 @@ constexpr std::string_view kReservedCategory = "_RESERVED";
 using RevCommandField = std::vector<std::string>;
 using RevCommandsIndexStore = std::vector<RevCommandField>;
 
+// The bits of each category's commands, by category bit position and then by family.
+using CategoryCommandsIndex = std::array<std::vector<uint64_t>, kCategoryNames.size()>;
+
 // Special flag/mask for all
 constexpr uint32_t NONE = 0;
 constexpr uint32_t ALL = std::numeric_limits<uint32_t>::max();

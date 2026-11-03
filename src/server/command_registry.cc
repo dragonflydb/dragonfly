@@ -50,6 +50,10 @@ namespace {
 uint32_t ImplicitCategories(uint32_t mask) {
   if (mask & CO::ADMIN)
     mask |= CO::NOSCRIPT;
+
+  // RW commands modify their keys, so they are always journaled.
+  if (mask & CO::RW)
+    mask |= CO::JOURNALED;
   return mask;
 }
 

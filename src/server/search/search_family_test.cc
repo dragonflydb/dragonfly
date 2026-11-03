@@ -2160,9 +2160,9 @@ TEST_F(SearchFamilyTest, JsonKnnInt8OutOfRange) {
 }
 
 TEST_F(SearchFamilyTest, HnswKnnFloat64LargeDim) {
-  // dim*8 = 2048 bytes exceeds the listpack threshold -> borrowed keyspace storage, whose sds
-  // data pointer is unaligned. Exercises the memcpy-based FLOAT64 reader (would trip
-  // -fsanitize=alignment before the byte-safe-load fix).
+  // dim*8 = 2048 bytes exceeds the listpack threshold -> borrowed keyspace storage, here
+  // single-field listpacks, whose vector data is unaligned. Exercises the memcpy-based FLOAT64
+  // reader (would trip -fsanitize=alignment before the byte-safe-load fix).
   const int kDim = 256;
   Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
        "TYPE", "FLOAT64", "DIM", absl::StrCat(kDim), "DISTANCE_METRIC", "L2"});
@@ -6104,6 +6104,106 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{non_existing} => [KNN 3 @pos $vec]", "PARAMS", "2",
               "vec", query_vec});
   EXPECT_THAT(resp, kNoResults);
+}
+
+// While indices serialize, their graphs keep borrowing the old listpack vectors until each one
+// drains. Both indices borrow from the same listpacks and share the preserved originals. Later, a
+// search holding a graph defers the updates instead, and the searches that start after them wait.
+TEST_F(SearchFamilyTest, HnswListpackUpdatesWhileGraphBusy) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");
+  ResetService();
+
+  auto vec = [](float x) {
+    vector<float> values(512, 0.0f);
+    values[0] = x;
+    return string(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(float));
+  };
+  for (string_view name : {"hx", "hy"}) {
+    EXPECT_EQ(Run({"FT.CREATE", name, "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "v", "VECTOR",
+                   "HNSW", "6", "TYPE", "FLOAT32", "DIM", "512", "DISTANCE_METRIC", "L2"}),
+              "OK");
+    WaitForIndexReady(name);
+  }
+  for (unsigned i = 1; i <= 4; ++i)
+    EXPECT_THAT(Run({"HSET", absl::StrCat("h:", i), "v", vec(i)}), IntArg(1));
+
+  // HSETNX reserves room for the skipped value, leaving h:4's listpack over-allocated.
+  EXPECT_THAT(Run({"HSETNX", "h:4", "v", string(8192, 'x')}), IntArg(0));
+  ASSERT_THAT(Run({"DEBUG", "OBJECT", "h:1"}).GetString(), HasSubstr("encoding:listpack"));
+  ASSERT_FALSE(GlobalHnswIndexRegistry::Instance().Get("hx", "v")->IsVectorCopied());
+
+  auto index = [](string_view name) {
+    return EngineShard::tlocal()->search_indices()->GetIndex(name);
+  };
+  pp_->at(0)->Await([&] {
+    index("hx")->SetHnswSerializing();
+    index("hy")->SetHnswSerializing();
+  });
+
+  // Convert a listpack via an unrelated field, replace a vector, and reuse a deleted DocId.
+  EXPECT_THAT(Run({"HSET", "h:1", "other", string(4096, 'x')}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "h:2", "v", vec(20)}), IntArg(0));
+  EXPECT_THAT(Run({"DEL", "h:3"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "h:5", "v", vec(5)}), IntArg(1));
+  EXPECT_THAT(Run({"DEL", "h:4"}), IntArg(1));
+
+  string query = vec(0);
+  auto distances = [&](string_view name) {
+    vector<long> out;
+    auto graph = GlobalHnswIndexRegistry::Instance().Get(name, "v");
+    for (const auto& result : graph->Knn(query.data(), 4, nullopt))
+      out.push_back(lround(result.first));
+    return out;
+  };
+  auto drain = [&](string_view name) {
+    pp_->at(0)->Await([&] {
+      auto* shard = EngineShard::tlocal();
+      DbContext db_cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+      index(name)->DrainSerializationUpdates(OpArgs{shard, nullptr, db_cntx});
+    });
+  };
+
+  EXPECT_THAT(distances("hx"), ElementsAre(1, 2, 3, 4));
+  drain("hx");
+  EXPECT_THAT(distances("hx"), ElementsAre(1, 5, 20));
+  EXPECT_THAT(distances("hy"), ElementsAre(1, 2, 3, 4));
+  drain("hy");
+  EXPECT_THAT(distances("hy"), ElementsAre(1, 5, 20));
+  for (string_view name : {"hx", "hy"}) {
+    EXPECT_THAT(
+        Run({"FT.SEARCH", name, "*=>[KNN 4 @v $q]", "PARAMS", "2", "q", query, "NOCONTENT"}),
+        AreNoContentDocIds("h:1", "h:2", "h:5"));
+  }
+
+  // Update a listpack and delete a converted hash while a search holds hx.
+  Fiber searcher;
+  {
+    auto lock = GlobalHnswIndexRegistry::Instance().Get("hx", "v")->GetReadLock();
+    EXPECT_THAT(Run({"HSET", "h:2", "v", vec(2)}), IntArg(0));
+    EXPECT_THAT(Run({"DEL", "h:1"}), IntArg(1));
+    searcher = pp_->at(1)->LaunchFiber([&] { EXPECT_THAT(distances("hx"), ElementsAre(2, 5)); });
+    ThisFiber::SleepFor(20ms);
+  }
+  searcher.Join();
+
+  // DEL accounts for the copy swapped in, so it must keep the original's allocation size.
+  EXPECT_THAT(Run({"DEL", "h:2", "h:5"}), IntArg(2));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+// The deferred updates re-read the documents from the namespaces that changed them.
+TEST_F(SearchFamilyTest, HnswDeferredUpdateInNamespace) {
+  namespace_ = "ns1";
+  CreateHnswHashIdx();
+  WaitForIndexReady("idx");
+  {
+    auto lock = GlobalHnswIndexRegistry::Instance().Get("idx", "vec")->GetReadLock();
+    EXPECT_THAT(Run({"HSET", "h:1", "vec", FloatVec(1)}), IntArg(1));
+  }
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "idx", "*=>[KNN 1 @vec $q]", "PARAMS", "2", "q", FloatVec(0), "NOCONTENT"}),
+      AreNoContentDocIds("h:1"));
 }
 
 TEST_F(SearchFamilyTest, RestoreHnswVectorsWithConcurrentDeletion) {

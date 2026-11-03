@@ -1924,7 +1924,7 @@ int64_t TrackedMemory() {
 
   // Full search index memory accounting scans all indices, so skip it
   const int64_t used_memory = shard->UsedMemoryWithoutSearch();
-  return used_memory - shard->type_mem_delta()[OBJ_KEY];
+  return used_memory - shard->type_attributed_memory()[OBJ_KEY];
 }
 
 }  // namespace

@@ -102,6 +102,29 @@ error_code LastErrno() {
   return {errno, system_category()};
 }
 
+string_view GetBaseName(string_view path) {
+  return path.substr(path.rfind('/') + 1);
+}
+
+// Only our names: other tools' files may share the appendonly prefix in --dir.
+bool IsAofFileName(string_view name) {
+  if (!absl::ConsumeSuffix(&name, ".tmp"))
+    absl::ConsumeSuffix(&name, ".discarded");
+  uint32_t sid;
+  uint64_t seq;
+  return name == kAofManifestName || AofSegmentWriter::ParseSegmentName(name, &sid, &seq);
+}
+
+// Deletes the files and makes the deletions durable.
+error_code RemoveFiles(string_view dir, const vector<string>& paths) {
+  for (const string& path : paths) {
+    LOG(INFO) << "Removing AOF file " << path;
+    if (unlink(path.c_str()) != 0)
+      return LastErrno();
+  }
+  return paths.empty() ? error_code{} : AofSyncDir(string(dir));
+}
+
 }  // namespace
 
 string EncodeAofManifest(const AofManifest& m) {
@@ -190,6 +213,43 @@ error_code WriteAofManifest(string_view dir, const AofManifest& manifest) {
     return LastErrno();
   std::move(remove_tmp).Cancel();
   return AofSyncDir(string(dir));
+}
+
+io::Result<vector<string>> ListAofFiles(string_view dir) {
+  auto files = io::StatFiles(absl::StrCat(dir, "/appendonly*"));
+  if (!files)
+    return make_unexpected(files.error());
+  vector<string> paths;
+  for (const auto& file : *files) {
+    if (IsAofFileName(GetBaseName(file.name)))
+      paths.push_back(file.name);
+  }
+  return paths;
+}
+
+error_code RemoveAofFilesExceptManifest(string_view dir) {
+  io::Result<vector<string>> files = ListAofFiles(dir);
+  if (!files)
+    return files.error();
+  erase_if(*files, [](const string& path) { return GetBaseName(path) == kAofManifestName; });
+  return RemoveFiles(dir, *files);
+}
+
+error_code CollectAofGarbage(string_view dir, const AofManifest& manifest) {
+  io::Result<vector<string>> files = ListAofFiles(dir);
+  if (!files)
+    return files.error();
+  vector<string> garbage;
+  for (const string& path : *files) {
+    string_view name = GetBaseName(path);
+    uint32_t sid;
+    uint64_t seq;
+    if (name.ends_with(".tmp") || (AofSegmentWriter::ParseSegmentName(name, &sid, &seq) &&
+                                   sid < manifest.cuts.size() && seq < manifest.cuts[sid].seq)) {
+      garbage.push_back(path);
+    }
+  }
+  return RemoveFiles(dir, garbage);
 }
 
 io::Result<AofManifest> ReadAofManifest(string_view dir) {

@@ -78,7 +78,7 @@ class HnswVectorIndex {
     return data_type_;
   }
 
-  // Get metadata for serialization
+  // Get metadata for serialization. Doesn't lock: the serializer holds GetReadLock().
   HnswIndexMetadata GetMetadata() const;
 
   // Current graph maxlevel_. Exposed for introspection and tests that need to
@@ -106,6 +106,12 @@ class HnswVectorIndex {
   // Acquire a read lock on the internal MRMW mutex.
   // Use this during serialization to block concurrent Add/Remove (write) operations.
   MRMWMutexLock GetReadLock() const;
+
+  // Holding its write lock, Add, Remove and UpdateVectorData don't wait. The tagged overloads work
+  // as the MRMWMutexLock constructors do.
+  MRMWMutexLock GetWriteLock() const;
+  MRMWMutexLock GetWriteLock(std::try_to_lock_t) const;
+  MRMWMutexLock GetWriteLock(std::defer_lock_t) const;
 
   // Approximate in-memory footprint of this HNSW graph, in bytes.
   size_t GetMemoryUsage() const;

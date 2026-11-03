@@ -880,6 +880,55 @@ TEST_F(AclFamilyTest, PfmergeRequiresPerKeyPermissions) {
   EXPECT_THAT(resp, "This user has no permissions to run the 'PFMERGE' command");
 }
 
+TEST_F(AclFamilyTest, CommandsReturningDataRequireReadPermission) {
+  TestInitAclFam();
+
+  struct Case {
+    std::string_view keys;
+    std::string_view command;
+    bool allowed;
+  };
+
+  const Case cases[] = {
+      {"%W~k", "GETDEL k", false},
+      {"%R~k", "GETDEL k", false},
+      {"%RW~k", "GETDEL k", true},
+      {"%W~k", "GETSET k v", false},
+      {"%W~k", "INCR k", false},
+      {"%W~k", "LPOP k", false},
+      {"%W~k", "BLPOP k 0", false},
+      {"%W~k", "SPOP k", false},
+      {"%W~k", "ZPOPMIN k", false},
+      {"%W~k", "HINCRBY k f 1", false},
+      {"%W~k", "SET k v", true},
+      {"%W~k", "SET k v GET", false},
+      {"%R~k", "BITFIELD k GET u8 0", true},
+      {"%R~k", "BITFIELD k SET u8 0 1", false},
+      {"%W~k", "BITFIELD k SET u8 0 1", false},
+      {"%RW~src %W~dst", "LMOVE src dst LEFT LEFT", true},
+      {"%W~src %W~dst", "LMOVE src dst LEFT LEFT", false},
+      {"%RW~src %W~dst", "RENAME src dst", true},
+      {"%W~src %W~dst", "RENAME src dst", false},
+      {"%R~k", "XREADGROUP GROUP g c STREAMS k >", true},
+      {"%W~k", "XREADGROUP GROUP g c STREAMS k >", false},
+      {"%R~k %W~k", "GETDEL k", true},
+      {"%R~k %W~k", "INCR k", true},
+      {"%RW~k", "MOVE k 1", true},
+      {"%W~k", "MOVE k 1", false},
+      {"~other", "MOVE k 1", false},
+  };
+
+  for (const auto& [keys, command, allowed] : cases) {
+    auto resp = Run(absl::StrCat("ACL SETUSER rd-user ON >p +@all resetkeys ", keys));
+    EXPECT_THAT(resp, "OK") << keys << " " << command;
+    resp = Run(absl::StrCat("ACL DRYRUN rd-user ", command));
+    if (allowed)
+      EXPECT_THAT(resp, "OK") << keys << " " << command;
+    else
+      EXPECT_THAT(resp.GetString(), HasSubstr("no permissions")) << keys << " " << command;
+  }
+}
+
 TEST_F(AclFamilyTest, AclGenPassTooManyArguments) {
   TestInitAclFam();
 
@@ -1111,6 +1160,21 @@ TEST_F(AclFamilyTest, AclLoadMinimalUserRule) {
   std::filesystem::remove(path);
 }
 
+TEST_F(AclFamilyTest, AclLoadRepeatedUserResetsCommands) {
+  TestInitAclFam();
+  std::string path = (std::filesystem::temp_directory_path() / "dfly_repeated_user.acl").string();
+  io::WriteStringToFileOrDie("user worker on nopass ~* &* +@all\nuser worker on +get\n", path);
+
+  absl::SetFlag(&FLAGS_aclfile, path);
+  EXPECT_EQ(Run("ACL LOAD"), "OK");
+  EXPECT_THAT(Run("ACL LIST").GetVec(), Contains("user worker on nopass ~* &* -@all +get $all"));
+  EXPECT_EQ(Run("ACL DRYRUN worker GET foo"), "OK");
+  EXPECT_THAT(Run("ACL DRYRUN worker SET foo bar"),
+              "This user has no permissions to run the 'SET' command");
+
+  std::filesystem::remove(path);
+}
+
 TEST_F(AclFamilyTest, AclSaveLoadKeepsSubcommandRules) {
   TestInitAclFam();
   std::string path =
@@ -1128,6 +1192,22 @@ TEST_F(AclFamilyTest, AclSaveLoadKeepsSubcommandRules) {
   EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules));
 
   std::filesystem::remove(path);
+}
+
+TEST_F(AclFamilyTest, AclSaveLoadReadWriteStarAsAllKeys) {
+  TestInitAclFam();
+  WriteAclFile("");
+  const std::string rules = "user u on nopass ~* resetchannels +@all $all";
+
+  for (std::string_view keys : {"%R~* %W~* ~foo", "%RW~* ~foo", "%R~* ~foo %W~*"}) {
+    EXPECT_EQ(Run(absl::StrCat("ACL SETUSER u on nopass +@all resetkeys ", keys)), "OK") << keys;
+    EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules)) << keys;
+
+    EXPECT_EQ(Run("ACL SAVE"), "OK") << keys;
+    EXPECT_EQ(Run("ACL LOAD"), "OK") << keys;
+    EXPECT_THAT(Run("ACL LIST").GetVec(), Contains(rules)) << keys;
+    EXPECT_EQ(Run("ACL DRYRUN u GETDEL anykey"), "OK") << keys;
+  }
 }
 
 TEST_F(AclFamilyTest, AclErrorHidesToken) {

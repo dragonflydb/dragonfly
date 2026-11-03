@@ -21,14 +21,12 @@ using namespace std;
 
 namespace {
 
-// Replays one shard's chain through the applier, then repairs it. Runs on the shard's thread.
-error_code ReplayChain(string_view dir, ShardId sid, Service* service,
+// Replays one shard's chain from its cut through the applier, then repairs it. Runs on the shard's
+// thread.
+error_code ReplayChain(string_view dir, ShardId sid, AofManifest::Cut cut, Service* service,
                        shared_ptr<MultiShardExecution> mse, AofResume* resume, TxId* max_txid) {
   AofChainReader chain(string(dir), sid, shard_set->size());
-
-  // kNoSegments is a normal first start.
-  if (error_code ec = chain.Open(); ec)
-    return ec;
+  RETURN_ON_ERR(chain.Open(cut.seq));
 
   ExecutionState cntx;
   JournalReader reader{&chain, /*dbid=*/0};
@@ -36,7 +34,7 @@ error_code ReplayChain(string_view dir, ShardId sid, Service* service,
   JournalApplier applier(service, std::move(mse));
   TransactionData tx;
 
-  // Records read, compared with LastLsn() below.
+  // Records read, compared with the block headers below.
   uint64_t records = 0;
   while (tx_reader.NextTxData(&reader, &cntx, &tx)) {
     // Before the PING skip: a PING has an LSN too.
@@ -55,11 +53,12 @@ error_code ReplayChain(string_view dir, ShardId sid, Service* service,
   if (!chain.AtEnd())
     return cntx.GetError();
 
-  // The records parsed must match the block headers. A record cut at the end is in neither count.
-  // TODO: start from the cut's LSN, not 1.
-  if (records != chain.LastLsn()) {
-    LOG(ERROR) << "AOF shard " << sid << ": read " << records << " records but the log ends at lsn "
-               << chain.LastLsn();
+  // The records parsed must match the block headers, counted from the cut. A chain that does not
+  // start at the cut fails it too. A record cut at the end is in neither count.
+  uint64_t logged = chain.LastLsn() ? chain.LastLsn() + 1 - cut.lsn : 0;
+  if (records != logged) {
+    LOG(ERROR) << "AOF shard " << sid << ": read " << records << " records, the block headers say "
+               << logged << " from the cut at lsn " << cut.lsn;
     return make_error_code(errc::state_not_recoverable);
   }
 
@@ -76,13 +75,19 @@ error_code ReplayChain(string_view dir, ShardId sid, Service* service,
   }
 
   RETURN_ON_ERR(chain.Repair());
-  *resume = {chain.NextSeq(), chain.LastLsn() + 1};
+  // An empty chain resumes at its cut.
+  *resume = {chain.NextSeq(), max(chain.LastLsn() + 1, cut.lsn)};
   return {};
 }
 }  // namespace
 
-error_code ReplayAof(string_view dir, Service* service, vector<AofResume>* resume) {
+error_code ReplayAof(string_view dir, const AofManifest& manifest, Service* service,
+                     vector<AofResume>* resume) {
   uint32_t shard_count = shard_set->size();
+
+  // TODO: replay into a different shard count.
+  if (manifest.cuts.size() != shard_count)
+    return AofError::kShardCountChanged;
   auto mse = make_shared<MultiShardExecution>(shard_count);
   vector<error_code> errors(shard_count);
   vector<TxId> max_txids(shard_count, 0);
@@ -90,10 +95,11 @@ error_code ReplayAof(string_view dir, Service* service, vector<AofResume>* resum
 
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     ShardId sid = shard->shard_id();
-    errors[sid] = ReplayChain(dir, sid, service, mse, &(*resume)[sid], &max_txids[sid]);
+    errors[sid] =
+        ReplayChain(dir, sid, manifest.cuts[sid], service, mse, &(*resume)[sid], &max_txids[sid]);
 
-    // A chain that ended, cleanly or torn, or has no segments never reaches another barrier: stop
-    // counting it, so longer chains can run a global command it lacks.
+    // A chain that ended, cleanly or torn, never reaches another barrier: stop counting it, so
+    // longer chains can run a global command it lacks.
     // TODO: that global command then exists only in the longer chains, and resuming the logs as
     // they are breaks a later restart. For example, with shards A and B:
     //   Run 1: FLUSHALL G1 reaches B's log but not A's (A's log just ends before it). Crash.
@@ -103,7 +109,7 @@ error_code ReplayAof(string_view dir, Service* service, vector<AofResume>* resum
     //   is cancelled (kOutOfOrder) and startup fails until the files are fixed by hand. Without
     //   G2, A would end and leave, and B would run G1 alone after run 2's writes, erasing them.
     // Fix: checkpoint in LOADING after restart 1, see "Resuming the log" in docs/aof.md.
-    if (!errors[sid] || errors[sid] == AofError::kNoSegments) {
+    if (!errors[sid]) {
       mse->RemoveFlow();
     } else {
       LOG(ERROR) << "AOF replay failed on shard " << sid << ": " << errors[sid].message();
@@ -113,13 +119,6 @@ error_code ReplayAof(string_view dir, Service* service, vector<AofResume>* resum
     }
   });
 
-  size_t empty = ranges::count(errors, AofError::kNoSegments);
-
-  // TODO: the manifest will tell a first start from lost segments.
-  if (empty == shard_count)
-    return {};
-
-  // Includes kNoSegments when only some chains are empty.
   for (const error_code& ec : errors) {
     if (ec)
       return ec;

@@ -4,13 +4,15 @@
 
 #pragma once
 
-#include <array>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <variant>
 #include <vector>
 
-#include "absl/container/flat_hash_set.h"
+#include "absl/functional/function_ref.h"
 #include "facade/facade_types.h"
 #include "helio/util/proactor_pool.h"
 #include "server/acl/acl_commands_def.h"
@@ -19,7 +21,6 @@
 #include "server/execution_state.h"
 
 namespace facade {
-class SinkReplyBuilder;
 class Listener;
 }  // namespace facade
 
@@ -28,7 +29,6 @@ namespace dfly {
 using facade::CmdArgList;
 using facade::CmdArgParser;
 
-class ConnectionContext;
 namespace acl {
 
 class AclFamily final {
@@ -39,8 +39,6 @@ class AclFamily final {
   void Init(facade::Listener* listener);
 
  private:
-  using SinkReplyBuilder = facade::SinkReplyBuilder;
-
   void Acl(CmdArgParser parser, CommandContext* cmd_cntx);
   void List(CmdArgParser parser, CommandContext* cmd_cntx);
   void SetUser(CmdArgParser parser, CommandContext* cmd_cntx);
@@ -48,8 +46,6 @@ class AclFamily final {
   void WhoAmI(CmdArgParser parser, CommandContext* cmd_cntx);
   void Save(CmdArgParser parser, CommandContext* cmd_cntx);
   void Load(CmdArgParser parser, CommandContext* cmd_cntx);
-  // Helper function for bootstrap
-  GenericError Load();
   void Log(CmdArgParser parser, CommandContext* cmd_cntx);
   void Users(CmdArgParser parser, CommandContext* cmd_cntx);
   void Cat(CmdArgParser parser, CommandContext* cmd_cntx);
@@ -58,63 +54,42 @@ class AclFamily final {
   void GenPass(CmdArgParser parser, CommandContext* cmd_cntx);
   void Help(CmdArgParser parser, CommandContext* cmd_cntx);
 
-  // Helper function that updates all open connections and their
-  // respective ACL fields on all the available proactor threads
-  using Commands = std::vector<uint64_t>;
-  void StreamUpdatesToAllProactorConnections(const std::string& user,
-                                             const Commands& update_commands,
-                                             const AclKeys& update_keys,
-                                             const AclPubSub& update_pub_sub, size_t db);
+  // Pushes the user's updated ACL rules to all its open connections.
+  void StreamUpdatesToConnections(std::string_view username, const User& user);
 
-  // Helper function that closes all open connection from the deleted user
-  void EvictOpenConnectionsOnAllProactors(const absl::flat_hash_set<std::string_view>& user);
+  // Closes all open connections whose authenticated user matches `pred`.
+  void EvictConnections(absl::FunctionRef<bool(std::string_view username)> pred);
 
-  // Helper function that closes all open connections for users in the registry
-  void EvictOpenConnectionsOnAllProactorsWithRegistry(const UserRegistry::RegistryType& registry);
+  using UserRequests = std::vector<std::pair<std::string, User::UpdateRequest>>;
 
-  // Helper function that loads the acl state of an acl file into the user registry
-  GenericError LoadToRegistryFromFile(std::string_view full_path, SinkReplyBuilder* builder);
+  // Reads and parses the ACL file into one update request per user.
+  GenericError ParseAclFile(std::string_view path, UserRequests* requests) const;
 
-  // Serializes the whole registry into a string
-  std::string RegistryToString() const;
+  // Adds the users of an ACL file to a registry that holds the write lock, and a default user if
+  // the file has none.
+  void AddUsers(UserRequests requests, UserRegistry::RegistryType* registry);
 
-  std::string AclCatToString(uint32_t acl_category, User::Sign sign) const;
+  // Creates or updates a user in a registry that holds the write lock.
+  User& UpsertUser(std::string_view username, User::UpdateRequest req,
+                   UserRegistry::RegistryType* registry);
 
-  std::string AclCommandToString(size_t family, uint64_t mask, User::Sign sign) const;
-
-  // Serializes category and command to string
-  std::string AclCatAndCommandToString(const User::CategoryChanges& cat,
-                                       const User::CommandChanges& cmds) const;
-
-  using OptCat = std::optional<uint32_t>;
-  std::pair<OptCat, bool> MaybeParseAclCategory(std::string_view command) const;
-
-  using OptCommand = std::optional<std::pair<size_t, uint64_t>>;
-  std::pair<OptCommand, bool> MaybeParseAclCommand(std::string_view command) const;
-
-  std::optional<std::string> MaybeParseNamespace(std::string_view command) const;
-
-  User::UpdateRequest::CategoryValueType CategoryRule(User::Sign sign, uint32_t category) const;
-
-  std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(
-      facade::ParsedArgs args, bool has_all_keys = false, bool has_all_channels = false) const;
+  // `has_all_keys` is whether the updated user can already access all keys.
+  std::variant<User::UpdateRequest, facade::ErrorReply> ParseAclSetUser(facade::ParsedArgs args,
+                                                                        bool has_all_keys) const;
 
   void BuildIndexers(RevCommandsIndexStore families);
 
-  // Data members
-
   facade::Listener* main_listener_{nullptr};
   UserRegistry* registry_;
-  CommandRegistry* cmd_registry_;
+  CommandRegistry* cmd_registry_{nullptr};
   util::ProactorPool* pool_;
+  uint32_t dbnum_;
 
   // Command names by family and bit position, to print command rules.
   RevCommandsIndexStore family_commands_;
 
   // The bits of each category's commands: category_commands_[bit position][family].
-  std::array<std::vector<uint64_t>, kCategoryNames.size()> category_commands_;
-
-  size_t dbnum_ = 0;
+  CategoryCommandsIndex category_commands_;
 
  public:
   // Only for tests.

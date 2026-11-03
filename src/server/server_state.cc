@@ -45,7 +45,8 @@ ABSL_FLAG(uint32_t, max_squashed_cmd_num, 100,
 ABSL_FLAG(strings::MemoryBytesFlag, snapshot_egress_limit_bytes, 0,
           "Per-shard-thread socket egress bandwidth budget in bytes/second. Each shard throttles "
           "its snapshot traversal loop to stay under this rate. Accepts human-readable sizes "
-          "(e.g. 100mb, 1gb). 0 disables throttling.");
+          "(e.g. 100mb, 1gb). S3 snapshot upload sockets are also paced to this rate "
+          "(SO_MAX_PACING_RATE) unless s3_upload_traffic_mark is set. 0 disables throttling.");
 ABSL_DECLARE_FLAG(uint32_t, iobuf_min_shrink_interval_sec);
 
 namespace dfly {

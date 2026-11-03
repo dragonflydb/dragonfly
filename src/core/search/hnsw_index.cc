@@ -90,10 +90,8 @@ struct HnswlibAdapter {
 
     // Writers share the lock and exclude readers: taking it for writing waits for the searches,
     // taking it for reading for the insertions.
-    for (auto mode : {MRMWMutex::LockMode::kWriteLock, MRMWMutex::LockMode::kReadLock}) {
-      mrmw_mutex_.LockInFiber(mode);
-      mrmw_mutex_.Unlock(mode);
-    }
+    { MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock); }
+    { MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock); }
   }
 
   vector<pair<float, GlobalDocId>> Knn(const void* target, size_t k, std::optional<uint32_t> ef) {
@@ -147,7 +145,6 @@ struct HnswlibAdapter {
   }
 
   HnswIndexMetadata GetMetadata() const {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     HnswIndexMetadata metadata;
     metadata.enterpoint_node = world_.enterpoint_node_;
     return metadata;
@@ -159,7 +156,6 @@ struct HnswlibAdapter {
   }
 
   size_t GetNodeCount() const {
-    MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
     return world_.cur_element_count.load();
   }
 
@@ -456,6 +452,10 @@ struct HnswlibAdapter {
     return MRMWMutexLock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock);
   }
 
+  template <typename... Tag> MRMWMutexLock GetWriteLock(Tag... tag) const {
+    return MRMWMutexLock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock, tag...);
+  }
+
   size_t GetMemoryUsage() const {
     return world_.memorySize();
   }
@@ -587,6 +587,18 @@ bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& d
 
 MRMWMutexLock HnswVectorIndex::GetReadLock() const {
   return adapter_->GetReadLock();
+}
+
+MRMWMutexLock HnswVectorIndex::GetWriteLock() const {
+  return adapter_->GetWriteLock();
+}
+
+MRMWMutexLock HnswVectorIndex::GetWriteLock(std::try_to_lock_t tag) const {
+  return adapter_->GetWriteLock(tag);
+}
+
+MRMWMutexLock HnswVectorIndex::GetWriteLock(std::defer_lock_t tag) const {
+  return adapter_->GetWriteLock(tag);
 }
 
 size_t HnswVectorIndex::GetMemoryUsage() const {

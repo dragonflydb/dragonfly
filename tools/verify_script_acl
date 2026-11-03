@@ -67,6 +67,7 @@ CO = {
     "NO_KEY_TRANSACTIONAL": 1 << 16,
     "NO_KEY_TX_SPAN_ALL": 1 << 17,
     "IDEMPOTENT": 1 << 18,
+    "RW": 1 << 22,
 }
 # The 21 standard categories -- named identically to Valkey/Redis's real ACL categories,
 # so a direct name-for-name comparison is valid for these. Everything from CUCKOO_FILTER
@@ -151,6 +152,9 @@ def implicit_acl(mask):
     m = mask
     if m & CO["ADMIN"]:
         m |= CO["NOSCRIPT"]
+    # Mirrors ImplicitCategories: RW implies JOURNALED.
+    if m & CO["RW"]:
+        m |= CO["JOURNALED"]
     out = 0
     if m & CO["JOURNALED"]:
         out |= ACL["WRITE"]

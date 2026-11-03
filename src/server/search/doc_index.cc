@@ -28,6 +28,11 @@
 #include "server/server_state.h"
 #include "util/fibers/fibers.h"
 
+extern "C" {
+#include "redis/listpack.h"
+#include "redis/zmalloc.h"
+}
+
 namespace rng = std::ranges;
 
 namespace dfly {
@@ -41,13 +46,21 @@ namespace {
 
 using PreservedEntry = std::shared_ptr<void>;
 
+// Swap the listpack with a copy, returning the original as a shared_ptr (see ExtractField).
+// The copy keeps the original's capacity: DEL subtracts MallocUsed() after the swap.
+PreservedEntry ExtractListpack(PrimeValue& pv) {
+  auto* lp = static_cast<uint8_t*>(pv.RObjPtr());
+  auto* replacement = lpNew(zmalloc_usable_size(lp));
+  memcpy(replacement, lp, lpBytes(lp));
+  pv.SetRObjPtr(replacement);
+  return PreservedEntry(lp, lpFree);
+}
+
 // Swap an sds entry in StringMap with a copy, returning the original as a shared_ptr.
 // The returned handle keeps the old data alive for deferred HNSW operations.
 // When a document is indexed by multiple search indices, they share the same PreservedEntry
 // so the original sds stays alive until all indices release it.
 PreservedEntry ExtractField(PrimeValue& pv, string_view field) {
-  // External vectors (copy_vector=false) normally imply StringMap encoding, but at the
-  // exact threshold boundary (dim*4 == max_listpack_map_bytes) the hash may still be listpack.
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   if (pv.Encoding() != kEncodingStrMap2)
     return nullptr;
@@ -488,6 +501,7 @@ ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index, unsigned* hash_in
 
 ShardDocIndex::~ShardDocIndex() {
   CancelBuilder();
+  FlushDeferredHnswUpdates();
 }
 
 void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored) {
@@ -501,6 +515,7 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, 
     // Full rebuild handles all documents — discard any buffered state from LOADING.
     hnsw_state_ = HnswState::kBuilding;
     pending_vector_updates_.clear();
+    pending_hnsw_removals_.clear();
   } else {
     // Restored path: buffer journal-driven mutations until PerformPostLoad drains
     // them after all shards complete vector restoration.
@@ -684,9 +699,18 @@ void HnswShardIndex::MaybePreserveField(PrimeValue& pv,
                                         FieldExtractionCache* cache) {
   if (global_index_->IsVectorCopied())
     return;
+
+  // Any mutation may move listpack entries, including writes to unrelated fields.
+  if (pv.Encoding() == kEncodingListPack) {
+    if (!cache->listpack)
+      cache->listpack = ExtractListpack(pv);
+    preserved_field_data_.push_back(cache->listpack);
+    return;
+  }
+
   if (!modified_fields.empty() && rng::find(modified_fields, field_ident_) == modified_fields.end())
     return;
-  auto [it, inserted] = cache->emplace(field_ident_, nullptr);
+  auto [it, inserted] = cache->fields.emplace(field_ident_, nullptr);
   if (inserted) {
     it->second = ExtractField(pv, field_ident_);
   }
@@ -698,12 +722,19 @@ void HnswShardIndex::MaybePreserveField(PrimeValue& pv,
 // --- ShardDocIndex HNSW methods ---
 
 void ShardDocIndex::ClearAllHnswPreservedData() {
+  // A deferred remove leaves its node pointing to the preserved entry.
+  if (!deferred_hnsw_ids_.empty())
+    return;
+
   for (auto& hnsw : hnsw_shard_indices_) {
     hnsw.ClearPreservedData();
   }
 }
 
 void ShardDocIndex::InitHnswShardIndices() {
+  // The deferred updates use the current indices.
+  FlushDeferredHnswUpdates();
+
   hnsw_shard_indices_.clear();
   for (const auto& [alias, field_info] : GetIndexedHnswFields(base_->schema)) {
     auto global = GlobalHnswIndexRegistry::Instance().Get(base_->name, alias);
@@ -726,6 +757,12 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const
     return;
   }
 
+  auto locks = TryLockHnswIndices(doc_id);
+  if (!locks) {
+    DeferHnswUpdate(doc_id, db_cntx.ns);
+    return;
+  }
+
   auto accessor = GetAccessor(db_cntx, *pv);
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
@@ -742,8 +779,18 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
   if (hnsw_state_ != HnswState::kBuilding) {
     std::string_view key = key_index_.Get(doc_id);
     pending_vector_updates_.emplace(key);
+    pending_hnsw_removals_.insert(doc_id);
 
-    // Preserve old sds so HNSW pointers set by UpdateVectorData stay valid.
+    // Preserve old hash data so HNSW pointers set by UpdateVectorData stay valid.
+    for (auto& hnsw : hnsw_shard_indices_)
+      hnsw.MaybePreserveField(pv, modified_fields, cache);
+    return;
+  }
+
+  auto locks = TryLockHnswIndices(doc_id);
+  if (!locks) {
+    // Preserve the old vectors so HNSW pointers stay valid until the deferred remove.
+    DeferHnswUpdate(doc_id, db_cntx.ns);
     for (auto& hnsw : hnsw_shard_indices_)
       hnsw.MaybePreserveField(pv, modified_fields, cache);
     return;
@@ -757,10 +804,86 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
 }
 
 void ShardDocIndex::RemoveFromAllHnswIndices(search::DocId doc_id) {
+  auto locks = TryLockHnswIndices(doc_id);
+  if (!locks) {
+    DeferHnswUpdate(doc_id, nullptr);
+    return;
+  }
+
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
   for (auto& hnsw : hnsw_shard_indices_) {
     hnsw.Remove(global_id);
   }
+}
+
+ShardDocIndex::HnswWriteLocks ShardDocIndex::LockHnswIndices() {
+  HnswWriteLocks locks;
+  for (const auto& hnsw : hnsw_shard_indices_)
+    locks.push_back(hnsw.global_index()->GetWriteLock());
+  return locks;
+}
+
+std::optional<ShardDocIndex::HnswWriteLocks> ShardDocIndex::TryLockHnswIndices(DocId doc_id) {
+  // Keeps the updates of a document in order.
+  if (deferred_hnsw_ids_.contains(doc_id))
+    return std::nullopt;
+
+  HnswWriteLocks locks;
+  for (const auto& hnsw : hnsw_shard_indices_) {
+    locks.push_back(hnsw.global_index()->GetWriteLock(std::try_to_lock));
+    if (!locks.back().locked())
+      return std::nullopt;
+  }
+  return locks;
+}
+
+void ShardDocIndex::DeferHnswUpdate(DocId doc_id, Namespace* ns) {
+  // The sync fiber doesn't suspend after it takes the map, so an empty map means none is pending.
+  const bool start_sync = deferred_hnsw_ids_.empty();
+  deferred_hnsw_ids_[doc_id] = ns;
+  if (!start_sync)
+    return;
+
+  HnswWriteLocks locks;
+  for (const auto& hnsw : hnsw_shard_indices_)
+    locks.push_back(hnsw.global_index()->GetWriteLock(std::defer_lock));
+  hnsw_sync_fiber_.Detach();
+  hnsw_sync_fiber_ =
+      util::fb2::Fiber("hnsw_sync", &ShardDocIndex::SyncDeferredHnsw, this, std::move(locks));
+}
+
+void ShardDocIndex::SyncDeferredHnsw(HnswWriteLocks locks) {
+  // The deferred locks keep new searches out, so this waits only for the running ones.
+  for (auto& lock : locks)
+    lock.Lock();
+
+  // Re-reading the documents applies the updates of each of them at once, in order.
+  auto docs = std::exchange(deferred_hnsw_ids_, {});
+  for (auto [id, ns] : docs) {
+    RemoveFromAllHnswIndices(id);
+    if (!ns || !key_index_.IsValid(id))
+      continue;
+
+    DbContext db_cntx{ns, 0, GetCurrentTimeMs()};
+    DbSlice& db_slice = db_cntx.GetDbSlice(EngineShard::tlocal()->shard_id());
+    if (!db_slice.IsDbValid(0))
+      continue;
+
+    // FindMutable may suspend, while a plain lookup doesn't change the document.
+    auto it = db_slice.GetDBTable(0)->prime.Find(key_index_.Get(id));
+    if (IsValid(it) && it->second.ObjType() == base_->GetObjCode())
+      AddDocToGlobalVectorIndex(id, db_cntx, &it->second);
+  }
+  DCHECK(deferred_hnsw_ids_.empty());
+
+  if (pending_vector_updates_.empty())
+    ClearAllHnswPreservedData();
+}
+
+void ShardDocIndex::FlushDeferredHnswUpdates() {
+  // Steal the fiber before joining it: a deferral during the join may start a new one.
+  while (hnsw_sync_fiber_.IsJoinable())
+    util::fb2::Fiber{std::move(hnsw_sync_fiber_)}.Join();
 }
 
 void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, const OpArgs& op_args) {
@@ -831,13 +954,18 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
     return true;
   };
 
+  // Wait for the searches beforehand: HNSW updates must not wait for them while restore_doc holds a
+  // document, nor in the cleanup below, between a removal and its key index check.
+  HnswWriteLocks locks = LockHnswIndices();
   for (const auto& [key, local_id] : doc_keys_snapshot) {
     if (!restore_doc(key, local_id))
       continue;
 
     // Yield periodically to avoid blocking the fiber
     if (++processed % 1000 == 0) {
+      locks.clear();
       util::ThisFiber::Yield();
+      locks = LockHnswIndices();
     }
   }
 
@@ -896,6 +1024,11 @@ void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
 
   LOG(INFO) << "Draining " << pending_vector_updates_.size() << " pending vector updates on shard "
             << EngineShard::tlocal()->shard_id();
+
+  // Remove stale nodes before additions: their DocIds may already belong to different keys.
+  for (DocId id : pending_hnsw_removals_)
+    RemoveFromAllHnswIndices(id);
+  pending_hnsw_removals_.clear();
 
   for (const auto& key : pending_vector_updates_) {
     auto local_id = key_index_.Find(key);

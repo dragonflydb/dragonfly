@@ -21,6 +21,8 @@
 #include <mimalloc-new-delete.h>
 #endif
 
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #ifdef __linux__
@@ -91,8 +93,8 @@ ABSL_DECLARE_FLAG(bool, alsologtostderr);
 #endif
 
 ABSL_FLAG(string, bind, "",
-          "Bind address. If empty - binds on all interfaces. "
-          "It's not advised due to security implications.");
+          "Bind address. If empty - binds on all interfaces, over both IPv4 and IPv6 if the host "
+          "supports dual-stack sockets. It's not advised due to security implications.");
 ABSL_FLAG(string, pidfile, "", "If not empty - server writes its pid into the file");
 ABSL_FLAG(string, unixsocket, "",
           "If not empty - specifies path for the Unix socket that will "
@@ -317,6 +319,23 @@ bool DropPrivilegesToUser(const string& user_spec, const string& data_dir) {
 }
 #endif  // __linux__
 
+// Returns the wildcard address for listeners without an explicit bind address: "::" when IPv6
+// sockets are dual-stack by default, so that one listener accepts both IPv4 and IPv6 clients.
+// Returns nullptr otherwise, which keeps the IPv4 wildcard. IPV6_V6ONLY is only read, never
+// overridden, so hosts where it defaults to on (Linux with net.ipv6.bindv6only=1, FreeBSD) or
+// without IPv6 support keep listening on IPv4 as before.
+const char* DefaultBindAddress() {
+  int fd = socket(AF_INET6, SOCK_STREAM, 0);
+  if (fd < 0)
+    return nullptr;
+
+  int v6only = 1;
+  socklen_t len = sizeof(v6only);
+  bool dual_stack = getsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, &len) == 0 && v6only == 0;
+  close(fd);
+  return dual_stack ? "::" : nullptr;
+}
+
 void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   uint64_t maxmemory = absl::GetFlag(FLAGS_maxmemory);
   if (maxmemory > 0 && maxmemory < pool->size() * 256_MB) {
@@ -351,7 +370,11 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   // GetPassword() checks both --requirepass flag and DFLY_PASSWORD env var.
   bool running_under_systemd = getenv("INVOCATION_ID") != nullptr;
   bool protected_mode = running_under_systemd && bind.empty() && GetPassword().empty();
-  const char* bind_addr = nullptr;
+
+  // Protected mode does not cover the admin port, which keeps its previous IPv4 wildcard there
+  // instead of the dual-stack one, so that protected mode does not expose it to IPv6 clients.
+  const char* default_bind = protected_mode ? nullptr : DefaultBindAddress();
+  const char* bind_addr = default_bind;
   if (protected_mode) {
     bind_addr = "127.0.0.1";
     LOG(WARNING) << "Protected mode enabled. Binding to localhost only because no password is set. "
@@ -427,10 +450,10 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
   if (admin_port != 0) {
     const std::string& admin_bind = GetFlag(FLAGS_admin_bind);
     // Note passing the result of c_str() for empty string in optimized mode don't work, we must
-    // explicitly set this to null in this case
-    const char* interface_addr = admin_bind.empty() ? nullptr : admin_bind.c_str();
+    // explicitly use the default bind address in this case
+    const char* interface_addr = admin_bind.empty() ? default_bind : admin_bind.c_str();
     const std::string printable_addr =
-        absl::StrCat("admin socket ", interface_addr ? interface_addr : "any", ":", admin_port);
+        absl::StrCat("admin socket ", admin_bind.empty() ? "any" : admin_bind, ":", admin_port);
     auto admin_listener = MakeListener(pool, Protocol::REDIS, &service, Listener::Role::PRIVILEGED);
 
     error_code ec = acceptor->AddListener(interface_addr, admin_port, admin_listener.get());

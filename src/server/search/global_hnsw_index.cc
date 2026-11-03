@@ -46,11 +46,13 @@ bool GlobalHnswIndexRegistry::Create(std::string_view index_name, std::string_vi
   // encoding.
   //    We use pesimistic approach for decision and expect that ONLY VECTOR data field is used.
   //    When HSET object is created function `IsGoodForListpack` decides if object should be encoded
-  //    as listpack or StringMap. Problem with listpack encoding is that vector memory, if
-  //    referenced, can have wrong alignment for vector distance operations.
-  const bool copy_vector =
-      (data_type == DocIndex::JSON) ||
-      (params.dim * search::ElementSize(params.data_type) < server.max_listpack_map_bytes);
+  //    as listpack or StringMap. Larger vectors can still be borrowed from single-field listpacks,
+  //    unless they are short enough to be encoded as integers there.
+  constexpr size_t kMaxListpackIntegerBytes = 20;
+  const size_t vector_bytes = params.dim * search::ElementSize(params.data_type);
+  const bool copy_vector = (data_type == DocIndex::JSON) ||
+                           (vector_bytes < server.max_listpack_map_bytes) ||
+                           (vector_bytes <= kMaxListpackIntegerBytes);
 
   indices_[key] = std::make_shared<search::HnswVectorIndex>(params, copy_vector);
 
