@@ -138,7 +138,8 @@ class BaseFamilyTest::TestConnWrapper {
 
   ConnectionContext* cmd_cntx() {
     auto cntx = static_cast<ConnectionContext*>(dummy_conn_->cntx());
-    cntx->ns = &namespaces->GetDefaultNamespace();
+    if (cntx->ns == nullptr)  // Keep the namespace chosen by AUTH across commands.
+      cntx->ns = &namespaces->GetDefaultNamespace();
     return cntx;
   }
 
@@ -481,7 +482,6 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   CmdArgVec args = conn_wrapper->Args(slice);
 
   ConnectionContext* context = conn_wrapper->cmd_cntx();
-  context->ns = &namespaces->GetDefaultNamespace();
 
   DCHECK(context->transaction == nullptr) << id;
   CommandContext cmd_cntx;
@@ -509,7 +509,6 @@ void BaseFamilyTest::RunMany(const std::vector<std::vector<std::string>>& cmds) 
   }
   TestConnWrapper* conn_wrapper = AddFindConn(Protocol::REDIS, GetId());
   auto* context = conn_wrapper->cmd_cntx();
-  context->ns = &namespaces->GetDefaultNamespace();
   vector<CommandContext> cmd_cntxs(cmds.size());
   for (size_t i = 0; i < cmds.size(); ++i) {
     cmd_cntxs[i].Init(conn_wrapper->builder(), context);
