@@ -71,6 +71,7 @@ bool AofSegmentWriter::ParseSegmentName(string_view name, uint32_t* shard_id, ui
 
 error_code AofSegmentWriter::Open(uint64_t seq) {
   DCHECK(!file_);
+  seq_ = seq;
   string path = absl::StrCat(dir_, "/", SegmentName(shard_id_, seq));
   // tmp because we switch after the header becomes durable
   string tmp_path = absl::StrCat(path, ".tmp");
@@ -110,8 +111,13 @@ error_code AofSegmentWriter::Open(uint64_t seq) {
   std::move(cleanup).Cancel();
 
   builder_.emplace(uid, [this](AofSealedBlock block) { OnSealed(std::move(block)); });
-  tick_id_ = util::fb2::ProactorBase::me()->AddPeriodic(kAofSyncMs, [this] { MaybeStartFSync(); });
   return {};
+}
+
+void AofSegmentWriter::StartPeriodicSync() {
+  DCHECK(file_);
+  DCHECK_EQ(tick_id_, 0u);
+  tick_id_ = util::fb2::ProactorBase::me()->AddPeriodic(kAofSyncMs, [this] { MaybeStartFSync(); });
 }
 
 void AofSegmentWriter::AddRecord(string_view record, uint64_t lsn) {
@@ -128,8 +134,10 @@ void AofSegmentWriter::Seal() {
 
 error_code AofSegmentWriter::Shutdown() {
   DCHECK(file_);
-  util::fb2::ProactorBase::me()->CancelPeriodic(tick_id_);
-  tick_id_ = 0;
+  if (tick_id_) {
+    util::fb2::ProactorBase::me()->CancelPeriodic(tick_id_);
+    tick_id_ = 0;
+  }
 
   Seal();
   util::fb2::NoOpLock lk;
@@ -145,6 +153,17 @@ error_code AofSegmentWriter::Shutdown() {
   // On NFS-like filesystems close can be the only place a deferred write error shows up.
   LOG_IF(ERROR, close_ec) << "AOF close failed: " << close_ec.message();
   return ec_ ? ec_ : close_ec;
+}
+
+error_code AofSegmentWriter::Discard() {
+  DCHECK(file_);
+  DCHECK(pending_.empty() && builder_->PayloadSize() == 0);
+  DCHECK_EQ(tick_id_, 0u);
+  RETURN_ON_ERR(file_->Close());
+  string path = absl::StrCat(dir_, "/", SegmentName(shard_id_, seq_));
+  if (unlink(path.c_str()) != 0)
+    return LastErrno();
+  return AofSyncDir(dir_);
 }
 
 void AofSegmentWriter::WaitPending(size_t limit) {

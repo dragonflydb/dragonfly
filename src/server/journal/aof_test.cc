@@ -11,6 +11,7 @@
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
+#include <absl/time/clock.h>
 
 #include <filesystem>
 #include <fstream>
@@ -24,6 +25,8 @@
 #include "server/journal/aof_chain_reader.h"
 #include "server/journal/aof_manifest.h"
 #include "server/journal/aof_segment_writer.h"
+#include "server/journal/aof_streamer.h"
+#include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/test_utils.h"
 
@@ -438,6 +441,89 @@ TEST_F(AofStreamerTest, WritesReachSegments) {
     EXPECT_TRUE(reader.ReadEntry(&parsed)) << "trailing data in shard " << sid;
     EXPECT_EQ(cmds, expected[sid]) << "shard " << sid;
   }
+}
+
+// One shard, so the records after the rotation all land in segment 1.
+class AofStreamerOneShardTest : public AofStreamerTest {
+ protected:
+  AofStreamerOneShardTest() {
+    num_threads_ = 1;
+  }
+
+  // A retirement finishes within milliseconds, so tests fake one in progress.
+  static void SetRetiring(AofStreamer* streamer, bool retiring) {
+    streamer->spare_ready_ = !retiring;
+  }
+};
+
+// TODO: cover a crash while preparing a spare. Leave each partial state on disk (a leftover
+// appendonly-<shard>-<seq>.aof.tmp, a header-only segment with its tmp twin, a complete unused
+// spare) and check that the restart replays the chain cleanly and startup GC removes the tmp files.
+TEST_F(AofStreamerOneShardTest, RotateContinuesInSpare) {
+  Run("mset a 1 b 2 c 3 d 4");
+  const uint32_t shard_count = shard_set->size();
+
+  // As a checkpoint's cut does: wait for the spares first, then rotate without yielding.
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_TRUE(shard->aof_streamer()->WaitSpareReady()); });
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_EQ(shard->aof_streamer()->Rotate(), 1u); });
+  Run("mset a 5 b 6 c 7 d 8");
+  ShutdownService();
+
+  for (uint32_t sid = 0; sid < shard_count; ++sid) {
+    // Shutdown deleted the unused spare.
+    EXPECT_FALSE(filesystem::exists(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, 2))))
+        << "shard " << sid;
+
+    // The LSNs continue from segment 0 into segment 1, and both hold records.
+    optional<uint64_t> next_lsn;
+    for (uint64_t seq : {0, 1}) {
+      size_t blocks = 0;
+      ifstream in(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, seq)), ios::binary);
+      string file(istreambuf_iterator<char>(in), {});
+      auto seg = DecodeAofSegmentHeader(file);
+      ASSERT_TRUE(seg) << "shard " << sid << " segment " << seq;
+      string_view rest = string_view(file).substr(kAofSegmentHeaderSize);
+      while (!rest.empty()) {
+        auto hdr = DecodeAofBlock(rest, seg->segment_uid);
+        ASSERT_TRUE(hdr) << "shard " << sid << " segment " << seq;
+        if (next_lsn) {
+          EXPECT_EQ(hdr->first_lsn, *next_lsn) << "shard " << sid << " segment " << seq;
+        }
+        next_lsn = hdr->first_lsn + hdr->n_records;
+        rest.remove_prefix(hdr->total_block_bytes);
+        ++blocks;
+      }
+      EXPECT_GT(blocks, 0u) << "shard " << sid << " segment " << seq;
+    }
+  }
+}
+
+TEST_F(AofStreamerOneShardTest, DurableLsnWaitsForRetiredSegment) {
+  Run("mset a 1 b 2 c 3 d 4");
+  AofStreamer* streamer = shard_set->Await(0, [] { return EngineShard::tlocal()->aof_streamer(); });
+  uint64_t cut = shard_set->Await(0, [&] {
+    EXPECT_TRUE(streamer->WaitSpareReady());
+    uint64_t lsn = journal::GetLsn();
+    EXPECT_EQ(streamer->Rotate(), 1u);
+
+    // Joins the retirement: everything before the cut is durable.
+    EXPECT_TRUE(streamer->WaitSpareReady());
+    EXPECT_EQ(streamer->DurableLsn(), lsn - 1);
+    return lsn;
+  });
+
+  // Record cut lands in segment 1; wait past the 1s periodic sync, so segment 1 covers it.
+  Run("set x 1");
+  absl::SleepFor(absl::Milliseconds(1500));
+  shard_set->Await(0, [&] {
+    // While the old segment retires, segment 1 does not count, though it is synced.
+    SetRetiring(streamer, true);
+    EXPECT_EQ(streamer->DurableLsn(), cut - 1);
+    SetRetiring(streamer, false);
+    EXPECT_EQ(streamer->DurableLsn(), cut);
+  });
 }
 
 class AofChainReaderTest : public AofSegmentWriterTest {
