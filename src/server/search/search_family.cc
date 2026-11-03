@@ -34,7 +34,6 @@
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
-#include "server/cluster/cluster_config.h"
 #include "server/cluster/coordinator.h"
 #include "server/command_registry.h"
 #include "server/config_registry.h"
@@ -228,9 +227,9 @@ ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
 
 using TP = search::SchemaField::TextParams;
 
-struct ValidTextWeight : facade::VNum<double> {
-  static facade::RuleError validate(double v) {
-    return {!TP::IsValidWeight(v), {}};
+struct ValidTextWeight : VNum<double> {
+  static RuleError validate(double v) {
+    return {.failed = !TP::IsValidWeight(v), .msg = {}};
   }
 };
 
@@ -2112,7 +2111,7 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
 bool CollectGlobalScoringStats(string_view index_name, search::SearchAlgorithm& text_algo,
                                Transaction* tx, size_t shard_count,
                                search::GlobalScoringStats& out_stats) {
-  atomic<bool> not_found{false};
+  atomic not_found{false};
   vector<search::ShardScoringStats> shard_stats(shard_count);
   tx->Execute(
       [&](Transaction* t, EngineShard* es) {
@@ -2313,7 +2312,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const size_t shard_count = shard_set->size();
   const bool needs_global_stats = (shard_count > 1);
-  std::atomic<bool> index_not_found{false};
+  atomic index_not_found{false};
   const absl::Time t_start = absl::Now();
 
   if (!CheckQueryLength(params->text_query, "Query", rb) ||
@@ -3200,7 +3199,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   };
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
-  atomic<bool> index_not_found{false};
+  atomic index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
   vector<SearchIdResult> knn_prefilter_docs(shard_set->size());
 
@@ -3542,7 +3541,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
 
     if (knn_has_prefilter) {
-      std::atomic<bool> index_not_found{false};
+      std::atomic index_not_found{false};
       std::vector<SearchIdResult> knn_prefilter_docs(shards_count);
 
       cmd_cntx->tx()->Execute(
@@ -3658,7 +3657,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (hnsw_range_prefilter) {
-    std::atomic<bool> index_not_found{false};
+    std::atomic index_not_found{false};
     std::vector<SearchResult> prefilter_results(shards_count);
     std::vector<absl::Duration> profile_results(shards_count);
 
@@ -3720,7 +3719,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
-  std::atomic<bool> index_not_found{false};
+  std::atomic index_not_found{false};
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
 
