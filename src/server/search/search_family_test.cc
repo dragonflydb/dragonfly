@@ -6107,8 +6107,9 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
 }
 
 // While indices serialize, their graphs keep borrowing the old listpack vectors until each one
-// drains. Both indices borrow from the same listpacks and share the preserved originals.
-TEST_F(SearchFamilyTest, HnswListpackUpdatesWhileSerializing) {
+// drains. Both indices borrow from the same listpacks and share the preserved originals. Later, a
+// search holding a graph defers the updates instead, and the searches that start after them wait.
+TEST_F(SearchFamilyTest, HnswListpackUpdatesWhileGraphBusy) {
   absl::FlagSaver fs;
   SetTestFlag("num_shards", "1");
   ResetService();
@@ -6175,9 +6176,34 @@ TEST_F(SearchFamilyTest, HnswListpackUpdatesWhileSerializing) {
         AreNoContentDocIds("h:1", "h:2", "h:5"));
   }
 
+  // Update a listpack and delete a converted hash while a search holds hx.
+  Fiber searcher;
+  {
+    auto lock = GlobalHnswIndexRegistry::Instance().Get("hx", "v")->GetReadLock();
+    EXPECT_THAT(Run({"HSET", "h:2", "v", vec(2)}), IntArg(0));
+    EXPECT_THAT(Run({"DEL", "h:1"}), IntArg(1));
+    searcher = pp_->at(1)->LaunchFiber([&] { EXPECT_THAT(distances("hx"), ElementsAre(2, 5)); });
+    ThisFiber::SleepFor(20ms);
+  }
+  searcher.Join();
+
   // DEL accounts for the copy swapped in, so it must keep the original's allocation size.
-  EXPECT_THAT(Run({"DEL", "h:1", "h:2", "h:5"}), IntArg(3));
+  EXPECT_THAT(Run({"DEL", "h:2", "h:5"}), IntArg(2));
   EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+// The deferred updates re-read the documents from the namespaces that changed them.
+TEST_F(SearchFamilyTest, HnswDeferredUpdateInNamespace) {
+  namespace_ = "ns1";
+  CreateHnswHashIdx();
+  WaitForIndexReady("idx");
+  {
+    auto lock = GlobalHnswIndexRegistry::Instance().Get("idx", "vec")->GetReadLock();
+    EXPECT_THAT(Run({"HSET", "h:1", "vec", FloatVec(1)}), IntArg(1));
+  }
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "idx", "*=>[KNN 1 @vec $q]", "PARAMS", "2", "q", FloatVec(0), "NOCONTENT"}),
+      AreNoContentDocIds("h:1"));
 }
 
 TEST_F(SearchFamilyTest, RestoreHnswVectorsWithConcurrentDeletion) {
