@@ -33,6 +33,7 @@ extern "C" {
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
+ABSL_DECLARE_FLAG(bool, use_oah_set);
 ABSL_DECLARE_FLAG(uint32_t, container_iteration_yield_interval_usec);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
 
@@ -3211,6 +3212,10 @@ struct MetricCmp {
   bool IsClean() const {
     return table_used == 0 && search_used == 0;
   }
+
+  bool Replaced(size_t old_type, size_t new_type) const {
+    return Match(old_type) && Negative(old_type) && Match(new_type) && MatchObj() && IsClean();
+  }
 };
 
 ostream& operator<<(ostream& os, const MetricCmp& m) {
@@ -3260,6 +3265,20 @@ class MemParityTest : public GenericFamilyTest {
   const string key3_ = string(1536, 'd');
   const string val_ = string(1024, 'b');
 };
+
+template <bool use_oah_set> class SetMemParityTest : public MemParityTest {
+ protected:
+  void SetUp() override {
+    absl::SetFlag(&FLAGS_use_oah_set, use_oah_set);
+    MemParityTest::SetUp();
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
+};
+
+using StringSetMemParityTest = SetMemParityTest<false>;
+using OAHSetMemParityTest = SetMemParityTest<true>;
 }  // namespace
 
 TEST_F(MemParityTest, SetStringSimple) {
@@ -3372,14 +3391,62 @@ TEST_F(MemParityTest, AsyncUnlinkLargeHash) {
   EXPECT_TRUE(d.IsClean()) << d;
 }
 
+TEST_F(MemParityTest, SetOverwritesHash) {
+  for (const string& value : {val_, string("inline"), string("42")}) {
+    SCOPED_TRACE(StrCat("replacement length=", value.size()));
+    ASSERT_THAT(Run({"HSET", key_, "field", val_}), IntArg(1));
+    auto d = Delta([&] { EXPECT_EQ(Run({"SET", key_, value}), "OK"); });
+    EXPECT_TRUE(d.Replaced(OBJ_HASH, OBJ_STRING)) << d;
+    EXPECT_EQ(Run({"GET", key_}), value);
+    ASSERT_THAT(Run({"DEL", key_}), IntArg(1));
+  }
+}
+
+TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
+  ASSERT_THAT(Run({"HSET", key_, "f", val_}), IntArg(1));
+  ASSERT_THAT(Run({"ZADD", key2_, "1", "a", "2", "b"}), IntArg(2));
+  ASSERT_THAT(Run({"ZADD", key3_, "3", "c", "4", "d"}), IntArg(2));
+  auto d = Delta([&] { EXPECT_THAT(Run({"ZUNIONSTORE", key_, "2", key2_, key3_}), IntArg(4)); });
+  EXPECT_TRUE(d.Replaced(OBJ_HASH, OBJ_ZSET)) << d;
+  EXPECT_TRUE(d.Positive(OBJ_ZSET)) << d;
+}
+
+TEST_F(StringSetMemParityTest, SUnionStoreOverwritesHash) {
+  for (const string& member : {string("3"), string("a")}) {
+    SCOPED_TRACE(StrCat("replacement member=", member));
+    ASSERT_THAT(Run({"HSET", key_, "f", val_}), IntArg(1));
+    ASSERT_THAT(Run({"SADD", key2_, "1", "2"}), IntArg(2));
+    ASSERT_THAT(Run({"SADD", key3_, member, "4"}), IntArg(2));
+    auto d = Delta([&] { EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4)); });
+    EXPECT_TRUE(d.Replaced(OBJ_HASH, OBJ_SET)) << d;
+    EXPECT_TRUE(d.Positive(OBJ_SET)) << d;
+    ASSERT_THAT(Run({"DEL", key_, key2_, key3_}), IntArg(3));
+  }
+}
+
 // Known gaps: scenarios below are not covered by the new metric, all are to do. comparisons pasted
 // above tests as guide of what fails, with table values not denoted where not relevant
 
-// new: {string=-384 } old: {string=896 hash=-1280 } obj_used=-384
-TEST_F(MemParityTest, SetOverwritesHash) {
-  Run({"HSET", key_, "field", val_});
-  auto d = Delta([&] { Run({"SET", key_, val_}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
+// OAHSet needs separate work/investigation.
+TEST_F(OAHSetMemParityTest, SAddNewKey) {
+  auto d = Delta([&] { EXPECT_THAT(Run({"SADD", key_, "1", "2", "a", "4"}), IntArg(4)); });
+  ASSERT_TRUE(d.Positive(OBJ_SET)) << d;
+  ASSERT_TRUE(d.Match(OBJ_KEY)) << d;
+  ASSERT_TRUE(d.IsClean()) << d;
+  METRIC_CMP_TODO(d, d.Match(OBJ_SET) && d.MatchObj());
+}
+
+TEST_F(OAHSetMemParityTest, SUnionStoreOverwritesHash) {
+  ASSERT_THAT(Run({"HSET", key_, "f", val_}), IntArg(1));
+  ASSERT_THAT(Run({"SADD", key2_, "1", "2"}), IntArg(2));
+  ASSERT_THAT(Run({"SADD", key3_, "a", "4"}), IntArg(2));
+  auto d = Delta([&] { EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4)); });
+  ASSERT_TRUE(d.Match(OBJ_HASH)) << d;
+  ASSERT_TRUE(d.Negative(OBJ_HASH)) << d;
+  ASSERT_TRUE(d.Positive(OBJ_SET)) << d;
+  ASSERT_TRUE(d.Match(OBJ_KEY)) << d;
+  ASSERT_TRUE(d.IsClean()) << d;
+  METRIC_CMP_TODO(d, d.Replaced(OBJ_HASH, OBJ_SET));
 }
 
 // Whole table reset bypasses per-key delete scopes
@@ -3439,24 +3506,6 @@ TEST_F(MemParityTest, RestoreHash) {
   const string payload = Run({"DUMP", key_}).GetString();
   auto d = Delta([&] { EXPECT_EQ(Run({"RESTORE", key3_, "0", payload}), "OK"); });
   METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
-}
-
-// new: {zset=-1248 } old: {zset=32 hash=-1280 } obj_used=-1248
-TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
-  Run({"HSET", key_, "f", val_});
-  Run({"ZADD", key2_, "1", "a", "2", "b"});
-  Run({"ZADD", key3_, "3", "c", "4", "d"});
-  auto d = Delta([&] { Run({"ZUNIONSTORE", key_, "2", key2_, key3_}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_ZSET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
-}
-
-// new: {set=-992 } old: {set=280 hash=-1280 } obj_used=-1000
-TEST_F(MemParityTest, SUnionStoreOverwritesHash) {
-  Run({"HSET", key_, "f", val_});
-  Run({"SADD", key2_, "1", "a", "2", "b"});
-  Run({"SADD", key3_, "3", "c", "4", "d"});
-  auto d = Delta([&] { Run({"SUNIONSTORE", key_, key2_, key3_}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_SET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
 }
 
 // Table growth not added to the new metric. Slow (~20 seconds) so disabled by default, but passes

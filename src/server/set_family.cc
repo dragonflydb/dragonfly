@@ -28,6 +28,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
+#include "server/memory_scope.h"
 #include "server/transaction.h"
 
 ABSL_FLAG(bool, use_oah_set, true, "If true, store SET values in OAHSet instead of StringSet.");
@@ -556,6 +557,9 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       InitSet(vals, &replacement);
       db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &co);
       co = std::move(replacement);
+    } else if (!add_res.is_new && co.ObjType() != OBJ_SET) {
+      TrackOldValueFree track(co, co.ObjType());
+      InitSet(vals, &co);
     } else {
       InitSet(vals, &co);
     }

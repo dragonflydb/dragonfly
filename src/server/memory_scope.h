@@ -6,6 +6,7 @@
 
 #include <cstdint>
 
+#include "core/compact_object.h"
 #include "util/fibers/fibers.h"
 
 namespace dfly {
@@ -56,6 +57,36 @@ class AtomicMemoryScope {
   bool enabled_;
   int obj_type_;
   int64_t mem_baseline_;
+};
+
+// In a replacement operation, handles freeing of old value by wrapping it in the correct type
+// scope. Use RAII to register and then de-register the hook. Also use guard to prevent fiber switch
+// (which might leave a hook dangling in the compact object tls). Once this tracker object is
+// created, the next free of old type will be wrapped in scope.
+class TrackOldValueFree {
+ public:
+  TrackOldValueFree(const CompactObj& target, int old_type) : old_type_(old_type) {
+    CompactObj::RegisterDeallocateHandler(target, CompactObj::FreeHook{*this});
+  }
+
+  ~TrackOldValueFree() {
+    CompactObj::DeregisterDeallocateHandler();
+  }
+
+  TrackOldValueFree(const TrackOldValueFree&) = delete;
+  TrackOldValueFree& operator=(const TrackOldValueFree&) = delete;
+  TrackOldValueFree(TrackOldValueFree&&) = delete;
+  TrackOldValueFree& operator=(TrackOldValueFree&&) = delete;
+
+  // Attribute the old value's destruction to its original type.
+  void operator()(CompactObj& obj) const {
+    AtomicMemoryScope scope(old_type_);
+    obj.Free();
+  }
+
+ private:
+  util::FiberAtomicGuard guard_;
+  int old_type_;
 };
 
 }  // namespace dfly

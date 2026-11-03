@@ -33,6 +33,7 @@
 #include "server/execution_state.h"
 #include "server/family_utils.h"
 #include "server/journal/journal.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/table.h"
@@ -1014,7 +1015,8 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   bool has_expire = key.HasExpire();
-  const bool was_stream = prime_value.ObjType() == OBJ_STREAM;
+  const auto old_type = prime_value.ObjType();
+  const bool was_stream = old_type == OBJ_STREAM;
 
   it_upd->post_updater.ReduceHeapUsage();
 
@@ -1032,7 +1034,12 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   }
 
   // overwrite existing entry.
-  prime_value.SetString(value);
+  if (old_type == OBJ_STRING) {
+    prime_value.SetString(value);
+  } else {
+    TrackOldValueFree track(prime_value, old_type);
+    prime_value.SetString(value);
+  }
 
   if (was_stream) {
     if (auto* bc = op_args_.db_cntx.ns->GetBlockingController(shard->shard_id()); bc) {
