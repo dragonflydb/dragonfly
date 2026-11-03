@@ -28,6 +28,11 @@
 #include "server/server_state.h"
 #include "util/fibers/fibers.h"
 
+extern "C" {
+#include "redis/listpack.h"
+#include "redis/zmalloc.h"
+}
+
 namespace rng = std::ranges;
 
 namespace dfly {
@@ -41,13 +46,21 @@ namespace {
 
 using PreservedEntry = std::shared_ptr<void>;
 
+// Swap the listpack with a copy, returning the original as a shared_ptr (see ExtractField).
+// The copy keeps the original's capacity: DEL subtracts MallocUsed() after the swap.
+PreservedEntry ExtractListpack(PrimeValue& pv) {
+  auto* lp = static_cast<uint8_t*>(pv.RObjPtr());
+  auto* replacement = lpNew(zmalloc_usable_size(lp));
+  memcpy(replacement, lp, lpBytes(lp));
+  pv.SetRObjPtr(replacement);
+  return PreservedEntry(lp, lpFree);
+}
+
 // Swap an sds entry in StringMap with a copy, returning the original as a shared_ptr.
 // The returned handle keeps the old data alive for deferred HNSW operations.
 // When a document is indexed by multiple search indices, they share the same PreservedEntry
 // so the original sds stays alive until all indices release it.
 PreservedEntry ExtractField(PrimeValue& pv, string_view field) {
-  // External vectors (copy_vector=false) normally imply StringMap encoding, but at the
-  // exact threshold boundary (dim*4 == max_listpack_map_bytes) the hash may still be listpack.
   DCHECK_EQ(pv.Encoding(), kEncodingStrMap2);
   if (pv.Encoding() != kEncodingStrMap2)
     return nullptr;
@@ -501,6 +514,7 @@ void ShardDocIndex::Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, 
     // Full rebuild handles all documents — discard any buffered state from LOADING.
     hnsw_state_ = HnswState::kBuilding;
     pending_vector_updates_.clear();
+    pending_hnsw_removals_.clear();
   } else {
     // Restored path: buffer journal-driven mutations until PerformPostLoad drains
     // them after all shards complete vector restoration.
@@ -684,9 +698,18 @@ void HnswShardIndex::MaybePreserveField(PrimeValue& pv,
                                         FieldExtractionCache* cache) {
   if (global_index_->IsVectorCopied())
     return;
+
+  // Any mutation may move listpack entries, including writes to unrelated fields.
+  if (pv.Encoding() == kEncodingListPack) {
+    if (!cache->listpack)
+      cache->listpack = ExtractListpack(pv);
+    preserved_field_data_.push_back(cache->listpack);
+    return;
+  }
+
   if (!modified_fields.empty() && rng::find(modified_fields, field_ident_) == modified_fields.end())
     return;
-  auto [it, inserted] = cache->emplace(field_ident_, nullptr);
+  auto [it, inserted] = cache->fields.emplace(field_ident_, nullptr);
   if (inserted) {
     it->second = ExtractField(pv, field_ident_);
   }
@@ -737,8 +760,9 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
   if (hnsw_state_ != HnswState::kBuilding) {
     std::string_view key = key_index_.Get(doc_id);
     pending_vector_updates_.emplace(key);
+    pending_hnsw_removals_.insert(doc_id);
 
-    // Preserve old sds so HNSW pointers set by UpdateVectorData stay valid.
+    // Preserve old hash data so HNSW pointers set by UpdateVectorData stay valid.
     for (auto& hnsw : hnsw_shard_indices_)
       hnsw.MaybePreserveField(pv, modified_fields, cache);
     return;
@@ -891,6 +915,11 @@ void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
 
   LOG(INFO) << "Draining " << pending_vector_updates_.size() << " pending vector updates on shard "
             << EngineShard::tlocal()->shard_id();
+
+  // Remove stale nodes before additions: their DocIds may already belong to different keys.
+  for (DocId id : pending_hnsw_removals_)
+    RemoveFromAllHnswIndices(id);
+  pending_hnsw_removals_.clear();
 
   for (const auto& key : pending_vector_updates_) {
     auto local_id = key_index_.Find(key);
