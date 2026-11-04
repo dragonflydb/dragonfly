@@ -3014,7 +3014,7 @@ void Service::ConfigureHttpHandlers(util::HttpListenerBase* base, bool is_privil
   // requirepass flag only reflects the startup configuration and can become stale after ACL
   // changes or CONFIG SET requirepass.
   base->SetAuthFunctor([this, is_privileged](std::string_view path, std::string_view username,
-                                              std::string_view password) {
+                                             std::string_view password) {
     if (path == "/metrics" || path == "/healthz")
       return true;
 
