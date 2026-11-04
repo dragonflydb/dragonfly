@@ -447,18 +447,32 @@ All serialized data ultimately flows through `HandleFlushData` (`snapshot.cc`):
 
 1. If `stream_mu_.is_locked()`, increments `stats_.flushed_under_lock` (observability).
 2. Records the egress, as a high priority write when it comes from the mutation path.
-3. **Blocks** in `writer_.Push(data)`: appends the chunk to the writer's FIFO and waits until it
-   is written. Nothing preempts between extracting the chunk from the serializer and the append,
-   so the queue order is the production order across fibers.
+3. **Blocks** in `writer_.Push(data)`: appends the chunk to the writer's FIFO and waits while more
+   than `--snapshot_output_buffer_limit` bytes are queued. Nothing preempts between extracting the
+   chunk from the serializer and the append, so the queue order is the production order across
+   fibers.
 4. Optionally yields (background mode), after the push so that a fiber running during the yield
    queues behind this chunk.
-5. In non-background mode, sleeps up to 2ms proportional to CPU spent, to throttle.
+5. On the traversal fiber in non-background mode, sleeps up to 2ms proportional to CPU spent, to
+   throttle. A mutation fiber holds its shard's transaction queue, so it never sleeps here.
 
 ### `writer_` (`detail::QueuedSinkWriter`)
 
 Owns the FIFO of serialized chunks and a fiber that hands them to `consumer_->ConsumeData` in
 order, so the sink only ever sees one write at a time. `Push` blocks while more than the writer's
-limit is queued; with the limit at 0 it waits until its own chunk is written. The snapshot fiber
+limit is queued; with the limit at 0 it waits until its own chunk is written.
+
+The limit is `--snapshot_output_buffer_limit`, per shard and per running snapshot. It lets a
+mutation fiber that serializes a bucket inline queue its chunks and return, instead of waiting on a
+slow replica or storage while it holds the shard's transaction queue. The traversal paces itself
+in `PaceTraversal`, between buckets where it holds no bucket dependency, by waiting until at most a
+quarter of the limit is queued, which leaves the rest of the room to the mutation path. Before the
+full sync cut the limit drops to 0: the cut's push drains the queue, and the journal entries that
+follow wait for the sink again, so `DFLY STARTSTABLE`, which stops the writer under a global
+transaction, finds no backlog. Queued chunks count toward RSS and `snapshot_serialization_bytes`
+but not `used_memory`.
+
+The snapshot fiber
 stops the writer before `consumer_->Finalize()` for saves. For replication journal entries keep
 flowing after the traversal, so `FinalizeJournalStream` stops it after the last push. A cancelled
 context makes `ConsumeData` return at once, so the queue drains without writing.

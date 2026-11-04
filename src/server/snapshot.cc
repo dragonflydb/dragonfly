@@ -32,6 +32,11 @@ ABSL_FLAG(bool, background_snapshotting, false, "Whether to run snapshot as a ba
 ABSL_FLAG(bool, serialize_hnsw_index, false, "Serialize HNSW vector index graph structure");
 ABSL_FLAG(bool, serialization_tagged_chunks, true,
           "Allow serializer output to be split into tagged chunks and reassembled by receiver");
+ABSL_FLAG(strings::MemoryBytesFlag, snapshot_output_buffer_limit, 64u << 20,
+          "Bytes of serialized data a shard's snapshot may queue for the sink before producers "
+          "wait for it. Lets a write that serializes a bucket inline during a save or a full sync "
+          "proceed without waiting on a slow replica or storage. 0 makes every producer wait for "
+          "its data to be written.");
 
 namespace dfly {
 
@@ -87,8 +92,8 @@ bool SliceSnapshot::IsSnaphotInProgress() {
 void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
 
-  // Every producer waits for its chunk to be written.
-  writer_.Start(absl::StrCat("SnapshotWriter-", ProactorBase::me()->GetPoolIndex()), 0);
+  writer_.Start(absl::StrCat("SnapshotWriter-", ProactorBase::me()->GetPoolIndex()),
+                absl::GetFlag(FLAGS_snapshot_output_buffer_limit));
 
   use_background_mode_ = absl::GetFlag(FLAGS_background_snapshotting);
   SerializerBase::RegisterChangeListener(stream_journal);
@@ -182,6 +187,10 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   // A successful traversal leaves no bucket dependency pending.
   DCHECK(!IsAnyBucketBlocked());
   if (send_full_sync_cut) {
+    // From here on journal entries wait for the sink again, and the push below drains the queue
+    // before the cut. DFLY STARTSTABLE, which the replica sends after the cut, stops the writer
+    // under a global transaction, so it must find no backlog to drain.
+    writer_.SetLimit(0);
     CHECK(!serializer_->SendFullSyncCut());
     PushSerialized(true);
   }
@@ -206,6 +215,10 @@ void SliceSnapshot::PaceTraversal(bool done) {
   } else if (!PushSerialized(false) && CpuSliceUsedUp()) {
     ThisFiber::Yield();
   }
+
+  // Between buckets no dependency is held, so this is where the traversal waits for the sink.
+  // It stays well below the limit, leaving the room to the mutation path.
+  writer_.WaitBelow(writer_.limit() / 4);
 }
 
 void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
@@ -253,7 +266,8 @@ void SliceSnapshot::HandleFlushData(std::string data) {
     // TODO: Mavbe Sleep() to provide write backpressure in advance?
   }
 
-  if (!use_background_mode_) {
+  // A mutation fiber holds its shard's transaction queue, so only the traversal paces itself.
+  if (!OnMutationPath() && !use_background_mode_) {
     // serializer_->Flush can be quite slow for large values or due to compression, therefore
     // we counter-balance CPU over-usage by sleeping.
     uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
@@ -314,7 +328,7 @@ void SliceSnapshot::ThrottleIfNeeded() {
 }
 
 size_t SliceSnapshot::GetBufferCapacity() const {
-  return serializer_ ? serializer_->GetBufferCapacity() : 0;
+  return (serializer_ ? serializer_->GetBufferCapacity() : 0) + writer_.pending_bytes();
 }
 
 size_t SliceSnapshot::GetTempBuffersSize() const {
