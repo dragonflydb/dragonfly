@@ -466,10 +466,14 @@ The limit is `--snapshot_output_buffer_limit`, per shard and per running snapsho
 mutation fiber that serializes a bucket inline queue its chunks and return, instead of waiting on a
 slow replica or storage while it holds the shard's transaction queue. The traversal paces itself
 in `PaceTraversal`, between buckets where it holds no bucket dependency, by waiting until at most a
-quarter of the limit is queued, which leaves the rest of the room to the mutation path. Before the
-full sync cut the limit drops to 0: the cut's push drains the queue, and the journal entries that
-follow wait for the sink again, so `DFLY STARTSTABLE`, which stops the writer under a global
-transaction, finds no backlog. Queued chunks count toward RSS and `snapshot_serialization_bytes`
+quarter of the limit is queued, which leaves the rest of the room to the mutation path.
+
+Before the full sync cut, the snapshot fiber lowers the limit to `--replication_stream_output_limit`
+with `LowerLimit`, so `DFLY STARTSTABLE`, which stops the writer under a global transaction, drains
+no more than stable sync would hold. The limit follows the queue down, each write lowering it by
+half of the bytes written, so the journal flushes during that time keep half of the sink's
+throughput and none of them waits for the whole backlog while it holds the shard's transaction
+queue. Queued chunks count toward RSS and `snapshot_serialization_bytes`
 but not `used_memory`.
 
 The snapshot fiber

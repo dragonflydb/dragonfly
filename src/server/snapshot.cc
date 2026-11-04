@@ -38,6 +38,8 @@ ABSL_FLAG(strings::MemoryBytesFlag, snapshot_output_buffer_limit, 64u << 20,
           "proceed without waiting on a slow replica or storage. 0 makes every producer wait for "
           "its data to be written.");
 
+ABSL_DECLARE_FLAG(uint32_t, replication_stream_output_limit);
+
 namespace dfly {
 
 using namespace std;
@@ -187,10 +189,11 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   // A successful traversal leaves no bucket dependency pending.
   DCHECK(!IsAnyBucketBlocked());
   if (send_full_sync_cut) {
-    // From here on journal entries wait for the sink again, and the push below drains the queue
-    // before the cut. DFLY STARTSTABLE, which the replica sends after the cut, stops the writer
-    // under a global transaction, so it must find no backlog to drain.
-    writer_.SetLimit(0);
+    // DFLY STARTSTABLE, which the replica sends after the cut, stops the writer under a global
+    // transaction, so the backlog must be down to what stable sync allows by then. Lower the limit
+    // gradually: dropping it at once would make the next journal flush wait for the whole backlog
+    // while it holds the shard's transaction queue.
+    writer_.LowerLimit(absl::GetFlag(FLAGS_replication_stream_output_limit));
     CHECK(!serializer_->SendFullSyncCut());
     PushSerialized(true);
   }

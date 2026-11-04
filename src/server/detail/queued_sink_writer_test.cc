@@ -156,6 +156,57 @@ TEST_F(QueuedSinkWriterTest, RaisingLimitReleasesProducers) {
   writer_.Stop();
 }
 
+// LowerLimit makes a producer wait only for part of the backlog ahead of it, and returns once the
+// limit got down to the target.
+TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotWaitForBacklog) {
+  StartWriter(1 << 20);
+  for (char c : {'a', 'b', 'c', 'd'})
+    writer_.Push(Chunk(c));
+
+  fb2::Fiber lowerer([&] { writer_.LowerLimit(0); });
+  ThisFiber::SleepFor(1ms);
+
+  bool pushed = false;
+  fb2::Fiber producer([&] {
+    writer_.Push(Chunk('e'));
+    pushed = true;
+  });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_FALSE(pushed);
+
+  // SetLimit(0) would release the producer only once all 5 chunks are written.
+  while (!pushed) {
+    sink_.Allow(1);
+    ThisFiber::SleepFor(1ms);
+  }
+  EXPECT_LT(sink_.written().size(), 4u);
+
+  sink_.Open();
+  lowerer.Join();
+  producer.Join();
+  EXPECT_EQ(writer_.limit(), 0u);
+  writer_.Stop();
+}
+
+// LowerLimit returns although producers keep pushing as fast as the sink writes.
+TEST_F(QueuedSinkWriterTest, LowerLimitConvergesUnderLoad) {
+  StartWriter(1 << 20);
+  sink_.Open();
+  bool done = false;
+  fb2::Fiber producer([&] {
+    while (!done)
+      writer_.Push(Chunk('a'));
+  });
+  for (unsigned i = 0; i < 100; ++i)
+    writer_.Push(Chunk('b'));
+
+  writer_.LowerLimit(0);
+  EXPECT_EQ(writer_.limit(), 0u);
+  done = true;
+  producer.Join();
+  writer_.Stop();
+}
+
 // Push returns at once while the queue holds at most the limit, and blocks above it.
 TEST_F(QueuedSinkWriterTest, LimitBoundsPush) {
   StartWriter(2500);

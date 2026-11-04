@@ -43,6 +43,20 @@ void QueuedSinkWriter::WaitBelow(size_t bytes) {
   cv_.wait(lk, [&] { return pending_bytes() <= bytes || !cntx_->IsRunning(); });
 }
 
+void QueuedSinkWriter::LowerLimit(size_t limit) {
+  util::fb2::NoOpLock lk;
+  limit_ = max(limit, min(limit_, pending_bytes()));
+  while (limit_ > limit && cntx_->IsRunning()) {
+    // More than `limit` is queued, so the writer is busy and the wait below ends.
+    const uint64_t written_bytes = written_bytes_;
+    cv_.wait(lk, [&] { return written_bytes_ > written_bytes || !cntx_->IsRunning(); });
+
+    size_t step = (written_bytes_ - written_bytes) / 2;
+    limit_ = max(limit, min(limit_ - min(limit_, step), pending_bytes()));
+  }
+  SetLimit(limit);
+}
+
 void QueuedSinkWriter::Stop() {
   if (!fb_.IsJoinable())
     return;

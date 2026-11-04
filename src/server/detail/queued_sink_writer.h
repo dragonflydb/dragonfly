@@ -53,6 +53,12 @@ class QueuedSinkWriter {
     cv_.notify_all();  // a raised limit may release waiting producers
   }
 
+  // Lowers the limit to `limit` without making a producer wait for the whole backlog, as
+  // SetLimit(limit) would. The limit follows the queue down: each write lowers it by half of the
+  // bytes written, so producers keep half of the sink's throughput while the queue shrinks.
+  // Blocks until the limit reaches `limit`.
+  void LowerLimit(size_t limit);
+
   size_t limit() const {
     return limit_;
   }
