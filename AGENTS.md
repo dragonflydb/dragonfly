@@ -293,6 +293,20 @@ python3 -m pytest tests/dragonfly/pymemcached_test.py::TestMemcached::test_basic
 - `DRAGONFLY_PATH` — sets the path to the Dragonfly binary the test harness starts. Defaults to `build-dbg/dragonfly` relative to the `tests/dragonfly/` directory.
 - `--df` — passes **extra flags to the Dragonfly process** (not the binary path). For example: `--df logtostdout --df "vmodule=*=1"`.
 
+### Where to Put New Coverage
+
+For small incremental features, **prefer extending an existing test over adding a new one**.
+Look for a test that already drives the scenario you need and assert the new behavior there -
+a new metric, field or status is usually a line or two inside a test that already performs the
+save, the replication teardown or the command sequence that produces it.
+
+- Check what the surrounding test file already covers before writing a new test function.
+- Anchor a new assertion to something the host test already guarantees, so it adds no timing
+  assumption of its own.
+- Add a separate test when the scenario itself is new (a setup no existing test performs), when
+  it needs its own flags or fixtures, or when folding it in would obscure what the host test is
+  about.
+
 ---
 
 ## CI/CD Pipeline

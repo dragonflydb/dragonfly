@@ -430,8 +430,13 @@ async def test_migration_timeout_on_sync(
     await nodes[1].client.execute_command("debug migration pause")
 
     try:
+        # The write timeout carries errc::timed_out, whose message prefixes the detail.
         await wait_for_error(
-            nodes[0].admin_client, nodes[1].id, "BufferedSocketWriter write operation timeout", 30
+            nodes[0].admin_client,
+            nodes[1].id,
+            "BufferedSocketWriter write operation timeout",
+            30,
+            exact=False,
         )
     finally:
         logging.debug("debug migration resume")

@@ -2164,8 +2164,10 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
   // Success - update state
   controller->Start();
-  thread_safe_save_info_.Update(
-      [bg_save](SaveInfoData* data) { data->bgsave_in_progress = bg_save; });
+  thread_safe_save_info_.Update([bg_save](SaveInfoData* data) {
+    data->bgsave_in_progress = bg_save;
+    data->save_in_progress = true;
+  });
 
   return {};
 }
@@ -2201,6 +2203,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
   // Still under save_mu_, so the next save cannot start before its predecessor's state is stored.
   thread_safe_save_info_.Update([&](SaveInfoData* data) {
+    data->save_in_progress = false;
     if (is_bg_save) {
       data->bgsave_in_progress = false;
       data->last_bgsave_status = !save_info.error;
@@ -2920,6 +2923,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
     util::fb2::LockGuard lk{loading_stats_mu_};
     result.loading_stats = loading_stats_;
   }
+
+  result.save_in_progress = thread_safe_save_info_.Get().save_in_progress;
 
   result.migration_errors_total = service_.cluster_family().MigrationsErrorsCount();
   result.acl_stats = service_.user_registry().GetAclStats();

@@ -358,6 +358,14 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   AppendMetricWithoutLabels("failed_restores_total", "", m.loading_stats.failed_restore_count,
                             MetricType::COUNTER, &resp->body());
 
+  // Snapshot (RDB/DFS) metrics.
+  AppendMetricWithoutLabels(
+      "rdb_serialize_total",
+      "Number of record writes performed while serializing single-file RDB snapshots",
+      m.coordinator_stats.rdb_save_count, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("save_in_progress", "1 if a snapshot save is in progress, 0 otherwise",
+                            m.save_in_progress ? 1 : 0, MetricType::GAUGE, &resp->body());
+
   // Net metrics
   AppendMetricWithoutLabels("net_input_recv_total", "", conn_stats.io_read_cnt, MetricType::COUNTER,
                             &resp->body());
@@ -563,6 +571,17 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricWithoutLabels("replication_psync_count", "Pync count",
                               m.coordinator_stats.psync_requests_total, MetricType::COUNTER,
                               &resp->body());
+
+    const DflyCmd::DisconnectStats disconnects = dfly_cmd->GetDisconnectStats();
+    AppendMetricHeader("replica_disconnects_total",
+                       "Replica sessions dropped by the master, by reason", MetricType::COUNTER,
+                       &resp->body());
+    AppendMetricValue("replica_disconnects_total", disconnects.closed, {"reason"}, {"closed"},
+                      &resp->body());
+    AppendMetricValue("replica_disconnects_total", disconnects.error, {"reason"}, {"error"},
+                      &resp->body());
+    AppendMetricValue("replica_disconnects_total", disconnects.timeout, {"reason"}, {"timeout"},
+                      &resp->body());
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
                        MetricType::GAUGE, &replication_lag_metrics);
     for (const auto& replica : replicas_info) {
@@ -851,7 +870,7 @@ void Metrics::Merge(const Metrics& src) {
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeAttributedMemory) + 184,  // 21 scalar fields + 4-byte alignment padding
+              sizeof(TypeAttributedMemory) + 192,  // 22 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
   // Per-db stats / events / small_string_bytes are merged element-wise.
@@ -926,7 +945,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeAttributedMemory) + 184,  // 21 scalar fields + 4-byte alignment padding
+              sizeof(TypeAttributedMemory) + 192,  // 22 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
   ServerState* ss = ServerState::tlocal();
