@@ -85,8 +85,9 @@ flowchart TD
   PS --> FS[FlushSerialized]
   FS --> HFD
 
-  HFD --> SEQ["seq_cond_.wait - ordering gate"]
-  SEQ --> CD["consumer_->ConsumeData"]
+  HFD --> WQ["writer_.Push - FIFO queue"]
+  WQ --> WFB["writer_ fiber"]
+  WFB --> CD["consumer_->ConsumeData"]
   CD --> SINK[(Replica socket / file sink)]
 ```
 
@@ -440,17 +441,27 @@ is the only surviving role of the `eventually_consistent_` flag.
 
 ## Flushing and Backpressure
 
-### `HandleFlushData(std::string data)` — Common Blocking Sink
+### `HandleFlushData(std::string data)` — Common Sink
 
 All serialized data ultimately flows through `HandleFlushData` (`snapshot.cc`):
 
 1. If `stream_mu_.is_locked()`, increments `stats_.flushed_under_lock` (observability).
-2. Assigns a monotonically increasing record ID (`rec_id_++`).
-3. Optionally yields (background mode).
-4. **Blocks** on `seq_cond_.wait` until `id == last_pushed_id_ + 1` (sequential ordering gate).
-5. **Blocks** on `consumer_->ConsumeData(data, base_cntx_)` (downstream write).
-6. Updates `last_pushed_id_`, notifies waiters via `seq_cond_.notify_all()`.
-7. In non-background mode, sleeps up to 2ms proportional to CPU spent, to throttle.
+2. Records the egress, as a high priority write when it comes from the mutation path.
+3. **Blocks** in `writer_.Push(data)`: appends the chunk to the writer's FIFO and waits until it
+   is written. Nothing preempts between extracting the chunk from the serializer and the append,
+   so the queue order is the production order across fibers.
+4. Optionally yields (background mode), after the push so that a fiber running during the yield
+   queues behind this chunk.
+5. In non-background mode, sleeps up to 2ms proportional to CPU spent, to throttle.
+
+### `writer_` (`detail::QueuedSinkWriter`)
+
+Owns the FIFO of serialized chunks and a fiber that hands them to `consumer_->ConsumeData` in
+order, so the sink only ever sees one write at a time. `Push` blocks while more than the writer's
+limit is queued; with the limit at 0 it waits until its own chunk is written. The snapshot fiber
+stops the writer before `consumer_->Finalize()` for saves. For replication journal entries keep
+flowing after the traversal, so `FinalizeJournalStream` stops it after the last push. A cancelled
+context makes `ConsumeData` return at once, so the queue drains without writing.
 
 ### `ConsumeBigValueChunk(std::string data)`
 
@@ -524,12 +535,11 @@ A non-preempting latch guarding the `change_cb_` consumer list. Held during `Cal
 `FlushChangeToEarlierCallbacks`, and `WaitForUnblockedJournalWrites` so the consumer set cannot
 change underneath an iteration.
 
-### `seq_cond_` (CondVarAny)
+### `writer_` FIFO
 
-Condition variable in `HandleFlushData` ensuring records reach the consumer in `rec_id_` order. If
-fiber A has `id=5` and fiber B `id=6`, B waits until A pushes and advances `last_pushed_id_` to 5.
-Needed because fibers wake in arbitrary order and reordering flushed chunks would corrupt the wire
-protocol.
+`HandleFlushData` appends to the writer's queue without preempting, so chunks reach the consumer in
+the order they were produced, whichever fiber produced them. Reordering flushed chunks would corrupt
+the wire protocol.
 
 ## Code Paths That Reach `HandleFlushData`
 
@@ -558,7 +568,7 @@ flowchart TD
     FS --> HFD2[HandleFlushData]
   end
 
-  HFD1 --> BLOCK["seq_cond_.wait → consumer_->ConsumeData (BLOCKING)"]
+  HFD1 --> BLOCK["writer_.Push → writer fiber → consumer_->ConsumeData (BLOCKING)"]
   HFD2 --> BLOCK
 
   classDef perentry fill:#FFF3E0,stroke:#EF6C00;
@@ -603,8 +613,8 @@ for self-contained single-key writes. The following items remain open:
      consumer backpressure; the bandwidth limiter is an additional upper bound.
    - **Account post-compression bytes** (what actually hits the wire), measured where the chunk is
      handed to `ConsumeData`.
-   - Interaction with background mode and with the `seq_cond_` ordering gate (the sleep must not be
-     held while blocking other producers behind the ordering gate).
+   - Interaction with background mode and with `writer_` (the sleep must not be held while other
+     producers wait on the writer's queue).
 
 3. **Broaden journal-omit eligibility.** `is_omittable_operation` is currently set only for
    self-contained single-key writes (e.g. `SET`). Extending "skip both" to a wider, individually
