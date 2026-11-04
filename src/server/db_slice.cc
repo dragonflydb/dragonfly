@@ -1378,11 +1378,11 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
     return kPersistValue;
   }
 
-  if (!params.IsValid(cntx.time_now_ms)) {
+  auto [rel_msec, abs_msec] = params.Calculate(cntx.time_now_ms, true);
+  if (abs_msec < 0) {
     return OpStatus::OUT_OF_RANGE;
   }
 
-  const int64_t abs_msec = params.ms_timestamp;
   int64_t current_cmp = numeric_limits<int64_t>::max();  // inf if no expiry is set
   const bool has_expire = prime_it->first.HasExpire();
   if (has_expire)
@@ -1403,7 +1403,7 @@ OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
   }
 
   // Delete an already expired key; the caller emits the event after journaling.
-  if (params.IsExpired(cntx.time_now_ms)) {
+  if (rel_msec <= 0) {
     DelAtomic(cntx, prime_it.GetInnerIt());
     db_arr_[cntx.db_index]->stats.events.expired_keys++;
     return -1;
