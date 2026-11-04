@@ -194,9 +194,7 @@ You can enable caching mode by passing the `--cache_mode=true` flag. Once this m
 
 ### Expiration deadlines with relative accuracy
 
-Expiration ranges are limited to ~8 years.
-
-Expiration deadlines with millisecond precision (PEXPIRE, PSETEX, etc.) are rounded to the closest second **for deadlines greater than 2^28ms**, which has less than 0.001% error and should be acceptable for large ranges. If this is not suitable for your use case, get in touch or open an issue explaining your case.
+Expiration ranges are limited to 268435455 seconds (2^28 - 1, about 8.5 years). Key expiration deadlines beyond that limit are clamped to it, while hash field expirations reject them. If this is not suitable for your use case, get in touch or open an issue explaining your case.
 
 For more detailed differences between Dragonfly expiration deadlines and Redis implementations, [see here](docs/differences.md).
 
