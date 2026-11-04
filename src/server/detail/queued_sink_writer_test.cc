@@ -112,6 +112,50 @@ TEST_F(QueuedSinkWriterTest, ZeroLimitWaitsForWrite) {
   writer_.Stop();
 }
 
+// With a limit of 0, a producer returns once its own chunk is written, while a chunk pushed after
+// it is still unwritten.
+TEST_F(QueuedSinkWriterTest, ZeroLimitDoesNotWaitForLaterChunks) {
+  StartWriter(0);
+  bool a_pushed = false, b_pushed = false;
+  fb2::Fiber producer_a([&] {
+    writer_.Push(Chunk('a'));
+    a_pushed = true;
+  });
+  fb2::Fiber producer_b([&] {
+    writer_.Push(Chunk('b'));
+    b_pushed = true;
+  });
+  ThisFiber::SleepFor(1ms);
+
+  sink_.Allow(1);
+  producer_a.Join();
+  EXPECT_TRUE(a_pushed);
+  EXPECT_FALSE(b_pushed);
+
+  sink_.Open();
+  producer_b.Join();
+  writer_.Stop();
+}
+
+// Raising the limit releases a producer that waits above the old one, while the sink is blocked.
+TEST_F(QueuedSinkWriterTest, RaisingLimitReleasesProducers) {
+  StartWriter(0);
+  bool pushed = false;
+  fb2::Fiber producer([&] {
+    writer_.Push(Chunk('a'));
+    pushed = true;
+  });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_FALSE(pushed);
+
+  writer_.SetLimit(1 << 20);
+  producer.Join();
+  EXPECT_TRUE(sink_.written().empty());
+
+  sink_.Open();
+  writer_.Stop();
+}
+
 // Push returns at once while the queue holds at most the limit, and blocks above it.
 TEST_F(QueuedSinkWriterTest, LimitBoundsPush) {
   StartWriter(2500);

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <string>
@@ -19,8 +20,9 @@ class ExecutionState;
 namespace dfly::detail {
 
 // Decouples producers from a slow synchronous sink: Push() queues a chunk that a dedicated fiber
-// writes in FIFO order, and blocks only while more than limit() bytes are queued. A limit of 0
-// makes Push() wait until its chunk is written. Must be used from the thread that created it.
+// writes in FIFO order, and blocks only while its chunk is unwritten and more than limit() bytes
+// are queued. A limit of 0 makes Push() wait until its own chunk is written, not for the chunks
+// queued after it. Must be used from the thread that created it.
 class QueuedSinkWriter {
  public:
   // Writes a chunk to the sink. Can block. Called only from the writer fiber.
@@ -36,7 +38,7 @@ class QueuedSinkWriter {
   // Starts the writer fiber. Must precede Push().
   void Start(std::string_view name, size_t limit);
 
-  // Queues data and blocks while more than limit() bytes are queued.
+  // Queues data and blocks until it is written or at most limit() bytes are queued.
   void Push(std::string data);
 
   // Blocks while more than `bytes` are queued.
@@ -48,6 +50,7 @@ class QueuedSinkWriter {
 
   void SetLimit(size_t limit) {
     limit_ = limit;
+    drain_cv_.notify_all();  // a raised limit may release waiting producers
   }
 
   size_t limit() const {
@@ -64,6 +67,7 @@ class QueuedSinkWriter {
 
   std::deque<std::string> pending_;
   size_t pending_bytes_ = 0;
+  uint64_t pushed_ = 0, written_ = 0;  // chunk counts, to tell when a given chunk is written
   size_t limit_ = 0;
   bool stop_ = false;
   ExecutionState* cntx_;
@@ -71,7 +75,7 @@ class QueuedSinkWriter {
 
   util::fb2::Fiber fb_;
   util::fb2::CondVarAny writer_cv_;  // wakes fb_
-  util::fb2::CondVarAny drain_cv_;   // wakes producers waiting for pending_bytes_ to drop
+  util::fb2::CondVarAny drain_cv_;   // wakes producers after each write
 };
 
 }  // namespace dfly::detail
