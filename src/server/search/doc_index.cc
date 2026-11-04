@@ -153,8 +153,6 @@ std::pair<std::vector<DocField>, std::vector<std::string_view>> GetBasicFields(
   return {std::move(basic_fields), std::move(sort_alias)};
 }
 
-constexpr std::string_view kIndexNotBuilt = "index is not built";
-
 auto GetIndexedHnswFields(const search::Schema& schema) {
   return schema.fields |
          std::views::filter([](const auto& item) { return item.second.IsIndexableHnswField(); });
@@ -1384,17 +1382,17 @@ search::ShardScoringStats ShardDocIndex::CollectScoringStats(
   return search_algo->CollectScoringStats(&*indices_);
 }
 
-vector<SearchDocData> ShardDocIndex::SearchForAggregator(
+ShardDocIndex::AggregateShardResult ShardDocIndex::SearchForAggregator(
     const OpArgs& op_args, const AggregateParams& params,
     search::SearchAlgorithm* search_algo) const {
   if (!indices_)
-    return {};
+    return make_unexpected(ErrorReply{std::string{kIndexNotBuilt}});
 
   auto search_results = search_algo->Search(&*indices_, std::numeric_limits<size_t>::max(),
                                             params.global_scoring_stats);
 
   if (!search_results.error.empty())
-    return {};
+    return make_unexpected(ErrorReply{std::move(search_results.error)});
 
   // Distance lookup for FLAT KNN/VECTOR_RANGE so the score alias is available in the
   // aggregation pipeline. HNSW paths use LoadHnswRangeDocsForAggregator.
@@ -1476,13 +1474,15 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
   return out;
 }
 
-join::Vector<join::OwnedEntry> ShardDocIndex::PreagregateDataForJoin(
+io::Result<join::Vector<join::OwnedEntry>, ErrorReply> ShardDocIndex::PreagregateDataForJoin(
     const OpArgs& op_args, absl::Span<const std::string_view> join_fields,
     search::SearchAlgorithm* search_algo) const {
   if (!indices_)
-    return {};
+    return make_unexpected(ErrorReply{std::string{kIndexNotBuilt}});
 
   auto search_results = search_algo->Search(&*indices_);
+  if (!search_results.error.empty())
+    return make_unexpected(ErrorReply{std::move(search_results.error)});
 
   const size_t fields_count = join_fields.size();
   const auto [basic_fields, sort_alias] = GetBasicFields(join_fields, base_->schema);
@@ -1590,11 +1590,16 @@ DocIndexInfo ShardDocIndex::GetInfo() const {
 
 io::Result<StringVec, ErrorReply> ShardDocIndex::GetTagVals(string_view field) const {
   if (!indices_)
-    return StringVec{};
+    return make_unexpected(ErrorReply{std::string{kIndexNotBuilt}});
 
   search::BaseIndex* base_index = indices_->GetIndex(field);
   if (base_index == nullptr) {
-    return make_unexpected(ErrorReply{"-No such field"});
+    const auto* attribute = base_->schema.Find(field);
+    if (!attribute || !(attribute->flags & search::SchemaField::NOINDEX))
+      return make_unexpected(ErrorReply{"-No such field"});
+    if (attribute->type != search::SchemaField::TAG)
+      return make_unexpected(ErrorReply{"-Not a tag field"});
+    return StringVec{};  // a tag without an index lists no values
   }
 
   search::TagIndex* tag_index = dynamic_cast<search::TagIndex*>(base_index);

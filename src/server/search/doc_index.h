@@ -33,6 +33,9 @@ namespace dfly {
 
 using StringVec = std::vector<std::string>;
 
+// What a registered index answers until its data structures are rebuilt after a load.
+inline constexpr std::string_view kIndexNotBuilt = "index is not built";
+
 namespace search {
 struct IndexBuilder;
 }  // namespace search
@@ -460,9 +463,9 @@ class ShardDocIndex {
   search::ShardScoringStats CollectScoringStats(search::SearchAlgorithm* search_algo) const;
 
   // Perform search and load requested values - note params might be interpreted differently.
-  std::vector<SearchDocData> SearchForAggregator(const OpArgs& op_args,
-                                                 const AggregateParams& params,
-                                                 search::SearchAlgorithm* search_algo) const;
+  using AggregateShardResult = io::Result<std::vector<SearchDocData>, facade::ErrorReply>;
+  AggregateShardResult SearchForAggregator(const OpArgs& op_args, const AggregateParams& params,
+                                           search::SearchAlgorithm* search_algo) const;
 
   // Load and serialize docs for aggregation from pre-computed (DocId, distance) pairs.
   // Used by the HNSW VECTOR_RANGE path in FT.AGGREGATE, where doc ids and distances come
@@ -473,7 +476,7 @@ class ShardDocIndex {
       const absl::flat_hash_map<search::DocId, float>& text_score_map) const;
 
   // Methods needed for join operation
-  join::Vector<join::OwnedEntry> PreagregateDataForJoin(
+  io::Result<join::Vector<join::OwnedEntry>, facade::ErrorReply> PreagregateDataForJoin(
       const OpArgs& op_args, absl::Span<const std::string_view> join_fields,
       search::SearchAlgorithm* search_algo) const;
 
@@ -499,6 +502,11 @@ class ShardDocIndex {
   // (which contains the entire schema by value).
   const DocIndex& base() const {
     return *base_;
+  }
+
+  // False between a definition replayed by a load and the rebuild that follows it.
+  bool IsBuilt() const {
+    return indices_.has_value();
   }
 
   io::Result<StringVec, facade::ErrorReply> GetTagVals(std::string_view field) const;
