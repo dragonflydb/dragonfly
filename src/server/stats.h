@@ -102,6 +102,9 @@ struct TieredStats {
   // Bytes currently in-flight to disk (submitted stash IOs not yet completed).
   size_t pending_stash_bytes = 0;
 
+  // Sum of the per-shard tiered_max_pending_bytes caps; 0 when tiering is off.
+  size_t max_pending_bytes = 0;
+
   // Current number of throttled clients.
   uint64_t clients_throttled = 0;
 
