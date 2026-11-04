@@ -478,6 +478,8 @@ TEST_F(StringFamilyTest, SetEx) {
   ASSERT_THAT(Run({"setex", "key", StrCat(1 << 30), "val"}), "OK");
   ASSERT_THAT(Run({"ttl", "key"}), IntArg(kMaxExpireDeadlineSec));
   ASSERT_THAT(Run({"SETEX", "foo", "18446744073709561", "bar"}), ErrArg("invalid expire time"));
+  ASSERT_EQ(Run({"PSETEX", "key", StrCat(kMaxExpireDeadlineMs + 1), "val"}), "OK");
+  EXPECT_THAT(Run({"PTTL", "key"}), IntArg(kMaxExpireDeadlineMs));
 }
 
 TEST_F(StringFamilyTest, Range) {
@@ -714,6 +716,25 @@ TEST_F(StringFamilyTest, GetEx) {
 
   AdvanceTime(1);
   EXPECT_THAT(Run({"getex", "foo"}), ArgType(RespExpr::NIL));
+
+  // Overflowing deadlines are rejected for an existing key; a missing key still returns nil.
+  for (string_view option : {"EX", "PX", "EXAT", "PXAT"}) {
+    SCOPED_TRACE(option);
+    Run({"set", "foo", "bar", "px", "1000"});
+    EXPECT_THAT(Run({"getex", "foo", option, StrCat(INT64_MAX)}),
+                ErrArg("invalid expire time in 'getex' command"));
+    EXPECT_THAT(Run({"pttl", "foo"}), IntArg(1000));
+    EXPECT_THAT(Run({"getex", "missing", option, StrCat(INT64_MAX)}), ArgType(RespExpr::NIL));
+  }
+
+  // Memcached GAT shares the clamp, so an absolute exptime beyond it is a hit rather than a miss.
+  // Another proactor gives GetMC a memcached connection instead of this thread's reused RESP one.
+  EXPECT_THAT(pp_->at(1)->Await([&] {
+    return GetMC(facade::MemcacheParser::GAT,
+                 {StrCat(TEST_current_time_ms / 1000 + kMaxExpireDeadlineSec + 1), "foo"});
+  }),
+              ElementsAre("VALUE foo 0 3", "bar", "END"));
+  EXPECT_THAT(Run({"pttl", "foo"}), IntArg(kMaxExpireDeadlineMs));
 }
 
 TEST_F(StringFamilyTest, ClThrottle) {

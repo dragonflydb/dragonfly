@@ -6,6 +6,7 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_join.h>
 
 #include <array>
 #include <cstring>
@@ -24,11 +25,14 @@ extern "C" {
 #include "facade/facade_test.h"
 #include "facade/reply_builder.h"
 #include "facade/string_socket.h"
+#include "io/io.h"
 #include "server/channel_store.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
@@ -208,7 +212,7 @@ TEST_F(GenericFamilyTest, ExpireCornerCases) {
   EXPECT_THAT(Run({"pexpireat", "key", "-1"}), IntArg(1));
   EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
 
-  // Huge absolute timestamps overflow the kMaxExpireDeadlineMs cap and surface OUT_OF_RANGE.
+  // Absolute timestamps that overflow the internal representation remain invalid.
   Run({"set", "key", "val"});
   EXPECT_THAT(Run({"expireat", "key", absl::StrCat(INT64_MAX)}), ErrArg("expiry is out of range"));
   EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
@@ -229,6 +233,59 @@ TEST_F(GenericFamilyTest, ExpireCornerCases) {
   EXPECT_THAT(Run({"expire", "missing", "-1"}), IntArg(0));
   EXPECT_THAT(Run({"expireat", "missing", "0"}), IntArg(0));
   EXPECT_THAT(Run({"pexpireat", "missing", "0"}), IntArg(0));
+}
+
+TEST_F(GenericFamilyTest, ExpireCap) {
+  TEST_current_time_ms = 1'800'000'000'123;
+  struct Case {
+    vector<string_view> args;  // the command up to its expiry argument
+    int64_t unit_ms;
+    bool absolute;
+  };
+  const Case cases[] = {
+      {{"expire", "key"}, 1000, false},       {{"pexpire", "key"}, 1, false},
+      {{"expireat", "key"}, 1000, true},      {{"pexpireat", "key"}, 1, true},
+      {{"getex", "key", "EX"}, 1000, false},  {{"getex", "key", "PX"}, 1, false},
+      {{"getex", "key", "EXAT"}, 1000, true}, {{"getex", "key", "PXAT"}, 1, true}};
+  const int64_t deadline = TEST_current_time_ms + kMaxExpireDeadlineMs;
+  pp_->at(Shard("key", shard_set->size()))->Await([&] {
+    journal::AcquireUser();
+    absl::Cleanup release_journal = [] { journal::ReleaseUser(); };
+    for (const auto& [args, unit_ms, absolute] : cases) {
+      // One unit beyond the cap is clamped to it.
+      const string value = StrCat(kMaxExpireDeadlineMs / unit_ms + 1 +
+                                  (absolute ? TEST_current_time_ms / unit_ms : 0));
+      vector<string_view> cmd(args);
+      cmd.push_back(value);
+      SCOPED_TRACE(absl::StrJoin(cmd, " "));
+
+      ASSERT_EQ(Run({"set", "key", "val", "px", "1000"}), "OK");
+      const auto lsn = journal::GetLsn();
+      const RespExpr resp = Run(cmd);
+      if (args[0] == "getex") {
+        EXPECT_EQ(resp, "val");
+      } else {
+        EXPECT_THAT(resp, IntArg(1));
+      }
+
+      // Replicas receive the applied deadline; decode the borrowed bytes before yielding.
+      ASSERT_EQ(journal::GetLsn(), lsn + 1);
+      io::BytesSource source{journal::GetEntry(lsn)};
+      JournalReader reader{&source, 0};
+      journal::ParsedEntry entry;
+      ASSERT_FALSE(reader.ReadEntry(&entry));
+      ASSERT_EQ(entry.cmd.size(), 3);
+      EXPECT_EQ(entry.cmd[0], "PEXPIREAT");
+      EXPECT_EQ(entry.cmd[2], StrCat(deadline));
+      EXPECT_THAT(Run({"pexpiretime", "key"}), IntArg(deadline));
+
+      // GT compares the clamped deadline, which equals the one already set.
+      if (args[0] != "getex") {
+        cmd.push_back("GT");
+        EXPECT_THAT(Run(cmd), IntArg(0));
+      }
+    }
+  });
 }
 
 TEST_F(GenericFamilyTest, ExpireOptions) {
@@ -1529,6 +1586,15 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"get", "string-key"});
   EXPECT_EQ("hello world", resp);
   EXPECT_EQ(CheckedInt({"pttl", "string-key"}), 2000);
+
+  // RESTORE caps both relative TTLs and absolute deadlines.
+  ASSERT_EQ(Run({"restore", "string-key", StrCat(kMaxExpireDeadlineMs + 1), ToSV(dump), "REPLACE"}),
+            "OK");
+  EXPECT_THAT(Run({"pttl", "string-key"}), IntArg(kMaxExpireDeadlineMs));
+  ASSERT_EQ(Run({"restore", "string-key", StrCat(TEST_current_time_ms + kMaxExpireDeadlineMs + 1),
+                 ToSV(dump), "ABSTTL", "REPLACE"}),
+            "OK");
+  EXPECT_THAT(Run({"pttl", "string-key"}), IntArg(kMaxExpireDeadlineMs));
 
   // Last but not least - just make sure that we are good without TTL as well
   resp = Run({"restore", "string-key", "0", ToSV(STRING_DUMP_REDIS), "REPLACE"});

@@ -1435,13 +1435,15 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     StringResult value = ReadString(t->GetDbIndex(), key, it_res->it->second, shard);
 
-    bool key_expired = false;
+    int64_t expire_at_ms = 0;
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
       auto expire_res = op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params);
       RETURN_ON_BAD_STATUS(expire_res);
-      key_expired = *expire_res == -1;
+      expire_at_ms = *expire_res;
     }
+
+    const bool key_expired = expire_at_ms == -1;
 
     // Replicate GETEX as DEL (already-past expiration), PEXPIREAT or PERSIST.
     if (shard->journal() && exp_params.IsDefined()) {
@@ -1450,8 +1452,7 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
       } else if (key_expired) {
         RecordJournal(op_args, "DEL", {key});
       } else {
-        auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms, false);
-        auto abs_time_str = absl::StrCat(abs_time);
+        auto abs_time_str = absl::StrCat(expire_at_ms);
         RecordJournal(op_args, "PEXPIREAT", {key, abs_time_str});
       }
     }
@@ -1463,7 +1464,11 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
+  auto result = co_await cmd::SingleHopT(cb);
+  if (result.status() == OpStatus::OUT_OF_RANGE)
+    co_return facade::ErrorReply{kGetExExpiryErr};
+
+  GetReplies{cmd_cntx}.Send(std::move(result));
   co_return std::nullopt;
 }
 

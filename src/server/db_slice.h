@@ -364,8 +364,8 @@ class DbSlice {
   // and reports no heap allocation, so overwriting it drops the only reference to its disk extent.
   void ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv);
 
-  // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
-  // already expired and was deleted;
+  // Update key expiration, clamping TTL to kMaxExpireDeadlineMs. Return the applied absolute
+  // deadline in ms, 0 for PERSIST, -1 if deleted, or OUT_OF_RANGE on overflow.
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,
                                          const ExpireParams& params);
 
