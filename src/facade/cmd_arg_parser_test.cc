@@ -1005,6 +1005,57 @@ TEST_F(CmdArgParserTest, CapGrammarChoice) {
   }
 }
 
+TEST_F(CmdArgParserTest, CapGrammarChoiceError) {
+  static constexpr auto kGrammar =
+      Compile(Options(Choice("AGGREGATE", &ChoiceTarget::agg, ChoiceError("unknown aggregate '$0'"),
+                             "SUM", Agg::kSum, "MAX", Agg::kMax)));
+  auto run = [&](std::initializer_list<std::string_view> args, ChoiceTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  ChoiceTarget o;
+  EXPECT_FALSE(run({"AGGREGATE", "max"}, &o));
+  EXPECT_EQ(o.agg, Agg::kMax);
+  EXPECT_EQ(run({"AGGREGATE", "BOGUS"}, &o).MakeReply().ToSv(), "unknown aggregate 'BOGUS'");
+
+  // A missing value keeps the generic error.
+  EXPECT_EQ(run({"AGGREGATE"}, &o).MakeReply().ToSv(), kSyntaxErr);
+}
+
+namespace {
+struct DigitTarget {
+  std::optional<int64_t> digit;
+};
+
+int64_t ParseDigit(std::string_view arg, RuleError& err) {
+  if (arg.size() != 1 || arg[0] < '0' || arg[0] > '9') {
+    err = {true, "not a digit"};
+    return 0;
+  }
+  return arg[0] - '0';
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarFieldParserFn) {
+  static constexpr auto kGrammar =
+      Compile(Options(Field("DIGIT", &DigitTarget::digit, &ParseDigit)));
+  auto run = [&](std::initializer_list<std::string_view> args, DigitTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  DigitTarget o;
+  EXPECT_FALSE(run({"DIGIT", "7"}, &o));
+  EXPECT_EQ(o.digit, 7);
+  EXPECT_EQ(run({"DIGIT", "07"}, &o).MakeReply().ToSv(), "not a digit");
+  EXPECT_EQ(run({"DIGIT"}, &o).MakeReply().ToSv(), kSyntaxErr);
+}
+
 // TagValue: a keyword sets a discriminant member to a compile-time value and reads the next arg
 // into another member (e.g. the EX/PX expiry keywords). Wrapped in OneOf for mutual exclusion.
 namespace {

@@ -337,6 +337,7 @@ TEST_F(ServerFamilyTest, ClientListRejected) {
       {{"CLIENT", "LIST", "ID"}, "syntax error"},
       {{"CLIENT", "LIST", "ID", "abc"}, "Invalid client ID"},
       {{"CLIENT", "LIST", "TYPE", "normal", "ID", "1"}, "syntax error"},
+      {{"CLIENT", "LIST", "TYPE", "normal", "ID", "abc"}, "syntax error"},
       {{"CLIENT", "LIST", "FOO"}, "syntax error"},
   };
   for (const auto& [args, msg] : bad) {

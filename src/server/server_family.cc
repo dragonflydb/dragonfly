@@ -5,6 +5,7 @@
 #include "server/server_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/functional/function_ref.h>
 #include <absl/random/random.h>  // for master_replid_ generation.
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
@@ -422,46 +423,30 @@ struct ClientListFilter {
   absl::flat_hash_set<uint32_t> ids;
 };
 
-// Replies with an error itself if the value is missing or unknown.
-optional<ClientListType> ParseClientType(CmdArgParser* parser, CommandContext* cmd_cntx) {
-  if (!parser->HasNext()) {
-    cmd_cntx->SendError(facade::kSyntaxErr);
-    return nullopt;
-  }
-  string_view raw = parser->Peek();
-  auto mapped =
-      parser->TryMapNext("NORMAL", ClientListType::kNormal, "MASTER", ClientListType::kMaster,
-                         "REPLICA", ClientListType::kReplica, "SLAVE", ClientListType::kReplica,
-                         "PUBSUB", ClientListType::kPubsub);
-  if (!mapped)
-    cmd_cntx->SendError(StrCat("Unknown client type '", raw, "'"), kSyntaxErrType);
-  return mapped;
+template <class T> consteval auto ClientTypeRule(optional<ClientListType> T::*field) {
+  return Choice("TYPE", field, ChoiceError("Unknown client type '$0'"), "NORMAL",
+                ClientListType::kNormal, "MASTER", ClientListType::kMaster, "REPLICA",
+                ClientListType::kReplica, "SLAVE", ClientListType::kReplica, "PUBSUB",
+                ClientListType::kPubsub);
+}
+
+// ID takes one or more client ids, up to the last argument.
+void ReadClientIds(CmdArgParser* parser, ClientListFilter* filter) {
+  if (!parser->HasNext())
+    parser->Report(CmdArgParser::INVALID_CASES);
+  while (parser->HasNext())
+    filter->ids.insert(parser->Next<uint32_t>("Invalid client ID"));
 }
 
 optional<ClientListFilter> ParseClientListFilter(CmdArgParser parser, CommandContext* cmd_cntx) {
-  ClientListFilter filter;
-  if (!parser.HasNext())
-    return filter;
-
-  if (parser.Check("TYPE")) {
-    filter.type = ParseClientType(&parser, cmd_cntx);
-    if (!filter.type)
-      return nullopt;
-  } else if (parser.Check("ID")) {
-    if (!parser.HasNext()) {
-      cmd_cntx->SendError(facade::kSyntaxErr);
-      return nullopt;
-    }
-    while (parser.HasNext()) {
-      filter.ids.insert(parser.Next<uint32_t>("Invalid client ID"));
-    }
-  } else {
-    cmd_cntx->SendError(facade::kSyntaxErr);
-    return nullopt;
-  }
-
+  static constexpr auto kGrammar = Compile(Options(
+      OneOf(kSyntaxErr, ClientTypeRule(&ClientListFilter::type), Action("ID", &ReadClientIds))));
+  ClientListFilter filter = kGrammar.Apply(&parser);
   if (!parser.Finalize()) {
-    cmd_cntx->SendError(parser.TakeError().MakeReply());
+    auto err = parser.TakeError();
+
+    // A valid TYPE ends the filters, so an error after it is a syntax error.
+    cmd_cntx->SendError(filter.type ? ErrorReply{kSyntaxErr} : err.MakeReply());
     return nullopt;
   }
   return filter;
@@ -698,68 +683,61 @@ struct ClientKillFilter {
   optional<string_view> user, addr, laddr;
   bool skipme = true;
   bool legacy = false;  // CLIENT KILL <addr>
+
+  // The addresses are computed only when a filter needs them.
+  bool Matches(uint32_t client_id, ClientListType client_type, const string* client_user,
+               time_t age, absl::FunctionRef<string()> client_addr,
+               absl::FunctionRef<string()> client_laddr) const {
+    return (!id || client_id == *id) && (!type || client_type == *type) &&
+           (!user || (client_user && *client_user == *user)) && (!max_age || age >= *max_age) &&
+           (!addr || client_addr() == *addr) && (!laddr || client_laddr() == *laddr);
+  }
 };
+
+// string2ll rejects '+', spaces and leading zeros, which the parser's integers accept.
+int64_t ParseClientId(string_view val, RuleError& err) {
+  long long num = 0;
+  if (!string2ll(val.data(), val.size(), &num) || num <= 0)
+    err = {true, "client-id should be greater than 0"};
+  return num;
+}
+
+int64_t ParseMaxAge(string_view val, RuleError& err) {
+  long long num = 0;
+  if (!string2ll(val.data(), val.size(), &num))
+    err = {true, "maxage is not an integer or out of range"};
+  else if (num <= 0)
+    err = {true, "maxage should be greater than 0"};
+  return num;
+}
+
+void ReadKillUser(CmdArgParser* parser, ClientKillFilter* filter) {
+  filter->user = parser->Next();
+  if (!ServerState::tlocal()->user_registry->GetRegistryWithLock().registry.contains(*filter->user))
+    parser->ReportCustom(StrCat("No such user '", *filter->user, "'"));
+}
 
 optional<ClientKillFilter> ParseClientKillFilter(facade::ParsedArgs args,
                                                  CommandContext* cmd_cntx) {
-  ClientKillFilter filter;
-  if (args.size() == 1) {
-    filter.addr = args[0];
-    filter.skipme = false;
-    filter.legacy = true;
-    return filter;
-  }
+  static constexpr auto kGrammar = Compile(
+      Options(Field("ID", &ClientKillFilter::id, &ParseClientId),
+              ClientTypeRule(&ClientKillFilter::type), Action("USER", &ReadKillUser),
+              Field("ADDR", &ClientKillFilter::addr), Field("LADDR", &ClientKillFilter::laddr),
+              Choice("SKIPME", &ClientKillFilter::skipme, "YES", true, "NO", false),
+              Field("MAXAGE", &ClientKillFilter::max_age, &ParseMaxAge)));
 
   CmdArgParser parser{args};
-  while (parser.HasNext()) {
-    if (!parser.HasAtLeast(2)) {
-      cmd_cntx->SendError(kSyntaxErr);
-      return nullopt;
-    }
-
-    string_view val;
-    long long num = 0;
-    if (parser.Check("ID", &val)) {
-      if (!string2ll(val.data(), val.size(), &num) || num <= 0) {
-        cmd_cntx->SendError("client-id should be greater than 0");
-        return nullopt;
-      }
-      filter.id = num;
-    } else if (parser.Check("TYPE")) {
-      filter.type = ParseClientType(&parser, cmd_cntx);
-      if (!filter.type)
-        return nullopt;
-    } else if (parser.Check("USER", &val)) {
-      if (!ServerState::tlocal()->user_registry->GetRegistryWithLock().registry.contains(val)) {
-        cmd_cntx->SendError(StrCat("No such user '", val, "'"), kSyntaxErrType);
-        return nullopt;
-      }
-      filter.user = val;
-    } else if (parser.Check("ADDR", &val)) {
-      filter.addr = val;
-    } else if (parser.Check("LADDR", &val)) {
-      filter.laddr = val;
-    } else if (parser.Check("SKIPME")) {
-      auto skipme = parser.TryMapNext("YES", true, "NO", false);
-      if (!skipme) {
-        cmd_cntx->SendError(kSyntaxErr);
-        return nullopt;
-      }
-      filter.skipme = *skipme;
-    } else if (parser.Check("MAXAGE", &val)) {
-      if (!string2ll(val.data(), val.size(), &num)) {
-        cmd_cntx->SendError("maxage is not an integer or out of range");
-        return nullopt;
-      }
-      if (num <= 0) {
-        cmd_cntx->SendError("maxage should be greater than 0");
-        return nullopt;
-      }
-      filter.max_age = num;
-    } else {
-      cmd_cntx->SendError(kSyntaxErr);
-      return nullopt;
-    }
+  ClientKillFilter filter;
+  if (args.size() == 1) {
+    filter.addr = parser.Next();
+    filter.skipme = false;
+    filter.legacy = true;
+  } else {
+    kGrammar.Apply(&parser, &filter);
+  }
+  if (!parser.Finalize()) {
+    cmd_cntx->SendError(parser.TakeError().MakeReply());
+    return nullopt;
   }
   return filter;
 }
@@ -774,12 +752,11 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
     return;
 
   // The master link is not killable; refuse a TYPE master or ID request that matches it.
-  if (!filter->user && (filter->type == ClientListType::kMaster || (filter->id && !filter->type))) {
+  if (filter->type == ClientListType::kMaster || filter->id) {
     for (const facade::ClientInfo& link : server_family->GetMasterLinkClientInfo()) {
-      if ((!filter->id || link.id == *filter->id) &&
-          (!filter->addr || link.addr == *filter->addr) &&
-          (!filter->laddr || link.laddr == *filter->laddr) &&
-          (!filter->max_age || link.age >= *filter->max_age))
+      if (filter->Matches(
+              link.id, ClientListType::kMaster, nullptr, link.age, [&] { return link.addr; },
+              [&] { return link.laddr; }))
         return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
     }
   }
@@ -800,17 +777,10 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
     // Already being shut down; do not count it twice.
     if (cntx && cntx->conn_closing)
       return false;
-    if (filter->id && conn->GetClientId() != *filter->id)
-      return false;
-    if (filter->type && ClassifyConnection(conn) != *filter->type)
-      return false;
-    if (filter->user && (!cntx || cntx->authed_username != *filter->user))
-      return false;
-    if (filter->max_age && now - conn->creation_time() < *filter->max_age)
-      return false;
-    if (filter->addr && conn->RemoteEndpointStr() != *filter->addr)
-      return false;
-    return !filter->laddr || conn->LocalBindStr() == *filter->laddr;
+    return filter->Matches(
+        conn->GetClientId(), ClassifyConnection(conn), cntx ? &cntx->authed_username : nullptr,
+        now - conn->creation_time(), [conn] { return conn->RemoteEndpointStr(); },
+        [conn] { return conn->LocalBindStr(); });
   };
 
   // HTTP API connections have no close-after-reply path.
