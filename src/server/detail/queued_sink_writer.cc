@@ -27,19 +27,20 @@ void QueuedSinkWriter::Start(string_view name, size_t limit) {
 
 void QueuedSinkWriter::Push(string data) {
   DCHECK(fb_.IsJoinable());
-  uint64_t seq = ++pushed_;
-  pending_bytes_ += data.capacity();
+  pushed_bytes_ += data.capacity();
+  const uint64_t end = pushed_bytes_;
   pending_.push_back(std::move(data));
   writer_cv_.notify_one();
 
   util::fb2::NoOpLock lk;
-  drain_cv_.wait(
-      lk, [&] { return written_ >= seq || pending_bytes_ <= limit_ || !cntx_->IsRunning(); });
+  drain_cv_.wait(lk, [&] {
+    return written_bytes_ >= end || pending_bytes() <= limit_ || !cntx_->IsRunning();
+  });
 }
 
 void QueuedSinkWriter::WaitBelow(size_t bytes) {
   util::fb2::NoOpLock lk;
-  drain_cv_.wait(lk, [&] { return pending_bytes_ <= bytes || !cntx_->IsRunning(); });
+  drain_cv_.wait(lk, [&] { return pending_bytes() <= bytes || !cntx_->IsRunning(); });
 }
 
 void QueuedSinkWriter::Stop() {
@@ -61,8 +62,7 @@ void QueuedSinkWriter::WriterFb() {
     pending_.pop_front();
     size_t bytes = record.capacity();
     write_fn_(std::move(record));
-    pending_bytes_ -= bytes;
-    ++written_;
+    written_bytes_ += bytes;
     drain_cv_.notify_all();
   }
 }

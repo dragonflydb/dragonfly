@@ -57,24 +57,27 @@ class QueuedSinkWriter {
     return limit_;
   }
 
-  // Sum of the capacities of the queued strings.
+  // Sum of the capacities of the chunks pushed but not yet written.
   size_t pending_bytes() const {
-    return pending_bytes_;
+    return pushed_bytes_ - written_bytes_;
   }
 
  private:
   void WriterFb();
 
-  std::deque<std::string> pending_;
-  size_t pending_bytes_ = 0;
-  uint64_t pushed_ = 0, written_ = 0;  // chunk counts, to tell when a given chunk is written
-  size_t limit_ = 0;
-  bool stop_ = false;
-  ExecutionState* cntx_;
+  std::deque<std::string> pending_;  // chunks not yet handed to write_fn_, in push order
+
+  // Running totals of the capacities of the pushed and of the written chunks. A chunk is written
+  // once written_bytes_ reaches the value pushed_bytes_ had right after its push.
+  uint64_t pushed_bytes_ = 0, written_bytes_ = 0;
+
+  size_t limit_ = 0;      // bytes producers may leave queued without waiting for their chunk
+  bool stop_ = false;     // set by Stop(): fb_ exits once pending_ is empty
+  ExecutionState* cntx_;  // once it stops running, waiting producers are released
   WriteFn write_fn_;
 
-  util::fb2::Fiber fb_;
-  util::fb2::CondVarAny writer_cv_;  // wakes fb_
+  util::fb2::Fiber fb_;              // the writer fiber, runs WriterFb()
+  util::fb2::CondVarAny writer_cv_;  // wakes fb_ on Push() and Stop()
   util::fb2::CondVarAny drain_cv_;   // wakes producers after each write
 };
 
