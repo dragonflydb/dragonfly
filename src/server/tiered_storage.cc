@@ -690,6 +690,7 @@ TieredStats TieredStorage::GetStats() const {
     stats.estimated_bin_bucket_fragmentation = stats_.estimated_bin_bucket_fragmentation;
     stats.clients_throttled = stash_backpressure_.size();
     stats.total_clients_throttled = stats_.total_clients_throttled;
+    stats.max_pending_bytes = config_.max_pending_bytes;
   }
   return stats;
 }

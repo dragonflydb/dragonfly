@@ -718,6 +718,7 @@ TEST_F(PureDiskTSMTTest, SortByGetOffloadedSquashed) {
   EXPECT_TRUE(GetMetrics().facade_stats.reply_stats.err_count.empty());  // RunMany drops replies
   EXPECT_THAT(Run({"LRANGE", "dst", "0", "-1"}), RespElementsAre(o1, o2));
   EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 4u);
+  EXPECT_EQ(GetMetrics().tiered_stats.max_pending_bytes, 32_MB * shard_set->size());
 }
 
 // The remaining in-place overwrite paths reach the value through DbSlice::AddOrFind and retype it,
@@ -892,6 +893,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   // Check that we provided backpressure for all the clients.
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.tiered_stats.total_clients_throttled, fibs.size());
+  EXPECT_EQ(metrics.tiered_stats.max_pending_bytes, 1u * shard_set->size());
 
   for (auto& fib : fibs)
     fib.JoinIfNeeded();

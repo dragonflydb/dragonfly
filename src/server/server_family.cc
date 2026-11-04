@@ -171,7 +171,6 @@ ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
-ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 ABSL_DECLARE_FLAG(bool, cache_mode);
 ABSL_DECLARE_FLAG(int32_t, hz);
 ABSL_DECLARE_FLAG(bool, experimental_cascaded_partial_sync);
@@ -3230,8 +3229,7 @@ string ServerFamily::FormatInfoMetrics(
     // tiered_max_pending_bytes cap. Read + write usage is exported separately (reads are the
     // priority traffic; writes yield to total pressure) plus their sum. >= 100 means the device is
     // at/over its cap.
-    const uint64_t per_shard_cap = absl::GetFlag(FLAGS_tiered_max_pending_bytes).value;
-    const uint64_t total_cap = per_shard_cap * shard_set->size();
+    const uint64_t total_cap = m.tiered_stats.max_pending_bytes;
     const uint64_t read_pct = total_cap ? (m.tiered_stats.pending_read_bytes * 100) / total_cap : 0;
     const uint64_t write_pct =
         total_cap ? (m.tiered_stats.pending_stash_bytes * 100) / total_cap : 0;

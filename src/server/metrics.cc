@@ -22,11 +22,9 @@
 #include "server/search/doc_index.h"
 #include "server/server_family.h"
 #include "server/snapshot.h"
-#include "strings/human_readable.h"
 #include "util/fibers/fibers.h"
 
 ABSL_DECLARE_FLAG(uint32_t, maxclients);
-ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 
 namespace dfly {
 
@@ -801,8 +799,7 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricWithoutLabels("tiered_clients_throttled", "Currently throttled clients",
                               m.tiered_stats.clients_throttled, MetricType::GAUGE, &resp->body());
     // Device pressure: in-flight IO bytes as a percentage of the aggregate
-    const uint64_t per_shard_cap = GetFlag(FLAGS_tiered_max_pending_bytes).value;
-    const uint64_t total_cap = per_shard_cap * shard_set->size();
+    const uint64_t total_cap = m.tiered_stats.max_pending_bytes;
     const uint64_t read_pct = total_cap ? (m.tiered_stats.pending_read_bytes * 100) / total_cap : 0;
     const uint64_t write_pct =
         total_cap ? (m.tiered_stats.pending_stash_bytes * 100) / total_cap : 0;
