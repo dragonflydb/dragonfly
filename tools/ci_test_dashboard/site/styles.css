@@ -247,7 +247,8 @@ select {
 table {
   border-collapse: collapse;
   font-size: 12px;
-  min-width: 1100px;
+  min-width: 1200px;
+  table-layout: fixed;
   width: 100%;
 }
 
@@ -281,6 +282,11 @@ td:nth-child(2) {
   width: 64px;
 }
 
+th:first-child,
+td:first-child {
+  width: 220px;
+}
+
 th:nth-child(3),
 td:nth-child(3),
 th:nth-child(7),
@@ -296,7 +302,7 @@ th:nth-child(4),
 td:nth-child(4),
 th:nth-child(5),
 td:nth-child(5) {
-  width: 88px;
+  width: 130px;
 }
 
 th:nth-child(6),
@@ -306,11 +312,14 @@ td:nth-child(6) {
 
 th:nth-child(10),
 td:nth-child(10),
-th:nth-child(11),
-td:nth-child(11),
 th:nth-child(12),
 td:nth-child(12) {
-  width: 78px;
+  width: 150px;
+}
+
+th:nth-child(11),
+td:nth-child(11) {
+  width: 100px;
 }
 
 th {
@@ -336,7 +345,7 @@ tbody tr.selected {
 .test-name {
   display: grid;
   gap: 4px;
-  min-width: 220px;
+  min-width: 0;
 }
 
 .test-name strong {

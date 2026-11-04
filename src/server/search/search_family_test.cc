@@ -839,10 +839,10 @@ TEST_F(SearchFamilyTest, InfoIndex) {
 
   auto info = Run({"ft.info", "idx-1"});
 
-  auto descriptor_matcher = IsArray("key_type", "HASH", "prefixes", IsArray("doc-"),
-                                    "default_language", "english", "default_score", 1);
-  auto schema_matcher = IsArray(
-      IsArray("identifier", "name", "attribute", "name", "type", "TEXT", "WEIGHT", "1.000000"));
+  auto descriptor_matcher =
+      IsArray("key_type", "HASH", "prefixes", IsArray("doc-"), "default_score", 1);
+  auto schema_matcher =
+      IsArray(IsArray("identifier", "name", "attribute", "name", "type", "TEXT", "WEIGHT", "1"));
 
   EXPECT_THAT(info, IsArray(_, _, _, descriptor_matcher, "index_options", RespArray(IsEmpty()),
                             "attributes", schema_matcher, "num_docs", IntArg(15), "indexing",
@@ -2160,9 +2160,9 @@ TEST_F(SearchFamilyTest, JsonKnnInt8OutOfRange) {
 }
 
 TEST_F(SearchFamilyTest, HnswKnnFloat64LargeDim) {
-  // dim*8 = 2048 bytes exceeds the listpack threshold -> borrowed keyspace storage, whose sds
-  // data pointer is unaligned. Exercises the memcpy-based FLOAT64 reader (would trip
-  // -fsanitize=alignment before the byte-safe-load fix).
+  // dim*8 = 2048 bytes exceeds the listpack threshold -> borrowed keyspace storage, here
+  // single-field listpacks, whose vector data is unaligned. Exercises the memcpy-based FLOAT64
+  // reader (would trip -fsanitize=alignment before the byte-safe-load fix).
   const int kDim = 256;
   Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "v", "VECTOR", "HNSW", "6",
        "TYPE", "FLOAT64", "DIM", absl::StrCat(kDim), "DISTANCE_METRIC", "L2"});
@@ -3681,7 +3681,7 @@ TEST_F(SearchFamilyTest, HashAllowsSameIdentifierWithDifferentAliases) {
                       IsArray(IsArray("identifier", "description", "attribute", "description",
                                       "type", "TAG", "SEPARATOR", "|"),
                               IsArray("identifier", "description", "attribute", "description_fts",
-                                      "type", "TEXT", "WEIGHT", "1.000000")),
+                                      "type", "TEXT", "WEIGHT", "1")),
                       "num_docs", IntArg(1), _, _, _, _));
   Run({"HSET", "hx:1", "description", "slow"});  // the old value leaves both twins
   EXPECT_THAT(Run({"FT.SEARCH", "hx", "@description_fts:fast"}), kNoResults);
@@ -5140,6 +5140,94 @@ TEST_F(SearchFamilyTest, IgnoredOptionsInFtCreate) {
   EXPECT_THAT(resp, AreDocIds("doc:1"));
 }
 
+// Covers the rules documented on ParseFieldOptions; lower-case option words here name fields.
+TEST_F(SearchFamilyTest, SchemaOptionOrders) {
+  ASSERT_EQ(Run("FT.CREATE i ON HASH SCHEMA a TEXT UNF SORTABLE INDEXEMPTY INDEXMISSING NOSTEM "
+                "weight NUMERIC INDEXEMPTY SORTABLE b TEXT INDEXEMPTY nostem WITHSUFFIXTRIE "
+                "NOINDEX SORTABLE WEIGHT 2 phonetic dm:en nostem TAG INDEXEMPTY CASESENSITIVE "
+                "PHONETIC x SORTABLE separator TEXT unf TEXT indexmissing TEXT indexempty TEXT "
+                "phonetic TEXT"),
+            "OK");
+  EXPECT_THAT(
+      Run({"FT.INFO", "i"}),
+      IsArray(_, _, _, _, _, _, "attributes",
+              IsArray(IsArray("identifier", "a", "attribute", "a", "type", "TEXT", "WEIGHT", "1",
+                              "SORTABLE", "UNF", "NOSTEM", "INDEXEMPTY", "INDEXMISSING"),
+                      IsArray("identifier", "weight", "attribute", "weight", "type", "NUMERIC",
+                              "blocksize", "10000", "SORTABLE", "UNF"),
+                      IsArray("identifier", "b", "attribute", "b", "type", "TEXT", "WEIGHT", "2",
+                              "SORTABLE", "NOSTEM", "NOINDEX", "WITHSUFFIXTRIE", "INDEXEMPTY"),
+                      IsArray("identifier", "nostem", "attribute", "nostem", "type", "TAG",
+                              "SEPARATOR", ",", "CASESENSITIVE", "SORTABLE", "UNF", "INDEXEMPTY"),
+                      _, _, _, _, _),
+              _, _, _, _, _, _));
+  auto stored = pp_->at(0)->Await([] {
+    return EngineShard::tlocal()->search_indices()->GetIndex("i")->GetInfo().BuildRestoreCommand();
+  });
+  EXPECT_THAT(stored, HasSubstr("NOSTEM INDEXEMPTY INDEXMISSING SORTABLE UNF weight"));
+
+  auto create = [&](string_view schema) {
+    return Run(absl::StrCat("FT.CREATE f ON HASH SCHEMA ", schema));
+  };
+  EXPECT_THAT(create("a\r\nb"), ErrArg("Field `a  b` does not have a type"));
+  EXPECT_THAT(create("a\nb TEXT INDEXMISSING NOINDEX"),
+              ErrArg("both `NOINDEX` and `INDEXMISSING` `a b`"));
+  EXPECT_THAT(create("a TEXT UNf"), ErrArg("Field `UNf` does not have a type"));
+  EXPECT_THAT(create("a TEXT PHONETIC"), ErrArg("Field `PHONETIC` does not have a type"));
+  EXPECT_THAT(create("a TAG phonetic dm:en"), ErrArg("Field type dm:en is not supported"));
+  EXPECT_THAT(create("a TEXT SORTABLE WEIGHT -1"), ErrArg("Field type -1 is not supported"));
+}
+
+// Every schema that FT.CREATE accepts reads back unchanged from the definition stored for it.
+TEST_F(SearchFamilyTest, EveryAcceptedSchemaRestores) {
+  const vector<string> options = {
+      "SORTABLE", "NOINDEX",        "UNF",      "INDEXMISSING",   "INDEXEMPTY",
+      "NOSTEM",   "WITHSUFFIXTRIE", "WEIGHT 2", "PHONETIC dm:en", "SEPARATOR ;"};
+  vector<string> sequences = {""};
+  for (const string& first : options) {
+    sequences.push_back(" " + first);
+    for (const string& second : options)
+      sequences.push_back(absl::StrCat(" ", first, " ", second));
+  }
+  for (string_view type : {"TEXT", "TAG", "NUMERIC"}) {
+    for (const string& sequence : sequences) {
+      for (string_view name : {"UNF", "unf", "SORTABLE", "INDEXMISSING", "indexempty", "WEIGHT",
+                               "PHONETIC", "NOSTEM", "SEPARATOR", "AS", "TEXT"}) {
+        const string cmd =
+            absl::StrCat("FT.CREATE a ON HASH SCHEMA t ", type, sequence, " ", name, " TEXT");
+        if (Run(cmd) != "OK")
+          continue;
+
+        const string before = testing::PrintToString(Run({"FT.INFO", "a"}).GetVec()[7]);
+        const string restore = pp_->at(0)->Await([] {
+          auto* indices = EngineShard::tlocal()->search_indices();
+          return indices->GetIndex("a")->GetInfo().BuildRestoreCommand();
+        });
+        Run({"FT.DROPINDEX", "a"});
+        ASSERT_EQ(Run(absl::StrCat("FT.CREATE a ", restore)), "OK") << cmd;
+        EXPECT_EQ(testing::PrintToString(Run({"FT.INFO", "a"}).GetVec()[7]), before) << cmd;
+        Run({"FT.DROPINDEX", "a"});
+      }
+    }
+  }
+}
+
+// FT.INFO: a non-default language, CR/LF names as bulk strings, shortest doubles, UNF on JSON.
+TEST_F(SearchFamilyTest, FtInfoRendering) {
+  ASSERT_EQ(Run({"FT.CREATE", "a\r\nb", "ON", "JSON", "LANGUAGE", "german", "LANGUAGE_FIELD",
+                 "l\nm", "SCHEMA", "$.t", "AS", "p\nq", "TEXT", "WEIGHT", "0.0000004", "SORTABLE"}),
+            "OK");
+  EXPECT_THAT(
+      Run({"FT.INFO", "a\r\nb"}),
+      IsArray("index_name", "a\r\nb", "index_definition",
+              IsArray("key_type", "JSON", "prefixes", RespArray(IsEmpty()), "default_language",
+                      "german", "language_field", "l\nm", "default_score", 1),
+              "index_options", RespArray(IsEmpty()), "attributes",
+              IsArray(IsArray("identifier", "$.t", "attribute", "p\nq", "type", "TEXT", "WEIGHT",
+                              "4e-7", "SORTABLE", "UNF")),
+              _, _, _, _, _, _));
+}
+
 TEST_F(SearchFamilyTest, JsonDelIndexesBug) {
   auto resp = Run(
       {"FT.CREATE", "index", "ON", "json", "SCHEMA", "$.text", "AS", "text", "TEXT", "SORTABLE"});
@@ -6104,6 +6192,106 @@ TEST_F(SearchFamilyTest, KnnHnsw) {
   resp = Run({"FT.SEARCH", "knn_idx", "@even:{non_existing} => [KNN 3 @pos $vec]", "PARAMS", "2",
               "vec", query_vec});
   EXPECT_THAT(resp, kNoResults);
+}
+
+// While indices serialize, their graphs keep borrowing the old listpack vectors until each one
+// drains. Both indices borrow from the same listpacks and share the preserved originals. Later, a
+// search holding a graph defers the updates instead, and the searches that start after them wait.
+TEST_F(SearchFamilyTest, HnswListpackUpdatesWhileGraphBusy) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");
+  ResetService();
+
+  auto vec = [](float x) {
+    vector<float> values(512, 0.0f);
+    values[0] = x;
+    return string(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(float));
+  };
+  for (string_view name : {"hx", "hy"}) {
+    EXPECT_EQ(Run({"FT.CREATE", name, "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "v", "VECTOR",
+                   "HNSW", "6", "TYPE", "FLOAT32", "DIM", "512", "DISTANCE_METRIC", "L2"}),
+              "OK");
+    WaitForIndexReady(name);
+  }
+  for (unsigned i = 1; i <= 4; ++i)
+    EXPECT_THAT(Run({"HSET", absl::StrCat("h:", i), "v", vec(i)}), IntArg(1));
+
+  // HSETNX reserves room for the skipped value, leaving h:4's listpack over-allocated.
+  EXPECT_THAT(Run({"HSETNX", "h:4", "v", string(8192, 'x')}), IntArg(0));
+  ASSERT_THAT(Run({"DEBUG", "OBJECT", "h:1"}).GetString(), HasSubstr("encoding:listpack"));
+  ASSERT_FALSE(GlobalHnswIndexRegistry::Instance().Get("hx", "v")->IsVectorCopied());
+
+  auto index = [](string_view name) {
+    return EngineShard::tlocal()->search_indices()->GetIndex(name);
+  };
+  pp_->at(0)->Await([&] {
+    index("hx")->SetHnswSerializing();
+    index("hy")->SetHnswSerializing();
+  });
+
+  // Convert a listpack via an unrelated field, replace a vector, and reuse a deleted DocId.
+  EXPECT_THAT(Run({"HSET", "h:1", "other", string(4096, 'x')}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "h:2", "v", vec(20)}), IntArg(0));
+  EXPECT_THAT(Run({"DEL", "h:3"}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "h:5", "v", vec(5)}), IntArg(1));
+  EXPECT_THAT(Run({"DEL", "h:4"}), IntArg(1));
+
+  string query = vec(0);
+  auto distances = [&](string_view name) {
+    vector<long> out;
+    auto graph = GlobalHnswIndexRegistry::Instance().Get(name, "v");
+    for (const auto& result : graph->Knn(query.data(), 4, nullopt))
+      out.push_back(lround(result.first));
+    return out;
+  };
+  auto drain = [&](string_view name) {
+    pp_->at(0)->Await([&] {
+      auto* shard = EngineShard::tlocal();
+      DbContext db_cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+      index(name)->DrainSerializationUpdates(OpArgs{shard, nullptr, db_cntx});
+    });
+  };
+
+  EXPECT_THAT(distances("hx"), ElementsAre(1, 2, 3, 4));
+  drain("hx");
+  EXPECT_THAT(distances("hx"), ElementsAre(1, 5, 20));
+  EXPECT_THAT(distances("hy"), ElementsAre(1, 2, 3, 4));
+  drain("hy");
+  EXPECT_THAT(distances("hy"), ElementsAre(1, 5, 20));
+  for (string_view name : {"hx", "hy"}) {
+    EXPECT_THAT(
+        Run({"FT.SEARCH", name, "*=>[KNN 4 @v $q]", "PARAMS", "2", "q", query, "NOCONTENT"}),
+        AreNoContentDocIds("h:1", "h:2", "h:5"));
+  }
+
+  // Update a listpack and delete a converted hash while a search holds hx.
+  Fiber searcher;
+  {
+    auto lock = GlobalHnswIndexRegistry::Instance().Get("hx", "v")->GetReadLock();
+    EXPECT_THAT(Run({"HSET", "h:2", "v", vec(2)}), IntArg(0));
+    EXPECT_THAT(Run({"DEL", "h:1"}), IntArg(1));
+    searcher = pp_->at(1)->LaunchFiber([&] { EXPECT_THAT(distances("hx"), ElementsAre(2, 5)); });
+    ThisFiber::SleepFor(20ms);
+  }
+  searcher.Join();
+
+  // DEL accounts for the copy swapped in, so it must keep the original's allocation size.
+  EXPECT_THAT(Run({"DEL", "h:2", "h:5"}), IntArg(2));
+  EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+// The deferred updates re-read the documents from the namespaces that changed them.
+TEST_F(SearchFamilyTest, HnswDeferredUpdateInNamespace) {
+  namespace_ = "ns1";
+  CreateHnswHashIdx();
+  WaitForIndexReady("idx");
+  {
+    auto lock = GlobalHnswIndexRegistry::Instance().Get("idx", "vec")->GetReadLock();
+    EXPECT_THAT(Run({"HSET", "h:1", "vec", FloatVec(1)}), IntArg(1));
+  }
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "idx", "*=>[KNN 1 @vec $q]", "PARAMS", "2", "q", FloatVec(0), "NOCONTENT"}),
+      AreNoContentDocIds("h:1"));
 }
 
 TEST_F(SearchFamilyTest, RestoreHnswVectorsWithConcurrentDeletion) {
@@ -8824,7 +9012,7 @@ TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
   auto vector_field_matcher = IsArray(
       "identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm", "HNSW",
       "data_type", "FLOAT32", "dim", "4", "distance_metric", "COSINE", "initial_cap", "500", "M",
-      "16", "ef_construction", "200", "ef_runtime", "150", "epsilon", "0.070000");
+      "16", "ef_construction", "200", "ef_runtime", "150", "epsilon", "0.07");
 
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsArray(vector_field_matcher), _, _, _,
                             _, _, _));
@@ -8875,7 +9063,7 @@ TEST_F(SearchFamilyTest, InfoIndexTextParams) {
   auto info = Run({"ft.info", "idx"});
 
   auto text_field_matcher = IsArray("identifier", "title", "attribute", "title", "type", "TEXT",
-                                    "WEIGHT", "1.000000", "WITHSUFFIXTRIE");
+                                    "WEIGHT", "1", "WITHSUFFIXTRIE");
 
   EXPECT_THAT(
       info, IsArray(_, _, _, _, _, _, "attributes", IsArray(text_field_matcher), _, _, _, _, _, _));
@@ -9077,8 +9265,7 @@ TEST_F(SearchFamilyTest, NoOffsetsAbsentByDefault) {
 TEST_F(SearchFamilyTest, FtInfoResp2AndResp3) {
   Run({"FT.CREATE", "idx", "ON", "JSON", "PREFIX", "1", "d:", "SCHEMA", "$.id", "AS", "id", "TAG"});
 
-  auto definition = IsArray("key_type", "JSON", "prefixes", IsArray("d:"), "default_language",
-                            "english", "default_score", 1);
+  auto definition = IsArray("key_type", "JSON", "prefixes", IsArray("d:"), "default_score", 1);
   auto attributes =
       IsArray(IsArray("identifier", "$.id", "attribute", "id", "type", "TAG", "SEPARATOR", ","));
 
@@ -9102,11 +9289,10 @@ TEST_F(SearchFamilyTest, StemmingInfoSurface) {
 
   auto info = Run({"FT.INFO", "info_idx"});
   auto title_matcher =
-      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1.000000");
-  auto body_matcher = IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT",
-                              "1.000000", "NOSTEM");
-  auto definition = IsArray("key_type", "HASH", "prefixes", IsArray("doc:"), "default_language",
-                            "english", "default_score", 1);
+      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1");
+  auto body_matcher =
+      IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "1", "NOSTEM");
+  auto definition = IsArray("key_type", "HASH", "prefixes", IsArray("doc:"), "default_score", 1);
   EXPECT_THAT(info, IsArray(_, _, _, definition, _, _, "attributes",
                             IsUnordArray(title_matcher, body_matcher), _, _, _, _, _, _));
 }
@@ -9147,9 +9333,8 @@ TEST_F(SearchFamilyTest, StemmingLanguageFieldPerDoc) {
 
   // FT.INFO exposes language_field.
   auto info = Run({"FT.INFO", "lf_idx"});
-  auto definition =
-      IsArray("key_type", "HASH", "prefixes", RespArray(IsEmpty()), "default_language", "english",
-              "language_field", "lang", "default_score", 1);
+  auto definition = IsArray("key_type", "HASH", "prefixes", RespArray(IsEmpty()), "language_field",
+                            "lang", "default_score", 1);
   EXPECT_THAT(info, IsArray(_, _, _, definition, _, _, _, _, _, _, _, _, _, _));
 }
 
@@ -9715,10 +9900,8 @@ TEST_F(SearchFamilyTest, TextWeightsInfoAndScoring) {
             "OK");
 
   auto info = Run({"FT.INFO", "idx"});
-  auto title =
-      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "5.000000");
-  auto body =
-      IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "1.000000");
+  auto title = IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "5");
+  auto body = IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "1");
   auto tag = IsArray("identifier", "tag", "attribute", "tag", "type", "TAG", "SEPARATOR", ",");
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsUnordArray(title, body, tag), _, _, _,
                             _, _, _));
@@ -9782,10 +9965,8 @@ TEST_F(SearchFamilyTest, AlterTextWeight) {
   WaitForIndexReady("idx");
 
   auto info = Run({"FT.INFO", "idx"});
-  auto title =
-      IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1.000000");
-  auto body =
-      IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "4.000000");
+  auto title = IsArray("identifier", "title", "attribute", "title", "type", "TEXT", "WEIGHT", "1");
+  auto body = IsArray("identifier", "body", "attribute", "body", "type", "TEXT", "WEIGHT", "4");
   EXPECT_THAT(info,
               IsArray(_, _, _, _, _, _, "attributes", IsUnordArray(title, body), _, _, _, _, _, _));
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "@body:weighted"}), AreDocIds("d:1"));

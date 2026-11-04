@@ -214,7 +214,11 @@ string PasswordsToString(const User& user, bool full_hash) {
 }
 
 string KeysToString(const AclKeys& keys) {
-  if (keys.all_keys)
+  // A read-write "*" grants every key, so it saves as allkeys and drops the redundant patterns.
+  const bool rw_all = rng::any_of(keys.key_globs, [](const GlobType& glob) {
+    return glob.first == "*" && glob.second == KeyOp::READ_WRITE;
+  });
+  if (keys.all_keys || rw_all)
     return "~*";
 
   return absl::StrJoin(keys.key_globs, " ", [](string* out, const GlobType& glob) {

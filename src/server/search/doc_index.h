@@ -27,6 +27,7 @@
 #include "server/search/index_join.h"
 #include "server/stats.h"
 #include "server/table.h"
+#include "util/fibers/fibers.h"
 
 namespace dfly {
 
@@ -319,9 +320,12 @@ struct DocIndexInfo {
 
 class ShardDocIndices;
 
-// Extraction cache: ensures each sds field is swapped at most once per document removal,
-// even when multiple search indices reference the same hash field.
-using FieldExtractionCache = absl::flat_hash_map<std::string_view, std::shared_ptr<void>>;
+// Extraction cache: ensures each sds field, or a whole listpack, is swapped at most once per
+// document removal, even when multiple search indices reference it.
+struct FieldExtractionCache {
+  absl::flat_hash_map<std::string_view, std::shared_ptr<void>> fields;
+  std::shared_ptr<void> listpack;
+};
 
 // Per-shard wrapper around a global HnswVectorIndex. Encapsulates shard-local state
 // (preserved field data while HNSW ops are buffered) and delegates to the global index.
@@ -341,7 +345,7 @@ class HnswShardIndex {
 
   void ClearPreservedData();
 
-  // Preserve old sds entry for borrowed-vector mode so HNSW pointers stay valid.
+  // Preserve old sds entry or listpack for borrowed-vector mode so HNSW pointers stay valid.
   void MaybePreserveField(PrimeValue& pv, absl::Span<const std::string_view> modified_fields,
                           FieldExtractionCache* cache);
 
@@ -361,7 +365,7 @@ class HnswShardIndex {
   std::shared_ptr<search::HnswVectorIndex> global_index_;
   std::string field_ident_;  // actual hash key, not AS alias
 
-  // Old sds entries kept alive while HNSW ops are buffered (serializing/restoring).
+  // Old sds entries and listpacks kept alive while HNSW ops are buffered (serializing/restoring).
   // shared_ptr because multiple search indices may reference the same sds.
   std::vector<std::shared_ptr<void>> preserved_field_data_;
 };
@@ -522,10 +526,10 @@ class ShardDocIndex {
                                  PrimeValue* pv);
 
   // Remove doc from all HNSW indices. When hnsw_state_ != kBuilding, the remove
-  // is buffered in pending_vector_updates_ and old sds entries are preserved so
+  // is buffered in pending_vector_updates_ and old sds entries or listpacks are preserved so
   // HNSW pointers remain valid until the buffer is drained.
-  // modified_fields: when non-empty, only preserve fields being mutated.
-  // cache: shared across search indices so each sds field is extracted at most once.
+  // modified_fields: when non-empty, only preserve sds fields being mutated.
+  // cache: shared across search indices so each sds field or listpack is extracted at most once.
   void RemoveDocFromGlobalVectorIndex(ShardDocIndex::DocId doc_id, const DbContext& db_cntx,
                                       PrimeValue& pv,
                                       absl::Span<const std::string_view> modified_fields,
@@ -633,6 +637,28 @@ class ShardDocIndex {
   // Remove a DocId from all HNSW indices for this index.
   void RemoveFromAllHnswIndices(search::DocId doc_id);
 
+  using HnswWriteLocks = absl::InlinedVector<search::MRMWMutexLock, 2>;
+
+  // Waits on the calling fiber for the write locks of all HNSW indices. While they are held,
+  // HNSW updates apply without waiting or deferral, unless the document has a deferred update.
+  HnswWriteLocks LockHnswIndices();
+
+  // Takes the write locks of all HNSW indices without waiting. Fails when a search holds one or
+  // doc_id has a deferred update.
+  std::optional<HnswWriteLocks> TryLockHnswIndices(DocId doc_id);
+
+  // Defers the HNSW update of doc_id to hnsw_sync_fiber_, which waits for the searches. Until then
+  // the indices keep deferred write locks, so the searches that start later see the update. ns is
+  // the namespace to re-read the document from, or nullptr to only remove it.
+  void DeferHnswUpdate(DocId doc_id, Namespace* ns);
+
+  // Takes the deferred write locks, then applies the deferred updates by re-reading the
+  // documents from their namespaces. Runs in hnsw_sync_fiber_.
+  void SyncDeferredHnsw(HnswWriteLocks locks);
+
+  // Waits for hnsw_sync_fiber_ to apply the deferred updates.
+  void FlushDeferredHnswUpdates();
+
   // FieldIndices::Add/Remove of one document. Lazy field expiry can drop a hash field before its
   // document is removed, so the values of fields with a TTL are kept until then.
   bool AddToIndices(DocId id, const DbContext& db_cntx, const PrimeValue& pv);
@@ -675,7 +701,17 @@ class ShardDocIndex {
   enum class HnswState : uint8_t { kProhibit, kRestoring, kSerializing, kBuilding };
 
   absl::flat_hash_set<std::string> pending_vector_updates_;
+
+  // DocIds of buffered removals. key_index_ forgets them immediately, so the drain can't find them
+  // by key, while their DocIds may be reused by other keys.
+  absl::flat_hash_set<DocId> pending_hnsw_removals_;
   HnswState hnsw_state_ = HnswState::kProhibit;
+
+  // HNSW updates that couldn't apply without waiting for the searches, with the namespace passed
+  // by the last one of each document. While any are pending, hnsw_sync_fiber_ holds deferred write
+  // locks of the indices.
+  absl::flat_hash_map<DocId, Namespace*> deferred_hnsw_ids_;
+  util::fb2::Fiber hnsw_sync_fiber_;
 };
 
 // Stores shard doc indices by name on a specific shard.

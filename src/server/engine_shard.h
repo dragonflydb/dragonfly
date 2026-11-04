@@ -27,7 +27,7 @@ class TieredStorage;
 class ShardDocIndices;
 class AofStreamer;
 
-using TypeMemDeltas = std::array<int64_t, OBJ_TYPE_MAX>;
+using TypeAttributedMemory = std::array<int64_t, OBJ_TYPE_MAX>;
 
 class EngineShard {
   friend class EngineShardSet;
@@ -263,8 +263,8 @@ class EngineShard {
 
   void AddTypeMemDelta(size_t type, int64_t delta);
 
-  const TypeMemDeltas& type_mem_delta() const {
-    return type_mem_delta_;
+  const TypeAttributedMemory& type_attributed_memory() const {
+    return type_attributed_memory_;
   }
 
  private:
@@ -395,7 +395,7 @@ class EngineShard {
 
   Counter counter_[COUNTER_TOTAL];
 
-  TypeMemDeltas type_mem_delta_ = {};
+  TypeAttributedMemory type_attributed_memory_ = {};
 
   static __thread EngineShard* shard_;
 };

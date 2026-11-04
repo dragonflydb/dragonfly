@@ -25,6 +25,8 @@
 
 namespace dfly {
 
+class QList;
+
 namespace cluster {
 class SlotRanges;
 class SlotSet;
@@ -84,6 +86,9 @@ struct SliceEvents {
 
   // how many journal omit optimizations were performed
   size_t journal_omit = 0;
+
+  // how many times the forced snapshot serialization was skipped (superset of journal_omit)
+  size_t serialize_skip = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
 };
@@ -208,12 +213,20 @@ class DbSlice {
       size_t orig_value_heap_size = 0;
       CompactObjType orig_obj_type = 0;
 
+      // Tiered list whose node stash/upload callbacks account memory on their own, and the
+      // amount they had accounted at init time. Excluded from the delta to avoid double counting.
+      const QList* orig_tiered_list = nullptr;
+      int64_t orig_tiering_accounted = 0;
+
       // KeySlot(key), computed at most once and only if per-slot stats are tracked.
       std::optional<SlotId> slot;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice,
                 std::optional<SlotId> slot = std::nullopt);
+
+    // Captures the tiered list baseline, see Fields::orig_tiered_list.
+    void ResyncTieredList();
 
     // Returns KeySlot(key) if `table` tracks per-slot stats, nullopt otherwise.
     std::optional<SlotId> StatsSlot(const DbTable& table);
@@ -628,7 +641,7 @@ class DbSlice {
                                              bool force_update);
 
   void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
-                    ChangeConsumerInterface* consumer);
+                    const DbTableArray& tables, ChangeConsumerInterface* consumer);
   util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
@@ -667,8 +680,18 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
-  // Returns true if this write could be ignored during replication without losing consistency
-  bool IsOmittableWrite(const Context& cntx, const ChangeReq& req);
+  // Describes what events caused by a write during ongoing serialization can be safely skipped.
+  struct OmitDecision {
+    bool skip_serialize = false;  // Skip bucket serialization caused by on-change consumers
+    bool omit_journal = false;    // Skip emitting journal event
+  };
+
+  // Decides whether the forced snapshot serialization and/or the journal write can be skipped.
+  // In general, we serialize buckets just before a modification, even if the modified value is
+  // completely overwritten - this is wasteful. If the snapshot traversal loop has not yet reached
+  // the targets bucket, we can skip forced serialization, as it will be eventually serialized with
+  // the new value
+  OmitDecision DetermineOmitPossibility(const Context& cntx, const ChangeReq& req);
 
   enum class LookupMode : uint8_t {
     kReadOnly,

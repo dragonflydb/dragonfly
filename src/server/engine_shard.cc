@@ -793,15 +793,8 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
-  if (tiered_storage_ && tiered_storage_->ShouldOffload()) {
-    VLOG(1) << "Running Offloading, memory=" << db_slice.memory_budget()
-            << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
-
-    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-      if (!db_slice.IsDbValid(i))
-        continue;
-      tiered_storage_->RunOffloading(i);
-    }
+  if (tiered_storage_) {
+    tiered_storage_->Heartbeat();
   }
 }
 
@@ -1053,9 +1046,8 @@ size_t EngineShard::UsedMemory() const {
 }
 
 bool EngineShard::ShouldThrottleForTiering() const {
-  // Throttle if the tiered storage is busy offloading (at least 30% of allowed capacity)
-  return tiered_storage_ && tiered_storage_->WriteDepthUsage() > 0.3 &&
-         tiered_storage_->ShouldOffload();
+  // Throttle if the tiered storage is busy offloading (at least 50% of allowed capacity)
+  return tiered_storage_ && tiered_storage_->TotalUsage() > 50 && tiered_storage_->ShouldOffload();
 }
 
 void EngineShard::FinalizeMulti(Transaction* tx) {
@@ -1196,8 +1188,8 @@ void EngineShard::AddTypeMemDelta(size_t type, int64_t delta) {
   if (delta == 0)
     return;
 
-  DCHECK_LT(type, type_mem_delta_.size());
-  type_mem_delta_[type] += delta;
+  DCHECK_LT(type, type_attributed_memory_.size());
+  type_attributed_memory_[type] += delta;
 }
 
 }  // namespace dfly

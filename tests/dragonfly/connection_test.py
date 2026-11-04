@@ -409,15 +409,11 @@ the connections is running all commands in its context
 
 
 async def test_pipeline_support(async_client):
-    def generate(max):
-        for i in range(max):
-            yield f"key{i}", f"value={i}"
-
-    messages = {a: b for a, b in generate(5)}
+    messages = {f"key{i}": f"value={i}" for i in range(5)}
     assert await run_pipeline_mode(async_client, messages)
 
 
-async def reader(channel: aioredis.client.PubSub, messages, max: int):
+async def reader(channel: aioredis.client.PubSub, messages):
     message_count = len(messages)
     while message_count > 0:
         try:
@@ -457,11 +453,7 @@ expected results on the subscriber side
 
 
 async def test_pubsub_command(async_client):
-    def generate(max):
-        for i in range(max):
-            yield f"message number {i}"
-
-    messages = [a for a in generate(5)]
+    messages = [f"message number {i}" for i in range(5)]
     assert await run_pubsub(async_client, messages, "channel-1")
 
 
@@ -469,7 +461,7 @@ async def run_pubsub(async_client, messages, channel_name):
     pubsub = async_client.pubsub()
     await pubsub.subscribe(channel_name)
 
-    future = asyncio.create_task(reader(pubsub, messages, len(messages)))
+    future = asyncio.create_task(reader(pubsub, messages))
     success = True
 
     for message in messages:
@@ -491,38 +483,6 @@ async def run_pubsub(async_client, messages, channel_name):
         )
 
 
-async def run_multi_pubsub(async_client, messages, channel_name):
-    subs = [async_client.pubsub() for i in range(5)]
-    for s in subs:
-        await s.subscribe(channel_name)
-
-    tasks = [
-        asyncio.create_task(reader(s, messages, random.randint(0, len(messages)))) for s in subs
-    ]
-
-    success = True
-
-    for message in messages:
-        res = await async_client.publish(channel_name, message)
-        if not res:
-            success = False
-            break
-
-    for f in tasks:
-        await f
-    results = [f.result() for f in tasks]
-
-    for s in subs:
-        await s.close()
-    if success:
-        for status, message in results:
-            if not status:
-                return False, f"failed to process {message}"
-        return True, "success"
-    else:
-        return False, "failed to publish"
-
-
 """
 Test with multiple subscribers for a channel
 We want to stress this to see if we have any issue
@@ -532,14 +492,46 @@ across multiple connections internally
 
 
 async def test_multi_pubsub(async_client):
-    def generate(max):
-        for i in range(max):
-            yield f"this is message number {i} from the publisher on the channel"
+    messages = [f"this is message number {i} from the publisher on the channel" for i in range(500)]
+    channel_name = "my-channel"
+    subs = [async_client.pubsub() for _ in range(5)]
+    tasks = []
+    test_succeeded = False
+    try:
+        for s in subs:
+            await s.subscribe(channel_name)
+            async with async_timeout.timeout(5):
+                ack = await s.get_message(ignore_subscribe_messages=False, timeout=None)
+                assert ack is not None
+                assert ack["type"] == "subscribe"
+                assert ack["channel"] == channel_name
+                assert ack["data"] == 1
 
-    messages = [a for a in generate(500)]
-    state, message = await run_multi_pubsub(async_client, messages, "my-channel")
+        tasks = [asyncio.create_task(reader(s, messages)) for s in subs]
 
-    assert state, message
+        for i, message in enumerate(messages):
+            published = await async_client.publish(channel_name, message)
+            assert published == len(
+                subs
+            ), f"Message {i}: expected {len(subs)} subscribers, got {published}"
+
+        async with async_timeout.timeout(30):
+            results = await asyncio.gather(*tasks)
+        for status, message in results:
+            assert status, message
+        test_succeeded = True
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        close_results = await asyncio.gather(*(s.aclose() for s in subs), return_exceptions=True)
+        close_errors = [result for result in close_results if isinstance(result, BaseException)]
+        if close_errors:
+            logging.warning(f"{len(close_errors)} failures seen:")
+            for error in close_errors:
+                logging.warning("Failed to close pub/sub subscription during cleanup: %r", error)
+            if test_succeeded:
+                raise close_errors[0]
 
 
 """

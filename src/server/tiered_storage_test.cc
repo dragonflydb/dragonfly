@@ -39,7 +39,7 @@ ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
-ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
@@ -74,7 +74,7 @@ class TieredStorageTest : public BaseFamilyTest {
       SetFlag(&FLAGS_registered_buffer_size, 0);
     }
 
-    SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 32_MB);
+    SetFlag(&FLAGS_tiered_max_pending_bytes, 32_MB);
     if (GetFlag(FLAGS_tiered_prefix).empty()) {
       // Suffixed with the pid so each test run gets its own directory.
       SetFlag(&FLAGS_tiered_prefix, absl::StrCat("/tmp/tiered_storage_test_", getpid()));
@@ -870,7 +870,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   // Set low limit so all clients are throttled
-  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 1);
+  absl::SetFlag(&FLAGS_tiered_max_pending_bytes, 1);
   UpdateFromFlags();
 
   // issue client pause to accumualte SETs
@@ -1629,6 +1629,28 @@ TEST_F(ListNodeTieringTest, LPopStashedNodes) {
 
   // List must be gone after all elements are popped.
   EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+}
+
+// Node loads and stash completions during a mutating list operation must not be double counted
+// by the key's memory updater.
+TEST_F(ListNodeTieringTest, MemoryAccountingWithStashedNodes) {
+  auto list_memory = [this] { return GetMetrics().db_stats[0].memory_usage_by_type[OBJ_LIST]; };
+
+  const int kItems = 12;
+  for (int i = 0; i < kItems; i++)
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('A' + i))});
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 3; });
+
+  for (int i = 0; i < kItems - 1; i++) {
+    Run({"LPOP", "mylist"});
+    // Pushing to the tail triggers more offloads that may complete during the next pop's load.
+    Run({"RPUSH", "mylist", BuildString(2048, 'z')});
+  }
+
+  Run({"DEL", "mylist"});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+  EXPECT_EQ(list_memory(), 0u);
 }
 
 // MOVE a list whose interior nodes are fully offloaded to a different DB.

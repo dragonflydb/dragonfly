@@ -9,9 +9,10 @@
 namespace dfly {
 
 #define ADD(x) (x) += o.x
+#define UMAX(x) (x) = std::max((x), o.x)
 
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 216);
+  static_assert(sizeof(TieredStats) == 256);
 
   ADD(total_stashes);
   ADD(total_fetches);
@@ -31,6 +32,7 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
 
   ADD(pending_read_cnt);
   ADD(pending_stash_cnt);
+  ADD(pending_read_bytes);
 
   ADD(small_bins_cnt);
   ADD(small_bins_entries_cnt);
@@ -44,6 +46,10 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
   ADD(total_offloading_usec);
   ADD(total_defrag_usec);
   ADD(total_offloading_stashes);
+  ADD(total_repacks);
+  ADD(total_repack_usec);
+
+  UMAX(estimated_bin_bucket_fragmentation);
 
   ADD(clients_throttled);
   ADD(total_clients_throttled);
@@ -63,5 +69,6 @@ SearchStats& SearchStats::operator+=(const SearchStats& o) {
 }
 
 #undef ADD
+#undef UMAX
 
 }  // namespace dfly

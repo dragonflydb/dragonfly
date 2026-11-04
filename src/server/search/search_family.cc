@@ -12,6 +12,7 @@
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_format.h>
 #include <absl/strings/str_join.h>
+#include <absl/strings/str_replace.h>
 #include <absl/strings/str_split.h>
 #include <absl/types/span.h>
 
@@ -34,7 +35,6 @@
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
-#include "server/cluster/cluster_config.h"
 #include "server/cluster/coordinator.h"
 #include "server/command_registry.h"
 #include "server/config_registry.h"
@@ -188,35 +188,20 @@ search::SchemaField::VectorParams ParseVectorParams(CmdArgParser* parser) {
   return params;
 }
 
-ParseResult<search::SchemaField::TagParams> ParseTagParams(CmdArgParser* parser) {
-  search::SchemaField::TagParams params{};
-  while (parser->HasNext()) {
-    if (parser->Check("SEPARATOR")) {
-      std::string_view separator = parser->NextOrDefault();
-
-      if (separator.size() != 1) {
-        return CreateSyntaxError(
-            absl::StrCat("Tag separator must be a single character. Got `"sv, separator, "`"sv));
-      }
-
-      params.separator = separator.front();
-      continue;
-    }
-
-    if (parser->Check("CASESENSITIVE")) {
-      params.case_sensitive = true;
-      continue;
-    }
-
-    if (parser->Check("WITHSUFFIXTRIE")) {
-      params.with_suffixtrie = true;
-      continue;
-    }
-
-    break;
-  }
-  return params;
+void ParseTagSeparator(CmdArgParser* parser, search::SchemaField::TagParams* params) {
+  std::string_view separator = parser->NextOrDefault();
+  if (separator.size() == 1)
+    params->separator = separator.front();
+  else
+    parser->ReportCustom(
+        absl::StrCat("Tag separator must be a single character. Got `"sv, separator, "`"sv));
 }
+
+constexpr auto kTagParams =
+    Options(Action("SEPARATOR", ParseTagSeparator),
+            Exist("CASESENSITIVE", &search::SchemaField::TagParams::case_sensitive),
+            Exist("WITHSUFFIXTRIE", &search::SchemaField::TagParams::with_suffixtrie));
+constexpr auto kTagParamsGrammar = Compile(kTagParams);
 
 ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
   std::string lang = absl::AsciiStrToLower(parser->Next<std::string_view>());
@@ -228,19 +213,16 @@ ParseResult<std::string> ParseLanguageArg(CmdArgParser* parser) {
 
 using TP = search::SchemaField::TextParams;
 
-struct ValidTextWeight : facade::VNum<double> {
-  static facade::RuleError validate(double v) {
-    return {!TP::IsValidWeight(v), {}};
+struct ValidTextWeight : VNum<double> {
+  static RuleError validate(double v) {
+    return {.failed = !TP::IsValidWeight(v), .msg = {}};
   }
 };
 
-void ParseTextWeight(CmdArgParser* parser, TP* params) {
-  params->weight = parser->Next<ValidTextWeight>("Invalid WEIGHT value");
-}
-
-constexpr auto kTextParamsGrammar =
-    Compile(Options(Exist("WITHSUFFIXTRIE", &TP::with_suffixtrie), Exist("NOSTEM", &TP::no_stem),
-                    Field<ValidTextWeight>("WEIGHT", &TP::weight, "Invalid WEIGHT value")));
+constexpr auto kTextWeight = Field<ValidTextWeight>("WEIGHT", &TP::weight, "Invalid WEIGHT value");
+constexpr auto kTextParams = Options(Exist("WITHSUFFIXTRIE", &TP::with_suffixtrie),
+                                     Exist("NOSTEM", &TP::no_stem), kTextWeight);
+constexpr auto kTextParamsGrammar = Compile(kTextParams);
 
 search::SchemaField::NumericParams ParseNumericParams(CmdArgParser* parser) {
   search::SchemaField::NumericParams params{};
@@ -262,11 +244,7 @@ using ParsedSchemaField =
 
 // Tag fields include: [separator char] [casesensitive]
 ParsedSchemaField ParseTag(CmdArgParser* parser) {
-  auto tag_params = ParseTagParams(parser);
-  if (!tag_params) {
-    return make_unexpected(tag_params.error());
-  }
-  return std::make_pair(search::SchemaField::TAG, std::move(tag_params).value());
+  return std::make_pair(search::SchemaField::TAG, kTagParamsGrammar.Apply(parser));
 }
 
 ParsedSchemaField ParseText(CmdArgParser* parser) {
@@ -370,9 +348,74 @@ ParseResult<bool> ParseStopwords(CmdArgParser* parser, DocIndex* index) {
   return true;
 }
 
-constexpr std::array<const std::string_view, 3> kIgnoredOptions = {"UNF"sv, "INDEXMISSING"sv,
-                                                                   "INDEXEMPTY"sv};
-constexpr std::array<const std::string_view, 1> kIgnoredOptionsWithArg = {"PHONETIC"sv};
+// A name quoted in an error reply, which takes a single line.
+string OneLine(string_view name) {
+  return absl::StrReplaceAll(name, {{"\r", " "}, {"\n", " "}});
+}
+
+// Skips PHONETIC and its argument, which Read must accept.
+template <auto Read> void SkipPhonetic(CmdArgParser* parser, search::SchemaField*) {
+  parser->Next(Read);
+  LOG_IF(WARNING, !parser->HasError())
+      << "Ignoring unsupported field option in FT.CREATE: PHONETIC";
+}
+
+string_view AnyArg(string_view arg, facade::RuleError&) {
+  return arg;
+}
+
+// A matcher such as dm:en, the only argument after which PHONETIC is skipped in lower case.
+string_view Matcher(string_view arg, facade::RuleError& err) {
+  err.failed = arg.size() != 5 || arg[2] != ':';
+  return arg;
+}
+
+bool IsUpper(string_view token) {
+  return rng::none_of(token, absl::ascii_islower);
+}
+
+// Field options: type parameters before the flags, SORTABLE [UNF] and NOINDEX in any order, and, as
+// in older versions that clients rely on, upper-case UNF, INDEXMISSING, INDEXEMPTY, PHONETIC x and,
+// on TEXT, NOSTEM and WEIGHT n anywhere. Any other argument starts the next field.
+ParseResult<search::SchemaField> ParseFieldOptions(CmdArgParser* parser, string_view field_alias,
+                                                   search::SchemaField field) {
+  using SF = search::SchemaField;
+
+  // In lower case these words name fields, as older versions stored them.
+  static constexpr auto kAnywhere =
+      If(IsUpper, Options(Flags(&SF::flags, "UNF", SF::UNF, "INDEXMISSING", SF::INDEXMISSING,
+                                "INDEXEMPTY", SF::INDEXEMPTY),
+                          Try(Action("PHONETIC", SkipPhonetic<AnyArg>))));
+  static constexpr auto kFlags =
+      Flags(&SF::flags, "SORTABLE", SF::SORTABLE, "NOINDEX", SF::NOINDEX);
+  static constexpr auto kTextAnywhere =
+      Options(kAnywhere, Try(Action("PHONETIC", SkipPhonetic<Matcher>)));
+  static constexpr auto kText =
+      Compile(Options(kTextAnywhere, Into(&SF::special_params, kTextParams)),
+              Options(kFlags, kTextAnywhere,
+                      Into(&SF::special_params,
+                           Options(Try(kTextWeight), If(IsUpper, Exist("NOSTEM", &TP::no_stem))))));
+  static constexpr auto kTag = Compile(Options(kAnywhere, Into(&SF::special_params, kTagParams)),
+                                       Options(kFlags, kAnywhere));
+  static constexpr auto kOther = Compile(Options(kFlags, kAnywhere));
+  if (field.type == SF::TEXT)
+    kText.Apply(parser, &field);
+  else if (field.type == SF::TAG)
+    kTag.Apply(parser, &field);
+  else
+    kOther.Apply(parser, &field);
+
+  if ((field.flags & SF::NOINDEX) && (field.flags & SF::INDEXMISSING)) {
+    return CreateSyntaxError(
+        absl::StrCat("Field cannot be defined with both `NOINDEX` and `INDEXMISSING` `"sv,
+                     OneLine(field_alias), "` "sv));
+  }
+
+  // Accepted on any type, as before; only TEXT and TAG keep it.
+  if (field.type != SF::TEXT && field.type != SF::TAG)
+    field.flags &= ~SF::INDEXEMPTY;
+  return field;
+}
 
 // SCHEMA field [AS alias] type [flags...]
 ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
@@ -418,6 +461,9 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
         parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv, &ParseNumeric,
                            "VECTOR"sv, &ParseVector, "GEO", &ParseGeo);
     if (!params_parser) {
+      if (!parser->HasNext())
+        return CreateSyntaxError(
+            absl::StrCat("Field `"sv, OneLine(field_alias), "` does not have a type"sv));
       return CreateSyntaxError(
           absl::StrCat("Field type "sv, parser->Next(), " is not supported"sv));
     }
@@ -429,43 +475,14 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
 
     auto [field_type, params] = std::move(parsed_params).value();
 
-    // Flags: check for SORTABLE and NOINDEX
-    uint8_t flags = 0;
-    while (parser->HasNext()) {
-      auto flag = parser->TryMapNext("NOINDEX", search::SchemaField::NOINDEX, "SORTABLE",
-                                     search::SchemaField::SORTABLE);
-      if (!flag) {
-        std::string_view option = parser->Peek();
-        if (field_type == search::SchemaField::TEXT && option == "NOSTEM"sv) {
-          std::get<search::SchemaField::TextParams>(params).no_stem = true;
-          parser->Skip(1);
-          continue;
-        }
-        if (field_type == search::SchemaField::TEXT && parser->Check("WEIGHT")) {
-          ParseTextWeight(parser, &std::get<search::SchemaField::TextParams>(params));
-          continue;
-        }
-        if (rng::find(kIgnoredOptions, option) != kIgnoredOptions.end()) {
-          LOG_IF(WARNING, option != "INDEXMISSING"sv && option != "INDEXEMPTY"sv)
-              << "Ignoring unsupported field option in FT.CREATE: " << option;
-          // Ignore these options
-          parser->Skip(1);
-          continue;
-        }
-        if (rng::find(kIgnoredOptionsWithArg, option) != kIgnoredOptionsWithArg.end()) {
-          LOG(WARNING) << "Ignoring unsupported field option in FT.CREATE: " << option;
-          // Ignore these options with argument
-          parser->Skip(2);
-          continue;
-        }
-        break;
-      }
-
-      flags |= *flag;
+    const uint32_t number = schema.fields.size();
+    auto field =
+        ParseFieldOptions(parser, field_alias, {field_type, 0, string{field_path}, params, number});
+    if (!field) {
+      return make_unexpected(field.error());
     }
 
-    const uint32_t number = schema.fields.size();
-    schema.fields[field_alias] = {field_type, flags, string{field_path}, params, number};
+    schema.fields[field_alias] = std::move(field).value();
   }
 
   return false;
@@ -1149,8 +1166,7 @@ join::Vector<join::Vector<join::Key>> DoJoin(
       if (limit >= joined_entries->size()) {
         rng::sort(*joined_entries, std::move(comparator));
       } else {
-        std::partial_sort(joined_entries->begin(), joined_entries->begin() + limit,
-                          joined_entries->end(), std::move(comparator));
+        rng::partial_sort(*joined_entries, joined_entries->begin() + limit, std::move(comparator));
         joined_entries->resize(limit);
       }
     }
@@ -1244,7 +1260,7 @@ void PartialSort(absl::Span<SerializedSearchDoc*> docs, size_t limit, SortOrder 
   auto cb = [order, field](SerializedSearchDoc* l, SerializedSearchDoc* r) {
     return order == SortOrder::ASC ? l->*field < r->*field : r->*field < l->*field;
   };
-  partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), cb);
+  rng::partial_sort(docs, docs.begin() + min(limit, docs.size()), cb);
 }
 
 // Global SORTBY merge across shards, in the same order the shards used (SortRanksBefore).
@@ -1252,7 +1268,7 @@ void PartialSortBySortScore(absl::Span<SerializedSearchDoc*> docs, size_t limit,
   auto ranks_before = [order](SerializedSearchDoc* l, SerializedSearchDoc* r) {
     return SortRanksBefore(l->sort_score, l->key, r->sort_score, r->key, order);
   };
-  partial_sort(docs.begin(), docs.begin() + min(limit, docs.size()), docs.end(), ranks_before);
+  rng::partial_sort(docs, docs.begin() + min(limit, docs.size()), ranks_before);
 }
 
 bool IsBM25StdNorm(const std::optional<search::ScorerSpec>& scorer) {
@@ -1262,7 +1278,7 @@ bool IsBM25StdNorm(const std::optional<search::ScorerSpec>& scorer) {
 // Global max raw text score across per-shard results, used to normalize BM25STD.NORM by the
 // max over the full matched set. Returns 0 when there are no scored docs.
 float GlobalMaxTextScore(absl::Span<const SearchResult> results) {
-  auto max_it = std::ranges::max_element(
+  auto max_it = rng::max_element(
       results, [](const auto& a, const auto& b) { return a.max_text_score < b.max_text_score; });
   return max_it == results.end() ? 0.0f : max_it->max_text_score;
 }
@@ -1327,8 +1343,7 @@ void SearchReply(const SearchParams& params,
         return l->text_score > r->text_score;
       return l->key < r->key;
     };
-    partial_sort(docs.begin(), docs.begin() + std::min(end, docs.size()), docs.end(),
-                 by_score_then_key);
+    rng::partial_sort(docs, docs.begin() + std::min(end, docs.size()), by_score_then_key);
   }
 
   // Apply SORTBY if its different from the KNN sort
@@ -1468,15 +1483,14 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
 
   // Transform shard results back to a flat list of serialized docs.
   size_t shard_id = 0;
-  std::for_each(shard_docs.begin(), shard_docs.end(),
-                [&](const std::vector<SerializedSearchDoc>& shard) {
-                  const auto& serialized = shard_docs_serialized_indicator[shard_id];
-                  for (size_t doc_index = 0; doc_index < shard.size(); ++doc_index) {
-                    if (doc_index < serialized.size() && serialized[doc_index])
-                      knn_search_serialized_docs.push_back(shard[doc_index]);
-                  }
-                  shard_id++;
-                });
+  rng::for_each(shard_docs, [&](const std::vector<SerializedSearchDoc>& shard) {
+    const auto& serialized = shard_docs_serialized_indicator[shard_id];
+    for (size_t doc_index = 0; doc_index < shard.size(); ++doc_index) {
+      if (doc_index < serialized.size() && serialized[doc_index])
+        knn_search_serialized_docs.push_back(shard[doc_index]);
+    }
+    shard_id++;
+  });
 
   results[0].total_hits = knn_search_serialized_docs.size();
   for (const auto& doc : knn_search_serialized_docs)
@@ -1518,8 +1532,8 @@ std::vector<std::pair<float, search::GlobalDocId>> SearchHnswWithPrefilter(
     return index->SubsetKnn(knn->blob.data(), knn->limit, ids);
 
   // HnswVectorIndex::Knn(... allowed) uses binary_search for membership.
-  if (!is_sorted(ids.begin(), ids.end()))
-    sort(ids.begin(), ids.end());
+  if (!rng::is_sorted(ids))
+    rng::sort(ids);
 
   return index->Knn(knn->blob.data(), knn->limit, knn->ef_runtime, ids);
 }
@@ -1657,9 +1671,7 @@ vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
     std::vector<SearchResult>& sharded_prefilter_docs) {
   // Sort each shard's prefilter docs by local id so a range hit can be matched with binary search.
   for (auto& shard : sharded_prefilter_docs)
-    std::sort(
-        shard.docs.begin(), shard.docs.end(),
-        [](const SerializedSearchDoc& a, const SerializedSearchDoc& b) { return a.id < b.id; });
+    rng::sort(shard.docs, {}, &SerializedSearchDoc::id);
 
   auto range_results =
       index->RangeQuery(range->blob.data(), static_cast<float>(range->radius), range->epsilon);
@@ -1671,9 +1683,7 @@ vector<SearchResult> SearchGlobalHnswIndexRangePrefiltered(
     if (shard_id >= sharded_prefilter_docs.size())
       continue;
     auto& docs = sharded_prefilter_docs[shard_id].docs;
-    auto it =
-        std::lower_bound(docs.begin(), docs.end(), local_id,
-                         [](const SerializedSearchDoc& d, search::DocId id) { return d.id < id; });
+    auto it = rng::lower_bound(docs, local_id, {}, &SerializedSearchDoc::id);
     if (it != docs.end() && it->id == local_id) {
       out.emplace_back(std::move(*it));
       out.back().knn_score = dist;
@@ -2022,17 +2032,15 @@ void ComputeRrfCombined(float rrf_constant, absl::flat_hash_map<string, HybridDo
       knn_ranked.push_back(&e);
   }
 
-  std::sort(
-      text_ranked.begin(), text_ranked.end(), [](const HybridDocEntry* a, const HybridDocEntry* b) {
-        return a->text_score != b->text_score ? a->text_score > b->text_score : a->key < b->key;
-      });
+  rng::sort(text_ranked, [](const HybridDocEntry* a, const HybridDocEntry* b) {
+    return a->text_score != b->text_score ? a->text_score > b->text_score : a->key < b->key;
+  });
   for (size_t r = 0; r < text_ranked.size(); ++r)
     text_ranked[r]->text_rank = r + 1;
 
-  std::sort(knn_ranked.begin(), knn_ranked.end(),
-            [](const HybridDocEntry* a, const HybridDocEntry* b) {
-              return a->knn_dist != b->knn_dist ? a->knn_dist < b->knn_dist : a->key < b->key;
-            });
+  rng::sort(knn_ranked, [](const HybridDocEntry* a, const HybridDocEntry* b) {
+    return a->knn_dist != b->knn_dist ? a->knn_dist < b->knn_dist : a->key < b->key;
+  });
   for (size_t r = 0; r < knn_ranked.size(); ++r)
     knn_ranked[r]->knn_rank = r + 1;
 
@@ -2052,10 +2060,9 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
   const size_t total_hits = docs.size();
   const size_t end = std::min(params.limit_offset + params.limit_total, docs.size());
 
-  partial_sort(docs.begin(), docs.begin() + end, docs.end(),
-               [](const HybridDocEntry* a, const HybridDocEntry* b) {
-                 return a->combined != b->combined ? a->combined > b->combined : a->key < b->key;
-               });
+  rng::partial_sort(docs, docs.begin() + end, [](const HybridDocEntry* a, const HybridDocEntry* b) {
+    return a->combined != b->combined ? a->combined > b->combined : a->key < b->key;
+  });
 
   const size_t offset = std::min(params.limit_offset, docs.size());
   const size_t limit = std::min(docs.size() - offset, params.limit_total);
@@ -2122,7 +2129,7 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
 bool CollectGlobalScoringStats(string_view index_name, search::SearchAlgorithm& text_algo,
                                Transaction* tx, size_t shard_count,
                                search::GlobalScoringStats& out_stats) {
-  atomic<bool> not_found{false};
+  atomic not_found{false};
   vector<search::ShardScoringStats> shard_stats(shard_count);
   tx->Execute(
       [&](Transaction* t, EngineShard* es) {
@@ -2292,7 +2299,7 @@ void NormalizeAggregateScores(absl::Span<aggregate::DocValues> values) {
   if (values.empty())
     return;
 
-  double max_score = std::ranges::max(values | std::views::transform(get_score));
+  double max_score = rng::max(values | std::views::transform(get_score));
   if (max_score == 0)
     return;
 
@@ -2323,7 +2330,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   const size_t shard_count = shard_set->size();
   const bool needs_global_stats = (shard_count > 1);
-  std::atomic<bool> index_not_found{false};
+  atomic index_not_found{false};
   const absl::Time t_start = absl::Now();
 
   if (!CheckQueryLength(params->text_query, "Query", rb) ||
@@ -2918,9 +2925,8 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   });
 
   // Count how many shards didn't find the index by checking empty entries.
-  size_t num_notfound = std::count_if(infos.begin(), infos.end(), [](const DocIndexInfo& info) {
-    return info.base_index.schema.fields.empty();
-  });
+  size_t num_notfound = rng::count_if(
+      infos, [](const DocIndexInfo& info) { return info.base_index.schema.fields.empty(); });
 
   DCHECK(num_notfound == 0u || num_notfound == shard_set->size());
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -2950,12 +2956,13 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->StartArray((has_custom_stopwords ? 8 : 7) * 2);
 
   rb->SendSimpleString("index_name");
-  rb->SendSimpleString(info.base_index.name);
+  rb->SendBulkString(info.base_index.name);
 
   rb->SendSimpleString("index_definition");
   {
+    const bool has_lang = schema.default_language != "english";
     const bool has_lang_field = !schema.language_field.empty();
-    rb->StartArray((has_lang_field ? 5 : 4) * 2);
+    rb->StartArray((3 + has_lang + has_lang_field) * 2);
     rb->SendSimpleString("key_type");
     rb->SendSimpleString(info.base_index.type == DocIndex::JSON ? "JSON" : "HASH");
     rb->SendSimpleString("prefixes");
@@ -2963,11 +2970,13 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
     for (const auto& prefix : info.base_index.prefixes) {
       rb->SendBulkString(prefix);
     }
-    rb->SendSimpleString("default_language");
-    rb->SendSimpleString(schema.default_language);
+    if (has_lang) {
+      rb->SendSimpleString("default_language");
+      rb->SendSimpleString(schema.default_language);
+    }
     if (has_lang_field) {
       rb->SendSimpleString("language_field");
-      rb->SendSimpleString(schema.language_field);
+      rb->SendBulkString(schema.language_field);
     }
     rb->SendSimpleString("default_score");
     rb->SendLong(1);
@@ -2983,22 +2992,18 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       rb->SendSimpleString(opt);
   }
 
+  const bool on_json = info.base_index.type == DocIndex::JSON;
   rb->SendSimpleString("attributes");
   rb->StartArray(schema.fields.size());
   for (const auto& [alias, field_ptr] : schema.Ordered()) {
     const auto& field_info = *field_ptr;
     vector<string> info;
+    char buf[128];
 
     string_view base[] = {"identifier"sv, field_info.identifier,
                           "attribute"sv,  alias,
                           "type"sv,       SearchFieldTypeToString(field_info.type)};
     info.insert(info.end(), base, base + ABSL_ARRAYSIZE(base));
-
-    if (field_info.flags & search::SchemaField::NOINDEX)
-      info.emplace_back("NOINDEX"sv);
-
-    if (field_info.flags & search::SchemaField::SORTABLE)
-      info.emplace_back("SORTABLE"sv);
 
     if (field_info.type == search::SchemaField::VECTOR) {
       auto& vparams = std::get<search::SchemaField::VectorParams>(field_info.special_params);
@@ -3020,7 +3025,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
         info.emplace_back("ef_runtime");
         info.emplace_back(std::to_string(vparams.hnsw_ef_runtime));
         info.emplace_back("epsilon");
-        info.emplace_back(std::to_string(vparams.hnsw_epsilon));
+        info.emplace_back(RedisReplyBuilder::FormatDouble(vparams.hnsw_epsilon, buf, sizeof(buf)));
       }
     } else if (field_info.type == search::SchemaField::TAG) {
       auto& tparams = std::get<search::SchemaField::TagParams>(field_info.special_params);
@@ -3028,16 +3033,10 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       info.emplace_back(std::string(1, tparams.separator));
       if (tparams.case_sensitive)
         info.emplace_back("CASESENSITIVE");
-      if (tparams.with_suffixtrie)
-        info.emplace_back("WITHSUFFIXTRIE");
     } else if (field_info.type == search::SchemaField::TEXT) {
       auto& tparams = std::get<search::SchemaField::TextParams>(field_info.special_params);
       info.emplace_back("WEIGHT");
-      info.emplace_back(std::to_string(tparams.weight));
-      if (tparams.with_suffixtrie)
-        info.emplace_back("WITHSUFFIXTRIE");
-      if (tparams.no_stem)
-        info.emplace_back("NOSTEM");
+      info.emplace_back(RedisReplyBuilder::FormatDouble(tparams.weight, buf, sizeof(buf)));
     } else if (field_info.type == search::SchemaField::NUMERIC) {
       auto& numeric_params =
           std::get<search::SchemaField::NumericParams>(field_info.special_params);
@@ -3045,7 +3044,31 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       info.emplace_back(std::to_string(numeric_params.block_size));
     }
 
-    rb->SendSimpleStrArr(info);
+    // Flags in the reference order, with UNF where the reference shows it.
+    const auto* text_params =
+        std::get_if<search::SchemaField::TextParams>(&field_info.special_params);
+    const auto* tag_params =
+        std::get_if<search::SchemaField::TagParams>(&field_info.special_params);
+    if (field_info.flags & search::SchemaField::SORTABLE) {
+      info.emplace_back("SORTABLE"sv);
+      if ((field_info.flags & search::SchemaField::UNF) ||
+          field_info.type == search::SchemaField::NUMERIC ||
+          (tag_params && tag_params->case_sensitive) || on_json)
+        info.emplace_back("UNF"sv);
+    }
+    if (text_params && text_params->no_stem)
+      info.emplace_back("NOSTEM"sv);
+    if (field_info.flags & search::SchemaField::NOINDEX)
+      info.emplace_back("NOINDEX"sv);
+    if ((text_params && text_params->with_suffixtrie) ||
+        (tag_params && tag_params->with_suffixtrie))
+      info.emplace_back("WITHSUFFIXTRIE"sv);
+    if (field_info.flags & search::SchemaField::INDEXEMPTY)
+      info.emplace_back("INDEXEMPTY"sv);
+    if (field_info.flags & search::SchemaField::INDEXMISSING)
+      info.emplace_back("INDEXMISSING"sv);
+
+    rb->SendBulkStrArr(info);
   }
 
   rb->SendSimpleString("num_docs");
@@ -3180,24 +3203,23 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   const search::AstVectorRangeNode* hnsw_range_prefilter = nullptr;
   if (!knn) {
     auto ranges = search_algo.CollectVectorRangeNodes();
-    if (ranges.size() > 1 &&
-        std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
-          return GlobalHnswIndexRegistry::Instance().Exist(resolved_name, r->field);
-        })) {
+    const bool has_hnsw_range = rng::any_of(ranges, [&](const search::AstVectorRangeNode* r) {
+      return GlobalHnswIndexRegistry::Instance().Exist(resolved_name, r->field);
+    });
+    if (ranges.size() > 1 && has_hnsw_range) {
       return builder->SendError(
           "Combining multiple VECTOR_RANGE clauses with an HNSW index is not supported");
     }
-    if (auto* vr = search_algo.GetVectorRangeNode(); vr != nullptr) {
-      if (GlobalHnswIndexRegistry::Instance().Exist(resolved_name, vr->field)) {
-        if (search_algo.IsBareVectorRange()) {
-          hnsw_range = vr;
-        } else if (search_algo.IsAndedVectorRange()) {
-          hnsw_range_holder = search_algo.ExtractVectorRangeAsPrefilter();
-          hnsw_range_prefilter = hnsw_range_holder->As<search::AstVectorRangeNode>();
-        } else {
-          return builder->SendError(
-              "Combining VECTOR_RANGE with OR/NOT is not supported on HNSW indexes");
-        }
+    if (has_hnsw_range) {
+      const auto* vr = ranges.front();
+      if (search_algo.IsBareVectorRange()) {
+        hnsw_range = vr;
+      } else if (search_algo.IsAndedVectorRange()) {
+        hnsw_range_holder = search_algo.ExtractVectorRangeAsPrefilter();
+        hnsw_range_prefilter = hnsw_range_holder->As<search::AstVectorRangeNode>();
+      } else {
+        return builder->SendError(
+            "Combining VECTOR_RANGE with OR/NOT is not supported on HNSW indexes");
       }
     }
   }
@@ -3212,7 +3234,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   };
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
-  atomic<bool> index_not_found{false};
+  atomic index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
   vector<SearchIdResult> knn_prefilter_docs(shard_set->size());
 
@@ -3554,7 +3576,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
 
     if (knn_has_prefilter) {
-      std::atomic<bool> index_not_found{false};
+      std::atomic index_not_found{false};
       std::vector<SearchIdResult> knn_prefilter_docs(shards_count);
 
       cmd_cntx->tx()->Execute(
@@ -3621,8 +3643,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   search::AstExpr hnsw_range_holder;
   const search::AstVectorRangeNode* hnsw_range_prefilter = nullptr;
   auto ranges = search_algo.CollectVectorRangeNodes();
-  if (ranges.size() > 1 &&
-      std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
+  if (ranges.size() > 1 && rng::any_of(ranges, [&](const search::AstVectorRangeNode* r) {
         return GlobalHnswIndexRegistry::Instance().Exist(resolved_name, r->field);
       })) {
     return rb->SendError(
@@ -3671,7 +3692,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   if (hnsw_range_prefilter) {
-    std::atomic<bool> index_not_found{false};
+    std::atomic index_not_found{false};
     std::vector<SearchResult> prefilter_results(shards_count);
     std::vector<absl::Duration> profile_results(shards_count);
 
@@ -3733,7 +3754,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
-  std::atomic<bool> index_not_found{false};
+  std::atomic index_not_found{false};
   std::vector<SearchResult> search_results(shards_count);
   std::vector<absl::Duration> profile_results(shards_count);
 
@@ -3950,7 +3971,7 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
   std::optional<std::vector<search::GlobalDocId>> prefilter_ids;
   if (has_prefilter) {
     auto ids = RunAggregatePrefilter(cmd_cntx, params, search_algo, text_scores);
-    std::sort(ids.begin(), ids.end());  // sorted for the binary_search intersection below
+    rng::sort(ids);  // sorted for the binary_search intersection below
     prefilter_ids = std::move(ids);
   }
 
@@ -3959,9 +3980,8 @@ static bool AggregateHnswRange(CommandContext* cmd_cntx, AggregateParams& params
   auto range_results = hnsw_index->RangeQuery(
       hnsw_range->blob.data(), static_cast<float>(hnsw_range->radius), hnsw_range->epsilon);
   if (prefilter_ids) {
-    erase_if(range_results, [&](const auto& r) {
-      return !std::binary_search(prefilter_ids->begin(), prefilter_ids->end(), r.second);
-    });
+    erase_if(range_results,
+             [&](const auto& r) { return !rng::binary_search(*prefilter_ids, r.second); });
   }
   auto shard_docs = GroupByShardId(range_results, shard_set->size());
   if (RunHnswAggregateLoad(cmd_cntx, params, query_results, shard_docs, hnsw_range->score_alias,
@@ -4038,8 +4058,7 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     if (!knn) {
       auto ranges = search_algo.CollectVectorRangeNodes();
-      if (ranges.size() > 1 &&
-          std::any_of(ranges.begin(), ranges.end(), [&](const search::AstVectorRangeNode* r) {
+      if (ranges.size() > 1 && rng::any_of(ranges, [&](const search::AstVectorRangeNode* r) {
             return GlobalHnswIndexRegistry::Instance().Exist(params->index, r->field);
           })) {
         return builder->SendError(
@@ -4180,8 +4199,7 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Auto-add __score to visible fields when ADDSCORES is set
   static constexpr std::string_view kScoreField = "__score";
-  if (params->add_scores &&
-      std::find(load_fields.begin(), load_fields.end(), kScoreField) == load_fields.end()) {
+  if (params->add_scores && rng::find(load_fields, kScoreField) == load_fields.end()) {
     load_fields.push_back(kScoreField);
   }
 

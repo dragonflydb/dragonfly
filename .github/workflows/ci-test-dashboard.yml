@@ -91,18 +91,18 @@ jobs:
             "${DASHBOARD_ROOT}/site/data"
 
       # Create data/issue-links.json containing related issue/PR/assignee lookup data.
+      # CI_DASHBOARD_GITHUB_TOKEN must read issues in both repos and PRs in dragonfly.
       - name: Link tests to GitHub issues and pull requests
         shell: bash
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 "${DASHBOARD_ROOT}/sync_issue_links.py" "${DASHBOARD_ROOT}/site/data"
-
-      - name: Upload dashboard artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: ci-test-dashboard
-          path: ${{ env.DASHBOARD_ROOT }}/site
-          if-no-files-found: error
+          GITHUB_TOKEN: ${{ secrets.CI_DASHBOARD_GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "${GITHUB_TOKEN}" || {
+            echo "CI_DASHBOARD_GITHUB_TOKEN is required to read dragonflydb/dataplane-private" >&2
+            false
+          }
+          python3 "${DASHBOARD_ROOT}/sync_issue_links.py" "${DASHBOARD_ROOT}/site/data"
 
       - name: Authenticate to GCP
         uses: google-github-actions/auth@v3

@@ -49,18 +49,35 @@ ABSL_FLAG(bool, tiered_experimental_cooling, true,
 
 ABSL_RETIRED_FLAG(unsigned, tiered_storage_write_depth, 200,
                   "Maximum number of concurrent stash requests issued by background offload. "
-                  "Deprecated: prefer tiered_max_pending_stash_bytes.");
+                  "Deprecated: prefer tiered_max_pending_bytes.");
+
+ABSL_RETIRED_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes, 256_KB,
+                  "Deprecated: prefer tiered_max_pending_bytes.");
 
 // 256kb is a realistic limit for moden NVMe drives: in-flight = avg latency * throughput/s
-ABSL_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes, 256_KB,
-          "Maximum bytes in-flight to disk before rejecting new stashes or applying client "
-          "backpressure. Allows batching writes to saturate disk I/O even with few clients");
+ABSL_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes, 256_KB,
+          "Cap on the total volume of in-flight bytes to the tiered (disk) device, counting both "
+          "reads and writes. Governs stash write backpressure, and throttles background "
+          "serialization (snapshot/migration) and defragmentation while the device is overloaded, "
+          "so those do not starve client reads.");
 
 ABSL_FLAG(float, tiered_offload_threshold, 0.5,
           "Ratio of free memory (free/max memory) below which offloading starts");
 
 ABSL_FLAG(float, tiered_upload_threshold, 0.1,
           "Ratio of free memory (free/max memory) below which uploading stops");
+
+ABSL_FLAG(uint32_t, tiered_repack_scan_budget_us, 0,
+          "Base cpu time-slice in microseconds granted to a single background bin-bucket repack "
+          "scan, which regroups small offloaded values scattered across disk pages. Set to 0 "
+          "(default) to disable repack scans");
+
+ABSL_FLAG(uint32_t, tiered_repack_max_reads, 10,
+          "Maximum number of concurrent page reads a single repack scan may issue");
+
+ABSL_FLAG(uint32_t, tiered_repack_acceptable_waste, 2,
+          "How many more disk pages than the theoretical minimum a bucket may spread its small "
+          "values over before the repack scan regroups it");
 
 ABSL_FLAG(bool, tiered_experimental_hash_support, false, "Experimental hash datatype offloading");
 
@@ -443,7 +460,9 @@ bool TieredStorage::ShardOpManager::NotifyDelete(tiering::DiskSegment segment, b
   // Otherwise background scans of fragmented bins will discover them
   if (bin.fragmented && ts_->UploadBudget() > 0) {
     // Limit number of IO operations if we need to read from disk (in_memory is false)
-    if (in_memory || stats_.pending_defrags < ts_->config_.max_pending_defrags) {
+    bool underloaded =
+        stats_.pending_defrags < ts_->config_.max_pending_defrags && ts_->TotalUsage() < 100;
+    if (in_memory || underloaded) {
       EnqueueForDefrag(bin.segment);
     }
   }
@@ -530,13 +549,14 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
   DCHECK_GT(est_size, 0u);
 
   tiering::OpManager::PendingId id;
+  std::optional<tiering::SmallBins::FilledBin> bin;
   error_code ec;
 
   if (OccupiesWholePages(est_size)) {  // large enough for own page
     id = KeyRef(dbid, key);
     auto serialize = absl::bind_front(&StashDescriptor::Serialize, &blobs);
     ec = op_manager_->PrepareAndStash(id, est_size, serialize);
-  } else if (auto bin = bins_->Stash(dbid, key, SerializeToString(blobs)); bin) {
+  } else if (bin = bins_->Stash(dbid, key, SerializeToString(blobs)); bin) {
     id = bin->id;
     auto serialize = absl::bind_front(&tiering::SmallBins::SerializeBin, bins_.get(), &*bin);
     ec = op_manager_->PrepareAndStash(id, 4_KB, serialize);
@@ -551,12 +571,20 @@ void TieredStorage::StashPrimeValue(DbIndex dbid, string_view key, const StashDe
     bool to_log = ec != errc::file_too_large && ec != errc::operation_would_block &&
                   ec != errc::operation_in_progress;
     LOG_IF(ERROR, to_log) << "Stash failed: " << ec.message();
-    visit([this](auto id) { op_manager_->ClearStashPending(id); }, id);
+    if (bin) {
+      // The bin filled up but PrepareAndStash failed before serializing it, so SmallBins never
+      // tracked it as pending. Recover its keys directly to clear their stash-pending flags.
+      for (const auto& bin_key : bins_->ReportStashFailed(std::move(*bin)))
+        op_manager_->ClearStashPending(bin_key);
+    } else {
+      visit([this](auto id) { op_manager_->ClearStashPending(id); }, id);
+    }
     return;
   }
 
-  // Throttle if we're low on memory and reached the offloading limit
-  if (backpressure && ShouldOffload() && WriteDepthUsage() >= 1.0f) {
+  // Throttle if we're low on memory and the device is at its pressure cap
+  // TODO: possibly change to TotalUsage() to give reads priority
+  if (backpressure && ShouldOffload() && WriteUsage() >= 100) {
     stats_.total_clients_throttled++;
     *backpressure = stash_backpressure_[{dbid, string{key}}];
   }
@@ -630,6 +658,7 @@ TieredStats TieredStorage::GetStats() const {
     tiering::OpManager::Stats op_stats = op_manager_->GetStats();
     stats.pending_read_cnt = op_stats.pending_read_cnt;
     stats.pending_stash_cnt = op_stats.pending_stash_cnt;
+    stats.pending_read_bytes = op_stats.disk_stats.pending_read_bytes;
     stats.allocated_bytes = op_stats.disk_stats.allocated_bytes;
     stats.capacity_bytes = op_stats.disk_stats.capacity_bytes;
     stats.alloc_segment_bytes = op_stats.disk_stats.segment_bytes;
@@ -656,26 +685,45 @@ TieredStats TieredStorage::GetStats() const {
     stats.total_offloading_usec = stats_.offloading_usec;
     stats.total_defrag_usec = stats_.defrag_usec;
     stats.total_offloading_stashes = stats_.offloading_stashes;
+    stats.total_repacks = stats_.total_repacks;
+    stats.total_repack_usec = stats_.repack_usec;
+    stats.estimated_bin_bucket_fragmentation = stats_.estimated_bin_bucket_fragmentation;
     stats.clients_throttled = stash_backpressure_.size();
     stats.total_clients_throttled = stats_.total_clients_throttled;
   }
   return stats;
 }
 
-float TieredStorage::WriteDepthUsage() const {
-  auto disk_stats = op_manager_->GetStats().disk_stats;
-  return 1.0f * float(disk_stats.pending_stash_bytes) / float(config_.max_pending_stash_bytes);
+unsigned TieredStorage::ReadUsage() const {
+  uint64_t cap = config_.max_pending_bytes;
+  if (cap == 0)
+    return 0;
+  return static_cast<unsigned>(op_manager_->GetStats().disk_stats.pending_read_bytes * 100 / cap);
+}
+
+unsigned TieredStorage::WriteUsage() const {
+  uint64_t cap = config_.max_pending_bytes;
+  if (cap == 0)
+    return 0;
+  return static_cast<unsigned>(op_manager_->GetStats().disk_stats.pending_stash_bytes * 100 / cap);
+}
+
+unsigned TieredStorage::TotalUsage() const {
+  return ReadUsage() + WriteUsage();
 }
 
 void TieredStorage::UpdateFromFlags() {
   config_ = {
       .min_value_size = absl::GetFlag(FLAGS_tiered_min_value_size),
       .experimental_cooling = absl::GetFlag(FLAGS_tiered_experimental_cooling),
-      .max_pending_stash_bytes = absl::GetFlag(FLAGS_tiered_max_pending_stash_bytes),
+      .max_pending_bytes = absl::GetFlag(FLAGS_tiered_max_pending_bytes),
       .offload_threshold = absl::GetFlag(FLAGS_tiered_offload_threshold),
       .upload_threshold = absl::GetFlag(FLAGS_tiered_upload_threshold),
       .experimental_hash_offload = absl::GetFlag(FLAGS_tiered_experimental_hash_support),
       .experimental_list_offload = absl::GetFlag(FLAGS_tiered_experimental_list_support),
+      .repack_scan_budget_us = absl::GetFlag(FLAGS_tiered_repack_scan_budget_us),
+      .repack_max_reads = absl::GetFlag(FLAGS_tiered_repack_max_reads),
+      .repack_acceptable_waste = absl::GetFlag(FLAGS_tiered_repack_acceptable_waste),
       .min_ttl_to_offload_ms = absl::GetFlag(FLAGS_tiered_min_ttl_to_offload_ms),
       .offload_scan_budget_us = absl::GetFlag(FLAGS_tiered_offload_scan_budget_us),
       .defrag_scan_budget_us = absl::GetFlag(FLAGS_tiered_defrag_scan_budget_us),
@@ -689,9 +737,11 @@ void TieredStorage::UpdateFromFlags() {
 
 std::vector<std::string> TieredStorage::GetMutableFlagNames() {
   return base::GetFlagNames(FLAGS_tiered_min_value_size, FLAGS_tiered_experimental_cooling,
-                            FLAGS_tiered_max_pending_stash_bytes, FLAGS_tiered_offload_threshold,
+                            FLAGS_tiered_max_pending_bytes, FLAGS_tiered_offload_threshold,
                             FLAGS_tiered_upload_threshold, FLAGS_tiered_experimental_hash_support,
                             FLAGS_tiered_experimental_list_support,
+                            FLAGS_tiered_repack_scan_budget_us, FLAGS_tiered_repack_max_reads,
+                            FLAGS_tiered_repack_acceptable_waste,
                             FLAGS_tiered_min_ttl_to_offload_ms, FLAGS_tiered_offload_scan_budget_us,
                             FLAGS_tiered_defrag_scan_budget_us, FLAGS_tiered_max_pending_defrags);
 }
@@ -708,6 +758,28 @@ int64_t TieredStorage::UploadBudget() const {
   int64_t free_memory = op_manager_->db_slice_.memory_budget();
   int64_t per_shard = max_memory_limit.load(memory_order_relaxed) / shard_set->size();
   return free_memory - double(config_.upload_threshold) * per_shard;
+}
+
+void TieredStorage::Heartbeat() {
+  DbSlice& db_slice = op_manager_->db_slice_;
+
+  if (config_.repack_scan_budget_us) {
+    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+      if (db_slice.IsDbValid(i))
+        RunRepackScan(i);
+    }
+  }
+
+  if (!ShouldOffload())
+    return;
+
+  VLOG(1) << "Running offloading, memory=" << db_slice.memory_budget()
+          << ", cool memory: " << CoolMemoryUsage();
+
+  for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
+    if (db_slice.IsDbValid(i))
+      RunOffloading(i);
+  }
 }
 
 void TieredStorage::RunOffloading(DbIndex dbid) {
@@ -748,8 +820,8 @@ void TieredStorage::RunOffloading(DbIndex dbid) {
   // Loop over entry with time and max stash budget.
   uint64_t cycles = 0;
   do {
-    // We hit backpressure limit, so stop
-    if (op_manager_->GetStats().disk_stats.pending_stash_bytes >= config_.max_pending_stash_bytes)
+    // Ignore ReadUsage() as we potentially running out of memory - writes are more important now
+    if (WriteUsage() >= 100)
       break;
 
     offloading_cursor_ = table.TraverseBySegmentOrder(offloading_cursor_, cb);
@@ -770,6 +842,10 @@ void TieredStorage::RunDefragScan() {
   const uint64_t time_budget_us =
       config_.defrag_scan_budget_us * std::min<uint64_t>(1 + last_defrag_scan_hits_, 3);
   if (time_budget_us == 0)
+    return;
+
+  // Skip the scan while the device is overloaded so defrag reads don't starve client reads.
+  if (TotalUsage() >= 100)
     return;
 
   const auto start_cycles = base::CycleClock::Now();
@@ -802,6 +878,103 @@ void TieredStorage::RunDefragScan() {
 
   stats_.defrag_usec += base::CycleClock::ToUsec(cycles);
   last_defrag_scan_hits_ = hits;
+}
+
+void TieredStorage::RunRepackScan(DbIndex dbid) {
+  // Only run when explicitly enabled and there are small values stashed on disk to regroup.
+  if (config_.repack_scan_budget_us == 0 || bins_->GetStats().stashed_bins_cnt == 0)
+    return;
+
+  if (SliceSnapshot::IsSnaphotInProgress())
+    return;
+
+  PrimeTable& table = op_manager_->db_slice_.GetDBTable(dbid)->prime;
+  const auto start_cycles = base::CycleClock::Now();
+
+  size_t issued_reads = 0;
+
+  // With negative upload budget we only recalculate the fragmentation estimate and issue no reads.
+  if (UploadBudget() < 0)
+    issued_reads = config_.repack_max_reads + 1;
+
+  auto cb = [&](PrimeTable::bucket_iterator it) {
+    size_t total_size = 0;
+    std::vector<size_t> pages;
+
+    auto it2 = it;
+    for (it2.AdvanceIfNotOccupied(); !it2.is_done(); ++it2) {
+      PrimeValue& pv = it2->second;
+      if (!pv.IsExternal() || pv.IsCool())
+        continue;
+
+      tiering::DiskSegment segment{pv.GetExternalSlice()};
+      if (OccupiesWholePages(segment.length))
+        continue;
+
+      total_size += segment.length;
+      size_t page = segment.ContainingPages().offset;
+      if (std::find(pages.begin(), pages.end(), page) == pages.end())
+        pages.push_back(page);
+    }
+
+    if (pages.empty())
+      return;
+
+    repack_state_.cycle_buckets++;
+    repack_state_.cycle_pages += pages.size();
+
+    // Skip buckets already within the acceptable page-waste bound above the theoretical minimum.
+    size_t min_required = total_size / tiering::kPageSize + 1;
+    if (pages.size() <= min_required + config_.repack_acceptable_waste)
+      return;
+
+    if (issued_reads >= config_.repack_max_reads)
+      return;
+
+    stats_.total_repacks++;
+
+    std::string scratch;
+    for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
+      PrimeValue& pv = it->second;
+      if (!pv.IsExternal() || pv.IsCool())
+        continue;
+      tiering::DiskSegment segment{pv.GetExternalSlice()};
+      if (OccupiesWholePages(segment.length))
+        continue;
+
+      if (op_manager_->HasModificationPending(segment))
+        continue;
+
+      pv.SetTouched(true);
+      string_view key = it->first.GetSlice(&scratch);
+      Read(
+          tiering::KeyRef{dbid, key}, segment, tiering::StringDecoder{pv},
+          [](io::Result<tiering::StringDecoder*>) {}, tiering::ReadOptions{.read_only = true});
+    }
+    issued_reads += pages.size();
+  };
+
+  // TraverseBuckets advances the cursor monotonically each call (visiting a bounded number of
+  // buckets and returning an end-cursor once the whole table is covered), so the clock budget
+  // alone bounds the scan.
+  uint64_t cycles = 0;
+  do {
+    repack_state_.cursor = table.TraverseBuckets(repack_state_.cursor, cb);
+    cycles = base::CycleClock::Now() - start_cycles;
+    if (base::CycleClock::ToUsec(cycles) >= config_.repack_scan_budget_us)
+      break;
+  } while (repack_state_.cursor);
+
+  stats_.repack_usec += base::CycleClock::ToUsec(cycles);
+
+  if (!repack_state_.cursor) {  // completed a full pass over the table
+    if (repack_state_.cycle_buckets > 0) {
+      stats_.estimated_bin_bucket_fragmentation =
+          float(repack_state_.cycle_pages) / float(repack_state_.cycle_buckets);
+    }
+    repack_state_.cycle_buckets = 0;
+    repack_state_.cycle_pages = 0;
+  }
 }
 
 size_t TieredStorage::ReclaimMemory(size_t goal) {
@@ -875,9 +1048,9 @@ auto TieredStorage::ShouldStash(const tiering::FragmentRef& fragment_ref,
   if (fragment_ref.ObjType() == OBJ_LIST && !OccupiesWholePages(estimated_size))
     return nullopt;
 
-  // Track if we oversature disk (backpressure fails to stop clients, possibly many new).
+  // Track if we oversaturate disk (backpressure fails to stop clients, possibly many new).
   const auto& disk_stats = op_manager_->GetStats().disk_stats;
-  if (disk_stats.pending_stash_bytes >= 2 * config_.max_pending_stash_bytes) {
+  if (WriteUsage() >= 200) {
     ++stats_.stash_overflow_cnt;
     // Discard the write if we don't require offloading to not oversaturate the disk
     if (!should_offload)

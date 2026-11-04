@@ -290,14 +290,12 @@ async def test_management(async_client: aioredis.Redis):
         "HASH",
         "prefixes",
         ["p1"],
-        "default_language",
-        "english",
         "default_score",
         1,
     ]
     assert i1info["num_docs"] == 10
     assert sorted(i1info["attributes"]) == [
-        ["identifier", "f1", "attribute", "f1", "type", "TEXT", "WEIGHT", "1.000000"],
+        ["identifier", "f1", "attribute", "f1", "type", "TEXT", "WEIGHT", "1"],
         [
             "identifier",
             "f2",
@@ -305,9 +303,10 @@ async def test_management(async_client: aioredis.Redis):
             "f2",
             "type",
             "NUMERIC",
-            "SORTABLE",
             "blocksize",
             "10000",
+            "SORTABLE",
+            "UNF",
         ],
     ]
 
@@ -317,8 +316,6 @@ async def test_management(async_client: aioredis.Redis):
         "HASH",
         "prefixes",
         ["p2"],
-        "default_language",
-        "english",
         "default_score",
         1,
     ]
@@ -331,10 +328,11 @@ async def test_management(async_client: aioredis.Redis):
             "f3",
             "type",
             "NUMERIC",
-            "NOINDEX",
-            "SORTABLE",
             "blocksize",
             "10000",
+            "SORTABLE",
+            "UNF",
+            "NOINDEX",
         ],
         ["identifier", "f4", "attribute", "f4", "type", "TAG", "SEPARATOR", ","],
         [
@@ -361,7 +359,7 @@ async def test_management(async_client: aioredis.Redis):
             "ef_runtime",
             "10",
             "epsilon",
-            "0.010000",
+            "0.01",
         ],
     ]
 

@@ -8,6 +8,7 @@
 
 #include "core/dense_set.h"
 #include "core/oah_set.h"
+#include "core/qlist.h"
 #include "strings/human_readable.h"
 
 extern "C" {
@@ -444,7 +445,7 @@ DbStats& DbStats::operator+=(const DbStats& o) {
 }
 
 SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
-  static_assert(sizeof(SliceEvents) == 112, "You should update this function with new fields");
+  static_assert(sizeof(SliceEvents) == 120, "You should update this function with new fields");
 
   ADD(hard_evictions);
   ADD(garbage_collected);
@@ -460,6 +461,7 @@ SliceEvents& SliceEvents::operator+=(const SliceEvents& o) {
   ADD(ram_cool_hits);
   ADD(ram_misses);
   ADD(journal_omit);
+  ADD(serialize_skip);
   return *this;
 }
 
@@ -564,6 +566,16 @@ void DbSlice::AddSlotStats(absl::Span<const SlotId> slots, absl::Span<SlotStats>
   }
 }
 
+namespace {
+
+const QList* TieredListOf(const PrimeValue& pv) {
+  if (pv.ObjType() != OBJ_LIST || pv.Encoding() != kEncodingQL2)
+    return nullptr;
+  return static_cast<const QList*>(pv.RObjPtr());
+}
+
+}  // namespace
+
 DbSlice::AutoUpdater::AutoUpdater() {
 }
 
@@ -592,12 +604,20 @@ void DbSlice::AutoUpdater::ReduceHeapUsage() {
   // Reset to avoid double accounting, and sync the type after accounting.
   fields_.orig_value_heap_size = 0;
   fields_.orig_obj_type = fields_.it->second.ObjType();
+  ResyncTieredList();
 }
 
 void DbSlice::AutoUpdater::ResyncBaseline() {
   const PrimeValue& pv = fields_.it->second;
   fields_.orig_value_heap_size = pv.MallocUsed();
   fields_.orig_obj_type = pv.ObjType();
+  ResyncTieredList();
+}
+
+void DbSlice::AutoUpdater::ResyncTieredList() {
+  fields_.orig_tiered_list = TieredListOf(fields_.it->second);
+  fields_.orig_tiering_accounted =
+      fields_.orig_tiered_list ? fields_.orig_tiered_list->TieringAccountedBytes() : 0;
 }
 
 void DbSlice::AutoUpdater::Run() {
@@ -615,6 +635,11 @@ void DbSlice::AutoUpdater::Run() {
   const PrimeValue& pv = fields_.it->second;
   CompactObjType current_type = pv.ObjType();
   int64_t current_size = static_cast<int64_t>(pv.MallocUsed());
+
+  // List node tiering callbacks may have run while the operation was blocked on a node load.
+  // They already accounted their changes, so exclude them from the size observed here.
+  if (const QList* ql = TieredListOf(pv); ql && ql == fields_.orig_tiered_list)
+    current_size -= ql->TieringAccountedBytes() - fields_.orig_tiering_accounted;
   DbTable* table = fields_.db_slice->GetDBTable(fields_.db_ind);
   const std::optional<SlotId> slot = StatsSlot(*table);
 
@@ -655,6 +680,7 @@ DbSlice::AutoUpdater::AutoUpdater(DbIndex db_ind, std::string_view key, const It
               .orig_obj_type = it->second.ObjType(),
               .slot = slot} {
   DCHECK(IsValid(it));
+  ResyncTieredList();
 }
 
 DbSlice::ItAndUpdater DbSlice::FindMutable(const Context& cntx, string_view key) {
@@ -673,8 +699,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
 
   auto it = Iterator(*res, StringOrView::FromView(key));
 
-  bool omitted = IsOmittableWrite(cntx, ChangeReq{it.GetInnerIt()});
-  if (!omitted)
+  auto omit = DetermineOmitPossibility(cntx, ChangeReq{it.GetInnerIt()});
+  if (!omit.skip_serialize)
     PreUpdateBlocking(cntx.db_index, it);
 
   // PreUpdate() might have caused a deletion of `it`
@@ -684,7 +710,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::FindMutableInternal(const Context& cntx
     return {{.it = it,
              .post_updater = AutoUpdater{cntx.db_index, key, it, this},
              .is_new = false,
-             .omitted_journal = omitted}};
+             .omitted_journal = omit.omit_journal}};
   }
 
   return OpStatus::KEY_NOTFOUND;
@@ -817,6 +843,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_v
   CHECK(res.status() == OpStatus::KEY_NOTFOUND) << res.status();
 
   // Call change callbacks on the computed set of buckets that can be affected by the insert
+  bool skip_serialize = false;
   bool omit_journal = false;
   DbTable& db = *db_arr_[cntx.db_index];
 
@@ -825,8 +852,11 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_v
       auto bucket_set = db.prime.CVCUponInsert(key);
 
       // We skip calling callbacks, so the bucket set is consistent and we break
-      if (omit_journal = IsOmittableWrite(cntx, bucket_set); omit_journal)
+      if (auto omit = DetermineOmitPossibility(cntx, bucket_set); omit.skip_serialize) {
+        skip_serialize = true;
+        omit_journal = omit.omit_journal;
         break;
+      }
 
       CallChangeCallbacks(cntx.db_index, bucket_set);
 
@@ -910,7 +940,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_v
 
   DCHECK_EQ(it->second.MallocUsed(), 0UL);  // Make sure accounting is no-op
 
-  if (!omit_journal)
+  if (!skip_serialize)
     it.SetVersion(NextVersion());
 
   TouchTopKeysIfNeeded(key, db.sample_top_keys);
@@ -968,9 +998,10 @@ void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
 }
 
 void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
-                           ChangeConsumerInterface* consumer) {
+                           const DbTableArray& tables, ChangeConsumerInterface* consumer) {
   VLOG(1) << "Start FlushSlotsFb";
-  // Slot deletion can take time as it traverses all the database, hence it runs in fiber.
+
+  // Slot deletion can take time as it traverses all databases, hence it runs in a fiber.
   // We want to flush all the data of a slot that was added till the time the call to FlushSlots
   // was made. Therefore we delete slots entries with version < next_version.
   // next_version and the on_change callback are registered synchronously in FlushSlots
@@ -979,12 +1010,11 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
   uint64_t del_count = 0;
 
   // Explicitly copy table smart pointer to keep reference count up (flushall drops it)
-  boost::intrusive_ptr<DbTable> table = db_arr_.front();
-  size_t memory_before = table->table_memory() + table->stats.obj_memory_usage;
+  boost::intrusive_ptr<DbTable> table;
+  size_t memory_before = 0, memory_after = 0;
 
   DbContext db_cntx;
   db_cntx.time_now_ms = GetCurrentTimeMs();
-  db_cntx.db_index = table->index;
 
   std::string tmp;
   auto iterate_bucket = [&](PrimeTable::bucket_iterator it) {
@@ -1003,27 +1033,42 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
 
   ServerState& etl = *ServerState::tlocal();
   const float cpu_budget = GetFlag(FLAGS_migration_buckets_cpu_budget);
-  PrimeTable* pt = &table->prime;
-  PrimeTable::Cursor cursor;
+  for (DbIndex db_ind = 0; db_ind < tables.size() && etl.gstate() != GlobalState::SHUTTING_DOWN;
+       ++db_ind) {
+    table = tables[db_ind];
 
-  do {
-    {
-      base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
-      cursor = pt->TraverseBuckets(cursor, iterate_bucket);
-    }
-    // DelAtomic above only marks the watchers of a deleted stream as awakened; normally the
-    // deleting transaction dispatches them when it concludes. This fiber has no such transaction,
-    // so dispatch here - between bucket traversals, where preempting in a readiness check is safe.
-    if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
-        bc && owner_->GetContTx() == nullptr) {
-      bc->NotifyPending();
-    }
+    // FLUSHDB/FLUSHALL replaces the table and subtracts its remaining keys from entries_count_.
+    // Skip replaced tables before traversal and after each yield to avoid subtracting keys twice.
+    if (!table || table != db_arr_[db_ind])
+      continue;
 
-    while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN &&
-           flush_slots_cpu_aggregator_.IsOverloaded(cpu_budget)) {
-      ThisFiber::SleepFor(300us);
-    }
-  } while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN);
+    db_cntx.db_index = db_ind;
+    memory_before += table->table_memory() + table->stats.obj_memory_usage;
+    PrimeTable* pt = &table->prime;
+    PrimeTable::Cursor cursor;
+
+    do {
+      {
+        base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
+        cursor = pt->TraverseBuckets(cursor, iterate_bucket);
+      }
+
+      // DelAtomic above only marks the watchers of a deleted stream as awakened; normally the
+      // deleting transaction dispatches them when it concludes. This fiber has no such transaction,
+      // so dispatch here - between bucket traversals, where preempting in a readiness check is
+      // safe.
+      if (auto* bc = ns_->GetBlockingController(owner_->shard_id());
+          bc && owner_->GetContTx() == nullptr) {
+        bc->NotifyPending();
+      }
+
+      while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN &&
+             flush_slots_cpu_aggregator_.IsOverloaded(cpu_budget)) {
+        ThisFiber::SleepFor(300us);
+      }
+    } while (cursor && table == db_arr_[db_ind] && etl.gstate() != GlobalState::SHUTTING_DOWN);
+    memory_after += table->table_memory() + table->stats.obj_memory_usage;
+  }
 
   VLOG(1) << "FlushSlotsFb del count is: " << del_count;
   if (!UnregisterOnChange(consumer))
@@ -1033,7 +1078,6 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
     int64_t start = absl::GetCurrentTimeNanos();
     etl.DecommitMemory(ServerState::kDataHeap);
     int64_t took = absl::GetCurrentTimeNanos() - start;
-    size_t memory_after = table->table_memory() + table->stats.obj_memory_usage;
 
     LOG(INFO) << "Memory decommit took " << took << "ns, deleted " << del_count << ", memory delta "
               << (static_cast<int64_t>(memory_before) - static_cast<int64_t>(memory_after));
@@ -1044,21 +1088,21 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   cluster::SlotSet slot_set(slot_ranges);
   InvalidateSlotWatches(slot_set);
 
-  // Capture the version threshold synchronously, before launching the fiber.
+  // Capture the tables and version synchronously so the callback and fiber use the same snapshot.
   // Entries inserted after this point get version >= next_version and survive the flush.
   uint64_t next_version = NextVersion();
+  auto tables = std::make_shared<const DbTableArray>(db_arr_);
 
   auto shared_slots = std::make_shared<cluster::SlotSet>(std::move(slot_set));
-  boost::intrusive_ptr<DbTable> table = db_arr_.front();
 
   // Register the on_change callback synchronously so that bucket modifications between
   // FlushSlots returning and the fiber starting are caught (the callback deletes old entries
   // before the bucket version is bumped, preventing the traversal from skipping them).
-  auto on_change = [this, shared_slots, next_version, table](DbIndex db_index,
-                                                             const ChangeReq& req) {
-    // The callback fires for every db index, but only db 0 is flushed; deleting a db > 0
-    // entry through db 0's table would corrupt its accounting and prime table.
-    if (db_index != 0)
+  auto on_change = [this, shared_slots, next_version, tables](DbIndex db_index,
+                                                              const ChangeReq& req) {
+    // New or replaced tables are outside this flush. Serializers may still pass buckets from old
+    // tables, whose keys FLUSHDB/FLUSHALL already subtracted from entries_count_.
+    if (db_index >= tables->size() || (*tables)[db_index] != db_arr_[db_index])
       return;
 
     FiberAtomicGuard fg;
@@ -1074,7 +1118,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
           DbContext cntx;
           cntx.time_now_ms = GetCurrentTimeMs();
           cntx.db_index = db_index;
-          DelAtomic(cntx, it, table.get());
+          DelAtomic(cntx, it);
         }
         ++it;
       }
@@ -1090,8 +1134,8 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
   RegisterOnChange(consumer.get());
 
   fb2::Fiber::Opts opts{.priority = fb2::FiberPriority::BACKGROUND, .name = "flush_slots"};
-  fb2::Fiber(opts, [this, shared_slots, next_version, consumer = std::move(consumer)]() {
-    FlushSlotsFb(*shared_slots, next_version, consumer.get());
+  fb2::Fiber(opts, [this, shared_slots, next_version, tables, consumer = std::move(consumer)]() {
+    FlushSlotsFb(*shared_slots, next_version, *tables, consumer.get());
   }).Detach();
 }
 
@@ -1846,13 +1890,18 @@ void DbSlice::InvalidateDbWatches(DbIndex db_indx) {
 }
 
 void DbSlice::InvalidateSlotWatches(const cluster::SlotSet& slot_ids) {
-  for (const auto& [key, conn_list] : db_arr_[0]->watched_keys) {
-    SlotId sid = KeySlot(key);
-    if (!slot_ids.Contains(sid)) {
+  for (const auto& table : db_arr_) {
+    if (!table)
       continue;
+
+    for (const auto& [key, conn_list] : table->watched_keys) {
+      SlotId sid = KeySlot(key);
+      if (!slot_ids.Contains(sid)) {
+        continue;
+      }
+      for (auto* dirty_ptr : conn_list)
+        dirty_ptr->store(true, memory_order_relaxed);
     }
-    for (auto* dirty_ptr : conn_list)
-      dirty_ptr->store(true, memory_order_relaxed);
   }
 }
 
@@ -2219,31 +2268,32 @@ void DbSlice::CallChangeCallbacks(DbIndex id, const ChangeReq& cr) const {
     cb->OnChange(id, cr);
 }
 
-// We can omit the journal write if:
+// We can skip the forced snapshot serialization if:
 // 1. it supports mutation hints and uses only a single key
 // 2. there is a single eventually-consistent snapshot (i.e. replica full sync)
-// 3. there are no other journal consumers
-// 4. the snapshot did not reach the bucket yet
-bool DbSlice::IsOmittableWrite(const Context& cntx, const ChangeReq& req) {
+// 3. the snapshot did not reach the bucket yet
+// The journal write is additionally omitted only when the snapshot is the sole journal consumer.
+DbSlice::OmitDecision DbSlice::DetermineOmitPossibility(const Context& cntx, const ChangeReq& req) {
   if (!journal_omit_redundant_writes_)
-    return false;
+    return {};
 
   // Stash entries can be moved backwards relative to the cursor by TryMoveFromStash,
   // breaking our reachability assumption. We must serialize now
   if (req.ContainsStashBucket())
-    return false;
+    return {};
 
-  bool omit_update = false;
+  OmitDecision res;
   if (cntx.is_omittable_operation && change_cb_.size() == 1) {
     auto gv = [](PrimeTable::bucket_iterator it) { return it.GetVersion(); };
     uint64_t max_version = std::ranges::max(req.buckets(), {}, gv).GetVersion();
 
     auto* cb = change_cb_.front();
-    omit_update = cb->eventually_consistent_ && max_version < cb->snapshot_version_ &&
-                  journal::GetCallbackCount() == 1;
-    events_.journal_omit += unsigned(omit_update);
+    res.skip_serialize = cb->eventually_consistent_ && max_version < cb->snapshot_version_;
+    res.omit_journal = res.skip_serialize && journal::GetCallbackCount() == 1;
+    events_.serialize_skip += unsigned(res.skip_serialize);
+    events_.journal_omit += unsigned(res.omit_journal);
   }
-  return omit_update;
+  return res;
 }
 
 }  // namespace dfly

@@ -60,6 +60,9 @@ enum CommandOpt : uint32_t {
   // each watched key that is ready on the waking shard is reserved for it, not only the key that
   // woke it (see BlockingController).
   WAKE_ALL_READY_KEYS = 1U << 21,
+
+  // ACL: keys need read and write (only the source of a two-key move). Implies JOURNALED.
+  RW = 1U << 22,
 };
 
 };  // namespace CO
