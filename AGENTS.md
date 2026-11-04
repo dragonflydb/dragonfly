@@ -315,7 +315,7 @@ save, the replication teardown or the command sequence that produces it.
 
 The CI workflow runs on all PRs and includes:
 - **Pre-commit checks**: clang-format, black formatters
-- **Build matrix**: Multiple OS/compiler/sanitizer combinations (Ubuntu 20/24, Alpine, GCC/Clang, ASAN/UBSAN)
+- **Build matrix**: Multiple OS/compiler combinations (Ubuntu 24, Alpine, GCC/Clang); the ASAN/UBSAN build runs nightly in `daily-builds.yml`
 - **Test execution**: C++ unit tests, Python integration tests, cluster mode tests
 - **Additional validations**: Helm charts, Docker image builds
 

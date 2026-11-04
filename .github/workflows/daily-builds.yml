@@ -142,3 +142,243 @@ jobs:
             -H 'Content-Type: application/json' \
             '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
             -d '{"text": "'"${message}"'"}'
+
+  build-sanitizers:
+    if: github.repository == 'dragonflydb/dragonfly'
+    runs-on: ubuntu-latest
+    name: Build sanitizers
+    # The ASAN/UBSAN configuration that used to be a leg of the ci-tests matrix, with the same unit-test
+    # passes and JUnit upload. It took 48-102 min there; this job is the only producer of the Sanitizers
+    # caches on main, so after a cache eviction it is a cold build.
+    timeout-minutes: 180
+
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+      actions: write # To allow deleting cache
+
+    env:
+      GTEST_BRIEF: 1
+      CPP_JUNIT_DIR: ${{ github.workspace }}/test-results/junit/cpp
+      CPP_DASHBOARD_DIR: ${{ github.workspace }}/test-results/dashboard/cpp
+
+    container:
+      image: ghcr.io/romange/ubuntu-dev:24
+      # Seems that docker by default prohibits running iouring syscalls
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      volumes:
+        - /:/hostroot
+        - /mnt:/mnt
+      credentials:
+        username: ${{ github.repository_owner }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+
+      - name: Prepare Environment
+        run: |
+          uname -a
+          cmake --version
+          mkdir -p ${GITHUB_WORKSPACE}/build
+          mount
+
+          echo "===================Before freeing up space ============================================"
+          df -h
+          rm -rf /hostroot/usr/share/dotnet
+          rm -rf /hostroot/usr/local/share/boost
+          rm -rf /hostroot/usr/local/lib/android
+          rm -rf /hostroot/opt/ghc
+          echo "===================After freeing up space ============================================"
+          df -h
+          touch /mnt/foo
+          ls -la /mnt/foo
+
+      - name: System diagnostics
+        run: |
+          echo "ulimit is"
+          ulimit -s
+          echo "-----------------------------"
+          echo "disk space is:"
+          df -h
+          echo "-----------------------------"
+
+      - name: Build Dragonfly
+        uses: ./.github/actions/builder
+        with:
+          enable-ccache: 'true'
+          ccache-save: 'true'
+          enable-deps-cache: 'true'
+          build-type: Debug
+          cache-key-suffix: ubuntu-dev:24
+          # Sanitizer builds produce larger objects, so give this job a bigger ccache.
+          ccache-max-size: '2G'
+          c-compiler: clang
+          cxx-compiler: clang++
+          # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
+          cxx-flags: "-Wno-error=unused-command-line-argument"
+          sanitizers: Sanitizers
+
+      - name: PostFail
+        if: failure()
+        run: |
+          echo "disk space is:"
+          df -h
+
+      - name: C++ Unit Tests - IoUring
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          echo Run ctest -V -L DFLY
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
+          GTEST_IOURING_DIR="${JUNIT_DIR}/gtest/iouring"
+          GTEST_MANUAL_DIR="${JUNIT_DIR}/gtest/iouring-manual"
+          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_IOURING_DIR}" "${GTEST_MANUAL_DIR}"
+
+          run_manual_gtest() {
+            GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" timeout 5m "$@"
+          }
+
+          GTEST_OUTPUT="xml:${GTEST_IOURING_DIR}/" \
+          GLOG_alsologtostderr=1 GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1,op_manager=1,op_manager_test=1 \
+          FLAGS_fiber_safety_margin=4096 timeout 20m ctest -V -L DFLY -E allocation_tracker_test \
+            --output-junit "${CTEST_JUNIT_DIR}/iouring.xml"
+
+          # Run allocation tracker test separately without alsologtostderr because it generates a TON of logs.
+          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" FLAGS_fiber_safety_margin=4096 \
+            timeout 5m ./allocation_tracker_test
+
+          run_manual_gtest ./dragonfly_test
+          run_manual_gtest ./json_family_test --jsonpathv2=false
+          run_manual_gtest ./tiered_storage_test --vmodule=db_slice=2 --logtostderr
+          run_manual_gtest ./search_test --use_numeric_range_tree=false
+          run_manual_gtest ./search_family_test --use_numeric_range_tree=false
+
+      - name: C++ Unit Tests - Epoll
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
+          GTEST_EPOLL_DIR="${JUNIT_DIR}/gtest/epoll"
+          GTEST_MANUAL_DIR="${JUNIT_DIR}/gtest/epoll-manual"
+          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_EPOLL_DIR}" "${GTEST_MANUAL_DIR}"
+
+          # Create a rule that automatically prints stacktrace upon segfault
+          cat > ./init.gdb <<EOF
+          catch signal SIGSEGV
+          command
+          bt
+          end
+          EOF
+
+          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" \
+            gdb -ix ./init.gdb --batch -ex r --args ./dragonfly_test --force_epoll
+          GTEST_OUTPUT="xml:${GTEST_EPOLL_DIR}/" \
+          GLOG_alsologtostderr=1 FLAGS_fiber_safety_margin=4096 FLAGS_force_epoll=true GLOG_vmodule=rdb_load=1,rdb_save=1,snapshot=1 \
+          timeout 20m ctest -V -L DFLY -E allocation_tracker_test \
+            --output-junit "${CTEST_JUNIT_DIR}/epoll.xml"
+
+          GTEST_OUTPUT="xml:${GTEST_MANUAL_DIR}/" FLAGS_fiber_safety_margin=4096 \
+            FLAGS_force_epoll=true timeout 5m ./allocation_tracker_test
+
+      - name: C++ Unit Tests - IoUring with cluster mode
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
+          GTEST_CLUSTER_DIR="${JUNIT_DIR}/gtest/cluster"
+          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_CLUSTER_DIR}"
+          GTEST_OUTPUT="xml:${GTEST_CLUSTER_DIR}/" FLAGS_fiber_safety_margin=4096 \
+            FLAGS_cluster_mode=emulated timeout 20m ctest -V -L DFLY \
+            --output-junit "${CTEST_JUNIT_DIR}/cluster.xml"
+
+      - name: C++ Unit Tests - IoUring with cluster mode and FLAGS_lock_on_hashtags
+        run: |
+          cd ${GITHUB_WORKSPACE}/build
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          CTEST_JUNIT_DIR="${JUNIT_DIR}/ctest"
+          GTEST_CLUSTER_DIR="${JUNIT_DIR}/gtest/cluster-hashtags"
+          mkdir -p "${CTEST_JUNIT_DIR}" "${GTEST_CLUSTER_DIR}"
+          GTEST_OUTPUT="xml:${GTEST_CLUSTER_DIR}/" FLAGS_fiber_safety_margin=4096 \
+            FLAGS_cluster_mode=emulated FLAGS_lock_on_hashtags=true timeout 20m ctest -V -L DFLY \
+            --output-junit "${CTEST_JUNIT_DIR}/cluster-hashtags.xml"
+
+      - name: Upload unit logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit_logs
+          path: /tmp/*INFO*
+
+      - name: Prepare JUnit artifact name
+        if: always()
+        run: |
+          NAME="junit-ci-ubuntu-dev:24-Debug-clang++-Sanitizers"
+          MATRIX_NAME="container-ubuntu-dev:24-build-Debug-compiler-clang++-sanitizers-Sanitizers"
+          SAFE_NAME=$("${GITHUB_WORKSPACE}/.github/scripts/sanitize-token.sh" "${NAME}")
+          {
+            echo "CI_JUNIT_ARTIFACT=${SAFE_NAME}"
+            echo "CI_JUNIT_UPLOAD_SUFFIX=${MATRIX_NAME}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Generate C++ GTest dashboard summary
+        if: always()
+        run: |
+          mkdir -p "${CPP_DASHBOARD_DIR}"
+
+          python3 "${GITHUB_WORKSPACE}/.github/scripts/gtest-junit-to-dashboard-json.py" \
+            "${CPP_JUNIT_DIR}/gtest" "${CPP_DASHBOARD_DIR}/gtest-summary.json" \
+            --workflow "${GITHUB_WORKFLOW}" \
+            --run-id "${GITHUB_RUN_ID}" \
+            --run-attempt "${GITHUB_RUN_ATTEMPT}" \
+            --job "${GITHUB_JOB}" \
+            --variant "${CI_JUNIT_UPLOAD_SUFFIX}"
+
+      - name: Upload C++ JUnit test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.CI_JUNIT_ARTIFACT }}
+          path: |
+            ${{ github.workspace }}/test-results/junit/cpp/ctest/**/*.xml
+            ${{ github.workspace }}/test-results/dashboard/cpp/**/*.json
+          if-no-files-found: ignore
+
+      - name: Refresh AWS credentials for C++ JUnit upload
+        if: always()
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_CI_S3_ROLE_ARN }}
+          aws-region: us-east-1
+          unset-current-credentials: true
+
+      - name: Upload C++ JUnit results to S3
+        if: always()
+        env:
+          S3_REGTEST_BUCKET: ${{ secrets.S3_REGTEST_BUCKET }}
+        run: |
+          JUNIT_DIR="${CPP_JUNIT_DIR}"
+          MATRIX_NAME="${CI_JUNIT_UPLOAD_SUFFIX}"
+
+          "${GITHUB_WORKSPACE}/.github/scripts/upload-test-results-to-s3.sh" \
+            dir junit "${JUNIT_DIR}" "${S3_REGTEST_BUCKET}" "cpp" "${MATRIX_NAME}" \
+            "C++ JUnit" "*.xml" "gtest/*/*.xml"
+
+          "${GITHUB_WORKSPACE}/.github/scripts/upload-test-results-to-s3.sh" \
+            file dashboard "${CPP_DASHBOARD_DIR}/gtest-summary.json" "${S3_REGTEST_BUCKET}" "cpp" \
+            "${MATRIX_NAME}" "C++ GTest dashboard JSON"
+
+      - name: Send notification on failure
+        if: failure() && github.ref == 'refs/heads/main'
+        run: |
+          job_link="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          message="Daily build (sanitizers) failed.\\n Commit: ${{github.sha}}\\n Job Link: ${job_link}\\n"
+
+          curl -s \
+            -X POST \
+            -H 'Content-Type: application/json' \
+            '${{ secrets.GSPACES_BOT_DF_BUILD }}' \
+            -d '{"text": "'"${message}"'"}'
