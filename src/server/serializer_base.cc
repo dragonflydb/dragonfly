@@ -8,6 +8,8 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
+#include <chrono>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "redis/redis_aux.h"
@@ -25,6 +27,9 @@
 #include "util/fibers/synchronization.h"
 
 ABSL_DECLARE_FLAG(bool, serialization_tagged_chunks);
+
+using namespace facade;
+using namespace std::chrono_literals;
 
 namespace dfly {
 
@@ -78,7 +83,8 @@ void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_ind
 
 void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush_bucket,
                                                 ExecutionState* cntx) {
-  const size_t kMaxDelayedEntries = 512;
+  // Force flush before letting the delayed size grow too large
+  const size_t kMaxDelayedEntries = 128;
   if (delayed_entries_.size() > kMaxDelayedEntries)
     force |= true;
 
@@ -264,7 +270,8 @@ bool SerializerBase::TraverseAllBuckets() {
 
       // Suspend the traversal loop if we are exceeding the egress budget, letting
       // high priority writes drain first. Guarantees the loop its reserved share.
-      ServerState::tlocal()->GetEgressThrottler().Throttle();
+      // Also applies tiered read-volume backpressure when disk reads are saturated.
+      Throttle();
     } while (cursor);
 
     // Wait for all the outstanding delayed entries and serialize them as well.
@@ -301,6 +308,26 @@ unsigned SerializerBase::SerializeBucket(DbIndex db_index, PrimeTable::bucket_it
 
 void SerializerBase::WaitForNoBucketBlocked() const {
   BucketDependencies::WaitEmpty();
+}
+
+void SerializerBase::Throttle() {
+  // Egress backpressure: suspend if the destination sink is not keeping up.
+  ServerState::tlocal()->GetEgressThrottler().Throttle();
+
+  if (!HasDelayedEntries())
+    return;
+
+  // Throttle on total usage to avoid overloading regular clients, wait with gap
+  EngineShard* es = EngineShard::tlocal();
+  TieredStorage* ts = es ? es->tiered_storage() : nullptr;
+  if (ts == nullptr || ts->TotalUsage() < 100)
+    return;
+
+  int steps_left = 10;
+  while (base_cntx_->IsRunning() && ts->TotalUsage() > 70 && steps_left-- > 0) {
+    ProcessDelayedEntries(false, 0, base_cntx_);
+    util::ThisFiber::SleepFor(100us);
+  }
 }
 
 void SerializerBase::OnChange(DbIndex db_index, const ChangeReq& req) {
