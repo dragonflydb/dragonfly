@@ -30,31 +30,31 @@ void QueuedSinkWriter::Push(string data) {
   pushed_bytes_ += data.capacity();
   const uint64_t end = pushed_bytes_;
   pending_.push_back(std::move(data));
-  writer_cv_.notify_one();
+  cv_.notify_all();
 
   util::fb2::NoOpLock lk;
-  drain_cv_.wait(lk, [&] {
+  cv_.wait(lk, [&] {
     return written_bytes_ >= end || pending_bytes() <= limit_ || !cntx_->IsRunning();
   });
 }
 
 void QueuedSinkWriter::WaitBelow(size_t bytes) {
   util::fb2::NoOpLock lk;
-  drain_cv_.wait(lk, [&] { return pending_bytes() <= bytes || !cntx_->IsRunning(); });
+  cv_.wait(lk, [&] { return pending_bytes() <= bytes || !cntx_->IsRunning(); });
 }
 
 void QueuedSinkWriter::Stop() {
   if (!fb_.IsJoinable())
     return;
   stop_ = true;
-  writer_cv_.notify_one();
+  cv_.notify_all();
   fb_.Join();
 }
 
 void QueuedSinkWriter::WriterFb() {
   util::fb2::NoOpLock lk;
   while (true) {
-    writer_cv_.wait(lk, [&] { return !pending_.empty() || stop_; });
+    cv_.wait(lk, [&] { return !pending_.empty() || stop_; });
     if (pending_.empty())
       return;
 
@@ -63,7 +63,7 @@ void QueuedSinkWriter::WriterFb() {
     size_t bytes = record.capacity();
     write_fn_(std::move(record));
     written_bytes_ += bytes;
-    drain_cv_.notify_all();
+    cv_.notify_all();
   }
 }
 

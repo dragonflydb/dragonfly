@@ -50,7 +50,7 @@ class QueuedSinkWriter {
 
   void SetLimit(size_t limit) {
     limit_ = limit;
-    drain_cv_.notify_all();  // a raised limit may release waiting producers
+    cv_.notify_all();  // a raised limit may release waiting producers
   }
 
   size_t limit() const {
@@ -76,9 +76,10 @@ class QueuedSinkWriter {
   ExecutionState* cntx_;  // once it stops running, waiting producers are released
   WriteFn write_fn_;
 
-  util::fb2::Fiber fb_;              // the writer fiber, runs WriterFb()
-  util::fb2::CondVarAny writer_cv_;  // wakes fb_ on Push() and Stop()
-  util::fb2::CondVarAny drain_cv_;   // wakes producers after each write
+  util::fb2::Fiber fb_;  // the writer fiber, runs WriterFb()
+  // Notified on every change to the queue: Push(), Stop(), each write and SetLimit(). The writer
+  // fiber and the producers wait on it for their own conditions.
+  util::fb2::CondVarAny cv_;
 };
 
 }  // namespace dfly::detail
