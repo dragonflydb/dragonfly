@@ -20,7 +20,7 @@ import redis
 from redis import asyncio as aioredis
 
 from . import dfly_args
-from .instance import DflyInstanceFactory, RedisServer
+from .instance import DflyInstance, DflyInstanceFactory, RedisServer
 from .replication_utils import compare_datasets, get_metric_value
 from .seeder import DebugPopulateSeeder, Seeder
 from .utility import (
@@ -175,6 +175,11 @@ async def test_consistency(df_factory, format: str, seeder_opts: dict):
 
     # save + flush + load
     await async_client.execute_command("SAVE", format)
+
+    # The counter tracks record writes of single-file RDB serialization only.
+    serialized = await get_metric_value(instance, "dragonfly_rdb_serialize")
+    assert serialized > 0 if format == "RDB" else serialized == 0
+
     assert await async_client.flushall()
     await async_client.execute_command(
         "DFLY",
@@ -825,10 +830,15 @@ async def test_infomemory_while_snapshotting(df_factory, format: str):
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-bgsave"})
-async def test_bgsave_and_save(async_client: aioredis.Redis):
+async def test_bgsave_and_save(df_server: DflyInstance, async_client: aioredis.Redis):
     await async_client.execute_command("DEBUG POPULATE 200000")
+    await assert_metric_value(df_server, "dragonfly_save_in_progress", 0)
 
     await async_client.execute_command("BGSAVE")
+
+    # Read before the BGSAVE below, which is rejected precisely because this save is still
+    # running: if the save had already finished, that rejection would not happen either.
+    await assert_metric_value(df_server, "dragonfly_save_in_progress", 1)
     with pytest.raises(redis.exceptions.ResponseError):
         await async_client.execute_command("BGSAVE")
 
@@ -840,7 +850,17 @@ async def test_bgsave_and_save(async_client: aioredis.Redis):
 
     while await is_saving(async_client):
         await asyncio.sleep(0.1)
-    await async_client.execute_command("SAVE")
+
+    # A foreground save (the path scheduled and shutdown saves take) is reported as well.
+    save = asyncio.create_task(async_client.execute_command("SAVE"))
+    seen_saving = False
+    while not save.done():
+        if await get_metric_value(df_server, "dragonfly_save_in_progress") == 1:
+            seen_saving = True
+        await asyncio.sleep(0.01)
+    await save
+    assert seen_saving
+    await assert_metric_value(df_server, "dragonfly_save_in_progress", 0)
 
 
 @dfly_args({**BASIC_ARGS, "dbfilename": "test-objhist-crash"})

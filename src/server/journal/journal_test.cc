@@ -254,7 +254,9 @@ TEST_F(BufferedSocketWriterTest, AbortOnWriteTimeout) {
     // A write that stays in flight longer than the timeout fails the stream.
     ThisFiber::SleepFor(600ms);
     writer.AbortOnWriteTimeout(kTimeoutUsec);
-    EXPECT_EQ(cntx.GetError().Format(), "BufferedSocketWriter write operation timeout");
+    GenericError err = cntx.GetError();
+    EXPECT_EQ(std::error_code(err), make_error_code(errc::timed_out));
+    EXPECT_THAT(err.Format(), testing::HasSubstr("BufferedSocketWriter write operation timeout"));
     socket.Complete();
   });
 }

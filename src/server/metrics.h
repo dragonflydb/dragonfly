@@ -142,6 +142,9 @@ struct Metrics {
 
   LoadingStats loading_stats;
 
+  // True while any snapshot save runs: BGSAVE, SAVE, scheduled or shutdown save.
+  bool save_in_progress = false;
+
   absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
 
   InternedStringStats interned_string_stats;

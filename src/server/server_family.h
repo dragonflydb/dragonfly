@@ -91,6 +91,9 @@ struct SaveInfoData {
   // false if last attempt failed
   bool last_bgsave_status = true;
   bool bgsave_in_progress = false;
+
+  // Unlike bgsave_in_progress, also covers SAVE, scheduled and shutdown saves.
+  bool save_in_progress = false;
 };
 
 // A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
