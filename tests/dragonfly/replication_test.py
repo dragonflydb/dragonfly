@@ -256,6 +256,167 @@ async def test_replication_list_double_apply(df_factory: DflyInstanceFactory):
     await assert_replica_data_matches(c_master, [c_replica])
 
 
+@pytest.mark.parametrize("output_buffer", ["0", "64mb"])
+@pytest.mark.parametrize("background", [False, True])
+async def test_replication_full_sync_output_buffer(
+    df_factory: DflyInstanceFactory, output_buffer, background
+):
+    """Mutations streamed during full sync replicate correctly with and without the snapshot
+    output buffer. In background mode the traversal yields after queueing its chunk, while
+    mutations keep running."""
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={
+            "proactor_threads": 2,
+            "snapshot_output_buffer_limit": output_buffer,
+            "background_snapshotting": background,
+        },
+        replica_args={"proactor_threads": 1},
+        connect=False,
+    )
+
+    seeder = SeederV2(key_target=5000, data_size=1000, huge_value_size=70000, huge_value_target=10)
+    await seeder.run(c_master, target_deviation=0.01)
+
+    stream_task = asyncio.create_task(seeder.run(c_master))
+    await asyncio.sleep(0.0)
+
+    await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+
+    async with async_timeout.timeout(120):
+        await wait_for_replicas_state(c_replica)
+
+    await seeder.stop(c_master)
+    await stream_task
+
+    await assert_replica_data_matches(c_master, [c_replica])
+
+
+@pytest.mark.parametrize("output_buffer", ["0", "256mb"])
+async def test_replication_full_sync_writes_do_not_wait_for_replica(
+    df_factory: DflyInstanceFactory, output_buffer
+):
+    """A write to a key the full sync traversal has not reached yet serializes it inline. With the
+    output buffer the write queues that data and returns although the replica does not read;
+    without it, the write waits for the replica."""
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        # The egress limit keeps the traversal slow enough to pause the replica mid sync.
+        master_args={
+            "proactor_threads": 2,
+            "snapshot_output_buffer_limit": output_buffer,
+            "snapshot_egress_limit_bytes": "2mb",
+            "replication_timeout": 60000,
+        },
+        replica_args={"proactor_threads": 1},
+        connect=False,
+    )
+    # Random values do not compress, so the inline-serialized buckets below are far more than the
+    # socket buffers between master and replica can absorb.
+    num_keys = 200_000
+    await c_master.execute_command(f"DEBUG POPULATE {num_keys} key 1000 RAND")
+
+    await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica, state="full_sync", timeout=0.02)
+
+    # Once the replica stops reading and the sockets fill, the traversal waits for it, so most keys
+    # stay untraversed.
+    await c_replica.execute_command("DEBUG REPLICA PAUSE")
+    await asyncio.sleep(1)
+
+    c_writer = master.client()
+
+    async def write_untraversed():
+        for i in range(0, num_keys, 40):
+            await c_writer.set(f"key:{i}", "updated")
+
+    writes = asyncio.create_task(write_untraversed())
+    done, _ = await asyncio.wait([writes], timeout=20)
+    assert bool(done) == (output_buffer != "0")
+
+    await c_master.config_set("snapshot_egress_limit_bytes", "0")
+    await c_replica.execute_command("DEBUG REPLICA RESUME")
+    await writes
+    await c_writer.aclose()
+
+    async with async_timeout.timeout(120):
+        await wait_for_replicas_state(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+    await assert_replica_data_matches(c_master, [c_replica])
+
+
+@pytest.mark.parametrize("output_buffer", ["0", "1mb"])
+async def test_replication_full_sync_output_buffer_replica_stalls(
+    df_factory: DflyInstanceFactory, output_buffer
+):
+    """A replica that stops reading mid full sync, while writers have chunks queued beyond the
+    output buffer limit, is dropped by the master without leaving a writer behind: the writers
+    are released, the queue drains, and the next full sync carries everything written meanwhile."""
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory,
+        # The egress limit keeps the traversal slow enough to pause the replica mid sync.
+        master_args={
+            "proactor_threads": 2,
+            "snapshot_output_buffer_limit": output_buffer,
+            "snapshot_egress_limit_bytes": "2mb",
+            "replication_timeout": 2000,
+        },
+        replica_args={"proactor_threads": 1},
+        connect=False,
+    )
+
+    seeder = SeederV2(
+        key_target=2000, data_size=1000, huge_value_size=200_000, huge_value_target=100
+    )
+    await seeder.run(c_master, target_deviation=0.01)
+
+    await c_replica.execute_command("REPLICAOF localhost " + str(master.port))
+    async with async_timeout.timeout(10):
+        await wait_for_replicas_state(c_replica, state="full_sync", timeout=0.02)
+
+    # Once the replica stops reading, the writer fiber blocks on the socket and the producers'
+    # chunks pile up in the queue.
+    await c_replica.execute_command("DEBUG REPLICA PAUSE")
+    writer = asyncio.create_task(seeder.run(c_master))
+
+    limit = 0 if output_buffer == "0" else 1024 * 1024
+
+    @assert_eventually(times=200)
+    async def queue_exceeds_limit():
+        info = await c_master.info("memory")
+        assert info["snapshot_serialization_bytes"] > limit
+
+    await queue_exceeds_limit()
+
+    # replication_timeout makes the master drop the stalled replica mid sync.
+    @assert_eventually(times=200)
+    async def replica_dropped():
+        assert "slave0" not in await c_master.info("replication")
+
+    await replica_dropped()
+
+    # Writers waiting on the queue are released and the queue drains without a reader.
+    await seeder.stop(c_master)
+    async with async_timeout.timeout(30):
+        await writer
+
+    @assert_eventually
+    async def queue_drained():
+        info = await c_master.info("memory")
+        assert info["snapshot_serialization_bytes"] == 0
+
+    await queue_drained()
+
+    # The replica reconnects once it reads again and gets everything written meanwhile.
+    await c_master.config_set("snapshot_egress_limit_bytes", "0")
+    await c_replica.execute_command("DEBUG REPLICA RESUME")
+    async with async_timeout.timeout(120):
+        await wait_for_replicas_state(c_replica)
+    await check_all_replicas_finished([c_replica], c_master)
+    await assert_replica_data_matches(c_master, [c_replica])
+
+
 """
 Test flushall command. Set data to master send flashall and set more data.
 Check replica keys at the end.

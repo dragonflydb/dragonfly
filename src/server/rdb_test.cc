@@ -3153,6 +3153,55 @@ TEST_F(RdbTest, SnapshotEgressThrottle) {
   EXPECT_GT(t_lim, t_base * 3);
 }
 
+// With an output buffer, writes to buckets the traversal has not reached yet queue their
+// inline-serialized chunks instead of waiting for the sink. Save in DF format with values above
+// serialization_max_chunk_size, so those buckets are handed over in several chunks, with the
+// buffer off, on, and off again (the flag is read when a snapshot starts). The file must load back
+// whole, with the values as of the save's start.
+TEST_F(RdbTest, SnapshotOutputBuffer) {
+  absl::FlagSaver fs;
+  constexpr unsigned kKeys = 5000;
+  ASSERT_EQ(Run({"config", "set", "serialization_max_chunk_size", "1024"}), "OK");
+  const string updated(4000, 'u');
+
+  for (string_view limit : {"0", "1mb", "0"}) {
+    Run({"debug", "populate", StrCat(kKeys), "key", "4000"});
+    ASSERT_EQ(Run({"config", "set", "snapshot_output_buffer_limit", limit}), "OK");
+
+    std::atomic_bool save_done = false;
+    auto save_fb = pp_->at(0)->LaunchFiber([&] {
+      EXPECT_EQ(Run({"save", "df"}), "OK");
+      save_done = true;
+    });
+
+    // A save that fails outright, e.g. when the file system does not support direct I/O, never
+    // reports itself as saving, so stop waiting once it is done instead of spinning forever.
+    const bool started =
+        WaitUntilCondition([&] { return service_->server_family().TEST_IsSaving() || save_done; },
+                           chrono::seconds(10));
+    if (!started || save_done) {
+      save_fb.Join();  // destroying a joinable fiber aborts the whole test binary
+      FAIL() << "the save did not run while the writes did";
+    }
+
+    pp_->at(1)->Await([&] {
+      for (unsigned i = 0; i < kKeys; i += 7) {
+        Run({"set", StrCat("key:", i), updated});
+      }
+    });
+    save_fb.Join();
+
+    auto save_info = service_->server_family().GetLastSaveInfo();
+    ASSERT_EQ(Run({"flushall"}), "OK");
+    ASSERT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
+    EXPECT_THAT(Run({"dbsize"}), IntArg(kKeys));
+    for (unsigned i = 0; i < kKeys; i += 7) {
+      ASSERT_NE(Run({"get", StrCat("key:", i)}).GetString(), updated) << i;
+    }
+    ASSERT_EQ(Run({"flushall"}), "OK");
+  }
+}
+
 TEST_F(RdbTest, EofWithRemoteShardChunksPending) {
   // This test creates a key whose RDB chunk is dispatched to a remote shard (not the shard
   // driving the load), and simulates the source stream ending (EOF) before all of that chunk's
