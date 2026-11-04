@@ -198,7 +198,10 @@ struct HnswlibAdapter {
   }
 
  private:
-  // The check under the lock orders with Retire; the one before it keeps a retired index cheap.
+  // Returns no lock once the index is retired. The check before locking only spares a retired
+  // index the locking. The check under the lock keeps the vectors alive: Retire sets the flag and
+  // then waits for the lock holders, so a caller that still sees the flag clear under the lock is
+  // one that Retire waits for.
   std::optional<MRMWMutexLock> LockIfActive(MRMWMutex::LockMode mode) {
     std::optional<MRMWMutexLock> lock;
     if (retired_)
