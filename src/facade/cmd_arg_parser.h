@@ -6,6 +6,7 @@
 
 #include <absl/strings/match.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/substitute.h>
 
 #include <array>
 #include <cassert>
@@ -87,12 +88,15 @@ namespace facade {
 //   Exist(tag, &T::flag)                  set a bool member when tag is present
 //   Field(tag, &T::a, ...)                read values after tag into the listed members
 //   Field<Parsed>(tag, &T::a, error)      parse as Parsed, then convert into the member type
+//   Field(tag, &T::a, fn)                 read the value with a token parser fn(sv, RuleError&)
 //   Action(tag, fn)                       call fn(CmdArgParser*, T*) after consuming tag
 //   TagValue(tag, &T::kind, k, &T::val)   set a discriminant and read the following value
 //   TagValue<Parsed>(...)                 TagValue with an explicit parsed value type
 //   Map(&T::value, tag, value, ...)       map any matching tag directly into a member
 //   Flags(&T::bits, tag, bit, ...)        OR the value for each matching tag into an integer
 //   Choice(tag, &T::value, key, value...) consume tag, then map the following token
+//   Choice(tag, &T::value, ChoiceError(e), key, value...)
+//                                         same, but an unknown token reports e
 //
 // Composition and control rules:
 //   If(&T::condition, rule)               enable rule only when the bool member is true
@@ -749,6 +753,15 @@ template <class M, class... Cs> consteval auto SplitTagValues(Cs... cs) {
   return std::pair{tags, values};
 }
 
+// A non-empty format whose '$' are only $0 and $$; absl::Substitute aborts on any other '$'.
+constexpr bool IsChoiceFormat(std::string_view fmt) {
+  for (size_t i = 0; i < fmt.size(); ++i) {
+    if (fmt[i] == '$' && (++i == fmt.size() || (fmt[i] != '0' && fmt[i] != '$')))
+      return false;
+  }
+  return !fmt.empty();
+}
+
 struct Skip {
   using Target = void;
   using State = NoState;
@@ -851,6 +864,20 @@ template <class P, class T, class M> struct ParsedField : TaggedRule<ParsedField
   M T::*field_;
 };
 
+template <class T, class M, class R> struct FnField : TaggedRule<FnField<T, M, R>, T> {
+  consteval FnField(const char* tag, M T::*field, R (*fn)(std::string_view, RuleError&))
+      : TaggedRule<FnField<T, M, R>, T>(tag), field_(field), fn_(fn) {
+  }
+
+  void OnMatch(CmdArgParser* p, T* o) const {
+    o->*field_ = p->Next(fn_);
+  }
+
+ private:
+  M T::*field_;
+  R (*fn_)(std::string_view, RuleError&);
+};
+
 template <class T> struct Action : TaggedRule<Action<T>, T> {
   consteval Action(const char* tag, void (*fn)(CmdArgParser*, T*))
       : TaggedRule<Action<T>, T>(tag), fn_(fn) {
@@ -913,8 +940,12 @@ template <class T, class M, size_t N, bool kAccumulate> struct TagMap {
 
 template <class T, class M, size_t N> struct Choice : TaggedRule<Choice<T, M, N>, T> {
   consteval Choice(std::string_view tag, M T::*field, std::array<std::string_view, N> keys,
-                   std::array<M, N> values)
-      : TaggedRule<Choice<T, M, N>, T>(tag), field_(field), keys_(keys), values_(values) {
+                   std::array<M, N> values, std::string_view err = {})
+      : TaggedRule<Choice<T, M, N>, T>(tag),
+        field_(field),
+        keys_(keys),
+        values_(values),
+        err_(err) {
   }
 
   void OnMatch(CmdArgParser* p, T* o) const {
@@ -925,13 +956,17 @@ template <class T, class M, size_t N> struct Choice : TaggedRule<Choice<T, M, N>
         return;
       }
     }
-    p->Report(CmdArgParser::INVALID_CASES);
+    if (err_.empty())
+      p->Report(CmdArgParser::INVALID_CASES);
+    else
+      p->ReportCustom(absl::Substitute(err_, val));
   }
 
  private:
   M T::*field_;
   std::array<std::string_view, N> keys_;
   std::array<M, N> values_;
+  std::string_view err_;
 };
 
 template <class T, class Inner> struct If {
@@ -1146,6 +1181,11 @@ requires std::convertible_to<P, M>
 consteval auto Field(const char* tag, M T::*field, std::string_view err = {}) {
   return cap_detail::ParsedField<P, T, M>{tag, err, field};
 }
+template <class T, class M, class R>
+requires std::convertible_to<R, M> && TokenParser<R (*)(std::string_view, RuleError&)>
+consteval auto Field(const char* tag, M T::*field, R (*fn)(std::string_view, RuleError&)) {
+  return cap_detail::FnField<T, M, R>{tag, field, fn};
+}
 template <class T> consteval auto Action(const char* tag, void (*fn)(CmdArgParser*, T*)) {
   return cap_detail::Action<T>{tag, fn};
 }
@@ -1177,6 +1217,22 @@ requires cap_detail::TagValuePack<M, Cs...>
 consteval auto Choice(const char* tag, M T::*field, Cs... cs) {
   auto [keys, values] = cap_detail::SplitTagValues<M>(cs...);
   return cap_detail::Choice<T, M, sizeof...(Cs) / 2>{tag, field, keys, values};
+}
+
+// Choice error for an unknown token: $0 is the token and $$ a literal '$'.
+struct ChoiceError {
+  consteval explicit ChoiceError(std::string_view format) : fmt(format) {
+    if (!cap_detail::IsChoiceFormat(fmt))
+      throw "ChoiceError: the format must not be empty; use $0 for the token and $$ for '$'";
+  }
+  const std::string_view fmt;
+};
+
+template <class T, class M, class... Cs>
+requires cap_detail::TagValuePack<M, Cs...>
+consteval auto Choice(const char* tag, M T::*field, ChoiceError err, Cs... cs) {
+  auto [keys, values] = cap_detail::SplitTagValues<M>(cs...);
+  return cap_detail::Choice<T, M, sizeof...(Cs) / 2>{tag, field, keys, values, err.fmt};
 }
 template <class T, class Inner> consteval auto If(bool T::*cond, Inner inner) {
   return cap_detail::If<T, Inner>{cond, true, inner};
