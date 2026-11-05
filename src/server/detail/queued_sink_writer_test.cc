@@ -188,6 +188,14 @@ TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotWaitForBacklog) {
   writer_.Stop();
 }
 
+// LowerLimit never raises a limit that is already below its target.
+TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotRaiseLimit) {
+  StartWriter(0);
+  writer_.LowerLimit(1 << 20);
+  EXPECT_EQ(writer_.limit(), 0u);
+  writer_.Stop();
+}
+
 // LowerLimit returns although producers keep pushing as fast as the sink writes.
 TEST_F(QueuedSinkWriterTest, LowerLimitConvergesUnderLoad) {
   StartWriter(1 << 20);

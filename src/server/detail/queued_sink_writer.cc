@@ -44,6 +44,7 @@ void QueuedSinkWriter::WaitBelow(size_t bytes) {
 }
 
 void QueuedSinkWriter::LowerLimit(size_t limit) {
+  limit = min(limit, limit_);  // never raises the limit
   util::fb2::NoOpLock lk;
   limit_ = max(limit, min(limit_, pending_bytes()));
   while (limit_ > limit && cntx_->IsRunning()) {
