@@ -424,6 +424,23 @@ TEST_P(DragonflyV2ConnectionTest, RejectsControlMessagesAfterProtocolError) {
   EXPECT_TRUE(client.ReadEof());
 }
 
+// Over the pipeline limit, an undispatched head command must not stall the backpressure park, and
+// the park must not ask it for a reply.
+TEST_P(DragonflyV2ConnectionTest, ExecutesHeadParkedOverPipelineLimit) {
+  RawRespClient client{port_};
+  ASSERT_TRUE(client.valid());
+  ASSERT_TRUE(
+      client.SendAll("CONFIG SET pipeline_buffer_limit 1\r\nGET a\r\n"
+                     "CLIENT SETNAME over-limit\r\nSET a b\r\nPING\r\n"));
+
+  EXPECT_EQ(client.ReadLine(), "+OK\r\n");
+  EXPECT_EQ(client.ReadLine(), "$-1\r\n");
+  EXPECT_EQ(client.ReadLine(), "+OK\r\n");
+  EXPECT_EQ(client.ReadLine(), "+OK\r\n");
+  EXPECT_EQ(client.ReadLine(), "+PONG\r\n");
+  EXPECT_EQ(Run({"CONFIG", "SET", "pipeline_buffer_limit", "128MB"}), "OK");
+}
+
 INSTANTIATE_TEST_SUITE_P(PrivateAndSharedReadBuffer, DragonflyV2ConnectionTest,
                          testing::Values(false, true));
 

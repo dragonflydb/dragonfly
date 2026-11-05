@@ -4175,7 +4175,7 @@ bool Connection::HasControlEvent() const {
   // a reply became ready, control-plane messages are queued (dispatch_q_), the socket errored or
   // closed (io_ec_), or a thread migration is pending and actionable.
 
-  return (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
+  return (HasInFlightCommands() && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
          IsReadyToMigrate();
 }
 
@@ -4267,11 +4267,12 @@ void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_wait
     return;
 
   io_event_.await([this]() {
-    // Leave the backpressure wait once our own pipeline pressure clears, or on any control event
-    // (the latter lets a terminating/migrating connection escape the park).
+    // Leave the backpressure wait once our own pipeline pressure clears, once the undispatched head
+    // command can run (draining it relieves the pressure), or on any control event (the latter
+    // lets a terminating/migrating connection escape the park).
     bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
         GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
-    return under_limit || HasControlEvent();
+    return under_limit || HasCommandToExecute() || HasControlEvent();
   });
 }
 
