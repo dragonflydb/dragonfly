@@ -79,6 +79,11 @@ class BaseFamilyTest : public ::testing::Test {
   void SetUp() override;
   void TearDown() override;
 
+  // Listeners for Service::Init; a fixture that returns some can not reset the service again.
+  virtual std::vector<facade::Listener*> CreateListeners() {
+    return {};
+  }
+
   class TestConnWrapper;
 
   RespExpr Run(std::initializer_list<const std::string_view> list) {
