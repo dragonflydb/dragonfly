@@ -883,6 +883,10 @@ bool ShouldLogError(const CommandId& cid, string_view reason, const facade::Pars
 
   if (cid.name() != "CLIENT")
     return true;
+
+  // CLIENT KILL <addr> found nothing to kill, which is not a failure.
+  if (reason == kNoSuchClient)
+    return false;
   return tail_args.empty() || !absl::EqualsIgnoreCase(tail_args.Front(), "maint_notifications");
 }
 

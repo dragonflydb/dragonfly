@@ -5,6 +5,7 @@
 #include "server/server_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/functional/function_ref.h>
 #include <absl/random/random.h>  // for master_replid_ generation.
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
@@ -35,6 +36,7 @@
 
 extern "C" {
 #include "redis/redis_aux.h"
+#include "redis/util.h"
 }
 
 #include "base/cycle_clock.h"
@@ -413,48 +415,37 @@ void ClientInfo(facade::ParsedArgs args, CommandContext* cmd_cntx) {
   return rb->SendBulkString(info);
 }
 
-enum class ClientListType { kNormal, kMaster, kReplica, kPubsub };
+enum class ClientListType { kNormal, kMaster, kReplica, kPubsub, kInternal };
 
 struct ClientListFilter {
   optional<ClientListType> type;
   absl::flat_hash_set<uint32_t> ids;
 };
 
+template <class T> consteval auto ClientTypeRule(optional<ClientListType> T::*field) {
+  return Choice("TYPE", field, FormattableError("Unknown client type '$0'"), "NORMAL",
+                ClientListType::kNormal, "MASTER", ClientListType::kMaster, "REPLICA",
+                ClientListType::kReplica, "SLAVE", ClientListType::kReplica, "PUBSUB",
+                ClientListType::kPubsub);
+}
+
+// ID takes one or more client ids, up to the last argument.
+void ReadClientIds(CmdArgParser* parser, ClientListFilter* filter) {
+  if (!parser->HasNext())
+    parser->Report(CmdArgParser::INVALID_CASES);
+  while (parser->HasNext())
+    filter->ids.insert(parser->Next<uint32_t>("Invalid client ID"));
+}
+
 optional<ClientListFilter> ParseClientListFilter(CmdArgParser parser, CommandContext* cmd_cntx) {
-  ClientListFilter filter;
-  if (!parser.HasNext())
-    return filter;
-
-  if (parser.Check("TYPE")) {
-    if (!parser.HasNext()) {
-      cmd_cntx->SendError(facade::kSyntaxErr);
-      return nullopt;
-    }
-    string_view raw = parser.Peek();
-    auto mapped =
-        parser.TryMapNext("NORMAL", ClientListType::kNormal, "MASTER", ClientListType::kMaster,
-                          "REPLICA", ClientListType::kReplica, "SLAVE", ClientListType::kReplica,
-                          "PUBSUB", ClientListType::kPubsub);
-    if (!mapped) {
-      cmd_cntx->SendError(StrCat("Unknown client type '", raw, "'"));
-      return nullopt;
-    }
-    filter.type = *mapped;
-  } else if (parser.Check("ID")) {
-    if (!parser.HasNext()) {
-      cmd_cntx->SendError(facade::kSyntaxErr);
-      return nullopt;
-    }
-    while (parser.HasNext()) {
-      filter.ids.insert(parser.Next<uint32_t>("Invalid client ID"));
-    }
-  } else {
-    cmd_cntx->SendError(facade::kSyntaxErr);
-    return nullopt;
-  }
-
+  static constexpr auto kGrammar = Compile(Options(
+      OneOf(kSyntaxErr, ClientTypeRule(&ClientListFilter::type), Action("ID", &ReadClientIds))));
+  ClientListFilter filter = kGrammar.Apply(&parser);
   if (!parser.Finalize()) {
-    cmd_cntx->SendError(parser.TakeError().MakeReply());
+    auto err = parser.TakeError();
+
+    // A valid TYPE ends the filters, so an error after it is a syntax error.
+    cmd_cntx->SendError(filter.type ? ErrorReply{kSyntaxErr} : err.MakeReply());
     return nullopt;
   }
   return filter;
@@ -469,6 +460,10 @@ ClientListType ClassifyConnection(facade::Connection* conn) {
   // GetMasterLinkClientInfo (not produced here).
   if (base_cntx->replica_conn)
     return ClientListType::kReplica;
+
+  // Slot migration flows match no TYPE.
+  if (base_cntx->slot_migration_conn)
+    return ClientListType::kInternal;
 
   auto* dfly_cntx = static_cast<const ConnectionContext*>(base_cntx);
   const auto& sub_info = dfly_cntx->conn_state.subscribe_info;
@@ -513,8 +508,8 @@ void ClientList(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
   bool want_master = !filter->type.has_value() || *filter->type == ClientListType::kMaster;
   if (want_master) {
     for (auto& entry : server_family->GetMasterLinkClientInfo()) {
-      if (filter->ids.empty() || filter->ids.contains(entry.client_id))
-        client_info.push_back(std::move(entry.info));
+      if (filter->ids.empty() || filter->ids.contains(entry.id))
+        client_info.push_back(facade::FormatClientInfo(entry));
     }
   }
 
@@ -681,49 +676,110 @@ void ClientId(facade::ParsedArgs args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendLong(cmd_cntx->conn()->GetClientId());
 }
 
+struct ClientKillFilter {
+  optional<int64_t> id, max_age;
+  optional<ClientListType> type;
+  optional<string_view> user, addr, laddr;
+  bool skipme = true;
+  bool legacy = false;  // CLIENT KILL <addr>
+
+  // The addresses are computed only when a filter needs them.
+  bool Matches(uint32_t client_id, ClientListType client_type, const string* client_user,
+               time_t age, absl::FunctionRef<string()> client_addr,
+               absl::FunctionRef<string()> client_laddr) const {
+    return (!id || client_id == *id) && (!type || client_type == *type) &&
+           (!user || (client_user && *client_user == *user)) && (!max_age || age >= *max_age) &&
+           (!addr || client_addr() == *addr) && (!laddr || client_laddr() == *laddr);
+  }
+};
+
+// string2ll rejects '+', spaces and leading zeros, which the parser's integers accept.
+int64_t ParseClientId(string_view val, RuleError& err) {
+  long long num = 0;
+  if (!string2ll(val.data(), val.size(), &num) || num <= 0)
+    err = {true, "client-id should be greater than 0"};
+  return num;
+}
+
+int64_t ParseMaxAge(string_view val, RuleError& err) {
+  long long num = 0;
+  if (!string2ll(val.data(), val.size(), &num))
+    err = {true, "maxage is not an integer or out of range"};
+  else if (num <= 0)
+    err = {true, "maxage should be greater than 0"};
+  return num;
+}
+
+void ReadKillUser(CmdArgParser* parser, ClientKillFilter* filter) {
+  filter->user = parser->Next();
+  if (!ServerState::tlocal()->user_registry->GetRegistryWithLock().registry.contains(*filter->user))
+    parser->ReportCustom(StrCat("No such user '", *filter->user, "'"));
+}
+
+optional<ClientKillFilter> ParseClientKillFilter(facade::ParsedArgs args,
+                                                 CommandContext* cmd_cntx) {
+  static constexpr auto kGrammar = Compile(
+      Options(Field("ID", &ClientKillFilter::id, &ParseClientId),
+              ClientTypeRule(&ClientKillFilter::type), Action("USER", &ReadKillUser),
+              Field("ADDR", &ClientKillFilter::addr), Field("LADDR", &ClientKillFilter::laddr),
+              Choice("SKIPME", &ClientKillFilter::skipme, "YES", true, "NO", false),
+              Field("MAXAGE", &ClientKillFilter::max_age, &ParseMaxAge)));
+
+  CmdArgParser parser{args};
+  ClientKillFilter filter;
+  if (args.size() == 1) {
+    filter.addr = parser.Next();
+    filter.skipme = false;
+    filter.legacy = true;
+  } else {
+    kGrammar.Apply(&parser, &filter);
+  }
+  if (!parser.Finalize()) {
+    cmd_cntx->SendError(parser.TakeError().MakeReply());
+    return nullopt;
+  }
+  return filter;
+}
+
 void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners,
                 ServerFamily* server_family, CommandContext* cmd_cntx) {
-  std::function<bool(facade::Connection * conn)> evaluator;
+  if (args.empty())
+    return cmd_cntx->SendError(WrongNumArgsError("client|kill"), kSyntaxErrType);
 
-  if (args.size() == 1) {
-    string_view ip_port = args[0];
-    if (ip_port.find(':') != ip_port.npos) {
-      evaluator = [ip_port](facade::Connection* conn) {
-        return conn->RemoteEndpointStr() == ip_port;
-      };
-    }
-  } else if (args.size() == 2) {
-    string filter_type = absl::AsciiStrToUpper(args[0]);
-    string_view filter_value = args[1];
-    if (filter_type == "ADDR") {
-      evaluator = [filter_value](facade::Connection* conn) {
-        return conn->RemoteEndpointStr() == filter_value;
-      };
-    } else if (filter_type == "LADDR") {
-      evaluator = [filter_value](facade::Connection* conn) {
-        return conn->LocalBindStr() == filter_value;
-      };
-    } else if (filter_type == "ID") {
-      uint32_t id;
-      if (absl::SimpleAtoi(filter_value, &id)) {
-        if (server_family->IsMasterLinkClientId(id)) {
-          return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
-        }
-        evaluator = [id](facade::Connection* conn) { return conn->GetClientId() == id; };
-      }
-    }
-    // TODO: Add support for KILL USER/TYPE/SKIPME
-  }
+  auto filter = ParseClientKillFilter(args, cmd_cntx);
+  if (!filter)
+    return;
 
-  if (!evaluator) {
-    return cmd_cntx->SendError(kSyntaxErr);
+  // The master link is not killable; refuse a TYPE master or ID request that matches it.
+  if (filter->type == ClientListType::kMaster || filter->id) {
+    for (const facade::ClientInfo& link : server_family->GetMasterLinkClientInfo()) {
+      if (filter->Matches(
+              link.id, ClientListType::kMaster, nullptr, link.age, [&] { return link.addr; },
+              [&] { return link.laddr; }))
+        return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
+    }
   }
+  if (filter->type == ClientListType::kMaster)
+    return cmd_cntx->rb()->SendLong(0);
 
   const bool is_admin_request = cmd_cntx->conn()->IsPrivileged();
   facade::Connection* self = cmd_cntx->conn();
 
+  // Filters that name specific connections report the admin ones they can not kill.
+  const bool targeted =
+      filter->id || filter->addr || filter->laddr || filter->type == ClientListType::kReplica;
+  const time_t now = time(nullptr);
+
+  auto evaluator = [&](facade::Connection* conn) {
+    auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
+    return filter->Matches(
+        conn->GetClientId(), ClassifyConnection(conn), cntx ? &cntx->authed_username : nullptr,
+        now - conn->creation_time(), [conn] { return conn->RemoteEndpointStr(); },
+        [conn] { return conn->LocalBindStr(); });
+  };
+
   // HTTP API connections have no close-after-reply path.
-  const bool kill_self = !self->IsHttp() && evaluator(self);
+  const bool kill_self = !filter->skipme && !self->IsHttp() && evaluator(self);
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
 
@@ -733,12 +789,12 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
     auto traverse_cb = [&](unsigned idx, util::Connection* conn) {
       facade::Connection* dconn = static_cast<facade::Connection*>(conn);
 
-      // The caller is closed after the reply.
-      if (dconn != self && evaluator(dconn)) {
+      // The caller is closed after the reply; shut down connections were already killed.
+      if (dconn != self && dconn->socket()->IsOpen() && evaluator(dconn)) {
         if (is_admin_request || !dconn->IsPrivileged()) {
           if (!dconn->IsMigrating())
             connections.push_back(dconn->Borrow());
-        } else {
+        } else if (targeted) {
           kill_errors.fetch_add(1);
         }
       }
@@ -765,7 +821,11 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
   }
 
   if (kill_errors.load() == 0) {
-    return cmd_cntx->rb()->SendLong(killed_connections.load());
+    if (!filter->legacy)
+      return cmd_cntx->rb()->SendLong(killed_connections.load());
+    if (killed_connections.load() > 0)
+      return cmd_cntx->rb()->SendOk();
+    return cmd_cntx->SendError(kNoSuchClient);
   } else {
     return cmd_cntx->SendError(absl::StrCat("Killed ", killed_connections.load(),
                                             " client(s), but unable to kill ", kill_errors.load(),
@@ -2020,27 +2080,16 @@ optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {
   return info;
 }
 
-vector<ServerFamily::MasterLinkClientInfo> ServerFamily::GetMasterLinkClientInfo() const {
-  vector<MasterLinkClientInfo> out;
+vector<facade::ClientInfo> ServerFamily::GetMasterLinkClientInfo() const {
+  vector<facade::ClientInfo> out;
   util::fb2::LockGuard lk(replicaof_mu_);
   if (replica_ == nullptr)
     return out;
-  out.push_back({replica_->GetClientId(), replica_->GetClientInfo()});
+  out.push_back(replica_->GetClientInfo());
   for (const auto& cl_repl : cluster_replicas_) {
-    out.push_back({cl_repl->GetClientId(), cl_repl->GetClientInfo()});
+    out.push_back(cl_repl->GetClientInfo());
   }
   return out;
-}
-
-bool ServerFamily::IsMasterLinkClientId(uint32_t id) const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  if (replica_ && replica_->GetClientId() == id)
-    return true;
-  for (const auto& cl_repl : cluster_replicas_) {
-    if (cl_repl->GetClientId() == id)
-      return true;
-  }
-  return false;
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
@@ -2478,8 +2527,16 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "      Kill connections made from the specified address",
       "    * LADDR (<ip:port>|<unixsocket>:0)",
       "      Kill connections made to specified local address",
+      "    * TYPE (NORMAL|MASTER|REPLICA|PUBSUB)",
+      "      Kill connections by type.",
+      "    * USER <username>",
+      "      Kill connections authenticated by <username>.",
+      "    * SKIPME (YES|NO)",
+      "      Skip killing current connection (default: yes).",
       "    * ID <client-id>",
       "      Kill connections by client id.",
+      "    * MAXAGE <maxage>",
+      "      Kill connections older than the specified age.",
       "INFO",
       "    Return information about the current client connection.",
       "LIST",

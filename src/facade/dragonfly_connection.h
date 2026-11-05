@@ -335,6 +335,10 @@ class Connection : public util::Connection {
     return time(nullptr) - last_interaction_;
   }
 
+  time_t creation_time() const {
+    return creation_time_;
+  }
+
   // A connection that is moving to another thread can not be borrowed.
   bool IsMigrating() const {
     return migration_in_process_;
