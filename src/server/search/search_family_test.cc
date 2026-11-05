@@ -10407,8 +10407,12 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
     for (auto [q, err] : {pair{"@zz:x", "Invalid field: zz"},
                           pair{"@ni:[1 2]", "Wrong access type for field: ni"}}) {
       EXPECT_THAT(Run({"FT.AGGREGATE", idx, q}), ErrArg(err));
-      EXPECT_THAT(Run({"FT.AGGREGATE", idx, absl::StrCat(q, "=>[KNN 1 @v $vec]"), "PARAMS", "2",
-                       "vec", vec}),
+      const string knn = absl::StrCat(q, "=>[KNN 1 @v $vec]");
+      EXPECT_THAT(Run({"FT.AGGREGATE", idx, knn, "PARAMS", "2", "vec", vec}), ErrArg(err));
+      EXPECT_EQ(open_txs(), 0u);
+      EXPECT_THAT(Run({"FT.SEARCH", idx, knn, "PARAMS", "2", "vec", vec}), ErrArg(err));
+      EXPECT_EQ(open_txs(), 0u);
+      EXPECT_THAT(Run({"FT.PROFILE", idx, "SEARCH", "QUERY", knn, "PARAMS", "2", "vec", vec}),
                   ErrArg(err));
       EXPECT_EQ(open_txs(), 0u);
       EXPECT_THAT(Run({"FT.AGGREGATE", idx, absl::StrCat("(", q, " @v:[VECTOR_RANGE 0.5 $vec])"),
@@ -10433,6 +10437,10 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
   EXPECT_THAT(Run({"FT.AGGREGATE", "nope", "*", "SCORER", "BM25STD"}),
               ErrArg("nope: no such index"));
   EXPECT_EQ(open_txs(), 0u);
+  EXPECT_THAT(Run({"FT.HYBRID", "nope", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2",
+                   "vec", vec}),
+              ErrArg("nope: no such index"));
+  EXPECT_EQ(open_txs(), 0u);
   EXPECT_THAT(
       Run({"FT.AGGREGATE", "i", "*", "LOAD", "1", "i.t", "LOAD_FROM", "nope", "1", "nope.t=i.t"}),
       ErrArg("nope: no such index"));
@@ -10441,6 +10449,10 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
                    "QUERY", "@zz:x"}),
               ErrArg("Invalid field: zz"));
   EXPECT_EQ(open_txs(), 0u);
+  EXPECT_THAT(Run({"EVAL", "--!df flags=disable-atomicity\nreturn redis.pcall(unpack(ARGV))", "0",
+                   "FT.SEARCH", "h", "@zz:x=>[KNN 1 @v $vec]", "PARAMS", "2", "vec", vec}),
+              ErrArg("Invalid field: zz"));
+  EXPECT_EQ(open_txs(), 0u);  // a non-atomic script concludes each command
 
   for (string_view q : {"@ni:hello", "@ng:{red}", "@nn:[1 10]", "@ge:[13.4 52.5 10 km]"})
     EXPECT_THAT(Run({"FT.SEARCH", "i", q}), kNoResults) << q;

@@ -4,7 +4,6 @@
 
 #include "server/search/search_family.h"
 
-#include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/flags/flag.h>
 #include <absl/functional/function_ref.h>
@@ -17,9 +16,9 @@
 #include <absl/types/span.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
-#include <exception>
 #include <functional>
 #include <ranges>
 #include <variant>
@@ -2145,7 +2144,24 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
   rb->SendBulkString(absl::StrFormat("%.6f", absl::ToDoubleMilliseconds(total_took)));
 }
 
-// Returns false if the index is not found on any shard; caller must Conclude() the tx.
+// Concludes the hop left open when a query handler returns. Skipped in atomic MULTI/EXEC and
+// scripts: UnlockMulti releases the shards there, and these commands have nothing to journal.
+class ConcludeGuard {
+ public:
+  [[nodiscard]] explicit ConcludeGuard(CommandContext* cmd_cntx) : tx_{cmd_cntx->tx()} {
+    DCHECK(cmd_cntx->cid()->opt_mask() & CO::NO_AUTOJOURNAL);
+  }
+
+  ~ConcludeGuard() {
+    if (!tx_->IsAtomicMulti())
+      tx_->Conclude();
+  }
+
+ private:
+  Transaction* tx_;
+};
+
+// Returns false if the index is not found on any shard. Its hop leaves the transaction open.
 bool CollectGlobalScoringStats(string_view index_name, search::SearchAlgorithm& text_algo,
                                Transaction* tx, size_t shard_count,
                                search::GlobalScoringStats& out_stats) {
@@ -2450,7 +2466,6 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   search::GlobalScoringStats global_stats;
   if (needs_global_stats && !CollectGlobalScoringStats(resolved_name, text_algo, cmd_cntx->tx(),
                                                        shard_count, global_stats)) {
-    cmd_cntx->tx()->Conclude();
     cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     return false;
   }
@@ -2461,8 +2476,6 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   if (use_hnsw && !have_filter) {
     const absl::Time t = absl::Now();
     if (auto err = RunHnswPreSearch(resolved_name, *params, hnsw_shard_docs)) {
-      if (needs_global_stats)
-        cmd_cntx->tx()->Conclude();
       rb->SendError(*err);
       return false;
     }
@@ -2556,13 +2569,13 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
     return false;
   }
 
-  // Shard errors reach the client as in FT.SEARCH, the SEARCH clause before FILTER.
-  for (const auto* results : {&text_docs, use_hnsw ? &hnsw_filter_docs : &flat_knn_docs}) {
-    for (const auto& res : *results) {
-      if (res.error) {
-        cmd_cntx->SendError(*res.error);
-        return false;
-      }
+  // Report the first shard error, the SEARCH clause before the VSIM one.
+  const std::array clause_results{absl::MakeConstSpan(text_docs),
+                                  absl::MakeConstSpan(use_hnsw ? hnsw_filter_docs : flat_knn_docs)};
+  for (const SearchResult& res : clause_results | std::views::join) {
+    if (res.error) {
+      cmd_cntx->SendError(*res.error);
+      return false;
     }
   }
 
@@ -3205,6 +3218,7 @@ static vector<SearchResult> FtSearchCSS(std::string_view idx, std::string_view q
 }
 
 void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ConcludeGuard conclude_guard{cmd_cntx};
   string_view index_name = parser.Next();
   string_view query_str = parser.Next();
 
@@ -3270,14 +3284,6 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
   const bool hnsw_range_has_prefilter = hnsw_range_prefilter != nullptr;
 
-  // The KNN-prefilter flow leaves the transaction open between hops; conclude it if an exception
-  // unwinds out of the command, otherwise the scheduled global tx leaks and stalls the shards.
-  const int uncaught_on_entry = std::uncaught_exceptions();
-  absl::Cleanup conclude_on_unwind = [&] {
-    if (std::uncaught_exceptions() > uncaught_on_entry)
-      cmd_cntx->tx()->Conclude();
-  };
-
   // Because our coordinator thread may not have a shard, we can't check ahead if the index exists.
   atomic index_not_found{false};
   vector<SearchResult> docs(shard_set->size());
@@ -3307,7 +3313,6 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
         false);
 
     if (index_not_found.load(memory_order_relaxed)) {
-      cmd_cntx->tx()->Conclude();  // phase 1 ran with conclude=false
       return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     }
 
@@ -3336,8 +3341,6 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     cmd_cntx->tx()->Execute(std::move(search_cb), /*conclude=*/!knn_has_prefilter);
 
     if (index_not_found.load(memory_order_relaxed)) {
-      if (knn_has_prefilter)
-        cmd_cntx->tx()->Conclude();
       return cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     }
 
@@ -3345,12 +3348,11 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
       for (const auto& res : knn_prefilter_docs) {
         empty_prefilter_result &= res.ids.empty();
         if (res.error) {
-          cmd_cntx->tx()->Conclude();
           return cmd_cntx->SendError(*res.error);
         }
       }
       if (empty_prefilter_result)
-        cmd_cntx->tx()->Conclude();
+        cmd_cntx->tx()->Conclude();  // no load hop follows
     } else {
       for (const auto& res : docs) {
         empty_prefilter_result &= res.docs.empty();
@@ -3363,13 +3365,9 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (knn_node && (!knn_has_prefilter || !empty_prefilter_result)) {
     auto hnsw_index = GlobalHnswIndexRegistry::Instance().Get(resolved_name, knn->field);
     if (!hnsw_index) {
-      if (knn_has_prefilter)
-        cmd_cntx->tx()->Conclude();
       return builder->SendError(string{index_name} + ": no such global hnsw index");
     }
     if (auto err = ValidateHnswKnnBlob(knn, *hnsw_index)) {
-      if (knn_has_prefilter)
-        cmd_cntx->tx()->Conclude();
       return builder->SendError(*err);
     }
     const HnswSearchOptions hnsw_options{.index_name = resolved_name,
@@ -3537,6 +3535,7 @@ void SendFtProfileSearchResponse(const SearchParams& params,
 }
 
 void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ConcludeGuard conclude_guard{cmd_cntx};
   string_view index_name = parser.Next();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
@@ -3580,14 +3579,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   absl::Time start = absl::Now();
   const size_t shards_count = shard_set->size();
 
-  // Prefilter/range profile flows leave the transaction open between hops; conclude it if an
-  // exception unwinds out of the command so the scheduled global tx cannot leak.
-  const int uncaught_on_entry = std::uncaught_exceptions();
-  absl::Cleanup conclude_on_unwind = [&] {
-    if (std::uncaught_exceptions() > uncaught_on_entry)
-      cmd_cntx->tx()->Conclude();
-  };
-
   const std::string resolved_name = ResolveIndexName(index_name);
 
   auto [profile_knn_node, profile_knn] = TryPopHnswKnnNode(search_algo, resolved_name);
@@ -3614,7 +3605,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (needs_global_stats) {
       if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
-        cmd_cntx->tx()->Conclude();
         return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
@@ -3642,7 +3632,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
           false);
 
       if (index_not_found.load(memory_order_relaxed)) {
-        cmd_cntx->tx()->Conclude();
         return rb->SendError(IndexNotFoundMsg(index_name));
       }
 
@@ -3651,7 +3640,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
         auto& res = knn_prefilter_docs[shard_id];
         empty_prefilter_result &= res.ids.empty();
         if (res.error) {
-          cmd_cntx->tx()->Conclude();
           return cmd_cntx->SendError(*res.error);
         }
         profile_search_results[shard_id].total_hits = res.total_hits;
@@ -3659,7 +3647,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
 
       if (empty_prefilter_result) {
-        cmd_cntx->tx()->Conclude();
+        cmd_cntx->tx()->Conclude();  // no load hop follows
       } else {
         auto result = SearchGlobalHnswIndex(profile_knn, hnsw_index, hnsw_options,
                                             knn_prefilter_docs, *cmd_cntx);
@@ -3747,7 +3735,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     if (needs_global_stats) {
       if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                      global_scoring_stats)) {
-        cmd_cntx->tx()->Conclude();
         return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
@@ -3809,7 +3796,6 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (needs_global_stats) {
     if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
                                    global_scoring_stats)) {
-      cmd_cntx->tx()->Conclude();
       return rb->SendError(IndexNotFoundMsg(index_name));
     }
     global_stats_ptr = &global_scoring_stats;
@@ -3894,7 +3880,7 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
 
 // Runs the ids-only prefilter search (a non-finalizing tx hop) and stores the matched global ids.
 // When ADDSCORES is on, also records per-shard text scores for later __score injection.
-// Returns false if a shard error was already sent, with the hop concluded.
+// Returns false if a shard error was already sent.
 static bool RunAggregatePrefilter(
     CommandContext* cmd_cntx, const AggregateParams& params, search::SearchAlgorithm& search_algo,
     std::vector<absl::flat_hash_map<search::DocId, float>>& text_scores,
@@ -3915,7 +3901,6 @@ static bool RunAggregatePrefilter(
 
   for (const auto& res : prefilter_docs) {
     if (res.error) {
-      cmd_cntx->tx()->Conclude();
       cmd_cntx->SendError(*res.error);
       return false;
     }
@@ -4110,6 +4095,7 @@ static bool AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
 }
 
 void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ConcludeGuard conclude_guard{cmd_cntx};
   auto* builder = cmd_cntx->rb();
 
   auto params = ParseAggregatorParams(&parser);
@@ -4244,14 +4230,11 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
         },
         false);
 
-    // The hop above left the transaction open, so conclude it before reporting an error.
     if (int i = missing_index.load(std::memory_order_relaxed); i >= 0) {
-      cmd_cntx->tx()->Conclude();
       return cmd_cntx->SendError(IndexNotFoundMsg(requested_names[i]));
     }
     for (const auto& err : shard_errors) {
       if (err) {
-        cmd_cntx->tx()->Conclude();
         return cmd_cntx->SendError(*err);
       }
     }
@@ -4573,6 +4556,7 @@ void CmdFtDebug(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void CmdFtHybrid(CmdArgParser parser, CommandContext* cmd_cntx) {
+  ConcludeGuard conclude_guard{cmd_cntx};
   string_view index_name = parser.Next();
 
   auto params = ParseHybridParams(&parser);
