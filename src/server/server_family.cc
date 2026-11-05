@@ -783,6 +783,9 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
 
+  // Kill only after every thread has collected: closing a replica's main connection closes its
+  // flows on the other threads.
+  util::fb2::Barrier collected(shard_set->pool()->size());
   auto cb = [&](unsigned idx, ProactorBase* p) mutable {
     // Step 1 aggregate the per thread connections from all listeners
     std::vector<facade::Connection::WeakRef> connections;
@@ -802,11 +805,17 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
     for (auto* listener : listeners) {
       listener->TraverseConnectionsOnThread(traverse_cb, UINT32_MAX, nullptr);
     }
+    collected.Wait();
 
     // Step 2 kill the clients
     for (auto& tcon : connections) {
       facade::Connection* conn = tcon.Get();
-      if (conn && conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
+
+      // Closed meanwhile, e.g. a replica flow closed with its session: it still counts.
+      if (conn == nullptr) {
+        killed_connections.fetch_add(1);
+      } else if (!conn->IsMigrating() &&
+                 conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
         conn->ShutdownSelfBlocking();
         killed_connections.fetch_add(1);
       }
