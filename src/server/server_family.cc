@@ -720,7 +720,10 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
   }
 
   const bool is_admin_request = cmd_cntx->conn()->IsPrivileged();
+  facade::Connection* self = cmd_cntx->conn();
 
+  // HTTP API connections have no close-after-reply path.
+  const bool kill_self = !self->IsHttp() && evaluator(self);
   atomic<uint32_t> killed_connections = 0;
   atomic<uint32_t> kill_errors = 0;
 
@@ -729,9 +732,12 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
     std::vector<facade::Connection::WeakRef> connections;
     auto traverse_cb = [&](unsigned idx, util::Connection* conn) {
       facade::Connection* dconn = static_cast<facade::Connection*>(conn);
-      if (evaluator(dconn)) {
+
+      // The caller is closed after the reply.
+      if (dconn != self && evaluator(dconn)) {
         if (is_admin_request || !dconn->IsPrivileged()) {
-          connections.push_back(dconn->Borrow());
+          if (!dconn->IsMigrating())
+            connections.push_back(dconn->Borrow());
         } else {
           kill_errors.fetch_add(1);
         }
@@ -752,6 +758,11 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
   };
 
   shard_set->pool()->AwaitFiberOnAll(cb);
+
+  if (kill_self) {
+    self->RequestCloseAfterReply();
+    killed_connections.fetch_add(1);
+  }
 
   if (kill_errors.load() == 0) {
     return cmd_cntx->rb()->SendLong(killed_connections.load());
