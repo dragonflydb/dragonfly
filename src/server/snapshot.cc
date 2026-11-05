@@ -6,6 +6,7 @@
 
 #include <absl/strings/str_cat.h>
 
+#include <limits>
 #include <mutex>
 
 #include "base/cycle_clock.h"
@@ -100,10 +101,13 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   size_t flush_threshold = 0;
   RdbSerializer::ConsumeFun consume_fun;
   if (allow_flush == SnapshotFlush::kAllow) {
+    // 0 disables splitting by size. The callback is still needed for forced consume points.
     flush_threshold = ServerState::tlocal()->serialization_max_chunk_size;
+    if (flush_threshold == 0)
+      flush_threshold = std::numeric_limits<size_t>::max();
+
     // The callback receives data directly from the serializer, no need to call back into it.
-    if (flush_threshold != 0)
-      consume_fun = std::bind_front(&SliceSnapshot::ConsumeBigValueChunk, this);
+    consume_fun = std::bind_front(&SliceSnapshot::ConsumeBigValueChunk, this);
   }
 
   bool serialize_index = SaveMode() != dfly::SaveMode::RDB &&
