@@ -48,12 +48,19 @@ thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 // it may require (especially with compression), and less responsive the server may be.
 constexpr size_t kMinBlobSize = 8_KB;
 
+// True once the current fiber has run for more than a jiffy (~15usec) since it was last resumed,
+// i.e. it should yield to let the other fibers of the thread run.
+bool CpuSliceUsedUp() {
+  return ThisFiber::GetRunningTimeCycles() > (base::CycleClock::Frequency() >> 16);
+}
+
 }  // namespace
 
 SliceSnapshot::SliceSnapshot(CompressionMode compression_mode, DbSlice* slice,
                              SnapshotDataConsumerInterface* consumer, ExecutionState* cntx,
                              DflyVersion replica_dfly_version)
     : SerializerBase(slice, cntx),
+      writer_(cntx, [this](string data) { consumer_->ConsumeData(std::move(data), base_cntx_); }),
       compression_mode_(compression_mode),
       replica_dfly_version_(replica_dfly_version),
       consumer_(consumer) {
@@ -79,6 +86,9 @@ bool SliceSnapshot::IsSnaphotInProgress() {
 
 void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
   DCHECK(!snapshot_fb_.IsJoinable());
+
+  // Every producer waits for its chunk to be written.
+  writer_.Start(absl::StrCat("SnapshotWriter-", ProactorBase::me()->GetPoolIndex()), 0);
 
   use_background_mode_ = absl::GetFlag(FLAGS_background_snapshotting);
   SerializerBase::RegisterChangeListener(stream_journal);
@@ -120,6 +130,10 @@ void SliceSnapshot::Start(bool stream_journal, SnapshotFlush allow_flush) {
     }
     this->IterateBucketsFb(stream_journal);
     UnregisterChangeListener();
+
+    // Journal streaming keeps producing until FinalizeJournalStream, which stops the writer then.
+    if (!stream_journal)
+      writer_.Stop();
     consumer_->Finalize();
     VLOG(1) << "Serialization peak bytes: " << serializer_->GetSerializationPeakBytes();
   });
@@ -133,6 +147,7 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
     // In case of incremental snapshotting in StartIncremental, if an error is encountered,
     // journal_cb_id_ may not be set, but the snapshot fiber is still running.
     snapshot_fb_.JoinIfNeeded();
+    writer_.Stop();
     return;
   }
   uint32_t cb_id = journal_cb_id_;
@@ -148,6 +163,9 @@ void SliceSnapshot::FinalizeJournalStream(bool cancel) {
     std::ignore = serializer_->SendJournalOffset(journal::GetLsn());
     PushSerialized(true);
   }
+
+  // Every producer is unregistered, so the writer can drain and stop.
+  writer_.Stop();
 }
 
 // Serializes all the entries with version less than snapshot_version_.
@@ -185,11 +203,7 @@ void SliceSnapshot::PaceTraversal(bool done) {
     DCHECK(ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND);
     ThisFiber::Yield();
     PushSerialized(false);
-    return;
-  }
-
-  const uint64_t kCyclesPerJiffy = base::CycleClock::Frequency() >> 16;  // ~15usec.
-  if (!PushSerialized(false) && ThisFiber::GetRunningTimeCycles() > kCyclesPerJiffy) {
+  } else if (!PushSerialized(false) && CpuSliceUsedUp()) {
     ThisFiber::Yield();
   }
 }
@@ -218,42 +232,30 @@ void SliceSnapshot::HandleFlushData(std::string data) {
     ++stats_.flushed_under_lock;
   }
   size_t serialized = data.size();
-  uint64_t id = rec_id_++;
+
+  // We measure running_cycles before the preemption points, because they reset the counter.
+  uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
+
+  // Track egress as the chunk is queued. Attribute it to a high priority (out of order) write when
+  // it comes from the mutation path.
+  ServerState::tlocal()->GetEgressThrottler().Record(serialized, OnMutationPath());
+
+  // Nothing preempts between taking the chunk from the serializer and queueing it, so the queue
+  // order is the production order across fibers. Blocking point.
+  writer_.Push(std::move(data));
 
   if (use_background_mode_) {
-    // Yield after possibly long cpu slice due to compression and serialization
-    // before possbile suspension of ConsumeData resets the cpu time of the last slice
+    // Yield after possibly long cpu slice due to compression and serialization. Only after the
+    // push: a fiber running during the yield must queue behind this chunk.
     if (ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND)
       ThisFiber::Yield();
     // else: This function is invoked from the journal with regular priority as well.
     // TODO: Mavbe Sleep() to provide write backpressure in advance?
   }
 
-  uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
-
-  fb2::NoOpLock lk;
-  // We create a critical section here that ensures that records are pushed in sequential order.
-  // As a result, it is not possible for two fiber producers to push concurrently.
-  // If A.id = 5, and then B.id = 6, and both are blocked here, it means that last_pushed_id_ < 4.
-  // Once last_pushed_id_ = 4, A will be unblocked, while B will wait until A finishes pushing and
-  // update last_pushed_id_ to 5.
-  seq_cond_.wait(lk, [&] { return id == this->last_pushed_id_ + 1; });
-
-  // Track egress just before the socket write. Attribute it to a high priority (out of order)
-  // write when we don't run on the snapshot fiber.
-  ServerState::tlocal()->GetEgressThrottler().Record(serialized, !snapshot_fb_.IsActive());
-
-  // Blocking point.
-  consumer_->ConsumeData(std::move(data), base_cntx_);
-
-  DCHECK_EQ(last_pushed_id_ + 1, id);
-  last_pushed_id_ = id;
-  seq_cond_.notify_all();
-
   if (!use_background_mode_) {
     // serializer_->Flush can be quite slow for large values or due to compression, therefore
     // we counter-balance CPU over-usage by sleeping.
-    // We measure running_cycles before the preemption points, because they reset the counter.
     uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
     ThisFiber::SleepFor(chrono::microseconds(std::min<uint64_t>(sleep_usec, 2000ul)));
   }
