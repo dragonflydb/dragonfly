@@ -180,11 +180,21 @@ concept CompositeNode = (requires(const Node& node) { node.node; }) ||
 
 // The schema type an index class serves.
 template <typename T>
-constexpr SchemaField::FieldType kFieldTypeOf = is_same_v<T, TextIndex>      ? SchemaField::TEXT
-                                                : is_same_v<T, NumericIndex> ? SchemaField::NUMERIC
-                                                : is_same_v<T, TagIndex>     ? SchemaField::TAG
-                                                : is_same_v<T, GeoIndex>     ? SchemaField::GEO
-                                                                             : SchemaField::VECTOR;
+constexpr SchemaField::FieldType kFieldTypeOf = [] {
+  using Index = decay_t<T>;
+  if constexpr (is_same_v<Index, TextIndex>)
+    return SchemaField::TEXT;
+  else if constexpr (is_same_v<Index, NumericIndex>)
+    return SchemaField::NUMERIC;
+  else if constexpr (is_same_v<Index, TagIndex>)
+    return SchemaField::TAG;
+  else if constexpr (is_same_v<Index, GeoIndex>)
+    return SchemaField::GEO;
+  else if constexpr (is_same_v<Index, BaseVectorIndex>)
+    return SchemaField::VECTOR;
+  else
+    static_assert(sizeof(Index) == 0, "no schema type for this index");
+}();
 
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
@@ -224,7 +234,7 @@ struct BasicSearch {
       if (const auto* noindex = error_.empty() ? NoIndexField(field) : nullptr; noindex) {
         if (noindex->type != kFieldTypeOf<T>)
           error_ = absl::StrCat("Wrong access type for field: ", field);
-        else if (is_same_v<T, BaseVectorIndex>)
+        else if (noindex->type == SchemaField::VECTOR)
           error_ = absl::StrCat("Invalid field: ", field);
       }
       return nullptr;

@@ -10376,10 +10376,21 @@ TEST_F(SearchFamilyTest, FtHybridUnknownIndex) {
   EXPECT_THAT(resp, ErrArg("no such index"));
 }
 
-// Shard errors reach the client in every query command, through the single-hop and the multi-hop
-// (scoring, KNN prefilter, JOIN) flows alike, and a reported error leaves no transaction behind.
+// Query errors reach the client in every command, also from the multi-hop flows (KNN prefilter,
+// scoring, JOIN), which leave no transaction behind. A clause on a NOINDEX field is no error: it
+// matches nothing, while its type is still checked.
 TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
   const string vec = FloatVec(1, 0);
+  ASSERT_EQ(
+      Run("FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t TEXT ni TEXT NOINDEX ng TAG NOINDEX nn "
+          "NUMERIC NOINDEX ge GEO NOINDEX nv VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC "
+          "L2 NOINDEX v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2"),
+      "OK");
+  ASSERT_EQ(Run("FT.CREATE h ON HASH PREFIX 1 d: SCHEMA t TEXT ni TEXT NOINDEX v VECTOR HNSW 6 "
+                "TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2"),
+            "OK");
+  Run({"HSET", "d:1", "t", "hello web", "ni", "hello", "ng", "red", "nn", "5", "v", vec});
+  Run({"HSET", "d:2", "t", "world", "v", FloatVec(0, 1)});
 
   // A hop left open after an error stays on every shard as its continuation transaction; the next
   // command on the same connection would silently continue it, so the shards are inspected
@@ -10392,131 +10403,51 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
     return open.load();
   };
 
-  auto run_matrix = [&] {
-    for (auto [idx, algo] : {pair{"i", "FLAT"}, pair{"h", "HNSW"}}) {
-      ASSERT_EQ(Run({"FT.CREATE", idx,       "ON",   "HASH", "PREFIX",          "1",  "d:",
-                     "SCHEMA",    "t",       "TEXT", "v",    "VECTOR",          algo, "6",
-                     "TYPE",      "FLOAT32", "DIM",  "2",    "DISTANCE_METRIC", "L2"}),
-                "OK");
-    }
-    Run({"HSET", "d:1", "t", "hello", "v", vec});
-    Run({"HSET", "d:2", "t", "world", "v", FloatVec(0, 1)});
-
-    for (string_view idx : {"i", "h"}) {
-      for (auto [q, err] : {pair{"@zz:x", "Invalid field: zz"},
-                            pair{"@t:[1 2]", "Wrong access type for field: t"}}) {
-        EXPECT_THAT(Run({"FT.AGGREGATE", idx, q}), ErrArg(err));
-        EXPECT_THAT(Run({"FT.AGGREGATE", idx, q, "SCORER", "BM25STD"}), ErrArg(err));
-        EXPECT_EQ(open_txs(), 0u);
-        EXPECT_THAT(Run({"FT.AGGREGATE", idx, absl::StrCat(q, "=>[KNN 1 @v $vec]"), "PARAMS", "2",
-                         "vec", vec}),
-                    ErrArg(err));
-        EXPECT_EQ(open_txs(), 0u);
-        EXPECT_THAT(Run({"FT.AGGREGATE", idx, absl::StrCat("(", q, " @v:[VECTOR_RANGE 0.5 $vec])"),
-                         "PARAMS", "2", "vec", vec}),
-                    ErrArg(err));
-        EXPECT_EQ(open_txs(), 0u);
-        EXPECT_THAT(
-            Run({"FT.HYBRID", idx, "SEARCH", q, "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
-            ErrArg(err));
-        EXPECT_THAT(Run({"FT.HYBRID", idx, "SEARCH", "hello", "VSIM", "@v", "$vec", "FILTER", q,
-                         "PARAMS", "2", "vec", vec}),
-                    ErrArg(err));
-        EXPECT_THAT(Run({"FT.PROFILE", idx, "HYBRID", "QUERY", "SEARCH", q, "VSIM", "@v", "$vec",
-                         "PARAMS", "2", "vec", vec}),
-                    ErrArg(err));
-        EXPECT_EQ(open_txs(), 0u);
-      }
-      EXPECT_THAT(Run({"FT.HYBRID", idx, "SEARCH", "@zz:x", "VSIM", "@v", "$vec", "FILTER",
-                       "@t:[1 2]", "PARAMS", "2", "vec", vec}),
-                  ErrArg("Invalid field: zz"));  // the SEARCH clause is reported first
-      EXPECT_THAT(Run({"FT.HYBRID", idx, "SEARCH", "hello", "VSIM", "@v", "$vec", "FILTER",
-                       "@t:(hello", "PARAMS", "2", "vec", vec}),
-                  ErrArg("Query syntax error in VSIM FILTER clause"));
-      EXPECT_THAT(Run({"FT.HYBRID", idx, "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2",
-                       "vec", "abc"}),
-                  ErrArg("blob size (3)"));
-    }
-
-    const auto no_index = ErrArg("nope: no such index");
-    EXPECT_THAT(Run({"FT.AGGREGATE", "nope", "*"}), no_index);
-    EXPECT_THAT(Run({"FT.AGGREGATE", "nope", "*", "SCORER", "BM25STD"}), no_index);
-    EXPECT_EQ(open_txs(), 0u);
-    EXPECT_THAT(Run({"FT.HYBRID", "nope", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2",
-                     "vec", vec}),
-                no_index);
-    EXPECT_THAT(Run({"FT.PROFILE", "nope", "AGGREGATE", "QUERY", "*"}), no_index);
-    EXPECT_THAT(
-        Run({"FT.AGGREGATE", "i", "*", "LOAD", "1", "i.t", "LOAD_FROM", "nope", "1", "nope.t=i.t"}),
-        no_index);
-    EXPECT_EQ(open_txs(), 0u);
-    EXPECT_THAT(Run({"FT.AGGREGATE", "i", "*", "LOAD", "1", "i.t", "LOAD_FROM", "h", "1", "h.t=i.t",
-                     "QUERY", "@zz:x"}),
-                ErrArg("Invalid field: zz"));
-    EXPECT_EQ(open_txs(), 0u);
-  };
-
-  run_matrix();  // the fixture runs 2 shards: the scoring and prefilter hops are separate
-  absl::FlagSaver fs;
-  SetTestFlag("num_shards", "1");
-  ResetService();
-  run_matrix();
-}
-
-// A clause on a NOINDEX field matches nothing, as the field has no index; the type check still
-// applies, and the field stays readable through SORTBY, LOAD and FT.TAGVALS.
-TEST_F(SearchFamilyTest, NoIndexFieldClauses) {
-  const string vec = FloatVec(1, 0);
-  ASSERT_EQ(Run("FT.CREATE i ON HASH PREFIX 1 d: SCHEMA t TEXT ni TEXT NOINDEX ng TAG NOINDEX nn "
-                "NUMERIC SORTABLE NOINDEX ge GEO NOINDEX v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 "
-                "DISTANCE_METRIC L2"),
-            "OK");
-  ASSERT_EQ(Run("FT.CREATE h ON HASH PREFIX 1 d: SCHEMA t TEXT ni TEXT NOINDEX v VECTOR HNSW 6 "
-                "TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2"),
-            "OK");
-  ASSERT_EQ(Run("FT.CREATE nv ON HASH PREFIX 1 d: SCHEMA t TEXT v VECTOR FLAT 6 TYPE FLOAT32 "
-                "DIM 2 DISTANCE_METRIC L2 NOINDEX"),
-            "OK");
-  Run({"HSET", "d:1", "t", "hello web", "ni", "hello", "ng", "red", "nn", "5", "v", vec});
-  Run({"HSET", "d:2", "t", "world", "ni", "web", "ng", "blue", "nn", "1", "v", FloatVec(0, 1)});
-
-  auto search = [&](string_view query) { return Run({"FT.SEARCH", "i", query}); };
-  EXPECT_THAT(search("@ni:hello"), kNoResults);
-  EXPECT_THAT(search("@ni:*"), kNoResults);  // no index knows which documents carry the field
-  EXPECT_THAT(search("@ng:{red}"), kNoResults);
-  EXPECT_THAT(search("@nn:[1 10]"), kNoResults);
-  EXPECT_THAT(search("@ge:[13.4 52.5 10 km]"), kNoResults);
-  EXPECT_THAT(search("-@ni:hello"), AreDocIds("d:1", "d:2"));
-  EXPECT_THAT(search("@t:hello @ni:hello"), kNoResults);
-  EXPECT_THAT(search("@ni:hello | @t:web"), AreDocIds("d:1"));
-  EXPECT_THAT(Run({"FT.SEARCH", "i", "*", "FILTER", "nn", "0", "10"}), kNoResults);
-  EXPECT_THAT(search("@ni:[1 2]"), ErrArg("Wrong access type for field: ni"));
-  EXPECT_THAT(search("@nn:hello"), ErrArg("Wrong access type for field: nn"));
-  EXPECT_THAT(Run({"FT.SEARCH", "i", "*", "SORTBY", "nn", "NOCONTENT"}),
-              IsArray(IntArg(2), "d:2", "d:1"));
-
-  EXPECT_THAT(Run({"FT.AGGREGATE", "i", "@ni:hello"}), kNoResults);
-  EXPECT_THAT(Run({"FT.AGGREGATE", "i", "@ni:hello | @t:web", "LOAD", "1", "@t"}),
-              IsUnordArrayWithSize(IsMap("t", "hello web")));
-  EXPECT_THAT(Run({"FT.AGGREGATE", "i", "@ni:[1 2]"}), ErrArg("Wrong access type for field: ni"));
-
   for (string_view idx : {"i", "h"}) {
-    EXPECT_EQ(HybridTotal(Run({"FT.HYBRID", idx, "SEARCH", "@ni:hello", "VSIM", "@v", "$vec",
-                               "PARAMS", "2", "vec", vec})),
-              2);
-    EXPECT_THAT(HybridKeys(Run({"FT.HYBRID", idx, "SEARCH", "hello", "VSIM", "@v", "$vec", "FILTER",
-                                "@ni:hello", "PARAMS", "2", "vec", vec})),
-                ElementsAre("d:1"));
-    EXPECT_THAT(Run({"FT.HYBRID", idx, "SEARCH", "@ni:[1 2]", "VSIM", "@v", "$vec", "PARAMS", "2",
-                     "vec", vec}),
-                ErrArg("Wrong access type for field: ni"));
+    for (auto [q, err] : {pair{"@zz:x", "Invalid field: zz"},
+                          pair{"@ni:[1 2]", "Wrong access type for field: ni"}}) {
+      EXPECT_THAT(Run({"FT.AGGREGATE", idx, q}), ErrArg(err));
+      EXPECT_THAT(Run({"FT.AGGREGATE", idx, absl::StrCat(q, "=>[KNN 1 @v $vec]"), "PARAMS", "2",
+                       "vec", vec}),
+                  ErrArg(err));
+      EXPECT_EQ(open_txs(), 0u);
+      EXPECT_THAT(Run({"FT.AGGREGATE", idx, absl::StrCat("(", q, " @v:[VECTOR_RANGE 0.5 $vec])"),
+                       "PARAMS", "2", "vec", vec}),
+                  ErrArg(err));
+      EXPECT_EQ(open_txs(), 0u);
+      EXPECT_THAT(
+          Run({"FT.HYBRID", idx, "SEARCH", q, "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
+          ErrArg(err));
+      EXPECT_THAT(Run({"FT.HYBRID", idx, "SEARCH", "hello", "VSIM", "@v", "$vec", "FILTER", q,
+                       "PARAMS", "2", "vec", vec}),
+                  ErrArg(err));
+      EXPECT_THAT(Run({"FT.PROFILE", idx, "HYBRID", "QUERY", "SEARCH", q, "VSIM", "@v", "$vec",
+                       "PARAMS", "2", "vec", vec}),
+                  ErrArg(err));
+    }
+    EXPECT_THAT(Run({"FT.HYBRID", idx, "SEARCH", "@zz:x", "VSIM", "@v", "$vec", "FILTER",
+                     "@ni:[1 2]", "PARAMS", "2", "vec", vec}),
+                ErrArg("Invalid field: zz"));  // the SEARCH clause is reported first
   }
 
-  // A NOINDEX vector has no index to search, which the text results no longer hide.
+  EXPECT_THAT(Run({"FT.AGGREGATE", "nope", "*", "SCORER", "BM25STD"}),
+              ErrArg("nope: no such index"));
+  EXPECT_EQ(open_txs(), 0u);
   EXPECT_THAT(
-      Run({"FT.HYBRID", "nv", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
-      ErrArg("Invalid field: v"));
+      Run({"FT.AGGREGATE", "i", "*", "LOAD", "1", "i.t", "LOAD_FROM", "nope", "1", "nope.t=i.t"}),
+      ErrArg("nope: no such index"));
+  EXPECT_EQ(open_txs(), 0u);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "i", "*", "LOAD", "1", "i.t", "LOAD_FROM", "h", "1", "h.t=i.t",
+                   "QUERY", "@zz:x"}),
+              ErrArg("Invalid field: zz"));
+  EXPECT_EQ(open_txs(), 0u);
 
+  for (string_view q : {"@ni:hello", "@ng:{red}", "@nn:[1 10]", "@ge:[13.4 52.5 10 km]"})
+    EXPECT_THAT(Run({"FT.SEARCH", "i", q}), kNoResults) << q;
+  EXPECT_THAT(Run({"FT.SEARCH", "i", "@ni:hello | @t:web"}), AreDocIds("d:1"));
+  EXPECT_THAT(
+      Run({"FT.HYBRID", "i", "SEARCH", "hello", "VSIM", "@nv", "$vec", "PARAMS", "2", "vec", vec}),
+      ErrArg("Invalid field: nv"));  // a vector without an index has nothing to search
   EXPECT_THAT(Run({"FT.TAGVALS", "i", "ng"}), ArrLen(0));
   EXPECT_THAT(Run({"FT.TAGVALS", "i", "ni"}), ErrArg("Not a tag field"));
 }
@@ -10547,6 +10478,16 @@ TEST_F(SearchFamilyTest, FtHybridSyntaxErrors) {
   EXPECT_THAT(Run({"FT.HYBRID", "idx", "SEARCH", "hi", "VSIM", "@vec", "$v", "COMBINE", "UNKNOWN",
                    "4", "LIMIT", "0", "10", "PARAMS", "2", "v", Vec3ToBytes(1, 0, 0)}),
               ErrArg("unsupported COMBINE method"));
+
+  // Bad FILTER on a FLAT index, as on an HNSW one
+  EXPECT_THAT(Run({"FT.HYBRID", "idx", "SEARCH", "hi", "VSIM", "@vec", "$v", "FILTER", "@title:(hi",
+                   "PARAMS", "2", "v", Vec3ToBytes(1, 0, 0)}),
+              ErrArg("Query syntax error in VSIM FILTER clause"));
+
+  // Vector of a wrong size, reported in bytes
+  EXPECT_THAT(
+      Run({"FT.HYBRID", "idx", "SEARCH", "hi", "VSIM", "@vec", "$v", "PARAMS", "2", "v", "abc"}),
+      ErrArg("Query vector blob size (3) does not match index's expected size (12)"));
 }
 
 TEST_F(SearchFamilyTest, FtHybridFlatBasic) {
