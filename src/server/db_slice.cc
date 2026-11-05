@@ -4,6 +4,8 @@
 
 #include "server/db_slice.h"
 
+#include <absl/container/inlined_vector.h>
+
 #include <ranges>
 
 #include "core/dense_set.h"
@@ -176,7 +178,7 @@ bool PrimeEvictionPolicy::CanGrow(const PrimeTable& tbl) const {
 unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
   unsigned res = 0;
 
-  if (db_slice_->WillBlockOnJournalWrite()) {
+  if (db_slice_->IsJournalAppendBlocked()) {
     return res;
   }
 
@@ -192,7 +194,9 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
   for (unsigned i = 0; i < num_buckets; ++i) {
     auto bucket_it = eb.at(i);
     for (; !bucket_it.is_done(); ++bucket_it) {
-      if (bucket_it->first.HasExpire()) {
+      // Entries of a bucket that is mid-serialization can't be deleted.
+      if (bucket_it->first.HasExpire() &&
+          db_slice_->CanDeleteWithoutBlocking(bucket_it.bucket_address())) {
         ++checked_;
         // Deleting expired keys here without checking the lock table is safe: transaction
         // callbacks are serialized per shard (see EngineShard::running_tx_), so no suspended
@@ -212,16 +216,24 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
 }
 
 unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable* me) {
-  if (!can_evict_ || db_slice_->WillBlockOnJournalWrite())
+  if (!can_evict_)
     return 0;
-
-  // Disable flush journal changes to prevent preemtion in evict.
-  journal::DisableFlushGuard journal_flush_guard;
 
   constexpr size_t kNumStashBuckets = ABSL_ARRAYSIZE(eb.probes.stash_buckets);
 
   // choose "randomly" a stash bucket to evict an item.
   auto bucket_it = eb.probes.stash_buckets[eb.key_hash % kNumStashBuckets];
+
+  // Both the deletion and ShiftRight below must not touch a bucket that is mid-serialization.
+  // Eviction bypasses OnChange, so it must also skip buckets that a snapshot has not serialized
+  // yet: the evicted key would be missing from the point-in-time snapshot.
+  if (!db_slice_->CanDeleteWithoutBlocking(bucket_it.bucket_address()) ||
+      !db_slice_->IsBucketSerialized(bucket_it.GetVersion()))
+    return 0;
+
+  // Disable flush journal changes to prevent preemtion in evict.
+  journal::DisableFlushGuard journal_flush_guard;
+
   auto last_slot_it = bucket_it;
   last_slot_it += (PrimeTable::kSlotNum - 1);
   if (!last_slot_it.is_done()) {
@@ -1626,7 +1638,7 @@ void DbSlice::SendQueuedExpiredKeyEventsSlow() {
 void DbSlice::ExpireAllIfNeeded() {
   // We hold no locks to any of the keys so we should Wait() here such that
   // we don't preempt in TryExpire
-  WaitForUnblockedJournalWrites();
+  WaitForNoBucketBlocked();
 
   {
     // Disable flush journal changes to prevent preemtion in traverse.
@@ -1668,14 +1680,41 @@ bool DbSlice::UnregisterOnChange(ChangeConsumerInterface* consumer) {
   return true;
 }
 
-bool DbSlice::WillBlockOnJournalWrite() const {
+bool DbSlice::IsAnyBucketBlocked() const {
   return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsAnyBucketBlocked);
 }
 
-void DbSlice::WaitForUnblockedJournalWrites() const {
+void DbSlice::WaitForNoBucketBlocked() const {
   std::lock_guard lk{change_cb_latch_};
-  while (WillBlockOnJournalWrite())
+  while (IsAnyBucketBlocked())
     ranges::for_each(change_cb_, &ChangeConsumerInterface::WaitForNoBucketBlocked);
+}
+
+bool DbSlice::IsJournalAppendBlocked() const {
+  return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsJournalAppendBlocked);
+}
+
+bool DbSlice::CanDeleteWithoutBlocking(BucketIdentity bucket) const {
+  return ranges::none_of(change_cb_, [bucket](const ChangeConsumerInterface* cb) {
+    return cb->IsJournalAppendBlocked() || cb->IsBucketBlocked(bucket);
+  });
+}
+
+bool DbSlice::IsBucketSerialized(uint64_t bucket_version) const {
+  return ranges::all_of(change_cb_, [bucket_version](const ChangeConsumerInterface* cb) {
+    return bucket_version >= cb->snapshot_version_;
+  });
+}
+
+void DbSlice::WaitForBucketUnblocked(BucketIdentity bucket) const {
+  std::lock_guard lk{change_cb_latch_};
+  auto blocked = [bucket](const ChangeConsumerInterface* cb) {
+    return cb->IsBucketBlocked(bucket);
+  };
+  while (ranges::any_of(change_cb_, blocked)) {
+    for (const auto* cb : change_cb_)
+      cb->WaitForBucketUnblocked(bucket);
+  }
 }
 
 // Ordering invariant (PIT mode):
@@ -1735,9 +1774,15 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
       return;
     }
 
-    result.deleted_bytes += it->first.MallocUsed() + it->second.MallocUsed();
-    TryExpire(cntx, it);
-    ++result.deleted;
+    // Retry on a later step once the bucket is serialized.
+    if (!CanDeleteWithoutBlocking(it.bucket_address()))
+      return;
+
+    size_t bytes = it->first.MallocUsed() + it->second.MallocUsed();
+    if (TryExpire(cntx, it) == ExpireResult::Deleted) {
+      result.deleted_bytes += bytes;
+      ++result.deleted;
+    }
   };
 
   auto quota_remains = [] {
@@ -1777,7 +1822,9 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
 
   size_t evicted_items = 0, evicted_bytes = 0;
 
-  if (owner_->tiered_storage()) {
+  // Reclaiming changes values in place, so it keeps the shard-wide check.
+  // TODO: reclaim per bucket. Needs a check that a serializer can't reference the cool value.
+  if (owner_->tiered_storage() && !IsAnyBucketBlocked()) {
     evicted_bytes = owner_->tiered_storage()->ReclaimMemory(increase_goal_bytes);
     if (evicted_bytes >= increase_goal_bytes)
       return {0, evicted_bytes};
@@ -1823,6 +1870,12 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
         const auto& lt = db_table->trans_locks;
         string_view key = evict_it->first.GetSlice(&tmp);
         if (lt.Find(LockTag(key)).has_value())
+          continue;
+
+        // Eviction bypasses OnChange: skip buckets that are mid-serialization, and buckets that a
+        // snapshot has not serialized yet, so that the evicted key keeps its baseline.
+        if (!CanDeleteWithoutBlocking(evict_it.bucket_address()) ||
+            !IsBucketSerialized(evict_it.GetVersion()))
           continue;
 
         if (record_keys)
@@ -2230,14 +2283,19 @@ void DbSlice::OnCbFinishBlocking() {
       }
 
       if (!change_cb_.empty()) {
+        // CVCUponBump reports no bucket for a regular-bucket entry, but BumpUp still swaps slots
+        // within its bucket.
+        absl::InlinedVector<BucketIdentity, 4> touched{it.bucket_address()};
         auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
           CallChangeCallbacks(db_index, ChangeReq{bit});
+          touched.push_back(bit.bucket_address());
         };
         db.prime.CVCUponBump(it, key_hash, bump_cb);
-      }
 
-      // We must not change the bucket's internal order during serialization
-      WaitForUnblockedJournalWrites();
+        // We must not change the order of the touched buckets during serialization
+        for (BucketIdentity bucket : touched)
+          WaitForBucketUnblocked(bucket);
+      }
       PrimeBumpPolicy policy;
       auto bump_it = db.prime.BumpUp(it, key_hash, policy);
       if (bump_it != it) {  // the item was bumped
