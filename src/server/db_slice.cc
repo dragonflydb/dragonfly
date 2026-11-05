@@ -191,9 +191,7 @@ unsigned PrimeEvictionPolicy::GarbageCollect(const PrimeTable::HotBuckets& eb, P
   for (unsigned i = 0; i < num_buckets; ++i) {
     auto bucket_it = eb.at(i);
     for (; !bucket_it.is_done(); ++bucket_it) {
-      // Entries of a bucket that is mid-serialization can't be deleted.
-      if (bucket_it->first.HasExpire() &&
-          db_slice_->CanDeleteWithoutBlocking(bucket_it.bucket_address())) {
+      if (bucket_it->first.HasExpire()) {
         ++checked_;
         // Deleting expired keys here without checking the lock table is safe: transaction
         // callbacks are serialized per shard (see EngineShard::running_tx_), so no suspended
@@ -733,11 +731,26 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
   if (it->first.HasExpire()) {
     ExpireResult res = TryExpire(cntx, it);
 
-    // If expiry is paused, hide expired keys from read lookups. Mutable lookups must still see
-    // them: the entry is physically present, and reporting it missing would make AddOrFind insert
-    // a duplicate.
-    const bool hide_paused_expiry = mode == LookupMode::kReadOnly;
-    if (res == ExpireResult::Deleted || (res == ExpireResult::ExpiryPaused && hide_paused_expiry)) {
+    // A mutable lookup waits for the serialization like any write and retries, so the expiry is
+    // journaled before the write. The table may be replaced meanwhile, so do not use `db`.
+    while (res == ExpireResult::Deferred && mode == LookupMode::kMutable) {
+      // With tagged chunks disabled, a suspended stream mutex holder has a bucket dependency.
+      if (IsJournalAppendBlocked())
+        WaitForUnblockedJournalWrites();
+      else
+        CallChangeCallbacks(cntx.db_index, ChangeReq{it});
+
+      it = db_arr_[cntx.db_index]->prime.Find(key, key_hash);
+      if (!IsValid(it))
+        return OpStatus::KEY_NOTFOUND;
+      res = TryExpire(cntx, it);
+    }
+
+    // Hide expired keys that were not deleted from read lookups. Mutable lookups must still see
+    // paused ones: the entry is physically present, and reporting it missing would make AddOrFind
+    // insert a duplicate.
+    const bool hide_expired = mode == LookupMode::kReadOnly;
+    if (res == ExpireResult::Deleted || (res != ExpireResult::Valid && hide_expired)) {
       record_miss();
       return OpStatus::KEY_NOTFOUND;
     }
@@ -745,7 +758,7 @@ auto DbSlice::FindInternal(const Context& cntx, string_view key, optional<unsign
 
   DCHECK(IsValid(it));
 
-  // Preemptions happen only if the entry is being deleted during expiry, so `db` is valid here.
+  // Read-only lookups preempt only after deleting the entry, so `db` is valid for them here.
   if (req_obj_type.has_value() && it->second.ObjType() != req_obj_type.value()) {
     record_miss();
     return OpStatus::WRONG_TYPE;
@@ -1557,9 +1570,16 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it) const -> ExpireRe
   if (!AllowExpiredDeletions())
     return expire_allowed_ ? ExpireResult::Valid : ExpireResult::ExpiryPaused;
 
+  // A serializer may still reference the entry, and the journal append may block.
+  if (!CanDeleteWithoutBlocking(it.bucket_address()))
+    return ExpireResult::Deferred;
+
   string scratch;
   string_view key = it->first.GetSlice(&scratch);
 
+  // Journal and delete atomically: a suspension in between would let other fibers rewrite the
+  // entry, which we would then delete through a stale iterator.
+  journal::DisableFlushGuard flush_guard;
   RecordExpiryBlocking(cntx.db_index, key);
   QueueExpiredKeyEvent(cntx.db_index, key);
 
@@ -1725,10 +1745,7 @@ auto DbSlice::DeleteExpiredStep(const Context& cntx, unsigned count) -> DeleteEx
       return;
     }
 
-    // Retry on a later step once the bucket is serialized.
-    if (!CanDeleteWithoutBlocking(it.bucket_address()))
-      return;
-
+    // Deferred entries are retried on a later step.
     size_t bytes = it->first.MallocUsed() + it->second.MallocUsed();
     if (TryExpire(cntx, it) == ExpireResult::Deleted) {
       result.deleted_bytes += bytes;

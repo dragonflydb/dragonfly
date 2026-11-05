@@ -464,13 +464,15 @@ class DbSlice {
     Valid,         // Not expired, or expired on a replica that does not delete expired keys.
     ExpiryPaused,  // Expired, but expiry is paused. The caller decides whether to hide it.
     Deleted,       // Expired, journaled and deleted. 'it' is invalidated.
+    Deferred,      // Expired, but its bucket is mid-serialization. Left as is; hide it from reads.
   };
 
   // The single expiry primitive: journals and deletes 'it' if its expire time passed at
-  // cntx.time_now_ms. Entries without a TTL are Valid. The journal append may suspend unless the
-  // caller disabled journal flushing (journal::DisableFlushGuard).
-  // Never sends keyspace notifications, so it is safe in atomic sections: when they are enabled,
-  // the expired event is queued for SendQueuedExpiredKeyEvents.
+  // cntx.time_now_ms. Entries without a TTL are Valid. Never suspends before the deletion: it
+  // defers entries it could not journal and delete atomically. Throttles on return unless the
+  // caller disabled journal flushing (journal::DisableFlushGuard). Never sends keyspace
+  // notifications, so it is safe in atomic sections: when they are enabled, the expired event is
+  // queued for SendQueuedExpiredKeyEvents.
   ExpireResult TryExpire(const Context& cntx, PrimeIterator it) const;
 
   // Sends the expired events queued by TryExpire and eviction. OnCbFinishBlocking calls it, so
