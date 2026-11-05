@@ -788,7 +788,7 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
   util::fb2::Barrier collected(shard_set->pool()->size());
   auto cb = [&](unsigned idx, ProactorBase* p) mutable {
     // Step 1 aggregate the per thread connections from all listeners
-    std::vector<facade::Connection::WeakRef> connections;
+    std::vector<std::pair<facade::Connection::WeakRef, bool>> connections;
     auto traverse_cb = [&](unsigned idx, util::Connection* conn) {
       facade::Connection* dconn = static_cast<facade::Connection*>(conn);
 
@@ -796,7 +796,8 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
       if (dconn != self && dconn->socket()->IsOpen() && evaluator(dconn)) {
         if (is_admin_request || !dconn->IsPrivileged()) {
           if (!dconn->IsMigrating())
-            connections.push_back(dconn->Borrow());
+            connections.emplace_back(dconn->Borrow(),
+                                     ClassifyConnection(dconn) == ClientListType::kReplica);
         } else if (targeted) {
           kill_errors.fetch_add(1);
         }
@@ -808,12 +809,13 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
     collected.Wait();
 
     // Step 2 kill the clients
-    for (auto& tcon : connections) {
+    for (auto& [tcon, replica] : connections) {
       facade::Connection* conn = tcon.Get();
 
-      // Closed meanwhile, e.g. a replica flow closed with its session: it still counts.
+      // Expired: closed or migrating. Replica connections do not migrate, so theirs closed.
       if (conn == nullptr) {
-        killed_connections.fetch_add(1);
+        if (replica)
+          killed_connections.fetch_add(1);
       } else if (!conn->IsMigrating() &&
                  conn->socket()->proactor()->GetPoolIndex() == p->GetPoolIndex()) {
         conn->ShutdownSelfBlocking();
