@@ -1005,6 +1005,61 @@ TEST_F(CmdArgParserTest, CapGrammarChoice) {
   }
 }
 
+namespace {
+enum class ClientType { kNormal, kPubsub };
+struct ClientFilter {
+  std::optional<ClientType> type;
+};
+}  // namespace
+
+// FormattableError keeps a command's own error for an unknown token; $0 is the token.
+TEST_F(CmdArgParserTest, CapGrammarChoiceError) {
+  static constexpr auto kGrammar = Compile(
+      Options(Choice("TYPE", &ClientFilter::type, FormattableError("Unknown client type '$0'"),
+                     "NORMAL", ClientType::kNormal, "PUBSUB", ClientType::kPubsub)));
+  auto run = [&](std::initializer_list<std::string_view> args, ClientFilter* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  ClientFilter o;
+  EXPECT_FALSE(run({"TYPE", "pubsub"}, &o));
+  EXPECT_EQ(o.type, ClientType::kPubsub);
+  EXPECT_EQ(run({"TYPE", "bogus"}, &o).MakeReply().ToSv(), "Unknown client type 'bogus'");
+}
+
+namespace {
+struct DigitTarget {
+  std::optional<int64_t> digit;
+};
+}  // namespace
+
+// A token parser can be any callable, here a lambda that reads one digit.
+TEST_F(CmdArgParserTest, CapGrammarFieldParserFn) {
+  static constexpr auto kGrammar = Compile(Options(
+      Field("DIGIT", &DigitTarget::digit, [](std::string_view arg, RuleError& err) -> int64_t {
+        if (arg.size() != 1 || arg[0] < '0' || arg[0] > '9') {
+          err = {true, "not a digit"};
+          return 0;
+        }
+        return arg[0] - '0';
+      })));
+  auto run = [&](std::initializer_list<std::string_view> args, DigitTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  DigitTarget o;
+  EXPECT_FALSE(run({"DIGIT", "7"}, &o));
+  EXPECT_EQ(o.digit, 7);
+  EXPECT_EQ(run({"DIGIT", "07"}, &o).MakeReply().ToSv(), "not a digit");
+  EXPECT_EQ(run({"DIGIT"}, &o).MakeReply().ToSv(), kSyntaxErr);
+}
+
 // TagValue: a keyword sets a discriminant member to a compile-time value and reads the next arg
 // into another member (e.g. the EX/PX expiry keywords). Wrapped in OneOf for mutual exclusion.
 namespace {
