@@ -3306,6 +3306,34 @@ ostream& operator<<(ostream& os, const MetricCmp& m) {
 
 class MemParityTest : public GenericFamilyTest {
  protected:
+  struct JsonMemorySnapshot {
+    int64_t total_used_bytes;
+    int64_t json_type_bytes;
+    int64_t keys;
+    size_t table;
+    size_t pool_bytes;
+    size_t pool_entries;
+    size_t live_references;
+
+    bool operator==(const JsonMemorySnapshot&) const = default;
+  };
+
+  static JsonMemorySnapshot SnapshotJsonMemory(ShardId sid) {
+    return shard_set->Await(sid, [sid] {
+      const auto* shard = EngineShard::tlocal();
+      const auto& slice = namespaces->GetDefaultNamespace().GetDbSlice(sid);
+      const auto pool = GetInternedStringStats();
+      return JsonMemorySnapshot{
+          .total_used_bytes = static_cast<int64_t>(shard->UsedMemoryWithoutSearch()),
+          .json_type_bytes = shard->type_attributed_memory()[OBJ_JSON],
+          .keys = shard->type_attributed_memory()[OBJ_KEY],
+          .table = slice.table_memory(),
+          .pool_bytes = pool.pool_bytes,
+          .pool_entries = pool.pool_entries,
+          .live_references = pool.live_references};
+    });
+  }
+
   MetricCmp Delta(const function<void()>& action) const {
     const MetricCmp before{GetMetrics()};
     action();
@@ -3485,17 +3513,61 @@ TEST_F(MemParityTest, CopyReplace) {
   METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
 }
 
-// interned pool is accounted separately from the JSON objects
-// new: {ReJSON-RL=87104 } old: {key=32768 ReJSON-RL=87104 } obj_used=119872 interned=100
 TEST_F(MemParityTest, JsonSetInternedStrings) {
-  const string shared = StrCat("shared-json-string-", string(1024, 'x'));
-  const string doc = StrCat(R"({"field":")", shared, R"(","nested":{"field":")", shared, R"("}})");
-  auto d = Delta([&] {
-    for (int i = 0; i < 32; ++i)
-      Run({"JSON.SET", StrCat("json-interned-", i, "-", string(1024, 'j')), "$", doc});
-  });
-  METRIC_CMP_TODO(d, d.Match(OBJ_JSON) && d.new_metric[OBJ_JSON] == d.obj_used && d.interned > 0 &&
-                         d.IsClean());
+  const string first = kShard0Key, second = kShard0AltKey;
+  const ShardId sid = Shard(first, shard_set->size());
+  ASSERT_EQ(sid, Shard(second, shard_set->size()));
+  const string member = StrCat("shared-member-", string(1024, 'x'));
+  const string doc = StrCat("{\"", member, "\":1}");
+
+  // Initialize the prime table before measuring with two inline keys
+  ASSERT_EQ(Run({"SET", first, ""}), "OK");
+  ASSERT_EQ(Run({"SET", second, ""}), "OK");
+  ASSERT_THAT(Run({"DEL", first, second}), IntArg(2));
+
+  auto check_delta = [](const JsonMemorySnapshot& before, const JsonMemorySnapshot& after) {
+    EXPECT_EQ(after.table, before.table);
+    EXPECT_EQ(after.keys, before.keys);
+    EXPECT_EQ(after.json_type_bytes - before.json_type_bytes,
+              after.total_used_bytes - before.total_used_bytes);
+  };
+
+  for (bool delete_creator_first : {true, false}) {
+    SCOPED_TRACE(StrCat("delete creator first=", delete_creator_first));
+    const auto baseline = SnapshotJsonMemory(sid);
+    ASSERT_EQ(Run({"JSON.SET", first, "$", doc}), "OK");
+    const auto one = SnapshotJsonMemory(sid);
+    check_delta(baseline, one);
+    EXPECT_EQ(one.pool_entries, baseline.pool_entries + 1);
+    EXPECT_EQ(one.live_references, baseline.live_references + 1);
+    ASSERT_GT(one.pool_bytes, baseline.pool_bytes);
+    const int64_t blob_bytes = one.pool_bytes - baseline.pool_bytes;
+
+    ASSERT_EQ(Run({"JSON.SET", second, "$", doc}), "OK");
+    const auto two = SnapshotJsonMemory(sid);
+    check_delta(one, two);
+    EXPECT_EQ(two.pool_entries, one.pool_entries);
+    EXPECT_EQ(two.pool_bytes, one.pool_bytes);
+    EXPECT_EQ(two.live_references, baseline.live_references + 2);
+    const int64_t document_bytes = two.total_used_bytes - one.total_used_bytes;
+    EXPECT_GT(document_bytes, 0);
+    EXPECT_EQ(one.total_used_bytes - baseline.total_used_bytes, document_bytes + blob_bytes);
+
+    const string& deleted = delete_creator_first ? first : second;
+    const string& remaining = delete_creator_first ? second : first;
+    ASSERT_THAT(Run({"DEL", deleted}), IntArg(1));
+    const auto survivor = SnapshotJsonMemory(sid);
+    check_delta(two, survivor);
+    EXPECT_EQ(survivor, one);
+    EXPECT_EQ(two.total_used_bytes - survivor.total_used_bytes, document_bytes);
+    EXPECT_EQ(Run({"JSON.GET", remaining}), doc);
+
+    ASSERT_THAT(Run({"DEL", remaining}), IntArg(1));
+    const auto empty = SnapshotJsonMemory(sid);
+    check_delta(survivor, empty);
+    EXPECT_EQ(survivor.total_used_bytes - empty.total_used_bytes, document_bytes + blob_bytes);
+    EXPECT_EQ(empty, baseline);
+  }
 }
 
 // value is allocated while payload is decoded, delta should be for hash type
