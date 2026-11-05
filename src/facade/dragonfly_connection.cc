@@ -1002,6 +1002,14 @@ void Connection::MarkForClose() {
   request_shutdown_ = true;
 }
 
+void Connection::MaybeCloseAfterReply() {
+  if (!close_after_reply_ || reply_builder_->GetError())
+    return;
+
+  reply_builder_->Flush();
+  MarkForClose();
+}
+
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
 void Connection::OnShutdown() {
   VLOG(1) << CONN_ID << "Connection::OnShutdown";
@@ -1578,8 +1586,8 @@ void Connection::ConnectionFlow() {
   }
 
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
-  // offending request.
-  if (parse_status == ERROR) {
+  // offending request. A connection closed after its reply has no protocol error to send.
+  if (parse_status == ERROR && !close_after_reply_) {
     VLOG(1) << CONN_ID << "Error parser status " << parser_error_;
 
     if (redis_parser_) {
@@ -1660,6 +1668,8 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     // prefer synchronous dispatching to save memory.
     optimize_for_async = false;
     last_interaction_ = time(nullptr);
+    if (cc_->conn_closing)
+      return;
   }
 
   // Avoid sync dispatch if we can interleave with an ongoing async dispatch.
@@ -1676,6 +1686,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
       cc_->sync_dispatch = true;
       invoke_cb();
       cc_->sync_dispatch = false;
+      MaybeCloseAfterReply();
     }
     last_interaction_ = time(nullptr);
 
@@ -2272,6 +2283,7 @@ void Connection::ProcessPipelineCommandV1() {
   cc_->async_dispatch = false;
 
   ReleasePipelinedCommand(cmd);
+  MaybeCloseAfterReply();
 
   // If we drained the pipeline and no admin messages are waiting, flush.
   if (!HasPendingMessages()) {
@@ -3331,6 +3343,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
     } else {
       DCHECK(is_head);  // only head can execute sync
       retire_head();
+      MaybeCloseAfterReply();
     }
   }
 

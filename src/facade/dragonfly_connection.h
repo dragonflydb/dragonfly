@@ -327,6 +327,11 @@ class Connection : public util::Connection {
     return time(nullptr) - last_interaction_;
   }
 
+  // A connection that is moving to another thread can not be borrowed.
+  bool IsMigrating() const {
+    return migration_in_process_;
+  }
+
   unsigned GetSendWaitTimeSec() const;
 
   Phase phase() const {
@@ -345,6 +350,11 @@ class Connection : public util::Connection {
   }
 
   void MarkForClose();
+
+  // Closes the connection after the current reply is flushed; later commands do not run.
+  void RequestCloseAfterReply() {
+    close_after_reply_ = true;
+  }
 
   // Adjusts the pipeline queue byte counter by `delta`.
   // Used when command dispatch mutates a ParsedCommand's backing storage
@@ -495,6 +505,9 @@ class Connection : public util::Connection {
 
   // Processes the next Pipeline command from parsed_head_.
   void ProcessPipelineCommandV1();
+
+  // Flushes before MarkForClose(), which drops replies that were not written yet.
+  void MaybeCloseAfterReply();
 
   void SendAsync(MessageHandle msg);
 
@@ -878,6 +891,7 @@ class Connection : public util::Connection {
       bool shared_read_buf_enabled_ : 1;
 
       bool request_shutdown_ : 1;  // set when the connection is requested to shutdown
+      bool close_after_reply_ : 1;
     };
   };
 
