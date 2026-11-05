@@ -220,6 +220,33 @@ TEST_F(QueuedSinkWriterTest, LowerLimitKeepsHeadroom) {
   writer_.Stop();
 }
 
+// LowerLimit starts its target above the backlog, so a small push before the first write
+// completes does not wait for it.
+TEST_F(QueuedSinkWriterTest, LowerLimitStartsWithHeadroom) {
+  StartWriter(1 << 20);
+  for (char c : {'a', 'b', 'c', 'd'})
+    writer_.Push(Chunk(c));
+
+  fb2::Fiber lowerer([&] { writer_.LowerLimit(500); });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_EQ(writer_.limit(), 4500u);
+
+  bool pushed = false;
+  fb2::Fiber producer([&] {
+    writer_.Push(Chunk('e', 80));
+    pushed = true;
+  });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_TRUE(pushed);
+  EXPECT_TRUE(sink_.written().empty());
+
+  sink_.Open();
+  lowerer.Join();
+  producer.Join();
+  EXPECT_EQ(writer_.limit(), 500u);
+  writer_.Stop();
+}
+
 // LowerLimit never raises a limit that is already below its target.
 TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotRaiseLimit) {
   StartWriter(0);

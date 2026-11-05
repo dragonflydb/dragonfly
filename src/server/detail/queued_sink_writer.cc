@@ -45,8 +45,11 @@ void QueuedSinkWriter::WaitBelow(size_t bytes) {
 
 void QueuedSinkWriter::LowerLimit(size_t limit) {
   limit = min(limit, limit_);  // never raises the limit
+
+  // Start `limit` above the backlog, so a producer that pushes before the write in flight
+  // completes does not wait for it.
   util::fb2::NoOpLock lk;
-  limit_ = max(limit, min(limit_, pending_bytes()));
+  limit_ = max(limit, min(limit_, pending_bytes() + limit));
 
   // The limit may stay above a queue that drains faster than it falls, so stop once either is
   // down to `limit`.

@@ -54,8 +54,9 @@ class QueuedSinkWriter {
   }
 
   // Lowers the limit to `limit` without making a producer wait for the whole backlog, as
-  // SetLimit(limit) would. The limit follows the queue down: each write lowers it by half of the
-  // bytes written, so producers keep half of the sink's throughput while the queue shrinks.
+  // SetLimit(limit) would. The limit starts `limit` above the backlog and follows the queue down:
+  // each write lowers it by half of the bytes written, so producers keep half of the sink's
+  // throughput while the queue shrinks.
   // Blocks until the limit or the queue is down to `limit`. Does not raise a lower limit.
   void LowerLimit(size_t limit);
 

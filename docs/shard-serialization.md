@@ -470,10 +470,10 @@ quarter of the limit is queued, which leaves the rest of the room to the mutatio
 
 Before the full sync cut, the snapshot fiber lowers the limit to `--replication_stream_output_limit`
 with `LowerLimit`, so `DFLY STARTSTABLE`, which stops the writer under a global transaction, drains
-no more than stable sync would hold. The limit follows the queue down, each write lowering it by
-half of the bytes written, so the journal flushes during that time keep half of the sink's
-throughput and none of them waits for the whole backlog while it holds the shard's transaction
-queue. Queued chunks count toward RSS and `snapshot_serialization_bytes`
+no more than stable sync would hold. The limit starts that much above the backlog and follows the
+queue down, each write lowering it by half of the bytes written, so the journal flushes during that
+time keep half of the sink's throughput, and a small one does not wait for a write while it holds
+the shard's transaction queue. Queued chunks count toward RSS and `snapshot_serialization_bytes`
 but not `used_memory`.
 
 The snapshot fiber
