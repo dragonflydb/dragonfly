@@ -2226,7 +2226,9 @@ void DbSlice::OnCbFinishBlocking() {
       }
 
       if (!change_cb_.empty()) {
-        absl::InlinedVector<BucketIdentity, 3> touched;
+        // CVCUponBump reports no bucket for a regular-bucket entry, but BumpUp still swaps slots
+        // within its bucket.
+        absl::InlinedVector<BucketIdentity, 4> touched{it.bucket_address()};
         auto bump_cb = [&](PrimeTable::bucket_iterator bit) {
           CallChangeCallbacks(db_index, ChangeReq{bit});
           touched.push_back(bit.bucket_address());
