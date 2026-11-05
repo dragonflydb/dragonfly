@@ -753,15 +753,6 @@ template <class M, class... Cs> consteval auto SplitTagValues(Cs... cs) {
   return std::pair{tags, values};
 }
 
-// A non-empty format whose '$' are only $0 and $$; absl::Substitute aborts on any other '$'.
-constexpr bool IsChoiceFormat(std::string_view fmt) {
-  for (size_t i = 0; i < fmt.size(); ++i) {
-    if (fmt[i] == '$' && (++i == fmt.size() || (fmt[i] != '0' && fmt[i] != '$')))
-      return false;
-  }
-  return !fmt.empty();
-}
-
 struct Skip {
   using Target = void;
   using State = NoState;
@@ -1222,8 +1213,14 @@ consteval auto Choice(const char* tag, M T::*field, Cs... cs) {
 // Choice error for an unknown token: $0 is the token and $$ a literal '$'.
 struct ChoiceError {
   consteval explicit ChoiceError(std::string_view format) : fmt(format) {
-    if (!cap_detail::IsChoiceFormat(fmt))
-      throw "ChoiceError: the format must not be empty; use $0 for the token and $$ for '$'";
+    if (fmt.empty())
+      throw "ChoiceError: the format must not be empty";
+
+    // absl::Substitute aborts on any other '$' in debug builds, so reject it at compile time.
+    for (size_t i = 0; i < fmt.size(); ++i) {
+      if (fmt[i] == '$' && (++i == fmt.size() || (fmt[i] != '0' && fmt[i] != '$')))
+        throw "ChoiceError: use $0 for the token and $$ for '$'";
+    }
   }
   const std::string_view fmt;
 };

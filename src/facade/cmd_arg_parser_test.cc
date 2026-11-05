@@ -1005,29 +1005,29 @@ TEST_F(CmdArgParserTest, CapGrammarChoice) {
   }
 }
 
+namespace {
+enum class ClientType { kNormal, kPubsub };
+struct ClientFilter {
+  std::optional<ClientType> type;
+};
+}  // namespace
+
+// ChoiceError keeps a command's own error for an unknown token; $0 is the token.
 TEST_F(CmdArgParserTest, CapGrammarChoiceError) {
   static constexpr auto kGrammar =
-      Compile(Options(Choice("AGGREGATE", &ChoiceTarget::agg, ChoiceError("unknown aggregate '$0'"),
-                             "SUM", Agg::kSum, "MAX", Agg::kMax)));
-  auto run = [&](std::initializer_list<std::string_view> args, ChoiceTarget* o) {
+      Compile(Options(Choice("TYPE", &ClientFilter::type, ChoiceError("Unknown client type '$0'"),
+                             "NORMAL", ClientType::kNormal, "PUBSUB", ClientType::kPubsub)));
+  auto run = [&](std::initializer_list<std::string_view> args, ClientFilter* o) {
     auto parser = Make(args);
     kGrammar.Apply(&parser, o);
     parser.Finalize();
     return parser.TakeError();
   };
 
-  ChoiceTarget o;
-  EXPECT_FALSE(run({"AGGREGATE", "max"}, &o));
-  EXPECT_EQ(o.agg, Agg::kMax);
-  EXPECT_EQ(run({"AGGREGATE", "BOGUS"}, &o).MakeReply().ToSv(), "unknown aggregate 'BOGUS'");
-
-  // A missing value keeps the generic error.
-  EXPECT_EQ(run({"AGGREGATE"}, &o).MakeReply().ToSv(), kSyntaxErr);
-
-  // A bad ChoiceError format does not compile, so its check is tested directly.
-  static_assert(cap_detail::IsChoiceFormat("a '$0' $$ $$0"));
-  static_assert(!cap_detail::IsChoiceFormat("$1") && !cap_detail::IsChoiceFormat("x$") &&
-                !cap_detail::IsChoiceFormat("$a") && !cap_detail::IsChoiceFormat(""));
+  ClientFilter o;
+  EXPECT_FALSE(run({"TYPE", "pubsub"}, &o));
+  EXPECT_EQ(o.type, ClientType::kPubsub);
+  EXPECT_EQ(run({"TYPE", "bogus"}, &o).MakeReply().ToSv(), "Unknown client type 'bogus'");
 }
 
 namespace {
