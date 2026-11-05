@@ -1012,11 +1012,11 @@ struct ClientFilter {
 };
 }  // namespace
 
-// ChoiceError keeps a command's own error for an unknown token; $0 is the token.
+// FormattableError keeps a command's own error for an unknown token; $0 is the token.
 TEST_F(CmdArgParserTest, CapGrammarChoiceError) {
-  static constexpr auto kGrammar =
-      Compile(Options(Choice("TYPE", &ClientFilter::type, ChoiceError("Unknown client type '$0'"),
-                             "NORMAL", ClientType::kNormal, "PUBSUB", ClientType::kPubsub)));
+  static constexpr auto kGrammar = Compile(
+      Options(Choice("TYPE", &ClientFilter::type, FormattableError("Unknown client type '$0'"),
+                     "NORMAL", ClientType::kNormal, "PUBSUB", ClientType::kPubsub)));
   auto run = [&](std::initializer_list<std::string_view> args, ClientFilter* o) {
     auto parser = Make(args);
     kGrammar.Apply(&parser, o);
@@ -1034,19 +1034,18 @@ namespace {
 struct DigitTarget {
   std::optional<int64_t> digit;
 };
-
-int64_t ParseDigit(std::string_view arg, RuleError& err) {
-  if (arg.size() != 1 || arg[0] < '0' || arg[0] > '9') {
-    err = {true, "not a digit"};
-    return 0;
-  }
-  return arg[0] - '0';
-}
 }  // namespace
 
+// A token parser can be any callable, here a lambda that reads one digit.
 TEST_F(CmdArgParserTest, CapGrammarFieldParserFn) {
-  static constexpr auto kGrammar =
-      Compile(Options(Field("DIGIT", &DigitTarget::digit, &ParseDigit)));
+  static constexpr auto kGrammar = Compile(Options(
+      Field("DIGIT", &DigitTarget::digit, [](std::string_view arg, RuleError& err) -> int64_t {
+        if (arg.size() != 1 || arg[0] < '0' || arg[0] > '9') {
+          err = {true, "not a digit"};
+          return 0;
+        }
+        return arg[0] - '0';
+      })));
   auto run = [&](std::initializer_list<std::string_view> args, DigitTarget* o) {
     auto parser = Make(args);
     kGrammar.Apply(&parser, o);
