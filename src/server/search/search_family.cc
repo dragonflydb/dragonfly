@@ -2144,8 +2144,8 @@ void HybridReply(const HybridSearchParams& params, search::VectorSimilarity vsim
   rb->SendBulkString(absl::StrFormat("%.6f", absl::ToDoubleMilliseconds(total_took)));
 }
 
-// Concludes the hop left open when a query handler returns. Skipped in atomic MULTI/EXEC and
-// scripts: UnlockMulti releases the shards there, and these commands have nothing to journal.
+// Concludes the hop left open when a query handler returns. Skipped in an atomic MULTI/EXEC or
+// script: UnlockMulti releases the shards there, and these commands have nothing to journal.
 class ConcludeGuard {
  public:
   [[nodiscard]] explicit ConcludeGuard(CommandContext* cmd_cntx) : tx_{cmd_cntx->tx()} {
