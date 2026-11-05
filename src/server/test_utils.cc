@@ -241,8 +241,6 @@ void BaseFamilyTest::TearDown() {
 
 void BaseFamilyTest::ResetService() {
   if (service_ != nullptr) {
-    TEST_InvalidateLockTagOptions();
-
     ShutdownService();
   }
 
@@ -483,7 +481,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   CmdArgVec args = conn_wrapper->Args(slice);
 
   ConnectionContext* context = conn_wrapper->cmd_cntx();
-  context->ns = &namespaces->GetDefaultNamespace();
+  context->ns = &namespaces->GetOrInsert(namespace_);
 
   DCHECK(context->transaction == nullptr) << id;
   CommandContext cmd_cntx;

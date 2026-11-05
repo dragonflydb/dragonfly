@@ -60,6 +60,9 @@ enum CommandOpt : uint32_t {
   // each watched key that is ready on the waking shard is reserved for it, not only the key that
   // woke it (see BlockingController).
   WAKE_ALL_READY_KEYS = 1U << 21,
+
+  // ACL: keys need read and write (only the source of a two-key move). Implies JOURNALED.
+  RW = 1U << 22,
 };
 
 };  // namespace CO
@@ -184,9 +187,9 @@ class CommandId : public facade::CommandId {
     return (last_key_ != first_key_) || (opt_mask_ & CO::VARIADIC_KEYS);
   }
 
-  // True for commands with exactly one key at a fixed position (first_key == last_key > 0),
-  // no variadic/store-key handling and no global/no-key semantics. Lets DetermineKeys skip
-  // its generic branching. Precomputed at construction.
+  // True for commands with exactly one key at a fixed position (first_key == last_key > 0) that
+  // the arity guarantees, no variadic/store-key handling and no global/no-key semantics. Lets
+  // DetermineKeys skip its generic branching. Precomputed at construction.
   bool IsFixedSingleKey() const {
     return kind_mask_ & FIXED_SINGLE_KEY;
   }
@@ -205,6 +208,9 @@ class CommandId : public facade::CommandId {
   bool IsAlias() const {
     return kind_mask_ & IS_ALIAS;
   }
+
+  // Leading args safe to show in logs, MONITOR, SLOWLOG and replies; the rest hold credentials.
+  size_t NonSecretArgCount(const facade::ParsedArgs& args) const;
 
   hdr_histogram* GetLatencyHist() const {
     return latency_histogram_;
@@ -273,7 +279,20 @@ class CommandId : public facade::CommandId {
     return kind_mask_ & SUPPORT_ASYNC;
   }
 
+  // A handler-less "NAME SUB" entry: only SUB's ACL bit and categories, NAME runs it.
+  bool IsAclOnly() const {
+    return kind_mask_ & ACL_ONLY;
+  }
+
+  // Name and ACL bit to check: the ACL-only subcommand tail_args starts with, else own.
+  std::pair<std::string_view, uint64_t> AclTarget(const facade::ParsedArgs& tail_args) const;
+
+  // Bits that a +name/-name rule sets: this command's and its ACL-only subcommands'.
+  uint64_t AclRuleMask() const;
+
  private:
+  friend class CommandRegistry;
+
   // Engine-derived command identity and attributes, computed once in the constructor from the
   // command name and opt_mask, and stored in kind_mask_ so that hot-path queries are single bit
   // tests instead of string comparisons. This is an internal detail of CommandId, distinct from
@@ -307,11 +326,17 @@ class CommandId : public facade::CommandId {
     IS_ALIAS = 1U << 13,
     // Command has an async handler (set via SetAsyncHandler / SetHandler with async_support).
     SUPPORT_ASYNC = 1U << 14,
-    // Command has exactly one key at a fixed position (first_key == last_key > 0) with no
-    // variadic/store-key or global/no-key semantics. Lets DetermineKeys skip its generic branching.
+    // Command has exactly one key at a fixed position (first_key == last_key > 0), guaranteed by
+    // its arity, with no variadic/store-key or global/no-key semantics. Lets DetermineKeys skip
+    // its generic branching.
     FIXED_SINGLE_KEY = 1U << 15,  // last bit of the low uint16_t half of kind_mask_.
 
     RESET = 1U << 16,  // RESET only
+
+    SECRET_ARGS = 1U << 17,  // AUTH and ACL *: every arg may be a credential
+    HELLO = 1U << 18,        // HELLO only: the args after its protocol version may be credentials
+    ACL_ONLY = 1U << 19,     // see IsAclOnly()
+    CONFIG = 1U << 20,       // CONFIG only: the args after its parameter name may be credentials
   };
 
   // CmdKind bits. Trivially copied by the move ctor.
@@ -326,6 +351,7 @@ class CommandId : public facade::CommandId {
   Handler handler_;
   ArgValidator validator_;
   MoveOnly<hdr_histogram*> latency_histogram_;  // Histogram for command latency in usec
+  std::vector<std::pair<std::string, uint64_t>> acl_subcommands_;  // full name and ACL bit
 };
 
 class CommandRegistry {

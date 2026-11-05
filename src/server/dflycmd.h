@@ -113,6 +113,22 @@ class DflyCmd {
   // See class comments for state descriptions.
   enum class SyncState { PREPARATION, FULL_SYNC, STABLE_SYNC, CANCELLED };
 
+  // Why a replica session was torn down, derived from the error it stored. Exported as the
+  // `reason` label of replica_disconnects_total.
+  enum class DisconnectReason : uint8_t {
+    kClosed = 0,  // the replica connection went away: orderly stop, crash or reset
+    kError,       // a replication stream error was reported, e.g. a failed socket write
+    kTimeout      // the master gave up on writes that did not progress
+  };
+
+  // Replica sessions torn down so far, counted by reason. Note that sessions the master
+  // itself drops (CancelReplicas on shutdown or REPLICAOF) are not counted at all.
+  struct DisconnectStats {
+    uint32_t closed = 0;
+    uint32_t error = 0;
+    uint32_t timeout = 0;
+  };
+
   // Stores information related to a single replica.
   class ABSL_LOCKABLE ReplicaInfo {
    public:
@@ -261,6 +277,9 @@ class DflyCmd {
   // fan-out). Lock-free: reads thread-local replica infos.
   static ReplicationMemoryStats GetReplicationMemoryStats(EngineShard* shard);
 
+  // Returns the disconnect counters. Lock-free and safe to call from any thread.
+  DisconnectStats GetDisconnectStats() const;
+
   // Returns a snapshot of currently tracked replicas (shared ownership).
   std::vector<std::shared_ptr<ReplicaInfo>> GetReplicaInfoSnapshot() const ABSL_LOCKS_EXCLUDED(mu_);
 
@@ -335,6 +354,9 @@ class DflyCmd {
   // Main entrypoint for stopping replication.
   void StopReplication(uint32_t sync_id) ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Counts a replica session that was just removed from replica_infos_.
+  void RecordDisconnectLocked(const ReplicaInfo& replica) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+
   // Checks if LSN exists in the partial sync buffer. If not, also LOG that we can't
   // partial sync.
   bool IsLSNInPartialSyncBuffer(LSN lsn) const;
@@ -354,6 +376,10 @@ class DflyCmd {
   uint32_t next_sync_id_ = 1;
 
   ReplicaInfoMap replica_infos_ ABSL_GUARDED_BY(mu_);
+
+  // Indexed by DisconnectReason. Incremented under mu_, but read lock-free so that a scrape is
+  // not blocked when mu_ is held for long, e.g. behind a stalled STARTSTABLE.
+  std::atomic<uint32_t> disconnect_counts_[3] = {};
 
   // Writes are serialized by mu_. Readers only need the version, so relaxed ordering suffices.
   static std::atomic<DflyVersion> min_replica_version_;

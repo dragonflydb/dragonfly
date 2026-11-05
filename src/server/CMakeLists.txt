@@ -107,13 +107,8 @@ if (PRINT_STACKTRACES_ON_SIGNAL)
   target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
 endif()
 
-if (WITH_AWS)
-  SET(AWS_LIB awsv2_lib)
-  add_definitions(-DWITH_AWS)
-endif()
-
 if (WITH_AWS_CLOUD)
-  SET(AWS_LIB ${AWS_LIB} aws_cloud_lib)
+  SET(AWS_LIB aws_cloud_lib)
   add_definitions(-DWITH_AWS_CLOUD)
 endif()
 

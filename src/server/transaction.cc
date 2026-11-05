@@ -788,22 +788,20 @@ void Transaction::ScheduleInternal() {
     if (unique_shard_cnt_ > 1)
       txid_ = op_seq.fetch_add(1, memory_order_relaxed);
 
-    run_barrier_.Start(unique_shard_cnt_);
-
     if (CanRunInlined()) {
-      // We increase the barrier above for this branch as well, in order to calm the DCHECKs
-      // in the lower-level code. It's not really needed otherwise because we run inline.
+      // Nobody waits for an inline schedule, so it doesn't use run_barrier_. A callback that runs
+      // optimistically here is covered by running_tx() == this instead (see GetOpArgs).
 
       // single shard schedule operation can't fail
       CHECK(ScheduleInShard(EngineShard::tlocal(), optimistic_exec));
-      run_barrier_.Dec();
 
       // If the optimistic run above held running_tx_ and deferred any poll on this shard,
-      // drain it now. Uses the same needs_repoll_ mechanism as PollExecution's re-drive loop.
+      // drain it now, like PollExecution does after its own run.
       EngineShard::tlocal()->PollExecutionIfDeferred();
       break;
     }
 
+    run_barrier_.Start(unique_shard_cnt_);
     atomic_uint32_t fail_cnt{0};
 
     auto cb = [this, optimistic_exec, &fail_cnt] {
@@ -1248,7 +1246,7 @@ IntentLock::Mode Transaction::LockMode() const {
 
 OpArgs Transaction::GetOpArgs(EngineShard* shard) const {
   DCHECK(IsActive(shard->shard_id()));
-  DCHECK((multi_ && multi_->role == SQUASHED_STUB) || (run_barrier_.DEBUG_Count() > 0));
+  DCHECK(IsSquashedStub() || run_barrier_.DEBUG_Count() > 0 || shard->running_tx() == this);
   return OpArgs{shard, this, GetDbContext()};
 }
 
@@ -1311,8 +1309,10 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
     // lock: if we finish without preempting (the common case), no one will ever observe it; if
     // we do preempt, whoever schedules next on this shard will lazily register it for us (see
     // above), so the lock table stays accurate throughout.
+    // In cache mode an insert can evict keys inline, and eviction spares only the keys found in
+    // the lock table, so the callback must register its keys there.
     bool skip_acquire = execute_optimistic && running == nullptr && shard_unlocked &&
-                        db_slice.IsLockFree(mode, lock_args);
+                        !db_slice.IsCacheMode() && db_slice.IsLockFree(mode, lock_args);
     if (!skip_acquire) {
       // Slow path: either contended, or a callback is mid-flight on this shard, or we're not
       // eligible for immediate execution. Acquire intent locks as usual - they're always
@@ -1537,14 +1537,9 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
   auto* shard = EngineShard::tlocal();
   auto& db_slice = GetDbSlice(shard->shard_id());
 
-  // In NON_ATOMIC mode SquashedHopCb is invoked directly, without a wrapping RunCallback,
-  // so this stub owns the running_tx_ slot. In atomic modes (LOCK_AHEAD / GLOBAL) the
-  // parent transaction's RunCallback has already set running_tx_ to itself.
-  bool owns_running_tx = multi_->mode == NON_ATOMIC;
-  if (owns_running_tx) {
-    DCHECK(shard->running_tx() == nullptr);
-    shard->set_running_tx(this);
-  }
+  // The caller holds running_tx_ while stubs run: the parent transaction's RunCallback, or
+  // DEBUG POPULATE, which runs its stub without a parent hop.
+  DCHECK(shard->running_tx() != nullptr);
 
   // An escaping exception would skip the cleanup below and leave the EXEC reply incomplete.
   RunnableResult result;
@@ -1561,9 +1556,6 @@ OpStatus Transaction::RunSquashedMultiCb(RunnableType cb) {
 
   LogAutoJournalOnShard(shard, result);
   MaybeInvokeTrackingCb();
-
-  if (owns_running_tx)
-    shard->set_running_tx(nullptr);
 
   DCHECK_EQ(result.flags, 0);  // if it's sophisticated, we shouldn't squash it
   return result;
@@ -1596,12 +1588,6 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
   }
 
   shard->FinalizeMulti(this);
-}
-
-bool Transaction::IsGlobal() const {
-  // Please note that a transaction can be non-global even if multi_->mode == GLOBAL.
-  // It happens when a transaction is squashed and switches to execute differrent commands.
-  return global_;
 }
 
 // Runs only in the shard thread.
@@ -1861,6 +1847,9 @@ OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs&
     if (num_custom_keys >= 0) {
       end = start + num_custom_keys;
     } else {
+      // A command with a key-less form (e.g. XINFO HELP) has no keys in that form.
+      if (start >= args.size())
+        return KeyIndex{};
       end = last > 0 ? last : (int(args.size()) + last + 1);
     }
     if (cid->interleaved_step()) {
@@ -1935,7 +1924,7 @@ int64_t TrackedMemory() {
 
   // Full search index memory accounting scans all indices, so skip it
   const int64_t used_memory = shard->UsedMemoryWithoutSearch();
-  return used_memory - shard->type_mem_delta()[OBJ_KEY];
+  return used_memory - shard->type_attributed_memory()[OBJ_KEY];
 }
 
 }  // namespace
@@ -2002,6 +1991,10 @@ AtomicMemoryScope::~AtomicMemoryScope() {
   const int64_t delta = TrackedMemory() - mem_baseline_;
   EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta);
   DeductFromTxScope(delta);
+}
+
+void AdvanceTxIdPast(TxId txid) {
+  op_seq = max(op_seq.load(), txid + 1);
 }
 
 }  // namespace dfly

@@ -122,8 +122,8 @@ double ScoreDocument(const ScorerSpec& scorer, const ScoringContext& ctx,
 
 ScorerFn RawScorer(const ScorerSpec& scorer);
 
-// Single-shard slice of the counts a scorer needs. Keys are schema canonical
-// names; terms are post-synonym-resolution.
+// Single-shard slice of the counts a scorer needs. Keys are attribute aliases;
+// terms are post-synonym-resolution.
 struct ShardScoringStats {
   struct FieldStats {
     size_t num_docs = 0;

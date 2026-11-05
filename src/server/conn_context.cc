@@ -409,7 +409,7 @@ void CommandContext::RecordLatency(const facade::ParsedArgs& tail_args) const {
     slowlog_args = facade::ArgSlice{aux_slice};
   }
 
-  ServerState::SafeTLocal()->GetSlowLog().Add(cid_->name(), slowlog_args, conn->GetName(),
+  ServerState::SafeTLocal()->GetSlowLog().Add(*cid_, slowlog_args, conn->GetName(),
                                               conn->RemoteEndpointStr(), execution_time_usec,
                                               absl::GetCurrentTimeNanos() / 1000);
 }

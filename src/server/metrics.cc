@@ -140,6 +140,11 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                     &resp->body());
   AppendMetricValue("connected_clients", conn_stats.num_conns_other, {"listener"}, {"other"},
                     &resp->body());
+  AppendMetricWithoutLabels("io_threads", "Number of IO threads", m.io_threads, MetricType::GAUGE,
+                            &resp->body());
+  AppendMetricWithoutLabels("max_connected_clients_per_thread",
+                            "Max number of connected clients on a single IO thread",
+                            m.max_connected_clients_per_thread, MetricType::GAUGE, &resp->body());
   AppendMetricHeader("tls_handshakes_total", "Total TLS handshakes by status", MetricType::COUNTER,
                      &resp->body());
   AppendMetricValue("tls_handshakes_total", conn_stats.handshakes_started, {"status"}, {"started"},
@@ -304,12 +309,12 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     constexpr unsigned kTypes[] = {OBJ_STRING, OBJ_LIST, OBJ_SET,    OBJ_ZSET,
                                    OBJ_HASH,   OBJ_KEY,  OBJ_STREAM, OBJ_JSON,
                                    OBJ_SBF,    OBJ_CMS,  OBJ_TOPK,   OBJ_CUCKOOFILTER};
-    AppendMetricHeader("type_memory_delta_bytes",
-                       "Signed cumulative tracked memory delta per object type", MetricType::GAUGE,
-                       &resp->body());
+    AppendMetricHeader("type_attributed_memory_bytes",
+                       "Cumulative net memory attributed to operations per object type",
+                       MetricType::GAUGE, &resp->body());
     for (unsigned type : kTypes) {
-      AppendMetricValue("type_memory_delta_bytes", m.type_mem_delta[type], {"type"},
-                        {ObjTypeToString(type)}, &resp->body());
+      AppendMetricValue("type_attributed_memory_bytes", m.type_attributed_memory_bytes[type],
+                        {"type"}, {ObjTypeToString(type)}, &resp->body());
     }
   }
 
@@ -350,6 +355,14 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("failed_restores_total", "", m.loading_stats.failed_restore_count,
                             MetricType::COUNTER, &resp->body());
+
+  // Snapshot (RDB/DFS) metrics.
+  AppendMetricWithoutLabels(
+      "rdb_serialize_total",
+      "Number of record writes performed while serializing single-file RDB snapshots",
+      m.coordinator_stats.rdb_save_count, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("save_in_progress", "1 if a snapshot save is in progress, 0 otherwise",
+                            m.save_in_progress ? 1 : 0, MetricType::GAUGE, &resp->body());
 
   // Net metrics
   AppendMetricWithoutLabels("net_input_recv_total", "", conn_stats.io_read_cnt, MetricType::COUNTER,
@@ -556,6 +569,17 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricWithoutLabels("replication_psync_count", "Pync count",
                               m.coordinator_stats.psync_requests_total, MetricType::COUNTER,
                               &resp->body());
+
+    const DflyCmd::DisconnectStats disconnects = dfly_cmd->GetDisconnectStats();
+    AppendMetricHeader("replica_disconnects_total",
+                       "Replica sessions dropped by the master, by reason", MetricType::COUNTER,
+                       &resp->body());
+    AppendMetricValue("replica_disconnects_total", disconnects.closed, {"reason"}, {"closed"},
+                      &resp->body());
+    AppendMetricValue("replica_disconnects_total", disconnects.error, {"reason"}, {"error"},
+                      &resp->body());
+    AppendMetricValue("replica_disconnects_total", disconnects.timeout, {"reason"}, {"timeout"},
+                      &resp->body());
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
                        MetricType::GAUGE, &replication_lag_metrics);
     for (const auto& replica : replicas_info) {
@@ -774,6 +798,18 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 
     AppendMetricWithoutLabels("tiered_clients_throttled", "Currently throttled clients",
                               m.tiered_stats.clients_throttled, MetricType::GAUGE, &resp->body());
+    // Device pressure: in-flight IO bytes as a percentage of the aggregate
+    const uint64_t total_cap = m.tiered_stats.max_pending_bytes;
+    const uint64_t read_pct = total_cap ? (m.tiered_stats.pending_read_bytes * 100) / total_cap : 0;
+    const uint64_t write_pct =
+        total_cap ? (m.tiered_stats.pending_stash_bytes * 100) / total_cap : 0;
+    AppendMetricHeader("tiered_device_usage_percent",
+                       "Tiered device pressure as percent of tiered_max_pending_bytes cap",
+                       MetricType::GAUGE, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", read_pct, {"type"}, {"read"}, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", write_pct, {"type"}, {"write"}, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", read_pct + write_pct, {"type"}, {"total"},
+                      &resp->body());
 
     AppendMetricHeader("tiered_list_events", "Tiered List Events", MetricType::COUNTER,
                        &resp->body());
@@ -816,9 +852,10 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 }
 
 void Metrics::Merge(const Metrics& src) {
-  // Sum of all member sizes plus alignment padding (4 bytes after blocked_tasks).
-  // Expressed via sizeof so it adapts to different STL/Abseil implementations.
-  // If this fires, a field was added/removed - update Merge() and InitFromThread().
+  // Sum of all member sizes plus alignment padding (4 bytes after
+  // max_connected_clients_per_thread). Expressed via sizeof so it adapts to different STL/Abseil
+  // implementations. If this fires, a field was added/removed - update Merge() and
+  // InitFromThread().
   static_assert(
       sizeof(Metrics) ==
           sizeof(SliceEvents) + sizeof(std::vector<DbStats>) + sizeof(EngineShard::Stats) +
@@ -830,7 +867,7 @@ void Metrics::Merge(const Metrics& src) {
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeMemDeltas) + 176,  // scalar fields (19 fields) + 4-byte alignment padding
+              sizeof(TypeAttributedMemory) + 192,  // 22 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
   // Per-db stats / events / small_string_bytes are merged element-wise.
@@ -840,8 +877,8 @@ void Metrics::Merge(const Metrics& src) {
     db_stats[i] += src.db_stats[i];
   events += src.events;
   small_string_bytes += src.small_string_bytes;
-  for (size_t type = 0; type < type_mem_delta.size(); ++type)
-    type_mem_delta[type] += src.type_mem_delta[type];
+  for (size_t type = 0; type < type_attributed_memory_bytes.size(); ++type)
+    type_attributed_memory_bytes[type] += src.type_attributed_memory_bytes[type];
 
   // Aggregate sub-structs.
   shard_stats += src.shard_stats;
@@ -867,6 +904,7 @@ void Metrics::Merge(const Metrics& src) {
   worker_fiber_stack_size += src.worker_fiber_stack_size;
   worker_fiber_count += src.worker_fiber_count;
   blocked_tasks += src.blocked_tasks;
+  io_threads += src.io_threads;
   tls_bytes += src.tls_bytes;
   refused_conn_max_clients_reached_count += src.refused_conn_max_clients_reached_count;
   lsn_buffer_size += src.lsn_buffer_size;
@@ -874,6 +912,8 @@ void Metrics::Merge(const Metrics& src) {
 
   // Non-sum reductions.
   tx_queue_len = std::max(tx_queue_len, src.tx_queue_len);
+  max_connected_clients_per_thread =
+      std::max(max_connected_clients_per_thread, src.max_connected_clients_per_thread);
   oldest_pending_send_ts = std::min(oldest_pending_send_ts, src.oldest_pending_send_ts);
 
   // Map merges.
@@ -902,7 +942,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeMemDeltas) + 176,  // scalar fields (19 fields) + 4-byte alignment padding
+              sizeof(TypeAttributedMemory) + 192,  // 22 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
   ServerState* ss = ServerState::tlocal();
@@ -919,6 +959,9 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
 
   qps = uint64_t(ss->MovingSum6());
   facade_stats = *tl_facade_stats;
+  io_threads = 1;
+  max_connected_clients_per_thread =
+      facade_stats.conn_stats.num_conns_main + facade_stats.conn_stats.num_conns_other;
   serialization_bytes = SliceSnapshot::GetThreadLocalMemoryUsage();
 
   if (shard) {
@@ -928,7 +971,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
     events = slice_stats.events;
     small_string_bytes = slice_stats.small_string_bytes;
     shard_stats = shard->stats();
-    type_mem_delta = shard->type_mem_delta();
+    type_attributed_memory_bytes = shard->type_attributed_memory();
 
     if (shard->tiered_storage()) {
       tiered_stats = shard->tiered_storage()->GetStats();

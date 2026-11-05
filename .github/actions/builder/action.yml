@@ -32,11 +32,6 @@ inputs:
     required: false
     default: 'NoSanitizers'
     type: string
-  with-aws:
-    description: "Build with AWS support"
-    required: false
-    default: 'OFF'
-    type: string
   targets:
     description: "Build targets to compile"
     required: false
@@ -109,7 +104,7 @@ runs:
           "${{ hashFiles('src/external_libs.cmake', 'CMakeLists.txt', 'src/CMakeLists.txt', 'helio/cmake/third_party.cmake', 'helio/cmake/internal.cmake', 'patches/**', 'helio/patches/**') }}" \
           "${{ runner.os }}" "${{ runner.arch }}" "${{ inputs.build-type }}" \
           "${{ inputs.cxx-compiler }}" "${{ inputs.sanitizers }}" "${{ inputs.cxx-flags }}" \
-          "${{ inputs.with-aws }}" "${{ inputs.build-dir }}"
+          "${{ inputs.build-dir }}"
 
     - name: Restore cache (deps)
       # - actions/cache/restore only downloads a cache; unlike the combined cache action, it never saves automatically.
@@ -219,7 +214,6 @@ runs:
         # Add fixed options
         CMAKE_CMD+=(
           -DPRINT_STACKTRACES_ON_SIGNAL=ON
-          -DWITH_AWS="${{ inputs.with-aws }}"
           -DWITH_GCP=OFF
           -DWITH_UNWIND=OFF
           -DWITH_GPERF=OFF

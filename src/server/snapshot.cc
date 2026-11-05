@@ -156,7 +156,7 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
     stats_.keys_total += db_slice_->DbSize(db_indx);
   }
 
-  if (!TraverseAllBuckets(true /* include empty buckets */))
+  if (!TraverseAllBuckets())
     return;
 
   PushSerialized(true);

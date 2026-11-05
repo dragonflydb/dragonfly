@@ -1008,8 +1008,9 @@ OpResult<string> BPopPusher::Run(unsigned limit_ms, Transaction* tx, ConnectionC
 
 OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, ConnectionContext* cntx) {
   OpResult<string> op_res;
-  bool is_multi = tx->IsMulti();
-  auto cb_move = [&](Transaction* t, EngineShard* shard) {
+  // Blocking is not allowed inside MULTI/scripts, and only the first hop may decide to block.
+  bool may_block = !tx->IsMulti();
+  auto cb_move = [&](Transaction* t, EngineShard* shard) -> Transaction::RunnableResult {
     OpArgs op_args = t->GetOpArgs(shard);
     op_res = OpMoveSingleShard(op_args, pop_key_, push_key_, popdir_, pushdir_);
     if (op_res) {
@@ -1020,15 +1021,20 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
         RecordJournal(op_args, cmd, ArgSlice{push_key_, op_res.value()}, 1);
       }
     }
+
+    // Keep the transaction (and its locks) open only if we are going to block. This way the
+    // common case of a non-empty source list concludes in a single hop and does not stall
+    // the shard's tx queue waiting for a separate concluding hop from the coordinator.
+    if (may_block && op_res.status() == OpStatus::KEY_NOTFOUND)
+      return {OpStatus::OK, Transaction::RunnableResult::AVOID_CONCLUDING};
     return OpStatus::OK;
   };
-  tx->Execute(cb_move, false);
+  tx->Execute(cb_move, true);
 
-  if (is_multi || op_res.status() != OpStatus::KEY_NOTFOUND) {
+  if (!may_block || op_res.status() != OpStatus::KEY_NOTFOUND) {
     if (op_res.status() == OpStatus::KEY_NOTFOUND) {
       op_res = OpStatus::TIMED_OUT;
     }
-    tx->Conclude();
     return op_res;
   }
 
@@ -1037,6 +1043,7 @@ OpResult<string> BPopPusher::RunSingle(time_point tp, Transaction* tx, Connectio
   if (status != OpStatus::OK)
     return status;
 
+  may_block = false;
   tx->Execute(cb_move, true);
   return op_res;
 }
@@ -1542,21 +1549,20 @@ void RegisterListFamily(CommandRegistry* registry) {
   *registry
       << CI{"LPUSH", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPush)
       << CI{"LPUSHX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(LPushX)
-      << CI{"LPOP", CO::JOURNALED | CO::FAST, -2, 1, 1}.HFUNC(LPop)
-      << CI{"LMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(LMPop)
-      << CI{"BLMPOP", CO::JOURNALED | CO::BLOCKING | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3,
-            3}
+      << CI{"LPOP", CO::RW | CO::FAST, -2, 1, 1}.HFUNC(LPop)
+      << CI{"LMPOP", CO::RW | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(LMPop)
+      << CI{"BLMPOP", CO::RW | CO::BLOCKING | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -5, 3, 3}
              .HFUNC(BLMPop)
       << CI{"RPUSH", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPush)
       << CI{"RPUSHX", CO::JOURNALED | CO::FAST | CO::DENYOOM, -3, 1, 1}.HFUNC(RPushX)
-      << CI{"RPOP", CO::JOURNALED | CO::FAST, -2, 1, 1}.HFUNC(RPop)
-      << CI{"RPOPLPUSH", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2}.SetHandler(RPopLPush)
-      << CI{"BRPOPLPUSH", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2}
+      << CI{"RPOP", CO::RW | CO::FAST, -2, 1, 1}.HFUNC(RPop)
+      << CI{"RPOPLPUSH", CO::RW | CO::NO_AUTOJOURNAL, 3, 1, 2}.SetHandler(RPopLPush)
+      << CI{"BRPOPLPUSH", CO::RW | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, 4, 1, 2}
              .SetHandler(BRPopLPush)
-      << CI{"BLPOP", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
-             .HFUNC(BLPop)
-      << CI{"BRPOP", CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}
-             .HFUNC(BRPop)
+      << CI{"BLPOP", CO::RW | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}.HFUNC(
+             BLPop)
+      << CI{"BRPOP", CO::RW | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL, -3, 1, -2}.HFUNC(
+             BRPop)
       << CI{"LLEN", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(LLen)
       << CI{"LPOS", CO::READONLY, -3, 1, 1}.HFUNC(LPos)
       << CI{"LINDEX", CO::READONLY, 3, 1, 1}.HFUNC(LIndex)
@@ -1565,9 +1571,8 @@ void RegisterListFamily(CommandRegistry* registry) {
       << CI{"LSET", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.HFUNC(LSet)
       << CI{"LTRIM", CO::JOURNALED, 4, 1, 1}.HFUNC(LTrim)
       << CI{"LREM", CO::JOURNALED, 4, 1, 1}.HFUNC(LRem)
-      << CI{"LMOVE", CO::JOURNALED | CO::NO_AUTOJOURNAL, 5, 1, 2}.HFUNC(LMove)
-      << CI{"BLMOVE", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2}.SetHandler(
-             BLMove);
+      << CI{"LMOVE", CO::RW | CO::NO_AUTOJOURNAL, 5, 1, 2}.HFUNC(LMove)
+      << CI{"BLMOVE", CO::RW | CO::NO_AUTOJOURNAL | CO::BLOCKING, 6, 1, 2}.SetHandler(BLMove);
 }
 
 }  // namespace dfly

@@ -8,6 +8,8 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
+#include <chrono>
+
 #include "base/flags.h"
 #include "base/logging.h"
 #include "redis/redis_aux.h"
@@ -25,6 +27,9 @@
 #include "util/fibers/synchronization.h"
 
 ABSL_DECLARE_FLAG(bool, serialization_tagged_chunks);
+
+using namespace facade;
+using namespace std::chrono_literals;
 
 namespace dfly {
 
@@ -78,7 +83,8 @@ void DelayedEntryHandler::EnqueueOffloaded(BucketIdentity bucket, DbIndex db_ind
 
 void DelayedEntryHandler::ProcessDelayedEntries(bool force, BucketIdentity flush_bucket,
                                                 ExecutionState* cntx) {
-  const size_t kMaxDelayedEntries = 512;
+  // Force flush before letting the delayed size grow too large
+  const size_t kMaxDelayedEntries = 128;
   if (delayed_entries_.size() > kMaxDelayedEntries)
     force |= true;
 
@@ -183,7 +189,7 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
                                    bool on_update) {
   // Check if this bucket is stale
   if (it.is_done() || it.GetVersion() >= snapshot_version_) {
-    stats_.buckets_skipped++;
+    stats_.buckets_skipped += unsigned(!it.is_done());  // empty buckets are not skips
 
     // Update versions for empty buckets to mark that won't visit them anymore
     // TODO: Flush changes to earlier callbacks
@@ -227,17 +233,10 @@ bool SerializerBase::ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator
   return true;
 }
 
-// The algorithm is to go over all the buckets and serialize those with
-// version < snapshot_version_. In order to serialize each physical bucket exactly once we update
-// bucket version to snapshot_version_ once it has been serialized.
-// We handle serialization at physical bucket granularity.
-// To further complicate things, Table::Traverse covers a logical bucket that may comprise of
-// several physical buckets in dash table. For example, items belonging to logical bucket 0
-// can reside in buckets 0,1 and stash buckets 56-59.
-// PrimeTable::Traverse guarantees an atomic traversal of a single logical bucket,
-// it also guarantees 100% coverage of all items that exists when the traversal started
-// and survived until it finished.
-bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
+// Serializes every physical bucket with version < snapshot_version_ exactly once, stamping it with
+// snapshot_version_ afterwards. Empty buckets are stamped too, as journal omits rely on it.
+// TraverseBuckets is stable under table mutations and covers all items that existed at the start.
+bool SerializerBase::TraverseAllBuckets() {
   // Covers cancellation exits; on the normal path the entries were already drained.
   absl::Cleanup discard_delayed = [this] { DiscardDelayedEntries(); };
 
@@ -262,16 +261,17 @@ bool SerializerBase::TraverseAllBuckets(bool visit_empty) {
             if (!base_cntx_->IsRunning())  // Could be cancelled any time as Traverse may preempt
               return;
 
-            OnTraverseBucket();
+            OnTraverseBucket(it);
             ProcessBucket(db_index, it, false);
           },
-          visit_empty);
+          true /* visit empty buckets */);
 
       PaceTraversal(!cursor);
 
       // Suspend the traversal loop if we are exceeding the egress budget, letting
       // high priority writes drain first. Guarantees the loop its reserved share.
-      ServerState::tlocal()->GetEgressThrottler().Throttle();
+      // Also applies tiered read-volume backpressure when disk reads are saturated.
+      Throttle();
     } while (cursor);
 
     // Wait for all the outstanding delayed entries and serialize them as well.
@@ -308,6 +308,26 @@ unsigned SerializerBase::SerializeBucket(DbIndex db_index, PrimeTable::bucket_it
 
 void SerializerBase::WaitForNoBucketBlocked() const {
   BucketDependencies::WaitEmpty();
+}
+
+void SerializerBase::Throttle() {
+  // Egress backpressure: suspend if the destination sink is not keeping up.
+  ServerState::tlocal()->GetEgressThrottler().Throttle();
+
+  if (!HasDelayedEntries())
+    return;
+
+  // Throttle on total usage to avoid overloading regular clients, wait with gap
+  EngineShard* es = EngineShard::tlocal();
+  TieredStorage* ts = es ? es->tiered_storage() : nullptr;
+  if (ts == nullptr || ts->TotalUsage() < 100)
+    return;
+
+  int steps_left = 10;
+  while (base_cntx_->IsRunning() && ts->TotalUsage() > 70 && steps_left-- > 0) {
+    ProcessDelayedEntries(false, 0, base_cntx_);
+    util::ThisFiber::SleepFor(100us);
+  }
 }
 
 void SerializerBase::OnChange(DbIndex db_index, const ChangeReq& req) {

@@ -113,9 +113,8 @@ if(USE_AFL)
   set(WITH_ASAN OFF CACHE BOOL "Disable ASAN for fuzzing" FORCE)
   set(WITH_USAN OFF CACHE BOOL "Disable UBSAN for fuzzing" FORCE)
 
-  # Disable AWS and GCP for fuzzing builds (not needed, reduces build time)
-  message(STATUS "Disabling AWS and GCP integrations for fuzzing")
-  set(WITH_AWS OFF CACHE BOOL "Disable AWS for fuzzing" FORCE)
+  # Disable GCP for fuzzing builds (not needed, reduces build time)
+  message(STATUS "Disabling GCP integration for fuzzing")
   set(WITH_GCP OFF CACHE BOOL "Disable GCP for fuzzing" FORCE)
 endif()
 
@@ -143,7 +142,7 @@ if (HAS_SPLIT_DWARF_C)
 endif()
 
 set(LEGACY_GLOG OFF CACHE BOOL "Use legacy glog instead of absl")
-set(WITH_AWS OFF CACHE BOOL "Build with helio native AWS support")
+set(WITH_AWS OFF CACHE BOOL "aws-sdk-cpp is not supported, helio native S3 client is used" FORCE)
 
 include(third_party)
 include(internal)

@@ -28,9 +28,6 @@ namespace journal {
 struct JournalConsumerInterface;
 }  // namespace journal
 
-// Test hook defined in common.cc.
-void TEST_InvalidateLockTagOptions();
-
 class TestConnection : public facade::Connection {
  public:
   explicit TestConnection(facade::ServiceInterface* si, Protocol protocol);
@@ -219,6 +216,10 @@ class BaseFamilyTest : public ::testing::Test {
   ConnectionContext::LastCommandStats last_cmd_dbg_info_;
 
   bool single_response_ = true;
+
+  // The namespace of the commands Run issues, the default one if empty.
+  std::string namespace_;
+
   util::fb2::Fiber watchdog_fiber_;
   util::fb2::Done watchdog_done_;
 };

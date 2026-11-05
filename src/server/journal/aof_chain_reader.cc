@@ -8,8 +8,11 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/strip.h>
 #include <fcntl.h>
+#include <linux/io_uring.h>
+#include <unistd.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 #include "base/logging.h"
@@ -34,6 +37,10 @@ constexpr size_t kMaxBlockBytes = kAofBlockHeaderSize + kAofBlockBytes;
 constexpr size_t kReadChunk = 128_KB;
 static_assert(kReadChunk >= kMaxBlockBytes);
 
+error_code LastErrno() {
+  return {errno, system_category()};
+}
+
 }  // namespace
 
 AofChainReader::AofChainReader(string dir, uint32_t shard_id, uint32_t shard_count)
@@ -46,25 +53,32 @@ string AofChainReader::SegmentPath(uint64_t seq) const {
   return absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(shard_id_, seq));
 }
 
-error_code AofChainReader::Open() {
+error_code AofChainReader::Open(uint64_t cut_seq) {
   DCHECK(segment_chain_.empty());
+
+  // TODO: StatFiles treats dir_ as part of a glob pattern, so a --dir with *, ? or [ breaks it.
+  // List the directory with std::filesystem::directory_iterator instead.
   auto files = io::StatFiles(absl::StrCat(dir_, "/appendonly-", shard_id_, "-*.aof"));
   if (!files)
     return files.error();
 
   // Collect the shard's segments; the seq is in the file name.
-  string prefix = absl::StrCat("appendonly-", shard_id_, "-");
   for (const auto& file : *files) {
-    string_view seq_str = string_view(file.name).substr(file.name.rfind('/') + 1);
+    string_view name = string_view(file.name).substr(file.name.rfind('/') + 1);
+    uint32_t sid = 0;
     uint64_t seq = 0;
-    if (!absl::ConsumePrefix(&seq_str, prefix) || !absl::ConsumeSuffix(&seq_str, ".aof") ||
-        !absl::SimpleAtoi(seq_str, &seq)) {
-      return make_error_code(errc::illegal_byte_sequence);
+    if (!AofSegmentWriter::ParseSegmentName(name, &sid, &seq) || sid != shard_id_) {
+      LOG(ERROR) << "Unexpected AOF segment name: " << file.name;
+      return AofError::kBadSegmentName;
     }
+
+    // Before the cut: in the base, and garbage.
+    if (seq < cut_seq)
+      continue;
     segment_chain_.push_back({seq, file.size, 0, nullptr});
   }
   if (segment_chain_.empty())
-    return make_error_code(errc::no_such_file_or_directory);
+    return AofError::kNoSegments;
 
   // The log runs through the segments in seq order.
   sort(segment_chain_.begin(), segment_chain_.end(),
@@ -73,23 +87,40 @@ error_code AofChainReader::Open() {
   for (size_t i = 0; i < segment_chain_.size(); ++i) {
     Segment& seg = segment_chain_[i];
 
-    // A missing seq or a file without a full header.
-    if (seg.seq != segment_chain_.front().seq + i || seg.size < kAofSegmentHeaderSize)
-      return make_error_code(errc::illegal_byte_sequence);
+    // The chain starts at the cut segment, which a checkpoint creates before committing the cut.
+    if (seg.seq != cut_seq + i) {
+      LOG(ERROR) << "Gap in AOF segment seqs before " << SegmentPath(seg.seq);
+      return AofError::kSegmentNonContiguous;
+    }
+
+    if (seg.size < kAofSegmentHeaderSize) {
+      LOG(ERROR) << "AOF segment shorter than its header: " << SegmentPath(seg.seq);
+      return AofError::kShortSegment;
+    }
 
     auto file = OpenLinux(SegmentPath(seg.seq), O_RDONLY, 0);
     if (!file)
       return file.error();
     seg.file = std::move(*file);
+
+    // TODO: posix_fadvise(POSIX_FADV_SEQUENTIAL) doubles the kernel's readahead for our reads.
+
     string hdr_bytes(kAofSegmentHeaderSize, '\0');
     iovec v{hdr_bytes.data(), hdr_bytes.size()};
     RETURN_ON_ERR(seg.file->Read(&v, 1, 0, 0));
 
-    // The header must be valid and match the file's name and the chain.
+    // The header must be valid and match the file's name.
     auto hdr = DecodeAofSegmentHeader(hdr_bytes);
-    if (!hdr || hdr->shard_id != shard_id_ || hdr->shard_count != shard_count_ ||
-        hdr->seq != seg.seq) {
-      return make_error_code(errc::illegal_byte_sequence);
+    if (!hdr || hdr->shard_id != shard_id_ || hdr->seq != seg.seq) {
+      LOG(ERROR) << "Invalid AOF segment header: " << SegmentPath(seg.seq);
+      return AofError::kBadSegmentHeader;
+    }
+
+    // TODO: replay into a different shard count.
+    if (hdr->shard_count != shard_count_) {
+      LOG(ERROR) << "AOF segment written with " << hdr->shard_count << " shards, now "
+                 << shard_count_ << ": " << SegmentPath(seg.seq);
+      return AofError::kShardCountChanged;
     }
 
     // Seeds the CRCs of the segment's blocks.
@@ -161,7 +192,7 @@ error_code AofChainReader::ReadBlock() {
 io::Result<size_t> AofChainReader::ReadSome(const iovec* v, uint32_t len) {
   while (pending_.empty()) {
     if (end_ == End::kTailTorn)
-      return nonstd::make_unexpected(make_error_code(errc::illegal_byte_sequence));
+      return nonstd::make_unexpected(make_error_code(AofError::kTornTail));
     if (end_ == End::kTailReached)
       return 0;
     if (SegmentFullyRead()) {
@@ -215,6 +246,40 @@ void AofChainReader::MarkEndOfLog(End end) {
     discarded_bytes_ += segment_chain_[i].size;
   LOG(WARNING) << "AOF shard " << shard_id_ << ": damaged tail of " << discarded_bytes_
                << " bytes after lsn " << LastLsn();
+}
+
+error_code AofChainReader::Repair() {
+  DCHECK(end_ != End::kNotYet);
+
+  // The segment holding the end of the log. A clean end read every segment to its end.
+  size_t end_seg_id = AllSegmentsRead() ? segment_chain_.size() - 1 : read_seg_id_;
+
+  // Move the later segments away first, highest seq first, before cutting anything. The damaged
+  // bytes are what ends the log, so they stay until no later segment is left: a repair interrupted
+  // in between then stops at the same point again and redoes the remaining renames. Cutting first
+  // could hide a hole, e.g. a torn first block truncated away would let the next replay take the
+  // later segments as the continuation.
+  for (size_t i = segment_chain_.size(); i-- > end_seg_id + 1;) {
+    string path = SegmentPath(segment_chain_[i].seq);
+    if (rename(path.c_str(), absl::StrCat(path, ".discarded").c_str()) != 0)
+      return LastErrno();
+    RETURN_ON_ERR(AofSyncDir(dir_));
+  }
+
+  // Cut the bytes after the last valid block. Never a valid block, even one that ends inside a
+  // record: rewriting it could tear the complete records it holds.
+  const Segment& end_seg = segment_chain_[end_seg_id];
+  if (end_ == End::kTailTorn && offset_ < end_seg.size &&
+      truncate(SegmentPath(end_seg.seq).c_str(), offset_) != 0) {
+    return LastErrno();
+  }
+
+  // After a process crash, the kept blocks may be only in the page cache. Sync them, so the log
+  // resumes after data that a later power loss cannot remove.
+  for (size_t i = 0; i <= end_seg_id; ++i)
+    RETURN_ON_ERR(segment_chain_[i].file->FSync(IORING_FSYNC_DATASYNC));
+
+  return {};
 }
 
 }  // namespace dfly

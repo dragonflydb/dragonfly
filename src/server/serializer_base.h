@@ -109,6 +109,11 @@ struct DelayedEntryHandler {
   // Serialize delayed entry that was fetched with serializer specific implementation
   virtual void SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) = 0;
 
+  // True while this serializer still has offloaded entries waiting on tiered (disk) reads.
+  bool HasDelayedEntries() const {
+    return !delayed_entries_.empty();
+  }
+
  protected:
   explicit DelayedEntryHandler(BucketDependencies& deps) : deps_{deps} {
   }
@@ -193,14 +198,13 @@ class SerializerBase : public BucketDependencies,
   // and false if called by the traversal loop.
   bool ProcessBucket(DbIndex db_index, PrimeTable::bucket_iterator it, bool on_update);
 
-  // Traversal flow: goes over all buckets of every database in db_array_ and processes them with
-  // ProcessBucket, serializing the delayed entries after each database. Pending delayed entries
-  // are discarded on cancellation. visit_empty controls whether empty buckets are processed.
+  // Traversal flow: processes all buckets (including empty ones) of every database with
+  // ProcessBucket and serializes delayed entries after each database; they're discarded on cancel.
   // Returns false if the traversal was cancelled, true only once no bucket dependency is pending.
-  bool TraverseAllBuckets(bool visit_empty);
+  bool TraverseAllBuckets();
 
-  // Called by TraverseAllBuckets before processing each bucket.
-  virtual void OnTraverseBucket() {
+  // Called by TraverseAllBuckets before processing each bucket, including empty ones.
+  virtual void OnTraverseBucket(PrimeTable::bucket_iterator it) {
   }
 
   // Called by TraverseAllBuckets after each TraverseBuckets step. Implements the pacing policy
@@ -212,6 +216,9 @@ class SerializerBase : public BucketDependencies,
   virtual bool ShouldSerialize(DbIndex db_index, const PrimeKey& pk) const {
     return true;
   }
+
+  // Sleep for egress throttling or disk overload - must be called from iteration fiber
+  void Throttle();
 
   // Serialize a single bucket. Returns the number of entries serialized.
   // Serializes the entries accepted by ShouldSerialize. Called without holding stream_mu_, which

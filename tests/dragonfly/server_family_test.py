@@ -88,12 +88,16 @@ async def test_client_kill(df_factory):
             assert len(await client_conn.execute_command("CLIENT LIST")) == 2
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
 
+            # "localhost" may resolve to ::1 or 127.0.0.1, so kill by the address actually in use.
+            admin_laddr = (await admin_client.client_info())["laddr"]
+            client_laddr = (await client_conn.client_info())["laddr"]
+
             # Can't kill admin from regular connection
             with pytest.raises(ResponseError):
-                await client_conn.execute_command("CLIENT KILL LADDR 127.0.0.1:1112")
+                await client_conn.execute_command(f"CLIENT KILL LADDR {admin_laddr}")
 
             assert len(await admin_client.execute_command("CLIENT LIST")) == 2
-            await admin_client.execute_command("CLIENT KILL LADDR 127.0.0.1:1111")
+            await admin_client.execute_command(f"CLIENT KILL LADDR {client_laddr}")
 
             # Shutdown is asynchronous, so wait for the listener to remove the connection.
             @assert_eventually(timeout=10)
@@ -226,6 +230,22 @@ async def test_metric_labels(
         for sample in metrics["dragonfly_connected_clients"].samples:
             match_label_value(sample, "main", lambda v: v == 2)
             match_label_value(sample, "other", lambda v: v == 1)
+
+
+@dfly_args({"proactor_threads": 2})
+async def test_io_thread_conn_metrics(df_server: DflyInstance):
+    # Connections are assigned to threads round-robin, so with 2 threads and 5 connections
+    # the busiest thread handles 3 of them.
+    clients = [df_server.client() for _ in range(5)]
+    for c in clients:
+        await c.ping()
+
+    metrics = await df_server.metrics()
+    assert metrics["dragonfly_io_threads"].samples[0].value == 2
+    assert metrics["dragonfly_max_connected_clients_per_thread"].samples[0].value == 3
+
+    for c in clients:
+        await c.aclose()
 
 
 async def test_latency_stats(async_client: aioredis.Redis):

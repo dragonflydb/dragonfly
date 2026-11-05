@@ -91,6 +91,9 @@ struct SaveInfoData {
   // false if last attempt failed
   bool last_bgsave_status = true;
   bool bgsave_in_progress = false;
+
+  // Unlike bgsave_in_progress, also covers SAVE, scheduled and shutdown saves.
+  bool save_in_progress = false;
 };
 
 // A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
@@ -181,6 +184,9 @@ class ServerFamily {
   // specified in --df_snapshot_format
   GenericError DoSave(bool ignore_state = false);
 
+  // Cancels an in-progress save; its owner finishes cleanup and records the error.
+  void CancelSave();
+
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
   // `wait` makes it wait for all fibers to finish and decommit
@@ -253,6 +259,9 @@ class ServerFamily {
   void OnClose(ConnectionContext* cntx);
 
   void CancelBlockingOnThread(std::function<facade::OpStatus(facade::ArgSlice)> = {});
+
+  // Fails blocked commands on all threads with an UNBLOCKED error.
+  void UnblockAllClients();
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);

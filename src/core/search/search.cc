@@ -4,7 +4,6 @@
 
 #include "core/search/search.h"
 
-#include <absl/algorithm/container.h>
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
@@ -14,6 +13,7 @@
 #include <absl/types/span.h>
 #include <uni_algo/case.h>
 
+#include <algorithm>
 #include <chrono>
 #include <ranges>
 #include <type_traits>
@@ -32,6 +32,7 @@
 #include "core/search/vector_utils.h"
 
 using namespace std;
+namespace rng = std::ranges;
 
 namespace dfly::search {
 
@@ -111,7 +112,7 @@ struct ProfileBuilder {
   }
 
   AlgorithmProfile Take() {
-    reverse(profile_.events.begin(), profile_.events.end());
+    rng::reverse(profile_.events);
     return std::move(profile_);
   }
 
@@ -165,8 +166,9 @@ template <TagType T> vector<string_view> GroupTokensForAffix(const Synonyms& syn
     if (MatchesAffix<T>(it->first, affix))
       tokens.insert(tokens.end(), it->second.begin(), it->second.end());
   }
-  sort(tokens.begin(), tokens.end());
-  tokens.erase(unique(tokens.begin(), tokens.end()), tokens.end());
+  rng::sort(tokens);
+  auto unique_end = rng::unique(tokens).begin();
+  tokens.erase(unique_end, tokens.end());
   return tokens;
 }
 
@@ -249,8 +251,9 @@ struct BasicSearch {
     // Unifying from smallest to largest is more efficient.
     // AND: the result only shrinks, so starting with the smallest is most optimal.
     // OR: unifying smaller sets first reduces the number of element traversals on average.
-    sort(sub_results.begin(), sub_results.end(),
-         [](const auto& l, const auto& r) { return l.ApproximateSize() < r.ApproximateSize(); });
+    rng::sort(sub_results, [](const auto& l, const auto& r) {
+      return l.ApproximateSize() < r.ApproximateSize();
+    });
 
     IndexResult out{std::move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
@@ -384,7 +387,7 @@ struct BasicSearch {
       return true;
     const auto& p = positions[i];
     uint32_t upper = cur + slop + 1;
-    auto lo = std::upper_bound(p.begin(), p.end(), cur);
+    auto lo = rng::upper_bound(p, cur);
     for (auto it = lo; it != p.end() && *it <= upper; ++it) {
       if (CanExtendPhrase(positions, i + 1, *it, slop))
         return true;
@@ -571,8 +574,7 @@ struct BasicSearch {
     visit(cb, sub_results.Borrowed());
 
     size_t prefix_size = min(knn.limit, knn_distances_.size());
-    partial_sort(knn_distances_.begin(), knn_distances_.begin() + prefix_size,
-                 knn_distances_.end());
+    rng::partial_sort(knn_distances_, knn_distances_.begin() + prefix_size);
     knn_distances_.resize(prefix_size);
   }
 
@@ -639,12 +641,20 @@ struct BasicSearch {
     if (!error_.empty())
       return IndexResult{};
     auto matched = std::move(child).Take().first;
-    vector<DocId> all = indices_->GetAllDocs();
-    auto pred = [&matched](DocId doc) {
-      return binary_search(matched.begin(), matched.end(), doc);
-    };
-    all.erase(remove_if(all.begin(), all.end(), pred), all.end());
-    return IndexResult{std::move(all)};
+    const auto& all = indices_->GetAllDocs();
+    if (matched.empty())
+      return IndexResult{vector<DocId>{all}};
+    if (matched.size() == 1) {
+      vector<DocId> out = all;
+      auto it = rng::lower_bound(out, matched.front());
+      if (it != out.end() && *it == matched.front())
+        out.erase(it);
+      return IndexResult{std::move(out)};
+    }
+    vector<DocId> out;
+    out.reserve(all.size());
+    rng::set_difference(all, matched, back_inserter(out));
+    return IndexResult{std::move(out)};
   }
 
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
@@ -889,7 +899,7 @@ struct BasicSearch {
                              0.0f);
 
     // Ensure sorted for cursor-based scoring
-    sort(all_docs.begin(), all_docs.end());
+    rng::sort(all_docs);
 
     // Open cursors on posting lists for each matched term.
     vector<TermCursor> cursors;
@@ -937,7 +947,7 @@ struct BasicSearch {
     // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
     size_t k = min(limit, scored.size());
     if (k < scored.size()) {
-      partial_sort(scored.begin(), scored.begin() + k, scored.end(), greater<>());
+      rng::partial_sort(scored, scored.begin() + k, greater<>());
       scored.resize(k);
     }
 
@@ -1134,10 +1144,18 @@ AstExpr OptionalNumericFilter::Node(std::string field) {
   return make_unique<AstFieldNode>("@" + field, make_unique<AstRangeNode>(lo_, false, hi_, false));
 }
 
-string_view Schema::LookupAlias(string_view alias) const {
-  if (auto it = field_names.find(alias); it != field_names.end())
-    return it->second;
-  return alias;
+const SchemaField* Schema::Find(string_view alias) const {
+  auto it = fields.find(alias);
+  return it != fields.end() ? &it->second : nullptr;
+}
+
+Schema::Attribute Schema::FindByIdentifier(string_view identifier) const {
+  Attribute best{{}, nullptr};
+  for (const auto& [alias, field] : fields) {
+    if (field.identifier == identifier && (!best.second || field.StandsBefore(*best.second)))
+      best = {alias, &field};
+  }
+  return best;
 }
 
 Schema::OrderedFields Schema::Ordered() const {
@@ -1145,7 +1163,7 @@ Schema::OrderedFields Schema::Ordered() const {
                       return OrderedFields::value_type{kv.first, &kv.second};
                     });
   OrderedFields out(attributes.begin(), attributes.end());
-  absl::c_sort(out, [](const auto& l, const auto& r) {
+  rng::sort(out, [](const auto& l, const auto& r) {
     return std::tie(l.second->number, l.first) < std::tie(r.second->number, r.first);
   });
   return out;
@@ -1168,17 +1186,17 @@ FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
 }
 
 void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
-  for (const auto& [field_ident, field] : schema_.Ordered()) {
+  for (const auto& [alias, field] : schema_.Ordered()) {
     if (field->flags & SchemaField::NOINDEX)
       continue;
-    if (auto index = CreateIndex(field_ident, *field, mr); index) {
-      add_list_.emplace_back(field_ident, index.get());
-      indices_[field_ident] = std::move(index);
+    if (auto index = CreateIndex(alias, *field, mr); index) {
+      add_list_.emplace_back(field->identifier, index.get());
+      indices_[alias] = std::move(index);
     }
   }
 }
 
-unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view field_ident, const SchemaField& field,
+unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view alias, const SchemaField& field,
                                                 PMR_NS::memory_resource* mr) {
   switch (field.type) {
     case SchemaField::TEXT: {
@@ -1186,7 +1204,7 @@ unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view field_ident, const S
       auto idx = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
                                         tparams.no_stem, schema_.default_language,
                                         schema_.language_field, !options_.no_offsets);
-      idx->set_field_ident(field_ident);
+      idx->set_field_ident(alias);  // scoring stats and the schema weight are per attribute
       text_indices_.push_back(idx.get());
       return idx;
     }
@@ -1209,12 +1227,12 @@ unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view field_ident, const S
 }
 
 void FieldIndices::CreateSortIndices() {
-  for (const auto& [field_ident, field] : schema_.Ordered()) {
+  for (const auto& [alias, field] : schema_.Ordered()) {
     if (!(field->flags & SchemaField::SORTABLE))
       continue;
     if (auto index = CreateSortIndex(*field); index) {
-      add_list_.emplace_back(field_ident, index.get());
-      sort_indices_[field_ident] = std::move(index);
+      add_list_.emplace_back(field->identifier, index.get());
+      sort_indices_[alias] = std::move(index);
     }
   }
 }
@@ -1247,12 +1265,12 @@ bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
     return false;
   }
 
-  all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
+  all_ids_.insert(rng::upper_bound(all_ids_, doc), doc);
   return true;
 }
 
 void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
-  auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
+  auto it = rng::lower_bound(all_ids_, doc);
   if (it == all_ids_.end() || *it != doc) {
     // During index restoration CursorLoop may not have indexed this document
     // yet, so it is absent from all_ids_. Nothing to remove.
@@ -1266,17 +1284,17 @@ void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
-  auto it = indices_.find(schema_.LookupAlias(field));
+  auto it = indices_.find(field);
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
 BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
-  auto it = sort_indices_.find(schema_.LookupAlias(field));
+  auto it = sort_indices_.find(field);
   return it != sort_indices_.end() ? it->second.get() : nullptr;
 }
 
 TextIndex* FieldIndices::GetTextIndex(string_view field) const {
-  auto it = schema_.fields.find(schema_.LookupAlias(field));
+  auto it = schema_.fields.find(field);
   if (it == schema_.fields.end() || it->second.type != SchemaField::TEXT)
     return nullptr;
   return static_cast<TextIndex*>(GetIndex(field));  // CreateIndex builds a TextIndex for TEXT
@@ -1310,8 +1328,8 @@ const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }
 
-SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_identifier) const {
-  auto it = sort_indices_.find(field_identifier);
+SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view alias) const {
+  auto it = sort_indices_.find(alias);
   DCHECK(it != sort_indices_.end());
   return it->second->Lookup(doc);
 }
@@ -1444,7 +1462,7 @@ template <typename F> void WalkAst(const AstNode& root, const F& cb) {
     cb(*node);
     size_t before = stack.size();
     ForEachChild(*node, {}, [&](const AstNode& child, string_view) { stack.push_back(&child); });
-    std::reverse(stack.begin() + before, stack.end());  // restore left-to-right order
+    rng::reverse(stack.begin() + before, stack.end());  // restore left-to-right order
   }
 }
 
@@ -1474,8 +1492,7 @@ bool SearchAlgorithm::IsAndedVectorRange() const {
   auto* logical = query_->As<AstLogicalNode>();
   if (!logical || logical->op != AstLogicalNode::AND)
     return false;
-  return any_of(logical->nodes.begin(), logical->nodes.end(),
-                [](const AstExpr& n) { return n->Is<AstVectorRangeNode>(); });
+  return rng::any_of(logical->nodes, [](const AstExpr& n) { return n->Is<AstVectorRangeNode>(); });
 }
 
 AstExpr SearchAlgorithm::ExtractVectorRangeAsPrefilter() {

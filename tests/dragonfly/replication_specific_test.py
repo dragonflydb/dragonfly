@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import signal
 import time
 
@@ -76,6 +77,82 @@ async def test_search(df_factory):
     assert (await c_replica.ft("idx-m2").search(Query("*").sort_by("f2").paging(0, 1))).docs[
         0
     ].id == "k0"
+
+
+async def saved_aliases(client, summary_path) -> dict[str, str]:
+    # This low level byte check will be removed when we can query aliases.
+    assert await client.execute_command("SAVE", "DF")
+    data = summary_path.read_bytes()
+    aliases = {}
+    for m in re.finditer(re.escape(b"\xfa\x0csearch-alias"), data):
+        n = data[m.end()]
+        assert n < 64  # 6-bit length encoding
+        alias, target = data[m.end() + 1 : m.end() + 1 + n].decode().split(" ")
+        aliases[alias] = target
+    return aliases
+
+
+async def test_search_alias_replication(df_factory, tmp_dir):
+    master, _, c_master, [c_replica] = await setup_replication(
+        df_factory,
+        replica_args={"dbfilename": "alias-replica"},
+        connect=False,
+    )
+
+    await c_replica.execute_command("FT.CREATE", "stale-idx", "SCHEMA", "f", "text")
+    await c_replica.execute_command("FT.ALIASADD", "stale-alias", "stale-idx")
+
+    for index in ("idx-a", "idx-b"):
+        await c_master.execute_command("FT.CREATE", index, "SCHEMA", "f", "text")
+    await c_master.execute_command("FT.ALIASADD", "stable", "idx-a")
+    await c_master.execute_command("FT.ALIASADD", "stable-too", "idx-a")
+
+    await start_replication(c_replica, master.port)
+    await check_all_replicas_finished([c_replica], c_master)
+
+    summary = tmp_dir / "alias-replica-summary.dfs"
+    assert await saved_aliases(c_replica, summary) == {"stable": "idx-a", "stable-too": "idx-a"}
+
+    await c_master.execute_command("FT.ALIASADD", "new", "idx-b")
+    await c_master.execute_command("FT.ALIASUPDATE", "stable", "idx-b")
+    await c_master.execute_command("FT.ALIASDEL", "stable-too")
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await saved_aliases(c_replica, summary) == {"new": "idx-b", "stable": "idx-b"}
+
+
+async def test_search_alias_update_retries_full_sync(df_factory, tmp_dir):
+    master, _, c_master, [c_replica] = await setup_replication(
+        df_factory,
+        master_args={"snapshot_egress_limit_bytes": "100kb"},
+        replica_args={"dbfilename": "alias-replica"},
+        connect=False,
+    )
+
+    for index in ("idx-a", "idx-b"):
+        await c_master.execute_command("FT.CREATE", index, "SCHEMA", "f", "text")
+    await c_master.execute_command("FT.ALIASADD", "live", "idx-a")
+    # keep full sync journal window open
+    await c_master.execute_command("DEBUG", "POPULATE", "20000", "key", "1000", "RAND")
+
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+
+    @assert_eventually(timeout=10)
+    async def wait_until_primary_starts_full_sync():
+        info = await c_master.info("replication")
+        assert info.get("slave0", {}).get("state") == "full_sync"
+
+    await wait_until_primary_starts_full_sync()
+    syncid, _ = await c_replica.execute_command("DEBUG", "REPLICA", "OFFSET")
+    await c_master.execute_command("FT.ALIASUPDATE", "live", "idx-b")
+    # Remove the throttle so the retry completes promptly
+    await c_master.execute_command("CONFIG", "SET", "snapshot_egress_limit_bytes", "0")
+
+    await check_all_replicas_finished([c_replica], c_master)
+    new_syncid, _ = await c_replica.execute_command("DEBUG", "REPLICA", "OFFSET")
+    assert new_syncid != syncid
+
+    summary = tmp_dir / "alias-replica-summary.dfs"
+    assert await saved_aliases(c_replica, summary) == {"live": "idx-b"}
 
 
 @dfly_args({"proactor_threads": 4})
@@ -226,11 +303,15 @@ async def test_save_with_replication(df_factory, action_during_save):
 
     if action_during_save == "disconnect":
         await c_replica.execute_command("replicaof no one")
+        assert await is_saving(c_replica)
+        await save_task
     else:
         await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        # Full sync enters LOADING, which cancels the in-progress save.
+        with pytest.raises(aioredis.ResponseError, match="Operation canceled"):
+            await save_task
+        await wait_available_async(c_replica)
 
-    assert await is_saving(c_replica)
-    await save_task
     assert not await is_saving(c_replica)
 
 
@@ -2014,3 +2095,62 @@ async def test_set_member_partial_expiry_replication_lag(df_factory: DflyInstanc
         "re-arms the stale copy."
     )
     assert await c_replica.sismember("myset", "keep") == 1
+
+
+@pytest.mark.parametrize("pipeline,concurrency", [(False, 1), (True, 1), (False, 100)])
+async def test_wait_with_throttled_replica_stream(
+    df_factory: DflyInstanceFactory, pipeline, concurrency
+):
+    """
+    WAIT requests a journal PING on every shard. With the replica stream over its output limit,
+    recording it blocks in the journal throttle. This used to crash the master from a brief callback
+    (#8647); throttling and full PING queues must not hold WAIT past its timeout.
+    """
+    master, [replica], c_master, [c_replica] = await setup_replication(
+        df_factory, master_args={"proactor_threads": 2}, replica_args={"proactor_threads": 2}
+    )
+    assert await c_master.execute_command("WAIT", 1, 1000) == 1
+
+    c_writer = master.client()
+    c_wait = master.client()
+    value = "x" * (1 << 20)
+    writes = None
+    try:
+        # SIGSTOP is sent inside pause_process, so it must already be covered by finally.
+        await pause_process(replica.proc.pid)
+
+        # Far more than the socket buffers can hold, so the stream stays over its output limit.
+        pipe = c_writer.pipeline(transaction=False)
+        for i in range(100):
+            pipe.set(f"k{i}", value)
+        writes = asyncio.create_task(pipe.execute())
+        await asyncio.sleep(2)
+        assert not writes.done(), "writes were expected to be throttled"
+
+        async def wait():
+            if pipeline:
+                pipe = c_wait.pipeline(transaction=False)
+                pipe.execute_command("WAIT", 1, 1000)
+                pipe.ping()
+                assert await pipe.execute() == [0, True]
+            else:
+                assert await c_wait.execute_command("WAIT", 1, 1000) == 0
+
+        # Enough concurrent WAITs fill the PING queue while its workers are throttled.
+        start = time.monotonic()
+        await asyncio.wait_for(asyncio.gather(*(wait() for _ in range(concurrency))), timeout=3)
+        assert time.monotonic() - start < 3
+
+        # Short timeouts must not each incur the full 100 ms polling interval.
+        start = time.monotonic()
+        for _ in range(5):
+            assert await c_wait.execute_command("WAIT", 1, 1) == 0
+        assert time.monotonic() - start < 0.25
+        assert await c_master.ping()
+    finally:
+        resume_process(replica.proc.pid)
+        if writes is not None:
+            await writes
+
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await c_master.execute_command("WAIT", 1, 5000) == 1

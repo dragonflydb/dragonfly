@@ -40,20 +40,25 @@ template <typename T> SortableValue SimpleValueSortIndex<T>::Lookup(DocId doc) c
 }
 
 template <typename T>
-std::vector<SortableValue> SimpleValueSortIndex<T>::Sort(std::vector<DocId>* ids, size_t limit,
-                                                         bool desc) const {
-  auto cb = [this, desc](const auto& lhs, const auto& rhs) {
-    // null values are at the end
-    auto p1 = make_pair(!occupied_[lhs], cref(values_[lhs]));
-    auto p2 = make_pair(!occupied_[rhs], cref(values_[rhs]));
-    return desc ? (p1 > p2) : (p1 < p2);
+std::vector<SortableValue> SimpleValueSortIndex<T>::Sort(
+    std::vector<DocId>* ids, size_t limit, bool desc,
+    absl::FunctionRef<std::string_view(DocId)> key) const {
+  // Docs without a value rank last in both directions; equal values are ordered by key.
+  auto cb = [&](DocId lhs, DocId rhs) -> bool {
+    if (occupied_[lhs] != occupied_[rhs])
+      return occupied_[lhs];
+    if (values_[lhs] != values_[rhs])
+      return desc ? values_[rhs] < values_[lhs] : values_[lhs] < values_[rhs];
+    return desc ? key(rhs) < key(lhs) : key(lhs) < key(rhs);
   };
   std::partial_sort(ids->begin(), ids->begin() + std::min(ids->size(), limit), ids->end(), cb);
 
   // Turn stateless string into std::string
   vector<SortableValue> out(min(ids->size(), limit));
-  for (size_t i = 0; i < out.size(); i++)
-    out[i] = ScoreT<T>{values_[(*ids)[i]]};
+  for (size_t i = 0; i < out.size(); i++) {
+    if (DocId id = (*ids)[i]; occupied_[id])
+      out[i] = ScoreT<T>{values_[id]};
+  }
   return out;
 }
 

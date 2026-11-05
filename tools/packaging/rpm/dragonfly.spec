@@ -8,7 +8,7 @@ Name:       %{pkg_name}
 Version:    %{version}
 Release:    1%{?dist}
 Summary:    DragonflyDB memory store
-License:    BUSL-1.1
+License:    LicenseRef-DSAL
 URL:        https://www.dragonflydb.io
 Source0:    %{archive}
 Source1:    dragonfly.service

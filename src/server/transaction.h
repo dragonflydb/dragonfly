@@ -295,6 +295,12 @@ class Transaction {
   // Returns if the transaction spans this shard. Safe only when the transaction is armed.
   bool IsActive(ShardId sid) const;
 
+  // Whether the transaction is armed on this shard while blocked (suspended or awakened).
+  bool IsBlockedInShard(ShardId sid) const {
+    const auto& sd = shard_data_[SidToId(sid)];
+    return sd.is_armed.load(std::memory_order_acquire) && (sd.local_mask & WAS_SUSPENDED);
+  }
+
   // Whether shard sid woke this blocking transaction.
   bool IsWokenOn(ShardId sid) const;
 
@@ -355,7 +361,11 @@ class Transaction {
     return multi_ && (multi_->mode == LOCK_AHEAD || multi_->mode == GLOBAL);
   }
 
-  bool IsGlobal() const;
+  // Note that a transaction can be non-global even if multi_->mode == GLOBAL.
+  // It happens when a transaction is squashed and switches to execute different commands.
+  bool IsGlobal() const {
+    return global_;
+  }
 
   DbContext GetDbContext() const {
     return DbContext{namespace_, db_index_, time_now_ms_};
@@ -716,5 +726,10 @@ template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args);
+
+// New transactions get txids above txid. Called after AOF replay, when no transaction runs, so
+// replayed txids never repeat. Replay's own transactions also advance the sequence, so it never
+// moves it backwards.
+void AdvanceTxIdPast(TxId txid);
 
 }  // namespace dfly

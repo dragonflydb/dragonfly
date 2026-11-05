@@ -1814,16 +1814,11 @@ void CmdDebug(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-    ShardId sid = Shard(key, shard_set->size());
-    ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
-    auto cb = [&]() {
-      EngineShard* shard = EngineShard::tlocal();
-      DbContext db_cntx{cntx->ns, cntx->conn_state.db_index};
-      OpArgs op_args{shard, nullptr, db_cntx};
-      return OpMemory(op_args, key, json_path);
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpMemory(t->GetOpArgs(shard), key, json_path);
     };
 
-    auto result = shard_set->Await(sid, std::move(cb));
+    auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
     reply_generic::Send(result, cmd_cntx);
     return;
   }
@@ -1838,16 +1833,11 @@ void CmdDebug(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
-    ShardId sid = Shard(key, shard_set->size());
-    ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
-    auto cb = [&]() {
-      EngineShard* shard = EngineShard::tlocal();
-      DbContext db_cntx{cntx->ns, cntx->conn_state.db_index};
-      OpArgs op_args{shard, nullptr, db_cntx};
-      return OpFields(op_args, key, json_path);
+    auto cb = [&](Transaction* t, EngineShard* shard) {
+      return OpFields(t->GetOpArgs(shard), key, json_path);
     };
 
-    auto result = shard_set->Await(sid, std::move(cb));
+    auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
     reply_generic::Send(result, cmd_cntx);
     return;
   }
@@ -2215,9 +2205,9 @@ void RegisterJsonFamily(CommandRegistry* registry) {
   *registry << CI{"JSON.STRLEN", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(StrLen);
   *registry << CI{"JSON.OBJLEN", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ObjLen);
   *registry << CI{"JSON.ARRLEN", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrLen);
-  *registry << CI{"JSON.TOGGLE", CO::JOURNALED | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(Toggle);
-  *registry << CI{"JSON.NUMINCRBY", CO::JOURNALED | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumIncrBy);
-  *registry << CI{"JSON.NUMMULTBY", CO::JOURNALED | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumMultBy);
+  *registry << CI{"JSON.TOGGLE", CO::RW | CO::FAST, 3, 1, 1, acl::JSON}.HFUNC(Toggle);
+  *registry << CI{"JSON.NUMINCRBY", CO::RW | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumIncrBy);
+  *registry << CI{"JSON.NUMMULTBY", CO::RW | CO::FAST, 4, 1, 1, acl::JSON}.HFUNC(NumMultBy);
   *registry << CI{"JSON.DEL", CO::JOURNALED, -2, 1, 1, acl::JSON}.HFUNC(Del);
   *registry << CI{"JSON.FORGET", CO::JOURNALED, -2, 1, 1, acl::JSON}.HFUNC(
       Del);  // An alias of JSON.DEL.
@@ -2225,7 +2215,7 @@ void RegisterJsonFamily(CommandRegistry* registry) {
   *registry << CI{"JSON.STRAPPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, -3, 1, 1, acl::JSON}
                    .HFUNC(StrAppend);
   *registry << CI{"JSON.CLEAR", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Clear);
-  *registry << CI{"JSON.ARRPOP", CO::JOURNALED | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrPop);
+  *registry << CI{"JSON.ARRPOP", CO::RW | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(ArrPop);
   *registry << CI{"JSON.ARRTRIM", CO::JOURNALED | CO::FAST, 5, 1, 1, acl::JSON}.HFUNC(ArrTrim);
   *registry << CI{"JSON.ARRINSERT", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::JSON}
                    .HFUNC(ArrInsert);
@@ -2233,7 +2223,7 @@ void RegisterJsonFamily(CommandRegistry* registry) {
                    .HFUNC(ArrAppend);
   *registry << CI{"JSON.ARRINDEX", CO::READONLY | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(ArrIndex);
   *registry
-      << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 0, 0, acl::JSON}.HFUNC(Debug)
+      << CI{"JSON.DEBUG", CO::READONLY | CO::FAST, -2, 2, 2, acl::JSON}.HFUNC(Debug)
       << CI{"JSON.RESP", CO::READONLY | CO::FAST, -2, 1, 1, acl::JSON}.HFUNC(Resp)
       << CI{"JSON.SET", CO::JOURNALED | CO::DENYOOM | CO::FAST, -4, 1, 1, acl::JSON}.HFUNC(Set)
       << CI{"JSON.MSET", kMsetFlags, -4, 1, -1, acl::JSON}.HFUNC(MSet)

@@ -516,7 +516,7 @@ nonstd::unexpected_type<ErrorReply> CreateSyntaxError(std::string_view message) 
 }
 
 struct ParsedStreamId {
-  streamID val;
+  streamID val{};
 
   // Was an ID different than "ms-*" specified? for XADD only.
   bool has_seq = false;
@@ -732,12 +732,11 @@ inline const uint8_t* SafePtr(MutableSlice field) {
                        : reinterpret_cast<const uint8_t*>(field.data());
 }
 
-bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamId* dest) {
+// allow_auto_seq accepts XADD's "<ms>-*" form.
+bool ParseID(string_view strid, bool strict, uint64_t missing_seq, bool allow_auto_seq,
+             ParsedStreamId* dest) {
   if (strid.empty() || strid.size() > 127)
     return false;
-
-  if (strid == "*")
-    return true;
 
   dest->id_given = true;
   dest->has_seq = true;
@@ -769,7 +768,7 @@ bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamI
     if (dash_pos + 1 == strid.size())
       return false;
 
-    if (dash_pos + 2 == strid.size() && strid[dash_pos + 1] == '*') {
+    if (allow_auto_seq && dash_pos + 2 == strid.size() && strid[dash_pos + 1] == '*') {
       result.seq = 0;
       dest->has_seq = false;
     } else if (!absl::SimpleAtoi(strid.substr(dash_pos + 1), &result.seq)) {
@@ -780,6 +779,10 @@ bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamI
   dest->val = result;
 
   return true;
+}
+
+bool ParseID(string_view strid, bool strict, uint64_t missing_seq, ParsedStreamId* dest) {
+  return ParseID(strid, strict, missing_seq, false, dest);
 }
 
 enum class RangeBoundary { kStart, kEnd };
@@ -2486,6 +2489,8 @@ void CreateGroup(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
   switch (result) {
     case OpStatus::KEY_NOTFOUND:
       return cmd_cntx->SendError(kXGroupKeyNotFound);
+    case OpStatus::SYNTAX_ERR:
+      return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
     default:
       cmd_cntx->SendError(result);
   }
@@ -2598,6 +2603,8 @@ void SetId(facade::CmdArgParser* parser, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError(NoGroupError(key, gname));
     case OpStatus::KEY_NOTFOUND:
       return cmd_cntx->SendError(kXGroupKeyNotFound);
+    case OpStatus::SYNTAX_ERR:
+      return cmd_cntx->SendError(kInvalidStreamId, kSyntaxErrType);
     default:
       cmd_cntx->SendError(result);
   }
@@ -2674,8 +2681,8 @@ ParseResult<TrimOpts> ParseTrimOpts(bool max_len, CmdArgParser* parser) {
     opts.length_or_id = parser->Next<uint32_t>();
   } else {
     ParsedStreamId parsed_id;
-    if (!ParseID(parser->Next(), false, 0, &parsed_id)) {
-      return CreateSyntaxError(kSyntaxErr);
+    if (!ParseID(parser->Next(), true, 0, &parsed_id)) {
+      return CreateSyntaxError(kInvalidStreamId);
     }
 
     opts.length_or_id = parsed_id;  // trivial copy
@@ -2694,8 +2701,8 @@ ParseResult<TrimOpts> ParseTrimOpts(bool max_len, CmdArgParser* parser) {
 
 ParseResult<TrimOpts> ParseTrimOpts(CmdArgParser* parser) {
   bool max_len = parser->Check("MAXLEN");
-  if (!max_len) {
-    parser->ExpectTag("MINID");
+  if (!max_len && !parser->Check("MINID")) {
+    return CreateSyntaxError(kSyntaxErr);
   }
 
   auto res = ParseTrimOpts(max_len, parser);
@@ -2730,7 +2737,7 @@ ParseResult<AddOpts> ParseAddOpts(CmdArgParser* parser) {
     } else {
       // It is StreamId
       std::string_view id = parser->Next();
-      if (!ParseID(id, true, 0, &opts.parsed_id)) {
+      if (id != "*" && !ParseID(id, true, 0, /*allow_auto_seq=*/true, &opts.parsed_id)) {
         return CreateSyntaxError(kInvalidStreamId);
       }
       break;
@@ -2807,10 +2814,6 @@ std::optional<ReadOpts> ParseReadArgsOrReply(ParsedArgs args, bool read_group,
     id_indx++;
     opts.group_name = args[id_indx];
     opts.consumer_name = args[++id_indx];
-    if (opts.consumer_name.empty()) {
-      builder->SendError("consumer name can't be empty", kSyntaxErrType);
-      return std::nullopt;
-    }
     id_indx++;
   }
 
@@ -3633,10 +3636,6 @@ void CmdXClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
   opts.group = parser.Next();
   opts.consumer = parser.Next();
 
-  if (opts.group.empty() || opts.consumer.empty()) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
-
   if (!absl::SimpleAtoi(parser.Next(), &opts.min_idle_time)) {
     return cmd_cntx->SendError(kSyntaxErr);
   }
@@ -3734,20 +3733,15 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendSimpleStrArr(help_arr);
   }
 
-  ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   if (args.size() >= 2) {
     string_view key = args[1];
-    ShardId sid = Shard(key, shard_set->size());
 
     if (sub_cmd == "GROUPS") {
-      // We do not use transactional xemantics for xinfo since it's informational command.
-      auto cb = [&]() {
-        EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
-        return OpListGroups(db_context, key, shard);
+      auto cb = [&](Transaction* t, EngineShard* shard) {
+        return OpListGroups(t->GetDbContext(), key, shard);
       };
 
-      OpResult<vector<GroupInfo>> result = shard_set->Await(sid, std::move(cb));
+      OpResult<vector<GroupInfo>> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
       if (result) {
         rb->StartArray(result->size());
         for (const auto& ginfo : *result) {
@@ -3806,13 +3800,11 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
         }
       }
 
-      auto cb = [&]() {
-        EngineShard* shard = EngineShard::tlocal();
-        return OpStreams(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()}, key, shard,
-                         full, count);
+      auto cb = [&](Transaction* t, EngineShard* shard) {
+        return OpStreams(t->GetDbContext(), key, shard, full, count);
       };
 
-      OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
+      OpResult<StreamInfo> sinfo = cmd_cntx->tx()->ScheduleSingleHopT(cb);
       if (sinfo) {
         if (full) {
           rb->StartCollection(9, CollectionType::MAP);
@@ -3941,15 +3933,14 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
       string_view stream_name = args[1];
       string_view group_name = args[2];
-      auto cb = [&]() {
-        return OpConsumers(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()},
-                           EngineShard::tlocal(), stream_name, group_name);
+      auto cb = [&](Transaction* t, EngineShard* shard) {
+        return OpConsumers(t->GetDbContext(), shard, stream_name, group_name);
       };
 
-      OpResult<vector<ConsumerInfo>> result = shard_set->Await(sid, std::move(cb));
+      OpResult<vector<ConsumerInfo>> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
       if (result) {
         rb->StartArray(result->size());
-        int64_t now_ms = GetCurrentTimeMs();
+        int64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
         for (const auto& consumer_info : *result) {
           int64_t active = consumer_info.active_time;
           int64_t inactive = active != -1 ? now_ms - active : -1;
@@ -4228,10 +4219,6 @@ void CmdXAutoClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
   opts.consumer = args[2];
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (opts.group.empty() || opts.consumer.empty()) {
-    return cmd_cntx->SendError(kSyntaxErr);
-  }
-
   if (!absl::SimpleAtoi(args[3], &opts.min_idle_time)) {
     return rb->SendError(kSyntaxErr);
   }
@@ -4242,7 +4229,7 @@ void CmdXAutoClaim(CmdArgParser parser, CommandContext* cmd_cntx) {
   RangeId rs;
 
   if (!ParseRangeId(start, RangeBoundary::kStart, &rs)) {
-    return rb->SendError(kSyntaxErr);
+    return rb->SendError(kInvalidStreamId, kSyntaxErrType);
   }
 
   if (rs.exclude && StreamDecrID(&rs.parsed_id.val) != C_OK) {
@@ -4305,8 +4292,8 @@ namespace acl {
 constexpr uint32_t kXAdd = WRITE | STREAM | FAST;
 constexpr uint32_t kXClaim = WRITE | STREAM | FAST;
 constexpr uint32_t kXDel = WRITE | STREAM | FAST;
-constexpr uint32_t kXGroup = SLOW;
-constexpr uint32_t kXInfo = SLOW;
+constexpr uint32_t kXGroup = WRITE | STREAM | SLOW;
+constexpr uint32_t kXInfo = READ | STREAM | SLOW;
 constexpr uint32_t kXLen = READ | STREAM | FAST;
 constexpr uint32_t kXPending = READ | STREAM | SLOW;
 constexpr uint32_t kXRange = READ | STREAM | SLOW;
@@ -4330,7 +4317,7 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XCLAIM", CO::JOURNALED | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XClaim)
             << CI{"XDEL", CO::JOURNALED | CO::FAST, -3, 1, 1, acl::kXDel}.HFUNC(XDel)
             << CI{"XGROUP", CO::JOURNALED | CO::DENYOOM, -3, 2, 2, acl::kXGroup}.HFUNC(XGroup)
-            << CI{"XINFO", CO::READONLY, -2, 0, 0, acl::kXInfo}.HFUNC(XInfo)
+            << CI{"XINFO", CO::READONLY, -2, 2, 2, acl::kXInfo}.HFUNC(XInfo)
             << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kXLen}.HFUNC(XLen)
             << CI{"XPENDING", CO::READONLY, -3, 1, 1, acl::kXPending}.HFUNC(XPending)
             << CI{"XRANGE", CO::READONLY, -4, 1, 1, acl::kXRange}.HFUNC(XRange)

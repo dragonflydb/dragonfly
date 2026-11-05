@@ -887,8 +887,10 @@ uint64_t RmGeneric(uint64_t cursor, const ScanOpts& scan_opts, uint32_t* deleted
   return cursor;
 }
 
-OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireParams& params) {
+OpStatus OpExpire(OpArgs op_args, string_view key, const DbSlice::ExpireParams& params) {
   auto& db_slice = op_args.GetDbSlice();
+  op_args.db_cntx.is_omittable_operation = true;  // See DbSlice::DetermineOmitPossibility
+
   auto find_res = db_slice.FindMutable(op_args.db_cntx, key);
   if (!IsValid(find_res.it)) {
     return OpStatus::KEY_NOTFOUND;
@@ -900,7 +902,9 @@ OpStatus OpExpire(const OpArgs& op_args, string_view key, const DbSlice::ExpireP
   // If the value was deleted, replicate as DEL.
   // Else, replicate as PEXPIREAT with exact time.
   if (op_args.shard->journal() && res.ok()) {
-    if (res.value() == -1) {
+    if (find_res.omitted_journal) {
+      journal::ClearBuffer();
+    } else if (res.value() == -1) {
       RecordJournal(op_args, "DEL"sv, ArgSlice{key});
     } else {
       auto time = absl::StrCat(res.value());
@@ -2712,8 +2716,8 @@ void GenericFamily::Time(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->StartArray(2);
-  rb->SendLong(now_usec / 1000000);
-  rb->SendLong(now_usec % 1000000);
+  rb->SendBulkString(absl::StrCat(now_usec / 1000000));
+  rb->SendBulkString(absl::StrCat(now_usec % 1000000));
 }
 
 void GenericFamily::Echo(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2871,7 +2875,7 @@ using CI = CommandId;
 namespace acl {
 
 constexpr uint32_t kDel = KEYSPACE | WRITE | SLOW;
-constexpr uint32_t kDelEx = STRING | WRITE | FAST;
+constexpr uint32_t kDelEx = KEYSPACE | STRING | WRITE | FAST;
 constexpr uint32_t kPing = FAST | CONNECTION;
 constexpr uint32_t kEcho = FAST | CONNECTION;
 constexpr uint32_t kExists = KEYSPACE | READ | FAST;
@@ -2933,12 +2937,12 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"FIELDEXPIRE",    CO::JOURNALED | CO::FAST | CO::DENYOOM | CO::NO_AUTOJOURNAL, -4, 1, 1,
             acl::kFieldExpire}
              .HFUNC(FieldExpire)
-      << CI{"RENAME", CO::JOURNALED | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
+      << CI{"RENAME", CO::RW | CO::NO_AUTOJOURNAL, 3, 1, 2, acl::kRename}.HFUNC(Rename)
       << CI{"COPY",    CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::WRITE_KEY_OFFSET_1, -3, 1, 2,
             acl::kCopy}
              .HFUNC(Copy)
-      << CI{"RENAMENX", CO::JOURNALED | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 2, acl::kRenamNX}
-             .HFUNC(RenameNx)
+      << CI{"RENAMENX", CO::RW | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 2, acl::kRenamNX}.HFUNC(
+             RenameNx)
       << CI{"SELECT", kSelectOpts, 2, 0, 0, acl::kSelect}.HFUNC(Select)
       << CI{"SCAN", CO::READONLY | CO::LOADING, -2, 0, 0, acl::kScan}.HFUNC(Scan)
       << CI{"RM",
@@ -2960,8 +2964,7 @@ void GenericFamily::Register(CommandRegistry* registry) {
       << CI{"SORT", CO::JOURNALED | CO::STORE_LAST_KEY | CO::NO_AUTOJOURNAL, -2, 1, 1, acl::kSort}
              .HFUNC(Sort)
       << CI{"SORT_RO", CO::READONLY, -2, 1, 1, acl::kSortRO}.HFUNC(Sort_RO)
-      << CI{"MOVE",    CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 1,
-            acl::kMove}
+      << CI{"MOVE", CO::RW | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL | CO::FAST, 3, 1, 1, acl::kMove}
              .HFUNC(Move)
       << CI{"RESTORE", CO::JOURNALED | CO::NO_AUTOJOURNAL, -4, 1, 1, acl::kRestore}.HFUNC(Restore)
       << CI{"RANDOMKEY", CO::READONLY, 1, 0, 0, acl::kRandomKey}.HFUNC(RandomKey)

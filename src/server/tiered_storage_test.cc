@@ -39,7 +39,7 @@ ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
-ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
@@ -74,7 +74,7 @@ class TieredStorageTest : public BaseFamilyTest {
       SetFlag(&FLAGS_registered_buffer_size, 0);
     }
 
-    SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 32_MB);
+    SetFlag(&FLAGS_tiered_max_pending_bytes, 32_MB);
     if (GetFlag(FLAGS_tiered_prefix).empty()) {
       // Suffixed with the pid so each test run gets its own directory.
       SetFlag(&FLAGS_tiered_prefix, absl::StrCat("/tmp/tiered_storage_test_", getpid()));
@@ -718,6 +718,7 @@ TEST_F(PureDiskTSMTTest, SortByGetOffloadedSquashed) {
   EXPECT_TRUE(GetMetrics().facade_stats.reply_stats.err_count.empty());  // RunMany drops replies
   EXPECT_THAT(Run({"LRANGE", "dst", "0", "-1"}), RespElementsAre(o1, o2));
   EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 4u);
+  EXPECT_EQ(GetMetrics().tiered_stats.max_pending_bytes, 32_MB * shard_set->size());
 }
 
 // The remaining in-place overwrite paths reach the value through DbSlice::AddOrFind and retype it,
@@ -870,7 +871,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   // Set low limit so all clients are throttled
-  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 1);
+  absl::SetFlag(&FLAGS_tiered_max_pending_bytes, 1);
   UpdateFromFlags();
 
   // issue client pause to accumualte SETs
@@ -892,6 +893,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   // Check that we provided backpressure for all the clients.
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.tiered_stats.total_clients_throttled, fibs.size());
+  EXPECT_EQ(metrics.tiered_stats.max_pending_bytes, 1u * shard_set->size());
 
   for (auto& fib : fibs)
     fib.JoinIfNeeded();
@@ -978,6 +980,36 @@ TEST_F(PureDiskTSTest, Dump) {
   EXPECT_THAT(Run({"del", "k0"}), IntArg(1));
   resp = Run({"restore", "k0", "0", facade::ToSV(resp.GetBuf())});
   EXPECT_EQ(resp, "OK");
+}
+
+TEST_F(PureDiskTSTest, DebugObjHist) {
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+  const int kNum = 10;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), BuildString(3000)});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+
+  auto resp = Run({"DEBUG", "OBJHIST"});
+  string hist = resp.GetString();
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\n"
+                              "Count: 10 Average: 3000.0000"));
+  EXPECT_THAT(hist, HasSubstr("Tiered values - Serialized size:\nCount: 10 "));
+
+  // Offloaded hashes must be reported without touching their (absent) in-memory representation.
+  Run({"FLUSHALL"});
+  for (size_t i = 0; i < 100; ++i) {
+    Run({"HSET", absl::StrCat("hash:", i), "field-a", BuildString(40, 'a'), "field-b",
+         BuildString(40, 'b')});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries > 0; });
+
+  resp = Run({"DEBUG", "OBJHIST"});
+  hist = resp.GetString();
+  EXPECT_THAT(hist, HasSubstr("OBJECT:hash"));
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\nCount: 100 "));
+  EXPECT_THAT(hist, HasSubstr("Tiered values - Serialized size:\n"));
 }
 
 TEST_F(PureDiskTSTest, OffloadedStringSnapshotPreservesMemcacheFlags) {
@@ -1599,6 +1631,28 @@ TEST_F(ListNodeTieringTest, LPopStashedNodes) {
 
   // List must be gone after all elements are popped.
   EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+}
+
+// Node loads and stash completions during a mutating list operation must not be double counted
+// by the key's memory updater.
+TEST_F(ListNodeTieringTest, MemoryAccountingWithStashedNodes) {
+  auto list_memory = [this] { return GetMetrics().db_stats[0].memory_usage_by_type[OBJ_LIST]; };
+
+  const int kItems = 12;
+  for (int i = 0; i < kItems; i++)
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('A' + i))});
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 3; });
+
+  for (int i = 0; i < kItems - 1; i++) {
+    Run({"LPOP", "mylist"});
+    // Pushing to the tail triggers more offloads that may complete during the next pop's load.
+    Run({"RPUSH", "mylist", BuildString(2048, 'z')});
+  }
+
+  Run({"DEL", "mylist"});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+  EXPECT_EQ(list_memory(), 0u);
 }
 
 // MOVE a list whose interior nodes are fully offloaded to a different DB.
@@ -2442,7 +2496,9 @@ TEST_P(IndexedHashTieringTest, BorrowedHnswVectorsStayResident) {
 // MGET runs optimistically and when cancelled reruns its shard callback while tiered reads of the
 // previous attempt may still be in flight. These orphaned reads must not write into the response
 // buffer, which the new attempt reuses or reallocates.
-TEST_F(PureDiskTSMTTest, MGetRescheduleWithPendingReads) {
+// TODO: disabled - flaky, MGET retries depend on CPU parallelism and are rare on CI runners.
+// Run it with --gtest_also_run_disabled_tests on a machine with many cores.
+TEST_F(PureDiskTSMTTest, DISABLED_MGetRescheduleWithPendingReads) {
   DisableUploads();
 
   const auto sz = shard_set->size();

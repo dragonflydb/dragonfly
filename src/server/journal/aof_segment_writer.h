@@ -16,6 +16,9 @@
 
 namespace dfly {
 
+// fsyncs directory dir, so that names created, renamed or removed in it are durable.
+std::error_code AofSyncDir(const std::string& dir);
+
 // Writes one AOF segment. Not thread safe: all calls, including Open and Shutdown, must run
 // on the same proactor thread. Call Shutdown() before destruction if Open() succeeded, and
 // only then; it waits for in-flight I/O and cancels the periodic sync.
@@ -28,6 +31,9 @@ class AofSegmentWriter {
   // Synchronous
   std::error_code Open(uint64_t seq);
 
+  // Starts the periodic fdatasync. Never yields, so a rotation can call it.
+  void StartPeriodicSync();
+
   // non blocking
   void AddRecord(std::string_view record, uint64_t lsn);
   void Seal();
@@ -35,6 +41,9 @@ class AofSegmentWriter {
   // Waits for in-flight I/O and fdatasyncs the segment. Returns error() if one is set.
   // Must not be called if Open() failed.
   std::error_code Shutdown();
+
+  // Closes and deletes the segment instead of Shutdown(), for one that never got a record.
+  std::error_code Discard();
 
   // Blocks the calling fiber until PendingBytes() <= limit or an I/O error stopped the writer.
   void WaitPending(size_t limit);
@@ -59,6 +68,9 @@ class AofSegmentWriter {
   }
 
   static std::string SegmentName(uint32_t shard_id, uint64_t seq);
+
+  // Parses a SegmentName(). Only exact names, so "-007" or "-+7" fail.
+  static bool ParseSegmentName(std::string_view name, uint32_t* shard_id, uint64_t* seq);
 
  private:
   struct PendingBlock {
@@ -86,6 +98,7 @@ class AofSegmentWriter {
   std::string dir_;
   uint32_t shard_id_;
   uint32_t shard_count_;
+  uint64_t seq_ = 0;
   std::unique_ptr<util::fb2::LinuxFile> file_;
   // Created by Open, once the segment_uid that seeds block CRCs is known.
   std::optional<AofBlockBuilder> builder_;
