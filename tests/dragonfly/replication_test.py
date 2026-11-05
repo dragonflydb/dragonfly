@@ -301,12 +301,14 @@ async def test_replication_full_sync_writes_do_not_wait_for_replica(
     without it, the write waits for the replica."""
     master, [replica], c_master, [c_replica] = await setup_replication(
         df_factory,
-        # The egress limit keeps the traversal slow enough to pause the replica mid sync.
+        # The egress limit keeps the traversal slow enough to pause the replica mid sync. Writes to
+        # untraversed keys would skip inline serialization if journal omission were on.
         master_args={
             "proactor_threads": 2,
             "snapshot_output_buffer_limit": output_buffer,
             "snapshot_egress_limit_bytes": "2mb",
             "replication_timeout": 60000,
+            "journal_omit_redundant_writes": False,
         },
         replica_args={"proactor_threads": 1},
         connect=False,
@@ -355,12 +357,15 @@ async def test_replication_full_sync_output_buffer_replica_stalls(
     are released, the queue drains, and the next full sync carries everything written meanwhile."""
     master, [replica], c_master, [c_replica] = await setup_replication(
         df_factory,
-        # The egress limit keeps the traversal slow enough to pause the replica mid sync.
+        # The egress limit keeps the traversal slow enough to pause the replica mid sync. With
+        # journal omission off, every write to an untraversed key queues its bucket.
         master_args={
             "proactor_threads": 2,
+            "num_shards": 1,
             "snapshot_output_buffer_limit": output_buffer,
             "snapshot_egress_limit_bytes": "2mb",
             "replication_timeout": 2000,
+            "journal_omit_redundant_writes": False,
         },
         replica_args={"proactor_threads": 1},
         connect=False,
@@ -380,14 +385,19 @@ async def test_replication_full_sync_output_buffer_replica_stalls(
     await c_replica.execute_command("DEBUG REPLICA PAUSE")
     writer = asyncio.create_task(seeder.run(c_master))
 
-    limit = 0 if output_buffer == "0" else 1024 * 1024
+    # A producer waiting on the full queue holds the transaction queue of the only shard, so a read
+    # hangs behind it.
+    c_reader = master.client()
+    read = None
 
     @assert_eventually(times=200)
-    async def queue_exceeds_limit():
-        info = await c_master.info("memory")
-        assert info["snapshot_serialization_bytes"] > limit
+    async def producer_blocked():
+        nonlocal read
+        read = asyncio.create_task(c_reader.get("probe"))
+        done, _ = await asyncio.wait([read], timeout=0.2)
+        assert not done
 
-    await queue_exceeds_limit()
+    await producer_blocked()
 
     # replication_timeout makes the master drop the stalled replica mid sync.
     @assert_eventually(times=200)
@@ -395,6 +405,11 @@ async def test_replication_full_sync_output_buffer_replica_stalls(
         assert "slave0" not in await c_master.info("replication")
 
     await replica_dropped()
+
+    # Dropping the replica releases the blocked producer, and the read behind it.
+    async with async_timeout.timeout(30):
+        await read
+    await c_reader.aclose()
 
     # Writers waiting on the queue are released and the queue drains without a reader.
     await seeder.stop(c_master)

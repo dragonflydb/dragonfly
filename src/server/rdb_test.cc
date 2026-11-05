@@ -3167,6 +3167,10 @@ TEST_F(RdbTest, SnapshotOutputBuffer) {
   for (string_view limit : {"0", "1mb", "0"}) {
     Run({"debug", "populate", StrCat(kKeys), "key", "4000"});
     ASSERT_EQ(Run({"config", "set", "snapshot_output_buffer_limit", limit}), "OK");
+    vector<string> original;
+    for (unsigned i = 0; i < kKeys; i += 7) {
+      original.push_back(Run({"get", StrCat("key:", i)}).GetString());
+    }
 
     std::atomic_bool save_done = false;
     auto save_fb = pp_->at(0)->LaunchFiber([&] {
@@ -3196,7 +3200,7 @@ TEST_F(RdbTest, SnapshotOutputBuffer) {
     ASSERT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
     EXPECT_THAT(Run({"dbsize"}), IntArg(kKeys));
     for (unsigned i = 0; i < kKeys; i += 7) {
-      ASSERT_NE(Run({"get", StrCat("key:", i)}).GetString(), updated) << i;
+      ASSERT_EQ(Run({"get", StrCat("key:", i)}).GetString(), original[i / 7]) << i;
     }
     ASSERT_EQ(Run({"flushall"}), "OK");
   }
