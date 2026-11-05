@@ -27,6 +27,7 @@ extern "C" {
 #include "facade/string_socket.h"
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
+#include "server/journal/journal.h"
 #include "server/set_family.h"
 #include "util/fibers/pool.h"
 
@@ -38,7 +39,6 @@ ABSL_DECLARE_FLAG(uint32_t, num_shards);
 ABSL_FLAG(bool, force_epoll, false, "If true, uses epoll api instead iouring to run tests");
 ABSL_DECLARE_FLAG(uint32_t, acllog_max_len);
 ABSL_DECLARE_FLAG(bool, enable_heartbeat_rss_eviction);
-ABSL_DECLARE_FLAG(bool, disable_scope_based_mem_track);
 
 namespace dfly {
 
@@ -193,7 +193,6 @@ BaseFamilyTest::~BaseFamilyTest() {
 void BaseFamilyTest::SetUpTestSuite() {
   kInitSegmentLog = 1;
 
-  absl::SetFlag(&FLAGS_disable_scope_based_mem_track, false);
   absl::SetFlag(&FLAGS_rss_oom_deny_ratio, -1);
   absl::SetFlag(&FLAGS_dbfilename, "");
   // We don't want rss eviction
@@ -242,8 +241,6 @@ void BaseFamilyTest::TearDown() {
 
 void BaseFamilyTest::ResetService() {
   if (service_ != nullptr) {
-    TEST_InvalidateLockTagOptions();
-
     ShutdownService();
   }
 
@@ -400,14 +397,27 @@ string BaseFamilyTest::FormatMetrics(const Metrics& metrics) const {
   return service_->server_family().FormatInfoMetrics(metrics, "ALL", true, nullptr);
 }
 
+uint32_t BaseFamilyTest::StartJournalWithConsumer(journal::JournalConsumerInterface* consumer,
+                                                  unsigned index) {
+  uint32_t id = 0;
+  pp_->at(index)->AwaitBrief([&] {
+    CHECK(EngineShard::tlocal()) << "proactor " << index << " owns no shard";
+    journal::StartInThread();
+    id = journal::RegisterConsumer(consumer);
+  });
+  return id;
+}
+
 void BaseFamilyTest::WaitUntilLocked(DbIndex db_index, string_view key, double timeout) {
   auto step = 50us;
   auto timeout_micro = chrono::duration_cast<chrono::microseconds>(1000ms * timeout);
   int64_t steps = timeout_micro.count() / step.count();
+  bool locked = false;
   do {
     ThisFiber::SleepFor(step);
-  } while (!IsLocked(db_index, key) && --steps > 0);
-  CHECK(IsLocked(db_index, key));
+    locked = IsLocked(db_index, key);
+  } while (!locked && --steps > 0);
+  CHECK(locked);
 }
 
 bool BaseFamilyTest::WaitUntilCondition(std::function<bool()> condition_cb,
@@ -492,7 +502,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   CmdArgVec args = conn_wrapper->Args(slice);
 
   ConnectionContext* context = conn_wrapper->cmd_cntx();
-  context->ns = &namespaces->GetDefaultNamespace();
+  context->ns = &namespaces->GetOrInsert(namespace_);
 
   DCHECK(context->transaction == nullptr) << id;
   CommandContext cmd_cntx;
@@ -673,7 +683,7 @@ RespExpr BaseFamilyTest::TestConnWrapper::ParseResponse(bool fully_consumed) {
   // freeing it, since BuildExpr copies string data into owned_strings_.
   auto& parsed = *obj;
 
-  // BuildExpr handles scalars and arrays recursively, preserving array cardinality.
+  // BuildExpr handles scalars and arrays iteratively, preserving array cardinality.
   // parsed (RESPObj) goes out of scope here, freeing zmalloc-allocated hiredis
   // reply data on this thread. All needed string data has been copied into
   // expr_builder_.owned_strings_.

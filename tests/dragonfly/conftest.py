@@ -8,6 +8,7 @@ import logging
 import os
 import random
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -710,6 +711,20 @@ def copy_failed_logs(log_dir, report):
 def pytest_runtest_makereport(item, call):
     outcome = yield
     report = outcome.get_result()
+
+    if (
+        call.excinfo
+        and call.excinfo.errisinstance(pytest.fail.Exception)
+        and "from pytest-timeout." in str(call.excinfo.value)
+    ):
+        factory = item.funcargs.get("df_factory")
+        if factory:
+            processes = [instance.proc for instance in factory.instances if instance.proc]
+            for proc in processes:
+                proc.send_signal(signal.SIGUSR1)
+            if processes:
+                logging.error("Pytest timeout: requested fiber stacks before fixture cleanup")
+                sleep(5)
 
     if report.when == "call":
         # Store the result of the call phase in the item

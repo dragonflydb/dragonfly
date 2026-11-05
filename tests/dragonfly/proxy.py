@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import random
+import socket
 
 
 class Proxy:
@@ -9,20 +11,23 @@ class Proxy:
         self.remote_host = remote_host
         self.remote_port = remote_port
         self.stop_connections = []
-        self.server = None
+        self._listener = None
+        self._accept_retry = None
+        # Accepted sockets that no handler has taken over yet.
+        self._accepted = set()
         self._handler_tasks = set()
-        self._serve_task = None
         self._forwarding = asyncio.Event()
         self._forwarding.set()
         self._conn_gates = []
 
-    async def handle(self, reader, writer):
-        task = asyncio.current_task()
-        self._handler_tasks.add(task)
+    async def handle(self, sock):
+        self._accepted.discard(sock)
         try:
-            await self._handle_impl(reader, writer)
-        finally:
-            self._handler_tasks.discard(task)
+            reader, writer = await asyncio.open_connection(sock=sock)
+        except (OSError, asyncio.CancelledError):
+            sock.close()
+            return
+        await self._handle_impl(reader, writer)
 
     async def _handle_impl(self, reader, writer):
         try:
@@ -70,23 +75,39 @@ class Proxy:
             if cleanup in self.stop_connections:
                 self.stop_connections.remove(cleanup)
 
-    async def start(self):
-        self.server = await asyncio.start_server(self.handle, self.host, self.port)
+    def _accept(self):
+        # Accept and register in the same loop callback: asyncio.Server hands an accepted socket
+        # to a task that runs later, and if the server is closed before that task runs the socket
+        # stays open, unreachable from close(), until the cyclic GC frees it.
+        while True:
+            try:
+                sock, _ = self._listener.accept()
+            except (BlockingIOError, InterruptedError, ConnectionAbortedError):
+                return
+            except OSError as e:
+                # E.g. out of fds: the listener stays readable, so back off instead of spinning.
+                logging.warning("Proxy accept failed, retrying in 1s: %s", e)
+                loop = asyncio.get_running_loop()
+                loop.remove_reader(self._listener.fileno())
+                self._accept_retry = loop.call_later(1, self._resume_accept)
+                return
+            sock.setblocking(False)
+            self._accepted.add(sock)
+            task = asyncio.create_task(self.handle(sock))
+            self._handler_tasks.add(task)
+            task.add_done_callback(self._handler_tasks.discard)
 
-        if self.port == 0:
-            _, port = self.server.sockets[0].getsockname()[:2]
-            self.port = port
+    def _resume_accept(self):
+        self._accept_retry = None
+        asyncio.get_running_loop().add_reader(self._listener.fileno(), self._accept)
 
     async def start_serving(self):
-        await self.start()
-        self._serve_task = asyncio.create_task(self.serve(self.server))
-
-    async def serve(self, server=None):
-        server = server or self.server
-        if server is None:
-            return
-        async with server:
-            await server.serve_forever()
+        family = socket.AF_INET6 if ":" in self.host else socket.AF_INET
+        self._listener = socket.create_server((self.host, self.port), family=family, backlog=100)
+        self._listener.setblocking(False)
+        if self.port == 0:
+            self.port = self._listener.getsockname()[1]
+        asyncio.get_running_loop().add_reader(self._listener.fileno(), self._accept)
 
     async def __aenter__(self):
         await self.start_serving()
@@ -134,39 +155,31 @@ class Proxy:
             self.stop_connections.remove(cb)
             cb()
 
-    async def close(self, task=None):
+    async def close(self):
         # A Proxy is reused across close()/start_serving() cycles (see test_partial_sync), so
         # leave it forwarding: a paused proxy would silently stall every future connection.
         self.resume()
 
-        if task is None:
-            task = self._serve_task
-        if task is self._serve_task:
-            self._serve_task = None
+        if self._accept_retry is not None:
+            self._accept_retry.cancel()
+            self._accept_retry = None
 
-        if self.server is not None:
-            self.server.close()
-            self.server = None
+        if self._listener is not None:
+            asyncio.get_running_loop().remove_reader(self._listener.fileno())
+            self._listener.close()
+            self._listener = None
 
         for cb in self.stop_connections:
             cb()
         self.stop_connections = []
 
-        # Yield so that accepted-but-not-yet-started handler tasks begin
-        # executing and register themselves in _handler_tasks.
-        await asyncio.sleep(0)
+        # No accepts happen past this point and every accepted socket already has a handler
+        # task, including the ones that have not started running yet.
+        tasks = list(self._handler_tasks)
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Cancel all handler tasks, including ones that haven't registered
-        # their cleanup callbacks yet (race between accept and close).
-        # Loop until no tasks remain so late-starting handlers are caught.
-        while self._handler_tasks:
-            tasks = list(self._handler_tasks)
-            for t in tasks:
-                t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-
-        if task is not None:
-            try:
-                await task
-            except asyncio.exceptions.CancelledError:
-                pass
+        for sock in self._accepted:
+            sock.close()
+        self._accepted.clear()

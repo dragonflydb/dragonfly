@@ -13,8 +13,10 @@ extern "C" {
 
 #include <absl/flags/reflection.h>
 #include <mimalloc.h>
+#include <sys/resource.h>
 
 #include <filesystem>
+#include <fstream>
 
 #include "base/flags.h"
 #include "base/gtest.h"
@@ -24,13 +26,19 @@ extern "C" {
 #include "facade/facade_test.h"  // needed to find operator== for RespExpr.
 #include "io/file.h"
 #include "io/file_util.h"
+#include "server/detail/save_stages_controller.h"
+#include "server/detail/snapshot_storage.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/serializer.h"
 #include "server/journal/types.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
+#include "server/rdb_load_context.h"
 #include "server/rdb_save.h"
+#ifdef WITH_SEARCH
+#include "server/search/doc_index.h"
+#endif
 #include "server/serializer_commons.h"
 #include "server/server_state.h"
 #include "server/test_utils.h"
@@ -100,6 +108,13 @@ class RdbTest : public BaseFamilyTest {
       RdbLoader loader(service_.get(), &load_context);
       return loader.Load(&fs);
     });
+  }
+
+  bool IsIndexingDone(string_view idx_name) {
+    auto resp = Run({"FT.INFO", idx_name});
+    auto arr = resp.GetVec();
+    auto it = rng::find_if(arr, [](const auto& e) { return e == "indexing"; });
+    return it != arr.end() && (++it)->GetInt() == 0;
   }
 
   // Load a raw RDB image through the default (file/replica) loader path (no deep_integrity).
@@ -596,6 +611,157 @@ TEST_F(RdbTest, SaveFlush) {
   EXPECT_EQ(500000, k_v.second);
 }
 
+class SnapshotLoadingTest : public RdbTest, public WithParamInterface<pair<bool, bool>> {};
+
+TEST_P(SnapshotLoadingTest, CancelSave) {
+  const auto [use_dfs_format, bg_save] = GetParam();
+  const string_view format = use_dfs_format ? "DF" : "RDB";
+  absl::FlagSaver flags;
+  SetTestFlag("background_snapshotting", "true");
+
+  // Cancellation must preserve the previous successful snapshot and its metadata.
+  ASSERT_EQ(Run({"SET", "original", "value"}), "OK");
+  ASSERT_EQ(Run({"SAVE", format}), "OK");
+  const auto previous_save = service_->server_family().GetLastSaveInfo();
+  Run({"DEBUG", "POPULATE", "50000", "key", "256"});
+
+  const string basename = StrCat(absl::GetFlag(FLAGS_dbfilename), "_cancelled");
+  RespExpr save_response;
+  auto save_fb = pp_->at(1)->LaunchFiber([&] {
+    save_response = Run({bg_save ? "BGSAVE" : "SAVE", format, basename});
+  });
+
+  EXPECT_TRUE(WaitUntilCondition([&] { return service_->server_family().TEST_IsSaving(); },
+                                 chrono::seconds(10)));
+  EXPECT_EQ(service_->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING), GlobalState::ACTIVE);
+  EXPECT_THAT(Run({"SAVE", format}), ErrArg("LOADING Dragonfly is loading the dataset in memory"));
+  // Returning to ACTIVE must not revive a save that was cancelled by the transition.
+  EXPECT_EQ(service_->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE), GlobalState::LOADING);
+  save_fb.Join();
+
+  EXPECT_TRUE(WaitUntilCondition(
+      [&] { return bool(service_->server_family().GetLastSaveInfo().last_error); },
+      chrono::seconds(10)));
+  const auto save_info = service_->server_family().GetLastSaveInfo();
+  EXPECT_EQ(static_cast<error_code>(save_info.last_error),
+            make_error_code(errc::operation_canceled));
+  EXPECT_EQ(save_info.save_time, previous_save.save_time);
+  EXPECT_EQ(save_info.file_name, previous_save.file_name);
+  EXPECT_EQ(save_info.freq_map, previous_save.freq_map);
+  EXPECT_FALSE(service_->server_family().TEST_IsSaving());
+  if (bg_save) {
+    EXPECT_EQ(save_response, "OK");
+    EXPECT_FALSE(save_info.bgsave_in_progress);
+    EXPECT_FALSE(save_info.last_bgsave_status);
+  } else {
+    EXPECT_THAT(save_response, ArgType(RespExpr::ERROR));
+    EXPECT_THAT(save_response.GetString(), HasSubstr("Snapshot saving cancelled"));
+  }
+
+  auto files = io::StatFiles(StrCat(basename, "*"));
+  ASSERT_TRUE(files);
+  EXPECT_TRUE(files->empty());
+  EXPECT_TRUE(filesystem::exists(previous_save.file_name));
+  // A subsequent save must be able to use the cancelled save's name.
+  EXPECT_EQ(Run({"SAVE", format, basename}), "OK");
+}
+
+INSTANTIATE_TEST_SUITE_P(SaveModes, SnapshotLoadingTest,
+                         Values(pair{false, false}, pair{false, true}, pair{true, false},
+                                pair{true, true}));
+
+namespace {
+
+// Cloud storage that counts the uploads it opened, published with Close() and aborted.
+class TestCloudStorage : public detail::FileSnapshotStorage {
+ public:
+  enum Failure { kNone, kCancel, kOpenSummary, kWrite, kClose };
+
+  explicit TestCloudStorage(Failure failure) : FileSnapshotStorage(nullptr), failure_(failure) {
+  }
+
+  io::Result<pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(const string& path) override {
+    if (failure_ == kOpenSummary && path.find("summary") != string::npos)
+      return nonstd::make_unexpected(GenericError(make_error_code(errc::io_error)));
+    ++opened;
+    return pair<io::Sink*, uint8_t>{new File(this), detail::FileType::CLOUD};
+  }
+
+  bool IsCloud() const override {
+    return true;
+  }
+
+  atomic_uint opened = 0, published = 0, aborted = 0;
+
+ private:
+  class File : public io::WriteFile {
+   public:
+    explicit File(TestCloudStorage* storage) : WriteFile(""), storage_(storage) {
+    }
+
+    io::Result<size_t> WriteSome(const iovec* v, uint32_t len) override {
+      if (storage_->failure_ == kWrite)
+        return nonstd::make_unexpected(make_error_code(errc::io_error));
+      size_t written = 0;
+      for (uint32_t i = 0; i < len; ++i)
+        written += v[i].iov_len;
+      return written;
+    }
+
+    error_code Close() override {
+      if (storage_->failure_ == kClose)
+        return make_error_code(errc::io_error);
+      ++storage_->published;
+      return {};
+    }
+
+    error_code Abort() override {
+      ++storage_->aborted;
+      return {};
+    }
+
+   private:
+    TestCloudStorage* storage_;
+  };
+
+  Failure failure_;
+};
+
+}  // namespace
+
+// A failed or cancelled cloud save must abort all its uploads instead of publishing them.
+TEST_F(RdbTest, FailedCloudSaveAbortsUploads) {
+  for (auto failure :
+       {TestCloudStorage::kNone, TestCloudStorage::kCancel, TestCloudStorage::kOpenSummary,
+        TestCloudStorage::kWrite, TestCloudStorage::kClose}) {
+    SCOPED_TRACE(failure);
+    auto storage = make_shared<TestCloudStorage>(failure);
+    GenericError error;
+    pp_->at(0)->Await([&] {
+      boost::intrusive_ptr<Transaction> trans(new Transaction{service_->FindCmd("SAVE")});
+      trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+      detail::SaveStagesController controller(
+          {true, {}, {}, trans.get(), service_.get(), storage, false});
+      ASSERT_FALSE(controller.Init());
+      controller.Start();
+      if (failure == TestCloudStorage::kCancel)
+        controller.Cancel();
+      controller.WaitAllSnapshots();
+      error = controller.Finalize().error;
+    });
+
+    if (failure == TestCloudStorage::kNone) {
+      EXPECT_FALSE(error);
+      EXPECT_EQ(storage->published, shard_set->size() + 1);
+      EXPECT_EQ(storage->aborted, 0u);
+    } else {
+      EXPECT_TRUE(error);
+      EXPECT_EQ(storage->published, 0u);
+      EXPECT_EQ(storage->aborted, storage->opened);
+    }
+  }
+}
+
 TEST_F(RdbTest, SaveManyDbs) {
   Run({"debug", "populate", "50000"});
   pp_->at(1)->Await([&] {
@@ -832,6 +998,141 @@ TEST_F(RdbTest, RestoreSearchIndexNameStartingWithColon) {
   EXPECT_THAT(v.front(), IntArg(1));
 }
 
+#ifdef WITH_SEARCH
+TEST_F(RdbTest, SearchAliasesRoundTrip) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+
+  const string utf8_alias = ":alias-café";
+  ASSERT_EQ(Run({"FT.ALIASADD", "first", "idx-a"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "second", "idx-a"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASUPDATE", "first", "idx-b"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", utf8_alias, "idx-b"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "deleted", "idx-a"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASDEL", "deleted"}), "OK");
+  ASSERT_EQ(Run({"save", "df"}), "OK");
+
+  // Change every kind of alias state before reloading the snapshot.
+  ASSERT_EQ(Run({"FT.ALIASUPDATE", "first", "idx-a"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASDEL", "second"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "new", "idx-b"}), "OK");
+
+  auto expect_aliases = [&](vector<pair<string, string>> expected) {
+    ranges::sort(expected);
+    pp_->at(0)->Await([&] {
+      shard_set->RunBriefInParallel([&](EngineShard* es) {
+        auto actual = es->search_indices()->GetAliases();
+        ranges::sort(actual);
+        EXPECT_EQ(actual, expected) << "shard " << es->shard_id();
+      });
+    });
+  };
+  const vector<pair<string, string>> expected_aliases = {
+      {"first", "idx-b"}, {"second", "idx-a"}, {utf8_alias, "idx-b"}};
+
+  ASSERT_EQ(Run({"debug", "reload", "nosave"}), "OK");
+  expect_aliases(expected_aliases);
+  ASSERT_EQ(Run({"debug", "reload", "nosave"}), "OK");
+  expect_aliases(expected_aliases);
+}
+
+// Users choose names, prefixes, stop words, separators and synonym terms, spaces and tabs included.
+TEST_F(RdbTest, SearchDefinitionsWithSpacesSurviveReload) {
+  ASSERT_EQ(Run({"FT.CREATE", "my idx", "ON",        "JSON", "PREFIX",    "2",
+                 "my pfx:",   "j:",     "STOPWORDS", "1",    "a b",       "LANGUAGE_FIELD",
+                 "my lang",   "SCHEMA", "$.t",       "AS",   "t",         "TEXT",
+                 "$.d.city",  "AS",     "my city",   "TAG",  "SEPARATOR", " "}),
+            "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "h idx", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "first name",
+                 "TEXT", "a\tb", "TAG"}),
+            "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "my alias", "my idx"}), "OK");
+  ASSERT_EQ(Run({"FT.SYNUPDATE", "h idx", "group one", "new york"}), "OK");
+  Run({"JSON.SET", "j:1", "$", R"({"t":"hello","d":{"city":"New York"}})"});
+  Run({"HSET", "h:1", "first name", "jane", "a\tb", "x"});
+
+  auto state = [&] {
+    vector<string> out;
+    auto names = Run({"FT._LIST"});
+    for (const auto& name : names.GetVec())
+      out.push_back(string{name.GetString()});
+    ranges::sort(out);
+    for (string_view idx : {"my idx", "h idx"}) {
+      EXPECT_TRUE(WaitUntilCondition([&] { return IsIndexingDone(idx); },
+                                     std::chrono::milliseconds(10000)));
+      out.push_back(testing::PrintToString(Run({"FT.INFO", idx})));
+    }
+    out.push_back(testing::PrintToString(Run({"FT.SYNDUMP", "h idx"})));
+    out.push_back(testing::PrintToString(Run({"FT.SEARCH", "my alias", "@t:hello", "NOCONTENT"})));
+    return out;
+  };
+  const auto before = state();
+  ASSERT_EQ(Run({"save", "df"}), "OK");
+
+  // Older versions skip these keys instead of misreading the arguments.
+  auto summary = io::ReadFileToString(service_->server_family().GetLastSaveInfo().file_name);
+  ASSERT_TRUE(summary);
+  for (string_view key : {"search-index-resp", "search-alias-resp", "search-synonyms-resp"})
+    EXPECT_TRUE(absl::StrContains(*summary, key)) << key;
+  ASSERT_EQ(Run({"debug", "reload"}), "OK");
+  EXPECT_EQ(state(), before);
+}
+
+// A wide schema is written inline under the old key, as before, and loads back.
+TEST_F(RdbTest, WideSearchIndexSurvivesReload) {
+  vector<string> cmd = {"FT.CREATE", "wide", "ON", "HASH", "SCHEMA"};
+  for (int i = 0; i < 800; ++i) {
+    cmd.push_back(StrCat("a_rather_long_customer_field_name_", i));
+    cmd.push_back("TEXT");
+  }
+  ASSERT_EQ(Run(absl::MakeSpan(cmd)), "OK");
+  ASSERT_EQ(Run({"save", "df"}), "OK");
+  auto summary = io::ReadFileToString(service_->server_family().GetLastSaveInfo().file_name);
+  ASSERT_TRUE(summary);
+  EXPECT_TRUE(absl::StrContains(*summary, "wide ON HASH "));
+  EXPECT_FALSE(absl::StrContains(*summary, "-resp"));
+  ASSERT_EQ(Run({"debug", "reload"}), "OK");
+  EXPECT_THAT(Run({"FT._LIST"}), RespArray(ElementsAre("wide")));
+  auto info = Run({"FT.INFO", "wide"}).GetVec();
+  auto it = rng::find_if(info, [](const auto& e) { return e == "attributes"; });
+  ASSERT_NE(it, info.end());
+  EXPECT_EQ((++it)->GetVec().size(), 800u);
+}
+
+// A count below the arguments that follow must fail the field instead of restoring a part of it.
+TEST_F(RdbTest, UnderstatedSearchArgumentCountIsRejected) {
+  string def = "*6\r\n";
+  for (string_view arg : {"my idx", "ON", "HASH", "SCHEMA", "a", "TAG", "b", "TAG"})
+    absl::StrAppend(&def, "$", arg.size(), "\r\n", arg, "\r\n");
+  pp_->at(0)->Await([&] {
+    LoadSearchCommandFromAux(service_.get(), std::move(def), "FT.CREATE", "index definition");
+  });
+  EXPECT_THAT(Run({"FT._LIST"}).GetVec(), IsEmpty());
+}
+
+#ifdef __linux__
+// A corrupt argument count must fail the field instead of reserving memory for the count.
+TEST_F(RdbTest, CorruptSearchArgumentCountIsRejected) {
+  // Limit the address space so that hosts which overcommit memory fail a huge reservation too.
+  size_t vm_pages = 0;
+  ifstream{"/proc/self/statm"} >> vm_pages;
+  ASSERT_GT(vm_pages, 0u);
+  rlimit prev;
+  ASSERT_EQ(getrlimit(RLIMIT_AS, &prev), 0);
+  rlimit limit = prev;
+  limit.rlim_cur = min<rlim_t>(prev.rlim_cur, vm_pages * getpagesize() + (2ULL << 30));
+  ASSERT_EQ(setrlimit(RLIMIT_AS, &limit), 0);
+
+  pp_->at(0)->Await([&] {
+    EXPECT_NO_THROW(LoadSearchCommandFromAux(service_.get(), "*4294967295\r\n", "FT.CREATE",
+                                             "index definition"));
+  });
+  ASSERT_EQ(setrlimit(RLIMIT_AS, &prev), 0);
+  EXPECT_THAT(Run({"FT._LIST"}).GetVec(), IsEmpty());
+}
+#endif
+#endif
+
 // Parametrized test for RestoreVectorSearchIndexHnsw with varying document counts
 class HnswRestoreTest : public RdbTest, public testing::WithParamInterface<int> {};
 
@@ -867,16 +1168,9 @@ TEST_P(HnswRestoreTest, RestoreVectorSearchIndexHnsw) {
   EXPECT_EQ(Run({"dfly", "load", save_info.file_name}), "OK");
 
   // Wait for async index building to complete on both indices
-  auto is_indexing_done = [this](string_view idx_name) {
-    auto resp = Run({"FT.INFO", idx_name});
-    auto arr = resp.GetVec();
-    auto it = rng::find_if(arr, [](const auto& e) { return e == "indexing"; });
-    return it != arr.end() && (++it)->GetInt() == 0;
-  };
-
-  ASSERT_TRUE(WaitUntilCondition([&] { return is_indexing_done("vec_idx"); },
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsIndexingDone("vec_idx"); },
                                  std::chrono::milliseconds(10000)));
-  ASSERT_TRUE(WaitUntilCondition([&] { return is_indexing_done("only_vec_idx"); },
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsIndexingDone("only_vec_idx"); },
                                  std::chrono::milliseconds(10000)));
 
   // Verify text search still works on the restored index
@@ -910,6 +1204,93 @@ INSTANTIATE_TEST_SUITE_P(HnswRestoreTest, HnswRestoreTest, Values(5, 50, 500, 10
                          [](const testing::TestParamInfo<int>& info) {
                            return StrCat("Docs", info.param);
                          });
+
+// A load that fails after the index definitions were replayed must not leave unbuilt indexes
+// behind: they crash every search and report themselves as fully indexed.
+TEST_F(RdbTest, FailedLoadDropsUnbuiltIndex) {
+  const string vec = StrCat(FloatToBytes(1.0f), FloatToBytes(2.0f));
+  auto create = [&] {
+    return Run({"FT.CREATE", "idx", "ON",   "HASH",    "PREFIX", "1", "doc:",
+                "SCHEMA",    "t",   "TEXT", "g",       "TAG",    "v", "VECTOR",
+                "HNSW",      "6",   "TYPE", "FLOAT32", "DIM",    "2", "DISTANCE_METRIC",
+                "L2"});
+  };
+  ASSERT_EQ(create(), "OK");
+#ifdef WITH_SEARCH
+  ASSERT_EQ(Run({"FT.ALIASADD", "idx-alias", "idx"}), "OK");
+#endif
+  for (int i = 0; i < 10; ++i)
+    Run({"HSET", StrCat("doc:", i), "t", "hello", "g", "a", "v", vec});
+  ASSERT_EQ(Run({"save", "df"}), "OK");
+
+  // An empty shard file fails the load after the summary has replayed the index definitions.
+  string shard_file = service_->server_family().GetLastSaveInfo().file_name;
+  shard_file.replace(shard_file.rfind("summary"), 7, "0000");
+  filesystem::resize_file(shard_file, 0);
+
+  ASSERT_THAT(Run({"debug", "reload", "nosave"}), ArgType(RespExpr::ERROR));
+  EXPECT_GT(CheckedInt({"dbsize"}), 0);
+
+  const auto no_index = ErrArg("idx: no such index");
+  EXPECT_THAT(Run({"ft._list"}).GetVec(), IsEmpty());
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), no_index);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), no_index);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
+  EXPECT_THAT(
+      Run({"FT.HYBRID", "idx", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
+      no_index);
+  EXPECT_THAT(Run({"FT.INFO", "idx"}), no_index);
+#ifdef WITH_SEARCH
+  pp_->at(0)->Await([] {
+    shard_set->RunBriefInParallel(
+        [](EngineShard* es) { EXPECT_THAT(es->search_indices()->GetAliases(), IsEmpty()); });
+  });
+#endif
+
+  // The name is free again and the keys that survived the load get indexed.
+  ASSERT_EQ(create(), "OK");
+#ifdef WITH_SEARCH
+  ASSERT_EQ(Run({"FT.ALIASADD", "idx-alias", "idx"}), "OK");
+#endif
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsIndexingDone("idx"); }, std::chrono::milliseconds(10000)));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "LIMIT", "0", "0"}),
+              RespArray(ElementsAre(IntArg(CheckedInt({"dbsize"})))));
+}
+
+// Between its definition during a load and the rebuild after the load an index has no data
+// structures yet. Queries must fail cleanly and FT.INFO must not call it indexed.
+TEST_F(RdbTest, UnbuiltIndexAnswersWithoutCrash) {
+  const string vec = StrCat(FloatToBytes(1.0f), FloatToBytes(2.0f));
+  pp_->at(0)->Await([&] {
+    service_->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING);
+    LoadSearchCommandFromAux(service_.get(),
+                             "idx ON HASH PREFIX 1 doc: SCHEMA t TEXT g TAG v VECTOR HNSW 6 TYPE "
+                             "FLOAT32 DIM 2 DISTANCE_METRIC L2",
+                             "FT.CREATE", "index definition");
+    service_->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+  });
+
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), ErrArg("not built"));
+  EXPECT_THAT(
+      Run({"FT.HYBRID", "idx", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
+      ArgType(RespExpr::ARRAY));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}).GetVec(), IsEmpty());
+  auto info = Run({"FT.INFO", "idx"}).GetVec();
+  auto it = rng::find_if(info, [](const auto& e) { return e == "percent_indexed"; });
+  ASSERT_NE(it, info.end());
+  EXPECT_EQ(*++it, "0");
+
+  // A failed replica sync keeps the definitions for its next, successful run.
+  pp_->at(0)->Await([&] {
+    service_->RequestLoadingState();
+    RdbLoadContext{}.PerformPostLoad(service_.get(), true);
+    service_->RemoveLoadingState();
+  });
+  EXPECT_THAT(Run({"ft._list"}), RespArray(ElementsAre("idx")));
+  EXPECT_EQ(Run({"FT.DROPINDEX", "idx"}), "OK");
+}
 
 TEST_F(RdbTest, DflyLoadAppend) {
   // Create an RDB with (k1,1) value in it saved as `filename`
@@ -1854,6 +2235,118 @@ TEST_F(RdbTest, DragonflyExtensions) {
   }
 }
 
+#ifdef WITH_SEARCH
+TEST_F(RdbTest, SearchAliasAuxValidation) {
+  ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "taken", "idx-a"}), "OK");
+
+  const vector<string> malformed = {
+      "taken idx-b",        // conflicting alias
+      "alias",              // missing target
+      "new missing",        // missing index
+      "",                   // empty
+      "alias idx-a extra",  // too many args
+      "idx-a idx-b",        // index name used as alias
+  };
+  for (const auto& def : malformed) {
+    SCOPED_TRACE("definition size: " + std::to_string(def.size()));
+    string body;
+    body.push_back(RDB_OPCODE_AUX);
+    AddKV(&body, "df-ver", "test");
+    body.push_back(RDB_OPCODE_AUX);
+    AddKV(&body, "search-alias", def);
+    const auto data = WrapInRdb(body);
+    // Bad aliases are skipped without failing the load or touching existing aliases.
+    EXPECT_FALSE(LoadRdbBytes(to_byte(data.data()), data.size()));
+    pp_->at(0)->Await([] {
+      shard_set->RunBriefInParallel([](EngineShard* es) {
+        EXPECT_THAT(es->search_indices()->GetAliases(), ElementsAre(Pair("taken", "idx-a")));
+      });
+    });
+  }
+}
+
+TEST_F(RdbTest, AliasJournalMutationsAbortFullSync) {
+  auto aliases_on_all_shards = [&] {
+    vector<vector<pair<string, string>>> aliases(shard_set->size());
+    pp_->at(0)->Await([&] {
+      shard_set->RunBriefInParallel([&](EngineShard* es) {
+        aliases[es->shard_id()] = es->search_indices()->GetAliases();
+        sort(aliases[es->shard_id()].begin(), aliases[es->shard_id()].end());
+      });
+    });
+    return aliases;
+  };
+
+  auto make_journal_command = [](std::string_view command, std::string_view alias,
+                                 std::string_view target) {
+    io::StringSink sink;
+    JournalWriter writer(&sink);
+    const std::string_view args[] = {alias, target};
+    writer.Write(journal::Entry{
+        1, journal::Op::COMMAND, 0, std::nullopt,
+        journal::Entry::Payload(command, ArgSlice{args, command == "FT.ALIASDEL" ? 1u : 2u})});
+    RdbSerializer serializer(CompressionMode::NONE);
+    CHECK(!serializer.WriteJournalEntry(std::move(sink).str()));
+    return serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+  };
+
+  auto expect_rejected_without_mutation = [&](std::string_view command, std::string_view alias,
+                                              std::string_view target, bool initially_exists) {
+    SCOPED_TRACE(command);
+    ASSERT_EQ(Run({"FLUSHALL"}), "OK");
+    ASSERT_EQ(Run({"FT.CREATE", "idx-a", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+    ASSERT_EQ(Run({"FT.CREATE", "idx-b", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+    if (initially_exists) {
+      ASSERT_EQ(Run({"FT.ALIASADD", string(alias), "idx-a"}), "OK");
+    }
+    auto before = aliases_on_all_shards();
+
+    const auto rdb = WrapInRdb(make_journal_command(command, alias, target));
+    EXPECT_EQ(LoadRdbBytes(to_byte(rdb.data()), rdb.size()),
+              RdbError(rdb::errc::unsupported_operation));
+    auto after = aliases_on_all_shards();
+    EXPECT_EQ(after, before);
+  };
+
+  expect_rejected_without_mutation("FT.ALIASADD", "new", "idx-a", false);
+  expect_rejected_without_mutation("FT.ALIASUPDATE", "live", "idx-b", true);
+  expect_rejected_without_mutation("FT.ALIASDEL", "live", "", true);
+}
+
+// A full sync replays a journaled FT.SYNUPDATE before the index from the header is built.
+TEST_F(RdbTest, FullSyncKeepsSynUpdateOnUnbuiltIndex) {
+  ASSERT_THAT(Run({"HSET", "doc:1", "t", "automobile"}), IntArg(1));
+
+  string body;
+  body.push_back(RDB_OPCODE_AUX);
+  AddKV(&body, "search-index", "idx ON HASH PREFIX 1 doc: SCHEMA t TEXT");
+
+  io::StringSink sink;
+  JournalWriter writer(&sink);
+  const string_view args[] = {"idx", "g1", "car", "automobile"};
+  writer.Write(journal::Entry{1, journal::Op::COMMAND, 0, std::nullopt,
+                              journal::Entry::Payload("FT.SYNUPDATE", ArgSlice{args})});
+  RdbSerializer serializer(CompressionMode::NONE);
+  ASSERT_FALSE(serializer.WriteJournalEntry(std::move(sink).str()));
+  body += serializer.Flush(RdbSerializer::FlushState::kFlushEndEntry);
+
+  const auto rdb = WrapInRdb(body);
+  pp_->at(0)->Await([&] { service_->RequestLoadingState(); });
+  EXPECT_FALSE(LoadRdbBytes(to_byte(rdb.data()), rdb.size()));
+  pp_->at(0)->Await([&] {
+    RdbLoadContext{}.PerformPostLoad(service_.get());
+    service_->RemoveLoadingState();
+  });
+
+  EXPECT_THAT(Run({"FT.SYNDUMP", "idx"}),
+              RespArray(UnorderedElementsAre("car", RespElementsAre("g1"), "automobile",
+                                             RespElementsAre("g1"))));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "car", "NOCONTENT"}), RespElementsAre(IntArg(1), "doc:1"));
+}
+#endif
+
 TEST_F(RdbTest, HashExpiryEncoding) {
   absl::FlagSaver fs;
   SetTestFlag("num_shards", "1");
@@ -1976,10 +2469,13 @@ TEST_F(RdbTest, SplitSBF) {
   // splits. A plain string is also added between the split filter.
 
   // Creates filter in db to copy the fields from
-  auto resp = Run({"BF.RESERVE", "bf_src", "0.01", "10"});
+  constexpr char kShard0Key[] = "bf_src";
+  CHECK_EQ(0u, Shard(kShard0Key, shard_set->size()));
+
+  auto resp = Run({"BF.RESERVE", kShard0Key, "0.01", "10"});
   EXPECT_EQ(resp, "OK");
   for (size_t i = 0; i < 50; ++i) {
-    resp = Run({"BF.ADD", "bf_src", StrCat("item", i)});
+    resp = Run({"BF.ADD", kShard0Key, StrCat("item", i)});
     EXPECT_THAT(resp, AnyOf(0, 1));
   }
 
@@ -1994,7 +2490,7 @@ TEST_F(RdbTest, SplitSBF) {
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
     const auto& db = ctx.GetDbSlice(0);
-    auto it = db.FindReadOnly(ctx, "bf_src", OBJ_SBF);
+    auto it = db.FindReadOnly(ctx, kShard0Key, OBJ_SBF);
     ASSERT_TRUE(it.ok());
 
     const SBF* sbf = it.value()->second.GetSBF();
@@ -2068,10 +2564,13 @@ TEST_F(RdbTest, SplitSBF) {
 }
 
 TEST_F(RdbTest, SplitCuckoo) {
-  auto resp = Run("cf.reserve cf_src 4 expansion 2");
+  constexpr char kShard0Key[] = "cf_src";
+  CHECK_EQ(0u, Shard(kShard0Key, shard_set->size()));
+
+  auto resp = Run(StrCat("cf.reserve ", kShard0Key, " 4 expansion 2"));
   EXPECT_EQ(resp, "OK");
   for (size_t i = 0; i < 100; ++i) {
-    resp = Run(StrCat("cf.add cf_src item", i));
+    resp = Run(StrCat("cf.add ", kShard0Key, " item", i));
     EXPECT_THAT(resp, IntArg(1));
   }
 
@@ -2085,7 +2584,7 @@ TEST_F(RdbTest, SplitCuckoo) {
   pp_->at(0)->Await([&] {
     const DbContext ctx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
     const auto& db = ctx.GetDbSlice(0);
-    auto it = db.FindReadOnly(ctx, "cf_src", OBJ_CUCKOOFILTER);
+    auto it = db.FindReadOnly(ctx, kShard0Key, OBJ_CUCKOOFILTER);
     ASSERT_TRUE(it.ok());
 
     const CuckooFilter* cf = it.value()->second.GetCuckooFilter();
@@ -2155,6 +2654,47 @@ TEST_F(RdbTest, SplitCuckoo) {
   for (size_t i = 0; i < 100; ++i) {
     EXPECT_THAT(Run(StrCat("cf.exists cf_loaded item", i)), IntArg(1));
   }
+}
+
+// Twin attributes, also one added by FT.ALTER or on an HNSW field, and their declaration order
+// come back from a snapshot.
+TEST_F(RdbTest, TwinAttributesSurviveReload) {
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "email", "AS",
+                 "e_text", "TEXT", "city", "TEXT"}),
+            "OK");
+  EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", "email", "AS", "e_tag", "TAG"}), "OK");
+  Run({"HSET", "d:1", "email", "jane", "city", "Boston"});
+  EXPECT_EQ(Run("FT.CREATE vx ON HASH PREFIX 1 v: SCHEMA "
+                "v AS h1 VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2 "
+                "v AS h2 VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC COSINE"),
+            "OK");
+  Run({"HSET", "v:1", "v", StrCat(FloatToBytes(1.0f), FloatToBytes(0.0f))});
+  Run({"HSET", "v:2", "v", StrCat(FloatToBytes(0.0f), FloatToBytes(1.0f))});
+  EXPECT_EQ(Run({"save", "df"}), "OK");
+  EXPECT_EQ(Run({"debug", "reload"}), "OK");
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsIndexingDone("idx"); }, std::chrono::milliseconds(10000)));
+  ASSERT_TRUE(
+      WaitUntilCondition([&] { return IsIndexingDone("vx"); }, std::chrono::milliseconds(10000)));
+
+  auto info = Run({"FT.INFO", "idx"}).GetVec();
+  auto it = rng::find_if(info, [](const auto& e) { return e == "attributes"; });
+  ASSERT_NE(it, info.end());
+  vector<string> aliases;
+  for (const auto& attr : (++it)->GetVec())
+    aliases.push_back(string{attr.GetVec()[3].GetString()});
+  EXPECT_THAT(aliases, ElementsAre("e_text", "city", "e_tag"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_text:jane", "NOCONTENT"}),
+              RespArray(ElementsAre(IntArg(1), "d:1")));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@e_tag:{jane}", "NOCONTENT"}),
+              RespArray(ElementsAre(IntArg(1), "d:1")));
+  for (auto [field, q, nearest] :
+       {std::tuple{"h1", FloatToBytes(0.9f) + FloatToBytes(0.0f), "v:1"},
+        std::tuple{"h2", FloatToBytes(0.0f) + FloatToBytes(0.9f), "v:2"}})
+    EXPECT_THAT(Run({"FT.SEARCH", "vx", StrCat("*=>[KNN 1 @", field, " $q]"), "PARAMS", "2", "q", q,
+                     "NOCONTENT"}),
+                RespArray(ElementsAre(IntArg(1), nearest)))
+        << field;
 }
 
 TEST_F(RdbTest, TaggedInterleavedRoundTrip) {

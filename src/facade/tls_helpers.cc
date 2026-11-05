@@ -61,7 +61,7 @@ std::string Asn1TimeToString(const ASN1_TIME* asn1_time) {
   return result;
 }
 
-std::string X509NameToString(X509_NAME* name) {
+std::string X509NameToString(const X509_NAME* name) {
   if (!name)
     return {};
 
@@ -180,8 +180,8 @@ std::optional<TlsCertInfo> ParseTlsCertInfo(const X509* cert) {
   TlsCertInfo info;
   info.subject = X509NameToString(X509_get_subject_name(cert));
   info.issuer = X509NameToString(X509_get_issuer_name(cert));
-  info.not_before = Asn1TimeToString(X509_get_notBefore(cert));
-  info.not_after = Asn1TimeToString(X509_get_notAfter(cert));
+  info.not_before = Asn1TimeToString(X509_get0_notBefore(cert));
+  info.not_after = Asn1TimeToString(X509_get0_notAfter(cert));
 
   return info;
 }

@@ -40,6 +40,11 @@
 
 namespace dfly::search {
 
+// Glob match with `*`, `?` and `\` escapes; the test the wildcard walk applies to index keys.
+bool GlobMatch(std::string_view text, std::string_view pattern);
+// Literal characters of `pattern` before the first `*` or `?`: every match starts with them.
+std::string GlobLiteralPrefix(std::string_view pattern);
+
 // Per-token indexing payload. `positions` is sorted ascending (1-based per field value,
 // continuous across multi-value fields). Empty when the owning index doesn't store positions.
 struct TermInfo {
@@ -111,6 +116,9 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // the raw token form (stems live at the same positions but under a separate trie key).
   const Container* MatchingNoStem(std::string_view str) const;
 
+  // Posting list key that Matching() looks up for a query word.
+  cmn::StringOrView NormalizeForExactQuery(std::string_view word) const;
+
   // Iterate over all nodes matching on prefix.
   void MatchPrefix(std::string_view prefix, absl::FunctionRef<void(const Container*)> cb) const;
 
@@ -167,7 +175,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
     return field_total_docs_len_;
   }
 
-  // Schema canonical identifier of this field. Set by FieldIndices after
+  // Alias of the attribute this index serves. Set by FieldIndices after
   // construction; empty when the index is built outside that path.
   std::string_view field_ident() const {
     return field_ident_;
@@ -191,7 +199,6 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
                         absl::flat_hash_map<std::string, TermInfo>* out) const = 0;
 
   cmn::StringOrView NormalizeQueryWord(std::string_view word) const;
-  cmn::StringOrView NormalizeForExactQuery(std::string_view word) const;
   static Container* GetOrCreate(search::RaxTreeMap<Container>* map, std::string_view word,
                                 bool store_freq = false, bool store_positions = false);
   static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);

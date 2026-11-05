@@ -246,15 +246,19 @@ TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
 
 // Test how slowlog captures additional information about heavy commands
 TEST_F(ServerFamilyTest, SlowLogExecEval) {
+  constexpr char kShard0Key[] = "b";
+  constexpr char kShard1Key[] = "x";
+  constexpr char kShard1AltKey[] = "y";
+
   Run({"config", "set", "slowlog_max_len", "20"});
   Run({"config", "set", "slowlog_log_slower_than", "0"});
 
   // Run EXEC
   {
     Run({"multi"});
-    Run({"set", "first", "ok"});
-    Run({"set", "second2", "ok"});
-    Run({"get", "third3"});
+    Run({"set", kShard1Key, "ok"});
+    Run({"set", kShard0Key, "ok"});
+    Run({"get", kShard1AltKey});
     Run({"exec"});
   }
 
@@ -269,7 +273,7 @@ for i, key in ipairs(KEYS) do
 end
 return 'OK';
     )";
-    auto resp = Run({"EVAL", script, "3", "first", "second2", "third3", "second2"});
+    auto resp = Run({"EVAL", script, "3", kShard1Key, kShard0Key, kShard1AltKey, kShard0Key});
     EXPECT_EQ(resp, "OK");
   }
 
@@ -284,7 +288,7 @@ return 'OK';
       const auto sha = "41e84cf7973712deda6c1737a69bd1365eeb060f";
       EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "slow_cmds: 6", "tx_mode: 2",
                                           "tx_shards: 2", "is_write: 1", "lock_tags: 3", "3",
-                                          "first", "second2", "third3", "second2"}));
+                                          kShard1Key, kShard0Key, kShard1AltKey, kShard0Key}));
       found++;
     }
   }
@@ -404,6 +408,48 @@ TEST_F(ServerFamilyTest, ToggleTrackingOnAndOff) {
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
 }
 
+TEST_F(ServerFamilyTest, ClientTrackingInfo) {
+  auto tracking_info = [](auto&&... flags) {
+    return RespElementsAre("flags", RespElementsAre(flags...), "redirect", _, "prefixes",
+                           ArrLen(0));
+  };
+
+  // Allowed in RESP2 as well.
+  auto resp = Run("CLIENT TRACKINGINFO");
+  EXPECT_THAT(resp, tracking_info("off"));
+  EXPECT_THAT(resp.GetVec()[3], IntArg(-1));
+
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO foo"), ErrArg("syntax error"));
+
+  Run("HELLO 3");
+  Run("CLIENT TRACKING ON");
+  resp = Run("CLIENT TRACKINGINFO");
+  EXPECT_THAT(resp, tracking_info("on"));
+  EXPECT_THAT(resp.GetVec()[3], IntArg(0));
+
+  Run("CLIENT TRACKING ON OPTIN NOLOOP");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optin", "noloop"));
+
+  Run("CLIENT TRACKING ON OPTIN");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optin"));
+
+  // CACHING YES applies only to the next command.
+  Run("CLIENT CACHING YES");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optin", "caching-yes"));
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optin"));
+
+  Run("CLIENT TRACKING ON OPTOUT");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optout"));
+  Run("CLIENT CACHING NO");
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optout", "caching-no"));
+  EXPECT_THAT(Run("CLIENT TRACKINGINFO"), tracking_info("on", "optout"));
+
+  Run("CLIENT TRACKING OFF");
+  resp = Run("CLIENT TRACKINGINFO");
+  EXPECT_THAT(resp, tracking_info("off"));
+  EXPECT_THAT(resp.GetVec()[3], IntArg(-1));
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
   // case 1. only read the keys doesn't trigger any notification.
   Run({"HELLO", "3"});
@@ -415,6 +461,21 @@ TEST_F(ServerFamilyTest, ClientTrackingReadKey) {
 
   Run({"GET", "BAR"});
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+}
+
+// Expiry deletes the entry through a key view that points into the entry itself. The tracking
+// invalidation must not read that key after the entry has been erased.
+TEST_F(ServerFamilyTest, ClientTrackingExpiredKey) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+
+  Run({"SET", "FOO", "10", "PX", "10"});
+  Run({"GET", "FOO"});
+  AdvanceTime(20);
+
+  EXPECT_THAT(Run({"GET", "FOO"}), ArgType(RespExpr::NIL));
+  ASSERT_EQ(InvalidationMessagesLen("IO0"), 1);
+  EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "FOO");
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingOptin) {

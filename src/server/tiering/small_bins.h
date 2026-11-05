@@ -33,6 +33,7 @@ class SmallBins {
     size_t stashed_entries_bytes = 0;
     size_t current_bin_bytes = 0;
     size_t current_entries_cnt = 0;
+    size_t pending_bins_cnt = 0;
   };
 
   using BinId = unsigned;
@@ -76,15 +77,16 @@ class SmallBins {
   // Report that a stash was aborted. Returns list of keys that the entry contained.
   std::vector<std::pair<DbIndex, std::string>> ReportStashAborted(BinId id);
 
+  // Report that a filled bin could not be stashed before it was serialized.
+  // Returns list of keys that the bin contained.
+  std::vector<std::pair<DbIndex, std::string>> ReportStashFailed(FilledBin bin);
+
   // Delete a key with pending io. Returns entry id if needs to be deleted.
   std::optional<BinId> Delete(DbIndex dbid, std::string_view key);
 
   // Delete a stored segment. Returns information about the current bin, which might indicate
   // the need for external actions like deleting empty segments or triggering defragmentation
   BinInfo Delete(DiskSegment segment);
-
-  // Returns true if the page exists and is fragmented
-  bool IsFragmented(size_t offset);
 
   // Delete stashed bin. Returns list of recovered item key hashes and db indices.
   // Mainly used for defragmentation

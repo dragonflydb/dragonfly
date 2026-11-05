@@ -4,6 +4,7 @@
 
 #include "server/engine_shard.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
 
@@ -20,9 +21,9 @@ extern "C" {
 #include "redis/zmalloc.h"
 }
 #include "server/blocking_controller.h"
-#include "server/channel_store.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
@@ -433,6 +434,7 @@ void EngineShard::Shutdown() {
 
   queue_.Shutdown();
   queue2_.Shutdown();
+  deferred_polls_.clear();  // release while the shard's thread-local state is still alive
   DCHECK(!fiber_heartbeat_periodic_.IsJoinable());
   DCHECK(!fiber_shard_handler_periodic_.IsJoinable());
 }
@@ -450,7 +452,7 @@ void EngineShard::StopPeriodicFiber() {
   }
 }
 
-static void RunFPeriodically(std::function<void()> f, std::chrono::milliseconds period_ms,
+static void RunFPeriodically(const std::function<void()>& f, std::chrono::milliseconds period_ms,
                              std::string_view error_msg, util::fb2::Done* waiter) {
   int64_t last_heartbeat_ms = INT64_MAX;
 
@@ -501,8 +503,7 @@ void EngineShard::StartPeriodicShardHandlerFiber(util::ProactorBase* pb,
   fiber_shard_handler_periodic_ = MakeFiber(
       [this, index = pb->GetPoolIndex(), period_ms, handler = std::move(shard_handler)]() mutable {
         ThisFiber::SetName(absl::StrCat("shard_handler_periodic", index));
-        RunFPeriodically(std::move(handler), period_ms, "shard handler",
-                         &fiber_shard_handler_periodic_done_);
+        RunFPeriodically(handler, period_ms, "shard handler", &fiber_shard_handler_periodic_done_);
       });
 }
 
@@ -527,9 +528,8 @@ void EngineShard::InitTieredStorage(ProactorBase* pb, size_t max_file_size) {
 
     // TODO: enable tiered storage on non-default namespace
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard_id());
-    auto* shard = EngineShard::tlocal();
-    shard->tiered_storage_ = make_unique<TieredStorage>(max_file_size, &db_slice);
-    error_code ec = shard->tiered_storage_->Open(backing_prefix);
+    tiered_storage_ = make_unique<TieredStorage>(max_file_size, &db_slice);
+    error_code ec = tiered_storage_->Open(backing_prefix);
     CHECK(!ec) << ec.message();
   }
 }
@@ -570,7 +570,12 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
     // Check that trans doesn't need processing or is guaranteed to be found via txq/continuation
     DCHECK(trans == nullptr || !trans->DEBUG_IsArmedInShard(shard_id())  // tx was already disarmed
            || trans->DEBUG_GetTxqPosInShard(shard_id()) != TxQueue::kEnd ||
-           continuation_trans_ == trans);
+           continuation_trans_ == trans || trans->IsBlockedInShard(shard_id()));
+
+    // A repoll without trans does not reach blocked transactions, so their polls are kept.
+    // Duplicates are harmless: replaying a transaction that is no longer armed is a no-op.
+    if (trans && trans->IsBlockedInShard(shard_id()))
+      deferred_polls_.emplace_back(trans);
     needs_repoll_ = true;
     return;
   }
@@ -580,13 +585,26 @@ void EngineShard::PollExecution(const char* context, Transaction* trans) {
 
   // Executing `trans` out of order above would not follow up with queue processing, so
   // we need to issue another poll if we interruped another poll request.
-  // Because it runs with trans=nullptr, it progresses only on the loop and does not need follow ups
   PollExecutionIfDeferred();
 }
 
 void EngineShard::PollExecutionIfDeferred() {
-  if (std::exchange(needs_repoll_, false))
-    PollExecutionInternal("repoll", nullptr);
+  // Replayed polls can be interrupted again. A running callback or poll replays them when done.
+  // Any deferred poll can be replayed: a transaction awakened on this shard never meets an
+  // active continuation, since NotifyPending wakes none while one is active and the tx queue
+  // starts none while one is awakened. A stale entry is not armed anymore, so its replay is a
+  // no-op.
+  while (running_tx_ == nullptr && poll_depth_ == 0) {
+    if (!deferred_polls_.empty()) {
+      boost::intrusive_ptr<Transaction> trans = std::move(deferred_polls_.back());
+      deferred_polls_.pop_back();
+      PollExecutionInternal("repoll", trans.get());
+    } else if (std::exchange(needs_repoll_, false)) {
+      PollExecutionInternal("repoll", nullptr);
+    } else {
+      break;
+    }
+  }
 }
 
 void EngineShard::PollExecutionInternal(const char* context, Transaction* trans) {
@@ -596,6 +614,8 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
   DCHECK(running_tx_ == nullptr) << running_tx_->DebugId();
   ShardId sid = shard_id();
   stats_.poll_execution_total++;
+  ++poll_depth_;
+  absl::Cleanup poll_done = [this] { --poll_depth_; };
 
   // If any of the following flags are present, we are guaranteed to run in this function:
   // 1. AWAKED_Q -> Blocking transactions are executed immediately after waking up, they don't
@@ -630,7 +650,6 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
   }
 
   bool update_stats = false;
-  ++poll_concurrent_factor_;
 
   auto run = [this, &update_stats](Transaction* tx, bool allow_removal) -> bool /* concluding */ {
     update_stats = true;
@@ -644,10 +663,8 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
       trans = nullptr;
 
     if ((is_self && disarmed) || continuation_trans_->DisarmInShard(sid)) {
-      if (bool concludes = run(continuation_trans_, true); concludes) {
-        continuation_trans_ = nullptr;
-        continuation_debug_id_.clear();
-      } else {
+      // A concluding hop releases the continuation itself (RemoveContTx).
+      if (bool concludes = run(continuation_trans_, true); !concludes) {
         continuation_debug_id_ = continuation_trans_->DebugId(sid);
       }
     }
@@ -715,7 +732,6 @@ void EngineShard::PollExecutionInternal(const char* context, Transaction* trans)
       LOG_IF(DFATAL, trans->DEBUG_GetTxqPosInShard(sid) == TxQueue::kEnd);
     }
   }
-  --poll_concurrent_factor_;
   if (update_stats) {
     CacheStats();
   }
@@ -728,9 +744,17 @@ void EngineShard::RemoveContTx(Transaction* tx) {
   }
 }
 
+void EngineShard::set_aof_streamer(std::unique_ptr<AofStreamer> streamer) {
+  aof_streamer_ = std::move(streamer);
+}
+
 void EngineShard::Heartbeat() {
   DVLOG(3) << " Hearbeat";
   DCHECK(namespaces);
+
+  // Before the skip checks below, so small AOF blocks are written even when the heartbeat stalls.
+  if (aof_streamer_)
+    aof_streamer_->Seal();
 
   // Reap zero-copy GET pins whose refcnt has dropped to 0. Cheap and idempotent.
   CompactObj::DrainPendingReads();
@@ -769,15 +793,8 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
-  if (tiered_storage_ && tiered_storage_->ShouldOffload()) {
-    VLOG(1) << "Running Offloading, memory=" << db_slice.memory_budget()
-            << ", cool memory: " << tiered_storage_->CoolMemoryUsage();
-
-    for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
-      if (!db_slice.IsDbValid(i))
-        continue;
-      tiered_storage_->RunOffloading(i);
-    }
+  if (tiered_storage_) {
+    tiered_storage_->Heartbeat();
   }
 }
 
@@ -804,13 +821,10 @@ void EngineShard::RetireExpiredAndEvict() {
   size_t deleted_bytes = 0;
   size_t eviction_goal = GetFlag(FLAGS_enable_heartbeat_eviction) ? CalculateEvictionBytes() : 0;
 
-  // Accumulate keyspace notification events per-db during the atomic section; send after.
-  vector<vector<string>> per_db_events(db_slice.db_array_size());
-
   {
-    // Disable journal flush to prevent preemption. Scoped so that SendMessages below,
-    // which may suspend on backpressure, runs outside the atomic section.
-    journal::DisableFlushGuard journal_flush_guard(journal_);
+    // Disable journal flush to prevent preemption. Scoped so that the expired events queued
+    // meanwhile are sent below, outside the atomic section.
+    journal::DisableFlushGuard journal_flush_guard;
 
     for (unsigned i = 0; i < db_slice.db_array_size(); ++i) {
       if (!db_slice.IsDbValid(i))
@@ -833,9 +847,6 @@ void EngineShard::RetireExpiredAndEvict() {
         DbSlice::DeleteExpiredStats stats =
             db_slice.DeleteExpiredStep(db_cntx, db_ttl_delete_target);
 
-        if (!stats.key_events.empty())
-          per_db_events[i] = std::move(stats.key_events);
-
         deleted_bytes += stats.deleted_bytes;
         eviction_goal -= std::min(eviction_goal, size_t(stats.deleted_bytes));
         counter_[TTL_TRAVERSE].IncBy(stats.traversed);
@@ -850,8 +861,8 @@ void EngineShard::RetireExpiredAndEvict() {
 
       if (eviction_goal) {
         uint32_t starting_segment_id = rand() % pt->GetSegmentCount();
-        auto [evicted_items, evicted_bytes] = db_slice.FreeMemWithEvictionStepAtomic(
-            i, db_cntx, starting_segment_id, eviction_goal, &per_db_events[i]);
+        auto [evicted_items, evicted_bytes] =
+            db_slice.FreeMemWithEvictionStepAtomic(i, db_cntx, starting_segment_id, eviction_goal);
 
         VLOG(2) << "Heartbeat eviction: Expected to evict " << eviction_goal
                 << " bytes. Actually evicted " << evicted_items << " items, " << evicted_bytes
@@ -862,16 +873,12 @@ void EngineShard::RetireExpiredAndEvict() {
         eviction_goal -= std::min(eviction_goal, evicted_bytes);
       }
     }
-  }  // journal_flush_guard destroyed here — atomic section ends before SendMessages
+  }  // journal_flush_guard destroyed here — atomic section ends before sending the events
 
   // Send keyspace notifications for expired/evicted keys outside the atomic section
   // because SendMessages may suspend on connection backpressure (see issue #7052).
-  for (unsigned i = 0; i < per_db_events.size(); ++i) {
-    if (per_db_events[i].empty())
-      continue;
-    channel_store->SendMessages(absl::StrCat("__keyevent@", i, "__:expired"), per_db_events[i],
-                                false);
-  }
+  // This also sends events that other code queued but left unsent.
+  db_slice.SendQueuedExpiredKeyEvents();
 
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
@@ -879,7 +886,7 @@ void EngineShard::RetireExpiredAndEvict() {
   }
 
   // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
-  // section, because readiness checks read the db slice and may preempt.
+  // section, because NotifyPending may preempt before and after its readiness checks.
   if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
       bc && GetContTx() == nullptr) {
     bc->NotifyPending();
@@ -1039,9 +1046,8 @@ size_t EngineShard::UsedMemory() const {
 }
 
 bool EngineShard::ShouldThrottleForTiering() const {
-  // Throttle if the tiered storage is busy offloading (at least 30% of allowed capacity)
-  return tiered_storage_ && tiered_storage_->WriteDepthUsage() > 0.3 &&
-         tiered_storage_->ShouldOffload();
+  // Throttle if the tiered storage is busy offloading (at least 50% of allowed capacity)
+  return tiered_storage_ && tiered_storage_->TotalUsage() > 50 && tiered_storage_->ShouldOffload();
 }
 
 void EngineShard::FinalizeMulti(Transaction* tx) {
@@ -1182,8 +1188,8 @@ void EngineShard::AddTypeMemDelta(size_t type, int64_t delta) {
   if (delta == 0)
     return;
 
-  DCHECK_LT(type, type_mem_delta_.size());
-  type_mem_delta_[type] += delta;
+  DCHECK_LT(type, type_attributed_memory_.size());
+  type_attributed_memory_[type] += delta;
 }
 
 }  // namespace dfly

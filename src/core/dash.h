@@ -153,6 +153,12 @@ class DashTable : public detail::DashTableBase {
   template <typename U> const_iterator Find(U&& key) const;
   template <typename U> iterator Find(U&& key);
 
+  // Same as Find(key), for a caller that already has key_hash == DoHash(key).
+  template <typename U> iterator Find(U&& key, uint64_t key_hash) {
+    assert(key_hash == DoHash(key));
+    return FindFirst(key_hash, EqPred(key));
+  }
+
   // Prefetches the memory where the key would resize into the cache.
   template <typename U> void Prefetch(U&& key) const;
 
@@ -410,7 +416,12 @@ class DashTable : public detail::DashTableBase {
   // updating contents/versions of the passed iterators.
   template <typename U> BucketSet CVCUponInsert(const U& key);
 
-  template <typename Cb> void CVCUponBump(const_iterator it, Cb&& cb);
+  template <typename Cb> void CVCUponBump(const_iterator it, Cb&& cb) {
+    CVCUponBump(it, DoHash(it->first), std::forward<Cb>(cb));
+  }
+
+  // Same as above, with key_hash == DoHash(it->first) precomputed by the caller.
+  template <typename Cb> void CVCUponBump(const_iterator it, uint64_t key_hash, Cb&& cb);
 
   void Clear();
 
@@ -418,8 +429,15 @@ class DashTable : public detail::DashTableBase {
   bool ShiftRight(bucket_iterator it);
 
   template <typename BumpPolicy> iterator BumpUp(iterator it, BumpPolicy& bp) {
+    return BumpUp(it, DoHash(it->first), bp);
+  }
+
+  // Same as above, with key_hash == DoHash(it->first) precomputed by the caller.
+  template <typename BumpPolicy> iterator BumpUp(iterator it, uint64_t key_hash, BumpPolicy& bp) {
+    // A wrong hash would corrupt the stash pointers when the entry leaves a stash bucket.
+    assert(key_hash == DoHash(it->first));
     SegmentIterator seg_it = segment_[it.seg_id_]->BumpUp(
-        it.bucket_id_, it.slot_id_, DoHash(it->first), bp,
+        it.bucket_id_, it.slot_id_, key_hash, bp,
         [&](uint32_t segment_id, detail::PhysicalBid from, detail::PhysicalBid to) {
           // OnMove is used to notify policy about the items moves across buckets.
           bp.OnMove(Cursor{global_depth_, segment_id, from}, Cursor{global_depth_, segment_id, to});
@@ -857,8 +875,8 @@ auto DashTable<_Key, _Value, Policy>::CVCUponInsert(const U& key) -> BucketSet {
 
 template <typename _Key, typename _Value, typename Policy>
 template <typename Cb>
-void DashTable<_Key, _Value, Policy>::CVCUponBump(const_iterator it, Cb&& cb) {
-  uint64_t key_hash = DoHash(it->first);
+void DashTable<_Key, _Value, Policy>::CVCUponBump(const_iterator it, uint64_t key_hash, Cb&& cb) {
+  assert(key_hash == DoHash(it->first));
   uint32_t seg_id = it.segment_id();
   assert(seg_id < segment_.size());
   const SegmentType* target = segment_[seg_id];

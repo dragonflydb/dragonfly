@@ -230,9 +230,10 @@ class Transaction {
   facade::OpStatus WaitOnWatch(const time_point& tp, WaitKeys keys, KeyReadyChecker krc,
                                facade::ConnectionContext* cntx);
 
-  // Returns true if transaction is awaked, false if it's timed-out and can be removed from the
-  // blocking queue.
-  bool NotifySuspended(ShardId sid, std::string_view key);
+  // Called when this transaction heads the watch queue of a ready key on shard sid. Returns true
+  // if the key is reserved for it: either this call woke it, or this shard already did and the
+  // command has CO::WAKE_ALL_READY_KEYS. Returns false if it can be dropped from the queue.
+  bool NotifySuspended(ShardId sid);
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
   // Must be called from coordinator thread.
@@ -294,7 +295,21 @@ class Transaction {
   // Returns if the transaction spans this shard. Safe only when the transaction is armed.
   bool IsActive(ShardId sid) const;
 
-  // If blocking tx was woken up on this shard, get wake key.
+  // Whether the transaction is armed on this shard while blocked (suspended or awakened).
+  bool IsBlockedInShard(ShardId sid) const {
+    const auto& sd = shard_data_[SidToId(sid)];
+    return sd.is_armed.load(std::memory_order_acquire) && (sd.local_mask & WAS_SUSPENDED);
+  }
+
+  // Whether shard sid woke this blocking transaction.
+  bool IsWokenOn(ShardId sid) const;
+
+  // Whether key was reserved for this blocking transaction when this shard woke it.
+  // Runs only in the shard thread, since it queries the shard's BlockingController.
+  bool IsWakeKey(ShardId sid, std::string_view key) const;
+
+  // If blocking tx was woken up on this shard, the first reserved key in argument order. Runs only
+  // in the shard thread, like IsWakeKey.
   std::optional<std::string_view> GetWakeKey(ShardId sid) const;
 
   // Get OpArgs for specific shard
@@ -346,7 +361,11 @@ class Transaction {
     return multi_ && (multi_->mode == LOCK_AHEAD || multi_->mode == GLOBAL);
   }
 
-  bool IsGlobal() const;
+  // Note that a transaction can be non-global even if multi_->mode == GLOBAL.
+  // It happens when a transaction is squashed and switches to execute different commands.
+  bool IsGlobal() const {
+    return global_;
+  }
 
   DbContext GetDbContext() const {
     return DbContext{namespace_, db_index_, time_now_ms_};
@@ -437,9 +456,6 @@ class Transaction {
     // Position in the tx queue. OOO or cancelled schedules remove themselves by this index.
     TxQueue::Iterator pq_pos = TxQueue::kEnd;
 
-    // Index of key relative to args in shard that the shard was woken up after blocking wait.
-    uint32_t wake_key_pos = UINT32_MAX;
-
     // Irrational stats purely for debugging purposes.
     struct Stats {
       unsigned total_runs = 0;  // total number of runs
@@ -498,7 +514,7 @@ class Transaction {
    private:
     std::atomic_bool claimed_{false};
     std::atomic_bool closed_{false};
-    util::fb2::EventCount ec_{};
+    util::fb2::EventCount ec_;
   };
 
   // Init basic fields and reset re-usable.
@@ -685,7 +701,6 @@ class Transaction {
 
   std::function<void(Transaction* trans)> tracking_cb_;
 
- private:
   struct TLTmpSpace {
     std::vector<PerShardCache>& GetShardIndex(unsigned size);
 
@@ -711,5 +726,10 @@ template <typename F> auto Transaction::ScheduleSingleHopT(F&& f) -> decltype(f(
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args);
+
+// New transactions get txids above txid. Called after AOF replay, when no transaction runs, so
+// replayed txids never repeat. Replay's own transactions also advance the sequence, so it never
+// moves it backwards.
+void AdvanceTxIdPast(TxId txid);
 
 }  // namespace dfly

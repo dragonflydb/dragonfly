@@ -5,7 +5,7 @@ requires-python = ">=3.10"
 
 [dependency-groups]
 test = [
-  "aiohttp>=3.10.2",
+  "aiohttp>=3.14.4",
   "async-timeout>=4.0.3",
   "asyncio>=3.4.3",
   "attrs>=22.1.0",

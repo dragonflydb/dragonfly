@@ -103,6 +103,12 @@ struct Metrics {
   uint32_t tx_queue_len = 0;
   uint32_t worker_fiber_count = 0;
   uint32_t blocked_tasks = 0;
+
+  // Number of IO threads (each thread contributes 1, summed in Merge).
+  uint32_t io_threads = 0;
+
+  // Max number of client connections (main + other listeners) handled by a single IO thread.
+  uint32_t max_connected_clients_per_thread = 0;
   size_t worker_fiber_stack_size = 0;
 
   size_t lsn_buffer_size = 0;
@@ -136,11 +142,16 @@ struct Metrics {
 
   LoadingStats loading_stats;
 
+  // True while any snapshot save runs: BGSAVE, SAVE, scheduled or shutdown save.
+  bool save_in_progress = false;
+
   absl::flat_hash_map<std::string, hdr_histogram*> cmd_latency_map;
 
   InternedStringStats interned_string_stats;
 
   acl::UserRegistry::AclStats acl_stats;
+
+  TypeAttributedMemory type_attributed_memory_bytes{};
 
   void InitFromThread(Namespace* ns, const CommandRegistry* registry, unsigned proactor_index,
                       const MetricsCollectOpts& opts, DflyCmd* dfly_cmd);

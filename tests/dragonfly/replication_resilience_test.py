@@ -178,6 +178,14 @@ async def test_disconnect_replica(
     logging.debug("Check master survived all disconnects")
     assert await c_master.ping()
 
+    # Every replica that went away - crashed or disconnected - is counted exactly once.
+    @assert_eventually
+    async def check_disconnects_counted():
+        counted = sum([await get_disconnects(master, reason) for reason in disconnect_reasons])
+        assert counted == len(replicas)
+
+    await check_disconnects_counted()
+
 
 """
 Test stopping master during different phases.
@@ -722,7 +730,7 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
     In parallel, connect a replica, so that these SETEX commands write their custom journal log.
     This makes sure that no Fiber context switch while inside a shard callback.
     """
-    master, [replica], c_master, [c_replica] = await setup_replication(df_factory, connect=False)
+    master, _, c_master, [c_replica] = await setup_replication(df_factory, connect=False)
 
     async def send_setex():
         script = """
@@ -743,19 +751,26 @@ async def test_journal_doesnt_yield_issue_2500(df_factory, df_seeder_factory):
         end
         """
 
-        for i in range(10):
+        while not stop_stream.is_set():
             await asyncio.gather(
-                *[c_master.eval(script, 1, random.randint(0, 1_000)) for j in range(3)]
+                *[c_master.eval(script, 1, random.randint(0, 1_000)) for _ in range(3)]
             )
 
+    stop_stream = asyncio.Event()
     stream_task = asyncio.create_task(send_setex())
-    await asyncio.sleep(0.1)
 
-    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
-    assert not stream_task.done(), "Weak testcase. finished sending commands before replication."
+    @assert_eventually
+    async def wait_for_stream_start():
+        assert await c_master.dbsize() > 0
 
-    await wait_available_async(c_replica)
-    await stream_task
+    try:
+        await wait_for_stream_start()
+
+        await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+        await wait_available_async(c_replica)
+    finally:
+        stop_stream.set()
+        await stream_task
 
     await check_all_replicas_finished([c_replica], c_master)
     keys_master = await c_master.execute_command("keys *")
@@ -917,6 +932,18 @@ async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     await check_replica_connected()  # still connected
     await asyncio.sleep(1)  # wait for the master to recognize it's being blocked
     await check_replica_disconnected()
+    assert await get_disconnects(master, "timeout") == 1
+
+
+disconnect_reasons = ["closed", "error", "timeout"]
+
+
+async def get_disconnects(inst: DflyInstance, reason: str):
+    family = (await inst.metrics())["dragonfly_replica_disconnects"]
+    for sample in family.samples:
+        if sample.labels.get("reason") == reason:
+            return sample.value
+    return 0
 
 
 async def test_double_take_over(df_factory, df_seeder_factory):

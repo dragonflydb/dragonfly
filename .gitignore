@@ -5,6 +5,7 @@ clang-*
 .vscode/*.db
 .vscode/settings.json
 .vscode/launch.json
+/valkey-mcp-server.log
 third_party
 genfiles/*
 *.sublime-*

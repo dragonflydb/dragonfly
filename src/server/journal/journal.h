@@ -55,32 +55,30 @@ void RecordEntry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot,
 size_t LsnBufferSize();
 size_t LsnBufferBytes();
 
-void SetFlushMode(bool allow_flush);
+// Returns the previous mode. See JournalSlice::SetFlushMode.
+bool SetFlushMode(bool allow_flush);
 
+// Disables journal flushing and enters a fiber atomic section for its lifetime. Guards nest:
+// each one restores the mode it found, so only the outermost guard re-enables flushing, which
+// throttles journal consumers and may preempt, after the atomic section ends. The mode is
+// tracked whether or not the journal is active, so nesting never depends on callers agreeing on
+// that; without consumers, SetFlushMode does nothing else.
 class DisableFlushGuard {
  public:
-  explicit DisableFlushGuard(bool j) : journal_(j) {
-    if (journal_ && counter_ == 0) {
-      SetFlushMode(false);
-    }
+  DisableFlushGuard() : prev_flush_(SetFlushMode(false)) {
     util::fb2::detail::EnterFiberAtomicSection();
-    ++counter_;
   }
 
   ~DisableFlushGuard() {
     util::fb2::detail::LeaveFiberAtomicSection();
-    --counter_;
-    if (journal_ && counter_ == 0) {
-      SetFlushMode(true);  // Restore the state on destruction
-    }
+    SetFlushMode(prev_flush_);
   }
 
   DisableFlushGuard(const DisableFlushGuard&) = delete;
   DisableFlushGuard& operator=(const DisableFlushGuard&) = delete;
 
  private:
-  bool journal_;
-  static size_t thread_local counter_;
+  bool prev_flush_;
 };
 
 }  // namespace journal

@@ -105,6 +105,7 @@ COMMANDS = [
     (b"TOPK.COUNT", 2, 6), (b"TOPK.LIST", 1, 2), (b"TOPK.INFO", 1, 1),
     # Search
     (b"FT.CREATE", 3, 15), (b"FT.SEARCH", 2, 12), (b"FT.AGGREGATE", 2, 12), (b"FT.PROFILE", 3, 12),
+    (b"FT.ALIASADD", 2, 2), (b"FT.ALIASUPDATE", 2, 2), (b"FT.ALIASDEL", 1, 1),
     (b"FT.DROPINDEX", 1, 2), (b"FT.INFO", 1, 1), (b"FT.ALTER", 3, 8), (b"FT.TAGVALS", 2, 2),
     (b"FT.SYNDUMP", 1, 1), (b"FT.SYNUPDATE", 3, 6), (b"FT.CONFIG", 2, 4), (b"FT._LIST", 0, 0),
     (b"FT._DEBUG", 0, 4), (b"FT.HYBRID", 2, 12),

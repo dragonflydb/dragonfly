@@ -284,8 +284,8 @@ I/O loop implementations, selected at connection setup time:
 
 | Loop | Flag / Condition | Protocols | Architecture |
 |------|-----------------|-----------|--------------|
-| **v1** (`IoLoop` + `AsyncFiber`) | Default for Redis, TLS | Redis (RESP), TLS connections | Two-fiber: blocking recv loop (producer) + `AsyncFiber` (consumer) |
-| **v2** (`IoLoopV2`) | `--enable_memcache_io_loop_v2` (default: true) for Memcache; `--enable_resp_io_loop_v2` (default: false) for RESP | Memcache (and optionally RESP) | Single-fiber: event-driven via `RegisterOnRecv`, dispatch queue drained inline |
+| **v1** (`IoLoop` + `AsyncFiber`) | `--enable_resp_io_loop_v2=false` for Redis | Redis (RESP) | Two-fiber: blocking recv loop (producer) + `AsyncFiber` (consumer) |
+| **v2** (`IoLoopV2`) | `--enable_memcache_io_loop_v2` (default: true) for Memcache; `--enable_resp_io_loop_v2` (default: true) for RESP | Memcache and RESP | Single-fiber: event-driven via `RegisterOnRecv`, dispatch queue drained inline |
 
 ### v1: `IoLoop` + `AsyncFiber` (Redis connections)
 
@@ -322,9 +322,10 @@ the same `AsyncOperations` handler as v1. Key differences: no `async_dispatch_qu
 interleaving, no pipeline squashing, and backpressure uses `notifyAll()` instead of
 per-publisher `notify()`.
 
-> **Note**: By default, Pub/Sub traffic flows through the v1 `AsyncFiber` path because
-> `--enable_resp_io_loop_v2` defaults to `false`. When `--enable_resp_io_loop_v2` is
-> enabled, non-TLS RESP connections (including Pub/Sub subscribers) use `IoLoopV2` instead.
+> **Note**: By default, Pub/Sub traffic flows through the v2 `IoLoopV2` path because
+> `--enable_resp_io_loop_v2` defaults to `true`. When `--enable_resp_io_loop_v2` is
+> disabled, RESP connections (including Pub/Sub subscribers) use the v1 `AsyncFiber` path
+> instead.
 
 ### PubMessage Processing (shared by v1 and v2)
 

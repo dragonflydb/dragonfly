@@ -6,10 +6,29 @@
 
 #include <cstddef>
 #include <cstring>
+#include <utility>
 
 namespace facade {
 
 RespExpr RespExprBuilder::BuildExpr(const RESPObj& obj) {
+  // Arrays are expanded iteratively, so deeply nested replies do not overflow the fiber stack.
+  RespExpr expr;
+  std::vector<std::pair<RESPObj, RespExpr*>> pending;
+  pending.emplace_back(obj, &expr);
+  for (size_t i = 0; i < pending.size(); ++i) {
+    auto [node, target] = std::move(pending[i]);
+    *target = BuildNode(node);
+    if (target->type != RespExpr::ARRAY)
+      continue;
+    auto arr = node.As<RESPArray>();
+    auto* values = std::get<RespExpr::Vec*>(target->u);
+    for (size_t j = 0; j < arr->Size(); ++j)
+      pending.emplace_back((*arr)[j], &(*values)[j]);
+  }
+  return expr;
+}
+
+RespExpr RespExprBuilder::BuildNode(const RESPObj& obj) {
   RespExpr expr{RespExpr::NIL};
 
   switch (obj.GetType()) {
@@ -50,10 +69,7 @@ RespExpr RespExprBuilder::BuildExpr(const RESPObj& obj) {
         } else {
           expr.type = RespExpr::ARRAY;
           auto vec = std::make_unique<RespExpr::Vec>();
-          vec->reserve(arr->Size());
-          for (size_t i = 0; i < arr->Size(); ++i) {
-            vec->push_back(BuildExpr((*arr)[i]));
-          }
+          vec->resize(arr->Size());
           expr.u = vec.get();
           owned_arrays_.emplace_back(std::move(vec));
           expr.has_support = true;

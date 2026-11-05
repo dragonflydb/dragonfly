@@ -1797,7 +1797,7 @@
           "format": "time_series",
           "interval": "",
           "intervalFactor": 2,
-          "legendFormat": "P{{quantile}}",
+          "legendFormat": "{{type}} P{{quantile}}",
           "range": true,
           "refId": "A",
           "step": 240

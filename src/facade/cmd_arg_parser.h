@@ -17,6 +17,7 @@
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 #include "facade/facade_types.h"
 
@@ -79,6 +80,7 @@ namespace facade {
 //   Compile(elements...)                  sequence elements into an Apply-able grammar
 //   Args(&T::a, &T::b, ...)               read positional arguments into members
 //   Options(rules...)                     repeatedly match rules until none accepts the next token
+//   Options(rules...) as a rule           match any one of the rules (a reusable group of rules)
 //   OneOf(error, alternatives...)         allow one match; report error on a second match
 //
 // Tagged and token-mapping rules:
@@ -95,7 +97,10 @@ namespace facade {
 // Composition and control rules:
 //   If(&T::condition, rule)               enable rule only when the bool member is true
 //   IfNot(&T::condition, rule)            enable rule only when the bool member is false
-//   Into(&T::nested, rule)                apply a rule to a nested member (engages an optional one)
+//   If(pred, rule)                        enable rule only when pred(token) holds
+//   Try(rule)                             run a tagged rule all or nothing; an error leaves its tag
+//   Into(&T::nested, rule)                apply a rule to a nested member (engages an optional one,
+//                                         switches a variant to the rule's type when it matches)
 //   Skip(n)                               consume n positional args, or act as an option fallback
 //
 // Options stops at the first unmatched argument; pair the grammar with Finalize() to reject
@@ -791,8 +796,12 @@ template <class Derived, class T> struct TaggedRule {
   consteval explicit TaggedRule(std::string_view tag) : tag_(tag) {
   }
 
+  bool Matches(std::string_view cur) const {
+    return TagMatch(cur, tag_);
+  }
+
   bool Consume(CmdArgParser* p, std::string_view cur, T* o, State&) const {
-    if (!TagMatch(cur, tag_))
+    if (!Matches(cur))
       return false;
     p->AdvanceUnchecked();
     static_cast<const Derived*>(this)->OnMatch(p, o);
@@ -940,9 +949,56 @@ template <class T, class Inner> struct If {
   Inner inner_;
 };
 
+// Enables the inner rule only while the predicate holds for the token.
+template <class Pred, class Inner> struct IfPred {
+  using Target = typename Inner::Target;
+  using State = typename Inner::State;
+  consteval IfPred(Pred pred, Inner inner) : pred_(pred), inner_(inner) {
+  }
+  bool Consume(CmdArgParser* p, std::string_view cur, Target* o, State& st) const {
+    return pred_(cur) && inner_.Consume(p, cur, o, st);
+  }
+
+ private:
+  Pred pred_;
+  Inner inner_;
+};
+
+// Runs a tagged rule all or nothing: on an error it restores the parser and the target, and leaves
+// the tag to the other rules.
+template <class Inner> struct Try {
+  using Target = typename Inner::Target;
+  using State = typename Inner::State;
+  consteval explicit Try(Inner inner) : inner_(inner) {
+  }
+  bool Consume(CmdArgParser* p, std::string_view cur, Target* o, State& st) const {
+    if (!inner_.Matches(cur))
+      return false;
+    CmdArgParser saved = *p;
+    Target scratch = *o;
+    inner_.Consume(p, cur, &scratch, st);
+    if (p->HasError()) {
+      *p = saved;
+      return false;
+    }
+    *o = std::move(scratch);
+    return true;
+  }
+
+ private:
+  Inner inner_;
+};
+
+template <class A, class V> constexpr bool is_alternative = false;
+
+template <class A, class... U>
+constexpr bool is_alternative<A, std::variant<U...>> = (std::same_as<A, U> || ...);
+
 // Applies the inner rule to a nested member. A plain member is targeted directly; an optional
 // member has the rule target its contained value, and the optional is engaged only when the rule
 // matches (an existing value is preserved), so its engaged state signals that the keyword was seen.
+// A variant member has the rule target its alternative of that type in the same way, and switches
+// to that alternative only when the rule matches.
 template <class T, class Member, class Inner> struct Into {
   using Target = T;
   using State = typename Inner::State;
@@ -956,6 +1012,15 @@ template <class T, class Member, class Inner> struct Into {
       if (!inner_.Consume(p, cur, &scratch, st))
         return false;
       opt = std::move(scratch);
+      return true;
+    } else if constexpr (is_alternative<typename Inner::Target, Member>) {
+      using Value = typename Inner::Target;
+      Member& var = o->*field_;
+      Value* alt = std::get_if<Value>(&var);
+      Value scratch = alt ? *alt : Value{};
+      if (!inner_.Consume(p, cur, &scratch, st))
+        return false;
+      var = std::move(scratch);
       return true;
     } else {
       return inner_.Consume(p, cur, &(o->*field_), st);
@@ -1027,6 +1092,11 @@ template <class T, class... Rules> struct Options {
       if (!Match(p, cur, o, st, std::index_sequence_for<Rules...>{}))
         break;
     }
+  }
+
+  // Nested as a rule: accepts the token when one of its rules does.
+  bool Consume(CmdArgParser* p, std::string_view cur, T* o, State& st) const {
+    return Match(p, cur, o, st, std::index_sequence_for<Rules...>{});
   }
 
  private:
@@ -1114,9 +1184,20 @@ template <class T, class Inner> consteval auto If(bool T::*cond, Inner inner) {
 template <class T, class Inner> consteval auto IfNot(bool T::*cond, Inner inner) {
   return cap_detail::If<T, Inner>{cond, false, inner};
 }
+template <class Pred, class Inner>
+requires std::predicate<const Pred&, std::string_view>
+consteval auto If(Pred pred, Inner inner) {
+  return cap_detail::IfPred<Pred, Inner>{pred, inner};
+}
+template <class Inner>
+requires std::derived_from<Inner, cap_detail::TaggedRule<Inner, typename Inner::Target>>
+consteval auto Try(Inner inner) {
+  return cap_detail::Try<Inner>{inner};
+}
 template <class T, class Member, class Inner>
 requires std::same_as<Member, typename Inner::Target> ||
-    std::same_as<Member, std::optional<typename Inner::Target>>
+    std::same_as<Member, std::optional<typename Inner::Target>> ||
+    cap_detail::is_alternative<typename Inner::Target, Member>
 consteval auto Into(Member T::*field, Inner inner) {
   return cap_detail::Into<T, Member, Inner>{field, inner};
 }

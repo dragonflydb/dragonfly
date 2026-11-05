@@ -1070,7 +1070,7 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   auto zlen = pv.Size();
   if (zlen == 0) {
     DVLOG(1) << "deleting key " << key << " " << t->DebugId();
-    db_slice.Del(t->GetDbContext(), it_res->it);
+    db_slice.DelAtomic(t->GetDbContext(), it_res->it.GetInnerIt());
   }
 
   OpArgs op_args = t->GetOpArgs(shard);
@@ -1192,7 +1192,7 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
 
   auto zlen = pv.Size();
   if (zlen == 0) {
-    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
+    op_args.GetDbSlice().DelAtomic(op_args.db_cntx, res_it->it.GetInnerIt());
   }
 
   // Checking if command conatins flag with no autojournal
@@ -1239,7 +1239,7 @@ OpResult<unsigned> OpRemRange(const OpArgs& op_args, string_view key,
 
   auto zlen = pv.Size();
   if (zlen == 0) {
-    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
+    op_args.GetDbSlice().DelAtomic(op_args.db_cntx, res_it->it.GetInnerIt());
   }
 
   return iv.removed();
@@ -1422,7 +1422,7 @@ OpResult<unsigned> OpRem(const OpArgs& op_args, string_view key, facade::ParsedA
   res_it->post_updater.Run();
 
   if (zlen == 0) {
-    op_args.GetDbSlice().Del(op_args.db_cntx, res_it->it);
+    op_args.GetDbSlice().DelAtomic(op_args.db_cntx, res_it->it.GetInnerIt());
   }
 
   return deleted;
@@ -2867,32 +2867,29 @@ void ZSetFamily::Register(CommandRegistry* registry) {
   // TODO: to add support for SCRIPT for BZPOPMIN, BZPOPMAX similarly to BLPOP.
   // We break up chain into multiple calls to reduce stack usage in this function.
   *registry << CI{"ZADD", CO::FAST | CO::JOURNALED | CO::DENYOOM, -4, 1, 1}.HFUNC(ZAdd)
-            << CI{"BZPOPMIN",
-                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
-                  1, -2}
+            << CI{"BZPOPMIN", CO::RW | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST,
+                  -3, 1, -2}
                    .HFUNC(BZPopMin)
-            << CI{"BZPOPMAX",
-                  CO::JOURNALED | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST, -3,
-                  1, -2}
+            << CI{"BZPOPMAX", CO::RW | CO::NOSCRIPT | CO::BLOCKING | CO::NO_AUTOJOURNAL | CO::FAST,
+                  -3, 1, -2}
                    .HFUNC(BZPopMax)
             << CI{"ZCARD", CO::FAST | CO::READONLY, 2, 1, 1}.HFUNC(ZCard)
             << CI{"ZCOUNT", CO::FAST | CO::READONLY, 4, 1, 1}.HFUNC(ZCount)
             << CI{"ZDIFF", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZDiff);
 
   *registry << CI{"ZDIFFSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZDiffStore)
-            << CI{"ZINCRBY", CO::FAST | CO::JOURNALED, 4, 1, 1}.HFUNC(ZIncrBy)
+            << CI{"ZINCRBY", CO::FAST | CO::RW, 4, 1, 1}.HFUNC(ZIncrBy)
             << CI{"ZINTERSTORE", kStoreMask, -4, 3, 3}.HFUNC(ZInterStore)
             << CI{"ZINTER", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInter)
             << CI{"ZINTERCARD", CO::READONLY | CO::VARIADIC_KEYS, -3, 2, 2}.HFUNC(ZInterCard)
             << CI{"ZLEXCOUNT", CO::READONLY | CO::FAST, 4, 1, 1}.HFUNC(ZLexCount)
-            << CI{"ZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(
-                   ZMPop)
-            << CI{"BZMPOP", CO::JOURNALED | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL,
-                  -5, 3, 3}
+            << CI{"ZMPOP", CO::RW | CO::VARIADIC_KEYS | CO::NO_AUTOJOURNAL, -4, 2, 2}.HFUNC(ZMPop)
+            << CI{"BZMPOP", CO::RW | CO::VARIADIC_KEYS | CO::BLOCKING | CO::NO_AUTOJOURNAL, -5, 3,
+                  3}
                    .HFUNC(BZMPop);
 
-  *registry << CI{"ZPOPMAX", CO::FAST | CO::JOURNALED, -2, 1, 1}.HFUNC(ZPopMax)
-            << CI{"ZPOPMIN", CO::FAST | CO::JOURNALED, -2, 1, 1}.HFUNC(ZPopMin)
+  *registry << CI{"ZPOPMAX", CO::FAST | CO::RW, -2, 1, 1}.HFUNC(ZPopMax)
+            << CI{"ZPOPMIN", CO::FAST | CO::RW, -2, 1, 1}.HFUNC(ZPopMin)
             << CI{"ZREM", CO::FAST | CO::JOURNALED, -3, 1, 1}.HFUNC(ZRem)
             << CI{"ZRANGE", CO::READONLY, -4, 1, 1}.HFUNC(ZRange)
             << CI{"ZRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(ZRandMember)

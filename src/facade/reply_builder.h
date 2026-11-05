@@ -203,7 +203,6 @@ class MCReplyBuilder : public SinkReplyBuilder {
 
   void SendLong(long val) final;
 
-  void SendClientError(std::string_view str);
   void SendValue(MemcacheCmdFlags cmd_flags, std::string_view key, std::string_view value,
                  uint64_t mc_token, uint32_t mc_flag, uint32_t ttl_sec);
   void SendSimpleString(std::string_view str) final;

@@ -66,6 +66,9 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/generic_family.h"
+#include "server/journal/aof_manifest.h"
+#include "server/journal/aof_replay.h"
+#include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
 #include "server/main_service.h"
 #include "server/memory_cmd.h"
@@ -86,7 +89,6 @@ extern "C" {
 #include "server/version.h"
 #include "strings/human_readable.h"
 #include "util/accept_server.h"
-#include "util/aws/aws.h"
 
 namespace rng = std::ranges;
 
@@ -113,6 +115,7 @@ static bool AbslParseFlag(std::string_view in, CronExprFlag* flag, std::string* 
 static std::string AbslUnparseFlag(const CronExprFlag& flag);
 
 ABSL_FLAG(string, dir, "", "working directory");
+ABSL_FLAG(bool, aof, false, "If true, each shard logs its writes to an append-only file in --dir");
 ABSL_FLAG(string, dbfilename, "dump-{timestamp}",
           "the filename to save/load the DB, instead of/with {timestamp} can be used {Y}, {m}, and "
           "{d} macros");
@@ -149,10 +152,8 @@ ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
 // to load the credentials.
 ABSL_FLAG(bool, s3_ec2_metadata, false,
           "whether to load credentials and configuration from EC2 metadata");
-// Enables S3 payload signing over HTTP. This reduces the latency and resource
-// usage when writing snapshots to S3, at the expense of security.
-ABSL_FLAG(bool, s3_sign_payload, true,
-          "whether to sign the s3 request payload when uploading snapshots");
+ABSL_RETIRED_FLAG(bool, s3_sign_payload, true,
+                  "Deprecated: S3 snapshot uploads always use an unsigned payload.");
 
 ABSL_FLAG(bool, info_replication_valkey_compatible, true,
           "when true - output valkey compatible values for info-replication");
@@ -302,49 +303,59 @@ struct CmdArgListFormatter {
   }
 };
 
-string UnknownCmd(string cmd, facade::ParsedArgs args) {
+string UnknownCmd(string cmd, facade::ParsedArgs args, size_t num_args) {
+  auto end = std::next(args.begin(), num_args);
   return absl::StrCat("unknown command '", cmd, "' with args beginning with: ",
-                      absl::StrJoin(args.begin(), args.end(), ", ", CmdArgListFormatter()));
+                      absl::StrJoin(args.begin(), end, ", ", CmdArgListFormatter()));
 }
 
-std::shared_ptr<detail::SnapshotStorage> CreateCloudSnapshotStorage(std::string_view uri) {
+// Returns an error instead of terminating the process: this is called at runtime by
+// SAVE/LOAD commands, where a transient failure (e.g. missing credentials) must not kill
+// an already serving instance.
+io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> CreateCloudSnapshotStorage(
+    std::string_view uri) {
+  auto make_err = [](std::error_code ec, std::string_view what) {
+    return nonstd::make_unexpected(GenericError{ec, absl::StrCat("Failed to initialize ", what)});
+  };
+
   if (detail::IsS3Path(uri)) {
-    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(
-        absl::GetFlag(FLAGS_s3_endpoint), absl::GetFlag(FLAGS_s3_use_https),
-        absl::GetFlag(FLAGS_s3_ec2_metadata), absl::GetFlag(FLAGS_s3_sign_payload));
+    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(absl::GetFlag(FLAGS_s3_endpoint),
+                                                              absl::GetFlag(FLAGS_s3_use_https),
+                                                              absl::GetFlag(FLAGS_s3_ec2_metadata));
     auto ec = shard_set->pool()->GetNextProactor()->Await(
         [&] { return aws->Init(detail::kBucketConnectMs); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize AWS S3 snapshot storage: " << ec.message();
-      exit(1);
-    }
+    if (ec)
+      return make_err(ec, "AWS S3 snapshot storage");
     return aws;
   } else if (detail::IsGCSPath(uri)) {
 #ifdef WITH_GCP
     auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize GCS snapshot storage: " << ec.message();
-      exit(1);
-    }
+    if (ec)
+      return make_err(ec, "GCS snapshot storage");
     return gcs;
 #else
-    LOG(ERROR) << "Compiled without GCP support";
-    exit(1);
+    return nonstd::make_unexpected(
+        GenericError{make_error_code(errc::not_supported), "Compiled without GCP support"});
 #endif
   } else if (detail::IsAzurePath(uri)) {
     auto azure = std::make_shared<detail::AzureSnapshotStorage>();
     auto ec = shard_set->pool()->GetNextProactor()->Await(
         [&] { return azure->Init(uri, detail::kBucketConnectMs); });
-    if (ec) {
-      LOG(ERROR) << "Failed to initialize Azure snapshot storage: " << ec.message();
-      exit(1);
-    }
+    if (ec)
+      return make_err(ec, "Azure snapshot storage");
     return azure;
-  } else {
-    LOG(ERROR) << "Unknown cloud storage " << uri;
-    exit(1);
   }
+  return nonstd::make_unexpected(GenericError{make_error_code(errc::invalid_argument),
+                                              absl::StrCat("Unknown cloud storage ", uri)});
+}
+
+// Cloud paths need their own storage, other paths use the server's default storage.
+io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> SelectSnapshotStorage(
+    std::string_view path, std::shared_ptr<detail::SnapshotStorage> default_storage) {
+  if (detail::IsCloudPath(path))
+    return CreateCloudSnapshotStorage(path);
+  return default_storage;
 }
 
 template <typename T> void UpdateMax(T* maxv, T current) {
@@ -563,6 +574,40 @@ void ClientTracking(CmdArgParser parser, CommandContext* cmd_cntx) {
   conn_cntx->conn_state.tracking_info_.SetOption(option);
   conn_cntx->conn_state.tracking_info_.SetNoLoop(noloop);
   return cmd_cntx->rb()->SendOk();
+}
+
+void ClientTrackingInfo(facade::ParsedArgs args, CommandContext* cmd_cntx) {
+  if (!args.empty())
+    return cmd_cntx->SendError(kSyntaxErr);
+
+  using Tracking = ConnectionState::ClientTracking;
+  const auto& tracking = cmd_cntx->server_conn_cntx()->conn_state.tracking_info_;
+  const bool is_on = tracking.IsTrackingOn();
+
+  vector<string_view> flags;
+  if (!is_on) {
+    flags.push_back("off");
+  } else {
+    flags.push_back("on");
+    if (tracking.HasOption(Tracking::OPTIN))
+      flags.push_back("optin");
+    else if (tracking.HasOption(Tracking::OPTOUT))
+      flags.push_back("optout");
+    if (tracking.IsNoLoop())
+      flags.push_back("noloop");
+    if (tracking.IsCachingPending())
+      flags.push_back(tracking.HasOption(Tracking::OPTIN) ? "caching-yes" : "caching-no");
+  }
+
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+  rb->StartCollection(3, CollectionType::MAP);
+  rb->SendBulkString("flags");
+  rb->SendBulkStrArr(flags, CollectionType::SET);
+  rb->SendBulkString("redirect");
+  // REDIRECT is not supported, so 0 means tracking is on without redirection.
+  rb->SendLong(is_on ? 0 : -1);
+  rb->SendBulkString("prefixes");
+  rb->SendEmptyArray();
 }
 
 void ClientCaching(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -969,6 +1014,38 @@ bool IsMaster() {
   return ServerState::tlocal()->is_master;
 }
 
+// Returns {acked, running} for the supplied replica snapshot, reading ACKs on their owning shards.
+pair<uint32_t, uint32_t> CountAckedReplicas(
+    const vector<shared_ptr<DflyCmd::ReplicaInfo>>& replicas, const vector<LSN>& target_lsns,
+    atomic<bool>* role_changed) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+  size_t n = replicas.size();
+  vector<vector<bool>> shard_acked(target_lsns.size(), vector<bool>(n, true));
+
+  shard_set->RunBriefInParallel([&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
+    if (!IsMaster()) {
+      role_changed->store(true, std::memory_order_relaxed);
+      return;
+    }
+    uint32_t sid = shard->shard_id();
+    if (!shard->journal() || target_lsns[sid] == 0)
+      return;
+
+    for (size_t i = 0; i < n; i++) {
+      shard_acked[sid][i] = replicas[i]->GetFlow(sid).last_acked_lsn >= target_lsns[sid];
+    }
+  });
+
+  uint32_t acked = 0, running = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (!replicas[i]->GetExecState().IsRunning())
+      continue;
+    ++running;
+    if (rng::all_of(shard_acked, [i](const auto& shard) { return shard[i]; }))
+      ++acked;
+  }
+  return {acked, running};
+}
+
 void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
   static constexpr string_view kSaveHelp[] = {
       "DF",
@@ -991,6 +1068,181 @@ void SendSaveHelp(RedisReplyBuilder* rb, bool is_bgsave) {
   }
   help_arr.insert(help_arr.end(), begin(kSaveHelp), end(kSaveHelp));
   rb->SendSimpleStrArr(help_arr);
+}
+
+// For fatal startup errors: exit() would run destructors while server fibers still run.
+[[noreturn]] void ErrorAndExit(string_view reason) {
+  LOG(ERROR) << reason;
+  base::FlushLogs();
+  std::_Exit(EXIT_FAILURE);
+}
+
+// Loads a snapshot, blocking until it finishes.
+using AofLoadFn = std::function<GenericError(const string& path)>;
+
+// Why --aof cannot run with this configuration, or an empty string.
+string AofStartupError(string_view dir) {
+  if (detail::IsCloudPath(dir))
+    return "--aof needs a local --dir";
+  if (shard_set->pool()->at(0)->GetKind() != ProactorBase::IOURING)
+    return "--aof needs io_uring";
+  if (GetFlag(FLAGS_hz) <= 0)
+    return "--aof needs --hz > 0, the heartbeat seals AOF blocks";
+  if (GetFlag(FLAGS_replicaof).has_value())
+    return "--aof is not supported on replicas";
+  return {};
+}
+
+// Starts every shard's AofStreamer where its log resumes. False if any failed.
+bool StartStreamers(string_view dir, const vector<AofResume>& resume) {
+  atomic_bool failed = false;
+  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
+    ShardId sid = shard->shard_id();
+    auto streamer = make_unique<AofStreamer>(string(dir), sid, shard_set->size());
+    if (error_code ec = streamer->Start(resume[sid].seq, resume[sid].next_lsn); ec) {
+      LOG(ERROR) << "Failed to start AOF on shard " << sid << ": " << ec.message();
+      failed = true;
+      return;
+    }
+    shard->set_aof_streamer(std::move(streamer));
+  });
+  return !failed;
+}
+
+// Turns expiry and eviction on or off on every shard.
+void AllowExpiryOnAllShards(bool allowed) {
+  shard_set->RunBriefInParallel([allowed](EngineShard* shard) {
+    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).SetExpireAllowed(allowed);
+  });
+}
+
+#ifdef __linux__
+// Loads the base named by the manifest, or exits.
+void LoadAofBase(string_view dir, const string& base_path, const AofLoadFn& load) {
+  string path = absl::StrCat(dir, "/", base_path);
+
+  // The user may have deleted or moved a dump that is the base.
+  if (access(path.c_str(), F_OK) != 0)
+    ErrorAndExit(absl::StrCat("the AOF base ", path, " is missing"));
+  if (GenericError ec = load(path); ec)
+    ErrorAndExit(absl::StrCat("failed to load the AOF base ", path, ": ", ec.Format()));
+}
+
+// First start: adopts the --dbfilename dump, if any, as the base instead of taking a snapshot.
+void BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const AofLoadFn& load) {
+  AofManifest manifest;
+
+  // Nothing is logged before the load finishes, so every shard's cut is the journal's first lsn.
+  manifest.cuts.assign(shard_set->size(), {0, 1});
+  if (error_code ec = WriteAofManifest(dir, manifest); ec)
+    ErrorAndExit(absl::StrCat("failed to write the AOF manifest: ", ec.message()));
+
+  auto dump = storage->LoadPath(dir, GetFlag(FLAGS_dbfilename));
+  if (!dump && error_code(dump.error()) != errc::no_such_file_or_directory)
+    ErrorAndExit(absl::StrCat("failed to find the dump to adopt: ", dump.error().Format()));
+  if (dump && !dump->empty()) {
+    // TODO: adopt RDB dumps too.
+    if (!absl::EndsWith(*dump, "summary.dfs"))
+      ErrorAndExit(absl::StrCat("--aof adopts only DFS dumps for now, found ", *dump));
+
+    // TODO: record the dump's identity, in case it is replaced before the next start.
+    manifest.base_path = filesystem::path(*dump).filename().string();
+    LoadAofBase(dir, manifest.base_path, load);
+  }
+
+  if (!StartStreamers(dir, vector<AofResume>(shard_set->size())))
+    ErrorAndExit("failed to open AOF segments");
+
+  // Committed once the cut segments exist, so an active manifest always has them.
+  manifest.state = AofManifest::State::kActive;
+  if (error_code ec = WriteAofManifest(dir, manifest); ec)
+    ErrorAndExit(absl::StrCat("failed to write the AOF manifest: ", ec.message()));
+}
+
+// Loads the manifest's base, replays the log on top and resumes it.
+void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
+               const AofLoadFn& load) {
+  if (error_code ec = CollectAofGarbage(dir, manifest); ec)
+    ErrorAndExit(absl::StrCat("failed to remove stale AOF files: ", ec.message()));
+  if (!manifest.base_path.empty())
+    LoadAofBase(dir, manifest.base_path, load);
+
+  // Load() already left LOADING; harmless, no connections are accepted yet.
+  if (service->SwitchState(GlobalState::ACTIVE, GlobalState::LOADING) != GlobalState::ACTIVE)
+    ErrorAndExit("--aof cannot replay: the server is not active");
+
+  // No expiry or eviction during replay: a key may pass its deadline before a later record, such as
+  // PERSIST, changes it. Resumed once the streamers run, so every expiry is logged.
+  AllowExpiryOnAllShards(false);
+
+  vector<AofResume> resume;
+  if (error_code ec = ReplayAof(dir, manifest, service, &resume); ec)
+    ErrorAndExit(absl::StrCat("AOF replay failed: ", ec.message()));
+  if (!StartStreamers(dir, resume))
+    ErrorAndExit("failed to open AOF segments");
+
+  AllowExpiryOnAllShards(true);
+  service->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+}
+#endif
+
+// Restores the data from the AOF, or bootstraps it, then starts logging. Exits if it cannot.
+void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service,
+              const AofLoadFn& load) {
+  string dir = flag_dir.empty() ? "." : flag_dir;
+  if (string reason = AofStartupError(dir); !reason.empty())
+    ErrorAndExit(reason);
+
+#ifdef __linux__
+  // TODO: run this in a background fiber, like LoadFromSnapshot(), so the server accepts
+  // connections and answers -LOADING meanwhile; today Init() blocks and the port is closed until
+  // replay ends. Load() switches LOADING -> ACTIVE when the base is loaded, so first keep the
+  // server LOADING until the streamers run: otherwise writes between the base load and the replay
+  // never reach the AOF. Also join the fiber on shutdown, and check that no command allowed during
+  // LOADING changes data.
+  shard_set->pool()->GetNextProactor()->Await([&] {
+    io::Result<AofManifest> manifest = ReadAofManifest(dir);
+    if (!manifest && manifest.error() != errc::no_such_file_or_directory)
+      ErrorAndExit(absl::StrCat("failed to read the AOF manifest: ", manifest.error().message()));
+
+    // We crashed during the first start: its files are incomplete, so start over.
+    if (manifest && manifest->state == AofManifest::State::kBootstrapping) {
+      LOG(WARNING) << "Redoing an interrupted AOF bootstrap";
+      if (error_code ec = RemoveAofFilesExceptManifest(dir); ec)
+        ErrorAndExit(absl::StrCat("failed to remove AOF files: ", ec.message()));
+      return BootstrapAof(dir, storage, load);
+    }
+    if (manifest)
+      return ResumeAof(dir, *manifest, service, load);
+
+    io::Result<vector<string>> files = ListAofFiles(dir);
+    if (!files)
+      ErrorAndExit(absl::StrCat("failed to list AOF files: ", files.error().message()));
+
+    // A tmp file only shows that a write never completed, e.g. a crash during the first manifest
+    // write, not that an AOF existed. The bootstrap overwrites it.
+    erase_if(*files, [](const string& path) { return path.ends_with(".tmp"); });
+
+    // A lost manifest: loading --dbfilename could silently replace a newer AOF.
+    if (!files->empty())
+      ErrorAndExit(absl::StrCat("AOF files in ", dir, " but no manifest, e.g. ", files->front()));
+    BootstrapAof(dir, storage, load);
+  });
+#else
+  ErrorAndExit("--aof is supported only on Linux");
+#endif
+}
+
+// Seals, writes and syncs every shard's AOF.
+void StopAof() {
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    if (AofStreamer* streamer = shard->aof_streamer(); streamer) {
+      error_code ec = streamer->Shutdown();
+      LOG_IF(ERROR, ec) << "AOF shutdown failed on shard " << shard->shard_id() << ": "
+                        << ec.message();
+      shard->set_aof_streamer(nullptr);
+    }
+  });
 }
 
 }  // namespace
@@ -1281,18 +1533,30 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   string flag_dir = GetFlag(FLAGS_dir);
 
   if (detail::IsCloudPath(flag_dir)) {
-    snapshot_storage_ = CreateCloudSnapshotStorage(flag_dir);
+    auto res = CreateCloudSnapshotStorage(flag_dir);
+    if (!res) {
+      LOG(ERROR) << res.error().Format();
+      exit(1);
+    }
+    snapshot_storage_ = std::move(*res);
   } else if (fq_threadpool_) {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
     snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
   }
 
+  if (GetFlag(FLAGS_aof)) {
+    StartAof(flag_dir, snapshot_storage_.get(), &service_, [this](const string& path) {
+      auto future = Load(path, LoadExistingKeys::kFail);
+      return future ? future->Get() : GenericError("the server is not active");
+    });
+  }
+
   // check for '--replicaof' before loading anything
   if (ReplicaOfFlag flag = GetFlag(FLAGS_replicaof); flag.has_value()) {
     service_.proactor_pool().GetNextProactor()->Await(
         [this, &flag]() { this->Replicate(flag.host, flag.port); });
-  } else {  // load from snapshot only if --replicaof is empty
+  } else if (!GetFlag(FLAGS_aof)) {  // With --aof, the manifest names the base.
     LoadFromSnapshot();
   }
 
@@ -1324,13 +1588,8 @@ void ServerFamily::LoadFromSnapshot() {
       auto future = Load(load_path, LoadExistingKeys::kFail);
       load_fiber_ = service_.proactor_pool().GetNextProactor()->LaunchFiber([future]() mutable {
         // Wait for load to finish in a dedicated fiber.
-        if (!future.has_value() || future->Get()) {
-          // exit() runs destructors and atexit handlers without stopping other server fibers.
-          // On fatal startup errors, use _Exit() to skip that teardown, flushing logs first.
-          // Normal shutdown must still drain and save data.
-          base::FlushLogs();
-          std::_Exit(EXIT_FAILURE);
-        }
+        if (!future.has_value() || future->Get())
+          ErrorAndExit("Failed to load snapshot");
       });
     }
   } else {
@@ -1340,9 +1599,8 @@ void ServerFamily::LoadFromSnapshot() {
       loading_stats_mu_.lock();
       loading_stats_.failed_restore_count++;
       loading_stats_mu_.unlock();
-      LOG(ERROR) << "Failed to load snapshot with error: " << load_path_result.error().Format();
-      base::FlushLogs();
-      std::_Exit(EXIT_FAILURE);
+      ErrorAndExit(
+          absl::StrCat("Failed to load snapshot with error: ", load_path_result.error().Format()));
     }
   }
 }
@@ -1362,7 +1620,8 @@ void ServerFamily::Shutdown() {
 
   bg_save_fb_.JoinIfNeeded();
 
-  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty()) {
+  // With --aof, the log already holds the data, and a save could overwrite the base.
+  if (save_on_shutdown_ && !absl::GetFlag(FLAGS_dbfilename).empty() && !GetFlag(FLAGS_aof)) {
     shard_set->pool()->GetNextProactor()->Await([this]() ABSL_LOCKS_EXCLUDED(loading_stats_mu_) {
       GenericError ec = DoSave();
 
@@ -1377,6 +1636,9 @@ void ServerFamily::Shutdown() {
   }
 
   client_pause_ec_.await([this] { return active_pauses_.load() == 0; });
+
+  // Clients no longer write, and the journal is still open.
+  StopAof();
 
   pb_task_->Await([this] {
     auto ec = journal::Close();
@@ -1452,8 +1714,10 @@ GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
     return {std::make_error_code(std::errc::operation_not_permitted), "replica cannot load data"};
   if (path.empty())
     return {std::make_error_code(std::errc::invalid_argument), "no snapshot found to load"};
-  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
-  if (auto res = storage->ExpandSnapshot(path); !res)
+  auto storage = SelectSnapshotStorage(path, snapshot_storage_);
+  if (!storage)
+    return storage.error();
+  if (auto res = (*storage)->ExpandSnapshot(path); !res)
     return res.error();
   return {};
 }
@@ -1479,7 +1743,12 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
 
   // Select the right storage based on the path: cloud paths need their own storage,
   // mirroring what DoSaveCheckAndStart does for saves.
-  auto storage = detail::IsCloudPath(path) ? CreateCloudSnapshotStorage(path) : snapshot_storage_;
+  auto storage_res = SelectSnapshotStorage(path, snapshot_storage_);
+  if (!storage_res) {
+    LOG(ERROR) << "Failed to load snapshot: " << storage_res.error().Format();
+    return immediate(storage_res.error());
+  }
+  std::shared_ptr<detail::SnapshotStorage> storage = std::move(*storage_res);
 
   auto expand_result = storage->ExpandSnapshot(path);
   if (!expand_result) {
@@ -1514,8 +1783,10 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     error_code load_ec = pool.GetNextProactor()->Await([&] {
       return LoadRdb(path, existing_keys, &load_opts, load_context.get(), storage.get());
     });
-    if (load_ec)
+    if (load_ec) {
+      load_context->PerformPostLoad(&service_, true);
       return immediate(load_ec);
+    }
   }
 
   auto aggregated_result = std::make_shared<AggregateLoadResult>();
@@ -1824,32 +2095,48 @@ GenericError ServerFamily::DoSave(bool ignore_state) {
                 ignore_state);
 }
 
+void ServerFamily::CancelSave() {
+  // Holding save_mu_ keeps cancellation from interleaving with Finalize() closing the files.
+  util::fb2::LockGuard lk(save_mu_);
+  if (save_controller_)
+    save_controller_->Cancel();
+}
+
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
                                                Transaction* trans, DoSaveCheckAndStartOpts opts) {
+  // TODO(#8410): with --aof, a save to the base's name overwrites the base.
   auto [ignore_state, bg_save] = opts;
-  auto state = ServerState::tlocal()->gstate();
-
-  // In some cases we want to create a snapshot even if server is not active, f.e in takeover
-  if (!ignore_state && (state != GlobalState::ACTIVE && state != GlobalState::SHUTTING_DOWN)) {
-    return GenericError{make_error_code(errc::operation_in_progress),
-                        StrCat(GlobalStateName(state), " - can not save database")};
-  }
 
   std::shared_ptr<SaveStagesController> controller;
   {
     util::fb2::LockGuard lk(save_mu_);
+    // Check under save_mu_, so a concurrent switch to LOADING either rejects this save here or
+    // cancels it in CancelSave().
+    auto state = ServerState::tlocal()->gstate();
+
+    // In some cases we want to create a snapshot even if server is not active, f.e in takeover
+    if (!ignore_state && (state != GlobalState::ACTIVE && state != GlobalState::SHUTTING_DOWN)) {
+      return GenericError{make_error_code(errc::operation_in_progress),
+                          StrCat(GlobalStateName(state), " - can not save database")};
+    }
     if (save_controller_) {
       return GenericError{make_error_code(errc::operation_in_progress),
                           "SAVING - can not save database"};
     }
 
-    auto snapshot_storage = save_cmd_opts.cloud_uri.empty()
-                                ? snapshot_storage_
-                                : CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+    std::shared_ptr<detail::SnapshotStorage> snapshot_storage = snapshot_storage_;
+    if (!save_cmd_opts.cloud_uri.empty()) {
+      auto res = CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
+      if (!res) {
+        LOG(ERROR) << res.error().Format();
+        return res.error();
+      }
+      snapshot_storage = std::move(*res);
+    }
 
     controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, fq_threadpool_.get(), snapshot_storage, opts.bg_save});
+        &service_, snapshot_storage, opts.bg_save});
     save_controller_ = controller;
   }
 
@@ -1876,8 +2163,10 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
   // Success - update state
   controller->Start();
-  thread_safe_save_info_.Update(
-      [bg_save](SaveInfoData* data) { data->bgsave_in_progress = bg_save; });
+  thread_safe_save_info_.Update([bg_save](SaveInfoData* data) {
+    data->bgsave_in_progress = bg_save;
+    data->save_in_progress = true;
+  });
 
   return {};
 }
@@ -1913,6 +2202,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
   // Still under save_mu_, so the next save cannot start before its predecessor's state is stored.
   thread_safe_save_info_.Update([&](SaveInfoData* data) {
+    data->save_in_progress = false;
     if (is_bg_save) {
       data->bgsave_in_progress = false;
       data->last_bgsave_status = !save_info.error;
@@ -2007,6 +2297,12 @@ void ServerFamily::CancelBlockingOnThread(std::function<OpStatus(ArgSlice)> stat
   for (auto* listener : listeners_) {
     listener->TraverseConnectionsOnThread(cb, UINT32_MAX, nullptr);
   }
+}
+
+void ServerFamily::UnblockAllClients() {
+  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase*) {
+    CancelBlockingOnThread([](ArgSlice) { return OpStatus::UNBLOCKED; });
+  });
 }
 
 string GetPassword() {
@@ -2189,6 +2485,8 @@ void ClientHelp(SinkReplyBuilder* builder) {
       "    * LIB-VER: the client lib version.",
       "TRACKING (ON|OFF) [OPTIN] [OPTOUT] [NOLOOP]",
       "    Control server assisted client side caching.",
+      "TRACKINGINFO",
+      "    Report tracking status for the current connection.",
       "MIGRATE <client-id> <tid>",
       "    Migrates connection specified by client-id to the specified thread id.",
       "HELP",
@@ -2216,6 +2514,8 @@ void ServerFamily::Client(CmdArgParser parser, CommandContext* cmd_cntx) {
     return ClientUnPauseCmd(sub_args, cmd_cntx);
   } else if (sub_cmd == "TRACKING") {
     return ClientTracking(CmdArgParser{sub_args}, cmd_cntx);
+  } else if (sub_cmd == "TRACKINGINFO") {
+    return ClientTrackingInfo(sub_args, cmd_cntx);
   } else if (sub_cmd == "KILL") {
     return ClientKill(sub_args, absl::MakeSpan(listeners_), this, cmd_cntx);
   } else if (sub_cmd == "CACHING") {
@@ -2623,6 +2923,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
     result.loading_stats = loading_stats_;
   }
 
+  result.save_in_progress = thread_safe_save_info_.Get().save_in_progress;
+
   result.migration_errors_total = service_.cluster_family().MigrationsErrorsCount();
   result.acl_stats = service_.user_registry().GetAclStats();
 
@@ -2854,8 +3156,8 @@ string ServerFamily::FormatInfoMetrics(
     append("instantaneous_input_kbps", -1);
     append("instantaneous_output_kbps", -1);
     append("rejected_connections", -1);
-    append("expired_keys", m.events.expired_keys);
-    append("evicted_keys", m.events.evicted_keys);
+    append("expired_keys", total.events.expired_keys);
+    append("evicted_keys", total.events.evicted_keys);
     append("total_heartbeat_expired_keys", m.shard_stats.total_heartbeat_expired_keys);
     append("total_heartbeat_expired_bytes", m.shard_stats.total_heartbeat_expired_bytes);
     append("total_heartbeat_expired_calls", m.shard_stats.total_heartbeat_expired_calls);
@@ -2891,6 +3193,7 @@ string ServerFamily::FormatInfoMetrics(
     append("lua_gc_duration_total_sec", m.lua_stats.gc_duration_ns * 1e-9);
 
     append("total_journal_omits", m.events.journal_omit);
+    append("total_serialize_skips", m.events.serialize_skip);
   };
 
   auto add_tiered_info = [&] {
@@ -2904,6 +3207,8 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_total_deletes", m.tiered_stats.total_deletes);
     append("tiered_total_uploads", m.tiered_stats.total_uploads);
     append("tiered_total_defrags", m.tiered_stats.total_defrags);
+    append("tiered_total_repacks", m.tiered_stats.total_repacks);
+
     append("tiered_total_stash_overflows", m.tiered_stats.total_stash_overflows);
     append("tiered_heap_buf_allocations", m.tiered_stats.total_heap_buf_allocs);
     append("tiered_registered_buf_allocations", m.tiered_stats.total_registered_buf_allocs);
@@ -2916,17 +3221,34 @@ string ServerFamily::FormatInfoMetrics(
     append("tiered_alloc_free_extent_bytes", m.tiered_stats.alloc_free_extent_bytes);
 
     append("tiered_pending_read_cnt", m.tiered_stats.pending_read_cnt);
+    append("tiered_pending_read_bytes", m.tiered_stats.pending_read_bytes);
     append("tiered_pending_stash_cnt", m.tiered_stats.pending_stash_cnt);
     append("tiered_pending_stash_bytes", m.tiered_stats.pending_stash_bytes);
+
+    // Mean device pressure across shards: in-flight IO bytes relative to the aggregate
+    // tiered_max_pending_bytes cap. Read + write usage is exported separately (reads are the
+    // priority traffic; writes yield to total pressure) plus their sum. >= 100 means the device is
+    // at/over its cap.
+    const uint64_t total_cap = m.tiered_stats.max_pending_bytes;
+    const uint64_t read_pct = total_cap ? (m.tiered_stats.pending_read_bytes * 100) / total_cap : 0;
+    const uint64_t write_pct =
+        total_cap ? (m.tiered_stats.pending_stash_bytes * 100) / total_cap : 0;
+    append("tiered_device_read_usage_percent", read_pct);
+    append("tiered_device_write_usage_percent", write_pct);
+    append("tiered_device_total_usage_percent", read_pct + write_pct);
 
     append("tiered_small_bins_cnt", m.tiered_stats.small_bins_cnt);
     append("tiered_small_bins_entries_cnt", m.tiered_stats.small_bins_entries_cnt);
     append("tiered_small_bins_entries_bytes", m.tiered_stats.small_bins_entries_bytes);
     append("tiered_small_bins_filling_bytes", m.tiered_stats.small_bins_filling_bytes);
+    append("tiered_small_bins_estimated_bucket_fragmentation",
+           m.tiered_stats.estimated_bin_bucket_fragmentation);
+
     append("tiered_cold_storage_bytes", m.tiered_stats.cold_storage_bytes);
     append("tiered_offloading_usec", m.tiered_stats.total_offloading_usec);
     append("tiered_defrag_usec", m.tiered_stats.total_defrag_usec);
     append("tiered_offloading_stashes", m.tiered_stats.total_offloading_stashes);
+    append("tiered_repack_usec", m.tiered_stats.total_repack_usec);
     append("tiered_ram_hits", m.events.ram_hits);
     append("tiered_ram_cool_hits", m.events.ram_cool_hits);
     append("tiered_ram_misses", m.events.ram_misses);
@@ -3286,7 +3608,7 @@ void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
     is_resp3 = proto_version == "3";
     bool valid_proto_version = proto_version == "2" || is_resp3;
     if (!valid_proto_version) {
-      cmd_cntx->SendError(UnknownCmd("HELLO", args));
+      cmd_cntx->SendError(UnknownCmd("HELLO", args, cmd_cntx->cid()->NonSecretArgCount(args)));
       return;
     }
 
@@ -3487,6 +3809,10 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
     return ReplicaOfNoOne(cmd_cntx->rb());
   }
 
+  // A full sync loads data bypassing the journal, so the AOF would miss it.
+  if (GetFlag(FLAGS_aof))
+    return cmd_cntx->SendError("REPLICAOF is not supported with --aof");
+
   auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
                                           master_replid(), replicaof_args->slot_range);
   GenericError ec;
@@ -3522,9 +3848,7 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   replica_ = new_replica;
   SetMasterFlagOnAllThreads(false);
   // Blocked writers would otherwise consume elements applied from the replication stream.
-  shard_set->pool()->AwaitFiberOnAll([this](util::ProactorBase*) {
-    CancelBlockingOnThread([](ArgSlice) { return OpStatus::UNBLOCKED; });
-  });
+  UnblockAllClients();
 
   if (on_error == ActionOnConnectionFail::kReturnOnError) {
     replica_->StartMainReplicationFiber(last_master_data);
@@ -3699,7 +4023,9 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
   return builder->SendOk();
 }
 
+// WAIT <num_replicas> <timeout_ms>
 void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+  const auto start = chrono::steady_clock::now();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (!IsMaster()) {
@@ -3709,139 +4035,83 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   using NonNegInt = facade::FInt<int64_t{0}, std::numeric_limits<int64_t>::max()>;
   auto [num_replicas_arg, timeout_arg] = parser.Next<NonNegInt, NonNegInt>();
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
   const int64_t num_replicas = num_replicas_arg;
   const int64_t timeout_ms = timeout_arg;
 
-  // Collect currently tracked replicas.
-  auto replicas = dfly_cmd_->GetReplicaInfoSnapshot();
+  // WAIT does not use Transaction's cancellation machinery; bound even an infinite timeout.
+  constexpr auto kMaxWaitDuration = chrono::minutes(10);
+  const auto timeout = timeout_ms == 0 ? kMaxWaitDuration : chrono::milliseconds(timeout_ms);
 
-  if (replicas.empty()) {
+  // Clamp before converting milliseconds to the clock's finer-grained duration.
+  const auto max_timeout =
+      chrono::duration_cast<chrono::milliseconds>(chrono::steady_clock::time_point::max() - start);
+  const auto deadline = start + min(timeout, max_timeout);
+
+  auto replicas = dfly_cmd_->GetReplicaInfoSnapshot();
+  if (replicas.empty())
     return rb->SendLong(0);
-  }
 
   uint32_t shard_count = shard_set->size();
   std::vector<LSN> target_lsns(shard_count, 0);
-
-  // We snapshot the global per-shard LSN rather than the calling connection's own last-write
-  // LSN: journal writes happen post-commit on the shard's fiber, decoupled from the issuing
-  // connection, so tracking a per-connection LSN would add bookkeeping to every write's hot
-  // path. This waits for all writes up to now, which is strictly stronger than the Redis
-  // per-connection guarantee.
-  //
-  // Set from within a shard's own dispatched callback whenever that shard observes this node is
-  // no longer master. is_master is per-thread and SetMasterFlagOnAllThreads' fan-out gives no
-  // ordering guarantee across threads, so a check on the connection's own thread is not a
-  // reliable proxy for what a given shard's thread has seen; only checking at the exact site
-  // where we touch that shard's journal/LSN data is race-free.
   std::atomic<bool> role_changed{false};
 
-  // Capture the current LSN on each shard and send PING to force replicas to ACK immediately.
-  // PING causes replicas to skip their normal ACK interval and send REPLCONF ACK right away.
+  auto* tx = cmd_cntx->tx();
+  bool can_block = !tx || !tx->IsMulti();
+
+  // Global shard LSNs cover at least this connection's writes without per-write bookkeeping.
+  // Role changes update threads independently, so check the role on each shard before access.
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     if (!IsMaster()) {
       role_changed.store(true, std::memory_order_relaxed);
       return;
     }
-    if (shard->journal()) {
-      uint32_t sid = shard->shard_id();
-      target_lsns[sid] = journal::GetLsn();
-      journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
+    if (!shard->journal())
+      return;
+
+    LSN last_sent_lsn = journal::GetLsn();
+    // Record the currently issued LSN for this shard.
+    target_lsns[shard->shard_id()] = last_sent_lsn;
+
+    // Check if all replicas are already caught up to the last sent LSN for this shard.
+    ShardId sid = shard->shard_id();
+    bool acked = rng::all_of(replicas, [sid, last_sent_lsn](const auto& replica) {
+      return replica->GetFlow(sid).last_acked_lsn >= last_sent_lsn;
+    });
+
+    // MULTI never blocks, so there is no point in expediting ACKs.
+    if (!acked && can_block) {
+      // PING accelerates ACKs. Try to expedite the acknowledgment from replicas.
+      // If the queue is full, then we rely on periodic replica ACKs to eventually catch up.
+      shard->GetSecondaryQueue()->TryAdd([] {
+        if (IsMaster() && EngineShard::tlocal()->journal())
+          journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
+      });
     }
   });
 
-  // Count replicas that have acknowledged all shards up to their respective target LSN.
-  // Runs the check on each shard's proactor to safely read last_acked_lsn.
-  // Also returns the number of replicas still running (connected), so callers can detect
-  // that the required count can never be reached due to disconnections.
-  auto count_acked = [&]() ABSL_NO_THREAD_SAFETY_ANALYSIS -> std::pair<uint32_t, uint32_t> {
-    size_t n = replicas.size();
-    // Per-shard result: shard_acked[sid][i] == true means replica i caught up on shard sid.
-    std::vector<std::vector<bool>> shard_acked(shard_count, std::vector<bool>(n, true));
+  while (true) {
+    auto [count, running] = CountAckedReplicas(replicas, target_lsns, &role_changed);
 
-    shard_set->RunBriefInParallel([&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
-      if (!IsMaster()) {
-        role_changed.store(true, std::memory_order_relaxed);
-        return;
-      }
-      uint32_t sid = shard->shard_id();
-      if (!shard->journal() || target_lsns[sid] == 0)
-        return;
-      for (size_t i = 0; i < n; i++) {
-        shard_acked[sid][i] = replicas[i]->GetFlow(sid).last_acked_lsn >= target_lsns[sid];
-      }
-    });
-
-    uint32_t acked = 0, running = 0;
-    for (size_t i = 0; i < n; i++) {
-      if (!replicas[i]->GetExecState().IsRunning())
-        continue;
-      ++running;
-      bool all_acked = true;
-      for (uint32_t sid = 0; sid < shard_count; sid++) {
-        if (!shard_acked[sid][i]) {
-          all_acked = false;
-          break;
-        }
-      }
-      if (all_acked)
-        ++acked;
-    }
-    return {acked, running};
-  };
-
-  auto [count, running] = count_acked();
-
-  // A shard observed a role change while we were capturing/comparing LSNs: none of the above is
-  // trustworthy anymore (target_lsns may span a stale journal epoch from before the transition),
-  // so fail the same way the upfront check would have if the transition had landed a moment
-  // earlier.
-  if (role_changed.load(std::memory_order_relaxed)) {
-    return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
-  }
-
-  // Inside MULTI/EXEC we must not block: return the currently acked count immediately,
-  // matching Redis semantics for commands issued in a non-blocking context.
-  if (auto* tx = cmd_cntx->tx(); tx && tx->IsMulti()) {
-    return rb->SendLong(count);
-  }
-
-  // Unlike BLPOP et al., this loop isn't tied to Transaction's blocking machinery, so
-  // CancelBlockingOnThread (used by REPLTAKEOVER/shutdown) can't force it to return early -
-  // the connection just looks "busy dispatching" for as long as we keep polling. Cap timeout=0
-  // at a bounded duration instead of blocking forever, so a forgotten/disconnected WAIT client
-  // can't pin a fiber (and its per-tick shard fan-out) indefinitely.
-  constexpr auto kMaxWaitDuration = absl::Minutes(10);
-  absl::Time deadline = timeout_ms == 0 ? absl::Now() + kMaxWaitDuration
-                                        : absl::Now() + absl::Milliseconds(timeout_ms);
-  while (count < num_replicas && absl::Now() < deadline) {
-    // Exit early once every currently-tracked, still-running replica has already acked and
-    // that's still short of what was requested: our replica snapshot is fixed at call time, so
-    // no further polling can improve on this. Checking running < num_replicas alone would be
-    // wrong -- it's true from the very first iteration whenever more replicas were requested
-    // than are tracked, and would cut off replicas that just haven't caught up yet.
-    if (count == running && running < num_replicas)
-      break;
-    // Bail out promptly on takeover/shutdown: otherwise we'd keep this connection "busy" for
-    // the rest of the deadline, which can make REPLTAKEOVER's (much shorter) dispatch-drain
-    // timeout fail spuriously.
-    if (ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
-      break;
-    // Bail out if this node became a replica mid-wait (e.g. a concurrent REPLICAOF): gstate()
-    // only transitions to LOADING for a full sync, not a partial one, so is_master is the only
-    // signal that catches both.
-    if (!IsMaster())
-      break;
-    ThisFiber::SleepFor(100ms);
-    std::tie(count, running) = count_acked();
+    // A role change invalidates the captured journal epoch, even if this thread is still master.
     if (role_changed.load(std::memory_order_relaxed)) {
       return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
     }
-  }
 
-  return rb->SendLong(count);
+    // MULTI never blocks. Once all running replicas in our fixed snapshot ACK, no more can join.
+    auto now = chrono::steady_clock::now();
+    if (!can_block || count >= num_replicas || count == running || now >= deadline)
+      return rb->SendLong(count);
+
+    // Do not hold up takeover/shutdown, including demotion through a partial sync.
+    if (!IsMaster() || ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
+      return rb->SendLong(count);
+
+    ThisFiber::SleepUntil(min(deadline, now + 100ms));
+  }
 }
 
-void ServerFamily::Role(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
+void ServerFamily::Role(facade::CmdArgParser /*parser*/, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   util::fb2::LockGuard lk(replicaof_mu_);
   // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
@@ -4094,6 +4364,7 @@ namespace acl {
 constexpr uint32_t kAuth = FAST | CONNECTION;
 constexpr uint32_t kBGSave = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kClient = SLOW | CONNECTION;
+constexpr uint32_t kClientAdmin = ADMIN | SLOW | DANGEROUS | CONNECTION;
 constexpr uint32_t kConfig = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kDbSize = KEYSPACE | READ | FAST;
 constexpr uint32_t kDebug = ADMIN | SLOW | DANGEROUS;
@@ -4102,8 +4373,9 @@ constexpr uint32_t kFlushAll = KEYSPACE | WRITE | SLOW | DANGEROUS;
 constexpr uint32_t kInfo = SLOW | DANGEROUS;
 constexpr uint32_t kHello = FAST | CONNECTION;
 constexpr uint32_t kLastSave = ADMIN | FAST | DANGEROUS;
-constexpr uint32_t kLatency = SLOW;
-constexpr uint32_t kMemory = SLOW;
+constexpr uint32_t kLatency = ADMIN | SLOW | DANGEROUS;
+constexpr uint32_t kMemory = READ | SLOW;
+constexpr uint32_t kMemoryAdmin = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kShrink = WRITE | FAST;
 constexpr uint32_t kSave = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kShutDown = ADMIN | SLOW | DANGEROUS;
@@ -4113,7 +4385,7 @@ constexpr uint32_t kReplTakeOver = DANGEROUS;
 constexpr uint32_t kReplConf = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kRole = ADMIN | FAST | DANGEROUS;
 constexpr uint32_t kWait = SLOW | CONNECTION | BLOCKING;
-constexpr uint32_t kSlowLog = SLOW;
+constexpr uint32_t kSlowLog = ADMIN | SLOW | DANGEROUS;
 constexpr uint32_t kScript = SLOW | SCRIPTING;
 constexpr uint32_t kModule = ADMIN | SLOW | DANGEROUS;
 // TODO(check this)
@@ -4122,12 +4394,17 @@ constexpr uint32_t kDfly = ADMIN;
 
 void ServerFamily::Register(CommandRegistry* registry) {
   constexpr auto kReplicaOpts = CO::LOADING | CO::ADMIN | CO::GLOBAL_TRANS;
-  constexpr auto kMemOpts = CO::LOADING;
+  constexpr auto kMemOpts = CO::LOADING | CO::READONLY;
   registry->StartFamily();
   *registry
       << CI{"AUTH", CO::NOSCRIPT | CO::FAST | CO::LOADING, -2, 0, 0, acl::kAuth}.HFUNC(Auth)
       << CI{"BGSAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kBGSave}.HFUNC(BgSave)
       << CI{"CLIENT", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kClient}.HFUNC(Client)
+      << CI{"CLIENT KILL", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
+      << CI{"CLIENT LIST", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
+      << CI{"CLIENT MIGRATE", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
+      << CI{"CLIENT PAUSE", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
+      << CI{"CLIENT UNPAUSE", CO::HIDDEN, -1, 0, 0, acl::kClientAdmin}
       << CI{"CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -2, 0, 0, acl::kConfig}.HFUNC(Config)
       << CI{"DBSIZE", CO::READONLY | CO::FAST | CO::LOADING, 1, 0, 0, acl::kDbSize}.HFUNC(DbSize)
       << CI{"DEBUG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kDebug}.HFUNC(Debug)
@@ -4140,6 +4417,11 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)
       << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kLatency}.HFUNC(Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
+      << CI{"MEMORY ARENA", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
+      << CI{"MEMORY DECOMMIT", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
+      << CI{"MEMORY DEFRAGMENT", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
+      << CI{"MEMORY DEFRAGMENT-SEGMENTS", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
+      << CI{"MEMORY TRACK", CO::HIDDEN, -1, 0, 0, acl::kMemoryAdmin}
       << CI{"SHRINK", CO::JOURNALED | CO::FAST, 2, 1, 1, acl::kShrink}.HFUNC(Shrink)
       << CI{"SAVE", CO::ADMIN | CO::GLOBAL_TRANS, -1, 0, 0, acl::kSave}.HFUNC(Save)
       << CI{"SHUTDOWN",    CO::ADMIN | CO::NOSCRIPT | CO::LOADING | CO::DANGEROUS, -1, 0, 0,
@@ -4153,7 +4435,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"REPLCONF", CO::ADMIN | CO::LOADING, -1, 0, 0, acl::kReplConf}.HFUNC(ReplConf)
       << CI{"WAIT", CO::NOSCRIPT | CO::BLOCKING, 3, 0, 0, acl::kWait}.HFUNC(Wait)
       << CI{"ROLE", CO::LOADING | CO::FAST | CO::NOSCRIPT, 1, 0, 0, acl::kRole}.HFUNC(Role)
-      << CI{"SLOWLOG", CO::LOADING, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
+      << CI{"SLOWLOG", CO::ADMIN | CO::LOADING, -2, 0, 0, acl::kSlowLog}.HFUNC(SlowLog)
       << CI{"SCRIPT", CO::NOSCRIPT | CO::NO_KEY_TRANSACTIONAL, -2, 0, 0, acl::kScript}.HFUNC(Script)
       << CI{"DFLY", CO::ADMIN | CO::GLOBAL_TRANS | CO::HIDDEN, -2, 0, 0, acl::kDfly}.HFUNC(Dfly)
       << CI{"MODULE", CO::ADMIN, 2, 0, 0, acl::kModule}.HFUNC(Module);

@@ -268,15 +268,30 @@ TEST_F(HllFamilyTest, MergeOverlapping) {
   EXPECT_EQ(CheckedInt({"pfcount", "key6"}), 3);
 }
 
-TEST_F(HllFamilyTest, MergeInvalid) {
+TEST_F(HllFamilyTest, MergeAcrossShardsKeepsSingleDestination) {
   Run({"exists", "key1", "key4"});
   ASSERT_EQ(GetDebugInfo().shards_count, 2);  // ensure 2 shards
 
-  EXPECT_EQ(CheckedInt({"pfadd", "key1", "1", "2", "3"}), 1);
-  EXPECT_EQ(Run({"set", "key4", "..."}), "OK");
-  EXPECT_THAT(Run({"pfmerge", "key1", "key4"}),
+  EXPECT_EQ(CheckedInt({"pfadd", "key1", "1"}), 1);
+  EXPECT_EQ(Run({"pfmerge", "key4", "key1"}), "OK");
+  EXPECT_EQ(CheckedInt({"dbsize"}), 2);
+
+  EXPECT_EQ(CheckedInt({"del", "key4"}), 1);
+  EXPECT_EQ(CheckedInt({"dbsize"}), 1);
+}
+
+TEST_F(HllFamilyTest, MergeInvalid) {
+  constexpr char kShard0Key[] = "key1";
+  constexpr char kShard1Key[] = "key4";
+
+  Run({"exists", kShard0Key, kShard1Key});
+  ASSERT_EQ(GetDebugInfo().shards_count, 2);  // ensure 2 shards
+
+  EXPECT_EQ(CheckedInt({"pfadd", kShard0Key, "1", "2", "3"}), 1);
+  EXPECT_EQ(Run({"set", kShard1Key, "..."}), "OK");
+  EXPECT_THAT(Run({"pfmerge", kShard0Key, kShard1Key}),
               ErrArg("INVALIDOBJ Corrupted HLL object detected."));
-  EXPECT_EQ(CheckedInt({"pfcount", "key1"}), 3);
+  EXPECT_EQ(CheckedInt({"pfcount", kShard0Key}), 3);
 }
 
 TEST_F(HllFamilyTest, MergeWithInvalidHllFormat) {

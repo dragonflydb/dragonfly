@@ -841,8 +841,36 @@ void DflyCmd::StopReplication(uint32_t sync_id) {
   replica_ptr->Cancel();
 
   util::fb2::LockGuard lk(mu_);
-  replica_infos_.erase(sync_id);
-  UpdateReplicaInfoCacheLocked();
+
+  // StopReplication can run concurrently for the same session (connection close racing with the
+  // error handler); only the call that removes it counts the disconnect.
+  if (replica_infos_.erase(sync_id) > 0) {
+    RecordDisconnectLocked(*replica_ptr);
+    UpdateReplicaInfoCacheLocked();
+  }
+}
+
+void DflyCmd::RecordDisconnectLocked(const ReplicaInfo& replica) {
+  // The first error the session stored tells us why it went away. Cancellation is reported on
+  // every orderly stop, so it means the connection simply went away.
+  DisconnectReason reason = DisconnectReason::kClosed;
+  std::error_code ec = replica.GetExecState().GetError();
+  if (ec == errc::timed_out) {
+    reason = DisconnectReason::kTimeout;
+  } else if (ec && ec != errc::operation_canceled) {
+    reason = DisconnectReason::kError;
+  }
+
+  disconnect_counts_[static_cast<unsigned>(reason)].fetch_add(1, memory_order_relaxed);
+}
+
+DflyCmd::DisconnectStats DflyCmd::GetDisconnectStats() const {
+  auto load = [this](DisconnectReason reason) {
+    return disconnect_counts_[static_cast<unsigned>(reason)].load(memory_order_relaxed);
+  };
+  return {.closed = load(DisconnectReason::kClosed),
+          .error = load(DisconnectReason::kError),
+          .timeout = load(DisconnectReason::kTimeout)};
 }
 
 // Because we need to annotate unique_lock
@@ -875,12 +903,23 @@ void DflyCmd::BreakStalledFlowsInShard() {
 
       deleted.push_back(sync_id);
       replica_lock.unlock();
+
+      // Reporting rather than marking keeps an error another flow reported first. The handler
+      // only spawns a detached fiber, so the JoinErrorHandler inside Cancel() cannot block on
+      // the mutex we are holding here.
+      replica_ptr->GetExecState().ReportError(make_error_code(errc::timed_out),
+                                              "Master detected replication timeout");
       replica_ptr->Cancel();
     }
   }
 
-  for (auto sync_id : deleted)
-    replica_infos_.erase(sync_id);
+  for (auto sync_id : deleted) {
+    auto it = replica_infos_.find(sync_id);
+    if (it != replica_infos_.end()) {
+      RecordDisconnectLocked(*it->second);
+      replica_infos_.erase(it);
+    }
+  }
 
   if (!deleted.empty())
     UpdateReplicaInfoCacheLocked();

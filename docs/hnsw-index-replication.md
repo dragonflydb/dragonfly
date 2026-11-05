@@ -22,7 +22,10 @@ machine, and the invariants that make the scheme safe under concurrent writes.
   data.
 - **MRMW mutex** — a multi-reader / multi-writer mutex used by the global graph to
   serialize structural mutations against the serializer.
-- **sds** — simple dynamic string, the backing storage of a hash field value.
+- **sds** — simple dynamic string, the backing storage of a hash field value when the
+  hash is encoded as a hash table.
+- **listpack** — the compact hash encoding, which stores all fields and values in one
+  contiguous buffer.
 
 ## 2. Data Model
 
@@ -62,6 +65,8 @@ transmitted; the replica rebuilds them from the (empty) keyspace.
 |-----|---------|-------|
 | `search-index` | `"<index_name> <FT.CREATE arguments…>"` | Summary flow and `SINGLE_SHARD_WITH_SUMMARY` flows unconditionally; per-shard flows only if the replica advertises capability `VER6` or later. Omitted entirely from RDB-to-disk saves. |
 | `search-synonyms` | `"<index_name> <group_id> <terms…>"` | Summary flow. |
+| `search-alias` | `"<alias> <index_name>"` | Summary flow. |
+| `search-index-resp`, `search-synonyms-resp`, `search-alias-resp` | The same arguments as a RESP array (`*N\r\n$len\r\n…`), used when an argument is empty or contains a byte ≤ 0x20. Older versions skip these keys. | Same as the key without `-resp`. |
 | `shard-count` | integer | Summary and `SINGLE_SHARD_WITH_SUMMARY` flows. Load-bearing: controls the remap branch (§6). |
 
 ### 3.2 Opcodes
@@ -213,7 +218,9 @@ There is no direct transition between `kRestoring` and `kSerializing`.
 
 The global graph is mutated only when the owning shard is in `kBuilding`. All other
 states divert `Add` and `Remove` calls to a per-shard pending-updates list, which is
-replayed on drain.
+replayed on drain. The list records the affected keys and the DocIds of removed
+documents: the key index releases a DocId immediately and may reissue it to another key
+before the drain, so the drain first removes those DocIds' nodes, then replays the keys.
 
 ### 5.3 Consistent-snapshot invariant
 
@@ -223,12 +230,20 @@ buffered mutation from committing until the dump completes.
 
 ### 5.4 Borrowed-vector invariant
 
-A graph can be configured to store pointers into hash field sds rather than copying
-vectors. In copy mode this invariant is a no-op. In borrowed mode, any mutation that
-would free or overwrite such an sds while the index is not in `kBuilding` must retain
-the original sds until the drain. Retention is per-shard, per-field. The containing
-`PrimeValue` additionally suppresses defragmentation for the lifetime of the node to
-prevent relocation of borrowed storage.
+A graph can be configured to store pointers into hash storage rather than copying
+vectors. JSON documents always use copy mode, as do vectors smaller than
+`--listpack_max_bytes` or of at most 20 bytes, which a listpack may store as integers.
+Larger vectors are borrowed from a field's sds or, when the hash has a single field,
+from its listpack, which `HSET` keeps for a single field-value pair of any size.
+
+In copy mode this invariant is a no-op. In borrowed mode, any mutation that would free,
+move or overwrite borrowed storage while the index is not in `kBuilding` must retain the
+original until the drain; the hash continues with a copy. Retention is per-shard.
+An sds is retained only if the mutation affects its field; a listpack is retained on any
+mutation, since writes to other fields may also reallocate or convert it. Indices on the
+same hash share the retained original. The containing `PrimeValue` additionally
+suppresses defragmentation for the lifetime of the node to prevent relocation of
+borrowed storage.
 
 ### 5.5 Identifier uniqueness
 

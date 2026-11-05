@@ -53,7 +53,16 @@ struct LockTagOptions {
   // Returns the tag according to the rules defined by this options object.
   std::string_view Tag(std::string_view key) const;
 
-  static const LockTagOptions& instance();
+  // Called for every key that is sharded or locked. The options never change at runtime.
+  static const LockTagOptions& instance() {
+    return instance_;
+  }
+
+  // Sets instance() from the flags. Called once at startup, and by tests that change the flags.
+  static void InitFromFlags();
+
+ private:
+  static LockTagOptions instance_;
 };
 
 std::ostream& operator<<(std::ostream& os, const GlobalState& state);
@@ -115,7 +124,7 @@ class ScanResult {
 
   // Undo the most recent AppendBuffer using its returned pointer, e.g. when MATCH rejects a key.
   // No other mutation or move may intervene, and each append can be undone only once.
-  void UndoAppend(char* buffer);
+  void UndoAppend(const char* buffer);
 
   // Access an entry without copying. The view is invalidated by mutation or moving the result.
   // Packed entries precede overflow entries; insertion order is not preserved.
@@ -161,7 +170,7 @@ struct BorrowedInterpreter {
     return interpreter_;
   }
 
-  operator Interpreter*() {
+  operator Interpreter*() {  // NOLINT
     return interpreter_;
   }
 

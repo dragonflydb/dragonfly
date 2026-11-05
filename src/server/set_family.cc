@@ -591,7 +591,8 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   }
 
   if (co.Encoding() != kEncodingIntSet) {
-    res = StringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX, false);
+    // Include members added to the intset before conversion.
+    res += StringSetWrapper{co, op_args.db_cntx}.Add(vals, UINT32_MAX, false);
   }
 
   // TODO: consider optimization to record real command if the replica is in stable_sync state
@@ -652,7 +653,7 @@ OpResult<uint32_t> OpRem(const OpArgs& op_args, string_view key, const ParsedArg
   find_res->post_updater.Run();
 
   if (isempty) {
-    db_slice.Del(op_args.db_cntx, find_res->it);
+    db_slice.DelAtomic(op_args.db_cntx, find_res->it.GetInnerIt());
   }
   if (removed && journal_rewrite && op_args.shard->journal()) {
     vector<string_view> mapped(vals.size() + 1);
@@ -1110,11 +1111,7 @@ struct SetReplies {
   template <typename T> void Send(vector<T> sv) {
     if (script)  // output is sorted under scripts
       sort(sv.begin(), sv.end());
-    auto replier = [vec = std::move(sv)](facade::SinkReplyBuilder* builder) {
-      auto* rb = static_cast<RedisReplyBuilder*>(builder);
-      rb->SendBulkStrArr(vec, CollectionType::SET);
-    };
-    cmd_cntx->ReplyWith(std::move(replier));
+    static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBulkStrArr(sv, CollectionType::SET);
   }
 
   void Send(const ResultSetView& rsv) {
@@ -1193,15 +1190,11 @@ void CmdSMIsMember(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   OpResult<void> result = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
 
-  auto replier = [result, memberships = std::move(memberships)](facade::SinkReplyBuilder* builder) {
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    if (result || result == OpStatus::KEY_NOTFOUND) {
-      rb->SendLongArr(absl::MakeConstSpan(memberships));
-    } else {
-      rb->SendError(result.status());
-    }
-  };
-  cmd_cntx->ReplyWith(std::move(replier));
+  if (result || result == OpStatus::KEY_NOTFOUND) {
+    static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendLongArr(absl::MakeConstSpan(memberships));
+  } else {
+    cmd_cntx->SendError(result.status());
+  }
 }
 
 void CmdSMove(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -1586,14 +1579,13 @@ void CmdSScan(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   OpResult<StringVec> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (result.status() != OpStatus::WRONG_TYPE) {
-    auto replier = [cursor, result = std::move(result)](facade::SinkReplyBuilder* builder) {
-      auto* rb = static_cast<RedisReplyBuilder*>(builder);
-      std::string cursor_str = absl::StrCat(cursor);
-      RedisReplyBuilder::ArrayScope scope{rb, 2};
-      rb->SendBulkString(cursor_str);
-      rb->SendBulkStrArr(*result);
-    };
-    cmd_cntx->ReplyWith(std::move(replier));
+    // Must be a named variable declared before ArrayScope: the scope may reference it until it
+    // ends, and SendBulkString(std::string&&) DCHECKs when called inside a scope.
+    std::string cursor_str = absl::StrCat(cursor);
+    auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+    RedisReplyBuilder::ArrayScope scope{rb, 2};
+    rb->SendBulkString(cursor_str);
+    rb->SendBulkStrArr(*result);
   } else {
     cmd_cntx->SendError(result.status());
   }
@@ -1728,10 +1720,10 @@ void SetFamily::Register(CommandRegistry* registry) {
             << CI{"SMEMBERS", CO::READONLY, 2, 1, 1}.HFUNC(SMembers)
             << CI{"SISMEMBER", CO::FAST | CO::READONLY, 3, 1, 1}.HFUNC(SIsMember)
             << CI{"SMISMEMBER", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(SMIsMember)
-            << CI{"SMOVE", CO::FAST | CO::JOURNALED | CO::NO_AUTOJOURNAL, 4, 1, 2}.HFUNC(SMove)
+            << CI{"SMOVE", CO::FAST | CO::RW | CO::NO_AUTOJOURNAL, 4, 1, 2}.HFUNC(SMove)
             << CI{"SREM", CO::JOURNALED | CO::FAST, -3, 1, 1}.HFUNC(SRem)
             << CI{"SCARD", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(SCard)
-            << CI{"SPOP", CO::JOURNALED | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(SPop)
+            << CI{"SPOP", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}.HFUNC(SPop)
             << CI{"SRANDMEMBER", CO::READONLY, -2, 1, 1}.HFUNC(SRandMember)
             << CI{"SUNION", CO::READONLY, -2, 1, -1}.HFUNC(SUnion)
             << CI{"SUNIONSTORE",

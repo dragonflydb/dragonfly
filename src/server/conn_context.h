@@ -318,6 +318,15 @@ struct ConnectionState {
       return option_ == option;
     }
 
+    bool IsNoLoop() const {
+      return noloop_;
+    }
+
+    // True while the one-shot override set by the last CLIENT CACHING is active.
+    bool IsCachingPending() const {
+      return option_ != NONE && seq_num_ == (1 + caching_seq_num_);
+    }
+
    private:
     // a flag indicating whether the client has turned on client tracking.
     bool tracking_enabled_ = false;

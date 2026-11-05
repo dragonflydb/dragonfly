@@ -4,7 +4,10 @@
 
 #pragma once
 
+#include <absl/container/inlined_vector.h>
+
 #include <array>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
@@ -22,8 +25,9 @@ namespace dfly {
 class EngineShardSet;
 class TieredStorage;
 class ShardDocIndices;
+class AofStreamer;
 
-using TypeMemDeltas = std::array<int64_t, OBJ_TYPE_MAX>;
+using TypeAttributedMemory = std::array<int64_t, OBJ_TYPE_MAX>;
 
 class EngineShard {
   friend class EngineShardSet;
@@ -143,6 +147,12 @@ class EngineShard {
     return shard_search_indices_.get();
   }
 
+  AofStreamer* aof_streamer() {
+    return aof_streamer_.get();
+  }
+
+  void set_aof_streamer(std::unique_ptr<AofStreamer> streamer);
+
   // Moving average counters.
   enum MovingCnt : uint8_t { TTL_TRAVERSE, TTL_DELETE, COUNTER_TOTAL };
 
@@ -253,8 +263,8 @@ class EngineShard {
 
   void AddTypeMemDelta(size_t type, int64_t delta);
 
-  const TypeMemDeltas& type_mem_delta() const {
-    return type_mem_delta_;
+  const TypeAttributedMemory& type_attributed_memory() const {
+    return type_attributed_memory_;
   }
 
  private:
@@ -358,8 +368,12 @@ class EngineShard {
   Transaction* running_tx_ = nullptr;
   bool needs_repoll_ = false;  // set when running_tx_ interrupted a PollExecution call
 
+  // Dropped polls of blocked transactions, which a repoll without trans can't reach.
+  // Owning: a stale entry can outlive its hop.
+  absl::InlinedVector<boost::intrusive_ptr<Transaction>, 4> deferred_polls_;
+
   std::string continuation_debug_id_;
-  unsigned poll_concurrent_factor_ = 0;
+  unsigned poll_depth_ = 0;  // PollExecutionInternal calls in progress
 
   IntentLock shard_lock_;
 
@@ -375,12 +389,13 @@ class EngineShard {
   std::unique_ptr<TieredStorage> tiered_storage_;
   // TODO: Move indices to Namespace
   std::unique_ptr<ShardDocIndices> shard_search_indices_;
+  std::unique_ptr<AofStreamer> aof_streamer_;
   uint64_t stalled_start_ns_ = 0;
   using Counter = util::SlidingCounter<7>;
 
   Counter counter_[COUNTER_TOTAL];
 
-  TypeMemDeltas type_mem_delta_ = {};
+  TypeAttributedMemory type_attributed_memory_ = {};
 
   static __thread EngineShard* shard_;
 };

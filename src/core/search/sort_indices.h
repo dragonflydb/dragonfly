@@ -30,7 +30,8 @@ template <typename T> struct SimpleValueSortIndex : BaseSortIndex {
 
  public:
   SortableValue Lookup(DocId doc) const override;
-  std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit, bool desc) const override;
+  std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit, bool desc,
+                                  absl::FunctionRef<std::string_view(DocId)> key) const override;
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;

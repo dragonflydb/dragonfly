@@ -17,6 +17,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/namespaces.h"
+#include "server/server_state.h"
 #ifdef WITH_SEARCH
 #include "server/search/doc_index.h"
 #endif
@@ -38,7 +39,7 @@ ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
-ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
@@ -73,7 +74,7 @@ class TieredStorageTest : public BaseFamilyTest {
       SetFlag(&FLAGS_registered_buffer_size, 0);
     }
 
-    SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 32_MB);
+    SetFlag(&FLAGS_tiered_max_pending_bytes, 32_MB);
     if (GetFlag(FLAGS_tiered_prefix).empty()) {
       // Suffixed with the pid so each test run gets its own directory.
       SetFlag(&FLAGS_tiered_prefix, absl::StrCat("/tmp/tiered_storage_test_", getpid()));
@@ -87,9 +88,8 @@ class TieredStorageTest : public BaseFamilyTest {
         [](EngineShard* shard) { shard->tiered_storage()->UpdateFromFlags(); });
   }
 
-  // src=[1,2] with offloaded BY weights (w_2 < w_1) and GET targets; uploads are disabled so every
-  // later lookup reads from disk. Returns the GET values.
-  pair<string, string> OffloadSortOperands() {
+  // Disables uploads on all shards so that offloaded values will stay on disk
+  void DisableUploads() {
     SetFlag(&FLAGS_tiered_upload_threshold, 1.0f);
     UpdateFromFlags();
     // The budget turns negative once the heartbeat's CacheStats() has run on every shard.
@@ -100,6 +100,11 @@ class TieredStorageTest : public BaseFamilyTest {
       });
       return *std::ranges::max_element(budgets) < 0;
     });
+  }
+
+  // src=[1,2] with offloaded BY weights (w_2 < w_1) and GET targets. uploads are disabled
+  pair<string, string> OffloadSortOperands() {
+    DisableUploads();
 
     string o1 = BuildString(3000, 'a'), o2 = BuildString(3000, 'b');
     Run({"RPUSH", "src", "1", "2"});
@@ -713,6 +718,7 @@ TEST_F(PureDiskTSMTTest, SortByGetOffloadedSquashed) {
   EXPECT_TRUE(GetMetrics().facade_stats.reply_stats.err_count.empty());  // RunMany drops replies
   EXPECT_THAT(Run({"LRANGE", "dst", "0", "-1"}), RespElementsAre(o1, o2));
   EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 4u);
+  EXPECT_EQ(GetMetrics().tiered_stats.max_pending_bytes, 32_MB * shard_set->size());
 }
 
 // The remaining in-place overwrite paths reach the value through DbSlice::AddOrFind and retype it,
@@ -865,7 +871,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   // Set low limit so all clients are throttled
-  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 1);
+  absl::SetFlag(&FLAGS_tiered_max_pending_bytes, 1);
   UpdateFromFlags();
 
   // issue client pause to accumualte SETs
@@ -887,6 +893,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   // Check that we provided backpressure for all the clients.
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.tiered_stats.total_clients_throttled, fibs.size());
+  EXPECT_EQ(metrics.tiered_stats.max_pending_bytes, 1u * shard_set->size());
 
   for (auto& fib : fibs)
     fib.JoinIfNeeded();
@@ -973,6 +980,36 @@ TEST_F(PureDiskTSTest, Dump) {
   EXPECT_THAT(Run({"del", "k0"}), IntArg(1));
   resp = Run({"restore", "k0", "0", facade::ToSV(resp.GetBuf())});
   EXPECT_EQ(resp, "OK");
+}
+
+TEST_F(PureDiskTSTest, DebugObjHist) {
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+  const int kNum = 10;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), BuildString(3000)});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+
+  auto resp = Run({"DEBUG", "OBJHIST"});
+  string hist = resp.GetString();
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\n"
+                              "Count: 10 Average: 3000.0000"));
+  EXPECT_THAT(hist, HasSubstr("Tiered values - Serialized size:\nCount: 10 "));
+
+  // Offloaded hashes must be reported without touching their (absent) in-memory representation.
+  Run({"FLUSHALL"});
+  for (size_t i = 0; i < 100; ++i) {
+    Run({"HSET", absl::StrCat("hash:", i), "field-a", BuildString(40, 'a'), "field-b",
+         BuildString(40, 'b')});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries > 0; });
+
+  resp = Run({"DEBUG", "OBJHIST"});
+  hist = resp.GetString();
+  EXPECT_THAT(hist, HasSubstr("OBJECT:hash"));
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\nCount: 100 "));
+  EXPECT_THAT(hist, HasSubstr("Tiered values - Serialized size:\n"));
 }
 
 TEST_F(PureDiskTSTest, OffloadedStringSnapshotPreservesMemcacheFlags) {
@@ -1594,6 +1631,28 @@ TEST_F(ListNodeTieringTest, LPopStashedNodes) {
 
   // List must be gone after all elements are popped.
   EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
+}
+
+// Node loads and stash completions during a mutating list operation must not be double counted
+// by the key's memory updater.
+TEST_F(ListNodeTieringTest, MemoryAccountingWithStashedNodes) {
+  auto list_memory = [this] { return GetMetrics().db_stats[0].memory_usage_by_type[OBJ_LIST]; };
+
+  const int kItems = 12;
+  for (int i = 0; i < kItems; i++)
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('A' + i))});
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 3; });
+
+  for (int i = 0; i < kItems - 1; i++) {
+    Run({"LPOP", "mylist"});
+    // Pushing to the tail triggers more offloads that may complete during the next pop's load.
+    Run({"RPUSH", "mylist", BuildString(2048, 'z')});
+  }
+
+  Run({"DEL", "mylist"});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+  EXPECT_EQ(list_memory(), 0u);
 }
 
 // MOVE a list whose interior nodes are fully offloaded to a different DB.
@@ -2433,5 +2492,77 @@ TEST_P(IndexedHashTieringTest, BorrowedHnswVectorsStayResident) {
 }
 
 #endif  // WITH_SEARCH
+
+// MGET runs optimistically and when cancelled reruns its shard callback while tiered reads of the
+// previous attempt may still be in flight. These orphaned reads must not write into the response
+// buffer, which the new attempt reuses or reallocates.
+// TODO: disabled - flaky, MGET retries depend on CPU parallelism and are rare on CI runners.
+// Run it with --gtest_also_run_disabled_tests on a machine with many cores.
+TEST_F(PureDiskTSMTTest, DISABLED_MGetRescheduleWithPendingReads) {
+  DisableUploads();
+
+  const auto sz = shard_set->size();
+  // big - tiered, read from disk
+  // pad - keep flipping size, always allocated before big in the resp storage
+  // hot - on another shard concurrent write so that MGET's optimistic run there is cancelled.
+  // other - makes the writers of hot multi-shard and prevent inlining
+  const string big = "big", hot = "hot", other = "y";
+  string pad;
+  unsigned i = 0;
+  do {
+    pad = absl::StrCat("pad", i++);
+  } while (Shard(pad, sz) != Shard(big, sz));
+
+  ASSERT_NE(Shard(big, sz), Shard(hot, sz));
+  ASSERT_NE(Shard(other, sz), Shard(big, sz));
+  ASSERT_NE(Shard(other, sz), Shard(hot, sz));
+
+  const string value(8_KB, 'x');
+  const string small_pad(16, 'a'), large_pad(48, 'b');
+
+  Run({"SET", big, value});
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == 1; });
+  Run({"SET", hot, "v"});
+  Run({"SET", pad, small_pad});
+
+  atomic_bool done{false};
+  vector<Fiber> writers;
+  for (size_t i = 0; i < 4; i++) {
+    writers.push_back(pp_->at(i)->LaunchFiber([&] {
+      // contends with mget hot
+      while (!done.load(memory_order_relaxed))
+        Run({"MSET", hot, "v", other, "v"});
+    }));
+  }
+  writers.push_back(pp_->at(4)->LaunchFiber([&] {
+    // keep changing the size of pad, so that on retries the location for big also changes (next to
+    // pad)
+    for (unsigned i = 0; !done.load(memory_order_relaxed); ++i)
+      Run({"SET", pad, i % 2 ? small_pad : large_pad});
+  }));
+
+  // Run MGETs until enough of them were rescheduled. The counter is incremented on the coordinator
+  // thread, so reading it on the MGET thread counts only the MGET cancellations.
+  constexpr uint64_t kMinCancels = 50;
+  const auto deadline = absl::Now() + absl::Seconds(30);
+  uint64_t cancels = 0;
+  pp_->at(pp_->size() - 1)->Await([&] {
+    const auto& stats = ServerState::tlocal()->stats;
+    const auto base = stats.tx_schedule_cancel_cnt;
+    while (cancels < kMinCancels && absl::Now() < deadline) {
+      // if our attempt comparison is broken we would get mixed bytes here due to overwriting the
+      // buffer
+      EXPECT_THAT(Run({"MGET", pad, big, hot}),
+                  RespElementsAre(AnyOf(small_pad, large_pad), value, "v"));
+      cancels = stats.tx_schedule_cancel_cnt - base;
+    }
+  });
+
+  done = true;
+  for (auto& fb : writers)
+    fb.Join();
+
+  EXPECT_GE(cancels, kMinCancels);
+}
 
 }  // namespace dfly

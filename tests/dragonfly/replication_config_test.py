@@ -218,6 +218,23 @@ async def test_ipv6_replication(df_factory: DflyInstanceFactory):
     assert await c_replica.execute_command("REPLICAOF", master["bind"], master["port"]) == "OK"
 
 
+async def test_default_bind_replica_ip(df_factory: DflyInstanceFactory, monkeypatch):
+    """Without --bind, the master reports an IPv4 replica's IP as plain IPv4."""
+    # Under systemd, protected mode would bind 127.0.0.1 and skip the default bind address.
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    master = df_factory.create(proactor_threads=1)
+    replica = df_factory.create(proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    c_master = master.client()
+    c_replica = replica.client()
+    assert await c_replica.execute_command("REPLICAOF", "127.0.0.1", master.port) == "OK"
+    await wait_for_replicas_state(c_replica)
+
+    role = await c_master.role()
+    assert role[1][0][0] == "127.0.0.1"
+
+
 @pytest.mark.parametrize(
     "start_replica_first, disconnect_at_end",
     [
@@ -427,11 +444,11 @@ async def test_replicate_old_master(
     if cpu not in ("x86_64", "aarch64"):
         pytest.skip(f"No release binaries for {cpu}")
 
-    dfly_version = "v1.19.2"
+    dfly_version = "v1.25.3"
     released_dfly_path = download_dragonfly_release(dfly_version)
     master, [replica], c_master, [c_replica] = await setup_replication(
         df_factory,
-        master_args={"version": 1.19, "path": released_dfly_path, "cluster_mode": cluster_mode},
+        master_args={"version": 1.25, "path": released_dfly_path, "cluster_mode": cluster_mode},
         replica_args={
             "cluster_mode": cluster_mode,
             "cluster_announce_ip": announce_ip,
@@ -440,28 +457,36 @@ async def test_replicate_old_master(
         connect=False,
     )
 
-    assert (
-        f"df-{dfly_version}"
-        == (await c_master.execute_command("info", "server"))["dragonfly_version"]
-    )
-    assert dfly_version != (await c_replica.execute_command("info", "server"))["dragonfly_version"]
+    try:
+        assert (
+            f"df-{dfly_version}"
+            == (await c_master.execute_command("info", "server"))["dragonfly_version"]
+        )
+        assert (
+            dfly_version != (await c_replica.execute_command("info", "server"))["dragonfly_version"]
+        )
 
-    await c_master.execute_command("set", "k1", "v1")
-    await c_master.execute_command("HSETEX", "hash", 3600, "expiring", "one")
-    await c_master.hset("hash", "persistent", "two")
+        await c_master.execute_command("set", "k1", "v1")
+        await c_master.execute_command("HSETEX", "hash", 3600, "expiring", "one")
+        await c_master.hset("hash", "persistent", "two")
 
-    assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
-    await wait_available_async(c_replica)
+        assert await c_replica.execute_command(f"REPLICAOF localhost {master.port}") == "OK"
+        await wait_available_async(c_replica)
 
-    assert await c_replica.execute_command("get", "k1") == "v1"
-    await assert_hash_expiry(c_master, c_replica)
+        assert await c_replica.execute_command("get", "k1") == "v1"
+        await assert_hash_expiry(c_master, c_replica)
 
-    if cluster_mode == "emulated":
-        # An old master sends no announced address: fall back to the one we replicate from.
-        res = await c_replica.execute_command("CLUSTER SLOTS")
-        master_replid = (await c_replica.execute_command("INFO", "REPLICATION"))["master_replid"]
-        assert res[0][2] == ["localhost", master.port, master_replid]
-        assert res[0][3][1] == replica.port
+        if cluster_mode == "emulated":
+            # An old master sends no announced address: fall back to the one we replicate from.
+            res = await c_replica.execute_command("CLUSTER SLOTS")
+            master_replid = (await c_replica.execute_command("INFO", "REPLICATION"))[
+                "master_replid"
+            ]
+            assert res[0][2] == ["localhost", master.port, master_replid]
+            assert res[0][3][1] == replica.port
+    finally:
+        # This test checks replication compatibility; the released master's shutdown can hang.
+        master.stop(kill=True)
 
 
 async def test_replicate_to_old_replica(df_factory: DflyInstanceFactory):
@@ -469,10 +494,10 @@ async def test_replicate_to_old_replica(df_factory: DflyInstanceFactory):
     if cpu not in ("x86_64", "aarch64"):
         pytest.skip(f"No release binaries for {cpu}")
 
-    dfly_version = "v1.19.2"
+    dfly_version = "v1.25.3"
     released_dfly_path = download_dragonfly_release(dfly_version)
     master = df_factory.create(cluster_mode="emulated", admin_port=ADMIN_PORT)
-    replica = df_factory.create(version=1.19, path=released_dfly_path, cluster_mode="emulated")
+    replica = df_factory.create(version=1.25, path=released_dfly_path, cluster_mode="emulated")
     df_factory.start_all([master, replica])
 
     c_master = master.client()

@@ -6,12 +6,18 @@
 
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_set.h>
+#include <absl/container/inlined_vector.h>
+#include <absl/strings/ascii.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
+#include <absl/types/span.h>
 #include <uni_algo/case.h>
 
+#include <algorithm>
 #include <chrono>
+#include <ranges>
 #include <type_traits>
+#include <utility>
 #include <variant>
 
 #include "base/logging.h"
@@ -26,6 +32,7 @@
 #include "core/search/vector_utils.h"
 
 using namespace std;
+namespace rng = std::ranges;
 
 namespace dfly::search {
 
@@ -34,7 +41,6 @@ namespace {
 AstExpr ParseQuery(std::string_view query, const QueryParams* params,
                    const OptionalFilters* filters) {
   QueryDriver driver{};
-  driver.ResetScanner();
   driver.SetParams(params);
   driver.SetInput(std::string{query});
   (void)Parser (&driver)();  // can throw
@@ -51,17 +57,13 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params,
 
 struct ProfileBuilder {
   struct NodeFormatter {
-    template <TagType T> void operator()(std::string* out, const AstAffixNode<T>& node) const {
-      out->append(node.affix);
-    }
     void operator()(std::string* out, const AstTagsNode::TagValue& value) const {
-      visit([this, out](const auto& n) { this->operator()(out, n); }, value);
+      out->append(value.affix);
     }
   };
 
   string GetNodeInfo(const AstNode& node) {
     Overloaded node_info{
-        [](monostate) -> string { return ""s; },
         [](const AstTermNode& n) { return absl::StrCat("Term{", n.affix, "}"); },
         [](const AstPrefixNode& n) { return absl::StrCat("Prefix{", n.affix, "}"); },
         [](const AstSuffixNode& n) { return absl::StrCat("Suffix{", n.affix, "}"); },
@@ -88,7 +90,9 @@ struct ProfileBuilder {
         },
         [](const AstVectorRangeNode& n) { return absl::StrCat("VectorRange{r=", n.radius, "}"); },
     };
-    return visit(node_info, node.Variant());
+    string result;
+    VisitAst(node, [&](const auto& inner) { result = node_info(inner); });
+    return result;
   }
 
   using Tp = std::chrono::steady_clock::time_point;
@@ -108,7 +112,7 @@ struct ProfileBuilder {
   }
 
   AlgorithmProfile Take() {
-    reverse(profile_.events.begin(), profile_.events.end());
+    rng::reverse(profile_.events);
     return std::move(profile_);
   }
 
@@ -116,6 +120,63 @@ struct ProfileBuilder {
   size_t depth_;
   AlgorithmProfile profile_;
 };
+
+// Posting list key of a query term as Matching() resolves it (the index stemmer applies). Scoring
+// cursors and the per-shard stats are keyed by posting list keys, so both describe the same list
+// whichever query leaf matched it; the trie walk and phrase terms use their raw entry keys.
+string TermKey(const TextIndex* index, string_view term) {
+  return string{index->NormalizeForExactQuery(absl::StripAsciiWhitespace(term)).view()};
+}
+
+// Group tokens of every synonym group the lowercase term belongs to (empty without synonyms).
+// Index keys are lowercase already; a query term is folded once by its leaf.
+absl::Span<const string> SynonymTokens(const FieldIndices* indices, string_view lowercase_term) {
+  const Synonyms* synonyms = indices->GetSynonyms();
+  return synonyms ? synonyms->GetGroupTokens(lowercase_term) : absl::Span<const string>{};
+}
+
+// The test BaseStringIndex::Match*WithTerm applies to index keys.
+template <TagType T> bool MatchesAffix(string_view term, string_view affix) {
+  if constexpr (T == TagType::PREFIX)
+    return term.starts_with(affix);
+  else if constexpr (T == TagType::SUFFIX)
+    return term.ends_with(affix);
+  else if constexpr (T == TagType::INFIX)
+    return term.find(affix) != string_view::npos;
+  else
+    return GlobMatch(term, affix);
+}
+
+// Group tokens of the synonym terms matching the affix, deduplicated. Which grouped keys the
+// local walk reaches differs per shard while the synonym terms are the same everywhere, so every
+// shard records this superset. Prefix and wildcard patterns narrow the scan to a sorted range.
+template <TagType T> vector<string_view> GroupTokensForAffix(const Synonyms& syn, string_view raw) {
+  // Text indices fold the pattern the same way (NormalizeQueryWord).
+  const string affix = una::cases::to_lowercase_utf8(raw);
+  string prefix;
+  if constexpr (T == TagType::PREFIX)
+    prefix = affix;
+  else if constexpr (T == TagType::WILDCARD)
+    prefix = GlobLiteralPrefix(affix);
+
+  const auto& terms = syn.TermTokens();
+  vector<string_view> tokens;
+  for (auto it = terms.lower_bound(prefix); it != terms.end() && it->first.starts_with(prefix);
+       ++it) {
+    if (MatchesAffix<T>(it->first, affix))
+      tokens.insert(tokens.end(), it->second.begin(), it->second.end());
+  }
+  rng::sort(tokens);
+  auto unique_end = rng::unique(tokens).begin();
+  tokens.erase(unique_end, tokens.end());
+  return tokens;
+}
+
+// Nodes evaluated from their children's results; all other nodes are leaves.
+template <typename Node>
+concept CompositeNode = (requires(const Node& node) { node.node; }) ||
+                        (requires(const Node& node) { node.nodes; }) ||
+                        (requires(const Node& node) { node.filter; });
 
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
@@ -182,15 +243,17 @@ struct BasicSearch {
   }
 
   // Efficiently unify multiple sub results with specified logical op
-  IndexResult UnifyResults(vector<IndexResult>&& sub_results, LogicOp op) {
+  // Consumes the results in place, including views into the evaluation buffer.
+  template <typename Results> IndexResult UnifyResults(Results&& sub_results, LogicOp op) {
     if (sub_results.empty())
       return IndexResult{};
 
     // Unifying from smallest to largest is more efficient.
     // AND: the result only shrinks, so starting with the smallest is most optimal.
     // OR: unifying smaller sets first reduces the number of element traversals on average.
-    sort(sub_results.begin(), sub_results.end(),
-         [](const auto& l, const auto& r) { return l.ApproximateSize() < r.ApproximateSize(); });
+    rng::sort(sub_results, [](const auto& l, const auto& r) {
+      return l.ApproximateSize() < r.ApproximateSize();
+    });
 
     IndexResult out{std::move(sub_results[0])};
     for (auto& matched : absl::MakeSpan(sub_results).subspan(1))
@@ -204,10 +267,6 @@ struct BasicSearch {
     invoke(f, *index, word,
            [&result, this](const auto* c) { Merge(IndexResult{c}, &result, LogicOp::OR); });
     return result;
-  }
-
-  IndexResult Search(monostate, string_view) {
-    return IndexResult{};
   }
 
   IndexResult Search(const AstStarNode& node, string_view active_field) {
@@ -228,20 +287,25 @@ struct BasicSearch {
   }
 
   template <TagType T> IndexResult Search(const AstAffixNode<T>& node, string_view active_field) {
-    vector<TextIndex*> indices;
+    TextIndex* single = nullptr;
+    absl::Span<TextIndex* const> indices;
     if (!active_field.empty()) {
-      if (auto* index = GetIndex<TextIndex>(active_field); index)
-        indices = {index};
-      else
+      single = GetIndex<TextIndex>(active_field);
+      if (!single)
         return IndexResult{};
+      indices = absl::MakeConstSpan(&single, 1);
     } else {
       indices = indices_->GetAllTextIndices();
     }
 
-    // Single trie walk dispatches each match to scoring (AddMatchedTerm) and
-    // to the union (for the result set). Synonym shadow entries (freq=0) are
-    // resolved to the group token so TakeScoredTopK looks up the group's
-    // posting list instead.
+    // Single trie walk dispatches each match to scoring (AddMatchedTerm) and to the union (for
+    // the result set). A matched term that belongs to synonym groups is scored through the group
+    // tokens instead of its own posting list. Which grouped terms the local walk reaches differs
+    // per shard, so the tokens come from the synonym terms matching the pattern, the same set on
+    // every shard (as in StatsCollector).
+    vector<string_view> group_tokens;
+    if (const Synonyms* syn = indices_->GetSynonyms(); scorer_ && syn)
+      group_tokens = GroupTokensForAffix<T>(*syn, node.affix);
     vector<IndexResult> sub_results;
     sub_results.reserve(indices.size());
     for (auto* index : indices) {
@@ -249,15 +313,9 @@ struct BasicSearch {
       absl::flat_hash_set<string> scored_terms;
       auto term_cb = [&per_index, &scored_terms, this, index](string_view term,
                                                               const auto* container) {
-        if (scorer_) {
-          std::string resolved{term};
-          if (auto synonyms = indices_->GetSynonyms(); synonyms) {
-            if (auto group_id = synonyms->GetGroupToken(resolved); group_id)
-              resolved = std::move(*group_id);
-          }
-          if (scored_terms.insert(resolved).second)
-            AddMatchedTerm(index, std::move(resolved));
-        }
+        if (scorer_ && SynonymTokens(indices_, term).empty() &&
+            scored_terms.insert(string{term}).second)
+          AddMatchedTerm(index, string{term}, container);
         Merge(IndexResult{container}, &per_index, LogicOp::OR);
       };
       if constexpr (T == TagType::PREFIX)
@@ -268,6 +326,11 @@ struct BasicSearch {
         index->MatchInfixWithTerm(node.affix, term_cb);
       else if constexpr (T == TagType::WILDCARD)
         index->MatchWildcardWithTerm(node.affix, term_cb);
+      for (string_view group_token : group_tokens) {
+        if (scored_terms.insert(string{group_token}).second)
+          AddMatchedTerm(index, string{group_token},
+                         index->Matching(group_token, /*strip_whitespace=*/false));
+      }
       sub_results.push_back(std::move(per_index));
     }
 
@@ -275,24 +338,28 @@ struct BasicSearch {
   }
 
   // "term": access field's text index or unify results from all text indices if no field is set.
-  // When the term is in a synonym group, the search is expanded to (term OR group_ref) so docs
-  // matched via stem still join the synonym group's docs.
-  IndexResult Search(const AstAffixNode<TagType::REGULAR> node, string_view active_field) {
+  // When the term is in synonym groups, the search is expanded to (term OR every group token) so
+  // docs matched via stem still join the docs of all of the term's groups.
+  IndexResult Search(const AstTermNode& node, string_view active_field) {
     const std::string& term = node.affix;
-    std::optional<std::string> group_id;
-    if (auto synonyms = indices_->GetSynonyms(); synonyms)
-      group_id = synonyms->GetGroupToken(term);
+    absl::Span<const string> group_tokens =
+        SynonymTokens(indices_, una::cases::to_lowercase_utf8(term));
 
     auto match_in = [&](TextIndex* index) {
+      const auto* own = index->Matching(term, /*strip_whitespace=*/true);
       if (scorer_)
-        AddMatchedTerm(index, term);
-      IndexResult r{index->Matching(term, /*strip_whitespace=*/true)};
-      if (group_id) {
-        if (scorer_)
-          AddMatchedTerm(index, *group_id);
+        AddMatchedTerm(index, TermKey(index, term), own);
+      IndexResult r{own};
+      if (!group_tokens.empty()) {
         vector<IndexResult> parts;
+        parts.reserve(group_tokens.size() + 1);
         parts.push_back(std::move(r));
-        parts.push_back(IndexResult{index->Matching(*group_id, /*strip_whitespace=*/false)});
+        for (const string& group_token : group_tokens) {
+          const auto* c = index->Matching(group_token, /*strip_whitespace=*/false);
+          if (scorer_)
+            AddMatchedTerm(index, group_token, c);
+          parts.push_back(IndexResult{c});
+        }
         r = UnifyResults(std::move(parts), LogicOp::OR);
       }
       return r;
@@ -320,7 +387,7 @@ struct BasicSearch {
       return true;
     const auto& p = positions[i];
     uint32_t upper = cur + slop + 1;
-    auto lo = std::upper_bound(p.begin(), p.end(), cur);
+    auto lo = rng::upper_bound(p, cur);
     for (auto it = lo; it != p.end() && *it <= upper; ++it) {
       if (CanExtendPhrase(positions, i + 1, *it, slop))
         return true;
@@ -356,20 +423,18 @@ struct BasicSearch {
     if (terms.empty())
       return lists;
 
-    if (scorer_) {
-      for (const auto& t : terms)
-        AddMatchedTerm(text_index, t);
-    }
-
     lists.reserve(terms.size());
+    bool complete = true;
     for (const auto& t : terms) {
       const auto* c = text_index->MatchingNoStem(t);
-      if (!c || c->Empty()) {
-        lists.clear();
-        return lists;
-      }
+      if (scorer_)
+        AddMatchedTerm(text_index, t, c);
+      if (!c || c->Empty())
+        complete = false;
       lists.push_back(c);
     }
+    if (!complete)
+      lists.clear();
     return lists;
   }
 
@@ -470,89 +535,27 @@ struct BasicSearch {
     return IndexResult{};
   }
 
-  // negate -(*subquery*): explicitly compute result complement. Needs further optimizations
-  IndexResult Search(const AstNegateNode& node, string_view active_field) {
-    auto matched = SearchGeneric(*node.node, active_field).Take().first;
-    if (!error_.empty())
-      return IndexResult{};
-
-    vector<DocId> all = indices_->GetAllDocs();
-
-    // To negate a result, we have to find the complement of matched to all documents,
-    // so we remove all matched documents from the set of all documents.
-    auto pred = [&matched](DocId doc) {
-      return binary_search(matched.begin(), matched.end(), doc);
-    };
-    all.erase(remove_if(all.begin(), all.end(), pred), all.end());
-    return IndexResult{std::move(all)};
-  }
-
-  IndexResult Search(const AstOptionalNode& node, string_view active_field) {
-    // ~ tolerates inner failures: it's a soft scoring boost, not a filter.
-    // E.g. @noindex_field:~hello can't actually populate matched_text_terms_
-    // (no index to query) — but the operator should still return all docs.
-    // Save/restore error_ so a transient inner failure doesn't poison the
-    // outer query.
-    string saved_error = std::move(error_);
-    SearchGeneric(*node.node, active_field);
-    error_ = std::move(saved_error);
-    // ~ never filters: return the full doc set, including docs that lack the
-    // active field. Mirrors AstNegateNode which also operates on global all-docs.
-    return IndexResult{&indices_->GetAllDocs()};
-  }
-
-  IndexResult Search(const AstAttributeNode& node, string_view active_field) {
-    double previous_weight = current_weight_;
-    current_weight_ *= node.weight;
-    absl::Cleanup restore_weight = [&] { current_weight_ = previous_weight; };
-    return SearchGeneric(*node.node, active_field);
-  }
-
-  // logical query: unify all sub results
-  IndexResult Search(const AstLogicalNode& node, string_view active_field) {
-    // Stopwords are never indexed, so a bare stopword operand matches nothing: as an AND term it
-    // would zero the whole result (e.g. `@title:(foo) and bar`), as an OR term it adds nothing.
-    // Drop such operands so the surrounding query still matches.
-    vector<IndexResult> sub_results;
-    sub_results.reserve(node.nodes.size());
-    for (const auto& sub : node.nodes) {
-      if (const auto* term = get_if<AstTermNode>(&sub.Variant());
-          term && indices_->IsStopWord(term->affix))
-        continue;
-      sub_results.push_back(SearchGeneric(sub, active_field));
-    }
-    return UnifyResults(std::move(sub_results), node.op);
-  }
-
-  // @field: set active field for sub tree
-  IndexResult Search(const AstFieldNode& node, string_view active_field) {
-    DCHECK(active_field.empty());
-    DCHECK(node.node);
-    return SearchGeneric(*node.node, node.field);
-  }
-
   // {tags | ...}: Unify results for all tags
   IndexResult Search(const AstTagsNode& node, string_view active_field) {
     auto* tag_index = GetIndex<TagIndex>(active_field);
     if (!tag_index)
       return IndexResult{};
 
-    Overloaded ov{[tag_index](const AstTermNode& term) -> IndexResult {
-                    return IndexResult{tag_index->Matching(term.affix)};
-                  },
-                  [tag_index, this](const AstPrefixNode& prefix) {
-                    return CollectMatches(tag_index, prefix.affix, &TagIndex::MatchPrefix);
-                  },
-                  [tag_index, this](const AstSuffixNode& suffix) {
-                    return CollectMatches(tag_index, suffix.affix, &TagIndex::MatchSuffix);
-                  },
-                  [tag_index, this](const AstInfixNode& infix) {
-                    return CollectMatches(tag_index, infix.affix, &TagIndex::MatchInfix);
-                  },
-                  [tag_index, this](const AstWildcardNode& wildcard) {
-                    return CollectMatches(tag_index, wildcard.affix, &TagIndex::MatchWildcard);
-                  }};
-    auto mapping = [ov](const auto& tag) { return visit(ov, tag); };
+    auto mapping = [tag_index, this](const AstTagsNode::TagValue& tag) {
+      switch (tag.type) {
+        case TagType::REGULAR:
+          return IndexResult{tag_index->Matching(tag.affix)};
+        case TagType::PREFIX:
+          return CollectMatches(tag_index, tag.affix, &TagIndex::MatchPrefix);
+        case TagType::SUFFIX:
+          return CollectMatches(tag_index, tag.affix, &TagIndex::MatchSuffix);
+        case TagType::INFIX:
+          return CollectMatches(tag_index, tag.affix, &TagIndex::MatchInfix);
+        case TagType::WILDCARD:
+          return CollectMatches(tag_index, tag.affix, &TagIndex::MatchWildcard);
+      }
+      ABSL_UNREACHABLE();
+    };
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
   }
 
@@ -571,8 +574,7 @@ struct BasicSearch {
     visit(cb, sub_results.Borrowed());
 
     size_t prefix_size = min(knn.limit, knn_distances_.size());
-    partial_sort(knn_distances_.begin(), knn_distances_.begin() + prefix_size,
-                 knn_distances_.end());
+    rng::partial_sort(knn_distances_, knn_distances_.begin() + prefix_size);
     knn_distances_.resize(prefix_size);
   }
 
@@ -634,10 +636,31 @@ struct BasicSearch {
     return IndexResult{std::move(out)};
   }
 
+  // Kept out of the large iterative driver: inlining it there made negation ~12% slower.
+  __attribute__((noinline)) IndexResult EvalNegate(IndexResult child) {
+    if (!error_.empty())
+      return IndexResult{};
+    auto matched = std::move(child).Take().first;
+    const auto& all = indices_->GetAllDocs();
+    if (matched.empty())
+      return IndexResult{vector<DocId>{all}};
+    if (matched.size() == 1) {
+      vector<DocId> out = all;
+      auto it = rng::lower_bound(out, matched.front());
+      if (it != out.end() && *it == matched.front())
+        out.erase(it);
+      return IndexResult{std::move(out)};
+    }
+    vector<DocId> out;
+    out.reserve(all.size());
+    rng::set_difference(all, matched, back_inserter(out));
+    return IndexResult{std::move(out)};
+  }
+
   // [KNN limit @field vec]: Compute distance from `vec` to all vectors keep closest `limit`
-  IndexResult Search(const AstKnnNode& knn, string_view active_field) {
+  // KNN over the (already evaluated) pre-filter result `sub_results`.
+  IndexResult EvalKnn(const AstKnnNode& knn, string_view active_field, IndexResult sub_results) {
     DCHECK(active_field.empty());
-    auto sub_results = SearchGeneric(*knn.filter, active_field);
 
     auto* vec_index = GetIndex<BaseVectorIndex>(knn.field);
     if (!vec_index)
@@ -673,27 +696,155 @@ struct BasicSearch {
     return IndexResult{std::move(out)};
   }
 
-  // Determine node type and call specific search function
-  IndexResult SearchGeneric(const AstNode& node, string_view active_field, bool top_level = false) {
-    if (!error_.empty())
-      return IndexResult{};
+  // SearchGeneric's traversal helpers. The functions are force-inlined into its hot loop; the
+  // compiler's own inlining choices generate measurably slower code there.
 
-    ProfileBuilder::Tp start = profile_builder_ ? profile_builder_->Start() : ProfileBuilder::Tp{};
+  // A composite node whose children are being evaluated by SearchGeneric.
+  struct EvalFrame {
+    const AstNode* node;
+    string_view field;         // active field of the children
+    double weight;             // query weight of the children
+    size_t results_base;       // index of the first child's result in SearchGeneric's `values`
+    size_t next_operand;       // AstLogicalNode: index of the next operand to consider
+    ProfileBuilder::Tp start;  // profiling start of the node
+    AstNode::Type type;
+  };
 
-    auto cb = [this, active_field](const auto& inner) { return Search(inner, active_field); };
-    auto result = visit(cb, node.Variant());
+  // Pushes the frame of a composite node entered with `field` and returns its first child to
+  // evaluate, or null if it has none.
+  template <CompositeNode Node>
+  __attribute__((always_inline)) const AstNode* OpenFrame(const Node& node, string_view field,
+                                                          size_t results_base,
+                                                          ProfileBuilder::Tp start,
+                                                          vector<EvalFrame>* stack) const {
+    stack->push_back({&node, field, current_weight_, results_base, 0, start, Node::kType});
+    if constexpr (is_same_v<Node, AstFieldNode>) {
+      DCHECK(field.empty());
+      stack->back().field = node.field;
+    } else if constexpr (is_same_v<Node, AstAttributeNode>) {
+      stack->back().weight *= node.weight;
+    }
 
-    // Top level results don't need to be sorted, because they will be scored, sorted by fields or
-    // used by knn
-    DCHECK(top_level || holds_alternative<AstKnnNode>(node.Variant()) ||
-           holds_alternative<AstGeoNode>(node.Variant()) ||
-           holds_alternative<AstVectorRangeNode>(node.Variant()) ||
-           visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
+    if constexpr (requires { node.node; })
+      return node.node.get();
+    else if constexpr (requires { node.filter; })
+      return node.filter.get();  // optional KNN pre-filter
+    else
+      return NextOperand(&stack->back());
+  }
 
-    if (profile_builder_)
-      profile_builder_->Finish(start, node, result);
+  // Returns the next operand of the logical node in `frame`, or null after the last one.
+  // Stopword operands are dropped: they match nothing.
+  __attribute__((always_inline)) const AstNode* NextOperand(EvalFrame* frame) const {
+    const auto& operands = static_cast<const AstLogicalNode&>(*frame->node).nodes;
+    while (frame->next_operand < operands.size()) {
+      const AstNode* operand = operands[frame->next_operand++].get();
+      const auto* term = operand->As<AstTermNode>();
+      if (!term || !indices_->IsStopWord(term->affix))
+        return operand;
+    }
+    return nullptr;
+  }
 
-    return result;
+  // Computes the result of the node in `frame` from the results of its evaluated children.
+  __attribute__((always_inline)) IndexResult CloseFrame(const EvalFrame& frame,
+                                                        absl::Span<IndexResult> children) {
+    switch (frame.type) {
+      case AstNode::Type::NEGATE:
+        return EvalNegate(std::move(children[0]));
+      case AstNode::Type::FIELD:
+      case AstNode::Type::ATTRIBUTE:
+        return std::move(children[0]);  // pass the single child's result through
+      case AstNode::Type::OPTIONAL:
+        // ~ never fails outward and never filters: drop the child's error and match all docs.
+        // The node is entered only without a pending error, so there is none to restore.
+        error_ = string{};
+        return IndexResult{&indices_->GetAllDocs()};
+      case AstNode::Type::LOGICAL:
+        return UnifyResults(children, static_cast<const AstLogicalNode&>(*frame.node).op);
+      case AstNode::Type::KNN:
+        return EvalKnn(static_cast<const AstKnnNode&>(*frame.node), frame.field,
+                       children.empty() ? IndexResult{} : std::move(children[0]));
+      default:
+        DCHECK(false);  // leaves are evaluated on entry and never push frames
+        return IndexResult{};
+    }
+  }
+
+  // Iterative depth-first evaluation: an explicit stack keeps deep query trees off the fiber
+  // stack. Leaves are evaluated on entry; composite nodes push a frame and are computed from their
+  // children's results once all of them are evaluated. `top_level` exempts the root from the
+  // sorted-result DCHECK.
+  IndexResult SearchGeneric(const AstNode& root, string_view root_field, bool top_level = false) {
+    vector<IndexResult> values;  // evaluated children of the frames on `stack`
+    vector<EvalFrame> stack;     // composite ancestors of the node being evaluated
+    const double root_weight = current_weight_;
+    const AstNode* current = &root;  // node to enter next, or null to resume the top frame
+
+    // Checks the sorted-result invariant and records the profile event.
+    auto record = [&](const AstNode& node, ProfileBuilder::Tp start, const IndexResult& result) {
+      DCHECK(
+          (top_level && &node == &root) || node.Is<AstKnnNode>() || node.Is<AstGeoNode>() ||
+          node.Is<AstVectorRangeNode>() ||
+          visit([](auto* set) { return is_sorted(set->begin(), set->end()); }, result.Borrowed()));
+      if (profile_builder_)
+        profile_builder_->Finish(start, node, result);
+    };
+
+    // The root's result is returned as soon as it is known; every other result goes to `values`.
+    for (;;) {
+      if (current) {
+        const AstNode* node = std::exchange(current, nullptr);
+
+        // A pending error short-circuits to an empty result, unprofiled.
+        if (!error_.empty()) {
+          if (stack.empty())
+            return IndexResult{};
+          values.emplace_back();
+          continue;
+        }
+
+        const string_view field = stack.empty() ? root_field : stack.back().field;
+        current_weight_ = stack.empty() ? root_weight : stack.back().weight;
+        const auto start = profile_builder_ ? profile_builder_->Start() : ProfileBuilder::Tp{};
+        optional<IndexResult> root_result;
+        VisitAst(*node, [&](const auto& typed) {
+          if constexpr (CompositeNode<decay_t<decltype(typed)>>) {
+            current = OpenFrame(typed, field, values.size(), start, &stack);
+          } else {
+            IndexResult result = Search(typed, field);
+            record(*node, start, result);
+            if (stack.empty())
+              root_result.emplace(std::move(result));
+            else
+              values.push_back(std::move(result));
+          }
+        });
+        if (root_result)
+          return std::move(*root_result);
+        continue;
+      }
+
+      // Logical nodes evaluate their remaining operands one at a time.
+      EvalFrame& frame = stack.back();
+      if (frame.type == AstNode::Type::LOGICAL) {
+        if (const AstNode* operand = NextOperand(&frame)) {
+          current = operand;
+          continue;
+        }
+      }
+
+      // All children are evaluated: leave the frame with the node's result.
+      current_weight_ = stack.size() > 1 ? stack[stack.size() - 2].weight : root_weight;
+      const size_t base = frame.results_base;
+      IndexResult result = CloseFrame(frame, absl::MakeSpan(values).subspan(base));
+      values.resize(base);
+      record(*frame.node, frame.start, result);
+      stack.pop_back();
+      if (stack.empty())
+        return result;
+      values.push_back(std::move(result));
+    }
   }
 
   SearchResult Search(const AstNode& query, size_t cuttoff_limit) {
@@ -748,19 +899,19 @@ struct BasicSearch {
                              0.0f);
 
     // Ensure sorted for cursor-based scoring
-    sort(all_docs.begin(), all_docs.end());
+    rng::sort(all_docs);
 
     // Open cursors on posting lists for each matched term.
     vector<TermCursor> cursors;
     cursors.reserve(matched_text_terms_.size());
     for (const auto& matched : matched_text_terms_) {
       auto* index = matched.index;
-      auto* container = index->Matching(matched.term, /*strip_whitespace=*/false);
+      const auto* container = matched.container;
       if (!container)
         continue;
       string_view field_ident = index->field_ident();
       size_t term_docs =
-          global_stats_ ? global_stats_->GetTermDocs(field_ident, matched.term) : container->Size();
+          global_stats_ ? global_stats_->GetTermDocs(field_ident, matched.key) : container->Size();
       double avg = global_stats_ ? global_stats_->GetFieldAvgDocLen(field_ident)
                                  : index->GetFieldAvgDocLen();
       cursors.push_back({index, term_docs, avg, matched.weight, GetSchemaTextWeight(index),
@@ -796,7 +947,7 @@ struct BasicSearch {
     // Top-K by score (skip sort when no actual cutoff, e.g. FT.AGGREGATE)
     size_t k = min(limit, scored.size());
     if (k < scored.size()) {
-      partial_sort(scored.begin(), scored.begin() + k, scored.end(), greater<>());
+      rng::partial_sort(scored, scored.begin() + k, greater<>());
       scored.resize(k);
     }
 
@@ -821,11 +972,13 @@ struct BasicSearch {
     return std::get<SchemaField::TextParams>(it->second.special_params).weight;
   }
 
-  void AddMatchedTerm(TextIndex* index, string term) {
+  // Registers the posting list a query leaf matched under the key the shard stats use for it.
+  // An absent term registers a null list: scoring still runs, so ties are broken by key.
+  void AddMatchedTerm(TextIndex* index, string key, const TextIndex::Container* container) {
     auto [it, inserted] =
-        matched_terms_index_.try_emplace(std::make_pair(index, term), matched_text_terms_.size());
+        matched_terms_index_.try_emplace(std::make_pair(index, key), matched_text_terms_.size());
     if (inserted) {
-      matched_text_terms_.push_back({index, std::move(term), current_weight_});
+      matched_text_terms_.push_back({index, std::move(key), container, current_weight_});
     } else {
       matched_text_terms_[it->second].weight += current_weight_;
     }
@@ -837,19 +990,20 @@ struct BasicSearch {
   double current_weight_ = 1.0;
 
   string error_;
-  optional<ProfileBuilder> profile_builder_ = ProfileBuilder{};
+  optional<ProfileBuilder> profile_builder_;
 
   absl::flat_hash_map<DocId, float> knn_scores_;
   vector<pair<float, DocId>> knn_distances_;
 
   struct MatchedTextTerm {
     TextIndex* index;
-    string term;
+    string key;
+    const TextIndex::Container* container;
     double weight;
   };
 
-  // Tracked text terms for scoring. Repeated query occurrences accumulate weight per
-  // (TextIndex*, term); individual expansion sites still dedupe their own synonym aliases.
+  // Tracked posting lists for scoring. Repeated query occurrences accumulate weight per
+  // (TextIndex*, key); individual expansion sites still dedupe their own synonym aliases.
   vector<MatchedTextTerm> matched_text_terms_;
   absl::flat_hash_map<pair<TextIndex*, string>, size_t> matched_terms_index_;
 };
@@ -869,70 +1023,58 @@ struct StatsCollector {
     return std::move(stats_);
   }
 
-  void Walk(const AstNode& node, string_view active_field) {
-    visit([this, active_field](const auto& inner) { Visit(inner, active_field); }, node.Variant());
+  // Iterative DFS (explicit stack keeps deep trees off the fiber stack): composite nodes enqueue
+  // their children, leaves record stats.
+  void Walk(const AstNode& root, string_view root_field) {
+    absl::InlinedVector<pair<const AstNode*, string_view>, 4> stack{{&root, root_field}};
+    while (!stack.empty()) {
+      auto [node, active_field] = stack.back();
+      stack.pop_back();
+
+      VisitAst(*node, [this, &stack, active_field](const auto& inner) {
+        size_t before = stack.size();
+        ForEachChild(inner, active_field, [&](const AstNode& child, string_view field) {
+          // BasicSearch drops stopword operands of AND/OR only (a stopword elsewhere is searched,
+          // for example through its synonym group), so the stats follow the same rule.
+          if constexpr (std::is_same_v<std::decay_t<decltype(inner)>, AstLogicalNode>) {
+            if (const auto* term = child.As<AstTermNode>();
+                term && indices_->IsStopWord(term->affix))
+              return;
+          }
+          stack.emplace_back(&child, field);
+        });
+        if (stack.size() == before)
+          VisitLeaf(inner, active_field);
+      });
+    }
   }
 
  private:
-  // Catch-all for nodes that don't reference text terms; specific overloads below win.
-  template <typename T> void Visit(const T&, string_view) {
+  // Catch-all for leaves that don't reference text terms; specific overloads below win.
+  template <typename T> void VisitLeaf(const T&, string_view) {
   }
 
-  void Visit(const AstFieldNode& node, string_view) {
-    DCHECK(node.node);
-    Walk(*node.node, node.field);
-  }
-  void Visit(const AstLogicalNode& node, string_view active_field) {
-    for (const auto& child : node.nodes)
-      Walk(child, active_field);
-  }
-  void Visit(const AstNegateNode& node, string_view active_field) {
-    Walk(*node.node, active_field);
-  }
-  void Visit(const AstOptionalNode& node, string_view active_field) {
-    Walk(*node.node, active_field);
-  }
-  void Visit(const AstAttributeNode& node, string_view active_field) {
-    Walk(*node.node, active_field);
-  }
-  void Visit(const AstKnnNode& node, string_view active_field) {
-    Walk(*node.filter, active_field);
+  void VisitLeaf(const AstTermNode& node, string_view active_field) {
+    // Same cursors as BasicSearch: the term's own posting list plus one per group token.
+    absl::Span<const string> group_tokens =
+        SynonymTokens(indices_, una::cases::to_lowercase_utf8(node.affix));
+    ForEachTextIndex(active_field, [&](TextIndex* idx) {
+      Record(idx, TermKey(idx, node.affix), idx->Matching(node.affix));
+      for (const string& group_token : group_tokens)
+        Record(idx, group_token, idx->Matching(group_token, /*strip_whitespace=*/false));
+    });
   }
 
-  void Visit(const AstTermNode& node, string_view active_field) {
-    // Stopwords are dropped from queries (see BasicSearch), so they never contribute matches and
-    // must not be recorded as scoring terms either.
-    if (indices_->IsStopWord(node.affix))
-      return;
-
-    string term = node.affix;
-    bool strip_whitespace = true;
-    if (auto* syn = indices_->GetSynonyms(); syn) {
-      if (auto group_id = syn->GetGroupToken(term); group_id) {
-        term = *group_id;
-        strip_whitespace = false;
-      }
-    }
-    for (auto* idx : SelectTextIndices(active_field)) {
-      const auto* container = idx->Matching(term, strip_whitespace);
-      Record(idx, term, container);
-    }
-  }
-
-  template <TagType T> void Visit(const AstAffixNode<T>& node, string_view active_field) {
+  template <TagType T> void VisitLeaf(const AstAffixNode<T>& node, string_view active_field) {
     static_assert(T != TagType::REGULAR);
-    for (auto* idx : SelectTextIndices(active_field)) {
+    vector<string_view> group_tokens;
+    if (const Synonyms* syn = indices_->GetSynonyms(); syn)
+      group_tokens = GroupTokensForAffix<T>(*syn, node.affix);
+    ForEachTextIndex(active_field, [&](TextIndex* idx) {
+      RecordField(idx);
       auto cb = [this, idx](string_view term, const auto* container) {
-        string resolved{term};
-        // Synonym shadow has freq=0; stats must come from the group's posting list.
-        const auto* effective = container;
-        if (auto* syn = indices_->GetSynonyms(); syn) {
-          if (auto group_id = syn->GetGroupToken(resolved); group_id) {
-            resolved = std::move(*group_id);
-            effective = idx->Matching(resolved, /*strip_whitespace=*/false);
-          }
-        }
-        Record(idx, std::move(resolved), effective);
+        if (SynonymTokens(indices_, term).empty())
+          Record(idx, string{term}, container);
       };
       if constexpr (T == TagType::PREFIX)
         idx->MatchPrefixWithTerm(node.affix, cb);
@@ -942,21 +1084,34 @@ struct StatsCollector {
         idx->MatchInfixWithTerm(node.affix, cb);
       else if constexpr (T == TagType::WILDCARD)
         idx->MatchWildcardWithTerm(node.affix, cb);
+      // Grouped terms are scored through their group tokens (mirrors BasicSearch).
+      for (string_view group_token : group_tokens)
+        Record(idx, string{group_token}, idx->Matching(group_token, /*strip_whitespace=*/false));
+    });
+  }
+
+  void VisitLeaf(const AstPhraseNode& node, string_view active_field) {
+    ForEachTextIndex(active_field, [&](TextIndex* idx) {
+      for (const string& term : idx->TokenizePhraseQuery(node.raw))
+        Record(idx, term, idx->MatchingNoStem(term));
+    });
+  }
+
+  // All text indices for an empty field, else the named one if it is a text index.
+  template <typename F> void ForEachTextIndex(string_view active_field, F&& f) {
+    if (active_field.empty()) {
+      for (auto* idx : indices_->GetAllTextIndices())
+        f(idx);
+    } else if (auto* idx = indices_->GetTextIndex(active_field); idx) {
+      f(idx);
     }
   }
 
-  vector<TextIndex*> SelectTextIndices(string_view active_field) {
-    if (active_field.empty())
-      return indices_->GetAllTextIndices();
-    auto* idx = dynamic_cast<TextIndex*>(indices_->GetIndex(active_field));
-    return idx ? vector<TextIndex*>{idx} : vector<TextIndex*>{};
-  }
-
-  void Record(TextIndex* idx, string term, const TextIndex::Container* container) {
+  // Field stats are summed over shards, so a shard reports them even when the query reaches no
+  // term of the field on it (an affix walk may match nothing locally).
+  void RecordField(TextIndex* idx) {
     string_view field_ident = idx->field_ident();
     if (field_ident.empty())
-      return;
-    if (!seen_.emplace(idx, term).second)
       return;
     auto [it, inserted] =
         stats_.field_stats.try_emplace(string{field_ident}, ShardScoringStats::FieldStats{});
@@ -964,7 +1119,18 @@ struct StatsCollector {
       it->second.num_docs = idx->GetFieldNumDocs();
       it->second.total_docs_len = idx->GetFieldTotalDocsLen();
     }
-    stats_.term_stats[string{field_ident}][std::move(term)] = container ? container->Size() : 0;
+  }
+
+  // Same (key, posting list) pairs as BasicSearch::AddMatchedTerm, so the global stats describe
+  // the lists the scoring cursors read.
+  void Record(TextIndex* idx, string key, const TextIndex::Container* container) {
+    string_view field_ident = idx->field_ident();
+    if (field_ident.empty())
+      return;
+    if (!seen_.emplace(idx, key).second)
+      return;
+    RecordField(idx);
+    stats_.term_stats[string{field_ident}][std::move(key)] = container ? container->Size() : 0;
   }
 
   const FieldIndices* indices_;
@@ -974,20 +1140,33 @@ struct StatsCollector {
 
 }  // namespace
 
-AstNode OptionalNumericFilter::Node(std::string field) {
-  return AstFieldNode{"@" + field, AstRangeNode(lo_, false, hi_, false)};
+AstExpr OptionalNumericFilter::Node(std::string field) {
+  return make_unique<AstFieldNode>("@" + field, make_unique<AstRangeNode>(lo_, false, hi_, false));
 }
 
-string_view Schema::LookupAlias(string_view alias) const {
-  if (auto it = field_names.find(alias); it != field_names.end())
-    return it->second;
-  return alias;
+const SchemaField* Schema::Find(string_view alias) const {
+  auto it = fields.find(alias);
+  return it != fields.end() ? &it->second : nullptr;
 }
 
-string_view Schema::LookupIdentifier(string_view identifier) const {
-  if (auto it = fields.find(identifier); it != fields.end())
-    return it->second.short_name;
-  return identifier;
+Schema::Attribute Schema::FindByIdentifier(string_view identifier) const {
+  Attribute best{{}, nullptr};
+  for (const auto& [alias, field] : fields) {
+    if (field.identifier == identifier && (!best.second || field.StandsBefore(*best.second)))
+      best = {alias, &field};
+  }
+  return best;
+}
+
+Schema::OrderedFields Schema::Ordered() const {
+  auto attributes = fields | std::views::transform([](const auto& kv) {
+                      return OrderedFields::value_type{kv.first, &kv.second};
+                    });
+  OrderedFields out(attributes.begin(), attributes.end());
+  rng::sort(out, [](const auto& l, const auto& r) {
+    return std::tie(l.second->number, l.first) < std::tie(r.second->number, r.first);
+  });
+  return out;
 }
 
 IndicesOptions::IndicesOptions() {
@@ -1007,143 +1186,122 @@ FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
 }
 
 void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
-  for (const auto& [field_ident, field_info] : schema_.fields) {
-    if ((field_info.flags & SchemaField::NOINDEX) > 0)
+  for (const auto& [alias, field] : schema_.Ordered()) {
+    if (field->flags & SchemaField::NOINDEX)
       continue;
-
-    switch (field_info.type) {
-      case SchemaField::TEXT: {
-        const auto& tparams = std::get<SchemaField::TextParams>(field_info.special_params);
-        auto idx = make_unique<TextIndex>(
-            mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie, tparams.no_stem,
-            schema_.default_language, schema_.language_field, !options_.no_offsets);
-        idx->set_field_ident(field_ident);
-        indices_[field_ident] = std::move(idx);
-        break;
-      }
-      case SchemaField::NUMERIC: {
-        const auto& nparams = std::get<SchemaField::NumericParams>(field_info.special_params);
-        indices_[field_ident] = make_unique<NumericIndex>(nparams.block_size, mr);
-        break;
-      }
-      case SchemaField::TAG: {
-        const auto& tparams = std::get<SchemaField::TagParams>(field_info.special_params);
-        indices_[field_ident] = make_unique<TagIndex>(mr, tparams);
-        break;
-      }
-      case SchemaField::VECTOR: {
-        unique_ptr<BaseVectorIndex> vector_index;
-
-        DCHECK(holds_alternative<SchemaField::VectorParams>(field_info.special_params));
-        const auto& vparams = std::get<SchemaField::VectorParams>(field_info.special_params);
-
-        // Use global HNSW index
-        if (vparams.use_hnsw)
-          break;
-
-        vector_index = make_unique<FlatVectorIndex>(vparams, mr);
-        indices_[field_ident] = std::move(vector_index);
-
-        break;
-      }
-      case SchemaField::GEO: {
-        indices_[field_ident] = make_unique<GeoIndex>(mr);
-        break;
-      }
+    if (auto index = CreateIndex(alias, *field, mr); index) {
+      add_list_.emplace_back(field->identifier, index.get());
+      indices_[alias] = std::move(index);
     }
   }
+}
+
+unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view alias, const SchemaField& field,
+                                                PMR_NS::memory_resource* mr) {
+  switch (field.type) {
+    case SchemaField::TEXT: {
+      const auto& tparams = std::get<SchemaField::TextParams>(field.special_params);
+      auto idx = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
+                                        tparams.no_stem, schema_.default_language,
+                                        schema_.language_field, !options_.no_offsets);
+      idx->set_field_ident(alias);  // scoring stats and the schema weight are per attribute
+      text_indices_.push_back(idx.get());
+      return idx;
+    }
+    case SchemaField::NUMERIC: {
+      const auto& nparams = std::get<SchemaField::NumericParams>(field.special_params);
+      return make_unique<NumericIndex>(nparams.block_size, mr);
+    }
+    case SchemaField::TAG:
+      return make_unique<TagIndex>(mr, std::get<SchemaField::TagParams>(field.special_params));
+    case SchemaField::VECTOR: {
+      const auto& vparams = std::get<SchemaField::VectorParams>(field.special_params);
+      if (vparams.use_hnsw)  // served by the global HNSW index
+        return nullptr;
+      return make_unique<FlatVectorIndex>(vparams, mr);
+    }
+    case SchemaField::GEO:
+      return make_unique<GeoIndex>(mr);
+  }
+  return nullptr;
 }
 
 void FieldIndices::CreateSortIndices() {
-  for (const auto& [field_ident, field_info] : schema_.fields) {
-    if ((field_info.flags & SchemaField::SORTABLE) == 0)
+  for (const auto& [alias, field] : schema_.Ordered()) {
+    if (!(field->flags & SchemaField::SORTABLE))
       continue;
-
-    switch (field_info.type) {
-      case SchemaField::TAG:
-      case SchemaField::TEXT:
-        sort_indices_[field_ident] = make_unique<StringSortIndex>();
-        break;
-      case SchemaField::NUMERIC:
-        sort_indices_[field_ident] = make_unique<NumericSortIndex>();
-        break;
-      case SchemaField::VECTOR:
-      case SchemaField::GEO:
-        break;
+    if (auto index = CreateSortIndex(*field); index) {
+      add_list_.emplace_back(field->identifier, index.get());
+      sort_indices_[alias] = std::move(index);
     }
   }
 }
 
+unique_ptr<BaseSortIndex> FieldIndices::CreateSortIndex(const SchemaField& field) {
+  switch (field.type) {
+    case SchemaField::TAG:
+    case SchemaField::TEXT:
+      return make_unique<StringSortIndex>();
+    case SchemaField::NUMERIC:
+      return make_unique<NumericSortIndex>();
+    case SchemaField::VECTOR:
+    case SchemaField::GEO:
+      return nullptr;
+  }
+  return nullptr;
+}
+
 bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
-  bool was_added = true;
-
-  std::vector<std::pair<std::string_view, BaseIndex*>> successfully_added_indices;
-  successfully_added_indices.reserve(indices_.size() + sort_indices_.size());
-
-  auto try_add = [&](const auto& indices_container) {
-    for (auto& [field, index] : indices_container) {
-      if (index->Add(doc, access, field)) {
-        successfully_added_indices.emplace_back(field, index.get());
-      } else {
-        was_added = false;
-        break;
-      }
-    }
-  };
-
-  try_add(indices_);
-
-  if (was_added) {
-    try_add(sort_indices_);
+  size_t added = 0;
+  for (; added < add_list_.size(); added++) {
+    auto& [identifier, index] = add_list_[added];
+    if (!index->Add(doc, access, identifier))
+      break;
   }
 
-  if (!was_added) {
-    for (auto& [field, index] : successfully_added_indices) {
-      index->Remove(doc, access, field);
-    }
+  if (added < add_list_.size()) {  // all or nothing: roll back what was added
+    for (size_t i = 0; i < added; i++)
+      add_list_[i].second->Remove(doc, access, add_list_[i].first);
     return false;
   }
 
-  all_ids_.insert(upper_bound(all_ids_.begin(), all_ids_.end(), doc), doc);
+  all_ids_.insert(rng::upper_bound(all_ids_, doc), doc);
   return true;
 }
 
 void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
-  auto it = lower_bound(all_ids_.begin(), all_ids_.end(), doc);
+  auto it = rng::lower_bound(all_ids_, doc);
   if (it == all_ids_.end() || *it != doc) {
     // During index restoration CursorLoop may not have indexed this document
     // yet, so it is absent from all_ids_. Nothing to remove.
     return;
   }
 
-  for (auto& [field, index] : indices_)
-    index->Remove(doc, access, field);
-  for (auto& [field, sort_index] : sort_indices_)
-    sort_index->Remove(doc, access, field);
+  for (auto& [identifier, index] : add_list_)
+    index->Remove(doc, access, identifier);
 
   all_ids_.erase(it);
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
-  auto it = indices_.find(schema_.LookupAlias(field));
+  auto it = indices_.find(field);
   return it != indices_.end() ? it->second.get() : nullptr;
 }
 
 BaseSortIndex* FieldIndices::GetSortIndex(string_view field) const {
-  auto it = sort_indices_.find(schema_.LookupAlias(field));
+  auto it = sort_indices_.find(field);
   return it != sort_indices_.end() ? it->second.get() : nullptr;
 }
 
-std::vector<TextIndex*> FieldIndices::GetAllTextIndices() const {
-  vector<TextIndex*> out;
-  for (const auto& [field_name, field_info] : schema_.fields) {
-    if (field_info.type != SchemaField::TEXT || (field_info.flags & SchemaField::NOINDEX) > 0)
-      continue;
-    auto* index = dynamic_cast<TextIndex*>(GetIndex(field_name));
-    DCHECK(index);
-    out.push_back(index);
-  }
-  return out;
+TextIndex* FieldIndices::GetTextIndex(string_view field) const {
+  auto it = schema_.fields.find(field);
+  if (it == schema_.fields.end() || it->second.type != SchemaField::TEXT)
+    return nullptr;
+  return static_cast<TextIndex*>(GetIndex(field));  // CreateIndex builds a TextIndex for TEXT
+}
+
+absl::Span<TextIndex* const> FieldIndices::GetAllTextIndices() const {
+  return text_indices_;
 }
 
 const vector<DocId>& FieldIndices::GetAllDocs() const {
@@ -1154,12 +1312,15 @@ size_t FieldIndices::GetNonPmrMemoryUsage() const {
   // all_ids_ scales with document count — the dominant untracked cost.
   size_t mem = all_ids_.capacity() * sizeof(DocId);
   // Hash map bucket arrays scale with field count (typically small).
-  constexpr size_t kIndicesSlotSize =
-      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseIndex>>::value_type) + 1;
-  constexpr size_t kSortSlotSize =
-      sizeof(absl::flat_hash_map<std::string_view, std::unique_ptr<BaseSortIndex>>::value_type) + 1;
+  constexpr size_t kIndicesSlotSize = sizeof(decltype(indices_)::value_type) + 1;
+  constexpr size_t kSortSlotSize = sizeof(decltype(sort_indices_)::value_type) + 1;
   mem += indices_.bucket_count() * kIndicesSlotSize;
   mem += sort_indices_.bucket_count() * kSortSlotSize;
+  // The field lists leave their inline storage only for schemas with more than 16 fields.
+  if (add_list_.size() > 16)
+    mem += add_list_.capacity() * sizeof(add_list_[0]);
+  if (text_indices_.size() > 16)
+    mem += text_indices_.capacity() * sizeof(text_indices_[0]);
   return mem;
 }
 
@@ -1167,8 +1328,8 @@ const Schema& FieldIndices::GetSchema() const {
   return schema_;
 }
 
-SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view field_identifier) const {
-  auto it = sort_indices_.find(field_identifier);
+SortableValue FieldIndices::GetSortIndexValue(DocId doc, std::string_view alias) const {
+  auto it = sort_indices_.find(alias);
   DCHECK(it != sort_indices_.end());
   return it->second->Lookup(doc);
 }
@@ -1215,7 +1376,7 @@ SearchAlgorithm::~SearchAlgorithm() = default;
 bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
                            const OptionalFilters* filters) {
   try {
-    query_ = make_unique<AstExpr>(ParseQuery(query, params, filters));
+    query_ = ParseQuery(query, params, filters);
   } catch (const Parser::syntax_error& se) {
     LOG(INFO) << "Failed to parse query \"" << query << "\":" << se.what();
     return false;
@@ -1224,7 +1385,7 @@ bool SearchAlgorithm::Init(string_view query, const QueryParams* params,
     return false;
   }
 
-  if (holds_alternative<monostate>(*query_)) {
+  if (!query_) {
     LOG_EVERY_T(INFO, 10) << "Empty result after parsing query \"" << query << "\"";
     return false;
   }
@@ -1256,32 +1417,27 @@ std::optional<KnnScoreSortOption> SearchAlgorithm::GetKnnScoreSortOption() const
   }
 
   // FLAT KNN query
-  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn)
+  if (auto* knn = GetKnnNode(); knn)
     return KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
 
   return nullopt;
 }
 
 bool SearchAlgorithm::IsKnnQuery() const {
-  DCHECK(query_);
-  return std::holds_alternative<AstKnnNode>(*query_);
+  return GetKnnNode() != nullptr;
 }
 
 AstKnnNode* SearchAlgorithm::GetKnnNode() const {
-  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn) {
-    return knn;
-  }
-  return nullptr;
+  return query_ ? query_->As<AstKnnNode>() : nullptr;
 }
 
-std::unique_ptr<AstNode> SearchAlgorithm::PopKnnNode() {
-  if (auto* knn = get_if<AstKnnNode>(query_.get()); knn) {
+AstExpr SearchAlgorithm::PopKnnNode() {
+  if (auto* knn = GetKnnNode(); knn) {
     // Save knn score sort option
     knn_hnsw_score_sort_option_ = KnnScoreSortOption{string_view{knn->score_alias}, knn->limit};
     auto node = std::move(query_);
-    AstKnnNode* moved_knn_node = reinterpret_cast<AstKnnNode*>(node.get());
-    if (!std::holds_alternative<AstStarNode>(*moved_knn_node->filter))
-      query_.swap(moved_knn_node->filter);
+    if (!knn->filter->Is<AstStarNode>())
+      query_.swap(knn->filter);
     return node;
   }
   LOG(DFATAL) << "Should not reach here";
@@ -1296,29 +1452,25 @@ void SearchAlgorithm::SetScorer(ScorerSpec scorer) {
   scorer_ = scorer;
 }
 
-// Visits `node` and recurses into its sub-expressions, invoking `cb` on every node in DFS order.
-template <typename F> void WalkAst(const AstNode& node, const F& cb) {
-  cb(node);
-  visit(Overloaded{
-            [&](const AstLogicalNode& n) {
-              for (const auto& child : n.nodes)
-                WalkAst(child, cb);
-            },
-            [&](const AstKnnNode& n) { WalkAst(*n.filter, cb); },
-            // Negate/Optional/Field all wrap a single child `node`; leaves have none (no-op).
-            [&](const auto& n) {
-              if constexpr (requires { n.node; })
-                WalkAst(*n.node, cb);
-            },
-        },
-        node.Variant());
+// Invokes `cb` on every node in pre-order DFS, iteratively (deep trees must not overflow the
+// stack).
+template <typename F> void WalkAst(const AstNode& root, const F& cb) {
+  absl::InlinedVector<const AstNode*, 4> stack{&root};
+  while (!stack.empty()) {
+    const AstNode* node = stack.back();
+    stack.pop_back();
+    cb(*node);
+    size_t before = stack.size();
+    ForEachChild(*node, {}, [&](const AstNode& child, string_view) { stack.push_back(&child); });
+    rng::reverse(stack.begin() + before, stack.end());  // restore left-to-right order
+  }
 }
 
 vector<const AstVectorRangeNode*> SearchAlgorithm::CollectVectorRangeNodes() const {
   vector<const AstVectorRangeNode*> out;
   if (query_) {
     WalkAst(*query_, [&out](const AstNode& node) {
-      if (auto* r = get_if<AstVectorRangeNode>(&node))
+      if (auto* r = node.As<AstVectorRangeNode>())
         out.push_back(r);
     });
   }
@@ -1332,25 +1484,25 @@ const AstVectorRangeNode* SearchAlgorithm::GetVectorRangeNode() const {
 
 bool SearchAlgorithm::IsBareVectorRange() const {
   DCHECK(query_);
-  return holds_alternative<AstVectorRangeNode>(*query_);
+  return query_->Is<AstVectorRangeNode>();
 }
 
 bool SearchAlgorithm::IsAndedVectorRange() const {
   DCHECK(query_);
-  auto* logical = get_if<AstLogicalNode>(query_.get());
+  auto* logical = query_->As<AstLogicalNode>();
   if (!logical || logical->op != AstLogicalNode::AND)
     return false;
-  return any_of(logical->nodes.begin(), logical->nodes.end(),
-                [](const AstNode& n) { return holds_alternative<AstVectorRangeNode>(n); });
+  return rng::any_of(logical->nodes, [](const AstExpr& n) { return n->Is<AstVectorRangeNode>(); });
 }
 
-std::unique_ptr<AstNode> SearchAlgorithm::ExtractVectorRangeAsPrefilter() {
-  auto* logical = get_if<AstLogicalNode>(query_.get());
+AstExpr SearchAlgorithm::ExtractVectorRangeAsPrefilter() {
+  auto* logical = query_->As<AstLogicalNode>();
   DCHECK(logical && logical->op == AstLogicalNode::AND);
   for (auto& child : logical->nodes) {
-    if (holds_alternative<AstVectorRangeNode>(child)) {
-      auto extracted = make_unique<AstNode>(std::move(child));
-      child = AstStarNode{};  // match-all in its place, leaving query_ as the pure pre-filter
+    if (child->Is<AstVectorRangeNode>()) {
+      auto extracted = std::move(child);
+      child = make_unique<AstStarNode>();  // match-all in its place, leaving query_ as the pure
+                                           // pre-filter
       return extracted;
     }
   }

@@ -56,6 +56,14 @@ inline string GetMetricFullName(string_view metric_name) {
   return StrCat("dragonfly_", metric_name);
 }
 
+constexpr double UsecToSec(double usec) {
+  return usec * 1e-6;
+}
+
+constexpr double NsecToSec(double ns) {
+  return ns * 1e-9;
+}
+
 void AppendMetricHeader(string_view metric_name, string_view metric_help, MetricType type,
                         string* dest) {
   const auto full_metric_name = GetMetricFullName(metric_name);
@@ -93,19 +101,19 @@ void AppendMetricWithoutLabels(string_view name, string_view help, const absl::A
   AppendMetricValue(name, value, {}, {}, dest);
 }
 
-void AppendPipelineLatencySummary(string_view name, string_view help, const base::Histogram& hist,
+// Appends the samples of one `type` series of a summary family. The header is emitted by the
+// caller.
+void AppendPipelineLatencySummary(string_view name, string_view type, const base::Histogram& hist,
                                   uint64_t total_count, double total_sum_usec, string* dest) {
-  AppendMetricHeader(name, help, MetricType::SUMMARY, dest);
-  const string full_name = GetMetricFullName(name);
   if (hist.count() > 0) {
     auto [p95, p99] = hist.Percentiles(95, 99);
-    AppendMetricValue(name, p95 * 1e-6, {"quantile"}, {"0.95"}, dest);
-    AppendMetricValue(name, p99 * 1e-6, {"quantile"}, {"0.99"}, dest);
+    AppendMetricValue(name, UsecToSec(p95), {"type", "quantile"}, {type, "0.95"}, dest);
+    AppendMetricValue(name, UsecToSec(p99), {"type", "quantile"}, {type, "0.99"}, dest);
   }
   // Use monotonically increasing counters for _sum/_count so that Prometheus
   // rate()/irate() functions work correctly even though the histogram is decayed.
-  absl::StrAppend(dest, full_name, "_sum ", total_sum_usec * 1e-6, "\n");
-  absl::StrAppend(dest, full_name, "_count ", total_count, "\n");
+  AppendMetricValue(StrCat(name, "_sum"), UsecToSec(total_sum_usec), {"type"}, {type}, dest);
+  AppendMetricValue(StrCat(name, "_count"), total_count, {"type"}, {type}, dest);
 }
 
 }  // namespace
@@ -132,6 +140,11 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                     &resp->body());
   AppendMetricValue("connected_clients", conn_stats.num_conns_other, {"listener"}, {"other"},
                     &resp->body());
+  AppendMetricWithoutLabels("io_threads", "Number of IO threads", m.io_threads, MetricType::GAUGE,
+                            &resp->body());
+  AppendMetricWithoutLabels("max_connected_clients_per_thread",
+                            "Max number of connected clients on a single IO thread",
+                            m.max_connected_clients_per_thread, MetricType::GAUGE, &resp->body());
   AppendMetricHeader("tls_handshakes_total", "Total TLS handshakes by status", MetricType::COUNTER,
                      &resp->body());
   AppendMetricValue("tls_handshakes_total", conn_stats.handshakes_started, {"status"}, {"started"},
@@ -175,14 +188,27 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             conn_stats.pipeline_dispatch_flush_count, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("pipeline_dispatch_flush_duration_seconds", "",
-                            conn_stats.pipeline_dispatch_flush_usec * 1e-6, MetricType::COUNTER,
+                            UsecToSec(conn_stats.pipeline_dispatch_flush_usec), MetricType::COUNTER,
+                            &resp->body());
+  AppendMetricWithoutLabels("pipeline_squashes_total", "", conn_stats.pipeline_squashes,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_resquashes_total", "", conn_stats.pipeline_resquashes,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_reply_batches_total", "", conn_stats.pipeline_reply_batches,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_idle_waits_total", "", conn_stats.pipeline_idle_waits,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_reply_waits_total", "", conn_stats.pipeline_reply_waits,
+                            MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("pipeline_idle_wait_duration_seconds", "",
+                            UsecToSec(conn_stats.pipeline_idle_wait_usec), MetricType::COUNTER,
                             &resp->body());
 
   AppendMetricWithoutLabels("pipeline_commands_duration_seconds", "",
-                            conn_stats.pipelined_cmd_latency * 1e-6, MetricType::COUNTER,
+                            UsecToSec(conn_stats.pipelined_cmd_latency), MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("pipeline_queue_wait_duration_seconds", "",
-                            conn_stats.pipelined_wait_latency * 1e-6, MetricType::COUNTER,
+                            UsecToSec(conn_stats.pipelined_wait_latency), MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("pipeline_blocking_commands_total", "",
                             m.coordinator_stats.blocking_commands_in_pipelines, MetricType::COUNTER,
@@ -190,9 +216,16 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 
   // pipelined_cmd_cnt/pipelined_cmd_latency are monotonically increasing counters used for
   // Prometheus _count/_sum; the histogram is decayed and therefore not monotonic.
-  AppendPipelineLatencySummary("pipeline_latency_seconds", "Pipeline command latency distribution",
-                               conn_stats.pipelined_latency_hist, conn_stats.pipelined_cmd_cnt,
-                               conn_stats.pipelined_cmd_latency, &resp->body());
+  // Read-only commands are reported separately from all the others (type="other").
+  AppendMetricHeader("pipeline_latency_seconds", "Pipeline command latency distribution",
+                     MetricType::SUMMARY, &resp->body());
+  AppendPipelineLatencySummary(
+      "pipeline_latency_seconds", "read", conn_stats.pipelined_read_latency_hist,
+      conn_stats.pipelined_read_cmd_cnt, conn_stats.pipelined_read_cmd_latency, &resp->body());
+  AppendPipelineLatencySummary(
+      "pipeline_latency_seconds", "other", conn_stats.pipelined_other_latency_hist,
+      conn_stats.pipelined_cmd_cnt - conn_stats.pipelined_read_cmd_cnt,
+      conn_stats.pipelined_cmd_latency - conn_stats.pipelined_read_cmd_latency, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_hop_total", "", m.coordinator_stats.multi_squash_hops,
                             MetricType::COUNTER, &resp->body());
@@ -201,10 +234,10 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("cmd_squash_hop_duration_seconds", "",
-                            m.coordinator_stats.multi_squash_exec_hop_usec * 1e-6,
+                            UsecToSec(m.coordinator_stats.multi_squash_exec_hop_usec),
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("cmd_squash_hop_reply_seconds", "",
-                            m.coordinator_stats.multi_squash_exec_reply_usec * 1e-6,
+                            UsecToSec(m.coordinator_stats.multi_squash_exec_reply_usec),
                             MetricType::COUNTER, &resp->body());
 
   string connections_libs;
@@ -272,6 +305,19 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
       absl::StrAppend(&resp->body(), type_used_memory_metric);
   }
 
+  {
+    constexpr unsigned kTypes[] = {OBJ_STRING, OBJ_LIST, OBJ_SET,    OBJ_ZSET,
+                                   OBJ_HASH,   OBJ_KEY,  OBJ_STREAM, OBJ_JSON,
+                                   OBJ_SBF,    OBJ_CMS,  OBJ_TOPK,   OBJ_CUCKOOFILTER};
+    AppendMetricHeader("type_attributed_memory_bytes",
+                       "Cumulative net memory attributed to operations per object type",
+                       MetricType::GAUGE, &resp->body());
+    for (unsigned type : kTypes) {
+      AppendMetricValue("type_attributed_memory_bytes", m.type_attributed_memory_bytes[type],
+                        {"type"}, {ObjTypeToString(type)}, &resp->body());
+    }
+  }
+
   // Stats metrics
   AppendMetricWithoutLabels("connections_received_total", "", conn_stats.conn_received_cnt,
                             MetricType::COUNTER, &resp->body());
@@ -298,7 +344,7 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("lua_force_gc_calls", "", m.lua_stats.force_gc_calls,
                             MetricType::COUNTER, &resp->body());
-  AppendMetricWithoutLabels("lua_gc_duration_total_sec", "", m.lua_stats.gc_duration_ns * 1e-9,
+  AppendMetricWithoutLabels("lua_gc_duration_total_sec", "", NsecToSec(m.lua_stats.gc_duration_ns),
                             MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("backups_total", "", m.loading_stats.backup_count, MetricType::COUNTER,
@@ -309,6 +355,14 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
                             MetricType::COUNTER, &resp->body());
   AppendMetricWithoutLabels("failed_restores_total", "", m.loading_stats.failed_restore_count,
                             MetricType::COUNTER, &resp->body());
+
+  // Snapshot (RDB/DFS) metrics.
+  AppendMetricWithoutLabels(
+      "rdb_serialize_total",
+      "Number of record writes performed while serializing single-file RDB snapshots",
+      m.coordinator_stats.rdb_save_count, MetricType::COUNTER, &resp->body());
+  AppendMetricWithoutLabels("save_in_progress", "1 if a snapshot save is in progress, 0 otherwise",
+                            m.save_in_progress ? 1 : 0, MetricType::GAUGE, &resp->body());
 
   // Net metrics
   AppendMetricWithoutLabels("net_input_recv_total", "", conn_stats.io_read_cnt, MetricType::COUNTER,
@@ -340,7 +394,7 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
   {
     AppendMetricWithoutLabels(
         "reply_duration_seconds", "",
-        base::CycleClock::ToUsec(m.facade_stats.reply_stats.send_stats.total_duration) * 1e-6,
+        UsecToSec(base::CycleClock::ToUsec(m.facade_stats.reply_stats.send_stats.total_duration)),
         MetricType::COUNTER, &resp->body());
     AppendMetricWithoutLabels("reply_total", "", m.facade_stats.reply_stats.send_stats.count,
                               MetricType::COUNTER, &resp->body());
@@ -484,7 +538,7 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricHeader("commands_duration_seconds", "Duration of commands in seconds",
                        MetricType::COUNTER, &command_metrics);
     for (const auto& [name, stat] : cmd_stats) {
-      const double duration_seconds = stat.second * 1e-6;
+      const double duration_seconds = UsecToSec(stat.second);
       AppendMetricValue("commands_duration_seconds", duration_seconds, {"cmd"}, {name},
                         &command_metrics);
     }
@@ -515,6 +569,17 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
     AppendMetricWithoutLabels("replication_psync_count", "Pync count",
                               m.coordinator_stats.psync_requests_total, MetricType::COUNTER,
                               &resp->body());
+
+    const DflyCmd::DisconnectStats disconnects = dfly_cmd->GetDisconnectStats();
+    AppendMetricHeader("replica_disconnects_total",
+                       "Replica sessions dropped by the master, by reason", MetricType::COUNTER,
+                       &resp->body());
+    AppendMetricValue("replica_disconnects_total", disconnects.closed, {"reason"}, {"closed"},
+                      &resp->body());
+    AppendMetricValue("replica_disconnects_total", disconnects.error, {"reason"}, {"error"},
+                      &resp->body());
+    AppendMetricValue("replica_disconnects_total", disconnects.timeout, {"reason"}, {"timeout"},
+                      &resp->body());
     AppendMetricHeader("connected_replica_lag_records", "Lag in records of a connected replica.",
                        MetricType::GAUGE, &replication_lag_metrics);
     for (const auto& replica : replicas_info) {
@@ -528,13 +593,13 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 
   AppendMetricWithoutLabels("fiber_switch_total", "", m.fiber_switch_cnt, MetricType::COUNTER,
                             &resp->body());
-  double delay_seconds = m.fiber_switch_delay_usec * 1e-6;
+  double delay_seconds = UsecToSec(m.fiber_switch_delay_usec);
   AppendMetricWithoutLabels("fiber_switch_delay_seconds_total", "", delay_seconds,
                             MetricType::COUNTER, &resp->body());
 
   AppendMetricWithoutLabels("fiber_longrun_total", "", m.fiber_longrun_cnt, MetricType::COUNTER,
                             &resp->body());
-  double longrun_seconds = m.fiber_longrun_usec * 1e-6;
+  double longrun_seconds = UsecToSec(m.fiber_longrun_usec);
   AppendMetricWithoutLabels("fiber_longrun_seconds", "", longrun_seconds, MetricType::COUNTER,
                             &resp->body());
   AppendMetricWithoutLabels("tx_queue_len", "", m.tx_queue_len, MetricType::GAUGE, &resp->body());
@@ -733,6 +798,18 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 
     AppendMetricWithoutLabels("tiered_clients_throttled", "Currently throttled clients",
                               m.tiered_stats.clients_throttled, MetricType::GAUGE, &resp->body());
+    // Device pressure: in-flight IO bytes as a percentage of the aggregate
+    const uint64_t total_cap = m.tiered_stats.max_pending_bytes;
+    const uint64_t read_pct = total_cap ? (m.tiered_stats.pending_read_bytes * 100) / total_cap : 0;
+    const uint64_t write_pct =
+        total_cap ? (m.tiered_stats.pending_stash_bytes * 100) / total_cap : 0;
+    AppendMetricHeader("tiered_device_usage_percent",
+                       "Tiered device pressure as percent of tiered_max_pending_bytes cap",
+                       MetricType::GAUGE, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", read_pct, {"type"}, {"read"}, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", write_pct, {"type"}, {"write"}, &resp->body());
+    AppendMetricValue("tiered_device_usage_percent", read_pct + write_pct, {"type"}, {"total"},
+                      &resp->body());
 
     AppendMetricHeader("tiered_list_events", "Tiered List Events", MetricType::COUNTER,
                        &resp->body());
@@ -775,21 +852,22 @@ void Metrics::Print(uint64_t uptime, const CommandRegistry* registry, DflyCmd* d
 }
 
 void Metrics::Merge(const Metrics& src) {
-  // Sum of all member sizes plus alignment padding (4 bytes after blocked_tasks).
-  // Expressed via sizeof so it adapts to different STL/Abseil implementations.
-  // If this fires, a field was added/removed - update Merge() and InitFromThread().
+  // Sum of all member sizes plus alignment padding (4 bytes after
+  // max_connected_clients_per_thread). Expressed via sizeof so it adapts to different STL/Abseil
+  // implementations. If this fires, a field was added/removed - update Merge() and
+  // InitFromThread().
   static_assert(
-      sizeof(Metrics) == sizeof(SliceEvents) + sizeof(std::vector<DbStats>) +
-                             sizeof(EngineShard::Stats) + sizeof(facade::FacadeStats) +
-                             sizeof(TieredStats) + sizeof(SearchStats) +
-                             sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
-                             sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
-                             sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
-                             sizeof(absl::flat_hash_map<std::string, uint64_t>) +
-                             sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
-                             sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
-                             sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+      sizeof(Metrics) ==
+          sizeof(SliceEvents) + sizeof(std::vector<DbStats>) + sizeof(EngineShard::Stats) +
+              sizeof(facade::FacadeStats) + sizeof(TieredStats) + sizeof(SearchStats) +
+              sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
+              sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
+              sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
+              sizeof(absl::flat_hash_map<std::string, uint64_t>) +
+              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
+              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
+              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+              sizeof(TypeAttributedMemory) + 192,  // 22 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
   // Per-db stats / events / small_string_bytes are merged element-wise.
@@ -799,6 +877,8 @@ void Metrics::Merge(const Metrics& src) {
     db_stats[i] += src.db_stats[i];
   events += src.events;
   small_string_bytes += src.small_string_bytes;
+  for (size_t type = 0; type < type_attributed_memory_bytes.size(); ++type)
+    type_attributed_memory_bytes[type] += src.type_attributed_memory_bytes[type];
 
   // Aggregate sub-structs.
   shard_stats += src.shard_stats;
@@ -824,6 +904,7 @@ void Metrics::Merge(const Metrics& src) {
   worker_fiber_stack_size += src.worker_fiber_stack_size;
   worker_fiber_count += src.worker_fiber_count;
   blocked_tasks += src.blocked_tasks;
+  io_threads += src.io_threads;
   tls_bytes += src.tls_bytes;
   refused_conn_max_clients_reached_count += src.refused_conn_max_clients_reached_count;
   lsn_buffer_size += src.lsn_buffer_size;
@@ -831,6 +912,8 @@ void Metrics::Merge(const Metrics& src) {
 
   // Non-sum reductions.
   tx_queue_len = std::max(tx_queue_len, src.tx_queue_len);
+  max_connected_clients_per_thread =
+      std::max(max_connected_clients_per_thread, src.max_connected_clients_per_thread);
   oldest_pending_send_ts = std::min(oldest_pending_send_ts, src.oldest_pending_send_ts);
 
   // Map merges.
@@ -849,17 +932,17 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
                              unsigned proactor_index, const MetricsCollectOpts& opts,
                              DflyCmd* dfly_cmd) {
   static_assert(
-      sizeof(Metrics) == sizeof(SliceEvents) + sizeof(std::vector<DbStats>) +
-                             sizeof(EngineShard::Stats) + sizeof(facade::FacadeStats) +
-                             sizeof(TieredStats) + sizeof(SearchStats) +
-                             sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
-                             sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
-                             sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
-                             sizeof(absl::flat_hash_map<std::string, uint64_t>) +
-                             sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
-                             sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
-                             sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-                             176,  // scalar fields (19 fields) + 4-byte alignment padding
+      sizeof(Metrics) ==
+          sizeof(SliceEvents) + sizeof(std::vector<DbStats>) + sizeof(EngineShard::Stats) +
+              sizeof(facade::FacadeStats) + sizeof(TieredStats) + sizeof(SearchStats) +
+              sizeof(ServerState::Stats) + sizeof(PeakStats) + sizeof(QList::Stats) +
+              sizeof(ReplicationMemoryStats) + sizeof(InterpreterManager::Stats) +
+              sizeof(std::vector<std::pair<uint64_t, uint64_t>>) +
+              sizeof(absl::flat_hash_map<std::string, uint64_t>) +
+              sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
+              sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
+              sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
+              sizeof(TypeAttributedMemory) + 192,  // 22 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
   ServerState* ss = ServerState::tlocal();
@@ -876,6 +959,9 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
 
   qps = uint64_t(ss->MovingSum6());
   facade_stats = *tl_facade_stats;
+  io_threads = 1;
+  max_connected_clients_per_thread =
+      facade_stats.conn_stats.num_conns_main + facade_stats.conn_stats.num_conns_other;
   serialization_bytes = SliceSnapshot::GetThreadLocalMemoryUsage();
 
   if (shard) {
@@ -885,6 +971,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
     events = slice_stats.events;
     small_string_bytes = slice_stats.small_string_bytes;
     shard_stats = shard->stats();
+    type_attributed_memory_bytes = shard->type_attributed_memory();
 
     if (shard->tiered_storage()) {
       tiered_stats = shard->tiered_storage()->GetStats();

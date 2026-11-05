@@ -12,7 +12,7 @@ endif()
 
 add_executable(dragonfly dfly_main.cc version_monitor.cc)
 add_custom_target(check_dfly WORKING_DIRECTORY .. COMMAND ctest -L DFLY)
-cxx_link(dragonfly base dragonfly_lib)
+cxx_link(dragonfly base dragonfly_lib cloud_lib)
 
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" AND CMAKE_BUILD_TYPE STREQUAL "Release")
   # Add core2 only to this file, thus avoiding instructions in this object file that
@@ -107,13 +107,8 @@ if (PRINT_STACKTRACES_ON_SIGNAL)
   target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
 endif()
 
-if (WITH_AWS)
-  SET(AWS_LIB awsv2_lib)
-  add_definitions(-DWITH_AWS)
-endif()
-
 if (WITH_AWS_CLOUD)
-  SET(AWS_LIB ${AWS_LIB} aws_cloud_lib)
+  SET(AWS_LIB aws_cloud_lib)
   add_definitions(-DWITH_AWS_CLOUD)
 endif()
 
@@ -137,6 +132,7 @@ add_library(dfly_test_lib test_utils.cc)
 cxx_link(dfly_test_lib dragonfly_lib facade_test gtest_main_ext)
 
 helio_cxx_test(dragonfly_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(dragonfly_connection_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(multi_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(generic_family_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(hset_family_test dfly_test_lib LABELS DFLY)

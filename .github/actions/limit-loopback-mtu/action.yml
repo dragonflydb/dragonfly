@@ -1,0 +1,34 @@
+name: Limit loopback MTU
+description: >
+  Lowers the loopback MTU of the job container before the regression tests run.
+
+# Why: the regression tests talk over loopback, whose default MTU is 65536 (~64KB MSS). With such a
+# jumbo MSS, some Linux kernels (seen on the 6.17 CI runners) collapse a socket's receive buffer and
+# window to about the MSS. The sender then crawls in a 200ms zero-window probe loop, and replication
+# or slot migration tests hang. With a NIC sized MTU this does not happen. See #4834 for the analysis
+# and the upstream kernel reports.
+#
+# The job container has its own network namespace, so only its loopback changes. Changing an
+# interface MTU needs the NET_ADMIN capability, which Docker does not grant even to root: the job
+# container must run with "--cap-add=NET_ADMIN".
+
+inputs:
+  mtu:
+    required: false
+    default: "9000"
+    description: "MTU to set on the loopback interface"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Limit loopback MTU
+      shell: bash
+      env:
+        LO_MTU: ${{ inputs.mtu }}
+      # iproute2 ships in the CI images (romange/container-foundry). Writing to
+      # /sys/class/net/lo/mtu does not work: Docker mounts /sys read-only.
+      run: |
+        set -e
+        ip link set dev lo mtu "${LO_MTU}"
+        echo "lo mtu: $(cat /sys/class/net/lo/mtu)"
+        test "$(cat /sys/class/net/lo/mtu)" = "${LO_MTU}"

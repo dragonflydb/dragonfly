@@ -5,10 +5,13 @@
 #include "server/generic_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/strings/numbers.h>
+#include <absl/strings/str_join.h>
 
 #include <array>
 #include <cstring>
 #include <limits>
+#include <numeric>
 
 extern "C" {
 #include "redis/crc64.h"
@@ -22,11 +25,14 @@ extern "C" {
 #include "facade/facade_test.h"
 #include "facade/reply_builder.h"
 #include "facade/string_socket.h"
+#include "io/io.h"
 #include "server/channel_store.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
@@ -38,6 +44,14 @@ using namespace testing;
 using namespace std;
 using namespace util;
 using absl::StrCat;
+
+constexpr char kShard0Key[] = "b";  // shard 0
+constexpr char kShard1Key[] = "x";  // shard 1
+
+// Alternate keys for tests that need additional keys.
+constexpr char kShard0AltKey[] = "d";   // shard 0
+constexpr char kShard1AltKey[] = "y";   // shard 1
+constexpr char kShard1AltKey2[] = "z";  // shard 1
 
 namespace dfly {
 
@@ -143,6 +157,21 @@ TEST_F(GenericFamilyTest, Expire) {
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
 }
 
+// An expired key is missing even when a lookup asks for another type.
+TEST_F(GenericFamilyTest, ExpiredKeyOfOtherType) {
+  Run({"hset", "key", "f", "v"});
+  Run({"pexpire", "key", "1"});
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"get", "key"}), ArgType(RespExpr::NIL));
+  EXPECT_EQ(1u, GetMetrics().db_stats[0].events.expired_keys);
+
+  Run({"set", "key", "val", "px", "1"});
+  AdvanceTime(1);
+  EXPECT_THAT(Run({"lpush", "key", "x"}), IntArg(1));
+  EXPECT_EQ(2u, GetMetrics().db_stats[0].events.expired_keys);
+  EXPECT_EQ(Run({"type", "key"}), "list");
+}
+
 TEST_F(GenericFamilyTest, ExpireCornerCases) {
   // EXPIRE / PEXPIRE with non-positive TTL deletes the key immediately and reports success.
   Run({"set", "key", "val"});
@@ -183,7 +212,7 @@ TEST_F(GenericFamilyTest, ExpireCornerCases) {
   EXPECT_THAT(Run({"pexpireat", "key", "-1"}), IntArg(1));
   EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
 
-  // Huge absolute timestamps overflow the kMaxExpireDeadlineMs cap and surface OUT_OF_RANGE.
+  // Absolute timestamps that overflow the internal representation remain invalid.
   Run({"set", "key", "val"});
   EXPECT_THAT(Run({"expireat", "key", absl::StrCat(INT64_MAX)}), ErrArg("expiry is out of range"));
   EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
@@ -204,6 +233,59 @@ TEST_F(GenericFamilyTest, ExpireCornerCases) {
   EXPECT_THAT(Run({"expire", "missing", "-1"}), IntArg(0));
   EXPECT_THAT(Run({"expireat", "missing", "0"}), IntArg(0));
   EXPECT_THAT(Run({"pexpireat", "missing", "0"}), IntArg(0));
+}
+
+TEST_F(GenericFamilyTest, ExpireCap) {
+  TEST_current_time_ms = 1'800'000'000'123;
+  struct Case {
+    vector<string_view> args;  // the command up to its expiry argument
+    int64_t unit_ms;
+    bool absolute;
+  };
+  const Case cases[] = {
+      {{"expire", "key"}, 1000, false},       {{"pexpire", "key"}, 1, false},
+      {{"expireat", "key"}, 1000, true},      {{"pexpireat", "key"}, 1, true},
+      {{"getex", "key", "EX"}, 1000, false},  {{"getex", "key", "PX"}, 1, false},
+      {{"getex", "key", "EXAT"}, 1000, true}, {{"getex", "key", "PXAT"}, 1, true}};
+  const int64_t deadline = TEST_current_time_ms + kMaxExpireDeadlineMs;
+  pp_->at(Shard("key", shard_set->size()))->Await([&] {
+    journal::AcquireUser();
+    absl::Cleanup release_journal = [] { journal::ReleaseUser(); };
+    for (const auto& [args, unit_ms, absolute] : cases) {
+      // One unit beyond the cap is clamped to it.
+      const string value = StrCat(kMaxExpireDeadlineMs / unit_ms + 1 +
+                                  (absolute ? TEST_current_time_ms / unit_ms : 0));
+      vector<string_view> cmd(args);
+      cmd.push_back(value);
+      SCOPED_TRACE(absl::StrJoin(cmd, " "));
+
+      ASSERT_EQ(Run({"set", "key", "val", "px", "1000"}), "OK");
+      const auto lsn = journal::GetLsn();
+      const RespExpr resp = Run(cmd);
+      if (args[0] == "getex") {
+        EXPECT_EQ(resp, "val");
+      } else {
+        EXPECT_THAT(resp, IntArg(1));
+      }
+
+      // Replicas receive the applied deadline; decode the borrowed bytes before yielding.
+      ASSERT_EQ(journal::GetLsn(), lsn + 1);
+      io::BytesSource source{journal::GetEntry(lsn)};
+      JournalReader reader{&source, 0};
+      journal::ParsedEntry entry;
+      ASSERT_FALSE(reader.ReadEntry(&entry));
+      ASSERT_EQ(entry.cmd.size(), 3);
+      EXPECT_EQ(entry.cmd[0], "PEXPIREAT");
+      EXPECT_EQ(entry.cmd[2], StrCat(deadline));
+      EXPECT_THAT(Run({"pexpiretime", "key"}), IntArg(deadline));
+
+      // GT compares the clamped deadline, which equals the one already set.
+      if (args[0] != "getex") {
+        cmd.push_back("GT");
+        EXPECT_THAT(Run(cmd), IntArg(0));
+      }
+    }
+  });
 }
 
 TEST_F(GenericFamilyTest, ExpireOptions) {
@@ -538,29 +620,39 @@ TEST_F(GenericFamilyTest, Touch) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
+TEST_F(GenericFamilyTest, ShardPlacementOfTestKeys) {
+  ASSERT_EQ(shard_set->size(), 2u);
+  EXPECT_EQ(Shard(kShard0Key, shard_set->size()), 0u);
+  EXPECT_EQ(Shard(kShard0AltKey, shard_set->size()), 0u);
+  EXPECT_EQ(Shard(kShard1Key, shard_set->size()), 1u);
+  EXPECT_EQ(Shard(kShard1AltKey, shard_set->size()), 1u);
+  EXPECT_EQ(Shard(kShard1AltKey2, shard_set->size()), 1u);
+}
+
 TEST_F(GenericFamilyTest, Rename) {
   RespExpr resp;
-  string b_val(32, 'b');
-  string x_val(32, 'x');
+  string dest_val(32, 'z');
+  string src_val(32, 'x');
 
-  resp = Run({"mset", "x", x_val, "b", b_val});
+  resp = Run({"mset", kShard1Key, src_val, kShard0Key, dest_val});
   ASSERT_EQ(resp, "OK");
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
-  resp = Run({"rename", "z", "b"});
+  resp = Run({"rename", kShard0AltKey, kShard0Key});
   ASSERT_THAT(resp, ErrArg("no such key"));
 
-  resp = Run({"rename", "x", "b"});
+  resp = Run({"rename", kShard1Key, kShard0Key});
   ASSERT_EQ(resp, "OK");
 
-  int64_t val = CheckedInt({"get", "x"});
-  ASSERT_EQ(kint64min, val);  // does not exist
+  int64_t val = CheckedInt({"get", kShard1Key});
+  ASSERT_EQ(kint64min, val);
 
-  ASSERT_EQ(x_val, Run({"get", "b"}));  // swapped.
+  ASSERT_EQ(src_val, Run({"get", kShard0Key}));
 
-  EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 1);
+  EXPECT_EQ(CheckedInt({"exists", kShard1Key, kShard0Key}), 1);
 
-  const char* keys[2] = {"b", "x"};
+  const char* keys[2] = {kShard0Key, kShard1Key};
+
   auto ren_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 200; ++i) {
       int j = i % 2;
@@ -571,8 +663,7 @@ TEST_F(GenericFamilyTest, Rename) {
 
   auto exist_fb = pp_->at(2)->LaunchFiber([&] {
     for (size_t i = 0; i < 300; ++i) {
-      int64_t resp = CheckedInt({"exists", "x", "b"});
-      ASSERT_EQ(1, resp);
+      ASSERT_EQ(1, CheckedInt({"exists", kShard1Key, kShard0Key}));
     }
   });
 
@@ -581,8 +672,12 @@ TEST_F(GenericFamilyTest, Rename) {
 }
 
 TEST_F(GenericFamilyTest, RenameList) {
-  for (string_view dest : {"b", "y", "z"}) {
-    EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
+  const char* kSourceKey = kShard1AltKey;  // b (shard 1)
+
+  for (string_view dest :
+       {string_view{kShard0AltKey}, string_view{kShard1Key}, string_view{kShard1AltKey2}}) {
+    EXPECT_EQ(1, CheckedInt({"lpush", kSourceKey, "elem"}));
+
     Metrics metrics = GetMetrics();
 
     size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
@@ -590,9 +685,10 @@ TEST_F(GenericFamilyTest, RenameList) {
     ASSERT_GT(list_usage, 0);
     ASSERT_EQ(string_usage, 0);
 
-    auto resp = Run({"rename", "x", dest});
+    auto resp = Run({"rename", kSourceKey, dest});
     ASSERT_EQ(resp, "OK");
-    if (dest == "b") {
+
+    if (dest == string_view{kShard0AltKey}) {
       ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
     } else {
       ASSERT_EQ(1, last_cmd_dbg_info_.shards_count);
@@ -604,7 +700,7 @@ TEST_F(GenericFamilyTest, RenameList) {
     ASSERT_EQ(list_usage_after, list_usage);
     ASSERT_EQ(string_usage, 0);
 
-    EXPECT_EQ(0, CheckedInt({"del", "x"}));
+    EXPECT_EQ(0, CheckedInt({"del", kSourceKey}));
     EXPECT_EQ(1, CheckedInt({"del", dest}));
   }
 }
@@ -683,6 +779,7 @@ TEST_F(GenericFamilyTest, Stick) {
   // check stickyness persists during writes
   Run({"set", "a", "new"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
+
   Run({"append", "a", "-value"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
 
@@ -691,14 +788,17 @@ TEST_F(GenericFamilyTest, Stick) {
   ASSERT_THAT(Run({"stick", "k"}), IntArg(0));
 
   // check rename persists stickyness on multiple shards
-  Run({"del", "b"});
-  string b_val(32, 'b');
-  string x_val(32, 'x');
-  Run({"mset", "b", b_val, "x", x_val});
+  Run({"del", kShard0Key});
+
+  string dest_val(32, 'z');
+  string src_val(32, 'x');
+
+  Run({"mset", kShard0Key, dest_val, kShard1Key, src_val});
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
-  Run({"stick", "x"});
-  Run({"rename", "x", "b"});
-  ASSERT_THAT(Run({"stick", "b"}), IntArg(0));
+
+  Run({"stick", kShard1Key});
+  Run({"rename", kShard1Key, kShard0Key});
+  ASSERT_THAT(Run({"stick", kShard0Key}), IntArg(0));
 }
 
 TEST_F(GenericFamilyTest, Move) {
@@ -1316,11 +1416,22 @@ TEST_F(GenericFamilyTest, SortROBug3636) {
   ASSERT_THAT(resp, ArrLen(17));
 }
 
+void ExpectTimeReply(const RespExpr& resp) {
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::STRING))));
+  int64_t sec = 0, usec = -1;
+  EXPECT_TRUE(absl::SimpleAtoi(resp.GetVec()[0].GetView(), &sec));
+  EXPECT_TRUE(absl::SimpleAtoi(resp.GetVec()[1].GetView(), &usec));
+  EXPECT_GT(sec, 0);
+  EXPECT_GE(usec, 0);
+  EXPECT_LT(usec, 1000000);
+}
+
 TEST_F(GenericFamilyTest, TimeNoKeys) {
-  auto resp = Run({"time"});
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0], ArgType(RespExpr::INT64));
-  EXPECT_THAT(resp.GetVec()[1], ArgType(RespExpr::INT64));
+  ExpectTimeReply(Run({"time"}));
+
+  // Lua must see the elements as strings, not numbers.
+  auto resp = Run({"eval", "local t = redis.call('TIME'); return {type(t[1]), type(t[2])}", "0"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("string", "string")));
 
   // Check that time is the same inside a transaction.
   Run({"multi"});
@@ -1329,21 +1440,16 @@ TEST_F(GenericFamilyTest, TimeNoKeys) {
   Run({"time"});
   resp = Run({"exec"});
 
-  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre(Not(IntArg(0)), _)),
-                                          RespArray(ElementsAre(Not(IntArg(0)), _)))));
-
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
+  ExpectTimeReply(resp.GetVec()[0]);
+  ExpectTimeReply(resp.GetVec()[1]);
   for (int i = 0; i < 2; ++i) {
-    int64_t val0 = get<int64_t>(resp.GetVec()[0].GetVec()[i].u);
-    int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
-    EXPECT_EQ(val0, val1);
+    EXPECT_EQ(resp.GetVec()[0].GetVec()[i].GetString(), resp.GetVec()[1].GetVec()[i].GetString());
   }
 }
 
 TEST_F(GenericFamilyTest, TimeWithKeys) {
-  auto resp = Run({"time"});
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0], ArgType(RespExpr::INT64));
-  EXPECT_THAT(resp.GetVec()[1], ArgType(RespExpr::INT64));
+  ExpectTimeReply(Run({"time"}));
 
   // Check that time is the same inside a transaction.
   Run({"multi"});
@@ -1351,15 +1457,13 @@ TEST_F(GenericFamilyTest, TimeWithKeys) {
   usleep(2000);
   Run({"time"});
   Run({"get", "x"});
-  resp = Run({"exec"});
+  auto resp = Run({"exec"});
 
-  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre(Not(IntArg(0)), _)),
-                                          RespArray(ElementsAre(Not(IntArg(0)), _)), _)));
-
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2), _)));
+  ExpectTimeReply(resp.GetVec()[0]);
+  ExpectTimeReply(resp.GetVec()[1]);
   for (int i = 0; i < 2; ++i) {
-    int64_t val0 = get<int64_t>(resp.GetVec()[0].GetVec()[i].u);
-    int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
-    EXPECT_EQ(val0, val1);
+    EXPECT_EQ(resp.GetVec()[0].GetVec()[i].GetString(), resp.GetVec()[1].GetVec()[i].GetString());
   }
 }
 
@@ -1482,6 +1586,15 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"get", "string-key"});
   EXPECT_EQ("hello world", resp);
   EXPECT_EQ(CheckedInt({"pttl", "string-key"}), 2000);
+
+  // RESTORE caps both relative TTLs and absolute deadlines.
+  ASSERT_EQ(Run({"restore", "string-key", StrCat(kMaxExpireDeadlineMs + 1), ToSV(dump), "REPLACE"}),
+            "OK");
+  EXPECT_THAT(Run({"pttl", "string-key"}), IntArg(kMaxExpireDeadlineMs));
+  ASSERT_EQ(Run({"restore", "string-key", StrCat(TEST_current_time_ms + kMaxExpireDeadlineMs + 1),
+                 ToSV(dump), "ABSTTL", "REPLACE"}),
+            "OK");
+  EXPECT_THAT(Run({"pttl", "string-key"}), IntArg(kMaxExpireDeadlineMs));
 
   // Last but not least - just make sure that we are good without TTL as well
   resp = Run({"restore", "string-key", "0", ToSV(STRING_DUMP_REDIS), "REPLACE"});
@@ -1945,6 +2058,58 @@ TEST_F(GenericFamilyTest, DebugObjHistMultiDbCorrectDb) {
   EXPECT_EQ("value", Run({"HGET", "shared", "alive"}));
 }
 
+TEST_F(GenericFamilyTest, DebugObjHistDataSize) {
+  Run({"JSON.SET", "json", "$", R"({"ab":"cde","f":[1,"gh"]})"});
+  Run({"XADD", "stream", "*", "f1", "v1", "f2", "value2"});
+  Run({"XADD", "stream", "*", "f1", "v1"});
+  Run({"BF.ADD", "bloom", "item"});
+
+  string hist = Run({"DEBUG", "OBJHIST"}).GetString();
+  auto section = [&](string_view type) {
+    size_t start = hist.find(absl::StrCat("OBJECT:", type, "\n"));
+    EXPECT_NE(start, string::npos) << type;
+    if (start == string::npos)
+      return string{};
+    size_t end = hist.find("OBJECT:", start + 1);
+    return hist.substr(start, end == string::npos ? string::npos : end - start);
+  };
+  constexpr string_view kDataSize = "Values - Data size (in-memory and tiered):\n";
+  constexpr string_view kMemoryUsed = "Values - Total Memory used:\n";
+
+  string json_hist = section("ReJSON-RL");
+  EXPECT_THAT(json_hist, HasSubstr(absl::StrCat(kMemoryUsed, "Count: 1 ")));
+  EXPECT_THAT(json_hist, Not(HasSubstr(absl::StrCat(kMemoryUsed, "Count: 1 Average: 0.0000"))));
+  EXPECT_THAT(json_hist, Not(HasSubstr(kDataSize)));
+  EXPECT_THAT(json_hist, Not(HasSubstr("Cardinality histogram")));
+  EXPECT_THAT(json_hist, Not(HasSubstr("Items length histogram")));
+
+  string stream_hist = section("stream");
+  EXPECT_THAT(stream_hist, HasSubstr(absl::StrCat(kMemoryUsed, "Count: 1 ")));
+  EXPECT_THAT(stream_hist, HasSubstr(absl::StrCat(kDataSize, "Count: 1 Average: 16.0")));
+  EXPECT_THAT(stream_hist, HasSubstr("Cardinality histogram (number of elements in sets):\n"
+                                     "Count: 1 Average: 2.0"));
+  EXPECT_THAT(stream_hist, HasSubstr("Items length histogram:\nCount: 3 "));
+
+  string bloom_hist = section("MBbloom--");
+  EXPECT_THAT(bloom_hist, HasSubstr(absl::StrCat(kDataSize, "Count: 1 ")));
+  EXPECT_THAT(bloom_hist, Not(HasSubstr(absl::StrCat(kDataSize, "Count: 1 Average: 0.0000"))));
+}
+
+TEST_F(GenericFamilyTest, DebugObjHistStreamTombstonesAndNodes) {
+  for (unsigned i = 1; i <= 256; ++i) {
+    EXPECT_EQ(Run({"XADD", "stream", StrCat(i, "-0"), "123", "456"}), StrCat(i, "-0"));
+  }
+  EXPECT_EQ(Run({"XADD", "stream", "257-0", "field", "value"}), "257-0");
+  EXPECT_THAT(Run({"XDEL", "stream", "2-0"}), IntArg(1));
+
+  string hist = Run({"DEBUG", "OBJHIST"}).GetString();
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\n"
+                              "Count: 1 Average: 1540.0"));
+  EXPECT_THAT(hist, HasSubstr("Cardinality histogram (number of elements in sets):\n"
+                              "Count: 1 Average: 256.0"));
+  EXPECT_THAT(hist, HasSubstr("Items length histogram:\nCount: 256 "));
+}
+
 TEST_F(GenericFamilyTest, ZInterStoreDeletesEmptySet) {
   for (int i = 0; i < 20; ++i) {
     Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
@@ -2133,28 +2298,29 @@ TEST_F(GenericFamilyTest, Unlink) {
 
 TEST_F(GenericFamilyTest, Copy) {
   RespExpr resp;
-  string b_val(32, 'b');
-  string x_val(32, 'x');
+  string dest_val(32, 'z');
+  string src_val(32, 'x');
 
-  resp = Run({"mset", "x", x_val, "b", b_val});
+  resp = Run({"mset", kShard1Key, src_val, kShard0Key, dest_val});
   ASSERT_EQ(resp, "OK");
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
-  resp = Run({"COPY", "z", "b"});
+  resp = Run({"COPY", kShard0AltKey, kShard0Key});
   ASSERT_THAT(resp, IntArg(0));
 
-  resp = Run({"COPY", "b", "c"});
+  resp = Run({"COPY", kShard0Key, "c"});
   ASSERT_THAT(resp, IntArg(1));
-  ASSERT_EQ(b_val, Run({"get", "c"}));
+  ASSERT_EQ(dest_val, Run({"get", "c"}));
 
-  resp = Run({"COPY", "x", "b", "REPLACE"});
+  resp = Run({"COPY", kShard1Key, kShard0Key, "REPLACE"});
   ASSERT_THAT(resp, IntArg(1));
 
-  ASSERT_EQ(x_val, Run({"get", "x"}));
-  ASSERT_EQ(x_val, Run({"get", "b"}));
-  EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 2);
+  ASSERT_EQ(src_val, Run({"get", kShard1Key}));
+  ASSERT_EQ(src_val, Run({"get", kShard0Key}));
+  EXPECT_EQ(CheckedInt({"exists", kShard1Key, kShard0Key}), 2);
 
-  const char* keys[2] = {"b", "x"};
+  const char* keys[2] = {kShard0Key, kShard1Key};
+
   auto ren_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 200; ++i) {
       int j = i % 2;
@@ -2165,8 +2331,7 @@ TEST_F(GenericFamilyTest, Copy) {
 
   auto exist_fb = pp_->at(2)->LaunchFiber([&] {
     for (size_t i = 0; i < 300; ++i) {
-      int64_t resp = CheckedInt({"exists", "x", "b"});
-      ASSERT_EQ(2, resp);
+      ASSERT_EQ(2, CheckedInt({"exists", kShard1Key, kShard0Key}));
     }
   });
 
@@ -2175,13 +2340,14 @@ TEST_F(GenericFamilyTest, Copy) {
 }
 
 TEST_F(GenericFamilyTest, CopyNonString) {
-  EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
-  auto resp = Run({"COPY", "x", "b"});
+  EXPECT_EQ(1, CheckedInt({"lpush", kShard1Key, "elem"}));
+
+  auto resp = Run({"COPY", kShard1Key, kShard0Key});
   ASSERT_THAT(resp, IntArg(1));
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
-  EXPECT_EQ(1, CheckedInt({"del", "x"}));
-  EXPECT_EQ(1, CheckedInt({"del", "b"}));
+  EXPECT_EQ(1, CheckedInt({"del", kShard1Key}));
+  EXPECT_EQ(1, CheckedInt({"del", kShard0Key}));
 }
 
 TEST_F(GenericFamilyTest, CopyBinary) {
@@ -2807,16 +2973,15 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
   Run({"expire", "mykey", "1"});
   AdvanceTime(1100);
 
-  // Drive expiry the same way the heartbeat does: DeleteExpiredStep returns events,
+  // Drive expiry the same way the heartbeat does: DeleteExpiredStep queues events,
   // which are sent outside the atomic section (see issue #7052).
-  shard_set->RunBriefInParallel([](EngineShard* shard) {
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
     DbSlice& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     DbContext db_cntx;
     db_cntx.db_index = 0;
     db_cntx.time_now_ms = TEST_current_time_ms;
-    DbSlice::DeleteExpiredStats stats = db_slice.DeleteExpiredStep(db_cntx, 100);
-    if (!stats.key_events.empty())
-      channel_store->SendMessages("__keyevent@0__:expired", stats.key_events, false);
+    db_slice.DeleteExpiredStep(db_cntx, 100);
+    db_slice.SendQueuedExpiredKeyEvents();
   });
 
   // Flush all async dispatch callbacks so the subscriber's thread receives the message.
@@ -2826,6 +2991,67 @@ TEST_F(GenericFamilyTest, KeyspaceNotificationNoAtomicSectionOnExpiry) {
   const auto& msg = GetPublishedMessage("IO1", 0);
   EXPECT_EQ("__keyevent@0__:expired", msg.channel);
   EXPECT_EQ("mykey", msg.message);
+}
+
+// SCAN expires keys while traversing inside an atomic section. The expired event must be sent
+// after the traversal, not from inside it.
+TEST_F(GenericFamilyTest, KeyspaceNotificationOnScanExpiry) {
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  Run({"set", "mykey", "myval", "PX", "10"});
+  AdvanceTime(20);
+
+  auto resp = Run({"scan", "0"});
+  ASSERT_THAT(resp, ArrLen(2));
+  EXPECT_THAT(resp.GetVec()[1], ArrLen(0));
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+
+  ASSERT_EQ(1u, SubscriberMessagesLen("IO1"));
+  EXPECT_EQ("mykey", GetPublishedMessage("IO1", 0).message);
+}
+
+// Inserting into a full bucket garbage-collects expired keys inside an atomic section. Their
+// expired events must be sent after the insert, not from inside it.
+TEST_F(GenericFamilyTest, KeyspaceNotificationOnGarbageCollect) {
+  const string prev_notify =
+      Run({"CONFIG", "GET", "notify_keyspace_events"}).GetVec()[1].GetString();
+  Run({"CONFIG", "SET", "notify_keyspace_events", "EX"});
+  absl::Cleanup restore_notify = [&] {
+    Run({"CONFIG", "SET", "notify_keyspace_events", prev_notify});
+  };
+
+  single_response_ = false;
+  auto sub_resp = pp_->at(1)->Await([&] { return Run({"subscribe", "__keyevent@0__:expired"}); });
+  ASSERT_THAT(sub_resp, ArrLen(3));
+
+  constexpr unsigned kNumKeys = 20000;
+  Run({"debug", "populate", absl::StrCat(kNumKeys), "old", "8", "EXPIRE", "1", "2"});
+  AdvanceTime(3000);
+  Run({"debug", "populate", absl::StrCat(kNumKeys), "new", "8"});
+
+  EXPECT_GT(GetMetrics().events.garbage_collected, 0u);
+
+  // The heartbeat expires some of the old keys too. Expire the rest with a full SCAN, so every
+  // old key must have produced exactly one event, whichever path expired it.
+  string cursor = "0";
+  do {
+    auto resp = Run({"scan", cursor, "count", "1000"});
+    ASSERT_THAT(resp, ArrLen(2));
+    cursor = resp.GetVec()[0].GetString();
+  } while (cursor != "0");
+
+  pp_->AwaitFiberOnAll([](util::ProactorBase*) {});
+  EXPECT_EQ(SubscriberMessagesLen("IO1"), kNumKeys);
 }
 
 // A rejected CONFIG SET must not leave the invalid value observable: CONFIG GET has to keep
@@ -2894,15 +3120,25 @@ TEST_F(GenericFamilyTest, ExpirePastEmitsExpiredEvent) {
   const auto& msg = GetPublishedMessage("IO1", 0);
   EXPECT_EQ("__keyevent@0__:expired", msg.channel);
   EXPECT_EQ("foo", msg.message);
-  EXPECT_GE(GetMetrics().events.expired_keys, 1u);
+  EXPECT_GE(GetMetrics().db_stats[0].events.expired_keys, 1u);
+}
+
+// Expiry counters are cumulative and must survive a flush.
+TEST_F(GenericFamilyTest, ExpiredKeysSurviveFlush) {
+  Run({"SET", "foo", "bar"});
+  EXPECT_THAT(Run({"EXPIRE", "foo", "-1"}), IntArg(1));
+  Run({"FLUSHALL"});
+  EXPECT_EQ(1u, GetMetrics().db_stats[0].events.expired_keys);
+  EXPECT_THAT(Run({"INFO", "STATS"}).GetString(), HasSubstr("expired_keys:1\r\n"));
 }
 
 namespace {
 
-TypeMemDeltas Snapshot() {
-  TypeMemDeltas total{};
+TypeAttributedMemory Snapshot() {
+  TypeAttributedMemory total{};
   for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
-    auto local = shard_set->Await(sid, [] { return EngineShard::tlocal()->type_mem_delta(); });
+    auto local =
+        shard_set->Await(sid, [] { return EngineShard::tlocal()->type_attributed_memory(); });
     ranges::transform(total, local, total.begin(), plus{});
   }
   return total;
@@ -2946,7 +3182,7 @@ TEST_F(GenericFamilyTest, AsyncDelTrackMemByType) {
   auto before_del = Snapshot();
   ASSERT_THAT(Run({"DEL", key}), IntArg(1));
 
-  auto diff = [](TypeMemDeltas deltas, const TypeMemDeltas& before) {
+  auto diff = [](TypeAttributedMemory deltas, const TypeAttributedMemory& before) {
     ranges::transform(deltas, before, deltas.begin(), minus{});
     return deltas;
   };
@@ -2981,6 +3217,325 @@ TEST_F(GenericFamilyTest, AsyncDelTrackMemByType) {
   EXPECT_EQ(diff(Snapshot(), before_unlink), del_diff);
 }
 
+namespace {
+struct MetricCmp {
+  TypeAttributedMemory new_metric{};
+  TypeAttributedMemory old_metric{};
+  int64_t obj_used = 0, table_used = 0, search_used = 0, interned = 0;
+
+  MetricCmp() = default;
+
+  explicit MetricCmp(const Metrics& m) : new_metric(m.type_attributed_memory_bytes) {
+    for (const auto& db : m.db_stats) {
+      ranges::transform(old_metric, db.memory_usage_by_type, old_metric.begin(), plus{});
+      obj_used += db.obj_memory_usage;
+      table_used += db.table_mem_usage;
+    }
+    search_used = m.search_stats.used_memory;
+    interned = m.interned_string_stats.pool_bytes + m.interned_string_stats.pool_table_bytes;
+  }
+
+  MetricCmp operator-(const MetricCmp& o) const {
+    MetricCmp res = *this;
+    ranges::transform(res.new_metric, o.new_metric, res.new_metric.begin(), minus{});
+    ranges::transform(res.old_metric, o.old_metric, res.old_metric.begin(), minus{});
+    res.obj_used -= o.obj_used;
+    res.table_used -= o.table_used;
+    res.search_used -= o.search_used;
+    res.interned -= o.interned;
+    return res;
+  }
+
+  int64_t NewTotal() const {
+    return reduce(new_metric.begin(), new_metric.end());
+  }
+
+  int64_t OldTotal() const {
+    return reduce(old_metric.begin(), old_metric.end());
+  }
+
+  bool NewUnchanged() const {
+    return new_metric == TypeAttributedMemory{};
+  }
+
+  bool Positive(size_t t) const {
+    return new_metric[t] > 0;
+  }
+
+  bool Negative(size_t t) const {
+    return new_metric[t] < 0;
+  }
+
+  bool Match(size_t t) const {
+    return new_metric[t] == old_metric[t];
+  }
+
+  bool MatchObj() const {
+    return Match(OBJ_KEY) && NewTotal() == obj_used && obj_used == OldTotal();
+  }
+
+  bool IsClean() const {
+    return table_used == 0 && search_used == 0;
+  }
+};
+
+ostream& operator<<(ostream& os, const MetricCmp& m) {
+  auto print = [&](string_view name, const TypeAttributedMemory& arr) {
+    os << name << ": {";
+    for (size_t t = 0; t < arr.size(); ++t)
+      if (arr[t] != 0)
+        os << ObjTypeToString(t) << "=" << arr[t] << " ";
+    os << "} ";
+  };
+  print("new", m.new_metric);
+  print("old", m.old_metric);
+  return os << "obj_used=" << m.obj_used << " table_used=" << m.table_used
+            << " search_used=" << m.search_used << " interned=" << m.interned;
+}
+
+// known gap
+#define METRIC_CMP_TODO(d, cond)                                              \
+  do {                                                                        \
+    if (cond) {                                                               \
+      LOG(WARNING) << "parity TODO scenario passes, promote it to PARITY_OK"; \
+    } else {                                                                  \
+      LOG(WARNING) << "parity gap: " #cond "\n" << (d);                       \
+      GTEST_SKIP() << "parity gap";                                           \
+    }                                                                         \
+  } while (0)
+
+class MemParityTest : public GenericFamilyTest {
+ protected:
+  MetricCmp Delta(const function<void()>& action) const {
+    const MetricCmp before{GetMetrics()};
+    action();
+    return MetricCmp{GetMetrics()} - before;
+  }
+
+  static string OnOtherShard(string_view other, string key) {
+    int count = 0;
+    while (++count < 5000 && Shard(key, shard_set->size()) == Shard(other, shard_set->size()))
+      key += 'x';
+    if (count >= 5000)
+      return "";
+    return key;
+  }
+
+  const string key_ = string(1024, 'a');
+  const string key2_ = string(2048, 'c');
+  const string key3_ = string(1536, 'd');
+  const string val_ = string(1024, 'b');
+};
+}  // namespace
+
+TEST_F(MemParityTest, SetStringSimple) {
+  const string value(65536, 'x'), prefix(256, 'k');
+  const auto d = Delta([&] {
+    for (int i = 0; i < 32; ++i)
+      Run({"SET", StrCat(prefix, "-", i), value});
+  });
+  EXPECT_TRUE(d.Match(OBJ_STRING)) << d;
+  EXPECT_EQ(d.obj_used, d.old_metric[OBJ_STRING] + d.old_metric[OBJ_KEY]) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+TEST_F(MemParityTest, DeleteString) {
+  Run({"SET", key_, val_});
+  auto d = Delta([&] { Run({"DEL", key_}); });
+  EXPECT_TRUE(d.Match(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+TEST_F(MemParityTest, DeleteMixedTypes) {
+  Run({"SET", key_, val_});
+  Run({"HSET", key_ + "h", "f", val_});
+  Run({"LPUSH", key_ + "l", val_});
+  auto d = Delta([&] { Run({"DEL", key_, key_ + "h", key_ + "l"}); });
+  EXPECT_TRUE(d.Negative(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.Negative(OBJ_LIST)) << d;
+  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Only types which are always freed synchronously, see AsyncUnlinkLargeHash for the deferred path
+TEST_F(MemParityTest, UnlinkMixedTypes) {
+  Run({"SET", key_, val_});
+  Run({"LPUSH", key_ + "l", val_});
+  auto d = Delta([&] { Run({"UNLINK", key_, key_ + "l"}); });
+  EXPECT_TRUE(d.Negative(OBJ_LIST)) << d;
+  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Same key/value moved across dbs have no delta
+TEST_F(MemParityTest, MoveHashBetweenDbs) {
+  Run({"SELECT", "1"});
+  Run({"HSET", key_, "field", val_});
+  auto d = Delta([&] { EXPECT_THAT(Run({"MOVE", key_, "0"}), IntArg(1)); });
+  EXPECT_TRUE(d.NewUnchanged()) << d;
+  EXPECT_EQ(d.OldTotal(), 0) << d;
+  EXPECT_EQ(d.obj_used, 0) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+TEST_F(MemParityTest, ReadOnly) {
+  Run({"SET", key_, val_});
+  Run({"HSET", key2_, "f", val_});
+  Run({"LPUSH", key3_, val_});
+  auto d = Delta([&] {
+    Run({"GET", key_});
+    Run({"HGET", key2_, "f"});
+    Run({"LLEN", key3_});
+  });
+  EXPECT_TRUE(d.NewUnchanged()) << d;
+  EXPECT_EQ(d.obj_used, 0) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Expiry delete should look like DEL for the expired value type
+TEST_F(MemParityTest, ExpireString) {
+  Run({"SET", key_, val_, "PX", "500"});
+  auto d = Delta([&] {
+    AdvanceTime(600);
+    EXPECT_THAT(Run({"GET", key_}), ArgType(RespExpr::NIL));
+  });
+  EXPECT_TRUE(d.Match(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+TEST_F(MemParityTest, HashEncodingChange) {
+  Run({"HSET", key_, "f", "v"});
+  auto d = Delta([&] { Run({"HSET", key_, "f1", val_}); });
+  EXPECT_TRUE(d.Match(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Positive(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Frees are run after the command, can only compare once the async deletion queue is drained
+TEST_F(MemParityTest, AsyncUnlinkLargeHash) {
+  for (int i = 0; i < 1024; ++i)
+    Run({"HSET", key_, StrCat("f", i), string(128, 'x')});
+  auto d = Delta([&] {
+    Run({"UNLINK", key_});
+    EXPECT_TRUE(WaitUntilCondition(
+        [&] {
+          return ranges::all_of(views::iota(ShardId{0}, shard_set->size()), [&](auto sid) {
+            return shard_set->Await(sid, [] { return DbSlice::TEST_IsAsyncDeletionQueueEmpty(); });
+          });
+        },
+        std::chrono::seconds{5}));
+  });
+  EXPECT_TRUE(d.Match(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Negative(OBJ_HASH)) << d;
+  EXPECT_TRUE(d.IsClean()) << d;
+}
+
+// Known gaps: scenarios below are not covered by the new metric, all are to do. comparisons pasted
+// above tests as guide of what fails, with table values not denoted where not relevant
+
+// new: {string=-384 } old: {string=896 hash=-1280 } obj_used=-384
+TEST_F(MemParityTest, SetOverwritesHash) {
+  Run({"HSET", key_, "field", val_});
+  auto d = Delta([&] { Run({"SET", key_, val_}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
+}
+
+// Whole table reset bypasses per-key delete scopes
+// new: {} old: {string=-896 list=-1280 hash=-1280 key=-2944 } obj_used=-6400
+TEST_F(MemParityTest, FlushDbMixedTypes) {
+  Run({"SET", key_, val_});
+  Run({"HSET", key_ + "h", "f", val_});
+  Run({"LPUSH", key_ + "l", val_});
+  auto d = Delta([&] { Run({"FLUSHDB", "SYNC"}); });
+  METRIC_CMP_TODO(d, d.Negative(OBJ_HASH) && d.Negative(OBJ_LIST) && d.Negative(OBJ_STRING) &&
+                         d.MatchObj() && d.IsClean());
+}
+
+// new: {string=-896 } old: {key=1152 } obj_used=1152
+TEST_F(MemParityTest, RenameStringAcrossShards) {
+  const string dest = OnOtherShard(key_, key2_);
+  EXPECT_FALSE(dest.empty()) << "could not find key on another shard after 5k tries";
+  Run({"SET", key_, val_});
+  auto d = Delta([&] { EXPECT_EQ(Run({"RENAME", key_, dest}), "OK"); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
+}
+
+// needs fix in the command handler.
+// new: {} old: {string=-896 key=-896 } obj_used=-1792
+TEST_F(MemParityTest, RenameHashOverString) {
+  Run({"HSET", key_, "field", val_});
+  Run({"SET", key3_, val_});
+  auto d = Delta([&] { Run({"RENAME", key_, key3_}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// new: {string=-896 } old: {string=-896 hash=1392 } obj_used=496
+TEST_F(MemParityTest, CopyReplace) {
+  Run({"HSET", key_, "f", val_});
+  Run({"SET", key2_, val_});
+  auto d = Delta([&] { Run({"COPY", key_, key2_, "REPLACE"}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// interned pool is accounted separately from the JSON objects
+// new: {ReJSON-RL=87104 } old: {key=32768 ReJSON-RL=87104 } obj_used=119872 interned=100
+TEST_F(MemParityTest, JsonSetInternedStrings) {
+  const string shared = StrCat("shared-json-string-", string(1024, 'x'));
+  const string doc = StrCat(R"({"field":")", shared, R"(","nested":{"field":")", shared, R"("}})");
+  auto d = Delta([&] {
+    for (int i = 0; i < 32; ++i)
+      Run({"JSON.SET", StrCat("json-interned-", i, "-", string(1024, 'j')), "$", doc});
+  });
+  METRIC_CMP_TODO(d, d.Match(OBJ_JSON) && d.new_metric[OBJ_JSON] == d.obj_used && d.interned > 0 &&
+                         d.IsClean());
+}
+
+// value is allocated while payload is decoded, delta should be for hash type
+// new: {} old: {hash=1392 key=1536 } obj_used=2928
+TEST_F(MemParityTest, RestoreHash) {
+  Run({"HSET", key_, "f", string(1024, 'x')});
+  const string payload = Run({"DUMP", key_}).GetString();
+  auto d = Delta([&] { EXPECT_EQ(Run({"RESTORE", key3_, "0", payload}), "OK"); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// new: {zset=-1248 } old: {zset=32 hash=-1280 } obj_used=-1248
+TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
+  Run({"HSET", key_, "f", val_});
+  Run({"ZADD", key2_, "1", "a", "2", "b"});
+  Run({"ZADD", key3_, "3", "c", "4", "d"});
+  auto d = Delta([&] { Run({"ZUNIONSTORE", key_, "2", key2_, key3_}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_ZSET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// new: {set=-992 } old: {set=280 hash=-1280 } obj_used=-1000
+TEST_F(MemParityTest, SUnionStoreOverwritesHash) {
+  Run({"HSET", key_, "f", val_});
+  Run({"SADD", key2_, "1", "a", "2", "b"});
+  Run({"SADD", key3_, "3", "c", "4", "d"});
+  auto d = Delta([&] { Run({"SUNIONSTORE", key_, key2_, key3_}); });
+  METRIC_CMP_TODO(d, d.Match(OBJ_SET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+}
+
+// Table growth not added to the new metric. Slow (~20 seconds) so disabled by default, but passes
+TEST_F(MemParityTest, DISABLED_TableGrowth) {
+  const string suffix(64, 'k');
+  const auto d = Delta([&] {
+    for (int i = 0; i < 500'000; ++i)
+      Run({"SET", StrCat("table-gr-", i, "-", suffix), "v"});
+  });
+  EXPECT_GT(d.table_used, 0) << d;
+  EXPECT_LT(d.new_metric[OBJ_STRING], d.table_used) << d;
+}
+
 // Each iteration traverses the whole database, including command dispatch and RESP serialization
 // to a reusable in-memory sink. Run with --bench --gtest_filter='-*'
 // --benchmark_filter=BM_ScanCommand --benchmark_min_time=1s.
@@ -3009,7 +3564,7 @@ class ScanBenchmark : public BaseFamilyTest {
     }
     auto populate_resp = Run(absl::Span<const string>{populate_args});
     DCHECK_EQ(populate_resp.GetView(), "OK");
-    DCHECK_EQ(Run({"dbsize"}).GetInt().value(), key_count);
+    DCHECK_EQ(Run({"dbsize"}).GetInt().value(), int64_t(key_count));
 
     // A real connection runs many commands in one fiber. Run() would create a fiber per command
     // and retain all parsed replies until teardown, so use the normal dispatcher directly here.

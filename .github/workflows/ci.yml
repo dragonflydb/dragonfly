@@ -73,27 +73,19 @@ jobs:
         compiler: [{ cxx: g++, c: gcc }]
         # -no-pie to disable address randomization so we could symbolize stacktraces
         cxx_flags: ["-Werror -no-pie"]
-        sanitizers: ["NoSanitizers"]
+        # The ASAN/UBSAN build runs nightly in daily-builds.yml (build-sanitizers), not per PR.
         include:
           - container: "alpine-dev:latest"
             build-type: Debug
             compiler: { cxx: clang++, c: clang }
             cxx_flags: ""
-            sanitizers: "NoSanitizers"
-          - container: "ubuntu-dev:24"
-            build-type: Debug
-            compiler: { cxx: clang++, c: clang }
-            # https://maskray.me/blog/2023-08-25-clang-wunused-command-line-argument (search for compiler-rt)
-            cxx_flags: "-Wno-error=unused-command-line-argument"
-            sanitizers: "Sanitizers"
-            # Sanitizer builds produce larger objects, so give this job a bigger ccache.
-            ccache-max-size: "2G"
 
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/romange/${{ matrix.container }}
       # Seems that docker by default prohibits running iouring syscalls
-      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      # NET_ADMIN lets the limit-loopback-mtu action lower the loopback MTU.
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0" --cap-add=NET_ADMIN
       volumes:
         - /:/hostroot
         - /mnt:/mnt
@@ -134,7 +126,7 @@ jobs:
           echo "-----------------------------"
 
       - name: Test dependency-cache manifest
-        if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Debug' && matrix.compiler.cxx == 'g++' && matrix.sanitizers == 'NoSanitizers'
+        if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Debug' && matrix.compiler.cxx == 'g++'
         # run only once for both pull requests and pushes.
         run: bash .github/actions/builder/scripts/test_deps_cache_manifest.sh
 
@@ -146,12 +138,9 @@ jobs:
           enable-deps-cache: 'true'
           build-type: ${{matrix.build-type}}
           cache-key-suffix: ${{ matrix.container }}
-          ccache-max-size: ${{ matrix.ccache-max-size || '1G' }}
           c-compiler: ${{matrix.compiler.c}}
           cxx-compiler: ${{matrix.compiler.cxx}}
           cxx-flags: ${{matrix.cxx_flags}}
-          sanitizers: ${{matrix.sanitizers}}
-          with-aws: 'OFF'
 
       - name: PostFail
         if: failure()
@@ -250,7 +239,7 @@ jobs:
           path: /tmp/*INFO*
 
       - name: Run regression tests
-        if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push'
+        if: matrix.container == 'ubuntu-dev:24' && github.event_name != 'push'
         uses: ./.github/actions/regression-tests
         with:
           dfly-executable: dragonfly
@@ -277,7 +266,7 @@ jobs:
         # external-server mode against the just-built binary, on both Debug and Release.
         # continue-on-error keeps it a canary for now — flip to a blocking step once proven stable
         # in CI. See tests/dragonfly/valkey_tcl/README.md.
-        if: matrix.container == 'ubuntu-dev:24' && matrix.sanitizers == 'NoSanitizers' && github.event_name != 'push'
+        if: matrix.container == 'ubuntu-dev:24' && github.event_name != 'push'
         continue-on-error: true
         timeout-minutes: 20
         run: |
@@ -290,8 +279,8 @@ jobs:
       - name: Prepare JUnit artifact name
         if: always() && github.event_name != 'push'
         run: |
-          NAME="junit-ci-${{ matrix.container }}-${{ matrix.build-type }}-${{ matrix.compiler.cxx }}-${{ matrix.sanitizers }}"
-          MATRIX_NAME="container-${{ matrix.container }}-build-${{ matrix.build-type }}-compiler-${{ matrix.compiler.cxx }}-sanitizers-${{ matrix.sanitizers }}"
+          NAME="junit-ci-${{ matrix.container }}-${{ matrix.build-type }}-${{ matrix.compiler.cxx }}"
+          MATRIX_NAME="container-${{ matrix.container }}-build-${{ matrix.build-type }}-compiler-${{ matrix.compiler.cxx }}"
           SAFE_NAME=$("${GITHUB_WORKSPACE}/.github/scripts/sanitize-token.sh" "${NAME}")
           {
             echo "CI_JUNIT_ARTIFACT=${SAFE_NAME}"
@@ -346,7 +335,7 @@ jobs:
             "${MATRIX_NAME}" "C++ GTest dashboard JSON"
 
       - name: Upload dragonfly binary for cgroup test
-        if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Release' && matrix.sanitizers == 'NoSanitizers' && matrix.compiler.cxx == 'g++' && github.event_name != 'push'
+        if: matrix.container == 'ubuntu-dev:24' && matrix.build-type == 'Release' && matrix.compiler.cxx == 'g++' && github.event_name != 'push'
         uses: actions/upload-artifact@v7
         with:
           name: dragonfly-binary
@@ -460,7 +449,8 @@ jobs:
 
     container:
       image: ghcr.io/romange/ubuntu-dev:24
-      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      # NET_ADMIN lets the limit-loopback-mtu action lower the loopback MTU.
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0" --cap-add=NET_ADMIN
       volumes:
         - /var/crash:/var/crash
         - /:/hostroot

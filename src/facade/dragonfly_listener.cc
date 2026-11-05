@@ -48,24 +48,6 @@ ABSL_FLAG(uint32_t, tcp_user_timeout, 0,
 
 ABSL_DECLARE_FLAG(bool, primary_port_http_enabled);
 
-#if 0
-enum TlsClientAuth {
-  CL_AUTH_NO = 0,
-  CL_AUTH_YES = 1,
-  CL_AUTH_OPTIONAL = 2,
-};
-
-facade::ConfigEnum tls_auth_clients_enum[] = {
-    {"no", CL_AUTH_NO},
-    {"yes", CL_AUTH_YES},
-    {"optional", CL_AUTH_OPTIONAL},
-};
-
-static int tls_auth_clients_opt = CL_AUTH_YES;
-
-CONFIG_enum(tls_auth_clients, "yes", "", tls_auth_clients_enum, tls_auth_clients_opt);
-#endif
-
 namespace facade {
 
 // See dragonfly_listener.h

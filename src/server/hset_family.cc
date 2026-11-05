@@ -210,7 +210,7 @@ void DeleteHw(HMapWrap& hw, const OpArgs& op_args, std::string_view key) {
   auto& db_slice = op_args.GetDbSlice();
   if (auto del_it = db_slice.FindMutable(op_args.db_cntx, key, OBJ_HASH); del_it) {
     del_it->post_updater.Run();
-    db_slice.Del(op_args.db_cntx, del_it->it);
+    db_slice.DelAtomic(op_args.db_cntx, del_it->it.GetInnerIt());
     if (op_args.shard->journal()) {
       RecordJournal(op_args, "DEL"sv, {key});
     }
@@ -1623,13 +1623,12 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HGETALL", CO::READONLY, 2, 1, 1}.HFUNC(HGetAll)
             << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(HMGet)
             << CI{"HMSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
-            << CI{"HINCRBY", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)
-            << CI{"HINCRBYFLOAT", CO::JOURNALED | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(
-                   HIncrByFloat)
+            << CI{"HINCRBY", CO::RW | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)
+            << CI{"HINCRBYFLOAT", CO::RW | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrByFloat)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
             << CI{"HEXPIRE", kExpiryOpts, -5, 1, 1}.HFUNC(HExpire)
             << CI{"HPEXPIRETIME", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HPExpireTime)
-            << CI{"HGETEX", kExpiryOpts, -4, 1, 1}.HFUNC(HGetEx)
+            << CI{"HGETEX", kExpiryOpts | CO::RW, -4, 1, 1}.HFUNC(HGetEx)
             << CI{"HTTL", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HTtl)
             << CI{"HRANDFIELD", CO::READONLY, -2, 1, 1}.HFUNC(HRandField)
             << CI{"HSCAN", CO::READONLY, -3, 1, 1}.HFUNC(HScan)

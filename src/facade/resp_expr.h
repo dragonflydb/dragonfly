@@ -71,8 +71,6 @@ inline std::string_view ToSV(RespExpr::Buffer buf) {
   return std::string_view{reinterpret_cast<const char*>(buf.data()), buf.size()};
 }
 
-void FillBackedArgs(const RespVec& src, cmn::BackedArguments* dest);
-
 }  // namespace facade
 
 namespace std {

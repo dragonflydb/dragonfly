@@ -56,7 +56,6 @@ cd build-opt && ninja dragonfly
 
 | Option               | Description                                                                                                                                                                                                                              |
 | ---------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| WITH_AWS             | Include AWS client. Required for cloud snapshots                                                                                                                                                                                         |
 | WITH_GCP | Include GCP client. Required for cloud snapshots |
 | WITH_GPERF | Include gperf tracing profiler |
 | WITH_TIERING | Include tiered storage module |
@@ -69,7 +68,7 @@ cd build-opt && ninja dragonfly
 Minimal debug build:
 
 ```bash
-./helio/blaze.sh -DWITH_GPERF=OFF -DWITH_AWS=OFF -DWITH_GCP=OFF -DWITH_TIERING=OFF -DWITH_SEARCH=OFF -DWITH_COLLECTION_CMDS=OFF -DWITH_EXTENSION_CMDS=OFF
+./helio/blaze.sh -DWITH_GPERF=OFF -DWITH_GCP=OFF -DWITH_TIERING=OFF -DWITH_SEARCH=OFF -DWITH_COLLECTION_CMDS=OFF -DWITH_EXTENSION_CMDS=OFF
 ```
 
 ### ccache

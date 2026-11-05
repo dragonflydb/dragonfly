@@ -110,10 +110,6 @@ size_t ListpackWrap::size() const {
   return lpLength(lp_) / 2;
 }
 
-size_t ListpackWrap::DataBytes() const {
-  return lpBytes(lp_);
-}
-
 ListpackWrap::Iterator ListpackWrap::begin() const {
   return Iterator{lp_, lpFirst(lp_), intbuf_};
 }

@@ -17,8 +17,32 @@ using namespace std;
 
 ABSL_FLAG(string, shard_round_robin_prefix, "", "Deprecated -- will be removed");
 
+ABSL_FLAG(bool, shard_sidekiq_queues, false,
+          "If true, Sidekiq queues (<prefix>queue:<q>) and Sidekiq Pro super_fetch private queues "
+          "(<prefix>queue:sq|<identity>|<q>) are sharded by the queue name <q> only, so a queue "
+          "and its private queues share a shard. Ignored with "
+          "--experimental_cluster_shard_by_slot.");
+
 namespace dfly {
 namespace {
+
+thread_local bool shard_sidekiq_queues = false;
+
+// Sidekiq Pro super_fetch hardcodes private queue names as "queue:sq|<identity>|<q>" (since 2017).
+// Returns <q> for "<prefix>queue:<q>" and "<prefix>queue:sq|<identity>|<q>", empty otherwise.
+string_view SidekiqQueueName(string_view key) {
+  constexpr string_view kQueue = "queue:";
+
+  size_t pos = key.rfind(kQueue);
+  if (pos == string_view::npos)
+    return {};
+
+  string_view q = key.substr(pos + kQueue.size());
+  if (absl::StartsWith(q, "sq|"))
+    q = q.substr(q.rfind('|') + 1);
+  return q;
+}
+
 // RoundRobinSharder implements a way to distribute keys that begin with some prefix.
 // Round-robin is disabled by default. It is not a general use-case optimization, but instead only
 // reasonable when there are a few highly contended keys, which we'd like to spread between the
@@ -112,6 +136,13 @@ ShardId Shard(string_view v, ShardId shard_num) {
     v = LockTagOptions::instance().Tag(v);
   }
 
+  // Map the lock tag, not the key, so keys sharing a lock tag stay on the same shard.
+  if (shard_sidekiq_queues) {
+    if (string_view q = SidekiqQueueName(v); !q.empty()) {
+      v = q;
+    }
+  }
+
   XXH64_hash_t hash = XXH64(v.data(), v.size(), 120577240643ULL);
 
   if (RoundRobinSharder::IsEnabled()) {
@@ -126,6 +157,7 @@ ShardId Shard(string_view v, ShardId shard_num) {
 
 namespace sharding {
 void InitThreadLocals(uint32_t shard_set_size) {
+  shard_sidekiq_queues = absl::GetFlag(FLAGS_shard_sidekiq_queues);
   RoundRobinSharder::Init(shard_set_size);
 }
 }  // namespace sharding

@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <ranges>
 
 #include "base/flags.h"
 
@@ -46,6 +47,11 @@ bool IsAllAscii(string_view sv) {
 
 string ToLower(string_view word) {
   return IsAllAscii(word) ? absl::AsciiStrToLower(word) : una::cases::to_lowercase_utf8(word);
+}
+
+// Synonym group tokens carry a leading space (Synonyms::GetGroupTokens); no real word does.
+bool IsGroupSentinel(string_view token) {
+  return !token.empty() && token.front() == ' ';
 }
 
 constexpr std::array<bool, 256> MakeSepTable() {
@@ -148,8 +154,8 @@ void TokenizeWords(std::string_view text, const TextIndex::StopWords& stopwords,
       return;
     uint32_t pos = ++(*pos_counter);
     if (synonyms) {
-      if (auto group_id = synonyms->GetGroupToken(word_lc); group_id)
-        emit(*group_id, pos);
+      for (const std::string& group_token : synonyms->GetGroupTokens(word_lc))
+        emit(group_token, pos);
     }
     if (stemmer) {
       std::string stem = stemmer->Stem(word_lc);
@@ -175,8 +181,8 @@ void NormalizeTags(string_view taglist, bool case_sensitive, char separator,
 }
 
 // Iterate over all suffixes of all words
-void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
-                        absl::FunctionRef<void(std::string_view)> cb) {
+template <typename Words>
+void IterateAllSuffixes(Words&& words, absl::FunctionRef<void(std::string_view)> cb) {
   for (string_view word : words) {
     for (size_t offs = 0; offs < word.length(); offs++) {
       cb(word.substr(offs));
@@ -184,19 +190,10 @@ void IterateAllSuffixes(const absl::flat_hash_set<string>& words,
   }
 }
 
-// Literal characters of `pat` up to the first unescaped `*` or `?`. Any term matching `pat` must
-// start with this, so it bounds the dictionary range that has to be scanned.
-string GlobLiteralPrefix(string_view pat) {
-  string prefix;
-  for (size_t i = 0; i < pat.size(); ++i) {
-    char c = pat[i];
-    if (c == '*' || c == '?')
-      break;
-    if (c == '\\' && i + 1 < pat.size())
-      c = pat[++i];
-    prefix.push_back(c);
-  }
-  return prefix;
+// Tokens that go into the suffix trie: group tokens are internal and stay out of affix queries.
+auto TrieKeys(const absl::flat_hash_map<string, TermInfo>& tokens) {
+  return tokens | std::views::keys |
+         std::views::filter([](string_view token) { return !IsGroupSentinel(token); });
 }
 
 // Longest run of literal characters in `pat` (bounded by unescaped `*`/`?`), with `\` escapes
@@ -222,6 +219,8 @@ string GlobLongestLiteralSegment(string_view pat) {
   flush();
   return best;
 }
+
+}  // namespace
 
 // Matches `text` against glob `pat`: `*` = any run (incl. empty), `?` = exactly one character,
 // `\` escapes the next character to a literal. Two-pointer scan with backtracking to the last `*`.
@@ -262,6 +261,23 @@ bool GlobMatch(string_view text, string_view pat) {
     ++p;
   return p == pat.size();
 }
+
+// Literal characters of `pat` up to the first unescaped `*` or `?`. Any term matching `pat` must
+// start with this, so it bounds the dictionary range that has to be scanned.
+string GlobLiteralPrefix(string_view pat) {
+  string prefix;
+  for (size_t i = 0; i < pat.size(); ++i) {
+    char c = pat[i];
+    if (c == '*' || c == '?')
+      break;
+    if (c == '\\' && i + 1 < pat.size())
+      c = pat[++i];
+    prefix.push_back(c);
+  }
+  return prefix;
+}
+
+namespace {
 
 // Haversine with earth radius in meters. Used to calculate distance.
 boost::geometry::strategy::distance::haversine haversine_(6372797.560856);
@@ -499,7 +515,8 @@ void BaseStringIndex<C>::MatchPrefix(std::string_view prefix,
   // TODO(vlad): Use right iterator to avoid string comparison?
   for (auto it = entries_.lower_bound(prefix);
        it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
-    cb(&(*it).second);
+    if (!IsGroupSentinel((*it).first))
+      cb(&(*it).second);
   }
 }
 
@@ -518,7 +535,7 @@ void BaseStringIndex<C>::MatchSuffix(std::string_view suffix,
 
   // Otherwise, iterate over all entries and look for the suffix
   for (const auto& entry : entries_) {
-    if (entry.first.ends_with(suffix))
+    if (!IsGroupSentinel(entry.first) && entry.first.ends_with(suffix))
       cb(&entry.second);
   }
 }
@@ -539,7 +556,7 @@ void BaseStringIndex<C>::MatchInfix(std::string_view infix,
 
   // Otherwise, iterate over all entries and check if it contains the entry
   for (const auto& entry : entries_) {
-    if (entry.first.find(infix) != string::npos)
+    if (!IsGroupSentinel(entry.first) && entry.first.find(infix) != string::npos)
       cb(&entry.second);
   }
 }
@@ -553,7 +570,8 @@ void BaseStringIndex<C>::MatchPrefixWithTerm(
 
   for (auto it = entries_.lower_bound(prefix);
        it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
-    cb((*it).first, &(*it).second);
+    if (!IsGroupSentinel((*it).first))
+      cb((*it).first, &(*it).second);
   }
 }
 
@@ -572,7 +590,7 @@ void BaseStringIndex<C>::MatchSuffixWithTerm(
   }
 
   for (const auto& entry : entries_) {
-    if (entry.first.ends_with(suffix))
+    if (!IsGroupSentinel(entry.first) && entry.first.ends_with(suffix))
       cb(entry.first, &entry.second);
   }
 }
@@ -593,7 +611,7 @@ void BaseStringIndex<C>::MatchInfixWithTerm(
   }
 
   for (const auto& entry : entries_) {
-    if (entry.first.find(infix) != string::npos)
+    if (!IsGroupSentinel(entry.first) && entry.first.find(infix) != string::npos)
       cb(entry.first, &entry.second);
   }
 }
@@ -620,7 +638,7 @@ void BaseStringIndex<C>::MatchWildcardWithTerm(
   string prefix = GlobLiteralPrefix(pattern);
   for (auto it = entries_.lower_bound(prefix);
        it != entries_.end() && (*it).first.starts_with(prefix); ++it) {
-    if (GlobMatch((*it).first, pattern))
+    if (!IsGroupSentinel((*it).first) && GlobMatch((*it).first, pattern))
       cb((*it).first, &(*it).second);
   }
 }
@@ -666,10 +684,7 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
         ->Insert(id, info.freq, absl::MakeConstSpan(info.positions.data(), info.positions.size()));
 
   if (suffix_trie_) {
-    absl::flat_hash_set<std::string> token_keys;
-    for (const auto& [token, _] : tokens)
-      token_keys.insert(token);
-    IterateAllSuffixes(token_keys,
+    IterateAllSuffixes(TrieKeys(tokens),
                        [&](string_view str) { GetOrCreate(&*suffix_trie_, str)->Insert(id); });
   }
 
@@ -699,10 +714,7 @@ void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_vi
     Remove(&entries_, id, token);
 
   if (suffix_trie_) {
-    absl::flat_hash_set<std::string> token_keys;
-    for (const auto& [token, _] : tokens)
-      token_keys.insert(token);
-    IterateAllSuffixes(token_keys, [&](string_view str) { Remove(&*suffix_trie_, id, str); });
+    IterateAllSuffixes(TrieKeys(tokens), [&](string_view str) { Remove(&*suffix_trie_, id, str); });
   }
 }
 
@@ -754,11 +766,10 @@ StringOrView BaseStringIndex<C>::NormalizeQueryWord(std::string_view query) cons
 
 template <typename C>
 StringOrView BaseStringIndex<C>::NormalizeForExactQuery(std::string_view query) const {
-  if (case_sensitive_)
+  if (case_sensitive_ || IsGroupSentinel(query))
     return StringOrView::FromView(query);
   std::string lc = ToLower(query);
-  // Synonym group tokens are sentinels prefixed with a space by GetGroupToken; never stem them.
-  if (stemmer_ && !lc.empty() && lc.front() != ' ')
+  if (stemmer_)
     lc = stemmer_->Stem(lc);
   return StringOrView::FromString(std::move(lc));
 }
@@ -841,12 +852,19 @@ void TextIndex::Tokenize(std::string_view value, uint32_t* pos_counter,
 std::vector<std::string> TextIndex::TokenizePhraseQuery(std::string_view phrase) const {
   std::vector<std::string> out;
   const StopWords* sw = stopwords_;
+  bool group_token = false;
   SplitWithEscapes(phrase, [&](std::string_view word) {
     std::string lc = una::cases::to_lowercase_utf8(word);
+    group_token |= IsGroupSentinel(lc);
     if (sw && sw->contains(lc))
       return;
     out.push_back(std::move(lc));
   });
+  // A word with an escaped leading space is never indexed (see TokenizeWords, which checks it
+  // before the stopwords) but would hit a synonym group token: such a phrase cannot match and
+  // registers no terms.
+  if (group_token)
+    out.clear();
   return out;
 }
 

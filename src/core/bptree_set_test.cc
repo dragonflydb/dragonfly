@@ -300,55 +300,6 @@ TEST_F(BPTreeSetTest, HalfRanges) {
   ASSERT_TRUE(path.Empty());
 }
 
-#if 0
-TEST_F(BPTreeSetTest, MemoryUsage) {
-  zskiplist* zsl = zslCreate();
-  std::vector<sds> sds_vec;
-
-  constexpr size_t kLength = 3000;
-  for (size_t i = 0; i < kLength; ++i) {
-    sds_vec.push_back(sdsnew("f"));
-  }
-  size_t sz_before = zmalloc_used_memory_tl;
-  LOG(INFO) << "zskiplist before: " << sz_before << " bytes";
-
-  for (size_t i = 0; i < sds_vec.size(); ++i) {
-    zslInsert(zsl, i, sds_vec[i]);
-  }
-  LOG(INFO) << "zskiplist takes: " << double(zmalloc_used_memory_tl - sz_before) / sds_vec.size()
-            << " bytes per entry";
-  zslFree(zsl);
-
-  sds_vec.clear();
-  for (size_t i = 0; i < kLength; ++i) {
-    sds_vec.push_back(sdsnew("f"));
-  }
-
-  MiMemoryResource mi_alloc(mi_heap_get_backing());
-  using AllocType = PMR_NS::polymorphic_allocator<std::pair<double, sds>>;
-  AllocType alloc(&mi_alloc);
-  absl::btree_set<pair<double, sds>, std::greater<pair<double, sds>>, AllocType> btree(alloc);
-
-  ASSERT_EQ(0, mi_alloc.used());
-  for (size_t i = 0; i < sds_vec.size(); ++i) {
-    btree.emplace(i, sds_vec[i]);
-  }
-  ASSERT_GT(mi_alloc.used(), 0u);
-  LOG(INFO) << "abseil btree: " << double(mi_alloc.used()) / sds_vec.size() << " bytes per entry";
-  btree.clear();
-
-  ASSERT_EQ(0, mi_alloc.used());
-  SDSTree df_tree(&mi_alloc);
-  for (size_t i = 0; i < sds_vec.size(); ++i) {
-    btree.emplace(i, sds_vec[i]);
-    VLOG(1) << "df btree: " << i << " " << double(mi_alloc.used()) / btree.size()
-            << " bytes per entry";
-  }
-  ASSERT_GT(mi_alloc.used(), 0u);
-  LOG(INFO) << "df btree: " << double(mi_alloc.used()) / sds_vec.size() << " bytes per entry";
-}
-#endif
-
 TEST_F(BPTreeSetTest, InsertSDS) {
   vector<ZsetPolicy::KeyT> vals;
   for (unsigned i = 0; i < 256; ++i) {
@@ -454,41 +405,6 @@ static void BM_FindRandomBPTree(benchmark::State& state) {
   }
 }
 BENCHMARK(BM_FindRandomBPTree)->Arg(1024)->Arg(1 << 16)->Arg(1 << 20);
-
-#if 0
-static void BM_FindRandomZSL(benchmark::State& state) {
-  zskiplist* zsl = zslCreate();
-  unsigned iters = state.range(0);
-  std::vector<ZsetPolicy::KeyT> vals = GenerateRandomPairs(iters);
-  for (unsigned i = 0; i < iters; ++i) {
-    zslInsert(zsl, vals[i].d, sdsdup(vals[i].s));
-  }
-
-  zrangespec spec;
-  spec.maxex = 0;
-  spec.minex = 0;
-
-  unsigned i = 0;
-  while (state.KeepRunningBatch(10)) {
-    for (unsigned j = 0; j < 10; ++j) {
-      spec.min = vals[i].d;
-      spec.max = spec.min;
-      benchmark::DoNotOptimize(zslFirstInRange(zsl, &spec));
-
-      ++i;
-      if (vals.size() == i)
-        i = 0;
-    }
-  }
-
-  zslFree(zsl);
-
-  for (const auto v : vals) {
-    sdsfree(v.s);
-  }
-}
-BENCHMARK(BM_FindRandomZSL)->Arg(1024)->Arg(1 << 16)->Arg(1 << 20);
-#endif
 
 void RegisterBPTreeBench() {
   auto* tlh = mi_heap_get_backing();

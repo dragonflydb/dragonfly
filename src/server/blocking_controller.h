@@ -16,6 +16,13 @@ namespace dfly {
 // Used for tracking keys of blocking transactions and properly notifying them.
 // First, keys are marked as watched and associated with an owner transaction. A mutating
 // transaction marks them as touched, and once it concludes, the watching transactions are notified.
+//
+// Each watched key has a FIFO queue of waiting transactions. Notifying wakes the first waiter for
+// which the key is ready and reserves the key for it: the queue turns ACTIVE with the woken
+// transaction at its head, and no other waiter on the key is woken until that transaction
+// concludes. Then the queue is SUSPENDED again and the key is re-checked for the next waiter.
+// The shard also pauses its transaction queue while a woken transaction is pending, so other
+// transactions cannot take the data it was woken for before it runs.
 class BlockingController {
  public:
   explicit BlockingController(EngineShard* owner, Namespace* ns);
@@ -48,8 +55,12 @@ class BlockingController {
   // Mark all watched keys in a specific db as awakened.
   void AwakenWatched(DbIndex db_index);
 
-  // Notify transactions of awakened keys
+  // Notify transactions of awakened keys. May suspend, but not while it iterates the watch tables.
   void NotifyPending();
+
+  // Whether key's watch queue is reserved for tx, i.e. tx was woken while heading it and has not
+  // concluded yet.
+  bool IsReserved(DbIndex db_index, std::string_view key, const Transaction* tx) const;
 
   // Used in tests and debugging functions.
   size_t NumWatched(DbIndex db_indx) const;
@@ -58,6 +69,10 @@ class BlockingController {
  private:
   struct WatchQueue;
   struct DbWatchTable;
+
+  // Runs the readiness checks of the awakened keys. Must not suspend: called with journal flushing
+  // disabled, in an atomic section.
+  void NotifyPendingAtomic();
 
   void NotifyWatchQueue(std::string_view key, WatchQueue* wqm, const DbContext& context);
 

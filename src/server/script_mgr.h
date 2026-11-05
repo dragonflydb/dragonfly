@@ -90,7 +90,6 @@ class ScriptMgr {
  private:
   struct InternalScriptData : public ScriptParams {
     std::unique_ptr<char[]> body{};
-    std::unique_ptr<char[]> orig_body{};
   };
 
   ScriptParams default_params_;

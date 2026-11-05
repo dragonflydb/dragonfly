@@ -8,6 +8,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/strings/escaping.h>
 #include <absl/strings/numbers.h>
+#include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <benchmark/benchmark.h>
 #include <gmock/gmock.h>
@@ -15,6 +16,7 @@
 #include <mimalloc.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory_resource>
 #include <random>
@@ -24,6 +26,7 @@
 #include "base/logging.h"
 #include "core/search/base.h"
 #include "core/search/hnsw_index.h"
+#include "core/search/index_result.h"
 #include "core/search/indices.h"
 #include "core/search/query_driver.h"
 #include "core/search/scoring.h"
@@ -206,6 +209,7 @@ class SearchTest : public ::testing::Test {
     }
 
     auto matched = search_algo.Search(&index);
+    EXPECT_FALSE(matched.profile);
 
     if (!is_sorted(matched.ids.begin(), matched.ids.end()))
       LOG(FATAL) << "Search result is not sorted";
@@ -257,6 +261,13 @@ TEST_F(SearchTest, MatchNotTerm) {
   ExpectAll("faa", "definitielyright");
   ExpectNone("foo", "foo bar", "more foo bar");
 
+  EXPECT_TRUE(Check()) << GetError();
+}
+
+TEST_F(SearchTest, MatchDeepNegation) {
+  PrepareQuery(string(16384, '-') + "hello");
+  ExpectAll("hello");
+  ExpectNone("world");
   EXPECT_TRUE(Check()) << GetError();
 }
 
@@ -605,6 +616,82 @@ TEST_F(SearchTest, StopWordsDroppedFromQuery) {
   // A non-stopword term still constrains the result as usual.
   algo.Init("found matched", &params);
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre());
+}
+
+// A term may belong to several synonym groups. Its group tokens depend only on the current groups
+// (sorted; terms are stored and looked up in lowercase, group ids keep their case); the document
+// is indexed under every token, reachable through any term of any of its groups, and leaves no
+// posting behind after removal even when the group map was re-laid out between Add and Remove.
+TEST_F(SearchTest, MultiGroupTermIndexedUnderAllGroups) {
+  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
+  Synonyms syn;
+  syn.UpdateGroup("g2", {"shared", "two"});
+  syn.UpdateGroup("G1", {"SHARED", "one"});
+  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" G1", " g2"));
+  EXPECT_THAT(syn.GetGroupTokens("one"), testing::ElementsAre(" G1"));
+  EXPECT_THAT(syn.GetGroupTokens("none"), testing::IsEmpty());
+
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), &syn};
+  MockedDocument doc{"shared"};
+  ASSERT_TRUE(index.Add(0, doc));
+
+  auto* text = dynamic_cast<TextIndex*>(index.GetIndex("field"));
+  ASSERT_NE(text, nullptr);
+  for (string_view token : {" G1", " g2", "shared"}) {
+    const auto* c = text->Matching(token, /*strip_whitespace=*/false);
+    ASSERT_NE(c, nullptr) << token;
+    EXPECT_EQ(c->Size(), 1u) << token;
+  }
+  for (string_view query : {"one", "two", "shared"}) {
+    SearchAlgorithm algo;
+    QueryParams params;
+    ASSERT_TRUE(algo.Init(query, &params)) << query;
+    EXPECT_EQ(algo.Search(&index).ids, vector<DocId>{0}) << query;
+  }
+
+  // Re-lay out the group map between Add and Remove; ids differing only by case stay distinct.
+  for (int i = 0; i < 300; i++)
+    syn.UpdateGroup(absl::StrCat("extra", i), {absl::StrCat("term", i)});
+  syn.UpdateGroup("g1", {"shared"});
+  EXPECT_THAT(syn.GetGroupTokens("shared"), testing::ElementsAre(" G1", " g1", " g2"));
+  index.Remove(0, doc);
+  for (string_view token : {" G1", " g2", "shared"})
+    EXPECT_EQ(text->Matching(token, /*strip_whitespace=*/false), nullptr) << token;
+  EXPECT_TRUE(index.GetAllDocs().empty());
+}
+
+// Group tokens are internal: ids that differ only by case stay distinct groups, and the suffix
+// trie never stores group tokens.
+TEST_F(SearchTest, SynonymGroupTokensStayInternal) {
+  auto schema = MakeSimpleSchema(
+      {{"field", SchemaField::TEXT, SchemaField::TextParams{.with_suffixtrie = true}}});
+  Synonyms syn;
+  syn.UpdateGroup("A", {"x"});
+  syn.UpdateGroup("a", {"y"});
+  syn.UpdateGroup("syn1", {"z"});
+  FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), &syn};
+  ASSERT_TRUE(index.Add(0, MockedDocument{"x z"}));
+  ASSERT_TRUE(index.Add(1, MockedDocument{"y"}));
+
+  auto search = [&index](string_view query) {
+    SearchAlgorithm algo;
+    QueryParams params;
+    EXPECT_TRUE(algo.Init(query, &params)) << query;
+    return algo.Search(&index).ids;
+  };
+  EXPECT_EQ(search("x"), vector<DocId>{0});
+  EXPECT_EQ(search("y"), vector<DocId>{1});
+
+  auto* text = dynamic_cast<TextIndex*>(index.GetIndex("field"));
+  ASSERT_NE(text, nullptr);
+  size_t calls = 0, hits = 0;
+  text->MatchSuffix("n1", [&](const auto* c) {
+    ++calls;
+    hits += c != nullptr;
+  });
+  text->MatchInfix("yn", [&hits](const auto* c) { hits += c != nullptr; });
+  EXPECT_EQ(calls, 1u);  // answered by the suffix trie
+  EXPECT_EQ(hits, 0u);
 }
 
 // A glued word under a field binds all of its atoms to that field, in any order and position.
@@ -1468,6 +1555,24 @@ TEST(HnswRestoreInvariant, MissingEntrypointFailsGracefully) {
   EXPECT_FALSE(restored.RestoreFromNodes(nodes, bad_metadata));
 }
 
+struct BorrowedDoc final : public DocumentAccessor {
+  const char* data;
+  explicit BorrowedDoc(const char* d) : data(d) {
+  }
+  std::optional<VectorInfo> GetVector(string_view, size_t, VectorDataType) const override {
+    return BorrowedFtVector{data};
+  }
+  std::optional<StringList> GetStrings(string_view) const override {
+    return std::nullopt;
+  }
+  std::optional<StringList> GetTags(string_view) const override {
+    return std::nullopt;
+  }
+  std::optional<NumsList> GetNumbers(string_view) const override {
+    return std::nullopt;
+  }
+};
+
 // Regression: in borrowed mode (copy_vector=false), Remove marks the node deleted
 // but hnswlib still traverses it and dereferences its data pointer.  If the external
 // data is freed (as happens after DEL), the pointer dangles.  The fix in DoRemove
@@ -1488,24 +1593,6 @@ TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
   params.hnsw_m = 16;
   params.hnsw_ef_construction = 200;
   HnswVectorIndex index(params, /*copy_vector=*/false);
-
-  struct BorrowedDoc : public DocumentAccessor {
-    const char* data;
-    explicit BorrowedDoc(const char* d) : data(d) {
-    }
-    std::optional<VectorInfo> GetVector(string_view, size_t, VectorDataType) const override {
-      return BorrowedFtVector{data};
-    }
-    std::optional<StringList> GetStrings(string_view) const override {
-      return std::nullopt;
-    }
-    std::optional<StringList> GetTags(string_view) const override {
-      return std::nullopt;
-    }
-    std::optional<NumsList> GetNumbers(string_view) const override {
-      return std::nullopt;
-    }
-  };
 
   std::mt19937 rng(42);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
@@ -1541,6 +1628,48 @@ TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
   vector<float> query(kDim, 0.0f);
   auto results = index.Knn(query.data(), 5, std::nullopt);
   EXPECT_GT(results.size(), 0u);
+}
+
+// A retired index reads no vectors, so the borrowed ones may be freed while searches still hold
+// the index.
+TEST(HnswBorrowedMode, RetiredIndexReadsNoVectors) {
+  constexpr size_t kDim = 256;
+  constexpr size_t kN = 20;
+
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kN * 2;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+  HnswVectorIndex index(params, /*copy_vector=*/false);
+
+  std::vector<std::unique_ptr<float[]>> bufs;
+  std::vector<GlobalDocId> ids;
+  for (size_t i = 0; i < kN; i++) {
+    bufs.push_back(std::make_unique<float[]>(kDim));
+    bufs.back()[0] = static_cast<float>(i);
+    index.Add(i, BorrowedDoc{reinterpret_cast<const char*>(bufs.back().get())}, "vec");
+    ids.push_back(i);
+  }
+  vector<float> query(kDim, 0.0f);
+  ASSERT_EQ(index.Knn(query.data(), 5, std::nullopt).size(), 5u);
+
+  index.Retire();
+  bufs.clear();
+
+  EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt), testing::IsEmpty());
+  EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt, ids), testing::IsEmpty());
+  EXPECT_THAT(index.SubsetKnn(query.data(), 5, ids), testing::IsEmpty());
+  EXPECT_THAT(index.RangeQuery(query.data(), 1e9, std::nullopt), testing::IsEmpty());
+
+  auto extra = std::make_unique<float[]>(kDim);
+  index.Add(kN, BorrowedDoc{reinterpret_cast<const char*>(extra.get())}, "vec");
+  EXPECT_EQ(index.GetNodeCount(), kN);
 }
 
 INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,
@@ -2356,7 +2485,7 @@ TEST_F(SearchTest, InvalidVectorParameter) {
   schema.fields["v"] = search::SchemaField{
       search::SchemaField::VECTOR,
       0,   // flags
-      "v"  // short_name
+      "v"  // identifier
   };
 
   search::SchemaField::VectorParams params;
@@ -2387,6 +2516,8 @@ TEST_F(SearchTest, InvalidVectorParameter) {
 
 class SortIndexTest : public testing::Test {
  protected:
+  static constexpr auto kNoKey = [](DocId) { return string_view{}; };
+
   void SetUp() override {
     InitTLSearchMR(PMR_NS::get_default_resource());
   }
@@ -2410,11 +2541,11 @@ TEST_F(SortIndexTest, StringSort) {
 
   const auto index = indices.GetSortIndex(field);
 
-  index->Sort(&ids, ids.size(), desc);
+  index->Sort(&ids, ids.size(), desc, kNoKey);
   std::vector<DocId> expected{1, 2, 0};
   EXPECT_EQ(ids, expected);
 
-  index->Sort(&ids, ids.size(), !desc);
+  index->Sort(&ids, ids.size(), !desc, kNoKey);
   expected = {0, 2, 1};
   EXPECT_EQ(ids, expected);
 
@@ -2437,17 +2568,43 @@ TEST_F(SortIndexTest, NumSort) {
   constexpr bool desc = false;
 
   auto index = indices.GetSortIndex(field);
-  index->Sort(&ids, ids.size(), desc);
+  index->Sort(&ids, ids.size(), desc, kNoKey);
   std::vector<DocId> expected{2, 1, 0};
   EXPECT_EQ(ids, expected);
 
-  index->Sort(&ids, ids.size(), !desc);
+  index->Sort(&ids, ids.size(), !desc, kNoKey);
   expected = {0, 1, 2};
   EXPECT_EQ(ids, expected);
 
   auto lookup = index->Lookup(1);
   EXPECT_TRUE(std::holds_alternative<double>(lookup));
   EXPECT_EQ(std::get<double>(lookup), 999);
+}
+
+// Docs without a value rank last in both directions and report no value; equal values are ordered
+// by document key in the sort direction.
+TEST_F(SortIndexTest, MissingLastAndKeyTieBreak) {
+  constexpr auto field = "cost";
+  const auto schema = MakeSimpleSchema({{field, SchemaField::NUMERIC}}, true);
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{field, "5"}}});
+  indices.Add(1, MockedDocument{Map{{field, "5"}}});
+  indices.Add(2, MockedDocument{Map{}});  // no value
+  indices.Add(3, MockedDocument{Map{{field, "1"}}});
+  const vector<string> keys{"k:b", "k:a", "k:c", "k:d"};
+  auto key = [&](DocId id) { return string_view{keys[id]}; };
+
+  auto index = indices.GetSortIndex(field);
+  std::vector<DocId> ids{0, 1, 2, 3};
+  auto values = index->Sort(&ids, ids.size(), false, key);
+  EXPECT_EQ(ids, (vector<DocId>{3, 1, 0, 2}));
+  EXPECT_EQ(get<double>(values[0]), 1);
+  EXPECT_TRUE(holds_alternative<monostate>(values[3]));
+
+  values = index->Sort(&ids, ids.size(), true, key);
+  EXPECT_EQ(ids, (vector<DocId>{0, 1, 3, 2}));
+  EXPECT_TRUE(holds_alternative<monostate>(values[3]));
 }
 
 // Enumeration for different search types
@@ -2642,6 +2799,44 @@ static std::vector<float> GenerateRandomVector(size_t dims, unsigned seed = 42) 
   }
   return vec;
 }
+
+static void BM_SearchAst(benchmark::State& state) {
+  const pair<string_view, string_view> kQueries[] = {
+      {"term", "hello"},
+      {"field", "@title:hello"},
+      {"logical", "(@title:(hello world) | prefix*) -@tag:{obsolete}"},
+      {"mixed", "@tag:{blue|green*} @score:[10 50]"},
+      {"phrase", "@title:\"hello world\""},
+      {"optional_weight", "~@title:hello=>{$weight:2} @tag:{blue}"},
+      {"union", "@title:(hello | elsewhere)"},
+  };
+  auto [name, query] = kQueries[state.range(0)];
+  auto schema = MakeSimpleSchema(
+      {{"title", SchemaField::TEXT}, {"tag", SchemaField::TAG}, {"score", SchemaField::NUMERIC}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  for (DocId i = 0; i < state.range(1); ++i) {
+    indices.Add(i, MockedDocument{Map{{"title", i % 2 ? "hello world prefix" : "prefix elsewhere"},
+                                      {"tag", i % 2 ? "blue" : "green"},
+                                      {"score", to_string(i % 100)}}});
+  }
+  indices.FinalizeInitialization();
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  CHECK(algo.Init(query, &params));
+  for (auto _ : state) {
+    if (state.range(2))
+      CHECK(algo.Init(query, &params));
+    auto result = algo.Search(&indices);
+    CHECK(result.error.empty());
+    benchmark::DoNotOptimize(result);
+  }
+  state.SetLabel(string{name});
+}
+BENCHMARK(BM_SearchAst)
+    ->ArgsProduct({{0, 1, 2, 3, 4, 5, 6}, {100, 1000}, {0, 1}})
+    ->ArgNames({"query", "docs", "parse"})
+    ->Unit(benchmark::kMicrosecond);
 
 static void BM_SearchDocIds(benchmark::State& state) {
   auto schema = MakeSimpleSchema({{"score", SchemaField::NUMERIC}, {"tag", SchemaField::TAG}});
@@ -3358,6 +3553,7 @@ TEST_F(ScoringTest, SearchWithScorer) {
   // doc1 and doc2 should match, doc3 should not
   ASSERT_EQ(result.ids.size(), 2u);
   EXPECT_EQ(result.text_scores.size(), 2u);
+  EXPECT_FALSE(result.profile);
 
   // Both scores should be positive
   for (auto& [doc, score] : result.text_scores) {
@@ -3373,6 +3569,15 @@ TEST_F(ScoringTest, SearchWithScorer) {
       score1 = score;
   }
   EXPECT_GT(score0, score1) << "Doc with higher TF should score higher";
+
+  algo.EnableProfiling();
+  auto profiled = algo.Search(&index);
+  ASSERT_TRUE(profiled.profile);
+  EXPECT_FALSE(profiled.profile->events.empty());
+  EXPECT_EQ(profiled.ids, result.ids);
+  EXPECT_EQ(profiled.total, result.total);
+  EXPECT_EQ(profiled.text_scores, result.text_scores);
+  EXPECT_EQ(profiled.max_text_score, result.max_text_score);
 }
 
 TEST_F(ScoringTest, SearchPrefixWithScorer) {
@@ -3455,6 +3660,14 @@ TEST_F(ScoringTest, IndexStats) {
   EXPECT_EQ(ti->GetFieldDocLength(1), 1u);
   EXPECT_EQ(ti->GetFieldDocLength(2), 2u);
   EXPECT_DOUBLE_EQ(ti->GetFieldAvgDocLen(), 2.0);  // (3+1+2)/3
+
+  QueryParams params;
+  SearchAlgorithm algo;
+  ASSERT_TRUE(algo.Init("@field:(hello world)", &params));
+  auto stats = algo.CollectScoringStats(&index);
+  EXPECT_EQ(stats.num_docs, 3u);
+  EXPECT_EQ(stats.term_stats.at("field").at("hello"), 2u);
+  EXPECT_EQ(stats.term_stats.at("field").at("world"), 1u);
 }
 
 TEST_F(ScoringTest, IndexStatsAfterRemove) {
@@ -3679,10 +3892,15 @@ TEST_F(SearchTest, MatchOptionalSwallowsInnerErrors) {
 
   SearchAlgorithm algo;
   QueryParams params;
-  ASSERT_TRUE(algo.Init("~@invalid_field:hello", &params));
-  auto result = algo.Search(&index);
-  EXPECT_TRUE(result.error.empty()) << "~ should swallow inner errors, got: " << result.error;
-  EXPECT_EQ(result.ids.size(), 1u) << "~ should still return all docs";
+  for (auto query : {"~@invalid_field:hello", "~(@invalid_field:hello @text:anything)",
+                     "~(~@invalid_field:hello | @text:anything)"}) {
+    ASSERT_TRUE(algo.Init(query, &params)) << query;
+    auto result = algo.Search(&index);
+    EXPECT_TRUE(result.error.empty()) << query << ": " << result.error;
+    EXPECT_EQ(result.ids.size(), 1u) << query;
+  }
+  ASSERT_TRUE(algo.Init("@invalid_field:hello ~@text:anything", &params));
+  EXPECT_FALSE(algo.Search(&index).error.empty());
 }
 
 TEST_F(SearchTest, MatchEscapedTermLiteral) {
@@ -4142,6 +4360,67 @@ TEST_F(PhraseTest, NoOffsetsErrorIsExplicit) {
   ASSERT_TRUE(algo.Init("\"machine learning\"", &params));
   auto result = algo.Search(&indices);
   EXPECT_THAT(result.error, testing::HasSubstr("phrase queries require offsets"));
+}
+
+// The same document ids stored in every container type that IndexResult can borrow.
+struct IdContainers {
+  explicit IdContainers(const std::vector<DocId>& ids) : vec{ids} {
+    for (DocId id : ids) {
+      compressed.Insert(id);
+      sorted.Insert(id);
+      tree.Add(id, id);
+    }
+  }
+
+  std::array<IndexResult, 4> Results() const {
+    return {IndexResult{&vec}, IndexResult{&compressed}, IndexResult{&sorted},
+            IndexResult{tree.GetAllDocIds()}};  // a single block, so SingleBlockRangeResult
+  }
+
+  std::vector<DocId> vec;
+  // Small blocks, so that iteration crosses block boundaries
+  BlockList<CompressedSortedSet> compressed{PMR_NS::get_default_resource(), 4};
+  BlockList<SortedVector<DocId>> sorted{PMR_NS::get_default_resource(), 4};
+  RangeTree tree{PMR_NS::get_default_resource()};
+};
+
+// MergeIndexResults with OR must match std::set_union for every pair of container types.
+TEST(IndexResultTest, MergeUnion) {
+  auto random_ids = [rnd = std::default_random_engine{}](double density) mutable {
+    std::bernoulli_distribution take{density};
+    std::vector<DocId> ids;
+    for (DocId id = 0; id < 1000; ++id) {
+      if (take(rnd))
+        ids.push_back(id);
+    }
+    return ids;
+  };
+
+  const std::vector<std::pair<std::vector<DocId>, std::vector<DocId>>> cases = {
+      {{}, {}},
+      {{}, {1, 2}},
+      {{1, 2}, {}},
+      {{1, 2, 3}, {1, 2, 3}},
+      {{1, 3, 5, 7}, {2, 3, 6, 7, 8, 9}},
+      {{4, 5, 6, 7}, {1, 2}},
+      {random_ids(0.3), random_ids(0.6)},
+  };
+
+  for (const auto& [left_ids, right_ids] : cases) {
+    std::vector<DocId> expected;
+    std::set_union(left_ids.begin(), left_ids.end(), right_ids.begin(), right_ids.end(),
+                   std::back_inserter(expected));
+
+    IdContainers left{left_ids}, right{right_ids};
+    auto left_results = left.Results(), right_results = right.Results();
+    for (size_t i = 0; i < left_results.size(); ++i) {
+      for (size_t j = 0; j < right_results.size(); ++j) {
+        EXPECT_EQ(MergeIndexResults(left_results[i], right_results[j], AstLogicalNode::OR),
+                  expected)
+            << "container types " << i << " and " << j;
+      }
+    }
+  }
 }
 
 }  // namespace search

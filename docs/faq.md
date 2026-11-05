@@ -9,18 +9,20 @@
 
 
 ## What is the license model of Dragonfly? Is it an open source?
-Dragonfly is released under [BSL 1.1](../LICENSE.md) (Business Source License).
-BSL 1.1 is considered to be "source available" license and it's not strictly open-source license.
-We believe that a [BSL 1.1](https://spdx.org/licenses/BUSL-1.1.html) license is more permissive
-than licenses like AGPL, and it will allow us to
-provide a competitive commercial service using our technology. In general terms,
-it means that Dragonfly's code is free to use and free to change as long as you do not sell services directly related to
-Dragonfly or in-memory datastores.
+Dragonfly is released under the [Dragonfly Source Available License (DSAL)](../LICENSE.md).
+DSAL is a "source available" license and it's not strictly an open-source license.
+In general terms, it means that Dragonfly's code is free to use, modify and incorporate into your own
+applications or products, as long as you do not distribute or offer it as a standalone database,
+data store, caching product or a substantially similar product or service.
+Production use is free up to an aggregate of 100 vCPUs across all your instances (including replicas),
+while non-production use is unlimited. Usage beyond that requires a commercial license.
 We followed the trend of other technological companies like Elastic, Redis, MongoDB, Cockroach labs,
 Redpanda Data to protect our rights to provide service and support for the software we are building.
 
 ## Can I use dragonfly in production?
-License wise you are free to use dragonfly in your production as long as you do not provide Dragonfly as a managed service.
+License wise you are free to use dragonfly in your production up to an aggregate of 100 vCPUs,
+as long as you do not provide Dragonfly as a standalone database, data store or caching product or service.
+See [LICENSE](../LICENSE.md) for the exact terms.
 From a code maturity point of view, Dragonfly's code is covered with unit testing and the regression tests.
 However as with any new software there are use cases that are hard to test and predict.
 We advise you to run your own particular use case on dragonfly for a few days before considering production usage.

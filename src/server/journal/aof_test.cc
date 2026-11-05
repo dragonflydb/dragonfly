@@ -5,8 +5,35 @@
 #include "server/journal/aof.h"
 
 #include <absl/base/internal/endian.h>
+#include <absl/crc/crc32c.h>
+#include <absl/flags/declare.h>
+#include <absl/flags/flag.h>
+#include <absl/flags/reflection.h>
+#include <absl/strings/str_cat.h>
+#include <absl/strings/str_join.h>
+#include <absl/time/clock.h>
+
+#include <filesystem>
+#include <fstream>
 
 #include "base/gtest.h"
+#include "util/fibers/pool.h"
+
+#ifdef __linux__
+#include "io/file_util.h"
+#include "server/engine_shard_set.h"
+#include "server/journal/aof_chain_reader.h"
+#include "server/journal/aof_manifest.h"
+#include "server/journal/aof_segment_writer.h"
+#include "server/journal/aof_streamer.h"
+#include "server/journal/journal.h"
+#include "server/journal/serializer.h"
+#include "server/test_utils.h"
+
+ABSL_DECLARE_FLAG(bool, aof);
+ABSL_DECLARE_FLAG(std::string, dir);
+ABSL_DECLARE_FLAG(bool, force_epoll);
+#endif
 
 namespace dfly {
 
@@ -70,9 +97,12 @@ TEST_F(AofTest, BlockCrc) {
   string input(8, '\0');
   absl::little_endian::Store64(input.data(), kUid);
   input += rec;
-  input += bytes.substr(0, 8);    // total_block_bytes
-  input += bytes.substr(12, 12);  // first_lsn, n_records
-  input += bytes[24];             // flags
+  // total_block_bytes
+  input += bytes.substr(0, 8);
+  // first_lsn, n_records
+  input += bytes.substr(12, 12);
+  // flags
+  input += bytes[24];
   uint32_t expected = static_cast<uint32_t>(absl::ComputeCrc32c(input));
   EXPECT_EQ(absl::little_endian::Load32(bytes.data() + 8), expected);
 
@@ -93,7 +123,8 @@ TEST_F(AofTest, SmallRecords) {
   builder_.Append("bb", 11);
   builder_.Append("ccc", 12);
   builder_.Append("dddd", 13);
-  EXPECT_TRUE(TakeSealed().empty());  // no seal per record
+  // No seal per record.
+  EXPECT_TRUE(TakeSealed().empty());
   builder_.Seal();
   blocks = TakeSealed();
   ASSERT_EQ(blocks.size(), 1u);
@@ -131,9 +162,9 @@ TEST_F(AofTest, SpanningRecord) {
   auto blocks = TakeSealed();
   ASSERT_EQ(blocks.size(), 3u);
 
-  EXPECT_EQ(blocks[0].flags, kEndsWithPartial);
-  EXPECT_EQ(blocks[1].flags, kEndsWithPartial | kStartsWithContinuation);
-  EXPECT_EQ(blocks[2].flags, kStartsWithContinuation);
+  EXPECT_EQ(blocks[0].flags, kEndsMidRecord);
+  EXPECT_EQ(blocks[1].flags, kEndsMidRecord | kStartsMidRecord);
+  EXPECT_EQ(blocks[2].flags, kStartsMidRecord);
   EXPECT_EQ(blocks[0].n_records, 1u);
   EXPECT_EQ(blocks[1].n_records, 0u);
   EXPECT_EQ(blocks[2].n_records, 1u);
@@ -148,5 +179,485 @@ TEST_F(AofTest, SealEmpty) {
   builder_.Seal();
   EXPECT_TRUE(TakeSealed().empty());
 }
+
+#ifdef __linux__
+
+class AofSegmentWriterTest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    dir_ = base::GetTestTempPath("aof");
+    filesystem::remove_all(dir_);
+    filesystem::create_directories(dir_);
+    pp_.reset(util::fb2::Pool::IOUring(16, 1));
+    pp_->Run();
+  }
+
+  void TearDown() override {
+    pp_->Stop();
+  }
+
+  string ReadSegment(uint64_t seq) {
+    // convenience
+    ifstream in(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(2, seq)), ios::binary);
+    return string(istreambuf_iterator<char>(in), {});
+  }
+
+  string dir_;
+  unique_ptr<util::ProactorPool> pp_;
+};
+
+TEST_F(AofSegmentWriterTest, WriteAndReadBack) {
+  string small(100, 's');
+  string huge(kAofBlockBytes, 'h');
+  pp_->at(0)->Await([&] {
+    AofSegmentWriter writer(dir_, 2, 4);
+    ASSERT_FALSE(writer.Open(0));
+    writer.AddRecord(small, 1);
+    // Seals the first block with huge partial.
+    writer.AddRecord(huge, 2);
+
+    // Only the open block remains.
+    writer.WaitPending(small.size());
+    EXPECT_EQ(writer.WrittenLsn(), 1u);
+
+    ASSERT_FALSE(writer.Shutdown());
+    EXPECT_EQ(writer.WrittenLsn(), 2u);
+  });
+
+  EXPECT_FALSE(
+      filesystem::exists(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(2, 0), ".tmp")));
+  string file = ReadSegment(0);
+  auto seg = DecodeAofSegmentHeader(file);
+  ASSERT_TRUE(seg);
+  EXPECT_EQ(seg->shard_id, 2u);
+  EXPECT_EQ(seg->shard_count, 4u);
+  EXPECT_EQ(seg->seq, 0u);
+
+  string_view rest = string_view(file).substr(kAofSegmentHeaderSize);
+  string payload;
+  vector<AofBlockHeader> blocks;
+  while (!rest.empty()) {
+    auto hdr = DecodeAofBlock(rest, seg->segment_uid);
+    ASSERT_TRUE(hdr);
+    blocks.push_back(*hdr);
+    payload += rest.substr(kAofBlockHeaderSize, hdr->total_block_bytes - kAofBlockHeaderSize);
+    rest.remove_prefix(hdr->total_block_bytes);
+  }
+  ASSERT_EQ(blocks.size(), 2u);
+  EXPECT_EQ(blocks[0].flags, kEndsMidRecord);
+  EXPECT_EQ(blocks[1].flags, kStartsMidRecord);
+  EXPECT_EQ(blocks[1].first_lsn, 2u);
+  EXPECT_EQ(payload, small + huge);
+}
+
+TEST_F(AofSegmentWriterTest, OpenKeepsExistingSegment) {
+  pp_->at(0)->Await([&] {
+    AofSegmentWriter first(dir_, 2, 4);
+    ASSERT_FALSE(first.Open(0));
+    first.AddRecord("x", 1);
+    ASSERT_FALSE(first.Shutdown());
+
+    AofSegmentWriter second(dir_, 2, 4);
+    EXPECT_EQ(second.Open(0), errc::file_exists);
+  });
+  EXPECT_FALSE(
+      filesystem::exists(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(2, 0), ".tmp")));
+  EXPECT_EQ(ReadSegment(0).size(), kAofSegmentHeaderSize + kAofBlockHeaderSize + 1);
+}
+
+class AofManifestTest : public AofSegmentWriterTest {
+ protected:
+  static AofManifest Sample() {
+    AofManifest m;
+    m.state = AofManifest::State::kActive;
+    m.checkpoint_id = 3;
+    m.base_owned = true;
+    m.base_path = "dump base-3.dfs";
+    m.cuts = {{5, 1234}, {7, 1300}};
+    return m;
+  }
+
+  string ManifestPath() const {
+    return absl::StrCat(dir_, "/", kAofManifestName);
+  }
+};
+
+TEST_F(AofManifestTest, RoundTrip) {
+  AofManifest m = Sample();
+  auto decoded = DecodeAofManifest(EncodeAofManifest(m));
+  ASSERT_TRUE(decoded) << decoded.error().message();
+  EXPECT_EQ(*decoded, m);
+
+  // Bootstrapping, no base.
+  AofManifest empty;
+  empty.cuts = {{0, 1}};
+  decoded = DecodeAofManifest(EncodeAofManifest(empty));
+  ASSERT_TRUE(decoded) << decoded.error().message();
+  EXPECT_EQ(*decoded, empty);
+}
+
+TEST_F(AofManifestTest, WriteReplacesAtomically) {
+  pp_->at(0)->Await([&] {
+    // No manifest yet.
+    EXPECT_EQ(ReadAofManifest(dir_).error(), errc::no_such_file_or_directory);
+
+    AofManifest first = Sample();
+    ASSERT_FALSE(WriteAofManifest(dir_, first));
+    EXPECT_EQ(*ReadAofManifest(dir_), first);
+
+    // A crash before the rename leaves a tmp file, which the reader ignores.
+    ofstream(ManifestPath() + ".tmp") << "garbage";
+    EXPECT_EQ(*ReadAofManifest(dir_), first);
+
+    // The next write truncates the stale tmp, then renames it over the manifest.
+    AofManifest second = Sample();
+    second.checkpoint_id = 4;
+    second.cuts = {{8, 2000}, {9, 2100}};
+    ASSERT_FALSE(WriteAofManifest(dir_, second));
+    EXPECT_EQ(*ReadAofManifest(dir_), second);
+    // The rename consumed the tmp file.
+    EXPECT_FALSE(filesystem::exists(ManifestPath() + ".tmp"));
+  });
+}
+
+TEST_F(AofManifestTest, CollectGarbage) {
+  // appendonly.aof, appendonly-x.tmp and appendonlydir are not ours, so they must not be deleted.
+  for (string_view name :
+       {"appendonly-0-1.aof", "appendonly-0-2.aof", "appendonly-0-3.aof", "appendonly-1-0.aof",
+        "appendonly-0-4.aof.discarded", "appendonly-1-1.aof.tmp", "appendonly.manifest.tmp",
+        "dump-summary.dfs", "appendonly.aof", "appendonly-x.tmp"}) {
+    ofstream(absl::StrCat(dir_, "/", name)) << "x";
+  }
+  filesystem::create_directory(absl::StrCat(dir_, "/appendonlydir"));
+  AofManifest m = Sample();
+  m.cuts = {{2, 100}, {0, 1}};
+
+  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m)); });
+
+  vector<string> left;
+  for (const auto& entry : filesystem::directory_iterator(dir_))
+    left.push_back(entry.path().filename().string());
+  sort(left.begin(), left.end());
+
+  // Segments below the cut and our tmp files go; *.discarded and others' files stay.
+  EXPECT_EQ(left, (vector<string>{"appendonly-0-2.aof", "appendonly-0-3.aof",
+                                  "appendonly-0-4.aof.discarded", "appendonly-1-0.aof",
+                                  "appendonly-x.tmp", "appendonly.aof", "appendonlydir",
+                                  "dump-summary.dfs"}));
+}
+
+class AofStreamerTest : public BaseFamilyTest {
+ protected:
+  void SetUp() override {
+    if (absl::GetFlag(FLAGS_force_epoll))
+      GTEST_SKIP() << "--aof needs io_uring";
+    dir_ = base::GetTestTempPath("aof_streamer");
+    filesystem::remove_all(dir_);
+    filesystem::create_directories(dir_);
+    absl::SetFlag(&FLAGS_aof, true);
+    absl::SetFlag(&FLAGS_dir, dir_);
+    BaseFamilyTest::SetUp();
+  }
+
+  void TearDown() override {
+    // The test already shut the service down to read the segments.
+    if (shard_set)
+      BaseFamilyTest::TearDown();
+  }
+
+  absl::FlagSaver saver_;
+  string dir_;
+};
+
+// TODO: remove this test later once we actually test e2e.
+TEST_F(AofStreamerTest, WritesReachSegments) {
+  Run("set a 1");
+  Run("set a 2");
+  Run("hset h f v");
+  Run("lpush l x");
+  Run("mset k1 1 x 2 k2 3 y 4");
+  const uint32_t shard_count = shard_set->size();
+  // Seals, writes and syncs every shard's segment.
+  ShutdownService();
+
+  // Expected commands per shard, in order.
+  vector<vector<string>> expected(shard_count);
+  for (auto [key, cmd] : {pair{"a", "SET a 1"}, pair{"a", "SET a 2"}, pair{"h", "HSET h f v"},
+                          pair{"l", "LPUSH l x"}}) {
+    expected[Shard(key, shard_count)].push_back(cmd);
+  }
+  // The journal records MSET once per shard, with only that shard's keys.
+  vector<string> mset(shard_count);
+  for (auto [key, val] : {pair{"k1", "1"}, pair{"x", "2"}, pair{"k2", "3"}, pair{"y", "4"}}) {
+    string& part = mset[Shard(key, shard_count)];
+    absl::StrAppend(&part, part.empty() ? "MSET " : " ", key, " ", val);
+  }
+  ASSERT_GT(count_if(mset.begin(), mset.end(), [](const string& p) { return !p.empty(); }), 1)
+      << "MSET keys must span shards";
+  for (uint32_t sid = 0; sid < shard_count; ++sid) {
+    if (!mset[sid].empty())
+      expected[sid].push_back(mset[sid]);
+  }
+
+  auto files = io::StatFiles(absl::StrCat(dir_, "/appendonly-*.aof"));
+  ASSERT_TRUE(files);
+  EXPECT_EQ(files->size(), shard_count);
+
+  for (uint32_t sid = 0; sid < shard_count; ++sid) {
+    ifstream in(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, 0)), ios::binary);
+    string file(istreambuf_iterator<char>(in), {});
+    auto seg = DecodeAofSegmentHeader(file);
+    ASSERT_TRUE(seg) << "shard " << sid;
+    EXPECT_EQ(seg->shard_id, sid);
+    EXPECT_EQ(seg->shard_count, shard_count);
+    EXPECT_EQ(seg->seq, 0u);
+
+    string_view rest = string_view(file).substr(kAofSegmentHeaderSize);
+    string payload;
+    uint64_t n_records = 0;
+    optional<AofBlockHeader> prev;
+    while (!rest.empty()) {
+      auto hdr = DecodeAofBlock(rest, seg->segment_uid);
+      ASSERT_TRUE(hdr);
+      if (prev) {
+        EXPECT_EQ(hdr->first_lsn, prev->first_lsn + prev->n_records);
+      }
+      prev = hdr;
+      n_records += hdr->n_records;
+      payload += rest.substr(kAofBlockHeaderSize, hdr->total_block_bytes - kAofBlockHeaderSize);
+      rest.remove_prefix(hdr->total_block_bytes);
+    }
+
+    // The payload must hold exactly n_records whole records.
+    io::BytesSource source(payload);
+    JournalReader reader{&source, 0};
+    journal::ParsedEntry parsed;
+    vector<string> cmds;
+    for (uint64_t i = 0; i < n_records; ++i) {
+      ASSERT_FALSE(reader.ReadEntry(&parsed)) << "shard " << sid << " record " << i;
+      if (parsed.opcode == journal::Op::COMMAND)
+        cmds.push_back(absl::StrJoin(parsed.cmd.view(), " "));
+    }
+    EXPECT_TRUE(reader.ReadEntry(&parsed)) << "trailing data in shard " << sid;
+    EXPECT_EQ(cmds, expected[sid]) << "shard " << sid;
+  }
+}
+
+// One shard, so the records after the rotation all land in segment 1.
+class AofStreamerOneShardTest : public AofStreamerTest {
+ protected:
+  AofStreamerOneShardTest() {
+    num_threads_ = 1;
+  }
+
+  // A retirement finishes within milliseconds, so tests fake one in progress.
+  static void SetRetiring(AofStreamer* streamer, bool retiring) {
+    streamer->spare_ready_ = !retiring;
+  }
+};
+
+// TODO: cover a crash while preparing a spare. Leave each partial state on disk (a leftover
+// appendonly-<shard>-<seq>.aof.tmp, a header-only segment with its tmp twin, a complete unused
+// spare) and check that the restart replays the chain cleanly and startup GC removes the tmp files.
+TEST_F(AofStreamerOneShardTest, RotateContinuesInSpare) {
+  Run("mset a 1 b 2 c 3 d 4");
+  const uint32_t shard_count = shard_set->size();
+
+  // As a checkpoint's cut does: wait for the spares first, then rotate without yielding.
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_TRUE(shard->aof_streamer()->WaitSpareReady()); });
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_EQ(shard->aof_streamer()->Rotate(), 1u); });
+  Run("mset a 5 b 6 c 7 d 8");
+  ShutdownService();
+
+  for (uint32_t sid = 0; sid < shard_count; ++sid) {
+    // Shutdown deleted the unused spare.
+    EXPECT_FALSE(filesystem::exists(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, 2))))
+        << "shard " << sid;
+
+    // The LSNs continue from segment 0 into segment 1, and both hold records.
+    optional<uint64_t> next_lsn;
+    for (uint64_t seq : {0, 1}) {
+      size_t blocks = 0;
+      ifstream in(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, seq)), ios::binary);
+      string file(istreambuf_iterator<char>(in), {});
+      auto seg = DecodeAofSegmentHeader(file);
+      ASSERT_TRUE(seg) << "shard " << sid << " segment " << seq;
+      string_view rest = string_view(file).substr(kAofSegmentHeaderSize);
+      while (!rest.empty()) {
+        auto hdr = DecodeAofBlock(rest, seg->segment_uid);
+        ASSERT_TRUE(hdr) << "shard " << sid << " segment " << seq;
+        if (next_lsn) {
+          EXPECT_EQ(hdr->first_lsn, *next_lsn) << "shard " << sid << " segment " << seq;
+        }
+        next_lsn = hdr->first_lsn + hdr->n_records;
+        rest.remove_prefix(hdr->total_block_bytes);
+        ++blocks;
+      }
+      EXPECT_GT(blocks, 0u) << "shard " << sid << " segment " << seq;
+    }
+  }
+}
+
+TEST_F(AofStreamerOneShardTest, DurableLsnWaitsForRetiredSegment) {
+  Run("mset a 1 b 2 c 3 d 4");
+  AofStreamer* streamer = shard_set->Await(0, [] { return EngineShard::tlocal()->aof_streamer(); });
+  uint64_t cut = shard_set->Await(0, [&] {
+    EXPECT_TRUE(streamer->WaitSpareReady());
+    uint64_t lsn = journal::GetLsn();
+    EXPECT_EQ(streamer->Rotate(), 1u);
+
+    // Joins the retirement: everything before the cut is durable.
+    EXPECT_TRUE(streamer->WaitSpareReady());
+    EXPECT_EQ(streamer->DurableLsn(), lsn - 1);
+    return lsn;
+  });
+
+  // Record cut lands in segment 1; wait past the 1s periodic sync, so segment 1 covers it.
+  Run("set x 1");
+  absl::SleepFor(absl::Milliseconds(1500));
+  shard_set->Await(0, [&] {
+    // While the old segment retires, segment 1 does not count, though it is synced.
+    SetRetiring(streamer, true);
+    EXPECT_EQ(streamer->DurableLsn(), cut - 1);
+    SetRetiring(streamer, false);
+    EXPECT_EQ(streamer->DurableLsn(), cut);
+  });
+}
+
+class AofChainReaderTest : public AofSegmentWriterTest {
+ protected:
+  // Writes segment seq, one block per record.
+  void WriteSegment(uint64_t seq, uint64_t first_lsn, const vector<string>& records) {
+    pp_->at(0)->Await([&] {
+      AofSegmentWriter writer(dir_, 2, 4);
+      ASSERT_FALSE(writer.Open(seq));
+      for (size_t i = 0; i < records.size(); ++i) {
+        writer.AddRecord(records[i], first_lsn + i);
+        writer.Seal();
+      }
+      ASSERT_FALSE(writer.Shutdown());
+    });
+  }
+
+  struct ChainResult {
+    string data;
+    bool torn = false;
+    uint64_t last_lsn = 0;
+    uint64_t discarded = 0;
+  };
+
+  // Reads the whole chain on the proactor, as replay does, in small pieces.
+  ChainResult ReadChain() {
+    ChainResult res;
+    pp_->at(0)->Await([&] {
+      AofChainReader reader(dir_, 2, 4);
+      ASSERT_FALSE(reader.Open(0));
+      char buf[7];
+      while (true) {
+        iovec v{buf, sizeof(buf)};
+        auto n = reader.ReadSome(&v, 1);
+        if (!n) {
+          ASSERT_EQ(n.error(), AofError::kTornTail);
+          res.torn = true;
+          break;
+        }
+        if (*n == 0)
+          break;
+        res.data.append(buf, *n);
+      }
+      res.last_lsn = reader.LastLsn();
+      res.discarded = reader.DiscardedBytes();
+    });
+    return res;
+  }
+
+  string SegmentPath(uint64_t seq) {
+    return absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(2, seq));
+  }
+
+  // Flips the first payload byte of the block at offset.
+  void CorruptBlock(const string& path, uint64_t offset) {
+    fstream f(path, ios::in | ios::out | ios::binary);
+    f.seekp(offset + kAofBlockHeaderSize);
+    f.put('X');
+  }
+};
+
+TEST_F(AofChainReaderTest, CleanChain) {
+  WriteSegment(0, 1, {"a1", "b22", "c333"});
+  WriteSegment(1, 4, {"d4444"});
+
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1b22c333d4444");
+  EXPECT_FALSE(res.torn);
+  EXPECT_EQ(res.last_lsn, 4u);
+  EXPECT_EQ(res.discarded, 0u);
+}
+
+TEST_F(AofChainReaderTest, TornTail) {
+  WriteSegment(0, 1, {"a1", "b22", "c333"});
+  WriteSegment(1, 4, {"d4444"});
+
+  // Corrupt the second block, so the valid third block and segment 1 lie after a hole.
+  CorruptBlock(SegmentPath(0), kAofSegmentHeaderSize + kAofBlockHeaderSize + 2);
+
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1");
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 1u);
+  EXPECT_EQ(res.discarded, filesystem::file_size(SegmentPath(0)) - kAofSegmentHeaderSize -
+                               kAofBlockHeaderSize - 2 + filesystem::file_size(SegmentPath(1)));
+}
+
+TEST_F(AofChainReaderTest, TornInMiddleOfChain) {
+  WriteSegment(0, 1, {"a1", "b22"});
+  WriteSegment(1, 3, {"c333", "d4444"});
+  WriteSegment(2, 5, {"e5"});
+
+  // Corrupt the second block of the middle segment, as a crash during a rotation would.
+  CorruptBlock(SegmentPath(1), kAofSegmentHeaderSize + kAofBlockHeaderSize + 4);
+
+  // The log ends inside segment 1; the valid segment 2 comes after the hole.
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1b22c333");
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 3u);
+}
+
+TEST_F(AofChainReaderTest, PartialRecordAtEnd) {
+  string huge(2 * kAofBlockBytes, 'h');
+  WriteSegment(0, 1, {"a1", huge});
+
+  // Cut the last block of the record that spans two blocks.
+  string seg0 = SegmentPath(0);
+  filesystem::resize_file(seg0, filesystem::file_size(seg0) - 10);
+
+  // The cut record's first block is valid, so it is handed out; JournalReader drops the record.
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, "a1" + string(kAofBlockBytes, 'h'));
+  EXPECT_TRUE(res.torn);
+  EXPECT_EQ(res.last_lsn, 1u);
+}
+
+TEST_F(AofChainReaderTest, BlocksAcrossReadChunks) {
+  // 5000-byte records sealed one per block: 5025-byte blocks don't divide the 128 KB read chunk,
+  // so refills keep a partial block and some blocks span two reads.
+  vector<string> records;
+  string expected;
+  for (int i = 0; i < 60; ++i) {
+    records.push_back(string(5000, 'a' + i % 26));
+    expected += records.back();
+  }
+  WriteSegment(0, 1, records);
+
+  ChainResult res = ReadChain();
+  EXPECT_EQ(res.data, expected);
+  EXPECT_FALSE(res.torn);
+  EXPECT_EQ(res.last_lsn, 60u);
+}
+
+#endif  // __linux__
 
 }  // namespace dfly

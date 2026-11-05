@@ -27,9 +27,8 @@ class UserRegistry {
   UserRegistry(const UserRegistry&) = delete;
   UserRegistry(UserRegistry&&) = delete;
 
-  void Init(const CategoryToIdxStore* cat_to_id_table,
-            const ReverseCategoryIndexTable* reverse_cat_table,
-            const CategoryToCommandsIndexStore* cat_to_commands_table);
+  // Adds the default user, with its password taken from --requirepass or the environment.
+  void Init();
 
   using RegistryType = absl::flat_hash_map<std::string, User>;
 
@@ -111,10 +110,6 @@ class UserRegistry {
    private:
     LockT<util::fb2::SharedMutex> registry_lk_;
   };
-
-  const CategoryToIdxStore* cat_to_id_table_;
-  const ReverseCategoryIndexTable* reverse_cat_table_;
-  const CategoryToCommandsIndexStore* cat_to_commands_table_;
 };
 
 }  // namespace dfly::acl

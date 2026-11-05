@@ -73,10 +73,6 @@ void IndexBuilder::Cancel() {
   util::fb2::Fiber{std::move(fiber_)}.JoinIfNeeded();  // steal and wait for finish
 }
 
-util::fb2::Fiber IndexBuilder::Worker() {
-  return std::move(fiber_);
-}
-
 double IndexBuilder::Progress() const {
   double done = 0;
   for (size_t i = 0; i < phase_done_.size(); i++)
@@ -238,13 +234,12 @@ void IndexBuilder::IndexEntry(std::string_view key, const DbContext& db_cntx,
 
   // Reuse restored DocIds so they stay aligned with ids serialized in the HNSW graph. Vector
   // fields are populated later by VectorLoop.
-  auto accessor = GetAccessor(db_cntx, pv);
   if (auto doc_id = index_->key_index().Find(key); doc_id) {
     const auto& indexed_docs = index_->indices_->GetAllDocs();
     if (std::binary_search(indexed_docs.begin(), indexed_docs.end(), *doc_id))
       return;
 
-    if (!index_->indices_->Add(*doc_id, *accessor)) {
+    if (!index_->AddToIndices(*doc_id, db_cntx, pv)) {
       LOG(WARNING) << "Failed to restore index entry for key: " << key
                    << ", removing from key index";
       index_->RemoveFromAllHnswIndices(*doc_id);
@@ -252,7 +247,7 @@ void IndexBuilder::IndexEntry(std::string_view key, const DbContext& db_cntx,
     }
   } else {
     DocId id = index_->key_index_.AddNew(key);
-    if (!index_->indices_->Add(id, *accessor))
+    if (!index_->AddToIndices(id, db_cntx, pv))
       index_->key_index_.Remove(id);
   }
 }
@@ -273,6 +268,7 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
   // any pending updates — the full table traversal below will pick up all current documents.
   index_->hnsw_state_ = ShardDocIndex::HnswState::kBuilding;
   index_->pending_vector_updates_.clear();
+  index_->pending_hnsw_removals_.clear();
 
   auto cb = [this, db_cntx, scratch = std::string{}](PrimeTable::iterator it) mutable {
     PrimeValue& pv = it->second;
@@ -282,9 +278,8 @@ void IndexBuilder::VectorLoop(dfly::DbTable* table, DbContext db_cntx) {
       index_->AddDocToGlobalVectorIndex(*local_id, db_cntx, &pv);
   };
 
-  // NOTE(global-hnsw-mutex): HNSW (hnsw_alg) index uses a thread-blocking mutex making
-  // AddDocToGlobalVectorIndex non-fiber-suspendable from a fiber point of view. This makes it safe
-  // to perform add keys without locking them while sleeping of a mutex.
+  // NOTE(global-hnsw-mutex): AddDocToGlobalVectorIndex never suspends: it defers the addition while
+  // a search holds an HNSW index. This makes it safe to add keys while traversing the table.
   PrimeTable::Cursor cursor;
   do {
     cursor = table->prime.Traverse(cursor, cb);

@@ -1,6 +1,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_join.h>
+#include <absl/strings/str_split.h>
 
 #include <array>
 #include <random>
@@ -12,12 +13,16 @@
 #include "core/detail/gen_utils.h"
 #include "server/common.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/buffered_socket_writer.h"
 #include "server/journal/journal_slice.h"
 #include "server/journal/pending_buf.h"
 #include "server/journal/serializer.h"
+#include "server/journal/tx_executor.h"
 #include "server/journal/types.h"
 #include "server/serializer_commons.h"
+#include "server/test_utils.h"
 #include "strings/human_readable.h"
+#include "util/fibers/epoll_socket.h"
 #include "util/fibers/fibers.h"
 
 ABSL_DECLARE_FLAG(uint32_t, shard_repl_backlog_time_ms);
@@ -206,6 +211,54 @@ TEST(Journal, PendingBuf) {
 
   ASSERT_TRUE(pbuf.Empty());
   ASSERT_EQ(pbuf.Size(), 0);
+}
+
+// Completes writes only on demand to simulate a stalled or slowly progressing receiver.
+class ControlledSocket : public util::fb2::EpollSocket {
+ public:
+  void AsyncWriteSome(const iovec* v, uint32_t len, io::AsyncProgressCb cb) override {
+    size_t bytes = 0;
+    for (uint32_t i = 0; i < len; ++i)
+      bytes += v[i].iov_len;
+    completion_ = [cb = std::move(cb), bytes] { cb(bytes); };
+  }
+
+  void Complete() {
+    std::exchange(completion_, {})();
+  }
+
+ private:
+  std::function<void()> completion_;
+};
+
+class BufferedSocketWriterTest : public BaseFamilyTest {};
+
+TEST_F(BufferedSocketWriterTest, AbortOnWriteTimeout) {
+  pp_->at(0)->Await([] {
+    constexpr uint64_t kTimeoutUsec = 500'000;
+    ControlledSocket socket;
+    ExecutionState cntx;
+    BufferedSocketWriter writer(&cntx, {});
+    writer.Start(&socket);
+
+    // Writes that keep completing do not time out, even past the timeout.
+    writer.Write(string(512, 'x'));
+    for (unsigned i = 0; i < 12; ++i) {
+      ThisFiber::SleepFor(50ms);
+      writer.Write(string(512, 'x'));
+      socket.Complete();
+      writer.AbortOnWriteTimeout(kTimeoutUsec);
+    }
+    EXPECT_TRUE(cntx.IsRunning());
+
+    // A write that stays in flight longer than the timeout fails the stream.
+    ThisFiber::SleepFor(600ms);
+    writer.AbortOnWriteTimeout(kTimeoutUsec);
+    GenericError err = cntx.GetError();
+    EXPECT_EQ(std::error_code(err), make_error_code(errc::timed_out));
+    EXPECT_THAT(err.Format(), testing::HasSubstr("BufferedSocketWriter write operation timeout"));
+    socket.Complete();
+  });
 }
 
 void AddSetRecord(JournalSlice* slice, string_view value) {
@@ -482,6 +535,96 @@ TEST(Journal, BacklogBoundsTimeBasedCleanup) {
   EXPECT_FALSE(slice.IsLSNInBuffer(kExpiredEntries - 1));
   EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries));
   EXPECT_TRUE(slice.IsLSNInBuffer(kExpiredEntries + 1));
+}
+
+TransactionData MakeTx(TxId txid, string_view cmd) {
+  vector<string_view> args = absl::StrSplit(cmd, ' ');
+  TransactionData tx;
+  tx.txid = txid;
+  tx.opcode = Op::COMMAND;
+  tx.command.Assign(args.begin(), args.end(), args.size());
+  return tx;
+}
+
+TEST(MultiShardExecution, EndOfLogWakeup) {
+  MultiShardExecution exe(2);
+  int applied = 0;
+  fb2::Fiber flow0("flow0", [&] {
+    EXPECT_EQ(exe.Execute(1,
+                          [&] {
+                            ++applied;
+                            return true;
+                          }),
+              MultiShardExecution::Status::kOk);
+  });
+  // flow0 waits for flow1, which reaches end of log before the global command.
+  ThisFiber::Yield();
+  EXPECT_EQ(applied, 0);
+  exe.RemoveFlow();
+  flow0.Join();
+  EXPECT_EQ(applied, 1);
+}
+
+TEST(MultiShardExecution, MoveThenFlushall) {
+  // MOVE is journaled on one shard only, so it bypasses the barrier: only FLUSHALL is applied.
+  vector<vector<TransactionData>> flows(2);
+  flows[0].push_back(MakeTx(5, "MOVE k 1"));
+  flows[0].push_back(MakeTx(7, "FLUSHALL"));
+  flows[1].push_back(MakeTx(7, "FLUSHALL"));
+
+  MultiShardExecution exe(flows.size());
+  int global_applies = 0;
+  vector<fb2::Fiber> fibers;
+  for (auto& flow : flows) {
+    fibers.emplace_back("flow", [&] {
+      for (const auto& tx : flow) {
+        if (tx.IsGlobalCmd()) {
+          EXPECT_EQ(exe.Execute(tx.txid,
+                                [&] {
+                                  ++global_applies;
+                                  return true;
+                                }),
+                    MultiShardExecution::Status::kOk);
+        }
+      }
+      exe.RemoveFlow();
+    });
+  }
+  for (auto& fb : fibers)
+    fb.Join();
+  EXPECT_EQ(global_applies, 1);
+}
+
+TEST(MultiShardExecution, AliasCommandsAreGlobal) {
+  vector<vector<TransactionData>> flows(2);
+  for (auto& flow : flows) {
+    flow.push_back(MakeTx(11, "FT.ALIASADD live idx-a"));
+    flow.push_back(MakeTx(12, "FT.ALIASUPDATE live idx-b"));
+    flow.push_back(MakeTx(13, "FT.ALIASDEL live"));
+  }
+
+  MultiShardExecution exe(flows.size());
+  vector<TxId> applied;
+  auto run_flow = [&](auto& flow) {
+    for (const auto& tx : flow) {
+      auto apply = [&] {
+        applied.push_back(tx.txid);
+        return true;
+      };
+      ASSERT_TRUE(tx.IsGlobalCmd());
+      EXPECT_EQ(exe.Execute(tx.txid, apply), MultiShardExecution::Status::kOk);
+    }
+    exe.RemoveFlow();
+  };
+
+  fb2::Fiber first_flow("first", [&] { run_flow(flows[0]); });
+  ThisFiber::Yield();
+  EXPECT_TRUE(applied.empty());
+
+  fb2::Fiber second_flow("second", [&] { run_flow(flows[1]); });
+  first_flow.Join();
+  second_flow.Join();
+  EXPECT_EQ(applied, (vector<TxId>{11, 12, 13}));
 }
 
 }  // namespace journal

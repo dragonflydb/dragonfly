@@ -8,7 +8,6 @@
 #include <variant>
 
 #include "base/cycle_clock.h"
-#include "base/function2.hpp"
 #include "common/backed_args.h"
 #include "facade/memcache_parser.h"
 #include "facade/reply_payload.h"
@@ -54,13 +53,7 @@ class ParsedCommand : public cmn::BackedArguments {
 
   ParsedCommand() = default;
 
-  // Helper function to get the only argument type
-  template <typename C, typename Arg> static Arg OnlyArgType(void (C::*)(Arg) const);
-
  public:
-  using ReplyFunc = fu2::function_base<true, false, fu2::capacity_fixed<16, 8>, false, false,
-                                       void(SinkReplyBuilder*)>;
-
   virtual ~ParsedCommand() = default;
 
   virtual size_t GetSize() const {
@@ -126,6 +119,15 @@ class ParsedCommand : public cmn::BackedArguments {
     return is_deferred_reply_;
   }
 
+  // Set by the server once the command is resolved. Used to split latency stats by command type.
+  void SetReadOnly(bool read_only) {
+    is_read_only_ = read_only;
+  }
+
+  bool IsReadOnly() const {
+    return is_read_only_;
+  }
+
   void ResetForReuse();
 
   void SendError(std::string_view str, std::string_view type = std::string_view{});
@@ -138,13 +140,6 @@ class ParsedCommand : public cmn::BackedArguments {
   }
 
   void SendLong(long val);
-
-  // Deprecated: use Resolve instead for deferred replies.
-  template <typename F> void ReplyWith(F&& func) {
-    assert(!is_deferred_reply_);
-    using RbType = decltype(OnlyArgType(&std::decay_t<F>::operator()));
-    func(static_cast<RbType>(rb_));
-  }
 
   // Whether SendReply() can be called. Only valid in deferred mode.
   // If the reply is not ready yet, it is guaranteed to be tracked by non-null Blocker()
@@ -163,11 +158,6 @@ class ParsedCommand : public cmn::BackedArguments {
 
   // Requires CanReply(). Either sends stored reply or wakes up coroutine to send reply
   void SendReply();
-
-  // Resolve deferred command immediately with an error reply.
-  void Resolve(const facade::ErrorReply& error) {
-    SendError(error);
-  }
 
   // Resolve deferred command with a captured payload.
   void Resolve(payload::Payload&& pl);
@@ -208,6 +198,7 @@ class ParsedCommand : public cmn::BackedArguments {
   // if false then the reply was sent directly to reply builder,
   // otherwise, moved asynchronously into reply_payload_
   bool is_deferred_reply_ = false;
+  bool is_read_only_ = false;  // whether this command is read-only
 
   std::variant<payload::Payload, SuspendedCommand> reply_;
 };

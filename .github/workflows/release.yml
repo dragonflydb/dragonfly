@@ -12,7 +12,21 @@ env:
   RELEASE_DIR: build-release
 
 jobs:
+  validate-tag:
+    runs-on: ubuntu-latest
+    steps:
+      # Docker image tagging (docker-release2.yml) requires vMAJOR.MINOR.PATCH.
+      - name: Check tag is semver
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Tag '$TAG' is not of the form vMAJOR.MINOR.PATCH, e.g. v2.1.0"
+            exit 1
+          fi
+
   create-release:
+    needs: validate-tag
     runs-on: ubuntu-latest
     steps:
       - name: Create Release
@@ -142,7 +156,8 @@ jobs:
             binary: dragonfly-aarch64
     container:
       image: ghcr.io/romange/ubuntu-dev:24
-      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0"
+      # NET_ADMIN lets the limit-loopback-mtu action lower the loopback MTU.
+      options: --security-opt seccomp=unconfined --sysctl "net.ipv6.conf.all.disable_ipv6=0" --cap-add=NET_ADMIN
       volumes:
         - /mnt:/mnt
     steps:

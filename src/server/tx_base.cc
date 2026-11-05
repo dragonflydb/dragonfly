@@ -66,6 +66,8 @@ void RecordJournal(const OpArgs& op_args, std::string_view cmd, facade::ArgSlice
 }
 
 void RecordDelete(DbIndex dbid, string_view key) {
+  if (!EngineShard::tlocal()->journal())
+    return;
   journal::RecordEntry(0, journal::Op::COMMAND, dbid, KeySlot(key), Payload("DEL", ArgSlice{key}));
 }
 

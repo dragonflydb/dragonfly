@@ -11,8 +11,29 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace dfly {
+
+enum class AofError {
+  kTornTail = 1,
+  kNoSegments,
+
+  // A file matches the shard's segment pattern, but its name does not parse.
+  kBadSegmentName,
+  kSegmentNonContiguous,
+
+  // A segment is shorter than its header.
+  kShortSegment,
+
+  // A header's CRC, shard id or seq does not match its file.
+  kBadSegmentHeader,
+  kShardCountChanged,
+  kBadManifest,
+  kManifestVersion,
+};
+
+std::error_code make_error_code(AofError e);
 
 // On-disk AOF format: a segment is a fixed header followed by blocks of journal records.
 constexpr std::string_view kAofMagic = "DFAOF1";
@@ -35,8 +56,8 @@ std::string EncodeAofSegmentHeader(const AofSegmentHeader& hdr);
 std::optional<AofSegmentHeader> DecodeAofSegmentHeader(std::string_view src);
 
 enum AofBlockFlags : uint8_t {
-  kStartsWithContinuation = 1,
-  kEndsWithPartial = 2,
+  kStartsMidRecord = 1,
+  kEndsMidRecord = 2,
 };
 
 struct AofBlockHeader {
@@ -52,7 +73,8 @@ struct AofBlockHeader {
 std::optional<AofBlockHeader> DecodeAofBlock(std::string_view src, uint64_t segment_uid);
 
 struct AofSealedBlock {
-  std::string bytes;  // header + payload, ready to write as-is
+  // Header + payload, ready to write as-is.
+  std::string bytes;
   uint64_t first_lsn;
   uint32_t n_records;
   uint8_t flags;
@@ -74,11 +96,12 @@ class AofBlockBuilder {
   // Seals the open block if non-empty.
   void Seal();
 
- private:
+  // Payload bytes in the open block.
   size_t PayloadSize() const {
     return buf_.size() - kAofBlockHeaderSize;
   }
 
+ private:
   void SealOpen();
   void ResetOpen();
 
@@ -93,3 +116,7 @@ class AofBlockBuilder {
 };
 
 }  // namespace dfly
+
+namespace std {
+template <> struct is_error_code_enum<dfly::AofError> : true_type {};
+}  // namespace std

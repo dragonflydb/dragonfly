@@ -68,7 +68,43 @@ uint32_t FinishCrc(absl::crc32c_t crc, const AofBlockHeader& hdr) {
   return static_cast<uint32_t>(crc);
 }
 
+class AofErrorCategory : public std::error_category {
+ public:
+  const char* name() const noexcept final {
+    return "aof";
+  }
+
+  std::string message(int ev) const final {
+    switch (static_cast<AofError>(ev)) {
+      case AofError::kTornTail:
+        return "AOF log ends with a damaged tail";
+      case AofError::kNoSegments:
+        return "no AOF segments";
+      case AofError::kBadSegmentName:
+        return "unexpected AOF segment name";
+      case AofError::kSegmentNonContiguous:
+        return "gap in AOF segment seqs";
+      case AofError::kShortSegment:
+        return "AOF segment shorter than its header";
+      case AofError::kBadSegmentHeader:
+        return "invalid AOF segment header";
+      case AofError::kShardCountChanged:
+        return "AOF written with a different shard count";
+      case AofError::kBadManifest:
+        return "invalid AOF manifest";
+      case AofError::kManifestVersion:
+        return "unsupported AOF manifest version";
+    }
+    return "unknown AOF error";
+  }
+};
+
 }  // namespace
+
+std::error_code make_error_code(AofError e) {
+  static const AofErrorCategory category;
+  return {static_cast<int>(e), category};
+}
 
 std::string EncodeAofSegmentHeader(const AofSegmentHeader& hdr) {
   std::string res(kAofSegmentHeaderSize, '\0');
@@ -128,9 +164,9 @@ void AofBlockBuilder::Append(std::string_view record, uint64_t lsn) {
     record.remove_prefix(n);
     if (record.empty())
       break;
-    flags_ |= kEndsWithPartial;
+    flags_ |= kEndsMidRecord;
     SealOpen();
-    start_flags = kStartsWithContinuation;
+    start_flags = kStartsMidRecord;
   }
 
   ++n_records_;
