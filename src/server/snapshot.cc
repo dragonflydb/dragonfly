@@ -220,7 +220,8 @@ void SliceSnapshot::PaceTraversal(bool done) {
   }
 
   // Between buckets no dependency is held, so this is where the traversal waits for the sink.
-  // It stays well below the limit, leaving the room to the mutation path.
+  // It stays well below the limit, leaving the room to the mutation path, whose chunks queued
+  // meanwhile do not extend the wait: sustained writes can not stall the traversal for good.
   writer_.WaitBelow(writer_.limit() / 4);
 }
 

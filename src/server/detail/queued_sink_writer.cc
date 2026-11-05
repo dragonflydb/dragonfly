@@ -39,8 +39,9 @@ void QueuedSinkWriter::Push(string data) {
 }
 
 void QueuedSinkWriter::WaitBelow(size_t bytes) {
+  const uint64_t fence = pushed_bytes_;
   util::fb2::NoOpLock lk;
-  cv_.wait(lk, [&] { return pending_bytes() <= bytes || !cntx_->IsRunning(); });
+  cv_.wait(lk, [&] { return fence <= written_bytes_ + bytes || !cntx_->IsRunning(); });
 }
 
 void QueuedSinkWriter::LowerLimit(size_t limit) {

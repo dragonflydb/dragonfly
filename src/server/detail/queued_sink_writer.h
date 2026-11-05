@@ -41,7 +41,8 @@ class QueuedSinkWriter {
   // Queues data and blocks until it is written or at most limit() bytes are queued.
   void Push(std::string data);
 
-  // Blocks while more than `bytes` are queued.
+  // Blocks while more than `bytes` of what is queued at the call remain unwritten. Chunks pushed
+  // meanwhile do not extend the wait, so producers can not keep the caller waiting.
   void WaitBelow(size_t bytes);
 
   // Hands what is queued to write_fn and joins the writer fiber. No Push() may follow.

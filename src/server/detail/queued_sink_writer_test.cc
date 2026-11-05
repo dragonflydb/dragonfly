@@ -316,6 +316,30 @@ TEST_F(QueuedSinkWriterTest, WaitBelow) {
   writer_.Stop();
 }
 
+// Chunks pushed while WaitBelow waits do not extend its wait.
+TEST_F(QueuedSinkWriterTest, WaitBelowIgnoresLaterPushes) {
+  StartWriter(1 << 20);
+  writer_.Push(Chunk('a'));
+  writer_.Push(Chunk('b'));
+
+  bool waited = false;
+  fb2::Fiber waiter([&] {
+    writer_.WaitBelow(0);
+    waited = true;
+  });
+  ThisFiber::SleepFor(1ms);
+  writer_.Push(Chunk('c'));
+
+  sink_.Allow(2);
+  ThisFiber::SleepFor(1ms);
+  EXPECT_TRUE(waited);
+  EXPECT_EQ(writer_.pending_bytes(), 1000u);
+
+  sink_.Open();
+  waiter.Join();
+  writer_.Stop();
+}
+
 // A cancelled context releases a producer blocked above the limit once the write in flight
 // returns, even though the queue is still above the limit.
 TEST_F(QueuedSinkWriterTest, CancelReleasesProducers) {
