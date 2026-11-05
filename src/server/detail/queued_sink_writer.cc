@@ -47,13 +47,17 @@ void QueuedSinkWriter::LowerLimit(size_t limit) {
   limit = min(limit, limit_);  // never raises the limit
   util::fb2::NoOpLock lk;
   limit_ = max(limit, min(limit_, pending_bytes()));
-  while (limit_ > limit && cntx_->IsRunning()) {
+
+  // The limit may stay above a queue that drains faster than it falls, so stop once either is
+  // down to `limit`.
+  while (limit_ > limit && pending_bytes() > limit && cntx_->IsRunning()) {
     // More than `limit` is queued, so the writer is busy and the wait below ends.
     const uint64_t written_bytes = written_bytes_;
     cv_.wait(lk, [&] { return written_bytes_ > written_bytes || !cntx_->IsRunning(); });
 
+    // Not clamped to what is still queued: the other half of the write is headroom for producers.
     size_t step = (written_bytes_ - written_bytes) / 2;
-    limit_ = max(limit, min(limit_ - min(limit_, step), pending_bytes()));
+    limit_ = max(limit, limit_ - min(limit_, step));
   }
   SetLimit(limit);
 }

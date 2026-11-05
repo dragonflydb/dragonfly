@@ -188,6 +188,38 @@ TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotWaitForBacklog) {
   writer_.Stop();
 }
 
+// Each write while LowerLimit runs lowers the limit by half of its size, so a small push right
+// after a write fits in the other half and does not wait for the next write, however slow.
+TEST_F(QueuedSinkWriterTest, LowerLimitKeepsHeadroom) {
+  StartWriter(1 << 20);
+  for (char c : {'a', 'b', 'c', 'd'})
+    writer_.Push(Chunk(c));
+
+  fb2::Fiber lowerer([&] { writer_.LowerLimit(0); });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_EQ(writer_.limit(), 4000u);
+
+  sink_.Allow(1);
+  ThisFiber::SleepFor(1ms);
+  EXPECT_EQ(writer_.pending_bytes(), 3000u);
+  EXPECT_EQ(writer_.limit(), 3500u);
+
+  bool pushed = false;
+  fb2::Fiber producer([&] {
+    writer_.Push(Chunk('e', 80));
+    pushed = true;
+  });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_TRUE(pushed);
+  EXPECT_EQ(sink_.written().size(), 1u);
+
+  sink_.Open();
+  lowerer.Join();
+  producer.Join();
+  EXPECT_EQ(writer_.limit(), 0u);
+  writer_.Stop();
+}
+
 // LowerLimit never raises a limit that is already below its target.
 TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotRaiseLimit) {
   StartWriter(0);
