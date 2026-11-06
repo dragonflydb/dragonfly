@@ -488,27 +488,13 @@ class CompactObjBorrowOps : public cmn::BorrowedStringOps {
 
 CompactObjBorrowOps g_borrow_ops;
 
-struct DeallocRegistration {
-  std::optional<CompactObj::FreeHook> handler;
-
-  void Register(CompactObj::FreeHook new_handler) {
-    DCHECK(!handler) << "A handler is already registered.";
-    handler = new_handler;
-  }
-
-  void Deregister() {
-    DCHECK(handler) << "No handler to deregister";
-    handler.reset();
-  }
-};
-
 struct TL {
   MemoryResource* local_mr = PMR_NS::get_default_resource();
   base::PODArray<uint8_t> tmp_buf;
   string tmp_str;
   size_t small_str_bytes;
   PinnedMap pin_map;
-  DeallocRegistration dealloc_registration;
+  std::optional<CompactObj::FreeHook> dealloc_handler;
 };
 
 // Callback function used in redis/t_stream.cc implementation to
@@ -631,11 +617,13 @@ void CompactObj::ClearThreadLocalStats() {
 }
 
 void CompactObj::RegisterDeallocateHandler(FreeHook handler) {
-  tl.dealloc_registration.Register(handler);
+  DCHECK(!tl.dealloc_handler) << "A handler is already registered.";
+  tl.dealloc_handler = handler;
 }
 
 void CompactObj::DeregisterDeallocateHandler() {
-  tl.dealloc_registration.Deregister();
+  DCHECK(tl.dealloc_handler) << "No handler to deregister";
+  tl.dealloc_handler.reset();
 }
 
 void CompactObj::DrainPendingReads() {
@@ -1499,10 +1487,10 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
 
 void CompactObj::SetMeta(uint8_t taglen, uint8_t mask) {
   if (HasAllocated()) {
-    if (tl.dealloc_registration.handler) {
+    if (tl.dealloc_handler) {
       // Calls Free() wrapped in AtomicMemoryScope of old type, in case old type is being replaced
       // by a new type. See src/server/memory_scope.h and TrackOldValueFree
-      (*tl.dealloc_registration.handler)(*this);
+      (*tl.dealloc_handler)(*this);
     } else {
       Free();
     }
