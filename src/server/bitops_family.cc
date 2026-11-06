@@ -699,7 +699,7 @@ bool Overflow::IntOverflow(size_t total_bits, int64_t incr, bool add, int64_t* v
   // happens. 'uint64_t' cast is there just to prevent undefined behavior on
   // overflow */
   int64_t maxincr = static_cast<uint64_t>(max) - *value;
-  int64_t minincr = min - *value;
+  int64_t minincr = static_cast<uint64_t>(min) - *value;
 
   // overflow
   if (*value > max || (total_bits != 64 && incr > maxincr) ||
