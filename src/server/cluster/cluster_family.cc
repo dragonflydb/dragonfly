@@ -1059,6 +1059,7 @@ void ClusterFamily::DflyMigrateFlow(CmdArgParser parser, CommandContext* cmd_cnt
   }
 
   auto* conn_cntx = cmd_cntx->server_conn_cntx();
+  conn_cntx->slot_migration_conn = true;
   DCHECK(conn_cntx->sync_dispatch);
   // we do this to be ignored by the dispatch tracker
   // TODO provide a more clear approach

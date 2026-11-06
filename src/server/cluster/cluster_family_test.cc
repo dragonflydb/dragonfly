@@ -1720,5 +1720,34 @@ TEST_F(ClusterFamilyTest, DflyMigrateRealModeWithoutConfig) {
   EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), ErrArg("syncid not found"));
 }
 
+TEST_F(ClusterFamilyTest, MigrationFlowMatchesNoClientType) {
+  constexpr string_view kConfig = R"json([
+    {"slot_ranges": [{"start": 0, "end": 16383}], "replicas": [],
+     "master": {"id": "src", "ip": "10.0.0.1", "port": 7000},
+     "migrations": [{"slot_ranges": [{"start": 0, "end": 16383}], "node_id": "$0",
+                     "ip": "10.0.0.2", "port": 7001}]},
+    {"slot_ranges": [], "replicas": [], "master": {"id": "$0", "ip": "10.0.0.2", "port": 7001}}
+  ])json";
+  ASSERT_EQ(RunPrivileged({"DFLYCLUSTER", "CONFIG", absl::Substitute(kConfig, GetMyId())}), "OK");
+  ASSERT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "16383"}), "OK");
+
+  // Paused flows do not read the socket; a test connection has no fd.
+  ASSERT_EQ(Run({"DEBUG", "MIGRATION", "PAUSE"}), "OK");
+  Run("flow", {"PING"});
+  auto flow = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    GetConnection("flow")->cntx()->sync_dispatch = true;  // DflyMigrateFlow DCHECKs it
+    EXPECT_EQ(Run("flow", {"DFLYMIGRATE", "FLOW", "src", "0"}), "OK");
+  });
+  EXPECT_TRUE(
+      pp_->at(0)->Await([&] { return GetConnection("flow")->cntx()->slot_migration_conn; }));
+
+  // A new INIT stops the flow.
+  EXPECT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "16383"}), "OK");
+  flow.Join();
+  for (string_view type : {"normal", "pubsub", "replica"})
+    EXPECT_THAT(Run("flow", {"CLIENT", "KILL", "TYPE", type, "SKIPME", "no"}), IntArg(0)) << type;
+  EXPECT_THAT(Run("flow", {"CLIENT", "KILL", "SKIPME", "no"}), IntArg(1));
+}
+
 }  // namespace
 }  // namespace dfly::cluster

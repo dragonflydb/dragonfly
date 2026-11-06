@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <deque>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -427,17 +428,20 @@ TEST_P(DragonflyV2ConnectionTest, RejectsControlMessagesAfterProtocolError) {
 INSTANTIATE_TEST_SUITE_P(PrivateAndSharedReadBuffer, DragonflyV2ConnectionTest,
                          testing::Values(false, true));
 
-// A real listener for CLIENT KILL. No OpenSSL use: a destroyed listener cleans it up.
+// Real main and admin listeners. No OpenSSL use: the last destroyed listener cleans it up.
 class ClientKillTest : public BaseFamilyTest {
  protected:
   std::vector<facade::Listener*> CreateListeners() override {
     acceptor_ = std::make_unique<util::AcceptServer>(pp_.get(), /*break_on_int=*/false);
-    auto* listener = pp_->at(0)->Await([&] {
-      return new facade::Listener(facade::Protocol::REDIS, service_.get(),
-                                  facade::Listener::Role::MAIN);
-    });
+    auto make = [&](facade::Listener::Role role) {
+      return pp_->at(0)->Await(
+          [&] { return new facade::Listener(facade::Protocol::REDIS, service_.get(), role); });
+    };
+    auto* listener = make(facade::Listener::Role::MAIN);
+    auto* admin = make(facade::Listener::Role::PRIVILEGED);
     port_ = acceptor_->AddListener(0, listener);
-    return {listener};
+    admin_port_ = acceptor_->AddListener(0, admin);
+    return {listener, admin};
   }
 
   void SetUp() override {
@@ -445,14 +449,14 @@ class ClientKillTest : public BaseFamilyTest {
     acceptor_->Run();
   }
 
-  // The service shuts down before the listener is freed.
+  // The service shuts down before the listeners are freed.
   void TearDown() override {
     acceptor_->Stop(/*wait=*/true);
     BaseFamilyTest::TearDown();
   }
 
   std::unique_ptr<util::AcceptServer> acceptor_;
-  uint16_t port_ = 0;
+  uint16_t port_ = 0, admin_port_ = 0;
   absl::FlagSaver flag_saver_;
 };
 
@@ -474,7 +478,7 @@ TEST_F(ClientKillTest, SelfClosesAfterReply) {
     client.ReadLine();
     std::vector<std::string> info =
         absl::StrSplit(client.ReadLine().value_or(""), absl::ByAnyChar(" ="));
-    std::string kill = absl::StrCat("CLIENT KILL ID ", info.at(1), "\r\n");
+    std::string kill = absl::StrCat("CLIENT KILL ID ", info.at(1), " SKIPME no\r\n");
     if (legacy)
       kill = absl::StrCat("CLIENT KILL ", info.at(3), "\r\n");
     EXPECT_TRUE(client.SendAll(absl::StrCat(before, kill, after)));
@@ -487,7 +491,7 @@ TEST_F(ClientKillTest, SelfClosesAfterReply) {
 
   // A kill in the first packet must not keep the server side open until the client closes.
   RawRespClient first{port_};
-  EXPECT_TRUE(first.SendAll(absl::StrCat("CLIENT KILL LADDR 127.0.0.1:", port_, "\r\n")));
+  EXPECT_TRUE(first.SendAll(absl::StrCat("CLIENT KILL LADDR 127.0.0.1:", port_, " SKIPME no\r\n")));
   EXPECT_EQ(first.ReadLine(), ":1\r\n");
   ExpectConditionWithinTimeout(
       [&] { return GetMetrics().facade_stats.conn_stats.num_conns_main == 0; });
@@ -503,7 +507,7 @@ TEST_F(ClientKillTest, SelfClosesAfterReply) {
       EXPECT_EQ(send_until_eof("MULTI\r\n", "PING\r\nSET k2 1\r\nEXEC\r\nSET k3 1\r\n"),
                 "+OK\r\n+QUEUED\r\n+QUEUED\r\n+QUEUED\r\n*3\r\n:1\r\n+PONG\r\n+OK\r\n");
     }
-    EXPECT_EQ(send_until_eof("PING\r\n", "SET k4 1\r\n", /*legacy=*/true), "+PONG\r\n:1\r\n");
+    EXPECT_EQ(send_until_eof("PING\r\n", "SET k4 1\r\n", /*legacy=*/true), "+PONG\r\n+OK\r\n");
 
     // A lone command is dispatched synchronously.
     EXPECT_EQ(send_until_eof("", ""), ":1\r\n");
@@ -515,6 +519,71 @@ TEST_F(ClientKillTest, SelfClosesAfterReply) {
     EXPECT_THAT(Run({"DEL", "k2"}), IntArg(1));
     EXPECT_THAT(Run({"DEL", "k1", "k3", "k4", "k5"}), IntArg(0));
   }
+}
+
+TEST_F(ClientKillTest, Filters) {
+  RawRespClient old{port_}, admin{admin_port_}, u1{port_}, u1_other{port_}, u2{port_},
+      monitor{port_}, caller{port_};
+  const std::string old_id = ClientId(old);
+  const time_t old_born = time(nullptr);
+  const std::string admin_id = ClientId(admin);
+  for (std::string_view user : {"u1", "u2"})
+    Run({"ACL", "SETUSER", user, "ON", "nopass", "+@all", "~*", "&*"});
+  for (RawRespClient* client : {&u1, &u1_other})
+    ASSERT_EQ(Call(*client, "AUTH u1 x"), "+OK\r\n");
+  ASSERT_EQ(Call(u2, "AUTH u2 x"), "+OK\r\n");
+  std::deque<RawRespClient> subs;
+  for (std::string_view cmd :
+       {"SUBSCRIBE ch", "PSUBSCRIBE ch", "SSUBSCRIBE ch", "HELLO 3\r\nSUBSCRIBE ch"}) {
+    RawRespClient& sub = subs.emplace_back(port_);
+    ASSERT_TRUE(Call(sub, cmd) && sub.ReadUntilContains("subscribe", 64));
+  }
+  ASSERT_EQ(Call(monitor, "MONITOR"), "+OK\r\n");
+
+  // A rejected command kills nothing; the counts below check it.
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "normal", "MAXAGE", "0"}),
+              ErrArg("maxage should be greater than 0"));
+  ASSERT_THAT(Run({"CLIENT", "KILL", "ID", admin_id}),
+              ErrArg("Killed 0 client(s), but unable to kill 1 admin client(s)."));
+  const std::vector<std::string> admin_info =
+      absl::StrSplit(Run({"CLIENT", "LIST", "ID", admin_id}).GetString(), absl::ByAnyChar(" ="));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "ADDR", admin_info.at(3)}), ErrArg("unable to kill 1 admin"));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "LADDR", absl::StrCat("127.0.0.1:", admin_port_)}),
+              ErrArg("unable to kill 1 admin"));
+  RawRespClient admin_replica{admin_port_};
+  ASSERT_TRUE(Call(admin_replica, "REPLCONF CAPA dragonfly"));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "replica"}), ErrArg("unable to kill 1 admin client"));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "slave"}), ErrArg("unable to kill 1 admin client"));
+  EXPECT_EQ(Call(admin, "CLIENT KILL TYPE replica"), ":1\r\n");
+  EXPECT_THAT(Run({"CLIENT", "KILL", "USER", "u1"}), IntArg(2));
+  EXPECT_TRUE(u1.ReadEof() && u1_other.ReadEof());
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "pubsub"}), IntArg(4));
+
+  // MAXAGE counts from the connection start, not from the last command.
+  while (time(nullptr) <= old_born)
+    absl::SleepFor(absl::Milliseconds(10));
+  ASSERT_EQ(Call(old, "PING"), "+PONG\r\n");
+  EXPECT_THAT(Run({"CLIENT", "KILL", "ID", old_id, "MAXAGE", "1", "LADDR", "1.2.3.4:5"}),
+              IntArg(0));
+  EXPECT_THAT(Run({"CLIENT", "KILL", "ID", old_id, "MAXAGE", "1"}), IntArg(1));
+
+  // Pipelined: the second kill usually runs while the first one's victims are still closing.
+  EXPECT_EQ(Call(caller, "CLIENT KILL TYPE normal\r\nCLIENT KILL TYPE normal"), ":2\r\n");
+  EXPECT_EQ(caller.ReadLine(), ":0\r\n");
+}
+
+// A half-closed peer marks the connection closing, yet only a kill ends its blocked send.
+TEST_F(ClientKillTest, KillsHalfClosedStuckSend) {
+  RawRespClient v{port_};
+  const std::string id = ClientId(v);
+  Run({"SET", "big", std::string(64 << 20, 'x')});
+  auto row = [&] { return Run({"CLIENT", "LIST", "ID", id}).GetString(); };
+  ASSERT_TRUE(v.SendAll("GET big\r\n"));
+  ExpectConditionWithinTimeout([&] { return absl::StrContains(row(), "phase=send"); });
+  ASSERT_TRUE(v.ShutdownWrite());
+  ExpectConditionWithinTimeout([&] { return absl::StrContains(row(), "flags=t"); });
+  EXPECT_THAT(Run({"CLIENT", "KILL", "ID", id}), IntArg(1));
+  ExpectConditionWithinTimeout([&] { return row().empty(); });
 }
 
 // Connections that move to another thread can not be borrowed.
