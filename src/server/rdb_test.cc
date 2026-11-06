@@ -1036,6 +1036,44 @@ TEST_F(RdbTest, SearchAliasesRoundTrip) {
   expect_aliases(expected_aliases);
 }
 
+TEST_F(RdbTest, SearchAliasAndAlterConsistency) {
+  absl::FlagSaver flags;
+  SetFlag(&FLAGS_num_shards, 1);
+  ResetService();
+
+  ASSERT_EQ(Run({"DEBUG", "POPULATE", "15000", "doc", "32", "TYPE", "HASH", "ELEMENTS", "1"}),
+            "OK");
+
+  // DEBUG POPULATE uses a field and value of 16 'x' characters for these hashes.
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", string(16, 'x'), "TEXT"}), "OK");
+  ASSERT_EQ(Run({"FT.ALIASADD", "idx-alias", "idx"}), "OK");
+
+  const auto aliases = pp_->at(0)->Await(
+      [&] { return RdbSaver::GetGlobalData(service_.get(), true).search_aliases; });
+  ASSERT_EQ(aliases.size(), 1);
+
+  atomic done{false};
+  bool consistent = true;
+  size_t samples = 0;
+  auto collector = pp_->at(1)->LaunchFiber([&] {
+    while (!done.load(memory_order_relaxed)) {
+      auto data = RdbSaver::GetGlobalData(service_.get(), true);
+      if (data.search_indices.size() != 1 || data.search_aliases != aliases)
+        consistent = false;
+      ++samples;
+    }
+  });
+
+  // Repeatedly restart the build to give metadata collection chances to observe cancellation.
+  for (unsigned i = 0; i < 20; ++i)
+    EXPECT_EQ(Run({"FT.ALTER", "idx", "SCHEMA", "ADD", StrCat("field", i), "TEXT"}), "OK");
+  done.store(true, memory_order_relaxed);
+  collector.Join();
+
+  EXPECT_GT(samples, 0);
+  EXPECT_TRUE(consistent);
+}
+
 // Users choose names, prefixes, stop words, separators and synonym terms, spaces and tabs included.
 TEST_F(RdbTest, SearchDefinitionsWithSpacesSurviveReload) {
   ASSERT_EQ(Run({"FT.CREATE", "my idx", "ON",        "JSON", "PREFIX",    "2",
