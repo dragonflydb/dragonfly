@@ -314,6 +314,10 @@ void SliceSnapshot::ConsumeJournalChange(const journal::JournalChangeItem& item)
 }
 
 void SliceSnapshot::ThrottleIfNeeded() {
+  // Without tagged chunks, an entry holds stream_mu_ while it may suspend mid-entry (e.g. reading a
+  // tiered list node). Flushing then would cut it, so leave the flush to a later call.
+  if (stream_mu_.is_locked())
+    return;
   PushSerialized(false);
 }
 

@@ -1982,7 +1982,8 @@ template <typename F> std::error_code RdbSerializer::ConsumeAround(F&& fn) {
 
   const auto id = mem_buf_controller_.SaveStateBeforeConsume();
   std::error_code ec = blob.empty() ? std::error_code{} : consume_fun_(std::move(blob));
-  fn();
+  if (!ec)
+    fn();
   mem_buf_controller_.RestoreStateAfterConsume(id);
   return ec;
 }
