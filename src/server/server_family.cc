@@ -766,10 +766,13 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
 
   auto evaluator = [&](facade::Connection* conn) {
     auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
+
+    // Each address costs a syscall; read it only for an ADDR or LADDR filter.
     return filter->Matches(conn->GetClientId(), ClassifyConnection(conn),
                            cntx ? optional<string_view>{cntx->authed_username} : nullopt,
-                           now - conn->creation_time(), conn->RemoteEndpointStr(),
-                           conn->LocalBindStr());
+                           now - conn->creation_time(),
+                           filter->addr ? conn->RemoteEndpointStr() : string{},
+                           filter->laddr ? conn->LocalBindStr() : string{});
   };
 
   // HTTP API connections have no close-after-reply path.
