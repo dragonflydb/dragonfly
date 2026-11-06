@@ -481,9 +481,9 @@ class CompactObj {
 
   using FreeHook = absl::FunctionRef<void(CompactObj&)>;
 
-  // Registers a hook for the target's destruction in SetMeta, for cases where an object type is
+  // Registers a thread-local hook for destruction in SetMeta, for cases where an object type is
   // replaced, such as SET overwriting another type to string. Requires no existing registration.
-  static void RegisterDeallocateHandler(const CompactObj& target, FreeHook handler);
+  static void RegisterDeallocateHandler(FreeHook handler);
 
   // Clears the current thread's hook. Requires an existing registration.
   static void DeregisterDeallocateHandler();

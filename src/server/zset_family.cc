@@ -274,7 +274,7 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
     }
 
     if (!add_res.is_new && old_type != OBJ_ZSET) {
-      TrackOldValueFree track_free(pv, old_type);
+      TrackOldValueFree track_free(old_type);
       pv.InitRobj(OBJ_ZSET, encoding, robj_ptr);
     } else {
       pv.InitRobj(OBJ_ZSET, encoding, robj_ptr);

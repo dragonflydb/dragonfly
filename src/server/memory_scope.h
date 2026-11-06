@@ -65,8 +65,8 @@ class AtomicMemoryScope {
 // created, the next free of old type will be wrapped in scope.
 class TrackOldValueFree {
  public:
-  TrackOldValueFree(const CompactObj& target, int old_type) : old_type_(old_type) {
-    CompactObj::RegisterDeallocateHandler(target, CompactObj::FreeHook{*this});
+  explicit TrackOldValueFree(int old_type) : old_type_(old_type) {
+    CompactObj::RegisterDeallocateHandler(CompactObj::FreeHook{*this});
   }
 
   ~TrackOldValueFree() {

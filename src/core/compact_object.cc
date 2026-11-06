@@ -489,18 +489,15 @@ class CompactObjBorrowOps : public cmn::BorrowedStringOps {
 CompactObjBorrowOps g_borrow_ops;
 
 struct DeallocRegistration {
-  const CompactObj* target = nullptr;
   std::optional<CompactObj::FreeHook> handler;
 
-  void Register(const CompactObj& new_target, CompactObj::FreeHook new_handler) {
+  void Register(CompactObj::FreeHook new_handler) {
     DCHECK(!handler) << "A handler is already registered.";
-    target = &new_target;
     handler = new_handler;
   }
 
   void Deregister() {
     DCHECK(handler) << "No handler to deregister";
-    target = nullptr;
     handler.reset();
   }
 };
@@ -633,8 +630,8 @@ void CompactObj::ClearThreadLocalStats() {
   tl.small_str_bytes = 0;
 }
 
-void CompactObj::RegisterDeallocateHandler(const CompactObj& target, FreeHook handler) {
-  tl.dealloc_registration.Register(target, handler);
+void CompactObj::RegisterDeallocateHandler(FreeHook handler) {
+  tl.dealloc_registration.Register(handler);
 }
 
 void CompactObj::DeregisterDeallocateHandler() {
@@ -1503,7 +1500,6 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
 void CompactObj::SetMeta(uint8_t taglen, uint8_t mask) {
   if (HasAllocated()) {
     if (tl.dealloc_registration.handler) {
-      DCHECK_EQ(tl.dealloc_registration.target, this);
       // Calls Free() wrapped in AtomicMemoryScope of old type, in case old type is being replaced
       // by a new type. See src/server/memory_scope.h and TrackOldValueFree
       (*tl.dealloc_registration.handler)(*this);
