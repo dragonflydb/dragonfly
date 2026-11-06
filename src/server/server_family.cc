@@ -1278,7 +1278,7 @@ bool ValidateServerTlsFlags() {
     has_auth = true;
   }
 
-  if (acl::JwtValidator::IsEnabled()) {
+  if (acl::AuthValidator::IsEnabled()) {
     has_auth = true;
   }
 
@@ -2367,14 +2367,13 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
   CHECK(registry);
 
   bool is_authorized = false;
-  std::string jwt_username;
+  std::string external_username;
   auto auth_expires_at = std::chrono::steady_clock::time_point::max();
-  if (acl::JwtValidator::IsEnabled()) {
-    acl::JwtValidator jwt;
-    auto claims = jwt.Validate(password);
+  if (acl::AuthValidator::IsEnabled()) {
+    auto claims = acl::AuthValidator{}.Validate(username, password);
     if (claims) {
-      jwt_username = std::move(claims->username);
-      username = jwt_username;
+      external_username = std::move(claims->username);
+      username = external_username;
       is_authorized = registry->IsUserActive(username);
       auth_expires_at = claims->expires_at;
     }

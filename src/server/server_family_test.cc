@@ -16,9 +16,12 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "common/heap_size.h"
+#include "core/json/json_object.h"
 #include "facade/facade_test.h"
 #include "facade/socket_utils.h"
 #include "server/test_utils.h"
+#include "util/accept_server.h"
+#include "util/http/http_handler.h"
 
 using namespace testing;
 using namespace std;
@@ -32,6 +35,8 @@ ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(bool, jwt_validate);
 ABSL_DECLARE_FLAG(string, jwt_validate_url);
+ABSL_DECLARE_FLAG(bool, auth_validate);
+ABSL_DECLARE_FLAG(string, auth_validate_url);
 
 namespace dfly {
 
@@ -1232,7 +1237,72 @@ TEST_F(ServerFamilyTest, InfoClusterMigrationErrors) {
   EXPECT_THAT(Run({"INFO", "CLUSTER"}).GetString(), HasSubstr("migration_errors_total:0"));
 }
 
-TEST_F(ServerFamilyTest, TlsAcceptsConfiguredJwtValidation) {
+TEST_F(ServerFamilyTest, ExternalAuth) {
+  absl::FlagSaver flag_saver;
+  EXPECT_THAT(Run({"ACL", "SETUSER", "alice", "on", ">local", "+@all", "~*"}), "OK");
+  EXPECT_THAT(Run({"ACL", "SETUSER", "directory-user", "on", ">local"}), "OK");
+  AcceptServer server{pp_.get(), false};
+  auto* listener = new HttpListener<>;
+  const string password = "pass\"\\word";
+  const string token = "eyJ.mock.token";
+  listener->RegisterCb("/validate", [&](const http::QueryArgs&, HttpListenerBase::RequestType&& req,
+                                        HttpContext* ctx) {
+    EXPECT_EQ(req.method(), beast::http::verb::post);
+    auto body = JsonFromString(req.body());
+    ASSERT_TRUE(body);
+    const bool token_only = body->contains("token");
+    const string credential = body->at(token_only ? "token" : "password").as_string();
+    EXPECT_EQ(body->size(), token_only ? 1 : 2);
+    if (!token_only) {
+      EXPECT_EQ(body->at("username").as_string(),
+                credential == token ? "default" : "directory-user");
+    }
+    auto response = http::MakeStringResponse(beast::http::status::ok);
+    response.body() = credential == password || credential == token
+                          ? R"({"valid":true,"username":"alice"})"
+                          : R"({"valid":false})";
+    ctx->Invoke(std::move(response));
+  });
+  const auto port = server.AddListener(0, listener);
+  server.Run();
+  absl::Cleanup stop_server = [&] { server.Stop(true); };
+  const string url = absl::StrCat("http://localhost:", port, "/validate");
+  absl::SetFlag(&FLAGS_auth_validate, true);
+  absl::SetFlag(&FLAGS_auth_validate_url, url);
+  absl::SetFlag(&FLAGS_jwt_validate, true);
+  absl::SetFlag(&FLAGS_jwt_validate_url, "invalid");
+
+  pp_->at(0)->Await([&] {
+    AddFindConn(Protocol::REDIS, "ldap");
+    auto* connection = GetConnection("ldap");
+    ASSERT_FALSE(connection->socket()->Create());
+    absl::Cleanup close_socket = [&] { EXPECT_FALSE(connection->socket()->Close()); };
+    unique_ptr<facade::ConnectionContext> context{service_->CreateContext(connection)};
+    EXPECT_TRUE(context->req_auth);
+    connection->cntx()->req_auth = context->req_auth;
+  });
+  EXPECT_THAT(Run("ldap", {"PING"}), ErrArg("NOAUTH Authentication required."));
+  EXPECT_THAT(Run("ldap", {"AUTH", "directory-user", "local"}),
+              ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
+  EXPECT_THAT(Run("ldap", {"AUTH", "directory-user", password}), "OK");
+  EXPECT_THAT(Run("ldap", {"ACL", "WHOAMI"}), "User is alice");
+  EXPECT_THAT(Run("token", {"AUTH", token}), "OK");
+  EXPECT_THAT(Run("token", {"ACL", "WHOAMI"}), "User is alice");
+  absl::SetFlag(&FLAGS_auth_validate_url, "");
+  EXPECT_THAT(Run("ldap", {"AUTH", "directory-user", "local"}),
+              ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
+  absl::SetFlag(&FLAGS_auth_validate_url, url);
+  EXPECT_THAT(Run({"ACL", "SETUSER", "alice", "off"}), "OK");
+  EXPECT_THAT(Run("disabled", {"AUTH", "directory-user", password}),
+              ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
+
+  EXPECT_THAT(Run({"ACL", "SETUSER", "alice", "on"}), "OK");
+  absl::SetFlag(&FLAGS_auth_validate, false);
+  absl::SetFlag(&FLAGS_jwt_validate_url, url);
+  EXPECT_THAT(Run("legacy-jwt", {"AUTH", token}), "OK");
+}
+
+TEST_F(ServerFamilyTest, TlsAcceptsConfiguredExternalValidation) {
   absl::FlagSaver flag_saver;
   const char* password_env = getenv("DFLY_PASSWORD");
   const bool had_password_env = password_env != nullptr;
@@ -1249,12 +1319,18 @@ TEST_F(ServerFamilyTest, TlsAcceptsConfiguredJwtValidation) {
   absl::SetFlag(&FLAGS_tls_ca_cert_file, "");
   absl::SetFlag(&FLAGS_tls_ca_cert_dir, "");
   unsetenv("DFLY_PASSWORD");
+  absl::SetFlag(&FLAGS_auth_validate, false);
   absl::SetFlag(&FLAGS_jwt_validate, false);
   absl::SetFlag(&FLAGS_jwt_validate_url, "");
   EXPECT_FALSE(ValidateServerTlsFlags());
 
   absl::SetFlag(&FLAGS_jwt_validate, true);
   absl::SetFlag(&FLAGS_jwt_validate_url, "http://localhost:8080/validate");
+  EXPECT_TRUE(ValidateServerTlsFlags());
+
+  absl::SetFlag(&FLAGS_jwt_validate, false);
+  absl::SetFlag(&FLAGS_auth_validate, true);
+  absl::SetFlag(&FLAGS_auth_validate_url, "http://localhost:8080/validate");
   EXPECT_TRUE(ValidateServerTlsFlags());
 }
 
