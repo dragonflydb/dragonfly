@@ -220,9 +220,11 @@ void SliceSnapshot::PaceTraversal(bool done) {
   }
 
   // Between buckets no dependency is held, so this is where the traversal waits for the sink.
-  // It stays well below the limit, leaving the room to the mutation path, whose chunks queued
-  // meanwhile do not extend the wait: sustained writes can not stall the traversal for good.
-  writer_.WaitBelow(writer_.limit() / 4);
+  // One queued chunk keeps the sink busy, so the traversal queues no more than that and leaves
+  // the room, and the memory, to the mutation path. Mutation chunks queued meanwhile do not
+  // extend the wait: sustained writes can not stall the traversal for good.
+  writer_.WaitBelow(
+      min(writer_.limit() / 4, size_t(ServerState::tlocal()->serialization_max_chunk_size)));
 }
 
 void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
