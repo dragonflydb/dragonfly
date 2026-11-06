@@ -47,11 +47,8 @@ class GatedSink {
   vector<string> written_;
 };
 
-// The queue accounts strings by capacity, so build chunks whose capacity is known.
 string Chunk(char c, size_t size) {
-  string s(size, c);
-  s.shrink_to_fit();
-  return s;
+  return string(size, c);
 }
 
 string Chunk(char c) {
@@ -158,18 +155,27 @@ TEST_F(QueuedSinkWriterTest, RaisingLimitReleasesProducers) {
 
 // Push returns at once while the queue holds at most the limit, and blocks above it.
 TEST_F(QueuedSinkWriterTest, LimitBoundsPush) {
-  StartWriter(2500);
-  writer_.Push(Chunk('a'));
-  writer_.Push(Chunk('b'));
-  EXPECT_EQ(writer_.pending_bytes(), 2000u);
+  string a = Chunk('a');
+  string b = Chunk('b');
+  string c = Chunk('c');
+
+  // Include unused capacity in the queued byte count.
+  a.reserve(2 * a.size());
+  const size_t limit = a.capacity() + b.capacity();
+  const size_t total_bytes = limit + c.capacity();
+  StartWriter(limit);
+  writer_.Push(std::move(a));
+  writer_.Push(std::move(b));
+  EXPECT_EQ(writer_.pending_bytes(), limit);
 
   bool pushed = false;
   fb2::Fiber producer([&] {
-    writer_.Push(Chunk('c'));
+    writer_.Push(std::move(c));
     pushed = true;
   });
   ThisFiber::SleepFor(1ms);
   EXPECT_FALSE(pushed);
+  EXPECT_EQ(writer_.pending_bytes(), total_bytes);
 
   sink_.Open();
   producer.Join();
