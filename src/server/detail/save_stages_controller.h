@@ -7,6 +7,7 @@
 
 #include <filesystem>
 
+#include "server/journal/aof_manifest.h"
 #include "server/rdb_save.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 
@@ -36,6 +37,8 @@ struct SaveStagesInputs {
   std::shared_ptr<SnapshotStorage> snapshot_storage_;
   // true if the command that triggered this flow is bgsave. false otherwise.
   bool is_bg_save_;
+  // A local DFS save under --aof: it becomes the AOF checkpoint.
+  bool aof_checkpoint_ = false;
 };
 
 class RdbSnapshot {
@@ -106,13 +109,19 @@ struct SaveStagesController : public SaveStagesInputs {
     return is_bg_save_;
   }
 
+  // The checkpoint's cut on each shard.
+  const std::vector<AofManifest::Cut>& aof_cuts() const {
+    return aof_cuts_;
+  }
+
  private:
   // In the new version (.dfs) we store a file for every shard and one more summary file.
   // Summary file is always last in snapshots array.
   void SaveDfs();
 
   // Start saving a dfs file on shard
-  void SaveDfsSingle(EngineShard* shard, const std::string& snapshot_id);
+  void SaveDfsSingle(EngineShard* shard, const std::string& snapshot_id,
+                     const RdbSaver::GlobalData& glob_data);
   void SaveSnashot(EngineShard* shard);
   void WaitSnapshotInShard(EngineShard* shard);
 
@@ -123,6 +132,16 @@ struct SaveStagesController : public SaveStagesInputs {
 
   // Remove .tmp extension or delete files in case of error
   GenericError FinalizeFileMovement();
+
+  // The AOF checkpoint steps; no-ops for other saves.
+  // Waits for every shard's AOF spare and checks that the save cannot rename over the base.
+  GenericError PrepareAofCheckpoint();
+
+  // Rotates the shard's AOF at the snapshot's start; never yields.
+  void TakeAofCut(EngineShard* shard);
+
+  // fdatasyncs the snapshot files, so the base is durable before the renames.
+  std::error_code SyncAofBaseFiles();
 
   // Build full path: get dir, try creating dirs, get filename with placeholder
   GenericError BuildFullPath();
@@ -141,6 +160,8 @@ struct SaveStagesController : public SaveStagesInputs {
 
   absl::flat_hash_map<string_view, size_t> rdb_name_map_;
   util::fb2::Mutex rdb_name_map_mu_;
+
+  std::vector<AofManifest::Cut> aof_cuts_;
 };
 
 GenericError ValidateFilename(const std::filesystem::path& filename, bool new_version);

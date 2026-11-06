@@ -118,6 +118,15 @@ void AofStreamer::PrepareSpare(uint64_t seq) {
   });
 }
 
+void AofStreamer::OnCheckpoint(uint64_t cut_lsn) {
+  // The retirement of the segment the cut left may still run.
+  spare_fb_.JoinIfNeeded();
+  LOG_IF(INFO, retired_ec_) << "AOF checkpoint at lsn " << cut_lsn << " ends the failed state of "
+                            << "shard " << shard_id_;
+  retired_ec_.clear();
+  prev_durable_lsn_ = max(prev_durable_lsn_, cut_lsn - 1);
+}
+
 uint64_t AofStreamer::DurableLsn() const {
   // A retirement in progress, or one that failed: nothing past the old segment counts. A failure
   // holds until a committed checkpoint supersedes the segment.
