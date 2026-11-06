@@ -36,6 +36,16 @@ ABSL_FLAG(uint32_t, jwt_validate_timeout_ms, 300,
           "built-in timeout. A validator that doesn't respond in time causes AUTH to "
           "be rejected rather than left waiting indefinitely.");
 
+ABSL_FLAG(bool, ldap_validate, false,
+          "Validate AUTH username/password via --ldap_validate_url (startup-only). "
+          "JWT mode takes precedence when both modes are enabled.");
+ABSL_FLAG(std::string, ldap_validate_url, "",
+          "Trusted HTTP LDAP agent URL. POST JSON {username, password}; reply with "
+          "{valid: bool, username: string, exp: unix seconds (optional)}. The returned "
+          "username must name a pre-provisioned ACL user. No TLS or local caching.");
+ABSL_FLAG(uint32_t, ldap_validate_timeout_ms, 300,
+          "LDAP validation HTTP timeout (ms); timeout rejects AUTH.");
+
 namespace dfly::acl {
 
 using namespace std;
@@ -78,35 +88,11 @@ optional<ParsedUrl> ParseHttpUrl(string_view url) {
   return out;
 }
 
-}  // namespace
-
-bool JwtValidator::IsEnabled() {
-  if (!absl::GetFlag(FLAGS_jwt_validate))
-    return false;
-  if (absl::GetFlag(FLAGS_jwt_validate_url).empty()) {
-    // Misconfigured: fall back to password auth rather than reject every AUTH.
-    LOG_FIRST_N(ERROR, 1)
-        << "jwt_validate is enabled but jwt_validate_url is empty; falling back to "
-           "password auth until jwt_validate_url is configured (requires a restart)";
-    return false;
-  }
-  return true;
-}
-
-void JwtValidator::SetValidateFuncForTest(
-    std::function<std::optional<ValidationResult>(std::string_view)> f) {
-  validate_override_ = std::move(f);
-}
-
-optional<JwtValidator::ValidationResult> JwtValidator::Validate(string_view token) {
-  if (validate_override_) {
-    return validate_override_(token);
-  }
-
-  const string url = absl::GetFlag(FLAGS_jwt_validate_url);
+optional<JwtValidator::ValidationResult> ValidateRequest(const string& url, uint32_t timeout_ms,
+                                                         const TmpJson& body) {
   optional<ParsedUrl> parsed = ParseHttpUrl(url);
   if (!parsed) {
-    LOG_FIRST_N(ERROR, 1) << "jwt_validate_url is set but not a valid http:// URL: " << url;
+    LOG_FIRST_N(ERROR, 1) << "External auth validation URL is not a valid http:// URL";
     return nullopt;
   }
 
@@ -116,40 +102,39 @@ optional<JwtValidator::ValidationResult> JwtValidator::Validate(string_view toke
   bh::request<bh::string_body> req{bh::verb::post, parsed->path, 11 /*http 1.1*/};
   req.set(bh::field::host, parsed->host);
   req.set(bh::field::content_type, "application/json");
-  TmpJson body{jsoncons::json_object_arg};
-  body["token"] = string(token);
   req.body() = body.to_string();
   req.prepare_payload();
 
   ProactorBase* proactor = ProactorBase::me();
-  DCHECK(proactor) << "JwtValidator::Validate must run on a proactor fiber";
+  DCHECK(proactor) << "External auth validation must run on a proactor fiber";
 
   Client client{proactor};
   // Bounds connect+send+recv (see romange/helio#645); only blocks the calling fiber.
-  client.set_timeout_ms(absl::GetFlag(FLAGS_jwt_validate_timeout_ms));
+  client.set_timeout_ms(timeout_ms);
 
   std::error_code connect_ec = client.Connect(parsed->host, parsed->port);
   if (connect_ec) {
-    LOG_EVERY_N(WARNING, 100) << "JWT validation - connection error to " << parsed->host << ":"
-                              << parsed->port << ": " << connect_ec.message();
+    LOG_EVERY_N(WARNING, 100) << "External auth validation - connection error to " << parsed->host
+                              << ":" << parsed->port << ": " << connect_ec.message();
     return nullopt;
   }
 
   ResponseType res;
   Client::BoostError send_ec = client.Send(req, &res);
   if (send_ec) {
-    LOG_EVERY_N(WARNING, 100) << "JWT validation - HTTP request error: " << send_ec.message();
+    LOG_EVERY_N(WARNING, 100) << "External auth validation - HTTP request error: "
+                              << send_ec.message();
     return nullopt;
   }
 
   if (res.result() != bh::status::ok) {
-    VLOG(1) << "JWT validation - API rejected token, status " << res.result();
+    VLOG(1) << "External auth validation - API rejected credentials, status " << res.result();
     return nullopt;
   }
 
   std::optional<TmpJson> parsed_body = JsonFromString(res.body());
   if (!parsed_body) {
-    LOG_EVERY_N(WARNING, 100) << "JWT validation - malformed (non-JSON) API response";
+    LOG_EVERY_N(WARNING, 100) << "External auth validation - malformed (non-JSON) API response";
     return nullopt;
   }
   if (!parsed_body->contains("valid") || !parsed_body->at("valid").is_bool() ||
@@ -157,10 +142,10 @@ optional<JwtValidator::ValidationResult> JwtValidator::Validate(string_view toke
     return nullopt;
   }
   if (!parsed_body->contains("username") || !parsed_body->at("username").is_string()) {
-    LOG_EVERY_N(WARNING, 100) << "JWT validation - API response missing 'username' field";
+    LOG_EVERY_N(WARNING, 100) << "External auth validation - API response missing 'username' field";
     return nullopt;
   }
-  ValidationResult result{parsed_body->at("username").as_string()};
+  JwtValidator::ValidationResult result{parsed_body->at("username").as_string()};
 
   // "exp" (optional) determines how long the connection stays authenticated before a
   // reauth is required (see ConnectionContext::auth_expires_at).
@@ -180,6 +165,51 @@ optional<JwtValidator::ValidationResult> JwtValidator::Validate(string_view toke
   // the API's wall-clock "exp".
   result.expires_at = chrono::steady_clock::now() + (exp_wall - now_wall);
   return result;
+}
+
+}  // namespace
+
+bool JwtValidator::IsEnabled() {
+  if (!absl::GetFlag(FLAGS_jwt_validate))
+    return false;
+  if (absl::GetFlag(FLAGS_jwt_validate_url).empty()) {
+    LOG_FIRST_N(ERROR, 1) << "jwt_validate_url is empty; falling back to password auth";
+    return false;
+  }
+  return true;
+}
+
+void JwtValidator::SetValidateFuncForTest(
+    std::function<std::optional<ValidationResult>(std::string_view)> f) {
+  validate_override_ = std::move(f);
+}
+
+optional<JwtValidator::ValidationResult> JwtValidator::Validate(string_view token) {
+  if (validate_override_)
+    return validate_override_(token);
+  TmpJson body{jsoncons::json_object_arg};
+  body["token"] = string(token);
+  return ValidateRequest(absl::GetFlag(FLAGS_jwt_validate_url),
+                         absl::GetFlag(FLAGS_jwt_validate_timeout_ms), body);
+}
+
+bool LdapValidator::IsEnabled() {
+  if (!absl::GetFlag(FLAGS_ldap_validate))
+    return false;
+  if (absl::GetFlag(FLAGS_ldap_validate_url).empty()) {
+    LOG_FIRST_N(ERROR, 1) << "ldap_validate_url is empty; falling back to password auth";
+    return false;
+  }
+  return true;
+}
+
+optional<JwtValidator::ValidationResult> LdapValidator::Validate(string_view username,
+                                                                 string_view password) {
+  TmpJson body{jsoncons::json_object_arg};
+  body["username"] = string(username);
+  body["password"] = string(password);
+  return ValidateRequest(absl::GetFlag(FLAGS_ldap_validate_url),
+                         absl::GetFlag(FLAGS_ldap_validate_timeout_ms), body);
 }
 
 }  // namespace dfly::acl

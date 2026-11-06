@@ -38,4 +38,12 @@ class JwtValidator {
   std::function<std::optional<ValidationResult>(std::string_view)> validate_override_;
 };
 
+// Delegates username/password validation to a trusted HTTP LDAP agent.
+class LdapValidator {
+ public:
+  static bool IsEnabled();
+  std::optional<JwtValidator::ValidationResult> Validate(std::string_view username,
+                                                         std::string_view password);
+};
+
 }  // namespace dfly::acl
