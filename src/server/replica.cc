@@ -1458,7 +1458,7 @@ int Replica::GetMasterSocketUnreadBytes() {
   return GetSocketUnreadBytes();
 }
 
-string Replica::GetClientInfo() const {
+facade::ClientInfo Replica::GetClientInfo() const {
   auto f = [this]() {
     facade::ClientInfo ci;
     time_t now = time(nullptr);
@@ -1492,7 +1492,7 @@ string Replica::GetClientInfo() const {
     ci.db = 0;
     ci.flags = "M";
     ci.repl_phase = absl::AsciiStrToLower(GetCurrentPhase());
-    return facade::FormatClientInfo(ci);
+    return ci;
   };
   return proactor_->AwaitBrief(f);
 }
