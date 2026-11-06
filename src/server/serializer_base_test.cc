@@ -10,6 +10,7 @@
 #include <gtest/gtest.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <chrono>
@@ -302,6 +303,18 @@ unsigned TestDriver::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterat
   }
   return serialized;
 }
+
+namespace {
+
+unsigned MaxAccountedUsec(const base::CycleBucketAggregator& aggregator, uint64_t start,
+                          uint64_t end) {
+  unsigned accounted_usec = aggregator.Usec10ms(end);
+  for (uint64_t sample = start; sample < end; sample += base::CycleClock::FromUsec(1'000))
+    accounted_usec = std::max(accounted_usec, aggregator.Usec10ms(sample));
+  return accounted_usec;
+}
+
+}  // namespace
 
 class SerializerBaseTest : public BaseFamilyTest {
  public:
@@ -706,6 +719,69 @@ TEST_F(SerializerBaseTest, MigrationCancellationWaitsForTraversal) {
 TEST_F(SerializerBaseTest, DelayedEntriesErrorReleasesLatches) {
   Run({"DEBUG", "POPULATE", "1"});
   EXPECT_FALSE(DelayedErrorLeavesBlocked());
+}
+
+// Outgoing migrations and slot cleanup share their shard's CPU budget, which is charged only for
+// the time they run.
+TEST_F(SerializerBaseTest, MigrationCpuBudget) {
+  struct BlockingMigration : SlotMigrationStreamer {
+    using SerializerBase::SerializeFetchedEntry;
+    using SlotMigrationStreamer::SlotMigrationStreamer;
+
+    // Blocks like a migration writing to a slow target, then works for 250us.
+    void SerializeEntryLocked(DbIndex, const PrimeKey&, const PrimeValue&, time_t,
+                              uint32_t) override {
+      unblocked.Wait();
+      const uint64_t start = base::CycleClock::Now();
+      while (base::CycleClock::Now() - start < base::CycleClock::FromUsec(250)) {
+      }
+    }
+
+    util::fb2::Done unblocked;
+  };
+
+  Run({"DEBUG", "POPULATE", "10000"});
+  pp_->at(0)->Await([this] {
+    auto& slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
+    const auto& budget = slice.shard_owner()->migration_cpu_aggregator();
+
+    uint64_t start = base::CycleClock::Now();
+    WithShardLock([](DbSlice& locked_slice, CommandRegistry*) {
+      locked_slice.FlushSlots(cluster::SlotRanges{std::vector<cluster::SlotRange>{{0, 16383}}});
+    });
+
+    unsigned cleanup_usec = 0;
+    do {
+      util::ThisFiber::SleepFor(100us);
+      cleanup_usec =
+          std::max(cleanup_usec, MaxAccountedUsec(budget, start, base::CycleClock::Now()));
+    } while (slice.HasRegisteredCallbacks());
+
+    EXPECT_EQ(slice.databases().front()->prime.size(), 0u);
+    EXPECT_GT(cleanup_usec, 0u);
+
+    // Measure the migration in a window without the cleanup's charges.
+    while (budget.Usec10ms() > 0)
+      util::ThisFiber::SleepFor(1ms);
+
+    ExecutionState cntx;
+    BlockingMigration migration{&slice, cluster::SlotSet{}, &cntx};
+    TieredDelayedEntry entry{0, PrimeKey{"key"}, {}, 0, 0};
+
+    start = base::CycleClock::Now();
+    util::fb2::Fiber serialize{util::fb2::Launch::dispatch,
+                               [&] { migration.SerializeFetchedEntry(entry, PrimeValue{}); }};
+    util::ThisFiber::SleepFor(2ms);
+    const uint64_t unblocked = base::CycleClock::Now();
+    migration.unblocked.Notify();
+    serialize.Join();
+    const uint64_t end = base::CycleClock::Now();
+
+    // The work is charged, but not the time the migration was blocked.
+    const unsigned accounted_usec = MaxAccountedUsec(budget, start, end);
+    EXPECT_GE(accounted_usec, 250u);
+    EXPECT_LE(accounted_usec, base::CycleClock::ToUsec(end - unblocked));
+  });
 }
 
 // A cancelled traversal must discard pending offloaded entries, not leak their bucket latches.
