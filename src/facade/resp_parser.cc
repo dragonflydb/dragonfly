@@ -113,7 +113,7 @@ std::optional<RESPObj> RESPParser::Feed(const char* data, size_t len, size_t* co
   // The peer controls this data, so only log a bounded prefix of it.
   auto log_error = [this, data, len](int status) {
     constexpr size_t kMaxLoggedData = 256;
-    std::string_view sv = data ? std::string_view{data, len} : std::string_view{};
+    std::string_view sv = data ? std::string_view{data, len} : std::string_view{""};
     LOG(ERROR) << "RESP parser error: " << status << " description: " << reader_->errstr
                << " data: " << sv.substr(0, kMaxLoggedData);
   };
