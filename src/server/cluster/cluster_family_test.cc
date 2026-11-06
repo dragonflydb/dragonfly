@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <iterator>
+#include <random>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -24,6 +25,7 @@
 #include "core/detail/gen_utils.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "facade/facade_test.h"
+#include "server/cluster_support.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -32,6 +34,10 @@
 #include "server/test_utils.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
+
+extern "C" {
+#include "redis/crc16.h"
+}
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
@@ -1392,6 +1398,50 @@ TEST_F(ClusterFamilyTest, Keyslot) {
 
   EXPECT_EQ(CheckedInt({"cluster", "keyslot", "abc{def}ghi"}),
             CheckedInt({"cluster", "keyslot", "123{def}456"}));
+
+  EXPECT_EQ(0, KeySlot(string_view{}));
+  EXPECT_EQ(0, KeySlot(""));
+  EXPECT_EQ(0x31C3, KeySlot("123456789"));  // The CRC16-XMODEM check value.
+}
+
+// Whether Crc16() and each of its kernels compute the same CRC of data as the table-driven crc16()
+// of Redis, in all 16 bits rather than only the 14 that KeySlot() keeps. Crc16() only runs the
+// fastest kernel the CPU supports, so the kernels are also called directly.
+AssertionResult Crc16MatchesRedis(string_view data) {
+  const uint16_t expected = crc16(data.data(), data.size());
+  if (detail::Crc16(data) != expected)
+    return AssertionFailure() << "Crc16() differs";
+  if (detail::impl::Crc16Scalar(data) != expected)
+    return AssertionFailure() << "Crc16Scalar() differs";
+#ifdef DFLY_CRC16_HAS_CLMUL
+  if (detail::impl::kSupportsClmul() && detail::impl::Crc16Clmul(data) != expected)
+    return AssertionFailure() << "Crc16Clmul() differs";
+#endif
+  return AssertionSuccess();
+}
+
+TEST(Crc16Test, MatchesRedis) {
+  // Every input of up to 3 bytes.
+  for (size_t len = 0; len <= 3; ++len) {
+    for (uint32_t value = 0; value < (1u << (8 * len)); ++value) {
+      const char bytes[] = {static_cast<char>(value), static_cast<char>(value >> 8),
+                            static_cast<char>(value >> 16)};
+      ASSERT_TRUE(Crc16MatchesRedis({bytes, len})) << "len " << len << " value " << value;
+    }
+  }
+
+  // Random bytes of every length up to 256, which takes the kernels down each of their paths, at 16
+  // alignments. Each input ends its allocation, so ASAN catches a kernel reading past it.
+  std::mt19937 rng(42);
+  for (size_t len = 0; len <= 256; ++len) {
+    for (size_t offset = 0; offset < 16; ++offset) {
+      vector<char> buf(offset + len);
+      for (char& c : buf)
+        c = static_cast<char>(rng());
+      ASSERT_TRUE(Crc16MatchesRedis({buf.data() + offset, len}))
+          << "len " << len << " offset " << offset;
+    }
+  }
 }
 
 TEST_F(ClusterFamilyTest, FlushSlots) {
@@ -1854,6 +1904,44 @@ TEST_F(ClusterFamilyTest, MigrationFlowMatchesNoClientType) {
     EXPECT_THAT(Run("flow", {"CLIENT", "KILL", "TYPE", type, "SKIPME", "no"}), IntArg(0)) << type;
   EXPECT_THAT(Run("flow", {"CLIENT", "KILL", "SKIPME", "no"}), IntArg(1));
 }
+
+static uint16_t RedisCrc16(string_view data) {
+  return crc16(data.data(), data.size());
+}
+
+// Each Crc16 kernel next to the table-driven crc16() of Redis, and KeySlot() with its hash-tag
+// lookup on top of the dispatched kernel.
+template <auto crc16_fn> static void BM_Crc16(benchmark::State& state) {
+  if constexpr (detail::impl::kHasClmul && crc16_fn == detail::impl::Crc16Clmul) {
+    if (!detail::impl::kSupportsClmul()) {
+      state.SkipWithError("The CPU lacks carry-less multiplication");
+      return;
+    }
+  }
+
+  string data(state.range(0), '\0');
+  std::mt19937 rng(42);
+  for (char& c : data)
+    c = 'a' + rng() % 26;
+
+  while (state.KeepRunning())
+    benchmark::DoNotOptimize(crc16_fn(data));
+  state.SetBytesProcessed(state.iterations() * data.size());
+}
+
+static void Crc16Args(benchmark::Benchmark* benchmark) {
+  benchmark->ArgName("len");
+  for (int len : {1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 48, 64, 65, 128, 256, 1024})
+    benchmark->Arg(len);
+}
+
+BENCHMARK_TEMPLATE(BM_Crc16, RedisCrc16)->Apply(Crc16Args);
+BENCHMARK_TEMPLATE(BM_Crc16, detail::impl::Crc16Scalar)->Apply(Crc16Args);
+#ifdef DFLY_CRC16_HAS_CLMUL
+BENCHMARK_TEMPLATE(BM_Crc16, detail::impl::Crc16Clmul)->Apply(Crc16Args);
+#endif
+BENCHMARK_TEMPLATE(BM_Crc16, detail::Crc16)->Apply(Crc16Args);
+BENCHMARK_TEMPLATE(BM_Crc16, KeySlot)->Apply(Crc16Args);
 
 }  // namespace
 }  // namespace dfly::cluster
