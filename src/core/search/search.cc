@@ -178,6 +178,24 @@ concept CompositeNode = (requires(const Node& node) { node.node; }) ||
                         (requires(const Node& node) { node.nodes; }) ||
                         (requires(const Node& node) { node.filter; });
 
+// The schema type an index class serves.
+template <typename T>
+constexpr SchemaField::FieldType kFieldTypeOf = [] {
+  using Index = decay_t<T>;
+  if constexpr (is_same_v<Index, TextIndex>)
+    return SchemaField::TEXT;
+  else if constexpr (is_same_v<Index, NumericIndex>)
+    return SchemaField::NUMERIC;
+  else if constexpr (is_same_v<Index, TagIndex>)
+    return SchemaField::TAG;
+  else if constexpr (is_same_v<Index, GeoIndex>)
+    return SchemaField::GEO;
+  else if constexpr (is_same_v<Index, BaseVectorIndex>)
+    return SchemaField::VECTOR;
+  else
+    static_assert(sizeof(Index) == 0, "no schema type for this index");
+}();
+
 struct BasicSearch {
   using LogicOp = AstLogicalNode::LogicOp;
 
@@ -190,9 +208,16 @@ struct BasicSearch {
     profile_builder_ = ProfileBuilder{};
   }
 
+  // The attribute under `field` if it is NOINDEX: it has no index, so its clauses match nothing
+  // instead of failing.
+  const SchemaField* NoIndexField(string_view field) const {
+    const SchemaField* attribute = indices_->GetSchema().Find(field);
+    return attribute && (attribute->flags & SchemaField::NOINDEX) ? attribute : nullptr;
+  }
+
   BaseIndex* GetBaseIndex(string_view field) {
     auto index = indices_->GetIndex(field);
-    if (!index) {
+    if (!index && !NoIndexField(field)) {
       error_ = absl::StrCat("Invalid field: ", field);
       return nullptr;
     }
@@ -205,6 +230,13 @@ struct BasicSearch {
 
     auto base_index = GetBaseIndex(field);
     if (!base_index) {
+      // A NOINDEX attribute keeps its type, and a vector one has nothing to search at all.
+      if (const auto* noindex = error_.empty() ? NoIndexField(field) : nullptr; noindex) {
+        if (noindex->type != kFieldTypeOf<T>)
+          error_ = absl::StrCat("Wrong access type for field: ", field);
+        else if (noindex->type == SchemaField::VECTOR)
+          error_ = absl::StrCat("Invalid field: ", field);
+      }
       return nullptr;
     }
 

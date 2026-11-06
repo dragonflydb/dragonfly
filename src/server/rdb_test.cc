@@ -1235,7 +1235,7 @@ TEST_F(RdbTest, FailedLoadDropsUnbuiltIndex) {
   EXPECT_THAT(Run({"ft._list"}).GetVec(), IsEmpty());
   EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), no_index);
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), no_index);
-  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), no_index);
   EXPECT_THAT(
       Run({"FT.HYBRID", "idx", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
       no_index);
@@ -1271,12 +1271,33 @@ TEST_F(RdbTest, UnbuiltIndexAnswersWithoutCrash) {
     service_->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
   });
 
-  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), ErrArg("not built"));
+  const auto not_built = ErrArg("not built");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello"}), not_built);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*=>[KNN 2 @v $vec]", "PARAMS", "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "@v:[VECTOR_RANGE 1 $vec]", "PARAMS", "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), not_built);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*=>[KNN 2 @v $vec]", "PARAMS", "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "@v:[VECTOR_RANGE 1 $vec]", "PARAMS", "2", "vec", vec}),
+              not_built);
   EXPECT_THAT(
       Run({"FT.HYBRID", "idx", "SEARCH", "hello", "VSIM", "@v", "$vec", "PARAMS", "2", "vec", vec}),
-      ArgType(RespExpr::ARRAY));
-  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*"}), RespArray(ElementsAre(IntArg(0))));
-  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}).GetVec(), IsEmpty());
+      not_built);
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "idx.t", "LOAD_FROM", "idx", "AS", "j",
+                   "1", "j.g=idx.g"}),
+              not_built);
+  EXPECT_THAT(Run({"FT.PROFILE", "idx", "SEARCH", "QUERY", "*=>[KNN 2 @v $vec]", "PARAMS", "2",
+                   "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.PROFILE", "idx", "SEARCH", "QUERY", "@v:[VECTOR_RANGE 1 $vec]", "PARAMS",
+                   "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.PROFILE", "idx", "HYBRID", "QUERY", "SEARCH", "hello", "VSIM", "@v", "$vec",
+                   "PARAMS", "2", "vec", vec}),
+              not_built);
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "g"}), not_built);
   auto info = Run({"FT.INFO", "idx"}).GetVec();
   auto it = rng::find_if(info, [](const auto& e) { return e == "percent_indexed"; });
   ASSERT_NE(it, info.end());
