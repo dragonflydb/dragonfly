@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <iterator>
+#include <random>
 #include <string>
 #include <string_view>
 
@@ -23,6 +24,7 @@
 #include "core/detail/gen_utils.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "facade/facade_test.h"
+#include "server/cluster_support.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -30,6 +32,10 @@
 #include "server/test_utils.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
+
+extern "C" {
+#include "redis/crc16.h"
+}
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
 
@@ -1335,6 +1341,75 @@ TEST_F(ClusterFamilyTest, Keyslot) {
 
   EXPECT_EQ(CheckedInt({"cluster", "keyslot", "abc{def}ghi"}),
             CheckedInt({"cluster", "keyslot", "123{def}456"}));
+
+  EXPECT_EQ(0, KeySlot(string_view{}));
+  EXPECT_EQ(0, KeySlot(""));
+  EXPECT_EQ(0x31C3, KeySlot("123456789"));  // The CRC16-XMODEM check value.
+}
+
+// detail::Crc16() only ever runs the fastest kernel the CPU supports, so calling it alone leaves
+// the other kernel unverified. The suite below takes a kernel as a parameter and is instantiated
+// once per kernel, each compared with the table-driven crc16() of Redis.
+struct Crc16Kernel {
+  const char* name;
+  uint16_t (*compute)(string_view data);
+  bool needs_clmul;
+};
+
+const Crc16Kernel kCrc16Kernels[] = {
+    {"Dispatch", detail::Crc16, false},
+    {"Scalar", detail::impl::Crc16Scalar, false},
+#ifdef DFLY_CRC16_HAS_CLMUL
+    {"Clmul", detail::impl::Crc16Clmul, true},
+#endif
+};
+
+class Crc16Test : public ::testing::TestWithParam<Crc16Kernel> {};
+
+INSTANTIATE_TEST_SUITE_P(Kernel, Crc16Test, testing::ValuesIn(kCrc16Kernels),
+                         [](const testing::TestParamInfo<Crc16Kernel>& info) {
+                           return string(info.param.name);
+                         });
+
+// Every length up to several times the 64 bytes the widest loop consumes per iteration, at every
+// alignment, both for random bytes and for bytes with all bits set. Compares all 16 bits, not only
+// the 14 that KeySlot() keeps.
+TEST_P(Crc16Test, MatchesRedis) {
+  const Crc16Kernel& kernel = GetParam();
+  if (kernel.needs_clmul && !detail::impl::kSupportsClmul())
+    GTEST_SKIP() << "The CPU lacks carry-less multiplication";
+
+  EXPECT_EQ(0, kernel.compute(string_view{}));
+  EXPECT_EQ(0x31C3, kernel.compute("123456789"));  // The CRC16-XMODEM check value.
+
+  // Inputs of 1 to 3 bytes, which Crc16() computes in place: all of them up to 2 bytes, and every
+  // 251st of the 3-byte ones, which still sets each byte to every value.
+  for (size_t len = 1; len <= 3; ++len) {
+    const uint32_t step = len < 3 ? 1 : 251;
+    for (uint32_t value = 0; value < (1u << (8 * len)); value += step) {
+      const char bytes[] = {static_cast<char>(value >> 16), static_cast<char>(value >> 8),
+                            static_cast<char>(value)};
+      const string_view data{bytes + 3 - len, len};
+      ASSERT_EQ(crc16(data.data(), data.size()), kernel.compute(data))
+          << "len " << len << " value " << value;
+    }
+  }
+
+  std::mt19937 rng(42);
+  string random(600, '\0');
+  for (char& c : random)
+    c = static_cast<char>(rng());
+  string ones(random.size(), '\xff');
+
+  for (const string* buf : {&random, &ones}) {
+    for (size_t offset = 0; offset < 16; ++offset) {
+      for (size_t len = 0; offset + len <= buf->size(); ++len) {
+        const string_view data = string_view{*buf}.substr(offset, len);
+        ASSERT_EQ(crc16(data.data(), data.size()), kernel.compute(data))
+            << "offset " << offset << " len " << len << (buf == &ones ? " all ones" : "");
+      }
+    }
+  }
 }
 
 TEST_F(ClusterFamilyTest, FlushSlots) {
@@ -1719,6 +1794,44 @@ TEST_F(ClusterFamilyTest, DflyMigrateRealModeWithoutConfig) {
   EXPECT_EQ(Run({"DFLYMIGRATE", "ACK", "src", "1"}), "UNKNOWN_MIGRATION");
   EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), ErrArg("syncid not found"));
 }
+
+static uint16_t RedisCrc16(string_view data) {
+  return crc16(data.data(), data.size());
+}
+
+// Each Crc16 kernel next to the table-driven crc16() of Redis, and KeySlot() with its hash-tag
+// lookup on top of the dispatched kernel.
+template <auto crc16_fn> static void BM_Crc16(benchmark::State& state) {
+  if constexpr (detail::impl::kHasClmul && crc16_fn == detail::impl::Crc16Clmul) {
+    if (!detail::impl::kSupportsClmul()) {
+      state.SkipWithError("The CPU lacks carry-less multiplication");
+      return;
+    }
+  }
+
+  string data(state.range(0), '\0');
+  std::mt19937 rng(42);
+  for (char& c : data)
+    c = 'a' + rng() % 26;
+
+  while (state.KeepRunning())
+    benchmark::DoNotOptimize(crc16_fn(data));
+  state.SetBytesProcessed(state.iterations() * data.size());
+}
+
+static void Crc16Args(benchmark::Benchmark* benchmark) {
+  benchmark->ArgName("len");
+  for (int len : {1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 48, 64, 65, 128, 256, 1024})
+    benchmark->Arg(len);
+}
+
+BENCHMARK_TEMPLATE(BM_Crc16, RedisCrc16)->Apply(Crc16Args);
+BENCHMARK_TEMPLATE(BM_Crc16, detail::impl::Crc16Scalar)->Apply(Crc16Args);
+#ifdef DFLY_CRC16_HAS_CLMUL
+BENCHMARK_TEMPLATE(BM_Crc16, detail::impl::Crc16Clmul)->Apply(Crc16Args);
+#endif
+BENCHMARK_TEMPLATE(BM_Crc16, detail::Crc16)->Apply(Crc16Args);
+BENCHMARK_TEMPLATE(BM_Crc16, KeySlot)->Apply(Crc16Args);
 
 }  // namespace
 }  // namespace dfly::cluster
