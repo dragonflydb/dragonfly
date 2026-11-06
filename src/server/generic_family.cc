@@ -1071,15 +1071,29 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
 
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = from_res.it->first.GetExpireTime();
-  RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, from_res.it->second, op_args.shard);
-  from_res.post_updater.ReduceHeapUsage();
-  PrimeValue from_obj = std::move(from_res.it->second);
 
-  db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
-  auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
-  RETURN_ON_BAD_STATUS(op_result);
-  auto& add_res = *op_result;
+  // Reserve the destination before touching the source. The databases have separate tables,
+  // so insertion cannot invalidate the source iterator.
+  DbSlice::ItAndUpdater add_res;
+  try {
+    auto op_result = db_slice.AddNew(target_cntx, key, PrimeValue{}, exp_ts);
+    RETURN_ON_BAD_STATUS(op_result);
+    add_res = std::move(*op_result);
+    RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, from_res.it->second, op_args.shard);
+  } catch (const std::bad_alloc&) {
+    // AddNew may throw after insertion (e.g. while sampling top keys). The destination is
+    // still empty, and its change callbacks have already run, so remove the reservation.
+    add_res.post_updater.Cancel();
+    auto it = db_slice.GetDBTable(target_db)->prime.Find(key);
+    if (IsValid(it))
+      db_slice.DelAtomic(target_cntx, it);
+    throw;
+  }
   add_res.it->first.SetSticky(sticky);
+
+  from_res.post_updater.ReduceHeapUsage();
+  add_res.it->second = std::move(from_res.it->second);
+  db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
   AddKeyToIndexesIfNeeded(key, target_cntx, add_res.it->second, op_args.shard);
 
   // When tiering is enabled, update tiered-storage metadata for partial moved values.
@@ -2523,17 +2537,20 @@ void GenericFamily::Move(CmdArgParser parser, CommandContext* cmd_cntx) {
       res = OpMove(op_args, key, target_db);
       // MOVE runs as global command but we want to write the
       // command to only one journal.
-      if (res != OpStatus::IO_ERROR && op_args.shard->journal()) {
+      if (res == OpStatus::OK && op_args.shard->journal()) {
         RecordJournal(op_args, "MOVE"sv, ArgSlice{key, target_db_str});
       }
     }
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  if (status != OpStatus::OK)
+    return cmd_cntx->SendError(status);
+
   // Exactly one shard will call OpMove.
   DCHECK(res != OpStatus::SKIPPED);
-  if (res == OpStatus::IO_ERROR)
+  if (res != OpStatus::OK && res != OpStatus::KEY_NOTFOUND && res != OpStatus::KEY_EXISTS)
     return cmd_cntx->SendError(res);
   cmd_cntx->SendLong(res == OpStatus::OK);
 }
