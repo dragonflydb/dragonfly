@@ -180,6 +180,10 @@ ABSL_DECLARE_FLAG(string, tls_ca_cert_file);
 ABSL_DECLARE_FLAG(string, tls_ca_cert_dir);
 ABSL_DECLARE_FLAG(int, replica_priority);
 ABSL_DECLARE_FLAG(double, rss_oom_deny_ratio);
+ABSL_DECLARE_FLAG(std::string, tiered_prefix);
+#ifdef WITH_TIERING
+ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
+#endif
 
 bool AbslParseFlag(std::string_view in, ReplicaOfFlag* flag, std::string* err) {
 #define RETURN_ON_ERROR(cond, m)                                           \
@@ -1363,10 +1367,33 @@ bool ValidateServerTlsFlags() {
   return true;
 }
 
+namespace {
+
+// Saving a list reads its offloaded nodes from disk in the middle of the entry, which suspends.
+// Concurrent writes may serialize other keys into the same buffer meanwhile. The DF format keeps
+// them out of the entry with tagged chunks or the stream mutex; the RDB format has neither.
+// Disabling the flag at runtime leaves already offloaded nodes on disk, which this does not catch.
+bool TieredListNodesEnabled() {
+#ifdef WITH_TIERING
+  return !GetFlag(FLAGS_tiered_prefix).empty() && GetFlag(FLAGS_tiered_experimental_list_support);
+#else
+  return false;
+#endif
+}
+
+constexpr string_view kRdbWithTieredListsErr =
+    "RDB format is not supported with --tiered_experimental_list_support, use the DF format";
+
+}  // namespace
+
 bool ValidateSnapshotFilenameFlags() {
   auto ec = detail::ValidateFilename(GetFlag(FLAGS_dbfilename), GetFlag(FLAGS_df_snapshot_format));
   if (ec) {
     LOG(ERROR) << ec.Format();
+    return false;
+  }
+  if (!GetFlag(FLAGS_df_snapshot_format) && TieredListNodesEnabled()) {
+    LOG(ERROR) << kRdbWithTieredListsErr;
     return false;
   }
   return true;
@@ -2174,6 +2201,10 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
                                                Transaction* trans, DoSaveCheckAndStartOpts opts) {
   // TODO(#8410): with --aof, a save to the base's name overwrites the base.
   auto [ignore_state, bg_save] = opts;
+
+  if (!save_cmd_opts.new_version && TieredListNodesEnabled())
+    return GenericError{make_error_code(errc::operation_not_supported),
+                        string{kRdbWithTieredListsErr}};
 
   std::shared_ptr<SaveStagesController> controller;
   {

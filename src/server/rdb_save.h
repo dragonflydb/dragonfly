@@ -373,6 +373,9 @@ class RdbSerializer {
   // Might preempt
   std::error_code PushToConsumerIfNeeded(FlushState flush_state);
 
+  // Runs fn, which may preempt mid-entry, at a forced consume point. Requires tagged entries.
+  template <typename F> std::error_code ConsumeAround(F&& fn);
+
   static constexpr size_t kFilterChunkSize = 1ULL << 26;
   static constexpr size_t kMinStrSizeToCompress = 256;
   static constexpr size_t kMaxStrSizeToCompress = 1 * 1024 * 1024;

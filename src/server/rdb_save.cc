@@ -417,11 +417,19 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
 
-    // Use listpack encoding
-    RETURN_ON_ERR(SaveLen(node->container));
     // Materialize the node if it was offloaded to tiered storage, so that we can access its
     // content. We have to drop const qualifier to update the node.
-    ql->Materialize(const_cast<QList::Node*>(node));
+    if (node->offloaded && consume_fun_ && mem_buf_controller_.TagEntriesEnabled()) {
+      // Reading the node from disk suspends. Make it a consume point between two nodes, so that
+      // other writers don't land inside this entry's bytes. Without tags, stream_mu_ holds them
+      // off instead.
+      RETURN_ON_ERR(ConsumeAround([&] { ql->Materialize(const_cast<QList::Node*>(node)); }));
+    } else {
+      ql->Materialize(const_cast<QList::Node*>(node));
+    }
+
+    // Use listpack encoding
+    RETURN_ON_ERR(SaveLen(node->container));
     if (node->encoding == QLIST_NODE_ENCODING_ZSTD) {
       // ZSTD-compressed nodes cannot be saved using RDB LZF encoding — the loader would
       // call lzf_decompress on ZSTD bytes and corrupt the data. Decompress to raw first.
@@ -1966,6 +1974,18 @@ void RdbSerializer::CompressBlob() {
   auto dest = mem_buf->AppendBuffer();
   memcpy(dest.data(), compressed->data(), compressed->size());
   mem_buf->CommitWrite(compressed->size());
+}
+
+template <typename F> std::error_code RdbSerializer::ConsumeAround(F&& fn) {
+  mem_buf_controller_.MarkEntrySplit();
+  string blob = Flush(FlushState::kFlushMidEntry);
+
+  const auto id = mem_buf_controller_.SaveStateBeforeConsume();
+  std::error_code ec = blob.empty() ? std::error_code{} : consume_fun_(std::move(blob));
+  if (!ec)
+    fn();
+  mem_buf_controller_.RestoreStateAfterConsume(id);
+  return ec;
 }
 
 std::error_code RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {

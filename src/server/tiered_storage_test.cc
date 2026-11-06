@@ -45,6 +45,7 @@ ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
 ABSL_DECLARE_FLAG(unsigned, list_tiering_threshold);
+ABSL_DECLARE_FLAG(bool, serialization_tagged_chunks);
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 
 namespace dfly {
@@ -1353,6 +1354,10 @@ class ListNodeTieringTest : public TieredStorageTest {
     SetFlag(&FLAGS_tiered_experimental_list_support, true);
     TieredStorageTest::SetUp();
   }
+
+ protected:
+  void SaveWithConcurrentWrites();
+
   optional<absl::FlagSaver> fs;
 };
 
@@ -1748,6 +1753,72 @@ TEST_F(ListNodeTieringTest, PushAfterOffloadedNodePromotedToTail) {
   EXPECT_THAT(Run({"RPUSH", "mylist", appended}), IntArg(kTrimmedItems + 1));
   EXPECT_EQ(Run({"RPOP", "mylist"}), appended);
   EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kTrimmedItems));
+}
+
+// Reading an offloaded node from disk suspends the snapshot in the middle of the list entry. Writes
+// that serialize other buckets meanwhile must not interleave their bytes with the entry. They write
+// to another db, so their SELECTDB lands between the list's chunks.
+void ListNodeTieringTest::SaveWithConcurrentWrites() {
+  const int kLists = 50, kItems = 8, kKeys = 2000;
+  vector<vector<string>> expected(kLists);
+  for (int l = 0; l < kLists; l++) {
+    for (int i = 0; i < kItems; i++) {
+      expected[l].push_back(BuildString(2048, static_cast<char>('A' + (l + i) % 26)));
+      Run({"RPUSH", absl::StrCat("list:", l), expected[l].back()});
+    }
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_stashes >= kLists; });
+
+  Run({"SELECT", "1"});
+  for (int k = 0; k < kKeys; k++)
+    Run({"SET", absl::StrCat("key:", k), "v"});
+  Run({"SELECT", "0"});
+
+  // Each write serializes the bucket of its key if the snapshot has not reached it yet.
+  atomic_bool saved{false};
+  auto writer = pp_->at(0)->LaunchFiber([&] {
+    Run("writer", {"SELECT", "1"});
+    for (int k = 0; !saved.load(memory_order_relaxed); k = (k + 1) % kKeys) {
+      Run("writer", {"SET", absl::StrCat("key:", k), "w"});
+      ThisFiber::SleepFor(10us);  // let the proactor poll io completions
+    }
+  });
+  EXPECT_EQ(Run({"SAVE"}), "OK");
+  saved.store(true, memory_order_relaxed);
+  writer.Join();
+
+  ASSERT_EQ(Run({"DEBUG", "RELOAD", "NOSAVE"}), "OK");
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(kLists));
+  for (int l = 0; l < kLists; l++) {
+    auto resp = Run({"LRANGE", absl::StrCat("list:", l), "0", "-1"});
+    ASSERT_THAT(resp, ArrLen(kItems)) << "list " << l;
+    for (int i = 0; i < kItems; i++)
+      EXPECT_EQ(resp.GetVec()[i].GetString(), expected[l][i]) << "list " << l << " index " << i;
+  }
+  Run({"SELECT", "1"});
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(kKeys));
+  Run({"SELECT", "0"});
+}
+
+// Tagged chunks: the disk read is a consume point.
+TEST_F(ListNodeTieringTest, SaveWithConcurrentWritesWhileLoadingNodes) {
+  InitWithDbFilename();
+  SaveWithConcurrentWrites();
+  CleanupSnapshots();
+}
+
+// Without tagged chunks, the stream mutex keeps other writers out of the entry.
+TEST_F(ListNodeTieringTest, SaveWithConcurrentWritesWhileLoadingNodesUntagged) {
+  SetFlag(&FLAGS_serialization_tagged_chunks, false);
+  InitWithDbFilename();
+  SaveWithConcurrentWrites();
+  CleanupSnapshots();
+}
+
+TEST_F(ListNodeTieringTest, RdbSaveRejected) {
+  InitWithDbFilename();
+  EXPECT_THAT(Run({"SAVE", "RDB"}), ErrArg("not supported"));
+  CleanupSnapshots();
 }
 
 // Test MEMORY DECOMMIT COOL command flushes the cool queue
