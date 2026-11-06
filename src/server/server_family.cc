@@ -5,7 +5,6 @@
 #include "server/server_family.h"
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/functional/function_ref.h>
 #include <absl/random/random.h>  // for master_replid_ generation.
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
@@ -676,20 +675,19 @@ void ClientId(facade::ParsedArgs args, CommandContext* cmd_cntx) {
   return cmd_cntx->rb()->SendLong(cmd_cntx->conn()->GetClientId());
 }
 
-struct ClientKillFilter {
+struct ClientKillOpts {
   optional<int64_t> id, max_age;
   optional<ClientListType> type;
   optional<string_view> user, addr, laddr;
   bool skipme = true;
   bool legacy = false;  // CLIENT KILL <addr>
 
-  // The addresses are computed only when a filter needs them.
-  bool Matches(uint32_t client_id, ClientListType client_type, const string* client_user,
-               time_t age, absl::FunctionRef<string()> client_addr,
-               absl::FunctionRef<string()> client_laddr) const {
-    return (!id || client_id == *id) && (!type || client_type == *type) &&
-           (!user || (client_user && *client_user == *user)) && (!max_age || age >= *max_age) &&
-           (!addr || client_addr() == *addr) && (!laddr || client_laddr() == *laddr);
+  bool Matches(int64_t client_id, ClientListType client_type, optional<string_view> client_user,
+               time_t age, string_view client_addr, string_view client_laddr) const {
+    auto opt_eq = []<typename T>(const optional<T>& opt, const T& v) { return !opt || *opt == v; };
+    return opt_eq(id, client_id) && opt_eq(type, client_type) && (!user || client_user == user) &&
+           opt_eq(addr, client_addr) && opt_eq(laddr, client_laddr) &&
+           (!max_age || age >= *max_age);
   }
 };
 
@@ -710,23 +708,22 @@ int64_t ParseMaxAge(string_view val, RuleError& err) {
   return num;
 }
 
-void ReadKillUser(CmdArgParser* parser, ClientKillFilter* filter) {
+void ReadKillUser(CmdArgParser* parser, ClientKillOpts* filter) {
   filter->user = parser->Next();
   if (!ServerState::tlocal()->user_registry->GetRegistryWithLock().registry.contains(*filter->user))
     parser->ReportCustom(StrCat("No such user '", *filter->user, "'"));
 }
 
-optional<ClientKillFilter> ParseClientKillFilter(facade::ParsedArgs args,
-                                                 CommandContext* cmd_cntx) {
-  static constexpr auto kGrammar = Compile(
-      Options(Field("ID", &ClientKillFilter::id, &ParseClientId),
-              ClientTypeRule(&ClientKillFilter::type), Action("USER", &ReadKillUser),
-              Field("ADDR", &ClientKillFilter::addr), Field("LADDR", &ClientKillFilter::laddr),
-              Choice("SKIPME", &ClientKillFilter::skipme, "YES", true, "NO", false),
-              Field("MAXAGE", &ClientKillFilter::max_age, &ParseMaxAge)));
+nonstd::expected<ClientKillOpts, ErrorReply> ParseClientKillOpts(facade::ParsedArgs args) {
+  static constexpr auto kGrammar =
+      Compile(Options(Field("ID", &ClientKillOpts::id, &ParseClientId),
+                      ClientTypeRule(&ClientKillOpts::type), Action("USER", &ReadKillUser),
+                      Field("ADDR", &ClientKillOpts::addr), Field("LADDR", &ClientKillOpts::laddr),
+                      Choice("SKIPME", &ClientKillOpts::skipme, "YES", true, "NO", false),
+                      Field("MAXAGE", &ClientKillOpts::max_age, &ParseMaxAge)));
 
   CmdArgParser parser{args};
-  ClientKillFilter filter;
+  ClientKillOpts filter;
   if (args.size() == 1) {
     filter.addr = parser.Next();
     filter.skipme = false;
@@ -734,10 +731,8 @@ optional<ClientKillFilter> ParseClientKillFilter(facade::ParsedArgs args,
   } else {
     kGrammar.Apply(&parser, &filter);
   }
-  if (!parser.Finalize()) {
-    cmd_cntx->SendError(parser.TakeError().MakeReply());
-    return nullopt;
-  }
+  if (!parser.Finalize())
+    return nonstd::make_unexpected(parser.TakeError().MakeReply());
   return filter;
 }
 
@@ -746,16 +741,15 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
   if (args.empty())
     return cmd_cntx->SendError(WrongNumArgsError("client|kill"), kSyntaxErrType);
 
-  auto filter = ParseClientKillFilter(args, cmd_cntx);
+  auto filter = ParseClientKillOpts(args);
   if (!filter)
-    return;
+    return cmd_cntx->SendError(filter.error());
 
   // The master link is not killable; refuse a TYPE master or ID request that matches it.
   if (filter->type == ClientListType::kMaster || filter->id) {
     for (const facade::ClientInfo& link : server_family->GetMasterLinkClientInfo()) {
-      if (filter->Matches(
-              link.id, ClientListType::kMaster, nullptr, link.age, [&] { return link.addr; },
-              [&] { return link.laddr; }))
+      if (filter->Matches(link.id, ClientListType::kMaster, nullopt, link.age, link.addr,
+                          link.laddr))
         return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
     }
   }
@@ -772,10 +766,10 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
 
   auto evaluator = [&](facade::Connection* conn) {
     auto* cntx = static_cast<ConnectionContext*>(conn->cntx());
-    return filter->Matches(
-        conn->GetClientId(), ClassifyConnection(conn), cntx ? &cntx->authed_username : nullptr,
-        now - conn->creation_time(), [conn] { return conn->RemoteEndpointStr(); },
-        [conn] { return conn->LocalBindStr(); });
+    return filter->Matches(conn->GetClientId(), ClassifyConnection(conn),
+                           cntx ? optional<string_view>{cntx->authed_username} : nullopt,
+                           now - conn->creation_time(), conn->RemoteEndpointStr(),
+                           conn->LocalBindStr());
   };
 
   // HTTP API connections have no close-after-reply path.
