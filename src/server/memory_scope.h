@@ -59,34 +59,28 @@ class AtomicMemoryScope {
   int64_t mem_baseline_;
 };
 
-// In a replacement operation, handles freeing of old value by wrapping it in the correct type
-// scope. Use RAII to register and then de-register the hook. Also use guard to prevent fiber switch
-// (which might leave a hook dangling in the compact object tls). Once this tracker object is
-// created, the next free of old type will be wrapped in scope.
-class TrackOldValueFree {
+// Registers a hook for replacement frees, attributing each free to the object's existing type.
+// The guard prevents fiber switches while the thread-local hook is installed.
+class TypeReplacementScope {
  public:
-  explicit TrackOldValueFree(int old_type) : old_type_(old_type) {
-    CompactObj::RegisterDeallocateHandler(CompactObj::FreeHook{*this});
+  TypeReplacementScope() {
+    RegisterDeallocateHandler(FreeOldValue);
   }
 
-  ~TrackOldValueFree() {
-    CompactObj::DeregisterDeallocateHandler();
+  ~TypeReplacementScope() {
+    DeregisterDeallocateHandler();
   }
 
-  TrackOldValueFree(const TrackOldValueFree&) = delete;
-  TrackOldValueFree& operator=(const TrackOldValueFree&) = delete;
-  TrackOldValueFree(TrackOldValueFree&&) = delete;
-  TrackOldValueFree& operator=(TrackOldValueFree&&) = delete;
+  TypeReplacementScope(const TypeReplacementScope&) = delete;
+  TypeReplacementScope& operator=(const TypeReplacementScope&) = delete;
 
-  // Attribute the old value's destruction to its original type.
-  void operator()(CompactObj& obj) const {
-    AtomicMemoryScope scope(old_type_);
+ private:
+  static void FreeOldValue(CompactObj& obj) {
+    AtomicMemoryScope scope(obj.ObjType());
     obj.Free();
   }
 
- private:
   util::FiberAtomicGuard guard_;
-  int old_type_;
 };
 
 }  // namespace dfly

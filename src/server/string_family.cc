@@ -1037,7 +1037,7 @@ OpStatus SetCmd::SetExisting(const SetParams& params, string_view value,
   if (old_type == OBJ_STRING) {
     prime_value.SetString(value);
   } else {
-    TrackOldValueFree track(old_type);
+    TypeReplacementScope track;
     prime_value.SetString(value);
   }
 

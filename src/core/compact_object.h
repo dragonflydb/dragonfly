@@ -5,7 +5,6 @@
 #pragma once
 
 #include <absl/base/internal/endian.h>
-#include <absl/functional/function_ref.h>
 
 #include <memory>
 #include <optional>
@@ -23,7 +22,7 @@ typedef struct stream stream;
 
 namespace dfly {
 
-class TrackOldValueFree;
+class TypeReplacementScope;
 
 namespace tiering {
 struct TieredCoolRecord;
@@ -152,7 +151,7 @@ constexpr CompactObjType kInvalidCompactObjType = std::numeric_limits<CompactObj
 
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
-  friend class TrackOldValueFree;
+  friend class TypeReplacementScope;
 
  public:
   void operator=(const CompactObj&) = delete;
@@ -479,14 +478,7 @@ class CompactObj {
   static void InitThreadLocal(MemoryResource* mr);
   static void ClearThreadLocalStats();
 
-  using FreeHook = absl::FunctionRef<void(CompactObj&)>;
-
-  // Registers a thread-local hook for destruction in SetMeta, for cases where an object type is
-  // replaced, such as SET overwriting another type to string. Requires no existing registration.
-  static void RegisterDeallocateHandler(FreeHook handler);
-
-  // Clears the current thread's hook. Requires an existing registration.
-  static void DeregisterDeallocateHandler();
+  using FreeHook = void (*)(CompactObj&);
 
   // Iterate the thread-local pin map and reap entries with refcnt==0:
   // free orphaned buffers, erase the map slot. Typically called from
@@ -629,6 +621,13 @@ class CompactObj {
   uint8_t taglen_ : 5;    // Either length of inline string or tag of type
   uint8_t encoding_ : 2;  // Encoding of string values
 };
+
+// Registers a thread-local hook for destruction in SetMeta, for cases where an object type is
+// replaced, such as SET overwriting another type to string. Requires no existing registration.
+void RegisterDeallocateHandler(CompactObj::FreeHook handler);
+
+// Clears the current thread's hook. Requires an existing registration.
+void DeregisterDeallocateHandler();
 
 struct CompactKey : public CompactObj {
   CompactKey() : CompactObj(true) {

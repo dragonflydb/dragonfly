@@ -494,7 +494,7 @@ struct TL {
   string tmp_str;
   size_t small_str_bytes;
   PinnedMap pin_map;
-  std::optional<CompactObj::FreeHook> dealloc_handler;
+  CompactObj::FreeHook dealloc_handler = nullptr;
 };
 
 // Callback function used in redis/t_stream.cc implementation to
@@ -616,14 +616,14 @@ void CompactObj::ClearThreadLocalStats() {
   tl.small_str_bytes = 0;
 }
 
-void CompactObj::RegisterDeallocateHandler(FreeHook handler) {
+void RegisterDeallocateHandler(CompactObj::FreeHook handler) {
   DCHECK(!tl.dealloc_handler) << "A handler is already registered.";
   tl.dealloc_handler = handler;
 }
 
-void CompactObj::DeregisterDeallocateHandler() {
+void DeregisterDeallocateHandler() {
   DCHECK(tl.dealloc_handler) << "No handler to deregister";
-  tl.dealloc_handler.reset();
+  tl.dealloc_handler = nullptr;
 }
 
 void CompactObj::DrainPendingReads() {
@@ -1487,13 +1487,10 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
 
 void CompactObj::SetMeta(uint8_t taglen, uint8_t mask) {
   if (HasAllocated()) {
-    if (tl.dealloc_handler) {
-      // Calls Free() wrapped in AtomicMemoryScope of old type, in case old type is being replaced
-      // by a new type. See src/server/memory_scope.h and TrackOldValueFree
-      (*tl.dealloc_handler)(*this);
-    } else {
+    if (tl.dealloc_handler)
+      tl.dealloc_handler(*this);
+    else
       Free();
-    }
   } else {
     memset(u_.inline_str, 0, kInlineLen);
   }

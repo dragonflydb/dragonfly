@@ -558,7 +558,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &co);
       co = std::move(replacement);
     } else if (!add_res.is_new && co.ObjType() != OBJ_SET) {
-      TrackOldValueFree track(co.ObjType());
+      TypeReplacementScope track;
       InitSet(vals, &co);
     } else {
       InitSet(vals, &co);
