@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <iterator>
+#include <random>
 #include <string>
 #include <string_view>
 
@@ -23,6 +24,8 @@
 #include "core/detail/gen_utils.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "facade/facade_test.h"
+#include "server/cluster_support.h"
+#include "server/common.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
@@ -30,6 +33,10 @@
 #include "server/test_utils.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
+
+extern "C" {
+#include "redis/crc16.h"
+}
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
 
@@ -1335,6 +1342,29 @@ TEST_F(ClusterFamilyTest, Keyslot) {
 
   EXPECT_EQ(CheckedInt({"cluster", "keyslot", "abc{def}ghi"}),
             CheckedInt({"cluster", "keyslot", "123{def}456"}));
+
+  EXPECT_EQ(0, KeySlot(string_view{}));
+  EXPECT_EQ(0, KeySlot(""));
+  EXPECT_EQ(0x31C3, KeySlot("123456789"));  // The CRC16-XMODEM check value.
+
+  std::mt19937 rng(42);
+  string buf(320, '\0');
+
+  // Exclude opening braces so every length exercises the full CRC input.
+  for (char& c : buf) {
+    c = char(rng());
+    if (c == '{')
+      c = '\0';
+  }
+
+  // Cover every block/tail split, binary keys, and unaligned starts.
+  for (size_t offset = 0; offset < 16; ++offset) {
+    for (size_t len = 0; len + offset <= buf.size(); ++len) {
+      string_view key = string_view{buf}.substr(offset, len);
+      ASSERT_EQ(crc16(key.data(), key.size()) & kMaxSlotNum, KeySlot(key))
+          << "offset " << offset << " len " << len;
+    }
+  }
 }
 
 TEST_F(ClusterFamilyTest, FlushSlots) {
@@ -1719,6 +1749,28 @@ TEST_F(ClusterFamilyTest, DflyMigrateRealModeWithoutConfig) {
   EXPECT_EQ(Run({"DFLYMIGRATE", "ACK", "src", "1"}), "UNKNOWN_MIGRATION");
   EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), ErrArg("syncid not found"));
 }
+
+// Compare Redis slot hashing (algo 0) with KeySlot (algo 1), including hash-tag extraction.
+static void BM_KeySlot(benchmark::State& state) {
+  string key(state.range(1), '\0');
+  std::mt19937 rng(42);
+  for (char& c : key)
+    c = 'a' + rng() % 26;
+
+  if (state.range(0) == 0) {
+    while (state.KeepRunning()) {
+      string_view tag = LockTagOptions::instance().Tag(key);
+      benchmark::DoNotOptimize(crc16(tag.data(), tag.size()) & kMaxSlotNum);
+    }
+  } else {
+    while (state.KeepRunning()) {
+      benchmark::DoNotOptimize(KeySlot(key));
+    }
+  }
+}
+BENCHMARK(BM_KeySlot)
+    ->ArgNames({"algo", "len"})
+    ->ArgsProduct({{0, 1}, {1, 4, 7, 8, 15, 16, 17, 31, 32, 33, 64, 128, 256}});
 
 }  // namespace
 }  // namespace dfly::cluster
