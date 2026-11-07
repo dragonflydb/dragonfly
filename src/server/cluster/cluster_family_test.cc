@@ -1532,7 +1532,7 @@ TEST_F(ClusterFamilyTest, FlushSlotsNonDefaultDb) {
     ASSERT_TRUE(res.ok());
     EXPECT_TRUE(res->is_new);
 
-    util::ThisFiber::SleepFor(50ms);  // let the flush fiber finish
+    ASSERT_TRUE(WaitUntilCondition([&] { return !db_slice.HasRegisteredCallbacks(); }, 1s));
 
     // Only the entry written after FlushSlots stays.
     EXPECT_EQ(db_slice.DbSize(1), 1u);
