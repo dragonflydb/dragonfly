@@ -6,6 +6,7 @@
 
 #include <cstdint>
 
+#include "core/compact_object.h"
 #include "util/fibers/fibers.h"
 
 namespace dfly {
@@ -56,6 +57,30 @@ class AtomicMemoryScope {
   bool enabled_;
   int obj_type_;
   int64_t mem_baseline_;
+};
+
+// Registers a hook for replacement frees, attributing each free to the object's existing type.
+// The guard prevents fiber switches while the thread-local hook is installed.
+class TypeReplacementScope {
+ public:
+  TypeReplacementScope() {
+    RegisterDeallocateHandler(FreeOldValue);
+  }
+
+  ~TypeReplacementScope() {
+    DeregisterDeallocateHandler();
+  }
+
+  TypeReplacementScope(const TypeReplacementScope&) = delete;
+  TypeReplacementScope& operator=(const TypeReplacementScope&) = delete;
+
+ private:
+  static void FreeOldValue(CompactObj& obj) {
+    AtomicMemoryScope scope(obj.ObjType());
+    obj.Free();
+  }
+
+  util::FiberAtomicGuard guard_;
 };
 
 }  // namespace dfly

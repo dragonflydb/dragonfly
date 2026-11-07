@@ -494,6 +494,7 @@ struct TL {
   string tmp_str;
   size_t small_str_bytes;
   PinnedMap pin_map;
+  CompactObj::FreeHook dealloc_handler = nullptr;
 };
 
 // Callback function used in redis/t_stream.cc implementation to
@@ -613,6 +614,16 @@ void CompactObj::InitThreadLocal(MemoryResource* mr) {
 
 void CompactObj::ClearThreadLocalStats() {
   tl.small_str_bytes = 0;
+}
+
+void RegisterDeallocateHandler(CompactObj::FreeHook handler) {
+  DCHECK(!tl.dealloc_handler) << "A handler is already registered.";
+  tl.dealloc_handler = handler;
+}
+
+void DeregisterDeallocateHandler() {
+  DCHECK(tl.dealloc_handler) << "No handler to deregister";
+  tl.dealloc_handler = nullptr;
 }
 
 void CompactObj::DrainPendingReads() {
@@ -1472,6 +1483,19 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
   str[idx] = val;
   SetString(str);
   return {true, false};
+}
+
+void CompactObj::SetMeta(uint8_t taglen, uint8_t mask) {
+  if (HasAllocated()) {
+    if (tl.dealloc_handler)
+      tl.dealloc_handler(*this);
+    else
+      Free();
+  } else {
+    memset(u_.inline_str, 0, kInlineLen);
+  }
+  taglen_ = taglen;
+  mask_ = mask;
 }
 
 // Frees all resources if owns.

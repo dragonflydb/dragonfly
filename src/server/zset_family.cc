@@ -29,6 +29,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
 
@@ -252,6 +253,8 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
   auto& it = add_res.it;
   PrimeValue& pv = it->second;
   if (add_res.is_new || zparams.override) {
+    const auto old_type = pv.ObjType();
+
     // Allocated before the value is released below: freeing the disk extent is irreversible,
     // while a bad_alloc here is reported to the client as OOM and must leave the value readable.
     unsigned encoding = OBJ_ENCODING_LISTPACK;
@@ -270,7 +273,12 @@ OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams
       db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &pv);
     }
 
-    pv.InitRobj(OBJ_ZSET, encoding, robj_ptr);
+    if (!add_res.is_new && old_type != OBJ_ZSET) {
+      TypeReplacementScope track_free;
+      pv.InitRobj(OBJ_ZSET, encoding, robj_ptr);
+    } else {
+      pv.InitRobj(OBJ_ZSET, encoding, robj_ptr);
+    }
   } else {
     if (it->second.ObjType() != OBJ_ZSET)
       return OpStatus::WRONG_TYPE;

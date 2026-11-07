@@ -22,6 +22,8 @@ typedef struct stream stream;
 
 namespace dfly {
 
+class TypeReplacementScope;
+
 namespace tiering {
 struct TieredCoolRecord;
 }
@@ -149,9 +151,9 @@ constexpr CompactObjType kInvalidCompactObjType = std::numeric_limits<CompactObj
 
 class CompactObj {
   static constexpr unsigned kInlineLen = 16;
+  friend class TypeReplacementScope;
 
  public:
- private:
   void operator=(const CompactObj&) = delete;
   CompactObj(const CompactObj&) = delete;
 
@@ -476,6 +478,8 @@ class CompactObj {
   static void InitThreadLocal(MemoryResource* mr);
   static void ClearThreadLocalStats();
 
+  using FreeHook = void (*)(CompactObj&);
+
   // Iterate the thread-local pin map and reap entries with refcnt==0:
   // free orphaned buffers, erase the map slot. Typically called from
   // EngineShard::Heartbeat.
@@ -527,15 +531,7 @@ class CompactObj {
   bool CmpEncoded(std::string_view sv) const;
   bool CmpNonInline(std::string_view sv) const;
 
-  void SetMeta(uint8_t taglen, uint8_t mask = 0) {
-    if (HasAllocated()) {
-      Free();
-    } else {
-      memset(u_.inline_str, 0, kInlineLen);
-    }
-    taglen_ = taglen;
-    mask_ = mask;
-  }
+  void SetMeta(uint8_t taglen, uint8_t mask = 0);
 
   struct ExternalPtr {
     uint32_t serialized_size;
@@ -625,6 +621,13 @@ class CompactObj {
   uint8_t taglen_ : 5;    // Either length of inline string or tag of type
   uint8_t encoding_ : 2;  // Encoding of string values
 };
+
+// Registers a thread-local hook for destruction in SetMeta, for cases where an object type is
+// replaced, such as SET overwriting another type to string. Requires no existing registration.
+void RegisterDeallocateHandler(CompactObj::FreeHook handler);
+
+// Clears the current thread's hook. Requires an existing registration.
+void DeregisterDeallocateHandler();
 
 struct CompactKey : public CompactObj {
   CompactKey() : CompactObj(true) {
