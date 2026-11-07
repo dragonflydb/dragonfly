@@ -9,6 +9,7 @@
 #include "base/logging.h"
 #include "core/oah_set.h"
 #include "facade/facade_test.h"
+#include "server/family_utils.h"
 #include "server/test_utils.h"
 
 extern "C" {
@@ -250,6 +251,23 @@ TEST_F(SetFamilyTest, SRandMemberRestoredEmptySet) {
   EXPECT_THAT(Run({"srandmember", "es", "-1"}), ArrLen(0));
   EXPECT_THAT(Run({"srandmember", "es", "2"}), ArrLen(0));
   EXPECT_THAT(Run({"srandmember", "es"}), ArgType(RespExpr::NIL));
+}
+
+TEST_F(SetFamilyTest, SRandMemberNegativeCountBound) {
+  // Regression: an unbounded negative COUNT must not drive the result allocation.
+  Run({"SADD", "s", "a"});
+
+  EXPECT_THAT(Run({"srandmember", "s", "-200000000"}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  EXPECT_THAT(Run({"srandmember", "s", "-" + std::to_string(dfly::kMaxRandCount + 1)}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  EXPECT_THAT(Run({"srandmember", "s", "-2147483648"}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  EXPECT_THAT(Run({"srandmember", "s", "-" + std::to_string(dfly::kMaxRandCount)}).GetVec(),
+              SizeIs(dfly::kMaxRandCount));
+  EXPECT_THAT(Run({"srandmember", "s", "-4"}).GetVec(), ElementsAre("a", "a", "a", "a"));
+  // Positive COUNT stays clamped to the set size.
+  EXPECT_THAT(Run({"srandmember", "s", "1000000"}).GetVec(), ElementsAre("a"));
 }
 
 TEST_F(SetFamilyTest, SRandMember) {

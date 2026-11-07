@@ -1515,7 +1515,9 @@ OpResult<ScoredArray> OpRandMember(int count, const ZSetFamily::RangeParams& par
 
   const std::size_t size = pv.Size();
   const std::size_t picks_count =
-      count >= 0 ? std::min(static_cast<std::size_t>(count), size) : std::abs(count);
+      // Widen before negating: std::abs(count) on INT_MIN is signed-overflow UB.
+      count >= 0 ? std::min(static_cast<std::size_t>(count), size)
+                 : static_cast<std::size_t>(-static_cast<std::int64_t>(count));
 
   ScoredArray result{picks_count};
   std::unique_ptr<PicksGenerator> generator =
@@ -2693,6 +2695,10 @@ void CmdZRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendError(absl::StrCat("Unsupported option:", string_view(parser.Next())));
 
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+
+  if (count < 0 && static_cast<uint64_t>(-static_cast<int64_t>(count)) > kMaxRandCount) {
+    return rb->SendError(absl::StrCat("COUNT magnitude exceeds the maximum of ", kMaxRandCount));
+  }
 
   const auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRandMember(count, params, t->GetOpArgs(shard), key);
