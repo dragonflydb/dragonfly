@@ -1231,6 +1231,116 @@ TEST_F(AclFamilyTest, AclErrorHidesToken) {
   std::filesystem::remove(path);
 }
 
+TEST_F(AclFamilyTest, AclSetUserRejectsInvalidOperands) {
+  TestInitAclFam();
+  const std::string username_error = "Usernames can't contain spaces or null characters";
+  ASSERT_THAT(Run({"ACL", "SETUSER", "", "on"}), ErrArg("Usernames can't be empty"));
+
+  for (char byte : {' ', '\n', '\r', '\0'}) {
+    const std::string value = absl::StrCat("app:x", std::string(1, byte), "nopass");
+    ASSERT_THAT(Run({"ACL", "SETUSER", value, "on"}), ErrArg(username_error));
+    EXPECT_THAT(Run("ACL USERS").GetVec(), ElementsAre("default"));
+
+    for (std::string_view prefix : {"~", "%R~", "%W~", "%RW~", "&"}) {
+      for (bool existing : {false, true}) {
+        if (existing) {
+          ASSERT_EQ(Run("ACL SETUSER worker off %R~good &good +get"), "OK");
+        }
+        ASSERT_THAT(
+            Run({"ACL", "SETUSER", "worker", "on", "nopass", "+@all", absl::StrCat(prefix, value)}),
+            ErrArg("Error in ACL SETUSER modifier: Syntax error"));
+        if (existing) {
+          EXPECT_THAT(Run("ACL LIST").GetVec(),
+                      Contains("user worker off %R~good resetchannels &good -@all +get $all"));
+          EXPECT_THAT(Run("ACL DELUSER worker"), IntArg(1));
+        } else {
+          EXPECT_THAT(Run("ACL USERS").GetVec(), ElementsAre("default"));
+        }
+      }
+    }
+  }
+}
+
+TEST_F(AclFamilyTest, AclLoadRejectsInvalidOperands) {
+  TestInitAclFam();
+  ASSERT_EQ(Run("ACL SETUSER keeper on >pass %R~safe +get"), "OK");
+  for (char byte : {'\r', '\0'}) {
+    const std::string value = absl::StrCat("app:x", std::string(1, byte), "nopass");
+    for (std::string_view prefix : {"", "~", "%R~", "%W~", "%RW~", "&"}) {
+      std::string line = prefix.empty() ? absl::StrCat("user ", value, " on nopass\n")
+                                        : absl::StrCat("user victim on ", prefix, value, " +get\n");
+      const std::string contents = "user earlier on nopass ~* +@all\n" + line;
+      WriteAclFile(contents);
+      ASSERT_EQ(io::ReadFileToString(path_).value_or(""), contents);
+      ASSERT_THAT(
+          Run("ACL LOAD"),
+          ErrArg(prefix.empty() ? "line 2: Usernames can't contain spaces or null characters"
+                                : "line 2: Error in ACL SETUSER modifier: Syntax error"));
+      EXPECT_THAT(Run("ACL LIST").GetVec(),
+                  UnorderedElementsAre(
+                      "user default on nopass ~* &* +@all $all",
+                      "user keeper on #d74ff0ee8da3b98 %R~safe resetchannels -@all +get $all"));
+    }
+  }
+
+  // A newline inside a pattern can leave a rule on a line without a USER declaration.
+  WriteAclFile("user victim on ~app:x\nnopass\n");
+  ASSERT_EQ(io::ReadFileToString(path_).value_or(""), "user victim on ~app:x\nnopass\n");
+  ASSERT_THAT(Run("ACL LOAD"), ErrArg("line 2: expected USER <name> <rule>"));
+  WriteAclFile("user \n");
+  ASSERT_EQ(io::ReadFileToString(path_).value_or(""), "user \n");
+  ASSERT_THAT(Run("ACL LOAD"), ErrArg("line 1: expected USER <name> <rule>"));
+}
+
+TEST_F(AclFamilyTest, InitExitsOnInvalidAclOperand) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  WriteAclFile("user victim on ~app:x\rnopass +get\n");
+  ASSERT_EQ(io::ReadFileToString(path_).value_or(""), "user victim on ~app:x\rnopass +get\n");
+  EXPECT_EXIT(TestInitAclFam(), ExitedWithCode(1),
+              "Could not load the acl file .* line 1: Error in ACL SETUSER modifier: Syntax error");
+}
+
+TEST_F(AclFamilyTest, AclSaveKeepsLiteralOperands) {
+  TestInitAclFam();
+  WriteAclFile("");
+  const std::string username = "worker\t\"\\";
+  const std::string pattern = "a\t\"\\x";
+  const std::string key = "a\t\"x";  // The backslash in the glob escapes 'x'.
+  ASSERT_EQ(Run({"ACL", "SETUSER", username, "on", "nopass", "%R~" + pattern, "%W~write:*",
+                 "~both:*", "&" + pattern, "+get", "+set", "+publish"}),
+            "OK");
+  const std::string line = absl::StrCat("USER ", username, " ON nopass %R~", pattern,
+                                        " %W~write:* ~both:* resetchannels &", pattern,
+                                        " -@all +get +set +publish $all\n");
+  ASSERT_EQ(Run("ACL SAVE"), "OK");
+  auto saved = io::ReadFileToString(path_);
+  ASSERT_TRUE(saved);
+  const std::string default_line = "USER default ON nopass ~* &* +@all $all\n";
+  EXPECT_TRUE(*saved == default_line + line || *saved == line + default_line) << *saved;
+
+  for (bool startup : {false, true}) {
+    if (startup) {
+      ResetService();
+      TestInitAclFam();
+    } else {
+      ASSERT_EQ(Run("ACL LOAD"), "OK");
+    }
+    EXPECT_THAT(Run("ACL USERS").GetVec(), UnorderedElementsAre("default", username));
+    EXPECT_THAT(Run({"ACL", "GETUSER", username}).GetVec()[7],
+                "%R~" + pattern + " %W~write:* ~both:*");
+    EXPECT_THAT(Run({"ACL", "GETUSER", username}).GetVec()[9], "resetchannels &" + pattern);
+    EXPECT_EQ(Run({"ACL", "DRYRUN", username, "PUBLISH", key, "v"}), "OK");
+    EXPECT_EQ(Run({"ACL", "DRYRUN", username, "GET", key}), "OK");
+    EXPECT_EQ(Run({"ACL", "DRYRUN", username, "SET", key, "v"}),
+              "This user has no permissions to run the 'SET' command");
+    EXPECT_EQ(Run({"ACL", "DRYRUN", username, "SET", "write:x", "v"}), "OK");
+    EXPECT_EQ(Run({"ACL", "DRYRUN", username, "GET", "write:x"}),
+              "This user has no permissions to run the 'GET' command");
+    EXPECT_EQ(Run({"ACL", "DRYRUN", username, "GET", "outside"}),
+              "This user has no permissions to run the 'GET' command");
+  }
+}
+
 TEST_F(AclFamilyTest, AclFileWhitespaceIsData) {
   // An empty file, space-only, tab-only and CRLF-only lines carry nothing; only '\r' is dropped.
   TestInitAclFam();
