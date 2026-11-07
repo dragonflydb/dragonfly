@@ -208,10 +208,10 @@ def warmup_workers(num_workers):
             ar.get(timeout=70)
         except Exception:
             pass
-    print(f"    done")
+    print("    done")
 
     # Phase 2: ramp up to full concurrency, wait until stable (using lighter load)
-    print(f"  Phase 2: ramping to full concurrency, waiting for stability...")
+    print("  Phase 2: ramping to full concurrency, waiting for stability...")
     consecutive_ok = 0
     attempts = 0
     warmup_concurrent = max(1, CONCURRENT // 4)  # Use 1/4 load for faster warmup
@@ -289,31 +289,6 @@ def run():
 
     outer_timeout = TIMEOUT + EXTRA_POLL + 10
     dispatch = app.tasks["group_get"]
-
-    def run_round():
-        """Run one round and return (round_ok, round_fail, round_lost, round_elapsed)."""
-        ars = [dispatch.delay(BATCH, get_timeout=TIMEOUT) for _ in range(CONCURRENT)]
-
-        round_ok = 0
-        round_fail = 0
-        round_lost = 0
-        round_max_elapsed = 0.0
-
-        for ar in ars:
-            try:
-                res = ar.get(timeout=outer_timeout)
-                if res["lost"] == 0 and res.get("not_completed", 0) == 0:
-                    round_ok += 1
-                else:
-                    round_fail += 1
-                    round_lost += res["lost"]
-                round_max_elapsed = max(round_max_elapsed, outer_timeout)
-            except Exception:
-                round_fail += 1
-                round_lost += BATCH
-                round_max_elapsed = outer_timeout
-
-        return round_ok, round_fail, round_lost, round_max_elapsed
 
     print("Warming up workers (initializing connections)...")
     warmup_workers(num_workers)
@@ -443,7 +418,7 @@ def run():
 
     print()
     total = total_ok + total_fail
-    print(f"================= RESULT ==================")
+    print("================= RESULT ==================")
     print(f"Total: {total_ok}/{total} passed, {total_fail} failed")
     if total_lost > 0:
         print(f"  PUB/SUB BUG: {total_lost} tasks completed but group.get() never received PUBLISH")

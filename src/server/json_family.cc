@@ -1636,7 +1636,7 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
   // Replicate custom journal, see OpMSet
   if (auto journal = op_args.shard->journal(); journal) {
     if (stored * 3 == args.Size()) {
-      RecordJournal(op_args, "JSON.MSET", args, op_args.tx->GetUniqueShardCnt());
+      RecordJournal(op_args, "JSON.MSET", args);
       DCHECK_EQ(result, OpStatus::OK);
       return result;
     }
@@ -1644,7 +1644,7 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
     string_view cmd = stored == 0 ? "PING" : "JSON.MSET";
     vector<string_view> store_args(args.begin(), args.end());
     store_args.resize(stored * 3);
-    RecordJournal(op_args, cmd, store_args, op_args.tx->GetUniqueShardCnt());
+    RecordJournal(op_args, cmd, store_args);
   }
 
   return result;

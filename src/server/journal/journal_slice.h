@@ -27,10 +27,6 @@ class JournalSlice {
     return lsn_;
   }
 
-  std::error_code status() const {
-    return status_ec_;
-  }
-
   void AddLogRecord(const Entry& entry);
 
   void AcquireUser();
@@ -109,7 +105,6 @@ class JournalSlice {
   uint32_t user_count_ = 0;
 
   uint32_t next_cb_id_ = 1;
-  std::error_code status_ec_;
   bool enable_journal_flush_ = true;
   bool use_legacy_entry_limit_ = false;
 

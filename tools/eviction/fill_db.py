@@ -29,8 +29,6 @@ This number can be changed using the -c option:
 ./fill_db.py -m -c 2000
 """
 
-
-import redis
 import string
 from random import choice
 from random import shuffle
@@ -40,7 +38,6 @@ import asyncio
 from redis import asyncio as aioredis
 import os
 import argparse
-import re
 import glob
 
 all_val_lens = [400, 800, 1600, 25000]
@@ -59,94 +56,44 @@ def random_str(len):
 
 
 def random_key():
-    global all_key_lens, key_lens_probs
     return random_str(np.random.choice(all_key_lens, p=key_lens_probs))
 
 
 def random_val():
-    global all_val_lens, val_lens_probs
     return random_str(np.random.choice(all_val_lens, p=val_lens_probs))
 
 
 def flush_keys_to_file(file_name):
-    global inserted_keys
     with open(file_name, "a") as f:
         for key in inserted_keys:
             f.write(f"{key}\n")
 
 
 def read_keys_from_file(file_name):
-    global inserted_keys
     with open(file_name) as file:
         for line in file:
             inserted_keys.append(line.rstrip())
 
 
 def read_keys():
-    global inserted_keys
     inserted_keys.clear()
     key_files = glob.glob("./keys_*.txt")
     for key_file in key_files:
         read_keys_from_file(key_file)
 
 
-def sync_populate_db():
-    r = redis.Redis(decode_responses=True)
-    n = 0
-    while True:
-        r.set(random_key(), random_val())
-        n += 1
-        if n % 1000 == 0:
-            print("\r>> Number of key-value pairs inserted: {}".format(n), end="")
-
-
-def sync_query_db():
-    global inserted_keys
-    r = redis.Redis(decode_responses=True)
-    n = 0
-    read_keys()
-    misses = 0
-    hits = 0
-    for key in inserted_keys:
-        resp = r.set(key, random_val(), nx=True)
-        # print(resp)
-        if resp:
-            misses += 1
-        else:
-            hits += 1
-        n += 1
-        if n % 1000 == 0:
-            print(
-                "\r>> Number of key-value pairs inserted: {0}, hit: {1}, miss: {2}".format(
-                    n, hits, misses
-                ),
-                end="",
-            )
-
-
 async def populate_db(ratio):
-    global inserted_keys
     r = aioredis.Redis(decode_responses=True)
     n = 0
-    misses = 0
-    hits = 0
 
     total_key_count = 0
     while True:
-        # await r.set(random_key(), random_val())
         pipeline = r.pipeline(False)
         for x in range(200):
             k = random_key()
             inserted_keys.append(k)
             pipeline.set(k, random_val())
-            # pipeline.set(k, random_val(), nx=True)
         await pipeline.execute()
-        # responses = await pipeline.execute()
-        # for resp in responses:
-        #    if resp:
-        #        misses += 1
-        #    else:
-        #        hits += 1
 
         # key file names are in keys_xxxx.txt format
         key_file_name = "keys_" + str(os.getpid()) + ".txt"
@@ -175,7 +122,6 @@ async def populate_db(ratio):
                 break
         if n % 1000 == 0:
             print("\r>> Number of key-value pairs inserted: {0}".format(n), end="")
-            # print("\r>> Number of key-value pairs inserted: {0}, hit: {1}, miss: {2}".format(n, hits, misses), end='')
 
 
 def rand_zipf_generator(alpha: float, upper: int, batch: int):
@@ -212,12 +158,10 @@ def rearrange_keys():
     we will generate a zipfian hotspot that prefers to access small kv pairs (or larger kv pairs)
     current implementation just uses a random shuffle.
     """
-    global inserted_keys
     shuffle(inserted_keys)
 
 
 async def query_db_with_locality(count):
-    global inserted_keys
     r = aioredis.Redis(decode_responses=True)
     n = 0
     read_keys()

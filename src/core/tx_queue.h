@@ -67,11 +67,6 @@ class TxQueue {
     return Rank(vec_[vec_[head_].prev]);
   }
 
-  //! returns the score of the head record. Can be called only if !Empty().
-  uint64_t HeadScore() const {
-    return Rank(vec_[head_]);
-  }
-
   //! Can be called only if !Empty().
   Iterator Head() const {
     return head_;

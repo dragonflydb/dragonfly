@@ -124,7 +124,6 @@ cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_tiering
          TRDP::croncpp TRDP::flatbuffers)
 
 if (DF_USE_SSL)
-  set(TLS_LIB tls_lib)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_USE_SSL)
 endif()
 
