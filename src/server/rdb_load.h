@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <functional>
 #include <source_location>
 #include <system_error>
 
@@ -316,6 +317,7 @@ class RdbLoaderBase {
 
   std::unique_ptr<JournalReader> journal_reader_;
   std::unique_ptr<JournalExecutor> journal_executor_;
+  std::function<void(std::string_view)> lineage_cb_;  // receives LINEAGE markers in journal blobs
 
   // State for the tagged chunk currently being parsed
   struct ActiveTaggedChunk {
@@ -343,6 +345,10 @@ class RdbLoader : protected RdbLoaderBase {
 
   void SetLoadUnownedSlots(bool load_unowned) {
     load_unowned_slots_ = load_unowned;
+  }
+
+  void SetLineageCallback(std::function<void(std::string_view)> cb) {
+    lineage_cb_ = std::move(cb);
   }
 
   // Sets shard count of the snapshot being loaded.

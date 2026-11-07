@@ -39,7 +39,6 @@ struct MasterContext {
   std::string dfly_session_id;  // Sync session id for dfly sync.
   unsigned num_flows = 0;
   DflyVersion version = DflyVersion::VER1;
-  std::string lineage_id;                     // lineage id of master
   std::optional<AnnouncedAddress> announced;  // from the capa reply, absent on older masters
 };
 
@@ -130,13 +129,6 @@ class Replica : ProtocolClient {
     return !master_context_.dfly_session_id.empty();
   }
 
-  // The replication id of the lineage root master. Equals the direct master's id, unless the
-  // direct master advertised an ancestor id (cascaded replication), in which case it is the
-  // ancestor's id. Used to negotiate partial sync when reconnecting up the chain.
-  std::string GetLineageId() const {
-    return master_context_.lineage_id;
-  }
-
   std::vector<uint64_t> GetReplicaOffset() const;
   std::string GetSyncId() const;
 
@@ -172,6 +164,11 @@ class Replica : ProtocolClient {
   util::fb2::Fiber sync_fb_;
   util::fb2::Fiber acks_fb_;
   util::fb2::EventCount replica_waker_;
+
+  // Lineage of our data: the replication id of the lineage root master, adopted by all flows from
+  // LINEAGE markers (sent at snapshot start and on promotions up the chain). Collected when the
+  // flows are joined and claimed, together with the LSNs, when negotiating a partial sync.
+  std::string lineage_id_;
 
   std::vector<std::unique_ptr<DflyShardReplica>> shard_flows_;
   std::vector<std::vector<unsigned>> thread_flow_map_;  // a map from proactor id to flow list.
@@ -222,7 +219,7 @@ class DflyShardReplica : public ProtocolClient {
  public:
   DflyShardReplica(ServerContext server_context, MasterContext master_context, uint32_t flow_id,
                    Service* service, std::shared_ptr<MultiShardExecution> multi_shard_exe,
-                   class RdbLoadContext* load_context);
+                   class RdbLoadContext* load_context, std::string lineage_id);
   ~DflyShardReplica();
 
   void Cancel();
@@ -257,12 +254,24 @@ class DflyShardReplica : public ProtocolClient {
     return journal_rec_executed_ = value;
   }
 
+  // Must only be read after the flow fibers are joined.
+  const std::string& Lineage() const {
+    return lineage_;
+  }
+
   // Can be called from any thread.
   void Pause(bool pause);
 
  private:
   Service& service_;
   MasterContext master_context_;
+
+  // Called when a LINEAGE marker arrives, either in the stable sync stream or in a snapshot.
+  void AdoptLineage(std::string_view lineage_id);
+
+  // Lineage of this flow's data, from its last LINEAGE marker. Empty if unknown (full sync without
+  // a marker). Owned by the flow fiber.
+  std::string lineage_;
 
   std::optional<base::IoBuf> leftover_buf_;
 

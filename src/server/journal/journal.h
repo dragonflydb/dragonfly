@@ -52,6 +52,13 @@ void UnregisterConsumer(uint32_t id);
 void RecordEntry(TxId txid, Op opcode, DbIndex dbid, std::optional<SlotId> slot,
                  Entry::Payload payload);
 
+// Lineage id of this shard's data: the replication id of its lineage root master. A master starts
+// with its own replid; a replica clears it on full sync and adopts it from LINEAGE markers
+// (snapshot start, or an upstream promotion); a promotion forks it to the node's own replid. Empty
+// means unknown, which never matches a partial sync claim.
+void SetLineage(std::string lineage_id);
+const std::string& GetLineage();
+
 size_t LsnBufferSize();
 size_t LsnBufferBytes();
 
