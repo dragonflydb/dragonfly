@@ -437,15 +437,19 @@ class ClientKillTest : public BaseFamilyTest {
       return pp_->at(0)->Await(
           [&] { return new facade::Listener(facade::Protocol::REDIS, service_.get(), role); });
     };
-    auto* listener = make(facade::Listener::Role::MAIN);
+    main_listener_ = make(facade::Listener::Role::MAIN);
     auto* admin = make(facade::Listener::Role::PRIVILEGED);
-    port_ = acceptor_->AddListener(0, listener);
+    port_ = acceptor_->AddListener(0, main_listener_);
     admin_port_ = acceptor_->AddListener(0, admin);
-    return {listener, admin};
+    return {main_listener_, admin};
   }
 
   void SetUp() override {
+    // Initialize shared buffers for tests that switch to V2 after setup.
+    const bool v2 = absl::GetFlag(FLAGS_enable_resp_io_loop_v2);
+    absl::SetFlag(&FLAGS_enable_resp_io_loop_v2, true);
     BaseFamilyTest::SetUp();
+    absl::SetFlag(&FLAGS_enable_resp_io_loop_v2, v2);
     acceptor_->Run();
   }
 
@@ -456,6 +460,7 @@ class ClientKillTest : public BaseFamilyTest {
   }
 
   std::unique_ptr<util::AcceptServer> acceptor_;
+  facade::Listener* main_listener_ = nullptr;
   uint16_t port_ = 0, admin_port_ = 0;
   absl::FlagSaver flag_saver_;
 };
@@ -572,18 +577,66 @@ TEST_F(ClientKillTest, Filters) {
   EXPECT_EQ(caller.ReadLine(), ":0\r\n");
 }
 
-// A half-closed peer marks the connection closing, yet only a kill ends its blocked send.
-TEST_F(ClientKillTest, KillsHalfClosedStuckSend) {
-  RawRespClient v{port_};
-  const std::string id = ClientId(v);
-  Run({"SET", "big", std::string(64 << 20, 'x')});
-  auto row = [&] { return Run({"CLIENT", "LIST", "ID", id}).GetString(); };
-  ASSERT_TRUE(v.SendAll("GET big\r\n"));
-  ExpectConditionWithinTimeout([&] { return absl::StrContains(row(), "phase=send"); });
-  ASSERT_TRUE(v.ShutdownWrite());
-  ExpectConditionWithinTimeout([&] { return absl::StrContains(row(), "flags=t"); });
-  EXPECT_THAT(Run({"CLIENT", "KILL", "ID", id}), IntArg(1));
-  ExpectConditionWithinTimeout([&] { return row().empty(); });
+// A closing context must not prevent killing an open socket with a blocked send.
+TEST_F(ClientKillTest, KillsClosingConnectionWithStuckSend) {
+  auto wait_until = [](auto&& condition) {
+    const auto deadline = std::chrono::steady_clock::now() + 2s;
+    while (!condition()) {
+      if (std::chrono::steady_clock::now() >= deadline)
+        return false;
+      absl::SleepFor(absl::Milliseconds(1));
+    }
+    return true;
+  };
+
+  ASSERT_EQ(Run({"SET", "big", std::string(64 << 20, 'x')}), "OK");
+  for (bool v2 : {false, true}) {
+    SCOPED_TRACE(v2);
+    absl::SetFlag(&FLAGS_enable_resp_io_loop_v2, v2);
+    RawRespClient client{port_};
+    ASSERT_TRUE(client.valid());
+    const std::string id = ClientId(client);
+    ASSERT_FALSE(id.empty());
+    SCOPED_TRACE(absl::StrCat("client id=", id));
+    ASSERT_TRUE(client.SendAll("GET big\r\n"));
+
+    // Identify the GET reply while leaving its large body unread to keep the send blocked.
+    ASSERT_EQ(client.ReadLine(), "$67108864\r\n");
+
+    std::string state;
+    auto inspect = [&](bool mark_closing) {
+      return pp_->at(0)->Await([&] {
+        bool ready = false;
+        state = "Connection not found";
+        main_listener_->TraverseConnections([&](unsigned tid, util::Connection* connection) {
+          auto* conn = static_cast<facade::Connection*>(connection);
+          if (absl::StrCat(conn->GetClientId()) != id)
+            return;
+
+          ready = conn->cntx() && conn->socket()->IsOpen() && conn->IsSending();
+          if (ready && mark_closing)
+            conn->cntx()->conn_closing = true;
+          state =
+              absl::StrCat("socket_open=", conn->socket()->IsOpen(), " ", conn->GetClientInfo(tid));
+        });
+        return ready;
+      });
+    };
+    ASSERT_TRUE(wait_until([&] { return inspect(false); }))
+        << "Expected an open connection with a blocked send: " << state;
+
+    // Set the context flag on its owner proactor without shutting down the socket. A real
+    // half-close can abort the blocked send on kqueue before CLIENT KILL gets to it.
+    ASSERT_TRUE(inspect(true)) << "Connection stopped sending before marking it closing: " << state;
+    ASSERT_THAT(Run({"CLIENT", "KILL", "ID", id}), IntArg(1)) << state;
+
+    std::string last_row;
+    ASSERT_TRUE(wait_until([&] {
+      last_row = Run({"CLIENT", "LIST", "ID", id}).GetString();
+      return last_row.empty();
+    })) << last_row;
+    EXPECT_THAT(Run({"CLIENT", "KILL", "ID", id}), IntArg(0));
+  }
 }
 
 // Connections that move to another thread can not be borrowed.
