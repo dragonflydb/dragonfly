@@ -3,6 +3,7 @@
 
 #include "facade/dragonfly_connection.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_split.h>
 #include <arpa/inet.h>
@@ -23,11 +24,13 @@
 #include "facade/dragonfly_listener.h"
 #include "facade/facade_test.h"
 #include "server/conn_context.h"
+#include "server/engine_shard_set.h"
 #include "server/test_utils.h"
 #include "util/accept_server.h"
 
 ABSL_DECLARE_FLAG(bool, enable_resp_io_loop_v2);
 ABSL_DECLARE_FLAG(bool, enable_shared_read_buffer);
+ABSL_DECLARE_FLAG(bool, enable_pipeline_squashing_v2);
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 
 namespace dfly {
@@ -203,7 +206,7 @@ class DragonflyConnectionTest : public BaseFamilyTest {
   absl::FlagSaver flag_saver_;
 };
 
-// Run every V2 parser-error test with private and shared read buffers.
+// Run V2 connection tests with private and shared read buffers.
 class DragonflyV2ConnectionTest : public DragonflyConnectionTest,
                                   public testing::WithParamInterface<bool> {
  protected:
@@ -211,6 +214,81 @@ class DragonflyV2ConnectionTest : public DragonflyConnectionTest,
     return GetParam();
   }
 };
+
+// A drained batch can expose an undispatched head while the queue remains over its byte limit.
+TEST_P(DragonflyV2ConnectionTest, DrainsQueuedCommandsOverPipelineLimit) {
+  const std::string original_limit =
+      Run({"CONFIG", "GET", "pipeline_buffer_limit"}).GetVec()[1].GetString();
+  for (bool squash : {true, false}) {
+    SCOPED_TRACE(squash);
+    absl::SetFlag(&FLAGS_enable_pipeline_squashing_v2, squash);
+    absl::Cleanup restore_limit = [&] {
+      EXPECT_EQ(Run({"CONFIG", "SET", "pipeline_buffer_limit", original_limit}), "OK");
+    };
+
+    RawRespClient client{port_};
+    ASSERT_TRUE(client.valid());
+
+    // Parse the whole pipeline before CONFIG lowers the limit; each PING ends a squash batch.
+    ASSERT_TRUE(
+        client.SendAll("CONFIG SET pipeline_buffer_limit 1\r\n"
+                       "SET a b\r\nPING\r\nSET c d\r\nPING\r\n"));
+    for (std::string_view reply : {"+OK\r\n", "+OK\r\n", "+PONG\r\n", "+OK\r\n", "+PONG\r\n"}) {
+      ASSERT_EQ(client.ReadLine(), reply);
+    }
+
+    // The connection stays usable and both writes are visible without raising the limit.
+    ASSERT_TRUE(client.SendAll("GET a\r\nGET c\r\nPING\r\n"));
+    for (std::string_view reply : {"$1\r\n", "b\r\n", "$1\r\n", "d\r\n", "+PONG\r\n"}) {
+      ASSERT_EQ(client.ReadLine(), reply);
+    }
+  }
+}
+
+// Completing one async reply must leave a completion subscription for the next pending head.
+TEST_P(DragonflyV2ConnectionTest, WakesForNextAsyncReplyOverPipelineLimit) {
+  absl::SetFlag(&FLAGS_enable_pipeline_squashing_v2, false);
+  const std::string original_limit =
+      Run({"CONFIG", "GET", "pipeline_buffer_limit"}).GetVec()[1].GetString();
+
+  ASSERT_GE(shard_set->size(), 2u);
+  const std::string first_key = "pipeline-async-first";
+  std::string second_key = "pipeline-async-second";
+  while (Shard(first_key, shard_set->size()) == Shard(second_key, shard_set->size()))
+    second_key += "x";
+
+  auto* exec_cid = service_->FindCmd("EXEC");
+  boost::intrusive_ptr<Transaction> first_lock(new Transaction{exec_cid});
+  boost::intrusive_ptr<Transaction> second_lock(new Transaction{exec_cid});
+  absl::Cleanup restore_state = [&] {
+    pp_->at(0)->Await([&] {
+      first_lock->UnlockMulti(true);
+      second_lock->UnlockMulti(true);
+    });
+    EXPECT_EQ(Run({"CONFIG", "SET", "pipeline_buffer_limit", original_limit}), "OK");
+  };
+  pp_->at(0)->Await([&] {
+    std::string_view first_keys[] = {first_key};
+    std::string_view second_keys[] = {second_key};
+    auto* ns = &namespaces->GetDefaultNamespace();
+    first_lock->StartMultiLockedAhead(ns, 0, CmdArgList{first_keys}, 1);
+    second_lock->StartMultiLockedAhead(ns, 0, CmdArgList{second_keys}, 1);
+  });
+
+  RawRespClient client{port_};
+  ASSERT_TRUE(client.valid());
+  ASSERT_TRUE(client.SendAll("CONFIG SET pipeline_buffer_limit 1\r\nSET " + first_key +
+                             " a\r\nSET " + second_key + " b\r\n"));
+
+  // CONFIG's batched reply flushes when backpressure parks behind the first locked SET.
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+  pp_->at(0)->Await([&] { first_lock->UnlockMulti(true); });
+
+  // The next flush follows retirement of the first SET, while the second SET remains pending.
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+  pp_->at(0)->Await([&] { second_lock->UnlockMulti(true); });
+  ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+}
 
 // A valid pipelined prefix must execute and reply in order before the terminal protocol error.
 // The malformed frame must then produce the error and close the connection.

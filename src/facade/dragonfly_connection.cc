@@ -4175,7 +4175,7 @@ bool Connection::HasControlEvent() const {
   // a reply became ready, control-plane messages are queued (dispatch_q_), the socket errored or
   // closed (io_ec_), or a thread migration is pending and actionable.
 
-  return (parsed_head_ && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
+  return (HasInFlightCommands() && parsed_head_->CanReply()) || !dispatch_q_.empty() || io_ec_ ||
          IsReadyToMigrate();
 }
 
@@ -4239,9 +4239,12 @@ void Connection::DrainQueuedCommands() {
 }
 
 void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_waiter) {
-  // Draining (by the caller) may have freed enough memory; only park if still over the limit, to
-  // prevent a busy-spin.
-  if (!IsOverPipelineLimit())
+  // Draining may expose a command ready to execute even while the queue remains over the limit.
+  // Let already-parsed work free memory, but keep new input subject to parse throttling.
+  auto should_wake = [this] {
+    return !IsOverPipelineLimit() || HasCommandToExecute() || HasControlEvent();
+  };
+  if (should_wake())
     return;
 
   auto& conn_stats = GetLocalConnStats();
@@ -4266,13 +4269,7 @@ void Connection::ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_wait
   if (auto ec = FlushReplies(); ec)
     return;
 
-  io_event_.await([this]() {
-    // Leave the backpressure wait once our own pipeline pressure clears, or on any control event
-    // (the latter lets a terminating/migrating connection escape the park).
-    bool under_limit = !GetQueueBackpressure().IsPipelineBufferOverLimit(
-        GetLocalConnStats().pipeline_queue_bytes, parsed_cmd_q_len_);
-    return under_limit || HasControlEvent();
-  });
+  io_event_.await(should_wake);
 }
 
 auto Connection::FinalizeV2ParserError() -> IoLoopResult {
@@ -4325,6 +4322,14 @@ auto Connection::IoLoopV2() -> IoLoopResult {
   util::fb2::detail::Waiter cmd_completion_waiter{ioevent_cb};
   absl::Cleanup waiter_cleanup = [this] { current_wait_.reset(); };
 
+  // ReplyBatch can advance the head and clear its subscription during this iteration. Subscribe
+  // before either park, and only for a pending reply: a ready captured payload has no blocker.
+  auto subscribe_to_head_completion = [this, &cmd_completion_waiter] {
+    if (HasInFlightCommands() && !current_wait_ && !parsed_head_->CanReply()) {
+      current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
+    }
+  };
+
   // Waiter used for transient, conditional subscriptions (via check_or_subscribe)
   // to global pipeline-backpressure relief notifications.
   util::fb2::detail::Waiter backpressure_waiter{ioevent_cb};
@@ -4333,11 +4338,6 @@ auto Connection::IoLoopV2() -> IoLoopResult {
 
   do {
     HandleMigrateRequest();
-
-    // Register completion for current head if its pending and we don't wait on current_wait_.
-    if (HasInFlightCommands() && !current_wait_.has_value()) {
-      current_wait_.emplace(parsed_head_, &cmd_completion_waiter);
-    }
 
     if (!parser_error_draining_) {
       if (shared_read_buf_enabled_) {
@@ -4367,6 +4367,7 @@ auto Connection::IoLoopV2() -> IoLoopResult {
       const bool wait_for_reply = HasInFlightCommands();
       const uint64_t idle_wait_start = CycleClock::Now();
 
+      subscribe_to_head_completion();
       fiber_park_spot_ = FiberParkSpot::kIdleAwait;
       const bool parked = io_event_.await([this] { return ShouldWakeIdle(); });
       fiber_park_spot_ = FiberParkSpot::kNone;
@@ -4408,8 +4409,10 @@ auto Connection::IoLoopV2() -> IoLoopResult {
     if (parser_error_draining_ || shared_read_buf_enabled_ || (io_buf_.InputLen() == 0) ||
         over_limit) {
       DrainQueuedCommands();
-      if (over_limit)
+      if (over_limit) {
+        subscribe_to_head_completion();
         ParkOnBackpressure(&backpressure_waiter);
+      }
 
       // ReadAndParseShared already supplied this iteration's status. Private buffer mode did not
       // parse here, so report that it requires more input for capacity bookkeeping below.
