@@ -847,6 +847,99 @@ TEST_F(GenericFamilyTest, Move) {
   fb_blpop.Join();
 }
 
+TEST_F(GenericFamilyTest, MoveDestinationInsertionFailure) {
+  struct RejectInsert : DbSlice::ChangeConsumerInterface {
+    DbSlice* slice = nullptr;
+    DbIndex target = 1;
+    bool throws = false;
+    unsigned calls = 0;
+
+    void OnChange(DbIndex db, const ChangeReq&) override {
+      if (db != target)
+        return;
+      ++calls;
+      if (throws)
+        throw std::bad_alloc{};
+      slice->UpdateMemoryParams(-1, 0);
+    }
+  } reject;
+  struct CountMoves : journal::JournalConsumerInterface {
+    unsigned count = 0;
+    void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+      count += item.cmd == "MOVE";
+    }
+    void ThrottleIfNeeded() override {
+    }
+  } moves;
+
+  ShardId sid = Shard("k", shard_set->size());
+  uint32_t consumer_id = StartJournalWithConsumer(&moves, sid);
+  auto cleanup = absl::MakeCleanup(
+      [&] { shard_set->Await(sid, [&] { journal::UnregisterConsumer(consumer_id); }); });
+
+  for (string_view type : {"string", "hash", "list"}) {
+    for (DbIndex source : {0, 1}) {
+      for (bool throws : {false, true}) {
+        SCOPED_TRACE(StrCat(type, " source=", source, " throws=", throws));
+        Run({"SELECT", "0"});
+        Run({"FLUSHALL", "SYNC"});
+#ifdef WITH_SEARCH
+        if (type == "hash") {
+          Run({"FT.DROPINDEX", "idx"});
+          ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "field", "TEXT"}), "OK");
+        }
+#endif
+        string source_str = StrCat(source), target_str = StrCat(1 - source);
+        Run({"SELECT", source_str});
+        if (type == "string")
+          ASSERT_EQ(Run({"SET", "k", "v"}), "OK");
+        else if (type == "hash")
+          ASSERT_EQ(Run({"HSET", "k", "field", "value"}), 1);
+        else
+          ASSERT_EQ(Run({"RPUSH", "k", "v"}), 1);
+        ASSERT_EQ(Run({"PEXPIRE", "k", "100000"}), 1);
+        ASSERT_EQ(Run({"STICK", "k"}), 1);
+        string value = Run({"DUMP", "k"}).GetString();
+        int64_t deadline = Run({"PEXPIRETIME", "k"}).GetInt().value();
+        reject.target = 1 - source;
+        reject.throws = throws;
+        reject.calls = 0;
+        shard_set->Await(sid, [&] {
+          reject.slice = &namespaces->GetDefaultNamespace().GetDbSlice(sid);
+          EngineShard::tlocal()->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+          reject.slice->RegisterOnChange(&reject);
+          EngineShard::tlocal()->shard_lock()->Release(IntentLock::EXCLUSIVE);
+          moves.count = 0;
+        });
+        auto reply = Run({"MOVE", "k", target_str});
+        shard_set->Await(sid, [&] {
+          EXPECT_TRUE(reject.slice->UnregisterOnChange(&reject));
+          reject.slice->UpdateMemoryParams(INT64_MAX / 2, 0);
+        });
+        ASSERT_EQ(reject.calls, 1u);
+        unsigned journal_count = moves.count;
+        bool error_reply = testing::Matches(ErrArg("Out of memory"))(reply);
+        bool state_preserved =
+            Run({"DUMP", "k"}) == value && Run({"PEXPIRETIME", "k"}).GetInt().value() == deadline;
+        bool sticky = shard_set->Await(sid, [&] {
+          auto it = reject.slice->GetDBTable(source)->prime.Find("k");
+          return IsValid(it) && it->first.IsSticky();
+        });
+        Run({"SELECT", target_str});
+        state_preserved &= Run({"EXISTS", "k"}).GetInt().value() == 0 && sticky;
+#ifdef WITH_SEARCH
+        if (type == "hash") {
+          Run({"SELECT", "0"});
+          state_preserved &= Run({"FT.SEARCH", "idx", "value"}).GetVec()[0].GetInt().value() ==
+                             (source == 0 ? 1 : 0);
+        }
+#endif
+        ASSERT_TRUE(state_preserved && error_reply && journal_count == 0);
+      }
+    }
+  }
+}
+
 TEST_F(GenericFamilyTest, MoveUpdatesMemoryAccounting) {
   EXPECT_EQ(1, CheckedInt({"lpush", "list", "elem"}));
 
