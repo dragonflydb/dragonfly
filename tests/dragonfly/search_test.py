@@ -1868,3 +1868,38 @@ async def test_sortby_with_scores_alignment(async_client: aioredis.Redis):
     # sort_scores from ids, ranks would be jumbled.
     assert ranks == sorted(ranks, reverse=True), f"SORTBY desynced: {keys} -> {ranks}"
     await async_client.execute_command("FT.DROPINDEX", "sw_idx")
+
+
+async def test_tag_range_keyset_pagination(async_client: aioredis.Redis):
+    """@field:>{$cursor} with SORTBY on the same field pages through a TAG field by key."""
+    await async_client.execute_command(
+        "FT.CREATE", "kp_idx", "ON", "HASH", "PREFIX", "1", "kp:", "SCHEMA",
+        "name", "TAG", "SORTABLE",
+    )  # fmt: skip
+    names = [f"user{i:03}" for i in range(50)]
+    for i, name in enumerate(names):
+        await async_client.hset(f"kp:{i}", mapping={"name": name})
+
+    # The first page has no cursor yet; every later page starts after the last name seen.
+    seen, cursor = [], None
+    while True:
+        query = ["*"] if cursor is None else ["@name:>{$cursor}", "PARAMS", "2", "cursor", cursor]
+        res = await async_client.execute_command(
+            "FT.SEARCH", "kp_idx", *query,
+            "SORTBY", "name", "ASC", "LIMIT", "0", "7", "RETURN", "1", "name",
+        )  # fmt: skip
+        page = [res[i + 1][1] for i in range(1, len(res), 2)]
+        if not page:
+            break
+        seen += page
+        cursor = page[-1]
+
+    assert seen == names
+
+    async def count(query):
+        return (await async_client.execute_command("FT.SEARCH", "kp_idx", query, "LIMIT", 0, 0))[0]
+
+    assert await count("@name:>={user010} @name:<{user020}") == 10
+    assert await count("@name:<={USER004}") == 5
+    assert await count("-@name:>{user044}") == 45
+    await async_client.execute_command("FT.DROPINDEX", "kp_idx")

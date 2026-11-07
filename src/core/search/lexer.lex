@@ -65,6 +65,14 @@ sep_ch     [.!#&=<>^?+/']
 "-"                  return Parser::make_NOT_OP (loc());
 "~"                  return Parser::make_TILDE (loc());
 ":"                  return Parser::make_COLON (loc());
+
+  /* Tag range operator right after a field's colon: `@f:>{v}`. Outside this position `<` and `>`
+     stay separators. */
+":<"                 return Parser::make_TAG_LT (loc());
+":<="                return Parser::make_TAG_LE (loc());
+":>"                 return Parser::make_TAG_GT (loc());
+":>="                return Parser::make_TAG_GE (loc());
+
 "=>"[[:space:]]*"{" return Parser::make_ATTR_ARROW (loc());
 "=>"                 return Parser::make_ARROW (loc());
 "["                  return Parser::make_LBRACKET (loc());
