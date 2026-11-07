@@ -462,6 +462,21 @@ class Segment {
   template <typename Cb, typename HashFn>
   bool TraverseLogicalBucket(LogicalBid bid, HashFn&& hfun, Cb&& cb) const;
 
+  // Prefetches what TraverseLogicalBucket(bid) reads first: the headers and keys of bucket bid
+  // and of the next bucket, which holds the probing entries of bid. Forced inline because GCC
+  // treats prefetch-only functions as pure and drops calls to them.
+  __attribute__((always_inline)) void PrefetchLogicalBucket(LogicalBid bid) const {
+    const Bucket& b = bucket_[bid];
+    const char* start = reinterpret_cast<const char*>(&b);
+    const char* next = reinterpret_cast<const char*>(&bucket_[NextBid(bid)]);
+    const size_t keys_end = reinterpret_cast<const char*>(b.key + kSlotNum) - start;
+    // The extra line covers buckets that do not start at a cache line boundary.
+    for (size_t offs = 0; offs < keys_end + 64; offs += 64) {
+      __builtin_prefetch(start + offs, 0, 2);
+      __builtin_prefetch(next + offs, 0, 2);
+    }
+  }
+
   // Cb  accepts (const Iterator&).
   template <typename Cb> void TraverseAll(Cb&& cb) const;
 

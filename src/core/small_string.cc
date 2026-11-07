@@ -149,6 +149,14 @@ void SmallString::Get(std::string* dest) const {
   Get(dest->data());
 }
 
+void SmallString::Prefetch() const {
+  DCHECK(size_);
+  const uint8_t* ptr = tl.seg_alloc->Translate(small_ptr_);
+  // Prefetching the trailing line of unaligned data did not pay off in benchmarks.
+  for (unsigned offs = 0; offs < size_ - kPrefLen; offs += 64)
+    __builtin_prefetch(ptr + offs, 0, 2);
+}
+
 bool SmallString::DefragIfNeeded(PageUsage* page_usage) {
   uint8_t* cur_real_ptr = tl.seg_alloc->Translate(small_ptr_);
   if (!page_usage->IsPageForObjectUnderUtilized(tl.seg_alloc->heap(), cur_real_ptr))

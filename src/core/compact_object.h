@@ -641,6 +641,30 @@ struct CompactKey : public CompactObj {
     return taglen_ == SDS_TTL_TAG && int64_t(now_ms) >= int64_t(u_.sds_ttl.exp_ms);
   }
 
+  // Hint to prefetch heap-backed key bytes; no-op for inline and integer representations.
+  // Defined inline: a call frame costs more than the hint itself.
+  void PrefetchString() const {
+    const char* ptr;
+    switch (taglen_) {
+      case SMALL_TAG:
+        u_.small_str.Prefetch();
+        return;
+      case SDS_TTL_TAG:
+        ptr = u_.sds_ttl.sds_ptr;
+        break;
+      case LARGE_STR_TAG:
+        ptr = static_cast<const char*>(u_.large_str.ptr);
+        break;
+      default:
+        return;
+    }
+    // The SDS length lives on the heap and large strings are unbounded, so prefetch a fixed
+    // 128 bytes, enough for typical keys. An aligned allocation and odd-sized SDS header keep
+    // sds_ptr[-1] (flags) in the same cache line as sds_ptr.
+    __builtin_prefetch(ptr, 0, 2);
+    __builtin_prefetch(ptr + 64, 0, 2);
+  }
+
   // Embed expire time directly in the key by converting to SDS_TTL_TAG.
   void SetExpireTime(uint64_t abs_ms);
 
