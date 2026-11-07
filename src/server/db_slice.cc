@@ -1033,6 +1033,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
 
   ServerState& etl = *ServerState::tlocal();
   const float cpu_budget = GetFlag(FLAGS_migration_buckets_cpu_budget);
+  base::CycleBucketAggregator& cpu_aggregator = owner_->migration_cpu_aggregator();
   for (DbIndex db_ind = 0; db_ind < tables.size() && etl.gstate() != GlobalState::SHUTTING_DOWN;
        ++db_ind) {
     table = tables[db_ind];
@@ -1049,7 +1050,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
 
     do {
       {
-        base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
+        base::CpuTimeGuard guard(&cpu_aggregator);
         cursor = pt->TraverseBuckets(cursor, iterate_bucket);
       }
 
@@ -1063,7 +1064,7 @@ void DbSlice::FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_versi
       }
 
       while (cursor && etl.gstate() != GlobalState::SHUTTING_DOWN &&
-             flush_slots_cpu_aggregator_.IsOverloaded(cpu_budget)) {
+             cpu_aggregator.IsOverloaded(cpu_budget)) {
         ThisFiber::SleepFor(300us);
       }
     } while (cursor && table == db_arr_[db_ind] && etl.gstate() != GlobalState::SHUTTING_DOWN);
@@ -1106,7 +1107,7 @@ void DbSlice::FlushSlots(const cluster::SlotRanges& slot_ranges) {
       return;
 
     FiberAtomicGuard fg;
-    base::CpuTimeGuard guard(&flush_slots_cpu_aggregator_);
+    base::CpuTimeGuard guard(&owner_->migration_cpu_aggregator());
 
     auto process_bucket = [&](PrimeTable::bucket_iterator it) {
       std::string tmp;
