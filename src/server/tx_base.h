@@ -17,6 +17,8 @@ namespace dfly {
 
 using cmn::ArgSlice;
 
+class CompactObj;
+
 struct KeyLockArgs {
   DbIndex db_index = 0;
   absl::Span<const LockFp> fps;
@@ -114,14 +116,12 @@ class LockTag {
 };
 
 enum class KeyReadyResult {
-  kKeyNotFound,  // key doesn't exist - abort the entire watch queue
-  kNotReady,     // key exists but per-tx conditions not met - skip this tx, try next
-  kReady,        // wake this tx
+  kNotReady,  // key missing or conditions not met keep this tx waiting, check next in queue
+  kReady,     // wake this tx
 };
 
 // Checks whether the touched key is valid for a blocking transaction watching it.
-using KeyReadyChecker =
-    std::function<KeyReadyResult(EngineShard*, const DbContext& context, std::string_view)>;
+using KeyReadyChecker = std::function<KeyReadyResult(std::string_view key, const CompactObj* obj)>;
 
 // References arguments in another array.
 using IndexSlice = std::pair<uint32_t, uint32_t>;  // [begin, end)
