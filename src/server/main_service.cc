@@ -1911,13 +1911,14 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
     // Memcached protocol doesn't support authentication, so we don't require it.
-    // This also means JWT validation is not supported/enforced for Memcached connections.
+    // External auth validation is not enforced for Memcached connections.
     if (owner->GetProtocol() == Protocol::MEMCACHE) {
       res->req_auth = false;
       res->authenticated = true;  // Automatically authenticated for Memcached protocol
     } else {
-      // JWT validation must gate every connection even if the local "default" user is nopass.
-      res->req_auth = acl::JwtValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
+      // External auth must gate connections even if the default user is nopass.
+      res->req_auth = acl::JwtValidator::IsEnabled() || acl::LdapValidator::IsEnabled() ||
+                      !user_registry_.AuthUser("default", "");
     }
   }
 

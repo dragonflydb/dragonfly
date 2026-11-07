@@ -11,6 +11,8 @@
 
 ABSL_DECLARE_FLAG(bool, jwt_validate);
 ABSL_DECLARE_FLAG(std::string, jwt_validate_url);
+ABSL_DECLARE_FLAG(bool, ldap_validate);
+ABSL_DECLARE_FLAG(std::string, ldap_validate_url);
 
 namespace dfly::acl {
 
@@ -53,6 +55,23 @@ TEST_F(JwtValidatorTest, IsEnabledTrueWhenBothSet) {
   absl::SetFlag(&FLAGS_jwt_validate, true);
   absl::SetFlag(&FLAGS_jwt_validate_url, "http://localhost:8080/validate");
   EXPECT_TRUE(JwtValidator::IsEnabled());
+}
+
+TEST_F(JwtValidatorTest, LdapRequiresFlagAndUrl) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_ldap_validate, false);
+  absl::SetFlag(&FLAGS_ldap_validate_url, "http://localhost:8080/validate");
+  EXPECT_FALSE(LdapValidator::IsEnabled());
+  absl::SetFlag(&FLAGS_ldap_validate, true);
+  EXPECT_TRUE(LdapValidator::IsEnabled());
+  absl::SetFlag(&FLAGS_ldap_validate_url, "");
+  EXPECT_FALSE(LdapValidator::IsEnabled());
+}
+
+TEST_F(JwtValidatorTest, LdapRejectsInvalidUrl) {
+  absl::FlagSaver flag_saver;
+  absl::SetFlag(&FLAGS_ldap_validate_url, "ldap://localhost");
+  EXPECT_FALSE(LdapValidator{}.Validate("alice", "password"));
 }
 
 TEST_F(JwtValidatorTest, ValidateOverrideBypassesNetwork) {
