@@ -446,6 +446,9 @@ class ShardDocIndex {
   // Possibly blocking to stop indexing job
   ~ShardDocIndex();
 
+  // Waits for the builder to stop and may yield.
+  void CancelBuilder();
+
   // Perform search on all indexed documents and return results.
   // When global_stats is non-null, scorers see cluster-wide counts.
   SearchResult Search(const OpArgs& op_args, const SearchParams& params,
@@ -630,9 +633,6 @@ class ShardDocIndex {
 
   // Clears internal data. Traverses all matching documents and assigns ids.
   void Rebuild(const OpArgs& op_args, PMR_NS::memory_resource* mr, bool is_restored = false);
-
-  // Cancel builder if in progress
-  void CancelBuilder();
 
   using LoadedEntry = std::pair<std::string_view, std::unique_ptr<BaseAccessor>>;
   std::optional<LoadedEntry> LoadEntry(search::DocId id, const OpArgs& op_args) const;
