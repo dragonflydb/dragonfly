@@ -41,7 +41,8 @@ class QueuedSinkWriter {
   // Queues data and blocks until it is written or at most limit() bytes are queued.
   void Push(std::string data);
 
-  // Blocks while more than `bytes` are queued.
+  // Blocks while more than `bytes` of what is queued at the call remain unwritten. Chunks pushed
+  // meanwhile do not extend the wait, so producers can not keep the caller waiting.
   void WaitBelow(size_t bytes);
 
   // Hands what is queued to write_fn and joins the writer fiber. No Push() may follow.
@@ -52,6 +53,13 @@ class QueuedSinkWriter {
     limit_ = limit;
     cv_.notify_all();  // a raised limit may release waiting producers
   }
+
+  // Lowers the limit to `limit` without making a producer wait for the whole backlog, as
+  // SetLimit(limit) would. The limit starts `limit` above the backlog and follows the queue down:
+  // each write lowers it by half of the bytes written, so producers keep half of the sink's
+  // throughput while the queue shrinks.
+  // Blocks until the limit or the queue is down to `limit`. Does not raise a lower limit.
+  void LowerLimit(size_t limit);
 
   size_t limit() const {
     return limit_;

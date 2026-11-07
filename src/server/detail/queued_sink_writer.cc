@@ -39,8 +39,31 @@ void QueuedSinkWriter::Push(string data) {
 }
 
 void QueuedSinkWriter::WaitBelow(size_t bytes) {
+  const uint64_t fence = pushed_bytes_;
   util::fb2::NoOpLock lk;
-  cv_.wait(lk, [&] { return pending_bytes() <= bytes || !cntx_->IsRunning(); });
+  cv_.wait(lk, [&] { return fence <= written_bytes_ + bytes || !cntx_->IsRunning(); });
+}
+
+void QueuedSinkWriter::LowerLimit(size_t limit) {
+  limit = min(limit, limit_);  // never raises the limit
+
+  // Start `limit` above the backlog, so a producer that pushes before the write in flight
+  // completes does not wait for it.
+  util::fb2::NoOpLock lk;
+  limit_ = max(limit, min(limit_, pending_bytes() + limit));
+
+  // The limit may stay above a queue that drains faster than it falls, so stop once either is
+  // down to `limit`.
+  while (limit_ > limit && pending_bytes() > limit && cntx_->IsRunning()) {
+    // More than `limit` is queued, so the writer is busy and the wait below ends.
+    const uint64_t written_bytes = written_bytes_;
+    cv_.wait(lk, [&] { return written_bytes_ > written_bytes || !cntx_->IsRunning(); });
+
+    // Not clamped to what is still queued: the other half of the write is headroom for producers.
+    size_t step = (written_bytes_ - written_bytes) / 2;
+    limit_ = max(limit, limit_ - min(limit_, step));
+  }
+  SetLimit(limit);
 }
 
 void QueuedSinkWriter::Stop() {
