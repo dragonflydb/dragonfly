@@ -1554,12 +1554,19 @@ class DflyCommandAliasTest : public DflyEngineTest {
  protected:
   DflyCommandAliasTest() {
     SetFlag(&FLAGS_command_alias,
-            {"___set=set", "___ping=ping", "___hello=hello", "evalauth=auth"});
+            {"___set=set", "___ping=ping", "___hello=hello", "evalauth=auth", "___msetex=msetex"});
     SetFlag(&FLAGS_latency_tracking, true);
   }
 
   absl::FlagSaver saver_;
 };
+
+// An alias of MSETEX must accept trailing options, like MSETEX itself.
+TEST_F(DflyCommandAliasTest, MSetExAlias) {
+  EXPECT_THAT(Run({"___msetex", "1", "k", "v", "EX", "10"}), IntArg(1));
+  EXPECT_EQ(Run({"GET", "k"}), "v");
+  EXPECT_THAT(Run({"TTL", "k"}), IntArg(10));
+}
 
 TEST_F(DflyCommandAliasTest, Aliasing) {
   EXPECT_EQ(Run({"SET", "foo", "bar"}), "OK");
