@@ -107,52 +107,7 @@ TEST_F(ListFamilyTest, BLMPopNonblocking) {
 }
 
 TEST_F(ListFamilyTest, BLMPopInvalidSyntax) {
-  // Not enough arguments
-  auto resp = Run({"blmpop", "0.1", "1", kKey1});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
-
-  // Timeout is not a float
-  resp = Run({"blmpop", "foo", "1", kKey1, "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg(facade::kTimeoutNotFloatErr));
-
-  // Negative timeout
-  resp = Run({"blmpop", "-0.01", "1", kKey1, "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg(facade::kTimeoutNegativeErr));
-
-  // Zero keys
-  resp = Run({"blmpop", "0.01", "0", "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
-
-  // Number of keys is not uint
-  resp = Run({"blmpop", "0.01", "aa", kKey1, "LEFT"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
-
-  // Missing LEFT/RIGHT
-  resp = Run({"blmpop", "0.01", "1", kKey1, "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Wrong number of keys
-  resp = Run({"blmpop", "0.01", "1", kKey1, kKey2, "LEFT"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // COUNT without number
-  resp = Run({"blmpop", "0.01", "1", kKey1, "LEFT", "COUNT"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // COUNT is not uint
-  resp = Run({"blmpop", "0.01", "1", kKey1, "LEFT", "COUNT", "boo"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
-
-  // Non-positive count errors immediately, even with an infinite timeout
-  resp = Run({"blmpop", "0", "1", kKey1, "LEFT", "COUNT", "0"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  resp = Run({"blmpop", "0", "1", kKey1, "LEFT", "COUNT", "-1"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // Too many arguments
-  resp = Run({"blmpop", "0.01", "1", "c", "LEFT", "COUNT", "2", "foo"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  CheckMPopSyntax("blmpop", "0.01", "LEFT", "LEFT");
 }
 
 TEST_F(ListFamilyTest, BLMPopWrongType) {
@@ -1409,59 +1364,7 @@ TEST_F(ListFamilyTest, ContendExpire) {
 }
 
 TEST_F(ListFamilyTest, LMPopInvalidSyntax) {
-  // Not enough arguments
-  auto resp = Run({"lmpop", "1", "a"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
-
-  // Zero keys
-  resp = Run({"lmpop", "0", "LEFT", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
-
-  // Number of keys is not uint
-  resp = Run({"lmpop", "aa", "a", "LEFT"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
-
-  // Missing LEFT/RIGHT
-  resp = Run({"lmpop", "1", "a", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Wrong number of keys
-  resp = Run({"lmpop", "1", "a", "b", "LEFT"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // COUNT without number
-  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // COUNT is not uint
-  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "boo"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
-
-  // COUNT is zero
-  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "0"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // COUNT is negative
-  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "-1"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "-9223372036854775808"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // COUNT above UINT32_MAX
-  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "4294967296"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "9223372036854775807"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // Non-positive count errors even with trailing junk
-  resp = Run({"lmpop", "1", "a", "LEFT", "COUNT", "0", "foo"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // Too many arguments
-  resp = Run({"lmpop", "1", "c", "LEFT", "COUNT", "2", "foo"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  CheckMPopSyntax("lmpop", "", "LEFT", "LEFT");
 }
 
 TEST_F(ListFamilyTest, LMPopCountLargerThanList) {

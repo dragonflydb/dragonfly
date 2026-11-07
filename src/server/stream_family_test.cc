@@ -1200,71 +1200,45 @@ TEST_F(StreamFamilyTest, XReadGroupBlockMultiStreamWakeNoSteal) {
 }
 
 TEST_F(StreamFamilyTest, XReadInvalidArgs) {
-  // Invalid COUNT value.
-  auto resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
-
-  // Missing COUNT value.
-  resp = Run({"xread", "count"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments for 'xread' command"));
-
-  // Invalid BLOCK value.
-  resp = Run({"xread", "block", "invalid", "streams", "s1", "s2", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
-
-  // Missing BLOCK value.
-  resp = Run({"xread", "block", "streams", "s1", "s2", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
-
-  // Missing STREAMS.
-  resp = Run({"xread", "count", "5"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Unbalanced list of streams.
-  resp = Run({"xread", "count", "invalid", "streams", "s1", "s2", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer"));
-
-  // Wrong type.
-  Run({"set", "foo", "v"});
-  resp = Run({"xread", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ErrArg("key holding the wrong kind of value"));
+  CheckCommandCases({
+      {"invalid_count", "xread count invalid streams s1 s2 0 0",
+       ErrArg("not an integer or out of range")},
+      {"missing_count", "xread count", ErrArg("wrong number of arguments for 'xread' command")},
+      {"invalid_block", "xread block invalid streams s1 s2 0 0",
+       ErrArg("not an integer or out of range")},
+      {"missing_block", "xread block streams s1 s2 0 0", ErrArg("not an integer or out of range")},
+      {"missing_streams", "xread count 5", ErrArg("syntax error")},
+      {"invalid_count_precedes_streams", "xread count invalid streams s1 s2 0 0",
+       ErrArg("value is not an integer")},
+      {"wrong_type",
+       "xread streams foo 0",
+       ErrArg("key holding the wrong kind of value"),
+       {{"set foo v", testing::Eq("OK")}},
+       {{"get foo", testing::Eq("v")}}},
+  });
 }
 
 TEST_F(StreamFamilyTest, XReadGroupInvalidArgs) {
-  Run({"xgroup", "create", "group", "foo", "0", "mkstream"});
-  // Invalid COUNT value.
-  auto resp =
-      Run({"xreadgroup", "group", "group", "alice", "count", "invalid", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
-
-  // Invalid "stream" instead of GROUP.
-  resp = Run({"xreadgroup", "stream", "group", "alice", "count", "1", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ErrArg("Missing 'GROUP' in 'XREADGROUP' command"));
-
-  // Missing streams.
-  resp = Run({"xreadgroup", "group", "group", "alice", "streams"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments for 'xreadgroup' command"));
-
-  // Missing consumer.
-  resp = Run({"xreadgroup", "group", "group", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Missing block value.
-  resp = Run({"xreadgroup", "group", "group", "alice", "block", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
-
-  // Invalid block value.
-  resp = Run({"xreadgroup", "group", "group", "alice", "block", "invalid", "streams", "foo", "0"});
-  EXPECT_THAT(resp, ErrArg("not an integer or out of range"));
-
-  // Unbalanced list of streams.
-  resp = Run({"xreadgroup", "group", "group", "alice", "streams", "s1", "s2", "s3", "0", "0"});
-  EXPECT_THAT(resp, ErrArg("Unbalanced 'xreadgroup' list of streams: for each stream key an ID or "
-                           "'>' must be specified"));
-
-  resp = Run({"XREAD", "COUNT", "1", "STREAMS", "mystream"});
-  ASSERT_THAT(resp, ErrArg("Unbalanced 'xread' list of streams: for each stream key an ID or '$' "
-                           "must be specified"));
+  ASSERT_EQ(Run("xgroup create group foo 0 mkstream"), "OK");
+  CheckCommandCases({
+      {"invalid_count", "xreadgroup group group alice count invalid streams foo 0",
+       ErrArg("not an integer or out of range")},
+      {"missing_group", "xreadgroup stream group alice count 1 streams foo 0",
+       ErrArg("Missing 'GROUP' in 'XREADGROUP' command")},
+      {"missing_streams", "xreadgroup group group alice streams",
+       ErrArg("wrong number of arguments for 'xreadgroup' command")},
+      {"missing_consumer", "xreadgroup group group streams foo 0", ErrArg("syntax error")},
+      {"missing_block", "xreadgroup group group alice block streams foo 0",
+       ErrArg("not an integer or out of range")},
+      {"invalid_block", "xreadgroup group group alice block invalid streams foo 0",
+       ErrArg("not an integer or out of range")},
+      {"unbalanced_group_streams", "xreadgroup group group alice streams s1 s2 s3 0 0",
+       ErrArg("Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '>' must be "
+              "specified")},
+      {"unbalanced_read_streams", "XREAD COUNT 1 STREAMS mystream",
+       ErrArg("Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be "
+              "specified")},
+  });
 }
 
 TEST_F(StreamFamilyTest, XReadGroupEmpty) {

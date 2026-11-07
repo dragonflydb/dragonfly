@@ -25,49 +25,57 @@ TEST_F(CuckooFilterFamilyTest, Reserve) {
   EXPECT_THAT(resp, ErrArg("capacity must be in the range [2 * bucket size, 1073741824]"));
 }
 
-TEST_F(CuckooFilterFamilyTest, ReserveWithOptions) {
-  auto resp = Run("cf.reserve cf1 1000 bucketsize 4 maxiterations 10 expansion 2");
-  EXPECT_EQ(resp, "OK");
-
-  resp = Run("cf.reserve cf2 1000 bucketsize 0");
-  EXPECT_THAT(resp, ErrArg("bucket size must be between 1 and 255"));
-
-  resp = Run("cf.reserve cf3 1000 bucketsize 256");
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
-
-  resp = Run("cf.reserve cf4 1000 maxiterations 0");
-  EXPECT_THAT(resp, ErrArg("max iterations must be between 1 and 65535"));
-
-  // Upper bound is inclusive: 32768 is accepted, 32769 is not.
-  resp = Run("cf.reserve cf5 1000 expansion 32768");
-  EXPECT_EQ(resp, "OK");
-
-  resp = Run("cf.reserve cf6 1000 expansion 32769");
-  EXPECT_THAT(resp, ErrArg("expansion must be between 0 and 32768"));
-}
-
-TEST_F(CuckooFilterFamilyTest, ReserveCapacityBelowTwiceBucketSize) {
-  // capacity must be >= 2 * bucketsize; 1 with the default bucketsize (2) is rejected.
-  auto resp = Run("cf.reserve cf1 1");
-  EXPECT_THAT(resp, ErrArg("capacity must be in the range [2 * bucket size, 1073741824]"));
-
-  resp = Run("cf.reserve cf2 3 bucketsize 4");
-  EXPECT_THAT(resp, ErrArg("capacity must be in the range [2 * bucket size, 1073741824]"));
-
-  // Exactly 2 * bucketsize is accepted.
-  resp = Run("cf.reserve cf3 8 bucketsize 4");
-  EXPECT_EQ(resp, "OK");
-}
-
-TEST_F(CuckooFilterFamilyTest, ReserveCapacityAboveMax) {
-  // Just above the 1<<30 cap is rejected. (We don't test that exactly-1<<30 succeeds here: that
-  // would actually allocate a ~1B-slot filter, which is multiple GB / very slow in debug builds.)
-  auto resp = Run("cf.reserve cf1 1073741825");
-  EXPECT_THAT(resp, ErrArg("capacity must be in the range [2 * bucket size, 1073741824]"));
-
-  // A huge capacity must not silently succeed or crash (was previously UB via bit_ceil).
-  resp = Run("cf.reserve cf3 18446744073709551615 bucketsize 1");
-  EXPECT_THAT(resp, ErrArg("capacity must be in the range [2 * bucket size, 1073741824]"));
+TEST_F(CuckooFilterFamilyTest, ReserveOptionsAndLimits) {
+  constexpr auto kCapacityError = "capacity must be in the range [2 * bucket size, 1073741824]";
+  CheckCommandCases({
+      {"custom_options",
+       "cf.reserve cf1 1000 bucketsize 4 maxiterations 10 expansion 2",
+       testing::Eq("OK"),
+       {},
+       {{"type cf1", testing::Eq("MBbloomCF")}}},
+      {"zero_bucket_size",
+       "cf.reserve cf2 1000 bucketsize 0",
+       ErrArg("bucket size must be between 1 and 255"),
+       {},
+       {{"exists cf2", IntArg(0)}}},
+      {"bucket_size_overflow",
+       "cf.reserve cf3 1000 bucketsize 256",
+       ErrArg("value is not an integer or out of range"),
+       {},
+       {{"exists cf3", IntArg(0)}}},
+      {"zero_iterations",
+       "cf.reserve cf4 1000 maxiterations 0",
+       ErrArg("max iterations must be between 1 and 65535"),
+       {},
+       {{"exists cf4", IntArg(0)}}},
+      {"maximum_expansion", "cf.reserve cf5 1000 expansion 32768", testing::Eq("OK")},
+      {"excess_expansion",
+       "cf.reserve cf6 1000 expansion 32769",
+       ErrArg("expansion must be between 0 and 32768"),
+       {},
+       {{"exists cf6", IntArg(0)}}},
+      {"below_default_bucket_capacity",
+       "cf.reserve cf1 1",
+       ErrArg(kCapacityError),
+       {{"FLUSHDB", testing::Eq("OK")}},
+       {{"exists cf1", IntArg(0)}}},
+      {"below_custom_bucket_capacity",
+       "cf.reserve cf2 3 bucketsize 4",
+       ErrArg(kCapacityError),
+       {},
+       {{"exists cf2", IntArg(0)}}},
+      {"minimum_custom_bucket_capacity", "cf.reserve cf3 8 bucketsize 4", testing::Eq("OK")},
+      {"capacity_above_cap",
+       "cf.reserve cf1 1073741825",
+       ErrArg(kCapacityError),
+       {{"FLUSHDB", testing::Eq("OK")}},
+       {{"exists cf1", IntArg(0)}}},
+      {"maximum_uint64_capacity",
+       "cf.reserve cf3 18446744073709551615 bucketsize 1",
+       ErrArg(kCapacityError),
+       {},
+       {{"exists cf3", IntArg(0)}}},
+  });
 }
 
 TEST_F(CuckooFilterFamilyTest, WrongType) {

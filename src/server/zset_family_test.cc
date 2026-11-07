@@ -898,59 +898,7 @@ TEST_F(ZSetFamilyTest, ZAddBug148) {
 }
 
 TEST_F(ZSetFamilyTest, ZMPopInvalidSyntax) {
-  // Not enough arguments.
-  auto resp = Run({"zmpop", "1", "a"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
-
-  // Zero keys.
-  resp = Run({"zmpop", "0", "MIN", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
-
-  // Number of keys not uint.
-  resp = Run({"zmpop", "aa", "a", "MIN"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
-
-  // Missing MIN/MAX.
-  resp = Run({"zmpop", "1", "a", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Wrong number of keys.
-  resp = Run({"zmpop", "1", "a", "b", "MAX"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Count with no number.
-  resp = Run({"zmpop", "1", "a", "MAX", "COUNT"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Count number is not uint.
-  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "boo"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
-
-  // Count is zero.
-  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "0"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // Count is negative.
-  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "-1"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "-9223372036854775808"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // Count above UINT32_MAX.
-  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "4294967296"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "9223372036854775807"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // Non-positive count errors even with trailing junk.
-  resp = Run({"zmpop", "1", "a", "MIN", "COUNT", "0", "foo"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // Too many arguments.
-  resp = Run({"zmpop", "1", "c", "MAX", "COUNT", "2", "foo"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
+  CheckMPopSyntax("zmpop", "", "MIN", "MAX");
 }
 
 TEST_F(ZSetFamilyTest, ZMPopCountZeroMulti) {
@@ -1043,48 +991,10 @@ TEST_F(ZSetFamilyTest, ZMPop) {
 }
 
 TEST_F(ZSetFamilyTest, BZMPopInvalidSyntax) {
-  // Not enough arguments.
-  auto resp = Run({"bzmpop", "1", "1", "a"});
-  EXPECT_THAT(resp, ErrArg("wrong number of arguments"));
-
-  // Zero keys.
-  resp = Run({"bzmpop", "1", "0", "MIN", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("at least 1 input key is needed"));
-
-  // Number of keys not uint.
-  resp = Run({"bzmpop", "1", "aa", "a", "MIN"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
-
-  // Missing MIN/MAX.
-  resp = Run({"bzmpop", "1", "1", "a", "COUNT", "1"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Wrong number of keys.
-  resp = Run({"bzmpop", "1", "1", "a", "b", "MAX"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Count with no number.
-  resp = Run({"bzmpop", "1", "1", "a", "MAX", "COUNT"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Count number is not uint.
-  resp = Run({"bzmpop", "1", "1", "a", "MIN", "COUNT", "boo"});
-  EXPECT_THAT(resp, ErrArg("value is not an integer or out of range"));
-
-  // Non-positive count errors immediately, even with an infinite timeout.
-  resp = Run({"bzmpop", "0", "1", "a", "MIN", "COUNT", "0"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  resp = Run({"bzmpop", "0", "1", "a", "MIN", "COUNT", "-1"});
-  EXPECT_THAT(resp, ErrArg("count should be greater than 0"));
-
-  // Too many arguments.
-  resp = Run({"bzmpop", "1", "1", "c", "MAX", "COUNT", "2", "foo"});
-  EXPECT_THAT(resp, ErrArg("syntax error"));
-
-  // Negative time argument.
-  resp = Run({"bzmpop", "-1", "1", "a", "MIN"});
-  EXPECT_THAT(resp, ErrArg("timeout is negative"));
+  CheckMPopSyntax("bzmpop", "1", "MIN", "MAX");
+  CheckCommandCases({
+      {"negative_timeout_without_count", "bzmpop -1 1 a MIN", ErrArg("timeout is negative")},
+  });
 }
 
 TEST_F(ZSetFamilyTest, BZMPop) {
