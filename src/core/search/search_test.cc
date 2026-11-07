@@ -558,6 +558,8 @@ TEST_F(SearchTest, CheckTagRange) {
       {"@name:<{\"bob z\"}", docs("bob", "bob a"), docs("bob zz", "carol")},
       // A multi-valued field matches if any of its values is in range.
       {"@name:>{m}", docs("alice, zed", "nina"), docs("alice, bob", "m")},
+      // A doc with several values in range is returned once.
+      {"@name:>{a}", docs("bob, carol, dave", "b"), docs("a", "")},
       // Composes with other clauses, negation and other fields.
       {"@name:>={b} @name:<{c}", docs("b", "bob", "bzz"), docs("a", "c", "carol")},
       {"-@name:>{m}", docs("alice", "m"), docs("nina", "zed")},
@@ -612,6 +614,25 @@ TEST_F(SearchTest, CheckTagRangeParams) {
   // Numeric-looking bounds compare as strings: "9" > "10".
   ASSERT_TRUE(algo.Init("@name:>{$num}", &params));
   EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 5));
+}
+
+// A range unions the posting lists of many values: the result is sorted and has no duplicates.
+TEST_F(SearchTest, CheckTagRangeUnion) {
+  auto schema = MakeSimpleSchema({{"name", SchemaField::TAG}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  vector<string> values = {"c, d, e", "a", "d", "b, e", "z"};
+  for (size_t i = 0; i < values.size(); i++)
+    indices.Add(i, MockedDocument{{{"name", values[i]}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("@name:>{a}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(0, 2, 3, 4));
+  ASSERT_TRUE(algo.Init("@name:>={y}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(4));
+  ASSERT_TRUE(algo.Init("@name:<{a}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre());
 }
 
 TEST_F(SearchTest, CheckTagRangeWrongField) {
