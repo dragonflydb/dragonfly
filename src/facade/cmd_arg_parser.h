@@ -578,10 +578,6 @@ struct CmdArgParser {
     return cur_i_ < size_ && !error_;
   }
 
-  bool InBounds() const {
-    return cur_i_ < size_;
-  }
-
   bool HasError() const {
     return bool(error_);
   }

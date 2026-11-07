@@ -528,7 +528,7 @@ OpStatus Renamer::DelSrc(Transaction* t, EngineShard* shard) {
 
   db_slice.DelMutable(t->GetDbContext(), std::move(res));
   if (shard->journal()) {
-    RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_}, 2);
+    RecordJournal(t->GetOpArgs(shard), "DEL"sv, ArgSlice{src_key_});
   }
 
   return OpStatus::OK;
@@ -556,7 +556,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     VLOG(1) << "Rename: the new key '" << dest_key_ << "' already expired, will not save the value";
 
     if (dest_found_ && shard->journal()) {  // We need to delete old dest_key_ from replica
-      RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
+      RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_});
     }
 
     return OpStatus::OK;
@@ -572,7 +572,7 @@ OpStatus Renamer::DeserializeDest(Transaction* t, EngineShard* shard) {
     // SKIPPED means all fields expired during deserialize - treat as success
     if (add_res.status() == OpStatus::SKIPPED) {
       if (dest_found_ && shard->journal()) {
-        RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_}, 2);
+        RecordJournal(op_args, "DEL"sv, ArgSlice{dest_key_});
       }
       return OpStatus::OK;
     }

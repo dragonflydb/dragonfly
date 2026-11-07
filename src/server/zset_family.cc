@@ -1076,7 +1076,7 @@ ScoredArray OpBZPop(Transaction* t, EngineShard* shard, std::string_view key, bo
   OpArgs op_args = t->GetOpArgs(shard);
   if (op_args.shard->journal()) {
     string command = is_max ? "ZPOPMAX" : "ZPOPMIN";
-    RecordJournal(op_args, command, ArgSlice{key}, 1);
+    RecordJournal(op_args, command, ArgSlice{key});
   }
 
   return res;
@@ -1203,7 +1203,7 @@ auto OpPopCount(const ZSetFamily::ZRangeSpec& range_spec, const OpArgs& op_args,
     DCHECK(std::holds_alternative<ZSetFamily::TopNScored>(range_spec.interval));
     auto count = std::get<ZSetFamily::TopNScored>(range_spec.interval);
     string command = (reverse ? "ZPOPMAX" : "ZPOPMIN");
-    RecordJournal(op_args, command, ArgSlice{key, absl::StrCat(count)}, 1);
+    RecordJournal(op_args, command, ArgSlice{key, absl::StrCat(count)});
   }
 
   return iv.PopResult();

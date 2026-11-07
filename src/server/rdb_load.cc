@@ -2445,11 +2445,6 @@ struct RdbLoader::ObjSettings {
     has_expired = (val <= now);
   }
 
-  void SetMCFlags(uint32_t flags) {
-    has_mc_flags = true;
-    mc_flags = flags;
-  }
-
   ObjSettings() = default;
 };
 
@@ -3200,10 +3195,7 @@ error_code RdbLoader::HandleAux() {
       shard_id_ = shard_id;
     }
   } else if (auxkey == "table-mem") {
-    size_t mem;
-    if (absl::SimpleAtoi(auxval, &mem)) {
-      table_used_memory_ = mem;
-    }
+    // Recognized snapshot metadata; the loader does not use the table memory estimate.
   } else {
     /* We ignore fields we don't understand, as by AUX field
      * contract. */
