@@ -69,8 +69,8 @@ flowchart TD
     SE1 --> SAVE2
 
     EXP["Expiry / Eviction<br/>(heartbeat, inline, lazy, SCAN-del)"]
-    EXP -->|"eviction: bail if<br/>WillBlockOnJournalWrite"| SKIP[skip]
-    EXP -->|"expiry/SCAN-del:<br/>WaitForUnblockedJournalWrites"| JRN_DIRECT["journal::RecordEntry (DEL)"]
+    EXP -->|"key's bucket blocked:<br/>CanDeleteWithoutBlocking"| SKIP[skip key]
+    EXP -->|"otherwise"| JRN_DIRECT["journal::RecordEntry (DEL)"]
     JRN_DIRECT --> CJC
 
     JRN[Journal change] --> CJC["ConsumeJournalChange<br/>(lock stream_mu_)"]
@@ -286,7 +286,7 @@ drain, so `TraverseAllBuckets` reports success only after `BucketDependencies::W
 Because delayed entries are **keyed by bucket** and hold a `BucketDependencies` reference, a bucket
 is not considered free of in-flight work until all its tiered reads have been serialized. This is
 what makes the ordering invariant hold for tiered values: a mutation or deletion of a tiered key
-is blocked (via `BucketDependencies::Wait` / `WaitForUnblockedJournalWrites`) until the key's
+is blocked (via `BucketDependencies::Wait`), and expiry and eviction skip the key, until its
 delayed baseline has been emitted.
 
 > Both `SliceSnapshot` and `SlotMigrationStreamer` use this same per-bucket `DelayedEntryHandler`. (An
@@ -305,12 +305,18 @@ void Decrement(BucketIdentity);   // counter->unlock(); erase if zero; notify if
 void Wait(BucketIdentity) const;  // block until this bucket's dependencies resolve
 void WaitEmpty() const;           // block until NO bucket has dependencies
 bool HasAny() const;              // any bucket currently has dependencies?
+bool Has(BucketIdentity) const;   // this bucket currently has dependencies?
 ```
 
 `SerializerBase` exposes these to the `DbSlice` through the change-consumer interface:
 
 - `IsAnyBucketBlocked()` → `BucketDependencies::HasAny()`
 - `WaitForNoBucketBlocked()` → `BucketDependencies::WaitEmpty()`
+- `IsBucketBlocked(bucket)` → `BucketDependencies::Has(bucket)`
+- `WaitForBucketUnblocked(bucket)` → `BucketDependencies::Wait(bucket)`
+- `IsJournalAppendBlocked()` → `stream_mu_` is held (only with tagged chunks disabled), or an entry
+  is suspended mid-serialization outside a consume point (e.g. loading a tiered list node), where
+  journal bytes or a flush would land inside the entry
 
 This is the mechanism that makes mutations and deletions wait for in-progress (possibly
 preempting) bucket serialization, replacing the older single `db_slice_->GetLatch()` /
@@ -350,36 +356,46 @@ Not every journal entry goes through `OnChange`. Expiry, eviction, and SCAN-base
 
 | Source | Journal command | Trigger |
 |--------|----------------|---------|
-| `ExpireIfNeeded` (`db_slice.cc`) | `DEL` | Lazy expiry on lookup, active sweep (`DeleteExpiredStep`), heartbeat eviction |
+| `TryExpire` (`db_slice.cc`) | `DEL` | Lazy expiry on lookup, active sweep (`DeleteExpiredStep`) |
+| `FreeMemWithEvictionStepAtomic` (`db_slice.cc`) | `DEL` | Heartbeat eviction |
 | `PrimeEvictionPolicy::Evict` / `GarbageCollect` (`db_slice.cc`) | `DEL` | Inline eviction/GC when a bucket overflows on insert |
 | `generic_family.cc` (SCAN-based deletion) | `DEL` | `RecordDelete` after `DbSlice::Del` |
 | `dflycmd.cc`, `replica.cc`, `cluster_family.cc` | `PING` / `DFLYCLUSTER` | Control signals |
 
 These bypass `OnChange`, so their baseline-before-journal ordering is enforced differently — via
-the `BucketDependencies` state surfaced as `WillBlockOnJournalWrite()`:
-
-- **Eviction & GC bail out.** `PrimeEvictionPolicy::Evict` and `GarbageCollect` return early
-  (delete nothing) if `db_slice_->WillBlockOnJournalWrite()` is true — i.e. while any bucket is
-  mid-serialization. So an inline eviction can never emit a `DEL` for a key whose baseline is
-  partially written.
-- **Expiry & SCAN-delete wait.** These paths call `DbSlice::WaitForUnblockedJournalWrites()`
-  before deleting, which blocks until `WaitForNoBucketBlocked()` reports no bucket has
-  outstanding dependencies.
+the `BucketDependencies` state, queried per bucket. A deletion that does not wait must not touch
+a bucket that is mid-serialization (the serializer may still reference its values), and must not
+journal while the append would block or split an entry (see `IsJournalAppendBlocked()` below):
 
 ```cpp
-bool DbSlice::WillBlockOnJournalWrite() const {           // db_slice.cc
-  return ranges::any_of(change_cb_, &ChangeConsumerInterface::IsAnyBucketBlocked);
-}
-void DbSlice::WaitForUnblockedJournalWrites() const {
-  std::lock_guard lk{change_cb_latch_};
-  while (WillBlockOnJournalWrite())
-    ranges::for_each(change_cb_, &ChangeConsumerInterface::WaitForNoBucketBlocked);
+bool DbSlice::CanDeleteWithoutBlocking(BucketIdentity bucket) const {  // db_slice.cc
+  return ranges::none_of(change_cb_, [bucket](const ChangeConsumerInterface* cb) {
+    return cb->IsJournalAppendBlocked() || cb->IsBucketBlocked(bucket);
+  });
 }
 ```
 
+- **Eviction & GC skip blocked buckets.** `PrimeEvictionPolicy::Evict` and `GarbageCollect` skip
+  the entries of a bucket that is mid-serialization and process the others. Evict checks before
+  `ShiftRight` too, since that moves entries within the bucket.
+- **Eviction also skips buckets not serialized yet.** Unlike expiry, eviction deletes live keys.
+  Evicting from a bucket that a snapshot has not reached would leave the key without a baseline,
+  so both inline and heartbeat eviction require the bucket version to be at least every
+  snapshot's version (`IsBucketSerialized`).
+- **Heartbeat expiry & eviction skip blocked buckets.** `DeleteExpiredStep` and heartbeat eviction
+  skip such entries and retry them on a later heartbeat. The heartbeat stops entirely only while
+  a journal append would block.
+- **Shard-wide waits remain** where there is no single bucket to check or every key must be
+  processed: `IsAnyBucketBlocked()` gates tiered offloading, repacking and memory reclaim (they
+  change values that may belong to many buckets), and `WaitForNoBucketBlocked()` is waited on
+  before SCAN, `ExpireAllIfNeeded` and the readiness checks of blocked clients. The heartbeat
+  defers those readiness checks while any bucket is blocked rather than wait.
+- **Cache-mode bump-up** waits per bucket for the buckets the bump changes: the entry's own bucket
+  and, for a stash entry, the buckets it may move into.
+
 This is the implemented replacement for the "deferred deletion queue" that older designs
 proposed: rather than queueing a `DEL` and replaying it after the bucket completes, the deleter
-waits for (or skips, for best-effort eviction) the in-flight serialization.
+skips the key and retries later (or waits, where every key must be processed).
 
 ## Tagged Chunks
 
@@ -532,7 +548,7 @@ before touching a bucket.
 ### `change_cb_latch_` (LocalLatch in `DbSlice`)
 
 A non-preempting latch guarding the `change_cb_` consumer list. Held during `CallChangeCallbacks`,
-`FlushChangeToEarlierCallbacks`, and `WaitForUnblockedJournalWrites` so the consumer set cannot
+`FlushChangeToEarlierCallbacks`, and `WaitForNoBucketBlocked` so the consumer set cannot
 change underneath an iteration.
 
 ### `writer_` FIFO

@@ -119,6 +119,12 @@ class MemBufController {
     return buffer_.InputLen();
   }
 
+  // True while an entry owns the buffer, i.e. outside of a consume point. Writing or flushing other
+  // data meanwhile would split the entry's bytes.
+  bool IsEntryInProgress() const {
+    return buffer_owner_ != 0;
+  }
+
   // Returns the active entry id. Called before the serializer's consume callback, which may preempt
   // and allow other entries to interleave. The returned id must be saved by caller, and then later
   // used for restoring the state.
@@ -282,6 +288,10 @@ class RdbSerializer {
   // Internal buffer size. Might shrink after flush due to compression.
   size_t SerializedLen() const {
     return mem_buf_controller_.FlushableSize();
+  }
+
+  bool IsEntryInProgress() const {
+    return mem_buf_controller_.IsEntryInProgress();
   }
 
   // Flush internal buffer and return serialized blob.
