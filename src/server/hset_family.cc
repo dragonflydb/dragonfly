@@ -4,6 +4,8 @@
 
 #include "server/hset_family.h"
 
+#include <climits>
+
 #include <absl/cleanup/cleanup.h>
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
@@ -455,7 +457,7 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
 
   StringVec res;
   // If NOVALUES, we expect 1 element per match (key). Otherwise, 2 elements (key + value).
-  uint32_t count = scan_op.limit * (scan_op.novalues ? 1 : 2);
+  size_t count = scan_op.limit * (scan_op.novalues ? 1 : 2);
 
   if (auto lw = hw.Get<detail::ListpackWrap>(); lw) {
     // TODO: Optimize unnecessary value reads from iterator
@@ -471,7 +473,9 @@ OpResult<StringVec> OpScan(const HMapWrap& hw, uint64_t* cursor, const ScanOpts&
   } else {
     StringMap* sm = *hw.Get<StringMap*>();
 
-    long max_iterations = count * INTERATION_FACTOR;
+    long max_iterations =
+        (count > LONG_MAX / INTERATION_FACTOR) ? LONG_MAX
+                                               : static_cast<long>(count * INTERATION_FACTOR);
 
     // note about this lambda - don't capture here! it should be convertible to C function!
     auto scanCb = [&](const void* obj) {
