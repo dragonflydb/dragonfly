@@ -5,10 +5,10 @@ cur_gen_dir(gen_dir)
 
 add_library(jsonpath lexer_impl.cc driver.cc path.cc
             ${gen_dir}/jsonpath_lexer.cc ${gen_dir}/jsonpath_grammar.cc json_object.cc
-            detail/jsoncons_dfs.cc detail/flat_dfs.cc
+            detail/jsoncons_dfs.cc
             detail/interned_blob.cc
             detail/interned_string.cc)
-target_link_libraries(jsonpath base absl::strings TRDP::reflex TRDP::jsoncons TRDP::flatbuffers dfly_page_usage)
+target_link_libraries(jsonpath base absl::strings TRDP::reflex TRDP::jsoncons dfly_page_usage)
 
 helio_cxx_test(jsonpath_test jsonpath dfly_core LABELS DFLY)
 helio_cxx_test(json_test jsonpath TRDP::jsoncons LABELS DFLY)

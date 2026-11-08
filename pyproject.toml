@@ -7,7 +7,6 @@ requires-python = ">=3.10"
 test = [
   "aiohttp>=3.14.4",
   "async-timeout>=4.0.3",
-  "asyncio>=3.4.3",
   "attrs>=22.1.0",
   "azure-storage-blob>=12.19.0",
   "boto3>=1.28.55",

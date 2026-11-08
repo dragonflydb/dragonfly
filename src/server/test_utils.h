@@ -129,7 +129,6 @@ class BaseFamilyTest : public ::testing::Test {
     return CheckedInt(ArgSlice{list.begin(), list.size()});
   }
   int64_t CheckedInt(ArgSlice list);
-  std::string CheckedString(ArgSlice list);
 
   void ResetService();
 
@@ -158,7 +157,6 @@ class BaseFamilyTest : public ::testing::Test {
                                                 MetricsCollectOpts{});
   }
 
-  void ClearMetrics();
   std::string FormatMetrics(const Metrics& metrics) const;
 
   void AdvanceTime(int64_t ms) {

@@ -30,14 +30,6 @@ class SingleValueImpl : public AggFunction {
     }
   }
 
-  void Init(const flexbuffers::Reference src) {
-    if (src.IsFloat()) {
-      val_.emplace<double>(src.AsDouble());
-    } else {
-      val_.emplace<int64_t>(src.AsInt64());
-    }
-  }
-
   Result val_;
 };
 
@@ -59,25 +51,6 @@ class MaxImpl : public SingleValueImpl {
           },
           val_);
 
-    return true;
-  }
-
-  bool ApplyImpl(flexbuffers::Reference src) final {
-    if (!src.IsNumeric()) {
-      return false;
-    }
-
-    visit(Overloaded{
-              [&](monostate) { Init(src); },
-              [&](double d) { val_ = max(d, src.AsDouble()); },
-              [&](int64_t i) {
-                if (src.IsFloat())
-                  val_ = max(double(i), src.AsDouble());
-                else
-                  val_ = max(i, src.AsInt64());
-              },
-          },
-          val_);
     return true;
   }
 };
@@ -103,25 +76,6 @@ class MinImpl : public SingleValueImpl {
 
     return true;
   }
-
-  bool ApplyImpl(flexbuffers::Reference src) final {
-    if (!src.IsNumeric()) {
-      return false;
-    }
-
-    visit(Overloaded{
-              [&](monostate) { Init(src); },
-              [&](double d) { val_ = min(d, src.AsDouble()); },
-              [&](int64_t i) {
-                if (src.IsFloat())
-                  val_ = min(double(i), src.AsDouble());
-                else
-                  val_ = min(i, src.AsInt64());
-              },
-          },
-          val_);
-    return true;
-  }
 };
 
 class AvgImpl : public AggFunction {
@@ -131,16 +85,6 @@ class AvgImpl : public AggFunction {
       return false;
     }
     sum_ += src.as_double();
-    count_++;
-
-    return true;
-  }
-
-  bool ApplyImpl(flexbuffers::Reference src) final {
-    if (!src.IsNumeric()) {
-      return false;
-    }
-    sum_ += src.AsDouble();
     count_++;
 
     return true;

@@ -249,10 +249,6 @@ class Connection : public util::Connection {
     REPLICA_RESP = 4,  // commands arriving on a replica from its master
   };
 
-  ListenerType GetListenerType() const {
-    return listener_type_;
-  }
-
   void SetName(std::string name);
 
   void SetLibName(std::string name);
