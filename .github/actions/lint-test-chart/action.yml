@@ -25,7 +25,12 @@ runs:
           go test -v ./contrib/charts/dragonfly/...
 
       - name: Set up chart-testing
-        uses: helm/chart-testing-action@v2.6.1
+        uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
+        with:
+          version: "3.15.0"
+          verify_blob: "true"
+          yamllint_version: "1.27.1"
+          yamale_version: "3.0.4"
 
       - name: Run chart-testing (list-changed)
         id: list-changed
