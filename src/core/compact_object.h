@@ -473,6 +473,11 @@ class CompactObj {
   };
 
   static Stats GetStatsThreadLocal();
+
+  // Receives the allocator delta from freeing a value replaced by a different type.
+  // The hook runs synchronously and must not suspend.
+  using TypeReplacementHook = void (*)(CompactObjType old_type, int64_t delta);
+  static void SetTypeReplacementHook(TypeReplacementHook hook);
   static void InitThreadLocal(MemoryResource* mr);
   static void ClearThreadLocalStats();
 
@@ -527,15 +532,9 @@ class CompactObj {
   bool CmpEncoded(std::string_view sv) const;
   bool CmpNonInline(std::string_view sv) const;
 
-  void SetMeta(uint8_t taglen, uint8_t mask = 0) {
-    if (HasAllocated()) {
-      Free();
-    } else {
-      memset(u_.inline_str, 0, kInlineLen);
-    }
-    taglen_ = taglen;
-    mask_ = mask;
-  }
+  // External tags need their logical type supplied before their payload is initialized.
+  void SetMeta(uint8_t taglen, uint8_t mask = 0,
+               CompactObjType replacement_type = kInvalidCompactObjType);
 
   struct ExternalPtr {
     uint32_t serialized_size;

@@ -3,6 +3,7 @@
 //
 #include "core/compact_object.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/functional/overload.h>
 #include <absl/strings/str_cat.h>
 #include <gtest/gtest.h>
@@ -1467,6 +1468,56 @@ TEST_F(CompactObjectTest, StreamSizeDoesNotWrap) {
   cobj_.AddStreamSize(-static_cast<int64_t>(initial) - 1);
   EXPECT_EQ(cobj_.MallocUsed(), cobj_.MallocUsed(true));
   EXPECT_GT(cobj_.MallocUsed(), 0);
+}
+
+TEST_F(CompactObjectTest, TypeReplacementAccounting) {
+  static thread_local vector<pair<CompactObjType, int64_t>> deltas;
+  deltas.clear();
+  CompactObj::SetTypeReplacementHook(
+      [](CompactObjType type, int64_t delta) { deltas.emplace_back(type, delta); });
+  absl::Cleanup restore_hook = [] { CompactObj::SetTypeReplacementHook(nullptr); };
+
+  for (size_t size : {32u, 4096u}) {
+    SCOPED_TRACE(size);
+    cobj_.SetString(string(size, '\x80'));
+    int64_t string_bytes = cobj_.MallocUsed();
+    intset* is = intsetNew();
+    int64_t set_bytes = zmalloc_usable_size(is);
+    cobj_.InitRobj(OBJ_SET, kEncodingIntSet, is);
+    ASSERT_FALSE(deltas.empty());
+    EXPECT_EQ(deltas.back(), make_pair(CompactObjType{OBJ_STRING}, -string_bytes));
+
+    cobj_.SetString("42");
+    EXPECT_EQ(deltas.back(), make_pair(CompactObjType{OBJ_SET}, -set_bytes));
+  }
+  ASSERT_EQ(deltas.size(), 4);
+
+  // Encoding changes, tiering, resets and destruction are not cross-type replacements.
+  cobj_.SetString(string(32, '\x80'));
+  cobj_.SetString(string(4096, '\x80'));
+  cobj_.SetExternal(0, 4096, CompactObj::ExternalRep::STRING);
+  CompactValue external_hash;
+  external_hash.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
+  external_hash.SetExternal(4096, 128, CompactObj::ExternalRep::SERIALIZED_MAP);
+  external_hash.Reset();
+  external_hash.SetString("inline");
+  {
+    CompactValue value;
+    value.SetString(string(32, '\x80'));
+    value.Reset();
+    value.SetString(string(4096, '\x80'));
+  }
+  EXPECT_EQ(deltas.size(), 4);
+
+  cobj_.Reset();
+  cobj_.SetString(string(4096, '\x80'));
+  int64_t string_bytes = cobj_.MallocUsed();
+  external_hash.SetExternal(4096, 128, CompactObj::ExternalRep::SERIALIZED_MAP);
+  cobj_ = std::move(external_hash);
+  ASSERT_EQ(deltas.size(), 5);
+  EXPECT_EQ(deltas.back(), make_pair(CompactObjType{OBJ_STRING}, -string_bytes));
+  EXPECT_EQ(cobj_.ObjType(), OBJ_HASH);
+  EXPECT_TRUE(cobj_.IsExternal());
 }
 
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {
