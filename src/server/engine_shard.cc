@@ -25,6 +25,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
@@ -515,6 +516,12 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
   shard_ = new (ptr) EngineShard(pb, data_heap);
 
   CompactObj::InitThreadLocal(shard_->memory_resource());
+  if (MemoryScopeEnabled()) {
+    CompactObj::SetTypeReplacementHook([](CompactObjType old_type, int64_t delta) {
+      EngineShard::tlocal()->AddTypeMemDelta(old_type, delta);
+      DeductFromTxScope(delta);
+    });
+  }
   SmallString::InitThreadLocal(data_heap);
   InitTLStatelessAllocMR(shard_->memory_resource());
 

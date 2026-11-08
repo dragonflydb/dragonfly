@@ -54,6 +54,19 @@ namespace {
 constexpr XXH64_hash_t kHashSeed = 24061983;
 constexpr size_t kAlignSize = 8u;
 
+CompactObjType TypeForExternalRep(CompactObj::ExternalRep rep) {
+  switch (rep) {
+    case CompactObj::ExternalRep::STRING:
+      return OBJ_STRING;
+    case CompactObj::ExternalRep::SERIALIZED_MAP:
+      return OBJ_HASH;
+    case CompactObj::ExternalRep::LIST_NODE:
+      return OBJ_LIST;
+  }
+  LOG(FATAL) << "Unsupported external representation " << int(rep);
+  return kInvalidCompactObjType;
+}
+
 size_t UpdateSize(size_t size, int64_t update) {
   int64_t result = static_cast<int64_t>(size) + update;
   if (result < 0) {
@@ -494,6 +507,7 @@ struct TL {
   string tmp_str;
   size_t small_str_bytes;
   PinnedMap pin_map;
+  CompactObj::TypeReplacementHook type_replacement_hook = nullptr;
 };
 
 // Callback function used in redis/t_stream.cc implementation to
@@ -605,8 +619,13 @@ auto CompactObj::GetStatsThreadLocal() -> Stats {
   return res;
 }
 
+void CompactObj::SetTypeReplacementHook(TypeReplacementHook hook) {
+  tl.type_replacement_hook = hook;
+}
+
 void CompactObj::InitThreadLocal(MemoryResource* mr) {
   tl.local_mr = mr;
+  tl.type_replacement_hook = nullptr;
   tl.tmp_buf = base::PODArray<uint8_t>{mr};
   cmn::BorrowedStringOps::Set(&g_borrow_ops);
 }
@@ -641,7 +660,7 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   DCHECK(&o != this);
   DCHECK_EQ(is_key_, o.is_key_);
 
-  SetMeta(o.taglen_, o.mask_);  // frees own previous resources
+  SetMeta(o.taglen_, o.mask_, o.ObjType());  // frees own previous resources
   encoding_ = o.encoding_;
   memcpy(&u_, &o.u_, sizeof(u_));
 
@@ -773,14 +792,7 @@ CompactObjType CompactObj::ObjType() const {
     return OBJ_STRING;
 
   if (taglen_ == EXTERNAL_TAG) {
-    switch (static_cast<ExternalRep>(u_.ext_ptr.representation)) {
-      case ExternalRep::STRING:
-        return OBJ_STRING;
-      case ExternalRep::SERIALIZED_MAP:
-        return OBJ_HASH;
-      case ExternalRep::LIST_NODE:
-        return OBJ_LIST;
-    };
+    return TypeForExternalRep(static_cast<ExternalRep>(u_.ext_ptr.representation));
   }
 
   switch (taglen_) {
@@ -1242,7 +1254,7 @@ void CompactObj::GetString(char* dest) const {
 }
 
 void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
-  SetMeta(EXTERNAL_TAG, mask_);
+  SetMeta(EXTERNAL_TAG, mask_, TypeForExternalRep(rep));
 
   u_.ext_ptr.is_cool = 0;
   u_.ext_ptr.representation = static_cast<uint8_t>(rep);
@@ -1272,7 +1284,7 @@ CompactObj CompactObj::CloneExternal() const {
 void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
                          tiering::TieredCoolRecord* record) {
   encoding_ = record->value.encoding_;
-  SetMeta(EXTERNAL_TAG, record->value.mask_);
+  SetMeta(EXTERNAL_TAG, record->value.mask_, TypeForExternalRep(rep));
 
   u_.ext_ptr.is_cool = 1;
   u_.ext_ptr.representation = static_cast<uint8_t>(rep);
@@ -1472,6 +1484,36 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
   str[idx] = val;
   SetString(str);
   return {true, false};
+}
+
+void CompactObj::SetMeta(uint8_t taglen, uint8_t mask, CompactObjType replacement_type) {
+  CompactObjType old_type = kInvalidCompactObjType;
+  int64_t before = 0;
+  auto used_memory = [] {
+    return static_cast<int64_t>(static_cast<MiMemoryResource*>(tl.local_mr)->used()) +
+           zmalloc_used_memory_tl + static_cast<int64_t>(SmallString::UsedThreadLocal());
+  };
+
+  if (HasAllocated()) {
+    if (tl.type_replacement_hook && taglen != taglen_) {
+      old_type = ObjType();
+      before = used_memory();
+    }
+    Free();
+  } else {
+    memset(u_.inline_str, 0, kInlineLen);
+  }
+  taglen_ = taglen;
+  mask_ = mask;
+
+  if (old_type != kInvalidCompactObjType) {
+    if (replacement_type == kInvalidCompactObjType) {
+      DCHECK_NE(taglen, EXTERNAL_TAG);
+      replacement_type = ObjType();
+    }
+    if (old_type != replacement_type)
+      tl.type_replacement_hook(old_type, used_memory() - before);
+  }
 }
 
 // Frees all resources if owns.
