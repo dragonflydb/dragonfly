@@ -86,8 +86,6 @@ class Listener : public util::ListenerInterface {
 
   Role role_;
 
-  uint32_t conn_cnt_{0};
-
   Protocol protocol_;
   SSL_CTX* ctx_ = nullptr;
   // Updated in ReconfigureTLS (listener proactor) and read from any proactor

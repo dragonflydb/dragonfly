@@ -14,9 +14,9 @@ runs:
         with:
           version: "v3.21.0"
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.9"
+          python-version: "3.12"
           check-latest: true
 
       - name: Chart Rendering Tests

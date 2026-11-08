@@ -30,6 +30,8 @@ using namespace std;
 
 namespace {
 
+constexpr const char* kWriteTimeoutMsg = "BufferedSocketWriter write operation timeout";
+
 iovec IoVec(io::Bytes src) {
   return iovec{const_cast<uint8_t*>(src.data()), src.size()};
 }
@@ -240,8 +242,18 @@ void BufferedSocketWriter::Throttle() {
     LOG(WARNING) << "Stream timed out, inflight bytes/sent start: " << inflight_start << "/"
                  << sent_start << ", end: " << in_flight_bytes_ << "/" << total_sent_;
     LogTcpSocketDiagnostics(dest_);
-    cntx_->ReportError("BufferedSocketWriter write operation timeout");
+    cntx_->ReportError(make_error_code(errc::timed_out), kWriteTimeoutMsg);
   }
+}
+
+void BufferedSocketWriter::AbortOnWriteTimeout(uint64_t timeout_usec) {
+  if (in_flight_bytes_ == 0 || !cntx_->IsRunning() ||
+      base::CycleClock::ToUsec(base::CycleClock::Now() - last_async_write_time_) < timeout_usec)
+    return;
+
+  LOG(WARNING) << "Stream write timed out: " << FormatInternalState();
+  LogTcpSocketDiagnostics(dest_);
+  cntx_->ReportError(make_error_code(errc::timed_out), kWriteTimeoutMsg);
 }
 
 void BufferedSocketWriter::WaitForInflightToComplete(bool with_timeout) {
@@ -257,7 +269,7 @@ void BufferedSocketWriter::WaitForInflightToComplete(bool with_timeout) {
     if (next >= max_timeout) {
       LogTcpSocketDiagnostics(dest_);
       if (with_timeout) {
-        cntx_->ReportError("BufferedSocketWriter write operation timeout");
+        cntx_->ReportError(make_error_code(errc::timed_out), kWriteTimeoutMsg);
         break;
       } else {
         LOG(WARNING) << "WaitForInflightToComplete timed out with " << in_flight_bytes_

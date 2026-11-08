@@ -26,6 +26,15 @@ size_t StashedValueSize(string_view value) {
   return SmallBins::kEntryHeaderSize + value.size();
 }
 
+// Move all keys out of an entry map, emptying it.
+template <typename T> std::vector<DbKeyId> DrainKeys(EntryMap<T>& entries) {
+  std::vector<DbKeyId> out;
+  out.reserve(entries.size());
+  while (!entries.empty())
+    out.emplace_back(std::move(entries.extract(entries.begin()).key()));
+  return out;
+}
+
 // The biggest a single entry (value + fixed header) can ever be.
 constexpr size_t kMaxEntrySize = (2_KB - 1) + SmallBins::kEntryHeaderSize;
 
@@ -122,14 +131,17 @@ SmallBins::KeySegmentList SmallBins::ReportStashed(BinId id, DiskSegment segment
 }
 
 std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashAborted(BinId id) {
-  std::vector<std::pair<DbIndex, std::string>> out;
-
   auto node = pending_bins_.extract(id);
-  auto& entries = node.mapped();
-  while (!entries.empty())
-    out.emplace_back(std::move(entries.extract(entries.begin()).key()));
+  DCHECK(!node.empty()) << id;
+  if (node.empty())
+    return {};
 
-  return out;
+  return DrainKeys(node.mapped());
+}
+
+std::vector<std::pair<DbIndex, std::string>> SmallBins::ReportStashFailed(FilledBin bin) {
+  DCHECK(!pending_bins_.contains(bin.id));
+  return DrainKeys(bin.entries_);
 }
 
 std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view key) {
@@ -143,9 +155,14 @@ std::optional<SmallBins::BinId> SmallBins::Delete(DbIndex dbid, std::string_view
     return std::nullopt;
   }
 
-  for (auto& [id, keys] : pending_bins_) {
-    if (keys.erase(make_pair(dbid, key)))
-      return keys.empty() ? std::make_optional(id) : std::nullopt;
+  for (auto it = pending_bins_.begin(); it != pending_bins_.end(); ++it) {
+    if (it->second.erase(make_pair(dbid, key))) {
+      if (!it->second.empty())
+        return std::nullopt;
+      BinId id = it->first;
+      pending_bins_.erase(it);  // don't leave the drained bin behind
+      return id;
+    }
   }
   return std::nullopt;
 }
@@ -187,7 +204,8 @@ SmallBins::Stats SmallBins::GetStats() const {
                .stashed_entries_cnt = stats_.stashed_entries_cnt,
                .stashed_entries_bytes = stats_.stashed_entries_bytes,
                .current_bin_bytes = current_bin_.bytes_,
-               .current_entries_cnt = current_bin_.entries_.size()};
+               .current_entries_cnt = current_bin_.entries_.size(),
+               .pending_bins_cnt = pending_bins_.size()};
 }
 
 SmallBins::KeyHashDbList SmallBins::DeleteBin(DiskSegment segment, std::string_view value) {

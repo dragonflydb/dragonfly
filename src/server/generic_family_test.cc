@@ -5,6 +5,8 @@
 #include "server/generic_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/strings/numbers.h>
+#include <absl/strings/str_join.h>
 
 #include <array>
 #include <cstring>
@@ -23,11 +25,14 @@ extern "C" {
 #include "facade/facade_test.h"
 #include "facade/reply_builder.h"
 #include "facade/string_socket.h"
+#include "io/io.h"
 #include "server/channel_store.h"
 #include "server/common.h"
 #include "server/conn_context.h"
 #include "server/container_utils.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
@@ -39,6 +44,14 @@ using namespace testing;
 using namespace std;
 using namespace util;
 using absl::StrCat;
+
+constexpr char kShard0Key[] = "b";  // shard 0
+constexpr char kShard1Key[] = "x";  // shard 1
+
+// Alternate keys for tests that need additional keys.
+constexpr char kShard0AltKey[] = "d";   // shard 0
+constexpr char kShard1AltKey[] = "y";   // shard 1
+constexpr char kShard1AltKey2[] = "z";  // shard 1
 
 namespace dfly {
 
@@ -199,7 +212,7 @@ TEST_F(GenericFamilyTest, ExpireCornerCases) {
   EXPECT_THAT(Run({"pexpireat", "key", "-1"}), IntArg(1));
   EXPECT_THAT(Run({"exists", "key"}), IntArg(0));
 
-  // Huge absolute timestamps overflow the kMaxExpireDeadlineMs cap and surface OUT_OF_RANGE.
+  // Absolute timestamps that overflow the internal representation remain invalid.
   Run({"set", "key", "val"});
   EXPECT_THAT(Run({"expireat", "key", absl::StrCat(INT64_MAX)}), ErrArg("expiry is out of range"));
   EXPECT_THAT(Run({"exists", "key"}), IntArg(1));
@@ -220,6 +233,59 @@ TEST_F(GenericFamilyTest, ExpireCornerCases) {
   EXPECT_THAT(Run({"expire", "missing", "-1"}), IntArg(0));
   EXPECT_THAT(Run({"expireat", "missing", "0"}), IntArg(0));
   EXPECT_THAT(Run({"pexpireat", "missing", "0"}), IntArg(0));
+}
+
+TEST_F(GenericFamilyTest, ExpireCap) {
+  TEST_current_time_ms = 1'800'000'000'123;
+  struct Case {
+    vector<string_view> args;  // the command up to its expiry argument
+    int64_t unit_ms;
+    bool absolute;
+  };
+  const Case cases[] = {
+      {{"expire", "key"}, 1000, false},       {{"pexpire", "key"}, 1, false},
+      {{"expireat", "key"}, 1000, true},      {{"pexpireat", "key"}, 1, true},
+      {{"getex", "key", "EX"}, 1000, false},  {{"getex", "key", "PX"}, 1, false},
+      {{"getex", "key", "EXAT"}, 1000, true}, {{"getex", "key", "PXAT"}, 1, true}};
+  const int64_t deadline = TEST_current_time_ms + kMaxExpireDeadlineMs;
+  pp_->at(Shard("key", shard_set->size()))->Await([&] {
+    journal::AcquireUser();
+    absl::Cleanup release_journal = [] { journal::ReleaseUser(); };
+    for (const auto& [args, unit_ms, absolute] : cases) {
+      // One unit beyond the cap is clamped to it.
+      const string value = StrCat(kMaxExpireDeadlineMs / unit_ms + 1 +
+                                  (absolute ? TEST_current_time_ms / unit_ms : 0));
+      vector<string_view> cmd(args);
+      cmd.push_back(value);
+      SCOPED_TRACE(absl::StrJoin(cmd, " "));
+
+      ASSERT_EQ(Run({"set", "key", "val", "px", "1000"}), "OK");
+      const auto lsn = journal::GetLsn();
+      const RespExpr resp = Run(cmd);
+      if (args[0] == "getex") {
+        EXPECT_EQ(resp, "val");
+      } else {
+        EXPECT_THAT(resp, IntArg(1));
+      }
+
+      // Replicas receive the applied deadline; decode the borrowed bytes before yielding.
+      ASSERT_EQ(journal::GetLsn(), lsn + 1);
+      io::BytesSource source{journal::GetEntry(lsn)};
+      JournalReader reader{&source, 0};
+      journal::ParsedEntry entry;
+      ASSERT_FALSE(reader.ReadEntry(&entry));
+      ASSERT_EQ(entry.cmd.size(), 3);
+      EXPECT_EQ(entry.cmd[0], "PEXPIREAT");
+      EXPECT_EQ(entry.cmd[2], StrCat(deadline));
+      EXPECT_THAT(Run({"pexpiretime", "key"}), IntArg(deadline));
+
+      // GT compares the clamped deadline, which equals the one already set.
+      if (args[0] != "getex") {
+        cmd.push_back("GT");
+        EXPECT_THAT(Run(cmd), IntArg(0));
+      }
+    }
+  });
 }
 
 TEST_F(GenericFamilyTest, ExpireOptions) {
@@ -554,29 +620,39 @@ TEST_F(GenericFamilyTest, Touch) {
   EXPECT_THAT(resp, IntArg(1));
 }
 
+TEST_F(GenericFamilyTest, ShardPlacementOfTestKeys) {
+  ASSERT_EQ(shard_set->size(), 2u);
+  EXPECT_EQ(Shard(kShard0Key, shard_set->size()), 0u);
+  EXPECT_EQ(Shard(kShard0AltKey, shard_set->size()), 0u);
+  EXPECT_EQ(Shard(kShard1Key, shard_set->size()), 1u);
+  EXPECT_EQ(Shard(kShard1AltKey, shard_set->size()), 1u);
+  EXPECT_EQ(Shard(kShard1AltKey2, shard_set->size()), 1u);
+}
+
 TEST_F(GenericFamilyTest, Rename) {
   RespExpr resp;
-  string b_val(32, 'b');
-  string x_val(32, 'x');
+  string dest_val(32, 'z');
+  string src_val(32, 'x');
 
-  resp = Run({"mset", "x", x_val, "b", b_val});
+  resp = Run({"mset", kShard1Key, src_val, kShard0Key, dest_val});
   ASSERT_EQ(resp, "OK");
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
-  resp = Run({"rename", "z", "b"});
+  resp = Run({"rename", kShard0AltKey, kShard0Key});
   ASSERT_THAT(resp, ErrArg("no such key"));
 
-  resp = Run({"rename", "x", "b"});
+  resp = Run({"rename", kShard1Key, kShard0Key});
   ASSERT_EQ(resp, "OK");
 
-  int64_t val = CheckedInt({"get", "x"});
-  ASSERT_EQ(kint64min, val);  // does not exist
+  int64_t val = CheckedInt({"get", kShard1Key});
+  ASSERT_EQ(kint64min, val);
 
-  ASSERT_EQ(x_val, Run({"get", "b"}));  // swapped.
+  ASSERT_EQ(src_val, Run({"get", kShard0Key}));
 
-  EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 1);
+  EXPECT_EQ(CheckedInt({"exists", kShard1Key, kShard0Key}), 1);
 
-  const char* keys[2] = {"b", "x"};
+  const char* keys[2] = {kShard0Key, kShard1Key};
+
   auto ren_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 200; ++i) {
       int j = i % 2;
@@ -587,8 +663,7 @@ TEST_F(GenericFamilyTest, Rename) {
 
   auto exist_fb = pp_->at(2)->LaunchFiber([&] {
     for (size_t i = 0; i < 300; ++i) {
-      int64_t resp = CheckedInt({"exists", "x", "b"});
-      ASSERT_EQ(1, resp);
+      ASSERT_EQ(1, CheckedInt({"exists", kShard1Key, kShard0Key}));
     }
   });
 
@@ -597,8 +672,12 @@ TEST_F(GenericFamilyTest, Rename) {
 }
 
 TEST_F(GenericFamilyTest, RenameList) {
-  for (string_view dest : {"b", "y", "z"}) {
-    EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
+  const char* kSourceKey = kShard1AltKey;  // b (shard 1)
+
+  for (string_view dest :
+       {string_view{kShard0AltKey}, string_view{kShard1Key}, string_view{kShard1AltKey2}}) {
+    EXPECT_EQ(1, CheckedInt({"lpush", kSourceKey, "elem"}));
+
     Metrics metrics = GetMetrics();
 
     size_t list_usage = metrics.db_stats[0].memory_usage_by_type[OBJ_LIST];
@@ -606,9 +685,10 @@ TEST_F(GenericFamilyTest, RenameList) {
     ASSERT_GT(list_usage, 0);
     ASSERT_EQ(string_usage, 0);
 
-    auto resp = Run({"rename", "x", dest});
+    auto resp = Run({"rename", kSourceKey, dest});
     ASSERT_EQ(resp, "OK");
-    if (dest == "b") {
+
+    if (dest == string_view{kShard0AltKey}) {
       ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
     } else {
       ASSERT_EQ(1, last_cmd_dbg_info_.shards_count);
@@ -620,7 +700,7 @@ TEST_F(GenericFamilyTest, RenameList) {
     ASSERT_EQ(list_usage_after, list_usage);
     ASSERT_EQ(string_usage, 0);
 
-    EXPECT_EQ(0, CheckedInt({"del", "x"}));
+    EXPECT_EQ(0, CheckedInt({"del", kSourceKey}));
     EXPECT_EQ(1, CheckedInt({"del", dest}));
   }
 }
@@ -699,6 +779,7 @@ TEST_F(GenericFamilyTest, Stick) {
   // check stickyness persists during writes
   Run({"set", "a", "new"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
+
   Run({"append", "a", "-value"});
   ASSERT_THAT(Run({"stick", "a"}), IntArg(0));
 
@@ -707,14 +788,17 @@ TEST_F(GenericFamilyTest, Stick) {
   ASSERT_THAT(Run({"stick", "k"}), IntArg(0));
 
   // check rename persists stickyness on multiple shards
-  Run({"del", "b"});
-  string b_val(32, 'b');
-  string x_val(32, 'x');
-  Run({"mset", "b", b_val, "x", x_val});
+  Run({"del", kShard0Key});
+
+  string dest_val(32, 'z');
+  string src_val(32, 'x');
+
+  Run({"mset", kShard0Key, dest_val, kShard1Key, src_val});
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
-  Run({"stick", "x"});
-  Run({"rename", "x", "b"});
-  ASSERT_THAT(Run({"stick", "b"}), IntArg(0));
+
+  Run({"stick", kShard1Key});
+  Run({"rename", kShard1Key, kShard0Key});
+  ASSERT_THAT(Run({"stick", kShard0Key}), IntArg(0));
 }
 
 TEST_F(GenericFamilyTest, Move) {
@@ -1332,11 +1416,22 @@ TEST_F(GenericFamilyTest, SortROBug3636) {
   ASSERT_THAT(resp, ArrLen(17));
 }
 
+void ExpectTimeReply(const RespExpr& resp) {
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArgType(RespExpr::STRING), ArgType(RespExpr::STRING))));
+  int64_t sec = 0, usec = -1;
+  EXPECT_TRUE(absl::SimpleAtoi(resp.GetVec()[0].GetView(), &sec));
+  EXPECT_TRUE(absl::SimpleAtoi(resp.GetVec()[1].GetView(), &usec));
+  EXPECT_GT(sec, 0);
+  EXPECT_GE(usec, 0);
+  EXPECT_LT(usec, 1000000);
+}
+
 TEST_F(GenericFamilyTest, TimeNoKeys) {
-  auto resp = Run({"time"});
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0], ArgType(RespExpr::INT64));
-  EXPECT_THAT(resp.GetVec()[1], ArgType(RespExpr::INT64));
+  ExpectTimeReply(Run({"time"}));
+
+  // Lua must see the elements as strings, not numbers.
+  auto resp = Run({"eval", "local t = redis.call('TIME'); return {type(t[1]), type(t[2])}", "0"});
+  EXPECT_THAT(resp, RespArray(ElementsAre("string", "string")));
 
   // Check that time is the same inside a transaction.
   Run({"multi"});
@@ -1345,21 +1440,16 @@ TEST_F(GenericFamilyTest, TimeNoKeys) {
   Run({"time"});
   resp = Run({"exec"});
 
-  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre(Not(IntArg(0)), _)),
-                                          RespArray(ElementsAre(Not(IntArg(0)), _)))));
-
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2))));
+  ExpectTimeReply(resp.GetVec()[0]);
+  ExpectTimeReply(resp.GetVec()[1]);
   for (int i = 0; i < 2; ++i) {
-    int64_t val0 = get<int64_t>(resp.GetVec()[0].GetVec()[i].u);
-    int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
-    EXPECT_EQ(val0, val1);
+    EXPECT_EQ(resp.GetVec()[0].GetVec()[i].GetString(), resp.GetVec()[1].GetVec()[i].GetString());
   }
 }
 
 TEST_F(GenericFamilyTest, TimeWithKeys) {
-  auto resp = Run({"time"});
-  EXPECT_THAT(resp, ArrLen(2));
-  EXPECT_THAT(resp.GetVec()[0], ArgType(RespExpr::INT64));
-  EXPECT_THAT(resp.GetVec()[1], ArgType(RespExpr::INT64));
+  ExpectTimeReply(Run({"time"}));
 
   // Check that time is the same inside a transaction.
   Run({"multi"});
@@ -1367,15 +1457,13 @@ TEST_F(GenericFamilyTest, TimeWithKeys) {
   usleep(2000);
   Run({"time"});
   Run({"get", "x"});
-  resp = Run({"exec"});
+  auto resp = Run({"exec"});
 
-  EXPECT_THAT(resp, RespArray(ElementsAre(RespArray(ElementsAre(Not(IntArg(0)), _)),
-                                          RespArray(ElementsAre(Not(IntArg(0)), _)), _)));
-
+  ASSERT_THAT(resp, RespArray(ElementsAre(ArrLen(2), ArrLen(2), _)));
+  ExpectTimeReply(resp.GetVec()[0]);
+  ExpectTimeReply(resp.GetVec()[1]);
   for (int i = 0; i < 2; ++i) {
-    int64_t val0 = get<int64_t>(resp.GetVec()[0].GetVec()[i].u);
-    int64_t val1 = get<int64_t>(resp.GetVec()[1].GetVec()[i].u);
-    EXPECT_EQ(val0, val1);
+    EXPECT_EQ(resp.GetVec()[0].GetVec()[i].GetString(), resp.GetVec()[1].GetVec()[i].GetString());
   }
 }
 
@@ -1498,6 +1586,15 @@ TEST_F(GenericFamilyTest, Restore) {
   resp = Run({"get", "string-key"});
   EXPECT_EQ("hello world", resp);
   EXPECT_EQ(CheckedInt({"pttl", "string-key"}), 2000);
+
+  // RESTORE caps both relative TTLs and absolute deadlines.
+  ASSERT_EQ(Run({"restore", "string-key", StrCat(kMaxExpireDeadlineMs + 1), ToSV(dump), "REPLACE"}),
+            "OK");
+  EXPECT_THAT(Run({"pttl", "string-key"}), IntArg(kMaxExpireDeadlineMs));
+  ASSERT_EQ(Run({"restore", "string-key", StrCat(TEST_current_time_ms + kMaxExpireDeadlineMs + 1),
+                 ToSV(dump), "ABSTTL", "REPLACE"}),
+            "OK");
+  EXPECT_THAT(Run({"pttl", "string-key"}), IntArg(kMaxExpireDeadlineMs));
 
   // Last but not least - just make sure that we are good without TTL as well
   resp = Run({"restore", "string-key", "0", ToSV(STRING_DUMP_REDIS), "REPLACE"});
@@ -1961,6 +2058,58 @@ TEST_F(GenericFamilyTest, DebugObjHistMultiDbCorrectDb) {
   EXPECT_EQ("value", Run({"HGET", "shared", "alive"}));
 }
 
+TEST_F(GenericFamilyTest, DebugObjHistDataSize) {
+  Run({"JSON.SET", "json", "$", R"({"ab":"cde","f":[1,"gh"]})"});
+  Run({"XADD", "stream", "*", "f1", "v1", "f2", "value2"});
+  Run({"XADD", "stream", "*", "f1", "v1"});
+  Run({"BF.ADD", "bloom", "item"});
+
+  string hist = Run({"DEBUG", "OBJHIST"}).GetString();
+  auto section = [&](string_view type) {
+    size_t start = hist.find(absl::StrCat("OBJECT:", type, "\n"));
+    EXPECT_NE(start, string::npos) << type;
+    if (start == string::npos)
+      return string{};
+    size_t end = hist.find("OBJECT:", start + 1);
+    return hist.substr(start, end == string::npos ? string::npos : end - start);
+  };
+  constexpr string_view kDataSize = "Values - Data size (in-memory and tiered):\n";
+  constexpr string_view kMemoryUsed = "Values - Total Memory used:\n";
+
+  string json_hist = section("ReJSON-RL");
+  EXPECT_THAT(json_hist, HasSubstr(absl::StrCat(kMemoryUsed, "Count: 1 ")));
+  EXPECT_THAT(json_hist, Not(HasSubstr(absl::StrCat(kMemoryUsed, "Count: 1 Average: 0.0000"))));
+  EXPECT_THAT(json_hist, Not(HasSubstr(kDataSize)));
+  EXPECT_THAT(json_hist, Not(HasSubstr("Cardinality histogram")));
+  EXPECT_THAT(json_hist, Not(HasSubstr("Items length histogram")));
+
+  string stream_hist = section("stream");
+  EXPECT_THAT(stream_hist, HasSubstr(absl::StrCat(kMemoryUsed, "Count: 1 ")));
+  EXPECT_THAT(stream_hist, HasSubstr(absl::StrCat(kDataSize, "Count: 1 Average: 16.0")));
+  EXPECT_THAT(stream_hist, HasSubstr("Cardinality histogram (number of elements in sets):\n"
+                                     "Count: 1 Average: 2.0"));
+  EXPECT_THAT(stream_hist, HasSubstr("Items length histogram:\nCount: 3 "));
+
+  string bloom_hist = section("MBbloom--");
+  EXPECT_THAT(bloom_hist, HasSubstr(absl::StrCat(kDataSize, "Count: 1 ")));
+  EXPECT_THAT(bloom_hist, Not(HasSubstr(absl::StrCat(kDataSize, "Count: 1 Average: 0.0000"))));
+}
+
+TEST_F(GenericFamilyTest, DebugObjHistStreamTombstonesAndNodes) {
+  for (unsigned i = 1; i <= 256; ++i) {
+    EXPECT_EQ(Run({"XADD", "stream", StrCat(i, "-0"), "123", "456"}), StrCat(i, "-0"));
+  }
+  EXPECT_EQ(Run({"XADD", "stream", "257-0", "field", "value"}), "257-0");
+  EXPECT_THAT(Run({"XDEL", "stream", "2-0"}), IntArg(1));
+
+  string hist = Run({"DEBUG", "OBJHIST"}).GetString();
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\n"
+                              "Count: 1 Average: 1540.0"));
+  EXPECT_THAT(hist, HasSubstr("Cardinality histogram (number of elements in sets):\n"
+                              "Count: 1 Average: 256.0"));
+  EXPECT_THAT(hist, HasSubstr("Items length histogram:\nCount: 256 "));
+}
+
 TEST_F(GenericFamilyTest, ZInterStoreDeletesEmptySet) {
   for (int i = 0; i < 20; ++i) {
     Run({"SADDEX", "skey", "1", absl::StrCat("m", i)});
@@ -2149,28 +2298,29 @@ TEST_F(GenericFamilyTest, Unlink) {
 
 TEST_F(GenericFamilyTest, Copy) {
   RespExpr resp;
-  string b_val(32, 'b');
-  string x_val(32, 'x');
+  string dest_val(32, 'z');
+  string src_val(32, 'x');
 
-  resp = Run({"mset", "x", x_val, "b", b_val});
+  resp = Run({"mset", kShard1Key, src_val, kShard0Key, dest_val});
   ASSERT_EQ(resp, "OK");
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
-  resp = Run({"COPY", "z", "b"});
+  resp = Run({"COPY", kShard0AltKey, kShard0Key});
   ASSERT_THAT(resp, IntArg(0));
 
-  resp = Run({"COPY", "b", "c"});
+  resp = Run({"COPY", kShard0Key, "c"});
   ASSERT_THAT(resp, IntArg(1));
-  ASSERT_EQ(b_val, Run({"get", "c"}));
+  ASSERT_EQ(dest_val, Run({"get", "c"}));
 
-  resp = Run({"COPY", "x", "b", "REPLACE"});
+  resp = Run({"COPY", kShard1Key, kShard0Key, "REPLACE"});
   ASSERT_THAT(resp, IntArg(1));
 
-  ASSERT_EQ(x_val, Run({"get", "x"}));
-  ASSERT_EQ(x_val, Run({"get", "b"}));
-  EXPECT_EQ(CheckedInt({"exists", "x", "b"}), 2);
+  ASSERT_EQ(src_val, Run({"get", kShard1Key}));
+  ASSERT_EQ(src_val, Run({"get", kShard0Key}));
+  EXPECT_EQ(CheckedInt({"exists", kShard1Key, kShard0Key}), 2);
 
-  const char* keys[2] = {"b", "x"};
+  const char* keys[2] = {kShard0Key, kShard1Key};
+
   auto ren_fb = pp_->at(0)->LaunchFiber([&] {
     for (size_t i = 0; i < 200; ++i) {
       int j = i % 2;
@@ -2181,8 +2331,7 @@ TEST_F(GenericFamilyTest, Copy) {
 
   auto exist_fb = pp_->at(2)->LaunchFiber([&] {
     for (size_t i = 0; i < 300; ++i) {
-      int64_t resp = CheckedInt({"exists", "x", "b"});
-      ASSERT_EQ(2, resp);
+      ASSERT_EQ(2, CheckedInt({"exists", kShard1Key, kShard0Key}));
     }
   });
 
@@ -2191,13 +2340,14 @@ TEST_F(GenericFamilyTest, Copy) {
 }
 
 TEST_F(GenericFamilyTest, CopyNonString) {
-  EXPECT_EQ(1, CheckedInt({"lpush", "x", "elem"}));
-  auto resp = Run({"COPY", "x", "b"});
+  EXPECT_EQ(1, CheckedInt({"lpush", kShard1Key, "elem"}));
+
+  auto resp = Run({"COPY", kShard1Key, kShard0Key});
   ASSERT_THAT(resp, IntArg(1));
   ASSERT_EQ(2, last_cmd_dbg_info_.shards_count);
 
-  EXPECT_EQ(1, CheckedInt({"del", "x"}));
-  EXPECT_EQ(1, CheckedInt({"del", "b"}));
+  EXPECT_EQ(1, CheckedInt({"del", kShard1Key}));
+  EXPECT_EQ(1, CheckedInt({"del", kShard0Key}));
 }
 
 TEST_F(GenericFamilyTest, CopyBinary) {
@@ -2984,10 +3134,11 @@ TEST_F(GenericFamilyTest, ExpiredKeysSurviveFlush) {
 
 namespace {
 
-TypeMemDeltas Snapshot() {
-  TypeMemDeltas total{};
+TypeAttributedMemory Snapshot() {
+  TypeAttributedMemory total{};
   for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
-    auto local = shard_set->Await(sid, [] { return EngineShard::tlocal()->type_mem_delta(); });
+    auto local =
+        shard_set->Await(sid, [] { return EngineShard::tlocal()->type_attributed_memory(); });
     ranges::transform(total, local, total.begin(), plus{});
   }
   return total;
@@ -3031,7 +3182,7 @@ TEST_F(GenericFamilyTest, AsyncDelTrackMemByType) {
   auto before_del = Snapshot();
   ASSERT_THAT(Run({"DEL", key}), IntArg(1));
 
-  auto diff = [](TypeMemDeltas deltas, const TypeMemDeltas& before) {
+  auto diff = [](TypeAttributedMemory deltas, const TypeAttributedMemory& before) {
     ranges::transform(deltas, before, deltas.begin(), minus{});
     return deltas;
   };
@@ -3068,13 +3219,13 @@ TEST_F(GenericFamilyTest, AsyncDelTrackMemByType) {
 
 namespace {
 struct MetricCmp {
-  TypeMemDeltas new_metric{};
-  TypeMemDeltas old_metric{};
+  TypeAttributedMemory new_metric{};
+  TypeAttributedMemory old_metric{};
   int64_t obj_used = 0, table_used = 0, search_used = 0, interned = 0;
 
   MetricCmp() = default;
 
-  explicit MetricCmp(const Metrics& m) : new_metric(m.type_mem_delta) {
+  explicit MetricCmp(const Metrics& m) : new_metric(m.type_attributed_memory_bytes) {
     for (const auto& db : m.db_stats) {
       ranges::transform(old_metric, db.memory_usage_by_type, old_metric.begin(), plus{});
       obj_used += db.obj_memory_usage;
@@ -3104,7 +3255,7 @@ struct MetricCmp {
   }
 
   bool NewUnchanged() const {
-    return new_metric == TypeMemDeltas{};
+    return new_metric == TypeAttributedMemory{};
   }
 
   bool Positive(size_t t) const {
@@ -3129,7 +3280,7 @@ struct MetricCmp {
 };
 
 ostream& operator<<(ostream& os, const MetricCmp& m) {
-  auto print = [&](string_view name, const TypeMemDeltas& arr) {
+  auto print = [&](string_view name, const TypeAttributedMemory& arr) {
     os << name << ": {";
     for (size_t t = 0; t < arr.size(); ++t)
       if (arr[t] != 0)

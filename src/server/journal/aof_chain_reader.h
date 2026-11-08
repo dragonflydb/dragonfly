@@ -27,14 +27,16 @@ class AofChainReader : public io::Source {
   AofChainReader(std::string dir, uint32_t shard_id, uint32_t shard_count);
   ~AofChainReader();
 
-  // Finds the chain's segments, sorted by seq, and validates their headers.
-  std::error_code Open();
+  // Finds the chain's segments from cut_seq on, sorted by seq, and validates their headers. A bad
+  // name, a seq gap or a bad header fails it: a segment gets its final name only after its header
+  // is durable, so these mean outside damage, not a crash.
+  std::error_code Open(uint64_t cut_seq);
 
   // Streams the payloads of valid blocks in order; a record cut at the end is left for
   // JournalReader to drop. The log is a prefix by LSN: the first invalid block, LSN break or record
   // cut at a segment's end ends it, even if later segments look valid, since their records may
   // depend on the lost ones. At the end of the log returns 0 if the log ends cleanly, or
-  // illegal_byte_sequence if a damaged tail follows.
+  // AofError::kTornTail if a damaged tail follows.
   io::Result<size_t> ReadSome(const iovec* v, uint32_t len) override;
 
   // Last complete record read so far, 0 if none; the log's last once the end was reached.
@@ -46,6 +48,29 @@ class AofChainReader : public io::Source {
   uint64_t DiscardedBytes() const {
     return discarded_bytes_;
   }
+
+  // ReadSome() reached the end of the log, cleanly or at a damaged tail.
+  bool AtEnd() const {
+    return end_ != End::kNotYet;
+  }
+
+  // Seq of the segment that resumes the log: right after the one where the log ends. Valid once
+  // the end was reached.
+  uint64_t NextSeq() const {
+    const Segment& end = AllSegmentsRead() ? segment_chain_.back() : segment_chain_[read_seg_id_];
+    return end.seq + 1;
+  }
+
+  // The last valid block ends inside a record that never completed. Valid once the end was
+  // reached.
+  bool EndsMidRecord() const {
+    return ends_mid_record_;
+  }
+
+  // Makes the files match the log as read: drops what follows the last valid block and syncs the
+  // rest. Call once the end was reached, before resuming. The valid end may still be inside a
+  // record: that block is kept, since it also holds complete records that replay applied.
+  std::error_code Repair();
 
  private:
   struct Segment {

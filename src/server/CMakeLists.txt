@@ -89,7 +89,7 @@ add_library(dragonfly_lib
             ${DF_FAMILY_SRCS}
             main_service.cc memory_cmd.cc rdb_load.cc rdb_load_context.cc rdb_save.cc replica.cc http_api.cc
             protocol_client.cc serializer_base.cc snapshot.cc script_mgr.cc
-            detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc detail/egress_throttle.cc
+            detail/compressor.cc detail/decompress.cc detail/save_stages_controller.cc detail/snapshot_storage.cc detail/egress_throttle.cc detail/queued_sink_writer.cc
             version.cc container_utils.cc
             multi_command_squasher.cc
             ${DF_TIERING_SRCS}
@@ -107,13 +107,8 @@ if (PRINT_STACKTRACES_ON_SIGNAL)
   target_compile_definitions(dragonfly_lib PRIVATE PRINT_STACKTRACES_ON_SIGNAL)
 endif()
 
-if (WITH_AWS)
-  SET(AWS_LIB awsv2_lib)
-  add_definitions(-DWITH_AWS)
-endif()
-
 if (WITH_AWS_CLOUD)
-  SET(AWS_LIB ${AWS_LIB} aws_cloud_lib)
+  SET(AWS_LIB aws_cloud_lib)
   add_definitions(-DWITH_AWS_CLOUD)
 endif()
 
@@ -129,7 +124,6 @@ cxx_link(dragonfly_lib dfly_transaction dfly_facade dfly_tiering
          TRDP::croncpp TRDP::flatbuffers)
 
 if (DF_USE_SSL)
-  set(TLS_LIB tls_lib)
   target_compile_definitions(dragonfly_lib PRIVATE DFLY_USE_SSL)
 endif()
 
@@ -173,6 +167,7 @@ helio_cxx_test(acl/jwt_validator_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(engine_shard_set_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(serializer_base_test dfly_test_lib LABELS DFLY)
 helio_cxx_test(detail/egress_throttle_test dfly_test_lib LABELS DFLY)
+helio_cxx_test(detail/queued_sink_writer_test dfly_test_lib LABELS DFLY)
 
 add_dependencies(check_dfly dragonfly_test json_family_test list_family_test
                  generic_family_test memcache_parser_test rdb_test journal_test aof_test

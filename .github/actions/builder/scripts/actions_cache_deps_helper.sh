@@ -21,8 +21,7 @@ actions_cache_deps_set_key() {
   local cxx_compiler="$6"
   local sanitizers="$7"
   local cxx_flags="$8"
-  local with_aws="$9"
-  local build_dir="${10}"
+  local build_dir="$9"
   local cxx_flags_hash
 
   actions_cache_deps_validate_suffix "$suffix" || return
@@ -32,7 +31,7 @@ actions_cache_deps_set_key() {
   fi
   cxx_flags_hash=$(printf '%s' "$cxx_flags" | sha256sum | cut -d ' ' -f1)
   {
-    echo "key=dfly-deps-${suffix}-${runner_os}-${runner_arch}-${build_type}-${cxx_compiler}-${sanitizers}-${cxx_flags_hash}-${with_aws}-${deps_cache_hash}"
+    echo "key=dfly-deps-${suffix}-${runner_os}-${runner_arch}-${build_type}-${cxx_compiler}-${sanitizers}-${cxx_flags_hash}-${deps_cache_hash}"
     echo 'paths<<EOF'
     echo "${build_dir}/third_party"
     echo "${build_dir}/_deps"

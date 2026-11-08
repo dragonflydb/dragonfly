@@ -178,6 +178,7 @@ class RdbSaver {
   struct GlobalData {
     const StringVec lua_scripts;      // bodies of lua scripts
     const StringVec search_indices;   // ft.create commands to re-create search indices
+    const StringVec search_aliases;   // alias/target commands
     const StringVec search_synonyms;  // ft.synupdate commands to restore synonyms
     size_t table_used_memory = 0;     // total memory used by all tables in all shards
   };
@@ -371,6 +372,9 @@ class RdbSerializer {
 
   // Might preempt
   std::error_code PushToConsumerIfNeeded(FlushState flush_state);
+
+  // Runs fn, which may preempt mid-entry, at a forced consume point. Requires tagged entries.
+  template <typename F> std::error_code ConsumeAround(F&& fn);
 
   static constexpr size_t kFilterChunkSize = 1ULL << 26;
   static constexpr size_t kMinStrSizeToCompress = 256;

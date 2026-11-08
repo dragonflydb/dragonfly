@@ -37,6 +37,7 @@ inline constexpr char kAuthRejected[] =
 inline constexpr char kExpiryOutOfRange[] = "expiry is out of range";
 inline constexpr char kIndexOutOfRange[] = "index out of range";
 inline constexpr char kOutOfMemory[] = "Out of memory";
+inline constexpr char kNoSuchClient[] = "No such client";
 inline constexpr char kInvalidNumericResult[] = "result is not a number";
 inline constexpr char kClusterNotConfigured[] = "Cluster is not yet configured";
 inline constexpr char kLoadingErr[] = "-LOADING Dragonfly is loading the dataset in memory";

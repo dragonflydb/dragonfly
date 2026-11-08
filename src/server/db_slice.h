@@ -10,6 +10,7 @@
 #include <atomic>
 #include <limits>
 
+#include "base/cycle_clock.h"
 #include "common/string_or_view.h"
 #include "core/mi_memory_resource.h"
 #include "facade/connection_ref.h"
@@ -23,6 +24,8 @@
 #include "util/fibers/synchronization.h"
 
 namespace dfly {
+
+class QList;
 
 namespace cluster {
 class SlotRanges;
@@ -83,6 +86,9 @@ struct SliceEvents {
 
   // how many journal omit optimizations were performed
   size_t journal_omit = 0;
+
+  // how many times the forced snapshot serialization was skipped (superset of journal_omit)
+  size_t serialize_skip = 0;
 
   SliceEvents& operator+=(const SliceEvents& o);
 };
@@ -207,12 +213,20 @@ class DbSlice {
       size_t orig_value_heap_size = 0;
       CompactObjType orig_obj_type = 0;
 
+      // Tiered list whose node stash/upload callbacks account memory on their own, and the
+      // amount they had accounted at init time. Excluded from the delta to avoid double counting.
+      const QList* orig_tiered_list = nullptr;
+      int64_t orig_tiering_accounted = 0;
+
       // KeySlot(key), computed at most once and only if per-slot stats are tracked.
       std::optional<SlotId> slot;
     };
 
     AutoUpdater(DbIndex db_ind, std::string_view key, const Iterator& it, DbSlice* db_slice,
                 std::optional<SlotId> slot = std::nullopt);
+
+    // Captures the tiered list baseline, see Fields::orig_tiered_list.
+    void ResyncTieredList();
 
     // Returns KeySlot(key) if `table` tracks per-slot stats, nullopt otherwise.
     std::optional<SlotId> StatsSlot(const DbTable& table);
@@ -286,8 +300,13 @@ class DbSlice {
   // Returns statistics for the whole db slice. A bit heavy operation.
   Stats GetStats() const;
 
-  // Returns slot statistics for db 0.
+  // Returns slot statistics summed across all active databases.
   SlotStats GetSlotStats(SlotId sid) const;
+
+  // Adds the statistics of each slot in `slots`, summed across all active databases, to the
+  // respective entry of `dest`. Cheaper than calling GetSlotStats per slot, which repeats the call
+  // and the walk over the databases for every slot.
+  void AddSlotStats(absl::Span<const SlotId> slots, absl::Span<SlotStats> dest) const;
 
   void UpdateMemoryParams(int64_t budget, size_t bytes_per_object) {
     memory_budget_ = budget;
@@ -345,8 +364,8 @@ class DbSlice {
   // and reports no heap allocation, so overwriting it drops the only reference to its disk extent.
   void ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv);
 
-  // Update entry expiration. Return expiration timepoint in abs milliseconds, or -1 if the entry
-  // already expired and was deleted;
+  // Update key expiration, clamping TTL to kMaxExpireDeadlineMs. Return the applied absolute
+  // deadline in ms, 0 for PERSIST, -1 if deleted, or OUT_OF_RANGE on overflow.
   facade::OpResult<int64_t> UpdateExpire(const Context& cntx, Iterator prime_it,
                                          const ExpireParams& params);
 
@@ -622,7 +641,7 @@ class DbSlice {
                                              bool force_update);
 
   void FlushSlotsFb(const cluster::SlotSet& slot_ids, uint64_t next_version,
-                    ChangeConsumerInterface* consumer);
+                    const DbTableArray& tables, ChangeConsumerInterface* consumer);
   util::fb2::Fiber FlushDbIndexes(const std::vector<DbIndex>& indexes);
 
   // Invalidate all watched keys in database. Used on FLUSH.
@@ -661,24 +680,30 @@ class DbSlice {
 
   void CreateDb(DbIndex index);
 
-  // Returns true if this write could be ignored during replication without losing consistency
-  bool IsOmittableWrite(const Context& cntx, const ChangeReq& req);
+  // Describes what events caused by a write during ongoing serialization can be safely skipped.
+  struct OmitDecision {
+    bool skip_serialize = false;  // Skip bucket serialization caused by on-change consumers
+    bool omit_journal = false;    // Skip emitting journal event
+  };
 
-  enum class UpdateStatsMode : uint8_t {
-    kReadStats,
-    kMutableStats,
+  // Decides whether the forced snapshot serialization and/or the journal write can be skipped.
+  // In general, we serialize buckets just before a modification, even if the modified value is
+  // completely overwritten - this is wasteful. If the snapshot traversal loop has not yet reached
+  // the targets bucket, we can skip forced serialization, as it will be eventually serialized with
+  // the new value
+  OmitDecision DetermineOmitPossibility(const Context& cntx, const ChangeReq& req);
+
+  enum class LookupMode : uint8_t {
+    kReadOnly,
+    kMutable,
   };
 
   // Returns true if deletion of expired entries is allowed (i.e., expiry is not paused
   // and this is not a replica that leaves expiry to its master)
   bool AllowExpiredDeletions() const;
 
-  OpResult<ItAndUpdater> AddOrFindInternal(const Context& cntx, std::string_view key,
-                                           std::optional<unsigned> req_obj_type);
-
   OpResult<PrimeIterator> FindInternal(const Context& cntx, std::string_view key,
-                                       std::optional<unsigned> req_obj_type,
-                                       UpdateStatsMode stats_mode) const;
+                                       std::optional<unsigned> req_obj_type, LookupMode mode) const;
   OpResult<ItAndUpdater> FindMutableInternal(const Context& cntx, std::string_view key,
                                              std::optional<unsigned> req_obj_type);
 
@@ -731,6 +756,9 @@ class DbSlice {
   // ordered from the smallest to largest version.
   std::list<ChangeConsumerInterface*> change_cb_;
   mutable LocalLatch change_cb_latch_;  // to avoid deletion during traversal
+
+  // Shared by overlapping slot sweeps and their foreground on-change callbacks.
+  base::RealTimeAggregator flush_slots_cpu_aggregator_;
 
   // Cache mode only: <key hash, db> of the entries looked up during the current transaction
   // callback. OnCbFinishBlocking bumps them up after the callback finishes, because a bump moves

@@ -246,15 +246,19 @@ TEST_F(ServerFamilyTest, SlowLogMinusOneDisabled) {
 
 // Test how slowlog captures additional information about heavy commands
 TEST_F(ServerFamilyTest, SlowLogExecEval) {
+  constexpr char kShard0Key[] = "b";
+  constexpr char kShard1Key[] = "x";
+  constexpr char kShard1AltKey[] = "y";
+
   Run({"config", "set", "slowlog_max_len", "20"});
   Run({"config", "set", "slowlog_log_slower_than", "0"});
 
   // Run EXEC
   {
     Run({"multi"});
-    Run({"set", "first", "ok"});
-    Run({"set", "second2", "ok"});
-    Run({"get", "third3"});
+    Run({"set", kShard1Key, "ok"});
+    Run({"set", kShard0Key, "ok"});
+    Run({"get", kShard1AltKey});
     Run({"exec"});
   }
 
@@ -269,7 +273,7 @@ for i, key in ipairs(KEYS) do
 end
 return 'OK';
     )";
-    auto resp = Run({"EVAL", script, "3", "first", "second2", "third3", "second2"});
+    auto resp = Run({"EVAL", script, "3", kShard1Key, kShard0Key, kShard1AltKey, kShard0Key});
     EXPECT_EQ(resp, "OK");
   }
 
@@ -284,7 +288,7 @@ return 'OK';
       const auto sha = "41e84cf7973712deda6c1737a69bd1365eeb060f";
       EXPECT_THAT(args, ElementsAreArray({"EVAL", sha, "num_cmds: 6", "slow_cmds: 6", "tx_mode: 2",
                                           "tx_shards: 2", "is_write: 1", "lock_tags: 3", "3",
-                                          "first", "second2", "third3", "second2"}));
+                                          kShard1Key, kShard0Key, kShard1AltKey, kShard0Key}));
       found++;
     }
   }
@@ -333,11 +337,93 @@ TEST_F(ServerFamilyTest, ClientListRejected) {
       {{"CLIENT", "LIST", "ID"}, "syntax error"},
       {{"CLIENT", "LIST", "ID", "abc"}, "Invalid client ID"},
       {{"CLIENT", "LIST", "TYPE", "normal", "ID", "1"}, "syntax error"},
+      {{"CLIENT", "LIST", "TYPE", "normal", "ID", "abc"}, "syntax error"},
       {{"CLIENT", "LIST", "FOO"}, "syntax error"},
   };
   for (const auto& [args, msg] : bad) {
     EXPECT_THAT(Run(args), ErrArg(msg)) << absl::StrJoin(args, " ");
   }
+}
+
+TEST_F(ServerFamilyTest, ClientKillRejected) {
+  const std::vector<std::pair<std::vector<std::string>, std::string>> bad = {
+      {{"CLIENT", "KILL"}, "wrong number of arguments for 'client|kill' command"},
+      {{"CLIENT", "KILL", "1.2.3.4:5"}, "No such client"},
+      {{"CLIENT", "KILL", "TYPE"}, "No such client"},
+      {{"CLIENT", "KILL", "FOO", "bar"}, "syntax error"},
+      {{"CLIENT", "KILL", "TYPE", "normal", "USER"}, "syntax error"},
+      {{"CLIENT", "KILL", "SKIPME", "maybe"}, "syntax error"},
+      {{"CLIENT", "KILL", "ID", "0"}, "client-id should be greater than 0"},
+      {{"CLIENT", "KILL", "ID", "-1"}, "client-id should be greater than 0"},
+      {{"CLIENT", "KILL", "ID", "+5"}, "client-id should be greater than 0"},
+      {{"CLIENT", "KILL", "TYPE", "bogus", "TYPE", "normal"}, "Unknown client type 'bogus'"},
+      {{"CLIENT", "KILL", "USER", "nosuchuser", "MAXAGE", "0"}, "No such user 'nosuchuser'"},
+      {{"CLIENT", "KILL", "MAXAGE", "-1"}, "maxage should be greater than 0"},
+      {{"CLIENT", "KILL", "MAXAGE", "abc"}, "maxage is not an integer or out of range"},
+  };
+  for (const auto& [args, msg] : bad) {
+    EXPECT_THAT(Run(args), ErrArg(msg)) << absl::StrJoin(args, " ");
+  }
+
+  // Error stats keys must not grow with user input.
+  const string errorstats = Run({"INFO", "ERRORSTATS"}).GetString();
+  EXPECT_THAT(errorstats, Not(HasSubstr("nosuchuser")));
+  EXPECT_THAT(errorstats, Not(HasSubstr("bogus")));
+}
+
+// The fixture has no listeners, so only the caller itself can match.
+TEST_F(ServerFamilyTest, ClientKillSelf) {
+  TestInitAclFam();
+  const string id = absl::StrCat(*Run({"CLIENT", "ID"}).GetInt());
+  auto kill = [&](std::vector<std::string> args) {
+    args.insert(args.begin(), {"CLIENT", "KILL"});
+    return Run(args);
+  };
+
+  EXPECT_THAT(kill({"ID", id}), IntArg(0));
+  EXPECT_THAT(kill({"SKIPME", "yes"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", absl::StrCat(stoll(id) + (int64_t{1} << 32)), "SKIPME", "no"}),
+              IntArg(0));
+  const std::vector<std::vector<std::string>> mismatches = {
+      {"MAXAGE", "100000"},
+      {"TYPE", "normal", "USER", "default", "ADDR", "", "LADDR", "1.2.3.4:5"},
+  };
+  for (const auto& mismatch : mismatches) {
+    std::vector<std::string> args = {"ID", id, "SKIPME", "no"};
+    args.insert(args.end(), mismatch.begin(), mismatch.end());
+    EXPECT_THAT(kill(args), IntArg(0)) << absl::StrJoin(args, " ");
+  }
+  EXPECT_THAT(kill({"TYPE", "normal", "USER", "default", "ADDR", "", "SKIPME", "no", "ID", id}),
+              IntArg(1));
+  EXPECT_THAT(kill({"ID", "999999", "ID", id, "SKIPME", "no"}), IntArg(1));
+}
+
+TEST_F(ServerFamilyTest, ClientKillMasterLink) {
+  TestInitAclFam();
+  EXPECT_THAT(Run({"CLIENT", "KILL", "TYPE", "master"}), IntArg(0));
+
+  // Unlike REPLICAOF, Replicate keeps the link to an unreachable master; .onion is never resolved.
+  pp_->at(0)->Await([&] { service_->server_family().Replicate("x.onion", "1"); });
+  const string row = Run({"CLIENT", "LIST", "TYPE", "master"}).GetString();
+  ASSERT_THAT(row, StartsWith("id="));
+  const string id = row.substr(3, row.find(' ') - 3);
+  EXPECT_EQ(Run({"CLIENT", "LIST", "ID", "999999"}).GetString(), "");
+  auto kill = [&](std::vector<std::string> args) {
+    args.insert(args.begin(), {"CLIENT", "KILL"});
+    return Run(args);
+  };
+
+  EXPECT_THAT(kill({"TYPE", "master"}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
+  EXPECT_THAT(kill({"ID", id}), ErrArg("Cannot kill master link; use REPLICAOF NO ONE"));
+  EXPECT_THAT(kill({"TYPE", "master", "ADDR", "x.onion:1"}), ErrArg("Cannot kill master link"));
+  EXPECT_THAT(kill({"ADDR", "x.onion:1"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "USER", "default"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "ID", "999999"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "ADDR", "1.2.3.4:5"}), IntArg(0));
+  EXPECT_THAT(kill({"TYPE", "master", "MAXAGE", "9223372036854775807"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", id, "LADDR", "1.2.3.4:5"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", id, "TYPE", "normal"}), IntArg(0));
+  EXPECT_THAT(kill({"ID", absl::StrCat(stoll(id) + (int64_t{1} << 32))}), IntArg(0));
 }
 
 TEST_F(ServerFamilyTest, ClientInfoSingleDbField) {

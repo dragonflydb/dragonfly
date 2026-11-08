@@ -25,6 +25,7 @@
 struct hdr_histogram;
 
 namespace facade {
+struct ClientInfo;
 class Listener;
 struct TlsCertInfo;
 }  // namespace facade
@@ -91,6 +92,9 @@ struct SaveInfoData {
   // false if last attempt failed
   bool last_bgsave_status = true;
   bool bgsave_in_progress = false;
+
+  // Unlike bgsave_in_progress, also covers SAVE, scheduled and shutdown saves.
+  bool save_in_progress = false;
 };
 
 // A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
@@ -181,6 +185,9 @@ class ServerFamily {
   // specified in --df_snapshot_format
   GenericError DoSave(bool ignore_state = false);
 
+  // Cancels an in-progress save; its owner finishes cleanup and records the error.
+  void CancelSave();
+
   // Burns down and destroy all the data from the database.
   // if kDbAll is passed, burns all the databases to the ground.
   // `wait` makes it wait for all fibers to finish and decommit
@@ -239,20 +246,16 @@ class ServerFamily {
   // nullopt otherwise.
   std::optional<Metrics::ReplicaInfo> GetReplicaSummary() const;
 
-  struct MasterLinkClientInfo {
-    uint32_t client_id;
-    std::string info;
-  };
-
   // One entry per attached outbound master link; empty if not replicating.
-  std::vector<MasterLinkClientInfo> GetMasterLinkClientInfo() const
+  std::vector<facade::ClientInfo> GetMasterLinkClientInfo() const
       ABSL_LOCKS_EXCLUDED(replicaof_mu_);
-
-  bool IsMasterLinkClientId(uint32_t id) const ABSL_LOCKS_EXCLUDED(replicaof_mu_);
 
   void OnClose(ConnectionContext* cntx);
 
   void CancelBlockingOnThread(std::function<facade::OpStatus(facade::ArgSlice)> = {});
+
+  // Fails blocked commands on all threads with an UNBLOCKED error.
+  void UnblockAllClients();
 
   // Sets the server to replicate another instance. Does not flush the database beforehand!
   void Replicate(std::string_view host, std::string_view port);

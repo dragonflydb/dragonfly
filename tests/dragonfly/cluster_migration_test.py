@@ -1082,8 +1082,9 @@ async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory)
 
             # FlushSlots runs in a detached fiber, so an acked record does not mean the keys
             # are gone, and dbsize equality alone can catch a value both sides pass through.
+            # GETSLOTINFO reports only owned slots, so the keys it does not count are dropped ones.
             dropped = f"0-{step * pushes - 1}"
-            slotinfo = ("DFLYCLUSTER", "GETSLOTINFO", "SLOTS", dropped)
+            slotinfo = ("DFLYCLUSTER", "GETSLOTINFO", "SLOTS", f"{step * pushes}-16383")
 
             @assert_eventually(timeout=30)
             async def dropped_slots_empty():
@@ -1093,8 +1094,8 @@ async def test_repeated_flushslots_with_replica(df_factory: DflyInstanceFactory)
                     c_master.execute_command("dbsize"),
                     c_replica.execute_command("dbsize"),
                 )
-                m_left = sum(row[2] for row in m_slots)
-                r_left = sum(row[2] for row in r_slots)
+                m_left = m - sum(row[2] for row in m_slots)
+                r_left = r - sum(row[2] for row in r_slots)
                 assert m_left == 0, f"master still holds {m_left} keys in slots {dropped}"
                 assert r_left == 0, f"replica still holds {r_left} keys in slots {dropped}"
                 assert m == r, f"master and replica diverged across repeated FLUSHSLOTS: {m} vs {r}"

@@ -34,7 +34,6 @@ jobs:
         run: |
           cmake -B ${GITHUB_WORKSPACE}/build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DWITH_AWS=OFF \
             -DWITH_GCP=OFF \
             -DWITH_UNWIND=OFF \
             -DWITH_GPERF=OFF \

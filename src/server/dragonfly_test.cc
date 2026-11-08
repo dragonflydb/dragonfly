@@ -864,6 +864,33 @@ TEST_F(DflyEngineTest, HelloAuthHidden) {
   EXPECT_THAT(slowlog, Contains(ElementsAre("AUTH", "... (2 more arguments)")));
   EXPECT_THAT(slowlog, testing::Each(testing::Not(Contains(HasSubstr("secret")))));
 }
+
+TEST_F(DflyEngineTest, ConfigSetValueHidden) {
+  absl::FlagSaver fs;
+  Run({"config", "set", "slowlog_log_slower_than", "0"});
+
+  FailedCmdSink sink;
+  Run({"config", "set", "masterauth", "secret"});
+  Run({"config", "set", "requirepas", "secret"});
+  Run({"config", "setrequirepass", "secret"});
+  Run({"config", "set", "requirepasssecret"});
+  Run({"config", "get", "maxmemory"});
+  Run({"config", "get"});
+
+  EXPECT_THAT(sink.Lines(),
+              Contains(HasSubstr(" CONFIG set requirepas failed with reason: Unknown option")));
+  EXPECT_THAT(sink.Lines(), testing::Each(testing::Not(HasSubstr("secret"))));
+
+  vector<vector<string>> slowlog;
+  auto resp = Run({"slowlog", "get", "100"});
+  for (const auto& entry : resp.GetVec())
+    slowlog.push_back(StrArray(entry.GetVec()[3]));
+  EXPECT_THAT(slowlog,
+              Contains(ElementsAre("CONFIG", "set", "masterauth", "... (1 more arguments)")));
+  EXPECT_THAT(slowlog, Contains(ElementsAre("CONFIG", "get", "maxmemory")));
+  EXPECT_THAT(slowlog, Contains(ElementsAre("CONFIG", "setrequirepass", "... (1 more arguments)")));
+  EXPECT_THAT(slowlog, testing::Each(testing::Not(Contains(HasSubstr("secret")))));
+}
 #endif
 
 TEST_F(DflyEngineTest, Bug468) {
@@ -1269,6 +1296,8 @@ TEST_F(DflyEngineTest, CommandMetricLabels) {
   EXPECT_EQ(metrics.facade_stats.conn_stats.command_cnt_main, 0);
   EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_main, 0);
   EXPECT_EQ(metrics.facade_stats.conn_stats.num_conns_other, 0);
+  EXPECT_EQ(metrics.io_threads, pp_->size());
+  EXPECT_EQ(metrics.max_connected_clients_per_thread, 0);
 }
 
 TEST_F(DflyEngineTest, MemoryKeys) {

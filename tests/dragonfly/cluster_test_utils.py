@@ -157,22 +157,21 @@ async def wait_for_ft_index_creation(client, idx_name, timeout=5):
             assert len(states) != 0, states
 
 
-async def wait_for_error(admin_client, node_id, error, timeout=10):
+async def wait_for_error(admin_client, node_id, error, timeout=10, exact=True):
+    """Wait until every migration state reports `error`.
+
+    With exact=False the state only has to contain `error`, which keeps callers off
+    error codes whose message text is platform dependent.
+    """
     get_status = lambda: admin_client.execute_command(
         "DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id
     )
 
+    matches = (lambda state: error == state) if exact else (lambda state: error in state)
+
     async for states, breaker in tick_timer(get_status, timeout=timeout):
         with breaker:
-            assert len(states) != 0 and all(error == state[4] for state in states), states
-
-
-async def wait_for_migration_start(admin_client, node_id):
-    while (
-        len(await admin_client.execute_command("DFLYCLUSTER", "SLOT-MIGRATION-STATUS", node_id))
-        == 0
-    ):
-        await asyncio.sleep(0.1)
+            assert len(states) != 0 and all(matches(state[4]) for state in states), states
 
 
 async def check_for_no_state_status(admin_clients):

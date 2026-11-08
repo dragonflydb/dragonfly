@@ -25,6 +25,7 @@ Usage
     # GitHub Copilot backend (uses Copilot CLI auth, no API key needed):
     pip install github-copilot-sdk
     python tools/release_notes_generator.py v1.37.0..v1.38.0 --backend copilot
+    python tools/release_notes_generator.py v1.37.0..v1.38.0 --backend copilot --model claude-sonnet-5
 """
 
 from __future__ import annotations
@@ -89,11 +90,7 @@ ANTHROPIC_MODEL = "claude-sonnet-4-6"
 ANTHROPIC_CACHE_CONTROL = {"type": "ephemeral"}
 
 # Copilot model alias -- use the ID from `CopilotClient.list_models()`.
-# Available models as of 2026-05 (billing multiplier vs GPT-4.1 baseline):
-#   claude-sonnet-4.6   -- Claude Sonnet 4.6   200K ctx  1.0×  (recommended)
-#   claude-opus-4.6     -- Claude Opus 4.6     200K ctx  3.0×  (highest quality)
-#   gpt-5.3-codex       -- GPT-5.3-Codex       400K ctx  1.0×
-COPILOT_MODEL = "claude-sonnet-4.6"
+COPILOT_MODEL = "claude-sonnet-5.5"
 
 # Bound the size of diff context per commit. Massive diffs (vendored deps,
 # generated files, large refactors) would otherwise dominate the context window
@@ -119,9 +116,6 @@ ANALYZE_MAX_TOKENS_JSON = 1000
 COMPOSE_MAX_TOKENS = 16_000
 COMPOSE_HEARTBEAT_S = 15
 COMPOSE_TOKEN_PROGRESS_INTERVAL = 250
-
-# How many consecutive all-failed commits before aborting a round early.
-FAIL_FAST_THRESHOLD = 5
 
 CACHE_SUBDIR = ".release_notes_cache"
 PROMOTE_THEME_MIN_SIZE = 3
@@ -1044,12 +1038,16 @@ def _short_error(e: Exception) -> str:
     return f"{name}: {msg}"
 
 
+class _FatalBackendError(RuntimeError):
+    pass
+
+
 def _is_fatal_error(e: Exception) -> bool:
     """True for errors that won't resolve with retries (auth / model-not-available)."""
-    msg = str(e)
-    if "not available" in msg or "JSON-RPC Error" in msg:
+    msg = str(e).lower()
+    if re.search(r"\bmodel\b.*\bnot available\b", msg):
         return True
-    if "authentication" in msg.lower() or "unauthorized" in msg.lower():
+    if "authentication" in msg or "unauthorized" in msg:
         return True
     return False
 
@@ -1161,37 +1159,28 @@ async def _analyze_round(
                         f"{commit.short_sha} {commit.subject}"
                     )
             except Exception as e:
+                fatal = _is_fatal_error(e)
+                error_tag = "FAIL (PERMANENT)" if fatal else fail_tag
                 async with lock:
                     completed += 1
                     failed.append((commit, e))
                     print(
-                        f"  {label} [{completed}/{len(commits)}] {fail_tag} "
+                        f"  {label} [{completed}/{len(commits)}] {error_tag} "
                         f"{commit.short_sha} {commit.subject}\n      -> {_short_error(e)}",
                         file=sys.stderr,
                     )
-                    if (
-                        not abort_event.is_set()
-                        and len(succeeded) == 0
-                        and len(failed) >= FAIL_FAST_THRESHOLD
-                        and all(_is_fatal_error(err) for _, err in failed)
-                    ):
-                        print(
-                            f"\nFATAL: first {len(failed)} commits all failed with a "
-                            f"non-retriable error -- aborting round early.\n"
-                            f"  Last error: {_short_error(e)}",
-                            file=sys.stderr,
-                        )
+                    if fatal:
                         abort_event.set()
+                        raise _FatalBackendError(_short_error(e)) from e
 
-    await asyncio.gather(*[analyze_one(c) for c in commits])
-
-    # Any commit not in succeeded or failed was silently skipped due to abort.
-    # Add them to failed so the caller can retry them in the next round.
-    if abort_event.is_set():
-        processed = {a.commit.sha for a in succeeded} | {c.sha for c, _ in failed}
-        for commit in commits:
-            if commit.sha not in processed:
-                failed.append((commit, RuntimeError("skipped due to fatal backend error")))
+    tasks = [asyncio.create_task(analyze_one(c)) for c in commits]
+    try:
+        await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
     return succeeded, failed
 
@@ -1898,6 +1887,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Model ID for the selected backend "
+            f"(defaults: anthropic={ANTHROPIC_MODEL}, copilot={COPILOT_MODEL})."
+        ),
+    )
+    parser.add_argument(
         "--cache-dir",
         default=None,
         help=(
@@ -1938,10 +1935,15 @@ def _check_prerequisites(backend_name: str) -> Optional[str]:
     return None
 
 
-def _build_backend(backend_name: str) -> LLMBackend:
+def _build_backend(backend_name: str, model: Optional[str] = None) -> LLMBackend:
+    backend: LLMBackend
     if backend_name == "copilot":
-        return CopilotBackend()
-    return AnthropicBackend(anthropic.Anthropic(max_retries=SDK_MAX_RETRIES))
+        backend = CopilotBackend()
+    else:
+        backend = AnthropicBackend(anthropic.Anthropic(max_retries=SDK_MAX_RETRIES))
+    if model is not None:
+        backend.model = model
+    return backend
 
 
 def _resolve_cache_dir(
@@ -2056,7 +2058,7 @@ def main() -> int:
             print(f"  ... +{len(commits) - 20} more")
         return 0
 
-    backend = _build_backend(args.backend)
+    backend = _build_backend(args.backend, args.model)
     target = TARGETS[args.target]
     cache_dir = _resolve_cache_dir(args.no_cache, args.cache_dir, repo, backend)
     highlight_blacklist_terms = _normalize_blacklist_terms(args.highlight_blacklist)
@@ -2076,6 +2078,12 @@ def main() -> int:
                 highlight_blacklist_terms,
             )
         )
+    except _FatalBackendError as e:
+        print(
+            f"\nERROR: backend configuration failed ({e}). Aborting without retries.",
+            file=sys.stderr,
+        )
+        return 2
     except _AnalysisIncompleteError as e:
         print(f"\nERROR: {e}", file=sys.stderr)
         print(
@@ -2084,6 +2092,9 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
     except Exception as e:
         print(f"\nERROR: composition failed ({type(e).__name__}: {e})", file=sys.stderr)
         return 3

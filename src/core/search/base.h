@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <absl/container/inlined_vector.h>
+#include <absl/functional/function_ref.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -164,8 +165,11 @@ struct BaseIndex {
 // Base class for type-specific sorting indices.
 struct BaseSortIndex : BaseIndex {
   virtual SortableValue Lookup(DocId doc) const = 0;
-  virtual std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit,
-                                          bool desc) const = 0;
+
+  // Moves the first `limit` ids into sort order: docs with a value first, then by value and by
+  // `key` in the requested direction. Returns their values, monostate for docs without one.
+  virtual std::vector<SortableValue> Sort(std::vector<DocId>* ids, size_t limit, bool desc,
+                                          absl::FunctionRef<std::string_view(DocId)> key) const = 0;
 };
 
 /* Used in iterators of inverse indices.

@@ -178,6 +178,14 @@ async def test_disconnect_replica(
     logging.debug("Check master survived all disconnects")
     assert await c_master.ping()
 
+    # Every replica that went away - crashed or disconnected - is counted exactly once.
+    @assert_eventually
+    async def check_disconnects_counted():
+        counted = sum([await get_disconnects(master, reason) for reason in disconnect_reasons])
+        assert counted == len(replicas)
+
+    await check_disconnects_counted()
+
 
 """
 Test stopping master during different phases.
@@ -924,6 +932,18 @@ async def test_master_stalled_disconnect(df_factory: DflyInstanceFactory):
     await check_replica_connected()  # still connected
     await asyncio.sleep(1)  # wait for the master to recognize it's being blocked
     await check_replica_disconnected()
+    assert await get_disconnects(master, "timeout") == 1
+
+
+disconnect_reasons = ["closed", "error", "timeout"]
+
+
+async def get_disconnects(inst: DflyInstance, reason: str):
+    family = (await inst.metrics())["dragonfly_replica_disconnects"]
+    for sample in family.samples:
+        if sample.labels.get("reason") == reason:
+            return sample.value
+    return 0
 
 
 async def test_double_take_over(df_factory, df_seeder_factory):

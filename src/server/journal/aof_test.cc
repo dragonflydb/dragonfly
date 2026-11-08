@@ -5,11 +5,13 @@
 #include "server/journal/aof.h"
 
 #include <absl/base/internal/endian.h>
+#include <absl/crc/crc32c.h>
 #include <absl/flags/declare.h>
 #include <absl/flags/flag.h>
 #include <absl/flags/reflection.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
+#include <absl/time/clock.h>
 
 #include <filesystem>
 #include <fstream>
@@ -21,7 +23,10 @@
 #include "io/file_util.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/aof_chain_reader.h"
+#include "server/journal/aof_manifest.h"
 #include "server/journal/aof_segment_writer.h"
+#include "server/journal/aof_streamer.h"
+#include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/test_utils.h"
 
@@ -260,6 +265,87 @@ TEST_F(AofSegmentWriterTest, OpenKeepsExistingSegment) {
   EXPECT_EQ(ReadSegment(0).size(), kAofSegmentHeaderSize + kAofBlockHeaderSize + 1);
 }
 
+class AofManifestTest : public AofSegmentWriterTest {
+ protected:
+  static AofManifest Sample() {
+    AofManifest m;
+    m.state = AofManifest::State::kActive;
+    m.checkpoint_id = 3;
+    m.base_owned = true;
+    m.base_path = "dump base-3.dfs";
+    m.cuts = {{5, 1234}, {7, 1300}};
+    return m;
+  }
+
+  string ManifestPath() const {
+    return absl::StrCat(dir_, "/", kAofManifestName);
+  }
+};
+
+TEST_F(AofManifestTest, RoundTrip) {
+  AofManifest m = Sample();
+  auto decoded = DecodeAofManifest(EncodeAofManifest(m));
+  ASSERT_TRUE(decoded) << decoded.error().message();
+  EXPECT_EQ(*decoded, m);
+
+  // Bootstrapping, no base.
+  AofManifest empty;
+  empty.cuts = {{0, 1}};
+  decoded = DecodeAofManifest(EncodeAofManifest(empty));
+  ASSERT_TRUE(decoded) << decoded.error().message();
+  EXPECT_EQ(*decoded, empty);
+}
+
+TEST_F(AofManifestTest, WriteReplacesAtomically) {
+  pp_->at(0)->Await([&] {
+    // No manifest yet.
+    EXPECT_EQ(ReadAofManifest(dir_).error(), errc::no_such_file_or_directory);
+
+    AofManifest first = Sample();
+    ASSERT_FALSE(WriteAofManifest(dir_, first));
+    EXPECT_EQ(*ReadAofManifest(dir_), first);
+
+    // A crash before the rename leaves a tmp file, which the reader ignores.
+    ofstream(ManifestPath() + ".tmp") << "garbage";
+    EXPECT_EQ(*ReadAofManifest(dir_), first);
+
+    // The next write truncates the stale tmp, then renames it over the manifest.
+    AofManifest second = Sample();
+    second.checkpoint_id = 4;
+    second.cuts = {{8, 2000}, {9, 2100}};
+    ASSERT_FALSE(WriteAofManifest(dir_, second));
+    EXPECT_EQ(*ReadAofManifest(dir_), second);
+    // The rename consumed the tmp file.
+    EXPECT_FALSE(filesystem::exists(ManifestPath() + ".tmp"));
+  });
+}
+
+TEST_F(AofManifestTest, CollectGarbage) {
+  // appendonly.aof, appendonly-x.tmp and appendonlydir are not ours, so they must not be deleted.
+  for (string_view name :
+       {"appendonly-0-1.aof", "appendonly-0-2.aof", "appendonly-0-3.aof", "appendonly-1-0.aof",
+        "appendonly-0-4.aof.discarded", "appendonly-1-1.aof.tmp", "appendonly.manifest.tmp",
+        "dump-summary.dfs", "appendonly.aof", "appendonly-x.tmp"}) {
+    ofstream(absl::StrCat(dir_, "/", name)) << "x";
+  }
+  filesystem::create_directory(absl::StrCat(dir_, "/appendonlydir"));
+  AofManifest m = Sample();
+  m.cuts = {{2, 100}, {0, 1}};
+
+  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m)); });
+
+  vector<string> left;
+  for (const auto& entry : filesystem::directory_iterator(dir_))
+    left.push_back(entry.path().filename().string());
+  sort(left.begin(), left.end());
+
+  // Segments below the cut and our tmp files go; *.discarded and others' files stay.
+  EXPECT_EQ(left, (vector<string>{"appendonly-0-2.aof", "appendonly-0-3.aof",
+                                  "appendonly-0-4.aof.discarded", "appendonly-1-0.aof",
+                                  "appendonly-x.tmp", "appendonly.aof", "appendonlydir",
+                                  "dump-summary.dfs"}));
+}
+
 class AofStreamerTest : public BaseFamilyTest {
  protected:
   void SetUp() override {
@@ -357,6 +443,89 @@ TEST_F(AofStreamerTest, WritesReachSegments) {
   }
 }
 
+// One shard, so the records after the rotation all land in segment 1.
+class AofStreamerOneShardTest : public AofStreamerTest {
+ protected:
+  AofStreamerOneShardTest() {
+    num_threads_ = 1;
+  }
+
+  // A retirement finishes within milliseconds, so tests fake one in progress.
+  static void SetRetiring(AofStreamer* streamer, bool retiring) {
+    streamer->spare_ready_ = !retiring;
+  }
+};
+
+// TODO: cover a crash while preparing a spare. Leave each partial state on disk (a leftover
+// appendonly-<shard>-<seq>.aof.tmp, a header-only segment with its tmp twin, a complete unused
+// spare) and check that the restart replays the chain cleanly and startup GC removes the tmp files.
+TEST_F(AofStreamerOneShardTest, RotateContinuesInSpare) {
+  Run("mset a 1 b 2 c 3 d 4");
+  const uint32_t shard_count = shard_set->size();
+
+  // As a checkpoint's cut does: wait for the spares first, then rotate without yielding.
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_TRUE(shard->aof_streamer()->WaitSpareReady()); });
+  shard_set->RunBlockingInParallel(
+      [](EngineShard* shard) { EXPECT_EQ(shard->aof_streamer()->Rotate(), 1u); });
+  Run("mset a 5 b 6 c 7 d 8");
+  ShutdownService();
+
+  for (uint32_t sid = 0; sid < shard_count; ++sid) {
+    // Shutdown deleted the unused spare.
+    EXPECT_FALSE(filesystem::exists(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, 2))))
+        << "shard " << sid;
+
+    // The LSNs continue from segment 0 into segment 1, and both hold records.
+    optional<uint64_t> next_lsn;
+    for (uint64_t seq : {0, 1}) {
+      size_t blocks = 0;
+      ifstream in(absl::StrCat(dir_, "/", AofSegmentWriter::SegmentName(sid, seq)), ios::binary);
+      string file(istreambuf_iterator<char>(in), {});
+      auto seg = DecodeAofSegmentHeader(file);
+      ASSERT_TRUE(seg) << "shard " << sid << " segment " << seq;
+      string_view rest = string_view(file).substr(kAofSegmentHeaderSize);
+      while (!rest.empty()) {
+        auto hdr = DecodeAofBlock(rest, seg->segment_uid);
+        ASSERT_TRUE(hdr) << "shard " << sid << " segment " << seq;
+        if (next_lsn) {
+          EXPECT_EQ(hdr->first_lsn, *next_lsn) << "shard " << sid << " segment " << seq;
+        }
+        next_lsn = hdr->first_lsn + hdr->n_records;
+        rest.remove_prefix(hdr->total_block_bytes);
+        ++blocks;
+      }
+      EXPECT_GT(blocks, 0u) << "shard " << sid << " segment " << seq;
+    }
+  }
+}
+
+TEST_F(AofStreamerOneShardTest, DurableLsnWaitsForRetiredSegment) {
+  Run("mset a 1 b 2 c 3 d 4");
+  AofStreamer* streamer = shard_set->Await(0, [] { return EngineShard::tlocal()->aof_streamer(); });
+  uint64_t cut = shard_set->Await(0, [&] {
+    EXPECT_TRUE(streamer->WaitSpareReady());
+    uint64_t lsn = journal::GetLsn();
+    EXPECT_EQ(streamer->Rotate(), 1u);
+
+    // Joins the retirement: everything before the cut is durable.
+    EXPECT_TRUE(streamer->WaitSpareReady());
+    EXPECT_EQ(streamer->DurableLsn(), lsn - 1);
+    return lsn;
+  });
+
+  // Record cut lands in segment 1; wait past the 1s periodic sync, so segment 1 covers it.
+  Run("set x 1");
+  absl::SleepFor(absl::Milliseconds(1500));
+  shard_set->Await(0, [&] {
+    // While the old segment retires, segment 1 does not count, though it is synced.
+    SetRetiring(streamer, true);
+    EXPECT_EQ(streamer->DurableLsn(), cut - 1);
+    SetRetiring(streamer, false);
+    EXPECT_EQ(streamer->DurableLsn(), cut);
+  });
+}
+
 class AofChainReaderTest : public AofSegmentWriterTest {
  protected:
   // Writes segment seq, one block per record.
@@ -384,13 +553,13 @@ class AofChainReaderTest : public AofSegmentWriterTest {
     ChainResult res;
     pp_->at(0)->Await([&] {
       AofChainReader reader(dir_, 2, 4);
-      ASSERT_FALSE(reader.Open());
+      ASSERT_FALSE(reader.Open(0));
       char buf[7];
       while (true) {
         iovec v{buf, sizeof(buf)};
         auto n = reader.ReadSome(&v, 1);
         if (!n) {
-          ASSERT_EQ(n.error(), errc::illegal_byte_sequence);
+          ASSERT_EQ(n.error(), AofError::kTornTail);
           res.torn = true;
           break;
         }

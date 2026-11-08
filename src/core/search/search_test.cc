@@ -1555,6 +1555,24 @@ TEST(HnswRestoreInvariant, MissingEntrypointFailsGracefully) {
   EXPECT_FALSE(restored.RestoreFromNodes(nodes, bad_metadata));
 }
 
+struct BorrowedDoc final : public DocumentAccessor {
+  const char* data;
+  explicit BorrowedDoc(const char* d) : data(d) {
+  }
+  std::optional<VectorInfo> GetVector(string_view, size_t, VectorDataType) const override {
+    return BorrowedFtVector{data};
+  }
+  std::optional<StringList> GetStrings(string_view) const override {
+    return std::nullopt;
+  }
+  std::optional<StringList> GetTags(string_view) const override {
+    return std::nullopt;
+  }
+  std::optional<NumsList> GetNumbers(string_view) const override {
+    return std::nullopt;
+  }
+};
+
 // Regression: in borrowed mode (copy_vector=false), Remove marks the node deleted
 // but hnswlib still traverses it and dereferences its data pointer.  If the external
 // data is freed (as happens after DEL), the pointer dangles.  The fix in DoRemove
@@ -1575,24 +1593,6 @@ TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
   params.hnsw_m = 16;
   params.hnsw_ef_construction = 200;
   HnswVectorIndex index(params, /*copy_vector=*/false);
-
-  struct BorrowedDoc : public DocumentAccessor {
-    const char* data;
-    explicit BorrowedDoc(const char* d) : data(d) {
-    }
-    std::optional<VectorInfo> GetVector(string_view, size_t, VectorDataType) const override {
-      return BorrowedFtVector{data};
-    }
-    std::optional<StringList> GetStrings(string_view) const override {
-      return std::nullopt;
-    }
-    std::optional<StringList> GetTags(string_view) const override {
-      return std::nullopt;
-    }
-    std::optional<NumsList> GetNumbers(string_view) const override {
-      return std::nullopt;
-    }
-  };
 
   std::mt19937 rng(42);
   std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
@@ -1628,6 +1628,48 @@ TEST(HnswBorrowedMode, DanglingPointerAfterRemove) {
   vector<float> query(kDim, 0.0f);
   auto results = index.Knn(query.data(), 5, std::nullopt);
   EXPECT_GT(results.size(), 0u);
+}
+
+// A retired index reads no vectors, so the borrowed ones may be freed while searches still hold
+// the index.
+TEST(HnswBorrowedMode, RetiredIndexReadsNoVectors) {
+  constexpr size_t kDim = 256;
+  constexpr size_t kN = 20;
+
+  InitTLSearchMR(PMR_NS::get_default_resource());
+  absl::Cleanup cleanup = [] { InitTLSearchMR(nullptr); };
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.sim = VectorSimilarity::L2;
+  params.capacity = kN * 2;
+  params.hnsw_m = 16;
+  params.hnsw_ef_construction = 200;
+  HnswVectorIndex index(params, /*copy_vector=*/false);
+
+  std::vector<std::unique_ptr<float[]>> bufs;
+  std::vector<GlobalDocId> ids;
+  for (size_t i = 0; i < kN; i++) {
+    bufs.push_back(std::make_unique<float[]>(kDim));
+    bufs.back()[0] = static_cast<float>(i);
+    index.Add(i, BorrowedDoc{reinterpret_cast<const char*>(bufs.back().get())}, "vec");
+    ids.push_back(i);
+  }
+  vector<float> query(kDim, 0.0f);
+  ASSERT_EQ(index.Knn(query.data(), 5, std::nullopt).size(), 5u);
+
+  index.Retire();
+  bufs.clear();
+
+  EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt), testing::IsEmpty());
+  EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt, ids), testing::IsEmpty());
+  EXPECT_THAT(index.SubsetKnn(query.data(), 5, ids), testing::IsEmpty());
+  EXPECT_THAT(index.RangeQuery(query.data(), 1e9, std::nullopt), testing::IsEmpty());
+
+  auto extra = std::make_unique<float[]>(kDim);
+  index.Add(kN, BorrowedDoc{reinterpret_cast<const char*>(extra.get())}, "vec");
+  EXPECT_EQ(index.GetNodeCount(), kN);
 }
 
 INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,
@@ -2443,7 +2485,7 @@ TEST_F(SearchTest, InvalidVectorParameter) {
   schema.fields["v"] = search::SchemaField{
       search::SchemaField::VECTOR,
       0,   // flags
-      "v"  // short_name
+      "v"  // identifier
   };
 
   search::SchemaField::VectorParams params;
@@ -2474,6 +2516,8 @@ TEST_F(SearchTest, InvalidVectorParameter) {
 
 class SortIndexTest : public testing::Test {
  protected:
+  static constexpr auto kNoKey = [](DocId) { return string_view{}; };
+
   void SetUp() override {
     InitTLSearchMR(PMR_NS::get_default_resource());
   }
@@ -2497,11 +2541,11 @@ TEST_F(SortIndexTest, StringSort) {
 
   const auto index = indices.GetSortIndex(field);
 
-  index->Sort(&ids, ids.size(), desc);
+  index->Sort(&ids, ids.size(), desc, kNoKey);
   std::vector<DocId> expected{1, 2, 0};
   EXPECT_EQ(ids, expected);
 
-  index->Sort(&ids, ids.size(), !desc);
+  index->Sort(&ids, ids.size(), !desc, kNoKey);
   expected = {0, 2, 1};
   EXPECT_EQ(ids, expected);
 
@@ -2524,17 +2568,43 @@ TEST_F(SortIndexTest, NumSort) {
   constexpr bool desc = false;
 
   auto index = indices.GetSortIndex(field);
-  index->Sort(&ids, ids.size(), desc);
+  index->Sort(&ids, ids.size(), desc, kNoKey);
   std::vector<DocId> expected{2, 1, 0};
   EXPECT_EQ(ids, expected);
 
-  index->Sort(&ids, ids.size(), !desc);
+  index->Sort(&ids, ids.size(), !desc, kNoKey);
   expected = {0, 1, 2};
   EXPECT_EQ(ids, expected);
 
   auto lookup = index->Lookup(1);
   EXPECT_TRUE(std::holds_alternative<double>(lookup));
   EXPECT_EQ(std::get<double>(lookup), 999);
+}
+
+// Docs without a value rank last in both directions and report no value; equal values are ordered
+// by document key in the sort direction.
+TEST_F(SortIndexTest, MissingLastAndKeyTieBreak) {
+  constexpr auto field = "cost";
+  const auto schema = MakeSimpleSchema({{field, SchemaField::NUMERIC}}, true);
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  indices.Add(0, MockedDocument{Map{{field, "5"}}});
+  indices.Add(1, MockedDocument{Map{{field, "5"}}});
+  indices.Add(2, MockedDocument{Map{}});  // no value
+  indices.Add(3, MockedDocument{Map{{field, "1"}}});
+  const vector<string> keys{"k:b", "k:a", "k:c", "k:d"};
+  auto key = [&](DocId id) { return string_view{keys[id]}; };
+
+  auto index = indices.GetSortIndex(field);
+  std::vector<DocId> ids{0, 1, 2, 3};
+  auto values = index->Sort(&ids, ids.size(), false, key);
+  EXPECT_EQ(ids, (vector<DocId>{3, 1, 0, 2}));
+  EXPECT_EQ(get<double>(values[0]), 1);
+  EXPECT_TRUE(holds_alternative<monostate>(values[3]));
+
+  values = index->Sort(&ids, ids.size(), true, key);
+  EXPECT_EQ(ids, (vector<DocId>{0, 1, 3, 2}));
+  EXPECT_TRUE(holds_alternative<monostate>(values[3]));
 }
 
 // Enumeration for different search types

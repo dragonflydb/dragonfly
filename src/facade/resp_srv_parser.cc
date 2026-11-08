@@ -13,7 +13,6 @@
 namespace facade {
 
 namespace {
-constexpr uint32_t kMaxInlineSize = 64 * 1024;
 // Above this declared bulk length the buffer grows as data arrives instead of upfront.
 constexpr size_t kBulkEagerLimit = 1u << 20;
 }  // namespace
@@ -123,7 +122,7 @@ auto RespSrvParser::ParseInline(Buffer str, cmn::BackedArguments* args) -> Resul
     buf_stash_.append(reinterpret_cast<const char*>(token_start), len);
     if (ptr == end) {
       inline_total_ += len;
-      if (inline_total_ > kMaxInlineSize)
+      if (inline_total_ > max_inline_len_)
         return {BAD_INLINE, uint32_t(len)};
       return {INPUT_PENDING, ptr - token_start};
     }
@@ -164,14 +163,14 @@ auto RespSrvParser::ParseInline(Buffer str, cmn::BackedArguments* args) -> Resul
       state_ = CMD_COMPLETE_S;  // have not found anything besides whitespace.
     }
     inline_total_ += last_consumed;
-    if (inline_total_ > kMaxInlineSize)
+    if (inline_total_ > max_inline_len_)
       return {BAD_INLINE, last_consumed};
     return {INPUT_PENDING, last_consumed};
   }
 
   DCHECK_EQ('\n', *ptr);
 
-  if (inline_total_ + last_consumed > kMaxInlineSize)
+  if (inline_total_ + last_consumed > max_inline_len_)
     return {BAD_INLINE, last_consumed};
 
   ++last_consumed;  // consume \n as well.

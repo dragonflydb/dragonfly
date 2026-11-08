@@ -1000,6 +1000,14 @@ void Connection::MarkForClose() {
   request_shutdown_ = true;
 }
 
+void Connection::MaybeCloseAfterReply() {
+  if (!close_after_reply_ || reply_builder_->GetError())
+    return;
+
+  reply_builder_->Flush();
+  MarkForClose();
+}
+
 // Called from Connection::Shutdown() right after socket_->Shutdown call.
 void Connection::OnShutdown() {
   VLOG(1) << CONN_ID << "Connection::OnShutdown";
@@ -1577,8 +1585,8 @@ void Connection::ConnectionFlow() {
   }
 
   // We wait for dispatch_fb to finish writing the previous replies before replying to the last
-  // offending request.
-  if (parse_status == ERROR) {
+  // offending request. A connection closed after its reply has no protocol error to send.
+  if (parse_status == ERROR && !close_after_reply_) {
     VLOG(1) << CONN_ID << "Error parser status " << parser_error_;
 
     // V2 sends protocol errors inside IoLoopV2().
@@ -1662,6 +1670,8 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
     // prefer synchronous dispatching to save memory.
     optimize_for_async = false;
     last_interaction_ = time(nullptr);
+    if (cc_->conn_closing)
+      return;
   }
 
   // Avoid sync dispatch if we can interleave with an ongoing async dispatch.
@@ -1678,6 +1688,7 @@ void Connection::DispatchSingle(bool has_more, absl::FunctionRef<void()> invoke_
       cc_->sync_dispatch = true;
       invoke_cb();
       cc_->sync_dispatch = false;
+      MaybeCloseAfterReply();
     }
     last_interaction_ = time(nullptr);
 
@@ -2290,6 +2301,7 @@ void Connection::ProcessPipelineCommandV1() {
   cc_->async_dispatch = false;
 
   ReleasePipelinedCommand(cmd);
+  MaybeCloseAfterReply();
 
   // If we drained the pipeline and no admin messages are waiting, flush.
   if (!HasPendingMessages()) {
@@ -2819,12 +2831,24 @@ void Connection::UpdateDispatchStats(const MessageHandle& msg, bool add) {
   }
 }
 
+namespace {
+
+// Dual-stack IPv6 listeners see IPv4 peers as v4-mapped addresses (::ffff:a.b.c.d).
+// Print those as plain IPv4, so that IPv4 clients look the same regardless of the listener family.
+string AddressToString(const boost::asio::ip::address& addr) {
+  if (addr.is_v6() && addr.to_v6().is_v4_mapped())
+    return boost::asio::ip::make_address_v4(boost::asio::ip::v4_mapped, addr.to_v6()).to_string();
+  return addr.to_string();
+}
+
+}  // namespace
+
 std::string Connection::LocalBindStr() const {
   if (socket_->IsUDS())
     return "unix-domain-socket";
 
   auto le = socket_->LocalEndpoint();
-  return absl::StrCat(le.address().to_string(), ":", le.port());
+  return absl::StrCat(AddressToString(le.address()), ":", le.port());
 }
 
 std::string Connection::LocalBindAddress() const {
@@ -2832,7 +2856,7 @@ std::string Connection::LocalBindAddress() const {
     return "unix-domain-socket";
 
   auto le = socket_->LocalEndpoint();
-  return le.address().to_string();
+  return AddressToString(le.address());
 }
 
 std::string Connection::RemoteEndpointStr() const {
@@ -2840,7 +2864,7 @@ std::string Connection::RemoteEndpointStr() const {
     return "unix-domain-socket";
 
   auto re = socket_->RemoteEndpoint();
-  return absl::StrCat(re.address().to_string(), ":", re.port());
+  return absl::StrCat(AddressToString(re.address()), ":", re.port());
 }
 
 std::string Connection::RemoteEndpointAddress() const {
@@ -2848,7 +2872,7 @@ std::string Connection::RemoteEndpointAddress() const {
     return "unix-domain-socket";
 
   auto re = socket_->RemoteEndpoint();
-  return re.address().to_string();
+  return AddressToString(re.address());
 }
 
 facade::ConnectionContext* Connection::cntx() {
@@ -3397,6 +3421,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
     } else {
       DCHECK(is_head);  // only head can execute sync
       retire_head();
+      MaybeCloseAfterReply();
     }
   }
 

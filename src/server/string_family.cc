@@ -439,12 +439,12 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args, const SetCmd::SetP
   if (params.flags == 0) {
     if (auto journal = op_args.shard->journal(); journal) {
       if (stored * 2 == args.Size()) {
-        RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
+        RecordJournal(op_args, "MSET", args);
         DCHECK_EQ(result, OpStatus::OK);
       } else if (stored > 0) {
         vector<string_view> store_args(args.begin(), args.end());
         store_args.resize(stored * 2);
-        RecordJournal(op_args, "MSET", store_args, op_args.tx->GetUniqueShardCnt());
+        RecordJournal(op_args, "MSET", store_args);
       }
     }
   }
@@ -1461,13 +1461,15 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     StringResult value = ReadString(t->GetDbIndex(), key, it_res->it->second, shard);
 
-    bool key_expired = false;
+    int64_t expire_at_ms = 0;
     if (exp_params.IsDefined()) {
       it_res->post_updater.Run();  // Run manually before possible delete due to negative expire
       auto expire_res = op_args.GetDbSlice().UpdateExpire(op_args.db_cntx, it_res->it, exp_params);
       RETURN_ON_BAD_STATUS(expire_res);
-      key_expired = *expire_res == -1;
+      expire_at_ms = *expire_res;
     }
+
+    const bool key_expired = expire_at_ms == -1;
 
     // Replicate GETEX as DEL (already-past expiration), PEXPIREAT or PERSIST.
     if (shard->journal() && exp_params.IsDefined()) {
@@ -1476,8 +1478,7 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
       } else if (key_expired) {
         RecordJournal(op_args, "DEL", {key});
       } else {
-        auto [ignore, abs_time] = exp_params.Calculate(op_args.db_cntx.time_now_ms, false);
-        auto abs_time_str = absl::StrCat(abs_time);
+        auto abs_time_str = absl::StrCat(expire_at_ms);
         RecordJournal(op_args, "PEXPIREAT", {key, abs_time_str});
       }
     }
@@ -1489,7 +1490,11 @@ cmd::CmdR CmdGetEx(CmdArgParser parser, CommandContext* cmd_cntx) {
     return value;
   };
 
-  GetReplies{cmd_cntx}.Send(co_await cmd::SingleHopT(cb));
+  auto result = co_await cmd::SingleHopT(cb);
+  if (result.status() == OpStatus::OUT_OF_RANGE)
+    co_return facade::ErrorReply{kGetExExpiryErr};
+
+  GetReplies{cmd_cntx}.Send(std::move(result));
   co_return std::nullopt;
 }
 
@@ -1965,17 +1970,17 @@ void RegisterStringFamily(CommandRegistry* registry) {
              ExtendGeneric)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
              ExtendGeneric)
-      << CI{"INCR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdIncr)
-      << CI{"DECR", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdDecr)
-      << CI{"INCRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
-      << CI{"INCRBYFLOAT", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
-      << CI{"DECRBY", CO::JOURNALED | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
+      << CI{"INCR", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdIncr)
+      << CI{"DECR", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdDecr)
+      << CI{"INCRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
+      << CI{"INCRBYFLOAT", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
+      << CI{"DECRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGet)
-      << CI{"GETDEL", CO::JOURNALED | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)
+      << CI{"GETDEL", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
-      << CI{"GETEX", CO::JOURNALED | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}
+      << CI{"GETEX", CO::RW | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, -2, 1, 1}
              .SetAsyncHandler(CmdGetEx)
-      << CI{"GETSET", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdGetSet)
+      << CI{"GETSET", CO::RW | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdGetSet)
       << CI{"MGET", CO::READONLY | CO::FAST | CO::IDEMPOTENT, -2, 1, -1}.SetAsyncHandler(CmdMGet)
       << CI{"MSET", kMSetMask, -3, 1, -1}.HFUNC(MSet)
       << CI{"MSETNX", kMSetMask, -3, 1, -1}.HFUNC(MSetNx)
@@ -1986,9 +1991,9 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"GETRANGE", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)
       << CI{"SUBSTR", CO::READONLY, 4, 1, 1}.SetAsyncHandler(CmdGetRange)  // Alias for GetRange
       << CI{"SETRANGE", CO::JOURNALED | CO::DENYOOM, 4, 1, 1}.SetAsyncHandler(CmdSetRange)
-      << CI{"CL.THROTTLE", CO::JOURNALED | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
+      << CI{"CL.THROTTLE", CO::RW | CO::DENYOOM | CO::FAST, -5, 1, 1, acl::THROTTLE}.HFUNC(
              ClThrottle)
-      << CI{"GAT", CO::JOURNALED | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}
+      << CI{"GAT", CO::RW | CO::DENYOOM | CO::NO_AUTOJOURNAL | CO::HIDDEN, -2, 1, -1}
              .SetAsyncHandler(CmdGAT);
 }
 

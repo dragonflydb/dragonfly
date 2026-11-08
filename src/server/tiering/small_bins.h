@@ -33,6 +33,7 @@ class SmallBins {
     size_t stashed_entries_bytes = 0;
     size_t current_bin_bytes = 0;
     size_t current_entries_cnt = 0;
+    size_t pending_bins_cnt = 0;
   };
 
   using BinId = unsigned;
@@ -75,6 +76,10 @@ class SmallBins {
 
   // Report that a stash was aborted. Returns list of keys that the entry contained.
   std::vector<std::pair<DbIndex, std::string>> ReportStashAborted(BinId id);
+
+  // Report that a filled bin could not be stashed before it was serialized.
+  // Returns list of keys that the bin contained.
+  std::vector<std::pair<DbIndex, std::string>> ReportStashFailed(FilledBin bin);
 
   // Delete a key with pending io. Returns entry id if needs to be deleted.
   std::optional<BinId> Delete(DbIndex dbid, std::string_view key);

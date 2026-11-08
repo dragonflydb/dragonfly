@@ -3733,20 +3733,15 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendSimpleStrArr(help_arr);
   }
 
-  ConnectionContext* cntx = cmd_cntx->server_conn_cntx();
   if (args.size() >= 2) {
     string_view key = args[1];
-    ShardId sid = Shard(key, shard_set->size());
 
     if (sub_cmd == "GROUPS") {
-      // We do not use transactional xemantics for xinfo since it's informational command.
-      auto cb = [&]() {
-        EngineShard* shard = EngineShard::tlocal();
-        DbContext db_context{cntx->ns, cntx->db_index(), GetCurrentTimeMs()};
-        return OpListGroups(db_context, key, shard);
+      auto cb = [&](Transaction* t, EngineShard* shard) {
+        return OpListGroups(t->GetDbContext(), key, shard);
       };
 
-      OpResult<vector<GroupInfo>> result = shard_set->Await(sid, std::move(cb));
+      OpResult<vector<GroupInfo>> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
       if (result) {
         rb->StartArray(result->size());
         for (const auto& ginfo : *result) {
@@ -3805,13 +3800,11 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
         }
       }
 
-      auto cb = [&]() {
-        EngineShard* shard = EngineShard::tlocal();
-        return OpStreams(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()}, key, shard,
-                         full, count);
+      auto cb = [&](Transaction* t, EngineShard* shard) {
+        return OpStreams(t->GetDbContext(), key, shard, full, count);
       };
 
-      OpResult<StreamInfo> sinfo = shard_set->Await(sid, std::move(cb));
+      OpResult<StreamInfo> sinfo = cmd_cntx->tx()->ScheduleSingleHopT(cb);
       if (sinfo) {
         if (full) {
           rb->StartCollection(9, CollectionType::MAP);
@@ -3940,15 +3933,14 @@ void CmdXInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
       }
       string_view stream_name = args[1];
       string_view group_name = args[2];
-      auto cb = [&]() {
-        return OpConsumers(DbContext{cntx->ns, cntx->db_index(), GetCurrentTimeMs()},
-                           EngineShard::tlocal(), stream_name, group_name);
+      auto cb = [&](Transaction* t, EngineShard* shard) {
+        return OpConsumers(t->GetDbContext(), shard, stream_name, group_name);
       };
 
-      OpResult<vector<ConsumerInfo>> result = shard_set->Await(sid, std::move(cb));
+      OpResult<vector<ConsumerInfo>> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
       if (result) {
         rb->StartArray(result->size());
-        int64_t now_ms = GetCurrentTimeMs();
+        int64_t now_ms = cmd_cntx->tx()->GetDbContext().time_now_ms;
         for (const auto& consumer_info : *result) {
           int64_t active = consumer_info.active_time;
           int64_t inactive = active != -1 ? now_ms - active : -1;
@@ -4325,7 +4317,7 @@ void StreamFamily::Register(CommandRegistry* registry) {
             << CI{"XCLAIM", CO::JOURNALED | CO::FAST, -6, 1, 1, acl::kXClaim}.HFUNC(XClaim)
             << CI{"XDEL", CO::JOURNALED | CO::FAST, -3, 1, 1, acl::kXDel}.HFUNC(XDel)
             << CI{"XGROUP", CO::JOURNALED | CO::DENYOOM, -3, 2, 2, acl::kXGroup}.HFUNC(XGroup)
-            << CI{"XINFO", CO::READONLY, -2, 0, 0, acl::kXInfo}.HFUNC(XInfo)
+            << CI{"XINFO", CO::READONLY, -2, 2, 2, acl::kXInfo}.HFUNC(XInfo)
             << CI{"XLEN", CO::READONLY | CO::FAST, 2, 1, 1, acl::kXLen}.HFUNC(XLen)
             << CI{"XPENDING", CO::READONLY, -3, 1, 1, acl::kXPending}.HFUNC(XPending)
             << CI{"XRANGE", CO::READONLY, -4, 1, 1, acl::kXRange}.HFUNC(XRange)

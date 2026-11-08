@@ -506,7 +506,6 @@ class RdbLoader : protected RdbLoaderBase {
   const bool deserialize_hnsw_index_;
   uint32_t shard_id_ = UINT32_MAX;
   uint32_t shard_count_ = 0;
-  size_t table_used_memory_ = 0;
   ScriptMgr* script_mgr_;
   std::vector<ItemsBuf> shard_buf_;
 

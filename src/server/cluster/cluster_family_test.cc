@@ -8,6 +8,7 @@
 #include <gtest/gtest-matchers.h>
 
 #include <atomic>
+#include <iterator>
 #include <string>
 #include <string_view>
 
@@ -530,6 +531,38 @@ TEST_F(ClusterFamilyTest, ClusterGetSlotInfo) {
                                 "total_writes", IntArg(2), "memory_bytes", IntArg(36))))));
 }
 
+TEST_F(ClusterFamilyTest, GetSlotStatsAcrossDatabases) {
+  ConfigSingleNodeCluster(GetMyId());
+  uint64_t memory_bytes = 0;
+  for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
+    memory_bytes += shard_set->Await(sid, [] {
+      auto& ns = namespaces->GetDefaultNamespace();
+      auto& db_slice = ns.GetCurrentDbSlice();
+      uint64_t memory_bytes = 0;
+
+      for (DbIndex db_index : {0, 2}) {
+        db_slice.ActivateDb(db_index);
+        DbContext cntx{&ns, db_index, GetCurrentTimeMs()};
+        PrimeValue value;
+        value.SetString(string(1'000, '#'));
+        memory_bytes += value.MallocUsed();
+        EXPECT_TRUE(db_slice.AddOrUpdate(cntx, "key", std::move(value), 0).ok());
+        EXPECT_TRUE(IsValid(db_slice.FindReadOnly(cntx, "key")));
+      }
+
+      EXPECT_THAT(db_slice.GetSlotStats(KeySlot("key")), FieldsAre(2, 2, 2, memory_bytes, 0));
+      return memory_bytes;
+    });
+  }
+
+  const uint64_t key_count = 2 * shard_set->size();
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(KeySlot("key"))}),
+              RespElementsAre(RespElementsAre(
+                  IntArg(KeySlot("key")), "key_count", IntArg(key_count), "total_reads",
+                  IntArg(key_count), "total_writes", IntArg(key_count), "memory_bytes",
+                  IntArg(memory_bytes + key_count * sizeof(CompactObj) * 2))));
+}
+
 TEST_F(ClusterFamilyTest, ClusterGetSlotInfoRanges) {
   ConfigSingleNodeCluster(GetMyId());
 
@@ -622,18 +655,34 @@ TEST_F(ClusterFamilyTest, FragmentedSlotsReplyIsBatched) {
 TEST_F(ClusterFamilyTest, ClusterSlotsPopulate) {
   ConfigSingleNodeCluster(GetMyId());
 
-  Run({"debug", "populate", "10000", "key", "4", "SLOTS", "0", "1000"});
+  constexpr int64_t kKeys = 10'000;
+  Run({"debug", "populate", absl::StrCat(kKeys), "key", "4", "SLOTS", "0", "1000"});
 
-  for (int i = 0; i <= 1'000; ++i) {
-    EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespElementsAre(RespArray(
-                    ElementsAre(IntArg(i), "key_count", Not(IntArg(0)), _, _, _, _, _, _))));
+  auto writes = [this] { return GetMetrics().facade_stats.reply_stats.io_write_calls; };
+  const uint64_t writes_before = writes();
+
+  // Collected in two rounds; the second one is partial and spans several ranges.
+  auto result = RunPrivileged({"dflycluster", "getslotinfo", "slots", "0-16383", "16383", "2-0"});
+
+  // Flushing the reply per slot would take more than 16K writes.
+  EXPECT_LT(writes() - writes_before, 1000u);
+
+  // Every slot sums the stats of all shards, in request order and with duplicates.
+  constexpr SlotId kTail[] = {16383, 0, 1, 2};
+  ASSERT_THAT(result, ArrLen(kMaxSlotNum + 1 + std::size(kTail)));
+  const auto& reply = result.GetVec();
+  auto key_count = [&](size_t i) { return *reply[i].GetVec()[2].GetInt(); };
+  int64_t total_keys = 0;
+  for (SlotId slot = 0; slot <= kMaxSlotNum; ++slot) {
+    ASSERT_THAT(reply[slot], RespElementsAre(IntArg(slot), "key_count", _, _, _, _, _, _, _));
+    EXPECT_EQ(key_count(slot) > 0, slot <= 1000) << slot;
+    total_keys += key_count(slot);
   }
-
-  for (int i = 1'001; i <= 16'383; ++i) {
-    EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", absl::StrCat(i)}),
-                RespElementsAre(
-                    RespArray(ElementsAre(IntArg(i), "key_count", IntArg(0), _, _, _, _, _, _))));
+  EXPECT_EQ(total_keys, kKeys);
+  for (size_t i = 0; i < std::size(kTail); ++i) {
+    EXPECT_THAT(reply[kMaxSlotNum + 1 + i],
+                RespElementsAre(IntArg(kTail[i]), "key_count", IntArg(key_count(kTail[i])), _, _, _,
+                                _, _, _));
   }
 }
 
@@ -680,6 +729,11 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
 
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 
+  // Only owned slots are reported.
+  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}), ArrLen(0));
+
+  // Take the slots back to check that the deletion released their stats.
+  ConfigSingleNodeCluster(GetMyId());
   EXPECT_THAT(
       RunPrivileged({"dflycluster", "getslotinfo", "slots", "1", "2"}),
       RespArray(ElementsAre(
@@ -902,6 +956,8 @@ TEST_F(ClusterTieredTest, SlotCountersReleasedOnConfigSlotRemoval) {
   ConfigSingleNodeCluster("abc");
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 0; });
 
+  // Only owned slots are reported, so take slot 1 back to read its counters.
+  ConfigSingleNodeCluster(GetMyId());
   ExpectSlotEmpty(1);
 }
 
@@ -1183,10 +1239,17 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
   // Verify that keys for slot 8000 were deleted, while key for slot 7999 was kept
   ExpectConditionWithinTimeout([&]() { return CheckedInt({"dbsize"}) == 1; });
 
-  EXPECT_THAT(RunPrivileged({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
-              RespArray(ElementsAre(
-                  RespArray(ElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _, _, _)),
-                  RespArray(ElementsAre(IntArg(8000), "key_count", IntArg(0), _, _, _, _, _, _)))));
+  // Slot 8000 belongs to the other master now, so it is not reported.
+  EXPECT_THAT(
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "7999", "8000"}),
+      RespElementsAre(RespElementsAre(IntArg(7999), "key_count", IntArg(1), _, _, _, _, _, _)));
+
+  // Owned slots keep the request order, also when collected in several rounds.
+  auto resp =
+      RunPrivileged({"dflycluster", "getslotinfo", "slots", "0-16383", "0-16383", "0-16383"});
+  ASSERT_THAT(resp, ArrLen(3 * 8000));
+  for (size_t i = 0; i < resp.GetVec().size(); ++i)
+    ASSERT_THAT(resp.GetVec()[i], RespElementsAre(IntArg(i % 8000), _, _, _, _, _, _, _, _));
 }
 
 TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
@@ -1434,9 +1497,9 @@ TEST_F(ClusterFamilyTest, AclSelectDbNotAllowedInClusterMode) {
   EXPECT_EQ(Run({"acl", "setuser", "u3", "on", ">pw", "~*", "+@all", "$ALL"}), "OK");
 }
 
-// The flush's on_change fires for every db index but must only touch db 0; the bug charged
-// db 0's table for a db 1 deletion (FATAL underflow in debug).
-TEST_F(ClusterFamilyTest, FlushSlotsOnChangeIgnoresNonDefaultDb) {
+// FlushSlots covers all databases: db 1 entries must be deleted through db 1's table (charging
+// db 0's table is a FATAL underflow in debug) and db 1 watches must be invalidated.
+TEST_F(ClusterFamilyTest, FlushSlotsNonDefaultDb) {
   ConfigSingleNodeCluster(GetMyId());
 
   pp_->at(0)->Await([&] {
@@ -1446,25 +1509,77 @@ TEST_F(ClusterFamilyTest, FlushSlotsOnChangeIgnoresNonDefaultDb) {
     db_slice.ActivateDb(1);
     DbContext cntx{&namespaces->GetDefaultNamespace(), 1, GetCurrentTimeMs()};
 
-    PrimeValue val;
-    val.SetString(string(128, 'x'));
-    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val), 0).ok());
+    for (string_view key : {"key", "stale"}) {
+      PrimeValue val;
+      val.SetString(string(128, 'x'));
+      CHECK(db_slice.AddOrUpdate(cntx, key, std::move(val), 0).ok());
+    }
+    atomic_bool watch_dirty = false;
+    db_slice.RegisterWatchedKey(1, "stale", &watch_dirty);
 
     cluster::SlotRanges ranges({{0, 16383}});
     es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
     db_slice.FlushSlots(ranges);
     es->shard_lock()->Release(IntentLock::EXCLUSIVE);
+    EXPECT_TRUE(watch_dirty);
+    db_slice.UnregisterConnectionWatches({{1, "stale"}}, &watch_dirty);
 
-    // Overwrite without yielding: PreUpdateBlocking fires on_change with db_index=1.
+    // Overwrite without yielding: PreUpdateBlocking fires on_change with db_index=1, which deletes
+    // the old entry, so a new one is inserted.
     PrimeValue val2;
     val2.SetString(string(128, 'y'));
-    CHECK(db_slice.AddOrUpdate(cntx, "key", std::move(val2), 0).ok());
+    auto res = db_slice.AddOrUpdate(cntx, "key", std::move(val2), 0);
+    ASSERT_TRUE(res.ok());
+    EXPECT_TRUE(res->is_new);
 
     util::ThisFiber::SleepFor(50ms);  // let the flush fiber finish
 
-    // db 1 is not covered by slot operations; the entry stays.
+    // Only the entry written after FlushSlots stays.
     EXPECT_EQ(db_slice.DbSize(1), 1u);
     EXPECT_EQ(db_slice.DbSize(0), 0u);
+  });
+}
+
+// FLUSHALL during the FlushSlots traversal already accounts for all entries of the replaced
+// tables, so the traversal must stop deleting from them.
+TEST_F(ClusterFamilyTest, FlushSlotsStopsAfterDatabaseFlush) {
+  absl::FlagSaver flag_saver;
+  SetTestFlag("migration_buckets_cpu_budget", "0.0001");
+  ConfigSingleNodeCluster(GetMyId());
+
+  pp_->at(0)->Await([&] {
+    auto* es = EngineShard::tlocal();
+    ASSERT_NE(es, nullptr);
+    auto& ns = namespaces->GetDefaultNamespace();
+    auto& db_slice = ns.GetDbSlice(es->shard_id());
+    db_slice.ActivateDb(2);
+    auto put = [&](DbIndex db_index, string_view key) {
+      DbContext cntx{&ns, db_index, GetCurrentTimeMs()};
+      PrimeValue value;
+      value.SetString("value");
+      CHECK(db_slice.AddOrUpdate(cntx, key, std::move(value), 0).ok());
+    };
+    constexpr size_t kKeys = 128;
+    for (size_t i = 0; i < kKeys; ++i) {
+      put(0, absl::StrCat("key:", i));
+      put(2, absl::StrCat("key:", i));
+    }
+
+    es->shard_lock()->Acquire(IntentLock::EXCLUSIVE);
+    db_slice.FlushSlots(SlotRanges({{0, kMaxSlotNum}}));
+    es->shard_lock()->Release(IntentLock::EXCLUSIVE);
+
+    // The throttled traversal pauses in the middle of db 0, before reaching db 2.
+    ASSERT_TRUE(WaitUntilCondition([&] { return db_slice.DbSize(0) < kKeys; }, 1s));
+    ASSERT_GT(db_slice.DbSize(0), 0u);
+    ASSERT_EQ(db_slice.DbSize(2), kKeys);
+
+    auto flush_all = db_slice.FlushDb(DbSlice::kDbAll);
+    put(2, "new");
+    flush_all.Join();
+    ASSERT_TRUE(WaitUntilCondition([&] { return !db_slice.HasRegisteredCallbacks(); }, 5s));
+    EXPECT_EQ(db_slice.DbSize(2), 1u);
+    EXPECT_EQ(db_slice.entries_count(), 1u);
   });
 }
 
@@ -1496,14 +1611,12 @@ class ClusterFamilyEmulatedTest : public ClusterFamilyTest {
 
 // slots_stats is null outside real cluster mode; GetSlotStats must not crash.
 TEST_F(ClusterFamilyEmulatedTest, GetSlotStatsWithoutClusterMode) {
+  EXPECT_EQ(Run({"select", "2"}), "OK");
   EXPECT_EQ(Run({"set", "key", "value"}), "OK");
 
-  pp_->at(0)->Await([&] {
-    auto* es = EngineShard::tlocal();
-    ASSERT_NE(es, nullptr);
-    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(es->shard_id());
-    SlotStats stats = db_slice.GetSlotStats(0);
-    EXPECT_EQ(stats.key_count, 0u);
+  shard_set->Await(0, [] {
+    auto& db_slice = namespaces->GetDefaultNamespace().GetCurrentDbSlice();
+    EXPECT_THAT(db_slice.GetSlotStats(0), FieldsAre(0, 0, 0, 0, 0));
   });
 }
 
@@ -1605,6 +1718,35 @@ TEST_F(ClusterFamilyTest, DflyMigrateRealModeWithoutConfig) {
   EXPECT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "1"}), "UNKNOWN_MIGRATION");
   EXPECT_EQ(Run({"DFLYMIGRATE", "ACK", "src", "1"}), "UNKNOWN_MIGRATION");
   EXPECT_THAT(Run({"DFLYMIGRATE", "FLOW", "src", "1"}), ErrArg("syncid not found"));
+}
+
+TEST_F(ClusterFamilyTest, MigrationFlowMatchesNoClientType) {
+  constexpr string_view kConfig = R"json([
+    {"slot_ranges": [{"start": 0, "end": 16383}], "replicas": [],
+     "master": {"id": "src", "ip": "10.0.0.1", "port": 7000},
+     "migrations": [{"slot_ranges": [{"start": 0, "end": 16383}], "node_id": "$0",
+                     "ip": "10.0.0.2", "port": 7001}]},
+    {"slot_ranges": [], "replicas": [], "master": {"id": "$0", "ip": "10.0.0.2", "port": 7001}}
+  ])json";
+  ASSERT_EQ(RunPrivileged({"DFLYCLUSTER", "CONFIG", absl::Substitute(kConfig, GetMyId())}), "OK");
+  ASSERT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "16383"}), "OK");
+
+  // Paused flows do not read the socket; a test connection has no fd.
+  ASSERT_EQ(Run({"DEBUG", "MIGRATION", "PAUSE"}), "OK");
+  Run("flow", {"PING"});
+  auto flow = pp_->at(0)->LaunchFiber(Launch::dispatch, [&] {
+    GetConnection("flow")->cntx()->sync_dispatch = true;  // DflyMigrateFlow DCHECKs it
+    EXPECT_EQ(Run("flow", {"DFLYMIGRATE", "FLOW", "src", "0"}), "OK");
+  });
+  EXPECT_TRUE(
+      pp_->at(0)->Await([&] { return GetConnection("flow")->cntx()->slot_migration_conn; }));
+
+  // A new INIT stops the flow.
+  EXPECT_EQ(Run({"DFLYMIGRATE", "INIT", "src", "1", "0", "16383"}), "OK");
+  flow.Join();
+  for (string_view type : {"normal", "pubsub", "replica"})
+    EXPECT_THAT(Run("flow", {"CLIENT", "KILL", "TYPE", type, "SKIPME", "no"}), IntArg(0)) << type;
+  EXPECT_THAT(Run("flow", {"CLIENT", "KILL", "SKIPME", "no"}), IntArg(1));
 }
 
 }  // namespace

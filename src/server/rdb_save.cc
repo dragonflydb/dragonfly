@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_format.h>
+#include <absl/strings/str_join.h>
 
 #include <bit>
 #include <queue>
@@ -416,11 +417,19 @@ error_code RdbSerializer::SaveListObject(const PrimeValue& pv) {
     DVLOG(3) << "QL node (encoding/container/sz): " << node->encoding << "/" << node->container
              << "/" << node->sz;
 
-    // Use listpack encoding
-    RETURN_ON_ERR(SaveLen(node->container));
     // Materialize the node if it was offloaded to tiered storage, so that we can access its
     // content. We have to drop const qualifier to update the node.
-    ql->Materialize(const_cast<QList::Node*>(node));
+    if (node->offloaded && consume_fun_ && mem_buf_controller_.TagEntriesEnabled()) {
+      // Reading the node from disk suspends. Make it a consume point between two nodes, so that
+      // other writers don't land inside this entry's bytes. Without tags, stream_mu_ holds them
+      // off instead.
+      RETURN_ON_ERR(ConsumeAround([&] { ql->Materialize(const_cast<QList::Node*>(node)); }));
+    } else {
+      ql->Materialize(const_cast<QList::Node*>(node));
+    }
+
+    // Use listpack encoding
+    RETURN_ON_ERR(SaveLen(node->container));
     if (node->encoding == QLIST_NODE_ENCODING_ZSTD) {
       // ZSTD-compressed nodes cannot be saved using RDB LZF encoding — the loader would
       // call lzf_decompress on ZSTD bytes and corrupt the data. Decompress to raw first.
@@ -1582,13 +1591,38 @@ error_code RdbSaver::Impl::FlushSerializer() {
 
 namespace {
 
+#ifdef WITH_SEARCH
+// A search command for an AUX field, read back by LoadSearchCommandFromAux: space-joined when every
+// argument survives inline parsing, otherwise a RESP array.
+string EncodeSearchCommand(absl::Span<const string> args) {
+  // Inline parsing splits arguments at every byte <= ' ' and skips empty ones.
+  auto is_inline_safe = [](string_view arg) {
+    return !arg.empty() && ranges::all_of(arg, [](unsigned char c) { return c > ' '; });
+  };
+  if (ranges::all_of(args, is_inline_safe))
+    return absl::StrJoin(args, " ");
+
+  string cmd = absl::StrCat("*", args.size(), "\r\n");
+  for (const auto& arg : args)
+    absl::StrAppend(&cmd, "$", arg.size(), "\r\n", arg, "\r\n");
+  return cmd;
+}
+#endif
+
+// RESP arrays, the only encoded commands with '\r', go under keys that older versions skip.
+string SearchAuxKey(string_view key, string_view value) {
+  return value.find('\r') == string_view::npos ? string{key} : absl::StrCat(key, "-resp");
+}
+
 // Collect search index definitions for replication / RDB.
-// search_indices always gets simple "index_name cmd" restore commands.
-// For summary shards, search_synonyms gets synonym group restore commands.
+// search_indices always gets "index_name args..." restore commands.
+// For summary shards, search_aliases gets alias/target commands and search_synonyms gets
+// synonym group restore commands.
 // (HNSW graph metadata travels inline with the node data in RDB_OPCODE_VECTOR_INDEX,
 //  so it is not collected here.)
 void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
                           [[maybe_unused]] StringVec* search_indices,
+                          [[maybe_unused]] StringVec* search_aliases,
                           [[maybe_unused]] StringVec* search_synonyms,
                           [[maybe_unused]] bool is_summary) {
 #ifdef WITH_SEARCH
@@ -1597,9 +1631,9 @@ void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
     auto* index = indices->GetIndex(index_name);
     auto index_info = index->GetInfo();
 
-    // Always store the simple restore command format
-    std::string restore_cmd = absl::StrCat(index_name, " ", index_info.BuildRestoreCommand());
-    search_indices->emplace_back(std::move(restore_cmd));
+    auto restore_args = index_info.BuildRestoreArgs();
+    restore_args.insert(restore_args.begin(), index_name);
+    search_indices->emplace_back(EncodeSearchCommand(restore_args));
 
     if (!is_summary)
       continue;
@@ -1608,10 +1642,16 @@ void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
     const auto& synonym_groups = index->GetSynonyms().GetGroups();
     for (const auto& [group_id, terms] : synonym_groups) {
       if (!terms.empty()) {
-        std::string syn_cmd =
-            absl::StrCat(index_name, " ", group_id, " ", absl::StrJoin(terms, " "));
-        search_synonyms->emplace_back(std::move(syn_cmd));
+        vector<string> syn_args = {index_name, group_id};
+        syn_args.insert(syn_args.end(), terms.begin(), terms.end());
+        search_synonyms->emplace_back(EncodeSearchCommand(syn_args));
       }
+    }
+  }
+
+  if (is_summary) {
+    for (const auto& [alias, target] : indices->GetAliases()) {
+      search_aliases->push_back(EncodeSearchCommand({alias, target}));
     }
   }
 #endif
@@ -1620,16 +1660,18 @@ void CollectSearchIndices([[maybe_unused]] const EngineShard& shard,
 }  // namespace
 
 RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_summary) {
-  StringVec script_bodies, search_indices, search_synonyms;
+  StringVec script_bodies, search_indices, search_aliases, search_synonyms;
   size_t table_mem_result = 0;
 
   if (!is_summary) {
     shard_set->RunBriefInParallel([&](EngineShard* shard) {
       if (shard->shard_id() == 0)
-        CollectSearchIndices(*shard, &search_indices, &search_synonyms, is_summary);
+        CollectSearchIndices(*shard, &search_indices, &search_aliases, &search_synonyms,
+                             is_summary);
     });
     return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
-                                std::move(search_synonyms), table_mem_result};
+                                std::move(search_aliases), std::move(search_synonyms),
+                                table_mem_result};
   }
   {
     // For summary file: collect all global data
@@ -1642,7 +1684,7 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   atomic<size_t> table_mem{0};
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
     if (shard->shard_id() == 0)
-      CollectSearchIndices(*shard, &search_indices, &search_synonyms, is_summary);
+      CollectSearchIndices(*shard, &search_indices, &search_aliases, &search_synonyms, is_summary);
 
     auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
     size_t shard_table_mem = 0;
@@ -1656,7 +1698,8 @@ RdbSaver::GlobalData RdbSaver::GetGlobalData(const Service* service, bool is_sum
   });
 
   return RdbSaver::GlobalData{std::move(script_bodies), std::move(search_indices),
-                              std::move(search_synonyms), table_mem.load(memory_order_relaxed)};
+                              std::move(search_aliases), std::move(search_synonyms),
+                              table_mem.load(memory_order_relaxed)};
 }
 
 void RdbSaver::Impl::FillFreqMap(RdbTypeFreqMap* dest) const {
@@ -1800,13 +1843,18 @@ error_code RdbSaver::SaveAux(const GlobalData& glob_state) {
         (save_mode_ != SaveMode::SINGLE_SHARD) || (replica_dfly_version_ >= DflyVersion::VER6);
     if (send_search_index) {
       for (const string& s : glob_state.search_indices)
-        RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-index", s));
+        RETURN_ON_ERR(impl_->SaveAuxFieldStrStr(SearchAuxKey("search-index", s), s));
     }
+
+    // Save aliases only in the summary file.
+    DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_aliases.empty());
+    for (const string& s : glob_state.search_aliases)
+      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr(SearchAuxKey("search-alias", s), s));
 
     // Save synonyms only in summary file
     DCHECK(save_mode_ != SaveMode::SINGLE_SHARD || glob_state.search_synonyms.empty());
     for (const string& s : glob_state.search_synonyms)
-      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr("search-synonyms", s));
+      RETURN_ON_ERR(impl_->SaveAuxFieldStrStr(SearchAuxKey("search-synonyms", s), s));
 
     if (save_mode_ == SaveMode::SINGLE_SHARD_WITH_SUMMARY || save_mode_ == SaveMode::SUMMARY) {
       // We save the shard id in the summary file, so that we can restore it later.
@@ -1926,6 +1974,18 @@ void RdbSerializer::CompressBlob() {
   auto dest = mem_buf->AppendBuffer();
   memcpy(dest.data(), compressed->data(), compressed->size());
   mem_buf->CommitWrite(compressed->size());
+}
+
+template <typename F> std::error_code RdbSerializer::ConsumeAround(F&& fn) {
+  mem_buf_controller_.MarkEntrySplit();
+  string blob = Flush(FlushState::kFlushMidEntry);
+
+  const auto id = mem_buf_controller_.SaveStateBeforeConsume();
+  std::error_code ec = blob.empty() ? std::error_code{} : consume_fun_(std::move(blob));
+  if (!ec)
+    fn();
+  mem_buf_controller_.RestoreStateAfterConsume(id);
+  return ec;
 }
 
 std::error_code RdbSerializer::PushToConsumerIfNeeded(FlushState flush_state) {

@@ -57,7 +57,7 @@ provided for client-library compatibility.
 | `READONLY` | — | `FAST \| CONNECTION` | No-op stub (always replies `+OK`). Provided for client-library compatibility; no replica-read routing today. |
 | `READWRITE` | — | `FAST \| CONNECTION` | No-op stub only in `emulated` mode. In real cluster mode (`--cluster_mode=yes`) it returns `-ERR Cluster is disabled. Use --cluster_mode=yes to enable.` |
 | `DFLYCLUSTER` | `CONFIG <json>` | `ADMIN \| GLOBAL_TRANS \| HIDDEN`, ACL `ADMIN \| SLOW` | Installs new cluster state. Runs as a global transaction. |
-| `DFLYCLUSTER` | `GETSLOTINFO SLOTS <id\|a-b>...` | as above | Per-slot stats: `key_count`, `total_reads`, `total_writes`, `memory_bytes`. |
+| `DFLYCLUSTER` | `GETSLOTINFO SLOTS <id\|a-b>...` | as above | Per-slot stats: `key_count`, `total_reads`, `total_writes`, `memory_bytes`. Reports only the requested slots owned by the node. |
 | `DFLYCLUSTER` | `FLUSHSLOTS <start> <end> [...]` | as above | Deletes data in slot ranges. Journaled to replicas. |
 | `DFLYCLUSTER` | `SLOT-MIGRATION-STATUS [<peer_id>]` | as above | Per-migration status: `[direction, peer_id, state, keys_migrated, error, slot_ranges]`. |
 | `DFLYMIGRATE` | `INIT <source_id> <num_flows> [start end]...` | `ADMIN \| HIDDEN`, ACL `ADMIN \| SLOW \| DANGEROUS` | Source → target: announce migration. |
@@ -308,8 +308,10 @@ background sweep:
   hook deletes any newly written key in those slot ranges if its version predates the
   stamp; this catches writes that race the sweep.
 - A detached fiber walks the local hash table, deleting entries whose slot id falls in
-  the unowned ranges and whose version predates the stamp. The fiber yields per bucket
-  so foreground commands keep making progress.
+  the unowned ranges and whose version predates the stamp. The fiber runs at background
+  priority and sleeps when over budget so foreground commands keep making progress. Slot sweeps
+  on each shard share a CPU budget controlled by `migration_buckets_cpu_budget`, including
+  work performed by their on-change hooks.
 - Once the walk completes, the node also drops sharded pub/sub subscriptions
   associated with the flushed slots.
 

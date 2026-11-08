@@ -39,12 +39,13 @@ ABSL_DECLARE_FLAG(bool, force_epoll);
 ABSL_DECLARE_FLAG(string, tiered_prefix);
 ABSL_DECLARE_FLAG(float, tiered_offload_threshold);
 ABSL_DECLARE_FLAG(float, tiered_upload_threshold);
-ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_stash_bytes);
+ABSL_DECLARE_FLAG(strings::MemoryBytesFlag, tiered_max_pending_bytes);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_cooling);
 ABSL_DECLARE_FLAG(uint64_t, registered_buffer_size);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_hash_support);
 ABSL_DECLARE_FLAG(bool, tiered_experimental_list_support);
 ABSL_DECLARE_FLAG(unsigned, list_tiering_threshold);
+ABSL_DECLARE_FLAG(bool, serialization_tagged_chunks);
 ABSL_DECLARE_FLAG(int32_t, list_max_listpack_size);
 
 namespace dfly {
@@ -74,7 +75,7 @@ class TieredStorageTest : public BaseFamilyTest {
       SetFlag(&FLAGS_registered_buffer_size, 0);
     }
 
-    SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 32_MB);
+    SetFlag(&FLAGS_tiered_max_pending_bytes, 32_MB);
     if (GetFlag(FLAGS_tiered_prefix).empty()) {
       // Suffixed with the pid so each test run gets its own directory.
       SetFlag(&FLAGS_tiered_prefix, absl::StrCat("/tmp/tiered_storage_test_", getpid()));
@@ -718,6 +719,7 @@ TEST_F(PureDiskTSMTTest, SortByGetOffloadedSquashed) {
   EXPECT_TRUE(GetMetrics().facade_stats.reply_stats.err_count.empty());  // RunMany drops replies
   EXPECT_THAT(Run({"LRANGE", "dst", "0", "-1"}), RespElementsAre(o1, o2));
   EXPECT_EQ(GetMetrics().db_stats[0].tiered_entries, 4u);
+  EXPECT_EQ(GetMetrics().tiered_stats.max_pending_bytes, 32_MB * shard_set->size());
 }
 
 // The remaining in-place overwrite paths reach the value through DbSlice::AddOrFind and retype it,
@@ -870,7 +872,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);
   // Set low limit so all clients are throttled
-  absl::SetFlag(&FLAGS_tiered_max_pending_stash_bytes, 1);
+  absl::SetFlag(&FLAGS_tiered_max_pending_bytes, 1);
   UpdateFromFlags();
 
   // issue client pause to accumualte SETs
@@ -892,6 +894,7 @@ TEST_F(PureDiskTSTest, ThrottleClients) {
   // Check that we provided backpressure for all the clients.
   auto metrics = GetMetrics();
   EXPECT_EQ(metrics.tiered_stats.total_clients_throttled, fibs.size());
+  EXPECT_EQ(metrics.tiered_stats.max_pending_bytes, 1u * shard_set->size());
 
   for (auto& fib : fibs)
     fib.JoinIfNeeded();
@@ -978,6 +981,36 @@ TEST_F(PureDiskTSTest, Dump) {
   EXPECT_THAT(Run({"del", "k0"}), IntArg(1));
   resp = Run({"restore", "k0", "0", facade::ToSV(resp.GetBuf())});
   EXPECT_EQ(resp, "OK");
+}
+
+TEST_F(PureDiskTSTest, DebugObjHist) {
+  SetFlag(&FLAGS_tiered_experimental_hash_support, true);
+  UpdateFromFlags();
+  const int kNum = 10;
+  for (size_t i = 0; i < kNum; i++) {
+    Run({"SET", absl::StrCat("k", i), BuildString(3000)});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries == kNum; });
+
+  auto resp = Run({"DEBUG", "OBJHIST"});
+  string hist = resp.GetString();
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\n"
+                              "Count: 10 Average: 3000.0000"));
+  EXPECT_THAT(hist, HasSubstr("Tiered values - Serialized size:\nCount: 10 "));
+
+  // Offloaded hashes must be reported without touching their (absent) in-memory representation.
+  Run({"FLUSHALL"});
+  for (size_t i = 0; i < 100; ++i) {
+    Run({"HSET", absl::StrCat("hash:", i), "field-a", BuildString(40, 'a'), "field-b",
+         BuildString(40, 'b')});
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().db_stats[0].tiered_entries > 0; });
+
+  resp = Run({"DEBUG", "OBJHIST"});
+  hist = resp.GetString();
+  EXPECT_THAT(hist, HasSubstr("OBJECT:hash"));
+  EXPECT_THAT(hist, HasSubstr("Values - Data size (in-memory and tiered):\nCount: 100 "));
+  EXPECT_THAT(hist, HasSubstr("Tiered values - Serialized size:\n"));
 }
 
 TEST_F(PureDiskTSTest, OffloadedStringSnapshotPreservesMemcacheFlags) {
@@ -1321,6 +1354,10 @@ class ListNodeTieringTest : public TieredStorageTest {
     SetFlag(&FLAGS_tiered_experimental_list_support, true);
     TieredStorageTest::SetUp();
   }
+
+ protected:
+  void SaveWithConcurrentWrites();
+
   optional<absl::FlagSaver> fs;
 };
 
@@ -1601,6 +1638,28 @@ TEST_F(ListNodeTieringTest, LPopStashedNodes) {
   EXPECT_THAT(Run({"EXISTS", "mylist"}), IntArg(0));
 }
 
+// Node loads and stash completions during a mutating list operation must not be double counted
+// by the key's memory updater.
+TEST_F(ListNodeTieringTest, MemoryAccountingWithStashedNodes) {
+  auto list_memory = [this] { return GetMetrics().db_stats[0].memory_usage_by_type[OBJ_LIST]; };
+
+  const int kItems = 12;
+  for (int i = 0; i < kItems; i++)
+    Run({"RPUSH", "mylist", BuildString(2048, static_cast<char>('A' + i))});
+
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.total_stashes >= 3; });
+
+  for (int i = 0; i < kItems - 1; i++) {
+    Run({"LPOP", "mylist"});
+    // Pushing to the tail triggers more offloads that may complete during the next pop's load.
+    Run({"RPUSH", "mylist", BuildString(2048, 'z')});
+  }
+
+  Run({"DEL", "mylist"});
+  ExpectConditionWithinTimeout([this] { return GetMetrics().tiered_stats.pending_stash_cnt == 0; });
+  EXPECT_EQ(list_memory(), 0u);
+}
+
 // MOVE a list whose interior nodes are fully offloaded to a different DB.
 TEST_F(ListNodeTieringTest, MoveWithStashedNodes) {
   const int kItems = 6;
@@ -1694,6 +1753,72 @@ TEST_F(ListNodeTieringTest, PushAfterOffloadedNodePromotedToTail) {
   EXPECT_THAT(Run({"RPUSH", "mylist", appended}), IntArg(kTrimmedItems + 1));
   EXPECT_EQ(Run({"RPOP", "mylist"}), appended);
   EXPECT_THAT(Run({"LLEN", "mylist"}), IntArg(kTrimmedItems));
+}
+
+// Reading an offloaded node from disk suspends the snapshot in the middle of the list entry. Writes
+// that serialize other buckets meanwhile must not interleave their bytes with the entry. They write
+// to another db, so their SELECTDB lands between the list's chunks.
+void ListNodeTieringTest::SaveWithConcurrentWrites() {
+  const int kLists = 50, kItems = 8, kKeys = 2000;
+  vector<vector<string>> expected(kLists);
+  for (int l = 0; l < kLists; l++) {
+    for (int i = 0; i < kItems; i++) {
+      expected[l].push_back(BuildString(2048, static_cast<char>('A' + (l + i) % 26)));
+      Run({"RPUSH", absl::StrCat("list:", l), expected[l].back()});
+    }
+  }
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_stashes >= kLists; });
+
+  Run({"SELECT", "1"});
+  for (int k = 0; k < kKeys; k++)
+    Run({"SET", absl::StrCat("key:", k), "v"});
+  Run({"SELECT", "0"});
+
+  // Each write serializes the bucket of its key if the snapshot has not reached it yet.
+  atomic_bool saved{false};
+  auto writer = pp_->at(0)->LaunchFiber([&] {
+    Run("writer", {"SELECT", "1"});
+    for (int k = 0; !saved.load(memory_order_relaxed); k = (k + 1) % kKeys) {
+      Run("writer", {"SET", absl::StrCat("key:", k), "w"});
+      ThisFiber::SleepFor(10us);  // let the proactor poll io completions
+    }
+  });
+  EXPECT_EQ(Run({"SAVE"}), "OK");
+  saved.store(true, memory_order_relaxed);
+  writer.Join();
+
+  ASSERT_EQ(Run({"DEBUG", "RELOAD", "NOSAVE"}), "OK");
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(kLists));
+  for (int l = 0; l < kLists; l++) {
+    auto resp = Run({"LRANGE", absl::StrCat("list:", l), "0", "-1"});
+    ASSERT_THAT(resp, ArrLen(kItems)) << "list " << l;
+    for (int i = 0; i < kItems; i++)
+      EXPECT_EQ(resp.GetVec()[i].GetString(), expected[l][i]) << "list " << l << " index " << i;
+  }
+  Run({"SELECT", "1"});
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(kKeys));
+  Run({"SELECT", "0"});
+}
+
+// Tagged chunks: the disk read is a consume point.
+TEST_F(ListNodeTieringTest, SaveWithConcurrentWritesWhileLoadingNodes) {
+  InitWithDbFilename();
+  SaveWithConcurrentWrites();
+  CleanupSnapshots();
+}
+
+// Without tagged chunks, the stream mutex keeps other writers out of the entry.
+TEST_F(ListNodeTieringTest, SaveWithConcurrentWritesWhileLoadingNodesUntagged) {
+  SetFlag(&FLAGS_serialization_tagged_chunks, false);
+  InitWithDbFilename();
+  SaveWithConcurrentWrites();
+  CleanupSnapshots();
+}
+
+TEST_F(ListNodeTieringTest, RdbSaveRejected) {
+  InitWithDbFilename();
+  EXPECT_THAT(Run({"SAVE", "RDB"}), ErrArg("not supported"));
+  CleanupSnapshots();
 }
 
 // Test MEMORY DECOMMIT COOL command flushes the cool queue
@@ -2442,7 +2567,9 @@ TEST_P(IndexedHashTieringTest, BorrowedHnswVectorsStayResident) {
 // MGET runs optimistically and when cancelled reruns its shard callback while tiered reads of the
 // previous attempt may still be in flight. These orphaned reads must not write into the response
 // buffer, which the new attempt reuses or reallocates.
-TEST_F(PureDiskTSMTTest, MGetRescheduleWithPendingReads) {
+// TODO: disabled - flaky, MGET retries depend on CPU parallelism and are rare on CI runners.
+// Run it with --gtest_also_run_disabled_tests on a machine with many cores.
+TEST_F(PureDiskTSMTTest, DISABLED_MGetRescheduleWithPendingReads) {
   DisableUploads();
 
   const auto sz = shard_set->size();

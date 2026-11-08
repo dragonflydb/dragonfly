@@ -1005,6 +1005,61 @@ TEST_F(CmdArgParserTest, CapGrammarChoice) {
   }
 }
 
+namespace {
+enum class ClientType { kNormal, kPubsub };
+struct ClientFilter {
+  std::optional<ClientType> type;
+};
+}  // namespace
+
+// FormattableError keeps a command's own error for an unknown token; $0 is the token.
+TEST_F(CmdArgParserTest, CapGrammarChoiceError) {
+  static constexpr auto kGrammar = Compile(
+      Options(Choice("TYPE", &ClientFilter::type, FormattableError("Unknown client type '$0'"),
+                     "NORMAL", ClientType::kNormal, "PUBSUB", ClientType::kPubsub)));
+  auto run = [&](std::initializer_list<std::string_view> args, ClientFilter* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  ClientFilter o;
+  EXPECT_FALSE(run({"TYPE", "pubsub"}, &o));
+  EXPECT_EQ(o.type, ClientType::kPubsub);
+  EXPECT_EQ(run({"TYPE", "bogus"}, &o).MakeReply().ToSv(), "Unknown client type 'bogus'");
+}
+
+namespace {
+struct DigitTarget {
+  std::optional<int64_t> digit;
+};
+}  // namespace
+
+// A token parser can be any callable, here a lambda that reads one digit.
+TEST_F(CmdArgParserTest, CapGrammarFieldParserFn) {
+  static constexpr auto kGrammar = Compile(Options(
+      Field("DIGIT", &DigitTarget::digit, [](std::string_view arg, RuleError& err) -> int64_t {
+        if (arg.size() != 1 || arg[0] < '0' || arg[0] > '9') {
+          err = {true, "not a digit"};
+          return 0;
+        }
+        return arg[0] - '0';
+      })));
+  auto run = [&](std::initializer_list<std::string_view> args, DigitTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  DigitTarget o;
+  EXPECT_FALSE(run({"DIGIT", "7"}, &o));
+  EXPECT_EQ(o.digit, 7);
+  EXPECT_EQ(run({"DIGIT", "07"}, &o).MakeReply().ToSv(), "not a digit");
+  EXPECT_EQ(run({"DIGIT"}, &o).MakeReply().ToSv(), kSyntaxErr);
+}
+
 // TagValue: a keyword sets a discriminant member to a compile-time value and reads the next arg
 // into another member (e.g. the EX/PX expiry keywords). Wrapped in OneOf for mutual exclusion.
 namespace {
@@ -1045,6 +1100,73 @@ TEST_F(CmdArgParserTest, CapGrammarTagValue) {
   {  // missing value -> error
     TvTarget o;
     EXPECT_TRUE(run({"EX"}, &o));
+  }
+}
+
+namespace {
+struct VarText {
+  bool no_stem = false;
+};
+struct VarTag {
+  bool case_sensitive = false;
+  char separator = ',';
+};
+struct WrapTarget {
+  bool upper = false;
+  bool lower = false;
+  bool a = false;
+  bool b = false;
+  double num = 0;
+  std::variant<std::monostate, VarText, VarTag> params;
+};
+consteval auto MakeWrapGrammar() {
+  using T = WrapTarget;
+  auto is_upper = [](std::string_view token) {
+    return std::ranges::none_of(token, [](char c) { return c >= 'a' && c <= 'z'; });
+  };
+  auto ab = Options(OneOf("A and B conflict", Exist("A", &T::a), Exist("B", &T::b)));
+  return Compile(Options(If(is_upper, Exist("U", &T::upper)), Exist("U", &T::lower), ab,
+                         Try(Field("NUM", &T::num)),
+                         Into(&T::params, Exist("NOSTEM", &VarText::no_stem)),
+                         Into(&T::params, Exist("CASESENSITIVE", &VarTag::case_sensitive))));
+}
+}  // namespace
+
+TEST_F(CmdArgParserTest, CapGrammarRuleWrappers) {
+  static constexpr auto kGrammar = MakeWrapGrammar();
+  auto run = [&](std::initializer_list<std::string_view> args, WrapTarget* o) {
+    auto parser = Make(args);
+    kGrammar.Apply(&parser, o);
+    parser.Finalize();
+    return parser.TakeError();
+  };
+
+  {  // a failed predicate leaves the token to the next rule
+    WrapTarget o;
+    EXPECT_FALSE(run({"u"}, &o));
+    EXPECT_FALSE(o.upper);
+    EXPECT_TRUE(o.lower);
+    EXPECT_FALSE(run({"U"}, &o));
+    EXPECT_TRUE(o.upper);
+  }
+  {  // a failed Try restores the parser and the target
+    WrapTarget o;
+    EXPECT_FALSE(run({"NUM", "2.5"}, &o));
+    EXPECT_EQ(run({"NUM", "x"}, &o).type, CmdArgParser::UNPROCESSED);
+    EXPECT_EQ(o.num, 2.5);
+  }
+  {  // the nested group keeps its state across the outer loop
+    WrapTarget o;
+    EXPECT_EQ(run({"A", "U", "B"}, &o).MakeReply().ToSv(), "A and B conflict");
+  }
+  {  // a match keeps the held alternative's values or switches to the rule's alternative
+    WrapTarget o;
+    o.params = VarTag{.separator = ';'};
+    EXPECT_FALSE(run({"CASESENSITIVE"}, &o));
+    EXPECT_TRUE(std::get<VarTag>(o.params).case_sensitive);
+    EXPECT_EQ(std::get<VarTag>(o.params).separator, ';');
+    EXPECT_FALSE(run({"NOSTEM"}, &o));
+    EXPECT_TRUE(std::get<VarText>(o.params).no_stem);
   }
 }
 

@@ -346,20 +346,6 @@ def create_temp_file(content, tmp_dir):
 
 
 @dfly_args({"port": 1111})
-async def test_bad_acl_file(df_factory, tmp_dir):
-    acl = create_temp_file("ACL SETUSER kostas ON >mypass +@WRONG", tmp_dir)
-
-    df = df_factory.create(aclfile=acl)
-
-    df.start()
-
-    client = aioredis.Redis(port=df.port)
-
-    with pytest.raises(redis.exceptions.ResponseError):
-        await client.execute_command("ACL LOAD")
-
-
-@dfly_args({"port": 1111})
 async def test_good_acl_file(df_factory, tmp_dir):
     # The hash below is password temp
     acl = create_temp_file(
@@ -821,3 +807,26 @@ async def test_acl_select(async_client):
 
     res = await async_client.client_list()
     assert res[0]["db"] == "1"
+
+
+async def test_admin_subcommands_over_connection(df_server):
+    admin = df_server.client()
+    await admin.execute_command("ACL SETUSER mem-reader ON >p ~* +@read")
+    await admin.execute_command("ACL SETUSER non-admin ON >p ~* +@all -@admin -@dangerous")
+
+    # One pipelined batch: MEMORY USAGE and MEMORY DEFRAGMENT resolve to the same command.
+    reader = df_server.client(username="mem-reader", password="p")
+    pipe = reader.pipeline(transaction=False)
+    pipe.execute_command("MEMORY USAGE k")
+    pipe.execute_command("MEMORY DEFRAGMENT")
+    res = await pipe.execute(raise_on_error=False)
+    assert res[0] is None
+    assert isinstance(res[1], redis.exceptions.NoPermissionError)
+
+    # Client libraries send CLIENT SETNAME on connect; it must stay allowed.
+    client = df_server.client(username="non-admin", password="p", client_name="lib")
+    assert await client.client_getname() == "lib"
+    with pytest.raises(redis.exceptions.NoPermissionError):
+        await client.client_list()
+    log = await admin.execute_command("ACL LOG")
+    assert {"MEMORY DEFRAGMENT", "CLIENT LIST"} <= {entry["object"] for entry in log}

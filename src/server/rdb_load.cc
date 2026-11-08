@@ -2445,11 +2445,6 @@ struct RdbLoader::ObjSettings {
     has_expired = (val <= now);
   }
 
-  void SetMCFlags(uint32_t flags) {
-    has_mc_flags = true;
-    mc_flags = flags;
-  }
-
   ObjSettings() = default;
 };
 
@@ -3100,6 +3095,12 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
       return RdbError(errc::unsupported_operation);
     }
 
+    if (absl::EqualsIgnoreCase(entry.cmd[0], "FT.ALIASADD") ||
+        absl::EqualsIgnoreCase(entry.cmd[0], "FT.ALIASUPDATE") ||
+        absl::EqualsIgnoreCase(entry.cmd[0], "FT.ALIASDEL")) {
+      return RdbError(errc::unsupported_operation);
+    }
+
     DVLOG(2) << "Executing item: " << entry.ToString();
     journal_executor_->Execute(entry.dbid, entry.cmd);
   }
@@ -3176,9 +3177,11 @@ error_code RdbLoader::HandleAux() {
     }
   } else if (auxkey == "redis-bits") {
     /* Just ignored. */
-  } else if (auxkey == "search-index") {
+  } else if (auxkey == "search-index" || auxkey == "search-index-resp") {
     LoadSearchIndexDefFromAux(std::move(auxval));
-  } else if (auxkey == "search-synonyms") {
+  } else if (auxkey == "search-alias" || auxkey == "search-alias-resp") {
+    LoadSearchCommandFromAux(service_, std::move(auxval), "FT.ALIASADD", "search alias");
+  } else if (auxkey == "search-synonyms" || auxkey == "search-synonyms-resp") {
     LoadSearchSynonymsFromAux(std::move(auxval));
   } else if (auxkey == "shard-count") {
     uint32_t shard_count;
@@ -3192,10 +3195,7 @@ error_code RdbLoader::HandleAux() {
       shard_id_ = shard_id;
     }
   } else if (auxkey == "table-mem") {
-    size_t mem;
-    if (absl::SimpleAtoi(auxval, &mem)) {
-      table_used_memory_ = mem;
-    }
+    // Recognized snapshot metadata; the loader does not use the table memory estimate.
   } else {
     /* We ignore fields we don't understand, as by AUX field
      * contract. */

@@ -6,6 +6,9 @@ The test suite fails if similar but unrelated test names are linked.
 import sys
 import tempfile
 import unittest
+import json
+import io
+from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -226,6 +229,124 @@ class IssueLinkTest(unittest.TestCase):
         self.assertTrue(match["issues"][0]["eligible_for_assignee"])
         self.assertEqual(match["pull_requests"][0]["number"], 456)
 
+    def test_build_links_keeps_sources_for_same_numbered_records(self):
+        """Keep same-numbered records from both source repositories distinct."""
+        primary = links.DEFAULT_REPOSITORY
+        private = "dragonflydb/dataplane-private"
+        primary_issue = {**self.issue, "repository": primary}
+        private_issue = {
+            **self.issue,
+            "repository": private,
+            "html_url": "https://github.com/dragonflydb/dataplane-private/issues/123",
+        }
+        pull_requests = [
+            {
+                "number": 456,
+                "repository": primary,
+                "html_url": "https://github.com/dragonflydb/dragonfly/pull/456",
+                "title": "Fixes #123",
+                "body": "",
+                "state": "open",
+            },
+            {
+                "number": 456,
+                "repository": private,
+                "html_url": "https://github.com/dragonflydb/dataplane-private/pull/456",
+                "title": "Fixes #123",
+                "body": "",
+                "state": "open",
+            },
+        ]
+        result = links.build_links([self.test], [primary_issue, private_issue], pull_requests)
+        match = result[self.test["id"]]
+        self.assertEqual(
+            {(issue["repository"], issue["number"]) for issue in match["issues"]},
+            {(primary, 123), (private, 123)},
+        )
+        self.assertEqual(
+            {
+                (pull_request["repository"], pull_request["number"])
+                for pull_request in match["pull_requests"]
+            },
+            {(primary, 456), (private, 456)},
+        )
+
+    def test_bare_pr_issue_reference_stays_with_its_source_repository(self):
+        """Do not link a bare issue reference to an equal number in another repository."""
+        primary = links.DEFAULT_REPOSITORY
+        private = "dragonflydb/dataplane-private"
+        primary_issue = {
+            **self.issue,
+            "repository": primary,
+            "title": "Unrelated test failure",
+            "body": "",
+        }
+        private_issue = {
+            **self.issue,
+            "repository": private,
+            "html_url": "https://github.com/dragonflydb/dataplane-private/issues/123",
+        }
+        pull_request = {
+            "number": 456,
+            "repository": primary,
+            "html_url": "https://github.com/dragonflydb/dragonfly/pull/456",
+            "title": "Fixes #123",
+            "body": "",
+            "state": "open",
+        }
+        result = links.build_links([self.test], [primary_issue, private_issue], [pull_request])
+        match = result[self.test["id"]]
+        self.assertEqual(
+            [(issue["repository"], issue["number"]) for issue in match["issues"]],
+            [(private, 123)],
+        )
+        self.assertEqual(match["pull_requests"], [])
+
+    def test_private_links_include_metadata(self):
+        """Include private issue and PR details for the private dashboard."""
+        private_issue = {
+            **self.issue,
+            "repository": "dragonflydb/dataplane-private",
+            "html_url": "https://github.com/dragonflydb/dataplane-private/issues/123",
+        }
+        private_pr = {
+            "number": 456,
+            "repository": "dragonflydb/dataplane-private",
+            "html_url": "https://github.com/dragonflydb/dataplane-private/pull/456",
+            "title": "Fixes #123",
+            "body": "",
+            "state": "closed",
+            "merged_at": "2026-10-18T00:00:00Z",
+        }
+        result = links.build_links([self.test], [private_issue], [private_pr])[self.test["id"]]
+        self.assertEqual(
+            result["issues"],
+            [
+                {
+                    "number": 123,
+                    "repository": "dragonflydb/dataplane-private",
+                    "url": private_issue["html_url"],
+                    "title": private_issue["title"],
+                    "state": "open",
+                    "match": "exact",
+                    "eligible_for_assignee": True,
+                    "assignees": ["dragonfly-user"],
+                }
+            ],
+        )
+        self.assertEqual(
+            result["pull_requests"],
+            [
+                {
+                    "number": 456,
+                    "repository": "dragonflydb/dataplane-private",
+                    "url": private_pr["html_url"],
+                    "title": "Fixes #123",
+                    "state": "merged",
+                }
+            ],
+        )
+
     def test_closed_issue_and_merged_directly_matched_pr_include_states(self):
         """Preserve closed and merged states for historical dashboard links."""
         self.issue["state"] = "closed"
@@ -251,8 +372,8 @@ class IssueLinkTest(unittest.TestCase):
         )
 
     @patch("tools.ci_test_dashboard.sync_issue_links.github_api")
-    def test_recent_pages_filters_records_before_applying_limit(self, github_api):
-        """Filter pull requests and old records before enforcing the closed-history limit."""
+    def test_recent_pages_filters_pull_requests_and_old_records(self, github_api):
+        """Filter pull requests and records that closed before the cutoff."""
         github_api.return_value = [
             {
                 "number": 1,
@@ -281,10 +402,118 @@ class IssueLinkTest(unittest.TestCase):
             "https://api.github.test/issues?state=closed",
             "token",
             cutoff,
-            1,
             lambda item: "pull_request" not in item,
         )
         self.assertEqual([item["number"] for item in result], [3])
+
+    @patch("tools.ci_test_dashboard.sync_issue_links.github_api")
+    def test_page_progress_reports_counts_without_record_details(self, github_api):
+        """Report fetch progress without printing titles or token values."""
+        github_api.return_value = [{"number": 1, "title": "private issue title"}]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            result = links.github_pages("https://api.github.test/issues?state=open", "secret-token")
+        self.assertEqual(len(result), 1)
+        self.assertIn("page 1", output.getvalue())
+        self.assertIn("Received 1 records; 1 total", output.getvalue())
+        self.assertNotIn("private issue title", output.getvalue())
+        self.assertNotIn("secret-token", output.getvalue())
+
+    @patch("tools.ci_test_dashboard.sync_issue_links.github_api")
+    def test_open_pages_returns_more_than_500_records_regardless_of_age(self, github_api):
+        """Fetch all open records, including records older than the closed-history window."""
+        records = [
+            {"number": number, "created_at": "2020-01-01T00:00:00Z"} for number in range(1, 601)
+        ]
+        github_api.side_effect = [
+            records[index : index + 100] for index in range(0, len(records), 100)
+        ] + [[]]
+        result = links.github_pages("https://api.github.test/issues?state=open", "token")
+        self.assertEqual([item["number"] for item in result], list(range(1, 601)))
+        self.assertEqual(github_api.call_count, 7)
+
+    @patch("tools.ci_test_dashboard.sync_issue_links.github_api")
+    def test_recent_pages_returns_all_records_until_the_cutoff(self, github_api):
+        """Continue beyond 500 records and stop only after reaching the cutoff."""
+        recent_records = [
+            {
+                "number": number,
+                "updated_at": "2026-10-18T00:00:00Z",
+                "closed_at": "2026-10-18T00:00:00Z",
+            }
+            for number in range(1, 601)
+        ]
+        github_api.side_effect = [
+            recent_records[index : index + 100] for index in range(0, len(recent_records), 100)
+        ] + [
+            [
+                {
+                    "number": 601,
+                    "updated_at": "2026-09-30T00:00:00Z",
+                    "closed_at": "2026-09-30T00:00:00Z",
+                }
+            ],
+        ]
+        result = links.github_recent_pages(
+            "https://api.github.test/pulls?state=closed",
+            "token",
+            datetime(2026, 10, 1, tzinfo=timezone.utc),
+        )
+        self.assertEqual([item["number"] for item in result], list(range(1, 601)))
+        self.assertEqual(github_api.call_count, 7)
+        self.assertIn("page=7", github_api.call_args_list[6].args[0])
+
+    @patch("tools.ci_test_dashboard.sync_issue_links.load_tests")
+    @patch("tools.ci_test_dashboard.sync_issue_links.github_recent_pages")
+    @patch("tools.ci_test_dashboard.sync_issue_links.github_pages")
+    def test_write_links_aggregates_both_repositories(
+        self, github_pages, github_recent_pages, load_tests
+    ):
+        """Fetch both repositories' issues and only the public repository's PRs."""
+        primary = links.DEFAULT_REPOSITORY
+        private = "dragonflydb/dataplane-private"
+        load_tests.return_value = [self.test]
+        github_pages.side_effect = [
+            [self.issue],
+            [],
+            [self.issue],
+        ]
+        github_recent_pages.return_value = []
+        with tempfile.TemporaryDirectory() as temporary:
+            data_dir = Path(temporary)
+            output = io.StringIO()
+            with redirect_stdout(output):
+                links.write_links(data_dir, [primary, private], "token", closed_history_days=1)
+            payload = json.loads((data_dir / "issue-links.json").read_text())
+        self.assertIn('Loading "failed dashboard tests"', output.getvalue())
+        self.assertIn('Loaded 1 "failed dashboard tests"', output.getvalue())
+        self.assertEqual(payload["repositories"], [primary, private])
+        self.assertEqual(
+            {
+                (issue["repository"], issue["number"])
+                for issue in payload["links"][self.test["id"]]["issues"]
+            },
+            {(primary, 123), (private, 123)},
+        )
+        open_endpoints = [call.args[0] for call in github_pages.call_args_list]
+        closed_endpoints = [call.args[0] for call in github_recent_pages.call_args_list]
+        base = "https://api.github.com/repos"
+        self.assertEqual(
+            open_endpoints,
+            [
+                f"{base}/{primary}/issues?state=open",
+                f"{base}/{primary}/pulls?state=open",
+                f"{base}/{private}/issues?state=open",
+            ],
+        )
+        self.assertEqual(
+            closed_endpoints,
+            [
+                f"{base}/{primary}/issues?state=closed",
+                f"{base}/{primary}/pulls?state=closed",
+                f"{base}/{private}/issues?state=closed",
+            ],
+        )
 
     @patch(
         "tools.ci_test_dashboard.sync_issue_links.write_links", side_effect=RuntimeError("offline")

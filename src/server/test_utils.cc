@@ -241,8 +241,6 @@ void BaseFamilyTest::TearDown() {
 
 void BaseFamilyTest::ResetService() {
   if (service_ != nullptr) {
-    TEST_InvalidateLockTagOptions();
-
     ShutdownService();
   }
 
@@ -267,7 +265,7 @@ void BaseFamilyTest::ResetService() {
   // value, and if reset after some invocations of heartbeat have run, the accumulated data is
   // lost and can cause test failure.
   used_mem_current = 0;
-  service_->Init(nullptr, {});
+  service_->Init(nullptr, CreateListeners());
 
   TEST_current_time_ms = absl::GetCurrentTimeNanos() / 1000000;
 
@@ -389,12 +387,6 @@ unsigned BaseFamilyTest::NumLocked() {
   return count;
 }
 
-void BaseFamilyTest::ClearMetrics() {
-  shard_set->pool()->AwaitBrief([](unsigned, auto*) {
-    ServerState::tlocal()->stats = ServerState::Stats(shard_set->size());
-  });
-}
-
 string BaseFamilyTest::FormatMetrics(const Metrics& metrics) const {
   return service_->server_family().FormatInfoMetrics(metrics, "ALL", true, nullptr);
 }
@@ -483,7 +475,7 @@ RespExpr BaseFamilyTest::Run(std::string_view id, ArgSlice slice) {
   CmdArgVec args = conn_wrapper->Args(slice);
 
   ConnectionContext* context = conn_wrapper->cmd_cntx();
-  context->ns = &namespaces->GetDefaultNamespace();
+  context->ns = &namespaces->GetOrInsert(namespace_);
 
   DCHECK(context->transaction == nullptr) << id;
   CommandContext cmd_cntx;
@@ -611,12 +603,6 @@ int64_t BaseFamilyTest::CheckedInt(ArgSlice list) {
   int64_t res;
   CHECK(absl::SimpleAtoi(sv, &res)) << "|" << sv << "|";
   return res;
-}
-
-string BaseFamilyTest::CheckedString(ArgSlice list) {
-  RespExpr resp = Run(list);
-  CHECK_EQ(RespExpr::STRING, int(resp.type)) << list;
-  return string{ToSV(resp.GetBuf())};
 }
 
 CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {

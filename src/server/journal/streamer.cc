@@ -27,10 +27,12 @@ ABSL_FLAG(uint32_t, migration_buckets_sleep_usec, 500,
           "migration_buckets_serialization_threshold");
 
 ABSL_FLAG(float, migration_buckets_cpu_budget, 0.2,
-          "How much CPU budget to use for migration buckets serialization");
+          "How much CPU budget to use for migration buckets serialization and slot flushing");
 
 ABSL_FLAG(uint32_t, replication_dispatch_threshold, 1500,
           "Number of bytes to aggregate before replication");
+
+ABSL_DECLARE_FLAG(uint32_t, replication_timeout);
 
 namespace dfly {
 using namespace util;
@@ -179,6 +181,7 @@ SlotMigrationStreamer::SlotMigrationStreamer(DbSlice* slice, cluster::SlotSet sl
   migration_buckets_serialization_threshold_cached =
       absl::GetFlag(FLAGS_migration_buckets_serialization_threshold);
   migration_buckets_sleep_usec_cached = absl::GetFlag(FLAGS_migration_buckets_sleep_usec);
+  replication_timeout_usec_ = absl::GetFlag(FLAGS_replication_timeout) * 1000ULL;
 
   cmd_serializer_ = std::make_unique<CmdSerializer>(
       [&](std::string s) {
@@ -249,11 +252,9 @@ void SlotMigrationStreamer::PaceTraversal(bool done) {
 
   while (base_cntx_->IsRunning() && should_stall()) {
     ThisFiber::SleepFor(300us);
-
-    // We have a design bug in RealTimeAggregator that resets it measurements only when
-    // the next sample is taken. So we add this sample to ensure cpu_aggregator_
-    // refreshes its state.
-    base::CpuTimeGuard guard(&cpu_aggregator_);
+    // Pacing stops below output_limit, where Throttle() would detect a stuck socket. Checked
+    // after sleeping, so completions of already finished writes have been processed.
+    writer_.AbortOnWriteTimeout(replication_timeout_usec_);
     migration_stats_.iter_skips++;
   }
 }
@@ -359,8 +360,8 @@ bool SlotMigrationStreamer::ShouldWrite(SlotId slot_id) const {
 
 bool SlotMigrationStreamer::ShouldSerialize(DbIndex db_index, const PrimeKey& pk) const {
   // Cluster mode blocks SELECT, but loading an RDB file taken from a non-cluster instance can
-  // still activate other databases. Slot ownership (and FlushSlots) covers only db 0, so keys
-  // in other databases are not migrated. This applies to both the traversal and OnChange flows.
+  // still activate other databases. Slot ownership covers only db 0, so keys in other databases
+  // are not migrated. This applies to both the traversal and OnChange flows.
   if (db_index != 0)
     return false;
 

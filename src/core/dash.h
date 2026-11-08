@@ -404,13 +404,6 @@ class DashTable : public detail::DashTableBase {
     return iterator{this, segment_id, uint8_t(bucket_id), uint8_t(slot_id)};
   }
 
-  const_bucket_iterator CursorToBucketIt(Cursor c) const {
-    return const_bucket_iterator{this, c.segment_id(global_depth_), c.bucket_id(), 0};
-  }
-  bucket_iterator CursorToBucketIt(Cursor c) {
-    return bucket_iterator{this, c.segment_id(global_depth_), c.bucket_id(), 0};
-  }
-
   // Capture Version Change. Determine buckets that can potentially be modified when inserting key.
   // These are not const functions because they send non-const iterators that allow
   // updating contents/versions of the passed iterators.

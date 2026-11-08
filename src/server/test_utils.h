@@ -28,9 +28,6 @@ namespace journal {
 struct JournalConsumerInterface;
 }  // namespace journal
 
-// Test hook defined in common.cc.
-void TEST_InvalidateLockTagOptions();
-
 class TestConnection : public facade::Connection {
  public:
   explicit TestConnection(facade::ServiceInterface* si, Protocol protocol);
@@ -82,6 +79,11 @@ class BaseFamilyTest : public ::testing::Test {
   void SetUp() override;
   void TearDown() override;
 
+  // Listeners for Service::Init; a fixture that returns some can not reset the service again.
+  virtual std::vector<facade::Listener*> CreateListeners() {
+    return {};
+  }
+
   class TestConnWrapper;
 
   RespExpr Run(std::initializer_list<const std::string_view> list) {
@@ -127,7 +129,6 @@ class BaseFamilyTest : public ::testing::Test {
     return CheckedInt(ArgSlice{list.begin(), list.size()});
   }
   int64_t CheckedInt(ArgSlice list);
-  std::string CheckedString(ArgSlice list);
 
   void ResetService();
 
@@ -156,7 +157,6 @@ class BaseFamilyTest : public ::testing::Test {
                                                 MetricsCollectOpts{});
   }
 
-  void ClearMetrics();
   std::string FormatMetrics(const Metrics& metrics) const;
 
   void AdvanceTime(int64_t ms) {
@@ -217,6 +217,10 @@ class BaseFamilyTest : public ::testing::Test {
   ConnectionContext::LastCommandStats last_cmd_dbg_info_;
 
   bool single_response_ = true;
+
+  // The namespace of the commands Run issues, the default one if empty.
+  std::string namespace_;
+
   util::fb2::Fiber watchdog_fiber_;
   util::fb2::Done watchdog_done_;
 };
