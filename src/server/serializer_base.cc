@@ -9,6 +9,7 @@
 #include <absl/strings/str_join.h>
 
 #include <chrono>
+#include <optional>
 
 #include "base/flags.h"
 #include "base/logging.h"
@@ -129,10 +130,13 @@ void DelayedEntryHandler::DiscardDelayedEntries() {
   delayed_entries_.clear();
 }
 
-SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
+SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx,
+                               base::CycleBucketAggregator* cpu_aggregator)
     : DelayedEntryHandler(static_cast<BucketDependencies&>(*this)),
       db_slice_(slice),
       base_cntx_(cntx),
+      cpu_aggregator_(cpu_aggregator),
+
       // Enable stream mutex if tagged chunks are disabled
       stream_mu_(!absl::GetFlag(FLAGS_serialization_tagged_chunks)) {
   DCHECK(base_cntx_);
@@ -286,7 +290,9 @@ bool SerializerBase::TraverseAllBuckets() {
 
 unsigned SerializerBase::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) {
-  base::CpuTimeGuard guard(&cpu_aggregator_);
+  std::optional<base::CpuTimeGuard> guard;
+  if (cpu_aggregator_)
+    guard.emplace(cpu_aggregator_);
 
   unsigned serialized = 0;
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
