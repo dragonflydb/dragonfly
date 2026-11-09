@@ -40,7 +40,6 @@
 #include "io/file_util.h"
 #include "server/acl/acl_log.h"
 #include "server/acl/validator.h"
-#include "server/cluster_support.h"
 #include "server/config_registry.h"
 #include "server/conn_context.h"
 #include "server/server_state.h"
@@ -825,9 +824,6 @@ variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(facade::Pars
       if (req.select_db)
         return ErrorReply("ERR Error, select db $ was used twice");
 
-      // AUTH switches the connection to this db, bypassing the SELECT restriction.
-      if (IsClusterEnabled() && *db != 0 && *db != kAllDbs)
-        return ErrorReply("ERR Error, select db $ is not allowed in cluster mode");
       req.select_db = db;
       continue;
     }

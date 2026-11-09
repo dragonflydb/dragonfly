@@ -2499,11 +2499,6 @@ void GenericFamily::Move(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
 
-  // A key moved to db > 0 would escape slot-scoped operations.
-  if (IsClusterEnabled()) {
-    return cmd_cntx->SendError("MOVE is not allowed in cluster mode");
-  }
-
   if (target_db < 0 || uint32_t(target_db) >= absl::GetFlag(FLAGS_dbnum)) {
     return cmd_cntx->SendError(kDbIndOutOfRangeErr);
   }
@@ -2523,8 +2518,12 @@ void GenericFamily::Move(CmdArgParser parser, CommandContext* cmd_cntx) {
       res = OpMove(op_args, key, target_db);
       // MOVE runs as global command but we want to write the
       // command to only one journal.
-      if (res != OpStatus::IO_ERROR && op_args.shard->journal()) {
-        RecordJournal(op_args, "MOVE"sv, ArgSlice{key, target_db_str});
+      // A failed move must not replay before the destination's baseline is serialized.
+      if (res == OpStatus::OK && op_args.shard->journal()) {
+        // Global transactions track no slot, but migrations filter journal entries by slot.
+        journal::RecordEntry(t->txid(), journal::Op::COMMAND, op_args.db_cntx.db_index,
+                             KeySlot(key),
+                             journal::Entry::Payload("MOVE"sv, ArgSlice{key, target_db_str}));
       }
     }
     return OpStatus::OK;
@@ -2633,9 +2632,6 @@ void GenericFamily::Select(CmdArgParser parser, CommandContext* cmd_cntx) {
   int64_t index = parser.Next<int64_t>();
   if (parser.TakeError()) {
     return cmd_cntx->SendError(kInvalidDbIndErr);
-  }
-  if (IsClusterEnabled() && index != 0) {
-    return cmd_cntx->SendError("SELECT is not allowed in cluster mode");
   }
   if (index < 0 || index >= absl::GetFlag(FLAGS_dbnum)) {
     return cmd_cntx->SendError(kDbIndOutOfRangeErr);

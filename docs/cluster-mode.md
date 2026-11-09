@@ -321,10 +321,25 @@ replica deletes exactly the data the master did.
 
 ### 5.4 Cluster-mode command restrictions
 
+Cluster mode supports logical databases `0` through `--dbnum - 1`. `SELECT` changes
+the connection's database. An ACL user configured with `$N` starts in database `N`
+after authentication and may only select that database; `$ALL` permits selecting
+any configured database.
+
+All databases share the same slot topology. The slot depends only on the key name,
+so identical keys in different databases have independent values but the same owner.
+`MOVE key db` transfers a key between databases on that owner. Migration and slot
+cleanup include every active database, and `DFLYCLUSTER GETSLOTINFO` aggregates their
+counters. Migration targets and replicas must allow the database IDs used by their
+sources through `--dbnum`.
+
+`SCAN`, `KEYS`, `DBSIZE`, and `FLUSHDB` operate on the selected database's keys held
+by the connected node. `FLUSHALL` clears every database on that node. These commands
+do not fan out to other cluster nodes. Snapshots and replication preserve database
+IDs and the data in each database.
+
 In real cluster mode (`--cluster_mode=yes`):
 
-- `SELECT` to any DB index other than the default is rejected; cluster-mode storage is
-  single-DB.
 - Global-keyspace pub/sub (`PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE`) is rejected. Sharded
   pub/sub (`SPUBLISH`, `SSUBSCRIBE`, `SUNSUBSCRIBE`) routes by slot and is supported.
 - Multi-key commands and `MULTI/EXEC` blocks that span multiple slots return
@@ -332,8 +347,8 @@ In real cluster mode (`--cluster_mode=yes`):
   Lua scripts are not supported in cluster mode).
 
 `--cluster_mode=emulated` exposes the cluster commands on a single node that owns all
-16384 slots. In emulated mode `DFLYCLUSTER` is not available, `SELECT` and global
-pub/sub still work, and the above restrictions do not apply. Emulated mode is intended
+16384 slots. In emulated mode `DFLYCLUSTER` is not available, global pub/sub still
+works, and the above restrictions do not apply. Emulated mode is intended
 for development, migration phases, and resource-constrained environments where one node
 stands in for an entire cluster.
 

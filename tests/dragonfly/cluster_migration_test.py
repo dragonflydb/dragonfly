@@ -7,6 +7,7 @@ import string
 import time
 
 import pytest
+from redis.exceptions import MovedError
 
 from . import dfly_args
 from .cluster_test_utils import (
@@ -250,7 +251,7 @@ async def test_migration_with_key_ttl(df_factory):
 
 @dfly_args({"proactor_threads": 2})
 async def test_migration_preserves_database_ids(df_factory: DflyInstanceFactory):
-    # Cluster clients can't SELECT, so a standalone instance fills and inspects the databases.
+    # A standalone instance fills the databases and mirrors the commands issued during migration.
     standalone = df_factory.create()
     standalone.start()
     # A tiny chunk size splits collections into many commands. The target starts empty, so it must
@@ -266,7 +267,6 @@ async def test_migration_preserves_database_ids(df_factory: DflyInstanceFactory)
         keyspace = await client.info("keyspace")
         return {db: (s["keys"], s["expires"]) for db, s in keyspace.items() if s["keys"]}
 
-    captures = []
     for db in range(3):
         client = standalone.client(db=db)
         await DebugPopulateSeeder(key_target=500).run(client)
@@ -275,7 +275,6 @@ async def test_migration_preserves_database_ids(df_factory: DflyInstanceFactory)
             f"DEBUG POPULATE 10 ttl{db} 10 TYPE LIST ELEMENTS 5 EXPIRE 1000 2000"
         )
         assert await client.execute_command("STICK", f"ttl{db}:0") == 1
-        captures.append(await DebugPopulateSeeder.capture(client))
 
     sizes = await db_sizes(standalone.client())
     assert len(sizes) == 3
@@ -288,6 +287,23 @@ async def test_migration_preserves_database_ids(df_factory: DflyInstanceFactory)
         MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
     ]
     await apply_config(nodes)
+
+    # Commands may race the ownership switch, so follow the source's redirect when necessary.
+    async def apply_command(db, *args):
+        expected = await standalone.client(db=db).execute_command(*args)
+        try:
+            result = await instances[0].client(db=db).execute_command(*args)
+        except MovedError:
+            result = await instances[1].client(db=db).execute_command(*args)
+        assert result == expected
+
+    # Writes and moves in every database are journaled while the migration runs.
+    for db in range(3):
+        await apply_command(db, "SET", "live-write", f"value{db}")
+        await apply_command(db, "MOVE", f"ttl{db}:1", (db + 1) % 3)
+
+    sizes = await db_sizes(standalone.client())
+    captures = [await DebugPopulateSeeder.capture(standalone.client(db=db)) for db in range(3)]
     await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
     await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
     assert await db_sizes(nodes[1].client) == sizes

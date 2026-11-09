@@ -1749,7 +1749,7 @@ bool Transaction::CanRunInlined() const {
 }
 
 OpResult<KeyIndex> DetermineKeys(const CommandId* cid, const facade::ParsedArgs& args) {
-  if (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL))
+  if ((cid->opt_mask() & CO::NO_KEY_TRANSACTIONAL) || cid->first_key_pos() == 0)
     return KeyIndex{};
 
   // Fast path for commands with a single key at a fixed position (e.g. GET/SET/...): skip the
