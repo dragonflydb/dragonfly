@@ -38,6 +38,8 @@ namespace {
 
 using namespace std::chrono_literals;
 using testing::HasSubstr;
+using testing::Optional;
+using testing::StartsWith;
 
 // Some if the tests in this test suite must send malformed RESP bytes and verify the ordered raw
 // replies followed by EOF. We won't use ProtocolClient (protocol_client.cc) here - it does not
@@ -229,10 +231,14 @@ TEST_P(DragonflyV2ConnectionTest, DrainsQueuedCommandsOverPipelineLimit) {
     RawRespClient client{port_};
     ASSERT_TRUE(client.valid());
 
-    // Parse the whole pipeline before CONFIG lowers the limit; each PING ends a squash batch.
+    // Each PING ends a squash batch.
     ASSERT_TRUE(
-        client.SendAll("CONFIG SET pipeline_buffer_limit 1\r\n"
+        client.SendAll("CLIENT INFO\r\nCONFIG SET pipeline_buffer_limit 1\r\n"
                        "SET a b\r\nPING\r\nSET c d\r\nPING\r\n"));
+
+    // Verify the whole pipeline was parsed before CONFIG lowers the limit, counting CLIENT INFO.
+    ASSERT_THAT(client.ReadLine(), Optional(StartsWith("$")));
+    ASSERT_THAT(client.ReadLine(), Optional(HasSubstr(" pipeline=6 ")));
     for (std::string_view reply : {"+OK\r\n", "+OK\r\n", "+PONG\r\n", "+OK\r\n", "+PONG\r\n"}) {
       ASSERT_EQ(client.ReadLine(), reply);
     }
@@ -277,8 +283,12 @@ TEST_P(DragonflyV2ConnectionTest, WakesForNextAsyncReplyOverPipelineLimit) {
 
   RawRespClient client{port_};
   ASSERT_TRUE(client.valid());
-  ASSERT_TRUE(client.SendAll("CONFIG SET pipeline_buffer_limit 1\r\nSET " + first_key +
-                             " a\r\nSET " + second_key + " b\r\n"));
+  ASSERT_TRUE(client.SendAll("CLIENT INFO\r\nCONFIG SET pipeline_buffer_limit 1\r\nSET " +
+                             first_key + " a\r\nSET " + second_key + " b\r\n"));
+
+  // Verify both SETs were parsed before CONFIG lowers the limit; the count includes CLIENT INFO.
+  ASSERT_THAT(client.ReadLine(), Optional(StartsWith("$")));
+  ASSERT_THAT(client.ReadLine(), Optional(HasSubstr(" pipeline=4 ")));
 
   // CONFIG's batched reply flushes when backpressure parks behind the first locked SET.
   ASSERT_EQ(client.ReadLine(), "+OK\r\n");
