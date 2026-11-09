@@ -99,6 +99,11 @@ class SinkReplyBuilder {
   // `additional_bytes` hints how many bytes did not fit into the buffer to possibly grow it
   void Flush(size_t additional_bytes = 0);
 
+  // True if reply bytes are waiting to be flushed.
+  bool HasBufferedOutput() const {
+    return total_size_ != 0;
+  }
+
   std::error_code GetError() const {
     return ec_;
   }

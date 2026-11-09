@@ -3355,8 +3355,9 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
     //   mid-flight waits for this command. A lone V2 command sets no other flag, so without it the
     //   write can slip past CLIENT PAUSE.
     // - async_dispatch (flush-before-block): makes MainService::DispatchCommand flush the buffered
-    //   pipeline replies before a blocking command (e.g. BLPOP) parks the fiber. Gating it avoids a
-    //   bogus flush / blocking-in-pipeline stat bump for a lone blocking command.
+    //   pipeline replies before a blocking command (e.g. BLPOP) parks the fiber. Buffered replies
+    //   can outlive their commands, so a lone tail still needs this flag until the prefix flushes.
+    //   A standalone blocking command with no buffered replies keeps the flag clear.
     // V1 sets these flags elsewhere (DispatchSingle / the AsyncFiber paths), hence the ioloop_v2_
     // guard.
     //
@@ -3370,7 +3371,7 @@ Connection::ExecuteBatchResult Connection::ExecuteBatch() {
       DCHECK(!cc_->sync_dispatch);
       DCHECK(!cc_->async_dispatch);
       cc_->sync_dispatch = true;
-      cc_->async_dispatch = is_true_pipeline;
+      cc_->async_dispatch = is_true_pipeline || reply_builder_->HasBufferedOutput();
       fiber_park_spot_ = FiberParkSpot::kSimpleHop;
     }
     // parse-in-proactor can append commands while we are parked in DispatchCommandSimple. We might

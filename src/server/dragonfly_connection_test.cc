@@ -300,6 +300,49 @@ TEST_P(DragonflyV2ConnectionTest, WakesForNextAsyncReplyOverPipelineLimit) {
   ASSERT_EQ(client.ReadLine(), "+OK\r\n");
 }
 
+// A lone blocking tail must flush replies buffered by earlier execution batches.
+TEST_P(DragonflyV2ConnectionTest, FlushesPipelineBeforeBlockingTail) {
+  const std::string original_limit =
+      Run({"CONFIG", "GET", "pipeline_buffer_limit"}).GetVec()[1].GetString();
+  for (bool squash : {true, false}) {
+    SCOPED_TRACE(squash);
+    absl::SetFlag(&FLAGS_enable_pipeline_squashing_v2, squash);
+    for (std::string_view limit : {"128MB", "1"}) {
+      SCOPED_TRACE(limit);
+      absl::Cleanup restore_limit = [&] {
+        EXPECT_EQ(Run({"CONFIG", "SET", "pipeline_buffer_limit", original_limit}), "OK");
+      };
+
+      RawRespClient client{port_};
+      ASSERT_TRUE(client.valid());
+      const std::string name = "blocking-tail-" + std::to_string(squash) + "-" + std::string(limit);
+      ASSERT_TRUE(client.SendAll("CLIENT SETNAME " + name + "\r\n"));
+      ASSERT_EQ(client.ReadLine(), "+OK\r\n");
+
+      ASSERT_TRUE(client.SendAll("CLIENT INFO\r\nCONFIG SET pipeline_buffer_limit " +
+                                 std::string(limit) +
+                                 "\r\nSET a b\r\nPING\r\nSET c d\r\nBLPOP empty 0\r\n"));
+      ASSERT_TRUE(WaitForBlockedConnection(name));
+
+      // Count CLIENT INFO itself to verify the full pipeline was parsed before CONFIG ran.
+      ASSERT_THAT(client.ReadLine(), Optional(StartsWith("$")));
+      ASSERT_THAT(client.ReadLine(), Optional(HasSubstr(" pipeline=6 ")));
+
+      // All completed replies must arrive while BLPOP is still blocked.
+      for (std::string_view reply : {"+OK\r\n", "+OK\r\n", "+PONG\r\n", "+OK\r\n"}) {
+        ASSERT_EQ(client.ReadLine(), reply);
+      }
+
+      EXPECT_THAT(Run({"LPUSH", "empty", "value"}), IntArg(1));
+      for (std::string_view reply : {"*2\r\n", "$5\r\n", "empty\r\n", "$5\r\n", "value\r\n"}) {
+        ASSERT_EQ(client.ReadLine(), reply);
+      }
+      ASSERT_TRUE(client.SendAll("PING\r\n"));
+      ASSERT_EQ(client.ReadLine(), "+PONG\r\n");
+    }
+  }
+}
+
 // A valid pipelined prefix must execute and reply in order before the terminal protocol error.
 // The malformed frame must then produce the error and close the connection.
 TEST_P(DragonflyV2ConnectionTest, DrainsValidPipelineBeforeProtocolError) {
