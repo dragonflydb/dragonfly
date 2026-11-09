@@ -3439,9 +3439,6 @@ TEST_F(MemParityTest, AsyncUnlinkLargeHash) {
   EXPECT_TRUE(d.IsClean()) << d;
 }
 
-// Known gaps: scenarios below are not covered by the new metric, all are to do. comparisons pasted
-// above tests as guide of what fails, with table values not denoted where not relevant
-
 TEST_F(MemParityTest, SetOverwritesHash) {
   for (const string& value : {val_, string("inline"), string("42")}) {
     SCOPED_TRACE(StrCat("replacement length=", value.size()));
@@ -3474,13 +3471,11 @@ TEST_F(MemParityTest, RenameStringAcrossShards) {
   METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
 }
 
-// needs fix in the command handler.
-// new: {} old: {string=-896 key=-896 } obj_used=-1792
 TEST_F(MemParityTest, RenameHashOverString) {
   Run({"HSET", key_, "field", val_});
   Run({"SET", key3_, val_});
-  auto d = Delta([&] { Run({"RENAME", key_, key3_}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+  auto d = Delta([&] { EXPECT_EQ(Run({"RENAME", key_, key3_}), "OK"); });
+  EXPECT_TRUE(d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
 // new: {string=-896 } old: {string=-896 hash=1392 } obj_used=496
@@ -3522,15 +3517,6 @@ TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
   EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Positive(OBJ_ZSET)) << d;
 }
 
-// new: {set=-992 } old: {set=280 hash=-1280 } obj_used=-1000
-TEST_F(MemParityTest, SUnionStoreOverwritesHash) {
-  Run({"HSET", key_, "f", val_});
-  Run({"SADD", key2_, "1", "a", "2", "b"});
-  Run({"SADD", key3_, "3", "c", "4", "d"});
-  auto d = Delta([&] { Run({"SUNIONSTORE", key_, key2_, key3_}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_SET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
-}
-
 namespace {
 class SetMemParityTest : public MemParityTest, public WithParamInterface<bool> {
  protected:
@@ -3547,20 +3533,32 @@ class SetMemParityTest : public MemParityTest, public WithParamInterface<bool> {
 
 TEST_P(SetMemParityTest, SetUnionStoreOverwritesHashAccounting) {
   ASSERT_EQ(g_use_oah_set, GetParam());
+  auto store_union = [&] { EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4)); };
+  bool full_parity = true;
+  MetricCmp parity_gap;
   for (const string& member : {string("3"), string("a")}) {
     SCOPED_TRACE(StrCat("replacement member=", member));
     ASSERT_THAT(Run({"SADD", key2_, "1", "2"}), IntArg(2));
     ASSERT_THAT(Run({"SADD", key3_, member, "4"}), IntArg(2));
-    auto created = Delta([&] { EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4)); });
+    auto created = Delta(store_union);
     ASSERT_THAT(Run({"DEL", key_}), IntArg(1));
     ASSERT_THAT(Run({"HSET", key_, "f", val_}), IntArg(1));
-    auto d = Delta([&] { EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4)); });
+    auto d = Delta(store_union);
     EXPECT_TRUE(d.Match(OBJ_HASH) && d.Match(OBJ_KEY) && d.IsClean()) << d;
     EXPECT_EQ(d.new_metric[OBJ_SET], created.new_metric[OBJ_SET]) << d;
     EXPECT_EQ(d.NewTotal(), created.new_metric[OBJ_SET] + d.old_metric[OBJ_HASH]) << d;
     EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Positive(OBJ_SET)) << d;
+    if (!(d.Match(OBJ_SET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean())) {
+      full_parity = false;
+      parity_gap = d;
+    }
     ASSERT_THAT(Run({"DEL", key_, key2_, key3_}), IntArg(3));
   }
+
+  // A known parity gap must not bypass or obscure replacement-accounting failures.
+  if (HasFailure())
+    return;
+  METRIC_CMP_TODO(parity_gap, full_parity);
 }
 
 INSTANTIATE_TEST_SUITE_P(SetImplementations, SetMemParityTest, Bool(),
