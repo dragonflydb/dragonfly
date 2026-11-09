@@ -52,14 +52,13 @@ size_t ShardArgs::Size() const {
   return sz;
 }
 
-void RecordJournal(const OpArgs& op_args, string_view cmd, const ShardArgs& args, uint32_t unused) {
+void RecordJournal(const OpArgs& op_args, string_view cmd, const ShardArgs& args) {
   DCHECK(op_args.tx);
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
   op_args.tx->LogJournalOnShard(Payload(cmd, args));
 }
 
-void RecordJournal(const OpArgs& op_args, std::string_view cmd, facade::ArgSlice args,
-                   uint32_t unused) {
+void RecordJournal(const OpArgs& op_args, std::string_view cmd, facade::ArgSlice args) {
   DCHECK(op_args.tx);
   VLOG(2) << "Logging command " << cmd << " from txn " << op_args.tx->txid();
   op_args.tx->LogJournalOnShard(Payload(cmd, args));

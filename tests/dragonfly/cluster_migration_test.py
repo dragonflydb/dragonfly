@@ -248,6 +248,64 @@ async def test_migration_with_key_ttl(df_factory):
     assert await nodes[1].client.execute_command("stick k_sticky") == 0
 
 
+@dfly_args({"proactor_threads": 2})
+async def test_migration_preserves_database_ids(df_factory: DflyInstanceFactory):
+    # Cluster clients can't SELECT, so a standalone instance fills and inspects the databases.
+    standalone = df_factory.create()
+    standalone.start()
+    # A tiny chunk size splits collections into many commands. The target starts empty, so it must
+    # create databases 1-2 during the migration.
+    instances, nodes = await create_cluster(
+        df_factory, 2, cluster_mode="yes", serialization_max_chunk_size=1
+    )
+    nodes[0].slots = [(0, 16383)]
+    nodes[1].slots = []
+    await apply_config(nodes)
+
+    async def db_sizes(client):
+        keyspace = await client.info("keyspace")
+        return {db: (s["keys"], s["expires"]) for db, s in keyspace.items() if s["keys"]}
+
+    captures = []
+    for db in range(3):
+        client = standalone.client(db=db)
+        await DebugPopulateSeeder(key_target=500).run(client)
+        # Collections send TTL and sticky bit as separate PEXPIREAT and STICK commands.
+        await client.execute_command(
+            f"DEBUG POPULATE 10 ttl{db} 10 TYPE LIST ELEMENTS 5 EXPIRE 1000 2000"
+        )
+        assert await client.execute_command("STICK", f"ttl{db}:0") == 1
+        captures.append(await DebugPopulateSeeder.capture(client))
+
+    sizes = await db_sizes(standalone.client())
+    assert len(sizes) == 3
+    snapshot = tmp_file_name()
+    await standalone.client().execute_command("SAVE", "DF", f"{snapshot}-src")
+    await nodes[0].client.execute_command("DFLY", "LOAD", f"{snapshot}-src-summary.dfs")
+    assert await db_sizes(nodes[0].client) == sizes
+
+    nodes[0].migrations = [
+        MigrationInfo("127.0.0.1", nodes[1].instance.admin_port, [(0, 16383)], nodes[1].id)
+    ]
+    await apply_config(nodes)
+    await wait_for_status(nodes[0].admin_client, nodes[1].id, "FINISHED")
+    await finalize_migration(nodes, 0, 1, [], [(0, 16383)])
+    assert await db_sizes(nodes[1].client) == sizes
+
+    @assert_eventually
+    async def check_source_flushed():
+        assert await db_sizes(nodes[0].client) == {}
+
+    await check_source_flushed()
+
+    await nodes[1].client.execute_command("SAVE", "DF", f"{snapshot}-dst")
+    await standalone.client().execute_command("DFLY", "LOAD", f"{snapshot}-dst-summary.dfs")
+    for db in range(3):
+        client = standalone.client(db=db)
+        assert await DebugPopulateSeeder.capture(client) == captures[db]
+        assert await client.execute_command("STICK", f"ttl{db}:0") == 0
+
+
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
 async def test_cluster_replication_migration(
     df_factory: DflyInstanceFactory, df_seeder_factory: DflySeederFactory

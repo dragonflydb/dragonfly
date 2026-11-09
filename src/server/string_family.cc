@@ -419,12 +419,12 @@ OpStatus OpMSet(const OpArgs& op_args, const ShardArgs& args) {
   // Above loop could have parial success (e.g. OOM), replicate only what changed
   if (auto journal = op_args.shard->journal(); journal) {
     if (stored * 2 == args.Size()) {
-      RecordJournal(op_args, "MSET", args, op_args.tx->GetUniqueShardCnt());
+      RecordJournal(op_args, "MSET", args);
       DCHECK_EQ(result, OpStatus::OK);
     } else if (stored > 0) {
       vector<string_view> store_args(args.begin(), args.end());
       store_args.resize(stored * 2);
-      RecordJournal(op_args, "MSET", store_args, op_args.tx->GetUniqueShardCnt());
+      RecordJournal(op_args, "MSET", store_args);
     }
   }
   return result;

@@ -235,7 +235,7 @@ it and miss the bucket entirely.
 
 `SerializeBucket` (in `serializer_base.cc`) iterates the occupied slots of a physical bucket and
 calls `SerializeEntry` for each entry accepted by the virtual `ShouldSerialize` hook (all entries
-by default; slot migration keeps db 0 and its owned slots). No lock is held for the whole bucket:
+by default; slot migration keeps its owned slots in every db). No lock is held for the whole bucket:
 `SerializeEntry` takes `stream_mu_` per entry.
 
 `SerializeEntry` (in `serializer_base.cc`) dispatches based on value location:

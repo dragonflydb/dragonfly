@@ -26,7 +26,6 @@ redis-om>=0.3.3
 pytest-emoji>=0.2.0
 pytest-icdiff>=0.9
 pytest-timeout>=2.2.0
-asyncio>=3.4.3
 fakeredis[json]>=2.26.2
 hiredis==2.4.0
 PyYAML>=6.0.3

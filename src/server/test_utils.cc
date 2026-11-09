@@ -387,12 +387,6 @@ unsigned BaseFamilyTest::NumLocked() {
   return count;
 }
 
-void BaseFamilyTest::ClearMetrics() {
-  shard_set->pool()->AwaitBrief([](unsigned, auto*) {
-    ServerState::tlocal()->stats = ServerState::Stats(shard_set->size());
-  });
-}
-
 string BaseFamilyTest::FormatMetrics(const Metrics& metrics) const {
   return service_->server_family().FormatInfoMetrics(metrics, "ALL", true, nullptr);
 }
@@ -609,12 +603,6 @@ int64_t BaseFamilyTest::CheckedInt(ArgSlice list) {
   int64_t res;
   CHECK(absl::SimpleAtoi(sv, &res)) << "|" << sv << "|";
   return res;
-}
-
-string BaseFamilyTest::CheckedString(ArgSlice list) {
-  RespExpr resp = Run(list);
-  CHECK_EQ(RespExpr::STRING, int(resp.type)) << list;
-  return string{ToSV(resp.GetBuf())};
 }
 
 CmdArgVec BaseFamilyTest::TestConnWrapper::Args(ArgSlice list) {

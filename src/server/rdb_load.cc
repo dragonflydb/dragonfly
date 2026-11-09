@@ -2445,11 +2445,6 @@ struct RdbLoader::ObjSettings {
     has_expired = (val <= now);
   }
 
-  void SetMCFlags(uint32_t flags) {
-    has_mc_flags = true;
-    mc_flags = flags;
-  }
-
   ObjSettings() = default;
 };
 
@@ -3107,7 +3102,11 @@ error_code RdbLoaderBase::HandleJournalBlob(Service* service) {
     }
 
     DVLOG(2) << "Executing item: " << entry.ToString();
-    journal_executor_->Execute(entry.dbid, entry.cmd);
+    auto result = journal_executor_->Execute(entry.dbid, entry.cmd);
+    if (result != facade::DispatchResult::OK) {
+      return RdbError(result == facade::DispatchResult::OOM ? errc::out_of_memory
+                                                            : errc::rdb_file_corrupted);
+    }
   }
 
   return std::error_code{};
@@ -3200,10 +3199,7 @@ error_code RdbLoader::HandleAux() {
       shard_id_ = shard_id;
     }
   } else if (auxkey == "table-mem") {
-    size_t mem;
-    if (absl::SimpleAtoi(auxval, &mem)) {
-      table_used_memory_ = mem;
-    }
+    // Recognized snapshot metadata; the loader does not use the table memory estimate.
   } else {
     /* We ignore fields we don't understand, as by AUX field
      * contract. */
