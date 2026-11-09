@@ -7,6 +7,7 @@
 
 #include <filesystem>
 
+#include "io/file.h"
 #include "server/rdb_save.h"
 #include "util/fibers/fiberqueue_threadpool.h"
 
@@ -66,12 +67,11 @@ class RdbSnapshot {
   }
 
  private:
-  bool is_linux_file_ = false;
   SnapshotStorage* snapshot_storage_ = nullptr;
 
   std::atomic_uint32_t started_shards_ = 0;
 
-  unique_ptr<io::Sink> io_sink_;
+  unique_ptr<io::WriteFile> io_sink_;
   unique_ptr<RdbSaver> saver_;
   RdbTypeFreqMap freq_map_;
 

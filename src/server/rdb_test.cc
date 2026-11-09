@@ -681,11 +681,11 @@ class TestCloudStorage : public detail::FileSnapshotStorage {
   explicit TestCloudStorage(Failure failure) : FileSnapshotStorage(nullptr), failure_(failure) {
   }
 
-  io::Result<pair<io::Sink*, uint8_t>, GenericError> OpenWriteFile(const string& path) override {
+  io::Result<io::WriteFile*, GenericError> OpenWriteFile(const string& path) override {
     if (failure_ == kOpenSummary && path.find("summary") != string::npos)
       return nonstd::make_unexpected(GenericError(make_error_code(errc::io_error)));
     ++opened;
-    return pair<io::Sink*, uint8_t>{new File(this), detail::FileType::CLOUD};
+    return new File(this);
   }
 
   bool IsCloud() const override {

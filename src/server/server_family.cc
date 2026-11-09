@@ -146,13 +146,6 @@ ABSL_FLAG(uint32_t, pause_wait_timeout, 1,
           "Timeout in seconds, to set up the pause for all connections for CLIENT PAUSE command "
           "and cluster slot migration finalization procedure.");
 
-ABSL_FLAG(string, s3_endpoint, "", "endpoint for s3 snapshots, default uses aws regional endpoint");
-ABSL_FLAG(bool, s3_use_https, true, "whether to use https for s3 endpoints");
-// Disable EC2 metadata by default, or if a users credentials are invalid the
-// AWS client will spent 30s trying to connect to inaccessable EC2 endpoints
-// to load the credentials.
-ABSL_FLAG(bool, s3_ec2_metadata, false,
-          "whether to load credentials and configuration from EC2 metadata");
 ABSL_RETIRED_FLAG(bool, s3_sign_payload, true,
                   "Deprecated: S3 snapshot uploads always use an unsigned payload.");
 
@@ -314,52 +307,11 @@ string UnknownCmd(string cmd, facade::ParsedArgs args, size_t num_args) {
                       absl::StrJoin(args.begin(), end, ", ", CmdArgListFormatter()));
 }
 
-// Returns an error instead of terminating the process: this is called at runtime by
-// SAVE/LOAD commands, where a transient failure (e.g. missing credentials) must not kill
-// an already serving instance.
-io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> CreateCloudSnapshotStorage(
-    std::string_view uri) {
-  auto make_err = [](std::error_code ec, std::string_view what) {
-    return nonstd::make_unexpected(GenericError{ec, absl::StrCat("Failed to initialize ", what)});
-  };
-
-  if (detail::IsS3Path(uri)) {
-    auto aws = std::make_shared<detail::AwsS3SnapshotStorage>(absl::GetFlag(FLAGS_s3_endpoint),
-                                                              absl::GetFlag(FLAGS_s3_use_https),
-                                                              absl::GetFlag(FLAGS_s3_ec2_metadata));
-    auto ec = shard_set->pool()->GetNextProactor()->Await(
-        [&] { return aws->Init(detail::kBucketConnectMs); });
-    if (ec)
-      return make_err(ec, "AWS S3 snapshot storage");
-    return aws;
-  } else if (detail::IsGCSPath(uri)) {
-#ifdef WITH_GCP
-    auto gcs = std::make_shared<detail::GcsSnapshotStorage>();
-    auto ec = shard_set->pool()->GetNextProactor()->Await([&] { return gcs->Init(3000); });
-    if (ec)
-      return make_err(ec, "GCS snapshot storage");
-    return gcs;
-#else
-    return nonstd::make_unexpected(
-        GenericError{make_error_code(errc::not_supported), "Compiled without GCP support"});
-#endif
-  } else if (detail::IsAzurePath(uri)) {
-    auto azure = std::make_shared<detail::AzureSnapshotStorage>();
-    auto ec = shard_set->pool()->GetNextProactor()->Await(
-        [&] { return azure->Init(uri, detail::kBucketConnectMs); });
-    if (ec)
-      return make_err(ec, "Azure snapshot storage");
-    return azure;
-  }
-  return nonstd::make_unexpected(GenericError{make_error_code(errc::invalid_argument),
-                                              absl::StrCat("Unknown cloud storage ", uri)});
-}
-
 // Cloud paths need their own storage, other paths use the server's default storage.
 io::Result<std::shared_ptr<detail::SnapshotStorage>, GenericError> SelectSnapshotStorage(
     std::string_view path, std::shared_ptr<detail::SnapshotStorage> default_storage) {
   if (detail::IsCloudPath(path))
-    return CreateCloudSnapshotStorage(path);
+    return detail::CreateCloudSnapshotStorage(path);
   return default_storage;
 }
 
@@ -1639,16 +1591,14 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   string flag_dir = GetFlag(FLAGS_dir);
 
   if (detail::IsCloudPath(flag_dir)) {
-    auto res = CreateCloudSnapshotStorage(flag_dir);
+    auto res = detail::CreateCloudSnapshotStorage(flag_dir);
     if (!res) {
       LOG(ERROR) << res.error().Format();
       exit(1);
     }
     snapshot_storage_ = std::move(*res);
-  } else if (fq_threadpool_) {
-    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   } else {
-    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(nullptr);
+    snapshot_storage_ = std::make_shared<detail::FileSnapshotStorage>(fq_threadpool_.get());
   }
 
   if (GetFlag(FLAGS_aof)) {
@@ -2223,19 +2173,15 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
                           "SAVING - can not save database"};
     }
 
-    std::shared_ptr<detail::SnapshotStorage> snapshot_storage = snapshot_storage_;
-    if (!save_cmd_opts.cloud_uri.empty()) {
-      auto res = CreateCloudSnapshotStorage(save_cmd_opts.cloud_uri);
-      if (!res) {
-        LOG(ERROR) << res.error().Format();
-        return res.error();
-      }
-      snapshot_storage = std::move(*res);
+    auto snapshot_storage = SelectSnapshotStorage(save_cmd_opts.cloud_uri, snapshot_storage_);
+    if (!snapshot_storage) {
+      LOG(ERROR) << snapshot_storage.error().Format();
+      return snapshot_storage.error();
     }
 
     controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, snapshot_storage, opts.bg_save});
+        &service_, std::move(*snapshot_storage), opts.bg_save});
     save_controller_ = controller;
   }
 
@@ -2884,9 +2830,7 @@ std::optional<SaveCmdOptions> ServerFamily::GetSaveCmdOpts(facade::ParsedArgs ar
   }
 
   if (args.size() >= 2) {
-    if (detail::IsS3Path(args[1])) {
-      save_cmd_opts.cloud_uri = args[1];
-    } else if (detail::IsGCSPath(args[1]) || detail::IsAzurePath(args[1])) {
+    if (detail::IsCloudPath(args[1])) {
       save_cmd_opts.cloud_uri = args[1];
     } else {
       // no cloud_uri get basename and return
