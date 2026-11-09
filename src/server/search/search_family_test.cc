@@ -811,6 +811,10 @@ TEST_F(SearchFamilyTest, AlterIndex) {
   EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[0 100]"}), kNoResults);
   EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[100 300]"}), AreDocIds("d:1", "d:2"));
 
+  EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "size", "numeric", "INDEXMISSING"}), "OK");
+  WaitForIndexReady("idx-1");
+  EXPECT_THAT(Run({"ft.search", "idx-1", "ismissing(@size)"}), AreDocIds("d:1", "d:2"));
+
   EXPECT_THAT(Run({"ft.alter", "idx-2", "schema", "add", "price", "numeric"}),
               ErrArg("idx-2: no such index"));
 }
@@ -4497,12 +4501,16 @@ TEST_F(SearchFamilyTest, FieldExpiryLastFieldDeleteRemovesKey) {
 
 // A document that stays alive keeps its DocId across the HSET bracket.
 TEST_F(SearchFamilyTest, FieldExpiryLiveDocDropsExpiredValues) {
-  EXPECT_EQ(Run({"FT.CREATE", "idx",   "ON",   "HASH",   "PREFIX",  "1",  "d:",
-                 "SCHEMA",    "title", "TEXT", "NOSTEM", "title",   "AS", "title_tag",
-                 "TAG",       "t",     "TAG",  "n",      "NUMERIC", "g",  "GEO"}),
-            "OK");
+  EXPECT_EQ(
+      Run({"FT.CREATE", "idx",          "ON",     "HASH",    "PREFIX", "1",         "d:",  "SCHEMA",
+           "title",     "TEXT",         "NOSTEM", "title",   "AS",     "title_tag", "TAG", "t",
+           "TAG",       "INDEXMISSING", "n",      "NUMERIC", "g",      "GEO"}),
+      "OK");
   Run({"HSETEX", "d:1", "1", "title", "hello", "t", "red", "n", "5", "g", "13.4,52.5"});
   AdvanceTime(2000);
+
+  // An expired field nobody touched stays indexed until the next write.
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "ismissing(@t)", "NOCONTENT"}), kNoResults);
   Run({"HSET", "d:1", "title", "world"});
 
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "hello", "NOCONTENT"}), kNoResults);
@@ -4512,6 +4520,7 @@ TEST_F(SearchFamilyTest, FieldExpiryLiveDocDropsExpiredValues) {
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "@g:[13.4 52.5 10 km]", "NOCONTENT"}), kNoResults);
   EXPECT_THAT(Run({"FT.TAGVALS", "idx", "t"}), ArrLen(0));
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "world", "NOCONTENT"}), AreNoContentDocIds("d:1"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "ismissing(@t)", "NOCONTENT"}), AreNoContentDocIds("d:1"));
 }
 
 // Removal stems with the language the document was indexed with, even after it expired.
@@ -10404,8 +10413,10 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
   };
 
   for (string_view idx : {"i", "h"}) {
-    for (auto [q, err] : {pair{"@zz:x", "Invalid field: zz"},
-                          pair{"@ni:[1 2]", "Wrong access type for field: ni"}}) {
+    for (auto [q, err] :
+         {pair{"@zz:x", "Invalid field: zz"}, pair{"@ni:[1 2]", "Wrong access type for field: ni"},
+          pair{"ismissing(@zz)", "Invalid field: zz"},
+          pair{"ismissing(@ni)", "with 'INDEXMISSING': ni"}}) {
       EXPECT_THAT(Run({"FT.AGGREGATE", idx, q}), ErrArg(err));
       const string knn = absl::StrCat(q, "=>[KNN 1 @v $vec]");
       EXPECT_THAT(Run({"FT.AGGREGATE", idx, knn, "PARAMS", "2", "vec", vec}), ErrArg(err));
@@ -10462,6 +10473,86 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
       ErrArg("Invalid field: nv"));  // a vector without an index has nothing to search
   EXPECT_THAT(Run({"FT.TAGVALS", "i", "ng"}), ArrLen(0));
   EXPECT_THAT(Run({"FT.TAGVALS", "i", "ni"}), ErrArg("Not a tag field"));
+}
+
+// ismissing(@f) in the query shapes clients send, in FT.SEARCH, FT.AGGREGATE and FT.HYBRID.
+TEST_F(SearchFamilyTest, IsMissing) {
+  ASSERT_EQ(Run("FT.CREATE idx ON HASH PREFIX 1 doc: SCHEMA brand TAG INDEXMISSING title TEXT "
+                "INDEXMISSING price NUMERIC INDEXMISSING SORTABLE color TAG user.name TAG "
+                "INDEXMISSING emb VECTOR HNSW 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC COSINE "
+                "INDEXMISSING"),
+            "OK");
+  Run({"HSET", "doc:1", "brand", "nike", "title", "running shoes", "price", "50", "color", "red",
+       "user.name", "ann", "emb", FloatVec(0.1, 0.2)});
+  Run({"HSET", "doc:2", "title", "running shirt", "price", "150", "emb", FloatVec(0.2, 0.1)});
+  Run({"HSET", "doc:3", "brand", "adidas", "title", "", "user.name", "", "emb",
+       FloatVec(0.3, 0.3)});
+  Run({"HSET", "doc:4", "brand", "puma", "price", "20"});
+  Run({"HSET", "doc:5", "title", "broken", "price", "unknown"});  // fails indexing
+
+  auto search = [&](string_view query) { return Run({"FT.SEARCH", "idx", query, "NOCONTENT"}); };
+  EXPECT_THAT(search("ismissing(@brand)"), AreNoContentDocIds("doc:2"));
+  EXPECT_THAT(search("ismissing(@title)"), AreNoContentDocIds("doc:4"));
+  EXPECT_THAT(search(R"(ismissing(@user\.name))"), AreNoContentDocIds("doc:2", "doc:4"));
+  EXPECT_THAT(search("ismissing(@emb)"), AreNoContentDocIds("doc:4"));
+  EXPECT_THAT(search("-ismissing(@brand)"), AreNoContentDocIds("doc:1", "doc:3", "doc:4"));
+  EXPECT_THAT(search("(@brand:{nike} | ismissing(@brand))"), AreNoContentDocIds("doc:1", "doc:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "(-(ismissing(@price)))", "NOCONTENT", "SORTBY", "price"}),
+              IsArray(IntArg(3), "doc:4", "doc:1", "doc:2"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "(ismissing(@price))=>[KNN 3 @emb $vec AS dist]",
+                   "NOCONTENT", "PARAMS", "2", "vec", FloatVec(0.3, 0.3)}),
+              AreNoContentDocIds("doc:3"));
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "ismissing(@price)", "LOAD", "1", "@brand", "GROUPBY",
+                   "1", "@brand", "REDUCE", "COUNT", "0", "AS", "n"}),
+              IsUnordArrayWithSize(IsMap("brand", "adidas", "n", "1")));
+  auto hybrid = Run({"FT.HYBRID", "idx", "SEARCH", "@title:zzz", "VSIM", "@emb", "$vec", "FILTER",
+                     "ismissing(@brand)", "PARAMS", "2", "vec", FloatVec(0.3, 0.3)});
+  ASSERT_HYBRID_RESP(hybrid);
+  EXPECT_THAT(HybridKeys(hybrid), ElementsAre("doc:2"));
+  EXPECT_THAT(search("@brand:{nike} | ismissing(@color)"),
+              ErrArg("'ismissing' requires defining the field with 'INDEXMISSING': color"));
+
+  Run({"HDEL", "doc:1", "brand"});
+  Run({"HSET", "doc:2", "brand", "acme", "user.name", "bob"});
+  Run({"HSET", "doc:5", "brand", "acme", "price", "30"});  // fixes the failed document
+  EXPECT_THAT(search("ismissing(@brand)"), AreNoContentDocIds("doc:1"));
+  EXPECT_THAT(search(R"(ismissing(@user\.name))"), AreNoContentDocIds("doc:4", "doc:5"));
+
+  // Spans several blocks of 64 documents on each shard.
+  for (int i = 0; i < 300; i++) {
+    string key = absl::StrCat("doc:import:", i);
+    if (i % 4 == 0)
+      Run({"HSET", key, "title", "imported"});
+    else
+      Run({"HSET", key, "title", "imported", "brand", "acme"});
+  }
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "ismissing(@brand) @title:imported", "LIMIT", "0", "0"}),
+              RespElementsAre(IntArg(75)));
+  EXPECT_THAT(search("ismissing(@brand) @title:shoes"), AreNoContentDocIds("doc:1"));
+}
+
+// On JSON null and "" are values; a path that selects nothing (no key, [*] over []) is missing.
+TEST_F(SearchFamilyTest, IsMissingJson) {
+  ASSERT_EQ(Run("FT.CREATE j ON JSON PREFIX 1 j: SCHEMA $.lock AS lock TAG INDEXMISSING $.year AS "
+                "year NUMERIC INDEXMISSING $.tags[*] AS tags TAG INDEXMISSING $.owner.first AS "
+                "first TEXT INDEXMISSING $.embedding AS embedding VECTOR HNSW 6 TYPE FLOAT32 DIM 2 "
+                "DISTANCE_METRIC COSINE INDEXMISSING"),
+            "OK");
+  Run({"JSON.SET", "j:1", "$",
+       R"({"lock":"u1","year":2020,"tags":["x"],"owner":{"first":"ann"},"embedding":[0.1,0.2]})"});
+  Run({"JSON.SET", "j:2", "$", R"({"lock":null,"year":null,"tags":[],"embedding":null})"});
+  Run({"JSON.SET", "j:3", "$", R"({"lock":"","owner":{}})"});
+  Run({"JSON.SET", "j:4", "$", "{}"});
+
+  auto search = [&](string_view query) { return Run({"FT.SEARCH", "j", query, "NOCONTENT"}); };
+  EXPECT_THAT(search("ismissing(@lock)"), AreNoContentDocIds("j:4"));
+  EXPECT_THAT(search("ismissing(@tags)"), AreNoContentDocIds("j:2", "j:3", "j:4"));
+  EXPECT_THAT(search("ismissing(@first)"), AreNoContentDocIds("j:2", "j:3", "j:4"));
+  EXPECT_THAT(search("ismissing(@embedding)"), AreNoContentDocIds("j:3", "j:4"));
+  EXPECT_THAT(search("-ismissing(@year) -@year:[-inf +inf]"), AreNoContentDocIds("j:2"));
+
+  Run({"JSON.DEL", "j:1", "$.lock"});
+  EXPECT_THAT(search("ismissing(@lock)"), AreNoContentDocIds("j:1", "j:4"));
 }
 
 TEST_F(SearchFamilyTest, FtHybridSyntaxErrors) {

@@ -14,6 +14,7 @@
 #include <uni_algo/case.h>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <ranges>
 #include <type_traits>
@@ -85,6 +86,7 @@ struct ProfileBuilder {
         [](const AstAttributeNode& n) { return absl::StrCat("Attribute{w=", n.weight, "}"); },
         [](const AstStarNode& n) { return absl::StrCat("Star{}"); },
         [](const AstStarFieldNode& n) { return absl::StrCat("StarField{}"); },
+        [](const AstIsMissingNode& n) { return absl::StrCat("IsMissing{}"); },
         [](const AstGeoNode& n) {
           return absl::StrCat("Geo{", n.lat, " ", n.lon, " ", n.radius, " ", n.unit, "}");
         },
@@ -316,6 +318,21 @@ struct BasicSearch {
     // If sort index doesn't exist try regular index
     BaseIndex* base_index = GetBaseIndex(active_field);
     return base_index ? IndexResult{base_index->GetAllDocsWithNonNullValues()} : IndexResult{};
+  }
+
+  // Via the schema: HNSW attributes have no index here, and NOINDEX ones must fail.
+  IndexResult Search(const AstIsMissingNode& node, string_view active_field) {
+    const SchemaField* field = indices_->GetSchema().Find(active_field);
+    if (!field) {
+      error_ = absl::StrCat("Invalid field: ", active_field);
+      return IndexResult{};
+    }
+    if (!(field->flags & SchemaField::INDEXMISSING)) {
+      error_ = absl::StrCat("'ismissing' requires defining the field with 'INDEXMISSING': ",
+                            active_field);
+      return IndexResult{};
+    }
+    return IndexResult{indices_->GetMissingDocs(*field)};
   }
 
   template <TagType T> IndexResult Search(const AstAffixNode<T>& node, string_view active_field) {
@@ -1212,7 +1229,7 @@ IndicesOptions::IndicesOptions() {
 
 FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
                            PMR_NS::memory_resource* mr, const Synonyms* synonyms)
-    : schema_{schema}, options_{options}, synonyms_{synonyms} {
+    : schema_{schema}, options_{options}, missing_docs_{mr}, synonyms_{synonyms} {
   CreateIndices(mr);
   CreateSortIndices();
 }
@@ -1221,6 +1238,8 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
   for (const auto& [alias, field] : schema_.Ordered()) {
     if (field->flags & SchemaField::NOINDEX)
       continue;
+    if (field->flags & SchemaField::INDEXMISSING)
+      missing_fields_.push_back(field);
     if (auto index = CreateIndex(alias, *field, mr); index) {
       add_list_.emplace_back(field->identifier, index.get());
       indices_[alias] = std::move(index);
@@ -1297,6 +1316,10 @@ bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
     return false;
   }
 
+  for (size_t row = 0; row < missing_fields_.size(); row++) {
+    if (access.IsFieldMissing(missing_fields_[row]->identifier))
+      MarkMissing(row, doc);
+  }
   all_ids_.insert(rng::upper_bound(all_ids_, doc), doc);
   return true;
 }
@@ -1311,8 +1334,35 @@ void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
 
   for (auto& [identifier, index] : add_list_)
     index->Remove(doc, access, identifier);
+  ClearMissing(doc);
 
   all_ids_.erase(it);
+}
+
+void FieldIndices::MarkMissing(size_t row, DocId doc) {
+  const size_t block = doc / 64 * missing_fields_.size();
+  if (block >= missing_docs_.size())
+    missing_docs_.resize(block + missing_fields_.size());
+  missing_docs_[block + row] |= uint64_t{1} << (doc % 64);
+}
+
+void FieldIndices::ClearMissing(DocId doc) {
+  const size_t block = doc / 64 * missing_fields_.size();
+  for (size_t i = block; i < min(block + missing_fields_.size(), missing_docs_.size()); i++)
+    missing_docs_[i] &= ~(uint64_t{1} << (doc % 64));
+}
+
+vector<DocId> FieldIndices::GetMissingDocs(const SchemaField& field) const {
+  const size_t row = rng::find(missing_fields_, &field) - missing_fields_.begin();
+  DCHECK_LT(row, missing_fields_.size());
+  vector<DocId> docs;
+  for (size_t i = row, first = 0; i < missing_docs_.size(); i += missing_fields_.size()) {
+    for (uint64_t bits = missing_docs_[i]; bits; bits &= bits - 1)
+      docs.push_back(static_cast<DocId>(first + std::countr_zero(bits)));
+    first += 64;
+  }
+  DCHECK(rng::includes(all_ids_, docs));
+  return docs;
 }
 
 BaseIndex* FieldIndices::GetIndex(string_view field) const {
@@ -1353,6 +1403,7 @@ size_t FieldIndices::GetNonPmrMemoryUsage() const {
     mem += add_list_.capacity() * sizeof(add_list_[0]);
   if (text_indices_.size() > 16)
     mem += text_indices_.capacity() * sizeof(text_indices_[0]);
+  mem += missing_fields_.capacity() * sizeof(missing_fields_[0]);
   return mem;
 }
 

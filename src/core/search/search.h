@@ -211,6 +211,9 @@ class FieldIndices {
   const std::vector<DocId>& GetAllDocs() const;
   const Schema& GetSchema() const;
 
+  // Documents without a value at the document field of `field`, an INDEXMISSING attribute.
+  std::vector<DocId> GetMissingDocs(const SchemaField& field) const;
+
   const Synonyms* GetSynonyms() const;
 
   // True if `term` (case-folded) is a stopword for this index. Mirrors the index-time stopword
@@ -236,6 +239,8 @@ class FieldIndices {
   std::unique_ptr<BaseIndex> CreateIndex(std::string_view alias, const SchemaField& field,
                                          PMR_NS::memory_resource* mr);
   static std::unique_ptr<BaseSortIndex> CreateSortIndex(const SchemaField& field);
+  void MarkMissing(size_t row, DocId doc);
+  void ClearMissing(DocId doc);
 
   const Schema& schema_;
   const IndicesOptions& options_;
@@ -247,6 +252,10 @@ class FieldIndices {
   // (identifier, index) for regular and sort indices: what Add and Remove feed with document
   // values.
   absl::InlinedVector<std::pair<std::string_view, BaseIndex*>, 16> add_list_;
+  // INDEXMISSING attributes, one row of missing_docs_ each.
+  std::vector<const SchemaField*> missing_fields_;
+  // One word per row for each 64 DocIds; a set bit marks a document without that field.
+  PMR_NS::vector<uint64_t> missing_docs_;
   absl::InlinedVector<TextIndex*, 16> text_indices_;  // declaration order
   const Synonyms* synonyms_;
 

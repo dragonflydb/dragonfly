@@ -82,6 +82,7 @@ sep_ch     [.!#&=<>^?+/']
 "$EPSILON"           return Parser::make_EPSILON (loc());
 "$YIELD_DISTANCE_AS" return Parser::make_YIELD_DISTANCE_AS (loc());
 "$WEIGHT"            return Parser::make_WEIGHT (loc());
+"ismissing"/[[:space:]]*"(" return Parser::make_ISMISSING (loc());
 
 [0-9]{1,9}                          return Parser::make_UINT32(str(), loc());
 [+-]?(([0-9]*[.])?[0-9]+|inf)       return Parser::make_DOUBLE(str(), loc());
@@ -101,7 +102,7 @@ w{dq}([^"]|{esc_seq})*{dq}            { if (str()[0] != 'w') { matcher().less(1)
 {sq}([^']|{esc_seq})*{sq}(~[0-9]+)?   return make_PhraseTok(str(), loc());
 
 "$"{term_ch}+                       return ParseParam(str(), loc());
-"@"{term_ch}+                       return Parser::make_FIELD(str(), loc());
+"@"{term_part}+                     return Parser::make_FIELD(UnescapeTerm(str()), loc());
 {astrsk_ch}{term_part}+{astrsk_ch}    return Parser::make_INFIX(UnescapeTerm(matched_view(1, 1)), loc());
 {term_part}+{astrsk_ch}               return Parser::make_PREFIX(UnescapeTerm(matched_view(0, 1)), loc());
 {astrsk_ch}{term_part}+               return Parser::make_SUFFIX(UnescapeTerm(matched_view(1, 0)), loc());
