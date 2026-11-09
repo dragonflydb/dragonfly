@@ -460,8 +460,8 @@ TEST_F(CompactObjectTest, AsciiUtil) {
   uint8_t buf[32];
 
   char outbuf[32] = "xxxxxxxxxxxxxx";
-  detail::ascii_pack_simd(data.data(), 7, buf);
-  detail::ascii_unpack_simd(buf, 7, outbuf);
+  detail::ascii_try_pack(data.data(), 7, buf);
+  detail::ascii_unpack_fast(buf, 7, outbuf);
 
   ASSERT_EQ('x', outbuf[7]) << outbuf;
   std::string_view actual{outbuf, 7};
@@ -473,8 +473,8 @@ TEST_F(CompactObjectTest, AsciiUtil) {
   }
   string act_str(data3.size(), 'y');
   std::vector<uint8_t> binvec(detail::binpacked_len(data3.size()));
-  detail::ascii_pack_simd2(data3.data(), data3.size(), binvec.data());
-  detail::ascii_unpack_simd(binvec.data(), data3.size(), act_str.data());
+  detail::ascii_try_pack(data3.data(), data3.size(), binvec.data());
+  detail::ascii_unpack_fast(binvec.data(), data3.size(), act_str.data());
 
   ASSERT_EQ(data3, act_str);
 }
@@ -496,8 +496,14 @@ const AsciiCodec kAsciiCodecs[] = {
 #ifdef DFLY_ASCII_TRY_PACK_HAS_SIMD
     {"SimdPack", detail::impl::ascii_try_pack_simd, detail::impl::ascii_unpack_fast_scalar},
 #endif
+#ifdef DFLY_ASCII_TRY_PACK_HAS_SSE
+    {"SsePack", detail::impl::ascii_try_pack_sse, detail::impl::ascii_unpack_fast_scalar},
+#endif
 #ifdef DFLY_ASCII_TRY_PACK_HAS_AVX2
     {"Avx2Pack", detail::impl::ascii_try_pack_avx2, detail::impl::ascii_unpack_fast_scalar},
+#endif
+#ifdef DFLY_ASCII_UNPACK_FAST_HAS_SSE
+    {"SseUnpack", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_sse},
 #endif
 #ifdef DFLY_ASCII_UNPACK_FAST_HAS_AVX2
     {"Avx2Unpack", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_avx2},
@@ -622,7 +628,7 @@ TEST_F(CompactObjectTest, AsciiPackByte) {
 
     size_t packed_len = detail::binpacked_len(len);
     vector<uint8_t> packed(packed_len);
-    detail::ascii_pack(original.data(), len, packed.data());
+    detail::ascii_try_pack(original.data(), len, packed.data());
 
     // Verify initial pack/unpack round-trip at byte level.
     for (size_t i = 0; i < len; ++i) {
@@ -1388,8 +1394,8 @@ TEST_F(CompactObjectTest, TryBorrow_AsciiLargeString) {
 
     // Verify the packed bytes decode back to the original string.
     string decoded(str_enc.DecodedSize(borrow->view()), '\0');
-    detail::ascii_unpack(reinterpret_cast<const uint8_t*>(borrow->view().data()),
-                         str_enc.DecodedSize(borrow->view()), decoded.data());
+    detail::ascii_unpack_fast(reinterpret_cast<const uint8_t*>(borrow->view().data()),
+                              str_enc.DecodedSize(borrow->view()), decoded.data());
     EXPECT_EQ(decoded, val);
   }
 
@@ -1497,38 +1503,24 @@ static void BM_PackNaive(benchmark::State& state) {
 }
 BENCHMARK(BM_PackNaive);
 
-static void ValidateAndPack2(const char* ascii, size_t len, uint8_t* bin) {
-  if (detail::validate_ascii_fast(ascii, len))
-    detail::ascii_pack2(ascii, len, bin);
-}
-
-static void ValidateAndPackSimd2(const char* ascii, size_t len, uint8_t* bin) {
-  if (detail::validate_ascii_fast(ascii, len))
-    detail::ascii_pack_simd2(ascii, len, bin);
-}
-
-using AsciiPackFunction = void (*)(const char*, size_t, uint8_t*);
 using AsciiTryPackFunction = size_t (*)(const char*, size_t, uint8_t*);
 using AsciiUnpackFunction = void (*)(const uint8_t*, size_t, char*);
 
 template <auto operation> static void BM_AsciiCodec(benchmark::State& state) {
-  constexpr bool kPack = is_same_v<decltype(operation), AsciiPackFunction>;
   constexpr bool kTryPack = is_same_v<decltype(operation), AsciiTryPackFunction>;
   constexpr bool kUnpack = is_same_v<decltype(operation), AsciiUnpackFunction>;
-  static_assert(kPack || kTryPack || kUnpack);
+  static_assert(kTryPack || kUnpack);
 
   string val(state.range(0), 'a');
   vector<uint8_t> buf(max<size_t>(detail::binpacked_len(val.size()), 1));
   if constexpr (kUnpack)
-    detail::ascii_pack(val.data(), val.size(), buf.data());
+    detail::ascii_try_pack(val.data(), val.size(), buf.data());
 
   while (state.KeepRunning()) {
     if constexpr (kTryPack)
       benchmark::DoNotOptimize(operation(val.data(), val.size(), buf.data()));
-    else if constexpr (kUnpack)
-      operation(buf.data(), val.size(), val.data());
     else
-      operation(val.data(), val.size(), buf.data());
+      operation(buf.data(), val.size(), val.data());
     benchmark::ClobberMemory();
   }
   state.SetBytesProcessed(state.iterations() * val.size());
@@ -1541,21 +1533,13 @@ static void AsciiCodecArgs(benchmark::Benchmark* benchmark) {
     benchmark->Arg(len);
 }
 
-static void AsciiSimdPackArgs(benchmark::Benchmark* benchmark) {
-  benchmark->ArgName("len");
-  for (int len : {32, 33, 61, 64, 100, 128, 256, 1024, 4096, 65536})
-    benchmark->Arg(len);
-}
-
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_pack)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_pack2)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_pack_simd)->Apply(AsciiSimdPackArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_pack_simd2)->Apply(AsciiSimdPackArgs);
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_try_pack)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, ValidateAndPack2)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, ValidateAndPackSimd2)->Apply(AsciiSimdPackArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_unpack)->Apply(AsciiCodecArgs);
-BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_unpack_simd)->Apply(AsciiCodecArgs);
+#ifdef DFLY_ASCII_TRY_PACK_HAS_SSE
+BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_try_pack_sse)->Apply(AsciiCodecArgs);
+#endif
+#ifdef DFLY_ASCII_UNPACK_FAST_HAS_SSE
+BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_unpack_fast_sse)->Apply(AsciiCodecArgs);
+#endif
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_unpack_fast)->Apply(AsciiCodecArgs);
 
 static void BM_LpCompare(benchmark::State& state) {

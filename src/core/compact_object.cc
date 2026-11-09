@@ -458,7 +458,7 @@ class CompactObjBorrowOps : public cmn::BorrowedStringOps {
 
   // ASCII1/2: 7 source bytes → 8 decoded bytes for the packed prefix; the
   // last `decoded_size % 8` decoded bytes (if any) are stored verbatim and
-  // decode 1:1. ascii_unpack is parameterized by the *decoded* length: an
+  // decode 1:1. ascii_unpack_fast is parameterized by the *decoded* length: an
   // ascii_len of N consumes (N/8)*7 + (N%8) source bytes. So we size the
   // chunk in decoded space (using DecodedSize) and map back to source.
   DecodeResult DecodeChunk(const cmn::BorrowedString& bs, size_t src_len, size_t src_offset,
@@ -480,7 +480,7 @@ class CompactObjBorrowOps : public cmn::BorrowedStringOps {
       n &= ~(kDecGroup - 1);
 
     const uint8_t* src = reinterpret_cast<const uint8_t*>(bs.view().data()) + src_offset;
-    detail::ascii_unpack(src, n, dest.data());
+    detail::ascii_unpack_fast(src, n, dest.data());
     size_t src_consume = (n / kDecGroup) * kSrcGroup + (n % kDecGroup);
     return {src_consume, n};
   }
@@ -1609,7 +1609,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
       return false;
 
     char buf[kInlineLen * 2];
-    detail::ascii_unpack(to_byte(u_.inline_str), sv.size(), buf);
+    detail::ascii_unpack_fast(to_byte(u_.inline_str), sv.size(), buf);
 
     return sv == string_view(buf, sv.size());
   }
@@ -1661,7 +1661,7 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     DCHECK_LT(slice[0].size(), 14u);
 
     uint8_t tmpbuf[14];
-    detail::ascii_pack(sv.data(), 16, tmpbuf);
+    detail::ascii_try_pack(sv.data(), 16, tmpbuf);
 
     // Compare the first slice.
     if (memcmp(slice[0].data(), tmpbuf, slice[0].size()) != 0)
@@ -1687,10 +1687,17 @@ void CompactObj::EncodeString(string_view str) {
   DCHECK_EQ(NONE_ENC, encoding_);
 
   string_view encoded = str;
-  bool is_ascii = kUseAsciiEncoding && detail::validate_ascii_fast(str.data(), str.size());
+  size_t encode_len = binpacked_len(str.size());
+
+  // tmp_buf never shrinks, so grow it only for ASCII strings, not for binary ones.
+  bool is_ascii = kUseAsciiEncoding && (encode_len <= tl.tmp_buf.capacity() ||
+                                        detail::validate_ascii_fast(str.data(), str.size()));
+  if (is_ascii) {
+    tl.tmp_buf.resize(encode_len);
+    is_ascii = detail::ascii_try_pack(str.data(), str.size(), tl.tmp_buf.data()) != 0;
+  }
 
   if (is_ascii) {
-    size_t encode_len = binpacked_len(str.size());
     size_t rev_len = ascii_len(encode_len);
 
     if (rev_len == str.size()) {
@@ -1700,13 +1707,11 @@ void CompactObj::EncodeString(string_view str) {
       encoding_ = ASCII1_ENC;  // str is shorter than its highest bound.
     }
 
-    tl.tmp_buf.resize(encode_len);
-    detail::ascii_pack_simd2(str.data(), str.size(), tl.tmp_buf.data());
     encoded = string_view{reinterpret_cast<char*>(tl.tmp_buf.data()), encode_len};
 
     if (encoded.size() <= kInlineLen) {
       SetMeta(encoded.size(), mask_);
-      detail::ascii_pack(str.data(), str.size(), reinterpret_cast<uint8_t*>(u_.inline_str));
+      memcpy(u_.inline_str, encoded.data(), encoded.size());
 
       return;
     }
