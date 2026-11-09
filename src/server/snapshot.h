@@ -122,7 +122,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
 
   util::fb2::Fiber snapshot_fb_;
 
-  // Hands chunks to consumer_ from its own fiber, in the order they were produced.
+  // Hands chunks to consumer_ from its own fiber, in the order they were produced, so a mutation
+  // fiber that serializes a bucket inline does not wait on the sink while it holds the shard's
+  // transaction queue.
   detail::QueuedSinkWriter writer_;
 
   const CompressionMode compression_mode_;
