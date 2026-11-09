@@ -214,7 +214,7 @@ TEST_F(RdbTest, UnsupportedVersion) {
   }
 }
 
-TEST_F(RdbTest, LoadValkeyHashWithExpiry) {
+TEST_F(RdbTest, LoadHashWithExpiry) {
   for (string_view header : {"", "VALKEY081", "VALKEY999"}) {
     SCOPED_TRACE(header);
     EXPECT_EQ(Run({"FLUSHALL"}), "OK");
@@ -225,6 +225,39 @@ TEST_F(RdbTest, LoadValkeyHashWithExpiry) {
                 UnorderedElementsAre("expiring", "one", "persistent", "two", "overflow", "three"));
     EXPECT_THAT(Run({"HPEXPIRETIME", "hash", "FIELDS", "2", "expiring", "persistent"}),
                 RespElementsAre(2524608000000, -1));
+  }
+
+  // Redis 7.4.2 saved hashes with metadata and listpack_ex encodings and their DUMP payloads. The
+  // listpack_ex DUMP is LZF-compressed and also has 1500 fields expired at the time set below,
+  // which fill its first load batch.
+  TEST_current_time_ms = 2524607900000;
+  auto ec = LoadRdb("redis7_hash_expiry.rdb");
+  ASSERT_FALSE(ec) << ec.message();
+
+  // Returns the DUMP with another footer version and a matching CRC64.
+  auto with_version = [](string dump, uint16_t version) {
+    absl::little_endian::Store16(dump.data() + dump.size() - 10, version);
+    absl::little_endian::Store64(dump.data() + dump.size() - 8,
+                                 crc64(0, to_byte(dump.data()), dump.size() - 8));
+    return dump;
+  };
+  for (string_view key : {"metadata", "listpack_ex"}) {
+    SCOPED_TRACE(key);
+    string restored = StrCat(key, ":restored");
+    string dump = Run({"GET", StrCat("dump:", key)}).GetString();
+    EXPECT_EQ(Run({"RESTORE", restored, "0", dump}), "OK");
+
+    // Dragonfly DUMPs use RDB_SER_VERSION and can't carry Redis-only types, while RedisShake
+    // wraps Redis RDB values with version 6.
+    EXPECT_THAT(Run({"RESTORE", "invalid", "0", with_version(dump, RDB_SER_VERSION)}),
+                ErrArg("Bad data format"));
+    EXPECT_EQ(Run({"RESTORE", restored, "0", with_version(dump, 6), "REPLACE"}), "OK");
+    for (string_view hash : {key, string_view{restored}}) {
+      EXPECT_THAT(Run({"HGETALL", hash}).GetVec(),
+                  UnorderedElementsAre("expiring", "one", "persistent", "two"));
+      EXPECT_THAT(Run({"HPEXPIRETIME", hash, "FIELDS", "2", "expiring", "persistent"}),
+                  RespElementsAre(2524608000000, -1));
+    }
   }
 }
 
@@ -2206,12 +2239,15 @@ struct InterleaveHarness {
 }  // namespace
 
 TEST_F(RdbTest, UnsupportedTypeOrOpcode) {
-  // Redis hash metadata (22) and newer types overlap with Dragonfly's custom types.
+  // Redis pre-GA hash metadata (22) and newer types overlap with Dragonfly's custom types.
   // Reject them before attempting to read their payload, even after loading a supported key.
   for (string_view header : {"REDIS0012", "REDIS0015", "VALKEY081"}) {
     SCOPED_TRACE(header);
-    for (int type : {22, 24, 27, 30, 200, 220, 243}) {
+    for (int type : {22, 23, 24, 25, 27, 30, 200, 220, 243}) {
       if (header == "VALKEY081" && type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS)
+        continue;
+      if (header != "VALKEY081" &&
+          (type == RDB_TYPE_HASH_METADATA || type == RDB_TYPE_HASH_LISTPACK_EX))
         continue;
       SCOPED_TRACE(type);
       EXPECT_EQ(Run({"FLUSHALL"}), "OK");
@@ -2247,11 +2283,14 @@ TEST_F(RdbTest, DragonflyExtensions) {
     body.append(reinterpret_cast<const char*>(flags), sizeof(flags));
     body.push_back(RDB_TYPE_JSON);
     AddKV(&body, "json", R"({"value":42})");
+
+    // Dragonfly may reuse the IDs of Redis-only types for other encodings.
+    body.push_back(RDB_TYPE_HASH_METADATA);
     auto data = WrapInRdb(body);
     data.replace(0, 9, header);
 
     auto ec = LoadRdbBytes(to_byte(data.data()), data.size());
-    ASSERT_FALSE(ec) << ec.message();
+    EXPECT_EQ(ec, RdbError(rdb::errc::invalid_rdb_type));
     EXPECT_EQ(Run({"JSON.GET", "json"}), R"({"value":42})");
     EXPECT_THAT(Run({"STICK", "json"}), IntArg(0));
   }

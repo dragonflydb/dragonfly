@@ -1467,9 +1467,13 @@ auto RdbLoaderBase::ReadObj(int rdbtype, OpaqueObj* dest) -> Error {
     case RDB_TYPE_SET_LISTPACK:
       iores = ReadGeneric(rdbtype);
       break;
+    case RDB_TYPE_HASH_LISTPACK_EX:
+      iores = ReadHashListpackEx();
+      break;
     case RDB_TYPE_HASH:
     case RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED:
     case RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS:
+    case RDB_TYPE_HASH_METADATA:
       iores = ReadHMap(rdbtype);
       break;
     case RDB_TYPE_ZSET:
@@ -1684,13 +1688,8 @@ error_code RdbLoaderBase::ReadValkeyHashExpiry(RdbVariant* dest) {
   int64_t expiry_ms = *expiry_res;
   if (expiry_ms < -1)
     return RdbError(errc::rdb_file_corrupted);
-  if (expiry_ms >= 0) {
-    uint64_t expiry_sec = (static_cast<uint64_t>(expiry_ms) + 999) / 1000;
-    expiry_sec = std::min(expiry_sec, kMemberExpiryBase + UINT32_MAX);
-    expiry_ms = expiry_sec <= kMemberExpiryBase ? 0 : expiry_sec - kMemberExpiryBase;
-  }
 
-  dest->emplace<long long>(expiry_ms);
+  dest->emplace<long long>(MemberExpirySeconds(expiry_ms));
   return error_code{};
 }
 
@@ -1699,21 +1698,20 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
   if (pending_read_.remaining > 0) {
     len = pending_read_.remaining;
   } else {
+    if (rdbtype == RDB_TYPE_HASH_METADATA) {
+      SET_OR_UNEXPECT(FetchInt<uint64_t>(), pending_read_.hash_min_expiry_ms);
+    }
     SET_OR_UNEXPECT(LoadLen(NULL), len);
     if (len == 0 && !RdbTypeAllowedEmpty(rdbtype))
       return Unexpected(errc::empty_key);
-    // Reject a field count beyond the remaining input before it is reserved.
-    if (len > RemainingBytes())
+
+    // Reject a field count beyond the remaining input before it is reserved. Every element takes
+    // at least one byte, which also keeps the multiplication from overflowing.
+    const size_t increment = rdbtype == RDB_TYPE_HASH ? 2 : 3;
+    if (len > RemainingBytes() / increment)
       return Unexpected(errc::rdb_file_corrupted);
 
-    if (rdbtype == RDB_TYPE_HASH) {
-      len *= 2;
-    } else {
-      DCHECK(rdbtype == RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED ||
-             rdbtype == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS);
-      len *= 3;
-    }
-
+    len *= increment;
     pending_read_.reserve = len;
   }
 
@@ -1731,6 +1729,24 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
       if (ec)
         return make_unexpected(ec);
     }
+  } else if (rdbtype == RDB_TYPE_HASH_METADATA) {
+    // Redis writes each field TTL first: 0 means none, otherwise the deadline is min + ttl - 1.
+    // Saturate the sum so oversized deadlines reach the shared clamping conversion safely.
+    const uint64_t min_ms = std::min<uint64_t>(pending_read_.hash_min_expiry_ms, INT64_MAX);
+    for (; i < n && !ChunkBudgetExhausted(); i += 3) {
+      uint64_t ttl;
+      SET_OR_UNEXPECT(LoadLen(NULL), ttl);
+      int64_t expiry_ms = -1;
+      if (ttl != 0) {
+        expiry_ms = min_ms + std::min<uint64_t>(ttl - 1, INT64_MAX - min_ms);
+      }
+
+      if (error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var); ec)
+        return make_unexpected(ec);
+      if (error_code ec = ReadStringObj(&load_trace->arr[i + 1].rdb_var); ec)
+        return make_unexpected(ec);
+      load_trace->arr[i + 2].rdb_var.emplace<long long>(MemberExpirySeconds(expiry_ms));
+    }
   } else {
     for (; i < n && !ChunkBudgetExhausted(); ++i) {
       if (error_code ec = ReadStringObj(&load_trace->arr[i].rdb_var); ec)
@@ -1747,7 +1763,93 @@ auto RdbLoaderBase::ReadHMap(int rdbtype) -> io::Result<OpaqueObj> {
     pending_read_.remaining = 0;
   }
 
+  // Redis hash metadata now has the Dragonfly/Valkey [field, value, expiry] layout.
+  if (rdbtype == RDB_TYPE_HASH_METADATA)
+    rdbtype = RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS;
   return OpaqueObj{std::move(load_trace), rdbtype};
+}
+
+// Converts a Redis listpack of [field, value, deadline] triples to the hash expiry layout of
+// Dragonfly and Valkey.
+auto RdbLoaderBase::ReadHashListpackEx() -> Result<OpaqueObj> {
+  if (!pending_read_.hash_listpack) {
+    // The listpack stores absolute deadlines, so the leading minimum deadline is redundant.
+    RDB_TRY_SET(FetchInt<uint64_t>(), std::ignore);
+
+    RdbVariant obj;
+    RDB_TRY(ReadStringObj(&obj));
+    PendingRead::HashListpackState state;
+    if (const auto* lzf = get_if<LzfString>(&obj)) {
+      if (lzf->uncompressed_len == 0 || lzf->compressed_blob.empty())
+        return Fail(errc::rdb_file_corrupted) << "empty lzf string";
+      state.data.resize(lzf->uncompressed_len);
+
+      // PODArray is uninitialized, so decompression must fill the entire declared buffer.
+      if (lzf_decompress(lzf->compressed_blob.data(), lzf->compressed_blob.size(),
+                         state.data.data(), state.data.size()) != state.data.size())
+        return Fail(errc::rdb_file_corrupted) << "invalid lzf string";
+    } else if (auto* str = get_if<base::PODArray<char>>(&obj)) {
+      state.data = std::move(*str);
+    } else {
+      return Fail(errc::rdb_file_corrupted) << "invalid listpack string encoding";
+    }
+
+    if (state.data.empty())
+      return Fail(errc::rdb_file_corrupted) << "empty listpack";
+
+    auto* lp = reinterpret_cast<uint8_t*>(state.data.data());
+    if (!lpValidateIntegrity(lp, state.data.size(), /*deep=*/1, nullptr, nullptr))
+      return Fail(errc::rdb_file_corrupted) << "invalid listpack";
+
+    size_t len = lpLength(lp);
+    if (len == 0)
+      return Fail(errc::empty_key);
+    if (len % 3 != 0)
+      return Fail(errc::rdb_file_corrupted) << "listpack length " << len;
+
+    pending_read_.remaining = len;
+    pending_read_.reserve = len / 3;
+    state.offset = lpFirst(lp) - lp;
+    pending_read_.hash_listpack.emplace(std::move(state));
+  }
+
+  auto& state = *pending_read_.hash_listpack;
+  DCHECK_EQ(pending_read_.remaining % 3, 0u);
+  DCHECK_LT(state.offset, state.data.size());
+  auto* lp = reinterpret_cast<uint8_t*>(state.data.data());
+
+  // The packed payload is already consumed; only expand one batch of entries at a time.
+  size_t len = std::min(pending_read_.remaining, kMaxBlobLen);
+  auto load_trace = make_unique<LoadTrace>();
+  load_trace->arr.resize(len);
+  uint8_t* p = lp + state.offset;
+  for (size_t i = 0; i < len; ++i, p = lpNext(lp, p)) {
+    auto& dest = load_trace->arr[i].rdb_var;
+    if (i % 3 < 2) {
+      uint8_t intbuf[LP_INTBUF_SIZE];
+      int64_t slen;
+      const uint8_t* str = lpGet(p, &slen, intbuf);
+      auto& buf = dest.emplace<base::PODArray<char>>();
+      if (slen > 0)  // An empty PODArray has no buffer to memcpy into.
+        buf.assign(str, str + slen);
+      continue;
+    }
+
+    // Deadlines are absolute Unix times in milliseconds, where zero means no expiry.
+    int64_t expiry_ms;
+    if (!lpGetInteger(p, &expiry_ms) || expiry_ms < 0)
+      return Fail(errc::rdb_file_corrupted) << "invalid field deadline";
+    dest.emplace<long long>(MemberExpirySeconds(expiry_ms ? expiry_ms : -1));
+  }
+
+  pending_read_.remaining -= len;
+  if (pending_read_.remaining > 0) {
+    state.offset = p - lp;
+  } else {
+    pending_read_.hash_listpack.reset();
+  }
+
+  return OpaqueObj{std::move(load_trace), RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS};
 }
 
 auto RdbLoaderBase::ReadZSet(int rdbtype) -> io::Result<OpaqueObj> {
@@ -2776,8 +2878,11 @@ auto RdbLoader::LoadImpl(io::Source* src) -> Error {
     }
 
     // Redis uses some of the same IDs as Dragonfly and Valkey for different encodings.
-    if (!__rdbIsObjectType(type) && !(allow_df_extensions && rdbIsObjectTypeDF(type)) &&
-        !(is_valkey && type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS))
+    bool supported_type =
+        is_valkey ? __rdbIsObjectType(type) || type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS
+        : allow_df_extensions ? rdbIsObjectTypeDF(type)
+                              : rdbIsObjectTypeRedis(type);
+    if (!supported_type)
       return unsupported_type(type);
 
     ++keys_loaded;
@@ -3431,15 +3536,11 @@ auto RdbLoader::LoadKeyValPair(int type, ObjSettings* settings) -> Error {
   RDB_TRY_SET(ReadKey(), key);
   last_key_loaded_ = key;
 
-  auto remaining_payload_bytes = [&] {
-    return current_chunk_state_ ? current_chunk_state_->remaining_payload_bytes : UINT32_MAX;
-  };
-
   bool finalized = false;
   do {
     RDB_TRY_SET(ReadAndDispatchObject(type, key, *settings, cur_db_index_), finalized)
         << "key '" << absl::CHexEscape(key.substr(0, 64)) << "' type " << type;
-  } while (!finalized && remaining_payload_bytes() > 0 && !stop_early_.load(memory_order_relaxed));
+  } while (!finalized && CanReadObjectPart() && !stop_early_.load(memory_order_relaxed));
 
   // If the first tagged chunk did not finish the object, save enough state to resume it when
   // the next chunk with the same stream id arrives.
@@ -3484,8 +3585,7 @@ auto RdbLoader::LoadValueChunk() -> Error {
                 finalized)
         << "stream " << current_chunk_state_->stream_id << " key '"
         << absl::CHexEscape(state.key.substr(0, 64)) << "'";
-  } while (!finalized && current_chunk_state_->remaining_payload_bytes > 0 &&
-           !stop_early_.load(memory_order_relaxed));
+  } while (!finalized && CanReadObjectPart() && !stop_early_.load(memory_order_relaxed));
 
   if (finalized) {
     // done reading this object

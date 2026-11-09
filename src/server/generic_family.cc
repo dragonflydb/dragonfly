@@ -186,7 +186,11 @@ std::optional<RdbLoaderBase::OpaqueObj> RdbRestoreValue::Parse(io::Source* sourc
   src_ = source;
   if (pending_read_.remaining == 0) {
     io::Result<uint8_t> type_id = FetchType();
-    if (type_id && rdbIsObjectTypeDF(type_id.value())) {
+
+    // Only the version identifies a DUMP producer: Dragonfly writes RDB_SER_VERSION, while Redis
+    // payloads may carry other versions (RedisShake wraps RDB values with version 6).
+    if (type_id && (rdbIsObjectTypeDF(*type_id) ||
+                    (rdb_version_ != RDB_SER_VERSION && rdbIsObjectTypeRedis(*type_id)))) {
       rdb_type_ = *type_id;
     }
   }
@@ -235,6 +239,11 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
     if (auto ec = FromOpaque(*opaque_res, config, &pv); ec) {
       // Handle value_expired gracefully - all fields expired during deserialize
       if (ec.value() == rdb::errc::value_expired) {
+        // A partially read hash may still contain live fields in a later batch.
+        if (pending_read_.remaining > 0) {
+          first_parse = true;
+          continue;
+        }
         return OpStatus::SKIPPED;
       }
       // we failed - report and exit
@@ -316,11 +325,12 @@ void JournalRestore(const OpArgs& op_args, string_view key, const PrimeValue& pv
   if (!op_args.shard->journal())
     return;
 
-  // A stored DUMP may predate an older replica joining. Convert it for the current receivers.
+  // Convert imported Redis encodings and stored DUMPs for the current receivers.
   string storage;
   auto version = DflyCmd::GetMinReplicaVersion();
-  if (static_cast<uint8_t>(payload.front()) == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS &&
-      version < DflyVersion::VER7) {
+  uint8_t type = static_cast<uint8_t>(payload.front());
+  if (type == RDB_TYPE_HASH_METADATA || type == RDB_TYPE_HASH_LISTPACK_EX ||
+      (type == RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS && version < DflyVersion::VER7)) {
     storage = RdbSerializer::DumpValue(pv, version);
     payload = storage;
   }
