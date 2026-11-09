@@ -366,6 +366,10 @@ Mutations to migrating slots that arrive while the snapshot walk is still runnin
 streamed as ordinary write commands over the same connection, so the target catches
 up incrementally with no separate journal channel.
 
+Every command keeps the database ID of its source key, and the target creates the
+database if it doesn't exist yet. As in replication, the ID must be below the target's
+`--dbnum`.
+
 The target executes every decoded command through its normal transaction framework,
 exactly as if it had arrived from a client. The writes therefore appear on the
 target's outbound replication stream like any other write, so target-side replicas

@@ -169,19 +169,23 @@ class ClusterShardMigration {
       return {};
     }
 
+    std::string error;
     if (!tx_data.IsGlobalCmd()) {
       facade::DispatchResult res = executor_.Execute(tx_data.dbid, tx_data.command);
-      return res == facade::DispatchResult::OOM ? make_error_code(errc::not_enough_memory)
-                                                : error_code();
+      if (res == facade::DispatchResult::OK)
+        return {};
+      if (res == facade::DispatchResult::OOM)
+        return make_error_code(errc::not_enough_memory);
+      error = absl::StrCat("Failed to replay migration command in db ", tx_data.dbid);
     } else {
       // TODO check which global commands should be supported
-      std::string error = absl::StrCat("We don't support command: ", tx_data.command[0],
-                                       " in cluster migration process.");
-      LOG(ERROR) << error;
-      cntx->ReportError(error);
-      in_migration_->ReportError(error);
+      error = absl::StrCat("We don't support command: ", tx_data.command[0],
+                           " in cluster migration process.");
     }
 
+    LOG(ERROR) << error;
+    cntx->ReportError(error);
+    in_migration_->ReportError(error);
     return {};
   }
 

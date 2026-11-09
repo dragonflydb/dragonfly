@@ -28,21 +28,23 @@ class CmdSerializer {
   explicit CmdSerializer(FlushSerialized cb, size_t max_serialization_buffer_size);
 
   // Returns how many commands we broke this entry into (like multiple HSETs etc)
-  size_t SerializeEntry(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
-                        uint64_t expire_ms);
+  size_t SerializeEntry(DbIndex db_index, std::string_view key, const PrimeKey& pk,
+                        const PrimeValue& pv, uint64_t expire_ms);
 
  private:
-  void SerializeCommand(std::string_view cmd, absl::Span<const std::string_view> args);
-  void SerializeStickIfNeeded(std::string_view key, const PrimeKey& pk);
-  void SerializeExpireIfNeeded(std::string_view key, uint64_t expire_ms);
+  void SerializeCommand(DbIndex db_index, std::string_view cmd,
+                        absl::Span<const std::string_view> args);
+  void SerializeStickIfNeeded(DbIndex db_index, std::string_view key, const PrimeKey& pk);
+  void SerializeExpireIfNeeded(DbIndex db_index, std::string_view key, uint64_t expire_ms);
 
-  size_t SerializeSet(std::string_view key, const PrimeValue& pv);
-  size_t SerializeZSet(std::string_view key, const PrimeValue& pv);
-  size_t SerializeHash(std::string_view key, const PrimeValue& pv);
-  size_t SerializeList(std::string_view key, const PrimeValue& pv);
-  size_t SerializeString(std::string_view key, const PrimeValue& pv, uint64_t expire_ms);
-  void SerializeRestore(std::string_view key, const PrimeKey& pk, const PrimeValue& pv,
-                        uint64_t expire_ms);
+  size_t SerializeSet(DbIndex db_index, std::string_view key, const PrimeValue& pv);
+  size_t SerializeZSet(DbIndex db_index, std::string_view key, const PrimeValue& pv);
+  size_t SerializeHash(DbIndex db_index, std::string_view key, const PrimeValue& pv);
+  size_t SerializeList(DbIndex db_index, std::string_view key, const PrimeValue& pv);
+  size_t SerializeString(DbIndex db_index, std::string_view key, const PrimeValue& pv,
+                         uint64_t expire_ms);
+  void SerializeRestore(DbIndex db_index, std::string_view key, const PrimeKey& pk,
+                        const PrimeValue& pv, uint64_t expire_ms);
 
   FlushSerialized cb_;
   size_t max_serialization_buffer_size_;
