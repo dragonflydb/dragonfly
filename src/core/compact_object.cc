@@ -787,15 +787,18 @@ uint64_t CompactObj::HashCode(string_view str) {
 }
 
 CompactObjType CompactObj::ObjType() const {
-  if (IsInline() || taglen_ == INT_TAG || taglen_ == SMALL_TAG || taglen_ == SDS_TTL_TAG ||
-      taglen_ == LARGE_STR_TAG)
-    return OBJ_STRING;
-
   if (taglen_ == EXTERNAL_TAG) {
     return TypeForExternalRep(static_cast<ExternalRep>(u_.ext_ptr.representation));
   }
+  return TypeForTag(taglen_);
+}
 
-  switch (taglen_) {
+CompactObjType CompactObj::TypeForTag(uint8_t tag) {
+  if (tag <= kInlineLen || tag == INT_TAG || tag == SMALL_TAG || tag == SDS_TTL_TAG ||
+      tag == LARGE_STR_TAG)
+    return OBJ_STRING;
+
+  switch (tag) {
     case LIST_TAG:
       return OBJ_LIST;
     case SET_TAG:
@@ -818,7 +821,7 @@ CompactObjType CompactObj::ObjType() const {
       return OBJ_CUCKOOFILTER;
   }
 
-  LOG(FATAL) << "TBD " << int(taglen_);
+  LOG(FATAL) << "Unsupported non-external tag " << int(tag);
   return kInvalidCompactObjType;
 }
 
@@ -1487,33 +1490,25 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
 }
 
 void CompactObj::SetMeta(uint8_t taglen, uint8_t mask, CompactObjType replacement_type) {
-  CompactObjType old_type = kInvalidCompactObjType;
-  int64_t before = 0;
-  auto used_memory = [] {
-    return static_cast<int64_t>(
-        UsedMemoryThreadLocal(*static_cast<MiMemoryResource*>(tl.local_mr)));
-  };
-
   if (HasAllocated()) {
-    if (tl.type_replacement_hook && taglen != taglen_) {
-      old_type = ObjType();
-      before = used_memory();
+    const auto old_type = ObjType();
+    if (tl.type_replacement_hook && replacement_type == kInvalidCompactObjType)
+      replacement_type = TypeForTag(taglen);
+
+    if (tl.type_replacement_hook && old_type != replacement_type) {
+      const auto& resource = *static_cast<MiMemoryResource*>(tl.local_mr);
+      const int64_t before = UsedMemoryThreadLocal(resource);
+      Free();
+      const int64_t after = UsedMemoryThreadLocal(resource);
+      tl.type_replacement_hook(old_type, after - before);
+    } else {
+      Free();
     }
-    Free();
   } else {
     memset(u_.inline_str, 0, kInlineLen);
   }
   taglen_ = taglen;
   mask_ = mask;
-
-  if (old_type != kInvalidCompactObjType) {
-    if (replacement_type == kInvalidCompactObjType) {
-      DCHECK_NE(taglen, EXTERNAL_TAG);
-      replacement_type = ObjType();
-    }
-    if (old_type != replacement_type)
-      tl.type_replacement_hook(old_type, used_memory() - before);
-  }
 }
 
 // Frees all resources if owns.

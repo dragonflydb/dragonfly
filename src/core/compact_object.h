@@ -519,6 +519,9 @@ class CompactObj {
   }
 
  private:
+  // Resolves non-external tags without inspecting the value payload.
+  static CompactObjType TypeForTag(uint8_t tag);
+
   // Returns a string_view corresponding to the serialized encoded blob.
   // If opt_dest is provided, it may be used to decode directly into the destination buffer.
   std::string_view GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const;

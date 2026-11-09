@@ -3531,29 +3531,42 @@ TEST_F(MemParityTest, SUnionStoreOverwritesHash) {
   METRIC_CMP_TODO(d, d.Match(OBJ_SET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
 }
 
-TEST_F(MemParityTest, SetUnionStoreOverwritesHashAccounting) {
-  absl::FlagSaver flag_saver;
-  for (bool use_oah_set : {false, true}) {
-    absl::SetFlag(&FLAGS_use_oah_set, use_oah_set);
-    SCOPED_TRACE(StrCat("use_oah_set=", use_oah_set));
-    for (const string& member : {string("3"), string("a")}) {
-      SCOPED_TRACE(StrCat("replacement member=", member));
-      ASSERT_THAT(Run({"SADD", key2_, "1", "2"}), IntArg(2));
-      ASSERT_THAT(Run({"SADD", key3_, member, "4"}), IntArg(2));
-      auto created = Delta([&] {
-        EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4));
-      });
-      ASSERT_THAT(Run({"DEL", key_}), IntArg(1));
-      ASSERT_THAT(Run({"HSET", key_, "f", val_}), IntArg(1));
-      auto d = Delta([&] { EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4)); });
-      EXPECT_TRUE(d.Match(OBJ_HASH) && d.Match(OBJ_KEY) && d.IsClean()) << d;
-      EXPECT_EQ(d.new_metric[OBJ_SET], created.new_metric[OBJ_SET]) << d;
-      EXPECT_EQ(d.NewTotal(), created.new_metric[OBJ_SET] + d.old_metric[OBJ_HASH]) << d;
-      EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Positive(OBJ_SET)) << d;
-      ASSERT_THAT(Run({"DEL", key_, key2_, key3_}), IntArg(3));
-    }
+namespace {
+class SetMemParityTest : public MemParityTest, public WithParamInterface<bool> {
+ protected:
+  void SetUp() override {
+    // InitSetFamilyFlags caches this flag during base fixture setup.
+    absl::SetFlag(&FLAGS_use_oah_set, GetParam());
+    MemParityTest::SetUp();
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
+};
+}  // namespace
+
+TEST_P(SetMemParityTest, SetUnionStoreOverwritesHashAccounting) {
+  ASSERT_EQ(g_use_oah_set, GetParam());
+  for (const string& member : {string("3"), string("a")}) {
+    SCOPED_TRACE(StrCat("replacement member=", member));
+    ASSERT_THAT(Run({"SADD", key2_, "1", "2"}), IntArg(2));
+    ASSERT_THAT(Run({"SADD", key3_, member, "4"}), IntArg(2));
+    auto created = Delta([&] { EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4)); });
+    ASSERT_THAT(Run({"DEL", key_}), IntArg(1));
+    ASSERT_THAT(Run({"HSET", key_, "f", val_}), IntArg(1));
+    auto d = Delta([&] { EXPECT_THAT(Run({"SUNIONSTORE", key_, key2_, key3_}), IntArg(4)); });
+    EXPECT_TRUE(d.Match(OBJ_HASH) && d.Match(OBJ_KEY) && d.IsClean()) << d;
+    EXPECT_EQ(d.new_metric[OBJ_SET], created.new_metric[OBJ_SET]) << d;
+    EXPECT_EQ(d.NewTotal(), created.new_metric[OBJ_SET] + d.old_metric[OBJ_HASH]) << d;
+    EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Positive(OBJ_SET)) << d;
+    ASSERT_THAT(Run({"DEL", key_, key2_, key3_}), IntArg(3));
   }
 }
+
+INSTANTIATE_TEST_SUITE_P(SetImplementations, SetMemParityTest, Bool(),
+                         [](const TestParamInfo<bool>& info) {
+                           return info.param ? "OAHSet" : "StringSet";
+                         });
 
 // Table growth not added to the new metric. Slow (~20 seconds) so disabled by default, but passes
 TEST_F(MemParityTest, DISABLED_TableGrowth) {
