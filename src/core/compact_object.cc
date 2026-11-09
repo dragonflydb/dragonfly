@@ -1490,8 +1490,8 @@ void CompactObj::SetMeta(uint8_t taglen, uint8_t mask, CompactObjType replacemen
   CompactObjType old_type = kInvalidCompactObjType;
   int64_t before = 0;
   auto used_memory = [] {
-    return static_cast<int64_t>(static_cast<MiMemoryResource*>(tl.local_mr)->used()) +
-           zmalloc_used_memory_tl + static_cast<int64_t>(SmallString::UsedThreadLocal());
+    return static_cast<int64_t>(
+        UsedMemoryThreadLocal(*static_cast<MiMemoryResource*>(tl.local_mr)));
   };
 
   if (HasAllocated()) {

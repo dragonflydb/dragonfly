@@ -1045,7 +1045,7 @@ void EngineShard::CacheStats() {
 }
 
 size_t EngineShard::UsedMemoryWithoutSearch() const {
-  return mi_resource_.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
+  return UsedMemoryThreadLocal(mi_resource_);
 }
 
 size_t EngineShard::UsedMemory() const {
