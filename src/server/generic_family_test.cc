@@ -3206,7 +3206,7 @@ namespace {
 struct MetricCmp {
   TypeAttributedMemory new_metric{};
   TypeAttributedMemory old_metric{};
-  int64_t obj_used = 0, table_used = 0, search_used = 0, interned = 0;
+  int64_t obj_used = 0, table_used = 0, search_used = 0;
 
   MetricCmp() = default;
 
@@ -3217,7 +3217,6 @@ struct MetricCmp {
       table_used += db.table_mem_usage;
     }
     search_used = m.search_stats.used_memory;
-    interned = m.interned_string_stats.pool_bytes + m.interned_string_stats.pool_table_bytes;
   }
 
   MetricCmp operator-(const MetricCmp& o) const {
@@ -3227,7 +3226,6 @@ struct MetricCmp {
     res.obj_used -= o.obj_used;
     res.table_used -= o.table_used;
     res.search_used -= o.search_used;
-    res.interned -= o.interned;
     return res;
   }
 
@@ -3275,7 +3273,7 @@ ostream& operator<<(ostream& os, const MetricCmp& m) {
   print("new", m.new_metric);
   print("old", m.old_metric);
   return os << "obj_used=" << m.obj_used << " table_used=" << m.table_used
-            << " search_used=" << m.search_used << " interned=" << m.interned;
+            << " search_used=" << m.search_used;
 }
 
 // known gap
