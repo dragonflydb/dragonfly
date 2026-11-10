@@ -206,6 +206,8 @@ TEST_F(ClusterFamilyTest, ClusterConfigNoReplicas) {
 
   EXPECT_THAT(Run({"get", "x"}).GetString(),
               testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
+  EXPECT_THAT(Run({"move", "x", "1"}).GetString(),
+              testing::MatchesRegex(R"(MOVED [0-9]+ 10.0.0.1:7000)"));
 
   EXPECT_THAT(Run({"cluster", "slots"}),
               RespElementsAre(RespArray(ElementsAre(IntArg(0),              //
@@ -710,6 +712,16 @@ TEST_F(ClusterFamilyTest, ClusterMultiExec) {
   Run({"SET", "X3", "X3"});
 
   EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
+
+  Run({"MULTI"});
+  Run({"MOVE", "X1", "1"});
+  Run({"MOVE", "X2", "1"});
+  EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
+
+  Run({"MULTI"});
+  Run({"SET", "{tag}key", "value"});
+  Run({"MOVE", "{tag}key", "1"});
+  EXPECT_THAT(Run({"EXEC"}), RespElementsAre("OK", IntArg(1)));
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
@@ -1252,11 +1264,6 @@ TEST_F(ClusterFamilyTest, ClusterConfigDeleteSomeSlots) {
     ASSERT_THAT(resp.GetVec()[i], RespElementsAre(IntArg(i % 8000), _, _, _, _, _, _, _, _));
 }
 
-TEST_F(ClusterFamilyTest, ClusterModeSelectNotAllowed) {
-  EXPECT_THAT(Run({"select", "1"}), ErrArg("SELECT is not allowed in cluster mode"));
-  EXPECT_EQ(Run({"select", "0"}), "OK");
-}
-
 TEST_F(ClusterFamilyTest, ClusterModePubSubNotAllowed) {
   EXPECT_THAT(Run({"PUBLISH", "ch", "message"}),
               ErrArg("PUBLISH is not supported in cluster mode yet"));
@@ -1368,12 +1375,15 @@ TEST_F(ClusterFamilyTest, FlushSlots) {
                                                   _, "total_writes", _, "memory_bytes", _)))));
 }
 
+// Uses a non-default database: blocked clients are woken through the flushed table's db index.
 TEST_F(ClusterFamilyTest, FlushSlotsWakesBlockedXReadGroup) {
   ConfigSingleNodeCluster(GetMyId());
+  EXPECT_EQ(Run({"SELECT", "2"}), "OK");
   EXPECT_EQ(Run({"XGROUP", "CREATE", "s", "group", "0", "MKSTREAM"}), "OK");
 
   RespExpr blocked_resp;
   auto reader = pp_->at(1)->LaunchFiber(Launch::dispatch, [&] {
+    EXPECT_EQ(Run({"SELECT", "2"}), "OK");
     blocked_resp =
         Run({"XREADGROUP", "GROUP", "group", "consumer", "BLOCK", "2000", "STREAMS", "s", ">"});
   });
@@ -1482,19 +1492,36 @@ TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
   });
 }
 
-TEST_F(ClusterFamilyTest, MoveNotAllowedInClusterMode) {
+// MOVE is a global transaction, but its journal record must carry the key's slot so that slot
+// migrations stream it. Failed moves are not journaled.
+TEST_F(ClusterFamilyTest, ClusterModeDatabases) {
+  struct MoveJournalConsumer : journal::JournalConsumerInterface {
+    void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+      if (item.cmd == "MOVE")
+        slots.push_back(item.slot);
+    }
+
+    void ThrottleIfNeeded() override {
+    }
+
+    vector<optional<SlotId>> slots;
+  } move_journal;
+
   ConfigSingleNodeCluster(GetMyId());
+  EXPECT_EQ(Run({"ACL", "SETUSER", "user", "on", ">pw", "~*", "+@all", "$1"}), "OK");
 
-  EXPECT_EQ(Run({"set", "key", "val"}), "OK");
-  EXPECT_THAT(Run({"move", "key", "1"}), ErrArg("MOVE is not allowed in cluster mode"));
-  EXPECT_EQ(Run({"get", "key"}), "val");
-}
+  const ShardId shard_id = Shard("key", shard_set->size());
+  const uint32_t consumer_id = StartJournalWithConsumer(&move_journal, shard_id);
+  absl::Cleanup unregister = [&] {
+    pp_->at(shard_id)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
+  };
 
-TEST_F(ClusterFamilyTest, AclSelectDbNotAllowedInClusterMode) {
-  EXPECT_THAT(Run({"acl", "setuser", "u1", "on", ">pw", "~*", "+@all", "$1"}),
-              ErrArg("not allowed in cluster mode"));
-  EXPECT_EQ(Run({"acl", "setuser", "u2", "on", ">pw", "~*", "+@all", "$0"}), "OK");
-  EXPECT_EQ(Run({"acl", "setuser", "u3", "on", ">pw", "~*", "+@all", "$ALL"}), "OK");
+  EXPECT_THAT(Run({"MOVE", "key", "1"}), IntArg(0));
+  EXPECT_EQ(Run({"SET", "key", "val"}), "OK");
+  EXPECT_THAT(Run({"MOVE", "key", "1"}), IntArg(1));
+  EXPECT_EQ(Run({"SET", "key", "val"}), "OK");
+  EXPECT_THAT(Run({"MOVE", "key", "1"}), IntArg(0));
+  EXPECT_THAT(move_journal.slots, ElementsAre(optional<SlotId>{KeySlot("key")}));
 }
 
 // FlushSlots covers all databases: db 1 entries must be deleted through db 1's table (charging
