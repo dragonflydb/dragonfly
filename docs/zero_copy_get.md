@@ -85,7 +85,7 @@ source into a destination buffer and returns the number of bytes written
 
 This is the only seam between `common/` (or `facade/`) and the core internals:
 the concrete impl (`CompactObjBorrowOps`, file-local in `compact_object.cc`)
-casts the pin to `PendingRead*` and calls `detail::ascii_unpack` — callers
+casts the pin to `PendingRead*` and calls `detail::ascii_unpack_fast` — callers
 outside `core/` never see either type.
 
 ### `CompactObj::TryBorrow`
