@@ -49,6 +49,9 @@
     inline std::ostream& operator<<(std::ostream& os, const TextAttributes&) {
       return os;  // bison debug trace requires this; content not material to traces.
     }
+    inline std::ostream& operator<<(std::ostream& os, TagRangeOp) {
+      return os;  // bison debug trace requires this; content not material to traces.
+    }
   }
   }
 }
@@ -105,6 +108,10 @@ string UnescapeTerm(string_view src);
   YIELD_DISTANCE_AS "$YIELD_DISTANCE_AS"
   WEIGHT      "$WEIGHT"
   GLUE        "glue"
+  TAG_LT      ":<"
+  TAG_LE      ":<="
+  TAG_GT      ":>"
+  TAG_GE      ":>="
 ;
 
 %token AND_OP
@@ -133,6 +140,8 @@ string UnescapeTerm(string_view src);
 %nterm <AstExpr> field_cond field_cond_expr field_unary_expr field_or_expr field_and_expr tag_list
 %nterm <AstExpr> term_atom glued_word
 %nterm <AstTagsNode::TagValue> tag_list_element
+%nterm <std::string> tag_value tag_range_bound
+%nterm <TagRangeOp> tag_range_op
 
 %nterm <std::unique_ptr<AstKnnNode>> knn_query
 %nterm <std::string> opt_knn_alias
@@ -388,6 +397,21 @@ search_primary:
   | term_atom                         { $$ = std::move($1);                  }
   | glued_word                        { $$ = std::move($1);                  }
   | FIELD COLON field_cond            { $$ = make_unique<AstFieldNode>(std::move($1), std::move($3)); }
+  | FIELD tag_range_op LCURLBR tag_range_bound RCURLBR
+    {
+      auto range = make_unique<AstTagRangeNode>($2, std::move($4));
+      $$ = make_unique<AstFieldNode>(std::move($1), std::move(range));
+    }
+
+tag_range_op:
+  TAG_LT   { $$ = TagRangeOp::LESS;       }
+  | TAG_LE { $$ = TagRangeOp::LESS_EQ;    }
+  | TAG_GT { $$ = TagRangeOp::GREATER;    }
+  | TAG_GE { $$ = TagRangeOp::GREATER_EQ; }
+
+// A range bound is a single exact tag value; patterns have no order to compare against.
+tag_range_bound:
+  tag_value { $$ = std::move($1); }
 
 field_cond:
   term_atom                                             { $$ = std::move($1);                }
@@ -479,7 +503,15 @@ tag_list:
       }
 
 tag_list_element:
-  TERM        { $$ = {TagType::REGULAR, std::move($1)};   }
+  tag_value   { $$ = {TagType::REGULAR, std::move($1)};   }
+  | PREFIX    { $$ = {TagType::PREFIX, std::move($1)}; }
+  | SUFFIX    { $$ = {TagType::SUFFIX, std::move($1)}; }
+  | INFIX     { $$ = {TagType::INFIX, std::move($1)};  }
+  | WILDCARD  { $$ = {TagType::WILDCARD, std::move($1)}; }
+
+// An exact tag value inside {..}.
+tag_value:
+  TERM        { $$ = std::move($1); }
   | PHRASE {
       /* Inside {..}, quoted strings are literal tag values with one layer of `\X` escapes,
          matching the unquoted tag path (make_Tag). ~N slop is only meaningful for phrases,
@@ -487,15 +519,11 @@ tag_list_element:
       auto p = std::move($1);
       if (p.slop != 0)
         throw Parser::syntax_error(@$, "slop is not allowed in tag values");
-      $$ = {TagType::REGULAR, UnescapeTerm(p.raw)};
+      $$ = UnescapeTerm(p.raw);
     }
-  | PREFIX    { $$ = {TagType::PREFIX, std::move($1)}; }
-  | SUFFIX    { $$ = {TagType::SUFFIX, std::move($1)}; }
-  | INFIX     { $$ = {TagType::INFIX, std::move($1)};  }
-  | WILDCARD  { $$ = {TagType::WILDCARD, std::move($1)}; }
-  | UINT32    { $$ = {TagType::REGULAR, std::move($1)};   }
-  | DOUBLE    { $$ = {TagType::REGULAR, std::move($1)};   }
-  | TAG_VAL   { $$ = {TagType::REGULAR, std::move($1)};   }
+  | UINT32    { $$ = std::move($1); }
+  | DOUBLE    { $$ = std::move($1); }
+  | TAG_VAL   { $$ = std::move($1); }
 
 
 %%

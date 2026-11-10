@@ -43,6 +43,7 @@ struct AstAttributeNode;
 struct AstLogicalNode;
 struct AstFieldNode;
 struct AstTagsNode;
+struct AstTagRangeNode;
 struct AstKnnNode;
 struct AstVectorRangeNode;
 
@@ -82,6 +83,7 @@ struct AstNode {
     LOGICAL,
     FIELD,
     TAGS,
+    TAG_RANGE,
     KNN,
     VECTOR_RANGE,
     COUNT,
@@ -156,7 +158,7 @@ using AstNodeTypes =
     std::tuple<AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode, AstSuffixNode,
                AstInfixNode, AstWildcardNode, AstPhraseNode, AstRangeNode, AstGeoNode,
                AstNegateNode, AstOptionalNode, AstAttributeNode, AstLogicalNode, AstFieldNode,
-               AstTagsNode, AstKnnNode, AstVectorRangeNode>;
+               AstTagsNode, AstTagRangeNode, AstKnnNode, AstVectorRangeNode>;
 
 // Generate the typed callbacks in one base, without a virtual overload for each node type.
 template <typename Derived, typename... Nodes> struct AstVisitorCallbacks : AstVisitor {
@@ -325,6 +327,16 @@ struct AstTagsNode final : TypedAstNode<AstTagsNode, AstNode::Type::TAGS> {
   }
 
   std::vector<TagValue> tags;
+};
+
+// Matches documents with a tag value that compares to `bound` as `op` does, e.g. `@f:>{bob}`.
+// Values compare as byte strings after the same normalization the tag index applies.
+struct AstTagRangeNode final : TypedAstNode<AstTagRangeNode, AstNode::Type::TAG_RANGE> {
+  AstTagRangeNode(TagRangeOp op, std::string bound) : op{op}, bound{std::move(bound)} {
+  }
+
+  TagRangeOp op;
+  std::string bound;
 };
 
 // Applies nearest neighbor search to the final result set

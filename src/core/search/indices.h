@@ -33,6 +33,7 @@
 #include "core/search/range_tree.h"
 #include "core/search/rax_tree.h"
 #include "core/search/stemmer.h"
+#include "core/search/tag_types.h"
 
 // TODO: move core field definitions out of big header
 #include "common/string_or_view.h"
@@ -146,6 +147,12 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   void MatchWildcardWithTerm(
       std::string_view pattern,
       absl::FunctionRef<void(std::string_view term, const Container*)> cb) const;
+
+  // Iterate over all nodes whose term compares to `bound` as `op` says, in byte order. The bound
+  // is normalized like an exact query word (whitespace trimmed, lowercased unless case
+  // sensitive), so it compares against terms the way they were indexed.
+  void MatchRange(TagRangeOp op, std::string_view bound,
+                  absl::FunctionRef<void(const Container*)> cb) const;
 
   // Returns all the terms that appear as keys in the reverse index.
   std::vector<std::string> GetTerms() const;

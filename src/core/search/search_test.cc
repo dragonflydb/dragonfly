@@ -537,6 +537,118 @@ TEST_F(SearchTest, CheckTagPrefix) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
+// @field:<op>{bound} compares tag values lexicographically, after the same lowercasing and
+// whitespace trimming the tag index applies to stored values.
+TEST_F(SearchTest, CheckTagRange) {
+  PrepareSchema({{"name", SchemaField::TAG}, {"other", SchemaField::TAG}});
+  auto docs = [](auto... names) { return std::vector<Map>{Map{{"name", names}}...}; };
+
+  const struct {
+    string query;
+    vector<Map> match;
+    vector<Map> no_match;
+  } kCases[] = {
+      {"@name:>{bob}", docs("bobby", "Carol", "zed"), docs("bob", "BOB", "alice", "bo", "")},
+      {"@name:>={bob}", docs("bob", "BOB", "bobby", "zed"), docs("alice", "bo", "")},
+      {"@name:<{bob}", docs("alice", "bo", "Abe"), docs("bob", "bobby", "carol")},
+      {"@name:<={bob}", docs("alice", "bo", "BOB"), docs("bobby", "carol")},
+      // The bound is normalized like an exact tag match: lowercased and trimmed.
+      {R"(@name:>{\ BOB\ })", docs("bobby", "carol"), docs("bob", "alice")},
+      // The bound need not be an indexed value, and quoting allows spaces.
+      {"@name:<{\"bob z\"}", docs("bob", "bob a"), docs("bob zz", "carol")},
+      // A multi-valued field matches if any of its values is in range.
+      {"@name:>{m}", docs("alice, zed", "nina"), docs("alice, bob", "m")},
+      // A doc with several values in range is returned once.
+      {"@name:>{a}", docs("bob, carol, dave", "b"), docs("a", "")},
+      // Composes with other clauses, negation and other fields.
+      {"@name:>={b} @name:<{c}", docs("b", "bob", "bzz"), docs("a", "c", "carol")},
+      {"-@name:>{m}", docs("alice", "m"), docs("nina", "zed")},
+  };
+
+  for (const auto& c : kCases) {
+    PrepareQuery(c.query);
+    for (const auto& doc : c.match)
+      ExpectAll(doc);
+    for (const auto& doc : c.no_match)
+      ExpectNone(doc);
+    EXPECT_TRUE(Check()) << GetError();
+  }
+}
+
+TEST_F(SearchTest, CheckTagRangeCaseSensitive) {
+  auto schema = MakeSimpleSchema({{"name", SchemaField::TAG}});
+  schema.fields["name"].special_params = SchemaField::TagParams{.case_sensitive = true};
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  vector<string> values = {"Bob", "bob", "Carol", "alice"};
+  for (size_t i = 0; i < values.size(); i++)
+    indices.Add(i, MockedDocument{{{"name", values[i]}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+
+  // Uppercase letters sort before lowercase ones in byte order.
+  ASSERT_TRUE(algo.Init("@name:>{Bob}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(1, 2, 3));
+  ASSERT_TRUE(algo.Init("@name:<{a}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 2));
+}
+
+TEST_F(SearchTest, CheckTagRangeParams) {
+  auto schema = MakeSimpleSchema({{"name", SchemaField::TAG}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  vector<string> values = {"alice", "bob", "carol", "dave", "10", "9"};
+  for (size_t i = 0; i < values.size(); i++)
+    indices.Add(i, MockedDocument{{{"name", values[i]}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  params["cursor"] = "bob";
+  params["num"] = "10";
+
+  // Keyset pagination: the next page starts after the last seen value.
+  ASSERT_TRUE(algo.Init("@name:>{$cursor}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(2, 3));
+
+  // Numeric-looking bounds compare as strings: "9" > "10".
+  ASSERT_TRUE(algo.Init("@name:>{$num}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::UnorderedElementsAre(0, 1, 2, 3, 5));
+}
+
+// A range unions the posting lists of many values: the result is sorted and has no duplicates.
+TEST_F(SearchTest, CheckTagRangeUnion) {
+  auto schema = MakeSimpleSchema({{"name", SchemaField::TAG}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+
+  vector<string> values = {"c, d, e", "a", "d", "b, e", "z"};
+  for (size_t i = 0; i < values.size(); i++)
+    indices.Add(i, MockedDocument{{{"name", values[i]}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  ASSERT_TRUE(algo.Init("@name:>{a}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(0, 2, 3, 4));
+  ASSERT_TRUE(algo.Init("@name:>={y}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre(4));
+  ASSERT_TRUE(algo.Init("@name:<{a}", &params));
+  EXPECT_THAT(algo.Search(&indices).ids, testing::ElementsAre());
+}
+
+TEST_F(SearchTest, CheckTagRangeWrongField) {
+  auto schema = MakeSimpleSchema({{"title", SchemaField::TEXT}, {"n", SchemaField::NUMERIC}});
+  FieldIndices indices{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
+  indices.Add(0, MockedDocument{{{"title", "bob"}, {"n", "1"}}});
+
+  SearchAlgorithm algo{};
+  QueryParams params;
+  for (string_view query : {"@title:>{a}", "@n:>{0}"}) {
+    ASSERT_TRUE(algo.Init(query, &params)) << query;
+    auto res = algo.Search(&indices);
+    EXPECT_THAT(res.error, testing::HasSubstr("Wrong access type")) << query;
+  }
+}
+
 TEST_F(SearchTest, IntegerTerms) {
   PrepareSchema({{"status", SchemaField::TAG}, {"title", SchemaField::TEXT}});
 

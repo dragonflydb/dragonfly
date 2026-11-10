@@ -55,6 +55,20 @@ AstExpr ParseQuery(std::string_view query, const QueryParams* params,
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 #endif
 
+string_view TagRangeOpName(TagRangeOp op) {
+  switch (op) {
+    case TagRangeOp::LESS:
+      return "<";
+    case TagRangeOp::LESS_EQ:
+      return "<=";
+    case TagRangeOp::GREATER:
+      return ">";
+    case TagRangeOp::GREATER_EQ:
+      return ">=";
+  }
+  ABSL_UNREACHABLE();
+}
+
 struct ProfileBuilder {
   struct NodeFormatter {
     void operator()(std::string* out, const AstTagsNode::TagValue& value) const {
@@ -77,6 +91,9 @@ struct ProfileBuilder {
         },
         [](const AstTagsNode& n) {
           return absl::StrCat("Tags{", absl::StrJoin(n.tags, ",", NodeFormatter()), "}");
+        },
+        [](const AstTagRangeNode& n) {
+          return absl::StrCat("TagRange{", TagRangeOpName(n.op), n.bound, "}");
         },
         [](const AstFieldNode& n) { return absl::StrCat("Field{", n.field, "}"); },
         [](const AstKnnNode& n) { return absl::StrCat("KNN{l=", n.limit, "}"); },
@@ -589,6 +606,32 @@ struct BasicSearch {
       ABSL_UNREACHABLE();
     };
     return UnifyResults(GetSubResults(node.tags, mapping), LogicOp::OR);
+  }
+
+  // @field:>{value}: union of every tag value on the requested side of the bound.
+  IndexResult Search(const AstTagRangeNode& node, string_view active_field) {
+    auto* tag_index = GetIndex<TagIndex>(active_field);
+    if (!tag_index)
+      return IndexResult{};
+
+    vector<const TagIndex::Container*> lists;
+    tag_index->MatchRange(node.op, node.bound, [&lists](const auto* c) { lists.push_back(c); });
+    if (lists.size() == 1)
+      return IndexResult{lists.front()};
+
+    // A range can expand to many values, so pairwise merging would re-copy the growing union once
+    // per value. Gather all ids once instead; a multi-valued doc can appear in several lists.
+    size_t total = 0;
+    for (const auto* list : lists)
+      total += list->size();
+
+    vector<DocId> ids;
+    ids.reserve(total);
+    for (const auto* list : lists)
+      ids.insert(ids.end(), list->begin(), list->end());
+    rng::sort(ids);
+    ids.erase(unique(ids.begin(), ids.end()), ids.end());
+    return IndexResult{std::move(ids)};
   }
 
   void SearchKnnFlat(FlatVectorIndex* vec_index, const AstKnnNode& knn, IndexResult&& sub_results) {

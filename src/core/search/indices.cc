@@ -650,6 +650,37 @@ void BaseStringIndex<C>::MatchWildcard(std::string_view pattern,
 }
 
 template <typename C>
+void BaseStringIndex<C>::MatchRange(TagRangeOp op, std::string_view bound,
+                                    absl::FunctionRef<void(const Container*)> cb) const {
+  StringOrView bound_norm{NormalizeQueryWord(absl::StripAsciiWhitespace(bound))};
+  bound = bound_norm.view();
+
+  auto visit = [&cb](const auto& entry) {
+    if (!IsGroupSentinel(entry.first))
+      cb(&entry.second);
+  };
+
+  // Keys are ordered bytewise, so a lower bound walks to the end and an upper bound walks from
+  // the start until the first key past it.
+  if (op == TagRangeOp::GREATER || op == TagRangeOp::GREATER_EQ) {
+    auto it = entries_.lower_bound(bound);
+    if (op == TagRangeOp::GREATER && it != entries_.end() && (*it).first == bound)
+      ++it;
+    for (; it != entries_.end(); ++it)
+      visit(*it);
+    return;
+  }
+
+  for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+    auto entry = *it;
+    int cmp = entry.first.compare(bound);
+    if (cmp > 0 || (cmp == 0 && op == TagRangeOp::LESS))
+      break;
+    visit(entry);
+  }
+}
+
+template <typename C>
 bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view field) {
   auto strings_list = GetStrings(doc, field);
   if (!strings_list) {

@@ -73,6 +73,10 @@ struct AstDumper {
       absl::StrAppend(&res, i ? "|" : "", (*this)(n.tags[i]));
     return res + "}";
   }
+  string operator()(const AstTagRangeNode& n) const {
+    static constexpr string_view kOps[] = {"<", "<=", ">", ">="};
+    return absl::StrCat("TRANGE", kOps[static_cast<size_t>(n.op)], "(", n.bound, ")");
+  }
   string operator()(const AstKnnNode& n) const {
     return absl::StrCat("KNN(", n.filter ? Dump(*n.filter) : "", ";", n.limit, ";", n.field, ";",
                         n.score_alias, ")");
@@ -1044,6 +1048,43 @@ TEST_F(SearchParserTest, GluedWordUnchangedAst) {
   };
   for (const auto& [query, ast] : kCases)
     EXPECT_EQ(ParseDump(query), ast) << query;
+}
+
+TEST_F(SearchParserTest, TagRange) {
+  const pair<string, string> kCases[] = {
+      {"@t:>{bob}", "t:TRANGE>(bob)"},
+      {"@t:>={bob}", "t:TRANGE>=(bob)"},
+      {"@t:<{bob}", "t:TRANGE<(bob)"},
+      {"@t:<={bob}", "t:TRANGE<=(bob)"},
+      {"@t:> { bob }", "t:TRANGE>(bob)"},
+      {R"(@t:>{"New York"})", "t:TRANGE>(New York)"},
+      {R"(@t:>{a\ b})", "t:TRANGE>(a b)"},
+      {"@t:>{42}", "t:TRANGE>(42)"},
+      {"@t:>{4.5}", "t:TRANGE>(4.5)"},
+      {"@t:>{a} @t:<{c}", "AND{t:TRANGE>(a) t:TRANGE<(c)}"},
+      {"-@t:>{a} | @u:{x}", "OR{NOT(t:TRANGE>(a)) u:TAGS{T(x)}}"},
+      // A bound holds exactly one exact value.
+      {"@t:>{a b}", "error"},
+      {"@t:>{a | b}", "error"},
+      {"@t:>{a*}", "error"},
+      {"@t:>{}", "error"},
+      {"@t:>bob", "error"},
+      {R"(@t:>{"a"~2})", "error"},
+      // The operator must follow the colon directly; a detached `>` stays a separator.
+      {"@t: >{bob}", "t:TAGS{T(bob)}"},
+  };
+  for (const auto& [query, ast] : kCases)
+    EXPECT_EQ(ParseDump(query), ast) << query;
+
+  // Outside a field clause `<` and `>` remain separators.
+  EXPECT_EQ(ParseDump("a>b"), "AND{T(a) T(b)}");
+
+  QueryParams params;
+  params["cursor"] = "bob";
+  params["n"] = "7";
+  SetParams(&params);
+  EXPECT_EQ(ParseDump("@t:>{$cursor}"), "t:TRANGE>(bob)");
+  EXPECT_EQ(ParseDump("@t:<={$n}"), "t:TRANGE<=(7)");
 }
 
 // Phrases and quotes are not word atoms: a separator next to them is skipped.
