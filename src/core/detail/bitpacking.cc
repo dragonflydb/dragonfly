@@ -6,7 +6,7 @@
 
 #include <absl/base/internal/endian.h>
 
-#if defined(__x86_64__) && (defined(__AVX2__) || defined(__BMI2__))
+#ifdef __x86_64__
 #include <immintrin.h>
 #endif
 
@@ -22,86 +22,6 @@ namespace detail {
 #if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC push_options
 #pragma GCC optimize("Ofast")
-#endif
-
-static inline uint64_t Compress8x7bit(uint64_t x) {
-  x = ((x & 0x7F007F007F007F00) >> 1) | (x & 0x007F007F007F007F);
-  x = ((x & 0x3FFF00003FFF0000) >> 2) | (x & 0x00003FFF00003FFF);
-  x = ((x & 0x0FFFFFFF00000000) >> 4) | (x & 0x000000000FFFFFFF);
-
-  return x;
-}
-
-#if defined(__SSE3__) || defined(__aarch64__)
-static inline pair<const char*, uint8_t*> simd_variant1_pack(const char* ascii, const char* end,
-                                                             uint8_t* bin) {
-  __m128i val, rpart, lpart;
-
-  // Skips 8th byte (indexc 7) in the lower 8-byte part.
-  const __m128i control = _mm_set_epi8(-1, -1, 14, 13, 12, 11, 10, 9, 8, 6, 5, 4, 3, 2, 1, 0);
-
-  // Based on the question I asked here: https://stackoverflow.com/q/74831843/2280111
-  while (ascii <= end) {
-    val = mm_loadu_si128(reinterpret_cast<const __m128i*>(ascii));
-
-    /*
-    x = ((x & 0x7F007F007F007F00) >> 1) | (x & 0x007F007F007F007F);
-    x = ((x & 0x3FFF00003FFF0000) >> 2) | (x & 0x00003FFF00003FFF);
-    x = ((x & 0x0FFFFFFF00000000) >> 4) | (x & 0x000000000FFFFFFF);
-    */
-
-    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x007F007F007F007F));
-    lpart = _mm_and_si128(val, _mm_set1_epi64x(0x7F007F007F007F00));
-    val = _mm_or_si128(_mm_srli_epi64(lpart, 1), rpart);
-
-    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x00003FFF00003FFF));
-    lpart = _mm_and_si128(val, _mm_set1_epi64x(0x3FFF00003FFF0000));
-    val = _mm_or_si128(_mm_srli_epi64(lpart, 2), rpart);
-
-    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x000000000FFFFFFF));
-    lpart = _mm_and_si128(val, _mm_set1_epi64x(0x0FFFFFFF00000000));
-    val = _mm_or_si128(_mm_srli_epi64(lpart, 4), rpart);
-
-    val = _mm_shuffle_epi8(val, control);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(bin), val);
-    bin += 14;
-    ascii += 16;
-  }
-
-  return make_pair(ascii, bin);
-}
-
-static inline pair<const char*, uint8_t*> simd_variant2_pack(const char* ascii, const char* end,
-                                                             uint8_t* bin) {
-  // Skips 8th byte (indexc 7) in the lower 8-byte part.
-  const __m128i control = _mm_set_epi8(-1, -1, 14, 13, 12, 11, 10, 9, 8, 6, 5, 4, 3, 2, 1, 0);
-
-  __m128i val, rpart, lpart;
-
-  // Based on the question I asked here: https://stackoverflow.com/q/74831843/2280111
-  while (ascii <= end) {
-    val = mm_loadu_si128(reinterpret_cast<const __m128i*>(ascii));
-
-    /*
-    x = ((x & 0x7F007F007F007F00) >> 1) | (x & 0x007F007F007F007F);
-    x = ((x & 0x3FFF00003FFF0000) >> 2) | (x & 0x00003FFF00003FFF);
-    x = ((x & 0x0FFFFFFF00000000) >> 4) | (x & 0x000000000FFFFFFF);
-    */
-    val = _mm_maddubs_epi16(_mm_set1_epi16(0x8001), val);
-    val = _mm_madd_epi16(_mm_set1_epi32(0x40000001), val);
-
-    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x000000000FFFFFFF));
-    lpart = _mm_and_si128(val, _mm_set1_epi64x(0x0FFFFFFF00000000));
-    val = _mm_or_si128(_mm_srli_epi64(lpart, 4), rpart);
-
-    val = _mm_shuffle_epi8(val, control);
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(bin), val);
-    bin += 14;
-    ascii += 16;
-  }
-  return make_pair(ascii, bin);
-}
-
 #endif
 
 // Daniel Lemire's function validate_ascii_fast() - under Apache/MIT license.
@@ -165,115 +85,6 @@ bool validate_ascii_fast(const char* src, size_t len) {
 }
 #endif
 
-// len must be at least 16
-void ascii_pack(const char* ascii, size_t len, uint8_t* bin) {
-  uint64_t val;
-  const char* end = ascii + len;
-
-  while (ascii + 8 <= end) {
-    val = absl::little_endian::Load64(ascii);
-    uint64_t dest = (val & 0xFF);
-    for (unsigned i = 1; i <= 7; ++i) {
-      val >>= 1;
-      dest |= (val & (0x7FUL << 7 * i));
-    }
-    memcpy(bin, &dest, 7);
-    bin += 7;
-    ascii += 8;
-  }
-
-  // epilog - we do not pack since we have less than 8 bytes.
-  while (ascii < end) {
-    *bin++ = *ascii++;
-  }
-}
-
-void ascii_pack2(const char* ascii, size_t len, uint8_t* bin) {
-  uint64_t val;
-  const char* end = ascii + len;
-
-  while (ascii + 8 <= end) {
-    val = absl::little_endian::Load64(ascii);
-    val = Compress8x7bit(val);
-    memcpy(bin, &val, 7);
-    bin += 7;
-    ascii += 8;
-  }
-
-  // epilog - we do not pack since we have less than 8 bytes.
-  while (ascii < end) {
-    *bin++ = *ascii++;
-  }
-}
-
-// The algo - do in parallel what ascii_pack does on two uint64_t integers
-void ascii_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
-#if defined(__SSE3__) || defined(__aarch64__)
-  // I leave out 16 bytes in addition to 16 that we load in the loop
-  // because we store into bin full 16 bytes instead of 14. To prevent data
-  // overwrite we finish loop one iteration earlier.
-  const char* end = ascii + len - 32;
-
-  tie(ascii, bin) = simd_variant1_pack(ascii, end, bin);
-
-  end += 32;  // Bring back end.
-  DCHECK(ascii < end);
-  ascii_pack(ascii, end - ascii, bin);
-#else
-  ascii_pack(ascii, len, bin);
-#endif
-}
-
-void ascii_pack_simd2(const char* ascii, size_t len, uint8_t* bin) {
-#if defined(__SSE3__) || defined(__aarch64__)
-  // I leave out 16 bytes in addition to 16 that we load in the loop
-  // because we store into bin full 16 bytes instead of 14. To prevent data
-  // overwrite we finish loop one iteration earlier.
-  const char* end = ascii + len - 32;
-
-  // on arm var
-#if defined(__aarch64__)
-  tie(ascii, bin) = simd_variant1_pack(ascii, end, bin);
-#else
-  tie(ascii, bin) = simd_variant2_pack(ascii, end, bin);
-#endif
-
-  end += 32;  // Bring back end.
-  DCHECK(ascii < end);
-  ascii_pack(ascii, end - ascii, bin);
-#else
-  ascii_pack(ascii, len, bin);
-#endif
-}
-
-// unpacks 8->7 encoded blob back to ascii.
-// generally, we can not unpack inplace because ascii (dest) buffer is 8/7 bigger than
-// the source buffer.
-// however, if binary data is positioned on the right of the ascii buffer with empty space on the
-// left than we can unpack inplace.
-void ascii_unpack(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  constexpr uint8_t kM = 0x7F;
-  uint8_t p = 0;
-  unsigned i = 0;
-
-  while (ascii_len >= 8) {
-    for (i = 0; i < 7; ++i) {
-      uint8_t src = *bin;  // keep on stack in case we unpack inplace.
-      *ascii++ = (p >> (8 - i)) | ((src << i) & kM);
-      p = src;
-      ++bin;
-    }
-
-    ascii_len -= 8;
-    *ascii++ = p >> 1;
-  }
-
-  DCHECK_LT(ascii_len, 8u);
-  for (i = 0; i < ascii_len; ++i) {
-    *ascii++ = *bin++;
-  }
-}
-
 uint8_t ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx) {
   DCHECK(idx < ascii_len) << "Index oob for ascii byte unpacking: " << idx << " >= " << ascii_len;
   const size_t packed_groups = ascii_len / 8;
@@ -287,7 +98,7 @@ uint8_t ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx) {
 
   // Unpack ascii group and return byte at idx.
   char buf[8];
-  ascii_unpack(bin + group * 7, 8, buf);
+  impl::ascii_unpack_fast_scalar(bin + group * 7, 8, buf);
   return buf[idx_in_group];
 }
 
@@ -308,59 +119,9 @@ void ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t val) {
   // Unpack ascii group and return, modify byte at idx and pack back.
   uint8_t* group_bin = bin + group * 7;
   char buf[8];
-  ascii_unpack(group_bin, 8, buf);
+  impl::ascii_unpack_fast_scalar(group_bin, 8, buf);
   buf[idx_in_group] = val;
-  ascii_pack(buf, 8, group_bin);
-}
-
-// See CompactObjectTest.AsanTriggerReadOverflow for more details.
-void ascii_unpack_simd(const uint8_t* bin, size_t ascii_len, char* ascii) {
-#if defined(__SSE3__) || defined(__aarch64__)
-
-  if (ascii_len < 18) {  // ascii_len >=18 means bin length >=16.
-    ascii_unpack(bin, ascii_len, ascii);
-    return;
-  }
-
-  __m128i val, rpart, lpart;
-
-  // we read 16 bytes from bin even when we need only 14 bytes.
-  // So for last iteration we may access 2 bytes outside of the bin buffer.
-  // To prevent this we need to round down the length of the bin buffer but since we
-  // limit by ascii_len we reduce the ascii_len by two before computing number of iterations.
-  size_t simd_len = ((ascii_len - 2) / 16) * 16;
-  const char* end = ascii + simd_len;
-
-  // shifts the second 7-byte blob to the left.
-  const __m128i control = _mm_set_epi8(14, 13, 12, 11, 10, 9, 8, 7, -1, 6, 5, 4, 3, 2, 1, 0);
-
-  while (ascii < end) {
-    val = mm_loadu_si128(reinterpret_cast<const __m128i*>(bin));
-    val = _mm_shuffle_epi8(val, control);
-
-    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x000000000FFFFFFF));
-    lpart = _mm_and_si128(val, _mm_set1_epi64x(0x00FFFFFFF0000000));
-    val = _mm_or_si128(_mm_slli_epi64(lpart, 4), rpart);
-
-    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x00003FFF00003FFF));
-    lpart = _mm_and_si128(val, _mm_set1_epi64x(0xFFFFC000FFFFC000));
-    val = _mm_or_si128(_mm_slli_epi64(lpart, 2), rpart);
-
-    rpart = _mm_and_si128(val, _mm_set1_epi64x(0x007F007F007F007F));
-    lpart = _mm_and_si128(val, _mm_set1_epi64x(0x7F807F807F807F80));
-    val = _mm_or_si128(_mm_slli_epi64(lpart, 1), rpart);
-
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(ascii), val);
-    ascii += 16;
-    bin += 14;
-  }
-
-  ascii_len -= simd_len;
-  if (ascii_len)
-    ascii_unpack(bin, ascii_len, ascii);
-#else
-  ascii_unpack(bin, ascii_len, ascii);
-#endif
+  ascii_try_pack(buf, 8, group_bin);
 }
 
 // compares packed and unpacked strings. packed must be of length = binpacked_len(ascii_len).
@@ -409,7 +170,9 @@ inline uint64_t Pack8BytesTo7(uint64_t val) {
 }
 #else
 inline uint64_t Pack8BytesTo7(uint64_t val) {
-  return Compress8x7bit(val);
+  val = ((val & 0x7F007F007F007F00) >> 1) | (val & 0x007F007F007F007F);
+  val = ((val & 0x3FFF00003FFF0000) >> 2) | (val & 0x00003FFF00003FFF);
+  return ((val & 0x0FFFFFFF00000000) >> 4) | (val & 0x000000000FFFFFFF);
 }
 #endif
 
@@ -506,8 +269,9 @@ constexpr size_t kTryPackSimdMin = kAsciiPerTryPackSimdBlock + kTryPackSimdStore
 // Leaves the byte that separates the two 64-bit lanes for the shuffles below to drop. Both
 // versions run the same three stages, each merging neighbouring fields and so doubling their
 // width: 7 -> 14 -> 28 -> 56 bits.
+// kSse selects the optimized variant used by ascii_try_pack_sse().
 #if defined(__aarch64__)
-inline __m128i Pack2x8BytesTo2x7(__m128i val) {
+template <bool kSse> inline __m128i Pack2x8BytesTo2x7(__m128i val) {
   // vsli ("shift left and insert") keeps the low n bits of the first operand and lays the second
   // one shifted up by n on top. vshr is a plain right shift by an immediate; shifting the lane down
   // by one field width before handing it to vsli closes the gap between each pair of neighbours,
@@ -521,7 +285,7 @@ inline __m128i Pack2x8BytesTo2x7(__m128i val) {
   return vreinterpretq_m128i_u64(v64);
 }
 #else
-inline __m128i Pack2x8BytesTo2x7(__m128i val) {
+template <bool kSse> inline __m128i Pack2x8BytesTo2x7(__m128i val) {
   // maddubs multiplies the bytes of the two operands pairwise and sums each neighbouring pair into
   // a 16-bit lane. The constant supplies 1 and 0x80, so a pair collapses to even | (odd << 7): the
   // multiplier is used purely as a shift, and the add as the merge.
@@ -530,21 +294,27 @@ inline __m128i Pack2x8BytesTo2x7(__m128i val) {
   // join two 14-bit fields into 28.
   val = _mm_madd_epi16(_mm_set1_epi32(0x40000001), val);
 
-  // There is no multiply wide enough for the last stage, so the two 28-bit halves of each 64-bit
-  // lane are masked apart and rejoined by hand.
-  const __m128i rpart = _mm_and_si128(val, _mm_set1_epi64x(0x000000000FFFFFFF));
-  const __m128i lpart = _mm_and_si128(val, _mm_set1_epi64x(0x0FFFFFFF00000000));
-  return _mm_or_si128(_mm_srli_epi64(lpart, 4), rpart);
+  if constexpr (kSse) {
+    // Each lane is a + (b << 32), with a and b occupying 28 bits.
+    // Subtract b * (2^32 - 2^28) to close the four-bit gap.
+    const __m128i high = _mm_srli_epi64(val, 32);
+    return _mm_sub_epi64(val, _mm_mul_epu32(high, _mm_set1_epi64x(0x00000000F0000000ULL)));
+  } else {
+    // Mask apart the two 28-bit fields and join them within each 64-bit lane.
+    const __m128i rpart = _mm_and_si128(val, _mm_set1_epi64x(0x000000000FFFFFFF));
+    const __m128i lpart = _mm_and_si128(val, _mm_set1_epi64x(0x0FFFFFFF00000000));
+    return _mm_or_si128(_mm_srli_epi64(lpart, 4), rpart);
+  }
 }
 #endif
 
 // Leaves the packed bytes contiguous at the bottom and zeroes the two above them.
-inline __m128i Pack16BytesTo14(__m128i val) {
+template <bool kSse> inline __m128i Pack16BytesTo14(__m128i val) {
   // shuffle_epi8 rebuilds a vector by taking, for every output byte, the input byte that `control`
   // names, and writing zero where the index is negative. set_epi8 lists lanes from the top down,
   // so read the row backwards: bytes 0..6 then 8..14, closing the gap the compaction left at 7.
   const __m128i control = _mm_set_epi8(-1, -1, 14, 13, 12, 11, 10, 9, 8, 6, 5, 4, 3, 2, 1, 0);
-  return _mm_shuffle_epi8(Pack2x8BytesTo2x7(val), control);
+  return _mm_shuffle_epi8(Pack2x8BytesTo2x7<kSse>(val), control);
 }
 
 #if defined(__aarch64__)
@@ -560,10 +330,9 @@ inline uint64_t AsciiTryPackSimdErrorFlag(__m128i simd_error) {
 }
 #endif
 
-// Handles the block the loop has to leave behind whenever no output slack follows it. Only neon
-// has an exact 14-byte store cheap enough to beat the scalar tail; there this keeps every length
-// that is 0 or 1 modulo 16 on the simd path.
+// Handles a final 16-byte block without writing past its 14 packed bytes.
 #if defined(__aarch64__)
+template <bool kSse>
 inline void PackTrailing16BytesTo14(const uint8_t*& src, size_t& remaining, uint8_t*& out,
                                     __m128i& simd_error) {
   if (remaining < kAsciiPerTryPackSimdBlock)
@@ -576,7 +345,8 @@ inline void PackTrailing16BytesTo14(const uint8_t*& src, size_t& remaining, uint
   // stores cover the block and agree on the pair they both write. vqtbl1q is neon's byte permute:
   // like shuffle_epi8 it reads one index per output byte, but zeroes only for indices above 15.
   const uint8x16_t control = {0, 1, 2, 3, 4, 5, 6, 8, 6, 8, 9, 10, 11, 12, 13, 14};
-  const uint8x16_t packed = vqtbl1q_u8(vreinterpretq_u8_m128i(Pack2x8BytesTo2x7(val)), control);
+  const uint8x16_t packed =
+      vqtbl1q_u8(vreinterpretq_u8_m128i(Pack2x8BytesTo2x7<kSse>(val)), control);
   vst1_u8(out, vget_low_u8(packed));
   vst1_u8(out + 6, vget_high_u8(packed));
 
@@ -585,30 +355,54 @@ inline void PackTrailing16BytesTo14(const uint8_t*& src, size_t& remaining, uint
   remaining -= kAsciiPerTryPackSimdBlock;
 }
 #else
-inline void PackTrailing16BytesTo14(const uint8_t*&, size_t&, uint8_t*&, __m128i&) {
+template <bool kSse>
+inline void PackTrailing16BytesTo14(const uint8_t*& src, size_t& remaining, uint8_t*& out,
+                                    __m128i& simd_error) {
+  if constexpr (kSse) {
+    if (remaining < kAsciiPerTryPackSimdBlock)
+      return;
+
+    const __m128i val = mm_loadu_si128(reinterpret_cast<const __m128i*>(src));
+    simd_error = _mm_or_si128(simd_error, val);
+    const __m128i packed = Pack16BytesTo14<kSse>(val);
+
+    // The overlapping stores cover exactly 14 bytes.
+    _mm_storel_epi64(reinterpret_cast<__m128i*>(out), packed);
+    _mm_storel_epi64(reinterpret_cast<__m128i*>(out + 6), _mm_srli_si128(packed, 6));
+    src += kAsciiPerTryPackSimdBlock;
+    out += kPackedPerTryPackSimdBlock;
+    remaining -= kAsciiPerTryPackSimdBlock;
+  }
 }
 #endif
 
+template <bool kSse>
 inline __attribute__((always_inline)) uint64_t AsciiTryPackSimdLoop(const uint8_t* src,
                                                                     size_t remaining,
                                                                     uint8_t* out) {
   uint64_t has_error = 0;
 
-  if (remaining >= kTryPackSimdMin) {
+  constexpr size_t kMinLen = kSse ? kAsciiPerTryPackSimdBlock : kTryPackSimdMin;
+  if (remaining >= kMinLen) {
     __m128i simd_error = _mm_setzero_si128();
     // Each block stores 16 bytes although only 14 of them are packed data: the next block or the
     // tail always overwrites the two extra bytes, which is cheaper than an exact 14-byte store.
     while (remaining >= kAsciiPerTryPackSimdBlock + kTryPackSimdStoreOverlap) {
       const __m128i val = mm_loadu_si128(reinterpret_cast<const __m128i*>(src));
       simd_error = _mm_or_si128(simd_error, val);
-      _mm_storeu_si128(reinterpret_cast<__m128i*>(out), Pack16BytesTo14(val));
+      _mm_storeu_si128(reinterpret_cast<__m128i*>(out), Pack16BytesTo14<kSse>(val));
       src += kAsciiPerTryPackSimdBlock;
       out += kPackedPerTryPackSimdBlock;
       remaining -= kAsciiPerTryPackSimdBlock;
     }
 
-    PackTrailing16BytesTo14(src, remaining, out, simd_error);
-    has_error = AsciiTryPackSimdErrorFlag(simd_error);
+    if constexpr (kSse) {
+      // Finish bulk validation before the tail so the accumulator need not stay live across it.
+      has_error = AsciiTryPackSimdErrorFlag(simd_error);
+      simd_error = _mm_setzero_si128();
+    }
+    PackTrailing16BytesTo14<kSse>(src, remaining, out, simd_error);
+    has_error |= AsciiTryPackSimdErrorFlag(simd_error);
   }
 
   return has_error | AsciiTryPackScalarTail(src, remaining, out);
@@ -664,7 +458,7 @@ inline __attribute__((always_inline)) uint64_t AsciiTryPackSimdShort(const uint8
   if (remaining >= kTryPackSimdMin) {
     const __m128i val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src));
     has_error = _mm_movemask_epi8(val) ? kAsciiHighBits : 0;
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(out), Pack16BytesTo14(val));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(out), Pack16BytesTo14<false>(val));
     src += kAsciiPerTryPackSimdBlock;
     out += kPackedPerTryPackSimdBlock;
     remaining -= kAsciiPerTryPackSimdBlock;
@@ -727,10 +521,17 @@ size_t ascii_try_pack_scalar(const char* ascii, size_t len, uint8_t* bin) {
                           len);
 }
 
+#ifdef DFLY_ASCII_TRY_PACK_HAS_SSE
+size_t ascii_try_pack_sse(const char* ascii, size_t len, uint8_t* bin) {
+  return PackedLenIfAscii(
+      AsciiTryPackSimdLoop<true>(reinterpret_cast<const uint8_t*>(ascii), len, bin), len);
+}
+#endif
+
 #ifdef DFLY_ASCII_TRY_PACK_HAS_SIMD
 size_t ascii_try_pack_simd(const char* ascii, size_t len, uint8_t* bin) {
-  return PackedLenIfAscii(AsciiTryPackSimdLoop(reinterpret_cast<const uint8_t*>(ascii), len, bin),
-                          len);
+  return PackedLenIfAscii(
+      AsciiTryPackSimdLoop<false>(reinterpret_cast<const uint8_t*>(ascii), len, bin), len);
 }
 #endif
 
@@ -743,7 +544,7 @@ size_t ascii_try_pack_avx2(const char* ascii, size_t len, uint8_t* bin) {
   uint64_t has_error;
   if (len > kTryPackSimdShortMax)
     has_error = len >= kTryPackAvx2Min ? AsciiTryPackAvx2Long(src, len, bin)
-                                       : AsciiTryPackSimdLoop(src, len, bin);
+                                       : AsciiTryPackSimdLoop<false>(src, len, bin);
   else
     has_error = AsciiTryPackSimdShort(src, len, bin);
 
@@ -784,6 +585,24 @@ inline __attribute__((always_inline)) void AsciiUnpackFastScalar(const uint8_t* 
   // iteration feed the tail, so the loop can no longer run ahead of its stores.
   CopyTailBytes(bin, ascii_len, reinterpret_cast<uint8_t*>(ascii));
 }
+
+#ifdef DFLY_ASCII_UNPACK_FAST_HAS_SSE
+constexpr size_t kAsciiPerUnpackSseBlock = 16;
+constexpr size_t kPackedPerUnpackSseBlock = 14;
+
+// Expects seven packed bytes in the low 56 bits of every 64-bit lane, and runs the stages of
+// Unpack28BytesTo32 below at 128 bits.
+inline __m128i Unpack14BytesTo16(__m128i val) {
+  // Without AVX2 there is only the 16-bit blend, but taking 16-bit lanes 2, 3, 6 and 7 (0xCC) from
+  // the shifted vector is the same as taking the upper 32-bit lane of each 64-bit one.
+  val = _mm_blend_epi16(val, _mm_slli_epi64(val, 4), 0xCC);
+  val = _mm_blend_epi16(val, _mm_slli_epi32(val, 2), 0xAA);
+  // Adding the upper nine bits of every 16-bit lane to the lane once more doubles them, which
+  // moves them up by one bit without a byte blend.
+  val = _mm_add_epi16(val, _mm_and_si128(val, _mm_set1_epi16(static_cast<int16_t>(0xFF80))));
+  return _mm_and_si128(val, _mm_set1_epi8(0x7F));
+}
+#endif
 
 #ifdef DFLY_ASCII_UNPACK_FAST_HAS_AVX2
 constexpr size_t kAsciiPerUnpackAvx2Block = 32;
@@ -909,6 +728,47 @@ namespace impl {
 void ascii_unpack_fast_scalar(const uint8_t* bin, size_t ascii_len, char* ascii) {
   AsciiUnpackFastScalar(bin, ascii_len, ascii);
 }
+
+#ifdef DFLY_ASCII_UNPACK_FAST_HAS_SSE
+// No load reaches past the packed bytes, see CompactObjectTest.AsanTriggerReadOverflow.
+void ascii_unpack_fast_sse(const uint8_t* bin, size_t ascii_len, char* ascii) {
+  // Testing this first keeps short strings from paying for the block checks below.
+  if (ascii_len < kAsciiPerUnpackSseBlock) {
+    AsciiUnpackFastScalar(bin, ascii_len, ascii);
+    return;
+  }
+
+  // Read the control backwards: bytes 0..6, a zero, then 7..14, the same as in Unpack28BytesTo32.
+  const __m128i control = _mm_set_epi8(14, 13, 12, 11, 10, 9, 8, 7, -1, 6, 5, 4, 3, 2, 1, 0);
+
+  // Each load takes 16 bytes and so reads 2 past the block, which is why the loop stops 2 early.
+  while (ascii_len >= kAsciiPerUnpackSseBlock + 2) {
+    const __m128i val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bin));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(ascii),
+                     Unpack14BytesTo16(_mm_shuffle_epi8(val, control)));
+    bin += kPackedPerUnpackSseBlock;
+    ascii += kAsciiPerUnpackSseBlock;
+    ascii_len -= kAsciiPerUnpackSseBlock;
+  }
+
+  // The final block has nothing after it to over-read, so two 8-byte loads fetch exactly its bytes,
+  // 0..7 and 6..13, and the control skips the two they share.
+  if (ascii_len >= kAsciiPerUnpackSseBlock) {
+    const __m128i control_last =
+        _mm_set_epi8(-1, 15, 14, 13, 12, 11, 10, 9, -1, 6, 5, 4, 3, 2, 1, 0);
+    const __m128i val =
+        _mm_unpacklo_epi64(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(bin)),
+                           _mm_loadl_epi64(reinterpret_cast<const __m128i*>(bin + 6)));
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(ascii),
+                     Unpack14BytesTo16(_mm_shuffle_epi8(val, control_last)));
+    bin += kPackedPerUnpackSseBlock;
+    ascii += kAsciiPerUnpackSseBlock;
+    ascii_len -= kAsciiPerUnpackSseBlock;
+  }
+
+  AsciiUnpackFastScalar(bin, ascii_len, ascii);
+}
+#endif
 
 #ifdef DFLY_ASCII_UNPACK_FAST_HAS_AVX2
 void ascii_unpack_fast_avx2(const uint8_t* bin, size_t ascii_len, char* ascii) {
