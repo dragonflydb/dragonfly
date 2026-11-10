@@ -932,6 +932,7 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
 
     /* Realloc after: we need to free space. */
     if (new_listpack_bytes < old_listpack_bytes) {
+        lpSetTotalBytesChecked(lp,new_listpack_bytes);
         if ((lp = zrealloc(lp,new_listpack_bytes)) == NULL) return NULL;
         dst = lp + poff;
     }
@@ -966,7 +967,8 @@ unsigned char *lpInsert(unsigned char *lp, const unsigned char *elestr, unsigned
                 lpSetNumElements(lp,num_elements-1);
         }
     }
-    lpSetTotalBytesChecked(lp,new_listpack_bytes);
+    if (new_listpack_bytes >= old_listpack_bytes)
+        lpSetTotalBytesChecked(lp,new_listpack_bytes);
 
 #if 0
     /* This code path is normally disabled: what it does is to force listpack

@@ -763,6 +763,16 @@ TEST_F(HSetFamilyTest, SingleFieldLargeValueRemainsListpack) {
   EXPECT_EQ(Run({"HGET", "hmap", "field2"}), "val");
 }
 
+TEST_F(HSetFamilyTest, ShrinkLargeListpackValue) {
+  const string large_value(5 * 1024 * 1024, 'x');
+
+  EXPECT_EQ(1, CheckedInt({"HSET", "hmap", "field", large_value}));
+  EXPECT_THAT(Run({"DEBUG", "OBJECT", "hmap"}).GetString(), HasSubstr("encoding:listpack"));
+  EXPECT_EQ(0, CheckedInt({"HSET", "hmap", "field", "small"}));
+  EXPECT_EQ(Run({"HGET", "hmap", "field"}), "small");
+  EXPECT_THAT(Run({"DEBUG", "OBJECT", "hmap"}).GetString(), HasSubstr("encoding:listpack"));
+}
+
 TEST_F(HSetFamilyTest, Issue1140) {
   Run({"HSET", "CaseKey", "Foo", "Bar"});
 
