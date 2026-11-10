@@ -1227,9 +1227,34 @@ IndicesOptions::IndicesOptions() {
   stopwords = kDefaultStopwords;
 }
 
+DocBitMatrix::DocBitMatrix(size_t rows, PMR_NS::memory_resource* mr) : rows_{rows}, words_{mr} {
+}
+
+void DocBitMatrix::Set(size_t row, DocId doc) {
+  const size_t block = doc / kDocsPerWord * rows_;
+  if (block >= words_.size())
+    words_.resize(block + rows_);
+  words_[block + row] |= Bit(doc);
+}
+
+void DocBitMatrix::Clear(DocId doc) {
+  const size_t block = doc / kDocsPerWord * rows_;
+  for (size_t i = block; i < min(block + rows_, words_.size()); i++)
+    words_[i] &= ~Bit(doc);
+}
+
+vector<DocId> DocBitMatrix::Row(size_t row) const {
+  vector<DocId> docs;
+  for (size_t i = row, first = 0; i < words_.size(); i += rows_, first += kDocsPerWord) {
+    for (uint64_t bits = words_[i]; bits; bits &= bits - 1)
+      docs.push_back(static_cast<DocId>(first + std::countr_zero(bits)));
+  }
+  return docs;
+}
+
 FieldIndices::FieldIndices(const Schema& schema, const IndicesOptions& options,
                            PMR_NS::memory_resource* mr, const Synonyms* synonyms)
-    : schema_{schema}, options_{options}, missing_docs_{mr}, synonyms_{synonyms} {
+    : schema_{schema}, options_{options}, missing_docs_{0, mr}, synonyms_{synonyms} {
   CreateIndices(mr);
   CreateSortIndices();
 }
@@ -1245,6 +1270,7 @@ void FieldIndices::CreateIndices(PMR_NS::memory_resource* mr) {
       indices_[alias] = std::move(index);
     }
   }
+  missing_docs_ = DocBitMatrix{missing_fields_.size(), mr};
 }
 
 unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view alias, const SchemaField& field,
@@ -1318,7 +1344,7 @@ bool FieldIndices::Add(DocId doc, const DocumentAccessor& access) {
 
   for (size_t row = 0; row < missing_fields_.size(); row++) {
     if (access.IsFieldMissing(missing_fields_[row]->identifier))
-      MarkMissing(row, doc);
+      missing_docs_.Set(row, doc);
   }
   all_ids_.insert(rng::upper_bound(all_ids_, doc), doc);
   return true;
@@ -1334,33 +1360,15 @@ void FieldIndices::Remove(DocId doc, const DocumentAccessor& access) {
 
   for (auto& [identifier, index] : add_list_)
     index->Remove(doc, access, identifier);
-  ClearMissing(doc);
+  missing_docs_.Clear(doc);
 
   all_ids_.erase(it);
-}
-
-void FieldIndices::MarkMissing(size_t row, DocId doc) {
-  const size_t block = doc / 64 * missing_fields_.size();
-  if (block >= missing_docs_.size())
-    missing_docs_.resize(block + missing_fields_.size());
-  missing_docs_[block + row] |= uint64_t{1} << (doc % 64);
-}
-
-void FieldIndices::ClearMissing(DocId doc) {
-  const size_t block = doc / 64 * missing_fields_.size();
-  for (size_t i = block; i < min(block + missing_fields_.size(), missing_docs_.size()); i++)
-    missing_docs_[i] &= ~(uint64_t{1} << (doc % 64));
 }
 
 vector<DocId> FieldIndices::GetMissingDocs(const SchemaField& field) const {
   const size_t row = rng::find(missing_fields_, &field) - missing_fields_.begin();
   DCHECK_LT(row, missing_fields_.size());
-  vector<DocId> docs;
-  for (size_t i = row, first = 0; i < missing_docs_.size(); i += missing_fields_.size()) {
-    for (uint64_t bits = missing_docs_[i]; bits; bits &= bits - 1)
-      docs.push_back(static_cast<DocId>(first + std::countr_zero(bits)));
-    first += 64;
-  }
+  vector<DocId> docs = missing_docs_.Row(row);
   DCHECK(rng::includes(all_ids_, docs));
   return docs;
 }
