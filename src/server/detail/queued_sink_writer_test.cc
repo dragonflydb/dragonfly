@@ -153,6 +153,124 @@ TEST_F(QueuedSinkWriterTest, RaisingLimitReleasesProducers) {
   writer_.Stop();
 }
 
+// LowerLimit makes a producer wait only for part of the backlog ahead of it, and returns once the
+// limit got down to the target.
+TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotWaitForBacklog) {
+  StartWriter(1 << 20);
+  for (char c : {'a', 'b', 'c', 'd'})
+    writer_.Push(Chunk(c));
+
+  fb2::Fiber lowerer([&] { writer_.LowerLimit(0, 0); });
+  ThisFiber::SleepFor(1ms);
+
+  bool pushed = false;
+  fb2::Fiber producer([&] {
+    writer_.Push(Chunk('e'));
+    pushed = true;
+  });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_FALSE(pushed);
+
+  // SetLimit(0) would release the producer only once all 5 chunks are written.
+  while (!pushed) {
+    sink_.Allow(1);
+    ThisFiber::SleepFor(1ms);
+  }
+  EXPECT_LT(sink_.written().size(), 4u);
+
+  sink_.Open();
+  lowerer.Join();
+  producer.Join();
+  EXPECT_EQ(writer_.limit(), 0u);
+  writer_.Stop();
+}
+
+// Each write while LowerLimit runs lowers the limit by half of its size, so a small push right
+// after a write fits in the other half and does not wait for the next write, however slow.
+TEST_F(QueuedSinkWriterTest, LowerLimitKeepsHeadroom) {
+  StartWriter(1 << 20);
+  for (char c : {'a', 'b', 'c', 'd'})
+    writer_.Push(Chunk(c));
+
+  fb2::Fiber lowerer([&] { writer_.LowerLimit(0, 0); });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_EQ(writer_.limit(), 4000u);
+
+  sink_.Allow(1);
+  ThisFiber::SleepFor(1ms);
+  EXPECT_EQ(writer_.pending_bytes(), 3000u);
+  EXPECT_EQ(writer_.limit(), 3500u);
+
+  bool pushed = false;
+  fb2::Fiber producer([&] {
+    writer_.Push(Chunk('e', 80));
+    pushed = true;
+  });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_TRUE(pushed);
+  EXPECT_EQ(sink_.written().size(), 1u);
+
+  sink_.Open();
+  lowerer.Join();
+  producer.Join();
+  EXPECT_EQ(writer_.limit(), 0u);
+  writer_.Stop();
+}
+
+// LowerLimit starts `headroom` above the backlog, so a small push before the first write
+// completes does not wait for it.
+TEST_F(QueuedSinkWriterTest, LowerLimitStartsWithHeadroom) {
+  StartWriter(1 << 20);
+  for (char c : {'a', 'b', 'c', 'd'})
+    writer_.Push(Chunk(c));
+
+  fb2::Fiber lowerer([&] { writer_.LowerLimit(0, 500); });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_EQ(writer_.limit(), 4500u);
+
+  bool pushed = false;
+  fb2::Fiber producer([&] {
+    writer_.Push(Chunk('e', 80));
+    pushed = true;
+  });
+  ThisFiber::SleepFor(1ms);
+  EXPECT_TRUE(pushed);
+  EXPECT_TRUE(sink_.written().empty());
+
+  sink_.Open();
+  lowerer.Join();
+  producer.Join();
+  EXPECT_EQ(writer_.limit(), 0u);
+  writer_.Stop();
+}
+
+// LowerLimit never raises a limit that is already below its target, headroom included.
+TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotRaiseLimit) {
+  StartWriter(0);
+  writer_.LowerLimit(1 << 20, 1 << 20);
+  EXPECT_EQ(writer_.limit(), 0u);
+  writer_.Stop();
+}
+
+// LowerLimit returns although producers keep pushing as fast as the sink writes.
+TEST_F(QueuedSinkWriterTest, LowerLimitConvergesUnderLoad) {
+  StartWriter(1 << 20);
+  sink_.Open();
+  bool done = false;
+  fb2::Fiber producer([&] {
+    while (!done)
+      writer_.Push(Chunk('a'));
+  });
+  for (unsigned i = 0; i < 100; ++i)
+    writer_.Push(Chunk('b'));
+
+  writer_.LowerLimit(0, 0);
+  EXPECT_EQ(writer_.limit(), 0u);
+  done = true;
+  producer.Join();
+  writer_.Stop();
+}
+
 // Push returns at once while the queue holds at most the limit, and blocks above it.
 TEST_F(QueuedSinkWriterTest, LimitBoundsPush) {
   string a = Chunk('a');
@@ -201,6 +319,30 @@ TEST_F(QueuedSinkWriterTest, WaitBelow) {
   sink_.Open();
   waiter.Join();
   EXPECT_EQ(writer_.pending_bytes(), 0u);
+  writer_.Stop();
+}
+
+// Chunks pushed while WaitBelow waits do not extend its wait.
+TEST_F(QueuedSinkWriterTest, WaitBelowIgnoresLaterPushes) {
+  StartWriter(1 << 20);
+  writer_.Push(Chunk('a'));
+  writer_.Push(Chunk('b'));
+
+  bool waited = false;
+  fb2::Fiber waiter([&] {
+    writer_.WaitBelow(0);
+    waited = true;
+  });
+  ThisFiber::SleepFor(1ms);
+  writer_.Push(Chunk('c'));
+
+  sink_.Allow(2);
+  ThisFiber::SleepFor(1ms);
+  EXPECT_TRUE(waited);
+  EXPECT_EQ(writer_.pending_bytes(), 1000u);
+
+  sink_.Open();
+  waiter.Join();
   writer_.Stop();
 }
 

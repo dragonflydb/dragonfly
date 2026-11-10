@@ -39,8 +39,41 @@ void QueuedSinkWriter::Push(string data) {
 }
 
 void QueuedSinkWriter::WaitBelow(size_t bytes) {
+  // `fence` is the cumulative bytes pushed at entry. The predicate is true once all but at most
+  // `bytes` of that prefix have been written.
+  // Pushed data from other fibers won't affect this wait which prevents starvation for the waiter.
+  const uint64_t fence = pushed_bytes_;
   util::fb2::NoOpLock lk;
-  cv_.wait(lk, [&] { return pending_bytes() <= bytes || !cntx_->IsRunning(); });
+  cv_.wait(lk, [&] { return fence <= written_bytes_ + bytes || !cntx_->IsRunning(); });
+}
+
+void QueuedSinkWriter::LowerLimit(size_t target, size_t headroom) {
+  target = min(target, limit_);  // never raises the limit
+
+  // Start `headroom` above the backlog, so a producer that pushes before the write in flight
+  // completes does not wait for it.
+  util::fb2::NoOpLock lk;
+
+  DCHECK_GE(limit_, target);
+  const size_t start = max(target, pending_bytes() + headroom);
+  if (start < limit_)
+    limit_ = start;  // Reduce the limit to the current backlog plus the headroom.
+
+  // The limit may stay above a queue that drains faster than it falls, so stop once either is
+  // down to `target`.
+  while (limit_ > target && pending_bytes() > target && cntx_->IsRunning()) {
+    // More than `target` is queued, so the writer is busy and the wait below ends.
+    const uint64_t written_bytes = written_bytes_;
+    cv_.wait(lk, [&] { return written_bytes_ > written_bytes || !cntx_->IsRunning(); });
+
+    // Not clamped to what is still queued: the other half of the write is headroom for producers.
+    size_t step = (written_bytes_ - written_bytes) / 2;
+    if (step < limit_ - target)
+      limit_ -= step;
+    else
+      limit_ = target;
+  }
+  SetLimit(target);
 }
 
 void QueuedSinkWriter::Stop() {
