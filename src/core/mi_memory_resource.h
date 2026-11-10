@@ -37,4 +37,8 @@ class MiMemoryResource : public PMR_NS::memory_resource {
   size_t used_ = 0;
 };
 
+// Returns combined resource, zmalloc and SmallString usage, without search-index estimates.
+// The resource must belong to the current thread.
+size_t UsedMemoryThreadLocal(const MiMemoryResource& resource);
+
 }  // namespace dfly

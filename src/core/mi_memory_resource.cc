@@ -6,10 +6,19 @@
 #include <sys/mman.h>
 
 #include "base/logging.h"
+#include "core/small_string.h"
+
+extern "C" {
+#include "redis/zmalloc.h"
+}
 
 namespace dfly {
 
 using namespace std;
+
+size_t UsedMemoryThreadLocal(const MiMemoryResource& resource) {
+  return resource.used() + zmalloc_used_memory_tl + SmallString::UsedThreadLocal();
+}
 
 void* MiMemoryResource::do_allocate(size_t size, size_t align) {
   DCHECK(align);
