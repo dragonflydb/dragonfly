@@ -245,6 +245,16 @@ struct JsonAccessor::JsonPathContainer {
     return res;
   }
 
+  // Whether the path selects any value; unlike Evaluate, copies nothing on the default engine.
+  bool Selects(const JsonType& json) const {
+    if (const auto* path = get_if<json::Path>(&val)) {
+      bool found = false;
+      json::EvaluatePath(*path, json, [&](auto, const JsonType&) { found = true; });
+      return found;
+    }
+    return !Evaluate(json).empty();
+  }
+
   variant<json::Path, jsoncons::jsonpath::jsonpath_expression<JsonType>> val;
 };
 
@@ -402,6 +412,11 @@ std::optional<BaseAccessor::NumsList> JsonAccessor::GetNumbers(string_view activ
     return std::nullopt;
   }
   return nums_list;
+}
+
+bool JsonAccessor::IsFieldMissing(string_view field) const {
+  auto* path = GetPath(field);
+  return !path || !path->Selects(json_);
 }
 
 JsonAccessor::JsonPathContainer* JsonAccessor::GetPath(std::string_view field) const {

@@ -104,6 +104,7 @@ string UnescapeTerm(string_view src);
   VECTOR_RANGE      "VECTOR_RANGE"
   YIELD_DISTANCE_AS "$YIELD_DISTANCE_AS"
   WEIGHT      "$WEIGHT"
+  ISMISSING   "ismissing"
   GLUE        "glue"
 ;
 
@@ -388,6 +389,7 @@ search_primary:
   | term_atom                         { $$ = std::move($1);                  }
   | glued_word                        { $$ = std::move($1);                  }
   | FIELD COLON field_cond            { $$ = make_unique<AstFieldNode>(std::move($1), std::move($3)); }
+  | ISMISSING LPAREN FIELD RPAREN     { $$ = make_unique<AstFieldNode>(std::move($3), make_unique<AstIsMissingNode>()); }
 
 field_cond:
   term_atom                                             { $$ = std::move($1);                }

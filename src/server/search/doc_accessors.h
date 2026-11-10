@@ -87,6 +87,9 @@ struct JsonAccessor : public BaseAccessor {
   std::optional<NumsList> GetNumbers(std::string_view active_field) const override;
   std::optional<StringList> GetTags(std::string_view active_field) const override;
 
+  // Missing when the path selects nothing: null, [] and [null] are values.
+  bool IsFieldMissing(std::string_view field) const override;
+
   // The JsonAccessor works with structured types and not plain strings, so an overload is needed
   SearchDocData Serialize(absl::Span<const DocField> fields) const override;
   SearchDocData SerializeAll(const DocFieldTypes& types) const override;

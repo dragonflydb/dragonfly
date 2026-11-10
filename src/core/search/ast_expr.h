@@ -45,6 +45,7 @@ struct AstFieldNode;
 struct AstTagsNode;
 struct AstKnnNode;
 struct AstVectorRangeNode;
+struct AstIsMissingNode;
 
 // A visitor handles each concrete node; AstNode::Visit dispatches through the node's vtable.
 struct AstVisitor {
@@ -84,6 +85,7 @@ struct AstNode {
     TAGS,
     KNN,
     VECTOR_RANGE,
+    IS_MISSING,
     COUNT,
   };
 
@@ -156,7 +158,7 @@ using AstNodeTypes =
     std::tuple<AstStarNode, AstStarFieldNode, AstTermNode, AstPrefixNode, AstSuffixNode,
                AstInfixNode, AstWildcardNode, AstPhraseNode, AstRangeNode, AstGeoNode,
                AstNegateNode, AstOptionalNode, AstAttributeNode, AstLogicalNode, AstFieldNode,
-               AstTagsNode, AstKnnNode, AstVectorRangeNode>;
+               AstTagsNode, AstKnnNode, AstVectorRangeNode, AstIsMissingNode>;
 
 // Generate the typed callbacks in one base, without a virtual overload for each node type.
 template <typename Derived, typename... Nodes> struct AstVisitorCallbacks : AstVisitor {
@@ -212,6 +214,9 @@ struct AstStarNode final : TypedAstNode<AstStarNode, AstNode::Type::STAR> {};
 
 // Matches all documents where this field has a non-null value
 struct AstStarFieldNode final : TypedAstNode<AstStarFieldNode, AstNode::Type::STAR_FIELD> {};
+
+// Matches the documents without a value in the field of the enclosing AstFieldNode
+struct AstIsMissingNode final : TypedAstNode<AstIsMissingNode, AstNode::Type::IS_MISSING> {};
 
 constexpr AstNode::Type AstAffixType(TagType type) {
   switch (type) {

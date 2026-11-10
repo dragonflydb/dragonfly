@@ -10,6 +10,7 @@
 #include <absl/types/span.h>
 
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -189,6 +190,26 @@ struct IndicesOptions {
   bool no_offsets = false;
 };
 
+// One bit per (row, document); the bits of a document in all rows sit in adjacent words.
+class DocBitMatrix {
+ public:
+  DocBitMatrix(size_t rows, PMR_NS::memory_resource* mr);
+
+  void Set(size_t row, DocId doc);
+  void Clear(DocId doc);                     // in every row
+  std::vector<DocId> Row(size_t row) const;  // ascending
+
+ private:
+  static constexpr size_t kDocsPerWord = std::numeric_limits<uint64_t>::digits;
+
+  static uint64_t Bit(DocId doc) {
+    return uint64_t{1} << (doc % kDocsPerWord);
+  }
+
+  size_t rows_;
+  PMR_NS::vector<uint64_t> words_;
+};
+
 // BM25 scoring statistics are now tracked per-field inside each TextIndex.
 // See BaseStringIndex::GetFieldDocLength() and GetFieldAvgDocLen().
 
@@ -210,6 +231,9 @@ class FieldIndices {
 
   const std::vector<DocId>& GetAllDocs() const;
   const Schema& GetSchema() const;
+
+  // Documents without a value at the document field of `field`, an INDEXMISSING attribute.
+  std::vector<DocId> GetMissingDocs(const SchemaField& field) const;
 
   const Synonyms* GetSynonyms() const;
 
@@ -247,6 +271,9 @@ class FieldIndices {
   // (identifier, index) for regular and sort indices: what Add and Remove feed with document
   // values.
   absl::InlinedVector<std::pair<std::string_view, BaseIndex*>, 16> add_list_;
+  // INDEXMISSING attributes, one row of missing_docs_ each.
+  std::vector<const SchemaField*> missing_fields_;
+  DocBitMatrix missing_docs_;
   absl::InlinedVector<TextIndex*, 16> text_indices_;  // declaration order
   const Synonyms* synonyms_;
 

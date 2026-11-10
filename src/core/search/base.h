@@ -128,6 +128,9 @@ struct DocumentAccessor {
 
   /* Same as GetStrings, but also supports boolean values */
   virtual std::optional<StringList> GetTags(std::string_view active_field) const = 0;
+
+  /* True if the document has no value at the field; an empty string or a JSON null is a value */
+  virtual bool IsFieldMissing(std::string_view active_field) const;
 };
 
 // Base class for type-specific indices.
