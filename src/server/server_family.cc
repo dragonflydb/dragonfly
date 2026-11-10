@@ -1581,6 +1581,10 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   LOG_FIRST_N(INFO, 1) << "Host OS: " << os_string << " with " << shard_set->pool()->size()
                        << " threads";
   SetMaxClients(listeners_, absl::GetFlag(FLAGS_maxclients));
+
+  // A master's data is rooted in its own lineage until it becomes a replica.
+  shard_set->RunBriefInParallel([this](EngineShard*) { journal::SetLineage(master_replid_); });
+
   config_registry.RegisterSetter<uint32_t>(
       "maxclients", [this](uint32_t val) { SetMaxClients(listeners_, val); });
 
@@ -3860,6 +3864,24 @@ void ServerFamily::ForceReplicasToFullSync() {
   });
 }
 
+void ServerFamily::ForkLineage() {
+  if (!absl::GetFlag(FLAGS_experimental_cascaded_partial_sync))
+    return;
+
+  // We are being promoted while possibly serving sub-replicas that share our master's lineage.
+  // Emit a LINEAGE marker carrying our own replication id (the new lineage root) so downstream
+  // replicas adopt it: they can still partial-sync within our new lineage, but will full-sync if
+  // they reconnect to the old ancestor (split-brain safety).
+  // Must run after replication stopped, so no upstream entry is journaled after the marker.
+  // RecordEntry may block on slow replicas.
+  std::string_view new_lineage_id = master_replid_;
+  shard_set->RunBlockingInParallel([new_lineage_id](EngineShard* shard) {
+    journal::SetLineage(string(new_lineage_id));
+    if (shard->journal())
+      journal::RecordEntry(0, journal::Op::LINEAGE, 0, nullopt, {new_lineage_id, ArgSlice{}});
+  });
+}
+
 void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
   util::fb2::LockGuard lk(replicaof_mu_);
 
@@ -3867,14 +3889,20 @@ void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
     CHECK(replica_);
 
     auto repl_ptr = replica_;
-    if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
+    const bool start_journal = absl::GetFlag(FLAGS_replicaof_no_one_start_journal);
+    if (start_journal) {
       // Start journal and keep offsets.
       repl_ptr->StartJournalAtOwnLSN();
     }
+
+    // Stop replication before forking the lineage; writes stay disabled until the master flag
+    // flips.
+    last_master_data_ = replica_->Stop();
+    if (start_journal)
+      ForkLineage();
+
     // flip flag before clearing replica_
     SetMasterFlagOnAllThreads(true);
-
-    last_master_data_ = replica_->Stop();
     replica_.reset();
     StopAllClusterReplicas();
   }
@@ -4015,15 +4043,11 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
   }
 
   last_master_data_ = replica_->Stop();
+  ForkLineage();
   replica_.reset();
 
   SetMasterFlagOnAllThreads(true);
   return builder->SendOk();
-}
-
-std::string ServerFamily::GetLineageId() const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  return replica_ ? replica_->GetLineageId() : master_replid_;
 }
 
 void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -4063,9 +4087,9 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
         cntx->replica_conn = true;
 
         // The response for 'capa dragonfly' is <master_repl_id> <syncid> <num_shards> <version>
-        // <lineage_id> <announced_ip> <announced_port>. It may only grow at the end, and the ip
-        // is a bulk string because it is operator-supplied.
-        std::string lineage_id = GetLineageId();
+        // <reserved> <announced_ip> <announced_port>. It may only grow at the end, and the ip
+        // is a bulk string because it is operator-supplied. The reserved field used to carry
+        // the lineage id, which now arrives per shard as a LINEAGE marker in the stream.
         auto announced = cluster::ClusterFamily::AnnouncedNodeInfo(cntx->conn());
 
         auto* rb = static_cast<RedisReplyBuilder*>(builder);
@@ -4074,7 +4098,7 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
         rb->SendSimpleString(sync_id);
         rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
-        rb->SendSimpleString(lineage_id);
+        rb->SendSimpleString("");
         rb->SendBulkString(announced.ip);
         rb->SendLong(announced.port);
         return;
