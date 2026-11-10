@@ -160,7 +160,7 @@ TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotWaitForBacklog) {
   for (char c : {'a', 'b', 'c', 'd'})
     writer_.Push(Chunk(c));
 
-  fb2::Fiber lowerer([&] { writer_.LowerLimit(0); });
+  fb2::Fiber lowerer([&] { writer_.LowerLimit(0, 0); });
   ThisFiber::SleepFor(1ms);
 
   bool pushed = false;
@@ -192,7 +192,7 @@ TEST_F(QueuedSinkWriterTest, LowerLimitKeepsHeadroom) {
   for (char c : {'a', 'b', 'c', 'd'})
     writer_.Push(Chunk(c));
 
-  fb2::Fiber lowerer([&] { writer_.LowerLimit(0); });
+  fb2::Fiber lowerer([&] { writer_.LowerLimit(0, 0); });
   ThisFiber::SleepFor(1ms);
   EXPECT_EQ(writer_.limit(), 4000u);
 
@@ -217,14 +217,14 @@ TEST_F(QueuedSinkWriterTest, LowerLimitKeepsHeadroom) {
   writer_.Stop();
 }
 
-// LowerLimit starts its target above the backlog, so a small push before the first write
+// LowerLimit starts `headroom` above the backlog, so a small push before the first write
 // completes does not wait for it.
 TEST_F(QueuedSinkWriterTest, LowerLimitStartsWithHeadroom) {
   StartWriter(1 << 20);
   for (char c : {'a', 'b', 'c', 'd'})
     writer_.Push(Chunk(c));
 
-  fb2::Fiber lowerer([&] { writer_.LowerLimit(500); });
+  fb2::Fiber lowerer([&] { writer_.LowerLimit(0, 500); });
   ThisFiber::SleepFor(1ms);
   EXPECT_EQ(writer_.limit(), 4500u);
 
@@ -240,14 +240,14 @@ TEST_F(QueuedSinkWriterTest, LowerLimitStartsWithHeadroom) {
   sink_.Open();
   lowerer.Join();
   producer.Join();
-  EXPECT_EQ(writer_.limit(), 500u);
+  EXPECT_EQ(writer_.limit(), 0u);
   writer_.Stop();
 }
 
-// LowerLimit never raises a limit that is already below its target.
+// LowerLimit never raises a limit that is already below its target, headroom included.
 TEST_F(QueuedSinkWriterTest, LowerLimitDoesNotRaiseLimit) {
   StartWriter(0);
-  writer_.LowerLimit(1 << 20);
+  writer_.LowerLimit(1 << 20, 1 << 20);
   EXPECT_EQ(writer_.limit(), 0u);
   writer_.Stop();
 }
@@ -264,7 +264,7 @@ TEST_F(QueuedSinkWriterTest, LowerLimitConvergesUnderLoad) {
   for (unsigned i = 0; i < 100; ++i)
     writer_.Push(Chunk('b'));
 
-  writer_.LowerLimit(0);
+  writer_.LowerLimit(0, 0);
   EXPECT_EQ(writer_.limit(), 0u);
   done = true;
   producer.Join();

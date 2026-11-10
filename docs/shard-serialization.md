@@ -471,12 +471,14 @@ queued chunk keeps the sink busy, so the traversal adds little to RSS and leaves
 mutation path. Only what is queued when the wait starts counts, so sustained writes that refill
 the queue do not stall it.
 
-Before the full sync cut, the snapshot fiber lowers the limit to `--replication_stream_output_limit`
-with `LowerLimit`, so `DFLY STARTSTABLE`, which stops the writer under a global transaction, drains
-no more than stable sync would hold. The limit starts that much above the backlog and follows the
-queue down, each write lowering it by half of the bytes written, so the journal flushes during that
-time keep half of the sink's throughput, and a small one does not wait for a write while it holds
-the shard's transaction queue. Queued chunks count toward RSS and `snapshot_serialization_bytes`
+Before the full sync cut, the snapshot fiber lowers the limit to 0 with `LowerLimit`. `DFLY
+STARTSTABLE` stops the writer under a global transaction and the replica's mutex, and a replica
+that stopped reading would block that drain, and every shard with it, where `replication_timeout`
+can not break it, so by then nothing may be queued beyond the chunks producers still wait on, as
+without the buffer. The limit starts `--replication_stream_output_limit` above the backlog and
+follows the queue down, each write lowering it by half of the bytes written, so the journal flushes
+during that time keep half of the sink's throughput, and a small one does not wait for a write
+while it holds the shard's transaction queue. Queued chunks count toward RSS and `snapshot_serialization_bytes`
 but not `used_memory`.
 
 The snapshot fiber

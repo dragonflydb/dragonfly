@@ -196,10 +196,13 @@ void SliceSnapshot::IterateBucketsFb(bool send_full_sync_cut) {
   DCHECK(!IsAnyBucketBlocked());
   if (send_full_sync_cut) {
     // DFLY STARTSTABLE, which the replica sends after the cut, stops the writer under a global
-    // transaction, so the backlog must be down to what stable sync allows by then. Lower the limit
-    // gradually: dropping it at once would make the next journal flush wait for the whole backlog
-    // while it holds the shard's transaction queue.
-    writer_.LowerLimit(absl::GetFlag(FLAGS_replication_stream_output_limit));
+    // transaction and the replica's mutex. A replica that stops reading would block that drain,
+    // and every shard with it, where replication_timeout can not break it, so by then nothing may
+    // be queued beyond the chunks producers still wait on, as without the buffer. Lower the limit
+    // to 0 gradually: dropping it at once would make the next journal flush wait for the whole
+    // backlog while it holds the shard's transaction queue. Starting the stable sync bound above
+    // the backlog keeps a flush right at the cut from waiting for the write in flight.
+    writer_.LowerLimit(0, absl::GetFlag(FLAGS_replication_stream_output_limit));
     CHECK(!serializer_->SendFullSyncCut());
     PushSerialized(true);
   }
