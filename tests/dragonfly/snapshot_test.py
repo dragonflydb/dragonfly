@@ -901,7 +901,7 @@ async def test_randomkey_during_bgsave(df_factory: DflyInstanceFactory):
     """
     Regression test for #7404. Before the fix, RANDOMKEY dispatched its per-shard
     scan via RunBriefInParallel (dispatcher fiber, no preempt). The callback ran
-    OpScan -> DbSlice::WaitForUnblockedJournalWrites, which suspends on a CondVar
+    OpScan -> DbSlice::WaitForNoBucketBlocked, which suspends on a CondVar
     while a BGSAVE snapshot has buckets mid-serialization — tripping
     "Should not preempt dispatcher" and aborting the process.
     """

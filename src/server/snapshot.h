@@ -82,6 +82,13 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   void ConsumeJournalChange(const journal::JournalChangeItem& item) final;
   void ThrottleIfNeeded() final;
 
+  // Also true while an entry is suspended mid-serialization outside a consume point (e.g. loading
+  // a tiered list node): a journal append or a flush would land inside the entry's bytes.
+  bool IsJournalAppendBlocked() const override {
+    return SerializerBase::IsJournalAppendBlocked() ||
+           (serializer_ && serializer_->IsEntryInProgress());
+  }
+
  private:
   // Main snapshotting fiber that iterates over all buckets in the db slice.
   void IterateBucketsFb(bool send_full_sync_cut);

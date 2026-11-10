@@ -782,7 +782,8 @@ void EngineShard::Heartbeat() {
   // If this starves expiry/eviction in practice, the design should consider changing direction:
   // lazily register the suspended transaction's locks here (like ScheduleInShard does) and
   // proceed instead of skipping.
-  if (db_slice.WillBlockOnJournalWrite() || !can_acquire_global_lock || running_tx_ != nullptr) {
+  // Entries of buckets that are mid-serialization are skipped by expiry and eviction below.
+  if (db_slice.IsJournalAppendBlocked() || !can_acquire_global_lock || running_tx_ != nullptr) {
     uint64_t now = absl::GetCurrentTimeNanos();
 
     uint64_t elapsed_ms = (now - stalled_start_ns_) / 1000000;
@@ -800,7 +801,8 @@ void EngineShard::Heartbeat() {
     RetireExpiredAndEvict();
   }
 
-  if (tiered_storage_) {
+  // Tiered offloading and repacking change values in place, so they keep the shard-wide check.
+  if (tiered_storage_ && !db_slice.IsAnyBucketBlocked()) {
     tiered_storage_->Heartbeat();
   }
 }
@@ -893,9 +895,10 @@ void EngineShard::RetireExpiredAndEvict() {
   }
 
   // Expiry/eviction above only marks watchers as awakened. Dispatch here, outside the atomic
-  // section, because NotifyPending may preempt before and after its readiness checks.
+  // section, because NotifyPending may preempt before and after its readiness checks. It waits
+  // for all snapshot buckets, so defer it to a later heartbeat rather than stall this one.
   if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
-      bc && GetContTx() == nullptr) {
+      bc && GetContTx() == nullptr && !db_slice.IsAnyBucketBlocked()) {
     bc->NotifyPending();
   }
 }

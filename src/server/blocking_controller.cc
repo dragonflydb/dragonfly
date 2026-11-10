@@ -159,7 +159,7 @@ void BlockingController::NotifyPending() {
   // change the watch tables. So wait for blocked journal writes up front and iterate with journal
   // flushing disabled, in an atomic section; the expired events are sent after the iteration.
   DbSlice& db_slice = ns_->GetDbSlice(owner_->shard_id());
-  db_slice.WaitForUnblockedJournalWrites();
+  db_slice.WaitForNoBucketBlocked();
 
   // A transaction may have started running while we waited; it notifies when it concludes. Check
   // running_tx() too: a first hop that suspended is not the continuation transaction yet, and
