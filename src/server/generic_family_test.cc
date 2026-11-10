@@ -1823,77 +1823,61 @@ TEST_F(GenericFamilyTest, RestoreOobStreamListpack) {
 TEST_F(GenericFamilyTest, Info) {
   InitWithDbFilename();  // Needed for `save`
 
-  auto get_rdb_changes_since_last_save = [](const string& str) -> size_t {
-    const string matcher = "rdb_changes_since_last_success_save:";
-    const auto pos = str.find(matcher) + matcher.size();
-    const auto sub = str.substr(pos, 1);
-    return atoi(sub.c_str());
-  };
-
   EXPECT_EQ(Run({"set", "k", "1"}), "OK");
   auto resp = Run({"info", "persistence"});
-  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(1, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"set", "k", "1"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(2, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(2, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"set", "k2", "2"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(3, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(3, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"save"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(0, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(0, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"set", "k2", "2"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(1, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_EQ(Run({"bgsave"}), "OK");
   bool cond = WaitUntilCondition(
       [&]() {
         resp = Run({"info", "persistence"});
-        return get_rdb_changes_since_last_save(resp.GetString()) == 0;
+        return InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save") == 0;
       },
       500ms);
   EXPECT_TRUE(cond);
   cond = WaitUntilCondition(
       [&]() {
         resp = Run({"info", "persistence"});
-        return resp.GetString().find("rdb_bgsave_in_progress:0") != string::npos;
+        return InfoReply(resp.GetString()).GetInt("rdb_bgsave_in_progress") == 0;
       },
       500ms);
   EXPECT_TRUE(cond) << resp.GetString();
 
   EXPECT_EQ(Run({"set", "k3", "3"}), "OK");
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(1, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(1, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 
   EXPECT_THAT(Run({"del", "k3"}), IntArg(1));
   resp = Run({"info", "persistence"});
-  EXPECT_EQ(2, get_rdb_changes_since_last_save(resp.GetString()));
+  EXPECT_EQ(2, InfoReply(resp.GetString()).GetInt("rdb_changes_since_last_success_save"));
 }
 
 TEST_F(GenericFamilyTest, BgSaveSchedule) {
   InitWithDbFilename();
-
-  auto changes_since_save = [](const string& info) -> int {
-    const string m = "rdb_changes_since_last_success_save:";
-    auto pos = info.find(m);
-    if (pos == string::npos)
-      return -1;
-    pos += m.size();
-    auto end = info.find('\r', pos);
-    return atoi(info.substr(pos, end - pos).c_str());
-  };
 
   auto bgsave_and_wait = [&](const std::vector<std::string_view>& cmd) {
     EXPECT_EQ(Run({"set", "k", "1"}), "OK");
     EXPECT_EQ(Run(cmd), "OK");
     EXPECT_TRUE(WaitUntilCondition(
         [&] {
-          return changes_since_save(Run({"info", "persistence"}).GetString()) == 0;
+          return InfoReply(Run({"info", "persistence"}).GetString())
+                     .GetInt("rdb_changes_since_last_success_save") == 0;
         },
         500ms));
   };

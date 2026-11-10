@@ -14,6 +14,7 @@ extern "C" {
 
 #include <absl/flags/reflection.h>
 #include <absl/strings/match.h>
+#include <absl/strings/numbers.h>
 #include <absl/strings/str_split.h>
 #include <mimalloc.h>
 #include <unistd.h>
@@ -58,6 +59,70 @@ constexpr size_t kFiberDefaultStackSize = 50_KB - 16;
 #endif
 
 }  // namespace
+
+InfoReply::InfoReply(string_view reply) {
+  for (string_view line : absl::StrSplit(reply, '\n')) {
+    absl::ConsumeSuffix(&line, "\r");
+
+    if (line.empty() || line.starts_with('#'))
+      continue;
+
+    const auto colon = line.find(':');
+    if (colon == string_view::npos || colon == 0) {
+      ADD_FAILURE() << "Malformed INFO field: " << line;
+      continue;
+    }
+
+    fields_.emplace(line.substr(0, colon), line.substr(colon + 1));
+  }
+}
+
+optional<string_view> InfoReply::Find(string_view field) const {
+  auto [it, end] = fields_.equal_range(field);
+
+  if (it == end)
+    return nullopt;
+
+  EXPECT_TRUE(std::next(it) == end) << "Ambiguous INFO field: " << field;
+  return it->second;
+}
+
+int64_t InfoReply::GetInt(string_view field, string_view subfield) const {
+  auto value = Find(field);
+  if (!value) {
+    ADD_FAILURE() << "Missing INFO field: " << field;
+    return 0;
+  }
+
+  if (!subfield.empty()) {
+    optional<string_view> found;
+    for (string_view part : absl::StrSplit(*value, ',')) {
+      const auto equal = part.find('=');
+      if (equal != string_view::npos && part.substr(0, equal) == subfield) {
+        if (found) {
+          ADD_FAILURE() << "Duplicate INFO subfield: " << field << "." << subfield;
+          return 0;
+        }
+        found = part.substr(equal + 1);
+      }
+    }
+
+    if (!found) {
+      ADD_FAILURE() << "Missing INFO subfield: " << field << "." << subfield;
+      return 0;
+    }
+
+    value = found;
+  }
+
+  int64_t result = 0;
+  if (!absl::SimpleAtoi(*value, &result)) {
+    ADD_FAILURE() << "Invalid INFO integer: " << field << "." << subfield << " = " << *value;
+    return 0;
+  }
+
+  return result;
+}
 
 std::ostream& operator<<(std::ostream& os, const DbStats& stats) {
   os << "keycount: " << stats.key_count << ", tiered_size: " << stats.tiered_used_bytes

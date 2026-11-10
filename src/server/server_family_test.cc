@@ -7,6 +7,7 @@
 #include <absl/cleanup/cleanup.h>
 #include <absl/flags/flag.h>
 #include <absl/strings/match.h>
+#include <gtest/gtest-spi.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -35,9 +36,45 @@ ABSL_DECLARE_FLAG(string, jwt_validate_url);
 
 namespace dfly {
 
-class ServerFamilyTest : public BaseFamilyTest {
- protected:
-};
+TEST(InfoReplyTest, FieldsAndSubfields) {
+  const InfoReply info(
+      string{"# Stats\r\n\r\nprefixed_count:99\r\ncount:12\r\n"
+             "negative:-2\r\nzero:0\r\nempty:\r\naddress:host:6379\r\n"
+             "cmdstat_getex:calls=99\r\n"
+             "cmdstat_get:failed_calls=8,calls=17,usec=2\r\n"
+             "module:name=search\r\nmodule:name=json\r\nlast:42"});
+  EXPECT_EQ(info.GetInt("count"), 12);
+  EXPECT_EQ(info.GetInt("negative"), -2);
+  EXPECT_EQ(info.GetInt("zero"), 0);
+  EXPECT_EQ(info.GetInt("last"), 42);
+  EXPECT_EQ(info.Find("empty"), "");
+  EXPECT_EQ(info.Find("address"), "host:6379");
+  EXPECT_FALSE(info.Find("missing"));
+  EXPECT_FALSE(info.Find("ount"));
+  EXPECT_EQ(info.GetInt("cmdstat_get", "calls"), 17);
+}
+
+TEST(InfoReplyTest, ReportsInvalidInput) {
+  EXPECT_NONFATAL_FAILURE(InfoReply("broken\r\n"), "Malformed INFO field");
+  EXPECT_NONFATAL_FAILURE(InfoReply(":12\r\n"), "Malformed INFO field");
+  const InfoReply repeated("count:1\r\ncount:2\r\n");
+  EXPECT_NONFATAL_FAILURE(repeated.GetInt("count"), "Ambiguous INFO field");
+
+  const InfoReply info(
+      "count:12oops\r\nempty:\r\noverflow:9223372036854775808\r\n"
+      "cmdstat_get:failed_calls=8\r\ncmdstat_set:calls=17\r\n"
+      "duplicate:calls=1,calls=2\r\n");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("missing"), "Missing INFO field");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("count"), "Invalid INFO integer");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("empty"), "Invalid INFO integer");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("overflow"), "Invalid INFO integer");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("cmdstat_get", "calls"), "Missing INFO subfield");
+  EXPECT_NONFATAL_FAILURE(info.GetInt("duplicate", "calls"), "Duplicate INFO subfield");
+}
+
+namespace {
+class ServerFamilyTest : public BaseFamilyTest {};
+}  // namespace
 
 #ifdef __linux__
 TEST_F(ServerFamilyTest, ReadTcpInfo) {
@@ -1279,35 +1316,15 @@ TEST_F(ServerFamilyTest, InfoCommandStatsAggregation) {
     Run({"get", "nonexistent"});
   }
 
-  auto extract_calls = [](std::string_view info, std::string_view stat) -> int {
-    // looks for "<stat>:calls=<n>,..."
-    size_t pos = info.find(stat);
-    if (pos == std::string_view::npos)
-      return -1;
-    std::string_view rest = info.substr(pos);
-    const string needle = "calls=";
-    size_t cpos = rest.find(needle);
-    if (cpos == std::string_view::npos)
-      return -1;
-    rest = rest.substr(cpos + needle.size());
-    int value = 0;
-    for (char c : rest) {
-      if (c < '0' || c > '9')
-        break;
-      value = value * 10 + (c - '0');
-    }
-    return value;
-  };
-
   const string cmdstats = Run({"INFO", "COMMANDSTATS"}).GetString();
-  EXPECT_EQ(extract_calls(cmdstats, "cmdstat_get:"), kGets);
+  EXPECT_EQ(InfoReply(cmdstats).GetInt("cmdstat_get", "calls"), kGets);
 
   // A command never invoked must not appear at all (zero-call commands are skipped).
   EXPECT_THAT(cmdstats, Not(HasSubstr("cmdstat_getex:")));
 
   // The aggregated value is also visible in INFO ALL.
   const string all = Run({"INFO", "ALL"}).GetString();
-  EXPECT_GE(extract_calls(all, "cmdstat_get:"), kGets);
+  EXPECT_GE(InfoReply(all).GetInt("cmdstat_get", "calls"), kGets);
 }
 
 TEST_F(ServerFamilyTest, InfoClusterMigrationErrors) {
