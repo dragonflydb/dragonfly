@@ -7,12 +7,12 @@
 #include <gmock/gmock.h>
 
 #include <chrono>
+#include <map>
+#include <optional>
 
 #include "facade/dragonfly_connection.h"
 #include "facade/memcache_parser.h"
 #include "facade/resp_expr_test_utils.h"
-#include "facade/resp_parser.h"
-#include "io/io.h"
 #include "server/conn_context.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
@@ -27,6 +27,27 @@ using util::fb2::Launch;
 namespace journal {
 struct JournalConsumerInterface;
 }  // namespace journal
+
+// Parses the text payload of INFO
+// Names will be matched exactly, without a trailing ':'. Malformed fields will fail the test.
+// Example:          InfoReply info(Run({"INFO", "STATS"}).GetString());
+//                   EXPECT_EQ(info.GetInt("expired_keys"), 1);
+class InfoReply {
+ public:
+  explicit InfoReply(std::string_view reply);
+
+  // Missing fields are allowed. Returned view is owned by this class, so do not call this on a
+  // temporary.
+  std::optional<std::string_view> Find(std::string_view field) const;
+
+  // Reads a integer optionally from comma-separated name=value subfield:
+  // info.GetInt("cmdstat_get", "calls").
+  // Missing or invalid values will record a nonfatal test failure and return 0.
+  int64_t GetInt(std::string_view field, std::string_view subfield = {}) const;
+
+ private:
+  std::multimap<std::string, std::string, std::less<>> fields_;
+};
 
 class TestConnection : public facade::Connection {
  public:

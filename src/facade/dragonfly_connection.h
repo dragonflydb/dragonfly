@@ -683,8 +683,8 @@ class Connection : public util::Connection {
   // replies, freeing pipeline memory without growing the queue.
   void DrainQueuedCommands();
 
-  // IoLoopV2 backpressure park: if still over the pipeline limit (draining may have relieved it),
-  // subscribe to global memory-relief notifications, flush, and park until pressure clears.
+  // IoLoopV2 backpressure park: if still over the pipeline limit and queued work cannot progress,
+  // subscribe to global memory-relief notifications, flush, and park until either changes.
   void ParkOnBackpressure(util::fb2::detail::Waiter* backpressure_waiter);
 
   // Guard of the current subscription to a parsed commands async task blocker

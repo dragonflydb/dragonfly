@@ -361,9 +361,7 @@ TEST_F(HllFamilyTest, PfAddCorruptSparseDoesNotLeak) {
   ASSERT_EQ(Run({"set", "leak", hll}), "OK");
 
   auto used_memory = [this] {
-    const string info = Run({"info", "memory"}).GetString();
-    const auto pos = info.find("used_memory:") + strlen("used_memory:");
-    return strtoll(info.c_str() + pos, nullptr, 10);
+    return InfoReply(Run({"info", "memory"}).GetString()).GetInt("used_memory");
   };
 
   EXPECT_THAT(Run({"pfadd", "leak", "x"}), ErrArg(kInvalidHllError));

@@ -1815,6 +1815,55 @@ TEST_F(ListNodeTieringTest, SaveWithConcurrentWritesWhileLoadingNodesUntagged) {
   CleanupSnapshots();
 }
 
+// Without tagged chunks, a write serializing a list holds the stream mutex while it reads a node
+// from disk. The snapshot fiber must not flush (and compress) the partial list meanwhile.
+TEST_F(ListNodeTieringTest, SaveWithListWritesWhileLoadingNodesUntagged) {
+  SetFlag(&FLAGS_serialization_tagged_chunks, false);
+  InitWithDbFilename();
+
+  // 2KB items, so a partial list passes the 8KB flush threshold after a few nodes.
+  const int kLists = 50, kItems = 12;
+  vector<vector<string>> expected(kLists);
+  for (int l = 0; l < kLists; l++) {
+    for (int i = 0; i < kItems; i++) {
+      expected[l].push_back(BuildString(2048, static_cast<char>('A' + (l + i) % 26)));
+      Run({"RPUSH", absl::StrCat("list:", l), expected[l].back()});
+    }
+  }
+
+  // Wait until the inner nodes of every list are on disk.
+  ExpectConditionWithinTimeout([&] { return GetMetrics().tiered_stats.total_stashes >= kLists; });
+
+  // Each push serializes its list if the snapshot has not reached it yet.
+  atomic_bool saved{false};
+  auto writer = pp_->at(0)->LaunchFiber([&] {
+    for (int l = 0; !saved.load(memory_order_relaxed); l = (l + 1) % kLists) {
+      Run("writer", {"RPUSH", absl::StrCat("list:", l), "w"});
+
+      // Let the proactor poll io completions.
+      ThisFiber::SleepFor(10us);
+    }
+  });
+  EXPECT_EQ(Run({"SAVE"}), "OK");
+  saved.store(true, memory_order_relaxed);
+  writer.Join();
+
+  // A list cut by a flush fails to load.
+  ASSERT_EQ(Run({"DEBUG", "RELOAD", "NOSAVE"}), "OK");
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(kLists));
+  for (int l = 0; l < kLists; l++) {
+    auto resp = Run({"LRANGE", absl::StrCat("list:", l), "0", "-1"});
+    ASSERT_GE(resp.GetVec().size(), size_t(kItems)) << "list " << l;
+
+    // Pushes that precede the snapshot cut are in it.
+    for (size_t i = 0; i < resp.GetVec().size(); i++) {
+      const string& want = i < kItems ? expected[l][i] : "w";
+      EXPECT_EQ(resp.GetVec()[i].GetString(), want) << "list " << l << " index " << i;
+    }
+  }
+  CleanupSnapshots();
+}
+
 TEST_F(ListNodeTieringTest, RdbSaveRejected) {
   InitWithDbFilename();
   EXPECT_THAT(Run({"SAVE", "RDB"}), ErrArg("not supported"));

@@ -223,9 +223,12 @@ void SliceSnapshot::PaceTraversal(bool /*done*/) {
     // Do it after every bucket for maximum responsiveness.
     DCHECK(ThisFiber::Priority() == fb2::FiberPriority::BACKGROUND);
     ThisFiber::Yield();
-    PushSerialized(false);
-  } else if (!PushSerialized(false) && CpuSliceUsedUp()) {
-    ThisFiber::Yield();
+    ThrottleIfNeeded();
+  } else {
+    // Skip the flush while another fiber is mid-entry, as in ThrottleIfNeeded.
+    bool pushed = !stream_mu_.is_locked() && PushSerialized(false);
+    if (!pushed && CpuSliceUsedUp())
+      ThisFiber::Yield();
   }
 
   // Between buckets no dependency is held, so this is where the traversal waits for the sink.

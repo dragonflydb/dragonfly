@@ -271,23 +271,14 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
   StringVec vec = StrArray(resp.GetVec()[1]);
   ASSERT_GE(vec.size(), 10);
 
-  auto get_bump_ups = [](const string& str) -> size_t {
-    const string matcher = "bump_ups:";
-    const auto pos = str.find(matcher) + matcher.size();
-    const auto next_new_line =
-        str.find("\r\n", pos);  // Find the position of the next "\r\n" after the initial position
-    const auto sub = str.substr(pos, next_new_line - pos);
-    return atoi(sub.c_str());
-  };
-
   resp = Run({"info", "stats"});
-  EXPECT_EQ(get_bump_ups(resp.GetString()), 0);
+  EXPECT_EQ(InfoReply(resp.GetString()).GetInt("bump_ups"), 0);
 
   auto mget_resp = StrArray(Run(
       {"mget", vec[0], vec[1], vec[2], vec[3], vec[4], vec[5], vec[6], vec[7], vec[8], vec[9]}));
 
   resp = Run({"info", "stats"});
-  size_t bumps1 = get_bump_ups(resp.GetString());
+  size_t bumps1 = InfoReply(resp.GetString()).GetInt("bump_ups");
 
   EXPECT_GE(bumps1, 0);
   EXPECT_LE(bumps1, 10);
@@ -298,7 +289,7 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2276) {
   }
 
   resp = Run({"info", "stats"});
-  size_t bumps2 = get_bump_ups(resp.GetString());
+  size_t bumps2 = InfoReply(resp.GetString()).GetInt("bump_ups");
   EXPECT_GT(bumps2, bumps1);
 }
 
@@ -315,17 +306,8 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   StringVec vec = StrArray(resp.GetVec()[1]);
   ASSERT_GE(vec.size(), 10);
 
-  auto get_bump_ups = [](const string& str) -> size_t {
-    const string matcher = "bump_ups:";
-    const auto pos = str.find(matcher) + matcher.size();
-    const auto next_new_line =
-        str.find("\r\n", pos);  // Find the position of the next "\r\n" after the initial position
-    const auto sub = str.substr(pos, next_new_line - pos);
-    return atoi(sub.c_str());
-  };
-
   resp = Run({"info", "stats"});
-  EXPECT_EQ(get_bump_ups(resp.GetString()), 0);
+  EXPECT_EQ(InfoReply(resp.GetString()).GetInt("bump_ups"), 0);
 
   Run({"del", vec[1]});
   Run({"lpush", vec[1], "a"});
@@ -336,7 +318,7 @@ TEST_F(StringFamilyTest, MGetCachingModeBug2465) {
   EXPECT_THAT(mget_resp, ElementsAre(val, val, val));
 
   resp = Run({"info", "stats"});
-  size_t bumps = get_bump_ups(resp.GetString());
+  size_t bumps = InfoReply(resp.GetString()).GetInt("bump_ups");
   EXPECT_EQ(bumps, 2);  // one bump for get and one for mget
 }
 
@@ -1076,24 +1058,8 @@ TEST_F(StringFamilyTest, MSetNxOddArgs) {
 // must clear TryBorrowString's borrow threshold (currently 8 KiB) so
 // TryBorrow actually fires; we test a spread above it.
 TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
-  auto get_info_stat = [this](std::string_view name) -> uint64_t {
-    std::string stats = Run({"info", "stats"}).GetString();
-    std::string needle = absl::StrCat(name, ":");
-    size_t pos = stats.find(needle);
-    EXPECT_NE(pos, std::string::npos) << name;
-    if (pos == std::string::npos)
-      return 0;
-    pos += needle.size();
-    size_t line_end = stats.find("\r\n", pos);
-    EXPECT_NE(line_end, std::string::npos) << name;
-    if (line_end == std::string::npos)
-      return 0;
-    uint64_t value = 0;
-    EXPECT_TRUE(absl::SimpleAtoi(stats.substr(pos, line_end - pos), &value)) << name;
-    return value;
-  };
-
-  uint64_t initial_sent = get_info_stat("borrowed_strings_sent_total");
+  int64_t initial_sent =
+      InfoReply(Run({"info", "stats"}).GetString()).GetInt("borrowed_strings_sent_total");
   std::mt19937 rng{0xDF1FDF1F};
   std::uniform_int_distribution<int> dist(0, 255);
 
@@ -1107,7 +1073,8 @@ TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
     EXPECT_EQ(resp, value) << "size " << sz;
   }
 
-  EXPECT_EQ(get_info_stat("borrowed_strings_sent_total"), initial_sent + 3);
+  EXPECT_EQ(InfoReply(Run({"info", "stats"}).GetString()).GetInt("borrowed_strings_sent_total"),
+            initial_sent + 3);
 }
 
 // Same as GetLargeRawBorrowed, but executes the GETs through MULTI/EXEC so the
@@ -1118,24 +1085,8 @@ TEST_F(StringFamilyTest, GetLargeRawBorrowed) {
 // (borrowed_strings_sent_total advances) and the bytes must round-trip
 // correctly through capture and replay.
 TEST_F(StringFamilyTest, GetLargeRawBorrowedSquashed) {
-  auto get_info_stat = [this](std::string_view name) -> uint64_t {
-    std::string stats = Run({"info", "stats"}).GetString();
-    std::string needle = absl::StrCat(name, ":");
-    size_t pos = stats.find(needle);
-    EXPECT_NE(pos, std::string::npos) << name;
-    if (pos == std::string::npos)
-      return 0;
-    pos += needle.size();
-    size_t line_end = stats.find("\r\n", pos);
-    EXPECT_NE(line_end, std::string::npos) << name;
-    if (line_end == std::string::npos)
-      return 0;
-    uint64_t value = 0;
-    EXPECT_TRUE(absl::SimpleAtoi(stats.substr(pos, line_end - pos), &value)) << name;
-    return value;
-  };
-
-  uint64_t initial_sent = get_info_stat("borrowed_strings_sent_total");
+  int64_t initial_sent =
+      InfoReply(Run({"info", "stats"}).GetString()).GetInt("borrowed_strings_sent_total");
   std::mt19937 rng{0xDF1FDF1F};
   std::uniform_int_distribution<int> dist(0, 255);
 
@@ -1161,7 +1112,8 @@ TEST_F(StringFamilyTest, GetLargeRawBorrowedSquashed) {
   auto resp = Run({"exec"});
   EXPECT_THAT(resp, RespArray(ElementsAre(values[0], values[1], values[2])));
 
-  EXPECT_EQ(get_info_stat("borrowed_strings_sent_total"), initial_sent + 3);
+  EXPECT_EQ(InfoReply(Run({"info", "stats"}).GetString()).GetInt("borrowed_strings_sent_total"),
+            initial_sent + 3);
 }
 
 // Exercises the PendingRead pin/orphan/drain cycle through CompactObj's
