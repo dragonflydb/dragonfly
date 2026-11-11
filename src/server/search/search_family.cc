@@ -252,6 +252,12 @@ ParsedSchemaField ParseTag(CmdArgParser* parser) {
   return std::make_pair(search::SchemaField::TAG, kTagParamsGrammar.Apply(parser));
 }
 
+ParsedSchemaField ParseJsonTag(CmdArgParser* parser) {
+  search::SchemaField::TagParams params{.separator = std::nullopt};
+  kTagParamsGrammar.Apply(parser, &params);
+  return std::make_pair(search::SchemaField::TAG, params);
+}
+
 ParsedSchemaField ParseText(CmdArgParser* parser) {
   return std::make_pair(search::SchemaField::TEXT, kTextParamsGrammar.Apply(parser));
 }
@@ -465,6 +471,8 @@ ParseResult<bool> ParseSchema(CmdArgParser* parser, DocIndex* index) {
     auto params_parser =
         parser->TryMapNext("TAG"sv, &ParseTag, "TEXT"sv, &ParseText, "NUMERIC"sv, &ParseNumeric,
                            "VECTOR"sv, &ParseVector, "GEO", &ParseGeo);
+    if (index->type == DocIndex::JSON && params_parser == &ParseTag)
+      params_parser = &ParseJsonTag;
     if (!params_parser) {
       if (!parser->HasNext())
         return CreateSyntaxError(
@@ -3089,7 +3097,7 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
     } else if (field_info.type == search::SchemaField::TAG) {
       auto& tparams = std::get<search::SchemaField::TagParams>(field_info.special_params);
       info.emplace_back("SEPARATOR");
-      info.emplace_back(std::string(1, tparams.separator));
+      info.emplace_back(tparams.separator ? std::string(1, *tparams.separator) : "");
       if (tparams.case_sensitive)
         info.emplace_back("CASESENSITIVE");
     } else if (field_info.type == search::SchemaField::TEXT) {
@@ -3860,13 +3868,14 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   });
 
-  absl::flat_hash_set<string> result_set;
+  vector<StringVec> lists;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   // Check first if either shard had errors. Also merge the results into a single set.
   for (auto& res : shard_results) {
     if (res) {
-      result_set.insert(make_move_iterator(res->begin()), make_move_iterator(res->end()));
+      DCHECK(rng::is_sorted(*res));
+      lists.push_back(std::move(*res));
     } else {
       res.error().kind = facade::kSearchErrType;
       return cmd_cntx->SendError(res.error());
@@ -3874,7 +3883,18 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   shard_results.clear();
-  vector<string> vec(result_set.begin(), result_set.end());
+  for (size_t step = 1; step < lists.size(); step *= 2) {
+    for (size_t i = 0; i + step < lists.size(); i += 2 * step) {
+      StringVec merged;
+      merged.reserve(lists[i].size() + lists[i + step].size());
+      std::merge(make_move_iterator(lists[i].begin()), make_move_iterator(lists[i].end()),
+                 make_move_iterator(lists[i + step].begin()),
+                 make_move_iterator(lists[i + step].end()), back_inserter(merged));
+      lists[i] = std::move(merged);
+    }
+  }
+  StringVec& vec = lists.front();
+  vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
 
   rb->SendBulkStrArr(vec, CollectionType::SET);
 }

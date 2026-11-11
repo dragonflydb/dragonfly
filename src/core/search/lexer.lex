@@ -5,6 +5,7 @@
 }
 
 %{
+  #include <absl/strings/ascii.h>
   #include <absl/strings/escaping.h>
   #include <absl/strings/numbers.h>
 
@@ -165,9 +166,19 @@ string UnescapeTerm(string_view src) {
   return res;
 }
 
+// Raw whitespace the longest match takes in around an unquoted tag value only separates tokens.
+string_view TrimRawWhitespace(string_view src) {
+  src = absl::StripLeadingAsciiWhitespace(src);
+  string_view kept = absl::StripTrailingAsciiWhitespace(src);
+  size_t slashes = kept.size() - (kept.find_last_not_of('\\') + 1);
+  return src.substr(0, kept.size() + slashes % 2);  // an odd run escapes the next character
+}
+
 Parser::symbol_type make_Tag(string_view src, TagType type, const Parser::location_type& loc) {
   // Trim the glob markers, then share the single-layer `\X` unescape with terms via UnescapeTerm,
   // so quoted and unquoted tag values can never diverge.
+  if (type == TagType::REGULAR)  // a trimmed affix could become "", which matches every tag
+    src = TrimRawWhitespace(src);
   size_t start = (type == TagType::SUFFIX || type == TagType::INFIX) ? 1 : 0;
   size_t end = src.size();
   if (type == TagType::PREFIX || type == TagType::INFIX) {

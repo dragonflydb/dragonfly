@@ -284,6 +284,8 @@ TEST_F(SearchParserTest, Scanner) {
   NEXT_TOK(TOK_LCURLBR);
   NEXT_EQ(TOK_TAG_VAL, string, "Tag:value");
   NEXT_TOK(TOK_RCURLBR);
+  SetInput("\tTag:value\\ \n");
+  NEXT_EQ(TOK_TAG_VAL, string, "Tag:value ");
 
   // Prefix simple
   SetInput("pre*");
@@ -603,6 +605,7 @@ TEST_F(SearchParserTest, VectorRangeParse) {
   params["radius"] = "1";
   // 4 bytes = one float dimension
   params["vec"] = std::string(4, '\0');
+  params["empty"] = "";
   SetParams(&params);
 
   // Basic syntax parses without error
@@ -614,6 +617,8 @@ TEST_F(SearchParserTest, VectorRangeParse) {
   EXPECT_NE(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$EPSILON: 2000000}"));
   EXPECT_NE(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$EPSILON: inf}"));
   EXPECT_NE(0, Parse("*=>[KNN 1 @f $vec]=>{$EPSILON: 0.1}"));
+  EXPECT_NE(0, Parse("@f:[VECTOR_RANGE $radius $vec]=>{$YIELD_DISTANCE_AS: $empty}"));
+  EXPECT_NE(0, Parse("*=>[KNN 1 @f $vec]=>{$YIELD_DISTANCE_AS: $empty}"));
 }
 
 TEST_F(SearchParserTest, VectorRangeCombinations) {

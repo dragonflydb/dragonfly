@@ -1080,7 +1080,8 @@ TEST_F(RdbTest, SearchDefinitionsWithSpacesSurviveReload) {
   ASSERT_EQ(Run({"FT.CREATE", "my idx", "ON",        "JSON", "PREFIX",    "2",
                  "my pfx:",   "j:",     "STOPWORDS", "1",    "a b",       "LANGUAGE_FIELD",
                  "my lang",   "SCHEMA", "$.t",       "AS",   "t",         "TEXT",
-                 "$.d.city",  "AS",     "my city",   "TAG",  "SEPARATOR", " "}),
+                 "$.d.city",  "AS",     "my city",   "TAG",  "SEPARATOR", " ",
+                 "$.d.zip",   "AS",     "zip",       "TAG"}),
             "OK");
   ASSERT_EQ(Run({"FT.CREATE", "h idx", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "first name",
                  "TEXT", "a\tb", "TAG"}),
