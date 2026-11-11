@@ -47,7 +47,7 @@ class Scanner : public Lexer {
     name.remove_prefix(1);  // drop $ symbol
 
     std::string_view str = (*params_)[name];
-    if (str.empty() && !params_->Has(name))
+    if (str.empty() && !params_->Contains(name))
       throw std::runtime_error(absl::StrCat("Query parameter ", name, " not found"));
 
     uint32_t val = 0;

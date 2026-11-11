@@ -3851,6 +3851,37 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
                               absl::MakeSpan(profile_results), took, rb, limited);
 }
 
+// Merges lists that are each sorted into one sorted list without repeats. The lists come from the
+// shards, so the same value can be in several of them.
+static StringVec MergeSortedUnique(vector<StringVec> lists) {
+  DCHECK(!lists.empty());
+
+  // Each round merges neighboring lists in pairs and halves their number, e.g. 5 -> 3 -> 2 -> 1.
+  // So a value takes part in at most ceil(log2(lists.size())) merges instead of up to
+  // lists.size() - 1 when the lists are merged one by one.
+  while (lists.size() > 1) {
+    vector<StringVec> next;
+    for (size_t i = 0; i + 1 < lists.size(); i += 2) {
+      StringVec& merged = next.emplace_back();
+      merged.reserve(lists[i].size() + lists[i + 1].size());
+      std::merge(make_move_iterator(lists[i].begin()), make_move_iterator(lists[i].end()),
+                 make_move_iterator(lists[i + 1].begin()), make_move_iterator(lists[i + 1].end()),
+                 back_inserter(merged));
+    }
+
+    // With an odd number of lists the last one has no pair and waits for the next round.
+    if (lists.size() % 2 == 1)
+      next.push_back(std::move(lists.back()));
+    lists = std::move(next);
+  }
+
+  // One list with every value is left. Merging put repeats from different shards next to each
+  // other, so unique() removes them.
+  StringVec res = std::move(lists.front());
+  res.erase(std::unique(res.begin(), res.end()), res.end());
+  return res;
+}
+
 void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view index_name = parser.Next();
   string_view field_name = parser.Next();
@@ -3871,7 +3902,7 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   vector<StringVec> lists;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  // Check first if either shard had errors. Also merge the results into a single set.
+  // Check first if any shard had errors. Also collect the sorted lists to merge them below.
   for (auto& res : shard_results) {
     if (res) {
       DCHECK(rng::is_sorted(*res));
@@ -3883,18 +3914,7 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   shard_results.clear();
-  for (size_t step = 1; step < lists.size(); step *= 2) {
-    for (size_t i = 0; i + step < lists.size(); i += 2 * step) {
-      StringVec merged;
-      merged.reserve(lists[i].size() + lists[i + step].size());
-      std::merge(make_move_iterator(lists[i].begin()), make_move_iterator(lists[i].end()),
-                 make_move_iterator(lists[i + step].begin()),
-                 make_move_iterator(lists[i + step].end()), back_inserter(merged));
-      lists[i] = std::move(merged);
-    }
-  }
-  StringVec& vec = lists.front();
-  vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
+  StringVec vec = MergeSortedUnique(std::move(lists));
 
   rb->SendBulkStrArr(vec, CollectionType::SET);
 }

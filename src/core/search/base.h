@@ -71,7 +71,7 @@ struct QueryParams {
   std::string_view operator[](std::string_view name) const;
   std::string& operator[](std::string_view k);
 
-  bool Has(std::string_view name) const {
+  bool Contains(std::string_view name) const {
     return params.contains(name);
   }
 
