@@ -209,21 +209,41 @@ async def test_migration_serializer_expired_fields(df_factory):
     # Server survived — no zombie crash.
 
 
+@pytest.mark.parametrize("db", [0, 2])
+@pytest.mark.parametrize("tiered", [False, pytest.param(True, marks=pytest.mark.exclude_epoll)])
 @dfly_args({"proactor_threads": 2, "cluster_mode": "yes", "cache_mode": "true"})
-async def test_migration_with_key_ttl(df_factory):
-    instances, nodes = await create_cluster(df_factory, 2)
+async def test_migration_with_key_ttl(df_factory, db, tiered):
+    _, nodes = await create_cluster(
+        df_factory,
+        1,
+        tiered_prefix="{DRAGONFLY_TMP}/migration" if tiered else "",
+        tiered_offload_threshold="1.0",
+        tiered_experimental_cooling="false",
+    )
+    _, target_nodes = await create_cluster(df_factory, 1)
+    nodes += target_nodes
     nodes[0].slots = [(0, 16383)]
     nodes[1].slots = []
 
     await apply_config(nodes)
 
+    for node in nodes:
+        node.client = node.instance.client(db=db)
+    sticky_value = "v3" * 4096
+    await nodes[0].client.set("k_sticky", sticky_value, ex=300)
+    assert await nodes[0].client.execute_command("stick k_sticky") == 1
+    expiry = await nodes[0].client.execute_command("PEXPIRETIME", "k_sticky")
+
+    if tiered:
+        async for info, breaker in info_tick_timer(nodes[0].client, section="TIERED", timeout=30):
+            with breaker:
+                assert info["tiered_entries"] == 1
+
     await nodes[0].client.execute_command("set k_with_ttl v1 EX 2")
     await nodes[0].client.execute_command("set k_without_ttl v2")
-    await nodes[0].client.execute_command("set k_sticky v3")
-    assert await nodes[0].client.execute_command("stick k_sticky") == 1
 
     nodes[0].migrations.append(
-        MigrationInfo("127.0.0.1", instances[1].port, [(0, 16383)], nodes[1].id)
+        MigrationInfo("127.0.0.1", nodes[1].instance.port, [(0, 16383)], nodes[1].id)
     )
     logging.debug("Start migration")
     await apply_config(nodes)
@@ -235,7 +255,8 @@ async def test_migration_with_key_ttl(df_factory):
 
     assert await nodes[1].client.execute_command("get k_with_ttl") == "v1"
     assert await nodes[1].client.execute_command("get k_without_ttl") == "v2"
-    assert await nodes[1].client.execute_command("get k_sticky") == "v3"
+    assert await nodes[1].client.get("k_sticky") == sticky_value
+    assert await nodes[1].client.execute_command("PEXPIRETIME", "k_sticky") == expiry
     assert await nodes[1].client.execute_command("ttl k_with_ttl") > 0
     assert await nodes[1].client.execute_command("ttl k_without_ttl") == -1
     assert await nodes[1].client.execute_command("stick k_sticky") == 0  # Sticky bit already set

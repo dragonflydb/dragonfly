@@ -19,7 +19,7 @@ from pymemcache.client.base import Client as MCClient
 import redis
 from redis import asyncio as aioredis
 
-from . import dfly_args
+from . import dfly_args, dfly_multi_test_args
 from .instance import DflyInstance, DflyInstanceFactory, RedisServer
 from .replication_utils import compare_datasets, get_metric_value
 from .seeder import DebugPopulateSeeder, Seeder
@@ -1052,22 +1052,27 @@ async def test_save_with_concurrent_mutations(df_server):
     await client.close()
 
 
+TIERED_ENTRIES_ARGS = {
+    **BASIC_ARGS,
+    "tiered_prefix": "/tmp/tiered/backing",
+    "tiered_offload_threshold": "1.0",  # ask offloading loop to offload as much as possible
+}
+
+
 @pytest.mark.exclude_epoll
-@dfly_args(
-    {
-        **BASIC_ARGS,
-        "dbfilename": "tiered-entries",
-        "tiered_prefix": "/tmp/tiered/backing",
-        "tiered_offload_threshold": "1.0",  # ask offloading loop to offload as much as possible
-    }
+@dfly_multi_test_args(
+    {**TIERED_ENTRIES_ARGS, "tiered_experimental_cooling": "true"},
+    {**TIERED_ENTRIES_ARGS, "tiered_experimental_cooling": "false"},
 )
-async def test_tiered_entries(async_client: aioredis.Redis):
+async def test_tiered_entries(async_client: aioredis.Redis, df_server: DflyInstance):
     """This test makes sure tieried entries are correctly persisted"""
 
     # With variance 4: 512 - 8192 we include small and large values
     await DebugPopulateSeeder(key_target=5000, data_size=1024, variance=4, types=["STRING"]).run(
         async_client
     )
+    keys = await async_client.keys()
+    assert await async_client.execute_command("STICK", *keys) == len(keys)
 
     # Compute the capture, this brings all items back to memory... so we'll wait for offloading
     start_capture = await DebugPopulateSeeder.capture(async_client)
@@ -1079,8 +1084,17 @@ async def test_tiered_entries(async_client: aioredis.Redis):
         last_writes = current_writes
         current_writes = (await async_client.info("TIERED"))["tiered_total_stashes"]
 
-    # Save + flush + load
-    await async_client.execute_command("SAVE", "DF")
+    tiered_info = await async_client.info("TIERED")
+    assert tiered_info["tiered_entries"] > 0
+
+    # With cooling, offloaded values stay in memory and SAVE serializes them directly.
+    # Without it, SAVE reads them back from disk.
+    cooling = df_server["tiered_experimental_cooling"] == "true"
+    assert (tiered_info["tiered_cold_storage_bytes"] > 0) == cooling
+
+    # Save + flush + load. The snapshot is named here instead of via dbfilename, so the server of
+    # the next config doesn't load it on startup.
+    await async_client.execute_command("SAVE", "DF", "tiered-entries")
     assert await async_client.flushall()
     await async_client.execute_command(
         "DFLY",
@@ -1090,6 +1104,7 @@ async def test_tiered_entries(async_client: aioredis.Redis):
 
     # Compare captures
     assert await DebugPopulateSeeder.capture(async_client) == start_capture
+    assert await async_client.execute_command("STICK", *keys) == 0
 
 
 @pytest.mark.skip
