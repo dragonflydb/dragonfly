@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "base/logging.h"
 #include "common/backed_args.h"
 #include "facade/facade_types.h"
 #include "server/common_types.h"
@@ -154,6 +156,18 @@ constexpr uint64_t kMemberExpiryBase = 1675209600;
 
 inline uint32_t MemberTimeSeconds(uint64_t now_ms) {
   return (now_ms / 1000) - kMemberExpiryBase;
+}
+
+// Converts a Unix deadline to member time, rounding up and clamping to the uint32_t range.
+// Accepts non-negative milliseconds or -1 for no expiry, which is preserved.
+inline int64_t MemberExpirySeconds(int64_t expiry_ms) {
+  DCHECK_GE(expiry_ms, -1);
+  if (expiry_ms == -1)
+    return -1;
+
+  uint64_t rounded_ms = static_cast<uint64_t>(expiry_ms) + 999;
+  return MemberTimeSeconds(
+      std::clamp(rounded_ms, kMemberExpiryBase * 1000, (kMemberExpiryBase + UINT32_MAX) * 1000));
 }
 
 // Ensures availability of an interpreter for EVAL-like commands and it's automatic release.
