@@ -9,6 +9,7 @@
 #include <array>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
+#include "base/cycle_clock.h"
 #include "core/intent_lock.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
@@ -131,6 +132,11 @@ class EngineShard {
 
   Stats& stats() {
     return stats_;
+  }
+
+  // Shared by all outgoing migration serializers and slot cleanup on this shard.
+  base::CycleBucketAggregator& migration_cpu_aggregator() {
+    return migration_cpu_aggregator_;
   }
 
   // Calculate memory used by shard by summing multiple sources.
@@ -349,6 +355,7 @@ class EngineShard {
 
   ShardId shard_id_;
   Stats stats_;
+  base::CycleBucketAggregator migration_cpu_aggregator_;
 
   // Become passive if replica: don't automatially evict expired items.
   bool is_replica_ = false;

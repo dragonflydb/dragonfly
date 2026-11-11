@@ -8,6 +8,7 @@
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 
+#include <algorithm>
 #include <chrono>
 
 #include "base/flags.h"
@@ -32,6 +33,38 @@ using namespace facade;
 using namespace std::chrono_literals;
 
 namespace dfly {
+
+namespace {
+
+// Like base::CpuTimeGuard, but if the fiber suspends in the scope, e.g. on socket backpressure,
+// only the time since it last resumed is charged. Otherwise a blocked migration would charge its
+// wait, and the work of the fibers running meanwhile, to the shared budget and throttle healthy
+// migrations. The work before the suspension goes uncharged, but then the migration is bound by
+// its target rather than the CPU.
+class FiberCpuTimeGuard {
+ public:
+  explicit FiberCpuTimeGuard(base::CycleBucketAggregator* aggregator)
+      : aggregator_(aggregator), start_(base::CycleClock::Now()) {
+  }
+
+  ~FiberCpuTimeGuard() {
+    if (!aggregator_)
+      return;
+
+    const uint64_t running = util::ThisFiber::GetRunningTimeCycles();
+    const uint64_t now = base::CycleClock::Now();
+    aggregator_->Add(std::max(start_, now - running), now);
+  }
+
+  FiberCpuTimeGuard(const FiberCpuTimeGuard&) = delete;
+  FiberCpuTimeGuard& operator=(const FiberCpuTimeGuard&) = delete;
+
+ private:
+  base::CycleBucketAggregator* const aggregator_;
+  const uint64_t start_;
+};
+
+}  // namespace
 
 void BucketDependencies::Increment(BucketIdentity bucket) {
   auto& counter = deps_[bucket];
@@ -129,10 +162,12 @@ void DelayedEntryHandler::DiscardDelayedEntries() {
   delayed_entries_.clear();
 }
 
-SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx)
+SerializerBase::SerializerBase(DbSlice* slice, ExecutionState* cntx,
+                               base::CycleBucketAggregator* cpu_aggregator)
     : DelayedEntryHandler(static_cast<BucketDependencies&>(*this)),
       db_slice_(slice),
       base_cntx_(cntx),
+      cpu_aggregator_(cpu_aggregator),
       // Enable stream mutex if tagged chunks are disabled
       stream_mu_(!absl::GetFlag(FLAGS_serialization_tagged_chunks)) {
   DCHECK(base_cntx_);
@@ -160,6 +195,7 @@ void SerializerBase::SerializeEntry(BucketIdentity bucket, DbIndex db_index, con
 
 void SerializerBase::SerializeFetchedEntry(const TieredDelayedEntry& tde, const PrimeValue& pv) {
   std::lock_guard lk{stream_mu_};
+  FiberCpuTimeGuard guard(cpu_aggregator_);
   SerializeEntryLocked(tde.dbid, tde.key, pv, tde.expire, tde.mc_flags);
 }
 
@@ -286,7 +322,7 @@ bool SerializerBase::TraverseAllBuckets() {
 
 unsigned SerializerBase::SerializeBucket(DbIndex db_index, PrimeTable::bucket_iterator it,
                                          bool on_update) {
-  base::CpuTimeGuard guard(&cpu_aggregator_);
+  FiberCpuTimeGuard guard(cpu_aggregator_);
 
   unsigned serialized = 0;
   for (it.AdvanceIfNotOccupied(); !it.is_done(); ++it) {
