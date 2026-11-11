@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <absl/functional/function_ref.h>
+
 #include <optional>
 #include <valarray>
 #include <vector>
@@ -12,6 +14,7 @@
 #include "core/interpreter.h"
 #include "server/acl/acl_log.h"
 #include "server/channel_store.h"
+#include "server/cluster/cluster_defs.h"
 #include "server/common_types.h"
 #include "server/detail/egress_throttle.h"
 #include "server/script_mgr.h"
@@ -88,7 +91,8 @@ class MonitorsRepo {
   unsigned int global_count_ = 0;  // by global its means that we count the monitor for all threads
 };
 
-enum class ClientPause { WRITE, ALL };
+// WRITE and ALL are CLIENT PAUSE modes. SLOTS pauses only commands accessing specific slots.
+enum class ClientPause { WRITE, ALL, SLOTS };
 
 // Present in every server thread. This class differs from EngineShard. The latter manages
 // state around engine shards while the former represents coordinator/connection state.
@@ -259,13 +263,26 @@ class ServerState {  // public struct - to allow initialization.
 
   // Starts or ends a `CLIENT PAUSE` command. @state controls whether
   // this is pausing only writes or every command, @start controls
-  // whether this is starting or ending the pause.
-  void SetPauseState(ClientPause state, bool start);
+  // whether this is starting or ending the pause. SLOTS pauses every command accessing @slots
+  // during slot migration finalization, independently of CLIENT PAUSE.
+  void SetPauseState(ClientPause state, bool start, const cluster::SlotRanges& slots = {});
+
+  bool HasPausedSlots() const {
+    return !paused_slots_.empty();
+  }
+
+  bool IsSlotPaused(SlotId slot) const;
+
+  bool IsKeyPaused(std::string_view key) const {
+    return HasPausedSlots() && IsSlotPaused(KeySlot(key));
+  }
 
   // Awaits until the pause is over and the command can execute, or until the connection starts
   // closing.
   // @is_write controls whether the command is a write command or not.
-  void AwaitPauseState(bool is_write, const facade::ConnectionContext* cntx);
+  // @is_slot_paused checks whether the command touches any currently paused slots.
+  void AwaitPauseState(bool is_write, const facade::ConnectionContext* cntx,
+                       absl::FunctionRef<bool()> is_slot_paused);
 
   bool IsPaused() const {
     return (client_pauses_[0] + client_pauses_[1]) > 0;
@@ -312,6 +329,9 @@ class ServerState {  // public struct - to allow initialization.
   // should subscribe to `client_pause_ec_` through `AwaitPauseState` to be
   // notified when the break is over.
   int client_pauses_[2] = {};
+
+  // Active SLOTS pauses, kept separately so releasing one cannot resume another's slots.
+  std::vector<cluster::SlotRanges> paused_slots_;
   util::fb2::EventCount client_pause_ec_;
 
   // Monitors connections. Currently responsible for closing timed out connections.

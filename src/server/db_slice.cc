@@ -246,8 +246,9 @@ unsigned PrimeEvictionPolicy::Evict(const PrimeTable::HotBuckets& eb, PrimeTable
     auto& lt = table->trans_locks;
     string scratch;
     string_view key = last_slot_it->first.GetSlice(&scratch);
-    // do not evict locked keys
-    if (lt.Find(LockTag(key)).has_value())
+
+    // Do not evict locked keys or keys paused for migration.
+    if (ServerState::tlocal()->IsKeyPaused(key) || lt.Find(LockTag(key)).has_value())
       return 0;
 
     // log the evicted keys to journal.
@@ -1603,6 +1604,8 @@ auto DbSlice::TryExpire(const Context& cntx, PrimeIterator it) const -> ExpireRe
 
   string scratch;
   string_view key = it->first.GetSlice(&scratch);
+  if (ServerState::tlocal()->IsKeyPaused(key))
+    return ExpireResult::ExpiryPaused;
 
   RecordExpiryBlocking(cntx.db_index, key);
   QueueExpiredKeyEvent(cntx.db_index, key);
@@ -1870,7 +1873,7 @@ pair<uint64_t, size_t> DbSlice::FreeMemWithEvictionStepAtomic(DbIndex db_ind, co
         // check if the key is locked by looking up transaction table.
         const auto& lt = db_table->trans_locks;
         string_view key = evict_it->first.GetSlice(&tmp);
-        if (lt.Find(LockTag(key)).has_value())
+        if (ServerState::tlocal()->IsKeyPaused(key) || lt.Find(LockTag(key)).has_value())
           continue;
 
         // Eviction bypasses OnChange: skip buckets that are mid-serialization, and buckets that a

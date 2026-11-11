@@ -468,15 +468,18 @@ walks the following sequence:
    single `RESTORE` for the non-decomposable ones; see §6 intro). Concurrent writes
    are appended to the same socket so the target sees a single, ordered stream per
    shard.
-5. **Finalization.** Starting at `attempt = 1`, the source pauses non-admin client
-   traffic node-wide, marks the end of each flow's journal with an `LSN(attempt)`
+5. **Finalization.** Starting at `attempt = 1`, the source pauses non-admin requests
+   for the migrating slots, marks the end of each flow's journal with an `LSN(attempt)`
    opcode, then sends `DFLYMIGRATE ACK <source_id> <attempt>` and waits up to
    `--migration_finalization_timeout_ms` (default 30000) for the reply. The target's
    reply on success is the integer attempt number echoed back (RESP `:<attempt>`);
    the source only treats the attempt as succeeded when the echoed value equals the
    attempt it sent. If any flow has not yet quiesced at exactly that `LSN`, the
    target echoes a stale attempt and the source increments its counter, re-pauses,
-   and retries.
+   and retries. Requests for other slots continue. Global transactions, keyless
+   writes, admin commands and Lua scripts also wait, since they can access migrating
+   slots. Expiration and eviction are suspended only for migrating slots until
+   finalization ends.
 6. **C_FINISHED.** On a successful ACK, the source drops the migrated slots from its
    local ownership immediately. From that moment its routing logic redirects clients
    for those slots to the target (the migration entry in the local config provides
@@ -655,5 +658,3 @@ pushes it to every node before authoring the next one.
    `emulated` mode; replicas do not currently serve reads with client-driven routing,
    so a real-cluster client that issues `READWRITE` to opt back into the writer
    receives an error instead of being silently accepted.
-2. Per-slot blocking on the source during finalization is a node-wide client pause; a
-   future change should pause only the migrating slots' keys.

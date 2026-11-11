@@ -795,17 +795,57 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
   }
 }
 
-// Blocks the command while CLIENT PAUSE holds it. Returns true if a pause was active.
-bool PauseConnection(const CommandId* cid, bool is_privileged, ConnectionContext* dfly_cntx) {
+// Returns true if the command accesses a slot paused by ClientPause::SLOTS.
+bool IsPausedBySlots(const CommandId& cid, const facade::ParsedArgs& args,
+                     const ConnectionContext& cntx) {
+  auto* ss = ServerState::tlocal();
+
+  // Key extraction assumes valid arity. Invalid commands will be rejected without executing.
+  if (!ss->HasPausedSlots() || cid.Validate(args))
+    return false;
+
+  if (cid.IsExec()) {
+    const auto& exec_info = cntx.conn_state.exec_info;
+    if (!exec_info.watched_keys.empty() && ss->IsKeyPaused(exec_info.watched_keys.front().second))
+      return true;
+    return rng::any_of(exec_info.body, [&](const auto& cmd) {
+      return IsPausedBySlots(*cmd.Cid(), cmd.Args(), cntx);
+    });
+  }
+
+  // Global and admin operations (e.g. DEBUG POPULATE) can touch migrating slots. Scripts can access
+  // undeclared keys or change their locking mode, so their declared keys do not bound their slots.
+  if (cid.IsEvalGroup() || (cid.opt_mask() & (CO::ADMIN | CO::GLOBAL_TRANS)))
+    return true;
+
+  if (cid.IsShardedPubSub())
+    return !args.empty() && ss->IsKeyPaused(args[0]);
+
+  // Keyless writes (e.g. RM) can modify migrating slots. Keyless reads don't check slot ownership.
+  if (cid.first_key_pos() == 0)
+    return cid.IsJournaled();
+
+  // Cluster commands use a single slot; ownership validation rejects cross-slot commands.
+  if (auto keys = DetermineKeys(&cid, args); keys && keys->NumArgs() > 0)
+    return ss->IsKeyPaused(args[keys->bonus.value_or(keys->start)]);
+  return false;
+}
+
+// Blocks the command while CLIENT PAUSE or migration finalization holds it.
+// Returns true if a pause was active.
+bool PauseConnection(const CommandId* cid, bool is_privileged, const facade::ParsedArgs& args,
+                     ConnectionContext* dfly_cntx) {
   auto& etl = *ServerState::tlocal();
-  if (etl.IsPaused() && !is_privileged) {
+  if ((etl.IsPaused() || etl.HasPausedSlots()) && !is_privileged) {
     bool is_write = cid->IsJournaled();
+
     // PUBLISH and writable EVAL/EVALSHA (not the *_RO variants) count as writes here.
     is_write |= cid->IsPublish() || (cid->IsEvalGroup() && !cid->IsReadOnly());
     is_write |= cid->IsExec() && dfly_cntx->conn_state.exec_info.is_write;
 
     dfly_cntx->paused = true;
-    etl.AwaitPauseState(is_write, dfly_cntx);
+    etl.AwaitPauseState(is_write, dfly_cntx,
+                        [&] { return IsPausedBySlots(*cid, args, *dfly_cntx); });
     dfly_cntx->paused = false;
     return true;
   }
@@ -1539,7 +1579,7 @@ DispatchResult Service::DispatchCommand(
 
   cmd_cntx->SetTailArgs(args_no_cmd);
 
-  // Block on CLIENT PAUSE if needed
+  // Block on CLIENT PAUSE or migration finalization if needed.
   if (auto* conn = cmd_cntx->conn(); conn /* replica context doesn't have an owner */) {
     if (VLOG_IS_ON(2)) {
       bool under_script = bool(dfly_cntx->conn_state.script_info);
@@ -1550,7 +1590,8 @@ DispatchResult Service::DispatchCommand(
 
     // Check pause state only if it is a top level transaction.
     if (dfly_cntx->transaction == nullptr &&
-        PauseConnection(cid, conn->IsPrivileged(), dfly_cntx) && dfly_cntx->conn_closing) {
+        PauseConnection(cid, conn->IsPrivileged(), args_no_cmd, dfly_cntx) &&
+        dfly_cntx->conn_closing) {
       cmd_cntx->SendError("connection is closing");  // resolves a deferred reply as well
       return DispatchResult::ERROR;
     }
@@ -1845,6 +1886,10 @@ uint32_t Service::DispatchSquashedBatch(
     const bool is_admin_cmd = cid->opt_mask() & CO::ADMIN;
     if (is_multi || is_eval || cid->IsBlocking() || is_admin_cmd || is_connection_state_cmd ||
         cid->IsSubscribeFamily())
+      break;
+
+    // Dispatch a paused command through the regular path after executing the preceding batch.
+    if (IsPausedBySlots(*cid, tail_args, *dfly_cntx))
       break;
 
     cmd_cntx->SetReadOnly(cid->IsReadOnly());

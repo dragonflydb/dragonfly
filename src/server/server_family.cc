@@ -1428,7 +1428,7 @@ void SlowLogGet(facade::ParsedArgs args, std::string_view sub_cmd, util::Proacto
 std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namespace* ns,
                                 facade::Connection* conn, ClientPause pause_state,
                                 std::function<bool()> is_pause_in_progress,
-                                std::function<void()> maybe_cleanup) {
+                                std::function<void()> maybe_cleanup, cluster::SlotRanges slots) {
   // Track connections and set pause state to be able to wait until all running transactions read
   // the new pause state. Exlude already paused commands from the busy count. Exlude tracking
   // blocked connections because: a) If the connection is blocked it is puased. b) We read pause
@@ -1436,11 +1436,11 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   //    command that did not pause on the new state yet we will pause after waking up.
   DispatchTracker tracker{listeners, conn, true /* ignore paused commands */,
                           true /*ignore blocking*/};
-  shard_set->pool()->AwaitFiberOnAll([&tracker, pause_state](unsigned, util::ProactorBase*) {
+  shard_set->pool()->AwaitFiberOnAll([&](unsigned, util::ProactorBase*) {
     // Commands don't suspend before checking the pause state, so
     // it's impossible to deadlock on waiting for a command that will be paused.
     tracker.TrackOnThread();
-    ServerState::tlocal()->SetPauseState(pause_state, true);
+    ServerState::tlocal()->SetPauseState(pause_state, true, slots);
   });
 
   // Wait for all busy commands to finish running before replying to guarantee
@@ -1448,18 +1448,20 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
   const absl::Duration kDispatchTimeout = absl::Seconds(absl::GetFlag(FLAGS_pause_wait_timeout));
   if (!tracker.Wait(kDispatchTimeout)) {
     LOG(WARNING) << "Couldn't wait for commands to finish dispatching in " << kDispatchTimeout;
-    shard_set->pool()->AwaitBrief([pause_state](unsigned, util::ProactorBase*) {
-      ServerState::tlocal()->SetPauseState(pause_state, false);
+    shard_set->pool()->AwaitBrief([pause_state, &slots](unsigned, util::ProactorBase*) {
+      ServerState::tlocal()->SetPauseState(pause_state, false, slots);
     });
     return std::nullopt;
   }
 
-  // We should not expire/evict keys while clients are paused.
-  shard_set->RunBriefInParallel(
-      [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(false); });
+  // We should not expire/evict keys while clients are paused. DbSlice skips SLOTS-paused keys.
+  if (pause_state != ClientPause::SLOTS) {
+    shard_set->RunBriefInParallel(
+        [ns](EngineShard* shard) { ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(false); });
+  }
 
   return fb2::Fiber("client_pause",
-                    [is_pause_in_progress, pause_state, ns, maybe_cleanup]() mutable {
+                    [is_pause_in_progress, pause_state, ns, maybe_cleanup, slots]() mutable {
                       // On server shutdown we sleep 10ms to make sure all running task finish,
                       // therefore 10ms steps ensure this fiber will not left hanging .
                       constexpr auto step = 10ms;
@@ -1469,12 +1471,14 @@ std::optional<fb2::Fiber> Pause(std::vector<facade::Listener*> listeners, Namesp
 
                       ServerState& etl = *ServerState::tlocal();
                       if (etl.gstate() != GlobalState::SHUTTING_DOWN) {
-                        shard_set->pool()->AwaitFiberOnAll([pause_state](util::ProactorBase* pb) {
-                          ServerState::tlocal()->SetPauseState(pause_state, false);
+                        shard_set->pool()->AwaitFiberOnAll([&](util::ProactorBase* pb) {
+                          ServerState::tlocal()->SetPauseState(pause_state, false, slots);
                         });
-                        shard_set->RunBriefInParallel([ns](EngineShard* shard) {
-                          ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
-                        });
+                        if (pause_state != ClientPause::SLOTS) {
+                          shard_set->RunBriefInParallel([ns](EngineShard* shard) {
+                            ns->GetDbSlice(shard->shard_id()).SetExpireAllowed(true);
+                          });
+                        }
                       }
                       if (maybe_cleanup) {
                         maybe_cleanup();
