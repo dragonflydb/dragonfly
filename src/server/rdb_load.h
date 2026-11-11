@@ -188,6 +188,16 @@ class RdbLoaderBase {
     // If the sbf_filter field is set, then this number also includes the partially read filter.
     size_t remaining = 0;
 
+    // Base timestamp for Redis hash field expiry offsets, retained across partial reads.
+    uint64_t hash_min_expiry_ms = 0;
+
+    // Keep the packed Redis hash while decoding its field/value/expiry triples in bounded batches.
+    struct HashListpackState {
+      base::PODArray<char> data;
+      size_t offset = 0;
+    };
+    std::optional<HashListpackState> hash_listpack;
+
     // partial state for single filter in an SBF
     // when chunk size runs out mid-filter, saves the partially filled buffer and resumes on the
     // next chunk.
@@ -250,6 +260,7 @@ class RdbLoaderBase {
   ::io::Result<OpaqueObj> ReadIntSet();
   Result<OpaqueObj> ReadGeneric(int rdbtype);
   ::io::Result<OpaqueObj> ReadHMap(int rdbtype);
+  Result<OpaqueObj> ReadHashListpackEx();
   ::io::Result<OpaqueObj> ReadZSet(int rdbtype);
   Result<OpaqueObj> ReadListQuicklist(int rdbtype);
   ::io::Result<OpaqueObj> ReadStreams(int rdbtype);
@@ -294,6 +305,12 @@ class RdbLoaderBase {
 
   bool ChunkBudgetExhausted() const {
     return current_chunk_state_ && current_chunk_state_->remaining_payload_bytes == 0;
+  }
+
+  // Whether the current object can load another part now. A packed Redis hash still decodes
+  // buffered entries after its tagged chunk payload is consumed.
+  bool CanReadObjectPart() const {
+    return !ChunkBudgetExhausted() || pending_read_.hash_listpack;
   }
 
   // Called to validate that the current chunk is fully consumed, after validation resets current
