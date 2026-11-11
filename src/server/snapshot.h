@@ -134,6 +134,9 @@ class SliceSnapshot : public SerializerBase, public journal::JournalConsumerInte
   // transaction queue.
   detail::QueuedSinkWriter writer_;
 
+  // Output produced by traversal since its previous pacing point.
+  size_t traversal_bytes_since_pace_ = 0;
+
   const CompressionMode compression_mode_;
   RdbTypeFreqMap type_freq_map_;
 

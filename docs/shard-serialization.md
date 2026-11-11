@@ -481,11 +481,15 @@ limit is queued; with the limit at 0 it waits until its own chunk is written.
 The limit is `--snapshot_output_buffer_limit`, per shard and per running snapshot. It lets a
 mutation fiber that serializes a bucket inline queue its chunks and return, instead of waiting on a
 slow replica or storage while it holds the shard's transaction queue. The traversal paces itself
-in `PaceTraversal`, between buckets where it holds no bucket dependency, by waiting until at most
-one `--serialization_max_chunk_size` chunk is queued, and no more than a quarter of the limit. One
-queued chunk keeps the sink busy, so the traversal adds little to RSS and leaves the room to the
-mutation path. Only what is queued when the wait starts counts, so sustained writes that refill
-the queue do not stall it.
+in `PaceTraversal`, between buckets where it holds no bucket dependency. It waits until at most
+max(low watermark, backlog - 4 * output) bytes of what is queued remain unwritten, where output
+is the capacity of the chunks the traversal pushed since its previous pacing point and the low
+watermark is the smaller of one `--serialization_max_chunk_size` chunk and a quarter of the limit.
+When the sink keeps up, the low watermark wins: the traversal keeps about one chunk queued, adds
+little to RSS and leaves the room to the mutation path. When mutations keep the queue full, each
+wait drains at most four times the traversal's own output, so the traversal still gets about a
+quarter of the sink's throughput instead of waiting out the whole backlog at every step. A step
+that pushed nothing does not wait. Chunks pushed during the wait do not extend it.
 
 Before the full sync cut, the snapshot fiber lowers the limit to 0 with `LowerLimit`. `DFLY
 STARTSTABLE` stops the writer under a global transaction and the replica's mutex, and a replica

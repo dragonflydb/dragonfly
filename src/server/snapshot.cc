@@ -58,6 +58,9 @@ thread_local absl::flat_hash_set<SliceSnapshot*> tl_slice_snapshots;
 // it may require (especially with compression), and less responsive the server may be.
 constexpr size_t kMinBlobSize = 8_KB;
 
+// Between traversal steps, wait for at most this multiple of traversal output to drain.
+constexpr size_t kTraverseMultiplier = 4;
+
 // True once the current fiber has run for more than a jiffy (~15usec) since it was last resumed,
 // i.e. it should yield to let the other fibers of the thread run.
 bool CpuSliceUsedUp() {
@@ -232,11 +235,16 @@ void SliceSnapshot::PaceTraversal(bool /*done*/) {
   }
 
   // Between buckets no dependency is held, so this is where the traversal waits for the sink.
-  // One queued chunk keeps the sink busy, so the traversal queues no more than that and leaves
-  // the room, and the memory, to the mutation path. Mutation chunks queued meanwhile do not
-  // extend the wait: sustained writes can not stall the traversal for good.
-  writer_.WaitBelow(
-      min(writer_.limit() / 4, size_t(ServerState::tlocal()->serialization_max_chunk_size)));
+  // Cap the drain wait at four times the traversal output since the previous step. The low
+  // watermark still applies, and later mutation chunks do not extend this pacing wait.
+  size_t pending = writer_.pending_bytes();
+  size_t budget = traversal_bytes_since_pace_ * kTraverseMultiplier;
+  size_t remaining_after_budget = pending > budget ? pending - budget : 0;
+  size_t chunk_size = ServerState::tlocal()->serialization_max_chunk_size;
+  size_t min_to_wait = min(writer_.limit() / 4, chunk_size);
+  size_t allowed_remaining = max(min_to_wait, remaining_after_budget);
+  writer_.WaitBelow(allowed_remaining);
+  traversal_bytes_since_pace_ = 0;
 }
 
 void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, const PrimeValue& pv,
@@ -267,9 +275,13 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   // We measure running_cycles before the preemption points, because they reset the counter.
   uint64_t running_cycles = ThisFiber::GetRunningTimeCycles();
 
+  bool on_mutation_path = OnMutationPath();
+  if (!on_mutation_path)
+    traversal_bytes_since_pace_ += data.capacity();
+
   // Track egress as the chunk is queued. Attribute it to a high priority (out of order) write when
   // it comes from the mutation path.
-  ServerState::tlocal()->GetEgressThrottler().Record(serialized, OnMutationPath());
+  ServerState::tlocal()->GetEgressThrottler().Record(serialized, on_mutation_path);
 
   // Nothing preempts between taking the chunk from the serializer and queueing it, so the queue
   // order is the production order across fibers. Blocking point.
@@ -285,7 +297,7 @@ void SliceSnapshot::HandleFlushData(std::string data) {
   }
 
   // A mutation fiber holds its shard's transaction queue, so only the traversal paces itself.
-  if (!OnMutationPath() && !use_background_mode_) {
+  if (!on_mutation_path && !use_background_mode_) {
     // serializer_->Flush can be quite slow for large values or due to compression, therefore
     // we counter-balance CPU over-usage by sleeping.
     uint64_t sleep_usec = (running_cycles * 1000'000 / base::CycleClock::Frequency()) / 2;
