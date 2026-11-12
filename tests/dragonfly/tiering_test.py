@@ -278,6 +278,7 @@ async def test_tiered_replication_offloaded_listpack_hashes(
     assert await pipe.execute() == [2] * len(expected)
     debug_info = await master_client.execute_command("DEBUG", "OBJECT", "hash:0")
     assert "encoding:listpack" in debug_info
+    assert await master_client.execute_command("STICK", *expected) == len(expected)
 
     assert await master_client.config_set("tiered_experimental_hash_support", "true")
     # Only hashes exist, so any tiered entry proves an external hash is present before full sync.
@@ -305,6 +306,9 @@ async def test_tiered_replication_offloaded_listpack_hashes(
     for key in expected:
         pipe.hgetall(key)
     assert await pipe.execute() == list(expected.values())
+
+    await replica_client.replicaof("NO", "ONE")
+    assert await replica_client.execute_command("STICK", *expected) == 0
 
 
 @pytest.mark.large

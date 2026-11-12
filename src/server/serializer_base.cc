@@ -154,8 +154,9 @@ void SerializerBase::SerializeEntry(BucketIdentity bucket, DbIndex db_index, con
   uint32_t mc_flags = pv.HasFlag() ? db_slice_->GetMCFlag(db_index, pk) : 0;
 
   if (pv.IsExternal()) {
-    // TODO: we loose the stickiness attribute by cloning like this PrimeKey.
-    EnqueueOffloaded(bucket, db_index, PrimeKey{pk.ToString()}, pv, expire_time, mc_flags);
+    PrimeKey delayed_key{pk.ToString()};
+    delayed_key.SetSticky(pk.IsSticky());
+    EnqueueOffloaded(bucket, db_index, std::move(delayed_key), pv, expire_time, mc_flags);
   } else {
     std::lock_guard lk{stream_mu_};
     SerializeEntryLocked(db_index, pk, pv, expire_time, mc_flags);
