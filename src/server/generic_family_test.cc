@@ -3435,15 +3435,43 @@ TEST_F(MemParityTest, SetOverwritesHash) {
   }
 }
 
-// Whole table reset bypasses per-key delete scopes
-// new: {} old: {string=-896 list=-1280 hash=-1280 key=-2944 } obj_used=-6400
 TEST_F(MemParityTest, FlushDbMixedTypes) {
-  Run({"SET", key_, val_});
-  Run({"HSET", key_ + "h", "f", val_});
-  Run({"LPUSH", key_ + "l", val_});
-  auto d = Delta([&] { Run({"FLUSHDB", "SYNC"}); });
-  METRIC_CMP_TODO(d, d.Negative(OBJ_HASH) && d.Negative(OBJ_LIST) && d.Negative(OBJ_STRING) &&
-                         d.MatchObj() && d.IsClean());
+  for (const auto& [command, mode] : {pair{"FLUSHDB", "SYNC"}, pair{"FLUSHALL", "ASYNC"}}) {
+    SCOPED_TRACE(StrCat(command, " ", mode));
+    const auto baseline = Snapshot();
+    Run({"SET", key_, val_});
+    Run({"HSET", key_ + "h", "f", val_});
+    Run({"LPUSH", key_ + "l", val_});
+    auto d = Delta([&] {
+      EXPECT_EQ(Run({command, mode}), "OK");
+      EXPECT_TRUE(
+          WaitUntilCondition([&] { return Snapshot() == baseline; }, std::chrono::seconds{5}));
+    });
+    EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Negative(OBJ_LIST) && d.Negative(OBJ_STRING) &&
+                d.MatchObj() && d.IsClean())
+        << d;
+  }
+}
+
+TEST_F(MemParityTest, FlushDbRetainedTable) {
+  const auto baseline = Snapshot();
+  ASSERT_EQ(Run({"SET", key_, val_}), "OK");
+  const auto populated = Snapshot();
+  const ShardId sid = Shard(key_, shard_set->size());
+  boost::intrusive_ptr<DbTable> retained;
+  absl::Cleanup release = [&] { shard_set->Await(sid, [&] { retained.reset(); }); };
+  shard_set->Await(
+      sid, [&] { retained = namespaces->GetDefaultNamespace().GetDbSlice(sid).databases()[0]; });
+
+  ASSERT_EQ(Run({"FLUSHDB", "SYNC"}), "OK");
+  EXPECT_EQ(Snapshot(), populated);
+
+  ASSERT_EQ(Run({"SET", key_, val_}), "OK");
+  shard_set->Await(sid, [&] { retained.reset(); });
+  EXPECT_EQ(Snapshot(), populated);
+
+  ASSERT_THAT(Run({"DEL", key_}), IntArg(1));
+  EXPECT_EQ(Snapshot(), baseline);
 }
 
 TEST_F(MemParityTest, RenameStringAcrossShards) {

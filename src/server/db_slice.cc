@@ -1171,6 +1171,7 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     entries_count_ -= db_arr_[index]->prime.size();
 
     InvalidateDbWatches(index);
+    db_arr_[index]->account_memory_on_destruction = MemoryScopeEnabled();
     flush_db_arr[index] = std::move(db_arr_[index]);
 
     CreateDb(index);
