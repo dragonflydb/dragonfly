@@ -119,6 +119,10 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
 
 DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
+
+  if (account_memory_on_destruction)
+    prime.Clear(true);
+
   delete sample_top_keys;
   delete sample_unique_keys;
   delete sample_values_hist;

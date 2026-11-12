@@ -165,6 +165,9 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   DbIndex index;
   uint32_t thread_index;
 
+  // Set on flush so retained tables account for entry frees when finally destroyed.
+  bool account_memory_on_destruction = false;
+
   explicit DbTable(PMR_NS::memory_resource* mr, DbIndex index);
   ~DbTable();
 

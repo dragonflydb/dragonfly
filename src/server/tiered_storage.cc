@@ -109,6 +109,15 @@ using tiering::TieredCoolRecord;
 
 namespace {
 
+void FreeCoolRecord(TieredCoolRecord* record) {
+  {
+    AtomicMemoryScope scope(record->value.ObjType());
+    record->value.Reset();
+  }
+  AtomicMemoryScope scope(kUntrackedMemory);
+  CompactObj::DeleteMR<TieredCoolRecord>(record);
+}
+
 bool OccupiesWholePages(size_t size) {
   return size >= TieredStorage::kMinOccupancySize;
 }
@@ -335,7 +344,10 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
 
     // Adjust parent QList node malloc size / number of offloaded nodes.
     ql->AdjustMallocSize(-segment.length);
-    node->SetExternal(segment.offset, segment.length);
+    {
+      AtomicMemoryScope scope(OBJ_LIST);
+      node->SetExternal(segment.offset, segment.length);
+    }
 
     AccountSlotTieredBytes(ql->GetKey(), segment.length, table);
     AccountObjectMemory(ql->GetKey(), OBJ_LIST, -int64_t(segment.length), table);
@@ -436,7 +448,10 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     QList* ql = reinterpret_cast<QList*>(std::get<1>(*key));
     QList::Node* node = reinterpret_cast<QList::Node*>(std::get<2>(*key));
     ++stats_.total_uploads;
-    decoder->Upload(node);
+    {
+      AtomicMemoryScope scope(OBJ_LIST);
+      decoder->Upload(node);
+    }
     AccountTieredUpload(node, segment.length, ql->GetKey(), db_slice_.GetDBTable(db_id));
     return true;
   }
@@ -1012,11 +1027,11 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
     CHECK(IsValid(it));
     PrimeValue& pv = it->second;
 
-    // Now the item is only in storage. Its bytes already left the RAM ledger at cool-down.
+    // Now the item is only in storage. Its bytes already left the legacy RAM ledger at cool-down.
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
     pv.Freeze(segment.offset, segment.length);
 
-    CompactObj::DeleteMR<TieredCoolRecord>(record);
+    FreeCoolRecord(record);
   } while (gained < goal);
 
   return gained;
@@ -1086,7 +1101,11 @@ bool TieredStorage::ShouldCool() const {
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
                              const tiering::DiskSegment& segment, CompactObj::ExternalRep rep,
                              PrimeValue* pv) {
-  TieredCoolRecord* record = CompactObj::AllocateMR<TieredCoolRecord>();
+  TieredCoolRecord* record;
+  {
+    AtomicMemoryScope scope(kUntrackedMemory);
+    record = CompactObj::AllocateMR<TieredCoolRecord>();
+  }
   cool_queue_.push_front(*record);
   stats_.cool_memory_used += (sizeof(TieredCoolRecord) + pv->MallocUsed());
 
@@ -1152,7 +1171,7 @@ PrimeValue TieredStorage::DeleteCool(TieredCoolRecord* record) {
 
   PrimeValue hot{std::move(record->value)};
   stats_.cool_memory_used -= (sizeof(TieredCoolRecord) + hot.MallocUsed());
-  CompactObj::DeleteMR<TieredCoolRecord>(record);
+  FreeCoolRecord(record);
   return hot;
 }
 
