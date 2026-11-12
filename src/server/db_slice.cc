@@ -4,6 +4,7 @@
 
 #include "server/db_slice.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/container/inlined_vector.h>
 
 #include <ranges>
@@ -1171,6 +1172,7 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     entries_count_ -= db_arr_[index]->prime.size();
 
     InvalidateDbWatches(index);
+    db_arr_[index]->account_memory_on_destruction = MemoryScopeEnabled();
     flush_db_arr[index] = std::move(db_arr_[index]);
 
     CreateDb(index);
@@ -1270,6 +1272,18 @@ bool DbSlice::RemoveExpire(DbIndex db_ind, const Iterator& main_it) {
 }
 
 bool DbSlice::SetMCFlag(DbIndex db_ind, const PrimeKey& key, uint32_t flag) {
+  FiberAtomicGuard guard;
+  const bool track_memory = MemoryScopeEnabled();
+  const int64_t memory_before = track_memory ? owner_->UsedMemoryWithoutSearch() : 0;
+
+  // Exclude mc flag table from transaction accounting
+  absl::Cleanup exclude_metadata = [&] {
+    if (track_memory) {
+      const int64_t memory_after = owner_->UsedMemoryWithoutSearch();
+      DeductFromTxScope(memory_after - memory_before);
+    }
+  };
+
   auto& db = *db_arr_[db_ind];
   string scratch;
   if (flag == 0 && !db.mcflag.Empty()) {
@@ -1973,6 +1987,7 @@ void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> 
     PrimeTable::Cursor cursor;
     do {
       cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
+        AtomicMemoryScope scope(it->second.ObjType());
         if (it->second.IsExternal()) {
           tiered_storage->Delete(index, it->first.GetSlice(&scratch), &it->second);
         } else if (it->second.HasStashPending()) {
@@ -2192,7 +2207,6 @@ void DbSlice::PerformDeletionAtomic(PrimeIterator del_it, string_view key, DbTab
   FiberAtomicGuard guard;
 
   const int obj_type = del_it->second.ObjType();
-  AtomicMemoryScope scope(obj_type);
 
   size_t table_before = table->table_memory();
 
@@ -2203,6 +2217,7 @@ void DbSlice::PerformDeletionAtomic(PrimeIterator del_it, string_view key, DbTab
     }
   }
 
+  AtomicMemoryScope scope(obj_type);
   DbTableStats& stats = table->stats;
 
   if (del_it->first.HasExpire())

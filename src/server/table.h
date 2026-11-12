@@ -165,6 +165,10 @@ struct DbTable : boost::intrusive_ref_counter<DbTable, boost::thread_unsafe_coun
   DbIndex index;
   uint32_t thread_index;
 
+  // When flushing the table, if this flag is set then key,values are destroyed individually to
+  // maintain typed memory accounting.
+  bool account_memory_on_destruction = false;
+
   explicit DbTable(PMR_NS::memory_resource* mr, DbIndex index);
   ~DbTable();
 

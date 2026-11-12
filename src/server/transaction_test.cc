@@ -11,7 +11,6 @@
 // production allocator. Skipped under ASAN, which must track these allocations to catch lifetime
 // bugs.
 #ifndef ABSL_HAVE_ADDRESS_SANITIZER
-#include <mimalloc-new-delete.h>
 #endif
 
 #include "base/flags.h"

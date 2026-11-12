@@ -6,9 +6,12 @@
 
 #include <cstdint>
 
+#include "redis/redis_aux.h"
 #include "util/fibers/fibers.h"
 
 namespace dfly {
+
+inline constexpr int kInternalMemory = OBJ_TYPE_MAX;
 
 bool MemoryScopeEnabled();
 

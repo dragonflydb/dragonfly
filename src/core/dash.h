@@ -418,6 +418,10 @@ class DashTable : public detail::DashTableBase {
 
   void Clear();
 
+  // Clears the table using destroy(key, value) instead of the policy's destruction methods.
+  // The callback must destroy both objects without throwing, yielding, or modifying the table.
+  template <typename Destroy> void Clear(Destroy&& destroy);
+
   // Returns true if an element was deleted i.e the rightmost slot was busy.
   bool ShiftRight(bucket_iterator it);
 
@@ -884,10 +888,18 @@ void DashTable<_Key, _Value, Policy>::CVCUponBump(const_iterator it, uint64_t ke
 
 template <typename _Key, typename _Value, typename Policy>
 void DashTable<_Key, _Value, Policy>::Clear() {
-  auto cb = [this](SegmentType* seg) {
-    seg->TraverseAll([this, seg](const SegmentIterator& it) {
-      policy_.DestroyKey(seg->Key(it.index, it.slot));
-      policy_.DestroyValue(seg->Value(it.index, it.slot));
+  Clear([this](Key_t& key, Value_t& value) {
+    policy_.DestroyKey(key);
+    policy_.DestroyValue(value);
+  });
+}
+
+template <typename _Key, typename _Value, typename Policy>
+template <typename Destroy>
+void DashTable<_Key, _Value, Policy>::Clear(Destroy&& destroy) {
+  auto cb = [&destroy](SegmentType* seg) {
+    seg->TraverseAll([&destroy, seg](const SegmentIterator& it) {
+      destroy(seg->Key(it.index, it.slot), seg->Value(it.index, it.slot));
     });
     seg->Clear();
     return false;

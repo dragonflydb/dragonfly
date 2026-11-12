@@ -764,7 +764,10 @@ void EngineShard::Heartbeat() {
     aof_streamer_->Seal();
 
   // Reap zero-copy GET pins whose refcnt has dropped to 0. Cheap and idempotent.
-  CompactObj::DrainPendingReads();
+  {
+    AtomicMemoryScope scope(OBJ_STRING);
+    CompactObj::DrainPendingReads();
+  }
 
   CacheStats();
 
