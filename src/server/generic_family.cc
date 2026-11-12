@@ -35,6 +35,7 @@ extern "C" {
 #include "server/family_utils.h"
 #include "server/hset_family.h"
 #include "server/journal/journal.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
@@ -168,6 +169,52 @@ struct RestoreArgs {
   [[nodiscard]] bool UpdateExpiration(int64_t now_msec);
 };
 
+int RestoredObjectType(int rdb_type) {
+  switch (rdb_type) {
+    case RDB_TYPE_STRING:
+      return OBJ_STRING;
+    case RDB_TYPE_LIST_QUICKLIST:
+    case RDB_TYPE_LIST_QUICKLIST_2:
+      return OBJ_LIST;
+    case RDB_TYPE_SET:
+    case RDB_TYPE_SET_INTSET:
+    case RDB_TYPE_SET_LISTPACK:
+    case RDB_TYPE_SET_WITH_EXPIRY:
+      return OBJ_SET;
+    case RDB_TYPE_HASH:
+    case RDB_TYPE_HASH_ZIPLIST:
+    case RDB_TYPE_HASH_LISTPACK:
+    case RDB_TYPE_HASH_METADATA:
+    case RDB_TYPE_HASH_LISTPACK_EX:
+    case RDB_TYPE_HASH_WITH_EXPIRY_DEPRECATED:
+    case RDB_TYPE_VALKEY_AND_DF_HASH_WITH_EXPIRY_MS:
+      return OBJ_HASH;
+    case RDB_TYPE_ZSET:
+    case RDB_TYPE_ZSET_2:
+    case RDB_TYPE_ZSET_ZIPLIST:
+    case RDB_TYPE_ZSET_LISTPACK:
+      return OBJ_ZSET;
+    case RDB_TYPE_STREAM_LISTPACKS:
+    case RDB_TYPE_STREAM_LISTPACKS_2:
+    case RDB_TYPE_STREAM_LISTPACKS_3:
+      return OBJ_STREAM;
+    case RDB_TYPE_JSON:
+      return OBJ_JSON;
+    case RDB_TYPE_SBF:
+    case RDB_TYPE_SBF2:
+      return OBJ_SBF;
+    case RDB_TYPE_CMS:
+      return OBJ_CMS;
+    case RDB_TYPE_TOPK:
+      return OBJ_TOPK;
+    case RDB_TYPE_CUCKOO:
+      return OBJ_CUCKOOFILTER;
+    default:
+      LOG(DFATAL) << "No memory accounting type for restored RDB type " << rdb_type;
+      return -1;
+  }
+}
+
 class RdbRestoreValue : protected RdbLoaderBase {
  public:
   explicit RdbRestoreValue(RdbVersion rdb_version) {
@@ -216,12 +263,19 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
   InMemSource data_src(data);
   // Bound declared lengths to the payload so a crafted element length can't force a huge resize.
   source_limit_ = data.size();
+
+  optional<TxMemoryScope> memory_scope;
   PrimeValue pv;
   bool first_parse = true;
   do {
     auto opaque_res = Parse(&data_src);
     if (!opaque_res) {
       return OpStatus::INVALID_VALUE;
+    }
+
+    if (!memory_scope && MemoryScopeEnabled()) {
+      if (int obj_type = RestoredObjectType(opaque_res->rdb_type); obj_type >= 0)
+        memory_scope.emplace(obj_type);
     }
 
     LoadConfig config;
@@ -253,6 +307,10 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
   } while (pending_read_.remaining > 0);
 
   auto res = db_slice->AddOrUpdate(cntx, key, std::move(pv), args.ExpirationTime());
+
+  // do not need tracking anymore. pv moved into AddOrUpdate and was destroyed or moved to db.
+  // either way accounting is complete for it.
+  memory_scope.reset();
   if (res) {
     res->it->first.SetSticky(args.Sticky());
     AddKeyToIndexesIfNeeded(key, cntx, res->it->second, db_slice->shard_owner());

@@ -1743,7 +1743,9 @@ TEST_F(GenericFamilyTest, RestoreRejectsDuplicateHashField) {
                            0x00, 0xbd, 0x46, 0xcd, 0x72, 0xc3, 0xf1, 0xd6, 0x32};
   for (auto payload : {ToSV(hash_dup), ToSV(hash_lp_dup)}) {
     Run({"del", "e"});
+    const auto before = GetMetrics().type_attributed_memory_bytes;
     EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+    EXPECT_EQ(GetMetrics().type_attributed_memory_bytes, before);
     EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
   }
 
@@ -3444,13 +3446,12 @@ TEST_F(MemParityTest, FlushDbMixedTypes) {
                          d.MatchObj() && d.IsClean());
 }
 
-// new: {string=-896 } old: {key=1152 } obj_used=1152
 TEST_F(MemParityTest, RenameStringAcrossShards) {
   const string dest = OnOtherShard(key_, key2_);
   EXPECT_FALSE(dest.empty()) << "could not find key on another shard after 5k tries";
   Run({"SET", key_, val_});
   auto d = Delta([&] { EXPECT_EQ(Run({"RENAME", key_, dest}), "OK"); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
+  EXPECT_TRUE(d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean()) << d;
 }
 
 TEST_F(MemParityTest, RenameHashOverString) {
@@ -3460,12 +3461,11 @@ TEST_F(MemParityTest, RenameHashOverString) {
   EXPECT_TRUE(d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
-// new: {string=-896 } old: {string=-896 hash=1392 } obj_used=496
 TEST_F(MemParityTest, CopyReplace) {
   Run({"HSET", key_, "f", val_});
   Run({"SET", key2_, val_});
   auto d = Delta([&] { Run({"COPY", key_, key2_, "REPLACE"}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+  EXPECT_TRUE(d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
 namespace {
@@ -3552,13 +3552,11 @@ TEST_F(MemParityTest, JsonSetInternedStrings) {
   }
 }
 
-// value is allocated while payload is decoded, delta should be for hash type
-// new: {} old: {hash=1392 key=1536 } obj_used=2928
 TEST_F(MemParityTest, RestoreHash) {
   Run({"HSET", key_, "f", string(1024, 'x')});
   const string payload = Run({"DUMP", key_}).GetString();
   auto d = Delta([&] { EXPECT_EQ(Run({"RESTORE", key3_, "0", payload}), "OK"); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+  EXPECT_TRUE(d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
 TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
