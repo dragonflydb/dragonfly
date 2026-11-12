@@ -348,6 +348,11 @@ class RdbLoaderBase::OpaqueObjLoader {
   }
 
   void operator()(long long val) {
+    // A JSON document with an int32 root is saved as an integer-encoded string.
+    if (rdb_type_ == RDB_TYPE_JSON) {
+      HandleBlob(absl::StrCat(val));
+      return;
+    }
     pv_->SetInt(val);
   }
 

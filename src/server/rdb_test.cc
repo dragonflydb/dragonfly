@@ -885,7 +885,8 @@ TEST_F(RdbTest, JsonTest) {
       R"({"a":1})"sv,                          //
       R"([1,2,3,4,5,6])"sv,                    //
       R"({"a":1.0,"b":[1,2],"c":"value"})"sv,  //
-      R"({"a":{"a":{"a":{"a":1}}}})"sv         //
+      R"({"a":{"a":{"a":{"a":1}}}})"sv,        //
+      "5"sv                                    //
   };
 
   for (auto test : data) {
@@ -895,6 +896,9 @@ TEST_F(RdbTest, JsonTest) {
     Run({"restore", "doc", "0", facade::ToSV(dump.GetBuf())});
     auto res = Run({"json.get", "doc"});
     ASSERT_EQ(res, test);
+
+    // JSON.GET reads plain strings too, so check that the value is still JSON.
+    EXPECT_EQ(Run({"type", "doc"}), "ReJSON-RL");
   }
 }
 
