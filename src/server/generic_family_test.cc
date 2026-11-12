@@ -1743,7 +1743,9 @@ TEST_F(GenericFamilyTest, RestoreRejectsDuplicateHashField) {
                            0x00, 0xbd, 0x46, 0xcd, 0x72, 0xc3, 0xf1, 0xd6, 0x32};
   for (auto payload : {ToSV(hash_dup), ToSV(hash_lp_dup)}) {
     Run({"del", "e"});
+    const auto before = GetMetrics().type_attributed_memory_bytes;
     EXPECT_THAT(Run({"restore", "e", "0", payload}), ErrArg("ERR Bad data format"));
+    EXPECT_EQ(GetMetrics().type_attributed_memory_bytes, before);
     EXPECT_THAT(Run({"exists", "e"}), IntArg(0));
   }
 
@@ -3206,7 +3208,7 @@ namespace {
 struct MetricCmp {
   TypeAttributedMemory new_metric{};
   TypeAttributedMemory old_metric{};
-  int64_t obj_used = 0, table_used = 0, search_used = 0, interned = 0;
+  int64_t obj_used = 0, table_used = 0, search_used = 0;
 
   MetricCmp() = default;
 
@@ -3217,7 +3219,6 @@ struct MetricCmp {
       table_used += db.table_mem_usage;
     }
     search_used = m.search_stats.used_memory;
-    interned = m.interned_string_stats.pool_bytes + m.interned_string_stats.pool_table_bytes;
   }
 
   MetricCmp operator-(const MetricCmp& o) const {
@@ -3227,7 +3228,6 @@ struct MetricCmp {
     res.obj_used -= o.obj_used;
     res.table_used -= o.table_used;
     res.search_used -= o.search_used;
-    res.interned -= o.interned;
     return res;
   }
 
@@ -3275,7 +3275,7 @@ ostream& operator<<(ostream& os, const MetricCmp& m) {
   print("new", m.new_metric);
   print("old", m.old_metric);
   return os << "obj_used=" << m.obj_used << " table_used=" << m.table_used
-            << " search_used=" << m.search_used << " interned=" << m.interned;
+            << " search_used=" << m.search_used;
 }
 
 // known gap
@@ -3446,13 +3446,12 @@ TEST_F(MemParityTest, FlushDbMixedTypes) {
                          d.MatchObj() && d.IsClean());
 }
 
-// new: {string=-896 } old: {key=1152 } obj_used=1152
 TEST_F(MemParityTest, RenameStringAcrossShards) {
   const string dest = OnOtherShard(key_, key2_);
   EXPECT_FALSE(dest.empty()) << "could not find key on another shard after 5k tries";
   Run({"SET", key_, val_});
   auto d = Delta([&] { EXPECT_EQ(Run({"RENAME", key_, dest}), "OK"); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean());
+  EXPECT_TRUE(d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean()) << d;
 }
 
 TEST_F(MemParityTest, RenameHashOverString) {
@@ -3462,34 +3461,102 @@ TEST_F(MemParityTest, RenameHashOverString) {
   EXPECT_TRUE(d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
-// new: {string=-896 } old: {string=-896 hash=1392 } obj_used=496
 TEST_F(MemParityTest, CopyReplace) {
   Run({"HSET", key_, "f", val_});
   Run({"SET", key2_, val_});
   auto d = Delta([&] { Run({"COPY", key_, key2_, "REPLACE"}); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+  EXPECT_TRUE(d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
-// interned pool is accounted separately from the JSON objects
-// new: {ReJSON-RL=87104 } old: {key=32768 ReJSON-RL=87104 } obj_used=119872 interned=100
-TEST_F(MemParityTest, JsonSetInternedStrings) {
-  const string shared = StrCat("shared-json-string-", string(1024, 'x'));
-  const string doc = StrCat(R"({"field":")", shared, R"(","nested":{"field":")", shared, R"("}})");
-  auto d = Delta([&] {
-    for (int i = 0; i < 32; ++i)
-      Run({"JSON.SET", StrCat("json-interned-", i, "-", string(1024, 'j')), "$", doc});
+namespace {
+struct JsonMemorySnapshot {
+  int64_t total_used_bytes;
+  int64_t json_type_bytes;
+  size_t pool_bytes;
+  size_t pool_entries;
+
+  bool operator==(const JsonMemorySnapshot&) const = default;
+};
+
+JsonMemorySnapshot SnapshotJsonMemory() {
+  return shard_set->Await(0, [] {
+    const auto* shard = EngineShard::tlocal();
+    const auto pool = GetInternedStringStats();
+    return JsonMemorySnapshot{
+        .total_used_bytes = static_cast<int64_t>(shard->UsedMemoryWithoutSearch()),
+        .json_type_bytes = shard->type_attributed_memory()[OBJ_JSON],
+        .pool_bytes = pool.pool_bytes,
+        .pool_entries = pool.pool_entries,
+    };
   });
-  METRIC_CMP_TODO(d, d.Match(OBJ_JSON) && d.new_metric[OBJ_JSON] == d.obj_used && d.interned > 0 &&
-                         d.IsClean());
+}
+}  // namespace
+
+TEST_F(MemParityTest, JsonSetInternedStrings) {
+  const string first = kShard0Key, second = kShard0AltKey;
+
+  const string member = StrCat("shared-member-", string(1024, 'x'));
+  const string doc = StrCat("{\"", member, "\":1}");
+
+  ASSERT_EQ(Run({"SET", first, ""}), "OK");
+  ASSERT_EQ(Run({"SET", second, ""}), "OK");
+  ASSERT_THAT(Run({"DEL", first, second}), IntArg(2));
+
+  auto check_delta = [](const JsonMemorySnapshot& before, const JsonMemorySnapshot& after) {
+    EXPECT_EQ(after.json_type_bytes - before.json_type_bytes,
+              after.total_used_bytes - before.total_used_bytes);
+  };
+
+  // Two values are computed here, document bytes = D and blob bytes = B.
+  // D is the size of the JSON object itself.
+  // B is the size of the interned `shared-member-...` json key which will be shared.
+  // The deltas below calculate D and B in sequence
+  for (bool delete_creator_first : {true, false}) {
+    SCOPED_TRACE(StrCat("delete creator first=", delete_creator_first));
+    const auto baseline = SnapshotJsonMemory();
+    ASSERT_EQ(Run({"JSON.SET", first, "$", doc}), "OK");
+    const auto one = SnapshotJsonMemory();
+    check_delta(baseline, one);
+    EXPECT_EQ(one.pool_entries, baseline.pool_entries + 1);
+    ASSERT_GT(one.pool_bytes, baseline.pool_bytes);
+
+    // B = the size of the JSON blob stored in the interned string pool
+    const int64_t blob_bytes = one.pool_bytes - baseline.pool_bytes;
+
+    ASSERT_EQ(Run({"JSON.SET", second, "$", doc}), "OK");
+    const auto two = SnapshotJsonMemory();
+    check_delta(one, two);
+
+    // Since B is shared, pool bytes or pool entries must not grow
+    EXPECT_EQ(two.pool_entries, one.pool_entries);
+    EXPECT_EQ(two.pool_bytes, one.pool_bytes);
+
+    // D = the size of the JSON object. Now all the growth is due to it since B does not grow.
+    const int64_t document_bytes = two.total_used_bytes - one.total_used_bytes;
+    EXPECT_GT(document_bytes, 0);
+
+    // Now we know both D and B, so check if the first creation matched exactly D+B
+    EXPECT_EQ(one.total_used_bytes - baseline.total_used_bytes, document_bytes + blob_bytes);
+
+    const string& deleted = delete_creator_first ? first : second;
+    const string& remaining = delete_creator_first ? second : first;
+    ASSERT_THAT(Run({"DEL", deleted}), IntArg(1));
+
+    // The snapshot is back to step 1 after the intermediate was deleted
+    EXPECT_EQ(SnapshotJsonMemory(), one);
+
+    EXPECT_EQ(Run({"JSON.GET", remaining}), doc);
+
+    ASSERT_THAT(Run({"DEL", remaining}), IntArg(1));
+    EXPECT_EQ(SnapshotJsonMemory(), baseline);
+  }
 }
 
-// value is allocated while payload is decoded, delta should be for hash type
-// new: {} old: {hash=1392 key=1536 } obj_used=2928
 TEST_F(MemParityTest, RestoreHash) {
   Run({"HSET", key_, "f", string(1024, 'x')});
   const string payload = Run({"DUMP", key_}).GetString();
   auto d = Delta([&] { EXPECT_EQ(Run({"RESTORE", key3_, "0", payload}), "OK"); });
-  METRIC_CMP_TODO(d, d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean());
+  EXPECT_TRUE(d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
 }
 
 TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
