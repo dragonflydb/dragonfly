@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <mutex>
 
 #include "base/logging.h"
 #include "core/search/hnsw_alg.h"
@@ -241,9 +242,9 @@ struct HnswlibAdapter {
   }
 
   void DoRemove(GlobalDocId id) {
-    auto it = copy_vector_ ? world_.label_lookup_.end() : world_.label_lookup_.find(id);
-
-    HnswErrorStatus status = world_.markDelete(id);
+    absl::ReaderMutexLock resize_lock(&resize_mutex_);
+    hnswlib::tableint internal_id = 0;
+    HnswErrorStatus status = world_.markDelete(id, &internal_id);
     if (status != HnswErrorStatus::SUCCESS) {
       VLOG(1) << "HnswlibAdapter::Remove failed with status: " << static_cast<int>(status)
               << " for global id: " << id;
@@ -255,9 +256,9 @@ struct HnswlibAdapter {
     // pointer with stub_vector_ so the caller can free the original data.
     // Uses a native-encoded 1.0 (not zero) because a zero-norm vector yields
     // cosine distance 0 and would bias traversal toward deleted nodes.
-    if (it != world_.label_lookup_.end()) {
+    if (!copy_vector_) {
       const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
-      char* ptr_location = world_.getDataPtrByInternalId(it->second);
+      char* ptr_location = world_.getDataPtrByInternalId(internal_id);
       memcpy(ptr_location, &safe_ptr, sizeof(void*));
     }
   }
@@ -425,15 +426,19 @@ struct HnswlibAdapter {
   // Returns false if the node doesn't exist in the index.
   bool UpdateVectorData(GlobalDocId id, const void* data) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    absl::ReaderMutexLock resize_lock(&resize_mutex_);
 
     // Find the internal id for this label
-    auto it = world_.label_lookup_.find(id);
-    if (it == world_.label_lookup_.end()) {
-      VLOG(1) << "UpdateVectorData: label " << id << " not found in index";
-      return false;
+    size_t internal_id;
+    {
+      std::lock_guard<std::mutex> lock_table(world_.label_lookup_lock);
+      auto it = world_.label_lookup_.find(id);
+      if (it == world_.label_lookup_.end()) {
+        VLOG(1) << "UpdateVectorData: label " << id << " not found in index";
+        return false;
+      }
+      internal_id = it->second;
     }
-
-    size_t internal_id = it->second;
 
     // Copy/store the vector data based on copy_vector_ mode
     if (world_.copy_vector_) {
@@ -470,6 +475,10 @@ struct HnswlibAdapter {
  private:
   HnswSpace space_;
   HierarchicalNSW<float> world_;
+
+  // Writers share mrmw_mutex_, and resizeIndex moves the level-0 block under them: readers of
+  // this mutex touch nodes (DoAdd, DoRemove, UpdateVectorData), writers replace the memory
+  // (ResizeIfFull, RestoreFromNodes).
   absl::Mutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
   std::atomic_bool retired_ = false;

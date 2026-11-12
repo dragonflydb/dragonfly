@@ -788,7 +788,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
   /*
    * Marks an element with the given label deleted, does NOT really change the current graph.
    */
-  HnswErrorStatus markDelete(labeltype label) {
+  HnswErrorStatus markDelete(labeltype label, tableint* internal_id = nullptr) {
     // lock all operations with element by label
     std::unique_lock<std::mutex> lock_label(getLabelOpMutex(label));
 
@@ -798,6 +798,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
       return HnswErrorStatus::LABEL_NOT_FOUND;
     }
     tableint internalId = search->second;
+    if (internal_id)
+      *internal_id = internalId;
     lock_table.unlock();
     if (!markDeletedInternal(internalId)) {
       return HnswErrorStatus::ELEMENT_ALREADY_DELETED;

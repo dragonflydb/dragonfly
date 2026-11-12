@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <memory_resource>
 #include <random>
@@ -32,6 +33,7 @@
 #include "core/search/scoring.h"
 #include "core/search/stateless_allocator.h"
 #include "core/search/vector_utils.h"
+#include "util/fibers/pool.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -1537,6 +1539,49 @@ TEST(HnswBorrowedMode, RetiredIndexReadsNoVectors) {
   auto extra = std::make_unique<float[]>(kDim);
   index.Add(kN, BorrowedDoc{reinterpret_cast<const char*>(extra.get())}, "vec");
   EXPECT_EQ(index.GetNodeCount(), kN);
+}
+
+// Removals on one thread run while insertions on another grow the graph. Every removal must
+// still mark its node and swap in the stub, so the search after the buffers are freed reads
+// no vector.
+TEST(HnswBorrowedMode, ConcurrentRemoveWhileGrowing) {
+  constexpr size_t kDim = 256;
+  constexpr size_t kN = 2000;
+
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = kDim;
+  params.capacity = 16;  // Grows at every doubling.
+  HnswVectorIndex index(params, /*copy_vector=*/false);
+
+  std::vector<std::unique_ptr<float[]>> bufs(kN);
+  std::atomic_size_t added = 0;
+
+  std::unique_ptr<util::ProactorPool> pp(util::fb2::Pool::Epoll(2));
+  pp->Run();
+  auto adder = pp->at(0)->LaunchFiber([&] {
+    for (size_t i = 0; i < kN; i++) {
+      bufs[i] = std::make_unique<float[]>(kDim);
+      bufs[i][0] = static_cast<float>(i);
+      index.Add(i, BorrowedDoc{reinterpret_cast<const char*>(bufs[i].get())}, "vec");
+      added.store(i + 1);
+    }
+  });
+  auto remover = pp->at(1)->LaunchFiber([&] {
+    for (size_t i = 0; i < kN; i++) {
+      while (added.load() <= i)
+        util::ThisFiber::Yield();
+      index.Remove(i);
+    }
+  });
+  adder.Join();
+  remover.Join();
+  pp->Stop();
+  bufs.clear();
+
+  vector<float> query(kDim, 0.0f);
+  EXPECT_EQ(index.GetNodeCount(), kN);
+  EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt), testing::IsEmpty());
 }
 
 INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,
