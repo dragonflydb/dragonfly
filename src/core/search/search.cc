@@ -587,6 +587,13 @@ struct BasicSearch {
   // {tags | ...}: Unify results for all tags
   IndexResult Search(const AstTagsNode& node, string_view active_field) {
     auto* tag_index = GetIndex<TagIndex>(active_field);
+
+    // A raw "" asks for the empty tag, which only INDEXEMPTY attributes keep; {" "} is no error.
+    if (error_.empty() && rng::any_of(node.tags, [](const auto& t) { return t.affix.empty(); }) &&
+        !(indices_->GetSchema().Find(active_field)->flags & SchemaField::INDEXEMPTY)) {
+      error_ = "Use `INDEXEMPTY` in field creation in order to index and query for empty strings";
+      return IndexResult{};
+    }
     if (!tag_index)
       return IndexResult{};
 
@@ -1290,7 +1297,8 @@ unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view alias, const SchemaF
       return make_unique<NumericIndex>(nparams.block_size, mr);
     }
     case SchemaField::TAG:
-      return make_unique<TagIndex>(mr, std::get<SchemaField::TagParams>(field.special_params));
+      return make_unique<TagIndex>(mr, std::get<SchemaField::TagParams>(field.special_params),
+                                   (field.flags & SchemaField::INDEXEMPTY) != 0);
     case SchemaField::VECTOR: {
       const auto& vparams = std::get<SchemaField::VectorParams>(field.special_params);
       if (vparams.use_hnsw)  // served by the global HNSW index

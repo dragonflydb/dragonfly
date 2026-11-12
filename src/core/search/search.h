@@ -104,7 +104,7 @@ struct SchemaField {
   };
 
   struct TagParams {
-    char separator = ',';
+    std::optional<char> separator = ',';  // none: the whole value is one tag, untrimmed
     bool case_sensitive = false;
     bool with_suffixtrie = false;  // see TextParams
   };

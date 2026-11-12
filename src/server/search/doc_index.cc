@@ -292,7 +292,8 @@ vector<string> DocIndexInfo::BuildRestoreArgs() const {
           }
         },
         [&add](const search::SchemaField::TagParams& params) {
-          add("SEPARATOR", string{params.separator});
+          if (params.separator)
+            add("SEPARATOR", string{*params.separator});
           if (params.case_sensitive)
             add("CASESENSITIVE");
           if (params.with_suffixtrie)

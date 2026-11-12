@@ -9276,7 +9276,7 @@ TEST_F(SearchFamilyTest, FtInfoResp2AndResp3) {
 
   auto definition = IsArray("key_type", "JSON", "prefixes", IsArray("d:"), "default_score", 1);
   auto attributes =
-      IsArray(IsArray("identifier", "$.id", "attribute", "id", "type", "TAG", "SEPARATOR", ","));
+      IsArray(IsArray("identifier", "$.id", "attribute", "id", "type", "TAG", "SEPARATOR", ""));
 
   for (string_view proto : {"2", "3"}) {
     Run({"HELLO", proto});
@@ -10396,7 +10396,7 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
           "L2 NOINDEX v VECTOR FLAT 6 TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2"),
       "OK");
   ASSERT_EQ(Run("FT.CREATE h ON HASH PREFIX 1 d: SCHEMA t TEXT ni TEXT NOINDEX v VECTOR HNSW 6 "
-                "TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2"),
+                "TYPE FLOAT32 DIM 2 DISTANCE_METRIC L2 ng TAG NOINDEX"),
             "OK");
   Run({"HSET", "d:1", "t", "hello web", "ni", "hello", "ng", "red", "nn", "5", "v", vec});
   Run({"HSET", "d:2", "t", "world", "v", FloatVec(0, 1)});
@@ -10416,6 +10416,7 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
     for (auto [q, err] :
          {pair{"@zz:x", "Invalid field: zz"}, pair{"@ni:[1 2]", "Wrong access type for field: ni"},
           pair{"ismissing(@zz)", "Invalid field: zz"},
+          pair{R"(@ng:{""})", "Use `INDEXEMPTY` in field creation"},
           pair{"ismissing(@ni)", "with 'INDEXMISSING': ni"}}) {
       EXPECT_THAT(Run({"FT.AGGREGATE", idx, q}), ErrArg(err));
       const string knn = absl::StrCat(q, "=>[KNN 1 @v $vec]");
@@ -10443,6 +10444,9 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
     EXPECT_THAT(Run({"FT.HYBRID", idx, "SEARCH", "@zz:x", "VSIM", "@v", "$vec", "FILTER",
                      "@ni:[1 2]", "PARAMS", "2", "vec", vec}),
                 ErrArg("Invalid field: zz"));  // the SEARCH clause is reported first
+    for (string_view cmd : {"FT.SEARCH", "FT.AGGREGATE"})
+      for (string_view q : {"@t:nomatch=>[KNN 1 @v $e]", "@t:nomatch @v:[VECTOR_RANGE 1 $e]"})
+        EXPECT_THAT(Run({cmd, idx, q, "PARAMS", "2", "e", ""}), ErrArg("syntax error")) << q;
   }
 
   EXPECT_THAT(Run({"FT.AGGREGATE", "nope", "*", "SCORER", "BM25STD"}),
@@ -10553,6 +10557,52 @@ TEST_F(SearchFamilyTest, IsMissingJson) {
 
   Run({"JSON.DEL", "j:1", "$.lock"});
   EXPECT_THAT(search("ismissing(@lock)"), AreNoContentDocIds("j:1", "j:4"));
+}
+
+// With INDEXEMPTY, empty or blank values and empty list items are the tag ""; else "" is an error.
+TEST_F(SearchFamilyTest, IndexEmptyTag) {
+  Run({"FT.CREATE",       "idx", "ON",     "HASH", "SCHEMA", "sizes", "TAG",       "SEPARATOR", " ",
+       "INDEXEMPTY",      "emb", "VECTOR", "FLAT", "6",      "TYPE",  "FLOAT32",   "DIM",       "2",
+       "DISTANCE_METRIC", "L2",  "brand",  "TAG",  "color",  "TAG",   "INDEXEMPTY"});
+  Run({"HSET", "p:1", "color", "red", "sizes", "s  m", "emb", FloatVec(0.1, 0.1)});
+  Run({"HSET", "p:2", "color", "", "sizes", "  ", "brand", " ", "emb", FloatVec(0.2, 0.2)});
+  Run({"HSET", "p:3", "color", "black,,blue", "emb", FloatVec(0.3, 0.3)});
+  Run({"HSET", "p:4", "color", " ", "emb", FloatVec(0.4, 0.4)});
+
+  auto search = [&](string_view query) { return Run({"FT.SEARCH", "idx", query, "NOCONTENT"}); };
+  for (string_view query : {R"(@color:{""})", R"(@color:{\ })"})
+    EXPECT_THAT(search(query), AreNoContentDocIds("p:2", "p:3", "p:4")) << query;
+  EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "@color:{$c}", "PARAMS", "2", "c", ""}),
+              RespElementsAre(IntArg(3), _, _, _));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "-$c", "PARAMS", "2", "c", ""}), ErrArg("syntax error"));
+  EXPECT_THAT(search(R"(@sizes:{""})"), AreNoContentDocIds("p:2"));
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "color"}), IsArray("", "black", "blue", "red"));
+  EXPECT_THAT(HybridKeys(Run({"FT.HYBRID", "idx", "SEARCH", "@brand:{zzz}", "VSIM", "@emb", "$v",
+                              "FILTER", R"(@color:{""})", "PARAMS", "2", "v", FloatVec(0.2, 0.2)})),
+              UnorderedElementsAre("p:2", "p:3", "p:4"));
+  EXPECT_THAT(search(R"(@brand:{\ })"), kNoResults);
+  EXPECT_THAT(search(R"(@brand:{""})"), ErrArg("Use `INDEXEMPTY` in field creation in order to "
+                                               "index and query for empty strings"));
+}
+
+// On JSON a TAG without SEPARATOR takes every string whole, as is; with SEPARATOR it splits.
+TEST_F(SearchFamilyTest, JsonTagWithoutSeparator) {
+  Run("FT.CREATE j ON JSON PREFIX 1 c: SCHEMA $.city AS city TAG INDEXEMPTY WITHSUFFIXTRIE "
+      "$.city AS parts TAG SEPARATOR , $.labels[*] AS labels TAG");
+  Run({"JSON.SET", "c:1", "$", R"({"city":"New York, NY","labels":["a,b","c"]})"});
+  Run({"JSON.SET", "c:2", "$", R"({"city":" Austin "})"});
+  Run({"JSON.SET", "c:3", "$", R"({"city":"NY"})"});
+  Run({"JSON.SET", "c:4", "$", R"({"city":""})"});
+
+  auto search = [&](string_view query) { return Run({"FT.SEARCH", "j", query, "NOCONTENT"}); };
+  EXPECT_THAT(search(R"(@city:{"New York, NY"})"), AreNoContentDocIds("c:1"));
+  EXPECT_THAT(search("@city:{\n  ny\n}"), AreNoContentDocIds("c:3"));
+  EXPECT_THAT(search("@parts:{ny}"), AreNoContentDocIds("c:1", "c:3"));
+  EXPECT_THAT(search(R"(@city:{" Austin "})"), AreNoContentDocIds("c:2"));
+  EXPECT_THAT(search("@city:{austin}"), kNoResults);
+  EXPECT_THAT(search("@city:{*austin*}"), AreNoContentDocIds("c:2"));
+  EXPECT_THAT(search(R"(@city:{""})"), AreNoContentDocIds("c:4"));
+  EXPECT_THAT(search(R"(@labels:{a\,b})"), AreNoContentDocIds("c:1"));
 }
 
 TEST_F(SearchFamilyTest, FtHybridSyntaxErrors) {

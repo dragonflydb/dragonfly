@@ -103,6 +103,11 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // TextIndex (CompressedSortedSet) supports TF storage and BM25 scoring; TagIndex does not.
   static constexpr bool kIsScored = std::is_same_v<C, CompressedSortedSet>;
 
+  // Synonym group tokens of a text index start with a space; a whole tag value may too.
+  static bool IsGroupSentinel(std::string_view key) {
+    return kIsScored && key.starts_with(' ');
+  }
+
   BaseStringIndex(PMR_NS::memory_resource* mr, bool case_sensitive, bool with_suffixtrie,
                   bool with_offsets = false);
 
@@ -263,9 +268,15 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 // Index for text fields.
 // Hashmap based lookup per word.
 struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
-  TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params)
+  TagIndex(PMR_NS::memory_resource* mr, SchemaField::TagParams params, bool index_empty)
       : BaseStringIndex(mr, params.case_sensitive, params.with_suffixtrie),
-        separator_{params.separator} {
+        separator_{params.separator},
+        index_empty_{index_empty} {
+  }
+
+  // A query is trimmed as the values of a separated list are; a whole value is matched as is.
+  const Container* Matching(std::string_view str) const {
+    return BaseStringIndex::Matching(str, separator_.has_value());
   }
 
   DefragmentResult Defragment(PageUsage* page_usage) override;
@@ -277,7 +288,8 @@ struct TagIndex : public BaseStringIndex<SortedVector<DocId>> {
                 absl::flat_hash_map<std::string, TermInfo>* out) const override;
 
  private:
-  char separator_;
+  std::optional<char> separator_;
+  bool index_empty_;
   std::string next_defrag_entry_;
   std::string next_defrag_suffix_entry_;
 };

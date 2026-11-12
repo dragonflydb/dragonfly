@@ -49,11 +49,6 @@ string ToLower(string_view word) {
   return IsAllAscii(word) ? absl::AsciiStrToLower(word) : una::cases::to_lowercase_utf8(word);
 }
 
-// Synonym group tokens carry a leading space (Synonyms::GetGroupTokens); no real word does.
-bool IsGroupSentinel(string_view token) {
-  return !token.empty() && token.front() == ' ';
-}
-
 constexpr std::array<bool, 256> MakeSepTable() {
   std::array<bool, 256> t{};
   for (unsigned char c : std::string_view{" \t\n\r\v\f,.<>{}[]\"':;!@#$%^&*()-+=~?/|`"})
@@ -168,15 +163,26 @@ void TokenizeWords(std::string_view text, const TextIndex::StopWords& stopwords,
 
 // Split taglist, remove duplicates and convert all to lowercase. Freq is always 1 for tags;
 // positions are not tracked (phrase queries don't apply to tag fields).
-void NormalizeTags(string_view taglist, bool case_sensitive, char separator,
+void NormalizeTags(string_view taglist, bool case_sensitive, optional<char> sep, bool index_empty,
                    absl::flat_hash_map<std::string, TermInfo>* out) {
-  // Splitting utf8 by ascii character is safe
-  for (string_view tag : absl::StrSplit(taglist, separator, absl::SkipEmpty())) {
-    string_view str = absl::StripAsciiWhitespace(tag);
+  auto add = [&](string_view str) {
+    if (str.empty() && !index_empty)
+      return;
     std::string s = case_sensitive ? string{str} : ToLower(str);
     auto& info = (*out)[std::move(s)];
     if (info.freq == 0)
       info.freq = 1;  // dedup: tag presence is binary
+  };
+  if (!sep)
+    return add(taglist);  // one whole tag, untrimmed
+  if (absl::ascii_isspace(*sep) && absl::StripAsciiWhitespace(taglist).empty())
+    return add("");  // whitespace parts tags as it parts words: only a blank value is ""
+
+  // Splitting utf8 by ascii character is safe
+  for (string_view tag : absl::StrSplit(taglist, *sep)) {
+    tag = absl::StripAsciiWhitespace(tag);
+    if (!tag.empty() || !absl::ascii_isspace(*sep))
+      add(tag);
   }
 }
 
@@ -191,9 +197,9 @@ void IterateAllSuffixes(Words&& words, absl::FunctionRef<void(std::string_view)>
 }
 
 // Tokens that go into the suffix trie: group tokens are internal and stay out of affix queries.
-auto TrieKeys(const absl::flat_hash_map<string, TermInfo>& tokens) {
+template <typename C> auto TrieKeys(const absl::flat_hash_map<string, TermInfo>& tokens) {
   return tokens | std::views::keys |
-         std::views::filter([](string_view token) { return !IsGroupSentinel(token); });
+         std::views::filter([](string_view t) { return !BaseStringIndex<C>::IsGroupSentinel(t); });
 }
 
 // Longest run of literal characters in `pat` (bounded by unescaped `*`/`?`), with `\` escapes
@@ -684,7 +690,7 @@ bool BaseStringIndex<C>::Add(DocId id, const DocumentAccessor& doc, string_view 
         ->Insert(id, info.freq, absl::MakeConstSpan(info.positions.data(), info.positions.size()));
 
   if (suffix_trie_) {
-    IterateAllSuffixes(TrieKeys(tokens),
+    IterateAllSuffixes(TrieKeys<C>(tokens),
                        [&](string_view str) { GetOrCreate(&*suffix_trie_, str)->Insert(id); });
   }
 
@@ -714,7 +720,7 @@ void BaseStringIndex<C>::Remove(DocId id, const DocumentAccessor& doc, string_vi
     Remove(&entries_, id, token);
 
   if (suffix_trie_) {
-    IterateAllSuffixes(TrieKeys(tokens), [&](string_view str) { Remove(&*suffix_trie_, id, str); });
+    IterateAllSuffixes(TrieKeys<C>(tokens), [&](string_view s) { Remove(&*suffix_trie_, id, s); });
   }
 }
 
@@ -890,7 +896,7 @@ std::optional<DocumentAccessor::StringList> TagIndex::GetStrings(const DocumentA
 
 void TagIndex::Tokenize(std::string_view value, uint32_t* /*pos_counter*/,
                         absl::flat_hash_map<std::string, TermInfo>* out) const {
-  NormalizeTags(value, case_sensitive_, separator_, out);
+  NormalizeTags(value, case_sensitive_, separator_, index_empty_, out);
 }
 
 BaseVectorIndex::BaseVectorIndex(size_t dim, VectorSimilarity sim, VectorDataType data_type)
