@@ -722,6 +722,51 @@ TEST_F(ClusterFamilyTest, ClusterMultiExec) {
   Run({"SET", "{tag}key", "value"});
   Run({"MOVE", "{tag}key", "1"});
   EXPECT_THAT(Run({"EXEC"}), RespElementsAre("OK", IntArg(1)));
+
+  Run({"MULTI"});
+  Run({"SET", "X1", "queued"});
+
+  // Change ownership on another connection while the transaction is queued.
+  pp_->at(1)->Await([&] { ConfigSingleNodeCluster("other-node"); });
+  EXPECT_THAT(Run({"EXEC"}), ErrArg("MOVED"));
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(0));
+}
+
+TEST_F(ClusterFamilyTest, ClusterMultiExecShardedPubSub) {
+  single_response_ = false;
+  ConfigSingleNodeCluster(GetMyId());
+
+  auto subscribe_resp = pp_->at(2)->Await([&] { return Run({"SSUBSCRIBE", "X1"}); });
+  ASSERT_THAT(subscribe_resp, RespElementsAre("ssubscribe", "X1", IntArg(1)));
+
+  EXPECT_EQ(Run({"MULTI"}), "OK");
+  EXPECT_EQ(Run({"SPUBLISH", "X1", "a transactional message"}), "QUEUED");
+  EXPECT_THAT(Run({"EXEC"}), RespElementsAre(IntArg(1)));
+  pp_->AwaitFiberOnAll([](util::ProactorBase* pb) {});
+  ASSERT_EQ(1, SubscriberMessagesLen("IO2"));
+  EXPECT_EQ("a transactional message", GetPublishedMessage("IO2", 0).message);
+
+  for (string_view command : {"SET", "SPUBLISH"}) {
+    EXPECT_EQ(Run({"MULTI"}), "OK");
+    EXPECT_EQ(Run({"SPUBLISH", "X1", "message"}), "QUEUED");
+    EXPECT_EQ(Run({command, "X2", "value"}), "QUEUED");
+    EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
+  }
+  pp_->AwaitFiberOnAll([](util::ProactorBase* pb) {});
+  EXPECT_EQ(1, SubscriberMessagesLen("IO2"));
+  EXPECT_THAT(Run({"DBSIZE"}), IntArg(0));
+
+  EXPECT_EQ(Run({"MULTI"}), "OK");
+  EXPECT_EQ(Run({"SPUBLISH", "X1", "queued"}), "QUEUED");
+
+  // Change ownership on another connection while the transaction is queued.
+  pp_->at(1)->Await([&] { ConfigSingleNodeCluster("other-node"); });
+  EXPECT_THAT(Run({"EXEC"}), ErrArg("MOVED"));
+  pp_->AwaitFiberOnAll([](util::ProactorBase* pb) {});
+
+  // Slot migration sends a forced unsubscribe notification.
+  ASSERT_EQ(2, SubscriberMessagesLen("IO2"));
+  EXPECT_TRUE(GetPublishedMessage("IO2", 1).force_unsubscribe);
 }
 
 TEST_F(ClusterFamilyTest, ClusterConfigDeleteSlots) {
