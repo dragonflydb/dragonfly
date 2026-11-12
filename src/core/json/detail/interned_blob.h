@@ -106,7 +106,7 @@ class InternedBlobHandle {
 struct BlobHash {
   using is_transparent = void;
   size_t operator()(std::string_view sv) const {
-    return std::hash<std::string_view>{}(sv);
+    return absl::Hash<std::string_view>{}(sv);
   }
 };
 
