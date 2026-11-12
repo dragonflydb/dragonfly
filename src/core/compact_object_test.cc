@@ -1451,6 +1451,37 @@ TEST_F(CompactObjectTest, TryBorrow_CowOnMutation) {
   cobj_.Reset();
 }
 
+// #8628 check both encoded and non encoded paths
+TEST_F(CompactObjectTest, TryBorrow_CowOnSetByteAtIndex) {
+  auto check = [this](char fill, char new_byte, bool encoded) {
+    const string val(3000, fill);
+    cobj_.SetString(val);
+
+    {
+      const auto borrow = cobj_.TryBorrow();
+      ASSERT_TRUE(borrow.has_value());
+      ASSERT_EQ(borrow->IsEncoded(), encoded);
+
+      EXPECT_EQ(cobj_.SetByteAtIndex(0, new_byte), make_pair(true, false));
+
+      EXPECT_TRUE(CompactObj::TEST_PinOrphaned(*borrow));
+      EXPECT_EQ(cmn::DecodeToString(*borrow), val);
+
+      uint8_t byte = 0;
+      EXPECT_TRUE(cobj_.GetByteAtIndex(0, &byte));
+      EXPECT_EQ(byte, static_cast<uint8_t>(new_byte));
+    }
+
+    // The new buffer is not pinned, so the next write is in place again.
+    CompactObj::DrainPendingReads();
+    EXPECT_EQ(cobj_.SetByteAtIndex(1, new_byte), make_pair(true, true));
+    cobj_.Reset();
+  };
+
+  check('\x80', '\x81', false);
+  check('a', '`', true);
+}
+
 TEST_F(CompactObjectTest, TryBorrow_DefragSkipsWhenPinned) {
   string val(300, '\x80');
   cobj_.SetString(val);

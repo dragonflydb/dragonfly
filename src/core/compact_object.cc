@@ -1454,14 +1454,18 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
     return {true, true};
   }
 
+  const bool pending_read = taglen_ == LARGE_STR_TAG && u_.large_str.read_pending;
+
   // LARGE_STR_TAG raw string without encoding: modify the underlying buffer directly.
   if (taglen_ == LARGE_STR_TAG && !encoding_) {
     if (idx >= u_.large_str.Size()) {
       VLOG(1) << "Offset out of bounds for raw string: " << idx << " >= " << u_.large_str.Size();
       return {false, false};
     }
-    reinterpret_cast<char*>(u_.large_str.ptr)[idx] = val;
-    return {true, true};
+    if (!pending_read) {
+      reinterpret_cast<char*>(u_.large_str.ptr)[idx] = val;
+      return {true, true};
+    }
   }
 
   // For ASCII encoded large strings we can modify the underlying buffer directly.
@@ -1473,8 +1477,10 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
       VLOG(1) << "Offset out of bounds for ASCII encoded string: " << idx << " >= " << decoded_len;
       return {false, false};
     }
-    detail::ascii_pack_byte(buf, decoded_len, idx, val);
-    return {true, true};
+    if (!pending_read) {
+      detail::ascii_pack_byte(buf, decoded_len, idx, val);
+      return {true, true};
+    }
   }
 
   // For other encoded strings, INT_TAG, SMALL_TAG we need to decode, modify, and re-encode.
