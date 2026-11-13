@@ -11,98 +11,110 @@
 
 ABSL_DECLARE_FLAG(bool, jwt_validate);
 ABSL_DECLARE_FLAG(std::string, jwt_validate_url);
+ABSL_DECLARE_FLAG(bool, auth_validate);
+ABSL_DECLARE_FLAG(std::string, auth_validate_url);
 
 namespace dfly::acl {
 
 using namespace std;
 
-class JwtValidatorTest : public testing::Test {
+class AuthValidatorTest : public testing::Test {
  protected:
   void SetUp() override {
-    // Flags are process-global; snapshot and restore so tests can freely flip them
-    // without affecting others (gtest doesn't run these in a fresh process each time).
-    saved_validate_ = absl::GetFlag(FLAGS_jwt_validate);
-    saved_validate_url_ = absl::GetFlag(FLAGS_jwt_validate_url);
-  }
-
-  void TearDown() override {
-    absl::SetFlag(&FLAGS_jwt_validate, saved_validate_);
-    absl::SetFlag(&FLAGS_jwt_validate_url, saved_validate_url_);
+    absl::SetFlag(&FLAGS_auth_validate, false);
+    absl::SetFlag(&FLAGS_jwt_validate, false);
   }
 
  private:
-  bool saved_validate_;
-  string saved_validate_url_;
+  absl::FlagSaver flag_saver_;
 };
 
-TEST_F(JwtValidatorTest, IsEnabledFalseWhenFlagOff) {
-  absl::SetFlag(&FLAGS_jwt_validate, false);
-  absl::SetFlag(&FLAGS_jwt_validate_url, "http://localhost:8080/validate");
-  EXPECT_FALSE(JwtValidator::IsEnabled());
+TEST_F(AuthValidatorTest, IsEnabledFalseWhenFlagOff) {
+  absl::SetFlag(&FLAGS_auth_validate_url, "http://localhost:8080/validate");
+  EXPECT_FALSE(AuthValidator::IsEnabled());
 }
 
-TEST_F(JwtValidatorTest, IsEnabledFalseWhenUrlEmpty) {
+TEST_F(AuthValidatorTest, MissingUrlFailsClosed) {
+  absl::SetFlag(&FLAGS_auth_validate, true);
+  absl::SetFlag(&FLAGS_auth_validate_url, "");
+  EXPECT_TRUE(AuthValidator::IsEnabled());
+  EXPECT_FALSE(AuthValidator{}.Validate("alice", "password"));
+}
+
+TEST_F(AuthValidatorTest, IsEnabledTrueWhenBothSet) {
+  absl::SetFlag(&FLAGS_auth_validate, true);
+  absl::SetFlag(&FLAGS_auth_validate_url, "http://localhost:8080/validate");
+  EXPECT_TRUE(AuthValidator::IsEnabled());
+}
+
+TEST_F(AuthValidatorTest, LegacyJwtRequiresUrl) {
   absl::SetFlag(&FLAGS_jwt_validate, true);
   absl::SetFlag(&FLAGS_jwt_validate_url, "");
-  // Misconfiguration -- must fail closed to "disabled" (falls back to password auth)
-  // rather than crash or treat every AUTH as a JWT with nowhere to validate it.
-  EXPECT_FALSE(JwtValidator::IsEnabled());
+  EXPECT_FALSE(AuthValidator::IsEnabled());
+  absl::SetFlag(&FLAGS_jwt_validate_url, "http://localhost:8080/validate");
+  EXPECT_TRUE(AuthValidator::IsEnabled());
+  absl::SetFlag(&FLAGS_jwt_validate, false);
+  EXPECT_FALSE(AuthValidator::IsEnabled());
 }
 
-TEST_F(JwtValidatorTest, IsEnabledTrueWhenBothSet) {
+TEST_F(AuthValidatorTest, NewModeOverridesLegacyJwt) {
   absl::SetFlag(&FLAGS_jwt_validate, true);
   absl::SetFlag(&FLAGS_jwt_validate_url, "http://localhost:8080/validate");
-  EXPECT_TRUE(JwtValidator::IsEnabled());
+  absl::SetFlag(&FLAGS_auth_validate, true);
+  absl::SetFlag(&FLAGS_auth_validate_url, "ldap://localhost");
+  EXPECT_TRUE(AuthValidator::IsEnabled());
+  EXPECT_FALSE(AuthValidator{}.Validate("alice", "password"));
 }
 
-TEST_F(JwtValidatorTest, ValidateOverrideBypassesNetwork) {
-  JwtValidator jwt;
-  jwt.SetValidateFuncForTest([](string_view token) -> optional<JwtValidator::ValidationResult> {
-    if (token == "good-token")
-      return JwtValidator::ValidationResult{"alice"};
-    return nullopt;
-  });
+TEST_F(AuthValidatorTest, ValidateOverrideBypassesNetwork) {
+  AuthValidator validator;
+  validator.SetValidateFuncForTest(
+      [](string_view username, string_view password) -> optional<AuthValidator::ValidationResult> {
+        if (username == "alice" && password == "good-token")
+          return AuthValidator::ValidationResult{"alice"};
+        return nullopt;
+      });
 
-  auto ok = jwt.Validate("good-token");
+  auto ok = validator.Validate("alice", "good-token");
   ASSERT_TRUE(ok.has_value());
   EXPECT_EQ(ok->username, "alice");
-  // Default-constructed ValidationResult never expires.
   EXPECT_EQ(ok->expires_at, chrono::steady_clock::time_point::max());
 
-  auto rejected = jwt.Validate("bad-token");
+  auto rejected = validator.Validate("alice", "bad-token");
   EXPECT_FALSE(rejected.has_value());
 }
 
-TEST_F(JwtValidatorTest, ValidateOverridePropagatesExpiry) {
+TEST_F(AuthValidatorTest, ValidateOverridePropagatesExpiry) {
   const auto expiry = chrono::steady_clock::now() + chrono::seconds(60);
-  JwtValidator jwt;
-  jwt.SetValidateFuncForTest([&](string_view) -> optional<JwtValidator::ValidationResult> {
-    JwtValidator::ValidationResult result{"bob"};
-    result.expires_at = expiry;
-    return result;
-  });
+  AuthValidator validator;
+  validator.SetValidateFuncForTest(
+      [&](string_view, string_view) -> optional<AuthValidator::ValidationResult> {
+        AuthValidator::ValidationResult result{"bob"};
+        result.expires_at = expiry;
+        return result;
+      });
 
-  auto result = jwt.Validate("whatever");
+  auto result = validator.Validate("bob", "whatever");
   ASSERT_TRUE(result.has_value());
   EXPECT_EQ(result->username, "bob");
   EXPECT_EQ(result->expires_at, expiry);
 }
 
-TEST_F(JwtValidatorTest, EachInstanceHasIndependentOverride) {
-  // JwtValidator is intentionally not a singleton (see review discussion) -- confirm two
-  // instances don't share state, since DoAuth constructs a fresh one per AUTH call.
-  JwtValidator jwt_a;
-  jwt_a.SetValidateFuncForTest([](string_view) -> optional<JwtValidator::ValidationResult> {
-    return JwtValidator::ValidationResult{"from_a"};
-  });
+TEST_F(AuthValidatorTest, EachInstanceHasIndependentOverride) {
+  AuthValidator validator_a;
+  validator_a.SetValidateFuncForTest(
+      [](string_view, string_view) -> optional<AuthValidator::ValidationResult> {
+        return AuthValidator::ValidationResult{"from_a"};
+      });
 
-  JwtValidator jwt_b;
-  jwt_b.SetValidateFuncForTest([](string_view) -> optional<JwtValidator::ValidationResult> {
-    return JwtValidator::ValidationResult{"from_b"};
-  });
+  AuthValidator validator_b;
+  validator_b.SetValidateFuncForTest(
+      [](string_view, string_view) -> optional<AuthValidator::ValidationResult> {
+        return AuthValidator::ValidationResult{"from_b"};
+      });
 
-  EXPECT_EQ(jwt_a.Validate("token")->username, "from_a");
-  EXPECT_EQ(jwt_b.Validate("token")->username, "from_b");
+  EXPECT_EQ(validator_a.Validate("alice", "token")->username, "from_a");
+  EXPECT_EQ(validator_b.Validate("alice", "token")->username, "from_b");
 }
 
 }  // namespace dfly::acl

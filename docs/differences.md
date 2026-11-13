@@ -37,3 +37,38 @@ Script replies may nest tables at most 128 levels deep; a deeper table is replac
 `reached lua stack limit`. A table reached several times, such as a shared or cyclic one, is
 serialized once per reference, and a reply may expand to 2^20 elements beyond one per 16 bytes of
 Lua memory in use. Past that, tables are replaced by the error `reached lua reply size limit`.
+
+## External Authentication
+
+Dragonfly can delegate AUTH validation to a trusted HTTP agent, which handles LDAP, Entra ID,
+or another identity provider outside Dragonfly:
+
+```sh
+--auth_validate --auth_validate_url=http://localhost:8080/validate --auth_validate_timeout_ms=300
+```
+
+These flags are startup-only. Each AUTH sends a POST request with JSON credentials:
+
+```json
+{"username":"alice","password":"password-or-token"}
+```
+
+For `AUTH <token>`, the username is `default` and the token is sent in `password`. The agent
+selects the identity provider and replies with:
+
+```json
+{"valid":true,"username":"alice"}
+```
+
+The returned username must name an active, pre-provisioned ACL user. An optional `exp` field
+contains Unix seconds and requires reauthentication after expiry. Rejections, HTTP errors,
+timeouts, and missing or invalid URLs reject AUTH without falling back to local passwords.
+Validation uses plain HTTP with no local caching; use a trusted endpoint. Non-admin Redis TCP
+connections require AUTH even when the default ACL user has no password. Admin, Unix-domain
+socket, and Memcached authentication behavior is unchanged.
+
+LDAP validation uses the generic `auth_validate` flags directly. To migrate from JWT mode,
+replace `jwt_validate` and its URL/timeout flags with the corresponding `auth_validate` flags.
+The JWT flags are deprecated but remain supported during migration. Legacy JWT mode still sends
+`{"token":"..."}`; update the agent to read the token from `password` before switching.
+When `auth_validate` is enabled, it takes precedence over the legacy JWT settings.

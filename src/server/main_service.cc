@@ -1397,8 +1397,7 @@ std::optional<ErrorReply> Service::VerifyCommandState(const CommandId& cid,
     }
   }
 
-  // JWT-derived auth carries its own expiration contract (see acl::JwtValidator): once
-  // it lapses, we must force a reauth.
+  // External auth may require reauthentication after expiry.
   if (dfly_cntx.authenticated && dfly_cntx.IsAuthExpired()) {
     if (cmd_name != "AUTH" && !cid.IsQuit() && !cid.IsReset() && cmd_name != "HELLO") {
       return ErrorReply{"-NOAUTH JWT token expired, please re-authenticate.",
@@ -1912,13 +1911,13 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
     res->req_auth = !GetPassword().empty();
   } else if (!owner->IsPrivileged()) {
     // Memcached protocol doesn't support authentication, so we don't require it.
-    // This also means JWT validation is not supported/enforced for Memcached connections.
+    // External auth validation is not enforced for Memcached connections.
     if (owner->GetProtocol() == Protocol::MEMCACHE) {
       res->req_auth = false;
       res->authenticated = true;  // Automatically authenticated for Memcached protocol
     } else {
-      // JWT validation must gate every connection even if the local "default" user is nopass.
-      res->req_auth = acl::JwtValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
+      // External auth must gate connections even if the default user is nopass.
+      res->req_auth = acl::AuthValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
     }
   }
 
