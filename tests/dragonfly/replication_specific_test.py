@@ -351,6 +351,59 @@ async def test_replicating_mc_flags(df_factory):
         assert c_mc_replica.get(f"key{i}") == str.encode(f"value{i}")
 
 
+@pytest.mark.parametrize("expire", [0, 3600], ids=["persistent", "expiring"])
+async def test_mc_counter_replication(df_factory, expire):
+    master = df_factory.create(memcached_port=11211, proactor_threads=1)
+    replica = df_factory.create(memcached_port=11212, proactor_threads=1)
+    df_factory.start_all([master, replica])
+
+    cm = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
+    cr = pymemcache.Client(
+        f"127.0.0.1:{replica.mc_port}",
+        default_noreply=False,
+        deserializer=lambda key, value, flags: (value, flags),
+    )
+    try:
+        async with master.client() as c_master, replica.client() as c_replica:
+            await start_replication(c_replica, master.port)
+            assert cm.set("counter", b"100", expire=expire, flags=42)
+            await check_all_replicas_finished([c_replica], c_master)
+            deadline = await c_master.execute_command("PEXPIRETIME", "counter")
+            assert deadline > 0 if expire else deadline == -1
+            assert cr.get("counter") == (b"100", 42)
+
+            for operation, delta, expected in [(cm.incr, 10000, 10100), (cm.decr, 123, 9977)]:
+                assert operation("counter", delta) == expected
+                await check_all_replicas_finished([c_replica], c_master)
+                assert await c_master.get("counter") == str(expected)
+                assert cr.get("counter") == (str(expected).encode(), 42)
+                for client in (c_master, c_replica):
+                    assert await client.execute_command("PEXPIRETIME", "counter") == deadline
+
+            for operation in (cm.incr, cm.decr):
+                assert operation("missing", 10000) is None
+                await check_all_replicas_finished([c_replica], c_master)
+                assert await c_master.exists("missing") == 0
+                assert await c_replica.exists("missing") == 0
+
+            # Redis INCR/DECR must still use automatic journaling.
+            for command, expected in [("INCR", 9978), ("DECR", 9977)]:
+                assert await c_master.execute_command(command, "counter") == expected
+                await check_all_replicas_finished([c_replica], c_master)
+                assert cr.get("counter") == (str(expected).encode(), 42)
+                assert await c_replica.execute_command("PEXPIRETIME", "counter") == deadline
+
+            await c_replica.execute_command("REPLICAOF", "NO", "ONE")
+            assert cr.get("counter") == (b"9977", 42)
+            assert await c_replica.execute_command("PEXPIRETIME", "counter") == deadline
+            assert cr.incr("counter", 23) == 10000
+            assert cr.get("counter") == (b"10000", 42)
+            assert await c_replica.execute_command("PEXPIRETIME", "counter") == deadline
+    finally:
+        cm.close()
+        cr.close()
+
+
 @pytest.mark.exclude_epoll
 @dfly_args({"proactor_threads": 1})
 async def test_memory_on_big_string_loading(df_factory):
