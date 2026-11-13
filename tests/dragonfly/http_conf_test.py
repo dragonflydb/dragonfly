@@ -1,6 +1,8 @@
 import json
 import asyncio
 import aiohttp
+import pytest
+import redis
 
 from . import dfly_args
 from .instance import DflyInstance
@@ -24,6 +26,43 @@ async def test_password(df_server: DflyInstance):
     async with get_http_session("default", "XXX") as session:
         resp = await session.get(f"http://localhost:{df_server.port}/")
         assert resp.status == 200
+
+    # Rotating the password at runtime (CONFIG SET requirepass) is picked
+    # up by HTTP auth immediately: the old password stops working and the
+    # new one is accepted.
+    client = df_server.client(password="XXX")
+    assert await client.config_set("requirepass", "newpassword")
+
+    async with get_http_session("default", "XXX") as session:
+        resp = await session.get(f"http://localhost:{df_server.port}/")
+        assert resp.status == 401
+    async with get_http_session("default", "newpassword") as session:
+        resp = await session.get(f"http://localhost:{df_server.port}/")
+        assert resp.status == 200
+
+
+@dfly_args({"proactor_threads": "1", "expose_http_api": "true"})
+async def test_empty_password_requires_explicit_auth(df_server: DflyInstance):
+    client = df_server.client()
+    assert await client.execute_command("ACL SETUSER default >") == "OK"
+
+    async with get_http_session() as session:
+        resp = await session.post(f"http://localhost:{df_server.port}/api", json=["ping"])
+        assert resp.status == 401
+    async with get_http_session("default", "wrongpassword") as session:
+        resp = await session.post(f"http://localhost:{df_server.port}/api", json=["ping"])
+        assert resp.status == 401
+    async with get_http_session("default", "") as session:
+        resp = await session.post(f"http://localhost:{df_server.port}/api", json=["ping"])
+        assert resp.status == 200
+
+    # RESP agrees with HTTP: an explicitly set empty password is still a password, so a
+    # fresh connection is not pre-authenticated and must AUTH before running commands.
+    resp_client = df_server.client()
+    with pytest.raises(redis.exceptions.AuthenticationError):
+        await resp_client.execute_command("PING")
+    assert await resp_client.execute_command("AUTH", "default", "") == "OK"
+    assert await resp_client.execute_command("PING") == "PONG"
 
 
 @dfly_args({"proactor_threads": "1", "requirepass": "XXX", "admin_port": 1113})
@@ -120,6 +159,72 @@ async def test_password_on_admin(df_server: DflyInstance):
     async with get_http_session("default", "XXX") as session:
         resp = await session.get(f"http://localhost:{df_server.admin_port}/")
         assert resp.status == 200
+
+    # RESP on the admin port validates against the live default user too:
+    # both AUTH forms accept the startup password.
+    admin_client = df_server.admin_client()
+    assert await admin_client.execute_command("AUTH", "XXX") == "OK"
+    assert await admin_client.execute_command("PING") == "PONG"
+
+    two_arg_client = df_server.admin_client()
+    assert await two_arg_client.execute_command("AUTH", "default", "XXX") == "OK"
+    assert await two_arg_client.execute_command("PING") == "PONG"
+
+    # Rotating the default user's password at runtime retires the startup
+    # password on the admin port as well: the old password is rejected and
+    # the new one is accepted, on RESP and HTTP alike.
+    client = df_server.client(password="XXX")
+    assert await client.execute_command("ACL SETUSER default resetpass >newpass") == "OK"
+
+    stale_client = df_server.admin_client()
+    with pytest.raises(redis.exceptions.AuthenticationError):
+        await stale_client.execute_command("AUTH", "XXX")
+
+    rotated_client = df_server.admin_client()
+    assert await rotated_client.execute_command("AUTH", "newpass") == "OK"
+    assert await rotated_client.execute_command("PING") == "PONG"
+
+    async with get_http_session("default", "XXX") as session:
+        resp = await session.get(f"http://localhost:{df_server.admin_port}/")
+        assert resp.status == 401
+    async with get_http_session("default", "newpass") as session:
+        resp = await session.get(f"http://localhost:{df_server.admin_port}/")
+        assert resp.status == 200
+
+
+@dfly_args({"proactor_threads": "1", "admin_port": 1113})
+async def test_admin_port_auth_follows_runtime_password(df_server: DflyInstance):
+    # Started without requirepass: once a password is set on the default user at
+    # runtime, the admin listener's HTTP and RESP sides must agree that
+    # authentication is required.
+    client = df_server.client()
+    assert await client.execute_command("ACL SETUSER default >secret") == "OK"
+
+    async with get_http_session() as session:
+        resp = await session.get(f"http://localhost:{df_server.admin_port}/")
+        assert resp.status == 401
+    async with get_http_session("default", "secret") as session:
+        resp = await session.get(f"http://localhost:{df_server.admin_port}/")
+        assert resp.status == 200
+
+    admin_client = df_server.admin_client()
+    with pytest.raises(redis.exceptions.AuthenticationError):
+        await admin_client.execute_command("PING")
+
+    # The admin AUTH handler must accept the runtime-set password too, and
+    # must not accept the empty startup value it used to compare against.
+    assert await admin_client.execute_command("AUTH", "secret") == "OK"
+    assert await admin_client.execute_command("PING") == "PONG"
+
+    # The two-argument form (what redis-py and other clients send when a
+    # username is configured) works on the admin port too.
+    two_arg_client = df_server.admin_client()
+    assert await two_arg_client.execute_command("AUTH", "default", "secret") == "OK"
+    assert await two_arg_client.execute_command("PING") == "PONG"
+
+    empty_client = df_server.admin_client()
+    with pytest.raises(redis.exceptions.AuthenticationError):
+        await empty_client.execute_command("AUTH", "")
 
 
 @dfly_args({"proactor_threads": "1", "expose_http_api": "true"})

@@ -108,6 +108,24 @@ bool UserRegistry::IsUserActive(std::string_view username) const {
   return it->second.IsActive();
 }
 
+bool UserRegistry::IsUserNopass(std::string_view username) const {
+  std::shared_lock<fb2::SharedMutex> lock(mu_);
+  auto it = registry_.find(username);
+  return it != registry_.end() && it->second.IsActive() && it->second.HasNopass();
+}
+
+bool UserRegistry::AuthDefaultUser(std::string_view username, std::string_view password) const {
+  std::shared_lock<fb2::SharedMutex> lock(mu_);
+  auto it = registry_.find("default");
+  if (it == registry_.end() || !it->second.IsActive()) {
+    return false;
+  }
+  if (it->second.HasNopass()) {
+    return true;
+  }
+  return username == "default" && it->second.HasPassword(password);
+}
+
 bool UserRegistry::AuthUser(std::string_view username, std::string_view password) const {
   std::shared_lock<fb2::SharedMutex> lock(mu_);
   const auto& user = registry_.find(username);
@@ -149,16 +167,16 @@ void UserRegistry::Init() {
   // if there exists an acl file to load from, requirepass
   // will not overwrite the default's user password loaded from
   // that file. Loading the default's user password from a file
-  // has higher priority than the deprecated flag
+  // has higher priority than the deprecated flag.
+  // An env var that is set but empty counts as unset (the default user
+  // stays nopass), consistent with --requirepass="" and
+  // CONFIG SET requirepass "".
   auto default_user = DefaultUserUpdateRequest();
   auto maybe_password = absl::GetFlag(FLAGS_requirepass);
   if (!maybe_password.empty()) {
     default_user.passwords.front().password = std::move(maybe_password);
     default_user.passwords.front().nopass = false;
-  } else if (const char* env_var = getenv("DFLY_PASSWORD"); env_var) {
-    default_user.passwords.front().password = env_var;
-    default_user.passwords.front().nopass = false;
-  } else if (const char* env_var = getenv("DFLY_requirepass"); env_var) {
+  } else if (const char* env_var = getenv("DFLY_requirepass"); env_var && *env_var) {
     default_user.passwords.front().password = env_var;
     default_user.passwords.front().nopass = false;
   }

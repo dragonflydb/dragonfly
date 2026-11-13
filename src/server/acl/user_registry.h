@@ -50,6 +50,16 @@ class UserRegistry {
   bool IsUserActive(std::string_view username) const;
 
   // Acquires a read lock
+  bool IsUserNopass(std::string_view username) const;
+
+  // Acquires a read lock
+  // Answers whether a request presenting `username`/`password` is authenticated against
+  // the live "default" user, with a single lookup: a nopass default user authenticates
+  // any request, otherwise the credentials must name the default user and match one of
+  // its passwords.
+  bool AuthDefaultUser(std::string_view username, std::string_view password) const;
+
+  // Acquires a read lock
   bool AuthUser(std::string_view username, std::string_view password) const;
 
   using RegistryViewWithLock = RegistryWithLock<std::shared_lock, const RegistryType&>;

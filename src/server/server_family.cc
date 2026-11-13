@@ -122,7 +122,7 @@ ABSL_FLAG(string, dbfilename, "dump-{timestamp}",
           "{d} macros");
 ABSL_FLAG(string, requirepass, "",
           "password for AUTH authentication. "
-          "If empty can also be set with DFLY_PASSWORD environment variable.");
+          "If empty can also be set with DFLY_requirepass environment variable.");
 ABSL_FLAG(uint32_t, maxclients, 64000, "Maximum number of concurrent clients allowed.");
 
 ABSL_FLAG(string, save_schedule, "", "the flag is deprecated, please use snapshot_cron instead");
@@ -2405,17 +2405,7 @@ void ServerFamily::UnblockAllClients() {
 }
 
 string GetPassword() {
-  string flag = GetFlag(FLAGS_requirepass);
-  if (!flag.empty()) {
-    return flag;
-  }
-
-  const char* env_var = getenv("DFLY_PASSWORD");
-  if (env_var) {
-    return env_var;
-  }
-
-  return "";
+  return GetFlag(FLAGS_requirepass);
 }
 
 void ServerFamily::SendInvalidationMessages() const {
@@ -2524,8 +2514,18 @@ void ServerFamily::Auth(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
         "admin port. Are you sure your configuration is correct?");
   }
 
-  string_view pass = arg0;
-  if (pass == GetPassword()) {
+  // Validate against the live default user, like every other auth surface:
+  // the startup password only seeds that user in UserRegistry::Init() and
+  // goes stale after a runtime ACL SETUSER, so it is never consulted here.
+  // Parse the arguments like the non-admin branch above, so the two-argument
+  // form (AUTH default <password>) works on the admin port too.
+  const bool one_arg = !arg1.has_value();
+  std::string_view username = one_arg ? "default" : arg0;
+  std::string_view password = one_arg ? arg0 : *arg1;
+  const auto* registry = ServerState::tlocal()->user_registry;
+  CHECK(registry);
+  const bool ok = registry->AuthDefaultUser(username, password);
+  if (ok) {
     cntx->authenticated = true;
     cmd_cntx->rb()->SendOk();
   } else {
