@@ -580,51 +580,36 @@ ExecScriptUse DetermineScriptPresense(const std::vector<StoredCmd>& body) {
 Transaction::MultiMode DeduceExecMode(ExecScriptUse state,
                                       const ConnectionState::ExecInfo& exec_info,
                                       const ScriptMgr& script_mgr) {
-  // Check if script most LIKELY has global eval transactions
-  bool contains_global = false;
-  bool contains_admin_cmd = false;
-  Transaction::MultiMode multi_mode = Transaction::LOCK_AHEAD;
-
-  if (state == ExecScriptUse::SCRIPT_RUN) {
-    contains_global = script_mgr.AreGlobalByDefault();
-  }
-
+  bool contains_global = state == ExecScriptUse::SCRIPT_RUN && script_mgr.AreGlobalByDefault();
   bool transactional = contains_global;
-  if (!transactional) {
-    for (const auto& scmd : exec_info.body) {
-      // We can only tell if eval is transactional based on they keycount
-      if (absl::StartsWith(scmd.Cid()->name(), "EVAL")) {
-        auto keys = DetermineKeys(scmd.Cid(), scmd.Args());
-        transactional |= (keys && keys.value().NumArgs() > 0);
-      } else {
-        transactional |= scmd.Cid()->IsTransactional();
-      }
-      contains_global |= scmd.Cid()->opt_mask() & CO::GLOBAL_TRANS;
-      contains_admin_cmd |= scmd.Cid()->opt_mask() & CO::ADMIN;
+  bool contains_admin_cmd = false;
+  for (const auto& scmd : exec_info.body) {
+    const auto* cid = scmd.Cid();
 
-      // We can't run no-key-transactional commands in lock-ahead mode currently,
-      // because it means we have to schedule on all shards
-      if (scmd.Cid()->opt_mask() & CO::NO_KEY_TRANSACTIONAL)
-        contains_global = true;
-
-      if (contains_global)
-        break;
+    // EVAL without keys does not require scheduling unless scripts use global mode.
+    if (absl::StartsWith(cid->name(), "EVAL")) {
+      auto keys = DetermineKeys(cid, scmd.Args());
+      transactional |= (keys && keys->NumArgs() > 0);
+    } else {
+      transactional |= cid->IsTransactional();
     }
+    contains_admin_cmd |= cid->opt_mask() & CO::ADMIN;
+
+    // Key locks are scoped to one database, so SELECT requires shard locks.
+    // No-key transactional commands also cannot use lock-ahead mode.
+    contains_global |= (cid->opt_mask() & (CO::GLOBAL_TRANS | CO::NO_KEY_TRANSACTIONAL)) ||
+                       cid->name() == "SELECT";
   }
 
   // multi/exec contains commands like ping that do not affect db state.
   if (!transactional && exec_info.watched_keys.empty())
     return Transaction::NOT_DETERMINED;
 
-  if (contains_admin_cmd) {
-    multi_mode = Transaction::NON_ATOMIC;
-  }
-  // Atomic modes fall back to GLOBAL if they contain global commands.
-  else if (contains_global && multi_mode == Transaction::LOCK_AHEAD) {
-    multi_mode = Transaction::GLOBAL;
-  }
+  // Administrative commands require non-atomic mode even if they follow a global command.
+  if (contains_admin_cmd)
+    return Transaction::NON_ATOMIC;
 
-  return multi_mode;
+  return contains_global ? Transaction::GLOBAL : Transaction::LOCK_AHEAD;
 }
 
 string CreateExecDescriptor(const std::vector<StoredCmd>& stored_cmds, unsigned num_uniq_shards) {
