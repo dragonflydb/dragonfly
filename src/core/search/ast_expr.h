@@ -243,7 +243,8 @@ template <TagType T> struct AstAffixNode final : TypedAstNode<AstAffixNode<T>, A
 
 // Quoted multi-word phrase. `raw` is the verbatim content between quotes; the
 // executor runs the shared text tokenizer over it and matches the resulting
-// tokens against posting-list positions.
+// tokens against posting-list positions, or only by presence without them (NOOFFSETS).
+// An empty `raw`, also from an empty parameter, asks for the empty value.
 // `slop` = max intervening tokens allowed between consecutive phrase terms
 // (in order). slop=0 = exact adjacency; slop>0 comes from `"..."~N` syntax.
 struct AstPhraseNode final : TypedAstNode<AstPhraseNode, AstNode::Type::PHRASE> {

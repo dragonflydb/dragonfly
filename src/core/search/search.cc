@@ -251,6 +251,15 @@ struct BasicSearch {
     return casted_ptr;
   }
 
+  // A raw "" asks for the empty value, which only INDEXEMPTY attributes keep. Reports that for
+  // `field` unless an error (unknown field, wrong type) is pending already.
+  bool EmptyValueRejected(string_view field) {
+    if (!error_.empty() || (indices_->GetSchema().Find(field)->flags & SchemaField::INDEXEMPTY))
+      return false;
+    error_ = "Use `INDEXEMPTY` in field creation in order to index and query for empty strings";
+    return true;
+  }
+
   BaseSortIndex* GetSortIndex(string_view field) {
     auto index = indices_->GetSortIndex(field);
     if (!index) {
@@ -532,15 +541,14 @@ struct BasicSearch {
     return matches;
   }
 
-  // Phrase match on a single TEXT index. Sets error_ and returns empty if the index was
-  // created with NOOFFSETS. Stems are never consulted — phrase semantics require the exact
-  // surface form. Stopwords inside the phrase drop without advancing positions, matching the
-  // index-side tokenizer.
+  // Phrase match on a single TEXT index; "" asks for the empty value. Stems are never consulted —
+  // phrase semantics require the exact surface form. Stopwords inside the phrase drop without
+  // advancing positions, matching the index-side tokenizer.
   IndexResult MatchPhraseInIndex(TextIndex* text_index, const AstPhraseNode& node) {
-    if (!text_index->StoresPositions()) {
-      error_ = "phrase queries require offsets; index was created with NOOFFSETS";
-      return IndexResult{};
-    }
+    if (node.raw.empty())
+      return IndexResult{text_index->GetEmptyDocs()};
+    if (!text_index->StoresPositions())
+      return MatchWords(absl::MakeConstSpan(&text_index, 1), node.raw);
 
     auto lists = FetchPhrasePostingLists(text_index, node.raw);
     if (lists.empty())
@@ -553,16 +561,40 @@ struct BasicSearch {
     return IndexResult{IntersectAdjacentDocs(lists, node.slop)};
   }
 
+  // Without positions (NOOFFSETS) a phrase is the AND of its words, each in any of `indices`.
+  IndexResult MatchWords(absl::Span<TextIndex* const> indices, string_view phrase) {
+    absl::InlinedVector<IndexResult, 4> words;
+    for (const string& word : indices.front()->TokenizePhraseQuery(phrase)) {
+      absl::InlinedVector<IndexResult, 4> lists;
+      for (auto* index : indices) {
+        const auto* list = index->MatchingNoStem(word);
+        if (scorer_)
+          AddMatchedTerm(index, word, list);
+        if (list)
+          lists.emplace_back(list);
+      }
+      words.push_back(UnifyResults(std::move(lists), LogicOp::OR));
+    }
+    return UnifyResults(std::move(words), LogicOp::AND);
+  }
+
   // Quoted phrase: dispatches per scoping. `@field:"..."` runs against one index; bare `"..."`
-  // ORs results across all TEXT indices, matching the term-lookup pattern.
+  // ORs the matches of all TEXT indices, except that without positions (NOOFFSETS) its words may
+  // sit in different TEXT indices.
   IndexResult Search(const AstPhraseNode& node, string_view active_field) {
     if (!active_field.empty()) {
       auto* index = GetIndex<TextIndex>(active_field);
+      if (node.raw.empty() && EmptyValueRejected(active_field))
+        return IndexResult{};
       return index ? MatchPhraseInIndex(index, node) : IndexResult{};
     }
 
+    auto indices = indices_->GetAllTextIndices();
+    if (!node.raw.empty() && !indices.empty() && !indices.front()->StoresPositions())
+      return MatchWords(indices, node.raw);
+
     vector<IndexResult> sub_results;
-    for (auto* index : indices_->GetAllTextIndices())
+    for (auto* index : indices)
       sub_results.push_back(MatchPhraseInIndex(index, node));
     return UnifyResults(std::move(sub_results), LogicOp::OR);
   }
@@ -589,11 +621,9 @@ struct BasicSearch {
     auto* tag_index = GetIndex<TagIndex>(active_field);
 
     // A raw "" asks for the empty tag, which only INDEXEMPTY attributes keep; {" "} is no error.
-    if (error_.empty() && rng::any_of(node.tags, [](const auto& t) { return t.affix.empty(); }) &&
-        !(indices_->GetSchema().Find(active_field)->flags & SchemaField::INDEXEMPTY)) {
-      error_ = "Use `INDEXEMPTY` in field creation in order to index and query for empty strings";
+    if (rng::any_of(node.tags, [](const auto& t) { return t.affix.empty(); }) &&
+        EmptyValueRejected(active_field))
       return IndexResult{};
-    }
     if (!tag_index)
       return IndexResult{};
 
@@ -812,9 +842,7 @@ struct BasicSearch {
       case AstNode::Type::ATTRIBUTE:
         return std::move(children[0]);  // pass the single child's result through
       case AstNode::Type::OPTIONAL:
-        // ~ never fails outward and never filters: drop the child's error and match all docs.
-        // The node is entered only without a pending error, so there is none to restore.
-        error_ = string{};
+        // ~ never filters: it matches all docs, and an error in its subtree fails the query.
         return IndexResult{&indices_->GetAllDocs()};
       case AstNode::Type::LOGICAL:
         return UnifyResults(children, static_cast<const AstLogicalNode&>(*frame.node).op);
@@ -1287,7 +1315,8 @@ unique_ptr<BaseIndex> FieldIndices::CreateIndex(string_view alias, const SchemaF
       const auto& tparams = std::get<SchemaField::TextParams>(field.special_params);
       auto idx = make_unique<TextIndex>(mr, &options_.stopwords, synonyms_, tparams.with_suffixtrie,
                                         tparams.no_stem, schema_.default_language,
-                                        schema_.language_field, !options_.no_offsets);
+                                        schema_.language_field, !options_.no_offsets,
+                                        (field.flags & SchemaField::INDEXEMPTY) != 0);
       idx->set_field_ident(alias);  // scoring stats and the schema weight are per attribute
       text_indices_.push_back(idx.get());
       return idx;

@@ -225,8 +225,10 @@ async def _create_search_option_indexes(client: aioredis.Redis):
 async def _assert_search_option_indexes(client: aioredis.Redis):
     nooff_info = _search_info_dict(await client.execute_command("FT.INFO", "idx_nooff"))
     assert nooff_info["index_options"] == ["NOOFFSETS"]
-    with pytest.raises(redis.exceptions.ResponseError, match="phrase queries require offsets"):
-        await client.execute_command("FT.SEARCH", "idx_nooff", '"machine learning"')
+
+    # Without positions a phrase matches its words in any order
+    nooff = await client.execute_command("FT.SEARCH", "idx_nooff", '"learning machine"')
+    assert _search_doc_ids(nooff) == {"nooff:1"}
 
     nostem_info = await client.execute_command("FT.INFO", "idx_nostem")
     assert "NOSTEM" in _search_attribute(nostem_info, "t")

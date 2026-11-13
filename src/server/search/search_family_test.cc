@@ -568,6 +568,19 @@ TEST_F(SearchFamilyTest, TagValsResolvesAlias) {
   EXPECT_THAT(Run({"FT.TAGVALS", "live", "color"}), ErrArg("live: no such index"));
 }
 
+// FT.TAGVALS merges the sorted values of the shards, also of an odd number of them.
+TEST_F(SearchFamilyTest, TagValsOfOddShardCount) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "3");
+  ResetService();
+
+  Run("FT.CREATE idx ON HASH SCHEMA t TAG");
+  for (int i = 0; i < 9; i++)
+    Run({"HSET", absl::StrCat("doc:", i), "t", absl::StrCat("common,v", i)});
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "t"}),
+              IsArray("common", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"));
+}
+
 TEST_F(SearchFamilyTest, AliasNameResolutionWithoutIndex) {
   ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
   WaitForIndexReady("idx");
@@ -4430,18 +4443,23 @@ TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
     EXPECT_NEAR(single_shard.at(key), single_shard.at("one d:0"), 1e-4) << key;
 }
 
-// A query whose only text term is absent from the index still runs the scorer, so equal scores
-// are tie-broken by key and LIMIT returns a prefix of the same ordering.
+// Equal scores are tie-broken by key and LIMIT returns a prefix of the same ordering, also when the
+// only text term of a query is absent from the index or there is none, and with a vector range.
 TEST_F(SearchFamilyTest, AbsentTermKeepsScoreOrder) {
-  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "t:", "SCHEMA", "title", "TEXT"}),
+  EXPECT_EQ(Run("FT.CREATE idx ON HASH PREFIX 1 t: SCHEMA title TEXT v VECTOR FLAT 6 TYPE FLOAT32 "
+                "DIM 1 DISTANCE_METRIC L2"),
             "OK");
-  EXPECT_THAT(Run({"HSET", "t:z", "title", "last"}), IntArg(1));
-  EXPECT_THAT(Run({"HSET", "t:a", "title", "first"}), IntArg(1));
-  for (string_view query : {"~absent", "-absent"}) {
-    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "1"}),
+  const string vec = FloatVec(1);
+  EXPECT_THAT(Run({"HSET", "t:z", "title", "last", "v", vec}), IntArg(2));
+  EXPECT_THAT(Run({"HSET", "t:a", "title", "first", "v", vec}), IntArg(2));
+  for (string_view query : {"~absent", "-absent", "*", "@v:[VECTOR_RANGE 1 $q]",
+                            "(first | last) @v:[VECTOR_RANGE 1 $q]"}) {
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "1",
+                     "PARAMS", "2", "q", vec}),
                 RespElementsAre(IntArg(2), "t:a", testing::_))
         << query;
-    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "2"}),
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", query, "NOCONTENT", "WITHSCORES", "LIMIT", "0", "2",
+                     "PARAMS", "2", "q", vec}),
                 RespElementsAre(IntArg(2), "t:a", testing::_, "t:z", testing::_))
         << query;
   }
@@ -7964,6 +7982,11 @@ TEST_F(SearchFamilyTest, SortByPagingWithTiesIsStable) {
       EXPECT_EQ(paged, want) << field << " " << order;
     }
   }
+
+  // WITHSCORES keeps the SORTBY order.
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "s", "DESC", "WITHSCORES", "NOCONTENT",
+                   "LIMIT", "0", "3"}),
+              RespElementsAre(IntArg(12), "d:9", _, "d:7", _, "d:5", _));
 }
 
 // Docs without a value in the SORTABLE field (absent or null) rank last in both directions, carry
@@ -9239,18 +9262,9 @@ TEST_F(SearchFamilyTest, WildcardUnicode) {
   EXPECT_THAT(Run({"FT.SEARCH", "wu", "w'*xyz*'"}), kNoResults);
 }
 
-// Phrase queries against a NOOFFSETS index surface an error (positions aren't stored).
-TEST_F(SearchFamilyTest, PhraseOnNoOffsetsErrors) {
-  Run({"FT.CREATE", "idx_no_off", "NOOFFSETS", "SCHEMA", "t", "TEXT"});
-  Run({"HSET", "p:1", "t", "machine learning"});
-
-  EXPECT_THAT(Run({"FT.SEARCH", "idx_no_off", "\"machine learning\""}),
-              ErrArg("phrase queries require offsets"));
-}
-
 // NOOFFSETS index-level flag is accepted by FT.CREATE and round-trips through FT.INFO.
 TEST_F(SearchFamilyTest, NoOffsetsFlagSurface) {
-  Run({"FT.CREATE", "no_off_idx", "NOOFFSETS", "SCHEMA", "body", "TEXT"});
+  Run({"FT.CREATE", "no_off_idx", "NOOFFSETS", "SCHEMA", "body", "TEXT", "title", "TEXT"});
 
   auto info = Run({"FT.INFO", "no_off_idx"});
   EXPECT_THAT(info,
@@ -9260,6 +9274,19 @@ TEST_F(SearchFamilyTest, NoOffsetsFlagSurface) {
   Run({"HSET", "h:1", "body", "machine learning algorithm"});
   Run({"HSET", "h:2", "body", "learning machine works"});
   EXPECT_THAT(Run({"FT.SEARCH", "no_off_idx", "machine learning"}), AreDocIds("h:1", "h:2"));
+
+  // Without positions a phrase matches its words in any order, and a bare one across fields.
+  Run({"HSET", "h:3", "title", "machine", "body", "learning"});
+  EXPECT_THAT(Run({"FT.SEARCH", "no_off_idx", R"("learning machine")"}),
+              AreDocIds("h:1", "h:2", "h:3"));
+  EXPECT_THAT(Run({"FT.SEARCH", "no_off_idx", R"(@body:"learning machine")"}),
+              AreDocIds("h:1", "h:2"));
+
+  // Its words are taken as written, and WITHSCORES ranks the matches.
+  EXPECT_THAT(Run({"FT.SEARCH", "no_off_idx", R"("learning machines")"}), kNoResults);
+  EXPECT_THAT(Run({"FT.SEARCH", "no_off_idx", R"("learning machine")", "NOCONTENT", "WITHSCORES",
+                   "LIMIT", "0", "1"}),
+              RespElementsAre(IntArg(3), "h:3", _));
 }
 
 // Default index (no NOOFFSETS) has an empty index_options array.
@@ -10417,6 +10444,8 @@ TEST_F(SearchFamilyTest, QueryErrorsReachAllCommands) {
          {pair{"@zz:x", "Invalid field: zz"}, pair{"@ni:[1 2]", "Wrong access type for field: ni"},
           pair{"ismissing(@zz)", "Invalid field: zz"},
           pair{R"(@ng:{""})", "Use `INDEXEMPTY` in field creation"},
+          pair{R"(@ni:"")", "Use `INDEXEMPTY` in field creation"},
+          pair{R"(@zz:"")", "Invalid field: zz"},
           pair{"ismissing(@ni)", "with 'INDEXMISSING': ni"}}) {
       EXPECT_THAT(Run({"FT.AGGREGATE", idx, q}), ErrArg(err));
       const string knn = absl::StrCat(q, "=>[KNN 1 @v $vec]");
@@ -10574,7 +10603,8 @@ TEST_F(SearchFamilyTest, IndexEmptyTag) {
     EXPECT_THAT(search(query), AreNoContentDocIds("p:2", "p:3", "p:4")) << query;
   EXPECT_THAT(Run({"FT.AGGREGATE", "idx", "@color:{$c}", "PARAMS", "2", "c", ""}),
               RespElementsAre(IntArg(3), _, _, _));
-  EXPECT_THAT(Run({"FT.SEARCH", "idx", "-$c", "PARAMS", "2", "c", ""}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "-$c", "PARAMS", "2", "c", "", "NOCONTENT"}),
+              AreNoContentDocIds("p:1", "p:2", "p:3", "p:4"));
   EXPECT_THAT(search(R"(@sizes:{""})"), AreNoContentDocIds("p:2"));
   EXPECT_THAT(Run({"FT.TAGVALS", "idx", "color"}), IsArray("", "black", "blue", "red"));
   EXPECT_THAT(HybridKeys(Run({"FT.HYBRID", "idx", "SEARCH", "@brand:{zzz}", "VSIM", "@emb", "$v",
@@ -10583,6 +10613,35 @@ TEST_F(SearchFamilyTest, IndexEmptyTag) {
   EXPECT_THAT(search(R"(@brand:{\ })"), kNoResults);
   EXPECT_THAT(search(R"(@brand:{""})"), ErrArg("Use `INDEXEMPTY` in field creation in order to "
                                                "index and query for empty strings"));
+}
+
+// With INDEXEMPTY a TEXT value "" is found by "", an empty parameter and @f:*; else @f:"" fails.
+TEST_F(SearchFamilyTest, IndexEmptyText) {
+  Run("FT.CREATE idx ON HASH PREFIX 1 p: SCHEMA title TEXT INDEXEMPTY notes TEXT INDEXEMPTY "
+      "brand TEXT");
+  Run({"HSET", "p:1", "title", "red shoes", "notes", ""});
+  Run({"HSET", "p:2", "title", "", "notes", "the", "brand", "acme"});
+  Run({"HSET", "p:3", "title", "blue shoes", "notes", " "});
+  Run({"HSET", "p:4", "brand", ""});
+
+  auto search = [&](string_view query) { return Run({"FT.SEARCH", "idx", query, "NOCONTENT"}); };
+  for (string_view query : {R"(@title:"" | @title:shoes)", "@title:*"})
+    EXPECT_THAT(search(query), AreNoContentDocIds("p:1", "p:2", "p:3")) << query;
+  EXPECT_THAT(search("-@title:*"), AreNoContentDocIds("p:4"));
+  EXPECT_THAT(search("-@notes:''"), AreNoContentDocIds("p:2", "p:3", "p:4"));
+  EXPECT_THAT(search(R"("")"), AreNoContentDocIds("p:1", "p:2"));
+  for (auto [p, n] : {pair{"", 1}, pair{" ", 0}})
+    EXPECT_THAT(Run({"FT.SEARCH", "idx", "@notes:$p", "PARAMS", "2", "p", p, "LIMIT", "0", "0"}),
+                RespElementsAre(IntArg(n)));
+  EXPECT_THAT(search(R"(@brand:"")"), ErrArg("Use `INDEXEMPTY` in field creation in order to "
+                                             "index and query for empty strings"));
+  Run({"HSET", "p:2", "title", "green hat"});
+  EXPECT_THAT(search(R"(@title:"")"), kNoResults);
+
+  Run("FT.CREATE j ON JSON PREFIX 1 j: SCHEMA $.reviews[*] AS reviews TEXT INDEXEMPTY");
+  Run({"JSON.SET", "j:1", "$", R"({"reviews":["late delivery", ""]})"});
+  for (string_view query : {R"(@reviews:"" @reviews:late)", "@reviews:*"})
+    EXPECT_THAT(Run({"FT.SEARCH", "j", query, "NOCONTENT"}), AreNoContentDocIds("j:1")) << query;
 }
 
 // On JSON a TAG without SEPARATOR takes every string whole, as is; with SEPARATOR it splits.

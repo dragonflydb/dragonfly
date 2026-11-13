@@ -364,9 +364,9 @@ search_or_expr:
   | search_expr OR_OP search_unary_expr            { $$ = AstLogicalNode::Combine(std::move($1), std::move($3), AstLogicalNode::OR); }
 
 // Leaf atoms shared by the top-level, field-condition, and field-grouping positions.
-// Only an empty parameter gives an empty TERM; text attributes do not index "".
+// Only an empty parameter gives an empty TERM: like "", it asks for the empty value.
 term_atom:
-  TERM        { auto t = std::move($1); if (t.empty()) YYABORT; $$ = make_unique<AstTermNode>(std::move(t)); }
+  TERM        { auto t = std::move($1); if (t.empty()) $$ = make_unique<AstPhraseNode>(""); else $$ = make_unique<AstTermNode>(std::move(t)); }
   | PHRASE    { auto p = std::move($1); $$ = make_unique<AstPhraseNode>(std::move(p.raw), p.slop); }
   | PREFIX    { $$ = make_unique<AstPrefixNode>(std::move($1)); }
   | SUFFIX    { $$ = make_unique<AstSuffixNode>(std::move($1)); }
