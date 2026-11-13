@@ -3851,35 +3851,78 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
                               absl::MakeSpan(profile_results), took, rb, limited);
 }
 
+// Appends the union of the sorted ranges [a, a_end) and [b, b_end) to `out`; a value present in
+// both ranges is appended once. As in timsort, once one range supplies kMinGallop values in a
+// row, the rest of its run below the other head is found by exponential search and copied at
+// once, so a long run costs O(log(run)) comparisons instead of O(run).
+static void AppendSortedUnion(const string_view* a, const string_view* a_end, const string_view* b,
+                              const string_view* b_end, vector<string_view>* out) {
+  constexpr size_t kMinGallop = 4;
+  size_t wins = 0;  // Values taken from `a` in a row.
+  while (a != a_end && b != b_end) {
+    int cmp = a->compare(*b);
+    if (cmp > 0) {
+      // Keep the range with the smaller head in `a`.
+      std::swap(a, b);
+      std::swap(a_end, b_end);
+      wins = 0;
+    } else if (cmp == 0) {
+      ++b;
+      wins = 0;
+    }
+    out->push_back(*a++);
+
+    if (++wins == kMinGallop) {
+      // Probe a[0], a[1], a[3], a[7], ... until reaching *b, then binary search the last gap.
+      size_t size = a_end - a, step = 1;
+      while (step <= size && a[step - 1] < *b)
+        step *= 2;
+      const string_view* run_end = std::lower_bound(a + step / 2, a + std::min(step - 1, size), *b);
+      out->insert(out->end(), a, run_end);
+      a = run_end;
+      wins = 0;
+    }
+  }
+  out->insert(out->end(), a, a_end);
+  out->insert(out->end(), b, b_end);
+}
+
 // Merges lists that are each sorted and without repeats into one such list. The lists come from
 // the shards, so the same value can be in several of them. The result points into the lists.
 static vector<string_view> MergeSortedUnique(const vector<StringVec>& lists) {
-  DCHECK(!lists.empty());
-  vector<vector<string_view>> views;
-  views.reserve(lists.size());
-  for (const StringVec& list : lists)
-    views.emplace_back(list.begin(), list.end());
+  size_t total_size = 0;
+  for (const auto& list : lists)
+    total_size += list.size();
 
-  // Each round merges neighboring lists in pairs and halves their number, e.g. 5 -> 3 -> 2 -> 1.
-  // So a value takes part in at most ceil(log2(lists.size())) merges instead of up to
-  // lists.size() - 1 when the lists are merged one by one. set_union keeps a value found in both
-  // lists once, so repeats from different shards are dropped as soon as their lists meet.
-  while (views.size() > 1) {
-    vector<vector<string_view>> next;
-    for (size_t i = 0; i + 1 < views.size(); i += 2) {
-      vector<string_view>& merged = next.emplace_back();
-      merged.reserve(views[i].size() + views[i + 1].size());
-      rng::set_union(views[i], views[i + 1], back_inserter(merged));
+  // Concatenate the non-empty lists into one buffer of sorted runs; run i ends at ends[i].
+  vector<string_view> values, merged;
+  vector<size_t> ends;
+  values.reserve(total_size);
+  for (const auto& list : lists) {
+    if (!list.empty()) {
+      values.insert(values.end(), list.begin(), list.end());
+      ends.push_back(values.size());
     }
-
-    // With an odd number of lists the last one has no pair and waits for the next round.
-    if (views.size() % 2 == 1)
-      next.push_back(std::move(views.back()));
-    views = std::move(next);
   }
 
-  // One list with every value is left.
-  return std::move(views.front());
+  // Each round merges neighboring runs into the other buffer and halves the number of runs, so a
+  // value takes part in at most ceil(log2(lists.size())) merges.
+  while (ends.size() > 1) {
+    merged.clear();
+    merged.reserve(values.size());
+    size_t begin = 0, runs = 0;
+    for (size_t i = 0; i < ends.size(); i += 2) {
+      // With an odd number of runs, the last one is merged with an empty range, i.e. copied.
+      size_t mid = ends[i], end = i + 1 < ends.size() ? ends[i + 1] : mid;
+      AppendSortedUnion(values.data() + begin, values.data() + mid, values.data() + mid,
+                        values.data() + end, &merged);
+      ends[runs++] = merged.size();
+      begin = end;
+    }
+    ends.resize(runs);
+    values.swap(merged);
+  }
+  return values;
 }
 
 void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
