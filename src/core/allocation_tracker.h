@@ -28,8 +28,9 @@ class AllocationTracker {
   // Returns a thread-local reference.
   static AllocationTracker& Get();
 
-  // Will track memory allocations in range [lower, upper]. Sample odds must be between [0, 1],
-  // where 1 means all allocations are tracked and 0 means none.
+  // Will track memory allocations whose usable size (as reported by mi_usable_size) is in range
+  // [lower, upper]. Sample odds must be between [0, 1], where 1 means all allocations are tracked
+  // and 0 means none.
   bool Add(const TrackingInfo& info);
 
   // Removes all tracking exactly matching lower_bound and upper_bound.
