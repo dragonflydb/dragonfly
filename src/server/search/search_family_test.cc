@@ -581,6 +581,31 @@ TEST_F(SearchFamilyTest, TagValsOfOddShardCount) {
               IsArray("common", "v0", "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8"));
 }
 
+// FT.TAGVALS merges the sorted tag lists of the shards. With 5 shards the merge takes 3 rounds and
+// carries the odd list over in the first two.
+TEST_F(SearchFamilyTest, TagValsMergesShardLists) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "5");
+  num_threads_ = 5;
+  ResetService();
+
+  ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "tag", "TAG"}), "OK");
+
+  // Each document adds a run of up to 13 consecutive values to the list of its shard, long enough
+  // for the merge to gallop. A run starts with the last value of the previous one, so the same
+  // value can come from two shards.
+  vector<string> expected = {"v0000"};
+  for (size_t doc = 0; doc < 100; doc++) {
+    string tags = expected.back();
+    for (size_t i = 0; i <= doc % 12; i++) {
+      expected.push_back(absl::StrFormat("v%04d", expected.size()));
+      absl::StrAppend(&tags, ",", expected.back());
+    }
+    Run({"HSET", absl::StrCat("doc:", doc), "tag", tags});
+  }
+  EXPECT_THAT(Run({"FT.TAGVALS", "idx", "tag"}), RespArray(ElementsAreArray(expected)));
+}
+
 TEST_F(SearchFamilyTest, AliasNameResolutionWithoutIndex) {
   ASSERT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "SCHEMA", "title", "TEXT"}), "OK");
   WaitForIndexReady("idx");
@@ -1467,7 +1492,7 @@ TEST_F(SearchFamilyTest, Tags) {
   EXPECT_THAT(Run({"ft.tagvals", "i1", "foo"}), ErrArg("No such field"));
   EXPECT_THAT(Run({"ft.tagvals", "i1", "dummy"}), ErrArg("Not a tag field"));
   auto resp = Run({"ft.tagvals", "i1", "color"});
-  ASSERT_THAT(resp, IsUnordArray("red", "blue", "green"));
+  ASSERT_THAT(resp, IsArray("blue", "green", "red"));
 
   // Tags don't participate in full text search
   EXPECT_THAT(Run({"ft.search", "i1", "red"}), kNoResults);
