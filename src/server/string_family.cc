@@ -1136,9 +1136,10 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
   if (params.flags & SET_STICK) {
     cmds.push_back("STICK");
   }
+  std::string mc_flags;
   if (params.memcache_flags) {
-    cmds.push_back("_MCFLAGS");
-    cmds.push_back(absl::StrCat(params.memcache_flags));
+    mc_flags = absl::StrCat(params.memcache_flags);
+    cmds.insert(cmds.end(), {"_MCFLAGS", mc_flags});
   }
 
   // Skip NX/XX because SET operation was executed.
