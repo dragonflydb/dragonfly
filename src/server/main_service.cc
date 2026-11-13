@@ -2603,8 +2603,20 @@ void Service::Exec(CmdArgParser, CommandContext* cmd_cntx) {
       slot_checker.Add(s);
     }
 
+    // Sharded publish channels participate in slot checks without requiring database key locks.
+    for (const auto& scmd : exec_info.body) {
+      if (scmd.Cid()->IsSPublish())
+        slot_checker.Add(scmd.Args()[0]);
+    }
+
     if (slot_checker.IsCrossSlot()) {
       return rb->SendError(kCrossSlotError);
+    }
+
+    // Commands were validated when queued, but a migration may have moved their slot before EXEC.
+    if (auto slot = slot_checker.GetUniqueSlotId()) {
+      if (auto error = cluster::SlotOwnershipError(*slot); error.status != OpStatus::OK)
+        return rb->SendError(std::move(error));
     }
   }
 
