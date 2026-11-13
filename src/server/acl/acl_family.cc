@@ -77,6 +77,12 @@ RedisReplyBuilder* GetRedisReplyBuilder(CommandContext* cmd_cntx) {
   return static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 }
 
+// Spaces and record delimiters cannot be represented inside a literal ACL-file operand.
+// Keep tabs, quotes and backslashes literal for compatibility with existing files.
+bool HasInvalidOperandBytes(string_view operand) {
+  return operand.find_first_of(string_view{" \n\r\0", 4}) != string_view::npos;
+}
+
 string_view SignPrefix(Sign sign) {
   return sign == Sign::PLUS ? "+" : "-";
 }
@@ -405,7 +411,8 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto reg = registry_->GetRegistryWithWriteLock();
   auto it = reg.registry.find(username);
   const bool exists = it != reg.registry.end();
-  auto req = ParseAclSetUser(parser.RemainingRange(), exists && it->second.Keys().all_keys);
+  auto req =
+      ParseAclSetUser(username, parser.RemainingRange(), exists && it->second.Keys().all_keys);
   if (const auto* error = get_if<ErrorReply>(&req))
     return cmd_cntx->SendError(*error);
 
@@ -513,7 +520,7 @@ GenericError AclFamily::ParseAclFile(string_view path, UserRequests* requests) c
       return GenericError{std::move(error)};
     }
 
-    auto req = ParseAclSetUser(facade::ArgSlice{tokens}.subspan(2), false);
+    auto req = ParseAclSetUser(tokens[1], facade::ArgSlice{tokens}.subspan(2), false);
     if (const auto* reply = get_if<ErrorReply>(&req)) {
       string error = absl::StrCat("line ", i + 1, ": ", reply->ToSv());
       LOG(WARNING) << "Error while parsing aclfile: " << error;
@@ -769,8 +776,14 @@ void AclFamily::Init(facade::Listener* main_listener) {
   AddUsers(std::move(requests), &reg.registry);
 }
 
-variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(facade::ParsedArgs args,
+variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(string_view username,
+                                                                    facade::ParsedArgs args,
                                                                     bool has_all_keys) const {
+  if (username.empty())
+    return ErrorReply("Usernames can't be empty");
+  if (HasInvalidOperandBytes(username))
+    return ErrorReply("Usernames can't contain spaces or null characters");
+
   User::UpdateRequest req;
 
   for (string_view arg : args) {
@@ -796,6 +809,9 @@ variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(facade::Pars
             "with an empty list of patterns");
       }
 
+      if (HasInvalidOperandBytes(key->key))
+        return ErrorReply("Error in ACL SETUSER modifier: Syntax error");
+
       req.allow_all_keys = key->all_keys;
       req.reset_all_keys = key->reset_keys;
       if (key->reset_keys)
@@ -813,6 +829,9 @@ variant<User::UpdateRequest, ErrorReply> AclFamily::ParseAclSetUser(facade::Pars
             "'allchannels' flag) is not valid and does not have any effect. Try 'resetchannels' to "
             "start with an empty list of channels");
       }
+
+      if (HasInvalidOperandBytes(channel->pattern))
+        return ErrorReply("Error in ACL SETUSER modifier: Syntax error");
 
       req.all_channels = channel->all_channels;
       req.reset_channels = channel->reset_channels;
