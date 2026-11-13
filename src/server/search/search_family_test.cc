@@ -6263,6 +6263,10 @@ TEST_F(SearchFamilyTest, HnswListpackUpdatesWhileGraphBusy) {
   EXPECT_THAT(Run({"HSET", "h:5", "v", vec(5)}), IntArg(1));
   EXPECT_THAT(Run({"DEL", "h:4"}), IntArg(1));
 
+  // h:6 expires inside the drain's FindMutable, which frees its DocId before the drain does.
+  EXPECT_THAT(Run({"HSET", "h:6", "v", vec(6)}), IntArg(1));
+  EXPECT_THAT(Run({"PEXPIRE", "h:6", "100"}), IntArg(1));
+
   string query = vec(0);
   auto distances = [&](string_view name) {
     vector<long> out;
@@ -6273,6 +6277,7 @@ TEST_F(SearchFamilyTest, HnswListpackUpdatesWhileGraphBusy) {
   };
   auto drain = [&](string_view name) {
     pp_->at(0)->Await([&] {
+      AdvanceTime(200);
       auto* shard = EngineShard::tlocal();
       DbContext db_cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
       index(name)->DrainSerializationUpdates(OpArgs{shard, nullptr, db_cntx});
@@ -6290,6 +6295,15 @@ TEST_F(SearchFamilyTest, HnswListpackUpdatesWhileGraphBusy) {
         Run({"FT.SEARCH", name, "*=>[KNN 4 @v $q]", "PARAMS", "2", "q", query, "NOCONTENT"}),
         AreNoContentDocIds("h:1", "h:2", "h:5"));
   }
+
+  // The expired DocId must be free once, so the next two documents get distinct ids.
+  EXPECT_THAT(Run({"HSET", "h:7", "v", vec(7)}), IntArg(1));
+  EXPECT_THAT(Run({"HSET", "h:8", "v", vec(8)}), IntArg(1));
+  for (string_view name : {"hx", "hy"}) {
+    EXPECT_THAT(Run({"FT.SEARCH", name, "*", "NOCONTENT"}),
+                AreNoContentDocIds("h:1", "h:2", "h:5", "h:7", "h:8"));
+  }
+  EXPECT_THAT(Run({"DEL", "h:7", "h:8"}), IntArg(2));
 
   // Update a listpack and delete a converted hash while a search holds hx.
   Fiber searcher;

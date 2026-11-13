@@ -1032,7 +1032,9 @@ void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
 
   auto& db_slice = op_args.GetDbSlice();
 
-  LOG(INFO) << "Draining " << pending_vector_updates_.size() << " pending vector updates on shard "
+  // FindMutable may suspend, and a serializer window opening meanwhile buffers into the members.
+  auto pending = std::exchange(pending_vector_updates_, {});
+  LOG(INFO) << "Draining " << pending.size() << " pending vector updates on shard "
             << EngineShard::tlocal()->shard_id();
 
   // Remove stale nodes before additions: their DocIds may already belong to different keys.
@@ -1040,10 +1042,11 @@ void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
     RemoveFromAllHnswIndices(id);
   pending_hnsw_removals_.clear();
 
-  for (const auto& key : pending_vector_updates_) {
-    auto local_id = key_index_.Find(key);
+  for (const auto& key : pending) {
     auto it = db_slice.FindMutable(op_args.db_cntx, key, base_->GetObjCode());
 
+    // Looked up after FindMutable: an expiry inside it removes the document and frees the id.
+    auto local_id = key_index_.Find(key);
     if (it && IsValid(it->it)) {
       PrimeValue& pv = it->it->second;
 
@@ -1061,8 +1064,8 @@ void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
       key_index_.Remove(*local_id);
     }
   }
-  pending_vector_updates_.clear();
-  ClearAllHnswPreservedData();
+  if (pending_vector_updates_.empty())
+    ClearAllHnswPreservedData();
 }
 
 ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
