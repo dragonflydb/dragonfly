@@ -1171,6 +1171,7 @@ util::fb2::Fiber DbSlice::FlushDbIndexes(const std::vector<DbIndex>& indexes) {
     entries_count_ -= db_arr_[index]->prime.size();
 
     InvalidateDbWatches(index);
+    db_arr_[index]->account_memory_on_destruction = MemoryScopeEnabled();
     flush_db_arr[index] = std::move(db_arr_[index]);
 
     CreateDb(index);
@@ -1973,6 +1974,7 @@ void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> 
     PrimeTable::Cursor cursor;
     do {
       cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
+        AtomicMemoryScope scope(it->second.ObjType());
         if (it->second.IsExternal()) {
           tiered_storage->Delete(index, it->first.GetSlice(&scratch), &it->second);
         } else if (it->second.HasStashPending()) {

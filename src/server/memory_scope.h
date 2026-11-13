@@ -5,10 +5,14 @@
 #pragma once
 
 #include <cstdint>
+#include <utility>
 
+#include "redis/redis_aux.h"
 #include "util/fibers/fibers.h"
 
 namespace dfly {
+
+inline constexpr int kInternalMemory = OBJ_TYPE_MAX;
 
 bool MemoryScopeEnabled();
 
@@ -57,5 +61,11 @@ class AtomicMemoryScope {
   int obj_type_;
   int64_t mem_baseline_;
 };
+
+// Accounts a non-yielding operation under obj_type, excluding it from the transaction scope.
+template <typename F> decltype(auto) AccountMemory(int obj_type, F&& fn) {
+  AtomicMemoryScope scope(obj_type);
+  return std::forward<F>(fn)();
+}
 
 }  // namespace dfly

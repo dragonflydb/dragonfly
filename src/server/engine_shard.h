@@ -28,7 +28,7 @@ class TieredStorage;
 class ShardDocIndices;
 class AofStreamer;
 
-using TypeAttributedMemory = std::array<int64_t, OBJ_TYPE_MAX>;
+using TypeAttributedMemory = std::array<int64_t, OBJ_TYPE_MAX + 1>;
 
 class EngineShard {
   friend class EngineShardSet;

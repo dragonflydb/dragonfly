@@ -701,6 +701,40 @@ TEST_F(TransactionTest, DeltaAllocAndFree) {
   });
 }
 
+TEST_F(TransactionTest, DeltaInternalMemory) {
+  OnShard(0, [] {
+    auto* shard = EngineShard::tlocal();
+    auto* mr = shard->memory_resource();
+    const auto before = shard->type_attributed_memory();
+    void* internal = nullptr;
+    void* value = nullptr;
+    {
+      TxMemoryScope tx_scope(OBJ_STRING);
+      AtomicMemoryScope value_scope(OBJ_HASH);
+
+      // Nested internal scopes must count the allocation only once.
+      internal = AccountMemory(kInternalMemory, [&] {
+        return AccountMemory(kInternalMemory, [&] { return mr->allocate(256); });
+      });
+      value = mr->allocate(128);
+    }
+    TypeAttributedMemory expected{};
+    expected[kInternalMemory] = 256;
+    expected[OBJ_HASH] = 128;
+    EXPECT_EQ(DeltaDiff(before, shard->type_attributed_memory()), expected);
+
+    {
+      TxMemoryScope tx_scope(OBJ_STRING);
+      AtomicMemoryScope value_scope(OBJ_HASH);
+      AccountMemory(kInternalMemory, [&] {
+        AccountMemory(kInternalMemory, [&] { mr->deallocate(internal, 256); });
+      });
+      mr->deallocate(value, 128);
+    }
+    EXPECT_EQ(shard->type_attributed_memory(), before);
+  });
+}
+
 TEST_F(TransactionTest, DeltaInterleavedFibers) {
   // A tx scope yields and another fiber opens a scope while tx is suspended
   OnShard(0, [] {

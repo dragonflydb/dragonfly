@@ -1924,7 +1924,8 @@ int64_t TrackedMemory() {
 
   // Full search index memory accounting scans all indices, so skip it
   const int64_t used_memory = shard->UsedMemoryWithoutSearch();
-  return used_memory - shard->type_attributed_memory()[OBJ_KEY];
+  const auto& metrics = shard->type_attributed_memory();
+  return used_memory - metrics[OBJ_KEY] - metrics[kInternalMemory];
 }
 
 }  // namespace
@@ -1990,7 +1991,11 @@ AtomicMemoryScope::~AtomicMemoryScope() {
 
   const int64_t delta = TrackedMemory() - mem_baseline_;
   EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta);
-  DeductFromTxScope(delta);
+
+  // TrackedMemory already subtracts the internal slot, like OBJ_KEY. Deducting its delta
+  // from the transaction scope too would exclude the same memory twice.
+  if (obj_type_ != kInternalMemory)
+    DeductFromTxScope(delta);
 }
 
 void AdvanceTxIdPast(TxId txid) {
