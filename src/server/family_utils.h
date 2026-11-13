@@ -30,6 +30,12 @@ typedef struct streamCG streamCG;
 
 namespace dfly {
 
+// Upper bound on a negative COUNT (with-duplicates mode) for the RAND-family commands
+// (HRANDFIELD/ZRANDMEMBER/SRANDMEMBER). The magnitude otherwise sizes an allocation directly, so
+// an unbounded value is a memory-amplification DoS; 64K selections is well beyond any reasonable
+// use. Larger magnitudes are rejected with an error.
+inline constexpr uint64_t kMaxRandCount = 1ULL << 16;
+
 struct ExpiryOption {
   ExpT type = ExpT::EX;
   std::optional<int64_t> value;
