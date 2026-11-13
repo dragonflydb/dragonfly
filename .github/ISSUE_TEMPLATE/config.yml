@@ -1,8 +1,8 @@
 blank_issues_enabled: true
 
 contact_links:
-  - name: Dragonfly DB Discord Channel
-    url: https://discord.gg/HsPjXGVH85
+  - name: Dragonfly Community Slack
+    url: https://join.slack.com/t/dragonflycommunityhq/shared_invite/zt-4ftpylx50-SQZ0g0CD2lJMvi0EsqPNbQ
     about: Get help! Ask questions, get support, and share ideas.
 
   - name: GitHub Discussions
