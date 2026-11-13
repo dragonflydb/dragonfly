@@ -5,7 +5,7 @@
 #include "server/server_family.h"
 
 #include <absl/cleanup/cleanup.h>
-#include <absl/random/random.h>  // for master_replid_ generation.
+#include <absl/random/random.h>  // for master_replid generation.
 #include <absl/strings/match.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_replace.h>
@@ -166,9 +166,6 @@ ABSL_FLAG(string, availability_zone, "",
           "server availability zone, used by clients to read from local-zone replicas");
 
 ABSL_FLAG(bool, keep_legacy_memory_metrics, false, "legacy metrics format");
-// TODO deprecate when flipped in production
-ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
-          "when set, preserves journal offsets after REPLICAOF NO ONE");
 
 ABSL_DECLARE_FLAG(int32_t, port);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
@@ -367,11 +364,6 @@ template <typename T> void UpdateMax(T* maxv, T current) {
   *maxv = std::max(*maxv, current);
 }
 
-void SetMasterFlagOnAllThreads(bool is_master) {
-  auto cb = [is_master](unsigned, auto*) { ServerState::tlocal()->is_master = is_master; };
-  shard_set->pool()->AwaitBrief(cb);
-}
-
 std::optional<cron::cronexpr> InferSnapshotCronExpr() {
   string save_time = GetFlag(FLAGS_save_schedule);
   auto cron_expr = GetFlag(FLAGS_snapshot_cron);
@@ -460,7 +452,7 @@ ClientListType ClassifyConnection(facade::Connection* conn) {
     return ClientListType::kNormal;
 
   // Replica takes priority over PUBSUB; kMaster is added separately by
-  // GetMasterLinkClientInfo (not produced here).
+  // ReplicaManager::GetMasterLinkClientInfo (not produced here).
   if (base_cntx->replica_conn)
     return ClientListType::kReplica;
 
@@ -510,7 +502,7 @@ void ClientList(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
 
   bool want_master = !filter->type.has_value() || *filter->type == ClientListType::kMaster;
   if (want_master) {
-    for (auto& entry : server_family->GetMasterLinkClientInfo()) {
+    for (auto& entry : server_family->replica_manager().GetMasterLinkClientInfo()) {
       if (filter->ids.empty() || filter->ids.contains(entry.id))
         client_info.push_back(facade::FormatClientInfo(entry));
     }
@@ -751,7 +743,8 @@ void ClientKill(facade::ParsedArgs args, absl::Span<facade::Listener*> listeners
 
   // The master link is not killable; refuse a TYPE master or ID request that matches it.
   if (filter->type == ClientListType::kMaster || filter->id) {
-    for (const facade::ClientInfo& link : server_family->GetMasterLinkClientInfo()) {
+    for (const facade::ClientInfo& link :
+         server_family->replica_manager().GetMasterLinkClientInfo()) {
       if (filter->Matches(link.id, ClientListType::kMaster, nullopt, link.age, link.addr,
                           link.laddr))
         return cmd_cntx->SendError("Cannot kill master link; use REPLICAOF NO ONE");
@@ -1088,15 +1081,6 @@ GenericError RewriteConfigFile() {
   return {};
 }
 
-bool IsMaster() {
-  // We call this function on startup where tlocal() == nullptr. We handle
-  // this case below.
-  if (!ServerState::tlocal()) {
-    return true;
-  }
-  return ServerState::tlocal()->is_master;
-}
-
 // Returns {acked, running} for the supplied replica snapshot, reading ACKs on their owning shards.
 pair<uint32_t, uint32_t> CountAckedReplicas(
     const vector<shared_ptr<DflyCmd::ReplicaInfo>>& replicas, const vector<LSN>& target_lsns,
@@ -1105,7 +1089,7 @@ pair<uint32_t, uint32_t> CountAckedReplicas(
   vector<vector<bool>> shard_acked(target_lsns.size(), vector<bool>(n, true));
 
   shard_set->RunBriefInParallel([&](EngineShard* shard) ABSL_NO_THREAD_SAFETY_ANALYSIS {
-    if (!IsMaster()) {
+    if (!ServerState::IsMaster()) {
       role_changed->store(true, std::memory_order_relaxed);
       return;
     }
@@ -1537,8 +1521,10 @@ ServerFamily::ServerFamily(Service* service) : service_(*service) {
 
   {
     absl::InsecureBitGen eng;
-    master_replid_ = GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
-    DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_replid_.size());
+    string master_replid = GetRandomHex(eng, CONFIG_RUN_ID_SIZE);
+    DCHECK_EQ(CONFIG_RUN_ID_SIZE, master_replid.size());
+    replica_manager_ = make_unique<ReplicaManager>(service, std::move(master_replid),
+                                                   [this] { UnblockAllClients(); });
   }
 
   // Note: startup flag validation (TLS + snapshot filename) runs in main() before the proactor
@@ -1750,11 +1736,7 @@ void ServerFamily::Shutdown() {
     auto ec = journal::Close();
     LOG_IF(ERROR, ec) << "Error closing journal " << ec;
 
-    util::fb2::LockGuard lk(replicaof_mu_);
-    if (replica_) {
-      replica_->Stop();
-    }
-    StopAllClusterReplicas();
+    replica_manager_->Shutdown();
 
     dfly_cmd_->CancelReplicas();
     DebugCmd::Shutdown();
@@ -1816,7 +1798,7 @@ void ServerFamily::FlushAll(Namespace* ns) {
 }
 
 GenericError ServerFamily::CheckSnapshotLoadable(const std::string& path) {
-  if (!IsMaster())
+  if (!ServerState::IsMaster())
     return {std::make_error_code(std::errc::operation_not_permitted), "replica cannot load data"};
   if (path.empty())
     return {std::make_error_code(std::errc::invalid_argument), "no snapshot found to load"};
@@ -1843,7 +1825,7 @@ std::optional<fb2::Future<GenericError>> ServerFamily::Load(const std::string& p
     return future;
   };
 
-  if (!IsMaster()) {
+  if (!ServerState::IsMaster()) {
     return immediate(string("Replica cannot load data"));
   }
 
@@ -2046,40 +2028,6 @@ void ServerFamily::ConfigureMetrics(util::HttpListenerBase* http_base) {
   http_base->RegisterCb("/metrics", cb);
 }
 
-void ServerFamily::PauseReplication(bool pause) {
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  // Switch to primary mode.
-  if (!IsMaster()) {
-    auto repl_ptr = replica_;
-    CHECK(repl_ptr);
-    repl_ptr->Pause(pause);
-  }
-}
-
-std::optional<ReplicaOffsetInfo> ServerFamily::GetReplicaOffsetInfo() {
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  // Switch to primary mode.
-  if (!IsMaster()) {
-    auto repl_ptr = replica_;
-    CHECK(repl_ptr);
-    return ReplicaOffsetInfo{repl_ptr->GetSyncId(), repl_ptr->GetReplicaOffset()};
-  }
-  return nullopt;
-}
-
-std::optional<int> ServerFamily::GetReplicaMasterSocketUnreadBytes() {
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  if (!IsMaster()) {
-    auto repl_ptr = replica_;
-    CHECK(repl_ptr);
-    return repl_ptr->GetMasterSocketUnreadBytes();
-  }
-  return nullopt;
-}
-
 vector<facade::Listener*> ServerFamily::GetNonPriviligedListeners() const {
   std::vector<facade::Listener*> listeners;
   listeners.reserve(listeners.size());
@@ -2098,33 +2046,6 @@ bool ServerFamily::AreAllReplicasInStableSync() const {
   }
   auto match = SyncStateName(DflyCmd::SyncState::STABLE_SYNC);
   return rng::all_of(roles, [&match](auto& elem) { return elem.state == match; });
-}
-
-optional<Metrics::ReplicaInfo> ServerFamily::GetReplicaSummary() const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  if (replica_ == nullptr) {
-    return nullopt;
-  }
-
-  Metrics::ReplicaInfo info;
-  info.summary = replica_->GetSummary();
-  for (const auto& cl_repl : cluster_replicas_) {
-    info.cl_repl_summary.push_back(cl_repl->GetSummary());
-  }
-
-  return info;
-}
-
-vector<facade::ClientInfo> ServerFamily::GetMasterLinkClientInfo() const {
-  vector<facade::ClientInfo> out;
-  util::fb2::LockGuard lk(replicaof_mu_);
-  if (replica_ == nullptr)
-    return out;
-  out.push_back(replica_->GetClientInfo());
-  for (const auto& cl_repl : cluster_replicas_) {
-    out.push_back(cl_repl->GetClientInfo());
-  }
-  return out;
 }
 
 void ServerFamily::OnClose(ConnectionContext* cntx) {
@@ -3021,8 +2942,8 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
   result.traverse_ttl_per_sec /= 6;
   result.delete_ttl_per_sec /= 6;
 
-  if (!IsMaster()) {
-    result.replica_side_info = GetReplicaSummary();
+  if (!ServerState::IsMaster()) {
+    result.replica_side_info = replica_manager_->GetSummary();
   }
 
   {
@@ -3446,7 +3367,7 @@ string ServerFamily::FormatInfoMetrics(
                                             ",state=", r.state, ",lag=", r.lsn_lag));
         }
       }
-      append("master_replid", master_replid_);
+      append("master_replid", replica_manager_->master_replid());
     } else {
       append("role", GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
@@ -3667,8 +3588,8 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
       opts.cmd_latency = true;
     }
     metrics = GetMetrics(cmd_cntx->server_conn_cntx()->ns, opts);
-  } else if (!IsMaster()) {
-    metrics.replica_side_info = GetReplicaSummary();
+  } else if (!ServerState::IsMaster()) {
+    metrics.replica_side_info = replica_manager_->GetSummary();
   }
 
   std::string info;
@@ -3785,7 +3706,7 @@ void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
   rb->SendBulkString("mode");
   rb->SendBulkString(GetRedisMode());
   rb->SendBulkString("role");
-  rb->SendBulkString(IsMaster() ? "master" : "slave");
+  rb->SendBulkString(ServerState::IsMaster() ? "master" : "slave");
 
   // Add availability_zone to the response if flag is explicitly set and not empty
   if (!az.empty()) {
@@ -3795,16 +3716,12 @@ void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void ServerFamily::AddReplicaOf(CmdArgParser parser, CommandContext* cmd_cntx) {
-  facade::ParsedArgs args = parser.UnparsedArgs();
-  util::fb2::LockGuard lk(replicaof_mu_);
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  if (IsMaster()) {
+  if (!replica_manager_->IsReplica()) {
     return cmd_cntx->SendError(
         "Calling ADDREPLICAOFF allowed only after server is already a replica");
   }
-  CHECK(replica_);
 
-  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args);
+  auto replicaof_args = ReplicaOfArgs::FromCmdArgs(parser.UnparsedArgs());
   if (!replicaof_args.has_value()) {
     return cmd_cntx->SendError(replicaof_args.error());
   }
@@ -3813,28 +3730,16 @@ void ServerFamily::AddReplicaOf(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
   LOG(INFO) << "Add Replica " << *replicaof_args;
 
-  auto add_replica = make_unique<Replica>(replicaof_args->host, replicaof_args->port, &service_,
-                                          master_replid(), replicaof_args->slot_range);
-  GenericError ec = add_replica->Start();
+  GenericError ec = replica_manager_->AddClusterReplica(replicaof_args->host, replicaof_args->port,
+                                                        replicaof_args->slot_range);
   if (ec) {
     return cmd_cntx->SendError(ec.Format());
   }
-  add_replica->StartMainReplicationFiber(nullopt);
-  cluster_replicas_.push_back(std::move(add_replica));
-  rb->SendOk();
-}
-
-void ServerFamily::StopAllClusterReplicas() {
-  // Stop all cluster replication.
-  for (auto& replica : cluster_replicas_) {
-    replica->Stop();
-    replica.reset();
-  }
-  cluster_replicas_.clear();
+  cmd_cntx->rb()->SendOk();
 }
 
 void ServerFamily::ReplicaOf(CmdArgParser parser, CommandContext* cmd_cntx) {
-  ReplicaOfInternal(parser.UnparsedArgs(), cmd_cntx, ActionOnConnectionFail::kReturnOnError);
+  ReplicaOfInternal(parser.UnparsedArgs(), cmd_cntx, ReplicaManager::kReturnOnError);
 }
 
 void ServerFamily::Replicate(string_view host, string_view port) {
@@ -3849,7 +3754,7 @@ void ServerFamily::Replicate(string_view host, string_view port) {
   sock.set_null(true);
   facade::RedisReplyBuilder rb(&sock);
   CommandContext cmd_cntx{&rb, nullptr};
-  ReplicaOfInternal(args_list, &cmd_cntx, ActionOnConnectionFail::kContinueReplication);
+  ReplicaOfInternal(args_list, &cmd_cntx, ReplicaManager::kContinueReplication);
 }
 
 void ServerFamily::ForceReplicasToFullSync() {
@@ -3860,34 +3765,8 @@ void ServerFamily::ForceReplicasToFullSync() {
   });
 }
 
-void ServerFamily::ReplicaOfNoOne(SinkReplyBuilder* builder) {
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  if (!IsMaster()) {
-    CHECK(replica_);
-
-    auto repl_ptr = replica_;
-    if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
-      // Start journal and keep offsets.
-      repl_ptr->StartJournalAtOwnLSN();
-    }
-    // flip flag before clearing replica_
-    SetMasterFlagOnAllThreads(true);
-
-    last_master_data_ = replica_->Stop();
-    replica_.reset();
-    StopAllClusterReplicas();
-  }
-
-  // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
-  service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
-
-  return builder->SendOk();
-}
-
 void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmd_cntx,
-                                     ActionOnConnectionFail on_error)
-    ABSL_LOCKS_EXCLUDED(replicaof_mu_) {
+                                     ReplicaManager::ActionOnConnectionFail on_error) {
   auto replicaof_args = ReplicaOfArgs::FromCmdArgs(args);
   if (!replicaof_args.has_value()) {
     return cmd_cntx->SendError(replicaof_args.error());
@@ -3897,7 +3776,7 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   // This is a "weak" check. For example, if the node is already a replica,
   // it could be the case that one of the flows disconnects. The MainReplicationFiber
   // will then loop and if it can't partial sync it will enter LOADING state because of
-  // full sync. Note that the fiber is not aware of the replicaof_mu_ so even
+  // full sync. Note that the fiber is not aware of the replica manager mutex so even
   // if that mutex is locked below before any state check we can't really enforce
   // that the old replication fiber won't try to full sync and update the state to LOADING.
   // What is more here is that we always call `replica->Stop()`. So even if we end up in the
@@ -3907,58 +3786,24 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
   // well defined semantics.
   ServerState* ss = ServerState::tlocal();
 
-  if (IsMaster() && ss->gstate() == GlobalState::LOADING) {
+  if (ServerState::IsMaster() && ss->gstate() == GlobalState::LOADING) {
     return cmd_cntx->SendError(kLoadingErr);
   }
 
   // replicaof no one
   if (replicaof_args->IsReplicaOfNoOne()) {
-    return ReplicaOfNoOne(cmd_cntx->rb());
+    replica_manager_->PromoteToMaster();
+    return cmd_cntx->rb()->SendOk();
   }
 
   // A full sync loads data bypassing the journal, so the AOF would miss it.
   if (GetFlag(FLAGS_aof))
     return cmd_cntx->SendError("REPLICAOF is not supported with --aof");
 
-  auto new_replica = make_shared<Replica>(replicaof_args->host, replicaof_args->port, &service_,
-                                          master_replid(), replicaof_args->slot_range);
-  GenericError ec;
-  switch (on_error) {
-    case ActionOnConnectionFail::kReturnOnError:
-      ec = new_replica->Start();
-      break;
-    case ActionOnConnectionFail::kContinueReplication:
-      new_replica->EnableReplication();
-      break;
-  };
-
-  if (ec || new_replica->IsContextCancelled()) {
-    return cmd_cntx->SendError(ec ? ec.Format() : "replication cancelled");
-  }
-
-  // Critical section.
-  // 1. Stop the old replica_ if it exists
-  // 2. Update all the pointers to the new replica and update master flag
-  // 3. Start the main replication fiber
-  // 4. Send OK
-  util::fb2::LockGuard lk(replicaof_mu_);
-  std::optional<Replica::LastMasterSyncData> last_master_data;
-  if (replica_)
-    last_master_data = replica_->Stop();
-
-  StopAllClusterReplicas();
-
-  if (ServerState::tlocal()->gstate() == GlobalState::TAKEN_OVER)
-    service_.SwitchState(GlobalState::TAKEN_OVER, GlobalState::LOADING);
-
-  // TODO Update thread locals. That way INFO never blocks
-  replica_ = new_replica;
-  SetMasterFlagOnAllThreads(false);
-  // Blocked writers would otherwise consume elements applied from the replication stream.
-  UnblockAllClients();
-
-  if (on_error == ActionOnConnectionFail::kReturnOnError) {
-    replica_->StartMainReplicationFiber(last_master_data);
+  GenericError ec = replica_manager_->StartReplication(replicaof_args->host, replicaof_args->port,
+                                                       replicaof_args->slot_range, on_error);
+  if (ec) {
+    return cmd_cntx->SendError(ec.Format());
   }
 
   cmd_cntx->rb()->SendOk();
@@ -3983,47 +3828,11 @@ void ServerFamily::ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd
     return cmd_cntx->SendError("timeout is negative");
   }
 
-  // The LockGuard must precede the master check to ensure atomicity for the subsequent repl_ptr
-  // check
-  util::fb2::LockGuard lk(replicaof_mu_);
-
-  // We return OK, to support idempotency semantics.
-  if (IsMaster())
-    return builder->SendOk();
-
-  auto repl_ptr = replica_;
-  CHECK(repl_ptr);
-
-  // Start journal to allow partial sync from same source master
-  repl_ptr->StartJournalAtOwnLSN();
-
-  auto info = replica_->GetSummary();
-  if (!info.full_sync_done) {
-    return cmd_cntx->SendError("Full sync not done");
+  GenericError ec = replica_manager_->TakeOver(timeout_sec, save_flag);
+  if (ec) {
+    return cmd_cntx->SendError(ec.Format());
   }
-
-  std::error_code res = replica_->TakeOver(timeout_sec, save_flag);
-  if (res) {
-    LOG(WARNING) << "Takeover failed with error: " << res << " - " << res.message();
-    return cmd_cntx->SendError(absl::StrCat("Couldn't execute takeover: ", res.message()));
-  }
-
-  LOG(INFO) << "Takeover successful, promoting this instance to master.";
-
-  if (IsClusterEnabled()) {
-    service().cluster_family().ReconcileReplicaSlots();
-  }
-
-  last_master_data_ = replica_->Stop();
-  replica_.reset();
-
-  SetMasterFlagOnAllThreads(true);
   return builder->SendOk();
-}
-
-std::string ServerFamily::GetLineageId() const {
-  util::fb2::LockGuard lk(replicaof_mu_);
-  return replica_ ? replica_->GetLineageId() : master_replid_;
 }
 
 void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -4032,8 +3841,7 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Replicating a replica (cascaded replication) is only supported behind the experimental flag.
   if (!absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
-    util::fb2::LockGuard lk(replicaof_mu_);
-    if (!IsMaster()) {
+    if (replica_manager_->IsReplica()) {
       return cmd_cntx->SendError("Replicating a replica is unsupported");
     }
   }
@@ -4065,12 +3873,12 @@ void ServerFamily::ReplConf(CmdArgParser parser, CommandContext* cmd_cntx) {
         // The response for 'capa dragonfly' is <master_repl_id> <syncid> <num_shards> <version>
         // <lineage_id> <announced_ip> <announced_port>. It may only grow at the end, and the ip
         // is a bulk string because it is operator-supplied.
-        std::string lineage_id = GetLineageId();
+        std::string lineage_id = replica_manager_->GetLineageId();
         auto announced = cluster::ClusterFamily::AnnouncedNodeInfo(cntx->conn());
 
         auto* rb = static_cast<RedisReplyBuilder*>(builder);
         rb->StartArray(7);
-        rb->SendSimpleString(master_replid_);
+        rb->SendSimpleString(replica_manager_->master_replid());
         rb->SendSimpleString(sync_id);
         rb->SendLong(flow_count);
         rb->SendLong(unsigned(DflyVersion::CURRENT_VER));
@@ -4135,7 +3943,7 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   const auto start = chrono::steady_clock::now();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
-  if (!IsMaster()) {
+  if (!ServerState::IsMaster()) {
     return cmd_cntx->SendError("WAIT cannot be used with replica instances.");
   }
 
@@ -4169,7 +3977,7 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   // Global shard LSNs cover at least this connection's writes without per-write bookkeeping.
   // Role changes update threads independently, so check the role on each shard before access.
   shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    if (!IsMaster()) {
+    if (!ServerState::IsMaster()) {
       role_changed.store(true, std::memory_order_relaxed);
       return;
     }
@@ -4191,7 +3999,7 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
       // PING accelerates ACKs. Try to expedite the acknowledgment from replicas.
       // If the queue is full, then we rely on periodic replica ACKs to eventually catch up.
       shard->GetSecondaryQueue()->TryAdd([] {
-        if (IsMaster() && EngineShard::tlocal()->journal())
+        if (ServerState::IsMaster() && EngineShard::tlocal()->journal())
           journal::RecordEntry(0, journal::Op::PING, 0, nullopt, {});
       });
     }
@@ -4211,7 +4019,7 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
       return rb->SendLong(count);
 
     // Do not hold up takeover/shutdown, including demotion through a partial sync.
-    if (!IsMaster() || ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
+    if (!ServerState::IsMaster() || ServerState::tlocal()->gstate() != GlobalState::ACTIVE)
       return rb->SendLong(count);
 
     ThisFiber::SleepUntil(min(deadline, now + 100ms));
@@ -4220,12 +4028,10 @@ void ServerFamily::Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void ServerFamily::Role(facade::CmdArgParser /*parser*/, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  util::fb2::LockGuard lk(replicaof_mu_);
-  // Thread local var is_master is updated under mutex replicaof_mu_ together with replica_,
-  // ensuring eventual consistency of is_master. When determining if the server is a replica and
-  // accessing the replica_ object, we must lock replicaof_mu_. Using is_master alone is
-  // insufficient in this scenario.
-  if (!replica_) {
+
+  // is_master alone is insufficient here: the summary is taken under the replica manager lock.
+  auto replica_info = replica_manager_->GetSummary();
+  if (!replica_info) {
     rb->StartArray(2);
     rb->SendBulkString("master");
     auto vec = dfly_cmd_->GetReplicasRoleInfo();
@@ -4238,7 +4044,7 @@ void ServerFamily::Role(facade::CmdArgParser /*parser*/, CommandContext* cmd_cnt
     }
 
   } else {
-    rb->StartArray(4 + cluster_replicas_.size() * 3);
+    rb->StartArray(4 + replica_info->cl_repl_summary.size() * 3);
     rb->SendBulkString(GetFlag(FLAGS_info_replication_valkey_compatible) ? "slave" : "replica");
 
     auto send_replica_info = [rb](const Replica::Summary& rinfo) {
@@ -4255,9 +4061,9 @@ void ServerFamily::Role(facade::CmdArgParser /*parser*/, CommandContext* cmd_cnt
         rb->SendBulkString("connecting");
       }
     };
-    send_replica_info(replica_->GetSummary());
-    for (const auto& replica : cluster_replicas_) {
-      send_replica_info(replica->GetSummary());
+    send_replica_info(replica_info->summary);
+    for (const auto& summary : replica_info->cl_repl_summary) {
+      send_replica_info(summary);
     }
   }
 }

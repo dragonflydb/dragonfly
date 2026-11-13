@@ -156,6 +156,11 @@ class ServerState {  // public struct - to allow initialization.
     return state_;
   }
 
+  // True on startup, before the thread-local state exists.
+  static bool IsMaster() {
+    return !state_ || state_->is_master;
+  }
+
   // Safe version.
   // Calls to tlocal() before and after a fiber migrates to a different thread may both
   // return the thread local of the thread that run the fiber before the migration. Use this
