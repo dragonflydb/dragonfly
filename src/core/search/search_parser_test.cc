@@ -502,11 +502,24 @@ TEST_F(SearchParserTest, ParseParams) {
   QueryParams params;
   params["k"] = "10";
   params["name"] = "alex";
+  params["neg"] = "-5";
+  params["big"] = "5000000000";
+  params["min"] = "-9223372036854775808";
+  params["max"] = "9223372036854775807";
+  params["huge"] = "9223372036854775808";
   SetParams(&params);
 
-  SetInput("$name $k");
+  SetInput("$name $k $neg $big $min $max $huge");
   NEXT_EQ(TOK_TERM, string, "alex");
   NEXT_EQ(TOK_UINT32, string, "10");
+
+  // Integers that don't fit in a uint32 but do fit in int64 lex as numbers
+  NEXT_EQ(TOK_DOUBLE, string, "-5");
+  NEXT_EQ(TOK_DOUBLE, string, "5000000000");
+  NEXT_EQ(TOK_DOUBLE, string, "-9223372036854775808");
+  NEXT_EQ(TOK_DOUBLE, string, "9223372036854775807");
+  // max int64 + 1 parses as a term because we only handle ints in range params
+  NEXT_EQ(TOK_TERM, string, "9223372036854775808");
 }
 
 TEST_F(SearchParserTest, Quotes) {

@@ -256,6 +256,10 @@ class SearchTest : public ::testing::Test {
     query_ = query;
   }
 
+  void PrepareParam(string_view name, string_view value) {
+    params_[name] = value;
+  }
+
   template <typename... Args> void ExpectAll(Args... args) {
     (entries_.emplace_back(args, true), ...);
   }
@@ -516,6 +520,15 @@ TEST_F(SearchTest, MatchRange) {
   ExpectAll(Map{{"f1", "5"}, {"f2", "50"}}, Map{{"f1", "1"}, {"f2", "100"}},
             Map{{"f1", "10"}, {"f2", "50"}});
   ExpectNone(Map{{"f1", "11"}, {"f2", "49"}}, Map{{"f1", "0"}, {"f2", "101"}});
+
+  EXPECT_TRUE(Check()) << GetError();
+
+  PrepareParam("lo", "-5");
+  PrepareParam("hi", "5000000000");
+  PrepareQuery("@f1:[$lo $hi]");
+
+  ExpectAll(Map{{"f1", "-5"}}, Map{{"f1", "0"}}, Map{{"f1", "5000000000"}});
+  ExpectNone(Map{{"f1", "-6"}}, Map{{"f1", "5000000001"}});
 
   EXPECT_TRUE(Check()) << GetError();
 }

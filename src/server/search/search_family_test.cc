@@ -823,6 +823,12 @@ TEST_F(SearchFamilyTest, AlterIndex) {
   WaitForIndexReady("idx-1");
   EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[0 100]"}), kNoResults);
   EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[100 300]"}), AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(Run({"ft.search", "idx-1", "@cost:[$lo $hi]", "PARAMS", "4", "lo", "-5000000000",
+                   "hi", "5000000000"}),
+              AreDocIds("d:1", "d:2"));
+  EXPECT_THAT(
+      Run({"ft.search", "idx-1", "@cost:[$lo $hi]", "PARAMS", "4", "lo", "-5", "hi", "100"}),
+      kNoResults);
 
   EXPECT_EQ(Run({"ft.alter", "idx-1", "schema", "add", "size", "numeric", "INDEXMISSING"}), "OK");
   WaitForIndexReady("idx-1");
