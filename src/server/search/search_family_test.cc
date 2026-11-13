@@ -2372,6 +2372,10 @@ TEST_F(SearchFamilyTest, SimpleUpdates) {
     Run({"hset", "d:3", "visits", "175"});
     EXPECT_THAT(Run({"ft.search", "i1", "@visits:[0 100]"}), kNoResults);
     EXPECT_THAT(Run({"ft.search", "i1", "@visits:[150 1000]"}), AreDocIds("d:2", "d:3"));
+
+    // A failed increment must leave the document indexed.
+    EXPECT_THAT(Run({"hincrby", "d:3", "title", "1"}), ErrArg("hash value is not an integer"));
+    EXPECT_THAT(Run({"ft.search", "i1", "@visits:[150 1000]"}), AreDocIds("d:2", "d:3"));
   }
 
   // Delete documents

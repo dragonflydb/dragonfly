@@ -426,8 +426,11 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
       res = it->second;
   }
 
-  if (OpStatus status = IncrementValue(res, param); status != OpStatus::OK)
+  if (OpStatus status = IncrementValue(res, param); status != OpStatus::OK) {
+    if (!add_res.is_new)
+      op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
     return status;
+  }
 
   if (holds_alternative<double>(*param)) {
     double new_val = get<double>(*param);
