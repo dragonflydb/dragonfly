@@ -353,19 +353,41 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   return base;
 }
 
-// if skip_on_missing - returns KEY_NOTFOUND.
-OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
-                           bool skip_on_missing) {
+void RecordMemcacheIncr(const OpArgs& op_args, string_view key, int64_t new_val,
+                        DbSlice::Iterator it) {
+  const string value = absl::StrCat(new_val);
+  string expiry;
+  string mc_flags;
+  absl::InlinedVector<string_view, 7> args{key, value};
+
+  const uint64_t expire_time = it->first.GetExpireTime();
+  if (expire_time != 0) {
+    expiry = absl::StrCat(expire_time);
+    args.insert(args.end(), {"PXAT", expiry});
+  }
+
+  if (it->second.HasFlag()) {
+    mc_flags = absl::StrCat(op_args.GetDbSlice().GetMCFlag(op_args.db_cntx.db_index, it->first));
+    args.insert(args.end(), {"_MCFLAGS", mc_flags});
+  }
+
+  if (it->first.IsSticky())
+    args.push_back("STICK");
+
+  RecordJournal(op_args, "SET", ArgSlice{args});
+}
+
+OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr, bool is_memcache) {
   auto& db_slice = op_args.GetDbSlice();
 
-  // we avoid using AddOrFind because of skip_on_missing option for memcache.
+  // Memcached must not create missing keys so do not use AddOrFind
   auto res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
 
   if (!res) {
     if (res.status() == OpStatus::WRONG_TYPE)
       return res.status();
 
-    if (skip_on_missing)
+    if (is_memcache)
       return OpStatus::KEY_NOTFOUND;
 
     PrimeValue pv;
@@ -392,6 +414,11 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   int64_t new_val = prev + incr;
   DCHECK(!res->it->second.IsExternal());
   res->it->second.SetInt(new_val);
+
+  if (is_memcache && op_args.shard->journal()) {
+    res->post_updater.Run();
+    RecordMemcacheIncr(op_args, key, new_val, res->it);
+  }
 
   return new_val;
 }
@@ -837,10 +864,10 @@ cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR IncrByGeneric(CommandContext* cmd_cntx, string_view key, int64_t val) {
-  bool skip_on_missing = (cmd_cntx->mc_command() != nullptr);
+  bool is_memcache = (cmd_cntx->mc_command() != nullptr);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
+    OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, is_memcache);
     return res;
   };
   auto result = co_await cmd::SingleHopT(cb);
@@ -1481,6 +1508,8 @@ cmd::CmdR CmdIncr(CmdArgParser parser, CommandContext* cmd_cntx) {
       return cmd::kAborted;
     }
     delta = static_cast<int64_t>(mc->delta);
+  } else {
+    cmd_cntx->tx()->ReviveAutoJournal();
   }
   return IncrByGeneric(cmd_cntx, key, delta);
 }
@@ -1522,6 +1551,8 @@ cmd::CmdR CmdDecr(CmdArgParser parser, CommandContext* cmd_cntx) {
       return cmd::kAborted;
     }
     delta = static_cast<int64_t>(mc->delta);
+  } else {
+    cmd_cntx->tx()->ReviveAutoJournal();
   }
   return IncrByGeneric(cmd_cntx, key, -delta);
 }
@@ -1848,8 +1879,8 @@ void RegisterStringFamily(CommandRegistry* registry) {
              ExtendGeneric)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
              ExtendGeneric)
-      << CI{"INCR", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdIncr)
-      << CI{"DECR", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdDecr)
+      << CI{"INCR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdIncr)
+      << CI{"DECR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdDecr)
       << CI{"INCRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
       << CI{"INCRBYFLOAT", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
       << CI{"DECRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
