@@ -83,6 +83,10 @@ class OpManager {
 
   Stats GetStats() const;
 
+  size_t UsedMemory() const {
+    return storage_.UsedMemory();
+  }
+
  protected:
   using OwnedEntryId = std::variant<uintptr_t, DbKeyId, ListNodeId>;
 
