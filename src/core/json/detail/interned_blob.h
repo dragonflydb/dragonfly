@@ -5,7 +5,11 @@
 
 #include <absl/container/flat_hash_set.h>
 
+#include <cstring>
+#include <limits>
 #include <string_view>
+
+#include "base/logging.h"
 
 namespace dfly::detail {
 
@@ -27,9 +31,20 @@ class InternedBlobHandle {
 
   [[nodiscard]] static InternedBlobHandle Create(std::string_view sv);
 
-  uint32_t Size() const;
+  uint32_t Size() const {
+    if (!blob_)
+      return 0;
+    uint32_t size;
+    std::memcpy(&size, blob_ - kHeaderSize, sizeof(size));
+    return size;
+  }
 
-  uint32_t RefCount() const;
+  uint32_t RefCount() const {
+    DCHECK(blob_) << "Called RefCount() on empty blob";
+    uint32_t ref_count;
+    std::memcpy(&ref_count, blob_ - kRefCountOffset, sizeof(ref_count));
+    return ref_count;
+  }
 
   const char* Data() const {
     return blob_;
@@ -43,10 +58,19 @@ class InternedBlobHandle {
   // avoid writing to memory unless absolutely necessary, making the handle cheap.
 
   // Increment ref count, asserts if count grows over type max limit
-  void IncrRefCount();
+  void IncrRefCount() {  // NOLINT - non-const, mutates via ptr
+    const uint32_t ref_count = RefCount();
+    DCHECK_LT(ref_count, std::numeric_limits<uint32_t>::max())
+        << "Attempt to increase max refcount";
+    SetRefCount(ref_count + 1);
+  }
 
   // Decrement ref count, asserts if count falls below 0
-  void DecrRefCount();
+  void DecrRefCount() {  // NOLINT - non-const, mutates via ptr
+    const uint32_t ref_count = RefCount();
+    DCHECK_GE(ref_count, 1ul) << "Attempt to decrease zero refcount";
+    SetRefCount(ref_count - 1);
+  }
 
   // Returns bytes used, including string, header and trailing byte
   size_t MemUsed() const;
@@ -65,7 +89,15 @@ class InternedBlobHandle {
   }
 
  private:
+  // Offsets are relative to blob_, which points past the header.
+  static constexpr size_t kHeaderSize = sizeof(uint32_t) * 2;
+  static constexpr size_t kRefCountOffset = sizeof(uint32_t);
+
   explicit InternedBlobHandle(BlobPtr blob) : blob_{blob} {
+  }
+
+  void SetRefCount(uint32_t ref_count) {
+    std::memcpy(blob_ - kRefCountOffset, &ref_count, sizeof(ref_count));
   }
 
   BlobPtr blob_{nullptr};
@@ -74,7 +106,7 @@ class InternedBlobHandle {
 struct BlobHash {
   using is_transparent = void;
   size_t operator()(std::string_view sv) const {
-    return std::hash<std::string_view>{}(sv);
+    return absl::Hash<std::string_view>{}(sv);
   }
 };
 
