@@ -208,6 +208,7 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
                                 bool store_freq = false, bool store_positions = false);
   static void Remove(search::RaxTreeMap<Container>* map, DocId id, std::string_view word);
 
+  uint32_t field_num_docs_ = 0;  // Docs with non-empty content in this field; packed with flags
   bool case_sensitive_ = false;
   bool unique_ids_ = true;  // If true, docs ids are unique in the index, otherwise they can repeat.
   bool with_offsets_ = false;  // Whether posting lists store token positions (TextIndex only).
@@ -223,7 +224,10 @@ template <typename C> struct BaseStringIndex : public BaseIndex {
   // get reused over time.
   std::vector<uint32_t> field_doc_lengths_;  // DocId -> sum of TF in this field
   size_t field_total_docs_len_ = 0;
-  size_t field_num_docs_ = 0;  // Number of docs with non-empty content in this field
+
+  // TextIndex with INDEXEMPTY: the docs with a value "", which has no words.
+  [[no_unique_address]] std::conditional_t<kIsScored, std::unique_ptr<DocBitMatrix>, std::monostate>
+      empty_docs_;
 
   // Borrows from owning Schema's field map; the schema outlives this index.
   std::string_view field_ident_;
@@ -236,7 +240,7 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
 
   TextIndex(PMR_NS::memory_resource* mr, const StopWords* stopwords, const Synonyms* synonyms,
             bool with_suffixtrie, bool no_stem, std::string_view language,
-            std::string_view language_field, bool with_offsets = true);
+            std::string_view language_field, bool with_offsets = true, bool index_empty = false);
 
   bool Add(DocId id, const DocumentAccessor& doc, std::string_view field) override;
   void Remove(DocId id, const DocumentAccessor& doc, std::string_view field) override;
@@ -245,8 +249,12 @@ struct TextIndex : public BaseStringIndex<CompressedSortedSet> {
     return with_offsets_;
   }
 
-  // Stems are NOT applied to phrase queries; they match raw token positions only.
+  // Stems are NOT applied to phrase queries; they match raw tokens only.
   std::vector<std::string> TokenizePhraseQuery(std::string_view phrase) const;
+
+  std::vector<DocId> GetEmptyDocs() const {
+    return empty_docs_ ? empty_docs_->Row(0) : std::vector<DocId>{};
+  }
 
  protected:
   std::optional<StringList> GetStrings(const DocumentAccessor& doc,

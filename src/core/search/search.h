@@ -185,8 +185,9 @@ struct IndicesOptions {
 
   absl::flat_hash_set<std::string> stopwords;
   bool custom_stopwords = false;  // true when STOPWORDS was explicitly set in FT.CREATE
-  // When true, TEXT posting lists do not store token positions. Saves memory but
-  // disables phrase queries. Set via NOOFFSETS in FT.CREATE.
+
+  // When true, TEXT posting lists do not store token positions. Saves memory; a phrase then
+  // matches its words in any order. Set via NOOFFSETS in FT.CREATE.
   bool no_offsets = false;
 };
 

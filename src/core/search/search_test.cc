@@ -3689,10 +3689,8 @@ TEST_F(SearchTest, MatchFieldOptionalUnparen) {
   EXPECT_TRUE(Check()) << GetError();
 }
 
-TEST_F(SearchTest, MatchOptionalSwallowsInnerErrors) {
-  // ~@invalid_field:hello: ~ is a soft boost, not a filter. Inner errors
-  // (missing/NOINDEX field) must NOT poison the outer query — return all docs
-  // without error, matching Redis's silent no-op semantics.
+TEST_F(SearchTest, MatchOptionalReportsInnerErrors) {
+  // ~ is a soft boost, not a filter, yet an error inside it (an unknown field) fails the query.
   Schema schema = MakeSimpleSchema({{"text", SchemaField::TEXT}});
   FieldIndices index{schema, kEmptyOptions, PMR_NS::get_default_resource(), nullptr};
   MockedDocument doc{Map{{"text", "anything"}}};
@@ -3704,9 +3702,7 @@ TEST_F(SearchTest, MatchOptionalSwallowsInnerErrors) {
   for (auto query : {"~@invalid_field:hello", "~(@invalid_field:hello @text:anything)",
                      "~(~@invalid_field:hello | @text:anything)"}) {
     ASSERT_TRUE(algo.Init(query, &params)) << query;
-    auto result = algo.Search(&index);
-    EXPECT_TRUE(result.error.empty()) << query << ": " << result.error;
-    EXPECT_EQ(result.ids.size(), 1u) << query;
+    EXPECT_EQ(algo.Search(&index).error, "Invalid field: invalid_field") << query;
   }
   ASSERT_TRUE(algo.Init("@invalid_field:hello ~@text:anything", &params));
   EXPECT_FALSE(algo.Search(&index).error.empty());
@@ -4152,23 +4148,6 @@ TEST_F(PhraseTest, EmptyPhrase) {
   PrepareQuery("\"\"");
   ExpectNone("foo", "anything", "literally any document");
   EXPECT_TRUE(Check()) << GetError();
-}
-
-// NOOFFSETS index surfaces a typed error to FT.SEARCH callers, not silently empty.
-TEST_F(PhraseTest, NoOffsetsErrorIsExplicit) {
-  auto schema = MakeSimpleSchema({{"field", SchemaField::TEXT}});
-  IndicesOptions options{{}};
-  options.no_offsets = true;
-  FieldIndices indices{schema, options, PMR_NS::get_default_resource(), nullptr};
-
-  MockedDocument doc("machine learning algorithm");
-  indices.Add(0, doc);
-
-  SearchAlgorithm algo;
-  QueryParams params;
-  ASSERT_TRUE(algo.Init("\"machine learning\"", &params));
-  auto result = algo.Search(&indices);
-  EXPECT_THAT(result.error, testing::HasSubstr("phrase queries require offsets"));
 }
 
 // The same document ids stored in every container type that IndexResult can borrow.

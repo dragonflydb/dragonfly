@@ -1228,8 +1228,8 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
   // Re-rank by (score, key) so per-shard top-K matches what a global merge
   // would pick. Skipped when SORTBY or KNN drives the order — those vectors
   // are positionally aligned with result.ids and reordering desyncs them.
-  if (sort_by_text_score && sort_scores.empty() && result.knn_scores.empty() &&
-      !result.text_scores.empty()) {
+  const bool rerank = sort_by_text_score && sort_scores.empty() && !knn_sort_option;
+  if (rerank && !result.text_scores.empty()) {
     struct Scored {
       float score;
       std::string_view key;
@@ -1243,7 +1243,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
         expired_count++;
         continue;
       }
-      entries.push_back({score, key_index_.Get(doc), doc});
+      entries.push_back({score, key_index_.GetOrEmpty(doc), doc});
     }
 
     const size_t take = std::min(limit, entries.size());
@@ -1264,6 +1264,14 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       top_scores[entries[i].doc] = entries[i].score;
     }
     result.text_scores = std::move(top_scores);
+  }
+
+  // Without text terms every score is 0, so the key alone picks the per-shard top-K.
+  if (rerank && result.text_scores.empty() && result.ids.size() > limit) {
+    expired_count +=
+        std::erase_if(result.ids, [this](DocId id) { return !key_index_.IsValid(id); });
+    rng::partial_sort(result.ids, result.ids.begin() + min(limit, result.ids.size()), {},
+                      [this](DocId id) { return key_index_.GetOrEmpty(id); });
   }
 
   // Cut off unnecessary items

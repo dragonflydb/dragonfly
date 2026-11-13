@@ -338,7 +338,7 @@ ParseResult<bool> ParseIndexLanguageField(CmdArgParser* parser, DocIndex* index)
 }
 
 // NOOFFSETS (index-level): disable storing token positions in TEXT posting lists.
-// Saves memory but breaks phrase queries.
+// Saves memory; a phrase then matches its words in any order.
 ParseResult<bool> ParseNoOffsets(CmdArgParser* /*parser*/, DocIndex* index) {
   index->options.no_offsets = true;
   return true;
@@ -3851,35 +3851,35 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
                               absl::MakeSpan(profile_results), took, rb, limited);
 }
 
-// Merges lists that are each sorted into one sorted list without repeats. The lists come from the
-// shards, so the same value can be in several of them.
-static StringVec MergeSortedUnique(vector<StringVec> lists) {
+// Merges lists that are each sorted and without repeats into one such list. The lists come from
+// the shards, so the same value can be in several of them. The result points into the lists.
+static vector<string_view> MergeSortedUnique(const vector<StringVec>& lists) {
   DCHECK(!lists.empty());
+  vector<vector<string_view>> views;
+  views.reserve(lists.size());
+  for (const StringVec& list : lists)
+    views.emplace_back(list.begin(), list.end());
 
   // Each round merges neighboring lists in pairs and halves their number, e.g. 5 -> 3 -> 2 -> 1.
   // So a value takes part in at most ceil(log2(lists.size())) merges instead of up to
-  // lists.size() - 1 when the lists are merged one by one.
-  while (lists.size() > 1) {
-    vector<StringVec> next;
-    for (size_t i = 0; i + 1 < lists.size(); i += 2) {
-      StringVec& merged = next.emplace_back();
-      merged.reserve(lists[i].size() + lists[i + 1].size());
-      std::merge(make_move_iterator(lists[i].begin()), make_move_iterator(lists[i].end()),
-                 make_move_iterator(lists[i + 1].begin()), make_move_iterator(lists[i + 1].end()),
-                 back_inserter(merged));
+  // lists.size() - 1 when the lists are merged one by one. set_union keeps a value found in both
+  // lists once, so repeats from different shards are dropped as soon as their lists meet.
+  while (views.size() > 1) {
+    vector<vector<string_view>> next;
+    for (size_t i = 0; i + 1 < views.size(); i += 2) {
+      vector<string_view>& merged = next.emplace_back();
+      merged.reserve(views[i].size() + views[i + 1].size());
+      rng::set_union(views[i], views[i + 1], back_inserter(merged));
     }
 
     // With an odd number of lists the last one has no pair and waits for the next round.
-    if (lists.size() % 2 == 1)
-      next.push_back(std::move(lists.back()));
-    lists = std::move(next);
+    if (views.size() % 2 == 1)
+      next.push_back(std::move(views.back()));
+    views = std::move(next);
   }
 
-  // One list with every value is left. Merging put repeats from different shards next to each
-  // other, so unique() removes them.
-  StringVec res = std::move(lists.front());
-  res.erase(std::unique(res.begin(), res.end()), res.end());
-  return res;
+  // One list with every value is left.
+  return std::move(views.front());
 }
 
 void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -3906,6 +3906,7 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   for (auto& res : shard_results) {
     if (res) {
       DCHECK(rng::is_sorted(*res));
+      DCHECK(rng::adjacent_find(*res) == res->end());
       lists.push_back(std::move(*res));
     } else {
       res.error().kind = facade::kSearchErrType;
@@ -3914,7 +3915,7 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   shard_results.clear();
-  StringVec vec = MergeSortedUnique(std::move(lists));
+  vector<string_view> vec = MergeSortedUnique(lists);
 
   rb->SendBulkStrArr(vec, CollectionType::SET);
 }
