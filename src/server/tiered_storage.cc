@@ -23,6 +23,7 @@
 #include "core/qlist.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/memory_scope.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
 #include "server/snapshot.h"
@@ -998,11 +999,12 @@ size_t TieredStorage::ReclaimMemory(size_t goal) {
     CHECK(IsValid(it));
     PrimeValue& pv = it->second;
 
-    // Now the item is only in storage. Its bytes already left the RAM ledger at cool-down.
+    // Now the item is only in storage. Its bytes already left the legacy RAM ledger at cool-down.
     tiering::DiskSegment segment = FromCoolItem(pv.GetCool());
     pv.Freeze(segment.offset, segment.length);
 
-    CompactObj::DeleteMR<TieredCoolRecord>(record);
+    AccountMemory(record->value.ObjType(), [&] { record->value.Reset(); });
+    AccountMemory(kInternalMemory, [&] { CompactObj::DeleteMR<TieredCoolRecord>(record); });
   } while (gained < goal);
 
   return gained;
@@ -1072,7 +1074,8 @@ bool TieredStorage::ShouldCool() const {
 void TieredStorage::CoolDown(DbIndex db_ind, std::string_view str,
                              const tiering::DiskSegment& segment, CompactObj::ExternalRep rep,
                              PrimeValue* pv) {
-  TieredCoolRecord* record = CompactObj::AllocateMR<TieredCoolRecord>();
+  TieredCoolRecord* record =
+      AccountMemory(kInternalMemory, [] { return CompactObj::AllocateMR<TieredCoolRecord>(); });
   cool_queue_.push_front(*record);
   stats_.cool_memory_used += (sizeof(TieredCoolRecord) + pv->MallocUsed());
 
@@ -1138,7 +1141,7 @@ PrimeValue TieredStorage::DeleteCool(TieredCoolRecord* record) {
 
   PrimeValue hot{std::move(record->value)};
   stats_.cool_memory_used -= (sizeof(TieredCoolRecord) + hot.MallocUsed());
-  CompactObj::DeleteMR<TieredCoolRecord>(record);
+  AccountMemory(kInternalMemory, [&] { CompactObj::DeleteMR<TieredCoolRecord>(record); });
   return hot;
 }
 

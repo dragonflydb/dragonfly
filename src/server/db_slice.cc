@@ -1974,6 +1974,7 @@ void DbSlice::RemoveOffloadedEntriesFromTieredStorage(absl::Span<const DbIndex> 
     PrimeTable::Cursor cursor;
     do {
       cursor = db_ptr->prime.Traverse(cursor, [&](PrimeIterator it) {
+        AtomicMemoryScope scope(it->second.ObjType());
         if (it->second.IsExternal()) {
           tiered_storage->Delete(index, it->first.GetSlice(&scratch), &it->second);
         } else if (it->second.HasStashPending()) {

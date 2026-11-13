@@ -16,6 +16,7 @@
 #include "facade/facade_test.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 #ifdef WITH_SEARCH
@@ -849,6 +850,18 @@ TEST_F(PureDiskTSTest, FlushAll) {
   LOG(INFO) << FormatMetrics(metrics);
 
   EXPECT_EQ(metrics.db_stats.front().tiered_entries, 0u);
+}
+
+TEST_F(TieredStorageTest, FlushResidentListMemory) {
+  absl::FlagSaver saver;
+  SetFlag(&FLAGS_list_max_listpack_size, 1);
+
+  const auto baseline = GetMetrics().type_attributed_memory_bytes;
+  ASSERT_THAT(Run({"RPUSH", "resident-list", BuildString(2048), BuildString(2048)}), IntArg(2));
+  EXPECT_GT(GetMetrics().type_attributed_memory_bytes[OBJ_LIST], baseline[OBJ_LIST]);
+  ASSERT_EQ(Run({"FLUSHDB", "SYNC"}), "OK");
+  ExpectConditionWithinTimeout(
+      [&] { return GetMetrics().type_attributed_memory_bytes == baseline; });
 }
 
 // Check FLUSHALL clears filling bytes of small bins
@@ -1893,6 +1906,7 @@ TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
   auto metrics_before = GetMetrics();
   ASSERT_GT(metrics_before.tiered_stats.cold_storage_bytes, 0)
       << "Should have cool storage data before decommit";
+  EXPECT_GT(metrics_before.type_attributed_memory_bytes[kInternalMemory], 0);
 
   // Call MEMORY DECOMMIT COOL
   auto response = Run({"MEMORY", "DECOMMIT", "COOL"});
@@ -1902,6 +1916,16 @@ TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
   auto metrics_after = GetMetrics();
   EXPECT_EQ(metrics_after.tiered_stats.cold_storage_bytes, 0)
       << "Cool queue should be flushed after MEMORY DECOMMIT COOL";
+  EXPECT_EQ(metrics_after.type_attributed_memory_bytes[kInternalMemory], 0);
+  EXPECT_LT(metrics_after.type_attributed_memory_bytes[OBJ_STRING],
+            metrics_before.type_attributed_memory_bytes[OBJ_STRING]);
+  for (size_t type = 0; type < metrics_before.type_attributed_memory_bytes.size(); ++type) {
+    if (type != OBJ_STRING && type != kInternalMemory) {
+      EXPECT_EQ(metrics_after.type_attributed_memory_bytes[type],
+                metrics_before.type_attributed_memory_bytes[type])
+          << "type=" << type;
+    }
+  }
 }
 
 // Ensure that uploading still happens even if the memory if occupied by cool entries.
@@ -2368,6 +2392,8 @@ TEST_F(TieredStorageTest, CoolHashDeleteDoesNotAbort) {
   SetFlag(&FLAGS_tiered_experimental_hash_support, true);
   UpdateFromFlags();
 
+  const auto baseline = GetMetrics().type_attributed_memory_bytes;
+
   // Listpack hashes go through small bins, which only flush at 4KB - one hash never stashes.
   const int kNum = 60;
   for (int i = 0; i < kNum; ++i)
@@ -2375,9 +2401,10 @@ TEST_F(TieredStorageTest, CoolHashDeleteDoesNotAbort) {
 
   ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries > 0u; });
 
-  Run({"FLUSHALL"});
+  Run({"FLUSHALL", "SYNC"});
   EXPECT_EQ(Run({"PING"}), "PONG");
   EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+  EXPECT_EQ(GetMetrics().type_attributed_memory_bytes, baseline);
 }
 
 #ifdef WITH_SEARCH

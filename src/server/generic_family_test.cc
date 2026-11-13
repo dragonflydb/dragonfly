@@ -33,6 +33,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
+#include "server/memory_scope.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
@@ -3213,6 +3214,7 @@ struct MetricCmp {
   MetricCmp() = default;
 
   explicit MetricCmp(const Metrics& m) : new_metric(m.type_attributed_memory_bytes) {
+    new_metric[kInternalMemory] = 0;
     for (const auto& db : m.db_stats) {
       ranges::transform(old_metric, db.memory_usage_by_type, old_metric.begin(), plus{});
       obj_used += db.obj_memory_usage;
