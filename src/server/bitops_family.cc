@@ -19,6 +19,7 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
+#include "server/family_utils.h"
 #include "server/namespaces.h"
 #include "server/tiered_storage.h"
 #include "server/transaction.h"
@@ -352,6 +353,9 @@ void ElementAccess::Commit(string_view new_value) const {
     // The value is replaced wholesale below, so drop the old heap accounting once.
     if (!IsNewEntry()) {
       updater_.post_updater.ReduceHeapUsage();
+
+      // BITOP overwrites keys of any type, an indexed HASH or JSON document included.
+      RemoveKeyFromIndexesIfNeeded(key_, context_, updater_.it->second, EngineShard::tlocal());
     }
     if (is_external) {
       EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, key_,
