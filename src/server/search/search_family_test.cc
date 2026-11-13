@@ -4397,6 +4397,7 @@ TEST_F(SearchFamilyTest, SynonymMultiGroupTermAcrossShardsAndReload) {
 // their stats, including the synonym group tokens of affix queries and phrase terms. Optional
 // affix queries also score documents that only contain another term of a matched group.
 TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
+  absl::FlagSaver fs;
   auto scores = [this] {
     EXPECT_EQ(
         Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
@@ -4453,7 +4454,6 @@ TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
   SetTestFlag("num_shards", "1");
   ResetService();
   auto single_shard = scores();
-  SetTestFlag("num_shards", "2");
 
   ASSERT_EQ(multi_shard.size(), single_shard.size());
   EXPECT_GT(single_shard.size(), 15u);
@@ -5356,6 +5356,15 @@ TEST_F(SearchFamilyTest, SetDoesNotUpdateIndexesBug) {
 
   resp = Run({"FT.SEARCH", "index", "*"});
   EXPECT_THAT(resp, AreDocIds("k1"));
+
+  // BITOP overwrites the indexed hash the same way.
+  Run({"SET", "src", "abc"});
+  EXPECT_THAT(Run({"BITOP", "OR", "k1", "src"}), IntArg(3));
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "value", "NOCONTENT"}), kNoResults);
+
+  Run({"DEL", "k1"});
+  Run({"HSET", "k1", "field", "fresh"});
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "fresh"}), AreDocIds("k1"));
 }
 
 TEST_F(SearchFamilyTest, SortStoreDoesNotUpdateIndexesBug) {
