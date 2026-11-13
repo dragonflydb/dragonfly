@@ -30,7 +30,6 @@ namespace detail {
 using namespace util;
 using absl::GetFlag;
 using absl::StrCat;
-using fb2::OpenLinux;
 
 namespace fs = std::filesystem;
 
@@ -122,12 +121,10 @@ GenericError RdbSnapshot::Start(SaveMode save_mode, const std::string& path,
   if (!res) {
     return res.error();
   }
+  io_sink_.reset(*res);
 
-  auto [file, file_type] = *res;
-  io_sink_.reset(file);
-
-  is_linux_file_ = file_type & FileType::IO_URING;
-  bool align_writes = (file_type & FileType::DIRECT) != 0;
+  // Local files are opened with O_DIRECT.
+  bool align_writes = !snapshot_storage_->IsCloud();
   saver_.reset(
       new RdbSaver(io_sink_.get(), save_mode, align_writes, snapshot_id, DflyVersion::CURRENT_VER));
 
@@ -162,14 +159,8 @@ RdbSaver::SnapshotStats RdbSnapshot::GetCurrentSnapshotProgress() const {
 }
 
 error_code RdbSnapshot::Close() {
-#ifdef __linux__
-  if (is_linux_file_) {
-    return static_cast<LinuxWriteWrapper*>(io_sink_.get())->Close();
-  }
-#endif
-
   error_code ec;
-  auto* file = static_cast<io::WriteFile*>(io_sink_.get());
+  io::WriteFile* file = io_sink_.get();
 
   // S3 implementation is stack hungry. We use a fiber to close the file to
   // avoid wasting stack space.
