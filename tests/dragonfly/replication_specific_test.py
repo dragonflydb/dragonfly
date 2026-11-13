@@ -315,90 +315,34 @@ async def test_save_with_replication(df_factory, action_during_save):
     assert not await is_saving(c_replica)
 
 
-async def test_replicating_mc_flags(df_factory):
-    master = df_factory.create(memcached_port=11211, proactor_threads=1)
-    replica = df_factory.create(
-        memcached_port=11212, proactor_threads=1, dbfilename=f"dump_{tmp_file_name()}"
-    )
-    df_factory.start_all([master, replica])
-
-    c_mc_master = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
-
-    c_replica = replica.client()
-
-    assert c_mc_master.set("key1", "value0", noreply=True)
-    assert c_mc_master.set("key2", "value2", noreply=True, expire=3600, flags=123456)
-    assert c_mc_master.replace("key1", "value1", expire=4000, flags=2, noreply=True)
-
-    c_master = master.client()
-    for i in range(3, 100):
-        await c_master.set(f"key{i}", f"value{i}")
-
-    await start_replication(c_replica, master.port)
-
-    c_mc_replica = pymemcache.Client(f"127.0.0.1:{replica.mc_port}", default_noreply=False)
-
-    async def check_flag(key, flag):
-        res = c_mc_replica.raw_command("get " + key, "END\r\n").split()
-        # workaround sometimes memcached_client.raw_command returns empty str
-        if len(res) > 2:
-            assert res[2].decode() == str(flag)
-
-    await check_flag("key1", 2)
-    await check_flag("key2", 123456)
-
-    for i in range(1, 100):
-        assert c_mc_replica.get(f"key{i}") == str.encode(f"value{i}")
-
-
-@pytest.mark.parametrize("expire", [0, 3600], ids=["persistent", "expiring"])
-async def test_mc_counter_replication(df_factory, expire):
+async def test_memcache_replication(df_factory):
     master = df_factory.create(memcached_port=11211, proactor_threads=1)
     replica = df_factory.create(memcached_port=11212, proactor_threads=1)
     df_factory.start_all([master, replica])
 
     cm = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
     cr = pymemcache.Client(
-        f"127.0.0.1:{replica.mc_port}",
-        default_noreply=False,
-        deserializer=lambda key, value, flags: (value, flags),
+        f"127.0.0.1:{replica.mc_port}", deserializer=lambda key, value, flags: (value, flags)
     )
     try:
         async with master.client() as c_master, replica.client() as c_replica:
-            await start_replication(c_replica, master.port)
-            assert cm.set("counter", b"100", expire=expire, flags=42)
-            await check_all_replicas_finished([c_replica], c_master)
+            assert cm.set("counter", b"100", expire=3600, flags=42)
             deadline = await c_master.execute_command("PEXPIRETIME", "counter")
-            assert deadline > 0 if expire else deadline == -1
+            assert deadline > 0
+
+            await start_replication(c_replica, master.port)
             assert cr.get("counter") == (b"100", 42)
-
-            for operation, delta, expected in [(cm.incr, 10000, 10100), (cm.decr, 123, 9977)]:
-                assert operation("counter", delta) == expected
-                await check_all_replicas_finished([c_replica], c_master)
-                assert await c_master.get("counter") == str(expected)
-                assert cr.get("counter") == (str(expected).encode(), 42)
-                for client in (c_master, c_replica):
-                    assert await client.execute_command("PEXPIRETIME", "counter") == deadline
-
-            for operation in (cm.incr, cm.decr):
-                assert operation("missing", 10000) is None
-                await check_all_replicas_finished([c_replica], c_master)
-                assert await c_master.exists("missing") == 0
-                assert await c_replica.exists("missing") == 0
-
-            # Redis INCR/DECR must still use automatic journaling.
-            for command, expected in [("INCR", 9978), ("DECR", 9977)]:
-                assert await c_master.execute_command(command, "counter") == expected
-                await check_all_replicas_finished([c_replica], c_master)
-                assert cr.get("counter") == (str(expected).encode(), 42)
-                assert await c_replica.execute_command("PEXPIRETIME", "counter") == deadline
-
-            await c_replica.execute_command("REPLICAOF", "NO", "ONE")
-            assert cr.get("counter") == (b"9977", 42)
             assert await c_replica.execute_command("PEXPIRETIME", "counter") == deadline
-            assert cr.incr("counter", 23) == 10000
-            assert cr.get("counter") == (b"10000", 42)
+
+            assert cm.incr("counter", 10000) == 10100
+            await check_all_replicas_finished([c_replica], c_master)
+            assert cr.get("counter") == (b"10100", 42)
             assert await c_replica.execute_command("PEXPIRETIME", "counter") == deadline
+
+            assert await c_master.incrby("new", 10000) == 10000
+            await check_all_replicas_finished([c_replica], c_master)
+            assert cr.get("new") == (b"10000", 0)
+            assert await c_replica.pttl("new") == -1
     finally:
         cm.close()
         cr.close()

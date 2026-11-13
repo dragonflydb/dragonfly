@@ -353,8 +353,14 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   return base;
 }
 
-void RecordMemcacheIncr(const OpArgs& op_args, string_view key, int64_t new_val,
-                        DbSlice::Iterator it) {
+void FinishIncr(const OpArgs& op_args, string_view key, int64_t new_val,
+                DbSlice::ItAndUpdater& it_upd) {
+  if (!op_args.shard->journal())
+    return;
+
+  // Finish mutation accounting before journaling, which may suspend.
+  it_upd.post_updater.Run();
+  const auto& it = it_upd.it;
   const string value = absl::StrCat(new_val);
   string expiry;
   string mc_flags;
@@ -377,17 +383,19 @@ void RecordMemcacheIncr(const OpArgs& op_args, string_view key, int64_t new_val,
   RecordJournal(op_args, "SET", ArgSlice{args});
 }
 
-OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr, bool is_memcache) {
+OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
+                           bool skip_on_missing) {
+  DCHECK(op_args.tx->GetCId()->opt_mask() & CO::NO_AUTOJOURNAL);
   auto& db_slice = op_args.GetDbSlice();
 
-  // Memcached must not create missing keys so do not use AddOrFind
+  // we avoid using AddOrFind because of skip_on_missing option for memcache.
   auto res = db_slice.FindMutable(op_args.db_cntx, key, OBJ_STRING);
 
   if (!res) {
     if (res.status() == OpStatus::WRONG_TYPE)
       return res.status();
 
-    if (is_memcache)
+    if (skip_on_missing)
       return OpStatus::KEY_NOTFOUND;
 
     PrimeValue pv;
@@ -395,6 +403,8 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
 
     auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(pv), 0);
     RETURN_ON_BAD_STATUS(op_result);
+
+    FinishIncr(op_args, key, incr, *op_result);
 
     return incr;
   }
@@ -415,10 +425,7 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   DCHECK(!res->it->second.IsExternal());
   res->it->second.SetInt(new_val);
 
-  if (is_memcache && op_args.shard->journal()) {
-    res->post_updater.Run();
-    RecordMemcacheIncr(op_args, key, new_val, res->it);
-  }
+  FinishIncr(op_args, key, new_val, *res);
 
   return new_val;
 }
@@ -864,10 +871,10 @@ cmd::CmdR ExtendGeneric(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR IncrByGeneric(CommandContext* cmd_cntx, string_view key, int64_t val) {
-  bool is_memcache = (cmd_cntx->mc_command() != nullptr);
+  bool skip_on_missing = (cmd_cntx->mc_command() != nullptr);
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, is_memcache);
+    OpResult<int64_t> res = OpIncrBy(t->GetOpArgs(shard), key, val, skip_on_missing);
     return res;
   };
   auto result = co_await cmd::SingleHopT(cb);
@@ -1123,7 +1130,7 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
 }
 
 void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view value) {
-  absl::InlinedVector<string_view, 5> cmds({key, value});  // 5 is theoretical maximum;
+  absl::InlinedVector<string_view, 7> cmds({key, value});
 
   std::string exp_str;
   if (params.flags & SET_EXPIRE_AFTER_MS) {
@@ -1509,8 +1516,6 @@ cmd::CmdR CmdIncr(CmdArgParser parser, CommandContext* cmd_cntx) {
       return cmd::kAborted;
     }
     delta = static_cast<int64_t>(mc->delta);
-  } else {
-    cmd_cntx->tx()->ReviveAutoJournal();
   }
   return IncrByGeneric(cmd_cntx, key, delta);
 }
@@ -1552,8 +1557,6 @@ cmd::CmdR CmdDecr(CmdArgParser parser, CommandContext* cmd_cntx) {
       return cmd::kAborted;
     }
     delta = static_cast<int64_t>(mc->delta);
-  } else {
-    cmd_cntx->tx()->ReviveAutoJournal();
   }
   return IncrByGeneric(cmd_cntx, key, -delta);
 }
@@ -1882,9 +1885,9 @@ void RegisterStringFamily(CommandRegistry* registry) {
              ExtendGeneric)
       << CI{"INCR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdIncr)
       << CI{"DECR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdDecr)
-      << CI{"INCRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
+      << CI{"INCRBY", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
       << CI{"INCRBYFLOAT", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
-      << CI{"DECRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
+      << CI{"DECRBY", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGet)
       << CI{"GETDEL", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)
