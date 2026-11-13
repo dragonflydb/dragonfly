@@ -838,7 +838,7 @@ error_code Replica::ConsumeRedisStream() {
       auto cmd = last_args.Front();
 
       // Valkey and Redis may send MULTI and EXEC as part of their replication commands.
-      // Dragonfly disallows some commands, such as SELECT, inside of MULTI/EXEC, so here we
+      // Dragonfly disallows some commands, such as FLUSHALL, inside of MULTI/EXEC, so here we
       // simply ignore MULTI/EXEC and execute their inner commands individually.
       if (!absl::EqualsIgnoreCase(cmd, "MULTI") && !absl::EqualsIgnoreCase(cmd, "EXEC")) {
         VLOG(2) << "Got command " << absl::CHexEscape(cmd)

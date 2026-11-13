@@ -241,11 +241,16 @@ trans->UnlockMulti()
 
 ### Multi modes
 
-**1. Global mode** - Acquires the shard-level lock on all shards. Required for global commands (MOVE, FLUSHDB) and Lua scripts that access undeclared keys. Blocks all concurrent transactions across all shards, so it should be avoided when possible.
+**1. Global mode** - Acquires the shard-level lock on all shards. Required for global commands (MOVE, FLUSHDB), MULTI/EXEC blocks containing SELECT, and Lua scripts that access undeclared keys. Blocks all concurrent transactions across all shards, so it should be avoided when possible.
 
 **2. Lock-ahead mode** - Pre-locks all keys declared by the transaction (e.g., keys from MULTI/EXEC or declared Lua script keys). Commands run as consecutive hops with locks held throughout. Other transactions touching different keys can still run concurrently.
 
-**3. Non-atomic mode** - Each command schedules and executes independently, as if pipelined. No atomicity guarantee across commands. Useful for Lua scripts that explicitly opt out of atomicity, since it avoids holding locks across the entire sequence.
+**3. Non-atomic mode** - Each command schedules and executes independently, as if pipelined. No atomicity guarantee across commands. Used for MULTI/EXEC blocks containing administrative commands and Lua scripts that explicitly opt out of atomicity.
+
+`SELECT` inside `MULTI/EXEC` applies to the commands after it, and the connection keeps
+the last successfully selected database after `EXEC`. Key locks are per database, so
+global mode is needed to keep blocks like `MULTI; DEL key; SELECT 1; MOVE key 0; EXEC`
+atomic. Lock-ahead Lua scripts still cannot change databases.
 
 ---
 

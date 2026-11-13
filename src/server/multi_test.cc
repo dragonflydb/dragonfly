@@ -388,6 +388,56 @@ TEST_F(MultiTest, MultiSeq) {
   ASSERT_THAT(arr[2].GetVec(), ElementsAre("1", ArgType(RespExpr::NIL)));
 }
 
+// SELECT applies to the commands after it, whether they are squashed or not.
+TEST_F(MultiTest, MultiSelect) {
+  absl::FlagSaver fs;
+  for (bool squash : {false, true}) {
+    SCOPED_TRACE(squash);
+    absl::SetFlag(&FLAGS_multi_exec_squash, squash);
+    Run({"flushall"});
+
+    Run({"multi"});
+    Run({"set", "key", "zero"});
+    Run({"select", "1"});
+    Run({"get", "key"});
+    Run({"set", "key", "one"});
+    Run({"select", "1000000"});
+    Run({"get", "key"});
+    Run({"select", "2"});
+    Run({"set", "key", "two"});
+    EXPECT_THAT(Run({"exec"}),
+                RespElementsAre("OK", "OK", ArgType(RespExpr::NIL), "OK",
+                                ErrArg("DB index is out of range"), "one", "OK", "OK"));
+
+    // The connection keeps the last database selected successfully.
+    EXPECT_EQ(Run({"get", "key"}), "two");
+    Run({"select", "0"});
+    EXPECT_EQ(Run({"get", "key"}), "zero");
+
+    // Concurrent transactions stay atomic across databases.
+    auto worker = [this](string id) {
+      for (unsigned i = 0; i < 50; ++i) {
+        Run(id, {"multi"});
+        Run(id, {"incr", kKeySid0});
+        Run(id, {"select", "1"});
+        Run(id, {"incr", kKeySid1});
+        Run(id, {"select", "0"});
+        auto resp = Run(id, {"exec"});
+        ASSERT_THAT(
+            resp, RespElementsAre(ArgType(RespExpr::INT64), "OK", ArgType(RespExpr::INT64), "OK"));
+        EXPECT_EQ(resp.GetVec()[0].GetInt(), resp.GetVec()[2].GetInt());
+      }
+    };
+
+    vector<Fiber> workers;
+    for (unsigned i = 0; i < kPoolThreadCount; ++i)
+      workers.push_back(pp_->at(i)->LaunchFiber([worker, i] { worker(StrCat("worker", i)); }));
+    for (auto& fb : workers)
+      fb.Join();
+  }
+  EXPECT_FALSE(service_->IsShardSetLocked());
+}
+
 TEST_F(MultiTest, MultiConsistent) {
   Run({"mset", kKey1, "base", kKey4, "base"});
 
@@ -845,6 +895,14 @@ TEST_F(MultiTest, Watch) {
   Run({"select", "0"});
   Run({"multi"});
   ASSERT_THAT(Run({"exec"}), kExecSuccess);
+
+  // Check watch keys are validated in the database selected before EXEC.
+  Run({"del", "a"});
+  Run({"watch", "a"});
+  Run({"multi"});
+  Run({"select", "1"});
+  Run({"get", "a"});
+  ASSERT_THAT(Run({"exec"}), RespElementsAre("OK", "2"));
 }
 
 TEST_F(MultiTest, MultiOOO) {
@@ -1042,6 +1100,27 @@ TEST_F(MultiTest, ExecGlobalFallback) {
   Run({"move", "a", "1"});
   Run({"exec"});
   EXPECT_EQ(1, GetMetrics().coordinator_stats.tx_global_cnt);
+
+  // Key locks are per database, so SELECT requires global mode too.
+  Run({"multi"});
+  Run({"select", "1"});
+  Run({"get", "a"});
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("OK", "1"));
+  EXPECT_EQ(2, GetMetrics().coordinator_stats.tx_global_cnt);
+
+  // Without transactional commands nothing is scheduled.
+  Run({"multi"});
+  Run({"select", "0"});
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("OK"));
+  EXPECT_THAT(Run({"get", "a"}), ArgType(RespExpr::NIL));
+
+  // Admin commands make the transaction non-atomic, even after SELECT.
+  Run({"multi"});
+  Run({"select", "1"});
+  Run({"get", "a"});
+  Run({"config", "get", "maxmemory"});
+  EXPECT_THAT(Run({"exec"}), RespElementsAre("OK", "1", ArrLen(2)));
+  EXPECT_EQ(2, GetMetrics().coordinator_stats.tx_global_cnt);
 }
 
 TEST_P(ScriptJournalTest, ReleasesResourcesBeforeJournaling) {

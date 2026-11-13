@@ -334,10 +334,12 @@ void Transaction::InitByKeys(const KeyIndex& key_index) {
     unique_shard_cnt_ = 1;
     string_view akey = full_args_[*key_index];
 
+    // Stubs need the slot too: slot migrations skip journal entries without one.
+    unique_slot_checker_.Add(akey);
+
     if (is_stub) {  // stub transactions don't migrate
       DCHECK_EQ(unique_shard_id_, Shard(akey, shard_set->size()));
     } else {
-      unique_slot_checker_.Add(akey);
       unique_shard_id_ = Shard(akey, shard_set->size());
     }
 
