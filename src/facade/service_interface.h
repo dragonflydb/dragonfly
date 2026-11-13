@@ -78,6 +78,11 @@ class ServiceInterface {
   virtual ContextInfo GetContextInfo(ConnectionContext* cntx) const {
     return {};
   }
+
+  // Thread-safe id of the connection's current transaction: its address, never dereferenced.
+  virtual std::string GetTxDebugInfo(ConnectionContext* cntx) const {
+    return {};
+  }
 };
 
 }  // namespace facade
