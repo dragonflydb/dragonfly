@@ -229,6 +229,16 @@ class SearchFamilyTest : public BaseFamilyTest {
   }
 
   void CheckGluedWordCommands();
+
+  // Logs in on a connection named by the rules; unlike test connections, it checks them.
+  string_view Login(string_view rules) {
+    EXPECT_EQ(Run(absl::StrCat("ACL SETUSER u on >MKPASS1 resetkeys +@all ", rules)), "OK");
+    EXPECT_EQ(Run(rules, {"AUTH", "u", "MKPASS1"}), "OK");
+    pp_->at(0)->Await([&] {
+      static_cast<ConnectionContext*>(GetConnection(rules)->cntx())->skip_acl_validation = false;
+    });
+    return rules;
+  }
 };
 
 const auto kNoResults = RespElementsAre(IntArg(0));
@@ -760,6 +770,100 @@ TEST_F(SearchFamilyTest, AliasCommandsErrors) {
 
 TEST_F(SearchFamilyTest, InfoMissingIndexUsesRedisCompatibleError) {
   EXPECT_THAT(Run({"FT.INFO", "missing-index"}), ErrArg("missing-index: no such index"));
+}
+
+// A tenant reads indexes of keys it may read and changes only indexes of keys it may also write.
+TEST_F(SearchFamilyTest, AclKeyPatternsLimitIndexAccess) {
+  const string schema = " SCHEMA k TAG v VECTOR HNSW 6 TYPE FLOAT32 DIM 1 DISTANCE_METRIC L2";
+  for (string_view t : {"a PREFIX 1 tenant_a:", "b PREFIX 2 tenant_a: tenant_b:", "all"})
+    ASSERT_EQ(Run(absl::StrCat("FT.CREATE ", t, schema)), "OK");
+  ASSERT_EQ(Run("FT.ALIASADD b_live b"), "OK");
+  Run({"HSET", "tenant_c:1", "k", "MKSECRET1"});
+
+  const string_view tenant = Login("~tenant_a:* %R~tenant_b:* $0");  // reads tenant_b's keys
+  auto expect = [&](const vector<vector<string_view>>& cmds, const auto& reply) {
+    for (const auto& cmd : cmds)
+      EXPECT_THAT(Run(tenant, cmd), reply) << cmd[0] << " " << cmd[1];
+  };
+
+  auto queries = [vec = FloatVec1(1)](string_view idx) -> vector<vector<string_view>> {
+    return {{"FT.SEARCH", idx, "*"},
+            {"FT.AGGREGATE", idx, "*"},
+            {"FT.AGGREGATE", "a", "*", "LOAD_FROM", idx, "AS", "j", "1", "j.k=a.k"},
+            {"FT.PROFILE", idx, "SEARCH", "QUERY", "*"},
+            {"FT.HYBRID", idx, "SEARCH", "*", "VSIM", "@v", "$q", "PARAMS", "2", "q", vec},
+            {"FT.INFO", idx},
+            {"FT.TAGVALS", idx, "k"},
+            {"FT.SYNDUMP", idx}};
+  };
+  expect(queries("b_live"), Not(ArgType(RespExpr::ERROR)));
+  auto denied = ErrArg("NOPERM User does not have the required permissions to query the index");
+  expect(queries("all"), denied);  // all has no PREFIX, so it holds every key
+  EXPECT_THAT(Run("ACL LOG 1"), RespElementsAre(RespArray(IsSupersetOf({"KEY", "FT.SYNDUMP"}))));
+  expect(queries("c"), ErrArg("c: no such index"));
+  expect({{"FT.TAGVALS", "all", "v"}}, denied);  // a field error would reveal a foreign schema
+
+  // The check runs when the command executes, also inside a transaction and a script.
+  Run(tenant, {"MULTI"});
+  Run(tenant, {"FT.SEARCH", "all", "*"});
+  EXPECT_THAT(Run(tenant, {"EXEC"}), RespElementsAre(denied));
+  const auto* script = "--!df flags=disable-atomicity\nreturn redis.pcall('FT.SEARCH', 'all', '*')";
+  EXPECT_THAT(Run(tenant, {"EVAL", script, "0"}), denied);
+
+  expect({{"FT.ALIASUPDATE", "a_live", "a"},
+          {"FT.SYNUPDATE", "a", "g", "x"},
+          {"FT.ALTER", "a", "SCHEMA", "ADD", "n", "NUMERIC"},
+          {"FT.ALIASADD", "x", "a"},
+          {"FT.ALIASDEL", "x"},
+          {"FT.CREATE", "a2", "PREFIX", "1", "tenant_a:", "SCHEMA", "k", "TAG"},
+          {"FT.ALIASUPDATE", "a_live", "a2"},
+          {"FT.DROPINDEX", "a"}},
+         "OK");
+
+  // A denied change or an unknown index schedules no transaction, so nothing reaches the journal.
+  const uint64_t txs = GetMetrics().coordinator_stats.tx_global_cnt;
+  expect({{"FT.CREATE", "x", "PREFIX", "2", "tenant_a:", "tenant_b:", "SCHEMA", "k", "TAG"},
+          {"FT.ALTER", "b", "SCHEMA", "ADD", "n", "NUMERIC"},
+          {"FT.SYNUPDATE", "b", "g", "x"},
+          {"FT.ALIASADD", "x", "b"},
+          {"FT.ALIASUPDATE", "a_live", "b"},
+          {"FT.ALIASUPDATE", "b_live", "a2"},
+          {"FT.ALIASDEL", "b_live"},
+          {"FT.DROPINDEX", "b"}},
+         denied);
+  expect({{"FT.DROPINDEX", "c"}}, ErrArg("c: no such index"));
+  EXPECT_EQ(GetMetrics().coordinator_stats.tx_global_cnt, txs);
+
+  // One hop may see an alias moved or deleted on one shard but not yet on another.
+  pp_->at(1)->Await([] { EngineShard::tlocal()->search_indices()->UpdateAlias("b_live", "all"); });
+  expect({{"FT.TAGVALS", "b_live", "k"}, {"FT.SYNDUMP", "b_live"}, {"FT.INFO", "b_live"}}, denied);
+  pp_->at(1)->Await([] { EngineShard::tlocal()->search_indices()->DeleteAlias("b_live"); });
+  expect({{"FT.SYNDUMP", "b_live"}}, Not(ArgType(RespExpr::ERROR)));
+  pp_->at(0)->Await([] { EngineShard::tlocal()->search_indices()->UpdateAlias("b_live", "all"); });
+  expect({{"FT.TAGVALS", "b_live", "k"}, {"FT.SYNDUMP", "b_live"}}, denied);
+}
+
+// Reading an index needs read access to all its keys; changing it, read and write from one pattern.
+TEST_F(SearchFamilyTest, AclKeyPatternsPermissionKinds) {
+  ASSERT_EQ(Run("FT.CREATE a PREFIX 1 tenant_a: SCHEMA k TAG"), "OK");
+  ASSERT_EQ(Run("FT.CREATE all SCHEMA k TAG"), "OK");
+
+  const tuple<string_view, vector<string_view>, bool> cases[] = {
+      {"%W~tenant_a:*", {"FT.SEARCH", "a", "*"}, false},
+      {"%R~tenant_a* %W~tenant_a:*", {"FT.SYNUPDATE", "a", "g", "x"}, false},
+      {"~tenant_a[:* ~tenant_*:", {"FT.SEARCH", "a", "*"}, false},  // a * in a class or not last
+      {"~TENANT_A:*", {"FT.SEARCH", "a", "*"}, false},
+      {"%R~*", {"FT.SEARCH", "a", "*"}, true},
+      {"%RW~*", {"FT.SEARCH", "all", "*"}, false},  // the pattern * misses the empty key name
+      {"-@all +@read ~*", {"FT.SEARCH", "all", "*"}, true},  // queries are in @read
+      {"-@dangerous ~tenant_a:*", {"FT.TAGVALS", "a", "k"}, false},
+      {"-@dangerous ~tenant_a:*", {"FT.DROPINDEX", "a"}, false}};
+  for (const auto& [rules, cmd, allowed] : cases)
+    EXPECT_NE(Matches(ErrArg("NOPERM"))(Run(Login(rules), cmd)), allowed) << rules << " " << cmd[0];
+
+  // Indexes hold keys of database 0.
+  Run(Login("~* $3"), {"SELECT", "3"});
+  EXPECT_THAT(Run("~* $3", {"FT.SEARCH", "a", "*"}), ErrArg("NOPERM"));
 }
 
 // Regression for #7953: a zero-field index is a broken state (FT.INFO says "not found" while

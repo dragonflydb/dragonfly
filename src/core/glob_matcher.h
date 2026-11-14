@@ -41,6 +41,9 @@ class GlobMatcher {
   // Stateless matcher behind Matches(): iterative, no allocation. Exposed for tests and benchmarks.
   static bool MatchGlob(std::string_view pattern, std::string_view str, bool case_sensitive);
 
+  // Whether every string that starts with prefix matches; needs a pattern that ends with a '*'.
+  static bool MatchesAllWithPrefix(std::string_view pattern, std::string_view prefix);
+
  private:
   // TODO: we fix the problem of MatchGlob being much
   // faster when the result is immediately known to be false, for example: "a*" vs "bxxxxx".
