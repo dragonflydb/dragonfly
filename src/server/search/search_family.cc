@@ -5,6 +5,7 @@
 #include "server/search/search_family.h"
 
 #include <absl/container/flat_hash_map.h>
+#include <absl/container/inlined_vector.h>
 #include <absl/flags/flag.h>
 #include <absl/functional/function_ref.h>
 #include <absl/strings/match.h>
@@ -34,6 +35,7 @@
 #include "facade/error.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
+#include "server/acl/validator.h"
 #include "server/cluster/coordinator.h"
 #include "server/command_registry.h"
 #include "server/config_registry.h"
@@ -66,6 +68,9 @@ ABSL_FLAG(size_t, subset_knn_search_threshold, 8192,
           "instead of HNSW graph search");
 
 namespace dfly {
+namespace acl {
+constexpr uint32_t kFtDangerous = FT_SEARCH | DANGEROUS;
+}  // namespace acl
 
 using namespace std;
 using namespace facade;
@@ -130,6 +135,53 @@ std::vector<std::string> ResolveIndexNames(absl::Span<const string_view> request
   else
     shard_set->Await(0, resolve);
   return canonical_names;
+}
+
+// Replies NOPERM unless the ACL rules allow op on every key under prefixes; none: all keys.
+bool CheckPrefixAccess(absl::Span<const string> prefixes, acl::KeyOp op, CommandContext* cmd_cntx) {
+  const ConnectionContext& cntx = *cmd_cntx->server_conn_cntx();
+  if (acl::ArePrefixesAllowed(cntx, prefixes, op))
+    return true;
+
+  ServerState::tlocal()->acl_log.Add(cntx, string{cmd_cntx->cid()->name()},
+                                     acl::AclLog::Reason::KEY);
+  cmd_cntx->SendError("-NOPERM User does not have the required permissions to query the index",
+                      "NOPERM");
+  return false;
+}
+
+// Call before the first hop, which journals even failed DDL; unknown names fail or set *missing.
+bool CheckIndexAccess(absl::Span<const string_view> names, acl::KeyOp op, CommandContext* cmd_cntx,
+                      string_view not_found = {}, bool* missing = nullptr) {
+  if (acl::ArePrefixesAllowed(*cmd_cntx->server_conn_cntx(), {}, op))
+    return true;
+
+  absl::InlinedVector<string, 2> prefixes;  // "" for an index without PREFIX, which holds every key
+  optional<string_view> unknown;            // the first name that resolves to no index
+  auto resolve = [&] {
+    auto* indices = EngineShard::tlocal()->search_indices();
+    for (string_view name : names) {
+      const ShardDocIndex* index = indices->ResolveIndex(name);
+      if (index == nullptr)
+        unknown = unknown.value_or(name);
+      else if (const auto& p = index->base().prefixes; p.empty())
+        prefixes.emplace_back();
+      else
+        prefixes.insert(prefixes.end(), p.begin(), p.end());
+    }
+  };
+  if (EngineShard::tlocal())
+    resolve();
+  else
+    shard_set->Await(0, resolve);
+
+  if (unknown && !missing) {
+    cmd_cntx->SendError(not_found.empty() ? IndexNotFoundMsg(*unknown) : string{not_found});
+    return false;
+  }
+  if (missing)
+    *missing = unknown.has_value();
+  return (missing && unknown && prefixes.empty()) || CheckPrefixAccess(prefixes, op, cmd_cntx);
 }
 
 // Send error from parser or result
@@ -2406,6 +2458,8 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   apply_return_fields(text_sp);
 
   const std::string resolved_name = ResolveIndexName(index_name);
+  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+    return false;
 
   const bool use_hnsw =
       GlobalHnswIndexRegistry::Instance().Exist(resolved_name, params->vsim_field);
@@ -2686,6 +2740,9 @@ void RenderShardProfileTree(RedisReplyBuilder* rb, const SearchResult& shard_res
   RenderProfileEvent(rb, shard_result.profile->events, 0, limited);
 }
 
+constexpr string_view kUnknownIndexMsg = "Unknown index name or name is alias";
+constexpr string_view kNoAliasMsg = "Alias does not exist";
+
 void RunAliasCommand(CommandContext* cmd_cntx, string_view command, string_view alias,
                      ArgSlice journal_args, absl::FunctionRef<OpStatus(ShardDocIndices*)> mutate) {
   using enum OpStatus;
@@ -2714,8 +2771,7 @@ void RunAliasCommand(CommandContext* cmd_cntx, string_view command, string_view 
     case KEY_EXISTS:
       return cmd_cntx->SendError("Alias already exists");
     case KEY_NOTFOUND:
-      return cmd_cntx->SendError(command == "FT.ALIASDEL" ? "Alias does not exist"
-                                                          : "Unknown index name or name is alias");
+      return cmd_cntx->SendError(command == "FT.ALIASDEL" ? kNoAliasMsg : kUnknownIndexMsg);
     case INVALID_VALUE:
       return cmd_cntx->SendError("Alias name conflicts with an existing index");
     default:
@@ -2726,6 +2782,8 @@ void RunAliasCommand(CommandContext* cmd_cntx, string_view command, string_view 
 void CmdFtAliasAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view alias = parser.Next();
   string_view target = parser.Next();
+  if (!CheckIndexAccess({target}, acl::KeyOp::READ_WRITE, cmd_cntx, kUnknownIndexMsg))
+    return;
   RunAliasCommand(cmd_cntx, "FT.ALIASADD", alias, ArgSlice{alias, target},
                   [alias, target](auto* indices) { return indices->AddAlias(alias, target); });
 }
@@ -2733,12 +2791,19 @@ void CmdFtAliasAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdFtAliasUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view alias = parser.Next();
   string_view target = parser.Next();
+  bool add = false;  // a restricted caller adds a missing alias, never repoints one made since
+  if (!CheckIndexAccess({target}, acl::KeyOp::READ_WRITE, cmd_cntx, kUnknownIndexMsg) ||
+      !CheckIndexAccess({alias}, acl::KeyOp::READ_WRITE, cmd_cntx, {}, &add))
+    return;
+  auto update = add ? &ShardDocIndices::AddAlias : &ShardDocIndices::UpdateAlias;
   RunAliasCommand(cmd_cntx, "FT.ALIASUPDATE", alias, ArgSlice{alias, target},
-                  [alias, target](auto* indices) { return indices->UpdateAlias(alias, target); });
+                  [=](auto* indices) { return (indices->*update)(alias, target); });
 }
 
 void CmdFtAliasDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view alias = parser.Next();
+  if (!CheckIndexAccess({alias}, acl::KeyOp::READ_WRITE, cmd_cntx, kNoAliasMsg))
+    return;
   RunAliasCommand(cmd_cntx, "FT.ALIASDEL", alias, ArgSlice{alias},
                   [alias](auto* indices) { return indices->DeleteAlias(alias); });
 }
@@ -2767,6 +2832,8 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (SendErrorIfOccurred(parsed_index, &parser, cmd_cntx)) {
     return;
   }
+  if (!CheckPrefixAccess(parsed_index->prefixes, acl::KeyOp::READ_WRITE, cmd_cntx))
+    return;
 
   // Check if the name is already occupied by an index or alias.
   atomic_uint exists_cnt = 0;
@@ -2830,6 +2897,8 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
   parser.ExpectTag("ADD");
   auto* builder = cmd_cntx->rb();
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
+  if (!CheckIndexAccess({idx_name}, acl::KeyOp::READ_WRITE, cmd_cntx))
+    return;
 
   // First, extract existing index info
   shared_ptr<DocIndex> index_info;
@@ -2902,6 +2971,8 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Parse optional DD (Delete Documents) parameter
   bool delete_docs = parser.Check("DD");
+  if (!CheckIndexAccess({idx_name}, acl::KeyOp::READ_WRITE, cmd_cntx))
+    return;
 
   shared_ptr<DocIndex> index_info;
   std::string canonical_name;
@@ -3000,6 +3071,9 @@ void CmdFtInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (num_notfound > 0u)
     return rb->SendError(IndexNotFoundMsg(idx_name));
+  for (const auto& info : infos)  // a hop may read each shard at another moment
+    if (!CheckPrefixAccess(info.base_index.prefixes, acl::KeyOp::READ, cmd_cntx))
+      return;
 
   DCHECK(infos.front().base_index.schema.fields.size() ==
          infos.back().base_index.schema.fields.size());
@@ -3261,6 +3335,8 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     search_algo.SetScorer(search::ScorerSpec{});
 
   const std::string resolved_name = ResolveIndexName(index_name);
+  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+    return;
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, resolved_name);
 
@@ -3589,6 +3665,8 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   const size_t shards_count = shard_set->size();
 
   const std::string resolved_name = ResolveIndexName(index_name);
+  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+    return;
 
   auto [profile_knn_node, profile_knn] = TryPopHnswKnnNode(search_algo, resolved_name);
   if (profile_knn) {
@@ -3931,16 +4009,22 @@ void CmdFtTagVals(CmdArgParser parser, CommandContext* cmd_cntx) {
   VLOG(1) << "FtTagVals: " << index_name << " " << field_name;
 
   vector<io::Result<StringVec, ErrorReply>> shard_results(shard_set->size(), StringVec{});
+  vector<optional<vector<string>>> prefixes(shard_set->size());
 
   cmd_cntx->tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->ResolveIndex(index_name); index)
+    if (auto* index = es->search_indices()->ResolveIndex(index_name); index) {
       shard_results[es->shard_id()] = index->GetTagVals(field_name);
-    else
+      prefixes[es->shard_id()] = index->base().prefixes;
+    } else {
       shard_results[es->shard_id()] =
           nonstd::make_unexpected(ErrorReply(IndexNotFoundMsg(index_name)));
+    }
 
     return OpStatus::OK;
   });
+  for (const auto& p : prefixes)  // a hop may read each shard at another moment
+    if (p && !CheckPrefixAccess(*p, acl::KeyOp::READ, cmd_cntx))
+      return;
 
   vector<StringVec> lists;
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
@@ -4208,6 +4292,8 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     // The requested name is kept for error messages; lookups use the resolved name.
     const string_view index_name = params->index;
     const std::string resolved_name = ResolveIndexName(index_name);
+    if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+      return;
     params->index = resolved_name;
 
     auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, params->index);
@@ -4286,6 +4372,8 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     const auto canonical_index_names = ResolveIndexNames(data_for_join->indexes);
     for (size_t i = 0; i < indexes_count; ++i)
       data_for_join->indexes[i] = canonical_index_names[i];
+    if (!CheckIndexAccess(data_for_join->indexes, acl::KeyOp::READ, cmd_cntx))
+      return;
 
     // preaggregated_shard_data is preaggregation results per index per shard
     // preaggregated_shard_data[shard_id][i] is the results of index i on shard shard_id
@@ -4417,6 +4505,7 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
   // Store per-shard synonym data
   vector<absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>>> shard_term_groups(
       shard_set->size());
+  vector<optional<vector<string>>> prefixes(shard_set->size());
 
   // Collect synonym data from all shards
   cmd_cntx->tx()->Execute(
@@ -4425,6 +4514,9 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
         if (!index)
           return OpStatus::OK;
 
+        // A retried idempotent run must not merge synonyms of two indexes.
+        shard_term_groups[es->shard_id()].clear();
+        prefixes[es->shard_id()] = index->base().prefixes;
         index_not_found.store(false, std::memory_order_relaxed);
 
         // Get synonym data from current shard
@@ -4444,6 +4536,9 @@ void CmdFtSynDump(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (index_not_found.load(std::memory_order_relaxed))
     return rb->SendError(IndexNotFoundMsg(index_name));
+  for (const auto& p : prefixes)
+    if (p && !CheckPrefixAccess(*p, acl::KeyOp::READ, cmd_cntx))
+      return;
 
   // Merge data from all shards into a single map
   absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> merged_term_groups;
@@ -4583,6 +4678,8 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!parser.Finalize()) {
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
   }
+  if (!CheckIndexAccess({index_name}, acl::KeyOp::READ_WRITE, cmd_cntx))
+    return;
 
   std::atomic_bool index_not_found{true};
 
@@ -4682,7 +4779,7 @@ void SearchFamily::Register(CommandRegistry* registry) {
             acl::FT_SEARCH}
              .HFUNC(FtAliasDel)
       << CI{"FT.ALTER", CO::JOURNALED | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
-      << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(
+      << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::kFtDangerous}.HFUNC(
              FtDropIndex)
       << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL,
             -2,        0,
@@ -4691,16 +4788,16 @@ void SearchFamily::Register(CommandRegistry* registry) {
       << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtConfig)
       // Underscore same as in RediSearch because it's "temporary" (long time already)
-      << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH}.HFUNC(FtList)
-      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtSearch)
-      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAggregate)
-      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH}.HFUNC(FtProfile)
-      << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::FT_SEARCH}.HFUNC(FtTagVals)
+      << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH | acl::ADMIN}.HFUNC(FtList)
+      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtSearch)
+      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtAggregate)
+      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtProfile)
+      << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::kFtDangerous | acl::READ}.HFUNC(FtTagVals)
       << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
       << CI{"FT.SYNUPDATE", CO::JOURNALED | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
              FtSynUpdate)
-      << CI{"FT._DEBUG", kReadOnlyMask, -1, 0, 0, acl::FT_SEARCH}.HFUNC(FtDebug)
-      << CI{"FT.HYBRID", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtHybrid);
+      << CI{"FT._DEBUG", kReadOnlyMask, -1, 0, 0, acl::kFtDangerous | acl::ADMIN}.HFUNC(FtDebug)
+      << CI{"FT.HYBRID", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtHybrid);
 }
 
 void SearchFamily::Shutdown() {
