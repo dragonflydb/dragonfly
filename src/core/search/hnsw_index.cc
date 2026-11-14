@@ -256,11 +256,8 @@ struct HnswlibAdapter {
     // pointer with stub_vector_ so the caller can free the original data.
     // Uses a native-encoded 1.0 (not zero) because a zero-norm vector yields
     // cosine distance 0 and would bias traversal toward deleted nodes.
-    if (!copy_vector_) {
-      const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
-      char* ptr_location = world_.getDataPtrByInternalId(internal_id);
-      memcpy(ptr_location, &safe_ptr, sizeof(void*));
-    }
+    if (!copy_vector_)
+      world_.storeDataPtr(internal_id, stub_vector_.data());
   }
 
   // Function requires that we hold mutex while resizing index. resizeIndex is not thread safe with
@@ -405,11 +402,8 @@ struct HnswlibAdapter {
 
       // In borrowed mode, deleted nodes are still traversed by addPoint.
       // Point to stub_vector_ so distance computations don't dereference nullptr.
-      if (!copy_vector_) {
-        const char* safe_ptr = reinterpret_cast<const char*>(stub_vector_.data());
-        char* ptr_location = world_.getDataPtrByInternalId(internal_id);
-        memcpy(ptr_location, &safe_ptr, sizeof(void*));
-      }
+      if (!copy_vector_)
+        world_.storeDataPtr(internal_id, stub_vector_.data());
     }
 
     // Set the metadata for the graph
@@ -447,8 +441,7 @@ struct HnswlibAdapter {
       memcpy(data_ptr, data, world_.data_size_);
     } else {
       // Borrowed mode: store pointer to external data
-      char* ptr_location = world_.getDataPtrByInternalId(internal_id);
-      memcpy(ptr_location, &data, sizeof(void*));
+      world_.storeDataPtr(internal_id, data);
     }
 
     // Unmark deleted so the node participates in KNN searches now that it
