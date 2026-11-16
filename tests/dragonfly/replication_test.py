@@ -474,6 +474,35 @@ async def test_flushall(replication):
     assert all(v is not None for v in vals)
 
 
+@pytest.mark.replication(master_args={"proactor_threads": 4}, replica_args={"proactor_threads": 4})
+async def test_multi_select(replication):
+    master, [replica], c_master, [c_replica] = replication
+    keys = ["x", "c", "b"]
+
+    await c_master.set("replace", "old")
+    await master.client(db=1).set("replace", "new", px=60000)
+
+    # Atomically replace the key in db 0 with its version from db 1, then reuse the squasher's
+    # per-shard transactions across several database changes.
+    pipe = master.client().pipeline(transaction=True)
+    pipe.delete("replace")
+    pipe.select(1)
+    pipe.move("replace", 0)
+    for db in [0, 1, 2, 0, 2]:
+        pipe.select(db)
+        for key in keys:
+            pipe.set(key, f"db{db}")
+    assert await pipe.execute() == [1, True, True] + [True] * 20
+
+    await check_all_replicas_finished([c_replica], c_master)
+    for instance in [master, replica]:
+        for db in range(3):
+            client = instance.client(db=db)
+            assert await client.mget(keys) == [f"db{db}"] * len(keys)
+            assert await client.get("replace") == ("new" if db == 0 else None)
+    assert 0 < await c_replica.pttl("replace") <= 60000
+
+
 """
 Test journal rewrites.
 """

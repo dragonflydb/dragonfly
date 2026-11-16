@@ -2717,10 +2717,6 @@ void GenericFamily::Select(CmdArgParser parser, CommandContext* cmd_cntx) {
       return cmd_cntx->SendError("SELECT is not allowed in regular EXEC/EVAL");
   }
 
-  if (cntx->conn_state.exec_info.IsRunning()) {
-    return cmd_cntx->SendError("SELECT is not allowed in a transaction");
-  }
-
   cntx->conn_state.db_index = index;
   auto cb = [ns = cntx->ns, index](EngineShard* shard) {
     auto& db_slice = ns->GetDbSlice(shard->shard_id());

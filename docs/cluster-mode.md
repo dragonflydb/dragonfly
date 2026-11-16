@@ -338,6 +338,9 @@ by the connected node. `FLUSHALL` clears every database on that node. These comm
 do not fan out to other cluster nodes. Snapshots and replication preserve database
 IDs and the data in each database.
 
+`SELECT` also works inside `MULTI/EXEC`, but all keys of the transaction must still
+belong to one slot, even across databases.
+
 In real cluster mode (`--cluster_mode=yes`):
 
 - Global-keyspace pub/sub (`PUBLISH`, `SUBSCRIBE`, `PSUBSCRIBE`) is rejected. Sharded

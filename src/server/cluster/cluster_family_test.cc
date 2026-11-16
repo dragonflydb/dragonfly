@@ -11,6 +11,7 @@
 #include <iterator>
 #include <string>
 #include <string_view>
+#include <utility>
 
 #include "absl/strings/str_replace.h"
 #include "absl/strings/substitute.h"
@@ -26,12 +27,14 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
+#include "server/journal/serializer.h"
 #include "server/namespaces.h"
 #include "server/test_utils.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
+ABSL_DECLARE_FLAG(bool, multi_exec_squash);
 
 namespace dfly::cluster {
 namespace {
@@ -713,9 +716,11 @@ TEST_F(ClusterFamilyTest, ClusterMultiExec) {
 
   EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
 
+  // Keys must share a slot even when they belong to different databases.
   Run({"MULTI"});
   Run({"MOVE", "X1", "1"});
-  Run({"MOVE", "X2", "1"});
+  Run({"SELECT", "1"});
+  Run({"MOVE", "X2", "0"});
   EXPECT_THAT(Run({"EXEC"}), ErrArg("CROSSSLOT"));
 
   Run({"MULTI"});
@@ -1538,25 +1543,31 @@ TEST_F(ClusterFamilyTest, FlushSlotsDoesNotDeleteEntriesInsertedAfterFlush) {
 }
 
 // MOVE is a global transaction, but its journal record must carry the key's slot so that slot
-// migrations stream it. Failed moves are not journaled.
+// migrations stream it. Failed moves are not journaled. Commands inside EXEC, squashed or not,
+// also keep their slot and the database they ran in.
 TEST_F(ClusterFamilyTest, ClusterModeDatabases) {
-  struct MoveJournalConsumer : journal::JournalConsumerInterface {
+  struct JournalConsumer : journal::JournalConsumerInterface {
     void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
-      if (item.cmd == "MOVE")
-        slots.push_back(item.slot);
+      if (item.cmd == "MOVE" || item.cmd == "DEL") {
+        io::BytesSource source{item.journal_item.data};
+        JournalReader reader{&source, 0};
+        journal::ParsedEntry entry;
+        ASSERT_FALSE(reader.ReadEntry(&entry));
+        entries.emplace_back(entry.dbid, item.slot);
+      }
     }
 
     void ThrottleIfNeeded() override {
     }
 
-    vector<optional<SlotId>> slots;
-  } move_journal;
+    vector<pair<DbIndex, optional<SlotId>>> entries;
+  } consumer;
 
   ConfigSingleNodeCluster(GetMyId());
   EXPECT_EQ(Run({"ACL", "SETUSER", "user", "on", ">pw", "~*", "+@all", "$1"}), "OK");
 
   const ShardId shard_id = Shard("key", shard_set->size());
-  const uint32_t consumer_id = StartJournalWithConsumer(&move_journal, shard_id);
+  const uint32_t consumer_id = StartJournalWithConsumer(&consumer, shard_id);
   absl::Cleanup unregister = [&] {
     pp_->at(shard_id)->AwaitBrief([&] { journal::UnregisterConsumer(consumer_id); });
   };
@@ -1566,7 +1577,30 @@ TEST_F(ClusterFamilyTest, ClusterModeDatabases) {
   EXPECT_THAT(Run({"MOVE", "key", "1"}), IntArg(1));
   EXPECT_EQ(Run({"SET", "key", "val"}), "OK");
   EXPECT_THAT(Run({"MOVE", "key", "1"}), IntArg(0));
-  EXPECT_THAT(move_journal.slots, ElementsAre(optional<SlotId>{KeySlot("key")}));
+  const optional<SlotId> slot{KeySlot("key")};
+  EXPECT_THAT(consumer.entries, ElementsAre(Pair(0, slot)));
+
+  absl::FlagSaver saver;
+  for (bool squash : {false, true}) {
+    absl::SetFlag(&FLAGS_multi_exec_squash, squash);
+    SCOPED_TRACE(squash);
+    consumer.entries.clear();
+
+    // Atomically replace the key in db 0 with its version from db 1.
+    Run({"SET", "key", "old"});
+    Run({"SELECT", "1"});
+    Run({"SET", "key", "new"});
+    Run({"SELECT", "0"});
+    Run({"MULTI"});
+    Run({"DEL", "key"});
+    Run({"SELECT", "1"});
+    Run({"MOVE", "key", "0"});
+    EXPECT_THAT(Run({"EXEC"}), RespElementsAre(IntArg(1), "OK", IntArg(1)));
+    EXPECT_THAT(consumer.entries, ElementsAre(Pair(0, slot), Pair(1, slot)));
+
+    Run({"SELECT", "0"});
+    EXPECT_EQ(Run({"GET", "key"}), "new");
+  }
 }
 
 // FlushSlots covers all databases: db 1 entries must be deleted through db 1's table (charging
