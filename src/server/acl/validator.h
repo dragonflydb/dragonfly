@@ -4,9 +4,12 @@
 
 #pragma once
 
+#include <absl/types/span.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "facade/facade_types.h"
@@ -39,6 +42,10 @@ std::optional<AclLog::Reason> CheckCommand(const AclRulesView& rules, size_t db_
 // running script started. Records denials in the ACL log.
 [[nodiscard]] bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId& id,
                                                 const facade::ParsedArgs& tail_args);
+
+// Whether the same rules allow op on every key of database 0 under prefixes; "" or none: all keys.
+[[nodiscard]] bool ArePrefixesAllowed(const ConnectionContext& cntx,
+                                      absl::Span<const std::string> prefixes, KeyOp op);
 
 }  // namespace acl
 }  // namespace dfly

@@ -140,11 +140,12 @@ KeyPermissions RequiredKeyPermissions(const CommandId& id, const ParsedArgs& tai
 }
 
 // Like Valkey, a single pattern must grant every permission the key needs.
-bool IsKeyAllowed(const AclKeys& keys, string_view key, KeyPermissions perms) {
+bool IsKeyAllowed(const AclKeys& keys, string_view key, KeyPermissions perms, bool prefix = false) {
   return absl::c_any_of(keys.key_globs, [&](const GlobType& glob) {
     const auto& [pattern, op] = glob;
     const bool grants = (!perms.read || op != KeyOp::WRITE) && (!perms.write || op != KeyOp::READ);
-    return grants && Matches(pattern, key);
+    return grants &&
+           (prefix ? GlobMatcher::MatchesAllWithPrefix(pattern, key) : Matches(pattern, key));
   });
 }
 
@@ -194,6 +195,14 @@ bool AreKeysAllowed(const AclKeys& keys, const CommandId& id, const ParsedArgs& 
   return true;
 }
 
+// While a script runs, its calls are checked against the rules in effect when it started.
+AclRulesView RulesOf(const ConnectionContext& cntx) {
+  const auto* sinfo = cntx.conn_state.script_info.get();
+  return sinfo ? AclRulesView{sinfo->acl_commands, sinfo->acl_keys, sinfo->acl_pub_sub,
+                              sinfo->acl_db_idx}
+               : AclRulesView{cntx.acl_commands, cntx.keys, cntx.pub_sub, cntx.acl_db_idx};
+}
+
 }  // namespace
 
 std::optional<AclLog::Reason> CheckCommand(const AclRulesView& rules, size_t db_index,
@@ -223,20 +232,27 @@ bool IsUserAllowedToInvokeCommand(const ConnectionContext& cntx, const CommandId
   if (id.IsAlias())
     return false;
 
-  // While a script is running, redis.call() must be checked against the
-  // ACL rules that were in effect when the script started.
-  const auto* sinfo = cntx.conn_state.script_info.get();
-  const AclRulesView rules =
-      sinfo ? AclRulesView{sinfo->acl_commands, sinfo->acl_keys, sinfo->acl_pub_sub,
-                           sinfo->acl_db_idx}
-            : AclRulesView{cntx.acl_commands, cntx.keys, cntx.pub_sub, cntx.acl_db_idx};
-
-  const auto denial = CheckCommand(rules, cntx.db_index(), id, tail_args);
+  const auto denial = CheckCommand(RulesOf(cntx), cntx.db_index(), id, tail_args);
   if (!denial)
     return true;
 
   ServerState::tlocal()->acl_log.Add(cntx, std::string(id.AclTarget(tail_args).first), *denial);
   return false;
+}
+
+bool ArePrefixesAllowed(const ConnectionContext& cntx, absl::Span<const std::string> prefixes,
+                        KeyOp op) {
+  if (cntx.skip_acl_validation)
+    return true;
+
+  const AclRulesView rules = RulesOf(cntx);
+  if (rules.db != kAllDbs && rules.db != 0)
+    return false;
+  if (rules.keys.all_keys)
+    return true;
+  return !prefixes.empty() && absl::c_all_of(prefixes, [&](const std::string& prefix) {
+    return IsKeyAllowed(rules.keys, prefix, {op != KeyOp::WRITE, op != KeyOp::READ}, true);
+  });
 }
 
 }  // namespace dfly::acl
