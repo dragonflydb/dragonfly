@@ -5314,6 +5314,7 @@ TEST_F(SearchFamilyTest, SetDoesNotUpdateIndexesBug) {
   // This should affect the index, the hset value should not be indexed anymore.
   resp = Run({"SET", "k1", "anothervalue"});
   EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "value", "NOCONTENT"}), kNoResults);
 
   resp = Run({"RENAME", "k1", "anotherkey"});
   EXPECT_EQ(resp, "OK");
@@ -5336,6 +5337,22 @@ TEST_F(SearchFamilyTest, SetDoesNotUpdateIndexesBug) {
   Run({"DEL", "k1"});
   Run({"HSET", "k1", "field", "fresh"});
   EXPECT_THAT(Run({"FT.SEARCH", "index", "fresh"}), AreDocIds("k1"));
+
+  // So does BF.LOADCHUNK.
+  Run({"BF.RESERVE", "bf", "0.01", "100"});
+  const string header = Run({"BF.SCANDUMP", "bf", "0"}).GetVec()[1].GetString();
+  EXPECT_EQ(Run({"BF.LOADCHUNK", "k1", "1", header}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "fresh", "NOCONTENT"}), kNoResults);
+
+  // And RENAME from the same shard, which overwrites the value in place.
+  Run({"DEL", "k1"});
+  Run({"HSET", "k1", "field", "other"});
+  string src = "src";
+  while (Shard(src, shard_set->size()) != Shard("k1", shard_set->size()))
+    src += "1";
+  Run({"SET", src, "abc"});
+  EXPECT_EQ(Run({"RENAME", src, "k1"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "other", "NOCONTENT"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, SortStoreDoesNotUpdateIndexesBug) {
@@ -5351,6 +5368,7 @@ TEST_F(SearchFamilyTest, SortStoreDoesNotUpdateIndexesBug) {
   EXPECT_THAT(Run({"RPUSH", "lst", "b", "a"}), IntArg(2));
   // SORT lst STORE k1 -> changes type of k1 from HASH to LIST
   Run({"SORT", "lst", "ALPHA", "STORE", "k1"});
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "value", "NOCONTENT"}), kNoResults);
 
   // Rename away and recreate k1 as HASH again
   EXPECT_EQ(Run({"RENAME", "k1", "anotherkey"}), "OK");
@@ -6086,6 +6104,7 @@ TEST_F(SearchFamilyTest, ZsetStoreCommandsOverwriteIndexedHash) {
   EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
   EXPECT_THAT(Run({"ZUNIONSTORE", "dest", "2", "zset1", "zset2"}), IntArg(3));
   EXPECT_EQ(Run({"RENAME", "dest", "y"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value", "NOCONTENT"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
@@ -6107,6 +6126,7 @@ TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
   EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
   EXPECT_THAT(Run({"SDIFFSTORE", "dest", "set1", "set2"}), IntArg(1));
   EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value", "NOCONTENT"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {
