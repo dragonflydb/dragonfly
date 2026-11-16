@@ -1139,15 +1139,30 @@ OpStatus OpMove(const OpArgs& op_args, string_view key, DbIndex target_db) {
 
   bool sticky = from_res.it->first.IsSticky();
   uint64_t exp_ts = from_res.it->first.GetExpireTime();
-  RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, from_res.it->second, op_args.shard);
-  from_res.post_updater.ReduceHeapUsage();
-  PrimeValue from_obj = std::move(from_res.it->second);
 
-  db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
-  auto op_result = db_slice.AddNew(target_cntx, key, std::move(from_obj), exp_ts);
-  RETURN_ON_BAD_STATUS(op_result);
-  auto& add_res = *op_result;
+  // Reserve the destination before changing the source. Insertion and expiry may allocate.
+  DbSlice::ItAndUpdater add_res;
+  try {
+    auto op_result = db_slice.AddNew(target_cntx, key, PrimeValue{}, 0);
+    if (!op_result) {
+      from_res.post_updater.Cancel();
+      return op_result.status();
+    }
+    add_res = std::move(*op_result);
+    if (exp_ts)
+      db_slice.AddExpire(target_db, add_res.it, exp_ts);
+    RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, from_res.it->second, op_args.shard);
+  } catch (const std::bad_alloc&) {
+    from_res.post_updater.Cancel();
+    add_res.post_updater.Cancel();
+    db_slice.RollbackEmptyInsert(target_cntx, key);
+    throw;
+  }
   add_res.it->first.SetSticky(sticky);
+
+  from_res.post_updater.ReduceHeapUsage();
+  add_res.it->second = std::move(from_res.it->second);
+  db_slice.DelMutable(op_args.db_cntx, std::move(from_res));
   AddKeyToIndexesIfNeeded(key, target_cntx, add_res.it->second, op_args.shard);
 
   // When tiering is enabled, update tiered-storage metadata for partial moved values.
@@ -2597,10 +2612,13 @@ void GenericFamily::Move(CmdArgParser parser, CommandContext* cmd_cntx) {
     return OpStatus::OK;
   };
 
-  cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  if (status != OpStatus::OK)
+    return cmd_cntx->SendError(status);
+
   // Exactly one shard will call OpMove.
   DCHECK(res != OpStatus::SKIPPED);
-  if (res == OpStatus::IO_ERROR)
+  if (res != OpStatus::OK && res != OpStatus::KEY_NOTFOUND && res != OpStatus::KEY_EXISTS)
     return cmd_cntx->SendError(res);
   cmd_cntx->SendLong(res == OpStatus::OK);
 }

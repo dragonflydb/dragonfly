@@ -23,6 +23,35 @@ class TestKeys:
         assert len(keys) in range(max_keys, max_keys + 512)
 
 
+@dfly_args({"proactor_threads": 1, "maxmemory": "256mb"})
+async def test_move_out_of_memory_preserves_source(df_factory):
+    df = df_factory.create()
+    df.start()
+    source = df.client()
+    destination = df.client(db=1)
+    await source.set("k", "v", px=100_000)
+    await source.execute_command("STICK", "k")
+    deadline = await source.execute_command("PEXPIRETIME", "k")
+
+    # Lower the limit after filling: MOVE is allowed even when DENYOOM commands are rejected.
+    await source.set("filler", "x" * (2 * 1024 * 1024))
+    await source.config_set("maxmemory", 1024 * 1024)
+    await asyncio.sleep(0.1)  # Let the shard refresh its memory budget.
+    with pytest.raises(redis.exceptions.ResponseError, match="[Oo]ut of memory"):
+        await source.move("k", 1)
+
+    assert await source.get("k") == "v"
+    assert await source.execute_command("PEXPIRETIME", "k") == deadline
+    assert await destination.exists("k") == 0
+
+    await source.config_set("maxmemory", 256 * 1024 * 1024)
+    await asyncio.sleep(0.1)
+    assert await source.move("k", 1)
+    assert await source.exists("k") == 0
+    assert await destination.get("k") == "v"
+    assert await destination.execute_command("PEXPIRETIME", "k") == deadline
+
+
 @pytest.fixture(scope="function")
 def export_dfly_password() -> str:
     pwd = "flypwd"
