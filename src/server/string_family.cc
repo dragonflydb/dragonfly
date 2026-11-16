@@ -353,9 +353,39 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   return base;
 }
 
-// if skip_on_missing - returns KEY_NOTFOUND.
+void FinishIncr(const OpArgs& op_args, string_view key, int64_t new_val,
+                DbSlice::ItAndUpdater& it_upd) {
+  if (!op_args.shard->journal())
+    return;
+
+  // Finish mutation accounting before journaling, which may suspend.
+  it_upd.post_updater.Run();
+  const auto& it = it_upd.it;
+  const string value = absl::StrCat(new_val);
+  string expiry;
+  string mc_flags;
+  absl::InlinedVector<string_view, 7> args{key, value};
+
+  const uint64_t expire_time = it->first.GetExpireTime();
+  if (expire_time != 0) {
+    expiry = absl::StrCat(expire_time);
+    args.insert(args.end(), {"PXAT", expiry});
+  }
+
+  if (it->second.HasFlag()) {
+    mc_flags = absl::StrCat(op_args.GetDbSlice().GetMCFlag(op_args.db_cntx.db_index, it->first));
+    args.insert(args.end(), {"_MCFLAGS", mc_flags});
+  }
+
+  if (it->first.IsSticky())
+    args.push_back("STICK");
+
+  RecordJournal(op_args, "SET", ArgSlice{args});
+}
+
 OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
                            bool skip_on_missing) {
+  DCHECK(op_args.tx->GetCId()->opt_mask() & CO::NO_AUTOJOURNAL);
   auto& db_slice = op_args.GetDbSlice();
 
   // we avoid using AddOrFind because of skip_on_missing option for memcache.
@@ -373,6 +403,8 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
 
     auto op_result = db_slice.AddNew(op_args.db_cntx, key, std::move(pv), 0);
     RETURN_ON_BAD_STATUS(op_result);
+
+    FinishIncr(op_args, key, incr, *op_result);
 
     return incr;
   }
@@ -392,6 +424,8 @@ OpResult<int64_t> OpIncrBy(const OpArgs& op_args, string_view key, int64_t incr,
   int64_t new_val = prev + incr;
   DCHECK(!res->it->second.IsExternal());
   res->it->second.SetInt(new_val);
+
+  FinishIncr(op_args, key, new_val, *res);
 
   return new_val;
 }
@@ -1096,7 +1130,7 @@ void SetCmd::PostEdit(const SetParams& params, std::string_view key, std::string
 }
 
 void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view value) {
-  absl::InlinedVector<string_view, 5> cmds({key, value});  // 5 is theoretical maximum;
+  absl::InlinedVector<string_view, 7> cmds({key, value});
 
   std::string exp_str;
   if (params.flags & SET_EXPIRE_AFTER_MS) {
@@ -1109,9 +1143,10 @@ void SetCmd::RecordJournal(const SetParams& params, string_view key, string_view
   if (params.flags & SET_STICK) {
     cmds.push_back("STICK");
   }
+  std::string mc_flags;
   if (params.memcache_flags) {
-    cmds.push_back("_MCFLAGS");
-    cmds.push_back(absl::StrCat(params.memcache_flags));
+    mc_flags = absl::StrCat(params.memcache_flags);
+    cmds.insert(cmds.end(), {"_MCFLAGS", mc_flags});
   }
 
   // Skip NX/XX because SET operation was executed.
@@ -1848,11 +1883,11 @@ void RegisterStringFamily(CommandRegistry* registry) {
              ExtendGeneric)
       << CI{"PREPEND", CO::JOURNALED | CO::DENYOOM | CO::FAST, 3, 1, 1}.SetAsyncHandler(
              ExtendGeneric)
-      << CI{"INCR", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdIncr)
-      << CI{"DECR", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdDecr)
-      << CI{"INCRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
+      << CI{"INCR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdIncr)
+      << CI{"DECR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdDecr)
+      << CI{"INCRBY", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
       << CI{"INCRBYFLOAT", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
-      << CI{"DECRBY", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
+      << CI{"DECRBY", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGet)
       << CI{"GETDEL", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)
       << CI{"DIGEST", CO::READONLY | CO::FAST, 2, 1, 1}.HFUNC(Digest)

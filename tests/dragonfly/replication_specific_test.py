@@ -315,40 +315,37 @@ async def test_save_with_replication(df_factory, action_during_save):
     assert not await is_saving(c_replica)
 
 
-async def test_replicating_mc_flags(df_factory):
+async def test_memcache_replication(df_factory):
     master = df_factory.create(memcached_port=11211, proactor_threads=1)
-    replica = df_factory.create(
-        memcached_port=11212, proactor_threads=1, dbfilename=f"dump_{tmp_file_name()}"
-    )
+    replica = df_factory.create(memcached_port=11212, proactor_threads=1)
     df_factory.start_all([master, replica])
 
-    c_mc_master = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
+    cm = pymemcache.Client(f"127.0.0.1:{master.mc_port}", default_noreply=False)
+    cr = pymemcache.Client(
+        f"127.0.0.1:{replica.mc_port}", deserializer=lambda key, value, flags: (value, flags)
+    )
+    try:
+        async with master.client() as c_master, replica.client() as c_replica:
+            assert cm.set("counter", b"100", expire=3600, flags=42)
+            deadline = await c_master.execute_command("PEXPIRETIME", "counter")
+            assert deadline > 0
 
-    c_replica = replica.client()
+            await start_replication(c_replica, master.port)
+            assert cr.get("counter") == (b"100", 42)
+            assert await c_replica.execute_command("PEXPIRETIME", "counter") == deadline
 
-    assert c_mc_master.set("key1", "value0", noreply=True)
-    assert c_mc_master.set("key2", "value2", noreply=True, expire=3600, flags=123456)
-    assert c_mc_master.replace("key1", "value1", expire=4000, flags=2, noreply=True)
+            assert cm.incr("counter", 10000) == 10100
+            await check_all_replicas_finished([c_replica], c_master)
+            assert cr.get("counter") == (b"10100", 42)
+            assert await c_replica.execute_command("PEXPIRETIME", "counter") == deadline
 
-    c_master = master.client()
-    for i in range(3, 100):
-        await c_master.set(f"key{i}", f"value{i}")
-
-    await start_replication(c_replica, master.port)
-
-    c_mc_replica = pymemcache.Client(f"127.0.0.1:{replica.mc_port}", default_noreply=False)
-
-    async def check_flag(key, flag):
-        res = c_mc_replica.raw_command("get " + key, "END\r\n").split()
-        # workaround sometimes memcached_client.raw_command returns empty str
-        if len(res) > 2:
-            assert res[2].decode() == str(flag)
-
-    await check_flag("key1", 2)
-    await check_flag("key2", 123456)
-
-    for i in range(1, 100):
-        assert c_mc_replica.get(f"key{i}") == str.encode(f"value{i}")
+            assert await c_master.incrby("new", 10000) == 10000
+            await check_all_replicas_finished([c_replica], c_master)
+            assert cr.get("new") == (b"10000", 0)
+            assert await c_replica.pttl("new") == -1
+    finally:
+        cm.close()
+        cr.close()
 
 
 @pytest.mark.exclude_epoll
