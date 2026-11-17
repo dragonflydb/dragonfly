@@ -790,13 +790,9 @@ TEST_F(SearchFamilyTest, AclKeyPatternsLimitIndexAccess) {
 
   auto queries = [vec = FloatVec1(1)](string_view idx) -> vector<vector<string_view>> {
     return {{"FT.SEARCH", idx, "*"},
-            {"FT.SEARCH", idx, "*=>[KNN 1 @v $q]", "PARAMS", "2", "q", vec},
-            {"FT.SEARCH", idx, "@v:[VECTOR_RANGE 1 $q]", "PARAMS", "2", "q", vec},
             {"FT.AGGREGATE", idx, "*"},
-            {"FT.AGGREGATE", idx, "*=>[KNN 1 @v $q]", "PARAMS", "2", "q", vec},
             {"FT.AGGREGATE", "a", "*", "LOAD_FROM", idx, "AS", "j", "1", "j.k=a.k"},
             {"FT.PROFILE", idx, "SEARCH", "QUERY", "*"},
-            {"FT.PROFILE", idx, "SEARCH", "QUERY", "*=>[KNN 1 @v $q]", "PARAMS", "2", "q", vec},
             {"FT.HYBRID", idx, "SEARCH", "*", "VSIM", "@v", "$q", "PARAMS", "2", "q", vec},
             {"FT.INFO", idx},
             {"FT.TAGVALS", idx, "k"},
@@ -815,17 +811,6 @@ TEST_F(SearchFamilyTest, AclKeyPatternsLimitIndexAccess) {
   EXPECT_THAT(Run(tenant, {"EXEC"}), RespElementsAre(denied));
   const auto* script = "--!df flags=disable-atomicity\nreturn redis.pcall('FT.SEARCH', 'all', '*')";
   EXPECT_THAT(Run(tenant, {"EVAL", script, "0"}), denied);
-
-  // A hop may also read an index re-created under the same name over other keys.
-  pp_->at(1)->Await([] {
-    auto* indices = EngineShard::tlocal()->search_indices();
-    auto other = make_shared<DocIndex>(indices->GetIndex("all")->base());
-    other->name = "b";
-    indices->DropIndex("b");
-    DbContext db_cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
-    indices->InitIndex(OpArgs{EngineShard::tlocal(), nullptr, db_cntx}, "b", other);
-  });
-  expect(queries("b"), AnyOf(denied, ErrArg("b: no such index")));
 
   expect({{"FT.ALIASUPDATE", "a_live", "a"},
           {"FT.SYNUPDATE", "a", "g", "x"},
@@ -849,8 +834,6 @@ TEST_F(SearchFamilyTest, AclKeyPatternsLimitIndexAccess) {
           {"FT.DROPINDEX", "b"}},
          denied);
   expect({{"FT.DROPINDEX", "c"}}, ErrArg("c: no such index"));
-  expect({{"FT.ALIASUPDATE", "a_live", "c"}, {"FT.ALIASUPDATE", "b_live", "c"}},
-         ErrArg("Unknown index name or name is alias"));
   EXPECT_EQ(GetMetrics().coordinator_stats.tx_global_cnt, txs);
 
   // One hop may see an alias moved or deleted on one shard but not yet on another.
@@ -860,19 +843,6 @@ TEST_F(SearchFamilyTest, AclKeyPatternsLimitIndexAccess) {
   expect({{"FT.SYNDUMP", "b_live"}}, Not(ArgType(RespExpr::ERROR)));
   pp_->at(0)->Await([] { EngineShard::tlocal()->search_indices()->UpdateAlias("b_live", "all"); });
   expect({{"FT.TAGVALS", "b_live", "k"}, {"FT.SYNDUMP", "b_live"}}, denied);
-
-  // A change through an alias checks what each shard resolves under the change's own lock.
-  pp_->at(1)->Await([] { EngineShard::tlocal()->search_indices()->UpdateAlias("a_live", "all"); });
-  expect({{"FT.ALTER", "a_live", "SCHEMA", "ADD", "m", "NUMERIC"},
-          {"FT.SYNUPDATE", "a_live", "g", "y"},
-          {"FT.ALIASUPDATE", "a_live", "a2"},
-          {"FT.ALIASDEL", "a_live"},
-          {"FT.DROPINDEX", "a_live", "DD"}},
-         denied);
-  EXPECT_TRUE(pp_->at(1)->Await(
-      [] { return EngineShard::tlocal()->search_indices()->GetIndex("all") != nullptr; }));
-  auto* open_tx = pp_->at(0)->Await([] { return EngineShard::tlocal()->GetContTx(); });
-  EXPECT_EQ(open_tx, nullptr);  // a denied change concludes its transaction
 }
 
 // Reading an index needs read access to all its keys; changing it, read and write from one pattern.

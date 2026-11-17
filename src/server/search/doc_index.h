@@ -174,9 +174,6 @@ enum class SortOrder { ASC, DESC };
 bool SortRanksBefore(const search::SortableValue& lv, std::string_view lk,
                      const search::SortableValue& rv, std::string_view rk, SortOrder order);
 
-// The prefixes each index name had when a restricted read was checked.
-using IndexPin = absl::InlinedVector<std::pair<std::string_view, std::vector<std::string>>, 1>;
-
 struct SearchParams {
   struct SortOption {
     FieldReference field;
@@ -213,7 +210,6 @@ struct SearchParams {
   search::OptionalFilters optional_filters;
 
   search::QueryParams query_params;
-  IndexPin pin;
 
   bool with_scores = false;                  // WITHSCORES flag
   std::optional<search::ScorerSpec> scorer;  // SCORER parameter (null = not set); carries the
@@ -274,7 +270,6 @@ struct AggregateParams {
   };
 
   std::string_view index, query;
-  IndexPin pin;
   search::QueryParams params;
 
   std::vector<JoinParams> joins;
