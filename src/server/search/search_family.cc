@@ -150,38 +150,75 @@ bool CheckPrefixAccess(absl::Span<const string> prefixes, acl::KeyOp op, Command
   return false;
 }
 
-// Call before the first hop, which journals even failed DDL; unknown names fail or set *missing.
+// Call before the first hop; a restricted DDL is checked again in its first hop, under its lock.
 bool CheckIndexAccess(absl::Span<const string_view> names, acl::KeyOp op, CommandContext* cmd_cntx,
-                      string_view not_found = {}, bool* missing = nullptr) {
+                      IndexPin* pin = nullptr, string_view not_found = {},
+                      bool last_optional = false) {
   if (acl::ArePrefixesAllowed(*cmd_cntx->server_conn_cntx(), {}, op))
     return true;
 
-  absl::InlinedVector<string, 2> prefixes;  // "" for an index without PREFIX, which holds every key
-  optional<string_view> unknown;            // the first name that resolves to no index
-  auto resolve = [&] {
-    auto* indices = EngineShard::tlocal()->search_indices();
-    for (string_view name : names) {
-      const ShardDocIndex* index = indices->ResolveIndex(name);
-      if (index == nullptr)
-        unknown = unknown.value_or(name);
-      else if (const auto& p = index->base().prefixes; p.empty())
-        prefixes.emplace_back();
-      else
-        prefixes.insert(prefixes.end(), p.begin(), p.end());
-    }
+  struct Resolved {
+    absl::InlinedVector<string, 2> prefixes;  // "" for an index without PREFIX: every key
+    optional<size_t> unknown;                 // position of the first name with no index
   };
-  if (EngineShard::tlocal())
-    resolve();
-  else
-    shard_set->Await(0, resolve);
-
-  if (unknown && !missing) {
-    cmd_cntx->SendError(not_found.empty() ? IndexNotFoundMsg(*unknown) : string{not_found});
+  auto resolve = [names](IndexPin* out) {
+    Resolved res;
+    auto* indices = EngineShard::tlocal()->search_indices();
+    for (size_t i = 0; i < names.size(); ++i) {
+      const ShardDocIndex* index = indices->ResolveIndex(names[i]);
+      if (index == nullptr) {
+        res.unknown = res.unknown.value_or(i);
+        continue;
+      }
+      const auto& p = index->base().prefixes;
+      if (out)
+        out->emplace_back(names[i], p);
+      if (p.empty())
+        res.prefixes.emplace_back();
+      else
+        res.prefixes.insert(res.prefixes.end(), p.begin(), p.end());
+    }
+    return res;
+  };
+  auto allowed = [&](const Resolved& res) {  // replies unless allowed
+    if (res.unknown && !(last_optional && res.unknown == names.size() - 1)) {
+      string_view name = names[*res.unknown];
+      cmd_cntx->SendError(not_found.empty() ? IndexNotFoundMsg(name) : string{not_found});
+      return false;
+    }
+    return CheckPrefixAccess(res.prefixes, op, cmd_cntx);
+  };
+  auto resolve_pinned = [&] { return resolve(pin); };
+  if (!allowed(EngineShard::tlocal() ? resolve_pinned() : shard_set->Await(0, resolve_pinned)))
     return false;
+  if (!(cmd_cntx->cid()->opt_mask() & CO::GLOBAL_TRANS))
+    return true;
+
+  vector<Resolved> shards(shard_set->size());
+  cmd_cntx->tx()->Execute(
+      [&](Transaction*, EngineShard* es) {
+        shards[es->shard_id()] = resolve(nullptr);
+        return OpStatus::OK;
+      },
+      false);
+  for (const Resolved& res : shards) {
+    if (!allowed(res)) {
+      cmd_cntx->tx()->Conclude();
+      return false;
+    }
   }
-  if (missing)
-    *missing = unknown.has_value();
-  return (missing && unknown && prefixes.empty()) || CheckPrefixAccess(prefixes, op, cmd_cntx);
+  return true;
+}
+
+// An index re-created over other prefixes since the read was checked counts as missing.
+ShardDocIndex* GetPinnedIndex(EngineShard* es, string_view name, const IndexPin& pin) {
+  ShardDocIndex* index = es->search_indices()->GetIndex(name);
+  if (index == nullptr || pin.empty())
+    return index;
+  for (const auto& [pinned, prefixes] : pin)
+    if (pinned == name && prefixes == index->base().prefixes)
+      return index;
+  return nullptr;
 }
 
 // Send error from parser or result
@@ -1496,7 +1533,7 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
 
   // Fetch all docs from shards
   auto cb = [&](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(options.index_name);
+    auto* index = GetPinnedIndex(es, options.index_name, options.params.pin);
 
     if (!index) {
       missing_index.store(true, std::memory_order_relaxed);
@@ -1696,7 +1733,7 @@ HnswSearchResult SearchGlobalHnswIndexRange(const search::AstVectorRangeNode* ra
   std::atomic missing_index = false;
   std::atomic not_built = false;
   cmd_cntx.tx()->ScheduleSingleHop([&](Transaction* t, EngineShard* es) {
-    auto* idx = es->search_indices()->GetIndex(options.index_name);
+    auto* idx = GetPinnedIndex(es, options.index_name, options.params.pin);
     if (!idx) {
       missing_index.store(true, std::memory_order_relaxed);
       return OpStatus::OK;
@@ -2223,13 +2260,13 @@ class ConcludeGuard {
 
 // Returns false if the index is not found on any shard. Its hop leaves the transaction open.
 bool CollectGlobalScoringStats(string_view index_name, search::SearchAlgorithm& text_algo,
-                               Transaction* tx, size_t shard_count,
+                               Transaction* tx, size_t shard_count, const IndexPin& pin,
                                search::GlobalScoringStats& out_stats) {
   atomic not_found{false};
   vector<search::ShardScoringStats> shard_stats(shard_count);
   tx->Execute(
       [&](Transaction* t, EngineShard* es) {
-        if (auto* idx = es->search_indices()->GetIndex(index_name); idx)
+        if (auto* idx = GetPinnedIndex(es, index_name, pin); idx)
           shard_stats[es->shard_id()] = idx->CollectScoringStats(&text_algo);
         else
           not_found.store(true, memory_order_relaxed);
@@ -2458,7 +2495,8 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   apply_return_fields(text_sp);
 
   const std::string resolved_name = ResolveIndexName(index_name);
-  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+  IndexPin pin;
+  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx, &pin))
     return false;
 
   const bool use_hnsw =
@@ -2527,7 +2565,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
 
   search::GlobalScoringStats global_stats;
   if (needs_global_stats && !CollectGlobalScoringStats(resolved_name, text_algo, cmd_cntx->tx(),
-                                                       shard_count, global_stats)) {
+                                                       shard_count, pin, global_stats)) {
     cmd_cntx->SendError(IndexNotFoundMsg(index_name));
     return false;
   }
@@ -2557,7 +2595,7 @@ bool RunHybridSearch(string_view index_name, HybridSearchParams* params, Command
   vector<absl::Duration> shard_knn_durations(shard_count);
 
   auto shard_cb = [&](Transaction* t, EngineShard* es) {
-    auto* idx = es->search_indices()->GetIndex(resolved_name);
+    auto* idx = GetPinnedIndex(es, resolved_name, pin);
     if (!idx) {
       index_not_found.store(true, std::memory_order_relaxed);
       return OpStatus::OK;
@@ -2782,7 +2820,7 @@ void RunAliasCommand(CommandContext* cmd_cntx, string_view command, string_view 
 void CmdFtAliasAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view alias = parser.Next();
   string_view target = parser.Next();
-  if (!CheckIndexAccess({target}, acl::KeyOp::READ_WRITE, cmd_cntx, kUnknownIndexMsg))
+  if (!CheckIndexAccess({target}, acl::KeyOp::READ_WRITE, cmd_cntx, nullptr, kUnknownIndexMsg))
     return;
   RunAliasCommand(cmd_cntx, "FT.ALIASADD", alias, ArgSlice{alias, target},
                   [alias, target](auto* indices) { return indices->AddAlias(alias, target); });
@@ -2791,18 +2829,16 @@ void CmdFtAliasAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdFtAliasUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view alias = parser.Next();
   string_view target = parser.Next();
-  bool add = false;  // a restricted caller adds a missing alias, never repoints one made since
-  if (!CheckIndexAccess({target}, acl::KeyOp::READ_WRITE, cmd_cntx, kUnknownIndexMsg) ||
-      !CheckIndexAccess({alias}, acl::KeyOp::READ_WRITE, cmd_cntx, {}, &add))
+  if (!CheckIndexAccess({target, alias}, acl::KeyOp::READ_WRITE, cmd_cntx, nullptr,
+                        kUnknownIndexMsg, true))
     return;
-  auto update = add ? &ShardDocIndices::AddAlias : &ShardDocIndices::UpdateAlias;
   RunAliasCommand(cmd_cntx, "FT.ALIASUPDATE", alias, ArgSlice{alias, target},
-                  [=](auto* indices) { return (indices->*update)(alias, target); });
+                  [=](auto* indices) { return indices->UpdateAlias(alias, target); });
 }
 
 void CmdFtAliasDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view alias = parser.Next();
-  if (!CheckIndexAccess({alias}, acl::KeyOp::READ_WRITE, cmd_cntx, kNoAliasMsg))
+  if (!CheckIndexAccess({alias}, acl::KeyOp::READ_WRITE, cmd_cntx, nullptr, kNoAliasMsg))
     return;
   RunAliasCommand(cmd_cntx, "FT.ALIASDEL", alias, ArgSlice{alias},
                   [alias](auto* indices) { return indices->DeleteAlias(alias); });
@@ -2881,6 +2917,7 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
+  cmd_cntx->tx()->ReviveAutoJournal();
   cmd_cntx->tx()->Execute(
       [idx_name, idx_ptr, is_journal](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr, is_journal);
@@ -2961,6 +2998,7 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
                                     std::move(synonyms));
     return OpStatus::OK;
   };
+  cmd_cntx->tx()->ReviveAutoJournal();
   cmd_cntx->tx()->Execute(upd_cb, true);
 
   builder->SendOk();
@@ -3016,6 +3054,9 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
         }
       }
     }
+
+    if (es->journal())
+      t->LogJournalOnShard({cmd_cntx->cid()->name(), cmd_cntx->tail_args()});
 
     // Defer destruction — will be destroyed on the shard thread after the transaction.
     dropped[es->shard_id()] = std::move(index);
@@ -3335,7 +3376,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     search_algo.SetScorer(search::ScorerSpec{});
 
   const std::string resolved_name = ResolveIndexName(index_name);
-  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx, &params->pin))
     return;
 
   auto [knn_node, knn] = TryPopHnswKnnNode(search_algo, resolved_name);
@@ -3389,7 +3430,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
     std::vector<search::ShardScoringStats> shard_stats(shard_set->size());
     cmd_cntx->tx()->Execute(
         [&](Transaction* t, EngineShard* es) {
-          if (auto* index = es->search_indices()->GetIndex(resolved_name); index)
+          if (auto* index = GetPinnedIndex(es, resolved_name, params->pin); index)
             shard_stats[es->shard_id()] = index->CollectScoringStats(&search_algo);
           else
             index_not_found.store(true, memory_order_relaxed);
@@ -3410,7 +3451,7 @@ void CmdFtSearch(CmdArgParser parser, CommandContext* cmd_cntx) {
   // HNSW vector range has no prefilter, so skip per-shard search entirely.
   if ((!knn || knn_has_prefilter) && !hnsw_range) {
     auto search_cb = [&](Transaction* t, EngineShard* es) {
-      if (auto* index = es->search_indices()->GetIndex(resolved_name); index) {
+      if (auto* index = GetPinnedIndex(es, resolved_name, params->pin); index) {
         if (knn_has_prefilter) {
           knn_prefilter_docs[es->shard_id()] =
               index->SearchIds(t->GetOpArgs(es), *params, &search_algo, global_stats_ptr);
@@ -3665,7 +3706,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   const size_t shards_count = shard_set->size();
 
   const std::string resolved_name = ResolveIndexName(index_name);
-  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+  if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx, &params->pin))
     return;
 
   auto [profile_knn_node, profile_knn] = TryPopHnswKnnNode(search_algo, resolved_name);
@@ -3691,7 +3732,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     if (needs_global_stats) {
       if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
-                                     global_scoring_stats)) {
+                                     params->pin, global_scoring_stats)) {
         return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
@@ -3703,7 +3744,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
       cmd_cntx->tx()->Execute(
           [&](Transaction* t, EngineShard* es) {
-            auto* index = es->search_indices()->GetIndex(resolved_name);
+            auto* index = GetPinnedIndex(es, resolved_name, params->pin);
             if (!index) {
               index_not_found.store(true, memory_order_relaxed);
               return OpStatus::OK;
@@ -3821,7 +3862,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
     const search::GlobalScoringStats* global_stats_ptr = nullptr;
     if (needs_global_stats) {
       if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
-                                     global_scoring_stats)) {
+                                     params->pin, global_scoring_stats)) {
         return rb->SendError(IndexNotFoundMsg(index_name));
       }
       global_stats_ptr = &global_scoring_stats;
@@ -3829,7 +3870,7 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
 
     cmd_cntx->tx()->Execute(
         [&](Transaction* t, EngineShard* es) {
-          auto* index = es->search_indices()->GetIndex(resolved_name);
+          auto* index = GetPinnedIndex(es, resolved_name, params->pin);
           if (!index) {
             index_not_found.store(true, memory_order_relaxed);
             return OpStatus::OK;
@@ -3882,14 +3923,14 @@ void CmdFtProfile(CmdArgParser parser, CommandContext* cmd_cntx) {
   const search::GlobalScoringStats* global_stats_ptr = nullptr;
   if (needs_global_stats) {
     if (!CollectGlobalScoringStats(resolved_name, search_algo, cmd_cntx->tx(), shards_count,
-                                   global_scoring_stats)) {
+                                   params->pin, global_scoring_stats)) {
       return rb->SendError(IndexNotFoundMsg(index_name));
     }
     global_stats_ptr = &global_scoring_stats;
   }
 
   auto search_cb = [&](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(resolved_name);
+    auto* index = GetPinnedIndex(es, resolved_name, params->pin);
     if (!index) {
       index_not_found.store(true, memory_order_relaxed);
       return OpStatus::OK;
@@ -4057,7 +4098,7 @@ static bool RunAggregatePrefilter(
   std::vector<SearchResult> prefilter_docs(shard_set->size());
   cmd_cntx->tx()->Execute(
       [&](Transaction* t, EngineShard* es) {
-        if (auto* index = es->search_indices()->GetIndex(params.index); index) {
+        if (auto* index = GetPinnedIndex(es, params.index, params.pin); index) {
           SearchParams sp;
           sp.limit_total = std::numeric_limits<size_t>::max();
           sp.return_fields.emplace();  // ids-only, skip field serialization
@@ -4096,7 +4137,7 @@ static std::optional<HnswLoadError> RunHnswAggregateLoad(
   std::atomic not_built = false;
   auto cb = [&query_results, &params, &shard_docs, score_alias, &text_scores, &missing_index,
              &not_built](Transaction* t, EngineShard* es) {
-    auto* index = es->search_indices()->GetIndex(params.index);
+    auto* index = GetPinnedIndex(es, params.index, params.pin);
     if (!index) {
       missing_index.store(true, std::memory_order_relaxed);
       return OpStatus::OK;
@@ -4227,7 +4268,7 @@ static bool AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
     std::vector<search::ShardScoringStats> shard_stats(shard_set->size());
     cmd_cntx->tx()->Execute(
         [&](Transaction* t, EngineShard* es) {
-          if (auto* index = es->search_indices()->GetIndex(params.index); index)
+          if (auto* index = GetPinnedIndex(es, params.index, params.pin); index)
             shard_stats[es->shard_id()] = index->CollectScoringStats(&search_algo);
           return OpStatus::OK;
         },
@@ -4240,7 +4281,7 @@ static bool AggregateGeneric(CommandContext* cmd_cntx, AggregateParams& params,
   std::vector<ShardDocIndex::AggregateShardResult> shard_results(shard_set->size());
   std::atomic index_not_found = false;
   auto search_cb = [&](Transaction* t, EngineShard* es) {
-    if (auto* index = es->search_indices()->GetIndex(params.index); index)
+    if (auto* index = GetPinnedIndex(es, params.index, params.pin); index)
       shard_results[es->shard_id()] =
           index->SearchForAggregator(t->GetOpArgs(es), params, &search_algo);
     else
@@ -4292,7 +4333,7 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     // The requested name is kept for error messages; lookups use the resolved name.
     const string_view index_name = params->index;
     const std::string resolved_name = ResolveIndexName(index_name);
-    if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx))
+    if (!CheckIndexAccess({resolved_name}, acl::KeyOp::READ, cmd_cntx, &params->pin))
       return;
     params->index = resolved_name;
 
@@ -4372,7 +4413,7 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
     const auto canonical_index_names = ResolveIndexNames(data_for_join->indexes);
     for (size_t i = 0; i < indexes_count; ++i)
       data_for_join->indexes[i] = canonical_index_names[i];
-    if (!CheckIndexAccess(data_for_join->indexes, acl::KeyOp::READ, cmd_cntx))
+    if (!CheckIndexAccess(data_for_join->indexes, acl::KeyOp::READ, cmd_cntx, &params->pin))
       return;
 
     // preaggregated_shard_data is preaggregation results per index per shard
@@ -4386,7 +4427,7 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
         [&](Transaction* t, EngineShard* es) {
           auto& shard_data = preaggregated_shard_data[es->shard_id()];
           for (size_t i = 0; i < indexes_count; ++i) {
-            auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]);
+            auto* index = GetPinnedIndex(es, data_for_join->indexes[i], params->pin);
             if (!index) {
               if (missing_index.load(std::memory_order_relaxed) < 0)
                 missing_index.store(static_cast<int>(i), std::memory_order_relaxed);
@@ -4437,7 +4478,7 @@ void CmdFtAggregate(CmdArgParser parser, CommandContext* cmd_cntx) {
           const auto& doc_ids_per_index = doc_ids_per_shard[shard_id];
 
           for (size_t i = 0; i < indexes_count; ++i) {
-            if (auto* index = es->search_indices()->GetIndex(data_for_join->indexes[i]); index) {
+            if (auto* index = GetPinnedIndex(es, data_for_join->indexes[i], params->pin); index) {
               shard_keys_data[i] = index->LoadKeysData(t->GetOpArgs(es), doc_ids_per_index[i],
                                                        data_for_join->fields_to_load_per_index[i]);
             }
@@ -4698,6 +4739,8 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}},
             group_id, terms);
 
+        if (es->journal())
+          t->LogJournalOnShard({cmd_cntx->cid()->name(), cmd_cntx->tail_args()});
         return OpStatus::OK;
       },
       true);
@@ -4766,38 +4809,37 @@ void SearchFamily::Register(CommandRegistry* registry) {
   const uint32_t kReadOnlyMask =
       CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL | CO::IDEMPOTENT;
 
+  // An index change journals itself only once it succeeds.
+  const uint32_t kChangeMask = CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL;
+
+  // As in the reference, without the @write, @slow and @dangerous that the option masks imply.
+  const uint32_t kSearch = acl::FT_SEARCH, kQuery = acl::FT_SEARCH | acl::READ;
+
   registry->StartFamily();
   *registry
-      << CI{"FT.CREATE", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
-      << CI{"FT.ALIASADD", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
-            acl::FT_SEARCH}
-             .HFUNC(FtAliasAdd)
-      << CI{"FT.ALIASUPDATE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
-            acl::FT_SEARCH}
-             .HFUNC(FtAliasUpdate)
-      << CI{"FT.ALIASDEL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 2, 0, 0,
-            acl::FT_SEARCH}
-             .HFUNC(FtAliasDel)
-      << CI{"FT.ALTER", CO::JOURNALED | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
-      << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::kFtDangerous}.HFUNC(
-             FtDropIndex)
-      << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL,
-            -2,        0,
-            0,         acl::FT_SEARCH}
+      << CI{"FT.CREATE", kChangeMask, -2, 0, 0}.SetAclCategories(kSearch).HFUNC(FtCreate)
+      << CI{"FT.ALIASADD", kChangeMask, 3, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAliasAdd)
+      << CI{"FT.ALIASUPDATE", kChangeMask, 3, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAliasUpdate)
+      << CI{"FT.ALIASDEL", kChangeMask, 2, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAliasDel)
+      << CI{"FT.ALTER", kChangeMask, -3, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAlter)
+      << CI{"FT.DROPINDEX", kChangeMask, -2, 0, 0, acl::kFtDangerous}.HFUNC(FtDropIndex)
+      << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL, -2,
+            0, 0}
+             .SetAclCategories(kSearch)
              .HFUNC(FtInfo)
-      << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
-             FtConfig)
+      << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0}
+             .SetAclCategories(kSearch | acl::ADMIN)
+             .HFUNC(FtConfig)
       // Underscore same as in RediSearch because it's "temporary" (long time already)
       << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH | acl::ADMIN}.HFUNC(FtList)
-      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtSearch)
-      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtAggregate)
-      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtProfile)
+      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0}.SetAclCategories(kQuery).HFUNC(FtSearch)
+      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0}.SetAclCategories(kQuery).HFUNC(FtAggregate)
+      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0}.SetAclCategories(kQuery).HFUNC(FtProfile)
       << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::kFtDangerous | acl::READ}.HFUNC(FtTagVals)
-      << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
-      << CI{"FT.SYNUPDATE", CO::JOURNALED | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
-             FtSynUpdate)
+      << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0}.SetAclCategories(kSearch).HFUNC(FtSynDump)
+      << CI{"FT.SYNUPDATE", kChangeMask, -4, 0, 0}.SetAclCategories(kSearch).HFUNC(FtSynUpdate)
       << CI{"FT._DEBUG", kReadOnlyMask, -1, 0, 0, acl::kFtDangerous | acl::ADMIN}.HFUNC(FtDebug)
-      << CI{"FT.HYBRID", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtHybrid);
+      << CI{"FT.HYBRID", kReadOnlyMask, -3, 0, 0}.SetAclCategories(kQuery).HFUNC(FtHybrid);
 }
 
 void SearchFamily::Shutdown() {
