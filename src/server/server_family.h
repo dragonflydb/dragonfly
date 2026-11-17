@@ -95,6 +95,15 @@ struct SaveInfoData {
 
   // Unlike bgsave_in_progress, also covers SAVE, scheduled and shutdown saves.
   bool save_in_progress = false;
+
+  // The save in progress becomes the AOF checkpoint.
+  bool aof_checkpoint_in_progress = false;
+
+  // Bytes of the AOF base, the dump the manifest names.
+  uint64_t aof_base_size = 0;
+
+  // True if the last checkpoint wrote its dump and then the manifest naming it as the base.
+  bool aof_last_checkpoint_ok = true;
 };
 
 // A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.

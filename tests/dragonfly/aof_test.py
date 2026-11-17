@@ -23,7 +23,6 @@ async def test_replay_restores_data(df_factory: DflyInstanceFactory, tmp_path):
     before = await SeederV2.capture(client)
     keys = await client.dbsize()
     assert keys >= 400_000
-    await client.connection_pool.disconnect()
 
     # A graceful stop seals, writes and syncs every shard's AOF.
     df.stop()
@@ -233,10 +232,14 @@ async def test_deleted_base_refuses_start(df_factory: DflyInstanceFactory, tmp_p
         df.start()
 
 
-async def wait_log_written():
-    # So a kill loses nothing: the heartbeat seals every 10ms, and writes complete right after.
-    # TODO: poll INFO persistence once it reports the unwritten AOF bytes.
-    await asyncio.sleep(0.5)
+async def wait_log_written(client):
+    # So a kill loses nothing: every record is sealed and written. The buffered bytes, listed per
+    # shard, include the open block.
+    while True:
+        info = await client.info("persistence")
+        if all(int(v) == 0 for v in str(info["aof_buffered_bytes"]).split(",")):
+            return
+        await asyncio.sleep(0.05)
 
 
 @pytest.mark.exclude_epoll
@@ -347,7 +350,7 @@ async def test_crash_during_and_after_checkpoint(df_factory: DflyInstanceFactory
     await seeder.run(client, target_deviation=0.1)
     await client.set("counter", 10)
     before = await SeederV2.capture(client)
-    await wait_log_written()
+    await wait_log_written(client)
 
     # Killed while the save runs: the old manifest and the whole log still hold the data.
     await client.execute_command("BGSAVE")
@@ -361,7 +364,7 @@ async def test_crash_during_and_after_checkpoint(df_factory: DflyInstanceFactory
     await client.execute_command("SAVE DF after-{timestamp}")
     await client.incr("counter")
     before = await SeederV2.capture(client)
-    await wait_log_written()
+    await wait_log_written(client)
     df.stop(kill=True)
     df.start()
     client = df.client()
@@ -391,3 +394,52 @@ async def test_checkpoint_then_log_restores_data(df_factory: DflyInstanceFactory
 
     df.start()
     assert await SeederV2.capture(df.client()) == before
+
+
+# TODO: test a record cut at the end of the log, once replay can resume after it: kill during a
+# burst, so the last written block ends mid-record, and check that the restart keeps every whole
+# record and that a later restart still replays the resumed segment.
+@pytest.mark.exclude_epoll
+@pytest.mark.debug_only
+@dfly_args({"proactor_threads": 2, "num_shards": 1})
+async def test_kill_loses_only_unwritten_tail(df_factory: DflyInstanceFactory, tmp_path):
+    # The bulk is written before the kill; the batch fits one block, so it stays in memory until
+    # the next heartbeat seals it. Every record is whole: a size seal could split one across blocks,
+    # and replay cannot resume after a record cut at the end of the log yet.
+    bulk, batch = 50_000, 100
+    keys = [f"key:{i}" for i in range(bulk + batch)]
+
+    for attempt in range(10):
+        # A slow heartbeat leaves the batch unsealed for up to a second.
+        aof_dir = tmp_path / f"attempt{attempt}"
+        aof_dir.mkdir()
+        df = df_factory.create(aof=True, hz=1, dir=str(aof_dir))
+        df.start()
+        client = df.client()
+
+        for i in range(0, bulk, 1000):
+            pipe = client.pipeline(transaction=False)
+            for j in range(i, i + 1000):
+                pipe.set(keys[j], j)
+            await pipe.execute()
+        await wait_log_written(client)
+
+        pipe = client.pipeline(transaction=False)
+        for j in range(bulk, bulk + batch):
+            pipe.set(keys[j], j)
+        await pipe.execute()
+        df.stop(kill=True)
+
+        df.start()
+        client = df.client()
+        vals = await client.mget(keys)
+        df.stop()
+
+        # The first m writes survived, with their values, and nothing after them.
+        m = sum(v is not None for v in vals)
+        assert vals[:m] == [str(i) for i in range(m)], "not a prefix of the writes"
+        assert m >= bulk, "lost writes that were already written"
+        # Otherwise the heartbeat wrote the batch before the kill, and nothing was at risk.
+        if m < bulk + batch:
+            return
+    pytest.fail("the batch was written before the kill in all attempts; no loss tested")

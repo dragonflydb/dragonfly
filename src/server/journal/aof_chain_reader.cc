@@ -234,13 +234,18 @@ void AofChainReader::MarkEndOfLog(End end) {
   DCHECK(end_ == End::kNotYet);
   end_ = end;
 
-  // A clean end read every segment to its end, so nothing is discarded.
+  // A clean end read every segment to its end, so the whole chain is kept.
   if (end == End::kTailReached) {
     DCHECK(AllSegmentsRead());
+    for (const Segment& seg : segment_chain_)
+      log_size_ += seg.size;
     return;
   }
 
   // The log ends at the read position, right after the last valid block.
+  log_size_ = offset_;
+  for (size_t i = 0; i < read_seg_id_; ++i)
+    log_size_ += segment_chain_[i].size;
   discarded_bytes_ = segment_chain_[read_seg_id_].size - offset_;
   for (size_t i = read_seg_id_ + 1; i < segment_chain_.size(); ++i)
     discarded_bytes_ += segment_chain_[i].size;

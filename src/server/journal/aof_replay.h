@@ -19,6 +19,8 @@ class Service;
 struct AofResume {
   uint64_t seq = 0;
   uint64_t next_lsn = 1;
+  // Size of the kept segments.
+  uint64_t log_size = 0;
 };
 
 #ifdef __linux__

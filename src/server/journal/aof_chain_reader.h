@@ -44,6 +44,11 @@ class AofChainReader : public io::Source {
     return expected_first_lsn_ ? expected_first_lsn_ - 1 : 0;
   }
 
+  // Bytes of the log kept by Repair(), segment headers included. Valid once the end was reached.
+  uint64_t LogSize() const {
+    return log_size_;
+  }
+
   // Bytes past the end of the log. Valid once the end was reached.
   uint64_t DiscardedBytes() const {
     return discarded_bytes_;
@@ -112,6 +117,7 @@ class AofChainReader : public io::Source {
   uint32_t shard_count_;
   std::vector<Segment> segment_chain_;
 
+  uint64_t log_size_ = 0;
   uint64_t discarded_bytes_ = 0;
 
   // The segment being read and the offset of its next block.

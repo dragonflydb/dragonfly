@@ -456,11 +456,10 @@ everything after the first hole, so writing on is pointless.
   retried. The shard's log goes on in the active segment, but every later checkpoint fails before
   its cut, so only a restart recovers.
 - **Clients.** The server keeps serving reads and writes. Writes accepted while the log is
-  stopped are lost if the server restarts before a checkpoint. For now, the failure shows only in
-  the logs.
+  stopped are lost if the server restarts before a checkpoint. `INFO persistence` reports the
+  failure as `aof_last_write_status:err` until a checkpoint clears it.
 
 **Possible directions.**
-- Report the state through metrics and `INFO persistence` (`aof_last_write_status`).
 - Schedule a checkpoint right after a failure, or right after the one in progress, instead of
   waiting for the next trigger.
 - Stricter error policies: reject writes until a checkpoint clears the state (like Redis's
@@ -1006,8 +1005,10 @@ and `CONFIG SET appendonly`.
   `aof_checkpoint_failures`, `aof_base_file`, `aof_current_size`, `aof_base_size`,
   `aof_rewrite_trigger_size`, `aof_last_write_status`
 - **MVP, per shard:** `aof_buffered_bytes`, `aof_unsynced_bytes`, `aof_throttle_usec`,
-  `aof_fsync_latency`, `aof_load_discarded_bytes`
-- **Fsync policy:** `aof_delayed_fsync`
+  `aof_fsync_count`, `aof_fsync_usec_total`, `aof_delayed_fsync`, `aof_load_discarded_bytes`.
+  The fsync fields are cumulative counters, so a scraper misses no sync between two reads: the
+  mean latency over a window is the ratio of their rates, and `aof_delayed_fsync` counts periodic
+  syncs that came due while the previous one still ran.
 
 ---
 

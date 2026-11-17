@@ -76,7 +76,7 @@ error_code ReplayChain(string_view dir, ShardId sid, AofManifest::Cut cut, Servi
 
   RETURN_ON_ERR(chain.Repair());
   // An empty chain resumes at its cut.
-  *resume = {chain.NextSeq(), max(chain.LastLsn() + 1, cut.lsn)};
+  *resume = {chain.NextSeq(), max(chain.LastLsn() + 1, cut.lsn), chain.LogSize()};
   return {};
 }
 }  // namespace

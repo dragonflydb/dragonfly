@@ -1130,14 +1130,29 @@ string AofStartupError(string_view dir) {
 }
 
 #ifdef __linux__
+// Bytes of the DFS file set whose summary is base_path: <prefix>-summary.dfs, <prefix>-NNNN.dfs.
+uint64_t AofBaseSize(string_view dir, string_view base_path) {
+  string_view prefix = base_path;
+  absl::ConsumeSuffix(&prefix, "summary.dfs");
+  io::Result<io::StatShortVec> files = io::StatFiles(absl::StrCat(dir, "/", prefix, "*.dfs"));
+  uint64_t size = 0;
+  if (files) {
+    for (const io::StatShort& file : *files)
+      size += file.size;
+  }
+  return size;
+}
+
 // Makes a finished save the AOF base: commits the manifest, then deletes the segments below the
-// cut. The save itself succeeded, so a failure here is only logged.
-void CommitAofCheckpoint(const string& base_file, const vector<AofManifest::Cut>& cuts) {
+// cut. The save itself succeeded, so a failure here is only logged. Returns the new base's size if
+// the checkpoint committed.
+optional<uint64_t> CommitAofCheckpoint(const string& base_file,
+                                       const vector<AofManifest::Cut>& cuts) {
   string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
   io::Result<AofManifest> manifest = ReadAofManifest(dir);
   if (!manifest) {
     LOG(ERROR) << "AOF checkpoint not committed: " << manifest.error().message();
-    return;
+    return nullopt;
   }
   manifest->checkpoint_id++;
   manifest->base_owned = false;
@@ -1145,7 +1160,7 @@ void CommitAofCheckpoint(const string& base_file, const vector<AofManifest::Cut>
   manifest->cuts = cuts;
   if (error_code ec = WriteAofManifest(dir, *manifest); ec) {
     LOG(ERROR) << "AOF checkpoint not committed: " << ec.message();
-    return;
+    return nullopt;
   }
   LOG(INFO) << "AOF checkpoint " << manifest->checkpoint_id << " committed, base "
             << manifest->base_path;
@@ -1156,6 +1171,7 @@ void CommitAofCheckpoint(const string& base_file, const vector<AofManifest::Cut>
   });
   if (error_code ec = CollectAofGarbage(dir, *manifest, /*remove_discarded=*/true); ec)
     LOG(WARNING) << "Failed to remove AOF segments below the cut: " << ec.message();
+  return AofBaseSize(dir, manifest->base_path);
 }
 #endif
 
@@ -1165,7 +1181,8 @@ bool StartStreamers(string_view dir, const vector<AofResume>& resume) {
   shard_set->RunBlockingInParallel([&](EngineShard* shard) {
     ShardId sid = shard->shard_id();
     auto streamer = make_unique<AofStreamer>(string(dir), sid, shard_set->size());
-    if (error_code ec = streamer->Start(resume[sid].seq, resume[sid].next_lsn); ec) {
+    const AofResume& r = resume[sid];
+    if (error_code ec = streamer->Start(r.seq, r.next_lsn, r.log_size); ec) {
       LOG(ERROR) << "Failed to start AOF on shard " << sid << ": " << ec.message();
       failed = true;
       return;
@@ -1195,7 +1212,8 @@ void LoadAofBase(string_view dir, const string& base_path, const AofLoadFn& load
 }
 
 // First start: adopts the --dbfilename dump, if any, as the base instead of taking a snapshot.
-void BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const AofLoadFn& load) {
+// Returns the base, empty if none.
+string BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const AofLoadFn& load) {
   AofManifest manifest;
 
   // Nothing is logged before the load finishes, so every shard's cut is the journal's first lsn.
@@ -1223,6 +1241,7 @@ void BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const AofLo
   manifest.state = AofManifest::State::kActive;
   if (error_code ec = WriteAofManifest(dir, manifest); ec)
     ErrorAndExit(absl::StrCat("failed to write the AOF manifest: ", ec.message()));
+  return manifest.base_path;
 }
 
 // Loads the manifest's base, replays the log on top and resumes it.
@@ -1253,8 +1272,9 @@ void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
 #endif
 
 // Restores the data from the AOF, or bootstraps it, then starts logging. Exits if it cannot.
-void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service,
-              const AofLoadFn& load) {
+// Returns the size of the base.
+uint64_t StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service,
+                  const AofLoadFn& load) {
   string dir = flag_dir.empty() ? "." : flag_dir;
   if (string reason = AofStartupError(dir); !reason.empty())
     ErrorAndExit(reason);
@@ -1266,6 +1286,7 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service*
   // server LOADING until the streamers run: otherwise writes between the base load and the replay
   // never reach the AOF. Also join the fiber on shutdown, and check that no command allowed during
   // LOADING changes data.
+  string base_path;
   shard_set->pool()->GetNextProactor()->Await([&] {
     io::Result<AofManifest> manifest = ReadAofManifest(dir);
     if (!manifest && manifest.error() != errc::no_such_file_or_directory)
@@ -1276,10 +1297,14 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service*
       LOG(WARNING) << "Redoing an interrupted AOF bootstrap";
       if (error_code ec = RemoveAofFilesExceptManifest(dir); ec)
         ErrorAndExit(absl::StrCat("failed to remove AOF files: ", ec.message()));
-      return BootstrapAof(dir, storage, load);
+      base_path = BootstrapAof(dir, storage, load);
+      return;
     }
-    if (manifest)
-      return ResumeAof(dir, *manifest, service, load);
+    if (manifest) {
+      ResumeAof(dir, *manifest, service, load);
+      base_path = manifest->base_path;
+      return;
+    }
 
     io::Result<vector<string>> files = ListAofFiles(dir);
     if (!files)
@@ -1292,8 +1317,9 @@ void StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service*
     // A lost manifest: loading --dbfilename could silently replace a newer AOF.
     if (!files->empty())
       ErrorAndExit(absl::StrCat("AOF files in ", dir, " but no manifest, e.g. ", files->front()));
-    BootstrapAof(dir, storage, load);
+    base_path = BootstrapAof(dir, storage, load);
   });
+  return base_path.empty() ? 0 : AofBaseSize(dir, base_path);
 #else
   ErrorAndExit("--aof is supported only on Linux");
 #endif
@@ -1309,6 +1335,57 @@ void StopAof() {
       shard->set_aof_streamer(nullptr);
     }
   });
+}
+
+// Appends the AOF fields of INFO persistence.
+void AppendAofInfo(const SaveInfoData& save_info, string* info) {
+  auto append = [info](const absl::AlphaNum& key, const absl::AlphaNum& val) {
+    absl::StrAppend(info, key, ":", val, "\r\n");
+  };
+
+  // Like Valkey: aof_enabled always, the rest only with --aof.
+  bool aof_enabled = GetFlag(FLAGS_aof);
+  append("aof_enabled", aof_enabled);
+  if (!aof_enabled)
+    return;
+
+  vector<AofStats> per_shard(shard_set->size());
+  shard_set->RunBriefInParallel([&](EngineShard* shard) {
+    if (AofStreamer* streamer = shard->aof_streamer(); streamer)
+      per_shard[shard->shard_id()] = streamer->GetStats();
+  });
+
+  // The log size is summed; the write status is ok only if every shard's is.
+  bool write_ok = true;
+  uint64_t log_size = 0;
+  for (const AofStats& st : per_shard) {
+    write_ok &= st.write_ok;
+    log_size += st.log_size;
+  }
+
+  // Listed in shard order, so a shard that falls behind can be found.
+  auto per_shard_list = [&](auto get) {
+    return absl::StrJoin(per_shard, ",",
+                         [get](string* out, const AofStats& st) { absl::StrAppend(out, get(st)); });
+  };
+
+  append("aof_rewrite_in_progress", static_cast<int>(save_info.aof_checkpoint_in_progress));
+  append("aof_last_bgrewrite_status", save_info.aof_last_checkpoint_ok ? "ok" : "err");
+  append("aof_last_write_status", write_ok ? "ok" : "err");
+  append("aof_current_size", log_size);
+  append("aof_base_size", save_info.aof_base_size);
+  // TODO: report once checkpoints are triggered by size.
+  append("aof_rewrite_trigger_size", 0);
+  append("aof_buffered_bytes",
+         per_shard_list([](const AofStats& st) { return st.buffered_bytes; }));
+  append("aof_unsynced_bytes",
+         per_shard_list([](const AofStats& st) { return st.unsynced_bytes; }));
+  append("aof_throttle_usec", per_shard_list([](const AofStats& st) { return st.throttle_usec; }));
+
+  // Cumulative, so a scraper sees every sync: rate(usec) / rate(count) is the mean latency.
+  append("aof_fsync_count", per_shard_list([](const AofStats& st) { return st.fsync.count; }));
+  append("aof_fsync_usec_total", per_shard_list([](const AofStats& st) { return st.fsync.usec; }));
+  append("aof_delayed_fsync", per_shard_list([](const AofStats& st) { return st.fsync.delayed; }));
 }
 
 }  // namespace
@@ -1635,10 +1712,13 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   if (GetFlag(FLAGS_aof)) {
-    StartAof(flag_dir, snapshot_storage_.get(), &service_, [this](const string& path) {
-      auto future = Load(path, LoadExistingKeys::kFail);
-      return future ? future->Get() : GenericError("the server is not active");
-    });
+    uint64_t base_size =
+        StartAof(flag_dir, snapshot_storage_.get(), &service_, [this](const string& path) {
+          auto future = Load(path, LoadExistingKeys::kFail);
+          return future ? future->Get() : GenericError("the server is not active");
+        });
+    thread_safe_save_info_.Update(
+        [base_size](SaveInfoData* data) { data->aof_base_size = base_size; });
   }
 
   // check for '--replicaof' before loading anything
@@ -2172,6 +2252,8 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       if (bg_save) {
         data->last_bgsave_status = false;
       }
+      if (aof_checkpoint)
+        data->aof_last_checkpoint_ok = false;
     });
 
     // Reset the controller under lock if initialization failed.
@@ -2184,9 +2266,10 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
   // Success - update state
   controller->Start();
-  thread_safe_save_info_.Update([bg_save](SaveInfoData* data) {
+  thread_safe_save_info_.Update([bg_save, aof_checkpoint](SaveInfoData* data) {
     data->bgsave_in_progress = bg_save;
     data->save_in_progress = true;
+    data->aof_checkpoint_in_progress = aof_checkpoint;
   });
 
   return {};
@@ -2208,16 +2291,19 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 
   VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
   bool is_bg_save;
+  bool aof_checkpoint = false;
+  optional<uint64_t> aof_base_size;
   util::fb2::LockGuard lk(save_mu_);
   // It's possible that another save was initiated and the controller has changed.
   // We only finalize and reset if it's still the same one we were waiting for.
   if (save_controller_ == controller) {
     save_info = save_controller_->Finalize();
     is_bg_save = save_controller_->IsBgSave();
+    aof_checkpoint = save_controller_->aof_checkpoint_;
 #ifdef __linux__
     // Under save_mu_, so checkpoints commit in order.
     if (save_controller_->aof_checkpoint_ && !save_info.error)
-      CommitAofCheckpoint(save_info.file_name, save_controller_->aof_cuts());
+      aof_base_size = CommitAofCheckpoint(save_info.file_name, save_controller_->aof_cuts());
 #endif
     save_controller_.reset();
   } else {
@@ -2229,6 +2315,11 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   // Still under save_mu_, so the next save cannot start before its predecessor's state is stored.
   thread_safe_save_info_.Update([&](SaveInfoData* data) {
     data->save_in_progress = false;
+    data->aof_checkpoint_in_progress = false;
+    if (aof_checkpoint)
+      data->aof_last_checkpoint_ok = aof_base_size.has_value();
+    if (aof_base_size)
+      data->aof_base_size = *aof_base_size;
     if (is_bg_save) {
       data->bgsave_in_progress = false;
       data->last_bgsave_status = !save_info.error;
@@ -3337,6 +3428,8 @@ string ServerFamily::FormatInfoMetrics(
     append("last_failed_save", save_info.last_error_time);
     append("last_error", save_info.last_error.Format());
     append("last_failed_save_duration_sec", save_info.failed_duration_sec);
+
+    AppendAofInfo(save_info, &info);
   };
 
   auto add_tx_info = [&] {

@@ -115,6 +115,25 @@ class AofBlockBuilder {
   SealCb seal_cb_;
 };
 
+// Cumulative fdatasync stats of an AOF writer.
+struct AofFsyncStats {
+  // Completed fdatasyncs, failed ones included.
+  uint64_t count = 0;
+
+  // Their total duration.
+  uint64_t usec = 0;
+
+  // Periodic syncs that came due while the previous one still ran: the disk falls behind.
+  uint64_t delayed = 0;
+
+  AofFsyncStats& operator+=(const AofFsyncStats& other) {
+    count += other.count;
+    usec += other.usec;
+    delayed += other.delayed;
+    return *this;
+  }
+};
+
 }  // namespace dfly
 
 namespace std {
