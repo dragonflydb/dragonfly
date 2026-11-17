@@ -20,6 +20,7 @@
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/detail/listpack_wrap.h"
+#include "core/memory_accounting.h"
 #include "core/qlist.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
@@ -114,6 +115,19 @@ bool OccupiesWholePages(size_t size) {
 
 // Stashed bins no longer have bin ids, so this sentinel is used to differentiate from regular reads
 constexpr auto kFragmentedBin = tiering::SmallBins::kInvalidBin - 1;
+
+void UploadValue(tiering::Decoder& decoder, PrimeValue* value) {
+  const int type = value->ObjType();
+  const size_t transferred_bytes = decoder.GetMetrics().transferred_bytes;
+  {
+    AtomicMemoryScope scope(type);
+    decoder.Upload(value);
+  }
+
+  // Modified hash decoders may already own the allocation before Upload starts. Charge the
+  // transfer after the scope, so its delta does not cancel this charge.
+  ChargeMemory(type, transferred_bytes);
+}
 
 // Called when a value returns to RAM and its disk segment is dropped: the bytes go back to the
 // RAM ledger and leave the tiered counters.
@@ -268,7 +282,7 @@ class TieredStorage::ShardOpManager : public tiering::OpManager {
     DCHECK(!value.empty());
     tiering::BareDecoder decoder;
     decoder.slice = value;
-    decoder.Upload(pv);
+    UploadValue(decoder, pv);
     AccountTieredUpload(*pv, value.size(), key, db_slice_.GetDBTable(dbid));
   }
 
@@ -432,7 +446,7 @@ bool TieredStorage::ShardOpManager::NotifyFetched(const OwnedEntryId& id,
     if (pv && pv->IsExternal() && segment == pv->GetExternalSlice()) {
       if (metrics.modified || pv->WasTouched() || options.force_upload) {
         ++stats_.total_uploads;
-        decoder->Upload(pv);
+        UploadValue(*decoder, pv);
         AccountTieredUpload(*pv, segment.length, key->second, db_slice_.GetDBTable(key->first));
         return true;
       }
