@@ -572,6 +572,12 @@ template <typename F> void TraverseAllEntries(bool background, ConnectionContext
     fb.Join();
 }
 
+// Skips expired keys: their mutable lookup may wait for serialization inside the traversal.
+bool IsEmptyMap(PrimeIterator it, uint64_t now_ms) {
+  return it->second.Encoding() == kEncodingStrMap2 && it->second.Size() == 0 &&
+         !it->first.IsExpired(now_ms);
+}
+
 }  // namespace
 
 DebugCmd::DebugCmd(ServerFamily* owner, cluster::ClusterFamily* cf, ConnectionContext* cntx)
@@ -1245,13 +1251,10 @@ void DebugCmd::ObjHist(CommandContext* cmd_cntx) {
     AddObjHist(it, hist_ptr.get());
 
     // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
-    // in the currently traversed DB (not the connection-selected one). Skip expired keys: their
-    // mutable lookup may wait for serialization inside the traversal.
-    if ((obj_type == OBJ_SET || obj_type == OBJ_HASH) &&
-        it->second.Encoding() == kEncodingStrMap2 && it->second.Size() == 0 &&
-        !it->first.IsExpired(GetCurrentTimeMs())) {
+    // in the currently traversed DB (not the connection-selected one).
+    if (uint64_t now_ms = GetCurrentTimeMs(); IsEmptyMap(it, now_ms)) {
       auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
-      DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
+      DbContext db_cntx{cntx->ns, dbid, now_ms};
       string key;
       it->first.GetString(&key);
       DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
@@ -1651,16 +1654,13 @@ void DebugCmd::CountUniqueStrings(const CommandContext* cmd_cntx) const {
       entry->AddZSet(it->second);
 
     // IterateMap/IterateSet may trigger lazy expiry.  Clean up empty containers
-    // in the currently traversed DB (not the connection-selected one). Skip expired keys: their
-    // mutable lookup may wait for serialization inside the traversal.
-    if (it->second.Size() == 0 && it->second.Encoding() == kEncodingStrMap2 &&
-        !it->first.IsExpired(GetCurrentTimeMs())) {
+    // in the currently traversed DB (not the connection-selected one).
+    if (uint64_t now_ms = GetCurrentTimeMs(); IsEmptyMap(it, now_ms)) {
       auto& db_slice = cntx->ns->GetDbSlice(EngineShard::tlocal()->shard_id());
-      DbContext db_cntx{cntx->ns, dbid, GetCurrentTimeMs()};
+      DbContext db_cntx{cntx->ns, dbid, now_ms};
       string key;
       it->first.GetString(&key);
-      if (obj_type == OBJ_SET || obj_type == OBJ_HASH)
-        DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
+      DeleteCollectionIfEmpty(db_slice, db_cntx, key, it->second);
     }
   };
 
