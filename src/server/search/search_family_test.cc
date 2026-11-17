@@ -4,6 +4,7 @@
 
 #include "server/search/search_family.h"
 
+#include <absl/cleanup/cleanup.h>
 #include <absl/functional/function_ref.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_cat.h>
@@ -26,6 +27,7 @@
 #include "facade/resp_parser.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/journal/journal.h"
 #include "server/search/doc_index.h"
 #include "server/search/global_hnsw_index.h"
 #include "server/test_utils.h"
@@ -861,9 +863,53 @@ TEST_F(SearchFamilyTest, AclKeyPatternsPermissionKinds) {
   for (const auto& [rules, cmd, allowed] : cases)
     EXPECT_NE(Matches(ErrArg("NOPERM"))(Run(Login(rules), cmd)), allowed) << rules << " " << cmd[0];
 
+  // As in the reference, these are neither @slow, @write nor @dangerous.
+  Login("-@slow -@write -@dangerous");
+  for (string_view cmd : {"FT.CREATE", "FT.ALTER", "FT.ALIASADD", "FT.ALIASUPDATE", "FT.ALIASDEL",
+                          "FT.SYNUPDATE", "FT.SYNDUMP", "FT.INFO", "FT.SEARCH", "FT.AGGREGATE",
+                          "FT.PROFILE", "FT.HYBRID", "FT.CONFIG"})
+    EXPECT_EQ(Run({"ACL", "DRYRUN", "u", cmd}), "OK") << cmd;
+
   // Indexes hold keys of database 0.
   Run(Login("~* $3"), {"SELECT", "3"});
   EXPECT_THAT(Run("~* $3", {"FT.SEARCH", "a", "*"}), ErrArg("NOPERM"));
+}
+
+// A replica replays every journaled index change, so only the ones that succeeded are journaled.
+TEST_F(SearchFamilyTest, IndexChangeJournaledOnlyOnSuccess) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");  // where an atomic script runs commands in stub transactions
+  ResetService();
+  struct Recorder : journal::JournalConsumerInterface {
+    void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+      cmds.emplace_back(item.cmd);
+      data += item.journal_item.data;
+    }
+    void ThrottleIfNeeded() override {
+    }
+    vector<string> cmds;
+    string data;
+  } recorder;
+  const uint32_t id = StartJournalWithConsumer(&recorder, 0);
+  absl::Cleanup stop = [&] { pp_->at(0)->Await([&] { journal::UnregisterConsumer(id); }); };
+
+  ASSERT_EQ(Run("FT.CREATE a SCHEMA k TAG"), "OK");
+  for (string_view cmd : {"FT.CREATE a SCHEMA k TAG", "FT.ALTER x SCHEMA ADD n NUMERIC",
+                          "FT.SYNUPDATE x g y", "FT.DROPINDEX x"})
+    EXPECT_THAT(Run(cmd), ArgType(RespExpr::ERROR)) << cmd;
+  for (string_view cmd :
+       {"FT.SYNUPDATE a g MKTERM1", "FT.ALTER a SCHEMA ADD n NUMERIC", "FT.DROPINDEX a"})
+    EXPECT_EQ(Run(cmd), "OK") << cmd;
+  const auto* script = R"(--!df flags=allow-undeclared-keys
+redis.call('FT.CREATE', 'c', 'SCHEMA', 'k', 'TAG')
+redis.call('FT.ALTER', 'c', 'SCHEMA', 'ADD', 'n', 'NUMERIC')
+redis.call('FT.SYNUPDATE', 'c', 'g', 'w')
+return redis.call('FT.DROPINDEX', 'c'))";
+  EXPECT_EQ(Run({"EVAL", script, "0"}), "OK");
+  EXPECT_THAT(pp_->at(0)->Await([&] { return recorder.cmds; }),
+              ElementsAre("FT.CREATE", "FT.SYNUPDATE", "FT.ALTER", "FT.DROPINDEX", "FT.CREATE",
+                          "FT.ALTER", "FT.SYNUPDATE", "FT.DROPINDEX"));
+  EXPECT_THAT(pp_->at(0)->Await([&] { return recorder.data; }), HasSubstr("MKTERM1"));
 }
 
 // Regression for #7953: a zero-field index is a broken state (FT.INFO says "not found" while

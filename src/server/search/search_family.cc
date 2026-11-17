@@ -150,7 +150,7 @@ bool CheckPrefixAccess(absl::Span<const string> prefixes, acl::KeyOp op, Command
   return false;
 }
 
-// Call before the first hop, which journals even failed DDL; unknown names fail or set *missing.
+// Call before any hop, so a denial schedules no transaction; unknown names fail or set *missing.
 bool CheckIndexAccess(absl::Span<const string_view> names, acl::KeyOp op, CommandContext* cmd_cntx,
                       string_view not_found = {}, bool* missing = nullptr) {
   if (acl::ArePrefixesAllowed(*cmd_cntx->server_conn_cntx(), {}, op))
@@ -2881,6 +2881,7 @@ void CmdFtCreate(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   auto idx_ptr = make_shared<DocIndex>(std::move(parsed_index).value());
   const bool is_journal = cmd_cntx->server_conn_cntx()->journal_emulated;
+  cmd_cntx->tx()->ReviveAutoJournal();
   cmd_cntx->tx()->Execute(
       [idx_name, idx_ptr, is_journal](auto* tx, auto* es) {
         es->search_indices()->InitIndex(tx->GetOpArgs(es), idx_name, idx_ptr, is_journal);
@@ -2961,6 +2962,7 @@ void CmdFtAlter(CmdArgParser parser, CommandContext* cmd_cntx) {
                                     std::move(synonyms));
     return OpStatus::OK;
   };
+  cmd_cntx->tx()->ReviveAutoJournal();
   cmd_cntx->tx()->Execute(upd_cb, true);
 
   builder->SendOk();
@@ -3016,6 +3018,9 @@ void CmdFtDropIndex(CmdArgParser parser, CommandContext* cmd_cntx) {
         }
       }
     }
+
+    if (es->journal())
+      t->LogJournalOnShard({cmd_cntx->cid()->name(), cmd_cntx->tail_args()});
 
     // Defer destruction — will be destroyed on the shard thread after the transaction.
     dropped[es->shard_id()] = std::move(index);
@@ -4698,6 +4703,8 @@ void CmdFtSynUpdate(CmdArgParser parser, CommandContext* cmd_cntx) {
                    DbContext{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()}},
             group_id, terms);
 
+        if (es->journal())
+          t->LogJournalOnShard({cmd_cntx->cid()->name(), cmd_cntx->tail_args()});
         return OpStatus::OK;
       },
       true);
@@ -4766,38 +4773,37 @@ void SearchFamily::Register(CommandRegistry* registry) {
   const uint32_t kReadOnlyMask =
       CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL | CO::IDEMPOTENT;
 
+  // An index change journals itself only once it succeeds.
+  const uint32_t kChangeMask = CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL;
+
+  // As in the reference, without the @write, @slow and @dangerous that the option masks imply.
+  const uint32_t kSearch = acl::FT_SEARCH, kQuery = acl::FT_SEARCH | acl::READ;
+
   registry->StartFamily();
   *registry
-      << CI{"FT.CREATE", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::FT_SEARCH}.HFUNC(FtCreate)
-      << CI{"FT.ALIASADD", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
-            acl::FT_SEARCH}
-             .HFUNC(FtAliasAdd)
-      << CI{"FT.ALIASUPDATE", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 3, 0, 0,
-            acl::FT_SEARCH}
-             .HFUNC(FtAliasUpdate)
-      << CI{"FT.ALIASDEL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::NO_AUTOJOURNAL, 2, 0, 0,
-            acl::FT_SEARCH}
-             .HFUNC(FtAliasDel)
-      << CI{"FT.ALTER", CO::JOURNALED | CO::GLOBAL_TRANS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(FtAlter)
-      << CI{"FT.DROPINDEX", CO::JOURNALED | CO::GLOBAL_TRANS, -2, 0, 0, acl::kFtDangerous}.HFUNC(
-             FtDropIndex)
-      << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL,
-            -2,        0,
-            0,         acl::FT_SEARCH}
+      << CI{"FT.CREATE", kChangeMask, -2, 0, 0}.SetAclCategories(kSearch).HFUNC(FtCreate)
+      << CI{"FT.ALIASADD", kChangeMask, 3, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAliasAdd)
+      << CI{"FT.ALIASUPDATE", kChangeMask, 3, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAliasUpdate)
+      << CI{"FT.ALIASDEL", kChangeMask, 2, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAliasDel)
+      << CI{"FT.ALTER", kChangeMask, -3, 0, 0}.SetAclCategories(kSearch).HFUNC(FtAlter)
+      << CI{"FT.DROPINDEX", kChangeMask, -2, 0, 0, acl::kFtDangerous}.HFUNC(FtDropIndex)
+      << CI{"FT.INFO", CO::NO_KEY_TRANSACTIONAL | CO::NO_KEY_TX_SPAN_ALL | CO::NO_AUTOJOURNAL, -2,
+            0, 0}
+             .SetAclCategories(kSearch)
              .HFUNC(FtInfo)
-      << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0, acl::FT_SEARCH}.HFUNC(
-             FtConfig)
+      << CI{"FT.CONFIG", CO::ADMIN | CO::LOADING | CO::DANGEROUS, -3, 0, 0}
+             .SetAclCategories(kSearch | acl::ADMIN)
+             .HFUNC(FtConfig)
       // Underscore same as in RediSearch because it's "temporary" (long time already)
       << CI{"FT._LIST", kReadOnlyMask, 1, 0, 0, acl::FT_SEARCH | acl::ADMIN}.HFUNC(FtList)
-      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtSearch)
-      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtAggregate)
-      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtProfile)
+      << CI{"FT.SEARCH", kReadOnlyMask, -3, 0, 0}.SetAclCategories(kQuery).HFUNC(FtSearch)
+      << CI{"FT.AGGREGATE", kReadOnlyMask, -3, 0, 0}.SetAclCategories(kQuery).HFUNC(FtAggregate)
+      << CI{"FT.PROFILE", kReadOnlyMask, -4, 0, 0}.SetAclCategories(kQuery).HFUNC(FtProfile)
       << CI{"FT.TAGVALS", kReadOnlyMask, 3, 0, 0, acl::kFtDangerous | acl::READ}.HFUNC(FtTagVals)
-      << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0, acl::FT_SEARCH}.HFUNC(FtSynDump)
-      << CI{"FT.SYNUPDATE", CO::JOURNALED | CO::GLOBAL_TRANS, -4, 0, 0, acl::FT_SEARCH}.HFUNC(
-             FtSynUpdate)
+      << CI{"FT.SYNDUMP", kReadOnlyMask, 2, 0, 0}.SetAclCategories(kSearch).HFUNC(FtSynDump)
+      << CI{"FT.SYNUPDATE", kChangeMask, -4, 0, 0}.SetAclCategories(kSearch).HFUNC(FtSynUpdate)
       << CI{"FT._DEBUG", kReadOnlyMask, -1, 0, 0, acl::kFtDangerous | acl::ADMIN}.HFUNC(FtDebug)
-      << CI{"FT.HYBRID", kReadOnlyMask, -3, 0, 0, acl::FT_SEARCH | acl::READ}.HFUNC(FtHybrid);
+      << CI{"FT.HYBRID", kReadOnlyMask, -3, 0, 0}.SetAclCategories(kQuery).HFUNC(FtHybrid);
 }
 
 void SearchFamily::Shutdown() {
