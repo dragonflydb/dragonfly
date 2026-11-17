@@ -216,6 +216,12 @@ class DflyCmd {
       return std::ranges::all_of(flows_, [](const FlowInfo& flow) { return flow.conn != nullptr; });
     }
 
+    // Returns true if every flow negotiated a partial sync. Caller must hold a lock.
+    bool AllFlowsPartial() const {
+      return std::ranges::all_of(
+          flows_, [](const FlowInfo& flow) { return flow.start_partial_sync_at.has_value(); });
+    }
+
     // Returns the per-replica mutex. Callers acquire it via util::fb2::LockGuard
     // (exclusive), dfly::SharedLock (shared), or std::shared_lock(..., std::try_to_lock)
     // (try-shared). Returned by reference rather than a factory-returned scoped lock

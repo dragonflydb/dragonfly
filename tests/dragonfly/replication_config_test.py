@@ -560,6 +560,39 @@ async def test_hash_expiry_replica_version(df_factory: DflyInstanceFactory, olde
     await check_encoding(22)
 
 
+@pytest.mark.parametrize("partial_flows, renegotiate", [(0, False), (1, False), (2, True)])
+@dfly_args({"proactor_threads": 2, "num_shards": 2})
+async def test_startstable_without_sync(
+    df_factory: DflyInstanceFactory, partial_flows, renegotiate
+):
+    # DFLY STARTSTABLE may skip DFLY SYNC only if every flow negotiated a partial sync.
+    master, _, c_master, _ = await setup_replication(df_factory)
+    lsns = await c_master.execute_command("DFLY REPLICAOFFSET")
+    async with master.client(single_connection_client=True) as control:
+        master_id, sync_id, num_flows, version = (
+            await control.execute_command("REPLCONF", "CAPA", "dragonfly")
+        )[:4]
+        await control.execute_command("REPLCONF", "CLIENT-VERSION", version)
+        flows = [
+            master.client(single_connection_client=True, lib_name=None, lib_version=None)
+            for _ in range(num_flows)
+        ]
+        for i, flow in enumerate(flows):
+            lsn = [lsns[i]] if i < partial_flows else []
+            response = await flow.execute_command("DFLY", "FLOW", master_id, sync_id, i, *lsn)
+            assert response[0] == ("PARTIAL" if lsn else "FULL")
+        if renegotiate:
+            # A repeated DFLY FLOW without an LSN turns the partial flow into a full one.
+            response = await flows[0].execute_command("DFLY", "FLOW", master_id, sync_id, 0)
+            assert response[0] == "FULL"
+
+        with pytest.raises(redis.exceptions.ResponseError, match="invalid state"):
+            await control.execute_command("DFLY", "STARTSTABLE", sync_id)
+        assert await c_master.ping()
+        for flow in flows:
+            await flow.aclose()
+
+
 # This Test was intorduced in response to a bug when replicating empty hashmaps (encoded as
 # ziplists) created with HSET, HSETEX, HDEL and then replicated 2 times.
 # For more information plz refer to the issue on gh:
