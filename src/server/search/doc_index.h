@@ -337,12 +337,19 @@ class HnswShardIndex {
  public:
   HnswShardIndex(std::shared_ptr<search::HnswVectorIndex> global_index, std::string field_ident);
 
-  bool Add(search::GlobalDocId id, const BaseAccessor& doc);
+  // With copy the graph keeps its own copy of the vector (the field expires).
+  bool Add(search::GlobalDocId id, const BaseAccessor& doc, bool copy);
 
   void Remove(search::GlobalDocId id);
 
   // Update vector data for an existing HNSW node (used during restoration).
-  bool UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc);
+  bool UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc, bool copy);
+
+  // Takes the sds entry or listpack the graph borrows out of the document, when the mutation
+  // would free it: the caller keeps it alive until the node no longer points at it.
+  std::shared_ptr<void> TakeField(PrimeValue& pv,
+                                  absl::Span<const std::string_view> modified_fields,
+                                  FieldExtractionCache* cache);
 
   bool IsVectorCopied() const;
 

@@ -21,6 +21,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
+#include "core/string_map.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
 #include "facade/resp_parser.h"
@@ -6481,6 +6482,60 @@ TEST_F(SearchFamilyTest, HnswListpackUpdatesWhileGraphBusy) {
   // DEL accounts for the copy swapped in, so it must keep the original's allocation size.
   EXPECT_THAT(Run({"DEL", "h:2", "h:5"}), IntArg(2));
   EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+}
+
+// A vector whose field has a TTL is copied into the graph, because the lazy field expiry frees
+// the hash's bytes without telling the index. The defrag skip follows the borrowing.
+TEST_F(SearchFamilyTest, FieldTtlVectorIsCopied) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");
+  ResetService();
+
+  auto vec = [](float x) {
+    vector<float> values(256, 0.0f);
+    values[0] = x;
+    return string(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(float));
+  };
+  EXPECT_EQ(Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "v", "VECTOR",
+                 "HNSW", "6", "TYPE", "FLOAT32", "DIM", "256", "DISTANCE_METRIC", "L2"}),
+            "OK");
+  WaitForIndexReady("idx");
+  EXPECT_THAT(Run({"HSET", "h:ttl", "v", vec(1), "title", "x"}), IntArg(2));
+  EXPECT_THAT(Run({"HSET", "h:keep", "v", vec(2), "title", "x"}), IntArg(2));
+  EXPECT_THAT(Run({"HEXPIRE", "h:ttl", "100", "FIELDS", "1", "v"}), RespElementsAre(IntArg(1)));
+  ASSERT_FALSE(GlobalHnswIndexRegistry::Instance().Get("idx", "v")->IsVectorCopied());
+
+  auto value = [&](string_view key) {
+    DbContext db_cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+    auto it = db_cntx.GetDbSlice(0).FindReadOnly(db_cntx, key, OBJ_HASH);
+    return it.ok() ? &it.value()->second : nullptr;
+  };
+  auto omit_defrag = [&](string_view key) {
+    bool out = false;
+    pp_->at(0)->Await([&] { out = value(key)->OmitDefrag(); });
+    return out;
+  };
+  EXPECT_TRUE(omit_defrag("h:keep"));
+  EXPECT_FALSE(omit_defrag("h:ttl"));
+
+  // Overwrite the live value in place: the graph must keep reading its own copy.
+  pp_->at(0)->Await([&] {
+    auto* sm = static_cast<StringMap*>(value("h:ttl")->RObjPtr());
+    const float changed = 7.0f;
+    memcpy(sm->Find("v")->second, &changed, sizeof(changed));
+  });
+  auto knn = [&](float x) {
+    return Run({"FT.SEARCH", "idx", "*=>[KNN 1 @v $q]", "PARAMS", "2", "q", vec(x), "NOCONTENT"});
+  };
+  EXPECT_THAT(knn(1), AreNoContentDocIds("h:ttl"));
+
+  // The field expires and its bytes are freed; the graph still answers from the copy.
+  AdvanceTime(200000);
+  EXPECT_THAT(Run({"HGET", "h:ttl", "v"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(knn(1), AreNoContentDocIds("h:ttl"));
+
+  EXPECT_THAT(Run({"HDEL", "h:keep", "v"}), IntArg(1));
+  EXPECT_FALSE(omit_defrag("h:keep"));
 }
 
 // The deferred updates re-read the documents from the namespaces that changed them.

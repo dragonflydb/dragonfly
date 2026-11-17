@@ -77,6 +77,16 @@ PreservedEntry ExtractField(PrimeValue& pv, string_view field) {
   return PreservedEntry(old.release(), deleter);
 }
 
+// The graph must own a copy of such a vector: the lazy field expiry frees the hash's bytes
+// without telling the index.
+bool VectorFieldHasTtl(const PrimeValue& pv, string_view field) {
+  if (pv.ObjType() != OBJ_HASH || pv.Encoding() != kEncodingStrMap2 || !pv.HasMemberExpiration())
+    return false;
+  auto* sm = static_cast<StringMap*>(pv.RObjPtr());
+  auto it = sm->Find(field);
+  return it != sm->end() && it.HasExpiry();
+}
+
 // Serves the recorded values, sorted by field name, of fields that had a TTL when the document was
 // indexed.
 class ExpiringValuesAccessor : public BaseAccessor {
@@ -679,16 +689,16 @@ HnswShardIndex::HnswShardIndex(std::shared_ptr<search::HnswVectorIndex> global_i
     : global_index_(std::move(global_index)), field_ident_(std::move(field_ident)) {
 }
 
-bool HnswShardIndex::Add(search::GlobalDocId id, const BaseAccessor& doc) {
-  return global_index_->Add(id, doc, field_ident_);
+bool HnswShardIndex::Add(search::GlobalDocId id, const BaseAccessor& doc, bool copy) {
+  return global_index_->Add(id, doc, field_ident_, copy);
 }
 
 void HnswShardIndex::Remove(search::GlobalDocId id) {
   global_index_->Remove(id);
 }
 
-bool HnswShardIndex::UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc) {
-  return global_index_->UpdateVectorData(id, doc, field_ident_);
+bool HnswShardIndex::UpdateVectorData(search::GlobalDocId id, const BaseAccessor& doc, bool copy) {
+  return global_index_->UpdateVectorData(id, doc, field_ident_, copy);
 }
 
 bool HnswShardIndex::IsVectorCopied() const {
@@ -699,29 +709,35 @@ void HnswShardIndex::ClearPreservedData() {
   preserved_field_data_.clear();
 }
 
-void HnswShardIndex::MaybePreserveField(PrimeValue& pv,
-                                        absl::Span<const std::string_view> modified_fields,
-                                        FieldExtractionCache* cache) {
+std::shared_ptr<void> HnswShardIndex::TakeField(PrimeValue& pv,
+                                                absl::Span<const std::string_view> modified_fields,
+                                                FieldExtractionCache* cache) {
   if (global_index_->IsVectorCopied())
-    return;
+    return nullptr;
 
   // Any mutation may move listpack entries, including writes to unrelated fields.
   if (pv.Encoding() == kEncodingListPack) {
     if (!cache->listpack)
       cache->listpack = ExtractListpack(pv);
-    preserved_field_data_.push_back(cache->listpack);
-    return;
+    return cache->listpack;
   }
 
   if (!modified_fields.empty() && rng::find(modified_fields, field_ident_) == modified_fields.end())
-    return;
+    return nullptr;
+  if (VectorFieldHasTtl(pv, field_ident_))  // the graph owns a copy
+    return nullptr;
   auto [it, inserted] = cache->fields.emplace(field_ident_, nullptr);
   if (inserted) {
     it->second = ExtractField(pv, field_ident_);
   }
-  if (it->second) {
-    preserved_field_data_.push_back(it->second);
-  }
+  return it->second;
+}
+
+void HnswShardIndex::MaybePreserveField(PrimeValue& pv,
+                                        absl::Span<const std::string_view> modified_fields,
+                                        FieldExtractionCache* cache) {
+  if (auto entry = TakeField(pv, modified_fields, cache))
+    preserved_field_data_.push_back(std::move(entry));
 }
 
 // --- ShardDocIndex HNSW methods ---
@@ -777,7 +793,8 @@ void ShardDocIndex::AddDocToGlobalVectorIndex(ShardDocIndex::DocId doc_id, const
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
   for (auto& hnsw : hnsw_shard_indices_) {
-    if (hnsw.Add(global_id, *accessor) && !hnsw.IsVectorCopied()) {
+    bool copy = !hnsw.IsVectorCopied() && VectorFieldHasTtl(*pv, hnsw.field_ident());
+    if (hnsw.Add(global_id, *accessor, copy) && !hnsw.IsVectorCopied() && !copy) {
       pv->SetOmitDefrag(true);
     }
   }
@@ -809,7 +826,13 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
   GlobalDocId global_id = search::CreateGlobalDocId(EngineShard::tlocal()->shard_id(), doc_id);
 
   for (auto& hnsw : hnsw_shard_indices_) {
+    // Taken before the removal: the node points at it until the stub is in.
+    auto borrowed = hnsw.TakeField(pv, modified_fields, cache);
     hnsw.Remove(global_id);
+    if (borrowed)
+      hnsw.global_index()->RetireBorrowed(std::move(borrowed));
+    if (!hnsw.IsVectorCopied())
+      pv.SetOmitDefrag(false);
   }
 }
 
@@ -943,10 +966,11 @@ void ShardDocIndex::RestoreGlobalVectorIndices(std::string_view index_name, cons
 
     bool any_deferred = false;
     for (auto& hnsw : hnsw_shard_indices_) {
-      bool success = hnsw.UpdateVectorData(global_id, *doc);
+      bool copy = !hnsw.IsVectorCopied() && VectorFieldHasTtl(pv, hnsw.field_ident());
+      bool success = hnsw.UpdateVectorData(global_id, *doc, copy);
       if (success) {
         ++successful_updates;
-        if (!hnsw.IsVectorCopied()) {
+        if (!hnsw.IsVectorCopied() && !copy) {
           pv.SetOmitDefrag(true);
         }
       } else {

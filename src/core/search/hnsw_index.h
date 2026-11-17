@@ -46,7 +46,10 @@ class HnswVectorIndex {
 
   ~HnswVectorIndex();
 
-  bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field);
+  // With copy the graph keeps its own copy of the vector instead of borrowing the document's
+  // bytes (fields that expire).
+  bool Add(search::GlobalDocId id, const search::DocumentAccessor& doc, std::string_view field,
+           bool copy = false);
 
   void Remove(search::GlobalDocId id);
 
@@ -103,7 +106,11 @@ class HnswVectorIndex {
 
   // Update vector data for an existing node (used after RestoreFromNodes)
   // This populates the vector data for a node that already has graph links
-  bool UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc, std::string_view field);
+  bool UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc, std::string_view field,
+                        bool copy = false);
+
+  // Keeps a vector the graph no longer points at until no insertion can still read it.
+  void RetireBorrowed(std::shared_ptr<void> entry);
 
   // Acquire a read lock on the internal MRMW mutex.
   // Use this during serialization to block concurrent Add/Remove (write) operations.
@@ -119,6 +126,8 @@ class HnswVectorIndex {
   size_t GetMemoryUsage() const;
 
  private:
+  std::unique_ptr<std::byte[]> CopyVector(const void* data) const;
+
   bool copy_vector_;
   size_t dim_;
   VectorDataType data_type_;

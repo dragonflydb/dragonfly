@@ -4,6 +4,7 @@
 
 #include "core/search/hnsw_index.h"
 
+#include <absl/container/flat_hash_map.h>
 #include <absl/strings/match.h>
 #include <hnswlib/hnswlib.h>
 #include <hnswlib/space_ip.h>
@@ -11,6 +12,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 
 #include "base/logging.h"
@@ -76,14 +78,48 @@ struct HnswlibAdapter {
         stub_vector_(EncodeOnesVector(params.dim, params.data_type)) {
   }
 
-  void Add(const void* data, GlobalDocId id) {
-    if (auto lock = LockIfActive(MRMWMutex::LockMode::kWriteLock))
+  void Add(const void* data, GlobalDocId id, std::unique_ptr<std::byte[]> copy) {
+    if (auto lock = LockIfActive(MRMWMutex::LockMode::kWriteLock)) {
+      if (copy)
+        data = copy.get();
+      auto previous = ExchangeCopy(id, std::move(copy));
       DoAdd(data, id);
+
+      // The previous copy goes only once the slot points at the new data.
+      RetireCopy(std::move(previous));
+    }
   }
 
   void Remove(GlobalDocId id) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
     DoRemove(id);
+    RetireCopy(ExchangeCopy(id, nullptr));
+  }
+
+  // Keeps an entry the graph no longer points at until no writer can still hold its pointer.
+  // Writers touch nodes under the resize_mutex_ reader lock, so taking it for writing proves none
+  // of them is inside, and searches exclude writers, so they never see a slot before its swap.
+  void RetireBorrowed(std::shared_ptr<void> entry) {
+    {
+      absl::MutexLock lock(&retired_mu_);
+      retired_entries_.push_back(std::move(entry));
+    }
+    TryReleaseRetired();
+  }
+
+  void TryReleaseRetired(bool wait = false) {
+    std::vector<std::shared_ptr<void>> released;
+    {
+      absl::MutexLock lock(&retired_mu_);
+      if (retired_entries_.empty())
+        return;
+      if (wait || retired_entries_.size() >= kRetiredBacklog)
+        resize_mutex_.WriterLock();
+      else if (!resize_mutex_.WriterTryLock())
+        return;
+      resize_mutex_.WriterUnlock();
+      released.swap(retired_entries_);
+    }
   }
 
   void Retire() {
@@ -93,6 +129,7 @@ struct HnswlibAdapter {
     // taking it for reading for the insertions.
     { MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock); }
     { MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kReadLock); }
+    TryReleaseRetired(/*wait=*/true);
   }
 
   bool IsRetired() const {
@@ -220,6 +257,34 @@ struct HnswlibAdapter {
     world_.~HierarchicalNSW<float>();
     new (&world_)
         HierarchicalNSW<float>(&space_, capacity_, M_, ef_construction_, kSeed, copy_vector_);
+    absl::MutexLock lock(&copies_mu_);
+    copies_.clear();
+    copies_bytes_.store(0, std::memory_order_relaxed);
+  }
+
+  // Stores the copy the graph owns for the label, or none, and returns the previous one.
+  std::unique_ptr<std::byte[]> ExchangeCopy(GlobalDocId id, std::unique_ptr<std::byte[]> copy) {
+    if (!copy && copies_bytes_.load(std::memory_order_relaxed) == 0)
+      return nullptr;
+
+    absl::MutexLock lock(&copies_mu_);
+    std::unique_ptr<std::byte[]> previous;
+    if (auto it = copies_.find(id); it != copies_.end()) {
+      previous = std::move(it->second);
+      copies_.erase(it);
+      copies_bytes_.fetch_sub(data_size_, std::memory_order_relaxed);
+    }
+    if (copy) {
+      copies_.emplace(id, std::move(copy));
+      copies_bytes_.fetch_add(data_size_, std::memory_order_relaxed);
+    }
+    return previous;
+  }
+
+  void RetireCopy(std::unique_ptr<std::byte[]> copy) {
+    if (copy)
+      RetireBorrowed(std::shared_ptr<void>(copy.release(),
+                                           [](void* p) { delete[] static_cast<std::byte*>(p); }));
   }
 
   // Actually add the point. Must be called while holding mrmw write lock.
@@ -418,8 +483,19 @@ struct HnswlibAdapter {
 
   // Update vector data for an existing node (used after RestoreFromNodes).
   // Returns false if the node doesn't exist in the index.
-  bool UpdateVectorData(GlobalDocId id, const void* data) {
+  bool UpdateVectorData(GlobalDocId id, const void* data, std::unique_ptr<std::byte[]> copy) {
     MRMWMutexLock lock(&mrmw_mutex_, MRMWMutex::LockMode::kWriteLock);
+    if (copy)
+      data = copy.get();
+    auto previous = ExchangeCopy(id, std::move(copy));
+    bool updated = DoUpdateVectorData(id, data);
+    if (!updated)
+      ExchangeCopy(id, nullptr);
+    RetireCopy(std::move(previous));
+    return updated;
+  }
+
+  bool DoUpdateVectorData(GlobalDocId id, const void* data) {
     absl::ReaderMutexLock resize_lock(&resize_mutex_);
 
     // Find the internal id for this label
@@ -462,7 +538,7 @@ struct HnswlibAdapter {
   }
 
   size_t GetMemoryUsage() const {
-    return world_.memorySize();
+    return world_.memorySize() + copies_bytes_.load(std::memory_order_relaxed);
   }
 
  private:
@@ -475,6 +551,16 @@ struct HnswlibAdapter {
   absl::Mutex resize_mutex_;
   mutable MRMWMutex mrmw_mutex_;
   std::atomic_bool retired_ = false;
+
+  // Vectors the graph owns instead of borrowing, by label.
+  absl::Mutex copies_mu_;
+  absl::flat_hash_map<GlobalDocId, std::unique_ptr<std::byte[]>> copies_;
+  std::atomic<size_t> copies_bytes_ = 0;
+
+  // Entries the graph no longer points at, freed by TryReleaseRetired.
+  constexpr static size_t kRetiredBacklog = 1024;
+  absl::Mutex retired_mu_;
+  std::vector<std::shared_ptr<void>> retired_entries_;
 
   bool copy_vector_;                    // Whether vectors are copied into hnswlib.
   size_t capacity_;                     // Initial max_elements_ — used to reconstruct world_.
@@ -499,7 +585,8 @@ HnswVectorIndex::HnswVectorIndex(const SchemaField::VectorParams& params, bool c
 HnswVectorIndex::~HnswVectorIndex() {
 }
 
-bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::string_view field) {
+bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::string_view field,
+                          bool copy) {
   auto vector_ptr = doc.GetVector(field, dim_, data_type_);
 
   if (!vector_ptr) {
@@ -517,8 +604,19 @@ bool HnswVectorIndex::Add(GlobalDocId id, const DocumentAccessor& doc, std::stri
     return false;
   }
 
-  adapter_->Add(data, id);
+  adapter_->Add(data, id, copy && !copy_vector_ ? CopyVector(data) : nullptr);
   return true;
+}
+
+std::unique_ptr<std::byte[]> HnswVectorIndex::CopyVector(const void* data) const {
+  size_t bytes = dim_ * ElementSize(data_type_);
+  auto copy = std::make_unique<std::byte[]>(bytes);
+  memcpy(copy.get(), data, bytes);
+  return copy;
+}
+
+void HnswVectorIndex::RetireBorrowed(std::shared_ptr<void> entry) {
+  adapter_->RetireBorrowed(std::move(entry));
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(const void* target, size_t k,
@@ -576,7 +674,7 @@ bool HnswVectorIndex::RestoreFromNodes(const std::vector<HnswNodeData>& nodes,
 }
 
 bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc,
-                                       std::string_view field) {
+                                       std::string_view field, bool copy) {
   auto vector_ptr = doc.GetVector(field, dim_, data_type_);
   if (!vector_ptr ||
       *vector_ptr == search::DocumentAccessor::VectorInfo(search::BorrowedFtVector(nullptr))) {
@@ -595,7 +693,7 @@ bool HnswVectorIndex::UpdateVectorData(GlobalDocId id, const DocumentAccessor& d
     data = std::get<BorrowedFtVector>(*vector_ptr);
   }
 
-  return adapter_->UpdateVectorData(id, data);
+  return adapter_->UpdateVectorData(id, data, copy && !copy_vector_ ? CopyVector(data) : nullptr);
 }
 
 MRMWMutexLock HnswVectorIndex::GetReadLock() const {

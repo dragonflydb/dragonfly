@@ -1544,8 +1544,8 @@ TEST(HnswBorrowedMode, RetiredIndexReadsNoVectors) {
 }
 
 // Removals on one thread run while insertions on another grow the graph. Every removal must
-// still mark its node and swap in the stub, so the search after the buffers are freed reads
-// no vector.
+// still mark its node and swap in the stub, and the buffer it hands back to the index may be
+// freed only once no insertion can still read it; the final search reads no vector.
 TEST(HnswBorrowedMode, ConcurrentRemoveWhileGrowing) {
   constexpr size_t kDim = 256;
   constexpr size_t kN = 2000;
@@ -1574,16 +1574,44 @@ TEST(HnswBorrowedMode, ConcurrentRemoveWhileGrowing) {
       while (added.load() <= i)
         util::ThisFiber::Yield();
       index.Remove(i);
+      index.RetireBorrowed(std::shared_ptr<void>(bufs[i].release(),
+                                                 [](void* p) { delete[] static_cast<float*>(p); }));
     }
   });
   adder.Join();
   remover.Join();
   pp->Stop();
-  bufs.clear();
 
   vector<float> query(kDim, 0.0f);
   EXPECT_EQ(index.GetNodeCount(), kN);
   EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt), testing::IsEmpty());
+}
+
+// A vector the graph owns instead of borrowing survives changes to the caller's buffer, costs
+// its size and is released by the removal.
+TEST(HnswBorrowedMode, KeepsOwnedVectors) {
+  SchemaField::VectorParams params;
+  params.use_hnsw = true;
+  params.dim = 4;
+  HnswVectorIndex borrowed(params, /*copy_vector=*/false);
+  HnswVectorIndex owned(params, /*copy_vector=*/false);
+
+  vector<float> buf{1.0f, 0.0f, 0.0f, 0.0f};
+  BorrowedDoc doc{reinterpret_cast<const char*>(buf.data())};
+  borrowed.Add(1, doc, "vec");
+  owned.Add(1, doc, "vec", /*copy=*/true);
+  EXPECT_EQ(owned.GetMemoryUsage() - borrowed.GetMemoryUsage(), buf.size() * sizeof(float));
+
+  buf[0] = 3.0f;
+  vector<float> query{1.0f, 0.0f, 0.0f, 0.0f};
+  EXPECT_THAT(borrowed.Knn(query.data(), 1, std::nullopt),
+              testing::ElementsAre(testing::Pair(2.0f, GlobalDocId{1})));
+  EXPECT_THAT(owned.Knn(query.data(), 1, std::nullopt),
+              testing::ElementsAre(testing::Pair(0.0f, GlobalDocId{1})));
+
+  borrowed.Remove(1);
+  owned.Remove(1);
+  EXPECT_EQ(owned.GetMemoryUsage(), borrowed.GetMemoryUsage());
 }
 
 // The stub swap and an insertion on another shard access a node's pointer slot concurrently,
