@@ -1208,7 +1208,6 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
         return status;
     }
 
-    RemoveKeyFromIndexesIfNeeded(to_key, op_args.db_cntx, to_res.it->second, op_args.shard);
     is_prior_list = (to_res.it->second.ObjType() == OBJ_LIST);
   }
 
@@ -1235,7 +1234,7 @@ OpResult<void> OpRen(const OpArgs& op_args, string_view from_key, string_view to
 
   if (IsValid(to_res.it)) {
     to_res.post_updater.ReduceHeapUsage();
-    db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, to_key, &to_res.it->second);
+    db_slice.PrepareOverwrite(op_args.db_cntx, to_key, &to_res.it->second);
     to_res.it->second = std::move(from_obj);
 
     if (exp_ts) {
@@ -1925,16 +1924,6 @@ template <typename IteratorBegin, typename IteratorEnd>
 OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, IteratorBegin&& start_it,
                            IteratorEnd&& end_it, bool has_get_patterns) {
   uint32_t len = 0;
-
-  // If we are about to overwrite an existing indexed document (HASH/JSON),
-  // remove it from search indices first to avoid duplicate entries.
-  // Use FindMutable (not FindReadOnly) because HNSW preservation may modify the PrimeValue.
-  {
-    auto existing = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key);
-    if (IsValid(existing.it)) {
-      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, existing.it->second, op_args.shard);
-    }
-  }
 
   QList* ql_v2 = CompactObj::AllocateMR<QList>();
   QList::Where where = QList::TAIL;

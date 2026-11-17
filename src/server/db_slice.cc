@@ -1375,9 +1375,11 @@ uint64_t DbSlice::ExpireParams::TtlSec(uint64_t now_ms) const {
   return DeadlineSec() - now_ms / 1000;
 }
 
-void DbSlice::ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv) {
+void DbSlice::PrepareOverwrite(const Context& cntx, std::string_view key, PrimeValue* pv) {
+  if (pv->ObjType() == OBJ_HASH || pv->ObjType() == OBJ_JSON)
+    shard_owner()->search_indices()->RemoveDoc(key, cntx, *pv);
   if (pv->IsExternal())
-    shard_owner()->tiered_storage()->Delete(db_ind, key, pv);
+    shard_owner()->tiered_storage()->Delete(cntx.db_index, key, pv);
 }
 
 OpResult<int64_t> DbSlice::UpdateExpire(const Context& cntx, Iterator prime_it,
@@ -1446,7 +1448,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrUpdateInternal(const Context& cntx
 
   auto& it = res.it;
 
-  ReleaseOffloadedValue(cntx.db_index, key, &it->second);
+  PrepareOverwrite(cntx, key, &it->second);
   it->second = std::move(obj);
 
   if (expire_at_ms) {

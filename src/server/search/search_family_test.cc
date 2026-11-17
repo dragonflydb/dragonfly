@@ -4501,6 +4501,7 @@ TEST_F(SearchFamilyTest, SynonymMultiGroupTermAcrossShardsAndReload) {
 // their stats, including the synonym group tokens of affix queries and phrase terms. Optional
 // affix queries also score documents that only contain another term of a matched group.
 TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
+  absl::FlagSaver fs;
   auto scores = [this] {
     EXPECT_EQ(
         Run({"FT.CREATE", "idx", "ON", "HASH", "PREFIX", "1", "d:", "SCHEMA", "title", "TEXT"}),
@@ -4557,7 +4558,6 @@ TEST_F(SearchFamilyTest, SynonymScoringMatchesSingleShard) {
   SetTestFlag("num_shards", "1");
   ResetService();
   auto single_shard = scores();
-  SetTestFlag("num_shards", "2");
 
   ASSERT_EQ(multi_shard.size(), single_shard.size());
   EXPECT_GT(single_shard.size(), 15u);
@@ -5447,6 +5447,7 @@ TEST_F(SearchFamilyTest, SetDoesNotUpdateIndexesBug) {
   // This should affect the index, the hset value should not be indexed anymore.
   resp = Run({"SET", "k1", "anothervalue"});
   EXPECT_EQ(resp, "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "value", "NOCONTENT"}), kNoResults);
 
   resp = Run({"RENAME", "k1", "anotherkey"});
   EXPECT_EQ(resp, "OK");
@@ -5460,6 +5461,31 @@ TEST_F(SearchFamilyTest, SetDoesNotUpdateIndexesBug) {
 
   resp = Run({"FT.SEARCH", "index", "*"});
   EXPECT_THAT(resp, AreDocIds("k1"));
+
+  // BITOP overwrites the indexed hash the same way.
+  Run({"SET", "src", "abc"});
+  EXPECT_THAT(Run({"BITOP", "OR", "k1", "src"}), IntArg(3));
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "value", "NOCONTENT"}), kNoResults);
+
+  Run({"DEL", "k1"});
+  Run({"HSET", "k1", "field", "fresh"});
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "fresh"}), AreDocIds("k1"));
+
+  // So does BF.LOADCHUNK.
+  Run({"BF.RESERVE", "bf", "0.01", "100"});
+  const string header = Run({"BF.SCANDUMP", "bf", "0"}).GetVec()[1].GetString();
+  EXPECT_EQ(Run({"BF.LOADCHUNK", "k1", "1", header}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "fresh", "NOCONTENT"}), kNoResults);
+
+  // And RENAME from the same shard, which overwrites the value in place.
+  Run({"DEL", "k1"});
+  Run({"HSET", "k1", "field", "other"});
+  string src = "src";
+  while (Shard(src, shard_set->size()) != Shard("k1", shard_set->size()))
+    src += "1";
+  Run({"SET", src, "abc"});
+  EXPECT_EQ(Run({"RENAME", src, "k1"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "other", "NOCONTENT"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, SortStoreDoesNotUpdateIndexesBug) {
@@ -5475,6 +5501,7 @@ TEST_F(SearchFamilyTest, SortStoreDoesNotUpdateIndexesBug) {
   EXPECT_THAT(Run({"RPUSH", "lst", "b", "a"}), IntArg(2));
   // SORT lst STORE k1 -> changes type of k1 from HASH to LIST
   Run({"SORT", "lst", "ALPHA", "STORE", "k1"});
+  EXPECT_THAT(Run({"FT.SEARCH", "index", "value", "NOCONTENT"}), kNoResults);
 
   // Rename away and recreate k1 as HASH again
   EXPECT_EQ(Run({"RENAME", "k1", "anotherkey"}), "OK");
@@ -6210,6 +6237,7 @@ TEST_F(SearchFamilyTest, ZsetStoreCommandsOverwriteIndexedHash) {
   EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
   EXPECT_THAT(Run({"ZUNIONSTORE", "dest", "2", "zset1", "zset2"}), IntArg(3));
   EXPECT_EQ(Run({"RENAME", "dest", "y"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value", "NOCONTENT"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
@@ -6231,6 +6259,7 @@ TEST_F(SearchFamilyTest, SetStoreCommandsOverwriteIndexedHash) {
   EXPECT_THAT(Run({"HSET", "dest", "field", "value"}), IntArg(1));
   EXPECT_THAT(Run({"SDIFFSTORE", "dest", "set1", "set2"}), IntArg(1));
   EXPECT_EQ(Run({"RENAME", "dest", "z"}), "OK");
+  EXPECT_THAT(Run({"FT.SEARCH", "idx", "value", "NOCONTENT"}), kNoResults);
 }
 
 TEST_F(SearchFamilyTest, HsetOnDifferentDatabasesCrash) {

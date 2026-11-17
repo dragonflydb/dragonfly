@@ -348,15 +348,11 @@ void ElementAccess::Commit(string_view new_value) const {
     }
     context_.ns->GetCurrentDbSlice().DelAtomic(context_, updater_.it.GetInnerIt());
   } else {
-    const bool is_external = IsExternal();
     // The value is replaced wholesale below, so drop the old heap accounting once.
     if (!IsNewEntry()) {
       updater_.post_updater.ReduceHeapUsage();
     }
-    if (is_external) {
-      EngineShard::tlocal()->tiered_storage()->Delete(context_.db_index, key_,
-                                                      &updater_.it->second);
-    }
+    context_.ns->GetCurrentDbSlice().PrepareOverwrite(context_, key_, &updater_.it->second);
     updater_.it->second.SetString(new_value);
     updater_.post_updater.Run();
   }

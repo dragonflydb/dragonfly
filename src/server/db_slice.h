@@ -382,9 +382,10 @@ class DbSlice {
   OpResult<ItAndUpdater> AddNew(const Context& cntx, std::string_view key, PrimeValue obj,
                                 uint64_t expire_at_ms);
 
-  // Must be called before overwriting a value in place. An offloaded value keeps its data on disk
-  // and reports no heap allocation, so overwriting it drops the only reference to its disk extent.
-  void ReleaseOffloadedValue(DbIndex db_ind, std::string_view key, PrimeValue* pv);
+  // Must be called before overwriting a value in place. Drops an indexed HASH or JSON document from
+  // the search indices. An offloaded value keeps its data on disk and reports no heap allocation,
+  // so overwriting it drops the only reference to its disk extent.
+  void PrepareOverwrite(const Context& cntx, std::string_view key, PrimeValue* pv);
 
   // Update key expiration, clamping TTL to kMaxExpireDeadlineMs. Return the applied absolute
   // deadline in ms, 0 for PERSIST, -1 if deleted, or OUT_OF_RANGE on overflow.

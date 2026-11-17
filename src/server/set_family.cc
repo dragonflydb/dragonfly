@@ -538,10 +538,7 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
   }
 
   if (add_res.is_new || overwrite) {
-    // If we're overwriting an existing key (not a new one), we need to remove it from
-    // search indexes first. This prevents crashes when the key is indexed (e.g., HASH or JSON).
     if (!add_res.is_new && overwrite) {
-      RemoveKeyFromIndexesIfNeeded(key, op_args.db_cntx, co, op_args.shard);
       // Account for the old value's memory under its original type before destroying it,
       // since InitSet will free the old value and change the type.
       add_res.post_updater.ReduceHeapUsage();
@@ -554,9 +551,10 @@ OpResult<uint32_t> OpAdd(const OpArgs& op_args, std::string_view key, const NewE
       // inside InitSet is reported to the client as OOM and must leave the value readable.
       PrimeValue replacement;
       InitSet(vals, &replacement);
-      db_slice.ReleaseOffloadedValue(op_args.db_cntx.db_index, key, &co);
+      db_slice.PrepareOverwrite(op_args.db_cntx, key, &co);
       co = std::move(replacement);
     } else {
+      db_slice.PrepareOverwrite(op_args.db_cntx, key, &co);
       InitSet(vals, &co);
     }
   }
