@@ -204,7 +204,7 @@ double ParseGeoUnit(std::string_view arg, facade::RuleError& err) {
 
 void ParseCircularShape(CmdArgParser* parser, GeoShape* shape, GeoSearchOpts* geo_ops) {
   shape->t.radius = parser->Next<double>();
-  if (shape->t.radius <= 0) {
+  if (shape->t.radius < 0) {
     parser->ReportCustom(kNegativeRadiusErr);
     return;
   }
@@ -269,7 +269,7 @@ void ParseLongLat(CmdArgParser* parser, GeoSearchParse* opts) {
 void ParseGeoSearchByRadius(CmdArgParser* parser, GeoSearchParse* opts) {
   GeoShape& shape = opts->shape;
   shape.t.radius = parser->Next<double>();
-  if (shape.t.radius <= 0) {
+  if (shape.t.radius < 0) {
     parser->ReportCustom(kNegativeRadiusErr);
     return;
   }
@@ -280,7 +280,7 @@ void ParseGeoSearchByRadius(CmdArgParser* parser, GeoSearchParse* opts) {
 void ParseGeoSearchByBox(CmdArgParser* parser, GeoSearchParse* opts) {
   GeoShape& shape = opts->shape;
   std::tie(shape.t.r.width, shape.t.r.height) = parser->Next<double, double>();
-  if (shape.t.r.width <= 0 || shape.t.r.height <= 0) {
+  if (shape.t.r.width < 0 || shape.t.r.height < 0) {
     parser->ReportCustom(kNegativeBoxErr);
     return;
   }

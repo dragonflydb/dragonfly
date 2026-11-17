@@ -309,6 +309,34 @@ TEST_F(GeoFamilyTest, RejectsNegativeGeoDimensions) {
   EXPECT_THAT(resp, ErrArg("radius must be positive"));
 }
 
+// Redis rejects only negative GEO dimensions; zero is a valid (empty) search area. The radius
+// estimator even special-cases zero, so all GEO entry points must accept it instead of erroring.
+TEST_F(GeoFamilyTest, AcceptsZeroGeoDimensions) {
+  EXPECT_EQ(1, CheckedInt({"GEOADD", "points", "13.361389", "38.115556", "Palermo"}));
+
+  auto resp =
+      Run({"GEOSEARCH", "points", "FROMLONLAT", "13.361389", "38.115556", "BYRADIUS", "0", "M"});
+  EXPECT_NE(resp.type, RespExpr::ERROR);
+
+  resp =
+      Run({"GEOSEARCH", "points", "FROMLONLAT", "13.361389", "38.115556", "BYBOX", "0", "0", "M"});
+  EXPECT_NE(resp.type, RespExpr::ERROR);
+
+  resp =
+      Run({"GEOSEARCH", "points", "FROMLONLAT", "13.361389", "38.115556", "BYBOX", "0", "10", "M"});
+  EXPECT_NE(resp.type, RespExpr::ERROR);
+
+  resp = Run({"GEORADIUS", "points", "13.361389", "38.115556", "0", "M"});
+  EXPECT_NE(resp.type, RespExpr::ERROR);
+
+  resp = Run({"GEORADIUSBYMEMBER", "points", "Palermo", "0", "M"});
+  EXPECT_NE(resp.type, RespExpr::ERROR);
+
+  resp = Run({"GEOSEARCHSTORE", "dest", "points", "FROMLONLAT", "13.361389", "38.115556",
+              "BYRADIUS", "0", "M"});
+  EXPECT_NE(resp.type, RespExpr::ERROR);
+}
+
 TEST_F(GeoFamilyTest, GeoRadiusByMember) {
   EXPECT_EQ(10, CheckedInt({"geoadd",  "Europe",    "13.4050", "52.5200", "Berlin",   "3.7038",
                             "40.4168", "Madrid",    "9.1427",  "38.7369", "Lisbon",   "2.3522",
