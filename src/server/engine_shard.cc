@@ -11,6 +11,7 @@
 #include <memory>
 
 #include "base/flags.h"
+#include "core/memory_accounting.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
 #include "core/search/stateless_allocator.h"
@@ -25,7 +26,6 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
-#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
 #include "server/server_state.h"
@@ -35,6 +35,8 @@ extern "C" {
 #include "util/fibers/proactor_base.h"
 
 using namespace std;
+
+ABSL_FLAG(bool, disable_scope_based_mem_track, false, "Turn off scope based memory metric");
 
 ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
@@ -516,14 +518,10 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
   shard_ = new (ptr) EngineShard(pb, data_heap);
 
   CompactObj::InitThreadLocal(shard_->memory_resource());
-  if (MemoryScopeEnabled()) {
-    CompactObj::SetTypeReplacementHook([](CompactObjType old_type, int64_t delta) {
-      EngineShard::tlocal()->AddTypeMemDelta(old_type, delta);
-      DeductFromTxScope(delta);
-    });
-  }
   SmallString::InitThreadLocal(data_heap);
   InitTLStatelessAllocMR(shard_->memory_resource());
+  if (!GetFlag(FLAGS_disable_scope_based_mem_track))
+    InitMemoryAccounting(shard_->mi_resource_);
 
   shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
 }
@@ -552,6 +550,8 @@ void EngineShard::DestroyThreadLocal() {
 
   QList::ShutdownThread();
   detail::InternedString::ResetPool();
+
+  ShutdownMemoryAccounting();
   shard_->~EngineShard();
   CleanupStatelessAllocMR();
 
@@ -1192,14 +1192,6 @@ EngineShard::CompactTableStats EngineShard::CompactTable(double threshold, DbInd
   }
 
   return stats;
-}
-
-void EngineShard::AddTypeMemDelta(size_t type, int64_t delta) {
-  if (delta == 0)
-    return;
-
-  DCHECK_LT(type, type_attributed_memory_.size());
-  type_attributed_memory_[type] += delta;
 }
 
 }  // namespace dfly

@@ -10,6 +10,7 @@
 #include <algorithm>
 
 #include "base/flags.h"
+#include "core/memory_accounting.h"
 #include "facade/dragonfly_connection.h"
 #include "facade/dragonfly_listener.h"
 #include "facade/reply_builder.h"
@@ -971,7 +972,7 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
     events = slice_stats.events;
     small_string_bytes = slice_stats.small_string_bytes;
     shard_stats = shard->stats();
-    type_attributed_memory_bytes = shard->type_attributed_memory();
+    type_attributed_memory_bytes = GetTypeAttributedMemory();
 
     if (shard->tiered_storage()) {
       tiered_stats = shard->tiered_storage()->GetStats();

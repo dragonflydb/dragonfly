@@ -21,6 +21,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/memory_accounting.h"
 #include "core/oah_set.h"
 #include "facade/facade_test.h"
 #include "facade/reply_builder.h"
@@ -3124,8 +3125,7 @@ namespace {
 TypeAttributedMemory Snapshot() {
   TypeAttributedMemory total{};
   for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
-    auto local =
-        shard_set->Await(sid, [] { return EngineShard::tlocal()->type_attributed_memory(); });
+    auto local = shard_set->Await(sid, [] { return GetTypeAttributedMemory(); });
     ranges::transform(total, local, total.begin(), plus{});
   }
   return total;
@@ -3484,7 +3484,7 @@ JsonMemorySnapshot SnapshotJsonMemory() {
     const auto pool = GetInternedStringStats();
     return JsonMemorySnapshot{
         .total_used_bytes = static_cast<int64_t>(shard->UsedMemoryWithoutSearch()),
-        .json_type_bytes = shard->type_attributed_memory()[OBJ_JSON],
+        .json_type_bytes = GetTypeAttributedMemory()[OBJ_JSON],
         .pool_bytes = pool.pool_bytes,
         .pool_entries = pool.pool_entries,
     };

@@ -13,6 +13,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/memory_accounting.h"
 #include "core/qlist.h"
 #include "facade/facade_stats.h"
 #include "server/acl/user_registry.h"

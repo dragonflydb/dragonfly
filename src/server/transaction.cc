@@ -10,6 +10,7 @@
 
 #include "base/flags.h"
 #include "base/logging.h"
+#include "core/memory_accounting.h"
 #include "facade/conn_context.h"
 #include "facade/facade_stats.h"
 #include "facade/op_status.h"
@@ -18,13 +19,11 @@
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
-#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 
 ABSL_FLAG(uint32_t, tx_queue_warning_len, 96,
           "Length threshold for warning about long transaction queue");
-ABSL_FLAG(bool, disable_scope_based_mem_track, false, "Turn off scope based memory metric");
 
 namespace dfly {
 
@@ -84,29 +83,14 @@ uint16_t trans_id(const Transaction* ptr) {
   return (intptr_t(ptr) >> 8) & 0xFFFF;
 }
 
-thread_local TxMemoryScope* tl_tx_scope = nullptr;
-
-void MemTrackerHook(fb2::FiberSwitchHookEvent event) noexcept {
-  DCHECK_NE(tl_tx_scope, nullptr);
-
-  using enum fb2::FiberSwitchHookEvent;
-  switch (event) {
-    case SUSPEND:
-      tl_tx_scope->Suspend();
-      break;
-    case RESUME:
-      tl_tx_scope->Resume();
-      break;
-  }
-}
-
 template <typename Func> auto WithTxScope(int obj_type, Func func) {
   TxMemoryScope scope(obj_type);
   return func();
 }
 
 int ObjectType(const CommandId* cid) {
-  return MemoryScopeEnabled() && cid && cid->HasFamily() ? TypeForFamily(cid->GetFamily()) : -1;
+  return MemoryAccountingEnabled() && cid && cid->HasFamily() ? TypeForFamily(cid->GetFamily())
+                                                              : -1;
 }
 
 }  // namespace
@@ -1916,83 +1900,6 @@ std::vector<Transaction::PerShardCache>& Transaction::TLTmpSpace::GetShardIndex(
   for (auto& v : shard_cache)
     v.Clear();
   return shard_cache;
-}
-
-namespace {
-
-int64_t TrackedMemory() {
-  const EngineShard* shard = EngineShard::tlocal();
-  DCHECK_NE(shard, nullptr);
-
-  // Full search index memory accounting scans all indices, so skip it
-  const int64_t used_memory = shard->UsedMemoryWithoutSearch();
-  return used_memory - shard->type_attributed_memory()[OBJ_KEY];
-}
-
-}  // namespace
-
-bool MemoryScopeEnabled() {
-  static const bool enabled = !absl::GetFlag(FLAGS_disable_scope_based_mem_track);
-  return enabled;
-}
-
-void DeductFromTxScope(int64_t delta) {
-  if (tl_tx_scope)
-    tl_tx_scope->Deduct(delta);
-}
-
-TxMemoryScope::TxMemoryScope(int obj_type) : obj_type_(obj_type) {
-  CHECK_EQ(tl_tx_scope, nullptr) << "tx scope created while another tx scope exists";
-  DCHECK_GE(obj_type_, 0);
-  mem_baseline_ = TrackedMemory();
-  tl_tx_scope = this;
-  prev_hook_ = ThisFiber::SetSwitchHook({MemTrackerHook});
-}
-
-TxMemoryScope::~TxMemoryScope() {
-  CHECK_EQ(tl_tx_scope, this) << "tx scope destroyed without owning the tracking pointer";
-  DCHECK(!suspended_);
-  ThisFiber::SetSwitchHook(prev_hook_);
-  tl_tx_scope = nullptr;
-
-  Checkpoint(TrackedMemory());
-  EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta_);
-}
-
-void TxMemoryScope::Suspend() {
-  DCHECK(!suspended_);
-
-  Checkpoint(TrackedMemory());
-  suspended_ = true;
-}
-
-void TxMemoryScope::Resume() {
-  DCHECK(suspended_);
-
-  mem_baseline_ = TrackedMemory();
-  suspended_ = false;
-}
-
-void TxMemoryScope::Checkpoint(int64_t used_memory) {
-  DCHECK(!suspended_);
-  delta_ += used_memory - mem_baseline_;
-  mem_baseline_ = used_memory;
-}
-
-AtomicMemoryScope::AtomicMemoryScope(int obj_type)
-    : enabled_(MemoryScopeEnabled()),
-      obj_type_(obj_type),
-      mem_baseline_(enabled_ ? TrackedMemory() : 0) {
-  DCHECK_GE(obj_type, 0);
-}
-
-AtomicMemoryScope::~AtomicMemoryScope() {
-  if (!enabled_)
-    return;
-
-  const int64_t delta = TrackedMemory() - mem_baseline_;
-  EngineShard::tlocal()->AddTypeMemDelta(obj_type_, delta);
-  DeductFromTxScope(delta);
 }
 
 void AdvanceTxIdPast(TxId txid) {

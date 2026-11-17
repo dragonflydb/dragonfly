@@ -9,6 +9,7 @@
 #include <ranges>
 
 #include "core/dense_set.h"
+#include "core/memory_accounting.h"
 #include "core/oah_set.h"
 #include "core/qlist.h"
 #include "strings/human_readable.h"
@@ -29,7 +30,6 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/journal/journal.h"
-#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 #include "server/tiered_storage.h"
@@ -432,7 +432,7 @@ void AccountObjectMemory(string_view key, unsigned type, int64_t delta, DbTable*
 
   db->stats.AddTypeMemoryUsage(type, delta);
   if (type == OBJ_KEY)
-    EngineShard::tlocal()->AddTypeMemDelta(OBJ_KEY, delta);
+    ChargeMemory(OBJ_KEY, delta);
   UpdateSlotStat(key, delta, db, &SlotStats::memory_bytes, "memory usage", type, slot);
 }
 
@@ -937,7 +937,7 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_v
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
-  DeductFromTxScope(table_increase);
+  ChargeMemory(kUntrackedMemory, table_increase);
   memory_budget_ -= table_increase;
 
   table_memory_ += table_increase;
