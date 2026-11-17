@@ -353,7 +353,12 @@ class HnswShardIndex {
 
   bool IsVectorCopied() const;
 
-  void ClearPreservedData();
+  // Keeps an entry the graph stopped pointing at until no insertion can still read it. Freed on
+  // this shard, so the allocation accounting stays with the thread that owns it.
+  void RetireEntry(std::shared_ptr<void> entry);
+
+  // Moves the preserved entries to the retired ones once their nodes are gone.
+  void RetirePreservedData();
 
   // Preserve old sds entry or listpack for borrowed-vector mode so HNSW pointers stay valid.
   void MaybePreserveField(PrimeValue& pv, absl::Span<const std::string_view> modified_fields,
@@ -375,9 +380,14 @@ class HnswShardIndex {
   std::shared_ptr<search::HnswVectorIndex> global_index_;
   std::string field_ident_;  // actual hash key, not AS alias
 
+  void ReleaseRetiredIfQuiet();
+
   // Old sds entries and listpacks kept alive while HNSW ops are buffered (serializing/restoring).
   // shared_ptr because multiple search indices may reference the same sds.
   std::vector<std::shared_ptr<void>> preserved_field_data_;
+
+  // Entries the graph stopped pointing at, freed once no insertion can still read them.
+  std::vector<std::shared_ptr<void>> retired_entries_;
 };
 
 // Stores internal search indices for documents of a document index on a specific shard.
@@ -553,9 +563,9 @@ class ShardDocIndex {
                                       absl::Span<const std::string_view> modified_fields,
                                       FieldExtractionCache* cache);
 
-  // Clear preserved field data on all per-shard HNSW indices.
-  // Called after DrainPendingVectorUpdates completes buffered operations.
-  void ClearAllHnswPreservedData();
+  // Retires the preserved field data of all per-shard HNSW indices once the buffered removals
+  // ran (DrainPendingVectorUpdates, SyncDeferredHnsw).
+  void RetireAllHnswPreservedData();
 
   // Rebuild global vector indices from restored key index, updating vector data
   // for nodes whose graph structure was already restored from RDB.

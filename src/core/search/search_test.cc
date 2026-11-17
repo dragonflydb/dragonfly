@@ -1544,8 +1544,8 @@ TEST(HnswBorrowedMode, RetiredIndexReadsNoVectors) {
 }
 
 // Removals on one thread run while insertions on another grow the graph. Every removal must
-// still mark its node and swap in the stub, and the buffer it hands back to the index may be
-// freed only once no insertion can still read it; the final search reads no vector.
+// still mark its node and swap in the stub, and its buffer may be freed only once no insertion
+// can still read it; the final search reads no vector.
 TEST(HnswBorrowedMode, ConcurrentRemoveWhileGrowing) {
   constexpr size_t kDim = 256;
   constexpr size_t kN = 2000;
@@ -1556,7 +1556,7 @@ TEST(HnswBorrowedMode, ConcurrentRemoveWhileGrowing) {
   params.capacity = 16;  // Grows at every doubling.
   HnswVectorIndex index(params, /*copy_vector=*/false);
 
-  std::vector<std::unique_ptr<float[]>> bufs(kN);
+  std::vector<std::unique_ptr<float[]>> bufs(kN), retired;
   std::atomic_size_t added = 0;
 
   std::unique_ptr<util::ProactorPool> pp(util::fb2::Pool::Epoll(2));
@@ -1574,13 +1574,15 @@ TEST(HnswBorrowedMode, ConcurrentRemoveWhileGrowing) {
       while (added.load() <= i)
         util::ThisFiber::Yield();
       index.Remove(i);
-      index.RetireBorrowed(std::shared_ptr<void>(bufs[i].release(),
-                                                 [](void* p) { delete[] static_cast<float*>(p); }));
+      retired.push_back(std::move(bufs[i]));
+      if (index.Quiesce(/*wait=*/false))
+        retired.clear();
     }
   });
   adder.Join();
   remover.Join();
   pp->Stop();
+  retired.clear();
 
   vector<float> query(kDim, 0.0f);
   EXPECT_EQ(index.GetNodeCount(), kN);

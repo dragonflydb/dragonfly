@@ -6538,6 +6538,50 @@ TEST_F(SearchFamilyTest, FieldTtlVectorIsCopied) {
   EXPECT_FALSE(omit_defrag("h:keep"));
 }
 
+// A removal deferred by a running search keeps borrowing from the hash, so the defrag skip
+// stays while another index removes its own field inline.
+TEST_F(SearchFamilyTest, HnswOmitDefragStaysWhileDeferred) {
+  absl::FlagSaver fs;
+  SetTestFlag("num_shards", "1");
+  ResetService();
+
+  auto vec = [](float x) {
+    vector<float> values(256, 0.0f);
+    values[0] = x;
+    return string(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(float));
+  };
+  for (auto [name, field] : {pair{"hx", "v1"}, pair{"hy", "v2"}}) {
+    EXPECT_EQ(Run({"FT.CREATE", name, "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", field, "VECTOR",
+                   "HNSW", "6", "TYPE", "FLOAT32", "DIM", "256", "DISTANCE_METRIC", "L2"}),
+              "OK");
+    WaitForIndexReady(name);
+  }
+  EXPECT_THAT(Run({"HSET", "h:1", "v1", vec(1), "v2", vec(2), "title", "x"}), IntArg(3));
+  auto omit_defrag = [&] {
+    bool out = false;
+    pp_->at(0)->Await([&] {
+      DbContext db_cntx{&namespaces->GetDefaultNamespace(), 0, GetCurrentTimeMs()};
+      auto it = db_cntx.GetDbSlice(0).FindReadOnly(db_cntx, "h:1", OBJ_HASH);
+      out = it.value()->second.OmitDefrag();
+    });
+    return out;
+  };
+  EXPECT_TRUE(omit_defrag());
+
+  {
+    auto lock = GlobalHnswIndexRegistry::Instance().Get("hy", "v2")->GetReadLock();
+    EXPECT_THAT(Run({"HDEL", "h:1", "v1"}), IntArg(1));
+    EXPECT_TRUE(omit_defrag());
+  }
+
+  // The search waits for the deferred update; afterwards nothing borrows once v2 is gone.
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "hy", "*=>[KNN 1 @v2 $q]", "PARAMS", "2", "q", vec(2), "NOCONTENT"}),
+      AreNoContentDocIds("h:1"));
+  EXPECT_THAT(Run({"HDEL", "h:1", "v2"}), IntArg(1));
+  EXPECT_FALSE(omit_defrag());
+}
+
 // The deferred updates re-read the documents from the namespaces that changed them.
 TEST_F(SearchFamilyTest, HnswDeferredUpdateInNamespace) {
   namespace_ = "ns1";

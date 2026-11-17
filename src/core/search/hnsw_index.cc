@@ -96,29 +96,36 @@ struct HnswlibAdapter {
     RetireCopy(ExchangeCopy(id, nullptr));
   }
 
-  // Keeps an entry the graph no longer points at until no writer can still hold its pointer.
   // Writers touch nodes under the resize_mutex_ reader lock, so taking it for writing proves none
-  // of them is inside, and searches exclude writers, so they never see a slot before its swap.
-  void RetireBorrowed(std::shared_ptr<void> entry) {
+  // of them holds an old pointer, and searches exclude writers, so they never see a slot before
+  // its swap.
+  bool Quiesce(bool wait) {
+    if (wait)
+      resize_mutex_.WriterLock();
+    else if (!resize_mutex_.WriterTryLock())
+      return false;
+    resize_mutex_.WriterUnlock();
+    return true;
+  }
+
+  // Copies the graph stopped pointing at are freed at the next quiescent point.
+  void RetireCopy(std::unique_ptr<std::byte[]> copy) {
+    if (!copy)
+      return;
     {
       absl::MutexLock lock(&retired_mu_);
-      retired_entries_.push_back(std::move(entry));
+      retired_copies_.push_back(std::move(copy));
     }
     TryReleaseRetired();
   }
 
   void TryReleaseRetired(bool wait = false) {
-    std::vector<std::shared_ptr<void>> released;
+    std::vector<std::unique_ptr<std::byte[]>> released;
     {
       absl::MutexLock lock(&retired_mu_);
-      if (retired_entries_.empty())
+      if (retired_copies_.empty() || !Quiesce(wait || retired_copies_.size() >= kRetiredBacklog))
         return;
-      if (wait || retired_entries_.size() >= kRetiredBacklog)
-        resize_mutex_.WriterLock();
-      else if (!resize_mutex_.WriterTryLock())
-        return;
-      resize_mutex_.WriterUnlock();
-      released.swap(retired_entries_);
+      released.swap(retired_copies_);
     }
   }
 
@@ -279,12 +286,6 @@ struct HnswlibAdapter {
       copies_bytes_.fetch_add(data_size_, std::memory_order_relaxed);
     }
     return previous;
-  }
-
-  void RetireCopy(std::unique_ptr<std::byte[]> copy) {
-    if (copy)
-      RetireBorrowed(std::shared_ptr<void>(copy.release(),
-                                           [](void* p) { delete[] static_cast<std::byte*>(p); }));
   }
 
   // Actually add the point. Must be called while holding mrmw write lock.
@@ -557,10 +558,10 @@ struct HnswlibAdapter {
   absl::flat_hash_map<GlobalDocId, std::unique_ptr<std::byte[]>> copies_;
   std::atomic<size_t> copies_bytes_ = 0;
 
-  // Entries the graph no longer points at, freed by TryReleaseRetired.
+  // Copies the graph no longer points at, freed by TryReleaseRetired.
   constexpr static size_t kRetiredBacklog = 1024;
   absl::Mutex retired_mu_;
-  std::vector<std::shared_ptr<void>> retired_entries_;
+  std::vector<std::unique_ptr<std::byte[]>> retired_copies_;
 
   bool copy_vector_;                    // Whether vectors are copied into hnswlib.
   size_t capacity_;                     // Initial max_elements_ — used to reconstruct world_.
@@ -615,8 +616,8 @@ std::unique_ptr<std::byte[]> HnswVectorIndex::CopyVector(const void* data) const
   return copy;
 }
 
-void HnswVectorIndex::RetireBorrowed(std::shared_ptr<void> entry) {
-  adapter_->RetireBorrowed(std::move(entry));
+bool HnswVectorIndex::Quiesce(bool wait) {
+  return adapter_->Quiesce(wait);
 }
 
 std::vector<std::pair<float, GlobalDocId>> HnswVectorIndex::Knn(const void* target, size_t k,

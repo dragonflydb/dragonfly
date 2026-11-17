@@ -109,8 +109,9 @@ class HnswVectorIndex {
   bool UpdateVectorData(GlobalDocId id, const DocumentAccessor& doc, std::string_view field,
                         bool copy = false);
 
-  // Keeps a vector the graph no longer points at until no insertion can still read it.
-  void RetireBorrowed(std::shared_ptr<void> entry);
+  // True once no writer is inside the graph (with wait, after waiting for them): a vector a node
+  // stopped pointing at before the call may then be freed.
+  bool Quiesce(bool wait);
 
   // Acquire a read lock on the internal MRMW mutex.
   // Use this during serialization to block concurrent Add/Remove (write) operations.

@@ -705,8 +705,24 @@ bool HnswShardIndex::IsVectorCopied() const {
   return global_index_->IsVectorCopied();
 }
 
-void HnswShardIndex::ClearPreservedData() {
+void HnswShardIndex::RetireEntry(std::shared_ptr<void> entry) {
+  retired_entries_.push_back(std::move(entry));
+  ReleaseRetiredIfQuiet();
+}
+
+void HnswShardIndex::RetirePreservedData() {
+  if (preserved_field_data_.empty())
+    return;
+  for (auto& entry : preserved_field_data_)
+    retired_entries_.push_back(std::move(entry));
   preserved_field_data_.clear();
+  ReleaseRetiredIfQuiet();
+}
+
+void HnswShardIndex::ReleaseRetiredIfQuiet() {
+  constexpr size_t kRetiredBacklog = 1024;
+  if (global_index_->Quiesce(/*wait=*/retired_entries_.size() >= kRetiredBacklog))
+    retired_entries_.clear();
 }
 
 std::shared_ptr<void> HnswShardIndex::TakeField(PrimeValue& pv,
@@ -742,13 +758,13 @@ void HnswShardIndex::MaybePreserveField(PrimeValue& pv,
 
 // --- ShardDocIndex HNSW methods ---
 
-void ShardDocIndex::ClearAllHnswPreservedData() {
+void ShardDocIndex::RetireAllHnswPreservedData() {
   // A deferred remove leaves its node pointing to the preserved entry.
   if (!deferred_hnsw_ids_.empty())
     return;
 
   for (auto& hnsw : hnsw_shard_indices_) {
-    hnsw.ClearPreservedData();
+    hnsw.RetirePreservedData();
   }
 }
 
@@ -809,8 +825,11 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
     pending_hnsw_removals_.insert(doc_id);
 
     // Preserve old hash data so HNSW pointers set by UpdateVectorData stay valid.
-    for (auto& hnsw : hnsw_shard_indices_)
+    for (auto& hnsw : hnsw_shard_indices_) {
       hnsw.MaybePreserveField(pv, modified_fields, cache);
+      if (!hnsw.IsVectorCopied())  // the node keeps borrowing the unmodified fields
+        pv.SetOmitDefrag(true);
+    }
     return;
   }
 
@@ -818,8 +837,11 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
   if (!locks) {
     // Preserve the old vectors so HNSW pointers stay valid until the deferred remove.
     DeferHnswUpdate(doc_id, db_cntx.ns);
-    for (auto& hnsw : hnsw_shard_indices_)
+    for (auto& hnsw : hnsw_shard_indices_) {
       hnsw.MaybePreserveField(pv, modified_fields, cache);
+      if (!hnsw.IsVectorCopied())
+        pv.SetOmitDefrag(true);
+    }
     return;
   }
 
@@ -830,9 +852,7 @@ void ShardDocIndex::RemoveDocFromGlobalVectorIndex(
     auto borrowed = hnsw.TakeField(pv, modified_fields, cache);
     hnsw.Remove(global_id);
     if (borrowed)
-      hnsw.global_index()->RetireBorrowed(std::move(borrowed));
-    if (!hnsw.IsVectorCopied())
-      pv.SetOmitDefrag(false);
+      hnsw.RetireEntry(std::move(borrowed));
   }
 }
 
@@ -910,7 +930,7 @@ void ShardDocIndex::SyncDeferredHnsw(HnswWriteLocks locks) {
   DCHECK(deferred_hnsw_ids_.empty());
 
   if (pending_vector_updates_.empty())
-    ClearAllHnswPreservedData();
+    RetireAllHnswPreservedData();
 }
 
 void ShardDocIndex::FlushDeferredHnswUpdates() {
@@ -1089,7 +1109,7 @@ void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
     }
   }
   if (pending_vector_updates_.empty())
-    ClearAllHnswPreservedData();
+    RetireAllHnswPreservedData();
 }
 
 ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
@@ -1858,6 +1878,8 @@ void ShardDocIndices::RemoveDoc(string_view key, const DbContext& db_cntx, Prime
   // each sds entry is extracted once and shared via shared_ptr across all indices.
   FieldExtractionCache extraction_cache;
 
+  // Set again by every index whose graph keeps borrowing from the hash.
+  pv.SetOmitDefrag(false);
   for (auto& [index_name, index] : indices_) {
     if (index->Matches(key, pv.ObjType())) {
       std::optional<search::DocId> doc_id = index->GetDocId(key, db_cntx);
