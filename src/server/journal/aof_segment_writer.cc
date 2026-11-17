@@ -46,6 +46,14 @@ error_code AofSyncDir(const string& dir) {
   return (*res)->Close();
 }
 
+error_code AofSyncFile(const string& path) {
+  auto res = OpenLinux(path, O_RDONLY, 0);
+  if (!res)
+    return res.error();
+  RETURN_ON_ERR((*res)->FSync(IORING_FSYNC_DATASYNC));
+  return (*res)->Close();
+}
+
 AofSegmentWriter::AofSegmentWriter(string dir, uint32_t shard_id, uint32_t shard_count)
     : dir_(std::move(dir)), shard_id_(shard_id), shard_count_(shard_count) {
 }

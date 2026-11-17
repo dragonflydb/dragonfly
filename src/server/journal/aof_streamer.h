@@ -45,6 +45,10 @@ class AofStreamer : public journal::JournalConsumerInterface {
   // after WaitSpareReady(). Returns the new segment's seq, or nullopt if no spare is ready.
   std::optional<uint64_t> Rotate();
 
+  // A checkpoint whose cut is at cut_lsn committed: its base holds every record before it, so the
+  // segments before the cut, even a failed one, no longer matter. May yield.
+  void OnCheckpoint(uint64_t cut_lsn);
+
   // Last record covered by a successful fdatasync. Advances in log order: into the active segment
   // only once the segment a rotation left had its final fdatasync succeed.
   uint64_t DurableLsn() const;
@@ -88,10 +92,9 @@ class AofStreamer : public journal::JournalConsumerInterface {
   uint64_t prev_durable_lsn_ = 0;
 
   // First error of a writer retired by a rotation, returned by Shutdown(). Freezes DurableLsn()
-  // across later rotations.
-  // TODO(#8410): harmless once the checkpoint that rotated commits, since the old segment is then
-  // garbage: clear it there, with prev_durable_lsn_ at the cut. If it does not commit, the chain
-  // has a hole at the old segment's tail: stop the active writer.
+  // until a checkpoint commits.
+  // TODO: if the checkpoint that rotated does not commit, the chain has a hole at the old segment's
+  // tail, and replay discards everything after it: stop the active writer.
   std::error_code retired_ec_;
 
   friend class AofStreamerOneShardTest;
@@ -130,10 +133,22 @@ class AofStreamer : public journal::JournalConsumerInterface {
     return std::nullopt;
   }
 
+  void OnCheckpoint(uint64_t cut_lsn) {
+  }
+
   uint64_t DurableLsn() const {
     return 0;
   }
 };
+
+// No-ops: checkpoints need --aof, rejected at startup.
+inline std::error_code AofSyncDir(const std::string& dir) {
+  return {};
+}
+
+inline std::error_code AofSyncFile(const std::string& path) {
+  return {};
+}
 
 #endif  // __linux__
 
