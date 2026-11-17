@@ -13,6 +13,7 @@
 #include <benchmark/benchmark.h>
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <hnswlib/hnswlib.h>
 #include <mimalloc.h>
 
 #include <algorithm>
@@ -26,6 +27,7 @@
 #include "base/gtest.h"
 #include "base/logging.h"
 #include "core/search/base.h"
+#include "core/search/hnsw_alg.h"
 #include "core/search/hnsw_index.h"
 #include "core/search/index_result.h"
 #include "core/search/indices.h"
@@ -1582,6 +1584,20 @@ TEST(HnswBorrowedMode, ConcurrentRemoveWhileGrowing) {
   vector<float> query(kDim, 0.0f);
   EXPECT_EQ(index.GetNodeCount(), kN);
   EXPECT_THAT(index.Knn(query.data(), 5, std::nullopt), testing::IsEmpty());
+}
+
+// The stub swap and an insertion on another shard access a node's pointer slot concurrently,
+// which is atomic only when the slot keeps the pointer's alignment.
+TEST(HnswBorrowedMode, PointerSlotAligned) {
+  hnswlib::L2Space space(8);
+  for (bool copy_vector : {false, true}) {
+    for (size_t m : {4, 8, 16, 32, 48}) {
+      HierarchicalNSW<float> world(&space, 16, m, 200, 100, copy_vector);
+      EXPECT_EQ(world.offsetData_ % alignof(void*), 0u) << m;
+      EXPECT_EQ(world.label_offset_ % alignof(void*), 0u) << m;
+      EXPECT_EQ(world.size_data_per_element_ % alignof(void*), 0u) << m;
+    }
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(HnswSer, HnswSerializationTest,

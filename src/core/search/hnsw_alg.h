@@ -5,12 +5,18 @@
 #include <mimalloc.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 
 #pragma once
 
 namespace dfly::search {
+
+// Rounds size up to a multiple of alignment, a power of two.
+constexpr size_t AlignUp(size_t size, size_t alignment) {
+  return (size + alignment - 1) & ~(alignment - 1);
+}
 
 enum class HnswErrorStatus : int8_t {
   SUCCESS = 0,
@@ -133,7 +139,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
 
     // If we copy vector we don't use pointer to data
     size_t vector_ptr_size = copy_vector_ ? 0 : sizeof(char*);
-    size_links_level0_ = maxM0_ * sizeof(tableint) + sizeof(linklistsizeint);
+    size_links_level0_ =
+        AlignUp(maxM0_ * sizeof(tableint) + sizeof(linklistsizeint), alignof(char*));
     size_data_per_element_ = size_links_level0_ + vector_ptr_size + sizeof(labeltype);
     offsetData_ = size_links_level0_;
     label_offset_ = size_links_level0_ + vector_ptr_size;
@@ -216,15 +223,24 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     return (data_level0_memory_ + internal_id * size_data_per_element_ + offsetData_);
   }
 
+  // The stub swap races with insertions on other shards on this slot, hence the aligned atomic
+  // access.
+  char* loadDataPtr(tableint internal_id) const {
+    return std::atomic_ref<char*>(*reinterpret_cast<char**>(getDataPtrByInternalId(internal_id)))
+        .load(std::memory_order_relaxed);
+  }
+
+  void storeDataPtr(tableint internal_id, const void* ptr) {
+    std::atomic_ref<char*>(*reinterpret_cast<char**>(getDataPtrByInternalId(internal_id)))
+        .store(static_cast<char*>(const_cast<void*>(ptr)), std::memory_order_relaxed);
+  }
+
   // Return pointer to data by internal id
   inline char* getDataByInternalId(tableint internal_id) const {
     if (copy_vector_) {
       return (data_vector_memory_ + internal_id * data_size_);
     } else {
-      char* unaligned_data_ptr = (char*)(getDataPtrByInternalId(internal_id));
-      char* data_ptr = nullptr;
-      memcpy(static_cast<void*>(&data_ptr), unaligned_data_ptr, sizeof(void*));
-      return data_ptr;
+      return loadDataPtr(internal_id);
     }
   }
 
@@ -932,7 +948,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     if (copy_vector_) {
       memcpy(getDataByInternalId(internalId), dataPointIn, data_size_);
     } else {
-      memcpy(getDataPtrByInternalId(internalId), &dataPointIn, sizeof(void*));
+      storeDataPtr(internalId, dataPointIn);
     }
 
     const void* dataPoint = getDataByInternalId(internalId);
@@ -1161,7 +1177,7 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
     if (copy_vector_) {
       memcpy(getDataByInternalId(cur_c), data_point_in, data_size_);
     } else {
-      memcpy(getDataPtrByInternalId(cur_c), &data_point_in, sizeof(void*));
+      storeDataPtr(cur_c, data_point_in);
     }
 
     const void* data_point = getDataByInternalId(cur_c);
@@ -1210,7 +1226,8 @@ template <typename dist_t> class HierarchicalNSW : public hnswlib::AlgorithmInte
         std::priority_queue<std::pair<dist_t, tableint>, std::vector<std::pair<dist_t, tableint>>,
                             CompareByFirst>
             top_candidates = searchBaseLayer(currObj, data_point, level);
-        if (epDeleted) {
+        // The entry point may have been marked deleted since the check above; keep it as a link.
+        if (epDeleted || top_candidates.empty()) {
           top_candidates.emplace(
               fstdistfunc_(data_point, getDataByInternalId(enterpoint_copy), dist_func_param_),
               enterpoint_copy);
