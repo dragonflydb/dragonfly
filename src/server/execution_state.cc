@@ -43,7 +43,7 @@ GenericError ExecutionState::GetError() const {
 }
 
 void ExecutionState::ReportCancelError() {
-  ReportError(std::make_error_code(errc::operation_canceled), "ExecutionState cancelled");
+  ReportErrorInternal(GenericError::Cancellation());
 }
 
 void ExecutionState::Reset(ErrHandler handler) {
@@ -90,7 +90,7 @@ GenericError ExecutionState::ReportErrorInternal(GenericError&& err) {
   // This context is either new or was Reset, where the handler was joined
   CHECK(!err_handler_fb_.IsJoinable());
 
-  LOG(WARNING) << "ReportError: " << err_.Format();
+  LOG_IF(WARNING, !err_.IsExplicitCancellation()) << "ReportError: " << err_.Format();
 
   // We can move err_handler_ because it should run at most once.
   if (err_handler_)
