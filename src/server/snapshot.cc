@@ -244,7 +244,8 @@ void SliceSnapshot::SerializeEntryLocked(DbIndex db_index, const PrimeKey& pk, c
   io::Result<uint8_t> res = serializer_->SaveEntry(pk, pv, expire, mc_flags, db_index);
   if (!res) {
     if (res.error() == errc::operation_canceled) {
-      LOG_EVERY_T(WARNING, 1) << "Snapshot cancelled while serializing entry in dbid=" << db_index;
+      // The context has already stopped, and ExecutionState logged the cause if it was a failure.
+      VLOG(1) << "Snapshot cancelled while serializing entry in dbid=" << db_index;
     } else {
       string tmp;
       LOG_EVERY_T(ERROR, 1) << "Snapshot failed to serialize key " << pk.GetSlice(&tmp)

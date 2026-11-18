@@ -315,8 +315,9 @@ int ProtocolClient::GetSocketUnreadBytes() {
 }
 
 void ProtocolClient::DefaultErrorHandler(const GenericError& err) {
-  LOG(WARNING) << "Socket error: " << err.Format() << " in " << server_context_.Description()
-               << ", socket info: " << SockInfo();
+  LOG_IF(WARNING, !err.IsExplicitCancellation())
+      << "Socket error: " << err.Format() << " in " << server_context_.Description()
+      << ", socket info: " << SockInfo();
   ShutdownSocket();
 }
 

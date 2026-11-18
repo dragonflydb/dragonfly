@@ -310,9 +310,9 @@ void Replica::MainReplicationFb(std::optional<LastMasterSyncData> last_master_sy
           exec_st_.ReportError(ec);
           break;
         }
-        LOG(WARNING) << "Error syncing with " << server().Description()
-                     << " (phase: " << GetCurrentPhase() << "): " << ec << " " << ec.message()
-                     << ", socket state: " + SockInfo();
+        LOG_IF(WARNING, state_mask_ & R_ENABLED)
+            << "Error syncing with " << server().Description() << " (phase: " << GetCurrentPhase()
+            << "): " << ec << " " << ec.message() << ", socket state: " + SockInfo();
         state_mask_ &= R_ENABLED;  // reset all flags besides R_ENABLED
         continue;
       }

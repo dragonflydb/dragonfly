@@ -791,7 +791,7 @@ auto DflyCmd::CreateSyncSession(ConnectionState* state) -> std::pair<uint32_t, u
 
   unsigned flow_count = shard_set->size();
   auto err_handler = [this, sync_id](const GenericError& err) {
-    LOG(INFO) << "Replication error: " << err.Format();
+    LOG_IF(INFO, !err.IsExplicitCancellation()) << "Replication error: " << err.Format();
 
     // Spawn external fiber to allow destructing the context from outside
     // and return from the handler immediately.
