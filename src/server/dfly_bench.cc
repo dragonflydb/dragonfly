@@ -407,6 +407,12 @@ class CommandGenerator {
     return absl::Uniform(absl::IntervalClosedClosed, bit_gen, expiry_min_, expiry_max_);
   }
 
+  // Memcache reads an expiration time over 30 days as a Unix time, so send those as one.
+  static constexpr uint32_t kMemcacheMaxRelativeTtl = 60 * 60 * 24 * 30;
+  static uint64_t ToMemcacheExptime(uint32_t ttl) {
+    return ttl <= kMemcacheMaxRelativeTtl ? ttl : absl::ToUnixSeconds(absl::Now()) + ttl;
+  }
+
   string FillSet(string_view key);
   string FillGet(string_view key);
 
@@ -463,6 +469,10 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
     }
     CHECK(expiry_min_ > 0 && expiry_min_ <= expiry_max_)
         << "--expiry_range must be min:max with 0 < min <= max, got " << expiry;
+    if (protocol == MC_TEXT) {
+      CHECK_LE(ToMemcacheExptime(expiry_max_), numeric_limits<uint32_t>::max())
+          << "--expiry_range max is too large for a memcache expiration time";
+    }
   }
 
   if (command_.empty()) {
@@ -580,7 +590,8 @@ string CommandGenerator::FillSet(string_view key) {
     absl::StrAppend(&res, "\r\n$", value.size(), "\r\n", value, "\r\n");
   } else {
     DCHECK_EQ(protocol, MC_TEXT);
-    absl::StrAppend(&res, "set ", key, " 0 ", HasExpiry() ? NextTtl() : 0, " ", value.size());
+    uint64_t exptime = HasExpiry() ? ToMemcacheExptime(NextTtl()) : 0;
+    absl::StrAppend(&res, "set ", key, " 0 ", exptime, " ", value.size());
     if (GetFlag(FLAGS_noreply)) {
       absl::StrAppend(&res, " noreply");
       noreply_ = true;
