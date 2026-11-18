@@ -27,6 +27,9 @@ struct AofManifest {
     // First start in progress: on startup, delete the other AOF files and bootstrap again.
     kBootstrapping,
     kActive,
+    // A replica's full sync replaces the data the base and log hold: on startup, load nothing and
+    // keep the files until a checkpoint commits a new base.
+    kRebasing,
   };
 
   struct Cut {

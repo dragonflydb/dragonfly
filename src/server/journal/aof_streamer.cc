@@ -85,6 +85,7 @@ optional<uint64_t> AofStreamer::Rotate() {
     prev_durable_lsn_ = max(prev_durable_lsn_, active_->DurableLsn());
   swap(active_, standby_);
   active_->StartPeriodicSync();
+  paused_ = false;
   spare_ready_ = false;
   ++seq_;
   PrepareSpare(seq_ + 1);
@@ -142,7 +143,14 @@ uint64_t AofStreamer::DurableLsn() const {
   return max(prev_durable_lsn_, active_->DurableLsn());
 }
 
+void AofStreamer::Pause() {
+  active_->Seal();
+  paused_ = true;
+}
+
 void AofStreamer::ConsumeJournalChange(const journal::JournalChangeItem& item) {
+  if (paused_)
+    return;
   active_->AddRecord(item.journal_item.data, item.journal_item.lsn);
 }
 

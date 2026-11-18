@@ -1148,8 +1148,12 @@ string AofStartupError(string_view dir) {
     return "--aof needs io_uring";
   if (GetFlag(FLAGS_hz) <= 0)
     return "--aof needs --hz > 0, the heartbeat seals AOF blocks";
+  if (GetFlag(FLAGS_experimental_cascaded_partial_sync))
+    return "--aof does not support --experimental_cascaded_partial_sync, it resets journal LSNs";
+
+  // TODO: a restarting replica full syncs anyway, so it could skip the restore instead.
   if (GetFlag(FLAGS_replicaof).has_value())
-    return "--aof is not supported on replicas";
+    return "--aof does not support --replicaof, send REPLICAOF once the server is up";
   return AofSaveError(GetFlag(FLAGS_df_snapshot_format), GetFlag(FLAGS_dbfilename));
 }
 
@@ -1190,6 +1194,7 @@ optional<size_t> CommitAofCheckpoint(const string& base_file, bool owned,
     LOG(ERROR) << "AOF checkpoint not committed: " << manifest.error().message();
     return nullopt;
   }
+  manifest->state = AofManifest::State::kActive;
   manifest->checkpoint_id++;
   manifest->base_owned = owned;
   manifest->base_path = filesystem::path(base_file).filename().string();
@@ -1281,6 +1286,32 @@ string BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const Aof
   return manifest.base_path;
 }
 
+// A replica's full sync was interrupted: the base and log hold the data it was replacing. Starts
+// empty, with paused streamers in new segments past the existing ones, and keeps every file until
+// a new base commits.
+void ResumeRebasing(string_view dir, const AofManifest& manifest) {
+  LOG(WARNING) << "AOF manifest is rebasing: a full sync was interrupted. Starting empty; the old "
+                  "AOF files stay until a new base commits";
+  io::Result<vector<string>> files = ListAofFiles(dir);
+  if (!files)
+    ErrorAndExit(absl::StrCat("failed to list AOF files: ", files.error().message()));
+  vector<AofResume> resume(shard_set->size());
+  for (ShardId sid = 0; sid < resume.size() && sid < manifest.cuts.size(); ++sid)
+    resume[sid].seq = manifest.cuts[sid].seq;
+  for (const string& path : *files) {
+    string_view name = string_view(path).substr(path.rfind('/') + 1);
+    if (!absl::ConsumeSuffix(&name, ".tmp"))
+      absl::ConsumeSuffix(&name, ".discarded");
+    uint32_t sid;
+    uint64_t seq;
+    if (AofSegmentWriter::ParseSegmentName(name, &sid, &seq) && sid < resume.size())
+      resume[sid].seq = max(resume[sid].seq, seq + 1);
+  }
+  if (!StartStreamers(dir, resume))
+    ErrorAndExit("failed to open AOF segments");
+  shard_set->RunBriefInParallel([](EngineShard* shard) { shard->aof_streamer()->Pause(); });
+}
+
 // Loads the manifest's base, replays the log on top and resumes it.
 void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
                const AofLoadFn& load) {
@@ -1315,6 +1346,9 @@ struct AofBase {
 
   // Bytes on disk of the base: the summary plus every shard file.
   size_t size = 0;
+
+  // The manifest was rebasing: nothing was loaded and appending is paused.
+  bool rebasing = false;
 };
 
 // Restores the data from the AOF, or bootstraps it, then starts logging. Exits if it cannot.
@@ -1332,6 +1366,7 @@ AofBase StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Servi
   // never reach the AOF. Also join the fiber on shutdown, and check that no command allowed during
   // LOADING changes data.
   string base_path;
+  bool rebasing = false;
   shard_set->pool()->GetNextProactor()->Await([&] {
     io::Result<AofManifest> manifest = ReadAofManifest(dir);
     if (!manifest && manifest.error() != errc::no_such_file_or_directory)
@@ -1343,6 +1378,11 @@ AofBase StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Servi
       if (error_code ec = RemoveAofFilesExceptManifest(dir); ec)
         ErrorAndExit(absl::StrCat("failed to remove AOF files: ", ec.message()));
       base_path = BootstrapAof(dir, storage, load);
+      return;
+    }
+    if (manifest && manifest->state == AofManifest::State::kRebasing) {
+      ResumeRebasing(dir, *manifest);
+      rebasing = true;
       return;
     }
     if (manifest) {
@@ -1364,7 +1404,7 @@ AofBase StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Servi
       ErrorAndExit(absl::StrCat("AOF files in ", dir, " but no manifest, e.g. ", files->front()));
     base_path = BootstrapAof(dir, storage, load);
   });
-  return {base_path, base_path.empty() ? 0 : AofBaseSize(dir, base_path)};
+  return {base_path, base_path.empty() ? 0 : AofBaseSize(dir, base_path), rebasing};
 #else
   ErrorAndExit("--aof is supported only on Linux");
 #endif
@@ -1413,6 +1453,8 @@ void AppendAofInfo(const SaveInfoData& save_info, const Metrics& m, string* info
                          [get](string* out, const AofStats& st) { absl::StrAppend(out, get(st)); });
   };
 
+  // rebasing: no committed base covers the data in memory yet (a replica's full sync).
+  append("aof_state", save_info.aof_rebase == AofRebase::kNone ? "active" : "rebasing");
   append("aof_rewrite_in_progress", static_cast<int>(save_info.aof_checkpoint_in_progress));
   append("aof_last_bgrewrite_status", save_info.aof_last_checkpoint_ok ? "ok" : "err");
   append("aof_last_write_status", write_ok ? "ok" : "err");
@@ -1765,6 +1807,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
     thread_safe_save_info_.Update([&base](SaveInfoData* data) {
       data->aof_base_file = base.file;
       data->aof_base_size = base.size;
+      data->aof_rebase = base.rebasing ? AofRebase::kSyncing : AofRebase::kNone;
     });
     aof_checkpoint_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
         "aof_checkpoint", [this] { AofCheckpointScheduling(); });
@@ -1837,7 +1880,8 @@ void ServerFamily::Shutdown() {
   JoinSnapshotSchedule();
 
   // Before StopAof(): an automatic checkpoint needs the streamers.
-  aof_checkpoint_done_.Notify();
+  aof_checkpoint_stop_.store(true, memory_order_release);
+  aof_checkpoint_wake_.Notify();
   aof_checkpoint_fb_.JoinIfNeeded();
 
   bg_save_fb_.JoinIfNeeded();
@@ -2098,14 +2142,39 @@ void ServerFamily::SnapshotScheduling() {
 }
 
 void ServerFamily::AofCheckpointScheduling() {
-  if (GetFlag(FLAGS_aof_rewrite_percentage) == 0)
-    return;
-
   // A failed checkpoint is simply retried by the next wake.
-  while (!aof_checkpoint_done_.WaitFor(kAofCheckpointCheckInterval)) {
+  // TODO(#8410): back off after failures (1s doubling up to a few minutes, reset on success), so a
+  // persistent failure does not run full snapshots back to back and starve the AOF's own writes.
+  while (true) {
+    // Reset before reading the state, so a request made after it wakes the next wait.
+    aof_checkpoint_wake_.WaitFor(kAofCheckpointCheckInterval);
+    aof_checkpoint_wake_.Reset();
+    if (aof_checkpoint_stop_.load(memory_order_acquire))
+      return;
+
     // A running save becomes the checkpoint anyway.
     SaveInfoData save_info = GetLastSaveInfo();
     if (save_info.save_in_progress)
+      continue;
+
+    // After a full sync, at stable sync or promotion: the first base covers the loaded data.
+    if (save_info.aof_rebase == AofRebase::kCheckpoint) {
+      LOG(INFO) << "Taking the AOF checkpoint after the full sync";
+      if (GenericError ec = DoAofCheckpoint(); ec) {
+        LOG(WARNING) << "AOF checkpoint after the full sync failed: " << ec.Format();
+        continue;
+      }
+
+      // A full sync that started meanwhile needs its own checkpoint.
+      thread_safe_save_info_.Update([epoch = save_info.aof_rebase_epoch](SaveInfoData* data) {
+        if (data->aof_rebase_epoch == epoch)
+          data->aof_rebase = AofRebase::kNone;
+      });
+      continue;
+    }
+
+    // Appending is paused until the rebase, so the log does not grow meanwhile.
+    if (save_info.aof_rebase == AofRebase::kSyncing)
       continue;
 
     atomic_size_t total_log_size = 0;
@@ -2123,6 +2192,46 @@ void ServerFamily::AofCheckpointScheduling() {
     if (GenericError ec = DoAofCheckpoint(); ec)
       LOG(WARNING) << "AOF checkpoint failed: " << ec.Format();
   }
+}
+
+GenericError ServerFamily::PauseAofAndEnterRebasing() {
+#ifdef __linux__
+  if (!GetFlag(FLAGS_aof))
+    return {};
+  thread_safe_save_info_.Update([](SaveInfoData* data) {
+    data->aof_rebase_epoch++;
+    data->aof_rebase = AofRebase::kSyncing;
+  });
+  shard_set->RunBriefInParallel([](EngineShard* shard) {
+    if (AofStreamer* streamer = shard->aof_streamer(); streamer)
+      streamer->Pause();
+  });
+
+  // A crash before the new base commits must not load the data this sync replaces. The files stay
+  // until that commit.
+  string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
+  io::Result<AofManifest> manifest = ReadAofManifest(dir);
+  if (!manifest)
+    return GenericError(manifest.error(), "Failed to read the AOF manifest");
+  if (manifest->state != AofManifest::State::kRebasing) {
+    manifest->state = AofManifest::State::kRebasing;
+    if (error_code ec = WriteAofManifest(dir, *manifest); ec)
+      return GenericError(ec, "Failed to mark the AOF manifest rebasing");
+  }
+#endif
+  return {};
+}
+
+void ServerFamily::StartAofRebaseCheckpoint() {
+  bool requested = false;
+  thread_safe_save_info_.Update([&requested](SaveInfoData* data) {
+    if (data->aof_rebase == AofRebase::kSyncing) {
+      data->aof_rebase = AofRebase::kCheckpoint;
+      requested = true;
+    }
+  });
+  if (requested)
+    aof_checkpoint_wake_.Notify();
 }
 
 GenericError ServerFamily::DoAofCheckpoint() {
@@ -2466,6 +2575,9 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
     }
   });
 
+  // The dump is written, but the manifest still names the old base.
+  if (aof_checkpoint && !save_info.error && !aof_base_size)
+    return GenericError("Failed to commit the AOF checkpoint");
   return save_info.error;
 }
 
@@ -3948,6 +4060,10 @@ void ServerFamily::AddReplicaOf(CmdArgParser parser, CommandContext* cmd_cntx) {
         "Calling ADDREPLICAOFF allowed only after server is already a replica");
   }
 
+  // Each source's full sync would rebase the AOF at the same time.
+  if (GetFlag(FLAGS_aof))
+    return cmd_cntx->SendError("ADDREPLICAOF is not supported with --aof");
+
   auto replicaof_args = ReplicaOfArgs::FromCmdArgs(parser.UnparsedArgs());
   if (!replicaof_args.has_value()) {
     return cmd_cntx->SendError(replicaof_args.error());
@@ -4022,10 +4138,6 @@ void ServerFamily::ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cm
     replica_manager_->PromoteToMaster();
     return cmd_cntx->rb()->SendOk();
   }
-
-  // A full sync loads data bypassing the journal, so the AOF would miss it.
-  if (GetFlag(FLAGS_aof))
-    return cmd_cntx->SendError("REPLICAOF is not supported with --aof");
 
   GenericError ec = replica_manager_->StartReplication(replicaof_args->host, replicaof_args->port,
                                                        replicaof_args->slot_range, on_error);

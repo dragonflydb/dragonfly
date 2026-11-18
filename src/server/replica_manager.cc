@@ -16,6 +16,8 @@
 #include "server/replica.h"
 #include "server/server_state.h"
 
+ABSL_DECLARE_FLAG(bool, aof);
+
 // TODO deprecate when flipped in production
 ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
           "when set, preserves journal offsets after REPLICAOF NO ONE");
@@ -96,7 +98,8 @@ void ReplicaManager::PromoteToMaster() {
     CHECK(replica_);
 
     auto repl_ptr = replica_;
-    if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
+    // With --aof the journal already runs, with the LSNs the AOF chain continues from.
+    if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal) && !absl::GetFlag(FLAGS_aof)) {
       // Start journal and keep offsets.
       repl_ptr->StartJournalAtOwnLSN();
     }
@@ -111,6 +114,9 @@ void ReplicaManager::PromoteToMaster() {
 
   // May not switch to ACTIVE if the process is, for example, shutting down at the same time.
   service_->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+
+  // A full sync cut short paused the AOF: the new base covers whatever data was loaded.
+  service_->server_family().StartAofRebaseCheckpoint();
 }
 
 GenericError ReplicaManager::TakeOver(int timeout_sec, bool save_flag) {
@@ -125,8 +131,10 @@ GenericError ReplicaManager::TakeOver(int timeout_sec, bool save_flag) {
   auto repl_ptr = replica_;
   CHECK(repl_ptr);
 
-  // Start journal to allow partial sync from same source master
-  repl_ptr->StartJournalAtOwnLSN();
+  // Start journal to allow partial sync from same source master. With --aof it already runs, with
+  // the LSNs the AOF chain continues from.
+  if (!absl::GetFlag(FLAGS_aof))
+    repl_ptr->StartJournalAtOwnLSN();
 
   auto info = replica_->GetSummary();
   if (!info.full_sync_done) {

@@ -46,6 +46,10 @@ class AofStreamer : public journal::JournalConsumerInterface {
   // after WaitSpareReady(). Returns the new segment's seq, or nullopt if no spare is ready.
   std::optional<uint64_t> Rotate();
 
+  // Stops appending until the next Rotate(): a full sync replaces the data, so records stay out of
+  // the log until a checkpoint's base covers them. Seals what the active segment holds.
+  void Pause();
+
   // A checkpoint whose cut is at cut_lsn committed: its base holds every record before it, so the
   // segments before the cut, even a failed one, no longer matter. May yield.
   void OnCheckpoint(uint64_t cut_lsn);
@@ -100,6 +104,9 @@ class AofStreamer : public journal::JournalConsumerInterface {
   // tail, and replay discards everything after it: stop the active writer.
   std::error_code retired_ec_;
 
+  // Set by Pause(), cleared by Rotate(): records are dropped meanwhile.
+  bool paused_ = false;
+
   // Size of the segments before the active one, from the cut on.
   size_t prev_log_size_ = 0;
 
@@ -143,6 +150,9 @@ class AofStreamer : public journal::JournalConsumerInterface {
 
   std::optional<uint64_t> Rotate() {
     return std::nullopt;
+  }
+
+  void Pause() {
   }
 
   void OnCheckpoint(uint64_t cut_lsn) {
