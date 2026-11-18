@@ -265,6 +265,14 @@ class DflyCmd {
   // Stop all background processes so we can exit in orderly manner.
   void CancelReplicas() ABSL_LOCKS_EXCLUDED(mu_);
 
+  // Forces all replicas of this node to perform a full sync by breaking the replication connection
+  // with a cancellation error (CancelReplicas) and resetting the journal
+  void ForceReplicasToFullSync() ABSL_LOCKS_EXCLUDED(mu_);
+
+  // Return true if no replicas are registered or if all replicas reached stable sync
+  // Used in debug populate to DCHECK insocsistent flows that violate transaction gurantees
+  bool AreAllReplicasInStableSync() const ABSL_LOCKS_EXCLUDED(mu_);
+
   // Create new sync session. Returns (session_id, number of flows)
   std::pair<uint32_t, unsigned> CreateSyncSession(ConnectionState* state) ABSL_LOCKS_EXCLUDED(mu_);
 

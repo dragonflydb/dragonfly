@@ -29,6 +29,7 @@ extern "C" {
 #include "facade/reply_capture.h"
 #include "facade/resp_parser.h"
 #include "facade/socket_utils.h"
+#include "server/dflycmd.h"
 #include "server/error.h"
 #include "server/journal/executor.h"
 #include "server/journal/journal.h"
@@ -748,7 +749,7 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
     ++psync_successes_;
   } else if (absl::GetFlag(FLAGS_experimental_cascaded_partial_sync)) {
     // We replace our dataset with full sync invisibly for other replicas, so force them to re-sync
-    service_.server_family().ForceReplicasToFullSync();
+    service_.server_family().GetDflyCmd()->ForceReplicasToFullSync();
   }
 
   // Joining flows and resetting state is done by cleanup.
