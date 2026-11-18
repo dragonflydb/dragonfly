@@ -521,20 +521,29 @@ TEST_F(InterpreterTest, Modules) {
   EXPECT_EQ("str(\x1\x2test)", ser_.res);
 }
 
-TEST_F(InterpreterTest, CjsonDecodeMaxDepth) {
+TEST_F(InterpreterTest, CjsonMaxDepth) {
   ASSERT_TRUE(Execute(R"(
-    local json = cjson.new()
-    assert(cjson.decode_max_depth() == 50 and json.decode_max_depth() == 50)
     local value = string.rep('[', 50) .. '1' .. string.rep(']', 50)
-    assert(json.decode(value))
-    value = '[' .. value .. ']'
-    local ok, err = pcall(json.decode, value)
-    assert(not ok and err:find('Found too many nested data structures (51)', 1, true), err)
-
-    assert(json.decode_max_depth(51) == 51)
-    return type(json.decode(value))
+    for _, json in ipairs({cjson, cjson.new()}) do
+      for _, setting in ipairs({json.encode_max_depth, json.decode_max_depth}) do
+        assert(setting() == 50)
+        assert(not pcall(setting, 0))
+        assert(not pcall(setting, 1, 2))
+      end
+      for _, requested in ipairs({1000, 10}) do
+        assert(json.encode_max_depth(requested) == 50)
+        assert(json.decode_max_depth(requested) == 50)
+        local decoded = json.decode(value)
+        assert(json.encode(decoded) == value)
+        local ok, err = pcall(json.encode, {decoded})
+        assert(not ok and err:find('excessive nesting (51)', 1, true), err)
+        ok, err = pcall(json.decode, '[' .. value .. ']')
+        assert(not ok and err:find('too many nested data structures (51)', 1, true), err)
+      end
+    end
+    return true
   )")) << error_;
-  EXPECT_EQ("str(table)", ser_.res);
+  EXPECT_EQ("bool(1)", ser_.res);
 }
 
 // Check compatibility with Lua 5.1
