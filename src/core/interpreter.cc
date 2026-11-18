@@ -23,6 +23,7 @@
 #include "core/interpreter_polyfill.h"
 #include "core/lua_internals.h"
 #include "overloaded.h"
+#include "util/fibers/fibers.h"
 
 extern "C" {
 #include <lauxlib.h>
@@ -41,6 +42,13 @@ LUALIB_API int(luaopen_bit)(lua_State* L);
 #include <absl/strings/str_format.h>
 
 #include "base/logging.h"
+
+extern "C" bool dfly_cjson_has_stack_headroom() {
+  constexpr uintptr_t kReserve = 8 * 1024;
+  uintptr_t bottom = util::fb2::detail::FiberActive()->stack_bottom();
+  uintptr_t frame = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+  return bottom == 0 || (frame >= bottom && frame - bottom >= kReserve);
+}
 
 struct LuaGcGen {
   int minormul = 20;

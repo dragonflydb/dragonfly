@@ -20,6 +20,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "util/fibers/fibers.h"
 
 extern "C" {
 #include "redis/zmalloc.h"
@@ -519,6 +520,44 @@ TEST_F(InterpreterTest, Modules) {
   // struct module
   EXPECT_TRUE(Execute("return struct.pack('bbc4', 1, 2, 'test')"));
   EXPECT_EQ("str(\x1\x2test)", ser_.res);
+}
+
+TEST_F(InterpreterTest, CjsonDecodeFiberHeadroom) {
+  lua_pushcfunction(lua(), [](lua_State* state) -> int {
+    // leave enough room to enter the decoder and trip the error after several descents
+    constexpr size_t kEntryMargin = 13 * 1024;
+    size_t margin = util::ThisFiber::GetStackMargin(__builtin_frame_address(0));
+    luaL_argcheck(state, margin > kEntryMargin, 1, "insufficient test stack");
+    // fill up to leave only around 13 KiB free, this usage will remain live during the decode
+    auto* padding = static_cast<volatile char*>(__builtin_alloca(margin - kEntryMargin));
+    *padding = 0;
+
+    // Reset GC so decoding can trigger a collection and use stack frame of its own
+    lua_gc(state, LUA_GCRESTART);
+    // calls decode
+    lua_call(state, 1, 1);
+    return 1;
+  });
+  lua_setglobal(lua(), "with_occupied_stack");
+
+  // first tries with mostly filled stack, then without, the second try will succeeed, so the
+  // interpreter is still working and usable after the first error is handled
+  const char* script = R"(
+    local filter = string.rep('{"$not":', 64) .. 'true' .. string.rep('}', 64)
+    local value = '{"id":"example","topics":["created"],"filter":' .. filter .. '}'
+    local ok, err = pcall(with_occupied_stack, cjson.decode, value)
+    assert(not ok and string.match(err, 'Insufficient fiber stack to decode JSON at depth %d+, character %d+$'), err)
+    assert(cjson.decode(value).id == 'example')
+    cjson.decode_max_depth(1)
+    ok, err = pcall(cjson.decode, '[[1]]')
+    assert(not ok and string.find(err, 'Found too many nested data structures (2) at character 2', 1, true), err)
+  )";
+  ASSERT_EQ(luaL_loadstring(lua(), script), LUA_OK);
+  int status = LUA_ERRRUN;
+  util::fb2::Fiber fiber({.name = "cjson", .stack_size = 40 * 1024},
+                         [&] { status = lua_pcall(lua(), 0, 0, 0); });
+  fiber.Join();
+  ASSERT_EQ(status, LUA_OK) << lua_tostring(lua(), -1);
 }
 
 // Check compatibility with Lua 5.1
