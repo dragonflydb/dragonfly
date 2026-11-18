@@ -1131,7 +1131,7 @@ string AofStartupError(string_view dir) {
 
 #ifdef __linux__
 // Bytes of the DFS file set whose summary is base_path: <prefix>-summary.dfs, <prefix>-NNNN.dfs.
-uint64_t AofBaseSize(string_view dir, string_view base_path) {
+size_t AofBaseSize(string_view dir, string_view base_path) {
   string_view prefix = base_path;
   absl::ConsumeSuffix(&prefix, "summary.dfs");
   io::Result<io::StatShortVec> files = io::StatFiles(absl::StrCat(dir, "/", prefix, "*.dfs"));
@@ -1146,8 +1146,8 @@ uint64_t AofBaseSize(string_view dir, string_view base_path) {
 // Makes a finished save the AOF base: commits the manifest, then deletes the segments below the
 // cut. The save itself succeeded, so a failure here is only logged. Returns the new base's size if
 // the checkpoint committed.
-optional<uint64_t> CommitAofCheckpoint(const string& base_file,
-                                       const vector<AofManifest::Cut>& cuts) {
+optional<size_t> CommitAofCheckpoint(const string& base_file,
+                                     const vector<AofManifest::Cut>& cuts) {
   string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
   io::Result<AofManifest> manifest = ReadAofManifest(dir);
   if (!manifest) {
@@ -1273,8 +1273,8 @@ void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
 
 // Restores the data from the AOF, or bootstraps it, then starts logging. Exits if it cannot.
 // Returns the size of the base.
-uint64_t StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service,
-                  const AofLoadFn& load) {
+size_t StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service,
+                const AofLoadFn& load) {
   string dir = flag_dir.empty() ? "." : flag_dir;
   if (string reason = AofStartupError(dir); !reason.empty())
     ErrorAndExit(reason);
@@ -1712,7 +1712,7 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   if (GetFlag(FLAGS_aof)) {
-    uint64_t base_size =
+    size_t base_size =
         StartAof(flag_dir, snapshot_storage_.get(), &service_, [this](const string& path) {
           auto future = Load(path, LoadExistingKeys::kFail);
           return future ? future->Get() : GenericError("the server is not active");
@@ -2292,7 +2292,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   VLOG(1) << "Before WaitUntilSaveFinished::Finalize";
   bool is_bg_save;
   bool aof_checkpoint = false;
-  optional<uint64_t> aof_base_size;
+  optional<size_t> aof_base_size;
   util::fb2::LockGuard lk(save_mu_);
   // It's possible that another save was initiated and the controller has changed.
   // We only finalize and reset if it's still the same one we were waiting for.

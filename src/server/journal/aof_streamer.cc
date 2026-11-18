@@ -5,8 +5,8 @@
 #include "server/journal/aof_streamer.h"
 
 #include <absl/flags/flag.h>
-#include <absl/time/clock.h>
 
+#include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "facade/facade_types.h"
 #include "server/error.h"
@@ -30,7 +30,7 @@ AofStreamer::AofStreamer(string dir, uint32_t shard_id, uint32_t shard_count)
       max_buffered_bytes_(absl::GetFlag(FLAGS_aof_max_buffered_bytes)) {
 }
 
-error_code AofStreamer::Start(uint64_t seq, uint64_t next_lsn, uint64_t log_size) {
+error_code AofStreamer::Start(uint64_t seq, uint64_t next_lsn, size_t log_size) {
   active_ = make_shared<AofSegmentWriter>(dir_, shard_id_, shard_count_);
   RETURN_ON_ERR(active_->Open(seq));
   active_->StartPeriodicSync();
@@ -159,9 +159,9 @@ void AofStreamer::ThrottleIfNeeded() {
   shared_ptr<AofSegmentWriter> writer = active_;
   if (writer->PendingBytes() <= max_buffered_bytes_)
     return;
-  uint64_t start = absl::GetCurrentTimeNanos();
+  uint64_t start_cycles = base::CycleClock::Now();
   writer->WaitPending(max_buffered_bytes_);
-  throttle_usec_ += (absl::GetCurrentTimeNanos() - start) / 1000;
+  throttle_usec_ += base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
 }
 
 void AofStreamer::Seal() {

@@ -10,12 +10,12 @@
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_split.h>
 #include <absl/strings/strip.h>
-#include <absl/time/clock.h>
 #include <fcntl.h>
 // For IORING_FSYNC_DATASYNC.
 #include <linux/io_uring.h>
 #include <unistd.h>
 
+#include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "server/error.h"
 #include "util/fibers/proactor_base.h"
@@ -153,9 +153,9 @@ error_code AofSegmentWriter::Shutdown() {
   cv_.wait(lk, [this] { return in_flight_ == 0 && !sync_in_flight_; });
 
   if (!ec_) {
-    uint64_t start_ns = absl::GetCurrentTimeNanos();
+    uint64_t start_cycles = base::CycleClock::Now();
     error_code ec = file_->FSync(IORING_FSYNC_DATASYNC);
-    RecordSync(start_ns);
+    RecordSync(start_cycles);
     if (ec) {
       ec_ = ec;
     } else {
@@ -252,21 +252,21 @@ void AofSegmentWriter::MaybeStartFSync() {
   size_t sync_offset = written_offset_;
   uint64_t sync_lsn = written_lsn_;
   sync_in_flight_ = true;
-  uint64_t start_ns = absl::GetCurrentTimeNanos();
-  file_->FSyncAsync(IORING_FSYNC_DATASYNC, [this, sync_offset, sync_lsn, start_ns](int res) {
-    OnSyncDone(sync_offset, sync_lsn, start_ns, res);
+  uint64_t start_cycles = base::CycleClock::Now();
+  file_->FSyncAsync(IORING_FSYNC_DATASYNC, [this, sync_offset, sync_lsn, start_cycles](int res) {
+    OnSyncDone(sync_offset, sync_lsn, start_cycles, res);
   });
 }
 
-void AofSegmentWriter::RecordSync(uint64_t start_ns) {
+void AofSegmentWriter::RecordSync(uint64_t start_cycles) {
   ++fsync_stats_.count;
-  fsync_stats_.usec += (absl::GetCurrentTimeNanos() - start_ns) / 1000;
+  fsync_stats_.usec += base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
 }
 
-void AofSegmentWriter::OnSyncDone(size_t sync_offset, uint64_t sync_lsn, uint64_t start_ns,
+void AofSegmentWriter::OnSyncDone(size_t sync_offset, uint64_t sync_lsn, uint64_t start_cycles,
                                   int res) {
   sync_in_flight_ = false;
-  RecordSync(start_ns);
+  RecordSync(start_cycles);
   if (res < 0) {
     // Never retried: the kernel may have dropped the dirty pages ("fsyncgate"), so a later
     // success would prove nothing.

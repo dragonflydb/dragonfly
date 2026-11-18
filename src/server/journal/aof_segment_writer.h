@@ -110,10 +110,10 @@ class AofSegmentWriter {
   // Runs every kAofSyncMs: starts an fdatasync of completed writes, unless one is running or
   // nothing new was written.
   void MaybeStartFSync();
-  void OnSyncDone(size_t sync_offset, uint64_t sync_lsn, uint64_t start_ns, int res);
+  void OnSyncDone(size_t sync_offset, uint64_t sync_lsn, uint64_t start_cycles, int res);
 
-  // Counts a completed fdatasync that started at start_ns.
-  void RecordSync(uint64_t start_ns);
+  // Counts a completed fdatasync that started at start_cycles (base::CycleClock).
+  void RecordSync(uint64_t start_cycles);
 
   std::string dir_;
   uint32_t shard_id_;

@@ -43,7 +43,7 @@ class AofStreamer : public journal::JournalConsumerInterface {
 
   // Opens segment seq, starts the journal at next_lsn and registers as its consumer. Then prepares
   // segment seq + 1 as the spare. log_size is the size of the segments before seq.
-  std::error_code Start(uint64_t seq, uint64_t next_lsn, uint64_t log_size);
+  std::error_code Start(uint64_t seq, uint64_t next_lsn, size_t log_size);
 
   // Unregisters first, so no record arrives after the segment is closed. Deletes the unused
   // spare. Returns the first error, including one from a writer retired by a rotation.
@@ -113,7 +113,7 @@ class AofStreamer : public journal::JournalConsumerInterface {
   std::error_code retired_ec_;
 
   // Size of the segments before the active one, from the cut on.
-  uint64_t prev_log_size_ = 0;
+  size_t prev_log_size_ = 0;
 
   // fdatasyncs of the writers already retired, so the counters never go back.
   AofFsyncStats prev_fsync_;
@@ -132,7 +132,7 @@ class AofStreamer : public journal::JournalConsumerInterface {
   AofStreamer(std::string dir, uint32_t shard_id, uint32_t shard_count) {
   }
 
-  std::error_code Start(uint64_t seq, uint64_t next_lsn, uint64_t log_size) {
+  std::error_code Start(uint64_t seq, uint64_t next_lsn, size_t log_size) {
     return std::make_error_code(std::errc::not_supported);
   }
 
