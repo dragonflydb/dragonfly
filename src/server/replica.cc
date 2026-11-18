@@ -149,7 +149,7 @@ GenericError Replica::Start() {
   // 1. Resolve dns.
   VLOG(1) << "Resolving master DNS";
   error_code ec = ResolveHostDns();
-  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not resolve master dns"));
+  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not resolve master dns: "));
 
   // 2. Connect socket.
   VLOG(1) << "Connecting to master";
@@ -160,7 +160,7 @@ GenericError Replica::Start() {
   VLOG(1) << "Greeting";
   state_mask_ = R_ENABLED | R_TCP_CONNECTED;
   ec = Greet();
-  RETURN_ON_ERR(check_connection_error(ec, "could not greet master "));
+  RETURN_ON_GENERIC_ERR(check_connection_error(ec, "could not greet master: "));
 
   return {};
 }
