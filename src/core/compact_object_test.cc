@@ -494,22 +494,20 @@ struct AsciiCodec {
 const AsciiCodec kAsciiCodecs[] = {
     {"Dispatch", detail::ascii_try_pack, detail::ascii_unpack_fast},
     {"Scalar", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_scalar},
-#ifdef DFLY_ASCII_TRY_PACK_HAS_SIMD
-    {"SimdPack", detail::impl::ascii_try_pack_simd, detail::impl::ascii_unpack_fast_scalar},
-#endif
-#ifdef DFLY_ASCII_TRY_PACK_HAS_SSE
+#if defined(ASCII_SSSE3)
     {"SsePack", detail::impl::ascii_try_pack_sse, detail::impl::ascii_unpack_fast_scalar},
+#elif defined(ASCII_NEON)
+    {"NeonPack", detail::impl::ascii_try_pack_neon, detail::impl::ascii_unpack_fast_scalar},
 #endif
-#ifdef DFLY_ASCII_TRY_PACK_HAS_AVX2
+#if defined(ASCII_AVX2)
     {"Avx2Pack", detail::impl::ascii_try_pack_avx2, detail::impl::ascii_unpack_fast_scalar},
 #endif
-#ifdef DFLY_ASCII_UNPACK_FAST_HAS_SSE
+#if defined(ASCII_SSE4_1)
     {"SseUnpack", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_sse},
 #endif
-#ifdef DFLY_ASCII_UNPACK_FAST_HAS_AVX2
+#if defined(ASCII_AVX2)
     {"Avx2Unpack", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_avx2},
-#endif
-#ifdef DFLY_ASCII_UNPACK_FAST_HAS_NEON
+#elif defined(ASCII_NEON)
     {"NeonUnpack", detail::impl::ascii_try_pack_scalar, detail::impl::ascii_unpack_fast_neon},
 #endif
 };
@@ -539,7 +537,8 @@ vector<size_t> NonAsciiPositions(size_t len) {
     for (size_t i = 0; i < len; ++i)
       positions.push_back(i);
   } else {
-    for (size_t i : {size_t{0}, size_t{7}, size_t{8}, size_t{15}, size_t{16}, len / 2, len - 1}) {
+    for (size_t i : {size_t{0}, size_t{7}, size_t{8}, size_t{15}, size_t{16}, size_t{31},
+                     size_t{32}, size_t{63}, size_t{64}, len / 2, len - 1}) {
       if (i < len && find(positions.begin(), positions.end(), i) == positions.end())
         positions.push_back(i);
     }
@@ -606,15 +605,22 @@ TEST_P(AsciiCodecTest, UnpacksInPlace) {
 // A single byte with the high bit set has to be rejected, wherever it sits in the input.
 TEST_P(AsciiCodecTest, RejectsNonAscii) {
   const AsciiCodec& codec = GetParam();
+  const string guard(16, static_cast<char>(0xA5));
 
   for (size_t len : AsciiCodecLengths()) {
     string ascii = MakeAscii(len);
-    string packed(detail::binpacked_len(len), '\0');
+    const size_t packed_len = detail::binpacked_len(len);
+    string packed = guard + string(packed_len, '\0') + guard;
 
     for (size_t pos : NonAsciiPositions(len)) {
       ascii[pos] = static_cast<char>(ascii[pos] | 0x80);
-      EXPECT_EQ(codec.pack(ascii.data(), len, reinterpret_cast<uint8_t*>(packed.data())), 0u)
+      EXPECT_EQ(
+          codec.pack(ascii.data(), len, reinterpret_cast<uint8_t*>(packed.data() + guard.size())),
+          0u)
           << "len=" << len << " pos=" << pos;
+      EXPECT_EQ(packed.substr(0, guard.size()) + packed.substr(guard.size() + packed_len),
+                guard + guard)
+          << "packed guard, len=" << len << " pos=" << pos;
       ascii[pos] = static_cast<char>(ascii[pos] & 0x7F);
     }
   }
@@ -1608,6 +1614,18 @@ template <auto operation> static void BM_AsciiCodec(benchmark::State& state) {
   state.SetBytesProcessed(state.iterations() * val.size());
 }
 
+// Non-ascii byte at the very start, measures how early a kernel gives up.
+template <auto operation> static void BM_AsciiTryPackReject(benchmark::State& state) {
+  string val(state.range(0), 'a');
+  val[0] = '\xC3';
+  vector<uint8_t> buf(detail::binpacked_len(val.size()));
+
+  while (state.KeepRunning()) {
+    benchmark::DoNotOptimize(operation(val.data(), val.size(), buf.data()));
+    benchmark::ClobberMemory();
+  }
+}
+
 static void AsciiCodecArgs(benchmark::Benchmark* benchmark) {
   benchmark->ArgName("len");
   for (int len : {0,  1,  7,  8,  13, 16,  17,  18,  25,   27,   32,   33,   48,   49,   61,   64,
@@ -1615,14 +1633,26 @@ static void AsciiCodecArgs(benchmark::Benchmark* benchmark) {
     benchmark->Arg(len);
 }
 
+// Covers the boundaries between the short, 128-bit and 256-bit paths.
+static void AsciiTryPackRejectArgs(benchmark::Benchmark* benchmark) {
+  benchmark->ArgName("len");
+  for (int len : {16, 32, 34, 48, 64, 80, 95, 96, 128, 256, 4096, 65536})
+    benchmark->Arg(len);
+}
+
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_try_pack)->Apply(AsciiCodecArgs);
-#ifdef DFLY_ASCII_TRY_PACK_HAS_SSE
+#if defined(ASCII_SSSE3)
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_try_pack_sse)->Apply(AsciiCodecArgs);
 #endif
-#ifdef DFLY_ASCII_UNPACK_FAST_HAS_SSE
+#if defined(ASCII_SSE4_1)
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::impl::ascii_unpack_fast_sse)->Apply(AsciiCodecArgs);
 #endif
 BENCHMARK_TEMPLATE(BM_AsciiCodec, detail::ascii_unpack_fast)->Apply(AsciiCodecArgs);
+BENCHMARK_TEMPLATE(BM_AsciiTryPackReject, detail::ascii_try_pack)->Apply(AsciiTryPackRejectArgs);
+#if defined(ASCII_SSSE3)
+BENCHMARK_TEMPLATE(BM_AsciiTryPackReject, detail::impl::ascii_try_pack_sse)
+    ->Apply(AsciiTryPackRejectArgs);
+#endif
 
 static void BM_LpCompare(benchmark::State& state) {
   std::mt19937_64 rd;
