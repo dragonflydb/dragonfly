@@ -117,6 +117,9 @@ FlowInfo& SetupFlowConnection(CommandContext* cmd_cntx, DflyCmd::ReplicaInfo* re
   conn_cntx->conn()->SetConnectionMemoryAccounting(false);
   flow.conn = cmd_cntx->conn();
   flow.eof_token = *eof_token;
+
+  // A repeated DFLY FLOW must not inherit the partial sync negotiated by an earlier one.
+  flow.start_partial_sync_at.reset();
   return flow;
 }
 
@@ -462,17 +465,12 @@ void DflyCmd::StartStable(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
 
   util::fb2::LockGuard lk{replica_ptr->GetMutex()};
-  auto repl_state = replica_ptr->GetReplicaState();
-  if (repl_state != SyncState::FULL_SYNC && repl_state != SyncState::PREPARATION) {
-    cmd_cntx->SendError(kInvalidState);
-    return;
-  }
 
-  // This might happen if a flow abruptly disconnected before sending the SYNC request.
-  if (!replica_ptr->AllFlowsConnected()) {
-    cmd_cntx->SendError(kInvalidState);
+  // DFLY SYNC may be skipped only if every flow syncs partially, as only it starts a full sync.
+  SyncState expected =
+      replica_ptr->AllFlowsPartial() ? SyncState::PREPARATION : SyncState::FULL_SYNC;
+  if (!CheckReplicaStateOrReply(*replica_ptr, expected, cmd_cntx))
     return;
-  }
 
   {
     Transaction::Guard tg{cmd_cntx->tx()};
