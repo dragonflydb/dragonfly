@@ -2419,6 +2419,17 @@ TEST_F(StreamFamilyTest, XGroupSetIdEntriesRead) {
       resp.GetVec()[0].GetVec(),
       ElementsAre("name", "mygroup", "consumers", IntArg(0), "pending", IntArg(0),
                   "last-delivered-id", "2000-0", "entries-read", kMatchNil, "lag", IntArg(0)));
+
+  // Without ENTRIESREAD the old counter is dropped, as in Redis, so catching up reports no lag
+  Run("XGROUP SETID mystream mygroup 0 ENTRIESREAD 0");
+  Run("XGROUP SETID mystream mygroup $");
+  Run("XADD mystream 3000-0 key val");
+  Run("XREADGROUP GROUP mygroup c1 COUNT 1 STREAMS mystream >");
+  resp = Run("XINFO GROUPS mystream");
+  EXPECT_THAT(
+      resp.GetVec()[0].GetVec(),
+      ElementsAre("name", "mygroup", "consumers", IntArg(1), "pending", IntArg(1),
+                  "last-delivered-id", "3000-0", "entries-read", IntArg(2), "lag", IntArg(0)));
 }
 
 TEST_F(StreamFamilyTest, XGroupSetIdRejectsBadEntriesRead) {

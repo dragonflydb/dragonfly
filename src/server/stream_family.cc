@@ -2081,9 +2081,9 @@ OpStatus OpSetId(const OpArgs& op_args, string_view key, string_view gname, stri
     }
   }
   cgr_res->cg->last_id = sid;
-  if (entries_read) {
-    cgr_res->cg->entries_read = *entries_read;
-  }
+
+  // Like Redis, forget the old counter when ENTRIESREAD is omitted; it describes the old cursor.
+  cgr_res->cg->entries_read = entries_read.value_or(SCG_INVALID_ENTRIES_READ);
 
   return OpStatus::OK;
 }
