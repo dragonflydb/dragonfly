@@ -563,7 +563,7 @@ class ShardDocIndex {
   using SerializedEntryWithKey = std::optional<SerializedDoc>;
   SerializedEntryWithKey SerializeDocWithKey(search::DocId id, const OpArgs& op_args,
                                              const std::optional<std::vector<DocField>>& fields,
-                                             const DocField* sort_field = nullptr);
+                                             const FieldReference* sort_field = nullptr);
 
   search::DefragmentResult Defragment(PageUsage* page_usage) {
     if (indices_) {

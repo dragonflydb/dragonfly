@@ -4048,22 +4048,17 @@ TEST_F(SearchFamilyTest, HnswSortByKeepsReturnShape) {
        "SCHEMA",    "price",   "AS",  "p_num", "NUMERIC",         "SORTABLE", "price",
        "TAG",       "qty",     "TAG", "v",     "VECTOR",          "HNSW",     "6",
        "TYPE",      "FLOAT32", "DIM", "2",     "DISTANCE_METRIC", "L2"});
-  Run({"FT.CREATE", "jx",     "ON",
-       "JSON",      "PREFIX", "1",
-       "j:",        "SCHEMA", "$.price",
-       "AS",        "price",  "TAG",
-       "$.qty",     "AS",     "qty",
-       "TAG",       "$.v",    "AS",
-       "v",         "VECTOR", "HNSW",
-       "6",         "TYPE",   "FLOAT32",
-       "DIM",       "2",      "DISTANCE_METRIC",
+  Run({"FT.CREATE", "jx",   "ON",    "JSON", "PREFIX",   "1",   "j:",  "SCHEMA",
+       "$.price",   "AS",   "price", "TAG",  "$.qty",    "AS",  "qty", "TAG",
+       "$.flag",    "AS",   "flag",  "TAG",  "SORTABLE", "$.v", "AS",  "v",
+       "VECTOR",    "HNSW", "6",     "TYPE", "FLOAT32",  "DIM", "2",   "DISTANCE_METRIC",
        "L2"});
   WaitForIndexReady("hx");
   WaitForIndexReady("jx");
   Run({"HSET", "h:1", "price", "10", "qty", "7", "v", FloatVec(1, 0)});
   Run({"HSET", "h:2", "price", "9", "qty", "8", "v", FloatVec(2, 0)});
-  Run({"JSON.SET", "j:1", "$", R"({"price":"10","qty":"7","v":[1,0]})"});
-  Run({"JSON.SET", "j:2", "$", R"({"price":"9","qty":"8","v":[2,0]})"});
+  Run({"JSON.SET", "j:1", "$", R"({"price":"10","qty":"7","flag":true,"v":[1,0]})"});
+  Run({"JSON.SET", "j:2", "$", R"({"price":"9","qty":"8","flag":false,"v":[2,0]})"});
   const string q = FloatVec(2, 0);  // nearest is doc 2, SORTBY price puts doc 1 first ("10" < "9")
   auto check = [&](string_view index, const vector<string>& tail, const auto& content) {
     for (string_view query : {"*=>[KNN 2 @v $q]", "@v:[VECTOR_RANGE 5 $q]"}) {
@@ -4089,6 +4084,23 @@ TEST_F(SearchFamilyTest, HnswSortByKeepsReturnShape) {
     check(index, {"RETURN", "3", "qty", "AS", "price"}, IsMap("price", "7"));
     check(index, {"RETURN", "6", "price", "AS", "moved", "qty", "AS", "price"},
           IsMap("moved", "10", "price", "7"));
+  }
+
+  // Sorting by a SORTABLE field uses and shows its sort-index value; RETURN reads the document.
+  for (string_view query : {"*=>[KNN 2 @v $q]", "@v:[VECTOR_RANGE 5 $q]"}) {
+    EXPECT_THAT(
+        Run({"FT.SEARCH", "jx", query, "PARAMS", "2", "q", q, "SORTBY", "flag", "DESC", "DIALECT",
+             "2"}),
+        IsArray(
+            IntArg(2), "j:1",
+            AnyOf(IsMap("flag", "true", "$", _), IsMap("flag", "true", "$", _, "__v_score", _)),
+            "j:2",
+            AnyOf(IsMap("flag", "false", "$", _), IsMap("flag", "false", "$", _, "__v_score", _))))
+        << query;
+    EXPECT_THAT(Run({"FT.SEARCH", "jx", query, "PARAMS", "2", "q", q, "SORTBY", "flag", "DESC",
+                     "RETURN", "1", "flag", "DIALECT", "2"}),
+                IsArray(IntArg(2), "j:1", IsMap("flag", "1"), "j:2", IsMap("flag", "0")))
+        << query;
   }
 }
 
@@ -7353,7 +7365,7 @@ TEST_F(SearchFamilyTest, ReplyFieldValues) {
   Run({"FT.CREATE", "h", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "n", "NUMERIC", "SORTABLE",
        "t", "TAG"});
   Run({"FT.CREATE", "j", "ON", "JSON", "PREFIX", "1", "j:", "SCHEMA", "$.price", "AS", "price",
-       "NUMERIC", "SORTABLE", "$.flag", "AS", "flag", "TAG"});
+       "NUMERIC", "SORTABLE", "$.flag", "AS", "flag", "TAG", "SORTABLE"});
   Run({"HSET", "h:1", "n", "10.50", "t", "a"});
   Run({"HSET", "h:2", "n", "007", "t", "a"});
   Run({"HSET", "h:3", "t", "b"});
@@ -7373,6 +7385,11 @@ TEST_F(SearchFamilyTest, ReplyFieldValues) {
                       "j:1", IsMap("price", "10.5", "$", R"({"flag":true,"price":10.5})")));
   EXPECT_THAT(Run({"FT.SEARCH", "j", "*", "SORTBY", "price", "RETURN", "1", "flag"}),
               IsArray(IntArg(2), "j:2", IsMap("flag", "0"), "j:1", IsMap("flag", "1")));
+
+  // The sort field of a full document comes from the sort index; RETURN reads the document.
+  EXPECT_THAT(Run({"FT.SEARCH", "j", "*", "SORTBY", "flag"}),
+              IsArray(IntArg(2), "j:2", IsMap("flag", "false", "$", R"({"flag":false,"price":7})"),
+                      "j:1", IsMap("flag", "true", "$", R"({"flag":true,"price":10.5})")));
 
   // A document without a sortable field gets no entry for it.
   EXPECT_THAT(Run({"FT.AGGREGATE", "h", "@t:{b}", "LOAD", "1", "@n"}),

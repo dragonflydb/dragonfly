@@ -1486,13 +1486,12 @@ struct HnswSearchOptions {
   const SearchParams& params;
 };
 
-// SORTBY by anything but the KNN score needs the sort value loaded from the document.
-std::optional<DocField> HnswSortField(
-    const search::Schema& schema, const SearchParams& params,
-    const std::optional<search::KnnScoreSortOption>& knn_score_option) {
+// SORTBY by anything but the KNN score needs the sort value of each document.
+const FieldReference* HnswSortField(
+    const SearchParams& params, const std::optional<search::KnnScoreSortOption>& knn_score_option) {
   if (!params.sort_option || (knn_score_option && params.sort_option->IsSame(*knn_score_option)))
-    return std::nullopt;
-  return ResolveField(schema, params.sort_option->field);
+    return nullptr;
+  return &params.sort_option->field;
 }
 
 HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
@@ -1530,8 +1529,7 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
     }
 
     const auto& schema = index->base().schema;
-    const std::optional<DocField> sort_field =
-        HnswSortField(schema, options.params, options.score_sort);
+    const FieldReference* sort_field = HnswSortField(options.params, options.score_sort);
     const bool ids_only_without_sort_load = options.params.IdsOnly() && !sort_field;
 
     // Resize shard with default `true` value
@@ -1551,8 +1549,8 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
         continue;
       }
 
-      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
-                                                sort_field ? &*sort_field : nullptr);
+      if (auto doc =
+              index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields, sort_field);
           doc) {
         shard_doc.key = std::string{doc->key};
         shard_doc.values = std::move(doc->values);
@@ -1727,11 +1725,10 @@ HnswSearchResult SearchGlobalHnswIndexRange(const search::AstVectorRangeNode* ra
       return OpStatus::OK;
     const auto& schema = idx->base().schema;
     const auto doc_fields = ResolveFields(schema, options.params.return_fields);
-    const std::optional<DocField> sort_field =
-        HnswSortField(schema, options.params, options.score_sort);
+    const FieldReference* sort_field = HnswSortField(options.params, options.score_sort);
     for (auto& shard_doc : shard_docs[es->shard_id()]) {
-      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
-                                              sort_field ? &*sort_field : nullptr);
+      if (auto doc =
+              idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields, sort_field);
           doc) {
         shard_doc.key = std::string{doc->key};
         shard_doc.values = std::move(doc->values);

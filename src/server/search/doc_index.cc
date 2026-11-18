@@ -1052,7 +1052,7 @@ void ShardDocIndex::DrainPendingVectorUpdates(const OpArgs& op_args) {
 
 ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
     search::DocId id, const OpArgs& op_args, const std::optional<std::vector<DocField>>& fields,
-    const DocField* sort_field) {
+    const FieldReference* sort_field) {
   auto entry = LoadEntry(id, op_args);
   if (!entry)
     return std::nullopt;
@@ -1060,11 +1060,16 @@ ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
   SerializedDoc doc{
       entry->first, fields ? accessor->Serialize(*fields) : accessor->SerializeAll(), {}};
   if (sort_field) {
-    if (auto values = accessor->Serialize(absl::MakeConstSpan(sort_field, 1)); !values.empty()) {
-      doc.sort_value = values.begin()->second;
-      if (!fields)
-        doc.values.insert(values.begin(), values.end());
+    // As in Search(), a sortable field is sorted and shown by its sort-index value.
+    if (auto r = sort_field->Resolve(base_->schema); r.sortable) {
+      doc.sort_value = indices_->GetSortIndexValue(id, r.alias);
+    } else {
+      const DocField field{sort_field->OutputName(), r.identifier, r.type};
+      if (auto values = accessor->Serialize(absl::MakeConstSpan(&field, 1)); !values.empty())
+        doc.sort_value = std::move(values.begin()->second);
     }
+    if (!fields && !holds_alternative<monostate>(doc.sort_value))
+      doc.values.try_emplace(sort_field->OutputName(), doc.sort_value);
   }
   return doc;
 }
@@ -1208,10 +1213,6 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       if (!sort_scores.empty())
         result.ids.resize(sort_scores.size());
     }
-
-    // A whole document may lack the sort alias (JSON has only `$`).
-    if (params.ShouldReturnAllFields())
-      return_fields.push_back(so.field);
   }
 
   // Re-rank by (score, key) so per-shard top-K matches what a global merge
@@ -1307,6 +1308,10 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
 
     auto more_fields = accessor->Serialize(listed_fields);
     fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
+
+    // A whole document may lack the sort alias (JSON has only `$`); add the value it sorted by.
+    if (params.ShouldReturnAllFields() && !holds_alternative<monostate>(sort_score))
+      fields.try_emplace(params.sort_option->field.OutputName(), sort_score);
     out.push_back(
         {result.ids[i], string{key}, std::move(fields), knn_score, text_score, sort_score});
   }
