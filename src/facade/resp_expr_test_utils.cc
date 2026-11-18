@@ -68,6 +68,10 @@ RespExpr RespExprBuilder::BuildNode(const RESPObj& obj) {
           expr.u.emplace<RespExpr::Vec*>(nullptr);
         } else {
           expr.type = RespExpr::ARRAY;
+          if (obj.GetType() == RESPObj::Type::MAP)
+            expr.agg = RespExpr::Agg::kMap;
+          else if (obj.GetType() == RESPObj::Type::SET)
+            expr.agg = RespExpr::Agg::kSet;
           auto vec = std::make_unique<RespExpr::Vec>();
           vec->resize(arr->Size());
           expr.u = vec.get();
