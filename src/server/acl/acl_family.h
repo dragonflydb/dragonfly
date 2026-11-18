@@ -36,7 +36,7 @@ class AclFamily final {
   explicit AclFamily(UserRegistry* registry, util::ProactorPool* pool);
 
   void Register(CommandRegistry* registry);
-  void Init(facade::Listener* listener);
+  void Init(std::vector<facade::Listener*> listeners);
 
  private:
   void Acl(CmdArgParser parser, CommandContext* cmd_cntx);
@@ -79,7 +79,8 @@ class AclFamily final {
 
   void BuildIndexers(RevCommandsIndexStore families);
 
-  facade::Listener* main_listener_{nullptr};
+  // All listeners whose connections enforce ACL rules.
+  std::vector<facade::Listener*> listeners_;
   UserRegistry* registry_;
   CommandRegistry* cmd_registry_{nullptr};
   util::ProactorPool* pool_;

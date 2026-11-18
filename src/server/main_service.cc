@@ -1115,10 +1115,8 @@ void Service::Init(util::AcceptServer* acceptor, std::vector<facade::Listener*> 
   });
 
   const auto tcp_disabled = GetFlag(FLAGS_port) == 0u;
-  // We assume that listeners.front() is the main_listener
-  // see dfly_main RunEngine
   if (!tcp_disabled && main_listener) {
-    acl_family_.Init(main_listener);
+    acl_family_.Init(listeners);
   }
 
   // Initialize shard_set with a callback running once in a while in the shard threads.
@@ -3216,7 +3214,7 @@ void Service::RegisterCommands() {
 }
 
 const acl::AclFamily* Service::TestInit() {
-  acl_family_.Init(nullptr);
+  acl_family_.Init({});
   return &acl_family_;
 }
 
