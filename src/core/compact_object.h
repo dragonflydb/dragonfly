@@ -570,12 +570,13 @@ class CompactObj {
     std::string_view view() const;
   } __attribute__((packed));
 
+  // Pack the type so member functions accept the unaligned storage in CompactObj.
   struct JsonConsT {
     JsonType* json_ptr;
     size_t bytes_used;
 
     bool DefragIfNeeded(PageUsage* page_usage);
-  };
+  } __attribute__((packed));
 
   // Union of different representations
   union U {
@@ -584,9 +585,9 @@ class CompactObj {
     SmallString small_str;
     detail::RobjWrapper r_obj;
     detail::LargeString large_str;
+    JsonConsT json_obj;
 
     // using 'packed' to reduce alignment of U to 1.
-    JsonConsT json_obj __attribute__((packed));
     SBF* sbf __attribute__((packed));
     TOPK* topk __attribute__((packed));
     CMS* cms __attribute__((packed));
