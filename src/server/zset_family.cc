@@ -1620,8 +1620,13 @@ void ZBooleanOperation(CmdArgParser parser, string_view cmd, bool is_union, bool
     // We can't use SendScoredArray because it expects strings, not string_views
     // TOOD: Not longer relevant with new io, use scoping
     auto* rb = static_cast<RedisReplyBuilder*>(builder);
-    rb->StartArray(smvec.size() * (op_args->with_scores ? 2 : 1));
+
+    // Like SendScoredArray: RESP3 replies with a [member, score] pair per member.
+    const bool score_pairs = op_args->with_scores && rb->IsResp3();
+    rb->StartArray((op_args->with_scores && !score_pairs) ? smvec.size() * 2 : smvec.size());
     for (const auto& elem : smvec) {
+      if (score_pairs)
+        rb->StartArray(2);
       rb->SendBulkString(elem.second);
       if (op_args->with_scores) {
         rb->SendDouble(elem.first);
