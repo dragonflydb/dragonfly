@@ -37,7 +37,6 @@
  */
 
 #include <assert.h>
-#include <stdbool.h>
 #include <string.h>
 #include <math.h>
 #include <limits.h>
@@ -46,8 +45,6 @@
 
 #include "strbuf.h"
 #include "fpconv.h"
-
-extern bool dfly_cjson_has_stack_headroom(void);
 
 #ifndef CJSON_MODNAME
 #define CJSON_MODNAME   "cjson"
@@ -66,7 +63,7 @@ extern bool dfly_cjson_has_stack_headroom(void);
 #define DEFAULT_SPARSE_RATIO 2
 #define DEFAULT_SPARSE_SAFE 10
 #define DEFAULT_ENCODE_MAX_DEPTH 1000
-#define DEFAULT_DECODE_MAX_DEPTH 1000
+#define DEFAULT_DECODE_MAX_DEPTH 50
 #define DEFAULT_ENCODE_INVALID_NUMBERS 0
 #define DEFAULT_DECODE_INVALID_NUMBERS 1
 #define DEFAULT_ENCODE_KEEP_BUFFER 1
@@ -1123,16 +1120,14 @@ static void json_decode_descend(lua_State *l, json_parse_t *json, int slots)
 {
     json->current_depth++;
 
-    const char *error = "Found too many nested data structures (%d) at character %d";
-    if (json->current_depth <= json->cfg->decode_max_depth) {
-        if (!dfly_cjson_has_stack_headroom())
-            error = "Insufficient fiber stack to decode JSON at depth %d, character %d";
-        else if (lua_checkstack(l, slots))
-            return;
+    if (json->current_depth <= json->cfg->decode_max_depth &&
+        lua_checkstack(l, slots)) {
+        return;
     }
 
     strbuf_free(json->tmp);
-    luaL_error(l, error, json->current_depth, (int)(json->ptr - json->data));
+    luaL_error(l, "Found too many nested data structures (%d) at character %d",
+        json->current_depth, json->ptr - json->data);
 }
 
 static void json_parse_object_context(lua_State *l, json_parse_t *json)
