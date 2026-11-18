@@ -13,7 +13,10 @@ using namespace util;
 namespace {
 
 struct MemoryAccountingState {
+  // A live resource enables accounting for this thread
   MiMemoryResource* resource = nullptr;
+
+  // Cumulative signed charges from ChargeMemory form A in U - A accounting
   int64_t charged_total = 0;
   TypeAttributedMemory by_type{};
 };
