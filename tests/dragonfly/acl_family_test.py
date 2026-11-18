@@ -399,6 +399,38 @@ async def test_good_acl_file(df_factory, tmp_dir):
     assert "user default on nopass ~* &* +@all $all" in result
 
 
+async def test_acl_load_updates_default_user_connections(df_factory, tmp_dir):
+    acl = create_temp_file(
+        "user default on nopass ~* &* +@all\nuser admin on >pass ~* &* +@all\n", tmp_dir
+    )
+    df = df_factory.create(aclfile=acl)
+    df.start()
+
+    default_client = aioredis.Redis(
+        port=df.port, decode_responses=True, single_connection_client=True
+    )
+    assert await default_client.set("foo", "bar")
+
+    with open(acl, "w") as f:
+        f.write("user default on nopass ~* &* -@all +ping\nuser admin on >pass ~* &* +@all\n")
+    admin = df.client()
+    await admin.execute_command("AUTH admin pass")
+    await admin.execute_command("ACL LOAD")
+
+    # Updates reach open connections asynchronously after the reply.
+    @assert_eventually
+    async def get_denied():
+        try:
+            await default_client.get("foo")
+        except redis.exceptions.NoPermissionError:
+            return
+        assert False, "GET still allowed"
+
+    await get_denied()
+    assert await default_client.ping()
+    await default_client.aclose()
+
+
 async def test_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert [] == res

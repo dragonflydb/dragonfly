@@ -562,6 +562,9 @@ void AclFamily::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
   reg.registry.clear();
   registry_->ResetStats();
   AddUsers(std::move(requests), &reg.registry);
+
+  // Default user connections stay open, so they must pick up its reloaded rules.
+  StreamUpdatesToConnections("default", reg.registry.at("default"));
 }
 
 void AclFamily::Log(CmdArgParser parser, CommandContext* cmd_cntx) {
