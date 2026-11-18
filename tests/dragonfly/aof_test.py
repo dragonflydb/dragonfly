@@ -446,3 +446,54 @@ async def test_kill_loses_only_unwritten_tail(df_factory: DflyInstanceFactory, t
         if m < bulk + batch:
             return
     pytest.fail("the batch was written before the kill in all attempts; no loss tested")
+
+
+async def wait_for_manifest(aof_dir, text: str, timeout=10):
+    # The checkpoint fiber wakes once a second.
+    for _ in range(timeout * 10):
+        if text in read_manifest(aof_dir):
+            return
+        await asyncio.sleep(0.1)
+    pytest.fail(f"the manifest never had {text!r}:\n{read_manifest(aof_dir)}")
+
+
+@pytest.mark.exclude_epoll
+@dfly_args({"proactor_threads": 2, "aof_rewrite_min_size": 100_000})
+async def test_auto_checkpoint(df_factory: DflyInstanceFactory, tmp_path):
+    df = df_factory.create(aof=True, dir=str(tmp_path))
+    df.start()
+    client = df.client()
+
+    # The log outgrows --aof_rewrite_min_size, so a checkpoint runs without any save.
+    await client.mset({f"a:{i}": "x" * 100 for i in range(2000)})
+    await wait_for_manifest(tmp_path, "base dfs owned appendonly-base-1-summary.dfs\n")
+    info = await client.info("persistence")
+    assert info["aof_base_file"] == "appendonly-base-1-summary.dfs"
+    assert info["aof_checkpoint_failures"] == 0
+
+    # The next one becomes the base, and the previous owned base is deleted.
+    await client.mset({f"b:{i}": "y" * 100 for i in range(4000)})
+    await wait_for_manifest(tmp_path, "base dfs owned appendonly-base-2-summary.dfs\n")
+    assert not list(tmp_path.glob("appendonly-base-1-*"))
+    assert list(tmp_path.glob("appendonly-base-2-*"))
+
+    # The owned base plus the log after its cut restore the data.
+    await client.set("last", 1)
+    before = await SeederV2.capture(client)
+    df.stop()
+    df.start()
+    assert await SeederV2.capture(df.client()) == before
+
+
+@pytest.mark.exclude_epoll
+@dfly_args({"proactor_threads": 2, "aof_rewrite_min_size": 100_000, "aof_rewrite_percentage": 0})
+async def test_auto_checkpoint_disabled(df_factory: DflyInstanceFactory, tmp_path):
+    df = df_factory.create(aof=True, dir=str(tmp_path))
+    df.start()
+    client = df.client()
+
+    await client.mset({f"a:{i}": "x" * 100 for i in range(2000)})
+    await asyncio.sleep(3)
+    assert "checkpoint 0\n" in read_manifest(tmp_path)
+    assert not list(tmp_path.glob("appendonly-base-*"))
+    assert (await client.info("persistence"))["aof_rewrite_trigger_size"] == 0

@@ -117,6 +117,11 @@ static std::string AbslUnparseFlag(const CronExprFlag& flag);
 
 ABSL_FLAG(string, dir, "", "working directory");
 ABSL_FLAG(bool, aof, false, "If true, each shard logs its writes to an append-only file in --dir");
+ABSL_FLAG(strings::MemoryBytesFlag, aof_rewrite_min_size, 64ULL << 20,
+          "With --aof, the log size below which no automatic checkpoint runs");
+ABSL_FLAG(uint32_t, aof_rewrite_percentage, 100,
+          "With --aof, an automatic checkpoint runs once the log reaches this percentage of the "
+          "base size, and at least --aof_rewrite_min_size. 0 disables automatic checkpoints");
 ABSL_FLAG(string, dbfilename, "dump-{timestamp}",
           "the filename to save/load the DB, instead of/with {timestamp} can be used {Y}, {m}, and "
           "{d} macros");
@@ -1116,6 +1121,15 @@ string AofSaveError(bool dfs_format, string_view basename) {
   return {};
 }
 
+// The log size at which an automatic checkpoint runs, as in Valkey; 0 if they are disabled.
+size_t AofRewriteTriggerSize(size_t base_size) {
+  uint32_t percentage = GetFlag(FLAGS_aof_rewrite_percentage);
+  if (percentage == 0)
+    return 0;
+  size_t min_size = GetFlag(FLAGS_aof_rewrite_min_size).value;
+  return max(min_size, base_size * percentage / 100);
+}
+
 // Why --aof cannot run with this configuration, or an empty string.
 string AofStartupError(string_view dir) {
   if (detail::IsCloudPath(dir))
@@ -1158,7 +1172,7 @@ size_t AofBaseSize(string_view dir, string_view base_path) {
 // Makes a finished save the AOF base: commits the manifest, then deletes the segments below the
 // cut. The save itself succeeded, so a failure here is only logged. Returns the new base's size if
 // the checkpoint committed.
-optional<size_t> CommitAofCheckpoint(const string& base_file,
+optional<size_t> CommitAofCheckpoint(const string& base_file, bool owned,
                                      const vector<AofManifest::Cut>& cuts) {
   string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
   io::Result<AofManifest> manifest = ReadAofManifest(dir);
@@ -1167,7 +1181,7 @@ optional<size_t> CommitAofCheckpoint(const string& base_file,
     return nullopt;
   }
   manifest->checkpoint_id++;
-  manifest->base_owned = false;
+  manifest->base_owned = owned;
   manifest->base_path = filesystem::path(base_file).filename().string();
   manifest->cuts = cuts;
   if (error_code ec = WriteAofManifest(dir, *manifest); ec) {
@@ -1181,6 +1195,7 @@ optional<size_t> CommitAofCheckpoint(const string& base_file,
     if (AofStreamer* streamer = shard->aof_streamer(); streamer)
       streamer->OnCheckpoint(cuts[shard->shard_id()].lsn);
   });
+  // Also deletes the previous base if the AOF owned it.
   if (error_code ec = CollectAofGarbage(dir, *manifest, /*remove_discarded=*/true); ec)
     LOG(WARNING) << "Failed to remove AOF segments below the cut: " << ec.message();
   return AofBaseSize(dir, manifest->base_path);
@@ -1283,10 +1298,16 @@ void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
 }
 #endif
 
+// The AOF base the server started from.
+struct AofBase {
+  // Summary file name, empty without a base.
+  string file;
+  size_t size = 0;
+};
+
 // Restores the data from the AOF, or bootstraps it, then starts logging. Exits if it cannot.
-// Returns the size of the base.
-size_t StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service,
-                const AofLoadFn& load) {
+AofBase StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Service* service,
+                 const AofLoadFn& load) {
   string dir = flag_dir.empty() ? "." : flag_dir;
   if (string reason = AofStartupError(dir); !reason.empty())
     ErrorAndExit(reason);
@@ -1331,7 +1352,7 @@ size_t StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Servic
       ErrorAndExit(absl::StrCat("AOF files in ", dir, " but no manifest, e.g. ", files->front()));
     base_path = BootstrapAof(dir, storage, load);
   });
-  return base_path.empty() ? 0 : AofBaseSize(dir, base_path);
+  return {base_path, base_path.empty() ? 0 : AofBaseSize(dir, base_path)};
 #else
   ErrorAndExit("--aof is supported only on Linux");
 #endif
@@ -1385,8 +1406,9 @@ void AppendAofInfo(const SaveInfoData& save_info, const Metrics& m, string* info
   append("aof_last_write_status", write_ok ? "ok" : "err");
   append("aof_current_size", log_size);
   append("aof_base_size", save_info.aof_base_size);
-  // TODO: report once checkpoints are triggered by size.
-  append("aof_rewrite_trigger_size", 0);
+  append("aof_base_file", save_info.aof_base_file);
+  append("aof_rewrite_trigger_size", AofRewriteTriggerSize(save_info.aof_base_size));
+  append("aof_checkpoint_failures", save_info.aof_checkpoint_failures);
   append("aof_buffered_bytes",
          per_shard_list([](const AofStats& st) { return st.buffered_bytes; }));
   append("aof_unsynced_bytes",
@@ -1723,13 +1745,17 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
   }
 
   if (GetFlag(FLAGS_aof)) {
-    size_t base_size =
+    AofBase base =
         StartAof(flag_dir, snapshot_storage_.get(), &service_, [this](const string& path) {
           auto future = Load(path, LoadExistingKeys::kFail);
           return future ? future->Get() : GenericError("the server is not active");
         });
-    thread_safe_save_info_.Update(
-        [base_size](SaveInfoData* data) { data->aof_base_size = base_size; });
+    thread_safe_save_info_.Update([&base](SaveInfoData* data) {
+      data->aof_base_file = base.file;
+      data->aof_base_size = base.size;
+    });
+    aof_checkpoint_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
+        "aof_checkpoint", [this] { AofCheckpointScheduling(); });
   }
 
   // check for '--replicaof' before loading anything
@@ -1797,6 +1823,10 @@ void ServerFamily::Shutdown() {
   load_fiber_.JoinIfNeeded();
 
   JoinSnapshotSchedule();
+
+  // Before StopAof(): an automatic checkpoint needs the streamers.
+  aof_checkpoint_done_.Notify();
+  aof_checkpoint_fb_.JoinIfNeeded();
 
   bg_save_fb_.JoinIfNeeded();
 
@@ -2055,6 +2085,61 @@ void ServerFamily::SnapshotScheduling() {
   }
 }
 
+void ServerFamily::AofCheckpointScheduling() {
+  if (GetFlag(FLAGS_aof_rewrite_percentage) == 0)
+    return;
+
+  // A failed checkpoint is simply retried by the next wake.
+  while (!aof_checkpoint_done_.WaitFor(1s)) {
+    // A running save becomes the checkpoint anyway.
+    SaveInfoData save_info = GetLastSaveInfo();
+    if (save_info.save_in_progress)
+      continue;
+
+    atomic_uint64_t log_size = 0;
+    shard_set->RunBriefInParallel([&](EngineShard* shard) {
+      if (AofStreamer* streamer = shard->aof_streamer(); streamer)
+        log_size.fetch_add(streamer->GetStats().log_size, memory_order_relaxed);
+    });
+    size_t trigger_size = AofRewriteTriggerSize(save_info.aof_base_size);
+    if (log_size.load(memory_order_relaxed) < trigger_size)
+      continue;
+
+    LOG(INFO) << "AOF log reached " << log_size.load(memory_order_relaxed) << " bytes, trigger "
+              << trigger_size << ": taking a checkpoint";
+    if (GenericError ec = DoAofCheckpoint(); ec)
+      LOG(WARNING) << "AOF checkpoint failed: " << ec.Format();
+  }
+}
+
+GenericError ServerFamily::DoAofCheckpoint() {
+#ifdef __linux__
+  string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
+  io::Result<AofManifest> manifest = ReadAofManifest(dir);
+  if (!manifest)
+    return GenericError(manifest.error(), "Failed to read the AOF manifest");
+
+  // An earlier attempt whose commit failed may have left a base under the same name.
+  if (error_code ec = CollectAofGarbage(dir, *manifest); ec)
+    return GenericError(ec, "Failed to remove stale AOF files");
+
+  // The name of the checkpoint it commits as; only one save runs at a time.
+  string basename = AofOwnedBaseName(manifest->checkpoint_id + 1);
+  const CommandId* cid = service().FindCmd("SAVE");
+  CHECK_NOTNULL(cid);
+  boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
+  trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
+  DoSaveCheckAndStartOpts opts{.aof_owned_base = true};
+  if (GenericError ec = DoSaveCheckAndStart(SaveCmdOptions{true, {}, basename}, trans.get(), opts);
+      ec) {
+    return ec;
+  }
+  return WaitUntilSaveFinished(trans.get());
+#else
+  return GenericError(make_error_code(errc::not_supported), "--aof is supported only on Linux");
+#endif
+}
+
 std::error_code ServerFamily::LoadRdb(const std::string& rdb_file, LoadExistingKeys existing_keys,
                                       LoadOptions* load_opts, RdbLoadContext* load_context,
                                       detail::SnapshotStorage* storage) {
@@ -2208,15 +2293,15 @@ void ServerFamily::CancelSave() {
 
 GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts,
                                                Transaction* trans, DoSaveCheckAndStartOpts opts) {
-  auto [ignore_state, bg_save] = opts;
+  auto [ignore_state, bg_save, aof_owned_base] = opts;
 
   if (!save_cmd_opts.new_version && TieredListNodesEnabled())
     return GenericError{make_error_code(errc::operation_not_supported),
                         string{kRdbWithTieredListsErr}};
 
-  // Cloud saves stay plain saves.
+  // Cloud saves stay plain saves. An owned base has a fresh name of its own.
   bool aof_checkpoint = GetFlag(FLAGS_aof) && save_cmd_opts.cloud_uri.empty();
-  if (aof_checkpoint) {
+  if (aof_checkpoint && !aof_owned_base) {
     string dbfilename = GetFlag(FLAGS_dbfilename);
     string_view basename = save_cmd_opts.basename.empty() ? dbfilename : save_cmd_opts.basename;
     if (string err = AofSaveError(save_cmd_opts.new_version, basename); !err.empty())
@@ -2248,7 +2333,7 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
 
     controller = make_shared<SaveStagesController>(detail::SaveStagesInputs{
         save_cmd_opts.new_version, save_cmd_opts.cloud_uri, save_cmd_opts.basename, trans,
-        &service_, std::move(*snapshot_storage), opts.bg_save, aof_checkpoint});
+        &service_, std::move(*snapshot_storage), opts.bg_save, aof_checkpoint, aof_owned_base});
     save_controller_ = controller;
   }
 
@@ -2263,8 +2348,10 @@ GenericError ServerFamily::DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_op
       if (bg_save) {
         data->last_bgsave_status = false;
       }
-      if (aof_checkpoint)
+      if (aof_checkpoint) {
         data->aof_last_checkpoint_ok = false;
+        data->aof_checkpoint_failures++;
+      }
     });
 
     // Reset the controller under lock if initialization failed.
@@ -2314,7 +2401,8 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
 #ifdef __linux__
     // Under save_mu_, so checkpoints commit in order.
     if (aof_checkpoint && !save_info.error)
-      aof_base_size = CommitAofCheckpoint(save_info.file_name, save_controller_->aof_cuts());
+      aof_base_size = CommitAofCheckpoint(save_info.file_name, save_controller_->aof_owned_base_,
+                                          save_controller_->aof_cuts());
 #endif
     save_controller_.reset();
   } else {
@@ -2327,10 +2415,14 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
   thread_safe_save_info_.Update([&](SaveInfoData* data) {
     data->save_in_progress = false;
     data->aof_checkpoint_in_progress = false;
-    if (aof_checkpoint)
+    if (aof_checkpoint) {
       data->aof_last_checkpoint_ok = aof_base_size.has_value();
-    if (aof_base_size)
+      data->aof_checkpoint_failures = aof_base_size ? 0 : data->aof_checkpoint_failures + 1;
+    }
+    if (aof_base_size) {
+      data->aof_base_file = filesystem::path(save_info.file_name).filename().string();
       data->aof_base_size = *aof_base_size;
+    }
     if (is_bg_save) {
       data->bgsave_in_progress = false;
       data->last_bgsave_status = !save_info.error;

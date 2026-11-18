@@ -17,6 +17,10 @@ namespace dfly {
 inline constexpr uint32_t kAofManifestVersion = 1;
 inline constexpr std::string_view kAofManifestName = "appendonly.manifest";
 
+// Basename of the base an automatic checkpoint writes: appendonly-base-<ckpt>-summary.dfs and one
+// appendonly-base-<ckpt>-NNNN.dfs per shard. The AOF owns these files and deletes them once unused.
+std::string AofOwnedBaseName(uint64_t checkpoint_id);
+
 // Names the base and where each shard's log starts after it.
 struct AofManifest {
   enum class State : uint8_t {
@@ -55,14 +59,14 @@ std::error_code WriteAofManifest(std::string_view dir, const AofManifest& manife
 // ENOENT if there is none.
 io::Result<AofManifest> ReadAofManifest(std::string_view dir);
 
-// Paths of the AOF files in dir: the manifest, the segments and their leftovers.
+// Paths of the AOF files in dir: the manifest, the segments, owned bases and their leftovers.
 io::Result<std::vector<std::string>> ListAofFiles(std::string_view dir);
 
 // Deletes every AOF file but the manifest, to redo an interrupted bootstrap.
 std::error_code RemoveAofFilesExceptManifest(std::string_view dir);
 
-// Deletes the segments below each shard's cut and leftover tmp files. *.discarded are kept until
-// the next checkpoint, which passes remove_discarded.
+// Deletes the segments below each shard's cut, owned bases the manifest does not name and leftover
+// tmp files. *.discarded are kept until the next checkpoint, which passes remove_discarded.
 std::error_code CollectAofGarbage(std::string_view dir, const AofManifest& manifest,
                                   bool remove_discarded = false);
 
