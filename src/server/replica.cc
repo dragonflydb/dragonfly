@@ -541,24 +541,32 @@ error_code Replica::InitiatePSync() {
     }
     VLOG(1) << "full sync completed";
 
+    auto bad_trailer = [this](string_view reason) {
+      LOG(ERROR) << "Bad full sync trailer from master: " << reason;
+      FlushData();
+      return std::make_error_code(std::errc::illegal_byte_sequence);
+    };
+
     if (token) {
       uint8_t buf[kRdbEofMarkSize];
       io::PrefixSource chained(loader.Leftover(), &ps);
       VLOG(1) << "Before reading from chained stream";
       io::Result<size_t> eof_res = chained.Read(io::MutableBytes{buf});
-      CHECK(eof_res && *eof_res == kRdbEofMarkSize);
+      if (!eof_res || *eof_res != kRdbEofMarkSize)
+        return bad_trailer("missing EOF mark");
 
       VLOG(1) << "Comparing token " << io::View(io::Bytes{buf});
-
-      // TODO: handle gracefully...
-      CHECK_EQ(0, memcmp(token->data(), buf, kRdbEofMarkSize));
-      CHECK(chained.UnusedPrefix().empty());
+      if (memcmp(token->data(), buf, kRdbEofMarkSize) != 0)
+        return bad_trailer("EOF mark mismatch");
+      if (!chained.UnusedPrefix().empty())
+        return bad_trailer("unexpected data after EOF mark");
     } else {
-      CHECK_EQ(0u, loader.Leftover().size());
-      CHECK_EQ(snapshot_size, loader.bytes_read());
+      if (!loader.Leftover().empty() || loader.bytes_read() != snapshot_size)
+        return bad_trailer("snapshot size mismatch");
     }
 
-    CHECK(ps.UnusedPrefix().empty());
+    if (!ps.UnusedPrefix().empty())
+      return bad_trailer("unexpected data after snapshot");
     io_buf.ConsumeInput(io_buf.InputLen());
     TouchIoTime();
   } else {
@@ -1298,14 +1306,14 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
   std::string_view header;
   bool valid = false;
 
-  auto bad_header = [str]() {
-    LOG(ERROR) << "Bad replication header: " << str;
+  auto bad_header = [](std::string_view line) {
+    LOG(ERROR) << "Bad replication header: " << line;
     return std::make_error_code(std::errc::illegal_byte_sequence);
   };
 
   // non-empty lines
   if (str[0] != '+') {
-    return bad_header();
+    return bad_header(str);
   }
 
   header = str.substr(1);
@@ -1324,7 +1332,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     }
 
     if (!valid)
-      return bad_header();
+      return bad_header(str);
 
     io_buf->ConsumeInput(str.size() + 2);
     RETURN_ON_ERR(ReadLine(io_buf, &str));  // Read the next line parsed below.
@@ -1334,13 +1342,14 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     DCHECK(!str.empty());
 
     if (str[0] != '$') {
-      return bad_header();
+      return bad_header(str);
     }
 
     std::string_view token = str.substr(1);
     VLOG(1) << "token: " << token;
     if (absl::ConsumePrefix(&token, "EOF:")) {
-      CHECK_EQ(kRdbEofMarkSize, token.size()) << token;
+      if (token.size() != kRdbEofMarkSize)
+        return bad_header(str);
       dest->fullsync.emplace<string>(token);
       VLOG(1) << "Token: " << token;
     } else {
@@ -1361,7 +1370,7 @@ error_code Replica::ParseReplicationHeader(base::IoBuf* io_buf, PSyncResponse* d
     return std::make_error_code(std::errc::not_supported);
   } else {
     LOG(ERROR) << "Unknown replication header";
-    return bad_header();
+    return bad_header(str);
   }
 
   return error_code{};

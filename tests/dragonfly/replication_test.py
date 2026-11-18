@@ -73,6 +73,36 @@ async def test_replication_stops_on_unsupported_rdb(df_factory, unsupported_rdb,
     assert replica.is_in_logs(f"Replication stopped.*{error}")
 
 
+@pytest.mark.parametrize(
+    "eof_marker, eof_trailer, error",
+    [
+        pytest.param(b"abcde", None, "Bad replication header", id="short-marker"),
+        pytest.param(b"b" * 40, b"c" * 40, "EOF mark mismatch", id="trailer-mismatch"),
+    ],
+)
+async def test_replication_bad_eof_framing(df_factory, eof_marker, eof_trailer, error):
+    rdb = b"REDIS0011\xff" + bytes(8)
+    replica = df_factory.create(proactor_threads=2)
+    with replica:
+        client = replica.client()
+        async with FakeRedisNode(
+            rdb, rdb_framing="eof", eof_marker=eof_marker, eof_trailer=eof_trailer
+        ) as master:
+            await client.execute_command(f"REPLICAOF {master.host} {master.port}")
+            await asyncio.wait_for(master.disconnected.wait(), timeout=10)
+
+        # The master is gone, so the replica stops reloading and must still serve requests.
+        for _ in range(100):
+            try:
+                await client.ping()
+                break
+            except redis.exceptions.BusyLoadingError:
+                await asyncio.sleep(0.1)
+        assert await client.dbsize() == 0
+
+    assert replica.is_in_logs(error)
+
+
 """
 Test full replication pipeline. Test full sync with streaming changes and stable state streaming.
 """
