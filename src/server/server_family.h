@@ -232,6 +232,13 @@ class ServerFamily {
   // with a cancellation error (DfylCmd::CancelReplicas) and resetting the journal
   void ForceReplicasToFullSync();
 
+  // A replica's full sync starts: the loaded data bypasses the journal, so stop appending to the
+  // AOF and mark its manifest rebasing. No-op without --aof.
+  GenericError BeginAofRebase();
+
+  // The replica entered stable sync: take the checkpoint whose base covers the loaded data.
+  void RequestAofRebase();
+
   absl::Span<facade::Listener* const> GetListeners() const {
     return listeners_;
   }
@@ -374,6 +381,15 @@ class ServerFamily {
 
   util::fb2::Done schedule_done_;
   util::fb2::Done aof_checkpoint_done_;
+
+  // Between a full sync start and the commit of the first base after it (INFO aof_state).
+  std::atomic_bool aof_rebasing_{false};
+
+  // Set once stable sync starts; the checkpoint fiber then takes the rebase checkpoint.
+  std::atomic_bool aof_rebase_requested_{false};
+
+  // Bumped by every full sync, so a checkpoint that predates the latest one cannot end rebasing.
+  std::atomic_uint64_t aof_rebase_epoch_{0};
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 

@@ -16,6 +16,8 @@
 #include "server/replica.h"
 #include "server/server_state.h"
 
+ABSL_DECLARE_FLAG(bool, aof);
+
 // TODO deprecate when flipped in production
 ABSL_FLAG(bool, replicaof_no_one_start_journal, true,
           "when set, preserves journal offsets after REPLICAOF NO ONE");
@@ -96,7 +98,8 @@ void ReplicaManager::PromoteToMaster() {
     CHECK(replica_);
 
     auto repl_ptr = replica_;
-    if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal)) {
+    // With --aof the journal already runs, with the LSNs the AOF chain continues from.
+    if (absl::GetFlag(FLAGS_replicaof_no_one_start_journal) && !absl::GetFlag(FLAGS_aof)) {
       // Start journal and keep offsets.
       repl_ptr->StartJournalAtOwnLSN();
     }
