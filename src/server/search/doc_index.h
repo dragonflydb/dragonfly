@@ -152,21 +152,6 @@ std::vector<DocField> ResolveFields(const search::Schema& schema,
 std::optional<std::vector<DocField>> ResolveFields(
     const search::Schema& schema, const std::optional<std::vector<FieldReference>>& fields);
 
-// Types of document fields by identifier for whole-document replies, decided as by
-// Schema::FindByIdentifier. Views the schema it was built from, which has to outlive it.
-class DocFieldTypes {
- public:
-  explicit DocFieldTypes(const search::Schema& schema);
-
-  search::SchemaField::FieldType Of(std::string_view identifier) const;  // TEXT when unknown
-
-  size_t GetNonPmrMemoryUsage() const;
-
- private:
-  // The attribute standing for each document field.
-  absl::flat_hash_map<std::string_view, const search::SchemaField*> fields_;
-};
-
 enum class SortOrder { ASC, DESC };
 
 // SORTBY order shared by the shards and the coordinator: docs with a value first, then by value and
@@ -190,6 +175,7 @@ struct SearchParams {
   size_t limit_total = 10;
 
   bool with_sortkeys = false;
+  bool with_payloads = false;
 
   /*
   1. If not set -> return all fields
@@ -577,7 +563,7 @@ class ShardDocIndex {
   using SerializedEntryWithKey = std::optional<SerializedDoc>;
   SerializedEntryWithKey SerializeDocWithKey(search::DocId id, const OpArgs& op_args,
                                              const std::optional<std::vector<DocField>>& fields,
-                                             const DocField* sort_field = nullptr);
+                                             const FieldReference* sort_field = nullptr);
 
   search::DefragmentResult Defragment(PageUsage* page_usage) {
     if (indices_) {
@@ -680,7 +666,6 @@ class ShardDocIndex {
 
  private:
   std::shared_ptr<const DocIndex> base_;
-  DocFieldTypes field_types_;  // derived from base_->schema
 
   // Declared before index resources so its destructor releases the resident gate last.
   HashIndexLifetime hash_index_lifetime_;

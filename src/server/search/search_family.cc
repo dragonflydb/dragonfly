@@ -715,6 +715,8 @@ ParseResult<SearchParams> ParseSearchParams(CmdArgParser* parser) {
         return CreateSyntaxError("bad arguments for FILTER: empty field name"sv);
     } else if (parser->Check("WITHSORTKEYS")) {
       params.with_sortkeys = true;
+    } else if (parser->Check("WITHPAYLOADS")) {
+      params.with_payloads = true;
     } else if (parser->Check("WITHSCORES")) {
       params.with_scores = true;
     } else if (parser->Check("SCORER")) {
@@ -1300,10 +1302,24 @@ std::vector<aggregate::DocValues> MergeJoinedKeysWithData(
   return merged_data;
 }
 
+// Numbers in fields and rows: integers without a fraction, others with 12 significant digits.
+string FormatNumber(double d) {
+  // The sign of a nan depends on the CPU: x86 makes 0/0 negative.
+  if (std::isnan(d))
+    return "nan";
+  if (d >= -0x1p63 && d < 0x1p63 && std::trunc(d) == d)
+    return absl::StrCat(static_cast<int64_t>(d));
+  return absl::StrFormat("%.12g", d);
+}
+
 auto SortableValueSender(RedisReplyBuilder* rb) {
   return Overloaded{
       [rb](monostate) { rb->SendNull(); },
-      [rb](double d) { rb->SendDouble(d); },
+      [rb](double d) {
+        // Short enough to be copied inline, so it may die before a reply scope ends.
+        const string number = FormatNumber(d);
+        rb->SendBulkString(string_view{number});
+      },
       [rb](const string& s) { rb->SendBulkString(s); },
   };
 }
@@ -1417,8 +1433,8 @@ void SearchReply(const SearchParams& params,
 
   const bool reply_with_ids_only = params.IdsOnly();
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  const size_t items_per_field =
-      (reply_with_ids_only ? 1 : 2) + params.with_sortkeys + params.with_scores;
+  const size_t items_per_field = (reply_with_ids_only ? 1 : 2) + params.with_sortkeys +
+                                 params.with_scores + params.with_payloads;
   // Batch the reply so temporary sortkeys are copied into the batching buffer instead of referenced
   // past their lifetime — a >kMaxInlineSize bulk string enqueued by reference under a reply scope
   // is copied only when the scope ends, after the "$" + s temporary is gone (use-after-free).
@@ -1427,7 +1443,7 @@ void SearchReply(const SearchParams& params,
 
   Overloaded sortable_value_sender{
       [rb](monostate) { rb->SendNull(); },
-      [rb](double d) { rb->SendBulkString(absl::StrCat("#", d)); },
+      [rb](double d) { rb->SendBulkString(absl::StrFormat("#%.17g", d)); },
       [rb](const string& s) { rb->SendBulkString(absl::StrCat("$", s)); },
   };
 
@@ -1437,6 +1453,8 @@ void SearchReply(const SearchParams& params,
     if (params.with_scores) {
       rb->SendBulkString(absl::StrCat(docs[i]->text_score));
     }
+    if (params.with_payloads)  // Documents have no payloads.
+      rb->SendNull();
     if (params.with_sortkeys) {
       visit(sortable_value_sender, docs[i]->sort_score);
     }
@@ -1468,13 +1486,12 @@ struct HnswSearchOptions {
   const SearchParams& params;
 };
 
-// SORTBY by anything but the KNN score needs the sort value loaded from the document.
-std::optional<DocField> HnswSortField(
-    const search::Schema& schema, const SearchParams& params,
-    const std::optional<search::KnnScoreSortOption>& knn_score_option) {
+// SORTBY by anything but the KNN score needs the sort value of each document.
+const FieldReference* HnswSortField(
+    const SearchParams& params, const std::optional<search::KnnScoreSortOption>& knn_score_option) {
   if (!params.sort_option || (knn_score_option && params.sort_option->IsSame(*knn_score_option)))
-    return std::nullopt;
-  return ResolveField(schema, params.sort_option->field);
+    return nullptr;
+  return &params.sort_option->field;
 }
 
 HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
@@ -1512,8 +1529,7 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
     }
 
     const auto& schema = index->base().schema;
-    const std::optional<DocField> sort_field =
-        HnswSortField(schema, options.params, options.score_sort);
+    const FieldReference* sort_field = HnswSortField(options.params, options.score_sort);
     const bool ids_only_without_sort_load = options.params.IdsOnly() && !sort_field;
 
     // Resize shard with default `true` value
@@ -1533,8 +1549,8 @@ HnswSearchResult LoadHnswSearchDocs(const HnswSearchOptions& options,
         continue;
       }
 
-      if (auto doc = index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
-                                                sort_field ? &*sort_field : nullptr);
+      if (auto doc =
+              index->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields, sort_field);
           doc) {
         shard_doc.key = std::string{doc->key};
         shard_doc.values = std::move(doc->values);
@@ -1709,11 +1725,10 @@ HnswSearchResult SearchGlobalHnswIndexRange(const search::AstVectorRangeNode* ra
       return OpStatus::OK;
     const auto& schema = idx->base().schema;
     const auto doc_fields = ResolveFields(schema, options.params.return_fields);
-    const std::optional<DocField> sort_field =
-        HnswSortField(schema, options.params, options.score_sort);
+    const FieldReference* sort_field = HnswSortField(options.params, options.score_sort);
     for (auto& shard_doc : shard_docs[es->shard_id()]) {
-      if (auto doc = idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields,
-                                              sort_field ? &*sort_field : nullptr);
+      if (auto doc =
+              idx->SerializeDocWithKey(shard_doc.id, t->GetOpArgs(es), doc_fields, sort_field);
           doc) {
         shard_doc.key = std::string{doc->key};
         shard_doc.values = std::move(doc->values);

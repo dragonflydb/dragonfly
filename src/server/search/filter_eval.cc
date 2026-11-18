@@ -92,9 +92,9 @@ Value EvalArith(ArithOp op, const Value& lhs, const Value& rhs) {
     case ArithOp::MUL:
       return l * r;
     case ArithOp::DIV:
-      return r != 0.0 ? Value{l / r} : Value{};
+      return l / r;
     case ArithOp::MOD:
-      return r != 0.0 ? Value{std::fmod(l, r)} : Value{};
+      return std::fmod(l, r);
     case ArithOp::POW:
       return std::pow(l, r);
   }

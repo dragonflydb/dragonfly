@@ -2828,6 +2828,21 @@ TEST_F(SearchFamilyTest, AggregateGroupBy) {
                         IsMap("foo_total", "40", "word", "item1", "text", "\"third key\""),
                         IsMap("foo_total", "20", "word", "item2", "text", "\"second key\""),
                         IsMap("foo_total", "10", "word", "item1", "text", "\"first key\"")));
+
+  // A group without numbers: SUM and AVG are nan, MIN is inf and MAX is -inf.
+  Run({"hset", "key:4", "word", "item3"});
+  resp = Run({"ft.aggregate", "i1",  "@word:{item3}",
+              "GROUPBY",      "1",   "@word",
+              "REDUCE",       "SUM", "1",
+              "@foo",         "AS",  "s",
+              "REDUCE",       "AVG", "1",
+              "@foo",         "AS",  "a",
+              "REDUCE",       "MIN", "1",
+              "@foo",         "AS",  "mn",
+              "REDUCE",       "MAX", "1",
+              "@foo",         "AS",  "mx"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("word", "item3", "s", "nan", "a", "nan", "mn", "inf", "mx", "-inf")));
 }
 
 TEST_F(SearchFamilyTest, JsonAggregateGroupBy) {
@@ -3920,10 +3935,11 @@ TEST_F(SearchFamilyTest, NumericTwinResolvesTypeBySortableFirst) {
               IsArray(IntArg(2), "px:1", "px:2"));
   EXPECT_THAT(Run({"FT.SEARCH", "px", "*", "SORTBY", "price", "RETURN", "1", "price"}),
               IsArray(IntArg(2), "px:2", IsArray("price", "9"), "px:1", IsArray("price", "10")));
-  // The whole document is typed the same way: NUMERIC renders 10.50 as 10.5.
+
+  // The whole document keeps the stored text.
   Run({"HSET", "px:3", "price", "10.50"});
   EXPECT_THAT(Run({"FT.SEARCH", "px", "@p_num:[10.5 10.5]"}),
-              IsArray(IntArg(1), "px:3", IsArray("price", "10.5")));
+              IsArray(IntArg(1), "px:3", IsArray("price", "10.50")));
 }
 
 TEST_F(SearchFamilyTest, TwoSortableTwins) {
@@ -4026,29 +4042,23 @@ TEST_F(SearchFamilyTest, AliasBeatsSameSpelledPath) {
 }
 
 // A vector query sorted by a document field keeps the reply shape RETURN asks for, on HASH and
-// JSON; the sort value comes from the SORTBY attribute, not from the twin typing the whole
-// document.
+// JSON; the sort value comes from the SORTBY attribute.
 TEST_F(SearchFamilyTest, HnswSortByKeepsReturnShape) {
   Run({"FT.CREATE", "hx",      "ON",  "HASH",  "PREFIX",          "1",        "h:",
        "SCHEMA",    "price",   "AS",  "p_num", "NUMERIC",         "SORTABLE", "price",
        "TAG",       "qty",     "TAG", "v",     "VECTOR",          "HNSW",     "6",
        "TYPE",      "FLOAT32", "DIM", "2",     "DISTANCE_METRIC", "L2"});
-  Run({"FT.CREATE", "jx",     "ON",
-       "JSON",      "PREFIX", "1",
-       "j:",        "SCHEMA", "$.price",
-       "AS",        "price",  "TAG",
-       "$.qty",     "AS",     "qty",
-       "TAG",       "$.v",    "AS",
-       "v",         "VECTOR", "HNSW",
-       "6",         "TYPE",   "FLOAT32",
-       "DIM",       "2",      "DISTANCE_METRIC",
+  Run({"FT.CREATE", "jx",   "ON",    "JSON", "PREFIX",   "1",   "j:",  "SCHEMA",
+       "$.price",   "AS",   "price", "TAG",  "$.qty",    "AS",  "qty", "TAG",
+       "$.flag",    "AS",   "flag",  "TAG",  "SORTABLE", "$.v", "AS",  "v",
+       "VECTOR",    "HNSW", "6",     "TYPE", "FLOAT32",  "DIM", "2",   "DISTANCE_METRIC",
        "L2"});
   WaitForIndexReady("hx");
   WaitForIndexReady("jx");
   Run({"HSET", "h:1", "price", "10", "qty", "7", "v", FloatVec(1, 0)});
   Run({"HSET", "h:2", "price", "9", "qty", "8", "v", FloatVec(2, 0)});
-  Run({"JSON.SET", "j:1", "$", R"({"price":"10","qty":"7","v":[1,0]})"});
-  Run({"JSON.SET", "j:2", "$", R"({"price":"9","qty":"8","v":[2,0]})"});
+  Run({"JSON.SET", "j:1", "$", R"({"price":"10","qty":"7","flag":true,"v":[1,0]})"});
+  Run({"JSON.SET", "j:2", "$", R"({"price":"9","qty":"8","flag":false,"v":[2,0]})"});
   const string q = FloatVec(2, 0);  // nearest is doc 2, SORTBY price puts doc 1 first ("10" < "9")
   auto check = [&](string_view index, const vector<string>& tail, const auto& content) {
     for (string_view query : {"*=>[KNN 2 @v $q]", "@v:[VECTOR_RANGE 5 $q]"}) {
@@ -4066,13 +4076,31 @@ TEST_F(SearchFamilyTest, HnswSortByKeepsReturnShape) {
   check("hx", {},
         AnyOf(IsMap("price", "10", "qty", "7", "v", _),
               IsMap("price", "10", "qty", "7", "v", _, "__v_score", _)));
-  check("jx", {}, AnyOf(IsMap("$", _), IsMap("$", _, "__v_score", _)));
+  check("jx", {},
+        AnyOf(IsMap("price", "10", "$", _), IsMap("price", "10", "$", _, "__v_score", _)));
   for (string_view index : {"hx", "jx"}) {
     check(index, {"NOCONTENT"}, _);
     check(index, {"RETURN", "1", "price"}, IsMap("price", "10"));
     check(index, {"RETURN", "3", "qty", "AS", "price"}, IsMap("price", "7"));
     check(index, {"RETURN", "6", "price", "AS", "moved", "qty", "AS", "price"},
           IsMap("moved", "10", "price", "7"));
+  }
+
+  // Sorting by a SORTABLE field uses and shows its sort-index value; RETURN reads the document.
+  for (string_view query : {"*=>[KNN 2 @v $q]", "@v:[VECTOR_RANGE 5 $q]"}) {
+    EXPECT_THAT(
+        Run({"FT.SEARCH", "jx", query, "PARAMS", "2", "q", q, "SORTBY", "flag", "DESC", "DIALECT",
+             "2"}),
+        IsArray(
+            IntArg(2), "j:1",
+            AnyOf(IsMap("flag", "true", "$", _), IsMap("flag", "true", "$", _, "__v_score", _)),
+            "j:2",
+            AnyOf(IsMap("flag", "false", "$", _), IsMap("flag", "false", "$", _, "__v_score", _))))
+        << query;
+    EXPECT_THAT(Run({"FT.SEARCH", "jx", query, "PARAMS", "2", "q", q, "SORTBY", "flag", "DESC",
+                     "RETURN", "1", "flag", "DIALECT", "2"}),
+                IsArray(IntArg(2), "j:1", IsMap("flag", "1"), "j:2", IsMap("flag", "0")))
+        << query;
   }
 }
 
@@ -7306,6 +7334,19 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
                    "user2", "$jones", IsMap("last_name", "jones", "first_name", "bob", "age", "36"),
                    "user1", "$jones",
                    IsMap("last_name", "jones", "first_name", "alice", "age", "35")));
+
+  // Numeric sort keys keep full precision, and WITHPAYLOADS reserves an empty payload slot after
+  // the id and score.
+  Run({"HSET", "user3", "first_name", "carol", "last_name", "smith", "age", "123456789"});
+  EXPECT_THAT(Run({"FT.SEARCH", "users", "smith", "SORTBY", "age", "WITHSORTKEYS", "NOCONTENT"}),
+              IsArray(IntArg(1), "user3", "#123456789"));
+  EXPECT_THAT(Run({"FT.SEARCH", "users", "jones", "SORTBY", "age", "WITHPAYLOADS", "WITHSORTKEYS",
+                   "NOCONTENT"}),
+              IsArray(IntArg(2), "user1", ArgType(RespExpr::NIL), "#35", "user2",
+                      ArgType(RespExpr::NIL), "#36"));
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "users", "smith", "WITHSCORES", "WITHPAYLOADS", "RETURN", "1", "age"}),
+      IsArray(IntArg(1), "user3", _, ArgType(RespExpr::NIL), IsMap("age", "123456789")));
 }
 
 TEST_F(SearchFamilyTest, WithSortKeysLongValue) {
@@ -7318,6 +7359,47 @@ TEST_F(SearchFamilyTest, WithSortKeysLongValue) {
   Run({"HSET", "doc1", "txt", long_val});
   EXPECT_THAT(Run({"FT.SEARCH", "idx", "*", "SORTBY", "txt", "WITHSORTKEYS", "NOCONTENT"}),
               IsArray(IntArg(1), "doc1", "$" + long_val));
+}
+
+TEST_F(SearchFamilyTest, ReplyFieldValues) {
+  Run({"FT.CREATE", "h", "ON", "HASH", "PREFIX", "1", "h:", "SCHEMA", "n", "NUMERIC", "SORTABLE",
+       "t", "TAG"});
+  Run({"FT.CREATE", "j", "ON", "JSON", "PREFIX", "1", "j:", "SCHEMA", "$.price", "AS", "price",
+       "NUMERIC", "SORTABLE", "$.flag", "AS", "flag", "TAG", "SORTABLE"});
+  Run({"HSET", "h:1", "n", "10.50", "t", "a"});
+  Run({"HSET", "h:2", "n", "007", "t", "a"});
+  Run({"HSET", "h:3", "t", "b"});
+  Run({"JSON.SET", "j:1", "$", R"({"price":10.5,"flag":true})"});
+  Run({"JSON.SET", "j:2", "$", R"({"price":7,"flag":false})"});
+
+  // Full documents keep the stored text; returned fields are normalized numbers.
+  EXPECT_THAT(
+      Run({"FT.SEARCH", "h", "@t:{a}", "SORTBY", "n"}),
+      IsArray(IntArg(2), "h:2", IsMap("n", "007", "t", "a"), "h:1", IsMap("n", "10.50", "t", "a")));
+  EXPECT_THAT(Run({"FT.SEARCH", "h", "@t:{a}", "SORTBY", "n", "RETURN", "1", "n"}),
+              IsArray(IntArg(2), "h:2", IsMap("n", "7"), "h:1", IsMap("n", "10.5")));
+
+  // A full JSON document carries the SORTBY field, and JSON booleans come back as 1 and 0.
+  EXPECT_THAT(Run({"FT.SEARCH", "j", "*", "SORTBY", "price"}),
+              IsArray(IntArg(2), "j:2", IsMap("price", "7", "$", R"({"flag":false,"price":7})"),
+                      "j:1", IsMap("price", "10.5", "$", R"({"flag":true,"price":10.5})")));
+  EXPECT_THAT(Run({"FT.SEARCH", "j", "*", "SORTBY", "price", "RETURN", "1", "flag"}),
+              IsArray(IntArg(2), "j:2", IsMap("flag", "0"), "j:1", IsMap("flag", "1")));
+
+  // The sort field of a full document comes from the sort index; RETURN reads the document.
+  EXPECT_THAT(Run({"FT.SEARCH", "j", "*", "SORTBY", "flag"}),
+              IsArray(IntArg(2), "j:2", IsMap("flag", "false", "$", R"({"flag":false,"price":7})"),
+                      "j:1", IsMap("flag", "true", "$", R"({"flag":true,"price":10.5})")));
+
+  // A document without a sortable field gets no entry for it.
+  EXPECT_THAT(Run({"FT.AGGREGATE", "h", "@t:{b}", "LOAD", "1", "@n"}),
+              IsArray(IntArg(1), IsArray()));
+
+  // RESP3 sends numbers in rows as strings too.
+  Run({"HELLO", "3"});
+  EXPECT_THAT(
+      Run({"FT.AGGREGATE", "h", "@t:{a}", "GROUPBY", "1", "@t", "REDUCE", "COUNT", "0", "AS", "c"}),
+      IsArray(IntArg(1), IsMap("t", "a", "c", "2")));
 }
 
 // GEO index tests for FT.SEARCH with HASH and JSON documents
@@ -8821,6 +8903,19 @@ TEST_F(SearchFamilyTest, AggregateApplyArithmetic) {
   auto resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "2", "@a", "@b", "APPLY", "(@a - @b) / 2",
                    "AS", "result"});
   EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "10", "b", "3", "result", "3.5")));
+
+  // Division by zero gives inf or nan (never -nan), and fractions keep 12 significant digits.
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD",  "2",       "@a", "@b", "APPLY",
+              "@a / 0",       "AS",  "x", "APPLY", "@a % 0",  "AS", "y",  "APPLY",
+              "-(@a % 0)",    "AS",  "w", "APPLY", "@a / @b", "AS", "z"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(IsMap("a", "10", "b", "3", "x", "inf", "y", "nan", "w",
+                                               "nan", "z", "3.33333333333")));
+
+  // Integers print in full across the int64 range.
+  resp = Run({"FT.AGGREGATE", "idx", "*", "LOAD", "1", "@a", "APPLY", "-(2 ^ 63)", "AS", "lo",
+              "APPLY", "2 ^ 63", "AS", "hi"});
+  EXPECT_THAT(resp, IsUnordArrayWithSize(
+                        IsMap("a", "10", "lo", "-9223372036854775808", "hi", "9.22337203685e+18")));
 }
 
 TEST_F(SearchFamilyTest, AggregateApplyChained) {
