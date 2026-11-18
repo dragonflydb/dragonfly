@@ -96,8 +96,8 @@ class ExpiringValuesAccessor : public BaseAccessor {
     return live;
   }
 
-  SearchDocData SerializeAll(const DocFieldTypes& types) const override {
-    return doc_.SerializeAll(types);
+  SearchDocData SerializeAll() const override {
+    return doc_.SerializeAll();
   }
 
  private:
@@ -186,23 +186,6 @@ std::optional<std::vector<DocField>> ResolveFields(
   if (!fields)
     return std::nullopt;
   return ResolveFields(schema, *fields);
-}
-
-DocFieldTypes::DocFieldTypes(const search::Schema& schema) {
-  for (const auto& [_, field] : schema.fields) {
-    auto [it, inserted] = fields_.try_emplace(field.identifier, &field);
-    if (!inserted && field.StandsBefore(*it->second))
-      it->second = &field;
-  }
-}
-
-search::SchemaField::FieldType DocFieldTypes::Of(std::string_view identifier) const {
-  auto it = fields_.find(identifier);
-  return it != fields_.end() ? it->second->type : search::SchemaField::TEXT;
-}
-
-size_t DocFieldTypes::GetNonPmrMemoryUsage() const {
-  return fields_.bucket_count() * (sizeof(decltype(fields_)::value_type) + 1);
 }
 
 bool SearchParams::ShouldReturnField(std::string_view alias) const {
@@ -475,7 +458,6 @@ bool DocIndex::Matches(string_view key, unsigned obj_code) const {
 
 ShardDocIndex::ShardDocIndex(shared_ptr<const DocIndex> index, unsigned* hash_index_count)
     : base_{std::move(index)},
-      field_types_{base_->schema},
       hash_index_lifetime_{base_->type == DocIndex::HASH ? hash_index_count : nullptr},
       key_index_{} {
   DCHECK(base_->type != DocIndex::HASH || hash_index_count);
@@ -1075,12 +1057,14 @@ ShardDocIndex::SerializedEntryWithKey ShardDocIndex::SerializeDocWithKey(
   if (!entry)
     return std::nullopt;
   const auto& accessor = entry->second;
-  SerializedDoc doc{entry->first,
-                    fields ? accessor->Serialize(*fields) : accessor->SerializeAll(field_types_),
-                    {}};
+  SerializedDoc doc{
+      entry->first, fields ? accessor->Serialize(*fields) : accessor->SerializeAll(), {}};
   if (sort_field) {
-    if (auto values = accessor->Serialize(absl::MakeConstSpan(sort_field, 1)); !values.empty())
-      doc.sort_value = std::move(values.begin()->second);
+    if (auto values = accessor->Serialize(absl::MakeConstSpan(sort_field, 1)); !values.empty()) {
+      doc.sort_value = values.begin()->second;
+      if (!fields)
+        doc.values.insert(values.begin(), values.end());
+    }
   }
   return doc;
 }
@@ -1223,9 +1207,11 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
       // trim the rest to avoid out-of-bounds access on sort_scores in the loop below.
       if (!sort_scores.empty())
         result.ids.resize(sort_scores.size());
-      if (params.ShouldReturnAllFields())
-        return_fields.push_back(so.field);
     }
+
+    // A whole document may lack the sort alias (JSON has only `$`).
+    if (params.ShouldReturnAllFields())
+      return_fields.push_back(so.field);
   }
 
   // Re-rank by (score, key) so per-shard top-K matches what a global merge
@@ -1317,7 +1303,7 @@ SearchResult ShardDocIndex::Search(const OpArgs& op_args, const SearchParams& pa
     // Load all specified fields from document
     SearchDocData fields{};
     if (params.ShouldReturnAllFields())
-      fields = accessor->SerializeAll(field_types_);
+      fields = accessor->SerializeAll();
 
     auto more_fields = accessor->Serialize(listed_fields);
     fields.insert(make_move_iterator(more_fields.begin()), make_move_iterator(more_fields.end()));
@@ -1462,8 +1448,11 @@ vector<SearchDocData> ShardDocIndex::LoadDocEntriesWithScores(
 
     SearchDocData extracted_sort_indicies;
     extracted_sort_indicies.reserve(sort_indicies.size());
-    for (const auto& [alias, output] : sort_indicies)
-      extracted_sort_indicies[output] = indices_->GetSortIndexValue(doc, alias);
+    for (const auto& [alias, output] : sort_indicies) {
+      auto value = indices_->GetSortIndexValue(doc, alias);
+      if (!holds_alternative<monostate>(value))
+        extracted_sort_indicies[output] = std::move(value);
+    }
 
     SearchDocData loaded = accessor->Serialize(fields_to_load);
     out.emplace_back(make_move_iterator(extracted_sort_indicies.begin()),
@@ -1584,7 +1573,7 @@ ShardDocIndex::FieldsValuesPerDocId ShardDocIndex::LoadKeysData(
 }
 
 size_t ShardDocIndex::GetNonPmrMemoryUsage() const {
-  size_t mem = field_types_.GetNonPmrMemoryUsage();
+  size_t mem = 0;
   if (indices_)
     mem += indices_->GetNonPmrMemoryUsage();
   if (content_fields_.size() > 4)
