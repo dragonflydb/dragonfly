@@ -500,6 +500,28 @@ async def test_acl_load_keeps_connections_of_remaining_users(df_factory, tmp_dir
         writer.close()
 
 
+async def test_acl_no_auth_commands(df_server):
+    admin = df_server.client()
+    await admin.execute_command("ACL SETUSER noauth_locked on >pass ~* -@all")
+    await admin.execute_command("ACL SETUSER noauth_other on >pass ~* +@all")
+    client = aioredis.Redis(
+        port=df_server.port, decode_responses=True, single_connection_client=True
+    )
+
+    # Like Valkey, a user without permissions can still switch users or reset the connection.
+    assert await client.execute_command("AUTH noauth_locked pass") == "OK"
+    await client.execute_command("HELLO 2 AUTH noauth_other pass")
+    assert await client.execute_command("AUTH noauth_locked pass") == "OK"
+    assert await client.execute_command("RESET") == "RESET"
+
+    # HELLO cannot switch users inside a script.
+    with pytest.raises(redis.exceptions.ResponseError, match="not allowed from script"):
+        await client.eval("return redis.call('HELLO', '2', 'AUTH', 'noauth_locked', 'pass')", 0)
+
+    await client.aclose()
+    await admin.aclose()
+
+
 async def test_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert [] == res
