@@ -3213,6 +3213,8 @@ struct MetricCmp {
   MetricCmp() = default;
 
   explicit MetricCmp(const Metrics& m) : new_metric(m.type_attributed_memory_bytes) {
+    // Compare object categories with the legacy object-only metric.
+    new_metric[kUntrackedMemory] = 0;
     for (const auto& db : m.db_stats) {
       ranges::transform(old_metric, db.memory_usage_by_type, old_metric.begin(), plus{});
       obj_used += db.obj_memory_usage;

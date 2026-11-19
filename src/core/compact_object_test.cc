@@ -1604,6 +1604,7 @@ TEST_F(CompactObjectTest, MemoryAccountingScopesAndCharges) {
   expected[OBJ_STRING] = mi_usable_size(outer) + mi_usable_size(middle);
   expected[OBJ_HASH] = mi_usable_size(inner);
   expected[OBJ_KEY] = mi_usable_size(direct);
+  expected[kUntrackedMemory] = mi_usable_size(untracked);
   EXPECT_EQ(GetTypeAttributedMemory(), expected);
 
   resource.deallocate(direct, 64);
@@ -1630,7 +1631,9 @@ TEST_F(CompactObjectTest, MemoryAccountingUntrackedAndLifecycle) {
     AtomicMemoryScope untracked{kUntrackedMemory};
     metadata = resource.allocate(64);
   }
-  EXPECT_EQ(GetTypeAttributedMemory(), TypeAttributedMemory{});
+  TypeAttributedMemory expected{};
+  expected[kUntrackedMemory] = mi_usable_size(metadata);
+  EXPECT_EQ(GetTypeAttributedMemory(), expected);
   {
     AtomicMemoryScope outer{OBJ_HASH};
     AtomicMemoryScope untracked{kUntrackedMemory};
@@ -1643,13 +1646,13 @@ TEST_F(CompactObjectTest, MemoryAccountingUntrackedAndLifecycle) {
     AtomicMemoryScope untracked{kUntrackedMemory};
     metadata = resource.allocate(64);
   }
+  expected[kUntrackedMemory] = mi_usable_size(metadata);
   resource.deallocate(metadata, 64);
   void* value = nullptr;
   {
     AtomicMemoryScope scope{OBJ_STRING};
     value = resource.allocate(32);
   }
-  TypeAttributedMemory expected{};
   expected[OBJ_STRING] = mi_usable_size(value);
   EXPECT_EQ(GetTypeAttributedMemory(), expected);
 

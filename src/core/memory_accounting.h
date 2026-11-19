@@ -16,12 +16,10 @@ namespace dfly {
 
 class MiMemoryResource;
 
-using TypeAttributedMemory = std::array<ssize_t, OBJ_TYPE_MAX>;
-
-// Memory bytes added in this category participate only in scope exclusion. This is a bucket in
-// which we "throw away" objects which use the same mimalloc resource as the database, but we do not
-// care for individual categories. Example: tiered storage wrapper, mcflag table
+// Internal memory such as tiered storage wrappers and mcflag tables is counted in this slot.
 inline constexpr int kUntrackedMemory = OBJ_TYPE_MAX;
+
+using TypeAttributedMemory = std::array<ssize_t, kUntrackedMemory + 1>;
 
 // memory resource must outlive accounting sessions
 void InitMemoryAccounting(MiMemoryResource& resource);

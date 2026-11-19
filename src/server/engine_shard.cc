@@ -551,6 +551,7 @@ void EngineShard::DestroyThreadLocal() {
   QList::ShutdownThread();
   detail::InternedString::ResetPool();
 
+  // End accounting while the shard's memory resource is still alive.
   ShutdownMemoryAccounting();
   shard_->~EngineShard();
   CleanupStatelessAllocMR();

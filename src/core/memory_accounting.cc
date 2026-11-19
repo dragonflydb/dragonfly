@@ -23,6 +23,7 @@ struct MemoryAccountingState {
 
 thread_local MemoryAccountingState accounting;
 
+// The transaction retains ownership while its fiber is suspended.
 thread_local TxMemoryScope* tl_tx_scope = nullptr;
 
 }  // namespace
@@ -59,8 +60,7 @@ void ChargeMemory(int category, int64_t delta) {
     return;
 
   accounting.charged_total += delta;
-  if (category != kUntrackedMemory)
-    accounting.by_type[category] += delta;
+  accounting.by_type[category] += delta;
 }
 
 AtomicMemoryScope::AtomicMemoryScope(int category)
@@ -111,6 +111,8 @@ void TxMemoryScope::MemTrackerHook(fb2::FiberSwitchHookEvent event) noexcept {
       break;
     case RESUME:
       DCHECK(scope.suspended_);
+
+      // Start a fresh interval after other fibers may have changed memory usage.
       scope.mem_baseline_ = UnattributedMemory();
       scope.suspended_ = false;
       break;

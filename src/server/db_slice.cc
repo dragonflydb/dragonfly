@@ -937,6 +937,8 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_v
 
   events_.mutations++;
   ssize_t table_increase = db.prime.mem_usage() - table_before;
+
+  // Table storage is shared infrastructure rather than object memory.
   ChargeMemory(kUntrackedMemory, table_increase);
   memory_budget_ -= table_increase;
 
