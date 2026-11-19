@@ -19,6 +19,7 @@
 #include <utility>
 #include <variant>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/flags/commandlineflag.h"
 #include "absl/numeric/bits.h"
@@ -341,19 +342,20 @@ void AclFamily::List(CmdArgParser parser, CommandContext* cmd_cntx) {
     rb->SendSimpleString(UserToString(username, user, false, family_commands_));
 }
 
-void AclFamily::StreamUpdatesToConnections(string_view username, const User& user) {
+void AclFamily::StreamUpdatesToConnections(
+    absl::FunctionRef<const User*(string_view username)> find_user) {
   auto update = [&](unsigned, util::Connection* conn) {
     auto* connection = static_cast<facade::Connection*>(conn);
     if (connection->IsHttp() || !connection->cntx())
       return;
 
     auto* cntx = static_cast<ConnectionContext*>(connection->cntx());
-    if (cntx->authed_username == username) {
-      cntx->SetAclCredentials({.acl_commands = user.AclCommands(),
-                               .keys = user.Keys(),
-                               .pub_sub = user.PubSub(),
+    if (const User* user = find_user(cntx->authed_username)) {
+      cntx->SetAclCredentials({.acl_commands = user->AclCommands(),
+                               .keys = user->Keys(),
+                               .pub_sub = user->PubSub(),
                                .ns = {},
-                               .db = user.Db()});
+                               .db = user->Db()});
     }
   };
   for (auto* listener : listeners_)
@@ -422,7 +424,8 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
     EvictConnections(
         [username](const ConnectionContext& cntx) { return cntx.authed_username == username; });
   else
-    StreamUpdatesToConnections(username, user);
+    StreamUpdatesToConnections(
+        [&](string_view name) { return name == username ? &user : nullptr; });
 }
 
 void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -559,22 +562,32 @@ void AclFamily::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Reply first because the connection might get evicted.
   cmd_cntx->SendOk();
-  EvictConnections([&reg](const ConnectionContext& cntx) {
-    return cntx.authed_username != "default" && reg.registry.contains(cntx.authed_username);
-  });
+
+  // A connection's namespace is set when it authenticates, so a user that moves must reconnect.
+  absl::flat_hash_map<string, string> old_namespaces;
+  for (const auto& [name, user] : reg.registry)
+    old_namespaces.emplace(name, user.Namespace());
+
   reg.registry.clear();
   registry_->ResetStats();
   AddUsers(std::move(requests), &reg.registry);
 
-  // Default user connections stay open, so they must pick up its reloaded rules.
-  const User& default_user = reg.registry.at("default");
-  StreamUpdatesToConnections("default", default_user);
+  auto find_user = [&reg](string_view name) -> const User* {
+    auto it = reg.registry.find(name);
+    return it == reg.registry.end() ? nullptr : &it->second;
+  };
 
-  // Like Valkey, drop the ones holding subscriptions that the reloaded rules forbid.
-  EvictConnections([&default_user](const ConnectionContext& cntx) {
-    return cntx.authed_username == "default" &&
-           HasForbiddenSubscription(cntx, default_user.PubSub());
+  // Like Valkey, drop the connections of removed users and the ones holding subscriptions that the
+  // reloaded rules forbid. The rest stay open with the reloaded rules.
+  EvictConnections([&](const ConnectionContext& cntx) {
+    const User* user = find_user(cntx.authed_username);
+    if (!user)
+      return true;
+    auto old_ns = old_namespaces.find(cntx.authed_username);
+    return (old_ns != old_namespaces.end() && old_ns->second != user->Namespace()) ||
+           HasForbiddenSubscription(cntx, user->PubSub());
   });
+  StreamUpdatesToConnections(find_user);
 }
 
 void AclFamily::Log(CmdArgParser parser, CommandContext* cmd_cntx) {
