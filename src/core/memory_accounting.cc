@@ -17,7 +17,7 @@ struct MemoryAccountingState {
   MiMemoryResource* resource = nullptr;
 
   // Cumulative signed charges from ChargeMemory form A in U - A accounting
-  int64_t charged_total = 0;
+  ssize_t charged_total = 0;
   TypeAttributedMemory by_type{};
 };
 
@@ -45,15 +45,15 @@ const TypeAttributedMemory& GetTypeAttributedMemory() {
   return accounting.by_type;
 }
 
-int64_t UnattributedMemory() {
+ssize_t UnattributedMemory() {
   if (!MemoryAccountingEnabled())
     return 0;
 
-  const int64_t used = UsedMemoryThreadLocal(*accounting.resource);
+  const ssize_t used = UsedMemoryThreadLocal(*accounting.resource);
   return used - accounting.charged_total;
 }
 
-void ChargeMemory(int category, int64_t delta) {
+void ChargeMemory(int category, ssize_t delta) {
   DCHECK_GE(category, 0);
   DCHECK_LE(category, kUntrackedMemory);
   if (!MemoryAccountingEnabled())

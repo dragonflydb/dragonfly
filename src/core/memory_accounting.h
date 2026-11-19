@@ -50,8 +50,7 @@ const TypeAttributedMemory& GetTypeAttributedMemory();
 //   Array of per-type counters, breaking down the "accounted" total.
 //   Written only by accounting code and read by metrics.
 //
-// Relations:
-//   Used memory is always greater than or equal to accounted memory
+// Relation:
 //   Sum of memory usage by types is equal to accounted memory
 //
 // Lifecycle of a scope:
@@ -85,10 +84,10 @@ const TypeAttributedMemory& GetTypeAttributedMemory();
 // Nested scopes update "accounted" so enclosing scopes can compute the difference.
 
 // Returns used - accounted
-int64_t UnattributedMemory();
+ssize_t UnattributedMemory();
 
 // updates accounted total, and by type. delta is added to both
-void ChargeMemory(int category, int64_t delta);
+void ChargeMemory(int category, ssize_t delta);
 
 // Attributes allocator delta over this scope's non-yielding lifetime
 class AtomicMemoryScope {
@@ -102,7 +101,7 @@ class AtomicMemoryScope {
  private:
   util::FiberAtomicGuard guard_;
   int category_;
-  int64_t baseline_;
+  ssize_t baseline_;
 };
 
 // Attributes allocator delta during the owning fiber's running intervals for this scope's lifetime
@@ -120,7 +119,7 @@ class TxMemoryScope {
   static void MemTrackerHook(util::fb2::FiberSwitchHookEvent event) noexcept;
 
   int obj_type_;
-  int64_t mem_baseline_ = 0;
+  ssize_t mem_baseline_ = 0;
   util::fb2::FiberSwitchHook prev_hook_;
   bool enabled_ = false;
   bool suspended_ = false;
