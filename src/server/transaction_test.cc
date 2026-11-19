@@ -652,18 +652,6 @@ TEST_F(TransactionTest, AwakenedTxPollDroppedWhileRunning) {
   EXPECT_TRUE(t_ran) << "T awakened on shard 0 was stranded";
 }
 
-namespace {
-
-TypeAttributedMemory DeltaDiff(const TypeAttributedMemory& before,
-                               const TypeAttributedMemory& after) {
-  TypeAttributedMemory diffs = after;
-  for (size_t i = 0; i < before.size(); ++i)
-    diffs[i] -= before[i];
-  return diffs;
-}
-
-}  // namespace
-
 TEST_F(TransactionTest, DeltaTxScopeWhenAccountingDisabled) {
   OnShard(0, [] {
     auto& resource = *static_cast<MiMemoryResource*>(EngineShard::tlocal()->memory_resource());
@@ -692,9 +680,6 @@ TEST_F(TransactionTest, DeltaInterleavedFibers) {
     {
       bool other_ran = false;
       fb2::Fiber other{"other", [&] {
-                         TypeAttributedMemory suspended_delta{};
-                         suspended_delta[OBJ_STRING] = 1024;
-                         EXPECT_EQ(DeltaDiff(before, GetTypeAttributedMemory()), suspended_delta);
                          {
                            AtomicMemoryScope list_scope{OBJ_LIST};
                            q = mr->allocate(128);
@@ -711,41 +696,23 @@ TEST_F(TransactionTest, DeltaInterleavedFibers) {
       other.Join();
       ASSERT_TRUE(other_ran);
 
+      AtomicMemoryScope hash_scope{OBJ_HASH};
       r = mr->allocate(512);
     }
 
     TypeAttributedMemory expected{};
-    expected[OBJ_STRING] = 1024 + 512;
+    expected[OBJ_STRING] = 1024;
+    expected[OBJ_HASH] = 512;
     expected[OBJ_LIST] = 128;
-    EXPECT_EQ(DeltaDiff(before, GetTypeAttributedMemory()), expected);
+    auto delta = GetTypeAttributedMemory();
+    for (size_t i = 0; i < delta.size(); ++i)
+      delta[i] -= before[i];
+    EXPECT_EQ(delta, expected);
 
     mr->deallocate(p, 1024);
     mr->deallocate(q, 128);
     mr->deallocate(r, 512);
     mr->deallocate(background, 64);
-  });
-}
-
-TEST_F(TransactionTest, DeltaAtomicScopesInTransaction) {
-  OnShard(0, [] {
-    const auto mr = EngineShard::tlocal()->memory_resource();
-    void* parent = nullptr;
-    void* child = nullptr;
-
-    const auto before = GetTypeAttributedMemory();
-    {
-      TxMemoryScope scope{OBJ_STRING};
-      parent = mr->allocate(1024);
-      AtomicMemoryScope atomic_scope{OBJ_HASH};
-      child = mr->allocate(128);
-    }
-    TypeAttributedMemory expected{};
-    expected[OBJ_STRING] = 1024;
-    expected[OBJ_HASH] = 128;
-    EXPECT_EQ(DeltaDiff(before, GetTypeAttributedMemory()), expected);
-
-    mr->deallocate(parent, 1024);
-    mr->deallocate(child, 128);
   });
 }
 

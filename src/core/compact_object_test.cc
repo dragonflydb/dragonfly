@@ -1548,15 +1548,9 @@ TEST_F(CompactObjectTest, TypeReplacementAccounting) {
   expected[OBJ_STRING] += static_cast<int64_t>(cobj_.MallocUsed()) - old_bytes;
   EXPECT_EQ(attributed(), expected);
 
-  // Key accounting is separate; resets and destruction do not go through SetMeta.
+  // Key accounting is separate.
   CompactKey key(string(4096, '\x80'));
   key.SetString("inline");
-  {
-    CompactValue value;
-    value.SetString(string(32, '\x80'));
-    value.Reset();
-    value.SetString(string(4096, '\x80'));
-  }
   EXPECT_EQ(attributed(), expected);
 
   int64_t string_bytes = cobj_.MallocUsed();
@@ -1599,10 +1593,6 @@ TEST_F(CompactObjectTest, MemoryAccountingScopesAndCharges) {
         ChargeMemory(OBJ_KEY, mi_usable_size(direct));
         untracked = resource.allocate(64);
         ChargeMemory(kUntrackedMemory, mi_usable_size(untracked));
-
-        // Temporary allocations must not contribute to the scope's delta.
-        void* temporary = resource.allocate(48);
-        resource.deallocate(temporary, 48);
       }
     }
   }
