@@ -1537,7 +1537,7 @@ TEST_F(CompactObjectTest, TypeReplacementAccounting) {
     EXPECT_EQ(attributed()[OBJ_SET] - before[OBJ_SET], -set_bytes);
   }
 
-  // Same-type replacement charges the free once, even inside a scope of the same type.
+  // Same-type replacement is accounted for by the enclosing scope.
   cobj_.SetString(string(32, '\x80'));
   auto expected = attributed();
   int64_t old_bytes = cobj_.MallocUsed();
@@ -1567,6 +1567,13 @@ TEST_F(CompactObjectTest, TypeReplacementAccounting) {
   EXPECT_EQ(attributed()[OBJ_STRING] - before_move[OBJ_STRING], -string_bytes);
   EXPECT_EQ(cobj_.ObjType(), OBJ_HASH);
   EXPECT_TRUE(cobj_.IsExternal());
+
+  // Same-type offloading leaves accounting to the caller.
+  cobj_.Reset();
+  cobj_.SetString(string(4096, '\x80'));
+  const auto before_offload = attributed();
+  cobj_.SetExternal(4096, 4096, CompactObj::ExternalRep::STRING);
+  EXPECT_EQ(attributed(), before_offload);
 }
 
 TEST_F(CompactObjectTest, MemoryAccountingScopesAndCharges) {

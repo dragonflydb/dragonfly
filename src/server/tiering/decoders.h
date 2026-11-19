@@ -25,9 +25,6 @@ struct Decoder {
   struct UploadMetrics {
     bool modified;               // whether the value as modified
     size_t estimated_mem_usage;  // Estimated memory usage if uploaded
-
-    // Existing allocator bytes transferred into the value, rather than allocated during Upload.
-    size_t transferred_bytes = 0;
   };
 
   virtual ~Decoder() = default;

@@ -515,6 +515,9 @@ class CompactObj {
   }
 
  private:
+  // Resolves non-external tags without inspecting the value payload.
+  static CompactObjType TypeForTag(uint8_t tag);
+
   // Returns a string_view corresponding to the serialized encoded blob.
   // If opt_dest is provided, it may be used to decode directly into the destination buffer.
   std::string_view GetEncodedBlob(StrEncoding str_encoding, char* opt_dest) const;
@@ -528,7 +531,9 @@ class CompactObj {
   bool CmpEncoded(std::string_view sv) const;
   bool CmpNonInline(std::string_view sv) const;
 
-  void SetMeta(uint8_t taglen, uint8_t mask = 0);
+  // External tags need their logical type supplied before their payload is initialized.
+  void SetMeta(uint8_t taglen, uint8_t mask = 0,
+               CompactObjType replacement_type = kInvalidCompactObjType);
 
   struct ExternalPtr {
     uint32_t serialized_size;

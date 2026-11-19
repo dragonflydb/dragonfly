@@ -55,6 +55,19 @@ namespace {
 constexpr XXH64_hash_t kHashSeed = 24061983;
 constexpr size_t kAlignSize = 8u;
 
+CompactObjType TypeForExternalRep(CompactObj::ExternalRep rep) {
+  switch (rep) {
+    case CompactObj::ExternalRep::STRING:
+      return OBJ_STRING;
+    case CompactObj::ExternalRep::SERIALIZED_MAP:
+      return OBJ_HASH;
+    case CompactObj::ExternalRep::LIST_NODE:
+      return OBJ_LIST;
+  }
+  LOG(FATAL) << "Unsupported external representation " << int(rep);
+  return kInvalidCompactObjType;
+}
+
 size_t UpdateSize(size_t size, int64_t update) {
   int64_t result = static_cast<int64_t>(size) + update;
   if (result < 0) {
@@ -642,7 +655,7 @@ CompactObj& CompactObj::operator=(CompactObj&& o) noexcept {
   DCHECK(&o != this);
   DCHECK_EQ(is_key_, o.is_key_);
 
-  SetMeta(o.taglen_, o.mask_);  // frees own previous resources
+  SetMeta(o.taglen_, o.mask_, o.ObjType());  // frees own previous resources
   encoding_ = o.encoding_;
   memcpy(&u_, &o.u_, sizeof(u_));
 
@@ -770,22 +783,17 @@ uint64_t CompactObj::HashCode(string_view str) {
 
 CompactObjType CompactObj::ObjType() const {
   if (taglen_ == EXTERNAL_TAG) {
-    switch (static_cast<ExternalRep>(u_.ext_ptr.representation)) {
-      case ExternalRep::STRING:
-        return OBJ_STRING;
-      case ExternalRep::SERIALIZED_MAP:
-        return OBJ_HASH;
-      case ExternalRep::LIST_NODE:
-        return OBJ_LIST;
-    }
-    LOG(FATAL) << "Unsupported external representation " << int(u_.ext_ptr.representation);
-    return kInvalidCompactObjType;
+    return TypeForExternalRep(static_cast<ExternalRep>(u_.ext_ptr.representation));
   }
-  if (taglen_ <= kInlineLen || taglen_ == INT_TAG || taglen_ == SMALL_TAG ||
-      taglen_ == SDS_TTL_TAG || taglen_ == LARGE_STR_TAG)
+  return TypeForTag(taglen_);
+}
+
+CompactObjType CompactObj::TypeForTag(uint8_t tag) {
+  if (tag <= kInlineLen || tag == INT_TAG || tag == SMALL_TAG || tag == SDS_TTL_TAG ||
+      tag == LARGE_STR_TAG)
     return OBJ_STRING;
 
-  switch (taglen_) {
+  switch (tag) {
     case LIST_TAG:
       return OBJ_LIST;
     case SET_TAG:
@@ -808,7 +816,7 @@ CompactObjType CompactObj::ObjType() const {
       return OBJ_CUCKOOFILTER;
   }
 
-  LOG(FATAL) << "Unsupported non-external tag " << int(taglen_);
+  LOG(FATAL) << "Unsupported non-external tag " << int(tag);
   return kInvalidCompactObjType;
 }
 
@@ -1244,7 +1252,7 @@ void CompactObj::GetString(char* dest) const {
 }
 
 void CompactObj::SetExternal(size_t offset, uint32_t sz, ExternalRep rep) {
-  SetMeta(EXTERNAL_TAG, mask_);
+  SetMeta(EXTERNAL_TAG, mask_, TypeForExternalRep(rep));
 
   u_.ext_ptr.is_cool = 0;
   u_.ext_ptr.representation = static_cast<uint8_t>(rep);
@@ -1274,7 +1282,7 @@ CompactObj CompactObj::CloneExternal() const {
 void CompactObj::SetCool(size_t offset, uint32_t sz, ExternalRep rep,
                          tiering::TieredCoolRecord* record) {
   encoding_ = record->value.encoding_;
-  SetMeta(EXTERNAL_TAG, record->value.mask_);
+  SetMeta(EXTERNAL_TAG, record->value.mask_, TypeForExternalRep(rep));
 
   u_.ext_ptr.is_cool = 1;
   u_.ext_ptr.representation = static_cast<uint8_t>(rep);
@@ -1482,15 +1490,22 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
   return {true, false};
 }
 
-void CompactObj::SetMeta(uint8_t taglen, uint8_t mask) {
+void CompactObj::SetMeta(uint8_t taglen, uint8_t mask, CompactObjType replacement_type) {
   if (!HasAllocated()) {
     memset(u_.inline_str, 0, kInlineLen);
-  } else if (is_key_) {
+  } else if (is_key_ || !MemoryAccountingEnabled()) {
     // AccountObjectMemory charges key frees separately as OBJ_KEY.
     Free();
   } else {
-    AtomicMemoryScope scope(ObjType());
-    Free();
+    const auto old_type = ObjType();
+    if (replacement_type == kInvalidCompactObjType)
+      replacement_type = TypeForTag(taglen);
+    if (old_type != replacement_type) {
+      AtomicMemoryScope scope(old_type);
+      Free();
+    } else {
+      Free();
+    }
   }
   taglen_ = taglen;
   mask_ = mask;

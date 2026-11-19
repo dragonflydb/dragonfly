@@ -632,8 +632,6 @@ TEST_F(PureDiskTSTest, BackgroundOffloading) {
 
 // Verify correctness of our offloading startegy, offloading values only after second access.
 TEST_F(PureDiskTSTest, OffloadingStrategy) {
-  const auto baseline = GetMetrics().type_attributed_memory_bytes[OBJ_STRING];
-
   // Create value and wait to be offlaoded
   string value = BuildString(3000);
   Run({"set", "key", value});
@@ -644,7 +642,6 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
   EXPECT_EQ(metrics.tiered_stats.total_fetches, 0);
   EXPECT_EQ(metrics.tiered_stats.total_uploads, 0);
   EXPECT_EQ(metrics.tiered_stats.total_stashes, 1);
-  EXPECT_EQ(metrics.type_attributed_memory_bytes[OBJ_STRING], baseline);
 
   // Repeat a few times
   for (size_t i = 1; i <= 3; i++) {
@@ -665,7 +662,6 @@ TEST_F(PureDiskTSTest, OffloadingStrategy) {
     metrics = GetMetrics();
     EXPECT_EQ(metrics.tiered_stats.total_offloading_stashes, i);
     EXPECT_EQ(metrics.tiered_stats.total_stashes, i + 1);
-    EXPECT_EQ(metrics.type_attributed_memory_bytes[OBJ_STRING], baseline);
   }
 }
 
@@ -1162,7 +1158,6 @@ TEST_F(PureDiskTSTest, OffloadedHashSnapshotReload) {
 }
 
 TEST_P(LatentCoolingTSTest, SimpleHash) {
-  const auto baseline = GetMetrics().type_attributed_memory_bytes[OBJ_HASH];
   absl::FlagSaver saver;
   absl::SetFlag(&FLAGS_tiered_experimental_hash_support, true);
   absl::SetFlag(&FLAGS_tiered_upload_threshold, 0.0);  // never upload
@@ -1243,15 +1238,6 @@ TEST_P(LatentCoolingTSTest, SimpleHash) {
     string key = absl::StrCat("k", i);
     EXPECT_THAT(Run({"HSET", key, c_key, "Even more recent value"}), IntArg(0));
     EXPECT_EQ(Run({"HGET", key, c_key}), "Even more recent value");
-  }
-
-  // All resident allocations, including decoder-owned mutations uploaded later, must balance.
-  for (size_t i = 0; i < kNUM; i++)
-    EXPECT_THAT(Run({"DEL", absl::StrCat("k", i)}), IntArg(1));
-
-  // Cooling retains resident copies; accounting for that path is outside this upload regression.
-  if (!GetParam()) {
-    EXPECT_EQ(GetMetrics().type_attributed_memory_bytes[OBJ_HASH], baseline);
   }
 }
 

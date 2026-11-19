@@ -106,7 +106,6 @@ Decoder::UploadMetrics ListpackMapDecoder::GetMetrics() const {
   return UploadMetrics{
       .modified = owned_lw_ != nullptr,
       .estimated_mem_usage = bytes,
-      .transferred_bytes = owned_lw_ ? zmalloc_size(owned_lw_->GetPointer()) : 0,
   };
 }
 
