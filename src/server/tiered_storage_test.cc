@@ -16,6 +16,7 @@
 #include "facade/facade_test.h"
 #include "server/db_slice.h"
 #include "server/engine_shard_set.h"
+#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/server_state.h"
 #ifdef WITH_SEARCH
@@ -1893,6 +1894,7 @@ TEST_P(LatentCoolingTSTest, MemoryDecommitCool) {
   auto metrics_before = GetMetrics();
   ASSERT_GT(metrics_before.tiered_stats.cold_storage_bytes, 0)
       << "Should have cool storage data before decommit";
+  EXPECT_GT(metrics_before.type_attributed_memory_bytes[kInternalMemory], 0);
 
   // Call MEMORY DECOMMIT COOL
   auto response = Run({"MEMORY", "DECOMMIT", "COOL"});
@@ -2368,6 +2370,8 @@ TEST_F(TieredStorageTest, CoolHashDeleteDoesNotAbort) {
   SetFlag(&FLAGS_tiered_experimental_hash_support, true);
   UpdateFromFlags();
 
+  const auto baseline = GetMetrics().type_attributed_memory_bytes;
+
   // Listpack hashes go through small bins, which only flush at 4KB - one hash never stashes.
   const int kNum = 60;
   for (int i = 0; i < kNum; ++i)
@@ -2375,9 +2379,10 @@ TEST_F(TieredStorageTest, CoolHashDeleteDoesNotAbort) {
 
   ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries > 0u; });
 
-  Run({"FLUSHALL"});
+  Run({"FLUSHALL", "SYNC"});
   EXPECT_EQ(Run({"PING"}), "PONG");
   EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+  EXPECT_EQ(GetMetrics().type_attributed_memory_bytes, baseline);
 }
 
 #ifdef WITH_SEARCH

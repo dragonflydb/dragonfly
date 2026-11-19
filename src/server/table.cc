@@ -8,6 +8,8 @@
 #include "base/logging.h"
 #include "core/top_keys.h"
 #include "server/cluster_support.h"
+#include "server/engine_shard.h"
+#include "server/memory_scope.h"
 #include "server/server_state.h"
 
 using namespace std;
@@ -119,6 +121,19 @@ DbTable::DbTable(PMR_NS::memory_resource* mr, DbIndex db_index)
 
 DbTable::~DbTable() {
   DCHECK_EQ(thread_index, ServerState::tlocal()->thread_index());
+
+  if (account_memory_on_destruction) {
+    util::FiberAtomicGuard guard;
+    auto shard = EngineShard::tlocal();
+    auto cb = [&shard](PrimeKey& key, PrimeValue& value) {
+      shard->AddTypeMemDelta(OBJ_KEY, -static_cast<int64_t>(key.MallocUsed()));
+      key.Reset();
+      AtomicMemoryScope scope(value.ObjType());
+      value.Reset();
+    };
+    prime.Clear(cb);
+  }
+
   delete sample_top_keys;
   delete sample_unique_keys;
   delete sample_values_hist;

@@ -33,6 +33,7 @@ extern "C" {
 #include "server/engine_shard_set.h"
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
+#include "server/memory_scope.h"
 #include "server/test_utils.h"
 #include "server/transaction.h"
 
@@ -3133,27 +3134,6 @@ TypeAttributedMemory Snapshot() {
 
 }  // namespace
 
-TEST_F(GenericFamilyTest, DeleteTrackMemByType) {
-  const string value(4096, 'x');
-  Run({"SET", "s", value});
-  Run({"HSET", "h", "field", value});
-  Run({"LPUSH", "l", value});
-
-  const auto before = Snapshot();
-  ASSERT_THAT(Run({"DEL", "s", "h", "l"}), IntArg(3));
-  const auto after = Snapshot();
-
-  for (size_t type = 0; type < before.size(); ++type)
-    if (type == OBJ_STRING || type == OBJ_HASH || type == OBJ_LIST)
-      EXPECT_LT(after[type] - before[type], 0);
-    else
-      EXPECT_EQ(after[type], before[type]);
-
-  // deleting missing items doesnt change the memory
-  ASSERT_THAT(Run({"DEL", "s", "h", "l"}), IntArg(0));
-  EXPECT_EQ(Snapshot(), after);
-}
-
 TEST_F(GenericFamilyTest, AsyncDelTrackMemByType) {
   // Compares that memory deltas produced by async unlink are the same as those from sync deletes
   constexpr auto key = "big-collection";
@@ -3213,6 +3193,7 @@ struct MetricCmp {
   MetricCmp() = default;
 
   explicit MetricCmp(const Metrics& m) : new_metric(m.type_attributed_memory_bytes) {
+    new_metric[kInternalMemory] = 0;
     for (const auto& db : m.db_stats) {
       ranges::transform(old_metric, db.memory_usage_by_type, old_metric.begin(), plus{});
       obj_used += db.obj_memory_usage;
@@ -3255,8 +3236,8 @@ struct MetricCmp {
     return new_metric[t] == old_metric[t];
   }
 
-  bool MatchObj() const {
-    return Match(OBJ_KEY) && NewTotal() == obj_used && obj_used == OldTotal();
+  bool Matches() const {
+    return new_metric == old_metric && NewTotal() == obj_used;
   }
 
   bool IsClean() const {
@@ -3324,25 +3305,26 @@ TEST_F(MemParityTest, SetStringSimple) {
   EXPECT_TRUE(d.IsClean()) << d;
 }
 
-TEST_F(MemParityTest, DeleteString) {
-  Run({"SET", key_, val_});
-  auto d = Delta([&] { Run({"DEL", key_}); });
-  EXPECT_TRUE(d.Match(OBJ_STRING)) << d;
-  EXPECT_TRUE(d.MatchObj()) << d;
-  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
-  EXPECT_TRUE(d.IsClean()) << d;
-}
-
 TEST_F(MemParityTest, DeleteMixedTypes) {
-  Run({"SET", key_, val_});
-  Run({"HSET", key_ + "h", "f", val_});
-  Run({"LPUSH", key_ + "l", val_});
-  auto d = Delta([&] { Run({"DEL", key_, key_ + "h", key_ + "l"}); });
-  EXPECT_TRUE(d.Negative(OBJ_HASH)) << d;
-  EXPECT_TRUE(d.Negative(OBJ_LIST)) << d;
-  EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
-  EXPECT_TRUE(d.MatchObj()) << d;
-  EXPECT_TRUE(d.IsClean()) << d;
+  for (const string& key : {string("s"), key_}) {
+    SCOPED_TRACE(StrCat("key length=", key.size()));
+    ASSERT_EQ(Run({"SET", key, val_}), "OK");
+    ASSERT_THAT(Run({"HSET", key + "h", "f", val_}), IntArg(1));
+    ASSERT_THAT(Run({"LPUSH", key + "l", val_}), IntArg(1));
+    const auto before = Snapshot();
+    auto d = Delta([&] { EXPECT_THAT(Run({"DEL", key, key + "h", key + "l"}), IntArg(3)); });
+    const auto after = Snapshot();
+    EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
+    EXPECT_TRUE(d.Negative(OBJ_STRING) && d.Negative(OBJ_HASH) && d.Negative(OBJ_LIST)) << d;
+    for (size_t type = 0; type < d.new_metric.size(); ++type) {
+      if (type != OBJ_KEY && type != OBJ_STRING && type != OBJ_HASH && type != OBJ_LIST) {
+        EXPECT_EQ(after[type], before[type]) << type << ": " << d;
+      }
+    }
+
+    ASSERT_THAT(Run({"DEL", key, key + "h", key + "l"}), IntArg(0));
+    EXPECT_EQ(Snapshot(), after);
+  }
 }
 
 // Only types which are always freed synchronously, see AsyncUnlinkLargeHash for the deferred path
@@ -3352,8 +3334,7 @@ TEST_F(MemParityTest, UnlinkMixedTypes) {
   auto d = Delta([&] { Run({"UNLINK", key_, key_ + "l"}); });
   EXPECT_TRUE(d.Negative(OBJ_LIST)) << d;
   EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
-  EXPECT_TRUE(d.MatchObj()) << d;
-  EXPECT_TRUE(d.IsClean()) << d;
+  EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
 }
 
 // Same key/value moved across dbs have no delta
@@ -3388,19 +3369,15 @@ TEST_F(MemParityTest, ExpireString) {
     AdvanceTime(600);
     EXPECT_THAT(Run({"GET", key_}), ArgType(RespExpr::NIL));
   });
-  EXPECT_TRUE(d.Match(OBJ_STRING)) << d;
-  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
   EXPECT_TRUE(d.Negative(OBJ_STRING)) << d;
-  EXPECT_TRUE(d.IsClean()) << d;
 }
 
 TEST_F(MemParityTest, HashEncodingChange) {
   Run({"HSET", key_, "f", "v"});
   auto d = Delta([&] { Run({"HSET", key_, "f1", val_}); });
-  EXPECT_TRUE(d.Match(OBJ_HASH)) << d;
-  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
   EXPECT_TRUE(d.Positive(OBJ_HASH)) << d;
-  EXPECT_TRUE(d.IsClean()) << d;
 }
 
 // Frees are run after the command, can only compare once the async deletion queue is drained
@@ -3417,10 +3394,8 @@ TEST_F(MemParityTest, AsyncUnlinkLargeHash) {
         },
         std::chrono::seconds{5}));
   });
-  EXPECT_TRUE(d.Match(OBJ_HASH)) << d;
-  EXPECT_TRUE(d.MatchObj()) << d;
+  EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
   EXPECT_TRUE(d.Negative(OBJ_HASH)) << d;
-  EXPECT_TRUE(d.IsClean()) << d;
 }
 
 TEST_F(MemParityTest, SetOverwritesHash) {
@@ -3428,22 +3403,61 @@ TEST_F(MemParityTest, SetOverwritesHash) {
     SCOPED_TRACE(StrCat("replacement length=", value.size()));
     ASSERT_THAT(Run({"HSET", key_, "field", val_}), IntArg(1));
     auto d = Delta([&] { EXPECT_EQ(Run({"SET", key_, value}), "OK"); });
-    EXPECT_TRUE(d.Match(OBJ_HASH) && d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean()) << d;
+    EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
     EXPECT_TRUE(d.Negative(OBJ_HASH)) << d;
     EXPECT_EQ(Run({"GET", key_}), value);
     ASSERT_THAT(Run({"DEL", key_}), IntArg(1));
   }
 }
 
-// Whole table reset bypasses per-key delete scopes
-// new: {} old: {string=-896 list=-1280 hash=-1280 key=-2944 } obj_used=-6400
 TEST_F(MemParityTest, FlushDbMixedTypes) {
-  Run({"SET", key_, val_});
-  Run({"HSET", key_ + "h", "f", val_});
-  Run({"LPUSH", key_ + "l", val_});
-  auto d = Delta([&] { Run({"FLUSHDB", "SYNC"}); });
-  METRIC_CMP_TODO(d, d.Negative(OBJ_HASH) && d.Negative(OBJ_LIST) && d.Negative(OBJ_STRING) &&
-                         d.MatchObj() && d.IsClean());
+  for (const auto& [command, mode] : {pair{"FLUSHDB", "SYNC"}, pair{"FLUSHALL", "ASYNC"}}) {
+    SCOPED_TRACE(StrCat(command, " ", mode));
+    const auto baseline = Snapshot();
+    Run({"SET", key_, val_});
+    Run({"HSET", key_ + "h", "f", val_});
+    Run({"LPUSH", key_ + "l", val_});
+    auto d = Delta([&] {
+      EXPECT_EQ(Run({command, mode}), "OK");
+      EXPECT_TRUE(
+          WaitUntilCondition([&] { return Snapshot() == baseline; }, std::chrono::seconds{5}));
+    });
+    EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Negative(OBJ_LIST) && d.Negative(OBJ_STRING) &&
+                d.Matches() && d.IsClean())
+        << d;
+  }
+}
+
+TEST_F(MemParityTest, FlushDbRetainedMemory) {
+  const auto baseline = Snapshot();
+  ASSERT_EQ(Run({"SET", key_, val_}), "OK");
+
+  const auto populated = Snapshot();
+  ASSERT_EQ(Run({"SET", key_, val_, "_MCFLAGS", "42"}), "OK");
+  EXPECT_EQ(Snapshot(), populated);
+
+  const ShardId sid = Shard(key_, shard_set->size());
+  boost::intrusive_ptr<DbTable> retained;
+  absl::Cleanup release = [&] { shard_set->Await(sid, [&] { retained.reset(); }); };
+  auto borrow = shard_set->Await(sid, [&] {
+    retained = namespaces->GetDefaultNamespace().GetDbSlice(sid).databases()[0];
+    return retained->prime.Find(key_)->second.TryBorrow();
+  });
+  ASSERT_TRUE(borrow.has_value());
+
+  // Retaining the old table
+  ASSERT_EQ(Run({"FLUSHDB", "SYNC"}), "OK");
+  EXPECT_EQ(Snapshot(), populated);
+
+  // Destroying the table frees
+  shard_set->Await(sid, [&] { retained.reset(); });
+  auto pinned = baseline;
+  pinned[OBJ_STRING] = populated[OBJ_STRING];
+  EXPECT_EQ(Snapshot(), pinned);
+
+  // wait for heartbeat pinned string frees
+  borrow.reset();
+  EXPECT_TRUE(WaitUntilCondition([&] { return Snapshot() == baseline; }, std::chrono::seconds{5}));
 }
 
 TEST_F(MemParityTest, RenameStringAcrossShards) {
@@ -3451,21 +3465,21 @@ TEST_F(MemParityTest, RenameStringAcrossShards) {
   EXPECT_FALSE(dest.empty()) << "could not find key on another shard after 5k tries";
   Run({"SET", key_, val_});
   auto d = Delta([&] { EXPECT_EQ(Run({"RENAME", key_, dest}), "OK"); });
-  EXPECT_TRUE(d.Match(OBJ_STRING) && d.MatchObj() && d.IsClean()) << d;
+  EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
 }
 
 TEST_F(MemParityTest, RenameHashOverString) {
   Run({"HSET", key_, "field", val_});
   Run({"SET", key3_, val_});
   auto d = Delta([&] { EXPECT_EQ(Run({"RENAME", key_, key3_}), "OK"); });
-  EXPECT_TRUE(d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
+  EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
 }
 
 TEST_F(MemParityTest, CopyReplace) {
   Run({"HSET", key_, "f", val_});
   Run({"SET", key2_, val_});
   auto d = Delta([&] { Run({"COPY", key_, key2_, "REPLACE"}); });
-  EXPECT_TRUE(d.Match(OBJ_STRING) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
+  EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
 }
 
 namespace {
@@ -3556,7 +3570,7 @@ TEST_F(MemParityTest, RestoreHash) {
   Run({"HSET", key_, "f", string(1024, 'x')});
   const string payload = Run({"DUMP", key_}).GetString();
   auto d = Delta([&] { EXPECT_EQ(Run({"RESTORE", key3_, "0", payload}), "OK"); });
-  EXPECT_TRUE(d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
+  EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
 }
 
 TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
@@ -3564,7 +3578,7 @@ TEST_F(MemParityTest, ZUnionStoreOverwritesHash) {
   Run({"ZADD", key2_, "1", "a", "2", "b"});
   Run({"ZADD", key3_, "3", "c", "4", "d"});
   auto d = Delta([&] { EXPECT_THAT(Run({"ZUNIONSTORE", key_, "2", key2_, key3_}), IntArg(4)); });
-  EXPECT_TRUE(d.Match(OBJ_ZSET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean()) << d;
+  EXPECT_TRUE(d.Matches() && d.IsClean()) << d;
   EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Positive(OBJ_ZSET)) << d;
 }
 
@@ -3599,7 +3613,7 @@ TEST_P(SetMemParityTest, SetUnionStoreOverwritesHashAccounting) {
     EXPECT_EQ(d.new_metric[OBJ_SET], created.new_metric[OBJ_SET]) << d;
     EXPECT_EQ(d.NewTotal(), created.new_metric[OBJ_SET] + d.old_metric[OBJ_HASH]) << d;
     EXPECT_TRUE(d.Negative(OBJ_HASH) && d.Positive(OBJ_SET)) << d;
-    if (!(d.Match(OBJ_SET) && d.Match(OBJ_HASH) && d.MatchObj() && d.IsClean())) {
+    if (!(d.Matches() && d.IsClean())) {
       full_parity = false;
       parity_gap = d;
     }
