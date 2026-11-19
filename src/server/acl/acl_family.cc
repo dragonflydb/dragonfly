@@ -735,8 +735,12 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
                                   cid->AclTarget(simulated_args).first, "' command"));
 }
 
-void AclFamily::Init(std::vector<facade::Listener*> listeners) {
-  listeners_ = std::move(listeners);
+void AclFamily::Init(const std::vector<facade::Listener*>& listeners) {
+  // Only main and memcached connections are subject to ACL rules.
+  for (auto* listener : listeners) {
+    if (listener->IsMainInterface() || listener->protocol() == facade::Protocol::MEMCACHE)
+      listeners_.push_back(listener);
+  }
 
   // Like Redis: replaces all of default's passwords, and an empty value means nopass.
   config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {
