@@ -233,7 +233,7 @@ class Transaction {
   // Called when this transaction heads the watch queue of a ready key on shard sid. Returns true
   // if the key is reserved for it: either this call woke it, or this shard already did and the
   // command has CO::WAKE_ALL_READY_KEYS. Returns false if it can be dropped from the queue.
-  bool NotifySuspended(ShardId sid);
+  bool NotifySuspended(ShardId sid, uint64_t now_ms);
 
   // Cancel all blocking watches. Set COORD_CANCELLED.
   // Must be called from coordinator thread.
@@ -674,6 +674,9 @@ class Transaction {
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};
+
+  // Time the waking shard's readiness check ran at, set by the NotifySuspended that woke us.
+  uint64_t wake_time_ms_{0};
 
   // Stores status if COORD_CANCELLED was set. Apart from cancelled, it can be moved for cluster
   // changes

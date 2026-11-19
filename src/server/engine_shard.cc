@@ -891,9 +891,10 @@ void EngineShard::RetireExpiredAndEvict() {
     }
   }  // journal_flush_guard destroyed here — atomic section ends before sending the events
 
-  // Send keyspace notifications for expired/evicted keys outside the atomic section
-  // because SendMessages may suspend on connection backpressure (see issue #7052).
+  // Send tracking invalidations and keyspace notifications for expired/evicted keys outside the
+  // atomic section because dispatching them may suspend (see issue #7052).
   // This also sends events that other code queued but left unsent.
+  db_slice.SendQueuedInvalidationMessagesAsync();
   db_slice.SendQueuedExpiredKeyEvents();
 
   // Track deleted bytes only if we expect to lower memory
