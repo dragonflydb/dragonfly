@@ -123,6 +123,35 @@ TEST(Journal, WriteRead) {
   }
 }
 
+// Untrusted entries must be rejected before the argument storage is sized or written, and must not
+// yield an empty command.
+TEST(Journal, ReadRejectsMalformedEntries) {
+  constexpr uint64_t kCmd = uint64_t(Op::COMMAND);
+  constexpr uint64_t kMax32 = numeric_limits<uint32_t>::max();
+  constexpr uint64_t kMax64 = numeric_limits<uint64_t>::max();
+
+  // opcode, num_strings, cmd_size and the size of the first string.
+  const uint64_t cases[][4] = {
+      {kCmd, 1, kMax64, kMax64},  // the string size wraps when it is stored
+      {kCmd, 1, kMax32, 1},       // the storage exceeds the uint32_t offsets
+      {kCmd, 0, 0, 0},            // no command name
+      {11, 1, 1, 1},              // unknown opcode
+  };
+  for (const auto& c : cases) {
+    base::IoBuf buf;
+    io::BufSink sink{&buf};
+    JournalWriter writer{&sink};
+    for (uint64_t v : {c[0], uint64_t{1} /* txid */, uint64_t{1}, c[1], c[2], c[3]})
+      writer.Write(v);
+    std::ignore = sink.Write(io::Buffer(string(4096, 'x')));
+
+    io::BufSource source{&buf};
+    JournalReader reader{&source, 0};
+    ParsedEntry entry;
+    EXPECT_TRUE(reader.ReadEntry(&entry)) << absl::StrJoin(c, " ");
+  }
+}
+
 TEST(Journal, PendingBuf) {
   PendingBuf pbuf;
 
