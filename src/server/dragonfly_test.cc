@@ -1692,6 +1692,40 @@ TEST_F(DflyEngineTest, ScanDoesNotWaitForBlockedBucket) {
   EXPECT_EQ(DbSizeOnShard0(), 1u);
 }
 
+// A reader woken by a stream expired in a blocked bucket must not see it at its pre-block time.
+TEST_F(DflyEngineTest, XReadGroupWakesOnExpiryInBlockedBucket) {
+  Run({"xgroup", "create", kKeySid0, "g", "$", "mkstream"});
+  Run({"pexpire", kKeySid0, "10"});
+
+  RespExpr resp;
+  auto reader = pp_->at(1)->LaunchFiber([&] {
+    resp =
+        Run("reader", {"xreadgroup", "group", "g", "c", "block", "5000", "streams", kKeySid0, ">"});
+  });
+  absl::Cleanup join_reader = [&] { reader.JoinIfNeeded(); };
+  ASSERT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("reader"); }, 1s));
+
+  BlockedBucket snapshot;
+  snapshot.bucket = BucketOnShard0(kKeySid0);
+  RegisterOnShard0(&snapshot);
+  absl::Cleanup cleanup = [&] {
+    ReleaseOnShard0(&snapshot);
+    UnregisterOnShard0(&snapshot);
+  };
+
+  // The readiness check hides the expired stream without deleting it, and wakes the reader.
+  pp_->at(0)->Await([&] {
+    AdvanceTime(20);
+    auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(0);
+    bc->Awaken(0, kKeySid0);
+    bc->NotifyPending();
+  });
+  reader.Join();
+
+  EXPECT_THAT(resp, ErrArg("NOGROUP"));
+  EXPECT_EQ(DbSizeOnShard0(), 1u);
+}
+
 // AddListener picks the accept-loop proactor via the pool's shared round-robin, so listener
 // construction (see MakeListener in dfly_main.cc) must not call GetNextProactor() in between —
 // that would stack several accept loops on one proactor.

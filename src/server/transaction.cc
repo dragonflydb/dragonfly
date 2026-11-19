@@ -121,8 +121,10 @@ bool Transaction::BatonBarrier::TryClaim() {
 
 void Transaction::BatonBarrier::Close() {
   DCHECK(claimed_.load(memory_order_relaxed));
-  closed_.store(true, memory_order_relaxed);
-  ec_.notify();  // release
+
+  // Pairs with Wait()'s acquire load, whose fast path skips notify(): publishes wake_time_ms_.
+  closed_.store(true, memory_order_release);
+  ec_.notify();
 }
 
 cv_status Transaction::BatonBarrier::Wait(time_point tp) {
@@ -1341,6 +1343,12 @@ bool Transaction::ScheduleInShard(EngineShard* shard, bool execute_optimistic) {
         if (sd.local_mask & KEYLOCK_ACQUIRED) {
           release_fp_locks();
         }
+
+        // Wakes deferred while we ran (e.g. by FlushSlots during a snapshot wait) are retried here.
+        if (auto* bc = namespace_->GetBlockingController(shard->shard_id());
+            bc && shard->GetContTx() == nullptr) {
+          bc->NotifyPending();
+        }
         return true;
       }
 
@@ -1488,6 +1496,10 @@ OpStatus Transaction::WaitOnWatch(const time_point& tp, WaitKeys wkeys, KeyReady
     result = OpStatus::CANCELLED;
   }
 
+  // Act at the readiness check's time: older revives keys it hid, newer expires keys it found.
+  if (result == OpStatus::OK)
+    time_now_ms_ = wake_time_ms_;
+
   // If we don't follow up with an "action" hop, we must clean up manually on all shards.
   if (result != OpStatus::OK)
     ExpireBlocking(wkeys);
@@ -1593,7 +1605,7 @@ void Transaction::UnlockMultiShardCb(absl::Span<const LockFp> fps, EngineShard* 
 }
 
 // Runs only in the shard thread.
-bool Transaction::NotifySuspended(ShardId sid) {
+bool Transaction::NotifySuspended(ShardId sid, uint64_t now_ms) {
   auto& sd = shard_data_[SidToId(sid)];
 
   // This shard already woke us and we have not run yet. Commands that consume every ready key
@@ -1615,6 +1627,7 @@ bool Transaction::NotifySuspended(ShardId sid) {
   // Change state to awaked. The key that woke it stays reserved for it in the blocking controller:
   // its watch queue is ACTIVE with this transaction at the head (see IsWakeKey).
   sd.local_mask |= AWAKED_Q;
+  wake_time_ms_ = now_ms;
 
   blocking_barrier_.Close();
   return true;
