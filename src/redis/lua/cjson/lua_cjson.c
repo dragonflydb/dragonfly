@@ -62,8 +62,8 @@
 #define DEFAULT_SPARSE_CONVERT 0
 #define DEFAULT_SPARSE_RATIO 2
 #define DEFAULT_SPARSE_SAFE 10
-#define DEFAULT_ENCODE_MAX_DEPTH 1000
-#define DEFAULT_DECODE_MAX_DEPTH 1000
+/* Restrict to control stack on Dragonfly fiber caused by recursion. */
+#define CJSON_MAX_DEPTH 50
 #define DEFAULT_ENCODE_INVALID_NUMBERS 0
 #define DEFAULT_DECODE_INVALID_NUMBERS 1
 #define DEFAULT_ENCODE_KEEP_BUFFER 1
@@ -125,8 +125,8 @@ typedef struct {
     int encode_number_precision;
     int encode_keep_buffer;
 
-    int decode_invalid_numbers;
     int decode_max_depth;
+    int decode_invalid_numbers;
 } json_config_t;
 
 typedef struct {
@@ -274,22 +274,27 @@ static int json_cfg_encode_sparse_array(lua_State *l)
     return 3;
 }
 
-/* Configures the maximum number of nested arrays/objects allowed when
- * encoding */
+static int json_cfg_max_depth(lua_State *l, int *setting)
+{
+    lua_Integer requested = luaL_optinteger(l, 1, *setting);
+    luaL_argcheck(l, requested >= 1 && requested <= INT_MAX, 1,
+                  "depth must be a positive integer in the int range");
+    if (requested <= CJSON_MAX_DEPTH)
+        *setting = (int)requested;
+    lua_pushinteger(l, *setting);
+    return 1;
+}
+
 static int json_cfg_encode_max_depth(lua_State *l)
 {
     json_config_t *cfg = json_arg_init(l, 1);
-
-    return json_integer_option(l, 1, &cfg->encode_max_depth, 1, INT_MAX);
+    return json_cfg_max_depth(l, &cfg->encode_max_depth);
 }
 
-/* Configures the maximum number of nested arrays/objects allowed when
- * encoding */
 static int json_cfg_decode_max_depth(lua_State *l)
 {
     json_config_t *cfg = json_arg_init(l, 1);
-
-    return json_integer_option(l, 1, &cfg->decode_max_depth, 1, INT_MAX);
+    return json_cfg_max_depth(l, &cfg->decode_max_depth);
 }
 
 /* Configures number precision when converting doubles to text */
@@ -384,8 +389,8 @@ static void json_create_config(lua_State *l)
     cfg->encode_sparse_convert = DEFAULT_SPARSE_CONVERT;
     cfg->encode_sparse_ratio = DEFAULT_SPARSE_RATIO;
     cfg->encode_sparse_safe = DEFAULT_SPARSE_SAFE;
-    cfg->encode_max_depth = DEFAULT_ENCODE_MAX_DEPTH;
-    cfg->decode_max_depth = DEFAULT_DECODE_MAX_DEPTH;
+    cfg->encode_max_depth = CJSON_MAX_DEPTH;
+    cfg->decode_max_depth = CJSON_MAX_DEPTH;
     cfg->encode_invalid_numbers = DEFAULT_ENCODE_INVALID_NUMBERS;
     cfg->decode_invalid_numbers = DEFAULT_DECODE_INVALID_NUMBERS;
     cfg->encode_keep_buffer = DEFAULT_ENCODE_KEEP_BUFFER;
@@ -1120,8 +1125,7 @@ static void json_decode_descend(lua_State *l, json_parse_t *json, int slots)
 {
     json->current_depth++;
 
-    if (json->current_depth <= json->cfg->decode_max_depth &&
-        lua_checkstack(l, slots)) {
+    if (json->current_depth <= json->cfg->decode_max_depth && lua_checkstack(l, slots)) {
         return;
     }
 
