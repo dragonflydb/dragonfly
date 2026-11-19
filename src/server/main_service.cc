@@ -1885,29 +1885,35 @@ bool RequirePrivilegedAuth() {
   return !GetFlag(FLAGS_admin_nopass);
 }
 
+// Whether a connection of `owner` that starts as the default user must authenticate first.
+static bool RequiresAuth(const facade::Connection* owner,
+                         const acl::UserCredentials& default_cred) {
+  if (owner->socket()->IsUDS())
+    return false;
+  if (owner->IsPrivileged())
+    return RequirePrivilegedAuth() && !GetPassword().empty();
+
+  // Memcached protocol doesn't support authentication, so we don't require it.
+  // This also means JWT validation is not supported/enforced for Memcached connections.
+  if (owner->GetProtocol() == Protocol::MEMCACHE)
+    return false;
+
+  // JWT validation must gate every connection even if the local "default" user is nopass.
+  return acl::JwtValidator::IsEnabled() || !default_cred.nopass;
+}
+
 facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{owner, {}};
-  res->ns = &namespaces->GetOrInsert("");
 
-  if (owner->socket()->IsUDS()) {
-    res->req_auth = false;
+  // No yield after this until the caller installs the context, so ACL updates cannot miss it.
+  const acl::UserCredentials cred = res->ApplyUser(user_registry_, "default");
+  res->req_auth = RequiresAuth(owner, cred);
+  if (owner->socket()->IsUDS())
     res->skip_acl_validation = true;
-  } else if (owner->IsPrivileged() && RequirePrivilegedAuth()) {
-    res->req_auth = !GetPassword().empty();
-  } else if (!owner->IsPrivileged()) {
-    // Memcached protocol doesn't support authentication, so we don't require it.
-    // This also means JWT validation is not supported/enforced for Memcached connections.
-    if (owner->GetProtocol() == Protocol::MEMCACHE) {
-      res->req_auth = false;
-      res->authenticated = true;  // Automatically authenticated for Memcached protocol
-    } else {
-      // JWT validation must gate every connection even if the local "default" user is nopass.
-      res->req_auth = acl::JwtValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
-    }
-  }
 
-  // Read last: no yield until the caller installs the context, so ACL updates cannot miss it.
-  res->SetAclCredentials(user_registry_.GetCredentials("default"));
+  // Automatically authenticated for Memcached protocol.
+  if (!owner->IsPrivileged() && owner->GetProtocol() == Protocol::MEMCACHE)
+    res->authenticated = true;
   return res;
 }
 
@@ -1983,9 +1989,11 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
 
   // Restore the default-user ACL identity, matching a freshly created connection.
   const auto* registry = ServerState::tlocal()->user_registry;
-  cntx->SetAclCredentials(registry->GetCredentials("default"));
   cntx->authed_username = "default";
-  cntx->ns = &namespaces->GetOrInsert("");
+  const acl::UserCredentials cred = cntx->ApplyUser(*registry, "default");
+
+  // Like Redis, the default user's current password decides if AUTH is needed again.
+  cntx->req_auth = RequiresAuth(cntx->conn(), cred);
   cntx->authenticated = false;
   cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
 

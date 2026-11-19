@@ -2399,10 +2399,7 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
 
   if (is_authorized) {
     cntx->authed_username = username;
-    auto cred = registry->GetCredentials(username);
-    const size_t db_index = cred.db;
-    cntx->ns = &namespaces->GetOrInsert(cred.ns);
-    cntx->SetAclCredentials(std::move(cred));
+    const size_t db_index = cntx->ApplyUser(*registry, username).db;
     cntx->authenticated = true;
     cntx->auth_expires_at = auth_expires_at;
     if (db_index == std::numeric_limits<size_t>::max()) {
@@ -4330,7 +4327,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"FLUSHALL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
              .HFUNC(FlushDb)
       << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
-      << CI{"HELLO", CO::LOADING | CO::FAST, -1, 0, 0, acl::kHello}.HFUNC(Hello)
+      << CI{"HELLO", CO::NOSCRIPT | CO::LOADING | CO::FAST, -1, 0, 0, acl::kHello}.HFUNC(Hello)
       << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)
       << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kLatency}.HFUNC(Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)

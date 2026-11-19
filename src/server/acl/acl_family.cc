@@ -415,6 +415,7 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Reply first because the connection might get evicted.
   cmd_cntx->SendOk();
+  cmd_cntx->rb()->Flush();
   if (!exists)
     return;
 
@@ -432,13 +433,15 @@ void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
       users.insert(username);
   }
 
+  // Reply first because the connection might get evicted.
+  cmd_cntx->SendLong(users.size());
   if (!users.empty()) {
+    cmd_cntx->rb()->Flush();
     VLOG(1) << "Evicting open acl connections";
     EvictConnections(
         [&users](const ConnectionContext& cntx) { return users.contains(cntx.authed_username); });
     VLOG(1) << "Done evicting open acl connections";
   }
-  cmd_cntx->SendLong(users.size());
 }
 
 void AclFamily::WhoAmI(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -561,6 +564,7 @@ void AclFamily::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Reply first because the connection might get evicted.
   cmd_cntx->SendOk();
+  cmd_cntx->rb()->Flush();
   EvictConnections([&reg](const ConnectionContext& cntx) {
     return cntx.authed_username != "default" && reg.registry.contains(cntx.authed_username);
   });

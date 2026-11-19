@@ -116,6 +116,9 @@ struct UserCredentials {
   AclPubSub pub_sub;
   std::string ns;
   size_t db{0};
+
+  // The user is active and needs no password.
+  bool nopass{false};
 };
 
 }  // namespace dfly::acl
