@@ -1130,16 +1130,21 @@ string AofStartupError(string_view dir) {
 }
 
 #ifdef __linux__
-// Bytes of the DFS file set whose summary is base_path: <prefix>-summary.dfs, <prefix>-NNNN.dfs.
+// Bytes of the DFS file set whose summary is base_path: <prefix>summary.dfs and one
+// <prefix>NNNN.dfs per shard. Exact names, so other dumps sharing the prefix are not counted.
 size_t AofBaseSize(string_view dir, string_view base_path) {
   string_view prefix = base_path;
   absl::ConsumeSuffix(&prefix, "summary.dfs");
-  io::Result<io::StatShortVec> files = io::StatFiles(absl::StrCat(dir, "/", prefix, "*.dfs"));
-  uint64_t size = 0;
-  if (files) {
-    for (const io::StatShort& file : *files)
-      size += file.size;
-  }
+  size_t size = 0;
+  auto add = [&](string_view name) {
+    error_code ec;
+    uintmax_t file_size = filesystem::file_size(filesystem::path(dir) / name, ec);
+    if (!ec)
+      size += file_size;
+  };
+  add(base_path);
+  for (ShardId sid = 0; sid < shard_set->size(); ++sid)
+    add(absl::StrCat(prefix, absl::Dec(sid, absl::kZeroPad4), ".dfs"));
   return size;
 }
 
@@ -1338,7 +1343,7 @@ void StopAof() {
 }
 
 // Appends the AOF fields of INFO persistence.
-void AppendAofInfo(const SaveInfoData& save_info, string* info) {
+void AppendAofInfo(const SaveInfoData& save_info, const Metrics& m, string* info) {
   auto append = [info](const absl::AlphaNum& key, const absl::AlphaNum& val) {
     absl::StrAppend(info, key, ":", val, "\r\n");
   };
@@ -1349,11 +1354,10 @@ void AppendAofInfo(const SaveInfoData& save_info, string* info) {
   if (!aof_enabled)
     return;
 
-  vector<AofStats> per_shard(shard_set->size());
-  shard_set->RunBriefInParallel([&](EngineShard* shard) {
-    if (AofStreamer* streamer = shard->aof_streamer(); streamer)
-      per_shard[shard->shard_id()] = streamer->GetStats();
-  });
+  // Collected by GetMetrics() in its pass over the shards, sorted by shard id.
+  vector<AofStats> per_shard;
+  for (const auto& [sid, st] : m.aof_stats)
+    per_shard.push_back(st);
 
   // The log size is summed; the write status is ok only if every shard's is.
   bool write_ok = true;
@@ -2302,7 +2306,7 @@ GenericError ServerFamily::WaitUntilSaveFinished(Transaction* trans, bool ignore
     aof_checkpoint = save_controller_->aof_checkpoint_;
 #ifdef __linux__
     // Under save_mu_, so checkpoints commit in order.
-    if (save_controller_->aof_checkpoint_ && !save_info.error)
+    if (aof_checkpoint && !save_info.error)
       aof_base_size = CommitAofCheckpoint(save_info.file_name, save_controller_->aof_cuts());
 #endif
     save_controller_.reset();
@@ -3011,6 +3015,7 @@ Metrics ServerFamily::GetMetrics(Namespace* ns, const MetricsCollectOpts& opts) 
   // Fold per-thread partials into the aggregate result on this thread.
   for (const Metrics& partial : partials)
     result.Merge(partial);
+  rng::sort(result.aof_stats, {}, &pair<ShardId, AofStats>::first);
 
   // The per-thread deltas are read at slightly different moments, so the sum can transiently
   // dip below zero; a large negative value however means an accounting leak.
@@ -3429,7 +3434,7 @@ string ServerFamily::FormatInfoMetrics(
     append("last_error", save_info.last_error.Format());
     append("last_failed_save_duration_sec", save_info.failed_duration_sec);
 
-    AppendAofInfo(save_info, &info);
+    AppendAofInfo(save_info, m, &info);
   };
 
   auto add_tx_info = [&] {

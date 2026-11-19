@@ -1,6 +1,7 @@
 import asyncio
 import re
 
+import async_timeout
 import pytest
 import redis
 
@@ -23,6 +24,7 @@ async def test_replay_restores_data(df_factory: DflyInstanceFactory, tmp_path):
     before = await SeederV2.capture(client)
     keys = await client.dbsize()
     assert keys >= 400_000
+    await client.connection_pool.disconnect()
 
     # A graceful stop seals, writes and syncs every shard's AOF.
     df.stop()
@@ -235,11 +237,12 @@ async def test_deleted_base_refuses_start(df_factory: DflyInstanceFactory, tmp_p
 async def wait_log_written(client):
     # So a kill loses nothing: every record is sealed and written. The buffered bytes, listed per
     # shard, include the open block.
-    while True:
-        info = await client.info("persistence")
-        if all(int(v) == 0 for v in str(info["aof_buffered_bytes"]).split(",")):
-            return
-        await asyncio.sleep(0.05)
+    async with async_timeout.timeout(10):
+        while True:
+            info = await client.info("persistence")
+            if all(int(v) == 0 for v in str(info["aof_buffered_bytes"]).split(",")):
+                return
+            await asyncio.sleep(0.05)
 
 
 @pytest.mark.exclude_epoll

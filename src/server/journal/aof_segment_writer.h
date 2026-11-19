@@ -140,6 +140,9 @@ class AofSegmentWriter {
   uint64_t durable_lsn_ = 0;
 
   bool sync_in_flight_ = false;
+
+  // The last record the running fdatasync covers.
+  uint64_t sync_target_lsn_ = 0;
   AofFsyncStats fsync_stats_;
   uint32_t tick_id_ = 0;
   // See error(); never cleared.

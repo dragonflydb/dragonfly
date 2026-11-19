@@ -134,6 +134,18 @@ struct AofFsyncStats {
   }
 };
 
+// One shard's AOF stats, for INFO persistence.
+struct AofStats {
+  size_t log_size = 0;
+  size_t buffered_bytes = 0;
+  size_t unsynced_bytes = 0;
+  uint64_t throttle_usec = 0;
+  AofFsyncStats fsync;
+
+  // False once a write or fdatasync failed, until a checkpoint supersedes the failed segment.
+  bool write_ok = true;
+};
+
 }  // namespace dfly
 
 namespace std {

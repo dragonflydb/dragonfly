@@ -241,8 +241,10 @@ void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
 }
 
 void AofSegmentWriter::MaybeStartFSync() {
+  // Delayed only if records written since the running sync started wait behind it.
   if (sync_in_flight_) {
-    ++fsync_stats_.delayed;
+    if (written_lsn_ > sync_target_lsn_)
+      ++fsync_stats_.delayed;
     return;
   }
 
@@ -252,6 +254,7 @@ void AofSegmentWriter::MaybeStartFSync() {
   size_t sync_offset = written_offset_;
   uint64_t sync_lsn = written_lsn_;
   sync_in_flight_ = true;
+  sync_target_lsn_ = sync_lsn;
   uint64_t start_cycles = base::CycleClock::Now();
   file_->FSyncAsync(IORING_FSYNC_DATASYNC, [this, sync_offset, sync_lsn, start_cycles](int res) {
     OnSyncDone(sync_offset, sync_lsn, start_cycles, res);
