@@ -449,11 +449,14 @@ async def test_acl_load_updates_default_user_connections(df_factory, tmp_dir):
     async with async_timeout.timeout(5):
         await kept_reader.readuntil(b"hello\r\n")
 
-    # Moving default to another namespace drops its connections.
+    # Moving default to another namespace drops its connections, and new ones start there.
     with open(acl, "w") as f:
         f.write("user default on nopass NAMESPACE:other ~* &* +@all\n" + admin_rule)
     await default_client.execute_command("ACL LOAD")
     await assert_closed(kept_reader)
+    fresh_client = df.client()
+    assert await fresh_client.get("foo") is None
+    await fresh_client.aclose()
 
     for writer in (kept_writer, dropped_writer):
         writer.close()

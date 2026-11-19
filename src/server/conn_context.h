@@ -22,10 +22,6 @@ namespace dfly {
 class EngineShardSet;
 class ChannelStore;
 class Interpreter;
-
-namespace acl {
-class UserRegistry;
-}  // namespace acl
 struct FlowInfo;
 
 // Non-owning view of a command for the squasher. Can be constructed from StoredCmd or
@@ -359,10 +355,6 @@ class ConnectionContext : public facade::ConnectionContext {
   // Applies the ACL identity carried by `cred` and refreshes its cached memory estimate.
   // Does not touch `authed_username`, `ns`, or `authenticated`.
   void SetAclCredentials(dfly::acl::UserCredentials cred);
-
-  // Installs the current ACL rules and namespace of `username` and returns them.
-  // Can yield, but the rules are read last, so ACL updates made meanwhile are not lost.
-  acl::UserCredentials ApplyUser(const acl::UserRegistry& registry, std::string_view username);
 
   // Per-client introspection about the most recent command executed on this
   // connection (akin to the info Redis exposes via CLIENT INFO). Captured live

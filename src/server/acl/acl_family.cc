@@ -42,6 +42,7 @@
 #include "server/acl/validator.h"
 #include "server/config_registry.h"
 #include "server/conn_context.h"
+#include "server/namespaces.h"
 #include "server/server_state.h"
 #include "util/proactor_pool.h"
 
@@ -361,16 +362,23 @@ void AclFamily::StreamUpdatesToConnections(string_view username, const User& use
   });
 }
 
-void AclFamily::EvictConnections(absl::FunctionRef<bool(const ConnectionContext&)> pred) {
+void AclFamily::EvictConnections(absl::FunctionRef<bool(const ConnectionContext&)> pred,
+                                 CommandContext* cmd_cntx) {
   if (!main_listener_)
     return;
 
+  const ConnectionContext* self = cmd_cntx->server_conn_cntx();
+  bool evict_self = false;
   pool_->AwaitFiberOnAll([&](unsigned, util::ProactorBase* pb) {
     vector<facade::Connection::WeakRef> connections;
     auto collect = [&](unsigned, util::Connection* conn) {
       auto* connection = static_cast<facade::Connection*>(conn);
       auto* cntx = static_cast<ConnectionContext*>(connection->cntx());
-      if (cntx && pred(*cntx))
+      if (!cntx || !pred(*cntx))
+        return;
+      if (cntx == self)
+        evict_self = true;
+      else
         connections.push_back(connection->Borrow());
     };
     main_listener_->TraverseConnectionsOnThread(collect, UINT32_MAX, nullptr);
@@ -383,6 +391,9 @@ void AclFamily::EvictConnections(absl::FunctionRef<bool(const ConnectionContext&
         conn->ShutdownSelfBlocking();
     }
   });
+
+  if (evict_self)
+    cmd_cntx->conn()->RequestCloseAfterReply();
 }
 
 User& AclFamily::UpsertUser(string_view username, User::UpdateRequest req,
@@ -413,17 +424,14 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
   const bool reset_channels = update.reset_channels;
   const User& user = UpsertUser(username, std::move(update), &reg.registry);
 
-  // Reply first because the connection might get evicted.
-  cmd_cntx->SendOk();
-  cmd_cntx->rb()->Flush();
-  if (!exists)
-    return;
-
-  if (reset_channels)
+  if (exists && reset_channels) {
     EvictConnections(
-        [username](const ConnectionContext& cntx) { return cntx.authed_username == username; });
-  else
+        [username](const ConnectionContext& cntx) { return cntx.authed_username == username; },
+        cmd_cntx);
+  } else if (exists) {
     StreamUpdatesToConnections(username, user);
+  }
+  cmd_cntx->SendOk();
 }
 
 void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -433,15 +441,14 @@ void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
       users.insert(username);
   }
 
-  // Reply first because the connection might get evicted.
-  cmd_cntx->SendLong(users.size());
   if (!users.empty()) {
-    cmd_cntx->rb()->Flush();
     VLOG(1) << "Evicting open acl connections";
     EvictConnections(
-        [&users](const ConnectionContext& cntx) { return users.contains(cntx.authed_username); });
+        [&users](const ConnectionContext& cntx) { return users.contains(cntx.authed_username); },
+        cmd_cntx);
     VLOG(1) << "Done evicting open acl connections";
   }
+  cmd_cntx->SendLong(users.size());
 }
 
 void AclFamily::WhoAmI(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -559,33 +566,29 @@ void AclFamily::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
     return cmd_cntx->SendError(absl::StrCat("Error loading: ", acl_file, " ", error.Format()));
 
   auto reg = registry_->GetRegistryWithWriteLock();
-  auto old_default = reg.registry.find("default");
-  const string old_ns = old_default != reg.registry.end() ? old_default->second.Namespace() : "";
-
-  // Reply first because the connection might get evicted.
-  cmd_cntx->SendOk();
-  cmd_cntx->rb()->Flush();
-  EvictConnections([&reg](const ConnectionContext& cntx) {
-    return cntx.authed_username != "default" && reg.registry.contains(cntx.authed_username);
-  });
+  EvictConnections(
+      [&reg](const ConnectionContext& cntx) {
+        return cntx.authed_username != "default" && reg.registry.contains(cntx.authed_username);
+      },
+      cmd_cntx);
   reg.registry.clear();
   registry_->ResetStats();
   AddUsers(std::move(requests), &reg.registry);
 
-  const User& default_user = reg.registry.at("default");
-  auto is_default = [](const ConnectionContext& cntx) { return cntx.authed_username == "default"; };
-
-  // A connection's namespace is fixed when it authenticates, so a move must drop it.
-  if (default_user.Namespace() != old_ns)
-    return EvictConnections(is_default);
-
   // Default user connections stay open, so they must pick up its reloaded rules.
+  const User& default_user = reg.registry.at("default");
   StreamUpdatesToConnections("default", default_user);
 
-  // Like Redis, drop the ones holding subscriptions that the reloaded rules forbid.
-  EvictConnections([&](const ConnectionContext& cntx) {
-    return is_default(cntx) && HasForbiddenSubscription(cntx, default_user.PubSub());
-  });
+  // Drop the ones in another namespace, which is set only on connect, AUTH and RESET, and like
+  // Redis, the ones holding subscriptions that the reloaded rules forbid.
+  const Namespace* ns = &namespaces->GetOrInsert(default_user.Namespace());
+  EvictConnections(
+      [&](const ConnectionContext& cntx) {
+        return cntx.authed_username == "default" &&
+               (cntx.ns != ns || HasForbiddenSubscription(cntx, default_user.PubSub()));
+      },
+      cmd_cntx);
+  cmd_cntx->SendOk();
 }
 
 void AclFamily::Log(CmdArgParser parser, CommandContext* cmd_cntx) {

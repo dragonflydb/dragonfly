@@ -2381,40 +2381,55 @@ bool ServerFamily::DoAuth(ConnectionContext* cntx, std::string_view username,
   const auto* registry = ServerState::tlocal()->user_registry;
   CHECK(registry);
 
-  bool is_authorized = false;
+  // A valid JWT replaces the password check.
+  std::optional<std::string_view> check_password = password;
   std::string jwt_username;
   auto auth_expires_at = std::chrono::steady_clock::time_point::max();
   if (acl::JwtValidator::IsEnabled()) {
     acl::JwtValidator jwt;
     auto claims = jwt.Validate(password);
-    if (claims) {
-      jwt_username = std::move(claims->username);
-      username = jwt_username;
-      is_authorized = registry->IsUserActive(username);
-      auth_expires_at = claims->expires_at;
-    }
-  } else {
-    is_authorized = registry->AuthUser(username, password);
+    if (!claims)
+      return false;
+    jwt_username = std::move(claims->username);
+    username = jwt_username;
+    check_password = std::nullopt;
+    auth_expires_at = claims->expires_at;
   }
 
-  if (is_authorized) {
-    cntx->authed_username = username;
-    const size_t db_index = cntx->ApplyUser(*registry, username).db;
-    cntx->authenticated = true;
-    cntx->auth_expires_at = auth_expires_at;
-    if (db_index == std::numeric_limits<size_t>::max()) {
-      cntx->conn_state.db_index = 0;
-    } else {
-      auto cb = [ns = cntx->ns, index = db_index](EngineShard* shard) {
-        auto& db_slice = ns->GetDbSlice(shard->shard_id());
-        db_slice.ActivateDb(index);
-        return OpStatus::OK;
-      };
-      shard_set->RunBriefInParallel(std::move(cb));
-      cntx->conn_state.db_index = db_index;
-    }
+  std::string ns_name = registry->GetNamespace(username);
+  Namespace* ns = nullptr;
+  std::optional<acl::UserCredentials> cred;
+  while (true) {
+    ns = &namespaces->GetOrInsert(ns_name);
+
+    // GetOrInsert can yield, so authorize last, against the latest rules and namespace.
+    cred = registry->Authorize(username, check_password);
+    if (!cred)
+      return false;
+    if (cred->ns == ns_name)
+      break;
+    ns_name = std::move(cred->ns);
   }
-  return is_authorized;
+
+  // No yield until the new identity is installed, so ACL updates cannot miss it.
+  const size_t db_index = cred->db;
+  cntx->authed_username = username;
+  cntx->ns = ns;
+  cntx->SetAclCredentials(std::move(*cred));
+  cntx->authenticated = true;
+  cntx->auth_expires_at = auth_expires_at;
+  if (db_index == std::numeric_limits<size_t>::max()) {
+    cntx->conn_state.db_index = 0;
+  } else {
+    auto cb = [ns, index = db_index](EngineShard* shard) {
+      auto& db_slice = ns->GetDbSlice(shard->shard_id());
+      db_slice.ActivateDb(index);
+      return OpStatus::OK;
+    };
+    shard_set->RunBriefInParallel(std::move(cb));
+    cntx->conn_state.db_index = db_index;
+  }
+  return true;
 }
 
 void ServerFamily::Auth(facade::CmdArgParser parser, CommandContext* cmd_cntx) {

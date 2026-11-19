@@ -59,8 +59,10 @@ class AclFamily final {
   // Pushes the user's updated ACL rules to all its open connections.
   void StreamUpdatesToConnections(std::string_view username, const User& user);
 
-  // Closes all open connections that match `pred`.
-  void EvictConnections(absl::FunctionRef<bool(const ConnectionContext&)> pred);
+  // Closes all open connections that match `pred`. Like Redis, the caller's own connection is
+  // closed only after its reply.
+  void EvictConnections(absl::FunctionRef<bool(const ConnectionContext&)> pred,
+                        CommandContext* cmd_cntx);
 
   using UserRequests = std::vector<std::pair<std::string, User::UpdateRequest>>;
 

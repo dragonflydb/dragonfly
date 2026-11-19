@@ -1902,11 +1902,31 @@ static bool RequiresAuth(const facade::Connection* owner,
   return acl::JwtValidator::IsEnabled() || !default_cred.nopass;
 }
 
+// Installs the default user's rules and namespace on `cntx` and returns the rules. Admin and UDS
+// connections stay in the default namespace.
+static acl::UserCredentials ApplyDefaultUser(const acl::UserRegistry& registry,
+                                             ConnectionContext* cntx) {
+  const facade::Connection* owner = cntx->conn();
+  const bool use_user_ns = !owner->IsPrivileged() && !owner->socket()->IsUDS();
+  string ns_name = use_user_ns ? registry.GetNamespace("default") : "";
+  while (true) {
+    cntx->ns = &namespaces->GetOrInsert(ns_name);
+
+    // GetOrInsert can yield, so read the rules last.
+    acl::UserCredentials cred = registry.GetCredentials("default");
+    if (!use_user_ns || cred.ns == ns_name) {
+      cntx->SetAclCredentials(cred);
+      return cred;
+    }
+    ns_name = std::move(cred.ns);
+  }
+}
+
 facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   ConnectionContext* res = new ConnectionContext{owner, {}};
 
   // No yield after this until the caller installs the context, so ACL updates cannot miss it.
-  const acl::UserCredentials cred = res->ApplyUser(user_registry_, "default");
+  const acl::UserCredentials cred = ApplyDefaultUser(user_registry_, res);
   res->req_auth = RequiresAuth(owner, cred);
   if (owner->socket()->IsUDS())
     res->skip_acl_validation = true;
@@ -1990,7 +2010,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   // Restore the default-user ACL identity, matching a freshly created connection.
   const auto* registry = ServerState::tlocal()->user_registry;
   cntx->authed_username = "default";
-  const acl::UserCredentials cred = cntx->ApplyUser(*registry, "default");
+  const acl::UserCredentials cred = ApplyDefaultUser(*registry, cntx);
 
   // Like Redis, the default user's current password decides if AUTH is needed again.
   cntx->req_auth = RequiresAuth(cntx->conn(), cred);

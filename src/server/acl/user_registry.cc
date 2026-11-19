@@ -88,13 +88,9 @@ bool UserRegistry::RemoveUser(std::string_view username) {
   return true;
 }
 
-UserCredentials UserRegistry::GetCredentials(std::string_view username) const {
-  std::shared_lock<fb2::SharedMutex> lock(mu_);
-  auto it = registry_.find(username);
-  if (it == registry_.end()) {
-    return {};
-  }
-  auto& user = it->second;
+namespace {
+
+UserCredentials ToCredentials(const User& user) {
   return {user.AclCategory(),
           user.AclCommands(),
           user.Keys(),
@@ -104,23 +100,29 @@ UserCredentials UserRegistry::GetCredentials(std::string_view username) const {
           user.IsActive() && user.HasPassword("")};
 }
 
-bool UserRegistry::IsUserActive(std::string_view username) const {
+}  // namespace
+
+UserCredentials UserRegistry::GetCredentials(std::string_view username) const {
   std::shared_lock<fb2::SharedMutex> lock(mu_);
   auto it = registry_.find(username);
-  if (it == registry_.end()) {
-    return false;
-  }
-  return it->second.IsActive();
+  return it == registry_.end() ? UserCredentials{} : ToCredentials(it->second);
 }
 
-bool UserRegistry::AuthUser(std::string_view username, std::string_view password) const {
+std::string UserRegistry::GetNamespace(std::string_view username) const {
   std::shared_lock<fb2::SharedMutex> lock(mu_);
-  const auto& user = registry_.find(username);
-  if (user == registry_.end()) {
-    return false;
-  }
+  auto it = registry_.find(username);
+  return it == registry_.end() ? std::string{} : it->second.Namespace();
+}
 
-  return user->second.IsActive() && user->second.HasPassword(password);
+std::optional<UserCredentials> UserRegistry::Authorize(
+    std::string_view username, std::optional<std::string_view> password) const {
+  std::shared_lock<fb2::SharedMutex> lock(mu_);
+  auto it = registry_.find(username);
+  if (it == registry_.end() || !it->second.IsActive())
+    return std::nullopt;
+  if (password && !it->second.HasPassword(*password))
+    return std::nullopt;
+  return ToCredentials(it->second);
 }
 
 UserRegistry::RegistryViewWithLock UserRegistry::GetRegistryWithLock() const {

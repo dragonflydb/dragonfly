@@ -7,6 +7,7 @@
 #include <absl/container/flat_hash_map.h>
 
 #include <algorithm>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <utility>
@@ -46,11 +47,13 @@ class UserRegistry {
   // Acquires a read lock
   UserCredentials GetCredentials(std::string_view username) const;
 
-  // Acquires a read lock
-  bool IsUserActive(std::string_view username) const;
+  // Acquires a read lock. Returns the namespace of `username`, or "" if it does not exist.
+  std::string GetNamespace(std::string_view username) const;
 
-  // Acquires a read lock
-  bool AuthUser(std::string_view username, std::string_view password) const;
+  // Acquires a read lock. Returns the credentials of `username` if it is active and `password`
+  // matches, or skips the password check if `password` is empty.
+  std::optional<UserCredentials> Authorize(std::string_view username,
+                                           std::optional<std::string_view> password) const;
 
   using RegistryViewWithLock = RegistryWithLock<std::shared_lock, const RegistryType&>;
   using RegistryWithWriteLock = RegistryWithLock<std::unique_lock, RegistryType&>;

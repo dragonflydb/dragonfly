@@ -10,11 +10,9 @@
 #include "common/heap_size.h"
 #include "facade/reply_builder.h"
 #include "server/acl/acl_commands_def.h"
-#include "server/acl/user_registry.h"
 #include "server/channel_store.h"
 #include "server/command_registry.h"
 #include "server/engine_shard_set.h"
-#include "server/namespaces.h"
 #include "server/server_family.h"
 #include "server/server_state.h"
 #include "server/transaction.h"
@@ -111,23 +109,6 @@ void ConnectionContext::SetAclCredentials(acl::UserCredentials cred) {
   }
   acl_db_idx = cred.db;
   acl_globs_heap_bytes_ = SlowHeapSize(keys.key_globs) + SlowHeapSize(pub_sub.globs);
-}
-
-acl::UserCredentials ConnectionContext::ApplyUser(const acl::UserRegistry& registry,
-                                                  string_view username) {
-  acl::UserCredentials cred = registry.GetCredentials(username);
-  while (true) {
-    ns = &namespaces->GetOrInsert(cred.ns);
-
-    // GetOrInsert can yield, so read the rules again.
-    acl::UserCredentials fresh = registry.GetCredentials(username);
-    const bool same_ns = fresh.ns == cred.ns;
-    cred = std::move(fresh);
-    if (same_ns)
-      break;
-  }
-  SetAclCredentials(cred);
-  return cred;
 }
 
 void ConnectionContext::ChangeMonitor(bool start) {
