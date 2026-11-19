@@ -4435,7 +4435,7 @@ void ServerFamily::Register(CommandRegistry* registry) {
       << CI{"FLUSHALL", CO::JOURNALED | CO::GLOBAL_TRANS | CO::DANGEROUS, -1, 0, 0, acl::kFlushAll}
              .HFUNC(FlushDb)
       << CI{"INFO", CO::LOADING, -1, 0, 0, acl::kInfo}.HFUNC(Info)
-      << CI{"HELLO", CO::LOADING | CO::FAST, -1, 0, 0, acl::kHello}.HFUNC(Hello)
+      << CI{"HELLO", CO::NOSCRIPT | CO::LOADING | CO::FAST, -1, 0, 0, acl::kHello}.HFUNC(Hello)
       << CI{"LASTSAVE", CO::LOADING | CO::FAST, 1, 0, 0, acl::kLastSave}.HFUNC(LastSave)
       << CI{"LATENCY", CO::NOSCRIPT | CO::LOADING, -2, 0, 0, acl::kLatency}.HFUNC(Latency)
       << CI{"MEMORY", kMemOpts, -2, 0, 0, acl::kMemory}.HFUNC(Memory)
