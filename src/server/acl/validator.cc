@@ -205,6 +205,19 @@ AclRulesView RulesOf(const ConnectionContext& cntx) {
 
 }  // namespace
 
+bool HasForbiddenSubscription(const ConnectionContext& cntx, const AclPubSub& pub_sub) {
+  const auto& info = cntx.conn_state.subscribe_info;
+  if (!info || pub_sub.all_channels)
+    return false;
+
+  auto any_denied = [&](const auto& subscriptions, bool literal) {
+    return absl::c_any_of(subscriptions, [&](const std::string& channel) {
+      return !IsChannelAllowed(pub_sub, channel, literal);
+    });
+  };
+  return any_denied(info->Channels(), false) || any_denied(info->Patterns(), true);
+}
+
 std::optional<AclLog::Reason> CheckCommand(const AclRulesView& rules, size_t db_index,
                                            const CommandId& id, const ParsedArgs& tail_args) {
   using Reason = AclLog::Reason;

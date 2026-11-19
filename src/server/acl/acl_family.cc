@@ -360,7 +360,7 @@ void AclFamily::StreamUpdatesToConnections(string_view username, const User& use
     listener->TraverseConnections(update);
 }
 
-void AclFamily::EvictConnections(absl::FunctionRef<bool(string_view username)> pred) {
+void AclFamily::EvictConnections(absl::FunctionRef<bool(const ConnectionContext&)> pred) {
   if (listeners_.empty())
     return;
 
@@ -369,7 +369,7 @@ void AclFamily::EvictConnections(absl::FunctionRef<bool(string_view username)> p
     auto collect = [&](unsigned, util::Connection* conn) {
       auto* connection = static_cast<facade::Connection*>(conn);
       auto* cntx = static_cast<ConnectionContext*>(connection->cntx());
-      if (cntx && pred(cntx->authed_username))
+      if (cntx && pred(*cntx))
         connections.push_back(connection->Borrow());
     };
     for (auto* listener : listeners_)
@@ -419,7 +419,8 @@ void AclFamily::SetUser(CmdArgParser parser, CommandContext* cmd_cntx) {
     return;
 
   if (reset_channels)
-    EvictConnections([username](string_view name) { return name == username; });
+    EvictConnections(
+        [username](const ConnectionContext& cntx) { return cntx.authed_username == username; });
   else
     StreamUpdatesToConnections(username, user);
 }
@@ -433,7 +434,8 @@ void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (!users.empty()) {
     VLOG(1) << "Evicting open acl connections";
-    EvictConnections([&users](string_view name) { return users.contains(name); });
+    EvictConnections(
+        [&users](const ConnectionContext& cntx) { return users.contains(cntx.authed_username); });
     VLOG(1) << "Done evicting open acl connections";
   }
   cmd_cntx->SendLong(users.size());
@@ -557,11 +559,22 @@ void AclFamily::Load(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   // Reply first because the connection might get evicted.
   cmd_cntx->SendOk();
-  EvictConnections(
-      [&reg](string_view name) { return name != "default" && reg.registry.contains(name); });
+  EvictConnections([&reg](const ConnectionContext& cntx) {
+    return cntx.authed_username != "default" && reg.registry.contains(cntx.authed_username);
+  });
   reg.registry.clear();
   registry_->ResetStats();
   AddUsers(std::move(requests), &reg.registry);
+
+  // Default user connections stay open, so they must pick up its reloaded rules.
+  const User& default_user = reg.registry.at("default");
+  StreamUpdatesToConnections("default", default_user);
+
+  // Like Valkey, drop the ones holding subscriptions that the reloaded rules forbid.
+  EvictConnections([&default_user](const ConnectionContext& cntx) {
+    return cntx.authed_username == "default" &&
+           HasForbiddenSubscription(cntx, default_user.PubSub());
+  });
 }
 
 void AclFamily::Log(CmdArgParser parser, CommandContext* cmd_cntx) {

@@ -399,6 +399,59 @@ async def test_good_acl_file(df_factory, tmp_dir):
     assert "user default on nopass ~* &* +@all $all" in result
 
 
+async def test_acl_load_updates_default_user_connections(df_factory, tmp_dir):
+    admin_rule = "user admin on >pass ~* &* +@all\n"
+    acl = create_temp_file("user default on nopass ~* &* +@all\n" + admin_rule, tmp_dir)
+    df = df_factory.create(aclfile=acl)
+    df.start()
+
+    async def subscribe(channel):
+        reader, writer = await asyncio.open_connection("127.0.0.1", df.port)
+        writer.write(f"SUBSCRIBE {channel}\r\n".encode())
+        await reader.readuntil(b":1\r\n")
+        return reader, writer
+
+    default_client = aioredis.Redis(
+        port=df.port, decode_responses=True, single_connection_client=True
+    )
+    assert await default_client.set("foo", "bar")
+    kept_reader, kept_writer = await subscribe("news")
+    dropped_reader, dropped_writer = await subscribe("secret")
+
+    with open(acl, "w") as f:
+        f.write("user default on nopass ~* &news -@all +ping\n" + admin_rule)
+    admin = df.client()
+    await admin.execute_command("AUTH admin pass")
+    await admin.execute_command("ACL LOAD")
+
+    # Updates reach open connections asynchronously after the reply.
+    @assert_eventually
+    async def get_denied():
+        try:
+            await default_client.get("foo")
+        except redis.exceptions.NoPermissionError:
+            return
+        assert False, "GET still allowed"
+
+    await get_denied()
+    assert await default_client.ping()
+
+    # Like Valkey, only subscribers of channels the reload forbids are dropped.
+    async with async_timeout.timeout(5):
+        assert await dropped_reader.read() == b""
+
+    publisher = df.client()
+    await publisher.execute_command("AUTH admin pass")
+    await publisher.execute_command("PUBLISH news hello")
+    async with async_timeout.timeout(5):
+        await kept_reader.readuntil(b"hello\r\n")
+
+    for writer in (kept_writer, dropped_writer):
+        writer.close()
+    await publisher.aclose()
+    await default_client.aclose()
+
+
 async def test_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert [] == res

@@ -31,6 +31,9 @@ struct AclRulesView {
   size_t db;  // The only database the user may access, or kAllDbs.
 };
 
+// Whether the connection holds a channel or pattern subscription that `pub_sub` does not allow.
+bool HasForbiddenSubscription(const ConnectionContext& cntx, const AclPubSub& pub_sub);
+
 // Checks whether `rules` allow running `id` with `tail_args` while `db_index` is selected.
 // Returns the reason of a denial or nullopt if the command is allowed. Has no side effects and
 // needs no connection, so it can also simulate commands (ACL DRYRUN).
