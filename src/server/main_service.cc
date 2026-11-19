@@ -1883,16 +1883,19 @@ bool RequirePrivilegedAuth() {
   return !GetFlag(FLAGS_admin_nopass);
 }
 
-// Whether a client connection that starts as the default user must authenticate first.
-static bool DefaultUserRequiresAuth(const acl::UserRegistry& registry) {
+// Whether a client connection that starts as the default user, with `cred`, must authenticate.
+static bool DefaultUserRequiresAuth(const acl::UserCredentials& cred) {
   // JWT validation must gate every connection even if the local "default" user is nopass.
-  return acl::JwtValidator::IsEnabled() || !registry.AuthUser("default", "");
+  return acl::JwtValidator::IsEnabled() || !cred.nopass;
 }
 
 facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
-  auto cred = user_registry_.GetCredentials("default");
-  ConnectionContext* res = new ConnectionContext{owner, std::move(cred)};
+  ConnectionContext* res = new ConnectionContext{owner, {}};
   res->ns = &namespaces->GetOrInsert("");
+
+  // Read last, in one snapshot: no yield until the caller installs the context, so ACL updates
+  // cannot miss it.
+  auto cred = user_registry_.GetCredentials("default");
 
   if (owner->socket()->IsUDS()) {
     res->req_auth = false;
@@ -1906,9 +1909,10 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
       res->req_auth = false;
       res->authenticated = true;  // Automatically authenticated for Memcached protocol
     } else {
-      res->req_auth = DefaultUserRequiresAuth(user_registry_);
+      res->req_auth = DefaultUserRequiresAuth(cred);
     }
   }
+  res->SetAclCredentials(std::move(cred));
 
   return res;
 }
@@ -1985,16 +1989,17 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
 
   // Restore the default-user ACL identity, matching a freshly created connection.
   const auto* registry = ServerState::tlocal()->user_registry;
-  cntx->SetAclCredentials(registry->GetCredentials("default"));
   cntx->authed_username = "default";
   cntx->ns = &namespaces->GetOrInsert("");
+  auto cred = registry->GetCredentials("default");
   cntx->authenticated = false;
   cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
 
   // Like Valkey, the default user's current password decides if the connection must authenticate.
   const facade::Connection* owner = cntx->conn();
   if (!owner->IsPrivileged() && !owner->socket()->IsUDS())
-    cntx->req_auth = DefaultUserRequiresAuth(*registry);
+    cntx->req_auth = DefaultUserRequiresAuth(cred);
+  cntx->SetAclCredentials(std::move(cred));
 
   rb->SendSimpleString("RESET");
 }
