@@ -1130,21 +1130,28 @@ string AofStartupError(string_view dir) {
 }
 
 #ifdef __linux__
-// Bytes of the DFS file set whose summary is base_path: <prefix>summary.dfs and one
-// <prefix>NNNN.dfs per shard. Exact names, so other dumps sharing the prefix are not counted.
+// Bytes of the DFS file set whose summary is base_path: <prefix>summary.dfs and every
+// <prefix>NNNN.dfs, listed like FileSnapshotStorage::ListShardFiles(), since an adopted dump may
+// come from a server with more shards. Exact names, so other dumps sharing the prefix don't count.
 size_t AofBaseSize(string_view dir, string_view base_path) {
   string_view prefix = base_path;
   absl::ConsumeSuffix(&prefix, "summary.dfs");
   size_t size = 0;
-  auto add = [&](string_view name) {
-    error_code ec;
-    uintmax_t file_size = filesystem::file_size(filesystem::path(dir) / name, ec);
-    if (!ec)
-      size += file_size;
-  };
-  add(base_path);
-  for (ShardId sid = 0; sid < shard_set->size(); ++sid)
-    add(absl::StrCat(prefix, absl::Dec(sid, absl::kZeroPad4), ".dfs"));
+  error_code ec;
+  uintmax_t summary_size = filesystem::file_size(filesystem::path(dir) / base_path, ec);
+  if (!ec)
+    size += summary_size;
+
+  io::Result<io::StatShortVec> files = io::StatFiles(absl::StrCat(dir, "/", prefix, "????.dfs"));
+  if (!files)
+    return size;
+  for (const io::StatShort& file : *files) {
+    string_view name = string_view(file.name).substr(file.name.rfind('/') + 1);
+    if (absl::ConsumePrefix(&name, prefix) && absl::ConsumeSuffix(&name, ".dfs") &&
+        rng::all_of(name, absl::ascii_isdigit)) {
+      size += file.size;
+    }
+  }
   return size;
 }
 
