@@ -353,7 +353,7 @@ void RunEngine(ProactorPool* pool, AcceptServer* acceptor) {
 
   // If we ever add a new listener, plz don't change this,
   // we depend on tcp listener to be at the front since we later
-  // need to pass it to the AclFamily::Init
+  // need to pass it to ServerState::Init
   if (!tcp_disabled) {
     auto listener = MakeListener(pool, Protocol::REDIS, &service, Listener::Role::MAIN);
     main_listener = listener.get();

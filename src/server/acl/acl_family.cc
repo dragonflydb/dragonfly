@@ -342,10 +342,7 @@ void AclFamily::List(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::StreamUpdatesToConnections(string_view username, const User& user) {
-  if (!main_listener_ || main_listener_->protocol() != facade::Protocol::REDIS)
-    return;
-
-  main_listener_->TraverseConnections([&](unsigned, util::Connection* conn) {
+  auto update = [&](unsigned, util::Connection* conn) {
     auto* connection = static_cast<facade::Connection*>(conn);
     if (connection->IsHttp() || !connection->cntx())
       return;
@@ -358,11 +355,13 @@ void AclFamily::StreamUpdatesToConnections(string_view username, const User& use
                                .ns = {},
                                .db = user.Db()});
     }
-  });
+  };
+  for (auto* listener : listeners_)
+    listener->TraverseConnections(update);
 }
 
 void AclFamily::EvictConnections(absl::FunctionRef<bool(string_view username)> pred) {
-  if (!main_listener_)
+  if (listeners_.empty())
     return;
 
   pool_->AwaitFiberOnAll([&](unsigned, util::ProactorBase* pb) {
@@ -373,7 +372,8 @@ void AclFamily::EvictConnections(absl::FunctionRef<bool(string_view username)> p
       if (cntx && pred(cntx->authed_username))
         connections.push_back(connection->Borrow());
     };
-    main_listener_->TraverseConnectionsOnThread(collect, UINT32_MAX, nullptr);
+    for (auto* listener : listeners_)
+      listener->TraverseConnectionsOnThread(collect, UINT32_MAX, nullptr);
 
     for (auto& weak_conn : connections) {
       facade::Connection* conn = weak_conn.Get();
@@ -735,8 +735,12 @@ void AclFamily::DryRun(CmdArgParser parser, CommandContext* cmd_cntx) {
                                   cid->AclTarget(simulated_args).first, "' command"));
 }
 
-void AclFamily::Init(facade::Listener* main_listener) {
-  main_listener_ = main_listener;
+void AclFamily::Init(const std::vector<facade::Listener*>& listeners) {
+  // Only main and memcached connections are subject to ACL rules.
+  for (auto* listener : listeners) {
+    if (listener->IsMainInterface() || listener->protocol() == facade::Protocol::MEMCACHE)
+      listeners_.push_back(listener);
+  }
 
   // Like Redis: replaces all of default's passwords, and an empty value means nopass.
   config_registry.RegisterMutable("requirepass", [this](const absl::CommandLineFlag& flag) {

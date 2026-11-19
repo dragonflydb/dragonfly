@@ -830,3 +830,45 @@ async def test_admin_subcommands_over_connection(df_server):
         await client.client_list()
     log = await admin.execute_command("ACL LOG")
     assert {"MEMORY DEFRAGMENT", "CLIENT LIST"} <= {entry["object"] for entry in log}
+
+
+@dfly_args({"proactor_threads": 2, "memcached_port": 11211})
+async def test_acl_setuser_updates_memcached_connections(df_server):
+    admin = df_server.client()
+    await admin.set("foo", "bar")
+
+    # A raw socket keeps one connection throughout; pymemcache reconnects after any error.
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.mc_port)
+
+    async def mc_get_allowed():
+        writer.write(b"get foo\r\n")
+        await writer.drain()
+        line = await reader.readline()
+        if line.startswith(b"VALUE"):
+            assert await reader.readline() == b"bar\r\n"
+            assert await reader.readline() == b"END\r\n"
+            return True
+        assert b"ERROR" in line, line
+        return False
+
+    assert await mc_get_allowed()
+
+    # Updates reach open connections asynchronously after the reply.
+    async def wait_for(allowed):
+        for _ in range(100):
+            if await mc_get_allowed() == allowed:
+                return
+            await asyncio.sleep(0.05)
+        assert False, f"memcached GET allowed != {allowed}"
+
+    await admin.execute_command("ACL SETUSER default -@read")
+    await wait_for(False)
+
+    await admin.execute_command("ACL SETUSER default +@read")
+    await wait_for(True)
+
+    # resetchannels evicts the default user's connections, memcached ones included.
+    await admin.execute_command("ACL SETUSER default resetchannels")
+    async with async_timeout.timeout(5):
+        assert await reader.read() == b""
+    writer.close()
