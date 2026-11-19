@@ -4,9 +4,7 @@ A set of 100,000 unique 16-byte ASCII strings takes **45.6 bytes per member** in
 StringSet. OAHSet stores the same set in **25.2 bytes**, 45% less. The standard C++
 `std::unordered_set` needs **94.4 bytes**.
 
-OAHSet is Dragonfly's open-addressing hash set for strings. Since v2.1, it backs every SET except
-sets of up to 256 integers, which keep a compact intset; `--use_oah_set=false` brings back
-StringSet. Two compile-time constants decide how OAHSet trades memory for speed. This article
+OAHSet is Dragonfly's open-addressing hash set for strings. Since v2.1, OAHSet is used by default, `--use_oah_set=false` brings back StringSet. Two compile-time constants decide how OAHSet trades memory for speed. This article
 explains how we think about that trade, how OAHSet lays out its members, and what two settings of
 the constants cost. The accent is on the operations that process a whole set, such as resizing,
 saving, and loading, because those are the ones that move a server's CPU usage and latency.
@@ -28,19 +26,12 @@ that a member costs only a few bytes beyond its key. Where the two scarce resour
 memory usually wins: ASCII keys are packed into smaller allocations at the cost of a few cycles
 per key.
 
-Finding the balance took a while. The first version, merged in December 2025, probed windows of
-4 slots and grew once it held one member per slot. Its description already named the trade-off:
-"Current N = 4, it would be better to increase it to 16 or even 64, but doing so would require
-implementing quite a lot of other optimizations to prevent performance degradation. Bigger N
+Finding the balance took a while. The first version,  probed windows of 4 slots and grew once it held one member per slot. This version proved that new approach is better than the previous one. We understand that bigger N
 improves memory locality and reduces memory consumption, significantly improving Grow and
 serialization operations performance, but reducing the performance of ADD type operations."
 
-The optimizations arrived during 2026. SIMD probing landed in May. A 32-slot window followed in
-June and lasted a month: the pull request that added more set benchmarks in July set it back to
-4 slots. More SIMD work, a compact size format for keys, and ASCII packing came next. At the end of
-July, a change titled "tune OAH for memory consumption" moved to 16-slot windows and let the table
-fill up to two members per slot before growing. OAHSet has been the default since v2.1, and since
-October it also shrinks automatically after deletions.
+So we start experinmenting with SIMD probing and as a result started using 32-slot windows and let the table
+fill up to two members per slot before growing. 32-slot window showed good enough performance with significant memory usage saving. But we still has the problem, after grow ahlf othe buckets are empty and we wasted 8 bytes per element in average, so we decided to overload the hash table to avoid empty buckets after grow, this is why we have 16 slot window and up to 2 times more keys in hash table than buckets.
 
 The two constants live in [oah_table.h](../src/core/oah_table.h). `kShiftLog` is the log2 of the
 window size, and `kOverloadFactor` is the average number of members per slot at which the table
@@ -64,7 +55,7 @@ yardstick: a set measured against `std::unordered_set` elsewhere can be placed n
 StringSet. I used `std::unordered_set<std::string>` from GCC 13.3's libstdc++ on 64-bit Linux.
 Each node holds an 8-byte next pointer, a 32-byte `std::string`, and an 8-byte cached hash:
 **48 bytes**, plus 8 bytes per bucket. Strings longer than 15 characters need a separate heap
-buffer.
+buffer. I think these calculations show why we can't use standard library containers.
 
 ## How OAHSet stores members
 
@@ -103,7 +94,7 @@ bytes are packed at 7 bits per character; all other keys stay raw. For a 16-byte
 without expiry:
 
 ```text
-StringSet: 16 data bytes + 1 SDS header byte + 1 terminator = 18 requested → 32 allocated
+StringSet: 16 data bytes + 1 SDS header byte + 1 terminator = 18 requested → 32 allocated (because of allocator alligning)
 OAHSet:    14 packed bytes + 1 key header byte              = 15 requested → 16 allocated
 ```
 
@@ -112,10 +103,8 @@ Packing moves this key into a smaller mimalloc size class, which halves its allo
 ## How OAHSet uses the layout
 
 **Lookup.** OAHSet packs the query like a stored key and hashes it. SIMD compares the query's
-fingerprint with every slot of the window, four slots per instruction with AVX2. If no member
-matches and the group's shared slot holds a vector, the overflow array is scanned the same way, two
-slots at a time. Each fingerprint match is confirmed by comparing the packing flag, the length,
-and the key bytes.
+fingerprint with every slot of the window, four slots per instruction with AVX2 for example. If no member
+matches and the group's shared slot holds a vector, the overflow array is scanned the same way. Each fingerprint match is confirmed by comparing the packing flag, the length, and the key bytes.
 
 **Insertion.** `Add` allocates the new key before it checks for a duplicate, so adding an existing
 member costs an allocation and a free. A new member takes the first empty slot of its window. If
