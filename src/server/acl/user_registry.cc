@@ -95,8 +95,10 @@ UserCredentials UserRegistry::GetCredentials(std::string_view username) const {
     return {};
   }
   auto& user = it->second;
-  return {user.AclCategory(), user.AclCommands(), user.Keys(),
-          user.PubSub(),      user.Namespace(),   user.Db()};
+  UserCredentials cred{user.AclCategory(), user.AclCommands(), user.Keys(),
+                       user.PubSub(),      user.Namespace(),   user.Db()};
+  cred.nopass = user.IsActive() && user.HasPassword("");
+  return cred;
 }
 
 bool UserRegistry::IsUserActive(std::string_view username) const {
