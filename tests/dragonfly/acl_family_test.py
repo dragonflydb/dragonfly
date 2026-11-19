@@ -522,6 +522,21 @@ async def test_acl_no_auth_commands(df_server):
     await admin.aclose()
 
 
+async def test_acl_reset_requires_auth_after_default_password(df_factory):
+    df = df_factory.create()
+    df.start()
+    client = aioredis.Redis(port=df.port, decode_responses=True, single_connection_client=True)
+    assert await client.ping()
+
+    # Like Valkey, RESET checks the default user's current password.
+    await client.execute_command("ACL SETUSER default resetpass >secret")
+    assert await client.execute_command("RESET") == "RESET"
+    with pytest.raises(redis.exceptions.AuthenticationError, match="Authentication required"):
+        await client.get("foo")
+
+    await client.aclose()
+
+
 async def test_acl_log(async_client):
     res = await async_client.execute_command("ACL LOG")
     assert [] == res

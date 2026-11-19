@@ -1883,6 +1883,12 @@ bool RequirePrivilegedAuth() {
   return !GetFlag(FLAGS_admin_nopass);
 }
 
+// Whether a client connection that starts as the default user must authenticate first.
+static bool DefaultUserRequiresAuth(const acl::UserRegistry& registry) {
+  // JWT validation must gate every connection even if the local "default" user is nopass.
+  return acl::JwtValidator::IsEnabled() || !registry.AuthUser("default", "");
+}
+
 facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
   auto cred = user_registry_.GetCredentials("default");
   ConnectionContext* res = new ConnectionContext{owner, std::move(cred)};
@@ -1900,8 +1906,7 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
       res->req_auth = false;
       res->authenticated = true;  // Automatically authenticated for Memcached protocol
     } else {
-      // JWT validation must gate every connection even if the local "default" user is nopass.
-      res->req_auth = acl::JwtValidator::IsEnabled() || !user_registry_.AuthUser("default", "");
+      res->req_auth = DefaultUserRequiresAuth(user_registry_);
     }
   }
 
@@ -1985,6 +1990,11 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   cntx->ns = &namespaces->GetOrInsert("");
   cntx->authenticated = false;
   cntx->auth_expires_at = std::chrono::steady_clock::time_point::max();
+
+  // Like Valkey, the default user's current password decides if the connection must authenticate.
+  const facade::Connection* owner = cntx->conn();
+  if (!owner->IsPrivileged() && !owner->socket()->IsUDS())
+    cntx->req_auth = DefaultUserRequiresAuth(*registry);
 
   rb->SendSimpleString("RESET");
 }
