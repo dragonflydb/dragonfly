@@ -1886,8 +1886,7 @@ bool RequirePrivilegedAuth() {
 }
 
 facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
-  auto cred = user_registry_.GetCredentials("default");
-  ConnectionContext* res = new ConnectionContext{owner, std::move(cred)};
+  ConnectionContext* res = new ConnectionContext{owner, {}};
   res->ns = &namespaces->GetOrInsert("");
 
   if (owner->socket()->IsUDS()) {
@@ -1907,6 +1906,8 @@ facade::ConnectionContext* Service::CreateContext(facade::Connection* owner) {
     }
   }
 
+  // Read last: no yield until the caller installs the context, so ACL updates cannot miss it.
+  res->SetAclCredentials(user_registry_.GetCredentials("default"));
   return res;
 }
 

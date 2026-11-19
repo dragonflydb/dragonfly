@@ -400,19 +400,30 @@ async def test_good_acl_file(df_factory, tmp_dir):
 
 
 async def test_acl_load_updates_default_user_connections(df_factory, tmp_dir):
-    acl = create_temp_file(
-        "user default on nopass ~* &* +@all\nuser admin on >pass ~* &* +@all\n", tmp_dir
-    )
+    admin_rule = "user admin on >pass ~* &* +@all\n"
+    acl = create_temp_file("user default on nopass ~* &* +@all\n" + admin_rule, tmp_dir)
     df = df_factory.create(aclfile=acl)
     df.start()
+
+    async def subscribe(channel):
+        reader, writer = await asyncio.open_connection("127.0.0.1", df.port)
+        writer.write(f"SUBSCRIBE {channel}\r\n".encode())
+        await reader.readuntil(b":1\r\n")
+        return reader, writer
+
+    async def assert_closed(reader):
+        async with async_timeout.timeout(5):
+            assert await reader.read() == b""
 
     default_client = aioredis.Redis(
         port=df.port, decode_responses=True, single_connection_client=True
     )
     assert await default_client.set("foo", "bar")
+    kept_reader, kept_writer = await subscribe("news")
+    dropped_reader, dropped_writer = await subscribe("secret")
 
     with open(acl, "w") as f:
-        f.write("user default on nopass ~* &* -@all +ping\nuser admin on >pass ~* &* +@all\n")
+        f.write("user default on nopass ~* &news -@all +ping\n" + admin_rule)
     admin = df.client()
     await admin.execute_command("AUTH admin pass")
     await admin.execute_command("ACL LOAD")
@@ -428,6 +439,24 @@ async def test_acl_load_updates_default_user_connections(df_factory, tmp_dir):
 
     await get_denied()
     assert await default_client.ping()
+
+    # Like Redis, only subscribers of channels the reload forbids are dropped.
+    await assert_closed(dropped_reader)
+
+    # Like Redis, AUTH is allowed even without command permissions.
+    assert await default_client.execute_command("AUTH admin pass") == "OK"
+    await default_client.execute_command("PUBLISH news hello")
+    async with async_timeout.timeout(5):
+        await kept_reader.readuntil(b"hello\r\n")
+
+    # Moving default to another namespace drops its connections.
+    with open(acl, "w") as f:
+        f.write("user default on nopass NAMESPACE:other ~* &* +@all\n" + admin_rule)
+    await default_client.execute_command("ACL LOAD")
+    await assert_closed(kept_reader)
+
+    for writer in (kept_writer, dropped_writer):
+        writer.close()
     await default_client.aclose()
 
 

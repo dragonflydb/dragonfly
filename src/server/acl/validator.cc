@@ -26,6 +26,11 @@ bool Matches(string_view pattern, string_view target) {
   return GlobMatcher{pattern, true}.Matches(target);
 }
 
+// Like Redis no-auth commands: any user may run them, e.g. to switch to another user.
+bool IsNoAuthCommand(const CommandId& id) {
+  return id.IsQuit() || id.IsReset() || id.name() == "AUTH" || id.name() == "HELLO";
+}
+
 bool IsCommandAllowed(const std::vector<uint64_t>& commands, const CommandId& id,
                       const ParsedArgs& tail_args) {
   const size_t family = id.GetFamily();
@@ -205,6 +210,19 @@ AclRulesView RulesOf(const ConnectionContext& cntx) {
 
 }  // namespace
 
+bool HasForbiddenSubscription(const ConnectionContext& cntx, const AclPubSub& pub_sub) {
+  const auto& info = cntx.conn_state.subscribe_info;
+  if (!info || pub_sub.all_channels)
+    return false;
+
+  auto any_denied = [&](const auto& subscriptions, bool literal) {
+    return absl::c_any_of(subscriptions, [&](const std::string& channel) {
+      return !IsChannelAllowed(pub_sub, channel, literal);
+    });
+  };
+  return any_denied(info->Channels(), false) || any_denied(info->Patterns(), true);
+}
+
 std::optional<AclLog::Reason> CheckCommand(const AclRulesView& rules, size_t db_index,
                                            const CommandId& id, const ParsedArgs& tail_args) {
   using Reason = AclLog::Reason;
@@ -212,7 +230,7 @@ std::optional<AclLog::Reason> CheckCommand(const AclRulesView& rules, size_t db_
   if (!id.IsPubSub() && !IsDbAllowed(rules.db, db_index, id, tail_args))
     return Reason::AUTH;
 
-  if (!IsCommandAllowed(rules.commands, id, tail_args))
+  if (!IsCommandAllowed(rules.commands, id, tail_args) && !IsNoAuthCommand(id))
     return Reason::COMMAND;
 
   if (id.IsPubSub()) {

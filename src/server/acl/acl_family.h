@@ -26,6 +26,8 @@ class Listener;
 
 namespace dfly {
 
+class ConnectionContext;
+
 using facade::CmdArgList;
 using facade::CmdArgParser;
 
@@ -57,8 +59,8 @@ class AclFamily final {
   // Pushes the user's updated ACL rules to all its open connections.
   void StreamUpdatesToConnections(std::string_view username, const User& user);
 
-  // Closes all open connections whose authenticated user matches `pred`.
-  void EvictConnections(absl::FunctionRef<bool(std::string_view username)> pred);
+  // Closes all open connections that match `pred`.
+  void EvictConnections(absl::FunctionRef<bool(const ConnectionContext&)> pred);
 
   using UserRequests = std::vector<std::pair<std::string, User::UpdateRequest>>;
 
