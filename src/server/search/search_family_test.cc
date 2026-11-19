@@ -351,6 +351,24 @@ template <typename... Args> auto IsMap(Args... args) {
   return IsMapMatcher(std::make_tuple(args...));
 }
 
+template <typename... Args> auto IsResp3Array(Args... args) {
+  return AllOf(IsResp3ArrayKind(), IsArray(args...));
+}
+
+template <typename... Args> auto IsResp3Map(Args... args) {
+  return AllOf(IsResp3MapKind(), IsMap(args...));
+}
+
+template <typename... Args> auto IsResp3Set(Args... args) {
+  return AllOf(IsResp3SetKind(), IsUnordArray(args...));
+}
+
+// The RESP3 envelope of FT.SEARCH and FT.AGGREGATE replies.
+template <typename Results> auto IsResp3Reply(Results results, int64_t total) {
+  return IsResp3Map("attributes", IsResp3Array(), "format", "STRING", "results", results,
+                    "total_results", IntArg(total), "warning", IsResp3Array());
+}
+
 MATCHER_P(IsMapWithSizeMatcher, expected, "") {
   if (arg.type != RespExpr::ARRAY) {
     *result_listener << "Wrong response type: " << arg.type;
@@ -2676,6 +2694,12 @@ TEST_F(SearchFamilyTest, FtProfile) {
   // Test LIMITED throws no errors
   resp = Run({"ft.profile", "i1", "search", "limited", "query", "(a | b) c d"});
   ASSERT_ARRAY_OF_TWO_ARRAYS(resp);
+
+  // RESP3 names both parts, and the results are a search reply map.
+  Run({"HELLO", "3"});
+  EXPECT_THAT(Run({"ft.profile", "i1", "search", "query", "(a | b) c d"}),
+              IsResp3Map("Results", IsResp3Reply(IsResp3Array(), 0), "Profile",
+                         AllOf(IsResp3ArrayKind(), ArrLen(shard_set->size() + 1))));
 }
 
 TEST_F(SearchFamilyTest, FtProfileInvalidQuery) {
@@ -4305,6 +4329,13 @@ TEST_F(SearchFamilyTest, SynonymManagement) {
   EXPECT_THAT(resp, IsUnordArray("cub", IsArray("3"), "cute", IsArray("2"), "adorable",
                                  IsArray("2"), "kitty", IsArray("1", "2", "3"), "feline",
                                  IsArray("1"), "tiger", IsArray("3"), "cat", IsArray("1")));
+
+  // RESP3 maps each term to its groups.
+  Run({"HELLO", "3"});
+  EXPECT_THAT(Run({"FT.SYNDUMP", "my_idx"}),
+              IsResp3Map("cub", IsResp3Array("3"), "cute", IsResp3Array("2"), "adorable",
+                         IsResp3Array("2"), "kitty", IsResp3Array("1", "2", "3"), "feline",
+                         IsResp3Array("1"), "tiger", IsResp3Array("3"), "cat", IsResp3Array("1")));
 }
 
 TEST_F(SearchFamilyTest, SynonymCommandsResolveAliases) {
@@ -5388,7 +5419,7 @@ TEST_F(SearchFamilyTest, SchemaOptionOrders) {
               IsArray(IsArray("identifier", "a", "attribute", "a", "type", "TEXT", "WEIGHT", "1",
                               "SORTABLE", "UNF", "NOSTEM", "INDEXEMPTY", "INDEXMISSING"),
                       IsArray("identifier", "weight", "attribute", "weight", "type", "NUMERIC",
-                              "blocksize", "10000", "SORTABLE", "UNF"),
+                              "blocksize", IntArg(10000), "SORTABLE", "UNF"),
                       IsArray("identifier", "b", "attribute", "b", "type", "TEXT", "WEIGHT", "2",
                               "SORTABLE", "NOSTEM", "NOINDEX", "WITHSUFFIXTRIE", "INDEXEMPTY"),
                       IsArray("identifier", "nostem", "attribute", "nostem", "type", "TAG",
@@ -5597,9 +5628,9 @@ TEST_F(SearchFamilyTest, BlockSizeOptionFtCreate) {
   resp = Run({"FT.INFO", "index"});
   EXPECT_THAT(resp, IsArray(_, _, _, _, _, _, "attributes",
                             IsUnordArray(IsArray("identifier", "number1", "attribute", "number1",
-                                                 "type", "NUMERIC", "blocksize", "2"),
+                                                 "type", "NUMERIC", "blocksize", IntArg(2)),
                                          IsArray("identifier", "number2", "attribute", "number2",
-                                                 "type", "NUMERIC", "blocksize", "1024")),
+                                                 "type", "NUMERIC", "blocksize", IntArg(1024))),
                             "num_docs", IntArg(0), _, _, _, _));
 
   // Add a document to the index
@@ -6153,7 +6184,7 @@ TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
   WaitForIndexReady("memes");
 
   auto resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1000000"));
+  EXPECT_THAT(resp, IsArray(IsArray("MAXSEARCHRESULTS", "1000000")));
 
   resp = Run({"FT.SEARCH", "memes", "@phrase:(hello world)", "NOCONTENT"});
   EXPECT_THAT(resp, RespElementsAre(IntArg(3), _, _, _));
@@ -6171,7 +6202,7 @@ TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
   EXPECT_THAT(resp, ErrArg("LIMIT exceeds maximum of 1"));
 
   resp = Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"});
-  EXPECT_THAT(resp, IsArray("MAXSEARCHRESULTS", "1"));
+  EXPECT_THAT(resp, IsArray(IsArray("MAXSEARCHRESULTS", "1")));
 
   resp = Run({"FT.CONFIG", "HELP", "MAXSEARCHRESULTS"});
   EXPECT_THAT(resp, RespElementsAre(IsArray("MAXSEARCHRESULTS", "Description",
@@ -6180,14 +6211,22 @@ TEST_F(SearchFamilyTest, MAXSEARCHRESULTS) {
 
   resp = Run({"FT.CONFIG", "GET", "*"});
   // Should contain MAXSEARCHRESULTS among other search config parameters
-  EXPECT_THAT(resp, RespArray(Contains("MAXSEARCHRESULTS")));
-  EXPECT_THAT(resp, RespArray(Contains("1")));
+  EXPECT_THAT(resp, RespArray(Contains(IsArray("MAXSEARCHRESULTS", "1"))));
 
   resp = Run({"FT.CONFIG", "HELP", "*"});
   // Should contain MAXSEARCHRESULTS description among other search configs
   EXPECT_THAT(resp.GetVec(),
               Contains(IsArray("MAXSEARCHRESULTS", "Description",
                                "Maximum number of results from ft.search command", "Value", "1")));
+
+  // RESP3 replies with maps.
+  Run({"HELLO", "3"});
+  EXPECT_THAT(Run({"FT.CONFIG", "GET", "MAXSEARCHRESULTS"}), IsResp3Map("MAXSEARCHRESULTS", "1"));
+  EXPECT_THAT(
+      Run({"FT.CONFIG", "HELP", "MAXSEARCHRESULTS"}),
+      IsResp3Map("MAXSEARCHRESULTS",
+                 IsResp3Map("Description", "Maximum number of results from ft.search command",
+                            "Value", "1")));
 
   // restore normal value for other tests
   Run({"FT.CONFIG", "SET", "MAXSEARCHRESULTS", "1000000"});
@@ -7347,6 +7386,20 @@ TEST_F(SearchFamilyTest, WithSortKeysOption) {
   EXPECT_THAT(
       Run({"FT.SEARCH", "users", "smith", "WITHSCORES", "WITHPAYLOADS", "RETURN", "1", "age"}),
       IsArray(IntArg(1), "user3", _, ArgType(RespExpr::NIL), IsMap("age", "123456789")));
+
+  // RESP3 wraps the reply in a map and names each part of a result; the score is a double.
+  Run({"HELLO", "3"});
+  EXPECT_THAT(Run({"FT.SEARCH", "users", "smith", "WITHSCORES", "WITHPAYLOADS", "SORTBY", "age",
+                   "WITHSORTKEYS", "RETURN", "1", "age"}),
+              IsResp3Reply(IsResp3Array(IsResp3Map(
+                               "id", "user3", "score", ArgType(RespExpr::DOUBLE), "payload",
+                               ArgType(RespExpr::NIL), "sortkey", "#123456789", "extra_attributes",
+                               IsResp3Map("age", "123456789"), "values", IsResp3Array())),
+                           1));
+  EXPECT_THAT(Run({"FT.SEARCH", "users", "jones", "SORTBY", "age", "NOCONTENT"}),
+              IsResp3Reply(IsResp3Array(IsResp3Map("id", "user1", "values", IsResp3Array()),
+                                        IsResp3Map("id", "user2", "values", IsResp3Array())),
+                           2));
 }
 
 TEST_F(SearchFamilyTest, WithSortKeysLongValue) {
@@ -7399,7 +7452,9 @@ TEST_F(SearchFamilyTest, ReplyFieldValues) {
   Run({"HELLO", "3"});
   EXPECT_THAT(
       Run({"FT.AGGREGATE", "h", "@t:{a}", "GROUPBY", "1", "@t", "REDUCE", "COUNT", "0", "AS", "c"}),
-      IsArray(IntArg(1), IsMap("t", "a", "c", "2")));
+      IsResp3Reply(IsResp3Array(IsResp3Map("extra_attributes", IsResp3Map("t", "a", "c", "2"),
+                                           "values", IsResp3Array())),
+                   1));
 }
 
 // GEO index tests for FT.SEARCH with HASH and JSON documents
@@ -9358,13 +9413,26 @@ TEST_F(SearchFamilyTest, InfoIndexVectorParams) {
 
   auto info = Run({"ft.info", "idx"});
 
-  auto vector_field_matcher = IsArray(
-      "identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm", "HNSW",
-      "data_type", "FLOAT32", "dim", "4", "distance_metric", "COSINE", "initial_cap", "500", "M",
-      "16", "ef_construction", "200", "ef_runtime", "150", "epsilon", "0.07");
+  auto vector_field_matcher =
+      IsArray("identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm",
+              "HNSW", "data_type", "FLOAT32", "dim", IntArg(4), "distance_metric", "COSINE",
+              "initial_cap", IntArg(500), "M", IntArg(16), "ef_construction", IntArg(200),
+              "ef_runtime", IntArg(150), "epsilon", "0.07");
 
   EXPECT_THAT(info, IsArray(_, _, _, _, _, _, "attributes", IsArray(vector_field_matcher), _, _, _,
                             _, _, _));
+
+  // RESP3 makes the attribute a map with a flags list, and epsilon a double.
+  Run({"HELLO", "3"});
+  auto vector_field_map = IsResp3Map(
+      "identifier", "embedding", "attribute", "embedding", "type", "VECTOR", "algorithm", "HNSW",
+      "data_type", "FLOAT32", "dim", IntArg(4), "distance_metric", "COSINE", "initial_cap",
+      IntArg(500), "M", IntArg(16), "ef_construction", IntArg(200), "ef_runtime", IntArg(150),
+      "epsilon", AllOf(ArgType(RespExpr::DOUBLE), DoubleArg(0.07)), "flags", IsResp3Array());
+  EXPECT_THAT(Run({"ft.info", "idx"}),
+              IsResp3Map("index_name", _, "index_definition", _, "index_options", _, "attributes",
+                         IsResp3Array(vector_field_map), "num_docs", _, "indexing", _,
+                         "percent_indexed", _));
 }
 
 TEST_F(SearchFamilyTest, VectorEpsilonValidation) {
@@ -9614,25 +9682,36 @@ TEST_F(SearchFamilyTest, NoOffsetsAbsentByDefault) {
               IsArray(_, _, _, _, "index_options", RespArray(IsEmpty()), _, _, _, _, _, _, _, _));
 }
 
-// FT.INFO replies with a flat array under both RESP2 and RESP3.
+// FT.INFO replies with a flat array under RESP2 and with a map under RESP3; FT._LIST with a set.
 TEST_F(SearchFamilyTest, FtInfoResp2AndResp3) {
-  Run({"FT.CREATE", "idx", "ON", "JSON", "PREFIX", "1", "d:", "SCHEMA", "$.id", "AS", "id", "TAG"});
+  Run({"FT.CREATE", "idx", "ON", "JSON", "PREFIX", "1", "d:", "SCHEMA", "$.id", "AS", "id", "TAG",
+       "$.t", "AS", "t", "TEXT", "WEIGHT", "2.5", "SORTABLE"});
 
-  auto definition = IsArray("key_type", "JSON", "prefixes", IsArray("d:"), "default_score", 1);
-  auto attributes =
-      IsArray(IsArray("identifier", "$.id", "attribute", "id", "type", "TAG", "SEPARATOR", ""));
+  EXPECT_THAT(Run({"FT.INFO", "idx"}),
+              IsArray("index_name", "idx", "index_definition",
+                      IsArray("key_type", "JSON", "prefixes", IsArray("d:"), "default_score", 1),
+                      "index_options", RespArray(IsEmpty()), "attributes",
+                      IsArray(IsArray("identifier", "$.id", "attribute", "id", "type", "TAG",
+                                      "SEPARATOR", ""),
+                              IsArray("identifier", "$.t", "attribute", "t", "type", "TEXT",
+                                      "WEIGHT", "2.5", "SORTABLE", "UNF")),
+                      "num_docs", _, "indexing", IntArg(0), "percent_indexed", "1"));
 
-  for (string_view proto : {"2", "3"}) {
-    Run({"HELLO", proto});
-    Matcher<const RespExpr&> indexed = AllOf(ArgType(RespExpr::DOUBLE), DoubleArg(1));
-    if (proto == "2")
-      indexed = Eq(string_view{"1"});
-    EXPECT_THAT(Run({"FT.INFO", "idx"}),
-                IsArray("index_name", "idx", "index_definition", definition, "index_options",
-                        RespArray(IsEmpty()), "attributes", attributes, "num_docs", _, "indexing",
-                        IntArg(0), "percent_indexed", indexed))
-        << "RESP" << proto;
-  }
+  // Each attribute is a map too, with its flags in a list.
+  Run({"HELLO", "3"});
+  auto is_double = [](double d) { return AllOf(ArgType(RespExpr::DOUBLE), DoubleArg(d)); };
+  EXPECT_THAT(
+      Run({"FT.INFO", "idx"}),
+      IsResp3Map(
+          "index_name", "idx", "index_definition",
+          IsResp3Map("key_type", "JSON", "prefixes", IsResp3Array("d:"), "default_score", 1),
+          "index_options", IsResp3Array(), "attributes",
+          IsResp3Array(IsResp3Map("identifier", "$.id", "attribute", "id", "type", "TAG",
+                                  "SEPARATOR", "", "flags", IsResp3Array()),
+                       IsResp3Map("identifier", "$.t", "attribute", "t", "type", "TEXT", "WEIGHT",
+                                  is_double(2.5), "flags", IsResp3Array("SORTABLE", "UNF"))),
+          "num_docs", _, "indexing", IntArg(0), "percent_indexed", is_double(1)));
+  EXPECT_THAT(Run({"FT._LIST"}), IsResp3Set("idx"));
 }
 
 // FT.INFO surfaces NOSTEM per-attribute and language in index_definition.
@@ -11037,6 +11116,15 @@ TEST_F(SearchFamilyTest, FtHybridFlatBasic) {
   ASSERT_FALSE(keys.empty());
   EXPECT_EQ(keys[0], "d:1");
   EXPECT_GT(HybridScore(resp, 0), 0.f);
+
+  // RESP3: each result is a map, and execution_time is a double.
+  Run({"HELLO", "3"});
+  auto result = IsResp3Map("__key", _, "__score", _);
+  EXPECT_THAT(Run({"FT.HYBRID", "idx", "SEARCH", "fruit", "VSIM", "@vec", "$v", "PARAMS", "2", "v",
+                   Vec3ToBytes(1, 0, 0)}),
+              IsResp3Map("total_results", IntArg(3), "results",
+                         IsResp3Array(IsResp3Map("__key", "d:1", "__score", _), result, result),
+                         "warnings", IsResp3Array(), "execution_time", ArgType(RespExpr::DOUBLE)));
 }
 
 TEST_F(SearchFamilyTest, FtHybridFlatRrf) {
