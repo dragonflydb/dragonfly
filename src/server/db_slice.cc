@@ -1920,6 +1920,9 @@ finish:
     QueueExpiredKeyEvent(db_ind, key);
   }
 
+  // This might not always be atomic on exceptional cases -- see comments on the function
+  // declaration.
+  SendQueuedInvalidationMessagesAsync();
   auto time_finish = absl::GetCurrentTimeNanos();
   db_arr_[db_ind]->stats.events.evicted_keys += evicted_items;
   DVLOG(2) << "Eviction time (us): " << (time_finish - time_start) / 1000;

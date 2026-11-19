@@ -884,17 +884,16 @@ void EngineShard::RetireExpiredAndEvict() {
     }
 
     // Expiry/eviction above only marks watchers as awakened. Dispatch them in the same atomic
-    // section: no transaction can start running in between.
+    // section. Eviction may suspend sending tracking invalidations, so recheck running_tx_.
     if (auto* bc = namespaces->GetDefaultNamespace().GetBlockingController(shard_id());
-        bc && GetContTx() == nullptr) {
+        bc && GetContTx() == nullptr && running_tx_ == nullptr) {
       bc->NotifyPendingAtomic();
     }
   }  // journal_flush_guard destroyed here — atomic section ends before sending the events
 
-  // Send tracking invalidations and keyspace notifications for expired/evicted keys outside the
-  // atomic section because dispatching them may suspend (see issue #7052).
+  // Send keyspace notifications for expired/evicted keys outside the atomic section
+  // because SendMessages may suspend on connection backpressure (see issue #7052).
   // This also sends events that other code queued but left unsent.
-  db_slice.SendQueuedInvalidationMessagesAsync();
   db_slice.SendQueuedExpiredKeyEvents();
 
   // Track deleted bytes only if we expect to lower memory

@@ -508,9 +508,6 @@ class DbSlice {
       SendQueuedExpiredKeyEventsSlow();
   }
 
-  // Dispatches queued tracking invalidations to all threads. May suspend if a task queue is full.
-  void SendQueuedInvalidationMessagesAsync();
-
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
 
@@ -553,9 +550,8 @@ class DbSlice {
 
   // Evicts items with dynamically allocated data from the primary table.
   // Does not shrink tables.
-  // Returns number of (elements,bytes) freed due to evictions. Queues expired events and tracking
-  // invalidations for the evicted keys (see SendQueuedExpiredKeyEvents and
-  // SendQueuedInvalidationMessagesAsync).
+  // Returns number of (elements,bytes) freed due to evictions. Queues expired events for the
+  // evicted keys (see SendQueuedExpiredKeyEvents).
   std::pair<uint64_t, size_t> FreeMemWithEvictionStepAtomic(DbIndex db_indx, const Context& cntx,
                                                             size_t starting_segment_id,
                                                             size_t increase_goal_bytes);
@@ -706,6 +702,7 @@ class DbSlice {
       SendQueuedInvalidationMessagesSlow();
   }
   void SendQueuedInvalidationMessagesSlow();
+  void SendQueuedInvalidationMessagesAsync();
 
   // Queues the expired event of 'key' if keyspace notifications are enabled. Never suspends.
   void QueueExpiredKeyEvent(DbIndex db_index, std::string_view key) const {

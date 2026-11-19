@@ -121,8 +121,10 @@ bool Transaction::BatonBarrier::TryClaim() {
 
 void Transaction::BatonBarrier::Close() {
   DCHECK(claimed_.load(memory_order_relaxed));
-  closed_.store(true, memory_order_relaxed);
-  ec_.notify();  // release
+
+  // Pairs with Wait()'s acquire load, whose fast path skips notify(): publishes wake_time_ms_.
+  closed_.store(true, memory_order_release);
+  ec_.notify();
 }
 
 cv_status Transaction::BatonBarrier::Wait(time_point tp) {
