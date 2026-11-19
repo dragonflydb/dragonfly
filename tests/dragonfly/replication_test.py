@@ -81,7 +81,7 @@ async def test_replication_stops_on_unsupported_rdb(df_factory, unsupported_rdb,
     ],
 )
 async def test_replication_bad_eof_framing(df_factory, eof_marker, eof_trailer, error):
-    rdb = b"REDIS0011\xff" + bytes(8)
+    rdb = b"REDIS0011\x00\x03foo\x03bar\xff" + bytes(8)
     replica = df_factory.create(proactor_threads=2)
     with replica:
         client = replica.client()
