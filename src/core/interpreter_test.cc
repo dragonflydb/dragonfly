@@ -523,24 +523,36 @@ TEST_F(InterpreterTest, Modules) {
 
 TEST_F(InterpreterTest, CjsonMaxDepth) {
   ASSERT_TRUE(Execute(R"(
-    local value = string.rep('[', 50) .. '1' .. string.rep(']', 50)
-    for _, json in ipairs({cjson, cjson.new()}) do
-      for _, setting in ipairs({json.encode_max_depth, json.decode_max_depth}) do
-        assert(setting() == 50)
-        assert(not pcall(setting, 0))
-        assert(not pcall(setting, 1, 2))
-      end
-      for _, requested in ipairs({1000, 10}) do
-        assert(json.encode_max_depth(requested) == 50)
-        assert(json.decode_max_depth(requested) == 50)
-        local decoded = json.decode(value)
-        assert(json.encode(decoded) == value)
-        local ok, err = pcall(json.encode, {decoded})
-        assert(not ok and err:find('excessive nesting (51)', 1, true), err)
-        ok, err = pcall(json.decode, '[' .. value .. ']')
-        assert(not ok and err:find('too many nested data structures (51)', 1, true), err)
-      end
+    local function nested(depth)
+      return string.rep('[', depth) .. '1' .. string.rep(']', depth)
     end
+    local function check_boundary(json, depth)
+      local value = nested(depth)
+      local decoded = json.decode(value)
+      assert(json.encode(decoded) == value)
+      local ok, err = pcall(json.encode, {decoded})
+      assert(not ok and err:find('excessive nesting (' .. (depth + 1) .. ')', 1, true), err)
+      ok, err = pcall(json.decode, nested(depth + 1))
+      assert(not ok and err:find('too many nested data structures (' .. (depth + 1) .. ')', 1, true), err)
+    end
+    local json = cjson.new()
+    for _, setting in ipairs({json.encode_max_depth, json.decode_max_depth}) do
+      assert(setting() == 50)
+      assert(not pcall(setting, 0))
+      assert(not pcall(setting, 1, 2))
+    end
+    check_boundary(json, 50)
+    assert(json.encode_max_depth(10) == 10)
+    assert(json.decode_max_depth() == 50)
+    assert(json.decode_max_depth(10) == 10)
+    assert(json.encode_max_depth(1000) == 10)
+    assert(json.decode_max_depth(1000) == 10)
+    check_boundary(json, 10)
+    check_boundary(cjson, 50)
+    assert(json.decode_max_depth(50) == 50)
+    assert(json.encode_max_depth() == 10)
+    assert(json.encode_max_depth(50) == 50)
+    check_boundary(json, 50)
     return true
   )")) << error_;
   EXPECT_EQ("bool(1)", ser_.res);
