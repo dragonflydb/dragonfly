@@ -12,6 +12,7 @@
 #include "absl/random/random.h"
 #include "base/pmr/memory_resource.h"
 #include "core/dash_internal.h"
+#include "core/memory_accounting.h"
 
 namespace dfly {
 
@@ -416,7 +417,8 @@ class DashTable : public detail::DashTableBase {
   // Same as above, with key_hash == DoHash(it->first) precomputed by the caller.
   template <typename Cb> void CVCUponBump(const_iterator it, uint64_t key_hash, Cb&& cb);
 
-  void Clear();
+  // Account entry frees when requested and supported by the policy, excluding table storage.
+  void Clear(bool account_memory = false);
 
   // Returns true if an element was deleted i.e the rightmost slot was busy.
   bool ShiftRight(bucket_iterator it);
@@ -883,17 +885,34 @@ void DashTable<_Key, _Value, Policy>::CVCUponBump(const_iterator it, uint64_t ke
 }
 
 template <typename _Key, typename _Value, typename Policy>
-void DashTable<_Key, _Value, Policy>::Clear() {
-  auto cb = [this](SegmentType* seg) {
-    seg->TraverseAll([this, seg](const SegmentIterator& it) {
-      policy_.DestroyKey(seg->Key(it.index, it.slot));
-      policy_.DestroyValue(seg->Value(it.index, it.slot));
+void DashTable<_Key, _Value, Policy>::Clear(bool account_memory) {
+  constexpr bool kSupportsAccounting = requires(Policy & policy, Key_t & key, Value_t & value) {
+    policy.DestroyEntryWithAccounting(key, value);
+  };
+
+  auto cb = [this, account_memory](SegmentType* seg) {
+    seg->TraverseAll([this, account_memory, seg](const SegmentIterator& it) {
+      auto& key = seg->Key(it.index, it.slot);
+      auto& value = seg->Value(it.index, it.slot);
+      if constexpr (kSupportsAccounting)
+        if (account_memory) {
+          policy_.DestroyEntryWithAccounting(key, value);
+          return;
+        }
+      policy_.DestroyKey(key);
+      policy_.DestroyValue(value);
     });
     seg->Clear();
     return false;
   };
 
-  IterateDistinct(cb);
+  {
+    std::optional<AtomicMemoryScope> key_scope;
+    if constexpr (kSupportsAccounting)
+      if (account_memory)
+        key_scope.emplace(OBJ_KEY);
+    IterateDistinct(cb);
+  }
   size_ = 0;
 
   // Consider the following case: table with 8 segments overall, 4 distinct.

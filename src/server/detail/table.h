@@ -6,6 +6,7 @@
 
 #include "core/compact_object.h"
 #include "core/dash.h"
+#include "core/memory_accounting.h"
 
 namespace dfly {
 
@@ -33,6 +34,13 @@ struct PrimeTablePolicy {
 
   static void DestroyValue(PrimeValue& o) {
     o.Reset();
+  }
+
+  static void DestroyEntryWithAccounting(PrimeKey& key, PrimeValue& value) {
+    // Clear's enclosing key scope accounts for this free.
+    DestroyKey(key);
+    AtomicMemoryScope scope(value.ObjType());
+    DestroyValue(value);
   }
 
   static bool Equal(const PrimeKey& s1, std::string_view s2) {

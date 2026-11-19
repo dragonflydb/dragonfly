@@ -2368,6 +2368,8 @@ TEST_F(TieredStorageTest, CoolHashDeleteDoesNotAbort) {
   SetFlag(&FLAGS_tiered_experimental_hash_support, true);
   UpdateFromFlags();
 
+  const auto baseline = GetMetrics().type_attributed_memory_bytes;
+
   // Listpack hashes go through small bins, which only flush at 4KB - one hash never stashes.
   const int kNum = 60;
   for (int i = 0; i < kNum; ++i)
@@ -2375,9 +2377,10 @@ TEST_F(TieredStorageTest, CoolHashDeleteDoesNotAbort) {
 
   ExpectConditionWithinTimeout([this] { return GetMetrics().db_stats[0].tiered_entries > 0u; });
 
-  Run({"FLUSHALL"});
+  Run({"FLUSHALL", "SYNC"});
   EXPECT_EQ(Run({"PING"}), "PONG");
   EXPECT_EQ(GetMetrics().db_stats[0].obj_memory_usage, 0u);
+  EXPECT_EQ(GetMetrics().type_attributed_memory_bytes, baseline);
 }
 
 #ifdef WITH_SEARCH

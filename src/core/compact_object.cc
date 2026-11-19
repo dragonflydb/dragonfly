@@ -630,6 +630,7 @@ void CompactObj::ClearThreadLocalStats() {
 }
 
 void CompactObj::DrainPendingReads() {
+  AtomicMemoryScope scope(OBJ_STRING);
   tl.pin_map.Drain(tl.local_mr);
 }
 
