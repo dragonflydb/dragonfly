@@ -267,6 +267,11 @@ TEST_F(CuckooFilterFamilyTest, InsertFilterFull) {
   // Item 0 already exists → 0; overflow → -1.
   resp = Run("cf.insertnx cfnx items 0 overflow");
   EXPECT_THAT(resp, RespArray(ElementsAre(IntArg(0), IntArg(-1))));
+
+  // RESP3: CF.INSERT reports a full filter as false, CF.INSERTNX stays numeric.
+  Run("hello 3");
+  EXPECT_THAT(Run("cf.insert cf items overflow3"), RespElementsAre(BoolArg(false)));
+  EXPECT_THAT(Run("cf.insertnx cfnx items 0 overflow"), RespElementsAre(IntArg(0), IntArg(-1)));
 }
 
 TEST_F(CuckooFilterFamilyTest, Exists) {
@@ -276,6 +281,17 @@ TEST_F(CuckooFilterFamilyTest, Exists) {
 
   // Missing key returns 0, not an error.
   EXPECT_THAT(Run("cf.exists nonexist-key blah"), IntArg(0));
+
+  // RESP3 answers membership with booleans; CF.COUNT stays numeric.
+  Run("hello 3");
+  EXPECT_THAT(Run("cf.add f1 bar"), BoolArg(true));
+  EXPECT_THAT(Run("cf.addnx f1 bar"), BoolArg(false));
+  EXPECT_THAT(Run("cf.exists f1 bar"), BoolArg(true));
+  EXPECT_THAT(Run("cf.exists nonexist-key blah"), BoolArg(false));
+  EXPECT_THAT(Run("cf.mexists f1 bar nope"), RespElementsAre(BoolArg(true), BoolArg(false)));
+  EXPECT_THAT(Run("cf.insert f1 items baz"), RespElementsAre(BoolArg(true)));
+  EXPECT_THAT(Run("cf.del f1 bar"), BoolArg(true));
+  EXPECT_THAT(Run("cf.count f1 baz"), IntArg(1));
 }
 
 TEST_F(CuckooFilterFamilyTest, ExistsWrongArity) {
@@ -321,6 +337,15 @@ TEST_F(CuckooFilterFamilyTest, Info) {
                         IntArg(1), "Number of items inserted", IntArg(1), "Number of items deleted",
                         IntArg(0), "Bucket size", IntArg(4), "Expansion rate", IntArg(2),
                         "Max iterations", IntArg(10))));
+
+  Run("hello 3");
+  EXPECT_THAT(
+      Run("cf.info cf1"),
+      AllOf(IsResp3MapKind(),
+            RespElementsAre("Size", testing::_, "Number of buckets", testing::_,
+                            "Number of filters", IntArg(1), "Number of items inserted", IntArg(1),
+                            "Number of items deleted", IntArg(0), "Bucket size", IntArg(4),
+                            "Expansion rate", IntArg(2), "Max iterations", IntArg(10))));
 }
 
 TEST_F(CuckooFilterFamilyTest, InfoMissingKey) {

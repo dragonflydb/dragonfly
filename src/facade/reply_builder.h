@@ -253,6 +253,7 @@ class RedisReplyBuilderBase : public SinkReplyBuilder {
 
   void SendLong(long val) override;
   virtual void SendDouble(double val);  // RESP: Number
+  virtual void SendBool(bool val);      // RESP3: Boolean, RESP2: Integer 1 or 0
 
   virtual void SendNullArray();
   virtual void StartCollection(unsigned len, CollectionType ct);

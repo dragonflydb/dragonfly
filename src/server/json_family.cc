@@ -2,12 +2,14 @@
 // See LICENSE for licensing terms.
 //
 
+#include <absl/container/inlined_vector.h>
 #include <absl/strings/match.h>
 #include <absl/strings/str_cat.h>
 #include <absl/strings/str_join.h>
 #include <absl/strings/str_split.h>
 
 #include <type_traits>
+#include <variant>
 
 #include "absl/cleanup/cleanup.h"
 #include "base/flags.h"
@@ -15,6 +17,7 @@
 #include "core/json/json_object.h"
 #include "core/json/path.h"
 #include "core/mi_memory_resource.h"
+#include "core/overloaded.h"
 #include "facade/cmd_arg_parser.h"
 #include "facade/op_status.h"
 #include "facade/reply_builder.h"
@@ -223,6 +226,10 @@ ParseResult<WrappedJsonPath> ParseJsonPath(std::string_view path) {
   return IsJsonPathV2(path) ? ParseJsonPathV2(path) : ParseJsonPathV1(path);
 }
 
+// The new value of a JSON.NUMINCRBY or JSON.NUMMULTBY match, monostate where it is not a number.
+using NumericOpValue = std::variant<std::monostate, int64_t, uint64_t, double>;
+using NumericOpValues = absl::InlinedVector<NumericOpValue, 1>;
+
 namespace reply_generic {
 
 template <typename I> void Send(I begin, I end, CommandContext* cmd_cntx);
@@ -258,7 +265,8 @@ void Send(const std::vector<std::string>& vec, CommandContext* cmd_cntx) {
 template <typename Allocator>
 void Send(const JsonWithAllocator<Allocator>& value, CommandContext* cmd_cntx) {
   auto* rb = RB(cmd_cntx);
-  if (value.is_double()) {
+  if (value.is_number() && !value.template is_integer<long>()) {
+    // A double, or an integer above the range of long that as_integer would wrap.
     Send(value.as_double(), cmd_cntx);
   } else if (value.is_number()) {
     Send(value.template as_integer<long>(), cmd_cntx);
@@ -277,17 +285,10 @@ void Send(const JsonWithAllocator<Allocator>& value, CommandContext* cmd_cntx) {
       Send(item.value(), cmd_cntx);
     }
   } else if (value.is_array()) {
-    if (rb->IsResp3()) {
-      rb->StartArray(value.size());
-      for (const auto& item : value.array_range()) {
-        Send(item, cmd_cntx);
-      }
-    } else {
-      rb->StartArray(value.size() + 1);
-      rb->SendSimpleString("[");
-      for (const auto& item : value.array_range()) {
-        Send(item, cmd_cntx);
-      }
+    rb->StartArray(value.size() + 1);
+    rb->SendSimpleString("[");
+    for (const auto& item : value.array_range()) {
+      Send(item, cmd_cntx);
     }
   }
 }
@@ -327,26 +328,12 @@ template <typename T> void Send(const JsonCallbackResult<T>& result, CommandCont
   if (result.IsV1()) {
     /* The specified path was restricted (JSON legacy mode), then the result consists only of a
      * single value */
-    if (rb->IsResp3()) {
-      rb->StartArray(1);
-    }
     Send(result.AsV1(), cmd_cntx);
   } else {
     /* The specified path was enhanced (starts with '$'), then the result is an array of multiple
      * values */
     const auto& arr = result.AsV2();
-    if (rb->IsResp3()) {
-      rb->StartArray(arr.size());
-      for (const auto& item : arr) {
-        // For JSON.TYPE (std::string), preserve nested array behavior for compatibility
-        if constexpr (std::is_same_v<T, std::string>) {
-          rb->StartArray(1);
-        }
-        Send(item, cmd_cntx);
-      }
-    } else {
-      Send(arr.begin(), arr.end(), cmd_cntx);
-    }
+    Send(arr.begin(), arr.end(), cmd_cntx);
   }
 }
 
@@ -359,21 +346,64 @@ template <typename T> void Send(const OpResult<T>& result, CommandContext* cmd_c
   }
 }
 
-void SendJsonString(const OpResult<string>& result, CommandContext* cmd_cntx) {
-  if (result) {
-    RedisReplyBuilder::ReplyScope scope{cmd_cntx->rb()};
-    RedisReplyBuilder* rb = RB(cmd_cntx);
-    const string& json_str = result.value();
-    if (rb->IsResp3()) {
-      if (const std::optional<TmpJson> parsed_json = JsonFromString(json_str)) {
-        Send(parsed_json.value(), cmd_cntx);
-        return;
-      }
-    }
-    Send(json_str, cmd_cntx);
-  } else {
-    cmd_cntx->SendError(result.status());
+TmpJson ToJson(const NumericOpValue& value) {
+  return visit(
+      Overloaded{[](monostate) { return TmpJson::null(); }, [](auto num) { return TmpJson(num); }},
+      value);
+}
+
+void SendNumericOpResp2(OpStatus status, const optional<NumericOpValues>& values, bool legacy,
+                        CommandContext* cmd_cntx) {
+  if (status != OpStatus::OK)
+    return cmd_cntx->SendError(status);
+
+  // A legacy path replies with its last new number.
+  if (legacy) {
+    auto last = find_if(values->rbegin(), values->rend(),
+                        [](const NumericOpValue& v) { return !holds_alternative<monostate>(v); });
+    DCHECK(last != values->rend());
+    return RB(cmd_cntx)->SendBulkString(ToJson(*last).as_string());
   }
+
+  TmpJson array{jsoncons::json_array_arg};
+  for (const NumericOpValue& value : *values)
+    array.emplace_back(ToJson(value));
+  RB(cmd_cntx)->SendBulkString(array.as_string());
+}
+
+// RESP3 sends the new value of every match, also when a legacy path changed no number.
+void SendNumericOpResp3(OpStatus status, const optional<NumericOpValues>& values, bool /*legacy*/,
+                        CommandContext* cmd_cntx) {
+  if (!values)
+    return cmd_cntx->SendError(status);
+
+  RedisReplyBuilder::ArrayScope scope{RB(cmd_cntx), values->size()};
+  for (const NumericOpValue& value : *values)
+    Send(ToJson(value), cmd_cntx);
+}
+
+void SendNumericOpResp(OpStatus status, const optional<NumericOpValues>& values, bool legacy,
+                       CommandContext* cmd_cntx) {
+  auto* reply = RB(cmd_cntx)->IsResp3() ? &SendNumericOpResp3 : &SendNumericOpResp2;
+  reply(status, values, legacy, cmd_cntx);
+}
+
+void SendTypeResp2(const OpResult<JsonCallbackResult<string>>& result, CommandContext* cmd_cntx) {
+  Send(result, cmd_cntx);
+}
+
+// RESP3 wraps the whole JSON.TYPE reply in one more array.
+void SendTypeResp3(const OpResult<JsonCallbackResult<string>>& result, CommandContext* cmd_cntx) {
+  if (!result || result->ShouldSendWrongType())
+    return Send(result, cmd_cntx);
+  RedisReplyBuilder::ReplyScope scope{cmd_cntx->rb()};
+  RB(cmd_cntx)->StartArray(1);
+  Send(*result, cmd_cntx);
+}
+
+void SendTypeResp(const OpResult<JsonCallbackResult<string>>& result, CommandContext* cmd_cntx) {
+  auto* reply = RB(cmd_cntx)->IsResp3() ? &SendTypeResp3 : &SendTypeResp2;
+  reply(result, cmd_cntx);
 }
 
 }  // namespace reply_generic
@@ -1068,37 +1098,29 @@ void BinOpApply(double num, bool num_is_double, ArithmeticOpType op, JsonType* v
   *overflow = false;
 }
 
-// Tmp solution with struct CallbackResult, because MutateCallbackResult<std::optional<JsonType>>
-// does not compile
 struct DoubleArithmeticCallbackResult {
-  explicit DoubleArithmeticCallbackResult(bool legacy_mode_is_enabled_)
-      : legacy_mode_is_enabled(legacy_mode_is_enabled_) {
-    if (!legacy_mode_is_enabled) {
-      json_value.emplace(jsoncons::json_array_arg);
-    }
-  }
-
-  void AddValue(JsonType val) {
-    if (legacy_mode_is_enabled) {
-      json_value = std::move(val);
-    } else {
-      json_value->emplace_back(std::move(val));
-    }
+  void AddValue(const JsonType& val) {
+    if (val.is_double())
+      values.emplace_back(val.as<double>());
+    else if (val.is_uint64())
+      values.emplace_back(val.as<uint64_t>());
+    else
+      values.emplace_back(val.as<int64_t>());
+    has_number = true;
   }
 
   void AddEmptyValue() {
-    if (!legacy_mode_is_enabled) {
-      json_value->emplace_back(JsonType::null());
-    }
+    values.emplace_back();
   }
 
-  std::optional<JsonType> json_value;
-  bool legacy_mode_is_enabled;
+  NumericOpValues values;
+  bool has_number = false;
 };
 
-OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
-                                    const WrappedJsonPath& json_path, string_view num,
-                                    ArithmeticOpType op_type) {
+// Sets `values` once the path is evaluated, also when a legacy path then fails for lack of numbers.
+OpStatus OpDoubleArithmetic(const OpArgs& op_args, string_view key,
+                            const WrappedJsonPath& json_path, string_view num,
+                            ArithmeticOpType op_type, optional<NumericOpValues>* values) {
   bool has_fractional_part = num.find('.') != string::npos;
   double double_value = 0;
 
@@ -1109,8 +1131,8 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
 
   bool is_result_overflow = false;
 
-  DoubleArithmeticCallbackResult result{json_path.IsLegacyModePath()};
-  auto cb = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
+  DoubleArithmeticCallbackResult result;
+  auto apply = [&](JsonType* val) {
     if (val->is_number()) {
       bool res = false;
       BinOpApply(double_value, has_fractional_part, op_type, val, &res);
@@ -1118,24 +1140,42 @@ OpResult<string> OpDoubleArithmetic(const OpArgs& op_args, string_view key,
         is_result_overflow = true;
       } else {
         result.AddValue(*val);
-        return {};
+        return;
       }
     }
     result.AddEmptyValue();
-    return {};
   };
 
-  auto res = JsonMutateOperation<Nothing>(op_args, key, json_path, std::move(cb));
+  auto it_res = op_args.GetDbSlice().FindMutable(op_args.db_cntx, key, OBJ_JSON);
+  RETURN_ON_BAD_STATUS(it_res);
+
+  JsonAutoUpdater updater(op_args, key, *std::move(it_res));
+
+  // Allocates before the first change, so a bad_alloc can't leave the matches half changed.
+  absl::InlinedVector<JsonType*, 1> matches;
+  auto collect = [&](std::optional<std::string_view>, JsonType* val) -> MutateCallbackResult<> {
+    matches.push_back(val);
+    return {};
+  };
+  auto res = json_path.ExecuteMutateCallback<Nothing>(
+      updater.GetJson(), collect, CallbackResultOptions::DefaultMutateOptions());
+  result.values.reserve(matches.size());
+  for (JsonType* val : matches)
+    apply(val);
+  updater.SetJsonSize();
 
   if (is_result_overflow)
     return OpStatus::INVALID_NUMERIC_RESULT;
 
   RETURN_ON_BAD_STATUS(res);
 
-  if (!result.json_value) {
+  *values = std::move(result.values);
+
+  // Nothing changed, and the failure also keeps the command out of the journal.
+  if (json_path.IsLegacyModePath() && !result.has_number) {
     return OpStatus::WRONG_JSON_TYPE;
   }
-  return result.json_value->as_string();
+  return OpStatus::OK;
 }
 
 // Deletes items specified by the expression/path.
@@ -2072,12 +2112,13 @@ void CmdNumIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
+  optional<NumericOpValues> values;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_ADD);
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_ADD, &values);
   };
 
-  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  reply_generic::SendJsonString(result, cmd_cntx);
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  reply_generic::SendNumericOpResp(status, values, json_path.IsLegacyModePath(), cmd_cntx);
 }
 
 void CmdNumMultBy(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2088,12 +2129,13 @@ void CmdNumMultBy(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* builder = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   WrappedJsonPath json_path = GET_OR_SEND_UNEXPECTED(ParseJsonPath(path));
 
+  optional<NumericOpValues> values;
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_MULTIPLY);
+    return OpDoubleArithmetic(t->GetOpArgs(shard), key, json_path, num, OP_MULTIPLY, &values);
   };
 
-  OpResult<string> result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  reply_generic::SendJsonString(result, cmd_cntx);
+  OpStatus status = cmd_cntx->tx()->ScheduleSingleHop(std::move(cb));
+  reply_generic::SendNumericOpResp(status, values, json_path.IsLegacyModePath(), cmd_cntx);
 }
 
 void CmdToggle(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2122,7 +2164,7 @@ void CmdType(CmdArgParser parser, CommandContext* cmd_cntx) {
   };
 
   auto result = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
-  reply_generic::Send(result, cmd_cntx);
+  reply_generic::SendTypeResp(result, cmd_cntx);
 }
 
 void CmdArrLen(CmdArgParser parser, CommandContext* cmd_cntx) {

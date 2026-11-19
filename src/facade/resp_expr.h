@@ -20,7 +20,7 @@ class RespExpr {
  public:
   using Buffer = absl::Span<const uint8_t>;
 
-  enum Type : uint8_t { STRING, ARRAY, INT64, DOUBLE, NIL, NIL_ARRAY, ERROR };
+  enum Type : uint8_t { STRING, ARRAY, INT64, DOUBLE, NIL, NIL_ARRAY, ERROR, BOOL };
 
   // RESP3 maps and sets arrive as an ARRAY of their flat contents; this tells them apart.
   enum class Agg : uint8_t { kArray, kMap, kSet };

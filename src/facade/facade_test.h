@@ -69,6 +69,10 @@ inline ::testing::PolymorphicMatcher<RespMatcher> DoubleArg(double_t dval) {
   return ::testing::MakePolymorphicMatcher(RespMatcher(dval));
 }
 
+inline ::testing::PolymorphicMatcher<RespMatcher> BoolArg(bool val) {
+  return ::testing::MakePolymorphicMatcher(RespMatcher(int64_t{val}, RespExpr::BOOL));
+}
+
 inline ::testing::PolymorphicMatcher<RespMatcher> ArrLen(size_t len) {
   return ::testing::MakePolymorphicMatcher(RespMatcher((int64_t)len, RespExpr::ARRAY));
 }

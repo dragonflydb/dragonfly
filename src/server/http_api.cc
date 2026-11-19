@@ -113,6 +113,10 @@ struct CaptureVisitor {
     absl::StrAppend(&str, v);
   }
 
+  void operator()(payload::Bool b) {
+    absl::StrAppend(&str, b.val ? "true" : "false");
+  }
+
   void operator()(const payload::SimpleString& ss) {
     absl::StrAppend(&str, "\"", ss, "\"");
   }

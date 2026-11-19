@@ -314,7 +314,7 @@ void CmdAdd(CmdArgParser parser, CommandContext* cmd_cntx) {
   OpResult<bool> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res)
     return cmd_cntx->SendError(res.status());
-  cmd_cntx->SendLong(*res);
+  static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBool(*res);
 }
 
 void CmdAddNx(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -328,7 +328,7 @@ void CmdAddNx(CmdArgParser parser, CommandContext* cmd_cntx) {
   OpResult<bool> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res)
     return cmd_cntx->SendError(res.status());
-  cmd_cntx->SendLong(*res);
+  static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBool(*res);
 }
 
 OpResult<vector<bool>> RunExists(CommandContext* cmd_cntx, string_view key, ParsedArgs items) {
@@ -346,7 +346,7 @@ void CmdExists(CmdArgParser parser, CommandContext* cmd_cntx) {
   OpResult<vector<bool>> res = RunExists(cmd_cntx, key, items);
   if (!res && res.status() != OpStatus::KEY_NOTFOUND && res.status() != OpStatus::WRONG_TYPE)
     return cmd_cntx->SendError(res.status());
-  cmd_cntx->SendLong(res ? res->front() : 0);
+  static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBool(res && res->front());
 }
 
 void CmdMExists(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -361,7 +361,7 @@ void CmdMExists(CmdArgParser parser, CommandContext* cmd_cntx) {
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   RedisReplyBuilder::ArrayScope scope{rb, items.size()};
   for (size_t i = 0; i < items.size(); ++i) {
-    rb->SendLong(res ? static_cast<long>((*res)[i]) : 0);
+    rb->SendBool(res && (*res)[i]);
   }
 }
 
@@ -378,22 +378,22 @@ void CmdInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
     return rb->SendError(res.status());
 
   SinkReplyBuilder::ReplyScope scope(rb);
-  rb->StartArray(16);
-  rb->SendBulkString("Size");
+  rb->StartCollection(8, CollectionType::MAP);
+  rb->SendSimpleString("Size");
   rb->SendLong(static_cast<long>(res->size));
-  rb->SendBulkString("Number of buckets");
+  rb->SendSimpleString("Number of buckets");
   rb->SendLong(static_cast<long>(res->num_buckets));
-  rb->SendBulkString("Number of filters");
+  rb->SendSimpleString("Number of filters");
   rb->SendLong(static_cast<long>(res->num_filters));
-  rb->SendBulkString("Number of items inserted");
+  rb->SendSimpleString("Number of items inserted");
   rb->SendLong(static_cast<long>(res->num_items));
-  rb->SendBulkString("Number of items deleted");
+  rb->SendSimpleString("Number of items deleted");
   rb->SendLong(static_cast<long>(res->num_deletes));
-  rb->SendBulkString("Bucket size");
+  rb->SendSimpleString("Bucket size");
   rb->SendLong(res->bucket_size);
-  rb->SendBulkString("Expansion rate");
+  rb->SendSimpleString("Expansion rate");
   rb->SendLong(res->expansion);
-  rb->SendBulkString("Max iterations");
+  rb->SendSimpleString("Max iterations");
   rb->SendLong(res->max_iterations);
 }
 
@@ -422,7 +422,30 @@ void CmdDel(CmdArgParser parser, CommandContext* cmd_cntx) {
   OpResult<bool> res = cmd_cntx->tx()->ScheduleSingleHopT(std::move(cb));
   if (!res)
     return cmd_cntx->SendError(res.status());
-  cmd_cntx->SendLong(*res);
+  static_cast<RedisReplyBuilder*>(cmd_cntx->rb())->SendBool(*res);
+}
+
+void SendInsertResultsResp2(absl::Span<const int> results, bool /*nx*/, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ArrayScope scope{rb, results.size()};
+  for (int result : results)
+    rb->SendLong(result);
+}
+
+// RESP3 makes a CF.INSERT result a boolean, false when the filter is full. CF.INSERTNX tells an
+// existing item (0) from a full filter (-1), so it stays numeric.
+void SendInsertResultsResp3(absl::Span<const int> results, bool nx, RedisReplyBuilder* rb) {
+  RedisReplyBuilder::ArrayScope scope{rb, results.size()};
+  for (int result : results) {
+    if (nx)
+      rb->SendLong(result);
+    else
+      rb->SendBool(result > 0);
+  }
+}
+
+void SendInsertResultsResp(absl::Span<const int> results, bool nx, RedisReplyBuilder* rb) {
+  auto* reply = rb->IsResp3() ? &SendInsertResultsResp3 : &SendInsertResultsResp2;
+  reply(results, nx, rb);
 }
 
 void CmdInsertImpl(CmdArgParser parser, CommandContext* cmd_cntx, bool nx) {
@@ -452,10 +475,7 @@ void CmdInsertImpl(CmdArgParser parser, CommandContext* cmd_cntx, bool nx) {
   if (!res)
     return rb->SendError(res.status());
 
-  RedisReplyBuilder::ArrayScope scope{rb, res->size()};
-  for (int v : *res) {
-    rb->SendLong(v);
-  }
+  SendInsertResultsResp(*res, nx, rb);
 }
 
 void CmdInsert(CmdArgParser parser, CommandContext* cmd_cntx) {

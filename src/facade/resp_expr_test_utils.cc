@@ -42,6 +42,11 @@ RespExpr RespExprBuilder::BuildNode(const RESPObj& obj) {
       expr.u = obj.As<double>().value();
       break;
     }
+    case RESPObj::Type::BOOL: {
+      expr.type = RespExpr::BOOL;
+      expr.u = int64_t{obj.As<bool>().value()};
+      break;
+    }
     case RESPObj::Type::NIL: {
       expr.type = RespExpr::NIL;
       break;

@@ -151,6 +151,8 @@ const char* RespExpr::TypeName(Type t) {
       return "nil";
     case ERROR:
       return "error";
+    case BOOL:
+      return "bool";
   }
   ABSL_UNREACHABLE();
 }
@@ -221,6 +223,9 @@ ostream& operator<<(ostream& os, const facade::RespExpr& e) {
       break;
     case RespExpr::ERROR:
       os << "e(" << ToSV(get<RespExpr::Buffer>(e.u)) << ")";
+      break;
+    case RespExpr::BOOL:
+      os << (get<int64_t>(e.u) ? "true" : "false");
       break;
   }
 

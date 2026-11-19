@@ -275,12 +275,12 @@ void CmdInfo(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   {
     SinkReplyBuilder::ReplyScope scope(rb);
-    rb->StartArray(6);
-    rb->SendBulkString("width");
+    rb->StartCollection(3, CollectionType::MAP);
+    rb->SendSimpleString("width");
     rb->SendLong(res->width);
-    rb->SendBulkString("depth");
+    rb->SendSimpleString("depth");
     rb->SendLong(res->depth);
-    rb->SendBulkString("count");
+    rb->SendSimpleString("count");
     rb->SendLong(res->count);
   }
 }

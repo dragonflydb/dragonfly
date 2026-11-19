@@ -786,6 +786,24 @@ TEST_F(RedisReplyBuilderTest, Resp3Double) {
   ASSERT_EQ(str(), ",5.5\r\n");
 }
 
+TEST_F(RedisReplyBuilderTest, Bool) {
+  builder_->SendBool(true);
+  builder_->SendBool(false);
+  ASSERT_TRUE(NoErrors());
+  ASSERT_EQ(TakePayload(), ":1\r\n:0\r\n");
+
+  builder_->SetRespVersion(RespVersion::kResp3);
+  builder_->SendBool(true);
+  builder_->SendBool(false);
+  ASSERT_TRUE(NoErrors());
+  ASSERT_EQ(TakePayload(), "#t\r\n#f\r\n");
+
+  // A RESP2 capture keeps the integer.
+  CapturingReplyBuilder crb;
+  crb.SendBool(true);
+  EXPECT_TRUE(holds_alternative<long>(crb.Take()));
+}
+
 TEST_F(RedisReplyBuilderTest, Resp3NullString) {
   builder_->SetRespVersion(RespVersion::kResp3);
   builder_->SendNull();
@@ -912,6 +930,8 @@ TEST_F(RedisReplyBuilderTest, BasicCapture) {
       [](RRB* r) { r->SendNull(); },
       [](RRB* r) { r->SendLong(1L); },
       [](RRB* r) { r->SendDouble(6.7); },
+      [](RRB* r) { r->SendBool(true); },
+      [](RRB* r) { r->SendBool(false); },
       [](RRB* r) { r->SendSimpleString("ok"); },
       [](RRB* r) { r->SendVerbatimString("A simple string!", RRB::VerbatimFormat::TXT); },
       [](RRB* r) { r->SendVerbatimString("# Title\nbody", RRB::VerbatimFormat::MARKDOWN); },
