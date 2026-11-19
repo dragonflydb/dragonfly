@@ -8,6 +8,7 @@ import redis
 from . import dfly_args
 from .instance import DflyInstanceFactory, DflyStartException
 from .seeder import Seeder as SeederV2
+from .utility import check_all_replicas_finished, wait_for_replicas_state
 
 
 # --aof needs io_uring, so startup fails under --force_epoll.
@@ -497,3 +498,64 @@ async def test_auto_checkpoint_disabled(df_factory: DflyInstanceFactory, tmp_pat
     assert "checkpoint 0\n" in read_manifest(tmp_path)
     assert not list(tmp_path.glob("appendonly-base-*"))
     assert (await client.info("persistence"))["aof_rewrite_trigger_size"] == 0
+
+
+@pytest.mark.exclude_epoll
+async def test_replica_full_sync_rebases(df_factory: DflyInstanceFactory, tmp_path):
+    master = df_factory.create(proactor_threads=2)
+    replica = df_factory.create(proactor_threads=2, aof=True, dir=str(tmp_path))
+    df_factory.start_all([master, replica])
+    c_master, c_replica = master.client(), replica.client()
+    seeder = SeederV2(key_target=20_000)
+    await seeder.run(c_master, target_deviation=0.1)
+
+    # The full sync loads data past the journal; the checkpoint after it covers that data.
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+    await wait_for_manifest(tmp_path, "base dfs owned appendonly-base-1-summary.dfs\n")
+    assert (await c_replica.info("persistence"))["aof_state"] == "active"
+
+    # Stable sync goes through the replica's journal into its AOF.
+    await seeder.run(c_master, target_ops=5_000)
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await SeederV2.capture(c_replica) == await SeederV2.capture(c_master)
+
+    # Promotion keeps the journal LSNs the AOF chain continues from.
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    await c_replica.set("after_promotion", 1)
+    before = await SeederV2.capture(c_replica)
+    replica.stop()
+    replica.start()
+    assert await SeederV2.capture(replica.client()) == before
+
+
+@pytest.mark.exclude_epoll
+async def test_restart_while_rebasing_starts_empty(df_factory: DflyInstanceFactory, tmp_path):
+    df = df_factory.create(proactor_threads=2, aof=True, dir=str(tmp_path))
+    df.start()
+    await df.client().set("old", 1)
+    df.stop()
+
+    # As if a full sync had started, and the replica crashed before its new base committed.
+    text = read_manifest(tmp_path)
+    body = text[: text.rindex("crc32c ")]
+    write_manifest(tmp_path, body.replace("state active", "state rebasing"))
+    old_files = [p.name for p in tmp_path.glob("appendonly-*.aof")]
+    assert old_files
+
+    # The old log holds the data the sync was replacing: nothing is loaded, nothing is deleted.
+    df.start()
+    client = df.client()
+    assert await client.dbsize() == 0
+    assert (await client.info("persistence"))["aof_state"] == "rebasing"
+    assert all((tmp_path / name).exists() for name in old_files)
+
+    # A full sync gives the node its base; only then do the old files go.
+    master = df_factory.create(proactor_threads=2)
+    master.start()
+    await master.client().set("new", 1)
+    await client.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_manifest(tmp_path, "base dfs owned appendonly-base-1-summary.dfs\n")
+    assert (await client.info("persistence"))["aof_state"] == "active"
+    assert not any((tmp_path / name).exists() for name in old_files)
+    assert await client.get("new") == "1"

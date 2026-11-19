@@ -526,6 +526,10 @@ error_code Replica::InitiatePSync() {
 
     absl::Cleanup cleanup = [this]() { service_.RemoveLoadingState(); };
 
+    // The loaded data bypasses the journal: the AOF stops appending until its next base.
+    if (GenericError ec = service_.server_family().BeginAofRebase(); ec)
+      return exec_st_.ReportError(std::move(ec));
+
     FlushData();
 
     RdbLoadContext load_context;
@@ -707,6 +711,10 @@ error_code Replica::InitiateDflySync(std::optional<LastMasterSyncData> last_mast
       }
       sync_type = "full";
 
+      // The loaded data bypasses the journal: the AOF stops appending until its next base.
+      if (GenericError ec = service_.server_family().BeginAofRebase(); ec)
+        return exec_st_.ReportError(std::move(ec));
+
       DVLOG(1) << "Calling Flush on all slots " << this;
 
       passed_full_sync_ = false;
@@ -788,6 +796,9 @@ error_code Replica::ConsumeRedisStream() {
   // Replica connection must send "REPLCONF ACK xxx" in order to make sure that master replication
   // buffer gets disposed of already processed commands, this is done in a separate fiber.
   LOG(INFO) << "Transitioned into stable sync";
+
+  // After a full sync, the AOF takes a checkpoint so its base covers the loaded data.
+  service_.server_family().RequestAofRebase();
 
   // Set new error handler.
   auto err_handler = [this](const auto& ge) {
@@ -941,6 +952,9 @@ error_code Replica::ConsumeDflyStream() {
   RETURN_ON_ERR(exec_st_.SwitchErrorHandler(std::move(err_handler)));
 
   LOG(INFO) << "Transitioned into stable sync";
+
+  // After a full sync, the AOF takes a checkpoint so its base covers the loaded data.
+  service_.server_family().RequestAofRebase();
 
   // Continue the master's LSN numbering so cascaded sub-replicas share the lineage root's LSN
   // space and can negotiate partial sync when reconnecting up the chain.
