@@ -5,7 +5,6 @@
 #pragma once
 
 #include <array>
-#include <cstdint>
 
 #include "util/fibers/fibers.h"
 
@@ -35,24 +34,62 @@ bool MemoryAccountingEnabled();
 // Returns the current thread's cumulative charges split into types
 const TypeAttributedMemory& GetTypeAttributedMemory();
 
-// Accounting uses U, the tracked allocator usage, and A, the cumulative signed
-// total in MemoryAccountingState::charged_total (memory_accounting.cc). And U is from
-// UsedMemoryThreadLocal.
+// Memory sources of truth:
 //
-// UnattributedMemory returns U - A.
+// Total used memory: from UsedMemoryThreadLocal
+//   Reported by mimalloc and thread-local counters.
+//   Up to date on every call and read-only.
+//   Referred to as "used".
 //
-// ChargeMemory(type, D) adds D to the type's total and to A.
-// For kUntrackedMemory, only A is updated.
+// Accounted-for memory: from MemoryAccountingState::charged_total
+//   Running counter, only updated by ChargeMemory.
+//   Read when calculating the baseline and written after a scope ends.
+//   Total of the memory tracked by this accounting system. Running total of allocations and frees
+//   tracked by scopes and attributed to object types such as list, string, etc. Referred to as
+//   "accounted".
 //
-// A scope saves B = U - A and later charges D = (U' - A') - B.
-// Equivalently, D = (U' - U) - (A' - A), excluding intervening charges.
+// Memory usage broken down by type: MemoryAccountingState::by_type
+//   Array of per-type counters, breaking down the "accounted" total.
+//   Written only by accounting code and read by metrics.
 //
-// For example, a parent allocates 10 bytes and a child allocates 100 bytes.
-// The child charges 100 to its type and increases A by 100.
-// The parent then charges 110 - 100 = 10 to its own type.
+// Relations:
+//   Used memory is always greater than or equal to accounted memory
+//   Sum of memory usage by types is equal to accounted memory
 //
-// U and A may start at different values because only their changes matter.
+// Lifecycle of a scope:
+//   At the start, calculate baseline = used - accounted.
+//   This is the memory not accounted for yet, whose changes come from allocations and frees during
+//   the operation.
+//
+//   At the end, calculate used - accounted again as baseline'.
+//   delta = baseline' - baseline is the change in unaccounted memory due to the scope's type.
+//   Attribute this delta to the scope's type in accounting.by_type[category].
+//
+//   Crucially, we also add this delta to the accounted total: accounted += delta.
+//   This step is critical for nested scope handling. All outer scopes can use change in this
+//   accounted total, to excloude changes from inner scopes if any. The nested scopes don't need to
+//   know about each other, they just refer to these two values: used and accounted.
+//
+// Nested scopes:
+//   Outer scope A (STRING) starts: used=10, accounted=5, baseline=10-5=5.
+//     A allocates 1: used=11.
+//     Inner scope B (HASH) starts: used=11, accounted=5, baseline=11-5=6.
+//       B allocates 1: used=12.
+//       B ends: baseline' = used - accounted = 12 - 5 = 7.
+//         delta = baseline' - baseline = 7 - 6 = 1.
+//         usage for HASH += 1.
+//         accounted += 1, so accounted=6.
+//     A ends: baseline' = used - accounted = 12 - 6 = 6.
+//       delta = baseline' - baseline = 6 - 5 = 1.
+//       usage for STRING += 1.
+//       accounted += 1, so accounted=7.
+//
+// Nested scopes update "accounted" so enclosing scopes can compute the difference.
+
+// Returns used - accounted
 int64_t UnattributedMemory();
+
+// updates accounted total, and by type. delta is added to both
 void ChargeMemory(int category, int64_t delta);
 
 // Attributes allocator delta over this scope's non-yielding lifetime
@@ -71,6 +108,7 @@ class AtomicMemoryScope {
 };
 
 // Attributes allocator delta during the owning fiber's running intervals for this scope's lifetime
+// Memory tracking is turned off for the durations when fiber is suspended.
 class TxMemoryScope {
  public:
   // An enabled transaction scope exclusively owns the thread's tracking hook until destruction.
