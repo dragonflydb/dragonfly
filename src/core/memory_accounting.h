@@ -16,7 +16,7 @@ namespace dfly {
 
 class MiMemoryResource;
 
-using TypeAttributedMemory = std::array<int64_t, OBJ_TYPE_MAX>;
+using TypeAttributedMemory = std::array<ssize_t, OBJ_TYPE_MAX>;
 
 // Memory bytes added in this category participate only in scope exclusion. This is a bucket in
 // which we "throw away" objects which use the same mimalloc resource as the database, but we do not
