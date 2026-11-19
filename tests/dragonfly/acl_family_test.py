@@ -5,7 +5,6 @@ import tempfile
 import time
 
 import async_timeout
-import pymemcache
 import pytest
 
 import redis
@@ -836,16 +835,23 @@ async def test_admin_subcommands_over_connection(df_server):
 @dfly_args({"proactor_threads": 2, "memcached_port": 11211})
 async def test_acl_setuser_updates_memcached_connections(df_server):
     admin = df_server.client()
-    mc = pymemcache.Client(f"127.0.0.1:{df_server.mc_port}", default_noreply=False)
-    mc.set("foo", "bar")
-    assert mc.get("foo") == b"bar"
+    await admin.set("foo", "bar")
+
+    # A raw socket keeps one connection throughout; pymemcache reconnects after any error.
+    reader, writer = await asyncio.open_connection("127.0.0.1", df_server.mc_port)
 
     async def mc_get_allowed():
-        try:
-            mc.get("foo")
+        writer.write(b"get foo\r\n")
+        await writer.drain()
+        line = await reader.readline()
+        if line.startswith(b"VALUE"):
+            assert await reader.readline() == b"bar\r\n"
+            assert await reader.readline() == b"END\r\n"
             return True
-        except pymemcache.exceptions.MemcacheError:
-            return False
+        assert b"ERROR" in line, line
+        return False
+
+    assert await mc_get_allowed()
 
     # Updates reach open connections asynchronously after the reply.
     async def wait_for(allowed):
@@ -863,8 +869,6 @@ async def test_acl_setuser_updates_memcached_connections(df_server):
 
     # resetchannels evicts the default user's connections, memcached ones included.
     await admin.execute_command("ACL SETUSER default resetchannels")
-    with pytest.raises(Exception):
-        for _ in range(100):
-            mc.get("foo")
-            await asyncio.sleep(0.05)
-    mc.close()
+    async with async_timeout.timeout(5):
+        assert await reader.read() == b""
+    writer.close()
