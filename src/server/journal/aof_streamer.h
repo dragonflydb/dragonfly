@@ -8,6 +8,7 @@
 #include <string>
 #include <system_error>
 
+#include "server/journal/aof.h"
 #include "server/journal/types.h"
 
 #ifdef __linux__
@@ -29,8 +30,8 @@ class AofStreamer : public journal::JournalConsumerInterface {
   AofStreamer(std::string dir, uint32_t shard_id, uint32_t shard_count);
 
   // Opens segment seq, starts the journal at next_lsn and registers as its consumer. Then prepares
-  // segment seq + 1 as the spare.
-  std::error_code Start(uint64_t seq, uint64_t next_lsn);
+  // segment seq + 1 as the spare. log_size is the size of the segments before seq.
+  std::error_code Start(uint64_t seq, uint64_t next_lsn, size_t log_size);
 
   // Unregisters first, so no record arrives after the segment is closed. Deletes the unused
   // spare. Returns the first error, including one from a writer retired by a rotation.
@@ -61,6 +62,8 @@ class AofStreamer : public journal::JournalConsumerInterface {
 
   // Called by the heartbeat, so small records reach the disk.
   void Seal();
+
+  AofStats GetStats() const;
 
  private:
   // Starts spare_fb_: it shuts down the writer standby_ holds, if any (the one a rotation left),
@@ -97,6 +100,15 @@ class AofStreamer : public journal::JournalConsumerInterface {
   // tail, and replay discards everything after it: stop the active writer.
   std::error_code retired_ec_;
 
+  // Size of the segments before the active one, from the cut on.
+  size_t prev_log_size_ = 0;
+
+  // fdatasyncs of the writers already retired, so the counters never go back.
+  AofFsyncStats prev_fsync_;
+
+  // Total time the shard was blocked by backpressure.
+  uint64_t throttle_usec_ = 0;
+
   friend class AofStreamerOneShardTest;
 };
 
@@ -108,7 +120,7 @@ class AofStreamer : public journal::JournalConsumerInterface {
   AofStreamer(std::string dir, uint32_t shard_id, uint32_t shard_count) {
   }
 
-  std::error_code Start(uint64_t seq, uint64_t next_lsn) {
+  std::error_code Start(uint64_t seq, uint64_t next_lsn, size_t log_size) {
     return std::make_error_code(std::errc::not_supported);
   }
 
@@ -138,6 +150,10 @@ class AofStreamer : public journal::JournalConsumerInterface {
 
   uint64_t DurableLsn() const {
     return 0;
+  }
+
+  AofStats GetStats() const {
+    return {};
   }
 };
 

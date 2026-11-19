@@ -17,6 +17,7 @@
 #include "server/cluster_support.h"
 #include "server/command_registry.h"
 #include "server/dflycmd.h"
+#include "server/journal/aof_streamer.h"
 #include "server/journal/journal.h"
 #include "server/namespaces.h"
 #include "server/search/doc_index.h"
@@ -867,7 +868,8 @@ void Metrics::Merge(const Metrics& src) {
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeAttributedMemory) + 192,  // 22 scalar fields + 4-byte alignment padding
+              sizeof(TypeAttributedMemory) + sizeof(std::vector<std::pair<ShardId, AofStats>>) +
+              192,  // 22 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
 
   // Per-db stats / events / small_string_bytes are merged element-wise.
@@ -920,6 +922,9 @@ void Metrics::Merge(const Metrics& src) {
   for (const auto& [k, v] : src.connections_lib_name_ver_map)
     connections_lib_name_ver_map[k] += v;
 
+  // Each thread holds at most its own shard's AOF stats.
+  aof_stats.insert(aof_stats.end(), src.aof_stats.begin(), src.aof_stats.end());
+
   if (src.cmd_call_stats.size() > cmd_call_stats.size())
     cmd_call_stats.resize(src.cmd_call_stats.size());
   for (size_t i = 0; i < src.cmd_call_stats.size(); ++i) {
@@ -942,7 +947,8 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
               sizeof(std::optional<Metrics::ReplicaInfo>) + sizeof(LoadingStats) +
               sizeof(absl::flat_hash_map<std::string, hdr_histogram*>) +
               sizeof(InternedStringStats) + sizeof(acl::UserRegistry::AclStats) +
-              sizeof(TypeAttributedMemory) + 192,  // 22 scalar fields + 4-byte alignment padding
+              sizeof(TypeAttributedMemory) + sizeof(std::vector<std::pair<ShardId, AofStats>>) +
+              192,  // 22 scalar fields + 4-byte alignment padding
       "Metrics size changed - update Merge() and InitFromThread()");
   EngineShard* shard = EngineShard::tlocal();
   ServerState* ss = ServerState::tlocal();
@@ -991,6 +997,9 @@ void Metrics::InitFromThread(Namespace* ns, const CommandRegistry* registry,
       lsn_buffer_size = journal::LsnBufferSize();
       lsn_buffer_bytes = journal::LsnBufferBytes();
     }
+
+    if (AofStreamer* streamer = shard->aof_streamer(); streamer)
+      aof_stats.emplace_back(shard->shard_id(), streamer->GetStats());
 
     if (opts.replication_memory)
       replication_stats = dfly_cmd->GetReplicationMemoryStats(shard);

@@ -15,6 +15,7 @@
 #include <linux/io_uring.h>
 #include <unistd.h>
 
+#include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "server/error.h"
 #include "util/fibers/proactor_base.h"
@@ -152,10 +153,15 @@ error_code AofSegmentWriter::Shutdown() {
   cv_.wait(lk, [this] { return in_flight_ == 0 && !sync_in_flight_; });
 
   if (!ec_) {
-    if (error_code ec = file_->FSync(IORING_FSYNC_DATASYNC); ec)
+    uint64_t start_cycles = base::CycleClock::Now();
+    error_code ec = file_->FSync(IORING_FSYNC_DATASYNC);
+    RecordSync(start_cycles);
+    if (ec) {
       ec_ = ec;
-    else
+    } else {
+      durable_offset_ = written_offset_;
       durable_lsn_ = written_lsn_;
+    }
   }
   error_code close_ec = file_->Close();
   // On NFS-like filesystems close can be the only place a deferred write error shows up.
@@ -235,17 +241,35 @@ void AofSegmentWriter::OnWriteDone(PendingBlock* pb, int res) {
 }
 
 void AofSegmentWriter::MaybeStartFSync() {
-  // fdatasync covers only writes completed before it is issued, hence the captured target.
-  if (sync_in_flight_ || ec_ || written_lsn_ == durable_lsn_)
+  // Delayed only if records written since the running sync started wait behind it.
+  if (sync_in_flight_) {
+    if (written_lsn_ > sync_target_lsn_)
+      ++fsync_stats_.delayed;
     return;
+  }
+
+  // fdatasync covers only writes completed before it is issued, hence the captured target.
+  if (ec_ || written_lsn_ == durable_lsn_)
+    return;
+  size_t sync_offset = written_offset_;
   uint64_t sync_lsn = written_lsn_;
   sync_in_flight_ = true;
-  file_->FSyncAsync(IORING_FSYNC_DATASYNC,
-                    [this, sync_lsn](int res) { OnSyncDone(sync_lsn, res); });
+  sync_target_lsn_ = sync_lsn;
+  uint64_t start_cycles = base::CycleClock::Now();
+  file_->FSyncAsync(IORING_FSYNC_DATASYNC, [this, sync_offset, sync_lsn, start_cycles](int res) {
+    OnSyncDone(sync_offset, sync_lsn, start_cycles, res);
+  });
 }
 
-void AofSegmentWriter::OnSyncDone(uint64_t sync_lsn, int res) {
+void AofSegmentWriter::RecordSync(uint64_t start_cycles) {
+  ++fsync_stats_.count;
+  fsync_stats_.usec += base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
+}
+
+void AofSegmentWriter::OnSyncDone(size_t sync_offset, uint64_t sync_lsn, uint64_t start_cycles,
+                                  int res) {
   sync_in_flight_ = false;
+  RecordSync(start_cycles);
   if (res < 0) {
     // Never retried: the kernel may have dropped the dirty pages ("fsyncgate"), so a later
     // success would prove nothing.
@@ -254,6 +278,7 @@ void AofSegmentWriter::OnSyncDone(uint64_t sync_lsn, int res) {
       ec_ = IoError(res);
     LOG(ERROR) << "AOF fdatasync failed: " << IoError(res).message();
   } else {
+    durable_offset_ = sync_offset;
     durable_lsn_ = sync_lsn;
   }
   cv_.notify_all();

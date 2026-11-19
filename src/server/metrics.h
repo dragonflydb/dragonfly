@@ -18,6 +18,7 @@
 #include "server/acl/user_registry.h"
 #include "server/db_slice.h"
 #include "server/engine_shard.h"
+#include "server/journal/aof.h"
 #include "server/replica_types.h"
 #include "server/server_state.h"
 #include "server/stats.h"
@@ -152,6 +153,9 @@ struct Metrics {
   acl::UserRegistry::AclStats acl_stats;
 
   TypeAttributedMemory type_attributed_memory_bytes{};
+
+  // With --aof, each shard's AOF stats, as (shard id, stats); GetMetrics() sorts them by shard.
+  std::vector<std::pair<ShardId, AofStats>> aof_stats;
 
   void InitFromThread(Namespace* ns, const CommandRegistry* registry, unsigned proactor_index,
                       const MetricsCollectOpts& opts, DflyCmd* dfly_cmd);

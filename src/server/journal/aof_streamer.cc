@@ -6,6 +6,7 @@
 
 #include <absl/flags/flag.h>
 
+#include "base/cycle_clock.h"
 #include "base/logging.h"
 #include "facade/facade_types.h"
 #include "server/error.h"
@@ -29,7 +30,7 @@ AofStreamer::AofStreamer(string dir, uint32_t shard_id, uint32_t shard_count)
       max_buffered_bytes_(absl::GetFlag(FLAGS_aof_max_buffered_bytes)) {
 }
 
-error_code AofStreamer::Start(uint64_t seq, uint64_t next_lsn) {
+error_code AofStreamer::Start(uint64_t seq, uint64_t next_lsn, size_t log_size) {
   active_ = make_shared<AofSegmentWriter>(dir_, shard_id_, shard_count_);
   RETURN_ON_ERR(active_->Open(seq));
   active_->StartPeriodicSync();
@@ -37,6 +38,7 @@ error_code AofStreamer::Start(uint64_t seq, uint64_t next_lsn) {
 
   // Replay repaired and fdatasynced the log before it.
   prev_durable_lsn_ = next_lsn - 1;
+  prev_log_size_ = log_size;
 
   // A standalone node has no journal otherwise. Registering also holds a journal user.
   journal::StartInThreadAtLsn(next_lsn);
@@ -101,6 +103,8 @@ void AofStreamer::PrepareSpare(uint64_t seq) {
       } else if (!retired_ec_) {
         prev_durable_lsn_ = max(prev_durable_lsn_, standby_->DurableLsn());
       }
+      prev_log_size_ += standby_->WrittenSize();
+      prev_fsync_ += standby_->fsync_stats();
       standby_.reset();
     }
 
@@ -125,6 +129,9 @@ void AofStreamer::OnCheckpoint(uint64_t cut_lsn) {
                             << "shard " << shard_id_;
   retired_ec_.clear();
   prev_durable_lsn_ = max(prev_durable_lsn_, cut_lsn - 1);
+
+  // GC deletes the segments before the cut's, which is the active one.
+  prev_log_size_ = 0;
 }
 
 uint64_t AofStreamer::DurableLsn() const {
@@ -150,11 +157,35 @@ void AofStreamer::ThrottleIfNeeded() {
   // A rotation may retire and release the writer while ThrottleIfNeeded() waits in it; this
   // reference keeps it alive until the wait returns.
   shared_ptr<AofSegmentWriter> writer = active_;
+  if (writer->PendingBytes() <= max_buffered_bytes_)
+    return;
+  uint64_t start_cycles = base::CycleClock::Now();
   writer->WaitPending(max_buffered_bytes_);
+  throttle_usec_ += base::CycleClock::ToUsec(base::CycleClock::Now() - start_cycles);
 }
 
 void AofStreamer::Seal() {
   active_->Seal();
+}
+
+AofStats AofStreamer::GetStats() const {
+  AofStats st;
+  st.log_size = prev_log_size_ + active_->WrittenSize();
+  st.buffered_bytes = active_->PendingBytes();
+  st.unsynced_bytes = active_->UnsyncedBytes();
+  st.fsync = prev_fsync_;
+  st.fsync += active_->fsync_stats();
+
+  // The writer a rotation left still drains.
+  if (Retiring()) {
+    st.log_size += standby_->WrittenSize();
+    st.buffered_bytes += standby_->PendingBytes();
+    st.unsynced_bytes += standby_->UnsyncedBytes();
+    st.fsync += standby_->fsync_stats();
+  }
+  st.throttle_usec = throttle_usec_;
+  st.write_ok = !active_->error() && !retired_ec_ && !(Retiring() && standby_->error());
+  return st;
 }
 
 }  // namespace dfly
