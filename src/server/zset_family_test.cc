@@ -1249,6 +1249,22 @@ TEST_F(ZSetFamilyTest, Resp3) {
   ASSERT_THAT(resp, ArrLen(2));
   ASSERT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("a", DoubleArg(1)));
   ASSERT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("b", DoubleArg(2)));
+
+  // ZUNION and ZINTER reply with [member, score] pairs too.
+  Run({"zadd", "y", "3", "b", "4", "c"});
+  resp = Run({"zunion", "2", "x", "y", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(3));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("a", DoubleArg(1)));
+  EXPECT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("c", DoubleArg(4)));
+  EXPECT_THAT(resp.GetVec()[2].GetVec(), ElementsAre("b", DoubleArg(5)));
+
+  resp = Run({"zinter", "2", "x", "y", "WITHSCORES"});
+  ASSERT_THAT(resp, ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("b", DoubleArg(5)));
+
+  // Without WITHSCORES they stay a flat list of members.
+  resp = Run({"zunion", "2", "x", "y"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("a", "c", "b"));
 }
 
 TEST_F(ZSetFamilyTest, BlockingIsReleased) {
