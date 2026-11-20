@@ -90,22 +90,25 @@ TEST_F(GeoFamilyTest, GeoPosWrongType) {
 TEST_F(GeoFamilyTest, GeoDist) {
   EXPECT_EQ(2, CheckedInt({"geoadd", "Sicily", "13.361389", "38.115556", "Palermo", "15.087269",
                            "37.502669", "Catania"}));
-  auto resp = Run({"geodist", "Sicily", "Palermo", "Catania"});
-  // Haswell+ CPUs use FMA instructions, yielding higher precision that breaks exact string
-  // matching. DoubleArg handles parsing safely and applies standard floating-point tolerance.
-  EXPECT_THAT(resp, DoubleArg(166274.15156960033));
 
-  resp = Run({"geodist", "Sicily", "Palermo", "Catania", "km"});
-  EXPECT_THAT(resp, DoubleArg(166.27415156960032));
+  // Four decimals, so FMA rounding differences between CPUs do not show.
+  EXPECT_EQ(Run({"geodist", "Sicily", "Palermo", "Catania"}), "166274.1516");
+  EXPECT_EQ(Run({"geodist", "Sicily", "Palermo", "Catania", "km"}), "166.2742");
+  EXPECT_EQ(Run({"geodist", "Sicily", "Palermo", "Catania", "MI"}), "103.3182");
+  EXPECT_EQ(Run({"geodist", "Sicily", "Palermo", "Catania", "FT"}), "545518.8700");
+  EXPECT_EQ(Run({"geodist", "Sicily", "Palermo", "Palermo"}), "0.0000");
 
-  resp = Run({"geodist", "Sicily", "Palermo", "Catania", "MI"});
-  EXPECT_THAT(resp, DoubleArg(103.31822459492733));
-
-  resp = Run({"geodist", "Sicily", "Palermo", "Catania", "FT"});
-  EXPECT_THAT(resp, DoubleArg(545518.8699790037));
-
-  resp = Run({"geodist", "Sicily", "Foo", "Bar"});
+  auto resp = Run({"geodist", "Sicily", "Foo", "Bar"});
   EXPECT_THAT(resp, ArgType(RespExpr::NIL));
+
+  // RESP3 keeps the text distance and the integer geohash.
+  Run({"hello", "3"});
+  EXPECT_EQ(Run({"geodist", "Sicily", "Palermo", "Catania"}), "166274.1516");
+  resp = Run({"geosearch", "Sicily", "FROMMEMBER", "Palermo", "BYRADIUS", "200", "km", "ASC",
+              "WITHDIST", "WITHHASH"});
+  EXPECT_THAT(resp,
+              RespElementsAre(RespElementsAre("Palermo", "0.0000", IntArg(3479099956230698)),
+                              RespElementsAre("Catania", "166.2742", IntArg(3479447370796909))));
 }
 
 TEST_F(GeoFamilyTest, GeoSearch) {
@@ -121,9 +124,9 @@ TEST_F(GeoFamilyTest, GeoSearch) {
   EXPECT_THAT(
       resp,
       RespArray(ElementsAre(
-          RespArray(ElementsAre("Berlin", DoubleArg(0.00017343178521311378), "3673983950397063",
+          RespArray(ElementsAre("Berlin", "0.0002", IntArg(3673983950397063),
                                 RespArray(ElementsAre(DoubleArg(13.4050), DoubleArg(52.5200))))),
-          RespArray(ElementsAre("Dublin", DoubleArg(487.5619030644293), "3678981558208417",
+          RespArray(ElementsAre("Dublin", "487.5619", IntArg(3678981558208417),
                                 RespArray(ElementsAre(DoubleArg(6.2603), DoubleArg(53.3498))))))));
 
   resp = Run({"GEOSEARCH", "invalid_key", "FROMMEMBER", "Madrid", "BYRADIUS", "700", "KM",

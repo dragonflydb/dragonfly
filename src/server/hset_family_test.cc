@@ -17,6 +17,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
+#include "server/journal/journal.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -313,14 +314,48 @@ TEST_F(HSetFamilyTest, HincrbyFloat) {
   for (size_t i = 0; i < 500; ++i) {
     EXPECT_EQ(Run({"hget", "k", absl::StrCat("v", i)}), "1.5");
   }
+
+  // Where long double is wider than double, decimal steps stay exact.
+  if (numeric_limits<long double>::digits > numeric_limits<double>::digits) {
+    for (int i = 0; i < 3; ++i)
+      Run({"hincrbyfloat", "k", "dec", "0.1"});
+    EXPECT_EQ(Run({"hget", "k", "dec"}), "0.3");
+  }
+
+  // The reply is the stored text in scripts and in RESP3 too.
+  EXPECT_EQ(Run({"eval", "return type(redis.call('HINCRBYFLOAT', KEYS[1], 'f', '1'))", "1", "lua"}),
+            "string");
+  Run({"hello", "3"});
+  EXPECT_EQ(Run({"hincrbyfloat", "k", "a", "1.5"}), "4.5");
+}
+
+// The value is replicated with its field TTL, not the increment.
+TEST_F(HSetFamilyTest, HIncrByFloatJournalsValue) {
+  Run({"hsetex", "key", "5", "fl", "1.1"});
+  const ShardId sid = Shard("key", shard_set->size());
+  JournalRecorder recorder;
+  const uint32_t id = StartJournalWithConsumer(&recorder, sid);
+  EXPECT_EQ(Run({"hincrbyfloat", "key", "fl", "1.1"}), "2.2");
+  auto entries = pp_->at(sid)->Await([&] {
+    journal::UnregisterConsumer(id);
+    return recorder.entries;
+  });
+  EXPECT_THAT(entries, ElementsAre(Pair("HSET", HasSubstr("2.2")),
+                                   Pair("HGETEX", AllOf(HasSubstr("PXAT"), HasSubstr("fl")))));
 }
 
 TEST_F(HSetFamilyTest, HincrbyFloatCornerCases) {
   Run({"hset", "k", "mhv", "-1.8E+308", "phv", "1.8E+308", "nd", "-+-inf", "+inf", "+inf", "nan",
        "nan", "-inf", "-inf"});
-  // we don't support long doubles, so in all next cases we should return errors
-  EXPECT_THAT(Run({"hincrbyfloat", "k", "mhv", "-1"}), ErrArg("ERR hash value is not a float"));
-  EXPECT_THAT(Run({"hincrbyfloat", "k", "phv", "1"}), ErrArg("ERR hash value is not a float"));
+
+  // Values past the double range work where long double holds them.
+  if (numeric_limits<long double>::max_exponent10 > 308) {
+    EXPECT_THAT(Run({"hincrbyfloat", "k", "mhv", "-1"}), ArgType(RespExpr::STRING));
+    EXPECT_THAT(Run({"hincrbyfloat", "k", "phv", "1"}), ArgType(RespExpr::STRING));
+  } else {
+    EXPECT_THAT(Run({"hincrbyfloat", "k", "mhv", "-1"}), ErrArg("ERR hash value is not a float"));
+    EXPECT_THAT(Run({"hincrbyfloat", "k", "phv", "1"}), ErrArg("ERR hash value is not a float"));
+  }
   EXPECT_THAT(Run({"hincrbyfloat", "k", "nd", "1"}), ErrArg("ERR hash value is not a float"));
   EXPECT_THAT(Run({"hincrbyfloat", "k", "+inf", "1"}),
               ErrArg("increment would produce NaN or Infinity"));
@@ -1263,7 +1298,8 @@ TEST_F(HSetFamilyTest, HExpireZeroTTL_DeletesKey) {
 // Before the fix, the key was left in the DB with an empty listpack, causing HRANDFIELD
 // to crash with CHECK(lplen > 0 && lplen % 2 == 0).
 TEST_F(HSetFamilyTest, HIncrByFloatNaNDoesNotCreateKey) {
-  EXPECT_THAT(Run({"HINCRBYFLOAT", "key", "field", "nan"}),
+  EXPECT_THAT(Run({"HINCRBYFLOAT", "key", "field", "nan"}), ErrArg("not a valid float"));
+  EXPECT_THAT(Run({"HINCRBYFLOAT", "key", "field", "inf"}),
               ErrArg("increment would produce NaN or Infinity"));
   EXPECT_EQ(0, CheckedInt({"EXISTS", "key"}));
   EXPECT_THAT(Run({"HRANDFIELD", "key"}), ArgType(RespExpr::NIL));

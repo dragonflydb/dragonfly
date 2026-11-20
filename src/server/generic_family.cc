@@ -1721,7 +1721,7 @@ namespace {
 struct SortEntryBase {
   string key;
   const string* bound_value = nullptr;
-  vector<string> get_values;  // Stores fetched GET pattern values
+  vector<std::optional<string>> get_values;  // Stores fetched GET pattern values
 
   void BindValue(const std::string* value) {
     bound_value = value;
@@ -1890,15 +1890,25 @@ OpResult<pair<vector<string>, CompactObjType>> OpFetchContainerElements(const Op
   return std::make_pair(std::move(elements), obj_type);
 }
 
-// Fetch a string value from a key (for BY and GET pattern lookups)
-OpResult<string> OpFetchStringValue(const OpArgs& op_args, std::string_view key) {
+// Fetches a BY or GET pattern value, nullopt for a missing or non-string key.
+OpResult<std::optional<string>> OpFetchStringValue(const OpArgs& op_args, std::string_view key) {
   auto it = op_args.GetDbSlice().FindReadOnly(op_args.db_cntx, key);
   if (!IsValid(it) || it->second.ObjType() != OBJ_STRING) {
-    return string{};  // Missing key defaults to empty string
+    return std::optional<string>{};
   }
 
-  return ReadStringValue(op_args.db_cntx.db_index, key, it->second,
-                         op_args.shard->tiered_storage());
+  auto value =
+      ReadStringValue(op_args.db_cntx.db_index, key, it->second, op_args.shard->tiered_storage());
+  RETURN_ON_BAD_STATUS(value);
+  return std::optional<string>{std::move(*value)};
+}
+
+// A GET of a missing or non-string key replies null.
+void SendGetValue(const std::optional<string>& value, RedisReplyBuilder* rb) {
+  if (value)
+    rb->SendBulkString(*value);
+  else
+    rb->SendNull();
 }
 
 // Runs `cb` on every shard in parallel fibers (it may block) and returns the first non-OK status.
@@ -1933,9 +1943,9 @@ OpResult<uint32_t> OpStore(const OpArgs& op_args, std::string_view key, Iterator
 
   for (auto it = start_it; it != end_it; ++it) {
     if (has_get_patterns) {
-      // Store all GET pattern values for this entry
+      // Store all GET pattern values for this entry, a missing one as an empty string
       for (const auto& value : it->get_values)
-        add_item(value);
+        add_item(value ? string_view{*value} : string_view{});
     } else {
       // No GET patterns - store the element itself
       add_item(it->ResultKey());
@@ -2085,7 +2095,7 @@ OpStatus PopulateGetPatternValues(const SortParams& params, const DbContext& db_
   return FetchGetPatternValues(
       params, db_cntx, *entries,
       [&](size_t idx) -> std::string_view { return (*entries)[idx].ResultKey(); },
-      [&](size_t entry_idx, size_t pattern_idx, string value) {
+      [&](size_t entry_idx, size_t pattern_idx, std::optional<string> value) {
         (*entries)[entry_idx].get_values[pattern_idx] = std::move(value);
       });
 }
@@ -2142,7 +2152,7 @@ struct SortVisitor {
         if (has_get_patterns && !it->get_values.empty()) {
           // Send all GET pattern values for this entry
           for (const auto& value : it->get_values) {
-            rb->SendBulkString(value);
+            SendGetValue(value, rb);
           }
         } else {
           // No GET patterns - send the element itself
@@ -2204,7 +2214,7 @@ OpStatus PopulateSortEntriesFromByPattern(const SortParams& params,
             if (!external_value)
               return external_value.status();
             auto& entry = dest[idx];
-            if (!entry.Parse(std::move(*external_value)))
+            if (!entry.Parse(std::move(*external_value).value_or(string{})))
               return OpStatus::INVALID_NUMERIC_RESULT;
             entry.BindValue(&raw_elements[idx]);
           }
@@ -2371,16 +2381,17 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
   DCHECK(!raw_elements.empty());
 
   // Fetch GET pattern values if needed (for unsorted path)
-  vector<vector<string>> get_values_per_element;
+  vector<vector<std::optional<string>>> get_values_per_element;
   if (!params.get_patterns.empty()) {
     // Pre-allocate storage for GET pattern values
-    get_values_per_element.resize(raw_elements.size(), vector<string>(params.get_patterns.size()));
+    get_values_per_element.resize(raw_elements.size(),
+                                  vector<std::optional<string>>(params.get_patterns.size()));
 
     // Use generic fetcher with lambdas to access raw_elements and store in get_values_per_element
     OpStatus status = FetchGetPatternValues(
         params, db_cntx, raw_elements,
         [&](size_t idx) -> std::string_view { return raw_elements[idx]; },
-        [&](size_t elem_idx, size_t pattern_idx, string value) {
+        [&](size_t elem_idx, size_t pattern_idx, std::optional<string> value) {
           get_values_per_element[elem_idx][pattern_idx] = std::move(value);
         });
     if (status != OpStatus::OK)
@@ -2441,7 +2452,7 @@ void SortGeneric(CmdArgParser parser, CommandContext* cmd_cntx, bool is_read_onl
   for (auto it = start_it; it != end_it; ++it, ++elem_idx) {
     if (!get_values.empty() && !get_values[elem_idx].empty()) {
       for (const auto& value : get_values[elem_idx]) {
-        rb->SendBulkString(value);
+        SendGetValue(value, rb);
       }
     } else {
       rb->SendBulkString(*it);

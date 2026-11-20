@@ -50,7 +50,8 @@ using absl::SimpleAtoi;
 
 namespace {
 
-using IncrByParam = std::variant<double, int64_t>;
+// A float increment comes back as its stored text.
+using IncrByParam = std::variant<long double, int64_t, std::string>;
 using OptStr = std::optional<std::string>;
 enum GetAllMode : uint8_t { FIELDS = 1, VALUES = 2 };
 
@@ -352,12 +353,12 @@ size_t EstimateListpackMinBytes(const ParsedArgs& members) {
 }
 
 OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
-  if (holds_alternative<double>(*param)) {
-    double incr = get<double>(*param);
-    double value = 0;
+  if (holds_alternative<long double>(*param)) {
+    long double incr = get<long double>(*param);
+    long double value = 0;
 
     if (prev_val) {
-      if (!ParseDouble(*prev_val, &value)) {
+      if (!ParseLongDouble(*prev_val, &value)) {
         return OpStatus::INVALID_VALUE;
       }
     }
@@ -366,7 +367,7 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
       return OpStatus::NAN_OR_INF_DURING_INCR;
     }
 
-    param->emplace<double>(value);
+    param->emplace<long double>(value);
 
     return OpStatus::OK;
   }
@@ -390,6 +391,8 @@ OpStatus IncrementValue(optional<string_view> prev_val, IncrByParam* param) {
 
   return OpStatus::OK;
 }
+
+void JournalHSetEx(const OpArgs& op_args, ArgSlice args, const PrimeValue& pv);
 
 OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, IncrByParam* param) {
   auto& db_slice = op_args.GetDbSlice();
@@ -432,11 +435,11 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
     return status;
   }
 
-  if (holds_alternative<double>(*param)) {
-    double new_val = get<double>(*param);
-    char buf[128];
-    char* str = RedisReplyBuilder::FormatDouble(new_val, buf, sizeof(buf));
-    hw.AddOrUpdate(field, str);
+  const bool is_float = holds_alternative<long double>(*param);
+  string float_val;
+  if (is_float) {
+    float_val = FormatLongDouble(get<long double>(*param));
+    hw.AddOrUpdate(field, float_val);
   } else {  // integer increment
     int64_t new_val = get<int64_t>(*param);
     absl::AlphaNum an(new_val);
@@ -446,6 +449,14 @@ OpStatus OpIncrBy(const OpArgs& op_args, string_view key, string_view field, Inc
   hw.Launder(pv);
   op_args.shard->search_indices()->AddDoc(key, op_args.db_cntx, &pv);
 
+  // A float result is journaled as the value: replicas may compute with another long double.
+  if (is_float && op_args.shard->journal()) {
+    add_res.post_updater.Run();
+    const string_view journal_args[] = {key, field, float_val};
+    JournalHSetEx(op_args, journal_args, pv);
+  }
+  if (is_float)
+    *param = std::move(float_val);
   return OpStatus::OK;
 }
 
@@ -1358,10 +1369,16 @@ void CmdHIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
 void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
   string_view field = parser.Next();
-  double dval = parser.Next<Validated<double, Finite<kNanOrInfDuringIncr>>>();
+  string_view incr_arg = parser.Next();
   RETURN_ON_PARSE_ERROR(parser, cmd_cntx);
 
-  IncrByParam param{dval};
+  long double incr = 0;
+  if (!ParseLongDouble(incr_arg, &incr))
+    return cmd_cntx->SendError(kInvalidFloatErr);
+  if (isinf(incr))
+    return cmd_cntx->SendError(kNanOrInfDuringIncr);
+
+  IncrByParam param{incr};
 
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpIncrBy(t->GetOpArgs(shard), key, field, &param);
@@ -1371,7 +1388,7 @@ void CmdHIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   if (status == OpStatus::OK) {
     auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-    rb->SendDouble(get<double>(param));
+    rb->SendBulkString(get<string>(param));
   } else {
     switch (status) {
       case OpStatus::INVALID_VALUE:
@@ -1627,7 +1644,8 @@ void HSetFamily::Register(CommandRegistry* registry) {
             << CI{"HMGET", CO::FAST | CO::READONLY, -3, 1, 1}.HFUNC(HMGet)
             << CI{"HMSET", CO::JOURNALED | CO::FAST | CO::DENYOOM, -4, 1, 1}.HFUNC(HSet)
             << CI{"HINCRBY", CO::RW | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrBy)
-            << CI{"HINCRBYFLOAT", CO::RW | CO::DENYOOM | CO::FAST, 4, 1, 1}.HFUNC(HIncrByFloat)
+            << CI{"HINCRBYFLOAT", CO::RW | CO::DENYOOM | CO::FAST | CO::NO_AUTOJOURNAL, 4, 1, 1}
+                   .HFUNC(HIncrByFloat)
             << CI{"HKEYS", CO::READONLY, 2, 1, 1}.HFUNC(HKeys)
             << CI{"HEXPIRE", kExpiryOpts, -5, 1, 1}.HFUNC(HExpire)
             << CI{"HPEXPIRETIME", CO::READONLY | CO::FAST, -4, 1, 1}.HFUNC(HPExpireTime)

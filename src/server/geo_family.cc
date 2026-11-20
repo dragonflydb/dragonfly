@@ -3,6 +3,7 @@
 //
 
 #include <absl/strings/ascii.h>
+#include <absl/strings/str_format.h>
 
 extern "C" {
 #include "redis/geo.h"
@@ -200,6 +201,12 @@ double ParseGeoUnit(std::string_view arg, facade::RuleError& err) {
     return 1609.34;
   err = {true, kInvalidUnit};
   return -1;
+}
+
+// Distances are text with four decimals, rounded as llrint rounds the scaled value.
+string FormatDistance(double dist) {
+  const long long scaled = llrint(dist * 10000);
+  return absl::StrFormat("%d.%04d", scaled / 10000, scaled % 10000);
 }
 
 void ParseCircularShape(CmdArgParser* parser, GeoShape* shape, GeoSearchOpts* geo_ops) {
@@ -448,8 +455,8 @@ void CmdGeoDist(CmdArgParser parser, CommandContext* cmd_cntx) {
     }
   }
 
-  return rb->SendDouble(geohashGetDistance(xyxy[0], xyxy[1], xyxy[2], xyxy[3]) /
-                        distance_multiplier);
+  return rb->SendBulkString(
+      FormatDistance(geohashGetDistance(xyxy[0], xyxy[1], xyxy[2], xyxy[3]) / distance_multiplier));
 }
 
 namespace {
@@ -696,10 +703,12 @@ void GeoSearchStoreGeneric(Transaction* tx, facade::SinkReplyBuilder* builder,
       }
       rb->SendBulkString(p.member);
       if (geo_ops.withdist) {
-        rb->SendDouble(p.dist / geo_ops.conversion);
+        // Short enough to be copied inline, so it may die before the reply scope ends.
+        const string dist = FormatDistance(p.dist / geo_ops.conversion);
+        rb->SendBulkString(string_view{dist});
       }
       if (geo_ops.withhash) {
-        rb->SendDouble(p.score);
+        rb->SendLong(static_cast<int64_t>(p.score));
       }
       if (geo_ops.withcoord) {
         rb->StartArray(2);
