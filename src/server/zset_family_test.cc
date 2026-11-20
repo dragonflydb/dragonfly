@@ -649,6 +649,12 @@ TEST_F(ZSetFamilyTest, ZScan) {
   EXPECT_EQ(10 * 2, scan_len);  // expected members a0,a10,a20..,a90
 }
 
+TEST_F(ZSetFamilyTest, ZScanRejectsZeroCount) {
+  Run({"zadd", "myzset", "1", "a", "2", "b"});
+  EXPECT_THAT(Run({"zscan", "myzset", "0", "count", "0"}), ErrArg("syntax error"));
+  EXPECT_THAT(Run({"zscan", "myzset", "0", "count", "10"}), ArrLen(2));
+}
+
 TEST_F(ZSetFamilyTest, ZUnionError) {
   RespExpr resp;
 
