@@ -56,8 +56,10 @@ class AclFamily final {
   void GenPass(CmdArgParser parser, CommandContext* cmd_cntx);
   void Help(CmdArgParser parser, CommandContext* cmd_cntx);
 
-  // Pushes the user's updated ACL rules to all its open connections.
-  void StreamUpdatesToConnections(std::string_view username, const User& user);
+  // Pushes to each open connection the ACL rules of its user as returned by `find_user`, which
+  // returns null to leave a connection unchanged.
+  void StreamUpdatesToConnections(
+      absl::FunctionRef<const User*(std::string_view username)> find_user);
 
   // Closes all open connections that match `pred`.
   void EvictConnections(absl::FunctionRef<bool(const ConnectionContext&)> pred);
