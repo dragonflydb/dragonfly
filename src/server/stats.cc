@@ -12,7 +12,7 @@ namespace dfly {
 #define UMAX(x) (x) = std::max((x), o.x)
 
 TieredStats& TieredStats::operator+=(const TieredStats& o) {
-  static_assert(sizeof(TieredStats) == 264);
+  static_assert(sizeof(TieredStats) == 272);
 
   ADD(total_stashes);
   ADD(total_fetches);
@@ -54,6 +54,7 @@ TieredStats& TieredStats::operator+=(const TieredStats& o) {
 
   ADD(clients_throttled);
   ADD(total_clients_throttled);
+  ADD(used_memory);
   return *this;
 }
 

@@ -328,6 +328,12 @@ ExternalAllocator::~ExternalAllocator() {
   }
 }
 
+size_t ExternalAllocator::UsedMemory() const {
+  // Each segment descriptor occupies a whole kSegDescrAlignment unit, see FindPage.
+  return segments_.capacity() * sizeof(SegmentDescr*) +
+         (segment_bytes_ / kSegmentSize) * kSegDescrAlignment;
+}
+
 int64_t ExternalAllocator::Malloc(size_t sz) {
   BinIdx bin_idx = ToBinIdx(sz);
   Page* page = free_pages_[bin_idx];
