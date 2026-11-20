@@ -508,6 +508,9 @@ class DbSlice {
       SendQueuedExpiredKeyEventsSlow();
   }
 
+  // Dispatches the queued tracking invalidations without waiting for their delivery.
+  void SendQueuedInvalidationMessagesAsync();
+
   // Iterate over all expire table entries and delete expired.
   void ExpireAllIfNeeded();
 
@@ -616,6 +619,12 @@ class DbSlice {
     client_tracking_map_[key].insert(conn_ref);
   }
 
+  // Set while a CLIENT TRACKING NOLOOP client runs a command: its own changes do not notify it.
+  void SetTrackingNoLoopClient(uint32_t client_id) {
+    tracking_noloop_client_ = client_id;
+    tracking_noloop_fiber_ = util::fb2::detail::FiberActive();
+  }
+
   bool IsExpiredEventsRecording() const {
     return expired_keys_events_recording_;
   }
@@ -702,7 +711,6 @@ class DbSlice {
       SendQueuedInvalidationMessagesSlow();
   }
   void SendQueuedInvalidationMessagesSlow();
-  void SendQueuedInvalidationMessagesAsync();
 
   // Queues the expired event of 'key' if keyspace notifications are enabled. Never suspends.
   void QueueExpiredKeyEvent(DbIndex db_index, std::string_view key) const {
@@ -834,6 +842,8 @@ class DbSlice {
                           absl::container_internal::hash_default_hash<std::string>,
                           absl::container_internal::hash_default_eq<std::string>, AllocatorType>;
   TrackingMap client_tracking_map_, pending_send_map_;
+  uint32_t tracking_noloop_client_ = 0;
+  util::fb2::detail::FiberInterface* tracking_noloop_fiber_ = nullptr;
 
   // Expired events queued by QueueExpiredKeyEvent, sent by SendQueuedExpiredKeyEvents.
   // Consecutive events of the same db share one entry.

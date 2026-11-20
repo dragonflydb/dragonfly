@@ -714,6 +714,9 @@ void Transaction::RunCallback(EngineShard* shard) {
   DCHECK(shard->running_tx() == nullptr);
   shard->set_running_tx(this);
 
+  auto& db_slice = GetDbSlice(shard->shard_id());
+  db_slice.SetTrackingNoLoopClient(tracking_noloop_client_);
+
   RunnableResult result;
   try {
     if (const int obj_typ = ObjectType(cid_); obj_typ >= 0)
@@ -741,7 +744,7 @@ void Transaction::RunCallback(EngineShard* shard) {
     LOG(FATAL) << "Unexpected exception " << e.what();
   }
 
-  auto& db_slice = GetDbSlice(shard->shard_id());
+  db_slice.SetTrackingNoLoopClient(0);
   db_slice.OnCbFinishBlocking();
 
   // Handle result flags to alter behaviour.

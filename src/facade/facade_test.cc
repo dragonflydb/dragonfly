@@ -32,7 +32,7 @@ bool RespMatcher::MatchAndExplain(RespExpr e, MatchResultListener* listener) con
     }
   }
 
-  if (type_ == RespExpr::STRING || type_ == RespExpr::ERROR) {
+  if (type_ == RespExpr::STRING || type_ == RespExpr::ERROR || type_ == RespExpr::VERB) {
     RespExpr::Buffer ebuf = e.GetBuf();
     std::string_view actual{reinterpret_cast<const char*>(ebuf.data()), ebuf.size()};
 
@@ -40,7 +40,7 @@ bool RespMatcher::MatchAndExplain(RespExpr e, MatchResultListener* listener) con
       *listener << "Actual does not contain '" << exp_str_ << "'";
       return false;
     }
-    if (type_ == RespExpr::STRING && exp_str_ != actual) {
+    if (type_ != RespExpr::ERROR && exp_str_ != actual) {
       *listener << "\nActual string: " << actual;
       return false;
     }
@@ -72,6 +72,7 @@ void RespMatcher::DescribeTo(std::ostream* os) const {
   switch (type_) {
     case RespExpr::STRING:
     case RespExpr::ERROR:
+    case RespExpr::VERB:
       *os << exp_str_;
       break;
 

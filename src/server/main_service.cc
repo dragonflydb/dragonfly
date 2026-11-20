@@ -770,7 +770,11 @@ void TrackIfNeeded(CommandContext* cmd_cntx) {
     // we will end up triggerring the callback on the following commands. To avoid this
     // we reset it.
     tx->SetTrackingCallback({});
-    if (cmd_cntx->cid()->IsReadOnly() && info.ShouldTrackKeys()) {
+    tx->SetTrackingNoLoopClient(info.IsNoLoop() ? cntx->conn()->GetClientId() : 0);
+
+    // A read-only script tracks the keys its commands read, not its own.
+    const auto* cid = cmd_cntx->cid();
+    if (cid->IsReadOnly() && !cid->IsEvalGroup() && info.ShouldTrackKeys()) {
       auto conn = cntx->conn()->Borrow();
       tx->SetTrackingCallback([conn](Transaction* trans) {
         auto* shard = EngineShard::tlocal();
@@ -1974,6 +1978,7 @@ void Service::Reset(CmdArgParser, CommandContext* cmd_cntx) {
   conn_state.tracking_info_.SetClientTracking(false);
 
   conn_state.db_index = 0;
+  cntx->conn()->SetName({});
 
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   rb->SetRespVersion(RespVersion::kResp2);
@@ -3046,7 +3051,7 @@ void Service::OnConnectionClose(facade::ConnectionContext* cntx) {
   ConnectionContext* server_cntx = static_cast<ConnectionContext*>(cntx);
   ConnectionState& conn_state = server_cntx->conn_state;
   VLOG_IF(1, conn_state.replication_info.repl_session_id)
-      << "OnConnectionClose: " << server_cntx->conn()->GetName()
+      << "OnConnectionClose: " << server_cntx->conn()->GetClientId()
       << ", repl_session_id: " << conn_state.replication_info.repl_session_id;
 
   if (conn_state.subscribe_info) {  // Clean-ups related to PUBSUB
@@ -3077,10 +3082,10 @@ Service::ContextInfo Service::GetContextInfo(facade::ConnectionContext* cntx) co
                       !server_cntx->transaction->Blocker()->IsCompleted();
 
   return {.db_index = server_cntx->db_index(),
-          .async_dispatch = server_cntx->async_dispatch,
           .conn_closing = server_cntx->conn_closing,
           .has_subscribers = bool(server_cntx->conn_state.subscribe_info),
           .is_blocked = server_cntx->blocked,
+          .is_tracking = server_cntx->conn_state.tracking_info_.IsTrackingOn(),
           .is_scheduled = is_scheduled};
 }
 

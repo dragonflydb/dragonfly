@@ -153,6 +153,8 @@ const char* RespExpr::TypeName(Type t) {
       return "error";
     case BOOL:
       return "bool";
+    case VERB:
+      return "verbatim";
   }
   ABSL_UNREACHABLE();
 }
@@ -226,6 +228,9 @@ ostream& operator<<(ostream& os, const facade::RespExpr& e) {
       break;
     case RespExpr::BOOL:
       os << (get<int64_t>(e.u) ? "true" : "false");
+      break;
+    case RespExpr::VERB:
+      os << "v'" << ToSV(get<RespExpr::Buffer>(e.u)) << "'";
       break;
   }
 

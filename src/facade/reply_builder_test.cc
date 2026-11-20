@@ -1006,6 +1006,11 @@ TEST_F(RedisReplyBuilderTest, VerbatimString) {
   builder_->SetRespVersion(RespVersion::kResp3);
   builder_->SendVerbatimString(str, RedisReplyBuilder::VerbatimFormat::TXT);
   ASSERT_TRUE(NoErrors());
+
+  // Tests read the text without its format prefix and compare it.
+  auto parsed = Parse();
+  EXPECT_THAT(parsed.args, ElementsAre(RespMatcher(str, RespExpr::VERB)));
+  EXPECT_THAT(parsed.args, ElementsAre(Not(RespMatcher("A simple", RespExpr::VERB))));
   ASSERT_EQ(TakePayload(), "=20\r\ntxt:A simple string!\r\n") << "Resp3 VerbatimString TXT failed.";
 
   builder_->SetRespVersion(RespVersion::kResp3);

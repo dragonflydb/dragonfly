@@ -16,11 +16,9 @@ std::string ServiceInterface::ContextInfo::Format() const {
 
   unsigned index = 0;
 
-  if (async_dispatch)
-    buf[index++] = 'a';
-
+  // Letters as clients parse them: A closing, P pub/sub, b blocked, t tracking, N none.
   if (conn_closing)
-    buf[index++] = 't';
+    buf[index++] = 'A';
 
   if (has_subscribers)
     buf[index++] = 'P';
@@ -28,8 +26,10 @@ std::string ServiceInterface::ContextInfo::Format() const {
   if (is_blocked)
     buf[index++] = 'b';
 
-  if (index)
-    absl::StrAppend(&res, " flags=", buf);
+  if (is_tracking)
+    buf[index++] = 't';
+
+  absl::StrAppend(&res, " flags=", index ? buf : "N");
   return res;
 }
 

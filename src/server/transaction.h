@@ -420,6 +420,11 @@ class Transaction {
     tracking_cb_ = std::move(f);
   }
 
+  // The client of a CLIENT TRACKING NOLOOP connection, or 0: its own writes do not notify it.
+  void SetTrackingNoLoopClient(uint32_t client_id) {
+    tracking_noloop_client_ = client_id;
+  }
+
   void MaybeInvokeTrackingCb() {
     if (tracking_cb_) {
       tracking_cb_(this);
@@ -696,6 +701,7 @@ class Transaction {
   } stats_;
 
   std::function<void(Transaction* trans)> tracking_cb_;
+  uint32_t tracking_noloop_client_ = 0;
 
   struct TLTmpSpace {
     std::vector<PerShardCache>& GetShardIndex(unsigned size);

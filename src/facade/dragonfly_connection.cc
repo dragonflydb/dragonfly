@@ -1074,7 +1074,7 @@ void Connection::OnPostMigrateThread() {
 }
 
 void Connection::OnConnectionStart() {
-  SetName(absl::StrCat(id_));
+  SetName({});
 
   // is null in unit-tests.
   if (const Listener* lsnr = static_cast<Listener*>(listener()); lsnr) {
@@ -1361,7 +1361,7 @@ ClientInfo Connection::BuildClientInfo(unsigned thread_id) const {
     else if (ctx_info.is_scheduled)
       phase_name = "scheduled";
     ci.db = ctx_info.db_index;
-    // ctx_info.Format() returns "db=N" or "db=N flags=X"; extract flags only.
+    // ctx_info.Format() returns "db=N flags=X"; extract flags only.
     size_t flags_pos = ctx_info.Format().find(" flags=");
     if (flags_pos != string::npos)
       ci.flags = ctx_info.Format().substr(flags_pos + sizeof(" flags=") - 1);
@@ -1407,7 +1407,8 @@ bool Connection::IsMainOrMemcache() const {
 }
 
 void Connection::SetName(string name) {
-  util::ThisFiber::SetName(absl::StrCat("DflyConn_", name));
+  // An unnamed connection keeps its id in the fiber name.
+  util::ThisFiber::SetName(absl::StrCat("DflyConn_", name.empty() ? absl::StrCat(id_) : name));
   name_ = std::move(name);
 }
 

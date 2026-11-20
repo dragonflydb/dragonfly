@@ -2041,6 +2041,16 @@ void DbSlice::QueueInvalidationTrackingMessageAtomic(std::string_view key) {
   ConnectionHashSet moved_set = std::move(it->second);
   client_tracking_map_.erase(it);
 
+  // The writer stops tracking the key as well, it just gets no message. Other fibers may change
+  // keys while its command is suspended, so only its own fiber counts.
+  if (tracking_noloop_client_ != 0 && util::fb2::detail::FiberActive() == tracking_noloop_fiber_) {
+    absl::erase_if(moved_set, [this](const facade::ConnectionRef& ref) {
+      return ref.GetClientId() == tracking_noloop_client_;
+    });
+    if (moved_set.empty())
+      return;
+  }
+
   auto [pend_it, inserted] = pending_send_map_.emplace(key, std::move(moved_set));
   if (!inserted) {
     ConnectionHashSet& client_set = pend_it->second;
