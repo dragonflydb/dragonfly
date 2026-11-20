@@ -324,7 +324,8 @@ class ServerFamily {
   void AofCheckpointScheduling();
 
   // Saves an AOF-owned base and commits it as the next checkpoint. Blocks until it finishes.
-  GenericError DoAofCheckpoint();
+  // ignore_state allows it while LOADING, at startup.
+  GenericError DoAofCheckpoint(bool ignore_state = false);
 
   void SendInvalidationMessages() const;
 

@@ -332,7 +332,7 @@ TEST_F(AofManifestTest, CollectGarbage) {
   AofManifest m = Sample();
   m.cuts = {{2, 100}, {0, 1}};
 
-  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m)); });
+  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m, {.remove_tmp = true})); });
 
   vector<string> left;
   for (const auto& entry : filesystem::directory_iterator(dir_))
@@ -346,7 +346,7 @@ TEST_F(AofManifestTest, CollectGarbage) {
                                   "dump-summary.dfs"}));
 
   // A checkpoint also removes *.discarded.
-  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m, /*remove_discarded=*/true)); });
+  pp_->at(0)->Await([&] { ASSERT_FALSE(CollectAofGarbage(dir_, m, {.remove_discarded = true})); });
   EXPECT_FALSE(filesystem::exists(absl::StrCat(dir_, "/appendonly-0-4.aof.discarded")));
 }
 

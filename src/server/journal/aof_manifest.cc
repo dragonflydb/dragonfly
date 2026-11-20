@@ -276,7 +276,7 @@ error_code RemoveAofFilesExceptManifest(string_view dir) {
   return RemoveFiles(dir, *files);
 }
 
-error_code CollectAofGarbage(string_view dir, const AofManifest& manifest, bool remove_discarded) {
+error_code CollectAofGarbage(string_view dir, const AofManifest& manifest, AofGcOptions opts) {
   io::Result<vector<string>> files = ListAofFiles(dir);
   if (!files)
     return files.error();
@@ -285,9 +285,10 @@ error_code CollectAofGarbage(string_view dir, const AofManifest& manifest, bool 
     string_view name = GetBaseName(path);
     uint32_t sid;
     uint64_t seq;
-    if (name.ends_with(".tmp") || (remove_discarded && name.ends_with(".discarded")) ||
-        (AofSegmentWriter::ParseSegmentName(name, &sid, &seq) && sid < manifest.cuts.size() &&
-         seq < manifest.cuts[sid].seq) ||
+    if ((opts.remove_tmp && name.ends_with(".tmp")) ||
+        (opts.remove_discarded && name.ends_with(".discarded")) ||
+        (AofSegmentWriter::ParseSegmentName(name, &sid, &seq) &&
+         (sid >= manifest.cuts.size() ? opts.remove_other_shards : seq < manifest.cuts[sid].seq)) ||
         (IsOwnedBaseFileName(name) && !IsOwnedBaseInUse(name, manifest))) {
       garbage.push_back(path);
     }

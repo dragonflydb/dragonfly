@@ -68,9 +68,21 @@ io::Result<std::vector<std::string>> ListAofFiles(std::string_view dir);
 // Deletes every AOF file but the manifest, to redo an interrupted bootstrap.
 std::error_code RemoveAofFilesExceptManifest(std::string_view dir);
 
-// Deletes the segments below each shard's cut, owned bases the manifest does not name and leftover
-// tmp files. *.discarded are kept until the next checkpoint, which passes remove_discarded.
+struct AofGcOptions {
+  // Only at startup: while the server runs, a tmp file may be a spare segment being prepared.
+  bool remove_tmp = false;
+
+  // Discarded segments are kept until the next checkpoint commits.
+  bool remove_discarded = false;
+
+  // Segments of shard ids the manifest does not have (a shard count change). Only when no running
+  // streamer can own them: at startup, before the streamers start, or with a manifest written for
+  // the current shard count.
+  bool remove_other_shards = false;
+};
+
+// Deletes the segments below each shard's cut and owned bases the manifest does not name.
 std::error_code CollectAofGarbage(std::string_view dir, const AofManifest& manifest,
-                                  bool remove_discarded = false);
+                                  AofGcOptions opts);
 
 }  // namespace dfly
