@@ -62,6 +62,11 @@ RespExpr RespExprBuilder::BuildNode(const RESPObj& obj) {
       SetStringPayload(obj, &expr);
       break;
     }
+    case RESPObj::Type::VERB: {
+      expr.type = RespExpr::VERB;
+      SetStringPayload(obj, &expr);
+      break;
+    }
     case RESPObj::Type::ARRAY:
     case RESPObj::Type::MAP:
     case RESPObj::Type::SET: {

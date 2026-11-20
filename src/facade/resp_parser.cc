@@ -181,6 +181,8 @@ std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
     }
     case RESPObj::Type::STRING:
       [[fallthrough]];
+    case RESPObj::Type::VERB:
+      [[fallthrough]];
     case RESPObj::Type::NIL:
       [[fallthrough]];
     case RESPObj::Type::ERROR:

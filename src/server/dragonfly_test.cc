@@ -395,6 +395,9 @@ TEST_F(DflyEngineTestWithRegistry, Hello) {
                   ArgType(RespExpr::STRING), "proto", IntArg(3), "id", ArgType(RespExpr::INT64),
                   "mode", testing::AnyOf("standalone", "cluster"), "role", "master"));
 
+  // A bare HELLO keeps the current protocol.
+  EXPECT_THAT(Run({"hello"}).GetVec()[7], IntArg(3));
+
   EXPECT_THAT(Run({"hello", "2", "AUTH", "uname", "pwd"}),
               ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
 

@@ -475,6 +475,16 @@ TEST_F(ServerFamilyTest, ClientInfoSingleDbField) {
   EXPECT_EQ(count, 1u) << info;
   // CLIENT INFO returns a single line with no trailing newline (unlike CLIENT LIST).
   EXPECT_FALSE(absl::EndsWith(info, "\r\n")) << info;
+
+  // A connection without flags shows N.
+  EXPECT_THAT(info, HasSubstr(" flags=N "));
+
+  // RESP3 sends a verbatim string, and t marks a tracking connection.
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON"});
+  auto resp = Run({"CLIENT", "INFO"});
+  EXPECT_THAT(resp, ArgType(RespExpr::VERB));
+  EXPECT_THAT(resp.GetString(), HasSubstr(" flags=t "));
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingOnAndOff) {
@@ -591,13 +601,27 @@ TEST_F(ServerFamilyTest, ClientTrackingExpiredKey) {
   Run({"HELLO", "3"});
   Run({"CLIENT", "TRACKING", "ON"});
 
+  // Counted on IO0's thread, after an invalidation the heartbeat may have dispatched there.
+  auto received = [&] { return pp_->at(0)->Await([&] { return InvalidationMessagesLen("IO0"); }); };
+
   Run({"SET", "FOO", "10", "PX", "10"});
   Run({"GET", "FOO"});
   AdvanceTime(20);
 
   EXPECT_THAT(Run({"GET", "FOO"}), ArgType(RespExpr::NIL));
-  ASSERT_EQ(InvalidationMessagesLen("IO0"), 1);
+  ASSERT_EQ(received(), 1u);
   EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "FOO");
+
+  // Active expiry sends the invalidation too, with no later command on the key.
+  Run({"SET", "BAR", "10", "PX", "10"});
+  Run({"GET", "BAR"});
+  AdvanceTime(20);
+
+  // Up to ~100 heartbeats at the default hz=100.
+  for (unsigned i = 0; i < 100 && received() < 2; ++i)
+    ThisFiber::SleepFor(chrono::milliseconds(10));
+  ASSERT_EQ(received(), 2u);
+  EXPECT_EQ(GetInvalidationMessage("IO0", 1).key, "BAR");
 }
 
 TEST_F(ServerFamilyTest, ClientTrackingOptin) {
@@ -808,6 +832,27 @@ TEST_F(ServerFamilyTest, ClientTrackingUpdateKey) {
   Run({"FLUSHDB"});
 }
 
+TEST_F(ServerFamilyTest, ClientTrackingNoLoop) {
+  Run({"HELLO", "3"});
+  Run({"CLIENT", "TRACKING", "ON", "NOLOOP"});
+
+  // The connection's own writes, also from a script, send it nothing and stop tracking the key.
+  Run({"GET", "FOO"});
+  Run({"SET", "FOO", "1"});
+  Run({"GET", "FOO"});
+  Run({"EVAL", "return redis.call('set', KEYS[1], '2')", "1", "FOO"});
+  pp_->at(1)->Await([&] { return Run({"SET", "FOO", "3"}); });
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 0);
+
+  // A write from another connection to a key read again does.
+  Run({"GET", "FOO"});
+  pp_->at(1)->Await([&] { return Run({"SET", "FOO", "4"}); });
+  pp_->AwaitFiberOnAll([](ProactorBase* pb) {});
+  ASSERT_EQ(InvalidationMessagesLen("IO0"), 1);
+  EXPECT_EQ(GetInvalidationMessage("IO0", 0).key, "FOO");
+}
+
 TEST_F(ServerFamilyTest, ClientTrackingDeleteKey) {
   Run({"HELLO", "3"});
   Run({"CLIENT", "TRACKING", "ON"});
@@ -874,6 +919,11 @@ TEST_F(ServerFamilyTest, ClientTrackingLuaBug) {
   Run({"EVAL", eval, "2", "foo", "oof"});
   Run({"PING"});
   EXPECT_EQ(InvalidationMessagesLen("IO0"), 3);
+
+  // EVAL_RO tracks the keys its commands read, not the script itself.
+  EXPECT_EQ(Run({"EVAL_RO", "return redis.call('get', KEYS[1])", "1", "foo"}), "bar");
+  Run({"SET", "foo", "baz"});
+  EXPECT_EQ(InvalidationMessagesLen("IO0"), 4);
 }
 
 TEST_F(ServerFamilyTest, ConfigNormalization) {

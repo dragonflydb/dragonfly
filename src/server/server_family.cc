@@ -359,7 +359,7 @@ void ClientInfo(facade::ParsedArgs args, CommandContext* cmd_cntx) {
   auto* conn = cmd_cntx->conn();
   string info = conn->GetClientInfo();
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
-  return rb->SendBulkString(info);
+  return rb->SendVerbatimString(info);
 }
 
 enum class ClientListType { kNormal, kMaster, kReplica, kPubsub, kInternal };
@@ -3730,15 +3730,16 @@ void ServerFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
 void ServerFamily::Hello(CmdArgParser parser, CommandContext* cmd_cntx) {
   facade::ParsedArgs args = parser.UnparsedArgs();
-  // If no arguments are provided default to RESP2.
-  bool is_resp3 = false;
+  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
+
+  // Without arguments HELLO keeps the current protocol.
+  bool is_resp3 = rb->IsResp3();
   bool has_auth = false;
   bool has_setname = false;
   string_view username;
   string_view password;
   string_view clientname;
 
-  auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
   if (!args.empty()) {
     string_view proto_version = args[0];
     is_resp3 = proto_version == "3";

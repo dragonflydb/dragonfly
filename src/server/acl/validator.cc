@@ -28,6 +28,10 @@ bool Matches(string_view pattern, string_view target) {
 
 bool IsCommandAllowed(const std::vector<uint64_t>& commands, const CommandId& id,
                       const ParsedArgs& tail_args) {
+  // These run before authentication, so the user's command rules never deny them.
+  if (id.name() == "AUTH" || id.name() == "HELLO" || id.IsQuit() || id.IsReset())
+    return true;
+
   const size_t family = id.GetFamily();
   DCHECK_LT(family, commands.size());
   return (commands[family] & id.AclTarget(tail_args).second) != 0;

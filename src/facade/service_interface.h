@@ -71,7 +71,7 @@ class ServiceInterface {
     std::string Format() const;
 
     unsigned db_index;
-    bool async_dispatch, conn_closing, has_subscribers, is_blocked;
+    bool conn_closing, has_subscribers, is_blocked, is_tracking;
     bool is_scheduled;  // coordinator fiber is waiting on scheduled transaction.
   };
 

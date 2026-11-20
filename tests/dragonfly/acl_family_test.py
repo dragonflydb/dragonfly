@@ -255,7 +255,7 @@ async def test_acl_deluser(df_server):
     with pytest.raises(redis.exceptions.ResponseError):
         await client.execute_command("EXEC")
 
-    assert await client.execute_command("ACL WHOAMI") == "User is default"
+    assert await client.execute_command("ACL WHOAMI") == "default"
 
 
 script = """

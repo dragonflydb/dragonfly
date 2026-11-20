@@ -442,8 +442,7 @@ void AclFamily::DelUser(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 void AclFamily::WhoAmI(CmdArgParser parser, CommandContext* cmd_cntx) {
-  GetRedisReplyBuilder(cmd_cntx)->SendBulkString(
-      absl::StrCat("User is ", cmd_cntx->server_conn_cntx()->authed_username));
+  GetRedisReplyBuilder(cmd_cntx)->SendBulkString(cmd_cntx->server_conn_cntx()->authed_username);
 }
 
 void AclFamily::Save(CmdArgParser parser, CommandContext* cmd_cntx) {

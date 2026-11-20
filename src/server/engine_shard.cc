@@ -896,6 +896,9 @@ void EngineShard::RetireExpiredAndEvict() {
   // This also sends events that other code queued but left unsent.
   db_slice.SendQueuedExpiredKeyEvents();
 
+  // Without it, tracking invalidations of the expired keys wait for a command on this shard.
+  db_slice.SendQueuedInvalidationMessagesAsync();
+
   // Track deleted bytes only if we expect to lower memory
   if (eviction_state_.track_deleted_bytes) {
     eviction_state_.deleted_bytes_at_prev_eviction = deleted_bytes;

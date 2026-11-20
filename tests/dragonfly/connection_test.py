@@ -1674,7 +1674,7 @@ async def test_reset_restores_default_acl_identity(df_server: DflyInstance):
     await conn.send_command("SET", "k", "v")
     assert await conn.read_response() == "OK"
     await conn.send_command("ACL", "WHOAMI")
-    assert await conn.read_response() == "User is default"
+    assert await conn.read_response() == "default"
 
     await admin.aclose()
     await cl.aclose()
@@ -4551,7 +4551,7 @@ async def test_v2_proactor_parse_error_closes_connection(df_factory):
 
     client = _named_raw_client(server.port, "piped")
     client.sendall(_resp("SET", "k", "v") + _resp("SET", "k2", "v") + b"*3\r\n$3\r\nSET\r\n")
-    entry = await _wait_client(admin, "piped", lambda c: "a" in c.get("flags", ""), "parked")
+    entry = await _wait_client(admin, "piped", lambda c: c.get("phase") == "process", "parked")
     tail = b"$abc\r\n"  # malformed continuation
     client.sendall(tail)
     # The recv callback that counts the tail also parses it, as the write is still parked.
@@ -4665,8 +4665,8 @@ async def test_paused_client_released_on_protocol_error(df_factory):
     # Two complete writes go to the dispatch fiber, the incomplete third keeps the io fiber reading.
     # The queued second write arms reply batching, which the dispatch fiber must disarm on exit.
     client.sendall(_resp("SET", "k", "v") + _resp("SET", "k2", "v") + b"*3\r\n$3\r\nSET\r\n")
-    # Flag 'a' means the dispatch fiber is inside a command, which under the pause is parked.
-    await _wait_client(admin, "piped", lambda c: "a" in c.get("flags", ""), "parked in pause")
+    # The dispatch fiber counts the first SET right before it parks under the pause.
+    await _wait_client(admin, "piped", lambda c: int(c["tot-cmds"]) >= 2, "parked in pause")
     client.sendall(b"$abc\r\n")  # malformed continuation
 
     buf = b""

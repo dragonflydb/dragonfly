@@ -1935,6 +1935,15 @@ TEST_F(MultiTest, ResetClearsWatchState) {
   EXPECT_THAT(Run({"exec"}), RespElementsAre("2"));
 }
 
+TEST_F(MultiTest, ResetClearsName) {
+  // A connection has no name until it sets one.
+  EXPECT_THAT(Run({"client", "getname"}), ArgType(RespExpr::NIL));
+  EXPECT_THAT(Run({"client", "setname", "n"}), "OK");
+
+  EXPECT_THAT(Run({"reset"}), "RESET");
+  EXPECT_THAT(Run({"client", "getname"}), ArgType(RespExpr::NIL));
+}
+
 TEST_F(MultiTest, ResetSelectsDB0) {
   // Move to DB 1, set a key there.
   EXPECT_THAT(Run({"select", "1"}), "OK");

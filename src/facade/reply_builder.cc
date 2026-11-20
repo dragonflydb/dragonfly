@@ -417,7 +417,7 @@ void RedisReplyBuilderBase::SendBool(bool val) {
     return SendLong(val);
 
   ReplyScope scope(this);
-  val ? WritePieces(kTrueR3) : WritePieces(kFalseR3);
+  WritePieces(val ? kTrueR3 : kFalseR3);
 }
 
 void RedisReplyBuilderBase::SendNullArray() {

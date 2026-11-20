@@ -213,6 +213,7 @@ TEST_F(RESPParserTest, ReplyDiagnostics) {
       {",1.5\r\n", "1.5"},
       {"#t\r\n", "true"},
       {"#f\r\n", "false"},
+      {"=7\r\ntxt:abc\r\n", "abc"},
       {"$-1\r\n", "NIL"},
       {"*-1\r\n", "NIL"},
       {"%-1\r\n", "NIL"},
