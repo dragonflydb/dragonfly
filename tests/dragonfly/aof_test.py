@@ -559,3 +559,38 @@ async def test_restart_while_rebasing_starts_empty(df_factory: DflyInstanceFacto
     assert (await client.info("persistence"))["aof_state"] == "active"
     assert not any((tmp_path / name).exists() for name in old_files)
     assert await client.get("new") == "1"
+
+
+@pytest.mark.exclude_epoll
+async def test_replay_into_different_shard_count(df_factory: DflyInstanceFactory, tmp_path):
+    def create(shards):
+        return df_factory.create(aof=True, dir=str(tmp_path), proactor_threads=4, num_shards=shards)
+
+    df = create(4)
+    df.start()
+    client = df.client()
+    # A global command in the log, so the chains still meet at the barrier.
+    await SeederV2(key_target=10_000).run(client, target_deviation=0.1)
+    await client.flushall()
+    seeder = SeederV2(key_target=20_000)
+    await seeder.run(client, target_deviation=0.1)
+    before = await SeederV2.capture(client)
+    df.stop()
+
+    # Fewer shards, then more: each start replays the old chains, then a checkpoint replaces them.
+    for shards in (2, 3):
+        df = create(shards)
+        df.start()
+        client = df.client()
+        assert await SeederV2.capture(client) == before
+        assert f"shard_count {shards}\n" in read_manifest(tmp_path)
+        assert all(int(p.name.split("-")[1]) < shards for p in tmp_path.glob("appendonly-*-*.aof"))
+
+        # The new chains log what comes next.
+        await client.set(f"after:{shards}", 1)
+        before = await SeederV2.capture(client)
+        df.stop()
+
+    df = create(3)
+    df.start()
+    assert await SeederV2.capture(df.client()) == before

@@ -14,6 +14,8 @@
 #include "server/journal/serializer.h"
 #include "server/journal/tx_executor.h"
 #include "server/transaction.h"
+#include "util/fibers/fibers.h"
+#include "util/proactor_pool.h"
 
 namespace dfly {
 
@@ -21,11 +23,13 @@ using namespace std;
 
 namespace {
 
-// Replays one shard's chain from its cut through the applier, then repairs it. Runs on the shard's
-// thread.
-error_code ReplayChain(string_view dir, ShardId sid, AofManifest::Cut cut, Service* service,
-                       shared_ptr<MultiShardExecution> mse, AofResume* resume, TxId* max_txid) {
-  AofChainReader chain(string(dir), sid, shard_set->size());
+// Replays chain sid of a log written by source_count shards, from its cut, through the applier.
+// Commands are dispatched normally, so each key lands on the shard that owns it now. With resume,
+// also repairs the chain so its shard's log continues in it.
+error_code ReplayChain(string_view dir, ShardId sid, uint32_t source_count, AofManifest::Cut cut,
+                       Service* service, shared_ptr<MultiShardExecution> mse, AofResume* resume,
+                       TxId* max_txid) {
+  AofChainReader chain(string(dir), sid, source_count);
   RETURN_ON_ERR(chain.Open(cut.seq));
 
   ExecutionState cntx;
@@ -62,6 +66,10 @@ error_code ReplayChain(string_view dir, ShardId sid, AofManifest::Cut cut, Servi
     return make_error_code(errc::state_not_recoverable);
   }
 
+  // A chain that is not resumed needs no repair: a checkpoint replaces it.
+  if (!resume)
+    return {};
+
   // TODO: resume after a record cut at the end. Only a crash leaves one: a record split across
   // blocks whose first part was written and the rest was not; rotations, shutdowns and heartbeats
   // never split a record across segments. Repair() keeps that block, since rewriting it could tear
@@ -83,20 +91,21 @@ error_code ReplayChain(string_view dir, ShardId sid, AofManifest::Cut cut, Servi
 
 error_code ReplayAof(string_view dir, const AofManifest& manifest, Service* service,
                      vector<AofResume>* resume) {
-  uint32_t shard_count = shard_set->size();
+  // The log's shard count: one chain per source shard, whatever the shard count is now.
+  uint32_t source_count = manifest.cuts.size();
+  bool same_shards = source_count == shard_set->size();
+  auto mse = make_shared<MultiShardExecution>(source_count);
+  vector<error_code> errors(source_count);
+  vector<TxId> max_txids(source_count, 0);
+  resume->clear();
+  if (same_shards)
+    resume->resize(source_count);
 
-  // TODO: replay into a different shard count.
-  if (manifest.cuts.size() != shard_count)
-    return AofError::kShardCountChanged;
-  auto mse = make_shared<MultiShardExecution>(shard_count);
-  vector<error_code> errors(shard_count);
-  vector<TxId> max_txids(shard_count, 0);
-  resume->assign(shard_count, {});
-
-  shard_set->RunBlockingInParallel([&](EngineShard* shard) {
-    ShardId sid = shard->shard_id();
-    errors[sid] =
-        ReplayChain(dir, sid, manifest.cuts[sid], service, mse, &(*resume)[sid], &max_txids[sid]);
+  // One fiber per chain, chain i on proactor i % pool size, as replica flows: with the same shard
+  // count, that is shard i's thread.
+  auto replay = [&](ShardId sid) {
+    errors[sid] = ReplayChain(dir, sid, source_count, manifest.cuts[sid], service, mse,
+                              same_shards ? &(*resume)[sid] : nullptr, &max_txids[sid]);
 
     // A chain that ended, cleanly or torn, never reaches another barrier: stop counting it, so
     // longer chains can run a global command it lacks.
@@ -117,7 +126,15 @@ error_code ReplayAof(string_view dir, const AofManifest& manifest, Service* serv
       // The load fails; release the shards waiting at a barrier.
       mse->CancelAllBlockingEntities();
     }
-  });
+  };
+  util::ProactorPool* pool = shard_set->pool();
+  vector<util::fb2::Fiber> fibers;
+  for (ShardId sid = 0; sid < source_count; ++sid) {
+    fibers.push_back(
+        pool->at(sid % pool->size())->LaunchFiber("aof_replay", [&replay, sid] { replay(sid); }));
+  }
+  for (util::fb2::Fiber& fiber : fibers)
+    fiber.Join();
 
   for (const error_code& ec : errors) {
     if (ec)

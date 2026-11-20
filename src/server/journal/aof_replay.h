@@ -26,8 +26,9 @@ struct AofResume {
 #ifdef __linux__
 
 // Replays every shard's AOF chain from its cut in the manifest, in parallel, global commands
-// meeting at the barrier, and fills resume with where each shard's log continues. Runs while the
-// server is LOADING, after the manifest's base was loaded.
+// meeting at the barrier. Runs while the server is LOADING, after the manifest's base was loaded.
+// With the manifest's shard count, fills resume with where each shard's log continues. With
+// another one, the chains cannot continue: resume stays empty, and a checkpoint must replace them.
 std::error_code ReplayAof(std::string_view dir, const AofManifest& manifest, Service* service,
                           std::vector<AofResume>* resume);
 

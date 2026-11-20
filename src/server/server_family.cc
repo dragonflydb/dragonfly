@@ -1197,7 +1197,8 @@ optional<size_t> CommitAofCheckpoint(const string& base_file, bool owned,
       streamer->OnCheckpoint(cuts[shard->shard_id()].lsn);
   });
   // Also deletes the previous base if the AOF owned it.
-  if (error_code ec = CollectAofGarbage(dir, *manifest, /*remove_discarded=*/true); ec)
+  AofGcOptions gc{.remove_discarded = true, .remove_other_shards = true};
+  if (error_code ec = CollectAofGarbage(dir, *manifest, gc); ec)
     LOG(WARNING) << "Failed to remove AOF segments below the cut: " << ec.message();
   return AofBaseSize(dir, manifest->base_path);
 }
@@ -1275,9 +1276,9 @@ string BootstrapAof(string_view dir, detail::SnapshotStorage* storage, const Aof
 // A replica's full sync was interrupted: the base and log hold the data it was replacing. Starts
 // empty, with paused streamers in new segments past the existing ones, and keeps every file until
 // a new base commits.
-void ResumeRebasing(string_view dir, const AofManifest& manifest) {
-  LOG(WARNING) << "AOF manifest is rebasing: a full sync was interrupted. Starting empty; the old "
-                  "AOF files stay until a new base commits";
+// Starts every shard's streamer paused, in a new segment past each existing one of its shard id, so
+// no file is reused. The next checkpoint's rotation resumes appending.
+void StartPausedStreamers(string_view dir, const AofManifest& manifest) {
   io::Result<vector<string>> files = ListAofFiles(dir);
   if (!files)
     ErrorAndExit(absl::StrCat("failed to list AOF files: ", files.error().message()));
@@ -1298,10 +1299,19 @@ void ResumeRebasing(string_view dir, const AofManifest& manifest) {
   shard_set->RunBriefInParallel([](EngineShard* shard) { shard->aof_streamer()->Pause(); });
 }
 
-// Loads the manifest's base, replays the log on top and resumes it.
-void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
+void ResumeRebasing(string_view dir, const AofManifest& manifest) {
+  LOG(WARNING) << "AOF manifest is rebasing: a full sync was interrupted. Starting empty; the old "
+                  "AOF files stay until a new base commits";
+  StartPausedStreamers(dir, manifest);
+}
+
+// Loads the manifest's base, replays the log on top and resumes it. Returns false if the shard
+// count changed: the old chains cannot continue, so the server stays LOADING with paused
+// streamers until a checkpoint replaces them.
+bool ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
                const AofLoadFn& load) {
-  if (error_code ec = CollectAofGarbage(dir, manifest); ec)
+  AofGcOptions gc{.remove_tmp = true, .remove_other_shards = true};
+  if (error_code ec = CollectAofGarbage(dir, manifest, gc); ec)
     ErrorAndExit(absl::StrCat("failed to remove stale AOF files: ", ec.message()));
   if (!manifest.base_path.empty())
     LoadAofBase(dir, manifest.base_path, load);
@@ -1317,11 +1327,18 @@ void ResumeAof(string_view dir, const AofManifest& manifest, Service* service,
   vector<AofResume> resume;
   if (error_code ec = ReplayAof(dir, manifest, service, &resume); ec)
     ErrorAndExit(absl::StrCat("AOF replay failed: ", ec.message()));
+  if (resume.empty()) {
+    LOG(INFO) << "AOF replayed " << manifest.cuts.size() << " chains into " << shard_set->size()
+              << " shards; a checkpoint replaces them before serving";
+    StartPausedStreamers(dir, manifest);
+    return false;
+  }
   if (!StartStreamers(dir, resume))
     ErrorAndExit("failed to open AOF segments");
 
   AllowExpiryOnAllShards(true);
   service->SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+  return true;
 }
 #endif
 
@@ -1333,6 +1350,10 @@ struct AofBase {
 
   // The manifest was rebasing: nothing was loaded and appending is paused.
   bool rebasing = false;
+
+  // The log was written by another shard count: the server is LOADING, appending is paused, and a
+  // checkpoint must replace the old chains before serving.
+  bool needs_checkpoint = false;
 };
 
 // Restores the data from the AOF, or bootstraps it, then starts logging. Exits if it cannot.
@@ -1351,6 +1372,7 @@ AofBase StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Servi
   // LOADING changes data.
   string base_path;
   bool rebasing = false;
+  bool needs_checkpoint = false;
   shard_set->pool()->GetNextProactor()->Await([&] {
     io::Result<AofManifest> manifest = ReadAofManifest(dir);
     if (!manifest && manifest.error() != errc::no_such_file_or_directory)
@@ -1370,7 +1392,7 @@ AofBase StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Servi
       return;
     }
     if (manifest) {
-      ResumeAof(dir, *manifest, service, load);
+      needs_checkpoint = !ResumeAof(dir, *manifest, service, load);
       base_path = manifest->base_path;
       return;
     }
@@ -1388,7 +1410,8 @@ AofBase StartAof(const string& flag_dir, detail::SnapshotStorage* storage, Servi
       ErrorAndExit(absl::StrCat("AOF files in ", dir, " but no manifest, e.g. ", files->front()));
     base_path = BootstrapAof(dir, storage, load);
   });
-  return {base_path, base_path.empty() ? 0 : AofBaseSize(dir, base_path), rebasing};
+  return {base_path, base_path.empty() ? 0 : AofBaseSize(dir, base_path), rebasing,
+          needs_checkpoint};
 #else
   ErrorAndExit("--aof is supported only on Linux");
 #endif
@@ -1793,6 +1816,17 @@ void ServerFamily::Init(util::AcceptServer* acceptor, std::vector<facade::Listen
       data->aof_base_size = base.size;
     });
     aof_rebasing_ = base.rebasing;
+
+    // Still LOADING: no client writes before the new base covers the replayed data.
+    if (base.needs_checkpoint) {
+      GenericError ec = service_.proactor_pool().GetNextProactor()->Await(
+          [this] { return DoAofCheckpoint(/*ignore_state=*/true); });
+      if (ec)
+        ErrorAndExit(
+            absl::StrCat("AOF checkpoint after a shard count change failed: ", ec.Format()));
+      AllowExpiryOnAllShards(true);
+      service_.SwitchState(GlobalState::LOADING, GlobalState::ACTIVE);
+    }
     aof_checkpoint_fb_ = service_.proactor_pool().GetNextProactor()->LaunchFiber(
         "aof_checkpoint", [this] { AofCheckpointScheduling(); });
   }
@@ -2198,7 +2232,7 @@ void ServerFamily::RequestAofRebase() {
     aof_rebase_requested_ = true;
 }
 
-GenericError ServerFamily::DoAofCheckpoint() {
+GenericError ServerFamily::DoAofCheckpoint(bool ignore_state) {
 #ifdef __linux__
   string dir = GetFlag(FLAGS_dir).empty() ? "." : GetFlag(FLAGS_dir);
   io::Result<AofManifest> manifest = ReadAofManifest(dir);
@@ -2206,7 +2240,8 @@ GenericError ServerFamily::DoAofCheckpoint() {
     return GenericError(manifest.error(), "Failed to read the AOF manifest");
 
   // An earlier attempt whose commit failed may have left a base under the same name.
-  if (error_code ec = CollectAofGarbage(dir, *manifest); ec)
+  // The manifest may predate the current shard count, so other shards' segments stay.
+  if (error_code ec = CollectAofGarbage(dir, *manifest, {}); ec)
     return GenericError(ec, "Failed to remove stale AOF files");
 
   // The name of the checkpoint it commits as; only one save runs at a time.
@@ -2215,12 +2250,12 @@ GenericError ServerFamily::DoAofCheckpoint() {
   CHECK_NOTNULL(cid);
   boost::intrusive_ptr<Transaction> trans(new Transaction{cid});
   trans->InitByArgs(&namespaces->GetDefaultNamespace(), 0, {});
-  DoSaveCheckAndStartOpts opts{.aof_owned_base = true};
+  DoSaveCheckAndStartOpts opts{.ignore_state = ignore_state, .aof_owned_base = true};
   if (GenericError ec = DoSaveCheckAndStart(SaveCmdOptions{true, {}, basename}, trans.get(), opts);
       ec) {
     return ec;
   }
-  return WaitUntilSaveFinished(trans.get());
+  return WaitUntilSaveFinished(trans.get(), ignore_state);
 #else
   return GenericError(make_error_code(errc::not_supported), "--aof is supported only on Linux");
 #endif
