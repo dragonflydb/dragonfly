@@ -24,67 +24,6 @@ namespace detail {
 #pragma GCC optimize("Ofast")
 #endif
 
-// Daniel Lemire's function validate_ascii_fast() - under Apache/MIT license.
-// See https://github.com/lemire/fastvalidate-utf-8/
-// The function returns true (1) if all chars passed in src are
-// 7-bit values (0x00..0x7F). Otherwise, it returns false (0).
-#ifdef __s390x__
-bool validate_ascii_fast(const char* src, size_t len) {
-  size_t i = 0;
-
-  // Initialize a vector in which all the elements are set to zero.
-  vector unsigned char has_error = vec_splat_s8(0);
-  if (len >= 16) {
-    for (; i <= len - 16; i += 16) {
-      // Load 16 bytes from buffer into a vector.
-      vector unsigned char current_bytes = vec_load_len((signed char*)(src + i), 16);
-      // Perform a bitwise OR operation between the current and the previously loaded contents.
-      has_error = vec_orc(has_error, current_bytes);
-    }
-  }
-
-  // Initialize a vector in which all the elements are set to an invalid ASCII value.
-  vector unsigned char rep_invalid_values = vec_splat_s8(0x80);
-
-  // Perform bitwise AND-complement operation between two vectors.
-  vector unsigned char andc_result = vec_andc(rep_invalid_values, has_error);
-
-  // Tests whether any of corresponding elements of the given vectors are not equal.
-  // After the bitwise operation, both vectors should be equal if ASCII values.
-  if (!vec_all_eq(rep_invalid_values, andc_result)) {
-    return false;
-  }
-
-  for (; i < len; i++) {
-    if (src[i] & 0x80) {
-      return false;
-    }
-  }
-
-  return true;
-}
-#else
-bool validate_ascii_fast(const char* src, size_t len) {
-  size_t i = 0;
-  __m128i has_error = _mm_setzero_si128();
-  if (len >= 16) {
-    for (; i <= len - 16; i += 16) {
-      __m128i current_bytes = mm_loadu_si128((const __m128i*)(src + i));
-      has_error = _mm_or_si128(has_error, current_bytes);
-    }
-  }
-  int error_mask = _mm_movemask_epi8(has_error);
-
-  char tail_has_error = 0;
-  for (; i < len; i++) {
-    tail_has_error |= src[i];
-  }
-  error_mask |= (tail_has_error & 0x80);
-
-  return !error_mask;
-}
-#endif
-
 uint8_t ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx) {
   DCHECK(idx < ascii_len) << "Index oob for ascii byte unpacking: " << idx << " >= " << ascii_len;
   const size_t packed_groups = ascii_len / 8;
@@ -124,37 +63,8 @@ void ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t val) {
   ascii_try_pack(buf, 8, group_bin);
 }
 
-// compares packed and unpacked strings. packed must be of length = binpacked_len(ascii_len).
-bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len) {
-  unsigned i = 0;
-  bool res = true;
-  const char* end = ascii + ascii_len;
-
-  while (ascii + 8 <= end) {
-    for (i = 0; i < 7; ++i) {
-      uint8_t conv = (ascii[0] >> i) | (ascii[1] << (7 - i));
-      res &= (conv == *packed);
-      ++ascii;
-      ++packed;
-    }
-
-    if (!res)
-      return false;
-
-    ++ascii;
-  }
-
-  while (ascii < end) {
-    if (*ascii++ != *packed++) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 // ---------------------------------------------------------------------------
-// ascii_try_pack / ascii_unpack_fast
+// ascii_try_pack / ascii_unpack_fast / ascii_compare_packed
 //
 // ---------------------------------------------------------------------------
 
@@ -215,6 +125,24 @@ inline uint64_t CopyTailBytes(const uint8_t* src, size_t len, uint8_t* dest) {
     dest[0] = src[0];
     return src[0];
   }
+
+  return 0;
+}
+
+// Compares less than 8 bytes with the same loads as CopyTailBytes. Returns zero if they are equal.
+inline uint64_t DiffTailBytes(const uint8_t* a, const uint8_t* b, size_t len) {
+  if (len >= 4) {
+    return (absl::little_endian::Load32(a) ^ absl::little_endian::Load32(b)) |
+           (absl::little_endian::Load32(a + len - 4) ^ absl::little_endian::Load32(b + len - 4));
+  }
+
+  if (len >= 2) {
+    return (absl::little_endian::Load16(a) ^ absl::little_endian::Load16(b)) |
+           (absl::little_endian::Load16(a + len - 2) ^ absl::little_endian::Load16(b + len - 2));
+  }
+
+  if (len == 1)
+    return a[0] ^ b[0];
 
   return 0;
 }
@@ -633,20 +561,137 @@ size_t ascii_try_pack_avx2(const char* ascii, size_t len, uint8_t* bin) {
 
 namespace {
 
-inline __attribute__((always_inline)) void AsciiUnpackFastScalar(const uint8_t* bin,
-                                                                 size_t ascii_len, char* ascii) {
+// The unpack kernels below hand what they decode to a sink, so the same loops either store it or
+// compare it against a string that is already unpacked. Every call returns whether to go on, which
+// lets a comparison stop at the first difference. Kernels take their sink by value: behind a
+// reference, every store through `ascii_` could alias the pointer itself and force a reload.
+class StoreSink {
+ public:
+  explicit StoreSink(char* ascii) : ascii_(reinterpret_cast<uint8_t*>(ascii)) {
+  }
+
+  bool Word(uint64_t val) {
+    absl::little_endian::Store64(ascii_, val);
+    ascii_ += 8;
+    return true;
+  }
+
+#if defined(ASCII_SSE4_1)
+  bool Block(__m128i val) {
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(ascii_), val);
+    ascii_ += 16;
+    return true;
+  }
+#endif
+
+#if defined(ASCII_AVX2)
+  bool Block(__m256i val) {
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(ascii_), val);
+    ascii_ += 32;
+    return true;
+  }
+#endif
+
+#if defined(ASCII_NEON)
+  bool Block(uint8x16_t val) {
+    vst1q_u8(ascii_, val);
+    ascii_ += 16;
+    return true;
+  }
+
+  bool Block(uint8x16x2_t val) {
+    vst1q_u8(ascii_, val.val[0]);
+    vst1q_u8(ascii_ + 16, val.val[1]);
+    ascii_ += 32;
+    return true;
+  }
+#endif
+
+  // Takes the last bytes, less than 8, which are kept verbatim in `bin`.
+  bool Tail(const uint8_t* bin, size_t len) {
+    CopyTailBytes(bin, len, ascii_);
+    return true;
+  }
+
+ private:
+  uint8_t* ascii_;
+};
+
+// Unpacked bytes never have the high bit set, so a non-ascii byte in `ascii` is just a mismatch.
+class CompareSink {
+ public:
+  explicit CompareSink(const char* ascii) : ascii_(reinterpret_cast<const uint8_t*>(ascii)) {
+  }
+
+  bool Word(uint64_t val) {
+    const bool equal = absl::little_endian::Load64(ascii_) == val;
+    ascii_ += 8;
+    return equal;
+  }
+
+#if defined(ASCII_SSE4_1)
+  bool Block(__m128i val) {
+    const __m128i diff =
+        _mm_xor_si128(val, _mm_loadu_si128(reinterpret_cast<const __m128i*>(ascii_)));
+    ascii_ += 16;
+    return _mm_testz_si128(diff, diff);
+  }
+#endif
+
+#if defined(ASCII_AVX2)
+  bool Block(__m256i val) {
+    const __m256i diff =
+        _mm256_xor_si256(val, _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ascii_)));
+    ascii_ += 32;
+    return _mm256_testz_si256(diff, diff);
+  }
+#endif
+
+#if defined(ASCII_NEON)
+  bool Block(uint8x16_t val) {
+    const uint8x16_t diff = veorq_u8(val, vld1q_u8(ascii_));
+    ascii_ += 16;
+    return IsZero(diff);
+  }
+
+  // Folds both halves into one vector first, so that they cost a single test and branch.
+  bool Block(uint8x16x2_t val) {
+    const uint8x16_t diff = vorrq_u8(veorq_u8(val.val[0], vld1q_u8(ascii_)),
+                                     veorq_u8(val.val[1], vld1q_u8(ascii_ + 16)));
+    ascii_ += 32;
+    return IsZero(diff);
+  }
+#endif
+
+  bool Tail(const uint8_t* bin, size_t len) {
+    return DiffTailBytes(bin, ascii_, len) == 0;
+  }
+
+ private:
+#if defined(ASCII_NEON)
+  // vpmaxq folds neighbouring bytes, so the low 64 bits are zero only if all 16 bytes are. vmaxvq
+  // would fold all 16 at once, but it takes 6 cycles on a single pipe.
+  static bool IsZero(uint8x16_t val) {
+    return vgetq_lane_u64(vreinterpretq_u64_u8(vpmaxq_u8(val, val)), 0) == 0;
+  }
+#endif
+
+  const uint8_t* ascii_;
+};
+
+template <typename Sink>
+inline __attribute__((always_inline)) bool AsciiDecodeScalar(const uint8_t* bin, size_t ascii_len,
+                                                             Sink sink) {
   constexpr uint64_t kSevenBytes = 0x00FFFFFFFFFFFFFFULL;
 
-  if (ascii_len < 8) {
-    CopyTailBytes(bin, ascii_len, reinterpret_cast<uint8_t*>(ascii));
-    return;
-  }
+  if (ascii_len < 8)
+    return sink.Tail(bin, ascii_len);
 
   while (ascii_len >= 9) {
     const uint64_t val = absl::little_endian::Load64(bin) & kSevenBytes;
-    absl::little_endian::Store64(ascii, Unpack7BytesTo8(val));
+    if (!sink.Word(Unpack7BytesTo8(val)))
+      return false;
     bin += 7;
-    ascii += 8;
     ascii_len -= 8;
   }
 
@@ -654,13 +699,17 @@ inline __attribute__((always_inline)) void AsciiUnpackFastScalar(const uint8_t* 
     // Two overlapping loads read exactly seven bytes.
     const uint64_t val = absl::little_endian::Load32(bin) |
                          (static_cast<uint64_t>(absl::little_endian::Load32(bin + 3)) << 24);
-    absl::little_endian::Store64(ascii, Unpack7BytesTo8(val));
-    return;
+    return sink.Word(Unpack7BytesTo8(val));
   }
 
   // CopyTailBytesOverPrev would reuse the last expanded word, but keeping it live makes every loop
   // iteration feed the tail, so the loop can no longer run ahead of its stores.
-  CopyTailBytes(bin, ascii_len, reinterpret_cast<uint8_t*>(ascii));
+  return sink.Tail(bin, ascii_len);
+}
+
+inline __attribute__((always_inline)) void AsciiUnpackFastScalar(const uint8_t* bin,
+                                                                 size_t ascii_len, char* ascii) {
+  AsciiDecodeScalar(bin, ascii_len, StoreSink{ascii});
 }
 
 #if defined(ASCII_SSE4_1)
@@ -678,6 +727,43 @@ inline __m128i Unpack14BytesTo16(__m128i val) {
   // moves them up by one bit without a byte blend.
   val = _mm_add_epi16(val, _mm_and_si128(val, _mm_set1_epi16(static_cast<int16_t>(0xFF80))));
   return _mm_and_si128(val, _mm_set1_epi8(0x7F));
+}
+
+// No load reaches past the packed bytes, see CompactObjectTest.AsanTriggerReadOverflow.
+template <typename Sink>
+inline __attribute__((always_inline)) bool AsciiDecodeSse(const uint8_t* bin, size_t ascii_len,
+                                                          Sink sink) {
+  // Testing this first keeps short strings from paying for the block checks below.
+  if (ascii_len < kAsciiPerUnpackSseBlock)
+    return AsciiDecodeScalar(bin, ascii_len, sink);
+
+  // Read the control backwards: bytes 0..6, a zero, then 7..14, the same as in Unpack28BytesTo32.
+  const __m128i control = _mm_set_epi8(14, 13, 12, 11, 10, 9, 8, 7, -1, 6, 5, 4, 3, 2, 1, 0);
+
+  // Each load takes 16 bytes and so reads 2 past the block, which is why the loop stops 2 early.
+  while (ascii_len >= kAsciiPerUnpackSseBlock + 2) {
+    const __m128i val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bin));
+    if (!sink.Block(Unpack14BytesTo16(_mm_shuffle_epi8(val, control))))
+      return false;
+    bin += kPackedPerUnpackSseBlock;
+    ascii_len -= kAsciiPerUnpackSseBlock;
+  }
+
+  // The final block has nothing after it to over-read, so two 8-byte loads fetch exactly its bytes,
+  // 0..7 and 6..13, and the control skips the two they share.
+  if (ascii_len >= kAsciiPerUnpackSseBlock) {
+    const __m128i control_last =
+        _mm_set_epi8(-1, 15, 14, 13, 12, 11, 10, 9, -1, 6, 5, 4, 3, 2, 1, 0);
+    const __m128i val =
+        _mm_unpacklo_epi64(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(bin)),
+                           _mm_loadl_epi64(reinterpret_cast<const __m128i*>(bin + 6)));
+    if (!sink.Block(Unpack14BytesTo16(_mm_shuffle_epi8(val, control_last))))
+      return false;
+    bin += kPackedPerUnpackSseBlock;
+    ascii_len -= kAsciiPerUnpackSseBlock;
+  }
+
+  return AsciiDecodeScalar(bin, ascii_len, sink);
 }
 #endif
 
@@ -706,8 +792,9 @@ inline __m256i Unpack28BytesTo32(__m256i val) {
   return _mm256_and_si256(val, _mm256_set1_epi8(0x7F));
 }
 
-__attribute__((noinline)) void AsciiUnpackAvx2Loop(const uint8_t* bin, size_t ascii_len,
-                                                   char* ascii) {
+template <typename Sink>
+__attribute__((noinline)) bool AsciiDecodeAvx2Loop(const uint8_t* bin, size_t ascii_len,
+                                                   Sink sink) {
   // A block's two halves are 14 bytes apart, so they are loaded separately and joined: castsi128
   // widens the low one for free and inserti128 drops the other into the upper half. Each load
   // takes 16 bytes and therefore reads 2 past its half, which is why the loop stops 2 bytes early.
@@ -715,9 +802,9 @@ __attribute__((noinline)) void AsciiUnpackAvx2Loop(const uint8_t* bin, size_t as
     const __m128i low = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bin));
     const __m128i high = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bin + 14));
     __m256i val = _mm256_inserti128_si256(_mm256_castsi128_si256(low), high, 1);
-    _mm256_storeu_si256(reinterpret_cast<__m256i*>(ascii), Unpack28BytesTo32(val));
+    if (!sink.Block(Unpack28BytesTo32(val)))
+      return false;
     bin += kPackedPerUnpackAvx2Block;
-    ascii += kAsciiPerUnpackAvx2Block;
     ascii_len -= kAsciiPerUnpackAvx2Block;
   }
   // The final block has nothing after it to over-read, so its upper half is loaded 2 bytes early
@@ -727,73 +814,93 @@ __attribute__((noinline)) void AsciiUnpackAvx2Loop(const uint8_t* bin, size_t as
     const __m128i high =
         _mm_srli_si128(_mm_loadu_si128(reinterpret_cast<const __m128i*>(bin + 12)), 2);
     __m256i val = _mm256_inserti128_si256(_mm256_castsi128_si256(low), high, 1);
-    _mm256_storeu_si256(reinterpret_cast<__m256i*>(ascii), Unpack28BytesTo32(val));
+    if (!sink.Block(Unpack28BytesTo32(val)))
+      return false;
     bin += kPackedPerUnpackAvx2Block;
-    ascii += kAsciiPerUnpackAvx2Block;
     ascii_len -= kAsciiPerUnpackAvx2Block;
   }
-  AsciiUnpackFastScalar(bin, ascii_len, ascii);
+  return AsciiDecodeScalar(bin, ascii_len, sink);
+}
+
+template <typename Sink>
+inline bool AsciiDecodeAvx2(const uint8_t* bin, size_t ascii_len, Sink sink) {
+  if (ascii_len >= kAsciiPerUnpackAvx2Block)
+    return AsciiDecodeAvx2Loop(bin, ascii_len, sink);
+  return AsciiDecodeScalar(bin, ascii_len, sink);
 }
 #elif defined(ASCII_NEON)
-// Expects the packed bytes in the low 56 bits of each 64-bit lane, so the stages run widest first
-// and vsli lays the upper half of every field back above the lower one.
-inline uint8x16_t Unpack14BytesTo16(uint8x16_t val, uint8x16_t ascii_mask) {
-  uint64x2_t v64 = vreinterpretq_u64_u8(val);
-  v64 = vsliq_n_u64(v64, vshrq_n_u64(v64, 28), 32);
-  uint32x4_t v32 = vreinterpretq_u32_u64(v64);
-  v32 = vsliq_n_u32(v32, vshrq_n_u32(v32, 14), 16);
-  uint16x8_t v16 = vreinterpretq_u16_u32(v32);
-  v16 = vsliq_n_u16(v16, vshrq_n_u16(v16, 7), 8);
-  return vandq_u8(vreinterpretq_u8_u16(v16), ascii_mask);  // clears what shifted in from below
+constexpr size_t kAsciiPerUnpackNeonBlock = 16;
+constexpr size_t kPackedPerUnpackNeonBlock = 14;
+
+// Character j of a group of seven packed bytes occupies bits [7j, 7j + 7), which lie within the
+// 16-bit window that starts at byte 7j / 8. A table gathers these windows into 16-bit lanes, and a
+// per-lane shift right by 7j % 8 brings each character down to bit 0. Vector shifts issue to only
+// one of the two vector pipes, and this way a block needs just two of them. The first group starts
+// at byte 0 of `raw`, the second at byte kSecondGroup.
+template <uint8_t kSecondGroup> inline uint8x16_t Unpack14BytesTo16(uint8x16_t raw) {
+  // The result doesn't depend on the upper bytes of lanes 0 and 7: lane 0 isn't shifted, and the
+  // one bit lane 7 shifts in is cleared by the mask below. So their windows may point anywhere,
+  // even out of range, where vqtbl1q emits zero.
+  const uint8x16_t windows = {0, 1, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7};
+  const int16x8_t shifts = {0, -7, -6, -5, -4, -3, -2, -1};  // negative counts shift right
+  const uint8x16_t second_windows = vaddq_u8(windows, vdupq_n_u8(kSecondGroup));
+  const uint16x8_t low = vshlq_u16(vreinterpretq_u16_u8(vqtbl1q_u8(raw, windows)), shifts);
+  const uint16x8_t high = vshlq_u16(vreinterpretq_u16_u8(vqtbl1q_u8(raw, second_windows)), shifts);
+
+  // Every character is now in the low byte of its lane, under one bit of the next character.
+  return vandq_u8(vuzp1q_u8(vreinterpretq_u8_u16(low), vreinterpretq_u8_u16(high)),
+                  vdupq_n_u8(0x7F));
 }
 
-// Two 8-byte loads stay inside the 14 packed bytes, unlike the 16-byte load the loop uses, so this
-// also serves the last block of a buffer.
-inline void UnpackTail14BytesTo16(const uint8_t* bin, char* ascii, uint8x16_t ascii_mask) {
-  // Indices of 0xFF are out of range for vqtbl1q, which makes it emit zero: that is how the gap
-  // at byte 7 of each half is opened, leaving seven packed bytes in the low 56 bits of each lane.
-  const uint8x16_t control = {0, 1, 2, 3, 4, 5, 6, 0xFF, 9, 10, 11, 12, 13, 14, 15, 0xFF};
-  const uint8x16_t raw = vcombine_u8(vld1_u8(bin), vld1_u8(bin + 6));
-  vst1q_u8(reinterpret_cast<uint8_t*>(ascii),
-           Unpack14BytesTo16(vqtbl1q_u8(raw, control), ascii_mask));
+// Two 8-byte loads stay inside the 14 packed bytes, unlike the 16-byte loads below, so this also
+// serves the last block of a buffer. They fetch bytes 0..7 and 6..13, which moves the second group
+// up to byte 9.
+inline uint8x16_t UnpackLast14BytesTo16(const uint8_t* bin) {
+  return Unpack14BytesTo16<9>(vcombine_u8(vld1_u8(bin), vld1_u8(bin + 6)));
 }
 
-// Decodes 14-byte blocks two at a time while they last, so that the two independent chains keep
-// the store pipe busy.
-inline void AsciiUnpackNeonLoop(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  const uint8x16_t ascii_mask = vdupq_n_u8(0x7F);
-  const uint8x16_t control = {0, 1, 2, 3, 4, 5, 6, 0xFF, 7, 8, 9, 10, 11, 12, 13, 0xFF};
-  // Each 16-byte load reads 2 bytes past the 14 it needs, so the last block is left to the tail.
-  const size_t simd_len = ((ascii_len - 2) / 16) * 16;
-  const char* end = ascii + simd_len;
-  const char* paired_end = ascii + (simd_len & ~size_t{31});
+template <typename Sink>
+inline __attribute__((always_inline)) bool AsciiDecodeNeon(const uint8_t* bin, size_t ascii_len,
+                                                           Sink sink) {
+  if (ascii_len < kAsciiPerUnpackNeonBlock)
+    return AsciiDecodeScalar(bin, ascii_len, sink);
 
-  while (ascii < paired_end) {
-    const uint8x16_t low = vqtbl1q_u8(vld1q_u8(bin), control);
-    const uint8x16_t high = vqtbl1q_u8(vld1q_u8(bin + 14), control);
-    uint8_t* dest = reinterpret_cast<uint8_t*>(ascii);
-    vst1q_u8(dest, Unpack14BytesTo16(low, ascii_mask));
-    vst1q_u8(dest + 16, Unpack14BytesTo16(high, ascii_mask));
-    ascii += 32;
-    bin += 28;
+  // A single block plus the scalar tail covers these. They could take the steps below as well,
+  // but that measured slower at 18..31 bytes.
+  if (ascii_len < 2 * kAsciiPerUnpackNeonBlock) {
+    if (!sink.Block(UnpackLast14BytesTo16(bin)))
+      return false;
+    return AsciiDecodeScalar(bin + kPackedPerUnpackNeonBlock, ascii_len - kAsciiPerUnpackNeonBlock,
+                             sink);
   }
 
-  if (ascii < end) {
-    vst1q_u8(reinterpret_cast<uint8_t*>(ascii),
-             Unpack14BytesTo16(vqtbl1q_u8(vld1q_u8(bin), control), ascii_mask));
-    ascii += 16;
-    bin += 14;
-  }
-  ascii_len -= simd_len;
-
-  if (ascii_len >= 16) {
-    UnpackTail14BytesTo16(bin, ascii, ascii_mask);
-    ascii += 16;
-    bin += 14;
-    ascii_len -= 16;
+  // Two blocks per iteration halve the loop overhead, and CompareSink tests them with one branch.
+  // Each 16-byte load reads 2 bytes past the 14 it needs, which is why the next two steps stop 2
+  // bytes early.
+  while (ascii_len >= 2 * kAsciiPerUnpackNeonBlock + 2) {
+    const uint8x16_t low = vld1q_u8(bin);
+    const uint8x16_t high = vld1q_u8(bin + kPackedPerUnpackNeonBlock);
+    if (!sink.Block(uint8x16x2_t{{Unpack14BytesTo16<7>(low), Unpack14BytesTo16<7>(high)}}))
+      return false;
+    bin += 2 * kPackedPerUnpackNeonBlock;
+    ascii_len -= 2 * kAsciiPerUnpackNeonBlock;
   }
 
-  AsciiUnpackFastScalar(bin, ascii_len, ascii);
+  if (ascii_len >= kAsciiPerUnpackNeonBlock + 2) {
+    if (!sink.Block(Unpack14BytesTo16<7>(vld1q_u8(bin))))
+      return false;
+    bin += kPackedPerUnpackNeonBlock;
+    ascii_len -= kAsciiPerUnpackNeonBlock;
+  }
+
+  if (ascii_len >= kAsciiPerUnpackNeonBlock) {
+    if (!sink.Block(UnpackLast14BytesTo16(bin)))
+      return false;
+    bin += kPackedPerUnpackNeonBlock;
+    ascii_len -= kAsciiPerUnpackNeonBlock;
+  }
+
+  return AsciiDecodeScalar(bin, ascii_len, sink);
 }
 #endif
 
@@ -806,65 +913,35 @@ void ascii_unpack_fast_scalar(const uint8_t* bin, size_t ascii_len, char* ascii)
   AsciiUnpackFastScalar(bin, ascii_len, ascii);
 }
 
+bool ascii_compare_packed_scalar(const uint8_t* bin, size_t ascii_len, const char* ascii) {
+  return AsciiDecodeScalar(bin, ascii_len, CompareSink{ascii});
+}
+
 #if defined(ASCII_SSE4_1)
-// No load reaches past the packed bytes, see CompactObjectTest.AsanTriggerReadOverflow.
 void ascii_unpack_fast_sse(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  // Testing this first keeps short strings from paying for the block checks below.
-  if (ascii_len < kAsciiPerUnpackSseBlock) {
-    AsciiUnpackFastScalar(bin, ascii_len, ascii);
-    return;
-  }
+  AsciiDecodeSse(bin, ascii_len, StoreSink{ascii});
+}
 
-  // Read the control backwards: bytes 0..6, a zero, then 7..14, the same as in Unpack28BytesTo32.
-  const __m128i control = _mm_set_epi8(14, 13, 12, 11, 10, 9, 8, 7, -1, 6, 5, 4, 3, 2, 1, 0);
-
-  // Each load takes 16 bytes and so reads 2 past the block, which is why the loop stops 2 early.
-  while (ascii_len >= kAsciiPerUnpackSseBlock + 2) {
-    const __m128i val = _mm_loadu_si128(reinterpret_cast<const __m128i*>(bin));
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(ascii),
-                     Unpack14BytesTo16(_mm_shuffle_epi8(val, control)));
-    bin += kPackedPerUnpackSseBlock;
-    ascii += kAsciiPerUnpackSseBlock;
-    ascii_len -= kAsciiPerUnpackSseBlock;
-  }
-
-  // The final block has nothing after it to over-read, so two 8-byte loads fetch exactly its bytes,
-  // 0..7 and 6..13, and the control skips the two they share.
-  if (ascii_len >= kAsciiPerUnpackSseBlock) {
-    const __m128i control_last =
-        _mm_set_epi8(-1, 15, 14, 13, 12, 11, 10, 9, -1, 6, 5, 4, 3, 2, 1, 0);
-    const __m128i val =
-        _mm_unpacklo_epi64(_mm_loadl_epi64(reinterpret_cast<const __m128i*>(bin)),
-                           _mm_loadl_epi64(reinterpret_cast<const __m128i*>(bin + 6)));
-    _mm_storeu_si128(reinterpret_cast<__m128i*>(ascii),
-                     Unpack14BytesTo16(_mm_shuffle_epi8(val, control_last)));
-    bin += kPackedPerUnpackSseBlock;
-    ascii += kAsciiPerUnpackSseBlock;
-    ascii_len -= kAsciiPerUnpackSseBlock;
-  }
-
-  AsciiUnpackFastScalar(bin, ascii_len, ascii);
+bool ascii_compare_packed_sse(const uint8_t* bin, size_t ascii_len, const char* ascii) {
+  return AsciiDecodeSse(bin, ascii_len, CompareSink{ascii});
 }
 #endif
 
 #if defined(ASCII_AVX2)
 void ascii_unpack_fast_avx2(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  if (ascii_len >= kAsciiPerUnpackAvx2Block) {
-    AsciiUnpackAvx2Loop(bin, ascii_len, ascii);
-  } else {
-    AsciiUnpackFastScalar(bin, ascii_len, ascii);
-  }
+  AsciiDecodeAvx2(bin, ascii_len, StoreSink{ascii});
+}
+
+bool ascii_compare_packed_avx2(const uint8_t* bin, size_t ascii_len, const char* ascii) {
+  return AsciiDecodeAvx2(bin, ascii_len, CompareSink{ascii});
 }
 #elif defined(ASCII_NEON)
 void ascii_unpack_fast_neon(const uint8_t* bin, size_t ascii_len, char* ascii) {
-  if (ascii_len < 16) {
-    AsciiUnpackFastScalar(bin, ascii_len, ascii);
-  } else if (ascii_len < 32) {
-    UnpackTail14BytesTo16(bin, ascii, vdupq_n_u8(0x7F));
-    AsciiUnpackFastScalar(bin + 14, ascii_len - 16, ascii + 16);
-  } else {
-    AsciiUnpackNeonLoop(bin, ascii_len, ascii);
-  }
+  AsciiDecodeNeon(bin, ascii_len, StoreSink{ascii});
+}
+
+bool ascii_compare_packed_neon(const uint8_t* bin, size_t ascii_len, const char* ascii) {
+  return AsciiDecodeNeon(bin, ascii_len, CompareSink{ascii});
 }
 #endif
 
