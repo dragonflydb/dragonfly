@@ -86,6 +86,7 @@ class Service : public facade::ServiceInterface {
   void OnConnectionClose(facade::ConnectionContext* cntx) final;
 
   Service::ContextInfo GetContextInfo(facade::ConnectionContext* cntx) const final;
+  std::string GetTxDebugInfo(facade::ConnectionContext* cntx) const final;
 
   uint32_t shard_count() const {
     return shard_set->size();

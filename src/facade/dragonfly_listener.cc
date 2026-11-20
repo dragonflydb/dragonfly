@@ -401,11 +401,12 @@ ProactorBase* Listener::PickConnectionProactor(util::FiberSocketBase* sock) {
 
 DispatchTracker::DispatchTracker(absl::Span<facade::Listener* const> listeners,
                                  facade::Connection* issuer, bool ignore_paused,
-                                 bool ignore_blocked)
+                                 bool ignore_blocked, std::function<void()> on_stuck)
     : listeners_{listeners.begin(), listeners.end()},
       issuer_{issuer},
       ignore_paused_{ignore_paused},
-      ignore_blocked_{ignore_blocked} {
+      ignore_blocked_{ignore_blocked},
+      on_stuck_{std::move(on_stuck)} {
 }
 
 void DispatchTracker::TrackOnThread() {
@@ -427,7 +428,23 @@ bool DispatchTracker::Wait(absl::Duration duration) {
     res = bc_->WaitFor(absl::ToChronoMilliseconds(duration));
     LOG_IF(INFO, !res) << "DispatchTracker::Wait failed again, bc=" << bc_->DEBUG_Count();
   }
+
+  // Log before returning, while the caller still holds clients paused.
+  if (!res && on_stuck_)
+    LogStuckState();
   return res;
+}
+
+void DispatchTracker::LogStuckState() {
+  LOG(WARNING) << "DispatchTrackerStuck: bc=" << bc_->DEBUG_Count()
+               << " waiting_ms=" << absl::ToInt64Milliseconds(absl::Now() - start_);
+  for (auto* listener : listeners_) {
+    listener->TraverseConnections([](unsigned thread_index, util::Connection* conn) {
+      if (string info = static_cast<facade::Connection*>(conn)->DispatchStuckInfo(); !info.empty())
+        LOG(WARNING) << "DispatchTrackerStuck: conn " << info;
+    });
+  }
+  on_stuck_();
 }
 
 void DispatchTracker::TrackAll() {
