@@ -425,14 +425,13 @@ bool OutgoingMigration::FinalizeMigration(long attempt) {
     ResetReplyParser();
   }
 
-  // Migration finalization has to be done via client pause because commands need to
-  // be blocked on coordinator level to avoid intializing transactions with stale cluster slot info
-  // TODO implement blocking on migrated slots only
+  // Pause the migrating slots on coordinators before initializing transactions, so commands
+  // recheck slot ownership after the handoff. Requests for other slots can continue running.
   bool is_block_active = true;
   auto is_pause_in_progress = [&is_block_active] { return is_block_active; };
-  auto pause_fb_opt =
-      dfly::Pause(server_family_->GetNonPriviligedListeners(), &namespaces->GetDefaultNamespace(),
-                  nullptr, ClientPause::ALL, is_pause_in_progress);
+  auto pause_fb_opt = dfly::Pause(server_family_->GetNonPriviligedListeners(),
+                                  &namespaces->GetDefaultNamespace(), nullptr, ClientPause::SLOTS,
+                                  is_pause_in_progress, {}, migration_info_.slot_ranges);
 
   if (!pause_fb_opt) {
     auto err = absl::StrCat("Migration finalization time out ", cf_->MyID(), " : ",

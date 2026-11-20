@@ -29,6 +29,7 @@
 #include "server/journal/journal.h"
 #include "server/journal/serializer.h"
 #include "server/namespaces.h"
+#include "server/server_state.h"
 #include "server/test_utils.h"
 #include "server/tiered_storage.h"
 #include "util/fibers/fibers.h"
@@ -62,6 +63,19 @@ class ClusterFamilyTest : public BaseFamilyTest {
     return Run({"cluster", "myid"}).GetString();
   }
 
+  void SetSlotPause(const SlotRanges& slots, bool active) {
+    pp_->AwaitBrief([&](unsigned, util::ProactorBase*) {
+      ServerState::tlocal()->SetPauseState(ClientPause::SLOTS, active, slots);
+    });
+  }
+
+  bool IsClientPaused(string_view id) {
+    return pp_->at(0)->AwaitBrief([&] {
+      auto* conn = GetConnection(id);
+      return conn && conn->cntx()->paused;
+    });
+  }
+
   void ConfigSingleNodeCluster(string id) {
     string config_template = R"json(
       [
@@ -85,6 +99,161 @@ class ClusterFamilyTest : public BaseFamilyTest {
     EXPECT_EQ(RunPrivileged({"dflycluster", "config", config}), "OK");
   }
 };
+
+TEST_F(ClusterFamilyTest, MigrationPauseCommands) {
+  ConfigSingleNodeCluster(GetMyId());
+  const string value(64, 'v');
+  EXPECT_EQ(Run({"SET", "{moving}key", value, "PX", "1000"}), "OK");
+  EXPECT_EQ(Run({"SET", "{remaining}key", value}), "OK");
+  EXPECT_EQ(Run({"SET", "{expired}key", value, "PX", "1000"}), "OK");
+
+  const SlotId slot = KeySlot("{moving}key");
+  const SlotRanges slots({{slot, slot}});
+  SetSlotPause(slots, true);
+
+  const vector<vector<string_view>> commands = {
+      {"GET", "{moving}key"},
+      {"MSET", "{moving}a", "a", "{moving}b", "b"},
+      {"ZUNION", "2", "{moving}z1", "{moving}z2"},
+      {"EVAL", "return 1", "0"},
+      {"SPUBLISH", "{moving}channel", "message"},
+      {"FLUSHDB"},
+      {"RM", "0", "MATCH", "{moving}*"},
+      {"DEBUG", "POPULATE", "1", "{moving}"},
+  };
+  vector<RespExpr> replies(commands.size());
+  atomic_bool done = false;
+  vector<util::fb2::Fiber> fibers;
+  absl::Cleanup cleanup([&] {
+    SetSlotPause(slots, false);
+    for (auto& fiber : fibers)
+      fiber.JoinIfNeeded();
+  });
+
+  for (size_t i = 0; i < commands.size(); ++i) {
+    fibers.push_back(pp_->at(0)->LaunchFiber(
+        [&, i] { replies[i] = Run(absl::StrCat("paused", i), commands[i]); }));
+    EXPECT_TRUE(WaitUntilCondition([&] { return IsClientPaused(absl::StrCat("paused", i)); }, 1s));
+  }
+
+  fibers.push_back(pp_->at(0)->LaunchFiber([&] {
+    EXPECT_EQ(Run("other", {"PING"}), "PONG");
+    EXPECT_THAT(Run("other", {"SCRIPT", "EXISTS", "sha"}), RespElementsAre(IntArg(0)));
+    EXPECT_EQ(Run("other", {"GET", "{remaining}key"}), value);
+    EXPECT_EQ(Run("other", {"SET", "{remaining}key", value}), "OK");
+    EXPECT_THAT(Run("other", {"GET"}), ErrArg("wrong number of arguments"));
+    EXPECT_THAT(Run("other", {"MSET", "{moving}a"}), ErrArg("wrong number of arguments"));
+    EXPECT_THAT(Run("other", {"MGET", "{remaining}key", "{moving}key"}), ErrArg("CROSSSLOT"));
+    done = true;
+  }));
+  EXPECT_TRUE(WaitUntilCondition([&] { return done.load(); }, 1s));
+
+  AdvanceTime(1001);
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).ExpireAllIfNeeded();
+  });
+  EXPECT_THAT(RunPrivileged({"DBSIZE"}), IntArg(2));
+  EXPECT_EQ(RunPrivileged({"GET", "{moving}key"}).type, RespExpr::NIL);
+
+  // Other slots expire and evict normally; the migrating key stays in the table.
+  shard_set->RunBlockingInParallel([](EngineShard* shard) {
+    auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id());
+    db_slice.TEST_EnableCacheMode();
+    DbContext cntx;
+    cntx.db_index = 0;
+    cntx.time_now_ms = TEST_current_time_ms;
+    db_slice.FreeMemWithEvictionStepAtomic(0, cntx, 0, 1024);
+  });
+  EXPECT_THAT(RunPrivileged({"DBSIZE"}), IntArg(1));
+
+  std::move(cleanup).Invoke();
+  for (const auto& reply : replies)
+    EXPECT_NE(reply.type, RespExpr::ERROR);
+}
+
+TEST_F(ClusterFamilyTest, MigrationPausesReleaseIndependently) {
+  ConfigSingleNodeCluster(GetMyId());
+  const SlotId first = KeySlot("first"), second = KeySlot("second");
+  const SlotRanges first_slots({{first, first}}), second_slots({{second, second}});
+  EXPECT_EQ(Run("first", {"WATCH", "{first}a", "{first}b"}), "OK");
+  EXPECT_EQ(Run("first", {"MULTI"}), "OK");
+  EXPECT_EQ(Run("first", {"PING"}), "QUEUED");
+  SetSlotPause(first_slots, true);
+  SetSlotPause(first_slots, true);
+  SetSlotPause(second_slots, true);
+
+  unsigned first_pauses = 2;
+  atomic_bool first_done = false, second_done = false;
+  vector<util::fb2::Fiber> fibers;
+  absl::Cleanup cleanup([&] {
+    for (unsigned i = 0; i < first_pauses; ++i)
+      SetSlotPause(first_slots, false);
+    SetSlotPause(second_slots, false);
+    for (auto& fiber : fibers)
+      fiber.JoinIfNeeded();
+  });
+
+  fibers.push_back(pp_->at(0)->LaunchFiber([&] {
+    EXPECT_THAT(Run("first", {"EXEC"}), RespArray(ElementsAre("PONG")));
+    first_done = true;
+  }));
+  fibers.push_back(pp_->at(0)->LaunchFiber([&] {
+    EXPECT_EQ(Run("second", {"SET", "second", "value"}), "OK");
+    second_done = true;
+  }));
+  EXPECT_TRUE(WaitUntilCondition([&] { return IsClientPaused("first"); }, 1s));
+  EXPECT_TRUE(WaitUntilCondition([&] { return IsClientPaused("second"); }, 1s));
+
+  // CLIENT UNPAUSE must not release migration pauses.
+  EXPECT_EQ(RunPrivileged({"CLIENT", "PAUSE", "10000", "WRITE"}), "OK");
+  EXPECT_EQ(RunPrivileged({"CLIENT", "UNPAUSE"}), "OK");
+  EXPECT_TRUE(WaitUntilCondition(
+      [&] { return pp_->at(0)->AwaitBrief([] { return !ServerState::tlocal()->IsPaused(); }); },
+      1s));
+
+  SetSlotPause(first_slots, false);
+  --first_pauses;
+  EXPECT_TRUE(IsClientPaused("first"));
+  EXPECT_FALSE(first_done.load());
+
+  SetSlotPause(first_slots, false);
+  --first_pauses;
+  EXPECT_TRUE(WaitUntilCondition([&] { return first_done.load(); }, 1s));
+  EXPECT_TRUE(IsClientPaused("second"));
+  EXPECT_FALSE(second_done.load());
+}
+
+TEST_F(ClusterFamilyTest, MigrationPauseBlockingWake) {
+  ConfigSingleNodeCluster(GetMyId());
+  const SlotId slot = KeySlot("{moving}list");
+  const SlotRanges slots({{slot, slot}});
+  RespExpr moving_reply, remaining_reply;
+  auto moving = pp_->at(0)->LaunchFiber([&] {
+    moving_reply = Run("moving", {"BLPOP", "{moving}list", "0"});
+  });
+  auto remaining = pp_->at(0)->LaunchFiber([&] {
+    remaining_reply = Run("remaining", {"BLPOP", "{remaining}list", "0"});
+  });
+  EXPECT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("moving"); }, 1s));
+  EXPECT_TRUE(WaitUntilCondition([&] { return IsConnBlocked("remaining"); }, 1s));
+
+  SetSlotPause(slots, true);
+  absl::Cleanup cleanup([&] {
+    SetSlotPause(slots, false);
+    moving.JoinIfNeeded();
+    remaining.JoinIfNeeded();
+  });
+
+  // An in-flight write may wake a blocked command after the slot pause starts.
+  EXPECT_THAT(RunPrivileged({"LPUSH", "{moving}list", "value"}), IntArg(1));
+  EXPECT_THAT(Run({"LPUSH", "{remaining}list", "value"}), IntArg(1));
+  remaining.Join();
+  EXPECT_THAT(remaining_reply, RespArray(ElementsAre("{remaining}list", "value")));
+  EXPECT_TRUE(WaitUntilCondition([&] { return IsClientPaused("moving"); }, 1s));
+
+  std::move(cleanup).Invoke();
+  EXPECT_THAT(moving_reply, RespArray(ElementsAre("{moving}list", "value")));
+}
 
 TEST_F(ClusterFamilyTest, ClusterConfigInvalidJSON) {
   EXPECT_THAT(RunPrivileged({"dflycluster", "config", "invalid JSON"}),

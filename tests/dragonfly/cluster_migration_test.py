@@ -27,6 +27,7 @@ from .cluster_test_utils import (
     wait_for_status,
 )
 from .instance import DflyInstanceFactory
+from .proxy import Proxy
 from .seeder import DebugPopulateSeeder
 from .utility import (
     DflySeederFactory,
@@ -39,6 +40,116 @@ from .utility import (
     tmp_file_name,
     wait_available_async,
 )
+
+
+class MigrationAckProxy(Proxy):
+    """Hold the source in finalization until the test allows its ACK through."""
+
+    def __init__(self, remote_port):
+        super().__init__("127.0.0.1", 0, "127.0.0.1", remote_port)
+        self.finalizing = asyncio.Event()
+        self.resume = asyncio.Event()
+
+    async def _handle_impl(self, reader, writer):
+        proxy = self
+
+        class SourceReader:
+            inspect_commands = True
+
+            async def read(self, size):
+                # Control commands are inline; FLOW switches the connection to binary data.
+                data = await (reader.readline() if self.inspect_commands else reader.read(size))
+                if self.inspect_commands:
+                    command = data.split()[:2]
+                    if command == [b"DFLYMIGRATE", b"ACK"]:
+                        proxy.finalizing.set()
+                        await proxy.resume.wait()
+                    if command == [b"DFLYMIGRATE", b"FLOW"]:
+                        self.inspect_commands = False
+                return data
+
+        await super()._handle_impl(SourceReader(), writer)
+
+
+@pytest.mark.parametrize("io_loop_v2", [False, True])
+@pytest.mark.parametrize("cancel_migration", [False, True])
+@dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
+async def test_migration_pauses_only_migrating_slots(df_factory, io_loop_v2, cancel_migration):
+    _, nodes = await create_cluster(df_factory, 2, enable_resp_io_loop_v2=io_loop_v2)
+    source, target = nodes
+    source.slots = [(0, 16383)]
+    await apply_config(nodes)
+
+    moving_key = "{moving}:key"
+    remaining_key = "{remaining}:key"
+    slot = key_slot("moving")
+    assert slot != key_slot("remaining")
+    await source.client.set(moving_key, "original")
+    await source.client.set(remaining_key, "original")
+
+    # Queue this transaction before pausing, so EXEC must inspect its stored commands.
+    queued = source.instance.client(single_connection_client=True)
+    await queued.execute_command("MULTI")
+    await queued.execute_command("SET", moving_key, "queued")
+
+    pending = []
+    async with MigrationAckProxy(target.instance.admin_port) as proxy:
+        source.migrations = [MigrationInfo("127.0.0.1", proxy.port, [(slot, slot)], target.id)]
+        await apply_config(nodes)
+        await asyncio.wait_for(proxy.finalizing.wait(), timeout=10)
+
+        try:
+            read = asyncio.create_task(source.client.get(moving_key))
+            write = asyncio.create_task(source.client.set(moving_key, "changed"))
+            execute = asyncio.create_task(queued.execute_command("EXEC"))
+            moving_pipeline = source.client.pipeline(transaction=False)
+            for _ in range(20):
+                moving_pipeline.get(moving_key)
+            pipelined = asyncio.create_task(moving_pipeline.execute())
+            pending.extend([read, write, execute, pipelined])
+
+            assert await asyncio.wait_for(source.client.ping(), timeout=2)
+            assert await asyncio.wait_for(source.client.get(remaining_key), timeout=2) == "original"
+            assert await asyncio.wait_for(source.client.set(remaining_key, "changed"), timeout=2)
+
+            # Both squashed pipelines and MULTI/EXEC on other slots must keep making progress.
+            for transaction in (False, True):
+                pipeline = source.client.pipeline(transaction=transaction)
+                for i in range(20):
+                    pipeline.set(remaining_key, str(i))
+                    pipeline.get(remaining_key)
+                assert await asyncio.wait_for(pipeline.execute(), timeout=2) == [
+                    value for i in range(20) for value in (True, str(i))
+                ]
+
+            done, _ = await asyncio.wait(pending, timeout=0.1)
+            assert not done, "A command accessed a slot while its migration was finalizing"
+
+            if cancel_migration:
+                source.migrations = []
+                await apply_config(nodes)
+                assert await read in ("original", "changed", "queued")
+                assert await write
+                assert await execute == ["OK"]
+                assert all(value in ("original", "changed", "queued") for value in await pipelined)
+                await check_for_no_state_status([node.admin_client for node in nodes])
+            else:
+                proxy.resume.set()
+                await wait_for_status(source.admin_client, target.id, "FINISHED")
+
+                for task in pending:
+                    with pytest.raises(MovedError):
+                        await task
+                assert await target.client.get(moving_key) == "original"
+        finally:
+            proxy.resume.set()
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    if not cancel_migration:
+        await finalize_migration(nodes, 0, 1, [(0, slot - 1), (slot + 1, 16383)], [(slot, slot)])
+    assert await source.client.get(remaining_key) == "19"
 
 
 @dfly_args({"proactor_threads": 4, "cluster_mode": "yes"})
