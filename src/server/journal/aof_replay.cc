@@ -13,6 +13,7 @@
 #include "server/journal/journal_applier.h"
 #include "server/journal/serializer.h"
 #include "server/journal/tx_executor.h"
+#include "server/server_state.h"
 #include "server/transaction.h"
 
 namespace dfly {
@@ -43,7 +44,9 @@ error_code ReplayChain(string_view dir, ShardId sid, AofManifest::Cut cut, Servi
       continue;
     *max_txid = max(*max_txid, tx.txid);
     if (!applier.Apply(std::move(tx), &cntx)) {
-      LOG(ERROR) << "Failed to apply an AOF record of shard " << sid;
+      // A shutdown rejects every command; the caller stops the restore without a failure.
+      if (ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN)
+        LOG(ERROR) << "Failed to apply an AOF record of shard " << sid;
       return make_error_code(errc::state_not_recoverable);
     }
   }
@@ -112,7 +115,8 @@ error_code ReplayAof(string_view dir, const AofManifest& manifest, Service* serv
     if (!errors[sid]) {
       mse->RemoveFlow();
     } else {
-      LOG(ERROR) << "AOF replay failed on shard " << sid << ": " << errors[sid].message();
+      if (ServerState::tlocal()->gstate() != GlobalState::SHUTTING_DOWN)
+        LOG(ERROR) << "AOF replay failed on shard " << sid << ": " << errors[sid].message();
 
       // The load fails; release the shards waiting at a barrier.
       mse->CancelAllBlockingEntities();
