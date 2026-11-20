@@ -224,9 +224,9 @@ SendMessages(channel, messages, sharded)
      Creates string_view references into the shared buffer
 
   5. Cross-thread dispatch:
-     shard_set->pool()->DispatchBrief(cb)
-       → cb runs on EVERY I/O thread
-       → uses lower_bound on sorted subscribers to find this thread's connections
+     Walk the sorted snapshot's contiguous owner-thread ranges
+       → pool()->at(thread_id)->DispatchBrief(cb) once per range
+       → cb walks its known range, without searching the snapshot
        → for each local subscriber: conn->SendPubMessageAsync(PubMessage{...})
 
   6. Return subscriber count
@@ -262,7 +262,7 @@ FetchSubscribers(channel)
      → matching subscribers are added with their pattern string
 
   3. Sort by Subscriber::ByThread (thread_id ordering)
-     → enables O(log n) per-thread lookup during dispatch
+     → groups each owner thread's subscribers into a contiguous dispatch range
 ```
 
 Note: `FetchSubscribers` is not a global snapshot — each shard is locked independently, so
@@ -394,8 +394,10 @@ For `PUBLISH` and the non-cluster `SPUBLISH` path, the delivery sequence is:
    `subscriber_bytes` exceeds the **hard** limit (the equality case is allowed);
    being above the soft limit alone does not park publishers.
 3. `BuildSender` creates one shared payload containing the channel and message
-   arguments. `DispatchBrief` runs on each I/O thread and calls
-   `Connection::SendPubMessageAsync` for local subscribers.
+   arguments. A brief callback is queued only on I/O threads represented in the
+   subscriber snapshot, using the same per-proactor queue as pool-wide dispatch
+   (including when publishing to the current thread). Each callback calls
+   `Connection::SendPubMessageAsync` for its range of local subscribers.
 4. `SendPubMessageAsync` wraps the `PubMessage` in a `MessageHandle` and calls
    `SendAsync`. The message is appended to the connection's `dispatch_q_`,
    the V1 `AsyncFiber` is started if necessary, and the fiber is notified.
