@@ -314,7 +314,7 @@ void TopkFamily::Query(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
     SinkReplyBuilder::ReplyScope scope(rb);
     rb->StartArray(result->size());
     for (int present : *result) {
-      rb->SendLong(present);
+      rb->SendBool(present);
     }
   }
 }
@@ -383,17 +383,17 @@ void TopkFamily::Info(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   if (HandleOpError(result.status(), cmd_cntx))
     return;
 
-  // Build array response: [k, <k>, width, <width>, depth, <depth>, decay, <decay>]
+  // Build map response: {k, width, depth, decay}
   {
     SinkReplyBuilder::ReplyScope scope(rb);
-    rb->StartArray(8);
-    rb->SendBulkString("k");
+    rb->StartCollection(4, CollectionType::MAP);
+    rb->SendSimpleString("k");
     rb->SendLong(result->k);
-    rb->SendBulkString("width");
+    rb->SendSimpleString("width");
     rb->SendLong(result->width);
-    rb->SendBulkString("depth");
+    rb->SendSimpleString("depth");
     rb->SendLong(result->depth);
-    rb->SendBulkString("decay");
+    rb->SendSimpleString("decay");
     rb->SendDouble(result->decay);
   }
 }

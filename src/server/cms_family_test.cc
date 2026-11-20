@@ -6,6 +6,7 @@
 
 namespace dfly {
 
+using testing::AllOf;
 using testing::ElementsAre;
 
 class CmsFamilyTest : public BaseFamilyTest {
@@ -109,6 +110,12 @@ TEST_F(CmsFamilyTest, Info) {
   auto resp = Run("cms.info cms");
   EXPECT_THAT(
       resp, RespArray(ElementsAre("width", IntArg(1000), "depth", IntArg(5), "count", IntArg(17))));
+
+  // RESP3 replies with a map.
+  Run("hello 3");
+  EXPECT_THAT(Run("cms.info cms"),
+              AllOf(IsResp3MapKind(), RespElementsAre("width", IntArg(1000), "depth", IntArg(5),
+                                                      "count", IntArg(17))));
 
   resp = Run("cms.info noexist");
   EXPECT_THAT(resp, ErrArg("CMS: key does not exist"));

@@ -44,7 +44,7 @@ bool RespMatcher::MatchAndExplain(RespExpr e, MatchResultListener* listener) con
       *listener << "\nActual string: " << actual;
       return false;
     }
-  } else if (type_ == RespExpr::INT64) {
+  } else if (type_ == RespExpr::INT64 || type_ == RespExpr::BOOL) {
     auto actual = get<int64_t>(e.u);
     if (exp_int_ != actual) {
       *listener << "\nActual : " << actual << " expected: " << exp_int_;
@@ -83,6 +83,9 @@ void RespMatcher::DescribeTo(std::ostream* os) const {
       break;
     case RespExpr::DOUBLE:
       *os << exp_double_;
+      break;
+    case RespExpr::BOOL:
+      *os << (exp_int_ ? "true" : "false");
       break;
     default:
       *os << "TBD";

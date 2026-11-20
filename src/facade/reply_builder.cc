@@ -40,6 +40,8 @@ constexpr char kDoublePref[] = ",";
 constexpr char kLongPref[] = ":";
 constexpr char kNullStringR2[] = "$-1\r\n";
 constexpr char kNullStringR3[] = "_\r\n";
+constexpr char kTrueR3[] = "#t\r\n";
+constexpr char kFalseR3[] = "#f\r\n";
 
 template <typename T> size_t piece_size(const T& v) {
   if constexpr (is_array_v<T>)
@@ -408,6 +410,14 @@ void RedisReplyBuilderBase::SendDouble(double val) {
 
   ReplyScope scope(this);
   WritePieces(kDoublePref, val_str, kCRLF);
+}
+
+void RedisReplyBuilderBase::SendBool(bool val) {
+  if (!IsResp3())
+    return SendLong(val);
+
+  ReplyScope scope(this);
+  val ? WritePieces(kTrueR3) : WritePieces(kFalseR3);
 }
 
 void RedisReplyBuilderBase::SendNullArray() {

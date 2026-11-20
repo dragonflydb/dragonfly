@@ -1,6 +1,7 @@
 // Copyright 2022, DragonflyDB authors.  All rights reserved.
 // See LICENSE for licensing terms.
 //
+#include <absl/cleanup/cleanup.h>
 #include <absl/strings/str_replace.h>
 
 #include "base/flags.h"
@@ -8,6 +9,7 @@
 #include "base/logging.h"
 #include "facade/error.h"
 #include "facade/facade_test.h"
+#include "server/journal/journal.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -690,6 +692,11 @@ TEST_F(JsonFamilyTest, NumericOperationsResp2Resp3) {
   resp = Run({"JSON.NUMMULTBY", "a", "$", "2"});
   EXPECT_EQ(resp, "[4]");  // Currently returns string "[4]"
 
+  // A legacy path answers with the last match.
+  Run({"JSON.SET", "b", "$", R"({"n":1,"x":{"n":2},"s":"str"})"});
+  EXPECT_EQ(Run({"JSON.NUMINCRBY", "b", "..n", "1"}), "3");
+  EXPECT_THAT(Run({"JSON.NUMINCRBY", "b", ".s", "1"}), ArgType(RespExpr::ERROR));
+
   // Test RESP3 behavior
   Run({"HELLO", "3"});
   Run({"FLUSHALL"});
@@ -710,6 +717,38 @@ TEST_F(JsonFamilyTest, NumericOperationsResp2Resp3) {
   resp = Run({"JSON.NUMMULTBY", "a", "$", "2"});
   // In RESP3, this should return a proper array with integer: 1) (integer) 4
   EXPECT_THAT(resp, RespElementsAre(IntArg(4)));
+
+  // A legacy path answers with the new value of every match too, null where it is not a number.
+  Run({"JSON.SET", "b", "$", R"({"n":1,"x":{"n":2},"s":"str"})"});
+  EXPECT_THAT(Run({"JSON.NUMINCRBY", "b", "..n", "1"}), RespElementsAre(IntArg(2), IntArg(3)));
+
+  // An integer above the int64 range is sent as a double.
+  Run({"JSON.SET", "u", "$", R"({"a":[9223372036854775808,1]})"});
+  auto big = AllOf(ArgType(RespExpr::DOUBLE), DoubleArg(9223372036854777856.0));
+  EXPECT_THAT(Run({"JSON.NUMINCRBY", "u", ".a[*]", "2048"}), RespElementsAre(big, IntArg(2049)));
+  EXPECT_THAT(Run({"JSON.RESP", "u", ".a"}), RespElementsAre("[", big, IntArg(2049)));
+
+  // A legacy path that changes no number still fails, which keeps it out of the journal.
+  pp_->at(Shard("b", shard_set->size()))->Await([&] {
+    journal::AcquireUser();
+    absl::Cleanup release_journal = [] { journal::ReleaseUser(); };
+
+    // Run() here uses the connection of this thread.
+    Run({"HELLO", "3"});
+    const auto lsn = journal::GetLsn();
+    EXPECT_THAT(Run({"JSON.NUMINCRBY", "b", ".s", "1"}), RespElementsAre(ArgType(RespExpr::NIL)));
+    EXPECT_THAT(Run({"JSON.NUMINCRBY", "b", ".nomatch", "1"}), RespArray(IsEmpty()));
+    EXPECT_EQ(journal::GetLsn(), lsn);
+    EXPECT_THAT(Run({"JSON.NUMINCRBY", "b", ".n", "0.5"}),
+                RespElementsAre(AllOf(ArgType(RespExpr::DOUBLE), DoubleArg(2.5))));
+    EXPECT_EQ(journal::GetLsn(), lsn + 1);
+  });
+
+  // JSON.TYPE wraps its whole reply in one more array.
+  EXPECT_THAT(Run({"JSON.TYPE", "b", "$..n"}),
+              RespElementsAre(RespElementsAre("number", "integer")));
+  EXPECT_THAT(Run({"JSON.TYPE", "b", "$..nomatch"}), RespElementsAre(RespArray(IsEmpty())));
+  EXPECT_THAT(Run({"JSON.TYPE", "missing", "$"}), RespElementsAre(ArgType(RespExpr::NIL)));
 }
 
 TEST_F(JsonFamilyTest, Del) {
@@ -2066,6 +2105,10 @@ TEST_F(JsonFamilyTest, ARRLEN_RESP3NestedArrayBug) {
   // Verify the actual values
   EXPECT_THAT(resp.GetVec()[0], IntArg(1));
   EXPECT_THAT(resp.GetVec()[1], IntArg(3));
+
+  // JSON.RESP marks a JSON array with "[" in RESP3 too.
+  EXPECT_THAT(Run({"JSON.RESP", "doc", "$.a"}), RespElementsAre(RespElementsAre("[", IntArg(1))));
+  EXPECT_THAT(Run({"JSON.RESP", "doc", ".a"}), RespElementsAre("[", IntArg(1)));
 }
 
 TEST_F(JsonFamilyTest, ARRAPPEND_RESP3NestedArrayBug) {
@@ -2139,6 +2182,9 @@ TEST_F(JsonFamilyTest, STRLEN_RESP3NestedArrayBug) {
   EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
   EXPECT_THAT(resp.GetVec()[0], IntArg(2));
   EXPECT_THAT(resp.GetVec()[1], IntArg(3));
+
+  // A legacy path answers with the bare value.
+  EXPECT_THAT(Run({"JSON.STRLEN", "doc", ".s"}), IntArg(2));
 }
 
 TEST_F(JsonFamilyTest, OBJLEN_RESP3NestedArrayBug) {
@@ -2173,6 +2219,9 @@ TEST_F(JsonFamilyTest, OBJKEYS_RESP3NestedArrayBug) {
   EXPECT_THAT(el0.GetVec(), ElementsAre("k"));
   // Order of keys in objects is not guaranteed, so check size only for the second
   EXPECT_EQ(el1.GetVec().size(), 2);
+
+  // A legacy path answers with the bare key list.
+  EXPECT_THAT(Run({"JSON.OBJKEYS", "doc", ".o"}), RespElementsAre("k"));
 }
 
 TEST_F(JsonFamilyTest, STRAPPEND_RESP3NestedArrayBug) {
@@ -2203,6 +2252,9 @@ TEST_F(JsonFamilyTest, TOGGLE_RESP3NestedArrayBug) {
   EXPECT_THAT(resp.GetVec()[1], Not(ArgType(RespExpr::ARRAY)));
   EXPECT_THAT(resp.GetVec()[0], IntArg(0));
   EXPECT_THAT(resp.GetVec()[1], IntArg(1));
+
+  // A legacy path answers with the bare value, not with a one-element array.
+  EXPECT_EQ(Run({"JSON.TOGGLE", "doc", ".b"}), "true");
 }
 
 TEST_F(JsonFamilyTest, SetOverLargeStringKey) {

@@ -165,6 +165,10 @@ std::ostream& operator<<(std::ostream& os, const RESPObj& obj) {
       os << *obj.As<double>();
       break;
     }
+    case RESPObj::Type::BOOL: {
+      os << (*obj.As<bool>() ? "true" : "false");
+      break;
+    }
     case RESPObj::Type::ARRAY: {
       os << *obj.As<RESPArray>();
       break;
