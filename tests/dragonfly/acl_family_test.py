@@ -419,7 +419,7 @@ async def test_acl_load_updates_default_user_connections(df_factory, tmp_dir):
     dropped_reader, dropped_writer = await subscribe("secret")
 
     with open(acl, "w") as f:
-        f.write("user default on nopass ~* &news -@all +ping\n" + admin_rule)
+        f.write("user default on nopass ~* &news -@all +ping +publish\n" + admin_rule)
     admin = df.client()
     await admin.execute_command("AUTH admin pass")
     await admin.execute_command("ACL LOAD")
@@ -441,7 +441,6 @@ async def test_acl_load_updates_default_user_connections(df_factory, tmp_dir):
         assert await dropped_reader.read() == b""
 
     publisher = df.client()
-    await publisher.execute_command("AUTH admin pass")
     await publisher.execute_command("PUBLISH news hello")
     async with async_timeout.timeout(5):
         await kept_reader.readuntil(b"hello\r\n")
