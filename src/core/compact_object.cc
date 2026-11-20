@@ -1646,47 +1646,31 @@ bool CompactObj::CmpNonInline(std::string_view sv) const {
 bool CompactObj::CmpEncoded(string_view sv) const {
   DCHECK(encoding_);
 
-  size_t encode_len = binpacked_len(sv.size());
-  if (IsInline()) {
-    if (encode_len != taglen_)
-      return false;
+  // Compare decoded sizes, not packed ones: strings of 8n - 1 and 8n bytes both pack into 7n bytes
+  // and only the encoding tells them apart.
+  auto size_matches = [&](size_t packed_len) {
+    return GetStrEncoding().DecodedSize(packed_len) == sv.size();
+  };
+  auto cmp_packed = [&](string_view packed) {
+    return size_matches(packed.size()) &&
+           detail::ascii_compare_packed(to_byte(packed.data()), sv.size(), sv.data());
+  };
 
-    char buf[kInlineLen * 2];
-    detail::ascii_unpack_fast(to_byte(u_.inline_str), sv.size(), buf);
+  if (IsInline())
+    return cmp_packed(string_view{u_.inline_str, taglen_});
 
-    return sv == string_view(buf, sv.size());
-  }
+  if (taglen_ == LARGE_STR_TAG)
+    return cmp_packed(u_.large_str.AsView());
 
-  if (taglen_ == LARGE_STR_TAG) {
-    if (u_.large_str.Size() != encode_len)
-      return false;
-
-    if (!detail::validate_ascii_fast(sv.data(), sv.size()))
-      return false;
-
-    return detail::compare_packed(to_byte(u_.large_str.ptr), sv.data(), sv.size());
-  }
-
-  if (taglen_ == SDS_TTL_TAG) {
-    size_t sds_len = sdslen(u_.sds_ttl.sds_ptr);
-    if (sds_len != encode_len)
-      return false;
-
-    if (!detail::validate_ascii_fast(sv.data(), sv.size()))
-      return false;
-
-    return detail::compare_packed(to_byte(u_.sds_ttl.sds_ptr), sv.data(), sv.size());
-  }
+  if (taglen_ == SDS_TTL_TAG)
+    return cmp_packed(string_view{u_.sds_ttl.sds_ptr, sdslen(u_.sds_ttl.sds_ptr)});
 
   if (taglen_ == JSON_TAG) {
     return false;  // cannot compare json with string
   }
 
   if (taglen_ == SMALL_TAG) {
-    if (u_.small_str.size() != encode_len)
-      return false;
-
-    if (!detail::validate_ascii_fast(sv.data(), sv.size()))
+    if (!size_matches(u_.small_str.size()))
       return false;
 
     // We need to compare an unpacked sv with 2 packed parts.
@@ -1704,7 +1688,8 @@ bool CompactObj::CmpEncoded(string_view sv) const {
     DCHECK_LT(slice[0].size(), 14u);
 
     uint8_t tmpbuf[14];
-    detail::ascii_try_pack(sv.data(), 16, tmpbuf);
+    if (!detail::ascii_try_pack(sv.data(), 16, tmpbuf))
+      return false;
 
     // Compare the first slice.
     if (memcmp(slice[0].data(), tmpbuf, slice[0].size()) != 0)
@@ -1718,8 +1703,8 @@ bool CompactObj::CmpEncoded(string_view sv) const {
 
     // We verified that the first 16 chars (or 14 bytes) are equal.
     // Lets verify the rest - suffix of the second slice and the suffix of sv.
-    return detail::compare_packed(to_byte(slice[1].data() + pref_len), sv.data() + 16,
-                                  sv.size() - 16);
+    return detail::ascii_compare_packed(to_byte(slice[1].data() + pref_len), sv.size() - 16,
+                                        sv.data() + 16);
   }
   LOG(FATAL) << "Unsupported tag " << int(taglen_);
   return false;
@@ -1731,13 +1716,20 @@ void CompactObj::EncodeString(string_view str) {
 
   string_view encoded = str;
   size_t encode_len = binpacked_len(str.size());
+  bool is_ascii = false;
 
-  // tmp_buf never shrinks, so grow it only for ASCII strings, not for binary ones.
-  bool is_ascii = kUseAsciiEncoding && (encode_len <= tl.tmp_buf.capacity() ||
-                                        detail::validate_ascii_fast(str.data(), str.size()));
-  if (is_ascii) {
-    tl.tmp_buf.resize(encode_len);
-    is_ascii = detail::ascii_try_pack(str.data(), str.size(), tl.tmp_buf.data()) != 0;
+  if (kUseAsciiEncoding) {
+    if (encode_len <= tl.tmp_buf.capacity()) {
+      tl.tmp_buf.resize(encode_len);
+      is_ascii = detail::ascii_try_pack(str.data(), str.size(), tl.tmp_buf.data()) != 0;
+    } else {
+      // tmp_buf never shrinks, so grow it only for ASCII strings, not for binary ones: pack into a
+      // new buffer and keep it only if packing succeeds.
+      base::PODArray<uint8_t> new_buf(encode_len, tl.tmp_buf.mr());
+      is_ascii = detail::ascii_try_pack(str.data(), str.size(), new_buf.data()) != 0;
+      if (is_ascii)
+        tl.tmp_buf.swap(new_buf);
+    }
   }
 
   if (is_ascii) {

@@ -11,8 +11,6 @@ namespace dfly {
 
 namespace detail {
 
-bool validate_ascii_fast(const char* src, size_t len);
-
 // Access a single byte in a 7-bit ASCII-packed string without unpacking the entire buffer.
 // These helpers read/write the ASCII byte at logical position `idx` in the unpacked string
 // directly from/into the packed `bin` representation.
@@ -21,8 +19,6 @@ bool validate_ascii_fast(const char* src, size_t len);
 // 2. `ascii` must be less than 128 (7-bit ASCII) for packing.
 uint8_t ascii_unpack_byte(const uint8_t* bin, size_t ascii_len, size_t idx);
 void ascii_pack_byte(uint8_t* bin, size_t ascii_len, size_t idx, uint8_t ascii);
-
-bool compare_packed(const uint8_t* packed, const char* ascii, size_t ascii_len);
 
 // maps ascii len to 7-bit packed length. Each 8 bytes are converted to 7 bytes.
 inline constexpr size_t binpacked_len(size_t ascii_len) {
@@ -37,15 +33,16 @@ inline constexpr size_t ascii_len(size_t bin_len) {
   return (bin_len * 8) / 7;
 }
 
-// The two functions below only ever run the widest kernel this build targets, so a caller can
-// never reach the others and they would go untested. Every kernel therefore also gets its own
-// entry point here. They all honour the contract of the function they implement, for any length,
-// so they are interchangeable and tests can drive them side by side over the same input.
-// Compare kernels with compact_object_test --bench --benchmark_filter=AsciiCodec.
+// The functions below only ever run the widest kernel this build targets, so a caller can never
+// reach the others and they would go untested. Every kernel therefore also gets its own entry point
+// here. They all honour the contract of the function they implement, for any length, so they are
+// interchangeable and tests can drive them side by side over the same input.
+// Benchmark them with compact_object_test --bench --benchmark_filter=AsciiCodec.
 namespace impl {
 
 size_t ascii_try_pack_scalar(const char* ascii, size_t len, uint8_t* bin);
 void ascii_unpack_fast_scalar(const uint8_t* bin, size_t ascii_len, char* ascii);
+bool ascii_compare_packed_scalar(const uint8_t* bin, size_t ascii_len, const char* ascii);
 
 #if defined(__AVX2__)
 #define ASCII_AVX2 1
@@ -53,15 +50,18 @@ void ascii_unpack_fast_scalar(const uint8_t* bin, size_t ascii_len, char* ascii)
 #define ASCII_SSSE3 1
 size_t ascii_try_pack_avx2(const char* ascii, size_t len, uint8_t* bin);
 void ascii_unpack_fast_avx2(const uint8_t* bin, size_t ascii_len, char* ascii);
+bool ascii_compare_packed_avx2(const uint8_t* bin, size_t ascii_len, const char* ascii);
 size_t ascii_try_pack_sse(const char* ascii, size_t len, uint8_t* bin);
 void ascii_unpack_fast_sse(const uint8_t* bin, size_t ascii_len, char* ascii);
+bool ascii_compare_packed_sse(const uint8_t* bin, size_t ascii_len, const char* ascii);
 #elif defined(__SSE4_1__)
 #define ASCII_SSE4_1 1
 #define ASCII_SSSE3 1
 size_t ascii_try_pack_sse(const char* ascii, size_t len, uint8_t* bin);
 
-// Needs SSE4.1 for blend_epi16, which the release builds target (see Makefile).
+// Both need SSE4.1 for blend_epi16, which the release builds target (see Makefile).
 void ascii_unpack_fast_sse(const uint8_t* bin, size_t ascii_len, char* ascii);
+bool ascii_compare_packed_sse(const uint8_t* bin, size_t ascii_len, const char* ascii);
 #elif defined(__SSSE3__)
 #define ASCII_SSSE3 1
 size_t ascii_try_pack_sse(const char* ascii, size_t len, uint8_t* bin);
@@ -69,6 +69,7 @@ size_t ascii_try_pack_sse(const char* ascii, size_t len, uint8_t* bin);
 #define ASCII_NEON 1
 size_t ascii_try_pack_neon(const char* ascii, size_t len, uint8_t* bin);
 void ascii_unpack_fast_neon(const uint8_t* bin, size_t ascii_len, char* ascii);
+bool ascii_compare_packed_neon(const uint8_t* bin, size_t ascii_len, const char* ascii);
 #endif
 
 }  // namespace impl
@@ -106,6 +107,24 @@ inline void ascii_unpack_fast(const uint8_t* bin, size_t ascii_len, char* ascii)
   return impl::ascii_unpack_fast_neon(bin, ascii_len, ascii);
 #endif
   return impl::ascii_unpack_fast_scalar(bin, ascii_len, ascii);
+}
+
+// Returns whether `ascii` holds the ascii_len bytes that unpacking `bin` would produce, checking
+// them in a single pass without unpacking into a buffer. `bin` must be the ascii_try_pack() output
+// for exactly ascii_len bytes: 8n - 1 and 8n bytes pack to the same size, so the caller has to know
+// the original length. `ascii` may hold any bytes. Unpacked bytes are always 7-bit, so a byte with
+// the high bit set is just a mismatch and `ascii` needs no separate validation.
+inline bool ascii_compare_packed(const uint8_t* bin, size_t ascii_len, const char* ascii) {
+#if defined(ASCII_AVX2)
+  return impl::ascii_compare_packed_avx2(bin, ascii_len, ascii);
+#endif
+#if defined(ASCII_SSE4_1)
+  return impl::ascii_compare_packed_sse(bin, ascii_len, ascii);
+#endif
+#if defined(ASCII_NEON)
+  return impl::ascii_compare_packed_neon(bin, ascii_len, ascii);
+#endif
+  return impl::ascii_compare_packed_scalar(bin, ascii_len, ascii);
 }
 
 }  // namespace detail
