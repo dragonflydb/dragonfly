@@ -1377,6 +1377,11 @@ void CmdSRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!parser.Finalize())
     return cmd_cntx->SendError(parser.TakeError().MakeReply());
 
+  if (count < 0 && static_cast<uint64_t>(-static_cast<int64_t>(count)) > kMaxRandCount) {
+    return cmd_cntx->SendError(
+        absl::StrCat("COUNT magnitude exceeds the maximum of ", kMaxRandCount));
+  }
+
   cmn::BackedArguments vals;
   auto cb = [&](Transaction* t, EngineShard* shard) {
     return OpRandMember(t->GetOpArgs(shard), key, count, &vals);

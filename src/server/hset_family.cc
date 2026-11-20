@@ -1496,6 +1496,10 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!parser.Finalize())
     return rb->SendError(parser.TakeError().MakeReply());
 
+  if (count < 0 && static_cast<uint64_t>(-static_cast<int64_t>(count)) > kMaxRandCount) {
+    return rb->SendError(absl::StrCat("COUNT magnitude exceeds the maximum of ", kMaxRandCount));
+  }
+
   auto cb = [&](Transaction* t, EngineShard* shard) -> OpResult<StringVec> {
     auto& db_slice = t->GetDbSlice(shard->shard_id());
     DbContext db_context = t->GetDbContext();
@@ -1550,7 +1554,9 @@ void CmdHRandField(CmdArgParser parser, CommandContext* cmd_cntx) {
         lpRandomPair(lp, hlen, &key, NULL);
         StrVecEmplaceBack(str_vec, key);
       } else {
-        size_t actual_count = (count >= 0) ? std::min(size_t(count), hlen) : abs(count);
+        // Widen before negating: abs(count) on INT32_MIN is signed-overflow UB.
+        size_t actual_count =
+            (count >= 0) ? std::min(size_t(count), hlen) : size_t(-int64_t(count));
         std::unique_ptr<listpackEntry[]> keys = nullptr, vals = nullptr;
         keys = std::make_unique<listpackEntry[]>(actual_count);
         if (with_values)

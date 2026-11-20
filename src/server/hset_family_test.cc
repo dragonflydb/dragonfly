@@ -17,6 +17,7 @@ extern "C" {
 #include "base/logging.h"
 #include "core/detail/gen_utils.h"
 #include "facade/facade_test.h"
+#include "server/family_utils.h"
 #include "server/test_utils.h"
 
 using namespace testing;
@@ -1099,6 +1100,29 @@ TEST_F(HSetFamilyTest, HGetExErrors) {
   // Wrong type.
   Run({"SET", "strkey", "val"});
   EXPECT_THAT(Run({"HGETEX", "strkey", "FIELDS", "1", "f"}), ErrArg("WRONGTYPE"));
+}
+
+TEST_F(HSetFamilyTest, HRandFieldNegativeCountBound) {
+  // Regression: a negative COUNT (with-duplicates) must not size an allocation by its unbounded
+  // magnitude. Magnitudes above kMaxRandCount are rejected at parse time, before any allocation;
+  // valid magnitudes and positive counts are unaffected.
+  Run({"HSET", "k", "a", "0"});
+
+  // Over the bound -> rejected (no allocation, no OOM).
+  EXPECT_THAT(Run({"hrandfield", "k", "-200000000"}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  EXPECT_THAT(Run({"hrandfield", "k", "-" + std::to_string(dfly::kMaxRandCount + 1)}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  // INT32_MIN previously hit abs() signed-overflow UB; now rejected, never a crash.
+  EXPECT_THAT(Run({"hrandfield", "k", "-2147483648"}),
+              ErrArg("COUNT magnitude exceeds the maximum"));
+  // At the bound -> allowed (duplicates).
+  EXPECT_THAT(Run({"hrandfield", "k", "-" + std::to_string(dfly::kMaxRandCount)}).GetVec(),
+              SizeIs(dfly::kMaxRandCount));
+  // A small negative COUNT still returns duplicates.
+  EXPECT_THAT(Run({"hrandfield", "k", "-4"}).GetVec(), ElementsAre("a", "a", "a", "a"));
+  // Positive COUNT stays clamped to the hash size and is never rejected.
+  EXPECT_THAT(Run({"hrandfield", "k", "1000000"}).GetVec(), ElementsAre("a"));
 }
 
 TEST_F(HSetFamilyTest, RandomFieldAllExpired) {
