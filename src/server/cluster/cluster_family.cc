@@ -533,7 +533,7 @@ void DeleteSlots(Transaction* trans, const SlotRanges& slots_ranges) {
 
   trans->Execute(
       [&slots_ranges, &args_view](Transaction* t, EngineShard* shard) {
-        namespaces->GetDefaultNamespace().GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
+        t->GetDbSlice(shard->shard_id()).FlushSlots(slots_ranges);
 
         // TODO: Break slot migration upon FLUSHSLOTS
         if (shard->journal()) {
@@ -702,12 +702,17 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
     return cmd_cntx->SendError(kSyntaxErr);
   }
 
+  auto* server_cntx = cmd_cntx->server_conn_cntx();
+  Namespace* ns =
+      (server_cntx && server_cntx->ns) ? server_cntx->ns : &namespaces->GetDefaultNamespace();
+
   // Collect in rounds of up to all slots, which bounds memory however many slots are requested.
   // Waking up a shard thread costs more than reading its stats, so every round visits each shard
   // once. The shards add their stats one after another, which needs no locking.
   const size_t round_size = std::min<size_t>(total_slots, kMaxSlotNum + 1);
   vector<SlotId> round_slots(round_size);
   vector<SlotStats> round_stats;
+
 
   // Reply strings are literals, so they remain valid while waiting for the shards.
   SinkReplyBuilder::ReplyScope scope(rb);
@@ -722,13 +727,14 @@ void ClusterFamily::DflyClusterGetSlotInfo(CmdArgParser parser, CommandContext* 
         round_slots[i++] = next_slot;
       if (next_slot++ == range->end && ++range != ranges.end())
         next_slot = range->start;
+
     }
     remaining -= count;
 
     round_stats.assign(count, SlotStats{});
     for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
       shard_set->pool()->at(sid)->AwaitBrief([&] {
-        const auto& db_slice = namespaces->GetDefaultNamespace().GetDbSlice(sid);
+        const auto& db_slice = ns->GetDbSlice(sid);
         db_slice.AddSlotStats({round_slots.data(), count}, absl::MakeSpan(round_stats));
       });
     }
