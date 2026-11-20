@@ -62,6 +62,13 @@ ABSL_FLAG(string, key_prefix, "key:", "keys prefix");
 ABSL_FLAG(string, key_dist, "U", "U for uniform, N for normal, Z for zipfian, S for sequential");
 ABSL_FLAG(double, zipf_alpha, 0.99, "zipfian alpha parameter");
 ABSL_FLAG(uint64_t, seed, 42, "A seed for random data generation");
+ABSL_FLAG(bool, randomize, false,
+          "If true, seeds random data generation from the current time instead of --seed. "
+          "The seed is logged, so a run can be repeated with --seed");
+ABSL_FLAG(string, expiry_range, "",
+          "TTL range in seconds as min:max, or a single value, for keys that are written. "
+          "Built-in sets use SETEX (RESP) or the set expiration time (memcache); custom commands "
+          "are followed by an EXPIRE for each __key__. Empty means no expiry");
 ABSL_FLAG(uint64_t, key_stddev, 0,
           "Standard deviation for non-uniform distribution, 0 chooses"
           " a default value of (max-min)/6");
@@ -383,8 +390,28 @@ class CommandGenerator {
     return noreply_;
   }
 
+  // Number of EXPIRE commands that the last Next() appended after a custom command.
+  uint32_t num_expires() const {
+    return num_expires_;
+  }
+
  private:
   enum TemplateType : uint8_t { KEY, VALUE, SCORE };
+
+  bool HasExpiry() const {
+    return expiry_max_ > 0;
+  }
+
+  // A TTL in seconds from --expiry_range.
+  uint32_t NextTtl() const {
+    return absl::Uniform(absl::IntervalClosedClosed, bit_gen, expiry_min_, expiry_max_);
+  }
+
+  // Memcache reads an expiration time over 30 days as a Unix time, so send those as one.
+  static constexpr uint32_t kMemcacheMaxRelativeTtl = 60 * 60 * 24 * 30;
+  static uint64_t ToMemcacheExptime(uint32_t ttl) {
+    return ttl <= kMemcacheMaxRelativeTtl ? ttl : absl::ToUnixSeconds(absl::Now()) + ttl;
+  }
 
   string FillSet(string_view key);
   string FillGet(string_view key);
@@ -405,6 +432,8 @@ class CommandGenerator {
   bool might_hit_ = false;
   bool noreply_ = false;
   bool is_ascii_ = true;
+  uint32_t expiry_min_ = 0, expiry_max_ = 0;
+  uint32_t num_expires_ = 0;
   BenchOp op_ = BenchOp::kUnknown;
 };
 
@@ -429,6 +458,21 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
 
   if (!IsRandomValueLen()) {
     fixed_len_value_ = string(value_len_min_, is_ascii_ ? 'a' : char(130));
+  }
+
+  if (string expiry = GetFlag(FLAGS_expiry_range); !expiry.empty()) {
+    pair<string, string> range = absl::StrSplit(expiry, ':');
+    CHECK(absl::SimpleAtoi(range.first, &expiry_min_)) << "Invalid --expiry_range " << expiry;
+    expiry_max_ = expiry_min_;
+    if (!range.second.empty()) {
+      CHECK(absl::SimpleAtoi(range.second, &expiry_max_)) << "Invalid --expiry_range " << expiry;
+    }
+    CHECK(expiry_min_ > 0 && expiry_min_ <= expiry_max_)
+        << "--expiry_range must be min:max with 0 < min <= max, got " << expiry;
+    if (protocol == MC_TEXT) {
+      CHECK_LE(ToMemcacheExptime(expiry_max_), numeric_limits<uint32_t>::max())
+          << "--expiry_range max is too large for a memcache expiration time";
+    }
   }
 
   if (command_.empty()) {
@@ -462,6 +506,7 @@ CommandGenerator::CommandGenerator(KeyGenerator* keygen) : keygen_(keygen) {
 
 string CommandGenerator::Next(SlotRange range) {
   noreply_ = false;
+  num_expires_ = 0;
   op_ = BenchOp::kUnknown;
 
   if (command_.empty()) {
@@ -486,6 +531,7 @@ string CommandGenerator::Next(SlotRange range) {
   }
 
   string str, gen_cmd;
+  vector<string> keys;
   absl::StrAppend(&gen_cmd, "*", cmd_parts_.size(), "\r\n");
   for (const CmdPart& part : cmd_parts_) {
     if (auto p = get_if<string_view>(&part)) {
@@ -494,6 +540,8 @@ string CommandGenerator::Next(SlotRange range) {
       switch (get<TemplateType>(part)) {
         case KEY:
           str = (*keygen_)(slot_id, slot_id);
+          if (HasExpiry())
+            keys.push_back(str);
           break;
         case VALUE: {
           size_t value_len = IsRandomValueLen()
@@ -511,6 +559,13 @@ string CommandGenerator::Next(SlotRange range) {
     }
   }
 
+  for (const string& key : keys) {
+    string ttl = absl::StrCat(NextTtl());
+    absl::StrAppend(&gen_cmd, "*3\r\n$6\r\nEXPIRE\r\n$", key.size(), "\r\n", key, "\r\n$",
+                    ttl.size(), "\r\n", ttl, "\r\n");
+  }
+  num_expires_ = keys.size();
+
   return gen_cmd;
 }
 
@@ -525,11 +580,18 @@ string CommandGenerator::FillSet(string_view key) {
   }
 
   if (protocol == RESP) {
-    absl::StrAppend(&res, "*3\r\n$3\r\nset\r\n$", key.size(), "\r\n", key);
+    if (HasExpiry()) {
+      string ttl = absl::StrCat(NextTtl());
+      absl::StrAppend(&res, "*4\r\n$5\r\nsetex\r\n$", key.size(), "\r\n", key, "\r\n$", ttl.size(),
+                      "\r\n", ttl);
+    } else {
+      absl::StrAppend(&res, "*3\r\n$3\r\nset\r\n$", key.size(), "\r\n", key);
+    }
     absl::StrAppend(&res, "\r\n$", value.size(), "\r\n", value, "\r\n");
   } else {
     DCHECK_EQ(protocol, MC_TEXT);
-    absl::StrAppend(&res, "set ", key, " 0 0 ", value.size());
+    uint64_t exptime = HasExpiry() ? ToMemcacheExptime(NextTtl()) : 0;
+    absl::StrAppend(&res, "set ", key, " 0 ", exptime, " ", value.size());
     if (GetFlag(FLAGS_noreply)) {
       absl::StrAppend(&res, " noreply");
       noreply_ = true;
@@ -634,7 +696,14 @@ class Driver {
     uint64_t start;
     bool might_hit;
     BenchOp op = BenchOp::kUnknown;
+
+    // Replies still expected for the EXPIREs that --expiry_range sent after a custom command.
+    // They arrive after the command's own reply and are not counted as responses.
+    uint32_t expires_left = 0;
+    bool replied = false;
   };
+
+  void RecordResponse(const Req& req);
 
   uint32_t num_reqs_, time_limit_, received_ = 0;
   int64_t start_ns_ = 0;
@@ -867,6 +936,7 @@ void Driver::Run(uint64_t* cycle_ns, CommandGenerator* cmd_gen) {
       req.start = absl::GetCurrentTimeNanos();
       req.might_hit = cmd_gen->might_hit();
       req.op = cmd_gen->op();
+      req.expires_left = cmd_gen->num_expires();
 
       reqs_.push(req);
 
@@ -946,20 +1016,24 @@ static string_view FindLine(io::Bytes buf) {
   return {};
 };
 
-void Driver::PopRequest() {
+void Driver::RecordResponse(const Req& req) {
   uint64_t now = absl::GetCurrentTimeNanos();
-  const Req& req = reqs_.front();
   uint64_t usec = (now - req.start) / 1000;
   stats_.online_hist.Add(usec);
   stats_.total_hist.Add(usec);
   stats_.hit_opportunities += req.might_hit;
   stats_.AddLatencySample(req.op, usec, now - start_ns_);
   ++received_;
+  ++stats_.num_responses;
+}
+
+void Driver::PopRequest() {
+  if (!reqs_.front().replied)
+    RecordResponse(reqs_.front());
   reqs_.pop();
   if (reqs_.empty()) {
     cnd_.notify_one();
   }
-  ++stats_.num_responses;
 }
 
 void Driver::ReceiveFb() {
@@ -1012,19 +1086,39 @@ void Driver::ParseRESP() {
       first = (*array)[0];
     }
 
-    if (first.GetType() == facade::RESPObj::Type::ERROR) {
-      string_view error = *first.As<string_view>();
-      VLOG(2) << "Error " << error;
-      if (absl::StartsWith(error, kMovedErrorKey)) {
-        if (const auto moved = ParseMovedError(error, proactor_); moved) {
-          shard_slots_.MoveSlot(ep_, moved->second, moved->first);
-        }
+    Req& req = reqs_.front();
+    if (req.replied) {
+      // A reply to one of the EXPIREs sent after a custom command.
+      if (first.GetType() == facade::RESPObj::Type::ERROR) {
+        VLOG(2) << "EXPIRE error " << *first.As<string_view>();
+        ++stats_.num_errors;
       }
-      ++stats_.num_errors;
-    } else if (reqs_.front().might_hit && first.GetType() != facade::RESPObj::Type::NIL) {
-      ++stats_.hit_count;
+      if (--req.expires_left == 0) {
+        PopRequest();
+      }
+    } else {
+      if (first.GetType() == facade::RESPObj::Type::ERROR) {
+        string_view error = *first.As<string_view>();
+        VLOG(2) << "Error " << error;
+        if (absl::StartsWith(error, kMovedErrorKey)) {
+          if (const auto moved = ParseMovedError(error, proactor_); moved) {
+            shard_slots_.MoveSlot(ep_, moved->second, moved->first);
+          }
+        }
+        ++stats_.num_errors;
+      } else if (req.might_hit && first.GetType() != facade::RESPObj::Type::NIL) {
+        ++stats_.hit_count;
+      }
+
+      // The command's own reply. With EXPIREs to follow, record it now and keep the request
+      // until they reply.
+      if (req.expires_left == 0) {
+        PopRequest();
+      } else {
+        RecordResponse(req);
+        req.replied = true;
+      }
     }
-    PopRequest();
 
     if (!parser_.HasBufferedInput()) {
       break;
@@ -1636,8 +1730,15 @@ int main(int argc, char* argv[]) {
   ShardSlots shard_slots;
   shard_slots.SetClusterSlotRanges(shards);
   std::vector<tcp::endpoint> shard_endpoints = shard_slots.Endpoints();
+  uint64_t base_seed = GetFlag(FLAGS_seed);
+  if (GetFlag(FLAGS_randomize)) {
+    base_seed = absl::GetCurrentTimeNanos();
+    CONSOLE_INFO << "Using random seed " << base_seed << " (repeat with --seed=" << base_seed
+                 << ")";
+  }
+
   pp->AwaitBrief([&](unsigned index, auto* p) {
-    base::SplitMix64 seed_mix(GetFlag(FLAGS_seed) + index * 0x6a45554a264d72bULL);
+    base::SplitMix64 seed_mix(base_seed + index * 0x6a45554a264d72bULL);
     auto seed = seed_mix();
     VLOG(1) << "Seeding bitgen with seed " << seed;
     bit_gen.seed(seed);
