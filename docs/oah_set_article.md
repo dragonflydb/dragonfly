@@ -4,10 +4,12 @@ A set of 100,000 unique 16-byte ASCII strings takes **45.6 bytes per member** in
 StringSet. OAHSet stores the same set in **25.2 bytes**, 45% less. The standard C++
 `std::unordered_set` needs **94.4 bytes**.
 
-OAHSet is Dragonfly's open-addressing hash set for strings. Since v2.1, OAHSet is used by default, `--use_oah_set=false` brings back StringSet. Two compile-time constants decide how OAHSet trades memory for speed. This article
-explains how we think about that trade, how OAHSet lays out its members, and what two settings of
-the constants cost. The accent is on the operations that process a whole set, such as resizing,
-saving, and loading, because those are the ones that move a server's CPU usage and latency.
+OAHSet is Dragonfly's open-addressing hash set for strings. Since v2.1, it is used by default, and
+`--use_oah_set=false` brings back StringSet. Two compile-time constants decide how OAHSet trades
+memory for speed. This article explains how we think about that trade, how OAHSet lays out its
+members, and what two settings of the constants cost. The accent is on the operations that process
+a whole set, such as resizing, saving, and loading, because those are the ones that move a
+server's CPU usage and latency.
 
 ## How we think about a set in a database
 
@@ -17,7 +19,8 @@ so a cycle spent inside a set is a cycle that every other command on the shard w
 every member it holds. **Memory bandwidth is plentiful**: a database holds far more data than the
 CPU caches and touches it in no predictable order, so almost every visit to a set misses the
 cache, whatever the layout. Time goes into misses that must wait for each other. Once the CPU
-waits for one cache line, a few adjacent lines arrive almost for free.
+waits for one cache line, a few adjacent lines arrive almost for free. Memory works like a bus
+service: you wait ages for one cache line, and then three arrive at once.
 
 So OAHSet spends bandwidth, the plentiful resource, to save the other two. A lookup reads a window
 of adjacent slots at once and compares their cached fingerprints with SIMD instructions, instead
@@ -26,18 +29,24 @@ that a member costs only a few bytes beyond its key. Where the two scarce resour
 memory usually wins: ASCII keys are packed into smaller allocations at the cost of a few cycles
 per key.
 
-Finding the balance took a while. The first version,  probed windows of 4 slots and grew once it held one member per slot. This version proved that new approach is better than the previous one. We understand that bigger N
-improves memory locality and reduces memory consumption, significantly improving Grow and
-serialization operations performance, but reducing the performance of ADD type operations."
+Finding the balance took a while. The first version probed windows of 4 slots and grew once it
+held one member per slot. Even without SIMD, it beat StringSet in most of its benchmarks, which
+proved the approach. We expected bigger windows to improve memory locality and reduce memory
+consumption, making growth and serialization much faster but insertions slower.
 
-So we start experinmenting with SIMD probing and as a result started using 32-slot windows and let the table
-fill up to two members per slot before growing. 32-slot window showed good enough performance with significant memory usage saving. But we still has the problem, after grow ahlf othe buckets are empty and we wasted 8 bytes per element in average, so we decided to overload the hash table to avoid empty buckets after grow, this is why we have 16 slot window and up to 2 times more keys in hash table than buckets.
+SIMD probing made wide windows cheap, so we tried 32-slot windows and let the table fill up to two
+members per slot before growing. They performed well enough and saved a lot of memory. A month
+later, when we added more benchmarks, we went back to 4 slots and one member per slot, and with
+them came the problem the overload had solved: right after growth, half of the slots are empty,
+which wastes 8 bytes per member. So we overloaded the table again, this time with 16-slot windows.
+OAHSet now grows only when it holds twice as many members as slots, so even right after growth,
+it holds about one member per slot.
 
 The two constants live in [oah_table.h](../src/core/oah_table.h). `kShiftLog` is the log2 of the
 window size, and `kOverloadFactor` is the average number of members per slot at which the table
 grows. This article measures the default, **OAHSet 16/2**, and the first version's balance,
 **OAHSet 4/1**, built from the same commit with only these two constants changed, so the numbers
-can check the prediction.
+can check that expectation.
 
 ## Two baselines
 
@@ -52,10 +61,11 @@ StringSet memory ≈ 8 × buckets + 16 × collision links + allocated SDS string
 
 **std::unordered_set** is part of almost every hash-table benchmark, which makes it a common
 yardstick: a set measured against `std::unordered_set` elsewhere can be placed next to OAHSet and
-StringSet. I used `std::unordered_set<std::string>` from GCC 13.3's libstdc++ on 64-bit Linux.
-Each node holds an 8-byte next pointer, a 32-byte `std::string`, and an 8-byte cached hash:
-**48 bytes**, plus 8 bytes per bucket. Strings longer than 15 characters need a separate heap
-buffer. I think these calculations show why we can't use standard library containers.
+StringSet. Astronomers measure distances with standard candles; hash-table benchmarks use a `std::`
+one. I used `std::unordered_set<std::string>` from GCC 13.3's libstdc++ on 64-bit Linux. Each node
+holds an 8-byte next pointer, a 32-byte `std::string`, and an 8-byte cached hash: **48 bytes**,
+plus 8 bytes per bucket. Strings longer than 15 characters need a separate heap buffer. This
+arithmetic alone shows why we can't use standard-library containers.
 
 ## How OAHSet stores members
 
@@ -90,21 +100,26 @@ the key, which shrinking and `SCAN` rely on.
 
 **Compact keys.** A key allocation holds an optional 4-byte expiry, a 1-, 2-, or 4-byte header
 with the length and a packing flag, and the key bytes, without a terminator. ASCII keys of 8–128
-bytes are packed at 7 bits per character; all other keys stay raw. For a 16-byte ASCII key
-without expiry:
+bytes are packed at 7 bits per character; all other keys stay raw. ASCII has been a 7-bit code
+since 1963; OAHSet just stopped paying for the eighth bit. For a 16-byte ASCII key without expiry:
 
 ```text
-StringSet: 16 data bytes + 1 SDS header byte + 1 terminator = 18 requested → 32 allocated (because of allocator alligning)
-OAHSet:    14 packed bytes + 1 key header byte              = 15 requested → 16 allocated
+StringSet:          16 data bytes + 1 SDS header byte + 1 terminator = 18 requested → 32 allocated
+OAHSet:             14 packed bytes + 1 key header byte              = 15 requested → 16 allocated
+std::unordered_set: 16 data bytes + 1 terminator                     = 17 requested → 32 allocated
 ```
 
-Packing moves this key into a smaller mimalloc size class, which halves its allocation.
+Allocations are rounded up to mimalloc's size classes, which are 16 bytes apart for small sizes, so
+17 or 18 requested bytes take 32. Packing moves this key into the 16-byte class, which halves its
+allocation. `std::unordered_set` adds its 48-byte node on top.
 
 ## How OAHSet uses the layout
 
-**Lookup.** OAHSet packs the query like a stored key and hashes it. SIMD compares the query's
-fingerprint with every slot of the window, four slots per instruction with AVX2 for example. If no member
-matches and the group's shared slot holds a vector, the overflow array is scanned the same way. Each fingerprint match is confirmed by comparing the packing flag, the length, and the key bytes.
+**Lookup.** OAHSet packs the query like a stored key and hashes it. SIMD instructions compare the
+query's fingerprint with every slot of the window, for example four slots per instruction with
+AVX2. If no member matches and the group's shared slot holds a vector, the overflow array is
+scanned the same way. Each fingerprint match is confirmed by comparing the packing flag, the
+length, and the key bytes.
 
 **Insertion.** `Add` allocates the new key before it checks for a duplicate, so adding an existing
 member costs an allocation and a free. A new member takes the first empty slot of its window. If
@@ -122,11 +137,24 @@ by then. Growth at least doubles `B` and rehashes every key, which means reading
 power of two, computing the new positions from fingerprints and slots alone. Resizing moves only
 slot words; keys stay where they are.
 
+**Prefetching.** A cache miss costs less when the CPU has other work to do while it waits, so
+OAHSet requests memory before it needs it. As soon as `Add` knows the home bucket, it requests the
+window's first cache line, then allocates and copies the new key while that line is on its way.
+Before it probes the window, `Add` also requests whatever the group's shared slot points to,
+usually an overflow array, which it searches whenever the window holds no match. For each home
+bucket, a scan requests the key or array behind every slot of the window before it compares
+fingerprints. A scan visits buckets in order and windows overlap, so it usually requests a window's
+keys several buckets before it reports them, with many misses in flight at once. Lookups, erasure,
+resizing, and the iterator don't prefetch. With the prefetches compiled out, a full scan of
+1,000,000 members took 11–18% longer in my measurements, while insertion slowed by at most 2.4%,
+which is within the noise.
+
 **Expiry, scans, and threads.** A member's expiry is an absolute time in seconds, stored in front
 of its key. Reads and `Add` delete expired members lazily. The `SCAN` cursor is a hash prefix, so
 a scan survives resizing and still reports every member present for the whole scan at least once.
-Like everything in a Dragonfly shard, an OAHSet belongs to one thread and needs no locks. The code
-lives in [oah_set.h](../src/core/oah_set.h) and [oah_table.h](../src/core/oah_table.h).
+A `std::unordered_set` iterator can't do that: rehashing invalidates it. Like everything in a
+Dragonfly shard, an OAHSet belongs to one thread and needs no locks. The code lives in
+[oah_set.h](../src/core/oah_set.h) and [oah_table.h](../src/core/oah_table.h).
 
 ## Memory: the index and the strings
 
@@ -237,12 +265,13 @@ table at about 524,000 members: 21 ms in both OAHSet builds and 32 ms in StringS
 OAHSet builds and 138 ms in StringSet. A bare loop over the iterator ranks the sets the other way
 round. It visits StringSet's 1,000,000 members in 21.7 ns each and OAHSet's in 29.1 ns, because
 the CPU keeps more than four of StringSet's cache misses in flight at once but only about two of
-OAHSet's, whose loop also unpacks every key. `SAVE` runs about 470 more instructions per member,
-and with that much work in between, only one or two misses overlap in either set, so what decides
-is how often the CPU stalls. Per saved member, hardware counters show OAHSet 16/2 executing 15%
-more instructions than StringSet, but mispredicting 0.51 branches against 0.92 and fetching 0.57
-cache lines from DRAM against 1.23, plausibly because its set is a third smaller and more of it
-stays in the cache. It needed 17% fewer cycles.
+OAHSet's, whose loop also unpacks every key. In `std::unordered_set`, whose nodes form one linked
+list, each miss waits for the one before, and a member takes 86.5 ns. `SAVE` runs about 470 more
+instructions per member, and with that much work in between, only one or two misses overlap in
+OAHSet or StringSet, so what decides is how often the CPU stalls. Per saved member, hardware
+counters show OAHSet 16/2 executing 15% more instructions than StringSet, but mispredicting 0.51
+branches against 0.92 and fetching 0.57 cache lines from DRAM against 1.23, plausibly because its
+set is a third smaller and more of it stays in the cache. It needed 17% fewer cycles.
 
 **Loading** favors OAHSet 4/1, which loaded the snapshot in 155 ms, against 170 for OAHSet 16/2
 and 173 for StringSet. Loading reserves room for the saved members, which gives OAHSet 4/1 about
@@ -274,7 +303,9 @@ reserved set, as loading does, 16–28% less. The gap is widest for shrinking, w
 without reading keys: OAHSet 16/2 shrinks a set in 19 ns per member whatever the key size, while
 StringSet rehashes every key, in 40 ns per member with 10-byte keys and 149 ns with 1000-byte keys.
 Clearing a set of 32,000 members takes 4.9 ns per member in OAHSet 16/2, 9.7 in OAHSet 4/1, and
-18.2 in StringSet.
+18.2 in StringSet. The unit tests have no `std::unordered_set` version, but the harness described
+below does: adding 1,000,000 32-byte ASCII members one at a time to a reserved set takes 158 ns per
+member in OAHSet 16/2, 112 in OAHSet 4/1, 249 in StringSet, and 222 in `std::unordered_set`.
 
 ## Single-member operations
 
@@ -341,14 +372,15 @@ wait until the stores complete. Hardware counters for 8-byte keys showed about 4
 failed store-to-load forwards for packed keys as for binary ones, with the same cache misses and
 branch mispredictions.
 
-**Erasure** is slower in OAHSet while the set fits in the cache, 108 ns against StringSet's 75, and
-about as fast in the larger set. Small differences deserve caution: the StringSet code is the same
-in both harness builds, yet its two sets of results differ by up to 12% for lookups and 16% for
-erasure with 16- and 32-byte keys.
+**Erasure** is slower in OAHSet while the set fits in the cache: 108 ns against 75 in StringSet
+and 91 in `std::unordered_set`. In the larger set, OAHSet is about as fast as StringSet, and
+`std::unordered_set` is the slowest, at 433 ns. Small differences deserve caution: the StringSet
+code is the same in both harness builds, yet its two sets of results differ by up to 12% for
+lookups and 16% for erasure with 16- and 32-byte keys.
 
 ## Which balance to pick
 
-The first version's prediction holds in part. A bigger window and a fuller table save memory:
+The expectation we started with holds in part. A bigger window and a fuller table save memory:
 OAHSet 16/2's index takes 9.2 bytes per member against 12.5 in OAHSet 4/1, and its set in the
 server took 7% less memory in total. They cost speed when adding members and on misses: OAHSet 4/1
 inserts into a growing 1,000,000-member set in 39% less time, answers misses in that set in half
@@ -360,9 +392,9 @@ overflow arrays instead of linked chains, and compact keys. Freeing memory favor
 OAHSet 16/2 stays the default. Memory is what a deployment pays for; growth and saving cost the
 same with it, and freeing costs less. Loading and `SSCAN` cost 5–10% more, and a single-member
 command costs the same in a server either way. OAHSet 4/1 suits a workload dominated by insertions
-and misses that has memory to spare. Both constants are compile-time, so switching means
-rebuilding Dragonfly. Either way, the set spends memory bandwidth, which a database has in plenty,
-to save the CPU time and memory it lacks.
+and misses that has memory to spare. Such workloads are rumored to exist. Both constants are
+compile-time, so switching means rebuilding Dragonfly. Either way, the set spends memory
+bandwidth, which a database has in plenty, to save the CPU time and memory it lacks.
 
 Methodology, data, and scripts: [docs/benchmarks/oah_set](benchmarks/oah_set/README.md).
 
