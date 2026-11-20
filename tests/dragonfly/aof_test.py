@@ -594,3 +594,37 @@ async def test_replay_into_different_shard_count(df_factory: DflyInstanceFactory
     df = create(3)
     df.start()
     assert await SeederV2.capture(df.client()) == before
+
+
+@pytest.mark.exclude_epoll
+@pytest.mark.parametrize("master_shards, replica_shards", [(4, 2), (2, 4)])
+async def test_replica_with_different_shard_count(
+    df_factory: DflyInstanceFactory, tmp_path, master_shards, replica_shards
+):
+    master = df_factory.create(proactor_threads=4, num_shards=master_shards)
+    replica = df_factory.create(
+        proactor_threads=4, num_shards=replica_shards, aof=True, dir=str(tmp_path)
+    )
+    df_factory.start_all([master, replica])
+    c_master, c_replica = master.client(), replica.client()
+    seeder = SeederV2(key_target=20_000)
+    await seeder.run(c_master, target_deviation=0.1)
+
+    # The replica's AOF follows its own shard count, whatever the master's is.
+    await c_replica.execute_command(f"REPLICAOF localhost {master.port}")
+    await wait_for_replicas_state(c_replica)
+    await wait_for_manifest(tmp_path, "base dfs owned appendonly-base-1-summary.dfs\n")
+    assert f"shard_count {replica_shards}\n" in read_manifest(tmp_path)
+
+    # Stable sync, global commands included, reaches the replica's AOF.
+    await c_master.flushall()
+    await seeder.run(c_master, target_deviation=0.1)
+    await check_all_replicas_finished([c_replica], c_master)
+    assert await SeederV2.capture(c_replica) == await SeederV2.capture(c_master)
+
+    await c_replica.execute_command("REPLICAOF NO ONE")
+    await c_replica.set("after_promotion", 1)
+    before = await SeederV2.capture(c_replica)
+    replica.stop()
+    replica.start()
+    assert await SeederV2.capture(replica.client()) == before
