@@ -18,6 +18,7 @@
 #include "server/metrics.h"
 #include "server/replica_manager.h"
 #include "server/replica_types.h"
+#include "server/replication_family.h"
 #include "server/server_state.h"
 #include "server/stats.h"
 #include "util/fibers/fiberqueue_threadpool.h"
@@ -214,17 +215,21 @@ class ServerFamily {
 
   void ConfigureMetrics(util::HttpListenerBase* listener);
 
-  ReplicaManager& replica_manager() const {
-    return *replica_manager_;
+  ReplicaManager& replica_manager() {
+    return replica_manager_;
+  }
+
+  const ReplicaManager& replica_manager() const {
+    return replica_manager_;
+  }
+
+  ReplicationFamily& replication_family() {
+    return replication_family_;
   }
 
   DflyCmd* GetDflyCmd() const {
     return dfly_cmd_.get();
   }
-
-  // Forces all replicas of this node to perform a full sync by breaking the replication connection
-  // with a cancellation error (DfylCmd::CancelReplicas) and resetting the journal
-  void ForceReplicasToFullSync();
 
   absl::Span<facade::Listener* const> GetListeners() const {
     return listeners_;
@@ -239,14 +244,7 @@ class ServerFamily {
   // Fails blocked commands on all threads with an UNBLOCKED error.
   void UnblockAllClients();
 
-  // Sets the server to replicate another instance. Does not flush the database beforehand!
-  void Replicate(std::string_view host, std::string_view port);
-
   void UpdateMemoryGlobalStats();
-
-  // Return true if no replicas are registered or if all replicas reached stable sync
-  // Used in debug populate to DCHECK insocsistent flows that violate transaction gurantees
-  bool AreAllReplicasInStableSync() const;
 
  private:
   // Helper to safely get save controller copy
@@ -268,7 +266,6 @@ class ServerFamily {
   void Config(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void DbSize(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Debug(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Dfly(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Memory(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Shrink(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void FlushDb(facade::CmdArgParser parser, CommandContext* cmd_cntx);
@@ -276,12 +273,6 @@ class ServerFamily {
   void Hello(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void LastSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Latency(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void ReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void AddReplicaOf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void ReplTakeOver(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void ReplConf(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Wait(facade::CmdArgParser parser, CommandContext* cmd_cntx);
-  void Role(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Save(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void BgSave(facade::CmdArgParser parser, CommandContext* cmd_cntx);
   void Script(facade::CmdArgParser parser, CommandContext* cmd_cntx);
@@ -289,9 +280,6 @@ class ServerFamily {
   void Module(facade::CmdArgParser parser, CommandContext* cmd_cntx);
 
   void SyncGeneric(std::string_view repl_master_id, uint64_t offs, ConnectionContext* cntx);
-
-  void ReplicaOfInternal(facade::ParsedArgs args, CommandContext* cmnd_cntx,
-                         ReplicaManager::ActionOnConnectionFail on_error);
 
   struct LoadOptions {
     std::string snapshot_id;
@@ -342,10 +330,11 @@ class ServerFamily {
   util::ProactorBase* pb_task_ = nullptr;
 
   mutable util::fb2::Mutex save_mu_;
-  std::unique_ptr<ReplicaManager> replica_manager_;
+  ReplicaManager replica_manager_;
 
   std::unique_ptr<ScriptMgr> script_mgr_;
   std::unique_ptr<DflyCmd> dfly_cmd_;
+  ReplicationFamily replication_family_;
 
   time_t start_time_ = 0;  // in seconds, epoch time.
 

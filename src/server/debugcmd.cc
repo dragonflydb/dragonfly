@@ -32,6 +32,7 @@ extern "C" {
 #include "facade/dragonfly_connection.h"
 #include "server/blocking_controller.h"
 #include "server/container_utils.h"
+#include "server/dflycmd.h"
 #include "server/engine_shard_set.h"
 #include "server/error.h"
 #include "server/family_utils.h"
@@ -909,7 +910,7 @@ void DebugCmd::Populate(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
   if (!options.has_value()) {
     return;
   }
-  DCHECK(sf_.AreAllReplicasInStableSync());
+  DCHECK(sf_.GetDflyCmd()->AreAllReplicasInStableSync());
 
   ProactorPool& pp = sf_.service().proactor_pool();
   size_t runners_count = pp.size();
@@ -937,7 +938,7 @@ void DebugCmd::Populate(facade::CmdArgParser parser, CommandContext* cmd_cntx) {
 
   cmd_cntx->rb()->SendOk();
 
-  DCHECK(sf_.AreAllReplicasInStableSync());
+  DCHECK(sf_.GetDflyCmd()->AreAllReplicasInStableSync());
 }
 
 void DebugCmd::PopulateRangeFiber(uint64_t from, uint64_t num_of_keys,
