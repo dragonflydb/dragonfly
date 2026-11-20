@@ -213,8 +213,11 @@ class ServerFamily {
   // Load snapshot from file (.rdb file or summary.dfs file) and return
   // future with error_code.
   enum class LoadExistingKeys : uint8_t { kFail, kOverride };
+  // With caller_holds_loading, the caller keeps the server LOADING around it, so Load() neither
+  // enters nor leaves that state.
   std::optional<util::fb2::Future<GenericError>> Load(const std::string& file_name,
-                                                      LoadExistingKeys existing_keys);
+                                                      LoadExistingKeys existing_keys,
+                                                      bool caller_holds_loading = false);
 
   bool TEST_IsSaving() const;
 
