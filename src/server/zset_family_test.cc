@@ -245,11 +245,10 @@ TEST_F(ZSetFamilyTest, ZRandMember) {
   auto resp = Run({"ZAdd", "x", "1", "a", "2", "b", "3", "c"});
   EXPECT_THAT(resp, IntArg(3));
 
-  // Test if count > 0
-  resp = Run({"ZRandMember", "x"});
-  // ZRandMember always uses SendScoredArray which wraps in an array even without count arg.
-  EXPECT_THAT(resp, RespElementsAre(AnyOf("a", "b", "c")));
+  // Without a count the reply is the member itself.
+  EXPECT_THAT(Run({"ZRandMember", "x"}), AnyOf("a", "b", "c"));
 
+  // Test if count > 0
   resp = Run({"ZRandMember", "x", "1"});
   EXPECT_THAT(resp, RespElementsAre(AnyOf("a", "b", "c")));
 
@@ -1265,6 +1264,14 @@ TEST_F(ZSetFamilyTest, Resp3) {
   // Without WITHSCORES they stay a flat list of members.
   resp = Run({"zunion", "2", "x", "y"});
   EXPECT_THAT(resp.GetVec(), ElementsAre("a", "c", "b"));
+
+  // ZPOPMIN and ZPOPMAX nest the pairs only when COUNT is given.
+  EXPECT_THAT(Run({"zpopmin", "x"}), RespElementsAre("a", DoubleArg(1)));
+  EXPECT_THAT(Run({"zpopmax", "y"}), RespElementsAre("c", DoubleArg(4)));
+  resp = Run({"zpopmin", "y", "1"});
+  ASSERT_THAT(resp, ArrLen(1));
+  EXPECT_THAT(resp.GetVec()[0].GetVec(), ElementsAre("b", DoubleArg(3)));
+  EXPECT_THAT(Run({"zpopmin", "y"}), ArrLen(0));
 }
 
 TEST_F(ZSetFamilyTest, BlockingIsReleased) {
@@ -1428,6 +1435,10 @@ TEST_F(ZSetFamilyTest, ZDiff_Resp3) {
   ASSERT_THAT(resp.GetVec()[1].GetVec(), ElementsAre("two", DoubleArg(2)));
   ASSERT_THAT(resp.GetVec()[2].GetVec(), ElementsAre("three", DoubleArg(3)));
   ASSERT_THAT(resp.GetVec()[3].GetVec(), ElementsAre("four", DoubleArg(4)));
+
+  // Without WITHSCORES the members are not wrapped.
+  resp = Run({"zdiff", "1", "z1"});
+  EXPECT_THAT(resp.GetVec(), ElementsAre("one", "two", "three", "four"));
 }
 
 TEST_F(ZSetFamilyTest, ZDiffStoreError) {

@@ -303,20 +303,21 @@ OpResult<bool> ExtendOrSkip(const OpArgs& op_args, string_view key, string_view 
   return true;
 }
 
-OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val) {
+void FinishIncr(const OpArgs& op_args, string_view key, const absl::AlphaNum& new_val,
+                DbSlice::ItAndUpdater& it_upd);
+
+OpResult<string> OpIncrFloat(const OpArgs& op_args, string_view key, long double incr) {
   auto& db_slice = op_args.GetDbSlice();
 
   auto op_res = db_slice.AddOrFind(op_args.db_cntx, key, OBJ_STRING);
   RETURN_ON_BAD_STATUS(op_res);
   auto& add_res = *op_res;
 
-  char buf[128];
-
   if (add_res.is_new) {
-    char* str = RedisReplyBuilder::FormatDouble(val, buf, sizeof(buf));
-    add_res.it->second.SetString(str);
-
-    return val;
+    string res = FormatLongDouble(incr);
+    add_res.it->second.SetString(res);
+    FinishIncr(op_args, key, res, add_res);
+    return res;
   }
 
   if (add_res.it->second.Size() == 0)
@@ -331,29 +332,31 @@ OpResult<double> OpIncrFloat(const OpArgs& op_args, string_view key, double val)
   RETURN_ON_BAD_STATUS(cur);
   string_view slice = *cur;
 
-  double base = 0;
-  if (!ParseDouble(slice, &base)) {
+  long double base = 0;
+  if (!ParseLongDouble(slice, &base)) {
     return OpStatus::INVALID_FLOAT;
   }
 
-  base += val;
+  base += incr;
 
   if (isnan(base) || isinf(base)) {
     return OpStatus::NAN_OR_INF_DURING_INCR;
   }
 
-  char* str = RedisReplyBuilder::FormatDouble(base, buf, sizeof(buf));
+  string res = FormatLongDouble(base);
 
   add_res.post_updater.ReduceHeapUsage();
   if (add_res.it->second.IsExternal()) {
     op_args.shard->tiered_storage()->Delete(op_args.db_cntx.db_index, key, &add_res.it->second);
   }
-  add_res.it->second.SetString(str);
+  add_res.it->second.SetString(res);
+  FinishIncr(op_args, key, res, add_res);
 
-  return base;
+  return res;
 }
 
-void FinishIncr(const OpArgs& op_args, string_view key, int64_t new_val,
+// Journals the new value, so replicas do not recompute it.
+void FinishIncr(const OpArgs& op_args, string_view key, const absl::AlphaNum& new_val,
                 DbSlice::ItAndUpdater& it_upd) {
   if (!op_args.shard->journal())
     return;
@@ -361,10 +364,9 @@ void FinishIncr(const OpArgs& op_args, string_view key, int64_t new_val,
   // Finish mutation accounting before journaling, which may suspend.
   it_upd.post_updater.Run();
   const auto& it = it_upd.it;
-  const string value = absl::StrCat(new_val);
   string expiry;
   string mc_flags;
-  absl::InlinedVector<string_view, 7> args{key, value};
+  absl::InlinedVector<string_view, 7> args{key, new_val.Piece()};
 
   const uint64_t expire_time = it->first.GetExpireTime();
   if (expire_time != 0) {
@@ -1524,19 +1526,25 @@ cmd::CmdR CmdIncrBy(CmdArgParser parser, CommandContext* cmd_cntx) {
 }
 
 cmd::CmdR CmdIncrByFloat(CmdArgParser parser, CommandContext* cmd_cntx) {
-  auto [key, val] = parser.Next<string_view, double>();
+  auto [key, incr_arg] = parser.Next<string_view, string_view>();
   if (auto err = parser.TakeError(); err)
     co_return err.MakeReply();
 
+  long double incr = 0;
+  if (!ParseLongDouble(incr_arg, &incr))
+    co_return facade::ErrorReply{kInvalidFloatErr};
+  if (isinf(incr))
+    co_return facade::ErrorReply{kNanOrInfDuringIncr};
+
   auto cb = [&](Transaction* t, EngineShard* shard) {
-    return OpIncrFloat(t->GetOpArgs(shard), key, val);
+    return OpIncrFloat(t->GetOpArgs(shard), key, incr);
   };
 
-  OpResult<double> result = co_await cmd::SingleHopT(cb);
+  OpResult<string> result = co_await cmd::SingleHopT(cb);
   auto* rb = static_cast<RedisReplyBuilder*>(cmd_cntx->rb());
 
   if (result)
-    rb->SendDouble(result.value());
+    rb->SendBulkString(*result);
   else
     rb->SendError(result.status());
   co_return std::nullopt;
@@ -1880,7 +1888,8 @@ void RegisterStringFamily(CommandRegistry* registry) {
       << CI{"INCR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdIncr)
       << CI{"DECR", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 2, 1, 1}.SetAsyncHandler(CmdDecr)
       << CI{"INCRBY", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(CmdIncrBy)
-      << CI{"INCRBYFLOAT", CO::RW | CO::FAST, 3, 1, 1}.SetAsyncHandler(CmdIncrByFloat)
+      << CI{"INCRBYFLOAT", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(
+             CmdIncrByFloat)
       << CI{"DECRBY", CO::RW | CO::FAST | CO::NO_AUTOJOURNAL, 3, 1, 1}.SetAsyncHandler(CmdDecrBy)
       << CI{"GET", CO::READONLY | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGet)
       << CI{"GETDEL", CO::RW | CO::FAST, 2, 1, 1}.SetAsyncHandler(CmdGetDel)

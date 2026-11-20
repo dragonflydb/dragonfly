@@ -14,6 +14,7 @@
 #include "facade/memcache_parser.h"
 #include "facade/resp_expr_test_utils.h"
 #include "server/conn_context.h"
+#include "server/journal/types.h"
 #include "server/main_service.h"
 #include "server/namespaces.h"
 #include "server/transaction.h"
@@ -24,9 +25,18 @@ using namespace facade;
 using util::fb2::Fiber;
 using util::fb2::Launch;
 
-namespace journal {
-struct JournalConsumerInterface;
-}  // namespace journal
+// Records the commands journaled on the proactor it is registered on, with their serialized args.
+class JournalRecorder : public journal::JournalConsumerInterface {
+ public:
+  void ConsumeJournalChange(const journal::JournalChangeItem& item) override {
+    entries.emplace_back(item.cmd, item.journal_item.data);
+  }
+
+  void ThrottleIfNeeded() override {
+  }
+
+  std::vector<std::pair<std::string, std::string>> entries;
+};
 
 // Parses the text payload of INFO
 // Names will be matched exactly, without a trailing ':'. Malformed fields will fail the test.

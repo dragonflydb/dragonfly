@@ -224,7 +224,8 @@ int ZsetAdd(PrimeValue* pv, double score, std::string_view ele, int in_flags, in
   return ss->AddElem(score, ele, in_flags, out_flags, newscore);
 }
 
-void OutputScoredArrayResult(const OpResult<ScoredArray>& result, SinkReplyBuilder* builder) {
+void OutputScoredArrayResult(const OpResult<ScoredArray>& result, bool has_count,
+                             SinkReplyBuilder* builder) {
   if (result.status() == OpStatus::WRONG_TYPE) {
     return builder->SendError(kWrongTypeErr);
   }
@@ -232,7 +233,15 @@ void OutputScoredArrayResult(const OpResult<ScoredArray>& result, SinkReplyBuild
   LOG_IF(WARNING, !result && result.status() != OpStatus::KEY_NOTFOUND)
       << "Unexpected status " << result.status();
   auto* rb = static_cast<RedisReplyBuilder*>(builder);
-  rb->SendScoredArray(result.value(), true /* with scores */);
+  if (has_count)
+    return rb->SendScoredArray(result.value(), true /* with scores */);
+
+  // Without COUNT the popped member and its score are flat in both protocols.
+  RedisReplyBuilder::ArrayScope scope{rb, result.value().size() * 2};
+  for (const auto& [member, score] : result.value()) {
+    rb->SendBulkString(member);
+    rb->SendDouble(score);
+  }
 }
 
 OpResult<DbSlice::ItAndUpdater> PrepareZEntry(const ZSetFamily::ZParams& zparams,
@@ -1616,22 +1625,7 @@ void ZBooleanOperation(CmdArgParser parser, string_view cmd, bool is_union, bool
     builder->SendLong(smvec.size());
   } else {
     rng::sort(smvec);
-
-    // We can't use SendScoredArray because it expects strings, not string_views
-    // TOOD: Not longer relevant with new io, use scoping
-    auto* rb = static_cast<RedisReplyBuilder*>(builder);
-
-    // Like SendScoredArray: RESP3 replies with a [member, score] pair per member.
-    const bool score_pairs = op_args->with_scores && rb->IsResp3();
-    rb->StartArray((op_args->with_scores && !score_pairs) ? smvec.size() * 2 : smvec.size());
-    for (const auto& elem : smvec) {
-      if (score_pairs)
-        rb->StartArray(2);
-      rb->SendBulkString(elem.second);
-      if (op_args->with_scores) {
-        rb->SendDouble(elem.first);
-      }
-    }
+    static_cast<RedisReplyBuilder*>(builder)->SendScoredArray(smvec, op_args->with_scores);
   }
 }
 
@@ -1667,13 +1661,14 @@ OpResult<ScoredArray> ZPopMinMaxInternal(std::string_view key, FilterShards shou
 
 void ZPopMinMaxFromArgs(CmdArgParser parser, bool reverse, CommandContext* cmd_cntx) {
   string_view key = parser.Next();
+  const bool has_count = parser.HasNext();
   uint32 count = parser.NextOrDefault<uint32>(1);
   if (parser.TakeError()) {
     return cmd_cntx->SendError(kUintErr);
   }
 
   OutputScoredArrayResult(ZPopMinMaxInternal(key, FilterShards::NO, count, reverse, cmd_cntx->tx()),
-                          cmd_cntx->rb());
+                          has_count, cmd_cntx->rb());
 }
 
 void ZRangeInternal(const facade::ParsedArgs& args, ZSetFamily::RangeParams range_params,
@@ -2293,16 +2288,7 @@ void CmdZDiff(CmdArgParser parser, CommandContext* cmd_cntx) {
   }
 
   const bool with_scores = absl::EqualsIgnoreCase(args[args.size() - 1], "WITHSCORES");
-  bool is_resp3 = rb->IsResp3();
-  rb->StartArray(smvec.size() * ((with_scores && !is_resp3) ? 2 : 1));
-  for (const auto& [score, key] : smvec) {
-    if (is_resp3)
-      rb->StartArray(with_scores ? 2 : 1);
-    rb->SendBulkString(key);
-    if (with_scores) {
-      rb->SendDouble(score);
-    }
-  }
+  rb->SendScoredArray(smvec, with_scores);
 }
 
 void CmdZDiffStore(CmdArgParser parser, CommandContext* cmd_cntx) {
@@ -2701,7 +2687,11 @@ void CmdZRandMember(CmdArgParser parser, CommandContext* cmd_cntx) {
 
   OpResult<ScoredArray> result = cmd_cntx->tx()->ScheduleSingleHopT(cb);
   if (result) {
-    rb->SendScoredArray(result.value(), params.with_scores);
+    // Without a count the member is sent alone.
+    if (is_count)
+      rb->SendScoredArray(result.value(), params.with_scores);
+    else
+      rb->SendBulkString(result->front().first);
   } else if (result.status() == OpStatus::KEY_NOTFOUND) {
     if (is_count) {
       rb->SendScoredArray(ScoredArray(), params.with_scores);

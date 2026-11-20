@@ -74,6 +74,12 @@ const char* GlobalStateName(GlobalState gs);
 bool ParseHumanReadableBytes(std::string_view str, int64_t* num_bytes);
 bool ParseDouble(std::string_view src, double* value);
 
+// Parses an INCRBYFLOAT operand: no spaces or trailing characters, no nan, no overflow.
+bool ParseLongDouble(std::string_view src, long double* value);
+
+// Formats an INCRBYFLOAT result: up to 17 decimals where long double is wider than double.
+std::string FormatLongDouble(long double value);
+
 const char* RdbTypeName(unsigned type);
 
 // Globally used atomics for memory readings

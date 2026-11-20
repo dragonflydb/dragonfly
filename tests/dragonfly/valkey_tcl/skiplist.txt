@@ -138,13 +138,7 @@ GEORADIUS with ANY but no COUNT
 GEORADIUSBYMEMBER member does not exist
 GEOSEARCH FROMMEMBER member does not exist
 
-# --- Distances returned with full double precision instead of 4 decimals ---
-GEODIST simple & unit
-GEORADIUS withdist (sorted)
-GEOSEARCH withdist (sorted)
-GEORADIUS with multiple WITH* tokens
-GEORADIUSBYMEMBER withdist (sorted)
-GEOSEARCH with small distance
+# --- BYRADIUS 0 is rejected (the radius must be positive) ---
 GEOSEARCH with exact zero distances
 
 # --- GEOSEARCH BYPOLYGON (Valkey 9) not supported ---
