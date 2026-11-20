@@ -104,6 +104,12 @@ struct SaveInfoData {
 
   // True if the last checkpoint wrote its dump and then the manifest naming it as the base.
   bool aof_last_checkpoint_ok = true;
+
+  // Checkpoints failed in a row; a committed one resets it.
+  uint32_t aof_checkpoint_failures = 0;
+
+  // The base's summary file name, empty without a base.
+  std::string aof_base_file;
 };
 
 // A thread-safe wrapper for SaveInfoData using the Copy-on-Write pattern.
@@ -307,6 +313,12 @@ class ServerFamily {
 
   void SnapshotScheduling() ABSL_LOCKS_EXCLUDED(loading_stats_mu_);
 
+  // Wakes every second and checkpoints the AOF once its log outgrows the trigger size.
+  void AofCheckpointScheduling();
+
+  // Saves an AOF-owned base and commits it as the next checkpoint. Blocks until it finishes.
+  GenericError DoAofCheckpoint();
+
   void SendInvalidationMessages() const;
 
   std::optional<SaveCmdOptions> GetSaveCmdOpts(facade::ParsedArgs args, CommandContext* cmd_cntx);
@@ -316,6 +328,9 @@ class ServerFamily {
   struct DoSaveCheckAndStartOpts {
     bool ignore_state = false;
     bool bg_save = false;
+
+    // An automatic AOF checkpoint, see DoAofCheckpoint().
+    bool aof_owned_base = false;
   };
 
   GenericError DoSaveCheckAndStart(const SaveCmdOptions& save_cmd_opts, Transaction* trans,
@@ -333,6 +348,7 @@ class ServerFamily {
 
   util::fb2::Fiber snapshot_schedule_fb_;
   util::fb2::Fiber load_fiber_;
+  util::fb2::Fiber aof_checkpoint_fb_;
 
   Service& service_;
 
@@ -357,6 +373,7 @@ class ServerFamily {
   bool save_on_shutdown_{true};
 
   util::fb2::Done schedule_done_;
+  util::fb2::Done aof_checkpoint_done_;
   std::unique_ptr<util::fb2::FiberQueueThreadPool> fq_threadpool_;
   std::shared_ptr<detail::SnapshotStorage> snapshot_storage_;
 
