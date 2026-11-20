@@ -7,6 +7,8 @@
 #include <absl/strings/str_cat.h>
 #include <gmock/gmock.h>
 
+#include <random>
+
 #include "base/gtest.h"
 #include "base/logging.h"
 
@@ -134,6 +136,128 @@ TEST_F(RespSrvParserTest, Multi3) {
   ASSERT_EQ(RespSrvParser::OK, Parse("\r\n*3\r\n$3\r\nSET"));
   ASSERT_EQ(2, consumed_);
   EXPECT_THAT(Vec(), ElementsAre("SET", "key:000002273458", "VXK"));
+}
+
+// Parsed arguments remain valid after the input is overwritten.
+TEST_F(RespSrvParserTest, ParsedArgsSurviveSourceBufferOverwrite) {
+  string request = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+
+  ASSERT_EQ(RespSrvParser::OK, Parse(request));
+  ASSERT_EQ(request.size(), consumed_);
+  fill(request.begin(), request.end(), '\xCC');
+
+  // Verifies that the parsed arguments are still correct.
+  // This means the parser copied the argument data instead of keeping
+  // references to the original request buffer.
+  EXPECT_THAT(Vec(), ElementsAre("SET", "key", "value"));
+}
+
+// The parser consumes every fragment of an incomplete command.
+TEST_F(RespSrvParserTest, PendingFragmentsAreFullyConsumed) {
+  for (string_view fragment : {"*2\r\n", "$4\r\nECHO\r\n", "$5\r\nhe", "llo"}) {
+    ASSERT_EQ(RespSrvParser::INPUT_PENDING, Parse(fragment));
+    EXPECT_EQ(fragment.size(), consumed_);
+  }
+
+  ASSERT_EQ(RespSrvParser::OK, Parse("\r\n"));
+  EXPECT_EQ(2, consumed_);
+  EXPECT_THAT(Vec(), ElementsAre("ECHO", "hello"));
+}
+
+// A large bulk value is correctly assembled from small fragments.
+TEST_F(RespSrvParserTest, FragmentedLargeBulkSurvivesSourceBufferReuse) {
+  constexpr size_t kValueSize = 1U << 20;
+  const string value(kValueSize, 'x');
+  const string header = absl::StrCat("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$", kValueSize, "\r\n");
+  string shared_buffer;
+
+  auto parse = [this, &shared_buffer](string_view fragment) {
+    shared_buffer.assign(fragment);
+    ASSERT_EQ(Parse(shared_buffer), RespSrvParser::INPUT_PENDING);
+    ASSERT_EQ(consumed_, fragment.size());
+    fill(shared_buffer.begin(), shared_buffer.end(), '\xCC');
+  };
+
+  parse(header);
+  for (size_t offset = 0; offset < value.size(); offset += 257) {
+    parse(string_view{value}.substr(offset, min<size_t>(257, value.size() - offset)));
+  }
+
+  ASSERT_EQ(Parse("\r\n"), RespSrvParser::OK);
+  ASSERT_EQ(consumed_, 2u);
+  EXPECT_THAT(Vec(), ElementsAre("SET", "key", value));
+}
+
+// Independent parsers can assemble interleaved command fragments.
+TEST(RespSrvParserSharedBufferTest, AlternatingParsersSurviveSourceBufferReuse) {
+  RespSrvParser first_parser, second_parser;
+  cmn::BackedArguments first_args, second_args;
+  uint32_t consumed = 0;
+  string shared_buffer;
+
+  auto parse = [&shared_buffer, &consumed](RespSrvParser* parser, cmn::BackedArguments* args,
+                                           string_view fragment) {
+    shared_buffer.assign(fragment);
+    RespSrvParser::Buffer buffer{reinterpret_cast<const uint8_t*>(shared_buffer.data()),
+                                 shared_buffer.size()};
+    auto result = parser->Parse(buffer, &consumed, args);
+    EXPECT_EQ(consumed, fragment.size());
+    return result;
+  };
+
+  EXPECT_EQ(parse(&first_parser, &first_args, "*2\r\n$4\r\nECHO\r\n$5\r\nhe"),
+            RespSrvParser::INPUT_PENDING);
+  EXPECT_EQ(parse(&second_parser, &second_args, "*2\r\n$4\r\nECHO\r\n$5\r\nwo"),
+            RespSrvParser::INPUT_PENDING);
+  EXPECT_EQ(parse(&first_parser, &first_args, "llo\r\n"), RespSrvParser::OK);
+  EXPECT_EQ(parse(&second_parser, &second_args, "rld\r\n"), RespSrvParser::OK);
+
+  const auto expected = {pair{&first_args, "hello"}, pair{&second_args, "world"}};
+  for (const auto& [args, value] : expected) {
+    ASSERT_EQ(args->size(), 2u);
+    EXPECT_EQ((*args)[0], "ECHO");
+    EXPECT_EQ((*args)[1], value);
+  }
+}
+
+// Network input can split a command at many different places.
+// Split 100 commands into repeatable random-sized fragments and check they are rebuilt correctly.
+TEST(RespSrvParserSharedBufferTest, SeededFragmentationConsumesAndReassemblesCommands) {
+  mt19937 rng{0x5EED};
+
+  for (unsigned iteration = 0; iteration < 100; ++iteration) {
+    const string value = absl::StrCat("value-", iteration, "-", string(rng() % 256, 'x'));
+    const bool inline_command = (rng() % 2) == 0;
+    const string request = inline_command ? absl::StrCat("ECHO ", value, "\r\n")
+                                          : absl::StrCat("*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$",
+                                                         value.size(), "\r\n", value, "\r\n");
+    RespSrvParser parser;
+    cmn::BackedArguments args;
+    uint32_t consumed = 0;
+
+    for (size_t offset = 0; offset < request.size();) {
+      const size_t fragment_len = min<size_t>(1 + rng() % 31, request.size() - offset);
+      string fragment = request.substr(offset, fragment_len);
+      RespSrvParser::Buffer buffer{reinterpret_cast<const uint8_t*>(fragment.data()),
+                                   fragment.size()};
+      const auto result = parser.Parse(buffer, &consumed, &args);
+      EXPECT_EQ(consumed, fragment.size()) << "iteration=" << iteration;
+      offset += fragment_len;
+      if (offset < request.size())
+        EXPECT_EQ(result, RespSrvParser::INPUT_PENDING) << "iteration=" << iteration;
+      else
+        EXPECT_EQ(result, RespSrvParser::OK) << "iteration=" << iteration;
+    }
+
+    ASSERT_EQ(args.size(), inline_command ? 2u : 3u);
+    EXPECT_EQ(args[0], inline_command ? "ECHO" : "SET");
+    if (inline_command) {
+      EXPECT_EQ(args[1], value);
+    } else {
+      EXPECT_EQ(args[1], "key");
+      EXPECT_EQ(args[2], value);
+    }
+  }
 }
 
 TEST_F(RespSrvParserTest, InvalidMult1) {
