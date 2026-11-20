@@ -169,6 +169,10 @@ class DashTable : public detail::DashTableBase {
   // it must be valid.
   void Erase(iterator it);
 
+  // Erases without hashing the stored key (which may need allocating space for decoding).
+  // key_hash must be the hash of it->first.
+  void Erase(iterator it, uint64_t key_hash);
+
   size_t Erase(const Key_t& k);
 
   iterator begin() {
@@ -1029,8 +1033,12 @@ size_t DashTable<_Key, _Value, Policy>::Erase(const Key_t& key) {
 
 template <typename _Key, typename _Value, typename Policy>
 void DashTable<_Key, _Value, Policy>::Erase(iterator it) {
+  Erase(it, DoHash(it->first));
+}
+
+template <typename _Key, typename _Value, typename Policy>
+void DashTable<_Key, _Value, Policy>::Erase(iterator it, uint64_t key_hash) {
   auto* target = segment_[it.seg_id_];
-  uint64_t key_hash = DoHash(it->first);
   SegmentIterator sit{it.bucket_id_, it.slot_id_};
 
   policy_.DestroyKey(it->first);

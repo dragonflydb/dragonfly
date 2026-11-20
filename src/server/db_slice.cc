@@ -968,6 +968,12 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_v
   if (!skip_serialize)
     it.SetVersion(NextVersion());
 
+  // Finish accounting before sampling, which may allocate. A failed insertion can then
+  // remove the empty entry using the same accounting as a normal deletion.
+  if (slot) {
+    db.slots_stats[*slot].key_count += 1;
+  }
+
   TouchTopKeysIfNeeded(key, db.sample_top_keys);
   TouchHllIfNeeded(key, db.sample_unique_keys);
 
@@ -975,9 +981,6 @@ OpResult<DbSlice::ItAndUpdater> DbSlice::AddOrFind(const Context& cntx, string_v
   events_.stash_unloaded = db.prime.stash_unloaded();
   db.stats.events.evicted_keys += evp.evicted();
   events_.garbage_checked += evp.checked();
-  if (slot) {
-    db.slots_stats[*slot].key_count += 1;
-  }
 
   return ItAndUpdater{
       .it = Iterator(it, StringOrView::FromView(key)),
@@ -1015,6 +1018,20 @@ void DbSlice::DelAtomic(Context cntx, PrimeIterator it, DbTable* db_table, bool 
   }
 
   PerformDeletionAtomic(it, key, table, async);
+}
+
+void DbSlice::RollbackEmptyInsert(const Context& cntx, string_view key) noexcept {
+  auto* table = db_arr_[cntx.db_index].get();
+  auto it = table->prime.Find(key);
+  if (!IsValid(it))
+    return;
+
+  DCHECK_EQ(it->second.ObjType(), OBJ_STRING);
+  DCHECK_EQ(it->second.Size(), 0u);
+
+  // No value was published. In particular, do not allocate a client-tracking notification
+  // while rolling back an allocation failure. Use the caller's key without decoding it.
+  PerformDeletionAtomic(it, key, table, false, false);
 }
 
 void DbSlice::DelMutable(Context cntx, ItAndUpdater it_updater) {
@@ -2207,7 +2224,7 @@ void DbSlice::DefragTableSegments(DbIndex db_ind, PageUsage* page_usage) {
 }
 
 void DbSlice::PerformDeletionAtomic(PrimeIterator del_it, string_view key, DbTable* table,
-                                    bool async) {
+                                    bool async, bool notify_tracking) {
   FiberAtomicGuard guard;
 
   const int obj_type = del_it->second.ObjType();
@@ -2267,11 +2284,14 @@ void DbSlice::PerformDeletionAtomic(PrimeIterator del_it, string_view key, DbTab
   }
 
   // Before Erase: 'key' may point into the entry, and Erase destroys it.
-  if (!client_tracking_map_.empty()) {
+  if (notify_tracking && !client_tracking_map_.empty()) {
     QueueInvalidationTrackingMessageAtomic(key);
   }
 
-  table->prime.Erase(del_it);
+  if (notify_tracking)
+    table->prime.Erase(del_it);
+  else
+    table->prime.Erase(del_it, table->prime.DoHash(key));
 
   // Note, currently we do not shrink our tables upon deletion.
   // This DCHECK ensures that if we decide to do so, we will have to update table_memory_
