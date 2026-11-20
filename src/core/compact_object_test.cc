@@ -18,6 +18,7 @@
 #include "base/logging.h"
 #include "core/cuckoo.h"
 #include "core/detail/bitpacking.h"
+#include "core/memory_accounting.h"
 #include "core/mi_memory_resource.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/string_map.h"
@@ -1514,53 +1515,157 @@ TEST_F(CompactObjectTest, StreamSizeDoesNotWrap) {
 }
 
 TEST_F(CompactObjectTest, TypeReplacementAccounting) {
-  static thread_local vector<pair<CompactObjType, int64_t>> deltas;
-  deltas.clear();
-  CompactObj::SetTypeReplacementHook(
-      [](CompactObjType type, int64_t delta) { deltas.emplace_back(type, delta); });
-  absl::Cleanup restore_hook = [] { CompactObj::SetTypeReplacementHook(nullptr); };
+  auto& resource = *static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  InitMemoryAccounting(resource);
+  absl::Cleanup shutdown = [] { ShutdownMemoryAccounting(); };
+
+  auto attributed = [] { return GetTypeAttributedMemory(); };
 
   for (size_t size : {32u, 4096u}) {
     SCOPED_TRACE(size);
     cobj_.SetString(string(size, '\x80'));
     int64_t string_bytes = cobj_.MallocUsed();
-    intset* is = intsetNew();
-    int64_t set_bytes = zmalloc_usable_size(is);
-    cobj_.InitRobj(OBJ_SET, kEncodingIntSet, is);
-    ASSERT_FALSE(deltas.empty());
-    EXPECT_EQ(deltas.back(), make_pair(CompactObjType{OBJ_STRING}, -string_bytes));
+    auto before = attributed();
+    int64_t set_bytes;
+    {
+      AtomicMemoryScope scope(OBJ_SET);
+      intset* is = intsetNew();
+      set_bytes = zmalloc_usable_size(is);
+      cobj_.InitRobj(OBJ_SET, kEncodingIntSet, is);
+    }
+    auto expected = before;
+    expected[OBJ_STRING] -= string_bytes;
+    expected[OBJ_SET] += set_bytes;
+    EXPECT_EQ(attributed(), expected);
 
+    before = attributed();
     cobj_.SetString("42");
-    EXPECT_EQ(deltas.back(), make_pair(CompactObjType{OBJ_SET}, -set_bytes));
+    EXPECT_EQ(attributed()[OBJ_SET] - before[OBJ_SET], -set_bytes);
   }
-  ASSERT_EQ(deltas.size(), 4);
 
-  // Encoding changes, tiering, resets and destruction are not cross-type replacements.
+  // Same-type replacement is accounted for by the enclosing scope.
   cobj_.SetString(string(32, '\x80'));
-  cobj_.SetString(string(4096, '\x80'));
-  cobj_.SetExternal(0, 4096, CompactObj::ExternalRep::STRING);
-  CompactValue external_hash;
-  external_hash.InitRobj(OBJ_HASH, kEncodingStrMap2, CompactObj::AllocateMR<StringMap>());
-  external_hash.SetExternal(4096, 128, CompactObj::ExternalRep::SERIALIZED_MAP);
-  external_hash.Reset();
-  external_hash.SetString("inline");
+  auto expected = attributed();
+  int64_t old_bytes = cobj_.MallocUsed();
   {
-    CompactValue value;
-    value.SetString(string(32, '\x80'));
-    value.Reset();
-    value.SetString(string(4096, '\x80'));
+    AtomicMemoryScope scope(OBJ_STRING);
+    cobj_.SetString(string(4096, '\x80'));
   }
-  EXPECT_EQ(deltas.size(), 4);
+  expected[OBJ_STRING] += static_cast<int64_t>(cobj_.MallocUsed()) - old_bytes;
+  EXPECT_EQ(attributed(), expected);
 
-  cobj_.Reset();
-  cobj_.SetString(string(4096, '\x80'));
+  // Key accounting is separate.
+  CompactKey key(string(4096, '\x80'));
+  key.SetString("inline");
+  EXPECT_EQ(attributed(), expected);
+
   int64_t string_bytes = cobj_.MallocUsed();
+  const auto before_move = attributed();
+  CompactValue external_hash;
   external_hash.SetExternal(4096, 128, CompactObj::ExternalRep::SERIALIZED_MAP);
   cobj_ = std::move(external_hash);
-  ASSERT_EQ(deltas.size(), 5);
-  EXPECT_EQ(deltas.back(), make_pair(CompactObjType{OBJ_STRING}, -string_bytes));
+  EXPECT_EQ(attributed()[OBJ_STRING] - before_move[OBJ_STRING], -string_bytes);
   EXPECT_EQ(cobj_.ObjType(), OBJ_HASH);
   EXPECT_TRUE(cobj_.IsExternal());
+
+  // Same-type offloading leaves accounting to the caller.
+  cobj_.Reset();
+  cobj_.SetString(string(4096, '\x80'));
+  const auto before_offload = attributed();
+  cobj_.SetExternal(4096, 4096, CompactObj::ExternalRep::STRING);
+  EXPECT_EQ(attributed(), before_offload);
+}
+
+TEST_F(CompactObjectTest, MemoryAccountingScopesAndCharges) {
+  auto& resource = *static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  InitMemoryAccounting(resource);
+  absl::Cleanup shutdown = [] { ShutdownMemoryAccounting(); };
+
+  void* outer = nullptr;
+  void* middle = nullptr;
+  void* inner = nullptr;
+  void* direct = nullptr;
+  void* untracked = nullptr;
+  {
+    AtomicMemoryScope string_scope{OBJ_STRING};
+    outer = resource.allocate(64);
+    {
+      AtomicMemoryScope nested_string_scope{OBJ_STRING};
+      middle = resource.allocate(32);
+      {
+        AtomicMemoryScope hash_scope{OBJ_HASH};
+        inner = resource.allocate(16);
+        direct = resource.allocate(64);
+        ChargeMemory(OBJ_KEY, mi_usable_size(direct));
+        untracked = resource.allocate(64);
+        ChargeMemory(kUntrackedMemory, mi_usable_size(untracked));
+      }
+    }
+  }
+
+  TypeAttributedMemory expected{};
+  expected[OBJ_STRING] = mi_usable_size(outer) + mi_usable_size(middle);
+  expected[OBJ_HASH] = mi_usable_size(inner);
+  expected[OBJ_KEY] = mi_usable_size(direct);
+  expected[kUntrackedMemory] = mi_usable_size(untracked);
+  EXPECT_EQ(GetTypeAttributedMemory(), expected);
+
+  resource.deallocate(direct, 64);
+  resource.deallocate(untracked, 64);
+  resource.deallocate(outer, 64);
+  resource.deallocate(middle, 32);
+  resource.deallocate(inner, 16);
+}
+
+TEST_F(CompactObjectTest, MemoryAccountingUntrackedAndLifecycle) {
+  auto& resource = *static_cast<MiMemoryResource*>(CompactObj::memory_resource());
+  EXPECT_FALSE(MemoryAccountingEnabled());
+  {
+    AtomicMemoryScope disabled{OBJ_STRING};
+    ChargeMemory(OBJ_STRING, 64);
+  }
+  EXPECT_EQ(GetTypeAttributedMemory(), TypeAttributedMemory{});
+
+  InitMemoryAccounting(resource);
+  absl::Cleanup shutdown = [] { ShutdownMemoryAccounting(); };
+  void* metadata = nullptr;
+  {
+    AtomicMemoryScope outer{OBJ_STRING};
+    AtomicMemoryScope untracked{kUntrackedMemory};
+    metadata = resource.allocate(64);
+  }
+  TypeAttributedMemory expected{};
+  expected[kUntrackedMemory] = mi_usable_size(metadata);
+  EXPECT_EQ(GetTypeAttributedMemory(), expected);
+  {
+    AtomicMemoryScope outer{OBJ_HASH};
+    AtomicMemoryScope untracked{kUntrackedMemory};
+    resource.deallocate(metadata, 64);
+  }
+  EXPECT_EQ(GetTypeAttributedMemory(), TypeAttributedMemory{});
+
+  // An excluded allocation freed outside all scopes leaves a harmless historical offset.
+  {
+    AtomicMemoryScope untracked{kUntrackedMemory};
+    metadata = resource.allocate(64);
+  }
+  expected[kUntrackedMemory] = mi_usable_size(metadata);
+  resource.deallocate(metadata, 64);
+  void* value = nullptr;
+  {
+    AtomicMemoryScope scope{OBJ_STRING};
+    value = resource.allocate(32);
+  }
+  expected[OBJ_STRING] = mi_usable_size(value);
+  EXPECT_EQ(GetTypeAttributedMemory(), expected);
+
+  ShutdownMemoryAccounting();
+  EXPECT_FALSE(MemoryAccountingEnabled());
+  InitMemoryAccounting(resource);
+  EXPECT_TRUE(MemoryAccountingEnabled());
+  EXPECT_EQ(GetTypeAttributedMemory(), TypeAttributedMemory{});
+  EXPECT_EQ(UnattributedMemory(), static_cast<int64_t>(UsedMemoryThreadLocal(resource)));
+  resource.deallocate(value, 32);
 }
 
 static void ascii_pack_naive(const char* ascii, size_t len, uint8_t* bin) {

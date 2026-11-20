@@ -31,6 +31,7 @@ extern "C" {
 #include "core/cms.h"
 #include "core/cuckoo.h"
 #include "core/detail/bitpacking.h"
+#include "core/memory_accounting.h"
 #include "core/oah_set.h"
 #include "core/page_usage/page_usage_stats.h"
 #include "core/qlist.h"
@@ -507,7 +508,6 @@ struct TL {
   string tmp_str;
   size_t small_str_bytes;
   PinnedMap pin_map;
-  CompactObj::TypeReplacementHook type_replacement_hook = nullptr;
 };
 
 // Callback function used in redis/t_stream.cc implementation to
@@ -619,13 +619,8 @@ auto CompactObj::GetStatsThreadLocal() -> Stats {
   return res;
 }
 
-void CompactObj::SetTypeReplacementHook(TypeReplacementHook hook) {
-  tl.type_replacement_hook = hook;
-}
-
 void CompactObj::InitThreadLocal(MemoryResource* mr) {
   tl.local_mr = mr;
-  tl.type_replacement_hook = nullptr;
   tl.tmp_buf = base::PODArray<uint8_t>{mr};
   cmn::BorrowedStringOps::Set(&g_borrow_ops);
 }
@@ -1496,22 +1491,21 @@ std::pair<bool, bool> CompactObj::SetByteAtIndex(size_t idx, uint8_t val) {
 }
 
 void CompactObj::SetMeta(uint8_t taglen, uint8_t mask, CompactObjType replacement_type) {
-  if (HasAllocated()) {
+  if (!HasAllocated()) {
+    memset(u_.inline_str, 0, kInlineLen);
+  } else if (is_key_ || !MemoryAccountingEnabled()) {
+    // AccountObjectMemory charges key frees separately as OBJ_KEY.
+    Free();
+  } else {
     const auto old_type = ObjType();
-    if (tl.type_replacement_hook && replacement_type == kInvalidCompactObjType)
+    if (replacement_type == kInvalidCompactObjType)
       replacement_type = TypeForTag(taglen);
-
-    if (tl.type_replacement_hook && old_type != replacement_type) {
-      const auto& resource = *static_cast<MiMemoryResource*>(tl.local_mr);
-      const int64_t before = UsedMemoryThreadLocal(resource);
+    if (old_type != replacement_type) {
+      AtomicMemoryScope scope(old_type);
       Free();
-      const int64_t after = UsedMemoryThreadLocal(resource);
-      tl.type_replacement_hook(old_type, after - before);
     } else {
       Free();
     }
-  } else {
-    memset(u_.inline_str, 0, kInlineLen);
   }
   taglen_ = taglen;
   mask_ = mask;
