@@ -239,6 +239,14 @@ class Transaction {
   // Must be called from coordinator thread.
   void CancelBlocking(const std::function<OpStatus(ArgSlice)>&);
 
+  bool IsCoordinatorPaused() const {
+    return is_coordinator_paused_.load(std::memory_order_acquire);
+  }
+
+  void SetCoordinatorPaused(bool paused) {
+    is_coordinator_paused_.store(paused, std::memory_order_release);
+  }
+
   // Attempt to cancel a scheduled transaction that has been armed (hop dispatched).
   // Tries to atomically disarm all active shards. If all shards are successfully disarmed,
   // the transaction is cancelled and removed from shard queues. If any shard already executed
@@ -679,6 +687,7 @@ class Transaction {
 
   // Barrier for waking blocking transactions that ensures exclusivity of waking operation.
   BatonBarrier blocking_barrier_{};
+  std::atomic<bool> is_coordinator_paused_{false};
 
   // Time the waking shard's readiness check ran at, set by the NotifySuspended that woke us.
   uint64_t wake_time_ms_{0};
