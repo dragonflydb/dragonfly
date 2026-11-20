@@ -5,6 +5,7 @@
 #include "server/transaction.h"
 
 #include <absl/base/config.h>
+#include <absl/flags/reflection.h>
 #include <gmock/gmock.h>
 
 // Like dfly_main, route operator new/delete through mimalloc, so that benchmarks measure the
@@ -33,6 +34,7 @@
 #include "util/fibers/synchronization.h"
 
 ABSL_DECLARE_FLAG(bool, force_epoll);
+ABSL_DECLARE_FLAG(bool, enable_scope_based_mem_track);
 
 namespace dfly {
 
@@ -149,11 +151,13 @@ class TransactionTest : public Test {
   }
 
   std::unique_ptr<ProactorPool> pp_;
+  absl::FlagSaver flag_saver_;
   // Keep argument backing storage alive for the duration of the test.
   std::vector<std::pair<StringVec, std::shared_ptr<CmdArgVec>>> arg_holders_;
 };
 
 void TransactionTest::SetUp() {
+  absl::SetFlag(&FLAGS_enable_scope_based_mem_track, true);
   StartShards(fb2::Pool::Epoll(kNumThreads));
 }
 

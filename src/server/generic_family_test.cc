@@ -5,6 +5,7 @@
 #include "server/generic_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/flags/reflection.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_join.h>
 
@@ -38,6 +39,7 @@ extern "C" {
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
+ABSL_DECLARE_FLAG(bool, enable_scope_based_mem_track);
 ABSL_DECLARE_FLAG(bool, use_oah_set);
 ABSL_DECLARE_FLAG(uint32_t, container_iteration_yield_interval_usec);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
@@ -57,7 +59,16 @@ constexpr char kShard1AltKey2[] = "z";  // shard 1
 
 namespace dfly {
 
-class GenericFamilyTest : public BaseFamilyTest {};
+class GenericFamilyTest : public BaseFamilyTest {
+ protected:
+  void SetUp() override {
+    absl::SetFlag(&FLAGS_enable_scope_based_mem_track, true);
+    BaseFamilyTest::SetUp();
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
+};
 
 TEST_F(GenericFamilyTest, TtlOfExpiredKeyDuringPause) {
   // CLIENT PAUSE disables expiry; a key past its deadline is logically gone, not a negative TTL.

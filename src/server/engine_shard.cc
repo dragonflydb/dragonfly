@@ -36,7 +36,7 @@ extern "C" {
 
 using namespace std;
 
-ABSL_FLAG(bool, disable_scope_based_mem_track, false, "Turn off scope based memory metric");
+ABSL_FLAG(bool, enable_scope_based_mem_track, false, "Enable scope based memory metric");
 
 ABSL_FLAG(float, mem_defrag_threshold, 0.7,
           "Minimum percentage of used memory relative to maxmemory cap before running "
@@ -520,7 +520,7 @@ void EngineShard::InitThreadLocal(ProactorBase* pb) {
   CompactObj::InitThreadLocal(shard_->memory_resource());
   SmallString::InitThreadLocal(data_heap);
   InitTLStatelessAllocMR(shard_->memory_resource());
-  if (!GetFlag(FLAGS_disable_scope_based_mem_track))
+  if (GetFlag(FLAGS_enable_scope_based_mem_track))
     InitMemoryAccounting(shard_->mi_resource_);
 
   shard_->shard_search_indices_ = std::make_unique<ShardDocIndices>();
