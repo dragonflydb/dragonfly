@@ -1,0 +1,1353 @@
+{
+  "started_utc": "2026-11-18T13:54:33.756229+00:00",
+  "source_commit": "534e38340c3319fef9028d20bb00f97be65df0ab",
+  "binaries": {
+    "default": {
+      "path": "/tmp/oahwalk/walk_A",
+      "sha256": "fd3ba9c209af2831fddaab453245ef8aaf9d4b90bf4735a74961d23cc5d8fe60"
+    },
+    "w4o1": {
+      "path": "/tmp/oahwalk/walk_B",
+      "sha256": "718f62dd015fb7bc7009d30a75ea028a35ad156c074f80f3a4a35a0bf493035a"
+    }
+  },
+  "cpu": 9,
+  "cpufreq": {
+    "scaling_driver": "amd-pstate-epp",
+    "scaling_governor": "performance",
+    "energy_performance_preference": "performance"
+  },
+  "commands": [
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.534,
+      "cpu_s": 0.531,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.62,
+      "cpu_s": 0.616,
+      "involuntary_switches": 11
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.575,
+      "cpu_s": 0.571,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.866,
+      "cpu_s": 0.862,
+      "involuntary_switches": 16
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.931,
+      "cpu_s": 0.927,
+      "involuntary_switches": 15
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.443,
+      "cpu_s": 0.44,
+      "involuntary_switches": 13
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.504,
+      "cpu_s": 0.501,
+      "involuntary_switches": 12
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.523,
+      "cpu_s": 0.519,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.659,
+      "cpu_s": 0.655,
+      "involuntary_switches": 14
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.56,
+      "cpu_s": 0.556,
+      "involuntary_switches": 11
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.929,
+      "cpu_s": 0.925,
+      "involuntary_switches": 17
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.982,
+      "cpu_s": 0.978,
+      "involuntary_switches": 18
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.448,
+      "cpu_s": 0.444,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.519,
+      "cpu_s": 0.515,
+      "involuntary_switches": 9
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.533,
+      "cpu_s": 0.529,
+      "involuntary_switches": 8
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.658,
+      "cpu_s": 0.654,
+      "involuntary_switches": 13
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.675,
+      "cpu_s": 0.671,
+      "involuntary_switches": 13
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.961,
+      "cpu_s": 0.957,
+      "involuntary_switches": 16
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.988,
+      "cpu_s": 0.984,
+      "involuntary_switches": 19
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.447,
+      "cpu_s": 0.444,
+      "involuntary_switches": 8
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.511,
+      "cpu_s": 0.507,
+      "involuntary_switches": 11
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.521,
+      "cpu_s": 0.517,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.679,
+      "cpu_s": 0.676,
+      "involuntary_switches": 15
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.655,
+      "cpu_s": 0.652,
+      "involuntary_switches": 11
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.949,
+      "cpu_s": 0.945,
+      "involuntary_switches": 16
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 1.092,
+      "cpu_s": 1.088,
+      "involuntary_switches": 18
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.47,
+      "cpu_s": 0.466,
+      "involuntary_switches": 9
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.52,
+      "cpu_s": 0.516,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.535,
+      "cpu_s": 0.531,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.77,
+      "cpu_s": 0.766,
+      "involuntary_switches": 14
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.623,
+      "cpu_s": 0.619,
+      "involuntary_switches": 14
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.945,
+      "cpu_s": 0.941,
+      "involuntary_switches": 17
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 1.063,
+      "cpu_s": 1.059,
+      "involuntary_switches": 20
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.448,
+      "cpu_s": 0.444,
+      "involuntary_switches": 7
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.515,
+      "cpu_s": 0.511,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.582,
+      "cpu_s": 0.577,
+      "involuntary_switches": 12
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.703,
+      "cpu_s": 0.699,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.57,
+      "cpu_s": 0.566,
+      "involuntary_switches": 9
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.944,
+      "cpu_s": 0.94,
+      "involuntary_switches": 18
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 1.053,
+      "cpu_s": 1.049,
+      "involuntary_switches": 17
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.443,
+      "cpu_s": 0.439,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.558,
+      "cpu_s": 0.554,
+      "involuntary_switches": 12
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.616,
+      "cpu_s": 0.613,
+      "involuntary_switches": 12
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.653,
+      "cpu_s": 0.649,
+      "involuntary_switches": 13
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.575,
+      "cpu_s": 0.571,
+      "involuntary_switches": 12
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 1.069,
+      "cpu_s": 1.065,
+      "involuntary_switches": 18
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.967,
+      "cpu_s": 0.963,
+      "involuntary_switches": 18
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.458,
+      "cpu_s": 0.455,
+      "involuntary_switches": 9
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.601,
+      "cpu_s": 0.597,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.559,
+      "cpu_s": 0.556,
+      "involuntary_switches": 12
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.667,
+      "cpu_s": 0.663,
+      "involuntary_switches": 13
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.596,
+      "cpu_s": 0.591,
+      "involuntary_switches": 11
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 1.05,
+      "cpu_s": 1.047,
+      "involuntary_switches": 18
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.953,
+      "cpu_s": 0.949,
+      "involuntary_switches": 20
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.466,
+      "cpu_s": 0.463,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.611,
+      "cpu_s": 0.607,
+      "involuntary_switches": 12
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.537,
+      "cpu_s": 0.534,
+      "involuntary_switches": 11
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.623,
+      "cpu_s": 0.619,
+      "involuntary_switches": 8
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.663,
+      "cpu_s": 0.659,
+      "involuntary_switches": 12
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 1.007,
+      "cpu_s": 1.003,
+      "involuntary_switches": 18
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 1.039,
+      "cpu_s": 1.035,
+      "involuntary_switches": 17
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.532,
+      "cpu_s": 0.528,
+      "involuntary_switches": 11
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=false",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.516,
+      "cpu_s": 0.512,
+      "involuntary_switches": 8
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.522,
+      "cpu_s": 0.518,
+      "involuntary_switches": 10
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.704,
+      "cpu_s": 0.701,
+      "involuntary_switches": 17
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.658,
+      "cpu_s": 0.654,
+      "involuntary_switches": 11
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=ss",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.884,
+      "cpu_s": 0.88,
+      "involuntary_switches": 15
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_A",
+        "--set=std",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 1.022,
+      "cpu_s": 1.018,
+      "involuntary_switches": 16
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=false",
+        "--logtostderr"
+      ],
+      "wall_s": 0.492,
+      "cpu_s": 0.488,
+      "involuntary_switches": 8
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahwalk/walk_B",
+        "--set=oah",
+        "--count=1000000",
+        "--key_size=32",
+        "--binary=true",
+        "--seed=20261116",
+        "--passes=5",
+        "--scan=true",
+        "--logtostderr"
+      ],
+      "wall_s": 0.645,
+      "cpu_s": 0.64,
+      "involuntary_switches": 48
+    }
+  ],
+  "finished_utc": "2026-11-18T13:55:21.989599+00:00"
+}

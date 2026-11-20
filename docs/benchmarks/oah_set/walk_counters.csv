@@ -1,0 +1,241 @@
+set,walk,keys,repeat,event,per_member
+OAHSet 16/2,iterator,ascii,0,cycles,70.171
+OAHSet 16/2,iterator,ascii,0,instructions,113.5526
+OAHSet 16/2,iterator,ascii,0,ex_ret_brn_misp,0.067
+OAHSet 16/2,iterator,ascii,0,ls_dmnd_fills_from_sys.all,1.0458
+OAHSet 16/2,iterator,ascii,0,ls_any_fills_from_sys.dram_io_all,0.1842
+OAHSet 16/2,iterator,ascii,0,cycles#1,87.5933
+OAHSet 16/2,iterator,ascii,0,ls_alloc_mab_count,221.7833
+OAHSet 16/2,iterator,ascii,0,ls_hw_pf_dc_fills.all,0.1663
+OAHSet 16/2,iterator,ascii,0,ls_l1_d_tlb_miss.all,0.2856
+OAHSet 16/2,iterator,ascii,0,ls_l1_d_tlb_miss.all_l2_miss,0.0
+OAHSet 16/2,iterator,binary,0,cycles,75.7836
+OAHSet 16/2,iterator,binary,0,instructions,66.6821
+OAHSet 16/2,iterator,binary,0,ex_ret_brn_misp,0.0335
+OAHSet 16/2,iterator,binary,0,ls_dmnd_fills_from_sys.all,1.0451
+OAHSet 16/2,iterator,binary,0,ls_any_fills_from_sys.dram_io_all,0.598
+OAHSet 16/2,iterator,binary,0,cycles#1,88.4972
+OAHSet 16/2,iterator,binary,0,ls_alloc_mab_count,410.0719
+OAHSet 16/2,iterator,binary,0,ls_hw_pf_dc_fills.all,0.1699
+OAHSet 16/2,iterator,binary,0,ls_l1_d_tlb_miss.all,0.1687
+OAHSet 16/2,iterator,binary,0,ls_l1_d_tlb_miss.all_l2_miss,0.0001
+OAHSet 4/1,iterator,ascii,0,cycles,113.2237
+OAHSet 4/1,iterator,ascii,0,instructions,117.7449
+OAHSet 4/1,iterator,ascii,0,ex_ret_brn_misp,0.3852
+OAHSet 4/1,iterator,ascii,0,ls_dmnd_fills_from_sys.all,1.1005
+OAHSet 4/1,iterator,ascii,0,ls_any_fills_from_sys.dram_io_all,0.6765
+OAHSet 4/1,iterator,ascii,0,cycles#1,82.1696
+OAHSet 4/1,iterator,ascii,0,ls_alloc_mab_count,141.7718
+OAHSet 4/1,iterator,ascii,0,ls_hw_pf_dc_fills.all,0.1657
+OAHSet 4/1,iterator,ascii,0,ls_l1_d_tlb_miss.all,0.2365
+OAHSet 4/1,iterator,ascii,0,ls_l1_d_tlb_miss.all_l2_miss,0.0
+StringSet,iterator,ascii,0,cycles,67.8021
+StringSet,iterator,ascii,0,instructions,54.0198
+StringSet,iterator,ascii,0,ex_ret_brn_misp,0.5364
+StringSet,iterator,ascii,0,ls_dmnd_fills_from_sys.all,1.2845
+StringSet,iterator,ascii,0,ls_any_fills_from_sys.dram_io_all,0.6105
+StringSet,iterator,ascii,0,cycles#1,58.9538
+StringSet,iterator,ascii,0,ls_alloc_mab_count,386.6247
+StringSet,iterator,ascii,0,ls_hw_pf_dc_fills.all,0.1377
+StringSet,iterator,ascii,0,ls_l1_d_tlb_miss.all,0.1204
+StringSet,iterator,ascii,0,ls_l1_d_tlb_miss.all_l2_miss,0.0
+StringSet,iterator,binary,0,cycles,54.7898
+StringSet,iterator,binary,0,instructions,53.9815
+StringSet,iterator,binary,0,ex_ret_brn_misp,0.5367
+StringSet,iterator,binary,0,ls_dmnd_fills_from_sys.all,1.2824
+StringSet,iterator,binary,0,ls_any_fills_from_sys.dram_io_all,0.4732
+StringSet,iterator,binary,0,cycles#1,78.2304
+StringSet,iterator,binary,0,ls_alloc_mab_count,433.4417
+StringSet,iterator,binary,0,ls_hw_pf_dc_fills.all,0.1397
+StringSet,iterator,binary,0,ls_l1_d_tlb_miss.all,0.1203
+StringSet,iterator,binary,0,ls_l1_d_tlb_miss.all_l2_miss,0.0
+OAHSet 16/2,scan,ascii,0,cycles,150.3697
+OAHSet 16/2,scan,ascii,0,instructions,275.8967
+OAHSet 16/2,scan,ascii,0,ex_ret_brn_misp,1.2728
+OAHSet 16/2,scan,ascii,0,ls_dmnd_fills_from_sys.all,1.1007
+OAHSet 16/2,scan,ascii,0,ls_any_fills_from_sys.dram_io_all,0.2284
+OAHSet 16/2,scan,ascii,0,cycles#1,137.2374
+OAHSet 16/2,scan,ascii,0,ls_alloc_mab_count,194.099
+OAHSet 16/2,scan,ascii,0,ls_hw_pf_dc_fills.all,0.175
+OAHSet 16/2,scan,ascii,0,ls_l1_d_tlb_miss.all,0.2902
+OAHSet 16/2,scan,ascii,0,ls_l1_d_tlb_miss.all_l2_miss,0.0001
+OAHSet 4/1,scan,ascii,0,cycles,138.1069
+OAHSet 4/1,scan,ascii,0,instructions,198.9031
+OAHSet 4/1,scan,ascii,0,ex_ret_brn_misp,0.9876
+OAHSet 4/1,scan,ascii,0,ls_dmnd_fills_from_sys.all,1.1133
+OAHSet 4/1,scan,ascii,0,ls_any_fills_from_sys.dram_io_all,0.4364
+OAHSet 4/1,scan,ascii,0,cycles#1,134.7531
+OAHSet 4/1,scan,ascii,0,ls_alloc_mab_count,183.1908
+OAHSet 4/1,scan,ascii,0,ls_hw_pf_dc_fills.all,0.153
+OAHSet 4/1,scan,ascii,0,ls_l1_d_tlb_miss.all,0.2407
+OAHSet 4/1,scan,ascii,0,ls_l1_d_tlb_miss.all_l2_miss,0.0001
+StringSet,scan,ascii,0,cycles,276.7737
+StringSet,scan,ascii,0,instructions,311.8456
+StringSet,scan,ascii,0,ex_ret_brn_misp,0.6899
+StringSet,scan,ascii,0,ls_dmnd_fills_from_sys.all,1.2548
+StringSet,scan,ascii,0,ls_any_fills_from_sys.dram_io_all,0.7797
+StringSet,scan,ascii,0,cycles#1,288.1453
+StringSet,scan,ascii,0,ls_alloc_mab_count,400.4568
+StringSet,scan,ascii,0,ls_hw_pf_dc_fills.all,0.1701
+StringSet,scan,ascii,0,ls_l1_d_tlb_miss.all,0.1251
+StringSet,scan,ascii,0,ls_l1_d_tlb_miss.all_l2_miss,0.0002
+OAHSet 16/2,iterator,ascii,1,cycles,111.6103
+OAHSet 16/2,iterator,ascii,1,instructions,113.6636
+OAHSet 16/2,iterator,ascii,1,ex_ret_brn_misp,0.0669
+OAHSet 16/2,iterator,ascii,1,ls_dmnd_fills_from_sys.all,1.0542
+OAHSet 16/2,iterator,ascii,1,ls_any_fills_from_sys.dram_io_all,0.7883
+OAHSet 16/2,iterator,ascii,1,cycles#1,81.4043
+OAHSet 16/2,iterator,ascii,1,ls_alloc_mab_count,174.607
+OAHSet 16/2,iterator,ascii,1,ls_hw_pf_dc_fills.all,0.1665
+OAHSet 16/2,iterator,ascii,1,ls_l1_d_tlb_miss.all,0.2892
+OAHSet 16/2,iterator,ascii,1,ls_l1_d_tlb_miss.all_l2_miss,0.0
+OAHSet 16/2,iterator,binary,1,cycles,84.072
+OAHSet 16/2,iterator,binary,1,instructions,66.7072
+OAHSet 16/2,iterator,binary,1,ex_ret_brn_misp,0.0335
+OAHSet 16/2,iterator,binary,1,ls_dmnd_fills_from_sys.all,1.0524
+OAHSet 16/2,iterator,binary,1,ls_any_fills_from_sys.dram_io_all,0.9106
+OAHSet 16/2,iterator,binary,1,cycles#1,88.4309
+OAHSet 16/2,iterator,binary,1,ls_alloc_mab_count,438.6882
+OAHSet 16/2,iterator,binary,1,ls_hw_pf_dc_fills.all,0.1654
+OAHSet 16/2,iterator,binary,1,ls_l1_d_tlb_miss.all,0.1697
+OAHSet 16/2,iterator,binary,1,ls_l1_d_tlb_miss.all_l2_miss,0.0002
+OAHSet 4/1,iterator,ascii,1,cycles,93.0171
+OAHSet 4/1,iterator,ascii,1,instructions,117.7041
+OAHSet 4/1,iterator,ascii,1,ex_ret_brn_misp,0.386
+OAHSet 4/1,iterator,ascii,1,ls_dmnd_fills_from_sys.all,1.0964
+OAHSet 4/1,iterator,ascii,1,ls_any_fills_from_sys.dram_io_all,0.3445
+OAHSet 4/1,iterator,ascii,1,cycles#1,76.4787
+OAHSet 4/1,iterator,ascii,1,ls_alloc_mab_count,123.9454
+OAHSet 4/1,iterator,ascii,1,ls_hw_pf_dc_fills.all,0.1633
+OAHSet 4/1,iterator,ascii,1,ls_l1_d_tlb_miss.all,0.2364
+OAHSet 4/1,iterator,ascii,1,ls_l1_d_tlb_miss.all_l2_miss,0.0001
+StringSet,iterator,ascii,1,cycles,61.7959
+StringSet,iterator,ascii,1,instructions,53.9998
+StringSet,iterator,ascii,1,ex_ret_brn_misp,0.5381
+StringSet,iterator,ascii,1,ls_dmnd_fills_from_sys.all,1.2884
+StringSet,iterator,ascii,1,ls_any_fills_from_sys.dram_io_all,0.5221
+StringSet,iterator,ascii,1,cycles#1,61.6385
+StringSet,iterator,ascii,1,ls_alloc_mab_count,281.332
+StringSet,iterator,ascii,1,ls_hw_pf_dc_fills.all,0.1397
+StringSet,iterator,ascii,1,ls_l1_d_tlb_miss.all,0.12
+StringSet,iterator,ascii,1,ls_l1_d_tlb_miss.all_l2_miss,0.0001
+StringSet,iterator,binary,1,cycles,77.5705
+StringSet,iterator,binary,1,instructions,54.0464
+StringSet,iterator,binary,1,ex_ret_brn_misp,0.537
+StringSet,iterator,binary,1,ls_dmnd_fills_from_sys.all,1.2856
+StringSet,iterator,binary,1,ls_any_fills_from_sys.dram_io_all,0.9373
+StringSet,iterator,binary,1,cycles#1,74.8221
+StringSet,iterator,binary,1,ls_alloc_mab_count,440.3121
+StringSet,iterator,binary,1,ls_hw_pf_dc_fills.all,0.1412
+StringSet,iterator,binary,1,ls_l1_d_tlb_miss.all,0.1214
+StringSet,iterator,binary,1,ls_l1_d_tlb_miss.all_l2_miss,0.0004
+OAHSet 16/2,scan,ascii,1,cycles,127.8301
+OAHSet 16/2,scan,ascii,1,instructions,275.8214
+OAHSet 16/2,scan,ascii,1,ex_ret_brn_misp,1.2798
+OAHSet 16/2,scan,ascii,1,ls_dmnd_fills_from_sys.all,1.0998
+OAHSet 16/2,scan,ascii,1,ls_any_fills_from_sys.dram_io_all,0.0857
+OAHSet 16/2,scan,ascii,1,cycles#1,142.3015
+OAHSet 16/2,scan,ascii,1,ls_alloc_mab_count,205.2805
+OAHSet 16/2,scan,ascii,1,ls_hw_pf_dc_fills.all,0.1726
+OAHSet 16/2,scan,ascii,1,ls_l1_d_tlb_miss.all,0.2876
+OAHSet 16/2,scan,ascii,1,ls_l1_d_tlb_miss.all_l2_miss,0.0001
+OAHSet 4/1,scan,ascii,1,cycles,129.3144
+OAHSet 4/1,scan,ascii,1,instructions,198.8832
+OAHSet 4/1,scan,ascii,1,ex_ret_brn_misp,0.9854
+OAHSet 4/1,scan,ascii,1,ls_dmnd_fills_from_sys.all,1.1002
+OAHSet 4/1,scan,ascii,1,ls_any_fills_from_sys.dram_io_all,0.3657
+OAHSet 4/1,scan,ascii,1,cycles#1,115.8125
+OAHSet 4/1,scan,ascii,1,ls_alloc_mab_count,123.1614
+OAHSet 4/1,scan,ascii,1,ls_hw_pf_dc_fills.all,0.1554
+OAHSet 4/1,scan,ascii,1,ls_l1_d_tlb_miss.all,0.2399
+OAHSet 4/1,scan,ascii,1,ls_l1_d_tlb_miss.all_l2_miss,0.0
+StringSet,scan,ascii,1,cycles,284.5763
+StringSet,scan,ascii,1,instructions,311.8418
+StringSet,scan,ascii,1,ex_ret_brn_misp,0.6881
+StringSet,scan,ascii,1,ls_dmnd_fills_from_sys.all,1.2663
+StringSet,scan,ascii,1,ls_any_fills_from_sys.dram_io_all,0.8227
+StringSet,scan,ascii,1,cycles#1,241.8404
+StringSet,scan,ascii,1,ls_alloc_mab_count,302.0972
+StringSet,scan,ascii,1,ls_hw_pf_dc_fills.all,0.1756
+StringSet,scan,ascii,1,ls_l1_d_tlb_miss.all,0.1255
+StringSet,scan,ascii,1,ls_l1_d_tlb_miss.all_l2_miss,0.0002
+OAHSet 16/2,iterator,ascii,2,cycles,79.6902
+OAHSet 16/2,iterator,ascii,2,instructions,113.5792
+OAHSet 16/2,iterator,ascii,2,ex_ret_brn_misp,0.0659
+OAHSet 16/2,iterator,ascii,2,ls_dmnd_fills_from_sys.all,1.0463
+OAHSet 16/2,iterator,ascii,2,ls_any_fills_from_sys.dram_io_all,0.2636
+OAHSet 16/2,iterator,ascii,2,cycles#1,89.5995
+OAHSet 16/2,iterator,ascii,2,ls_alloc_mab_count,213.9851
+OAHSet 16/2,iterator,ascii,2,ls_hw_pf_dc_fills.all,0.1674
+OAHSet 16/2,iterator,ascii,2,ls_l1_d_tlb_miss.all,0.2861
+OAHSet 16/2,iterator,ascii,2,ls_l1_d_tlb_miss.all_l2_miss,0.0001
+OAHSet 16/2,iterator,binary,2,cycles,74.6882
+OAHSet 16/2,iterator,binary,2,instructions,66.5702
+OAHSet 16/2,iterator,binary,2,ex_ret_brn_misp,0.0338
+OAHSet 16/2,iterator,binary,2,ls_dmnd_fills_from_sys.all,1.0465
+OAHSet 16/2,iterator,binary,2,ls_any_fills_from_sys.dram_io_all,0.5582
+OAHSet 16/2,iterator,binary,2,cycles#1,75.6595
+OAHSet 16/2,iterator,binary,2,ls_alloc_mab_count,276.903
+OAHSet 16/2,iterator,binary,2,ls_hw_pf_dc_fills.all,0.1772
+OAHSet 16/2,iterator,binary,2,ls_l1_d_tlb_miss.all,0.1533
+OAHSet 16/2,iterator,binary,2,ls_l1_d_tlb_miss.all_l2_miss,0.0001
+OAHSet 4/1,iterator,ascii,2,cycles,81.7911
+OAHSet 4/1,iterator,ascii,2,instructions,117.6782
+OAHSet 4/1,iterator,ascii,2,ex_ret_brn_misp,0.381
+OAHSet 4/1,iterator,ascii,2,ls_dmnd_fills_from_sys.all,1.0867
+OAHSet 4/1,iterator,ascii,2,ls_any_fills_from_sys.dram_io_all,0.227
+OAHSet 4/1,iterator,ascii,2,cycles#1,81.5176
+OAHSet 4/1,iterator,ascii,2,ls_alloc_mab_count,144.5829
+OAHSet 4/1,iterator,ascii,2,ls_hw_pf_dc_fills.all,0.1567
+OAHSet 4/1,iterator,ascii,2,ls_l1_d_tlb_miss.all,0.2362
+OAHSet 4/1,iterator,ascii,2,ls_l1_d_tlb_miss.all_l2_miss,0.0
+StringSet,iterator,ascii,2,cycles,63.3484
+StringSet,iterator,ascii,2,instructions,53.9979
+StringSet,iterator,ascii,2,ex_ret_brn_misp,0.5383
+StringSet,iterator,ascii,2,ls_dmnd_fills_from_sys.all,1.2811
+StringSet,iterator,ascii,2,ls_any_fills_from_sys.dram_io_all,0.5827
+StringSet,iterator,ascii,2,cycles#1,60.7529
+StringSet,iterator,ascii,2,ls_alloc_mab_count,269.6696
+StringSet,iterator,ascii,2,ls_hw_pf_dc_fills.all,0.1401
+StringSet,iterator,ascii,2,ls_l1_d_tlb_miss.all,0.12
+StringSet,iterator,ascii,2,ls_l1_d_tlb_miss.all_l2_miss,0.0003
+StringSet,iterator,binary,2,cycles,62.0547
+StringSet,iterator,binary,2,instructions,54.0077
+StringSet,iterator,binary,2,ex_ret_brn_misp,0.5363
+StringSet,iterator,binary,2,ls_dmnd_fills_from_sys.all,1.284
+StringSet,iterator,binary,2,ls_any_fills_from_sys.dram_io_all,0.561
+StringSet,iterator,binary,2,cycles#1,63.148
+StringSet,iterator,binary,2,ls_alloc_mab_count,309.0486
+StringSet,iterator,binary,2,ls_hw_pf_dc_fills.all,0.133
+StringSet,iterator,binary,2,ls_l1_d_tlb_miss.all,0.121
+StringSet,iterator,binary,2,ls_l1_d_tlb_miss.all_l2_miss,0.0001
+OAHSet 16/2,scan,ascii,2,cycles,130.4801
+OAHSet 16/2,scan,ascii,2,instructions,275.8459
+OAHSet 16/2,scan,ascii,2,ex_ret_brn_misp,1.2794
+OAHSet 16/2,scan,ascii,2,ls_dmnd_fills_from_sys.all,1.1021
+OAHSet 16/2,scan,ascii,2,ls_any_fills_from_sys.dram_io_all,0.122
+OAHSet 16/2,scan,ascii,2,cycles#1,140.0583
+OAHSet 16/2,scan,ascii,2,ls_alloc_mab_count,203.4938
+OAHSet 16/2,scan,ascii,2,ls_hw_pf_dc_fills.all,0.1658
+OAHSet 16/2,scan,ascii,2,ls_l1_d_tlb_miss.all,0.2881
+OAHSet 16/2,scan,ascii,2,ls_l1_d_tlb_miss.all_l2_miss,0.0002
+OAHSet 4/1,scan,ascii,2,cycles,112.4104
+OAHSet 4/1,scan,ascii,2,instructions,198.8389
+OAHSet 4/1,scan,ascii,2,ex_ret_brn_misp,0.9852
+OAHSet 4/1,scan,ascii,2,ls_dmnd_fills_from_sys.all,1.0983
+OAHSet 4/1,scan,ascii,2,ls_any_fills_from_sys.dram_io_all,0.1997
+OAHSet 4/1,scan,ascii,2,cycles#1,116.0954
+OAHSet 4/1,scan,ascii,2,ls_alloc_mab_count,121.4668
+OAHSet 4/1,scan,ascii,2,ls_hw_pf_dc_fills.all,0.1524
+OAHSet 4/1,scan,ascii,2,ls_l1_d_tlb_miss.all,0.2413
+OAHSet 4/1,scan,ascii,2,ls_l1_d_tlb_miss.all_l2_miss,0.0
+StringSet,scan,ascii,2,cycles,233.5557
+StringSet,scan,ascii,2,instructions,311.7446
+StringSet,scan,ascii,2,ex_ret_brn_misp,0.6903
+StringSet,scan,ascii,2,ls_dmnd_fills_from_sys.all,1.2524
+StringSet,scan,ascii,2,ls_any_fills_from_sys.dram_io_all,0.5509
+StringSet,scan,ascii,2,cycles#1,229.9357
+StringSet,scan,ascii,2,ls_alloc_mab_count,277.5095
+StringSet,scan,ascii,2,ls_hw_pf_dc_fills.all,0.1685
+StringSet,scan,ascii,2,ls_l1_d_tlb_miss.all,0.1239
+StringSet,scan,ascii,2,ls_l1_d_tlb_miss.all_l2_miss,0.0004

@@ -1,0 +1,1768 @@
+{
+  "started_utc": "2026-11-18T11:27:20.151028+00:00",
+  "source_commit": "534e38340c3319fef9028d20bb00f97be65df0ab",
+  "source_status": "?? src/core/oah_set_bench.cc",
+  "source_sha256": {
+    "src/core/oah_base.h": "d0e72e64c2d5cc909255523d573665dbe6916947ed6fbf25a8b8a83527b83f1f",
+    "src/core/oah_entry.cc": "96f51a80dd03f182485afa55fe5431816e284e40e4d006bda62efa97d0af5ab4",
+    "src/core/oah_entry.h": "0ba50a8d76cb2e78367e86c3567da75f2c0d53304bad92b7be44895ba1d6dda5",
+    "src/core/oah_map.cc": "313968ccacd0e920a76f6cab31a9d7d655cbd8cc964fc78767a3ecb7db14d5ad",
+    "src/core/oah_map.h": "ef70eaf32e5a0ba9583960ada5fbddcf3e2fcb1140cedc4528ea15a4e9201758",
+    "src/core/oah_map_test.cc": "91fc3c45ffe8cd2dce1f45cead4bee8d051efd5b5da80697e5ffe250f0d6b646",
+    "src/core/oah_pair.cc": "d41fac1b93a7d813e8c7d9faeccd701860fc116333a15d89f8ccc160bdde9fb2",
+    "src/core/oah_pair.h": "58fba74945bb864104c1d219421dae13ef4b68b9089b3223dad0875980430c43",
+    "src/core/oah_ptr.cc": "6c7cd16ea444b68c93970b6bf458016d7f84ec48f6999f1a495d16d9ec1382e7",
+    "src/core/oah_ptr.h": "3de09ab0dba1ea923532cff62cdbef54f0785e194ef385cf845bfc1991198c4d",
+    "src/core/oah_set.cc": "603602a6f1d970fcfe4b6bcb37c018c9a94875d8a99c49208148e603470e28bc",
+    "src/core/oah_set.h": "09831313df5ee67fb2b629172f259191f60aec22777943004d9fc55eca2fc52b",
+    "src/core/oah_set_bench.cc": "50ea85d64a0363fbf929015cb6d663aa6fd8ec9d0ebe4e2a85364992aecee028",
+    "src/core/oah_set_test.cc": "fd008a4139f8cedb4008fbcf59c7e1a94d7db1887762987eb03ab04881701791",
+    "src/core/oah_table.cc": "014ad2acdebf80c5bcb41f0f7eb9630e734d6136b7688535d7bf075e52ad4f8e",
+    "src/core/oah_table.h": "a037c2c865330fe9fa4a146767289fcf4c77058532922b99e1656ae928be650b"
+  },
+  "platform": "Linux-7.0.0-43-generic-x86_64-with-glibc2.39",
+  "cpu": 9,
+  "cpufreq": {
+    "scaling_driver": "amd-pstate-epp",
+    "scaling_governor": "performance",
+    "energy_performance_preference": "performance"
+  },
+  "lscpu":
+      "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           48 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  32\nOn-line CPU(s) list:                     0-31\nVendor ID:                               AuthenticAMD\nModel name:                              AMD RYZEN AI MAX+ 395 w/ Radeon 8060S\nCPU family:                              26\nModel:                                   112\nThread(s) per core:                      2\nCore(s) per socket:                      16\nSocket(s):                               1\nStepping:                                0\nFrequency boost:                         enabled\nCPU(s) scaling MHz:                      69%\nCPU max MHz:                             3000.0000\nCPU min MHz:                             625.0000\nBogoMIPS:                                5989.00\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good amd_lbr_v2 nopl xtopology nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 sse4_1 sse4_2 movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpuid_fault cpb cat_l3 cdp_l3 hw_pstate ssbd mba perfmon_v2 ibrs ibpb stibp ibrs_enhanced vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local user_shstk avx_vnni avx512_bf16 clzero irperf xsaveerptr rdpru wbnoinvd cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif x2avic v_spec_ctrl vnmi avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq rdpid bus_lock_detect movdiri movdir64b overflow_recov succor smca fsrm avx512_vp2intersect flush_l1d amd_lbr_pmc_freeze\nVirtualization:                          AMD-V\nL1d cache:                               768 KiB (16 instances)\nL1i cache:                               512 KiB (16 instances)\nL2 cache:                                16 MiB (16 instances)\nL3 cache:                                64 MiB (2 instances)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-31\nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Mitigation; IBPB on VMEXIT only\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; STIBP always-on; PBRSB-eIBRS Not affected; BHI Not affected\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Mitigation; IBPB on VMEXIT",
+  "compiler":
+      "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nCopyright (C) 2023 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.",
+  "builds": {
+    "default": {
+      "binary": "/tmp/oahvar/A/oah_set_bench",
+      "sha256": "c8b1bff5a5d6463aa5250871a926cffd3d402a2ae819b8d1b6dc55120202af35",
+      "compile_command":
+          "/usr/bin/g++ -falign-functions=64 -DBOOST_ASIO_SEPARATE_COMPILATION -DBOOST_BEAST_SEPARATE_COMPILATION -DBOOST_CONTEXT_DYN_LINK -DBOOST_CONTEXT_NO_LIB -DHAS_RAWMEMCHR -DUSE_ABSL_LOG=1 -DUSE_FB2 -DUSE_ZMALLOC_MI -Dnsel_CONFIG_NO_NODISCARD=OFF -I/home/builder/dragonfly1 -I/home/builder/dragonfly1/genfiles -I/home/builder/dragonfly1/src -I/home/builder/dragonfly1/helio -I/home/builder/dragonfly1/genfiles/src -isystem /home/builder/dragonfly1/build-opt/_deps/abseil_cpp-src -isystem /home/builder/dragonfly1/build-opt/third_party/libs/xxhash/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/expected/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/hdr_histogram/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/mimalloc2/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/zstd/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/uring/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/cares/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/reflex/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/jsoncons/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/lua/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/dragonbox/include -Wno-use-after-free -O3 -DNDEBUG -std=c++20 -fdiagnostics-color=always -Wno-error=ignored-attributes -g -fno-omit-frame-pointer -fPIC -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free -Wall -Wextra -Wno-unused-parameter -march=haswell -mtune=skylake -o /tmp/oahvar/A/obj/oah_set_bench.cc.o -c /home/builder/dragonfly1/src/core/oah_set_bench.cc"
+    },
+    "w4o1": {
+      "binary": "/tmp/oahvar/B/oah_set_bench",
+      "sha256": "49a0a65571f9630bf7022616401d3728c09befae5c835e63429cff79bf5b6cbb",
+      "compile_command":
+          "/usr/bin/g++ -falign-functions=64 -DBOOST_ASIO_SEPARATE_COMPILATION -DBOOST_BEAST_SEPARATE_COMPILATION -DBOOST_CONTEXT_DYN_LINK -DBOOST_CONTEXT_NO_LIB -DHAS_RAWMEMCHR -DUSE_ABSL_LOG=1 -DUSE_FB2 -DUSE_ZMALLOC_MI -Dnsel_CONFIG_NO_NODISCARD=OFF -I/tmp/oahvar/inc_b -I/home/builder/dragonfly1 -I/home/builder/dragonfly1/genfiles -I/home/builder/dragonfly1/src -I/home/builder/dragonfly1/helio -I/home/builder/dragonfly1/genfiles/src -isystem /home/builder/dragonfly1/build-opt/_deps/abseil_cpp-src -isystem /home/builder/dragonfly1/build-opt/third_party/libs/xxhash/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/expected/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/hdr_histogram/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/mimalloc2/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/zstd/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/uring/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/cares/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/reflex/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/jsoncons/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/lua/include -isystem /home/builder/dragonfly1/build-opt/third_party/libs/dragonbox/include -Wno-use-after-free -O3 -DNDEBUG -std=c++20 -fdiagnostics-color=always -Wno-error=ignored-attributes -g -fno-omit-frame-pointer -fPIC -fno-builtin-malloc -fno-builtin-calloc -fno-builtin-realloc -fno-builtin-free -Wall -Wextra -Wno-unused-parameter -march=haswell -mtune=skylake -o /tmp/oahvar/B/obj/oah_set_bench.cc.o -c /home/builder/dragonfly1/src/core/oah_set_bench.cc"
+    }
+  },
+  "rounds": 7,
+  "repeats": 3,
+  "warmup_rounds": 1,
+  "lookup_passes": 5,
+  "seed": 20261116,
+  "scenarios": [
+    [
+      1000,
+      32,
+      false,
+      false
+    ],
+    [
+      100000,
+      8,
+      false,
+      false
+    ],
+    [
+      100000,
+      16,
+      false,
+      false
+    ],
+    [
+      100000,
+      32,
+      false,
+      false
+    ],
+    [
+      100000,
+      100,
+      false,
+      false
+    ],
+    [
+      100000,
+      256,
+      false,
+      false
+    ],
+    [
+      100000,
+      8,
+      true,
+      false
+    ],
+    [
+      100000,
+      16,
+      true,
+      false
+    ],
+    [
+      100000,
+      32,
+      true,
+      false
+    ],
+    [
+      100000,
+      100,
+      true,
+      false
+    ],
+    [
+      100000,
+      256,
+      true,
+      false
+    ],
+    [
+      1000000,
+      32,
+      false,
+      false
+    ],
+    [
+      1000000,
+      32,
+      true,
+      false
+    ],
+    [
+      100000,
+      32,
+      false,
+      true
+    ],
+    [
+      1000000,
+      32,
+      false,
+      true
+    ]
+  ],
+  "commands": [
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 0.019,
+      "cpu_s": 0.016,
+      "involuntary_switches": 1
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 0.018,
+      "cpu_s": 0.014,
+      "involuntary_switches": 1
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 1.877,
+      "cpu_s": 1.873,
+      "involuntary_switches": 17
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 1.754,
+      "cpu_s": 1.75,
+      "involuntary_switches": 24
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.508,
+      "cpu_s": 2.504,
+      "involuntary_switches": 36
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.464,
+      "cpu_s": 2.461,
+      "involuntary_switches": 29
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.646,
+      "cpu_s": 2.642,
+      "involuntary_switches": 35
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.492,
+      "cpu_s": 2.488,
+      "involuntary_switches": 33
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 4.922,
+      "cpu_s": 4.918,
+      "involuntary_switches": 73
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 4.156,
+      "cpu_s": 4.152,
+      "involuntary_switches": 66
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 10.131,
+      "cpu_s": 10.125,
+      "involuntary_switches": 149
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 10.386,
+      "cpu_s": 10.38,
+      "involuntary_switches": 159
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 1.613,
+      "cpu_s": 1.609,
+      "involuntary_switches": 30
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 1.553,
+      "cpu_s": 1.549,
+      "involuntary_switches": 26
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 2.088,
+      "cpu_s": 2.084,
+      "involuntary_switches": 30
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 1.81,
+      "cpu_s": 1.806,
+      "involuntary_switches": 32
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 2.229,
+      "cpu_s": 2.225,
+      "involuntary_switches": 34
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 2.42,
+      "cpu_s": 2.416,
+      "involuntary_switches": 42
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 4.991,
+      "cpu_s": 4.986,
+      "involuntary_switches": 80
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 5.245,
+      "cpu_s": 5.241,
+      "involuntary_switches": 81
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 11.22,
+      "cpu_s": 11.214,
+      "involuntary_switches": 160
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 9.989,
+      "cpu_s": 9.984,
+      "involuntary_switches": 152
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 96.258,
+      "cpu_s": 96.232,
+      "involuntary_switches": 1570
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 88.746,
+      "cpu_s": 88.72,
+      "involuntary_switches": 1362
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 96.026,
+      "cpu_s": 96.0,
+      "involuntary_switches": 1521
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 89.653,
+      "cpu_s": 89.632,
+      "involuntary_switches": 1306
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 2.46,
+      "cpu_s": 2.456,
+      "involuntary_switches": 41
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 2.649,
+      "cpu_s": 2.645,
+      "involuntary_switches": 42
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 94.418,
+      "cpu_s": 94.396,
+      "involuntary_switches": 1453
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 87.974,
+      "cpu_s": 87.948,
+      "involuntary_switches": 1402
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 0.02,
+      "cpu_s": 0.016,
+      "involuntary_switches": 2
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 0.017,
+      "cpu_s": 0.014,
+      "involuntary_switches": 1
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 1.768,
+      "cpu_s": 1.764,
+      "involuntary_switches": 31
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 1.704,
+      "cpu_s": 1.7,
+      "involuntary_switches": 26
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.247,
+      "cpu_s": 2.243,
+      "involuntary_switches": 41
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.092,
+      "cpu_s": 2.088,
+      "involuntary_switches": 30
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.912,
+      "cpu_s": 2.908,
+      "involuntary_switches": 49
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.644,
+      "cpu_s": 2.64,
+      "involuntary_switches": 43
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 5.873,
+      "cpu_s": 5.868,
+      "involuntary_switches": 90
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 4.805,
+      "cpu_s": 4.801,
+      "involuntary_switches": 72
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 11.612,
+      "cpu_s": 11.606,
+      "involuntary_switches": 184
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 11.258,
+      "cpu_s": 11.252,
+      "involuntary_switches": 172
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 1.73,
+      "cpu_s": 1.726,
+      "involuntary_switches": 28
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 1.593,
+      "cpu_s": 1.589,
+      "involuntary_switches": 25
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 2.304,
+      "cpu_s": 2.298,
+      "involuntary_switches": 39
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 2.036,
+      "cpu_s": 2.032,
+      "involuntary_switches": 29
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 2.727,
+      "cpu_s": 2.723,
+      "involuntary_switches": 45
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 2.41,
+      "cpu_s": 2.406,
+      "involuntary_switches": 39
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 5.218,
+      "cpu_s": 5.201,
+      "involuntary_switches": 90
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 4.96,
+      "cpu_s": 4.955,
+      "involuntary_switches": 76
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 10.574,
+      "cpu_s": 10.568,
+      "involuntary_switches": 164
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 9.825,
+      "cpu_s": 9.82,
+      "involuntary_switches": 148
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 99.49,
+      "cpu_s": 99.443,
+      "involuntary_switches": 1534
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 92.035,
+      "cpu_s": 92.012,
+      "involuntary_switches": 1392
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 95.251,
+      "cpu_s": 95.22,
+      "involuntary_switches": 1542
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 88.193,
+      "cpu_s": 87.854,
+      "involuntary_switches": 6663
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 2.606,
+      "cpu_s": 2.574,
+      "involuntary_switches": 432
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 2.472,
+      "cpu_s": 2.468,
+      "involuntary_switches": 47
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 93.75,
+      "cpu_s": 93.548,
+      "involuntary_switches": 4482
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 86.909,
+      "cpu_s": 86.888,
+      "involuntary_switches": 1349
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 0.019,
+      "cpu_s": 0.016,
+      "involuntary_switches": 1
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 0.018,
+      "cpu_s": 0.014,
+      "involuntary_switches": 2
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 1.823,
+      "cpu_s": 1.819,
+      "involuntary_switches": 32
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 1.776,
+      "cpu_s": 1.772,
+      "involuntary_switches": 26
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.275,
+      "cpu_s": 2.271,
+      "involuntary_switches": 40
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.005,
+      "cpu_s": 2.001,
+      "involuntary_switches": 29
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.644,
+      "cpu_s": 2.64,
+      "involuntary_switches": 44
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 2.508,
+      "cpu_s": 2.504,
+      "involuntary_switches": 38
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 5.105,
+      "cpu_s": 5.1,
+      "involuntary_switches": 84
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 4.696,
+      "cpu_s": 4.691,
+      "involuntary_switches": 72
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 9.874,
+      "cpu_s": 9.868,
+      "involuntary_switches": 160
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 9.355,
+      "cpu_s": 9.349,
+      "involuntary_switches": 155
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 1.612,
+      "cpu_s": 1.608,
+      "involuntary_switches": 27
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=8",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 1.451,
+      "cpu_s": 1.447,
+      "involuntary_switches": 24
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 1.906,
+      "cpu_s": 1.902,
+      "involuntary_switches": 32
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=16",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 1.752,
+      "cpu_s": 1.748,
+      "involuntary_switches": 25
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 2.19,
+      "cpu_s": 2.185,
+      "involuntary_switches": 34
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 2.009,
+      "cpu_s": 2.005,
+      "involuntary_switches": 34
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 4.979,
+      "cpu_s": 4.975,
+      "involuntary_switches": 76
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=100",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 4.313,
+      "cpu_s": 4.309,
+      "involuntary_switches": 69
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 9.748,
+      "cpu_s": 9.742,
+      "involuntary_switches": 153
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=256",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 9.51,
+      "cpu_s": 9.503,
+      "involuntary_switches": 158
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 104.721,
+      "cpu_s": 104.366,
+      "involuntary_switches": 4682
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=false"
+      ],
+      "wall_s": 86.81,
+      "cpu_s": 86.788,
+      "involuntary_switches": 1382
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 92.689,
+      "cpu_s": 92.666,
+      "involuntary_switches": 1470
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=true",
+        "--reserve=false"
+      ],
+      "wall_s": 84.838,
+      "cpu_s": 84.815,
+      "involuntary_switches": 1412
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 2.134,
+      "cpu_s": 2.13,
+      "involuntary_switches": 33
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=100000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 2.027,
+      "cpu_s": 2.023,
+      "involuntary_switches": 36
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 88.168,
+      "cpu_s": 88.146,
+      "involuntary_switches": 1461
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_bench",
+        "--count=1000000",
+        "--key_size=32",
+        "--rounds=7",
+        "--lookup_passes=5",
+        "--seed=20261116",
+        "--binary=false",
+        "--reserve=true"
+      ],
+      "wall_s": 81.276,
+      "cpu_s": 81.254,
+      "involuntary_switches": 1365
+    }
+  ],
+  "finished_utc": "2026-11-18T11:59:20.530648+00:00"
+}

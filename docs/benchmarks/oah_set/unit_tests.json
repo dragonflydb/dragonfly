@@ -1,0 +1,576 @@
+{
+  "started_utc": "2026-11-18T11:59:20.586764+00:00",
+  "source_commit": "534e38340c3319fef9028d20bb00f97be65df0ab",
+  "source_status": "?? src/core/oah_set_bench.cc",
+  "source_sha256": {
+    "src/core/oah_base.h": "d0e72e64c2d5cc909255523d573665dbe6916947ed6fbf25a8b8a83527b83f1f",
+    "src/core/oah_entry.cc": "96f51a80dd03f182485afa55fe5431816e284e40e4d006bda62efa97d0af5ab4",
+    "src/core/oah_entry.h": "0ba50a8d76cb2e78367e86c3567da75f2c0d53304bad92b7be44895ba1d6dda5",
+    "src/core/oah_map.cc": "313968ccacd0e920a76f6cab31a9d7d655cbd8cc964fc78767a3ecb7db14d5ad",
+    "src/core/oah_map.h": "ef70eaf32e5a0ba9583960ada5fbddcf3e2fcb1140cedc4528ea15a4e9201758",
+    "src/core/oah_map_test.cc": "91fc3c45ffe8cd2dce1f45cead4bee8d051efd5b5da80697e5ffe250f0d6b646",
+    "src/core/oah_pair.cc": "d41fac1b93a7d813e8c7d9faeccd701860fc116333a15d89f8ccc160bdde9fb2",
+    "src/core/oah_pair.h": "58fba74945bb864104c1d219421dae13ef4b68b9089b3223dad0875980430c43",
+    "src/core/oah_ptr.cc": "6c7cd16ea444b68c93970b6bf458016d7f84ec48f6999f1a495d16d9ec1382e7",
+    "src/core/oah_ptr.h": "3de09ab0dba1ea923532cff62cdbef54f0785e194ef385cf845bfc1991198c4d",
+    "src/core/oah_set.cc": "603602a6f1d970fcfe4b6bcb37c018c9a94875d8a99c49208148e603470e28bc",
+    "src/core/oah_set.h": "09831313df5ee67fb2b629172f259191f60aec22777943004d9fc55eca2fc52b",
+    "src/core/oah_set_bench.cc": "50ea85d64a0363fbf929015cb6d663aa6fd8ec9d0ebe4e2a85364992aecee028",
+    "src/core/oah_set_test.cc": "fd008a4139f8cedb4008fbcf59c7e1a94d7db1887762987eb03ab04881701791",
+    "src/core/oah_table.cc": "014ad2acdebf80c5bcb41f0f7eb9630e734d6136b7688535d7bf075e52ad4f8e",
+    "src/core/oah_table.h": "a037c2c865330fe9fa4a146767289fcf4c77058532922b99e1656ae928be650b",
+    "src/core/string_set.cc": "c272cbab2e2a7ead81632558ac405b65c9c821a22df1a4fa31d0df9fd9f2efb5",
+    "src/core/string_set.h": "b71aec5052e3a065c250a960978d3eeabf852660261bad268c53d3d4babd4b68",
+    "src/core/string_set_test.cc":
+        "dcc261f9c0d2095595e6e393751f2891912888554c12ada7d832823f9b9ed8f1",
+    "src/core/dense_set.cc": "d28a6abc42c3f898ec723d17eae6d5ed099dcc9960fa661993f8d2278ab42df8",
+    "src/core/dense_set.h": "ecaf170cb727fe93e311b2eda712647d3d7f008f62fb65f649a34b674e929fdb"
+  },
+  "binaries": {
+    "OAHSet": {
+      "path": "/tmp/oahvar/A/oah_set_test",
+      "sha256": "f262eae84a42e4c2fe949c2bc818094f21bc1ee700d0c13bc01ff1ca5c10d3f4"
+    },
+    "OAHSet_w4o1": {
+      "path": "/tmp/oahvar/B/oah_set_test",
+      "sha256": "dbf762610011fda2c863897c90b5b7629fc8906f030a477cc5339ae86eecbc72"
+    },
+    "StringSet": {
+      "path": "/tmp/oahvar/A/string_set_test",
+      "sha256": "76839c1f4535bf80ffc5ce931f879167cdbd248d64a5f4f00406e213a1ec4492"
+    }
+  },
+  "cpu": 9,
+  "cpufreq": {
+    "scaling_driver": "amd-pstate-epp",
+    "scaling_governor": "performance",
+    "energy_performance_preference": "performance"
+  },
+  "commands": [
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_test",
+        "--gtest_filter=NONE",
+        "--bench",
+        "--benchmark_filter=BM_(Add|Get|Erase|Grow|Shrink|Scan|Clear)/",
+        "--benchmark_repetitions=3",
+        "--benchmark_out=/tmp/tmpsra_uwck/report.json",
+        "--benchmark_out_format=json"
+      ],
+      "wall_s": 1121.876,
+      "cpu_s": 1119.592,
+      "involuntary_switches": 54618
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_test",
+        "--gtest_filter=NONE",
+        "--bench",
+        "--benchmark_filter=BM_(Add|Get|Erase|Grow|Shrink|Scan|Clear)/",
+        "--benchmark_repetitions=3",
+        "--benchmark_out=/tmp/tmphe6cya_s/report.json",
+        "--benchmark_out_format=json"
+      ],
+      "wall_s": 801.441,
+      "cpu_s": 800.094,
+      "involuntary_switches": 33138
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/string_set_test",
+        "--gtest_filter=StringSetTest.Basic",
+        "--bench",
+        "--benchmark_filter=BM_(Add|Get|Erase|Grow|Shrink|Scan|Clear)/",
+        "--benchmark_repetitions=3",
+        "--benchmark_out=/tmp/tmpdm_vlckm/report.json",
+        "--benchmark_out_format=json"
+      ],
+      "wall_s": 447.931,
+      "cpu_s": 446.78,
+      "involuntary_switches": 25143
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_test",
+        "--gtest_filter=NONE",
+        "--bench",
+        "--benchmark_filter=BM_(Add|Get|Erase|Grow|Shrink|Scan|Clear)/",
+        "--benchmark_repetitions=3",
+        "--benchmark_out=/tmp/tmp1z_y1jhi/report.json",
+        "--benchmark_out_format=json"
+      ],
+      "wall_s": 901.891,
+      "cpu_s": 901.03,
+      "involuntary_switches": 25891
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_test",
+        "--gtest_filter=NONE",
+        "--bench",
+        "--benchmark_filter=BM_(Add|Get|Erase|Grow|Shrink|Scan|Clear)/",
+        "--benchmark_repetitions=3",
+        "--benchmark_out=/tmp/tmp8tbmzsqr/report.json",
+        "--benchmark_out_format=json"
+      ],
+      "wall_s": 830.197,
+      "cpu_s": 830.026,
+      "involuntary_switches": 13112
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/string_set_test",
+        "--gtest_filter=StringSetTest.Basic",
+        "--bench",
+        "--benchmark_filter=BM_(Add|Get|Erase|Grow|Shrink|Scan|Clear)/",
+        "--benchmark_repetitions=3",
+        "--benchmark_out=/tmp/tmp6rfakpvv/report.json",
+        "--benchmark_out_format=json"
+      ],
+      "wall_s": 482.32,
+      "cpu_s": 482.222,
+      "involuntary_switches": 7865
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/oah_set_test",
+        "--gtest_filter=NONE",
+        "--bench",
+        "--benchmark_filter=BM_(Add|Get|Erase|Grow|Shrink|Scan|Clear)/",
+        "--benchmark_repetitions=3",
+        "--benchmark_out=/tmp/tmpr1ipb65d/report.json",
+        "--benchmark_out_format=json"
+      ],
+      "wall_s": 1121.304,
+      "cpu_s": 1120.62,
+      "involuntary_switches": 28011
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/B/oah_set_test",
+        "--gtest_filter=NONE",
+        "--bench",
+        "--benchmark_filter=BM_(Add|Get|Erase|Grow|Shrink|Scan|Clear)/",
+        "--benchmark_repetitions=3",
+        "--benchmark_out=/tmp/tmpkfuox62w/report.json",
+        "--benchmark_out_format=json"
+      ],
+      "wall_s": 781.535,
+      "cpu_s": 778.259,
+      "involuntary_switches": 73900
+    },
+    {
+      "command": [
+        "taskset",
+        "-c",
+        "9",
+        "/tmp/oahvar/A/string_set_test",
+        "--gtest_filter=StringSetTest.Basic",
+        "--bench",
+        "--benchmark_filter=BM_(Add|Get|Erase|Grow|Shrink|Scan|Clear)/",
+        "--benchmark_repetitions=3",
+        "--benchmark_out=/tmp/tmp189gndtt/report.json",
+        "--benchmark_out_format=json"
+      ],
+      "wall_s": 418.488,
+      "cpu_s": 413.382,
+      "involuntary_switches": 90022
+    }
+  ],
+  "contexts": [
+    {
+      "date": "2026-11-18T13:59:20+02:00",
+      "executable": "/tmp/oahvar/A/oah_set_test",
+      "num_cpus": 32,
+      "mhz_per_cpu": 3000,
+      "cpu_scaling_enabled": true,
+      "aslr_enabled": true,
+      "caches": [
+        {
+          "type": "Data",
+          "level": 1,
+          "size": 49152,
+          "num_sharing": 2
+        },
+        {
+          "type": "Instruction",
+          "level": 1,
+          "size": 32768,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 2,
+          "size": 1048576,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 3,
+          "size": 33554432,
+          "num_sharing": 16
+        }
+      ],
+      "load_avg": [
+        1.13525,
+        2.01562,
+        3.03662
+      ],
+      "library_build_type": "release",
+      "json_schema_version": 1
+    },
+    {
+      "date": "2026-11-18T14:18:02+02:00",
+      "executable": "/tmp/oahvar/B/oah_set_test",
+      "num_cpus": 32,
+      "mhz_per_cpu": 3000,
+      "cpu_scaling_enabled": true,
+      "aslr_enabled": true,
+      "caches": [
+        {
+          "type": "Data",
+          "level": 1,
+          "size": 49152,
+          "num_sharing": 2
+        },
+        {
+          "type": "Instruction",
+          "level": 1,
+          "size": 32768,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 2,
+          "size": 1048576,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 3,
+          "size": 33554432,
+          "num_sharing": 16
+        }
+      ],
+      "load_avg": [
+        4.14014,
+        2.93213,
+        2.55664
+      ],
+      "library_build_type": "release",
+      "json_schema_version": 1
+    },
+    {
+      "date": "2026-11-18T14:31:23+02:00",
+      "executable": "/tmp/oahvar/A/string_set_test",
+      "num_cpus": 32,
+      "mhz_per_cpu": 3000,
+      "cpu_scaling_enabled": true,
+      "aslr_enabled": true,
+      "caches": [
+        {
+          "type": "Data",
+          "level": 1,
+          "size": 49152,
+          "num_sharing": 2
+        },
+        {
+          "type": "Instruction",
+          "level": 1,
+          "size": 32768,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 2,
+          "size": 1048576,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 3,
+          "size": 33554432,
+          "num_sharing": 16
+        }
+      ],
+      "load_avg": [
+        1.37256,
+        2.26758,
+        2.61719
+      ],
+      "library_build_type": "release",
+      "json_schema_version": 1
+    },
+    {
+      "date": "2026-11-18T14:38:51+02:00",
+      "executable": "/tmp/oahvar/A/oah_set_test",
+      "num_cpus": 32,
+      "mhz_per_cpu": 3000,
+      "cpu_scaling_enabled": true,
+      "aslr_enabled": true,
+      "caches": [
+        {
+          "type": "Data",
+          "level": 1,
+          "size": 49152,
+          "num_sharing": 2
+        },
+        {
+          "type": "Instruction",
+          "level": 1,
+          "size": 32768,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 2,
+          "size": 1048576,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 3,
+          "size": 33554432,
+          "num_sharing": 16
+        }
+      ],
+      "load_avg": [
+        2.07666,
+        2.09961,
+        2.38281
+      ],
+      "library_build_type": "release",
+      "json_schema_version": 1
+    },
+    {
+      "date": "2026-11-18T14:53:53+02:00",
+      "executable": "/tmp/oahvar/B/oah_set_test",
+      "num_cpus": 32,
+      "mhz_per_cpu": 3000,
+      "cpu_scaling_enabled": true,
+      "aslr_enabled": true,
+      "caches": [
+        {
+          "type": "Data",
+          "level": 1,
+          "size": 49152,
+          "num_sharing": 2
+        },
+        {
+          "type": "Instruction",
+          "level": 1,
+          "size": 32768,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 2,
+          "size": 1048576,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 3,
+          "size": 33554432,
+          "num_sharing": 16
+        }
+      ],
+      "load_avg": [
+        1.28955,
+        1.65088,
+        1.95361
+      ],
+      "library_build_type": "release",
+      "json_schema_version": 1
+    },
+    {
+      "date": "2026-11-18T15:07:44+02:00",
+      "executable": "/tmp/oahvar/A/string_set_test",
+      "num_cpus": 32,
+      "mhz_per_cpu": 3000,
+      "cpu_scaling_enabled": true,
+      "aslr_enabled": true,
+      "caches": [
+        {
+          "type": "Data",
+          "level": 1,
+          "size": 49152,
+          "num_sharing": 2
+        },
+        {
+          "type": "Instruction",
+          "level": 1,
+          "size": 32768,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 2,
+          "size": 1048576,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 3,
+          "size": 33554432,
+          "num_sharing": 16
+        }
+      ],
+      "load_avg": [
+        1.76221,
+        1.62402,
+        1.72217
+      ],
+      "library_build_type": "release",
+      "json_schema_version": 1
+    },
+    {
+      "date": "2026-11-18T15:15:46+02:00",
+      "executable": "/tmp/oahvar/A/oah_set_test",
+      "num_cpus": 32,
+      "mhz_per_cpu": 3000,
+      "cpu_scaling_enabled": true,
+      "aslr_enabled": true,
+      "caches": [
+        {
+          "type": "Data",
+          "level": 1,
+          "size": 49152,
+          "num_sharing": 2
+        },
+        {
+          "type": "Instruction",
+          "level": 1,
+          "size": 32768,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 2,
+          "size": 1048576,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 3,
+          "size": 33554432,
+          "num_sharing": 16
+        }
+      ],
+      "load_avg": [
+        1.2998,
+        1.45508,
+        1.60791
+      ],
+      "library_build_type": "release",
+      "json_schema_version": 1
+    },
+    {
+      "date": "2026-11-18T15:34:27+02:00",
+      "executable": "/tmp/oahvar/B/oah_set_test",
+      "num_cpus": 32,
+      "mhz_per_cpu": 3000,
+      "cpu_scaling_enabled": true,
+      "aslr_enabled": true,
+      "caches": [
+        {
+          "type": "Data",
+          "level": 1,
+          "size": 49152,
+          "num_sharing": 2
+        },
+        {
+          "type": "Instruction",
+          "level": 1,
+          "size": 32768,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 2,
+          "size": 1048576,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 3,
+          "size": 33554432,
+          "num_sharing": 16
+        }
+      ],
+      "load_avg": [
+        1.30078,
+        1.19531,
+        1.29102
+      ],
+      "library_build_type": "release",
+      "json_schema_version": 1
+    },
+    {
+      "date": "2026-11-18T15:47:29+02:00",
+      "executable": "/tmp/oahvar/A/string_set_test",
+      "num_cpus": 32,
+      "mhz_per_cpu": 3000,
+      "cpu_scaling_enabled": true,
+      "aslr_enabled": true,
+      "caches": [
+        {
+          "type": "Data",
+          "level": 1,
+          "size": 49152,
+          "num_sharing": 2
+        },
+        {
+          "type": "Instruction",
+          "level": 1,
+          "size": 32768,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 2,
+          "size": 1048576,
+          "num_sharing": 2
+        },
+        {
+          "type": "Unified",
+          "level": 3,
+          "size": 33554432,
+          "num_sharing": 16
+        }
+      ],
+      "load_avg": [
+        1.62109,
+        1.42236,
+        1.3667
+      ],
+      "library_build_type": "release",
+      "json_schema_version": 1
+    }
+  ],
+  "finished_utc": "2026-11-18T13:54:27.655200+00:00"
+}

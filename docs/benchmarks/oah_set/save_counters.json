@@ -1,0 +1,19 @@
+{
+  "finished_utc": "2026-11-18T14:46:51.275067+00:00",
+  "binary": {
+    "label": "default",
+    "path": "/tmp/dfbuild/dragonfly",
+    "version": "dragonfly dev-0000000\nbuild time: bigbang",
+    "sha256": "03265e9741579de98bb36f61e89010fd7440d51c114cc11b9560ce8c824f5fdb",
+    "mtime_utc": "2026-11-18T12:26:28.206925+00:00"
+  },
+  "server_cpu": 9,
+  "members": 1000000,
+  "saves_per_measurement": 3,
+  "repeats": 5,
+  "event_groups": [
+    "cycles,instructions,ex_ret_brn_misp,ls_dmnd_fills_from_sys.all,ls_any_fills_from_sys.dram_io_all",
+    "cycles,ls_alloc_mab_count,ls_hw_pf_dc_fills.all,ls_l1_d_tlb_miss.all"
+  ],
+  "perf": "perf version 7.0.14"
+}

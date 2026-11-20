@@ -1,0 +1,113 @@
+--- a/src/core/oah_set_test.cc
++++ b/src/core/oah_set_test.cc
+@@ -8,6 +8,7 @@
+ #include <absl/strings/str_cat.h>
+ #include <mimalloc.h>
+
++#include <optional>
+ #include <random>
+ #include <set>
+ #include <unordered_set>
+@@ -1466,30 +1467,35 @@
+   vector<string> strs;
+   mt19937 generator(0);
+   OAHSet src;
+-  unsigned elems = 1 << 18;
++  unsigned elems = state.range(0);
++  unsigned key_size = state.range(1);
+   for (size_t i = 0; i < elems; ++i) {
+-    src.Add(random_string(generator, 16), UINT32_MAX);
+-    strs.push_back(random_string(generator, 16));
++    src.Add(random_string(generator, key_size), UINT32_MAX);
++    strs.push_back(random_string(generator, key_size));
+   }
+
++  std::optional<OAHSet> tmp;
+   while (state.KeepRunning()) {
+     state.PauseTiming();
+-    OAHSet tmp;
+-    src.Fill(&tmp);
+-    // Fill reserves via UpperBoundSize().
+-    CHECK_EQ(tmp.BucketCount(), elems / OAHSet::kOverloadFactor);
++    // Destroy the previous set while paused so only the grow is timed.
++    tmp.reset();
++    tmp.emplace();
++    src.Fill(&*tmp);
++    size_t initial = tmp->BucketCount();
+     state.ResumeTiming();
+     for (const auto& str : strs) {
+-      tmp.Add(str);
+-      if (tmp.BucketCount() >= elems) {
++      tmp->Add(str);
++      if (tmp->BucketCount() > initial) {
+         break;  // we grew
+       }
+     }
+
+-    CHECK_EQ(tmp.BucketCount(), elems);
++    CHECK_EQ(tmp->BucketCount(), initial * 2);
+   }
+ }
+-BENCHMARK(BM_Grow);
++BENCHMARK(BM_Grow)
++    ->ArgNames({"elements", "KeySize"})
++    ->ArgsProduct({{1 << 15, 1 << 18, 1 << 21}, {16}});
+
+ void BM_GetRandomMember(benchmark::State& state) {
+   mt19937 generator(0);
+--- a/src/core/string_set_test.cc
++++ b/src/core/string_set_test.cc
+@@ -11,6 +11,7 @@
+
+ #include <algorithm>
+ #include <memory_resource>
++#include <optional>
+ #include <random>
+ #include <string>
+ #include <string_view>
+@@ -772,29 +773,35 @@
+   vector<string> strs;
+   mt19937 generator(0);
+   StringSet src;
+-  unsigned elems = 1 << 18;
++  unsigned elems = state.range(0);
++  unsigned key_size = state.range(1);
+   for (size_t i = 0; i < elems; ++i) {
+-    src.Add(random_string(generator, 16), UINT32_MAX);
+-    strs.push_back(random_string(generator, 16));
++    src.Add(random_string(generator, key_size), UINT32_MAX);
++    strs.push_back(random_string(generator, key_size));
+   }
+
++  std::optional<StringSet> tmp;
+   while (state.KeepRunning()) {
+     state.PauseTiming();
+-    StringSet tmp;
+-    src.Fill(&tmp);
+-    CHECK_EQ(tmp.BucketCount(), elems);
++    // Destroy the previous set while paused so only the grow is timed.
++    tmp.reset();
++    tmp.emplace();
++    src.Fill(&*tmp);
++    size_t initial = tmp->BucketCount();
+     state.ResumeTiming();
+     for (const auto& str : strs) {
+-      tmp.Add(str);
+-      if (tmp.BucketCount() > elems) {
++      tmp->Add(str);
++      if (tmp->BucketCount() > initial) {
+         break;  // we grew
+       }
+     }
+
+-    CHECK_GT(tmp.BucketCount(), elems);
++    CHECK_EQ(tmp->BucketCount(), initial * 2);
+   }
+ }
+-BENCHMARK(BM_Grow);
++BENCHMARK(BM_Grow)
++    ->ArgNames({"elements", "KeySize"})
++    ->ArgsProduct({{1 << 15, 1 << 18, 1 << 21}, {16}});
+
+ void BM_GetRandomMember(benchmark::State& state) {
+   mt19937 generator(0);
