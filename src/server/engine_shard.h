@@ -28,8 +28,6 @@ class TieredStorage;
 class ShardDocIndices;
 class AofStreamer;
 
-using TypeAttributedMemory = std::array<int64_t, OBJ_TYPE_MAX>;
-
 class EngineShard {
   friend class EngineShardSet;
 
@@ -267,12 +265,6 @@ class EngineShard {
   // Merge underutilized buddy-segment pairs in the dash table.
   CompactTableStats CompactTable(double threshold, DbIndex db_idx);
 
-  void AddTypeMemDelta(size_t type, int64_t delta);
-
-  const TypeAttributedMemory& type_attributed_memory() const {
-    return type_attributed_memory_;
-  }
-
  private:
   struct DefragTaskState {
     size_t dbid = 0u;
@@ -401,8 +393,6 @@ class EngineShard {
   using Counter = util::SlidingCounter<7>;
 
   Counter counter_[COUNTER_TOTAL];
-
-  TypeAttributedMemory type_attributed_memory_ = {};
 
   static __thread EngineShard* shard_;
 };

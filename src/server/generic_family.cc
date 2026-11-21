@@ -18,6 +18,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/logging.h"
 #include "core/glob_matcher.h"
+#include "core/memory_accounting.h"
 #include "core/qlist.h"
 #include "facade/reply_builder.h"
 #include "redis/rdb.h"
@@ -35,7 +36,6 @@ extern "C" {
 #include "server/family_utils.h"
 #include "server/hset_family.h"
 #include "server/journal/journal.h"
-#include "server/memory_scope.h"
 #include "server/namespaces.h"
 #include "server/rdb_extensions.h"
 #include "server/rdb_load.h"
@@ -273,7 +273,7 @@ OpResult<DbSlice::ItAndUpdater> RdbRestoreValue::Add(string_view key, string_vie
       return OpStatus::INVALID_VALUE;
     }
 
-    if (!memory_scope && MemoryScopeEnabled()) {
+    if (!memory_scope && MemoryAccountingEnabled()) {
       if (int obj_type = RestoredObjectType(opaque_res->rdb_type); obj_type >= 0)
         memory_scope.emplace(obj_type);
     }

@@ -474,10 +474,6 @@ class CompactObj {
 
   static Stats GetStatsThreadLocal();
 
-  // Receives the allocator delta from freeing a value replaced by a different type.
-  // The hook runs synchronously and must not suspend.
-  using TypeReplacementHook = void (*)(CompactObjType old_type, int64_t delta);
-  static void SetTypeReplacementHook(TypeReplacementHook hook);
   static void InitThreadLocal(MemoryResource* mr);
   static void ClearThreadLocalStats();
 

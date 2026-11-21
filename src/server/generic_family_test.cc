@@ -5,6 +5,7 @@
 #include "server/generic_family.h"
 
 #include <absl/cleanup/cleanup.h>
+#include <absl/flags/reflection.h>
 #include <absl/strings/numbers.h>
 #include <absl/strings/str_join.h>
 
@@ -21,6 +22,7 @@ extern "C" {
 #include "base/flags.h"
 #include "base/gtest.h"
 #include "base/logging.h"
+#include "core/memory_accounting.h"
 #include "core/oah_set.h"
 #include "facade/facade_test.h"
 #include "facade/reply_builder.h"
@@ -37,6 +39,7 @@ extern "C" {
 #include "server/transaction.h"
 
 ABSL_DECLARE_FLAG(bool, multi_exec_squash);
+ABSL_DECLARE_FLAG(bool, enable_scope_based_mem_track);
 ABSL_DECLARE_FLAG(bool, use_oah_set);
 ABSL_DECLARE_FLAG(uint32_t, container_iteration_yield_interval_usec);
 ABSL_DECLARE_FLAG(std::string, notify_keyspace_events);
@@ -56,7 +59,16 @@ constexpr char kShard1AltKey2[] = "z";  // shard 1
 
 namespace dfly {
 
-class GenericFamilyTest : public BaseFamilyTest {};
+class GenericFamilyTest : public BaseFamilyTest {
+ protected:
+  void SetUp() override {
+    absl::SetFlag(&FLAGS_enable_scope_based_mem_track, true);
+    BaseFamilyTest::SetUp();
+  }
+
+ private:
+  absl::FlagSaver flag_saver_;
+};
 
 TEST_F(GenericFamilyTest, TtlOfExpiredKeyDuringPause) {
   // CLIENT PAUSE disables expiry; a key past its deadline is logically gone, not a negative TTL.
@@ -3131,8 +3143,7 @@ namespace {
 TypeAttributedMemory Snapshot() {
   TypeAttributedMemory total{};
   for (ShardId sid = 0; sid < shard_set->size(); ++sid) {
-    auto local =
-        shard_set->Await(sid, [] { return EngineShard::tlocal()->type_attributed_memory(); });
+    auto local = shard_set->Await(sid, [] { return GetTypeAttributedMemory(); });
     ranges::transform(total, local, total.begin(), plus{});
   }
   return total;
@@ -3220,6 +3231,8 @@ struct MetricCmp {
   MetricCmp() = default;
 
   explicit MetricCmp(const Metrics& m) : new_metric(m.type_attributed_memory_bytes) {
+    // Compare object categories with the legacy object-only metric.
+    new_metric[kUntrackedMemory] = 0;
     for (const auto& db : m.db_stats) {
       ranges::transform(old_metric, db.memory_usage_by_type, old_metric.begin(), plus{});
       obj_used += db.obj_memory_usage;
@@ -3491,7 +3504,7 @@ JsonMemorySnapshot SnapshotJsonMemory() {
     const auto pool = GetInternedStringStats();
     return JsonMemorySnapshot{
         .total_used_bytes = static_cast<int64_t>(shard->UsedMemoryWithoutSearch()),
-        .json_type_bytes = shard->type_attributed_memory()[OBJ_JSON],
+        .json_type_bytes = GetTypeAttributedMemory()[OBJ_JSON],
         .pool_bytes = pool.pool_bytes,
         .pool_entries = pool.pool_entries,
     };
