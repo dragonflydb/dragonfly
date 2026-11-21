@@ -1426,9 +1426,9 @@ TEST_F(ServerFamilyTest, ExternalAuth) {
   EXPECT_THAT(Run("ldap", {"AUTH", "directory-user", "local"}),
               ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
   EXPECT_THAT(Run("ldap", {"AUTH", "directory-user", password}), "OK");
-  EXPECT_THAT(Run("ldap", {"ACL", "WHOAMI"}), "User is alice");
+  EXPECT_THAT(Run("ldap", {"ACL", "WHOAMI"}), "alice");
   EXPECT_THAT(Run("token", {"AUTH", token}), "OK");
-  EXPECT_THAT(Run("token", {"ACL", "WHOAMI"}), "User is alice");
+  EXPECT_THAT(Run("token", {"ACL", "WHOAMI"}), "alice");
   absl::SetFlag(&FLAGS_auth_validate_url, "");
   EXPECT_THAT(Run("ldap", {"AUTH", "directory-user", "local"}),
               ErrArg("WRONGPASS invalid username-password pair or user is disabled."));
