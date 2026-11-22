@@ -425,10 +425,13 @@ class EvalSerializer : public ObjectExplorer {
       buf = StripCRLF(str);
       str = buf;
     }
+
+    // The message is chosen by the script, so use a fixed error type to keep the error stats
+    // bounded.
     if (!str.empty() && str.front() == '-') {
-      rb_->SendError(str);
+      rb_->SendError(str, facade::kScriptErrType);
     } else {
-      rb_->SendError(absl::StrCat("-", str));
+      rb_->SendError(absl::StrCat("-", str), facade::kScriptErrType);
     }
   }
 
